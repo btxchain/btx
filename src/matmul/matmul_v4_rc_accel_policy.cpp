@@ -26,15 +26,17 @@ RCCoupConsensusConfig MakeLegacyV1RCCoupConsensusConfig()
     cfg.lobes = toy.lobes;
     cfg.lobe_width = toy.lobe_width;
     cfg.bank_pages = toy.bank_pages;
+    cfg.rows_per_lobe = toy.rows_per_lobe;
     cfg.pages_per_barrier_lobe = 1;
     cfg.page_selection_version = kRCCoupPageSelectionLegacyV1;
     cfg.material_exchange_enabled = false;
     cfg.material_exchange_rows = dc::kRCCoupExchangeRowsDefault;
+    cfg.material_exchange_rounds = 0;
     cfg.material_exchange_cols = kRCCoupLobeWidth;
     cfg.full_bank_schedule_enabled = false;
     cfg.v2_pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
-    cfg.v2_profile_enabled = false;
-    cfg.v2_activation_height = std::numeric_limits<int32_t>::max();
+    cfg.v3_profile_enabled = false;
+    cfg.v3_activation_height = std::numeric_limits<int32_t>::max();
     return cfg;
 }
 
@@ -44,9 +46,13 @@ bool IsRCCoupConsensusConfigV1Compatible(const RCCoupConsensusConfig& cfg)
     return cfg.config_version == legacy.config_version &&
            cfg.barriers == legacy.barriers && cfg.lobes == legacy.lobes &&
            cfg.lobe_width == legacy.lobe_width && cfg.bank_pages == legacy.bank_pages &&
+           cfg.rows_per_lobe == legacy.rows_per_lobe &&
            cfg.pages_per_barrier_lobe == legacy.pages_per_barrier_lobe &&
            cfg.page_selection_version == legacy.page_selection_version &&
            cfg.material_exchange_enabled == legacy.material_exchange_enabled &&
+           cfg.material_exchange_rows == legacy.material_exchange_rows &&
+           cfg.material_exchange_rounds == legacy.material_exchange_rounds &&
+           cfg.material_exchange_cols == legacy.material_exchange_cols &&
            cfg.transcript_version == legacy.transcript_version &&
            cfg.extract_version == legacy.extract_version && cfg.seg_len == legacy.seg_len &&
            cfg.wgrad_exact_chunk == legacy.wgrad_exact_chunk &&
@@ -54,8 +60,9 @@ bool IsRCCoupConsensusConfigV1Compatible(const RCCoupConsensusConfig& cfg)
            cfg.mx_block_len == legacy.mx_block_len &&
            cfg.mx_packed_layout_version == legacy.mx_packed_layout_version &&
            cfg.full_bank_schedule_enabled == legacy.full_bank_schedule_enabled &&
-           cfg.v2_profile_enabled == legacy.v2_profile_enabled &&
-           cfg.v2_activation_height == legacy.v2_activation_height;
+           cfg.v2_pages_per_barrier_lobe == legacy.v2_pages_per_barrier_lobe &&
+           cfg.v3_profile_enabled == legacy.v3_profile_enabled &&
+           cfg.v3_activation_height == legacy.v3_activation_height;
 }
 
 RCCoupParams RCCoupParamsFromConsensusConfig(const RCCoupConsensusConfig& cfg)
@@ -65,7 +72,19 @@ RCCoupParams RCCoupParamsFromConsensusConfig(const RCCoupConsensusConfig& cfg)
     p.lobes = cfg.lobes;
     p.lobe_width = cfg.lobe_width;
     p.bank_pages = cfg.bank_pages;
+    p.rows_per_lobe = cfg.rows_per_lobe;
+    p.pages_per_barrier_lobe = cfg.pages_per_barrier_lobe;
     return p;
+}
+
+RCCoupOptions RCCoupOptionsFromConsensusConfig(const RCCoupConsensusConfig& cfg)
+{
+    RCCoupOptions o;
+    o.full_bank_schedule = cfg.full_bank_schedule_enabled;
+    o.material_exchange = cfg.material_exchange_enabled;
+    o.exchange_rows = cfg.material_exchange_rows;
+    o.exchange_rounds = cfg.material_exchange_rounds;
+    return o;
 }
 
 std::string BuildExactnessQualCacheKey(std::string_view provider, std::string_view arch,

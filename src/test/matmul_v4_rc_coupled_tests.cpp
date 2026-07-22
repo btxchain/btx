@@ -356,8 +356,10 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     header.nBits = UintToArith256(p.powLimit).GetCompact();
 
     const auto params_coup = rc::ResolveRCCoupParams(p);
+    const auto options_coup = rc::ResolveRCCoupOptions(p);
     BOOST_REQUIRE(p.fMatMulRCCoupledUseToyDims);
     BOOST_CHECK_EQUAL(params_coup.barriers, rc::MakeToyRCCoupParams().barriers);
+    BOOST_CHECK_EQUAL(options_coup.exchange_rounds, 0u);
     BOOST_CHECK(rc::RCCoupBarrierLoopComplete(params_coup));
 
     header.matmul_digest = rc::MineCoupledPuzzle(header, kHeight, params_coup);
@@ -372,6 +374,46 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     BOOST_CHECK_EQUAL(pub.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!pub.IsMatMulRCCoupledActive(0));
     BOOST_CHECK(!pub.IsMatMulRCCoupledActive(std::numeric_limits<int32_t>::max() - 1));
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_public_activation_resolves_v3_production_profile)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCCoupledHeight = 1;
+    p.fMatMulRCCoupledUseToyDims = false;
+
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kHeight));
+
+    const rc::RCCoupParams resolved = rc::ResolveRCCoupParams(p);
+    const rc::RCCoupParams v3 = rc::MakeProductionV3RCCoupParams();
+    const rc::RCCoupParams medium = rc::MakeMediumRCCoupParams();
+    BOOST_CHECK_EQUAL(resolved.barriers, v3.barriers);
+    BOOST_CHECK_EQUAL(resolved.lobes, v3.lobes);
+    BOOST_CHECK_EQUAL(resolved.lobe_width, v3.lobe_width);
+    BOOST_CHECK_EQUAL(resolved.bank_pages, v3.bank_pages);
+    BOOST_CHECK_EQUAL(resolved.rows_per_lobe, v3.rows_per_lobe);
+    BOOST_CHECK_EQUAL(resolved.pages_per_barrier_lobe, v3.pages_per_barrier_lobe);
+    BOOST_CHECK(resolved.bank_pages != medium.bank_pages);
+    BOOST_CHECK(resolved.rows_per_lobe != medium.rows_per_lobe);
+    BOOST_CHECK(rc::RCCoupBarrierLoopComplete(resolved));
+
+    const rc::RCCoupOptions options = rc::ResolveRCCoupOptions(p);
+    const rc::RCCoupOptions v3_options = rc::MakeV3RCCoupOptions();
+    BOOST_CHECK(options.full_bank_schedule);
+    BOOST_CHECK(options.material_exchange);
+    BOOST_CHECK_EQUAL(options.exchange_rows, v3_options.exchange_rows);
+    BOOST_CHECK_EQUAL(options.exchange_rounds, v3_options.exchange_rounds);
+
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupPackedBytes(resolved),
+                      51ULL * 1024ULL * 1024ULL * 1024ULL);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupExpandedBytes(resolved),
+                      96ULL * 1024ULL * 1024ULL * 1024ULL);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupMacs(resolved), 12ULL * 1024ULL * 1024ULL * 1024ULL * 1024ULL);
+    BOOST_CHECK_EQUAL(rc::TotalRCCoupExchangeBytes(resolved, options),
+                      4ULL * 1024ULL * 1024ULL * 1024ULL);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_golden_digest_stable)

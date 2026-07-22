@@ -652,7 +652,13 @@ RCCoupParams MakeMediumV3RCCoupParams()
 
 RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
 {
-    return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams() : MakeMediumRCCoupParams();
+    return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams()
+                                        : MakeProductionV3RCCoupParams();
+}
+
+RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p)
+{
+    return p.fMatMulRCCoupledUseToyDims ? RCCoupOptions{} : MakeV3RCCoupOptions();
 }
 
 uint64_t MaxRCCoupPageSumAbsBound(const RCCoupParams& p)

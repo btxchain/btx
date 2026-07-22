@@ -76,17 +76,32 @@ BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
 {
     const rc::RCCoupConsensusConfig cfg = rc::MakeDefaultRCCoupConsensusConfig();
     BOOST_CHECK(!rc::IsRCCoupConsensusConfigV1Compatible(cfg));
-    BOOST_CHECK_EQUAL(cfg.config_version, rc::kRCCoupConsensusConfigVersionV2);
-    const rc::RCCoupParams prod = rc::MakeProductionRCCoupParams();
+    BOOST_CHECK_EQUAL(cfg.config_version, rc::kRCCoupConsensusConfigVersionV3);
+    const rc::RCCoupParams prod = rc::MakeProductionV3RCCoupParams();
     BOOST_CHECK_EQUAL(cfg.barriers, prod.barriers);
     BOOST_CHECK_EQUAL(cfg.lobes, prod.lobes);
     BOOST_CHECK_EQUAL(cfg.lobe_width, prod.lobe_width);
     BOOST_CHECK_EQUAL(cfg.bank_pages, prod.bank_pages);
+    BOOST_CHECK_EQUAL(cfg.rows_per_lobe, prod.rows_per_lobe);
+    BOOST_CHECK_EQUAL(cfg.pages_per_barrier_lobe, prod.pages_per_barrier_lobe);
+    BOOST_CHECK_EQUAL(cfg.page_selection_version, rc::kRCCoupPageSelectionFullBankV3);
     BOOST_CHECK(cfg.full_bank_schedule_enabled);
     BOOST_CHECK(cfg.material_exchange_enabled);
-    BOOST_CHECK(cfg.v2_profile_enabled);
-    BOOST_CHECK_EQUAL(cfg.v2_activation_height, std::numeric_limits<int32_t>::max());
-    BOOST_CHECK(rc::ValidateRCCoupParams(rc::RCCoupParamsFromConsensusConfig(cfg)));
+    BOOST_CHECK_EQUAL(cfg.material_exchange_rows, rc::MakeV3RCCoupOptions().exchange_rows);
+    BOOST_CHECK_EQUAL(cfg.material_exchange_rounds, rc::MakeV3RCCoupOptions().exchange_rounds);
+    BOOST_CHECK(cfg.v3_profile_enabled);
+    BOOST_CHECK_EQUAL(cfg.v3_activation_height, std::numeric_limits<int32_t>::max());
+
+    const rc::RCCoupParams mapped = rc::RCCoupParamsFromConsensusConfig(cfg);
+    BOOST_CHECK(rc::ValidateRCCoupParams(mapped));
+    BOOST_CHECK_EQUAL(mapped.rows_per_lobe, prod.rows_per_lobe);
+    BOOST_CHECK_EQUAL(mapped.pages_per_barrier_lobe, prod.pages_per_barrier_lobe);
+
+    const rc::RCCoupOptions options = rc::RCCoupOptionsFromConsensusConfig(cfg);
+    BOOST_CHECK(options.full_bank_schedule);
+    BOOST_CHECK(options.material_exchange);
+    BOOST_CHECK_EQUAL(options.exchange_rows, 128u);
+    BOOST_CHECK_EQUAL(options.exchange_rounds, 4u);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_legacy_v1_compatible)
@@ -103,8 +118,9 @@ BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_legacy_v1_compatible)
     BOOST_CHECK_EQUAL(cfg.pages_per_barrier_lobe, 1u);
     BOOST_CHECK_EQUAL(cfg.page_selection_version, rc::kRCCoupPageSelectionLegacyV1);
     BOOST_CHECK(!cfg.material_exchange_enabled);
+    BOOST_CHECK_EQUAL(cfg.material_exchange_rounds, 0u);
     BOOST_CHECK(!cfg.full_bank_schedule_enabled);
-    BOOST_CHECK(!cfg.v2_profile_enabled);
+    BOOST_CHECK(!cfg.v3_profile_enabled);
 }
 
 BOOST_AUTO_TEST_CASE(rc_exactness_qual_cache_key_stable)

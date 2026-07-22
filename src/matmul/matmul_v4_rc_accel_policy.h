@@ -19,8 +19,9 @@
 //
 // Policy, provenance, lane IDs, exactness-qualification cache keys, and a
 // versioned coupled consensus configuration. No backends. Heights stay
-// INT32_MAX. GKR arbiter stays OFF. Digests unchanged: V1 defaults match the
-// current toy/legacy coupled path; V2 fields exist but are inert.
+// INT32_MAX. GKR arbiter stays OFF. V1 defaults match the current toy/legacy
+// coupled path; V3 production fields are selected only once the public coupled
+// activation height is deliberately made finite.
 
 namespace matmul::v4::rc {
 
@@ -100,27 +101,28 @@ inline constexpr uint32_t kRCCoupConsensusConfigVersionV3 = 3;
 /**
  * Versioned coupled consensus configuration — every digest-affecting knob.
  *
- * Default = V2 AI datacenter thesis (768 pages; packed ≈25.5 GiB / int8 48 GiB).
- * V3 hypothesis (1536/24/M=128, packed ≈51 GiB) is MakeProductionV3RCCoupParams —
- * not the default until TMTO audit + goldens land. Heights stay INT32_MAX.
+ * Default = V3 AI datacenter thesis (1536/24/M=128, packed ≈51 GiB /
+ * expanded int8 96 GiB, exchange_rounds=4). Heights stay INT32_MAX; changing
+ * activation height is the separate public consensus decision.
  */
 struct RCCoupConsensusConfig {
-    uint32_t config_version{kRCCoupConsensusConfigVersionV2};
+    uint32_t config_version{kRCCoupConsensusConfigVersionV3};
 
-    // Shape — V2 MakeProductionRCCoupParams() (int8 48 GiB / packed 25.5 GiB).
+    // Shape — V3 MakeProductionV3RCCoupParams() (expanded 96 GiB / packed ≈51 GiB).
     uint32_t barriers{8};
     uint32_t lobes{8};
     uint32_t lobe_width{8192};
-    uint32_t bank_pages{768};
-    uint32_t rows_per_lobe{1};
+    uint32_t bank_pages{1536};
+    uint32_t rows_per_lobe{128};
 
-    // Page schedule — full bank (12 pages / barrier×lobe).
-    uint32_t pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
-    uint32_t page_selection_version{kRCCoupPageSelectionFullBankV2};
+    // Page schedule — full bank (24 pages / barrier×lobe).
+    uint32_t pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobeV3};
+    uint32_t page_selection_version{kRCCoupPageSelectionFullBankV3};
 
     // Material exchange ON — fabric domain in mix.
     bool material_exchange_enabled{dc::kRCCoupMaterialExchangeEnabled};
     uint32_t material_exchange_rows{dc::kRCCoupExchangeRowsDefault};
+    uint32_t material_exchange_rounds{4};
     uint32_t material_exchange_cols{8192};
 
     // Transcript / Extract / segmentation.
@@ -136,9 +138,9 @@ struct RCCoupConsensusConfig {
     bool full_bank_schedule_enabled{dc::kRCCoupFullBankScheduleEnabled};
     uint32_t v2_pages_per_barrier_lobe{dc::kRCCoupPagesPerBarrierLobe};
 
-    // V2 profile selected; activation height stays INT32_MAX (public inert).
-    bool v2_profile_enabled{true};
-    int32_t v2_activation_height{std::numeric_limits<int32_t>::max()};
+    // V3 profile selected; activation height stays INT32_MAX (public inert).
+    bool v3_profile_enabled{true};
+    int32_t v3_activation_height{std::numeric_limits<int32_t>::max()};
 };
 
 /** Default consensus config — AI datacenter levers (production + full-bank). */
@@ -149,14 +151,19 @@ struct RCCoupConsensusConfig {
 
 /**
  * True iff cfg matches the frozen V1 toy/legacy digest-affecting defaults
- * (shape, single-page schedule, exchange off, transcript/extract V1, V2 inert).
+ * (shape, single-page schedule, exchange off, transcript/extract V1, V3 inert).
  */
 [[nodiscard]] bool IsRCCoupConsensusConfigV1Compatible(const RCCoupConsensusConfig& cfg);
 
 /**
- * Map consensus config shape fields onto RCCoupParams (ignores V2/exchange knobs).
+ * Map consensus config shape fields onto RCCoupParams.
  */
 [[nodiscard]] RCCoupParams RCCoupParamsFromConsensusConfig(const RCCoupConsensusConfig& cfg);
+
+/**
+ * Map consensus config exchange/schedule fields onto RCCoupOptions.
+ */
+[[nodiscard]] RCCoupOptions RCCoupOptionsFromConsensusConfig(const RCCoupConsensusConfig& cfg);
 
 /**
  * Qualification cache key:

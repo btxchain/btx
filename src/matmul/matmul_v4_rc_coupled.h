@@ -157,7 +157,8 @@ inline constexpr int64_t kRCCoupInt8ProdAbsMax =
 
 /**
  * Consensus checker/miner dims: toy when Params::fMatMulRCCoupledUseToyDims
- * (regtest), else medium (CI-safe stand-in until HBM production dims land).
+ * (regtest), else production V3. Public activation heights remain separate and
+ * are not raised by this resolver.
  */
 [[nodiscard]] RCCoupParams ResolveRCCoupParams(const Consensus::Params& p);
 
@@ -250,6 +251,13 @@ struct RCCoupOptions {
  * Pair with MakeProductionV3RCCoupParams(); does not raise heights.
  */
 [[nodiscard]] RCCoupOptions MakeV3RCCoupOptions();
+
+/**
+ * Consensus checker/miner options: toy/regtest keeps legacy zero-round options,
+ * else production V3 material-exchange options. Public activation heights remain
+ * separate and are not raised by this resolver.
+ */
+[[nodiscard]] RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p);
 
 /**
  * Digest-affecting material-exchange traffic estimate (read+write):

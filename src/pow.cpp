@@ -4251,11 +4251,14 @@ bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensu
 
     const matmul::v4::rc::RCCoupParams params_coup =
         matmul::v4::rc::ResolveRCCoupParams(params);
+    const matmul::v4::rc::RCCoupOptions options_coup =
+        matmul::v4::rc::ResolveRCCoupOptions(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) return finish(false);
 
     // Consensus REJECT: empty ExactGemm (CPU-only; R1).
     const uint256 digest =
-        matmul::v4::rc::RecomputeCoupledPuzzleReference(header, block_height, params_coup);
+        matmul::v4::rc::RecomputeCoupledPuzzleReference(header, block_height, params_coup,
+                                                        options_coup);
     if (digest.IsNull() || digest != header.matmul_digest) return finish(false);
     if (UintToArith256(digest) > *bnTarget) return finish(false);
     return finish(true);
@@ -5983,6 +5986,8 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
     const matmul::v4::rc::RCCoupParams params_coup =
         matmul::v4::rc::ResolveRCCoupParams(params);
+    const matmul::v4::rc::RCCoupOptions options_coup =
+        matmul::v4::rc::ResolveRCCoupOptions(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) {
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
         return false;
@@ -6003,7 +6008,7 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         }
 
         // Q-batch: stack nonces that share the bank template into one
-        // TryMineRCCoupledBatch (QxW · W×W ExactGemm per lobe) — not per-nonce GEMV.
+        // TryMineRCCoupledBatch (Q×M×W · W×W ExactGemm per lobe) — not per-nonce GEMV.
         const uint32_t q_want = std::min<uint32_t>(
             matmul::v4::rc::dc::kRCMinerBatchQDefault,
             static_cast<uint32_t>(std::min<uint64_t>(max_tries, matmul::v4::rc::dc::kRCMinerBatchQMax)));
@@ -6022,7 +6027,7 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         cfg.Q = Q;
         std::vector<uint256> digests;
         if (!matmul::v4::rc::TryMineRCCoupledBatch(window, block_height, params_coup, digests, cfg,
-                                                   gemm) ||
+                                                   gemm, options_coup) ||
             digests.size() != window.size()) {
             LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch failed at nonce=%llu; "
                        "aborting\n",
@@ -6048,7 +6053,8 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
             // Winner candidate: CPU reseal (empty ExactGemm).
             CBlockHeader cand = window[i];
             const uint256 resealed =
-                matmul::v4::rc::RecomputeCoupledPuzzleReference(cand, block_height, params_coup);
+                matmul::v4::rc::RecomputeCoupledPuzzleReference(cand, block_height, params_coup,
+                                                                options_coup);
             if (resealed != mined) {
                 LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
                            "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",
