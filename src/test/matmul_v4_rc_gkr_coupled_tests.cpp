@@ -273,6 +273,15 @@ BOOST_AUTO_TEST_CASE(coupled_v7_relation_status_marks_v4_permutation_as_necessar
     BOOST_CHECK(!st.barrier_roots_proof_bound);
     BOOST_CHECK(!st.digest_target_proof_bound);
 
+    std::string why_v4;
+    BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(prod, v4_options, &why_v4));
+    BOOST_CHECK(why_v4.find("NO-GO") != std::string::npos);
+    BOOST_CHECK(why_v4.find("native_reference_digest_replay") != std::string::npos);
+    BOOST_CHECK_MESSAGE(why_v4.find("permutation_requires_proof_friendly_transcript") ==
+                            std::string::npos,
+                        "V4 options should clear the permutation blocker but remain NO-GO "
+                        "for native grounding/bank/mix/extract/SHA/digest/budget blockers");
+
     const auto rels = rc::RCGkrCoupledV7RelationStatuses(prod, v4_options);
     auto find_rel = [&](const char* name) {
         return std::find_if(rels.begin(), rels.end(), [&](const auto& r) {

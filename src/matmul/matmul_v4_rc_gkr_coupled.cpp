@@ -803,7 +803,14 @@ AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& opt
 
 bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params, std::string* why)
 {
-    const RCGkrCoupledV7SuccinctnessStatus st = AssessCoupledV7Succinctness(params);
+    return RCGkrCoupledV7ReadyForProofOnlyConsensus(params, CoupledProofOptionsForParams(params),
+                                                    why);
+}
+
+bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params,
+                                              const RCCoupOptions& options, std::string* why)
+{
+    const RCGkrCoupledV7SuccinctnessStatus st = AssessCoupledV7Succinctness(params, options);
     if (why) *why = st.summary;
     return st.genuinely_succinct;
 }

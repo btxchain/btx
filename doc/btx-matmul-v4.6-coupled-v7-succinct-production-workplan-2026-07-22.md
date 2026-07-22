@@ -43,7 +43,8 @@ The required cutover is consistent with the standard GKR/FRI/LogUp model:
 
 A production-succinct coupled v7 verifier must accept using only:
 
-- public inputs: header, height, V3 params, target, claimed digest;
+- public inputs: header, height, V3-sized params, V4+ proof-friendly transcript
+  options, target, claimed digest;
 - proof-carried commitments: bank/page roots, state/accumulator roots, AIR roots,
   batched-FRI roots;
 - proof-carried openings: sampled page/state/GEMM/exchange/perm/mix/Extract/SHA
@@ -131,10 +132,10 @@ It must not:
 
 Activation is still NO-GO unless all are true:
 
-- `AssessCoupledV7Succinctness(MakeProductionV3RCCoupParams()).genuinely_succinct == true`
-- `RCGkrCoupledV7ReadyForProofOnlyConsensus(...) == true`
+- `AssessCoupledV7Succinctness(MakeProductionV3RCCoupParams(), MakeV4RCCoupOptions()).genuinely_succinct == true`
+- `RCGkrCoupledV7ReadyForProofOnlyConsensus(MakeProductionV3RCCoupParams(), MakeV4RCCoupOptions(), ...) == true`
 - coupled adversarial fabricated-witness tests reject at mechanism relations
   (`coupled:*`, `v7:ground:*`, `v7:logup:*`), not only digest/target gates;
-- production V3 proof verifies under Stage-I budget;
+- production V3-sized / V4+ transcript proof verifies under Stage-I budget;
 - external cryptographic review signs off on the composed GKR/FRI/LogUp bound;
 - public heights are still changed only by an explicit activation-height commit.

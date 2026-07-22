@@ -54,8 +54,11 @@
 //     i = ℓ·M·W + row·W + col makes the fixed segment a subcube restriction, so
 //     this one eval-argument claim IS the segment relation (a displaced/forged
 //     segment breaks it).
-//   R5.perm (public π, §7.3): p̃_b(r_p) must equal Σ_x eq(r_p, π_b(x))·e_b[x],
-//     the verifier evaluating the public weight-MLE natively in O(n·ν).
+//   R5.perm (public π, §7.3): V1-V3 use the legacy Fisher-Yates schedule and
+//     remain native-grounded because the verifier has no cheap MLE evaluator for
+//     that arbitrary permutation. ENC_RC_V4+ uses the seeded bit-affine schedule
+//     from matmul_v4_rc_coupled.h; then the verifier checks the succinct opening
+//     equality p̃_b(r_dst) = ẽ_b(π_b^{-1}(r_dst)).
 //   R5.mix / R5.extract / R5.roots / R5.bank: grounded by NATIVE re-derivation
 //     against the immutable int64 reference — every committed column root must
 //     equal the root of the natively re-derived column, barrier roots must be
@@ -222,6 +225,9 @@ RCGkrCoupledV7RelationStatuses(const RCCoupParams& params, const RCCoupOptions& 
  * must return false for every shape, including production V3.
  */
 [[nodiscard]] bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params,
+                                                            std::string* why = nullptr);
+[[nodiscard]] bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params,
+                                                            const RCCoupOptions& options,
                                                             std::string* why = nullptr);
 
 /** Λ_coup shape helpers (verifier-computable, layout-definitional). */
