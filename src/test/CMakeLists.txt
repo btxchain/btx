@@ -102,6 +102,7 @@ add_executable(test_btx
   matmul_v4_rc_gkr_f0_tests.cpp
   matmul_v4_rc_gkr_coupled_tests.cpp
   matmul_v4_rc_gkr_coupled_f0_tests.cpp
+  matmul_v4_rc_gkr_field_ext3_tests.cpp
   matmul_v4_rc_fri_tests.cpp
   matmul_v4_rc_vendor_accel_tests.cpp
   matmul_v4_provider_contract_tests.cpp

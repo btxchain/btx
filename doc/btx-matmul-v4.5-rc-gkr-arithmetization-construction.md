@@ -1230,3 +1230,20 @@ rounds or Fp3 FS), which lands the composed bound in the 74–77 band with genui
 margin. `RCGkrComposedSeparationBits()` returns ≈ 65.8; the term pins, the total,
 the margin, and the `inadequate_margin` flag are asserted in
 `gkr_integration_composed_separation_bound`.
+
+## Appendix FP3 (2026-07-22) — cubic extension field for FS challenges
+
+`src/matmul/matmul_v4_rc_gkr_field_ext3.h` adds the degree-3 Goldilocks
+extension **F_{p^3} = F_p[x]/(x^3 − W3)** with **W3 = 2**, the smallest
+positive non-cube in F_p (verified: 2^((p−1)/3) mod p = 0xFFFFFFFF ≠ 1, and
+3 | p − 1 since p − 1 = 2^32(2^32 − 1); by the binomial criterion for prime
+degree, x^3 − 2 is therefore irreducible). The extension has order
+**|F_{p^3}| = p^3 ≈ 2^192**, and `FromChallengeBytes3` consumes 24 FS bytes
+(~192 bits of challenge entropy) per challenge accordingly. This is the "Fp3
+FS" lever from the composed-bound table above: it lifts the FS union subtotal
+(≈72 → ≈136 bits) so that, combined with Q = 128, the FRI query term becomes
+the binding floor (≈76.8). Inversion uses the norm-quotient closed form
+a^{−1} = a^{p^2+p}/N(a) with the conjugate product expanded to base-field
+adjugate coefficients (derivation in the header; Frobenius, norm-in-F_p, and
+a·Inv(a) = 1 are unit-tested in
+`src/test/matmul_v4_rc_gkr_field_ext3_tests.cpp`).
