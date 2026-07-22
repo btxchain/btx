@@ -1,20 +1,27 @@
 # ENC_RC winner-proof — G1–G5 in-circuit arithmetization integration report
 
-**Date:** 2026-07-22
+**Date:** 2026-07-22 (margin restoration wave: `wip/gkr-margin-bounds`)
 **Branch:** `wip/gkr-g1g5-integration`
 **Base:** `origin/wip/v7-hardening` @ `3f4e1a0` — the **SOUND v5 FRI fold** hardening
 (WP-A..J: v5 half-domain fold, DEEP v5, arbiter hard-disable
 `kRCGkrFormalSoundnessReady=false`, V3 transcript domains; validated on the
 5060 Ti — GKR 78/78, CUDA green, 3-node IBD PASS).
 
-> ## HEADLINE: composed bound ≈ 65.8 bits — **INADEQUATE MARGIN** (< 2 bits over 64)
+> ## HEADLINE (updated 2026-07-22, margin restoration): composed bound ≈ **76.80 bits** — margin over 64 ≈ **12.8 bits**, ≥ 74 bar cleared
 >
-> On the sound v5 fold the composed separation bound is **NON-VACUOUS** and
-> **FRI-dominated at ≈ 65.8 bits (ε_total ≤ 2^-65.7)** — it clears the 2^-64
-> target, but by only ≈ **1.8 bits**. This is **INADEQUATE for consensus
-> authority.** The **arbiter stays hard-disabled** (`kRCGkrFormalSoundnessReady =
-> false`); **ExactReplay remains the sole authority.** Parameter levers to restore
-> margin are quantified in §3.
+> The two §3 levers are APPLIED to the bound accounting: **fold Q = 116 → 128**
+> (`kRCFriNumQueries`, live in this tree) and **FS/algebraic challenges over
+> F_{p^3}** (|K| ≈ 2^192, accounted symbolically — the Fp3 implementation is a
+> parallel workstream; the affected call-sites are enumerated in §3.5 and MUST
+> be cut over for the Fp3-dependent terms to hold). On the sound v5 fold the
+> composed separation bound is **NON-VACUOUS** and **FRI-dominated at ≈ 76.80
+> bits (ε_total ≤ 2^-76.79)** — clearing the 2^-64 target by ≈ 12.8 bits and
+> the 74-bit restored-margin bar (`kRCGkrComposedTargetBits`) by ≈ 2.8. No
+> included term is below 64 (smallest algebraic term: FS subtotal 135.5).
+> Historical Q=116/Fp2 state: ≈ 65.8 bits, ≈ 1.8-bit margin — INADEQUATE; kept
+> as a pinned record in the tests. The **arbiter stays hard-disabled**
+> (`kRCGkrFormalSoundnessReady = false`); **ExactReplay remains the sole
+> authority** — this is audit accounting, not a consensus switch.
 
 > Consensus posture (unchanged, guarded): arbiter **OFF / hard-disabled**;
 > activation heights **INT32_MAX**; `RecomputeResidentCurriculumReference` /
@@ -45,59 +52,121 @@ auto-merged with the hardening — both the v5 FRI and the constructions survive
 All four sources (`matmul_v4_rc_gkr{,_air,_eval,_wiring}.cpp`) and the four gkr
 test files are registered.
 
-## 2. Per-construction separation bounds (post-grind g = 40)
+## 2. Per-construction separation bounds (post-grind g = 40; Q = 128, Fp3 challenges)
 
-| Construction | Relation | −log2 ε | Notes |
-|---|---|---|---|
-| I — evaluation opening | G1/G2/G5 | **≥ 74** | `RCGkrConstructionISeparationBits()`; rides the v5 batched FRI. |
-| II — Extract composition | G3 | **80** | `ComposeConstraints`, n_slots ≤ 256: 2·log2 p − 8 − 40. |
-| III — fixed-reference membership | G3 | **128** | dual-α over Fp2 (`VerifyLookupAgainstPreprocessed`); single-α 45–59.6 → forbidden. |
-| IV — wiring (equality) | G4 | **83.19** | Schwartz–Zippel MLE, ℓ = 28. |
-| IV — wiring (permutation, **dual**) | G4 | **160** | grand product, two (β,γ) pairs. |
-| IV — wiring (permutation, single) | — | **60 — BELOW 64** | FORBIDDEN; single-challenge unreachable on the ship path (dual mandatory). |
-| **FRI fold proximity (v5, DOMINATING)** | PCS | **65.85** | sound v5 half-domain fold, Q = 116; `FriSoundnessBoundBits()`. |
-| batched-FRI query term | PCS | 76.8 | `FriBatchSoundnessBoundBits()` (Q = 128) — query-repetition, does NOT lift the fold floor. |
-| SHA256d bindings | — | **88** | computational, 2^40-query adversary. |
+Old = Q=116 fold / Fp2 challenges; New = Q=128 fold / Fp3 challenges
+(|K| = 2^191.999…; Fp3-dependent rows conditional on the §3.5 cutover).
 
-## 3. The COMPOSED separation bound — number, margin, and levers
+| Construction | Relation | Closed form (−log2, pre-grind) | Old | **New** | Notes |
+|---|---|---|---|---|---|
+| I — evaluation opening | G1/G2/G5 | FS′×2^40 ⊕ FRI-query ⊕ SHA | ≥ 74 | **≥ 76** | `RCGkrConstructionISeparationBits()`; now FRI-query-dominated (FS′ ≤ 2^-138.4). |
+| II — Extract composition | G3 | (n_slots−1)/\|K\|, n_slots ≤ 256 | 80 | **144** | 3·log2 p − 8 − 40; `ComposeConstraints`. |
+| III — fixed-reference membership | G3 | ((N_w+N_t)/\|K\|)², ≤ 2^44 | 128 | **256** | dual-α (`VerifyLookupAgainstPreprocessed`); N_L=2^43 helper form: 258. Single-α stays forbidden. |
+| IV — wiring (equality) | G4 | ℓ/\|K\|, ℓ = 28 | 83.19 | **147.19** | Schwartz–Zippel MLE. |
+| IV — wiring (permutation, **dual**) | G4 | (N/\|K\|)², N = 2^28 | 160 | **288** | grand product, two (β,γ) pairs. |
+| IV — wiring (permutation, single) | — | N/\|K\| | **60 — BELOW 64** | 124 | STILL FORBIDDEN: the dual mandate is structural (G4); the Fp2 below-64 record is pinned (`kRCGkrWiringPermutationSingleSepBitsFp2`). |
+| Whole-protocol FS subtotal ×2^40 | — | Σ(sumcheck 3·2^13 + cond. 2^9 + RLC 2^16)/\|K\| + dual-OOD + dual-α | 72 | **135.5** | `kRCGkrFsSubtotalSepBits`; pre-grind ≈ 2^-175.5. |
+| — dual-OOD DEEP (z1,z2) | — | (2κ/(\|K\|−\|D\|))², κ = 2^28 | 196 pre / 156 post | **326 pre / 286 post** | inside the FS subtotal. |
+| — dual-α LogUp | — | ((N_w+N_t)/\|K\|)² | 168 pre / 128 post | **296 pre / 256 post** | inside the FS subtotal. |
+| **FRI fold proximity (v5, DOMINATING floor)** | PCS | Q·log2(32/17) − 40 | **65.85** (Q=116) | **76.80** (Q=128) | field-independent; `FriSoundnessBoundBits()` = 76 (integer floor). |
+| batched-FRI query term | PCS | Q·log2(32/17) − 40 | 76.8 | 76.8 | `FriBatchSoundnessBoundBits()` (Q = 128, unchanged) — now COINCIDES with the fold floor. |
+| SHA256d bindings | — | computational | 88 | **88** | 2^40-query adversary; field-independent. |
+| **COMPOSED (log-sum-exp)** | all | — | **≈ 65.8 (margin 1.8 — INADEQUATE)** | **≈ 76.80 (margin 12.8; ≥ 74 bar cleared by 2.8)** | `RCGkrComposedSeparationBits()`. |
+
+## 3. The COMPOSED separation bound — number, margin, and the APPLIED levers
 
 `RCGkrComposedSeparation(fri_proximity_bits)` /
 `RCGkrComposedSeparationBits()` (`matmul_v4_rc_gkr.{h,cpp}`) combine all four
 constructions + the FRI backend + SHA256d by a log-sum-exp of the per-relation
 acceptance probabilities, **parametric in the FRI proximity bits**.
 
-> **Composed total (v5 fold floor 65.85): −log2(ε_total) ≈ 65.8 bits,
-> ε_total ≤ 2^-65.7. Margin over 64 ≈ 1.8 bits — INADEQUATE.**
+> **Composed total (v5 fold floor 76.80, Q = 128, Fp3 challenges):
+> −log2(ε_total) ≈ 76.80 bits, ε_total ≤ 2^-76.79. Margin over 64 ≈ 12.8
+> bits; over the 74-bit restored-margin bar ≈ 2.8 bits — ADEQUATE
+> (`inadequate_margin = false`).**
 
-This matches the independently-computed whole-protocol Theorem 8.1 figure (≈
-2^-65.7) and the Construction II+III agent's number. Honest markers:
+Both levers identified by the previous revision are applied to the accounting
+(the 2026-07-22 margin restoration):
 
-- **FRI-floor-limited, and 76.8 is NOT the security level.** The batched query
-  term `FriBatchSoundnessBoundBits()` = 76.8 (Q = 128) is the query-repetition
-  soundness *assuming* the fold; it does not lift the fold's own proximity
-  soundness (65.85), which is the floor. Plugging 76.8 into the composition gives
-  only the query-only view (FS subtotal 72 becomes the floor, ≈ 71.9) — reported,
-  not claimed. `RCGkrComposedBound::inadequate_margin` is `true`.
-- **Below-64 item:** the single-challenge grand-product wiring is **60 bits** —
-  excluded (dual mandatory). No *included* term is below 64.
+| Lever | Status | Effect on terms |
+|---|---|---|
+| **Raise fold Q 116 → 128** (`kRCFriNumQueries`) | **APPLIED, live in this tree** | FRI fold floor 65.85 → **76.80** (field-independent); now coincides with the batched query term. |
+| **Draw FS/algebraic challenges from Fp3** (\|K\| ≈ 2^192) | **APPLIED to the bound accounting; implementation is a parallel workstream** | FS subtotal 72 → **135.5**; composition 80 → 144; membership 128 → 256; wiring 83.19 → 147.19 / dual 160 → 288; Construction I 74 → 76. **Conditional on the §3.5 call-site cutover.** |
 
-### Parameter levers to restore margin (quantified; NOT applied — tuning is out of scope)
+Honest markers:
 
-FRI query term = Q·log2(32/17) − 40; FS subtotal = 72 is the next floor.
+- **FRI-floor-limited by design, now with margin.** The floor (76.80) is the
+  field-independent query-repetition term — exactly why Q had to rise: Fp3
+  alone left 65.85 in place (the historical lever table showed +0 for Fp3
+  alone). The next terms are SHA (88) and the FS subtotal (135.5).
+- **The conservative integer view also clears the bar:** plugging
+  `FriBatchSoundnessBoundBits()` = 76 composes to ≈ 76.0 ≥ 74; the margin does
+  not hinge on the fractional 0.80.
+- **No included term is below 64.** The single-challenge grand-product wiring
+  — 60 bits over Fp2, the origin of the dual mandate — remains **excluded and
+  structurally unreachable** (G4 enforces dual); over Fp3 it would be 124, but
+  the mandate is NOT relaxed, and the Fp2 record stays pinned in code + test.
+- **Historical record retained:** composing at the old Q=116 floor (65.85)
+  still reports ≈ 65.8 / `inadequate_margin = true`, asserted in the test so
+  the "before" state cannot be silently rewritten.
 
-| Lever | Effect | Composed after | Δ vs 65.8 |
-|---|---|---|---|
-| **Raise Q 116 → 128** (batched target) | FRI 65.85 → **76.8** | FS subtotal (72) becomes floor ⇒ ≈ **71.9** | **+6.1 bits** |
-| Raise Q 116 → 160 | FRI → 106.0 | still FS-bound ⇒ ≈ **71.9** | +6.1 (no more — FS is the ceiling) |
-| **Cut the FS union** (fewer sumcheck rounds / tighter RLC) with Q = 128 | FRI 76.8, FS ↑ | ⇒ min(76.8, FS′, 80…) | up to **+10**, into the 74–80 band |
-| **Fp3** FS/algebraic challenges alone (|F| ≈ 2^192) | FS/composition/membership/wiring double; **FRI floor UNCHANGED** | ≈ 65.8 unless Q rises | **0 alone** |
-| **Fp3 FS + Q = 128 together** | FRI 76.8, FS ≈ 136 | FRI is the floor ⇒ ≈ **76.8** | **+11 bits, real margin** |
+### 3.5 Fp2 → Fp3 challenge sites (MUST be cut over for the Fp3 rows to hold)
 
-**Binding lesson:** the bound is FRI-floor-limited ⇒ **raising Q is the first and
-mandatory lever** (Q = 128 alone → ≈ 71.9). Fp3 helps the algebraic terms but
-does nothing for the FRI floor until Q rises; the durable fix is **Q = 128 + an
-FS subtotal above 76.8**, landing the composed bound in the **74–77 band** with
-genuine margin.
+The bound treats |K| = 2^192 symbolically. The following challenge-derivation
+primitives and call-sites currently draw from **Fp2** and must switch to
+**Fp3** (the parallel F_{p^3} implementation workstream). DO-NOT-REWIRE note:
+none of these are changed by this margin-bounds branch.
+
+**Samplers (retype these, everything below flows through them):**
+
+1. `FriFs::ChallengeFp2` — `src/matmul/matmul_v4_rc_fri.cpp:234` (FRI
+   transcript; every `fri_*`/`frib_*` draw). Includes `FriSampleOodZ`
+   (`matmul_v4_rc_fri.cpp:283–289`), whose c1≠0 resample condition needs the
+   Fp3 analogue ("outside the base-line / outside D" embedding condition).
+2. `FsState::ChallengeFp2` + `FromChallengeBytes2` —
+   `src/matmul/matmul_v4_rc_gkr.cpp:208`.
+3. coupled-proof `ChallengeFp2` — `src/matmul/matmul_v4_rc_gkr_coupled.cpp:154`.
+4. eval-argument `ChallengeFp2` — `src/matmul/matmul_v4_rc_gkr_eval.cpp:315`;
+   plus `MuBase`/`MuChallenge` (tag `"mu"`) —
+   `src/matmul/matmul_v4_rc_gkr_eval.cpp:101–127`.
+5. `WiringChallengeFp2` / `WiringChallengePoint` —
+   `src/matmul/matmul_v4_rc_gkr_wiring.cpp:120,141` (decl
+   `matmul_v4_rc_gkr_wiring.h:272–275`).
+
+**Call-sites by bound term:**
+
+- **Sumcheck rounds (2ν/|K| rows of the FS subtotal):**
+  `matmul_v4_rc_gkr.cpp:282,326` (`"prod_sumcheck_r"`); `851–852, 3212–3213`
+  (`"ri"`,`"rj"`); `1705–1706, 2042–2043, 2399–2400` (`"v7_ri"`,`"v7_rj"`);
+  `matmul_v4_rc_gkr_coupled.cpp:227,253` (`"prod_sumcheck_r"`), `809, 1000`
+  (`"v7c_rj"`), `843–844, 1032–1033` (`"v7c_rp"`,`"v7c_rm"`);
+  `matmul_v4_rc_gkr_eval.cpp:506,627` (`"eqopen_r"`).
+- **RLC γ/μ/λ + DEEP weights ((M−1)/|K|, (W+2)/|K|):**
+  `matmul_v4_rc_gkr_eval.cpp:439,604` (`"eqopen_gamma"`), `101–127` (`"mu"`);
+  `matmul_v4_rc_fri.cpp:1115,1278` (`"frib_lambda"`), `1134–1135, 1301–1302`
+  (`"frib_w"` w1,w2).
+- **Dual-OOD ((2κ/(|K|−|D|))²):** `matmul_v4_rc_fri.cpp:1040` (`"frib_z"` via
+  `FriSampleOodZ`); the single-instance DEEP z draws `"deep_z"` at
+  `matmul_v4_rc_fri.cpp:564,695` (through `FriSampleOodZ`,
+  `matmul_v4_rc_fri.cpp:283–289`).
+- **Composition η + LogUp γ/α (dual-α ((N_w+N_t)/|K|)²):**
+  `matmul_v4_rc_gkr.cpp:919,3248` (`"logup_alpha"` legacy single-α);
+  `1751–1753, 2430–2432` (`"v7_gamma"`,`"v7_alpha1"`,`"v7_alpha2"`);
+  `2017–2020` (`"g3_eta"`,`"g3_gamma"`,`"g3_alpha1"`,`"g3_alpha2"` — the G3
+  relation replay incl. Construction II's η);
+  `matmul_v4_rc_gkr_coupled.cpp:881–883, 1057–1059`
+  (`"v7c_gamma"`,`"v7c_alpha1"`,`"v7c_alpha2"`).
+- **Wiring ρ / dual (β,γ) (ℓ/|K|, (N/|K|)²):**
+  `matmul_v4_rc_gkr_wiring.cpp:136–141,202` (equality ρ via
+  `WiringChallengePoint`, `"wire_eq_rho"`), `340–343`
+  (`"wire_perm_beta"`/`"wire_perm_gamma"`, both pairs).
+- **FRI fold challenges:** `matmul_v4_rc_fri.cpp:539,677` (`"fri_fold"`),
+  `1198,1310` (`"frib_fold"`). CAVEAT: fold challenges (and λ/w1/w2) multiply
+  codeword values, so moving them to Fp3 entails the Fp3-codeword FRI (or a
+  tower embedding) — a protocol decision owned by the Fp3 implementation
+  workstream. The FRI proximity floor itself (Q·log2(32/17) − 40) is
+  query-repetition-based and field-independent, so the composed floor of
+  76.80 does not depend on this caveat; the FS-union rows do.
 
 ## 4. In-circuit relations CHECKED in `VerifyWinnerProofV7`
 
@@ -156,10 +225,17 @@ tests + `src/CMakeLists.txt` + the three doc appendices.
 
 ## 6. Open items
 
-- **INADEQUATE MARGIN (≈ 1.8 bits over 64).** The composed bound clears 2^-64
-  only barely; it is **not** adequate for consensus authority. Arbiter stays
-  hard-disabled. Restoring margin requires the §3 levers — **Q = 128 is the
-  first, mandatory step** (→ ≈ 71.9), and Q = 128 + FS > 76.8 for the 74–77 band.
+- **Fp3 challenge cutover (the §3.5 list).** The composed bound's
+  Fp3-dependent terms (FS 135.5, composition 144, membership 256, wiring
+  147.19/288, Construction I 76) hold only once every §3.5 call-site draws
+  from F_{p^3}; until then those rows are the TARGET parameterization, not
+  the shipped behavior. The Q = 128 fold (and hence the 76.80 floor, which is
+  field-independent) is live in this tree. The Fp3-codeword decision for the
+  fold/λ/w draws (§3.5 caveat) is owned by the Fp3 workstream.
+- **Restored margin is accounting, not authority.** Composed ≈ 76.80
+  (margin ≈ 12.8) clears the 74-bit bar, but the arbiter stays hard-disabled
+  until the external audit and the Fp3 cutover land; ExactReplay remains the
+  sole authority.
 - **External audit** of the four constructions + the G1–G5 composition (the
   in-circuit relations are re-derivations in the construction vocabulary plus the
   new opening/segment/wiring/residual bindings; independent review outstanding).
