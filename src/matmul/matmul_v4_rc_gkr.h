@@ -644,39 +644,68 @@ struct RCGkrRelationsResult {
 // COMPOSED separation bound across the four constructions + batched-FRI backend
 // (integration accounting, PARAMETRIC in the FRI proximity bound). All values
 // are −log2(acceptance probability), post the g = 40 grinding convention.
+//
+// 2026-07-22 MARGIN RESTORATION (Q = 128, Fp3 challenges): the algebraic /
+// Fiat–Shamir terms below assume every FS challenge is drawn from the CUBIC
+// extension K = F_{p^3} (log2|K| = kRCGkrChallengeFieldBits ≈ 192) instead of
+// F_{p^2} (≈ 128); the FRI fold rides Q = kRCFriNumQueries = 128 instead of
+// 116. These numbers are the TARGET parameterization: they HOLD ONLY once the
+// challenge-derivation call-sites enumerated in INTEGRATION_REPORT.md
+// ("Fp2 → Fp3 challenge sites") actually draw from Fp3 (a parallel
+// implementation workstream). The Q = 128 fold is live in this tree.
 // ---------------------------------------------------------------------------
 
-/** Construction II composition polynomial (n_slots ≤ 256): 2·log2 p − 8 − 40. */
-inline constexpr double kRCGkrCompositionSepBits = 80.0;
-/** Construction III dual-α fixed-reference-vector membership over Fp2 (§5.6). */
-inline constexpr double kRCGkrLookupSepBits = 128.0;
-/** Construction IV equality (copy) at the κ = 2^28 column cap: 128 − log2(28) − 40. */
-inline constexpr double kRCGkrWiringEqualitySepBits = 83.19;
-/** Construction IV grand product, DUAL challenge, N = 2^28: 2·(128−28) − 40. */
-inline constexpr double kRCGkrWiringPermutationDualSepBits = 160.0;
-/** Construction IV grand product, SINGLE challenge, N = 2^28: (128−28) − 40 =
- *  60 — BELOW the 64-bit target; the single form is FORBIDDEN on the ship path
- *  (dual is mandatory). Pinned here so the test can assert it is < 64. */
-inline constexpr double kRCGkrWiringPermutationSingleSepBits = 60.0;
+/** log2 of the CHALLENGE field K = F_{p^3}: 3·log2(p), p = 2^64 − 2^32 + 1. */
+inline constexpr double kRCGkrChallengeFieldBits = 191.99999999899;
+/** Historical F_{p^2} challenge-field bits (2·log2 p), kept for the record. */
+inline constexpr double kRCGkrChallengeFieldBitsFp2 = 127.99999999932;
+/** Construction II composition polynomial (n_slots ≤ 256): 3·log2 p − 8 − 40
+ *  = 144 (Fp2 history: 80). */
+inline constexpr double kRCGkrCompositionSepBits = 144.0;
+/** Construction III dual-α fixed-reference-vector membership (§5.6),
+ *  conservative (N_w + N_t ≤ 2^44): 2·(192 − 44) − 40 = 256 (Fp2 history:
+ *  128; the N_L = 2^43 helper value is 258). */
+inline constexpr double kRCGkrLookupSepBits = 256.0;
+/** Construction IV equality (copy) at the κ = 2^28 column cap:
+ *  192 − log2(28) − 40 = 147.19 (Fp2 history: 83.19). */
+inline constexpr double kRCGkrWiringEqualitySepBits = 147.19;
+/** Construction IV grand product, DUAL challenge, N = 2^28: 2·(192−28) − 40
+ *  = 288 (Fp2 history: 160). */
+inline constexpr double kRCGkrWiringPermutationDualSepBits = 288.0;
+/** Construction IV grand product, SINGLE challenge, N = 2^28: (192−28) − 40 =
+ *  124 over Fp3. Over the historical Fp2 draw it was (128−28) − 40 = 60 —
+ *  BELOW the 64-bit target — which is why the single form is FORBIDDEN on the
+ *  ship path (dual is mandatory, structurally enforced by G4; the mandate is
+ *  NOT relaxed by the Fp3 lift). Pinned with its Fp2 record so the test can
+ *  assert the historical below-64 rationale cannot drift. */
+inline constexpr double kRCGkrWiringPermutationSingleSepBits = 124.0;
+inline constexpr double kRCGkrWiringPermutationSingleSepBitsFp2 = 60.0;
 /** Whole-protocol Fiat–Shamir subtotal × 2^40 grinding (all sumcheck rounds +
- *  RLC/DEEP weights; Theorem 8.1 line). */
-inline constexpr double kRCGkrFsSubtotalSepBits = 72.0;
-/** SHA256d Merkle/transcript bindings vs a 2^40-query adversary (computational). */
+ *  RLC/DEEP weights; Theorem 8.1 line re-derived over |K| ≈ 2^192):
+ *  pre-grind Σ ≈ 2^-175.5 (sumcheck 3·2^13/|K| + condensations 2^9/|K| +
+ *  RLC 2^16/|K| + dual-OOD (2^29/|K|)² + dual-α (2^44/|K|)²) ⇒ 135.5
+ *  post-grind (Fp2 history: 72). */
+inline constexpr double kRCGkrFsSubtotalSepBits = 135.5;
+/** SHA256d Merkle/transcript bindings vs a 2^40-query adversary
+ *  (computational; field-independent). */
 inline constexpr double kRCGkrShaSepBits = 88.0;
-/** FRI proximity term that DOMINATES the composed bound. The integration now
- *  rides the SOUND v5 half-domain fold (`origin/wip/v7-hardening`): the fold IS a
- *  low-degree test, so the bound is NON-VACUOUS (unlike the v4 base, on which it
- *  was meaningless). The dominating term is the fold's own proximity soundness at
- *  Q = 116: 116·log2(32/17) − 40 ≈ 65.85 (= `FriSoundnessBoundBits()` real
- *  value). NOTE: the batched query term `FriBatchSoundnessBoundBits()` = 76.8
- *  (Q = 128) is the query-repetition soundness ASSUMING the fold; it does NOT
- *  lift the fold's own proximity soundness, so 65.85 remains the floor. */
-inline constexpr double kRCGkrFriProximityBitsV5 = 65.85;
+/** FRI proximity term — still the floor of the composed bound, now with real
+ *  margin. The integration rides the SOUND v5 half-domain fold; at
+ *  Q = kRCFriNumQueries = 128 the fold's own proximity soundness is
+ *  128·log2(32/17) − 40 = 76.80 (= `FriSoundnessBoundBits()` real value; the
+ *  integer helper floors to 76). This term is FIELD-INDEPENDENT (query
+ *  repetitions), which is why raising Q was mandatory: Fp3 alone left the
+ *  65.85 floor in place. Historical Q = 116 value: 65.85. */
+inline constexpr double kRCGkrFriProximityBitsV5 = 76.80;
 /** Deprecated alias (the base is now v5, not v4). */
 inline constexpr double kRCGkrFriProximityBitsV4 = kRCGkrFriProximityBitsV5;
 /** Margin over the 64-bit target below which the composed bound is flagged
  *  INADEQUATE for consensus authority (audit gate; arbiter stays hard-disabled). */
 inline constexpr double kRCGkrAdequateMarginBits = 2.0;
+/** The restored-margin acceptance bar for the composed bound (the ≥ 74-bit
+ *  band targeted by the Q = 128 + Fp3 margin restoration; pinned by the
+ *  integration test). */
+inline constexpr double kRCGkrComposedTargetBits = 74.0;
 
 struct RCGkrComposedBound {
     double construction_i_bits{0.0};   // Construction I evaluation opening (FS-side)
@@ -697,13 +726,17 @@ struct RCGkrComposedBound {
 /** The full composed-bound breakdown, PARAMETRIC in the FRI proximity bits. */
 [[nodiscard]] RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits);
 
-/** The composed separation bound (−log2 ε_total). On the SOUND v5 fold this is
- *  NON-VACUOUS and FRI-dominated at ≈ 65.8 bits (ε_total ≤ 2^-65.7) — it clears
- *  the 2^-64 target, but by an INADEQUATE margin (< 2 bits) for consensus
- *  authority; the arbiter stays hard-disabled (`kRCGkrFormalSoundnessReady`) and
- *  the parameter levers to restore margin are documented in INTEGRATION_REPORT.md.
- *  The parametric overload lets callers plug any FRI proximity term (e.g.
- *  `FriBatchSoundnessBoundBits()` for the query-only view). */
+/** The composed separation bound (−log2 ε_total). On the SOUND v5 fold at
+ *  Q = 128 with Fp3 challenges this is NON-VACUOUS and FRI-dominated at
+ *  ≈ 76.80 bits (ε_total ≤ 2^-76.79) — clearing the 2^-64 target by ≈ 12.8
+ *  bits and the 74-bit restored-margin bar with ≈ 2.8 bits to spare.
+ *  (Historical Q = 116 / Fp2 value: ≈ 65.8, an INADEQUATE < 2-bit margin.)
+ *  The Fp3-dependent terms hold once the challenge sites listed in
+ *  INTEGRATION_REPORT.md draw from Fp3; the arbiter stays hard-disabled
+ *  (`kRCGkrFormalSoundnessReady`) regardless — this bound is audit
+ *  accounting, not a consensus switch. The parametric overload lets callers
+ *  plug any FRI proximity term (e.g. the integer
+ *  `FriBatchSoundnessBoundBits()` = 76). */
 [[nodiscard]] double RCGkrComposedSeparationBits(double fri_proximity_bits);
 [[nodiscard]] double RCGkrComposedSeparationBits();
 
