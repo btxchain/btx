@@ -1044,6 +1044,58 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
     return true;
 }
 
+
+/**
+ * F4 / WP-D: one-panel exact GEMM.
+ * Fast path (one MMA / scalar / cuBLASLt): ONLY when |a|,|b| <= 48 AND the panel
+ * FactorBlockToMx-succeeds (MX alphabet). Otherwise exact base-4: 16 limb-pair
+ * products with digits in {-3..3}, recombine in int64 (weight 2^(2(i+j))).
+ */
+using Mxfp4OnePanelFn = bool (*)(const std::vector<int8_t>&, const std::vector<int8_t>&, uint32_t,
+                                 uint32_t, uint32_t, std::vector<int32_t>&, std::string*,
+                                 cudaStream_t);
+
+[[nodiscard]] bool LaunchMxfp4OnePanelExact(const std::vector<int8_t>& Lpanel,
+                                            const std::vector<int8_t>& Rpanel, uint32_t rows,
+                                            uint32_t len, uint32_t cols,
+                                            std::vector<int64_t>& out_panel, std::string* error,
+                                            Mxfp4OnePanelFn launch_one)
+{
+    out_panel.assign(static_cast<size_t>(rows) * cols, 0);
+    if (matmul::v4::rc::RcOzakiOperandsFitMxFastPathAbs(Lpanel, Rpanel)) {
+        std::vector<int32_t> partial;
+        std::string local;
+        if (launch_one(Lpanel, Rpanel, rows, len, cols, partial, &local, nullptr) &&
+            partial.size() == out_panel.size()) {
+            for (size_t i = 0; i < out_panel.size(); ++i) {
+                out_panel[i] = static_cast<int64_t>(partial[i]);
+            }
+            return true;
+        }
+    }
+
+    std::vector<int8_t> a_planes[4];
+    std::vector<int8_t> b_planes[4];
+    matmul::v4::rc::DecomposeInt8Base4Planes(Lpanel.data(), Lpanel.size(), a_planes);
+    matmul::v4::rc::DecomposeInt8Base4Planes(Rpanel.data(), Rpanel.size(), b_planes);
+
+    for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t j = 0; j < 4; ++j) {
+            const int64_t weight = int64_t{1} << (2u * (i + j));
+            std::vector<int32_t> partial;
+            if (!launch_one(a_planes[i], b_planes[j], rows, len, cols, partial, error, nullptr) ||
+                partial.size() != out_panel.size()) {
+                out_panel.clear();
+                return false;
+            }
+            for (size_t t = 0; t < out_panel.size(); ++t) {
+                out_panel[t] += static_cast<int64_t>(partial[t]) * weight;
+            }
+        }
+    }
+    return true;
+}
+
 /**
  * Scalar-decode MXFP4 Ozaki panels (E2M1 nibble decode + FP32 accumulate).
  * Exactness/reference accelerator only — NEVER flips native MXFP4 latches.
@@ -1084,14 +1136,15 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
             }
         }
 
-        std::vector<int32_t> partial;
-        if (!LaunchMxfp4OnePanelScalar(Lpanel, Rpanel, rows, len, cols, partial, error) ||
+        std::vector<int64_t> partial;
+        if (!LaunchMxfp4OnePanelExact(Lpanel, Rpanel, rows, len, cols, partial, error,
+                                      &LaunchMxfp4OnePanelScalar) ||
             partial.size() != out.size()) {
             out.clear();
             return false;
         }
         for (size_t i = 0; i < out.size(); ++i) {
-            out[i] += static_cast<int64_t>(partial[i]);
+            out[i] += partial[i];
         }
     }
     return true;
@@ -1099,9 +1152,9 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
 
 /** Real TC Ozaki panels via cuBLASLt block-scaled E2M1 (native claim path). */
 [[nodiscard]] bool LaunchOzakiMxfp4PanelsCublasLt(const std::vector<int8_t>& left,
-                                                  const std::vector<int8_t>& right, uint32_t rows,
-                                                  uint32_t inner, uint32_t cols,
-                                                  std::vector<int64_t>& out, std::string* error)
+                                                const std::vector<int8_t>& right, uint32_t rows,
+                                                uint32_t inner, uint32_t cols,
+                                                std::vector<int64_t>& out, std::string* error)
 {
     out.clear();
     if (rows == 0 || inner == 0 || cols == 0) {
@@ -1133,14 +1186,15 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
             }
         }
 
-        std::vector<int32_t> partial;
-        if (!LaunchMxfp4OnePanelCublasLt(Lpanel, Rpanel, rows, len, cols, partial, error) ||
+        std::vector<int64_t> partial;
+        if (!LaunchMxfp4OnePanelExact(Lpanel, Rpanel, rows, len, cols, partial, error,
+                                      &LaunchMxfp4OnePanelCublasLt) ||
             partial.size() != out.size()) {
             out.clear();
             return false;
         }
         for (size_t i = 0; i < out.size(); ++i) {
-            out[i] += static_cast<int64_t>(partial[i]);
+            out[i] += partial[i];
         }
     }
     return true;
@@ -1155,8 +1209,6 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
                                              std::vector<int64_t>& out, std::string* error)
 {
     out.clear();
-    // SM100 isolation: never dispatch SM120 MMA on Blackwell sm_100 / B200.
-    // SM100 uses SM100_CUBLASLT only; MMA body is also compile-gated to sm_120a.
     {
         int device = 0;
         cudaDeviceProp prop{};
@@ -1183,18 +1235,16 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
     const uint32_t k_full = (inner / kMxBlk) * kMxBlk;
     const uint32_t k_rem = inner - k_full;
 
-    auto add_partial = [&](const std::vector<int32_t>& partial) -> bool {
+    auto add_partial64 = [&](const std::vector<int64_t>& partial) -> bool {
         if (partial.size() != out.size()) return false;
-        for (size_t i = 0; i < out.size(); ++i) {
-            out[i] += static_cast<int64_t>(partial[i]);
-        }
+        for (size_t i = 0; i < out.size(); ++i) out[i] += partial[i];
         return true;
     };
 
     using matmul::v4::rc::kRCOzakiExactChunk;
     for (uint32_t k0 = 0; k0 < k_full; k0 += kRCOzakiExactChunk) {
         uint32_t len = std::min(kRCOzakiExactChunk, k_full - k0);
-        len = (len / kMxBlk) * kMxBlk; // keep MMA tiles dense
+        len = (len / kMxBlk) * kMxBlk;
         if (len == 0) continue;
         std::vector<int8_t> Lpanel(static_cast<size_t>(rows) * len);
         std::vector<int8_t> Rpanel(static_cast<size_t>(len) * cols);
@@ -1210,9 +1260,10 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
                     right[static_cast<size_t>(k0 + t) * cols + c];
             }
         }
-        std::vector<int32_t> partial;
-        if (!LaunchMxfp4OnePanelMma(Lpanel, Rpanel, rows, len, cols, partial, error) ||
-            !add_partial(partial)) {
+        std::vector<int64_t> partial;
+        if (!LaunchMxfp4OnePanelExact(Lpanel, Rpanel, rows, len, cols, partial, error,
+                                      &LaunchMxfp4OnePanelMma) ||
+            !add_partial64(partial)) {
             out.clear();
             return false;
         }
@@ -1233,9 +1284,10 @@ __global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uin
                     right[static_cast<size_t>(k_full + t) * cols + c];
             }
         }
-        std::vector<int32_t> partial;
-        if (!LaunchMxfp4OnePanelScalar(Lpanel, Rpanel, rows, k_rem, cols, partial, error) ||
-            !add_partial(partial)) {
+        std::vector<int64_t> partial;
+        if (!LaunchMxfp4OnePanelExact(Lpanel, Rpanel, rows, k_rem, cols, partial, error,
+                                      &LaunchMxfp4OnePanelScalar) ||
+            !add_partial64(partial)) {
             out.clear();
             return false;
         }
@@ -1358,7 +1410,7 @@ void FillScaleTransitions(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32
     return true;
 }
 
-enum class MxFillKind : uint8_t { Seeded = 0, MaxCorner = 1, ScaleTransition = 2 };
+enum class MxFillKind : uint8_t { Seeded = 0, MaxCorner = 1, ScaleTransition = 2, HighScaleMixed = 3 };
 
 using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vector<int8_t>&,
                                     uint32_t, uint32_t, uint32_t, std::vector<int64_t>&,
@@ -1375,6 +1427,9 @@ using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vecto
         break;
     case MxFillKind::ScaleTransition:
         FillScaleTransitions(left, right, rows, inner, cols, seed);
+        break;
+    case MxFillKind::HighScaleMixed:
+        matmul::v4::rc::FillHighScaleMixedPanels(left, right, rows, inner, cols);
         break;
     case MxFillKind::Seeded:
     default:
@@ -1436,6 +1491,9 @@ using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vecto
         // Negatives + e=0..3 corners.
         {8, 256, 8, 53, MxFillKind::MaxCorner, 0},
         {8, 256, 8, 59, MxFillKind::MaxCorner, 3},
+        // F4 HighScaleMixed: -128 rails + odd low; requires base-4 limbs.
+        {4, 64, 4, 61, MxFillKind::HighScaleMixed, 0},
+        {8, 128, 8, 67, MxFillKind::HighScaleMixed, 0},
     };
     for (const auto& c : kCases) {
         std::string local;
