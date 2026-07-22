@@ -1670,8 +1670,9 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_high_scale_mixed_base4_matches_oracle)
     BOOST_REQUIRE(rc::RcOzakiBase4LimbGemmS8S8Int64(L, R, rows, inner, cols, base4));
     BOOST_CHECK(base4 == dense2);
 
-    // Fail-closed until native MXFP4 qualifies.
+    // Fail-closed until native MXFP4 qualifies (after once-only self-qual).
     rc::ResetRcOzakiQualForTest();
+    (void)rc::SelfQualifyRcOzakiMxfp4Once();
     if (!rc::IsRcOzakiMxfp4Qualified()) {
         std::vector<int64_t> oz;
         rc::FillHighScaleMixedPanels(L, R, rows, inner, cols);
