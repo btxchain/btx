@@ -86,7 +86,12 @@ BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
     BOOST_CHECK(cfg.material_exchange_enabled);
     BOOST_CHECK(cfg.v2_profile_enabled);
     BOOST_CHECK_EQUAL(cfg.v2_activation_height, std::numeric_limits<int32_t>::max());
-    BOOST_CHECK(rc::ValidateRCCoupParams(rc::RCCoupParamsFromConsensusConfig(cfg)));
+    BOOST_CHECK_EQUAL(cfg.rows_per_lobe, 1u);
+    BOOST_CHECK_EQUAL(cfg.pages_per_barrier_lobe, dc::kRCCoupPagesPerBarrierLobe);
+    const rc::RCCoupParams from_cfg = rc::RCCoupParamsFromConsensusConfig(cfg);
+    BOOST_CHECK(rc::ValidateRCCoupParams(from_cfg));
+    BOOST_CHECK_EQUAL(from_cfg.rows_per_lobe, cfg.rows_per_lobe);
+    BOOST_CHECK_EQUAL(from_cfg.pages_per_barrier_lobe, cfg.pages_per_barrier_lobe);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_legacy_v1_compatible)

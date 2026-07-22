@@ -325,6 +325,7 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     if (!is_regtest) {
         assert(consensus.nMatMulRCCoupledHeight == std::numeric_limits<int32_t>::max());
         assert(!consensus.fMatMulRCCoupledUseToyDims);
+        assert(consensus.nMatMulRCCoupledProfile == 2);
         assert(consensus.nMatMulRCCoupledAsertRescaleNum == 1);
         assert(consensus.nMatMulRCCoupledAsertRescaleDen == 1);
     }
@@ -1649,6 +1650,9 @@ public:
         if (opts.matmul_rc_coupled_use_toy_dims.has_value()) {
             consensus.fMatMulRCCoupledUseToyDims = *opts.matmul_rc_coupled_use_toy_dims;
         }
+        if (opts.matmul_rc_coupled_profile.has_value()) {
+            consensus.nMatMulRCCoupledProfile = *opts.matmul_rc_coupled_profile;
+        }
         // When RC (or coupled) is live on regtest, unthrottle tip-verify budgets
         // so -regtestrc* functional tests are not paced (mirrors LT above).
         if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() ||
@@ -1875,6 +1879,7 @@ public:
             opts.matmul_rc_coupled_height.has_value() ||
             opts.matmul_rc_use_toy_dims.has_value() ||
             opts.matmul_rc_coupled_use_toy_dims.has_value() ||
+            opts.matmul_rc_coupled_profile.has_value() ||
             opts.matmul_lt_seal_as_pow.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||

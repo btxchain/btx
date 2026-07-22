@@ -12,6 +12,7 @@
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_sketch_cache.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matrix.h>
 #include <matmul/noise.h>
 #include <matmul/transcript.h>
@@ -1364,6 +1365,7 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_activation_override_args)
     BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, 12);
     BOOST_CHECK(consensus.fMatMulRCUseToyDims);
     BOOST_CHECK(consensus.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 2u); // default V2
     BOOST_CHECK(!consensus.fSkipMatMulValidation);
     BOOST_CHECK(!consensus.IsMatMulRCActive(8));
     BOOST_CHECK(consensus.IsMatMulRCActive(9));
@@ -1375,6 +1377,28 @@ BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_activation_override_args)
     // Live RC/coupled on regtest unthrottles tip-verify budgets.
     BOOST_CHECK_EQUAL(consensus.nMatMulRCMaxPendingVerifications,
                       std::numeric_limits<uint32_t>::max());
+}
+
+BOOST_AUTO_TEST_CASE(ChainParams_REGTEST_rc_coupled_profile_override_args)
+{
+    // F8: -regtestrccoupledprofile=3 × toydims reaches ResolveRCCoupParams.
+    ArgsManager args;
+    args.ForceSetArg("-test", "matmulstrict");
+    args.ForceSetArg("-regtestmatmulv4height", "6");
+    args.ForceSetArg("-regtestbmx4cheight", "6");
+    args.ForceSetArg("-regtestdrltheight", "6");
+    args.ForceSetArg("-regtestmatmulltsealaspow", "0");
+    args.ForceSetArg("-regtestrccoupledheight", "12");
+    args.ForceSetArg("-regtestrccoupledtoydims", "1");
+    args.ForceSetArg("-regtestrccoupledprofile", "3");
+
+    const auto consensus = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 3u);
+    BOOST_CHECK(consensus.fMatMulRCCoupledUseToyDims);
+    const auto resolved = matmul::v4::rc::ResolveRCCoupParams(consensus);
+    BOOST_CHECK_EQUAL(resolved.rows_per_lobe, 32u);
+    BOOST_CHECK_EQUAL(resolved.pages_per_barrier_lobe, 4u);
+    BOOST_CHECK(matmul::v4::rc::ValidateRCCoupParams(resolved));
 }
 
 BOOST_AUTO_TEST_CASE(MatMulPreHashEpsilonBits_resolve_upgrade_at_boundary)

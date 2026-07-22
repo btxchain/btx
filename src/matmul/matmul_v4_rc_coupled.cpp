@@ -22,9 +22,40 @@
 #include <vector>
 
 namespace matmul::v4::rc {
+
+const RCCoupDomainTagSet& RCCoupDomainTagsForVersion(uint32_t transcript_version)
+{
+    static const RCCoupDomainTagSet kV1{
+        kRCCoupEpisodeTag,           kRCCoupBankTag,
+        kRCCoupLobeTag,              kRCCoupBarrierTag,
+        kRCCoupPermTag,              kRCCoupMixTag,
+        kRCCoupExtractTag,           kRCCoupFullBankTag,
+        kRCCoupMaterialExchangeTag,  kRCCoupMaterialExchangeRoundsTag,
+    };
+    static const RCCoupDomainTagSet kV2{
+        kRCCoupEpisodeTagV2,          kRCCoupBankTagV2,
+        kRCCoupLobeTagV2,             kRCCoupBarrierTagV2,
+        kRCCoupPermTagV2,             kRCCoupMixTagV2,
+        kRCCoupExtractTagV2,          kRCCoupFullBankTagV2,
+        kRCCoupMaterialExchangeTagV2, kRCCoupMaterialExchangeRoundsTag,
+    };
+    static const RCCoupDomainTagSet kV3{
+        kRCCoupEpisodeTagV3,          kRCCoupBankTagV3,
+        kRCCoupLobeTagV3,             kRCCoupBarrierTagV3,
+        kRCCoupPermTagV3,             kRCCoupMixTagV3,
+        kRCCoupExtractTagV3,          kRCCoupFullBankTagV3,
+        kRCCoupMaterialExchangeTagV3, kRCCoupMaterialExchangeRoundsTag,
+    };
+    if (transcript_version == ENC_RC_V3) return kV3;
+    if (transcript_version == ENC_RC_V2) return kV2;
+    return kV1;
+}
+
 namespace {
 
 namespace lt = matmul::v4::lt;
+
+inline size_t TagLen(const char* tag) { return std::strlen(tag); }
 
 uint256 Sha256Tagged(const char* tag, size_t taglen, const unsigned char* data, size_t len)
 {
@@ -104,13 +135,14 @@ private:
     unsigned char m_block[32]{};
 };
 
-uint256 BarrierRoot(uint32_t barrier, const std::vector<int8_t>& state)
+uint256 BarrierRoot(uint32_t barrier, const std::vector<int8_t>& state,
+                    const RCCoupDomainTagSet& tags)
 {
+    const size_t tlen = TagLen(tags.barrier);
     std::vector<unsigned char> buf;
-    buf.reserve((sizeof(kRCCoupBarrierTag) - 1) + 4 + state.size());
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupBarrierTag),
-               reinterpret_cast<const unsigned char*>(kRCCoupBarrierTag) +
-                   sizeof(kRCCoupBarrierTag) - 1);
+    buf.reserve(tlen + 4 + state.size());
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(tags.barrier),
+               reinterpret_cast<const unsigned char*>(tags.barrier) + tlen);
     unsigned char le[4];
     WriteLE32(le, barrier);
     buf.insert(buf.end(), le, le + 4);
@@ -120,11 +152,10 @@ uint256 BarrierRoot(uint32_t barrier, const std::vector<int8_t>& state)
 }
 
 uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t bank_pages,
-                       uint32_t lobe_width)
+                       uint32_t lobe_width, const RCCoupDomainTagSet& tags)
 {
     CSHA256 outer;
-    outer.Write(reinterpret_cast<const unsigned char*>(kRCCoupBankTag),
-                sizeof(kRCCoupBankTag) - 1);
+    outer.Write(reinterpret_cast<const unsigned char*>(tags.bank), TagLen(tags.bank));
     const size_t page_bytes = static_cast<size_t>(lobe_width) * lobe_width;
     for (uint32_t p = 0; p < bank_pages; ++p) {
         // Malformed page size → null commitment (caller treats as reject).
@@ -140,14 +171,14 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
 
 /** Stream pages into the hasher without retaining the full bank (Streamed). */
 uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
-                                const RCCoupParams& params)
+                                const RCCoupParams& params, uint32_t transcript_version)
 {
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     CSHA256 outer;
-    outer.Write(reinterpret_cast<const unsigned char*>(kRCCoupBankTag),
-                sizeof(kRCCoupBankTag) - 1);
+    outer.Write(reinterpret_cast<const unsigned char*>(tags.bank), TagLen(tags.bank));
     const size_t page_bytes = static_cast<size_t>(params.lobe_width) * params.lobe_width;
     for (uint32_t p = 0; p < params.bank_pages; ++p) {
-        const auto page = DeriveCoupledBankPage(header, height, p, params);
+        const auto page = DeriveCoupledBankPage(header, height, p, params, transcript_version);
         if (page.size() != page_bytes) return uint256{};
         outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
     }
@@ -232,18 +263,18 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, 
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
                       uint32_t n, bool material_exchange = false,
                       uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault,
-                      bool u64_wrap = false)
+                      bool u64_wrap = false, const RCCoupDomainTagSet* tags = nullptr)
 {
+    const RCCoupDomainTagSet& t =
+        tags != nullptr ? *tags : RCCoupDomainTagsForVersion(ENC_RC_V1);
     // When material exchange is ON, absorb rows into the mix domain so fabric
     // pressure is digest-visible (NVLink-shaped thesis). Legacy path unchanged.
     uint256 mix_seed;
     if (material_exchange) {
         const uint32_t rows = exchange_rows == 0 ? dc::kRCCoupExchangeRowsDefault : exchange_rows;
-        mix_seed = Sha256TaggedU32U32(kRCCoupMaterialExchangeTag,
-                                      sizeof(kRCCoupMaterialExchangeTag) - 1, sigma, barrier,
-                                      rows);
+        mix_seed = Sha256TaggedU32U32(t.exchange, TagLen(t.exchange), sigma, barrier, rows);
     } else {
-        mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
+        mix_seed = Sha256TaggedU32(t.mix, TagLen(t.mix), sigma, barrier);
     }
     ShaXof xof(mix_seed);
     const uint32_t mask = xof.NextU32() & (n - 1);
@@ -270,19 +301,18 @@ uint64_t AccXorFold(const std::vector<int64_t>& s)
  * Dependency-linked: fold binds prior accumulator state into the seed.
  */
 uint256 ExchangeRoundSeed(const uint256& sigma, uint32_t barrier, uint32_t round,
-                          uint64_t fold)
+                          uint64_t fold, const RCCoupDomainTagSet& tags)
 {
     unsigned char buf[32 + 4 + 4 + 8];
     std::memcpy(buf, sigma.data(), 32);
     WriteLE32(buf + 32, barrier);
     WriteLE32(buf + 36, round);
     WriteLE64(buf + 40, fold);
+    const size_t tlen = TagLen(tags.exchange_rounds);
     std::vector<unsigned char> pre;
-    pre.reserve((sizeof(kRCCoupMaterialExchangeRoundsTag) - 1) + sizeof(buf));
-    pre.insert(pre.end(),
-               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag),
-               reinterpret_cast<const unsigned char*>(kRCCoupMaterialExchangeRoundsTag) +
-                   sizeof(kRCCoupMaterialExchangeRoundsTag) - 1);
+    pre.reserve(tlen + sizeof(buf));
+    pre.insert(pre.end(), reinterpret_cast<const unsigned char*>(tags.exchange_rounds),
+               reinterpret_cast<const unsigned char*>(tags.exchange_rounds) + tlen);
     pre.insert(pre.end(), buf, buf + sizeof(buf));
     return Sha256dBytes(pre.data(), pre.size());
 }
@@ -326,9 +356,10 @@ void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma,
 {
     if (!options.material_exchange || options.exchange_rounds == 0) return;
     if (s.empty()) return;
+    const auto& tags = RCCoupDomainTagsForVersion(options.transcript_version);
     for (uint32_t r = 0; r < options.exchange_rounds; ++r) {
         const uint64_t fold = AccXorFold(s);
-        const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold);
+        const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold, tags);
         {
             ShaXof xof(seed);
             ApplyXorKeystream(s, xof);
@@ -414,13 +445,15 @@ void LobeLocalGemm(const int8_t* lobe_rows, const std::vector<int8_t>& page, uin
     }
 }
 
-uint256 BankRootSeed(const CBlockHeader& header, int32_t height)
+uint256 BankRootSeed(const CBlockHeader& header, int32_t height,
+                     uint32_t transcript_version)
 {
     // Template-scoped: same projection as ComputeTemplateHash (null seeds +
     // zero nonces). Leaving §H.4 seeds in would make the bank vary per nonce
     // and break Q>1 HeadersShareBankTemplate / TryMineRCCoupledBatch.
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     const uint256 tmpl_hash = RCBankTemplateHash(header);
-    return Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, tmpl_hash,
+    return Sha256TaggedU32(tags.bank, TagLen(tags.bank), tmpl_hash,
                            static_cast<uint32_t>(height));
 }
 
@@ -447,7 +480,10 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
 
     const uint32_t n = params.StateBytes();
     const uint256 sigma = matmul::v4::DeriveSigma(header);
-    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params);
+    // Distributed path stays on V1 domains (legacy single-page schedule).
+    constexpr uint32_t kTv = ENC_RC_V1;
+    const auto& tags = RCCoupDomainTagsForVersion(kTv);
+    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params, kTv);
 
     std::vector<int8_t> state(n);
     for (uint32_t ell = 0; ell < params.lobes; ++ell) {
@@ -465,8 +501,8 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
     for (uint32_t ell = 0; ell < params.lobes; ++ell) {
         // Distributed path stays on legacy single-page schedule (digest-stable).
         const uint32_t page_id =
-            SelectCoupledBankPageIds(barrier, ell, params, sigma, /*full=*/false).front();
-        auto page = DeriveCoupledBankPage(header, height, page_id, params);
+            SelectCoupledBankPageIds(barrier, ell, params, sigma, /*full=*/false, kTv).front();
+        auto page = DeriveCoupledBankPage(header, height, page_id, params, kTv);
         std::vector<int64_t> row(params.lobe_width, 0);
         LobeLocalGemm(state.data() + ell * params.lobe_width, page, /*rows=*/1,
                       params.lobe_width, row.data(), gemm);
@@ -494,13 +530,13 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
         std::memcpy(acc.data() + ell * params.lobe_width, segs[ell].data(),
                     params.lobe_width * sizeof(int64_t));
     }
-    const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
+    const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params, kTv);
     ApplyBalancedPermutation(acc, pi);
     ApplyAllToAllMix(acc, sigma, barrier, n, dc::RCCoupMaterialExchangeActive(),
-                     dc::kRCCoupExchangeRowsDefault, RCCoupUseMixU64Wrap(params));
+                     dc::kRCCoupExchangeRowsDefault, RCCoupUseMixU64Wrap(params), &tags);
 
     const uint256 extract_seed =
-        Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
+        Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, barrier,
                            /*unused=*/0);
     std::vector<int8_t> extracted(n);
     if (!ExtractActiveState(lt::DeriveMatExpandPrfKey(extract_seed), acc, extracted)) {
@@ -630,9 +666,19 @@ RCCoupParams MakeProductionV3RCCoupParams()
 RCCoupOptions MakeV3RCCoupOptions()
 {
     RCCoupOptions o;
+    o.transcript_version = ENC_RC_V3;
     o.material_exchange = true;
     o.exchange_rows = 128;
     o.exchange_rounds = 4;
+    return o;
+}
+
+RCCoupOptions MakeMediumV3RCCoupOptions()
+{
+    RCCoupOptions o;
+    o.transcript_version = ENC_RC_V3;
+    // exchange_rounds=0: CI medium-V3 golden pins independent V3 domains +
+    // uint64-wrap Mix without the 4-round exchange cost.
     return o;
 }
 
@@ -652,7 +698,27 @@ RCCoupParams MakeMediumV3RCCoupParams()
 
 RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
 {
-    return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams() : MakeMediumRCCoupParams();
+    // F8: profile × toydims matrix. Invalid profile → zero params → fail closed.
+    switch (p.nMatMulRCCoupledProfile) {
+    case 2:
+        return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams()
+                                            : MakeMediumRCCoupParams();
+    case 3:
+        return p.fMatMulRCCoupledUseToyDims ? MakeMediumV3RCCoupParams()
+                                            : MakeProductionV3RCCoupParams();
+    default: {
+        // Explicit zeros — RCCoupParams{} would apply default member initializers
+        // and look like a valid toy shape.
+        RCCoupParams z;
+        z.barriers = 0;
+        z.lobes = 0;
+        z.lobe_width = 0;
+        z.bank_pages = 0;
+        z.rows_per_lobe = 0;
+        z.pages_per_barrier_lobe = 0;
+        return z;
+    }
+    }
 }
 
 uint64_t MaxRCCoupPageSumAbsBound(const RCCoupParams& p)
@@ -811,24 +877,27 @@ uint256 FingerprintRCCoupParams(const RCCoupParams& p)
 }
 
 std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
-                                          uint32_t page, const RCCoupParams& params)
+                                          uint32_t page, const RCCoupParams& params,
+                                          uint32_t transcript_version)
 {
     // Out-of-range page → empty (reject), never assert/crash.
     if (params.bank_pages == 0 || page >= params.bank_pages) return {};
     if (params.lobe_width == 0 || (params.lobe_width % 32) != 0) return {};
-    const uint256 bank_root_seed = BankRootSeed(header, height);
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
+    const uint256 bank_root_seed = BankRootSeed(header, height, transcript_version);
     const uint256 page_seed =
-        Sha256TaggedU32(kRCCoupBankTag, sizeof(kRCCoupBankTag) - 1, bank_root_seed, page);
+        Sha256TaggedU32(tags.bank, TagLen(tags.bank), bank_root_seed, page);
     return ExpandMxDequantInt8(page_seed, params.lobe_width, params.lobe_width);
 }
 
 std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& header,
                                                         int32_t height,
-                                                        const RCCoupParams& params)
+                                                        const RCCoupParams& params,
+                                                        uint32_t transcript_version)
 {
     std::vector<std::vector<int8_t>> pages(params.bank_pages);
     for (uint32_t p = 0; p < params.bank_pages; ++p) {
-        pages[p] = DeriveCoupledBankPage(header, height, p, params);
+        pages[p] = DeriveCoupledBankPage(header, height, p, params, transcript_version);
     }
     return pages;
 }
@@ -836,32 +905,36 @@ std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& head
 std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& header,
                                                         int32_t height)
 {
-    return DeriveCoupledBankPages(header, height, MakeToyRCCoupParams());
+    return DeriveCoupledBankPages(header, height, MakeToyRCCoupParams(), ENC_RC_V1);
 }
 
-std::vector<uint256> DeriveCoupledLobeSeeds(const uint256& sigma, const RCCoupParams& params)
+std::vector<uint256> DeriveCoupledLobeSeeds(const uint256& sigma, const RCCoupParams& params,
+                                            uint32_t transcript_version)
 {
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     std::vector<uint256> out(params.lobes);
     for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-        out[ell] = Sha256TaggedU32(kRCCoupLobeTag, sizeof(kRCCoupLobeTag) - 1, sigma, ell);
+        out[ell] = Sha256TaggedU32(tags.lobe, TagLen(tags.lobe), sigma, ell);
     }
     return out;
 }
 
 std::array<uint256, kRCCoupLobes> DeriveCoupledLobeSeeds(const uint256& sigma)
 {
-    const auto v = DeriveCoupledLobeSeeds(sigma, MakeToyRCCoupParams());
+    const auto v = DeriveCoupledLobeSeeds(sigma, MakeToyRCCoupParams(), ENC_RC_V1);
     std::array<uint256, kRCCoupLobes> out{};
     for (uint32_t i = 0; i < kRCCoupLobes; ++i) out[i] = v[i];
     return out;
 }
 
 std::vector<uint32_t> DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
-                                                       const RCCoupParams& params)
+                                                       const RCCoupParams& params,
+                                                       uint32_t transcript_version)
 {
     const uint32_t n = params.StateBytes();
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     const uint256 perm_seed =
-        Sha256TaggedU32(kRCCoupPermTag, sizeof(kRCCoupPermTag) - 1, sigma, barrier);
+        Sha256TaggedU32(tags.perm, TagLen(tags.perm), sigma, barrier);
     ShaXof xof(perm_seed);
     std::vector<uint32_t> pi(n);
     for (uint32_t i = 0; i < n; ++i) {
@@ -880,7 +953,8 @@ std::vector<uint32_t> DeriveCoupledBalancedPermutation(const uint256& sigma, uin
 std::array<uint32_t, kRCCoupStateBytes> DeriveCoupledBalancedPermutation(const uint256& sigma,
                                                                          uint32_t barrier)
 {
-    const auto v = DeriveCoupledBalancedPermutation(sigma, barrier, MakeToyRCCoupParams());
+    const auto v =
+        DeriveCoupledBalancedPermutation(sigma, barrier, MakeToyRCCoupParams(), ENC_RC_V1);
     std::array<uint32_t, kRCCoupStateBytes> out{};
     for (uint32_t i = 0; i < kRCCoupStateBytes; ++i) out[i] = v[i];
     return out;
@@ -906,7 +980,8 @@ bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi)
 
 std::vector<uint32_t> SelectCoupledBankPageIds(uint32_t barrier, uint32_t lobe,
                                                const RCCoupParams& params, const uint256& sigma,
-                                               bool full_bank_schedule)
+                                               bool full_bank_schedule,
+                                               uint32_t transcript_version)
 {
     // Malformed entry → empty page list (caller rejects), never assert/crash.
     if (params.bank_pages == 0) return {};
@@ -921,9 +996,9 @@ std::vector<uint32_t> SelectCoupledBankPageIds(uint32_t barrier, uint32_t lobe,
     // V2: 8×8×12 = 768; V3: 8×8×24 = 1536 when bank_pages matches.
     const uint32_t P = params.pages_per_barrier_lobe == 0 ? dc::kRCCoupPagesPerBarrierLobe
                                                           : params.pages_per_barrier_lobe;
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     const uint256 perm_seed =
-        Sha256TaggedU32(kRCCoupFullBankTag, sizeof(kRCCoupFullBankTag) - 1, sigma,
-                        params.bank_pages);
+        Sha256TaggedU32(tags.full_bank, TagLen(tags.full_bank), sigma, params.bank_pages);
     ShaXof xof(perm_seed);
     std::vector<uint32_t> perm(params.bank_pages);
     for (uint32_t i = 0; i < params.bank_pages; ++i) {
@@ -953,9 +1028,9 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
 uint256 MineCoupledPuzzle(const CBlockHeader& header, int32_t height,
                           const RCCoupParams& params, const lt::ExactGemmBackend& gemm,
-                          const RCCoupOptions& options)
+                          const RCCoupOptions& options, RCCoupTiming* out_timing)
 {
-    return RecomputeCoupledPuzzleReference(header, height, params, options, gemm, nullptr,
+    return RecomputeCoupledPuzzleReference(header, height, params, options, gemm, out_timing,
                                            nullptr);
 }
 
@@ -974,6 +1049,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t n = params.StateBytes();
     const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const uint32_t tv = options.transcript_version;
+    const auto& tags = RCCoupDomainTagsForVersion(tv);
     if (out_tx) {
         *out_tx = RCCoupEpisodeTranscript{};
     }
@@ -993,10 +1070,10 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
     {
         const auto t_bank0 = std::chrono::steady_clock::now();
         if (streamed) {
-            bank_root = BankCommitmentStreaming(header, height, params);
+            bank_root = BankCommitmentStreaming(header, height, params, tv);
         } else {
-            const auto pages_commit = DeriveCoupledBankPages(header, height, params);
-            bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width);
+            const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);
+            bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width, tags);
             if (retain_bank) {
                 pages = pages_commit;
                 if (options.skip_bank_page && options.skip_page_index < params.bank_pages) {
@@ -1014,7 +1091,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         }
     }
 
-    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params);
+    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params, tv);
     std::vector<int8_t> state(n);
     const uint32_t M0 = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
     const uint32_t W0 = params.lobe_width;
@@ -1040,7 +1117,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         if (checkpointed) {
             // Restore from last barrier checkpoint and re-page the bank.
             state = checkpoint;
-            pages = DeriveCoupledBankPages(header, height, params);
+            pages = DeriveCoupledBankPages(header, height, params, tv);
             if (options.skip_bank_page && options.skip_page_index < params.bank_pages) {
                 std::fill(pages[options.skip_page_index].begin(),
                           pages[options.skip_page_index].end(), int8_t{0});
@@ -1049,7 +1126,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
         if (options.skip_barrier && options.skip_barrier_index == b) {
             // Identity pass — shortcut detection must change the digest.
-            barrier_roots[b] = BarrierRoot(b, state);
+            barrier_roots[b] = BarrierRoot(b, state, tags);
             checkpoint = state;
             if (checkpointed) {
                 pages.clear();
@@ -1070,14 +1147,14 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         const uint32_t lobe_stride = M * W;
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             const auto page_ids =
-                SelectCoupledBankPageIds(b, ell, params, sigma, full_sched);
+                SelectCoupledBankPageIds(b, ell, params, sigma, full_sched, tv);
             if (page_ids.empty()) return uint256{};
             int64_t* dest = acc.data() + static_cast<size_t>(ell) * lobe_stride;
             for (uint32_t page_id : page_ids) {
                 std::vector<int64_t> partial(static_cast<size_t>(lobe_stride), 0);
                 std::vector<int8_t> page_for_tx;
                 if (streamed) {
-                    auto page = DeriveCoupledBankPage(header, height, page_id, params);
+                    auto page = DeriveCoupledBankPage(header, height, page_id, params, tv);
                     MaybeZeroSkipPage(page, page_id, options);
                     if (out_tx) page_for_tx = page;
                     LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride, page, M,
@@ -1106,26 +1183,26 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         }
 
         // C3.b — nonce-derived balanced permutation over full active state.
-        const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params);
+        const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params, tv);
         if (!IsBalancedPermutation(pi, n)) return uint256{};
         ApplyBalancedPermutation(acc, pi);
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
         // Material exchange (default ON) absorbs exchange_rows into the mix domain.
         ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows,
-                         RCCoupUseMixU64Wrap(params, options.force_signed_mix));
+                         RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
         // V3: digest-affecting XOR+permute rounds (no-op when exchange_rounds==0).
         ApplyMaterialExchangeRounds(acc, sigma, b, options);
 
         // C3.d — non-affine Extract (lookup-argument-shaped for Stage E).
         const uint256 extract_seed =
-            Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, b,
+            Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, b,
                                /*unused=*/0);
         const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
         if (!ExtractActiveState(prf_key, acc, state)) return uint256{};
 
         // C3.e — feed-forward: next barrier reads this Extracted state.
-        barrier_roots[b] = BarrierRoot(b, state);
+        barrier_roots[b] = BarrierRoot(b, state, tags);
         if (out_tx) {
             RCCoupExtractTranscript et;
             et.barrier = b;
@@ -1151,12 +1228,12 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                                      .count();
     }
 
-    // episode_digest = SHA256d("BTX_RC_COUP_EPISODE_V1" ‖ bank_root ‖ barrier_roots…)
+    // episode_digest = SHA256d(episode_tag ‖ bank_root ‖ barrier_roots…)
+    const size_t ep_len = TagLen(tags.episode);
     std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + params.barriers * 32);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag),
-               reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag) +
-                   sizeof(kRCCoupEpisodeTag) - 1);
+    buf.reserve(ep_len + 32 + params.barriers * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(tags.episode),
+               reinterpret_cast<const unsigned char*>(tags.episode) + ep_len);
     buf.insert(buf.end(), bank_root.begin(), bank_root.end());
     for (const uint256& root : barrier_roots) {
         buf.insert(buf.end(), root.begin(), root.end());
@@ -1189,29 +1266,33 @@ bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCou
     if (!ValidateRCCoupParams(params) || barrier >= params.barriers) return false;
     const uint32_t n = params.StateBytes();
     if (acc.size() != n || state_out.size() != n) return false;
-    const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params);
+    const uint32_t tv = options.transcript_version;
+    const auto& tags = RCCoupDomainTagsForVersion(tv);
+    const auto pi = DeriveCoupledBalancedPermutation(sigma, barrier, params, tv);
     if (!IsBalancedPermutation(pi, n)) return false;
     ApplyBalancedPermutation(acc, pi);
     ApplyAllToAllMix(acc, sigma, barrier, n, options.material_exchange, options.exchange_rows,
-                     RCCoupUseMixU64Wrap(params, options.force_signed_mix));
+                     RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
     ApplyMaterialExchangeRounds(acc, sigma, barrier, options);
     const uint256 extract_seed =
-        Sha256TaggedU32U32(kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, sigma, barrier,
+        Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, barrier,
                            /*unused=*/0);
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
     if (!ExtractActiveState(prf_key, acc, state_out)) return false;
-    if (barrier_root_out) *barrier_root_out = BarrierRoot(barrier, state_out);
+    if (barrier_root_out) *barrier_root_out = BarrierRoot(barrier, state_out, tags);
     return true;
 }
 
 uint256 AssembleCoupledEpisodeDigest(const uint256& bank_root,
-                                     const std::vector<uint256>& barrier_roots)
+                                     const std::vector<uint256>& barrier_roots,
+                                     uint32_t transcript_version)
 {
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
+    const size_t ep_len = TagLen(tags.episode);
     std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + barrier_roots.size() * 32);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag),
-               reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag) +
-                   sizeof(kRCCoupEpisodeTag) - 1);
+    buf.reserve(ep_len + 32 + barrier_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(tags.episode),
+               reinterpret_cast<const unsigned char*>(tags.episode) + ep_len);
     buf.insert(buf.end(), bank_root.begin(), bank_root.end());
     for (const uint256& root : barrier_roots) {
         buf.insert(buf.end(), root.begin(), root.end());
@@ -1220,9 +1301,10 @@ uint256 AssembleCoupledEpisodeDigest(const uint256& bank_root,
 }
 
 uint256 CommitCoupledBankPages(const std::vector<std::vector<int8_t>>& pages,
-                               const RCCoupParams& params)
+                               const RCCoupParams& params, uint32_t transcript_version)
 {
-    return BankCommitment(pages, params.bank_pages, params.lobe_width);
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
+    return BankCommitment(pages, params.bank_pages, params.lobe_width, tags);
 }
 
 } // namespace matmul::v4::rc

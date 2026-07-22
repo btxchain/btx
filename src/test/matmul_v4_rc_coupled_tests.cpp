@@ -73,6 +73,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     BOOST_CHECK_EQUAL(consensus.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!consensus.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 2u);
     BOOST_CHECK(!consensus.IsMatMulRCActive(0));
     BOOST_CHECK(!consensus.IsMatMulRCCoupledActive(0));
     BOOST_CHECK(consensus.GetMatMulEncodingProfile(0) !=
@@ -113,6 +114,60 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
     bad.barriers = 9;
     BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_resolve_profile_toydims_matrix)
+{
+    // F8: -regtestrccoupledprofile × -regtestrccoupledtoydims selection + fail-closed.
+    Consensus::Params p;
+    p.nMatMulRCCoupledProfile = 2;
+    p.fMatMulRCCoupledUseToyDims = true;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeToyRCCoupParams();
+        BOOST_CHECK_EQUAL(got.barriers, want.barriers);
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, want.rows_per_lobe);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, want.pages_per_barrier_lobe);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    p.fMatMulRCCoupledUseToyDims = false;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeMediumRCCoupParams();
+        BOOST_CHECK_EQUAL(got.bank_pages, want.bank_pages);
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, 1u);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    p.nMatMulRCCoupledProfile = 3;
+    p.fMatMulRCCoupledUseToyDims = true;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeMediumV3RCCoupParams();
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, want.rows_per_lobe);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, want.pages_per_barrier_lobe);
+        BOOST_CHECK_EQUAL(got.bank_pages, want.bank_pages);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    p.fMatMulRCCoupledUseToyDims = false;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeProductionV3RCCoupParams();
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, 128u);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, want.pages_per_barrier_lobe);
+        BOOST_CHECK_EQUAL(got.bank_pages, 1536u);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    // Invalid profile → zero params → fail closed.
+    p.nMatMulRCCoupledProfile = 1;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        BOOST_CHECK_EQUAL(got.barriers, 0u);
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, 0u);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, 0u);
+        BOOST_CHECK(!rc::ValidateRCCoupParams(got));
+    }
+    p.nMatMulRCCoupledProfile = 99;
+    BOOST_CHECK(!rc::ValidateRCCoupParams(rc::ResolveRCCoupParams(p)));
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)

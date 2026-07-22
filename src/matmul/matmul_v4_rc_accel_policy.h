@@ -103,6 +103,10 @@ inline constexpr uint32_t kRCCoupConsensusConfigVersionV3 = 3;
  * Default = V2 AI datacenter thesis (768 pages; packed ≈25.5 GiB / int8 48 GiB).
  * V3 hypothesis (1536/24/M=128, packed ≈51 GiB) is MakeProductionV3RCCoupParams —
  * not the default until TMTO audit + goldens land. Heights stay INT32_MAX.
+ *
+ * Shape fields rows_per_lobe / pages_per_barrier_lobe MUST be projected by
+ * RCCoupParamsFromConsensusConfig (F8). Regtest selects the live family via
+ * Consensus::Params::nMatMulRCCoupledProfile × fMatMulRCCoupledUseToyDims.
  */
 struct RCCoupConsensusConfig {
     uint32_t config_version{kRCCoupConsensusConfigVersionV2};
@@ -147,6 +151,11 @@ struct RCCoupConsensusConfig {
 /** Frozen toy/legacy V1 config (single-page, exchange off) for golden diffs. */
 [[nodiscard]] RCCoupConsensusConfig MakeLegacyV1RCCoupConsensusConfig();
 
+/**
+ * V3 hypothesis consensus config (heights INT32_MAX). Sets config_version=3,
+ * transcript_version=ENC_RC_V3, production V3 shape knobs. Does not activate.
+ */
+[[nodiscard]] RCCoupConsensusConfig MakeProductionV3RCCoupConsensusConfig();
 /**
  * True iff cfg matches the frozen V1 toy/legacy digest-affecting defaults
  * (shape, single-page schedule, exchange off, transcript/extract V1, V2 inert).

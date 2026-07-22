@@ -25,10 +25,13 @@ namespace matmul::v4::rc {
  *  Bump only with new domain tags AND retain prior goldens. */
 inline constexpr uint8_t kRCTranscriptVersionV1 = 1;
 inline constexpr uint8_t kRCTranscriptVersionV2 = 2;
+inline constexpr uint8_t kRCTranscriptVersionV3 = 3;
 // Default sink version equals V1. Do NOT redefine kRCTranscriptVersion here —
 // that symbol is the uint32_t ENC_RC transcript gate in matmul_v4_rc.h (A1).
 static_assert(kRCTranscriptVersionV1 == 1 && kRCTranscriptVersion == 1,
               "sink V1 must match ENC_RC kRCTranscriptVersion while V1 is active");
+static_assert(kRCTranscriptVersionV3 == ENC_RC_V3,
+              "sink V3 must match ENC_RC_V3");
 
 /** Domain tags for V2 typed subroots (Stage C). Never used by ENC_RC V1 path. */
 inline constexpr char kRCRoundRootV2Tag[] = "BTX_RC_ROUND_ROOT_V2";
