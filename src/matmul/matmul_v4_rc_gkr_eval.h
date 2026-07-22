@@ -6,7 +6,9 @@
 #define BTX_MATMUL_MATMUL_V4_RC_GKR_EVAL_H
 
 #include <matmul/matmul_v4_rc_fri.h>
+#include <matmul/matmul_v4_rc_fri_ext3.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
+#include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <uint256.h>
 
 #include <cstdint>
@@ -65,6 +67,10 @@
 namespace matmul::v4::rc {
 
 using gkr_field::Fp2;
+// Fp3 is pulled in for the v7 episode-path siblings below. GF(p^2) is NOT a
+// subfield of GF(p^3) (2 ∤ 3), so the Fp2 and Fp3 pipelines never mix values;
+// the base field Fp embeds into both.
+using gkr_field::Fp3;
 
 inline constexpr uint32_t kRCGkrEvalArgVersion = 1;
 /** M ≤ 2^12 keeps the (M−1)/|Fp2| aggregation term ≥ 76 bits post-grinding
@@ -81,6 +87,13 @@ struct RCGkrOpeningClaim {
     /** Claimed ṽ(point). NOT prover-free in v7: derived per relation (e.g.
      *  final_eval := a_eval·b_eval is checked, never carried). */
     Fp2 value{};
+};
+
+/** Fp3 sibling of RCGkrOpeningClaim (v7 episode path; Fri3Batch* backend). */
+struct RCGkrOpeningClaim3 {
+    uint32_t column_id{0};
+    std::vector<Fp3> point;
+    Fp3 value{};
 };
 
 /**
@@ -112,6 +125,36 @@ struct RCGkrOpeningClaim {
     for (size_t b = 0; b < r.size(); ++b) {
         acc = gkr_field::Mul(
             acc, gkr_field::Add(gkr_field::Sub(Fp2::One(), r[b]), gkr_field::Mul(r[b], xp)));
+        xp = gkr_field::Mul(xp, xp);
+    }
+    return acc;
+}
+
+/** Fp3 sibling of RCGkrEqKernelCoeffs (v7 episode path). */
+[[nodiscard]] inline std::vector<Fp3> RCGkrEqKernelCoeffs3(const std::vector<Fp3>& r)
+{
+    std::vector<Fp3> c;
+    c.reserve(size_t{1} << r.size());
+    c.push_back(Fp3::One());
+    for (size_t b = 0; b < r.size(); ++b) {
+        const size_t half = c.size();
+        c.resize(half * 2);
+        for (size_t i = 0; i < half; ++i) {
+            c[half + i] = gkr_field::Mul(c[i], r[b]);
+            c[i] = gkr_field::Mul(c[i], gkr_field::Sub(Fp3::One(), r[b]));
+        }
+    }
+    return c;
+}
+
+/** Fp3 sibling of RCGkrEqKernelAt (v7 episode path). */
+[[nodiscard]] inline Fp3 RCGkrEqKernelAt3(const std::vector<Fp3>& r, const Fp3& x)
+{
+    Fp3 acc = Fp3::One();
+    Fp3 xp = x;
+    for (size_t b = 0; b < r.size(); ++b) {
+        acc = gkr_field::Mul(
+            acc, gkr_field::Add(gkr_field::Sub(Fp3::One(), r[b]), gkr_field::Mul(r[b], xp)));
         xp = gkr_field::Mul(xp, xp);
     }
     return acc;
@@ -166,6 +209,44 @@ struct RCGkrEvalArgumentProveResult {
                                       const FriBatchProof& batch,
                                       const RCGkrEvalArgumentProof& proof,
                                       const uint256& fs_seed, std::string* why = nullptr);
+
+// ----------------------------------------------------------------------------
+// Fp3 siblings of the §2.4 aggregated evaluation argument (v7 EPISODE path).
+// Same Aurora/Lemma-1.2 construction over K = F_{p^3} (|K| ≈ 2^192), riding
+// the Fri3Batch* backend. Soundness: ε_eval ≤ 2^40·[(M−1)/|Fp3| +
+// (2κ/(|Fp3|−2^32))²] — the FS terms sit ≈ 63 bits BELOW the 2^-76.8 query
+// floor, so the composed opening bound is query-dominated (the Fp2 pipeline
+// for the legacy v6/coupled paths is unchanged above).
+// ----------------------------------------------------------------------------
+
+struct RCGkrEvalArgumentProof3 {
+    uint32_t version{kRCGkrEvalArgVersion};
+    /** σ = Σ_m μ_m·c_m over Fp3 — recomputed and checked, never trusted. */
+    Fp3 sigma{};
+    uint32_t f_column{0};
+    uint32_t g_column{0};
+};
+
+struct RCGkrEvalArgumentProveResult3 {
+    RCGkrEvalArgumentProof3 proof;
+    std::vector<Fp3> f_coeffs;
+    std::vector<Fp3> g_coeffs;
+    bool ok{false};
+    std::string note;
+};
+
+/** Fp3 sibling of EvalArgumentProve (columns/claims over Fp3; the caller
+ *  appends f/g to the single Fri3BatchCommit column list). */
+[[nodiscard]] RCGkrEvalArgumentProveResult3 EvalArgumentProve3(
+    const std::vector<RCGkrOpeningClaim3>& claims,
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed);
+
+/** Fp3 sibling of EvalArgumentVerify against a Fri3BatchVerify-authenticated
+ *  batch (call Fri3BatchVerify FIRST). */
+[[nodiscard]] bool EvalArgumentVerify3(const std::vector<RCGkrOpeningClaim3>& claims,
+                                       const Fri3BatchProof& batch,
+                                       const RCGkrEvalArgumentProof3& proof,
+                                       const uint256& fs_seed, std::string* why = nullptr);
 
 // ============================================================================
 // CONSTRUCTION I — the batched multilinear evaluation opening.
@@ -239,11 +320,15 @@ struct RCGkrEvalArgumentProveResult {
 inline constexpr uint32_t kRCGkrEvalOpenVersion = 1;
 inline constexpr uint32_t kRCGkrConstructionIVersion = 1;
 
-/** Composed separation bound of Construction I: −log2(ε_total) ≥ 74 after the
- *  2^40 grinding budget (derivation in the block comment above; obligation
- *  (b)). Dominated by the FS subtotal ×2^40 term 2^-74.4; the batched-FRI
- *  query term contributes 2^-76.8 (= FriBatchSoundnessBoundBits() = 76). */
-[[nodiscard]] inline constexpr int RCGkrConstructionISeparationBits() { return 74; }
+/** Composed separation bound of Construction I: −log2(ε_total) ≥ 76 after the
+ *  2^40 grinding budget. Fp3 EPISODE REGIME (2026-07-22 cutover): the FS
+ *  subtotal terms move to |K| = p³ ≈ 2^192 (γ/μ/λ/w ≤ 3·2^-180, eq-sumcheck
+ *  ≤ 2^-186, dual-OOD ≤ 2^-326; ×2^40 ⇒ ≤ 2^-138.4), so the binding floor is
+ *  the field-independent batched-FRI query term 2^-76.8
+ *  (= FriBatchSoundnessBoundBits()/Fri3BatchSoundnessBoundBits() = 76):
+ *  ε_total ≤ 2^-138.4 + 2^-76.8 + 2^-88 < 2^-76. (Historical Fp2 value: 74,
+ *  dominated by the Fp2 FS subtotal 2^-74.4.) */
+[[nodiscard]] inline constexpr int RCGkrConstructionISeparationBits() { return 76; }
 static_assert(RCGkrConstructionISeparationBits() >= kRCFriTargetSoundnessBits + 10,
               "Construction I must clear the 2^-64 target with >= 10 bits margin");
 
@@ -427,6 +512,13 @@ struct RCGkrBatchedOpeningProveResult {
     return gkr_field::Eq(gf, gkr_field::Mul(a_at_r, b_at_r));
 }
 
+/** Fp3 overload (v7 episode path). */
+[[nodiscard]] inline bool RCGkrCheckFinalEvalBinding(const Fp3& gf, const Fp3& a_at_r,
+                                                     const Fp3& b_at_r)
+{
+    return gkr_field::Eq(gf, gkr_field::Mul(a_at_r, b_at_r));
+}
+
 /**
  * G2 — layer-claim → trace-column-segment binding (§4.2 output binding): for
  * an ALIGNED segment s (length 2^{|r|}, offset s·2^{|r|}) of a committed
@@ -470,6 +562,18 @@ struct RCGkrBatchedOpeningProveResult {
  *  bound openings is rejected deterministically. */
 [[nodiscard]] inline bool RCGkrCheckResidualAcc(const Fp2& acc, const Fp2& y_at_r,
                                                 const Fp2& x_at_r)
+{
+    return gkr_field::Eq(acc, RCGkrResidualAcc(y_at_r, x_at_r));
+}
+
+/** Fp3 overloads (v7 episode path). */
+[[nodiscard]] inline Fp3 RCGkrResidualAcc(const Fp3& y_at_r, const Fp3& x_at_r)
+{
+    return gkr_field::Add(y_at_r, x_at_r);
+}
+
+[[nodiscard]] inline bool RCGkrCheckResidualAcc(const Fp3& acc, const Fp3& y_at_r,
+                                                const Fp3& x_at_r)
 {
     return gkr_field::Eq(acc, RCGkrResidualAcc(y_at_r, x_at_r));
 }

@@ -279,6 +279,209 @@ bool EvalArgumentVerify(const std::vector<RCGkrOpeningClaim>& claims, const FriB
 }
 
 // ============================================================================
+// Fp3 SIBLINGS of the §2.4 aggregated evaluation argument (v7 EPISODE path).
+// Structure-for-structure mirror of the Fp2 implementation above over
+// K = F_{p^3} (|K| ≈ 2^192), consuming the Fri3Batch* opening primitive. The
+// μ-transcript uses a DISTINCT domain tag and 24-byte challenge derivation
+// (FromChallengeBytes3) — Fp2 and Fp3 transcripts can never collide.
+// ============================================================================
+
+namespace {
+
+using gkr_field::Fp3;
+
+void AppendFp3(std::vector<unsigned char>& b, const Fp3& v)
+{
+    const auto triple = gkr_field::ToU64Triple(v);
+    for (int w = 0; w < 3; ++w)
+        for (int i = 0; i < 8; ++i)
+            b.push_back(static_cast<unsigned char>((triple[w] >> (8 * i)) & 0xFF));
+}
+
+Fp3 PowFp3(Fp3 base, uint64_t exp)
+{
+    Fp3 r = Fp3::One();
+    while (exp > 0) {
+        if (exp & 1u) r = gkr_field::Mul(r, base);
+        base = gkr_field::Mul(base, base);
+        exp >>= 1;
+    }
+    return r;
+}
+
+/** μ-transcript over the Fp3 claims (distinct domain tag from the Fp2 path). */
+uint256 MuBase3(const std::vector<RCGkrOpeningClaim3>& claims, const uint256& fs_seed)
+{
+    std::vector<unsigned char> b;
+    b.insert(b.end(), fs_seed.begin(), fs_seed.end());
+    const char* tag = "RCGKR_EVALARG3_V1";
+    b.insert(b.end(), tag, tag + std::strlen(tag));
+    AppendLE32(b, static_cast<uint32_t>(claims.size()));
+    for (const auto& c : claims) {
+        AppendLE32(b, c.column_id);
+        AppendLE32(b, static_cast<uint32_t>(c.point.size()));
+        for (const Fp3& p : c.point) AppendFp3(b, p);
+        AppendFp3(b, c.value);
+    }
+    return Sha256dOf(b);
+}
+
+Fp3 MuChallenge3(const uint256& base, uint32_t m)
+{
+    std::vector<unsigned char> b;
+    b.insert(b.end(), base.begin(), base.end());
+    const char* tag = "mu3";
+    b.insert(b.end(), tag, tag + 3);
+    AppendLE32(b, m);
+    return gkr_field::FromChallengeBytes3(Sha256dOf(b).data());
+}
+
+/** q*_r(z) = z^{n-1}·q_r(z^{-1}) — coefficient-reversed eq-kernel, O(ν). */
+Fp3 QStarAt3(const std::vector<Fp3>& r, const Fp3& z, uint32_t n)
+{
+    const Fp3 zinv = gkr_field::Inv(z);
+    return gkr_field::Mul(PowFp3(z, n - 1), RCGkrEqKernelAt3(r, zinv));
+}
+
+} // namespace
+
+RCGkrEvalArgumentProveResult3 EvalArgumentProve3(const std::vector<RCGkrOpeningClaim3>& claims,
+                                                 const std::vector<std::vector<Fp3>>& columns,
+                                                 const uint256& fs_seed)
+{
+    RCGkrEvalArgumentProveResult3 res;
+    if (claims.empty()) {
+        res.note = "no claims";
+        return res;
+    }
+    if (claims.size() > kRCGkrEvalArgMaxClaims) {
+        res.note = "too many claims";
+        return res;
+    }
+
+    size_t max_len = 0;
+    for (const auto& col : columns) max_len = std::max(max_len, col.size());
+    if (max_len == 0) {
+        res.note = "empty columns";
+        return res;
+    }
+    uint32_t n = 1;
+    while (n < max_len) n <<= 1;
+    const uint32_t nu = Log2Pow2(n);
+
+    for (const auto& c : claims) {
+        if (c.column_id >= columns.size()) {
+            res.note = "claim column_id out of range";
+            return res;
+        }
+        if (c.point.size() != nu) {
+            res.note = "claim point dimension != log2(n) (caller must zero-extend)";
+            return res;
+        }
+    }
+    const uint256 mu_base = MuBase3(claims, fs_seed);
+
+    // σ = Σ_m μ_m·c_m and h(X) = X·Σ_m μ_m·P_{v_m}(X)·q*_{r_m}(X) (deg < 2n).
+    Fp3 sigma = Fp3::Zero();
+    std::vector<Fp3> h(2 * static_cast<size_t>(n), Fp3::Zero());
+    for (size_t m = 0; m < claims.size(); ++m) {
+        const Fp3 mu = MuChallenge3(mu_base, static_cast<uint32_t>(m));
+        sigma = gkr_field::Add(sigma, gkr_field::Mul(mu, claims[m].value));
+
+        const std::vector<Fp3>& P = columns[claims[m].column_id];
+        const std::vector<Fp3> q = RCGkrEqKernelCoeffs3(claims[m].point); // length n
+        // q*[j] = q[n-1-j]; h += μ·X·(P * q*).
+        for (size_t i = 0; i < P.size(); ++i) {
+            if (gkr_field::IsZero(P[i])) continue;
+            const Fp3 pw = gkr_field::Mul(mu, P[i]);
+            for (uint32_t j = 0; j < n; ++j) {
+                const Fp3& qc = q[n - 1 - j];
+                if (gkr_field::IsZero(qc)) continue;
+                const size_t k = i + j + 1; // +1 for the leading X
+                h[k] = gkr_field::Add(h[k], gkr_field::Mul(pw, qc));
+            }
+        }
+    }
+
+    // Lemma 1.2 witnesses (see the Fp2 body above for the derivation).
+    res.g_coeffs.assign(n, Fp3::Zero());
+    res.f_coeffs.assign(n > 1 ? n - 1 : 1, Fp3::Zero());
+    for (uint32_t j = 0; j < n; ++j) res.g_coeffs[j] = h[static_cast<size_t>(j) + n];
+    for (uint32_t i = 0; i + 1 < n; ++i) {
+        res.f_coeffs[i] = gkr_field::Add(h[static_cast<size_t>(i) + 1],
+                                         h[static_cast<size_t>(i) + 1 + n]);
+    }
+
+    res.proof.version = kRCGkrEvalArgVersion;
+    res.proof.sigma = sigma;
+    res.proof.f_column = static_cast<uint32_t>(columns.size());
+    res.proof.g_column = static_cast<uint32_t>(columns.size() + 1);
+    res.ok = true;
+    res.note = "ok";
+    return res;
+}
+
+bool EvalArgumentVerify3(const std::vector<RCGkrOpeningClaim3>& claims,
+                         const Fri3BatchProof& batch, const RCGkrEvalArgumentProof3& proof,
+                         const uint256& fs_seed, std::string* why)
+{
+    auto fail = [&](const char* m) {
+        if (why) *why = m;
+        return false;
+    };
+    if (proof.version != kRCGkrEvalArgVersion) return fail("eval:version");
+    if (claims.empty()) return fail("eval:no_claims");
+    if (claims.size() > kRCGkrEvalArgMaxClaims) return fail("eval:too_many_claims");
+
+    const uint32_t n = batch.n_coeffs;
+    if (n == 0 || (n & (n - 1)) != 0) return fail("eval:n_not_pow2");
+    const uint32_t nu = Log2Pow2(n);
+
+    // f/g must be real columns of the batch (their z-openings are bound by a
+    // PRIOR successful Fri3BatchVerify — the caller MUST have run it first).
+    const uint32_t ncols = static_cast<uint32_t>(batch.columns.size());
+    if (proof.f_column >= ncols || proof.g_column >= ncols) return fail("eval:fg_col_range");
+    if (batch.evals_z1.size() != ncols || batch.evals_z2.size() != ncols)
+        return fail("eval:evals_shape");
+
+    for (const auto& c : claims) {
+        if (c.column_id >= ncols) return fail("eval:claim_col_range");
+        if (c.point.size() != nu) return fail("eval:claim_point_dim");
+    }
+
+    // Recompute μ and σ from the CLAIMS — proof.sigma is never trusted.
+    const uint256 mu_base = MuBase3(claims, fs_seed);
+    Fp3 sigma = Fp3::Zero();
+    std::vector<Fp3> mu(claims.size());
+    for (size_t m = 0; m < claims.size(); ++m) {
+        mu[m] = MuChallenge3(mu_base, static_cast<uint32_t>(m));
+        sigma = gkr_field::Add(sigma, gkr_field::Mul(mu[m], claims[m].value));
+    }
+    if (!gkr_field::Eq(sigma, proof.sigma)) return fail("eval:sigma_mismatch");
+
+    // Check the Lemma 1.2 identity at BOTH bound OOD points.
+    for (int s = 0; s < 2; ++s) {
+        const Fp3 z = (s == 0) ? batch.z1 : batch.z2;
+        const std::vector<Fp3>& ev = (s == 0) ? batch.evals_z1 : batch.evals_z2;
+        // LHS: h(z) = z·Σ_m μ_m·C_m(z)·q*_{r_m}(z).
+        Fp3 lhs = Fp3::Zero();
+        for (size_t m = 0; m < claims.size(); ++m) {
+            const Fp3 term = gkr_field::Mul(gkr_field::Mul(mu[m], ev[claims[m].column_id]),
+                                            QStarAt3(claims[m].point, z, n));
+            lhs = gkr_field::Add(lhs, term);
+        }
+        lhs = gkr_field::Mul(z, lhs);
+        // RHS: g(z)·(z^n − 1) + z·f(z) + σ.
+        const Fp3 zn_minus_1 = gkr_field::Sub(PowFp3(z, n), Fp3::One());
+        Fp3 rhs = gkr_field::Mul(ev[proof.g_column], zn_minus_1);
+        rhs = gkr_field::Add(rhs, gkr_field::Mul(z, ev[proof.f_column]));
+        rhs = gkr_field::Add(rhs, sigma);
+        if (!gkr_field::Eq(lhs, rhs)) return fail(s == 0 ? "eval:identity_z1" : "eval:identity_z2");
+    }
+    return true;
+}
+
+// ============================================================================
 // CONSTRUCTION I (header block comment has the full statement + separation
 // accounting). Stage 1: γ-batched eq-kernel summation-reduction over
 //   F(x) = Σ_m γ^m · u_{c(m)}(x) · eq(z_m, x),   Σ_{x∈{0,1}^ν} F(x) = Σ γ^m y_m,

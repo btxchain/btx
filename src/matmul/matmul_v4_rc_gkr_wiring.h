@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext.h>
+#include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <uint256.h>
 
 #include <cstddef>
@@ -258,6 +259,73 @@ struct WiringPermutationDual {
                                      uint32_t sub);
 [[nodiscard]] std::vector<Fp2> WiringChallengePoint(const uint256& fs_seed, const char* label,
                                                     uint32_t idx, uint32_t ell);
+
+/** Fp3 siblings (v7 episode path): 24-byte challenge derivation under a
+ *  distinct domain tag — the Fp2 and Fp3 wiring transcripts never collide. */
+[[nodiscard]] gkr_field::Fp3 WiringChallengeFp3(const uint256& fs_seed, const char* label,
+                                                uint32_t idx, uint32_t sub);
+[[nodiscard]] std::vector<gkr_field::Fp3> WiringChallengePoint3(const uint256& fs_seed,
+                                                                const char* label, uint32_t idx,
+                                                                uint32_t ell);
+
+// ----------------------------------------------------------------------------
+// Fp3 siblings of the equality / permutation constraints (v7 EPISODE path).
+// Same constructions over ρ, (β, γ) ∈ Fp3 (|F| ≈ 2^192): equality S2 bound
+// ℓ/|Fp3| (ℓ = 28 ⇒ 2^-187.19 pre / 2^-147.19 post-grind), dual grand product
+// (n/|Fp3|)² (n = 2^28 ⇒ 2^-328 pre / 2^-288 post; single form 2^-124 post —
+// above target over Fp3, but the DUAL MANDATE is structural and unchanged).
+// The Fp2 module above remains for the legacy v6/coupled paths.
+// ----------------------------------------------------------------------------
+
+struct WiringEqualityConstraint3 {
+    uint64_t len_u{0};
+    uint64_t len_v{0};
+    uint32_t ell{0};
+    std::vector<gkr_field::Fp3> u;
+    std::vector<gkr_field::Fp3> v;
+};
+
+[[nodiscard]] WiringEqualityConstraint3 WiringEquality3FromFp3(std::vector<gkr_field::Fp3> u,
+                                                               std::vector<gkr_field::Fp3> v);
+[[nodiscard]] WiringEqualityConstraint3 WiringEquality3FromInt8(const std::vector<int8_t>& u,
+                                                                const std::vector<int8_t>& v);
+[[nodiscard]] WiringEqualityConstraint3 WiringEquality3FromInt64(const std::vector<int64_t>& u,
+                                                                 const std::vector<int64_t>& v);
+
+[[nodiscard]] WiringVerifyResult VerifyWiringEquality(const WiringEqualityConstraint3& c,
+                                                      const std::vector<gkr_field::Fp3>& rho);
+[[nodiscard]] WiringVerifyResult VerifyWiringEquality(const WiringEqualityConstraint3& c,
+                                                      const uint256& fs_seed,
+                                                      uint32_t claim_index);
+
+struct WiringPermutationConstraint3 {
+    uint64_t n{0};
+    std::vector<gkr_field::Fp3> u;
+    std::vector<gkr_field::Fp3> v; // u' — claim: v[j] = u[pi[j]]
+    std::vector<uint64_t> pi;
+    gkr_field::Fp3 beta{};
+    gkr_field::Fp3 gamma{};
+    std::vector<gkr_field::Fp3> z;
+    bool build_ok{false};
+    std::string build_note;
+};
+
+[[nodiscard]] WiringPermutationConstraint3 BuildWiringPermutation3(
+    std::vector<gkr_field::Fp3> u, std::vector<gkr_field::Fp3> v, std::vector<uint64_t> pi,
+    const gkr_field::Fp3& beta, const gkr_field::Fp3& gamma);
+
+[[nodiscard]] WiringVerifyResult VerifyWiringPermutation(const WiringPermutationConstraint3& c);
+
+struct WiringPermutationDual3 {
+    WiringPermutationConstraint3 inst1;
+    WiringPermutationConstraint3 inst2;
+};
+
+[[nodiscard]] WiringPermutationDual3 BuildWiringPermutationDual3(
+    const std::vector<gkr_field::Fp3>& u, const std::vector<gkr_field::Fp3>& v,
+    const std::vector<uint64_t>& pi, const uint256& fs_seed, uint32_t pair_index);
+
+[[nodiscard]] WiringVerifyResult VerifyWiringPermutationDual(const WiringPermutationDual3& d);
 
 // ----------------------------------------------------------------------------
 // Separation bounds: −log2 of the SEPARATION PROBABILITY — the chance that a
