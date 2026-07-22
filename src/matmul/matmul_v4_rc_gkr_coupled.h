@@ -123,12 +123,19 @@ struct RCGkrCoupledProofV7 {
     std::vector<uint256> barrier_roots;
     /** ONE batched dual-OOD FRI over ALL Λ_coup columns + eval-arg f,g. */
     FriBatchProof batch{};
+    /** Construction-I γ-batched MLE opening sumcheck over all coupled claims. */
+    RCGkrEvalOpenProof opening_sumcheck{};
     /** barriers × lobes blocks, row-major (b, ℓ) in Λ_coup order. */
     std::vector<RCGkrCoupledLobeClaimV7> lobes;
     /** Per barrier: p̃_b(r_p) — must equal the native Σ eq(r_p, π_b(x))·e_b[x]. */
     std::vector<Fp2> perm_evals;
     /** Per barrier: x̃_b(r_m) — must equal the native post-mix MLE. */
     std::vector<Fp2> mix_evals;
+    /** Per (barrier < last, lobe): committed feed-forward equality
+     *  s_b[segment_lobe](ρ) == A_{b+1,lobe}(ρ). This is a real succinct copy
+     *  relation carried by Construction I; not a native replay value. */
+    std::vector<Fp2> feed_evals;
+    /** Stage-2 eval argument for the reduced Construction-I openings. */
     RCGkrEvalArgumentProof eval{};
     /** Dual-α Extract LogUp challenges (FS-bound; §5.6). */
     Fp2 logup_alpha1{};
@@ -157,6 +164,9 @@ struct RCGkrCoupledV7SuccinctnessStatus {
     bool params_valid{false};
     bool production_v3_shape{false};
     bool genuinely_succinct{false};
+    bool proof_friendly_transcript{false};
+    bool full_schedule_gemm_proof_bound{false};
+    bool opening_claims_batched{false};
     bool verifier_reruns_reference_digest{true};
     bool verifier_rebuilds_native_wires{true};
     bool verifier_rebuilds_column_roots{true};
@@ -178,12 +188,33 @@ struct RCGkrCoupledV7SuccinctnessStatus {
 };
 
 /**
+ * Per-relation construction status. `proof_bound` means the relation is checked
+ * by committed openings/sumcheck/FRI today. `native_grounded` means the current
+ * verifier still also depends on verifier-side witness/reference reconstruction,
+ * so the relation is not yet acceptable for proof-only consensus.
+ */
+struct RCGkrCoupledV7RelationStatus {
+    std::string name;
+    bool proof_bound{false};
+    bool native_grounded{true};
+    bool verifier_sublinear{false};
+    std::string reject_relation;
+    std::string construction;
+};
+
+/**
  * Return a deterministic status object for the current coupled-v7 construction.
  * This function is intentionally consensus-pure: no env vars, no hardware
  * probing, and no native puzzle execution.
  */
 [[nodiscard]] RCGkrCoupledV7SuccinctnessStatus
 AssessCoupledV7Succinctness(const RCCoupParams& params);
+[[nodiscard]] RCGkrCoupledV7SuccinctnessStatus
+AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& options);
+
+/** Relation-by-relation production-succinctness map for cryptographic review. */
+[[nodiscard]] std::vector<RCGkrCoupledV7RelationStatus>
+RCGkrCoupledV7RelationStatuses(const RCCoupParams& params, const RCCoupOptions& options);
 
 /**
  * Convenience hard gate for any future proof-only coupled arbiter. Today this
@@ -201,6 +232,10 @@ AssessCoupledV7Succinctness(const RCCoupParams& params);
 [[nodiscard]] inline size_t RCGkrCoupledExpectedColumnCount(const RCCoupParams& p)
 {
     return static_cast<size_t>(p.barriers) * (3u * static_cast<size_t>(p.lobes) + 4u);
+}
+[[nodiscard]] inline size_t RCGkrCoupledExpectedFeedCount(const RCCoupParams& p)
+{
+    return p.barriers == 0 ? 0 : static_cast<size_t>(p.barriers - 1u) * p.lobes;
 }
 
 /**

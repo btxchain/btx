@@ -162,9 +162,8 @@ std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_
                                               Fp2& out_final)
 {
     const uint32_t k_pad = RCGkrNextPow2(k_dim);
-    std::vector<Fp2> wi(RCGkrNextPow2(m), Fp2::Zero()), wj(RCGkrNextPow2(n), Fp2::Zero());
-    for (uint32_t i = 0; i < m; ++i) wi[i] = EqFactor(ri, i);
-    for (uint32_t j = 0; j < n; ++j) wj[j] = EqFactor(rj, j);
+    const std::vector<Fp2> wi = RCGkrEqKernelCoeffs(ri);
+    const std::vector<Fp2> wj = RCGkrEqKernelCoeffs(rj);
     std::vector<Fp2> ah(k_pad, Fp2::Zero()), bh(k_pad, Fp2::Zero());
     for (uint32_t t = 0; t < k_dim; ++t) {
         Fp2 sa = Fp2::Zero(), sb = Fp2::Zero();
@@ -228,18 +227,56 @@ bool VerifyProductK(const std::vector<RCGkrSumcheckRound>& rounds, const Fp2& cl
     return true;
 }
 
+Fp2 MleEval1D2Raw(const Fp2* vals, size_t vals_len, const std::vector<Fp2>& r)
+{
+    if (r.empty()) return vals_len == 0 ? Fp2::Zero() : vals[0];
+    if (r.size() >= 31) return Fp2::Zero();
+    const size_t n = size_t{1} << r.size();
+    std::vector<Fp2> cur(n, Fp2::Zero());
+    const size_t copy_n = std::min(vals_len, n);
+    for (size_t i = 0; i < copy_n; ++i) cur[i] = vals[i];
+    size_t len = n;
+    for (size_t b = 0; b < r.size(); ++b) {
+        const Fp2 one_minus = Sub(Fp2::One(), r[b]);
+        const Fp2& rb = r[b];
+        for (size_t i = 0; i < len / 2; ++i) {
+            cur[i] = Add(Mul(cur[2 * i], one_minus), Mul(cur[2 * i + 1], rb));
+        }
+        len >>= 1;
+    }
+    return cur[0];
+}
+
 Fp2 MleEvalMatrix(const std::vector<Fp2>& mat, uint32_t rows, uint32_t cols,
                   const std::vector<Fp2>& r_row, const std::vector<Fp2>& r_col)
 {
-    Fp2 acc = Fp2::Zero();
+    if (rows == 0 || cols == 0 || mat.empty()) return Fp2::Zero();
+    std::vector<Fp2> row_evals(rows, Fp2::Zero());
     for (uint32_t i = 0; i < rows; ++i) {
-        const Fp2 ei = EqFactor(r_row, i);
-        for (uint32_t j = 0; j < cols; ++j) {
-            acc = Add(acc,
-                      Mul(Mul(mat[static_cast<size_t>(i) * cols + j], ei), EqFactor(r_col, j)));
-        }
+        const size_t off = static_cast<size_t>(i) * cols;
+        const size_t end = std::min(off + cols, mat.size());
+        if (off >= end) break;
+        row_evals[i] = MleEval1D2Raw(mat.data() + off, end - off, r_col);
     }
-    return acc;
+    return MleEval1D2Raw(row_evals.data(), row_evals.size(), r_row);
+}
+
+Fp2 MleEvalI8MatrixSegment(const std::vector<int8_t>& v, size_t off0, uint32_t rows,
+                           uint32_t cols, const std::vector<Fp2>& r_row,
+                           const std::vector<Fp2>& r_col)
+{
+    if (rows == 0 || cols == 0 || off0 >= v.size()) return Fp2::Zero();
+    std::vector<Fp2> row_evals(rows, Fp2::Zero());
+    std::vector<Fp2> row(cols, Fp2::Zero());
+    for (uint32_t i = 0; i < rows; ++i) {
+        const size_t off = off0 + static_cast<size_t>(i) * cols;
+        if (off >= v.size()) break;
+        const size_t n = std::min(static_cast<size_t>(cols), v.size() - off);
+        for (size_t j = 0; j < n; ++j) row[j] = FromSigned2(v[off + j]);
+        for (size_t j = n; j < cols; ++j) row[j] = Fp2::Zero();
+        row_evals[i] = MleEval1D2Raw(row.data(), row.size(), r_col);
+    }
+    return MleEval1D2Raw(row_evals.data(), row_evals.size(), r_row);
 }
 
 std::vector<Fp2> ToFp2I8(const std::vector<int8_t>& v)
@@ -268,17 +305,6 @@ std::vector<Fp2> PointConcatExtend(const std::vector<Fp2>& low, const std::vecto
     return p;
 }
 
-/** SHA256d(base ‖ every epoch-1 column root) — two-epoch eval-arg seed. */
-uint256 EvalArgSeed(const uint256& base, const std::vector<FriLayerCommit>& columns,
-                    size_t epoch1_count)
-{
-    std::vector<unsigned char> buf;
-    buf.insert(buf.end(), base.begin(), base.end());
-    for (size_t i = 0; i < epoch1_count && i < columns.size(); ++i)
-        AppendBytes(buf, columns[i].root.data(), 32);
-    return Sha256dBytes(buf.data(), buf.size());
-}
-
 // ---------------------------------------------------------------------------
 // LOCAL MIRRORS of the coupled reference's private stages. Divergence from the
 // reference is impossible to exploit: it changes barrier roots → digest, which
@@ -290,6 +316,27 @@ void ApplyBalancedPermutationLocal(std::vector<int64_t>& s, const std::vector<ui
     std::vector<int64_t> tmp(s.size());
     for (uint32_t i = 0; i < static_cast<uint32_t>(s.size()); ++i) tmp[pi[i]] = s[i];
     s = std::move(tmp);
+}
+
+std::vector<Fp2> ProofFriendlyPermutationInversePoint(const uint256& sigma, uint32_t barrier,
+                                                      const RCCoupParams& params,
+                                                      uint32_t transcript_version,
+                                                      const std::vector<Fp2>& dst_point)
+{
+    const auto spec =
+        DeriveCoupledProofFriendlyPermutationSpec(sigma, barrier, params, transcript_version);
+    if (spec.n == 0 || spec.bits != dst_point.size() ||
+        spec.out_to_in_bit.size() != spec.bits || spec.xor_mask_bit.size() != spec.bits) {
+        return {};
+    }
+    std::vector<Fp2> src_point(spec.bits, Fp2::Zero());
+    for (uint32_t out_bit = 0; out_bit < spec.bits; ++out_bit) {
+        const uint32_t in_bit = spec.out_to_in_bit[out_bit];
+        src_point[in_bit] = spec.xor_mask_bit[out_bit] != 0
+                                ? Sub(Fp2::One(), dst_point[out_bit])
+                                : dst_point[out_bit];
+    }
+    return src_point;
 }
 
 bool SameCoupledParams(const RCCoupParams& a, const RCCoupParams& b)
@@ -503,8 +550,7 @@ struct CoupColIds {
     uint32_t e(uint32_t b) const { return base(b) + 3 * lobes; }
     uint32_t p(uint32_t b) const { return base(b) + 3 * lobes + 1; }
     uint32_t x(uint32_t b) const { return base(b) + 3 * lobes + 2; }
-    // Column base(b)+3*lobes+3 is the state-out slot (part of the 3*lobes+4
-    // per-barrier width); no accessor is needed by the current claim wiring.
+    uint32_t s(uint32_t b) const { return base(b) + 3 * lobes + 3; }
 
 private:
     uint32_t base(uint32_t b) const { return b * (3 * lobes + 4); }
@@ -567,9 +613,12 @@ size_t EstimateCoupledProofBytes(const RCGkrCoupledProofV7& proof)
 {
     std::vector<unsigned char> tmp;
     size_t bytes = SerializeFriBatchProof(proof.batch, tmp);
+    bytes += 4;
+    bytes += proof.opening_sumcheck.rounds.size() * 3 * 16;
+    bytes += proof.opening_sumcheck.column_at_r.size() * 16;
     bytes += 4 + 32 * 5 + 16 + proof.barrier_roots.size() * 32;
     for (const auto& lc : proof.lobes) bytes += lc.sumcheck.size() * 48 + 5 * 16;
-    bytes += (proof.perm_evals.size() + proof.mix_evals.size()) * 16;
+    bytes += (proof.perm_evals.size() + proof.mix_evals.size() + proof.feed_evals.size()) * 16;
     bytes += 16 * 3 + 32 + 8; // eval proof sigma/fg + transcript + logup_bits
     return bytes;
 }
@@ -578,6 +627,94 @@ size_t EstimateCoupledProofBytes(const RCGkrCoupledProofV7& proof)
 
 RCGkrCoupledV7SuccinctnessStatus
 AssessCoupledV7Succinctness(const RCCoupParams& params)
+{
+    return AssessCoupledV7Succinctness(params, CoupledProofOptionsForParams(params));
+}
+
+std::vector<RCGkrCoupledV7RelationStatus>
+RCGkrCoupledV7RelationStatuses(const RCCoupParams& params, const RCCoupOptions& options)
+{
+    std::vector<RCGkrCoupledV7RelationStatus> out;
+    if (!ValidateRCCoupParams(params)) return out;
+
+    const bool proof_friendly_perm =
+        RCCoupUsesProofFriendlyPermutation(options.transcript_version);
+
+    out.push_back({"bank/page PCS",
+                   false,
+                   true,
+                   false,
+                   "coupled:bank_root_forged / coupled:column_not_grounded",
+                   "Needed: commit canonical packed page chunks under bank_root and prove "
+                   "selected page openings plus MxExpand seed AIR; current verifier "
+                   "grounds B roots by reference transcript."});
+    out.push_back({"full-schedule GEMM",
+                   true,
+                   true,
+                   true,
+                   "coupled:sumcheck / coupled:opening:* / coupled:final_eval",
+                   "Current: one Thaler product sumcheck per (barrier,lobe) over "
+                   "A · sum(page B) = Y, with all openings aggregated by "
+                   "Construction-I batched opening proof. Still native-grounded because "
+                   "the verifier rebuilds A/B/Y column roots."});
+    out.push_back({"fixed-segment material exchange",
+                   true,
+                   true,
+                   true,
+                   "coupled:exchange_segment / coupled:opening:*",
+                   "Current: exchange opening at fixed segment bits equals the lobe Y "
+                   "claim and is batched into the same opening proof. Still "
+                   "native-grounded because exchange column root is rebuilt."});
+    out.push_back({"permutation",
+                   proof_friendly_perm,
+                   true,
+                   proof_friendly_perm,
+                   proof_friendly_perm ? "coupled:opening:*"
+                                       : "coupled:perm_eval_forged",
+                   proof_friendly_perm
+                       ? "ENC_RC_V4 uses a seeded bit-affine permutation. Verifier checks "
+                         "p~(r_dst)=e~(pi^{-1}(r_dst)) through committed openings. "
+                         "Native column grounding still remains elsewhere."
+                       : "V1-V3 Fisher-Yates pi has no cheap MLE evaluator; verifier "
+                         "currently scans StateBytes() cells. Production proof-only needs "
+                         "ENC_RC_V4-style bit-affine pi or a separate committed pi table "
+                         "proof."});
+    out.push_back({"V3 material mix",
+                   false,
+                   true,
+                   false,
+                   "coupled:mix_eval_forged / coupled:column_not_grounded",
+                   "Needed: AIR for uint64-wrap butterfly/exchange rounds with committed "
+                   "range/carry columns; current verifier evaluates post-mix from native "
+                   "reference transcript."});
+    out.push_back({"Extract all tiles",
+                   false,
+                   true,
+                   false,
+                   "coupled:logup:*",
+                   "Needed: commit full coupled Extract AIR/composition and LogUp "
+                   "multiplicity columns for every StateBytes()/32 tile. Current helper "
+                   "checks a bounded native sample."});
+    out.push_back({"barrier SHA roots",
+                   false,
+                   true,
+                   false,
+                   "coupled:barrier_root_forged / coupled:digest_from_roots",
+                   "Needed: SHA/tile-tree AIR binding state_out columns to every "
+                   "barrier root; current verifier hashes native state bytes."});
+    out.push_back({"digest and target closure",
+                   false,
+                   true,
+                   false,
+                   "coupled:digest_not_header_bound / coupled:target",
+                   "Needed: proof-bound digest_from_roots and target comparison on the "
+                   "proof-carried digest. Current verifier checks digest after native "
+                   "reference replay."});
+    return out;
+}
+
+RCGkrCoupledV7SuccinctnessStatus
+AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& options)
 {
     RCGkrCoupledV7SuccinctnessStatus st;
     st.params_valid = ValidateRCCoupParams(params);
@@ -600,6 +737,8 @@ AssessCoupledV7Succinctness(const RCCoupParams& params)
     st.macs_per_nonce = TotalRCCoupMacs(params);
     st.required_extract_tiles = st.state_bytes / kRCMxBlockLen;
     st.current_extract_logup_tile_cap = 16;
+    st.proof_friendly_transcript =
+        RCCoupUsesProofFriendlyPermutation(options.transcript_version);
 
     // These are facts about the construction below, not runtime measurements:
     // VerifyWinnerCoupledV7 still calls RecomputeCoupledPuzzleReference() and
@@ -609,9 +748,14 @@ AssessCoupledV7Succinctness(const RCCoupParams& params)
     st.verifier_rebuilds_native_wires = true;
     st.verifier_rebuilds_column_roots = true;
 
+    // Landed production-direction pieces. These are not sufficient for
+    // proof-only consensus while the verifier still rebuilds the witness roots.
+    st.full_schedule_gemm_proof_bound = true;
+    st.opening_claims_batched = true;
+
     // The remaining relations are not yet proved by a block-sized proof object.
     st.bank_pages_proof_bound = false;
-    st.permutation_proof_bound = false;
+    st.permutation_proof_bound = st.proof_friendly_transcript;
     st.mix_proof_bound = false;
     st.extract_all_tiles_proof_bound = false;
     st.barrier_roots_proof_bound = false;
@@ -627,7 +771,7 @@ AssessCoupledV7Succinctness(const RCCoupParams& params)
     if (!st.bank_pages_proof_bound)
         st.blockers.push_back("bank_pages_not_pcs_bound_under_bank_root");
     if (!st.permutation_proof_bound)
-        st.blockers.push_back("permutation_not_succinctly_proven");
+        st.blockers.push_back("permutation_requires_proof_friendly_transcript");
     if (!st.mix_proof_bound)
         st.blockers.push_back("mix_not_succinctly_proven");
     if (!st.extract_all_tiles_proof_bound)
@@ -673,28 +817,23 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
         return res;
     }
 
-    // SOLE AUTHORITY: the immutable int64 coupled reference. Refuse to prove
-    // anything else — this is what makes toy/unrelated-work proofs impossible.
-    const uint256 ref_digest =
-        RecomputeCoupledPuzzleReference(header, height, params, options, {}, nullptr);
+    CoupledWires wires = BuildCoupledWires(header, height, params, options);
+    if (!wires.ok) {
+        res.timing.note = "wires: " + wires.note;
+        return res;
+    }
+
+    // SOLE AUTHORITY: the immutable int64 coupled reference transcript. Refuse
+    // to prove anything else — this is what makes toy/unrelated-work proofs
+    // impossible. BuildCoupledWires already exported the reference digest, so
+    // do not replay the entire coupled puzzle a second time.
+    const uint256 ref_digest = wires.digest;
     if (claimed_digest.IsNull() || claimed_digest != ref_digest) {
         res.timing.note = "coupled_digest_mismatch_refuses_unrelated_work";
         return res;
     }
     if (UintToArith256(ref_digest) > target) {
         res.timing.note = "coupled digest over target";
-        return res;
-    }
-
-    CoupledWires wires = BuildCoupledWires(header, height, params, options);
-    if (!wires.ok) {
-        res.timing.note = "wires: " + wires.note;
-        return res;
-    }
-    // Mirror-consistency: the re-derived trace MUST reproduce the reference
-    // digest byte-for-byte (fail closed on any local-mirror divergence).
-    if (wires.digest != ref_digest) {
-        res.timing.note = "coupled mirror digest mismatch vs int64 reference";
         return res;
     }
 
@@ -769,7 +908,11 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
         }
     }
 
-    // R5.perm / R5.mix bindings (per barrier; §7.3 native weight-MLE).
+    // R5.perm / R5.mix bindings (per barrier). V1–V3 use the legacy
+    // Fisher–Yates permutation and therefore compute p̃(r) with an O(n) native
+    // weight-MLE. V4 switches to the bit-affine permutation: p̃(r_dst) equals
+    // ẽ(r_src) with r_src derived in O(log n), and both openings are bound by
+    // the eval argument.
     proof.perm_evals.resize(params.barriers);
     proof.mix_evals.resize(params.barriers);
     for (uint32_t b = 0; b < params.barriers; ++b) {
@@ -779,40 +922,49 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
         std::vector<Fp2> rp(nu_n), rm(nu_n);
         for (uint32_t t = 0; t < nu_n; ++t) rp[t] = fs.ChallengeFp2("v7c_rp");
         for (uint32_t t = 0; t < nu_n; ++t) rm[t] = fs.ChallengeFp2("v7c_rm");
-        const auto pi =
-            DeriveCoupledBalancedPermutation(wires.sigma, b, params, options.transcript_version);
         Fp2 vp = Fp2::Zero();
-        for (uint32_t x = 0; x < n_state; ++x)
-            vp = Add(vp, Mul(EqFactor(rp, pi[x]), FromSigned2(bw.exchange[x])));
+        std::vector<Fp2> src_point;
+        if (RCCoupUsesProofFriendlyPermutation(options.transcript_version)) {
+            src_point = ProofFriendlyPermutationInversePoint(
+                wires.sigma, b, params, options.transcript_version, rp);
+            if (src_point.empty()) {
+                res.timing.note = "proof-friendly permutation point";
+                return res;
+            }
+            vp = RCGkrMleEval1D2(ToFp2I64(bw.exchange), src_point);
+            const Fp2 post_eval = RCGkrMleEval1D2(ToFp2I64(bw.post_perm), rp);
+            if (!Eq(post_eval, vp)) {
+                res.timing.note = "proof-friendly permutation mirror";
+                return res;
+            }
+        } else {
+            const auto pi =
+                DeriveCoupledBalancedPermutation(wires.sigma, b, params, options.transcript_version);
+            for (uint32_t x = 0; x < n_state; ++x)
+                vp = Add(vp, Mul(EqFactor(rp, pi[x]), FromSigned2(bw.exchange[x])));
+        }
         const Fp2 vm = RCGkrMleEval1D2(ToFp2I64(bw.post_mix), rm);
         proof.perm_evals[b] = vp;
         proof.mix_evals[b] = vm;
         fs.AbsorbFp2(vp);
         fs.AbsorbFp2(vm);
         claims.push_back({ids.p(b), PointConcatExtend(rp, {}, nu), vp});
+        if (!src_point.empty())
+            claims.push_back({ids.e(b), PointConcatExtend(src_point, {}, nu), vp});
         claims.push_back({ids.x(b), PointConcatExtend(rm, {}, nu), vm});
     }
 
-    // §2.4 eval argument (two-epoch: f,g committed inside the SAME batch).
-    std::vector<FriLayerCommit> epoch1_roots(columns.size());
-    for (size_t i = 0; i < columns.size(); ++i)
-        epoch1_roots[i].root = FriBatchColumnRoot(columns[i], batch_n);
-    const uint256 eval_seed = EvalArgSeed(base_seed, epoch1_roots, columns.size());
-    const auto ev = EvalArgumentProve(claims, columns, eval_seed);
-    if (!ev.ok) {
-        res.timing.note = "eval arg prove: " + ev.note;
+    // Construction I: γ-batched MLE opening sumcheck + Stage-2 eval argument
+    // inside the SAME batched FRI instance. This is the production-direction
+    // opening primitive; it avoids a separate per-claim FRI/eval union.
+    const auto opening = BatchedOpeningProve(claims, columns, base_seed);
+    if (!opening.ok) {
+        res.timing.note = "batched opening prove: " + opening.note;
         return res;
     }
-    proof.eval = ev.proof;
-    columns.push_back(ev.f_coeffs);
-    columns.push_back(ev.g_coeffs);
-
-    const auto bc = FriBatchCommit(columns, base_seed);
-    if (!bc.ok) {
-        res.timing.note = "batch commit: " + bc.note;
-        return res;
-    }
-    proof.batch = bc.proof;
+    proof.opening_sumcheck = opening.proof.sumcheck;
+    proof.eval = opening.proof.eval;
+    proof.batch = opening.proof.batch;
 
     // Dual-α Extract LogUp over coupled tiles (challenges FS-bound).
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
@@ -860,21 +1012,18 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         return fail("coupled:digest_not_header_bound");
     if (proof.sigma != matmul::v4::DeriveSigma(header)) return fail("coupled:sigma");
 
-    // SOLE AUTHORITY: the immutable int64 coupled reference (F13 dims ride on
-    // this too — forged params change the reference digest).
-    const uint256 ref_digest =
-        RecomputeCoupledPuzzleReference(header, height, params, options, {}, nullptr);
-    if (proof.claimed_digest != ref_digest) return fail("coupled:digest_mismatch_reference");
-    if (UintToArith256(ref_digest) > target) return fail("coupled:target");
-
     // F10 structural: exactly params.barriers roots (omission is unexpressible).
     if (proof.barrier_roots.size() != params.barriers)
         return fail("coupled:barrier_roots_count");
 
-    // Native grounding trace (page schedule, π, mix, Extract, roots, bank).
+    // SOLE AUTHORITY: native grounding trace (page schedule, π, mix, Extract,
+    // roots, bank). This single call exports the immutable int64 reference
+    // digest and the wire image; never replay the coupled puzzle twice.
     CoupledWires wires = BuildCoupledWires(header, height, params, options);
     if (!wires.ok) return fail("coupled:wires:" + wires.note);
-    if (wires.digest != ref_digest) return fail("coupled:mirror_digest");
+    const uint256 ref_digest = wires.digest;
+    if (proof.claimed_digest != ref_digest) return fail("coupled:digest_mismatch_reference");
+    if (UintToArith256(ref_digest) > target) return fail("coupled:target");
     if (proof.bank_root != wires.bank_root) return fail("coupled:bank_root_forged");
     if (proof.barrier_roots != wires.barrier_roots)
         return fail("coupled:barrier_root_forged"); // F10 forged barrier root
@@ -969,8 +1118,9 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         }
     }
 
-    // R5.perm / R5.mix: recompute the native expected values and REJECT any
-    // proof-carried mismatch; then bind the committed columns via the eval arg.
+    // R5.perm / R5.mix. V4 proves the permutation relation by two bound MLE
+    // openings: p̃(r_dst) == ẽ(π^{-1}(r_dst)), where π is a seeded bit-affine
+    // bijection. V1–V3 keep the native Fisher–Yates scan.
     for (uint32_t b = 0; b < params.barriers; ++b) {
         const CoupledBarrierWire& bw = wires.barriers[b];
         fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("perm"), 4);
@@ -978,27 +1128,40 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         std::vector<Fp2> rp(nu_n), rm(nu_n);
         for (uint32_t t = 0; t < nu_n; ++t) rp[t] = fs.ChallengeFp2("v7c_rp");
         for (uint32_t t = 0; t < nu_n; ++t) rm[t] = fs.ChallengeFp2("v7c_rm");
-        const auto pi =
-            DeriveCoupledBalancedPermutation(wires.sigma, b, params, options.transcript_version);
         Fp2 vp = Fp2::Zero();
-        for (uint32_t x = 0; x < n_state; ++x)
-            vp = Add(vp, Mul(EqFactor(rp, pi[x]), FromSigned2(bw.exchange[x])));
+        std::vector<Fp2> src_point;
+        if (RCCoupUsesProofFriendlyPermutation(options.transcript_version)) {
+            src_point = ProofFriendlyPermutationInversePoint(
+                wires.sigma, b, params, options.transcript_version, rp);
+            if (src_point.empty()) return fail("coupled:perm_affine_point");
+            vp = proof.perm_evals[b];
+        } else {
+            const auto pi =
+                DeriveCoupledBalancedPermutation(wires.sigma, b, params, options.transcript_version);
+            for (uint32_t x = 0; x < n_state; ++x)
+                vp = Add(vp, Mul(EqFactor(rp, pi[x]), FromSigned2(bw.exchange[x])));
+        }
         const Fp2 vm = RCGkrMleEval1D2(ToFp2I64(bw.post_mix), rm);
         if (!Eq(proof.perm_evals[b], vp)) return fail("coupled:perm_eval_forged"); // F11
         if (!Eq(proof.mix_evals[b], vm)) return fail("coupled:mix_eval_forged");
         fs.AbsorbFp2(vp);
         fs.AbsorbFp2(vm);
         claims.push_back({ids.p(b), PointConcatExtend(rp, {}, nu), vp});
+        if (!src_point.empty())
+            claims.push_back({ids.e(b), PointConcatExtend(src_point, {}, nu), vp});
         claims.push_back({ids.x(b), PointConcatExtend(rm, {}, nu), vm});
     }
 
-    // Thm 2.2: bind every claimed opening to the committed columns.
-    const uint256 eval_seed =
-        EvalArgSeed(base_seed, proof.batch.columns,
-                    /*epoch1_count=*/RCGkrCoupledExpectedColumnCount(params));
-    std::string ev_why;
-    if (!EvalArgumentVerify(claims, proof.batch, proof.eval, eval_seed, &ev_why))
-        return fail("coupled:eval:" + ev_why); // forged opening values
+    // Construction I: γ-batched MLE opening sumcheck + Stage-2 eval argument
+    // bound to the same batched FRI instance.
+    RCGkrBatchedOpeningProof opening;
+    opening.version = kRCGkrConstructionIVersion;
+    opening.sumcheck = proof.opening_sumcheck;
+    opening.eval = proof.eval;
+    opening.batch = proof.batch;
+    std::string open_why;
+    if (!BatchedOpeningVerify(claims, opening, base_seed, &open_why))
+        return fail("coupled:opening:" + open_why);
 
     // R5.extract: dual-α LogUp over the grounded coupled tiles (FS-bound α's).
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
