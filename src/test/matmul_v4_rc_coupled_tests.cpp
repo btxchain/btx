@@ -885,7 +885,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
     BOOST_CHECK(d1 == d2);
     // Pin filled after first honest CI run under COUP_*_V3; do not silently replace.
     BOOST_CHECK_EQUAL(d1.GetHex(),
-                      "0000000000000000000000000000000000000000000000000000000000000000");
+                      "a4bb0cc42e2b97631d126a0dcdae26ad83b2f287d885322392a564990a95bac4");
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
