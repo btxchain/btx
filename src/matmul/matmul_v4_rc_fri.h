@@ -217,9 +217,10 @@ struct FriCommitResult {
 // DUAL-OOD DEEP: a single OOD point z over Fp2 caps the bindable column
 // degree at 2^(128−40−64) = 2^24 coefficients; consensus columns reach
 // κ = 2^28. Two independent OOD points z1 ≠ z2 give
-// (2κ/(|Fp2|−|D|))² ≈ 2^-196 pre-grinding (soundness table row "dual-OOD");
-// under the Fp3 challenge draw (|K| ≈ 2^192, margin-restoration target) the
-// same dual pair gives (2κ/(|K|−|D|))² ≈ 2^-326.
+// (2κ/(|Fp2|−|D|))² ≈ 2^-196 pre-grinding (soundness table row "dual-OOD").
+// (An Fp3 challenge draw would raise this to ≈ 2^-326, but the OOD point z
+// feeds the DEEP quotient CODEWORD, so it stays in Fp2 with the rest of the
+// FRI stack — the Fp3 lift is a scoped follow-on; see INTEGRATION_REPORT.md.)
 // Every column's claimed evaluations at BOTH z1 and z2 ride in the proof and
 // are bound by the batched DEEP identity at each query site — these bound
 // (C_i(z1), C_i(z2)) pairs ARE the opening primitive the §2.4 evaluation

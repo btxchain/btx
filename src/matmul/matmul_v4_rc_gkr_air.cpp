@@ -1406,25 +1406,20 @@ CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp2 eta)
             break;
         }
     }
-    // Challenge field = F_{p^3} (|K| ~ 2^192, 2026-07-22 margin restoration);
-    // valid once the eta draw moves to Fp3 (INTEGRATION_REPORT.md call-sites).
-    const double log2K = 3.0 * std::log2(static_cast<double>(gkr_field::kP));
+    const double log2p2 = 2.0 * std::log2(static_cast<double>(gkr_field::kP));
     const double k = std::max<double>(1.0, static_cast<double>(res.n_slots) - 1.0);
-    res.soundness_bits = log2K - std::log2(k) - 40.0;
+    res.soundness_bits = log2p2 - std::log2(k) - 40.0;
     return res;
 }
 
 SeparationBound ComputeSeparationBound(uint32_t n_slots, uint64_t n_logup_rows)
 {
     SeparationBound b;
-    // Challenge field = F_{p^3} (|K| ~ 2^192): composition 192 − log2(n_slots−1)
-    // − 40 = 144.0 at the 256-slot budget; dual-α lookup 2·(192 − log2 N_L) − 40
-    // = 258.0 at N_L = 2^43. (Historical Fp2 values: 80.0 / 130.0.)
-    const double log2K = 3.0 * std::log2(static_cast<double>(gkr_field::kP));  // ~192
+    const double log2p2 = 2.0 * std::log2(static_cast<double>(gkr_field::kP));  // ~128
     const double k = std::max<double>(1.0, static_cast<double>(n_slots) - 1.0);
-    b.composition_bits = log2K - std::log2(k) - 40.0;
+    b.composition_bits = log2p2 - std::log2(k) - 40.0;
     const double n = std::max<double>(1.0, static_cast<double>(n_logup_rows));
-    b.lookup_bits = 2.0 * (log2K - std::log2(n)) - 40.0;
+    b.lookup_bits = 2.0 * (log2p2 - std::log2(n)) - 40.0;
     const double lo = std::min(b.composition_bits, b.lookup_bits);
     const double hi = std::max(b.composition_bits, b.lookup_bits);
     b.composed_bits = lo - std::log2(1.0 + std::pow(2.0, lo - hi));

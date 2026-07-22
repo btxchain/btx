@@ -460,12 +460,10 @@ struct TileTreeCheckResult {
 //   Comp(x) = sum_slot eta^slot * C_slot(x),
 // and the single check is "Comp vanishes on the whole domain". For an
 // invalid assignment (some C_slot(x*) != 0), Comp(x*) = 0 for at most
-// (n_slots - 1)/|K| of the eta's (Schwartz–Zippel on the slot polynomial),
-// so with eta drawn from K = F_{p^3} (|K| ~ 2^192, the 2026-07-22 margin-
-// restoration challenge field) the separation probability is
-//   <= (kAirSlotBudget - 1)/|K| < 2^8/2^192 = 2^-184   (pre-grinding)
-//   -> 2^-144 after the repo grinding convention g = 40.
-// (Historical Fp2 draw: 2^-120 pre / 2^-80 post.)
+// (n_slots - 1)/|Fp2| of the eta's (Schwartz–Zippel on the slot polynomial),
+// so the separation probability of the composition check is
+//   <= (kAirSlotBudget - 1)/|Fp2| < 2^8/2^128 = 2^-120   (pre-grinding)
+//   -> 2^-80 after the repo grinding convention g = 40.
 // ---------------------------------------------------------------------------
 
 /** Maximum slot index + 1 across all gadget rows (bounds the eta-collision). */
@@ -532,21 +530,15 @@ struct CompositionResult {
 /**
  * Combine all constraint families of each row with one challenge eta:
  * Comp(x) = sum_slot eta^slot * C_slot(x). ok iff Comp vanishes on the whole
- * domain. soundness_bits reports 3*log2(p) - log2(n_slots-1) - 40, the
- * -log2 separation probability of an invalid assignment for eta drawn
- * uniformly from the CUBIC extension K = F_{p^3} (|K| ~ 2^192, the
- * 2026-07-22 margin-restoration target field). VALID ONLY once the "g3_eta"/
- * "v7_gamma"/alpha challenge draws move to Fp3 (see INTEGRATION_REPORT.md,
- * "Fp2 -> Fp3 challenge sites"); over the historical Fp2 draw the numbers are
- * 2*log2(p) - log2(n_slots-1) - 40 (= 80.0 at the slot budget).
+ * domain. soundness_bits reports 2*log2(p) - log2(n_slots-1) - 40, the
+ * -log2 separation probability of an invalid assignment for uniform eta.
  */
 [[nodiscard]] CompositionResult ComposeConstraints(const RCAirConstraintSet& cs, Fp2 eta);
 
-/** Composed Construction-II + Construction-III separation bound (bits), for
- *  challenges drawn from F_{p^3} (see the ComposeConstraints field note). */
+/** Composed Construction-II + Construction-III separation bound (bits). */
 struct SeparationBound {
-    double composition_bits{0.0};  // 3*log2(p) - log2(n_slots-1) - 40
-    double lookup_bits{0.0};       // 2*(3*log2(p) - log2(N_w+N_t)) - 40
+    double composition_bits{0.0};  // 2*log2(p) - log2(n_slots-1) - 40
+    double lookup_bits{0.0};       // 2*(2*log2(p) - log2(N_w+N_t)) - 40
     double composed_bits{0.0};     // -log2(2^-composition + 2^-lookup)
 };
 [[nodiscard]] SeparationBound ComputeSeparationBound(uint32_t n_slots, uint64_t n_logup_rows);

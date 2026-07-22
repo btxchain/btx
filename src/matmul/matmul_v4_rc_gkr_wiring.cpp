@@ -187,9 +187,8 @@ WiringVerifyResult VerifyWiringEquality(const WiringEqualityConstraint& c,
     // d̃(ρ) = ũ(ρ) − ṽ(ρ); accept iff 0. COMPLETENESS: u = v ⇒ identical
     // MLEs ⇒ passes for every ρ, exactly. SEPARATION: u ≠ v ⇒ d̃ is a
     // nonzero multilinear in ℓ variables (total degree ≤ ℓ); by
-    // Schwartz–Zippel it vanishes at uniform ρ ∈ K^ℓ w.p. ≤ ℓ/|K|
-    // (Fp3 draw, ℓ = 28 ⇒ 2^-187.19 pre-grinding, 2^-147.19 after the 2^40
-    // budget; Fp2 history 2^-123.19 / 2^-83.19).
+    // Schwartz–Zippel it vanishes at uniform ρ ∈ Fp2^ℓ w.p. ≤ ℓ/|Fp2|
+    // (ℓ = 28 ⇒ 2^-123.19 pre-grinding, 2^-83.19 after the 2^40 budget).
     const Fp2 eu = RCGkrMleEval1D2(c.u, rho);
     const Fp2 ev = RCGkrMleEval1D2(c.v, rho);
     if (!Eq(eu, ev)) return Fail("wiring equality: d~(rho) != 0 (u~ != u'~ at rho)");
@@ -350,9 +349,8 @@ WiringVerifyResult VerifyWiringPermutationDual(const WiringPermutationDual& d)
 {
     // Both instances must verify: a FALSE instance survives only if the
     // degree-≤n difference polynomial vanishes at BOTH independent (β, γ)
-    // pairs — (n/|K|)²: Fp3 draw, n = 2^28 ⇒ 2^-328 pre-grinding, 2^-288
-    // after the single FS round's 2^40 budget (Fp2 history 2^-200 / 2^-160;
-    // mirrors the dual-α LogUp of §5.6).
+    // pairs — (n/|Fp2|)²: n = 2^28 ⇒ 2^-200 pre-grinding, 2^-160 after the
+    // single FS round's 2^40 budget (mirrors the dual-α LogUp of §5.6).
     const WiringVerifyResult r1 = VerifyWiringPermutation(d.inst1);
     if (!r1.ok) return Fail("dual instance 1: " + r1.reason);
     const WiringVerifyResult r2 = VerifyWiringPermutation(d.inst2);
@@ -418,8 +416,7 @@ double Log2U64(uint64_t n)
 
 double WiringEqualitySeparationBits(uint32_t ell, bool after_grinding)
 {
-    // Pr[accept false] ≤ ℓ/|K| (S2 on the nonzero multilinear difference);
-    // |K| = kRCGkrWiringFieldBits bits (Fp3 challenge draw).
+    // Pr[accept false] ≤ ℓ/|Fp2| (S2 on the nonzero multilinear difference).
     // ℓ = 0: the "MLE" is the single cell itself — the comparison is exact
     // (probability 0); report field bits as a conservative finite sentinel.
     const double pre =
@@ -429,8 +426,7 @@ double WiringEqualitySeparationBits(uint32_t ell, bool after_grinding)
 
 double WiringPermutationSeparationBits(uint64_t n, bool dual, bool after_grinding)
 {
-    // Single: n/|K|. Dual: (n/|K|)² with ONE FS round (grinding paid once).
-    // |K| = kRCGkrWiringFieldBits bits (Fp3 challenge draw).
+    // Single: n/|Fp2|. Dual: (n/|Fp2|)² with ONE FS round (grinding paid once).
     // n = 0: vacuous instance (empty product), exact — field-bits sentinel.
     if (n == 0) {
         const double pre = dual ? 2.0 * kRCGkrWiringFieldBits : kRCGkrWiringFieldBits;

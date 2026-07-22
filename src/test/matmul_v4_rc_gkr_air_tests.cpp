@@ -604,8 +604,7 @@ BOOST_AUTO_TEST_CASE(air_construction3_fixed_reference_vector)
 
 // ---------------------------------------------------------------------------
 // SEPARATION-BOUND NUMBERS (acceptance obligation b): composition-polynomial
-// and log-derivative bounds over the Fp3 challenge field (|K| ~ 2^192,
-// 2026-07-22 margin restoration), composed, at consensus scale.
+// and log-derivative bounds over Fp2, composed, at consensus scale.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(air_separation_bound_numbers)
 {
@@ -615,14 +614,9 @@ BOOST_AUTO_TEST_CASE(air_separation_bound_numbers)
     BOOST_TEST_MESSAGE("composition bits=" << b.composition_bits
                        << " lookup bits=" << b.lookup_bits
                        << " composed bits=" << b.composed_bits);
-    // Fp3 challenge field (|K| ~ 2^192, 2026-07-22 margin restoration);
-    // historical Fp2 values were 80.0 / 130.0 / ~80.0.
-    BOOST_CHECK(b.composition_bits > 143.9); // 3*log2(p) - log2(255) - 40 ~ 144.0
-    BOOST_CHECK(b.composition_bits < 144.1);
-    BOOST_CHECK(b.lookup_bits > 257.9);      // 2*(192 - 43) - 40 = 258.0
-    BOOST_CHECK(b.lookup_bits < 258.1);
+    BOOST_CHECK(b.composition_bits > 79.9);  // 2*log2(p) - log2(255) - 40 ~ 80.0
+    BOOST_CHECK(b.lookup_bits > 129.9);      // 2*(128 - 43) - 40 = 130.0
     BOOST_CHECK(b.composed_bits > 64.0);     // clears the 2^-64 target
-    BOOST_CHECK(b.composed_bits > 143.9);    // and the 74-bit adequacy band
 }
 
 // ---------------------------------------------------------------------------

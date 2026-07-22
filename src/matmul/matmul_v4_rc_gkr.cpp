@@ -2253,18 +2253,18 @@ bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof, const CBlockHeade
 RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits)
 {
     RCGkrComposedBound b;
-    b.construction_i_bits = static_cast<double>(RCGkrConstructionISeparationBits()); // 76
-    b.construction_ii_bits = kRCGkrCompositionSepBits;                                // 144
-    b.construction_iii_bits = kRCGkrLookupSepBits;                                    // 256
+    b.construction_i_bits = static_cast<double>(RCGkrConstructionISeparationBits()); // 74
+    b.construction_ii_bits = kRCGkrCompositionSepBits;                                // 80
+    b.construction_iii_bits = kRCGkrLookupSepBits;                                    // 128
     b.construction_iv_bits =
-        std::min(kRCGkrWiringEqualitySepBits, kRCGkrWiringPermutationDualSepBits);    // 147.19
-    b.wiring_single_bits = kRCGkrWiringPermutationSingleSepBits;                      // 124
+        std::min(kRCGkrWiringEqualitySepBits, kRCGkrWiringPermutationDualSepBits);    // 83.19
+    b.wiring_single_bits = kRCGkrWiringPermutationSingleSepBits;                      // 60
     b.fri_proximity_bits = fri_proximity_bits;
     b.sha_bits = kRCGkrShaSepBits;                                                    // 88
 
     // ε_total = Σ 2^-term ; composed = −log2(ε_total) via a stable log-sum-exp.
-    // Construction I (its FS-side sub-bound, 76) is ABSORBED into the whole-
-    // protocol FS subtotal (kRCGkrFsSubtotalSepBits = 135.5; the eval opening
+    // Construction I (its FS-side sub-bound, 74) is ABSORBED into the whole-
+    // protocol FS subtotal (kRCGkrFsSubtotalSepBits = 72; the eval opening
     // rides the same sumcheck rows), so it is reported but not summed twice.
     const double terms[] = {kRCGkrFsSubtotalSepBits, b.construction_ii_bits,
                             b.construction_iii_bits, b.construction_iv_bits,
@@ -2278,10 +2278,12 @@ RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits)
     b.margin_bits = b.composed_bits - static_cast<double>(kRCFriTargetSoundnessBits);
     b.clears_target = b.composed_bits >= static_cast<double>(kRCFriTargetSoundnessBits);
     // FRI-dominated iff the (parametric) FRI proximity term is the smallest.
+    // At Q=128 / Fp2 it is NOT: the FS subtotal (72) sits below the FRI floor
+    // (76.80), so the composed bound is FS-dominated at ≈ 71.9.
     b.fri_dominated = (lo == b.fri_proximity_bits);
     // INADEQUATE for consensus authority if the margin over 64 is < 2 bits.
-    // At the Q=128 fold floor with Fp3 challenges the margin is ≈ 12.8 bits
-    // (it was ≈ 1.8 at Q=116/Fp2). Arbiter stays hard-disabled regardless.
+    // At Q=128 / Fp2 the margin is ≈ 7.9 bits ⇒ adequate (it was ≈ 1.8 at
+    // Q=116/Fp2 — inadequate). Arbiter stays hard-disabled regardless.
     b.inadequate_margin = b.margin_bits < kRCGkrAdequateMarginBits;
     b.any_term_below_target = false;
     for (double t : terms)
@@ -2296,12 +2298,13 @@ double RCGkrComposedSeparationBits(double fri_proximity_bits)
 
 double RCGkrComposedSeparationBits()
 {
-    // Sound v5 fold, Q=128, Fp3 challenges: the fold's own proximity
-    // soundness (76.80, field-independent) dominates ⇒ ≈ 76.80 bits
-    // (ε_total ≤ 2^-76.79) — over the 74-bit restored-margin bar with the
-    // margin over 64 at ≈ 12.8 bits. (Historical Q=116/Fp2: ≈ 65.8,
-    // inadequate.) The Fp3-dependent terms hold once the challenge sites in
-    // INTEGRATION_REPORT.md draw from Fp3; see the header note.
+    // SHIPPED: sound v5 fold, Q=128, Fp2 challenges. Raising Q to 128 lifted
+    // the FRI floor (65.85 → 76.80, field-independent) ABOVE the Fp2 FS
+    // subtotal (72), so the composed bound is now FS-dominated at ≈ 71.9 bits
+    // (ε_total ≤ 2^-71.9), clearing the 2^-64 target by ≈ 7.9 bits (adequate).
+    // Reaching the 74-bit bar (≈ 76.8) needs the DEFERRED Fp3 challenge
+    // cutover (INTEGRATION_REPORT.md); see the header note. (Historical
+    // Q=116/Fp2: ≈ 65.8, inadequate.)
     return RCGkrComposedSeparationBits(kRCGkrFriProximityBitsV5);
 }
 

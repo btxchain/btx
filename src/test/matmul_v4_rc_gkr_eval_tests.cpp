@@ -95,12 +95,11 @@ rc::Fp2 MatrixMleDirect(const std::vector<rc::Fp2>& mat, uint32_t rows, uint32_t
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(constr1_separation_constants)
 {
-    // Composed bound: −log2(ε_total) ≥ 76 post-grinding (header derivation,
-    // Fp3 challenges |K| ≈ 2^192, 2026-07-22 margin restoration):
-    //   FS subtotal (γ + sumcheck + μ + λ/w + dual-OOD) ≤ 2^-178.4, ×2^40 ⇒
-    //   2^-138.4; + batched-FRI query term 2^-76.8; + SHA256d term 2^-88;
-    //   total < 2^-76. (Historical Fp2 value: 74, FS-dominated at 2^-74.4.)
-    BOOST_CHECK_EQUAL(rc::RCGkrConstructionISeparationBits(), 76);
+    // Composed bound: −log2(ε_total) ≥ 74 post-grinding (header derivation):
+    //   FS subtotal (γ + sumcheck + μ + λ/w + dual-OOD) ≤ 2^-114.4, ×2^40 ⇒
+    //   2^-74.4; + batched-FRI query term 2^-76.8; + SHA256d term 2^-88;
+    //   total < 2^-74.
+    BOOST_CHECK_EQUAL(rc::RCGkrConstructionISeparationBits(), 74);
     BOOST_CHECK_GE(rc::RCGkrConstructionISeparationBits(), rc::kRCFriTargetSoundnessBits + 10);
     // The Stage-2 substrate this composes with (single batched instance).
     BOOST_CHECK_EQUAL(rc::FriBatchSoundnessBoundBits(), 76);

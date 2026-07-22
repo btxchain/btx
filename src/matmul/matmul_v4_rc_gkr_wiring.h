@@ -37,13 +37,10 @@
 //     RCGkrOpeningClaim); this module produces the claims and, for direct /
 //     test use, evaluates the MLEs itself over the raw columns.
 //     SEPARATION (S2, Schwartz–Zippel): if d ≠ 0, d̃ is a nonzero ℓ-variate
-//     multilinear (total degree ≤ ℓ), so it vanishes at uniform ρ ∈ K^ℓ with
-//     probability ≤ ℓ/|K|. With ρ drawn from the CUBIC extension K = F_{p^3}
-//     (|K| ≈ 2^192, the 2026-07-22 margin restoration) at the κ = 2^28 column
-//     cap (ℓ = 28):
-//       28/2^192 = 2^-187.19 pre-grinding, 2^-147.19 after the repo's 2^40
-//       grinding budget (S6) — clears the 2^-64 target with ≥ 83 bits margin.
-//       (Historical Fp2 draw: 2^-123.19 pre / 2^-83.19 post.)
+//     multilinear (total degree ≤ ℓ), so it vanishes at uniform ρ ∈ Fp2^ℓ with
+//     probability ≤ ℓ/|Fp2|. At the κ = 2^28 column cap (ℓ = 28):
+//       28/2^128 = 2^-123.19 pre-grinding, 2^-83.19 after the repo's 2^40
+//       grinding budget (S6) — clears the 2^-64 target with ≥ 19 bits margin.
 //
 // (b) PERMUTATION (grand product, Plonk-style; for fixed public wiring π such
 //     as the free-transpose reuse of §1.2 when materialized, or any Λ-declared
@@ -63,16 +60,14 @@
 //     coincide — which (π a bijection, tags injective: indices < 2^32 < p)
 //     holds iff u'_j = u_{π(j)} for every j. Otherwise the difference is a
 //     nonzero polynomial of total degree ≤ N and S2 gives acceptance
-//     probability ≤ N/|K| over (β, γ). Challenge field K = F_{p^3}
-//     (|K| ≈ 2^192): at N = κ = 2^28, single pair 2^28/2^192 = 2^-164.0
-//     pre-grinding, 2^-124.0 post; dual (N/|K|)² = 2^-328 pre, 2^-288 post.
-//     THE DUAL FORM STAYS MANDATORY on the ship path: over the historical Fp2
-//     draw the single pair netted only 2^-60.0 post-grinding — BELOW the
-//     2^-64 target — and the dual mandate is structural (G4 enforces it), so
-//     a build/field regression can never silently reopen the single path.
-//     The dual API below is the shipped (and default-tested) form;
-//     kRCGkrWiringSingleChallengeMaxN retains the conservative Fp2-derived
-//     single-challenge ceiling N ≤ 2^23.
+//     probability ≤ N/|Fp2| over (β, γ). At N = κ = 2^28:
+//       2^28/2^128 = 2^-100.0 pre-grinding, 2^-60.0 after 2^40 grinding —
+//       BELOW the 2^-64 target. Full-size columns therefore REQUIRE the
+//       dual-challenge amplification (same argument as the dual-α LogUp,
+//       §5.6): two independent (β, γ) pairs give (N/|Fp2|)² = 2^-200
+//       pre-grinding, 2^-160 post — cleared with huge margin. The dual API
+//       below is the recommended (and default-tested) form; single-challenge
+//       is sufficient only for N ≤ 2^23 (2^-105 pre / 2^-65 post).
 //     ZERO FACTORS (fail-closed, same posture as the LogUp denominators): if
 //     any factor u_i + β·i + γ or u'_j + β·π(j) + γ is 0, the instance is
 //     rejected with a resample reason — this is a completeness resample event
@@ -98,26 +93,16 @@ using gkr_field::Fp2;
 inline constexpr uint32_t kRCGkrWiringVersion = 1;
 inline constexpr char kRCGkrWiringDomainTag[] = "BTX_RC_GKR_WIRING_V1";
 
-/** log2 |K| of the CHALLENGE field. 2026-07-22 margin restoration: challenges
- *  (ρ, β, γ) are drawn from the cubic extension K = F_{p^3}, so this is
- *  3·log2(p) with p = 2^64 − 2^32 + 1 (Goldilocks). The reported bounds are
- *  VALID ONLY once WiringChallengeFp2's draw moves to Fp3 (see
- *  INTEGRATION_REPORT.md "Fp2 → Fp3 challenge sites"). Historical Fp2 value:
- *  127.99999999932. */
-inline constexpr double kRCGkrWiringFieldBits = 191.99999999899;
-/** Historical Fp2 challenge-field bits (2·log2 p), kept for the below-64
- *  single-challenge record and the dual-mandate rationale. */
-inline constexpr double kRCGkrWiringFieldBitsFp2 = 127.99999999932;
+/** log2 |Fp2| = 2·log2(p), p = 2^64 − 2^32 + 1 (Goldilocks). */
+inline constexpr double kRCGkrWiringFieldBits = 127.99999999932;
 /** Repo grinding convention (S6): q_H = 2^40 RO queries; every FS term pays
  *  40 bits (matches FriSoundnessBoundBits()'s g = 40 subtraction). */
 inline constexpr double kRCGkrWiringGrindBits = 40.0;
 /** Column cap ℓ ≤ 28 (κ = 2^28, the Goldilocks 2-adicity wall, §2.1). */
 inline constexpr uint32_t kRCGkrWiringMaxEll = kRCGkrColumnMaxLog2;
 
-/** Single-challenge grand-product ceiling. Derived over Fp2 (N ≤ 2^23 keeps
- *  N/|Fp2| ≥ 105 pre-grinding bits ⇒ ≥ 65 after grinding) and RETAINED
- *  UNCHANGED under the Fp3 challenge draw — conservative by ~64 bits; the
- *  dual form remains mandatory above it regardless of field. */
+/** Single-challenge grand-product ceiling: N ≤ 2^23 keeps N/|Fp2| ≥ 105
+ *  pre-grinding bits ⇒ ≥ 65 after grinding. Above it, use the dual form. */
 inline constexpr uint64_t kRCGkrWiringSingleChallengeMaxN = uint64_t{1} << 23;
 
 struct WiringVerifyResult {
@@ -280,17 +265,14 @@ struct WiringPermutationDual {
 // vectors that differ in ≥ 1 entry / are not related by π).
 // ----------------------------------------------------------------------------
 
-/** Equality: ℓ/|K| ⇒ bits = log2|K| − log2(ℓ) [− 40 if after_grinding], with
- *  |K| = |Fp3| ≈ 2^192 (kRCGkrWiringFieldBits; valid under the Fp3 draw).
- *  ℓ = 28 (κ column): 187.19 pre / 147.19 post (Fp2 history: 123.19/83.19).
- *  ℓ = 0: exact point compare, returns field bits as a conservative sentinel
- *  (actual probability 0). */
+/** Equality: ℓ/|Fp2| ⇒ bits = log2|Fp2| − log2(ℓ) [− 40 if after_grinding].
+ *  ℓ = 28 (κ column): 123.19 pre / 83.19 post. ℓ = 0: exact point compare,
+ *  returns field bits as a conservative sentinel (actual probability 0). */
 [[nodiscard]] double WiringEqualitySeparationBits(uint32_t ell, bool after_grinding);
 
-/** Grand product: n/|K| single, (n/|K|)² dual, |K| = |Fp3| ≈ 2^192.
- *  n = 2^28: single 164.0 pre / 124.0 post; dual 328.0 pre / 288.0 post.
- *  (Fp2 history: single 100.0/60.0 — BELOW the 64 target, the origin of the
- *  structural dual mandate, which stays in force.) n = 0: sentinel. */
+/** Grand product: n/|Fp2| single, (n/|Fp2|)² dual.
+ *  n = 2^28: single 100.0 pre / 60.0 post (BELOW target — do not ship);
+ *            dual  200.0 pre / 160.0 post. n = 0: sentinel (field bits). */
 [[nodiscard]] double WiringPermutationSeparationBits(uint64_t n, bool dual, bool after_grinding);
 
 // ----------------------------------------------------------------------------
