@@ -119,7 +119,7 @@ rc::RCGkrCoupledProofV7 FabricateProof(const CBlockHeader& header, const rc::RCC
     p.mix_evals.assign(params.barriers, rc::Fp2::Zero());
     p.feed_evals.assign(rc::RCGkrCoupledExpectedFeedCount(params), rc::Fp2::Zero());
     // batch / eval / transcript left default (fake). We do not expect to reach
-    // them — the reference-digest wall stops the forgery long before.
+    // them — proof-carried digest closure stops the forgery first.
     p.transcript_hash = FillDigest(0xD3);
     return p;
 }
@@ -129,8 +129,8 @@ rc::RCGkrCoupledProofV7 FabricateProof(const CBlockHeader& header, const rc::RCC
 // ============================================================================
 // ATTACK 1 — PURE FABRICATION. No ProveWinnerCoupledV7, no puzzle computation.
 // Fabricate everything; digest chosen arbitrarily (all-zero → trivially small).
-// EXPECT: REJECT. The attacker cannot make claimed_digest equal the reference
-// digest the verifier recomputes for itself.
+// EXPECT: REJECT. The attacker cannot make claimed_digest equal the digest
+// obtained from the proof-carried bank/barrier roots.
 // ============================================================================
 BOOST_AUTO_TEST_CASE(coupled_f0_pure_fabrication_rejected)
 {
@@ -149,16 +149,16 @@ BOOST_AUTO_TEST_CASE(coupled_f0_pure_fabrication_rejected)
     BOOST_TEST_MESSAGE("ATTACK1 pure-fabrication verdict: " << (ok ? "ACCEPT" : "REJECT")
                                                             << " (" << why << ")");
     BOOST_CHECK_MESSAGE(!ok, "SOUNDNESS BUG: pure fabrication ACCEPTED");
-    // Deepest reachable check is the immutable-reference digest grounding.
-    BOOST_CHECK_EQUAL(why, "coupled:digest_mismatch_reference");
+    // Deepest reachable check is proof-carried digest-from-roots closure.
+    BOOST_CHECK_EQUAL(why, "coupled:digest_from_roots");
 }
 
 // ============================================================================
 // ATTACK 2 — GROUND-DIGEST vs the TARGET check. The attacker fabricates a TINY
 // digest that would satisfy a strict target, aiming to steal the "digest <=
 // target" relation with zero coupled work. EXPECT: REJECT — the target is bound
-// to the RECOMPUTED reference digest, so the fake tiny digest never even reaches
-// the target comparison (dies at the reference grounding first).
+// to proof-carried digest closure, so the fake tiny digest never even reaches
+// the target comparison.
 // ============================================================================
 BOOST_AUTO_TEST_CASE(coupled_f0_ground_digest_target_rejected)
 {
@@ -177,10 +177,9 @@ BOOST_AUTO_TEST_CASE(coupled_f0_ground_digest_target_rejected)
     BOOST_TEST_MESSAGE("ATTACK2 ground-digest/target verdict: " << (ok ? "ACCEPT" : "REJECT")
                                                                 << " (" << why << ")");
     BOOST_CHECK_MESSAGE(!ok, "SOUNDNESS BUG: fabricated tiny digest ACCEPTED (target stolen)");
-    // The verifier grounds the digest against the reference BEFORE the target
-    // check, so the fake tiny digest is rejected at the reference wall, proving
-    // the target relation cannot be satisfied with zero coupled work.
-    BOOST_CHECK_EQUAL(why, "coupled:digest_mismatch_reference");
+    // The verifier closes claimed_digest against proof-carried roots BEFORE the
+    // target check, so the fake tiny digest cannot satisfy target with zero work.
+    BOOST_CHECK_EQUAL(why, "coupled:digest_from_roots");
 }
 
 // ============================================================================
@@ -222,8 +221,9 @@ BOOST_AUTO_TEST_CASE(coupled_f0_different_params_relabel_rejected)
     BOOST_TEST_MESSAGE("ATTACK3 different-params-relabel verdict: " << (ok ? "ACCEPT" : "REJECT")
                                                                     << " (" << why << ")");
     BOOST_CHECK_MESSAGE(!ok, "SOUNDNESS BUG: different-params relabel ACCEPTED");
-    // Toy reference digest != medium digest → grounded reject.
-    BOOST_CHECK_EQUAL(why, "coupled:digest_mismatch_reference");
+    // Toy shape disagrees with the proof-carried medium root vector before the
+    // verifier reaches native reference replay.
+    BOOST_CHECK_EQUAL(why, "coupled:barrier_roots_count");
 }
 
 // ============================================================================

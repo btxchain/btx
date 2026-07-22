@@ -14,6 +14,7 @@
 #include <span.h>
 
 #include <array>
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstring>
@@ -556,21 +557,45 @@ private:
     uint32_t base(uint32_t b) const { return b * (3 * lobes + 4); }
 };
 
-/** Dual-α Extract LogUp over a bounded sample of coupled tiles (§5.5/§7.5).
- *  Tile inputs are the grounded post-mix int64 cells; TraceTile re-runs the
- *  immutable reference sub-primitives. */
-gkr_air::LogUpVerifyResult CoupledExtractLogUpSample(const CoupledWires& w, Fp2 gamma,
-                                                     Fp2 alpha1, Fp2 alpha2,
-                                                     uint32_t max_tiles)
+struct CoupledExtractAirResult {
+    bool ok{false};
+    std::string failure;
+    uint64_t total_tiles{0};
+    uint64_t checked_tiles{0};
+    uint64_t n_constraints{0};
+    double composition_bits{0.0};
+    gkr_air::LookupBindResult lookup;
+};
+
+/** Dual-α Extract LogUp + Construction-II AIR over coupled tiles (§5.5/§7.5).
+ *  Tile inputs are the grounded post-mix int64 cells; TraceTile records the
+ *  immutable reference sub-primitives as committed-cell witnesses and
+ *  EmitTileConstraints checks the polynomial identities over those cells.
+ *
+ *  max_tiles == 0 means ALL tiles. This intentionally replaces the old
+ *  16-tile sample. It is still native-grounded (the verifier enumerates the
+ *  grounded post-mix cells), but it is no longer sample-grounded: every tile
+ *  contributes AIR constraints plus canonical T_M/T_X/T_R16 LogUp rows. */
+CoupledExtractAirResult CoupledExtractAirLogUp(const CoupledWires& w, Fp2 eta, Fp2 gamma,
+                                               Fp2 alpha1, Fp2 alpha2,
+                                               uint64_t max_tiles)
 {
+    CoupledExtractAirResult out;
     gkr_air::TableTM tm_tab;
     gkr_air::TableTX tx_tab;
-    gkr_air::LogUpInstance inst_tm, inst_tx;
-    uint32_t used = 0;
+    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
     for (const CoupledBarrierWire& bw : w.barriers) {
-        if (used >= max_tiles) break;
+        if ((bw.post_mix.size() % kRCMxBlockLen) != 0) {
+            out.failure = "extract_air:post_mix_tile_shape";
+            return out;
+        }
+        out.total_tiles += bw.post_mix.size() / kRCMxBlockLen;
+    }
+    for (const CoupledBarrierWire& bw : w.barriers) {
+        if (max_tiles != 0 && out.checked_tiles >= max_tiles) break;
         const uint32_t n_tiles = static_cast<uint32_t>(bw.post_mix.size() / kRCMxBlockLen);
-        for (uint32_t t = 0; t < n_tiles && used < max_tiles; ++t) {
+        for (uint32_t t = 0; t < n_tiles &&
+                            (max_tiles == 0 || out.checked_tiles < max_tiles); ++t) {
             gkr_air::TilePublic pub;
             pub.prf_key = bw.extract_prf;
             pub.i = 0;
@@ -579,23 +604,45 @@ gkr_air::LogUpVerifyResult CoupledExtractLogUpSample(const CoupledWires& w, Fp2 
             for (uint32_t c = 0; c < kRCMxBlockLen; ++c)
                 in[c] = bw.post_mix[static_cast<size_t>(t) * kRCMxBlockLen + c];
             const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
-            gkr_air::AppendTileLookupsTmTxOnly(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx);
-            ++used;
+            const gkr_air::TileCheckResult tc = gkr_air::CheckTileConstraints(tw, tm_tab, tx_tab);
+            if (!tc.ok) {
+                out.failure = "extract_air:" + tc.failure;
+                return out;
+            }
+            const gkr_air::CompositionResult comp =
+                gkr_air::ComposeConstraints(gkr_air::EmitTileConstraints(tw), eta);
+            out.n_constraints += comp.n_constraints;
+            out.composition_bits = out.checked_tiles == 0
+                                       ? comp.soundness_bits
+                                       : std::min(out.composition_bits, comp.soundness_bits);
+            if (!comp.ok) {
+                out.failure = "extract_air:composition:" + comp.first_bad_families;
+                return out;
+            }
+            for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+                const int8_t expected = bw.state_out[static_cast<size_t>(t) * kRCMxBlockLen + c];
+                if (tw.out[c] != expected) {
+                    out.failure = "extract_air:state_out_mismatch";
+                    return out;
+                }
+            }
+            gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
+            ++out.checked_tiles;
         }
     }
-    auto build_mult = [](gkr_air::LogUpInstance& in) {
-        in.table_mult.assign(in.table.size(), 0);
-        for (const Fp2& wt : in.witness)
-            for (size_t j = 0; j < in.table.size(); ++j)
-                if (gkr_field::Eq(wt, in.table[j])) {
-                    in.table_mult[j] += 1;
-                    break;
-                }
-    };
-    build_mult(inst_tm);
-    build_mult(inst_tx);
-    std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
-    return gkr_air::LogUpDualAlphaVerify(insts, alpha1, alpha2);
+    if (out.checked_tiles == 0 || (max_tiles == 0 && out.checked_tiles != out.total_tiles)) {
+        out.failure = "extract_air:tile_coverage";
+        return out;
+    }
+    gkr_air::FinalizeTableMultiplicities(inst_tm, inst_tx, inst_r16);
+    std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx, inst_r16};
+    out.lookup = gkr_air::VerifyLookupAgainstPreprocessed(insts, gamma, alpha1, alpha2);
+    if (!out.lookup.ok) {
+        out.failure = "extract_air:logup:" + out.lookup.failure;
+        return out;
+    }
+    out.ok = true;
+    return out;
 }
 
 /** FS seed roots list: bank_root FIRST, then all barrier roots — binds the
@@ -609,6 +656,48 @@ std::vector<uint256> SeedRoots(const uint256& bank_root, const std::vector<uint2
     return out;
 }
 
+std::vector<uint8_t> CoupledBarrierRootPreimage(uint32_t barrier,
+                                                const std::vector<int8_t>& state,
+                                                const RCCoupDomainTagSet& tags)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(std::strlen(tags.barrier) + 4 + state.size());
+    buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(tags.barrier),
+               reinterpret_cast<const uint8_t*>(tags.barrier) + std::strlen(tags.barrier));
+    unsigned char le[4];
+    WriteLE32(le, barrier);
+    buf.insert(buf.end(), le, le + 4);
+    buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(state.data()),
+               reinterpret_cast<const uint8_t*>(state.data()) + state.size());
+    return buf;
+}
+
+std::vector<uint8_t> CoupledEpisodeDigestPreimage(const uint256& bank_root,
+                                                  const std::vector<uint256>& barrier_roots,
+                                                  const RCCoupDomainTagSet& tags)
+{
+    std::vector<uint8_t> buf;
+    buf.reserve(std::strlen(tags.episode) + 32 + barrier_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const uint8_t*>(tags.episode),
+               reinterpret_cast<const uint8_t*>(tags.episode) + std::strlen(tags.episode));
+    buf.insert(buf.end(), bank_root.begin(), bank_root.end());
+    for (const uint256& root : barrier_roots) buf.insert(buf.end(), root.begin(), root.end());
+    return buf;
+}
+
+void FinalizeSingleLogUpMultiplicities(gkr_air::LogUpInstance& in)
+{
+    in.table_mult.assign(in.table.size(), 0);
+    for (const Fp2& wt : in.witness) {
+        for (size_t j = 0; j < in.table.size(); ++j) {
+            if (gkr_field::Eq(wt, in.table[j])) {
+                in.table_mult[j] += 1;
+                break;
+            }
+        }
+    }
+}
+
 size_t EstimateCoupledProofBytes(const RCGkrCoupledProofV7& proof)
 {
     std::vector<unsigned char> tmp;
@@ -619,11 +708,18 @@ size_t EstimateCoupledProofBytes(const RCGkrCoupledProofV7& proof)
     bytes += 4 + 32 * 5 + 16 + proof.barrier_roots.size() * 32;
     for (const auto& lc : proof.lobes) bytes += lc.sumcheck.size() * 48 + 5 * 16;
     bytes += (proof.perm_evals.size() + proof.mix_evals.size() + proof.feed_evals.size()) * 16;
-    bytes += 16 * 3 + 32 + 8; // eval proof sigma/fg + transcript + logup_bits
+    bytes += 16 * 3 + 32 + 8 + 8 + 1 + 8; // eval proof + transcript + Extract coverage
     return bytes;
 }
 
 } // namespace
+
+uint64_t RCGkrCoupledRequiredExtractTiles(const RCCoupParams& params)
+{
+    if (!ValidateRCCoupParams(params) || (params.StateBytes() % kRCMxBlockLen) != 0) return 0;
+    return static_cast<uint64_t>(params.barriers) *
+           (static_cast<uint64_t>(params.StateBytes()) / kRCMxBlockLen);
+}
 
 RCGkrCoupledV7SuccinctnessStatus
 AssessCoupledV7Succinctness(const RCCoupParams& params)
@@ -700,25 +796,28 @@ RCGkrCoupledV7RelationStatuses(const RCCoupParams& params, const RCCoupOptions& 
                    false,
                    true,
                    false,
-                   "coupled:logup:*",
-                   "Needed: commit full coupled Extract AIR/composition and LogUp "
-                   "multiplicity columns for every StateBytes()/32 tile. Current helper "
-                   "checks a bounded native sample."});
+                   "coupled:extract_air:* / coupled:extract_tile_count / coupled:logup:*",
+                   "Current: every StateBytes()/32 tile across every barrier is checked by "
+                   "the Extract committed-cell AIR plus canonical T_M/T_X/T_R16 LogUp. "
+                   "Still native-grounded because the verifier traces those tile witnesses "
+                   "from the reference transcript instead of opening committed AIR trace "
+                   "columns from the proof."});
     out.push_back({"barrier SHA roots",
                    false,
                    true,
                    false,
                    "coupled:barrier_root_forged / coupled:digest_from_roots",
-                   "Needed: SHA/tile-tree AIR binding state_out columns to every "
-                   "barrier root; current verifier hashes native state bytes."});
+                   "Current: direct SHA256d preimages are checked through the generic "
+                   "SHA AIR over native state bytes. Still not proof-only because the "
+                   "state bytes are not opened from committed state_out columns."});
     out.push_back({"digest and target closure",
-                   false,
                    true,
                    false,
+                   true,
                    "coupled:digest_not_header_bound / coupled:target",
-                   "Needed: proof-bound digest_from_roots and target comparison on the "
-                   "proof-carried digest. Current verifier checks digest after native "
-                   "reference replay."});
+                   "Current: digest_from_roots and target comparison are checked from "
+                   "proof-carried bank/barrier roots before native reference replay. "
+                   "The root contents remain governed by the bank and barrier relations."});
     return out;
 }
 
@@ -744,8 +843,9 @@ AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& opt
     st.packed_bank_bytes = TotalRCCoupPackedBytes(params);
     st.expanded_bank_bytes = TotalRCCoupExpandedBytes(params);
     st.macs_per_nonce = TotalRCCoupMacs(params);
-    st.required_extract_tiles = st.state_bytes / kRCMxBlockLen;
-    st.current_extract_logup_tile_cap = 16;
+    st.required_extract_tiles = RCGkrCoupledRequiredExtractTiles(params);
+    st.current_extract_logup_tile_cap = 0; // 0 == uncapped / all tiles
+    st.current_extract_air_tiles_checked = st.required_extract_tiles;
     st.proof_friendly_transcript =
         RCCoupUsesProofFriendlyPermutation(options.transcript_version);
 
@@ -767,9 +867,10 @@ AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& opt
     st.bank_pages_proof_bound = false;
     st.permutation_proof_bound = st.proof_friendly_transcript;
     st.mix_proof_bound = false;
+    st.extract_all_tiles_native_air_checked = true;
     st.extract_all_tiles_proof_bound = false;
     st.barrier_roots_proof_bound = false;
-    st.digest_target_proof_bound = false;
+    st.digest_target_proof_bound = true;
     st.under_stage_i_budget = false;
 
     if (st.verifier_reruns_reference_digest)
@@ -785,11 +886,9 @@ AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& opt
     if (!st.mix_proof_bound)
         st.blockers.push_back("mix_not_succinctly_proven");
     if (!st.extract_all_tiles_proof_bound)
-        st.blockers.push_back("extract_all_tiles_not_proof_bound");
+        st.blockers.push_back("extract_all_tiles_native_air_not_proof_committed");
     if (!st.barrier_roots_proof_bound)
-        st.blockers.push_back("barrier_roots_sha_not_in_circuit");
-    if (!st.digest_target_proof_bound)
-        st.blockers.push_back("digest_target_not_proof_only_bound");
+        st.blockers.push_back("barrier_roots_sha_native_air_not_proof_committed");
     if (!st.under_stage_i_budget)
         st.blockers.push_back("production_stage_i_budget_unproven");
 
@@ -813,6 +912,154 @@ bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params,
     const RCGkrCoupledV7SuccinctnessStatus st = AssessCoupledV7Succinctness(params, options);
     if (why) *why = st.summary;
     return st.genuinely_succinct;
+}
+
+RCGkrCoupledV7NativeAirAudit AuditCoupledV7NativeAirCoverage(
+    const CBlockHeader& header, int32_t height, const RCCoupParams& params,
+    const RCCoupOptions& options, uint64_t max_bank_pages, uint64_t max_extract_tiles)
+{
+    RCGkrCoupledV7NativeAirAudit audit;
+    if (!ValidateRCCoupParams(params)) {
+        audit.failure = "air_audit:params_invalid";
+        return audit;
+    }
+    if (options.skip_barrier || options.skip_bank_page) {
+        audit.failure = "air_audit:test_hook_options";
+        return audit;
+    }
+
+    std::vector<uint32_t> selected_pages;
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    for (uint32_t b = 0; b < params.barriers; ++b) {
+        for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+            const auto ids = SelectCoupledBankPageIds(
+                b, ell, params, sigma, options.full_bank_schedule,
+                options.transcript_version);
+            if (ids.empty()) {
+                audit.failure = "air_audit:page_schedule";
+                return audit;
+            }
+            selected_pages.insert(selected_pages.end(), ids.begin(), ids.end());
+        }
+    }
+    std::sort(selected_pages.begin(), selected_pages.end());
+    selected_pages.erase(std::unique(selected_pages.begin(), selected_pages.end()),
+                         selected_pages.end());
+    if (max_bank_pages != 0 && selected_pages.size() > max_bank_pages) {
+        audit.over_cap = true;
+        audit.failure = "audit:over_cap";
+        return audit;
+    }
+
+    const uint64_t total_tiles = RCGkrCoupledRequiredExtractTiles(params);
+    if (max_extract_tiles != 0 && total_tiles > max_extract_tiles) {
+        audit.over_cap = true;
+        audit.failure = "audit:over_cap";
+        return audit;
+    }
+
+    CoupledWires wires = BuildCoupledWires(header, height, params, options);
+    if (!wires.ok) {
+        audit.failure = "air_audit:wires:" + wires.note;
+        return audit;
+    }
+
+    FsTranscript fs("BTX_RCGKR_COUPLED_NATIVE_AIR_AUDIT_V1");
+    fs.AbsorbUint256(wires.digest);
+    fs.AbsorbUint256(wires.bank_root);
+    fs.AbsorbU32(params.barriers);
+    fs.AbsorbU32(params.lobes);
+    fs.AbsorbU32(params.lobe_width);
+    fs.AbsorbU32(params.rows_per_lobe);
+    fs.AbsorbU32(params.pages_per_barrier_lobe);
+    fs.AbsorbU32(options.transcript_version);
+    const Fp2 gamma_bank = fs.ChallengeFp2("bank_logup_gamma");
+    const Fp2 gamma_extract = fs.ChallengeFp2("extract_logup_gamma");
+    const Fp2 eta_extract = fs.ChallengeFp2("extract_air_eta");
+    const Fp2 alpha1 = fs.ChallengeFp2("logup_alpha1");
+    const Fp2 alpha2 = fs.ChallengeFp2("logup_alpha2");
+
+    // Bank/page relation: every selected page is tied to its deterministic
+    // page seed by the MxExpand AIR. This still enumerates page bytes here; the
+    // proof-only cutover must commit these AIR columns and prove openings.
+    {
+        gkr_air::TableTM tm_tab;
+        gkr_air::LogUpInstance inst_tm;
+        for (uint32_t page_id : selected_pages) {
+            const uint256 seed = DeriveCoupledBankPageSeed(
+                header, height, page_id, params, options.transcript_version);
+            if (seed.IsNull()) {
+                audit.failure = "air_audit:bank_page_seed";
+                return audit;
+            }
+            const std::vector<int8_t> page =
+                DeriveCoupledBankPage(header, height, page_id, params, options.transcript_version);
+            const auto mx = gkr_air::VerifyMxExpandColumn(
+                seed, params.lobe_width, params.lobe_width, page, tm_tab, gamma_bank, inst_tm);
+            if (!mx.ok) {
+                audit.failure = "air_audit:" + mx.failure;
+                return audit;
+            }
+            ++audit.bank_pages_checked;
+            audit.bank_cells_checked += page.size();
+        }
+        FinalizeSingleLogUpMultiplicities(inst_tm);
+        const auto lookup =
+            gkr_air::VerifyLookupAgainstPreprocessed({inst_tm}, gamma_bank, alpha1, alpha2);
+        if (!lookup.ok) {
+            audit.failure = "air_audit:bank_mxexpand_logup:" + lookup.failure;
+            return audit;
+        }
+        audit.lookup_bits = lookup.logup.achieved_bits;
+        audit.bank_mxexpand_bound = true;
+    }
+
+    {
+        const CoupledExtractAirResult er =
+            CoupledExtractAirLogUp(wires, eta_extract, gamma_extract, alpha1, alpha2,
+                                   /*max_tiles=*/0);
+        if (!er.ok) {
+            audit.failure = "air_audit:" + er.failure;
+            return audit;
+        }
+        audit.extract_tiles_checked = er.checked_tiles;
+        audit.extract_cells_checked = er.checked_tiles * kRCMxBlockLen;
+        audit.lookup_bits = audit.lookup_bits == 0.0
+                                ? er.lookup.logup.achieved_bits
+                                : std::min(audit.lookup_bits, er.lookup.logup.achieved_bits);
+        audit.extract_all_tiles_bound = er.checked_tiles == er.total_tiles;
+    }
+
+    const auto& tags = RCCoupDomainTagsForVersion(options.transcript_version);
+    for (uint32_t b = 0; b < params.barriers; ++b) {
+        const std::vector<uint8_t> pre =
+            CoupledBarrierRootPreimage(b, wires.barriers[b].state_out, tags);
+        const auto sha = gkr_air::CheckSha256dInCircuit(pre, wires.barriers[b].barrier_root);
+        if (!sha.ok) {
+            audit.failure = "air_audit:barrier:" + sha.failure;
+            return audit;
+        }
+        ++audit.barrier_roots_checked;
+        audit.sha_compressions_checked += sha.n_compressions;
+    }
+    audit.barrier_sha_bound = audit.barrier_roots_checked == params.barriers;
+
+    {
+        const std::vector<uint8_t> pre =
+            CoupledEpisodeDigestPreimage(wires.bank_root, wires.barrier_roots, tags);
+        const auto sha = gkr_air::CheckSha256dInCircuit(pre, wires.digest);
+        if (!sha.ok) {
+            audit.failure = "air_audit:digest:" + sha.failure;
+            return audit;
+        }
+        audit.sha_compressions_checked += sha.n_compressions;
+        audit.digest_closure_bound = true;
+    }
+
+    audit.ok = audit.bank_mxexpand_bound && audit.extract_all_tiles_bound &&
+               audit.barrier_sha_bound && audit.digest_closure_bound;
+    if (!audit.ok && audit.failure.empty()) audit.failure = "air_audit:incomplete";
+    return audit;
 }
 
 // ============================================================================
@@ -1020,14 +1267,20 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
     proof.eval = opening.proof.eval;
     proof.batch = opening.proof.batch;
 
-    // Dual-α Extract LogUp over coupled tiles (challenges FS-bound).
+    // R5.extract: ALL coupled tiles, not a bounded sample. The AIR is still
+    // native-grounded today, but every StateBytes()/32 tile now contributes
+    // Construction-II constraints plus canonical T_M/T_X/T_R16 LogUp rows.
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
+    const Fp2 eta = fs.ChallengeFp2("v7c_extract_eta");
     const Fp2 gamma = fs.ChallengeFp2("v7c_gamma");
     proof.logup_alpha1 = fs.ChallengeFp2("v7c_alpha1");
     proof.logup_alpha2 = fs.ChallengeFp2("v7c_alpha2");
-    const auto lr = CoupledExtractLogUpSample(wires, gamma, proof.logup_alpha1,
-                                              proof.logup_alpha2, /*max_tiles=*/16);
-    proof.logup_bits = lr.achieved_bits;
+    const auto er = CoupledExtractAirLogUp(wires, eta, gamma, proof.logup_alpha1,
+                                           proof.logup_alpha2, /*max_tiles=*/0);
+    proof.extract_tiles_covered = er.checked_tiles;
+    proof.extract_all_tiles = er.ok && er.checked_tiles == er.total_tiles;
+    proof.extract_air_constraints = er.n_constraints;
+    proof.logup_bits = er.lookup.logup.achieved_bits;
 
     proof.transcript_hash = fs.Digest();
     proof.over_budget = true;
@@ -1036,9 +1289,9 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
     res.timing.prove_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     res.timing.proof_bytes = EstimateCoupledProofBytes(proof);
-    res.timing.ok = lr.ok;
+    res.timing.ok = er.ok;
     res.timing.over_budget = true; // native grounding — SOUND, not succinct
-    res.timing.note = lr.ok ? proof.note : ("logup: " + lr.failure);
+    res.timing.note = er.ok ? proof.note : er.failure;
     return res;
 }
 
@@ -1066,6 +1319,21 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         return fail("coupled:digest_not_header_bound");
     if (proof.sigma != matmul::v4::DeriveSigma(header)) return fail("coupled:sigma");
 
+    // Proof-carried digest/target closure first. The correctness of the root
+    // contents is checked below, but this relation itself no longer depends on
+    // native reference replay.
+    if (proof.barrier_roots.size() != params.barriers)
+        return fail("coupled:barrier_roots_count");
+    {
+        const auto& tags = RCCoupDomainTagsForVersion(options.transcript_version);
+        const std::vector<uint8_t> ep_pre =
+            CoupledEpisodeDigestPreimage(proof.bank_root, proof.barrier_roots, tags);
+        const gkr_air::Sha256dCheckResult digest_sha =
+            gkr_air::CheckSha256dInCircuit(ep_pre, proof.claimed_digest);
+        if (!digest_sha.ok) return fail("coupled:digest_from_roots");
+    }
+    if (UintToArith256(proof.claimed_digest) > target) return fail("coupled:target");
+
     // SOLE AUTHORITY: native grounding trace (page schedule, π, mix, Extract,
     // roots, bank). This single call exports the immutable int64 reference
     // digest and the wire image; never replay the coupled puzzle twice.
@@ -1073,22 +1341,20 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
     if (!wires.ok) return fail("coupled:wires:" + wires.note);
     const uint256 ref_digest = wires.digest;
     if (proof.claimed_digest != ref_digest) return fail("coupled:digest_mismatch_reference");
-    if (UintToArith256(ref_digest) > target) return fail("coupled:target");
-
-    // F10 structural: exactly params.barriers roots (omission is unexpressible).
-    // Keep this after the reference digest wall so params/profile relabel
-    // attacks reject at the semantic "wrong puzzle" relation, not at whatever
-    // array length happens to differ first.
-    if (proof.barrier_roots.size() != params.barriers)
-        return fail("coupled:barrier_roots_count");
 
     if (proof.bank_root != wires.bank_root) return fail("coupled:bank_root_forged");
     if (proof.barrier_roots != wires.barrier_roots)
         return fail("coupled:barrier_root_forged"); // F10 forged barrier root
-    // Native SHA closure: digest = SHA256d(EPISODE ‖ bank_root ‖ roots…).
-    if (AssembleCoupledEpisodeDigest(proof.bank_root, proof.barrier_roots,
-                                     options.transcript_version) != proof.claimed_digest)
-        return fail("coupled:digest_from_roots");
+    {
+        const auto& tags = RCCoupDomainTagsForVersion(options.transcript_version);
+        for (uint32_t b = 0; b < params.barriers; ++b) {
+            const std::vector<uint8_t> pre =
+                CoupledBarrierRootPreimage(b, wires.barriers[b].state_out, tags);
+            const gkr_air::Sha256dCheckResult br =
+                gkr_air::CheckSha256dInCircuit(pre, proof.barrier_roots[b]);
+            if (!br.ok) return fail("coupled:barrier_sha_air:" + br.failure);
+        }
+    }
 
     // Λ_coup shape (verifier-driven; the proof carries no layout data).
     if (proof.lobes.size() != RCGkrCoupledExpectedLobeCount(params))
@@ -1249,15 +1515,25 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
     if (!BatchedOpeningVerify(claims, opening, base_seed, &open_why))
         return fail("coupled:opening:" + open_why);
 
-    // R5.extract: dual-α LogUp over the grounded coupled tiles (FS-bound α's).
+    // R5.extract: all-tile AIR + dual-α LogUp over the grounded coupled tiles
+    // (FS-bound α's). A stale proof from the old 16-tile sample path fails
+    // here before it can be treated as production evidence.
     fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
+    const Fp2 eta = fs.ChallengeFp2("v7c_extract_eta");
     const Fp2 gamma = fs.ChallengeFp2("v7c_gamma");
     const Fp2 a1 = fs.ChallengeFp2("v7c_alpha1");
     const Fp2 a2 = fs.ChallengeFp2("v7c_alpha2");
     if (!Eq(a1, proof.logup_alpha1) || !Eq(a2, proof.logup_alpha2))
         return fail("coupled:logup_alpha_unbound");
-    const auto lr = CoupledExtractLogUpSample(wires, gamma, a1, a2, /*max_tiles=*/16);
-    if (!lr.ok) return fail("coupled:logup:" + lr.failure);
+    const auto er = CoupledExtractAirLogUp(wires, eta, gamma, a1, a2, /*max_tiles=*/0);
+    if (!er.ok) return fail("coupled:" + er.failure);
+    if (!proof.extract_all_tiles || proof.extract_tiles_covered != er.total_tiles ||
+        proof.extract_tiles_covered != er.checked_tiles)
+        return fail("coupled:extract_tile_count");
+    if (proof.extract_air_constraints != er.n_constraints)
+        return fail("coupled:extract_air_constraints");
+    if (proof.logup_bits != er.lookup.logup.achieved_bits)
+        return fail("coupled:extract_logup_bits");
 
     if (fs.Digest() != proof.transcript_hash) return fail("coupled:transcript_hash");
     if (why) *why = "coupled v7 ok (SOUND, over_budget; arbiter OFF)";

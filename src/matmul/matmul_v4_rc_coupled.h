@@ -453,7 +453,12 @@ DeriveCoupledBankPages(const CBlockHeader& header, int32_t height,
                        const RCCoupParams& params,
                        uint32_t transcript_version = ENC_RC_V1);
 
-/** Single bank page (Streamed path); same seed as DeriveCoupledBankPages[p]. */
+/** Single bank page seed / page (Streamed path); same seed as DeriveCoupledBankPages[p]. */
+[[nodiscard]] uint256
+DeriveCoupledBankPageSeed(const CBlockHeader& header, int32_t height, uint32_t page,
+                          const RCCoupParams& params,
+                          uint32_t transcript_version = ENC_RC_V1);
+
 [[nodiscard]] std::vector<int8_t>
 DeriveCoupledBankPage(const CBlockHeader& header, int32_t height, uint32_t page,
                       const RCCoupParams& params,

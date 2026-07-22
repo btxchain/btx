@@ -102,6 +102,13 @@ BOOST_AUTO_TEST_CASE(coupled_v7_positive_path_byte_parity)
     BOOST_CHECK_EQUAL(pr.proof.feed_evals.size(), rc::RCGkrCoupledExpectedFeedCount(params));
     BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
                       rc::RCGkrCoupledExpectedColumnCount(params) + 2); // + eval f,g
+    // Every coupled Extract tile is AIR-checked and included in the dual-α
+    // canonical LogUp aggregate. This used to be a 16-tile sample.
+    BOOST_CHECK(pr.proof.extract_all_tiles);
+    BOOST_CHECK_EQUAL(pr.proof.extract_tiles_covered,
+                      static_cast<uint64_t>(params.barriers) *
+                          (params.StateBytes() / rc::kRCMxBlockLen));
+    BOOST_CHECK_GT(pr.proof.extract_air_constraints, 0u);
     // Dual-α Extract LogUp cleared the target with margin.
     BOOST_CHECK_GT(pr.proof.logup_bits, 64.0);
     // Honestly non-succinct: native grounding ⇒ over_budget.
@@ -144,6 +151,10 @@ BOOST_AUTO_TEST_CASE(coupled_v7_medium_v3_rows_per_lobe_byte_parity)
     BOOST_CHECK_EQUAL(pr.proof.feed_evals.size(), rc::RCGkrCoupledExpectedFeedCount(params));
     BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
                       rc::RCGkrCoupledExpectedColumnCount(params) + 2);
+    BOOST_CHECK(pr.proof.extract_all_tiles);
+    BOOST_CHECK_EQUAL(pr.proof.extract_tiles_covered,
+                      static_cast<uint64_t>(params.barriers) *
+                          (params.StateBytes() / rc::kRCMxBlockLen));
     BOOST_CHECK(pr.proof.over_budget);
     BOOST_CHECK(pr.timing.over_budget);
 
@@ -153,7 +164,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_medium_v3_rows_per_lobe_byte_parity)
     auto wrong_options = pr.proof;
     wrong_options.options.transcript_version = rc::ENC_RC_V1;
     BOOST_CHECK(!rc::VerifyWinnerCoupledV7(wrong_options, header, 0, target, &why));
-    BOOST_CHECK_EQUAL(why, "coupled:digest_mismatch_reference");
+    BOOST_CHECK_EQUAL(why, "coupled:digest_from_roots");
 }
 
 BOOST_AUTO_TEST_CASE(coupled_v7_v4_affine_permutation_binding_accepts_and_rejects)
@@ -207,12 +218,15 @@ BOOST_AUTO_TEST_CASE(coupled_v7_succinctness_gate_stays_no_go_until_native_groun
     BOOST_CHECK(!st.bank_pages_proof_bound);
     BOOST_CHECK(!st.permutation_proof_bound);
     BOOST_CHECK(!st.mix_proof_bound);
+    BOOST_CHECK(st.extract_all_tiles_native_air_checked);
     BOOST_CHECK(!st.extract_all_tiles_proof_bound);
     BOOST_CHECK(!st.barrier_roots_proof_bound);
-    BOOST_CHECK(!st.digest_target_proof_bound);
+    BOOST_CHECK(st.digest_target_proof_bound);
     BOOST_CHECK(!st.under_stage_i_budget);
-    BOOST_CHECK_EQUAL(st.required_extract_tiles, toy.StateBytes() / rc::kRCMxBlockLen);
-    BOOST_CHECK_EQUAL(st.current_extract_logup_tile_cap, 16u);
+    BOOST_CHECK_EQUAL(st.required_extract_tiles,
+                      uint64_t{toy.barriers} * toy.StateBytes() / rc::kRCMxBlockLen);
+    BOOST_CHECK_EQUAL(st.current_extract_logup_tile_cap, 0u);
+    BOOST_CHECK_EQUAL(st.current_extract_air_tiles_checked, st.required_extract_tiles);
 
     auto has = [&](const char* blocker) {
         return std::find(st.blockers.begin(), st.blockers.end(), blocker) != st.blockers.end();
@@ -222,7 +236,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_succinctness_gate_stays_no_go_until_native_groun
     BOOST_CHECK(has("native_column_root_rebuild"));
     BOOST_CHECK(has("bank_pages_not_pcs_bound_under_bank_root"));
     BOOST_CHECK(has("permutation_requires_proof_friendly_transcript"));
-    BOOST_CHECK(has("extract_all_tiles_not_proof_bound"));
+    BOOST_CHECK(has("extract_all_tiles_native_air_not_proof_committed"));
 
     std::string why;
     BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(toy, &why));
@@ -241,12 +255,48 @@ BOOST_AUTO_TEST_CASE(coupled_v7_production_v3_succinct_gate_counts_real_work)
     BOOST_CHECK_EQUAL(st.packed_bank_bytes, (uint64_t{1536} * 8192 * 8192 * 17) / 32);
     BOOST_CHECK_EQUAL(st.macs_per_nonce,
                       uint64_t{128} * 24 * 8 * 8 * 8192 * 8192);
-    BOOST_CHECK_EQUAL(st.required_extract_tiles, st.state_bytes / rc::kRCMxBlockLen);
-    BOOST_CHECK_GT(st.required_extract_tiles, st.current_extract_logup_tile_cap);
+    BOOST_CHECK_EQUAL(st.required_extract_tiles,
+                      uint64_t{prod.barriers} * st.state_bytes / rc::kRCMxBlockLen);
+    BOOST_CHECK_EQUAL(st.current_extract_logup_tile_cap, 0u);
+    BOOST_CHECK_EQUAL(st.current_extract_air_tiles_checked, st.required_extract_tiles);
 
     std::string why;
     BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(prod, &why));
     BOOST_CHECK(why.find("native_reference_digest_replay") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_native_air_audit_covers_bounded_shapes_and_overcaps_product)
+{
+    auto header = MakeCoupledHeader(777);
+    const auto toy = rc::MakeToyRCCoupParams();
+    const rc::RCCoupOptions toy_options;
+    header.matmul_digest =
+        rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, toy, toy_options, {}, nullptr);
+
+    const auto audit =
+        rc::AuditCoupledV7NativeAirCoverage(header, 0, toy, toy_options,
+                                            /*max_bank_pages=*/64,
+                                            /*max_extract_tiles=*/1024);
+    BOOST_REQUIRE_MESSAGE(audit.ok, audit.failure);
+    BOOST_CHECK(!audit.over_cap);
+    BOOST_CHECK(audit.bank_mxexpand_bound);
+    BOOST_CHECK(audit.extract_all_tiles_bound);
+    BOOST_CHECK(audit.barrier_sha_bound);
+    BOOST_CHECK(audit.digest_closure_bound);
+    BOOST_CHECK_EQUAL(audit.bank_pages_checked, toy.bank_pages);
+    BOOST_CHECK_EQUAL(audit.extract_tiles_checked, rc::RCGkrCoupledRequiredExtractTiles(toy));
+    BOOST_CHECK_EQUAL(audit.barrier_roots_checked, toy.barriers);
+    BOOST_CHECK_GT(audit.sha_compressions_checked, 0u);
+    BOOST_CHECK_GT(audit.lookup_bits, 64.0);
+
+    const auto prod = rc::MakeProductionV3RCCoupParams();
+    const auto prod_audit =
+        rc::AuditCoupledV7NativeAirCoverage(header, 0, prod, rc::MakeV4RCCoupOptions(),
+                                            /*max_bank_pages=*/64,
+                                            /*max_extract_tiles=*/1024);
+    BOOST_CHECK(!prod_audit.ok);
+    BOOST_CHECK(prod_audit.over_cap);
+    BOOST_CHECK_EQUAL(prod_audit.failure, "audit:over_cap");
 }
 
 BOOST_AUTO_TEST_CASE(coupled_v7_relation_status_marks_v4_permutation_as_necessary_not_sufficient)
@@ -269,9 +319,10 @@ BOOST_AUTO_TEST_CASE(coupled_v7_relation_status_marks_v4_permutation_as_necessar
     BOOST_CHECK(st.verifier_rebuilds_column_roots);
     BOOST_CHECK(!st.bank_pages_proof_bound);
     BOOST_CHECK(!st.mix_proof_bound);
+    BOOST_CHECK(st.extract_all_tiles_native_air_checked);
     BOOST_CHECK(!st.extract_all_tiles_proof_bound);
     BOOST_CHECK(!st.barrier_roots_proof_bound);
-    BOOST_CHECK(!st.digest_target_proof_bound);
+    BOOST_CHECK(st.digest_target_proof_bound);
 
     std::string why_v4;
     BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(prod, v4_options, &why_v4));
@@ -313,6 +364,51 @@ BOOST_AUTO_TEST_CASE(coupled_v7_relation_status_marks_v4_permutation_as_necessar
     BOOST_CHECK(!extract->proof_bound);
     BOOST_CHECK(extract->native_grounded);
     BOOST_CHECK(!extract->verifier_sublinear);
+    BOOST_CHECK(extract->construction.find("every StateBytes()/32 tile") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_native_air_audit_covers_toy_bank_extract_sha_digest)
+{
+    auto header = MakeCoupledHeader(29);
+    const auto params = rc::MakeToyRCCoupParams();
+    const auto audit = rc::AuditCoupledV7NativeAirCoverage(
+        header, 0, params, {}, /*max_bank_pages=*/params.bank_pages,
+        /*max_extract_tiles=*/params.barriers * (params.StateBytes() / rc::kRCMxBlockLen));
+
+    BOOST_REQUIRE_MESSAGE(audit.ok, audit.failure);
+    BOOST_CHECK(!audit.over_cap);
+    BOOST_CHECK(audit.bank_mxexpand_bound);
+    BOOST_CHECK(audit.extract_all_tiles_bound);
+    BOOST_CHECK(audit.barrier_sha_bound);
+    BOOST_CHECK(audit.digest_closure_bound);
+    BOOST_CHECK_EQUAL(audit.bank_pages_checked, params.bank_pages);
+    BOOST_CHECK_EQUAL(audit.extract_tiles_checked,
+                      params.barriers * (params.StateBytes() / rc::kRCMxBlockLen));
+    BOOST_CHECK_EQUAL(audit.extract_cells_checked,
+                      uint64_t{params.barriers} * params.StateBytes());
+    BOOST_CHECK_EQUAL(audit.barrier_roots_checked, params.barriers);
+    BOOST_CHECK_GT(audit.bank_cells_checked, 0U);
+    BOOST_CHECK_GT(audit.sha_compressions_checked, 0U);
+    BOOST_CHECK_GE(audit.lookup_bits, 64.0);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_native_air_audit_caps_fail_closed)
+{
+    auto header = MakeCoupledHeader(30);
+    const auto params = rc::MakeToyRCCoupParams();
+
+    const auto bank_cap = rc::AuditCoupledV7NativeAirCoverage(
+        header, 0, params, {}, /*max_bank_pages=*/1, /*max_extract_tiles=*/1024);
+    BOOST_CHECK(!bank_cap.ok);
+    BOOST_CHECK(bank_cap.over_cap);
+    BOOST_CHECK_EQUAL(bank_cap.failure, "audit:over_cap");
+
+    const auto extract_cap = rc::AuditCoupledV7NativeAirCoverage(
+        header, 0, params, {}, /*max_bank_pages=*/params.bank_pages,
+        /*max_extract_tiles=*/1);
+    BOOST_CHECK(!extract_cap.ok);
+    BOOST_CHECK(extract_cap.over_cap);
+    BOOST_CHECK_EQUAL(extract_cap.failure, "audit:over_cap");
 }
 
 // ============================================================================
@@ -352,7 +448,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_forgery_list_rejected)
     {
         auto p = H;
         p.barrier_roots[1].data()[0] ^= 0xFF;
-        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:barrier_root_forged");
+        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:digest_from_roots");
     }
     // F11a — forge the page selection: the committed B operand of (b=0,ℓ=0)
     // must be the ROOT of the natively scheduled bank page — any other page
@@ -443,7 +539,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_forgery_list_rejected)
     {
         auto p = H;
         p.bank_root.data()[0] ^= 0xFF;
-        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:bank_root_forged");
+        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:digest_from_roots");
     }
     // Forge sigma.
     {
@@ -494,6 +590,23 @@ BOOST_AUTO_TEST_CASE(coupled_v7_forgery_list_rejected)
         auto p = H;
         p.logup_alpha1.c0 ^= 1;
         BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:logup_alpha_unbound");
+    }
+    // Forge all-tile Extract coverage metadata: stale 16-tile/sample proofs and
+    // fake AIR-constraint counts must be rejected.
+    {
+        auto p = H;
+        p.extract_all_tiles = false;
+        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:extract_tile_count");
+    }
+    {
+        auto p = H;
+        p.extract_tiles_covered -= 1;
+        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:extract_tile_count");
+    }
+    {
+        auto p = H;
+        p.extract_air_constraints += 1;
+        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:extract_air_constraints");
     }
     // Forge the transcript hash.
     {

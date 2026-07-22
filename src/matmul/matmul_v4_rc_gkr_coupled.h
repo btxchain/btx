@@ -66,7 +66,9 @@
 //     RecomputeCoupledPuzzleReference byte-for-byte (§7.4–§7.6 in-circuit
 //     range/SHA/bank AIRs are the PARKED succinctness gap — same honest
 //     over_budget stance as the Wave-2 episode verifier). The Extract relation
-//     additionally exercises the dual-α LogUp aggregate over sampled tiles.
+//     additionally exercises the committed-cell AIR + dual-α LogUp aggregate
+//     over every coupled tile, but those AIR trace columns are still verifier-
+//     reconstructed rather than proof-opened.
 //   Backward/checkpoint dependency (§7.5): checkpoint modes are digest-
 //     invariant execution policy (non-consensus); the feed-forward data
 //     dependency A_{b+1,ℓ} = s_b[ℓW..(ℓ+1)W) is Λ_coup wiring, enforced by the
@@ -91,7 +93,8 @@ inline constexpr char kRCGkrCoupledV7Statement[] =
     "immutable authority). GEMM succinct via batched-FRI sumcheck + eval-arg; "
     "exchange = committed fixed-segment opening relation; feed-forward = "
     "committed copy openings; perm = ENC_RC_V4+ affine opening relation "
-    "(legacy V1-V3 native-grounded); mix/Extract/barrier-roots/bank = native grounding "
+    "(legacy V1-V3 native-grounded); Extract = all-tile AIR/LogUp but native-grounded; "
+    "mix/barrier-roots/bank = native grounding "
     "(SOUND, over_budget — in-circuit AIRs are the parked succinctness gap). "
     "Never proves toy/unrelated work: claimed digest MUST equal the int64 "
     "coupled reference. Arbiter OFF; nMatMulRCCoupledHeight=INT32_MAX.";
@@ -145,6 +148,12 @@ struct RCGkrCoupledProofV7 {
     /** Dual-α Extract LogUp challenges (FS-bound; §5.6). */
     Fp2 logup_alpha1{};
     Fp2 logup_alpha2{};
+    /** Number of coupled Extract tiles covered by the AIR/LogUp relation. */
+    uint64_t extract_tiles_covered{0};
+    /** True iff every StateBytes()/32 tile across every barrier was checked. */
+    bool extract_all_tiles{false};
+    /** Number of emitted Extract-AIR polynomial identities across covered tiles. */
+    uint64_t extract_air_constraints{0};
     double logup_bits{0.0};
     uint256 transcript_hash{};
     /** Native grounding makes this verifier non-succinct by construction. */
@@ -179,6 +188,7 @@ struct RCGkrCoupledV7SuccinctnessStatus {
     bool bank_pages_proof_bound{false};
     bool permutation_proof_bound{false};
     bool mix_proof_bound{false};
+    bool extract_all_tiles_native_air_checked{false};
     bool extract_all_tiles_proof_bound{false};
     bool barrier_roots_proof_bound{false};
     bool digest_target_proof_bound{false};
@@ -187,8 +197,10 @@ struct RCGkrCoupledV7SuccinctnessStatus {
     uint64_t packed_bank_bytes{0};
     uint64_t expanded_bank_bytes{0};
     uint64_t macs_per_nonce{0};
+    /** Total Extract tiles in the coupled episode: barriers * StateBytes()/32. */
     uint64_t required_extract_tiles{0};
-    uint32_t current_extract_logup_tile_cap{0};
+    uint64_t current_extract_logup_tile_cap{0};
+    uint64_t current_extract_air_tiles_checked{0};
     std::vector<std::string> blockers;
     std::string summary;
 };
@@ -209,6 +221,31 @@ struct RCGkrCoupledV7RelationStatus {
 };
 
 /**
+ * Executable native-AIR coverage for the relations that must eventually move
+ * into proof-carried committed columns. This is intentionally NOT a production
+ * proof-only verifier: it still starts from the native coupled transcript, but
+ * it checks the same MxExpand / Extract / SHA AIR relations over bounded
+ * shapes so those relations have tests before they are wired into proof-only
+ * commitments.
+ */
+struct RCGkrCoupledV7NativeAirAudit {
+    bool ok{false};
+    bool over_cap{false};
+    std::string failure;
+    uint64_t bank_pages_checked{0};
+    uint64_t bank_cells_checked{0};
+    uint64_t extract_tiles_checked{0};
+    uint64_t extract_cells_checked{0};
+    uint64_t barrier_roots_checked{0};
+    uint64_t sha_compressions_checked{0};
+    bool bank_mxexpand_bound{false};
+    bool extract_all_tiles_bound{false};
+    bool barrier_sha_bound{false};
+    bool digest_closure_bound{false};
+    double lookup_bits{0.0};
+};
+
+/**
  * Return a deterministic status object for the current coupled-v7 construction.
  * This function is intentionally consensus-pure: no env vars, no hardware
  * probing, and no native puzzle execution.
@@ -221,6 +258,14 @@ AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& opt
 /** Relation-by-relation production-succinctness map for cryptographic review. */
 [[nodiscard]] std::vector<RCGkrCoupledV7RelationStatus>
 RCGkrCoupledV7RelationStatuses(const RCCoupParams& params, const RCCoupOptions& options);
+
+/** Total Extract tiles in one coupled proof: barriers * StateBytes()/32. */
+[[nodiscard]] uint64_t RCGkrCoupledRequiredExtractTiles(const RCCoupParams& params);
+
+[[nodiscard]] RCGkrCoupledV7NativeAirAudit AuditCoupledV7NativeAirCoverage(
+    const CBlockHeader& header, int32_t height, const RCCoupParams& params,
+    const RCCoupOptions& options, uint64_t max_bank_pages = 64,
+    uint64_t max_extract_tiles = 1024);
 
 /**
  * Convenience hard gate for any future proof-only coupled arbiter. Today this

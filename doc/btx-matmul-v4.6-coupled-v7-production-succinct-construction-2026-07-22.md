@@ -236,16 +236,18 @@ coupled:mix_range
 
 ### R6 — Extract all tiles
 
-The current 16-tile helper is not a production proof. Production must commit the
-full Extract AIR for every tile:
+The shadow verifier now runs the committed-cell Extract AIR and canonical
+T_M/T_X/T_R16 LogUp over every tile instead of the old 16-tile sample.
+Production must still commit the full Extract AIR for every tile:
 
 ```
 tiles_per_barrier = StateBytes() / 32
 ```
 
 For V3 production this is `262144` tiles per barrier and `2097152` tiles per
-nonce over all barriers. The verifier must check committed AIR composition and
-LogUp aggregates, not iterate the tiles.
+nonce over all barriers. The production verifier must check committed AIR
+composition and LogUp aggregates from proof-carried roots/openings, not iterate
+the tiles locally.
 
 Reject labels:
 
@@ -306,4 +308,3 @@ coupled:target
 - adversarial fabricated-witness tests reject at the mechanism relation, not at
   a trivial digest/target gate;
 - independent cryptographic review signs off on the composed bound.
-

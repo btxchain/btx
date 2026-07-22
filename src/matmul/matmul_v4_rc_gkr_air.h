@@ -427,6 +427,22 @@ struct TileTreeCheckResult {
     uint64_t n_compressions{0};  // SHA-256 compressions checked
 };
 
+struct Sha256dCheckResult {
+    bool ok{false};
+    std::string failure;
+    uint256 digest;
+    uint64_t n_compressions{0};
+};
+
+/**
+ * Recompute SHA256d(preimage) with in-circuit, constraint-checked SHA-256
+ * compressions and assert it equals claimed_digest. This is the generic hash
+ * closure primitive for coupled barrier roots and digest-from-roots relations
+ * whose consensus format is a direct SHA256d preimage, not a tile tree.
+ */
+[[nodiscard]] Sha256dCheckResult CheckSha256dInCircuit(const std::vector<uint8_t>& preimage,
+                                                       const uint256& claimed_digest);
+
 /**
  * Recompute the RoundMerkleStream root of `stream` (leaf size `t_leaf`) with
  * in-circuit, constraint-checked SHA-256 compressions and assert it equals

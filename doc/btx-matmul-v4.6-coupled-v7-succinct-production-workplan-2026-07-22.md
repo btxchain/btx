@@ -16,7 +16,8 @@ succinct. It still:
 - derives bank pages natively;
 - rebuilds every coupled column root from native columns;
 - recomputes permutation/mix/Extract/barrier roots locally;
-- samples only 16 Extract tiles in the coupled LogUp helper;
+- checks all Extract tiles through native-grounded AIR/LogUp, but does not yet
+  bind proof-carried Extract AIR trace columns;
 - sets `proof.over_budget=true` / `timing.over_budget=true`.
 
 That is a safe shadow verifier, not a block-sized proof-only consensus verifier.
@@ -32,9 +33,8 @@ The required cutover is consistent with the standard GKR/FRI/LogUp model:
   openings; every claimed value used by the higher-level IOP must be tied back
   to those openings.
 - LogUp/log-derivative lookups are the right family for Extract/range/table
-  constraints, but the coupled verifier must aggregate all production tiles or
-  prove a formal sampled bound. A hard-coded 16-tile sample is not a production
-  proof of the full 8 MiB state.
+  constraints. The shadow verifier now aggregates all coupled Extract tiles
+  natively; production still must move those AIR trace columns into the proof.
 - Recent sumcheck optimization work helps prover time/memory, especially for
   small-value products and equality-polynomial factors, but it does not remove
   the need for bank, permutation, mix, Extract, SHA and digest relations.
@@ -103,9 +103,10 @@ It must not:
 
 7. Extract proof for every tile
    - Reuse the episode Extract AIR, but commit the whole coupled post-mix stream.
-   - Replace the hard-coded `max_tiles=16` coupled sampling with proof coverage
-     for all `StateBytes()/32` tiles, aggregated through committed LogUp/AIR
-     columns.
+   - The native-grounded shadow verifier already removed the old
+     `max_tiles=16` sample and covers all `barriers * StateBytes()/32` tiles.
+   - Production still must carry committed AIR/LogUp columns in the proof,
+     rather than letting the verifier trace each tile locally.
    - The verifier checks sampled openings of the AIR composition, not every tile.
 
 8. Barrier-root and digest proof

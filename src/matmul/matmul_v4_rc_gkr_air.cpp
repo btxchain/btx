@@ -17,6 +17,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <unordered_map>
 
 // ENC_RC Extract AIR — implementation. See header for the high-level map and
 // the blueprint references (§5, Thm 5.2). The int64 reference in
@@ -949,11 +950,34 @@ void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                                  LogUpInstance& inst_r16)
 {
     // Multiplicity m_j = number of witness rows equal to table row j.
+    // This must be linear-ish in the witness size: coupled all-tile Extract
+    // coverage emits thousands of rows even for toy shapes, and production
+    // shapes are orders larger. The old nested witness×table scan was fine for
+    // single-tile unit tests but becomes the verifier bottleneck as soon as the
+    // 16-tile cap is removed.
     auto build_mult = [](LogUpInstance& in) {
         in.table_mult.assign(in.table.size(), 0);
+        struct PairHash {
+            size_t operator()(const std::array<uint64_t, 2>& x) const
+            {
+                uint64_t h = x[0] ^ (x[1] + 0x9e3779b97f4a7c15ull + (x[0] << 6) + (x[0] >> 2));
+                h ^= h >> 33;
+                h *= 0xff51afd7ed558ccdULL;
+                h ^= h >> 33;
+                h *= 0xc4ceb9fe1a85ec53ULL;
+                h ^= h >> 33;
+                return static_cast<size_t>(h);
+            }
+        };
+        std::unordered_map<std::array<uint64_t, 2>, size_t, PairHash> table_index;
+        table_index.reserve(in.table.size());
+        for (size_t j = 0; j < in.table.size(); ++j) {
+            table_index.emplace(gkr_field::ToU64Pair(in.table[j]), j);
+        }
         for (const Fp2& wt : in.witness) {
-            for (size_t j = 0; j < in.table.size(); ++j) {
-                if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
+            const auto it = table_index.find(gkr_field::ToU64Pair(wt));
+            if (it != table_index.end()) {
+                in.table_mult[it->second] += 1;
             }
         }
     };
@@ -1792,6 +1816,29 @@ bool MxExpandIntermediateTamperRejected()
 // Tile-tree AIR (§6.3): in-circuit SHA256d Merkle tile-tree over the committed
 // extract byte-stream. Byte-exact to RoundMerkleStream / BuildTileTreeRoot.
 // ===========================================================================
+
+Sha256dCheckResult CheckSha256dInCircuit(const std::vector<uint8_t>& preimage,
+                                         const uint256& claimed_digest)
+{
+    Sha256dCheckResult r;
+    std::vector<ShaCompressTrace> traces;
+    const uint256 digest = ToUint256(Sha256dInCircuit(preimage.data(), preimage.size(), traces));
+    std::string fail;
+    for (const auto& ct : traces) {
+        ++r.n_compressions;
+        if (!CheckShaCompress(ct, fail)) {
+            r.failure = "sha256d:" + fail;
+            return r;
+        }
+    }
+    r.digest = digest;
+    if (r.digest != claimed_digest) {
+        r.failure = "sha256d:digest_mismatch";
+        return r;
+    }
+    r.ok = true;
+    return r;
+}
 
 namespace {
 

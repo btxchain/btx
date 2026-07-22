@@ -918,17 +918,24 @@ uint256 FingerprintRCCoupParams(const RCCoupParams& p)
     return Sha256dBytes(buf.data(), buf.size());
 }
 
-std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
-                                          uint32_t page, const RCCoupParams& params,
-                                          uint32_t transcript_version)
+uint256 DeriveCoupledBankPageSeed(const CBlockHeader& header, int32_t height, uint32_t page,
+                                  const RCCoupParams& params, uint32_t transcript_version)
 {
     // Out-of-range page → empty (reject), never assert/crash.
     if (params.bank_pages == 0 || page >= params.bank_pages) return {};
     if (params.lobe_width == 0 || (params.lobe_width % 32) != 0) return {};
     const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     const uint256 bank_root_seed = BankRootSeed(header, height, transcript_version);
+    return Sha256TaggedU32(tags.bank, TagLen(tags.bank), bank_root_seed, page);
+}
+
+std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
+                                          uint32_t page, const RCCoupParams& params,
+                                          uint32_t transcript_version)
+{
     const uint256 page_seed =
-        Sha256TaggedU32(tags.bank, TagLen(tags.bank), bank_root_seed, page);
+        DeriveCoupledBankPageSeed(header, height, page, params, transcript_version);
+    if (page_seed.IsNull()) return {};
     return ExpandMxDequantInt8(page_seed, params.lobe_width, params.lobe_width);
 }
 
