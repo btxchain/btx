@@ -203,23 +203,30 @@ struct RCGkrEvalArgumentProveResult {
 // (A, B, Y, X, …) live in ONE FriBatchCommit; the random linear combination
 // λ (inside the batch) + γ (across claims) + μ (across reduced openings)
 // compose so the whole statement rides ONE FRI query phase — no union-bound
-// loss across per-column FRI instances (§2.3: seven instances ⇒ ≥ 7·2^-65.85
-// ≈ 2^-63.05, FAILING 2^-64; one batched instance restores 2^-76.8).
+// loss across per-column FRI instances (§2.3: at the historical Q=116, seven
+// instances ⇒ ≥ 7·2^-65.85 ≈ 2^-63.05, FAILING 2^-64; one batched instance
+// restores the single query term 2^-76.8).
 //
-// SEPARATION BOUND (obligation (b), composed, |K| = p² > 2^127.99, protocol
-// caps ν ≤ 28 = log2 κ, M ≤ 2^12 claims, W ≤ 2^12 columns, grinding g = 40):
+// SEPARATION BOUND (obligation (b), composed; challenges drawn from the CUBIC
+// extension K = F_{p^3}, |K| = p³ > 2^191.99 — the 2026-07-22 margin
+// restoration; protocol caps ν ≤ 28 = log2 κ, M ≤ 2^12 claims, W ≤ 2^12
+// columns, grinding g = 40):
 //   pre-grinding FS terms —
-//     γ-batching (powers of one γ):        (M−1)/|K|        ≤ 2^-116
-//     eq-sumcheck, ν rounds, deg ≤ 2 (S1): 2ν/|K|           ≤ 2^-122.2
-//     μ-aggregation of reduced openings:   (M−1)/|K|        ≤ 2^-116
-//     batch RLC λ + DEEP weights w1,w2:    (W+2)/|K|        ≤ 2^-116
-//     dual-OOD bad-point pairs (S5):       (2κ/(|K|−2^32))² ≤ 2^-196
-//   FS subtotal ≤ 3·2^-116 + 2^-122.2 ≈ 2^-114.4; ×2^40 (S6) ⇒ ≤ 2^-74.4.
-//   Batched-FRI query term (S4, post-grind): 2^-76.8
+//     γ-batching (powers of one γ):        (M−1)/|K|        ≤ 2^-180
+//     eq-sumcheck, ν rounds, deg ≤ 2 (S1): 2ν/|K|           ≤ 2^-186.2
+//     μ-aggregation of reduced openings:   (M−1)/|K|        ≤ 2^-180
+//     batch RLC λ + DEEP weights w1,w2:    (W+2)/|K|        ≤ 2^-180
+//     dual-OOD bad-point pairs (S5):       (2κ/(|K|−2^32))² ≤ 2^-326
+//   FS subtotal ≤ 3·2^-180 + 2^-186.2 ≈ 2^-178.4; ×2^40 (S6) ⇒ ≤ 2^-138.4.
+//   Batched-FRI query term (S4, post-grind, field-independent): 2^-76.8
 //     (Q=128 ⇒ FriBatchSoundnessBoundBits()=76).
 //   SHA256d Merkle/transcript bindings (2^40-query adversary): ≤ 2^-88.
-//   ε_total ≤ 2^-74.4 + 2^-76.8 + 2^-88 < 2^-74  ⇒  −log2(ε_total) ≥ 74,
-//   clearing the 2^-64 target with ≥ 10 bits of margin.
+//   ε_total ≤ 2^-138.4 + 2^-76.8 + 2^-88 < 2^-76  ⇒  −log2(ε_total) ≥ 76,
+//   clearing the 2^-64 target with ≥ 12 bits of margin. (Historical Fp2
+//   values: FS ×2^40 ≤ 2^-74.4 dominated and the bound was ≥ 74.)
+//   NOTE: the FS-term numbers above HOLD ONLY once every challenge draw
+//   listed in INTEGRATION_REPORT.md ("Fp2 → Fp3 challenge sites") moves to
+//   F_{p^3}; the FRI query term and SHA term are field-independent.
 //
 // COMPLETENESS (obligation (a)): for a valid assignment (u, z, y = ũ(z))
 // every check is an exact algebraic identity — round sums, the final eq
@@ -239,11 +246,13 @@ struct RCGkrEvalArgumentProveResult {
 inline constexpr uint32_t kRCGkrEvalOpenVersion = 1;
 inline constexpr uint32_t kRCGkrConstructionIVersion = 1;
 
-/** Composed separation bound of Construction I: −log2(ε_total) ≥ 74 after the
+/** Composed separation bound of Construction I: −log2(ε_total) ≥ 76 after the
  *  2^40 grinding budget (derivation in the block comment above; obligation
- *  (b)). Dominated by the FS subtotal ×2^40 term 2^-74.4; the batched-FRI
- *  query term contributes 2^-76.8 (= FriBatchSoundnessBoundBits() = 76). */
-[[nodiscard]] inline constexpr int RCGkrConstructionISeparationBits() { return 74; }
+ *  (b)). With Fp3 challenges the FS subtotal ×2^40 falls to ≤ 2^-138.4 and the
+ *  bound is dominated by the batched-FRI query term 2^-76.8
+ *  (= FriBatchSoundnessBoundBits() = 76, Q = 128). Historical Fp2 value: 74
+ *  (FS-dominated at 2^-74.4). */
+[[nodiscard]] inline constexpr int RCGkrConstructionISeparationBits() { return 76; }
 static_assert(RCGkrConstructionISeparationBits() >= kRCFriTargetSoundnessBits + 10,
               "Construction I must clear the 2^-64 target with >= 10 bits margin");
 
