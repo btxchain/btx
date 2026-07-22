@@ -665,6 +665,15 @@ RCGkrCoupledV7RelationStatuses(const RCCoupParams& params, const RCCoupOptions& 
                    "Current: exchange opening at fixed segment bits equals the lobe Y "
                    "claim and is batched into the same opening proof. Still "
                    "native-grounded because exchange column root is rebuilt."});
+    out.push_back({"feed-forward copy",
+                   true,
+                   true,
+                   true,
+                   "coupled:opening:*",
+                   "Current: committed state_out segment from barrier b is opened at the same "
+                   "random segment point as A for barrier b+1 and both are forced equal by "
+                   "Construction-I batched openings. Still native-grounded because the verifier "
+                   "rebuilds both column roots from the reference transcript."});
     out.push_back({"permutation",
                    proof_friendly_perm,
                    true,
@@ -751,6 +760,7 @@ AssessCoupledV7Succinctness(const RCCoupParams& params, const RCCoupOptions& opt
     // Landed production-direction pieces. These are not sufficient for
     // proof-only consensus while the verifier still rebuilds the witness roots.
     st.full_schedule_gemm_proof_bound = true;
+    st.feed_forward_proof_bound = true;
     st.opening_claims_batched = true;
 
     // The remaining relations are not yet proved by a block-sized proof object.
@@ -954,6 +964,43 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
         claims.push_back({ids.x(b), PointConcatExtend(rm, {}, nu), vm});
     }
 
+    // R5.feed-forward: state_out segment of barrier b is the next barrier's A
+    // operand for the same lobe. This is a true succinct copy relation: both
+    // sides are committed columns opened at the same verifier-chosen segment
+    // point and forced equal by Construction I.
+    proof.feed_evals.resize(RCGkrCoupledExpectedFeedCount(params));
+    for (uint32_t b = 0; b + 1 < params.barriers; ++b) {
+        for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+            const size_t fi = static_cast<size_t>(b) * params.lobes + ell;
+            fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("feed"), 4);
+            fs.AbsorbU32(static_cast<uint32_t>(fi));
+            std::vector<Fp2> ri(nu_m);
+            std::vector<Fp2> rj(nu_w);
+            for (uint32_t t = 0; t < nu_m; ++t) ri[t] = fs.ChallengeFp2("v7c_feed_ri");
+            for (uint32_t t = 0; t < nu_w; ++t) rj[t] = fs.ChallengeFp2("v7c_feed_rj");
+
+            const Fp2 next_a =
+                MleEvalMatrix(wires.barriers[b + 1].lobes[ell].A, M, W, ri, rj);
+            const size_t seg_off = static_cast<size_t>(ell) * M * W;
+            const Fp2 prev_s =
+                MleEvalI8MatrixSegment(wires.barriers[b].state_out, seg_off, M, W, ri, rj);
+            if (!Eq(next_a, prev_s)) {
+                res.timing.note = "feed-forward transcript mismatch";
+                return res;
+            }
+            proof.feed_evals[fi] = next_a;
+            fs.AbsorbFp2(next_a);
+
+            claims.push_back({ids.a(b + 1, ell), PointConcatExtend(rj, ri, nu), next_a});
+            std::vector<Fp2> seg_bits(nu_l);
+            for (uint32_t t = 0; t < nu_l; ++t)
+                seg_bits[t] = ((ell >> t) & 1u) ? Fp2::One() : Fp2::Zero();
+            std::vector<Fp2> state_high = ri;
+            state_high.insert(state_high.end(), seg_bits.begin(), seg_bits.end());
+            claims.push_back({ids.s(b), PointConcatExtend(rj, state_high, nu), next_a});
+        }
+    }
+
     // Construction I: γ-batched MLE opening sumcheck + Stage-2 eval argument
     // inside the SAME batched FRI instance. This is the production-direction
     // opening primitive; it avoids a separate per-claim FRI/eval union.
@@ -1012,10 +1059,6 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         return fail("coupled:digest_not_header_bound");
     if (proof.sigma != matmul::v4::DeriveSigma(header)) return fail("coupled:sigma");
 
-    // F10 structural: exactly params.barriers roots (omission is unexpressible).
-    if (proof.barrier_roots.size() != params.barriers)
-        return fail("coupled:barrier_roots_count");
-
     // SOLE AUTHORITY: native grounding trace (page schedule, π, mix, Extract,
     // roots, bank). This single call exports the immutable int64 reference
     // digest and the wire image; never replay the coupled puzzle twice.
@@ -1024,6 +1067,14 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
     const uint256 ref_digest = wires.digest;
     if (proof.claimed_digest != ref_digest) return fail("coupled:digest_mismatch_reference");
     if (UintToArith256(ref_digest) > target) return fail("coupled:target");
+
+    // F10 structural: exactly params.barriers roots (omission is unexpressible).
+    // Keep this after the reference digest wall so params/profile relabel
+    // attacks reject at the semantic "wrong puzzle" relation, not at whatever
+    // array length happens to differ first.
+    if (proof.barrier_roots.size() != params.barriers)
+        return fail("coupled:barrier_roots_count");
+
     if (proof.bank_root != wires.bank_root) return fail("coupled:bank_root_forged");
     if (proof.barrier_roots != wires.barrier_roots)
         return fail("coupled:barrier_root_forged"); // F10 forged barrier root
@@ -1037,6 +1088,8 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         return fail("coupled:lobe_count");
     if (proof.perm_evals.size() != params.barriers || proof.mix_evals.size() != params.barriers)
         return fail("coupled:perm_mix_count");
+    if (proof.feed_evals.size() != RCGkrCoupledExpectedFeedCount(params))
+        return fail("coupled:feed_count");
 
     // Rebuild the columns and BIND the commitment to ground truth. This is the
     // page-selection binding (F11): every B column must be the ROOT of the
@@ -1150,6 +1203,32 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         if (!src_point.empty())
             claims.push_back({ids.e(b), PointConcatExtend(src_point, {}, nu), vp});
         claims.push_back({ids.x(b), PointConcatExtend(rm, {}, nu), vm});
+    }
+
+    // R5.feed-forward: proof-bound copy from committed state_out segment to the
+    // next barrier's committed A operand. The verifier does not recompute this
+    // scalar natively; Construction I binds both openings to committed columns
+    // and forces equality at a random point.
+    for (uint32_t b = 0; b + 1 < params.barriers; ++b) {
+        for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+            const size_t fi = static_cast<size_t>(b) * params.lobes + ell;
+            fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("feed"), 4);
+            fs.AbsorbU32(static_cast<uint32_t>(fi));
+            std::vector<Fp2> ri(nu_m);
+            std::vector<Fp2> rj(nu_w);
+            for (uint32_t t = 0; t < nu_m; ++t) ri[t] = fs.ChallengeFp2("v7c_feed_ri");
+            for (uint32_t t = 0; t < nu_w; ++t) rj[t] = fs.ChallengeFp2("v7c_feed_rj");
+            const Fp2 feed = proof.feed_evals[fi];
+            fs.AbsorbFp2(feed);
+
+            claims.push_back({ids.a(b + 1, ell), PointConcatExtend(rj, ri, nu), feed});
+            std::vector<Fp2> seg_bits(nu_l);
+            for (uint32_t t = 0; t < nu_l; ++t)
+                seg_bits[t] = ((ell >> t) & 1u) ? Fp2::One() : Fp2::Zero();
+            std::vector<Fp2> state_high = ri;
+            state_high.insert(state_high.end(), seg_bits.begin(), seg_bits.end());
+            claims.push_back({ids.s(b), PointConcatExtend(rj, state_high, nu), feed});
+        }
     }
 
     // Construction I: γ-batched MLE opening sumcheck + Stage-2 eval argument

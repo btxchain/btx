@@ -988,10 +988,11 @@ BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
 
 BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
 {
-    // F7: V3 domain strings must not collide with V1/V2 families.
+    // F7: V3/V4 domain strings must not collide with older families.
     const auto& v1 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V1);
     const auto& v2 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V2);
     const auto& v3 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V3);
+    const auto& v4 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V4);
     const char* const fields_v1[] = {v1.episode, v1.bank,    v1.lobe,    v1.barrier,
                                      v1.perm,    v1.mix,     v1.extract, v1.full_bank,
                                      v1.exchange};
@@ -1001,15 +1002,23 @@ BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
     const char* const fields_v3[] = {v3.episode, v3.bank,    v3.lobe,    v3.barrier,
                                      v3.perm,    v3.mix,     v3.extract, v3.full_bank,
                                      v3.exchange};
+    const char* const fields_v4[] = {v4.episode, v4.bank,    v4.lobe,    v4.barrier,
+                                     v4.perm,    v4.mix,     v4.extract, v4.full_bank,
+                                     v4.exchange};
     for (size_t i = 0; i < 9; ++i) {
         BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v2[i]));
         BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v3[i]));
+        BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v4[i]));
         BOOST_CHECK(std::string(fields_v2[i]) != std::string(fields_v3[i]));
+        BOOST_CHECK(std::string(fields_v2[i]) != std::string(fields_v4[i]));
+        BOOST_CHECK(std::string(fields_v3[i]) != std::string(fields_v4[i]));
         BOOST_CHECK(std::string(fields_v3[i]).find("_V3") != std::string::npos);
+        BOOST_CHECK(std::string(fields_v4[i]).find("_V4") != std::string::npos);
     }
     BOOST_CHECK_EQUAL(std::string(v1.episode), "BTX_RC_COUP_EPISODE_V1");
     BOOST_CHECK_EQUAL(std::string(v2.episode), "BTX_RC_COUP_EPISODE_V2");
     BOOST_CHECK_EQUAL(std::string(v3.episode), "BTX_RC_COUP_EPISODE_V3");
+    BOOST_CHECK_EQUAL(std::string(v4.episode), "BTX_RC_COUP_EPISODE_V4");
 
     // V3 shape + V1 domains must diverge from V3 domains (proves selection matters).
     const auto header = MakeCoupHeader(42);
@@ -1033,6 +1042,34 @@ BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
     Consensus::Params p2;
     p2.nMatMulRCCoupledProfile = 2;
     BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p2).transcript_version, rc::ENC_RC_V1);
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_v4_proof_friendly_permutation_is_bijective)
+{
+    const auto params = rc::MakeToyRCCoupParams();
+    const uint256 sigma = matmul::v4::DeriveSigma(MakeCoupHeader(77));
+    BOOST_CHECK(!rc::RCCoupUsesProofFriendlyPermutation(rc::ENC_RC_V3));
+    BOOST_CHECK(rc::RCCoupUsesProofFriendlyPermutation(rc::ENC_RC_V4));
+
+    const auto spec =
+        rc::DeriveCoupledProofFriendlyPermutationSpec(sigma, /*barrier=*/2, params,
+                                                      rc::ENC_RC_V4);
+    BOOST_REQUIRE_EQUAL(spec.n, params.StateBytes());
+    BOOST_REQUIRE_EQUAL(spec.out_to_in_bit.size(), spec.bits);
+    BOOST_REQUIRE_EQUAL(spec.xor_mask_bit.size(), spec.bits);
+
+    const auto pi =
+        rc::DeriveCoupledBalancedPermutation(sigma, /*barrier=*/2, params, rc::ENC_RC_V4);
+    BOOST_REQUIRE(rc::IsBalancedPermutation(pi, params.StateBytes()));
+    std::vector<bool> seen(params.StateBytes(), false);
+    for (uint32_t src = 0; src < params.StateBytes(); ++src) {
+        const uint32_t dst = rc::ApplyCoupledProofFriendlyPermutationIndex(src, spec);
+        BOOST_REQUIRE_LT(dst, params.StateBytes());
+        BOOST_CHECK_EQUAL(dst, pi[src]);
+        BOOST_CHECK_EQUAL(rc::InvertCoupledProofFriendlyPermutationIndex(dst, spec), src);
+        BOOST_CHECK(!seen[dst]);
+        seen[dst] = true;
+    }
 }
 
 

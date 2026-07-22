@@ -68,6 +68,7 @@ struct ColIds {
     uint32_t e(uint32_t b) const { return base(b) + 3 * lobes; }
     uint32_t p(uint32_t b) const { return base(b) + 3 * lobes + 1; }
     uint32_t x(uint32_t b) const { return base(b) + 3 * lobes + 2; }
+    uint32_t s(uint32_t b) const { return base(b) + 3 * lobes + 3; }
 };
 
 } // namespace
@@ -98,6 +99,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_positive_path_byte_parity)
     // Structural shape driven by Λ_coup, not prover data.
     BOOST_CHECK_EQUAL(pr.proof.barrier_roots.size(), params.barriers);
     BOOST_CHECK_EQUAL(pr.proof.lobes.size(), rc::RCGkrCoupledExpectedLobeCount(params));
+    BOOST_CHECK_EQUAL(pr.proof.feed_evals.size(), rc::RCGkrCoupledExpectedFeedCount(params));
     BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
                       rc::RCGkrCoupledExpectedColumnCount(params) + 2); // + eval f,g
     // Dual-α Extract LogUp cleared the target with margin.
@@ -139,6 +141,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_medium_v3_rows_per_lobe_byte_parity)
     BOOST_CHECK_EQUAL(pr.proof.options.transcript_version, rc::ENC_RC_V3);
     BOOST_CHECK_EQUAL(pr.proof.options.exchange_rounds, 0u);
     BOOST_CHECK_EQUAL(pr.proof.lobes.size(), rc::RCGkrCoupledExpectedLobeCount(params));
+    BOOST_CHECK_EQUAL(pr.proof.feed_evals.size(), rc::RCGkrCoupledExpectedFeedCount(params));
     BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
                       rc::RCGkrCoupledExpectedColumnCount(params) + 2);
     BOOST_CHECK(pr.proof.over_budget);
@@ -153,6 +156,40 @@ BOOST_AUTO_TEST_CASE(coupled_v7_medium_v3_rows_per_lobe_byte_parity)
     BOOST_CHECK_EQUAL(why, "coupled:digest_mismatch_reference");
 }
 
+BOOST_AUTO_TEST_CASE(coupled_v7_v4_affine_permutation_binding_accepts_and_rejects)
+{
+    auto header = MakeCoupledHeader(126);
+    const auto params = rc::MakeToyRCCoupParams();
+    rc::RCCoupOptions options;
+    options.transcript_version = rc::ENC_RC_V4;
+    options.exchange_rounds = 0;
+    BOOST_REQUIRE(rc::RCCoupUsesProofFriendlyPermutation(options.transcript_version));
+
+    const uint256 dig =
+        rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, params, options, {}, nullptr);
+    BOOST_REQUIRE(!dig.IsNull());
+    header.matmul_digest = dig;
+    const arith_uint256 target = MaxTarget();
+
+    const auto pr = rc::ProveWinnerCoupledV7(header, 0, params, target, dig, options);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    BOOST_CHECK_EQUAL(pr.proof.options.transcript_version, rc::ENC_RC_V4);
+
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerCoupledV7(pr.proof, header, 0, target, &why), why);
+
+    // In V4 the verifier does not recompute the permutation MLE by scanning the
+    // state. The scalar is bound by the eval argument at both p(r_dst) and
+    // e(pi^{-1}(r_dst)); mutating it must fail there, not at a native
+    // Fisher-Yates gate.
+    auto bad = pr.proof;
+    bad.perm_evals[0].c0 ^= 1;
+    BOOST_CHECK(!rc::VerifyWinnerCoupledV7(bad, header, 0, target, &why));
+    BOOST_CHECK_MESSAGE(why != "coupled:perm_eval_forged",
+                        std::string("V4 must not use the native Fisher-Yates perm gate; got ") +
+                            why);
+}
+
 BOOST_AUTO_TEST_CASE(coupled_v7_succinctness_gate_stays_no_go_until_native_grounding_removed)
 {
     const auto toy = rc::MakeToyRCCoupParams();
@@ -160,6 +197,10 @@ BOOST_AUTO_TEST_CASE(coupled_v7_succinctness_gate_stays_no_go_until_native_groun
     BOOST_CHECK(st.params_valid);
     BOOST_CHECK(!st.production_v3_shape);
     BOOST_CHECK(!st.genuinely_succinct);
+    BOOST_CHECK(!st.proof_friendly_transcript);
+    BOOST_CHECK(st.full_schedule_gemm_proof_bound);
+    BOOST_CHECK(st.feed_forward_proof_bound);
+    BOOST_CHECK(st.opening_claims_batched);
     BOOST_CHECK(st.verifier_reruns_reference_digest);
     BOOST_CHECK(st.verifier_rebuilds_native_wires);
     BOOST_CHECK(st.verifier_rebuilds_column_roots);
@@ -180,6 +221,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_succinctness_gate_stays_no_go_until_native_groun
     BOOST_CHECK(has("native_wire_regeneration"));
     BOOST_CHECK(has("native_column_root_rebuild"));
     BOOST_CHECK(has("bank_pages_not_pcs_bound_under_bank_root"));
+    BOOST_CHECK(has("permutation_requires_proof_friendly_transcript"));
     BOOST_CHECK(has("extract_all_tiles_not_proof_bound"));
 
     std::string why;
@@ -205,6 +247,63 @@ BOOST_AUTO_TEST_CASE(coupled_v7_production_v3_succinct_gate_counts_real_work)
     std::string why;
     BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(prod, &why));
     BOOST_CHECK(why.find("native_reference_digest_replay") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_relation_status_marks_v4_permutation_as_necessary_not_sufficient)
+{
+    const auto prod = rc::MakeProductionV3RCCoupParams();
+    auto v4_options = rc::MakeV3RCCoupOptions();
+    v4_options.transcript_version = rc::ENC_RC_V4;
+
+    const auto st = rc::AssessCoupledV7Succinctness(prod, v4_options);
+    BOOST_CHECK(st.params_valid);
+    BOOST_CHECK(st.production_v3_shape);
+    BOOST_CHECK(st.proof_friendly_transcript);
+    BOOST_CHECK(st.permutation_proof_bound);
+    BOOST_CHECK(st.full_schedule_gemm_proof_bound);
+    BOOST_CHECK(st.feed_forward_proof_bound);
+    BOOST_CHECK(st.opening_claims_batched);
+    BOOST_CHECK(!st.genuinely_succinct);
+    BOOST_CHECK(st.verifier_reruns_reference_digest);
+    BOOST_CHECK(st.verifier_rebuilds_native_wires);
+    BOOST_CHECK(st.verifier_rebuilds_column_roots);
+    BOOST_CHECK(!st.bank_pages_proof_bound);
+    BOOST_CHECK(!st.mix_proof_bound);
+    BOOST_CHECK(!st.extract_all_tiles_proof_bound);
+    BOOST_CHECK(!st.barrier_roots_proof_bound);
+    BOOST_CHECK(!st.digest_target_proof_bound);
+
+    const auto rels = rc::RCGkrCoupledV7RelationStatuses(prod, v4_options);
+    auto find_rel = [&](const char* name) {
+        return std::find_if(rels.begin(), rels.end(), [&](const auto& r) {
+            return r.name == name;
+        });
+    };
+
+    const auto gemm = find_rel("full-schedule GEMM");
+    BOOST_REQUIRE(gemm != rels.end());
+    BOOST_CHECK(gemm->proof_bound);
+    BOOST_CHECK(gemm->native_grounded);
+    BOOST_CHECK(gemm->verifier_sublinear);
+
+    const auto perm = find_rel("permutation");
+    BOOST_REQUIRE(perm != rels.end());
+    BOOST_CHECK(perm->proof_bound);
+    BOOST_CHECK(perm->native_grounded);
+    BOOST_CHECK(perm->verifier_sublinear);
+    BOOST_CHECK(perm->construction.find("ENC_RC_V4") != std::string::npos);
+
+    const auto feed = find_rel("feed-forward copy");
+    BOOST_REQUIRE(feed != rels.end());
+    BOOST_CHECK(feed->proof_bound);
+    BOOST_CHECK(feed->native_grounded);
+    BOOST_CHECK(feed->verifier_sublinear);
+
+    const auto extract = find_rel("Extract all tiles");
+    BOOST_REQUIRE(extract != rels.end());
+    BOOST_CHECK(!extract->proof_bound);
+    BOOST_CHECK(extract->native_grounded);
+    BOOST_CHECK(!extract->verifier_sublinear);
 }
 
 // ============================================================================
@@ -288,6 +387,22 @@ BOOST_AUTO_TEST_CASE(coupled_v7_forgery_list_rejected)
     {
         auto p = H;
         p.batch.columns[ids.x(1)].root.data()[0] ^= 0xFF;
+        BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:column_not_grounded");
+    }
+    // Feed-forward copy relation: committed state_out segment of barrier b
+    // must equal next barrier's committed A operand at the sampled point.
+    {
+        auto p = H;
+        BOOST_REQUIRE(!p.feed_evals.empty());
+        p.feed_evals[0].c0 ^= 1;
+        const std::string w = reject_why(p, header, target);
+        BOOST_CHECK_MESSAGE(w.rfind("coupled:opening:", 0) == 0 ||
+                                w == "coupled:transcript_hash",
+                            w);
+    }
+    {
+        auto p = H;
+        p.batch.columns[ids.s(0)].root.data()[0] ^= 0xFF;
         BOOST_CHECK_EQUAL(reject_why(p, header, target), "coupled:column_not_grounded");
     }
     // Forge a coupled operand root (A = feed-forward state slice).

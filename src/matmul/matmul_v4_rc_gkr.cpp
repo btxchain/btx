@@ -220,15 +220,6 @@ uint32_t Log2Exact(uint32_t n)
     return l;
 }
 
-Fp2 EvalEqBit(const Fp2& r, uint32_t bit) { return bit ? r : Sub(Fp2::One(), r); }
-
-Fp2 EqFactor(const std::vector<Fp2>& r, uint32_t index)
-{
-    Fp2 acc = Fp2::One();
-    for (size_t i = 0; i < r.size(); ++i) acc = Mul(acc, EvalEqBit(r[i], (index >> i) & 1u));
-    return acc;
-}
-
 Fp2 EvalDeg2(const Fp2& g0, const Fp2& g1, const Fp2& g2, const Fp2& x)
 {
     const Fp2 inv2 = Inv(Fp2::FromFp(2));
@@ -245,9 +236,8 @@ std::vector<RCGkrSumcheckRound> ProveProductK(const std::vector<Fp2>& A, uint32_
                                               Fp2& out_a_at_r, Fp2& out_b_at_r)
 {
     const uint32_t k_pad = RCGkrNextPow2(k_dim);
-    std::vector<Fp2> wi(RCGkrNextPow2(m), Fp2::Zero()), wj(RCGkrNextPow2(n), Fp2::Zero());
-    for (uint32_t i = 0; i < m; ++i) wi[i] = EqFactor(ri, i);
-    for (uint32_t j = 0; j < n; ++j) wj[j] = EqFactor(rj, j);
+    const std::vector<Fp2> wi = RCGkrEqKernelCoeffs(ri);
+    const std::vector<Fp2> wj = RCGkrEqKernelCoeffs(rj);
     std::vector<Fp2> ah(k_pad, Fp2::Zero()), bh(k_pad, Fp2::Zero());
     for (uint32_t t = 0; t < k_dim; ++t) {
         Fp2 sa = Fp2::Zero(), sb = Fp2::Zero();
@@ -476,17 +466,38 @@ bool EnvFlagIsZero(const char* name)
     return e != nullptr && e[0] == '0' && e[1] == '\0';
 }
 
+Fp2 MleEval1D2Raw(const Fp2* vals, size_t vals_len, const std::vector<Fp2>& r)
+{
+    if (r.empty()) return vals_len == 0 ? Fp2::Zero() : vals[0];
+    if (r.size() >= 31) return Fp2::Zero();
+    const size_t n = size_t{1} << r.size();
+    std::vector<Fp2> cur(n, Fp2::Zero());
+    const size_t copy_n = std::min(vals_len, n);
+    for (size_t i = 0; i < copy_n; ++i) cur[i] = vals[i];
+    size_t len = n;
+    for (size_t b = 0; b < r.size(); ++b) {
+        const Fp2 one_minus = Sub(Fp2::One(), r[b]);
+        const Fp2& rb = r[b];
+        for (size_t i = 0; i < len / 2; ++i) {
+            cur[i] = Add(Mul(cur[2 * i], one_minus), Mul(cur[2 * i + 1], rb));
+        }
+        len >>= 1;
+    }
+    return cur[0];
+}
+
 Fp2 MleEvalMatrix(const std::vector<Fp2>& mat, uint32_t rows, uint32_t cols,
                   const std::vector<Fp2>& r_row, const std::vector<Fp2>& r_col)
 {
-    Fp2 acc = Fp2::Zero();
+    if (rows == 0 || cols == 0 || mat.empty()) return Fp2::Zero();
+    std::vector<Fp2> row_evals(rows, Fp2::Zero());
     for (uint32_t i = 0; i < rows; ++i) {
-        const Fp2 ei = EqFactor(r_row, i);
-        for (uint32_t j = 0; j < cols; ++j) {
-            acc = Add(acc, Mul(Mul(mat[static_cast<size_t>(i) * cols + j], ei), EqFactor(r_col, j)));
-        }
+        const size_t off = static_cast<size_t>(i) * cols;
+        const size_t end = std::min(off + cols, mat.size());
+        if (off >= end) break;
+        row_evals[i] = MleEval1D2Raw(mat.data() + off, end - off, r_col);
     }
-    return acc;
+    return MleEval1D2Raw(row_evals.data(), row_evals.size(), r_row);
 }
 
 struct LayerWire {
@@ -2642,25 +2653,47 @@ uint32_t RCGkrNextPow2(uint32_t n)
 
 Fp RCGkrMleEval1D(const std::vector<Fp>& evals_pow2, const std::vector<Fp>& r)
 {
-    Fp acc = 0;
-    for (size_t i = 0; i < evals_pow2.size(); ++i) {
-        Fp eq = 1;
-        for (size_t b = 0; b < r.size(); ++b) {
-            const Fp bit = ((i >> b) & 1u) ? r[b] : gkr_field::Sub(1, r[b]);
-            eq = gkr_field::Mul(eq, bit);
+    if (r.empty()) return evals_pow2.empty() ? 0 : evals_pow2[0];
+    if (r.size() >= 31) return 0; // unsupported caller shape; fail closed.
+
+    const size_t n = size_t{1} << r.size();
+    std::vector<Fp> cur(n, 0);
+    const size_t copy_n = std::min(evals_pow2.size(), n);
+    for (size_t i = 0; i < copy_n; ++i) cur[i] = evals_pow2[i];
+
+    size_t len = n;
+    for (size_t b = 0; b < r.size(); ++b) {
+        const Fp one_minus = gkr_field::Sub(1, r[b]);
+        const Fp rb = r[b];
+        for (size_t i = 0; i < len / 2; ++i) {
+            cur[i] = gkr_field::Add(gkr_field::Mul(cur[2 * i], one_minus),
+                                    gkr_field::Mul(cur[2 * i + 1], rb));
         }
-        acc = gkr_field::Add(acc, gkr_field::Mul(evals_pow2[i], eq));
+        len >>= 1;
     }
-    return acc;
+    return cur[0];
 }
 
 Fp2 RCGkrMleEval1D2(const std::vector<Fp2>& evals_pow2, const std::vector<Fp2>& r)
 {
-    Fp2 acc = Fp2::Zero();
-    for (size_t i = 0; i < evals_pow2.size(); ++i) {
-        acc = Add(acc, Mul(evals_pow2[i], EqFactor(r, static_cast<uint32_t>(i))));
+    if (r.empty()) return evals_pow2.empty() ? Fp2::Zero() : evals_pow2[0];
+    if (r.size() >= 31) return Fp2::Zero(); // unsupported caller shape; fail closed.
+
+    const size_t n = size_t{1} << r.size();
+    std::vector<Fp2> cur(n, Fp2::Zero());
+    const size_t copy_n = std::min(evals_pow2.size(), n);
+    for (size_t i = 0; i < copy_n; ++i) cur[i] = evals_pow2[i];
+
+    size_t len = n;
+    for (size_t b = 0; b < r.size(); ++b) {
+        const Fp2 one_minus = Sub(Fp2::One(), r[b]);
+        const Fp2& rb = r[b];
+        for (size_t i = 0; i < len / 2; ++i) {
+            cur[i] = Add(Mul(cur[2 * i], one_minus), Mul(cur[2 * i + 1], rb));
+        }
+        len >>= 1;
     }
-    return acc;
+    return cur[0];
 }
 
 RCGkrProveResult ProveWinnerFromSegments(const uint256& claimed_digest, const DistSynthShape& shape,

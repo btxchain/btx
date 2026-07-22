@@ -112,6 +112,19 @@ inline constexpr char kRCCoupMaterialExchangeTagV3[] = "BTX_RC_COUP_MAT_XCHG_V3"
 inline constexpr char kRCCoupMaterialExchangeRoundsTag[] =
     "BTX_RC_COUP_MAT_XCHG_ROUNDS_V3";
 
+/** ENC_RC_COUPLED V4 tags: proof-friendly permutation transcript family. */
+inline constexpr char kRCCoupEpisodeTagV4[] = "BTX_RC_COUP_EPISODE_V4";
+inline constexpr char kRCCoupBankTagV4[] = "BTX_RC_COUP_BANK_V4";
+inline constexpr char kRCCoupLobeTagV4[] = "BTX_RC_COUP_LOBE_V4";
+inline constexpr char kRCCoupBarrierTagV4[] = "BTX_RC_COUP_BARRIER_V4";
+inline constexpr char kRCCoupPermTagV4[] = "BTX_RC_COUP_PERM_AFFINE_V4";
+inline constexpr char kRCCoupMixTagV4[] = "BTX_RC_COUP_MIX_V4";
+inline constexpr char kRCCoupExtractTagV4[] = "BTX_RC_COUP_EXTRACT_V4";
+inline constexpr char kRCCoupFullBankTagV4[] = "BTX_RC_COUP_FULL_BANK_V4";
+inline constexpr char kRCCoupMaterialExchangeTagV4[] = "BTX_RC_COUP_MAT_XCHG_V4";
+inline constexpr char kRCCoupMaterialExchangeRoundsTagV4[] =
+    "BTX_RC_COUP_MAT_XCHG_ROUNDS_V4";
+
 /** One versioned coupled domain-tag family (pointers into the constexprs above). */
 struct RCCoupDomainTagSet {
     const char* episode{kRCCoupEpisodeTag};
@@ -126,7 +139,7 @@ struct RCCoupDomainTagSet {
     const char* exchange_rounds{kRCCoupMaterialExchangeRoundsTag};
 };
 
-/** Select coupled domain tags by transcript_version (1/2/3). Unknown → V1. */
+/** Select coupled domain tags by transcript_version (1/2/3/4). Unknown → V1. */
 [[nodiscard]] const RCCoupDomainTagSet& RCCoupDomainTagsForVersion(uint32_t transcript_version);
 /**
  * Parametric coupled-puzzle shape. Toy defaults match the frozen constexprs
@@ -454,6 +467,36 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
 
 [[nodiscard]] bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi);
 [[nodiscard]] bool IsBalancedPermutation(const std::vector<uint32_t>& pi, uint32_t n);
+
+/**
+ * V4 proof-friendly permutation descriptor.
+ *
+ * For transcript_version >= ENC_RC_V4, the consensus permutation is:
+ *   dst_bit[j] = src_bit[out_to_in_bit[j]] XOR xor_mask_bit[j].
+ * This remains a nonce-derived bijection over StateBytes(), but the verifier
+ * can transform an MLE opening point for the destination column into the
+ * corresponding source-column point in O(log StateBytes()). V1/V2/V3 keep the
+ * historical Fisher-Yates permutation and therefore are not proof-succinct for
+ * this relation without a separate memory-check argument.
+ */
+struct RCCoupProofFriendlyPermutationSpec {
+    uint32_t n{0};
+    uint32_t bits{0};
+    std::vector<uint32_t> out_to_in_bit;
+    std::vector<uint8_t> xor_mask_bit;
+};
+
+[[nodiscard]] bool RCCoupUsesProofFriendlyPermutation(uint32_t transcript_version);
+
+[[nodiscard]] RCCoupProofFriendlyPermutationSpec DeriveCoupledProofFriendlyPermutationSpec(
+    const uint256& sigma, uint32_t barrier, const RCCoupParams& params,
+    uint32_t transcript_version = ENC_RC_V1);
+
+[[nodiscard]] uint32_t ApplyCoupledProofFriendlyPermutationIndex(
+    uint32_t src, const RCCoupProofFriendlyPermutationSpec& spec);
+
+[[nodiscard]] uint32_t InvertCoupledProofFriendlyPermutationIndex(
+    uint32_t dst, const RCCoupProofFriendlyPermutationSpec& spec);
 
 /**
  * Stage E note — Extract/S-box shape:

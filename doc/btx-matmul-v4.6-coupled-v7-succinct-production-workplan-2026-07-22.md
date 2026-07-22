@@ -3,6 +3,9 @@
 Status: local optimization branch only. Do not merge to PR #89 main until the
 acceptance gates below are green and externally reviewed.
 
+Companion construction contract:
+`doc/btx-matmul-v4.6-coupled-v7-production-succinct-construction-2026-07-22.md`.
+
 ## Current blocker
 
 `VerifyWinnerCoupledV7` is sound by native grounding, but not production
@@ -82,8 +85,12 @@ It must not:
    - Include V3 material-exchange rounds in the transcript and committed columns.
 
 5. Permutation proof
-   - Replace native `Σ eq(r, pi[x]) * e[x]` over all `StateBytes()` cells with a
-     permutation/copy argument bound to public `pi_b`.
+   - For proof-only production, use the V4 proof-friendly bit-affine
+     permutation family over the V3-sized workload. Legacy V1-V3 Fisher-Yates
+     is not succinctly evaluable by the verifier without either scanning
+     `StateBytes()` or proving a committed permutation table.
+   - Replace native `Σ eq(r, pi[x]) * e[x]` over all `StateBytes()` cells with
+     `p~(r_dst) = e~(pi^-1(r_dst))` openings bound by Construction I.
    - The verifier should do `O(log StateBytes)` or sampled opening work, not
      `O(StateBytes)`.
 

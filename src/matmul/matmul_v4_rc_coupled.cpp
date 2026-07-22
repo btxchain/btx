@@ -46,6 +46,14 @@ const RCCoupDomainTagSet& RCCoupDomainTagsForVersion(uint32_t transcript_version
         kRCCoupExtractTagV3,          kRCCoupFullBankTagV3,
         kRCCoupMaterialExchangeTagV3, kRCCoupMaterialExchangeRoundsTag,
     };
+    static const RCCoupDomainTagSet kV4{
+        kRCCoupEpisodeTagV4,          kRCCoupBankTagV4,
+        kRCCoupLobeTagV4,             kRCCoupBarrierTagV4,
+        kRCCoupPermTagV4,             kRCCoupMixTagV4,
+        kRCCoupExtractTagV4,          kRCCoupFullBankTagV4,
+        kRCCoupMaterialExchangeTagV4, kRCCoupMaterialExchangeRoundsTagV4,
+    };
+    if (transcript_version == ENC_RC_V4) return kV4;
     if (transcript_version == ENC_RC_V3) return kV3;
     if (transcript_version == ENC_RC_V2) return kV2;
     return kV1;
@@ -940,11 +948,84 @@ std::array<uint256, kRCCoupLobes> DeriveCoupledLobeSeeds(const uint256& sigma)
     return out;
 }
 
+bool RCCoupUsesProofFriendlyPermutation(uint32_t transcript_version)
+{
+    return transcript_version == ENC_RC_V4;
+}
+
+RCCoupProofFriendlyPermutationSpec DeriveCoupledProofFriendlyPermutationSpec(
+    const uint256& sigma, uint32_t barrier, const RCCoupParams& params,
+    uint32_t transcript_version)
+{
+    RCCoupProofFriendlyPermutationSpec spec;
+    const uint32_t n = params.StateBytes();
+    if (!RCCoupUsesProofFriendlyPermutation(transcript_version)) return spec;
+    if (n < 2 || (n & (n - 1)) != 0) return spec;
+
+    spec.n = n;
+    for (uint32_t t = n; t > 1; t >>= 1) ++spec.bits;
+    spec.out_to_in_bit.resize(spec.bits);
+    spec.xor_mask_bit.resize(spec.bits);
+    for (uint32_t i = 0; i < spec.bits; ++i) spec.out_to_in_bit[i] = i;
+
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
+    const uint256 perm_seed =
+        Sha256TaggedU32(tags.perm, TagLen(tags.perm), sigma, barrier);
+    ShaXof xof(perm_seed);
+    for (uint32_t i = spec.bits - 1; i > 0; --i) {
+        const uint32_t j = xof.NextU32() % (i + 1);
+        const uint32_t tmp = spec.out_to_in_bit[i];
+        spec.out_to_in_bit[i] = spec.out_to_in_bit[j];
+        spec.out_to_in_bit[j] = tmp;
+    }
+    for (uint32_t i = 0; i < spec.bits; ++i) spec.xor_mask_bit[i] = xof.NextU32() & 1u;
+    return spec;
+}
+
+uint32_t ApplyCoupledProofFriendlyPermutationIndex(
+    uint32_t src, const RCCoupProofFriendlyPermutationSpec& spec)
+{
+    if (spec.n == 0 || src >= spec.n || spec.out_to_in_bit.size() != spec.bits ||
+        spec.xor_mask_bit.size() != spec.bits) {
+        return spec.n;
+    }
+    uint32_t dst = 0;
+    for (uint32_t out_bit = 0; out_bit < spec.bits; ++out_bit) {
+        const uint32_t in_bit = spec.out_to_in_bit[out_bit];
+        const uint32_t bit = ((src >> in_bit) & 1u) ^ spec.xor_mask_bit[out_bit];
+        dst |= bit << out_bit;
+    }
+    return dst;
+}
+
+uint32_t InvertCoupledProofFriendlyPermutationIndex(
+    uint32_t dst, const RCCoupProofFriendlyPermutationSpec& spec)
+{
+    if (spec.n == 0 || dst >= spec.n || spec.out_to_in_bit.size() != spec.bits ||
+        spec.xor_mask_bit.size() != spec.bits) {
+        return spec.n;
+    }
+    uint32_t src = 0;
+    for (uint32_t out_bit = 0; out_bit < spec.bits; ++out_bit) {
+        const uint32_t in_bit = spec.out_to_in_bit[out_bit];
+        const uint32_t bit = ((dst >> out_bit) & 1u) ^ spec.xor_mask_bit[out_bit];
+        src |= bit << in_bit;
+    }
+    return src;
+}
+
 std::vector<uint32_t> DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
                                                        const RCCoupParams& params,
                                                        uint32_t transcript_version)
 {
     const uint32_t n = params.StateBytes();
+    if (RCCoupUsesProofFriendlyPermutation(transcript_version)) {
+        const auto spec =
+            DeriveCoupledProofFriendlyPermutationSpec(sigma, barrier, params, transcript_version);
+        std::vector<uint32_t> pi(n);
+        for (uint32_t i = 0; i < n; ++i) pi[i] = ApplyCoupledProofFriendlyPermutationIndex(i, spec);
+        return pi;
+    }
     const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     const uint256 perm_seed =
         Sha256TaggedU32(tags.perm, TagLen(tags.perm), sigma, barrier);

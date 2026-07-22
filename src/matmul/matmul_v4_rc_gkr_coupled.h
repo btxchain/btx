@@ -166,6 +166,7 @@ struct RCGkrCoupledV7SuccinctnessStatus {
     bool genuinely_succinct{false};
     bool proof_friendly_transcript{false};
     bool full_schedule_gemm_proof_bound{false};
+    bool feed_forward_proof_bound{false};
     bool opening_claims_batched{false};
     bool verifier_reruns_reference_digest{true};
     bool verifier_rebuilds_native_wires{true};

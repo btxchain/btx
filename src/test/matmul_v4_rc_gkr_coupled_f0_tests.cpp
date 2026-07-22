@@ -117,6 +117,7 @@ rc::RCGkrCoupledProofV7 FabricateProof(const CBlockHeader& header, const rc::RCC
     p.lobes.assign(rc::RCGkrCoupledExpectedLobeCount(params), rc::RCGkrCoupledLobeClaimV7{});
     p.perm_evals.assign(params.barriers, rc::Fp2::Zero());
     p.mix_evals.assign(params.barriers, rc::Fp2::Zero());
+    p.feed_evals.assign(rc::RCGkrCoupledExpectedFeedCount(params), rc::Fp2::Zero());
     // batch / eval / transcript left default (fake). We do not expect to reach
     // them — the reference-digest wall stops the forgery long before.
     p.transcript_hash = FillDigest(0xD3);

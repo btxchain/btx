@@ -113,6 +113,7 @@ static_assert(static_cast<uint64_t>(kRCContextLen) * 2304ull < (uint64_t{1} << 6
 inline constexpr uint32_t ENC_RC_V1 = 1;
 inline constexpr uint32_t ENC_RC_V2 = 2;
 inline constexpr uint32_t ENC_RC_V3 = 3;
+inline constexpr uint32_t ENC_RC_V4 = 4;
 inline constexpr uint32_t kRCTranscriptVersion = ENC_RC_V1;
 static_assert(kRCTranscriptVersion == ENC_RC_V1,
               "kRCTranscriptVersion must equal ENC_RC_V1 while V1 is active");
