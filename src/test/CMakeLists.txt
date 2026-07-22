@@ -100,6 +100,7 @@ add_executable(test_btx
   matmul_v4_rc_gkr_air_tests.cpp
   matmul_v4_rc_air_episode_tests.cpp
   matmul_v4_rc_air_quotient_tests.cpp
+  matmul_v4_rc_air_recurse_tests.cpp
   matmul_v4_rc_gkr_wiring_tests.cpp
   matmul_v4_rc_gkr_integration_tests.cpp
   matmul_v4_rc_gkr_f0_tests.cpp
@@ -108,6 +109,7 @@ add_executable(test_btx
   matmul_v4_rc_gkr_field_ext3_tests.cpp
   matmul_v4_rc_fri_tests.cpp
   matmul_v4_rc_fri_ext3_tests.cpp
+  matmul_v4_rc_fri_ext3_alg_tests.cpp
   matmul_v4_rc_vendor_accel_tests.cpp
   matmul_v4_provider_contract_tests.cpp
   matmul_encdr_tests.cpp
