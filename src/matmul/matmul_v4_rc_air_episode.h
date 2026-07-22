@@ -56,8 +56,12 @@
 //     Fwd residual ein = Y + A; ein = Y elsewhere).
 //   • Leaf-operand seed binding: selLeaf·(val − expect) = 0 where `expect` is
 //     the PREPROCESSED canonical MxExpand expansion of the (public) operand
-//     seed — regenerated natively by the verifier with PLAIN SHA-256 (fast),
-//     not with the constraint-checked in-circuit compressions of the row scan.
+//     seed. STAGE A: the prover commits the SHA-derived preprocessed columns
+//     ONCE per episode under P_root and the verifier OPENS each shard's slice
+//     against it (root equality per column) instead of regenerating the
+//     Θ(total) SHA XOF/PRF; the regenerate path survives behind a flag as the
+//     differential baseline and as the A-residual direct attestation of
+//     P_root (see the STAGE A block below).
 //   • T_M LogUp membership of (nib, 1, mu) against the canonical mantissa
 //     table, as a RUNNING-SUM TRANSITION system: per-row fractional witnesses
 //         phi·(α − w) = selElem + selLeaf,   psi·(α − t) = m,
@@ -90,6 +94,48 @@
 //     deterministic-builder in the compact SHADOW path (a permutation-argument
 //     lift is the production step). This module is a measurement scaffold —
 //     arbiter stays OFF, nMatMulRCHeight = INT32_MAX, never consensus.
+//
+// STAGE A — COMMITTED PREPROCESSED ROOT (P_root). The dominant verifier cost
+// used to be BuildEpisodePublicData: Θ(total) SHA invocations regenerating
+// `scale_e` (DeriveMatExpandMxScale, a SHA PRF, per 32-element block) and
+// `leaf_val` (NativeExpandLeaf, a SHA-256 XOF, per leaf element) over EVERY
+// episode row before any shard is verified. Stage A moves that behind a
+// commitment:
+//   • The prover lays the γ-independent preprocessed columns (sel, scale
+//     bits, leaf_val, gemm claims — exactly the values BuildEpisodePublicData
+//     produces) end-to-end over the episode row space, commits each shard's
+//     slice with the existing Fri3 column commitment (Fri3BatchColumnRoot,
+//     byte-identical to the roots the shard's own AirQuotientProve batch
+//     yields for those columns), and aggregates the per-shard slice roots
+//     into ONE SHA256d-Merkle root P_root (CommitEpisodePreprocessed).
+//   • The verifier's DEFAULT path runs NO SHA XOF/PRF: per shard it verifies
+//     a Merkle slice opening of the shard's preprocessed column roots
+//     against P_root and hands them to AirQuotientVerify as
+//     preprocessed_roots (root equality per column). The γ-dependent kEpTfp
+//     table (16 meaningful entries) and the proof-public gemm claim columns
+//     stay verifier-regenerated (free) and value-pinned — gemm claims MUST
+//     remain value-bound to the proof-carried layout, not only root-bound.
+//   • P_root is absorbed into EVERY shard's Fiat–Shamir seed (ShardSeed /
+//     ShardChallenge), so challenges bind the preprocessed commitment.
+//   • WHY NOT ONE FLAT Fri3BatchCommit OVER THE EPISODE: an episode-length
+//     column (up to ~2^43 rows) breaks the 2^24 LDE-domain cap, and a single
+//     FRI instance would give no per-shard slice opening anyway; the
+//     two-level structure (Fri3 slice roots + SHA256d Merkle aggregation)
+//     reuses only existing primitives and opens a slice in O(log n_shards).
+//
+// HONESTY GAP (A-residual — name it loudly): committing P_root does NOT by
+// itself prove leaf_val = XOF(seed) or scale_e = DeriveMatExpandMxScale(...).
+// The v7 pipeline offers nothing to inherit here: its batched-FRI roots
+// commit the CARRIED per-layer operand columns in a different Merkle layout
+// (per-layer columns over the batch domain, not the episode row space), and
+// their equality-to-the-XOF is attested only by GroundEpisodeInCircuit — the
+// very row scan the compact path replaces — so binding P_root to those roots
+// would be both layout-impossible (SHA Merkle is not homomorphic) and
+// circular. The correctness attestation of P_root therefore remains an
+// INTERIM O(total) residual, exercised by the flagged regenerate path
+// (EpisodeAirVerifyOptions{.regenerate_preprocessed, .attest_p_root}) — the
+// same status as the bounded direct tile-tree SHA closure. The production fix
+// is the Stage-C recursion (a preprocessing-builder AIR folded up the tree).
 // ============================================================================
 
 namespace matmul::v4::rc::air_episode {
@@ -187,11 +233,50 @@ struct EpisodeAirWitness {
 };
 
 // ---------------------------------------------------------------------------
+// Stage A: committed preprocessed root (P_root).
+// ---------------------------------------------------------------------------
+
+/** Number of γ-independent preprocessed columns committed under P_root — the
+ *  contiguous column range [kEpSelElem, kEpGemmB], in column order. */
+inline constexpr uint32_t kEpPreRootCols = 9;
+
+struct EpisodePreprocessedCommit {
+    bool ok{false};
+    std::string note;
+    /** SHA256d-Merkle root over the per-shard preprocessed slice leaves;
+     *  leaf s = tagged digest of shard s's kEpPreRootCols Fri3 column roots. */
+    uint256 p_root{};
+    uint32_t n_shards{0};
+    /** Per shard: the kEpPreRootCols slice column roots
+     *  (Fri3BatchColumnRoot of the slice values — byte-identical to the
+     *  roots the shard's AirQuotientProve batch produces). */
+    std::vector<std::vector<uint256>> shard_roots;
+    /** Per shard: Merkle sibling path from the shard's leaf to p_root. */
+    std::vector<std::vector<uint256>> openings;
+};
+
+/**
+ * Stage-A producer: build the preprocessed public data (the ONE remaining
+ * Θ(total)-SHA pass, prover side), lay the γ-independent preprocessed columns
+ * end-to-end over the episode row space, commit each shard's slice with the
+ * existing Fri3 column commitment and aggregate into P_root with per-shard
+ * slice openings.
+ */
+[[nodiscard]] EpisodePreprocessedCommit CommitEpisodePreprocessed(
+    const EpisodeAirLayout& layout);
+
+// ---------------------------------------------------------------------------
 // Proof containers + API.
 // ---------------------------------------------------------------------------
 
 struct EpisodeAirProof {
     std::vector<air_quotient::AirQuotientProof<Fp3>> shards;
+    /** Stage A: episode-level preprocessed commitment + per-shard slice
+     *  openings (verifier default path opens these instead of regenerating
+     *  the SHA-derived columns). p_root is FS-absorbed by every shard. */
+    uint256 p_root{};
+    std::vector<std::vector<uint256>> p_shard_roots;  // n_shards × kEpPreRootCols
+    std::vector<std::vector<uint256>> p_openings;     // n_shards × log2(leaves)
 };
 
 struct EpisodeAirProveOptions {
@@ -216,11 +301,34 @@ struct EpisodeAirProveResult {
 struct EpisodeAirVerifyStats {
     uint32_t n_shards{0};
     uint64_t n_rows{0};
-    /** Native regeneration of the public/preprocessed data (leaf XOF
-     *  expansions with plain SHA-256, per-tile scales, selectors). */
+    /** Acquisition of the preprocessed data. Default (Stage A) path: row
+     *  layout + P_root slice-opening Merkle checks — NO SHA XOF/PRF. Flagged
+     *  regenerate path: the Θ(total) native SHA regeneration. */
     double preprocess_s{0.0};
     /** AirQuotientVerify over all shards — the O(shards·Q) part. */
     double quotient_s{0.0};
+    /** Flagged path only: full recomputation of the preprocessed commitment
+     *  and comparison against proof.p_root (A-residual direct check). */
+    double p_attest_s{0.0};
+    /** SHA workload of the preprocessed acquisition: DeriveMatExpandMxScale
+     *  PRF calls and leaf-XOF SHA-256 digests. ZERO on the default Stage-A
+     *  path — that is the point. */
+    uint64_t sha_prf_calls{0};
+    uint64_t sha_xof_digests{0};
+};
+
+struct EpisodeAirVerifyOptions {
+    /** Differential/interim path: regenerate every preprocessed column
+     *  natively (Θ(total) SHA XOF/PRF) and pin by values — the pre-Stage-A
+     *  verifier, kept for the differential test and as the measurement
+     *  baseline. */
+    bool regenerate_preprocessed{false};
+    /** With regenerate_preprocessed: additionally recompute the FULL
+     *  preprocessed commitment from the regenerated values and require
+     *  equality with proof.p_root — the A-residual direct attestation
+     *  (O(total), outside any sublinearity claim; same status as the direct
+     *  tile-tree closure). Implies regenerate_preprocessed. */
+    bool attest_p_root{false};
 };
 
 /**
@@ -235,17 +343,22 @@ struct EpisodeAirVerifyStats {
     const uint256& fs_seed, const EpisodeAirProveOptions& opt = {});
 
 /**
- * Verifier: regenerate the public data natively (plain SHA-256 XOF for leaf
- * expectations, per-tile scale bytes, selectors), re-derive per-shard γ/α from
- * the committed epoch-1 roots, and run AirQuotientVerify per shard (structural
- * degree bounds, batched FRI, preprocessed root pinning, quotient identity at
- * the Q = 128 query points). NO row scan of the per-row rules.
+ * Verifier. DEFAULT (Stage A): NO SHA XOF/PRF regeneration — per shard,
+ * verify the Merkle slice opening of the preprocessed column roots against
+ * proof.p_root, re-derive per-shard γ/α from the committed epoch-1 roots
+ * (FS absorbs p_root), and run AirQuotientVerify (structural degree bounds,
+ * batched FRI, preprocessed root equality + value pins for gemm/tfp,
+ * quotient identity at the Q = 128 query points). With
+ * opt.regenerate_preprocessed: the pre-Stage-A Θ(total)-SHA regenerate path
+ * (differential baseline; opt.attest_p_root adds the A-residual direct
+ * check of p_root). NO row scan of the per-row rules on either path.
  */
 [[nodiscard]] bool VerifyEpisodeAirQuotient(const EpisodeAirLayout& layout,
                                             const EpisodeAirProof& proof,
                                             const uint256& fs_seed,
                                             std::string* why = nullptr,
-                                            EpisodeAirVerifyStats* stats = nullptr);
+                                            EpisodeAirVerifyStats* stats = nullptr,
+                                            const EpisodeAirVerifyOptions& opt = {});
 
 } // namespace matmul::v4::rc::air_episode
 

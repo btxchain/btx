@@ -132,6 +132,7 @@ struct LeafExpansion {
     std::vector<int8_t> mu;    // accepted mantissa per element
     std::vector<uint8_t> nib;  // accepted E2M1 nibble per element
     std::vector<uint8_t> e;    // scale code per element (0..3)
+    uint64_t n_xof_digests{0}; // SHA-256 digests spent (mantissa + scale XOF)
 };
 
 bool NativeExpandLeaf(const uint256& seed, uint32_t rows, uint32_t cols,
@@ -144,10 +145,12 @@ bool NativeExpandLeaf(const uint256& seed, uint32_t rows, uint32_t cols,
     out.nib.clear();
     out.mu.reserve(count);
     out.nib.reserve(count);
+    out.n_xof_digests = 0;
     uint64_t block = 0;
     while (out.mu.size() < count) {
         const std::array<uint8_t, 32> digest =
             XofDigest(seed_bytes, kMantissaStreamDomain, block);
+        ++out.n_xof_digests;
         for (size_t i = 0; i < 32 && out.mu.size() < count; ++i) {
             const uint8_t nibs[2] = {static_cast<uint8_t>(digest[i] & 0x0F),
                                      static_cast<uint8_t>((digest[i] >> 4) & 0x0F)};
@@ -172,6 +175,7 @@ bool NativeExpandLeaf(const uint256& seed, uint32_t rows, uint32_t cols,
     block = 0;
     while (scale.size() < scale_count) {
         const std::array<uint8_t, 32> digest = XofDigest(seed_bytes, kScaleStreamDomain, block);
+        ++out.n_xof_digests;
         for (size_t i = 0; i < 32 && scale.size() < scale_count; ++i) {
             for (int shift = 0; shift < 8 && scale.size() < scale_count; shift += 2) {
                 scale.push_back(static_cast<uint8_t>((digest[i] >> shift) & 0x03));
@@ -206,6 +210,9 @@ struct EpisodePublicData {
     std::vector<int8_t> leaf_val;   // canonical expansion (leaf region, relative)
     std::vector<int8_t> leaf_mu;    // (prover) canonical mantissa
     std::vector<uint8_t> leaf_nib;  // (prover) canonical nibble
+    // SHA workload of this build (the cost Stage A removes from the verifier).
+    uint64_t n_prf_calls{0};        // DeriveMatExpandMxScale invocations
+    uint64_t n_xof_digests{0};      // leaf-XOF SHA-256 digests
 };
 
 bool BuildEpisodePublicData(const EpisodeAirLayout& layout, bool want_prover_data,
@@ -230,6 +237,7 @@ bool BuildEpisodePublicData(const EpisodeAirLayout& layout, bool want_prover_dat
         for (uint32_t i = 0; i < l.m; ++i) {
             for (uint32_t bj = 0; bj < n_blocks; ++bj) {
                 const uint8_t e = lt::DeriveMatExpandMxScale(l.extract_prf, i, bj);
+                ++pub.n_prf_calls;
                 const uint64_t off = base + static_cast<uint64_t>(i) * l.n +
                                      static_cast<uint64_t>(bj) * kRCMxBlockLen;
                 std::memset(pub.sel.data() + off, s, kRCMxBlockLen);
@@ -244,6 +252,7 @@ bool BuildEpisodePublicData(const EpisodeAirLayout& layout, bool want_prover_dat
         const EpisodeAirLeaf& leaf = layout.leaves[lf];
         LeafExpansion ex;
         if (!NativeExpandLeaf(leaf.seed, leaf.rows, leaf.cols, tm, ex, why)) return false;
+        pub.n_xof_digests += ex.n_xof_digests;
         const uint64_t abs = rl.leaf_base[lf];
         const uint64_t rel = abs - rl.elem_total;
         const size_t count = ex.val.size();
@@ -423,7 +432,27 @@ CS BuildEpisodeShardConstraints(uint32_t n_rows, const Fp3& gamma, const Fp3& al
 // Shard column assembly.
 // ---------------------------------------------------------------------------
 
-/** γ-independent preprocessed slices for shard s (columns 0..8). */
+/** Public per-layer GEMM claim columns (kEpGemmGf/A/B) for shard s — cheap
+ *  arithmetic from the proof-public claims, no SHA. Non-zero only where the
+ *  claim rows land (shard 0 by the BuildRowLayout gate). */
+std::array<std::vector<Fp3>, 3> ShardGemmColumns(const EpisodeAirLayout& layout, uint32_t N,
+                                                 uint32_t s)
+{
+    const uint64_t row0 = static_cast<uint64_t>(s) * N;
+    std::array<std::vector<Fp3>, 3> out{std::vector<Fp3>(N, Fp3::Zero()),
+                                        std::vector<Fp3>(N, Fp3::Zero()),
+                                        std::vector<Fp3>(N, Fp3::Zero())};
+    for (size_t gi = 0; gi < layout.gemm.size(); ++gi) {
+        if (gi < row0 || gi >= row0 + N) continue;
+        const size_t r = gi - row0;
+        out[0][r] = layout.gemm[gi].gf;
+        out[1][r] = layout.gemm[gi].a;
+        out[2][r] = layout.gemm[gi].b;
+    }
+    return out;
+}
+
+/** γ-independent preprocessed slices for shard s (columns 0..kEpPreRootCols−1). */
 std::vector<std::pair<uint32_t, std::vector<Fp3>>> ShardPreprocessed(
     const EpisodeAirLayout& layout, const EpisodePublicData& pub, uint32_t s)
 {
@@ -454,17 +483,105 @@ std::vector<std::pair<uint32_t, std::vector<Fp3>>> ShardPreprocessed(
         if (e & 1u) e0[r] = Fp3::One();
         if (e & 2u) e1[r] = Fp3::One();
     }
-    auto& ggf = pre[6].second;
-    auto& ga = pre[7].second;
-    auto& gb = pre[8].second;
-    for (size_t gi = 0; gi < layout.gemm.size(); ++gi) {
-        if (gi < row0 || gi >= row0 + N) continue;
-        const size_t r = gi - row0;
-        ggf[r] = layout.gemm[gi].gf;
-        ga[r] = layout.gemm[gi].a;
-        gb[r] = layout.gemm[gi].b;
-    }
+    std::array<std::vector<Fp3>, 3> gemm = ShardGemmColumns(layout, N, s);
+    pre[6].second = std::move(gemm[0]);
+    pre[7].second = std::move(gemm[1]);
+    pre[8].second = std::move(gemm[2]);
     return pre;
+}
+
+// ---------------------------------------------------------------------------
+// Stage A: P_root — SHA256d Merkle aggregation of the per-shard preprocessed
+// slice roots. Leaf s = tagged digest of shard s's kEpPreRootCols column
+// roots; inner nodes use the Fri3 node hash; leaves padded to a power of two
+// with the zero hash.
+// ---------------------------------------------------------------------------
+
+uint256 PreLeafDigest(uint32_t s, const std::vector<uint256>& roots)
+{
+    return aq::AirChallengeDigest(uint256{}, "ep_pre_leaf", roots, {s});
+}
+
+uint32_t PreTreeLeaves(uint32_t n_shards)
+{
+    return FriNextPow2(std::max<uint32_t>(1u, n_shards));
+}
+
+/** Full tree levels over the (zero-padded) leaf digests. */
+std::vector<std::vector<uint256>> BuildPreTree(const std::vector<uint256>& leaves,
+                                               uint32_t n_leaves)
+{
+    std::vector<std::vector<uint256>> levels;
+    std::vector<uint256> level(n_leaves, uint256{});
+    std::copy(leaves.begin(), leaves.end(), level.begin());
+    levels.push_back(level);
+    while (level.size() > 1) {
+        std::vector<uint256> next;
+        next.reserve(level.size() / 2);
+        for (size_t i = 0; i < level.size(); i += 2) {
+            next.push_back(aq::AirFriBackend<Fp3>::NodeHash(level[i], level[i + 1]));
+        }
+        levels.push_back(next);
+        level = std::move(next);
+    }
+    return levels;
+}
+
+std::vector<uint256> PreTreePath(const std::vector<std::vector<uint256>>& levels, uint32_t index)
+{
+    std::vector<uint256> siblings;
+    uint32_t idx = index;
+    for (size_t li = 0; li + 1 < levels.size(); ++li) {
+        siblings.push_back(levels[li][idx ^ 1u]);
+        idx >>= 1;
+    }
+    return siblings;
+}
+
+bool VerifyPreOpening(const uint256& leaf, uint32_t index, const std::vector<uint256>& siblings,
+                      const uint256& p_root, uint32_t n_leaves)
+{
+    if (n_leaves == 0 || (n_leaves & (n_leaves - 1)) != 0 || index >= n_leaves) return false;
+    uint32_t depth = 0;
+    for (uint32_t t = n_leaves; t > 1; t >>= 1) ++depth;
+    if (siblings.size() != depth) return false;
+    uint256 node = leaf;
+    uint32_t idx = index;
+    for (const uint256& sib : siblings) {
+        node = (idx & 1u) ? aq::AirFriBackend<Fp3>::NodeHash(sib, node)
+                          : aq::AirFriBackend<Fp3>::NodeHash(node, sib);
+        idx >>= 1;
+    }
+    return node == p_root;
+}
+
+/** Commit the preprocessed slices of an already-built EpisodePublicData
+ *  (shared by the public producer and the prover). n_coeffs must be the
+ *  shard commitment size (FriNextPow2(max(N, QuotientLen))). */
+EpisodePreprocessedCommit CommitPreprocessedFromPub(const EpisodeAirLayout& layout,
+                                                    const EpisodePublicData& pub,
+                                                    uint32_t n_coeffs)
+{
+    EpisodePreprocessedCommit out;
+    out.n_shards = pub.rl.n_shards;
+    out.shard_roots.resize(out.n_shards);
+    std::vector<uint256> leaves(out.n_shards);
+    for (uint32_t s = 0; s < out.n_shards; ++s) {
+        const auto pre = ShardPreprocessed(layout, pub, s);
+        out.shard_roots[s].reserve(kEpPreRootCols);
+        for (uint32_t c = 0; c < kEpPreRootCols; ++c) {
+            out.shard_roots[s].push_back(
+                aq::AirCommittedValuesRoot<Fp3>(pre[c].second, n_coeffs));
+        }
+        leaves[s] = PreLeafDigest(s, out.shard_roots[s]);
+    }
+    const uint32_t n_leaves = PreTreeLeaves(out.n_shards);
+    const std::vector<std::vector<uint256>> levels = BuildPreTree(leaves, n_leaves);
+    out.p_root = levels.back()[0];
+    out.openings.resize(out.n_shards);
+    for (uint32_t s = 0; s < out.n_shards; ++s) out.openings[s] = PreTreePath(levels, s);
+    out.ok = true;
+    return out;
 }
 
 /** Canonical T_M fingerprint table column for a given γ (rows ≥ 16 repeat
@@ -586,21 +703,42 @@ bool FillShardLogUp(const gkr_air::TableTM& tm, const Fp3& gamma, const Fp3& alp
     return true;
 }
 
-uint256 ShardSeed(const uint256& fs_seed, uint32_t s, uint32_t n_shards)
+/** Per-shard FS seed. Stage A: absorbs P_root, binding the preprocessed
+ *  commitment into every shard's transcript. */
+uint256 ShardSeed(const uint256& fs_seed, const uint256& p_root, uint32_t s, uint32_t n_shards)
 {
-    return aq::AirChallengeDigest(fs_seed, "ep_shard", {}, {s, n_shards});
+    return aq::AirChallengeDigest(fs_seed, "ep_shard", {p_root}, {s, n_shards});
 }
 
-Fp3 ShardChallenge(const uint256& fs_seed, const char* label,
+Fp3 ShardChallenge(const uint256& fs_seed, const uint256& p_root, const char* label,
                    const std::vector<uint256>& roots, uint32_t shard_rows, uint32_t s,
                    uint32_t n_shards)
 {
-    const uint256 d = aq::AirChallengeDigest(fs_seed, label, roots,
+    std::vector<uint256> all;
+    all.reserve(roots.size() + 1);
+    all.push_back(p_root);
+    all.insert(all.end(), roots.begin(), roots.end());
+    const uint256 d = aq::AirChallengeDigest(fs_seed, label, all,
                                              {shard_rows, s, n_shards});
     return aq::AirField<Fp3>::FromChallenge(d.data());
 }
 
 } // namespace
+
+// ===========================================================================
+// Stage-A producer (public API).
+// ===========================================================================
+
+EpisodePreprocessedCommit CommitEpisodePreprocessed(const EpisodeAirLayout& layout)
+{
+    EpisodePreprocessedCommit out;
+    EpisodePublicData pub;
+    if (!BuildEpisodePublicData(layout, /*want_prover_data=*/false, pub, out.note)) return out;
+    const uint32_t N = pub.rl.shard_rows;
+    const CS cs_probe = BuildEpisodeShardConstraints(N, Fp3::Zero(), Fp3::Zero(), {});
+    const uint32_t n_coeffs = FriNextPow2(std::max(N, cs_probe.QuotientLen()));
+    return CommitPreprocessedFromPub(layout, pub, n_coeffs);
+}
 
 // ===========================================================================
 // Prover.
@@ -637,6 +775,20 @@ EpisodeAirProveResult ProveEpisodeAirQuotient(const EpisodeAirLayout& layout,
     res.n_rows = pub.rl.total;
     res.n_shards = pub.rl.n_shards;
 
+    // Stage A: commit the preprocessed columns ONCE per episode. P_root feeds
+    // every shard's FS seed, so it must exist before any shard is proven.
+    const CS cs_probe = BuildEpisodeShardConstraints(N, Fp3::Zero(), Fp3::Zero(), {});
+    const uint32_t n_coeffs = FriNextPow2(std::max(N, cs_probe.QuotientLen()));
+    EpisodePreprocessedCommit pc = CommitPreprocessedFromPub(layout, pub, n_coeffs);
+    if (!pc.ok) {
+        res.note = pc.note;
+        return res;
+    }
+    res.proof.p_root = pc.p_root;
+    res.proof.p_shard_roots = pc.shard_roots;
+    res.proof.p_openings = std::move(pc.openings);
+    const uint256& p_root = res.proof.p_root;
+
     aq::AirProveOptions aopt;
     aopt.force_commit_on_inexact = opt.force_commit_on_violation;
     aopt.quotient_len_override = opt.quotient_len_override;
@@ -648,17 +800,18 @@ EpisodeAirProveResult ProveEpisodeAirQuotient(const EpisodeAirLayout& layout,
         ShardAux aux;
         FillShardWitnessColumns(layout, pub, ed, witness, s, cols, aux);
 
-        // Epoch-1 FS: γ, α from the committed epoch-1 column roots.
-        CS cs_probe = BuildEpisodeShardConstraints(N, Fp3::Zero(), Fp3::Zero(), {});
-        const uint32_t n_coeffs = FriNextPow2(std::max(N, cs_probe.QuotientLen()));
+        // Epoch-1 FS: γ, α from the committed epoch-1 column roots (+ P_root).
+        // The preprocessed slice roots are already committed — reuse them.
         std::vector<uint256> epoch1_roots(kEpEpoch1Cols);
         for (uint32_t c = 0; c < kEpEpoch1Cols; ++c) {
-            epoch1_roots[c] = aq::AirCommittedValuesRoot<Fp3>(cols[c], n_coeffs);
+            epoch1_roots[c] = (c < kEpPreRootCols)
+                                  ? pc.shard_roots[s][c]
+                                  : aq::AirCommittedValuesRoot<Fp3>(cols[c], n_coeffs);
         }
         const Fp3 gamma =
-            ShardChallenge(fs_seed, "ep_gamma", epoch1_roots, N, s, pub.rl.n_shards);
+            ShardChallenge(fs_seed, p_root, "ep_gamma", epoch1_roots, N, s, pub.rl.n_shards);
         const Fp3 alpha =
-            ShardChallenge(fs_seed, "ep_alpha", epoch1_roots, N, s, pub.rl.n_shards);
+            ShardChallenge(fs_seed, p_root, "ep_alpha", epoch1_roots, N, s, pub.rl.n_shards);
         if (!FillShardLogUp(tm, gamma, alpha, N, aux, cols, opt.force_commit_on_violation,
                             res.note)) {
             return res;
@@ -666,8 +819,8 @@ EpisodeAirProveResult ProveEpisodeAirQuotient(const EpisodeAirLayout& layout,
 
         pre.emplace_back(static_cast<uint32_t>(kEpTfp), cols[kEpTfp]);
         CS cs = BuildEpisodeShardConstraints(N, gamma, alpha, std::move(pre));
-        const aq::AirQuotientProveResult<Fp3> pr =
-            aq::AirQuotientProve<Fp3>(cs, cols, ShardSeed(fs_seed, s, pub.rl.n_shards), aopt);
+        const aq::AirQuotientProveResult<Fp3> pr = aq::AirQuotientProve<Fp3>(
+            cs, cols, ShardSeed(fs_seed, p_root, s, pub.rl.n_shards), aopt);
         if (!pr.ok) {
             res.note = "shard " + std::to_string(s) + ": " + pr.note;
             return res;

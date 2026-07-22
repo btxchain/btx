@@ -571,6 +571,13 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
             }
         }
     }
+    // Preprocessed columns satisfied by ROOT EQUALITY against a supplied root
+    // (Stage A slice-opening mode): the committed column must be EXACTLY the
+    // one committed under the caller-authenticated root — O(1) per column.
+    for (const auto& [idx, root] : cs.preprocessed_roots) {
+        if (idx >= W) return fail("preprocessed root index");
+        if (batch.columns[idx].root != root) return fail("preprocessed root mismatch");
+    }
 
     // FS λ re-derivation from the committed trace roots.
     std::vector<uint256> trace_roots(W);

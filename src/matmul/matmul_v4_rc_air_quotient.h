@@ -291,6 +291,17 @@ struct AirConstraintSystem {
      *  episode-scale instantiation where per-shard LDE+Merkle regeneration
      *  of every public column would dominate the O(Q) verifier. */
     bool preprocessed_pin_ood{false};
+    /** Preprocessed columns satisfied by ROOT EQUALITY against a SUPPLIED
+     *  root (column index → expected committed root) instead of canonical
+     *  values: the verifier requires batch.columns[idx].root == root — an
+     *  O(1) compare, stronger than the OOD pin (exact commitment equality,
+     *  not two-point agreement). The supplied root's own provenance (e.g. a
+     *  Merkle slice opening against an episode-level preprocessed commitment
+     *  P_root, Stage A of the sublinear-aggregation program) is the CALLER's
+     *  obligation — this module only binds the shard's committed column to
+     *  it. A column may appear in both lists (values pin AND root equality)
+     *  when the caller needs the values bound to proof-public inputs too. */
+    std::vector<std::pair<uint32_t, uint256>> preprocessed_roots;
 
     [[nodiscard]] uint64_t ComposedDegreeBound(const AirConstraint<F>& c) const
     {
