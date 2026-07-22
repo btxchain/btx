@@ -94,6 +94,7 @@ add_executable(test_btx
   matmul_v4_rc_transcript_tests.cpp
   matmul_v4_rc_verify_bakeoff_tests.cpp
   matmul_v4_rc_gkr_tests.cpp
+  matmul_v4_rc_gkr_eval_tests.cpp
   matmul_v4_rc_gkr_v7_soundness_tests.cpp
   matmul_v4_rc_gkr_air_tests.cpp
   matmul_v4_rc_gkr_f0_tests.cpp
