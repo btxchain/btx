@@ -1,5 +1,7 @@
 # ENC_RC finish-to-production status (2026-07-20)
 
+> **Corrected 2026-07-22 (v4.6):** superseded figures updated to the shipped Q=128/Fp2 ≈71.9-bit bound and V3-production default; see doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md.
+
 *Tip: Succinct-proof audit-hardening M6–M11 on M1–M5 base (`0bbd060`+).
 *Public activation: **NO-GO** (`nMatMulRCHeight = INT32_MAX`).*
 *Companion: `doc/btx-matmul-v4.5-enc-rc-final-form-spec-2026-07-20.md`.*
@@ -83,13 +85,13 @@ against Stages §§1–5. It does **not** raise height.
 | **M3 Fp2 + bound** | **DONE (writeup)** — challenges in Fp2; composed bound in soundness note. **External audit OPEN** |
 | **M4 / M9 cost** | **DONE (instrument)** — `MeasureWinnerGkrToyMedium` / CSV; CI=toy; off-CI `BTX_RC_GKR_MEASURE_LADDER=1` (b_seq=256) + `BTX_RC_GKR_MEASURE_MEDIUM=1` (b_seq=8192). Soft over_budget → ExactReplay (tested). **No invented silicon rates**. Consensus-dim HBM vs shrink needs datacenter GPU (OUT OF SCOPE) |
 | **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
-| **M6 FRI params** | **DONE (Fable)** — Q=116, blowup=16, g=40, Fp2; bits=65 |
+| **M6 FRI params** | **DONE** — Q=128, blowup=16, g=40, Fp2; bits=76 (76.80 real; the earlier Q=116 / bits=65 configuration was rejected as inadequate) |
 | **M6+ DEEP/OOD** | **DONE (FRI v3)** — quotient identity at query sites |
-| **M7 under-constraint** | **IMPROVED, NOT CLOSED** — v7 defeats the independent fabricated-witness constructors (arbitrary A/B, unrelated roots, fabricated trace/lookup/Extract, unrelated bank pages) by grounding against the immutable int64 reference (witness-carried verification / native re-execution), NOT by a compact in-circuit AIR. Succinctness (in-circuit ChaCha/SHA/tile-tree + committed openings) is **PARKED**; G1–G5 remain **OPEN/PARKED**; **arbiter hard-disabled** (`kRCGkrFormalSoundnessReady=false`); external audit OPEN. Composed bound ≈ 65.7 bits under batched+dual-OOD+dual-α — see `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md` |
+| **M7 under-constraint** | **IMPROVED, NOT CLOSED** — v7 defeats the independent fabricated-witness constructors (arbitrary A/B, unrelated roots, fabricated trace/lookup/Extract, unrelated bank pages) by grounding against the immutable int64 reference (witness-carried verification / native re-execution), NOT by a compact in-circuit AIR alone. The G1–G5 succinct constructions (I–IV: in-circuit ChaCha/SHA/tile-tree + committed openings) are now **integrated and validated in-tree** (wired into `VerifyWinnerProofV7`); the residual gate is the **external cryptographic audit**; **arbiter hard-disabled** (`kRCGkrFormalSoundnessReady=false`). Composed bound ≈ 71.9 bits at Q=128 (FS-dominated) under batched+dual-OOD+dual-α — see `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md` |
 | **M8 soundness note** | **DONE** + emulated multi-persona audit doc |
 | **Emulated audit** | `doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md` — **not** external sign-off |
 | **M10 PCS alt** | **DONE (recommend)** — hand-rolled-but-audited FRI; no consensus vendor dep |
-| **M11 proximity gap** | **DONE (option)** — BCIKS20 Q≈53 documented; **not** shipped; Q=116 default |
+| **M11 proximity gap** | **DONE (option)** — BCIKS20 Q≈53 documented; **not** shipped; Q=128 unique-decoding default |
 
 | Item | Detail |
 |---|---|
@@ -100,8 +102,9 @@ against Stages §§1–5. It does **not** raise height.
 **Honest residual:** v7 defeats the independent fabricated-witness
 constructors, but by native re-derivation against the immutable int64
 reference (witness-carried verification for the episode path; full
-re-execution for the coupled path), NOT by a succinct in-circuit proof — the
-AIR/committed-opening succinctness of §5.7/§6.2/§6.3 remains PARKED. DEEP is
+re-execution for the coupled path) — the AIR/committed-opening succinct
+constructions of §5.7/§6.2/§6.3 have since been integrated and validated
+in-tree, with the external cryptographic audit as the residual gate. DEEP is
 FRI-backed. Consensus-dim prove cost on CPU may soft-over_budget
 (ExactReplay ships until silicon M4); **independent human crypto audit**
 required before arbiter ON (OUT OF SCOPE). Fable IOP reference remains

@@ -1,5 +1,7 @@
 # ENC_RC succinct proof — emulated multi-persona crypto audit (2026-07-21)
 
+> **Corrected 2026-07-22 (v4.6):** superseded figures updated to the shipped Q=128/Fp2 ≈71.9-bit bound and V3-production default; see doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md.
+
 *Status: **emulated** auditor memos inspired by public STARK/FRI audit practice
 (Trail of Bits / Least Authority / Spearbit style). **NOT** a signed independent
 human engagement. Shadow ON / arbiter OFF / ExactReplay consensus /
@@ -26,7 +28,7 @@ IOP parameter oracle (scratchpad); Plonky3/Stwo DEEP-quotient practice.
 
 - FRI **v3**: DEEP/OOD — `deep_z`, `deep_eval`, quotient FRI, identity
   `P(x)=Q(x)(x−z)+v` at every query site (`matmul_v4_rc_fri.*`).
-- Fable operating point: **g=40 / Fp2 / blowup=16 / Q=116**, bits=65.
+- Shipped operating point: **g=40 / Fp2 / blowup=16 / Q=128**, bits=76 (76.80 real; the earlier Q=116 / bits=65 point was rejected as inadequate).
 - Conjectured bound compile-gated OFF.
 
 ### Residual (honest)
@@ -63,9 +65,12 @@ Not ε=0. Not production-complete. Not a substitute for external audit sign-off.
 | G4 | `extract_out_commit` chain absorbed across layers. |
 | G5 | Verifier checks `acc_claim = claim + residual_mle`; non-Fwd residual must be 0. |
 
-**G1–G5 remain OPEN/PARKED** for succinct PCS/AIR closure. v7 rejects independent
-malicious constructors by **grounding** (native re-derivation), not by flipping
-these rows to CLOSED. Arbiter hard-disabled (`kRCGkrFormalSoundnessReady=false`).
+**The G1–G5 succinct constructions (I–IV) are now integrated and validated
+in-tree** (wired into `VerifyWinnerProofV7`; rack/unit tests pass); the residual
+gate is the **external cryptographic audit** — never claim CLOSED or
+audit-passed. v7 additionally rejects independent malicious constructors by
+**grounding** (native re-derivation). Arbiter hard-disabled
+(`kRCGkrFormalSoundnessReady=false`).
 Composed bound: `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`.
 
 ### Residual (honest)
@@ -82,11 +87,11 @@ These residuals **still counsel against arbiter ON** until an external auditor s
 
 ### Checklist
 
-1. [x] Unique-decoding Q=116 / B=16 / g=40 matches Fable table.
+1. [x] Unique-decoding Q=128 / B=16 / g=40 matches the shipped parameter table.
 2. [x] DEEP/OOD present and tested (`fri_deep_ood_tamper_rejects`).
 3. [x] Commit-then-challenge ordering in prove/verify.
-4. [x] G5 residual algebra enforced (**scaffold only** — G5 remains OPEN/PARKED).
-5. [x] G3 Haböck virtual Extract table + I(1)/R≡0 (proof v6; adversarial tests) (**scaffold only** — G3 remains OPEN/PARKED).
+4. [x] G5 residual algebra enforced (construction since integrated & validated in-tree; external audit pending).
+5. [x] G3 Haböck virtual Extract table + I(1)/R≡0 (proof v6; adversarial tests) (construction since integrated & validated in-tree; external audit pending).
 6. [ ] External human audit sign-off — **OPEN**.
 7. [ ] Consensus-dim prover cost on silicon — **OPEN** (OUT OF SCOPE).
 8. [x] Arbiter hard-disabled (`kRCGkrFormalSoundnessReady=false`); ExactReplay consensus; height INT32_MAX.

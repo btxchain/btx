@@ -1,5 +1,7 @@
 # ENC_RC winner-GKR — companion soundness table — 2026-07-21
 
+> **Corrected 2026-07-22 (v4.6):** superseded figures updated to the shipped Q=128/Fp2 ≈71.9-bit bound and V3-production default; see doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md.
+
 *Companion to `doc/btx-matmul-v4.5-rc-gkr-arithmetization-construction.md`. All bit
 counts are −log2 of acceptance probability. "Post-grind" subtracts the repo grinding
 convention g = 40 bits (adversary RO budget 2^40, matching `FriSoundnessBoundBits()`).
@@ -11,7 +13,7 @@ rounds, N_L ≤ 2^43 LogUp rows (full PRF AIR), κ = 2^28 max column coefficient
 
 | Relation | Term | Formula | Pre-grind bits | Post-grind bits | Status |
 |---|---|---|---|---|---|
-| PCS (§2) | batched FRI queries, unique decoding | (17/32)^116 | 105.85 | **65.85** | dominant term |
+| PCS (§2) | batched FRI queries, unique decoding (Q = 128) | (17/32)^128 | 116.80 | **76.80** | above the Fp2 FS subtotal (72) — bound is FS-dominated (Q = 116 gave 65.85, rejected) |
 | PCS (§2) | RLC batching λ/μ/γ/weights | ≤ 2^12/\|Fp2\| | 116 | 76 | ok |
 | PCS (§2) | dual-OOD DEEP | (2κ/\|Fp2\|)² | 196 | 156 | ok |
 | PCS (§2) | single-OOD DEEP (rejected variant) | 2κ/\|Fp2\| | 99.6 | **59.6 — FAILS** | must use dual |
@@ -48,11 +50,11 @@ Requirement per FS round: pre-grind bits ≥ 64 + 40 = 104.
 |---|---|
 | FS subtotal (all rounds, pre-grind) | ≤ 2^-112 |
 | FS subtotal × 2^40 grinding | ≤ 2^-72 |
-| Batched FRI (post-grind) | 2^-65.85 |
+| Batched FRI (post-grind, Q = 128) | 2^-76.80 |
 | SHA256d computational | ≤ 2^-88 |
-| **Total ε** | **≤ 2^-65.7 (≈ 65.7 bits)** |
-| Target | 2^-64 — **CLEARED**, margin < 1 bit |
-| Hardening recommendation | Q: 116 → 128 ⇒ FRI 2^-76.8, total ≈ 2^-71.9 |
+| **Total ε** | **≤ 2^-71.9 (≈ 71.9 bits, FS-dominated)** — the value `RCGkrComposedSeparationBits()` returns |
+| Target | 2^-64 — **CLEARED**, margin ≈ 7.9 bits (the rejected Q = 116 configuration gave ≈ 65.7 bits, margin < 2 bits — inadequate) |
+| Deferred follow-on (NOT shipped) | full Fp3 Fiat–Shamir cutover (proof-wire-format change) ⇒ composed ≈ 2^-76.8 |
 
 Preconditions for the bound (each individually necessary):
 1. single batched FRI instance (union over 7 instances = 2^-63.05: fails);
@@ -68,5 +70,7 @@ All others: see §9 table of the construction document.
 *Nothing in this table changes consensus: arbiter hard-disabled
 (`kRCGkrFormalSoundnessReady=false` ⇒ `EnvRCGkrArbiterEnabled` ignores
 `BTX_RC_GKR_ARBITER`), heights INT32_MAX, int64 ExactReplay remains the sole
-authority. G1–G5 remain OPEN/PARKED. Authoritative v7 writeup:
+authority. The G1–G5 constructions are integrated and validated in-tree;
+the residual gate is an external cryptographic audit (never claim CLOSED or
+audit-passed). Authoritative v7 writeup:
 `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`.*

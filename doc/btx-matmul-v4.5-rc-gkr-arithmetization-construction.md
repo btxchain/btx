@@ -71,10 +71,12 @@ be discussed. Nothing here weakens or replaces exact replay.
    consensus dims, and a single QKt output alone is 2^28.6. The commitment layer is
    therefore necessarily **multi-column** (§2.1); the current single-vector
    `FriCommitAndFold(trace_evals…)` cannot even run at consensus dims.
-5. Composed bound of the full construction (§8): **ε_total ≤ 2^-65 + 2^-74 ≈ 2^-64.9**,
-   dominated by the single batched-FRI query term. It clears 2^-64 with ≈ 0.9 bits of
-   margin; raising Q from 116 to 128 buys ~11 bits of margin at +10% query cost and is
-   recommended before cutover.
+5. Composed bound of the full construction (§8): at the historical Q = 116 point,
+   **ε_total ≤ 2^-65 + 2^-74 ≈ 2^-64.9**, dominated by the single batched-FRI query
+   term — clearing 2^-64 with ≈ 0.9 bits of margin, which was **rejected as
+   inadequate**. Raising Q from 116 to 128 buys ~11 bits of FRI margin at +10% query
+   cost and **is the shipped configuration**: at Q = 128 the composed bound is
+   ≈ 71.9 bits, FS-subtotal-dominated, margin ≈ 7.9 bits.
 
 ---
 
@@ -725,25 +727,30 @@ terms (details per-row in the companion table):
 | Dual-α LogUp | 1 | (N_L·2/|Fp2|)² ≈ 2^-168 | 2^-168 |
 | **FS subtotal** | | | **≤ 2^-112** |
 | × grinding 2^40 | | | **≤ 2^-72** |
-| Batched FRI queries (S4, already post-grind) | 1 | 2^-65.85 | 2^-65.85 |
+| Batched FRI queries (S4, already post-grind; shipped Q = 128) | 1 | 2^-76.80 | 2^-76.80 (historical Q = 116: 2^-65.85) |
 | SHA256d bindings (computational, 2^40-query adversary) | | ≤ 2^40·2^-128… | ≤ 2^-88 |
 
-**Theorem 8.1 (whole-protocol).** ε_total ≤ 2^-65.85 + 2^-72 + 2^-88 ≈ **2^-65.7**,
-i.e. ≥ 65 bits after grinding: the construction **clears the 2^-64 target with the
-existing FRI parameters** (Q=116, ρ=1/16, g=40, Fp2), *provided* (i) single batched FRI
+**Theorem 8.1 (whole-protocol).** ε_total ≤ 2^-76.80 + 2^-72 + 2^-88 ≈ **2^-71.9**,
+i.e. ≈ 71.9 bits after grinding, **FS-subtotal-dominated**: the construction **clears
+the 2^-64 target with the shipped FRI parameters** (Q=128, ρ=1/16, g=40, Fp2) with
+margin ≈ 7.9 bits, *provided* (i) single batched FRI
 (§2.3), (ii) dual-OOD (§2.2), (iii) dual-α (§5.6). Violating any of (i)–(iii) breaks the
 target: 7 instances ⇒ 2^-62.2; single OOD ⇒ 2^-59.6 (worst column); single α ⇒ 2^-45.
-Margin is < 1 bit; Q = 128 (⇒ FRI 2^-76.8) is the recommended pre-cutover hardening.
+The historical Q = 116 parameters (FRI 2^-65.85 ⇒ ε_total ≈ 2^-65.7, margin < 2 bits)
+were **rejected as inadequate**; Q = 128 is the ship point and
+`RCGkrComposedSeparationBits()` returns ≈ 71.9.
 Fp3 is **not** forced anywhere under (i)–(iii); it is forced only if single-challenge
 LogUp/OOD is insisted upon. ∎
 
-> **UPDATE (2026-07-22, margin restoration):** the recommended hardening has been
-> applied to the bound accounting — the fold ships **Q = 128** (`kRCFriNumQueries`)
-> and the FS/algebraic challenges are accounted over **F_{p^3}** (|K| ≈ 2^192).
-> The re-derived table and composed total (**≈ 2^-76.8, margin ≈ 12.8 bits over
-> 2^-64**) live in Appendix INT; the Fp3 rows are conditional on the challenge
-> call-site cutover enumerated in INTEGRATION_REPORT.md. The table above is
-> retained as the historical Q=116/Fp2 derivation.
+> **UPDATE (2026-07-22, margin restoration — SCOPED):** only the fold hardening
+> ships — **Q = 128** (`kRCFriNumQueries`), lifting the FRI floor to 76.80 above
+> the Fp2 FS subtotal (72), so the **shipped composed total is ≈ 2^-71.9
+> (margin ≈ 7.9 bits over 2^-64), FS-dominated**. Additionally accounting the
+> FS/algebraic challenges over **F_{p^3}** (|K| ≈ 2^192) to reach
+> **≈ 2^-76.8 (margin ≈ 12.8 bits)** is a **DEFERRED follow-on**, conditional on
+> the challenge call-site cutover enumerated in INTEGRATION_REPORT.md (a
+> proof-wire-format change, 16 → 24-byte challenges); the Fp3 rows in Appendix
+> INT are that deferred target, not the shipped state.
 
 ---
 
@@ -754,9 +761,9 @@ probabilities of the forgery (lower = better), post-grinding.
 
 | # | Forgery | v6 outcome | New: rejecting constraint | New: accept prob |
 |---|---|---|---|---|
-| F0 | **Fabricated everything** (grind fake `round_roots` to target; self-consistent fake wires; zero episode work) | **ACCEPTED, prob 1** — the defining hole | §6.3 tile-tree AIR binds roots to columns; §5.7 grounds operands in seeds; Thms 4.1/5.2 | ≤ ε_total ≈ 2^-65.7 |
-| F1 | Forge A root (operand commitment) | accepted (roots never opened) | Thm 2.1 (FRI/Merkle) + §5.7/§4.2 grounding | ≤ 2^-65.7 |
-| F2 | Forge B root | same as F1 | same | ≤ 2^-65.7 |
+| F0 | **Fabricated everything** (grind fake `round_roots` to target; self-consistent fake wires; zero episode work) | **ACCEPTED, prob 1** — the defining hole | §6.3 tile-tree AIR binds roots to columns; §5.7 grounds operands in seeds; Thms 4.1/5.2 | ≤ ε_total ≈ 2^-71.9 |
+| F1 | Forge A root (operand commitment) | accepted (roots never opened) | Thm 2.1 (FRI/Merkle) + §5.7/§4.2 grounding | ≤ 2^-71.9 |
+| F2 | Forge B root | same as F1 | same | ≤ 2^-71.9 |
 | F3 | Forge an A/B opening value | N/A (no openings exist — the gap) | Thm 2.2 (dual-OOD eval binding) | ≤ 2^-76 + FRI |
 | F4 | Forge `final_eval` | accepted iff consistent with own fake chain (free) | §3.1 step 4: gf = a·b identity over bound openings; Thm 3.1 | deterministic reject given openings; else ≤ 2ν_k/|Fp2|·2^40 ≈ 2^-82 |
 | F5 | Forge trace opening (claim c_ℓ) | accepted (claim prover-supplied) | §4.2 output binding to Y-columns; Thm 4.1 | ≤ 2^-72 (FS share) |
@@ -1220,28 +1227,31 @@ posture unchanged: arbiter OFF, heights INT32_MAX,
 untouched; `VerifyWinnerProofV7` is never consensus-authoritative and ExactReplay
 remains the sole authority.
 
-### The composed separation bound (`RCGkrComposedSeparationBits`) — Q = 128 + Fp3 (margin restored, 2026-07-22)
+### The composed separation bound (`RCGkrComposedSeparationBits`) — shipped Q = 128 / Fp2 (≈ 71.9); Fp3 = deferred target (2026-07-22)
 
 `RCGkrComposedSeparation(fri_proximity_bits)` combines the four constructions +
 the batched-FRI backend + the SHA256d bindings by a log-sum-exp of the
 per-relation acceptance probabilities, **PARAMETRIC in the FRI proximity bound**.
 All values are −log2(acceptance), post the g = 40 grinding convention.
 
-**The two margin levers of the previous revision are now APPLIED to the bound
-accounting:** the fold query count is raised **Q = 116 → 128**
-(`kRCFriNumQueries`, live in this tree), and every FS/algebraic challenge is
-accounted over the **CUBIC extension K = F_{p^3}**, log2|K| = 3·log2 p =
-191.999999999 (`kRCGkrChallengeFieldBits`), instead of F_{p^2} (≈ 128). The
-Fp3-dependent rows below **hold only once the challenge-derivation call-sites
-enumerated in INTEGRATION_REPORT.md ("Fp2 → Fp3 challenge sites") actually draw
-from Fp3** — the F_{p^3} implementation is a parallel workstream; the FRI query
-term (query repetitions) and the SHA term are field-independent and already
-hold.
+**Of the two margin levers of the previous revision, only the first is APPLIED
+in the shipped tree:** the fold query count is raised **Q = 116 → 128**
+(`kRCFriNumQueries`, live in this tree), lifting the FRI floor to 76.80 — above
+the Fp2 FS subtotal (72) — so the **shipped composed bound is ≈ 71.9 bits,
+FS-dominated** (`kRCGkrChallengeFieldBits` stays at its Fp2 value, 128). The
+second lever — accounting every FS/algebraic challenge over the **CUBIC
+extension K = F_{p^3}**, log2|K| = 3·log2 p = 191.999999999 — is a **DEFERRED
+follow-on**: the Fp3-dependent rows below **hold only once the
+challenge-derivation call-sites enumerated in INTEGRATION_REPORT.md ("Fp2 → Fp3
+challenge sites") actually draw from Fp3** (a proof-wire-format change,
+16 → 24-byte challenges) — the F_{p^3} cutover is a parallel workstream; the FRI
+query term (query repetitions) and the SHA term are field-independent and
+already hold.
 
 Per-term closed forms and old-vs-new numbers (post-grind g = 40 unless marked
 "pre"):
 
-| Term | Closed form (−log2, pre-grind) | Old (Q=116, Fp2) pre → post | New (Q=128, Fp3) pre → post |
+| Term | Closed form (−log2, pre-grind) | Old (Q=116, Fp2) pre → post | Deferred Fp3 target (Q=128) pre → post |
 |---|---|---|---|
 | FRI fold proximity (v5, unique decoding α = 17/32) | Q·log2(32/17) | 105.85 → **65.85** | 116.80 → **76.80** |
 | FRI batched query term (`FriBatchSoundnessBoundBits`, Q = 128 both revisions) | Q·log2(32/17) | 116.80 → 76.8 | 116.80 → 76.8 |
@@ -1257,24 +1267,32 @@ Per-term closed forms and old-vs-new numbers (post-grind g = 40 unless marked
 | Construction IV grand product, DUAL (N = 2^28) | (N/\|K\|)² | 200 → **160** | 328 → **288** |
 | Construction IV grand product, SINGLE (excluded) | N/\|K\| | 100 → **60 (< 64!)** | 164 → 124 |
 | SHA256d bindings (computational, 2^40-query adversary) | — | **88** | **88** |
-| **COMPOSED (log-sum-exp of included terms)** | | **≈ 65.8** (margin **1.8** — INADEQUATE) | **≈ 76.80** (margin **12.8** — adequate; ≥ 74 bar cleared) |
+| **COMPOSED (log-sum-exp of included terms)** | | **≈ 65.8** (margin **1.8** — INADEQUATE, rejected) | **≈ 76.80** (margin **12.8** — DEFERRED Fp3 target, NOT shipped) |
 
-Composed total at the Q = 128 fold floor (`kRCGkrFriProximityBitsV5 = 76.80`):
+Composed total at the Q = 128 fold floor (`kRCGkrFriProximityBitsV5 = 76.80`)
+with the **shipped Fp2 challenges**:
 
-  **ε_total = Σ 2^-term ⇒ −log2(ε_total) ≈ 76.80 bits (ε_total ≤ 2^-76.79),
-  margin over 64 ≈ 12.8 bits, over the 74-bit restored-margin bar
-  (`kRCGkrComposedTargetBits`) ≈ 2.8 bits.**
+  **ε_total = Σ 2^-term ⇒ −log2(ε_total) ≈ 71.9 bits (ε_total ≤ 2^-71.9),
+  margin over 64 ≈ 7.9 bits — ADEQUATE, FS-subtotal-dominated.** Under the
+  deferred Fp3 cutover the same accounting would compose to ≈ 76.80 bits
+  (margin ≈ 12.8; ≈ 2.8 bits over the 74-bit restored-margin bar,
+  `kRCGkrComposedTargetBits`) — a follow-on target, not the shipped state.
 
-The bound is **FRI-dominated** (the field-independent query-repetition term is
-the floor; the next terms are SHA 88 and FS 135.5) and NON-VACUOUS on the sound
-v5 fold. Honesty markers, stated plainly:
+The **shipped** bound is **FS-dominated** (the Fp2 FS subtotal, 72, is the
+floor; the field-independent FRI query term sits above it at 76.80, then SHA at
+88) and NON-VACUOUS on the sound v5 fold. Only under the deferred Fp3 cutover
+(FS ≈ 135.5) would the bound become FRI-dominated. Honesty markers, stated
+plainly:
 
 - **The fold floor and the batched query term now coincide** (both Q = 128).
   Plugging the conservative integer `FriBatchSoundnessBoundBits()` = 76 still
-  composes to ≈ 76.0 ≥ 74 — the margin does not hinge on the fractional 0.80.
-- **No included term is below 64**; the smallest algebraic term (FS subtotal
-  135.5) is far above the bar. The historical Q = 116 floor (65.85) and Fp2 FS
-  subtotal (72) are retained in the test as a pinned record.
+  composes to ≈ 76.0 ≥ 74 *under the deferred Fp3 FS accounting* — the margin
+  does not hinge on the fractional 0.80. (The shipped Fp2 composition is
+  FS-bounded at ≈ 71.9 either way.)
+- **No included term is below 64**; the smallest algebraic term is the Fp2 FS
+  subtotal (**72** — the shipped binding floor; ≈ 135.5 under the deferred Fp3
+  accounting). The historical Q = 116 floor (65.85) is retained in the test as
+  a pinned record.
 - The **single-challenge** grand-product wiring netted only **60 bits over
   Fp2** — the origin of the dual mandate. Over Fp3 the single form would be
   124, but the **dual mandate is structural and is NOT relaxed** (G4 enforces
@@ -1285,9 +1303,11 @@ v5 fold. Honesty markers, stated plainly:
   parameterization, not a consensus switch; the Fp3 rows are conditional on
   the challenge-site cutover listed in INTEGRATION_REPORT.md.
 
-`RCGkrComposedSeparationBits()` returns ≈ 76.80; the term pins, the total, the
-margin, the `!inadequate_margin` flag, and the ≥ 74 bar are asserted in
-`gkr_integration_composed_separation_bound`.
+`RCGkrComposedSeparationBits()` returns **≈ 71.9** (the shipped Q = 128 / Fp2
+composition — it does **not** return 76.80); the term pins, the total, the
+margin (≈ 7.9 bits over the 2^-64 target), and the `!inadequate_margin` flag
+are asserted in `gkr_integration_composed_separation_bound`. The ≈ 76.80 total
+and the ≥ 74 restored-margin bar are met only by the deferred Fp3 follow-on.
 
 ## Appendix FP3 (2026-07-22) — cubic extension field for FS challenges
 

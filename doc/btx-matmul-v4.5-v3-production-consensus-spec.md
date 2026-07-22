@@ -1,6 +1,6 @@
 # BTX MatMul v4.5 — ENC_RC / ENC_RC_COUPLED V3 production consensus specification
 
-**Status:** HYPOTHESIS / design-locked for implementation. Public activation heights remain `INT32_MAX`. GKR arbiter OFF. No hardware attestation.
+**Status:** INTEGRATED — V3 production is the default coupled profile (`nMatMulRCCoupledProfile` defaults to `3`; the aggregate `RCCoupConsensusConfig{}` default `transcript_version` is `ENC_RC_V3`). Public activation heights remain `INT32_MAX`. GKR arbiter OFF. No hardware attestation.
 
 **Base tip:** `f861bd5` → integration `wip/v45-production-coupled`.
 
@@ -10,11 +10,11 @@
 |---------|------|
 | V1 | Legacy toy / single-page schedule goldens (frozen) |
 | V2 | 768 pages, M=1, 12 pages/slot — int8 48 GiB, **packed ≈ 25.5 GiB** (frozen; not a 48 GiB packed floor) |
-| V3 | Preferred production hypothesis below (new domain tags + goldens) |
+| V3 | Integrated production default below (new domain tags + goldens) |
 
 `kRCCoupConsensusConfigVersionV3 = 3`.
 
-## 2. V3 parameters (preferred hypothesis)
+## 2. V3 parameters (integrated production default)
 
 | Field | Value |
 |-------|-------|
@@ -35,8 +35,8 @@
 
 | Profile | pages | P/slot | M | int8 GiB | packed GiB | TiMAC |
 |---------|-------|--------|---|----------|------------|-------|
-| V2 (current) | 768 | 12 | 1 | 48 | **25.5** | 0.048 |
-| V3 (hypothesis) | 1536 | 24 | 128 | 96 | **51** | **12** |
+| V2 (regression-only) | 768 | 12 | 1 | 48 | **25.5** | 0.048 |
+| V3 (production default) | 1536 | 24 | 128 | 96 | **51** | **12** |
 | Sweep ~48 packed | ≈1448* | — | — | — | ~48 | — |
 | Sweep ~64 packed | ≈1928* | — | — | — | ~64 | — |
 | Sweep ~80 packed | ≈2410* | — | — | — | ~80 | — |

@@ -7,7 +7,7 @@ Base tip: f861bd567ea203f3f320647197a32d7d2a68ea30
 2. False “48 GiB packed” labelling for 768-page profile (actual packed ≈ 25.5 GiB).
 3. Decorative `TotalRCCoupMacs` (ignores pages/slot and rows_per_lobe).
 4. `peak_ready` must be derived, never manually asserted true.
-5. GKR G1–G5 OPEN/PARKED; arbiter remains OFF.
+5. GKR G1–G5 constructions integrated & validated in-tree; external cryptographic audit pending; arbiter remains OFF.
 
 ## Preserve
 - SM120 plain vs `BTX_CUDA_SM120_MXFP4_NATIVE` packaging.

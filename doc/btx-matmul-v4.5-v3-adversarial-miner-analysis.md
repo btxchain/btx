@@ -16,7 +16,7 @@ A **static template-scoped bank** alone cannot *guarantee* B200 ≻ RTX 5090 on 
 | Exchange algebraic collapse | OPEN — X_exchange still largely decorative |
 | Accumulator overflow / UB | MITIGATING — checked MAC helpers; butterfly bounds required |
 | CPU/GPU divergence | IN PROGRESS — medium digest fix (full page accumulate) |
-| Proof forgery | GKR G1–G5 OPEN/PARKED; arbiter OFF |
+| Proof forgery | GKR G1–G5 constructions integrated & validated in-tree (external audit pending); arbiter OFF |
 
 ## Nonce-conditioned transforms
 

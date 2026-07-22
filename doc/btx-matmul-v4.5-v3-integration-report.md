@@ -2,7 +2,7 @@
 
 ## Implemented on `wip/v45-production-coupled`
 
-- V3 parameter hypothesis + honest packed/int8 sizes (51 GiB packed / 96 GiB int8 / 12 TiMAC)
+- V3 production parameters (now the integrated default coupled profile) + honest packed/int8 sizes (51 GiB packed / 96 GiB int8 / 12 TiMAC)
 - Digest-affecting material-exchange rounds (`exchange_rounds=4` → 4 GiB R/W estimate; default 0 preserves V1/V2 goldens)
 - Medium-V3 CI shape + uint64 Mix wrap + overflow bounds; golden `744fd3df…`
 - CUDA device-resident barrier tail (permute / mix / ExtractMX / BarrierRoot); episode digest still host-assembled
@@ -15,8 +15,8 @@
 
 | Knob | Values |
 |------|--------|
-| `-regtestrccoupledprofile` | `2`=V2 (default), `3`=V3; other → zero params / reject |
-| `-regtestrccoupledtoydims` | `1`=CI toy, `0`=medium (V2) or production-V3 (profile 3) |
+| `-regtestrccoupledprofile` | `3`=V3 production (default), `2`=V2 (explicit regression tests only); other → zero params / reject |
+| `-regtestrccoupledtoydims` | `1`=CI toy, `0`=production-V3 (default profile 3) or medium (V2, regression-only profile 2) |
 | Harness | `--coupled-production` / `--coupled-production-v2` / `--coupled-v3-ci` |
 | Timing | `phase_wall_s` / `wall_s` = `MineCoupledPuzzle`; `reference_wall_s` label=`correctness_reference` |
 | GKR | `--prove-winner-gkr` + production dims → clear refuse |

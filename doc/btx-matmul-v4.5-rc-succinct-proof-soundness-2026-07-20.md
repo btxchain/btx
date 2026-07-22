@@ -1,5 +1,7 @@
 # ENC_RC Section-2 — Succinct proof soundness note (AUDIT-READY, M6/M8 + Fable)
 
+> **Corrected 2026-07-22 (v4.6):** superseded figures updated to the shipped Q=128/Fp2 ≈71.9-bit bound and V3-production default; see doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md.
+
 *Status: formal derivation for shipped parameters; **NOT** an external audit sign-off.
 `nMatMulRCHeight = INT32_MAX`. Reality Guardrail rejects “production-complete.”
 Arbiter OFF; ExactReplay is consensus.*
@@ -44,7 +46,7 @@ Target: \(\log_2(T\cdot\varepsilon)\le -64\), \(T=2^g\),
 
 | Grinding \(g\) | Field | Blowup | Required \(Q\) | \(\log_2(T\cdot\varepsilon)\) | Status |
 |---:|---|---:|---:|---:|---|
-| **40** | **Fp2** | **16** | **116** | **≈ −65.85** (Fable ≈ −65.26) | **SHIPPED** |
+| **40** | **Fp2** | **16** | **116 (formula minimum)** | **≈ −65.85** (Fable ≈ −65.26) | **superseded — SHIPPED Q = 128** (⇒ ≈ −76.80; the Q=116 point left the composed bound at ≈ 65.7 with < 2 bits of margin and was rejected as inadequate) |
 | 64 | Fp3 | 16 | 142 | ~−65 | future lever (needs Fp3) |
 | 80 | Fp3 | 16 | 159 | ~−65 | future lever (needs Fp3) |
 
@@ -54,10 +56,10 @@ Target: \(\log_2(T\cdot\varepsilon)\le -64\), \(T=2^g\),
 |---|---|
 | `kRCFriBlowup` | 16 |
 | `kRCFriGrindingBits` | 40 |
-| `kRCFriNumQueries` | 116 |
-| `FriSoundnessBoundBits()` | 65 (= \(\lfloor Q\log_2(32/17)-40\rfloor\)) |
+| `kRCFriNumQueries` | 128 |
+| `FriSoundnessBoundBits()` | 76 (= \(\lfloor Q\log_2(32/17)-40\rfloor\); real value 76.80) |
 
-Test `fri_constants_and_soundness_bits` asserts bits == 65 and
+Test `fri_constants_and_soundness_bits` asserts bits == 76 and
 `FriClaimedBitsMeetTarget()`.
 
 ### 2.4 Theorems (proven vs conjectured)
@@ -109,10 +111,14 @@ claims are additionally bound by commit-then-challenge (proof v5+). Haböck LogU
 |---|---|---|
 | \(\varepsilon_{\mathrm{sumcheck}}\) | \(R_{\mathrm{sc}} C_{\mathrm{layers}} D / 2^{128}\) | Deg≤2 product; Fable agrees \(n\cdot\deg/|E|\) |
 | \(\varepsilon_{\mathrm{logup}}\) | \((m+K+5n)/2^{128}\) style | Haböck ePrint 2022/1530; Fable agrees |
-| \(\varepsilon_{\mathrm{FRI,net}}\) | \(2^{40}\cdot(17/32)^{116}\le 2^{-65}\) | §2.2 unique decoding |
+| \(\varepsilon_{\mathrm{FRI,net}}\) | \(2^{40}\cdot(17/32)^{128}\le 2^{-76}\) | §2.2 unique decoding (shipped Q = 128) |
 | \(\varepsilon_{\mathrm{fold}}\) | \(O(N)\cdot 2^{-128}\) at g=40/Fp2 | §2.5 |
 
-**Dominant term:** FRI queries. Net \(\varepsilon_{\mathrm{total}}\le 2^{-64}\) under
+**Dominant term:** the Fiat–Shamir union subtotal (post-grind ≈ 72 bits) — at the
+shipped Q = 128 the FRI query term (≈ 76.8) sits above it, so the composed bound
+is FS-dominated at ≈ 71.9 bits (see
+`doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`). Net
+\(\varepsilon_{\mathrm{total}}\le 2^{-64}\) under
 §2 assumptions **for proximity**. Exact-eval PCS completeness awaits §3.
 
 **Fiat–Shamir / ROM / PoW grinding:** challenges are bind to committed layer
@@ -127,8 +133,8 @@ grinding binding an auditor should chase.
 
 ## 5. EXTERNAL AUDITOR CHECKLIST (M8)
 
-1. [ ] Shipped point is **g=40 / Fp2 / blowup=16 / Q=116** unique decoding
-      (Fable table), not conjectured \(\rho^Q\).
+1. [ ] Shipped point is **g=40 / Fp2 / blowup=16 / Q=128** unique decoding
+      (the Q=116 formula minimum was rejected as inadequate), not conjectured \(\rho^Q\).
 2. [ ] `kRCFriNumQueries`, `FriSoundnessBoundBits()`, `kRCFriSoundnessStatement`
       agree (CI test).
 3. [ ] `BTX_RC_FRI_CONJECTURED_BOUND` is OFF in consensus builds.
@@ -138,7 +144,7 @@ grinding binding an auditor should chase.
 6. [ ] **DEEP/OOD:** confirm proximity-only vs exact-eval; do not sign off PCS
       completeness without OOD (or equivalent).
 7. [ ] Fp3: confirm “not required at g=40”; do not require Fp3 for this tier.
-8. [ ] Arithmetization completeness (M7): OPEN gaps G1–G5 block arbiter.
+8. [ ] Arithmetization completeness (M7): G1–G5 constructions integrated & validated in-tree; the external audit (this checklist) is what still blocks the arbiter.
 9. [ ] LogUp binds `(extract_in, extract_out)` (C1).
 10. [ ] Shadow ON / arbiter OFF / ExactReplay consensus until checklist signed.
 
@@ -147,7 +153,7 @@ grinding binding an auditor should chase.
 ## 6. Arithmetization completeness pointer (M7)
 
 See `doc/btx-matmul-v4.5-rc-arithmetization-completeness-2026-07-20.md`.
-**Decision:** ship k=40/Fp2/Q=116; Fp3 documented as future lever only.
+**Decision:** ship k=40/Fp2/Q=128 (the Q=116 point was rejected as inadequate); Fp3 documented as a deferred future lever only.
 
 ---
 
