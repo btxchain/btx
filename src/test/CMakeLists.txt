@@ -98,6 +98,7 @@ add_executable(test_btx
   matmul_v4_rc_gkr_v7_soundness_tests.cpp
   matmul_v4_rc_gkr_air_tests.cpp
   matmul_v4_rc_gkr_wiring_tests.cpp
+  matmul_v4_rc_gkr_integration_tests.cpp
   matmul_v4_rc_gkr_f0_tests.cpp
   matmul_v4_rc_gkr_coupled_tests.cpp
   matmul_v4_rc_gkr_coupled_f0_tests.cpp
