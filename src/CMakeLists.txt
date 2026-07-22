@@ -528,6 +528,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_gkr_coupled.cpp
   matmul/matmul_v4_rc_fri.cpp
   matmul/matmul_v4_rc_fri_ext3.cpp
+  matmul/matmul_v4_rc_alg_hash.cpp
   matmul/matmul_v4_rc_air_episode.cpp
   matmul/matmul_v4_rc_air_quotient.cpp
   matmul/matmul_sketch_cache.cpp

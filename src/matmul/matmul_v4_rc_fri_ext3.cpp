@@ -40,6 +40,10 @@ using gkr_field::Sub;
 /** Goldilocks 2^32-th root of unity: 7^((p-1)/2^32). */
 constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
 
+} // namespace
+
+// External linkage (declared in matmul_v4_rc_fri_ext3.h): reused as the
+// deterministic constant-generation XOF by matmul_v4_rc_alg_hash.cpp.
 uint256 Sha256dBytes(const unsigned char* data, size_t len)
 {
     uint8_t d1[CSHA256::OUTPUT_SIZE];
@@ -50,6 +54,8 @@ uint256 Sha256dBytes(const unsigned char* data, size_t len)
     std::memcpy(out.data(), d2, 32);
     return out;
 }
+
+namespace {
 
 void AppendLE32(std::vector<unsigned char>& buf, uint32_t v)
 {

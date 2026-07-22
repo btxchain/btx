@@ -68,6 +68,10 @@ namespace matmul::v4::rc {
 
 using gkr_field::Fp3;
 
+/** SHA256d of a byte buffer (defined in matmul_v4_rc_fri_ext3.cpp) — also the
+ *  deterministic constant-generation XOF for matmul_v4_rc_alg_hash.cpp. */
+[[nodiscard]] uint256 Sha256dBytes(const unsigned char* data, size_t len);
+
 inline constexpr uint32_t kRCFri3ProofMagic = 0x33495246u; // 'FRI3'
 inline constexpr uint32_t kRCFri3ProofVersion = 5;
 inline constexpr char kRCFri3DomainTag[] = "BTX_RC_FRI3_V5";

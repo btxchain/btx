@@ -21,16 +21,9 @@
 namespace matmul::v4::rc {
 namespace {
 
-uint256 Sha256dBytes(const unsigned char* data, size_t len)
-{
-    uint8_t d1[CSHA256::OUTPUT_SIZE];
-    CSHA256().Write(data, len).Finalize(d1);
-    uint8_t d2[CSHA256::OUTPUT_SIZE];
-    CSHA256().Write(d1, sizeof(d1)).Finalize(d2);
-    uint256 out;
-    std::memcpy(out.data(), d2, 32);
-    return out;
-}
+// Sha256dBytes: shared external definition in matmul_v4_rc_fri_ext3.cpp
+// (declared in matmul_v4_rc_fri_ext3.h, included transitively) — the former
+// file-local copy was byte-identical and became ambiguous with it.
 
 uint256 DeriveTagged(const uint256& seed, const char* tag)
 {

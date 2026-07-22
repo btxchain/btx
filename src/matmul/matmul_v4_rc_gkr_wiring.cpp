@@ -33,7 +33,9 @@ void AppendLE32(std::vector<unsigned char>& b, uint32_t v)
     for (int i = 0; i < 4; ++i) b.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xff));
 }
 
-std::array<unsigned char, 32> Sha256dBytes(const unsigned char* data, size_t len)
+/** File-local SHA256d returning a raw 32-byte array (distinct from the
+ *  uint256-returning matmul::v4::rc::Sha256dBytes of matmul_v4_rc_fri_ext3). */
+std::array<unsigned char, 32> Sha256dBytes32(const unsigned char* data, size_t len)
 {
     std::array<unsigned char, 32> h1{}, h2{};
     CSHA256().Write(data, len).Finalize(h1.data());
@@ -129,7 +131,7 @@ Fp2 WiringChallengeFp2(const uint256& fs_seed, const char* label, uint32_t idx, 
                reinterpret_cast<const unsigned char*>(label) + label_len);
     AppendLE32(buf, idx);
     AppendLE32(buf, sub);
-    const auto h = Sha256dBytes(buf.data(), buf.size());
+    const auto h = Sha256dBytes32(buf.data(), buf.size());
     return gkr_field::FromChallengeBytes2(h.data());
 }
 
@@ -584,7 +586,7 @@ Fp3 WiringChallengeFp3(const uint256& fs_seed, const char* label, uint32_t idx, 
     // 24 challenge bytes (~192 bits): SHA256d(buf) ‖ SHA256d(buf ‖ "x") — take
     // the first digest whole plus 0 bytes of the second is NOT enough (32 ≥ 24:
     // one digest suffices; FromChallengeBytes3 consumes bytes [0, 24)).
-    const auto h = Sha256dBytes(buf.data(), buf.size());
+    const auto h = Sha256dBytes32(buf.data(), buf.size());
     return gkr_field::FromChallengeBytes3(h.data());
 }
 
