@@ -1641,6 +1641,16 @@ public:
         // DRLT so a lone -regtestrcheight lands on top of the unified
         // v4/BMX4C/DRLT schedule. Toy dims are REQUIRED for CI-scale mining
         // (consensus n_ctx is not runnable in functional tests).
+        // v4.6 SINGLE-SWITCH RC-family cutover: one height turns on episode +
+        // coupled + V3 production together. Applied FIRST so the granular
+        // per-component overrides below can still refine a single component in a
+        // regression test. The coupled profile default is already 3 (V3), so the
+        // unified switch needs no profile override. Public nets never set this —
+        // both heights stay INT32_MAX (OFF) until a deliberate mainnet cutover.
+        if (opts.matmul_rc_unified_height.has_value()) {
+            consensus.nMatMulRCHeight = *opts.matmul_rc_unified_height;
+            consensus.nMatMulRCCoupledHeight = *opts.matmul_rc_unified_height;
+        }
         if (opts.matmul_rc_height.has_value()) {
             consensus.nMatMulRCHeight = *opts.matmul_rc_height;
         }

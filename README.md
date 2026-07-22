@@ -162,6 +162,21 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
+> **Resident Curriculum upgrade (v4.6 — integrated, not yet activated).** This
+> branch integrates the next-generation MatMul workload, "v4.6": an exact-int64
+> AI-training *episode* (attention + micro-training + Merkle) coupled to a V3
+> production puzzle, attested by a succinct GKR/FRI proof with an in-circuit
+> G1–G5 arithmetization (composed soundness ≈71.9 bits, adequate margin over the
+> 2^-64 target). It replaces the single dense matmul described below with a
+> structured, exactly-replayed workload. **v4.6 is OFF on every public network**
+> (all activation heights are `INT32_MAX`, the formal proof arbiter is
+> hard-disabled, and the int64 CPU reference remains the sole consensus
+> authority). A single activation switch is wired but unset; flipping it is gated
+> on an external cryptographic audit, native-silicon qualification, and ASERT
+> calibration. Until then, the live PoW is exactly the single-matmul scheme
+> described in this section. See
+> [`doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`](doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md).
+
 ### How It Works
 
 1. **Seed derivation**: Two deterministic seeds (`seed_a`, `seed_b`) are derived

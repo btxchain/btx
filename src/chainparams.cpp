@@ -365,6 +365,11 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_drlt_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestdrltheight");
     }
+    if (args.IsArgSet("-regtestrcunifiedheight")) {
+        // v4.6 single-switch: one height activates episode + coupled + V3 together.
+        options.matmul_rc_unified_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestrcunifiedheight");
+    }
     if (args.IsArgSet("-regtestrcheight")) {
         options.matmul_rc_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestrcheight");

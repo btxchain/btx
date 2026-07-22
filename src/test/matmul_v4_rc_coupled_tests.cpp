@@ -311,6 +311,51 @@ BOOST_AUTO_TEST_CASE(rc_coup_asert_unsafe_ordering_rejected_at_construction)
     BOOST_CHECK_EQUAL(main.nMatMulRCCoupledAsertRescaleDen, 1);
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_unified_height_switch_activates_family_together)
+{
+    // v4.6 SINGLE-SWITCH: -regtestrcunifiedheight=N sets BOTH the ENC_RC episode
+    // and the ENC_RC_COUPLED (V3 production) heights to the SAME N, so the whole
+    // RC family transitions at one height with no staggered regime. Profile stays
+    // at its default 3 (V3 production) — the unified switch needs no profile knob.
+    ArgsManager unified_args;
+    unified_args.ForceSetArg("-regtestrcunifiedheight", "150");
+    const auto unified =
+        CreateChainParams(unified_args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(unified.nMatMulRCHeight, 150);
+    BOOST_CHECK_EQUAL(unified.nMatMulRCCoupledHeight, 150);
+    BOOST_CHECK_EQUAL(unified.nMatMulRCCoupledProfile, 3u);
+    // Both predicates flip on together at the one height (and not before it).
+    BOOST_CHECK(!unified.IsMatMulRCActive(149));
+    BOOST_CHECK(!unified.IsMatMulRCCoupledActive(149));
+    BOOST_CHECK(unified.IsMatMulRCActive(150));
+    BOOST_CHECK(unified.IsMatMulRCCoupledActive(150));
+
+    // A granular per-component override still refines a single leg AFTER the
+    // unified switch (the unified assignment is applied first): coupled follows
+    // episode by the construction ordering invariant (coupled >= episode).
+    ArgsManager refine_args;
+    refine_args.ForceSetArg("-regtestrcunifiedheight", "150");
+    refine_args.ForceSetArg("-regtestrccoupledheight", "160");
+    const auto refined =
+        CreateChainParams(refine_args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(refined.nMatMulRCHeight, 150);
+    BOOST_CHECK_EQUAL(refined.nMatMulRCCoupledHeight, 160);
+
+    // Default (no switch) keeps the whole family OFF on regtest and mainnet.
+    const auto reg_default =
+        CreateChainParams(ArgsManager{}, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(reg_default.nMatMulRCHeight,
+                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(reg_default.nMatMulRCCoupledHeight,
+                      std::numeric_limits<int32_t>::max());
+    const auto main_default =
+        CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
+    BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight,
+                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main_default.nMatMulRCCoupledHeight,
+                      std::numeric_limits<int32_t>::max());
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_asert_transition_reanchors_at_coupled_height)
 {
     // F2: at nMatMulRCCoupledHeight a 1/1 rescale keeps the parent target, then

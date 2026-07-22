@@ -233,6 +233,13 @@ public:
         //! INT32_MAX. When set finite, must be >= MatMul v4 height; when ENC_RC
         //! is also live, must be >= nMatMulRCHeight (coupled supersedes RC).
         std::optional<int32_t> matmul_rc_coupled_height{};
+        //! v4.6 single-switch RC-family cutover. When set, assigns the SAME
+        //! height to BOTH nMatMulRCHeight and nMatMulRCCoupledHeight so episode +
+        //! coupled + V3 production transition together at one height (no staggered
+        //! regime). Applied before the granular per-component overrides so a test
+        //! may still refine one component afterwards. Public nets never set this;
+        //! defaults keep both heights INT32_MAX (OFF).
+        std::optional<int32_t> matmul_rc_unified_height{};
         //! REGTEST-ONLY: CI-scale toy ENC_RC episode dims (MakeToyRCEpisodeParams).
         //! Public nets must keep fMatMulRCUseToyDims=false.
         std::optional<bool> matmul_rc_use_toy_dims{};
