@@ -681,12 +681,26 @@ RCCoupOptions MakeV3RCCoupOptions()
     return o;
 }
 
+RCCoupOptions MakeV4RCCoupOptions()
+{
+    RCCoupOptions o = MakeV3RCCoupOptions();
+    o.transcript_version = ENC_RC_V4;
+    return o;
+}
+
 RCCoupOptions MakeMediumV3RCCoupOptions()
 {
     RCCoupOptions o;
     o.transcript_version = ENC_RC_V3;
     // exchange_rounds=0: CI medium-V3 golden pins independent V3 domains +
     // uint64-wrap Mix without the 4-round exchange cost.
+    return o;
+}
+
+RCCoupOptions MakeMediumV4RCCoupOptions()
+{
+    RCCoupOptions o = MakeMediumV3RCCoupOptions();
+    o.transcript_version = ENC_RC_V4;
     return o;
 }
 
@@ -708,6 +722,9 @@ RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
 {
     // F8: profile × toydims matrix. Invalid profile → zero params → fail closed.
     switch (p.nMatMulRCCoupledProfile) {
+    case 4:
+        return p.fMatMulRCCoupledUseToyDims ? MakeMediumV3RCCoupParams()
+                                            : MakeProductionV3RCCoupParams();
     case 2:
         return p.fMatMulRCCoupledUseToyDims ? MakeToyRCCoupParams()
                                             : MakeMediumRCCoupParams();
@@ -731,8 +748,12 @@ RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
 
 RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p)
 {
-    // F7/F8: profile=3 selects V3 transcript domains; profile=2 keeps V1 tags.
+    // F7/F8: profile=4 selects proof-friendly V4 domains; profile=3 selects
+    // V3 transcript domains; profile=2 keeps V1 tags.
     switch (p.nMatMulRCCoupledProfile) {
+    case 4:
+        return p.fMatMulRCCoupledUseToyDims ? MakeMediumV4RCCoupOptions()
+                                            : MakeV4RCCoupOptions();
     case 3:
         return p.fMatMulRCCoupledUseToyDims ? MakeMediumV3RCCoupOptions()
                                             : MakeV3RCCoupOptions();

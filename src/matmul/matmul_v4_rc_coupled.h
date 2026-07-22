@@ -323,11 +323,24 @@ struct RCCoupOptions {
 [[nodiscard]] RCCoupOptions MakeV3RCCoupOptions();
 
 /**
+ * V4 execution options: V3 production levers plus proof-friendly coupled
+ * transcript domains. The V4 domain family replaces the Fisher-Yates
+ * permutation with the seeded bit-affine permutation needed by the proof-only
+ * verifier path. Pair with the V3-sized params; does not raise heights.
+ */
+[[nodiscard]] RCCoupOptions MakeV4RCCoupOptions();
+
+/**
  * CI medium-V3 options: transcript_version=ENC_RC_V3, exchange_rounds=0.
  * Pins the medium-V3 golden under independent V3 domains + uint64-wrap Mix
  * without the 4-round exchange cost.
  */
 [[nodiscard]] RCCoupOptions MakeMediumV3RCCoupOptions();
+
+/**
+ * CI medium-V4 options: V4 proof-friendly domains with exchange_rounds=0.
+ */
+[[nodiscard]] RCCoupOptions MakeMediumV4RCCoupOptions();
 
 /**
  * Execution options for the selected coupled profile (F7/F8).

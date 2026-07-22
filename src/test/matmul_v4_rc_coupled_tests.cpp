@@ -175,6 +175,10 @@ BOOST_AUTO_TEST_CASE(rc_coup_resolve_profile_toydims_matrix)
     p.nMatMulRCCoupledProfile = 3;
     p.fMatMulRCCoupledUseToyDims = true;
     BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V3);
+    p.nMatMulRCCoupledProfile = 4;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V4);
+    BOOST_CHECK(rc::RCCoupUsesProofFriendlyPermutation(
+        rc::ResolveRCCoupOptions(p).transcript_version));
     p.nMatMulRCCoupledProfile = 2;
     BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V1);
 }
@@ -1039,6 +1043,12 @@ BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
     p3.nMatMulRCCoupledProfile = 3;
     p3.fMatMulRCCoupledUseToyDims = true;
     BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p3).transcript_version, rc::ENC_RC_V3);
+    Consensus::Params p4;
+    p4.nMatMulRCCoupledProfile = 4;
+    p4.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p4).transcript_version, rc::ENC_RC_V4);
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupParams(p4).rows_per_lobe,
+                      rc::MakeMediumV3RCCoupParams().rows_per_lobe);
     Consensus::Params p2;
     p2.nMatMulRCCoupledProfile = 2;
     BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p2).transcript_version, rc::ENC_RC_V1);
