@@ -398,6 +398,99 @@ BOOST_AUTO_TEST_CASE(piece4_vcs_cell_budget_and_k2)
     BOOST_CHECK_GT(ar::CountWitnessViolationsOnH(w2.cs, w2.columns), 0U);
 }
 
+// ---------------------------------------------------------------------------
+// Blocker 2 gate: MULTI-BLOCK row-leaf sponge. LeafHashRow feeds ah::SpongeHashFp
+// a stream of L = 3*(W+1)+1 field elements (each opened row value flattened as
+// (c0,c1,c2), then the query index), 10*-padded across n_blocks = L/8 + 1 rate
+// blocks. Production episode shards have W=26 -> 82 elements -> 11 blocks; the
+// former single-block guard rejected any W with 3*(W+1)+1 > 8. These gates pin
+// completeness at W ∈ {1,2,7,26} (1/2/4/11 blocks), a non-first-block soundness
+// tamper (value + carried capacity), and the W=26 cell measurement vs 2^21.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(blocker2_multiblock_row_leaf_completeness)
+{
+    const uint256 child_seed = SeedByte(17);
+    const ar::VerifierAirFamilies fam; // full mirror
+    for (uint32_t W : {1u, 2u, 7u, 26u}) {
+        const aq::AirConstraintSystem<Fp3> child_cs = WideBoolChildCS(W);
+        std::vector<std::vector<Fp3>> cols(W, {Fp3::FromFp(0), Fp3::FromFp(1)});
+        auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+        BOOST_REQUIRE_MESSAGE(pr.ok && pr.division_exact, pr.note);
+        BOOST_REQUIRE((aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, pr.proof, child_seed, nullptr)));
+        ar::AggregateWitness w = ar::BuildAggregateWitness(child_cs, {pr.proof}, child_seed, fam);
+        BOOST_REQUIRE_MESSAGE(w.ok, w.note); // guard removed: any W supported
+        uint32_t frow = 0;
+        std::string fname;
+        const uint32_t v = ar::CountWitnessViolationsOnH(w.cs, w.columns, &frow, &fname);
+        BOOST_CHECK_MESSAGE(v == 0U, "W=" << W << " violations=" << v << " first(row=" << frow
+                                          << ",name=" << fname << ")");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(blocker2_multiblock_row_leaf_soundness)
+{
+    const uint256 child_seed = SeedByte(17);
+    const ar::VerifierAirFamilies fam;
+    const uint32_t W = 26; // 11 sponge blocks
+    const aq::AirConstraintSystem<Fp3> child_cs = WideBoolChildCS(W);
+    std::vector<std::vector<Fp3>> cols(W, {Fp3::FromFp(0), Fp3::FromFp(1)});
+    auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+    BOOST_REQUIRE(pr.ok);
+
+    // honest baseline satisfies every constraint on H.
+    {
+        auto w = ar::BuildAggregateWitness(child_cs, {pr.proof}, child_seed, fam);
+        BOOST_REQUIRE(w.ok);
+        BOOST_CHECK_EQUAL(ar::CountWitnessViolationsOnH(w.cs, w.columns), 0U);
+    }
+    // (b1) tamper an absorbed value lane in a NON-FIRST block: value W straddles
+    // stream positions 78..80 -> blocks 9/10. Native rejects; V_CS unsatisfiable.
+    {
+        auto c = pr.proof;
+        c.batch.queries[0].row.values[W].c0 =
+            gf::Add(c.batch.queries[0].row.values[W].c0, gf::FromU64(1));
+        BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, c, child_seed, nullptr)));
+        auto w = ar::BuildAggregateWitness(child_cs, {c}, child_seed, fam);
+        BOOST_REQUIRE(w.ok);
+        BOOST_CHECK_GT(ar::CountWitnessViolationsOnH(w.cs, w.columns), 0U);
+    }
+    // (b2) tamper the carried CAPACITY lane BETWEEN blocks: corrupt one capacity
+    // input cell of the SECOND sponge block in the honest witness. The
+    // capacity-carry constraint (block b>0) binds the inter-block carry.
+    {
+        auto w = ar::BuildAggregateWitness(child_cs, {pr.proof}, child_seed, fam);
+        BOOST_REQUIRE(w.ok);
+        BOOST_REQUIRE_EQUAL(ar::CountWitnessViolationsOnH(w.cs, w.columns), 0U);
+        const uint32_t nb = (3 * (W + 1) + 1) / ah::kAlgHashRate + 1;
+        BOOST_REQUIRE_EQUAL(nb, 11U);
+        const uint32_t block1_base = ar::kPermCellsPerPerm; // second block (child 0 at col 0)
+        const uint32_t cap_col = ar::PermLayout{block1_base}.InputCol(ah::kAlgHashRate); // lane 8
+        w.columns[cap_col][0] = gf::Add(w.columns[cap_col][0], Fp3::One());
+        BOOST_CHECK_GT(ar::CountWitnessViolationsOnH(w.cs, w.columns), 0U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(blocker2_multiblock_row_leaf_measurement_w26)
+{
+    const uint256 child_seed = SeedByte(17);
+    const ar::VerifierAirFamilies fam;
+    const uint32_t W = 26; // production episode-shard width
+    const aq::AirConstraintSystem<Fp3> child_cs = WideBoolChildCS(W);
+    std::vector<std::vector<Fp3>> cols(W, {Fp3::FromFp(0), Fp3::FromFp(1)});
+    auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+    BOOST_REQUIRE(pr.ok);
+    const ar::ChildPublicInputs sh = ar::ExtractChildPublicInputs(child_cs, pr.proof, child_seed);
+    const ar::VerifierAirMeasurement m1 = ar::MeasureVerifierAIR(1, {sh}, fam);
+    const ar::VerifierAirMeasurement m2 = ar::MeasureVerifierAIR(2, {sh, sh}, fam);
+    BOOST_TEST_MESSAGE("W=26 cells_per_child=" << m1.cell_count << " (cols=" << m1.n_columns
+                                               << " rows=" << m1.n_rows
+                                               << " perms/query=" << m1.perms_per_query << ")");
+    BOOST_TEST_MESSAGE("W=26 V_CS k=1 cells=" << m1.cell_count << " k=2 cells=" << m2.cell_count
+                                              << " (2^21=" << (1ull << 21) << ")");
+    BOOST_CHECK_EQUAL(m1.max_alg_degree, 7U);
+    BOOST_CHECK_LE(m2.cell_count, (1ULL << 21)); // §3.4 k=2 budget
+}
+
 // Piece 6: the episode-integration seam (EpisodeAggregateProof +
 // VerifyEpisodeAggregate). The FRI-backed honest-accept round-trip needs a
 // real aggregate root (prohibitively slow with reference Poseidon2 — the Mac
@@ -489,21 +582,20 @@ BOOST_AUTO_TEST_CASE(piece5_real_fri_roundtrip_and_current_blockers)
     ar::AggregateResult n0 = prove_node("level1[0]", leaves[0], leaves[1]);
     ar::AggregateResult n1 = prove_node("level1[1]", leaves[2], leaves[3]);
 
-    auto check_production_width_blocker = [&] {
-        // Production episode shard width blocker: W=26 is the current episode AIR
-        // width. The alg backend can prove a tiny W=26 child, but V_CS cannot
-        // consume it until multi-block row-leaf absorption is arithmetized.
+    auto check_production_width_supported = [&] {
+        // Production episode shard width W=26 (row leaf = 82 elements = 11 rate
+        // blocks). Blocker 2 is fixed: multi-block row-leaf absorption is
+        // arithmetized, so V_CS now consumes the W=26 child and its honest
+        // witness satisfies every constraint on H.
         const aq::AirConstraintSystem<Fp3> wide_cs = WideBoolChildCS(26);
         std::vector<std::vector<Fp3>> wide_cols(26, {Fp3::FromFp(0), Fp3::FromFp(1)});
         auto wide_pr = aq::AirQuotientProve<Fp3, AlgB3>(wide_cs, wide_cols, child_seed, {});
         BOOST_REQUIRE_MESSAGE(wide_pr.ok && wide_pr.division_exact, wide_pr.note);
         ar::AggregateWitness wide_w =
             ar::BuildAggregateWitness(wide_cs, {wide_pr.proof}, child_seed, fam);
-        BOOST_CHECK(!wide_w.ok);
-        BOOST_CHECK_MESSAGE(wide_w.note.find("child W too large") != std::string::npos,
-                            wide_w.note);
-        BOOST_TEST_MESSAGE("production-width child W=26 aggregate blocker=\"" << wide_w.note
-                                                                              << "\"");
+        BOOST_CHECK_MESSAGE(wide_w.ok, wide_w.note);
+        BOOST_CHECK_EQUAL(ar::CountWitnessViolationsOnH(wide_w.cs, wide_w.columns), 0U);
+        BOOST_TEST_MESSAGE("production-width child W=26 now aggregates (11-block row leaf)");
     };
 
     if (!n0.ok || !n1.ok) {
@@ -514,7 +606,7 @@ BOOST_AUTO_TEST_CASE(piece5_real_fri_roundtrip_and_current_blockers)
         BOOST_TEST_MESSAGE("piece5 real-FRI blocker: V_CS is satisfiable but "
                            "AirQuotientProve<Fp3,AlgB3> cannot commit the aggregate "
                            "because V_CS columns exceed kRCFriBatchMaxColumns");
-        check_production_width_blocker();
+        check_production_width_supported();
         BOOST_TEST_MESSAGE("child_prove_total_s=" << child_prove_s
                                                   << " level1_root_verify_budget_s=unmeasured"
                                                   << " target_budget_s=0.9");
@@ -547,11 +639,14 @@ BOOST_AUTO_TEST_CASE(piece5_real_fri_roundtrip_and_current_blockers)
                                              << root.witness_satisfies << " note=\""
                                              << root.note << "\"");
 
-    // Current Piece-4b shape cannot consume child proofs whose AIR width is
-    // larger than one row-leaf sponge block. This is the exact blocker for
-    // both two-level recursion and production episode shards (W=26).
-    BOOST_CHECK_MESSAGE(!root.ok, "unexpectedly produced a level-2 root proof");
-    BOOST_CHECK_MESSAGE(root.note.find("child W too large") != std::string::npos, root.note);
+    // Blocker 2 (multi-block row-leaf) is fixed, so the level-2 aggregate is no
+    // longer rejected by the removed "child W too large" guard. Two-level
+    // recursion may still hit the Blocker-1 column cap (level-1 V_CS width >
+    // kRCFriBatchMaxColumns); if so the note is the column-count blocker, NOT the
+    // stale multi-block guard.
+    if (!root.ok)
+        BOOST_CHECK_MESSAGE(root.note.find("child W too large") == std::string::npos,
+                            "stale multi-block guard still firing: " + root.note);
 
     // Negative: tamper one leaf; level-1 aggregate force-commits but rejects.
     auto bad_leaf = leaves[0];
@@ -565,7 +660,7 @@ BOOST_AUTO_TEST_CASE(piece5_real_fri_roundtrip_and_current_blockers)
     BOOST_CHECK(!ar::VerifyAggregate(bad_node.proof, bad_node.pis, l1_seed, 2, fam, &bad_why));
     BOOST_TEST_MESSAGE("tampered level1 reject why=\"" << bad_why << "\"");
 
-    check_production_width_blocker();
+    check_production_width_supported();
 
     BOOST_TEST_MESSAGE("child_prove_total_s=" << child_prove_s
                                               << " level1_root_verify_budget_s=" << v0_s

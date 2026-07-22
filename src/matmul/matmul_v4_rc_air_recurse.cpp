@@ -506,6 +506,21 @@ using aq::AirConstraint;
 using aq::AirConstraintSystem;
 using aq::AirKind;
 using ah::Digest;
+using ah::kAlgHashRate;
+
+// Number of sponge blocks the row leaf occupies. LeafHashRow feeds
+// ah::SpongeHashFp a stream of L = 3*(W+1)+1 field elements (each of the W+1
+// opened row values flattened as (c0,c1,c2), then the query index). The 10*-
+// padding ALWAYS appends a 1 and then 0s up to a multiple of the rate R=8 (a
+// FULL extra block when L is already rate-aligned), so the block count is
+// n_blocks = L/8 + 1 uniformly (floor division: the always-appended 1 forces at
+// least one padding element, i.e. one more block than floor(L/8)). Mirrors
+// SpongeHashFp exactly; W in {1,2,7,26} -> {1,2,4,11} blocks.
+[[nodiscard]] uint32_t RowLeafNBlocks(uint32_t W)
+{
+    const uint32_t L = 3 * (W + 1) + 1;
+    return L / kAlgHashRate + 1;
+}
 
 // ---- base-field domain helpers (mirror matmul_v4_rc_fri_ext3_alg.cpp) -------
 constexpr Fp kOmega2_32R = 0x185629dcda58878cULL;
@@ -567,7 +582,8 @@ struct ChildLayout {
     uint32_t base{0};                  // first WITNESS column of this child block
     uint32_t W{0}, D{0}, nf{0};
     // row path (witness)
-    uint32_t row_leaf{0};
+    std::vector<uint32_t> row_leaf_blocks; // n_blocks sponge perm strips (multi-block LeafHashRow)
+    uint32_t row_leaf{0};              // = row_leaf_blocks[0] (block holding the first value lanes)
     std::vector<uint32_t> row_comp;    // D
     std::vector<uint32_t> row_sib;     // D (4 cols each)
     std::vector<FoldCols> folds;
@@ -598,7 +614,9 @@ uint32_t AllocChildWitness(ChildLayout& c, uint32_t start, const ChildPublicInpu
     auto dig4 = [&]() { const uint32_t b = col; col += kAlgHashDigestLen; return b; };
     c.W = sh.child_w; c.D = sh.merkle_depth; c.nf = sh.n_folds;
     if (fam.row_merkle) {
-        c.row_leaf = perm_block();
+        const uint32_t nb = RowLeafNBlocks(c.W); // multi-block LeafHashRow sponge
+        for (uint32_t b = 0; b < nb; ++b) c.row_leaf_blocks.push_back(perm_block());
+        c.row_leaf = c.row_leaf_blocks[0];
         for (uint32_t j = 0; j < c.D; ++j) c.row_comp.push_back(perm_block());
         for (uint32_t j = 0; j < c.D; ++j) c.row_sib.push_back(dig4());
     }
@@ -761,6 +779,103 @@ Fp3 ReadTriple(const std::vector<Fp3>& cur, uint32_t base, uint32_t lane0)
     return Fp3{cur[p.InputCol(lane0)].c0, cur[p.InputCol(lane0 + 1)].c0, cur[p.InputCol(lane0 + 2)].c0};
 }
 
+// ---- multi-block row-leaf sponge (LeafHashRow / SpongeHashFp) ----------------
+// The row leaf absorbs L = 3*(W+1)+1 field elements across n_blocks sponge
+// blocks (RowLeafNBlocks). Block b add-absorbs stream position p = 8b+j onto the
+// carried rate lane j of the previous block's OUTPUT (0 for block 0); the
+// capacity lanes [8,12) carry the previous block's output capacity (0 for block
+// 0). This mirrors ah::SpongeHashFp exactly. The absorbed value coords are FREE
+// opened row values (input lane = carry + value, value unpinned — the perm S-box
+// identities + the Merkle root pin bind them through the digest); only the
+// appended index / pad-1 / pad-0 and the capacity carries are pinned.
+
+// input(block,lane) = carry(lane) + val, carry = prev block output lane (0 if b==0).
+void EmitAbsorbConst(std::vector<AirConstraint<Fp3>>& out, uint32_t block_base, bool has_prev,
+                     uint32_t prev_base, uint32_t lane, Fp3 val)
+{
+    if (!has_prev) { EmitInputConst(out, block_base, lane, val); return; }
+    AirConstraint<Fp3> c;
+    c.name = "vcs.sponge.absorb.const"; c.kind = AirKind::kEverywhere; c.alg_degree = 1;
+    const uint32_t col = PermLayout{block_base}.InputCol(lane);
+    const PermLayout prev{prev_base};
+    c.eval = [col, prev, lane, val](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
+        return gf::Sub(cur[col], gf::Add(PermOutputLane(prev, cur, lane), val));
+    };
+    out.push_back(std::move(c));
+}
+// input(block,lane) = carry(lane) + cur[src] (src = preprocessed absorbed value col).
+void EmitAbsorbCol(std::vector<AirConstraint<Fp3>>& out, uint32_t block_base, bool has_prev,
+                   uint32_t prev_base, uint32_t lane, uint32_t src)
+{
+    if (!has_prev) { EmitInputEqCol(out, block_base, lane, src); return; }
+    AirConstraint<Fp3> c;
+    c.name = "vcs.sponge.absorb.col"; c.kind = AirKind::kEverywhere; c.alg_degree = 1;
+    const uint32_t col = PermLayout{block_base}.InputCol(lane);
+    const PermLayout prev{prev_base};
+    c.eval = [col, prev, lane, src](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
+        return gf::Sub(cur[col], gf::Add(PermOutputLane(prev, cur, lane), cur[src]));
+    };
+    out.push_back(std::move(c));
+}
+// capacity carry: input(block,lane) = prev block output lane (0 if b==0).
+void EmitCapacityCarry(std::vector<AirConstraint<Fp3>>& out, uint32_t block_base, bool has_prev,
+                       uint32_t prev_base, uint32_t lane)
+{
+    if (!has_prev) { EmitInputConst(out, block_base, lane, Fp3::Zero()); return; }
+    AirConstraint<Fp3> c;
+    c.name = "vcs.sponge.capacity.carry"; c.kind = AirKind::kEverywhere; c.alg_degree = 1;
+    const uint32_t col = PermLayout{block_base}.InputCol(lane);
+    const PermLayout prev{prev_base};
+    c.eval = [col, prev, lane](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
+        return gf::Sub(cur[col], PermOutputLane(prev, cur, lane));
+    };
+    out.push_back(std::move(c));
+}
+
+// Emit the whole multi-block row-leaf sponge. `blocks` are the n_blocks perm
+// strips, `idx_col` the preprocessed Fp(query index) column, W the child width.
+void EmitRowLeafSponge(std::vector<AirConstraint<Fp3>>& out, const std::vector<uint32_t>& blocks,
+                       uint32_t idx_col, uint32_t W)
+{
+    const uint32_t nabs = 3 * (W + 1); // value coord positions [0, nabs)
+    const uint32_t p_idx = nabs;       // appended query index
+    const uint32_t p_pad1 = nabs + 1;  // 10*-padding: the appended 1
+    const uint32_t nb = static_cast<uint32_t>(blocks.size());
+    for (uint32_t b = 0; b < nb; ++b) {
+        EmitPermSbox(out, blocks[b]);
+        const bool has_prev = (b > 0);
+        const uint32_t prev = has_prev ? blocks[b - 1] : 0;
+        for (uint32_t j = 0; j < kAlgHashRate; ++j) { // rate lanes: absorb
+            const uint32_t p = b * kAlgHashRate + j;
+            if (p < nabs) continue; // FREE opened row value coord (unpinned input lane)
+            if (p == p_idx) EmitAbsorbCol(out, blocks[b], has_prev, prev, j, idx_col);
+            else if (p == p_pad1) EmitAbsorbConst(out, blocks[b], has_prev, prev, j, Fp3::One());
+            else EmitAbsorbConst(out, blocks[b], has_prev, prev, j, Fp3::Zero()); // pad 0
+        }
+        for (uint32_t j = kAlgHashRate; j < kAlgHashT; ++j) // capacity lanes: carry
+            EmitCapacityCarry(out, blocks[b], has_prev, prev, j);
+    }
+}
+
+// Read absorbed coord at stream position p across the multi-block row leaf: for
+// block b>0 the raw absorbed coord is (input lane) - (prev block output lane),
+// since the sponge add-absorbs onto the carried rate lane.
+Fp3 ReadRowLeafCoord(const std::vector<Fp3>& cur, const std::vector<uint32_t>& blocks, uint32_t p)
+{
+    const uint32_t b = p / kAlgHashRate, j = p % kAlgHashRate;
+    const Fp3 in = cur[PermLayout{blocks[b]}.InputCol(j)];
+    if (b == 0) return in;
+    return gf::Sub(in, PermOutputLane(PermLayout{blocks[b - 1]}, cur, j));
+}
+// Row value i (Fp3 flattened as coords 3i,3i+1,3i+2) — the multi-block analogue
+// of ReadTriple(cur, row_leaf, 3*i). Honest cells are base-field embeddings, so
+// the coordinate is the .c0 component (degree 1 in the witness cells).
+Fp3 ReadRowLeafValue(const std::vector<Fp3>& cur, const std::vector<uint32_t>& blocks, uint32_t i)
+{
+    return Fp3{ReadRowLeafCoord(cur, blocks, 3 * i).c0, ReadRowLeafCoord(cur, blocks, 3 * i + 1).c0,
+               ReadRowLeafCoord(cur, blocks, 3 * i + 2).c0};
+}
+
 } // namespace (Piece 4 internals)
 
 // ---------------------------------------------------------------------------
@@ -832,16 +947,13 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
 
         // ---- (B) ROW-OPENING MERKLE ----
         if (fam.row_merkle) {
-            // Row-leaf block: SpongeHashFp over [values(3(W+1)), idx, pad1, 0..].
-            EmitPermSbox(K, c.row_leaf);
-            const uint32_t nabs = 3 * (c.W + 1); // absorbed value lanes
-            // (values in_0..nabs-1 are FREE — the opened row values.)
-            EmitInputEqCol(K, c.row_leaf, nabs, c.pre.idx_fp);       // in_nabs = index
-            EmitInputConst(K, c.row_leaf, nabs + 1, Fp3::One());     // pad 1
-            for (uint32_t l = nabs + 2; l < kAlgHashT; ++l)
-                EmitInputConst(K, c.row_leaf, l, Fp3::Zero());       // rest 0 (rate pad + capacity)
-            // Compress chain.
-            uint32_t prev = c.row_leaf;
+            // Row-leaf sponge (multi-block LeafHashRow over [values(3(W+1)), idx,
+            // pad1, 0..], 10*-padded to n_blocks rate blocks). Absorb-carry +
+            // capacity-carry wiring mirrors ah::SpongeHashFp exactly; the leaf
+            // digest is the LAST block's output lanes [0..4).
+            EmitRowLeafSponge(K, c.row_leaf_blocks, c.pre.idx_fp, c.W);
+            // Compress chain (leaf digest = last sponge block's output).
+            uint32_t prev = c.row_leaf_blocks.back();
             for (uint32_t j = 0; j < c.D; ++j) {
                 EmitPermSbox(K, c.row_comp[j]);
                 EmitCompressWiring(K, c.row_comp[j], prev, c.row_sib[j], c.pre.row_dir[j], node_domain);
@@ -913,13 +1025,14 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
                 v1 = gf::Add(v1, gf::Mul(gf::Mul(lam_pow[i], Pow3R(pi.z1, shift)), pi.evals_z1[i]));
                 v2 = gf::Add(v2, gf::Mul(gf::Mul(lam_pow[i], Pow3R(pi.z2, shift)), pi.evals_z2[i]));
             }
-            const uint32_t rl = c.row_leaf, W = c.W;
+            const std::vector<uint32_t> rlb = c.row_leaf_blocks;
+            const uint32_t W = c.W;
             const std::vector<uint32_t> xpow = c.pre.xpow;
-            // U_x closure (reads row-leaf value lanes + xpow preprocessed).
-            auto eval_Ux = [rl, W, xpow, lam_pow](const std::vector<Fp3>& cur) {
+            // U_x closure (reads the multi-block row-leaf value lanes + xpow).
+            auto eval_Ux = [rlb, W, xpow, lam_pow](const std::vector<Fp3>& cur) {
                 Fp3 U = Fp3::Zero();
                 for (uint32_t i = 0; i <= W; ++i) {
-                    const Fp3 val = ReadTriple(cur, rl, 3 * i);
+                    const Fp3 val = ReadRowLeafValue(cur, rlb, i);
                     U = gf::Add(U, gf::Mul(gf::Mul(lam_pow[i], cur[xpow[i]]), val));
                 }
                 return U;
@@ -983,10 +1096,10 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
                 uint32_t md = 1;
                 for (const auto& cc : child_cons) md = std::max(md, cc.alg_degree);
                 con.alg_degree = md;
-                con.eval = [rl, W, zh, air_lambda, child_cons](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
+                con.eval = [rlb, W, zh, air_lambda, child_cons](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
                     std::vector<Fp3> cur_child(W);
-                    for (uint32_t i = 0; i < W; ++i) cur_child[i] = ReadTriple(cur, rl, 3 * i);
-                    const Fp3 qv = ReadTriple(cur, rl, 3 * W);
+                    for (uint32_t i = 0; i < W; ++i) cur_child[i] = ReadRowLeafValue(cur, rlb, i);
+                    const Fp3 qv = ReadRowLeafValue(cur, rlb, W);
                     Fp3 C = Fp3::Zero(), lp = Fp3::One();
                     for (const auto& cc : child_cons) {
                         C = gf::Add(C, gf::Mul(lp, cc.eval(cur_child, cur_child)));
@@ -1143,18 +1256,28 @@ void FillChildRow(std::vector<Fp3>& row, const ChildLayout& c, const ChildPublic
     const auto& q = child.batch.queries[qi];
 
     if (fam.row_merkle) {
-        // Row-leaf sponge state (single block; W+1 small).
-        ah::State s{};
-        uint32_t lane = 0;
+        // Multi-block row-leaf sponge — run the REAL ah::SpongeHashFp stream so
+        // every emitted absorb/carry constraint is satisfied by construction.
+        std::vector<Fp> xs;
+        xs.reserve(3 * (c.W + 1) + 1);
         for (uint32_t i = 0; i <= c.W; ++i) {
-            s[lane++] = gf::Canonical(q.row.values[i].c0);
-            s[lane++] = gf::Canonical(q.row.values[i].c1);
-            s[lane++] = gf::Canonical(q.row.values[i].c2);
+            xs.push_back(gf::Canonical(q.row.values[i].c0));
+            xs.push_back(gf::Canonical(q.row.values[i].c1));
+            xs.push_back(gf::Canonical(q.row.values[i].c2));
         }
-        s[lane++] = gf::FromU64(q.index); // idx
-        s[lane++] = 1;                     // pad 1  (remaining rate + capacity stay 0)
-        WriteBlock(row, c.row_leaf, s);
-        Digest acc = BlockDigest(s);
+        xs.push_back(gf::FromU64(q.index));
+        std::vector<Fp> padded = xs; // 10*-padding (mirror ah::SpongeHashFp)
+        padded.push_back(1);
+        while (padded.size() % kAlgHashRate != 0) padded.push_back(0);
+        ah::State s{}; // capacity lanes [8,12) start 0 and are carried across blocks
+        for (uint32_t b = 0; b < c.row_leaf_blocks.size(); ++b) {
+            for (uint32_t j = 0; j < kAlgHashRate; ++j) // add-absorb onto carried rate
+                s[j] = gf::Add(s[j], padded[b * kAlgHashRate + j]);
+            const PermWitness w = BuildPermWitness(s); // records this block's input + S-boxes
+            WritePermWitness(PermLayout{c.row_leaf_blocks[b]}, w, row);
+            for (uint32_t j = 0; j < kAlgHashT; ++j) s[j] = gf::Canonical(w.output[j]); // carry
+        }
+        Digest acc{s[0], s[1], s[2], s[3]}; // leaf digest = last block's output [0..4)
         for (uint32_t j = 0; j < c.D; ++j) {
             const bool bit = ((q.index >> j) & 1u) != 0;
             SetDigestCols(row, c.row_sib[j], q.row.siblings[j]);
@@ -1225,12 +1348,8 @@ AggregateWitness BuildAggregateWitness(const aq::AirConstraintSystem<Fp3>& child
     out.pis.resize(k);
     for (uint32_t ci = 0; ci < k; ++ci)
         out.pis[ci] = ExtractChildPublicInputs(child_cs, children[ci], child_fs_seed);
-    for (const auto& pi : out.pis) {
-        if (3 * (pi.child_w + 1) + 1 > alg_hash::kAlgHashRate) {
-            out.note = "child W too large: row-leaf sponge needs multiple blocks (not arithmetized)";
-            return out;
-        }
-    }
+    // Multi-block row-leaf absorption (RowLeafNBlocks) supports any W; the former
+    // single-block guard (3*(W+1)+1 > kAlgHashRate) is removed.
     out.cs = BuildVerifierAIRPinned(k, out.pis, fam);
     const VcsLayout L = ComputeLayout(k, out.pis, fam);
     out.n_witness_cols = L.n_witness_cols;
