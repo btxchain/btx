@@ -925,3 +925,120 @@ Consensus posture unchanged: arbiter OFF, activation heights INT32_MAX,
 `RecomputeResidentCurriculumReference`/`RecomputeCoupledPuzzleReference`
 untouched; `VerifyWinnerProofV7`/`matmul_v4_rc_gkr.cpp` wiring is the
 integration wave's job — this section provides the primitive + tests only.
+
+## Appendix W3 (2026-07-22) — Constructions II/III implementation note
+## (`matmul_v4_rc_gkr_air.{h,cpp}` §8–§9)
+
+This appendix records the acceptance obligations of the implemented Extract constraint
+system (Construction II) and fixed-reference-vector membership (Construction III).
+Everything remains behind the OFF arbiter; the int64 reference is untouched and stays
+the sole oracle.
+
+### W3.1 What was implemented
+
+**Construction II — the map E as polynomial identities over F_p.** The committed cells
+(`ChaChaBlockTrace`, `ShaCompressTrace`, sampler candidate rows in `TileWitness`) are
+the column vectors; `EmitTileConstraints` evaluates the full family of identities of
+total degree ≤ 4:
+
+- add mod 2^32: `a + b − c − 2^32·carry = 0`, `carry(carry−1) = 0`, operands
+  range-bound by bit columns (`Σ 2^i b_i − v = 0`, `b_i(b_i−1) = 0`);
+- rotation by r: a fixed index relabeling of the producing xor's bit columns,
+  `op − Σ 2^{(i+r) mod 32} b_i = 0` (no new cells — §1.2 / §5.4);
+- xor per bit: `x + y − 2xy − z = 0` (degree 2);
+- SHA-256 Boolean functions as bit polynomials: `Maj = ab+ac+bc−2abc`,
+  `Ch = c + a(b−c)`, Σ/σ as xor-of-relabelings (degree ≤ 3), message-schedule and
+  round adds with 2–3-bit carry witnesses, feed-forward, chaining, and public
+  message/init binding;
+- sampler C-E1..E10: keystream-nibble binding, the acceptance selector as an explicit
+  degree-4 polynomial in the four nibble bits (`AirAcceptNibblePoly`, exactly 0 on the
+  rejected E2M1 codes {1,3,8,9,11}), liveness `(32−pos)·inv − 1 = 0`, transition
+  `pos' − pos − acc = 0`, boundary `pos(0)=0`, `pos_final=32`, the MixBits
+  two's-complement embedding `lo + 2^32·hi − y − s(2^32−1) = 0` with zero-test branch
+  selectors, the golden-ratio decomposition `u·G − 2^32·q − v = 0`, and the dequant
+  output identity `out − M·(1+e0)(1+3e1) = 0`.
+
+All families of one gadget row are combined with ONE challenge η ∈ Fp2:
+`Comp(x) = Σ_slot η^slot·C_slot(x)`; the single check is that Comp vanishes on the
+whole trace domain (`ComposeConstraints`).
+
+Two integer-vs-field subtleties are closed explicitly (they are genuine invalid-
+assignment channels, found during this construction):
+
+- **Golden-mix mod-p alias.** For `u ∈ {0,1}` the field identity
+  `u·G = 2^32·q + v (mod p)` admits a second ranged representative
+  `(q', v') = (2^32−1, u·G + 1)` since `u·G + p < 2^64`. Every alias has
+  `q' = 2^32−1 > G`, so the added canonicity obligation `q ≤ G` — the T_R16 range row
+  on `(G − q)` plus the deterministic `C-E9:golden_q_canonical` check — excludes all
+  aliases and pins `(q, v)` to the unique integer decomposition.
+- **Embedding alias.** The mod-p alias of `lo + 2^32·hi` flips the sign cell `s`
+  inconsistently with hi's top bit (`s − hi_31 = 0` is a committed-bit relabel), so the
+  embedding identity plus the sign binding is alias-free (proof sketch in the C-E7
+  comment of `CheckTileConstraints`).
+
+**Construction III — membership in a FIXED reference vector.**
+`BuildPreprocessedLogUpTables(γ)` regenerates the T_M/T_X/T_R16 fingerprint vectors
+from consensus constants only (no assignment data), and
+`VerifyLookupAgainstPreprocessed` enforces, in order: (i) the supplied table side
+equals the regenerated canonical vector fingerprint-for-fingerprint — the Theorem-5.1
+clone `table := witness` is rejected here even though its fractional sums balance
+identically (the accompanying test demonstrates both halves); (ii) multiplicity
+accounting `Σ_j m_j = |W|` exactly (deterministic, overflow-guarded; the per-row
+occurrence counts are then certified by the dual-α identity itself, S3 with
+char F_p ≫ N); (iii) the dual-α log-derivative identity with the existing FAIL-CLOSED
+pole handling (`FracSum`/`FracSumMult` reject any α that collides with a key rather
+than computing through `Inv(0)`) — retained unchanged.
+
+### W3.2 Acceptance obligations
+
+**(a) Completeness.** `TraceTile` populates the committed cells by evaluating the
+reference primitives, so on an honest assignment every emitted identity evaluates to
+the zero field element and both log-derivative sums agree exactly at every non-pole α
+(the multiset relation holds by construction, so equality is an identity of rational
+functions, not a probabilistic event). Tests: `air_construction2_composition_polynomial`
+(honest branch), `air_construction3_fixed_reference_vector` (honest branch), plus the
+pre-existing byte-exactness suites against `ExtractMXTileInt64` /
+`ExpandMxDequantInt8` / `RoundMerkleStream`.
+
+**(b) Separation bound (explicit numbers over F_{p^2}, |F_{p^2}| = p² with
+2·log2(p) = 127.99999999932).**
+
+| Term | Pre-grinding | Post-grinding (g = 40) |
+|---|---|---|
+| Composition polynomial: an invalid assignment survives uniform η iff η hits the root set of the slot polynomial, ≤ (n_slots−1)/|Fp2| with n_slots ≤ 256 | ≤ 2^8/2^128 = **2^-120.0** | **2^-80.0** |
+| Lookup (Thm 5.2 / S3, dual-α): false multiset inclusion survives both α's with prob ≤ ((N_w+N_t)/|Fp2|)², N_L = 2^43 at consensus dims | ≤ (2^43/2^128)² = **2^-170.0** | **2^-130.0** |
+| **Composed (union bound)** | 2^-120 + 2^-170 ≈ **2^-120.0** | 2^-80 + 2^-130 ≈ **2^-80.0** |
+
+The composed Construction-II/III algebraic term is ≈ 2^-80.0, i.e. **80.0 bits**
+post-grinding — 16 bits above the 2^-64 target. (These are the R3-local algebraic
+terms; the whole-protocol bound of §8 remains dominated by the batched-FRI query term
+at ε_total ≈ 2^-65.7 and is unchanged by this appendix.)
+`ComputeSeparationBound` reports these numbers programmatically and
+`air_separation_bound_numbers` pins them in CI.
+
+**(c) Counterexamples (each is a unit test that must reject).** A fabricated
+(in,out) tuple absent from the reference vector — with the multiplicity sum patched to
+stay consistent — leaves the log-derivative difference a nonzero rational function and
+is separated at both α's. A self-manufactured "table" (`table := witness`, m_j := 1)
+balances the raw sums but is rejected by the reference-vector regeneration
+(`table_not_canonical`) — the v6 hole, now unexpressible. A single edited ARX/SHA
+intermediate cell (quarter-round add result, operand cell with locally-consistent
+identity, SHA round variable, schedule word, liveness inverse, golden-mix limb) makes
+a specific constraint polynomial evaluate to a nonzero field element, and the
+composition polynomial is nonzero at that row. Tests:
+`air_construction2_composition_polynomial`, `air_construction3_fixed_reference_vector`,
+plus the pre-existing tamper suites.
+
+### W3.3 Emulation caveats (explicit)
+
+- Bit columns are derived in the emitter from the committed 32-bit word cells (their
+  booleanity/recomposition identities are emitted but hold by construction); in the
+  committed layout of §2.1 the bits are their own columns and the same identities do
+  the binding. The cross-cell identities (add/xor/rotation/copy) carry the separation
+  force in both layouts and are what the counterexample tests break.
+- `ComposeConstraints` checks Comp(x) = 0 row-by-row over the explicit trace; in the
+  committed system the same statement is "Comp is divisible by Z_D", delegated to the
+  §2 quotient/FRI machinery with the identical η-collision term.
+- T_R16 range obligations (limbs, and the `(G − q)` canonicity row) are membership
+  relations routed through Construction III, not identities; the deterministic
+  structural guards in `CheckTileConstraints` mirror them 1:1.
