@@ -2021,7 +2021,12 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
 
     gkr_air::TableTM tm_tab;
     gkr_air::TableTX tx_tab;
+    // G3 membership instances — populated ONLY by AppendTileLookups so their table
+    // sides are exactly the canonical fixed reference vectors (Construction III).
     gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    // G1 operand grounding uses VerifyMxExpandColumn only for its in-circuit bool;
+    // its LogUp feed goes to a throwaway so it never perturbs the G3 instances.
+    gkr_air::LogUpInstance g1_mx_scratch;
 
     // ---- Per-layer sumcheck-point relations: G1 (operands), G2 (claim), G5. ----
     FsTranscript fs(kRCGkrDomainTagV7);
@@ -2059,10 +2064,12 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
             uint64_t n_sha = 0;
             std::string why;
             if (lp.a.is_leaf &&
-                !BindOperand(lp.a, w.A, w.m, w.k, proof.wires, tm_tab, gamma, inst_tm, n_sha, why))
+                !BindOperand(lp.a, w.A, w.m, w.k, proof.wires, tm_tab, gamma, g1_mx_scratch, n_sha,
+                             why))
                 return fail(RCGkrRelation::G1, "A_mxexpand:" + why);
             if (lp.b.is_leaf &&
-                !BindOperand(lp.b, w.B, w.k, w.n, proof.wires, tm_tab, gamma, inst_tm, n_sha, why))
+                !BindOperand(lp.b, w.B, w.k, w.n, proof.wires, tm_tab, gamma, g1_mx_scratch, n_sha,
+                             why))
                 return fail(RCGkrRelation::G1, "B_mxexpand:" + why);
         }
 

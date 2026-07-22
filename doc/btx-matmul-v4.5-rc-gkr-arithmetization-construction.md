@@ -1137,3 +1137,75 @@ mismatch always surfaces as a failed identity, never a silent re-route.
 Consensus posture unchanged: arbiter OFF, heights INT32_MAX, the int64
 reference (`RecomputeResidentCurriculumReference`,
 `RecomputeCoupledPuzzleReference`) untouched and authoritative.
+
+---
+
+## Appendix INT (2026-07-22) — G1–G5 integration + the COMPOSED separation bound
+
+Constructions I–IV (`matmul_v4_rc_gkr_eval`, `_air`, `_wiring`) are merged and
+wired into `VerifyWinnerProofV7` as the in-circuit relations **G1–G5**
+(`CheckWinnerProofRelationsV7` in `matmul_v4_rc_gkr.cpp`). Each winner-proof
+relation is now bound by a polynomial identity over the committed columns rather
+than solely by native int64 re-derivation:
+
+| Relation | Construction | Binding checked |
+|---|---|---|
+| **G1** | I (matrix opening) | `a_at_r = Ã(r_i,r_k)`, `b_at_r = B̃(r_k,r_j)` recomputed from the committed A/B columns must equal the carried `a_eval/b_eval`; `final_eval = a_at_r·b_at_r` (`RCGkrCheckFinalEvalBinding`); every **leaf** operand bound to its Λ MxExpand PRF expansion. |
+| **G2** | I (segment point) | `c_ℓ = Ỹ(r_i,r_j)` recomputed from the committed Y trace-column segment (`RCGkrSegmentPoint`) must equal the carried `c_claim`. |
+| **G3** | II + III | the prover-manufactured lookup is REPLACED by the Extract composition polynomial `Comp ≡ 0` (`EmitTileConstraints`/`ComposeConstraints`) + fixed-reference-vector membership (`BuildPreprocessedLogUpTables`/`VerifyLookupAgainstPreprocessed`, canonical T_M/T_X regenerated, never prover-chosen) + the sampler out-binding. |
+| **G4** | IV (dual wiring) | `extract_out(L) == input(L+1)` over the true Λ provenance: direct copies via the equality identity, transposed copies via the **DUAL-challenge** grand product (`BuildWiringPermutationDual`/`VerifyWiringPermutationDual`) — the single-challenge form is UNREACHABLE on the ship path; plus the §6.3 round-root↔stream binding. |
+| **G5** | I (residual binder) | Fwd `acc = claim + X̃(pt)` (`RCGkrCheckResidualAcc`); `extract_in == Y` for the non-residual layers. |
+
+The relation gate runs **after** the existing §5.4/§5.7/§6.3 native grounding, so
+it never changes which relation an already-rejected forgery *first* fails (the
+base v7 soundness suite still observes `v7:ground:*`/`v7:logup:*`). The
+integration red-team (`matmul_v4_rc_gkr_integration_tests.cpp`) additionally feeds
+the five internally-consistent episode forgeries to the **standalone** relation
+module and asserts each rejects at its `v7:g<N>:*` construction relation
+(ArbitraryAbFactorization/FabricatedTraceWires → `v7:g1`, IdenticalFabricatedLookup
+→ `v7:g3`, FabricatedExtractIO → `v7:g5`, UnrelatedLayerRoots → `v7:g4`) — the
+constructions catch the forgery, **not only** the int64 re-derivation. Consensus
+posture unchanged: arbiter OFF, heights INT32_MAX,
+`RecomputeResidentCurriculumReference`/`RecomputeCoupledPuzzleReference`
+untouched; `VerifyWinnerProofV7` is never consensus-authoritative and ExactReplay
+remains the sole authority.
+
+### The composed separation bound (`RCGkrComposedSeparationBits`)
+
+`RCGkrComposedSeparation(fri_proximity_bits)` combines the four constructions +
+the batched-FRI backend + the SHA256d bindings by a log-sum-exp of the
+per-relation acceptance probabilities, **PARAMETRIC in the FRI proximity bound**.
+All values are −log2(acceptance), post the g = 40 grinding convention.
+
+| Term | Construction | −log2 ε (post-grind) |
+|---|---|---|
+| Evaluation opening (FS side) | I | 74 (absorbed into the FS subtotal) |
+| Whole-protocol FS subtotal ×2^40 | I (rows) | 72 |
+| Extract composition polynomial | II | 80 |
+| Fixed-reference dual-α membership | III | 128 |
+| Copy/permutation wiring = min(equality 83.19, **dual** permutation 160) | IV | 83.19 |
+| **Batched-FRI proximity (parametric)** | backend | **65.85 (current v4 base)** |
+| SHA256d Merkle/transcript | — | 88 |
+
+Composed total (v4 base, `kRCGkrFriProximityBitsV4 = 65.85`):
+
+  **ε_total = Σ 2^-term ⇒ −log2(ε_total) ≈ 65.8 bits (conservatively ≥ 65.7).**
+
+This is **FRI-DOMINATED** and **CONDITIONAL** on the FRI fold being a sound
+low-degree test. Honesty markers, stated plainly:
+
+- The number clears the 2^-64 target by **less than 2 bits**, and only because
+  the batched-FRI proximity term (65.85) dominates every construction term. If
+  the FRI fold is *not* a sound LDT, the bound is vacuous — the current base is
+  still **FRI v4**; fixing the fold to **v5** is a separate hardening line.
+- The **single-challenge** grand-product wiring nets only **60 bits** post-grind
+  at κ = 2^28 — **BELOW 64**. It is therefore FORBIDDEN on the ship path; G4
+  enforces the **dual** form (160 bits). `kRCGkrWiringPermutationSingleSepBits`
+  is pinned so the test asserts it is < 64.
+- Hardening the batched FRI to Q = 128 (`FriBatchSoundnessBoundBits() = 76.8`)
+  makes the FS subtotal (72) the floor and lifts the composed bound to ≈ **71.9**
+  bits. `RCGkrComposedSeparationBits(FriBatchSoundnessBoundBits())` reports it.
+
+`RCGkrComposedSeparationBits()` (no argument) returns the honest current value
+(v4 base) ≈ 65.8. The term pins and the total are asserted in
+`gkr_integration_composed_separation_bound`.
