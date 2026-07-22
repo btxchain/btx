@@ -868,18 +868,73 @@ BOOST_AUTO_TEST_CASE(rc_coup_exchange_rounds_v3_digest_and_bytes)
 
 BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
 {
-    // FREEZE medium-V3 golden (ratio-preserving CI shape; uint64-wrap Mix).
+    // FREEZE medium-V3 golden under independent COUP_*_V3 domains (F7 / WP-H).
+    // Prior pin 744fd3df… used V1 domain tags on a V3 shape (bug); re-pinned with
+    // MakeMediumV3RCCoupOptions() (transcript_version=ENC_RC_V3, rounds=0).
+    // V1 toy 7a7ce106… and V2 medium 349175d5… MUST remain unchanged.
     const auto header = MakeCoupHeader(42);
     const auto params = rc::MakeMediumV3RCCoupParams();
+    const auto opt = rc::MakeMediumV3RCCoupOptions();
     BOOST_REQUIRE(rc::ValidateRCCoupParams(params));
     BOOST_REQUIRE(rc::RCCoupUseMixU64Wrap(params));
-    const uint256 d1 = rc::RecomputeCoupledPuzzleReference(header, 0, params);
-    const uint256 d2 = rc::RecomputeCoupledPuzzleReference(header, 0, params);
+    BOOST_CHECK_EQUAL(opt.transcript_version, rc::ENC_RC_V3);
+    BOOST_CHECK_EQUAL(opt.exchange_rounds, 0u);
+    const uint256 d1 = rc::RecomputeCoupledPuzzleReference(header, 0, params, opt);
+    const uint256 d2 = rc::RecomputeCoupledPuzzleReference(header, 0, params, opt);
     BOOST_CHECK(!d1.IsNull());
     BOOST_CHECK(d1 == d2);
-    // Pin filled after first honest CI run (Agent C); do not silently replace.
+    // Pin filled after first honest CI run under COUP_*_V3; do not silently replace.
     BOOST_CHECK_EQUAL(d1.GetHex(),
+                      "0000000000000000000000000000000000000000000000000000000000000000");
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
+{
+    // F7: V3 domain strings must not collide with V1/V2 families.
+    const auto& v1 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V1);
+    const auto& v2 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V2);
+    const auto& v3 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V3);
+    const char* const fields_v1[] = {v1.episode, v1.bank,    v1.lobe,    v1.barrier,
+                                     v1.perm,    v1.mix,     v1.extract, v1.full_bank,
+                                     v1.exchange};
+    const char* const fields_v2[] = {v2.episode, v2.bank,    v2.lobe,    v2.barrier,
+                                     v2.perm,    v2.mix,     v2.extract, v2.full_bank,
+                                     v2.exchange};
+    const char* const fields_v3[] = {v3.episode, v3.bank,    v3.lobe,    v3.barrier,
+                                     v3.perm,    v3.mix,     v3.extract, v3.full_bank,
+                                     v3.exchange};
+    for (size_t i = 0; i < 9; ++i) {
+        BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v2[i]));
+        BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v3[i]));
+        BOOST_CHECK(std::string(fields_v2[i]) != std::string(fields_v3[i]));
+        BOOST_CHECK(std::string(fields_v3[i]).find("_V3") != std::string::npos);
+    }
+    BOOST_CHECK_EQUAL(std::string(v1.episode), "BTX_RC_COUP_EPISODE_V1");
+    BOOST_CHECK_EQUAL(std::string(v2.episode), "BTX_RC_COUP_EPISODE_V2");
+    BOOST_CHECK_EQUAL(std::string(v3.episode), "BTX_RC_COUP_EPISODE_V3");
+
+    // V3 shape + V1 domains must diverge from V3 domains (proves selection matters).
+    const auto header = MakeCoupHeader(42);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    rc::RCCoupOptions v1_opts;
+    v1_opts.transcript_version = rc::ENC_RC_V1;
+    const auto v3_opts = rc::MakeMediumV3RCCoupOptions();
+    const uint256 d_v1 = rc::RecomputeCoupledPuzzleReference(header, 0, params, v1_opts);
+    const uint256 d_v3 = rc::RecomputeCoupledPuzzleReference(header, 0, params, v3_opts);
+    BOOST_CHECK(!d_v1.IsNull());
+    BOOST_CHECK(!d_v3.IsNull());
+    BOOST_CHECK(d_v1 != d_v3);
+    // Historical pre-WP-H medium-V3 digest (V1 tags on V3 shape) retained as witness.
+    BOOST_CHECK_EQUAL(d_v1.GetHex(),
                       "744fd3dfda6a58ddcd95474a9895cd2c6b17c2f1c2591848fc631eed78dea6a9");
+
+    Consensus::Params p3;
+    p3.nMatMulRCCoupledProfile = 3;
+    p3.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p3).transcript_version, rc::ENC_RC_V3);
+    Consensus::Params p2;
+    p2.nMatMulRCCoupledProfile = 2;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p2).transcript_version, rc::ENC_RC_V1);
 }
 
 

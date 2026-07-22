@@ -4254,9 +4254,11 @@ bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensu
         matmul::v4::rc::ResolveRCCoupParams(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) return finish(false);
 
-    // Consensus REJECT: empty ExactGemm (CPU-only; R1).
-    const uint256 digest =
-        matmul::v4::rc::RecomputeCoupledPuzzleReference(header, block_height, params_coup);
+    // Consensus REJECT: empty ExactGemm (CPU-only; R1). Profile-selected domains (F7).
+    const matmul::v4::rc::RCCoupOptions opts_coup =
+        matmul::v4::rc::ResolveRCCoupOptions(params);
+    const uint256 digest = matmul::v4::rc::RecomputeCoupledPuzzleReference(
+        header, block_height, params_coup, opts_coup);
     if (digest.IsNull() || digest != header.matmul_digest) return finish(false);
     if (UintToArith256(digest) > *bnTarget) return finish(false);
     return finish(true);
@@ -5988,6 +5990,8 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
         return false;
     }
+    const matmul::v4::rc::RCCoupOptions opts_coup =
+        matmul::v4::rc::ResolveRCCoupOptions(params);
 
     // F5: resolve + RC self-qual ONCE per solve (cached by provider/arch/epoch).
     // Per-nonce path must never re-enter ProbeRCSelfQual.
@@ -6023,7 +6027,7 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         cfg.Q = Q;
         std::vector<uint256> digests;
         if (!matmul::v4::rc::TryMineRCCoupledBatch(window, block_height, params_coup, digests, cfg,
-                                                   gemm) ||
+                                                   gemm, opts_coup) ||
             digests.size() != window.size()) {
             LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch failed at nonce=%llu; "
                        "aborting\n",
@@ -6048,8 +6052,8 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
             // Winner candidate: CPU reseal (empty ExactGemm).
             CBlockHeader cand = window[i];
-            const uint256 resealed =
-                matmul::v4::rc::RecomputeCoupledPuzzleReference(cand, block_height, params_coup);
+            const uint256 resealed = matmul::v4::rc::RecomputeCoupledPuzzleReference(
+                cand, block_height, params_coup, opts_coup);
             if (resealed != mined) {
                 LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
                            "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",

@@ -649,6 +649,28 @@ BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_stub)
     BOOST_CHECK(!ctx.Ready());
 }
 
+/** F6: resident CUDA + stub MUST refuse rows_per_lobe != 1 (V3 M=128) rather
+ *  than silently emit a wrong M=1 digest. */
+BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_rows_per_lobe_gt1_fail_closed)
+{
+    matmul_v4::cuda::RCCudaEpisodeContext ctx;
+    std::string err;
+    auto params = rc::MakeToyRCCoupParams();
+    params.rows_per_lobe = 128; // V3 production M
+    BOOST_REQUIRE(rc::ValidateRCCoupParams(params));
+    BOOST_CHECK(!ctx.Init(params, /*batch_q=*/1, &err));
+    BOOST_CHECK_MESSAGE(err.find("rows_per_lobe") != std::string::npos,
+                        "M>1 Init must fail-closed with rows_per_lobe reason; got: " << err);
+    BOOST_CHECK(!ctx.Ready());
+
+    // Medium V3 shape likewise refused.
+    auto medium_v3 = rc::MakeMediumV3RCCoupParams();
+    BOOST_REQUIRE_GE(medium_v3.rows_per_lobe, 2u);
+    err.clear();
+    BOOST_CHECK(!ctx.Init(medium_v3, /*batch_q=*/1, &err));
+    BOOST_CHECK(err.find("rows_per_lobe") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(rc_dc_cuda_episode_context_medium_digest)
 {
     if (!matmul_v4::cuda::IsRcEpisodeCudaCompiled()) {
