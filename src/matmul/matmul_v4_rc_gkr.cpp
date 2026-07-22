@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
 #include <matmul/matmul_v4_rc_gkr_coupled.h>
+#include <matmul/matmul_v4_rc_gkr_wiring.h>
 #include <span.h>
 #include <sys/resource.h>
 
@@ -19,6 +20,7 @@
 #include <atomic>
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -1969,6 +1971,324 @@ RCGkrProveResultV7 ProveMaliciousEpisodeV7ForTest(const CBlockHeader& header,
     return res;
 }
 
+// ============================================================================
+// G1–G5 IN-CIRCUIT RELATIONS — the four constructions wired over the committed
+// columns. Runs STANDALONE from the proof (re-derives the sumcheck points and
+// its own challenges), so an internally-consistent forgery is caught by the
+// construction identities and not only by the native §5 re-derivation. Every
+// identity below vanishes for the honest witness; each failing class of forgery
+// is named at its "v7:g<N>:" relation. Arbiter stays OFF; ExactReplay decides.
+// ============================================================================
+namespace {
+
+inline constexpr char kRCGkrRelDomainTagV7[] = "BTX_RC_GKR_RELV7";
+
+RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
+                                                    const CBlockHeader& header, int32_t height,
+                                                    const arith_uint256& target)
+{
+    RCGkrRelationsResult r;
+    auto fail = [&](RCGkrRelation rel, const std::string& detail) {
+        r.ok = false;
+        r.first_failing = rel;
+        const int n = static_cast<int>(rel);
+        r.failure = "v7:g" + std::to_string(n) + ":" + detail;
+        return r;
+    };
+
+    // Shape gates (mirror VerifyWinnerProofV7 so the module is self-standing).
+    if (proof.round_roots.size() != proof.episode.rounds) return fail(RCGkrRelation::G2, "roots_size");
+    const std::vector<uint256>& roots = proof.round_roots;
+    const uint32_t batch_n = proof.batch.n_coeffs;
+    if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail(RCGkrRelation::G1, "batch_n");
+
+    const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, proof.episode, roots);
+    if (prov.size() != proof.wires.size()) return fail(RCGkrRelation::G1, "wiring_count");
+
+    const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
+                                            proof.claimed_digest, proof.episode_sigma, roots);
+
+    // Module-local challenges (independent of the main transcript; soundness only
+    // needs uniform-random draws — the FS-binding of the shipped α's is a
+    // separate gate in VerifyWinnerProofV7). eta: G3 composition; gamma: G3
+    // fingerprint; alpha1/alpha2: G3 dual-α membership.
+    FsTranscript rel_fs(kRCGkrRelDomainTagV7);
+    rel_fs.AbsorbUint256(base_seed);
+    const Fp2 eta = rel_fs.ChallengeFp2("g3_eta");
+    const Fp2 gamma = rel_fs.ChallengeFp2("g3_gamma");
+    const Fp2 alpha1 = rel_fs.ChallengeFp2("g3_alpha1");
+    const Fp2 alpha2 = rel_fs.ChallengeFp2("g3_alpha2");
+
+    gkr_air::TableTM tm_tab;
+    gkr_air::TableTX tx_tab;
+    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+
+    // ---- Per-layer sumcheck-point relations: G1 (operands), G2 (claim), G5. ----
+    FsTranscript fs(kRCGkrDomainTagV7);
+    fs.AbsorbUint256(base_seed);
+    for (size_t li = 0; li < proof.wires.size(); ++li) {
+        const RCGkrV7WireWitness& w = proof.wires[li];
+        const RCGkrLayerClaimV7& lc = proof.layers[li];
+        const LayerProv& lp = prov[li];
+        fs.AbsorbU32(static_cast<uint32_t>(li));
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(std::max(w.m, 1u)));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(std::max(w.n, 1u)));
+        std::vector<Fp2> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp2("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp2("v7_rj");
+        std::vector<Fp2> rk;
+        Fp2 gf;
+        if (!VerifyProductK(lc.sumcheck, lc.c_claim, fs, rk, gf))
+            return fail(RCGkrRelation::G1, "sumcheck_endpoint"); // cannot re-derive the point
+
+        // -- G1: bind a_at_r/b_at_r to the committed A/B columns (Construction I
+        //    matrix-opening claim points) + the final-eval binding (Thm 3.1). --
+        const std::vector<Fp2> a_col = ToFp2I8(w.A);
+        const std::vector<Fp2> b_col = ToFp2I8(w.B);
+        const Fp2 a_at_r = MleEvalMatrix(a_col, w.m, w.k, ri, rk);
+        const Fp2 b_at_r = MleEvalMatrix(b_col, w.k, w.n, rk, rj);
+        if (!Eq(a_at_r, lc.a_eval)) return fail(RCGkrRelation::G1, "a_open");
+        if (!Eq(b_at_r, lc.b_eval)) return fail(RCGkrRelation::G1, "b_open");
+        if (!RCGkrCheckFinalEvalBinding(gf, a_at_r, b_at_r))
+            return fail(RCGkrRelation::G1, "final_eval");
+
+        // -- G1 (operand→PRF): each LEAF operand column bound to its Λ MxExpand
+        //    expansion (an alternate factorization / fabricated leaf is not the
+        //    PRF expansion). Chained operands are G4. --
+        {
+            uint64_t n_sha = 0;
+            std::string why;
+            if (lp.a.is_leaf &&
+                !BindOperand(lp.a, w.A, w.m, w.k, proof.wires, tm_tab, gamma, inst_tm, n_sha, why))
+                return fail(RCGkrRelation::G1, "A_mxexpand:" + why);
+            if (lp.b.is_leaf &&
+                !BindOperand(lp.b, w.B, w.k, w.n, proof.wires, tm_tab, gamma, inst_tm, n_sha, why))
+                return fail(RCGkrRelation::G1, "B_mxexpand:" + why);
+        }
+
+        // -- G2: layer claim c_ℓ bound to the committed Y trace-column segment
+        //    (Construction I segment point; single segment ⇒ index 0). --
+        const std::vector<Fp2> y_col = ToFp2I64(w.Y);
+        const Fp2 c_at_r = MleEvalMatrix(y_col, w.m, w.n, ri, rj);
+        if (!Eq(c_at_r, lc.c_claim)) return fail(RCGkrRelation::G2, "claim_segment");
+
+        // -- G5: residual accumulator binding acc = claim + X̃(pt) (Fwd), or
+        //    extract_in == Y for the non-residual layers (Construction I residual
+        //    binder). Only where the committed accumulator exists. --
+        if (w.extract_in.size() == static_cast<size_t>(w.m) * w.n) {
+            const Fp2 acc_at_r = MleEvalMatrix(ToFp2I64(w.extract_in), w.m, w.n, ri, rj);
+            if (lp.fwd_residual) {
+                // X̃ is the SAME committed operand A used as the Fwd input (k == n).
+                const Fp2 x_at_r = MleEvalMatrix(a_col, w.m, w.n, ri, rj);
+                if (!RCGkrCheckResidualAcc(acc_at_r, c_at_r, x_at_r))
+                    return fail(RCGkrRelation::G5, "residual_acc");
+            } else if (!Eq(acc_at_r, c_at_r)) {
+                return fail(RCGkrRelation::G5, "extract_in_eq_claim");
+            }
+        }
+
+        // -- G3 (per tile): Construction II Extract composition polynomial ==0 and
+        //    the verifier-defined sampler out-binding, plus feed Construction III
+        //    membership witnesses. --
+        if (w.n % kRCMxBlockLen == 0 && w.extract_out.size() == static_cast<size_t>(w.m) * w.n &&
+            w.extract_in.size() == static_cast<size_t>(w.m) * w.n) {
+            const uint32_t n_blocks = w.n / kRCMxBlockLen;
+            for (uint32_t i = 0; i < w.m; ++i) {
+                for (uint32_t bj = 0; bj < n_blocks; ++bj) {
+                    gkr_air::TilePublic pub;
+                    pub.prf_key = lp.extract_prf;
+                    pub.i = i;
+                    pub.bj = bj;
+                    std::array<int64_t, kRCMxBlockLen> in{};
+                    const size_t off = static_cast<size_t>(i) * w.n + bj * kRCMxBlockLen;
+                    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) in[t] = w.extract_in[off + t];
+                    const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
+                    // Construction II: composition polynomial over the committed cells.
+                    const gkr_air::RCAirConstraintSet cs = gkr_air::EmitTileConstraints(tw);
+                    const gkr_air::CompositionResult comp = gkr_air::ComposeConstraints(cs, eta);
+                    if (!comp.ok)
+                        return fail(RCGkrRelation::G3, "composition:" + comp.first_bad_families);
+                    // Sampler out-binding: the AIR-produced output must equal the
+                    // committed extract_out (a prover-chosen output is rejected here).
+                    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
+                        if (tw.out[t] != w.extract_out[off + t])
+                            return fail(RCGkrRelation::G3, "extract_out_binding");
+                    }
+                    gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
+                    ++r.n_tiles;
+                }
+            }
+        }
+    }
+
+    // -- G3 (aggregate): Construction III fixed-reference-vector membership. The
+    //    table sides are REGENERATED from consensus constants (never prover
+    //    data), closing the Theorem-5.1 clone-table vacuity; witnesses are the
+    //    fingerprints emitted above. T_R16 range is carried structurally by the
+    //    composition (matches the shipped sample path), so membership runs over
+    //    {T_M, T_X}. --
+    auto finalize = [](gkr_air::LogUpInstance& in) {
+        in.table_mult.assign(in.table.size(), 0);
+        for (const Fp2& wt : in.witness)
+            for (size_t j = 0; j < in.table.size(); ++j)
+                if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
+    };
+    finalize(inst_tm);
+    finalize(inst_tx);
+    {
+        std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
+        const gkr_air::LookupBindResult lr =
+            gkr_air::VerifyLookupAgainstPreprocessed(insts, gamma, alpha1, alpha2);
+        if (!lr.ok) return fail(RCGkrRelation::G3, "membership:" + lr.failure);
+    }
+
+    // -- G4: extract_out(L) == input(L+1) copy/permutation wiring (Construction
+    //    IV), over the TRUE Λ provenance. Direct copies use the equality identity
+    //    (Schwartz–Zippel MLE); transposed copies use the DUAL-challenge grand
+    //    product (the single-challenge form is never constructed here). --
+    auto bind_chain = [&](const TensorRef& ref, const std::vector<int8_t>& committed,
+                          uint32_t crows, uint32_t ccols, uint32_t idx, std::string& why) -> bool {
+        (void)crows;
+        (void)ccols; // dims come from ref.erows/ecols; kept for call-site symmetry
+        if (ref.is_leaf) return true; // leaf operands are G1 (MxExpand), not wiring
+        if (ref.src_idx >= proof.wires.size()) { why = "chain_src_oob"; return false; }
+        const std::vector<int8_t>& src = proof.wires[ref.src_idx].extract_out;
+        if (src.size() != static_cast<size_t>(ref.erows) * ref.ecols) { why = "chain_src_dims"; return false; }
+        ++r.n_chain_wirings;
+        if (!ref.transpose) {
+            // Direct copy: committed == src.
+            const WiringEqualityConstraint c = WiringEqualityFromInt8(src, committed);
+            const WiringVerifyResult vr = VerifyWiringEquality(c, base_seed, idx);
+            if (!vr.ok) { why = "equality:" + vr.reason; return false; }
+            return true;
+        }
+        // Transposed copy: committed == Transpose(src). DUAL grand product with
+        // the materialized transpose permutation (mandatory — single-challenge is
+        // 60 bits at κ, below target).
+        const std::vector<Fp2> u = ToFp2I8(src);
+        const std::vector<Fp2> v = ToFp2I8(committed);
+        const std::vector<uint64_t> pi = MakeTransposePermutation(ref.erows, ref.ecols);
+        if (v.size() != u.size() || pi.size() != u.size()) { why = "transpose_shape"; return false; }
+        const WiringPermutationDual d = BuildWiringPermutationDual(u, v, pi, base_seed, idx);
+        const WiringVerifyResult vr = VerifyWiringPermutationDual(d);
+        if (!vr.ok) { why = "permutation_dual:" + vr.reason; return false; }
+        return true;
+    };
+    for (size_t li = 0; li < proof.wires.size(); ++li) {
+        const RCGkrV7WireWitness& w = proof.wires[li];
+        const LayerProv& lp = prov[li];
+        std::string why;
+        if (!bind_chain(lp.a, w.A, w.m, w.k, static_cast<uint32_t>(4 * li + 0), why))
+            return fail(RCGkrRelation::G4, "A:" + why);
+        if (!bind_chain(lp.b, w.B, w.k, w.n, static_cast<uint32_t>(4 * li + 1), why))
+            return fail(RCGkrRelation::G4, "B:" + why);
+    }
+
+    // -- G4 (§6.3 companion): the round_roots must be the tile-tree commitment of
+    //    the reconstructed extract stream (a Construction-IV-style binding of the
+    //    per-round stream to its public root). Catches prover-chosen roots. --
+    for (uint32_t rr = 0; rr < proof.episode.rounds; ++rr) {
+        const std::vector<int8_t> stream =
+            ReconstructRoundStreamFromWitness(proof.wires, rr, proof.episode);
+        const gkr_air::TileTreeCheckResult tr =
+            gkr_air::CheckTileTreeInCircuit(stream, proof.episode.T_leaf, roots[rr]);
+        if (!tr.ok) return fail(RCGkrRelation::G4, "tiletree:" + tr.failure);
+    }
+
+    r.ok = true;
+    return r;
+}
+
+} // namespace
+
+RCGkrRelationsResult CheckWinnerProofRelationsV7(const RCGkrProofV7& proof,
+                                                 const CBlockHeader& header, int32_t height,
+                                                 const arith_uint256& target)
+{
+    // Structural pre-gates that the impl assumes (kept out of the identity core).
+    RCGkrRelationsResult r;
+    if (proof.version != kRCGkrProofVersionV7) {
+        r.failure = "v7:g1:version";
+        return r;
+    }
+    if (!ValidateRCEpisodeParams(proof.episode)) {
+        r.failure = "v7:g1:params_invalid";
+        return r;
+    }
+    const RCGkrLayout layout = RCGkrTraceLayout(proof.episode);
+    if (proof.wires.size() != layout.layers.size() ||
+        proof.layers.size() != layout.layers.size()) {
+        r.failure = "v7:g2:layer_count";
+        return r;
+    }
+    for (size_t li = 0; li < layout.layers.size(); ++li) {
+        const auto& w = proof.wires[li];
+        if (w.A.size() != static_cast<size_t>(w.m) * w.k ||
+            w.B.size() != static_cast<size_t>(w.k) * w.n ||
+            w.Y.size() != static_cast<size_t>(w.m) * w.n) {
+            r.failure = "v7:g1:wire_shape";
+            return r;
+        }
+    }
+    return CheckWinnerProofRelationsV7Impl(proof, header, height, target);
+}
+
+bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof, const CBlockHeader& header,
+                                    int32_t height, const arith_uint256& target, std::string* why)
+{
+    const RCGkrRelationsResult r = CheckWinnerProofRelationsV7(proof, header, height, target);
+    if (why) *why = r.ok ? std::string("v7 g1-g5 relations ok") : r.failure;
+    return r.ok;
+}
+
+// COMPOSED separation bound: −log2(Σ 2^-term) over the four constructions + the
+// batched-FRI backend + SHA256d, PARAMETRIC in the FRI proximity bits.
+RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits)
+{
+    RCGkrComposedBound b;
+    b.construction_i_bits = static_cast<double>(RCGkrConstructionISeparationBits()); // 74
+    b.construction_ii_bits = kRCGkrCompositionSepBits;                                // 80
+    b.construction_iii_bits = kRCGkrLookupSepBits;                                    // 128
+    b.construction_iv_bits =
+        std::min(kRCGkrWiringEqualitySepBits, kRCGkrWiringPermutationDualSepBits);    // 83.19
+    b.wiring_single_bits = kRCGkrWiringPermutationSingleSepBits;                      // 60
+    b.fri_proximity_bits = fri_proximity_bits;
+    b.sha_bits = kRCGkrShaSepBits;                                                    // 88
+
+    // ε_total = Σ 2^-term ; composed = −log2(ε_total) via a stable log-sum-exp.
+    // Construction I (its FS-side sub-bound, 74) is ABSORBED into the whole-
+    // protocol FS subtotal (kRCGkrFsSubtotalSepBits = 72; the eval opening rides
+    // the same sumcheck rows), so it is reported but not summed a second time.
+    const double terms[] = {kRCGkrFsSubtotalSepBits, b.construction_ii_bits,
+                            b.construction_iii_bits, b.construction_iv_bits,
+                            b.fri_proximity_bits,    b.sha_bits};
+    double lo = terms[0];
+    for (double t : terms) lo = std::min(lo, t);
+    double sum = 0.0;
+    for (double t : terms) sum += std::pow(2.0, -(t - lo));
+    b.composed_bits = lo - std::log2(sum);
+
+    b.clears_target = b.composed_bits >= static_cast<double>(kRCFriTargetSoundnessBits);
+    b.fri_conditional = true; // dominated by the FRI proximity term (see header)
+    b.any_term_below_target = false;
+    for (double t : terms)
+        if (t < static_cast<double>(kRCFriTargetSoundnessBits)) b.any_term_below_target = true;
+    return b;
+}
+
+double RCGkrComposedSeparationBits(double fri_proximity_bits)
+{
+    return RCGkrComposedSeparation(fri_proximity_bits).composed_bits;
+}
+
+double RCGkrComposedSeparationBits()
+{
+    // Current base: the v4 FRI fold (Q=116 unique decoding) dominates ⇒ ≈ 65.7,
+    // CONDITIONAL on the fold being a sound LDT. FriBatchSoundnessBoundBits()
+    // (Q=128, 76.8) is the hardened target ⇒ ≈ 71.9.
+    return RCGkrComposedSeparationBits(kRCGkrFriProximityBitsV4);
+}
+
 bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
                          const arith_uint256& target, std::string* why, RCGkrTiming* out_timing)
 {
@@ -2123,6 +2443,15 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
     const gkr_air::LogUpVerifyResult lr = gkr_air::LogUpDualAlphaVerify(insts, a1, a2);
     if (!lr.ok) return fail("v7:logup:" + lr.failure); // F6/F7 (mechanism)
+
+    // G1–G5 IN-CIRCUIT RELATIONS (defense-in-depth; the four constructions).
+    // Runs AFTER the native §5 grounding, so it never changes which relation an
+    // already-rejected forgery first fails (the red-team asserts the ground/logup
+    // relation), while binding every winner-proof relation by a construction
+    // identity. Honest proofs satisfy all of G1–G5. Behind the OFF arbiter.
+    const RCGkrRelationsResult rel =
+        CheckWinnerProofRelationsV7(proof, header, height, target);
+    if (!rel.ok) return fail(rel.failure); // v7:g1..g5 in-circuit relation
 
     if (fs.Digest() != proof.transcript_hash) return fail("v7:transcript_hash");
 

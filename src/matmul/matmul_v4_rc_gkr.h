@@ -574,6 +574,127 @@ struct RCGkrProveResultV7 {
                                        std::string* why = nullptr,
                                        RCGkrTiming* out_timing = nullptr);
 
+// ============================================================================
+// G1–G5 IN-CIRCUIT RELATIONS (integration wave, 2026-07-22).
+//
+// The four finite-field constructions (I: batched multilinear evaluation
+// opening; II: Extract composition polynomial; III: fixed-reference-vector
+// LogUp membership; IV: copy/permutation wiring) are wired into
+// VerifyWinnerProofV7 as the in-circuit relations G1–G5, so each winner-proof
+// relation is CHECKED by a polynomial identity over the committed columns
+// rather than grounded solely by native int64 re-derivation:
+//
+//   G1  operand openings a_at_r/b_at_r bound to the committed A/B columns
+//       (Construction I matrix-opening claim + final-eval binding) AND each
+//       committed LEAF operand bound to its Λ MxExpand PRF expansion.
+//   G2  each layer claim c_ℓ bound to the committed trace-column segment
+//       (Construction I segment point → Ỹ(r) == c_claim).
+//   G3  the prover-manufactured lookup is REPLACED by Construction II's Extract
+//       composition polynomial (Comp == 0 over every tile) + Construction III's
+//       fixed-reference-vector membership (canonical T_M/T_X regenerated, not
+//       prover-chosen) + the verifier-defined Extract sampler out-binding.
+//   G4  extract_out(L) == input(L+1) (and the §6.3 round-root↔stream binding)
+//       via Construction IV — the DUAL-challenge grand product is enforced for
+//       transposed copies; the single-challenge form (only 60 bits post-grind)
+//       is UNREACHABLE on this path.
+//   G5  the Fwd residual accumulator acc = claim + X̃(pt) (and extract_in == Y
+//       for the non-residual layers) via Construction I's residual binder.
+//
+// This stays STRICTLY behind the OFF arbiter — VerifyWinnerProofV7 is never
+// consensus-authoritative; ExactReplay remains the sole authority. The relation
+// gate runs AFTER the existing §5.4/§5.7/§6.3 native grounding so it never
+// changes which relation an already-rejected forgery first fails; it is a
+// construction-expressed re-derivation of the SAME soundness, plus the genuinely
+// new opening/segment/wiring/residual bindings.
+// ============================================================================
+
+/** Which in-circuit relation a winner-proof check belongs to. */
+enum class RCGkrRelation : uint8_t { G1 = 1, G2 = 2, G3 = 3, G4 = 4, G5 = 5 };
+
+struct RCGkrRelationsResult {
+    bool ok{false};
+    /** First failing relation reason, prefixed "v7:g<N>:<detail>" (empty on ok). */
+    std::string failure;
+    RCGkrRelation first_failing{RCGkrRelation::G1};
+    uint64_t n_tiles{0};
+    uint64_t n_chain_wirings{0};
+};
+
+/**
+ * Run the G1–G5 in-circuit relations over `proof` STANDALONE (independent of the
+ * native §5 grounding), re-deriving the sumcheck points and FS challenges from
+ * the proof itself. Returns ok iff every relation's polynomial identity holds.
+ * Used by VerifyWinnerProofV7 (defense-in-depth gate) and by the integration
+ * red-team, which feeds internally-consistent forgeries and asserts each rejects
+ * at its "v7:g<N>:" relation — i.e. the constructions catch the forgery, NOT
+ * only the native re-derivation. NEVER consensus; arbiter stays OFF.
+ */
+[[nodiscard]] RCGkrRelationsResult CheckWinnerProofRelationsV7(
+    const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
+    const arith_uint256& target);
+
+/** Thin bool wrapper for tests: true iff every G1–G5 relation holds; `why`
+ *  receives the first failing "v7:g<N>:*" relation. */
+[[nodiscard]] bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof,
+                                                  const CBlockHeader& header, int32_t height,
+                                                  const arith_uint256& target,
+                                                  std::string* why = nullptr);
+
+// ---------------------------------------------------------------------------
+// COMPOSED separation bound across the four constructions + batched-FRI backend
+// (integration accounting, PARAMETRIC in the FRI proximity bound). All values
+// are −log2(acceptance probability), post the g = 40 grinding convention.
+// ---------------------------------------------------------------------------
+
+/** Construction II composition polynomial (n_slots ≤ 256): 2·log2 p − 8 − 40. */
+inline constexpr double kRCGkrCompositionSepBits = 80.0;
+/** Construction III dual-α fixed-reference-vector membership over Fp2 (§5.6). */
+inline constexpr double kRCGkrLookupSepBits = 128.0;
+/** Construction IV equality (copy) at the κ = 2^28 column cap: 128 − log2(28) − 40. */
+inline constexpr double kRCGkrWiringEqualitySepBits = 83.19;
+/** Construction IV grand product, DUAL challenge, N = 2^28: 2·(128−28) − 40. */
+inline constexpr double kRCGkrWiringPermutationDualSepBits = 160.0;
+/** Construction IV grand product, SINGLE challenge, N = 2^28: (128−28) − 40 =
+ *  60 — BELOW the 64-bit target; the single form is FORBIDDEN on the ship path
+ *  (dual is mandatory). Pinned here so the test can assert it is < 64. */
+inline constexpr double kRCGkrWiringPermutationSingleSepBits = 60.0;
+/** Whole-protocol Fiat–Shamir subtotal × 2^40 grinding (all sumcheck rounds +
+ *  RLC/DEEP weights; Theorem 8.1 line). */
+inline constexpr double kRCGkrFsSubtotalSepBits = 72.0;
+/** SHA256d Merkle/transcript bindings vs a 2^40-query adversary (computational). */
+inline constexpr double kRCGkrShaSepBits = 88.0;
+/** Batched-FRI proximity term of the CURRENT base (v4 fold, Q = 116 unique
+ *  decoding): 116·log2(32/17) − 40 ≈ 65.85. This is the FRI-DOMINATING term and
+ *  the whole bound is CONDITIONAL on the fold being a sound low-degree test
+ *  (the v5 hardening line). FriBatchSoundnessBoundBits() = 76.8 (Q = 128) is the
+ *  hardened target that would lift the composed bound to ≈ 71.9. */
+inline constexpr double kRCGkrFriProximityBitsV4 = 65.85;
+
+struct RCGkrComposedBound {
+    double construction_i_bits{0.0};   // Construction I evaluation opening (FS-side)
+    double construction_ii_bits{0.0};  // composition
+    double construction_iii_bits{0.0}; // lookup membership (dual-α)
+    double construction_iv_bits{0.0};  // wiring (min of equality / dual permutation)
+    double wiring_single_bits{0.0};    // excluded single-challenge path (< 64)
+    double fri_proximity_bits{0.0};    // parametric FRI term (dominating)
+    double sha_bits{0.0};              // SHA256d computational
+    double composed_bits{0.0};         // −log2(Σ 2^-term) over all of the above
+    bool clears_target{false};         // composed_bits ≥ 64
+    bool fri_conditional{true};        // bound assumes the FRI fold is a sound LDT
+    bool any_term_below_target{false}; // any INCLUDED term < 64 (excludes wiring_single)
+};
+
+/** The full composed-bound breakdown, PARAMETRIC in the FRI proximity bits. */
+[[nodiscard]] RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits);
+
+/** The composed separation bound (−log2 ε_total), FRI-dominated and conditional
+ *  on the FRI fold being a sound LDT. With the current v4 base
+ *  (kRCGkrFriProximityBitsV4) this is ≈ 65.7 bits — it CLEARS 64 by < 2 bits and
+ *  ONLY if the fold is a sound low-degree test; if it is not, the bound is
+ *  vacuous. Parametric overload lets callers plug FriBatchSoundnessBoundBits(). */
+[[nodiscard]] double RCGkrComposedSeparationBits(double fri_proximity_bits);
+[[nodiscard]] double RCGkrComposedSeparationBits();
+
 enum class RCProdVerifyPath : uint8_t {
     ExactReplay = 0,
     WinnerGkr = 1,
