@@ -169,7 +169,14 @@ BOOST_AUTO_TEST_CASE(rc_coup_resolve_profile_toydims_matrix)
     }
     p.nMatMulRCCoupledProfile = 99;
     BOOST_CHECK(!rc::ValidateRCCoupParams(rc::ResolveRCCoupParams(p)));
+
+    p.nMatMulRCCoupledProfile = 3;
+    p.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V3);
+    p.nMatMulRCCoupledProfile = 2;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V1);
 }
+
 
 BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)
 {

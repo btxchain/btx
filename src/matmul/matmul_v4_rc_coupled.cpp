@@ -721,6 +721,19 @@ RCCoupParams ResolveRCCoupParams(const Consensus::Params& p)
     }
 }
 
+RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p)
+{
+    // F7/F8: profile=3 selects V3 transcript domains; profile=2 keeps V1 tags.
+    switch (p.nMatMulRCCoupledProfile) {
+    case 3:
+        return p.fMatMulRCCoupledUseToyDims ? MakeMediumV3RCCoupOptions()
+                                            : MakeV3RCCoupOptions();
+    case 2:
+    default:
+        return RCCoupOptions{};
+    }
+}
+
 uint64_t MaxRCCoupPageSumAbsBound(const RCCoupParams& p)
 {
     // |acc| ≤ P · W · 127² after P page-sums (int8±127 ExactGemm lanes).

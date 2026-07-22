@@ -212,14 +212,6 @@ inline constexpr int64_t kRCCoupInt8ProdAbsMax =
 [[nodiscard]] RCCoupParams ResolveRCCoupParams(const Consensus::Params& p);
 
 /**
- * Execution options for the selected coupled profile (F7/F8).
- * Profile 3 → MakeMediumV3RCCoupOptions (toydims) / MakeV3RCCoupOptions (prod)
- * so transcript_version=ENC_RC_V3 selects independent COUP_*_V3 domains.
- * Profile 2 / default → RCCoupOptions{} (V1 domains; preserves V1/V2 goldens).
- */
-[[nodiscard]] RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p);
-
-/**
  * Production barrier-loop completeness (C1–C6). True iff ValidateRCCoupParams
  * and barriers ∈ [4, 8] and kRCCoupMixPatterns ≥ 2.
  */
@@ -322,6 +314,15 @@ struct RCCoupOptions {
  * without the 4-round exchange cost.
  */
 [[nodiscard]] RCCoupOptions MakeMediumV3RCCoupOptions();
+
+/**
+ * Execution options for the selected coupled profile (F7/F8).
+ * Profile 3 → MakeMediumV3RCCoupOptions (toydims) / MakeV3RCCoupOptions (prod)
+ * so transcript_version=ENC_RC_V3 selects independent COUP_*_V3 domains.
+ * Profile 2 / default → RCCoupOptions{} (V1 domains; preserves V1/V2 goldens).
+ */
+[[nodiscard]] RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p);
+
 /**
  * Digest-affecting material-exchange traffic estimate (read+write):
  *   exchange_rounds × barriers × StateBytes() × sizeof(int64_t) × 2
