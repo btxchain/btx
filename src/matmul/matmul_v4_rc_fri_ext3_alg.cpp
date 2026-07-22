@@ -538,7 +538,7 @@ bool Fri3AlgVerifyPath(const Fri3AlgDigest& leaf_digest, uint32_t index,
 
 Fri3AlgDigest Fri3AlgBatchRowRoot(const std::vector<std::vector<Fp3>>& columns, uint32_t n_coeffs)
 {
-    if (columns.empty() || columns.size() > kRCFriBatchMaxColumns || n_coeffs == 0 ||
+    if (columns.empty() || columns.size() > kRCFri3AlgBatchMaxColumns || n_coeffs == 0 ||
         (n_coeffs & (n_coeffs - 1)) != 0 ||
         static_cast<uint64_t>(n_coeffs) * kRCFriBlowup > (uint64_t{1} << kRCFriMaxLdeLog2)) {
         return Fri3AlgDigest{};
@@ -558,7 +558,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommit(const std::vector<std::vector<Fp3>>&
                                             const uint256& fs_seed, uint64_t pow_grind_nonce)
 {
     Fri3AlgBatchCommitResult out;
-    if (columns.empty() || columns.size() > kRCFriBatchMaxColumns) {
+    if (columns.empty() || columns.size() > kRCFri3AlgBatchMaxColumns) {
         out.note = "bad column count";
         return out;
     }
@@ -741,7 +741,7 @@ bool Fri3AlgBatchVerify(const Fri3AlgBatchProof& proof, const uint256& fs_seed, 
         return fail("LDE guard");
     const uint32_t n_lde = n * kRCFriBlowup;
     const uint32_t W = static_cast<uint32_t>(proof.column_len.size());
-    if (W == 0 || W > kRCFriBatchMaxColumns) return fail("bad column count");
+    if (W == 0 || W > kRCFri3AlgBatchMaxColumns) return fail("bad column count");
     if (proof.row_commit.n_leaves != n_lde) return fail("row n_leaves");
     uint32_t max_len = 0;
     for (uint32_t i = 0; i < W; ++i) {
@@ -982,7 +982,7 @@ std::optional<Fri3AlgBatchProof> DeserializeFri3AlgBatchProof(const std::vector<
     if (!ReadAlgDigestChecked(p, end, proof.row_commit.root)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.row_commit.n_leaves)) return std::nullopt;
     uint32_t n_cols = 0;
-    if (!ReadLE32Checked(p, end, n_cols) || n_cols == 0 || n_cols > kRCFriBatchMaxColumns)
+    if (!ReadLE32Checked(p, end, n_cols) || n_cols == 0 || n_cols > kRCFri3AlgBatchMaxColumns)
         return std::nullopt;
     proof.column_len.resize(n_cols);
     for (auto& len : proof.column_len) {

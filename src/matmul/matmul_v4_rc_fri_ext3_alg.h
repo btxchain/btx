@@ -93,6 +93,18 @@ inline constexpr uint32_t kRCFri3AlgMaxQueriesHard = 256;
 /** Per-node soundness target for the 2^28-node recursion union (spec §5). */
 inline constexpr int kRCFri3AlgTargetSoundnessBits = 92;
 
+/** Path-local batch column cap for the RECURSION FRI. The shared
+ *  kRCFriBatchMaxColumns = 2^12 is a conservative SHA-path guard; the
+ *  recursion's FRI-verifier-as-AIR (V_CS) is a short-and-wide constraint
+ *  system whose column count exceeds 2^12 before the self-similar fixed-point
+ *  reshaping. The only W-dependent soundness term is the batching RLC
+ *  (W+2)/|Fp3|; at W ≤ 2^14 and |Fp3| ≈ 2^192 that is ≈ 2^-178 — ~86 bits
+ *  below the per-node 2^-92 target, so raising the cap here costs no soundness.
+ *  Path-local ONLY: the SHA base path keeps 2^12 untouched. */
+inline constexpr uint32_t kRCFri3AlgBatchMaxColumns = 1u << 14;
+static_assert(kRCFri3AlgBatchMaxColumns >= kRCFriBatchMaxColumns,
+              "recursion cap must admit at least the shared width");
+
 static_assert(kRCFri3AlgNumQueries == 148, "recursion FRI ships Q=148 (spec §5.2)");
 static_assert(kRCFriGrindingBits == 40, "recursion FRI ships g=40 (spec §5.2)");
 static_assert(kRCFriBlowup == 16, "recursion FRI ships blowup=16 (spec §5.2)");
