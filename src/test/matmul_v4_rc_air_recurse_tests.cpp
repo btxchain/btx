@@ -22,13 +22,17 @@
 #include <matmul/matmul_v4_rc_air_quotient.h>
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_alg_hash.h>
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <chrono>
+#include <cstdlib>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace ah = matmul::v4::rc::alg_hash;
@@ -260,12 +264,54 @@ aq::AirConstraintSystem<Fp3> ToyChildCS()
     cs.constraints.push_back(std::move(b));
     return cs;
 }
+
+aq::AirConstraintSystem<Fp3> WideBoolChildCS(uint32_t w)
+{
+    aq::AirConstraintSystem<Fp3> cs;
+    cs.n_rows = 2;
+    cs.n_columns = w;
+    for (uint32_t col = 0; col < w; ++col) {
+        aq::AirConstraint<Fp3> b;
+        b.name = "wide.bool";
+        b.kind = aq::AirKind::kEverywhere;
+        b.alg_degree = 2;
+        b.eval = [col](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
+            return gf::Mul(cur[col], gf::Sub(cur[col], Fp3::One()));
+        };
+        cs.constraints.push_back(std::move(b));
+    }
+    return cs;
+}
+
 uint256 SeedByte(unsigned char v)
 {
     uint256 u;
     for (int i = 0; i < 32; ++i) u.data()[i] = static_cast<unsigned char>(v + i);
     return u;
 }
+
+double Since(const std::chrono::steady_clock::time_point t0)
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+}
+
+size_t EstimateAlgAirProofBytes(const aq::AirQuotientProof<Fp3, AlgB3>& p)
+{
+    std::vector<unsigned char> ser;
+    size_t n = matmul::v4::rc::SerializeFri3AlgBatchProof(p.batch, ser);
+    n += 32; // trace_commit
+    n += 4;  // next_openings outer count
+    for (const auto& q : p.next_openings) {
+        n += 4; // per-query path count
+        for (const auto& path : q) {
+            n += 4; // index
+            n += 4 + path.values.size() * 3 * sizeof(uint64_t);
+            n += 4 + path.siblings.size() * ah::kAlgHashDigestLen * sizeof(uint64_t);
+        }
+    }
+    return n;
+}
+
 // V_CS satisfiable (all constraints vanish on H) for a given child proof.
 bool VcsSatisfiable(const aq::AirConstraintSystem<Fp3>& child_cs,
                     const aq::AirQuotientProof<Fp3, AlgB3>& c, const uint256& seed,
@@ -391,6 +437,139 @@ BOOST_AUTO_TEST_CASE(piece6_episode_aggregate_dispatches_to_verify)
     BOOST_CHECK(!ar::VerifyEpisodeAggregate(agg, child_seed, &why));
     BOOST_CHECK(why.rfind("v7c:agg:", 0) == 0);
     BOOST_CHECK(why != "v7c:agg:k_zero" && why != "v7c:agg:pins_arity_mismatch");
+}
+
+// Piece 5 diagnostic: run the REAL algebraic-hash FRI once (not the fast
+// satisfiability oracle), then attempt the requested second recursion level.
+// Gated because proving the aggregate over the row-wise Poseidon2 FRI is heavy.
+BOOST_AUTO_TEST_CASE(piece5_real_fri_roundtrip_and_current_blockers)
+{
+    const char* env = std::getenv("BTX_RC_AIR_RECURSE_REAL_FRI");
+    if (env == nullptr || std::string(env) != "1") {
+        BOOST_TEST_MESSAGE("piece5 real-FRI diagnostic skipped "
+                           "(BTX_RC_AIR_RECURSE_REAL_FRI!=1)");
+        return;
+    }
+
+    const uint256 child_seed = SeedByte(31);
+    const uint256 l1_seed = SeedByte(41);
+    const uint256 root_seed = SeedByte(51);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS(); // W=1, supported by V_CS
+    const std::vector<std::vector<Fp3>> cols = {{Fp3::FromFp(0), Fp3::FromFp(1)}};
+
+    std::vector<aq::AirQuotientProof<Fp3, AlgB3>> leaves;
+    double child_prove_s = 0.0;
+    for (uint32_t i = 0; i < 4; ++i) {
+        const auto t0 = std::chrono::steady_clock::now();
+        auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+        child_prove_s += Since(t0);
+        BOOST_REQUIRE_MESSAGE(pr.ok && pr.division_exact, pr.note);
+        std::string why;
+        BOOST_REQUIRE_MESSAGE((aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, pr.proof, child_seed,
+                                                                 &why)),
+                              why);
+        leaves.push_back(std::move(pr.proof));
+    }
+
+    const ar::VerifierAirFamilies fam; // full mirror: row + fold + deep + per-point
+    auto prove_node = [&](const char* tag, const aq::AirQuotientProof<Fp3, AlgB3>& a,
+                          const aq::AirQuotientProof<Fp3, AlgB3>& b) {
+        const auto t0 = std::chrono::steady_clock::now();
+        ar::AggregateResult r = ar::ProveAggregate(child_cs, {a, b}, child_seed, l1_seed, fam);
+        const double prove_s = Since(t0);
+        BOOST_TEST_MESSAGE(tag << " prove_s=" << prove_s << " ok=" << r.ok
+                               << " witness_satisfies=" << r.witness_satisfies
+                               << " note=\"" << r.note << "\" cells=" << r.measurement.cell_count
+                               << " cols=" << r.measurement.n_columns
+                               << " rows=" << r.measurement.n_rows
+                               << " proof_bytes=" << EstimateAlgAirProofBytes(r.proof));
+        return r;
+    };
+
+    ar::AggregateResult n0 = prove_node("level1[0]", leaves[0], leaves[1]);
+    ar::AggregateResult n1 = prove_node("level1[1]", leaves[2], leaves[3]);
+
+    auto check_production_width_blocker = [&] {
+        // Production episode shard width blocker: W=26 is the current episode AIR
+        // width. The alg backend can prove a tiny W=26 child, but V_CS cannot
+        // consume it until multi-block row-leaf absorption is arithmetized.
+        const aq::AirConstraintSystem<Fp3> wide_cs = WideBoolChildCS(26);
+        std::vector<std::vector<Fp3>> wide_cols(26, {Fp3::FromFp(0), Fp3::FromFp(1)});
+        auto wide_pr = aq::AirQuotientProve<Fp3, AlgB3>(wide_cs, wide_cols, child_seed, {});
+        BOOST_REQUIRE_MESSAGE(wide_pr.ok && wide_pr.division_exact, wide_pr.note);
+        ar::AggregateWitness wide_w =
+            ar::BuildAggregateWitness(wide_cs, {wide_pr.proof}, child_seed, fam);
+        BOOST_CHECK(!wide_w.ok);
+        BOOST_CHECK_MESSAGE(wide_w.note.find("child W too large") != std::string::npos,
+                            wide_w.note);
+        BOOST_TEST_MESSAGE("production-width child W=26 aggregate blocker=\"" << wide_w.note
+                                                                              << "\"");
+    };
+
+    if (!n0.ok || !n1.ok) {
+        BOOST_CHECK(n0.witness_satisfies);
+        BOOST_CHECK(n1.witness_satisfies);
+        BOOST_CHECK_MESSAGE(n0.note.find("bad column count") != std::string::npos, n0.note);
+        BOOST_CHECK_MESSAGE(n1.note.find("bad column count") != std::string::npos, n1.note);
+        BOOST_TEST_MESSAGE("piece5 real-FRI blocker: V_CS is satisfiable but "
+                           "AirQuotientProve<Fp3,AlgB3> cannot commit the aggregate "
+                           "because V_CS columns exceed kRCFriBatchMaxColumns");
+        check_production_width_blocker();
+        BOOST_TEST_MESSAGE("child_prove_total_s=" << child_prove_s
+                                                  << " level1_root_verify_budget_s=unmeasured"
+                                                  << " target_budget_s=0.9");
+        return;
+    }
+    BOOST_REQUIRE(n0.witness_satisfies);
+    BOOST_REQUIRE(n1.witness_satisfies);
+
+    std::string why0, why1;
+    const auto v0 = std::chrono::steady_clock::now();
+    const bool ok0 = ar::VerifyAggregate(n0.proof, n0.pis, l1_seed, 2, fam, &why0);
+    const double v0_s = Since(v0);
+    const auto v1 = std::chrono::steady_clock::now();
+    const bool ok1 = ar::VerifyAggregate(n1.proof, n1.pis, l1_seed, 2, fam, &why1);
+    const double v1_s = Since(v1);
+    BOOST_CHECK_MESSAGE(ok0, why0);
+    BOOST_CHECK_MESSAGE(ok1, why1);
+    BOOST_TEST_MESSAGE("level1 verify_s=" << v0_s << "," << v1_s
+                                          << " why=\"" << why0 << "\"");
+
+    // Attempt level 2 exactly as the recursion API requires: the children are
+    // level-1 aggregate proofs and the child CS is the level-1 verifier AIR.
+    const aq::AirConstraintSystem<Fp3> level1_cs = ar::BuildVerifierAIRPinned(2, n0.pis, fam);
+    const auto root_t0 = std::chrono::steady_clock::now();
+    ar::AggregateResult root =
+        ar::ProveAggregate(level1_cs, {n0.proof, n1.proof}, l1_seed, root_seed, fam);
+    const double root_prove_s = Since(root_t0);
+    BOOST_TEST_MESSAGE("level2 root prove_s=" << root_prove_s << " ok=" << root.ok
+                                             << " witness_satisfies="
+                                             << root.witness_satisfies << " note=\""
+                                             << root.note << "\"");
+
+    // Current Piece-4b shape cannot consume child proofs whose AIR width is
+    // larger than one row-leaf sponge block. This is the exact blocker for
+    // both two-level recursion and production episode shards (W=26).
+    BOOST_CHECK_MESSAGE(!root.ok, "unexpectedly produced a level-2 root proof");
+    BOOST_CHECK_MESSAGE(root.note.find("child W too large") != std::string::npos, root.note);
+
+    // Negative: tamper one leaf; level-1 aggregate force-commits but rejects.
+    auto bad_leaf = leaves[0];
+    bad_leaf.batch.queries[0].row.values[0].c0 =
+        gf::Add(bad_leaf.batch.queries[0].row.values[0].c0, gf::FromU64(1));
+    BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, bad_leaf, child_seed, nullptr)));
+    ar::AggregateResult bad_node = prove_node("level1[tampered]", bad_leaf, leaves[1]);
+    BOOST_REQUIRE(bad_node.ok);
+    BOOST_CHECK(!bad_node.witness_satisfies);
+    std::string bad_why;
+    BOOST_CHECK(!ar::VerifyAggregate(bad_node.proof, bad_node.pis, l1_seed, 2, fam, &bad_why));
+    BOOST_TEST_MESSAGE("tampered level1 reject why=\"" << bad_why << "\"");
+
+    check_production_width_blocker();
+
+    BOOST_TEST_MESSAGE("child_prove_total_s=" << child_prove_s
+                                              << " level1_root_verify_budget_s=" << v0_s
+                                              << " target_budget_s=0.9");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
