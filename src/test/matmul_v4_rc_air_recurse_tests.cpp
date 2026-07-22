@@ -20,6 +20,7 @@
 #include <matmul/matmul_v4_rc_air_recurse.h>
 
 #include <matmul/matmul_v4_rc_air_quotient.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_alg_hash.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
@@ -232,6 +233,123 @@ BOOST_AUTO_TEST_CASE(air_recurse_feasibility_measurement)
     BOOST_CHECK_EQUAL(cs.n_columns, 130U);
     BOOST_CHECK_EQUAL(cs.constraints.size(), 122U);
     BOOST_CHECK_EQUAL(cs.MaxComposedDegreeBound(), 7ULL * (kN - 1));
+}
+
+// ---------------------------------------------------------------------------
+// Piece 4 (V_CS) — the differential equivalence (spec §6 Piece 4b). Fast path:
+// "V_CS witness satisfies every constraint on H" ⇔ "native AirQuotientVerify
+// accepts the child". Uses BuildAggregateWitness + CountWitnessViolationsOnH so
+// the check runs without the (heavy) full FRI prove; the full FRI prove/verify
+// wrapping is exercised by the standalone selfcheck (scratchpad/recurse4b_*).
+// ---------------------------------------------------------------------------
+namespace {
+using AlgB3 = aq::AirFriBackendAlg<Fp3>;
+
+aq::AirConstraintSystem<Fp3> ToyChildCS()
+{
+    aq::AirConstraintSystem<Fp3> cs;
+    cs.n_rows = 2;
+    cs.n_columns = 1;
+    aq::AirConstraint<Fp3> b;
+    b.name = "toy.bool";
+    b.kind = aq::AirKind::kEverywhere;
+    b.alg_degree = 2;
+    b.eval = [](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
+        return gf::Mul(cur[0], gf::Sub(cur[0], Fp3::One()));
+    };
+    cs.constraints.push_back(std::move(b));
+    return cs;
+}
+uint256 SeedByte(unsigned char v)
+{
+    uint256 u;
+    for (int i = 0; i < 32; ++i) u.data()[i] = static_cast<unsigned char>(v + i);
+    return u;
+}
+// V_CS satisfiable (all constraints vanish on H) for a given child proof.
+bool VcsSatisfiable(const aq::AirConstraintSystem<Fp3>& child_cs,
+                    const aq::AirQuotientProof<Fp3, AlgB3>& c, const uint256& seed,
+                    const ar::VerifierAirFamilies& fam)
+{
+    ar::AggregateWitness w = ar::BuildAggregateWitness(child_cs, {c}, seed, fam);
+    if (!w.ok) return false;
+    return ar::CountWitnessViolationsOnH(w.cs, w.columns) == 0;
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(piece4_vcs_differential_equivalence)
+{
+    const uint256 child_seed = SeedByte(11);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {{Fp3::FromFp(0), Fp3::FromFp(1)}};
+
+    auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+    BOOST_REQUIRE(pr.ok && pr.division_exact);
+    const aq::AirQuotientProof<Fp3, AlgB3> child = pr.proof;
+    BOOST_REQUIRE((aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, child, child_seed, nullptr)));
+
+    const ar::VerifierAirFamilies fam; // full mirror: row + fold + deep + per-point
+
+    // (i) honest: native accepts AND V_CS satisfiable.
+    BOOST_CHECK(VcsSatisfiable(child_cs, child, child_seed, fam));
+
+    // (ii) tampered opened row value: native rejects AND V_CS UNsatisfiable.
+    {
+        auto c = child;
+        c.batch.queries[0].row.values[0].c0 =
+            gf::Add(c.batch.queries[0].row.values[0].c0, gf::FromU64(1));
+        BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, c, child_seed, nullptr)));
+        BOOST_CHECK(!VcsSatisfiable(child_cs, c, child_seed, fam));
+    }
+    // (iii) tampered fold value.
+    {
+        auto c = child;
+        c.batch.queries[0].steps[0].even.c0 =
+            gf::Add(c.batch.queries[0].steps[0].even.c0, gf::FromU64(1));
+        BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, c, child_seed, nullptr)));
+        BOOST_CHECK(!VcsSatisfiable(child_cs, c, child_seed, fam));
+    }
+    // (iv) tampered root/commitment.
+    {
+        auto c = child;
+        c.batch.row_commit.root[0] = gf::Add(c.batch.row_commit.root[0], gf::FromU64(1));
+        BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, c, child_seed, nullptr)));
+        BOOST_CHECK(!VcsSatisfiable(child_cs, c, child_seed, fam));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(piece4_vcs_cell_budget_and_k2)
+{
+    const uint256 child_seed = SeedByte(11);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {{Fp3::FromFp(0), Fp3::FromFp(1)}};
+    auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+    BOOST_REQUIRE(pr.ok);
+    const ar::ChildPublicInputs sh =
+        ar::ExtractChildPublicInputs(child_cs, pr.proof, child_seed);
+    const ar::VerifierAirFamilies fam;
+
+    const ar::VerifierAirMeasurement m1 = ar::MeasureVerifierAIR(1, {sh}, fam);
+    BOOST_TEST_MESSAGE("V_CS k=1 cells=" << m1.cell_count << " cols=" << m1.n_columns
+                                         << " rows=" << m1.n_rows
+                                         << " perms/query=" << m1.perms_per_query);
+    BOOST_CHECK_EQUAL(m1.max_alg_degree, 7U);
+    BOOST_CHECK_LE(m1.cell_count, (1ULL << 20)); // k=1 under 2^20
+
+    const ar::VerifierAirMeasurement m2 = ar::MeasureVerifierAIR(2, {sh, sh}, fam);
+    BOOST_TEST_MESSAGE("V_CS k=2 cells=" << m2.cell_count << " cols=" << m2.n_columns);
+    BOOST_CHECK_LE(m2.cell_count, (1ULL << 21)); // k=2 under 2^21 (spec §3.4)
+
+    // k=2 honest satisfiable; one tampered child ⇒ unsatisfiable.
+    auto w = ar::BuildAggregateWitness(child_cs, {pr.proof, pr.proof}, child_seed, fam);
+    BOOST_REQUIRE(w.ok);
+    BOOST_CHECK_EQUAL(ar::CountWitnessViolationsOnH(w.cs, w.columns), 0U);
+    auto c2 = pr.proof;
+    c2.batch.queries[0].steps[0].even.c0 =
+        gf::Add(c2.batch.queries[0].steps[0].even.c0, gf::FromU64(1));
+    auto w2 = ar::BuildAggregateWitness(child_cs, {pr.proof, c2}, child_seed, fam);
+    BOOST_REQUIRE(w2.ok);
+    BOOST_CHECK_GT(ar::CountWitnessViolationsOnH(w2.cs, w2.columns), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

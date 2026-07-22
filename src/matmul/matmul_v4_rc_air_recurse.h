@@ -6,12 +6,16 @@
 #define BTX_MATMUL_MATMUL_V4_RC_AIR_RECURSE_H
 
 #include <matmul/matmul_v4_rc_air_quotient.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_alg_hash.h>
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_gkr_field.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
+#include <uint256.h>
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // ============================================================================
@@ -272,6 +276,185 @@ BuildSinglePermCompressSystem(uint32_t n_rows);
 
 /** Measure the §3.4 numbers (cells_per_perm is the feasibility headline). */
 [[nodiscard]] PermGadgetMeasurement MeasureSinglePermCompress(uint32_t n_rows);
+
+// ============================================================================
+// PIECE 4 — the FRI-verifier-as-AIR (V_CS) plus the recursion API
+// (scratchpad/stage-c-buildable-spec.md §3/§4, §6 Piece 4). SECOND HALF of the
+// recursion module: assembles the Piece-3 Poseidon2/Merkle gadgets into an
+// AirConstraintSystem<Fp3> whose satisfying assignment is a transcript of
+// AirQuotientVerify<Fp3, AirFriBackendAlg<Fp3>> ACCEPTING a child proof over
+// the algebraic-hash FRI. "V_CS satisfiable ⇔ native verify accepts" is the
+// deliverable, checked by the differential test (§6 Piece 4b).
+//
+// LAYOUT CHOICE (this build): WIDE, one-query-per-row. Each of the child FRI's
+// Q query sites occupies ONE V_CS trace row; every constraint is kEverywhere
+// and reads only `cur`, so there is no cross-row chaining, no per-segment
+// kLastRow boundary, and no selector bookkeeping — the simplest structure that
+// is a faithful mirror. A row lays the per-query hash-permutation blocks side
+// by side (flattened 130-cell Piece-3 blocks) and wires each block's virtual
+// output (PermOutputLane) into the next block's input within the same row. The
+// child FRI's SHARED public roots (row_commit, fold-layer roots) are global
+// constants; the PER-QUERY public data (query index, fold domain points, y,
+// Z_H(y), …) are preprocessed columns pinned through the batch dual-OOD DEEP
+// (preprocessed_pin_ood — REQUIRED by the row-wise alg backend, Piece 4a).
+//
+// FS scalars are NOT arithmetized (spec §3.5): λ, z1, z2, w1, w2,
+// fold_challenges and the query indices enter as public inputs (constants /
+// preprocessed columns), exactly the values the child proof carries.
+// ============================================================================
+
+/** Public inputs of ONE child AirQuotientProof<Fp3, AlgB3> — everything V_CS
+ *  pins (spec §3.2 F, §3.5). Extracted identically by prover and verifier from
+ *  the child proof so both build the SAME AirConstraintSystem. */
+struct ChildPublicInputs {
+    using AlgB3 = air_quotient::AirFriBackendAlg<Fp3>;
+    // Child AIR / FRI shape.
+    uint32_t child_n_rows{0};   // N of the child AIR (H size)
+    uint32_t child_w{0};        // trace column count W (batch has W+1 cols)
+    uint32_t child_quotient_len{0};
+    uint32_t child_n_coeffs{0};
+    uint32_t child_n_lde{0};    // n_coeffs * blowup
+    uint32_t merkle_depth{0};   // log2(n_lde)
+    uint32_t n_folds{0};        // log2(n_coeffs)
+    // Shared roots (global constants).
+    alg_hash::Digest row_commit_root{};
+    alg_hash::Digest rt_root{};                       // trace_commit R_T
+    std::vector<alg_hash::Digest> fold_roots;         // fold_layers[l].root, l<n_folds
+    // FS scalars (public inputs, not arithmetized).
+    Fp3 fri_lambda{};
+    Fp3 z1{};
+    Fp3 z2{};
+    Fp3 w1{};
+    Fp3 w2{};
+    Fp3 final_value{};
+    Fp3 air_lambda{};                                 // airq_lambda (AIR batching)
+    std::vector<Fp3> fold_challenges;                 // beta_l
+    std::vector<uint32_t> column_len;                 // W+1 entries
+    std::vector<Fp3> evals_z1;                         // W+1
+    std::vector<Fp3> evals_z2;                         // W+1
+    // Per-query public data.
+    std::vector<uint32_t> query_index;                // Q entries
+    // The child AIR's own constraints (needed to arithmetize the per-point
+    // identity C(y)=Q(y)·Z_H(y) — family D). Supplied by the caller because
+    // BuildVerifierAIR cannot know the child's rule set from the proof alone.
+    std::vector<air_quotient::AirConstraint<Fp3>> child_constraints;
+    bool ok{false};
+    std::string note;
+};
+
+/** Extract the pinned public inputs from a child proof + the child AIR. */
+[[nodiscard]] ChildPublicInputs
+ExtractChildPublicInputs(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+                         const air_quotient::AirQuotientProof<Fp3, ChildPublicInputs::AlgB3>& child,
+                         const uint256& child_fs_seed);
+
+/** Which V_CS constraint families are assembled (build-time toggle used to grow
+ *  the mirror family-by-family; the differential test reports per-family). */
+struct VerifierAirFamilies {
+    bool row_merkle{true};    // (B) row-opening path → row_commit_root
+    bool fold{true};          // (B/C/E) fold even/odd paths + HalfDomainFoldPair
+    bool deep{true};          // (E) dual-OOD DEEP + fold-path leaf consistency
+    bool per_point{true};     // (D) C(y) = Q(y)·Z_H(y)
+};
+
+/** The measured V_CS shape (spec §3.4 cell-budget gate). */
+struct VerifierAirMeasurement {
+    uint32_t k{0};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint32_t max_alg_degree{0};
+    uint32_t quotient_len{0};
+    uint64_t cell_count{0};       // n_columns * n_rows
+    uint32_t perms_per_query{0};
+    uint32_t queries{0};
+};
+
+/**
+ * Build the k-child verifier AIR fully pinned to `pis` (§4.1). Prover and
+ * verifier both call this with the identical `pis` (extracted from the child
+ * proofs) so they operate on the SAME constraint system. `families` selects
+ * which mirror families are emitted (all on by default).
+ */
+[[nodiscard]] air_quotient::AirConstraintSystem<Fp3>
+BuildVerifierAIRPinned(uint32_t k, const std::vector<ChildPublicInputs>& pis,
+                       const VerifierAirFamilies& families = {});
+
+/**
+ * Pure-shape variant (spec §4.1 signature): the column count / degree profile
+ * of the k-child verifier AIR for the FIXED child-proof shape, WITHOUT pinning
+ * to a specific proof (roots/scalars left zero). Used for the self-similarity
+ * shape assertion (§4.2) and cell measurement; the pinned build is what
+ * Prove/VerifyAggregate use. `shape` supplies the fixed child FRI dimensions.
+ */
+[[nodiscard]] air_quotient::AirConstraintSystem<Fp3>
+BuildVerifierAIR(uint32_t k, const ChildPublicInputs& shape,
+                 const VerifierAirFamilies& families = {});
+
+/** Measure BuildVerifierAIRPinned(k, pis). */
+[[nodiscard]] VerifierAirMeasurement
+MeasureVerifierAIR(uint32_t k, const std::vector<ChildPublicInputs>& pis,
+                   const VerifierAirFamilies& families = {});
+
+/** The assembled V_CS + its honest witness (before the FRI prove). */
+struct AggregateWitness {
+    using AlgB3 = air_quotient::AirFriBackendAlg<Fp3>;
+    bool ok{false};
+    std::string note;
+    air_quotient::AirConstraintSystem<Fp3> cs;
+    std::vector<std::vector<Fp3>> columns;   // cs.n_columns × cs.n_rows
+    std::vector<ChildPublicInputs> pis;
+    uint32_t n_witness_cols{0};
+};
+
+/** Build V_CS + the honest witness (records each child's opened transcript into
+ *  the columns). Fast — no NTT/Merkle. The witness satisfies every constraint
+ *  on H iff every child's native verify accepts (the differential core). */
+[[nodiscard]] AggregateWitness
+BuildAggregateWitness(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+                      const std::vector<air_quotient::AirQuotientProof<Fp3, AggregateWitness::AlgB3>>& children,
+                      const uint256& child_fs_seed, const VerifierAirFamilies& families = {});
+
+/** Count constraints that fail to vanish on their applicable rows of H (fast,
+ *  no FRI). 0 ⇔ the witness is a satisfying assignment. Reports the first
+ *  offending (row, constraint name) if pointers are given. */
+[[nodiscard]] uint32_t
+CountWitnessViolationsOnH(const air_quotient::AirConstraintSystem<Fp3>& cs,
+                          const std::vector<std::vector<Fp3>>& columns,
+                          uint32_t* first_row = nullptr, std::string* first_name = nullptr);
+
+/** Result of aggregating k child proofs into one parent proof (§4.1). */
+struct AggregateResult {
+    using AlgB3 = air_quotient::AirFriBackendAlg<Fp3>;
+    bool ok{false};
+    bool witness_satisfies{false};   // V_CS witness satisfied every constraint on H
+    std::string note;
+    air_quotient::AirQuotientProof<Fp3, AlgB3> proof;
+    VerifierAirMeasurement measurement;
+    std::vector<ChildPublicInputs> pis;  // the pins used (verifier needs these)
+    uint256 fs_seed{};
+};
+
+/**
+ * Aggregate: run AirQuotientVerify on each child, RECORD its accept-transcript
+ * into the V_CS columns (§4.1), then AirQuotientProve(BuildVerifierAIRPinned,
+ * witness, fs_seed). Faithful mirror: if a child's native verify would reject,
+ * the recorded transcript violates a V_CS constraint on H, so the division is
+ * inexact and the returned proof (if force-committed) is rejected by
+ * VerifyAggregate — V_CS satisfiable ⇔ native accepts.
+ */
+[[nodiscard]] AggregateResult
+ProveAggregate(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+               const std::vector<air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>>& children,
+               const uint256& child_fs_seed, const uint256& fs_seed,
+               const VerifierAirFamilies& families = {});
+
+/** Verify a parent proof: rebuild the SAME V_CS from `pis` and run
+ *  AirQuotientVerify<Fp3, AlgB3> (spec §4.1). */
+[[nodiscard]] bool
+VerifyAggregate(const air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>& root,
+                const std::vector<ChildPublicInputs>& pis, const uint256& fs_seed, uint32_t k,
+                const VerifierAirFamilies& families = {}, std::string* why = nullptr);
 
 } // namespace matmul::v4::rc::air_recurse
 
