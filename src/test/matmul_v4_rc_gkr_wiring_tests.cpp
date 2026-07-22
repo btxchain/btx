@@ -6,9 +6,10 @@
 //   (a) COMPLETENESS: u == u' (resp. u' == π(u)) satisfies the identity
 //       EXACTLY — for every challenge, not just whp.
 //   (b) SEPARATION: the reported −log2 bounds match the construction
-//       (equality ℓ/|Fp2|; grand product n/|Fp2| single, squared for dual)
-//       and the single-challenge grand product is documented BELOW target at
-//       κ-sized columns (the dual mandate).
+//       (equality ℓ/|K|; grand product n/|K| single, squared for dual; K =
+//       Fp3, |K| ≈ 2^192 — 2026-07-22 margin restoration) and the historical
+//       Fp2 single-challenge grand product is documented BELOW target at
+//       κ-sized columns (the origin of the standing dual mandate).
 //   (c) COUNTEREXAMPLES (invalid assignments): one-entry difference FAILS
 //       equality (the difference-MLE at rho is a NONZERO field element); a
 //       non-permutation FAILS the grand product (both with the z built from
@@ -349,33 +350,44 @@ BOOST_AUTO_TEST_CASE(wiring_separation_bound_numbers)
 {
     const double tol = 0.05;
 
-    // Equality at the κ = 2^28 column cap (ell = 28): ell/|Fp2| ⇒
-    // 128 − log2(28) = 123.19 bits pre-grinding; 83.19 after the 2^40 budget.
+    // Challenge field = Fp3 (|K| ≈ 2^192, 2026-07-22 margin restoration; the
+    // numbers hold once the WiringChallengeFp2 draw moves to Fp3 — see
+    // INTEGRATION_REPORT.md "Fp2 → Fp3 challenge sites").
+    // Equality at the κ = 2^28 column cap (ell = 28): ell/|K| ⇒
+    // 192 − log2(28) = 187.19 bits pre-grinding; 147.19 after the 2^40 budget.
     const double eq_pre = rc::WiringEqualitySeparationBits(28, /*after_grinding=*/false);
     const double eq_post = rc::WiringEqualitySeparationBits(28, true);
-    BOOST_CHECK_CLOSE_FRACTION(eq_pre, 123.19, tol);
-    BOOST_CHECK_CLOSE_FRACTION(eq_post, 83.19, tol);
-    BOOST_CHECK(eq_post >= 64.0); // clears the target with ≥19 bits margin
+    BOOST_CHECK_CLOSE_FRACTION(eq_pre, 187.19, tol);
+    BOOST_CHECK_CLOSE_FRACTION(eq_post, 147.19, tol);
+    BOOST_CHECK(eq_post >= 64.0); // clears the target with ≥83 bits margin
 
-    // Grand product, SINGLE challenge pair at n = 2^28: n/|Fp2| ⇒ 100.0 pre,
-    // 60.0 post — BELOW the 2^-64 target. This is the dual mandate: single-
-    // challenge grand products MUST NOT ship at κ-sized columns.
+    // Grand product, SINGLE challenge pair at n = 2^28: n/|K| ⇒ 164.0 pre,
+    // 124.0 post over Fp3. THE DUAL MANDATE STAYS: over the historical Fp2
+    // draw the single pair was 100.0 pre / 60.0 post — BELOW the 2^-64 target
+    // (asserted from kRCGkrWiringFieldBitsFp2 so the record cannot drift) —
+    // and G4 keeps the single form structurally unreachable.
     const double p_single_pre = rc::WiringPermutationSeparationBits(uint64_t{1} << 28, false, false);
     const double p_single_post = rc::WiringPermutationSeparationBits(uint64_t{1} << 28, false, true);
-    BOOST_CHECK_CLOSE_FRACTION(p_single_pre, 100.0, tol);
-    BOOST_CHECK_CLOSE_FRACTION(p_single_post, 60.0, tol);
-    BOOST_CHECK(p_single_post < 64.0);
+    BOOST_CHECK_CLOSE_FRACTION(p_single_pre, 164.0, tol);
+    BOOST_CHECK_CLOSE_FRACTION(p_single_post, 124.0, tol);
+    const double p_single_post_fp2 = rc::kRCGkrWiringFieldBitsFp2 - 28.0 - 40.0;
+    BOOST_CHECK_CLOSE_FRACTION(p_single_post_fp2, 60.0, tol);
+    BOOST_CHECK(p_single_post_fp2 < 64.0); // the dual-mandate origin, on record
 
-    // DUAL (β,γ) at n = 2^28: (n/|Fp2|)² ⇒ 200.0 pre, 160.0 post — cleared.
+    // DUAL (β,γ) at n = 2^28: (n/|K|)² ⇒ 328.0 pre, 288.0 post — cleared.
     const double p_dual_post = rc::WiringPermutationSeparationBits(uint64_t{1} << 28, true, true);
-    BOOST_CHECK_CLOSE_FRACTION(p_dual_post, 160.0, tol);
+    BOOST_CHECK_CLOSE_FRACTION(p_dual_post, 288.0, tol);
     BOOST_CHECK(p_dual_post >= 64.0);
 
-    // Single-challenge ceiling constant: n = 2^23 nets 105 pre / 65 post ≥ 64.
+    // Single-challenge ceiling constant: RETAINED at the conservative
+    // Fp2-derived n = 2^23 (which netted 105 pre / 65 post over Fp2); over
+    // Fp3 it nets 129 post.
+    BOOST_CHECK_EQUAL(rc::kRCGkrWiringSingleChallengeMaxN, uint64_t{1} << 23);
     const double p_ceiling_post =
         rc::WiringPermutationSeparationBits(rc::kRCGkrWiringSingleChallengeMaxN, false, true);
-    BOOST_CHECK_CLOSE_FRACTION(p_ceiling_post, 65.0, tol);
+    BOOST_CHECK_CLOSE_FRACTION(p_ceiling_post, 129.0, tol);
     BOOST_CHECK(p_ceiling_post >= 64.0);
+    BOOST_CHECK(rc::kRCGkrWiringFieldBitsFp2 - 23.0 - 40.0 >= 64.0);
 }
 
 // ----------------------------------------------------------------------------
