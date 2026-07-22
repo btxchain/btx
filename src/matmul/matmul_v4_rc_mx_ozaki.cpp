@@ -363,13 +363,16 @@ bool SelfQualifyRcOzakiExactPanelsOnce()
     {
         std::lock_guard<std::mutex> lock(g_host_mu);
         if (g_exact_ran) return g_exact_qualified;
-        g_exact_ran = true;
     }
     // Run GEMMs outside the latch mutex (CUDA / ExactGemm may take other locks).
+    // A5/F12: qualify BEFORE writing the once-only latch.
     const ExactPanelsQualResult r = RunExactPanelsSelfQualBody();
     std::lock_guard<std::mutex> lock(g_host_mu);
-    g_exact_qualified = r.qualified;
-    g_exact_deficit = r.deficit;
+    if (!g_exact_ran) {
+        g_exact_ran = true;
+        g_exact_qualified = r.qualified;
+        g_exact_deficit = r.deficit;
+    }
     return g_exact_qualified;
 }
 
@@ -378,16 +381,21 @@ bool SelfQualifyRcOzakiMxfp4Once()
     {
         std::lock_guard<std::mutex> lock(g_host_mu);
         if (g_mx_ran) return g_mx_qualified;
-        g_mx_ran = true;
     }
+    // A5/F12: once-only MXFP4 suite runs before the latch is consulted/written.
+    // Vendor probes use the consensus MX-dequant alphabet (M11×E8M0); they do
+    // not claim arbitrary-int8 as the native MX surface.
     const Mxfp4QualResult r = RunMxfp4SelfQualBody();
     std::lock_guard<std::mutex> lock(g_host_mu);
-    g_mx_attempted = r.attempted;
-    g_mx_qualified = r.qualified;
-    g_mx_selected = r.selected;
-    g_mx_backend = r.backend;
-    g_mx_arch_key = r.arch_key;
-    g_mx_deficit = r.deficit;
+    if (!g_mx_ran) {
+        g_mx_ran = true;
+        g_mx_attempted = r.attempted;
+        g_mx_qualified = r.qualified;
+        g_mx_selected = r.selected;
+        g_mx_backend = r.backend;
+        g_mx_arch_key = r.arch_key;
+        g_mx_deficit = r.deficit;
+    }
     return g_mx_qualified;
 }
 

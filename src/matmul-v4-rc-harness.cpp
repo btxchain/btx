@@ -906,11 +906,13 @@ int main(int argc, char* argv[])
         gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
         if (gemm.gemm_s8s8 != nullptr) {
             // ForRC already ProbeRCSelfQual'd successfully; avoid a second medium probe.
+            // Report the real Ozaki native latch (A5/F12) — never hardcode false.
             selfqual.cpu_oracle_ok = true;
             selfqual.exact_gemm_backend_ok = true;
             selfqual.mining_accelerator_ok = true;
-            selfqual.native_mxfp4_qualified = false;
+            selfqual.native_mxfp4_qualified = rc::IsRcOzakiMxfp4Qualified();
             selfqual.native_fp8_qualified = false;
+            selfqual.deficit_reason.clear();
             backend_resolved = args.backend;
         } else {
             // RC gate cleared (or no device): probe ungated LT candidate for deficit.

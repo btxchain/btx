@@ -757,7 +757,11 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()
     // NativeRequired (default): never fall through to dense device INT8
     // (LaunchGemmS8S8) when a native MXFP4 lane is unavailable. Empty backend
     // ⇒ CPU ExactGemm oracle (portable math, not advertised as native).
+    //
+    // A5/F12: run once-only native qualification BEFORE consulting the latch so
+    // a fresh process can still select the qualified lane.
     if (policy == RCAccelerationPolicy::NativeRequired) {
+        (void)matmul::v4::rc::SelfQualifyRcOzakiMxfp4Once();
         if (!matmul::v4::rc::IsRcOzakiMxfp4Qualified()) {
             static std::atomic_bool logged_native_req{false};
             bool expected{false};
