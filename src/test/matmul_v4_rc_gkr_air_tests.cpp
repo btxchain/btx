@@ -425,6 +425,201 @@ BOOST_AUTO_TEST_CASE(air_mxexpand_byte_exact_and_tamper)
 }
 
 // ---------------------------------------------------------------------------
+// CONSTRUCTION II: the composition polynomial over the full constraint set.
+// COMPLETENESS: on an honest assignment every constraint polynomial evaluates
+// to the zero field element, so Comp(x) = sum_slot eta^slot C_slot(x)
+// vanishes on the whole trace domain. SEPARATION: each single-cell edit below
+// produces an INVALID ASSIGNMENT — some C_slot(x*) is a nonzero field
+// element, and the composition is nonzero at x* (up to the (n_slots-1)/|Fp2|
+// eta-collision, ~2^-120 pre-grind).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(air_construction2_composition_polynomial)
+{
+    air::TableTM tm; air::TableTX tx;
+    air::TilePublic pub = MakePub(7, 13, 2);
+    std::array<int64_t, kRCMxBlockLen> in{};
+    Lcg rng(0xC0DE);
+    for (auto& v : in) v = static_cast<int64_t>(rng.next());
+
+    const gf::Fp2 eta{0x1122334455667788ull % gf::kP, 0x99AABBCCDDEEFF00ull % gf::kP};
+
+    // COMPLETENESS: honest assignment -> composition vanishes everywhere.
+    air::TileWitness w = air::TraceTile(pub, in);
+    air::RCAirConstraintSet cs = air::EmitTileConstraints(w);
+    BOOST_CHECK(cs.n_slots <= air::kAirSlotBudget);
+    air::CompositionResult res = air::ComposeConstraints(cs, eta);
+    BOOST_CHECK_MESSAGE(res.ok, "honest composition nonzero at row " << res.first_bad_row
+                                << " (" << res.first_bad_families << ")");
+    BOOST_TEST_MESSAGE("composition rows=" << res.n_rows << " slots=" << res.n_slots
+                       << " constraints=" << res.n_constraints
+                       << " separation bits (post-grind)=" << res.soundness_bits);
+    BOOST_CHECK(res.soundness_bits > 64.0);
+
+    // INVALID ASSIGNMENT (ARX): flip one bit of a committed quarter-round add
+    // result cell. cc.add.identity (and the downstream copy constraints)
+    // evaluate to nonzero field elements.
+    {
+        air::TileWitness t = air::TraceTile(pub, in);
+        BOOST_REQUIRE(!t.chacha.empty());
+        BOOST_REQUIRE(t.chacha[0].adds.size() > 40);
+        t.chacha[0].adds[40].r ^= 0x00200000u;
+        air::CompositionResult bad = air::ComposeConstraints(air::EmitTileConstraints(t), eta);
+        BOOST_CHECK_MESSAGE(!bad.ok, "edited ChaCha add cell not separated");
+        BOOST_CHECK(!air::CheckTileConstraints(t, tm, tx).ok);
+    }
+    // INVALID ASSIGNMENT (ARX wiring): edit an operand cell consistently with
+    // its own add identity (adjust r too) — the dataflow copy constraint
+    // against the producing cell must catch it instead.
+    {
+        air::TileWitness t = air::TraceTile(pub, in);
+        auto& ad = t.chacha[0].adds[41];
+        ad.a += 4;  // keep a+b-r-2^32c identity by shifting r as well
+        ad.r = static_cast<uint32_t>(ad.a + ad.b);
+        ad.carry = static_cast<uint8_t>((static_cast<uint64_t>(ad.a) + ad.b) >> 32);
+        air::CompositionResult bad = air::ComposeConstraints(air::EmitTileConstraints(t), eta);
+        BOOST_CHECK_MESSAGE(!bad.ok, "edited ChaCha operand cell not separated");
+        BOOST_CHECK(!air::CheckTileConstraints(t, tm, tx).ok);
+    }
+    // INVALID ASSIGNMENT (SHA): flip a bit of a committed round variable.
+    {
+        air::TileWitness t = air::TraceTile(pub, in);
+        BOOST_REQUIRE(!t.scale_sha.empty());
+        t.scale_sha[0].vars[30][0] ^= 0x00000010u;
+        air::CompositionResult bad = air::ComposeConstraints(air::EmitTileConstraints(t), eta);
+        BOOST_CHECK_MESSAGE(!bad.ok, "edited SHA round cell not separated");
+        BOOST_CHECK(!air::CheckTileConstraints(t, tm, tx).ok);
+    }
+    // INVALID ASSIGNMENT (SHA schedule): flip a message-schedule word.
+    {
+        air::TileWitness t = air::TraceTile(pub, in);
+        t.scale_sha[0].w[20] ^= 0x00000100u;
+        air::CompositionResult bad = air::ComposeConstraints(air::EmitTileConstraints(t), eta);
+        BOOST_CHECK_MESSAGE(!bad.ok, "edited SHA schedule cell not separated");
+        BOOST_CHECK(!air::CheckTileConstraints(t, tm, tx).ok);
+    }
+    // INVALID ASSIGNMENT (sampler): break the liveness inverse witness.
+    {
+        air::TileWitness t = air::TraceTile(pub, in);
+        BOOST_REQUIRE(t.cands.size() > 5);
+        t.cands[3].inv_live += 1;
+        air::CompositionResult bad = air::ComposeConstraints(air::EmitTileConstraints(t), eta);
+        BOOST_CHECK_MESSAGE(!bad.ok, "edited liveness inverse not separated");
+        BOOST_CHECK(!air::CheckTileConstraints(t, tm, tx).ok);
+    }
+    // INVALID ASSIGNMENT (sampler): edit a golden-mix limb (changes the
+    // nibble source of h) — samp.golden / C-E9 becomes nonzero.
+    {
+        air::TileWitness t = air::TraceTile(pub, in);
+        t.cands[5].gold_v ^= 0x10000000u;
+        air::CompositionResult bad = air::ComposeConstraints(air::EmitTileConstraints(t), eta);
+        BOOST_CHECK_MESSAGE(!bad.ok, "edited golden-mix limb not separated");
+        BOOST_CHECK(!air::CheckTileConstraints(t, tm, tx).ok);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CONSTRUCTION III: multiset inclusion against the FIXED reference vector.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(air_construction3_fixed_reference_vector)
+{
+    air::TableTM tm; air::TableTX tx;
+    air::LogUpInstance i_tm, i_tx, i_r16;
+    air::TilePublic pub = MakePub(8, 21, 1);
+    std::array<int64_t, kRCMxBlockLen> in{};
+    Lcg rng(0x1DEA);
+    for (auto& v : in) v = static_cast<int64_t>(rng.next());
+    air::TileWitness w = air::TraceTile(pub, in);
+    air::AppendTileLookups(w, tm, tx, Gamma(), i_tm, i_tx, i_r16);
+    air::FinalizeTableMultiplicities(i_tm, i_tx, i_r16);
+
+    // COMPLETENESS: the honest assignment verifies against the REGENERATED
+    // reference vectors, with sum_j m_j = |W| in every instance.
+    {
+        air::LookupBindResult r = air::VerifyLookupAgainstPreprocessed(
+            {i_tm, i_tx, i_r16}, Gamma(), Alpha1(), Alpha2());
+        BOOST_CHECK_MESSAGE(r.ok, "honest membership failed: " << r.failure);
+        BOOST_TEST_MESSAGE("lookup N_w=" << r.logup.n_witness << " N_t=" << r.logup.n_table
+                           << " separation bits=" << r.logup.achieved_bits);
+    }
+
+    // (a) FABRICATED (in,out) TUPLE outside the reference vector: claim the
+    // rejected nibble 1 carries (acc=1, mu=5). Bump a multiplicity so
+    // sum m_j = |W| still holds — the fabricated inclusion must then be
+    // separated by the dual-alpha log-derivative difference being nonzero.
+    {
+        auto bad_tm = i_tm;
+        bad_tm.witness.push_back(
+            gf::Add(gf::Fp2::FromFp(gf::FromU64(1)),
+                    gf::Add(gf::Mul(Gamma(), gf::Fp2::FromFp(gf::FromU64(1))),
+                            gf::Mul(gf::Mul(Gamma(), Gamma()), gf::Fp2::FromFp(gf::FromU64(5))))));
+        bad_tm.table_mult[0] += 1;  // keep the multiplicity sum consistent
+        air::LookupBindResult r = air::VerifyLookupAgainstPreprocessed(
+            {bad_tm, i_tx, i_r16}, Gamma(), Alpha1(), Alpha2());
+        BOOST_CHECK_MESSAGE(!r.ok, "fabricated (in,out) tuple NOT separated");
+    }
+
+    // (b) SELF-MANUFACTURED "TABLE" (the Theorem-5.1 clone): table :=
+    // assignment multiset, m_j := 1. Its fractional sums balance identically
+    // — the raw dual-alpha sum equality alone ACCEPTS it — but the
+    // reference-vector regeneration rejects it outright, because T is
+    // verifier-defined, not chosen by the constructing routine.
+    {
+        air::LogUpInstance clone;
+        clone.name = "T_M";
+        clone.witness = i_tm.witness;
+        clone.table = i_tm.witness;  // cloned, NOT the canonical vector
+        clone.table_mult.assign(clone.table.size(), 1);
+        air::LogUpVerifyResult naive = air::LogUpDualAlphaVerify({clone}, Alpha1(), Alpha2());
+        BOOST_CHECK_MESSAGE(naive.ok, "clone should balance the raw fractional sums");
+        air::LookupBindResult r = air::VerifyLookupAgainstPreprocessed(
+            {clone}, Gamma(), Alpha1(), Alpha2());
+        BOOST_CHECK_MESSAGE(!r.ok, "self-manufactured reference vector NOT rejected");
+        BOOST_CHECK_EQUAL(r.failure, "T_M:table_not_canonical");
+    }
+
+    // (c) MULTIPLICITY ACCOUNTING: sum m_j != |W| is rejected
+    // deterministically, before any fractional arithmetic runs.
+    {
+        auto bad = i_tx;
+        bad.table_mult[0] += 1;
+        air::LookupBindResult r = air::VerifyLookupAgainstPreprocessed(
+            {i_tm, bad, i_r16}, Gamma(), Alpha1(), Alpha2());
+        BOOST_CHECK_MESSAGE(!r.ok, "multiplicity sum mismatch NOT rejected");
+        BOOST_CHECK_EQUAL(r.failure, "T_X:multiplicity_sum");
+    }
+
+    // (d) An unknown instance name cannot smuggle in a free reference vector.
+    {
+        air::LogUpInstance rogue;
+        rogue.name = "T_ROGUE";
+        rogue.witness = {gf::Fp2{5, 0}};
+        rogue.table = {gf::Fp2{5, 0}};
+        rogue.table_mult = {1};
+        air::LookupBindResult r = air::VerifyLookupAgainstPreprocessed(
+            {rogue}, Gamma(), Alpha1(), Alpha2());
+        BOOST_CHECK_MESSAGE(!r.ok, "unknown reference vector NOT rejected");
+        BOOST_CHECK_EQUAL(r.failure, "T_ROGUE:unknown_table");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SEPARATION-BOUND NUMBERS (acceptance obligation b): composition-polynomial
+// and log-derivative bounds over Fp2, composed, at consensus scale.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(air_separation_bound_numbers)
+{
+    // Consensus scale: slot budget 256, N_L = 2^43 LogUp rows (blueprint
+    // §5.6/§8 accounting).
+    air::SeparationBound b = air::ComputeSeparationBound(air::kAirSlotBudget, 1ull << 43);
+    BOOST_TEST_MESSAGE("composition bits=" << b.composition_bits
+                       << " lookup bits=" << b.lookup_bits
+                       << " composed bits=" << b.composed_bits);
+    BOOST_CHECK(b.composition_bits > 79.9);  // 2*log2(p) - log2(255) - 40 ~ 80.0
+    BOOST_CHECK(b.lookup_bits > 129.9);      // 2*(128 - 43) - 40 = 130.0
+    BOOST_CHECK(b.composed_bits > 64.0);     // clears the 2^-64 target
+}
+
+// ---------------------------------------------------------------------------
 // Tile-tree AIR (§6.3): recomputes the RoundMerkleStream root in-circuit,
 // matches the reference, and rejects a forged root / tampered SHA intermediate.
 // ---------------------------------------------------------------------------
