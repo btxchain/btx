@@ -177,9 +177,34 @@ struct AirField<gkr_field::Fp3> {
 // FRI backend trait: maps the field to its batched proximity module. Both
 // substrates already exist (matmul_v4_rc_fri.h over Fp2, matmul_v4_rc_fri_ext3.h
 // over Fp3) with byte-compatible shapes; the module never reimplements FRI.
+//
+// BACKEND POLICY PARAMETER: AirQuotientProof / AirQuotientProve /
+// AirQuotientVerify (and AirCommittedValuesRoot) additionally take an
+// explicit `Backend` policy DEFAULTED to AirFriBackend<F>, because field
+// type alone cannot distinguish two proximity modules over the SAME field:
+// Fp3 has both the SHA256d-Merkle Fri3Batch* module below (per-column
+// trees — the episode/base path) and the algebraic-hash ROW-WISE
+// Fri3AlgBatch* module (matmul_v4_rc_fri_ext3_alg.h — the recursion path).
+// Every existing caller keeps writing AirQuotientProof<Fp3> /
+// AirQuotientProve<Fp3>(...) and gets AirFriBackend<Fp3> via the default —
+// source- and behavior-identical. The recursion instantiates
+// AirQuotientProve<Fp3, AirFriBackendAlg<Fp3>> (policy defined in
+// matmul_v4_rc_air_quotient_alg.h, which this header deliberately does NOT
+// include).
+//
+// A policy declares `static constexpr bool kRowWiseLayout = true` iff its
+// batch commits ONE row tree over all columns (one authentication path per
+// query carrying the whole row) instead of one tree per column. The two
+// AirFriBackend specializations below carry no such member and therefore
+// read as per-column. The row-wise layout changes what the proof can carry
+// (no per-column roots) — see AirQuotientProof for the shape differences.
 // ---------------------------------------------------------------------------
 template <typename F>
 struct AirFriBackend;
+
+/** true iff `Backend` declares the row-wise commitment layout (see above). */
+template <typename Backend>
+inline constexpr bool AirBackendIsRowWise = requires { requires Backend::kRowWiseLayout; };
 
 template <>
 struct AirFriBackend<gkr_field::Fp2> {
@@ -333,13 +358,41 @@ struct AirConstraintSystem {
 // Proof / prover-result containers.
 // ---------------------------------------------------------------------------
 
-template <typename F>
+/**
+ * Proof container, parameterized on the proximity Backend policy (defaulted
+ * to AirFriBackend<F>, so all existing AirQuotientProof<F> spellings keep
+ * their exact type and layout).
+ *
+ * PER-COLUMN backends (the default AirFriBackend<F>):
+ *   next_openings[qi] has W entries — for each trace column a MerklePath
+ *   opening the "next row" value P(ω_H·y) at LDE index
+ *   (query_index + n_lde/N) mod n_lde against that column's OWN root from
+ *   the batch proof. trace_commit is unused (zero).
+ *
+ * ROW-WISE backends (kRowWiseLayout, e.g. AirFriBackendAlg<Fp3>):
+ *   next_openings[qi] has exactly 2 entries:
+ *     [0] the next-row opening: index = (query_index + n_lde/N) mod n_lde,
+ *         values = ALL W+1 column values of that row (the full row is needed
+ *         to recompute the row leaf), siblings against batch.row_commit.
+ *     [1] the trace-binding opening: index = query_index, values EMPTY (the
+ *         leaf is recomputed from the batch query's own opened trace values
+ *         [0..W)), siblings against the trace-only row root R_T below.
+ *   trace_commit = packed R_T, the row root over the W coset-shifted TRACE
+ *   columns only. The quotient column depends on the FS batching challenge
+ *   λ, so it cannot ride the tree that seeds λ; R_T is the λ-seeding trace
+ *   commitment, and the per-query [1] openings bind it to agree with the
+ *   batch's committed trace at every FS query site (same α = 17/32 query
+ *   soundness as the FRI itself — the standard trace/composition binding).
+ */
+template <typename F, typename Backend = AirFriBackend<F>>
 struct AirQuotientProof {
-    typename AirFriBackend<F>::BatchProof batch;  // trace columns + quotient (last)
-    /** Supplemental per-query openings of every TRACE column at LDE index
-     *  (query_index + n_lde/N) mod n_lde — the "next row" value P(ω_H·y),
-     *  Merkle-verified against the SAME column roots as the batch proof. */
-    std::vector<std::vector<typename AirFriBackend<F>::MerklePath>> next_openings;
+    typename Backend::BatchProof batch;  // trace columns + quotient (last)
+    /** Supplemental per-query openings — see the layout note above. */
+    std::vector<std::vector<typename Backend::MerklePath>> next_openings;
+    /** ROW-WISE backends only: the packed trace-only row root R_T that seeds
+     *  the constraint-batching challenge λ. Zero/unused for per-column
+     *  backends (their λ is seeded by the batch's per-column trace roots). */
+    uint256 trace_commit{};
 };
 
 struct AirProveOptions {
@@ -351,14 +404,14 @@ struct AirProveOptions {
     uint32_t quotient_len_override{0};
 };
 
-template <typename F>
+template <typename F, typename Backend = AirFriBackend<F>>
 struct AirQuotientProveResult {
     bool ok{false};
     bool division_exact{false};
     std::string note;
     /** Remainder of C(X) mod Z_H(X) (N coefficients; all zero iff exact). */
     std::vector<F> remainder;
-    AirQuotientProof<F> proof;
+    AirQuotientProof<F, Backend> proof;
 };
 
 // ---------------------------------------------------------------------------
@@ -370,10 +423,11 @@ struct AirQuotientProveResult {
  * (coset-shifted) trace column roots, build C(X) = Σ λ^i C_i(X) on an
  * extended subgroup, divide by Z_H(X) = X^N − 1 (exact iff every rule holds
  * on every row), coset-shift, commit trace + quotient in ONE batched FRI
- * instance, and attach next-row openings for the Q=128 query sites.
+ * instance, and attach next-row openings for the Q query sites (Q from the
+ * Backend policy; 128 on the SHA paths, 148 on the alg recursion path).
  */
-template <typename F>
-[[nodiscard]] AirQuotientProveResult<F> AirQuotientProve(
+template <typename F, typename Backend = AirFriBackend<F>>
+[[nodiscard]] AirQuotientProveResult<F, Backend> AirQuotientProve(
     const AirConstraintSystem<F>& cs, const std::vector<std::vector<F>>& columns,
     const uint256& fs_seed, const AirProveOptions& opt = {});
 
@@ -382,13 +436,18 @@ template <typename F>
  * equal the declared bounds — this is what rejects an over-degree quotient),
  * batched-FRI verification, preprocessed-column root regeneration, FS λ
  * re-derivation, and the per-point identity C(y) = Q(y)·Z_H(y) at each of
- * the Q=128 query sites (Z_H(y) ≠ 0 by the coset shift). O(Q) work — no
+ * the Q query sites (Z_H(y) ≠ 0 by the coset shift). O(Q) work — no
  * full-row scan.
+ *
+ * ROW-WISE backends: the value-pinned preprocessed-column modes require
+ * preprocessed_pin_ood (there are no per-column roots to regenerate), and
+ * the preprocessed_roots root-equality mode is unsupported (same reason);
+ * both are rejected with an explicit message rather than mis-verified.
  */
-template <typename F>
+template <typename F, typename Backend = AirFriBackend<F>>
 [[nodiscard]] bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
-                                     const AirQuotientProof<F>& proof, const uint256& fs_seed,
-                                     std::string* why = nullptr);
+                                     const AirQuotientProof<F, Backend>& proof,
+                                     const uint256& fs_seed, std::string* why = nullptr);
 
 /** FS challenge over fs_seed ‖ label ‖ roots ‖ extra (SHA256d, domain-tagged). */
 [[nodiscard]] uint256 AirChallengeDigest(const uint256& fs_seed, const char* label,
@@ -404,8 +463,12 @@ template <typename F>
  *  committed in the coset-shifted coefficient basis at `n_coeffs` —
  *  byte-identical to the root AirQuotientProve's batched FRI produces for the
  *  same column (used for the two-epoch FS discipline of instantiations that
- *  draw challenges from committed epoch-1 columns). */
-template <typename F>
+ *  draw challenges from committed epoch-1 columns). For ROW-WISE backends
+ *  this is the Backend's ColumnRoot semantic — the packed root of a
+ *  SINGLE-column row tree (a per-column FS-binding digest; it does NOT
+ *  appear inside a multi-column batch proof, whose unit of commitment is
+ *  the whole row). */
+template <typename F, typename Backend = AirFriBackend<F>>
 [[nodiscard]] uint256 AirCommittedValuesRoot(const std::vector<F>& values, uint32_t n_coeffs);
 
 // ---------------------------------------------------------------------------
@@ -496,6 +559,9 @@ template <typename F>
  * Verifier-side convenience: re-derive γ/α from the proof's base-column
  * roots, rebuild the constraint system with the PUBLIC scale_e, and run
  * AirQuotientVerify (which also pins the preprocessed t_fp column root).
+ * NOTE: the RcSampler* instantiation stays on the DEFAULT backend — its
+ * two-epoch γ/α discipline reads per-column base roots out of the batch
+ * proof, which a row-wise backend does not carry.
  */
 template <typename F>
 [[nodiscard]] bool RcSamplerAirVerify(const AirQuotientProof<F>& proof, const uint256& fs_seed,

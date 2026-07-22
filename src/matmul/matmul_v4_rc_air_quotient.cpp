@@ -4,6 +4,8 @@
 
 #include <matmul/matmul_v4_rc_air_quotient.h>
 
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
+
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <span.h>
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <type_traits>
 
 // AIR constraint-quotient construction — implementation. See the header for
 // the construction map and the per-rule honesty statement (what arithmetizes
@@ -178,10 +181,9 @@ struct AirTree {
     uint256 root{};
 };
 
-template <typename F>
+template <typename B, typename F>
 AirTree AirBuildTree(const std::vector<F>& evals)
 {
-    using B = AirFriBackend<F>;
     AirTree t;
     std::vector<uint256> level(evals.size());
     for (size_t i = 0; i < evals.size(); ++i) {
@@ -211,6 +213,61 @@ std::vector<uint256> AirTreePath(const AirTree& tree, uint32_t index)
     }
     return siblings;
 }
+
+// ---------------------------------------------------------------------------
+// ROW tree over the first n_cols columns of an LDE column set, matching the
+// row-wise backend's layout (leaf i = B::RowLeafHash of the row, node =
+// B::NodeHash; field-native B::Digest nodes). n_leaves = n_lde is a power of
+// two, so no odd-padding arises (same as the backend's own tree builder).
+// Used only for row-wise backends: to rebuild the batch's full-row tree for
+// the next-row openings and the trace-only tree behind R_T.
+// ---------------------------------------------------------------------------
+template <typename B, typename F>
+struct AirRowTree {
+    std::vector<std::vector<typename B::Digest>> levels;
+};
+
+template <typename B, typename F>
+AirRowTree<B, F> AirBuildRowTree(const std::vector<std::vector<F>>& col_lde, uint32_t n_cols)
+{
+    AirRowTree<B, F> t;
+    const size_t n_leaves = col_lde.empty() ? 0 : col_lde[0].size();
+    std::vector<typename B::Digest> level(n_leaves);
+    std::vector<F> row(n_cols);
+    for (size_t i = 0; i < n_leaves; ++i) {
+        for (uint32_t c = 0; c < n_cols; ++c) row[c] = col_lde[c][i];
+        level[i] = B::RowLeafHash(row, static_cast<uint32_t>(i));
+    }
+    t.levels.push_back(level);
+    while (level.size() > 1) {
+        std::vector<typename B::Digest> next;
+        next.reserve(level.size() / 2);
+        for (size_t i = 0; i < level.size(); i += 2) {
+            next.push_back(B::NodeHash(level[i], level[i + 1]));
+        }
+        t.levels.push_back(next);
+        level = std::move(next);
+    }
+    return t;
+}
+
+template <typename B, typename F>
+std::vector<typename B::Digest> AirRowTreePath(const AirRowTree<B, F>& tree, uint32_t index)
+{
+    std::vector<typename B::Digest> siblings;
+    uint32_t idx = index;
+    for (size_t li = 0; li + 1 < tree.levels.size(); ++li) {
+        siblings.push_back(tree.levels[li][idx ^ 1u]);
+        idx >>= 1;
+    }
+    return siblings;
+}
+
+/** Placeholder giving the per-column verifier instantiation a valid (unused)
+ *  type for the row-wise R_T digest slot (see AirQuotientVerify). */
+struct AirRowWiseNullState {
+    using Digest = std::nullptr_t;
+};
 
 void AppendLE32v(std::vector<unsigned char>& buf, uint32_t v)
 {
@@ -269,12 +326,12 @@ F AirAcceptPoly(const F& b0, const F& b1, const F& b2, const F& b3)
     return T::Sub(one, rejected);
 }
 
-template <typename F>
+template <typename F, typename Backend>
 uint256 AirCommittedValuesRoot(const std::vector<F>& values, uint32_t n_coeffs)
 {
     std::vector<F> cf = AirInterpolate(values);
     AirCosetShiftCoeffs(cf);
-    return AirFriBackend<F>::ColumnRoot(cf, n_coeffs);
+    return Backend::ColumnRoot(cf, n_coeffs);
 }
 
 namespace {
@@ -326,14 +383,15 @@ bool AirBarycentricWeightsOnH(uint32_t N, const F& x, std::vector<F>& weights, F
 // Prover.
 // ===========================================================================
 
-template <typename F>
-AirQuotientProveResult<F> AirQuotientProve(const AirConstraintSystem<F>& cs,
-                                           const std::vector<std::vector<F>>& columns,
-                                           const uint256& fs_seed, const AirProveOptions& opt)
+template <typename F, typename Backend>
+AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>& cs,
+                                                    const std::vector<std::vector<F>>& columns,
+                                                    const uint256& fs_seed,
+                                                    const AirProveOptions& opt)
 {
     using T = AirField<F>;
-    using B = AirFriBackend<F>;
-    AirQuotientProveResult<F> res;
+    using B = Backend;
+    AirQuotientProveResult<F, Backend> res;
 
     const uint32_t N = cs.n_rows;
     if (N < 2 || (N & (N - 1)) != 0) {
@@ -360,15 +418,27 @@ AirQuotientProveResult<F> AirQuotientProve(const AirConstraintSystem<F>& cs,
     const uint32_t n_coeffs = FriNextPow2(std::max(N, Lq_commit));
     const uint32_t W = cs.n_columns;
 
-    // 1. Interpolate the trace columns over H.
+    // 1. Interpolate the trace columns over H, then commit the trace for the
+    //    FS batching challenge (commit-then-challenge). Per-column backends:
+    //    one root per column, byte-identical to the roots the batched FRI
+    //    itself recomputes (checked below). ROW-WISE backends: ONE trace-only
+    //    row root R_T over the W shifted columns — the quotient depends on λ,
+    //    so it cannot ride the tree that seeds λ; R_T ships in the proof
+    //    (trace_commit) and is bound to the batch by per-query cross-openings
+    //    built in step 6.
     std::vector<std::vector<F>> coeffs(W);
     std::vector<std::vector<F>> shifted(W);
-    std::vector<uint256> trace_roots(W);
+    std::vector<uint256> trace_roots;
     for (uint32_t c = 0; c < W; ++c) {
         coeffs[c] = AirInterpolate(columns[c]);
         shifted[c] = coeffs[c];
         AirCosetShiftCoeffs(shifted[c]);
-        trace_roots[c] = B::ColumnRoot(shifted[c], n_coeffs);
+    }
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        trace_roots.push_back(B::RowRoot(shifted, n_coeffs));
+    } else {
+        trace_roots.resize(W);
+        for (uint32_t c = 0; c < W; ++c) trace_roots[c] = B::ColumnRoot(shifted[c], n_coeffs);
     }
 
     // 2. FS λ AFTER the trace commitment roots (commit-then-challenge).
@@ -456,33 +526,68 @@ AirQuotientProveResult<F> AirQuotientProve(const AirConstraintSystem<F>& cs,
         res.note = "batch commit failed: " + cr.note;
         return res;
     }
-    for (uint32_t c = 0; c < W; ++c) {
-        if (cr.proof.columns[c].root != trace_roots[c]) {
-            res.note = "internal: trace root mismatch vs FriBatchColumnRoot";
-            return res;
+    if constexpr (!AirBackendIsRowWise<Backend>) {
+        for (uint32_t c = 0; c < W; ++c) {
+            if (cr.proof.columns[c].root != trace_roots[c]) {
+                res.note = "internal: trace root mismatch vs FriBatchColumnRoot";
+                return res;
+            }
         }
     }
 
     // 6. Supplemental next-row openings at (query index + n_lde/N) mod n_lde.
     const uint32_t n_lde = cr.proof.n_coeffs * kRCFriBlowup;
     const uint32_t step = n_lde / N;
-    std::vector<AirTree> trees(W);
-    for (uint32_t c = 0; c < W; ++c) {
-        trees[c] = AirBuildTree<F>(cr.column_lde[c]);
-        if (trees[c].root != cr.proof.columns[c].root) {
-            res.note = "internal: rebuilt tree root mismatch";
+    res.proof.next_openings.resize(cr.proof.queries.size());
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        // Full-row tree (must reproduce the batch's row_commit) and the
+        // trace-only tree behind R_T (must reproduce trace_roots[0]).
+        const AirRowTree<B, F> full = AirBuildRowTree<B, F>(cr.column_lde, W + 1);
+        const AirRowTree<B, F> trace = AirBuildRowTree<B, F>(cr.column_lde, W);
+        if (B::PackDigest(full.levels.back()[0]) != B::PackDigest(cr.proof.row_commit.root)) {
+            res.note = "internal: rebuilt row tree root mismatch";
             return res;
         }
-    }
-    res.proof.next_openings.resize(cr.proof.queries.size());
-    for (size_t qi = 0; qi < cr.proof.queries.size(); ++qi) {
-        const uint32_t idx = (cr.proof.queries[qi].index + step) % n_lde;
-        auto& row = res.proof.next_openings[qi];
-        row.resize(W);
+        if (B::PackDigest(trace.levels.back()[0]) != trace_roots[0]) {
+            res.note = "internal: trace row root mismatch vs RowRoot";
+            return res;
+        }
+        res.proof.trace_commit = trace_roots[0];
+        for (size_t qi = 0; qi < cr.proof.queries.size(); ++qi) {
+            const uint32_t src = cr.proof.queries[qi].index;
+            const uint32_t idx = (src + step) % n_lde;
+            auto& row = res.proof.next_openings[qi];
+            row.resize(2);
+            // [0] next-row opening: full row (leaf recomputation needs every
+            // column value) against the batch's row_commit.
+            row[0].index = idx;
+            row[0].values.resize(W + 1);
+            for (uint32_t c = 0; c <= W; ++c) row[0].values[c] = cr.column_lde[c][idx];
+            row[0].siblings = AirRowTreePath(full, idx);
+            // [1] trace-binding opening at the query index itself against
+            // R_T; values stay empty — the verifier recomputes the leaf from
+            // the batch query's own (Merkle-verified) trace values.
+            row[1].index = src;
+            row[1].siblings = AirRowTreePath(trace, src);
+        }
+    } else {
+        std::vector<AirTree> trees(W);
         for (uint32_t c = 0; c < W; ++c) {
-            row[c].index = idx;
-            row[c].leaf = cr.column_lde[c][idx];
-            row[c].siblings = AirTreePath(trees[c], idx);
+            trees[c] = AirBuildTree<B, F>(cr.column_lde[c]);
+            if (trees[c].root != cr.proof.columns[c].root) {
+                res.note = "internal: rebuilt tree root mismatch";
+                return res;
+            }
+        }
+        for (size_t qi = 0; qi < cr.proof.queries.size(); ++qi) {
+            const uint32_t idx = (cr.proof.queries[qi].index + step) % n_lde;
+            auto& row = res.proof.next_openings[qi];
+            row.resize(W);
+            for (uint32_t c = 0; c < W; ++c) {
+                row[c].index = idx;
+                row[c].leaf = cr.column_lde[c][idx];
+                row[c].siblings = AirTreePath(trees[c], idx);
+            }
         }
     }
     res.proof.batch = std::move(cr.proof);
@@ -496,12 +601,13 @@ AirQuotientProveResult<F> AirQuotientProve(const AirConstraintSystem<F>& cs,
 // Verifier.
 // ===========================================================================
 
-template <typename F>
-bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<F>& proof,
-                       const uint256& fs_seed, std::string* why)
+template <typename F, typename Backend>
+bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
+                       const AirQuotientProof<F, Backend>& proof, const uint256& fs_seed,
+                       std::string* why)
 {
     using T = AirField<F>;
-    using B = AirFriBackend<F>;
+    using B = Backend;
     auto fail = [&](const char* w) {
         if (why) *why = w;
         return false;
@@ -515,9 +621,14 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
     // Structural degree-bound checks. column_len IS the enforced per-column
     // degree bound (batched-FRI degree-shift RLC); a quotient committed with
     // any other declared length — in particular an over-degree one — is
-    // rejected HERE before any crypto work.
-    if (batch.columns.size() != W + 1 || batch.column_len.size() != W + 1) {
-        return fail("column count mismatch");
+    // rejected HERE before any crypto work. (Row-wise backends carry no
+    // per-column commitments — only column_len — so only that is checked.)
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        if (batch.column_len.size() != W + 1) return fail("column count mismatch");
+    } else {
+        if (batch.columns.size() != W + 1 || batch.column_len.size() != W + 1) {
+            return fail("column count mismatch");
+        }
     }
     for (uint32_t c = 0; c < W; ++c) {
         if (batch.column_len[c] != N) return fail("trace column degree bound mismatch");
@@ -561,6 +672,13 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
                 }
             }
         }
+    } else if constexpr (AirBackendIsRowWise<Backend>) {
+        // No per-column roots exist to regenerate in the row-wise layout;
+        // value-pinned preprocessed columns must use the OOD-pin mode.
+        if (!cs.preprocessed.empty()) {
+            return fail("preprocessed root regen unsupported on row-wise backend "
+                        "(set preprocessed_pin_ood)");
+        }
     } else {
         for (const auto& [idx, values] : cs.preprocessed) {
             if (idx >= W || values.size() != N) return fail("preprocessed shape");
@@ -574,14 +692,34 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
     // Preprocessed columns satisfied by ROOT EQUALITY against a supplied root
     // (Stage A slice-opening mode): the committed column must be EXACTLY the
     // one committed under the caller-authenticated root — O(1) per column.
-    for (const auto& [idx, root] : cs.preprocessed_roots) {
-        if (idx >= W) return fail("preprocessed root index");
-        if (batch.columns[idx].root != root) return fail("preprocessed root mismatch");
+    // Per-column layouts only — a row-wise batch has no per-column roots.
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        if (!cs.preprocessed_roots.empty()) {
+            return fail("preprocessed root equality unsupported on row-wise backend");
+        }
+    } else {
+        for (const auto& [idx, root] : cs.preprocessed_roots) {
+            if (idx >= W) return fail("preprocessed root index");
+            if (batch.columns[idx].root != root) return fail("preprocessed root mismatch");
+        }
     }
 
-    // FS λ re-derivation from the committed trace roots.
-    std::vector<uint256> trace_roots(W);
-    for (uint32_t c = 0; c < W; ++c) trace_roots[c] = batch.columns[c].root;
+    // FS λ re-derivation from the committed trace roots: the batch's own
+    // per-column roots (per-column layout) or the trace-only row root R_T
+    // shipped in the proof (row-wise layout — bound to the batch by the
+    // per-query cross-openings verified in the query loop below).
+    std::vector<uint256> trace_roots;
+    [[maybe_unused]] typename std::conditional_t<AirBackendIsRowWise<Backend>, Backend,
+                                                 AirRowWiseNullState>::Digest rt_digest{};
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        const auto rt = B::UnpackDigest(proof.trace_commit);
+        if (!rt) return fail("trace commitment not canonical");
+        rt_digest = *rt;
+        trace_roots.push_back(proof.trace_commit);
+    } else {
+        trace_roots.resize(W);
+        for (uint32_t c = 0; c < W; ++c) trace_roots[c] = batch.columns[c].root;
+    }
     const F lambda = DeriveChallenge<F>(fs_seed, "airq_lambda", trace_roots, {N, Lq, W});
 
     const uint32_t n_lde = batch.n_coeffs * kRCFriBlowup;
@@ -599,17 +737,48 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
     std::vector<F> cur(W), nxt(W);
     for (size_t qi = 0; qi < batch.queries.size(); ++qi) {
         const auto& q = batch.queries[qi];
-        if (q.columns.size() != W + 1) return fail("query column count");
         const auto& no = proof.next_openings[qi];
-        if (no.size() != W) return fail("next-opening width");
         const uint32_t nidx = (q.index + step) % n_lde;
-        for (uint32_t c = 0; c < W; ++c) {
-            if (no[c].index != nidx) return fail("next-opening index");
-            if (!B::VerifyPath(no[c], batch.columns[c].root, n_lde)) {
+        F qv = T::Zero();
+        if constexpr (AirBackendIsRowWise<Backend>) {
+            if (q.row.values.size() != W + 1) return fail("query row width");
+            if (no.size() != 2) return fail("next-opening width");
+            // [0] next-row opening: the FULL row (leaf recomputation needs
+            // every column value) against the batch's single row_commit.
+            if (no[0].index != nidx) return fail("next-opening index");
+            if (no[0].values.size() != W + 1) return fail("next-opening row width");
+            if (!B::VerifyRowPath(B::RowLeafHash(no[0].values, nidx), nidx, no[0].siblings,
+                                  batch.row_commit.root, n_lde)) {
                 return fail("next-opening merkle");
             }
-            cur[c] = q.columns[c].value;
-            nxt[c] = no[c].leaf;
+            // [1] trace-binding opening: the λ-seeding trace commitment R_T
+            // must agree with the batch's own (already Merkle-verified) trace
+            // row values at this FS query index — same α = 17/32 per-query
+            // soundness as the FRI itself.
+            if (no[1].index != q.index) return fail("trace-binding index");
+            if (!no[1].values.empty()) return fail("trace-binding values not empty");
+            const std::vector<F> trow(q.row.values.begin(), q.row.values.begin() + W);
+            if (!B::VerifyRowPath(B::RowLeafHash(trow, q.index), q.index, no[1].siblings,
+                                  rt_digest, n_lde)) {
+                return fail("trace-binding merkle");
+            }
+            for (uint32_t c = 0; c < W; ++c) {
+                cur[c] = q.row.values[c];
+                nxt[c] = no[0].values[c];
+            }
+            qv = q.row.values[W];
+        } else {
+            if (q.columns.size() != W + 1) return fail("query column count");
+            if (no.size() != W) return fail("next-opening width");
+            for (uint32_t c = 0; c < W; ++c) {
+                if (no[c].index != nidx) return fail("next-opening index");
+                if (!B::VerifyPath(no[c], batch.columns[c].root, n_lde)) {
+                    return fail("next-opening merkle");
+                }
+                cur[c] = q.columns[c].value;
+                nxt[c] = no[c].leaf;
+            }
+            qv = q.columns[W].value;
         }
         // Actual evaluation point y = g·ω^index (coset — Z_H(y) ≠ 0).
         const F y = T::Mul(g, T::FromBase(AirPowBase(omega_lde, q.index)));
@@ -626,7 +795,6 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
             }
             lp = T::Mul(lp, lambda);
         }
-        const F qv = q.columns[W].value;
         if (!T::Eq(csum, T::Mul(qv, zh))) return fail("quotient identity C(y) != Q(y)*Z_H(y)");
     }
     if (why) *why = "AirQuotientVerify ok";
@@ -989,11 +1157,14 @@ bool RcSamplerAirVerify(const AirQuotientProof<F>& proof, const uint256& fs_seed
 }
 
 // ===========================================================================
-// Explicit instantiations (Fp2 today, Fp3 ready).
+// Explicit instantiations (Fp2 today, Fp3 ready; Fp3 additionally over the
+// row-wise algebraic-hash backend for the recursion path — the RcSampler
+// concrete instantiation stays on the default backend, see the header).
 // ===========================================================================
 
 using gkr_field::Fp2;
 using gkr_field::Fp3;
+using AlgB3 = AirFriBackendAlg<Fp3>;
 
 template Fp2 AirAcceptPoly<Fp2>(const Fp2&, const Fp2&, const Fp2&, const Fp2&);
 template Fp3 AirAcceptPoly<Fp3>(const Fp3&, const Fp3&, const Fp3&, const Fp3&);
@@ -1012,6 +1183,14 @@ template bool AirQuotientVerify<Fp2>(const AirConstraintSystem<Fp2>&,
                                      const AirQuotientProof<Fp2>&, const uint256&, std::string*);
 template bool AirQuotientVerify<Fp3>(const AirConstraintSystem<Fp3>&,
                                      const AirQuotientProof<Fp3>&, const uint256&, std::string*);
+
+template uint256 AirCommittedValuesRoot<Fp3, AlgB3>(const std::vector<Fp3>&, uint32_t);
+template AirQuotientProveResult<Fp3, AlgB3> AirQuotientProve<Fp3, AlgB3>(
+    const AirConstraintSystem<Fp3>&, const std::vector<std::vector<Fp3>>&, const uint256&,
+    const AirProveOptions&);
+template bool AirQuotientVerify<Fp3, AlgB3>(const AirConstraintSystem<Fp3>&,
+                                            const AirQuotientProof<Fp3, AlgB3>&, const uint256&,
+                                            std::string*);
 
 template AirConstraintSystem<Fp2> BuildRcSamplerConstraintSystem<Fp2>(
     uint32_t, const Fp2&, const Fp2&, uint8_t, const gkr_air::TableTM&);
