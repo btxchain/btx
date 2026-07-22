@@ -1533,11 +1533,28 @@ BOOST_AUTO_TEST_CASE(gkr_v7_positive_path_byte_parity)
     // Composed dual-α Extract LogUp cleared the target with margin.
     BOOST_CHECK_GT(pr.proof.logup_bits, 64.0);
 
+    // F3: the carried witness is accounted honestly (never 0) and the prover and
+    // verifier agree on the payload byte count.
+    BOOST_CHECK_GT(pr.timing.proof_bytes, 0u);
+    BOOST_CHECK_EQUAL(pr.timing.proof_bytes, rc::EstimateRCGkrProofV7PayloadBytes(pr.proof));
+
     std::string why;
     rc::RCGkrTiming vt;
     BOOST_CHECK_MESSAGE(rc::VerifyWinnerProofV7(pr.proof, header, 0, target, &why, &vt), why);
     // Cross-validate against the curriculum reference once more.
     BOOST_CHECK(rc::RecomputeResidentCurriculumReference(header, params, 0) == dig);
+
+    // F3 (cont.): verifier reports the same payload; over_budget is honestly the
+    // OR of wall-clock and the carried-witness soft cap (never silently false).
+    BOOST_CHECK_EQUAL(vt.proof_bytes, pr.timing.proof_bytes);
+    BOOST_CHECK_EQUAL(vt.over_budget, vt.verify_s > rc::kRCGkrVerifyBudgetS ||
+                                          vt.proof_bytes > rc::kRCGkrProofBytesBudget);
+    BOOST_CHECK_EQUAL(pr.proof.over_budget,
+                      pr.timing.proof_bytes > rc::kRCGkrProofBytesBudget);
+    // Even toy v7 carries every A/B/Y/extract column, so it already exceeds the
+    // 3 MiB soft cap — the "succinct" framing was inaccurate.
+    BOOST_CHECK_GT(vt.proof_bytes, rc::kRCGkrProofBytesBudget);
+    BOOST_CHECK(vt.over_budget);
 
     // Positive-path correctness (digest + verify) is mandatory. Wall-clock
     // Stage-I budget is NOT a soundness claim: FRI v5 half-domain fold +
@@ -1552,6 +1569,35 @@ BOOST_AUTO_TEST_CASE(gkr_v7_positive_path_byte_parity)
     if (vt.verify_s > rc::kRCGkrVerifyBudgetS) {
         BOOST_CHECK(vt.over_budget);
     }
+}
+
+// F4: the winner prover must refuse to attest work it did not do. An unrelated
+// claimed digest (or one that does not clear target) fails closed at prove time,
+// not only later at verify. Non-consensus (arbiter hard-off); this hardens the
+// proof path so it can never certify a mismatched digest.
+BOOST_AUTO_TEST_CASE(gkr_v7_prover_refuses_unrelated_digest_or_losing_target)
+{
+    auto header = MakeRCHeader(43);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 dig = rc::RecomputeResidentCurriculumReference(header, params, 0);
+    arith_uint256 max_target;
+    max_target = ~max_target;
+
+    // Unrelated claimed digest (header commits the wrong value) → refuse.
+    uint256 unrelated = dig;
+    unrelated.data()[0] ^= 1;
+    header.matmul_digest = unrelated;
+    const auto wrong = rc::ProveWinnerEpisodeV7(header, params, 0, max_target, unrelated);
+    BOOST_CHECK(!wrong.timing.ok);
+    BOOST_CHECK_EQUAL(wrong.timing.note, "episode_digest_mismatch_refuses_unrelated_work");
+
+    // Correct digest but a target too tight to clear → refuse.
+    header.matmul_digest = dig;
+    arith_uint256 losing = UintToArith256(dig);
+    if (losing > 0) --losing; // dig > losing
+    const auto over_target = rc::ProveWinnerEpisodeV7(header, params, 0, losing, dig);
+    BOOST_CHECK(!over_target.timing.ok);
+    BOOST_CHECK_EQUAL(over_target.timing.note, "episode digest over target");
 }
 
 // ============================================================================

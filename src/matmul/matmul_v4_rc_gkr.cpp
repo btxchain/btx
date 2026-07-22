@@ -1760,9 +1760,21 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
 
     const auto t1 = std::chrono::steady_clock::now();
     res.timing.prove_s = std::chrono::duration<double>(t1 - t0).count();
+    // F3: account the CARRIED witness honestly. v7 ships every A/B/Y/extract
+    // column, so proof_bytes is dominated by that payload — never 0. A malformed
+    // or oversized container is rejected before it can claim succinctness.
+    res.timing.proof_bytes = EstimateRCGkrProofV7PayloadBytes(proof);
+    if (res.timing.proof_bytes > kRCGkrMaxProofBytesHard) {
+        proof.over_budget = true;
+        res.timing.ok = false;
+        res.timing.over_budget = true;
+        res.timing.note = "v7 witness payload exceeds hard proof cap";
+        return res;
+    }
     res.timing.ok = true;
-    res.timing.over_budget = res.timing.prove_s > kRCGkrMediumProveBudgetS;
-    proof.over_budget = false; // verify is succinct: in-circuit AIRs, no reference re-run
+    proof.over_budget = res.timing.proof_bytes > kRCGkrProofBytesBudget;
+    res.timing.over_budget =
+        res.timing.prove_s > kRCGkrMediumProveBudgetS || proof.over_budget;
     res.timing.note = proof.note;
     return res;
 }
@@ -1784,7 +1796,23 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
     std::vector<RCRoundTranscript> transcripts;
     const uint256 true_digest =
         RecomputeResidentCurriculumReference(header, params, height, {}, &transcripts);
-    (void)true_digest;
+    // F4: the winner prover must not attest an unrelated claimed digest. Fail
+    // closed unless the claim equals the int64 reference AND the header commits
+    // it AND it clears target. (Non-consensus: arbiter hard-off, ExactReplay
+    // decides — but the proof path must never certify work it did not do.)
+    if (claimed_digest.IsNull() || claimed_digest != true_digest ||
+        header.matmul_digest != claimed_digest) {
+        RCGkrProveResultV7 res;
+        res.timing.ok = false;
+        res.timing.note = "episode_digest_mismatch_refuses_unrelated_work";
+        return res;
+    }
+    if (UintToArith256(true_digest) > target) {
+        RCGkrProveResultV7 res;
+        res.timing.ok = false;
+        res.timing.note = "episode digest over target";
+        return res;
+    }
     std::vector<uint256> roots(params.rounds);
     for (uint32_t r = 0; r < params.rounds; ++r) roots[r] = transcripts[r].round_root;
     const uint256 sigma = matmul::v4::DeriveSigma(header);
@@ -1793,8 +1821,97 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
 
     return ProveV7Core(
         header, params, height, target, claimed_digest, sigma, roots, seeds, wires,
-        "v7 SUCCINCT: batched FRI + sumcheck + eval-arg + in-circuit Extract/MxExpand/"
-        "tile-tree AIRs over committed columns (no int64-reference re-derivation)");
+        "v7 witness-carried: batched FRI + sumcheck + eval-arg + exhaustive "
+        "Extract/MxExpand/tile-tree checks over committed columns");
+}
+
+// F3: bounded structural + payload accounting for the witness-carried v7
+// container. Returns kRCGkrMaxProofBytesHard+1 when a structural cap or the hard
+// byte cap is exceeded (reject-before-work). Saturating arithmetic — never
+// overflows. This is an admission estimate until a canonical v7 serializer
+// lands; the dominant term is the carried A/B/Y/extract witness.
+size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof)
+{
+    constexpr size_t kTooLarge = kRCGkrMaxProofBytesHard + 1;
+    size_t bytes{0};
+    auto add = [&](size_t count, size_t width = 1) {
+        if (bytes > kRCGkrMaxProofBytesHard || width == 0 ||
+            count > (kRCGkrMaxProofBytesHard - bytes) / width) {
+            bytes = kTooLarge;
+            return false;
+        }
+        bytes += count * width;
+        return true;
+    };
+    auto malformed = [&]() {
+        bytes = kTooLarge;
+        return bytes;
+    };
+
+    const FriBatchProof& batch = proof.batch;
+    if (proof.round_seeds.size() > kRCGkrMaxRoundSeedsHard ||
+        proof.round_roots.size() > kRCGkrMaxRoundSeedsHard ||
+        proof.layers.size() > kRCGkrMaxLayersHard ||
+        proof.wires.size() > kRCGkrMaxLayersHard ||
+        batch.columns.size() > kRCFriBatchMaxColumns ||
+        batch.column_len.size() > kRCFriBatchMaxColumns ||
+        batch.evals_z1.size() > kRCFriBatchMaxColumns ||
+        batch.evals_z2.size() > kRCFriBatchMaxColumns ||
+        batch.fold_layers.size() > kRCFriMaxFoldLayersHard ||
+        batch.fold_challenges.size() > kRCFriMaxFoldLayersHard ||
+        batch.queries.size() > kRCFriMaxQueriesHard) {
+        return malformed();
+    }
+
+    // Fixed envelope + count-prefixed public vectors + diagnostic note.
+    if (!add(4 + 4 + 4 + 3 * 32 + 3 * 16 + 8 + 1 + 4) ||
+        !add(proof.round_seeds.size() + proof.round_roots.size(), 32) ||
+        !add(proof.note.size())) {
+        return kTooLarge;
+    }
+
+    // Batched-FRI payload (roots 32B + n_leaves 4B per layer; Fp2 = 16B).
+    if (!add(batch.columns.size(), 36) || !add(batch.column_len.size(), 4) ||
+        !add(batch.evals_z1.size() + batch.evals_z2.size(), 16) ||
+        !add(batch.fold_layers.size(), 36) || !add(batch.fold_challenges.size(), 16)) {
+        return kTooLarge;
+    }
+    for (const FriBatchQuery& q : batch.queries) {
+        if (q.columns.size() > kRCFriBatchMaxColumns ||
+            q.steps.size() > kRCFriMaxFoldLayersHard) {
+            return malformed();
+        }
+        for (const FriBatchColumnOpening& col : q.columns) {
+            if (col.siblings.size() > kRCFriMaxFoldLayersHard) return malformed();
+            if (!add(16 + 4) || !add(col.siblings.size(), 32)) return kTooLarge;
+        }
+        for (const FriFoldStep& step : q.steps) {
+            if (step.even_siblings.size() > kRCFriMaxFoldLayersHard ||
+                step.odd_siblings.size() > kRCFriMaxFoldLayersHard) {
+                return malformed();
+            }
+            if (!add(4 + 16 + 16) ||
+                !add(step.even_siblings.size() + step.odd_siblings.size(), 32)) {
+                return kTooLarge;
+            }
+        }
+    }
+
+    // Sumcheck/eval-argument payload (each round ~3 Fp2; per-layer 4 Fp2 claims).
+    for (const RCGkrLayerClaimV7& layer : proof.layers) {
+        if (layer.sumcheck.size() > kRCGkrMaxSumcheckRoundsHard) return malformed();
+        if (!add(layer.sumcheck.size(), 3 * 16) || !add(4, 16)) return kTooLarge;
+    }
+
+    // The critical previously-unaccounted term: the carried witness columns.
+    for (const RCGkrV7WireWitness& wire : proof.wires) {
+        if (!add(6, 4) || !add(wire.A.size()) || !add(wire.B.size()) ||
+            !add(wire.Y.size(), sizeof(int64_t)) ||
+            !add(wire.extract_in.size(), sizeof(int64_t)) || !add(wire.extract_out.size())) {
+            return kTooLarge;
+        }
+    }
+    return bytes;
 }
 
 namespace {
@@ -2312,17 +2429,23 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
                          const arith_uint256& target, std::string* why, RCGkrTiming* out_timing)
 {
     const auto t0 = std::chrono::steady_clock::now();
+    size_t payload_bytes{0};
     auto fail = [&](const std::string& m) {
         if (why) *why = m;
         if (out_timing) {
             out_timing->ok = false;
             out_timing->verify_s =
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+            out_timing->proof_bytes = payload_bytes;
+            out_timing->over_budget = payload_bytes > kRCGkrProofBytesBudget;
             out_timing->note = m;
         }
         return false;
     };
     if (proof.version != kRCGkrProofVersionV7) return fail("v7:version");
+    // F3: reject an over-hard-cap witness payload before rebuilding field columns.
+    payload_bytes = EstimateRCGkrProofV7PayloadBytes(proof);
+    if (payload_bytes > kRCGkrMaxProofBytesHard) return fail("v7:max_proof_size");
     if (!ValidateRCEpisodeParams(proof.episode)) return fail("v7:params_invalid");
     if (proof.height != height) return fail("v7:height");
 
@@ -2476,18 +2599,23 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
 
     const double verify_s =
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
-    const bool over_budget = verify_s > kRCGkrVerifyBudgetS;
+    // F3: soft budget is over when EITHER the wall-clock or the honestly-counted
+    // carried witness exceeds the soft cap — the payload is not free.
+    const bool over_budget =
+        verify_s > kRCGkrVerifyBudgetS || payload_bytes > kRCGkrProofBytesBudget;
     if (out_timing) {
         out_timing->ok = true;
         out_timing->verify_s = verify_s;
+        out_timing->proof_bytes = payload_bytes;
         out_timing->over_budget = over_budget;
-        out_timing->note = "v7 SUCCINCT ok (in-circuit AIRs; no reference re-run)";
+        out_timing->note = "v7 witness-carried checks ok (no whole-episode reference re-run)";
     }
     if (why) {
-        *why = "v7 SUCCINCT ok: tiles=" + std::to_string(gr.n_tiles) +
+        *why = "v7 witness-carried ok: tiles=" + std::to_string(gr.n_tiles) +
                " mxexpand_sha=" + std::to_string(gr.n_mxexpand_sha) +
                " tiletree_sha=" + std::to_string(gr.n_tiletree_sha) +
                " logup_bits=" + std::to_string(lr.achieved_bits) +
+               " proof_bytes=" + std::to_string(payload_bytes) +
                " verify_s=" + std::to_string(verify_s) +
                " over_budget=" + (over_budget ? "1" : "0");
     }
