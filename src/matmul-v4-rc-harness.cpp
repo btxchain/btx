@@ -20,6 +20,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
 #include <matmul/matmul_v4_rc_gkr.h>
+#include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/matmul_v4_rc_transcript.h>
 #include <primitives/block.h>
