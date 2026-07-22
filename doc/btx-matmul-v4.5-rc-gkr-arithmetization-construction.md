@@ -1184,28 +1184,49 @@ All values are −log2(acceptance), post the g = 40 grinding convention.
 | Extract composition polynomial | II | 80 |
 | Fixed-reference dual-α membership | III | 128 |
 | Copy/permutation wiring = min(equality 83.19, **dual** permutation 160) | IV | 83.19 |
-| **Batched-FRI proximity (parametric)** | backend | **65.85 (current v4 base)** |
+| **FRI fold proximity (parametric, DOMINATING)** | backend (v5) | **65.85 (sound v5 fold, Q = 116)** |
 | SHA256d Merkle/transcript | — | 88 |
 
-Composed total (v4 base, `kRCGkrFriProximityBitsV4 = 65.85`):
+Composed total on the **SOUND v5 fold** (`kRCGkrFriProximityBitsV5 = 65.85`;
+integration base `origin/wip/v7-hardening` @ `3f4e1a0`):
 
-  **ε_total = Σ 2^-term ⇒ −log2(ε_total) ≈ 65.8 bits (conservatively ≥ 65.7).**
+  **ε_total = Σ 2^-term ⇒ −log2(ε_total) ≈ 65.8 bits (ε_total ≤ 2^-65.7).**
 
-This is **FRI-DOMINATED** and **CONDITIONAL** on the FRI fold being a sound
-low-degree test. Honesty markers, stated plainly:
+This matches the independently-computed whole-protocol Theorem 8.1 figure
+(≈ 2^-65.7). The integration now rides the **v5 half-domain fold, which IS a
+sound low-degree test**, so the bound is **NON-VACUOUS** (on the old v4 base it
+was meaningless). Honesty markers, stated plainly:
 
-- The number clears the 2^-64 target by **less than 2 bits**, and only because
-  the batched-FRI proximity term (65.85) dominates every construction term. If
-  the FRI fold is *not* a sound LDT, the bound is vacuous — the current base is
-  still **FRI v4**; fixing the fold to **v5** is a separate hardening line.
-- The **single-challenge** grand-product wiring nets only **60 bits** post-grind
-  at κ = 2^28 — **BELOW 64**. It is therefore FORBIDDEN on the ship path; G4
-  enforces the **dual** form (160 bits). `kRCGkrWiringPermutationSingleSepBits`
-  is pinned so the test asserts it is < 64.
-- Hardening the batched FRI to Q = 128 (`FriBatchSoundnessBoundBits() = 76.8`)
-  makes the FS subtotal (72) the floor and lifts the composed bound to ≈ **71.9**
-  bits. `RCGkrComposedSeparationBits(FriBatchSoundnessBoundBits())` reports it.
+- **INADEQUATE MARGIN.** The number clears 2^-64 by only ≈ **1.8 bits** — under
+  the 2-bit adequacy gate for consensus authority. The **arbiter stays
+  hard-disabled** (`kRCGkrFormalSoundnessReady = false`); ExactReplay remains the
+  sole authority. `RCGkrComposedBound::inadequate_margin` is asserted true.
+- **Why 65.85 and not 76.8.** The batched query term
+  `FriBatchSoundnessBoundBits()` = 76.8 (Q = 128) is the query-repetition
+  soundness *assuming* the fold; it does **not** lift the fold's own proximity
+  soundness (65.85 at Q = 116), which is the floor. Plugging 76.8 gives only the
+  query-only view (FS subtotal 72 becomes the floor, ≈ 71.9) — reported, not
+  claimed as the security level.
+- The **single-challenge** grand-product wiring nets only **60 bits** at κ = 2^28
+  — **BELOW 64**; FORBIDDEN on the ship path (G4 enforces the **dual** form, 160).
 
-`RCGkrComposedSeparationBits()` (no argument) returns the honest current value
-(v4 base) ≈ 65.8. The term pins and the total are asserted in
+**Parameter levers to restore margin** (quantified; NOT applied here — the
+parameter-tuning decision is out of scope for the integration). FRI query term =
+Q·log2(32/17) − 40; FS subtotal = 72 (the next floor once FRI clears it):
+
+| Lever | Effect | Composed after | Δ vs 65.8 |
+|---|---|---|---|
+| **Raise Q 116 → 128** (already the batched target) | FRI floor 65.85 → **76.8** | FS subtotal (72) becomes floor ⇒ ≈ **71.9** | **+6.1 bits** |
+| Raise Q 116 → 160 | FRI floor → **106.0** | still FS-bound ⇒ ≈ **71.9** | +6.1 (no further gain — FS is the ceiling) |
+| **Cut the FS union** (fewer sumcheck rounds, tighter RLC) so FS > 76.8 **with** Q = 128 | FRI 76.8, FS ↑ | ⇒ min(76.8, FS′, 80, …) | up to **+10** toward the 74–80 band |
+| Move FS/algebraic challenges to **Fp3** (|F| ≈ 2^192) | doubles FS (72→≈136), composition (80→≈160), membership, wiring; **FRI floor UNCHANGED** | FRI still the floor ⇒ ≈ 65.8 **unless Q also rises** | **0 alone** |
+| **Fp3 FS + Q = 128 together** | FRI 76.8, FS ≈ 136 | FRI is the floor ⇒ ≈ **76.8** | **+11 bits, real margin** |
+
+The binding lesson: the composed bound is **FRI-floor-limited**, so **raising Q
+is the first and mandatory lever** (Q = 128 alone buys +6.1 bits → ≈ 71.9). Fp3
+lifts the FS/algebraic terms but does **nothing** for the FRI proximity floor
+until Q rises; the durable fix is **Q = 128 + an FS subtotal above 76.8** (fewer
+rounds or Fp3 FS), which lands the composed bound in the 74–77 band with genuine
+margin. `RCGkrComposedSeparationBits()` returns ≈ 65.8; the term pins, the total,
+the margin, and the `inadequate_margin` flag are asserted in
 `gkr_integration_composed_separation_bound`.

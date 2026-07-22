@@ -17,10 +17,11 @@
 //
 //  (2) The COMPOSED separation bound across the four constructions + the batched-
 //      FRI backend is pinned term-by-term and in total, PARAMETRIC in the FRI
-//      proximity bound. It is FRI-dominated (≈ 65.8 bits, conservatively ≥ 65.7)
-//      and CONDITIONAL on the FRI fold being a sound low-degree test; the single-
-//      challenge wiring path (60 bits) is BELOW 64 and is excluded (dual
-//      mandatory).
+//      proximity bound. On the SOUND v5 fold (origin/wip/v7-hardening) it is
+//      NON-VACUOUS and FRI-dominated (≈ 65.8 bits, ε_total ≤ 2^-65.7) — it clears
+//      2^-64 but by an INADEQUATE margin (< 2 bits) for consensus authority; the
+//      single-challenge wiring path (60 bits) is BELOW 64 and is excluded (dual
+//      mandatory). The arbiter stays hard-disabled (kRCGkrFormalSoundnessReady).
 //
 // HARD RULES honored: int64 reference immutable; arbiter OFF; heights INT32_MAX;
 // no existing adversarial test weakened (this suite only ADDS coverage).
@@ -170,7 +171,7 @@ BOOST_AUTO_TEST_CASE(gkr_integration_forgeries_rejected_at_construction_relation
 BOOST_AUTO_TEST_CASE(gkr_integration_composed_separation_bound)
 {
     const rc::RCGkrComposedBound b =
-        rc::RCGkrComposedSeparation(rc::kRCGkrFriProximityBitsV4);
+        rc::RCGkrComposedSeparation(rc::kRCGkrFriProximityBitsV5);
 
     // Per-construction terms (post-grind, −log2 acceptance).
     BOOST_CHECK_CLOSE(b.construction_ii_bits, 80.0, 1e-6);   // composition
@@ -187,11 +188,15 @@ BOOST_AUTO_TEST_CASE(gkr_integration_composed_separation_bound)
     BOOST_CHECK_LT(b.wiring_single_bits, 64.0);
     BOOST_CHECK_GE(rc::kRCGkrWiringPermutationDualSepBits, 64.0);
 
-    // Composed total: FRI-dominated. Clears 64 but by < 2 bits, and only
-    // CONDITIONALLY on the FRI fold being a sound low-degree test.
-    BOOST_CHECK(b.fri_conditional);
-    BOOST_CHECK_GT(b.composed_bits, 64.0);
-    BOOST_CHECK_LT(b.composed_bits, 66.0);
+    // Composed total on the SOUND v5 fold: FRI-dominated, NON-VACUOUS, but the
+    // margin over 64 is INADEQUATE (< 2 bits) for consensus authority.
+    BOOST_CHECK(b.fri_dominated);
+    BOOST_CHECK_GT(b.composed_bits, 64.0);   // clears the target (non-vacuous)
+    BOOST_CHECK_LT(b.composed_bits, 66.0);   // ...but only just — ≈ 65.8
+    BOOST_CHECK(b.clears_target);
+    BOOST_CHECK(b.inadequate_margin);        // margin < 2 bits: the headline warning
+    BOOST_CHECK_LT(b.margin_bits, 2.0);
+    BOOST_CHECK_GT(b.margin_bits, 0.0);
     // Composed ≤ the smallest INCLUDED term (the FRI proximity term), and within
     // a fraction of a bit of it (log-sum-exp of the larger terms).
     BOOST_CHECK_LE(b.composed_bits, b.fri_proximity_bits + 1e-9);
@@ -199,19 +204,21 @@ BOOST_AUTO_TEST_CASE(gkr_integration_composed_separation_bound)
     // No INCLUDED term is below target (the below-64 path is the EXCLUDED single
     // wiring form, tracked separately).
     BOOST_CHECK(!b.any_term_below_target);
-    BOOST_CHECK(b.clears_target);
 
-    // The convenience accessor equals the parametric value at the v4 base.
+    // The convenience accessor equals the parametric value at the v5 fold floor.
     BOOST_CHECK_CLOSE(rc::RCGkrComposedSeparationBits(), b.composed_bits, 1e-6);
 
-    // HARDENED path: plugging the batched-FRI target (FriBatchSoundnessBoundBits
-    // = 76.x, Q=128) lifts the composed bound (FS subtotal becomes the floor).
-    const double hardened =
+    // The batched query term (FriBatchSoundnessBoundBits = 76.x, Q=128) is a
+    // higher input, but it does NOT lift the fold floor — the composed bound at
+    // the v5 fold proximity is the honest number. Plugging the query term shows
+    // the query-only view (FS subtotal becomes the floor); it is reported, not
+    // claimed as the security level.
+    const double query_only_view =
         rc::RCGkrComposedSeparationBits(static_cast<double>(rc::FriBatchSoundnessBoundBits()));
-    BOOST_CHECK_GT(hardened, b.composed_bits);
-    BOOST_CHECK_GT(hardened, 70.0);
-    BOOST_TEST_MESSAGE("composed (v4 base) = " + std::to_string(b.composed_bits) +
-                       " ; composed (Q=128 hardened) = " + std::to_string(hardened));
+    BOOST_CHECK_GT(query_only_view, b.composed_bits);
+    BOOST_TEST_MESSAGE("composed (v5 fold floor) = " + std::to_string(b.composed_bits) +
+                       " ; margin over 64 = " + std::to_string(b.margin_bits) +
+                       " ; query-only view (Q=128) = " + std::to_string(query_only_view));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

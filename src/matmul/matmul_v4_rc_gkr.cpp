@@ -2275,8 +2275,13 @@ RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits)
     for (double t : terms) sum += std::pow(2.0, -(t - lo));
     b.composed_bits = lo - std::log2(sum);
 
+    b.margin_bits = b.composed_bits - static_cast<double>(kRCFriTargetSoundnessBits);
     b.clears_target = b.composed_bits >= static_cast<double>(kRCFriTargetSoundnessBits);
-    b.fri_conditional = true; // dominated by the FRI proximity term (see header)
+    // FRI-dominated iff the (parametric) FRI proximity term is the smallest.
+    b.fri_dominated = (lo == b.fri_proximity_bits);
+    // INADEQUATE for consensus authority if the margin over 64 is < 2 bits (it is
+    // ≈ 1.8 bits at the v5 fold floor). Arbiter stays hard-disabled regardless.
+    b.inadequate_margin = b.margin_bits < kRCGkrAdequateMarginBits;
     b.any_term_below_target = false;
     for (double t : terms)
         if (t < static_cast<double>(kRCFriTargetSoundnessBits)) b.any_term_below_target = true;
@@ -2290,10 +2295,11 @@ double RCGkrComposedSeparationBits(double fri_proximity_bits)
 
 double RCGkrComposedSeparationBits()
 {
-    // Current base: the v4 FRI fold (Q=116 unique decoding) dominates ⇒ ≈ 65.7,
-    // CONDITIONAL on the fold being a sound LDT. FriBatchSoundnessBoundBits()
-    // (Q=128, 76.8) is the hardened target ⇒ ≈ 71.9.
-    return RCGkrComposedSeparationBits(kRCGkrFriProximityBitsV4);
+    // Sound v5 fold: the fold's own proximity soundness (Q=116) dominates ⇒
+    // ≈ 65.8 bits (ε_total ≤ 2^-65.7), NON-VACUOUS but INADEQUATE margin (< 2
+    // bits over 64). The batched query term FriBatchSoundnessBoundBits() (76.8,
+    // Q=128) does not lift the fold floor; see the header note and the report.
+    return RCGkrComposedSeparationBits(kRCGkrFriProximityBitsV5);
 }
 
 bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,

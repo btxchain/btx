@@ -663,12 +663,20 @@ inline constexpr double kRCGkrWiringPermutationSingleSepBits = 60.0;
 inline constexpr double kRCGkrFsSubtotalSepBits = 72.0;
 /** SHA256d Merkle/transcript bindings vs a 2^40-query adversary (computational). */
 inline constexpr double kRCGkrShaSepBits = 88.0;
-/** Batched-FRI proximity term of the CURRENT base (v4 fold, Q = 116 unique
- *  decoding): 116·log2(32/17) − 40 ≈ 65.85. This is the FRI-DOMINATING term and
- *  the whole bound is CONDITIONAL on the fold being a sound low-degree test
- *  (the v5 hardening line). FriBatchSoundnessBoundBits() = 76.8 (Q = 128) is the
- *  hardened target that would lift the composed bound to ≈ 71.9. */
-inline constexpr double kRCGkrFriProximityBitsV4 = 65.85;
+/** FRI proximity term that DOMINATES the composed bound. The integration now
+ *  rides the SOUND v5 half-domain fold (`origin/wip/v7-hardening`): the fold IS a
+ *  low-degree test, so the bound is NON-VACUOUS (unlike the v4 base, on which it
+ *  was meaningless). The dominating term is the fold's own proximity soundness at
+ *  Q = 116: 116·log2(32/17) − 40 ≈ 65.85 (= `FriSoundnessBoundBits()` real
+ *  value). NOTE: the batched query term `FriBatchSoundnessBoundBits()` = 76.8
+ *  (Q = 128) is the query-repetition soundness ASSUMING the fold; it does NOT
+ *  lift the fold's own proximity soundness, so 65.85 remains the floor. */
+inline constexpr double kRCGkrFriProximityBitsV5 = 65.85;
+/** Deprecated alias (the base is now v5, not v4). */
+inline constexpr double kRCGkrFriProximityBitsV4 = kRCGkrFriProximityBitsV5;
+/** Margin over the 64-bit target below which the composed bound is flagged
+ *  INADEQUATE for consensus authority (audit gate; arbiter stays hard-disabled). */
+inline constexpr double kRCGkrAdequateMarginBits = 2.0;
 
 struct RCGkrComposedBound {
     double construction_i_bits{0.0};   // Construction I evaluation opening (FS-side)
@@ -679,19 +687,23 @@ struct RCGkrComposedBound {
     double fri_proximity_bits{0.0};    // parametric FRI term (dominating)
     double sha_bits{0.0};              // SHA256d computational
     double composed_bits{0.0};         // −log2(Σ 2^-term) over all of the above
+    double margin_bits{0.0};           // composed_bits − 64
     bool clears_target{false};         // composed_bits ≥ 64
-    bool fri_conditional{true};        // bound assumes the FRI fold is a sound LDT
+    bool fri_dominated{true};          // the FRI proximity term is the floor
+    bool inadequate_margin{false};     // margin_bits < kRCGkrAdequateMarginBits
     bool any_term_below_target{false}; // any INCLUDED term < 64 (excludes wiring_single)
 };
 
 /** The full composed-bound breakdown, PARAMETRIC in the FRI proximity bits. */
 [[nodiscard]] RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits);
 
-/** The composed separation bound (−log2 ε_total), FRI-dominated and conditional
- *  on the FRI fold being a sound LDT. With the current v4 base
- *  (kRCGkrFriProximityBitsV4) this is ≈ 65.7 bits — it CLEARS 64 by < 2 bits and
- *  ONLY if the fold is a sound low-degree test; if it is not, the bound is
- *  vacuous. Parametric overload lets callers plug FriBatchSoundnessBoundBits(). */
+/** The composed separation bound (−log2 ε_total). On the SOUND v5 fold this is
+ *  NON-VACUOUS and FRI-dominated at ≈ 65.8 bits (ε_total ≤ 2^-65.7) — it clears
+ *  the 2^-64 target, but by an INADEQUATE margin (< 2 bits) for consensus
+ *  authority; the arbiter stays hard-disabled (`kRCGkrFormalSoundnessReady`) and
+ *  the parameter levers to restore margin are documented in INTEGRATION_REPORT.md.
+ *  The parametric overload lets callers plug any FRI proximity term (e.g.
+ *  `FriBatchSoundnessBoundBits()` for the query-only view). */
 [[nodiscard]] double RCGkrComposedSeparationBits(double fri_proximity_bits);
 [[nodiscard]] double RCGkrComposedSeparationBits();
 
