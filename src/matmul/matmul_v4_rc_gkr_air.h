@@ -336,14 +336,16 @@ void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                                         const std::array<int64_t, kRCMxBlockLen>& input);
 
 // ---------------------------------------------------------------------------
-// 5. AIR-level intermediate tamper hooks (adversarial self-test).
+// 5. AIR-level intermediate edit hooks (invalid-assignment self-test).
 //
 // The ChaCha20 / SHA-256 intermediate columns (quarter-round add results,
-// working-variable words) live in the internal trace structs. These hooks
-// build an honest in-circuit trace, tamper ONE intermediate cell, and return
-// true iff the AIR constraint checker (CheckChaChaBlock / CheckShaCompress)
-// REJECTS the tampered trace — proving intermediate swaps are caught at the
-// arithmetic-constraint level, not merely at the output boundary.
+// working-variable words) are the committed cells of §2b. These hooks build
+// an honest in-circuit trace, edit ONE intermediate cell, and return true iff
+// the constraint checker (CheckChaChaBlock / CheckShaCompress) REJECTS the
+// edited assignment — a violated identity evaluates to a nonzero field
+// element at the arithmetic-constraint level, not merely at the output
+// boundary. (For the same property through the composition polynomial over a
+// full tile, see §8 and air_construction2_composition_polynomial.)
 // ---------------------------------------------------------------------------
 
 /** true iff tampering a ChaCha20 quarter-round add result is rejected. */
