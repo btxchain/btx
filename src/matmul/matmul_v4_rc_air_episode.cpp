@@ -843,46 +843,108 @@ EpisodeAirProveResult ProveEpisodeAirQuotient(const EpisodeAirLayout& layout,
 
 bool VerifyEpisodeAirQuotient(const EpisodeAirLayout& layout, const EpisodeAirProof& proof,
                               const uint256& fs_seed, std::string* why,
-                              EpisodeAirVerifyStats* stats)
+                              EpisodeAirVerifyStats* stats,
+                              const EpisodeAirVerifyOptions& opt)
 {
     auto fail = [&](const std::string& w) {
         if (why) *why = w;
         return false;
     };
+    if (stats) *stats = EpisodeAirVerifyStats{};
+
     const auto t_pre = Clock::now();
-    EpisodePublicData pub;
+    EpisodeRowLayout rl;
     {
         std::string w;
+        if (!BuildRowLayout(layout, rl, w)) return fail(w);
+    }
+
+    const bool regen_pre = opt.regenerate_preprocessed || opt.attest_p_root;
+    EpisodePublicData pub;
+    if (regen_pre) {
+        std::string w;
         if (!BuildEpisodePublicData(layout, /*want_prover_data=*/false, pub, w)) return fail(w);
+    } else {
+        pub.rl = rl;
     }
     if (stats) {
-        stats->preprocess_s = Secs(t_pre);
-        stats->n_shards = pub.rl.n_shards;
-        stats->n_rows = pub.rl.total;
+        stats->n_shards = rl.n_shards;
+        stats->n_rows = rl.total;
+        if (regen_pre) {
+            stats->sha_prf_calls = pub.n_prf_calls;
+            stats->sha_xof_digests = pub.n_xof_digests;
+        }
     }
-    if (proof.shards.size() != pub.rl.n_shards) return fail("shard count mismatch");
+    if (proof.shards.size() != rl.n_shards) return fail("shard count mismatch");
+    if (proof.p_shard_roots.size() != rl.n_shards) return fail("preprocessed shard-root count mismatch");
+    if (proof.p_openings.size() != rl.n_shards) return fail("preprocessed opening count mismatch");
+
+    const uint32_t n_leaves = PreTreeLeaves(rl.n_shards);
+    for (uint32_t s = 0; s < rl.n_shards; ++s) {
+        if (proof.p_shard_roots[s].size() != kEpPreRootCols) {
+            return fail("shard " + std::to_string(s) + ": preprocessed root column count");
+        }
+        const uint256 leaf = PreLeafDigest(s, proof.p_shard_roots[s]);
+        if (!VerifyPreOpening(leaf, s, proof.p_openings[s], proof.p_root, n_leaves)) {
+            return fail("shard " + std::to_string(s) + ": preprocessed opening");
+        }
+    }
+    if (stats) stats->preprocess_s = Secs(t_pre);
+
+    const uint32_t N = rl.shard_rows;
+    const CS cs_probe = BuildEpisodeShardConstraints(N, Fp3::Zero(), Fp3::Zero(), {});
+    const uint32_t n_coeffs = FriNextPow2(std::max(N, cs_probe.QuotientLen()));
+    if (opt.attest_p_root) {
+        const auto t_att = Clock::now();
+        const EpisodePreprocessedCommit pc = CommitPreprocessedFromPub(layout, pub, n_coeffs);
+        if (!pc.ok) return fail(pc.note);
+        if (pc.p_root != proof.p_root) return fail("preprocessed root mismatch");
+        if (stats) stats->p_attest_s = Secs(t_att);
+    }
 
     const gkr_air::TableTM tm;
-    const uint32_t N = pub.rl.shard_rows;
     const auto t_q = Clock::now();
-    for (uint32_t s = 0; s < pub.rl.n_shards; ++s) {
+    for (uint32_t s = 0; s < rl.n_shards; ++s) {
         const auto& batch = proof.shards[s].batch;
         if (batch.columns.size() != kEpNumCols + 1) {
             return fail("shard " + std::to_string(s) + ": column count");
         }
         std::vector<uint256> epoch1_roots(kEpEpoch1Cols);
-        for (uint32_t c = 0; c < kEpEpoch1Cols; ++c) epoch1_roots[c] = batch.columns[c].root;
+        for (uint32_t c = 0; c < kEpEpoch1Cols; ++c) {
+            if (c < kEpPreRootCols) {
+                epoch1_roots[c] = proof.p_shard_roots[s][c];
+            } else {
+                epoch1_roots[c] = batch.columns[c].root;
+            }
+        }
         const Fp3 gamma =
-            ShardChallenge(fs_seed, proof.p_root, "ep_gamma", epoch1_roots, N, s, pub.rl.n_shards);
+            ShardChallenge(fs_seed, proof.p_root, "ep_gamma", epoch1_roots, N, s, rl.n_shards);
         const Fp3 alpha =
-            ShardChallenge(fs_seed, proof.p_root, "ep_alpha", epoch1_roots, N, s, pub.rl.n_shards);
+            ShardChallenge(fs_seed, proof.p_root, "ep_alpha", epoch1_roots, N, s, rl.n_shards);
 
-        auto pre = ShardPreprocessed(layout, pub, s);
+        std::vector<std::pair<uint32_t, std::vector<Fp3>>> pre;
+        if (regen_pre) {
+            pre = ShardPreprocessed(layout, pub, s);
+        } else {
+            // Default Stage-A verifier: do not regenerate the SHA-derived
+            // selector/scale/leaf columns. The P_root slice opening below
+            // root-pins columns [0,kEpPreRootCols). Public GEMM endpoint
+            // columns are cheap arithmetic from the layout, so keep them
+            // value-pinned as well as root-pinned.
+            std::array<std::vector<Fp3>, 3> gemm = ShardGemmColumns(layout, N, s);
+            pre.emplace_back(static_cast<uint32_t>(kEpGemmGf), std::move(gemm[0]));
+            pre.emplace_back(static_cast<uint32_t>(kEpGemmA), std::move(gemm[1]));
+            pre.emplace_back(static_cast<uint32_t>(kEpGemmB), std::move(gemm[2]));
+        }
         pre.emplace_back(static_cast<uint32_t>(kEpTfp), TfpColumn(tm, gamma, N));
-        const CS cs = BuildEpisodeShardConstraints(N, gamma, alpha, std::move(pre));
+        CS cs = BuildEpisodeShardConstraints(N, gamma, alpha, std::move(pre));
+        cs.preprocessed_roots.reserve(kEpPreRootCols);
+        for (uint32_t c = 0; c < kEpPreRootCols; ++c) {
+            cs.preprocessed_roots.emplace_back(c, proof.p_shard_roots[s][c]);
+        }
         std::string w;
         if (!aq::AirQuotientVerify<Fp3>(cs, proof.shards[s],
-                                        ShardSeed(fs_seed, proof.p_root, s, pub.rl.n_shards), &w)) {
+                                        ShardSeed(fs_seed, proof.p_root, s, rl.n_shards), &w)) {
             return fail("shard " + std::to_string(s) + ": " + w);
         }
     }
