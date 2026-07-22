@@ -29,6 +29,7 @@
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_air_episode.h>
 #include <matmul/matmul_v4_rc_air_quotient.h>
+#include <matmul/matmul_v4_rc_fri_ext3.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
@@ -116,6 +117,26 @@ void ReportTimings(const char* tag, const rc::RCGkrGroundScanMeasureV7& scan,
     BOOST_TEST_MESSAGE("  episode AIR prove (prover-side): " << air_prove_s << " s");
 }
 
+size_t EstimateEpisodeAirProofBytes(const ae::EpisodeAirProof& proof)
+{
+    size_t bytes = 4; // shard count
+    for (const auto& shard : proof.shards) {
+        std::vector<unsigned char> ser;
+        bytes += rc::SerializeFri3BatchProof(shard.batch, ser);
+        bytes += 4; // query row count
+        for (const auto& query : shard.next_openings) {
+            bytes += 4; // path count
+            for (const auto& path : query) {
+                bytes += 4;  // index
+                bytes += 24; // Fp3 leaf
+                bytes += 4;  // sibling count
+                bytes += path.siblings.size() * 32;
+            }
+        }
+    }
+    return bytes;
+}
+
 } // namespace
 
 // The degree-2 factorization of the acceptance rule used by the episode AIR
@@ -170,6 +191,8 @@ BOOST_AUTO_TEST_CASE(honest_compact_accepts_and_measures_toy)
         rc::MeasureGroundEpisodeScanV7(h.prove.proof, h.header);
     BOOST_REQUIRE_MESSAGE(scan.ok, scan.failure);
     ReportTimings("toy", scan, ct, air.prove_s);
+    BOOST_TEST_MESSAGE("  proof_bytes: carried_v7=" << h.prove.timing.proof_bytes
+                       << " compact_air=" << EstimateEpisodeAirProofBytes(air.proof));
 
     // The O(N) row scan is gone from the compact verifier: its residual SHA
     // work is ONLY the direct tile-tree closure (no MxExpand / sampler scan).
@@ -307,6 +330,8 @@ BOOST_AUTO_TEST_CASE(measure_medium_dims)
     const rc::RCGkrGroundScanMeasureV7 scan = rc::MeasureGroundEpisodeScanV7(prove.proof, header);
     BOOST_REQUIRE_MESSAGE(scan.ok, scan.failure);
     ReportTimings("medium", scan, ct, air.prove_s);
+    BOOST_TEST_MESSAGE("  proof_bytes: carried_v7=" << prove.timing.proof_bytes
+                       << " compact_air=" << EstimateEpisodeAirProofBytes(air.proof));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
