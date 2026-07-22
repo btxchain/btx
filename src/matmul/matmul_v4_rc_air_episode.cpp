@@ -538,7 +538,8 @@ std::vector<uint256> PreTreePath(const std::vector<std::vector<uint256>>& levels
     return siblings;
 }
 
-bool VerifyPreOpening(const uint256& leaf, uint32_t index, const std::vector<uint256>& siblings,
+[[maybe_unused]] bool VerifyPreOpening(const uint256& leaf, uint32_t index,
+                      const std::vector<uint256>& siblings,
                       const uint256& p_root, uint32_t n_leaves)
 {
     if (n_leaves == 0 || (n_leaves & (n_leaves - 1)) != 0 || index >= n_leaves) return false;
@@ -872,16 +873,16 @@ bool VerifyEpisodeAirQuotient(const EpisodeAirLayout& layout, const EpisodeAirPr
         std::vector<uint256> epoch1_roots(kEpEpoch1Cols);
         for (uint32_t c = 0; c < kEpEpoch1Cols; ++c) epoch1_roots[c] = batch.columns[c].root;
         const Fp3 gamma =
-            ShardChallenge(fs_seed, "ep_gamma", epoch1_roots, N, s, pub.rl.n_shards);
+            ShardChallenge(fs_seed, proof.p_root, "ep_gamma", epoch1_roots, N, s, pub.rl.n_shards);
         const Fp3 alpha =
-            ShardChallenge(fs_seed, "ep_alpha", epoch1_roots, N, s, pub.rl.n_shards);
+            ShardChallenge(fs_seed, proof.p_root, "ep_alpha", epoch1_roots, N, s, pub.rl.n_shards);
 
         auto pre = ShardPreprocessed(layout, pub, s);
         pre.emplace_back(static_cast<uint32_t>(kEpTfp), TfpColumn(tm, gamma, N));
         const CS cs = BuildEpisodeShardConstraints(N, gamma, alpha, std::move(pre));
         std::string w;
         if (!aq::AirQuotientVerify<Fp3>(cs, proof.shards[s],
-                                        ShardSeed(fs_seed, s, pub.rl.n_shards), &w)) {
+                                        ShardSeed(fs_seed, proof.p_root, s, pub.rl.n_shards), &w)) {
             return fail("shard " + std::to_string(s) + ": " + w);
         }
     }
