@@ -24,8 +24,11 @@
 // ============================================================================
 // SOUNDNESS PARAMETERS (M6 — Fable cross-check; code and statement MUST agree)
 // ============================================================================
-// Shipped: g=40, Fp2, blowup B=16 (ρ=1/16), Q=116 unique decoding.
-// FriSoundnessBoundBits() = 65. See soundness note.
+// Shipped: g=40, Fp2, blowup B=16 (ρ=1/16), Q=128 unique decoding.
+// FriSoundnessBoundBits() = 76 (real value 128·log2(32/17) − 40 = 76.80).
+// Q was raised 116 → 128 (2026-07-22 margin restoration): at Q=116 the fold
+// proximity term (65.85) was the composed-bound floor with only ≈ 1.8 bits of
+// margin over the 2^-64 target. See soundness note.
 //
 // DEEP/OOD (ePrint 2019/336; DEEP-ALI practice): after committing P, draw z∉D,
 // claim v=P(z), commit quotient Q=(P−v)/(X−z), open Q at FRI query sites,
@@ -43,7 +46,11 @@ inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V5";
 
 inline constexpr uint32_t kRCFriBlowup = 16;
 inline constexpr uint32_t kRCFriGrindingBits = 40;
-inline constexpr uint32_t kRCFriNumQueries = 116;
+/** Fold-instance query count. Raised 116 → 128 (2026-07-22): the fold's own
+ *  proximity soundness Q·log2(32/17) − g is the composed-bound floor; Q=116
+ *  gave 65.85 bits (≈ 1.8 over the 64 target — inadequate), Q=128 gives 76.80
+ *  and matches kRCFriBatchNumQueries. */
+inline constexpr uint32_t kRCFriNumQueries = 128;
 inline constexpr uint32_t kRCFriNumQueriesBciKs20Optional = 53;
 
 [[nodiscard]] inline int FriSoundnessBoundBits()
@@ -56,10 +63,10 @@ inline constexpr uint32_t kRCFriNumQueriesBciKs20Optional = 53;
 inline constexpr int kRCFriTargetSoundnessBits = 64;
 
 inline constexpr char kRCFriSoundnessStatement[] =
-    "FRI REAL (v5/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=116, g=40, Fp2; "
+    "FRI REAL (v5/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=128, g=40, Fp2; "
     "v5 half-domain fold (pair i with i+N/2) × log2(n_coeffs) → terminal "
     "B-constant layer (Merkle of B identical leaves); "
-    "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=65; "
+    "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=76; "
     "DEEP/OOD binds P(z) via quotient openings at query sites (ePrint 2019/336); "
     "OOD z resampled until Fp2.c1!=0; deep_quot_root≡nested FRI layer-0; "
     "deep_z_forced Haböck I(1) at z=1 uses layer-0 Merkle opening (not quotient). "
@@ -194,21 +201,25 @@ struct FriCommitResult {
 // + companion soundness table 2026-07-21.
 //
 // WHY BATCHING IS MANDATORY (not cosmetic): the v6 proof carries 7 independent
-// FRI instances (a/b/trace/lookup/table/inv/r). Each is 2^-65.85 post-grinding;
-// the adversary attacks the weakest of its choice, so the union bound is
-// ≥ 7·2^-65.85 ≈ 2^-63.05 — FAILING the 2^-64 target. A single batched
-// instance over the FS random linear combination λ of all columns restores a
-// single query term.
+// FRI instances (a/b/trace/lookup/table/inv/r). At the historical Q=116 each
+// was 2^-65.85 post-grinding; the adversary attacks the weakest of its choice,
+// so the union bound was ≥ 7·2^-65.85 ≈ 2^-63.05 — FAILING the 2^-64 target
+// outright. Even at Q=128 (2^-76.8 each) the ≈ 2.8-bit union loss drops
+// 7 instances to ≈ 2^-74.0, burning the entire ≥ 74-bit adequacy band. A
+// single batched instance over the FS random linear combination λ of all
+// columns restores a single query term.
 //
-// QUERY COUNT: Q = 116 clears 2^-64 with < 1 bit of margin (65.85 bits).
-// Per the blueprint's pre-cutover hardening recommendation the batched
-// instance ships Q = kRCFriBatchNumQueries = 128:
-//   128·log2(32/17) = 116.80 bits pre-grinding − 40 grinding = 76 bits.
+// QUERY COUNT: Q = 116 cleared 2^-64 with < 1 bit of margin (65.85 bits).
+// Both the fold instance (kRCFriNumQueries) and the batched instance
+// (kRCFriBatchNumQueries) now ship Q = 128:
+//   128·log2(32/17) = 116.80 bits pre-grinding − 40 grinding = 76.80 bits.
 //
 // DUAL-OOD DEEP: a single OOD point z over Fp2 caps the bindable column
 // degree at 2^(128−40−64) = 2^24 coefficients; consensus columns reach
 // κ = 2^28. Two independent OOD points z1 ≠ z2 give
-// (2κ/(|Fp2|−|D|))² ≈ 2^-196 pre-grinding (soundness table row "dual-OOD").
+// (2κ/(|Fp2|−|D|))² ≈ 2^-196 pre-grinding (soundness table row "dual-OOD");
+// under the Fp3 challenge draw (|K| ≈ 2^192, margin-restoration target) the
+// same dual pair gives (2κ/(|K|−|D|))² ≈ 2^-326.
 // Every column's claimed evaluations at BOTH z1 and z2 ride in the proof and
 // are bound by the batched DEEP identity at each query site — these bound
 // (C_i(z1), C_i(z2)) pairs ARE the opening primitive the §2.4 evaluation
