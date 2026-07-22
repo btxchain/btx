@@ -1169,8 +1169,9 @@ uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisod
 }
 
 uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
-                             const RCCoupParams& params, const arith_uint256& target,
-                             const uint256& claimed_digest, const uint256& sigma,
+                             const RCCoupParams& params, const RCCoupOptions& options,
+                             const arith_uint256& target, const uint256& claimed_digest,
+                             const uint256& sigma,
                              const std::vector<uint256>& barrier_roots)
 {
     std::vector<unsigned char> buf;
@@ -1201,6 +1202,20 @@ uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
     AppendLE32(buf, params.lobes);
     AppendLE32(buf, params.lobe_width);
     AppendLE32(buf, params.bank_pages);
+    AppendLE32(buf, params.rows_per_lobe);
+    AppendLE32(buf, params.pages_per_barrier_lobe);
+    AppendBytes(buf, reinterpret_cast<const unsigned char*>("cop"), 3);
+    AppendLE32(buf, static_cast<uint32_t>(options.mode));
+    AppendLE32(buf, options.transcript_version);
+    AppendLE32(buf, options.skip_barrier ? 1u : 0u);
+    AppendLE32(buf, options.skip_barrier_index);
+    AppendLE32(buf, options.skip_bank_page ? 1u : 0u);
+    AppendLE32(buf, options.skip_page_index);
+    AppendLE32(buf, options.full_bank_schedule ? 1u : 0u);
+    AppendLE32(buf, options.material_exchange ? 1u : 0u);
+    AppendLE32(buf, options.exchange_rows);
+    AppendLE32(buf, options.exchange_rounds);
+    AppendLE32(buf, options.force_signed_mix ? 1u : 0u);
     AppendBytes(buf, reinterpret_cast<const unsigned char*>("tgt"), 3);
     const uint256 tgt = ArithToUint256(target);
     AppendBytes(buf, tgt.data(), 32);

@@ -303,6 +303,7 @@ struct RCGkrLayout {
  *  a distinct sub-domain label (episode/coupled transcripts can never collide). */
 [[nodiscard]] uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
                                            const RCCoupParams& params,
+                                           const RCCoupOptions& options,
                                            const arith_uint256& target,
                                            const uint256& claimed_digest,
                                            const uint256& sigma,

@@ -1391,11 +1391,39 @@ BOOST_AUTO_TEST_CASE(gkr_v7_fs_seed_binds_every_field)
       expect_differs(rc::RCGkrFsSeedV7(header, 0, params, target, dig, sigma, r2)); }
     // Episode vs coupled sub-domains can never collide.
     const auto coup = rc::MakeToyRCCoupParams();
-    expect_differs(rc::RCGkrFsSeedV7Coupled(header, 0, coup, target, dig, sigma, roots));
+    const auto coup_opts = rc::RCCoupOptions{};
+    expect_differs(
+        rc::RCGkrFsSeedV7Coupled(header, 0, coup, coup_opts, target, dig, sigma, roots));
     // Coupled binds its own params.
     { auto c2 = coup; c2.barriers += 1;
-      const uint256 a = rc::RCGkrFsSeedV7Coupled(header, 0, coup, target, dig, sigma, roots);
-      const uint256 b = rc::RCGkrFsSeedV7Coupled(header, 0, c2, target, dig, sigma, roots);
+      const uint256 a =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, coup_opts, target, dig, sigma, roots);
+      const uint256 b =
+          rc::RCGkrFsSeedV7Coupled(header, 0, c2, coup_opts, target, dig, sigma, roots);
+      BOOST_CHECK(a != b); }
+    { auto c2 = coup; c2.rows_per_lobe += 1;
+      const uint256 a =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, coup_opts, target, dig, sigma, roots);
+      const uint256 b =
+          rc::RCGkrFsSeedV7Coupled(header, 0, c2, coup_opts, target, dig, sigma, roots);
+      BOOST_CHECK(a != b); }
+    { auto c2 = coup; c2.pages_per_barrier_lobe += 1;
+      const uint256 a =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, coup_opts, target, dig, sigma, roots);
+      const uint256 b =
+          rc::RCGkrFsSeedV7Coupled(header, 0, c2, coup_opts, target, dig, sigma, roots);
+      BOOST_CHECK(a != b); }
+    { auto o2 = coup_opts; o2.transcript_version = rc::ENC_RC_V3;
+      const uint256 a =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, coup_opts, target, dig, sigma, roots);
+      const uint256 b =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, o2, target, dig, sigma, roots);
+      BOOST_CHECK(a != b); }
+    { auto o2 = coup_opts; o2.exchange_rounds = 4;
+      const uint256 a =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, coup_opts, target, dig, sigma, roots);
+      const uint256 b =
+          rc::RCGkrFsSeedV7Coupled(header, 0, coup, o2, target, dig, sigma, roots);
       BOOST_CHECK(a != b); }
 }
 

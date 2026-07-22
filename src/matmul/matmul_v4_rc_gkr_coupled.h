@@ -22,10 +22,12 @@
 //
 // Ground truth (IMMUTABLE, sole authority): RecomputeCoupledPuzzleReference —
 // bank pages (template-seeded, nonce-independent), per barrier b:
-//   C3.a per-lobe int8 GEMM 1×W · W×W → int64 against the page(s) named by
-//        SelectCoupledBankPageIds(b, ℓ) (legacy consensus schedule),
-//   C3.a' material exchange: per-lobe int64 rows land at FIXED segment offsets
-//        (segment_id = lobe index → cells [ℓ·W, (ℓ+1)·W) of the exchange col),
+//   C3.a per-lobe int8 GEMM M×W · W×W → int64, where
+//        M = rows_per_lobe, against the page set named by
+//        SelectCoupledBankPageIds(b, ℓ, options.full_bank_schedule,
+//        options.transcript_version),
+//   C3.a' material exchange: per-lobe int64 blocks land at FIXED segment offsets
+//        (segment_id = lobe index → cells [ℓ·M·W, (ℓ+1)·M·W) of the exchange col),
 //   C3.b balanced permutation π_b (public Fisher–Yates over ShaXof(sigma,b)),
 //   C3.c butterfly all-to-all mix (pattern b mod 2, mask from sigma),
 //   C3.d non-affine Extract (ExtractMXTileInt64 per 32-wide tile),
@@ -35,22 +37,23 @@
 // Λ_coup COLUMN LAYOUT (verifier-computable; the proof carries NO layout data —
 // §7.1: page schedule, π_b, mix masks, segment ids are all public functions of
 // (header, height, params), so forged page IDs / segments are UNEXPRESSIBLE):
-//   per barrier b: for ℓ = 0..L−1: [A_{b,ℓ} (W, int8 state slice),
-//                                   B_{b,ℓ} (W², int8 bank page),
-//                                   Y_{b,ℓ} (W, int64 GEMM row)]
+//   per barrier b: for ℓ = 0..L−1: [A_{b,ℓ} (M·W, int8 state block),
+//                                   B_{b,ℓ} (W², int64 folded bank-page sum),
+//                                   Y_{b,ℓ} (M·W, int64 GEMM block)]
 //   then e_b (n, int64 exchange = pre-perm), p_b (n, int64 post-perm),
 //        x_b (n, int64 post-mix), s_b (n, int8 extract/state-out).
 // All columns live in ONE batched dual-OOD FRI (Thm 2.1).
 //
 // VERIFIED RELATIONS:
 //   R5.gemm (SUCCINCT, the O(work) part): per (b,ℓ) Thaler product sumcheck
-//     (§7.2, m=1) with chain-end gf ≡ a_eval·b_eval and Y/A/B openings bound
+//     (§7.2, m=rows_per_lobe) with chain-end gf ≡ a_eval·b_eval and Y/A/B openings bound
 //     to the batched commitment by the §2.4 eval argument (Thm 2.2/3.1).
 //   R5.exchange (committed data-movement, fixed segment IDs): the exchange
-//     column opening ẽ_b(r_j, bits(ℓ)) MUST equal the lobe's GEMM claim
-//     Ỹ_{b,ℓ}(r_j) — the little-endian index split i = ℓ·W + c makes the
-//     fixed segment a subcube restriction, so this one eval-argument claim IS
-//     the segment relation (a displaced/forged segment breaks it).
+//     column opening ẽ_b(r_j, r_i, bits(ℓ)) MUST equal the lobe's GEMM claim
+//     Ỹ_{b,ℓ}(r_i,r_j) — the little-endian index split
+//     i = ℓ·M·W + row·W + col makes the fixed segment a subcube restriction, so
+//     this one eval-argument claim IS the segment relation (a displaced/forged
+//     segment breaks it).
 //   R5.perm (public π, §7.3): p̃_b(r_p) must equal Σ_x eq(r_p, π_b(x))·e_b[x],
 //     the verifier evaluating the public weight-MLE natively in O(n·ν).
 //   R5.mix / R5.extract / R5.roots / R5.bank: grounded by NATIVE re-derivation
@@ -92,22 +95,24 @@ inline constexpr char kRCGkrCoupledV7Statement[] =
  *  Λ_coup outputs the verifier derives natively (forgeries unexpressible). */
 struct RCGkrCoupledLobeClaimV7 {
     std::vector<RCGkrSumcheckRound> sumcheck;
-    /** c = Ỹ_{b,ℓ}(r_j) — bound to the committed Y column (eval argument). */
+    /** c = Ỹ_{b,ℓ}(r_i,r_j) — bound to the committed Y column (eval argument). */
     Fp2 c_claim{};
-    /** Ã_{b,ℓ}(r_k) — opening of the committed state-slice operand column. */
+    /** Ã_{b,ℓ}(r_i,r_k) — opening of the committed state-slice operand column. */
     Fp2 a_eval{};
     /** B̃_{b,ℓ}(r_k, r_j) — opening of the committed bank-page column. */
     Fp2 b_eval{};
     /** Sumcheck chain end; MUST equal a_eval·b_eval (Thm 3.1). */
     Fp2 final_eval{};
-    /** ẽ_b(r_j, bits(ℓ)) — the fixed-segment material-exchange opening; MUST
-     *  equal c_claim (checked, then bound by the eval argument). */
+    /** ẽ_b(r_j, r_i, bits(ℓ)) — the fixed-segment material-exchange opening;
+     *  MUST equal c_claim (checked, then bound by the eval argument). */
     Fp2 exchange_eval{};
 };
 
 struct RCGkrCoupledProofV7 {
     uint32_t version{kRCGkrProofVersionV7};
     RCCoupParams params{};
+    /** Digest-affecting coupled execution options (V3 domain/exchange/schedule). */
+    RCCoupOptions options{};
     int32_t height{0};
     uint256 claimed_digest{};
     uint256 pow_bind{};
@@ -140,6 +145,53 @@ struct RCGkrCoupledProveResultV7 {
     RCGkrTiming timing;
 };
 
+/**
+ * Production succinctness/readiness assessment for coupled v7.
+ *
+ * This is deliberately stricter than "VerifyWinnerCoupledV7 accepts". The
+ * current coupled verifier is sound by native grounding, but it is not a
+ * block-sized production verifier until every O(work) native re-derivation is
+ * replaced by proof-bound commitments/openings and in-circuit relations.
+ */
+struct RCGkrCoupledV7SuccinctnessStatus {
+    bool params_valid{false};
+    bool production_v3_shape{false};
+    bool genuinely_succinct{false};
+    bool verifier_reruns_reference_digest{true};
+    bool verifier_rebuilds_native_wires{true};
+    bool verifier_rebuilds_column_roots{true};
+    bool bank_pages_proof_bound{false};
+    bool permutation_proof_bound{false};
+    bool mix_proof_bound{false};
+    bool extract_all_tiles_proof_bound{false};
+    bool barrier_roots_proof_bound{false};
+    bool digest_target_proof_bound{false};
+    bool under_stage_i_budget{false};
+    uint64_t state_bytes{0};
+    uint64_t packed_bank_bytes{0};
+    uint64_t expanded_bank_bytes{0};
+    uint64_t macs_per_nonce{0};
+    uint64_t required_extract_tiles{0};
+    uint32_t current_extract_logup_tile_cap{0};
+    std::vector<std::string> blockers;
+    std::string summary;
+};
+
+/**
+ * Return a deterministic status object for the current coupled-v7 construction.
+ * This function is intentionally consensus-pure: no env vars, no hardware
+ * probing, and no native puzzle execution.
+ */
+[[nodiscard]] RCGkrCoupledV7SuccinctnessStatus
+AssessCoupledV7Succinctness(const RCCoupParams& params);
+
+/**
+ * Convenience hard gate for any future proof-only coupled arbiter. Today this
+ * must return false for every shape, including production V3.
+ */
+[[nodiscard]] bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params,
+                                                            std::string* why = nullptr);
+
 /** Λ_coup shape helpers (verifier-computable, layout-definitional). */
 [[nodiscard]] inline size_t RCGkrCoupledExpectedLobeCount(const RCCoupParams& p)
 {
@@ -159,7 +211,8 @@ struct RCGkrCoupledProveResultV7 {
  */
 [[nodiscard]] RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(
     const CBlockHeader& header, int32_t height, const RCCoupParams& params,
-    const arith_uint256& target, const uint256& claimed_digest);
+    const arith_uint256& target, const uint256& claimed_digest,
+    const RCCoupOptions& options = {});
 
 /**
  * Coupled R5 verifier (behind the OFF arbiter). Enumerates Λ_coup natively,

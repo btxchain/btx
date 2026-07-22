@@ -22,6 +22,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <limits>
 #include <string>
 #include <vector>
@@ -107,6 +108,103 @@ BOOST_AUTO_TEST_CASE(coupled_v7_positive_path_byte_parity)
 
     std::string why;
     BOOST_CHECK_MESSAGE(rc::VerifyWinnerCoupledV7(pr.proof, header, 0, target, &why), why);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_medium_v3_rows_per_lobe_byte_parity)
+{
+    auto header = MakeCoupledHeader(84);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    const auto options = rc::MakeMediumV3RCCoupOptions();
+    BOOST_REQUIRE_EQUAL(params.rows_per_lobe, 32u);
+    BOOST_REQUIRE_EQUAL(options.transcript_version, rc::ENC_RC_V3);
+    BOOST_REQUIRE(rc::ValidateRCCoupParams(params));
+
+    const uint256 dig =
+        rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, params, options, {}, nullptr);
+    BOOST_REQUIRE(!dig.IsNull());
+    header.matmul_digest = dig;
+    const arith_uint256 target = MaxTarget();
+
+    {
+        const auto bad = rc::ProveWinnerCoupledV7(header, 0, params, target, dig);
+        BOOST_CHECK(!bad.timing.ok);
+        BOOST_CHECK_EQUAL(bad.timing.note, "coupled_digest_mismatch_refuses_unrelated_work");
+    }
+
+    const auto pr = rc::ProveWinnerCoupledV7(header, 0, params, target, dig, options);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, pr.timing.note);
+    BOOST_CHECK(pr.proof.claimed_digest == dig);
+    BOOST_CHECK_EQUAL(pr.proof.params.rows_per_lobe, 32u);
+    BOOST_CHECK_EQUAL(pr.proof.params.lobe_width, 64u);
+    BOOST_CHECK_EQUAL(pr.proof.options.transcript_version, rc::ENC_RC_V3);
+    BOOST_CHECK_EQUAL(pr.proof.options.exchange_rounds, 0u);
+    BOOST_CHECK_EQUAL(pr.proof.lobes.size(), rc::RCGkrCoupledExpectedLobeCount(params));
+    BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
+                      rc::RCGkrCoupledExpectedColumnCount(params) + 2);
+    BOOST_CHECK(pr.proof.over_budget);
+    BOOST_CHECK(pr.timing.over_budget);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(rc::VerifyWinnerCoupledV7(pr.proof, header, 0, target, &why), why);
+
+    auto wrong_options = pr.proof;
+    wrong_options.options.transcript_version = rc::ENC_RC_V1;
+    BOOST_CHECK(!rc::VerifyWinnerCoupledV7(wrong_options, header, 0, target, &why));
+    BOOST_CHECK_EQUAL(why, "coupled:digest_mismatch_reference");
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_succinctness_gate_stays_no_go_until_native_grounding_removed)
+{
+    const auto toy = rc::MakeToyRCCoupParams();
+    const auto st = rc::AssessCoupledV7Succinctness(toy);
+    BOOST_CHECK(st.params_valid);
+    BOOST_CHECK(!st.production_v3_shape);
+    BOOST_CHECK(!st.genuinely_succinct);
+    BOOST_CHECK(st.verifier_reruns_reference_digest);
+    BOOST_CHECK(st.verifier_rebuilds_native_wires);
+    BOOST_CHECK(st.verifier_rebuilds_column_roots);
+    BOOST_CHECK(!st.bank_pages_proof_bound);
+    BOOST_CHECK(!st.permutation_proof_bound);
+    BOOST_CHECK(!st.mix_proof_bound);
+    BOOST_CHECK(!st.extract_all_tiles_proof_bound);
+    BOOST_CHECK(!st.barrier_roots_proof_bound);
+    BOOST_CHECK(!st.digest_target_proof_bound);
+    BOOST_CHECK(!st.under_stage_i_budget);
+    BOOST_CHECK_EQUAL(st.required_extract_tiles, toy.StateBytes() / rc::kRCMxBlockLen);
+    BOOST_CHECK_EQUAL(st.current_extract_logup_tile_cap, 16u);
+
+    auto has = [&](const char* blocker) {
+        return std::find(st.blockers.begin(), st.blockers.end(), blocker) != st.blockers.end();
+    };
+    BOOST_CHECK(has("native_reference_digest_replay"));
+    BOOST_CHECK(has("native_wire_regeneration"));
+    BOOST_CHECK(has("native_column_root_rebuild"));
+    BOOST_CHECK(has("bank_pages_not_pcs_bound_under_bank_root"));
+    BOOST_CHECK(has("extract_all_tiles_not_proof_bound"));
+
+    std::string why;
+    BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(toy, &why));
+    BOOST_CHECK(why.find("NO-GO") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_v7_production_v3_succinct_gate_counts_real_work)
+{
+    const auto prod = rc::MakeProductionV3RCCoupParams();
+    const auto st = rc::AssessCoupledV7Succinctness(prod);
+    BOOST_CHECK(st.params_valid);
+    BOOST_CHECK(st.production_v3_shape);
+    BOOST_CHECK(!st.genuinely_succinct);
+    BOOST_CHECK_EQUAL(st.state_bytes, uint64_t{8} * 128 * 8192);
+    BOOST_CHECK_EQUAL(st.expanded_bank_bytes, uint64_t{1536} * 8192 * 8192);
+    BOOST_CHECK_EQUAL(st.packed_bank_bytes, (uint64_t{1536} * 8192 * 8192 * 17) / 32);
+    BOOST_CHECK_EQUAL(st.macs_per_nonce,
+                      uint64_t{128} * 24 * 8 * 8 * 8192 * 8192);
+    BOOST_CHECK_EQUAL(st.required_extract_tiles, st.state_bytes / rc::kRCMxBlockLen);
+    BOOST_CHECK_GT(st.required_extract_tiles, st.current_extract_logup_tile_cap);
+
+    std::string why;
+    BOOST_CHECK(!rc::RCGkrCoupledV7ReadyForProofOnlyConsensus(prod, &why));
+    BOOST_CHECK(why.find("native_reference_digest_replay") != std::string::npos);
 }
 
 // ============================================================================

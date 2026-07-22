@@ -24,12 +24,10 @@
 // Relation (5) implementation — see the construction note in the header.
 //
 // SOLE AUTHORITY: RecomputeCoupledPuzzleReference (immutable int64 reference).
-// This file re-derives the coupled trace with LOCAL mirrors of the reference's
-// private stages (mix / barrier-root / bank-commitment / extract-seed); any
-// divergence between the mirrors and the reference propagates into the barrier
-// roots and therefore the digest, which BOTH prover and verifier check against
-// the exported reference entry point — a mirror bug can only cause a false
-// REJECT, never a false ACCEPT. The int64 reference itself is untouched.
+// This file derives its coupled-v7 wires from the exported reference transcript
+// so rows_per_lobe, V3 transcript tags, full-bank scheduling, uint64-wrap mix,
+// material-exchange rounds, bank_root and barrier_roots all stay byte-identical
+// to the path checked by consensus. The int64 reference itself is untouched.
 //
 // The FS/transcript helpers below intentionally duplicate the (anonymous-
 // namespace) episode helpers of matmul_v4_rc_gkr.cpp byte-for-byte so this
@@ -102,34 +100,6 @@ void AppendFp2(std::vector<unsigned char>& buf, const Fp2& v)
 void AppendBytes(std::vector<unsigned char>& buf, const unsigned char* p, size_t n)
 {
     buf.insert(buf.end(), p, p + n);
-}
-
-uint256 Sha256Tagged(const char* tag, size_t taglen, const unsigned char* data, size_t len)
-{
-    CSHA256 hasher;
-    hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
-    if (len > 0) hasher.Write(data, len);
-    uint8_t out[CSHA256::OUTPUT_SIZE];
-    hasher.Finalize(out);
-    return uint256{Span<const unsigned char>{out, sizeof(out)}};
-}
-
-uint256 Sha256TaggedU32(const char* tag, size_t taglen, const uint256& a, uint32_t le32)
-{
-    unsigned char buf[32 + 4];
-    std::memcpy(buf, a.data(), 32);
-    WriteLE32(buf + 32, le32);
-    return Sha256Tagged(tag, taglen, buf, sizeof(buf));
-}
-
-uint256 Sha256TaggedU32U32(const char* tag, size_t taglen, const uint256& a, uint32_t x,
-                           uint32_t y)
-{
-    unsigned char buf[32 + 8];
-    std::memcpy(buf, a.data(), 32);
-    WriteLE32(buf + 32, x);
-    WriteLE32(buf + 36, y);
-    return Sha256Tagged(tag, taglen, buf, sizeof(buf));
 }
 
 class FsTranscript {
@@ -315,137 +285,6 @@ uint256 EvalArgSeed(const uint256& base, const std::vector<FriLayerCommit>& colu
 // is checked against the exported RecomputeCoupledPuzzleReference.
 // ---------------------------------------------------------------------------
 
-/** XOF words from a seed (SHA256 counter mode) — mirror of the reference. */
-class ShaXof {
-public:
-    explicit ShaXof(const uint256& seed) : m_seed(seed) {}
-    uint32_t NextU32()
-    {
-        if (m_pos + 4 > 32) Refill();
-        const uint32_t v = ReadLE32(m_block + m_pos);
-        m_pos += 4;
-        return v;
-    }
-
-private:
-    void Refill()
-    {
-        unsigned char buf[32 + 4];
-        std::memcpy(buf, m_seed.data(), 32);
-        WriteLE32(buf + 32, m_ctr++);
-        uint8_t out[CSHA256::OUTPUT_SIZE];
-        CSHA256().Write(buf, sizeof(buf)).Finalize(out);
-        std::memcpy(m_block, out, 32);
-        m_pos = 0;
-    }
-    uint256 m_seed;
-    uint32_t m_ctr{0};
-    uint32_t m_pos{32};
-    unsigned char m_block[32]{};
-};
-
-uint256 BarrierRootLocal(uint32_t barrier, const std::vector<int8_t>& state)
-{
-    std::vector<unsigned char> buf;
-    buf.reserve((sizeof(kRCCoupBarrierTag) - 1) + 4 + state.size());
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupBarrierTag),
-               reinterpret_cast<const unsigned char*>(kRCCoupBarrierTag) +
-                   sizeof(kRCCoupBarrierTag) - 1);
-    unsigned char le[4];
-    WriteLE32(le, barrier);
-    buf.insert(buf.end(), le, le + 4);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(state.data()),
-               reinterpret_cast<const unsigned char*>(state.data()) + state.size());
-    return Sha256dBytes(buf.data(), buf.size());
-}
-
-uint256 BankCommitmentLocal(const std::vector<std::vector<int8_t>>& pages, uint32_t bank_pages,
-                            uint32_t lobe_width)
-{
-    CSHA256 outer;
-    outer.Write(reinterpret_cast<const unsigned char*>(kRCCoupBankTag),
-                sizeof(kRCCoupBankTag) - 1);
-    const size_t page_bytes = static_cast<size_t>(lobe_width) * lobe_width;
-    for (uint32_t p = 0; p < bank_pages; ++p) {
-        if (pages[p].size() != page_bytes) return uint256{};
-        outer.Write(reinterpret_cast<const unsigned char*>(pages[p].data()), pages[p].size());
-    }
-    uint8_t d1[CSHA256::OUTPUT_SIZE];
-    outer.Finalize(d1);
-    uint8_t d2[CSHA256::OUTPUT_SIZE];
-    CSHA256().Write(d1, sizeof(d1)).Finalize(d2);
-    return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
-}
-
-void MixButterflyAscendingLocal(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
-{
-    for (uint32_t stage = 0; (uint32_t{1} << stage) < n; ++stage) {
-        const uint32_t stride = uint32_t{1} << stage;
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t j = i ^ stride;
-            if (i >= j) continue;
-            const uint32_t pi = i ^ mask;
-            const uint32_t pj = j ^ mask;
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = a - b;
-        }
-    }
-}
-
-void MixButterflyDescendingLocal(std::vector<int64_t>& s, uint32_t mask, uint32_t n)
-{
-    assert(n >= 2 && (n & (n - 1)) == 0);
-    uint32_t bits = 0;
-    for (uint32_t t = n; t > 1; t >>= 1) ++bits;
-    auto rotl = [bits, n](uint32_t x, uint32_t r) -> uint32_t {
-        r %= bits;
-        return ((x << r) | (x >> (bits - r))) & (n - 1);
-    };
-    for (int stage = static_cast<int>(bits) - 1; stage >= 0; --stage) {
-        const uint32_t stride = uint32_t{1} << static_cast<uint32_t>(stage);
-        for (uint32_t i = 0; i < n; ++i) {
-            const uint32_t j = i ^ stride;
-            if (i >= j) continue;
-            const uint32_t pi = rotl(i ^ mask, 3);
-            const uint32_t pj = rotl(j ^ mask, 3);
-            const int64_t a = s[pi];
-            const int64_t b = s[pj];
-            s[pi] = a + b;
-            s[pj] = b - a;
-        }
-    }
-}
-
-void ApplyAllToAllMixLocal(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
-                           uint32_t n,
-                           bool material_exchange = dc::kRCCoupMaterialExchangeEnabled,
-                           uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault)
-{
-    // Mirror of the reference ApplyAllToAllMix mix-seed selection: when material
-    // exchange is ON the exchange_rows tile is absorbed into the mix domain via
-    // kRCCoupMaterialExchangeTag; otherwise the legacy kRCCoupMixTag seed. Kept
-    // byte-identical to RecomputeCoupledPuzzleReference so the digest matches.
-    uint256 mix_seed;
-    if (material_exchange) {
-        const uint32_t rows = exchange_rows == 0 ? dc::kRCCoupExchangeRowsDefault : exchange_rows;
-        mix_seed = Sha256TaggedU32U32(kRCCoupMaterialExchangeTag,
-                                      sizeof(kRCCoupMaterialExchangeTag) - 1, sigma, barrier,
-                                      rows);
-    } else {
-        mix_seed = Sha256TaggedU32(kRCCoupMixTag, sizeof(kRCCoupMixTag) - 1, sigma, barrier);
-    }
-    ShaXof xof(mix_seed);
-    const uint32_t mask = xof.NextU32() & (n - 1);
-    const uint32_t pattern = barrier % kRCCoupMixPatterns;
-    if (pattern == 0) {
-        MixButterflyAscendingLocal(s, mask, n);
-    } else {
-        MixButterflyDescendingLocal(s, mask, n);
-    }
-}
-
 void ApplyBalancedPermutationLocal(std::vector<int64_t>& s, const std::vector<uint32_t>& pi)
 {
     std::vector<int64_t> tmp(s.size());
@@ -453,32 +292,25 @@ void ApplyBalancedPermutationLocal(std::vector<int64_t>& s, const std::vector<ui
     s = std::move(tmp);
 }
 
-void ExtractActiveStateLocal(const uint256& prf_key, const std::vector<int64_t>& raw,
-                             std::vector<int8_t>& out)
+bool SameCoupledParams(const RCCoupParams& a, const RCCoupParams& b)
 {
-    assert(raw.size() == out.size());
-    assert(raw.size() % kRCMxBlockLen == 0);
-    const uint32_t n_tiles = static_cast<uint32_t>(raw.size() / kRCMxBlockLen);
-    for (uint32_t t = 0; t < n_tiles; ++t) {
-        ExtractMXTileInt64(prf_key, /*i=*/0, /*bj=*/t, raw.data() + t * kRCMxBlockLen,
-                           out.data() + t * kRCMxBlockLen);
-    }
+    return a.barriers == b.barriers && a.lobes == b.lobes && a.lobe_width == b.lobe_width &&
+           a.bank_pages == b.bank_pages && a.rows_per_lobe == b.rows_per_lobe &&
+           a.pages_per_barrier_lobe == b.pages_per_barrier_lobe;
 }
 
-uint256 CoupledDigestFromRoots(const uint256& bank_root, const std::vector<uint256>& roots)
+/** Proof-only option resolver. Consensus uses ResolveRCCoupOptions(params);
+ *  this helper gives standalone proof tests the same V3 domains for the two
+ *  canonical V3 shapes without requiring Consensus::Params at this API boundary. */
+RCCoupOptions CoupledProofOptionsForParams(const RCCoupParams& p)
 {
-    std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCCoupEpisodeTag) - 1 + 32 + roots.size() * 32);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag),
-               reinterpret_cast<const unsigned char*>(kRCCoupEpisodeTag) +
-                   sizeof(kRCCoupEpisodeTag) - 1);
-    buf.insert(buf.end(), bank_root.begin(), bank_root.end());
-    for (const uint256& root : roots) buf.insert(buf.end(), root.begin(), root.end());
-    return Sha256dBytes(buf.data(), buf.size());
+    if (SameCoupledParams(p, MakeProductionV3RCCoupParams())) return MakeV3RCCoupOptions();
+    if (SameCoupledParams(p, MakeMediumV3RCCoupParams())) return MakeMediumV3RCCoupOptions();
+    return RCCoupOptions{};
 }
 
 // ---------------------------------------------------------------------------
-// Coupled trace wires (native re-derivation; the grounding oracle).
+// Coupled trace wires (native reference transcript; the grounding oracle).
 // ---------------------------------------------------------------------------
 
 struct CoupledLobeWire {
@@ -486,9 +318,9 @@ struct CoupledLobeWire {
     uint32_t lobe{0};
     /** Λ_coup output — the natively scheduled page (never prover data). */
     uint32_t page_id{0};
-    std::vector<Fp2> A; // 1×W state slice (feed-forward wired)
-    std::vector<Fp2> B; // W×W bank page (page-selection wired)
-    std::vector<Fp2> Y; // 1×W int64 GEMM row
+    std::vector<Fp2> A; // M×W state slice (feed-forward wired)
+    std::vector<Fp2> B; // W×W folded bank page sum (page-selection wired)
+    std::vector<Fp2> Y; // M×W int64 GEMM block
 };
 
 struct CoupledBarrierWire {
@@ -512,86 +344,107 @@ struct CoupledWires {
 };
 
 CoupledWires BuildCoupledWires(const CBlockHeader& header, int32_t height,
-                               const RCCoupParams& p)
+                               const RCCoupParams& p, const RCCoupOptions& options)
 {
     CoupledWires w;
     if (!ValidateRCCoupParams(p)) {
         w.note = "invalid params";
         return w;
     }
+    if (options.skip_barrier || options.skip_bank_page) {
+        w.note = "proof options include test-only skip hook";
+        return w;
+    }
     const uint32_t n = p.StateBytes();
     const uint32_t W = p.lobe_width;
+    const uint32_t M = p.rows_per_lobe == 0 ? 1 : p.rows_per_lobe;
+    const uint32_t lobe_stride = M * W;
+    const uint32_t tv = options.transcript_version;
     w.sigma = matmul::v4::DeriveSigma(header);
 
-    // Bank (template-committed, nonce-independent) + commitment (§7.6).
-    const auto pages = DeriveCoupledBankPages(header, height, p);
-    w.bank_root = BankCommitmentLocal(pages, p.bank_pages, W);
-    if (w.bank_root.IsNull()) {
-        w.note = "bank page shape";
+    RCCoupEpisodeTranscript tx;
+    w.digest = RecomputeCoupledPuzzleReference(header, height, p, options, {}, nullptr, &tx);
+    if (w.digest.IsNull()) {
+        w.note = "reference digest";
+        return w;
+    }
+    w.bank_root = tx.bank_root;
+    w.barrier_roots = tx.barrier_roots;
+    if (w.bank_root.IsNull() || w.barrier_roots.size() != p.barriers) {
+        w.note = "reference transcript roots";
+        return w;
+    }
+    if (AssembleCoupledEpisodeDigest(w.bank_root, w.barrier_roots, tv) != w.digest) {
+        w.note = "reference transcript digest";
+        return w;
+    }
+    if (tx.extracts.size() != p.barriers) {
+        w.note = "reference extract transcript";
         return w;
     }
 
-    // Nonce-fresh lobe activation (C2).
-    const auto lobe_seeds = DeriveCoupledLobeSeeds(w.sigma, p);
-    std::vector<int8_t> state(n);
-    for (uint32_t ell = 0; ell < p.lobes; ++ell) {
-        const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W, W);
-        std::memcpy(state.data() + static_cast<size_t>(ell) * W, tile.data(), W);
-    }
-
     w.barriers.resize(p.barriers);
-    w.barrier_roots.resize(p.barriers);
+    size_t gi = 0;
     for (uint32_t b = 0; b < p.barriers; ++b) {
         CoupledBarrierWire& bw = w.barriers[b];
         bw.exchange.assign(n, 0);
         bw.lobes.resize(p.lobes);
 
-        // C3.a per-lobe GEMM vs the NATIVELY SCHEDULED pages (canonical full-bank
-        // schedule; §7.1 — forged page IDs are unexpressible because the verifier
-        // grounds B against this very schedule). The int64 reference accumulates
-        // Σ_page GEMM(A_ℓ, page); since A_ℓ is fixed for the (b,ℓ) slot this equals
-        // GEMM(A_ℓ, Σ_page page) (GEMM is linear in the page argument). We commit
-        // the folded page-sum as the single B column and Yacc as Y so that
-        // Y = A·B stays one grounded product AND bw.exchange (= acc) reproduces the
-        // full-bank reference digest byte-for-byte. Schedule/mix defaults come from
-        // dc:: — the SAME source RecomputeCoupledPuzzleReference grounds against.
+        // C3.a per-lobe GEMM vs the scheduled page set. The reference transcript
+        // records one M×W · W×W partial per page. Fold the B pages and Y partials:
+        // A·ΣB_page = Σ(A·B_page), preserving the full schedule with one sumcheck.
         for (uint32_t ell = 0; ell < p.lobes; ++ell) {
             CoupledLobeWire& lw = bw.lobes[ell];
             lw.barrier = b;
             lw.lobe = ell;
             const auto page_ids = SelectCoupledBankPageIds(
-                b, ell, p, w.sigma, dc::kRCCoupFullBankScheduleEnabled);
+                b, ell, p, w.sigma, options.full_bank_schedule, tv);
             if (page_ids.empty()) {
                 w.note = "page schedule";
                 return w;
             }
             lw.page_id = page_ids.front(); // representative (schedule head)
-            const std::vector<int8_t> arow(state.begin() + static_cast<size_t>(ell) * W,
-                                           state.begin() + static_cast<size_t>(ell + 1) * W);
             std::vector<int64_t> bsum(static_cast<size_t>(W) * W, 0);
-            std::vector<int64_t> yacc(W, 0);
+            std::vector<int64_t> yacc(static_cast<size_t>(lobe_stride), 0);
+            std::vector<int8_t> a_block;
             for (uint32_t page_id : page_ids) {
-                const std::vector<int8_t>& page = pages[page_id];
-                const auto y32 = lt::ExactGemmS8S8(arow, page, 1, W, W);
-                if (y32.size() != W) {
-                    w.note = "gemm shape";
+                if (gi >= tx.gemms.size()) {
+                    w.note = "gemm transcript truncated";
                     return w;
                 }
-                for (uint32_t c = 0; c < W; ++c) yacc[c] += static_cast<int64_t>(y32[c]);
+                const RCCoupGemmTranscript& gt = tx.gemms[gi++];
+                if (gt.barrier != b || gt.lobe != ell || gt.page_id != page_id ||
+                    gt.A.size() != static_cast<size_t>(lobe_stride) ||
+                    gt.B.size() != static_cast<size_t>(W) * W ||
+                    gt.Y.size() != static_cast<size_t>(lobe_stride)) {
+                    w.note = "gemm transcript shape/order";
+                    return w;
+                }
+                if (a_block.empty()) {
+                    a_block = gt.A;
+                } else if (a_block != gt.A) {
+                    w.note = "gemm transcript A mismatch";
+                    return w;
+                }
                 for (size_t idx = 0; idx < bsum.size(); ++idx)
-                    bsum[idx] += static_cast<int64_t>(page[idx]);
+                    bsum[idx] += static_cast<int64_t>(gt.B[idx]);
+                for (size_t idx = 0; idx < yacc.size(); ++idx) yacc[idx] += gt.Y[idx];
             }
             // C3.a' material exchange: consensus segment_id = lobe index →
-            // FIXED offset ℓ·W in the exchange column.
-            for (uint32_t c = 0; c < W; ++c)
-                bw.exchange[static_cast<size_t>(ell) * W + c] = yacc[c];
-            lw.A = ToFp2I8(arow);
+            // FIXED offset ℓ·M·W in the exchange column.
+            for (uint32_t i = 0; i < lobe_stride; ++i)
+                bw.exchange[static_cast<size_t>(ell) * lobe_stride + i] = yacc[i];
+            lw.A = ToFp2I8(a_block);
             lw.B = ToFp2I64(bsum);
             lw.Y = ToFp2I64(yacc);
         }
+        if (gi > tx.gemms.size()) {
+            w.note = "gemm transcript overflow";
+            return w;
+        }
 
         // C3.b public balanced permutation.
-        const auto pi = DeriveCoupledBalancedPermutation(w.sigma, b, p);
+        const auto pi = DeriveCoupledBalancedPermutation(w.sigma, b, p, tv);
         if (!IsBalancedPermutation(pi, n)) {
             w.note = "perm not balanced";
             return w;
@@ -599,27 +452,25 @@ CoupledWires BuildCoupledWires(const CBlockHeader& header, int32_t height,
         bw.post_perm = bw.exchange;
         ApplyBalancedPermutationLocal(bw.post_perm, pi);
 
-        // C3.c butterfly mix (mirror; digest-checked against the reference).
-        // Canonical material-exchange domain (dc::) — same config the reference
-        // grounds with under RCCoupOptions{} defaults.
-        bw.post_mix = bw.post_perm;
-        ApplyAllToAllMixLocal(bw.post_mix, w.sigma, b, n, dc::kRCCoupMaterialExchangeEnabled,
-                              dc::kRCCoupExchangeRowsDefault);
-
-        // C3.d Extract.
-        const uint256 extract_seed = Sha256TaggedU32U32(
-            kRCCoupExtractTag, sizeof(kRCCoupExtractTag) - 1, w.sigma, b, /*unused=*/0);
-        bw.extract_prf = lt::DeriveMatExpandPrfKey(extract_seed);
-        bw.state_out.assign(n, 0);
-        ExtractActiveStateLocal(bw.extract_prf, bw.post_mix, bw.state_out);
-
-        // C3.e barrier root + feed-forward.
-        bw.barrier_root = BarrierRootLocal(b, bw.state_out);
-        w.barrier_roots[b] = bw.barrier_root;
-        state = bw.state_out;
+        // C3.c/C3.d/C3.e: take post-mix/material-exchange, Extract output and
+        // barrier root from the exported reference transcript. This keeps V3
+        // uint64-wrap + material-exchange rounds byte-identical without a local
+        // shadow implementation.
+        const RCCoupExtractTranscript& et = tx.extracts[b];
+        if (et.barrier != b || et.extract_in.size() != n || et.extract_out.size() != n ||
+            et.barrier_root != w.barrier_roots[b]) {
+            w.note = "extract transcript shape/order";
+            return w;
+        }
+        bw.post_mix = et.extract_in;
+        bw.extract_prf = et.extract_prf;
+        bw.state_out = et.extract_out;
+        bw.barrier_root = et.barrier_root;
     }
-
-    w.digest = CoupledDigestFromRoots(w.bank_root, w.barrier_roots);
+    if (gi != tx.gemms.size()) {
+        w.note = "gemm transcript trailing";
+        return w;
+    }
     w.ok = true;
     return w;
 }
@@ -725,6 +576,84 @@ size_t EstimateCoupledProofBytes(const RCGkrCoupledProofV7& proof)
 
 } // namespace
 
+RCGkrCoupledV7SuccinctnessStatus
+AssessCoupledV7Succinctness(const RCCoupParams& params)
+{
+    RCGkrCoupledV7SuccinctnessStatus st;
+    st.params_valid = ValidateRCCoupParams(params);
+    if (!st.params_valid) {
+        st.blockers.push_back("params_invalid");
+        st.summary = "coupled v7 NO-GO: invalid coupled params";
+        return st;
+    }
+
+    const RCCoupParams prod = MakeProductionV3RCCoupParams();
+    st.production_v3_shape =
+        params.barriers == prod.barriers && params.lobes == prod.lobes &&
+        params.lobe_width == prod.lobe_width && params.bank_pages == prod.bank_pages &&
+        params.rows_per_lobe == prod.rows_per_lobe &&
+        params.pages_per_barrier_lobe == prod.pages_per_barrier_lobe;
+
+    st.state_bytes = params.StateBytes();
+    st.packed_bank_bytes = TotalRCCoupPackedBytes(params);
+    st.expanded_bank_bytes = TotalRCCoupExpandedBytes(params);
+    st.macs_per_nonce = TotalRCCoupMacs(params);
+    st.required_extract_tiles = st.state_bytes / kRCMxBlockLen;
+    st.current_extract_logup_tile_cap = 16;
+
+    // These are facts about the construction below, not runtime measurements:
+    // VerifyWinnerCoupledV7 still calls RecomputeCoupledPuzzleReference() and
+    // BuildCoupledWires(), then rebuilds every committed column root from the
+    // native wire image. That is sound by grounding, but non-succinct.
+    st.verifier_reruns_reference_digest = true;
+    st.verifier_rebuilds_native_wires = true;
+    st.verifier_rebuilds_column_roots = true;
+
+    // The remaining relations are not yet proved by a block-sized proof object.
+    st.bank_pages_proof_bound = false;
+    st.permutation_proof_bound = false;
+    st.mix_proof_bound = false;
+    st.extract_all_tiles_proof_bound = false;
+    st.barrier_roots_proof_bound = false;
+    st.digest_target_proof_bound = false;
+    st.under_stage_i_budget = false;
+
+    if (st.verifier_reruns_reference_digest)
+        st.blockers.push_back("native_reference_digest_replay");
+    if (st.verifier_rebuilds_native_wires)
+        st.blockers.push_back("native_wire_regeneration");
+    if (st.verifier_rebuilds_column_roots)
+        st.blockers.push_back("native_column_root_rebuild");
+    if (!st.bank_pages_proof_bound)
+        st.blockers.push_back("bank_pages_not_pcs_bound_under_bank_root");
+    if (!st.permutation_proof_bound)
+        st.blockers.push_back("permutation_not_succinctly_proven");
+    if (!st.mix_proof_bound)
+        st.blockers.push_back("mix_not_succinctly_proven");
+    if (!st.extract_all_tiles_proof_bound)
+        st.blockers.push_back("extract_all_tiles_not_proof_bound");
+    if (!st.barrier_roots_proof_bound)
+        st.blockers.push_back("barrier_roots_sha_not_in_circuit");
+    if (!st.digest_target_proof_bound)
+        st.blockers.push_back("digest_target_not_proof_only_bound");
+    if (!st.under_stage_i_budget)
+        st.blockers.push_back("production_stage_i_budget_unproven");
+
+    st.genuinely_succinct = st.blockers.empty();
+    st.summary = st.genuinely_succinct
+                     ? "coupled v7 GO: block-sized proof-only verifier"
+                     : ("coupled v7 NO-GO: " + std::to_string(st.blockers.size()) +
+                        " succinctness blockers; first=" + st.blockers.front());
+    return st;
+}
+
+bool RCGkrCoupledV7ReadyForProofOnlyConsensus(const RCCoupParams& params, std::string* why)
+{
+    const RCGkrCoupledV7SuccinctnessStatus st = AssessCoupledV7Succinctness(params);
+    if (why) *why = st.summary;
+    return st.genuinely_succinct;
+}
+
 // ============================================================================
 // Prover.
 // ============================================================================
@@ -732,7 +661,8 @@ size_t EstimateCoupledProofBytes(const RCGkrCoupledProofV7& proof)
 RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32_t height,
                                                const RCCoupParams& params,
                                                const arith_uint256& target,
-                                               const uint256& claimed_digest)
+                                               const uint256& claimed_digest,
+                                               const RCCoupOptions& options)
 {
     RCGkrCoupledProveResultV7 res;
     RCGkrCoupledProofV7& proof = res.proof;
@@ -746,7 +676,7 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
     // SOLE AUTHORITY: the immutable int64 coupled reference. Refuse to prove
     // anything else — this is what makes toy/unrelated-work proofs impossible.
     const uint256 ref_digest =
-        RecomputeCoupledPuzzleReference(header, height, params, {}, {}, nullptr);
+        RecomputeCoupledPuzzleReference(header, height, params, options, {}, nullptr);
     if (claimed_digest.IsNull() || claimed_digest != ref_digest) {
         res.timing.note = "coupled_digest_mismatch_refuses_unrelated_work";
         return res;
@@ -756,7 +686,7 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
         return res;
     }
 
-    CoupledWires wires = BuildCoupledWires(header, height, params);
+    CoupledWires wires = BuildCoupledWires(header, height, params, options);
     if (!wires.ok) {
         res.timing.note = "wires: " + wires.note;
         return res;
@@ -770,6 +700,7 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
 
     proof.version = kRCGkrProofVersionV7;
     proof.params = params;
+    proof.options = options;
     proof.height = height;
     proof.claimed_digest = claimed_digest;
     proof.pow_bind = DerivePowBind(claimed_digest);
@@ -778,7 +709,7 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
     proof.barrier_roots = wires.barrier_roots;
 
     const uint256 base_seed =
-        RCGkrFsSeedV7Coupled(header, height, params, target, claimed_digest, wires.sigma,
+        RCGkrFsSeedV7Coupled(header, height, params, options, target, claimed_digest, wires.sigma,
                              SeedRoots(wires.bank_root, wires.barrier_roots));
 
     // Λ_coup columns + batch dimensioning.
@@ -788,7 +719,9 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
     const uint32_t batch_n = FriNextPow2(static_cast<uint32_t>(max_len));
     const uint32_t nu = Log2Exact(batch_n);
     const uint32_t W = params.lobe_width;
+    const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
     const uint32_t n_state = params.StateBytes();
+    const uint32_t nu_m = Log2Exact(RCGkrNextPow2(M));
     const uint32_t nu_w = Log2Exact(RCGkrNextPow2(W));
     const uint32_t nu_l = Log2Exact(RCGkrNextPow2(params.lobes));
     const uint32_t nu_n = Log2Exact(RCGkrNextPow2(n_state));
@@ -805,30 +738,34 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
             const size_t li = static_cast<size_t>(b) * params.lobes + ell;
             const CoupledLobeWire& lw = wires.barriers[b].lobes[ell];
             fs.AbsorbU32(static_cast<uint32_t>(li));
+            std::vector<Fp2> ri(nu_m);
             std::vector<Fp2> rj(nu_w);
+            for (uint32_t t = 0; t < nu_m; ++t) ri[t] = fs.ChallengeFp2("v7c_ri");
             for (uint32_t t = 0; t < nu_w; ++t) rj[t] = fs.ChallengeFp2("v7c_rj");
 
-            // R5.gemm: m = 1 (§7.2) — claim c = Ỹ(rj).
-            const Fp2 c_claim = MleEvalMatrix(lw.Y, 1, W, {}, rj);
+            // R5.gemm: m = rows_per_lobe (§7.2) — claim c = Ỹ(ri,rj).
+            const Fp2 c_claim = MleEvalMatrix(lw.Y, M, W, ri, rj);
             std::vector<Fp2> rk;
             Fp2 gf;
             RCGkrCoupledLobeClaimV7& lc = proof.lobes[li];
-            lc.sumcheck = ProveProductK(lw.A, 1, W, lw.B, W, {}, rj, c_claim, fs, rk, gf);
+            lc.sumcheck = ProveProductK(lw.A, M, W, lw.B, W, ri, rj, c_claim, fs, rk, gf);
             lc.c_claim = c_claim;
-            lc.a_eval = MleEvalMatrix(lw.A, 1, W, {}, rk);
+            lc.a_eval = MleEvalMatrix(lw.A, M, W, ri, rk);
             lc.b_eval = MleEvalMatrix(lw.B, W, W, rk, rj);
             lc.final_eval = gf; // == a_eval·b_eval for honest wires
-            // R5.exchange: fixed segment ℓ ⇒ ẽ_b(rj, bits(ℓ)) = Ỹ(rj).
+            // R5.exchange: fixed segment ℓ ⇒ ẽ_b(rj, ri, bits(ℓ)) = Ỹ(ri,rj).
             lc.exchange_eval = c_claim;
 
-            claims.push_back({ids.y(b, ell), PointConcatExtend(rj, {}, nu), lc.c_claim});
-            claims.push_back({ids.a(b, ell), PointConcatExtend(rk, {}, nu), lc.a_eval});
+            claims.push_back({ids.y(b, ell), PointConcatExtend(rj, ri, nu), lc.c_claim});
+            claims.push_back({ids.a(b, ell), PointConcatExtend(rk, ri, nu), lc.a_eval});
             claims.push_back({ids.bcol(b, ell), PointConcatExtend(rj, rk, nu), lc.b_eval});
             std::vector<Fp2> seg_bits(nu_l);
             for (uint32_t t = 0; t < nu_l; ++t)
                 seg_bits[t] = ((ell >> t) & 1u) ? Fp2::One() : Fp2::Zero();
-            claims.push_back(
-                {ids.e(b), PointConcatExtend(rj, seg_bits, nu), lc.exchange_eval});
+            std::vector<Fp2> exchange_high = ri;
+            exchange_high.insert(exchange_high.end(), seg_bits.begin(), seg_bits.end());
+            claims.push_back({ids.e(b), PointConcatExtend(rj, exchange_high, nu),
+                              lc.exchange_eval});
         }
     }
 
@@ -842,7 +779,8 @@ RCGkrCoupledProveResultV7 ProveWinnerCoupledV7(const CBlockHeader& header, int32
         std::vector<Fp2> rp(nu_n), rm(nu_n);
         for (uint32_t t = 0; t < nu_n; ++t) rp[t] = fs.ChallengeFp2("v7c_rp");
         for (uint32_t t = 0; t < nu_n; ++t) rm[t] = fs.ChallengeFp2("v7c_rm");
-        const auto pi = DeriveCoupledBalancedPermutation(wires.sigma, b, params);
+        const auto pi =
+            DeriveCoupledBalancedPermutation(wires.sigma, b, params, options.transcript_version);
         Fp2 vp = Fp2::Zero();
         for (uint32_t x = 0; x < n_state; ++x)
             vp = Add(vp, Mul(EqFactor(rp, pi[x]), FromSigned2(bw.exchange[x])));
@@ -911,7 +849,9 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
     };
     if (proof.version != kRCGkrProofVersionV7) return fail("coupled:version");
     const RCCoupParams& params = proof.params;
+    const RCCoupOptions& options = proof.options;
     if (!ValidateRCCoupParams(params)) return fail("coupled:params_invalid");
+    if (options.skip_barrier || options.skip_bank_page) return fail("coupled:options_test_hook");
     if (proof.height != height) return fail("coupled:height");
 
     // §6.1 native: pow_bind, header-bound digest, sigma.
@@ -923,7 +863,7 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
     // SOLE AUTHORITY: the immutable int64 coupled reference (F13 dims ride on
     // this too — forged params change the reference digest).
     const uint256 ref_digest =
-        RecomputeCoupledPuzzleReference(header, height, params, {}, {}, nullptr);
+        RecomputeCoupledPuzzleReference(header, height, params, options, {}, nullptr);
     if (proof.claimed_digest != ref_digest) return fail("coupled:digest_mismatch_reference");
     if (UintToArith256(ref_digest) > target) return fail("coupled:target");
 
@@ -932,14 +872,15 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         return fail("coupled:barrier_roots_count");
 
     // Native grounding trace (page schedule, π, mix, Extract, roots, bank).
-    CoupledWires wires = BuildCoupledWires(header, height, params);
+    CoupledWires wires = BuildCoupledWires(header, height, params, options);
     if (!wires.ok) return fail("coupled:wires:" + wires.note);
     if (wires.digest != ref_digest) return fail("coupled:mirror_digest");
     if (proof.bank_root != wires.bank_root) return fail("coupled:bank_root_forged");
     if (proof.barrier_roots != wires.barrier_roots)
         return fail("coupled:barrier_root_forged"); // F10 forged barrier root
     // Native SHA closure: digest = SHA256d(EPISODE ‖ bank_root ‖ roots…).
-    if (CoupledDigestFromRoots(proof.bank_root, proof.barrier_roots) != proof.claimed_digest)
+    if (AssembleCoupledEpisodeDigest(proof.bank_root, proof.barrier_roots,
+                                     options.transcript_version) != proof.claimed_digest)
         return fail("coupled:digest_from_roots");
 
     // Λ_coup shape (verifier-driven; the proof carries no layout data).
@@ -972,14 +913,16 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
 
     // Thm 2.1: the single batched FRI binds every committed column.
     const uint256 base_seed =
-        RCGkrFsSeedV7Coupled(header, height, params, target, proof.claimed_digest,
+        RCGkrFsSeedV7Coupled(header, height, params, options, target, proof.claimed_digest,
                              proof.sigma, SeedRoots(proof.bank_root, proof.barrier_roots));
     std::string fri_why;
     if (!FriBatchVerify(proof.batch, base_seed, &fri_why))
         return fail("coupled:fri:" + fri_why);
 
     const uint32_t W = params.lobe_width;
+    const uint32_t M = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
     const uint32_t n_state = params.StateBytes();
+    const uint32_t nu_m = Log2Exact(RCGkrNextPow2(M));
     const uint32_t nu_w = Log2Exact(RCGkrNextPow2(W));
     const uint32_t nu_l = Log2Exact(RCGkrNextPow2(params.lobes));
     const uint32_t nu_n = Log2Exact(RCGkrNextPow2(n_state));
@@ -996,7 +939,9 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
             const size_t li = static_cast<size_t>(b) * params.lobes + ell;
             const RCGkrCoupledLobeClaimV7& lc = proof.lobes[li];
             fs.AbsorbU32(static_cast<uint32_t>(li));
+            std::vector<Fp2> ri(nu_m);
             std::vector<Fp2> rj(nu_w);
+            for (uint32_t t = 0; t < nu_m; ++t) ri[t] = fs.ChallengeFp2("v7c_ri");
             for (uint32_t t = 0; t < nu_w; ++t) rj[t] = fs.ChallengeFp2("v7c_rj");
 
             if (lc.sumcheck.size() != nu_w) return fail("coupled:sumcheck_rounds");
@@ -1011,14 +956,16 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
             // GEMM output claim at the FIXED segment (segment_id = ℓ).
             if (!Eq(lc.exchange_eval, lc.c_claim)) return fail("coupled:exchange_segment");
 
-            claims.push_back({ids.y(b, ell), PointConcatExtend(rj, {}, nu), lc.c_claim});
-            claims.push_back({ids.a(b, ell), PointConcatExtend(rk, {}, nu), lc.a_eval});
+            claims.push_back({ids.y(b, ell), PointConcatExtend(rj, ri, nu), lc.c_claim});
+            claims.push_back({ids.a(b, ell), PointConcatExtend(rk, ri, nu), lc.a_eval});
             claims.push_back({ids.bcol(b, ell), PointConcatExtend(rj, rk, nu), lc.b_eval});
             std::vector<Fp2> seg_bits(nu_l);
             for (uint32_t t = 0; t < nu_l; ++t)
                 seg_bits[t] = ((ell >> t) & 1u) ? Fp2::One() : Fp2::Zero();
-            claims.push_back(
-                {ids.e(b), PointConcatExtend(rj, seg_bits, nu), lc.exchange_eval});
+            std::vector<Fp2> exchange_high = ri;
+            exchange_high.insert(exchange_high.end(), seg_bits.begin(), seg_bits.end());
+            claims.push_back({ids.e(b), PointConcatExtend(rj, exchange_high, nu),
+                              lc.exchange_eval});
         }
     }
 
@@ -1031,7 +978,8 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
         std::vector<Fp2> rp(nu_n), rm(nu_n);
         for (uint32_t t = 0; t < nu_n; ++t) rp[t] = fs.ChallengeFp2("v7c_rp");
         for (uint32_t t = 0; t < nu_n; ++t) rm[t] = fs.ChallengeFp2("v7c_rm");
-        const auto pi = DeriveCoupledBalancedPermutation(wires.sigma, b, params);
+        const auto pi =
+            DeriveCoupledBalancedPermutation(wires.sigma, b, params, options.transcript_version);
         Fp2 vp = Fp2::Zero();
         for (uint32_t x = 0; x < n_state; ++x)
             vp = Add(vp, Mul(EqFactor(rp, pi[x]), FromSigned2(bw.exchange[x])));
@@ -1084,10 +1032,11 @@ RCGkrProveResult ProveWinnerCoupledLegacyBridge(const CBlockHeader& header, int3
         out.proof.shrink_note = out.timing.note;
         return out;
     }
+    const RCCoupOptions options = CoupledProofOptionsForParams(params);
     // NEVER prove toy/unrelated work: the claimed digest must be the immutable
     // int64 coupled reference digest for exactly this (header, height, params).
     const uint256 ref_digest =
-        RecomputeCoupledPuzzleReference(header, height, params, {}, {}, nullptr);
+        RecomputeCoupledPuzzleReference(header, height, params, options, {}, nullptr);
     if (resealed_digest.IsNull() || resealed_digest != ref_digest) {
         out.timing.note = "coupled_digest_mismatch_refuses_unrelated_work";
         out.proof.shrink_note = out.timing.note;
@@ -1104,7 +1053,7 @@ RCGkrProveResult ProveWinnerCoupledLegacyBridge(const CBlockHeader& header, int3
     max_target = ~max_target;
     CBlockHeader bound = header;
     bound.matmul_digest = resealed_digest;
-    auto v7 = ProveWinnerCoupledV7(bound, height, params, max_target, resealed_digest);
+    auto v7 = ProveWinnerCoupledV7(bound, height, params, max_target, resealed_digest, options);
     if (!v7.timing.ok) {
         out.timing.note = "coupled v7 prove failed: " + v7.timing.note;
         out.proof.shrink_note = out.timing.note;
