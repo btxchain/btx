@@ -108,7 +108,10 @@ void FillPseudoPanel(std::vector<int8_t>& L, std::vector<int8_t>& R, uint32_t ro
         FillPseudoPanel(L, R, rows, inner, cols, seed);
     }
     std::vector<int64_t> oracle;
-    DenseInt64GemmLocal(L, R, rows, inner, cols, oracle);
+    if (!DenseInt64GemmLocal(L, R, rows, inner, cols, oracle)) {
+        reason = "oracle DenseInt64GemmLocal failed";
+        return false;
+    }
 
     if (matmul_v4::cuda::IsRcOzakiCudaCompiled()) {
         std::vector<int64_t> device;

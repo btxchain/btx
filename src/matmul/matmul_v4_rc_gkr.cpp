@@ -1935,8 +1935,16 @@ RCGkrProveResultV7 ProveMaliciousEpisodeV7ForTest(const CBlockHeader& header,
         break;
     }
     case RCGkrIndepMaliciousKind::UnrelatedBankPages:
-        // Coupled-only; the episode API has no bank pages. Fall through to the
-        // fabricated-trace behaviour so the helper is total.
+    case RCGkrIndepMaliciousKind::OmittedPages:
+    case RCGkrIndepMaliciousKind::DuplicatedPages:
+    case RCGkrIndepMaliciousKind::WrongM:
+    case RCGkrIndepMaliciousKind::WrongExchangeTranscript:
+    case RCGkrIndepMaliciousKind::CrossVersionReplay:
+        // Coupled-only kinds: the episode API has no bank pages / page schedule /
+        // rows_per_lobe / exchange transcript / coupled version, so they are not
+        // constructible here. Fall through to the fabricated-trace behaviour so the
+        // helper is total (any coupled kind mis-routed to the episode constructor
+        // still yields a rejected proof, exercised via the coupled constructor).
         for (auto& w : wires) {
             if (!IsForgeableGemm(w)) continue;
             w.A_i8.assign(static_cast<size_t>(w.m) * w.k, 1);
