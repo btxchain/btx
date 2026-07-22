@@ -668,6 +668,8 @@ struct RCGkrEpisodeAirProveResultV7 {
     const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
     const arith_uint256& target, const air_episode::EpisodeAirProveOptions& opt = {});
 
+namespace air_recurse { struct EpisodeAggregateProof; }
+
 /**
  * COMPACT episode verifier: identical trivial/algebraic gates as
  * VerifyWinnerProofV7 (through the eval argument + FS LogUp-α binding), then
@@ -675,13 +677,19 @@ struct RCGkrEpisodeAirProveResultV7 {
  * AIR-quotient verify over `air`, (2) native chained-operand byte-equality,
  * (3) the bounded direct tile-tree SHA closure. Rejection reasons are
  * prefixed "v7c:". Shadow/measurement only — never consensus.
+ *
+ * RECURSION SEAM (Piece 6): when `agg` is non-null, step (1) verifies the
+ * single recursion-root aggregate (O(Q·log N), FS-bound to the episode seed)
+ * INSTEAD of looping `air`'s O(n_shards) shards — `air` is then ignored for
+ * grounding. When `agg` is null (the default) the behavior is byte-identical
+ * to before: the shard loop over `air`. Additive; the aggregate path is
+ * shadow/measurement only, never consensus.
  */
-[[nodiscard]] bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
-                                              const air_episode::EpisodeAirProof& air,
-                                              const CBlockHeader& header, int32_t height,
-                                              const arith_uint256& target,
-                                              std::string* why = nullptr,
-                                              RCGkrCompactTimingV7* out_timing = nullptr);
+[[nodiscard]] bool VerifyWinnerProofV7Compact(
+    const RCGkrProofV7& proof, const air_episode::EpisodeAirProof& air,
+    const CBlockHeader& header, int32_t height, const arith_uint256& target,
+    std::string* why = nullptr, RCGkrCompactTimingV7* out_timing = nullptr,
+    const air_recurse::EpisodeAggregateProof* agg = nullptr);
 
 /** Isolated wall-clock of the O(N) GroundEpisodeInCircuit row scan (plus the
  *  dual-α LogUp aggregate it feeds) over a v7 proof — the baseline the compact

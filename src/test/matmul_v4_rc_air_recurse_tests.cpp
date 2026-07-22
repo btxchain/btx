@@ -352,4 +352,45 @@ BOOST_AUTO_TEST_CASE(piece4_vcs_cell_budget_and_k2)
     BOOST_CHECK_GT(ar::CountWitnessViolationsOnH(w2.cs, w2.columns), 0U);
 }
 
+// Piece 6: the episode-integration seam (EpisodeAggregateProof +
+// VerifyEpisodeAggregate). The FRI-backed honest-accept round-trip needs a
+// real aggregate root (prohibitively slow with reference Poseidon2 — the Mac
+// Studio joint test). Here we pin the SEAM CONTRACT: structural gates fail
+// closed, and a supplied aggregate dispatches into the Piece-4b-proven
+// VerifyAggregate under the caller's episode seed with a "v7c:agg:" prefix.
+BOOST_AUTO_TEST_CASE(piece6_episode_aggregate_seam_gates)
+{
+    std::string why;
+    ar::EpisodeAggregateProof agg;  // default k=0
+    BOOST_CHECK(!ar::VerifyEpisodeAggregate(agg, SeedByte(1), &why));
+    BOOST_CHECK_EQUAL(why, "v7c:agg:k_zero");
+
+    agg.k = 1;  // arity 1 but no pins
+    why.clear();
+    BOOST_CHECK(!ar::VerifyEpisodeAggregate(agg, SeedByte(1), &why));
+    BOOST_CHECK_EQUAL(why, "v7c:agg:pins_arity_mismatch");
+}
+
+BOOST_AUTO_TEST_CASE(piece6_episode_aggregate_dispatches_to_verify)
+{
+    const uint256 child_seed = SeedByte(11);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {{Fp3::FromFp(0), Fp3::FromFp(1)}};
+    auto pr = aq::AirQuotientProve<Fp3, AlgB3>(child_cs, cols, child_seed, {});
+    BOOST_REQUIRE(pr.ok);
+    const ar::ChildPublicInputs sh =
+        ar::ExtractChildPublicInputs(child_cs, pr.proof, child_seed);
+
+    // Well-formed pins (k=1) but a default-constructed root: the seam must
+    // reach VerifyAggregate and reject there (structural), proving dispatch +
+    // the v7c:agg prefix. An honest accept requires a real FRI-backed root.
+    ar::EpisodeAggregateProof agg;
+    agg.k = 1;
+    agg.pis = {sh};
+    std::string why;
+    BOOST_CHECK(!ar::VerifyEpisodeAggregate(agg, child_seed, &why));
+    BOOST_CHECK(why.rfind("v7c:agg:", 0) == 0);
+    BOOST_CHECK(why != "v7c:agg:k_zero" && why != "v7c:agg:pins_arity_mismatch");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

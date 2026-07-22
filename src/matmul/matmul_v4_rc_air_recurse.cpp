@@ -1309,4 +1309,23 @@ bool VerifyAggregate(const aq::AirQuotientProof<Fp3, AlgB3>& root,
     return aq::AirQuotientVerify<Fp3, AlgB3>(cs, root, fs_seed, why);
 }
 
+bool VerifyEpisodeAggregate(const EpisodeAggregateProof& agg, const uint256& episode_seed,
+                            std::string* why)
+{
+    auto fail = [&](const std::string& m) {
+        if (why) *why = "v7c:agg:" + m;
+        return false;
+    };
+    if (agg.k == 0) return fail("k_zero");
+    if (agg.pis.size() != agg.k) return fail("pins_arity_mismatch");
+    // FS-bind the aggregate to THIS episode: verify under the episode seed, not
+    // a seed carried in the proof — a root built for another episode fails the
+    // λ / challenge re-derivation inside VerifyAggregate.
+    std::string w;
+    if (!VerifyAggregate(agg.root, agg.pis, episode_seed, agg.k, agg.families, &w)) {
+        return fail(w);
+    }
+    return true;
+}
+
 } // namespace matmul::v4::rc::air_recurse

@@ -9,6 +9,7 @@
 #include <logging.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_air_recurse.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
 #include <matmul/matmul_v4_rc_gkr_coupled.h>
@@ -2889,7 +2890,8 @@ bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
                                 const air_episode::EpisodeAirProof& air,
                                 const CBlockHeader& header, int32_t height,
                                 const arith_uint256& target, std::string* why,
-                                RCGkrCompactTimingV7* out_timing)
+                                RCGkrCompactTimingV7* out_timing,
+                                const air_recurse::EpisodeAggregateProof* agg)
 {
     const auto t0 = std::chrono::steady_clock::now();
     auto secs = [](std::chrono::steady_clock::time_point s) {
@@ -3018,25 +3020,37 @@ bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
     tm.layers_s = secs(t_layers);
 
     // ---- COMPACT grounding (replaces the GroundEpisodeInCircuit row scan). --
-    // (1) Episode AIR quotient — O(shards·Q), no row scan of the per-row rules.
-    air_episode::EpisodeAirLayout air_layout;
-    {
-        std::string bwhy;
-        if (!BuildEpisodeAirInputsV7(proof, header, air_layout, nullptr, bwhy)) {
-            return fail("v7c:air_layout:" + bwhy);
+    // (1) Episode AIR quotient. DEFAULT: the O(n_shards) shard loop over `air`.
+    //     RECURSION SEAM (Piece 6): when `agg` is supplied, verify the single
+    //     recursion-root aggregate in O(Q·log N), FS-bound to the episode seed.
+    const uint256 episode_seed = EpisodeAirSeedV7(proof, header, height, target);
+    const auto t_air = std::chrono::steady_clock::now();
+    if (agg != nullptr) {
+        std::string agg_why;
+        if (!air_recurse::VerifyEpisodeAggregate(*agg, episode_seed, &agg_why)) {
+            return fail(agg_why);
         }
+        tm.air_quotient_s = secs(t_air);
+        tm.air_shards = 1;  // one root aggregate, no per-shard loop
+    } else {
+        air_episode::EpisodeAirLayout air_layout;
+        {
+            std::string bwhy;
+            if (!BuildEpisodeAirInputsV7(proof, header, air_layout, nullptr, bwhy)) {
+                return fail("v7c:air_layout:" + bwhy);
+            }
+        }
+        air_episode::EpisodeAirVerifyStats astats;
+        std::string air_why;
+        const bool air_ok =
+            air_episode::VerifyEpisodeAirQuotient(air_layout, air, episode_seed, &air_why,
+                                                  &astats);
+        tm.air_preprocess_s = astats.preprocess_s;
+        tm.air_quotient_s = astats.quotient_s;
+        tm.air_shards = astats.n_shards;
+        tm.air_rows = astats.n_rows;
+        if (!air_ok) return fail("v7c:air:" + air_why);
     }
-    air_episode::EpisodeAirVerifyStats astats;
-    std::string air_why;
-    const bool air_ok =
-        air_episode::VerifyEpisodeAirQuotient(air_layout, air,
-                                              EpisodeAirSeedV7(proof, header, height, target),
-                                              &air_why, &astats);
-    tm.air_preprocess_s = astats.preprocess_s;
-    tm.air_quotient_s = astats.quotient_s;
-    tm.air_shards = astats.n_shards;
-    tm.air_rows = astats.n_rows;
-    if (!air_ok) return fail("v7c:air:" + air_why);
 
     // (2) Chained-operand Λ wiring (native byte-equality; no SHA).
     const auto t_chain = std::chrono::steady_clock::now();

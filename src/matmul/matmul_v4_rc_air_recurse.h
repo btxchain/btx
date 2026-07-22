@@ -456,6 +456,38 @@ VerifyAggregate(const air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3
                 const std::vector<ChildPublicInputs>& pis, const uint256& fs_seed, uint32_t k,
                 const VerifierAirFamilies& families = {}, std::string* why = nullptr);
 
+// ---------------------------------------------------------------------------
+// Episode integration carrier (Piece 6): the single recursion-root aggregate
+// that REPLACES the O(n_shards) shard loop in the compact episode verifier.
+// The root aggregates the episode shard proofs up the recursion tree; the
+// compact verifier checks it in O(Q·log N) via VerifyAggregate. The aggregate
+// is FS-bound to the episode by verifying it under the episode's own seed
+// (supplied by the compact verifier — NOT stored in the carrier — so a root
+// built for a different episode/header fails the FS re-derivation).
+// ---------------------------------------------------------------------------
+struct EpisodeAggregateProof {
+    using AlgB3 = air_quotient::AirFriBackendAlg<Fp3>;
+    /** Root aggregation proof (self-similar: same type as a tree node/leaf). */
+    air_quotient::AirQuotientProof<Fp3, AlgB3> root;
+    /** Per-child public-input pins the verifier rebuilds the root V_CS from. */
+    std::vector<ChildPublicInputs> pis;
+    /** Arity of the root node (k children). */
+    uint32_t k{0};
+    /** V_CS family selector (must match what the prover aggregated under). */
+    VerifierAirFamilies families{};
+};
+
+/**
+ * Verify an episode aggregate root under a caller-supplied episode FS seed
+ * (the binding to THIS episode/header). Thin wrapper over VerifyAggregate that
+ * pins the aggregate's Fiat–Shamir base to `episode_seed`; returns false with a
+ * "v7c:agg:"-prefixed reason on any mismatch. Structural pre-checks (k>0, pins
+ * present and sized k) are enforced before the O(Q·log N) verify.
+ */
+[[nodiscard]] bool
+VerifyEpisodeAggregate(const EpisodeAggregateProof& agg, const uint256& episode_seed,
+                       std::string* why = nullptr);
+
 } // namespace matmul::v4::rc::air_recurse
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_AIR_RECURSE_H
