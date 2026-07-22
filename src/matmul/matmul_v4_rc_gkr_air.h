@@ -320,6 +320,15 @@ void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& t
                        LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                        LogUpInstance& inst_r16);
 
+/**
+ * Verifier happy-path lookup feed when T_R16 is enforced structurally by the
+ * sampler AIR rather than by the dual-alpha LogUp aggregate. This deliberately
+ * does not populate the 2^16-row T_R16 table or its witnesses.
+ */
+void AppendTileLookupsTmTxOnly(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                               Fp2 gamma,
+                               LogUpInstance& inst_tm, LogUpInstance& inst_tx);
+
 /** Finalize table multiplicities for the three shared instances. */
 void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                                  LogUpInstance& inst_r16);

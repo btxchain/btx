@@ -1298,7 +1298,7 @@ gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wire
 {
     gkr_air::TableTM tm_tab;
     gkr_air::TableTX tx_tab;
-    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    gkr_air::LogUpInstance inst_tm, inst_tx;
     uint32_t used = 0;
     for (const LayerWire& w : wires) {
         if (used >= max_tiles) break;
@@ -1313,7 +1313,7 @@ gkr_air::LogUpVerifyResult ExtractLogUpSample(const std::vector<LayerWire>& wire
                 const size_t off = static_cast<size_t>(i) * w.n + bj * kRCMxBlockLen;
                 for (uint32_t t = 0; t < kRCMxBlockLen; ++t) in[t] = w.extract_in[off + t];
                 const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
-                gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
+                gkr_air::AppendTileLookupsTmTxOnly(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx);
                 ++used;
             }
         }
@@ -1567,8 +1567,7 @@ bool BindOperand(const TensorRef& ref, const std::vector<int8_t>& committed, uin
 GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires,
                                     const std::vector<LayerProv>& prov, const RCEpisodeParams& p,
                                     const std::vector<uint256>& round_roots, Fp2 gamma,
-                                    gkr_air::LogUpInstance& inst_tm, gkr_air::LogUpInstance& inst_tx,
-                                    gkr_air::LogUpInstance& inst_r16)
+                                    gkr_air::LogUpInstance& inst_tm, gkr_air::LogUpInstance& inst_tx)
 {
     GroundResult res;
     gkr_air::TableTM tm;
@@ -1617,7 +1616,7 @@ GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires
                         res.failure = "extract_air:out_binding"; return res;
                     }
                 }
-                gkr_air::AppendTileLookups(tw, tm, tx, gamma, inst_tm, inst_tx, inst_r16);
+                gkr_air::AppendTileLookupsTmTxOnly(tw, tm, tx, gamma, inst_tm, inst_tx);
                 ++res.n_tiles;
             }
         }
@@ -1985,7 +1984,8 @@ inline constexpr char kRCGkrRelDomainTagV7[] = "BTX_RC_GKR_RELV7";
 
 RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
                                                     const CBlockHeader& header, int32_t height,
-                                                    const arith_uint256& target)
+                                                    const arith_uint256& target,
+                                                    bool assume_grounded)
 {
     RCGkrRelationsResult r;
     auto fail = [&](RCGkrRelation rel, const std::string& detail) {
@@ -2023,7 +2023,7 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
     gkr_air::TableTX tx_tab;
     // G3 membership instances — populated ONLY by AppendTileLookups so their table
     // sides are exactly the canonical fixed reference vectors (Construction III).
-    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    gkr_air::LogUpInstance inst_tm, inst_tx;
     // G1 operand grounding uses VerifyMxExpandColumn only for its in-circuit bool;
     // its LogUp feed goes to a throwaway so it never perturbs the G3 instances.
     gkr_air::LogUpInstance g1_mx_scratch;
@@ -2059,8 +2059,14 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
 
         // -- G1 (operand→PRF): each LEAF operand column bound to its Λ MxExpand
         //    expansion (an alternate factorization / fabricated leaf is not the
-        //    PRF expansion). Chained operands are G4. --
-        {
+        //    PRF expansion). Chained operands are G4.
+        //
+        // VerifyWinnerProofV7 already ran GroundEpisodeInCircuit immediately
+        // before this relation pass. In that verified-grounded path, re-running
+        // leaf MxExpand here only duplicates SHA/AIR work and cannot add a new
+        // accept/reject condition. Keep the full work in the standalone relation
+        // checker used by tests/audits.
+        if (!assume_grounded) {
             uint64_t n_sha = 0;
             std::string why;
             if (lp.a.is_leaf &&
@@ -2097,7 +2103,8 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
         // -- G3 (per tile): Construction II Extract composition polynomial ==0 and
         //    the verifier-defined sampler out-binding, plus feed Construction III
         //    membership witnesses. --
-        if (w.n % kRCMxBlockLen == 0 && w.extract_out.size() == static_cast<size_t>(w.m) * w.n &&
+        if (!assume_grounded && w.n % kRCMxBlockLen == 0 &&
+            w.extract_out.size() == static_cast<size_t>(w.m) * w.n &&
             w.extract_in.size() == static_cast<size_t>(w.m) * w.n) {
             const uint32_t n_blocks = w.n / kRCMxBlockLen;
             for (uint32_t i = 0; i < w.m; ++i) {
@@ -2121,7 +2128,8 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
                         if (tw.out[t] != w.extract_out[off + t])
                             return fail(RCGkrRelation::G3, "extract_out_binding");
                     }
-                    gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
+                    gkr_air::AppendTileLookupsTmTxOnly(tw, tm_tab, tx_tab, gamma, inst_tm,
+                                                       inst_tx);
                     ++r.n_tiles;
                 }
             }
@@ -2134,19 +2142,21 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
     //    fingerprints emitted above. T_R16 range is carried structurally by the
     //    composition (matches the shipped sample path), so membership runs over
     //    {T_M, T_X}. --
-    auto finalize = [](gkr_air::LogUpInstance& in) {
-        in.table_mult.assign(in.table.size(), 0);
-        for (const Fp2& wt : in.witness)
-            for (size_t j = 0; j < in.table.size(); ++j)
-                if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
-    };
-    finalize(inst_tm);
-    finalize(inst_tx);
-    {
-        std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
-        const gkr_air::LookupBindResult lr =
-            gkr_air::VerifyLookupAgainstPreprocessed(insts, gamma, alpha1, alpha2);
-        if (!lr.ok) return fail(RCGkrRelation::G3, "membership:" + lr.failure);
+    if (!assume_grounded) {
+        auto finalize = [](gkr_air::LogUpInstance& in) {
+            in.table_mult.assign(in.table.size(), 0);
+            for (const Fp2& wt : in.witness)
+                for (size_t j = 0; j < in.table.size(); ++j)
+                    if (gkr_field::Eq(wt, in.table[j])) { in.table_mult[j] += 1; break; }
+        };
+        finalize(inst_tm);
+        finalize(inst_tx);
+        {
+            std::vector<gkr_air::LogUpInstance> insts{inst_tm, inst_tx};
+            const gkr_air::LookupBindResult lr =
+                gkr_air::VerifyLookupAgainstPreprocessed(insts, gamma, alpha1, alpha2);
+            if (!lr.ok) return fail(RCGkrRelation::G3, "membership:" + lr.failure);
+        }
     }
 
     // -- G4: extract_out(L) == input(L+1) copy/permutation wiring (Construction
@@ -2181,25 +2191,29 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
         if (!vr.ok) { why = "permutation_dual:" + vr.reason; return false; }
         return true;
     };
-    for (size_t li = 0; li < proof.wires.size(); ++li) {
-        const RCGkrV7WireWitness& w = proof.wires[li];
-        const LayerProv& lp = prov[li];
-        std::string why;
-        if (!bind_chain(lp.a, w.A, w.m, w.k, static_cast<uint32_t>(4 * li + 0), why))
-            return fail(RCGkrRelation::G4, "A:" + why);
-        if (!bind_chain(lp.b, w.B, w.k, w.n, static_cast<uint32_t>(4 * li + 1), why))
-            return fail(RCGkrRelation::G4, "B:" + why);
+    if (!assume_grounded) {
+        for (size_t li = 0; li < proof.wires.size(); ++li) {
+            const RCGkrV7WireWitness& w = proof.wires[li];
+            const LayerProv& lp = prov[li];
+            std::string why;
+            if (!bind_chain(lp.a, w.A, w.m, w.k, static_cast<uint32_t>(4 * li + 0), why))
+                return fail(RCGkrRelation::G4, "A:" + why);
+            if (!bind_chain(lp.b, w.B, w.k, w.n, static_cast<uint32_t>(4 * li + 1), why))
+                return fail(RCGkrRelation::G4, "B:" + why);
+        }
     }
 
     // -- G4 (§6.3 companion): the round_roots must be the tile-tree commitment of
     //    the reconstructed extract stream (a Construction-IV-style binding of the
     //    per-round stream to its public root). Catches prover-chosen roots. --
-    for (uint32_t rr = 0; rr < proof.episode.rounds; ++rr) {
-        const std::vector<int8_t> stream =
-            ReconstructRoundStreamFromWitness(proof.wires, rr, proof.episode);
-        const gkr_air::TileTreeCheckResult tr =
-            gkr_air::CheckTileTreeInCircuit(stream, proof.episode.T_leaf, roots[rr]);
-        if (!tr.ok) return fail(RCGkrRelation::G4, "tiletree:" + tr.failure);
+    if (!assume_grounded) {
+        for (uint32_t rr = 0; rr < proof.episode.rounds; ++rr) {
+            const std::vector<int8_t> stream =
+                ReconstructRoundStreamFromWitness(proof.wires, rr, proof.episode);
+            const gkr_air::TileTreeCheckResult tr =
+                gkr_air::CheckTileTreeInCircuit(stream, proof.episode.T_leaf, roots[rr]);
+            if (!tr.ok) return fail(RCGkrRelation::G4, "tiletree:" + tr.failure);
+        }
     }
 
     r.ok = true;
@@ -2237,7 +2251,17 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7(const RCGkrProofV7& proof,
             return r;
         }
     }
-    return CheckWinnerProofRelationsV7Impl(proof, header, height, target);
+    return CheckWinnerProofRelationsV7Impl(proof, header, height, target,
+                                          /*assume_grounded=*/false);
+}
+
+RCGkrRelationsResult CheckWinnerProofRelationsV7AfterGrounding(const RCGkrProofV7& proof,
+                                                               const CBlockHeader& header,
+                                                               int32_t height,
+                                                               const arith_uint256& target)
+{
+    return CheckWinnerProofRelationsV7Impl(proof, header, height, target,
+                                          /*assume_grounded=*/true);
 }
 
 bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof, const CBlockHeader& header,
@@ -2442,9 +2466,9 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // → tile-tree AIR. Public seeds/prf are Λ-derived natively.
     const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, proof.episode, roots);
     if (prov.size() != proof.wires.size()) return fail("v7:wiring_count");
-    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    gkr_air::LogUpInstance inst_tm, inst_tx;
     const GroundResult gr = GroundEpisodeInCircuit(proof.wires, prov, proof.episode, roots, gamma,
-                                                   inst_tm, inst_tx, inst_r16);
+                                                   inst_tm, inst_tx);
     if (!gr.ok) return fail("v7:ground:" + gr.failure); // F0/F6/F7 in-circuit
 
     // Dual-α LogUp aggregate over ALL committed tiles + MxExpand mantissa rows.
@@ -2469,7 +2493,7 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // relation), while binding every winner-proof relation by a construction
     // identity. Honest proofs satisfy all of G1–G5. Behind the OFF arbiter.
     const RCGkrRelationsResult rel =
-        CheckWinnerProofRelationsV7(proof, header, height, target);
+        CheckWinnerProofRelationsV7AfterGrounding(proof, header, height, target);
     if (!rel.ok) return fail(rel.failure); // v7:g1..g5 in-circuit relation
 
     if (fs.Digest() != proof.transcript_hash) return fail("v7:transcript_hash");

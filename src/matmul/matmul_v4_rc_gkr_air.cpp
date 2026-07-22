@@ -896,6 +896,22 @@ void PopulateCanonicalR16(LogUpInstance& inst, Fp2 gamma)
         inst.table.push_back(Fingerprint({v}, gamma));
 }
 
+void AppendTileLookupsTmTxRows(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                               Fp2 gamma, LogUpInstance& inst_tm, LogUpInstance& inst_tx)
+{
+    // Reference-vector sides: canonical, idempotent (see Construction III).
+    PopulateCanonicalTM(inst_tm, tm, gamma);
+    PopulateCanonicalTX(inst_tx, tx, gamma);
+
+    for (const auto& c : w.cands) {
+        // T_M lookup: (mixed, acc, mu).
+        inst_tm.witness.push_back(Fingerprint(
+            {c.mixed, c.acc, static_cast<uint64_t>(static_cast<uint8_t>(c.mu))}, gamma));
+        // T_X lookup for mixed = kappa ^ h.
+        inst_tx.witness.push_back(Fingerprint({c.kappa, c.h, c.mixed}, gamma));
+    }
+}
+
 } // namespace
 
 void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& tx,
@@ -903,9 +919,7 @@ void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& t
                        LogUpInstance& inst_tm, LogUpInstance& inst_tx,
                        LogUpInstance& inst_r16)
 {
-    // Reference-vector sides: canonical, idempotent (see Construction III).
-    PopulateCanonicalTM(inst_tm, tm, gamma);
-    PopulateCanonicalTX(inst_tx, tx, gamma);
+    AppendTileLookupsTmTxRows(w, tm, tx, gamma, inst_tm, inst_tx);
     PopulateCanonicalR16(inst_r16, gamma);
 
     auto emit_r16 = [&](uint32_t v32) {
@@ -914,11 +928,6 @@ void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& t
     };
 
     for (const auto& c : w.cands) {
-        // T_M lookup: (mixed, acc, mu).
-        inst_tm.witness.push_back(Fingerprint(
-            {c.mixed, c.acc, static_cast<uint64_t>(static_cast<uint8_t>(c.mu))}, gamma));
-        // T_X lookup for mixed = kappa ^ h.
-        inst_tx.witness.push_back(Fingerprint({c.kappa, c.h, c.mixed}, gamma));
         // T_R16 range lookups for the MixBits 32-bit limbs.
         emit_r16(c.y_lo);
         emit_r16(c.y_hi);
@@ -928,6 +937,12 @@ void AppendTileLookups(const TileWitness& w, const TableTM& tm, const TableTX& t
         // the golden-mix decomposition (see CheckTileConstraints C-E9 note).
         emit_r16(kGolden - c.gold_q);
     }
+}
+
+void AppendTileLookupsTmTxOnly(const TileWitness& w, const TableTM& tm, const TableTX& tx,
+                               Fp2 gamma, LogUpInstance& inst_tm, LogUpInstance& inst_tx)
+{
+    AppendTileLookupsTmTxRows(w, tm, tx, gamma, inst_tm, inst_tx);
 }
 
 void FinalizeTableMultiplicities(LogUpInstance& inst_tm, LogUpInstance& inst_tx,

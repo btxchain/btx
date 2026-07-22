@@ -268,6 +268,59 @@ Fp2 DomainPoint(uint32_t n0, uint32_t index)
     return Fp2::FromFp(PowFp(OmegaForSize(n0), index));
 }
 
+uint256 FriLeafHashFast(const Fp2& v, uint32_t index)
+{
+    constexpr size_t tag_len = sizeof(kRCFriDomainTag) - 1;
+    unsigned char buf[tag_len + 4 + 4 + 8 + 8];
+    unsigned char* p = buf;
+    std::memcpy(p, kRCFriDomainTag, tag_len);
+    p += tag_len;
+    std::memcpy(p, "leaf", 4);
+    p += 4;
+    WriteLE32(p, index);
+    p += 4;
+    WriteLE64(p, Canonical(v.c0));
+    p += 8;
+    WriteLE64(p, Canonical(v.c1));
+    return Sha256dBytes(buf, sizeof(buf));
+}
+
+uint256 FriNodeHashFast(const uint256& left, const uint256& right)
+{
+    constexpr size_t tag_len = sizeof(kRCFriDomainTag) - 1;
+    unsigned char buf[tag_len + 4 + 32 + 32];
+    unsigned char* p = buf;
+    std::memcpy(p, kRCFriDomainTag, tag_len);
+    p += tag_len;
+    std::memcpy(p, "node", 4);
+    p += 4;
+    std::memcpy(p, left.data(), 32);
+    p += 32;
+    std::memcpy(p, right.data(), 32);
+    return Sha256dBytes(buf, sizeof(buf));
+}
+
+bool FriVerifyPathRawImpl(uint32_t index, const Fp2& leaf,
+                          const std::vector<uint256>& siblings, const uint256& root,
+                          uint32_t n_leaves)
+{
+    if (n_leaves == 0 || index >= n_leaves) return false;
+    uint256 cur = FriLeafHashFast(leaf, index);
+    uint32_t idx = index;
+    uint32_t width = n_leaves;
+    size_t si = 0;
+    while (width > 1) {
+        if (width % 2 == 1) ++width; // match prover pad
+        if (si >= siblings.size()) return false;
+        const uint256& sib = siblings[si++];
+        if ((idx & 1u) == 0) cur = FriNodeHashFast(cur, sib);
+        else cur = FriNodeHashFast(sib, cur);
+        idx >>= 1;
+        width /= 2;
+    }
+    return cur == root && si == siblings.size();
+}
+
 /** z ∈ D (size-n_lde LDE subgroup on the c1=0 base-field line)? */
 bool FriPointInDomain(const Fp2& z, uint32_t n_lde)
 {
@@ -360,16 +413,10 @@ bool VerifyFoldStep(const FriFoldStep& step, const uint256& root, uint32_t n_lea
     if (step.odd_index != i + half) return fail("fold odd_index");
     if (step.odd_index >= n_leaves) return fail("fold pair OOB");
 
-    FriMerklePath pe;
-    pe.index = i;
-    pe.leaf = step.even;
-    pe.siblings = step.even_siblings;
-    FriMerklePath po;
-    po.index = step.odd_index;
-    po.leaf = step.odd;
-    po.siblings = step.odd_siblings;
-    if (!FriVerifyPath(pe, root, n_leaves)) return fail("fold even merkle");
-    if (!FriVerifyPath(po, root, n_leaves)) return fail("fold odd merkle");
+    if (!FriVerifyPathRawImpl(i, step.even, step.even_siblings, root, n_leaves))
+        return fail("fold even merkle");
+    if (!FriVerifyPathRawImpl(step.odd_index, step.odd, step.odd_siblings, root, n_leaves))
+        return fail("fold odd merkle");
 
     const Fp2 x = DomainPoint(n_leaves, i);
     if (!HalfDomainFoldPair(step.even, step.odd, x, beta, out_folded)) {
@@ -429,24 +476,12 @@ uint32_t FriNextPow2(uint32_t n)
 
 uint256 FriLeafHash(const Fp2& v, uint32_t index)
 {
-    std::vector<unsigned char> buf;
-    AppendBytes(buf, reinterpret_cast<const unsigned char*>(kRCFriDomainTag),
-                sizeof(kRCFriDomainTag) - 1);
-    AppendBytes(buf, reinterpret_cast<const unsigned char*>("leaf"), 4);
-    AppendLE32(buf, index);
-    AppendFp2(buf, v);
-    return Sha256dBytes(buf.data(), buf.size());
+    return FriLeafHashFast(v, index);
 }
 
 uint256 FriNodeHash(const uint256& left, const uint256& right)
 {
-    std::vector<unsigned char> buf;
-    AppendBytes(buf, reinterpret_cast<const unsigned char*>(kRCFriDomainTag),
-                sizeof(kRCFriDomainTag) - 1);
-    AppendBytes(buf, reinterpret_cast<const unsigned char*>("node"), 4);
-    AppendBytes(buf, left.data(), 32);
-    AppendBytes(buf, right.data(), 32);
-    return Sha256dBytes(buf.data(), buf.size());
+    return FriNodeHashFast(left, right);
 }
 
 FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals, uint32_t index)
@@ -463,21 +498,7 @@ FriMerklePath FriOpenIndex(const std::vector<Fp2>& evals, uint32_t index)
 
 bool FriVerifyPath(const FriMerklePath& path, const uint256& root, uint32_t n_leaves)
 {
-    if (n_leaves == 0 || path.index >= n_leaves) return false;
-    uint256 cur = FriLeafHash(path.leaf, path.index);
-    uint32_t idx = path.index;
-    uint32_t width = n_leaves;
-    size_t si = 0;
-    while (width > 1) {
-        if (width % 2 == 1) ++width; // match prover pad
-        if (si >= path.siblings.size()) return false;
-        const uint256& sib = path.siblings[si++];
-        if ((idx & 1u) == 0) cur = FriNodeHash(cur, sib);
-        else cur = FriNodeHash(sib, cur);
-        idx >>= 1;
-        width /= 2;
-    }
-    return cur == root && si == path.siblings.size();
+    return FriVerifyPathRawImpl(path.index, path.leaf, path.siblings, root, n_leaves);
 }
 
 FriCommitResult FriCommitAndFoldImpl(const std::vector<Fp2>& coeffs, const uint256& fs_seed,
@@ -705,11 +726,9 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
             if (proof.deep_quot_fri) return fail("unexpected deep quot");
             if (proof.deep_quot_n_leaves != 0) return fail("habock unexpected quot leaves");
             if (proof.deep_domain_index != 0) return fail("habock domain index");
-            FriMerklePath mp;
-            mp.index = proof.deep_domain_index;
-            mp.leaf = proof.deep_eval;
-            mp.siblings = proof.deep_domain_siblings;
-            if (!FriVerifyPath(mp, proof.layers[0].root, proof.layers[0].n_leaves)) {
+            if (!FriVerifyPathRawImpl(proof.deep_domain_index, proof.deep_eval,
+                                      proof.deep_domain_siblings, proof.layers[0].root,
+                                      proof.layers[0].n_leaves)) {
                 return fail("habock domain merkle");
             }
         } else {
@@ -775,12 +794,9 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         if (!have_claimed || !Eq(claimed, proof.final_value)) return fail("final fold value");
 
         if (deep_ood) {
-            FriMerklePath qp;
-            qp.index = q.index;
-            qp.leaf = q.deep_quot_leaf;
-            qp.siblings = q.deep_quot_siblings;
             if (q.index >= proof.deep_quot_n_leaves) return fail("deep quot index");
-            if (!FriVerifyPath(qp, proof.deep_quot_root, proof.deep_quot_n_leaves)) {
+            if (!FriVerifyPathRawImpl(q.index, q.deep_quot_leaf, q.deep_quot_siblings,
+                                      proof.deep_quot_root, proof.deep_quot_n_leaves)) {
                 return fail("deep quot merkle");
             }
             const Fp2 x = DomainPoint(n0, q.index);
@@ -1320,14 +1336,34 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
     std::vector<Fp2> lam_pow(W);
     lam_pow[0] = Fp2::One();
     for (uint32_t i = 1; i < W; ++i) lam_pow[i] = Mul(lam_pow[i - 1], proof.lambda);
-    Fp2 v1 = Fp2::Zero(), v2 = Fp2::Zero();
+    std::vector<uint32_t> shifts(W);
+    std::vector<uint32_t> unique_shifts;
+    std::vector<uint32_t> shift_slot(W);
+    unique_shifts.reserve(W);
     for (uint32_t i = 0; i < W; ++i) {
         const uint32_t shift = n - proof.column_len[i];
-        v1 = Add(v1, Mul(Mul(lam_pow[i], PowFp2(proof.z1, shift)), proof.evals_z1[i]));
-        v2 = Add(v2, Mul(Mul(lam_pow[i], PowFp2(proof.z2, shift)), proof.evals_z2[i]));
+        shifts[i] = shift;
+        auto it = std::find(unique_shifts.begin(), unique_shifts.end(), shift);
+        if (it == unique_shifts.end()) {
+            shift_slot[i] = static_cast<uint32_t>(unique_shifts.size());
+            unique_shifts.push_back(shift);
+        } else {
+            shift_slot[i] = static_cast<uint32_t>(it - unique_shifts.begin());
+        }
+    }
+    std::vector<Fp2> lam_z1(W), lam_z2(W);
+    for (uint32_t i = 0; i < W; ++i) {
+        lam_z1[i] = shifts[i] == 0 ? lam_pow[i] : Mul(lam_pow[i], PowFp2(proof.z1, shifts[i]));
+        lam_z2[i] = shifts[i] == 0 ? lam_pow[i] : Mul(lam_pow[i], PowFp2(proof.z2, shifts[i]));
+    }
+    Fp2 v1 = Fp2::Zero(), v2 = Fp2::Zero();
+    for (uint32_t i = 0; i < W; ++i) {
+        v1 = Add(v1, Mul(lam_z1[i], proof.evals_z1[i]));
+        v2 = Add(v2, Mul(lam_z2[i], proof.evals_z2[i]));
     }
 
     const uint32_t n_folds = static_cast<uint32_t>(proof.fold_challenges.size());
+    std::vector<Fp2> query_shift_pow(unique_shifts.size());
     for (uint32_t qi = 0; qi < kRCFriBatchNumQueries; ++qi) {
         const FriBatchQuery& q = proof.queries[qi];
         const uint32_t expect = fs.ChallengeIndex("frib_query", qi, n_lde);
@@ -1337,17 +1373,18 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
 
         // Per-column Merkle openings at the query index.
         const Fp2 x = DomainPoint(n_lde, q.index);
+        for (size_t si = 0; si < unique_shifts.size(); ++si) {
+            query_shift_pow[si] =
+                unique_shifts[si] == 0 ? Fp2::One() : PowFp2(x, unique_shifts[si]);
+        }
         Fp2 U_x = Fp2::Zero();
         for (uint32_t i = 0; i < W; ++i) {
-            FriMerklePath path;
-            path.index = q.index;
-            path.leaf = q.columns[i].value;
-            path.siblings = q.columns[i].siblings;
-            if (!FriVerifyPath(path, proof.columns[i].root, n_lde)) {
+            if (!FriVerifyPathRawImpl(q.index, q.columns[i].value, q.columns[i].siblings,
+                                      proof.columns[i].root, n_lde)) {
                 return fail("column merkle");
             }
-            const uint32_t shift = n - proof.column_len[i];
-            U_x = Add(U_x, Mul(Mul(lam_pow[i], PowFp2(x, shift)), q.columns[i].value));
+            U_x = Add(U_x, Mul(Mul(lam_pow[i], query_shift_pow[shift_slot[i]]),
+                                q.columns[i].value));
         }
 
         // Dual-OOD DEEP identity at the query site.

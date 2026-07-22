@@ -668,7 +668,7 @@ gkr_air::LogUpVerifyResult CoupledExtractLogUpSample(const CoupledWires& w, Fp2 
 {
     gkr_air::TableTM tm_tab;
     gkr_air::TableTX tx_tab;
-    gkr_air::LogUpInstance inst_tm, inst_tx, inst_r16;
+    gkr_air::LogUpInstance inst_tm, inst_tx;
     uint32_t used = 0;
     for (const CoupledBarrierWire& bw : w.barriers) {
         if (used >= max_tiles) break;
@@ -682,7 +682,7 @@ gkr_air::LogUpVerifyResult CoupledExtractLogUpSample(const CoupledWires& w, Fp2 
             for (uint32_t c = 0; c < kRCMxBlockLen; ++c)
                 in[c] = bw.post_mix[static_cast<size_t>(t) * kRCMxBlockLen + c];
             const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, in);
-            gkr_air::AppendTileLookups(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx, inst_r16);
+            gkr_air::AppendTileLookupsTmTxOnly(tw, tm_tab, tx_tab, gamma, inst_tm, inst_tx);
             ++used;
         }
     }
