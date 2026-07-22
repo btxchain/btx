@@ -61,7 +61,8 @@ inline constexpr char kRCFriSoundnessStatement[] =
     "B-constant layer (Merkle of B identical leaves); "
     "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=65; "
     "DEEP/OOD binds P(z) via quotient openings at query sites (ePrint 2019/336); "
-    "deep_z_forced supports Haböck I(1) at z=1. "
+    "OOD z resampled until Fp2.c1!=0; deep_quot_root≡nested FRI layer-0; "
+    "deep_z_forced Haböck I(1) at z=1 uses layer-0 Merkle opening (not quotient). "
     "NOT conjectured ρ^Q. ROM, commit-then-challenge; fs_seed PoW-bound. "
     "COMPUTATIONAL — not ε=0.";
 
@@ -122,14 +123,25 @@ struct FriProof {
     std::vector<FriQueryOpening> queries;
     /** DEEP/OOD (v3). has_deep=false only for nested quotient FRI. */
     bool has_deep{false};
-    /** If true, deep_z was fixed by the caller (not FS-sampled); verifier absorbs it. */
+    /**
+     * If true, deep_z was fixed by the caller (not FS-sampled); verifier absorbs it.
+     * When deep_z ∈ D (Haböck z=1), binding is a layer-0 Merkle opening of P at the
+     * domain index — NOT the DEEP quotient path (z∈D is not a valid OOD point).
+     */
     bool deep_z_forced{false};
     Fp2 deep_z{};
     Fp2 deep_eval{};
+    /** Must equal deep_quot_fri->layers[0].root / n_leaves (OOD path). */
     uint256 deep_quot_root{};
     uint32_t deep_quot_n_leaves{0};
-    /** Low-degree FRI on Q=(P−v)/(X−z); no recursive DEEP. */
+    /** Low-degree FRI on Q=(P−v)/(X−z); no recursive DEEP. Null on Haböck path. */
     std::shared_ptr<FriProof> deep_quot_fri;
+    /**
+     * Haböck in-domain forced-z: Merkle path of deep_eval into layers[0] at
+     * deep_domain_index (DomainPoint(n0, index) == deep_z). Empty on OOD path.
+     */
+    uint32_t deep_domain_index{0};
+    std::vector<uint256> deep_domain_siblings;
 };
 
 struct FriCommitResult {
@@ -146,7 +158,10 @@ struct FriCommitResult {
                                                uint64_t pow_grind_nonce = 0,
                                                bool enable_deep = true);
 
-/** Like FriCommitAndFold but forces DEEP evaluation at a fixed z (e.g. 1 for LogUp Σ). */
+/**
+ * Like FriCommitAndFold but forces evaluation at a fixed z (e.g. 1 for LogUp Σ).
+ * If z ∈ D (Haböck z=1), binds P(z) via layer-0 Merkle opening; otherwise DEEP quotient.
+ */
 [[nodiscard]] FriCommitResult FriCommitAndFoldDeepAt(const std::vector<Fp2>& coeffs,
                                                      const uint256& fs_seed, const Fp2& deep_z,
                                                      uint64_t pow_grind_nonce = 0);
@@ -268,10 +283,11 @@ inline constexpr char kRCFriBatchSoundnessStatement[] =
     "columns (7 separate instances union to 2^-63.05 — FAILS 2^-64; batching "
     "restores a single query term). Q=128, blowup=16, g=40, Fp2, UNIQUE-DECODING "
     "alpha=17/32 => FriBatchSoundnessBoundBits()=76. v5 half-domain fold × "
-    "log2(n_coeffs) → terminal B-constant layer. DUAL-OOD DEEP (z1,z2): "
-    "single OOD caps column degree at 2^24 < kappa=2^28; dual gives "
-    "(2k/|Fp2|)^2 ~ 2^-196 pre-grind. Degree-shift RLC enforces per-column "
-    "maximal degree. COMPUTATIONAL — not eps=0. Arbiter OFF.";
+    "log2(n_coeffs) → terminal B-constant layer. DUAL-OOD DEEP (z1,z2) with "
+    "Fp2.c1!=0 (extension coeff nonzero): single OOD caps column degree at "
+    "2^24 < kappa=2^28; dual gives (2k/|Fp2|)^2 ~ 2^-196 pre-grind. "
+    "Degree-shift RLC enforces per-column maximal degree. COMPUTATIONAL — "
+    "not eps=0. Arbiter OFF.";
 
 /** Per-query opening of one committed column at the query index. */
 struct FriBatchColumnOpening {

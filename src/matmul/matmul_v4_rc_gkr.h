@@ -398,7 +398,8 @@ struct RCGkrProof {
      *   witness keys w_i = Hash(meta, in, out)
      *   table keys   t_i = Hash(meta, in, Extract(in))  // virtual Extract table
      *   Σ 1/(α−w_i) = Σ 1/(α−t_i)  (here enforced by w≡t + inverse column)
-     * lookup_logup_sum = Σ inv_i with inv_i = 1/(α−t_i), proven via I(1) DEEP + R≡0.
+     * lookup_logup_sum = Σ inv_i with inv_i = 1/(α−t_i), proven via Haböck
+     * I(1) layer-0 Merkle opening at z=1 + R≡0.
      */
     Fp2 lookup_logup_sum{};
     Fp2 lookup_table_sum{}; // must equal lookup_logup_sum
@@ -407,7 +408,7 @@ struct RCGkrProof {
     FriProof lookup_fri{};
     /** Virtual Extract-table keys FRI (must match lookup_fri root/DEEP). */
     FriProof table_fri{};
-    /** inv_i = 1/(α − t_i); DEEP at z=1 binds sum. */
+    /** inv_i = 1/(α − t_i); Haböck I(1) layer-0 Merkle at z=1 binds sum. */
     FriProof logup_inv_fri{};
     /** R_i = inv_i·(α−t_i)−1; must be the zero polynomial. */
     FriProof logup_r_fri{};

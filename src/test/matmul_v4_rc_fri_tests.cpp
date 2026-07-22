@@ -55,6 +55,8 @@ BOOST_AUTO_TEST_CASE(fri_constants_and_soundness_bits)
                 std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("half-domain") != std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("B-constant") != std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("c1!=0") != std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriSoundnessStatement).find("Haböck") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(fri_honest_commit_verify)
@@ -152,6 +154,83 @@ BOOST_AUTO_TEST_CASE(fri_deep_ood_tamper_rejects)
     bad.deep_eval.c0 ^= 1;
     std::string why;
     BOOST_CHECK(!rc::FriVerify(bad, MakeSeed(0x71), &why));
+}
+
+BOOST_AUTO_TEST_CASE(fri_deep_ood_ext_coeff_nonzero)
+{
+    // OOD z must have nonzero Fp2 extension coefficient (c1 != 0).
+    const auto c = rc::FriCommitAndFold(MakeCoeffs(16), MakeSeed(0x72));
+    BOOST_REQUIRE(c.ok);
+    BOOST_REQUIRE(c.proof.has_deep);
+    BOOST_REQUIRE(!c.proof.deep_z_forced);
+    BOOST_CHECK_NE(gf::Canonical(c.proof.deep_z.c1), 0u);
+    // Forged c1==0 (base-field) deep_z must be rejected by FS replay.
+    auto bad = c.proof;
+    bad.deep_z.c1 = 0;
+    std::string why;
+    BOOST_CHECK(!rc::FriVerify(bad, MakeSeed(0x72), &why));
+}
+
+BOOST_AUTO_TEST_CASE(fri_deep_quot_root_must_match_nested_layer0)
+{
+    const auto c = rc::FriCommitAndFold(MakeCoeffs(16), MakeSeed(0x73));
+    BOOST_REQUIRE(c.ok);
+    BOOST_REQUIRE(c.proof.has_deep);
+    BOOST_REQUIRE(c.proof.deep_quot_fri);
+    BOOST_REQUIRE(!c.proof.deep_quot_fri->layers.empty());
+    BOOST_CHECK(c.proof.deep_quot_root == c.proof.deep_quot_fri->layers[0].root);
+    BOOST_CHECK_EQUAL(c.proof.deep_quot_n_leaves, c.proof.deep_quot_fri->layers[0].n_leaves);
+
+    // Tamper deep_quot_root independently of nested FRI → REJECT (not absorb-only).
+    auto bad = c.proof;
+    bad.deep_quot_root.data()[0] ^= 0xff;
+    std::string why;
+    BOOST_CHECK(!rc::FriVerify(bad, MakeSeed(0x73), &why));
+    BOOST_CHECK(why.find("deep_quot_root") != std::string::npos ||
+                why.find("nested") != std::string::npos || !why.empty());
+
+    auto bad2 = c.proof;
+    bad2.deep_quot_n_leaves ^= 1u;
+    BOOST_CHECK(!rc::FriVerify(bad2, MakeSeed(0x73), &why));
+}
+
+BOOST_AUTO_TEST_CASE(fri_deep_habock_z1_merkle_opening)
+{
+    // Forced z=1 is IN-domain → layer-0 Merkle opening of P(1), no quotient FRI.
+    const auto coeffs = MakeCoeffs(16);
+    const uint256 seed = MakeSeed(0x74);
+    const auto c = rc::FriCommitAndFoldDeepAt(coeffs, seed, gf::Fp2::One());
+    BOOST_REQUIRE_MESSAGE(c.ok, c.note);
+    BOOST_REQUIRE(c.proof.has_deep);
+    BOOST_REQUIRE(c.proof.deep_z_forced);
+    BOOST_CHECK(gf::Eq(c.proof.deep_z, gf::Fp2::One()));
+    BOOST_CHECK(!c.proof.deep_quot_fri);
+    BOOST_CHECK_EQUAL(c.proof.deep_quot_n_leaves, 0u);
+    BOOST_CHECK_EQUAL(c.proof.deep_domain_index, 0u);
+    BOOST_CHECK(!c.proof.deep_domain_siblings.empty());
+    // P(1) = sum of coeffs.
+    rc::Fp2 sum = gf::Fp2::Zero();
+    for (const auto& a : coeffs) sum = gf::Add(sum, a);
+    BOOST_CHECK(gf::Eq(c.proof.deep_eval, sum));
+    std::string why;
+    BOOST_CHECK_MESSAGE(rc::FriVerify(c.proof, seed, &why), why);
+
+    // Round-trip serialization (empty nested quot).
+    std::vector<unsigned char> bytes;
+    BOOST_REQUIRE(rc::SerializeFriProof(c.proof, bytes) > 0);
+    const auto back = rc::DeserializeFriProof(bytes);
+    BOOST_REQUIRE(back.has_value());
+    BOOST_CHECK(!back->deep_quot_fri);
+    BOOST_CHECK_MESSAGE(rc::FriVerify(*back, seed, &why), why);
+
+    // Tamper Haböck opening → REJECT.
+    auto bad = c.proof;
+    bad.deep_eval.c0 ^= 1;
+    BOOST_CHECK(!rc::FriVerify(bad, seed, &why));
+    auto bad2 = c.proof;
+    BOOST_REQUIRE(!bad2.deep_domain_siblings.empty());
+    bad2.deep_domain_siblings[0].data()[0] ^= 0xff;
+    BOOST_CHECK(!rc::FriVerify(bad2, seed, &why));
 }
 
 BOOST_AUTO_TEST_CASE(fri_forge_flipped_eval_rejected)
@@ -291,6 +370,8 @@ BOOST_AUTO_TEST_CASE(frib_constants_and_soundness_bits)
                 std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriBatchSoundnessStatement).find("DUAL-OOD") !=
                 std::string::npos);
+    BOOST_CHECK(std::string(rc::kRCFriBatchSoundnessStatement).find("c1!=0") !=
+                std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriBatchSoundnessStatement).find("half-domain") !=
                 std::string::npos);
     BOOST_CHECK_EQUAL(rc::kRCFriBatchProofVersion, 5u);
@@ -311,6 +392,9 @@ BOOST_AUTO_TEST_CASE(frib_honest_commit_verify_serde_byte_exact)
     BOOST_CHECK(!gf::Eq(p.z1, p.z2));
     std::string why;
     BOOST_CHECK_MESSAGE(rc::FriBatchVerify(p, seed, &why), why);
+    BOOST_CHECK_NE(gf::Canonical(p.z1.c1), 0u);
+    BOOST_CHECK_NE(gf::Canonical(p.z2.c1), 0u);
+    BOOST_CHECK(!gf::Eq(p.z1, p.z2));
 
     // The opening primitive: bound per-column evaluations at BOTH OOD points
     // are byte-exact against direct polynomial evaluation.

@@ -2917,11 +2917,14 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
     if (proof.logup_r_fri.has_deep && !IsZero(proof.logup_r_fri.deep_eval)) {
         return fail("G3 R deep");
     }
-    // Spot-check R openings are zero at every FRI query leaf.
+    // Spot-check R openings are zero at every FRI query leaf (v5 half-domain:
+    // pair i with i+N/2 — leaf at index is even if index < N/2, else odd).
     for (const auto& q : proof.logup_r_fri.queries) {
         if (q.steps.empty()) return fail("G3 R empty step");
+        if (proof.logup_r_fri.layers.empty()) return fail("G3 R empty layers");
         const auto& st = q.steps[0];
-        const Fp2 leaf = (q.index & 1u) ? st.odd : st.even;
+        const uint32_t half = proof.logup_r_fri.layers[0].n_leaves / 2;
+        const Fp2 leaf = (q.index < half) ? st.even : st.odd;
         if (!IsZero(leaf) || !IsZero(st.even) || !IsZero(st.odd)) return fail("G3 R leaf");
     }
     fs.AbsorbUint256(proof.logup_inv_fri.layers.empty() ? uint256{}
