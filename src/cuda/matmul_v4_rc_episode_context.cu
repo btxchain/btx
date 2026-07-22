@@ -627,6 +627,11 @@ void SeedLobeStateHost(const CBlockHeader& header, const rc::RCCoupParams& param
                 error, "selfqual H2D page")) {
         return false;
     }
+    // F6: kernel accumulates with +=; zero d_acc or self-qual is nondeterministic.
+    if (!CudaOk(cudaMemsetAsync(L.d_acc, 0, static_cast<size_t>(W) * sizeof(int64_t), stream),
+                error, "selfqual zero d_acc")) {
+        return false;
+    }
     const int threads = 128;
     const int blocks_x = static_cast<int>((W + threads - 1) / threads);
     dim3 grid(blocks_x, 1, 1);
@@ -797,6 +802,14 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     p.lobe_width = shape.lobe_width;
     p.bank_pages = shape.bank_pages;
     p.pages_per_barrier_lobe = shape.pages_per_barrier_lobe;
+    // F6: resident CUDA path is M=1 only (V3 rows_per_lobe>1 would emit a wrong digest).
+    if (p.rows_per_lobe != 1) {
+        if (error) {
+            *error = "RCCudaEpisodeContext: rows_per_lobe!=1 fail-closed "
+                     "(resident path does not wire V3 M>1)";
+        }
+        return false;
+    }
     if (!rc::ValidateRCCoupParams(p)) {
         if (error) *error = "RCCudaEpisodeContext: ValidateRCCoupParams failed";
         return false;
@@ -837,6 +850,8 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     m_stream = stream;
 
     m_prov.resident_native_mxfp4_attempted = true;
+    // Qual before latch consult (A5/F12) so provenance reflects a real probe.
+    (void)SelfQualifyRcOzakiCudaMxfp4Once();
     m_prov.resident_native_mxfp4_qualified = IsRcOzakiCudaMxfp4Qualified();
     if (g_device_gemm_hook != nullptr && m_prov.resident_native_mxfp4_qualified) {
         m_prov.gemm_path_label = "wsB_device_ptr_hook_present";
@@ -852,6 +867,14 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
 bool RCCudaEpisodeContext::Init(const rc::RCCoupParams& params, uint32_t batch_q,
                                 std::string* error)
 {
+    // F6: refuse V3 M>1 rather than silently dropping rows_per_lobe and mining wrong.
+    if (params.rows_per_lobe != 1) {
+        if (error) {
+            *error = "RCCudaEpisodeContext: rows_per_lobe!=1 fail-closed "
+                     "(resident path does not wire V3 M>1)";
+        }
+        return false;
+    }
     RCCudaEpisodeShape shape;
     shape.barriers = params.barriers;
     shape.lobes = params.lobes;
