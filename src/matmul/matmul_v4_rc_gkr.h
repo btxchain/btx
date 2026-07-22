@@ -715,7 +715,8 @@ struct RCGkrComposedBound {
     double construction_ii_bits{0.0};  // composition
     double construction_iii_bits{0.0}; // lookup membership (dual-α)
     double construction_iv_bits{0.0};  // wiring (min of equality / dual permutation)
-    double wiring_single_bits{0.0};    // excluded single-challenge path (< 64)
+    double wiring_single_bits{0.0};    // excluded single-challenge path (dual mandate;
+                                       // Fp2 record 60 < 64, Fp3 value 124)
     double fri_proximity_bits{0.0};    // parametric FRI term (dominating)
     double sha_bits{0.0};              // SHA256d computational
     double composed_bits{0.0};         // −log2(Σ 2^-term) over all of the above

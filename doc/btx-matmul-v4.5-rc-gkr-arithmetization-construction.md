@@ -17,6 +17,15 @@ be discussed. Nothing here weakens or replaces exact replay.
 
 ## 0. Headline findings (read first)
 
+> **UPDATE (2026-07-22, margin restoration — supersedes the parameter numbers
+> below and in §2/§8/§9):** the fold now ships **Q = 128** (`kRCFriNumQueries`;
+> `FriSoundnessBoundBits() = 76`, real 76.80) and the separation bounds are
+> re-derived over the **F_{p^3} challenge field** (|K| ≈ 2^192; Fp3 =
+> Fp[x]/(x³−7) per item 3, implementation pending — see INTEGRATION_REPORT.md
+> "Fp2 → Fp3 challenge sites"). Composed bound: **≈ 2^-76.8, margin ≈ 12.8 bits
+> over 2^-64** (was ≈ 2^-65.7 / 1.8 bits). Full old-vs-new table: Appendix INT.
+> The body text below retains the historical Q=116/Fp2 numbers.
+
 1. **The current `VerifyWinnerProof` (proof v6) is, against a Byzantine prover, a plain
    SHA256d PoW with extra steps.** A cheating prover who grinds arbitrary 32-byte strings as
    `round_roots` until `SHA256d(kRCEpisodeTag ‖ roots) ≤ target` can fabricate *all* layer
