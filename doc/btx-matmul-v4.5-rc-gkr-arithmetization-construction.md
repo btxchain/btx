@@ -17,14 +17,23 @@ be discussed. Nothing here weakens or replaces exact replay.
 
 ## 0. Headline findings (read first)
 
-> **UPDATE (2026-07-22, margin restoration — supersedes the parameter numbers
-> below and in §2/§8/§9):** the fold now ships **Q = 128** (`kRCFriNumQueries`;
-> `FriSoundnessBoundBits() = 76`, real 76.80) and the separation bounds are
-> re-derived over the **F_{p^3} challenge field** (|K| ≈ 2^192; Fp3 =
-> Fp[x]/(x³−7) per item 3, implementation pending — see INTEGRATION_REPORT.md
-> "Fp2 → Fp3 challenge sites"). Composed bound: **≈ 2^-76.8, margin ≈ 12.8 bits
-> over 2^-64** (was ≈ 2^-65.7 / 1.8 bits). Full old-vs-new table: Appendix INT.
-> The body text below retains the historical Q=116/Fp2 numbers.
+> **SHIPPED STATE (2026-07-22, `wip/gkr-margin` integration — READ THIS FIRST;
+> corrects the Fp3 UPDATE blocks throughout this doc):** the branch ships **only
+> the Q = 128 fold** (`kRCFriNumQueries`; `FriSoundnessBoundBits() = 76`, real
+> 76.80). This is the field-independent lever. It lifts the FRI floor above the
+> **Fp2** FS subtotal (72), so the **SHIPPED composed bound is ≈ 2^-71.9 (margin
+> ≈ 7.9 bits over 2^-64 — ADEQUATE), FS-subtotal-dominated**, below the 74-bit
+> target. **The Fp3 challenge field is NOT shipped** — the "margin restoration
+> → 2^-76.8 / 12.8-bit" UPDATE blocks below (and the Appendix INT Fp3 columns)
+> are the **DEFERRED follow-on TARGET**, blocked on the Fp3-codeword-FRI
+> decision and a proof-wire-format change (see INTEGRATION_REPORT.md §3.5). The
+> code constants (`kRCGkrChallengeFieldBits` = 128, composition 80, membership
+> 128, wiring 83.19/160, FS subtotal 72) and the pinning tests
+> (`air_separation_bound_numbers`, `wiring_separation_bound_numbers`,
+> `constr1_separation_constants`, `gkr_integration_composed_separation_bound`)
+> are all at their **Fp2** values on this branch. Where the UPDATE blocks below
+> claim a test "pins the Fp3 numbers", that is the follow-on target, not the
+> shipped test. The body text retains the historical Q=116/Fp2 numbers.
 
 1. **The current `VerifyWinnerProof` (proof v6) is, against a Byzantine prover, a plain
    SHA256d PoW with extra steps.** A cheating prover who grinds arbitrary 32-byte strings as
