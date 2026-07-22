@@ -14,11 +14,12 @@
 #include <string>
 #include <vector>
 
-// REAL FRI PCS for ENC_RC Section-2 (proof version 3) — M6/Fable + DEEP/OOD.
+// REAL FRI PCS for ENC_RC Section-2 (proof version 5) — M6/Fable + DEEP/OOD.
 //
 // Pipeline: LDE (blowup) → Merkle commit → DEEP out-of-domain sample →
-// multi-round fold → FS queries with per-layer fold-path openings + DEEP
-// quotient openings at the same indices. Witness LDE is NEVER shipped.
+// log2(n_coeffs) half-domain folds → terminal B-constant layer → FS queries
+// with per-layer fold-path openings + DEEP quotient openings at the same
+// indices. Witness LDE is NEVER shipped.
 //
 // ============================================================================
 // SOUNDNESS PARAMETERS (M6 — Fable cross-check; code and statement MUST agree)
@@ -36,9 +37,9 @@ namespace matmul::v4::rc {
 
 using gkr_field::Fp2;
 
-inline constexpr uint32_t kRCFriProofMagic = 0x46524934u; // 'FRI4'
-inline constexpr uint32_t kRCFriProofVersion = 4;
-inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V4";
+inline constexpr uint32_t kRCFriProofMagic = 0x46524935u; // 'FRI5'
+inline constexpr uint32_t kRCFriProofVersion = 5;
+inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V5";
 
 inline constexpr uint32_t kRCFriBlowup = 16;
 inline constexpr uint32_t kRCFriGrindingBits = 40;
@@ -55,7 +56,9 @@ inline constexpr uint32_t kRCFriNumQueriesBciKs20Optional = 53;
 inline constexpr int kRCFriTargetSoundnessBits = 64;
 
 inline constexpr char kRCFriSoundnessStatement[] =
-    "FRI REAL (v4/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=116, g=40, Fp2; "
+    "FRI REAL (v5/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=116, g=40, Fp2; "
+    "v5 half-domain fold (pair i with i+N/2) × log2(n_coeffs) → terminal "
+    "B-constant layer (Merkle of B identical leaves); "
     "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=65; "
     "DEEP/OOD binds P(z) via quotient openings at query sites (ePrint 2019/336); "
     "deep_z_forced supports Haböck I(1) at z=1. "
@@ -86,9 +89,11 @@ struct FriMerklePath {
 };
 
 struct FriFoldStep {
+    /** Pair indices on domain size N: even_index = i, odd_index = i + N/2. */
     uint32_t even_index{0};
-    Fp2 even{};
-    Fp2 odd{};
+    uint32_t odd_index{0};
+    Fp2 even{}; // f(x) at i
+    Fp2 odd{};  // f(-x) at i+N/2
     std::vector<uint256> even_siblings;
     std::vector<uint256> odd_siblings;
 };
@@ -224,8 +229,8 @@ struct FriCommitResult {
 // ============================================================================
 
 inline constexpr uint32_t kRCFriBatchProofMagic = 0x42495246u; // 'FRIB'
-inline constexpr uint32_t kRCFriBatchProofVersion = 1;
-inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V1";
+inline constexpr uint32_t kRCFriBatchProofVersion = 5;
+inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V5";
 /** Batched-instance query count. NAMED CONSTANT (soundness table): Q=116
  *  clears 2^-64 with <1 bit margin; Q=128 is the recommended hardening →
  *  floor(128·log2(32/17)) − 40 = 76 bits post-grinding. */
@@ -259,10 +264,11 @@ inline constexpr uint32_t kRCFriMaxLdeLog2 = 24;
 }
 
 inline constexpr char kRCFriBatchSoundnessStatement[] =
-    "BATCHED FRI (v7 substrate): ONE instance over ALL committed columns "
-    "(7 separate instances union to 2^-63.05 — FAILS 2^-64; batching restores "
-    "a single query term). Q=128, blowup=16, g=40, Fp2, UNIQUE-DECODING "
-    "alpha=17/32 => FriBatchSoundnessBoundBits()=76. DUAL-OOD DEEP (z1,z2): "
+    "BATCHED FRI (v7 substrate, v5 fold): ONE instance over ALL committed "
+    "columns (7 separate instances union to 2^-63.05 — FAILS 2^-64; batching "
+    "restores a single query term). Q=128, blowup=16, g=40, Fp2, UNIQUE-DECODING "
+    "alpha=17/32 => FriBatchSoundnessBoundBits()=76. v5 half-domain fold × "
+    "log2(n_coeffs) → terminal B-constant layer. DUAL-OOD DEEP (z1,z2): "
     "single OOD caps column degree at 2^24 < kappa=2^28; dual gives "
     "(2k/|Fp2|)^2 ~ 2^-196 pre-grind. Degree-shift RLC enforces per-column "
     "maximal degree. COMPUTATIONAL — not eps=0. Arbiter OFF.";
