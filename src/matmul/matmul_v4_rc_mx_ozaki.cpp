@@ -504,6 +504,86 @@ bool RcOzakiCpuLimbSplitGemmS8S8Int64(const std::vector<int8_t>& left,
     return true;
 }
 
+void DecomposeInt8Base4Planes(const int8_t* vals, size_t count, std::vector<int8_t> planes[4])
+{
+    for (uint32_t j = 0; j < 4; ++j) planes[j].assign(count, 0);
+    if (vals == nullptr || count == 0) return;
+    for (size_t i = 0; i < count; ++i) {
+        const int32_t x = static_cast<int32_t>(vals[i]);
+        int32_t mag = x < 0 ? -x : x;
+        const int8_t sgn = static_cast<int8_t>(x < 0 ? -1 : 1);
+        for (uint32_t j = 0; j < 4; ++j) {
+            const int32_t d = mag & 3;
+            planes[j][i] = (x == 0) ? int8_t{0} : static_cast<int8_t>(sgn * d);
+            mag >>= 2;
+        }
+    }
+}
+
+bool RcOzakiOperandsFitMxFastPathAbs(const std::vector<int8_t>& a, const std::vector<int8_t>& b)
+{
+    const auto abs_ok = [](const std::vector<int8_t>& v) {
+        for (int8_t x : v) {
+            const int32_t mag = x < 0 ? -static_cast<int32_t>(x) : static_cast<int32_t>(x);
+            if (mag > kRCMxOperandAbsMax) return false;
+        }
+        return true;
+    };
+    return abs_ok(a) && abs_ok(b);
+}
+
+bool RcOzakiBase4LimbGemmS8S8Int64(const std::vector<int8_t>& left,
+                                  const std::vector<int8_t>& right, uint32_t rows,
+                                  uint32_t inner, uint32_t cols, std::vector<int64_t>& out,
+                                  const matmul::v4::lt::ExactGemmBackend& gemm)
+{
+    out.clear();
+    if (rows == 0 || inner == 0 || cols == 0) return false;
+    if (left.size() != static_cast<size_t>(rows) * inner ||
+        right.size() != static_cast<size_t>(inner) * cols) {
+        return false;
+    }
+    std::vector<int8_t> a_planes[4];
+    std::vector<int8_t> b_planes[4];
+    DecomposeInt8Base4Planes(left.data(), left.size(), a_planes);
+    DecomposeInt8Base4Planes(right.data(), right.size(), b_planes);
+    const size_t out_n = static_cast<size_t>(rows) * cols;
+    out.assign(out_n, 0);
+    for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t j = 0; j < 4; ++j) {
+            const int64_t weight = int64_t{1} << (2u * (i + j));
+            const auto partial =
+                ExactGemmS8S8DispatchedLocal(gemm, a_planes[i], b_planes[j], rows, inner, cols);
+            if (partial.size() != out_n) { out.clear(); return false; }
+            for (size_t t = 0; t < out_n; ++t) {
+                out[t] += static_cast<int64_t>(partial[t]) * weight;
+            }
+        }
+    }
+    return true;
+}
+
+void FillHighScaleMixedPanels(std::vector<int8_t>& left, std::vector<int8_t>& right,
+                              uint32_t rows, uint32_t inner, uint32_t cols)
+{
+    left.assign(static_cast<size_t>(rows) * inner, 0);
+    right.assign(static_cast<size_t>(inner) * cols, 0);
+    for (uint32_t r = 0; r < rows; ++r) {
+        for (uint32_t k = 0; k < inner; ++k) {
+            const bool high = ((k / 32u) & 1u) == 0u;
+            left[static_cast<size_t>(r) * inner + k] =
+                high ? static_cast<int8_t>(-128) : static_cast<int8_t>(1);
+        }
+    }
+    for (uint32_t k = 0; k < inner; ++k) {
+        for (uint32_t c = 0; c < cols; ++c) {
+            const bool high = ((k / 32u) & 1u) == 0u;
+            right[static_cast<size_t>(k) * cols + c] =
+                high ? static_cast<int8_t>(-128) : static_cast<int8_t>(3);
+        }
+    }
+}
+
 void ResetRcOzakiQualForTest()
 {
     std::lock_guard<std::mutex> lock(g_host_mu);

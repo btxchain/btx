@@ -1613,4 +1613,97 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_sm120_native_capability_cpu_stub)
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
 }
 
+BOOST_AUTO_TEST_CASE(rc_ozaki_base4_decomp_total_for_all_int8)
+{
+    // F4: x = sign(x)·Σ digit_j·2^(2j), digit_j∈{0,1,2,3} — every int8 incl. -128.
+    for (int v = -128; v <= 127; ++v) {
+        const int8_t x = static_cast<int8_t>(v);
+        int8_t one = x;
+        std::vector<int8_t> planes[4];
+        rc::DecomposeInt8Base4Planes(&one, 1, planes);
+        int32_t recon = 0;
+        for (uint32_t j = 0; j < 4; ++j) {
+            BOOST_REQUIRE_LE(std::abs(static_cast<int>(planes[j][0])), 3);
+            recon += static_cast<int32_t>(planes[j][0]) * (1 << (2 * j));
+        }
+        BOOST_CHECK_EQUAL(recon, v);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_ozaki_high_scale_mixed_base4_matches_oracle)
+{
+    // F4 HighScaleMixed: unsafe direct Factor/single-MMA fails; base-4 matches int64.
+    constexpr uint32_t rows = 4, cols = 4, inner = 64;
+    std::vector<int8_t> L, R;
+    rc::FillHighScaleMixedPanels(L, R, rows, inner, cols);
+    BOOST_REQUIRE(!rc::RcOzakiOperandsFitMxFastPathAbs(L, R));
+
+    auto Dense = [](const std::vector<int8_t>& L, const std::vector<int8_t>& R, uint32_t rows,
+                    uint32_t inner, uint32_t cols) {
+        std::vector<int64_t> dense(static_cast<size_t>(rows) * cols, 0);
+        for (uint32_t r = 0; r < rows; ++r) {
+            for (uint32_t c = 0; c < cols; ++c) {
+                int64_t acc = 0;
+                for (uint32_t k = 0; k < inner; ++k) {
+                    acc += static_cast<int64_t>(L[static_cast<size_t>(r) * inner + k]) *
+                           static_cast<int64_t>(R[static_cast<size_t>(k) * cols + c]);
+                }
+                dense[static_cast<size_t>(r) * cols + c] = acc;
+            }
+        }
+        return dense;
+    };
+
+    const auto dense = Dense(L, R, rows, inner, cols);
+    std::vector<int64_t> base4;
+    BOOST_REQUIRE(rc::RcOzakiBase4LimbGemmS8S8Int64(L, R, rows, inner, cols, base4));
+    BOOST_CHECK(base4 == dense);
+
+    // Arbitrary int8 (incl. values outside MX alphabet) must also match.
+    for (size_t i = 0; i < L.size(); ++i) {
+        L[i] = static_cast<int8_t>(static_cast<int32_t>(i * 17u) - 128);
+    }
+    for (size_t i = 0; i < R.size(); ++i) {
+        R[i] = static_cast<int8_t>(127 - static_cast<int32_t>(i * 13u % 256));
+    }
+    const auto dense2 = Dense(L, R, rows, inner, cols);
+    BOOST_REQUIRE(rc::RcOzakiBase4LimbGemmS8S8Int64(L, R, rows, inner, cols, base4));
+    BOOST_CHECK(base4 == dense2);
+
+    // Fail-closed until native MXFP4 qualifies.
+    rc::ResetRcOzakiQualForTest();
+    if (!rc::IsRcOzakiMxfp4Qualified()) {
+        std::vector<int64_t> oz;
+        rc::FillHighScaleMixedPanels(L, R, rows, inner, cols);
+        BOOST_CHECK(!rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, rows, inner, cols, oz));
+    } else {
+        rc::FillHighScaleMixedPanels(L, R, rows, inner, cols);
+        const auto dense3 = Dense(L, R, rows, inner, cols);
+        std::vector<int64_t> oz;
+        BOOST_REQUIRE(rc::TryRcOzakiMxfp4GemmS8S8Int64(L, R, rows, inner, cols, oz));
+        BOOST_CHECK(oz == dense3);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(rc_wgrad_chunked_exact_matches_medium_shape)
+{
+    // A4/F10: medium b_seq=8192 exceeds 2^24; chunked ExactGemm == int64 oracle.
+    constexpr uint32_t b_seq = 8192;
+    constexpr uint32_t d_model = 16;
+    BOOST_CHECK_GT(static_cast<uint64_t>(b_seq) * 2304ull, uint64_t{1} << 24);
+    std::vector<int8_t> G(static_cast<size_t>(b_seq) * d_model, 48);
+    std::vector<int8_t> X(static_cast<size_t>(b_seq) * d_model, -48);
+    const auto oracle = rc::TestHelperGemmGXtInt64(G, X, b_seq, d_model);
+    const auto chunked = rc::TestHelperGemmGXtViaChunkedExact(G, X, b_seq, d_model);
+    BOOST_REQUIRE_EQUAL(oracle.size(), chunked.size());
+    BOOST_CHECK(oracle == chunked);
+    BOOST_CHECK_GT(std::llabs(oracle[0]), 1LL << 24);
+
+    const auto med = rc::MakeMediumRCEpisodeParams();
+    BOOST_CHECK_EQUAL(med.b_seq, 8192u);
+    CBlockHeader hdr = MakeRCHeader(7);
+    const uint256 cpu = rc::MineRCEpisode(hdr, med, /*height=*/0);
+    BOOST_CHECK(!cpu.IsNull());
+}
+
 BOOST_AUTO_TEST_SUITE_END()

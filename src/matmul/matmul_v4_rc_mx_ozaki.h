@@ -90,6 +90,26 @@ struct RCOzakiMxfp4Status {
     uint32_t inner, uint32_t cols, std::vector<int64_t>& out,
     const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
+/**
+ * Exact base-4 limb decomposition (F4 / WP-D):
+ *   x = sign(x)·Σ_{j=0..3} digit_j · 2^(2j),  digit_j ∈ {0,1,2,3}.
+ * Totality for every int8 including -128 without storing +128. Writes four
+ * signed digit planes (values in {-3..3}) such that
+ *   vals[i] == Σ_j planes[j][i] · 2^(2j).
+ */
+void DecomposeInt8Base4Planes(const int8_t* vals, size_t count, std::vector<int8_t> planes[4]);
+
+[[nodiscard]] bool RcOzakiOperandsFitMxFastPathAbs(const std::vector<int8_t>& a,
+                                                   const std::vector<int8_t>& b);
+
+[[nodiscard]] bool RcOzakiBase4LimbGemmS8S8Int64(
+    const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,
+    uint32_t inner, uint32_t cols, std::vector<int64_t>& out,
+    const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
+void FillHighScaleMixedPanels(std::vector<int8_t>& left, std::vector<int8_t>& right,
+                              uint32_t rows, uint32_t inner, uint32_t cols);
+
 void ResetRcOzakiQualForTest();
 
 } // namespace matmul::v4::rc
