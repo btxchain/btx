@@ -836,3 +836,82 @@ posture).
   2^33-cell trace put consensus-dim proving far over the CPU soft budget; the
   `over_budget → ExactReplay` shipping posture and the HBM PARK are unaffected by this
   document.
+
+---
+
+## 12. Construction I — batched multilinear evaluation opening (implemented 2026-07-22)
+
+`src/matmul/matmul_v4_rc_gkr_eval.{h,cpp}` now carries the §2.4 primitive in full,
+stated as finite-field algebra over F_p (Goldilocks) and K = F_{p²}:
+
+- **Stage 1 — γ-batched eq-kernel summation-reduction** (`EvalOpenProve/Verify`):
+  for claims {(u_c, z_m, y_m)} on root-bound columns, ONE ν-round degree-2
+  reduction on F(x) = Σ_m γ^m·u_{c(m)}(x)·eq(z_m, x) with Σ_x F(x) = Σ_m γ^m·y_m,
+  ending at a common point r ∈ K^ν with one residual ũ_c(r) per distinct column;
+  the checking routine spends O(ν) per round plus O(M·ν) native eq(z_m, r).
+  Points shorter than ν are zero-extended (low sub-cube identity); a point that
+  does not cover the column's logical length is refused (`point_short` guard —
+  the F-pad-adjacent smuggling surface).
+- **Stage 2 — root binding of the residuals** (existing `EvalArgumentProve/
+  Verify`, Aurora/Lemma-1.2): the reduced claims aggregate under μ into the
+  univariate identity whose f/g columns ride the SAME `FriBatchCommit`
+  (dual-OOD, degree-shift RLC, Q = 128). One low-degree-proximity instance for
+  the whole claim set — no union across per-column instances (§2.3).
+- **End-to-end bundle**: `BatchedOpeningProve/Verify` (γ seed bound to the
+  epoch-1 column roots; Stage-2 seed = the Stage-1 transcript digest;
+  check order: shape → `FriBatchVerify` → Stage-1 replay → Stage-2 identity).
+- **G1/G2/G5 pieces** (claim/point builders only; integration wires them):
+  `RCGkrMatrixOpeningClaim` (a_at_r = Ã(r_i,r_k), b_at_r = B̃(r_k,r_j), free
+  transpose view M̃ᵀ(r,s) = M̃(s,r)) + `RCGkrCheckFinalEvalBinding`
+  (gf = a·b, deterministic) for G1; `RCGkrSegmentPoint` (aligned trace-column
+  segment via 0/1 high coordinates) + `RCGkrFoldChunkClaims` (two-chunk
+  top-variable glue) for G2; `RCGkrResidualAcc`/`RCGkrCheckResidualAcc`
+  (acc̃(r) = Ỹ(r) + X̃(r) by MLE linearity, acc derived never carried) for G5.
+
+**Acceptance obligations.**
+
+(a) *Completeness*: a valid assignment (u, z, y = ũ(z)) satisfies every check
+as an exact polynomial identity (round sums, chain-end eq identity, Lemma-1.2
+coefficient identities, FRI/DEEP openings) — accepted with probability 1.
+Test: `constr1_completeness_valid_assignment`.
+
+(b) *Separation bound* (composed, |K| = p² > 2^127.99; caps ν ≤ 28 = log2 κ,
+M ≤ 2^12 claims, W ≤ 2^12 columns; grinding budget 2^40):
+
+| term | bound (pre-grinding) |
+|---|---|
+| γ-batching (powers of one γ) | (M−1)/\|K\| ≤ 2^-116 |
+| eq-sumcheck, ν rounds, deg ≤ 2 (S1) | 2ν/\|K\| ≤ 2^-122.2 |
+| μ-aggregation of reduced openings (Thm 2.2) | (M−1)/\|K\| ≤ 2^-116 |
+| batch RLC λ + DEEP weights (Thm 2.1) | (W+2)/\|K\| ≤ 2^-116 |
+| dual-OOD bad-point pairs (S5) | (2κ/(\|K\|−2^32))² ≤ 2^-196 |
+
+FS subtotal ≤ 3·2^-116 + 2^-122.2 ≈ 2^-114.4; ×2^40 ⇒ ≤ 2^-74.4. Adding the
+batched-FRI query term 2^-76.8 (Q = 128, post-grinding;
+`FriBatchSoundnessBoundBits() = 76`) and the SHA256d binding term ≤ 2^-88:
+
+  **ε_total ≤ 2^-74.4 + 2^-76.8 + 2^-88 < 2^-74, i.e. −log2(ε_total) ≥ 74**,
+
+clearing the 2^-64 target with ≥ 10 bits of margin
+(`RCGkrConstructionISeparationBits() = 74`, statically asserted ≥ 64+10).
+This instantiates the §8 accounting for the evaluation-opening sub-protocol
+alone; composed into the full episode proof it is absorbed by the same rows.
+
+(c) *Counterexamples* (`src/test/matmul_v4_rc_gkr_eval_tests.cpp`, wired into
+`src/test/CMakeLists.txt`): the checked identity evaluates NONZERO on every
+tested invalid assignment — (i) an internally-consistent transcript for
+y′ ≠ ũ(z) (round sums repaired by constant shifts into g(0), chain end
+repaired by a fabricated residual; built by the test-only
+`BatchedOpeningProveInvalidAssignmentForTest`) satisfies ALL Stage-1 algebra
+and is detected exactly at the Stage-2 root binding (`eval:identity_z1/z2` —
+the Lemma-1.2 residual is a nonzero constant σ − h_n, deterministic given the
+bound openings); (ii) a wrong batched γ-combination (claims permuted, foreign
+FS seed, tampered round message, tampered residual) is detected at Stage 1
+(`eqopen:round_sum` / `eqopen:final`); (iii) the valid assignment passes.
+The plain constructing routine refuses invalid claims outright
+("claims disagree with columns").
+
+Consensus posture unchanged: arbiter OFF, activation heights INT32_MAX,
+`RecomputeResidentCurriculumReference`/`RecomputeCoupledPuzzleReference`
+untouched; `VerifyWinnerProofV7`/`matmul_v4_rc_gkr.cpp` wiring is the
+integration wave's job — this section provides the primitive + tests only.
