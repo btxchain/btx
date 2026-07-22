@@ -926,12 +926,8 @@ bool RCCudaEpisodeContext::LoadBank(const std::vector<std::vector<int8_t>>& page
         if (error) *error = "RCCudaEpisodeContext: bank commitment null";
         return false;
     }
-    // Keep bank_root on device for episode digest assembly.
-    if (!CudaOk(cudaMemcpy(L.d_bank_root, m_bank_root.data(), 32, cudaMemcpyHostToDevice), error,
-                "bank_root H2D")) {
-        return false;
-    }
-    h2d += 32;
+    // Bank root stays host-side: AssembleCoupledEpisodeDigest runs on host
+    // (device_digest=false). Do not H2D into a nonexistent arena slot.
     m_bank_loaded = true;
     m_prov.device_bank_resident = true;
     m_prov.h2d_bytes_per_window += h2d;
