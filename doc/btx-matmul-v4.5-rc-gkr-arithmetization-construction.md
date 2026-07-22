@@ -6,7 +6,10 @@ Supersedes the gap table in `doc/btx-matmul-v4.5-rc-arithmetization-completeness
 
 **Consensus posture (unchanged).** The int64 reference
 (`RecomputeResidentCurriculumReference`, `RecomputeCoupledPuzzleReference`) remains the sole
-consensus authority. `BTX_RC_GKR_ARBITER` stays OFF, all activation heights stay `INT32_MAX`.
+consensus authority. `kRCGkrFormalSoundnessReady=false` hard-disables the arbiter
+(`EnvRCGkrArbiterEnabled` ignores `BTX_RC_GKR_ARBITER`); all activation heights stay
+`INT32_MAX`. G1–G5 remain OPEN/PARKED until succinct bindings + external audit.
+Composed bound writeup: `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`.
 This document is the mathematics that must be implemented before any audited cutover can even
 be discussed. Nothing here weakens or replaces exact replay.
 
@@ -22,10 +25,13 @@ be discussed. Nothing here weakens or replaces exact replay.
    having done zero episode work. Proof: §9, Forgery F0. Every "CLOSED (scaffold)" claim of
    G1–G3 in the M7+ audit is therefore reverted; the scaffold is *format*-complete, not
    *soundness*-complete. The five relations below are what actually closes it.
-2. **Nothing is fundamentally OPEN.** All five relations are soundly constrainable inside
-   the existing sumcheck + LogUp + FRI system. The honest cost is that relation (3)
-   (Extract) and the trace boundary of relation (2) require **in-circuit AIRs for ChaCha20
-   and SHA-256 compression** (≈ 2^42–2^43 lookup rows at consensus dims). That is laborious,
+2. **Nothing is fundamentally unconstrainable.** All five relations are soundly
+   constrainable inside the existing sumcheck + LogUp + FRI system. Shipped
+   **G1–G5 status remains OPEN/PARKED** until those bindings land and independent
+   malicious constructors are rejected under PCS/AIR (not merely under native
+   grounding). The honest cost is that relation (3) (Extract) and the trace
+   boundary of relation (2) require **in-circuit AIRs for ChaCha20 and SHA-256
+   compression** (≈ 2^42–2^43 lookup rows at consensus dims). That is laborious,
    not impossible; no obstruction theorem exists (§11).
 3. **Three quantified corrections to the shipped parameter story:**
    - **Seven separate FRI instances do not clear 2^-64.** Each instance is 2^-65 after
@@ -752,8 +758,8 @@ insufficient).
 
 ## 10. Implementation blueprint (`matmul_v4_rc_gkr.cpp` and friends)
 
-Behind the OFF arbiter flag throughout; proof version bump 6 → 7; int64 reference
-untouched; shadow-mode first.
+Behind the hard-disabled arbiter flag throughout (`kRCGkrFormalSoundnessReady=false`);
+proof version bump 6 → 7; int64 reference untouched; shadow-mode first.
 
 **`matmul_v4_rc_fri.{h,cpp}`** (compose-only additions, no redesign):
 - `FriBatchCommit(cols, fs_seed) / FriBatchVerify` — §2.2: per-column Merkle roots, RLC
@@ -819,8 +825,9 @@ posture).
   wrong* (keyed, int64-domain, data-dependent consumption — §5.1), and the shipped
   virtual-table check has exactly zero soundness (Theorem 5.1). The sound construction
   exists (§5.4–5.7) but requires in-circuit ChaCha20 + SHA-256 (≈ 2^43 LogUp rows at
-  consensus dims). This is labor, not impossibility: **no obstruction theorem, so no
-  OPEN mark is honest here.** Field verdict: Fp2 + dual-α suffices; single-α forces Fp3.
+  consensus dims). This is labor, not impossibility: **no obstruction theorem**.
+  Shipped G3 status remains **OPEN/PARKED** until the AIR is implemented and audited.
+  Field verdict: Fp2 + dual-α suffices; single-α forces Fp3.
 - **R4 (canonical sequence): CLOSABLE, essentially free** once R2's layout discipline is
   adopted (verifier-driven enumeration ⇒ deterministic rejection of order forgeries).
 - **R5 (coupled): CLOSABLE.** All components reduce to machinery already required
@@ -829,9 +836,12 @@ posture).
   bank_root binding at production dims (§7.6) — the per-winner variant is sound but
   budget-hostile; the amortized variant is sound and cheap but is a (minor, explicit)
   protocol addition.
-- **Nothing is OPEN in the obstruction sense.** Conversely, nothing in G1–G3 was
-  actually closed in v6; the honest status is: *constructions specified and proven here;
-  implementation pending; arbiter stays OFF; ExactReplay remains the sole authority.*
+- **No obstruction theorem blocks G1–G5.** Conversely, nothing in G1–G5 was actually
+  closed as a succinct relation in v6/v7 scaffolding; the honest status is:
+  *constructions specified and proven here; implementation pending; G1–G5 remain
+  OPEN/PARKED; arbiter hard-disabled (`kRCGkrFormalSoundnessReady=false`); ExactReplay
+  remains the sole authority. v7 defeats independent forges by grounding, not by
+  claiming these rows CLOSED.*
 - Prover-cost reality (unchanged from the Reality Guardrail): ≈ 2^43 lookup rows plus a
   2^33-cell trace put consensus-dim proving far over the CPU soft budget; the
   `over_budget → ExactReplay` shipping posture and the HBM PARK are unaffected by this

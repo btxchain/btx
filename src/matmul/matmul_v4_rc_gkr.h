@@ -38,8 +38,9 @@
 //
 // Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC) is the arbiter.
 // Shadow: BTX_RC_GKR_SHADOW=1 (default) generate+verify, log mismatches, never
-// reject. Arbiter cutover BTX_RC_GKR_ARBITER=1 is OFF by default and does NOT
-// raise height.
+// reject. Arbiter cutover is compile-time hard-disabled via
+// kRCGkrFormalSoundnessReady (ignores BTX_RC_GKR_ARBITER) and does NOT raise
+// height. v7 grounding / prove / verify remain callable for tests.
 
 namespace matmul::v4::rc {
 
@@ -47,6 +48,20 @@ inline constexpr uint32_t kRCGkrProofVersion = 7;
 inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V7";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
 inline constexpr uint32_t kRCGkrProofMagic = 0x524b4737u; // 'RKG7'
+
+/**
+ * Compile-time gate for succinct-proof / arbiter consensus authority.
+ *
+ * While false, EnvRCGkrArbiterEnabled() always returns false and ignores
+ * BTX_RC_GKR_ARBITER — no path may accept GKR as proof-only consensus winner.
+ * Does NOT disable: shadow observe, prove/verify APIs, or v7 native re-derivation
+ * grounding in VerifyWinnerProofV7 / Coupled V7 (sound by grounding against the
+ * int64 reference; ExactReplay remains sole consensus authority).
+ *
+ * Flip only after formal ≤2^{-64}-after-grind + G1–G5 succinct bindings +
+ * external audit. G1–G5 remain OPEN/PARKED until then.
+ */
+inline constexpr bool kRCGkrFormalSoundnessReady = false;
 
 inline constexpr const char* kRCGkrRealityGuardrail =
     "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
@@ -73,7 +88,8 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Coupled: real lobe-GEMM + barrier-Extract format (no toy stand-in) but "
     "bindings incomplete. External crypto audit MANDATORY before arbiter. "
     "Merkle q=8 is DoS PREFILTER ONLY. ExactReplay remains consensus arbiter "
-    "(BTX_RC_GKR_ARBITER OFF). nMatMulRCHeight=INT32_MAX.";
+    "(kRCGkrFormalSoundnessReady=false ⇒ EnvRCGkrArbiterEnabled ignores "
+    "BTX_RC_GKR_ARBITER). nMatMulRCHeight=INT32_MAX.";
 
 inline constexpr const char* kRCGkrSoundnessStatement = kRCGkrSoundnessBoundStatement;
 inline constexpr const char* kRCGkrSoundnessNote = kRCGkrSoundnessBoundStatement;
@@ -107,7 +123,7 @@ inline constexpr const char* kRCGkrCoupledArithStatement =
     "eval argument; page-selection/exchange/perm/mix/Extract/roots grounded "
     "natively vs the immutable int64 reference (SOUND, over_budget). Never "
     "emits a toy/episode stand-in proof of unrelated work. "
-    "BTX_RC_GKR_ARBITER stays OFF.";
+    "Arbiter hard-disabled (kRCGkrFormalSoundnessReady=false).";
 
 /**
  * Honest G1–G5 status — CLOSED only after independent malicious proofs REJECT
@@ -120,7 +136,7 @@ inline constexpr const char* kRCGkrG1G5ClosedStatement =
     "(G2) claim/y_root unbound to trace_fri segment openings; (G3) prover "
     "manufactures identical witness/table keys (Theorem 5.1 vacuity); "
     "(G4) extract_out_commit is FS-only; (G5) residual algebra without column "
-    "wiring. Arbiter OFF; ExactReplay sole consensus accept. "
+    "wiring. Arbiter hard-disabled; ExactReplay sole consensus accept. "
     "External crypto audit mandatory before any CLOSED claim.";
 
 /** Alias kept for call sites that still name the closed statement. */
@@ -129,8 +145,9 @@ inline constexpr const char* kRCGkrG1G5StatusStatement = kRCGkrG1G5ClosedStateme
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
     "mismatch LogWarning; NEVER rejects CheckMatMulProofOfWork_RC. "
-    "BTX_RC_GKR_ARBITER=1 cutover is OFF by default and does NOT raise height; "
-    "when OFF, ExactReplay decides.";
+    "kRCGkrFormalSoundnessReady=false: EnvRCGkrArbiterEnabled ignores "
+    "BTX_RC_GKR_ARBITER (no proof-only consensus authority); ExactReplay "
+    "decides. Does NOT raise height.";
 
 using gkr_field::Fp;
 using gkr_field::Fp2;
@@ -584,7 +601,10 @@ struct RCProdVerifyResult {
 [[nodiscard]] bool EnvRCVerifyGkrEnabled();
 /** Shadow mode: default ON unless BTX_RC_GKR_SHADOW=0. Never rejects consensus. */
 [[nodiscard]] bool EnvRCGkrShadowEnabled();
-/** Arbiter cutover: OFF by default. When ON still does not raise height. */
+/**
+ * Arbiter cutover probe. Always false while !kRCGkrFormalSoundnessReady
+ * (ignores BTX_RC_GKR_ARBITER). Even if someday true, does not raise height.
+ */
 [[nodiscard]] bool EnvRCGkrArbiterEnabled();
 
 [[nodiscard]] DistSynthShape RCGkrShapeForEpisode(const RCEpisodeParams& params);
@@ -654,7 +674,7 @@ struct RCProdVerifyResult {
 
 /**
  * FALLBACK / DISPUTE verifier: ε=0 bounded exact STREAMED replay.
- * CONSENSUS arbiter while BTX_RC_GKR_ARBITER is OFF.
+ * CONSENSUS arbiter while kRCGkrFormalSoundnessReady is false (arbiter hard-off).
  */
 [[nodiscard]] ExactReplayVerifyResult VerifyBoundedExactReplay(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,

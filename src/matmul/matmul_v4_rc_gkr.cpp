@@ -2149,7 +2149,14 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
 bool EnvRCWinnerGkrEnabled() { return EnvFlagIsOne("BTX_RC_WINNER_GKR"); }
 bool EnvRCVerifyGkrEnabled() { return EnvFlagIsOne("BTX_RC_VERIFY_GKR"); }
 bool EnvRCGkrShadowEnabled() { return !EnvFlagIsZero("BTX_RC_GKR_SHADOW"); }
-bool EnvRCGkrArbiterEnabled() { return EnvFlagIsOne("BTX_RC_GKR_ARBITER"); }
+bool EnvRCGkrArbiterEnabled()
+{
+    // A3/F3: compile-time hard-disable — no env var can grant proof-only
+    // consensus authority while formal soundness is not ready. Prove/verify/
+    // shadow and v7 grounding paths remain independent of this gate.
+    if (!kRCGkrFormalSoundnessReady) return false;
+    return EnvFlagIsOne("BTX_RC_GKR_ARBITER");
+}
 
 DistSynthShape RCGkrShapeForEpisode(const RCEpisodeParams& params)
 {

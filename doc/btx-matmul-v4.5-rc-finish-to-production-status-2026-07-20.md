@@ -85,7 +85,7 @@ against Stages §§1–5. It does **not** raise height.
 | **M5 shadow** | **Intact** — shadow ON, arbiter OFF, ExactReplay decides |
 | **M6 FRI params** | **DONE (Fable)** — Q=116, blowup=16, g=40, Fp2; bits=65 |
 | **M6+ DEEP/OOD** | **DONE (FRI v3)** — quotient identity at query sites |
-| **M7 under-constraint** | **IMPROVED, NOT CLOSED** — v7 defeats the independent fabricated-witness constructors (arbitrary A/B, unrelated roots, fabricated trace/lookup/Extract, unrelated bank pages) by grounding against the immutable int64 reference (witness-carried verification / native re-execution), NOT by a compact in-circuit AIR. Succinctness (in-circuit ChaCha/SHA/tile-tree + committed openings) is **PARKED**; **arbiter stays OFF**; external audit OPEN |
+| **M7 under-constraint** | **IMPROVED, NOT CLOSED** — v7 defeats the independent fabricated-witness constructors (arbitrary A/B, unrelated roots, fabricated trace/lookup/Extract, unrelated bank pages) by grounding against the immutable int64 reference (witness-carried verification / native re-execution), NOT by a compact in-circuit AIR. Succinctness (in-circuit ChaCha/SHA/tile-tree + committed openings) is **PARKED**; G1–G5 remain **OPEN/PARKED**; **arbiter hard-disabled** (`kRCGkrFormalSoundnessReady=false`); external audit OPEN. Composed bound ≈ 65.7 bits under batched+dual-OOD+dual-α — see `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md` |
 | **M8 soundness note** | **DONE** + emulated multi-persona audit doc |
 | **Emulated audit** | `doc/btx-matmul-v4.5-rc-crypto-audit-emulated-2026-07-21.md` — **not** external sign-off |
 | **M10 PCS alt** | **DONE (recommend)** — hand-rolled-but-audited FRI; no consensus vendor dep |
