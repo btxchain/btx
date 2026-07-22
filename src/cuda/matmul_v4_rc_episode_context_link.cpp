@@ -51,6 +51,14 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     p.lobes = shape.lobes;
     p.lobe_width = shape.lobe_width;
     p.bank_pages = shape.bank_pages;
+    // F6: stub must also refuse M>1 (no silent wrong-digest path).
+    if (p.rows_per_lobe != 1) {
+        if (error) {
+            *error = "RCCudaEpisodeContext stub: rows_per_lobe!=1 fail-closed "
+                     "(resident path does not wire V3 M>1)";
+        }
+        return false;
+    }
     if (!matmul::v4::rc::ValidateRCCoupParams(p)) {
         if (error) *error = "RCCudaEpisodeContext stub: ValidateRCCoupParams failed";
         return false;
@@ -85,6 +93,14 @@ void RCCudaEpisodeContext::RefreshPeakReadyDerived()
 bool RCCudaEpisodeContext::Init(const matmul::v4::rc::RCCoupParams& params, uint32_t batch_q,
                                 std::string* error)
 {
+    // F6: refuse V3 M>1 rather than silently dropping rows_per_lobe.
+    if (params.rows_per_lobe != 1) {
+        if (error) {
+            *error = "RCCudaEpisodeContext stub: rows_per_lobe!=1 fail-closed "
+                     "(resident path does not wire V3 M>1)";
+        }
+        return false;
+    }
     RCCudaEpisodeShape shape;
     shape.barriers = params.barriers;
     shape.lobes = params.lobes;

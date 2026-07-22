@@ -14,17 +14,21 @@
 #include <string>
 #include <vector>
 
-// REAL FRI PCS for ENC_RC Section-2 (proof version 3) — M6/Fable + DEEP/OOD.
+// REAL FRI PCS for ENC_RC Section-2 (proof version 5) — M6/Fable + DEEP/OOD.
 //
 // Pipeline: LDE (blowup) → Merkle commit → DEEP out-of-domain sample →
-// multi-round fold → FS queries with per-layer fold-path openings + DEEP
-// quotient openings at the same indices. Witness LDE is NEVER shipped.
+// log2(n_coeffs) half-domain folds → terminal B-constant layer → FS queries
+// with per-layer fold-path openings + DEEP quotient openings at the same
+// indices. Witness LDE is NEVER shipped.
 //
 // ============================================================================
 // SOUNDNESS PARAMETERS (M6 — Fable cross-check; code and statement MUST agree)
 // ============================================================================
-// Shipped: g=40, Fp2, blowup B=16 (ρ=1/16), Q=116 unique decoding.
-// FriSoundnessBoundBits() = 65. See soundness note.
+// Shipped: g=40, Fp2, blowup B=16 (ρ=1/16), Q=128 unique decoding.
+// FriSoundnessBoundBits() = 76 (real value 128·log2(32/17) − 40 = 76.80).
+// Q was raised 116 → 128 (2026-07-22 margin restoration): at Q=116 the fold
+// proximity term (65.85) was the composed-bound floor with only ≈ 1.8 bits of
+// margin over the 2^-64 target. See soundness note.
 //
 // DEEP/OOD (ePrint 2019/336; DEEP-ALI practice): after committing P, draw z∉D,
 // claim v=P(z), commit quotient Q=(P−v)/(X−z), open Q at FRI query sites,
@@ -36,13 +40,17 @@ namespace matmul::v4::rc {
 
 using gkr_field::Fp2;
 
-inline constexpr uint32_t kRCFriProofMagic = 0x46524934u; // 'FRI4'
-inline constexpr uint32_t kRCFriProofVersion = 4;
-inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V4";
+inline constexpr uint32_t kRCFriProofMagic = 0x46524935u; // 'FRI5'
+inline constexpr uint32_t kRCFriProofVersion = 5;
+inline constexpr char kRCFriDomainTag[] = "BTX_RC_FRI_V5";
 
 inline constexpr uint32_t kRCFriBlowup = 16;
 inline constexpr uint32_t kRCFriGrindingBits = 40;
-inline constexpr uint32_t kRCFriNumQueries = 116;
+/** Fold-instance query count. Raised 116 → 128 (2026-07-22): the fold's own
+ *  proximity soundness Q·log2(32/17) − g is the composed-bound floor; Q=116
+ *  gave 65.85 bits (≈ 1.8 over the 64 target — inadequate), Q=128 gives 76.80
+ *  and matches kRCFriBatchNumQueries. */
+inline constexpr uint32_t kRCFriNumQueries = 128;
 inline constexpr uint32_t kRCFriNumQueriesBciKs20Optional = 53;
 
 [[nodiscard]] inline int FriSoundnessBoundBits()
@@ -55,10 +63,13 @@ inline constexpr uint32_t kRCFriNumQueriesBciKs20Optional = 53;
 inline constexpr int kRCFriTargetSoundnessBits = 64;
 
 inline constexpr char kRCFriSoundnessStatement[] =
-    "FRI REAL (v4/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=116, g=40, Fp2; "
-    "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=65; "
+    "FRI REAL (v5/M6/Fable+DEEP): blowup=16 (ρ=1/16), Q=128, g=40, Fp2; "
+    "v5 half-domain fold (pair i with i+N/2) × log2(n_coeffs) → terminal "
+    "B-constant layer (Merkle of B identical leaves); "
+    "UNIQUE-DECODING α=17/32 ⇒ FriSoundnessBoundBits()=76; "
     "DEEP/OOD binds P(z) via quotient openings at query sites (ePrint 2019/336); "
-    "deep_z_forced supports Haböck I(1) at z=1. "
+    "OOD z resampled until Fp2.c1!=0; deep_quot_root≡nested FRI layer-0; "
+    "deep_z_forced Haböck I(1) at z=1 uses layer-0 Merkle opening (not quotient). "
     "NOT conjectured ρ^Q. ROM, commit-then-challenge; fs_seed PoW-bound. "
     "COMPUTATIONAL — not ε=0.";
 
@@ -86,9 +97,11 @@ struct FriMerklePath {
 };
 
 struct FriFoldStep {
+    /** Pair indices on domain size N: even_index = i, odd_index = i + N/2. */
     uint32_t even_index{0};
-    Fp2 even{};
-    Fp2 odd{};
+    uint32_t odd_index{0};
+    Fp2 even{}; // f(x) at i
+    Fp2 odd{};  // f(-x) at i+N/2
     std::vector<uint256> even_siblings;
     std::vector<uint256> odd_siblings;
 };
@@ -117,14 +130,25 @@ struct FriProof {
     std::vector<FriQueryOpening> queries;
     /** DEEP/OOD (v3). has_deep=false only for nested quotient FRI. */
     bool has_deep{false};
-    /** If true, deep_z was fixed by the caller (not FS-sampled); verifier absorbs it. */
+    /**
+     * If true, deep_z was fixed by the caller (not FS-sampled); verifier absorbs it.
+     * When deep_z ∈ D (Haböck z=1), binding is a layer-0 Merkle opening of P at the
+     * domain index — NOT the DEEP quotient path (z∈D is not a valid OOD point).
+     */
     bool deep_z_forced{false};
     Fp2 deep_z{};
     Fp2 deep_eval{};
+    /** Must equal deep_quot_fri->layers[0].root / n_leaves (OOD path). */
     uint256 deep_quot_root{};
     uint32_t deep_quot_n_leaves{0};
-    /** Low-degree FRI on Q=(P−v)/(X−z); no recursive DEEP. */
+    /** Low-degree FRI on Q=(P−v)/(X−z); no recursive DEEP. Null on Haböck path. */
     std::shared_ptr<FriProof> deep_quot_fri;
+    /**
+     * Haböck in-domain forced-z: Merkle path of deep_eval into layers[0] at
+     * deep_domain_index (DomainPoint(n0, index) == deep_z). Empty on OOD path.
+     */
+    uint32_t deep_domain_index{0};
+    std::vector<uint256> deep_domain_siblings;
 };
 
 struct FriCommitResult {
@@ -141,7 +165,10 @@ struct FriCommitResult {
                                                uint64_t pow_grind_nonce = 0,
                                                bool enable_deep = true);
 
-/** Like FriCommitAndFold but forces DEEP evaluation at a fixed z (e.g. 1 for LogUp Σ). */
+/**
+ * Like FriCommitAndFold but forces evaluation at a fixed z (e.g. 1 for LogUp Σ).
+ * If z ∈ D (Haböck z=1), binds P(z) via layer-0 Merkle opening; otherwise DEEP quotient.
+ */
 [[nodiscard]] FriCommitResult FriCommitAndFoldDeepAt(const std::vector<Fp2>& coeffs,
                                                      const uint256& fs_seed, const Fp2& deep_z,
                                                      uint64_t pow_grind_nonce = 0);
@@ -174,21 +201,26 @@ struct FriCommitResult {
 // + companion soundness table 2026-07-21.
 //
 // WHY BATCHING IS MANDATORY (not cosmetic): the v6 proof carries 7 independent
-// FRI instances (a/b/trace/lookup/table/inv/r). Each is 2^-65.85 post-grinding;
-// the adversary attacks the weakest of its choice, so the union bound is
-// ≥ 7·2^-65.85 ≈ 2^-63.05 — FAILING the 2^-64 target. A single batched
-// instance over the FS random linear combination λ of all columns restores a
-// single query term.
+// FRI instances (a/b/trace/lookup/table/inv/r). At the historical Q=116 each
+// was 2^-65.85 post-grinding; the adversary attacks the weakest of its choice,
+// so the union bound was ≥ 7·2^-65.85 ≈ 2^-63.05 — FAILING the 2^-64 target
+// outright. Even at Q=128 (2^-76.8 each) the ≈ 2.8-bit union loss drops
+// 7 instances to ≈ 2^-74.0, burning the entire ≥ 74-bit adequacy band. A
+// single batched instance over the FS random linear combination λ of all
+// columns restores a single query term.
 //
-// QUERY COUNT: Q = 116 clears 2^-64 with < 1 bit of margin (65.85 bits).
-// Per the blueprint's pre-cutover hardening recommendation the batched
-// instance ships Q = kRCFriBatchNumQueries = 128:
-//   128·log2(32/17) = 116.80 bits pre-grinding − 40 grinding = 76 bits.
+// QUERY COUNT: Q = 116 cleared 2^-64 with < 1 bit of margin (65.85 bits).
+// Both the fold instance (kRCFriNumQueries) and the batched instance
+// (kRCFriBatchNumQueries) now ship Q = 128:
+//   128·log2(32/17) = 116.80 bits pre-grinding − 40 grinding = 76.80 bits.
 //
 // DUAL-OOD DEEP: a single OOD point z over Fp2 caps the bindable column
 // degree at 2^(128−40−64) = 2^24 coefficients; consensus columns reach
 // κ = 2^28. Two independent OOD points z1 ≠ z2 give
 // (2κ/(|Fp2|−|D|))² ≈ 2^-196 pre-grinding (soundness table row "dual-OOD").
+// (An Fp3 challenge draw would raise this to ≈ 2^-326, but the OOD point z
+// feeds the DEEP quotient CODEWORD, so it stays in Fp2 with the rest of the
+// FRI stack — the Fp3 lift is a scoped follow-on; see INTEGRATION_REPORT.md.)
 // Every column's claimed evaluations at BOTH z1 and z2 ride in the proof and
 // are bound by the batched DEEP identity at each query site — these bound
 // (C_i(z1), C_i(z2)) pairs ARE the opening primitive the §2.4 evaluation
@@ -224,8 +256,8 @@ struct FriCommitResult {
 // ============================================================================
 
 inline constexpr uint32_t kRCFriBatchProofMagic = 0x42495246u; // 'FRIB'
-inline constexpr uint32_t kRCFriBatchProofVersion = 1;
-inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V1";
+inline constexpr uint32_t kRCFriBatchProofVersion = 5;
+inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V5";
 /** Batched-instance query count. NAMED CONSTANT (soundness table): Q=116
  *  clears 2^-64 with <1 bit margin; Q=128 is the recommended hardening →
  *  floor(128·log2(32/17)) − 40 = 76 bits post-grinding. */
@@ -259,13 +291,15 @@ inline constexpr uint32_t kRCFriMaxLdeLog2 = 24;
 }
 
 inline constexpr char kRCFriBatchSoundnessStatement[] =
-    "BATCHED FRI (v7 substrate): ONE instance over ALL committed columns "
-    "(7 separate instances union to 2^-63.05 — FAILS 2^-64; batching restores "
-    "a single query term). Q=128, blowup=16, g=40, Fp2, UNIQUE-DECODING "
-    "alpha=17/32 => FriBatchSoundnessBoundBits()=76. DUAL-OOD DEEP (z1,z2): "
-    "single OOD caps column degree at 2^24 < kappa=2^28; dual gives "
-    "(2k/|Fp2|)^2 ~ 2^-196 pre-grind. Degree-shift RLC enforces per-column "
-    "maximal degree. COMPUTATIONAL — not eps=0. Arbiter OFF.";
+    "BATCHED FRI (v7 substrate, v5 fold): ONE instance over ALL committed "
+    "columns (7 separate instances union to 2^-63.05 — FAILS 2^-64; batching "
+    "restores a single query term). Q=128, blowup=16, g=40, Fp2, UNIQUE-DECODING "
+    "alpha=17/32 => FriBatchSoundnessBoundBits()=76. v5 half-domain fold × "
+    "log2(n_coeffs) → terminal B-constant layer. DUAL-OOD DEEP (z1,z2) with "
+    "Fp2.c1!=0 (extension coeff nonzero): single OOD caps column degree at "
+    "2^24 < kappa=2^28; dual gives (2k/|Fp2|)^2 ~ 2^-196 pre-grind. "
+    "Degree-shift RLC enforces per-column maximal degree. COMPUTATIONAL — "
+    "not eps=0. Arbiter OFF.";
 
 /** Per-query opening of one committed column at the query index. */
 struct FriBatchColumnOpening {

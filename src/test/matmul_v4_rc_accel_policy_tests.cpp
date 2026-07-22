@@ -46,7 +46,41 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_native_required)
 }
 
 /** NativeRequired must not fall through to dense device INT8 when Ozaki MXFP4
- *  is unqualified (typical on CPU-only boxes). Empty gemm_s8s8 ⇒ CPU ExactGemm. */
+ *  is unqualified. Empty gemm_s8s8 ⇒ CPU ExactGemm.
+ *  A5/F12: resolver runs SelfQualify before consulting the latch, so a fresh
+ *  process selects the qualified lane when silicon qualifies. */
+BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
+{
+    const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
+    unsetenv("BTX_RC_ACCEL_POLICY");
+    BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
+                        static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
+
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRcOzakiQualForTest();
+
+    // Fresh latch (post-reset): unqualified until SelfQualify runs.
+    BOOST_CHECK(!rc::IsRcOzakiMxfp4Qualified());
+
+    const auto backend = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+    // Resolver must have consulted after qualification: backend tracks latch.
+    const bool qualified = rc::IsRcOzakiMxfp4Qualified();
+    if (qualified) {
+        BOOST_CHECK_MESSAGE(backend.gemm_s8s8 != nullptr,
+                            "fresh-process resolver must select qualified native lane");
+    } else {
+        BOOST_CHECK_MESSAGE(backend.gemm_s8s8 == nullptr,
+                            "NativeRequired must decline dense INT8 when Ozaki unqualified");
+    }
+
+    if (prev != nullptr) {
+        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_RC_ACCEL_POLICY");
+    }
+}
+
+/** Legacy name retained: CPU-only hosts stay empty; GPU hosts covered above. */
 BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
@@ -55,15 +89,21 @@ BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
     matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRcOzakiQualForTest();
+    (void)rc::SelfQualifyRcOzakiMxfp4Once();
 
-    // Default on this CPU box: Ozaki native MXFP4 is not qualified.
-    BOOST_REQUIRE_MESSAGE(!rc::IsRcOzakiMxfp4Qualified(),
-                          "expected Ozaki MXFP4 unqualified on CPU-only host");
-
-    const auto backend = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
-    BOOST_CHECK_MESSAGE(backend.gemm_s8s8 == nullptr,
-                        "NativeRequired must decline dense INT8 inject when Ozaki "
-                        "unqualified (empty ExactGemmBackend)");
+    if (rc::IsRcOzakiMxfp4Qualified()) {
+        // GPU-BOX with linked SM120a: resolver selects native; covered by order test.
+        const auto backend = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        BOOST_CHECK(backend.gemm_s8s8 != nullptr);
+    } else {
+        BOOST_REQUIRE_MESSAGE(!rc::IsRcOzakiMxfp4Qualified(),
+                              "expected Ozaki MXFP4 unqualified on this host");
+        const auto backend = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        BOOST_CHECK_MESSAGE(backend.gemm_s8s8 == nullptr,
+                            "NativeRequired must decline dense INT8 inject when Ozaki "
+                            "unqualified (empty ExactGemmBackend)");
+    }
 
     if (prev != nullptr) {
         setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);

@@ -11,6 +11,18 @@
 - GKR fabricated-witness suite + V3 binding work (arbiter remains OFF)
 - Rack validated: CPU coupled+packed PASS; CUDA sm120-plain datacenter PASS (toy/medium digest parity)
 
+## F8/F9 profile selectors + benchmark honesty (`wip/v7-hardening`)
+
+| Knob | Values |
+|------|--------|
+| `-regtestrccoupledprofile` | `2`=V2 (default), `3`=V3; other → zero params / reject |
+| `-regtestrccoupledtoydims` | `1`=CI toy, `0`=medium (V2) or production-V3 (profile 3) |
+| Harness | `--coupled-production` / `--coupled-production-v2` / `--coupled-v3-ci` |
+| Timing | `phase_wall_s` / `wall_s` = `MineCoupledPuzzle`; `reference_wall_s` label=`correctness_reference` |
+| GKR | `--prove-winner-gkr` + production dims → clear refuse |
+
+Heights remain `INT32_MAX`. `RCCoupParamsFromConsensusConfig` projects `rows_per_lobe` + `pages_per_barrier_lobe`.
+
 ## Still OPEN / not production-complete
 
 | Item | Status |

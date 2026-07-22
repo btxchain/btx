@@ -238,6 +238,8 @@ public:
         std::optional<bool> matmul_rc_use_toy_dims{};
         //! REGTEST-ONLY: CI-scale toy ENC_RC_COUPLED dims (MakeToyRCCoupParams).
         std::optional<bool> matmul_rc_coupled_use_toy_dims{};
+        //! REGTEST-ONLY: coupled profile 2 (V2) or 3 (V3). Invalid → zero params.
+        std::optional<uint32_t> matmul_rc_coupled_profile{};
         //! v4.4-LT Q* Phase B seal-as-PoW mode override. Regtest defaults to
         //! enabled; an explicit false selects Phase A for differential tests.
         std::optional<bool> matmul_lt_seal_as_pow{};

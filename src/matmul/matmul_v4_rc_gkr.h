@@ -38,8 +38,9 @@
 //
 // Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC) is the arbiter.
 // Shadow: BTX_RC_GKR_SHADOW=1 (default) generate+verify, log mismatches, never
-// reject. Arbiter cutover BTX_RC_GKR_ARBITER=1 is OFF by default and does NOT
-// raise height.
+// reject. Arbiter cutover is compile-time hard-disabled via
+// kRCGkrFormalSoundnessReady (ignores BTX_RC_GKR_ARBITER) and does NOT raise
+// height. v7 grounding / prove / verify remain callable for tests.
 
 namespace matmul::v4::rc {
 
@@ -47,6 +48,20 @@ inline constexpr uint32_t kRCGkrProofVersion = 7;
 inline constexpr char kRCGkrDomainTag[] = "BTX_RC_GKR_WINNER_V7";
 /** Magic for optional out-of-band / cache carriage (not consensus body). */
 inline constexpr uint32_t kRCGkrProofMagic = 0x524b4737u; // 'RKG7'
+
+/**
+ * Compile-time gate for succinct-proof / arbiter consensus authority.
+ *
+ * While false, EnvRCGkrArbiterEnabled() always returns false and ignores
+ * BTX_RC_GKR_ARBITER — no path may accept GKR as proof-only consensus winner.
+ * Does NOT disable: shadow observe, prove/verify APIs, or v7 native re-derivation
+ * grounding in VerifyWinnerProofV7 / Coupled V7 (sound by grounding against the
+ * int64 reference; ExactReplay remains sole consensus authority).
+ *
+ * Flip only after formal ≤2^{-64}-after-grind + G1–G5 succinct bindings +
+ * external audit. G1–G5 remain OPEN/PARKED until then.
+ */
+inline constexpr bool kRCGkrFormalSoundnessReady = false;
 
 inline constexpr const char* kRCGkrRealityGuardrail =
     "REJECT HBM/production-complete GKR claims: succinct scaffold uses Fp2+REAL "
@@ -62,8 +77,13 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Winner-only GKR/sumcheck+FRI SCAFFOLD (COMPUTATIONAL aspirational target): "
     "formal <=2^{-64} AFTER PoW grinding is a Stage-I REQUIREMENT. Challenges "
     "live in Goldilocks Fp2 (|F|~2^128); single Goldilocks is insufficient. "
-    "M6/Fable FRI: unique-decoding Q=116, ρ=1/16, g=40, Fp2 → "
-    "FriSoundnessBoundBits()=65. Fp3 only for g>=64 (unbuilt). "
+    "MARGIN RESTORATION 2026-07-22 (SHIPPED): fold Q=116->128 (field-"
+    "independent) lifts the composed bound to ~71.9 (margin ~7.9 over 64, "
+    "adequate); the FS subtotal (72, Fp2) is the binding floor. Fp3 challenges "
+    "(|K|~2^192, composed ~76.8) are a DEFERRED follow-on, blocked on the Fp3-"
+    "codeword-FRI decision (see INTEGRATION_REPORT.md challenge sites). "
+    "M6/Fable FRI: unique-decoding Q=128, ρ=1/16, g=40, Fp2 → "
+    "FriSoundnessBoundBits()=76. "
     "DEEP/OOD exact-eval binding CLOSED (FRI v4). "
     "G1–G5 OPEN/PARKED (proof v7): mutation-of-honest forges are NOT soundness "
     "evidence. Missing: PCS openings of A/B/Y at sumcheck points; layer roots "
@@ -73,7 +93,8 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "Coupled: real lobe-GEMM + barrier-Extract format (no toy stand-in) but "
     "bindings incomplete. External crypto audit MANDATORY before arbiter. "
     "Merkle q=8 is DoS PREFILTER ONLY. ExactReplay remains consensus arbiter "
-    "(BTX_RC_GKR_ARBITER OFF). nMatMulRCHeight=INT32_MAX.";
+    "(kRCGkrFormalSoundnessReady=false ⇒ EnvRCGkrArbiterEnabled ignores "
+    "BTX_RC_GKR_ARBITER). nMatMulRCHeight=INT32_MAX.";
 
 inline constexpr const char* kRCGkrSoundnessStatement = kRCGkrSoundnessBoundStatement;
 inline constexpr const char* kRCGkrSoundnessNote = kRCGkrSoundnessBoundStatement;
@@ -107,7 +128,7 @@ inline constexpr const char* kRCGkrCoupledArithStatement =
     "eval argument; page-selection/exchange/perm/mix/Extract/roots grounded "
     "natively vs the immutable int64 reference (SOUND, over_budget). Never "
     "emits a toy/episode stand-in proof of unrelated work. "
-    "BTX_RC_GKR_ARBITER stays OFF.";
+    "Arbiter hard-disabled (kRCGkrFormalSoundnessReady=false).";
 
 /**
  * Honest G1–G5 status — CLOSED only after independent malicious proofs REJECT
@@ -120,7 +141,7 @@ inline constexpr const char* kRCGkrG1G5ClosedStatement =
     "(G2) claim/y_root unbound to trace_fri segment openings; (G3) prover "
     "manufactures identical witness/table keys (Theorem 5.1 vacuity); "
     "(G4) extract_out_commit is FS-only; (G5) residual algebra without column "
-    "wiring. Arbiter OFF; ExactReplay sole consensus accept. "
+    "wiring. Arbiter hard-disabled; ExactReplay sole consensus accept. "
     "External crypto audit mandatory before any CLOSED claim.";
 
 /** Alias kept for call sites that still name the closed statement. */
@@ -129,8 +150,9 @@ inline constexpr const char* kRCGkrG1G5StatusStatement = kRCGkrG1G5ClosedStateme
 inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
     "mismatch LogWarning; NEVER rejects CheckMatMulProofOfWork_RC. "
-    "BTX_RC_GKR_ARBITER=1 cutover is OFF by default and does NOT raise height; "
-    "when OFF, ExactReplay decides.";
+    "kRCGkrFormalSoundnessReady=false: EnvRCGkrArbiterEnabled ignores "
+    "BTX_RC_GKR_ARBITER (no proof-only consensus authority); ExactReplay "
+    "decides. Does NOT raise height.";
 
 using gkr_field::Fp;
 using gkr_field::Fp2;
@@ -381,7 +403,8 @@ struct RCGkrProof {
      *   witness keys w_i = Hash(meta, in, out)
      *   table keys   t_i = Hash(meta, in, Extract(in))  // virtual Extract table
      *   Σ 1/(α−w_i) = Σ 1/(α−t_i)  (here enforced by w≡t + inverse column)
-     * lookup_logup_sum = Σ inv_i with inv_i = 1/(α−t_i), proven via I(1) DEEP + R≡0.
+     * lookup_logup_sum = Σ inv_i with inv_i = 1/(α−t_i), proven via Haböck
+     * I(1) layer-0 Merkle opening at z=1 + R≡0.
      */
     Fp2 lookup_logup_sum{};
     Fp2 lookup_table_sum{}; // must equal lookup_logup_sum
@@ -390,7 +413,7 @@ struct RCGkrProof {
     FriProof lookup_fri{};
     /** Virtual Extract-table keys FRI (must match lookup_fri root/DEEP). */
     FriProof table_fri{};
-    /** inv_i = 1/(α − t_i); DEEP at z=1 binds sum. */
+    /** inv_i = 1/(α − t_i); Haböck I(1) layer-0 Merkle at z=1 binds sum. */
     FriProof logup_inv_fri{};
     /** R_i = inv_i·(α−t_i)−1; must be the zero polynomial. */
     FriProof logup_r_fri{};
@@ -556,6 +579,183 @@ struct RCGkrProveResultV7 {
                                        std::string* why = nullptr,
                                        RCGkrTiming* out_timing = nullptr);
 
+// ============================================================================
+// G1–G5 IN-CIRCUIT RELATIONS (integration wave, 2026-07-22).
+//
+// The four finite-field constructions (I: batched multilinear evaluation
+// opening; II: Extract composition polynomial; III: fixed-reference-vector
+// LogUp membership; IV: copy/permutation wiring) are wired into
+// VerifyWinnerProofV7 as the in-circuit relations G1–G5, so each winner-proof
+// relation is CHECKED by a polynomial identity over the committed columns
+// rather than grounded solely by native int64 re-derivation:
+//
+//   G1  operand openings a_at_r/b_at_r bound to the committed A/B columns
+//       (Construction I matrix-opening claim + final-eval binding) AND each
+//       committed LEAF operand bound to its Λ MxExpand PRF expansion.
+//   G2  each layer claim c_ℓ bound to the committed trace-column segment
+//       (Construction I segment point → Ỹ(r) == c_claim).
+//   G3  the prover-manufactured lookup is REPLACED by Construction II's Extract
+//       composition polynomial (Comp == 0 over every tile) + Construction III's
+//       fixed-reference-vector membership (canonical T_M/T_X regenerated, not
+//       prover-chosen) + the verifier-defined Extract sampler out-binding.
+//   G4  extract_out(L) == input(L+1) (and the §6.3 round-root↔stream binding)
+//       via Construction IV — the DUAL-challenge grand product is enforced for
+//       transposed copies; the single-challenge form (only 60 bits post-grind)
+//       is UNREACHABLE on this path.
+//   G5  the Fwd residual accumulator acc = claim + X̃(pt) (and extract_in == Y
+//       for the non-residual layers) via Construction I's residual binder.
+//
+// This stays STRICTLY behind the OFF arbiter — VerifyWinnerProofV7 is never
+// consensus-authoritative; ExactReplay remains the sole authority. The relation
+// gate runs AFTER the existing §5.4/§5.7/§6.3 native grounding so it never
+// changes which relation an already-rejected forgery first fails; it is a
+// construction-expressed re-derivation of the SAME soundness, plus the genuinely
+// new opening/segment/wiring/residual bindings.
+// ============================================================================
+
+/** Which in-circuit relation a winner-proof check belongs to. */
+enum class RCGkrRelation : uint8_t { G1 = 1, G2 = 2, G3 = 3, G4 = 4, G5 = 5 };
+
+struct RCGkrRelationsResult {
+    bool ok{false};
+    /** First failing relation reason, prefixed "v7:g<N>:<detail>" (empty on ok). */
+    std::string failure;
+    RCGkrRelation first_failing{RCGkrRelation::G1};
+    uint64_t n_tiles{0};
+    uint64_t n_chain_wirings{0};
+};
+
+/**
+ * Run the G1–G5 in-circuit relations over `proof` STANDALONE (independent of the
+ * native §5 grounding), re-deriving the sumcheck points and FS challenges from
+ * the proof itself. Returns ok iff every relation's polynomial identity holds.
+ * Used by VerifyWinnerProofV7 (defense-in-depth gate) and by the integration
+ * red-team, which feeds internally-consistent forgeries and asserts each rejects
+ * at its "v7:g<N>:" relation — i.e. the constructions catch the forgery, NOT
+ * only the native re-derivation. NEVER consensus; arbiter stays OFF.
+ */
+[[nodiscard]] RCGkrRelationsResult CheckWinnerProofRelationsV7(
+    const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
+    const arith_uint256& target);
+
+/** Thin bool wrapper for tests: true iff every G1–G5 relation holds; `why`
+ *  receives the first failing "v7:g<N>:*" relation. */
+[[nodiscard]] bool VerifyWinnerRelationsV7ForTest(const RCGkrProofV7& proof,
+                                                  const CBlockHeader& header, int32_t height,
+                                                  const arith_uint256& target,
+                                                  std::string* why = nullptr);
+
+// ---------------------------------------------------------------------------
+// COMPOSED separation bound across the four constructions + batched-FRI backend
+// (integration accounting, PARAMETRIC in the FRI proximity bound). All values
+// are −log2(acceptance probability), post the g = 40 grinding convention.
+//
+// 2026-07-22 MARGIN RESTORATION — SHIPPED STATE (Q = 128, Fp2 challenges).
+// The FRI fold rides Q = kRCFriNumQueries = 128 (raised from 116); this is
+// the LIVE, field-INDEPENDENT lever and it lifts the composed bound from the
+// inadequate ≈ 65.8 (Q = 116) to ≈ 71.9, clearing 2^-64 by ≈ 7.9 bits.
+//
+// The FS/algebraic terms below stay at their F_{p^2} values (|F| ≈ 2^128)
+// because the challenges are STILL drawn from Fp2 in this tree. The Fp3 lift
+// of the FS subtotal to ≈ 76.8 was investigated and DEFERRED as a scoped
+// follow-on: every "algebraic" challenge that would move (LogUp α, the batch
+// RLC λ / DEEP weights w1,w2, the eval μ/γ, the OOD point z) is codeword-
+// entangled with a committed FRI instance (logup_inv_fri / logup_r_fri for α;
+// the batched-eval / DEEP-quotient codeword for λ/w/μ/γ/z), so drawing them
+// from Fp3 forces an Fp3-codeword FRI — a protocol decision out of scope for a
+// challenge-field swap. See INTEGRATION_REPORT.md "Fp3 challenge cutover".
+// The Fp3 target values are recorded per-constant below for the follow-on.
+// ---------------------------------------------------------------------------
+
+/** log2 of the SHIPPED challenge field K = F_{p^2}: 2·log2(p), p = 2^64−2^32+1. */
+inline constexpr double kRCGkrChallengeFieldBits = 127.99999999932;
+/** Fp3 follow-on target challenge-field bits (3·log2 p ≈ 192), for the record. */
+inline constexpr double kRCGkrChallengeFieldBitsFp3 = 191.99999999899;
+/** Construction II composition polynomial (n_slots ≤ 256): 2·log2 p − 8 − 40
+ *  = 80 (Fp3 follow-on target: 144). */
+inline constexpr double kRCGkrCompositionSepBits = 80.0;
+/** Construction III dual-α fixed-reference-vector membership over Fp2 (§5.6):
+ *  128 (Fp3 follow-on target: 256). */
+inline constexpr double kRCGkrLookupSepBits = 128.0;
+/** Construction IV equality (copy) at the κ = 2^28 column cap: 128 − log2(28)
+ *  − 40 = 83.19 (Fp3 follow-on target: 147.19). */
+inline constexpr double kRCGkrWiringEqualitySepBits = 83.19;
+/** Construction IV grand product, DUAL challenge, N = 2^28: 2·(128−28) − 40
+ *  = 160 (Fp3 follow-on target: 288). */
+inline constexpr double kRCGkrWiringPermutationDualSepBits = 160.0;
+/** Construction IV grand product, SINGLE challenge, N = 2^28: (128−28) − 40 =
+ *  60 — BELOW the 64-bit target; the single form is FORBIDDEN on the ship path
+ *  (dual is mandatory, structurally enforced by G4). Pinned here so the test
+ *  can assert it is < 64. (Fp3 follow-on value would be 124, but the dual
+ *  mandate is structural and is NOT relaxed by any field lift.) */
+inline constexpr double kRCGkrWiringPermutationSingleSepBits = 60.0;
+/** Whole-protocol Fiat–Shamir subtotal × 2^40 grinding (all sumcheck rounds +
+ *  RLC/DEEP weights; Theorem 8.1 line over |F_{p^2}| ≈ 2^128): pre-grind
+ *  Σ ≈ 2^-114.4 ⇒ 72 post-grind. With Q = 128 this (72) is the composed-bound
+ *  floor. (Fp3 follow-on target: 135.5 — see the header note on why it is
+ *  deferred.) */
+inline constexpr double kRCGkrFsSubtotalSepBits = 72.0;
+/** SHA256d Merkle/transcript bindings vs a 2^40-query adversary
+ *  (computational; field-independent). */
+inline constexpr double kRCGkrShaSepBits = 88.0;
+/** FRI proximity term. The integration rides the SOUND v5 half-domain fold; at
+ *  Q = kRCFriNumQueries = 128 the fold's own proximity soundness is
+ *  128·log2(32/17) − 40 = 76.80 (= `FriSoundnessBoundBits()` real value; the
+ *  integer helper floors to 76). This term is FIELD-INDEPENDENT (query
+ *  repetitions), which is why raising Q was the mandatory first lever: at
+ *  Q = 128 it sits ABOVE the Fp2 FS subtotal (72), so the FS subtotal becomes
+ *  the composed floor (≈ 71.9). Historical Q = 116 value: 65.85. */
+inline constexpr double kRCGkrFriProximityBitsV5 = 76.80;
+/** Deprecated alias (the base is now v5, not v4). */
+inline constexpr double kRCGkrFriProximityBitsV4 = kRCGkrFriProximityBitsV5;
+/** Margin over the 64-bit target below which the composed bound is flagged
+ *  INADEQUATE for consensus authority (audit gate; arbiter stays hard-disabled).
+ *  At Q = 128 / Fp2 the margin is ≈ 7.9 bits ⇒ adequate (inadequate_margin
+ *  false). */
+inline constexpr double kRCGkrAdequateMarginBits = 2.0;
+/** The ≥ 74-bit "restored-margin" acceptance bar TARGETED by the full Q = 128
+ *  + Fp3 margin restoration. The shipped Q = 128 / Fp2 bound (≈ 71.9) clears
+ *  64 with adequate margin but does NOT reach this bar; reaching it needs the
+ *  deferred Fp3 challenge cutover (INTEGRATION_REPORT.md). Retained as the
+ *  documented follow-on target. */
+inline constexpr double kRCGkrComposedTargetBits = 74.0;
+
+struct RCGkrComposedBound {
+    double construction_i_bits{0.0};   // Construction I evaluation opening (FS-side)
+    double construction_ii_bits{0.0};  // composition
+    double construction_iii_bits{0.0}; // lookup membership (dual-α)
+    double construction_iv_bits{0.0};  // wiring (min of equality / dual permutation)
+    double wiring_single_bits{0.0};    // excluded single-challenge path (dual mandate;
+                                       // Fp2 record 60 < 64)
+    double fri_proximity_bits{0.0};    // parametric FRI term (76.80 at Q=128; above
+                                       // the Fp2 FS floor, so NOT the binding term)
+    double sha_bits{0.0};              // SHA256d computational
+    double composed_bits{0.0};         // −log2(Σ 2^-term) over all of the above
+    double margin_bits{0.0};           // composed_bits − 64
+    bool clears_target{false};         // composed_bits ≥ 64
+    bool fri_dominated{true};          // the FRI proximity term is the floor
+    bool inadequate_margin{false};     // margin_bits < kRCGkrAdequateMarginBits
+    bool any_term_below_target{false}; // any INCLUDED term < 64 (excludes wiring_single)
+};
+
+/** The full composed-bound breakdown, PARAMETRIC in the FRI proximity bits. */
+[[nodiscard]] RCGkrComposedBound RCGkrComposedSeparation(double fri_proximity_bits);
+
+/** The composed separation bound (−log2 ε_total). SHIPPED STATE: SOUND v5
+ *  fold at Q = 128 with Fp2 challenges — NON-VACUOUS and FS-subtotal-dominated
+ *  at ≈ 71.9 bits (ε_total ≤ 2^-71.9), clearing the 2^-64 target by ≈ 7.9 bits
+ *  (adequate: inadequate_margin false). Raising Q from 116 to 128 lifted the
+ *  FRI floor (65.85 → 76.80) above the Fp2 FS subtotal (72), which is now the
+ *  binding term. Reaching the ≥ 74-bit "restored-margin" bar (≈ 76.8) requires
+ *  the DEFERRED Fp3 challenge cutover (INTEGRATION_REPORT.md), which is blocked
+ *  on the Fp3-codeword-FRI decision. (Historical Q = 116 / Fp2 value: ≈ 65.8,
+ *  an INADEQUATE < 2-bit margin.) The arbiter stays hard-disabled
+ *  (`kRCGkrFormalSoundnessReady`) regardless — this bound is audit accounting,
+ *  not a consensus switch. The parametric overload lets callers plug any FRI
+ *  proximity term (e.g. the integer `FriBatchSoundnessBoundBits()` = 76). */
+[[nodiscard]] double RCGkrComposedSeparationBits(double fri_proximity_bits);
+[[nodiscard]] double RCGkrComposedSeparationBits();
+
 enum class RCProdVerifyPath : uint8_t {
     ExactReplay = 0,
     WinnerGkr = 1,
@@ -584,7 +784,10 @@ struct RCProdVerifyResult {
 [[nodiscard]] bool EnvRCVerifyGkrEnabled();
 /** Shadow mode: default ON unless BTX_RC_GKR_SHADOW=0. Never rejects consensus. */
 [[nodiscard]] bool EnvRCGkrShadowEnabled();
-/** Arbiter cutover: OFF by default. When ON still does not raise height. */
+/**
+ * Arbiter cutover probe. Always false while !kRCGkrFormalSoundnessReady
+ * (ignores BTX_RC_GKR_ARBITER). Even if someday true, does not raise height.
+ */
 [[nodiscard]] bool EnvRCGkrArbiterEnabled();
 
 [[nodiscard]] DistSynthShape RCGkrShapeForEpisode(const RCEpisodeParams& params);
@@ -654,7 +857,7 @@ struct RCProdVerifyResult {
 
 /**
  * FALLBACK / DISPUTE verifier: ε=0 bounded exact STREAMED replay.
- * CONSENSUS arbiter while BTX_RC_GKR_ARBITER is OFF.
+ * CONSENSUS arbiter while kRCGkrFormalSoundnessReady is false (arbiter hard-off).
  */
 [[nodiscard]] ExactReplayVerifyResult VerifyBoundedExactReplay(
     const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,

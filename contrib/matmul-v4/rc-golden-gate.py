@@ -8,8 +8,8 @@ version bump (`kRCTranscriptVersion` / `ENC_RC_V1` in matmul_v4_rc.h).
 Policy (do not weaken):
   - Silent golden replacement is FORBIDDEN.
   - ENC_RC_V1 toy golden (V1 stream, segment leaves OFF) is pinned below.
-  - A V2 transition MUST introduce new domain tags (BTX_RC_*_V2) and KEEP
-    BOTH V1 and V2 goldens in tests / this gate.
+  - Coupled V1 toy + V2 medium + V3 medium goldens are ALL retained.
+  - V3 COUP_*_V3 domains must not collide with V1/V2 strings.
 
 Usage:
   contrib/matmul-v4/rc-golden-gate.py
@@ -43,6 +43,10 @@ FROZEN_VERSION = 1  # ENC_RC_V1
 # Separate frozen digest for Stage C coupled toy (MakeCoupHeader(42) @ height 0).
 # Not an episode transcript version — listed so silent replacement is caught.
 FROZEN_COUPLED_TOY_HEX = "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee"
+FROZEN_COUPLED_MEDIUM_V2_HEX = "349175d557eba373cd59ea4cb5431d5710481cc8e7e121e90c2a0775df8b5f4c"
+# WP-H: re-pin under COUP_*_V3 (prior 744fd3df… was V1 tags on V3 shape).
+FROZEN_COUPLED_MEDIUM_V3_HEX = "a4bb0cc42e2b97631d126a0dcdae26ad83b2f287d885322392a564990a95bac4"
+COUPLED_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc_coupled.h"
 
 def die(msg: str, code: int = 1) -> None:
     sys.stderr.write("rc-golden-gate: FAIL — " + msg + "\n")
@@ -50,11 +54,22 @@ def die(msg: str, code: int = 1) -> None:
 
 
 def parse_uint_constexpr(text: str, name: str) -> int | None:
+    """Parse `inline constexpr uint32_t NAME = <int|ENC_RC_Vk>;`."""
     m = re.search(
-        rf"inline\s+constexpr\s+uint32_t\s+{re.escape(name)}\s*=\s*(\d+)\s*;",
+        rf"inline\s+constexpr\s+uint32_t\s+{re.escape(name)}\s*=\s*([^;]+);",
         text,
     )
-    return int(m.group(1)) if m else None
+    if not m:
+        return None
+    rhs = m.group(1).strip()
+    if rhs.isdigit():
+        return int(rhs)
+    enc = re.fullmatch(r"ENC_RC_V(\d+)", rhs)
+    if enc:
+        return int(enc.group(1))
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", rhs):
+        return parse_uint_constexpr(text, rhs)
+    return None
 
 
 def extract_goldens(text: str) -> list[str]:
@@ -88,10 +103,16 @@ def main() -> int:
 
     ver = parse_uint_constexpr(hdr, "kRCTranscriptVersion")
     enc_v1 = parse_uint_constexpr(hdr, "ENC_RC_V1")
+    enc_v2 = parse_uint_constexpr(hdr, "ENC_RC_V2")
+    enc_v3 = parse_uint_constexpr(hdr, "ENC_RC_V3")
     if ver is None:
         errors.append("missing kRCTranscriptVersion in matmul_v4_rc.h")
-    if enc_v1 is None:
-        errors.append("missing ENC_RC_V1 in matmul_v4_rc.h")
+    if enc_v1 != 1:
+        errors.append(f"ENC_RC_V1 must be 1 (got {enc_v1})")
+    if enc_v2 != 2:
+        errors.append(f"ENC_RC_V2 must be 2 (got {enc_v2})")
+    if enc_v3 != 3:
+        errors.append(f"ENC_RC_V3 must be 3 (got {enc_v3})")
     if ver is not None and enc_v1 is not None and ver == 1 and enc_v1 != 1:
         errors.append(f"ENC_RC_V1={enc_v1} must be 1 while kRCTranscriptVersion==1")
     if "BTX_RC_ROUND_V1" not in hdr or "BTX_RC_EPISODE_V1" not in hdr:
@@ -104,6 +125,21 @@ def main() -> int:
             "kRCSegmentLeavesEnabled must be false while ENC_RC_V1 is active "
             "(enabling segment leaves changes the stream and the toy golden)"
         )
+
+    # F7: independent V1/V2/V3 coupled domain tags (no reuse across versions).
+    if COUPLED_H.is_file():
+        coup_h = COUPLED_H.read_text(encoding="utf-8")
+        for base in ("EPISODE", "BANK", "LOBE", "BARRIER", "PERM", "MIX", "EXTRACT", "FULL_BANK", "MAT_XCHG"):
+            for ver_s in ("V1", "V2", "V3"):
+                tag = f"BTX_RC_COUP_{base}_{ver_s}"
+                if tag not in coup_h:
+                    errors.append(f"missing coupled domain tag {tag}")
+        if "RCCoupDomainTagsForVersion" not in coup_h:
+            errors.append("missing RCCoupDomainTagsForVersion")
+        if "BTX_RC_COUP_MAT_XCHG_ROUNDS_V3" not in coup_h:
+            errors.append("missing BTX_RC_COUP_MAT_XCHG_ROUNDS_V3")
+    else:
+        errors.append(f"missing {COUPLED_H}")
 
     # Stage F: three-axis schedule ON with AI HBM/fabric epoch-0 dials.
     # Public activation still NO-GO (nMatMulRCHeight=INT32_MAX). Growth ratios
@@ -228,6 +264,45 @@ def main() -> int:
             )
         elif not coup_pin:
             errors.append("could not locate rc_coup_golden_digest_stable pin")
+
+        def pin_case(case: str) -> str | None:
+            m = re.search(
+                rf"{case}[\s\S]*?"
+                r'BOOST_CHECK_EQUAL\s*\(\s*d1\.GetHex\(\)\s*,\s*"([0-9a-f]{64})"\s*\)',
+                coup_text,
+            )
+            return m.group(1).lower() if m else None
+
+        med_v2 = pin_case("rc_coup_medium_golden_digest_stable")
+        med_v3 = pin_case("rc_coup_medium_v3_golden_digest_stable")
+        v2_hits = sum(1 for g in coup_goldens if g.lower() == FROZEN_COUPLED_MEDIUM_V2_HEX)
+        v3_hits = sum(1 for g in coup_goldens if g.lower() == FROZEN_COUPLED_MEDIUM_V3_HEX)
+        summary["coupled_medium_v2_hits"] = v2_hits
+        summary["coupled_medium_v3_hits"] = v3_hits
+        summary["ENC_RC_V2"] = enc_v2
+        summary["ENC_RC_V3"] = enc_v3
+        if v2_hits == 0:
+            errors.append(f"frozen coupled medium V2 golden {FROZEN_COUPLED_MEDIUM_V2_HEX} missing")
+        if med_v2 and med_v2 != FROZEN_COUPLED_MEDIUM_V2_HEX:
+            errors.append(f"medium V2 golden changed to {med_v2}")
+        elif not med_v2:
+            errors.append("could not locate rc_coup_medium_golden_digest_stable pin")
+        if not med_v3:
+            errors.append("could not locate rc_coup_medium_v3_golden_digest_stable pin")
+        elif med_v3 == "744fd3dfda6a58ddcd95474a9895cd2c6b17c2f1c2591848fc631eed78dea6a9":
+            errors.append("medium-V3 still on pre-WP-H digest 744fd3df… — re-pin under COUP_*_V3")
+        elif FROZEN_COUPLED_MEDIUM_V3_HEX == "0"*64:
+            if med_v3 == "0"*64:
+                errors.append("medium-V3 golden still all-zeros placeholder")
+            else:
+                errors.append(
+                    f"FROZEN_COUPLED_MEDIUM_V3_HEX placeholder; test pin is {med_v3}"
+                )
+                summary["coupled_medium_v3_pending_pin"] = med_v3
+        elif med_v3 != FROZEN_COUPLED_MEDIUM_V3_HEX:
+            errors.append(f"medium V3 golden changed to {med_v3}")
+        if "rc_coup_v3_domains_independent_of_v1_v2" not in coup_text:
+            errors.append("missing rc_coup_v3_domains_independent_of_v1_v2 unit test")
         summary["ok"] = not errors
         summary["errors"] = errors
     else:

@@ -380,6 +380,11 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_rc_coupled_use_toy_dims =
             args.GetBoolArg("-regtestrccoupledtoydims", false);
     }
+    if (args.IsArgSet("-regtestrccoupledprofile")) {
+        // Accept any uint32; ResolveRCCoupParams fail-closes on values other than 2|3.
+        options.matmul_rc_coupled_profile =
+            ParseRegTestUInt32Arg(args, "-regtestrccoupledprofile");
+    }
     if (args.IsArgSet("-regtestmatmulltsealaspow")) {
         options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", true);
     }

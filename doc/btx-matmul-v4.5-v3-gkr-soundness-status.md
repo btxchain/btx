@@ -1,22 +1,27 @@
 # V3 GKR / succinct verification soundness status
 
-## Status: NO-GO for arbiter — scaffold only
+## Status: NO-GO for arbiter — scaffold + grounding only
 
 - `nMatMulRCHeight` / `nMatMulRCCoupledHeight` = `INT32_MAX` (do not raise)
-- `EnvRCGkrArbiterEnabled` default OFF; toggling the env must not change ExactReplay
+- `kRCGkrFormalSoundnessReady=false`: `EnvRCGkrArbiterEnabled` always false
+  (ignores `BTX_RC_GKR_ARBITER`); toggling the env must not change ExactReplay
   consensus digest/acceptance while heights remain inert
+- v7 defeats independent malicious constructors by **grounding** against the
+  int64 reference — G1–G5 succinct bindings remain **OPEN/PARKED**
+- Composed bound (v7 batched + dual-OOD + dual-α): ≈ **65.7 bits** post-grind —
+  see `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`
 - External cryptographic review remains mandatory before any activation discussion
 
 ## GO / NO-GO table (honest)
 
 | Gate | Verdict | Notes |
 |---|---|---|
-| Arbiter cutover (`BTX_RC_GKR_ARBITER`) | **NO-GO** | Remains OFF; ExactReplay is sole consensus accept |
+| Arbiter cutover (`BTX_RC_GKR_ARBITER`) | **NO-GO** | Hard-disabled; ExactReplay is sole consensus accept |
 | Raise RC / coupled heights | **NO-GO** | Stay `INT32_MAX` |
 | V3 config in FS transcript | **GO (hooks)** | `AbsorbCoup` tag `coup_v3` binds `rows_per_lobe`, `pages_per_barrier_lobe`, and canonical dc full-bank / material-exchange / `exchange_rows` constants; wire format carries the two V3 shape fields |
 | Coupled prove ↔ verify schedule | **GO (fix)** | Verify uses `dc::kRCCoupFullBankScheduleEnabled` (matches `RecomputeCoupledPuzzleReference` defaults). Unit tests use `pages_per_barrier_lobe=1` for CI tractability while still exercising full-bank `SelectCoupledBankPageIds`. |
 | Layer `m` vs V3 `rows_per_lobe` | **GO (layout)** | `coupled:wrong_m` rejects `layer.m ≠ coup.rows_per_lobe` |
-| Fabricated-witness closure (G1–G5 / bank PCS) | **NO-GO** | Still OPEN — see attack table |
+| Fabricated-witness closure (G1–G5 / bank PCS) | **NO-GO** | Still OPEN/PARKED — see attack table |
 | Production V3 binding complete | **NO-GO** | Header/template/nonce, packed-bank PCS openings, every page under `bank_root`, exchange re-derive, Extract AIR still incomplete |
 
 ## Fabricated-witness policy

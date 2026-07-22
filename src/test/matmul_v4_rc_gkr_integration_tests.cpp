@@ -1,0 +1,252 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+//
+// G1–G5 INTEGRATION red-team + composed-bound pins (ENC_RC v7 winner proof).
+//
+// The three Fable constructions were merged and wired into VerifyWinnerProofV7 as
+// the in-circuit relations G1–G5 (Construction I evaluation opening; II Extract
+// composition; III fixed-reference-vector membership; IV dual-challenge wiring).
+// This suite proves TWO things the base v7 soundness suite does not:
+//
+//  (1) Every internally-consistent episode forgery that the native §5 grounding
+//      rejects is ALSO rejected by the standalone construction relations
+//      (CheckWinnerProofRelationsV7 → "v7:g<N>:*") — i.e. the constructions catch
+//      the forgery, not only the int64 re-derivation. The honest proof passes all
+//      of G1–G5.
+//
+//  (2) The COMPOSED separation bound across the four constructions + the batched-
+//      FRI backend is pinned term-by-term and in total, PARAMETRIC in the FRI
+//      proximity bound. SHIPPED STATE (2026-07-22 margin restoration): fold
+//      Q = 116 → 128 (the field-INDEPENDENT lever, LIVE) with Fp2 challenges.
+//      Raising Q lifts the FRI floor 65.85 → 76.80 ABOVE the Fp2 FS subtotal
+//      (72), so the composed bound is NON-VACUOUS and FS-SUBTOTAL-dominated at
+//      ≈ 71.9 bits (ε_total ≤ 2^-71.9) — clearing 2^-64 by ≈ 7.9 bits
+//      (ADEQUATE), though below the ≥ 74-bit bar that the DEFERRED Fp3
+//      challenge cutover would reach (blocked on the Fp3-codeword-FRI
+//      decision; see INTEGRATION_REPORT.md). (Historical Q=116/Fp2: ≈ 65.8
+//      with an inadequate < 2-bit margin.) The single-challenge wiring path is
+//      excluded by the standing dual mandate (60 bits, BELOW 64). The arbiter
+//      stays hard-disabled (kRCGkrFormalSoundnessReady).
+//
+// HARD RULES honored: int64 reference immutable; arbiter OFF; heights INT32_MAX;
+// no existing adversarial test weakened (this suite only ADDS coverage).
+
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_fri.h>
+#include <matmul/matmul_v4_rc_gkr.h>
+#include <primitives/block.h>
+#include <test/util/setup_common.h>
+#include <uint256.h>
+
+#include <boost/test/unit_test.hpp>
+
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace rc = matmul::v4::rc;
+
+BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_gkr_integration_tests, BasicTestingSetup)
+
+namespace {
+
+CBlockHeader MakeRCHeader(uint64_t nonce)
+{
+    CBlockHeader header;
+    header.nVersion = 0x20000004;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.nNonce64 = nonce;
+    header.nNonce = static_cast<uint32_t>(nonce);
+    for (int i = 0; i < 32; ++i) {
+        header.hashPrevBlock.data()[i] = static_cast<unsigned char>(0x51);
+        header.hashMerkleRoot.data()[i] = static_cast<unsigned char>(0xa3);
+        header.seed_a.data()[i] = static_cast<unsigned char>(0x11);
+        header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
+    }
+    return header;
+}
+
+arith_uint256 MaxTarget()
+{
+    arith_uint256 t;
+    t = ~t;
+    return t;
+}
+
+bool StartsWith(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+
+} // namespace
+
+// ============================================================================
+// Honest v7 proof satisfies EVERY G1–G5 in-circuit relation.
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_integration_honest_passes_all_relations)
+{
+    BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+
+    const auto base_header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 real_dig = rc::RecomputeResidentCurriculumReference(base_header, params, 0);
+    const arith_uint256 target = MaxTarget();
+
+    CBlockHeader h = base_header;
+    h.matmul_digest = real_dig;
+    const auto honest = rc::ProveWinnerEpisodeV7(h, params, 0, target, real_dig);
+    BOOST_REQUIRE_MESSAGE(honest.timing.ok, honest.timing.note);
+
+    // Full verifier accepts (the G1–G5 gate runs inside it).
+    std::string vwhy;
+    BOOST_REQUIRE_MESSAGE(rc::VerifyWinnerProofV7(honest.proof, h, 0, target, &vwhy), vwhy);
+
+    // Standalone relations module accepts every relation.
+    std::string gwhy;
+    const bool gok = rc::VerifyWinnerRelationsV7ForTest(honest.proof, h, 0, target, &gwhy);
+    BOOST_CHECK_MESSAGE(gok, std::string("honest failed a G1-G5 relation: ") + gwhy);
+
+    const rc::RCGkrRelationsResult r =
+        rc::CheckWinnerProofRelationsV7(honest.proof, h, 0, target);
+    BOOST_CHECK(r.ok);
+    BOOST_CHECK_GT(r.n_tiles, 0u); // G3 actually ran the Extract composition
+}
+
+// ============================================================================
+// Each internally-consistent forgery is ALSO caught by the constructions
+// (v7:g<N>:*), not only by the native re-derivation grounding.
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_integration_forgeries_rejected_at_construction_relation)
+{
+    const auto base_header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const uint256 real_dig = rc::RecomputeResidentCurriculumReference(base_header, params, 0);
+    const arith_uint256 target = MaxTarget();
+
+    struct Case {
+        rc::RCGkrIndepMaliciousKind kind;
+        const char* name;
+        const char* expected_prefix; // the construction relation that catches it
+    };
+    const Case cases[] = {
+        {rc::RCGkrIndepMaliciousKind::ArbitraryAbFactorization, "ArbitraryAbFactorization", "v7:g1:"},
+        {rc::RCGkrIndepMaliciousKind::FabricatedTraceWires, "FabricatedTraceWires", "v7:g1:"},
+        {rc::RCGkrIndepMaliciousKind::IdenticalFabricatedLookup, "IdenticalFabricatedLookup", "v7:g3:"},
+        {rc::RCGkrIndepMaliciousKind::FabricatedExtractIO, "FabricatedExtractIO", "v7:g5:"},
+        {rc::RCGkrIndepMaliciousKind::UnrelatedLayerRoots, "UnrelatedLayerRoots", "v7:g4:"},
+    };
+
+    for (const Case& c : cases) {
+        const auto forged = rc::ProveMaliciousEpisodeV7ForTest(base_header, params, 0, target,
+                                                               real_dig, c.kind);
+        BOOST_REQUIRE_MESSAGE(forged.timing.ok,
+                              std::string(c.name) + ": forgery prover failed: " +
+                                  forged.timing.note);
+
+        CBlockHeader h = base_header;
+        h.matmul_digest = forged.proof.claimed_digest;
+
+        // The standalone construction relations reject the forgery.
+        std::string gwhy;
+        const bool gok = rc::VerifyWinnerRelationsV7ForTest(forged.proof, h, 0, target, &gwhy);
+        BOOST_TEST_MESSAGE(std::string("[") + c.name + "] g-relation why=\"" + gwhy + "\"");
+        BOOST_CHECK_MESSAGE(!gok, std::string("SOUNDNESS BUG: G1-G5 accepted forgery ") + c.name);
+        // Hard: rejection is at a construction relation, not a trivial/ok state.
+        BOOST_CHECK_MESSAGE(StartsWith(gwhy, "v7:g"),
+                            std::string(c.name) + ": g-relation reason \"" + gwhy +
+                                "\" is not a v7:g<N> construction relation");
+        // Documented: the specific relation that catches this kind.
+        BOOST_CHECK_MESSAGE(StartsWith(gwhy, c.expected_prefix),
+                            std::string(c.name) + ": expected " + c.expected_prefix + ", got \"" +
+                                gwhy + "\"");
+
+        // And the full verifier still rejects it (native grounding first, as the
+        // base v7 soundness suite asserts — unchanged here).
+        std::string vwhy;
+        const bool vok = rc::VerifyWinnerProofV7(forged.proof, h, 0, target, &vwhy);
+        BOOST_CHECK_MESSAGE(!vok, std::string("SOUNDNESS BUG: v7 accepted forgery ") + c.name);
+    }
+}
+
+// ============================================================================
+// COMPOSED separation bound — pin each term and the total, PARAMETRIC in FRI.
+// ============================================================================
+BOOST_AUTO_TEST_CASE(gkr_integration_composed_separation_bound)
+{
+    const rc::RCGkrComposedBound b =
+        rc::RCGkrComposedSeparation(rc::kRCGkrFriProximityBitsV5);
+
+    // Per-construction terms (post-grind, −log2 acceptance). SHIPPED STATE:
+    // Q = 128 fold (field-independent lever, LIVE) + Fp2 challenge field
+    // (|F| ≈ 2^128). The Fp3 lift of the algebraic terms is a DEFERRED
+    // follow-on (blocked on the Fp3-codeword-FRI decision — see the report and
+    // matmul_v4_rc_gkr.h); its target values appear in trailing comments.
+    BOOST_CHECK_CLOSE(b.construction_ii_bits, 80.0, 1e-6);   // composition   (Fp3 target 144)
+    BOOST_CHECK_CLOSE(b.construction_iii_bits, 128.0, 1e-6); // dual-α membership (Fp3 target 256)
+    BOOST_CHECK_CLOSE(b.construction_iv_bits, 83.19, 1e-3);  // wiring = min(eq, dual) (Fp3 147.19)
+    BOOST_CHECK_CLOSE(b.wiring_single_bits, 60.0, 1e-6);     // excluded single path (Fp3 124)
+    BOOST_CHECK_CLOSE(b.sha_bits, 88.0, 1e-6);               // field-independent
+    BOOST_CHECK_CLOSE(b.fri_proximity_bits, 76.80, 1e-6);    // Q=128 fold (was 65.85 at Q=116)
+    // Construction I standalone sub-bound (absorbed into the FS subtotal).
+    BOOST_CHECK_CLOSE(b.construction_i_bits, 74.0, 1e-6);    // (Fp3 target 76)
+    // The FS subtotal itself (Fp2, |F| ≈ 2^128) — the binding floor at Q=128.
+    BOOST_CHECK_CLOSE(rc::kRCGkrFsSubtotalSepBits, 72.0, 1e-6); // (Fp3 target 135.5)
+
+    // The dual-challenge wiring MUST be used: the single-challenge grand
+    // product is below the 64-bit target (60 bits over Fp2) — this is the
+    // structural mandate (G4 enforces dual), NOT relaxed by any field lift.
+    BOOST_CHECK_LT(b.wiring_single_bits, 64.0); // 60: the dual-mandate origin
+    BOOST_CHECK_GE(rc::kRCGkrWiringPermutationDualSepBits, 64.0);
+    BOOST_CHECK_GT(rc::kRCGkrWiringPermutationDualSepBits, b.wiring_single_bits);
+
+    // Composed total on the SOUND v5 fold at Q = 128 (Fp2 challenges): raising
+    // Q lifted the FRI floor (65.85 → 76.80) ABOVE the Fp2 FS subtotal (72),
+    // so the bound is now FS-SUBTOTAL-dominated (NOT FRI-dominated) at ≈ 71.9,
+    // clearing 2^-64 by ≈ 7.9 bits — ADEQUATE, but BELOW the 74-bit bar that
+    // the deferred Fp3 cutover would reach.
+    BOOST_CHECK(!b.fri_dominated);           // FS subtotal (72) is the floor, not FRI (76.80)
+    BOOST_CHECK_GT(b.composed_bits, 64.0);   // clears the target (non-vacuous)
+    BOOST_CHECK_GT(b.composed_bits, 71.0);   // actual value ≈ 71.94
+    BOOST_CHECK_LT(b.composed_bits, 72.0);   // ...just under the FS floor (log-sum-exp)
+    BOOST_CHECK_LT(b.composed_bits, rc::kRCGkrComposedTargetBits); // below the 74-bit Fp3 bar
+    BOOST_CHECK(b.clears_target);
+    BOOST_CHECK(!b.inadequate_margin);       // margin ≈ 7.9 ≥ 2 bits: adequacy gate passes
+    BOOST_CHECK_GT(b.margin_bits, 7.0);      // actual margin ≈ 7.94 bits
+    BOOST_CHECK_LT(b.margin_bits, 8.0);
+    // Composed ≤ the smallest INCLUDED term (the Fp2 FS subtotal, 72), and
+    // within a fraction of a bit of it (log-sum-exp of the larger terms).
+    BOOST_CHECK_LE(b.composed_bits, rc::kRCGkrFsSubtotalSepBits + 1e-9);
+    BOOST_CHECK_GT(b.composed_bits, rc::kRCGkrFsSubtotalSepBits - 0.5);
+    // No INCLUDED term is below target (the below-64 path is the EXCLUDED
+    // single wiring form, tracked separately in wiring_single_bits).
+    BOOST_CHECK(!b.any_term_below_target);
+
+    // The convenience accessor equals the parametric value at the v5 fold floor.
+    BOOST_CHECK_CLOSE(rc::RCGkrComposedSeparationBits(), b.composed_bits, 1e-6);
+
+    // Plugging the conservative integer FRI helper (76) still lands FS-bound
+    // at ≈ 71.9 — the composed floor is the Fp2 FS subtotal, independent of the
+    // fractional 0.80, and does NOT reach the 74-bit bar without the Fp3 lift.
+    const double integer_view =
+        rc::RCGkrComposedSeparationBits(static_cast<double>(rc::FriBatchSoundnessBoundBits()));
+    BOOST_CHECK_GT(integer_view, 71.0);
+    BOOST_CHECK_LT(integer_view, 72.0);
+    BOOST_CHECK_LT(integer_view, rc::kRCGkrComposedTargetBits); // still below 74 (Fp3 needed)
+    // Historical record: at the Q=116 fold floor (65.85) the composed bound
+    // was ≈ 65.8 with an INADEQUATE (< 2-bit) margin — the state Q=128 fixes.
+    const rc::RCGkrComposedBound old_b = rc::RCGkrComposedSeparation(65.85);
+    BOOST_CHECK_LT(old_b.composed_bits, 66.0);
+    BOOST_CHECK_GT(old_b.composed_bits, 65.7);
+    BOOST_CHECK(old_b.inadequate_margin);
+    BOOST_CHECK(old_b.fri_dominated);        // at Q=116 the FRI floor (65.85) WAS the min
+    BOOST_TEST_MESSAGE("composed (SHIPPED: v5 fold, Q=128, Fp2) = " +
+                       std::to_string(b.composed_bits) +
+                       " ; margin over 64 = " + std::to_string(b.margin_bits) +
+                       " ; integer-FRI view = " + std::to_string(integer_view) +
+                       " ; historical Q=116 floor = " + std::to_string(old_b.composed_bits));
+}
+
+BOOST_AUTO_TEST_SUITE_END()

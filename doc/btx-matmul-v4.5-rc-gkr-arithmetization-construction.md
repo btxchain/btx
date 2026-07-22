@@ -6,13 +6,34 @@ Supersedes the gap table in `doc/btx-matmul-v4.5-rc-arithmetization-completeness
 
 **Consensus posture (unchanged).** The int64 reference
 (`RecomputeResidentCurriculumReference`, `RecomputeCoupledPuzzleReference`) remains the sole
-consensus authority. `BTX_RC_GKR_ARBITER` stays OFF, all activation heights stay `INT32_MAX`.
+consensus authority. `kRCGkrFormalSoundnessReady=false` hard-disables the arbiter
+(`EnvRCGkrArbiterEnabled` ignores `BTX_RC_GKR_ARBITER`); all activation heights stay
+`INT32_MAX`. G1–G5 remain OPEN/PARKED until succinct bindings + external audit.
+Composed bound writeup: `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`.
 This document is the mathematics that must be implemented before any audited cutover can even
 be discussed. Nothing here weakens or replaces exact replay.
 
 ---
 
 ## 0. Headline findings (read first)
+
+> **SHIPPED STATE (2026-07-22, `wip/gkr-margin` integration — READ THIS FIRST;
+> corrects the Fp3 UPDATE blocks throughout this doc):** the branch ships **only
+> the Q = 128 fold** (`kRCFriNumQueries`; `FriSoundnessBoundBits() = 76`, real
+> 76.80). This is the field-independent lever. It lifts the FRI floor above the
+> **Fp2** FS subtotal (72), so the **SHIPPED composed bound is ≈ 2^-71.9 (margin
+> ≈ 7.9 bits over 2^-64 — ADEQUATE), FS-subtotal-dominated**, below the 74-bit
+> target. **The Fp3 challenge field is NOT shipped** — the "margin restoration
+> → 2^-76.8 / 12.8-bit" UPDATE blocks below (and the Appendix INT Fp3 columns)
+> are the **DEFERRED follow-on TARGET**, blocked on the Fp3-codeword-FRI
+> decision and a proof-wire-format change (see INTEGRATION_REPORT.md §3.5). The
+> code constants (`kRCGkrChallengeFieldBits` = 128, composition 80, membership
+> 128, wiring 83.19/160, FS subtotal 72) and the pinning tests
+> (`air_separation_bound_numbers`, `wiring_separation_bound_numbers`,
+> `constr1_separation_constants`, `gkr_integration_composed_separation_bound`)
+> are all at their **Fp2** values on this branch. Where the UPDATE blocks below
+> claim a test "pins the Fp3 numbers", that is the follow-on target, not the
+> shipped test. The body text retains the historical Q=116/Fp2 numbers.
 
 1. **The current `VerifyWinnerProof` (proof v6) is, against a Byzantine prover, a plain
    SHA256d PoW with extra steps.** A cheating prover who grinds arbitrary 32-byte strings as
@@ -22,10 +43,13 @@ be discussed. Nothing here weakens or replaces exact replay.
    having done zero episode work. Proof: §9, Forgery F0. Every "CLOSED (scaffold)" claim of
    G1–G3 in the M7+ audit is therefore reverted; the scaffold is *format*-complete, not
    *soundness*-complete. The five relations below are what actually closes it.
-2. **Nothing is fundamentally OPEN.** All five relations are soundly constrainable inside
-   the existing sumcheck + LogUp + FRI system. The honest cost is that relation (3)
-   (Extract) and the trace boundary of relation (2) require **in-circuit AIRs for ChaCha20
-   and SHA-256 compression** (≈ 2^42–2^43 lookup rows at consensus dims). That is laborious,
+2. **Nothing is fundamentally unconstrainable.** All five relations are soundly
+   constrainable inside the existing sumcheck + LogUp + FRI system. Shipped
+   **G1–G5 status remains OPEN/PARKED** until those bindings land and independent
+   malicious constructors are rejected under PCS/AIR (not merely under native
+   grounding). The honest cost is that relation (3) (Extract) and the trace
+   boundary of relation (2) require **in-circuit AIRs for ChaCha20 and SHA-256
+   compression** (≈ 2^42–2^43 lookup rows at consensus dims). That is laborious,
    not impossible; no obstruction theorem exists (§11).
 3. **Three quantified corrections to the shipped parameter story:**
    - **Seven separate FRI instances do not clear 2^-64.** Each instance is 2^-65 after
@@ -713,6 +737,14 @@ Margin is < 1 bit; Q = 128 (⇒ FRI 2^-76.8) is the recommended pre-cutover hard
 Fp3 is **not** forced anywhere under (i)–(iii); it is forced only if single-challenge
 LogUp/OOD is insisted upon. ∎
 
+> **UPDATE (2026-07-22, margin restoration):** the recommended hardening has been
+> applied to the bound accounting — the fold ships **Q = 128** (`kRCFriNumQueries`)
+> and the FS/algebraic challenges are accounted over **F_{p^3}** (|K| ≈ 2^192).
+> The re-derived table and composed total (**≈ 2^-76.8, margin ≈ 12.8 bits over
+> 2^-64**) live in Appendix INT; the Fp3 rows are conditional on the challenge
+> call-site cutover enumerated in INTEGRATION_REPORT.md. The table above is
+> retained as the historical Q=116/Fp2 derivation.
+
 ---
 
 ## 9. Adversarial section — every listed forgery
@@ -752,8 +784,8 @@ insufficient).
 
 ## 10. Implementation blueprint (`matmul_v4_rc_gkr.cpp` and friends)
 
-Behind the OFF arbiter flag throughout; proof version bump 6 → 7; int64 reference
-untouched; shadow-mode first.
+Behind the hard-disabled arbiter flag throughout (`kRCGkrFormalSoundnessReady=false`);
+proof version bump 6 → 7; int64 reference untouched; shadow-mode first.
 
 **`matmul_v4_rc_fri.{h,cpp}`** (compose-only additions, no redesign):
 - `FriBatchCommit(cols, fs_seed) / FriBatchVerify` — §2.2: per-column Merkle roots, RLC
@@ -819,8 +851,9 @@ posture).
   wrong* (keyed, int64-domain, data-dependent consumption — §5.1), and the shipped
   virtual-table check has exactly zero soundness (Theorem 5.1). The sound construction
   exists (§5.4–5.7) but requires in-circuit ChaCha20 + SHA-256 (≈ 2^43 LogUp rows at
-  consensus dims). This is labor, not impossibility: **no obstruction theorem, so no
-  OPEN mark is honest here.** Field verdict: Fp2 + dual-α suffices; single-α forces Fp3.
+  consensus dims). This is labor, not impossibility: **no obstruction theorem**.
+  Shipped G3 status remains **OPEN/PARKED** until the AIR is implemented and audited.
+  Field verdict: Fp2 + dual-α suffices; single-α forces Fp3.
 - **R4 (canonical sequence): CLOSABLE, essentially free** once R2's layout discipline is
   adopted (verifier-driven enumeration ⇒ deterministic rejection of order forgeries).
 - **R5 (coupled): CLOSABLE.** All components reduce to machinery already required
@@ -829,10 +862,446 @@ posture).
   bank_root binding at production dims (§7.6) — the per-winner variant is sound but
   budget-hostile; the amortized variant is sound and cheap but is a (minor, explicit)
   protocol addition.
-- **Nothing is OPEN in the obstruction sense.** Conversely, nothing in G1–G3 was
-  actually closed in v6; the honest status is: *constructions specified and proven here;
-  implementation pending; arbiter stays OFF; ExactReplay remains the sole authority.*
+- **No obstruction theorem blocks G1–G5.** Conversely, nothing in G1–G5 was actually
+  closed as a succinct relation in v6/v7 scaffolding; the honest status is:
+  *constructions specified and proven here; implementation pending; G1–G5 remain
+  OPEN/PARKED; arbiter hard-disabled (`kRCGkrFormalSoundnessReady=false`); ExactReplay
+  remains the sole authority. v7 defeats independent forges by grounding, not by
+  claiming these rows CLOSED.*
 - Prover-cost reality (unchanged from the Reality Guardrail): ≈ 2^43 lookup rows plus a
   2^33-cell trace put consensus-dim proving far over the CPU soft budget; the
   `over_budget → ExactReplay` shipping posture and the HBM PARK are unaffected by this
   document.
+
+---
+
+## 12. Construction I — batched multilinear evaluation opening (implemented 2026-07-22)
+
+`src/matmul/matmul_v4_rc_gkr_eval.{h,cpp}` now carries the §2.4 primitive in full,
+stated as finite-field algebra over F_p (Goldilocks) and K = F_{p²}:
+
+- **Stage 1 — γ-batched eq-kernel summation-reduction** (`EvalOpenProve/Verify`):
+  for claims {(u_c, z_m, y_m)} on root-bound columns, ONE ν-round degree-2
+  reduction on F(x) = Σ_m γ^m·u_{c(m)}(x)·eq(z_m, x) with Σ_x F(x) = Σ_m γ^m·y_m,
+  ending at a common point r ∈ K^ν with one residual ũ_c(r) per distinct column;
+  the checking routine spends O(ν) per round plus O(M·ν) native eq(z_m, r).
+  Points shorter than ν are zero-extended (low sub-cube identity); a point that
+  does not cover the column's logical length is refused (`point_short` guard —
+  the F-pad-adjacent smuggling surface).
+- **Stage 2 — root binding of the residuals** (existing `EvalArgumentProve/
+  Verify`, Aurora/Lemma-1.2): the reduced claims aggregate under μ into the
+  univariate identity whose f/g columns ride the SAME `FriBatchCommit`
+  (dual-OOD, degree-shift RLC, Q = 128). One low-degree-proximity instance for
+  the whole claim set — no union across per-column instances (§2.3).
+- **End-to-end bundle**: `BatchedOpeningProve/Verify` (γ seed bound to the
+  epoch-1 column roots; Stage-2 seed = the Stage-1 transcript digest;
+  check order: shape → `FriBatchVerify` → Stage-1 replay → Stage-2 identity).
+- **G1/G2/G5 pieces** (claim/point builders only; integration wires them):
+  `RCGkrMatrixOpeningClaim` (a_at_r = Ã(r_i,r_k), b_at_r = B̃(r_k,r_j), free
+  transpose view M̃ᵀ(r,s) = M̃(s,r)) + `RCGkrCheckFinalEvalBinding`
+  (gf = a·b, deterministic) for G1; `RCGkrSegmentPoint` (aligned trace-column
+  segment via 0/1 high coordinates) + `RCGkrFoldChunkClaims` (two-chunk
+  top-variable glue) for G2; `RCGkrResidualAcc`/`RCGkrCheckResidualAcc`
+  (acc̃(r) = Ỹ(r) + X̃(r) by MLE linearity, acc derived never carried) for G5.
+
+**Acceptance obligations.**
+
+(a) *Completeness*: a valid assignment (u, z, y = ũ(z)) satisfies every check
+as an exact polynomial identity (round sums, chain-end eq identity, Lemma-1.2
+coefficient identities, FRI/DEEP openings) — accepted with probability 1.
+Test: `constr1_completeness_valid_assignment`.
+
+(b) *Separation bound* (composed, |K| = p² > 2^127.99; caps ν ≤ 28 = log2 κ,
+M ≤ 2^12 claims, W ≤ 2^12 columns; grinding budget 2^40):
+
+| term | bound (pre-grinding) |
+|---|---|
+| γ-batching (powers of one γ) | (M−1)/\|K\| ≤ 2^-116 |
+| eq-sumcheck, ν rounds, deg ≤ 2 (S1) | 2ν/\|K\| ≤ 2^-122.2 |
+| μ-aggregation of reduced openings (Thm 2.2) | (M−1)/\|K\| ≤ 2^-116 |
+| batch RLC λ + DEEP weights (Thm 2.1) | (W+2)/\|K\| ≤ 2^-116 |
+| dual-OOD bad-point pairs (S5) | (2κ/(\|K\|−2^32))² ≤ 2^-196 |
+
+FS subtotal ≤ 3·2^-116 + 2^-122.2 ≈ 2^-114.4; ×2^40 ⇒ ≤ 2^-74.4. Adding the
+batched-FRI query term 2^-76.8 (Q = 128, post-grinding;
+`FriBatchSoundnessBoundBits() = 76`) and the SHA256d binding term ≤ 2^-88:
+
+  **ε_total ≤ 2^-74.4 + 2^-76.8 + 2^-88 < 2^-74, i.e. −log2(ε_total) ≥ 74**,
+
+clearing the 2^-64 target with ≥ 10 bits of margin.
+
+> **UPDATE (2026-07-22, margin restoration):** with the FS challenges drawn from
+> F_{p^3} (|K| ≈ 2^192) the FS terms become γ/μ ≤ 2^-180, eq-sumcheck ≤ 2^-186.2,
+> λ+weights ≤ 2^-180, dual-OOD ≤ 2^-326; FS subtotal ≤ 2^-178.4, ×2^40 ⇒
+> ≤ 2^-138.4, and the composed bound is dominated by the (field-independent)
+> batched-FRI query term: **ε_total ≤ 2^-138.4 + 2^-76.8 + 2^-88 < 2^-76 ⇒
+> ≥ 76** (`RCGkrConstructionISeparationBits() = 76`, statically asserted
+> ≥ 64+10; conditional on the Fp3 challenge cutover per INTEGRATION_REPORT.md).
+This instantiates the §8 accounting for the evaluation-opening sub-protocol
+alone; composed into the full episode proof it is absorbed by the same rows.
+
+(c) *Counterexamples* (`src/test/matmul_v4_rc_gkr_eval_tests.cpp`, wired into
+`src/test/CMakeLists.txt`): the checked identity evaluates NONZERO on every
+tested invalid assignment — (i) an internally-consistent transcript for
+y′ ≠ ũ(z) (round sums repaired by constant shifts into g(0), chain end
+repaired by a fabricated residual; built by the test-only
+`BatchedOpeningProveInvalidAssignmentForTest`) satisfies ALL Stage-1 algebra
+and is detected exactly at the Stage-2 root binding (`eval:identity_z1/z2` —
+the Lemma-1.2 residual is a nonzero constant σ − h_n, deterministic given the
+bound openings); (ii) a wrong batched γ-combination (claims permuted, foreign
+FS seed, tampered round message, tampered residual) is detected at Stage 1
+(`eqopen:round_sum` / `eqopen:final`); (iii) the valid assignment passes.
+The plain constructing routine refuses invalid claims outright
+("claims disagree with columns").
+
+Consensus posture unchanged: arbiter OFF, activation heights INT32_MAX,
+`RecomputeResidentCurriculumReference`/`RecomputeCoupledPuzzleReference`
+untouched; `VerifyWinnerProofV7`/`matmul_v4_rc_gkr.cpp` wiring is the
+integration wave's job — this section provides the primitive + tests only.
+
+## Appendix W3 (2026-07-22) — Constructions II/III implementation note
+## (`matmul_v4_rc_gkr_air.{h,cpp}` §8–§9)
+
+This appendix records the acceptance obligations of the implemented Extract constraint
+system (Construction II) and fixed-reference-vector membership (Construction III).
+Everything remains behind the OFF arbiter; the int64 reference is untouched and stays
+the sole oracle.
+
+### W3.1 What was implemented
+
+**Construction II — the map E as polynomial identities over F_p.** The committed cells
+(`ChaChaBlockTrace`, `ShaCompressTrace`, sampler candidate rows in `TileWitness`) are
+the column vectors; `EmitTileConstraints` evaluates the full family of identities of
+total degree ≤ 4:
+
+- add mod 2^32: `a + b − c − 2^32·carry = 0`, `carry(carry−1) = 0`, operands
+  range-bound by bit columns (`Σ 2^i b_i − v = 0`, `b_i(b_i−1) = 0`);
+- rotation by r: a fixed index relabeling of the producing xor's bit columns,
+  `op − Σ 2^{(i+r) mod 32} b_i = 0` (no new cells — §1.2 / §5.4);
+- xor per bit: `x + y − 2xy − z = 0` (degree 2);
+- SHA-256 Boolean functions as bit polynomials: `Maj = ab+ac+bc−2abc`,
+  `Ch = c + a(b−c)`, Σ/σ as xor-of-relabelings (degree ≤ 3), message-schedule and
+  round adds with 2–3-bit carry witnesses, feed-forward, chaining, and public
+  message/init binding;
+- sampler C-E1..E10: keystream-nibble binding, the acceptance selector as an explicit
+  degree-4 polynomial in the four nibble bits (`AirAcceptNibblePoly`, exactly 0 on the
+  rejected E2M1 codes {1,3,8,9,11}), liveness `(32−pos)·inv − 1 = 0`, transition
+  `pos' − pos − acc = 0`, boundary `pos(0)=0`, `pos_final=32`, the MixBits
+  two's-complement embedding `lo + 2^32·hi − y − s(2^32−1) = 0` with zero-test branch
+  selectors, the golden-ratio decomposition `u·G − 2^32·q − v = 0`, and the dequant
+  output identity `out − M·(1+e0)(1+3e1) = 0`.
+
+All families of one gadget row are combined with ONE challenge η ∈ Fp2:
+`Comp(x) = Σ_slot η^slot·C_slot(x)`; the single check is that Comp vanishes on the
+whole trace domain (`ComposeConstraints`).
+
+Two integer-vs-field subtleties are closed explicitly (they are genuine invalid-
+assignment channels, found during this construction):
+
+- **Golden-mix mod-p alias.** For `u ∈ {0,1}` the field identity
+  `u·G = 2^32·q + v (mod p)` admits a second ranged representative
+  `(q', v') = (2^32−1, u·G + 1)` since `u·G + p < 2^64`. Every alias has
+  `q' = 2^32−1 > G`, so the added canonicity obligation `q ≤ G` — the T_R16 range row
+  on `(G − q)` plus the deterministic `C-E9:golden_q_canonical` check — excludes all
+  aliases and pins `(q, v)` to the unique integer decomposition.
+- **Embedding alias.** The mod-p alias of `lo + 2^32·hi` flips the sign cell `s`
+  inconsistently with hi's top bit (`s − hi_31 = 0` is a committed-bit relabel), so the
+  embedding identity plus the sign binding is alias-free (proof sketch in the C-E7
+  comment of `CheckTileConstraints`).
+
+**Construction III — membership in a FIXED reference vector.**
+`BuildPreprocessedLogUpTables(γ)` regenerates the T_M/T_X/T_R16 fingerprint vectors
+from consensus constants only (no assignment data), and
+`VerifyLookupAgainstPreprocessed` enforces, in order: (i) the supplied table side
+equals the regenerated canonical vector fingerprint-for-fingerprint — the Theorem-5.1
+clone `table := witness` is rejected here even though its fractional sums balance
+identically (the accompanying test demonstrates both halves); (ii) multiplicity
+accounting `Σ_j m_j = |W|` exactly (deterministic, overflow-guarded; the per-row
+occurrence counts are then certified by the dual-α identity itself, S3 with
+char F_p ≫ N); (iii) the dual-α log-derivative identity with the existing FAIL-CLOSED
+pole handling (`FracSum`/`FracSumMult` reject any α that collides with a key rather
+than computing through `Inv(0)`) — retained unchanged.
+
+### W3.2 Acceptance obligations
+
+**(a) Completeness.** `TraceTile` populates the committed cells by evaluating the
+reference primitives, so on an honest assignment every emitted identity evaluates to
+the zero field element and both log-derivative sums agree exactly at every non-pole α
+(the multiset relation holds by construction, so equality is an identity of rational
+functions, not a probabilistic event). Tests: `air_construction2_composition_polynomial`
+(honest branch), `air_construction3_fixed_reference_vector` (honest branch), plus the
+pre-existing byte-exactness suites against `ExtractMXTileInt64` /
+`ExpandMxDequantInt8` / `RoundMerkleStream`.
+
+**(b) Separation bound (explicit numbers over F_{p^2}, |F_{p^2}| = p² with
+2·log2(p) = 127.99999999932).**
+
+| Term | Pre-grinding | Post-grinding (g = 40) |
+|---|---|---|
+| Composition polynomial: an invalid assignment survives uniform η iff η hits the root set of the slot polynomial, ≤ (n_slots−1)/|Fp2| with n_slots ≤ 256 | ≤ 2^8/2^128 = **2^-120.0** | **2^-80.0** |
+| Lookup (Thm 5.2 / S3, dual-α): false multiset inclusion survives both α's with prob ≤ ((N_w+N_t)/|Fp2|)², N_L = 2^43 at consensus dims | ≤ (2^43/2^128)² = **2^-170.0** | **2^-130.0** |
+| **Composed (union bound)** | 2^-120 + 2^-170 ≈ **2^-120.0** | 2^-80 + 2^-130 ≈ **2^-80.0** |
+
+The composed Construction-II/III algebraic term is ≈ 2^-80.0, i.e. **80.0 bits**
+post-grinding — 16 bits above the 2^-64 target. (These are the R3-local algebraic
+terms; the whole-protocol bound of §8 remains dominated by the batched-FRI query term
+and is unchanged by this appendix.)
+
+> **UPDATE (2026-07-22, margin restoration):** with η/α drawn from F_{p^3}
+> (|K| ≈ 2^192) the same closed forms give composition ≤ 2^8/2^192 = 2^-184
+> pre-grind → **2^-144** post, and dual-α lookup ≤ (2^43/2^192)² = 2^-298
+> pre-grind → **2^-258** post (conservative (N_w+N_t ≤ 2^44) form: 2^-256,
+> the `kRCGkrLookupSepBits` pin). `ComputeSeparationBound` now reports the
+> Fp3 numbers programmatically and `air_separation_bound_numbers` pins them in
+> CI; the numbers are conditional on the challenge-site cutover per
+> INTEGRATION_REPORT.md.
+
+**(c) Counterexamples (each is a unit test that must reject).** A fabricated
+(in,out) tuple absent from the reference vector — with the multiplicity sum patched to
+stay consistent — leaves the log-derivative difference a nonzero rational function and
+is separated at both α's. A self-manufactured "table" (`table := witness`, m_j := 1)
+balances the raw sums but is rejected by the reference-vector regeneration
+(`table_not_canonical`) — the v6 hole, now unexpressible. A single edited ARX/SHA
+intermediate cell (quarter-round add result, operand cell with locally-consistent
+identity, SHA round variable, schedule word, liveness inverse, golden-mix limb) makes
+a specific constraint polynomial evaluate to a nonzero field element, and the
+composition polynomial is nonzero at that row. Tests:
+`air_construction2_composition_polynomial`, `air_construction3_fixed_reference_vector`,
+plus the pre-existing tamper suites.
+
+### W3.3 Emulation caveats (explicit)
+
+- Bit columns are derived in the emitter from the committed 32-bit word cells (their
+  booleanity/recomposition identities are emitted but hold by construction); in the
+  committed layout of §2.1 the bits are their own columns and the same identities do
+  the binding. The cross-cell identities (add/xor/rotation/copy) carry the separation
+  force in both layouts and are what the counterexample tests break.
+- `ComposeConstraints` checks Comp(x) = 0 row-by-row over the explicit trace; in the
+  committed system the same statement is "Comp is divisible by Z_D", delegated to the
+  §2 quotient/FRI machinery with the identical η-collision term.
+- T_R16 range obligations (limbs, and the `(G − q)` canonicity row) are membership
+  relations routed through Construction III, not identities; the deterministic
+  structural guards in `CheckTileConstraints` mirror them 1:1.
+
+## Appendix W — Construction IV: copy / permutation wiring constraints (implemented, 2026-07-22)
+
+*Implementation: `src/matmul/matmul_v4_rc_gkr_wiring.{h,cpp}`; tests:
+`src/test/matmul_v4_rc_gkr_wiring_tests.cpp`. Framing: this appendix is
+finite-field algebra over F_p (Goldilocks) and its quadratic extension Fp2 —
+polynomial identities that force two vectors to be equal, or to be related by
+a fixed public permutation π, as identities over the whole Boolean hypercube
+(never a Fiat–Shamir hash chain; cf. the §4.3 insufficiency lemma).*
+
+### W.1 Equality (copy) identity
+
+For vectors u, u' ∈ F^(2^ℓ) (canonically extract_out(L) and input(L+1)):
+u = u' ⟺ the difference multilinear d̃ = ũ − ũ' is the zero polynomial. The
+checking routine draws ρ ∈ Fp2^ℓ (FS-derived after both vectors are
+committed) and tests ũ(ρ) = ũ'(ρ) — two MLE opening claims at a shared point
+with a shared value (`WiringEqualityOpeningClaims` emits them for the §2.4
+evaluation argument; the direct whole-hypercube form evaluates both MLEs over
+the raw vectors, as the unit tests do).
+
+- **Completeness:** exact. u = u' ⇒ identical MLEs ⇒ the identity holds at
+  every ρ, with probability 1.
+- **Separation probability** (S2, Schwartz–Zippel): an invalid assignment
+  (u ≠ u' in ≥ 1 entry) makes d̃ a nonzero ℓ-variate multilinear (total
+  degree ≤ ℓ); it vanishes at uniform ρ ∈ Fp2^ℓ with probability ≤ ℓ/|Fp2|.
+  Numbers at the κ = 2^28 column cap (ℓ = 28, log2|Fp2| = 127.99999999932):
+  **2^-123.19 pre-grinding, 2^-83.19 after the 2^40 grinding budget** —
+  clears the 2^-64 target with ≥ 19 bits of margin. Unequal logical lengths
+  are a structural mismatch: deterministic reject (probability-0 event).
+- Zero-padding both sides to the common 2^ℓ preserves the identity (pads are
+  equal by construction); pad smuggling is separately closed by §2.5.
+
+### W.2 Permutation identity (grand product, Plonk-style)
+
+Claim: u'_j = u_{π(j)} for a fixed public bijection π (e.g. the materialized
+transpose remap `MakeTransposePermutation`; the free-transpose fact of §1.2
+makes this unnecessary for the canonical layout, where transposed reuse is a
+point manipulation on one commitment). For FS challenges β, γ ∈ Fp2 drawn
+after commitment, the running-product column z enforces
+
+  z_0 = 1,  z_{i+1}·(u'_i + β·π(i) + γ) = z_i·(u_i + β·i + γ),  z_N = 1,
+
+i.e. Π_i (u_i + β·i + γ) = Π_j (u'_j + β·π(j) + γ).
+
+- **Completeness:** exact. u'_j = u_{π(j)} makes right factor j equal left
+  factor π(j) (same value, same index tag), so the factor multisets coincide
+  and z telescopes to 1 for every (β, γ) with no zero factor.
+- **Separation probability:** by unique factorization in Fp2[β,γ] (the
+  factors are monic in γ and pairwise non-associate for distinct (tag, value)
+  pairs; index tags are injective since N ≤ 2^28 < p), the two products agree
+  as polynomials iff the multisets {(i, u_i)} and {(π(j), u'_j)} coincide —
+  which, π being a bijection, holds iff u'_j = u_{π(j)} for all j. Otherwise
+  the difference is a nonzero polynomial of total degree ≤ N and S2 gives
+  acceptance probability ≤ N/|Fp2| per challenge pair. Numbers:
+  - single (β, γ), N = 2^28: **2^-100.0 pre-grinding, 2^-60.0 post — BELOW
+    the 2^-64 target**; single-challenge ceiling is N ≤ 2^23
+    (`kRCGkrWiringSingleChallengeMaxN`: 2^-105 pre / 2^-65 post).
+  - **dual (β, γ)** (two independent pairs from one FS round, the same
+    amplification pattern as the dual-α LogUp of §5.6): (N/|Fp2|)² =
+    **2^-200.0 pre-grinding, 2^-160.0 post** at N = 2^28 — the shipping form
+    at κ-sized columns.
+- **Zero factors fail closed** (same posture as the LogUp denominators): any
+  vanishing factor rejects with a resample reason (completeness resample
+  probability ≤ 2N/|Fp2| per pair); it is never an accept path.
+
+> **UPDATE (2026-07-22, margin restoration):** with ρ/β/γ drawn from F_{p^3}
+> (|K| ≈ 2^192) the same closed forms give: equality (ℓ = 28)
+> **2^-187.19 pre / 2^-147.19 post**; grand product at N = 2^28 single
+> 2^-164 pre / 2^-124 post, **dual 2^-328 pre / 2^-288 post**. The Fp2
+> single-challenge record (2^-60 post, BELOW 2^-64) is retained
+> (`kRCGkrWiringPermutationSingleSepBitsFp2`) and **the dual mandate stays in
+> force structurally** — the Fp3 lift does not reopen the single path.
+> `kRCGkrWiringFieldBits` now carries 3·log2 p; the numbers are conditional on
+> the `WiringChallengeFp2` cutover per INTEGRATION_REPORT.md.
+
+### W.3 Cross-layer binding helper
+
+`BindAdjacentLayerWires(wires)` binds extract_out(L) to the shape-designated
+input of layer L+1 for every adjacent pair in Λ order (direct copy → W.1;
+transposed copy → W.2 with the transpose π; no shape-compatible input →
+reported "Λ-definitional", i.e. the pair shares a column reference per §4.2
+and needs no copy constraint). `VerifyLayerBindings(bindings, fs_seed)`
+checks every emitted constraint with FS-derived challenges. The choice of
+consumer operand is by SHAPE only — values are never consulted, so a value
+mismatch always surfaces as a failed identity, never a silent re-route.
+
+### W.4 Acceptance obligations (tested)
+
+- (a) Completeness: honest equality and honest permutation instances pass
+  EXACTLY (multiple independent challenge points/pairs per test).
+- (b) Separation bounds: the numbers of W.1/W.2 are asserted by
+  `wiring_separation_bound_numbers`, including the explicit check that the
+  single-challenge grand product at N = 2^28 is below target (the dual
+  mandate) and the dual form clears it at 2^-160.
+- (c) Counterexamples (invalid assignments): a one-entry difference fails
+  equality (difference-MLE nonzero at ρ); a non-permutation fails the grand
+  product three ways (faithful z from wrong data ⇒ z_N ≠ 1; boundary
+  overwritten to 1 ⇒ a step identity fails; interior z perturbed ⇒ a
+  neighboring step fails); position swaps with an unchanged value multiset
+  fail (index tags bind positions); non-bijective π and zero factors reject
+  structurally / fail closed.
+
+Consensus posture unchanged: arbiter OFF, heights INT32_MAX, the int64
+reference (`RecomputeResidentCurriculumReference`,
+`RecomputeCoupledPuzzleReference`) untouched and authoritative.
+
+---
+
+## Appendix INT (2026-07-22) — G1–G5 integration + the COMPOSED separation bound
+
+Constructions I–IV (`matmul_v4_rc_gkr_eval`, `_air`, `_wiring`) are merged and
+wired into `VerifyWinnerProofV7` as the in-circuit relations **G1–G5**
+(`CheckWinnerProofRelationsV7` in `matmul_v4_rc_gkr.cpp`). Each winner-proof
+relation is now bound by a polynomial identity over the committed columns rather
+than solely by native int64 re-derivation:
+
+| Relation | Construction | Binding checked |
+|---|---|---|
+| **G1** | I (matrix opening) | `a_at_r = Ã(r_i,r_k)`, `b_at_r = B̃(r_k,r_j)` recomputed from the committed A/B columns must equal the carried `a_eval/b_eval`; `final_eval = a_at_r·b_at_r` (`RCGkrCheckFinalEvalBinding`); every **leaf** operand bound to its Λ MxExpand PRF expansion. |
+| **G2** | I (segment point) | `c_ℓ = Ỹ(r_i,r_j)` recomputed from the committed Y trace-column segment (`RCGkrSegmentPoint`) must equal the carried `c_claim`. |
+| **G3** | II + III | the prover-manufactured lookup is REPLACED by the Extract composition polynomial `Comp ≡ 0` (`EmitTileConstraints`/`ComposeConstraints`) + fixed-reference-vector membership (`BuildPreprocessedLogUpTables`/`VerifyLookupAgainstPreprocessed`, canonical T_M/T_X regenerated, never prover-chosen) + the sampler out-binding. |
+| **G4** | IV (dual wiring) | `extract_out(L) == input(L+1)` over the true Λ provenance: direct copies via the equality identity, transposed copies via the **DUAL-challenge** grand product (`BuildWiringPermutationDual`/`VerifyWiringPermutationDual`) — the single-challenge form is UNREACHABLE on the ship path; plus the §6.3 round-root↔stream binding. |
+| **G5** | I (residual binder) | Fwd `acc = claim + X̃(pt)` (`RCGkrCheckResidualAcc`); `extract_in == Y` for the non-residual layers. |
+
+The relation gate runs **after** the existing §5.4/§5.7/§6.3 native grounding, so
+it never changes which relation an already-rejected forgery *first* fails (the
+base v7 soundness suite still observes `v7:ground:*`/`v7:logup:*`). The
+integration red-team (`matmul_v4_rc_gkr_integration_tests.cpp`) additionally feeds
+the five internally-consistent episode forgeries to the **standalone** relation
+module and asserts each rejects at its `v7:g<N>:*` construction relation
+(ArbitraryAbFactorization/FabricatedTraceWires → `v7:g1`, IdenticalFabricatedLookup
+→ `v7:g3`, FabricatedExtractIO → `v7:g5`, UnrelatedLayerRoots → `v7:g4`) — the
+constructions catch the forgery, **not only** the int64 re-derivation. Consensus
+posture unchanged: arbiter OFF, heights INT32_MAX,
+`RecomputeResidentCurriculumReference`/`RecomputeCoupledPuzzleReference`
+untouched; `VerifyWinnerProofV7` is never consensus-authoritative and ExactReplay
+remains the sole authority.
+
+### The composed separation bound (`RCGkrComposedSeparationBits`) — Q = 128 + Fp3 (margin restored, 2026-07-22)
+
+`RCGkrComposedSeparation(fri_proximity_bits)` combines the four constructions +
+the batched-FRI backend + the SHA256d bindings by a log-sum-exp of the
+per-relation acceptance probabilities, **PARAMETRIC in the FRI proximity bound**.
+All values are −log2(acceptance), post the g = 40 grinding convention.
+
+**The two margin levers of the previous revision are now APPLIED to the bound
+accounting:** the fold query count is raised **Q = 116 → 128**
+(`kRCFriNumQueries`, live in this tree), and every FS/algebraic challenge is
+accounted over the **CUBIC extension K = F_{p^3}**, log2|K| = 3·log2 p =
+191.999999999 (`kRCGkrChallengeFieldBits`), instead of F_{p^2} (≈ 128). The
+Fp3-dependent rows below **hold only once the challenge-derivation call-sites
+enumerated in INTEGRATION_REPORT.md ("Fp2 → Fp3 challenge sites") actually draw
+from Fp3** — the F_{p^3} implementation is a parallel workstream; the FRI query
+term (query repetitions) and the SHA term are field-independent and already
+hold.
+
+Per-term closed forms and old-vs-new numbers (post-grind g = 40 unless marked
+"pre"):
+
+| Term | Closed form (−log2, pre-grind) | Old (Q=116, Fp2) pre → post | New (Q=128, Fp3) pre → post |
+|---|---|---|---|
+| FRI fold proximity (v5, unique decoding α = 17/32) | Q·log2(32/17) | 105.85 → **65.85** | 116.80 → **76.80** |
+| FRI batched query term (`FriBatchSoundnessBoundBits`, Q = 128 both revisions) | Q·log2(32/17) | 116.80 → 76.8 | 116.80 → 76.8 |
+| Whole-protocol FS subtotal (sumcheck ≤ 2^13 rounds · 3/\|K\| + condensations 2^9/\|K\| + RLC γ/μ/λ/weights ≤ 2^16/\|K\| + dual-OOD + dual-α) | −log2(Σ …) | 111.5 → **72** (pinned) | 175.5 → **135.5** |
+| — sumcheck rows alone | 3·2^13/\|K\| | 113.4 | 177.4 |
+| — RLC batchings (γ, μ, λ, DEEP weights) | 2^16/\|K\| | 112 | 176 |
+| — dual-OOD DEEP (z1, z2) | (2κ/(\|K\|−\|D\|))², κ = 2^28 | 196 | 326 |
+| — dual-α LogUp (inside FS) | ((N_w+N_t)/\|K\|)², ≤ 2^44 | 168 | 296 |
+| Construction I (eval opening, standalone sub-bound) | FS′×2^40 ⊕ FRI query ⊕ SHA | → **74** (FS-dominated) | → **76** (FRI-query-dominated) |
+| Construction II composition (n_slots ≤ 256) | (n_slots−1)/\|K\| | 120 → **80** | 184 → **144** |
+| Construction III dual-α membership (conservative N_w+N_t ≤ 2^44) | ((N_w+N_t)/\|K\|)² | 168 → **128** | 296 → **256** |
+| Construction IV equality (ℓ = 28) | ℓ/\|K\| | 123.19 → **83.19** | 187.19 → **147.19** |
+| Construction IV grand product, DUAL (N = 2^28) | (N/\|K\|)² | 200 → **160** | 328 → **288** |
+| Construction IV grand product, SINGLE (excluded) | N/\|K\| | 100 → **60 (< 64!)** | 164 → 124 |
+| SHA256d bindings (computational, 2^40-query adversary) | — | **88** | **88** |
+| **COMPOSED (log-sum-exp of included terms)** | | **≈ 65.8** (margin **1.8** — INADEQUATE) | **≈ 76.80** (margin **12.8** — adequate; ≥ 74 bar cleared) |
+
+Composed total at the Q = 128 fold floor (`kRCGkrFriProximityBitsV5 = 76.80`):
+
+  **ε_total = Σ 2^-term ⇒ −log2(ε_total) ≈ 76.80 bits (ε_total ≤ 2^-76.79),
+  margin over 64 ≈ 12.8 bits, over the 74-bit restored-margin bar
+  (`kRCGkrComposedTargetBits`) ≈ 2.8 bits.**
+
+The bound is **FRI-dominated** (the field-independent query-repetition term is
+the floor; the next terms are SHA 88 and FS 135.5) and NON-VACUOUS on the sound
+v5 fold. Honesty markers, stated plainly:
+
+- **The fold floor and the batched query term now coincide** (both Q = 128).
+  Plugging the conservative integer `FriBatchSoundnessBoundBits()` = 76 still
+  composes to ≈ 76.0 ≥ 74 — the margin does not hinge on the fractional 0.80.
+- **No included term is below 64**; the smallest algebraic term (FS subtotal
+  135.5) is far above the bar. The historical Q = 116 floor (65.85) and Fp2 FS
+  subtotal (72) are retained in the test as a pinned record.
+- The **single-challenge** grand-product wiring netted only **60 bits over
+  Fp2** — the origin of the dual mandate. Over Fp3 the single form would be
+  124, but the **dual mandate is structural and is NOT relaxed** (G4 enforces
+  the dual form; `kRCGkrWiringPermutationSingleSepBitsFp2 = 60` keeps the
+  below-64 record asserted).
+- **Arbiter posture unchanged:** `kRCGkrFormalSoundnessReady = false`,
+  ExactReplay is the sole authority. This bound is audit accounting for the
+  parameterization, not a consensus switch; the Fp3 rows are conditional on
+  the challenge-site cutover listed in INTEGRATION_REPORT.md.
+
+`RCGkrComposedSeparationBits()` returns ≈ 76.80; the term pins, the total, the
+margin, the `!inadequate_margin` flag, and the ≥ 74 bar are asserted in
+`gkr_integration_composed_separation_bound`.
+
+## Appendix FP3 (2026-07-22) — cubic extension field for FS challenges
+
+`src/matmul/matmul_v4_rc_gkr_field_ext3.h` adds the degree-3 Goldilocks
+extension **F_{p^3} = F_p[x]/(x^3 − W3)** with **W3 = 2**, the smallest
+positive non-cube in F_p (verified: 2^((p−1)/3) mod p = 0xFFFFFFFF ≠ 1, and
+3 | p − 1 since p − 1 = 2^32(2^32 − 1); by the binomial criterion for prime
+degree, x^3 − 2 is therefore irreducible). The extension has order
+**|F_{p^3}| = p^3 ≈ 2^192**, and `FromChallengeBytes3` consumes 24 FS bytes
+(~192 bits of challenge entropy) per challenge accordingly. This is the "Fp3
+FS" lever from the composed-bound table above: it lifts the FS union subtotal
+(≈72 → ≈136 bits) so that, combined with Q = 128, the FRI query term becomes
+the binding floor (≈76.8). Inversion uses the norm-quotient closed form
+a^{−1} = a^{p^2+p}/N(a) with the conjugate product expanded to base-field
+adjugate coefficients (derivation in the header; Frobenius, norm-in-F_p, and
+a·Inv(a) = 1 are unit-tested in
+`src/test/matmul_v4_rc_gkr_field_ext3_tests.cpp`).

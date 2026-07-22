@@ -53,15 +53,20 @@ Not ε=0. Not production-complete. Not a substitute for external audit sign-off.
 | F-B4 | HIGH | G4: cross-layer extract wiring prove-only. |
 | F-B5 | HIGH | G5: `Y_acc = Y_gemm + X` not algebraically checked. |
 
-### Remediation landed (proof **v5**, Haböck G3 in **v6**)
+### Remediation landed (proof **v5**, Haböck G3 in **v6**) — scaffold only
 
-| Gap | Close |
+| Gap | Scaffold close (NOT succinct CLOSED) |
 |---|---|
 | G1 | Batched `a_fri` / `b_fri` + per-layer `a_root`/`b_root` absorbed **before** `(ri,rj)`. |
 | G2 | Commit-then-challenge: `trace_fri` (+DEEP) absorbed before claims; claims FS-bound to roots. |
 | G3 | Haböck LogUp: witness keys ≡ virtual Extract-table keys (FRI root/DEEP); α←FS; `inv` FRI with forced DEEP at z=1 binds `I(1)=Σ inv`; `R≡0` FRI; `sum_w=sum_t`. |
 | G4 | `extract_out_commit` chain absorbed across layers. |
 | G5 | Verifier checks `acc_claim = claim + residual_mle`; non-Fwd residual must be 0. |
+
+**G1–G5 remain OPEN/PARKED** for succinct PCS/AIR closure. v7 rejects independent
+malicious constructors by **grounding** (native re-derivation), not by flipping
+these rows to CLOSED. Arbiter hard-disabled (`kRCGkrFormalSoundnessReady=false`).
+Composed bound: `doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`.
 
 ### Residual (honest)
 
@@ -80,16 +85,17 @@ These residuals **still counsel against arbiter ON** until an external auditor s
 1. [x] Unique-decoding Q=116 / B=16 / g=40 matches Fable table.
 2. [x] DEEP/OOD present and tested (`fri_deep_ood_tamper_rejects`).
 3. [x] Commit-then-challenge ordering in prove/verify.
-4. [x] G5 residual algebra enforced.
-5. [x] G3 Haböck virtual Extract table + I(1)/R≡0 (proof v6; adversarial tests).
+4. [x] G5 residual algebra enforced (**scaffold only** — G5 remains OPEN/PARKED).
+5. [x] G3 Haböck virtual Extract table + I(1)/R≡0 (proof v6; adversarial tests) (**scaffold only** — G3 remains OPEN/PARKED).
 6. [ ] External human audit sign-off — **OPEN**.
 7. [ ] Consensus-dim prover cost on silicon — **OPEN** (OUT OF SCOPE).
-8. [x] Arbiter OFF; ExactReplay consensus; height INT32_MAX.
+8. [x] Arbiter hard-disabled (`kRCGkrFormalSoundnessReady=false`); ExactReplay consensus; height INT32_MAX.
 
 ### Verdict
 
-**Ship as hardened shadow scaffold.** Do **not** flip `BTX_RC_GKR_ARBITER`.
+**Ship as hardened shadow scaffold.** Do **not** flip arbiter / `kRCGkrFormalSoundnessReady`.
 Do **not** raise `nMatMulRCHeight`. Do **not** claim HBM/production-complete.
+Do **not** claim G1–G5 CLOSED.
 
 ---
 

@@ -4193,8 +4193,9 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
     if (!replay.ok) return finish(false);
 
     // Section-2 shadow (BTX_RC_GKR_SHADOW default ON): generate+verify observe only;
-    // mismatch logs; NEVER rejects consensus. Arbiter BTX_RC_GKR_ARBITER=1 is OFF
-    // by default and does NOT raise nMatMulRCHeight.
+    // mismatch logs; NEVER rejects consensus. Arbiter is compile-time hard-disabled
+    // (kRCGkrFormalSoundnessReady=false ⇒ EnvRCGkrArbiterEnabled ignores
+    // BTX_RC_GKR_ARBITER) and does NOT raise nMatMulRCHeight.
     {
         std::vector<unsigned char> proof_bytes;
         const std::vector<unsigned char>* opt = nullptr;
@@ -4206,7 +4207,8 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
     }
 
     // Optional explicit GKR measure hook (BTX_RC_VERIFY_GKR=1). Still does NOT
-    // replace ExactReplay unless BTX_RC_GKR_ARBITER=1 (kept OFF).
+    // replace ExactReplay: EnvRCGkrArbiterEnabled is hard-false while
+    // !kRCGkrFormalSoundnessReady (ignores BTX_RC_GKR_ARBITER).
     if (matmul::v4::rc::EnvRCVerifyGkrEnabled() || matmul::v4::rc::EnvRCGkrArbiterEnabled()) {
         std::vector<unsigned char> proof_bytes;
         if (matmul::v4::rc::RCGkrProofCacheGet(header.GetHash(), proof_bytes)) {
@@ -4217,9 +4219,8 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
                      "replay_ok=%d arbiter=%d note=%s\n",
                      static_cast<int>(dual.path), dual.gkr.ok ? 1 : 0, dual.replay.ok ? 1 : 0,
                      matmul::v4::rc::EnvRCGkrArbiterEnabled() ? 1 : 0, dual.note.c_str());
-            // Arbiter OFF (default): ExactReplay already passed above — ignore dual.ok.
-            // Arbiter ON: still require ExactReplay above; arbiter path is measurement
-            // until Stage-I audit. Never flip finish(false) from GKR here.
+            // Arbiter hard-off: ExactReplay already passed above — ignore dual.ok.
+            // Never flip finish(false) from GKR here.
             (void)dual;
         } else {
             LogDebug(BCLog::VALIDATION,
@@ -4255,10 +4256,9 @@ bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensu
         matmul::v4::rc::ResolveRCCoupOptions(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) return finish(false);
 
-    // Consensus REJECT: empty ExactGemm (CPU-only; R1).
-    const uint256 digest =
-        matmul::v4::rc::RecomputeCoupledPuzzleReference(header, block_height, params_coup,
-                                                        options_coup);
+    // Consensus REJECT: empty ExactGemm (CPU-only; R1). Profile-selected domains (F7).
+    const uint256 digest = matmul::v4::rc::RecomputeCoupledPuzzleReference(
+        header, block_height, params_coup, options_coup);
     if (digest.IsNull() || digest != header.matmul_digest) return finish(false);
     if (UintToArith256(digest) > *bnTarget) return finish(false);
     return finish(true);
@@ -6052,9 +6052,8 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
             // Winner candidate: CPU reseal (empty ExactGemm).
             CBlockHeader cand = window[i];
-            const uint256 resealed =
-                matmul::v4::rc::RecomputeCoupledPuzzleReference(cand, block_height, params_coup,
-                                                                options_coup);
+            const uint256 resealed = matmul::v4::rc::RecomputeCoupledPuzzleReference(
+                cand, block_height, params_coup, options_coup);
             if (resealed != mined) {
                 LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
                            "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",

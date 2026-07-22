@@ -479,9 +479,9 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
 
     constexpr bool keep_d_segs = kRCSegmentLeavesEnabled;
 
-    // Backward + wgrad (segmented int64 oracle; Extract once on Σ partials).
-    // Amendment 1.B: wgrad K=b_seq >2^24 at consensus — Ozaki limb path only
-    // (matmul_v4_rc_mx_ozaki.h); never plain LT native FP4.
+    // Backward + wgrad (Extract once on Σ partials).
+    // A4/F10: segment leaves OFF → chunked ExactGemm K-panels + int64 recombine.
+    // Amendment 1.B: wgrad K=b_seq >2^24 at consensus — never plain LT native FP4.
     for (int32_t l = static_cast<int32_t>(p.L_lyr) - 1; l >= 0; --l) {
         ensure_X(static_cast<uint32_t>(l));
         // G[l+1] is already resident from the previous step (or G[L] seed).
@@ -496,15 +496,23 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
             std::vector<int32_t>().swap(g_acc);
         }
 
-        auto seg = AccumulateSegmentedGemmGXt(out.G[l + 1], out.X[l], p.b_seq, p.d_model,
-                                              /*keep_segs=*/keep_d_segs);
+        // A4/F10 (WP-E): when segment leaves are OFF, wgrad uses fixed K panels
+        // (kRCWgradExactChunk with 2304·K < 2^24) → ExactGemm int32 partials →
+        // int64 recombine → single final Extract. ExactGemmS8S8Dispatched falls
+        // back to the CPU oracle on device decline.
+        std::vector<int64_t> d_total;
         if constexpr (keep_d_segs) {
+            auto seg = AccumulateSegmentedGemmGXt(out.G[l + 1], out.X[l], p.b_seq, p.d_model,
+                                                  /*keep_segs=*/true);
             out.d_segs[l] = std::move(seg.segs);
+            d_total = std::move(seg.total);
+        } else {
+            d_total = GemmGXtViaChunkedExact(out.G[l + 1], out.X[l], p.b_seq, p.d_model, gemm);
         }
-        out.D[l].assign(seg.total.size(), 0);
-        ExtractMXMatrixInt64(prf_wg[l], seg.total.data(), p.d_model, p.d_model, out.D[l].data());
+        out.D[l].assign(d_total.size(), 0);
+        ExtractMXMatrixInt64(prf_wg[l], d_total.data(), p.d_model, p.d_model, out.D[l].data());
         {
-            std::vector<int64_t>().swap(seg.total);
+            std::vector<int64_t>().swap(d_total);
         }
 
         // Free G[L] after the top backward step consumes it (not in the round

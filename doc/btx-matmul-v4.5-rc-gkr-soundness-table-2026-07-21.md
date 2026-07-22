@@ -65,5 +65,8 @@ F0 fabricate-everything: 1. F4 free final_eval: 1. F5 free claim: 1.
 F6 Extract witness: 1 (Theorem 5.1). F10 omitted coupled barrier: 1 (toy stand-in).
 All others: see §9 table of the construction document.
 
-*Nothing in this table changes consensus: arbiter OFF, heights INT32_MAX, int64
-ExactReplay remains the sole authority.*
+*Nothing in this table changes consensus: arbiter hard-disabled
+(`kRCGkrFormalSoundnessReady=false` ⇒ `EnvRCGkrArbiterEnabled` ignores
+`BTX_RC_GKR_ARBITER`), heights INT32_MAX, int64 ExactReplay remains the sole
+authority. G1–G5 remain OPEN/PARKED. Authoritative v7 writeup:
+`doc/btx-matmul-v4.5-v7-composed-soundness-bound-2026-07-22.md`.*

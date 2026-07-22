@@ -278,4 +278,538 @@ bool EvalArgumentVerify(const std::vector<RCGkrOpeningClaim>& claims, const FriB
     return true;
 }
 
+// ============================================================================
+// CONSTRUCTION I (header block comment has the full statement + separation
+// accounting). Stage 1: γ-batched eq-kernel summation-reduction over
+//   F(x) = Σ_m γ^m · u_{c(m)}(x) · eq(z_m, x),   Σ_{x∈{0,1}^ν} F(x) = Σ γ^m y_m,
+// a ν-round degree-2 reduction ending at a common point r with residual
+// claims ũ_c(r) per distinct column. Stage 2: those residuals are bound to
+// the LDE Merkle roots by the §2.4 aggregated opening (EvalArgument*) inside
+// the ONE FriBatch instance.
+// ============================================================================
+
+namespace {
+
+/** Lean FS transcript (SHA256d over a running byte buffer; same discipline as
+ *  the file-local FsTranscript of matmul_v4_rc_gkr.cpp — commit-then-challenge,
+ *  every challenge re-absorbed). */
+class EqOpenFs
+{
+public:
+    explicit EqOpenFs(const char* domain)
+    {
+        m_buf.insert(m_buf.end(), reinterpret_cast<const unsigned char*>(domain),
+                     reinterpret_cast<const unsigned char*>(domain) + std::strlen(domain));
+    }
+    void AbsorbU32(uint32_t v) { AppendLE32(m_buf, v); }
+    void AbsorbFp2(const Fp2& v) { AppendFp2(m_buf, v); }
+    void AbsorbUint256(const uint256& h) { m_buf.insert(m_buf.end(), h.begin(), h.end()); }
+    uint256 Challenge(const char* label)
+    {
+        m_buf.insert(m_buf.end(), reinterpret_cast<const unsigned char*>(label),
+                     reinterpret_cast<const unsigned char*>(label) + std::strlen(label));
+        const uint256 h = Sha256dOf(m_buf);
+        AbsorbUint256(h);
+        return h;
+    }
+    Fp2 ChallengeFp2(const char* label)
+    {
+        return gkr_field::FromChallengeBytes2(Challenge(label).data());
+    }
+    [[nodiscard]] uint256 Digest() const { return Sha256dOf(m_buf); }
+
+private:
+    std::vector<unsigned char> m_buf;
+};
+
+/** Degree-2 Lagrange evaluation from values at {0,1,2}:
+ *  g(x) = g0·(1−x)(2−x)/2 + g1·x(2−x) + g2·x(x−1)/2. */
+Fp2 EvalDeg2(const Fp2& g0, const Fp2& g1, const Fp2& g2, const Fp2& x)
+{
+    const Fp2 inv2 = gkr_field::Inv(Fp2::FromFp(2));
+    const Fp2 one_minus = gkr_field::Sub(Fp2::One(), x);
+    const Fp2 two_minus = gkr_field::Sub(Fp2::FromFp(2), x);
+    Fp2 acc = gkr_field::Mul(gkr_field::Mul(g0, gkr_field::Mul(one_minus, two_minus)), inv2);
+    acc = gkr_field::Add(acc, gkr_field::Mul(g1, gkr_field::Mul(x, two_minus)));
+    acc = gkr_field::Add(
+        acc, gkr_field::Mul(gkr_field::Mul(g2, gkr_field::Mul(x, gkr_field::Sub(x, Fp2::One()))),
+                            inv2));
+    return acc;
+}
+
+/** Zero-extend a point to dimension nu (selects the low sub-cube — the
+ *  appended eq-factors become (1−0)=1 on the low half, 0 on the high half). */
+std::vector<Fp2> PointExtend(const std::vector<Fp2>& p, uint32_t nu)
+{
+    std::vector<Fp2> q = p;
+    while (q.size() < nu) q.push_back(Fp2::Zero());
+    return q;
+}
+
+/** Distinct-column slots in first-use order over the claims.
+ *  slot_of_claim[m] = slot index; slot_column[s] = column_id. */
+void BuildSlots(const std::vector<RCGkrOpeningClaim>& claims, std::vector<size_t>& slot_of_claim,
+                std::vector<uint32_t>& slot_column)
+{
+    slot_of_claim.assign(claims.size(), 0);
+    slot_column.clear();
+    for (size_t m = 0; m < claims.size(); ++m) {
+        size_t s = slot_column.size();
+        for (size_t t = 0; t < slot_column.size(); ++t) {
+            if (slot_column[t] == claims[m].column_id) {
+                s = t;
+                break;
+            }
+        }
+        if (s == slot_column.size()) slot_column.push_back(claims[m].column_id);
+        slot_of_claim[m] = s;
+    }
+}
+
+/** Structural validation shared by the Stage-1 constructing/checking routines.
+ *  column_len[c] = logical length of column c (0 = unknown/skip the cover
+ *  check). Returns nullptr on success, else the failure label. */
+const char* ValidateOpenClaims(const std::vector<RCGkrOpeningClaim>& claims, uint32_t nu,
+                               size_t n_columns, const std::vector<uint32_t>* column_len)
+{
+    if (claims.empty()) return "eqopen:no_claims";
+    if (claims.size() > kRCGkrEvalArgMaxClaims) return "eqopen:too_many_claims";
+    for (const auto& c : claims) {
+        if (c.column_id >= n_columns) return "eqopen:claim_col_range";
+        if (c.point.size() > nu) return "eqopen:point_dim";
+        if (column_len != nullptr) {
+            const uint64_t cover = uint64_t{1} << std::min<size_t>(c.point.size(), 63);
+            if (cover < (*column_len)[c.column_id]) return "eqopen:point_short";
+        }
+    }
+    return nullptr;
+}
+
+/** γ-transcript preamble: binds fs_seed + EVERY claim before γ is drawn. */
+void AbsorbOpenStatement(EqOpenFs& fs, const std::vector<RCGkrOpeningClaim>& claims,
+                         const uint256& fs_seed, uint32_t nu)
+{
+    fs.AbsorbUint256(fs_seed);
+    fs.AbsorbU32(nu);
+    fs.AbsorbU32(static_cast<uint32_t>(claims.size()));
+    for (const auto& c : claims) {
+        fs.AbsorbU32(c.column_id);
+        fs.AbsorbU32(static_cast<uint32_t>(c.point.size()));
+        for (const Fp2& p : c.point) fs.AbsorbFp2(p);
+        fs.AbsorbFp2(c.value);
+    }
+}
+
+constexpr char kEqOpenDomainTag[] = "BTX_RCGKR_EQOPEN_V1";
+constexpr char kConstrIDomainTag[] = "RCGKR_CONSTR_I_V1";
+
+/** Shared Stage-1 core. With repair_invalid=false this is the plain
+ *  constructing routine and it REFUSES claims that disagree with the columns
+ *  (the summation identity would be violated — nothing to construct). With
+ *  repair_invalid=true it emits the STRONGEST internally-consistent transcript
+ *  for the (possibly invalid) claims: every round sum is repaired by a
+ *  constant shift into g(0) and the chain end is repaired by fabricating one
+ *  residual ũ_c(r); all Stage-1 algebra then holds and detection is deferred
+ *  to the Stage-2 root binding (test-only path). */
+RCGkrEvalOpenProveResult EvalOpenProveCore(const std::vector<RCGkrOpeningClaim>& claims,
+                                           const std::vector<std::vector<Fp2>>& columns,
+                                           uint32_t nu, const uint256& fs_seed,
+                                           bool repair_invalid)
+{
+    RCGkrEvalOpenProveResult res;
+    if (nu > kRCFriMaxColumnLog2) {
+        res.note = "eqopen:nu_too_large";
+        return res;
+    }
+    std::vector<uint32_t> lens(columns.size());
+    for (size_t i = 0; i < columns.size(); ++i) {
+        if (columns[i].empty() || columns[i].size() > (size_t{1} << nu)) {
+            res.note = "eqopen:column_len";
+            return res;
+        }
+        lens[i] = static_cast<uint32_t>(columns[i].size());
+    }
+    if (const char* bad = ValidateOpenClaims(claims, nu, columns.size(), &lens)) {
+        res.note = bad;
+        return res;
+    }
+
+    EqOpenFs fs(kEqOpenDomainTag);
+    AbsorbOpenStatement(fs, claims, fs_seed, nu);
+    const Fp2 gamma = fs.ChallengeFp2("eqopen_gamma");
+
+    std::vector<size_t> slot_of_claim;
+    std::vector<uint32_t> slot_column;
+    BuildSlots(claims, slot_of_claim, slot_column);
+    const size_t n_slots = slot_column.size();
+    const size_t n_full = size_t{1} << nu;
+
+    // Per-slot tables: U_s = zero-padded column; E_s = Σ_{claims m on s} γ^m ·
+    // eq-kernel(z_m zero-extended). Claimed total S = Σ_m γ^m·y_m.
+    std::vector<std::vector<Fp2>> U(n_slots), E(n_slots);
+    for (size_t s = 0; s < n_slots; ++s) {
+        U[s].assign(n_full, Fp2::Zero());
+        const auto& col = columns[slot_column[s]];
+        for (size_t i = 0; i < col.size(); ++i) U[s][i] = col[i];
+        E[s].assign(n_full, Fp2::Zero());
+    }
+    Fp2 gamma_pow = Fp2::One();
+    Fp2 claimed_sum = Fp2::Zero();
+    for (size_t m = 0; m < claims.size(); ++m) {
+        claimed_sum = gkr_field::Add(claimed_sum, gkr_field::Mul(gamma_pow, claims[m].value));
+        const std::vector<Fp2> kern = RCGkrEqKernelCoeffs(PointExtend(claims[m].point, nu));
+        std::vector<Fp2>& es = E[slot_of_claim[m]];
+        for (size_t i = 0; i < n_full; ++i) {
+            if (gkr_field::IsZero(kern[i])) continue;
+            es[i] = gkr_field::Add(es[i], gkr_field::Mul(gamma_pow, kern[i]));
+        }
+        gamma_pow = gkr_field::Mul(gamma_pow, gamma);
+    }
+
+    // ν degree-2 rounds folding the lowest remaining variable (pairs 2i/2i+1 —
+    // little-endian order, matching EqFactor / RCGkrEqKernelCoeffs).
+    Fp2 expected = claimed_sum;
+    res.proof.version = kRCGkrEvalOpenVersion;
+    res.proof.rounds.reserve(nu);
+    res.r.clear();
+    for (uint32_t round = 0; round < nu; ++round) {
+        Fp2 g0 = Fp2::Zero(), g1 = Fp2::Zero(), g2 = Fp2::Zero();
+        for (size_t s = 0; s < n_slots; ++s) {
+            const std::vector<Fp2>& us = U[s];
+            const std::vector<Fp2>& es = E[s];
+            for (size_t idx = 0; idx < us.size(); idx += 2) {
+                const Fp2 u0 = us[idx], u1 = us[idx + 1];
+                const Fp2 e0 = es[idx], e1 = es[idx + 1];
+                g0 = gkr_field::Add(g0, gkr_field::Mul(u0, e0));
+                g1 = gkr_field::Add(g1, gkr_field::Mul(u1, e1));
+                // g(2) from the linear extensions: (2u1−u0)·(2e1−e0).
+                const Fp2 u2 = gkr_field::Sub(gkr_field::Mul(u1, Fp2::FromFp(2)), u0);
+                const Fp2 e2 = gkr_field::Sub(gkr_field::Mul(e1, Fp2::FromFp(2)), e0);
+                g2 = gkr_field::Add(g2, gkr_field::Mul(u2, e2));
+            }
+        }
+        // Round-sum repair: expected − (g(0)+g(1)) is zero for a valid
+        // assignment; nonzero deltas are refused (or, test-only, folded into
+        // g(0) so the round identity holds by construction).
+        const Fp2 delta = gkr_field::Sub(expected, gkr_field::Add(g0, g1));
+        if (!gkr_field::IsZero(delta)) {
+            if (!repair_invalid) {
+                res.note = "claims disagree with columns";
+                return res;
+            }
+            g0 = gkr_field::Add(g0, delta);
+        }
+        RCGkrEvalSumcheckRound msg{g0, g1, g2};
+        fs.AbsorbFp2(msg.g0);
+        fs.AbsorbFp2(msg.g1);
+        fs.AbsorbFp2(msg.g2);
+        const Fp2 r_t = fs.ChallengeFp2("eqopen_r");
+        res.r.push_back(r_t);
+        expected = EvalDeg2(g0, g1, g2, r_t);
+        for (size_t s = 0; s < n_slots; ++s) {
+            std::vector<Fp2> nu_tab(U[s].size() / 2), ne_tab(E[s].size() / 2);
+            for (size_t i = 0; i < nu_tab.size(); ++i) {
+                const Fp2 om = gkr_field::Sub(Fp2::One(), r_t);
+                nu_tab[i] = gkr_field::Add(gkr_field::Mul(U[s][2 * i], om),
+                                           gkr_field::Mul(U[s][2 * i + 1], r_t));
+                ne_tab[i] = gkr_field::Add(gkr_field::Mul(E[s][2 * i], om),
+                                           gkr_field::Mul(E[s][2 * i + 1], r_t));
+            }
+            U[s] = std::move(nu_tab);
+            E[s] = std::move(ne_tab);
+        }
+        res.proof.rounds.push_back(msg);
+    }
+
+    // Chain end: residual ũ_c(r) per slot (U tables are fully folded).
+    res.proof.column_at_r.resize(n_slots);
+    for (size_t s = 0; s < n_slots; ++s) res.proof.column_at_r[s] = U[s][0];
+
+    // Chain-end repair (test-only): solve the final identity for ONE residual
+    // so Σ_s ũ_s·E_s(r) equals the (shift-repaired) expected value.
+    Fp2 total = Fp2::Zero();
+    for (size_t s = 0; s < n_slots; ++s)
+        total = gkr_field::Add(total, gkr_field::Mul(res.proof.column_at_r[s], E[s][0]));
+    const Fp2 final_delta = gkr_field::Sub(expected, total);
+    if (!gkr_field::IsZero(final_delta)) {
+        if (!repair_invalid) {
+            res.note = "claims disagree with columns";
+            return res;
+        }
+        size_t s_fix = n_slots;
+        for (size_t s = 0; s < n_slots; ++s) {
+            if (!gkr_field::IsZero(E[s][0])) {
+                s_fix = s;
+                break;
+            }
+        }
+        if (s_fix == n_slots) {
+            res.note = "eqopen:unrepairable (all eq-weights vanish at r)";
+            return res;
+        }
+        res.proof.column_at_r[s_fix] = gkr_field::Add(
+            res.proof.column_at_r[s_fix], gkr_field::Div(final_delta, E[s_fix][0]));
+    }
+    // Bind the residuals into the transcript; the digest seeds Stage 2 (μ).
+    for (size_t s = 0; s < n_slots; ++s) {
+        fs.AbsorbU32(slot_column[s]);
+        fs.AbsorbFp2(res.proof.column_at_r[s]);
+    }
+    res.bind_digest = fs.Digest();
+
+    res.reduced.clear();
+    res.reduced.reserve(n_slots);
+    for (size_t s = 0; s < n_slots; ++s) {
+        res.reduced.push_back(RCGkrOpeningClaim{slot_column[s], res.r, res.proof.column_at_r[s]});
+    }
+    res.ok = true;
+    res.note = "ok";
+    return res;
+}
+
+} // namespace
+
+RCGkrEvalOpenProveResult EvalOpenProve(const std::vector<RCGkrOpeningClaim>& claims,
+                                       const std::vector<std::vector<Fp2>>& columns, uint32_t nu,
+                                       const uint256& fs_seed)
+{
+    return EvalOpenProveCore(claims, columns, nu, fs_seed, /*repair_invalid=*/false);
+}
+
+bool EvalOpenVerify(const std::vector<RCGkrOpeningClaim>& claims, uint32_t nu,
+                    const RCGkrEvalOpenProof& proof, const uint256& fs_seed,
+                    std::vector<RCGkrOpeningClaim>* out_reduced, uint256* out_bind_digest,
+                    std::string* why)
+{
+    auto fail = [&](const char* m) {
+        if (why) *why = m;
+        return false;
+    };
+    if (proof.version != kRCGkrEvalOpenVersion) return fail("eqopen:version");
+    if (nu > kRCFriMaxColumnLog2) return fail("eqopen:nu_too_large");
+    if (proof.rounds.size() != nu) return fail("eqopen:round_count");
+    // Column-range/point-cover checks against real lengths are the caller's
+    // duty (BatchedOpeningVerify checks batch.column_len); here only shape.
+    if (const char* bad = ValidateOpenClaims(claims, nu, /*n_columns=*/UINT32_MAX, nullptr)) {
+        return fail(bad);
+    }
+
+    std::vector<size_t> slot_of_claim;
+    std::vector<uint32_t> slot_column;
+    BuildSlots(claims, slot_of_claim, slot_column);
+    if (proof.column_at_r.size() != slot_column.size()) return fail("eqopen:residual_count");
+
+    EqOpenFs fs(kEqOpenDomainTag);
+    AbsorbOpenStatement(fs, claims, fs_seed, nu);
+    const Fp2 gamma = fs.ChallengeFp2("eqopen_gamma");
+
+    // Claimed total S = Σ_m γ^m·y_m (recomputed — never carried).
+    Fp2 gamma_pow = Fp2::One();
+    Fp2 expected = Fp2::Zero();
+    std::vector<Fp2> gamma_pows(claims.size());
+    for (size_t m = 0; m < claims.size(); ++m) {
+        gamma_pows[m] = gamma_pow;
+        expected = gkr_field::Add(expected, gkr_field::Mul(gamma_pow, claims[m].value));
+        gamma_pow = gkr_field::Mul(gamma_pow, gamma);
+    }
+
+    // Round-sum chain replay.
+    std::vector<Fp2> r;
+    r.reserve(nu);
+    for (uint32_t round = 0; round < nu; ++round) {
+        const RCGkrEvalSumcheckRound& msg = proof.rounds[round];
+        if (!gkr_field::Eq(gkr_field::Add(msg.g0, msg.g1), expected)) {
+            return fail("eqopen:round_sum");
+        }
+        fs.AbsorbFp2(msg.g0);
+        fs.AbsorbFp2(msg.g1);
+        fs.AbsorbFp2(msg.g2);
+        const Fp2 r_t = fs.ChallengeFp2("eqopen_r");
+        r.push_back(r_t);
+        expected = EvalDeg2(msg.g0, msg.g1, msg.g2, r_t);
+    }
+
+    // Chain end vs native O(M·ν) eq evaluations of the batched eq-weights.
+    std::vector<Fp2> eq_slot(slot_column.size(), Fp2::Zero());
+    for (size_t m = 0; m < claims.size(); ++m) {
+        const Fp2 w = gkr_field::Mul(gamma_pows[m], RCGkrEqAt(PointExtend(claims[m].point, nu), r));
+        eq_slot[slot_of_claim[m]] = gkr_field::Add(eq_slot[slot_of_claim[m]], w);
+    }
+    Fp2 total = Fp2::Zero();
+    for (size_t s = 0; s < slot_column.size(); ++s) {
+        total = gkr_field::Add(total, gkr_field::Mul(proof.column_at_r[s], eq_slot[s]));
+    }
+    if (!gkr_field::Eq(total, expected)) return fail("eqopen:final");
+
+    // Emit reduced claims + the Stage-2 seed.
+    for (size_t s = 0; s < slot_column.size(); ++s) {
+        fs.AbsorbU32(slot_column[s]);
+        fs.AbsorbFp2(proof.column_at_r[s]);
+    }
+    if (out_bind_digest != nullptr) *out_bind_digest = fs.Digest();
+    if (out_reduced != nullptr) {
+        out_reduced->clear();
+        out_reduced->reserve(slot_column.size());
+        for (size_t s = 0; s < slot_column.size(); ++s) {
+            out_reduced->push_back(RCGkrOpeningClaim{slot_column[s], r, proof.column_at_r[s]});
+        }
+    }
+    return true;
+}
+
+namespace {
+
+/** Shared Construction I assembly (valid path and the test-only
+ *  invalid-assignment path differ ONLY in the Stage-1 core flag). */
+RCGkrBatchedOpeningProveResult BatchedOpeningProveCore(
+    const std::vector<RCGkrOpeningClaim>& claims, const std::vector<std::vector<Fp2>>& columns,
+    const uint256& fs_seed, bool repair_invalid)
+{
+    RCGkrBatchedOpeningProveResult res;
+    if (columns.empty()) {
+        res.note = "constr1:no_columns";
+        return res;
+    }
+    if (columns.size() + 2 > kRCFriBatchMaxColumns) {
+        res.note = "constr1:too_many_columns";
+        return res;
+    }
+    size_t max_len = 0;
+    for (const auto& col : columns) {
+        if (col.empty()) {
+            res.note = "constr1:empty_column";
+            return res;
+        }
+        max_len = std::max(max_len, col.size());
+    }
+    const uint32_t batch_n = FriNextPow2(static_cast<uint32_t>(max_len));
+    const uint32_t nu = Log2Pow2(batch_n);
+
+    // Epoch-1 roots → γ seed (commit-then-challenge: γ depends on every root).
+    std::vector<unsigned char> seed_buf;
+    seed_buf.insert(seed_buf.end(), fs_seed.begin(), fs_seed.end());
+    seed_buf.insert(seed_buf.end(), kConstrIDomainTag,
+                    kConstrIDomainTag + std::strlen(kConstrIDomainTag));
+    AppendLE32(seed_buf, batch_n);
+    AppendLE32(seed_buf, static_cast<uint32_t>(columns.size()));
+    for (const auto& col : columns) {
+        const uint256 root = FriBatchColumnRoot(col, batch_n);
+        seed_buf.insert(seed_buf.end(), root.begin(), root.end());
+    }
+    const uint256 gamma_seed = Sha256dOf(seed_buf);
+
+    // Stage 1: γ-batched eq-kernel summation-reduction.
+    RCGkrEvalOpenProveResult open =
+        EvalOpenProveCore(claims, columns, nu, gamma_seed, repair_invalid);
+    if (!open.ok) {
+        res.note = "constr1:" + open.note;
+        return res;
+    }
+    res.proof.sumcheck = open.proof;
+
+    // Stage 2: aggregated opening of the reduced claims; f/g join the batch.
+    const auto ev = EvalArgumentProve(open.reduced, columns, open.bind_digest);
+    if (!ev.ok) {
+        res.note = "constr1:eval_prove:" + ev.note;
+        return res;
+    }
+    res.proof.eval = ev.proof;
+    std::vector<std::vector<Fp2>> all = columns;
+    all.push_back(ev.f_coeffs);
+    all.push_back(ev.g_coeffs);
+
+    const auto bc = FriBatchCommit(all, fs_seed);
+    if (!bc.ok) {
+        res.note = "constr1:batch:" + bc.note;
+        return res;
+    }
+    if (bc.proof.n_coeffs != batch_n) {
+        res.note = "constr1:batch_n_mismatch";
+        return res;
+    }
+    res.proof.version = kRCGkrConstructionIVersion;
+    res.proof.batch = bc.proof;
+    res.ok = true;
+    res.note = "ok";
+    return res;
+}
+
+} // namespace
+
+RCGkrBatchedOpeningProveResult BatchedOpeningProve(const std::vector<RCGkrOpeningClaim>& claims,
+                                                   const std::vector<std::vector<Fp2>>& columns,
+                                                   const uint256& fs_seed)
+{
+    return BatchedOpeningProveCore(claims, columns, fs_seed, /*repair_invalid=*/false);
+}
+
+RCGkrBatchedOpeningProveResult BatchedOpeningProveInvalidAssignmentForTest(
+    const std::vector<RCGkrOpeningClaim>& claims, const std::vector<std::vector<Fp2>>& columns,
+    const uint256& fs_seed)
+{
+    return BatchedOpeningProveCore(claims, columns, fs_seed, /*repair_invalid=*/true);
+}
+
+bool BatchedOpeningVerify(const std::vector<RCGkrOpeningClaim>& claims,
+                          const RCGkrBatchedOpeningProof& proof, const uint256& fs_seed,
+                          std::string* why)
+{
+    auto fail = [&](const std::string& m) {
+        if (why) *why = m;
+        return false;
+    };
+    if (proof.version != kRCGkrConstructionIVersion) return fail("constr1:version");
+
+    // Shape: exactly two Stage-2 columns (f,g) after the epoch-1 columns.
+    const size_t n_cols = proof.batch.columns.size();
+    if (n_cols < 3) return fail("constr1:too_few_columns");
+    const uint32_t n_epoch1 = static_cast<uint32_t>(n_cols - 2);
+    if (proof.eval.f_column != n_epoch1 || proof.eval.g_column != n_epoch1 + 1) {
+        return fail("constr1:fg_columns");
+    }
+    const uint32_t batch_n = proof.batch.n_coeffs;
+    if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail("constr1:batch_n");
+    const uint32_t nu = Log2Pow2(batch_n);
+    if (proof.batch.column_len.size() != n_cols) return fail("constr1:column_len_shape");
+
+    // Claims must target epoch-1 columns, and each point must cover the
+    // column's logical length (the zero-extension sub-cube identity).
+    for (const auto& c : claims) {
+        if (c.column_id >= n_epoch1) return fail("constr1:claim_col_range");
+        if (c.point.size() > nu) return fail("constr1:claim_point_dim");
+        const uint64_t cover = uint64_t{1} << std::min<size_t>(c.point.size(), 63);
+        if (cover < proof.batch.column_len[c.column_id]) return fail("constr1:claim_point_short");
+    }
+
+    // (1) Bind roots + dual-OOD evaluations FIRST (Theorem 2.1).
+    std::string sub;
+    if (!FriBatchVerify(proof.batch, fs_seed, &sub)) return fail("constr1:batch:" + sub);
+
+    // (2) Recompute the γ seed from the AUTHENTICATED epoch-1 roots.
+    std::vector<unsigned char> seed_buf;
+    seed_buf.insert(seed_buf.end(), fs_seed.begin(), fs_seed.end());
+    seed_buf.insert(seed_buf.end(), kConstrIDomainTag,
+                    kConstrIDomainTag + std::strlen(kConstrIDomainTag));
+    AppendLE32(seed_buf, batch_n);
+    AppendLE32(seed_buf, n_epoch1);
+    for (uint32_t i = 0; i < n_epoch1; ++i) {
+        seed_buf.insert(seed_buf.end(), proof.batch.columns[i].root.begin(),
+                        proof.batch.columns[i].root.end());
+    }
+    const uint256 gamma_seed = Sha256dOf(seed_buf);
+
+    // (3) Stage-1 replay → reduced claims + Stage-2 seed.
+    std::vector<RCGkrOpeningClaim> reduced;
+    uint256 bind_digest;
+    if (!EvalOpenVerify(claims, nu, proof.sumcheck, gamma_seed, &reduced, &bind_digest, &sub)) {
+        return fail(sub);
+    }
+
+    // (4) Stage-2 root binding of the residuals (Theorem 2.2).
+    if (!EvalArgumentVerify(reduced, proof.batch, proof.eval, bind_digest, &sub)) {
+        return fail(sub);
+    }
+    return true;
+}
+
 } // namespace matmul::v4::rc

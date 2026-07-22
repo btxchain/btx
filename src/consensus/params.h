@@ -514,9 +514,19 @@ struct Params {
      *  before any public network raises the height). Public nets keep 1/1. */
     int64_t nMatMulRCCoupledAsertRescaleNum{1};
     int64_t nMatMulRCCoupledAsertRescaleDen{1};
-    /** REGTEST ONLY — when true, coupled checker/miner use MakeToyRCCoupParams()
-     *  instead of MakeMediumRCCoupParams(). Public nets MUST keep this false. */
+    /** REGTEST ONLY — when true, coupled checker/miner use CI-scale toy dims
+     *  for the selected nMatMulRCCoupledProfile (see ResolveRCCoupParams).
+     *  Public nets MUST keep this false. */
     bool fMatMulRCCoupledUseToyDims{false};
+    /**
+     * Coupled consensus profile selector (ENC_RC_COUPLED).
+     *   2 = V2 shape family (toy ↔ medium via fMatMulRCCoupledUseToyDims)
+     *   3 = V3 shape family (medium-V3 CI ↔ production-V3)
+     * Any other value → ResolveRCCoupParams returns zeroed params (fail closed).
+     * Public nets MUST keep 2 (AssertBMX4CConstructionInvariants). Default 2
+     * preserves pre-selector V2 behaviour. Heights stay INT32_MAX.
+     */
+    uint32_t nMatMulRCCoupledProfile{2};
     /** RC tip-verify concurrency (pending full-episode / coupled recomputes).
      *  Default 1 -- a single heavy RC-family tip verify must never share the
      *  EncDr/v4/LT pending counter or allow 16-way parallel recomputes. Cap is

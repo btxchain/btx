@@ -37,6 +37,31 @@ RCCoupConsensusConfig MakeLegacyV1RCCoupConsensusConfig()
     cfg.v2_pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
     cfg.v3_profile_enabled = false;
     cfg.v3_activation_height = std::numeric_limits<int32_t>::max();
+    cfg.transcript_version = ENC_RC_V1;
+    return cfg;
+}
+
+RCCoupConsensusConfig MakeProductionV3RCCoupConsensusConfig()
+{
+    RCCoupConsensusConfig cfg;
+    cfg.config_version = kRCCoupConsensusConfigVersionV3;
+    const RCCoupParams v3 = MakeProductionV3RCCoupParams();
+    cfg.barriers = v3.barriers;
+    cfg.lobes = v3.lobes;
+    cfg.lobe_width = v3.lobe_width;
+    cfg.bank_pages = v3.bank_pages;
+    cfg.rows_per_lobe = v3.rows_per_lobe;
+    cfg.pages_per_barrier_lobe = v3.pages_per_barrier_lobe;
+    cfg.page_selection_version = kRCCoupPageSelectionFullBankV3;
+    cfg.material_exchange_enabled = true;
+    cfg.material_exchange_rows = 128;
+    cfg.material_exchange_rounds = 4;
+    cfg.material_exchange_cols = v3.lobe_width;
+    cfg.full_bank_schedule_enabled = true;
+    cfg.v2_pages_per_barrier_lobe = dc::kRCCoupPagesPerBarrierLobe;
+    cfg.v3_profile_enabled = true;
+    cfg.v3_activation_height = std::numeric_limits<int32_t>::max();
+    cfg.transcript_version = ENC_RC_V3;
     return cfg;
 }
 
@@ -72,6 +97,8 @@ RCCoupParams RCCoupParamsFromConsensusConfig(const RCCoupConsensusConfig& cfg)
     p.lobes = cfg.lobes;
     p.lobe_width = cfg.lobe_width;
     p.bank_pages = cfg.bank_pages;
+    // F8: project shape fields (V3 default M=128 / P=24; legacy/V2 configs
+    // carry their own M / P through the same projection).
     p.rows_per_lobe = cfg.rows_per_lobe;
     p.pages_per_barrier_lobe = cfg.pages_per_barrier_lobe;
     return p;

@@ -252,16 +252,97 @@ struct FriFs {
     }
 };
 
+/** log2(n) for n = 2^k ≥ 1. */
+uint32_t FriLog2Exact(uint32_t n)
+{
+    uint32_t log = 0;
+    while (n > 1) {
+        n >>= 1;
+        ++log;
+    }
+    return log;
+}
+
+Fp2 DomainPoint(uint32_t n0, uint32_t index)
+{
+    return Fp2::FromFp(PowFp(OmegaForSize(n0), index));
+}
+
+/** z ∈ D (size-n_lde LDE subgroup on the c1=0 base-field line)? */
+bool FriPointInDomain(const Fp2& z, uint32_t n_lde)
+{
+    if (Canonical(z.c1) != 0) return false;
+    return Canonical(PowFp(z.c0, n_lde)) == 1;
+}
+
+/**
+ * OOD sample: FS challenges until the Fp2 extension coefficient is nonzero.
+ * c1!=0 ⇒ automatically ∉ D (D embeds on the c1=0 line). Rejection is
+ * deterministic so prover and verifier agree on the counter.
+ */
+Fp2 FriSampleOodZ(FriFs& fs, const char* label, uint32_t& ctr)
+{
+    while (true) {
+        const Fp2 z = fs.ChallengeFp2(label, ctr++);
+        if (Canonical(z.c1) != 0) return z;
+    }
+}
+
+/**
+ * v5 half-domain fold: pair i with i+N/2.
+ *   even = (f(x)+f(-x))/2, odd = (f(x)-f(-x))/(2x), next = even + β·odd
+ * Returns false if x=0 (fail closed; should not occur on subgroup points).
+ */
+bool HalfDomainFoldLayer(const std::vector<Fp2>& cur, const Fp2& beta, std::vector<Fp2>& next)
+{
+    const uint32_t N = static_cast<uint32_t>(cur.size());
+    if (N < 2 || (N % 2) != 0) return false;
+    const uint32_t half = N / 2;
+    next.resize(half);
+    const Fp2 inv2 = Inv(Fp2::FromFp(2));
+    for (uint32_t i = 0; i < half; ++i) {
+        const Fp2 f_x = cur[i];
+        const Fp2 f_neg = cur[i + half];
+        const Fp2 x = DomainPoint(N, i);
+        if (gkr_field::IsZero(x)) return false;
+        const Fp2 even = Mul(Add(f_x, f_neg), inv2);
+        const Fp2 odd = Mul(Sub(f_x, f_neg), Mul(inv2, Inv(x)));
+        next[i] = Add(even, Mul(beta, odd));
+    }
+    return true;
+}
+
+/** Algebraic fold of one opened pair (same formula as HalfDomainFoldLayer). */
+bool HalfDomainFoldPair(const Fp2& f_x, const Fp2& f_neg, const Fp2& x, const Fp2& beta,
+                        Fp2& out_folded)
+{
+    if (gkr_field::IsZero(x)) return false;
+    const Fp2 inv2 = Inv(Fp2::FromFp(2));
+    const Fp2 even = Mul(Add(f_x, f_neg), inv2);
+    const Fp2 odd = Mul(Sub(f_x, f_neg), Mul(inv2, Inv(x)));
+    out_folded = Add(even, Mul(beta, odd));
+    return true;
+}
+
+/** Merkle root of blowup identical constant leaves (terminal v5 layer). */
+uint256 MerkleRootConstantLayer(const Fp2& value, uint32_t n_leaves)
+{
+    std::vector<Fp2> consts(n_leaves, value);
+    return BuildMerkleTree(consts).root;
+}
+
 FriFoldStep OpenFoldStep(const std::vector<Fp2>& evals, const MerkleTree& tree, uint32_t idx)
 {
     FriFoldStep step;
     const uint32_t n = static_cast<uint32_t>(evals.size());
-    const uint32_t ei = (idx & ~1u) % n;
-    step.even_index = ei;
-    step.even = evals[ei];
-    step.odd = evals[ei + 1];
-    step.even_siblings = PathFromTree(tree, ei);
-    step.odd_siblings = PathFromTree(tree, ei + 1);
+    const uint32_t half = n / 2;
+    const uint32_t i = idx % half;
+    step.even_index = i;
+    step.odd_index = i + half;
+    step.even = evals[i];
+    step.odd = evals[i + half];
+    step.even_siblings = PathFromTree(tree, i);
+    step.odd_siblings = PathFromTree(tree, i + half);
     return step;
 }
 
@@ -273,22 +354,27 @@ bool VerifyFoldStep(const FriFoldStep& step, const uint256& root, uint32_t n_lea
         return false;
     };
     if (n_leaves < 2 || (n_leaves % 2) != 0) return fail("fold layer size");
-    const uint32_t ei = idx & ~1u;
-    if (step.even_index != ei) return fail("fold even_index");
-    if (ei + 1 >= n_leaves) return fail("fold pair OOB");
+    const uint32_t half = n_leaves / 2;
+    const uint32_t i = idx % half;
+    if (step.even_index != i) return fail("fold even_index");
+    if (step.odd_index != i + half) return fail("fold odd_index");
+    if (step.odd_index >= n_leaves) return fail("fold pair OOB");
 
     FriMerklePath pe;
-    pe.index = ei;
+    pe.index = i;
     pe.leaf = step.even;
     pe.siblings = step.even_siblings;
     FriMerklePath po;
-    po.index = ei + 1;
+    po.index = step.odd_index;
     po.leaf = step.odd;
     po.siblings = step.odd_siblings;
     if (!FriVerifyPath(pe, root, n_leaves)) return fail("fold even merkle");
     if (!FriVerifyPath(po, root, n_leaves)) return fail("fold odd merkle");
 
-    out_folded = Add(step.even, Mul(beta, step.odd));
+    const Fp2 x = DomainPoint(n_leaves, i);
+    if (!HalfDomainFoldPair(step.even, step.odd, x, beta, out_folded)) {
+        return fail("fold x=0");
+    }
     return true;
 }
 
@@ -325,11 +411,6 @@ std::vector<Fp2> SyntheticQuotient(const std::vector<Fp2>& coeffs, const Fp2& z,
         q[k - 1] = Add(num[k], Mul(z, q[k]));
     }
     return q;
-}
-
-Fp2 DomainPoint(uint32_t n0, uint32_t index)
-{
-    return Fp2::FromFp(PowFp(OmegaForSize(n0), index));
 }
 
 } // namespace
@@ -425,9 +506,11 @@ FriCommitResult FriCommitAndFoldImpl(const std::vector<Fp2>& coeffs, const uint2
 
     FriFs fs(fs_seed, pow_grind_nonce, kRCFriBlowup, n);
 
+    // Exactly log2(n_coeffs) half-domain folds; terminal layer size = blowup.
+    const uint32_t n_folds = FriLog2Exact(n);
     std::vector<Fp2> cur = out.lde_evals;
     std::vector<MerkleTree> trees;
-    while (true) {
+    for (uint32_t fold = 0;; ++fold) {
         MerkleTree tree = BuildMerkleTree(cur);
         FriLayerCommit lc;
         lc.n_leaves = static_cast<uint32_t>(cur.size());
@@ -437,60 +520,99 @@ FriCommitResult FriCommitAndFoldImpl(const std::vector<Fp2>& coeffs, const uint2
         trees.push_back(std::move(tree));
         fs.AbsorbRoot(lc.root);
 
-        if (cur.size() == 1) {
+        if (fold == n_folds) {
+            if (cur.size() != kRCFriBlowup) {
+                out.note = "terminal layer size != blowup";
+                return out;
+            }
             out.proof.final_value = cur[0];
+            for (size_t i = 1; i < cur.size(); ++i) {
+                if (!Eq(cur[i], out.proof.final_value)) {
+                    out.note = "terminal layer not constant";
+                    return out;
+                }
+            }
             break;
         }
 
         const Fp2 beta =
             fs.ChallengeFp2("fri_fold", static_cast<uint32_t>(out.proof.fold_challenges.size()));
         out.proof.fold_challenges.push_back(beta);
-        std::vector<Fp2> next(cur.size() / 2);
-        for (size_t i = 0; i < next.size(); ++i) {
-            next[i] = Add(cur[2 * i], Mul(beta, cur[2 * i + 1]));
+        std::vector<Fp2> next;
+        if (!HalfDomainFoldLayer(cur, beta, next)) {
+            out.note = "half-domain fold failed (x=0)";
+            return out;
         }
         cur = std::move(next);
     }
 
     std::vector<Fp2> quot_lde;
     MerkleTree quot_tree;
+    bool deep_habock_merkle = false;
     if (enable_deep) {
         out.proof.has_deep = true;
+        const uint32_t n0_lde = static_cast<uint32_t>(out.lde_evals.size());
         if (forced_deep_z) {
             out.proof.deep_z_forced = true;
             out.proof.deep_z = *forced_deep_z;
             fs.AbsorbFp2(out.proof.deep_z); // bind fixed z (no FS sample)
+            // Haböck I(1): z=1 ∈ D — bind via layer-0 Merkle opening, not quotient.
+            deep_habock_merkle = FriPointInDomain(out.proof.deep_z, n0_lde);
         } else {
             out.proof.deep_z_forced = false;
-            out.proof.deep_z = fs.ChallengeFp2("deep_z", 0);
+            uint32_t zctr = 0;
+            out.proof.deep_z = FriSampleOodZ(fs, "deep_z", zctr);
             fs.AbsorbFp2(out.proof.deep_z);
         }
         out.proof.deep_eval = EvalPolyCoeffs(coeff_pow2, out.proof.deep_z);
         fs.AbsorbFp2(out.proof.deep_eval);
 
-        std::vector<Fp2> quot = SyntheticQuotient(coeff_pow2, out.proof.deep_z, out.proof.deep_eval);
-        if (quot.empty()) quot.push_back(Fp2::Zero());
-        // Pad Q to the same coeff length as P so LDE domains / indices coincide.
-        if (quot.size() < coeff_pow2.size()) quot.resize(coeff_pow2.size(), Fp2::Zero());
-        auto quot_c =
-            FriCommitAndFold(quot, fs_seed, pow_grind_nonce ^ uint64_t{0xD33D}, /*enable_deep=*/false);
-        if (!quot_c.ok) {
-            out.note = "deep quot FRI failed";
-            return out;
-        }
-        out.proof.deep_quot_fri = std::make_shared<FriProof>(std::move(quot_c.proof));
-        quot_lde = std::move(quot_c.lde_evals);
-        quot_tree = BuildMerkleTree(quot_lde);
-        out.proof.deep_quot_root = quot_tree.root;
-        out.proof.deep_quot_n_leaves = static_cast<uint32_t>(quot_lde.size());
-        fs.AbsorbRoot(out.proof.deep_quot_root);
-        if (out.proof.deep_quot_fri && !out.proof.deep_quot_fri->layers.empty()) {
+        if (deep_habock_merkle) {
+            // Forced z∈D: only z=1 is supported (LogUp Σ / Haböck I(1)).
+            if (!Eq(out.proof.deep_z, Fp2::One())) {
+                out.note = "forced in-domain deep_z must be 1 (Haböck)";
+                return out;
+            }
+            out.proof.deep_domain_index = 0; // DomainPoint(n0, 0) == 1
+            if (!Eq(out.lde_evals[0], out.proof.deep_eval)) {
+                out.note = "Haböck P(1) LDE mismatch";
+                return out;
+            }
+            out.proof.deep_domain_siblings = PathFromTree(trees[0], 0);
+            // No quotient FRI / deep_quot_* on Haböck path.
+        } else {
+            std::vector<Fp2> quot =
+                SyntheticQuotient(coeff_pow2, out.proof.deep_z, out.proof.deep_eval);
+            if (quot.empty()) quot.push_back(Fp2::Zero());
+            // Pad Q to the same coeff length as P so LDE domains / indices coincide.
+            if (quot.size() < coeff_pow2.size()) quot.resize(coeff_pow2.size(), Fp2::Zero());
+            auto quot_c = FriCommitAndFold(quot, fs_seed, pow_grind_nonce ^ uint64_t{0xD33D},
+                                           /*enable_deep=*/false);
+            if (!quot_c.ok) {
+                out.note = "deep quot FRI failed";
+                return out;
+            }
+            out.proof.deep_quot_fri = std::make_shared<FriProof>(std::move(quot_c.proof));
+            quot_lde = std::move(quot_c.lde_evals);
+            if (out.proof.deep_quot_fri->layers.empty()) {
+                out.note = "deep quot empty layers";
+                return out;
+            }
+            // Reported quotient root/count MUST equal nested FRI layer-0.
+            out.proof.deep_quot_root = out.proof.deep_quot_fri->layers[0].root;
+            out.proof.deep_quot_n_leaves = out.proof.deep_quot_fri->layers[0].n_leaves;
+            quot_tree = BuildMerkleTree(quot_lde);
+            if (quot_tree.root != out.proof.deep_quot_root ||
+                static_cast<uint32_t>(quot_lde.size()) != out.proof.deep_quot_n_leaves) {
+                out.note = "deep quot root/count != nested FRI layer-0";
+                return out;
+            }
+            fs.AbsorbRoot(out.proof.deep_quot_root);
             fs.AbsorbRoot(out.proof.deep_quot_fri->layers[0].root);
         }
     }
 
     const uint32_t n0 = out.proof.layers[0].n_leaves;
-    const uint32_t n_folds = static_cast<uint32_t>(out.proof.fold_challenges.size());
     out.proof.queries.reserve(kRCFriNumQueries);
     for (uint32_t qi = 0; qi < kRCFriNumQueries; ++qi) {
         FriQueryOpening q;
@@ -499,9 +621,10 @@ FriCommitResult FriCommitAndFoldImpl(const std::vector<Fp2>& coeffs, const uint2
         q.steps.reserve(n_folds);
         for (uint32_t L = 0; L < n_folds; ++L) {
             q.steps.push_back(OpenFoldStep(out.layer_evals[L], trees[L], idx));
-            idx >>= 1;
+            const uint32_t half = out.proof.layers[L].n_leaves / 2;
+            idx = idx % half;
         }
-        if (enable_deep && !quot_lde.empty()) {
+        if (enable_deep && !deep_habock_merkle && !quot_lde.empty()) {
             if (quot_lde.size() != out.lde_evals.size()) {
                 out.note = "deep quot LDE size mismatch";
                 out.ok = false;
@@ -534,8 +657,10 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         (proof.n_coeffs & (proof.n_coeffs - 1)) != 0)
         return fail("n_coeffs not pow2");
     if (proof.layers[0].n_leaves != proof.n_coeffs * proof.blowup) return fail("LDE size");
+    const uint32_t n_folds_expect = FriLog2Exact(proof.n_coeffs);
+    if (proof.fold_challenges.size() != n_folds_expect) return fail("fold count");
     if (proof.fold_challenges.size() + 1 != proof.layers.size()) return fail("layer/challenge count");
-    if (proof.layers.back().n_leaves != 1) return fail("final layer not singleton");
+    if (proof.layers.back().n_leaves != proof.blowup) return fail("final layer not blowup");
     if (proof.queries.size() != kRCFriNumQueries) return fail("query count");
     if (proof.queries.size() > kRCFriMaxQueriesHard) return fail("query count hard");
 
@@ -554,35 +679,61 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         }
     }
 
-    {
-        FriMerklePath fin;
-        fin.index = 0;
-        fin.leaf = proof.final_value;
-        if (!FriVerifyPath(fin, proof.layers.back().root, 1)) return fail("final root");
+    // Terminal B-constant layer: reconstruct Merkle root of B identical leaves.
+    if (MerkleRootConstantLayer(proof.final_value, proof.blowup) != proof.layers.back().root) {
+        return fail("final constant layer root");
     }
 
     if (proof.has_deep) {
+        const uint32_t n0_lde = proof.layers[0].n_leaves;
+        const bool habock =
+            proof.deep_z_forced && FriPointInDomain(proof.deep_z, n0_lde);
         if (proof.deep_z_forced) {
             fs.AbsorbFp2(proof.deep_z);
         } else {
-            const Fp2 z = fs.ChallengeFp2("deep_z", 0);
+            uint32_t zctr = 0;
+            const Fp2 z = FriSampleOodZ(fs, "deep_z", zctr);
             if (!Eq(z, proof.deep_z)) return fail("deep_z");
+            if (Canonical(proof.deep_z.c1) == 0) return fail("deep_z c1==0");
             fs.AbsorbFp2(proof.deep_z);
         }
         fs.AbsorbFp2(proof.deep_eval);
-        if (!proof.deep_quot_fri) return fail("missing deep quot FRI");
-        if (proof.deep_quot_n_leaves == 0) return fail("deep quot leaves");
-        fs.AbsorbRoot(proof.deep_quot_root);
-        if (proof.deep_quot_fri->layers.empty()) return fail("deep quot empty");
-        fs.AbsorbRoot(proof.deep_quot_fri->layers[0].root);
-        std::string qw;
-        if (!FriVerify(*proof.deep_quot_fri, fs_seed, &qw)) return fail(qw.c_str());
+
+        if (habock) {
+            // Haböck I(1): z=1 ∈ D — layer-0 Merkle opening of P, no quotient.
+            if (!Eq(proof.deep_z, Fp2::One())) return fail("habock deep_z not 1");
+            if (proof.deep_quot_fri) return fail("unexpected deep quot");
+            if (proof.deep_quot_n_leaves != 0) return fail("habock unexpected quot leaves");
+            if (proof.deep_domain_index != 0) return fail("habock domain index");
+            FriMerklePath mp;
+            mp.index = proof.deep_domain_index;
+            mp.leaf = proof.deep_eval;
+            mp.siblings = proof.deep_domain_siblings;
+            if (!FriVerifyPath(mp, proof.layers[0].root, proof.layers[0].n_leaves)) {
+                return fail("habock domain merkle");
+            }
+        } else {
+            if (!proof.deep_quot_fri) return fail("missing deep quot FRI");
+            if (proof.deep_quot_fri->layers.empty()) return fail("deep quot empty");
+            if (proof.deep_quot_root != proof.deep_quot_fri->layers[0].root) {
+                return fail("deep_quot_root != nested FRI layer-0");
+            }
+            if (proof.deep_quot_n_leaves != proof.deep_quot_fri->layers[0].n_leaves) {
+                return fail("deep_quot_n_leaves != nested FRI layer-0");
+            }
+            if (proof.deep_quot_n_leaves == 0) return fail("deep quot leaves");
+            fs.AbsorbRoot(proof.deep_quot_root);
+            fs.AbsorbRoot(proof.deep_quot_fri->layers[0].root);
+            std::string qw;
+            if (!FriVerify(*proof.deep_quot_fri, fs_seed, &qw)) return fail(qw.c_str());
+        }
     } else if (proof.deep_quot_fri) {
         return fail("unexpected deep quot");
     }
 
     const uint32_t n0 = proof.layers[0].n_leaves;
     const uint32_t n_folds = static_cast<uint32_t>(proof.fold_challenges.size());
+    const bool deep_ood = proof.has_deep && !(proof.deep_z_forced && FriPointInDomain(proof.deep_z, n0));
 
     for (uint32_t qi = 0; qi < kRCFriNumQueries; ++qi) {
         const FriQueryOpening& q = proof.queries[qi];
@@ -595,6 +746,13 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
         bool have_claimed = false;
         Fp2 p_at_x = Fp2::Zero();
 
+        if (n_folds == 0) {
+            // Constant codeword: P(x) = final_value on the LDE (bound by terminal root).
+            p_at_x = proof.final_value;
+            have_claimed = true;
+            claimed = proof.final_value;
+        }
+
         for (uint32_t L = 0; L < n_folds; ++L) {
             const FriFoldStep& step = q.steps[L];
             Fp2 folded{};
@@ -603,19 +761,20 @@ bool FriVerify(const FriProof& proof, const uint256& fs_seed, std::string* why)
                                 proof.fold_challenges[L], idx, folded, &step_why)) {
                 return fail(step_why.c_str());
             }
-            if (L == 0) p_at_x = (idx & 1u) ? step.odd : step.even;
+            const uint32_t half = proof.layers[L].n_leaves / 2;
+            const Fp2 leaf_here = (idx < half) ? step.even : step.odd;
+            if (L == 0) p_at_x = leaf_here;
             if (have_claimed) {
-                const Fp2 leaf_here = (idx & 1u) ? step.odd : step.even;
                 if (!Eq(leaf_here, claimed)) return fail("fold path consistency");
             }
             claimed = folded;
             have_claimed = true;
-            idx >>= 1;
+            idx = idx % half;
         }
 
         if (!have_claimed || !Eq(claimed, proof.final_value)) return fail("final fold value");
 
-        if (proof.has_deep) {
+        if (deep_ood) {
             FriMerklePath qp;
             qp.index = q.index;
             qp.leaf = q.deep_quot_leaf;
@@ -681,6 +840,7 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
         AppendLE32(out, static_cast<uint32_t>(q.steps.size()));
         for (const auto& st : q.steps) {
             AppendLE32(out, st.even_index);
+            AppendLE32(out, st.odd_index);
             AppendFp2(out, st.even);
             AppendFp2(out, st.odd);
             AppendLE32(out, static_cast<uint32_t>(st.even_siblings.size()));
@@ -705,6 +865,9 @@ size_t SerializeFriProof(const FriProof& proof, std::vector<unsigned char>& out)
         }
         AppendLE32(out, static_cast<uint32_t>(nested.size()));
         AppendBytes(out, nested.data(), nested.size());
+        AppendLE32(out, proof.deep_domain_index);
+        AppendLE32(out, static_cast<uint32_t>(proof.deep_domain_siblings.size()));
+        for (const auto& s : proof.deep_domain_siblings) AppendBytes(out, s.data(), 32);
     }
     return out.size();
 }
@@ -760,6 +923,7 @@ std::optional<FriProof> DeserializeFriProofDepth(const std::vector<unsigned char
         q.steps.resize(n_steps);
         for (auto& st : q.steps) {
             if (!ReadLE32Checked(p, end, st.even_index)) return std::nullopt;
+            if (!ReadLE32Checked(p, end, st.odd_index)) return std::nullopt;
             if (!ReadFp2Checked(p, end, st.even)) return std::nullopt;
             if (!ReadFp2Checked(p, end, st.odd)) return std::nullopt;
             uint32_t n_es = 0, n_os = 0;
@@ -798,9 +962,21 @@ std::optional<FriProof> DeserializeFriProofDepth(const std::vector<unsigned char
             return std::nullopt;
         std::vector<unsigned char> nested(nested_n);
         if (!ReadBytesChecked(p, end, nested.data(), nested_n)) return std::nullopt;
-        auto quot = DeserializeFriProofDepth(nested, depth + 1);
-        if (!quot) return std::nullopt;
-        proof.deep_quot_fri = std::make_shared<FriProof>(std::move(*quot));
+        if (nested_n == 0) {
+            proof.deep_quot_fri = nullptr; // Haböck path: no nested quotient FRI
+        } else {
+            auto quot = DeserializeFriProofDepth(nested, depth + 1);
+            if (!quot) return std::nullopt;
+            proof.deep_quot_fri = std::make_shared<FriProof>(std::move(*quot));
+        }
+        if (!ReadLE32Checked(p, end, proof.deep_domain_index)) return std::nullopt;
+        uint32_t n_dsib = 0;
+        if (!ReadLE32Checked(p, end, n_dsib) || n_dsib > kRCFriMaxFoldLayersHard)
+            return std::nullopt;
+        proof.deep_domain_siblings.resize(n_dsib);
+        for (auto& s : proof.deep_domain_siblings) {
+            if (!ReadBytesChecked(p, end, s.data(), 32)) return std::nullopt;
+        }
     }
     if (p != end) return std::nullopt;
     return proof;
@@ -838,8 +1014,7 @@ namespace {
 /** z ∈ D (the size-n_lde LDE subgroup, embedded in the c1=0 base-field line)? */
 bool FriBatchPointInDomain(const Fp2& z, uint32_t n_lde)
 {
-    if (Canonical(z.c1) != 0) return false;
-    return Canonical(PowFp(z.c0, n_lde)) == 1;
+    return FriPointInDomain(z, n_lde);
 }
 
 /** Batch FS preamble: domain-separated from the legacy per-instance FRI. */
@@ -857,13 +1032,13 @@ FriFs FriBatchFsInit(const uint256& fs_seed, uint64_t pow_grind_nonce, uint32_t 
     return fs;
 }
 
-/** Dual-OOD sampling: FS challenges rejected until ∉ D and distinct. The
- *  rejection counter is deterministic, so prover and verifier agree. */
-Fp2 FriBatchSampleZ(FriFs& fs, uint32_t& ctr, uint32_t n_lde, const Fp2* distinct_from)
+/** Dual-OOD sampling: FS challenges rejected until Fp2.c1!=0 (⇒ ∉ D) and distinct.
+ *  The rejection counter is deterministic, so prover and verifier agree. */
+Fp2 FriBatchSampleZ(FriFs& fs, uint32_t& ctr, uint32_t /*n_lde*/, const Fp2* distinct_from)
 {
     while (true) {
         const Fp2 z = fs.ChallengeFp2("frib_z", ctr++);
-        if (FriBatchPointInDomain(z, n_lde)) continue;
+        if (Canonical(z.c1) == 0) continue; // require nonzero extension coeff
         if (distinct_from != nullptr && Eq(z, *distinct_from)) continue;
         return z;
     }
@@ -991,11 +1166,12 @@ FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns
         G[j] = Add(Mul(p.w1, q1[j]), Mul(p.w2, q2[j]));
     }
 
-    // Fold-commit phase on G — identical machinery to FriCommitAndFold.
+    // Fold-commit phase on G — v5 half-domain fold × log2(n), terminal B-constant.
+    const uint32_t n_folds = FriLog2Exact(n);
     std::vector<Fp2> cur = LdeFromCoeffs(G, kRCFriBlowup);
     std::vector<MerkleTree> g_trees;
     std::vector<std::vector<Fp2>> g_layers;
-    while (true) {
+    for (uint32_t fold = 0;; ++fold) {
         MerkleTree tree = BuildMerkleTree(cur);
         FriLayerCommit lc;
         lc.n_leaves = static_cast<uint32_t>(cur.size());
@@ -1004,22 +1180,32 @@ FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns
         g_layers.push_back(cur);
         g_trees.push_back(std::move(tree));
         fs.AbsorbRoot(lc.root);
-        if (cur.size() == 1) {
+        if (fold == n_folds) {
+            if (cur.size() != kRCFriBlowup) {
+                out.note = "terminal layer size != blowup";
+                return out;
+            }
             p.final_value = cur[0];
+            for (size_t i = 1; i < cur.size(); ++i) {
+                if (!Eq(cur[i], p.final_value)) {
+                    out.note = "terminal layer not constant";
+                    return out;
+                }
+            }
             break;
         }
         const Fp2 beta =
             fs.ChallengeFp2("frib_fold", static_cast<uint32_t>(p.fold_challenges.size()));
         p.fold_challenges.push_back(beta);
-        std::vector<Fp2> next(cur.size() / 2);
-        for (size_t i = 0; i < next.size(); ++i) {
-            next[i] = Add(cur[2 * i], Mul(beta, cur[2 * i + 1]));
+        std::vector<Fp2> next;
+        if (!HalfDomainFoldLayer(cur, beta, next)) {
+            out.note = "half-domain fold failed (x=0)";
+            return out;
         }
         cur = std::move(next);
     }
 
     // Queries: SAME index set opens every column AND G's fold path.
-    const uint32_t n_folds = static_cast<uint32_t>(p.fold_challenges.size());
     p.queries.reserve(kRCFriBatchNumQueries);
     for (uint32_t qi = 0; qi < kRCFriBatchNumQueries; ++qi) {
         FriBatchQuery q;
@@ -1033,7 +1219,8 @@ FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns
         q.steps.reserve(n_folds);
         for (uint32_t L = 0; L < n_folds; ++L) {
             q.steps.push_back(OpenFoldStep(g_layers[L], g_trees[L], idx));
-            idx >>= 1;
+            const uint32_t half = p.fold_layers[L].n_leaves / 2;
+            idx = idx % half;
         }
         p.queries.push_back(std::move(q));
     }
@@ -1071,9 +1258,11 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
     if (proof.evals_z1.size() != W || proof.evals_z2.size() != W) return fail("eval count");
     if (proof.fold_layers.empty()) return fail("no fold layers");
     if (proof.fold_layers[0].n_leaves != n_lde) return fail("fold LDE size");
+    const uint32_t n_folds_expect = FriLog2Exact(n);
+    if (proof.fold_challenges.size() != n_folds_expect) return fail("fold count");
     if (proof.fold_challenges.size() + 1 != proof.fold_layers.size())
         return fail("fold layer/challenge count");
-    if (proof.fold_layers.back().n_leaves != 1) return fail("final layer not singleton");
+    if (proof.fold_layers.back().n_leaves != proof.blowup) return fail("final layer not blowup");
     for (size_t i = 0; i + 1 < proof.fold_layers.size(); ++i) {
         if (proof.fold_layers[i].n_leaves < 2 || (proof.fold_layers[i].n_leaves % 2) != 0)
             return fail("fold layer parity");
@@ -1099,7 +1288,8 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
         fs.AbsorbFp2(z1);
         fs.AbsorbFp2(z2);
     }
-    if (FriBatchPointInDomain(proof.z1, n_lde) || FriBatchPointInDomain(proof.z2, n_lde) ||
+    if (Canonical(proof.z1.c1) == 0 || Canonical(proof.z2.c1) == 0 ||
+        FriBatchPointInDomain(proof.z1, n_lde) || FriBatchPointInDomain(proof.z2, n_lde) ||
         Eq(proof.z1, proof.z2)) {
         return fail("OOD points invalid");
     }
@@ -1121,11 +1311,8 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
             if (!Eq(beta, proof.fold_challenges[i])) return fail("fold challenge mismatch");
         }
     }
-    {
-        FriMerklePath fin;
-        fin.index = 0;
-        fin.leaf = proof.final_value;
-        if (!FriVerifyPath(fin, proof.fold_layers.back().root, 1)) return fail("final root");
+    if (MerkleRootConstantLayer(proof.final_value, proof.blowup) != proof.fold_layers.back().root) {
+        return fail("final constant layer root");
     }
 
     // v_s = U(z_s) from the per-column claims — the DEEP identity below binds
@@ -1168,6 +1355,12 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
             Add(Mul(proof.w1, Mul(Sub(U_x, v1), Inv(Sub(x, proof.z1)))),
                 Mul(proof.w2, Mul(Sub(U_x, v2), Inv(Sub(x, proof.z2)))));
 
+        if (n_folds == 0) {
+            // Constant G codeword bound by terminal root; must match DEEP identity.
+            if (!Eq(g_expect, proof.final_value)) return fail("deep identity");
+            continue;
+        }
+
         uint32_t idx = q.index;
         Fp2 claimed{};
         bool have_claimed = false;
@@ -1179,7 +1372,8 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
                                 proof.fold_challenges[L], idx, folded, &step_why)) {
                 return fail(step_why.c_str());
             }
-            const Fp2 leaf_here = (idx & 1u) ? step.odd : step.even;
+            const uint32_t half = proof.fold_layers[L].n_leaves / 2;
+            const Fp2 leaf_here = (idx < half) ? step.even : step.odd;
             if (L == 0) {
                 if (!Eq(leaf_here, g_expect)) return fail("deep identity");
             } else if (have_claimed && !Eq(leaf_here, claimed)) {
@@ -1187,11 +1381,7 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
             }
             claimed = folded;
             have_claimed = true;
-            idx >>= 1;
-        }
-        if (n_folds == 0) {
-            // Degenerate n_lde=1 cannot occur (n_lde ≥ blowup=16 > 1).
-            return fail("no folds");
+            idx = idx % half;
         }
         if (!Eq(claimed, proof.final_value)) return fail("final fold value");
     }
@@ -1244,6 +1434,7 @@ size_t SerializeFriBatchProof(const FriBatchProof& proof, std::vector<unsigned c
         AppendLE32(out, static_cast<uint32_t>(q.steps.size()));
         for (const auto& st : q.steps) {
             AppendLE32(out, st.even_index);
+            AppendLE32(out, st.odd_index);
             AppendFp2(out, st.even);
             AppendFp2(out, st.odd);
             AppendLE32(out, static_cast<uint32_t>(st.even_siblings.size()));
@@ -1334,6 +1525,7 @@ std::optional<FriBatchProof> DeserializeFriBatchProof(const std::vector<unsigned
         q.steps.resize(n_steps);
         for (auto& st : q.steps) {
             if (!ReadLE32Checked(p, end, st.even_index)) return std::nullopt;
+            if (!ReadLE32Checked(p, end, st.odd_index)) return std::nullopt;
             if (!ReadFp2Checked(p, end, st.even)) return std::nullopt;
             if (!ReadFp2Checked(p, end, st.odd)) return std::nullopt;
             uint32_t n_es = 0, n_os = 0;

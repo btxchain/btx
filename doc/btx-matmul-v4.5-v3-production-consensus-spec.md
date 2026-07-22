@@ -71,3 +71,18 @@ Header/template/nonce, V3 config, packed-bank commitment, full page coverage, M=
 ## 8. Domain tags
 
 New V3 tags must not collide with V1/V2 (`*_V3` suffixes). Do not silently retarget V1/V2 goldens.
+
+| Domain | V1 | V2 | V3 |
+|--------|----|----|-----|
+| episode | `BTX_RC_COUP_EPISODE_V1` | `…_V2` | `…_V3` |
+| bank | `BTX_RC_COUP_BANK_V1` | `…_V2` | `…_V3` |
+| lobe | `BTX_RC_COUP_LOBE_V1` | `…_V2` | `…_V3` |
+| barrier | `BTX_RC_COUP_BARRIER_V1` | `…_V2` | `…_V3` |
+| perm | `BTX_RC_COUP_PERM_V1` | `…_V2` | `…_V3` |
+| mix | `BTX_RC_COUP_MIX_V1` | `…_V2` | `…_V3` |
+| extract | `BTX_RC_COUP_EXTRACT_V1` | `…_V2` | `…_V3` |
+| full-bank | `BTX_RC_COUP_FULL_BANK_V1` | `…_V2` | `…_V3` |
+| exchange | `BTX_RC_COUP_MAT_XCHG_V1` | `…_V2` | `…_V3` |
+| exchange rounds | `BTX_RC_COUP_MAT_XCHG_ROUNDS_V3` (rounds>0 only) | same | same |
+
+Selection: `RCCoupDomainTagsForVersion(RCCoupOptions::transcript_version)`. Frozen V1 toy / V2 medium goldens use `transcript_version=1` (V1 tag family). V3 CI/production use `MakeMediumV3RCCoupOptions` / `MakeV3RCCoupOptions` (`transcript_version=3`).

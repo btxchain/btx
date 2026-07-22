@@ -97,18 +97,23 @@ static_assert(static_cast<uint64_t>(kRCContextLen) * 2304ull < (uint64_t{1} << 6
               "2304·n_ctx must fit in signed int64 headroom (< 2^62)");
 
 /**
- * Transcript serialization version (FINAL-FORM A1).
+ * Transcript serialization version (FINAL-FORM A1 / F7).
  * ENC_RC_V1 = current V1 stream layout with kRCSegmentLeavesEnabled=false.
  * Frozen toy golden: b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a
  * (MakeToyRCEpisodeParams + MakeRCHeader(42)).
  *
- * Silent golden replacement is FORBIDDEN. Bumping this constant is REQUIRED
- * before any frozen digest may change. A V2 transition must introduce new
- * domain tags (BTX_RC_*_V2) and KEEP BOTH V1 and V2 goldens in tests / CI
- * (see contrib/matmul-v4/rc-golden-gate.py).
+ * Silent golden replacement is FORBIDDEN. Bumping the *active* default
+ * (`kRCTranscriptVersion`) is REQUIRED before any frozen digest may change.
+ * Versioned domain tags (BTX_RC_*_V1/V2/V3) must not collide across versions;
+ * KEEP V1+V2+V3 goldens in tests / CI (see contrib/matmul-v4/rc-golden-gate.py).
+ *
+ * Episode path default remains V1. Coupled V3 carries `transcript_version=3`
+ * via RCCoupOptions / RCCoupConsensusConfig (independent COUP_*_V3 domains).
  */
-inline constexpr uint32_t kRCTranscriptVersion = 1;
 inline constexpr uint32_t ENC_RC_V1 = 1;
+inline constexpr uint32_t ENC_RC_V2 = 2;
+inline constexpr uint32_t ENC_RC_V3 = 3;
+inline constexpr uint32_t kRCTranscriptVersion = ENC_RC_V1;
 static_assert(kRCTranscriptVersion == ENC_RC_V1,
               "kRCTranscriptVersion must equal ENC_RC_V1 while V1 is active");
 

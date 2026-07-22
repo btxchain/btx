@@ -230,9 +230,11 @@ BOOST_AUTO_TEST_CASE(rc_sm120_env_vars_do_not_advertise_native)
     setenv("BTX_RC_OZAKI_FORCE_NATIVE", "1", /*overwrite=*/1);
     setenv("BTX_MATMUL_V4_BACKEND", "cuda", /*overwrite=*/1);
 
-    // Arbiter env can flip the GKR *env* probe, but that must not imply native MX.
-    // Heights / DC levers remain compile-time; native latch ignores these envs.
-    (void)rc::EnvRCGkrArbiterEnabled(); // may be true while env is set
+    // Arbiter env cannot enable EnvRCGkrArbiterEnabled while hard-disabled, and
+    // must never imply native MX. Heights / DC levers remain compile-time;
+    // native latch ignores these envs.
+    BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
+    BOOST_CHECK(!rc::kRCGkrFormalSoundnessReady);
 
     if (!matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked()) {
         AssertNativeMxfp4NotAdvertised("env must not advertise native without sm_120a object");

@@ -25,6 +25,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace rc = matmul::v4::rc;
@@ -73,6 +74,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     BOOST_CHECK_EQUAL(consensus.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!consensus.fMatMulRCCoupledUseToyDims);
+    BOOST_CHECK_EQUAL(consensus.nMatMulRCCoupledProfile, 2u);
     BOOST_CHECK(!consensus.IsMatMulRCActive(0));
     BOOST_CHECK(!consensus.IsMatMulRCCoupledActive(0));
     BOOST_CHECK(consensus.GetMatMulEncodingProfile(0) !=
@@ -114,6 +116,67 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     bad.barriers = 9;
     BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
 }
+
+BOOST_AUTO_TEST_CASE(rc_coup_resolve_profile_toydims_matrix)
+{
+    // F8: -regtestrccoupledprofile × -regtestrccoupledtoydims selection + fail-closed.
+    Consensus::Params p;
+    p.nMatMulRCCoupledProfile = 2;
+    p.fMatMulRCCoupledUseToyDims = true;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeToyRCCoupParams();
+        BOOST_CHECK_EQUAL(got.barriers, want.barriers);
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, want.rows_per_lobe);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, want.pages_per_barrier_lobe);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    p.fMatMulRCCoupledUseToyDims = false;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeMediumRCCoupParams();
+        BOOST_CHECK_EQUAL(got.bank_pages, want.bank_pages);
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, 1u);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    p.nMatMulRCCoupledProfile = 3;
+    p.fMatMulRCCoupledUseToyDims = true;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeMediumV3RCCoupParams();
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, want.rows_per_lobe);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, want.pages_per_barrier_lobe);
+        BOOST_CHECK_EQUAL(got.bank_pages, want.bank_pages);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    p.fMatMulRCCoupledUseToyDims = false;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        const auto want = rc::MakeProductionV3RCCoupParams();
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, 128u);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, want.pages_per_barrier_lobe);
+        BOOST_CHECK_EQUAL(got.bank_pages, 1536u);
+        BOOST_CHECK(rc::ValidateRCCoupParams(got));
+    }
+    // Invalid profile → zero params → fail closed.
+    p.nMatMulRCCoupledProfile = 1;
+    {
+        const auto got = rc::ResolveRCCoupParams(p);
+        BOOST_CHECK_EQUAL(got.barriers, 0u);
+        BOOST_CHECK_EQUAL(got.rows_per_lobe, 0u);
+        BOOST_CHECK_EQUAL(got.pages_per_barrier_lobe, 0u);
+        BOOST_CHECK(!rc::ValidateRCCoupParams(got));
+    }
+    p.nMatMulRCCoupledProfile = 99;
+    BOOST_CHECK(!rc::ValidateRCCoupParams(rc::ResolveRCCoupParams(p)));
+
+    p.nMatMulRCCoupledProfile = 3;
+    p.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V3);
+    p.nMatMulRCCoupledProfile = 2;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p).transcript_version, rc::ENC_RC_V1);
+}
+
 
 BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)
 {
@@ -383,6 +446,11 @@ BOOST_AUTO_TEST_CASE(rc_coup_public_activation_resolves_v3_production_profile)
     p.nMatMulV4Height = 1;
     p.nMatMulRCCoupledHeight = 1;
     p.fMatMulRCCoupledUseToyDims = false;
+    // F8 fold: V3 production is the profile-3 family. The default profile stays
+    // 2 (V2 medium, CI-safe stand-in; mainnet asserts profile==2), so a public
+    // V3 activation MUST select profile 3 to resolve to production V3 dims +
+    // 4-round material exchange (heights remain INT32_MAX regardless).
+    p.nMatMulRCCoupledProfile = 3;
 
     constexpr int32_t kHeight = 10;
     BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kHeight));
@@ -847,18 +915,73 @@ BOOST_AUTO_TEST_CASE(rc_coup_exchange_rounds_v3_digest_and_bytes)
 
 BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
 {
-    // FREEZE medium-V3 golden (ratio-preserving CI shape; uint64-wrap Mix).
+    // FREEZE medium-V3 golden under independent COUP_*_V3 domains (F7 / WP-H).
+    // Prior pin 744fd3df… used V1 domain tags on a V3 shape (bug); re-pinned with
+    // MakeMediumV3RCCoupOptions() (transcript_version=ENC_RC_V3, rounds=0).
+    // V1 toy 7a7ce106… and V2 medium 349175d5… MUST remain unchanged.
     const auto header = MakeCoupHeader(42);
     const auto params = rc::MakeMediumV3RCCoupParams();
+    const auto opt = rc::MakeMediumV3RCCoupOptions();
     BOOST_REQUIRE(rc::ValidateRCCoupParams(params));
     BOOST_REQUIRE(rc::RCCoupUseMixU64Wrap(params));
-    const uint256 d1 = rc::RecomputeCoupledPuzzleReference(header, 0, params);
-    const uint256 d2 = rc::RecomputeCoupledPuzzleReference(header, 0, params);
+    BOOST_CHECK_EQUAL(opt.transcript_version, rc::ENC_RC_V3);
+    BOOST_CHECK_EQUAL(opt.exchange_rounds, 0u);
+    const uint256 d1 = rc::RecomputeCoupledPuzzleReference(header, 0, params, opt);
+    const uint256 d2 = rc::RecomputeCoupledPuzzleReference(header, 0, params, opt);
     BOOST_CHECK(!d1.IsNull());
     BOOST_CHECK(d1 == d2);
-    // Pin filled after first honest CI run (Agent C); do not silently replace.
+    // Pin filled after first honest CI run under COUP_*_V3; do not silently replace.
     BOOST_CHECK_EQUAL(d1.GetHex(),
+                      "a4bb0cc42e2b97631d126a0dcdae26ad83b2f287d885322392a564990a95bac4");
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
+{
+    // F7: V3 domain strings must not collide with V1/V2 families.
+    const auto& v1 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V1);
+    const auto& v2 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V2);
+    const auto& v3 = rc::RCCoupDomainTagsForVersion(rc::ENC_RC_V3);
+    const char* const fields_v1[] = {v1.episode, v1.bank,    v1.lobe,    v1.barrier,
+                                     v1.perm,    v1.mix,     v1.extract, v1.full_bank,
+                                     v1.exchange};
+    const char* const fields_v2[] = {v2.episode, v2.bank,    v2.lobe,    v2.barrier,
+                                     v2.perm,    v2.mix,     v2.extract, v2.full_bank,
+                                     v2.exchange};
+    const char* const fields_v3[] = {v3.episode, v3.bank,    v3.lobe,    v3.barrier,
+                                     v3.perm,    v3.mix,     v3.extract, v3.full_bank,
+                                     v3.exchange};
+    for (size_t i = 0; i < 9; ++i) {
+        BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v2[i]));
+        BOOST_CHECK(std::string(fields_v1[i]) != std::string(fields_v3[i]));
+        BOOST_CHECK(std::string(fields_v2[i]) != std::string(fields_v3[i]));
+        BOOST_CHECK(std::string(fields_v3[i]).find("_V3") != std::string::npos);
+    }
+    BOOST_CHECK_EQUAL(std::string(v1.episode), "BTX_RC_COUP_EPISODE_V1");
+    BOOST_CHECK_EQUAL(std::string(v2.episode), "BTX_RC_COUP_EPISODE_V2");
+    BOOST_CHECK_EQUAL(std::string(v3.episode), "BTX_RC_COUP_EPISODE_V3");
+
+    // V3 shape + V1 domains must diverge from V3 domains (proves selection matters).
+    const auto header = MakeCoupHeader(42);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    rc::RCCoupOptions v1_opts;
+    v1_opts.transcript_version = rc::ENC_RC_V1;
+    const auto v3_opts = rc::MakeMediumV3RCCoupOptions();
+    const uint256 d_v1 = rc::RecomputeCoupledPuzzleReference(header, 0, params, v1_opts);
+    const uint256 d_v3 = rc::RecomputeCoupledPuzzleReference(header, 0, params, v3_opts);
+    BOOST_CHECK(!d_v1.IsNull());
+    BOOST_CHECK(!d_v3.IsNull());
+    BOOST_CHECK(d_v1 != d_v3);
+    // Historical pre-WP-H medium-V3 digest (V1 tags on V3 shape) retained as witness.
+    BOOST_CHECK_EQUAL(d_v1.GetHex(),
                       "744fd3dfda6a58ddcd95474a9895cd2c6b17c2f1c2591848fc631eed78dea6a9");
+
+    Consensus::Params p3;
+    p3.nMatMulRCCoupledProfile = 3;
+    p3.fMatMulRCCoupledUseToyDims = true;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p3).transcript_version, rc::ENC_RC_V3);
+    Consensus::Params p2;
+    p2.nMatMulRCCoupledProfile = 2;
+    BOOST_CHECK_EQUAL(rc::ResolveRCCoupOptions(p2).transcript_version, rc::ENC_RC_V1);
 }
 
 
@@ -870,6 +993,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_full_schedule_page_coverage_unique)
     for (const auto& params :
          {rc::MakeProductionRCCoupParams(), rc::MakeProductionV3RCCoupParams(),
           rc::MakeMediumV3RCCoupParams()}) {
+        const uint32_t tv =
+            params.rows_per_lobe >= 32 ? rc::ENC_RC_V3 : rc::ENC_RC_V1;
         const uint64_t slots = static_cast<uint64_t>(params.barriers) * params.lobes *
                                params.pages_per_barrier_lobe;
         BOOST_REQUIRE_EQUAL(slots, params.bank_pages);
@@ -877,7 +1002,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_full_schedule_page_coverage_unique)
         for (uint32_t b = 0; b < params.barriers; ++b) {
             for (uint32_t ell = 0; ell < params.lobes; ++ell) {
                 const auto ids =
-                    rc::SelectCoupledBankPageIds(b, ell, params, sigma, /*full=*/true);
+                    rc::SelectCoupledBankPageIds(b, ell, params, sigma, /*full=*/true, tv);
                 BOOST_REQUIRE_EQUAL(ids.size(), params.pages_per_barrier_lobe);
                 for (uint32_t id : ids) {
                     BOOST_REQUIRE(id < params.bank_pages);
