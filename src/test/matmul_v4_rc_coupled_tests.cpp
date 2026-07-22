@@ -25,6 +25,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <string>
 #include <vector>
 
 namespace rc = matmul::v4::rc;
@@ -883,6 +884,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_full_schedule_page_coverage_unique)
     for (const auto& params :
          {rc::MakeProductionRCCoupParams(), rc::MakeProductionV3RCCoupParams(),
           rc::MakeMediumV3RCCoupParams()}) {
+        const uint32_t tv =
+            params.rows_per_lobe >= 32 ? rc::ENC_RC_V3 : rc::ENC_RC_V1;
         const uint64_t slots = static_cast<uint64_t>(params.barriers) * params.lobes *
                                params.pages_per_barrier_lobe;
         BOOST_REQUIRE_EQUAL(slots, params.bank_pages);
@@ -890,7 +893,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_full_schedule_page_coverage_unique)
         for (uint32_t b = 0; b < params.barriers; ++b) {
             for (uint32_t ell = 0; ell < params.lobes; ++ell) {
                 const auto ids =
-                    rc::SelectCoupledBankPageIds(b, ell, params, sigma, /*full=*/true);
+                    rc::SelectCoupledBankPageIds(b, ell, params, sigma, /*full=*/true, tv);
                 BOOST_REQUIRE_EQUAL(ids.size(), params.pages_per_barrier_lobe);
                 for (uint32_t id : ids) {
                     BOOST_REQUIRE(id < params.bank_pages);

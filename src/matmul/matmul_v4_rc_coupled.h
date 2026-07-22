@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_COUPLED_H
 
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled_device.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_distributed.h>
@@ -209,6 +210,14 @@ inline constexpr int64_t kRCCoupInt8ProdAbsMax =
  *   otherwise        → zeroed params (ValidateRCCoupParams fails → reject)
  */
 [[nodiscard]] RCCoupParams ResolveRCCoupParams(const Consensus::Params& p);
+
+/**
+ * Execution options for the selected coupled profile (F7/F8).
+ * Profile 3 → MakeMediumV3RCCoupOptions (toydims) / MakeV3RCCoupOptions (prod)
+ * so transcript_version=ENC_RC_V3 selects independent COUP_*_V3 domains.
+ * Profile 2 / default → RCCoupOptions{} (V1 domains; preserves V1/V2 goldens).
+ */
+[[nodiscard]] RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p);
 
 /**
  * Production barrier-loop completeness (C1–C6). True iff ValidateRCCoupParams

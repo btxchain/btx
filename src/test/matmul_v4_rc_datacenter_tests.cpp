@@ -756,8 +756,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_golden_transcript_version_bump_requirement)
 {
     BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, rc::ENC_RC_V1);
     BOOST_CHECK_EQUAL(rc::kRCTranscriptVersion, 1u);
+    BOOST_CHECK_EQUAL(rc::ENC_RC_V2, 2u);
+    BOOST_CHECK_EQUAL(rc::ENC_RC_V3, 3u);
     BOOST_CHECK_EQUAL(rc::kRCTranscriptVersionV1, 1u);
     BOOST_CHECK(rc::kRCTranscriptVersionV1 != rc::kRCTranscriptVersionV2);
+    BOOST_CHECK(rc::kRCTranscriptVersionV2 != rc::kRCTranscriptVersionV3);
     // Coupled toy golden must remain pinned; any digest change requires an
     // explicit kRCTranscriptVersion / ENC_RC_V* bump and dual-golden retention
     // (see rc_coup_golden_digest_stable + contrib/matmul-v4/rc-golden-gate.py).
