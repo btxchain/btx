@@ -280,6 +280,17 @@ struct AirConstraintSystem {
      *  The verifier regenerates the committed root from these values and
      *  rejects any deviation — table sides of lookups go here. */
     std::vector<std::pair<uint32_t, std::vector<F>>> preprocessed;
+    /** Pin preprocessed columns through the batch's dual-OOD DEEP evals
+     *  instead of regenerating the full LDE Merkle root: the verifier
+     *  computes P(g·z1), P(g·z2) natively from the canonical values
+     *  (barycentric over H — O(N) FIELD ops with shared denominators) and
+     *  requires equality with evals_z1/evals_z2, which the batched FRI
+     *  DEEP-binds to the committed codeword. A committed column that differs
+     *  from the canonical polynomial (both deg < N) agrees at an FS OOD
+     *  point w.p. ≤ (N−1)/|F|; the dual points square it. Used by the
+     *  episode-scale instantiation where per-shard LDE+Merkle regeneration
+     *  of every public column would dominate the O(Q) verifier. */
+    bool preprocessed_pin_ood{false};
 
     [[nodiscard]] uint64_t ComposedDegreeBound(const AirConstraint<F>& c) const
     {
@@ -377,6 +388,14 @@ template <typename F>
  *  mirror of gkr_air::AirAcceptNibblePoly; cross-checked in tests). */
 template <typename F>
 [[nodiscard]] F AirAcceptPoly(const F& b0, const F& b1, const F& b2, const F& b3);
+
+/** Root of `values` read as evaluations over H (|values| = N, power of two),
+ *  committed in the coset-shifted coefficient basis at `n_coeffs` —
+ *  byte-identical to the root AirQuotientProve's batched FRI produces for the
+ *  same column (used for the two-epoch FS discipline of instantiations that
+ *  draw challenges from committed epoch-1 columns). */
+template <typename F>
+[[nodiscard]] uint256 AirCommittedValuesRoot(const std::vector<F>& values, uint32_t n_coeffs);
 
 // ---------------------------------------------------------------------------
 // Concrete instantiation: the Extract-sampler + dequant + LogUp rules of one

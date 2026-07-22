@@ -269,6 +269,59 @@ F AirAcceptPoly(const F& b0, const F& b1, const F& b2, const F& b3)
     return T::Sub(one, rejected);
 }
 
+template <typename F>
+uint256 AirCommittedValuesRoot(const std::vector<F>& values, uint32_t n_coeffs)
+{
+    std::vector<F> cf = AirInterpolate(values);
+    AirCosetShiftCoeffs(cf);
+    return AirFriBackend<F>::ColumnRoot(cf, n_coeffs);
+}
+
+namespace {
+
+/** Barycentric weights over H for an off-subgroup point x: w_j = ω^j/(x − ω^j)
+ *  plus the common factor (x^N − 1)/N, so P(x) = zh_over_n · Σ v_j·w_j for any
+ *  values vector v over H. Shared across every preprocessed column of a shard
+ *  (the weights depend only on x). Returns false iff x ∈ H (never for a coset
+ *  point g·z with nonzero extension part; guarded anyway). */
+template <typename F>
+bool AirBarycentricWeightsOnH(uint32_t N, const F& x, std::vector<F>& weights, F& zh_over_n)
+{
+    using T = AirField<F>;
+    const Fp omega = AirOmegaForSize(N);
+    std::vector<F> dens(N);
+    Fp wj = 1;
+    for (uint32_t j = 0; j < N; ++j) {
+        dens[j] = T::Sub(x, T::FromBase(wj));
+        if (T::IsZero(dens[j])) return false;
+        wj = gkr_field::Mul(wj, omega);
+    }
+    // Batch inversion (Montgomery trick).
+    std::vector<F> prefix(N);
+    F run = T::One();
+    for (uint32_t j = 0; j < N; ++j) {
+        prefix[j] = run;
+        run = T::Mul(run, dens[j]);
+    }
+    F inv_run = T::Inv(run);
+    weights.assign(N, T::Zero());
+    for (uint32_t j = N; j-- > 0;) {
+        const F inv_dj = T::Mul(inv_run, prefix[j]);
+        inv_run = T::Mul(inv_run, dens[j]);
+        weights[j] = inv_dj;
+    }
+    wj = 1;
+    for (uint32_t j = 0; j < N; ++j) {
+        weights[j] = T::Mul(weights[j], T::FromBase(wj));
+        wj = gkr_field::Mul(wj, omega);
+    }
+    const F zh = T::Sub(AirPow(x, N), T::One());
+    zh_over_n = T::Mul(zh, T::Inv(T::FromU64(N)));
+    return true;
+}
+
+} // namespace
+
 // ===========================================================================
 // Prover.
 // ===========================================================================
@@ -478,14 +531,44 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs, const AirQuotientProof<
     // per-query openings (Q = 128 FS query sites, dual-OOD DEEP).
     if (!B::BatchVerify(batch, fs_seed, why)) return false;
 
-    // Preprocessed (public) columns: regenerate the canonical committed root
-    // and require equality — a prover-chosen table side is rejected here.
-    for (const auto& [idx, values] : cs.preprocessed) {
-        if (idx >= W || values.size() != N) return fail("preprocessed shape");
-        std::vector<F> pc = AirInterpolate(values);
-        AirCosetShiftCoeffs(pc);
-        if (B::ColumnRoot(pc, batch.n_coeffs) != batch.columns[idx].root) {
-            return fail("preprocessed column root mismatch");
+    // Preprocessed (public) columns: pin the committed column to the canonical
+    // values — a prover-chosen table side is rejected here. Two modes:
+    //  • root regen (default): rebuild the LDE Merkle root from the values.
+    //  • dual-OOD pin: evaluate the canonical polynomial at g·z1, g·z2
+    //    (barycentric over H, shared weights) and require equality with the
+    //    DEEP-bound evals_z1/evals_z2 — O(N) field ops, no hashing.
+    if (cs.preprocessed_pin_ood && !cs.preprocessed.empty()) {
+        if (batch.evals_z1.size() != W + 1 || batch.evals_z2.size() != W + 1) {
+            return fail("preprocessed ood eval shape");
+        }
+        const F g_shift = T::FromBase(kAirCosetShift);
+        const F pts[2] = {T::Mul(g_shift, batch.z1), T::Mul(g_shift, batch.z2)};
+        const std::vector<F>* evs[2] = {&batch.evals_z1, &batch.evals_z2};
+        for (int pi = 0; pi < 2; ++pi) {
+            std::vector<F> wts;
+            F zh_over_n = T::Zero();
+            if (!AirBarycentricWeightsOnH<F>(N, pts[pi], wts, zh_over_n)) {
+                return fail("preprocessed ood point degenerate");
+            }
+            for (const auto& [idx, values] : cs.preprocessed) {
+                if (idx >= W || values.size() != N) return fail("preprocessed shape");
+                F acc = T::Zero();
+                for (uint32_t j = 0; j < N; ++j) {
+                    acc = T::Add(acc, T::Mul(values[j], wts[j]));
+                }
+                if (!T::Eq(T::Mul(zh_over_n, acc), (*evs[pi])[idx])) {
+                    return fail("preprocessed ood eval mismatch");
+                }
+            }
+        }
+    } else {
+        for (const auto& [idx, values] : cs.preprocessed) {
+            if (idx >= W || values.size() != N) return fail("preprocessed shape");
+            std::vector<F> pc = AirInterpolate(values);
+            AirCosetShiftCoeffs(pc);
+            if (B::ColumnRoot(pc, batch.n_coeffs) != batch.columns[idx].root) {
+                return fail("preprocessed column root mismatch");
+            }
         }
     }
 
@@ -907,6 +990,9 @@ using gkr_field::Fp3;
 
 template Fp2 AirAcceptPoly<Fp2>(const Fp2&, const Fp2&, const Fp2&, const Fp2&);
 template Fp3 AirAcceptPoly<Fp3>(const Fp3&, const Fp3&, const Fp3&, const Fp3&);
+
+template uint256 AirCommittedValuesRoot<Fp2>(const std::vector<Fp2>&, uint32_t);
+template uint256 AirCommittedValuesRoot<Fp3>(const std::vector<Fp3>&, uint32_t);
 
 template AirQuotientProveResult<Fp2> AirQuotientProve<Fp2>(
     const AirConstraintSystem<Fp2>&, const std::vector<std::vector<Fp2>>&, const uint256&,

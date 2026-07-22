@@ -2796,6 +2796,357 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     return true;
 }
 
+// ============================================================================
+// COMPACT (VERIFIER-SUBLINEAR) v7 grounding — episode AIR quotient + bounded
+// direct tile-tree SHA closure, INSTEAD of the GroundEpisodeInCircuit row
+// scan. Additive shadow path; see matmul_v4_rc_gkr.h banner. Arbiter OFF.
+// ============================================================================
+namespace {
+
+// Shared Λ-derived AIR inputs. `wit` may be null (verify side needs only the
+// public layout). Returns false with a reason on any wiring/shape mismatch.
+bool BuildEpisodeAirInputsV7(const RCGkrProofV7& proof, const CBlockHeader& header,
+                             air_episode::EpisodeAirLayout& layout,
+                             air_episode::EpisodeAirWitness* wit, std::string& why)
+{
+    const std::vector<LayerProv> prov =
+        RCGkrEpisodeWiring(header, proof.episode, proof.round_roots);
+    if (prov.size() != proof.wires.size() || proof.layers.size() != proof.wires.size()) {
+        why = "wiring_count";
+        return false;
+    }
+    for (size_t li = 0; li < prov.size(); ++li) {
+        const LayerProv& lp = prov[li];
+        const RCGkrV7WireWitness& w = proof.wires[li];
+        air_episode::EpisodeAirLayer al;
+        al.m = w.m;
+        al.n = w.n;
+        al.fwd_residual = lp.fwd_residual;
+        al.extract_prf = lp.extract_prf;
+        layout.layers.push_back(al);
+        if (wit != nullptr) {
+            air_episode::EpisodeAirLayerWitness lw;
+            lw.A = &w.A;
+            lw.Y = &w.Y;
+            lw.extract_in = &w.extract_in;
+            lw.extract_out = &w.extract_out;
+            wit->layers.push_back(lw);
+        }
+        auto add_leaf = [&](const TensorRef& ref, const std::vector<int8_t>& committed,
+                            uint32_t crows, uint32_t ccols) {
+            if (!ref.is_leaf) return true;
+            if (committed.size() != static_cast<size_t>(ref.erows) * ref.ecols) {
+                why = "leaf_dims";
+                return false;
+            }
+            air_episode::EpisodeAirLeaf leaf;
+            leaf.seed = ref.seed;
+            leaf.rows = ref.erows;
+            leaf.cols = ref.ecols;
+            layout.leaves.push_back(leaf);
+            if (wit != nullptr) {
+                wit->leaf_committed.push_back(
+                    ref.transpose ? TransposeI8(committed, crows, ccols) : committed);
+            }
+            return true;
+        };
+        if (!add_leaf(lp.a, w.A, w.m, w.k)) return false;
+        if (!add_leaf(lp.b, w.B, w.k, w.n)) return false;
+    }
+    for (const RCGkrLayerClaimV7& lc : proof.layers) {
+        air_episode::EpisodeAirGemmClaim gc;
+        gc.gf = lc.final_eval;
+        gc.a = lc.a_eval;
+        gc.b = lc.b_eval;
+        layout.gemm.push_back(gc);
+    }
+    return true;
+}
+
+uint256 EpisodeAirSeedV7(const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
+                         const arith_uint256& target)
+{
+    const uint256 base = RCGkrFsSeedV7(header, height, proof.episode, target,
+                                       proof.claimed_digest, proof.episode_sigma,
+                                       proof.round_roots);
+    return air_quotient::AirChallengeDigest(base, "ep_air_root_seed", {}, {});
+}
+
+} // namespace
+
+RCGkrEpisodeAirProveResultV7 ProveEpisodeAirForProofV7(
+    const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
+    const arith_uint256& target, const air_episode::EpisodeAirProveOptions& opt)
+{
+    RCGkrEpisodeAirProveResultV7 res;
+    air_episode::EpisodeAirLayout layout;
+    air_episode::EpisodeAirWitness wit;
+    if (!BuildEpisodeAirInputsV7(proof, header, layout, &wit, res.note)) return res;
+    air_episode::EpisodeAirProveResult pr = air_episode::ProveEpisodeAirQuotient(
+        layout, wit, EpisodeAirSeedV7(proof, header, height, target), opt);
+    res.ok = pr.ok;
+    res.division_exact = pr.division_exact;
+    res.note = pr.note;
+    res.prove_s = pr.prove_s;
+    res.proof = std::move(pr.proof);
+    return res;
+}
+
+bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
+                                const air_episode::EpisodeAirProof& air,
+                                const CBlockHeader& header, int32_t height,
+                                const arith_uint256& target, std::string* why,
+                                RCGkrCompactTimingV7* out_timing)
+{
+    const auto t0 = std::chrono::steady_clock::now();
+    auto secs = [](std::chrono::steady_clock::time_point s) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - s).count();
+    };
+    RCGkrCompactTimingV7 tm;
+    auto fail = [&](const std::string& m) {
+        if (why) *why = m;
+        if (out_timing != nullptr) {
+            tm.ok = false;
+            tm.total_s = secs(t0);
+            tm.note = m;
+            *out_timing = tm;
+        }
+        return false;
+    };
+
+    // ---- Trivial/structural gates (identical to VerifyWinnerProofV7). ----
+    if (proof.version != kRCGkrProofVersionV7) return fail("v7c:version");
+    if (EstimateRCGkrProofV7PayloadBytes(proof) > kRCGkrMaxProofBytesHard) {
+        return fail("v7c:max_proof_size");
+    }
+    if (!ValidateRCEpisodeParams(proof.episode)) return fail("v7c:params_invalid");
+    if (proof.height != height) return fail("v7c:height");
+    if (proof.pow_bind != DerivePowBind(proof.claimed_digest)) return fail("v7c:pow_bind");
+    if (proof.claimed_digest != header.matmul_digest) {
+        return fail("v7c:digest_not_header_bound");
+    }
+    if (proof.episode_sigma != matmul::v4::DeriveSigma(header)) return fail("v7c:sigma");
+    const std::vector<uint256>& roots = proof.round_roots;
+    if (roots.size() != proof.episode.rounds) return fail("v7c:round_roots_size");
+    const uint256 digest = EpisodeDigestFromRoots(roots);
+    if (digest != proof.claimed_digest) return fail("v7c:digest_from_roots");
+    if (UintToArith256(digest) > target) return fail("v7c:target");
+    const uint256 sigma = proof.episode_sigma;
+    for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
+        const uint256 expect =
+            (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
+                     : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, roots[r - 1], r);
+        if (r >= proof.round_seeds.size() || expect != proof.round_seeds[r]) {
+            return fail("v7c:round_seeds");
+        }
+    }
+    const RCGkrLayout layout_l = RCGkrTraceLayout(proof.episode);
+    if (proof.wires.size() != layout_l.layers.size()) return fail("v7c:layout_count");
+    if (proof.layers.size() != layout_l.layers.size()) return fail("v7c:layer_count");
+    for (size_t li = 0; li < layout_l.layers.size(); ++li) {
+        const auto& ls = layout_l.layers[li];
+        const auto& w = proof.wires[li];
+        if (!(ls.kind == w.kind && ls.round == w.round && ls.layer == w.layer && ls.m == w.m &&
+              ls.n == w.n && ls.k == w.k)) {
+            return fail("v7c:layout_layer_mismatch");
+        }
+        if (w.A.size() != static_cast<size_t>(w.m) * w.k ||
+            w.B.size() != static_cast<size_t>(w.k) * w.n ||
+            w.Y.size() != static_cast<size_t>(w.m) * w.n ||
+            w.extract_in.size() != static_cast<size_t>(w.m) * w.n ||
+            w.extract_out.size() != static_cast<size_t>(w.m) * w.n) {
+            return fail("v7c:wire_shape");
+        }
+    }
+    tm.gates_s = secs(t0);
+
+    // ---- Carried-column ↔ batched-FRI binding (F1/F2/F6). ----
+    const auto t_bind = std::chrono::steady_clock::now();
+    std::vector<std::vector<Fp3>> columns = BuildV7ColumnsFromWitness(proof.wires);
+    const uint32_t batch_n = proof.batch.n_coeffs;
+    if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail("v7c:batch_n");
+    const uint32_t nu = Log2Exact(batch_n);
+    if (proof.batch.columns.size() != columns.size() + 2) return fail("v7c:batch_col_count");
+    for (size_t i = 0; i < columns.size(); ++i) {
+        if (Fri3BatchColumnRoot(columns[i], batch_n) != proof.batch.columns[i].root) {
+            return fail("v7c:column_not_grounded");
+        }
+    }
+    tm.colbind_s = secs(t_bind);
+
+    // ---- Batched FRI (Thm 2.1). ----
+    const auto t_fri = std::chrono::steady_clock::now();
+    const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
+                                            proof.claimed_digest, proof.episode_sigma, roots);
+    std::string fri_why;
+    if (!Fri3BatchVerify(proof.batch, base_seed, &fri_why)) return fail("v7c:fri:" + fri_why);
+    tm.fri_s = secs(t_fri);
+
+    // ---- Per-layer sumcheck (R1) + eval argument (Thm 2.2). ----
+    const auto t_layers = std::chrono::steady_clock::now();
+    FsTranscript fs(kRCGkrDomainTagV7);
+    fs.AbsorbUint256(base_seed);
+    std::vector<RCGkrOpeningClaim3> claims;
+    for (size_t li = 0; li < proof.wires.size(); ++li) {
+        const RCGkrV7WireWitness& w = proof.wires[li];
+        const RCGkrLayerClaimV7& lc = proof.layers[li];
+        fs.AbsorbU32(static_cast<uint32_t>(li));
+        const uint32_t nu_i = Log2Exact(RCGkrNextPow2(w.m));
+        const uint32_t nu_j = Log2Exact(RCGkrNextPow2(w.n));
+        std::vector<Fp3> ri(nu_i), rj(nu_j);
+        for (uint32_t b = 0; b < nu_i; ++b) ri[b] = fs.ChallengeFp3("v7_ri");
+        for (uint32_t b = 0; b < nu_j; ++b) rj[b] = fs.ChallengeFp3("v7_rj");
+        std::vector<Fp3> rk;
+        Fp3 gfv;
+        if (!VerifyProductK3(lc.sumcheck, lc.c_claim, fs, rk, gfv)) return fail("v7c:sumcheck");
+        if (!Eq(lc.final_eval, gfv)) return fail("v7c:final_eval_endpoint");
+        if (!Eq(lc.final_eval, Mul(lc.a_eval, lc.b_eval))) return fail("v7c:final_eval");
+        const uint32_t a_col = static_cast<uint32_t>(4 * li);
+        const uint32_t b_col = a_col + 1;
+        const uint32_t y_col = a_col + 2;
+        claims.push_back({y_col, PointConcatExtend3(rj, ri, nu), lc.c_claim});
+        claims.push_back({a_col, PointConcatExtend3(rk, ri, nu), lc.a_eval});
+        claims.push_back({b_col, PointConcatExtend3(rj, rk, nu), lc.b_eval});
+    }
+    const uint256 eval_seed =
+        EvalArgSeed(base_seed, proof.batch.columns, /*epoch1_count=*/4 * proof.wires.size());
+    std::string ev_why;
+    if (!EvalArgumentVerify3(claims, proof.batch, proof.eval, eval_seed, &ev_why)) {
+        return fail("v7c:eval:" + ev_why);
+    }
+    // FS LogUp-α binding (transcript parity with the full verifier).
+    fs.AbsorbBytes(reinterpret_cast<const unsigned char*>("logup"), 5);
+    (void)fs.ChallengeFp3("v7_gamma");
+    const Fp3 a1 = fs.ChallengeFp3("v7_alpha1");
+    const Fp3 a2 = fs.ChallengeFp3("v7_alpha2");
+    if (!Eq(a1, proof.logup_alpha1) || !Eq(a2, proof.logup_alpha2)) {
+        return fail("v7c:logup_alpha_unbound");
+    }
+    tm.layers_s = secs(t_layers);
+
+    // ---- COMPACT grounding (replaces the GroundEpisodeInCircuit row scan). --
+    // (1) Episode AIR quotient — O(shards·Q), no row scan of the per-row rules.
+    air_episode::EpisodeAirLayout air_layout;
+    {
+        std::string bwhy;
+        if (!BuildEpisodeAirInputsV7(proof, header, air_layout, nullptr, bwhy)) {
+            return fail("v7c:air_layout:" + bwhy);
+        }
+    }
+    air_episode::EpisodeAirVerifyStats astats;
+    std::string air_why;
+    const bool air_ok =
+        air_episode::VerifyEpisodeAirQuotient(air_layout, air,
+                                              EpisodeAirSeedV7(proof, header, height, target),
+                                              &air_why, &astats);
+    tm.air_preprocess_s = astats.preprocess_s;
+    tm.air_quotient_s = astats.quotient_s;
+    tm.air_shards = astats.n_shards;
+    tm.air_rows = astats.n_rows;
+    if (!air_ok) return fail("v7c:air:" + air_why);
+
+    // (2) Chained-operand Λ wiring (native byte-equality; no SHA).
+    const auto t_chain = std::chrono::steady_clock::now();
+    {
+        const std::vector<LayerProv> prov =
+            RCGkrEpisodeWiring(header, proof.episode, proof.round_roots);
+        if (prov.size() != proof.wires.size()) return fail("v7c:wiring_count");
+        auto chain_ok = [&](const TensorRef& ref, const std::vector<int8_t>& committed) {
+            if (ref.is_leaf) return true;
+            const std::vector<int8_t>& src = proof.wires[ref.src_idx].extract_out;
+            if (src.size() != static_cast<size_t>(ref.erows) * ref.ecols) return false;
+            const std::vector<int8_t> expected =
+                ref.transpose ? TransposeI8(src, ref.erows, ref.ecols) : src;
+            return expected == committed;
+        };
+        for (size_t li = 0; li < prov.size(); ++li) {
+            if (!chain_ok(prov[li].a, proof.wires[li].A)) return fail("v7c:chain:A");
+            if (!chain_ok(prov[li].b, proof.wires[li].B)) return fail("v7c:chain:B");
+        }
+    }
+    tm.chain_s = secs(t_chain);
+
+    // (3) Bounded DIRECT tile-tree SHA closure (§6.3) — the non-arithmetized
+    // residual; n_compressions is reported for the consensus-dim projection.
+    const auto t_tree = std::chrono::steady_clock::now();
+    for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
+        const std::vector<int8_t> stream =
+            ReconstructRoundStreamFromWitness(proof.wires, r, proof.episode);
+        const gkr_air::TileTreeCheckResult tr =
+            gkr_air::CheckTileTreeInCircuit(stream, proof.episode.T_leaf, roots[r]);
+        tm.n_tiletree_sha += tr.n_compressions;
+        if (!tr.ok) return fail("v7c:tiletree:" + tr.failure);
+    }
+    tm.tiletree_s = secs(t_tree);
+
+    if (fs.Digest() != proof.transcript_hash) return fail("v7c:transcript_hash");
+
+    tm.ok = true;
+    tm.total_s = secs(t0);
+    tm.note = "v7 compact: AIR-quotient grounding (no row scan) + direct tile-tree closure";
+    if (out_timing != nullptr) *out_timing = tm;
+    if (why) {
+        *why = "v7 compact ok: shards=" + std::to_string(tm.air_shards) +
+               " air_rows=" + std::to_string(tm.air_rows) +
+               " tiletree_sha=" + std::to_string(tm.n_tiletree_sha) +
+               " total_s=" + std::to_string(tm.total_s);
+    }
+    return true;
+}
+
+RCGkrGroundScanMeasureV7 MeasureGroundEpisodeScanV7(const RCGkrProofV7& proof,
+                                                    const CBlockHeader& header)
+{
+    RCGkrGroundScanMeasureV7 out;
+    const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<LayerProv> prov =
+        RCGkrEpisodeWiring(header, proof.episode, proof.round_roots);
+    if (prov.size() != proof.wires.size()) {
+        out.failure = "wiring_count";
+        return out;
+    }
+    // Fixed challenges: the γ/α choice does not change the scan's work.
+    const Fp3 gamma = Fp3::FromFp(gkr_field::FromU64(0x9e3779b97f4a7c15ull));
+    const Fp3 a1 = Fp3{gkr_field::FromU64(0x243f6a8885a308d3ull),
+                       gkr_field::FromU64(0x13198a2e03707344ull),
+                       gkr_field::FromU64(0xa4093822299f31d0ull)};
+    const Fp3 a2 = Fp3{gkr_field::FromU64(0x082efa98ec4e6c89ull),
+                       gkr_field::FromU64(0x452821e638d01377ull),
+                       gkr_field::FromU64(0xbe5466cf34e90c6cull)};
+    gkr_air::LogUpInstance3 inst_tm, inst_tx, inst_r16;
+    const GroundResult gr = GroundEpisodeInCircuit(proof.wires, prov, proof.episode,
+                                                   proof.round_roots, gamma, inst_tm, inst_tx,
+                                                   inst_r16);
+    out.n_tiles = gr.n_tiles;
+    out.n_mxexpand_sha = gr.n_mxexpand_sha;
+    out.n_tiletree_sha = gr.n_tiletree_sha;
+    if (!gr.ok) {
+        out.failure = gr.failure;
+        out.scan_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        return out;
+    }
+    // The dual-α LogUp aggregate the scan feeds (mirrors the full verifier).
+    auto finalize_small = [](gkr_air::LogUpInstance3& in) {
+        in.table_mult.assign(in.table.size(), 0);
+        for (const Fp3& wt : in.witness) {
+            for (size_t j = 0; j < in.table.size(); ++j) {
+                if (gkr_field::Eq(wt, in.table[j])) {
+                    in.table_mult[j] += 1;
+                    break;
+                }
+            }
+        }
+    };
+    finalize_small(inst_tm);
+    finalize_small(inst_tx);
+    std::vector<gkr_air::LogUpInstance3> insts{inst_tm, inst_tx};
+    const gkr_air::LogUpVerifyResult lr = gkr_air::LogUpDualAlphaVerify(insts, a1, a2);
+    out.ok = lr.ok;
+    if (!lr.ok) out.failure = "logup:" + lr.failure;
+    out.scan_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+}
+
 bool EnvRCWinnerGkrEnabled() { return EnvFlagIsOne("BTX_RC_WINNER_GKR"); }
 bool EnvRCVerifyGkrEnabled() { return EnvFlagIsOne("BTX_RC_VERIFY_GKR"); }
 bool EnvRCGkrShadowEnabled() { return !EnvFlagIsZero("BTX_RC_GKR_SHADOW"); }

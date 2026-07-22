@@ -7,6 +7,7 @@
 
 #include <arith_uint256.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_air_episode.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_distributed.h>
 #include <matmul/matmul_v4_rc_fri.h>
@@ -610,6 +611,92 @@ struct RCGkrProveResultV7 {
  * witness dominates. Admission estimate until a canonical v7 serializer lands.
  */
 [[nodiscard]] size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof);
+
+// ============================================================================
+// COMPACT (VERIFIER-SUBLINEAR) v7 EPISODE GROUNDING — shadow/measurement path
+// (2026-07-22). The full VerifyWinnerProofV7 grounds the episode by
+// GroundEpisodeInCircuit — an O(N) row scan (per-row in-circuit MxExpand SHA,
+// TraceTile ChaCha/SHA + per-candidate constraints, tile-tree SHA). The
+// COMPACT path replaces the row scan of the LOW-DEGREE per-row rules with the
+// episode AIR constraint-quotient (matmul_v4_rc_air_episode.h — checked at
+// Q = 128 FS query points per shard, no row scan) and keeps only:
+//   • the bounded DIRECT tile-tree SHA closure (CheckTileTreeInCircuit /
+//     CheckSha256dInCircuit machinery) binding round_roots to the extract
+//     stream — SHA does not arithmetize into a low-degree rule;
+//   • the cheap native chained-operand (Λ wiring) byte-equality;
+//   • everything the full verifier already does in O(Q + polylog): batched
+//     FRI, per-layer sumcheck, eval argument, FS bindings.
+// ADDITIVE: GroundEpisodeInCircuit and VerifyWinnerProofV7 are unchanged;
+// both paths must agree on accept/reject (asserted by the red-team tests).
+// Arbiter stays OFF; nMatMulRCHeight = INT32_MAX; never consensus.
+// ============================================================================
+
+/** Wall-clock decomposition of the compact verify (shadow measurement). */
+struct RCGkrCompactTimingV7 {
+    bool ok{false};
+    double total_s{0.0};
+    double gates_s{0.0};        // trivial gates (version..layout..shapes)
+    double colbind_s{0.0};      // carried-column ↔ batched-FRI root binding
+    double fri_s{0.0};          // Fri3BatchVerify
+    double layers_s{0.0};       // per-layer sumcheck + eval argument
+    double air_preprocess_s{0.0};  // native regen of the AIR public columns
+    double air_quotient_s{0.0};    // AIR quotient verify (O(shards·Q))
+    double chain_s{0.0};        // chained-operand byte-equality
+    double tiletree_s{0.0};     // direct tile-tree SHA closure
+    uint64_t n_tiletree_sha{0};
+    uint32_t air_shards{0};
+    uint64_t air_rows{0};
+    std::string note;
+};
+
+struct RCGkrEpisodeAirProveResultV7 {
+    bool ok{false};
+    bool division_exact{true};
+    std::string note;
+    double prove_s{0.0};
+    air_episode::EpisodeAirProof proof;
+};
+
+/**
+ * Build + prove the episode AIR quotient for a v7 proof's carried witness
+ * (prover-side companion of the compact verify). `opt` exposes the
+ * adversarial force-commit / quotient-length-override knobs for the red-team
+ * tests (a forging prover MUST force-commit — the honest prover refuses on a
+ * violated constraint).
+ */
+[[nodiscard]] RCGkrEpisodeAirProveResultV7 ProveEpisodeAirForProofV7(
+    const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
+    const arith_uint256& target, const air_episode::EpisodeAirProveOptions& opt = {});
+
+/**
+ * COMPACT episode verifier: identical trivial/algebraic gates as
+ * VerifyWinnerProofV7 (through the eval argument + FS LogUp-α binding), then
+ * IN PLACE of the GroundEpisodeInCircuit row scan: (1) the episode
+ * AIR-quotient verify over `air`, (2) native chained-operand byte-equality,
+ * (3) the bounded direct tile-tree SHA closure. Rejection reasons are
+ * prefixed "v7c:". Shadow/measurement only — never consensus.
+ */
+[[nodiscard]] bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
+                                              const air_episode::EpisodeAirProof& air,
+                                              const CBlockHeader& header, int32_t height,
+                                              const arith_uint256& target,
+                                              std::string* why = nullptr,
+                                              RCGkrCompactTimingV7* out_timing = nullptr);
+
+/** Isolated wall-clock of the O(N) GroundEpisodeInCircuit row scan (plus the
+ *  dual-α LogUp aggregate it feeds) over a v7 proof — the baseline the compact
+ *  path replaces. Measurement-only: uses a fixed γ/α (challenge choice does
+ *  not change the scan cost). */
+struct RCGkrGroundScanMeasureV7 {
+    bool ok{false};
+    std::string failure;
+    double scan_s{0.0};
+    uint64_t n_tiles{0};
+    uint64_t n_mxexpand_sha{0};
+    uint64_t n_tiletree_sha{0};
+};
+[[nodiscard]] RCGkrGroundScanMeasureV7 MeasureGroundEpisodeScanV7(const RCGkrProofV7& proof,
+                                                                  const CBlockHeader& header);
 
 // ============================================================================
 // G1–G5 IN-CIRCUIT RELATIONS (integration wave, 2026-07-22).
