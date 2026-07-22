@@ -73,13 +73,14 @@
 //     native grounding of both columns from the single state chain.
 //
 // HONESTY: SOUND but NOT succinct (over_budget=true — the verifier re-runs the
-// coupled reference for grounding). The GEMM relation is the part proven
-// succinctly. Full coupled succinctness (in-circuit AIRs for perm/mix/Extract/
-// SHA + T_R16 range columns against mod-p wraparound) is a follow-on that
-// reuses the episode AIR work. Arbiter stays OFF; nMatMulRCCoupledHeight =
-// INT32_MAX; ExactReplay remains the consensus authority. Because every
-// int-semantics column is grounded natively (never prover-free), the §7.4
-// F-wrap mod-p attack has no degree of freedom in THIS variant.
+// coupled reference for grounding). GEMM, fixed exchange, feed-forward, and
+// ENC_RC_V4+ permutation openings are the parts proven in the production
+// direction. Full coupled succinctness (bank/page PCS, mix/Extract/SHA AIRs +
+// T_R16 range columns against mod-p wraparound) is a follow-on that reuses the
+// episode AIR work. Arbiter stays OFF; nMatMulRCCoupledHeight = INT32_MAX;
+// ExactReplay remains the consensus authority. Because every int-semantics
+// column is grounded natively (never prover-free), the §7.4 F-wrap mod-p attack
+// has no degree of freedom in THIS variant.
 // ============================================================================
 
 namespace matmul::v4::rc {
@@ -88,8 +89,9 @@ inline constexpr char kRCGkrCoupledV7Statement[] =
     "Coupled R5 (Wave 3B): ProveWinnerCoupledV7/VerifyWinnerCoupledV7 prove the "
     "ACTUAL coupled computation (RecomputeCoupledPuzzleReference is the sole "
     "immutable authority). GEMM succinct via batched-FRI sumcheck + eval-arg; "
-    "exchange = committed fixed-segment opening relation; perm = native public-"
-    "pi weight-MLE binding; mix/Extract/barrier-roots/bank = native grounding "
+    "exchange = committed fixed-segment opening relation; feed-forward = "
+    "committed copy openings; perm = ENC_RC_V4+ affine opening relation "
+    "(legacy V1-V3 native-grounded); mix/Extract/barrier-roots/bank = native grounding "
     "(SOUND, over_budget — in-circuit AIRs are the parked succinctness gap). "
     "Never proves toy/unrelated work: claimed digest MUST equal the int64 "
     "coupled reference. Arbiter OFF; nMatMulRCCoupledHeight=INT32_MAX.";
