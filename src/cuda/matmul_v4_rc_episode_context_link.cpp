@@ -80,6 +80,10 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     m_prov.permute_extract_label = "stub_not_wired";
     m_prov.parked_reason = "graph_unavailable:not_wired";
     m_prov.peak_ready = false;
+    // No device in the stub build: staging stays fail-closed Streamed.
+    m_prov.residency_mode = matmul::v4::rc::RCAccelResidencyMode::Streamed;
+    m_prov.resident_vram_capable = false;
+    m_prov.residency_reason = "streamed:cuda_not_compiled";
     if (error) error->clear();
     return true;
 }

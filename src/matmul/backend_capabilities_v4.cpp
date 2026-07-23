@@ -570,4 +570,35 @@ Eligibility ClassifyAscendDevice(std::string_view soc_name)
     return eligibility;
 }
 
+CudaComputePreference PreferCudaNativeMxfp4OverImma(const Eligibility& imma_eligibility,
+                                                    bool native_mxfp4_qualified)
+{
+    CudaComputePreference pref;
+    pref.imma_admissible = imma_eligibility.admissible;
+    pref.native_mxfp4_qualified = native_mxfp4_qualified;
+
+    if (!imma_eligibility.admissible) {
+        // Not even IMMA-admissible: native MXFP4 cannot rescue a non-tensor
+        // device, and we never advertise native on an inadmissible base.
+        pref.prefer_native = false;
+        pref.lane = "inadmissible";
+        pref.reason = "inadmissible_base:" + imma_eligibility.reason;
+        return pref;
+    }
+
+    // Fail-closed: prefer the peak native MXFP4 lane ONLY when it has passed its
+    // own on-silicon self-qualification. Otherwise keep the correct, admissible,
+    // sub-peak IMMA lane — the miner stays admissible either way.
+    if (native_mxfp4_qualified) {
+        pref.prefer_native = true;
+        pref.lane = "native_mxfp4";
+        pref.reason = "native_mxfp4_qualified_preferred_over_imma";
+    } else {
+        pref.prefer_native = false;
+        pref.lane = "imma_s8s8s32";
+        pref.reason = "native_mxfp4_unqualified_imma_baseline";
+    }
+    return pref;
+}
+
 } // namespace matmul_v4::backend

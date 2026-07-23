@@ -381,10 +381,29 @@ __device__ __forceinline__ uint32_t RcOzakiPack4Bytes(const uint8_t* p)
            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
 }
 
-__global__ void rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uint8_t* __restrict__ B,
-                                        const uint8_t* __restrict__ SFa,
-                                        const uint8_t* __restrict__ SFb, float* __restrict__ C,
-                                        int M, int N, int K, int kblocks)
+// GB202 / RTX PRO 6000 Blackwell tuning notes (sm_120a):
+//   * SM12x MXFP4 uses warp-level mma.sync with A/B/D fragments in REGISTERS
+//     (RMEM), NOT Tensor Memory — tcgen05/TMEM staging is an sm_100 (B200/B300)
+//     concept and must NOT be added here (confirmed: Colfax NVFP4 SM12x + CUTLASS
+//     blackwell_functionality). This kernel keeps operands in RMEM, correct for
+//     the RTX PRO 6000's 188 SMs.
+//   * This kernel is deliberately ONE warp / CTA computing a single 16x8 tile,
+//     scale_vec::1X block-32 (the only mxf8f6f4 shape). It is exactness-first and
+//     occupancy-limited: the grid is (N/8, M/16), so for the RC lobe shapes
+//     (M small, N up to 8192) it launches thousands of CTAs and fills the 188 SMs
+//     by breadth, but each CTA underuses its SM.
+//   * __launch_bounds__(32): one warp/CTA. The min-blocks-per-SM hint is left
+//     unset — the right value is GB202-profile-dependent (register pressure of
+//     the QMMA.SF path). FLAG: set it after `ncu --set full` on real silicon.
+//   * PEAK next step (profile-gated, NOT done here to preserve bit-exactness
+//     without a build): a multi-warp CTA (Colfax uses 8 warps / 256 threads,
+//     128x128x128 tile, ~60% of peak on RTX PRO 6000) or the cuBLASLt
+//     CUDA_R_4F_E2M1 + VEC32_UE8M0 block-scaled path. Any such rewrite MUST
+//     re-pass Mxfp4CompleteSuiteForLauncher bit-exactly before it may latch.
+__global__ void __launch_bounds__(32)
+    rc_ozaki_mxfp4_mma_gemm(const uint8_t* __restrict__ A, const uint8_t* __restrict__ B,
+                            const uint8_t* __restrict__ SFa, const uint8_t* __restrict__ SFb,
+                            float* __restrict__ C, int M, int N, int K, int kblocks)
 {
     const int lane = static_cast<int>(threadIdx.x) & 31;
     const int bm = static_cast<int>(blockIdx.y) * 16;
@@ -2059,6 +2078,14 @@ using Mxfp4PanelLauncher = bool (*)(const std::vector<int8_t>&, const std::vecto
         // F4 HighScaleMixed: -128 rails + odd low; requires base-4 limbs.
         {4, 64, 4, 61, MxFillKind::HighScaleMixed, 0},
         {8, 128, 8, 67, MxFillKind::HighScaleMixed, 0},
+        // RTX PRO 6000 Blackwell resident-scale: a single lobe row (M=1)
+        // contracting the full lobe_width K=8192 at max M11 magnitude. 2304·8192
+        // ≈ 1.89e7 > 2^24, so this exercises the multi-panel exact accumulation
+        // (kRCOzakiExactChunk keeps each MMA/cuBLASLt panel < 2^24) that the
+        // resident 96 GB fast path depends on. HighScaleMixed variant adds the
+        // -128 rail so base-4 limbs are forced at resident K.
+        {1, 8192, 64, 71, MxFillKind::MaxCorner, 3},
+        {1, 8192, 32, 73, MxFillKind::HighScaleMixed, 0},
     };
     for (const auto& c : kCases) {
         std::string local;

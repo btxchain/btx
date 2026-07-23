@@ -155,6 +155,39 @@ Eligibility ClassifyMetalDevice(bool has_metal4_int8_tensor_ops);
 //! Ascend/CANN: candidate iff SoC indicates Ascend 950-class Cube INT8.
 Eligibility ClassifyAscendDevice(std::string_view soc_name);
 
+// -- CUDA compute-lane preference (NON-consensus dispatch hint) --------------
+// ClassifyCudaDevice admits every sm>=7.5 device via the baseline IMMA
+// s8xs8->s32 tensor path — that admissibility is the fail-closed floor and is
+// NEVER weakened here. On Blackwell workstation cards (RTX PRO 6000, sm_120)
+// the IMMA path is CORRECT but SUB-PEAK: peak is the native block-scaled MXFP4
+// (E2M1/UE8M0) tensor path. When that native path is present AND has passed its
+// own on-silicon self-qualification, the dispatch layer SHOULD prefer it over
+// IMMA. If native is not qualified, IMMA stays selected (fail-closed) so the
+// miner is always admissible via the baseline path.
+
+//! Which CUDA compute lane the dispatcher should prefer. Pure, non-consensus.
+struct CudaComputePreference {
+    //! Device is admissible via the baseline IMMA s8xs8->s32 path.
+    bool imma_admissible{false};
+    //! A native block-scaled MXFP4 tensor path has passed self-qualification.
+    bool native_mxfp4_qualified{false};
+    //! Prefer native MXFP4 over IMMA: imma_admissible && native_mxfp4_qualified.
+    bool prefer_native{false};
+    //! "native_mxfp4" | "imma_s8s8s32" | "inadmissible".
+    std::string lane;
+    //! Machine-readable reason token.
+    std::string reason;
+};
+
+//! Compute the preferred CUDA compute lane from the baseline IMMA eligibility
+//! and whether a native MXFP4 tensor path is self-qualified. Fail-closed:
+//! native is only preferred when IMMA is already admissible AND native is
+//! qualified; otherwise the baseline IMMA lane is kept (or inadmissible when
+//! the device is not even IMMA-admissible). This never changes admissibility;
+//! it only selects the faster of two admissible-equivalent exact lanes.
+[[nodiscard]] CudaComputePreference PreferCudaNativeMxfp4OverImma(
+    const Eligibility& imma_eligibility, bool native_mxfp4_qualified);
+
 } // namespace matmul_v4::backend
 
 #endif // BTX_MATMUL_BACKEND_CAPABILITIES_V4_H

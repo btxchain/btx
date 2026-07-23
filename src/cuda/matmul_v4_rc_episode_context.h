@@ -5,6 +5,7 @@
 #ifndef BTX_CUDA_MATMUL_V4_RC_EPISODE_CONTEXT_H
 #define BTX_CUDA_MATMUL_V4_RC_EPISODE_CONTEXT_H
 
+#include <matmul/matmul_v4_rc_accel_policy.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <primitives/block.h>
 #include <uint256.h>
@@ -82,6 +83,22 @@ struct RCCudaEpisodeProvenance {
     std::string parked_reason;
     /** True when RunNonceWindow used independent per-Q arena slots (no slot-0 serialize). */
     bool independent_q_slots{false};
+
+    // --- Resident-vs-streamed staging (NON-consensus provenance) ------------
+    // Recorded by Init from cudaMemGetInfo + PlanRCResidency. Digest MUST match
+    // across Resident / Streamed; these fields describe how the working set was
+    // staged, never what was committed. RTX PRO 6000 Blackwell (96 GB) lands on
+    // Resident; a 32 GB card lands on Streamed (see matmul_v4_rc_residency_plan.h).
+    matmul::v4::rc::RCAccelResidencyMode residency_mode{
+        matmul::v4::rc::RCAccelResidencyMode::Streamed};
+    /** total VRAM >= kRCResidentVramFloorBytes (64 GiB) — resident-class card. */
+    bool resident_vram_capable{false};
+    /** Bytes of the single episode arena Init sized (LayoutFor(...).total). */
+    uint64_t working_set_bytes{0};
+    uint64_t device_free_vram_bytes{0};
+    uint64_t device_total_vram_bytes{0};
+    /** Machine-readable PlanRCResidency reason (e.g. resident:large_vram_fits). */
+    std::string residency_reason;
 };
 
 /**

@@ -15,6 +15,7 @@
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_peak_ready.h>
+#include <matmul/matmul_v4_rc_residency_plan.h>
 #include <span.h>
 
 #include <cuda_runtime.h>
@@ -816,8 +817,38 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
     }
 
     const ArenaLayout layout = LayoutFor(shape, nullptr);
+
+    // Resident-vs-streamed staging decision (RTX PRO 6000 Blackwell 96 GB win).
+    // Probe VRAM and record the plan in provenance BEFORE the big arena alloc.
+    // Fail-closed: if the resident arena cannot physically fit (working set +
+    // headroom > free VRAM), refuse here with a machine-readable capacity-short
+    // reason instead of triggering an opaque cudaMalloc OOM — the caller can
+    // then fall back to a streamed strategy. The card-class label (Resident vs
+    // Streamed) is recorded from the full plan; the hard guard uses physical
+    // fit only, so a sub-64 GiB card running a toy shape still proceeds.
+    size_t vram_free = 0, vram_total = 0;
+    const bool vram_known = cudaMemGetInfo(&vram_free, &vram_total) == cudaSuccess;
+    const rc::RCResidencyPlan plan = rc::PlanRCResidency(
+        static_cast<uint64_t>(layout.total),
+        vram_known ? static_cast<uint64_t>(vram_free) : 0ull,
+        vram_known ? static_cast<uint64_t>(vram_total) : 0ull);
+    if (vram_known && !plan.working_set_fits) {
+        if (error) {
+            *error = "RCCudaEpisodeContext residency:capacity_short (need " +
+                     std::to_string(layout.total) + "B + headroom " +
+                     std::to_string(plan.headroom_bytes) + "B > free " +
+                     std::to_string(vram_free) + "B; " + plan.reason +
+                     "; caller should stream)";
+        }
+        return false;
+    }
+
     void* ptr = nullptr;
     if (!CudaOk(cudaMalloc(&ptr, layout.total), error, "RCCudaEpisodeContext cudaMalloc")) {
+        if (error && vram_known) {
+            *error += " [residency plan: " + plan.reason + ", free=" +
+                      std::to_string(vram_free) + "B]";
+        }
         return false;
     }
     m_arena = ptr;
@@ -840,6 +871,14 @@ bool RCCudaEpisodeContext::Init(const RCCudaEpisodeShape& shape, std::string* er
         "AssembleCoupledEpisodeDigest_on_host; native_mxfp4_device_ptr_awaiting_wsB; "
         "peak_ready=false";
     m_prov.peak_ready = false;
+
+    // Record the resident-vs-streamed staging plan (NON-consensus provenance).
+    m_prov.residency_mode = plan.mode;
+    m_prov.resident_vram_capable = plan.resident_capable;
+    m_prov.working_set_bytes = plan.working_set_bytes;
+    m_prov.device_free_vram_bytes = plan.free_vram_bytes;
+    m_prov.device_total_vram_bytes = plan.total_vram_bytes;
+    m_prov.residency_reason = plan.reason;
 
     cudaStream_t stream = nullptr;
     if (!CudaOk(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), error,

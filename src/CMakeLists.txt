@@ -526,6 +526,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_transcript.cpp
   matmul/matmul_v4_rc_mx_layout.cpp
   matmul/matmul_v4_rc_mx_ozaki.cpp
+  matmul/matmul_v4_rc_residency_plan.cpp
   matmul/matmul_v4_provider_claims.cpp
   matmul/matmul_v4_rc_scale.cpp
   matmul/matmul_v4_rc_scale_axes.cpp
