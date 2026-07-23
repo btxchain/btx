@@ -227,6 +227,27 @@ void RCDenseTwoRowsBlockTransposedExactI8(const int8_t* lhs0, const int8_t* lhs1
                                           int64_t out0[kRCMxBlockLen],
                                           int64_t out1[kRCMxBlockLen]);
 
+/** True when the packed ARM I8MM cache-format kernels pass their byte-identity
+ *  self-test on this host. Packed layout is verifier-local only: it is derived
+ *  deterministically from the prewarmed int8 tensor and never serialized. */
+[[nodiscard]] bool RCDensePackedI8mmAvailable();
+
+/** Pack a row-major RHS matrix [rows][cols] into the verifier-local SMMLA
+ *  layout consumed by RCDense*PackedI8mmExactI8. Requires rows%8==0 and
+ *  cols%kRCMxBlockLen==0. */
+std::vector<int8_t> RCPackDenseI8mmOutputBlocks(const std::vector<int8_t>& rhs,
+                                                uint32_t rows, uint32_t cols);
+
+void RCDenseRowBlockPackedI8mmExactI8(const int8_t* lhs, const int8_t* rhs_packed,
+                                      uint32_t k, uint32_t rhs_cols, uint32_t rhs_col0,
+                                      int64_t out[kRCMxBlockLen]);
+
+void RCDenseTwoRowsBlockPackedI8mmExactI8(const int8_t* lhs0, const int8_t* lhs1,
+                                          const int8_t* rhs_packed, uint32_t k,
+                                          uint32_t rhs_cols, uint32_t rhs_col0,
+                                          int64_t out0[kRCMxBlockLen],
+                                          int64_t out1[kRCMxBlockLen]);
+
 /**
  * SUBLINEAR sampled verifier over a FULL v7 proof's carried wires. Runs the
  * same cheap trivial/target/digest/round_seeds/round_roots gates as

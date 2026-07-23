@@ -1100,7 +1100,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
     const std::vector<uint32_t> units =
         FreivaldsSampleLayers(base_seed, tm.n_units_total, carrier.lambda);
     tm.n_sampled = static_cast<uint32_t>(units.size());
-    tm.recompute_vectorized = RCDenseRowBlockVectorizedAvailable();
+    tm.recompute_vectorized = RCDenseRowBlockVectorizedAvailable() || RCDensePackedI8mmAvailable();
     if (carrier.sampled.size() != units.size()) return fail("v7fs:carrier_count");
     tm.gates_s = Secs(t0);
 
@@ -1230,8 +1230,9 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
         for (const auto& [seed, sp] : seed_plan) {
             seed_jobs.push_back(SeedJob{seed, sp.rows, sp.cols, sp.transpose_for_unitcheck, {}});
         }
+        const bool use_packed_i8mm = RCDensePackedI8mmAvailable();
         RegenCache regen;
-        TransposeCache transposed_w_up;
+        TransposeCache unitcheck_w_cache;
         const auto t_prewarm = std::chrono::steady_clock::now();
         try {
             std::sort(seed_jobs.begin(), seed_jobs.end(), [](const SeedJob& a, const SeedJob& b) {
@@ -1260,10 +1261,12 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 const SeedJob& job = seed_jobs[transpose_jobs[i]];
                 const auto it = regen.find(job.seed);
                 if (it == regen.end()) throw std::runtime_error("missing prewarmed W_up");
-                transposed_bytes[i] = TransposeI8Local(it->second, job.rows, job.cols);
+                transposed_bytes[i] = use_packed_i8mm
+                    ? RCPackDenseI8mmOutputBlocks(it->second, job.rows, job.cols)
+                    : TransposeI8Local(it->second, job.rows, job.cols);
             });
             for (size_t i = 0; i < transpose_jobs.size(); ++i) {
-                transposed_w_up.emplace(seed_jobs[transpose_jobs[i]].seed, std::move(transposed_bytes[i]));
+                unitcheck_w_cache.emplace(seed_jobs[transpose_jobs[i]].seed, std::move(transposed_bytes[i]));
             }
         } catch (...) {
             return fail("v7fs:worker_exception");
@@ -1283,15 +1286,15 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
         };
         std::vector<UnitResult> results(unit_plans.size());
         const RegenCache& regen_ro = regen;
-        const TransposeCache& transposed_ro = transposed_w_up;
+        const TransposeCache& unitcheck_w_ro = unitcheck_w_cache;
         auto get_seed = [&](const uint256& seed) -> const std::vector<int8_t>& {
             const auto it = regen_ro.find(seed);
             if (it == regen_ro.end()) throw std::runtime_error("missing prewarmed seed");
             return it->second;
         };
         auto get_transposed = [&](const uint256& seed) -> const std::vector<int8_t>& {
-            const auto it = transposed_ro.find(seed);
-            if (it == transposed_ro.end()) throw std::runtime_error("missing transposed W_up");
+            const auto it = unitcheck_w_ro.find(seed);
+            if (it == unitcheck_w_ro.end()) throw std::runtime_error("missing unitcheck W cache");
             return it->second;
         };
 
@@ -1431,12 +1434,23 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                         for (uint32_t bj = 0; bj < d_ff / T; ++bj) {
                             const uint32_t col0 = bj * T;
                             if (paired) {
-                                RCDenseTwoRowsBlockTransposedExactI8(X0.data(), X1.data(), W_up_t.data(),
-                                                                     d_model, d_ff, col0,
-                                                                     blk.data(), blk1.data());
+                                if (use_packed_i8mm) {
+                                    RCDenseTwoRowsBlockPackedI8mmExactI8(X0.data(), X1.data(), W_up_t.data(),
+                                                                        d_model, d_ff, col0,
+                                                                        blk.data(), blk1.data());
+                                } else {
+                                    RCDenseTwoRowsBlockTransposedExactI8(X0.data(), X1.data(), W_up_t.data(),
+                                                                         d_model, d_ff, col0,
+                                                                         blk.data(), blk1.data());
+                                }
                             } else {
-                                RCDenseRowBlockTransposedExactI8(X0.data(), W_up_t.data(), d_model,
-                                                                 d_ff, col0, blk.data());
+                                if (use_packed_i8mm) {
+                                    RCDenseRowBlockPackedI8mmExactI8(X0.data(), W_up_t.data(), d_model,
+                                                                     d_ff, col0, blk.data());
+                                } else {
+                                    RCDenseRowBlockTransposedExactI8(X0.data(), W_up_t.data(), d_model,
+                                                                     d_ff, col0, blk.data());
+                                }
                             }
                             const auto h0 = ExtractBlock(up.extract_prf, tile0.row, bj, blk.data());
                             for (uint32_t c = 0; c < T; ++c) H0[bj * T + c] = h0[c];
@@ -1450,8 +1464,13 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                                              const std::vector<int8_t>& H_row) {
                             std::array<int64_t, kRCMxBlockLen> yblk{};
                             const uint32_t out_col0 = tile.bcol * T;
-                            RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
-                                                             d_model, out_col0, yblk.data());
+                            if (use_packed_i8mm) {
+                                RCDenseRowBlockPackedI8mmExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                                 d_model, out_col0, yblk.data());
+                            } else {
+                                RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                                 d_model, out_col0, yblk.data());
+                            }
                             for (uint32_t c = 0; c < T; ++c)
                                 yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
                             return ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());

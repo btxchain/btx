@@ -1484,7 +1484,8 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
     BOOST_REQUIRE(target.has_value());
     const rc::RCEpisodeParams p = rc::ResolveRCEpisodeParams(consensus, kHeight);
     BOOST_REQUIRE(RCEpisodeParamsEqual(p, rc::MakeDatacenterRCEpisodeParams()));
-    rep.recompute_vectorized = rc::RCDenseRowBlockVectorizedAvailable();
+    rep.recompute_vectorized = rc::RCDenseRowBlockVectorizedAvailable() ||
+                               rc::RCDensePackedI8mmAvailable();
 
     const uint256 sigma = matmul::v4::DeriveSigma(header);
     std::vector<uint256> round_roots(p.rounds);
@@ -1611,6 +1612,7 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
     }
 
     std::map<uint256, std::vector<int8_t>> regen;
+    const bool use_packed_i8mm = rc::RCDensePackedI8mmAvailable();
     std::map<uint256, std::vector<int8_t>> transposed_w_up;
     auto elapsed = [&](std::chrono::steady_clock::time_point t0) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
@@ -1716,7 +1718,9 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
         std::vector<std::vector<int8_t>> transposed_jobs(transpose_seeds.size());
         run_parallel(transpose_seeds.size(), [&](size_t i) {
             const auto& W = regen.find(transpose_seeds[i].seed)->second;
-            transposed_jobs[i] = TransposeI8Bench(W, transpose_seeds[i].rows, transpose_seeds[i].cols);
+            transposed_jobs[i] = use_packed_i8mm
+                ? rc::RCPackDenseI8mmOutputBlocks(W, transpose_seeds[i].rows, transpose_seeds[i].cols)
+                : TransposeI8Bench(W, transpose_seeds[i].rows, transpose_seeds[i].cols);
         });
         for (size_t i = 0; i < transpose_seeds.size(); ++i) {
             transposed_w_up.emplace(transpose_seeds[i].seed, std::move(transposed_jobs[i]));
@@ -1824,12 +1828,23 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                     for (uint32_t bj = 0; bj < d_ff / rc::kRCMxBlockLen; ++bj) {
                         const uint32_t col0 = bj * rc::kRCMxBlockLen;
                         if (paired) {
-                            rc::RCDenseTwoRowsBlockTransposedExactI8(X0.data(), X1.data(), W_up_t.data(),
-                                                                     d_model, d_ff, col0,
-                                                                     blk.data(), blk1.data());
+                            if (use_packed_i8mm) {
+                                rc::RCDenseTwoRowsBlockPackedI8mmExactI8(X0.data(), X1.data(), W_up_t.data(),
+                                                                         d_model, d_ff, col0,
+                                                                         blk.data(), blk1.data());
+                            } else {
+                                rc::RCDenseTwoRowsBlockTransposedExactI8(X0.data(), X1.data(), W_up_t.data(),
+                                                                         d_model, d_ff, col0,
+                                                                         blk.data(), blk1.data());
+                            }
                         } else {
-                            rc::RCDenseRowBlockTransposedExactI8(X0.data(), W_up_t.data(), d_model,
-                                                                 d_ff, col0, blk.data());
+                            if (use_packed_i8mm) {
+                                rc::RCDenseRowBlockPackedI8mmExactI8(X0.data(), W_up_t.data(), d_model,
+                                                                     d_ff, col0, blk.data());
+                            } else {
+                                rc::RCDenseRowBlockTransposedExactI8(X0.data(), W_up_t.data(), d_model,
+                                                                     d_ff, col0, blk.data());
+                            }
                         }
                         const auto h0 = ExtractBlockBench(up.extract_prf, pl0.row, bj, blk.data());
                         for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
@@ -1844,8 +1859,13 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                                          const std::vector<int8_t>& H_row) {
                         std::array<int64_t, rc::kRCMxBlockLen> yblk{};
                         const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
-                        rc::RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
-                                                             d_model, out_col0, yblk.data());
+                        if (use_packed_i8mm) {
+                            rc::RCDenseRowBlockPackedI8mmExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                                 d_model, out_col0, yblk.data());
+                        } else {
+                            rc::RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                                 d_model, out_col0, yblk.data());
+                        }
                         for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
                             yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
                         }
