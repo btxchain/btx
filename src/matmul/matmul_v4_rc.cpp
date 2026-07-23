@@ -788,14 +788,23 @@ RCEpisodeParams DefaultConsensusRCEpisodeParams()
 
 RCEpisodeParams MakeDatacenterRCEpisodeParams()
 {
-    // ADDITIVE datacenter profile (design §6.1(A)): copy the exact epoch-0 base
-    // held values and raise ONLY the free extensive axes (rounds/L_lyr/b_seq).
-    // Deriving from DefaultConsensusRCEpisodeParams() guarantees the intensive
-    // dims (d_head, n_q, n_ctx, d_model, T_leaf) track the base byte-for-byte.
+    // ADDITIVE datacenter profile (design §6.1(A)): copy the epoch-0 base and raise
+    // the free extensive axes (rounds/L_lyr/b_seq). The intensive GEMM dims
+    // (d_head, n_q, n_ctx, d_model) track the base byte-for-byte. T_leaf is raised
+    // (kRCTileLeafBytesDC) as the compute/hash hardware-alignment lever
+    // (aicompute-alignment-review.md §4).
     RCEpisodeParams p = DefaultConsensusRCEpisodeParams();
-    p.rounds = kRCRoundsDC;   // 8  (2× base)
-    p.L_lyr = kRCLayersDC;    // 64 (4× base)
-    p.b_seq = kRCBatchSeqDC;  // 32768 (2× base)
+    p.rounds = kRCRoundsDC;         // 8  (2× base)
+    p.L_lyr = kRCLayersDC;          // 64 (4× base)
+    p.b_seq = kRCBatchSeqDC;        // 32768 (2× base)
+    p.T_leaf = kRCTileLeafBytesDC;  // 4096 (compute/hash margin lever, §4)
+    // HARD GUARDRAIL (aicompute-alignment-review.md §4, the weakest link): the
+    // datacenter profile MUST NOT grow n_ctx above the epoch-0 base. Attention has
+    // arithmetic intensity d_head (≈48× below the FFN's 1.5·d_model), so a larger
+    // n_ctx tips the episode HASH-BOUND and hands share to SHA-ASICs over AI
+    // accelerators. Fail closed if a future edit raises it.
+    assert(p.n_ctx == DefaultConsensusRCEpisodeParams().n_ctx &&
+           "datacenter n_ctx must never exceed epoch-0 base (hash-bound guardrail, §4)");
     return p;
 }
 

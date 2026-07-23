@@ -4230,6 +4230,13 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
               e.b_seq == params_rc.b_seq && e.T_leaf == params_rc.T_leaf)) {
             return finish(false);
         }
+        // Bind the sampling breadth λ to the consensus constant: with the SEGMENT
+        // carrier a relayer could otherwise shrink λ (fewer sampled layers ⇒ a
+        // larger deterrence residual ρ* ≈ ln κ/λ). The FS coin fixes WHICH layers
+        // are sampled from the header-bound base_seed; consensus fixes HOW MANY.
+        if (dc_carrier.lambda != matmul::v4::rc::kRCFreivaldsSampleCount) {
+            return finish(false);
+        }
         std::string why;
         if (!matmul::v4::rc::VerifyEpisodeFreivaldsSampledCarrier(dc_carrier, header, block_height,
                                                                   *bnTarget, &why)) {

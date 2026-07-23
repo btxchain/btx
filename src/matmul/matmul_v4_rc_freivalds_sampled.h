@@ -76,8 +76,44 @@
 
 namespace matmul::v4::rc {
 
-/** λ — number of Fiat–Shamir-sampled layers (stage-c §2.5 recommendation). */
-inline constexpr uint32_t kRCFreivaldsSampleCount = 256;
+/** λ — number of Fiat–Shamir-sampled layers. Raised 256→512 (aicompute-alignment-
+ *  review.md §5.2: "cheap soundness insurance"): halves the deterrence residual
+ *  ρ* ≈ ln(κ)/λ from ≈0.27%→0.13% (κ=2) / 0.037%→0.019% (competitive). The
+ *  segment carrier (below) keeps 512 sampled layers UNDER the 12 MiB relay ceiling
+ *  at production dims because per-layer relay is bounded by the segment footprint,
+ *  not the full operand size. */
+inline constexpr uint32_t kRCFreivaldsSampleCount = 512;
+
+// ---------------------------------------------------------------------------
+// SEGMENT-FREIVALDS carrier granularity (datacenter relay-ceiling fit + width
+// unpin). Instead of opening a sampled layer's FULL operands (which at production
+// dims exceed the 12 MiB carrier ceiling — a single Fwd Y is ~1 GiB int64, an SV
+// A operand ~384 MiB int8), each sampled layer opens a BOUNDED set of random
+// OUTPUT TILES and, within each, a BOUNDED set of random CONTRACTION SEGMENTS,
+// and runs the segment-Freivalds identity A·(B·r)=Y·r restricted to them
+// (matmul_v4_rc_freivalds.h). The per-sampled-layer relay is then INDEPENDENT of
+// m, n and the full k — it is
+//   s_tile · [ T·8 (Y int64) + T (extract_out) + T (Fwd residual)
+//              + s_ctr·L_seg·(1 + T) (A,B slices)  + leaves·T_leaf + path ]
+// with T = kRCMxBlockLen (one MX output block, a single output row × 32 cols),
+// so a d_model > 4096 (or n_ctx-scaled) episode carries the SAME bytes — this is
+// the width UNPIN. An output tile is a single (row i, 32-col block bj): contiguous
+// in the round stream (clean O(log N) leaf opening) and exactly one Extract tile.
+inline constexpr uint32_t kRCFreivaldsSegOutTiles = 2;     // output tiles / sampled layer
+inline constexpr uint32_t kRCFreivaldsSegContractSegs = 2; // contraction segments / tile
+inline constexpr uint32_t kRCFreivaldsSegContractLen = 64; // MX-aligned length / segment
+static_assert(kRCFreivaldsSegContractLen % 32 == 0, "segment length must be MX(32)-aligned");
+static_assert(kRCFreivaldsSegOutTiles >= 1 && kRCFreivaldsSegContractSegs >= 1,
+              "at least one output tile and one contraction segment must be sampled");
+/** SOUNDNESS granularity (matmul_v4_rc_freivalds.h header). When a layer's
+ *  contraction k ≤ s_ctr·L_seg the sampled segments COVER [0,k) fully and the tile
+ *  GEMM is verified EXACTLY (each rep ≤ 2^-63) — the case that holds for toy/CI
+ *  dims and the short FFN residual. At production dims k ≫ s_ctr·L_seg, coverage is
+ *  partial: the tile's Extract→extract_out chain and the covered segments' operand
+ *  self-consistency are exact, while the uncovered contraction folds into the ρ*
+ *  deterrence residual (a broadly-wrong / skipped GEMM is still caught w.h.p.; only
+ *  a contraction-concentrated error in the uncovered range escapes — priced as ρ*,
+ *  NOT a new soundness claim). This is the honest datacenter posture. */
 /** Freivalds projections per sampled layer. reps=1 already clears the ~2^-64
  *  consensus scale (2^-63); reps is exposed for margin only and the sampling
  *  residual ρ* dominates regardless (see banner). */
@@ -86,8 +122,19 @@ inline constexpr uint32_t kRCFreivaldsReps = 2;
 inline constexpr char kRCFreivaldsSampleTag[] = "BTX_RC_FRVS_SAMPLE_V1";
 /** Domain tag: per-layer Freivalds challenge seed derivation. */
 inline constexpr char kRCFreivaldsGemmSeedTag[] = "BTX_RC_FRVS_GEMM_V1";
-/** Carrier format version. */
-inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 1;
+/** Domain tag: FS derivation of the per-layer output-tile + contraction-segment
+ *  positions (segment carrier). */
+inline constexpr char kRCFreivaldsSegPosTag[] = "BTX_RC_FRVS_SEGPOS_V1";
+/** Carrier format version. v2: segment carrier (bounded per-layer relay). */
+inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 2;
+
+/** Upper bound on ONE sampled layer's serialized relay bytes in the segment
+ *  carrier — a function of the segment granularity (kRCFreivaldsSegOutTiles,
+ *  kRCFreivaldsSegContractSegs, kRCFreivaldsSegContractLen), T_leaf and the
+ *  tile-tree depth, and INDEPENDENT of the full operand size m·n·k. This is what
+ *  keeps λ=512 sampled layers under the 12 MiB ceiling at production dims and
+ *  unpins width (d_model > 4096 costs the same). Exposed for relay sizing/tests. */
+[[nodiscard]] size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params);
 
 // ---------------------------------------------------------------------------
 // FS sample derivation.
@@ -152,27 +199,47 @@ struct RCFreivaldsSampledTiming {
 // is what makes the relayed proof — and hence the whole flow — sublinear.
 // ---------------------------------------------------------------------------
 
-/** One sampled layer's carried bytes + its extract_out tile-tree opening. */
-struct RCFreivaldsSampledLayer {
-    uint32_t layer_index{0};   // index into the Λ enumeration (== wire index)
-    uint32_t round{0};         // which round_root the opening targets
-    RCGkrLayerKind kind{};
-    uint32_t m{0}, n{0}, k{0};
-    std::vector<int8_t> A;            // operand A (int8, m×k)
-    std::vector<int8_t> B;            // operand B (int8, k×n)
-    std::vector<int64_t> Y;           // GEMM product (int64, m×n)
-    std::vector<int64_t> extract_in;  // pre-Extract accumulator (int64, m×n)
-    std::vector<int8_t> extract_out;  // Extract output (int8, m×n)
-    // Tile-tree opening of extract_out into round_roots[round]. extract_out
-    // occupies stream bytes [stream_offset, stream_offset + m*n); the covering
-    // leaves are [first_leaf, first_leaf + leaf_bytes.size()). Each carried leaf
-    // is the FULL T_leaf stream bytes (neighbour bytes included) so its hash and
-    // Merkle path reproduce round_roots[round]; the overlap with extract_out is
-    // checked byte-for-byte.
+/** One sampled OUTPUT TILE of one sampled layer: a single (row i, 32-col block
+ *  bj) of the GEMM output, opened by a bounded set of random CONTRACTION SEGMENTS.
+ *  Relay is O(s_ctr·L_seg + T_leaf), independent of the full m,n,k. */
+struct RCFreivaldsSampledTile {
+    uint32_t row{0};   // output row i ∈ [0, m)
+    uint32_t bcol{0};  // output 32-col block bj ∈ [0, n/32); cols [bj*32, bj*32+32)
+    // Output-block wires (T = kRCMxBlockLen entries each).
+    std::vector<int64_t> Y;           // GEMM product Y[i, bj-block] (int64, T)
+    std::vector<int8_t> extract_out;  // Extract output eo[i, bj-block] (int8, T)
+    // Fwd residual slice A[i, bj-block] (int8, T); empty when the layer has no
+    // residual. extract_in = Y (+ this residual for Fwd).
+    std::vector<int8_t> residual;
+    // Contraction segments opened for the GEMM check (each a slice of the FULL
+    // contraction). A_seg is row i's contraction slice (seg_len int8); B_seg is
+    // that slice × the 32-col output block (seg_len × T int8).
+    struct Segment {
+        uint32_t seg_off{0};           // first contraction index of this segment
+        uint32_t seg_len{0};           // contraction indices covered
+        std::vector<int8_t> A_seg;     // A[i, seg_off:seg_off+seg_len]  (seg_len)
+        std::vector<int8_t> B_seg;     // B[seg_off:seg_off+seg_len, bj-block] (seg_len·T)
+    };
+    std::vector<Segment> segments;
+    bool full_cover{false};  // segments cover [0,k): tile GEMM verified EXACTLY
+    // Tile-tree opening of extract_out into round_roots[round]. The block occupies
+    // stream bytes [stream_offset, stream_offset + T); the covering leaves are
+    // [first_leaf, first_leaf + leaf_bytes.size()). Each carried leaf is the FULL
+    // T_leaf stream bytes so its hash + Merkle path reproduce round_roots[round];
+    // the overlap with extract_out is checked byte-for-byte.
     uint64_t stream_offset{0};
     uint32_t first_leaf{0};
     std::vector<std::vector<uint8_t>> leaf_bytes;
     std::vector<RCMerkleProof> leaf_proofs;
+};
+
+/** One sampled layer: its Λ identity + the bounded set of opened output tiles. */
+struct RCFreivaldsSampledLayer {
+    uint32_t layer_index{0};   // index into the Λ enumeration (== wire index)
+    uint32_t round{0};         // which round_root the openings target
+    RCGkrLayerKind kind{};
+    uint32_t m{0}, n{0}, k{0};
+    std::vector<RCFreivaldsSampledTile> tiles;  // <= kRCFreivaldsSegOutTiles
 };
 
 struct RCFreivaldsSampledCarrier {
@@ -234,19 +301,20 @@ struct RCFreivaldsSampledCarrier {
 // DoS bounds for the untrusted wire form. The carrier arrives in a single P2P
 // message capped by the net layer at MAX_PROTOCOL_MESSAGE_LENGTH (16 MB); the
 // bound below is the module's own hard ceiling, re-checked on both serve and
-// receive. It rides comfortably under the transport ceiling. NOTE (honest): at
-// full PRODUCTION datacenter dims a single sampled layer's dense operands can
-// exceed this ceiling — the relay is functional for the regtest/toy episode
-// regime that is actually reachable today (mainnet activation stays INT32_MAX);
-// see the report's residual-gap note. Oversize carriers are simply not served
-// (peers rebuild), mirroring the best-effort mmsketch relay.
+// receive. With the SEGMENT carrier the honest carrier fits UNDER this ceiling
+// even at full PRODUCTION datacenter dims (design §2c binding relay constraint is
+// resolved): per-sampled-layer relay is bounded by the segment footprint
+// (s_tile·s_ctr·L_seg + leaves), independent of the full m,n,k, so λ=512 sampled
+// layers at d_model≥4096 serialize in ~single-digit MiB — the size that blew the
+// full-operand carrier now fits. Oversize carriers are still rejected before parse.
 inline constexpr size_t kRCFreivaldsCarrierMaxSerializedBytes = 12u * 1024u * 1024u;
 /** Count caps (defense-in-depth alongside the byte ceiling): a violated cap
- *  aborts the deserialize with a std::ios_base::failure, which net_processing
- *  scores as peer misbehavior exactly like any malformed message. */
+ *  aborts the deserialize, which net_processing scores as peer misbehavior. */
 inline constexpr uint32_t kRCCarrierMaxRounds = 4096;          // round_seeds/round_roots
-inline constexpr uint32_t kRCCarrierMaxSampledLayers = 4096;   // >= any λ we deploy (256)
-inline constexpr uint32_t kRCCarrierMaxLeavesPerLayer = 65536; // covering leaves per layer
+inline constexpr uint32_t kRCCarrierMaxSampledLayers = 4096;   // >= any λ we deploy (512)
+inline constexpr uint32_t kRCCarrierMaxTilesPerLayer = 256;    // >= kRCFreivaldsSegOutTiles
+inline constexpr uint32_t kRCCarrierMaxSegmentsPerTile = 4096; // >= s_ctr, and full-cover P
+inline constexpr uint32_t kRCCarrierMaxLeavesPerTile = 4096;   // covering leaves per tile
 inline constexpr uint32_t kRCCarrierMaxMerkleSiblings = 64;    // >= tree depth for any N
 /** Per-vector element ceiling: no single carried vector may claim more elements
  *  than the whole-carrier byte ceiling could hold at 1 byte/elem. Combined with

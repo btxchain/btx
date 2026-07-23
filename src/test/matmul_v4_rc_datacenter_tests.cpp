@@ -936,7 +936,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
     BOOST_CHECK_EQUAL(dc.n_q, 4u * dc.d_head);
     BOOST_CHECK_EQUAL(dc.n_ctx, 786432u);
     BOOST_CHECK_EQUAL(dc.d_model, 4096u);
-    BOOST_CHECK_EQUAL(dc.T_leaf, 1024u);
+    // T_leaf is RAISED for the datacenter profile (compute/hash margin lever,
+    // aicompute-alignment-review.md §4) — 4× the epoch-0 1024.
+    BOOST_CHECK_EQUAL(dc.T_leaf, rc::kRCTileLeafBytesDC);
+    BOOST_CHECK_EQUAL(dc.T_leaf, 4096u);
+    BOOST_CHECK(dc.T_leaf > rc::DefaultConsensusRCEpisodeParams().T_leaf);
     BOOST_CHECK(rc::ValidateRCEpisodeParams(dc));
 }
 
@@ -973,13 +977,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile1_byte_identical_guard)
     BOOST_CHECK_MESSAGE(RCEpisodeParamsEqual(r1, base),
                         "profile-1 resolver must reproduce base params byte-for-byte");
 
-    // Datacenter differs from base ONLY on the three free extensive axes.
+    // Datacenter holds the intensive GEMM dims at base, raises the free extensive
+    // axes (rounds/L_lyr/b_seq), and raises T_leaf (compute/hash margin lever, §4).
     const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
     BOOST_CHECK_EQUAL(dc.d_head, base.d_head);
     BOOST_CHECK_EQUAL(dc.n_q, base.n_q);
-    BOOST_CHECK_EQUAL(dc.n_ctx, base.n_ctx);
+    BOOST_CHECK_EQUAL(dc.n_ctx, base.n_ctx);   // n_ctx guardrail: never grows (§4)
     BOOST_CHECK_EQUAL(dc.d_model, base.d_model);
-    BOOST_CHECK_EQUAL(dc.T_leaf, base.T_leaf);
+    BOOST_CHECK(dc.T_leaf > base.T_leaf);      // raised, not held
     BOOST_CHECK(dc.rounds != base.rounds);
     BOOST_CHECK(dc.L_lyr != base.L_lyr);
     BOOST_CHECK(dc.b_seq != base.b_seq);
@@ -1107,13 +1112,16 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     rc::RCFreivaldsCarrierStoreClear();
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Tampered sampled layer: flip a Y output of a carried layer. At toy dims
-    // n_units < λ=256, so EVERY sampleable layer is carried+sampled → any such
-    // tamper is caught by the per-layer Freivalds check.
+    // Tampered sampled layer: flip a Y output of a carried tile. At toy dims
+    // every sampleable layer is carried+sampled and the contraction is fully
+    // covered, so the segment-Freivalds tile check catches it exactly.
     rc::RCFreivaldsSampledCarrier tampered = carrier;
     bool tampered_one = false;
     for (auto& e : tampered.sampled) {
-        if (!e.Y.empty()) { e.Y[0] += 1; tampered_one = true; break; }
+        for (auto& t : e.tiles) {
+            if (!t.Y.empty()) { t.Y[0] += 1; tampered_one = true; break; }
+        }
+        if (tampered_one) break;
     }
     BOOST_REQUIRE(tampered_one);
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), tampered);
@@ -1313,11 +1321,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_rejects_irrelevant_and_tampered)
     rc::RCFreivaldsCarrierStorePut(header_b.GetHash(), carrier_a);
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header_b, p, kHeight));
 
-    // TAMPERED: flip a sampled Y output; the carrier no longer authenticates for A.
+    // TAMPERED: flip a sampled tile Y output; the carrier no longer authenticates.
     rc::RCFreivaldsSampledCarrier tampered = carrier_a;
     bool flipped = false;
     for (auto& e : tampered.sampled) {
-        if (!e.Y.empty()) { e.Y[0] += 1; flipped = true; break; }
+        for (auto& t : e.tiles) {
+            if (!t.Y.empty()) { t.Y[0] += 1; flipped = true; break; }
+        }
+        if (flipped) break;
     }
     BOOST_REQUIRE(flipped);
     std::string why;
@@ -1376,6 +1387,120 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
     BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 1);
     BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
+}
+
+// ---------------------------------------------------------------------------
+// SEGMENT CARRIER: the datacenter relay-ceiling FIT + WIDTH UNPIN + the coupled
+// λ=512 / raised-T_leaf / compute-hash-margin params. The current FULL-operand
+// carrier blows the 12 MiB ceiling at production dims (a single Fwd Y is 1 GiB
+// int64); the segment carrier's per-layer relay is bounded by the segment
+// footprint, independent of m,n,k.
+// ---------------------------------------------------------------------------
+
+// (i) At PRODUCTION datacenter dims the segment carrier serializes UNDER the
+//     12 MiB ceiling — the size that blows the full-operand carrier.
+BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_fits_production_ceiling)
+{
+    const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
+
+    // The size that BLOWS the ceiling: a single Fwd layer's full operands.
+    // Y (int64 b_seq×d_model) alone is ~1 GiB — 89× over the 12 MiB ceiling.
+    const uint64_t fwd_Y_bytes = static_cast<uint64_t>(dc.b_seq) * dc.d_model * 8ull;
+    BOOST_CHECK_EQUAL(fwd_Y_bytes, 1073741824ull);                 // 1 GiB
+    BOOST_CHECK_GT(fwd_Y_bytes, rc::kRCFreivaldsCarrierMaxSerializedBytes);
+    // The full-operand carrier carried Y+extract_in+extract_out+A+B for EVERY one
+    // of λ sampled layers — utterly over the ceiling. The segment carrier does not.
+
+    // The segment carrier's per-sampled-layer bound is bounded and small.
+    const size_t per_layer = rc::RCFreivaldsSegLayerByteBound(dc);
+    BOOST_TEST_MESSAGE("segment per-layer relay bound (bytes): " << per_layer);
+    // λ=512 sampled layers + the fixed header (round roots/seeds, digests) still
+    // fits under the 12 MiB ceiling.
+    const size_t fixed = 4 + 8 * 4 + 4 + 3 * 32 + 2 * (dc.rounds * 32u + 4) + 8;
+    const size_t total_bound = static_cast<size_t>(rc::kRCFreivaldsSampleCount) * per_layer + fixed;
+    BOOST_TEST_MESSAGE("segment carrier upper-bound at DC dims, λ=512 (bytes): " << total_bound);
+    BOOST_CHECK_LT(total_bound, rc::kRCFreivaldsCarrierMaxSerializedBytes);
+    // And it is a large reduction vs even ONE full Fwd Y.
+    BOOST_CHECK_LT(total_bound, fwd_Y_bytes / 50);
+}
+
+// (j) WIDTH UNPIN: the per-layer relay bound is INDEPENDENT of d_model (and n_ctx),
+//     so a d_model > 4096 episode's carrier still fits — width is no longer pinned
+//     by the ~32 MB relay budget of full-operand opening.
+BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_width_unpin)
+{
+    const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
+    const size_t bound_4096 = rc::RCFreivaldsSegLayerByteBound(dc);
+
+    // Frontier-ward widths (GPT-3-175B / GPT-4 class contraction). Hold n_ctx
+    // (hash-bound guardrail) and depth; only widen d_model. The int32 Extract
+    // accumulator invariant d_model·48² < 2^31 still holds to 12288+.
+    for (uint32_t dmw : {8192u, 12288u, 16384u}) {
+        rc::RCEpisodeParams wide = dc;
+        wide.d_model = dmw;
+        wide.n_q = 512;                    // keep n_q = 4·d_head (independent of d_model)
+        BOOST_REQUIRE(rc::ValidateRCEpisodeParams(wide));
+        // The per-layer relay bound is byte-identical — it depends only on the
+        // segment granularity + T_leaf, NOT on d_model. This IS the width unpin.
+        BOOST_CHECK_EQUAL(rc::RCFreivaldsSegLayerByteBound(wide), bound_4096);
+        // A full d_model=dmw episode carrier at λ=512 still fits the ceiling.
+        const size_t total = static_cast<size_t>(rc::kRCFreivaldsSampleCount) *
+                                 rc::RCFreivaldsSegLayerByteBound(wide) + 4096;
+        BOOST_CHECK_LT(total, rc::kRCFreivaldsCarrierMaxSerializedBytes);
+        // Whereas the full-operand Fwd Y at this width is even more absurd.
+        const uint64_t full_Y = static_cast<uint64_t>(wide.b_seq) * dmw * 8ull;
+        BOOST_CHECK_GT(full_Y, 20ull * rc::kRCFreivaldsCarrierMaxSerializedBytes);
+    }
+}
+
+// (k) The coupled params: λ=512, raised datacenter T_leaf, and the compute/hash
+//     margin moved OFF the ~1× knee. Quantify the ratio and assert it improves.
+BOOST_AUTO_TEST_CASE(rc_dc_segment_lambda512_tleaf_compute_hash_margin)
+{
+    // (a) λ raised 256→512 (halves the deterrence residual ρ* ≈ ln κ/λ).
+    BOOST_CHECK_EQUAL(rc::kRCFreivaldsSampleCount, 512u);
+    // ρ*(κ=2) ≈ ln(2)/λ : 0.271% at λ=256 → 0.135% at λ=512 (halved).
+    const double rho_256 = std::log(2.0) / 256.0;
+    const double rho_512 = std::log(2.0) / 512.0;
+    BOOST_CHECK_CLOSE(rho_256, 0.002707, 1.0);
+    BOOST_CHECK_CLOSE(rho_512, 0.001354, 1.0);
+    BOOST_CHECK_CLOSE(rho_256 / rho_512, 2.0, 1e-6);
+
+    // (b) datacenter T_leaf raised 1024→4096.
+    const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
+    const rc::RCEpisodeParams base = rc::DefaultConsensusRCEpisodeParams();
+    BOOST_CHECK_EQUAL(dc.T_leaf, 4096u);
+    BOOST_CHECK_GT(dc.T_leaf, base.T_leaf);
+
+    // (c) compute/hash ratio. Model (design §2d / review §4): FFN GEMM does
+    // 1.5·d_model MAC per committed byte; the SHA tile-tree processes
+    // (1 + 64/T_leaf) bytes per committed byte (leaf content + 64-byte internal
+    // nodes). ratio R = 1.5·d_model / (1 + 64/T_leaf) MAC per SHA-byte. Raising
+    // T_leaf shrinks the SHA overhead → R rises. Normalize by a balanced-node knee
+    // (μ·P_peak)/τ_sha ≈ 6400 (review §4) to read the margin.
+    auto hash_overhead = [](uint32_t t_leaf) { return 1.0 + 64.0 / t_leaf; };
+    auto ratio = [&](const rc::RCEpisodeParams& p) {
+        return 1.5 * p.d_model / hash_overhead(p.T_leaf);
+    };
+    const double knee = 6400.0;
+    const double r_epoch0 = ratio(base);   // d_model=4096, T_leaf=1024
+    const double r_dc = ratio(dc);         // d_model=4096, T_leaf=4096
+    const double margin_epoch0 = r_epoch0 / knee;
+    const double margin_dc = r_dc / knee;
+    BOOST_TEST_MESSAGE("compute/hash margin epoch-0 (T_leaf=1024): " << margin_epoch0);
+    BOOST_TEST_MESSAGE("compute/hash margin datacenter (T_leaf=4096): " << margin_dc);
+    BOOST_TEST_MESSAGE("improvement factor: " << (r_dc / r_epoch0));
+    // The raise moves the margin OFF the ~0.90 knee upward by the overhead ratio.
+    BOOST_CHECK_GT(r_dc, r_epoch0);                       // strictly improved
+    BOOST_CHECK_CLOSE(r_dc / r_epoch0,
+                      hash_overhead(1024) / hash_overhead(4096), 1e-6); // ≈1.046
+    BOOST_CHECK_GT(margin_dc, 0.94);                      // off the knee (was ~0.90)
+    BOOST_CHECK_LT(margin_epoch0, margin_dc);
+    // Honest bound: the T_leaf lever caps near the ~6% internal-node overhead; the
+    // residual toward the review's 2–4× target is the GEMM-based digest (future).
+    const double max_possible = 1.5 * dc.d_model / 1.0 / knee; // T_leaf → ∞
+    BOOST_CHECK_LT(margin_dc, max_possible);
+    BOOST_CHECK_LT(max_possible, 1.0);  // even a perfect tree stays at the ~0.96 knee
 }
 
 BOOST_AUTO_TEST_SUITE_END()

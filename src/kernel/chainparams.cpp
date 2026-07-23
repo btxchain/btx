@@ -15,6 +15,7 @@
 #include <logging.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_rc.h> // RCEpisodeParams factories (n_ctx hash-bound guardrail)
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -331,6 +332,14 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // ENC_RC episode profile selector (design §6.1(A)): 1 = epoch-0 base,
     // 2 = datacenter. Any other value is a misconfiguration — fail closed.
     assert(consensus.nMatMulRCProfile == 1 || consensus.nMatMulRCProfile == 2);
+    // HARDWARE-ALIGNMENT GUARDRAIL (aicompute-alignment-review.md §4, the weakest
+    // link): the datacenter profile must NEVER grow the attention context n_ctx
+    // above the epoch-0 base. Attention arithmetic intensity is d_head (≈48× below
+    // the FFN's 1.5·d_model), so a larger n_ctx tips the episode HASH-BOUND and
+    // favors SHA-ASICs over AI accelerators. Fail closed (defense-in-depth beside
+    // the factory-level assert in MakeDatacenterRCEpisodeParams).
+    assert(matmul::v4::rc::MakeDatacenterRCEpisodeParams().n_ctx <=
+           matmul::v4::rc::DefaultConsensusRCEpisodeParams().n_ctx);
     // COUPLED TRIO: whenever the datacenter profile is ACTIVE (profile 2 AND a
     // finite RC height) the one-time ASERT rescale MUST be the modeled ~16× loosen
     // — the difficulty re-anchor cannot be silently omitted when the 16×-heavier

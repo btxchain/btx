@@ -19,6 +19,7 @@
 #include <arith_uint256.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_freivalds.h>
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <primitives/block.h>
@@ -189,25 +190,36 @@ BOOST_AUTO_TEST_CASE(frvs_wrong_tiletree_opening_rejects)
     BOOST_REQUIRE(
         rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kLambda));
     BOOST_REQUIRE(!carrier.sampled.empty());
+    BOOST_REQUIRE(!carrier.sampled[0].tiles.empty());
 
-    {   // Corrupt a Merkle sibling.
+    {   // Corrupt a Merkle sibling of the first sampled tile's opening.
         rc::RCFreivaldsSampledCarrier c = carrier;
-        BOOST_REQUIRE(!c.sampled[0].leaf_proofs.empty());
-        BOOST_REQUIRE(!c.sampled[0].leaf_proofs[0].siblings.empty());
-        c.sampled[0].leaf_proofs[0].siblings[0].data()[0] ^= 0xff;
+        auto& tile = c.sampled[0].tiles[0];
+        BOOST_REQUIRE(!tile.leaf_proofs.empty());
+        BOOST_REQUIRE(!tile.leaf_proofs[0].siblings.empty());
+        tile.leaf_proofs[0].siblings[0].data()[0] ^= 0xff;
         std::string why;
         BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
         BOOST_CHECK_MESSAGE(StartsWith(why, "v7fs:tiletree"), why);
     }
     {   // Corrupt a leaf byte -> leaf hash changes -> path no longer folds to root.
         rc::RCFreivaldsSampledCarrier c = carrier;
-        BOOST_REQUIRE(!c.sampled[0].leaf_bytes.empty());
-        auto& lb = c.sampled[0].leaf_bytes.back();
+        auto& tile = c.sampled[0].tiles[0];
+        BOOST_REQUIRE(!tile.leaf_bytes.empty());
+        auto& lb = tile.leaf_bytes.back();
         BOOST_REQUIRE(!lb.empty());
         lb.back() ^= 0xff;
         std::string why;
         BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
         BOOST_CHECK_MESSAGE(StartsWith(why, "v7fs:tiletree"), why);
+    }
+    {   // Corrupt the opened extract_out block -> leaf-overlap byte check fails.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        auto& tile = c.sampled[0].tiles[0];
+        BOOST_REQUIRE(!tile.extract_out.empty());
+        tile.extract_out[0] ^= 0x1;
+        std::string why;
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
     }
 }
 
@@ -283,6 +295,108 @@ BOOST_AUTO_TEST_CASE(frvs_residual_unsampled_tamper_passes)
     std::string why;
     // Documented residual: the sampled verifier does NOT detect this (unsampled).
     BOOST_CHECK(rc::VerifyEpisodeFreivaldsSampled(p, f.h, 0, f.target, &why, nullptr, kLambda));
+}
+
+// ===========================================================================
+// SEGMENT-FREIVALDS: the primitive + the segment CARRIER (bounded per-layer
+// relay, datacenter relay-ceiling fit). matmul_v4_rc_freivalds.h + the segment
+// carrier in matmul_v4_rc_freivalds_sampled.{h,cpp}.
+// ===========================================================================
+
+// (g) FreivaldsCheckGemmSegments primitive: completeness EXACT over the segmented
+//     contraction; a wrong claim caught (soundness ≤ 2^(−63·reps)); the segment
+//     partials compose (Σ_p A_p·B_p == Y under one projection).
+BOOST_AUTO_TEST_CASE(frvs_check_gemm_segments_primitive)
+{
+    // Deterministic pseudo-random int8 A (m×k), B (k×n); split k into segments.
+    const uint32_t m = 3, n = 32, k = 200;
+    auto mix = [](uint32_t x) { x ^= x >> 15; x *= 0x2c1b3c6dU; x ^= x >> 12; return x; };
+    std::vector<int8_t> A(static_cast<size_t>(m) * k), B(static_cast<size_t>(k) * n);
+    for (uint32_t i = 0; i < A.size(); ++i) A[i] = static_cast<int8_t>((mix(i + 1) % 97) - 48);
+    for (uint32_t i = 0; i < B.size(); ++i) B[i] = static_cast<int8_t>((mix(i + 7919) % 97) - 48);
+    // True product Y = A·B (int64).
+    std::vector<int64_t> Y(static_cast<size_t>(m) * n, 0);
+    for (uint32_t i = 0; i < m; ++i)
+        for (uint32_t t = 0; t < k; ++t)
+            for (uint32_t j = 0; j < n; ++j)
+                Y[i * n + j] += static_cast<int64_t>(A[i * k + t]) * static_cast<int64_t>(B[t * n + j]);
+
+    // Split k into 3 segments (64,64,72) and slice A,B accordingly.
+    const uint32_t offs[] = {0, 64, 128};
+    const uint32_t lens[] = {64, 64, 72};
+    std::vector<rc::FreivaldsSegmentOperand> segs;
+    for (int s = 0; s < 3; ++s) {
+        rc::FreivaldsSegmentOperand fo;
+        fo.k_p = lens[s];
+        fo.A_slice.resize(static_cast<size_t>(m) * lens[s]);
+        for (uint32_t i = 0; i < m; ++i)
+            for (uint32_t t = 0; t < lens[s]; ++t)
+                fo.A_slice[i * lens[s] + t] = A[i * k + offs[s] + t];
+        fo.B_slice.resize(static_cast<size_t>(lens[s]) * n);
+        for (uint32_t t = 0; t < lens[s]; ++t)
+            for (uint32_t j = 0; j < n; ++j)
+                fo.B_slice[t * n + j] = B[(offs[s] + t) * n + j];
+        segs.push_back(std::move(fo));
+    }
+    const uint256 seed = uint256::ONE;
+    std::string why;
+    // Completeness: the segmented sum equals Y exactly.
+    BOOST_CHECK_MESSAGE(rc::FreivaldsCheckGemmSegments(segs, Y, m, n, seed, 2, &why), why);
+    // Soundness: any single wrong output entry is caught.
+    std::vector<int64_t> Ybad = Y;
+    Ybad[0] += 1;
+    BOOST_CHECK(!rc::FreivaldsCheckGemmSegments(segs, Ybad, m, n, seed, 2, &why));
+    // Dropping a segment (partial contraction) no longer equals the FULL Y — the
+    // exact identity fails, which is exactly why partial coverage is deterrence.
+    std::vector<rc::FreivaldsSegmentOperand> partial(segs.begin(), segs.begin() + 2);
+    BOOST_CHECK(!rc::FreivaldsCheckGemmSegments(partial, Y, m, n, seed, 2, &why));
+    // Tampering a segment operand byte is caught against the true Y.
+    auto segs_t = segs;
+    segs_t[1].A_slice[0] ^= 0x40;
+    BOOST_CHECK(!rc::FreivaldsCheckGemmSegments(segs_t, Y, m, n, seed, 2, &why));
+}
+
+// (h) Segment CARRIER honest verify + tamper rejection (toy dims are full-cover,
+//     so the tile GEMM is verified EXACTLY and any tamper is caught).
+BOOST_AUTO_TEST_CASE(frvs_segment_carrier_honest_and_tamper)
+{
+    Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
+    BOOST_REQUIRE(f.ok);
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string bwhy;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kLambda), bwhy);
+    BOOST_REQUIRE_EQUAL(carrier.sampled.size(), kLambda);
+    BOOST_REQUIRE(!carrier.sampled[0].tiles.empty());
+    // Toy contraction is fully covered by the sampled window.
+    BOOST_CHECK(carrier.sampled[0].tiles[0].full_cover);
+
+    std::string why;
+    rc::RCFreivaldsSampledTiming tmg;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why, &tmg), why);
+    BOOST_CHECK_EQUAL(tmg.n_layers_checked, kLambda);
+    BOOST_CHECK_GT(tmg.n_freivalds_calls, 0u);     // one per opened tile
+    BOOST_CHECK_GT(tmg.n_merkle_openings, 0u);
+
+    {   // Tamper a tile Y output -> segment-Freivalds (full cover) OR Extract catches.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        c.sampled[0].tiles[0].Y[0] += 1;
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
+    }
+    {   // Tamper a contraction-segment operand byte -> exact-cover Freivalds catches.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        BOOST_REQUIRE(!c.sampled[0].tiles[0].segments.empty());
+        c.sampled[0].tiles[0].segments[0].A_seg[0] ^= 0x40;
+        BOOST_CHECK(
+            !rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
+        BOOST_CHECK_MESSAGE(StartsWith(why, "v7fs:freivalds_seg"), why);
+    }
+    {   // Tamper extract_out -> Extract re-exec out-binding catches.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        c.sampled[0].tiles[0].extract_out[0] ^= 0x1;
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

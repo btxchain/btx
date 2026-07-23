@@ -54,18 +54,33 @@ inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8 (Class C)
 /**
  * Datacenter-scale episode profile (ADDITIVE — governance-gated, OFF by default).
  * scratchpad/datacenter-episode-dimensions-design.md §3 / §6.1(A). Scales the
- * episode ONLY through the free extensive axes (depth = rounds×L_lyr, batch =
- * b_seq); the intensive inner dims (d_head, n_q, n_ctx, d_model, T_leaf) are held
- * at their epoch-0 values so the compute/hash balance and int64/int32 accumulator
- * invariants are unchanged. F_ep grows ~16× (FFN 2·4·2=16×; attention 2×).
- * Selected only when Consensus::Params::nMatMulRCProfile == 2 (regtest/testnet
- * override); mainnet stays profile 1 with nMatMulRCHeight = INT32_MAX.
+ * episode through the free extensive axes (depth = rounds×L_lyr, batch = b_seq);
+ * the intensive GEMM dims (d_head, n_q, n_ctx, d_model) are held at epoch-0 so the
+ * int64/int32 accumulator invariants are unchanged. F_ep grows ~16× (FFN 2·4·2=16×;
+ * attention 2×). Selected only when Consensus::Params::nMatMulRCProfile == 2
+ * (regtest/testnet override); mainnet stays profile 1 with nMatMulRCHeight = INT32_MAX.
+ *
+ * HARDWARE-ALIGNMENT LEVER (aicompute-alignment-review.md §4, the weakest link).
+ * T_leaf IS raised for the datacenter profile (kRCTileLeafBytesDC): a larger leaf
+ * amortizes the tile-tree's internal-node + SHA-padding overhead over more GEMM
+ * bytes, so FEWER SHA compressions occur per committed GEMM byte, widening the
+ * compute/hash margin off the ~1× knee (§4 "raise T_leaf … fewer compressions per
+ * GEMM FLOP"). The raise is bounded (the leaf-content hash is T_leaf-invariant, so
+ * the T_leaf lever caps near the ~6% internal-node overhead) and trades against the
+ * sampled-carrier opening cost (each opened leaf relays T_leaf bytes); the residual
+ * toward the review's 2–4× target is the GEMM-based digest (future). T_leaf stays
+ * MX-block-aligned (%32) and %64==0 so segment openings still bind cleanly to leaves.
  */
 inline constexpr uint32_t kRCRoundsDC = 8;     // 2× epoch-0 rounds (depth)
 inline constexpr uint32_t kRCLayersDC = 64;    // 4× epoch-0 L_lyr (depth)
 inline constexpr uint32_t kRCBatchSeqDC = 32'768; // 2× epoch-0 b_seq (batch)
+inline constexpr uint32_t kRCTileLeafBytesDC = 4096; // 4× epoch-0 (compute/hash margin)
 static_assert(kRCBatchSeqDC % 32 == 0, "kRCBatchSeqDC must be divisible by 32 (MX align)");
 static_assert(kRCRoundsDC != 0 && kRCLayersDC != 0, "datacenter depth axes must be non-zero");
+static_assert(kRCTileLeafBytesDC % 32 == 0 && kRCTileLeafBytesDC % 64 == 0,
+              "kRCTileLeafBytesDC must be MX(32)- and SHA-block(64)-aligned for leaf binding");
+static_assert(kRCTileLeafBytesDC >= kRCTileLeafBytes,
+              "datacenter T_leaf must not shrink the epoch-0 leaf (compute/hash lever raises it)");
 
 /** Max |s8| operand magnitude on the RC ExactGemm path (balanced M11×2^{e≤3}). */
 inline constexpr int32_t kRCMxOperandAbsMax = 48; // 6 * 2^3
