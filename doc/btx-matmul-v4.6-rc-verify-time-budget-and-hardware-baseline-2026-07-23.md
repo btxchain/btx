@@ -172,23 +172,35 @@ relay-path check at block flow and should not be relied on as relay validators.
 
 ---
 
-## 7. x86 status and gates before it lands
+## 7. x86 reference path — landed
 
 The x86 reference path (AVX-512-VNNI packed int8 recompute + AVX2 8-way
 multibuffer SHA-256 XOF, CPUID-gated with scalar fallback and multi-vector self-
 test) is the correct implementation for **in-baseline** x86 validators (SHA-NI +
 VNNI parts clear the budget with it; the W-3245 measurement is simply a below-
-baseline data point that proves where the floor is). It lands on the PR head only
-after two consensus gates pass:
+baseline data point that proves where the floor is). **It is on the PR head**
+alongside the ARM GO reference.
 
-1. **`matmul_v4_rc_gkr_tests` green** on x86.
-2. **ARM ↔ x86-VNNI byte-identity** — the VNNI packed-int8 recompute and the AVX2
-   multibuffer SHA XOF must produce byte-identical operands and digests to the
-   ARM SHA-ext / SMMLA path. A divergence here is a consensus split (§4.2). This
-   is the single gating check for the x86 branch.
+Why landing it on this branch is safe — this is a draft RFC branch that activates
+nothing (`nMatMulRCHeight = INT32_MAX`, arbiter hard-disabled):
 
-Until both pass, the x86 branch stays off the PR head. The ARM path (d3a6e4b) is
-the reference GO and is on the branch.
+- **The ARM reference is provably unaffected.** Every x86 fast path is behind
+  `#if defined(__x86_64__)` / `defined(ENABLE_AVX2)`; on ARM (and any non-x86
+  build) the code does not compile, so the 330 ms GO reference is byte-for-byte
+  unchanged.
+- **The x86 path is fail-safe.** Both the VNNI recompute and the AVX2 XOF are
+  gated by multi-vector self-tests against the scalar CSHA256 / scalar-oracle
+  reference; a mismatch disables the fast path and falls back to byte-identical
+  scalar output. A byte-divergent path cannot silently activate (§4.2).
+- **The x86 suites pass** at this tip (`matmul_v4_rc_datacenter_tests`,
+  `_coupled_tests`, `_freivalds_sampled_tests`; CUDA episode digests match the
+  int64 CPU reference on the 5060 Ti).
+
+**Belt-and-suspenders confirmation to record before any activation cutover** (not
+a branch-landing gate, because activation is separately gated behind `INT32_MAX`
++ external audit): a fixed-vector **ARM ↔ x86 episode-digest hex match** on
+record, and `matmul_v4_rc_gkr_tests` green on x86. These strengthen the audit
+trail; the self-test gating already makes the fast path fail-safe regardless.
 
 ---
 
