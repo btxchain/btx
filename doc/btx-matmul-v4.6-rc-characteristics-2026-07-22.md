@@ -177,9 +177,31 @@ finite value (via the single switch) and pin the calibrated ASERT rescale.
 
 ---
 
-## 7. Benchmarking on CUDA
+## 7. Benchmarking (ENC_RC v4.6 only)
 
-See the PR comment for the step-by-step CUDA benchmark guide (regtest toy-dim
-mine → relay → ExactReplay, plus the `-regtestrcunifiedheight` single-switch
-path and the production-dim measurement protocol referenced in
-`doc/btx-matmul-v4.5-v3-b200-5090-measurement-protocol.md`).
+**Canonical entrypoint** (do not use bare `measure-hardware.sh cuda|cpu` — that
+is legacy v4.1/`matmul-v4-report` and is now refused without
+`BTX_ALLOW_LEGACY_MATMUL_MEASURE=1`):
+
+```bash
+contrib/matmul-v4/measure-enc-rc-v46.sh --help
+
+# Stage G CPU campaigns → rc-gate.py
+contrib/matmul-v4/measure-enc-rc-v46.sh cpu --profile coupled
+contrib/matmul-v4/measure-enc-rc-v46.sh cpu --profile rc-medium
+
+# Coupled V3 CI harness (v4.6 default coupled family)
+contrib/matmul-v4/measure-enc-rc-v46.sh cpu rc --coupled-v3-ci
+
+# Production Freivalds carrier verifier floor (900 ms budget)
+contrib/matmul-v4/measure-enc-rc-v46.sh verify-carrier --threads 32
+
+# CUDA episode context digest/probe tests (CUDA-built test_btx)
+contrib/matmul-v4/measure-enc-rc-v46.sh cuda-episode-tests
+```
+
+Aggregate harness JSON with `contrib/matmul-v4/rc-gate.py`. Toy/PARTIAL never
+raises `nMatMulRCHeight`. For CUDA mine→relay→ExactReplay on regtest and the
+older B200/5090 protocol notes, see
+`doc/btx-matmul-v4.5-v3-b200-5090-measurement-protocol.md` — cite only after
+confirming the workload is ENC_RC (coupled / episode), not v4.1 report.
