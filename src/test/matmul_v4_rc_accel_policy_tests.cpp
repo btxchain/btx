@@ -22,26 +22,42 @@ namespace dc = matmul::v4::rc::dc;
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_accel_policy_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(rc_accel_policy_native_required_neq_portable_explicit)
+BOOST_AUTO_TEST_CASE(rc_accel_policy_default_is_native_preferred)
 {
     BOOST_CHECK(rc::RCAccelerationPolicy::NativeRequired !=
                 rc::RCAccelerationPolicy::PortableExplicit);
+    BOOST_CHECK(rc::RCAccelerationPolicy::NativePreferred !=
+                rc::RCAccelerationPolicy::NativeRequired);
+    // Default is best-available-exact (native preferred, exact device INT8 else,
+    // CPU last) — mining is not blocked merely because the peak lane is unqualified.
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::kRCAccelerationPolicyDefault),
-                      static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
+                      static_cast<uint8_t>(rc::RCAccelerationPolicy::NativePreferred));
     BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::NativeRequired)},
                       "NativeRequired");
     BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::PortableExplicit)},
                       "PortableExplicit");
+    BOOST_CHECK_EQUAL(std::string{rc::ToString(rc::RCAccelerationPolicy::NativePreferred)},
+                      "NativePreferred");
 }
 
-BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_native_required)
+BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_and_env_overrides)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
+    // Unset → NativePreferred (default).
     unsetenv("BTX_RC_ACCEL_POLICY");
     BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
+                      static_cast<uint8_t>(rc::RCAccelerationPolicy::NativePreferred));
+    // Explicit opt-in overrides both directions.
+    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                       static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
+    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1);
+    BOOST_CHECK_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
+                      static_cast<uint8_t>(rc::RCAccelerationPolicy::PortableExplicit));
     if (prev != nullptr) {
         setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_RC_ACCEL_POLICY");
     }
 }
 
@@ -52,7 +68,7 @@ BOOST_AUTO_TEST_CASE(rc_accel_policy_resolve_default_native_required)
 BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    unsetenv("BTX_RC_ACCEL_POLICY");
+    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1); // NativeRequired is opt-in now
     BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
@@ -84,7 +100,7 @@ BOOST_AUTO_TEST_CASE(rc_native_required_resolver_order_qual_before_latch)
 BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
 {
     const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
-    unsetenv("BTX_RC_ACCEL_POLICY");
+    setenv("BTX_RC_ACCEL_POLICY", "native", /*overwrite=*/1); // NativeRequired is opt-in now
     BOOST_REQUIRE_EQUAL(static_cast<uint8_t>(rc::ResolveRCAccelerationPolicy()),
                         static_cast<uint8_t>(rc::RCAccelerationPolicy::NativeRequired));
 
@@ -105,6 +121,34 @@ BOOST_AUTO_TEST_CASE(rc_native_required_empty_gemm_when_ozaki_unqualified)
                             "unqualified (empty ExactGemmBackend)");
     }
 
+    if (prev != nullptr) {
+        setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_RC_ACCEL_POLICY");
+    }
+}
+
+/** DEFAULT (NativePreferred): when the native lane is unqualified, admission goes
+ *  through the SAME exact-gated device resolve as PortableExplicit — it does NOT
+ *  hard-decline the device the way NativeRequired does. On a CPU-only host both
+ *  yield an empty backend (→ CPU); on a GPU host both yield the exact device
+ *  backend. The bit-exact self-qual (GateExactGemmWithRCSelfQualCached) still gates
+ *  every device path, so a non-byte-identical device is never admitted. */
+BOOST_AUTO_TEST_CASE(rc_native_preferred_default_admits_device_like_portable)
+{
+    const char* prev = std::getenv("BTX_RC_ACCEL_POLICY");
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    rc::ResetRcOzakiQualForTest();
+    (void)rc::SelfQualifyRcOzakiMxfp4Once();
+    if (!rc::IsRcOzakiMxfp4Qualified()) { // meaningful only when native is unqualified
+        unsetenv("BTX_RC_ACCEL_POLICY"); // NativePreferred (default)
+        matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+        const auto def = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1); // PortableExplicit
+        matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+        const auto portable = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        BOOST_CHECK_EQUAL(def.gemm_s8s8 == nullptr, portable.gemm_s8s8 == nullptr);
+    }
     if (prev != nullptr) {
         setenv("BTX_RC_ACCEL_POLICY", prev, /*overwrite=*/1);
     } else {

@@ -138,6 +138,8 @@ const char* ToString(RCAccelerationPolicy policy)
         return "NativeRequired";
     case RCAccelerationPolicy::PortableExplicit:
         return "PortableExplicit";
+    case RCAccelerationPolicy::NativePreferred:
+        return "NativePreferred";
     }
     return "Unknown";
 }
@@ -181,6 +183,12 @@ RCAccelerationPolicy ResolveRCAccelerationPolicy()
         const std::string v{e};
         if (v == "portable" || v == "PortableExplicit" || v == "PORTABLE") {
             return RCAccelerationPolicy::PortableExplicit;
+        }
+        if (v == "native" || v == "NativeRequired" || v == "NATIVE") {
+            return RCAccelerationPolicy::NativeRequired;
+        }
+        if (v == "preferred" || v == "NativePreferred" || v == "auto") {
+            return RCAccelerationPolicy::NativePreferred;
         }
     }
     return kRCAccelerationPolicyDefault;

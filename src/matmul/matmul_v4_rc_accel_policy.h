@@ -27,10 +27,22 @@ namespace matmul::v4::rc {
 
 /** Mining execution policy (compute path only; never consensus-oracle). */
 enum class RCAccelerationPolicy : uint8_t {
-    /** Default for accelerator mining: genuinely native tensor lane required. */
+    /** Strict/peak-only: a genuinely native tensor lane (Ozaki MXFP4/FP8) is
+     *  required; if it does not self-qualify, decline the device and use the CPU
+     *  ExactGemm oracle. Use this for peak measurement so a sub-peak dense-INT8
+     *  rate can never masquerade as the native rate. Opt-in:
+     *  BTX_RC_ACCEL_POLICY=native. */
     NativeRequired = 0,
-    /** Opt-in portable/legacy participation; never auto-selected as native. */
+    /** Opt-in portable/legacy: force the exact dense-INT8 device path (skip
+     *  native selection entirely). BTX_RC_ACCEL_POLICY=portable. */
     PortableExplicit = 1,
+    /** DEFAULT — best available EXACT path. Prefer the native tensor lane when it
+     *  self-qualifies; otherwise fall through to the exact-gated dense-INT8 device
+     *  path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube); CPU only when no
+     *  device path passes the bit-exact self-qual. A device is used whenever ANY
+     *  path is proven byte-identical to the int64 oracle — mining is never blocked
+     *  merely because the *peak* lane is not yet qualified. */
+    NativePreferred = 2,
 };
 
 /** Distinct compute-lane identifiers (native ≠ portable ≠ dense INT8 legacy). */
@@ -53,9 +65,10 @@ enum class RCAccelResidencyMode : uint8_t {
     Streamed = 2,
 };
 
-/** Default mining policy for accelerators. */
+/** Default mining policy for accelerators: best available EXACT path (native
+ *  preferred, exact-gated device INT8 otherwise, CPU last). */
 inline constexpr RCAccelerationPolicy kRCAccelerationPolicyDefault =
-    RCAccelerationPolicy::NativeRequired;
+    RCAccelerationPolicy::NativePreferred;
 
 /**
  * Execution result / provenance snapshot for a mining attempt.
@@ -199,10 +212,15 @@ struct RCCoupConsensusConfig {
 
 /**
  * Resolve mining acceleration policy.
- * Default: NativeRequired (kRCAccelerationPolicyDefault).
- * Opt-in portable/legacy INT8 inject: BTX_RC_ACCEL_POLICY=portable|PortableExplicit.
- * Under NativeRequired the central ExactGemm resolver must NOT fall through to
- * dense device INT8 when native MX is unavailable.
+ * Default: NativePreferred (kRCAccelerationPolicyDefault) — native tensor lane
+ * preferred, else the exact-gated dense device INT8 path, else CPU. A device is
+ * used whenever any path is byte-identical to the int64 oracle.
+ * Opt-in overrides via BTX_RC_ACCEL_POLICY:
+ *   - portable|PortableExplicit|PORTABLE → force the dense INT8 device path.
+ *   - native|NativeRequired|NATIVE       → peak-only; decline device INT8 and use
+ *     CPU when the native lane is unqualified (for pure peak measurement).
+ * Under NativeRequired (only) the central ExactGemm resolver must NOT fall
+ * through to dense device INT8 when native MX is unavailable.
  */
 [[nodiscard]] RCAccelerationPolicy ResolveRCAccelerationPolicy();
 

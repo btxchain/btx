@@ -759,32 +759,40 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()
     using matmul::v4::rc::RCAccelerationPolicy;
     const RCAccelerationPolicy policy = matmul::v4::rc::ResolveRCAccelerationPolicy();
 
-    // NativeRequired (default): never fall through to dense device INT8
-    // (LaunchGemmS8S8) when a native MXFP4 lane is unavailable. Empty backend
-    // ⇒ CPU ExactGemm oracle (portable math, not advertised as native).
-    //
-    // A5/F12: run once-only native qualification BEFORE consulting the latch so
-    // a fresh process can still select the qualified lane.
-    if (policy == RCAccelerationPolicy::NativeRequired) {
+    // Prefer the genuinely native tensor lane (Ozaki MXFP4/FP8) first, UNLESS the
+    // operator forced the portable dense-INT8 path. A5/F12: run once-only native
+    // qualification BEFORE consulting the latch so a fresh process can still select
+    // the qualified lane.
+    if (policy != RCAccelerationPolicy::PortableExplicit) {
         (void)matmul::v4::rc::SelfQualifyRcOzakiMxfp4Once();
-        if (!matmul::v4::rc::IsRcOzakiMxfp4Qualified()) {
-            static std::atomic_bool logged_native_req{false};
-            bool expected{false};
-            if (logged_native_req.compare_exchange_strong(expected, true)) {
-                LogPrintf("MatMul-v4.4-RC ExactGemm: NativeRequired — native MXFP4 "
-                          "unqualified; declining device INT8 inject (CPU ExactGemm)\n");
-            }
-            return matmul::v4::lt::ExactGemmBackend{};
+        if (matmul::v4::rc::IsRcOzakiMxfp4Qualified()) {
+            matmul::v4::lt::ExactGemmBackend native;
+            native.gemm_s8s8 = &RcOzakiNativeMxfp4GemmS8S8;
+            // S32S8 not used by coupled lobe GEMMs; leave null so HasDeviceGemms is
+            // false for LT-style checks — RC Dispatch only needs gemm_s8s8.
+            return GateExactGemmWithRCSelfQualCached(native, "rc_ozaki_mxfp4", /*epoch=*/-1);
         }
-        // Native MXFP4 qualified: inject Ozaki tensor path — never dense INT8.
-        matmul::v4::lt::ExactGemmBackend native;
-        native.gemm_s8s8 = &RcOzakiNativeMxfp4GemmS8S8;
-        // S32S8 not used by coupled lobe GEMMs; leave null so HasDeviceGemms is
-        // false for LT-style checks — RC Dispatch only needs gemm_s8s8.
-        return GateExactGemmWithRCSelfQualCached(native, "rc_ozaki_mxfp4", /*epoch=*/-1);
     }
 
-    // PortableExplicit: legacy device ExactGemm (INT8 IMMA/etc.) after RC self-qual.
+    // Native lane unavailable/unqualified.
+    if (policy == RCAccelerationPolicy::NativeRequired) {
+        // Strict/peak-only: decline the dense device INT8 path so a sub-peak rate
+        // can never masquerade as native. Empty backend ⇒ CPU ExactGemm oracle.
+        static std::atomic_bool logged_native_req{false};
+        bool expected{false};
+        if (logged_native_req.compare_exchange_strong(expected, true)) {
+            LogPrintf("MatMul-v4.4-RC ExactGemm: NativeRequired — native MXFP4 "
+                      "unqualified; declining device INT8 inject (CPU ExactGemm)\n");
+        }
+        return matmul::v4::lt::ExactGemmBackend{};
+    }
+
+    // NativePreferred (default) or PortableExplicit: use the best exact-gated dense
+    // device path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube). The
+    // GateExactGemmWithRCSelfQualCached wrapper is the bit-exact self-qual: a device
+    // that is not byte-identical to the int64 oracle is declined here and falls
+    // through to the CPU ExactGemm — so mining engages on any proven-exact device
+    // without ever admitting a divergent one.
     const ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
     return GateExactGemmWithRCSelfQualCached(resolved.backend, resolved.label, /*epoch=*/-1);
 }
