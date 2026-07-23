@@ -49,6 +49,13 @@ void Transform4x41(unsigned char output[4][32], const unsigned char seed[32],
 }
 #endif
 
+#if defined(ENABLE_AVX2)
+namespace sha256_xof_avx2 {
+void Transform8x41(unsigned char output[8][32], const unsigned char seed[32],
+                   unsigned char domain, uint64_t block0);
+}
+#endif
+
 namespace matmul::v4::bmx4 {
 namespace {
 
@@ -142,14 +149,30 @@ void XofBlock41x4Shani(const uint8_t seed_bytes[32], uint8_t domain, uint64_t bl
 
 bool Xof4ShaniSelfTest()
 {
-    uint8_t seed_bytes[32];
-    for (uint32_t i = 0; i < 32; ++i) seed_bytes[i] = static_cast<uint8_t>(i * 7u + 3u);
-    uint8_t hashes4[4][32];
-    XofBlock41x4Shani(seed_bytes, kMantissaStreamDomain, 0x123456789abcdef0ULL, hashes4);
-    for (uint32_t lane = 0; lane < 4; ++lane) {
-        uint8_t ref[32];
-        XofBlock41(seed_bytes, kMantissaStreamDomain, 0x123456789abcdef0ULL + lane, ref);
-        if (std::memcmp(hashes4[lane], ref, 32) != 0) return false;
+    // Multi-vector: several seeds and counter bases (single-vector self-tests
+    // were flagged as a fork risk for consensus-critical kernels).
+    const uint64_t bases[] = {0ULL, 1ULL, 0x123456789abcdef0ULL, 0xfffffffffffffffcULL};
+    for (uint32_t s = 0; s < 4; ++s) {
+        uint8_t seed_bytes[32];
+        for (uint32_t i = 0; i < 32; ++i) {
+            seed_bytes[i] = static_cast<uint8_t>(i * 7u + 3u + s * 11u);
+        }
+        for (uint64_t base : bases) {
+            uint8_t hashes4[4][32];
+            XofBlock41x4Shani(seed_bytes, kMantissaStreamDomain, base, hashes4);
+            for (uint32_t lane = 0; lane < 4; ++lane) {
+                uint8_t ref[32];
+                XofBlock41(seed_bytes, kMantissaStreamDomain, base + lane, ref);
+                if (std::memcmp(hashes4[lane], ref, 32) != 0) return false;
+            }
+            uint8_t hashes4e[4][32];
+            XofBlock41x4Shani(seed_bytes, kScaleStreamDomain, base ^ 0x55ULL, hashes4e);
+            for (uint32_t lane = 0; lane < 4; ++lane) {
+                uint8_t ref[32];
+                XofBlock41(seed_bytes, kScaleStreamDomain, (base ^ 0x55ULL) + lane, ref);
+                if (std::memcmp(hashes4e[lane], ref, 32) != 0) return false;
+            }
+        }
     }
     return true;
 }
@@ -163,10 +186,59 @@ bool UseXof4Shani()
 }
 #endif
 
+#if defined(ENABLE_AVX2)
+void XofBlock41x8Avx2(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
+                      uint8_t hashes[8][32])
+{
+    sha256_xof_avx2::Transform8x41(hashes, seed_bytes, domain, block0);
+}
+
+bool Xof8Avx2SelfTest()
+{
+    // Multi-vector randomized self-test vs scalar CSHA256 XofBlock41.
+    const uint64_t bases[] = {0ULL, 7ULL, 0x123456789abcdef0ULL, 0xfffffffffffffff8ULL};
+    for (uint32_t s = 0; s < 5; ++s) {
+        uint8_t seed_bytes[32];
+        for (uint32_t i = 0; i < 32; ++i) {
+            seed_bytes[i] = static_cast<uint8_t>((i * 13u) ^ (s * 29u + 3u));
+        }
+        for (uint64_t base : bases) {
+            for (uint8_t domain : {kMantissaStreamDomain, kScaleStreamDomain}) {
+                uint8_t hashes8[8][32];
+                XofBlock41x8Avx2(seed_bytes, domain, base, hashes8);
+                for (uint32_t lane = 0; lane < 8; ++lane) {
+                    uint8_t ref[32];
+                    XofBlock41(seed_bytes, domain, base + lane, ref);
+                    if (std::memcmp(hashes8[lane], ref, 32) != 0) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool UseXof8Avx2()
+{
+    if (const char* env = std::getenv("BTX_BMX4_XOF8_AVX2")) {
+        if (env[0] == '0' && env[1] == '\0') return false;
+    }
+    static const bool ok = Xof8Avx2SelfTest();
+    return ok;
+}
+#endif
+
 bool UseXof4Fast()
 {
 #if defined(ENABLE_ARM_SHANI)
     if (UseXof4Shani()) return true;
+#endif
+    return false;
+}
+
+bool UseXof8Fast()
+{
+#if defined(ENABLE_AVX2)
+    if (UseXof8Avx2()) return true;
 #endif
     return false;
 }
@@ -181,6 +253,20 @@ void XofBlock41x4Fast(const uint8_t seed_bytes[32], uint8_t domain, uint64_t blo
     }
 #endif
     for (uint32_t lane = 0; lane < 4; ++lane) {
+        XofBlock41(seed_bytes, domain, block0 + lane, hashes[lane]);
+    }
+}
+
+void XofBlock41x8Fast(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
+                      uint8_t hashes[8][32])
+{
+#if defined(ENABLE_AVX2)
+    if (UseXof8Avx2()) {
+        XofBlock41x8Avx2(seed_bytes, domain, block0, hashes);
+        return;
+    }
+#endif
+    for (uint32_t lane = 0; lane < 8; ++lane) {
         XofBlock41(seed_bytes, domain, block0 + lane, hashes[lane]);
     }
 }
@@ -341,6 +427,25 @@ void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out)
 
     size_t filled = 0;
     uint64_t block = 0;
+#if defined(ENABLE_AVX2)
+    if (UseXof8Fast()) {
+        while (filled < count) {
+            uint8_t hashes[8][CSHA256::OUTPUT_SIZE];
+            XofBlock41x8Fast(seed_bytes, kMantissaStreamDomain, block, hashes);
+            for (uint32_t lane = 0; lane < 8 && filled < count; ++lane) {
+                for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
+                    const auto& e = kMantissaByteTable.entry[hashes[lane][i]];
+                    for (uint8_t j = 0; j < e.count; ++j) {
+                        out[filled++] = e.value[j];
+                        if (filled == count) break;
+                    }
+                }
+            }
+            block += 8;
+        }
+        return;
+    }
+#endif
 #if defined(__aarch64__) && defined(__ARM_NEON)
     if (UseXof4Fast()) {
         while (filled < count) {
@@ -444,6 +549,36 @@ void ExpandMantissaStreamParallel(const uint256& seed, size_t count, int8_t* out
             const size_t old = hashes.size();
             hashes.resize(want_blocks);
             accept_counts.resize(want_blocks);
+#if defined(ENABLE_AVX2)
+            if (UseXof8Fast()) {
+                const size_t jobs = want_blocks - old;
+                ParallelForBlocks((jobs + 7) / 8, threads, [&](size_t group) {
+                    const size_t i0 = old + group * 8;
+                    const size_t n = std::min<size_t>(8, want_blocks - i0);
+                    if (n == 8) {
+                        uint8_t h8[8][CSHA256::OUTPUT_SIZE];
+                        XofBlock41x8Fast(seed_bytes, kMantissaStreamDomain,
+                                         static_cast<uint64_t>(i0), h8);
+                        for (size_t lane = 0; lane < 8; ++lane) {
+                            std::memcpy(hashes[i0 + lane].data(), h8[lane], CSHA256::OUTPUT_SIZE);
+                            uint8_t acc = 0;
+                            for (uint8_t b : hashes[i0 + lane])
+                                acc += kMantissaByteTable.entry[b].count;
+                            accept_counts[i0 + lane] = acc;
+                        }
+                    } else {
+                        for (size_t lane = 0; lane < n; ++lane) {
+                            const size_t i = i0 + lane;
+                            XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(i),
+                                       hashes[i].data());
+                            uint8_t acc = 0;
+                            for (uint8_t b : hashes[i]) acc += kMantissaByteTable.entry[b].count;
+                            accept_counts[i] = acc;
+                        }
+                    }
+                });
+            } else
+#endif
 #if defined(__aarch64__) && defined(__ARM_NEON)
             if (UseXof4Fast()) {
                 const size_t jobs = want_blocks - old;
@@ -643,6 +778,23 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out)
 
     size_t filled = 0;
     uint64_t block = 0;
+#if defined(ENABLE_AVX2)
+    if (UseXof8Fast()) {
+        while (filled < count) {
+            uint8_t hashes[8][CSHA256::OUTPUT_SIZE];
+            XofBlock41x8Fast(seed_bytes, kScaleStreamDomain, block, hashes);
+            for (uint32_t lane = 0; lane < 8 && filled < count; ++lane) {
+                for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
+                    for (int shift = 0; shift < 8 && filled < count; shift += 2) {
+                        out[filled++] = static_cast<uint8_t>((hashes[lane][i] >> shift) & 0x03);
+                    }
+                }
+            }
+            block += 8;
+        }
+        return;
+    }
+#endif
     while (filled < count) {
         uint8_t hash[CSHA256::OUTPUT_SIZE];
         XofBlock41(seed_bytes, kScaleStreamDomain, block, hash);

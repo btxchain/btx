@@ -1668,8 +1668,18 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
         ++rep.regen_misses;
         rep.regen_bytes += static_cast<uint64_t>(rows) * cols;
         const auto t0 = std::chrono::steady_clock::now();
+        // Match production prewarm: large leaves expand with Parallel even when
+        // the outer bench loop is serial (threads=1). Byte-identical to scalar.
+        uint32_t expand_threads = 1;
+        if (rep.threads <= 1) {
+            expand_threads = std::thread::hardware_concurrency();
+            if (expand_threads == 0) expand_threads = 1;
+        } else {
+            expand_threads = rep.threads;
+        }
         const std::vector<int8_t>& v =
-            regen.emplace(seed, rc::ExpandMxDequantInt8(seed, rows, cols)).first->second;
+            regen.emplace(seed, rc::ExpandMxDequantInt8Parallel(seed, rows, cols, expand_threads))
+                .first->second;
         rep.regen_s += elapsed(t0);
         return v;
     };
@@ -1677,7 +1687,10 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                               uint32_t rows, uint32_t cols) -> const std::vector<int8_t>& {
         auto it = transposed_w_up.find(seed);
         if (it != transposed_w_up.end()) return it->second;
-        return transposed_w_up.emplace(seed, TransposeI8Bench(src, rows, cols)).first->second;
+        return transposed_w_up
+            .emplace(seed, use_packed_i8mm ? rc::RCPackDenseI8mmOutputBlocks(src, rows, cols)
+                                           : TransposeI8Bench(src, rows, cols))
+            .first->second;
     };
     const bool full = std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH_FULL") != nullptr;
     if (const char* env_threads = std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH_THREADS")) {
@@ -2040,20 +2053,32 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 const std::vector<int8_t>& W_down = regen_leaf(lp.b.seed, d_ff, d_model);
                 const auto t_rc_dn = std::chrono::steady_clock::now();
                 const std::vector<int8_t>& W_up_t = transpose_w_up(up.b.seed, W_up, d_model, d_ff);
+                const std::vector<int8_t>& W_down_t =
+                    transpose_w_up(lp.b.seed, W_down, d_ff, d_model);
                 std::vector<int8_t> H_row(d_ff);
                 std::array<int64_t, rc::kRCMxBlockLen> blk{};
                 for (uint32_t bj = 0; bj < d_ff / rc::kRCMxBlockLen; ++bj) {
                     const uint32_t col0 = bj * rc::kRCMxBlockLen;
-                    rc::RCDenseRowBlockTransposedExactI8(X_row.data(), W_up_t.data(), d_model,
-                                                         d_ff, col0, blk.data());
+                    if (use_packed_i8mm) {
+                        rc::RCDenseRowBlockPackedI8mmExactI8(X_row.data(), W_up_t.data(), d_model,
+                                                             d_ff, col0, blk.data());
+                    } else {
+                        rc::RCDenseRowBlockTransposedExactI8(X_row.data(), W_up_t.data(), d_model,
+                                                             d_ff, col0, blk.data());
+                    }
                     const auto ho = ExtractBlockBench(up.extract_prf, pl.row, bj, blk.data());
                     for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
                         H_row[bj * rc::kRCMxBlockLen + c] = ho[c];
                 }
                 std::array<int64_t, rc::kRCMxBlockLen> yblk{};
                 const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
-                rc::RCDenseRowBlockExactI8(H_row.data(), W_down.data(), d_ff, d_model, out_col0,
-                                           yblk.data());
+                if (use_packed_i8mm) {
+                    rc::RCDenseRowBlockPackedI8mmExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                         d_model, out_col0, yblk.data());
+                } else {
+                    rc::RCDenseRowBlockExactI8(H_row.data(), W_down.data(), d_ff, d_model, out_col0,
+                                               yblk.data());
+                }
                 for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
                     yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
                 }
