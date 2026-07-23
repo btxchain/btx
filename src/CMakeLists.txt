@@ -212,8 +212,54 @@ endif()
 # Amendment v2 §1.D D1: HIP TUs MUST be compiled by clang (HIPCXX / CMAKE_HIP_COMPILER).
 # Never silently fall back to host g++/c++ — Debian/Ubuntu ROCm ships clang++-N
 # as the HIP compiler; export HIPCXX=clang++-19 (or similar) before configure.
-option(BTX_ENABLE_HIP "Enable experimental AMD ROCm/HIP MatMul v4 backend (requires ROCm + clang HIP)" OFF)
+# HIP auto-detect (mirrors the CUDA auto-detect): default ON only when BOTH a HIP
+# clang compiler AND an AMD GPU arch are discoverable, so a ROCm host with an AMD
+# GPU gets the HIP backend without an opt-in flag — but auto-on NEVER trips the
+# mandatory-arch FATAL below (unlike CUDA, HIP needs an explicit gfx target and
+# there is no configure-time arch default). Non-ROCm hosts resolve to OFF.
+# Override explicitly with -DBTX_ENABLE_HIP=OFF|ON.
+set(_btx_hip_detect_cxx "")
+if(DEFINED ENV{HIPCXX} AND NOT "$ENV{HIPCXX}" STREQUAL "")
+  set(_btx_hip_detect_cxx "$ENV{HIPCXX}")
+elseif(CMAKE_HIP_COMPILER)
+  set(_btx_hip_detect_cxx "${CMAKE_HIP_COMPILER}")
+else()
+  foreach(_btx_hip_cand IN ITEMS clang++-19 clang++-18 clang++-17 clang++)
+    find_program(_btx_hip_detect_path NAMES "${_btx_hip_cand}")
+    if(_btx_hip_detect_path)
+      set(_btx_hip_detect_cxx "${_btx_hip_detect_path}")
+      unset(_btx_hip_detect_path CACHE)
+      break()
+    endif()
+    unset(_btx_hip_detect_path CACHE)
+  endforeach()
+endif()
+# Detect the installed AMD GPU arch(s) via amdgpu-arch (ships with ROCm/LLVM); it
+# prints one gfx target per present GPU. Empty on machines with no AMD GPU.
+set(_btx_hip_detect_arch "")
+find_program(_btx_amdgpu_arch_prog NAMES amdgpu-arch)
+if(_btx_amdgpu_arch_prog)
+  execute_process(COMMAND "${_btx_amdgpu_arch_prog}"
+    OUTPUT_VARIABLE _btx_amdgpu_arch_out ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _btx_amdgpu_arch_rc)
+  if(_btx_amdgpu_arch_rc EQUAL 0 AND NOT _btx_amdgpu_arch_out STREQUAL "")
+    string(REPLACE "\n" ";" _btx_hip_detect_arch "${_btx_amdgpu_arch_out}")
+    list(REMOVE_DUPLICATES _btx_hip_detect_arch)
+  endif()
+endif()
+unset(_btx_amdgpu_arch_prog CACHE)
+set(BTX_ENABLE_HIP_DEFAULT OFF)
+if(NOT _btx_hip_detect_cxx STREQUAL "" AND
+   (NOT _btx_hip_detect_arch STREQUAL "" OR NOT BTX_HIP_ARCHITECTURES STREQUAL ""))
+  set(BTX_ENABLE_HIP_DEFAULT ON)
+endif()
+option(BTX_ENABLE_HIP "Enable the AMD ROCm/HIP MatMul v4 backend (auto-on when a HIP clang compiler and an AMD GPU arch are detected)" ${BTX_ENABLE_HIP_DEFAULT})
 set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)")
+# Seed the arch from auto-detect when the operator did not set it explicitly, so
+# an auto-enabled HIP build has a valid gfx target and skips the FATAL below.
+if(BTX_ENABLE_HIP AND BTX_HIP_ARCHITECTURES STREQUAL "" AND NOT _btx_hip_detect_arch STREQUAL "")
+  set(BTX_HIP_ARCHITECTURES "${_btx_hip_detect_arch}" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)" FORCE)
+endif()
 
 if(BTX_ENABLE_HIP)
   if(BTX_HIP_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_HIP_ARCHITECTURES AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "")
