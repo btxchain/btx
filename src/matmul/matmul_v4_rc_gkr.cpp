@@ -784,23 +784,26 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         // Bwd/Wgrad are gone. Both contractions are row-contiguous → soundly anchorable.
         std::vector<std::vector<int8_t>> X(p.L_lyr + 1);
         std::vector<uint256> prf_up(p.L_lyr), prf_dn(p.L_lyr);
-        X[0] = ExpandMxDequantInt8(operand_ep("BTX_RC_X0_V1"), p.b_seq, p.d_model);
-        // FFN weights are SHARED across the round's L layers (one (W_up, W_down) per
-        // round). Fable verdict (scratchpad/verify-cost-fable-verdict.md): the iterated
-        // fused-FFN map with a single shared (W_up, W_down) is shortcut-free (the MX
-        // Extract nonlinearity kills associativity/telescoping/squaring/sketching) and
-        // contraction-free for L≤24 (expected steps to a fixed point ≫ 2^256), so every
-        // layer still requires a full evaluation — the compute floor and margin are
-        // untouched. Sharing cuts the SUBLINEAR VERIFIER's PRF weight regeneration ~24×
-        // (the dominant production verify cost: 91% of the per-layer verify time). The
-        // per-layer Extract samplers (prf_up/prf_dn) stay distinct — they are small keys,
-        // add per-layer diversity, and cost nothing to regenerate.
-        // (shared_ffn_weights computed above, next to operand_ep.)
+        // Config W: X0 is the PER-ROUND freshness source — operand() keys off seed_r
+        // (chained via round_roots[r-1]), so each round starts from a distinct chain-bound
+        // state. This is what lets the FFN weights be shared EPISODE-WIDE below.
+        X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
+        // Config W (datacenter): FFN weights SHARED EPISODE-WIDE — operand_ep() keys off
+        // sigma, so ONE (W_up, W_down) serves every round AND every layer. Fable-proven
+        // shortcut-free: with X0 the per-round freshness source, reusing one weight pair
+        // across the R independent chained instances still forces R full evaluations
+        // (batching is not a FLOP shortcut; the MX-Extract nonlinearity forecloses
+        // cross-instance memoization and telescoping/squaring/sketching within a round;
+        // each L=24 orbit is contraction-free from its fresh start). The compute floor and
+        // margin are untouched (weights are not committed). This cuts the sublinear
+        // verifier's DOMINANT cost — weight regeneration — from R pairs to ONE (~R×,
+        // ~1.07GB→0.13GB). Base keeps per-layer weights (operand_ep→seed_r there).
+        // prf_up/prf_dn stay per-layer (small keys, per-layer Extract diversity, free).
         const std::vector<int8_t> W_up_shared =
-            shared_ffn_weights ? ExpandMxDequantInt8(operand("BTX_RC_WUP_V1"), p.d_model, p.d_ff)
+            shared_ffn_weights ? ExpandMxDequantInt8(operand_ep("BTX_RC_WUP_V1"), p.d_model, p.d_ff)
                                : std::vector<int8_t>{};
         const std::vector<int8_t> W_down_shared =
-            shared_ffn_weights ? ExpandMxDequantInt8(operand("BTX_RC_WDN_V1"), p.d_ff, p.d_model)
+            shared_ffn_weights ? ExpandMxDequantInt8(operand_ep("BTX_RC_WDN_V1"), p.d_ff, p.d_model)
                                : std::vector<int8_t>{};
         std::vector<std::vector<int8_t>> W_up_layers(shared_ffn_weights ? 0 : p.L_lyr);
         std::vector<std::vector<int8_t>> W_down_layers(shared_ffn_weights ? 0 : p.L_lyr);
@@ -1587,24 +1590,28 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             t.transpose = tr; return t;
         };
         // X[l] (the layer input / down-wire residual): X0 leaf at l==0, else the
-        // previous layer's DOWN extract_out (committed, row-contiguous).
+        // previous layer's DOWN extract_out (committed, row-contiguous). Config W: X0 is
+        // the PER-ROUND freshness source — operand() keys off seed_r (chained), so each
+        // round's layer-0 input is distinct and chain-bound. The verifier regenerates only
+        // the sampled rows of X0 and checks them against seed_r → the anti-collision chain
+        // is verified for free.
         auto X_tensor = [&](uint32_t l, bool tr) {
-            return (l == 0) ? leaf(operand_ep("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
+            return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
                             : chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
         };
-        // Datacenter profile: FFN weights are SHARED across the round's layers
-        // (no layer index), so the sampled verifier's per-seed regen cache hits
-        // for all but the first sampled layer of a round. Base/toy/profile-1
-        // retain their per-layer tags exactly so the V1 golden remains
-        // byte-identical.
+        // Config W: datacenter FFN weights are SHARED EPISODE-WIDE — operand_ep() keys off
+        // sigma, so ONE (W_up, W_down) serves every round and layer, and the sampled
+        // verifier regenerates the weight pair ONCE per episode (not per round). This is
+        // the dominant regen cut (R pairs → 1). Base/toy/profile-1 retain their per-layer
+        // seed_r tags exactly so their V1 goldens remain byte-identical.
         auto Wup_seed = [&](uint32_t l) {
-            if (shared_ffn_weights) return operand("BTX_RC_WUP_V1");
+            if (shared_ffn_weights) return operand_ep("BTX_RC_WUP_V1");
             char tag[40];
             std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
             return operand(tag);
         };
         auto Wdn_seed = [&](uint32_t l) {
-            if (shared_ffn_weights) return operand("BTX_RC_WDN_V1");
+            if (shared_ffn_weights) return operand_ep("BTX_RC_WDN_V1");
             char tag[40];
             std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
             return operand(tag);

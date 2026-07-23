@@ -488,23 +488,26 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
     out.prf_up.resize(p.L_lyr);
     out.prf_dn.resize(p.L_lyr);
 
-    // X0: DATACENTER shares it EPISODE-WIDE (sigma-derived, one regen for the whole
-    // episode instead of per round) — safe because the FFN keeps W per-round, so fresh
-    // W_r keeps each round distinct even with shared X0. BASE keeps X0 per-round
-    // (seed_r) so its goldens are untouched. Gated by the same predicate as the FFN
-    // weight sharing; matches gkr BuildRealEpisodeLayers.
-    const uint256 seed_X0 = out.ffn_weights_shared
-                                ? DeriveOperandSeed(sigma, "BTX_RC_X0_V1")
-                                : DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
+    // Config W (datacenter): X0 is the PER-ROUND FRESHNESS SOURCE — derived from seed_r
+    // (which chains off round_roots[r-1]), so each round starts from a distinct, chain-
+    // bound state. This lets the FFN weights be shared EPISODE-WIDE (below) while keeping
+    // rounds non-collapsible: a miner cannot force X0_r == X0_r' without a seed collision
+    // (seed_r = hash(round_roots[r-1], r)), and the verifier's anchored recompute checks
+    // X0_r's sampled rows against seed_r, so the chain is verified at no extra cost.
+    // BASE keeps X0 per-round already; seed_r is correct for both, so no branch.
+    const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
     out.X[0] = ExpandMxDequantInt8(seed_X0, p.b_seq, p.d_model);
     if (out.ffn_weights_shared) {
-        // FFN weights SHARED across the round's layers (fixed tag, no layer index) — the
-        // per-round freshness source that keeps rounds distinct; cuts verifier PRF regen
-        // ~24× (Fable-proven shortcut-/contraction-free). Expanded ONCE into the shared
-        // members, reused for every layer of the fused-FFN pass.
-        out.W_up_shared = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, "BTX_RC_WUP_V1"),
+        // Config W (datacenter): FFN weights SHARED EPISODE-WIDE (sigma-derived, one pair
+        // for the whole episode — across all rounds AND all layers). Fable-proven
+        // shortcut-free: with X0 as the per-round freshness source, reusing one (W_up,
+        // W_down) across the R independent chained instances still forces R full
+        // evaluations (batching is not a FLOP shortcut; the Q1/Q2 nonlinearity forecloses
+        // cross-instance memoization). Cuts the verifier's dominant weight-regen ~R× (one
+        // pair instead of R). Expanded ONCE, reused for every round and layer.
+        out.W_up_shared = ExpandMxDequantInt8(DeriveOperandSeed(sigma, "BTX_RC_WUP_V1"),
                                               p.d_model, p.d_ff);
-        out.W_down_shared = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, "BTX_RC_WDN_V1"),
+        out.W_down_shared = ExpandMxDequantInt8(DeriveOperandSeed(sigma, "BTX_RC_WDN_V1"),
                                                 p.d_ff, p.d_model);
     }
 
