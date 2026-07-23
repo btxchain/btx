@@ -318,6 +318,190 @@ BTX_RC_TARGET_AVX512VNNI void DenseTwoRowsBlockPackedVnniS32(const int8_t* lhs0,
         out1[c] = static_cast<int64_t>(acc1[c]);
     }
 }
+
+#if defined(__clang__) || defined(__GNUC__)
+#define BTX_RC_TARGET_AVX2 __attribute__((target("avx2")))
+#else
+#define BTX_RC_TARGET_AVX2
+#endif
+
+bool AvxStateEnabledLocal()
+{
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    GetCPUID(1, 0, eax, ebx, ecx, edx);
+    if (((ecx >> 27) & 1u) == 0) return false; // OSXSAVE
+    uint32_t a = 0, d = 0;
+    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    // XMM (bit1) | YMM (bit2) enabled by the OS.
+    return (a & 0x6u) == 0x6u;
+}
+
+bool HaveAvx2Local()
+{
+    if (!AvxStateEnabledLocal()) return false;
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    GetCPUID(7, 0, eax, ebx, ecx, edx);
+    const bool avx2 = ((ebx >> 5) & 1u) != 0;
+    return avx2;
+}
+
+// Pre-VNNI AVX2 path for CPUs without VPDPBUSD (AMD Zen 2/3, Intel
+// Haswell–Skylake). VPMADDUBSW is unsigned×signed like VPDPBUSD, so we reuse
+// the SAME xor-0x80 lhs mapping and the SAME +128*sum(rhs) correction as the
+// VNNI kernel:
+//   sum((a+128)*b) = sum(a*b) + 128*sum(b)  ->  sum(a*b) = sum((a+128)*b) - 128*sum(b).
+// VPMADDUBSW forms i16 = u8*s8 + u8*s8 with SIGNED saturation of the pair sum.
+// A single u8*s8 fits i16 (255*128 = 32640 < 32768) but the pair sum can reach
+// 2*255*128 = 65280 and saturate. To stay bit-exact we split the unsigned lhs
+// byte a_u = 16*a_hi + a_lo (a_hi,a_lo in [0,15]) so every VPMADDUBSW pair sum
+// is at most 2*15*128 = 3840 << 32768 and cannot saturate, then recombine
+// u = 16*hi + lo at int32. sum(b) is formed the same way via VPMADDUBSW against
+// unsigned ones (pair sum <= 256). Int32 accumulation is exact for RC dims
+// (k*128*128 <= 2^31, guaranteed by DenseRowBlockFitsS32Local).
+BTX_RC_TARGET_AVX2 void DenseRowBlockPackedAvx2S32(const int8_t* lhs,
+                                                   const int8_t* rhs_packed,
+                                                   uint32_t k,
+                                                   uint32_t rhs_cols,
+                                                   uint32_t rhs_col0,
+                                                   int64_t out[kRCMxBlockLen])
+{
+    assert(DenseRowBlockFitsS32Local(k));
+    assert((k % 8) == 0);
+    assert((rhs_col0 % kRCMxBlockLen) == 0);
+    (void)rhs_cols;
+    const uint32_t chunks = k / 8;
+    const uint32_t block = rhs_col0 / kRCMxBlockLen;
+    const int8_t* block_base =
+        rhs_packed + static_cast<size_t>(block) * chunks * (kRCMxBlockLen / 2) * 16;
+
+    alignas(32) int32_t acc[kRCMxBlockLen];
+    std::memset(acc, 0, sizeof(acc));
+
+    const __m128i xor80 = _mm_set1_epi8(static_cast<char>(0x80));
+    const __m128i lo_mask = _mm_set1_epi8(0x0F);
+    const __m256i ones8 = _mm256_set1_epi8(1);
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+        const __m128i a_s = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(lhs + chunk * 8));
+        const __m128i a_u = _mm_xor_si128(a_s, xor80); // a + 128 in [0,255]
+        const __m128i a_lo8 = _mm_and_si128(a_u, lo_mask);
+        const __m128i a_hi8 = _mm_and_si128(_mm_srli_epi16(a_u, 4), lo_mask);
+        const __m128i lo_pair = _mm_unpacklo_epi64(a_lo8, a_lo8); // [lo0..lo7 | lo0..lo7]
+        const __m128i hi_pair = _mm_unpacklo_epi64(a_hi8, a_hi8);
+        const __m256i lo_pat = _mm256_broadcastsi128_si256(lo_pair);
+        const __m256i hi_pat = _mm256_broadcastsi128_si256(hi_pair);
+
+        const int8_t* packed =
+            block_base + static_cast<size_t>(chunk) * (kRCMxBlockLen / 2) * 16;
+        // 16 column-pairs × 16B = 256B = eight YMM loads (two column-pairs each).
+        for (uint32_t g = 0; g < 8; ++g) {
+            const __m256i b =
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(packed + static_cast<size_t>(g) * 32));
+            // Group-of-4-rows partial dots for the low/high nibble and for sum(b).
+            const __m256i lo_r = _mm256_madd_epi16(_mm256_maddubs_epi16(lo_pat, b), ones16);
+            const __m256i hi_r = _mm256_madd_epi16(_mm256_maddubs_epi16(hi_pat, b), ones16);
+            const __m256i sb_r = _mm256_madd_epi16(_mm256_maddubs_epi16(ones8, b), ones16);
+            // u = 16*hi + lo ; signed = u - 128*sum(b), all exact at int32.
+            const __m256i u_r = _mm256_add_epi32(_mm256_slli_epi32(hi_r, 4), lo_r);
+            const __m256i signed_r = _mm256_sub_epi32(u_r, _mm256_slli_epi32(sb_r, 7));
+            alignas(32) int32_t du[8];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(du), signed_r);
+            for (uint32_t p = 0; p < 2; ++p) {
+                const uint32_t pair = g * 2 + p;
+                const int32_t* d = du + p * 4;
+                acc[2 * pair] += d[0] + d[1];
+                acc[2 * pair + 1] += d[2] + d[3];
+            }
+        }
+    }
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) out[c] = static_cast<int64_t>(acc[c]);
+}
+
+BTX_RC_TARGET_AVX2 void DenseTwoRowsBlockPackedAvx2S32(const int8_t* lhs0,
+                                                       const int8_t* lhs1,
+                                                       const int8_t* rhs_packed,
+                                                       uint32_t k,
+                                                       uint32_t rhs_cols,
+                                                       uint32_t rhs_col0,
+                                                       int64_t out0[kRCMxBlockLen],
+                                                       int64_t out1[kRCMxBlockLen])
+{
+    assert(DenseRowBlockFitsS32Local(k));
+    assert((k % 8) == 0);
+    assert((rhs_col0 % kRCMxBlockLen) == 0);
+    (void)rhs_cols;
+    const uint32_t chunks = k / 8;
+    const uint32_t block = rhs_col0 / kRCMxBlockLen;
+    const int8_t* block_base =
+        rhs_packed + static_cast<size_t>(block) * chunks * (kRCMxBlockLen / 2) * 16;
+
+    alignas(32) int32_t acc0[kRCMxBlockLen];
+    alignas(32) int32_t acc1[kRCMxBlockLen];
+    std::memset(acc0, 0, sizeof(acc0));
+    std::memset(acc1, 0, sizeof(acc1));
+
+    const __m128i xor80 = _mm_set1_epi8(static_cast<char>(0x80));
+    const __m128i lo_mask = _mm_set1_epi8(0x0F);
+    const __m256i ones8 = _mm256_set1_epi8(1);
+    const __m256i ones16 = _mm256_set1_epi16(1);
+
+    for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+        const __m128i a0_s = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(lhs0 + chunk * 8));
+        const __m128i a1_s = _mm_loadl_epi64(reinterpret_cast<const __m128i*>(lhs1 + chunk * 8));
+        const __m128i a0_u = _mm_xor_si128(a0_s, xor80);
+        const __m128i a1_u = _mm_xor_si128(a1_s, xor80);
+        const __m128i a0_lo8 = _mm_and_si128(a0_u, lo_mask);
+        const __m128i a0_hi8 = _mm_and_si128(_mm_srli_epi16(a0_u, 4), lo_mask);
+        const __m128i a1_lo8 = _mm_and_si128(a1_u, lo_mask);
+        const __m128i a1_hi8 = _mm_and_si128(_mm_srli_epi16(a1_u, 4), lo_mask);
+        const __m256i lo0_pat = _mm256_broadcastsi128_si256(_mm_unpacklo_epi64(a0_lo8, a0_lo8));
+        const __m256i hi0_pat = _mm256_broadcastsi128_si256(_mm_unpacklo_epi64(a0_hi8, a0_hi8));
+        const __m256i lo1_pat = _mm256_broadcastsi128_si256(_mm_unpacklo_epi64(a1_lo8, a1_lo8));
+        const __m256i hi1_pat = _mm256_broadcastsi128_si256(_mm_unpacklo_epi64(a1_hi8, a1_hi8));
+
+        const int8_t* packed =
+            block_base + static_cast<size_t>(chunk) * (kRCMxBlockLen / 2) * 16;
+        for (uint32_t g = 0; g < 8; ++g) {
+            const __m256i b =
+                _mm256_loadu_si256(reinterpret_cast<const __m256i*>(packed + static_cast<size_t>(g) * 32));
+            const __m256i corr = _mm256_slli_epi32(
+                _mm256_madd_epi16(_mm256_maddubs_epi16(ones8, b), ones16), 7); // 128*sum(b)
+            const __m256i lo0_r = _mm256_madd_epi16(_mm256_maddubs_epi16(lo0_pat, b), ones16);
+            const __m256i hi0_r = _mm256_madd_epi16(_mm256_maddubs_epi16(hi0_pat, b), ones16);
+            const __m256i lo1_r = _mm256_madd_epi16(_mm256_maddubs_epi16(lo1_pat, b), ones16);
+            const __m256i hi1_r = _mm256_madd_epi16(_mm256_maddubs_epi16(hi1_pat, b), ones16);
+            const __m256i d0 = _mm256_sub_epi32(
+                _mm256_add_epi32(_mm256_slli_epi32(hi0_r, 4), lo0_r), corr);
+            const __m256i d1 = _mm256_sub_epi32(
+                _mm256_add_epi32(_mm256_slli_epi32(hi1_r, 4), lo1_r), corr);
+            alignas(32) int32_t du0[8], du1[8];
+            _mm256_store_si256(reinterpret_cast<__m256i*>(du0), d0);
+            _mm256_store_si256(reinterpret_cast<__m256i*>(du1), d1);
+            for (uint32_t p = 0; p < 2; ++p) {
+                const uint32_t pair = g * 2 + p;
+                const int32_t* e0 = du0 + p * 4;
+                const int32_t* e1 = du1 + p * 4;
+                acc0[2 * pair] += e0[0] + e0[1];
+                acc0[2 * pair + 1] += e0[2] + e0[3];
+                acc1[2 * pair] += e1[0] + e1[1];
+                acc1[2 * pair + 1] += e1[2] + e1[3];
+            }
+        }
+    }
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        out0[c] = static_cast<int64_t>(acc0[c]);
+        out1[c] = static_cast<int64_t>(acc1[c]);
+    }
+}
+
+// Cached tier choice: prefer VNNI when present, else fall to AVX2. Read once so
+// there is no per-block CPUID in the dispatchers.
+bool PackedX86PreferVnni()
+{
+    static const bool v = HaveAvx512VnniLocal();
+    return v;
+}
 #endif
 
 bool PackedFastPathSelfTest()
@@ -343,7 +527,10 @@ bool PackedFastPathSelfTest()
 #if defined(__aarch64__) && defined(__ARM_NEON)
     if (!HaveArmI8MMLocal()) return false;
 #elif defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
-    if (!HaveAvx512VnniLocal()) return false;
+    const bool have_vnni = HaveAvx512VnniLocal();
+    const bool have_avx2 = HaveAvx2Local();
+    // No usable x86 fast kernel -> stay on the scalar-over-packed path.
+    if (!have_vnni && !have_avx2) return false;
 #else
     return false;
 #endif
@@ -365,25 +552,46 @@ bool PackedFastPathSelfTest()
         const std::vector<int8_t> packed = RCPackDenseI8mmOutputBlocks(rhs, cs.rows, cs.cols);
         int64_t scalar0[kRCMxBlockLen];
         int64_t scalar1[kRCMxBlockLen];
+#if (defined(__aarch64__) && defined(__ARM_NEON)) || defined(__x86_64__) || \
+    defined(__amd64__) || defined(_M_X64)
         int64_t one[kRCMxBlockLen];
         int64_t pair0[kRCMxBlockLen];
         int64_t pair1[kRCMxBlockLen];
+#endif
         DenseRowBlockScalarLocal(lhs0.data(), rhs.data(), cs.rows, cs.cols, cs.col0, scalar0);
         DenseRowBlockScalarLocal(lhs1.data(), rhs.data(), cs.rows, cs.cols, cs.col0, scalar1);
 #if defined(__aarch64__) && defined(__ARM_NEON)
         DenseRowBlockPackedI8mmS32(lhs0.data(), packed.data(), cs.rows, cs.cols, cs.col0, one);
         DenseTwoRowsBlockPackedI8mmS32(lhs0.data(), lhs1.data(), packed.data(), cs.rows, cs.cols,
                                        cs.col0, pair0, pair1);
-#elif defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
-        DenseRowBlockPackedVnniS32(lhs0.data(), packed.data(), cs.rows, cs.cols, cs.col0, one);
-        DenseTwoRowsBlockPackedVnniS32(lhs0.data(), lhs1.data(), packed.data(), cs.rows, cs.cols,
-                                       cs.col0, pair0, pair1);
-#endif
         for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
             if (scalar0[c] != one[c] || scalar0[c] != pair0[c] || scalar1[c] != pair1[c]) {
                 return false;
             }
         }
+#elif defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
+        // Every tier the dispatcher may pick must be byte-identical to scalar.
+        if (have_vnni) {
+            DenseRowBlockPackedVnniS32(lhs0.data(), packed.data(), cs.rows, cs.cols, cs.col0, one);
+            DenseTwoRowsBlockPackedVnniS32(lhs0.data(), lhs1.data(), packed.data(), cs.rows,
+                                           cs.cols, cs.col0, pair0, pair1);
+            for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+                if (scalar0[c] != one[c] || scalar0[c] != pair0[c] || scalar1[c] != pair1[c]) {
+                    return false;
+                }
+            }
+        }
+        if (have_avx2) {
+            DenseRowBlockPackedAvx2S32(lhs0.data(), packed.data(), cs.rows, cs.cols, cs.col0, one);
+            DenseTwoRowsBlockPackedAvx2S32(lhs0.data(), lhs1.data(), packed.data(), cs.rows,
+                                           cs.cols, cs.col0, pair0, pair1);
+            for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+                if (scalar0[c] != one[c] || scalar0[c] != pair0[c] || scalar1[c] != pair1[c]) {
+                    return false;
+                }
+            }
+        }
+#endif
         // Packed scalar oracle must also match (layout / fallback contract).
         int64_t packed_scalar[kRCMxBlockLen];
         DenseRowBlockPackedScalarLocal(lhs0.data(), packed.data(), cs.rows, cs.cols, cs.col0,
@@ -460,7 +668,13 @@ void RCDenseRowBlockPackedI8mmExactI8(const int8_t* lhs, const int8_t* rhs_packe
 #elif defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
     if (RCDensePackedI8mmAvailable() && DenseRowBlockFitsS32Local(k) && (k % 8) == 0 &&
         (rhs_col0 % kRCMxBlockLen) == 0) {
-        DenseRowBlockPackedVnniS32(lhs, rhs_packed, k, rhs_cols, rhs_col0, out);
+        // Tier: VNNI if present, else pre-VNNI AVX2. RCDensePackedI8mmAvailable()
+        // being true means the selected tier passed PackedFastPathSelfTest.
+        if (PackedX86PreferVnni()) {
+            DenseRowBlockPackedVnniS32(lhs, rhs_packed, k, rhs_cols, rhs_col0, out);
+        } else {
+            DenseRowBlockPackedAvx2S32(lhs, rhs_packed, k, rhs_cols, rhs_col0, out);
+        }
         return;
     }
 #endif
@@ -482,7 +696,15 @@ void RCDenseTwoRowsBlockPackedI8mmExactI8(const int8_t* lhs0, const int8_t* lhs1
 #elif defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
     if (RCDensePackedI8mmAvailable() && DenseRowBlockFitsS32Local(k) && (k % 8) == 0 &&
         (rhs_col0 % kRCMxBlockLen) == 0) {
-        DenseTwoRowsBlockPackedVnniS32(lhs0, lhs1, rhs_packed, k, rhs_cols, rhs_col0, out0, out1);
+        // Tier: VNNI if present, else pre-VNNI AVX2. RCDensePackedI8mmAvailable()
+        // being true means the selected tier passed PackedFastPathSelfTest.
+        if (PackedX86PreferVnni()) {
+            DenseTwoRowsBlockPackedVnniS32(lhs0, lhs1, rhs_packed, k, rhs_cols, rhs_col0, out0,
+                                           out1);
+        } else {
+            DenseTwoRowsBlockPackedAvx2S32(lhs0, lhs1, rhs_packed, k, rhs_cols, rhs_col0, out0,
+                                           out1);
+        }
         return;
     }
 #endif
