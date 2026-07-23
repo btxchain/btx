@@ -265,7 +265,8 @@ BOOST_AUTO_TEST_CASE(rc_sm120_plain_arch_key_never_implies_feature_qualified)
         BOOST_CHECK_EQUAL(oz.backend, "SM120_MMA");
     } else {
         BOOST_CHECK(oz.selected == rc::RCOzakiMxfp4SelectedBackend::Unqualified ||
-                    oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT);
+                    oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT ||
+                    oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_MMA);
         if (!oz.qualified) {
             BOOST_CHECK(oz.backend.find("SM120_MMA") == std::string::npos ||
                         oz.backend.find("scalar") != std::string::npos);

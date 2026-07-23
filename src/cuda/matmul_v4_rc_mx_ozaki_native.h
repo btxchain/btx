@@ -13,10 +13,15 @@
 // ExactGemm panels ≠ native MXFP4. Native path must not call LaunchGemmS8S8.
 //
 // Selected backend honesty (PR #89 Workstream B / Agent C dispatch):
-//   Unqualified | SM120_MMA | SM100_CUBLASLT
+//   Unqualified | SM120_MMA | SM100_CUBLASLT | SM100_MMA
 // A backend latches ONLY after THAT same backend passes the COMPLETE suite.
 // Never combine partial MMA evidence with cuBLASLt and mislabel as MMA/cutlass.
 // Never report dense INT8 / scalar-decode as native MXFP4.
+// On sm_100 (B200): SM100_MMA (hand tcgen05) is preferred when the sm_100a
+// object is linked AND it passes the complete suite with a positive native
+// tensor launch count; otherwise the runtime falls back to SM100_CUBLASLT
+// (cuBLASLt block-scaled, also tcgen05 under the hood) or stays Unqualified.
+// SM100_MMA and SM100_CUBLASLT never cross-infer from SM120_MMA (separate ISA).
 //
 // SM120_MMA / native MXFP4 may be advertised ONLY if ALL of:
 //   1) Compatible SM120 device present
@@ -42,12 +47,18 @@
 //   rc_ozaki_mxfp4_mma_gemm kernel. Suggested:
 //     cuobjdump -sass <libbtx_matmul_backend.so> | rg -n 'QMMA|mma\.|E2M1|mxf8f6f4'
 //     ncu --devices 0 --set full ./src/test/test_btx -t rc_ozaki_mxfp4_native_gate
-// SM100/B200 is a separate latch (SM100_CUBLASLT); never infer from SM120.
-// SM100 path MUST refuse to compile/dispatch SM120 MMA:
-//   - Compile: __CUDA_ARCH_SPECIFIC__==1200 only (sm_100 slices compile OUT).
-//   - Runtime: LaunchOzakiMxfp4PanelsMma refuses DeviceLooksSm100; self-qual
-//     on SM100 only attempts cuBLASLt (never MMA). BTX_CUDA_SM100_NATIVE is a
-//     fail-closed packaging probe stub without B200 — see BTXCudaSm120a.cmake.
+// SM100/B200 is a separate latch (SM100_MMA / SM100_CUBLASLT); never infer from
+// SM120. The two ISAs' block-scaled MMAs are mutually exclusive:
+//   - SM120 warp MMA body: __CUDA_ARCH_SPECIFIC__==1200 only (sm_100 slices OUT).
+//   - SM100 tcgen05 MMA body: __CUDA_ARCH_SPECIFIC__==1000 only (sm_120 slices OUT).
+//   - Runtime: LaunchOzakiMxfp4PanelsMma (SM120 warp) refuses DeviceLooksSm100;
+//     LaunchOzakiMxfp4PanelsSm100Mma (tcgen05) refuses non-sm_100. On SM100 the
+//     self-qual attempts SM100_MMA first (only if the sm_100a object is linked),
+//     then SM100_CUBLASLT — never the SM120 warp MMA.
+// SM100_MMA rack SASS expectation (CUDA 12.8+/13.x, sm_100a): after it qualifies,
+// confirm tcgen05.mma / UTCMMA + block-scale appears in rc_ozaki_mxfp4_tcgen05_gemm:
+//   cuobjdump -sass <libbtx_matmul_backend.so> | rg -n 'UTCMMA|tcgen05|OMMA|E2M1'
+// BTX_CUDA_SM100_NATIVE compiles the sm_100a object + slice; see BTXCudaSm100.cmake.
 
 namespace matmul_v4::cuda {
 
@@ -56,6 +67,10 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
     Unqualified = 0,
     SM120_MMA = 1,       // hand QMMA.SF m16n8k32 e2m1 block_scale (not CUTLASS)
     SM100_CUBLASLT = 2,  // cuBLASLt CUDA_R_4F_E2M1 + VEC32_UE8M0 on sm_100
+    SM100_MMA = 3,       // hand tcgen05.mma.kind::mxf8f6f4.block_scale on sm_100a
+                         // (B200). Requires RcOzakiMxfp4Sm100NativeLinked()==true
+                         // (dedicated sm_100a object) + complete suite pass with
+                         // native_tensor_launches>0. Never CUTLASS; never cuBLASLt.
 };
 
 /**
@@ -68,10 +83,13 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
 [[nodiscard]] bool RcOzakiMxfp4Sm120aKernelLinked();
 
 /**
- * Optional SM100/B200 native packaging latch (Agent E+I).
- * Always false without BTX_CUDA_SM100_NATIVE + B200 probe evidence — the
- * configure probe is fail-closed, so this stays false in this tree. Never
- * implies SM120_MMA; never flips SelectedBackend by itself.
+ * SM100/B200 native packaging latch (Agent E+I).
+ * True only when the dedicated sm_100a marker TU
+ * (matmul_v4_rc_mx_ozaki_native_sm100.cu) is linked via BTX_CUDA_SM100_NATIVE.
+ * Weak stub returns false when that TU is absent (plain sm_100 / sm_120 /
+ * no-CUDA builds). Self-qual must consult this before advertising SM100_MMA.
+ * Never implies SM120_MMA; never flips SelectedBackend by itself — the runtime
+ * bit-exact suite on real B200 silicon is the gate.
  */
 [[nodiscard]] bool RcOzakiMxfp4Sm100NativeLinked();
 
@@ -90,21 +108,22 @@ enum class RcOzakiMxfp4SelectedBackend : uint8_t {
 [[nodiscard]] bool IsRcOzakiCudaMxfp4Qualified();
 [[nodiscard]] RcOzakiMxfp4SelectedBackend RcOzakiCudaMxfp4SelectedBackend();
 [[nodiscard]] std::string RcOzakiCudaMxfp4ArchKey();
-/** "Unqualified" | "SM120_MMA" | "SM100_CUBLASLT" |
+/** "Unqualified" | "SM120_MMA" | "SM100_CUBLASLT" | "SM100_MMA" |
  *  "mxfp4_blockscaled_device_scalar-decode" (exactness only; native false). */
 [[nodiscard]] std::string RcOzakiCudaMxfp4Backend();
-/** Machine-readable deficit; empty when SelectedBackend is SM120_MMA/SM100_CUBLASLT. */
+/** Machine-readable deficit; empty when SelectedBackend is a native tensor path
+ *  (SM120_MMA / SM100_CUBLASLT / SM100_MMA). */
 [[nodiscard]] std::string RcOzakiCudaMxfp4Deficit();
-/** Native QMMA/cuBLASLt panel launches (excludes scalar-tail K%32 remainder). */
+/** Native QMMA/tcgen05/cuBLASLt panel launches (excludes scalar-tail K%32). */
 [[nodiscard]] uint64_t RcOzakiCudaMxfp4NativeTensorLaunchCount();
 /** Scalar-decode tail launches (K remainder); never counts as MMA evidence. */
 [[nodiscard]] uint64_t RcOzakiCudaMxfp4ScalarTailLaunchCount();
 [[nodiscard]] bool SelfQualifyRcOzakiCudaMxfp4Once();
 
 /**
- * Succeeds only when SelectedBackend is SM120_MMA or SM100_CUBLASLT.
- * Dispatches ONLY that backend — no silent fallback to the other or to
- * scalar-decode / dense INT8.
+ * Succeeds only when SelectedBackend is a native tensor path (SM120_MMA,
+ * SM100_CUBLASLT, or SM100_MMA). Dispatches ONLY that backend — no silent
+ * fallback to another or to scalar-decode / dense INT8.
  */
 [[nodiscard]] bool TryLaunchRcOzakiMxfp4GemmS8S8Int64(
     const std::vector<int8_t>& left, const std::vector<int8_t>& right, uint32_t rows,

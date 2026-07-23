@@ -160,15 +160,8 @@ function(btx_cuda_add_sm120a_mxfp4_native_object PARENT_TARGET)
     "${BTX_CUDA_SM120A_GENCODE_FLAG} (isolated from BTX_CUDA_ARCHITECTURES)")
 endfunction()
 
-# Optional SM100 / B200 native probe stub (Agent E+I).
-# Fail-closed: without B200 / sm_100 MX evidence in this tree the probe is
-# ALWAYS FALSE. Enabling BTX_CUDA_SM100_NATIVE must not silently succeed or
-# advertise SM100_CUBLASLT / SM120_MMA. Does not touch SM120 packaging.
-function(btx_cuda_probe_sm100_native OUT_VAR)
-  set(${OUT_VAR} FALSE PARENT_SCOPE)
-  set(BTX_CUDA_SM100_PROBE_LOG
-    "BTX_CUDA_SM100_NATIVE probe stub: fail-closed (no B200 evidence in this tree). "
-    "SM100 stays on the separate SM100_CUBLASLT runtime latch; SM120_MMA remains "
-    "behind BTX_CUDA_SM120_MXFP4_NATIVE + sm_120a object only."
-    PARENT_SCOPE)
-endfunction()
+# SM100 / B200 native tcgen05 packaging now lives in cmake/BTXCudaSm100.cmake
+# (btx_cuda_probe_sm100_native + btx_cuda_add_sm100a_mxfp4_native_object). It is a
+# SEPARATE latch on a SEPARATE ISA (async tcgen05.mma, not the sm_120 warp MMA)
+# and does not touch SM120 packaging. The former fail-closed stub here has been
+# replaced by a real sm_100a configure probe in that module.

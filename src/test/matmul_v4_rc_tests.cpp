@@ -1456,8 +1456,8 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_exact_panels_qualify_and_match_oracle)
 BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
 {
     // Native MXFP4: only after THAT backend's COMPLETE suite quals.
-    // Selected backend is Unqualified | SM120_MMA | SM100_CUBLASLT — never
-    // mislabeled cutlass from hand-MMA, never scalar-decode / dense INT8.
+    // Selected backend is Unqualified | SM120_MMA | SM100_CUBLASLT | SM100_MMA —
+    // never mislabeled cutlass from hand-MMA, never scalar-decode / dense INT8.
     rc::ResetRcOzakiQualForTest();
     const auto oz = rc::ProbeRcOzakiMxfp4Status();
     if (!rc::IsRcOzakiMxfp4Qualified()) {
@@ -1483,8 +1483,10 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
     BOOST_CHECK(oz.attempted);
     BOOST_CHECK(oz.qualified);
     BOOST_CHECK(oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM120_MMA ||
-                oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT);
-    BOOST_CHECK(oz.backend == "SM120_MMA" || oz.backend == "SM100_CUBLASLT");
+                oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT ||
+                oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_MMA);
+    BOOST_CHECK(oz.backend == "SM120_MMA" || oz.backend == "SM100_CUBLASLT" ||
+                oz.backend == "SM100_MMA");
     BOOST_CHECK(oz.backend.find("exactgemm") == std::string::npos);
     BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
     BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
@@ -1497,6 +1499,10 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_native_gate)
     if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT) {
         BOOST_CHECK(oz.arch_key.find("sm_10") != std::string::npos);
         BOOST_CHECK(oz.backend == "SM100_CUBLASLT");
+    }
+    if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_MMA) {
+        BOOST_CHECK(oz.arch_key.find("sm_10") != std::string::npos);
+        BOOST_CHECK(oz.backend == "SM100_MMA");
     }
 
     constexpr uint32_t rows = 8, cols = 8;
@@ -1575,7 +1581,8 @@ BOOST_AUTO_TEST_CASE(rc_ozaki_mxfp4_scalar_decode_never_sets_native)
     if (oz.qualified) {
         BOOST_CHECK(rc::IsRcOzakiMxfp4Qualified());
         BOOST_CHECK(oz.backend.find("scalar-decode") == std::string::npos);
-        BOOST_CHECK(oz.backend == "SM120_MMA" || oz.backend == "SM100_CUBLASLT");
+        BOOST_CHECK(oz.backend == "SM120_MMA" || oz.backend == "SM100_CUBLASLT" ||
+                    oz.backend == "SM100_MMA");
         BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
         return;
     }

@@ -18,6 +18,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <vector>
 
 // Agent E+I — SM100 isolation + DeriveRCPeakReady honesty.
 //
@@ -88,6 +89,20 @@ BOOST_AUTO_TEST_CASE(rc_sm100_never_cross_infers_sm120_mma)
         BOOST_CHECK(oz.backend.find("SM120_MMA") == std::string::npos);
         BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
     }
+    // SM100_MMA (hand tcgen05) is also an sm_100-only latch; never SM120 / cuBLASLt.
+    if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM100_MMA) {
+        BOOST_REQUIRE(matmul_v4::cuda::RcOzakiMxfp4Sm100NativeLinked());
+        BOOST_CHECK_EQUAL(oz.backend, "SM100_MMA");
+        BOOST_CHECK(oz.backend.find("SM120_MMA") == std::string::npos);
+        BOOST_CHECK(oz.backend.find("cublaslt") == std::string::npos);
+        BOOST_CHECK(oz.backend.find("cutlass") == std::string::npos);
+    }
+    // Without the sm_100a object, SM100_MMA must never be advertised.
+    if (!matmul_v4::cuda::RcOzakiMxfp4Sm100NativeLinked()) {
+        BOOST_CHECK_NE(matmul_v4::cuda::RcOzakiCudaMxfp4Backend(), "SM100_MMA");
+        BOOST_CHECK(matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend() !=
+                    matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::SM100_MMA);
+    }
     if (oz.selected == rc::RCOzakiMxfp4SelectedBackend::SM120_MMA) {
         BOOST_REQUIRE(matmul_v4::cuda::RcOzakiMxfp4Sm120aKernelLinked());
         BOOST_CHECK_EQUAL(oz.backend, "SM120_MMA");
@@ -99,6 +114,63 @@ BOOST_AUTO_TEST_CASE(rc_sm100_never_cross_infers_sm120_mma)
             static_cast<int>(matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend()),
             static_cast<int>(matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::Unqualified));
     }
+}
+
+// B200 tcgen05 native-MMA qualification gate. On CI (no sm_100a object / no B200)
+// this asserts the path is fail-closed. On a real B200 with BTX_CUDA_SM100_NATIVE
+// the same body drives the exact self-qual and, if SM100_MMA latches, checks that
+// the native tcgen05 GEMM is bit-identical to the int64 oracle on a high-magnitude
+// multi-shape battery (K on both sides of 2^24; M11/E8M0 max corners; -128 rails).
+BOOST_AUTO_TEST_CASE(rc_sm100_tcgen05_native_gate_fail_closed_or_bit_exact)
+{
+    rc::ResetRcOzakiQualForTest();
+    matmul_v4::cuda::ResetRcOzakiCudaQualForTest();
+
+    (void)matmul_v4::cuda::SelfQualifyRcOzakiCudaMxfp4Once();
+    const auto sel = matmul_v4::cuda::RcOzakiCudaMxfp4SelectedBackend();
+
+    if (!matmul_v4::cuda::RcOzakiMxfp4Sm100NativeLinked()) {
+        // No sm_100a object linked (default / non-B200 packaging): fail-closed.
+        BOOST_CHECK(sel != matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::SM100_MMA);
+        return;
+    }
+    if (sel != matmul_v4::cuda::RcOzakiMxfp4SelectedBackend::SM100_MMA) {
+        // Object linked but silicon/toolkit did not qualify tcgen05: still fail-
+        // closed (Unqualified or SM100_CUBLASLT). Never a wrong digest.
+        BOOST_CHECK(matmul_v4::cuda::RcOzakiCudaMxfp4Backend() != "SM100_MMA");
+        return;
+    }
+
+    // SM100_MMA latched on real B200: the qual suite already matched the oracle.
+    // Re-verify an out-of-suite high-magnitude shape end-to-end for good measure.
+    BOOST_CHECK(matmul_v4::cuda::RcOzakiCudaMxfp4NativeTensorLaunchCount() > 0);
+    const uint32_t M = 24, K = 8192, N = 40; // K > 4096: crosses the 2^24 chunk edge
+    std::vector<int8_t> L(static_cast<size_t>(M) * K), R(static_cast<size_t>(K) * N);
+    for (size_t i = 0; i < L.size(); ++i) {
+        // M11×2^e alphabet corners incl. sign flips (MX-factorable, adversarial).
+        static const int8_t m11[] = {6, -6, 4, -4, 3, -3, 2, -2, 1, -1};
+        L[i] = static_cast<int8_t>(m11[i % 10] * (1 << ((i / 32) & 3)));
+    }
+    for (size_t i = 0; i < R.size(); ++i) {
+        static const int8_t m11[] = {-6, 6, -4, 4, -3, 3, -2, 2, -1, 1};
+        R[i] = static_cast<int8_t>(m11[i % 10] * (1 << ((i / 32) & 3)));
+    }
+    std::vector<int64_t> oracle(static_cast<size_t>(M) * N, 0);
+    for (uint32_t r = 0; r < M; ++r) {
+        for (uint32_t c = 0; c < N; ++c) {
+            int64_t acc = 0;
+            for (uint32_t k = 0; k < K; ++k) {
+                acc += static_cast<int64_t>(L[static_cast<size_t>(r) * K + k]) *
+                       static_cast<int64_t>(R[static_cast<size_t>(k) * N + c]);
+            }
+            oracle[static_cast<size_t>(r) * N + c] = acc;
+        }
+    }
+    std::vector<int64_t> gpu;
+    std::string err;
+    BOOST_REQUIRE_MESSAGE(
+        matmul_v4::cuda::TryLaunchRcOzakiMxfp4GemmS8S8Int64(L, R, M, K, N, gpu, &err), err);
+    BOOST_CHECK(gpu == oracle);
 }
 
 BOOST_AUTO_TEST_CASE(rc_peak_ready_derived_never_compiled_eq_ready)

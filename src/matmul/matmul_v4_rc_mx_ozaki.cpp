@@ -214,6 +214,8 @@ struct Mxfp4QualResult {
         return RCOzakiMxfp4SelectedBackend::SM120_MMA;
     case CS::SM100_CUBLASLT:
         return RCOzakiMxfp4SelectedBackend::SM100_CUBLASLT;
+    case CS::SM100_MMA:
+        return RCOzakiMxfp4SelectedBackend::SM100_MMA;
     case CS::Unqualified:
     default:
         return RCOzakiMxfp4SelectedBackend::Unqualified;

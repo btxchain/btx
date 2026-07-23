@@ -130,6 +130,7 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires BTX_CUDA_ARCHITECTURES to be set explicitly.")
   endif()
   include(${PROJECT_SOURCE_DIR}/cmake/BTXCudaSm120a.cmake)
+  include(${PROJECT_SOURCE_DIR}/cmake/BTXCudaSm100.cmake)
   btx_cuda_reject_feature_qualified_archs(BTX_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures for compiler detection and BTX CUDA targets" FORCE)
   if(NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
@@ -162,19 +163,28 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     endif()
     message(STATUS "BTX sm_120a MXFP4 probe OK (${BTX_CUDA_SM120A_GENCODE_FLAG})")
   endif()
-  # SM100 / B200: fail-closed probe stub (never enables without B200 evidence).
-  # Independent of SM120 packaging above.
+  # SM100 / B200: real sm_100a tcgen05 configure probe (cmake/BTXCudaSm100.cmake).
+  # Independent of SM120 packaging above (separate ISA / separate latch). Still
+  # fail-closed: a toolkit that cannot assemble the tcgen05 block-scale snippet
+  # under compute_100a FATAL_ERRORs, and even a passing probe only compiles the
+  # object IN — the runtime backend stays fail-closed until the bit-exact self-qual
+  # suite passes on real B200 silicon (SelectedBackend==SM100_MMA).
   if(BTX_CUDA_SM100_NATIVE)
     btx_cuda_probe_sm100_native(BTX_CUDA_SM100_NATIVE_PROBE_OK)
     if(NOT BTX_CUDA_SM100_NATIVE_PROBE_OK)
       unset(BTX_CUDA_SM100_NATIVE CACHE)
       message(FATAL_ERROR
-        "BTX_CUDA_SM100_NATIVE=ON but the configure-time SM100/B200 probe is "
-        "fail-closed (no B200 evidence in this tree).\n"
-        "Leave BTX_CUDA_SM100_NATIVE=OFF. SM100 runtime stays on the separate "
-        "SM100_CUBLASLT latch; SM120_MMA packaging is BTX_CUDA_SM120_MXFP4_NATIVE.\n"
+        "BTX_CUDA_SM100_NATIVE=ON but the configure-time sm_100a tcgen05 probe "
+        "failed.\n"
+        "Need an NVCC (CUDA >= 12.8, 13.x recommended) that accepts "
+        "${BTX_CUDA_SM100A_GENCODE_FLAG} and can assemble "
+        "tcgen05.mma kind::mxf8f6f4.block_scale (datacenter Blackwell / B200).\n"
+        "Plain packaging still works with BTX_CUDA_SM100_NATIVE=OFF and "
+        "BTX_CUDA_ARCHITECTURES=100 (or 120); SM100 then runs the separate "
+        "SM100_CUBLASLT latch or the exact INT8 path.\n"
         "Probe log:\n${BTX_CUDA_SM100_PROBE_LOG}")
     endif()
+    message(STATUS "BTX sm_100a tcgen05 MXFP4 probe OK (${BTX_CUDA_SM100A_GENCODE_FLAG})")
   endif()
 endif()
 
@@ -923,6 +933,21 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # (do not put 120a into CMAKE_CUDA_ARCHITECTURES for the whole target).
     set_property(SOURCE cuda/matmul_v4_rc_mx_ozaki_native.cu APPEND PROPERTY
       COMPILE_OPTIONS ${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}
+    )
+  endif()
+  if(BTX_CUDA_SM100_NATIVE)
+    # Datacenter B200 native tcgen05 MXFP4 (SEPARATE ISA/latch from sm_120a).
+    # Dedicated OBJECT lib with explicit -gencode=arch=compute_100a,code=sm_100a
+    # on Agent A marker TU cuda/matmul_v4_rc_mx_ozaki_native_sm100.cu
+    # (RcOzakiMxfp4Sm100NativeLinked=true). See cmake/BTXCudaSm100.cmake.
+    btx_cuda_add_sm100a_mxfp4_native_object(btx_matmul_backend)
+    # The tcgen05 MMA body lives in matmul_v4_rc_mx_ozaki_native.cu under
+    # __CUDA_ARCH_SPECIFIC__==1000. Plain BTX_CUDA_ARCHITECTURES never defines
+    # SPECIFIC, so also attach an sm_100a fatbin slice to that TU only (do not put
+    # 100a into CMAKE_CUDA_ARCHITECTURES for the whole target). This composes with
+    # the sm_120a slice above — both feature-qualified slices may coexist.
+    set_property(SOURCE cuda/matmul_v4_rc_mx_ozaki_native.cu APPEND PROPERTY
+      COMPILE_OPTIONS ${BTX_CUDA_SM100A_GENCODE_COMPILE_OPTION}
     )
   endif()
 else()

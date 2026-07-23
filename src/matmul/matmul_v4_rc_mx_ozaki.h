@@ -40,6 +40,7 @@ enum class RCOzakiMxfp4SelectedBackend : uint8_t {
     Unqualified = 0,
     SM120_MMA = 1,
     SM100_CUBLASLT = 2,
+    SM100_MMA = 3, // hand tcgen05.mma.block_scale on sm_100a (B200)
 };
 
 struct RCOzakiMxfp4Status {
