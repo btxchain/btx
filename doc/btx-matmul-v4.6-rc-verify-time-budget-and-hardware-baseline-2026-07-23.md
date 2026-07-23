@@ -217,13 +217,32 @@ Coverage note: the digest run directly toggles the **operand-generation XOF**
 (AVX2 multibuffer ↔ scalar CSHA256) and shows it is byte-identical, and the
 cross-arch match pins the AVX2 path to the ARM SHA-ext path. The **VNNI packed
 int8 recompute** is a verifier-path kernel (not part of the reference digest),
-so it is not toggled by these env vars; its byte-identity is enforced by the
-`PackedFastPathSelfTest` multi-vector scalar-oracle gate at init (auto-fallback
-to scalar on any mismatch) and exercised by the datacenter-suite verify
-assertions passing. `BTX_RC_PACKED_I8MM` is **not** currently wired as a runtime
-toggle (no-op); wiring it as an explicit operator kill switch + direct A/B for
-the VNNI recompute is a low-priority hardening follow-on, not a correctness gap
-(the self-test gate already provides the fail-safe).
+so the digest run does not exercise it directly; its byte-identity is enforced by
+the `PackedFastPathSelfTest` multi-vector scalar-oracle gate at init
+(auto-fallback to scalar on any mismatch) and exercised by the datacenter-suite
+verify assertions passing.
+
+### 7.2 Packed-recompute operator kill switch (`BTX_RC_PACKED_I8MM`)
+
+`RCDensePackedI8mmAvailable()` — the single selection point for the packed int8
+recompute, routed through by both the production carrier verifier
+(`matmul_v4_rc_freivalds_sampled.cpp`) and the compute bench — now honours
+`BTX_RC_PACKED_I8MM=0` as a **process-wide operator kill switch**. When set, both
+the ARM SMMLA and x86 VNNI packed paths are forced off and every recompute takes
+the non-packed transposed exact path (`RCDenseRowBlockTransposedExactI8` /
+`RCDenseTwoRowsBlockTransposedExactI8`). The switch is read once and cached (no
+per-block `getenv`, no mid-process flip).
+
+This is **consensus-safe**: the packed and transposed paths are byte-identical
+(the verdict is unchanged; only throughput differs), so a validator running with
+the switch either way reaches the same result. Its purposes:
+
+- **Escape hatch** — disable the packed kernels in the field if a SMMLA/VNNI
+  defect is ever found, without losing the (slower) correct verification.
+- **Direct A/B** — run the suite twice, once with the var unset and once with
+  `BTX_RC_PACKED_I8MM=0`; the episode digests and every verify verdict must
+  match. This is the whole-suite complement to the kernel-level
+  `PackedFastPathSelfTest`.
 
 ---
 

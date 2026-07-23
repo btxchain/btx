@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -398,7 +399,24 @@ bool PackedFastPathSelfTest()
 
 bool RCDensePackedI8mmAvailable()
 {
-    static const bool ok = PackedFastPathSelfTest();
+    // Single selection point for the packed int8 recompute fast path (ARM SMMLA /
+    // x86 AVX-512-VNNI). Every caller — the production carrier verifier
+    // (matmul_v4_rc_freivalds_sampled.cpp) and the compute bench — routes through
+    // here, so BTX_RC_PACKED_I8MM=0 is a process-wide operator kill switch that
+    // forces the non-packed scalar/transposed recompute everywhere. This is
+    // consensus-safe: the packed and scalar paths are byte-identical (enforced by
+    // PackedFastPathSelfTest below and by the cross-hardware digest match), so the
+    // verdict is unchanged whether the switch is on or off — only throughput
+    // differs. Use it as an escape hatch if a VNNI/SMMLA defect is ever found, or
+    // to A/B the two recompute paths (run the suite once with the var unset and
+    // once with BTX_RC_PACKED_I8MM=0; digests must match). Read once and cached so
+    // there is no per-block getenv and no mid-process flip.
+    static const bool ok = [] {
+        if (const char* env = std::getenv("BTX_RC_PACKED_I8MM")) {
+            if (env[0] == '0' && env[1] == '\0') return false;
+        }
+        return PackedFastPathSelfTest();
+    }();
     return ok;
 }
 
