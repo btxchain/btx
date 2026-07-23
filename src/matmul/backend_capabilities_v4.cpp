@@ -312,10 +312,85 @@ bool HasPassedDeterminismSelfTest(Kind kind)
     return eligibility.available && eligibility.admissible;
 }
 
+namespace {
+
+//! True when `kind` is compiled, present, §S.1-admissible, and (if required)
+//! has passed the ExactGemm / determinism self-test. Shared by explicit resolve
+//! and by the "auto" preference walk.
+bool KindReadyToMine(Kind kind, Eligibility* out_elig = nullptr)
+{
+    const Eligibility eligibility = EligibilityFor(kind);
+    if (out_elig) {
+        *out_elig = eligibility;
+    }
+    if (!(eligibility.available && eligibility.admissible)) {
+        return false;
+    }
+    if (eligibility.self_test_required && !HasPassedDeterminismSelfTest(kind)) {
+        return false;
+    }
+    return true;
+}
+
+//! Platform preference for BTX_MATMUL_V4_BACKEND=auto / DefaultBackendRequest().
+//! Apple prefers Metal (unified-memory Neural Accelerators); everywhere else
+//! prefers CUDA, then HIP/ROCm, then Ascend, then Metal (rare on non-Apple).
+//! CPU is never in the preference list — it is the universal fallback.
+const Kind* AutoPreferenceOrder(size_t& count)
+{
+#if defined(__APPLE__)
+    static constexpr Kind kOrder[] = {
+        Kind::METAL, Kind::CUDA, Kind::HIP, Kind::ASCEND,
+    };
+#else
+    static constexpr Kind kOrder[] = {
+        Kind::CUDA, Kind::HIP, Kind::ASCEND, Kind::METAL,
+    };
+#endif
+    count = sizeof(kOrder) / sizeof(kOrder[0]);
+    return kOrder;
+}
+
+Selection ResolveAutoBackend(const std::string& requested_input)
+{
+    Selection selection;
+    selection.requested_input = requested_input;
+    selection.requested_known = true;
+
+    size_t n = 0;
+    const Kind* order = AutoPreferenceOrder(n);
+    for (size_t i = 0; i < n; ++i) {
+        Eligibility eligibility;
+        if (!KindReadyToMine(order[i], &eligibility)) {
+            continue;
+        }
+        // Record the *selected* device as both requested and active so the
+        // accel one-shot log line reports a clean match (requested=auto,
+        // active=cuda|hip|metal|…) without the WARNING fallback path.
+        selection.requested = order[i];
+        selection.active = order[i];
+        selection.reason = std::string("auto_selected_") + ToString(order[i]) + ":" + eligibility.reason;
+        return selection;
+    }
+
+    selection.requested = Kind::CPU;
+    selection.active = Kind::CPU;
+    selection.reason = "auto_no_admissible_device_fallback_to_cpu";
+    return selection;
+}
+
+} // namespace
+
 Selection ResolveBackend(const std::string& requested)
 {
     Selection selection;
     selection.requested_input = requested;
+
+    const std::string normalized = ToLower(requested);
+    if (normalized == "auto" || normalized.empty()) {
+        // Empty string: treat like auto (DefaultBackendRequest / unset-adjacent).
+        return ResolveAutoBackend(requested.empty() ? "auto" : requested);
+    }
 
     bool known{false};
     selection.requested = ParseKind(requested, known);
@@ -327,28 +402,21 @@ Selection ResolveBackend(const std::string& requested)
         return selection;
     }
 
-    const Eligibility eligibility = EligibilityFor(selection.requested);
-    if (!eligibility.available) {
+    Eligibility eligibility;
+    if (!KindReadyToMine(selection.requested, &eligibility)) {
         selection.active = Kind::CPU;
-        selection.reason = ToString(selection.requested) + "_unavailable_fallback_to_cpu:" + eligibility.reason;
-        return selection;
-    }
-    if (!eligibility.admissible) {
-        // §S.1: runtime present but no bit-exact INT8 tensor path — the
-        // device is verification-only and MUST NOT mine (a device without an
-        // exact s8xs8->s32 path cannot reproduce the consensus digest).
-        selection.active = Kind::CPU;
-        selection.reason = ToString(selection.requested) + "_inadmissible_fallback_to_cpu:" + eligibility.reason;
-        return selection;
-    }
-
-    // §N.3-v fail-closed: self_test_required backends must have passed the
-    // determinism / ExactGemm self-test. Previously this was comment-only;
-    // HasPassedDeterminismSelfTest closes the gate at resolve time.
-    if (eligibility.self_test_required && !HasPassedDeterminismSelfTest(selection.requested)) {
-        selection.active = Kind::CPU;
-        selection.reason = ToString(selection.requested) +
-                           "_self_test_required_not_passed_fallback_to_cpu:" + eligibility.reason;
+        if (!eligibility.available) {
+            selection.reason = ToString(selection.requested) + "_unavailable_fallback_to_cpu:" + eligibility.reason;
+        } else if (!eligibility.admissible) {
+            // §S.1: runtime present but no bit-exact INT8 tensor path — the
+            // device is verification-only and MUST NOT mine (a device without an
+            // exact s8xs8->s32 path cannot reproduce the consensus digest).
+            selection.reason = ToString(selection.requested) + "_inadmissible_fallback_to_cpu:" + eligibility.reason;
+        } else {
+            // §N.3-v fail-closed: self_test_required backends must have passed.
+            selection.reason = ToString(selection.requested) +
+                               "_self_test_required_not_passed_fallback_to_cpu:" + eligibility.reason;
+        }
         return selection;
     }
 

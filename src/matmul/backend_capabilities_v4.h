@@ -110,8 +110,11 @@ Eligibility EligibilityFor(Kind kind);
 //! Eligibility for every backend, in Kind declaration order.
 std::vector<std::pair<Kind, Eligibility>> AllEligibility();
 
-//! Resolve a user-requested backend string ("cpu", "cuda"/"nvidia",
-//! "metal"/"mlx"/"apple", "hip"/"rocm"/"amd", "ascend"/"huawei"/"npu") against runtime eligibility.
+//! Resolve a user-requested backend string against runtime eligibility:
+//!   "auto" (or "") — pick the first §S.1-admissible device in platform order
+//!     (Apple: Metal→CUDA→HIP→Ascend; else: CUDA→HIP→Ascend→Metal), else CPU
+//!   "cpu", "cuda"/"nvidia", "metal"/"mlx"/"apple", "hip"/"rocm"/"amd",
+//!     "ascend"/"huawei"/"npu" — explicit request
 //! Unknown, unavailable, or INADMISSIBLE (verification-only, §S.1) requests
 //! fall back to CPU with a machine-readable reason. This is the hook
 //! matmul_v4::accel::ResolveBackend delegates to.

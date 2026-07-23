@@ -400,6 +400,26 @@ BOOST_AUTO_TEST_CASE(resolve_backend_never_selects_inadmissible_backend)
     BOOST_CHECK(ResolveBackend("ascend").requested == Kind::ASCEND);
     BOOST_CHECK(ResolveBackend("huawei").requested == Kind::ASCEND);
 
+    // "auto" is a first-class request: known, picks an admissible device in
+    // platform preference order (or CPU if none), never unknown_backend.
+    {
+        const auto auto_sel = ResolveBackend("auto");
+        BOOST_CHECK(auto_sel.requested_known);
+        BOOST_CHECK_EQUAL(auto_sel.requested_input, "auto");
+        BOOST_CHECK(auto_sel.active == auto_sel.requested);
+        const auto elig = matmul_v4::backend::EligibilityFor(auto_sel.active);
+        BOOST_CHECK(elig.available && elig.admissible);
+        if (auto_sel.active == Kind::CPU) {
+            BOOST_CHECK_EQUAL(auto_sel.reason, "auto_no_admissible_device_fallback_to_cpu");
+        } else {
+            BOOST_CHECK_MESSAGE(auto_sel.reason.rfind("auto_selected_", 0) == 0,
+                                "auto reason must be auto_selected_*: " << auto_sel.reason);
+        }
+        const auto empty_sel = ResolveBackend("");
+        BOOST_CHECK(empty_sel.requested_known);
+        BOOST_CHECK(empty_sel.active == auto_sel.active);
+    }
+
     // AllEligibility covers every backend exactly once, CPU first.
     const auto all = matmul_v4::backend::AllEligibility();
     BOOST_REQUIRE_EQUAL(all.size(), 5U);
