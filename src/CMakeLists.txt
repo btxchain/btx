@@ -77,7 +77,19 @@ set(BTX_BUILD_LT_CUTLASS_MXFP4 OFF)
 if(BTX_LT_CUTLASS_MXFP4 OR BTX_BMX4C_CUTLASS_MXFP4)
   set(BTX_BUILD_LT_CUTLASS_MXFP4 ON)
 endif()
-option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
+# Enable the CUDA backend automatically when a CUDA compiler is present, so a GPU
+# miner does not have to hand-set an "experimental" flag. check_language(CUDA)
+# probes WITHOUT erroring on hosts that lack a CUDA toolkit, so CPU-only / Apple /
+# non-CUDA builds resolve to OFF. Override explicitly with
+# -DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF (or =ON to force).
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  set(BTX_ENABLE_CUDA_DEFAULT ON)
+else()
+  set(BTX_ENABLE_CUDA_DEFAULT OFF)
+endif()
+option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable the CUDA MatMul backend (auto-on when a CUDA compiler is detected)" ${BTX_ENABLE_CUDA_DEFAULT})
 set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
 # Feature-qualified sm_120a native MXFP4 (block_scale mxf8f6f4 / QMMA.SF).
 # Default OFF so plain packaging (-DBTX_CUDA_ARCHITECTURES=120 / Guix
@@ -93,15 +105,15 @@ set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architec
 #      → compiles cuda/matmul_v4_rc_mx_ozaki_native_sm120a.cu with
 #        -gencode=arch=compute_120a,code=sm_120a (see cmake/BTXCudaSm120a.cmake).
 option(BTX_CUDA_SM120_MXFP4_NATIVE
-  "Compile dedicated sm_120a object TU for native block-scaled MXFP4 MMA (requires toolkit that accepts compute_120a)"
-  OFF)
+  "Native block-scaled MXFP4 MMA sm_120a object TU (default-on in CUDA builds; the configure probe below auto-disables it if the toolkit cannot assemble compute_120a)"
+  ${BTX_ENABLE_CUDA_EXPERIMENTAL})
 # Optional SM100 / B200 native packaging probe (Agent E+I). Default OFF.
 # The configure probe is intentionally fail-closed without B200 evidence —
 # enabling this option FATAL_ERRORs until a real sm_100 MX probe lands.
 # Independent of BTX_CUDA_SM120_MXFP4_NATIVE (SM120 packaging preserved).
 option(BTX_CUDA_SM100_NATIVE
-  "OPTIONAL fail-closed SM100/B200 native probe (stays OFF without B200 evidence)"
-  OFF)
+  "Native SM100/B200 tcgen05 MXFP4 path (default-on in CUDA builds; the configure probe below auto-disables it if the toolkit cannot assemble compute_100a — fail-closed)"
+  ${BTX_ENABLE_CUDA_EXPERIMENTAL})
 # Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
 # bridge that registers the narrow provider ABI in src/tpu. The core never
 # links OpenXLA directly. OFF keeps registration and all launches fail-closed.
@@ -152,16 +164,19 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   if(BTX_CUDA_SM120_MXFP4_NATIVE)
     btx_cuda_probe_sm120a_mxfp4(BTX_CUDA_SM120A_MXFP4_PROBE_OK)
     if(NOT BTX_CUDA_SM120A_MXFP4_PROBE_OK)
+      # Default-on in CUDA builds: a toolkit that cannot assemble compute_120a must
+      # NOT break the build — disable the native MXFP4 object and fall back to the
+      # exact INT8 IMMA path (which still mines). Force-debug with a newer NVCC.
       unset(BTX_CUDA_SM120_MXFP4_NATIVE CACHE)
-      message(FATAL_ERROR
-        "BTX_CUDA_SM120_MXFP4_NATIVE=ON but the configure-time sm_120a probe failed.\n"
-        "Need an NVCC that accepts ${BTX_CUDA_SM120A_GENCODE_FLAG} and can assemble "
-        "mma.sync kind::mxf8f6f4.block_scale (architecture-accelerated MXFP4).\n"
-        "Plain packaging still works with BTX_CUDA_SM120_MXFP4_NATIVE=OFF and "
-        "BTX_CUDA_ARCHITECTURES=120 (or Guix 120-real;120-virtual).\n"
-        "Probe log:\n${BTX_CUDA_SM120A_PROBE_LOG}")
+      set(BTX_CUDA_SM120_MXFP4_NATIVE OFF)
+      message(WARNING
+        "sm_120a native MXFP4 probe failed; this NVCC cannot assemble "
+        "${BTX_CUDA_SM120A_GENCODE_FLAG} / mma.sync kind::mxf8f6f4.block_scale. "
+        "Disabling the native MXFP4 object — the CUDA backend still builds and "
+        "mines via the exact INT8 IMMA path.\nProbe log:\n${BTX_CUDA_SM120A_PROBE_LOG}")
+    else()
+      message(STATUS "BTX sm_120a MXFP4 probe OK (${BTX_CUDA_SM120A_GENCODE_FLAG})")
     endif()
-    message(STATUS "BTX sm_120a MXFP4 probe OK (${BTX_CUDA_SM120A_GENCODE_FLAG})")
   endif()
   # SM100 / B200: real sm_100a tcgen05 configure probe (cmake/BTXCudaSm100.cmake).
   # Independent of SM120 packaging above (separate ISA / separate latch). Still
@@ -172,19 +187,20 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   if(BTX_CUDA_SM100_NATIVE)
     btx_cuda_probe_sm100_native(BTX_CUDA_SM100_NATIVE_PROBE_OK)
     if(NOT BTX_CUDA_SM100_NATIVE_PROBE_OK)
+      # Default-on in CUDA builds: a toolkit without sm_100a tcgen05 support must
+      # NOT break the build — disable the native object and fall back to the
+      # SM100_CUBLASLT latch / exact INT8 path (both still mine).
       unset(BTX_CUDA_SM100_NATIVE CACHE)
-      message(FATAL_ERROR
-        "BTX_CUDA_SM100_NATIVE=ON but the configure-time sm_100a tcgen05 probe "
-        "failed.\n"
-        "Need an NVCC (CUDA >= 12.8, 13.x recommended) that accepts "
-        "${BTX_CUDA_SM100A_GENCODE_FLAG} and can assemble "
-        "tcgen05.mma kind::mxf8f6f4.block_scale (datacenter Blackwell / B200).\n"
-        "Plain packaging still works with BTX_CUDA_SM100_NATIVE=OFF and "
-        "BTX_CUDA_ARCHITECTURES=100 (or 120); SM100 then runs the separate "
-        "SM100_CUBLASLT latch or the exact INT8 path.\n"
+      set(BTX_CUDA_SM100_NATIVE OFF)
+      message(WARNING
+        "sm_100a tcgen05 MXFP4 probe failed; this NVCC (need CUDA >= 12.8) cannot "
+        "assemble ${BTX_CUDA_SM100A_GENCODE_FLAG} / tcgen05.mma "
+        "kind::mxf8f6f4.block_scale. Disabling the native object — SM100 still "
+        "builds and runs via SM100_CUBLASLT or the exact INT8 path.\n"
         "Probe log:\n${BTX_CUDA_SM100_PROBE_LOG}")
+    else()
+      message(STATUS "BTX sm_100a tcgen05 MXFP4 probe OK (${BTX_CUDA_SM100A_GENCODE_FLAG})")
     endif()
-    message(STATUS "BTX sm_100a tcgen05 MXFP4 probe OK (${BTX_CUDA_SM100A_GENCODE_FLAG})")
   endif()
 endif()
 
