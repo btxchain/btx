@@ -478,4 +478,60 @@ BOOST_AUTO_TEST_CASE(frvs_carrier_parallel_verdict_and_reason_are_thread_invaria
     BOOST_CHECK_EQUAL(bad_why1, "v7fs:recompute_mismatch");
 }
 
+// (i) #101 REGRESSION LOCK — the profile-2 carrier verifier ENFORCES the fused-FFN
+//     matmul, targeted at the FFN layer specifically (the other tamper tests hit
+//     sampled[0], which may be an attention/SV layer). GemmPhase2Fwd is the streamed
+//     DOWN projection X[l+1]=Extract(H·W_down+X[l]); H=Extract(X·W_up) is the INTERNAL
+//     UP projection the verifier recomputes on the fly when a Fwd tile is checked. So
+//     when a Fwd layer is sampled, the anchored recompute exercises BOTH FFN matmuls
+//     (W_up internal + W_down streamed) and the result is bound to the committed output
+//     opened against round_roots. A verifier that merely trusted the committed FFN
+//     output (the #101 break) would accept a forged Fwd tile; this asserts it does not.
+BOOST_AUTO_TEST_CASE(frvs_ffn_matmul_is_enforced_101)
+{
+    Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 101);
+    BOOST_REQUIRE(f.ok);
+
+    // λ ≥ the sampleable-layer count ⇒ FreivaldsSampleLayers (without replacement)
+    // covers every layer, so every fused-FFN DOWN layer is in the sample set.
+    constexpr uint32_t kFfnLambda = 64;
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string bwhy;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kFfnLambda), bwhy);
+
+    // Non-vacuous: the honest carrier actually SAMPLES a fused-FFN DOWN layer with a
+    // committed output tile, so the FFN matmul path is genuinely exercised. This
+    // directly refutes the premise of #101 ("verifier does not enforce FFN matmul").
+    int ffn_idx = -1;
+    for (size_t i = 0; i < carrier.sampled.size(); ++i) {
+        if (carrier.sampled[i].kind == rc::RCGkrLayerKind::GemmPhase2Fwd &&
+            !carrier.sampled[i].tiles.empty() &&
+            !carrier.sampled[i].tiles[0].extract_out.empty()) {
+            ffn_idx = static_cast<int>(i);
+            break;
+        }
+    }
+    BOOST_REQUIRE_MESSAGE(ffn_idx >= 0, "toy episode must sample a fused-FFN DOWN layer");
+
+    // Honest carrier verifies, and the sampled FFN layer is counted as checked.
+    std::string why;
+    rc::RCFreivaldsSampledTiming tmg;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why, &tmg), why);
+    BOOST_CHECK_GT(tmg.n_freivalds_calls, 0u);
+
+    // Forge the fused-FFN layer's committed output. The verifier recomputes
+    // H=Extract(X·W_up) from the anchored input + PRF W_up, then Extract(H·W_down+X)
+    // from PRF W_down, and binds the result to the committed tile — so the forgery is
+    // caught by the FFN recompute (v7fs:recompute_mismatch), NOT merely the leaf
+    // opening. A miner cannot substitute a self-consistent fake FFN output.
+    rc::RCFreivaldsSampledCarrier forged = carrier;
+    forged.sampled[ffn_idx].tiles[0].extract_out[0] ^= 0x1;
+    std::string bad_why;
+    BOOST_CHECK(
+        !rc::VerifyEpisodeFreivaldsSampledCarrier(forged, f.h, 0, f.target, &bad_why, nullptr));
+    BOOST_CHECK_EQUAL(bad_why, "v7fs:recompute_mismatch");
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -258,3 +258,40 @@ gates that remain are the ones already listed in the characteristics doc §6
 (external crypto audit, native-silicon qualification, ASERT calibration) plus, on
 the code side, the two x86 byte-identity gates in §7 above. None of those relax
 the mainnet `INT32_MAX` heights, which stay set until a deliberate cutover.
+
+---
+
+## 9. FFN matmul enforcement — soundness item #101 (RESOLVED)
+
+An earlier tracking item flagged a soundness concern: *the profile-2 carrier
+verifier does not enforce the FFN matmul* — i.e. that a miner might commit a
+self-consistent but fabricated FFN output and have it accepted without the
+verifier recomputing `X·W_up·W_down`. Reviewed against the current verifier
+(`matmul_v4_rc_freivalds_sampled.cpp`), this is **closed in code**:
+
+- The fused-FFN is sampled as its **DOWN** layer `GemmPhase2Fwd`
+  (`X[l+1]=Extract(H·W_down+X[l])`). The **UP** projection
+  `H=Extract(X·W_up)` (`GemmPhase2FfnUp`) is internal and *not* streamed — the
+  verifier **recomputes it on the fly** when a Fwd tile is checked. So checking
+  one sampled Fwd tile exercises **both** FFN matmuls.
+- The recompute uses an **anchored input** (X-row opened against `round_roots`,
+  or PRF-regenerated X0 at `l=0`) and **PRF-derived weights** (`W_up`/`W_down`
+  from the operand seeds; the miner cannot choose them).
+- The recomputed output is bound to the committed tile: `finish_tile` rejects on
+  `eo != tile.extract_out` (`v7fs:recompute_mismatch`) **before** it opens
+  `tile.extract_out` against `round_roots`. A fabricated FFN output fails the
+  recompute check, not merely the Merkle opening.
+- The layer's declared `kind` is itself cross-checked against the recomputed
+  provenance (`e.kind == lp.kind`), so a miner cannot mislabel an FFN layer to
+  dodge the FFN recompute path.
+
+**Regression lock:** `matmul_v4_rc_freivalds_sampled_tests ::
+frvs_ffn_matmul_is_enforced_101` builds an honest carrier with λ large enough to
+cover every sampleable layer, asserts (non-vacuously) that a `GemmPhase2Fwd`
+layer is actually sampled, then forges that layer's committed output and asserts
+the verifier rejects with `v7fs:recompute_mismatch`. This guards the FFN
+enforcement against regression, distinct from the pre-existing generic
+`sampled[0]` tamper tests (which may land on an attention/SV layer).
+
+This is a verifier-mechanism confirmation, not a substitute for the external
+cryptographic audit (§8 / characteristics §6), which remains a gate.
