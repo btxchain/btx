@@ -38,6 +38,11 @@
 #endif
 #endif
 
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
+#include <compat/cpuid.h>
+#include <immintrin.h>
+#endif
+
 namespace matmul::v4::rc {
 
 namespace {
@@ -392,7 +397,158 @@ bool DenseRowBlockI8mmAvailable()
     static const bool ok = DenseRowBlockI8mmSelfTest();
     return ok;
 }
+#endif // __aarch64__ && __ARM_NEON
+
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
+#if defined(__clang__) || defined(__GNUC__)
+#define BTX_RC_TARGET_AVX2 __attribute__((target("avx2")))
+#else
+#define BTX_RC_TARGET_AVX2
 #endif
+
+// OS-enabled AVX state (XMM|YMM saved by the OS) + CPUID.7 EBX bit 5 (AVX2).
+// Mirrors the detection in matmul_v4_rc_freivalds_i8mm.cpp.
+bool DenseAvxStateEnabled()
+{
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    GetCPUID(1, 0, eax, ebx, ecx, edx);
+    if (((ecx >> 27) & 1u) == 0) return false; // OSXSAVE
+    uint32_t a = 0, d = 0;
+    __asm__("xgetbv" : "=a"(a), "=d"(d) : "c"(0));
+    return (a & 0x6u) == 0x6u; // XMM (bit1) | YMM (bit2) enabled by the OS.
+}
+
+bool DenseHaveAvx2()
+{
+    if (!DenseAvxStateEnabled()) return false;
+    uint32_t eax = 0, ebx = 0, ecx = 0, edx = 0;
+    GetCPUID(7, 0, eax, ebx, ecx, edx);
+    return ((ebx >> 5) & 1u) != 0;
+}
+
+// Number of rows folded before the int32 partials are flushed to int64. Chosen so
+// a full chunk cannot overflow int32: within a chunk every int32 lane accumulates
+// at most kDenseAvx2Chunk products, each |a*b| <= 128*128 = 16384, so
+// |lane| <= 65536 * 16384 = 2^16 * 2^14 = 2^30 < 2^31. (kDenseAvx2Chunk*128*128
+// < 2^31 is the invariant.)
+constexpr uint32_t kDenseAvx2Chunk = 65536;
+
+// AVX2 broadcast-MAC recompute of one 32-col output block. BYTE-IDENTICAL to
+// DenseRowBlockScalar for ALL k and all int8 inputs, so it needs neither the
+// DenseRowBlockFitsS32 gate nor any k alignment: k is processed in chunks of
+// kDenseAvx2Chunk with int32 lane accumulation (exact within a chunk, see above),
+// and each chunk's 32 int32 partials fold into int64 acc[] (exact for the whole
+// k sum: |acc[c]| <= k*16384, e.g. 786432*16384 ~ 1.3e10 << 2^63).
+//
+// Lane -> column mapping (must match DenseRowBlockScalar, which writes
+// out[c] += a*row[c] with row[c] = rhs[t*rhs_cols + rhs_col0 + c]):
+//   - _mm256_loadu_si256 puts row[i] in byte lane i (i=0..31).
+//   - _mm256_cvtepi8_epi16 widens the low/high 128-bit halves PRESERVING lane
+//     order: w0[j]=row[j] (j=0..15), w1[j]=row[16+j].
+//   - _mm256_mullo_epi16 is per-lane, so p0[j]=a*row[j], p1[j]=a*row[16+j]
+//     (exact: |a*row| <= 16384 < 2^15, no wrap).
+//   - _mm256_cvtepi16_epi32 again preserves lane order across the two 128-bit
+//     halves, giving int32 groups of 8: cols 0..7, 8..15, 16..23, 24..31.
+//   - acc0..acc3 store to tmp[0..7],[8..15],[16..23],[24..31], i.e. tmp[c] is
+//     the partial for column c. No cross-lane permute is ever used, so column c
+//     lands in exactly the accumulator lane the scalar loop writes.
+BTX_RC_TARGET_AVX2 void DenseRowBlockAvx2S32(const int8_t* lhs, const int8_t* rhs, uint32_t k,
+                                             uint32_t rhs_cols, uint32_t rhs_col0,
+                                             int64_t out[kRCMxBlockLen])
+{
+    int64_t acc[kRCMxBlockLen];
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) acc[c] = 0;
+
+    uint32_t t = 0;
+    while (t < k) {
+        const uint32_t end = std::min(k, t + kDenseAvx2Chunk);
+        __m256i acc0 = _mm256_setzero_si256(); // cols 0..7
+        __m256i acc1 = _mm256_setzero_si256(); // cols 8..15
+        __m256i acc2 = _mm256_setzero_si256(); // cols 16..23
+        __m256i acc3 = _mm256_setzero_si256(); // cols 24..31
+        for (; t < end; ++t) {
+            const int8_t* row = rhs + static_cast<size_t>(t) * rhs_cols + rhs_col0;
+            const __m256i b = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(row));
+            const __m256i w0 = _mm256_cvtepi8_epi16(_mm256_castsi256_si128(b));       // row[0..15]
+            const __m256i w1 = _mm256_cvtepi8_epi16(_mm256_extracti128_si256(b, 1));  // row[16..31]
+            const __m256i av = _mm256_set1_epi16(static_cast<int16_t>(lhs[t]));
+            const __m256i p0 = _mm256_mullo_epi16(av, w0); // a*row[0..15]
+            const __m256i p1 = _mm256_mullo_epi16(av, w1); // a*row[16..31]
+            acc0 = _mm256_add_epi32(acc0, _mm256_cvtepi16_epi32(_mm256_castsi256_si128(p0)));
+            acc1 = _mm256_add_epi32(acc1, _mm256_cvtepi16_epi32(_mm256_extracti128_si256(p0, 1)));
+            acc2 = _mm256_add_epi32(acc2, _mm256_cvtepi16_epi32(_mm256_castsi256_si128(p1)));
+            acc3 = _mm256_add_epi32(acc3, _mm256_cvtepi16_epi32(_mm256_extracti128_si256(p1, 1)));
+        }
+        alignas(32) int32_t tmp[kRCMxBlockLen];
+        _mm256_store_si256(reinterpret_cast<__m256i*>(tmp + 0), acc0);
+        _mm256_store_si256(reinterpret_cast<__m256i*>(tmp + 8), acc1);
+        _mm256_store_si256(reinterpret_cast<__m256i*>(tmp + 16), acc2);
+        _mm256_store_si256(reinterpret_cast<__m256i*>(tmp + 24), acc3);
+        for (uint32_t c = 0; c < kRCMxBlockLen; ++c) acc[c] += static_cast<int64_t>(tmp[c]);
+    }
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) out[c] = acc[c];
+}
+
+// One byte-equality case vs DenseRowBlockScalar. `extreme` fills lhs/rhs with
+// ±128/127 so products sit at the |16384| worst case (exercises int32-per-chunk
+// headroom and, for large k, an overall sum that overflows int32 but not int64).
+bool DenseRowBlockAvx2Case(uint32_t k, uint32_t rhs_cols, uint32_t rhs_col0, bool extreme)
+{
+    std::vector<int8_t> lhs(k);
+    std::vector<int8_t> rhs(static_cast<size_t>(k) * rhs_cols);
+    for (uint32_t t = 0; t < k; ++t) {
+        lhs[t] = extreme
+                     ? ((t & 1u) ? static_cast<int8_t>(-128) : static_cast<int8_t>(127))
+                     : static_cast<int8_t>((static_cast<int32_t>((t * 37u + 11u) & 0xffu)) - 128);
+        for (uint32_t j = 0; j < rhs_cols; ++j) {
+            const int32_t v =
+                extreme ? (((t + j) & 1u) ? -128 : 127)
+                        : static_cast<int32_t>(((t + 3u) * 131u + j * 17u) & 0xffu) - 128;
+            rhs[static_cast<size_t>(t) * rhs_cols + j] = static_cast<int8_t>(v);
+        }
+    }
+    int64_t scalar[kRCMxBlockLen];
+    int64_t avx2[kRCMxBlockLen];
+    DenseRowBlockScalar(lhs.data(), rhs.data(), k, rhs_cols, rhs_col0, scalar);
+    DenseRowBlockAvx2S32(lhs.data(), rhs.data(), k, rhs_cols, rhs_col0, avx2);
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        if (scalar[c] != avx2[c]) return false;
+    }
+    return true;
+}
+
+bool DenseRowBlockAvx2SelfTest()
+{
+    if (!DenseHaveAvx2()) return false;
+    // Small k with various rhs_col0 (block need not be aligned; rhs_col0+32<=cols).
+    if (!DenseRowBlockAvx2Case(1, 32, 0, false)) return false;    // k=1 edge
+    if (!DenseRowBlockAvx2Case(257, 96, 32, false)) return false; // offset block
+    if (!DenseRowBlockAvx2Case(64, 40, 8, false)) return false;   // unaligned col0
+    // Chunk-boundary crossings.
+    if (!DenseRowBlockAvx2Case(kDenseAvx2Chunk - 1, 33, 1, false)) return false; // just under
+    if (!DenseRowBlockAvx2Case(kDenseAvx2Chunk, 32, 0, false)) return false;     // exactly one chunk
+    if (!DenseRowBlockAvx2Case(kDenseAvx2Chunk + 1, 48, 16, false)) return false; // just over
+    // Large k, ±128 extremes: spans 4 chunks and its overall sum exceeds int32,
+    // proving the int32->int64 fold (200000*16384 ~ 3.3e9 > 2^31).
+    if (!DenseRowBlockAvx2Case(200000, 32, 0, true)) return false;
+    return true;
+}
+
+bool DenseRowBlockAvx2Available()
+{
+    // Process-wide operator kill switch BTX_RC_DENSE_AVX2=0 forces the int64 scalar
+    // recompute everywhere (consensus-safe: the AVX2 and scalar paths are
+    // byte-identical, enforced by DenseRowBlockAvx2SelfTest above). Read once and
+    // cached so there is no per-block getenv/CPUID and no mid-process flip.
+    static const bool ok = [] {
+        if (const char* env = std::getenv("BTX_RC_DENSE_AVX2")) {
+            if (env[0] == '0' && env[1] == '\0') return false;
+        }
+        return DenseRowBlockAvx2SelfTest();
+    }();
+    return ok;
+}
+#endif // __x86_64__
 
 // The sampleable-unit list: Λ layer indices whose extract_out is streamed.
 // Identical on prover and verifier — derived from the public wiring only.
@@ -683,6 +839,14 @@ void RCDenseRowBlockExactI8(const int8_t* lhs, const int8_t* rhs, uint32_t k,
 #if defined(__aarch64__) && defined(__ARM_NEON)
     if (RCDenseRowBlockVectorizedAvailable() && DenseRowBlockFitsS32(k)) {
         DenseRowBlockNeonS32(lhs, rhs, k, rhs_cols, rhs_col0, out);
+        return;
+    }
+#endif
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64)
+    // Chunked int32->int64 AVX2 kernel: byte-exact for ANY k (no DenseRowBlockFitsS32
+    // gate), so it also covers wide SV (k=n_ctx) that the int32-only NEON path skips.
+    if (DenseRowBlockAvx2Available()) {
+        DenseRowBlockAvx2S32(lhs, rhs, k, rhs_cols, rhs_col0, out);
         return;
     }
 #endif
