@@ -1421,13 +1421,16 @@ struct ProdCarrierBenchReport {
     uint32_t first_m{0};
     uint32_t first_n{0};
     uint32_t first_k{0};
+    uint64_t first_layer_regen_misses{0};
+    uint64_t first_layer_regen_hits{0};
+    uint64_t first_layer_regen_bytes{0};
+    uint64_t first_layer_extract_tiles{0};
     uint32_t layers_checked{0};
     uint64_t extract_tiles{0};
     uint32_t merkle_openings{0};
     uint64_t merkle_hashes{0};
     uint32_t checked_merkle_openings{0};
     uint64_t checked_merkle_hashes{0};
-    uint64_t first_layer_extract_tiles{0};
     uint32_t first_layer_checked_merkle_openings{0};
     uint64_t first_layer_checked_merkle_hashes{0};
     size_t carrier_bytes{0};
@@ -1435,9 +1438,6 @@ struct ProdCarrierBenchReport {
     uint64_t regen_misses{0};
     uint64_t regen_hits{0};
     uint64_t regen_bytes{0};
-    uint64_t first_layer_regen_misses{0};
-    uint64_t first_layer_regen_hits{0};
-    uint64_t first_layer_regen_bytes{0};
     uint64_t planned_regen_bytes_full{0};
     bool recompute_vectorized{false};
     uint64_t checksum{0};
@@ -1574,6 +1574,14 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
     for (uint32_t u : units) {
         const uint32_t li = sampleable[u];
         const auto& lp = prov[li];
+        const auto t_layer = std::chrono::steady_clock::now();
+        const double regen_s_before = rep.regen_s;
+        const double recompute_s_before = rep.recompute_s;
+        const double merkle_s_before = rep.merkle_s;
+        const uint64_t regen_misses_before = rep.regen_misses;
+        const uint64_t regen_hits_before = rep.regen_hits;
+        const uint64_t regen_bytes_before = rep.regen_bytes;
+        const uint64_t extract_tiles_before = rep.extract_tiles;
         if (rep.layers_checked == 0) {
             rep.first_layer_index = li;
             rep.first_layer_kind = static_cast<uint32_t>(lp.kind);
@@ -1710,6 +1718,16 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 rep.checked_merkle_hashes - layer_checked_merkle_hashes0;
         }
         ++rep.layers_checked;
+        if (rep.layers_checked == 1) {
+            rep.first_layer_total_s = elapsed(t_layer);
+            rep.first_layer_regen_s = rep.regen_s - regen_s_before;
+            rep.first_layer_recompute_s = rep.recompute_s - recompute_s_before;
+            rep.first_layer_merkle_s = rep.merkle_s - merkle_s_before;
+            rep.first_layer_regen_misses = rep.regen_misses - regen_misses_before;
+            rep.first_layer_regen_hits = rep.regen_hits - regen_hits_before;
+            rep.first_layer_regen_bytes = rep.regen_bytes - regen_bytes_before;
+            rep.first_layer_extract_tiles = rep.extract_tiles - extract_tiles_before;
+        }
         rep.total_s = elapsed(t0);
         if (!full && rep.total_s > 0.900) {
             rep.stopped_at_budget = true;
@@ -1751,6 +1769,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
                        << " first_m=" << rep.first_m
                        << " first_n=" << rep.first_n
                        << " first_k=" << rep.first_k
+                       << " first_layer_ms=" << (rep.first_layer_total_s * 1000.0)
+                       << " first_layer_regen_ms=" << (rep.first_layer_regen_s * 1000.0)
+                       << " first_layer_recompute_ms=" << (rep.first_layer_recompute_s * 1000.0)
+                       << " first_layer_merkle_ms=" << (rep.first_layer_merkle_s * 1000.0)
+                       << " first_layer_regen_misses=" << rep.first_layer_regen_misses
+                       << " first_layer_regen_hits=" << rep.first_layer_regen_hits
+                       << " first_layer_regen_bytes=" << rep.first_layer_regen_bytes
+                       << " first_layer_extract_tiles=" << rep.first_layer_extract_tiles
                        << " layers_checked=" << rep.layers_checked
                        << " extract_tiles=" << rep.extract_tiles
                        << " carrier_bytes=" << rep.carrier_bytes
