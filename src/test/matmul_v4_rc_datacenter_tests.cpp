@@ -1190,7 +1190,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
     rc::RCFreivaldsSampledCarrier tampered = carrier;
     bool tampered_one = false;
     for (auto& e : tampered.sampled) {
-        if (!e.Y.empty()) { e.Y[0] += 1; tampered_one = true; break; }
+        for (auto& t : e.tiles) {
+            if (!t.Y.empty()) { t.Y[0] += 1; tampered_one = true; break; }
+        }
+        if (tampered_one) break;
     }
     BOOST_REQUIRE(tampered_one);
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), tampered);
@@ -1578,6 +1581,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_lambda512_tleaf_compute_hash_margin)
     const double max_possible = 1.5 * dc.d_model / 1.0 / knee; // T_leaf → ∞
     BOOST_CHECK_LT(margin_dc, max_possible);
     BOOST_CHECK_LT(max_possible, 1.0);  // even a perfect tree stays at the ~0.96 knee
+}
+
 // (h) ASYNC-WORKER MEMO INTEGRITY: the ENC-DR verdict memo's invariant is that a
 //     verdict is a PURE FUNCTION OF THE HEADER. A profile-2 false verdict caused
 //     solely by a not-yet-arrived carrier is environment-dependent, so the worker
