@@ -668,6 +668,55 @@ struct RCGkrEpisodeAirProveResultV7 {
     const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
     const arith_uint256& target, const air_episode::EpisodeAirProveOptions& opt = {});
 
+// ============================================================================
+// SEAM for the sublinear Freivalds-sampled verifier (matmul_v4_rc_freivalds_
+// sampled.{h,cpp}). Exposes the file-local Λ wiring provenance and the round-
+// stream reconstruction so the sampled path can, for the λ SAMPLED layers only,
+// re-run the Extract glue, bind chained operands, and open extract_out against
+// round_roots WITHOUT re-deriving the whole episode. ADDITIVE: no existing
+// behavior changes; arbiter stays OFF; never consensus.
+// ============================================================================
+
+/** One operand's Λ provenance (leaf PRF expansion, or a chained prior output). */
+struct RCGkrSampledOperandProv {
+    bool is_leaf{true};
+    uint256 seed{};            // leaf: expansion seed (valid iff is_leaf)
+    uint32_t erows{0}, ecols{0}; // untransposed operand dims
+    size_t src_idx{0};         // chained: producing layer index (valid iff !is_leaf)
+    bool transpose{false};     // operand = transpose(source/leaf expansion)
+};
+
+/** Per-layer provenance the sampled verifier needs (public, verifier-derivable
+ *  from header+params+round_roots — never prover data). */
+struct RCGkrSampledLayerProv {
+    RCGkrLayerKind kind{};
+    uint32_t round{0}, layer{0}, m{0}, n{0}, k{0};
+    uint256 extract_prf{};     // per-layer Extract sampler PRF key
+    bool fwd_residual{false};  // extract_in = Y + A (Fwd residual) when true
+    RCGkrSampledOperandProv a{}, b{};
+};
+
+/** Verifier-computable Λ layer provenance (wraps the canonical episode wiring).
+ *  layers[i] corresponds one-to-one with the i-th RCGkrV7WireWitness. */
+[[nodiscard]] std::vector<RCGkrSampledLayerProv> RCGkrEpisodeLayerProvenance(
+    const CBlockHeader& header, const RCEpisodeParams& params,
+    const std::vector<uint256>& round_roots);
+
+/** Reconstruct round `round`'s tile-tree byte stream (Z ‖ per-layer X‖G‖D) from
+ *  the carried wires — byte-identical to the miner's RoundMerkleStream input.
+ *  Used by the sampled path to build/verify O(log N) tile-tree openings. */
+[[nodiscard]] std::vector<int8_t> RCGkrReconstructRoundStream(
+    const std::vector<RCGkrV7WireWitness>& wires, uint32_t round,
+    const RCEpisodeParams& params);
+
+/** Exported wrappers over the file-local FS/digest helpers (byte-identical to
+ *  the compact-verifier gates). digest = SHA256d(kRCEpisodeTag ‖ round_roots);
+ *  pow_bind = tagged(claimed_digest); round seed = Sha256TaggedU32(ROUND, prev
+ *  root or sigma, round). Additive; not consensus. */
+[[nodiscard]] uint256 RCGkrEpisodeDigestFromRoots(const std::vector<uint256>& round_roots);
+[[nodiscard]] uint256 RCGkrDerivePowBind(const uint256& claimed_digest);
+[[nodiscard]] uint256 RCGkrRoundSeed(const uint256& prev_root_or_sigma, uint32_t round);
+
 namespace air_recurse { struct EpisodeAggregateProof; }
 
 /**

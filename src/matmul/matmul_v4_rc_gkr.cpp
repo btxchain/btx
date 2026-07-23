@@ -1943,6 +1943,63 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
 
 } // namespace
 
+// --- Sublinear Freivalds-sampled seam (additive; see header banner). ---------
+std::vector<RCGkrSampledLayerProv> RCGkrEpisodeLayerProvenance(
+    const CBlockHeader& header, const RCEpisodeParams& params,
+    const std::vector<uint256>& round_roots)
+{
+    const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, params, round_roots);
+    std::vector<RCGkrSampledLayerProv> out;
+    out.reserve(prov.size());
+    auto conv = [](const TensorRef& t) {
+        RCGkrSampledOperandProv o;
+        o.is_leaf = t.is_leaf;
+        o.seed = t.seed;
+        o.erows = t.erows;
+        o.ecols = t.ecols;
+        o.src_idx = t.src_idx;
+        o.transpose = t.transpose;
+        return o;
+    };
+    for (const LayerProv& lp : prov) {
+        RCGkrSampledLayerProv s;
+        s.kind = lp.kind;
+        s.round = lp.round;
+        s.layer = lp.layer;
+        s.m = lp.m;
+        s.n = lp.n;
+        s.k = lp.k;
+        s.extract_prf = lp.extract_prf;
+        s.fwd_residual = lp.fwd_residual;
+        s.a = conv(lp.a);
+        s.b = conv(lp.b);
+        out.push_back(s);
+    }
+    return out;
+}
+
+std::vector<int8_t> RCGkrReconstructRoundStream(const std::vector<RCGkrV7WireWitness>& wires,
+                                                uint32_t round, const RCEpisodeParams& params)
+{
+    return ReconstructRoundStreamFromWitness(wires, round, params);
+}
+
+// Thin exported wrappers over the file-local FS/digest helpers so the additive
+// sampled verifier runs the byte-identical trivial/digest/round-seed gates
+// without re-deriving them (no drift). Not consensus.
+uint256 RCGkrEpisodeDigestFromRoots(const std::vector<uint256>& round_roots)
+{
+    return EpisodeDigestFromRoots(round_roots);
+}
+uint256 RCGkrDerivePowBind(const uint256& claimed_digest)
+{
+    return DerivePowBind(claimed_digest);
+}
+uint256 RCGkrRoundSeed(const uint256& prev_root_or_sigma, uint32_t round)
+{
+    return Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, prev_root_or_sigma, round);
+}
+
 RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpisodeParams& params,
                                         int32_t height, const arith_uint256& target,
                                         const uint256& claimed_digest)
