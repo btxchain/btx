@@ -33,6 +33,8 @@
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <matmul/matmul_sketch_cache.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/pow_v4.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -146,6 +148,20 @@ static constexpr auto MATMUL_SKETCH_REQUEST_TTL{60s};
  *  inflow approximates the block rate, and each accepted message costs up to an
  *  8 MiB authentication hash — this bounds that CPU per peer BEFORE hashing. */
 static constexpr double MATMUL_SKETCH_RECV_BUCKET_MAX{8.0};
+/** Datacenter-profile `rccarrier` relay budgets. The carrier is a real
+ *  amplification surface (a 32-byte getrccarrier triggers an up-to-12 MiB
+ *  reply) AND, unlike the best-effort sketch, its authentication on receipt
+ *  runs the full λ-sampled Freivalds/opening verifier (real CPU). We therefore
+ *  reuse the AUDITED sketch relay's exact three-limit serve discipline and
+ *  ingress bucket — same knobs, independent counters, so carrier traffic can
+ *  neither weaken nor be masked by sketch traffic. Serve: per-peer token bucket
+ *  + per-(peer,block) dedup window + node-wide egress byte budget. Receive:
+ *  per-peer ingress token bucket spent BEFORE the verify. */
+static constexpr double MATMUL_CARRIER_SERVE_BUCKET_MAX{16.0};
+static constexpr size_t MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC{size_t{12} * 1024 * 1024};
+static constexpr double MATMUL_CARRIER_RECV_BUCKET_MAX{8.0};
+static_assert(MAX_RCCARRIER_PAYLOAD_SIZE >= matmul::v4::rc::kRCFreivaldsCarrierMaxSerializedBytes,
+              "the rccarrier transport ceiling must admit any in-bounds carrier");
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
  *  when requested. For older blocks, a regular BLOCK response will be sent. */
 static const int MAX_CMPCTBLOCK_DEPTH = 5;
@@ -551,6 +567,16 @@ struct Peer {
      *  bucket above. Spent BEFORE the up-to-8-MiB authentication hash. */
     double m_matmul_sketch_recv_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_SKETCH_RECV_BUCKET_MAX};
     std::chrono::microseconds m_matmul_sketch_recv_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+
+    /** Datacenter-profile rccarrier serve/receive rate-limit state, same idiom
+     *  and lifetime as the sketch buckets above (touched only under
+     *  g_msgproc_mutex). Independent counters so carrier and sketch traffic do
+     *  not share a budget. */
+    double m_matmul_carrier_serve_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_CARRIER_SERVE_BUCKET_MAX};
+    std::chrono::microseconds m_matmul_carrier_serve_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+    std::map<uint256, std::chrono::microseconds> m_matmul_carrier_served GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    double m_matmul_carrier_recv_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){MATMUL_CARRIER_RECV_BUCKET_MAX};
+    std::chrono::microseconds m_matmul_carrier_recv_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
 
     explicit Peer(NodeId id, ServiceFlags our_services, bool is_inbound, const CNetAddr& addr)
         : m_id{id}
@@ -1106,6 +1132,31 @@ private:
      *  so FinalizeNode can reclaim slots without taking g_msgproc_mutex. */
     std::map<uint256, std::pair<NodeId, std::chrono::microseconds>> m_matmul_sketch_requested
         GUARDED_BY(cs_main);
+
+    /** Datacenter-profile rccarrier node-wide egress byte budget + outstanding
+     *  prefetch map — same structure/lifetime as the sketch equivalents above,
+     *  independent counters. */
+    double m_matmul_carrier_serve_global_tokens GUARDED_BY(NetEventsInterface::g_msgproc_mutex){
+        static_cast<double>(MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC)};
+    std::chrono::microseconds m_matmul_carrier_serve_global_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
+    std::map<uint256, std::pair<NodeId, std::chrono::microseconds>> m_matmul_carrier_requested
+        GUARDED_BY(cs_main);
+
+    //! Datacenter profile (nMatMulRCProfile==2): opportunistically request the
+    //! sampled CARRIER for a block we are about to download/validate, from the
+    //! peer we are talking to. Prefetch (best-effort) that races the block; the
+    //! STRICT pre-validation guarantee is provided by the serve-push in
+    //! ProcessGetBlockData (carrier enqueued before the block on the same ordered
+    //! connection). See the report's residual-gap note for the compact-block path.
+    void MaybeRequestMatMulCarrier(CNode& pto, const CBlockIndex& index)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
+    //! Serve the carrier for `block_hash` to `pfrom`, applying the full three-limit
+    //! anti-amplification discipline BEFORE emitting the reply. Returns true iff a
+    //! carrier was pushed. Shared by the getrccarrier handler and the block-serve
+    //! push. `is_reply` distinguishes an explicit getrccarrier (dedup-stamped) from
+    //! the pre-block push (which must not be suppressed by the dedup window).
+    bool ServeMatMulCarrier(CNode& pfrom, Peer& peer, const uint256& block_hash, bool is_reply)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     //! v4.4 ENC-DR: opportunistically request the sketch-cache bytes for a block
     //! we are about to download/validate, from the peer we are talking to. Purely
@@ -2144,6 +2195,15 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
             ++it;
         }
     }
+    // Likewise free outstanding GETRCCARRIER prefetch slots owned by this peer so
+    // an unanswered request to a departed peer cannot pin the carrier-store slots.
+    for (auto it = m_matmul_carrier_requested.begin(); it != m_matmul_carrier_requested.end();) {
+        if (it->second.first == nodeid) {
+            it = m_matmul_carrier_requested.erase(it);
+        } else {
+            ++it;
+        }
+    }
 
     if (m_node_states.empty()) {
         // Do a consistency check after the last peer is removed.
@@ -2215,6 +2275,115 @@ void PeerManagerImpl::MaybeRequestMatMulSketch(CNode& pto, const CBlockIndex& in
     MakeAndPushMessage(pto, NetMsgType::GETMMSKETCH, index.GetBlockHash());
     LogDebug(BCLog::NET, "Requesting matmul sketch %s peer=%d (best-effort)\n",
              index.GetBlockHash().ToString(), pto.GetId());
+}
+
+void PeerManagerImpl::MaybeRequestMatMulCarrier(CNode& pto, const CBlockIndex& index)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(g_msgproc_mutex);
+    const Consensus::Params& consensus = m_chainparams.GetConsensus();
+    if (!consensus.fMatMulPOW) return;
+    if (!consensus.IsMatMulRCActive(index.nHeight)) return;
+    if (consensus.nMatMulRCProfile != 2) return;   // carrier relay is a profile-2 construct
+    if (matmul::v4::rc::RCFreivaldsCarrierStoreHave(index.GetBlockHash())) return;  // already held
+    // Node-wide prefetch <-> store coupling (mirrors the sketch prefetch guard):
+    // never keep more carriers in flight than the store has slots, and never ask
+    // two peers for the same hash. Entries expire after the shared request TTL.
+    const auto now{GetTime<std::chrono::microseconds>()};
+    for (auto it = m_matmul_carrier_requested.begin(); it != m_matmul_carrier_requested.end();) {
+        if (now - it->second.second > MATMUL_SKETCH_REQUEST_TTL) {
+            it = m_matmul_carrier_requested.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (m_matmul_carrier_requested.count(index.GetBlockHash())) return;
+    if (m_matmul_carrier_requested.size() >= matmul::v4::rc::kRCGkrProofCacheMaxEntries) return;
+    m_matmul_carrier_requested.emplace(index.GetBlockHash(), std::make_pair(pto.GetId(), now));
+    MakeAndPushMessage(pto, NetMsgType::GETRCCARRIER, index.GetBlockHash());
+    LogDebug(BCLog::NET, "Requesting matmul carrier %s peer=%d (profile-2 prefetch)\n",
+             index.GetBlockHash().ToString(), pto.GetId());
+}
+
+bool PeerManagerImpl::ServeMatMulCarrier(CNode& pfrom, Peer& peer, const uint256& block_hash,
+                                         bool is_reply)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    // Fetch + serialize only if we actually hold it; a carrier we don't have is a
+    // silent no-serve (like a getblocktxn we can't answer).
+    matmul::v4::rc::RCFreivaldsSampledCarrier carrier;
+    if (!matmul::v4::rc::RCFreivaldsCarrierStoreGet(block_hash, carrier)) return false;
+    std::vector<unsigned char> bytes;
+    matmul::v4::rc::SerializeRCFreivaldsCarrier(carrier, bytes);
+    // A future larger-dims carrier may exceed the transport ceiling: don't serve
+    // (peers rebuild), exactly as the sketch relay does past its ceiling.
+    if (bytes.size() > MAX_RCCARRIER_PAYLOAD_SIZE) {
+        LogDebug(BCLog::NET, "Not serving carrier %s to peer=%d (exceeds transport ceiling)\n",
+                 block_hash.ToString(), pfrom.GetId());
+        return false;
+    }
+    const auto now = GetTime<std::chrono::microseconds>();
+    // (1) Per-peer serve token bucket.
+    if (peer.m_matmul_carrier_serve_last_refill != 0us) {
+        const auto elapsed = now - peer.m_matmul_carrier_serve_last_refill;
+        if (elapsed > 0us) {
+            const double refill = static_cast<double>(count_microseconds(elapsed)) /
+                                  static_cast<double>(count_microseconds(
+                                      std::chrono::microseconds{MATMUL_SKETCH_SERVE_REFILL}));
+            peer.m_matmul_carrier_serve_tokens =
+                std::min<double>(MATMUL_CARRIER_SERVE_BUCKET_MAX,
+                                 peer.m_matmul_carrier_serve_tokens + refill);
+        }
+    }
+    peer.m_matmul_carrier_serve_last_refill = now;
+    if (peer.m_matmul_carrier_serve_tokens < 1.0) {
+        LogDebug(BCLog::NET, "matmul: per-peer carrier serve bucket empty, skipping %s peer=%d\n",
+                 block_hash.ToString(), pfrom.GetId());
+        return false;
+    }
+    // (2) Per-(peer,block) dedup window — enforced only for an explicit reply to a
+    // getrccarrier. The pre-block PUSH (is_reply=false) is intentionally exempt:
+    // it must fire before the block to guarantee ordering even if we recently
+    // replied to a getrccarrier for the same hash. The token bucket (1) and the
+    // node-wide egress budget (3) still bound a spammer's drain in both cases.
+    if (is_reply) {
+        for (auto sit = peer.m_matmul_carrier_served.begin(); sit != peer.m_matmul_carrier_served.end();) {
+            if (now - sit->second > MATMUL_SKETCH_SERVE_DEDUP_WINDOW) {
+                sit = peer.m_matmul_carrier_served.erase(sit);
+            } else {
+                ++sit;
+            }
+        }
+        if (peer.m_matmul_carrier_served.find(block_hash) != peer.m_matmul_carrier_served.end()) {
+            LogDebug(BCLog::NET, "matmul: getrccarrier %s peer=%d within dedup window, skipping\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return false;
+        }
+    }
+    // (3) Node-wide egress byte budget (all-or-nothing per serve; may go negative).
+    if (m_matmul_carrier_serve_global_last_refill != 0us) {
+        const auto elapsed = now - m_matmul_carrier_serve_global_last_refill;
+        if (elapsed > 0us) {
+            m_matmul_carrier_serve_global_tokens = std::min<double>(
+                static_cast<double>(MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC),
+                m_matmul_carrier_serve_global_tokens +
+                    static_cast<double>(MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC) *
+                        (static_cast<double>(count_microseconds(elapsed)) / 1e6));
+        }
+    }
+    m_matmul_carrier_serve_global_last_refill = now;
+    if (m_matmul_carrier_serve_global_tokens <= 0.0) {
+        LogDebug(BCLog::NET, "matmul: carrier egress budget exhausted, deferring %s peer=%d\n",
+                 block_hash.ToString(), pfrom.GetId());
+        return false;
+    }
+    m_matmul_carrier_serve_global_tokens -= static_cast<double>(bytes.size());
+    peer.m_matmul_carrier_serve_tokens -= 1.0;
+    if (is_reply) peer.m_matmul_carrier_served[block_hash] = now;
+    MakeAndPushMessage(pfrom, NetMsgType::RCCARRIER, block_hash, bytes);
+    LogDebug(BCLog::NET, "Served matmul carrier %s (%u bytes) to peer=%d (%s)\n",
+             block_hash.ToString(), bytes.size(), pfrom.GetId(), is_reply ? "reply" : "pre-block");
+    return true;
 }
 
 bool PeerManagerImpl::HasAllDesirableServiceFlags(ServiceFlags services) const
@@ -3286,6 +3455,17 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                  inv.ToString(), pindex->GetBlockHash().ToString(), block_bytes, max_sendable, pfrom.GetId());
     };
 
+    // STRICT ordering guarantee for the datacenter-profile carrier: if we hold the
+    // sampled carrier for this block, push it NOW — enqueued on this peer's ordered
+    // send stream BEFORE the `block` below — so a non-mining requester stores the
+    // carrier and its CheckMatMulProofOfWork_RC finds it when it validates the
+    // block that arrives right after. Only fires for plain block downloads
+    // (IsMsgBlk/IsMsgWitnessBlk); filtered/merkle requests are not the profile-2
+    // block-download path. All anti-amplification gating is inside ServeMatMulCarrier.
+    if ((inv.IsMsgBlk() || inv.IsMsgWitnessBlk())) {
+        (void)ServeMatMulCarrier(pfrom, peer, pindex->GetBlockHash(), /*is_reply=*/false);
+    }
+
     std::shared_ptr<const CBlock> pblock;
     if (a_recent_block && a_recent_block->GetHash() == pindex->GetBlockHash()) {
         pblock = a_recent_block;
@@ -3973,6 +4153,11 @@ void PeerManagerImpl::HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, c
                 BlockRequested(pfrom.GetId(), *pindex);
                 // v4.4 ENC-DR: best-effort sketch prefetch (see SendMessages).
                 MaybeRequestMatMulSketch(pfrom, *pindex);
+                // Datacenter profile: prefetch the consensus-load-bearing sampled
+                // carrier alongside the block request so it races/arrives before
+                // the block (the STRICT ordering guarantee is the serve-push in
+                // ProcessGetBlockData; this prefetch covers header-first arrivals).
+                MaybeRequestMatMulCarrier(pfrom, *pindex);
                 LogDebug(BCLog::NET, "Requesting block %s from  peer=%d\n",
                         pindex->GetBlockHash().ToString(), pfrom.GetId());
             }
@@ -7223,6 +7408,155 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         WITH_LOCK(cs_main, m_matmul_sketch_requested.erase(block_hash));
         matmul::GetMatMulSketchCache().Put(block_hash, std::move(sketch_bytes));
         LogDebug(BCLog::NET, "Cached authenticated matmul sketch %s from peer=%d\n",
+                 block_hash.ToString(), pfrom.GetId());
+        return;
+    }
+
+    if (msg_type == NetMsgType::GETRCCARRIER) {
+        // Serve the datacenter-profile sampled carrier for one block, if we hold
+        // it. Request/response modeled on getblocktxn/getmmsketch: a request for a
+        // carrier we don't hold (or that trips an anti-amplification limit) is a
+        // silent no-serve, never an error. All amplification gating lives in
+        // ServeMatMulCarrier.
+        uint256 block_hash;
+        vRecv >> block_hash;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, strprintf("trailing data after getrccarrier = %u bytes", vRecv.size()));
+            return;
+        }
+        (void)ServeMatMulCarrier(pfrom, *peer, block_hash, /*is_reply=*/true);
+        return;
+    }
+
+    if (msg_type == NetMsgType::RCCARRIER) {
+        // Receive an UNTRUSTED sampled carrier and, iff it AUTHENTICATES against
+        // the consensus check, admit it to the local carrier store so a received
+        // profile-2 block validates (CheckMatMulProofOfWork_RC). Unlike the
+        // best-effort sketch this is consensus-load-bearing, so authentication is
+        // the FULL sampled-carrier verifier + episode-shape bind (identical to the
+        // consensus path) — a carrier that fails is dropped and the peer penalized;
+        // it is NEVER evidence about the block. Accepted for a block we are
+        // INTERESTED in (header known + profile-2 active height), which admits both
+        // a getrccarrier reply and the pre-block serve-push; a carrier for an
+        // unknown/irrelevant block is dropped before any expensive work.
+        if (m_chainman.m_blockman.LoadingBlocks()) {
+            LogDebug(BCLog::NET, "Unexpected rccarrier received from peer %d\n", pfrom.GetId());
+            return;
+        }
+        uint256 block_hash;
+        std::vector<unsigned char> carrier_bytes;   // bounded by the net message cap
+        vRecv >> block_hash >> carrier_bytes;
+        if (!vRecv.empty()) {
+            Misbehaving(*peer, strprintf("trailing data after rccarrier = %u bytes", vRecv.size()));
+            return;
+        }
+        const auto free_slot = [&] { WITH_LOCK(cs_main, m_matmul_carrier_requested.erase(block_hash)); };
+        // (i) Hard size ceiling BEFORE any allocation/parse (DoS: reject for a
+        // compare, and score it — an over-ceiling frame is malformed by contract).
+        if (carrier_bytes.size() > MAX_RCCARRIER_PAYLOAD_SIZE) {
+            free_slot();
+            Misbehaving(*peer, strprintf("rccarrier exceeds ceiling (%u > %u bytes)",
+                                         carrier_bytes.size(), MAX_RCCARRIER_PAYLOAD_SIZE));
+            return;
+        }
+        // (ii) Dedup: an authenticated carrier already stored for this hash is not
+        // re-verified and never overwritten (prevents a later garbage carrier from
+        // displacing a valid one). Cheap; before the ingress token.
+        if (matmul::v4::rc::RCFreivaldsCarrierStoreHave(block_hash)) {
+            LogDebug(BCLog::NET, "Ignoring rccarrier %s from peer=%d (already stored)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            free_slot();
+            return;
+        }
+        // (iii) INTERESTED-ONLY: we must know the header and it must be a profile-2
+        // active height. An unsolicited carrier for an unknown/irrelevant block is
+        // dropped here, before the ingress token and the verify.
+        CBlockHeader header;
+        int32_t block_height{0};
+        {
+            LOCK(cs_main);
+            const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(block_hash);
+            if (pindex == nullptr) {
+                LogDebug(BCLog::NET, "Ignoring rccarrier %s from peer=%d (unknown header)\n",
+                         block_hash.ToString(), pfrom.GetId());
+                m_matmul_carrier_requested.erase(block_hash);
+                return;
+            }
+            block_height = pindex->nHeight;
+            header = pindex->GetBlockHeader();
+        }
+        const Consensus::Params& consensus = m_chainparams.GetConsensus();
+        if (!consensus.IsMatMulRCActive(block_height) || consensus.nMatMulRCProfile != 2) {
+            LogDebug(BCLog::NET, "Ignoring rccarrier %s from peer=%d (not a profile-2 height)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            free_slot();
+            return;
+        }
+        // (iv) Per-peer ingress token bucket, spent BEFORE the bounded deserialize
+        // and the λ-sampled verify (both real CPU). Same lazy-refill idiom as the
+        // sketch ingress bucket. Empty => silent drop (slot stays live for retry).
+        {
+            const auto now_bucket{GetTime<std::chrono::microseconds>()};
+            if (peer->m_matmul_carrier_recv_last_refill != 0us) {
+                const auto elapsed = now_bucket - peer->m_matmul_carrier_recv_last_refill;
+                if (elapsed > 0us) {
+                    const double refill = static_cast<double>(count_microseconds(elapsed)) /
+                                          static_cast<double>(count_microseconds(
+                                              std::chrono::microseconds{MATMUL_SKETCH_SERVE_REFILL}));
+                    peer->m_matmul_carrier_recv_tokens =
+                        std::min<double>(MATMUL_CARRIER_RECV_BUCKET_MAX,
+                                         peer->m_matmul_carrier_recv_tokens + refill);
+                }
+            }
+            peer->m_matmul_carrier_recv_last_refill = now_bucket;
+            if (peer->m_matmul_carrier_recv_tokens < 1.0) {
+                LogDebug(BCLog::NET, "matmul: per-peer carrier ingress bucket empty, dropping %s peer=%d\n",
+                         block_hash.ToString(), pfrom.GetId());
+                return;
+            }
+            peer->m_matmul_carrier_recv_tokens -= 1.0;
+        }
+        // (v) Bounded deserialize (every vector length capped; oversize/malformed
+        // → false with a reason, scored as misbehavior).
+        matmul::v4::rc::RCFreivaldsSampledCarrier carrier;
+        std::string why;
+        if (!matmul::v4::rc::DeserializeRCFreivaldsCarrierBounded(carrier_bytes, carrier, &why)) {
+            free_slot();
+            Misbehaving(*peer, strprintf("malformed rccarrier %s: %s", block_hash.ToString(), why));
+            return;
+        }
+        // (vi) Consensus episode-shape bind — the 8 shape fields, identical to
+        // CheckMatMulProofOfWork_RC. A carrier committing smaller (cheaper) dims is
+        // rejected here, before the verify.
+        const auto params_rc = matmul::v4::rc::ResolveRCEpisodeParams(consensus, block_height);
+        const auto& ce = carrier.episode;
+        if (!(ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
+              ce.n_q == params_rc.n_q && ce.n_ctx == params_rc.n_ctx &&
+              ce.L_lyr == params_rc.L_lyr && ce.d_model == params_rc.d_model &&
+              ce.b_seq == params_rc.b_seq && ce.T_leaf == params_rc.T_leaf)) {
+            free_slot();
+            Misbehaving(*peer, strprintf("rccarrier %s episode-shape mismatch", block_hash.ToString()));
+            return;
+        }
+        // (vii) Full sampled-carrier authentication against the header commitment
+        // and target — the SAME check the consensus path runs.
+        const auto target = DeriveTarget(header.nBits, consensus.powLimit);
+        if (!target) {
+            free_slot();
+            LogDebug(BCLog::NET, "Ignoring rccarrier %s from peer=%d (bad nBits)\n",
+                     block_hash.ToString(), pfrom.GetId());
+            return;
+        }
+        if (!matmul::v4::rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, header, block_height,
+                                                                 *target, &why)) {
+            free_slot();
+            Misbehaving(*peer, strprintf("rccarrier %s fails to authenticate: %s",
+                                         block_hash.ToString(), why));
+            return;
+        }
+        free_slot();
+        matmul::v4::rc::RCFreivaldsCarrierStorePut(block_hash, std::move(carrier));
+        LogDebug(BCLog::NET, "Stored authenticated matmul carrier %s from peer=%d\n",
                  block_hash.ToString(), pfrom.GetId());
         return;
     }

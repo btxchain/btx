@@ -1085,43 +1085,40 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     const auto target = DeriveTarget(header.nBits, p.powLimit);
     BOOST_REQUIRE(target.has_value());
 
-    // Fail-closed BEFORE any proof is available.
-    rc::RCGkrProofV7StoreClear();
+    // Fail-closed BEFORE any carrier is available (the non-mining-node halt).
+    rc::RCFreivaldsCarrierStoreClear();
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Build + store the honest v7 episode proof (miner does this at winner time).
+    // Build + store the honest sampled CARRIER (miner does this at winner time;
+    // it is also exactly what the RCCARRIER relay carries). The consensus
+    // authority now reads the CARRIER store, not the full-wire v7 proof store.
     const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
                                              header.matmul_digest);
     BOOST_REQUIRE_MESSAGE(pr.timing.ok, "toy-dim v7 prove must succeed");
-    rc::RCGkrProofV7StorePut(header.GetHash(), pr.proof);
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string why;
+    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target, carrier, &why));
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), carrier);
 
-    // ACCEPT via the Freivalds sampled authority.
+    // ACCEPT via the Freivalds sampled-carrier authority.
     BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Clearing the proof reverts to fail-closed reject.
-    rc::RCGkrProofV7StoreClear();
+    // Clearing the carrier reverts to fail-closed reject.
+    rc::RCFreivaldsCarrierStoreClear();
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Tampered sampled layer: flip a Y output of an in-stream (sampleable) layer.
-    // At toy dims n_units < λ=256, so EVERY sampleable layer is sampled → any such
+    // Tampered sampled layer: flip a Y output of a carried layer. At toy dims
+    // n_units < λ=256, so EVERY sampleable layer is carried+sampled → any such
     // tamper is caught by the per-layer Freivalds check.
-    rc::RCGkrProofV7 tampered = pr.proof;
+    rc::RCFreivaldsSampledCarrier tampered = carrier;
     bool tampered_one = false;
-    for (auto& w : tampered.wires) {
-        const bool in_stream = w.kind == rc::RCGkrLayerKind::GemmPhase1SV ||
-                               w.kind == rc::RCGkrLayerKind::GemmPhase2Fwd ||
-                               w.kind == rc::RCGkrLayerKind::GemmPhase2Bwd ||
-                               w.kind == rc::RCGkrLayerKind::GemmPhase2Wgrad;
-        if (in_stream && !w.Y.empty()) {
-            w.Y[0] += 1;
-            tampered_one = true;
-            break;
-        }
+    for (auto& e : tampered.sampled) {
+        if (!e.Y.empty()) { e.Y[0] += 1; tampered_one = true; break; }
     }
     BOOST_REQUIRE(tampered_one);
-    rc::RCGkrProofV7StorePut(header.GetHash(), tampered);
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), tampered);
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
-    rc::RCGkrProofV7StoreClear();
+    rc::RCFreivaldsCarrierStoreClear();
 }
 
 // (c') Profile 2: an episode proof committing SMALLER-than-consensus dims is
@@ -1149,9 +1146,186 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_episode_shape_swap)
     BOOST_REQUIRE(target.has_value());
     const auto pr = rc::ProveWinnerEpisodeV7(header, toy, kHeight, *target, header.matmul_digest);
     BOOST_REQUIRE(pr.timing.ok);
-    rc::RCGkrProofV7StorePut(header.GetHash(), pr.proof);
+    rc::RCFreivaldsSampledCarrier toy_carrier;
+    std::string why;
+    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target, toy_carrier, &why));
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), toy_carrier);
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));   // shape mismatch → reject
+    rc::RCFreivaldsCarrierStoreClear();
+}
+
+// ---------------------------------------------------------------------------
+// RELAY: the sampled CARRIER — serialization (byte-exact + bounded) and the P2P
+// availability seam that closes the non-mining-node halt. These exercise the
+// object CheckMatMulProofOfWork_RC now consumes (RCFreivaldsCarrierStore) and
+// the wire form net_processing relays (RCCARRIER).
+// ---------------------------------------------------------------------------
+
+namespace {
+// Build a valid toy-dim carrier bound to `header` (miner side).
+bool BuildToyCarrier(const CBlockHeader& header, const rc::RCEpisodeParams& params_rc,
+                     int32_t height, const arith_uint256& target,
+                     rc::RCFreivaldsSampledCarrier& out)
+{
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, height, target,
+                                             header.matmul_digest);
+    if (!pr.timing.ok) return false;
+    std::string why;
+    return rc::BuildFreivaldsSampledCarrier(pr.proof, header, height, target, out, &why);
+}
+} // namespace
+
+// (f) Carrier serialization round-trips BYTE-EXACT, and the bounded deserializer
+//     rejects oversize / truncated / trailing-data / wrong-version input.
+BOOST_AUTO_TEST_CASE(rc_dc_carrier_serialize_roundtrip_and_bounds)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    CBlockHeader header = MakeDcRCHeader(0x5151);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    rc::RCFreivaldsSampledCarrier carrier;
+    BOOST_REQUIRE(BuildToyCarrier(header, params_rc, kHeight, *target, carrier));
+    BOOST_REQUIRE(!carrier.sampled.empty());   // toy episode has sampleable layers
+
+    std::vector<unsigned char> wire;
+    rc::SerializeRCFreivaldsCarrier(carrier, wire);
+    BOOST_CHECK(!wire.empty());
+    BOOST_CHECK(wire.size() <= rc::kRCFreivaldsCarrierMaxSerializedBytes);
+
+    // Round-trip and re-serialize: byte-exact iff the two wire forms are identical.
+    rc::RCFreivaldsSampledCarrier back;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(rc::DeserializeRCFreivaldsCarrierBounded(wire, back, &why),
+                          "round-trip deserialize failed: " << why);
+    std::vector<unsigned char> wire2;
+    rc::SerializeRCFreivaldsCarrier(back, wire2);
+    BOOST_CHECK(wire == wire2);                       // byte-exact round trip
+    // And the recovered carrier still authenticates.
+    BOOST_CHECK(rc::VerifyEpisodeFreivaldsSampledCarrier(back, header, kHeight, *target, &why));
+
+    // Oversize input: a frame larger than the ceiling is rejected before parse.
+    {
+        std::vector<unsigned char> oversize(rc::kRCFreivaldsCarrierMaxSerializedBytes + 1, 0);
+        rc::RCFreivaldsSampledCarrier tmp;
+        BOOST_CHECK(!rc::DeserializeRCFreivaldsCarrierBounded(oversize, tmp, &why));
+    }
+    // Truncated input: every prefix short of the full frame must be rejected
+    // (never a partial/UB read), and none may spuriously succeed.
+    for (size_t cut : {size_t{0}, wire.size() / 3, wire.size() / 2, wire.size() - 1}) {
+        rc::RCFreivaldsSampledCarrier tmp;
+        Span<const unsigned char> prefix{wire.data(), cut};
+        BOOST_CHECK(!rc::DeserializeRCFreivaldsCarrierBounded(prefix, tmp, &why));
+    }
+    // Trailing data: a well-formed frame with extra bytes appended is rejected.
+    {
+        std::vector<unsigned char> trailing = wire;
+        trailing.push_back(0x00);
+        rc::RCFreivaldsSampledCarrier tmp;
+        BOOST_CHECK(!rc::DeserializeRCFreivaldsCarrierBounded(trailing, tmp, &why));
+    }
+    // Wrong version byte: rejected.
+    {
+        std::vector<unsigned char> badver = wire;
+        badver[0] = static_cast<unsigned char>(badver[0] + 1);
+        rc::RCFreivaldsSampledCarrier tmp;
+        BOOST_CHECK(!rc::DeserializeRCFreivaldsCarrierBounded(badver, tmp, &why));
+    }
+}
+
+// (g) HALT CLOSURE: a profile-2 node WITHOUT the carrier fail-closed REJECTS a
+//     valid block; once the RELAYED carrier (round-tripped through the wire form,
+//     as net_processing stores it) is populated, the SAME block ACCEPTS.
+BOOST_AUTO_TEST_CASE(rc_dc_carrier_relay_closes_halt)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    CBlockHeader header = MakeDcRCHeader(0x6262);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    // Non-mining node: no carrier yet → the described halt (fail-closed reject).
+    rc::RCFreivaldsCarrierStoreClear();
     rc::RCGkrProofV7StoreClear();
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    // Miner builds the carrier; it travels over the wire (serialize → bounded
+    // deserialize) exactly as the RCCARRIER relay carries it; the receiver stores
+    // the deserialized object.
+    rc::RCFreivaldsSampledCarrier carrier;
+    BOOST_REQUIRE(BuildToyCarrier(header, params_rc, kHeight, *target, carrier));
+    std::vector<unsigned char> wire;
+    rc::SerializeRCFreivaldsCarrier(carrier, wire);
+    rc::RCFreivaldsSampledCarrier received;
+    std::string why;
+    BOOST_REQUIRE(rc::DeserializeRCFreivaldsCarrierBounded(wire, received, &why));
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), received);
+
+    // With the relayed carrier populated BEFORE validation, the block ACCEPTS.
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    // Evicting the carrier reverts to fail-closed reject (proves the store, not
+    // some other path, is load-bearing).
+    rc::RCFreivaldsCarrierStoreClear();
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+}
+
+// (h) DoS / soundness of the store gate: a carrier for a DIFFERENT header does
+//     not authenticate for this block (so a mis-keyed or spoofed carrier can
+//     never make an unrelated block accept), and a tampered carrier is rejected.
+BOOST_AUTO_TEST_CASE(rc_dc_carrier_rejects_irrelevant_and_tampered)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    const auto target_of = [&](const CBlockHeader& h) { return DeriveTarget(h.nBits, p.powLimit); };
+
+    CBlockHeader header_a = MakeDcRCHeader(0x7001);
+    header_a.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header_a.nBits = UintToArith256(p.powLimit).GetCompact();
+    header_a.matmul_digest = rc::MineRCEpisode(header_a, params_rc, kHeight);
+    CBlockHeader header_b = MakeDcRCHeader(0x7002);
+    header_b.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header_b.nBits = UintToArith256(p.powLimit).GetCompact();
+    header_b.matmul_digest = rc::MineRCEpisode(header_b, params_rc, kHeight);
+    BOOST_REQUIRE(header_a.GetHash() != header_b.GetHash());
+    const auto ta = target_of(header_a);
+    BOOST_REQUIRE(ta.has_value());
+
+    rc::RCFreivaldsSampledCarrier carrier_a;
+    BOOST_REQUIRE(BuildToyCarrier(header_a, params_rc, kHeight, *ta, carrier_a));
+
+    // IRRELEVANT: A's carrier stored under B's hash must NOT let B accept — the
+    // carrier is header-bound, so its verify fails against B. (This is exactly the
+    // consensus check the net-layer 'interested + authenticate' gate mirrors.)
+    rc::RCFreivaldsCarrierStoreClear();
+    rc::RCFreivaldsCarrierStorePut(header_b.GetHash(), carrier_a);
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header_b, p, kHeight));
+
+    // TAMPERED: flip a sampled Y output; the carrier no longer authenticates for A.
+    rc::RCFreivaldsSampledCarrier tampered = carrier_a;
+    bool flipped = false;
+    for (auto& e : tampered.sampled) {
+        if (!e.Y.empty()) { e.Y[0] += 1; flipped = true; break; }
+    }
+    BOOST_REQUIRE(flipped);
+    std::string why;
+    BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(tampered, header_a, kHeight, *ta, &why));
+    rc::RCFreivaldsCarrierStoreClear();
+    rc::RCFreivaldsCarrierStorePut(header_a.GetHash(), tampered);
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header_a, p, kHeight));
+    rc::RCFreivaldsCarrierStoreClear();
 }
 
 // (d) Profile 1: ExactReplay remains the authority, needs NO proof, and accepts

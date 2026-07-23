@@ -90,6 +90,19 @@ static const unsigned int MAX_MMSKETCH_PAYLOAD_SIZE = 8 * 1024 * 1024 + 64;
 static_assert(MAX_MMSKETCH_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
               "an mmsketch (payload + framing) must ride under the ordinary "
               "protocol-message ceiling on both v1 and v2 transports");
+/** Maximum payload of a datacenter-profile `rccarrier` message: a serialized
+ *  RCFreivaldsSampledCarrier (hard-capped at kRCFreivaldsCarrierMaxSerializedBytes
+ *  = 12 MiB in matmul_v4_rc_freivalds_sampled.h) plus small framing (32-byte
+ *  block hash + compactSize). Rides in ONE piece under BOTH the v2 (BIP324)
+ *  ~16 MB packet ceiling AND the v1 MAX_PROTOCOL_MESSAGE_LENGTH (16 MB). The
+ *  exact carrier-derived cap is re-checked in net_processing on both the serve
+ *  and receive sides; a carrier whose bytes exceed the cap is simply not served
+ *  / dropped (peers rebuild), never load-bearing on this transport. A
+ *  net_processing static_assert keeps this in step with the matmul-side ceiling. */
+static const unsigned int MAX_RCCARRIER_PAYLOAD_SIZE = 12u * 1024u * 1024u + 64u;
+static_assert(MAX_RCCARRIER_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "an rccarrier (payload + framing) must ride under the ordinary "
+              "protocol-message ceiling on both v1 and v2 transports");
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes over which we'll relay everything (blocks, tx, addrs, etc) */

@@ -1002,8 +1002,10 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/1, /*work_units=*/1, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 49));
 
-    // Consensus dims: work units scale by TotalRCEpisodeMacs / 2^40 (~49 at epoch 0).
+    // Consensus dims, PROFILE 1 (ExactReplay authority): work units scale by
+    // TotalRCEpisodeMacs / 2^40 (~49 at epoch 0).
     p.fMatMulRCUseToyDims = false;
+    p.nMatMulRCProfile = 1;
     Consensus::FillDefaultRCGrowthTables(p);
     const uint32_t wu = MatMulRCWorkUnits(p, 100);
     BOOST_CHECK_GE(wu, 40U);
@@ -1012,6 +1014,14 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK(CanStartMatMulRCVerification(0, wu, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(1, wu, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(0, wu + 1, p, 100));
+
+    // Consensus dims, PROFILE 2 (datacenter): the authority is the SUBLINEAR
+    // Freivalds sampled verifier, so admission is priced by the λ-sampled verify
+    // — flat in episode depth and MUCH cheaper than the 16× full-episode MACs.
+    // A datacenter block must not be throttled by its compute size.
+    p.nMatMulRCProfile = 2;
+    const uint32_t wu_dc = MatMulRCWorkUnits(p, 100);
+    BOOST_CHECK_LE(wu_dc, wu);  // sublinear verify ⇒ no MORE units than epoch-0 replay
 }
 
 // --- Stage H required-test scaffolding (final-form build spec) -------------

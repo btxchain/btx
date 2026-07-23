@@ -15,6 +15,9 @@
 #include <array>
 #include <chrono>
 #include <cstring>
+#include <list>
+#include <map>
+#include <mutex>
 #include <unordered_map>
 
 namespace matmul::v4::rc {
@@ -555,6 +558,373 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
     if (out_timing) *out_timing = tm;
     if (why) *why = tm.note;
     return true;
+}
+
+// ===========================================================================
+// RELAY: carrier serialization (byte-exact) + bounded deserialization.
+// Hand-rolled little-endian codec so every untrusted read is explicitly
+// budget- and count-checked. The carrier is a RELAY-ONLY object — this byte
+// layout is NOT consensus-serialized (it never enters a block/digest/FS seed);
+// the consensus binding is the SEMANTIC check in the carrier verifier.
+// ===========================================================================
+namespace {
+
+void PutU32(std::vector<unsigned char>& b, uint32_t v)
+{
+    b.push_back(static_cast<unsigned char>(v & 0xff));
+    b.push_back(static_cast<unsigned char>((v >> 8) & 0xff));
+    b.push_back(static_cast<unsigned char>((v >> 16) & 0xff));
+    b.push_back(static_cast<unsigned char>((v >> 24) & 0xff));
+}
+void PutU64(std::vector<unsigned char>& b, uint64_t v)
+{
+    for (int i = 0; i < 8; ++i) b.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xff));
+}
+// Bitcoin CompactSize (canonical).
+void PutCompact(std::vector<unsigned char>& b, uint64_t n)
+{
+    if (n < 253) {
+        b.push_back(static_cast<unsigned char>(n));
+    } else if (n <= 0xffff) {
+        b.push_back(253);
+        b.push_back(static_cast<unsigned char>(n & 0xff));
+        b.push_back(static_cast<unsigned char>((n >> 8) & 0xff));
+    } else if (n <= 0xffffffffULL) {
+        b.push_back(254);
+        PutU32(b, static_cast<uint32_t>(n));
+    } else {
+        b.push_back(255);
+        PutU64(b, n);
+    }
+}
+void PutBytes(std::vector<unsigned char>& b, const unsigned char* p, size_t n)
+{
+    b.insert(b.end(), p, p + n);
+}
+void PutHash(std::vector<unsigned char>& b, const uint256& h) { PutBytes(b, h.data(), 32); }
+void PutEpisode(std::vector<unsigned char>& b, const RCEpisodeParams& e)
+{
+    // Exactly the 8 consensus shape fields, in the canonical order used by the
+    // FS seed (RCGkrFsSeedV7). phase1_tile_delta is an RCEpisodeOptions execution
+    // knob (0 under consensus, never digest-bearing) and is intentionally absent.
+    PutU32(b, e.rounds);
+    PutU32(b, e.d_head);
+    PutU32(b, e.n_q);
+    PutU32(b, e.n_ctx);
+    PutU32(b, e.L_lyr);
+    PutU32(b, e.d_model);
+    PutU32(b, e.b_seq);
+    PutU32(b, e.T_leaf);
+}
+
+/** Budget-checked, non-throwing reader over an untrusted span. */
+struct BoundedReader {
+    const unsigned char* p;
+    size_t remaining;
+    bool ok{true};
+    std::string err;
+
+    explicit BoundedReader(Span<const unsigned char> in)
+        : p(in.data()), remaining(in.size()) {}
+
+    bool fail(const std::string& m) { ok = false; if (err.empty()) err = m; return false; }
+    bool need(size_t n) { return remaining >= n ? true : fail("carrier:underrun"); }
+
+    bool U32(uint32_t& v)
+    {
+        if (!need(4)) return false;
+        v = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+            (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+        p += 4; remaining -= 4; return true;
+    }
+    bool U64(uint64_t& v)
+    {
+        if (!need(8)) return false;
+        v = 0;
+        for (int i = 0; i < 8; ++i) v |= static_cast<uint64_t>(p[i]) << (8 * i);
+        p += 8; remaining -= 8; return true;
+    }
+    bool Hash(uint256& h)
+    {
+        if (!need(32)) return false;
+        std::memcpy(h.data(), p, 32);
+        p += 32; remaining -= 32; return true;
+    }
+    // Canonical CompactSize with a caller-supplied hard cap.
+    bool Compact(uint64_t& n, uint64_t cap)
+    {
+        if (!need(1)) return false;
+        const uint8_t ch = *p++; --remaining;
+        if (ch < 253) {
+            n = ch;
+        } else if (ch == 253) {
+            if (!need(2)) return false;
+            n = static_cast<uint64_t>(p[0]) | (static_cast<uint64_t>(p[1]) << 8);
+            p += 2; remaining -= 2;
+            if (n < 253) return fail("carrier:noncanonical_compact");
+        } else if (ch == 254) {
+            uint32_t v; if (!U32(v)) return false;
+            n = v;
+            if (n <= 0xffff) return fail("carrier:noncanonical_compact");
+        } else {
+            if (!U64(n)) return false;
+            if (n <= 0xffffffffULL) return fail("carrier:noncanonical_compact");
+        }
+        if (n > cap) return fail("carrier:count_over_cap");
+        return true;
+    }
+    bool Episode(RCEpisodeParams& e)
+    {
+        return U32(e.rounds) && U32(e.d_head) && U32(e.n_q) && U32(e.n_ctx) &&
+               U32(e.L_lyr) && U32(e.d_model) && U32(e.b_seq) && U32(e.T_leaf);
+    }
+    // Read a length-prefixed int8 vector; count bounded by remaining bytes and
+    // the whole-carrier element ceiling, so allocation can never exceed input.
+    bool VecI8(std::vector<int8_t>& v)
+    {
+        uint64_t cnt;
+        if (!Compact(cnt, kRCCarrierMaxVecElems)) return false;
+        if (!need(cnt)) return false;   // 1 byte/elem
+        v.resize(cnt);
+        for (uint64_t i = 0; i < cnt; ++i) v[i] = static_cast<int8_t>(p[i]);
+        p += cnt; remaining -= cnt; return true;
+    }
+    bool VecI64(std::vector<int64_t>& v)
+    {
+        uint64_t cnt;
+        if (!Compact(cnt, kRCCarrierMaxVecElems / 8 + 1)) return false;
+        if (!need(cnt * 8)) return false;
+        v.resize(cnt);
+        for (uint64_t i = 0; i < cnt; ++i) {
+            uint64_t u = 0;
+            for (int j = 0; j < 8; ++j) u |= static_cast<uint64_t>(p[8 * i + j]) << (8 * j);
+            v[i] = static_cast<int64_t>(u);
+        }
+        p += cnt * 8; remaining -= cnt * 8; return true;
+    }
+    bool VecHash(std::vector<uint256>& v, uint64_t cap)
+    {
+        uint64_t cnt;
+        if (!Compact(cnt, cap)) return false;
+        if (!need(cnt * 32)) return false;
+        v.resize(cnt);
+        for (uint64_t i = 0; i < cnt; ++i) { std::memcpy(v[i].data(), p + 32 * i, 32); }
+        p += cnt * 32; remaining -= cnt * 32; return true;
+    }
+    bool RawBytes(std::vector<uint8_t>& v)
+    {
+        uint64_t cnt;
+        if (!Compact(cnt, kRCCarrierMaxVecElems)) return false;
+        if (!need(cnt)) return false;
+        v.resize(cnt);
+        std::memcpy(v.data(), p, cnt);
+        p += cnt; remaining -= cnt; return true;
+    }
+};
+
+} // namespace
+
+void SerializeRCFreivaldsCarrier(const RCFreivaldsSampledCarrier& c,
+                                 std::vector<unsigned char>& out)
+{
+    out.clear();
+    PutU32(out, c.version);
+    PutEpisode(out, c.episode);
+    PutU32(out, static_cast<uint32_t>(c.height));
+    PutHash(out, c.claimed_digest);
+    PutHash(out, c.pow_bind);
+    PutHash(out, c.episode_sigma);
+    PutCompact(out, c.round_seeds.size());
+    for (const auto& h : c.round_seeds) PutHash(out, h);
+    PutCompact(out, c.round_roots.size());
+    for (const auto& h : c.round_roots) PutHash(out, h);
+    PutU32(out, c.lambda);
+    PutCompact(out, c.sampled.size());
+    for (const auto& e : c.sampled) {
+        PutU32(out, e.layer_index);
+        PutU32(out, e.round);
+        PutU32(out, static_cast<uint32_t>(e.kind));
+        PutU32(out, e.m);
+        PutU32(out, e.n);
+        PutU32(out, e.k);
+        PutCompact(out, e.A.size());
+        for (int8_t x : e.A) out.push_back(static_cast<unsigned char>(x));
+        PutCompact(out, e.B.size());
+        for (int8_t x : e.B) out.push_back(static_cast<unsigned char>(x));
+        PutCompact(out, e.Y.size());
+        for (int64_t x : e.Y) PutU64(out, static_cast<uint64_t>(x));
+        PutCompact(out, e.extract_in.size());
+        for (int64_t x : e.extract_in) PutU64(out, static_cast<uint64_t>(x));
+        PutCompact(out, e.extract_out.size());
+        for (int8_t x : e.extract_out) out.push_back(static_cast<unsigned char>(x));
+        PutU64(out, e.stream_offset);
+        PutU32(out, e.first_leaf);
+        PutCompact(out, e.leaf_bytes.size());
+        for (const auto& lb : e.leaf_bytes) {
+            PutCompact(out, lb.size());
+            PutBytes(out, lb.data(), lb.size());
+        }
+        PutCompact(out, e.leaf_proofs.size());
+        for (const auto& pf : e.leaf_proofs) {
+            PutCompact(out, pf.siblings.size());
+            for (const auto& s : pf.siblings) PutHash(out, s);
+        }
+    }
+}
+
+bool DeserializeRCFreivaldsCarrierBounded(Span<const unsigned char> in,
+                                          RCFreivaldsSampledCarrier& out, std::string* why)
+{
+    auto bad = [&](const std::string& m) { if (why) *why = m; return false; };
+    // Hard byte ceiling BEFORE touching the bytes: an oversize frame is rejected
+    // for the cost of a size compare, never a copy or allocation.
+    if (in.size() > kRCFreivaldsCarrierMaxSerializedBytes) return bad("carrier:oversize");
+
+    BoundedReader r(in);
+    RCFreivaldsSampledCarrier c;
+    if (!r.U32(c.version)) return bad(r.err);
+    if (c.version != kRCFreivaldsSampledCarrierVersion) return bad("carrier:version");
+    if (!r.Episode(c.episode)) return bad(r.err);
+    uint32_t h_raw; if (!r.U32(h_raw)) return bad(r.err);
+    c.height = static_cast<int32_t>(h_raw);
+    if (!r.Hash(c.claimed_digest)) return bad(r.err);
+    if (!r.Hash(c.pow_bind)) return bad(r.err);
+    if (!r.Hash(c.episode_sigma)) return bad(r.err);
+    if (!r.VecHash(c.round_seeds, kRCCarrierMaxRounds)) return bad(r.err);
+    if (!r.VecHash(c.round_roots, kRCCarrierMaxRounds)) return bad(r.err);
+    if (!r.U32(c.lambda)) return bad(r.err);
+
+    uint64_t n_sampled;
+    if (!r.Compact(n_sampled, kRCCarrierMaxSampledLayers)) return bad(r.err);
+    c.sampled.resize(n_sampled);
+    for (uint64_t i = 0; i < n_sampled; ++i) {
+        RCFreivaldsSampledLayer& e = c.sampled[i];
+        uint32_t kind_raw;
+        if (!r.U32(e.layer_index) || !r.U32(e.round) || !r.U32(kind_raw) ||
+            !r.U32(e.m) || !r.U32(e.n) || !r.U32(e.k)) {
+            return bad(r.err);
+        }
+        e.kind = static_cast<RCGkrLayerKind>(kind_raw);
+        if (!r.VecI8(e.A) || !r.VecI8(e.B) || !r.VecI64(e.Y) || !r.VecI64(e.extract_in) ||
+            !r.VecI8(e.extract_out)) {
+            return bad(r.err);
+        }
+        if (!r.U64(e.stream_offset) || !r.U32(e.first_leaf)) return bad(r.err);
+        uint64_t n_leaves;
+        if (!r.Compact(n_leaves, kRCCarrierMaxLeavesPerLayer)) return bad(r.err);
+        e.leaf_bytes.resize(n_leaves);
+        for (uint64_t x = 0; x < n_leaves; ++x) {
+            if (!r.RawBytes(e.leaf_bytes[x])) return bad(r.err);
+        }
+        uint64_t n_proofs;
+        if (!r.Compact(n_proofs, kRCCarrierMaxLeavesPerLayer)) return bad(r.err);
+        e.leaf_proofs.resize(n_proofs);
+        for (uint64_t x = 0; x < n_proofs; ++x) {
+            if (!r.VecHash(e.leaf_proofs[x].siblings, kRCCarrierMaxMerkleSiblings)) return bad(r.err);
+        }
+    }
+    if (r.remaining != 0) return bad("carrier:trailing_data");
+    out = std::move(c);
+    return true;
+}
+
+// ===========================================================================
+// RELAY: process-local carrier store (LRU+TTL). Same policy and limits as the
+// V7 proof store (kRCGkrProofCacheMaxEntries / kRCGkrProofCacheTtlSeconds);
+// independent mutex so carrier traffic never contends the GKR cache lock.
+// ===========================================================================
+namespace {
+std::mutex g_rc_carrier_mu;
+struct RCCarrierStoreEntry {
+    RCFreivaldsSampledCarrier carrier;
+    std::chrono::steady_clock::time_point expires_at;
+    std::list<uint256>::iterator lru_it;
+};
+std::list<uint256> g_rc_carrier_lru;
+std::map<uint256, RCCarrierStoreEntry> g_rc_carrier_store;
+
+void CarrierEvictExpiredLocked(std::chrono::steady_clock::time_point now)
+{
+    for (auto it = g_rc_carrier_store.begin(); it != g_rc_carrier_store.end();) {
+        if (it->second.expires_at <= now) {
+            g_rc_carrier_lru.erase(it->second.lru_it);
+            it = g_rc_carrier_store.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+void CarrierEvictLruLocked()
+{
+    while (g_rc_carrier_store.size() > kRCGkrProofCacheMaxEntries) {
+        const uint256 oldest = g_rc_carrier_lru.back();
+        g_rc_carrier_lru.pop_back();
+        g_rc_carrier_store.erase(oldest);
+    }
+}
+} // namespace
+
+void RCFreivaldsCarrierStorePut(const uint256& block_hash, RCFreivaldsSampledCarrier carrier)
+{
+    std::lock_guard<std::mutex> lock(g_rc_carrier_mu);
+    const auto now = std::chrono::steady_clock::now();
+    CarrierEvictExpiredLocked(now);
+    const auto expires = now + std::chrono::seconds(kRCGkrProofCacheTtlSeconds);
+    auto it = g_rc_carrier_store.find(block_hash);
+    if (it != g_rc_carrier_store.end()) {
+        g_rc_carrier_lru.erase(it->second.lru_it);
+        g_rc_carrier_lru.push_front(block_hash);
+        it->second.carrier = std::move(carrier);
+        it->second.expires_at = expires;
+        it->second.lru_it = g_rc_carrier_lru.begin();
+    } else {
+        g_rc_carrier_lru.push_front(block_hash);
+        RCCarrierStoreEntry entry;
+        entry.carrier = std::move(carrier);
+        entry.expires_at = expires;
+        entry.lru_it = g_rc_carrier_lru.begin();
+        g_rc_carrier_store.emplace(block_hash, std::move(entry));
+    }
+    CarrierEvictLruLocked();
+}
+
+bool RCFreivaldsCarrierStoreGet(const uint256& block_hash, RCFreivaldsSampledCarrier& out)
+{
+    std::lock_guard<std::mutex> lock(g_rc_carrier_mu);
+    const auto now = std::chrono::steady_clock::now();
+    auto it = g_rc_carrier_store.find(block_hash);
+    if (it == g_rc_carrier_store.end()) return false;
+    if (it->second.expires_at <= now) {
+        g_rc_carrier_lru.erase(it->second.lru_it);
+        g_rc_carrier_store.erase(it);
+        return false;
+    }
+    g_rc_carrier_lru.erase(it->second.lru_it);
+    g_rc_carrier_lru.push_front(block_hash);
+    it->second.lru_it = g_rc_carrier_lru.begin();
+    out = it->second.carrier;
+    return true;
+}
+
+bool RCFreivaldsCarrierStoreHave(const uint256& block_hash)
+{
+    std::lock_guard<std::mutex> lock(g_rc_carrier_mu);
+    CarrierEvictExpiredLocked(std::chrono::steady_clock::now());
+    return g_rc_carrier_store.count(block_hash) != 0;
+}
+
+void RCFreivaldsCarrierStoreClear()
+{
+    std::lock_guard<std::mutex> lock(g_rc_carrier_mu);
+    g_rc_carrier_store.clear();
+    g_rc_carrier_lru.clear();
+}
+
+size_t RCFreivaldsCarrierStoreSizeForTest()
+{
+    std::lock_guard<std::mutex> lock(g_rc_carrier_mu);
+    CarrierEvictExpiredLocked(std::chrono::steady_clock::now());
+    return g_rc_carrier_store.size();
 }
 
 } // namespace matmul::v4::rc

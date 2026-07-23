@@ -318,6 +318,34 @@ inline constexpr const char* GETMMSKETCH{"getmmsketch"};
  * @since MatMul v4.4 ENC-DR.
  */
 inline constexpr const char* MMSKETCH{"mmsketch"};
+/**
+ * getrccarrier requests the datacenter-profile (nMatMulRCProfile==2) Freivalds
+ * SAMPLED CARRIER for one block (the λ sampled layers' bytes + tile-tree
+ * openings). Payload: block_hash (uint256). Modeled on getmmsketch/getblocktxn:
+ * a node that holds the carrier for the requested block MAY reply with
+ * `rccarrier`; a request for a carrier we don't hold is silently ignored. The
+ * carrier is the availability seam that lets a NON-MINING node validate a
+ * received profile-2 block (CheckMatMulProofOfWork_RC) — unlike the best-effort
+ * sketch, it is consensus-load-bearing, so it is authenticated on receipt.
+ * @since datacenter-profile relay.
+ */
+inline constexpr const char* GETRCCARRIER{"getrccarrier"};
+/**
+ * rccarrier carries a serialized RCFreivaldsSampledCarrier for one block, in
+ * reply to a `getrccarrier` (or pushed by a serving peer immediately BEFORE the
+ * `block` on the same ordered connection, so it is stored before the block is
+ * validated). Payload:
+ *   block_hash    (uint256)          the block the carrier binds to (header hash);
+ *   carrier_bytes (var-length bytes) the bounded RCFreivaldsSampledCarrier wire.
+ * The bytes are UNTRUSTED: the receiver enforces a hard size ceiling BEFORE
+ * buffering, deserializes with every vector length bounded, then AUTHENTICATES
+ * with VerifyEpisodeFreivaldsSampledCarrier + the consensus episode-shape bind
+ * (identical to CheckMatMulProofOfWork_RC) before admitting it to the local
+ * carrier store. A carrier that fails to authenticate is dropped and the peer
+ * penalized; it is NEVER evidence about the block itself.
+ * @since datacenter-profile relay.
+ */
+inline constexpr const char* RCCARRIER{"rccarrier"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -364,6 +392,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::DANDELIONACC,
     NetMsgType::GETMMSKETCH,
     NetMsgType::MMSKETCH,
+    NetMsgType::GETRCCARRIER,
+    NetMsgType::RCCARRIER,
 })};
 
 /** nServices flags */

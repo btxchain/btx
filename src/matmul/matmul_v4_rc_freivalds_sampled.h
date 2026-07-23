@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc.h>      // RCEpisodeParams, RCMerkleProof
 #include <matmul/matmul_v4_rc_gkr.h>  // RCGkrProofV7 + the sampled-provenance seam
 #include <primitives/block.h>
+#include <span.h>
 #include <uint256.h>
 
 #include <cstdint>
@@ -216,6 +217,71 @@ struct RCFreivaldsSampledCarrier {
     const RCFreivaldsSampledCarrier& carrier, const CBlockHeader& header, int32_t height,
     const arith_uint256& target, std::string* why = nullptr,
     RCFreivaldsSampledTiming* out_timing = nullptr);
+
+// ---------------------------------------------------------------------------
+// P2P RELAY of the sampled carrier — serialization (byte-exact round-trip) +
+// bounded deserialization (untrusted input) + a process-local store keyed by
+// block hash. This is the network-operability seam for the datacenter (profile
+// 2) consensus path: a non-mining node that receives a profile-2 block over
+// P2P has no local RCGkrProofV7, so CheckMatMulProofOfWork_RC validates against
+// the RELAYED carrier fetched from this store (see pow.cpp). The carrier is a
+// RELAY-ONLY object; it is NOT a consensus-serialized structure and its bytes
+// never enter a block, a digest, or an FS seed. The consensus binding is the
+// SEMANTIC one performed by VerifyEpisodeFreivaldsSampledCarrier (episode shape
+// + digest→target + λ sampled layers), not this byte layout.
+// ---------------------------------------------------------------------------
+
+// DoS bounds for the untrusted wire form. The carrier arrives in a single P2P
+// message capped by the net layer at MAX_PROTOCOL_MESSAGE_LENGTH (16 MB); the
+// bound below is the module's own hard ceiling, re-checked on both serve and
+// receive. It rides comfortably under the transport ceiling. NOTE (honest): at
+// full PRODUCTION datacenter dims a single sampled layer's dense operands can
+// exceed this ceiling — the relay is functional for the regtest/toy episode
+// regime that is actually reachable today (mainnet activation stays INT32_MAX);
+// see the report's residual-gap note. Oversize carriers are simply not served
+// (peers rebuild), mirroring the best-effort mmsketch relay.
+inline constexpr size_t kRCFreivaldsCarrierMaxSerializedBytes = 12u * 1024u * 1024u;
+/** Count caps (defense-in-depth alongside the byte ceiling): a violated cap
+ *  aborts the deserialize with a std::ios_base::failure, which net_processing
+ *  scores as peer misbehavior exactly like any malformed message. */
+inline constexpr uint32_t kRCCarrierMaxRounds = 4096;          // round_seeds/round_roots
+inline constexpr uint32_t kRCCarrierMaxSampledLayers = 4096;   // >= any λ we deploy (256)
+inline constexpr uint32_t kRCCarrierMaxLeavesPerLayer = 65536; // covering leaves per layer
+inline constexpr uint32_t kRCCarrierMaxMerkleSiblings = 64;    // >= tree depth for any N
+/** Per-vector element ceiling: no single carried vector may claim more elements
+ *  than the whole-carrier byte ceiling could hold at 1 byte/elem. Combined with
+ *  the running byte budget below this bounds allocation regardless of element
+ *  width. */
+inline constexpr uint64_t kRCCarrierMaxVecElems = kRCFreivaldsCarrierMaxSerializedBytes;
+
+/** Serialize a carrier to a byte-exact wire form (miner/announce side). */
+void SerializeRCFreivaldsCarrier(const RCFreivaldsSampledCarrier& carrier,
+                                 std::vector<unsigned char>& out);
+
+/**
+ * BOUNDED deserialize from UNTRUSTED bytes. Enforces the hard byte ceiling
+ * (kRCFreivaldsCarrierMaxSerializedBytes) BEFORE and DURING allocation via a
+ * running budget, every count cap above, and rejects trailing data. Returns
+ * false (why set) on any violation — it does NOT throw, so callers on the hot
+ * path can branch; the P2P handler maps a false return to Misbehaving. Byte-
+ * exact: DeserializeBounded(Serialize(c)) == c for any well-formed c whose wire
+ * length is within the ceiling.
+ */
+[[nodiscard]] bool DeserializeRCFreivaldsCarrierBounded(Span<const unsigned char> in,
+                                                        RCFreivaldsSampledCarrier& out,
+                                                        std::string* why = nullptr);
+
+// Process-local carrier store — LRU+TTL, same policy/limits as the V7 proof
+// store (kRCGkrProofCacheMaxEntries / kRCGkrProofCacheTtlSeconds), independent
+// mutex. Populated from the network (RCCARRIER receipt) and by the local miner
+// (SolveMatMulV4RC) so CheckMatMulProofOfWork_RC always finds the carrier for a
+// block it is about to validate. Keyed by block header hash.
+void RCFreivaldsCarrierStorePut(const uint256& block_hash, RCFreivaldsSampledCarrier carrier);
+[[nodiscard]] bool RCFreivaldsCarrierStoreGet(const uint256& block_hash,
+                                              RCFreivaldsSampledCarrier& out);
+[[nodiscard]] bool RCFreivaldsCarrierStoreHave(const uint256& block_hash);
+void RCFreivaldsCarrierStoreClear();
+[[nodiscard]] size_t RCFreivaldsCarrierStoreSizeForTest();
 
 } // namespace matmul::v4::rc
 

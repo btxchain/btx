@@ -4202,33 +4202,39 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
     // -----------------------------------------------------------------------
     if (params.nMatMulRCProfile == 2) {
         // FAIL-CLOSED: the datacenter episode dims cannot be validated without
-        // the episode proof (its sampled wires + tile-tree openings). Fetch the
-        // in-memory RCGkrProofV7 from the process-local store — same lookup key
-        // (header.GetHash()) as the GKR shadow below. No proof ⇒ REJECT: a
-        // validator that has not received/rebuilt the proof cannot accept a
-        // profile-2 block. (Process-local availability seam — see
-        // RCGkrProofV7StoreGet in matmul_v4_rc_gkr.h.)
-        matmul::v4::rc::RCGkrProofV7 dc_proof;
-        if (!matmul::v4::rc::RCGkrProofV7StoreGet(header.GetHash(), dc_proof)) {
+        // the episode proof. A NON-MINING node that received this block over P2P
+        // has no local RCGkrProofV7 — it validates against the RELAYED sampled
+        // CARRIER (the λ sampled layers' bytes + tile-tree openings, ~O(λ·logN),
+        // not the O(N) full-wire proof) fetched from the process-local carrier
+        // store. The store is populated BEFORE this runs by (a) the miner at
+        // winner time (SolveMatMulV4RC) and (b) the P2P RCCARRIER relay
+        // (net_processing) which stores the carrier ahead of the block. No
+        // carrier ⇒ REJECT: a validator that has not received/rebuilt the carrier
+        // cannot accept a profile-2 block. (Availability seam — see
+        // RCFreivaldsCarrierStoreGet in matmul_v4_rc_freivalds_sampled.h.)
+        matmul::v4::rc::RCFreivaldsSampledCarrier dc_carrier;
+        if (!matmul::v4::rc::RCFreivaldsCarrierStoreGet(header.GetHash(), dc_carrier)) {
             return finish(false);
         }
         // Bind the carried episode to the CONSENSUS-resolved datacenter dims so a
         // miner cannot substitute a smaller (cheaper) episode: the sampled
         // verifier authenticates the digest→target and the λ sampled layers, but
-        // the episode SHAPE is fixed by consensus, not by the prover.
-        const auto& e = dc_proof.episode;
+        // the episode SHAPE is fixed by consensus, not by the prover. These are
+        // the complete 8-field episode shape (identical to the fields the FS seed
+        // binds in RCGkrFsSeedV7); phase1_tile_delta is an RCEpisodeOptions
+        // execution knob, not an RCEpisodeParams shape field.
+        const auto& e = dc_carrier.episode;
         if (!(e.rounds == params_rc.rounds && e.d_head == params_rc.d_head &&
               e.n_q == params_rc.n_q && e.n_ctx == params_rc.n_ctx &&
               e.L_lyr == params_rc.L_lyr && e.d_model == params_rc.d_model &&
-              e.b_seq == params_rc.b_seq && e.T_leaf == params_rc.T_leaf &&
-              e.phase1_tile_delta == params_rc.phase1_tile_delta)) {
+              e.b_seq == params_rc.b_seq && e.T_leaf == params_rc.T_leaf)) {
             return finish(false);
         }
         std::string why;
-        if (!matmul::v4::rc::VerifyEpisodeFreivaldsSampled(dc_proof, header, block_height,
-                                                           *bnTarget, &why)) {
+        if (!matmul::v4::rc::VerifyEpisodeFreivaldsSampledCarrier(dc_carrier, header, block_height,
+                                                                  *bnTarget, &why)) {
             LogDebug(BCLog::VALIDATION,
-                     "CheckMatMulProofOfWork_RC: profile-2 Freivalds sampled REJECT why=%s\n",
+                     "CheckMatMulProofOfWork_RC: profile-2 Freivalds sampled-carrier REJECT why=%s\n",
                      why.c_str());
             return finish(false);
         }
@@ -4793,7 +4799,29 @@ uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_he
     } else if (params.IsMatMulRCActive(reference_height)) {
         const matmul::v4::rc::RCEpisodeParams ep =
             matmul::v4::rc::ResolveRCEpisodeParams(params, reference_height);
-        macs = matmul::v4::rc::TotalRCEpisodeMacs(ep);
+        if (params.nMatMulRCProfile == 2) {
+            // Datacenter profile: the consensus authority is the SUBLINEAR
+            // Freivalds sampled verifier (not ExactReplay), so admission cost is
+            // the λ-sampled random-projection verify — O(λ·reps·(mn+mk+kn)), flat
+            // in episode depth — NOT the full-episode MAC count. Bound per
+            // sampled layer by the largest GEMM slab in the layout. This is the
+            // whole point of sublinear verification: a datacenter block is
+            // CHEAPER to verify than an epoch-0 block, so it must not be
+            // throttled by its (16×) compute size.
+            const matmul::v4::rc::RCGkrLayout layout =
+                matmul::v4::rc::RCGkrTraceLayout(ep);
+            uint64_t max_layer_fv = 0;
+            for (const auto& ls : layout.layers) {
+                const uint64_t mn = static_cast<uint64_t>(ls.m) * ls.n;
+                const uint64_t mk = static_cast<uint64_t>(ls.m) * ls.k;
+                const uint64_t kn = static_cast<uint64_t>(ls.k) * ls.n;
+                max_layer_fv = std::max(max_layer_fv, mn + mk + kn);
+            }
+            macs = static_cast<uint64_t>(matmul::v4::rc::kRCFreivaldsSampleCount) *
+                   matmul::v4::rc::kRCFreivaldsReps * max_layer_fv;
+        } else {
+            macs = matmul::v4::rc::TotalRCEpisodeMacs(ep);
+        }
     } else {
         return 1;
     }
@@ -6211,14 +6239,29 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             // DATACENTER PROFILE (nMatMulRCProfile==2): the Freivalds sampled
             // verifier is the CONSENSUS authority (CheckMatMulProofOfWork_RC), so
             // the winner MUST emit the episode proof or its own block fails closed
-            // at verify. Build the v7 episode proof and put it in the process-
-            // local store keyed by the header hash. (Process-local: the
-            // sampled-carrier RELAY over P2P is the remaining net_processing seam;
-            // within a node the miner→validator handoff is complete.)
+            // at verify. Build the v7 episode proof, then distil the RELAY-OPTIMIZED
+            // sampled CARRIER (only the λ sampled layers' bytes + tile-tree
+            // openings) and put THAT in the process-local carrier store keyed by
+            // the header hash — this is exactly what the consensus verifier reads
+            // AND what net_processing announces/serves over P2P (RCCARRIER), so the
+            // miner→network handoff carries the same object the validator checks.
             if (params.nMatMulRCProfile == 2) {
                 const auto pr = matmul::v4::rc::ProveWinnerEpisodeV7(
                     block, params_rc, block_height, effective_target, resealed);
                 if (pr.timing.ok) {
+                    matmul::v4::rc::RCFreivaldsSampledCarrier carrier;
+                    std::string cwhy;
+                    if (matmul::v4::rc::BuildFreivaldsSampledCarrier(
+                            pr.proof, block, block_height, effective_target, carrier, &cwhy)) {
+                        matmul::v4::rc::RCFreivaldsCarrierStorePut(block.GetHash(),
+                                                                  std::move(carrier));
+                    } else {
+                        LogWarning("SolveMatMulV4RC: profile-2 BuildFreivaldsSampledCarrier "
+                                   "failed (%s); block will fail closed at verify\n", cwhy.c_str());
+                    }
+                    // Retain the full v7 proof process-locally too: it is the
+                    // async ε=0 arbiter / dispute source a full node may run off
+                    // the hot path (never relayed).
                     matmul::v4::rc::RCGkrProofV7StorePut(block.GetHash(), pr.proof);
                 } else {
                     LogWarning("SolveMatMulV4RC: profile-2 winner ProveWinnerEpisodeV7 failed "
