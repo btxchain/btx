@@ -68,13 +68,21 @@ static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 // records that gate. See the mainnet block below and the report.
 static constexpr int32_t kRCDatacenterActivationHeight{5'000'000};
 // One-time ASERT rescale coupled to the datacenter cutover: per-nonce work rises
-// ~16× (F_ep 5.32e13 → 8.45e14 MAC), so the difficulty target must LOOSEN ~16× at
-// the activation height to hold the 90 s interval. modeled 16×; wants on-silicon
-// confirmation (MFU-dependent — the effective value is the datacenter miner's
-// real nonce/s, not the raw FLOP ratio). It takes effect together with a finite
-// profile-2 activation height (coupled trio asserted below).
-static constexpr int64_t kRCDatacenterAsertRescaleNum{16};
-static constexpr int64_t kRCDatacenterAsertRescaleDen{1};
+// by the EXACT episode-MAC ratio datacenter/base, so the difficulty target must
+// LOOSEN by that ratio at the activation height to hold the 90 s interval. After
+// the fused-FFN redesign BOTH profiles use the fused FFN, so the base grew too;
+// the measured MAC counts factor exactly as 2^37·k:
+//   datacenter = 2^37·6150 = 845 249 563 852 800  (FFN 2^48·3 + attn 3·2^38)
+//   base       = 2^37·1027 = 141 149 805 215 744  (FFN 2^47   + attn 3·2^37)
+// so the ratio is EXACTLY 6150/1027 = 5.98831… (1027=13·79, 6150=2·3·5^2·41, coprime).
+// This is exact, not modeled — block interval is continuous across the cutover.
+// (The absolute datacenter work is unchanged at ~0.85 PFLOP; only the base-relative
+// ratio moved from the pre-fused-FFN ~15.9× because the base denominator grew.)
+// On-silicon confirmation still wanted (effective value is the datacenter miner's
+// real nonce/s, MFU-dependent, not the raw FLOP ratio). Takes effect together with
+// a finite profile-2 activation height (coupled trio asserted below).
+static constexpr int64_t kRCDatacenterAsertRescaleNum{6150};
+static constexpr int64_t kRCDatacenterAsertRescaleDen{1027};
 
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled, e.g.
@@ -321,7 +329,7 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     // nMatMulRCProfile defaults to 2 (datacenter) network-wide; under it the
     // Freivalds sampled verifier is the consensus authority (deterrence-based,
     // ~0.27% residual — NOT audited). The three coupled pieces (profile 2 +
-    // finite height + ~16× ASERT) must activate TOGETHER. Public nets still stay
+    // finite height + ~6× (6150/1027) ASERT) must activate TOGETHER. Public nets still stay
     // fail-closed at height INT32_MAX with ASERT 1/1 because a finite PUBLIC RC
     // height rides the genuine external no-inversion gate
     // (BTX_MATMUL_NO_INVERSION_GATE_RATIFIED, unflipped) below; regtest may set a
@@ -341,9 +349,10 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     assert(matmul::v4::rc::MakeDatacenterRCEpisodeParams().n_ctx <=
            matmul::v4::rc::DefaultConsensusRCEpisodeParams().n_ctx);
     // COUPLED TRIO: whenever the datacenter profile is ACTIVE (profile 2 AND a
-    // finite RC height) the one-time ASERT rescale MUST be the modeled ~16× loosen
-    // — the difficulty re-anchor cannot be silently omitted when the 16×-heavier
-    // episode goes live, and cannot be applied without the datacenter dims.
+    // finite RC height) the one-time ASERT rescale MUST be the EXACT datacenter/base
+    // episode-MAC ratio 6150/1027 (~5.99× loosen) — the difficulty re-anchor cannot
+    // be silently omitted when the ~5.99×-heavier episode goes live, and cannot be
+    // applied without the datacenter dims.
     if (consensus.nMatMulRCProfile == 2 &&
         consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulRCAsertRescaleNum == kRCDatacenterAsertRescaleNum);
@@ -354,8 +363,8 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         // datacenter profile is the default SELECTION, but nothing runs until a
         // finite height is set — and a finite public height itself requires the
         // no-inversion gate (asserted in the height clause below). While the
-        // height stays INT32_MAX the ASERT rescale stays 1/1 (the coupled 16× is
-        // applied together with the finite height at deploy). NOTE: the former
+        // height stays INT32_MAX the ASERT rescale stays 1/1 (the coupled 6150/1027
+        // is applied together with the finite height at deploy). NOTE: the former
         // "nMatMulRCProfile == 1" public assertion is intentionally removed —
         // datacenter (profile 2) is now the owner-authorized public default.
         assert(consensus.nMatMulRCHeight == std::numeric_limits<int32_t>::max());
@@ -576,7 +585,7 @@ public:
         // RATIFIED), which is deliberately NOT flipped (doing so would falsely
         // attest an unperformed silicon measurement). At deploy the owner sets, in
         // one release: nMatMulV4Height, nMatMulRCHeight = kRCDatacenterActivation-
-        // Height, nMatMulRCAsertRescaleNum/Den = 16/1 (kRCDatacenterAsertRescale*),
+        // Height, nMatMulRCAsertRescaleNum/Den = 6150/1027 (kRCDatacenterAsertRescale*),
         // and flips the ratification gate — the coupled trio the invariant checks.
         consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
         consensus.nMatMulRCAsertRescaleNum = 1;
@@ -1745,9 +1754,9 @@ public:
             consensus.nMatMulRCProfile = *opts.matmul_rc_profile;
         }
         // COUPLED ASERT: when the datacenter profile (2) is live at a finite RC
-        // height on regtest, apply the modeled ~16× one-time loosen together with
+        // height on regtest, apply the exact 6150/1027 (~6×) one-time loosen together with
         // it (design §5) — mirrors the mainnet deploy where profile 2 + finite
-        // height + 16× ASERT activate as one. Satisfies the coupled-trio invariant
+        // height + 6150/1027 ASERT activate as one. Satisfies the coupled-trio invariant
         // in AssertBMX4CConstructionInvariants. (Behaviorally moot on CI toy dims
         // but keeps the activation shape faithful.)
         if (consensus.nMatMulRCProfile == 2 &&
