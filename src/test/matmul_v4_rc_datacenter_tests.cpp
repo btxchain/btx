@@ -1438,6 +1438,7 @@ struct ProdCarrierBenchReport {
     uint64_t regen_misses{0};
     uint64_t regen_hits{0};
     uint64_t regen_bytes{0};
+    uint64_t planned_regen_misses_full{0};
     uint64_t planned_regen_bytes_full{0};
     bool recompute_vectorized{false};
     uint64_t checksum{0};
@@ -1541,12 +1542,38 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
     rc::SerializeRCFreivaldsCarrier(skeleton, wire);
     rep.carrier_bytes = wire.size();
 
-    rep.planned_regen_bytes_full =
-        static_cast<uint64_t>(p.rounds) *
-        (static_cast<uint64_t>(p.n_q) * p.d_head +
-         2ull * static_cast<uint64_t>(p.n_ctx) * p.d_head +
-         static_cast<uint64_t>(p.b_seq) * p.d_model +
-         2ull * static_cast<uint64_t>(p.L_lyr) * p.d_model * p.d_ff);
+    std::map<uint256, uint64_t> planned_regen_seed_bytes;
+    auto note_planned_seed = [&](const uint256& seed, uint64_t bytes) {
+        auto it = planned_regen_seed_bytes.find(seed);
+        if (it == planned_regen_seed_bytes.end()) {
+            planned_regen_seed_bytes.emplace(seed, bytes);
+        } else {
+            BOOST_REQUIRE_EQUAL(it->second, bytes);
+        }
+    };
+    for (uint32_t u : units) {
+        const uint32_t li = sampleable[u];
+        const auto& lp = prov[li];
+        if (lp.kind == rc::RCGkrLayerKind::GemmPhase1SV) {
+            const auto& qkt = prov[lp.a.src_idx];
+            note_planned_seed(qkt.a.seed, static_cast<uint64_t>(p.n_q) * p.d_head);
+            note_planned_seed(qkt.b.seed, static_cast<uint64_t>(p.n_ctx) * p.d_head);
+            note_planned_seed(lp.b.seed, static_cast<uint64_t>(p.n_ctx) * p.d_head);
+        } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
+            const auto& up = prov[lp.a.src_idx];
+            if (up.a.is_leaf) {
+                note_planned_seed(up.a.seed, static_cast<uint64_t>(p.b_seq) * p.d_model);
+            }
+            note_planned_seed(up.b.seed, static_cast<uint64_t>(p.d_model) * p.d_ff);
+            note_planned_seed(lp.b.seed, static_cast<uint64_t>(p.d_ff) * p.d_model);
+        }
+    }
+    rep.planned_regen_misses_full = planned_regen_seed_bytes.size();
+    rep.planned_regen_bytes_full = 0;
+    for (const auto& [seed, bytes] : planned_regen_seed_bytes) {
+        (void)seed;
+        rep.planned_regen_bytes_full += bytes;
+    }
 
     std::map<uint256, std::vector<int8_t>> regen;
     auto elapsed = [&](std::chrono::steady_clock::time_point t0) {
@@ -1795,6 +1822,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
                        << " first_layer_regen_hits=" << rep.first_layer_regen_hits
                        << " first_layer_regen_bytes=" << rep.first_layer_regen_bytes
                        << " recompute_vectorized=" << (rep.recompute_vectorized ? 1 : 0)
+                       << " planned_full_regen_misses=" << rep.planned_regen_misses_full
                        << " planned_full_regen_bytes=" << rep.planned_regen_bytes_full
                        << " checksum=" << rep.checksum);
 

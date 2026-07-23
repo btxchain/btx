@@ -354,8 +354,8 @@ struct Phase2Tensors {
      *  during streaming serialization without a full StoreAll rebuild. W_up is
      *  d_model×d_ff, W_down is d_ff×d_model. The intermediate H (b_seq×d_ff) is
      *  NEVER stored/committed — each layer recomputes it internally. */
-    std::vector<std::vector<int8_t>> W_up;
-    std::vector<std::vector<int8_t>> W_down;
+    std::vector<int8_t> W_up_shared;
+    std::vector<int8_t> W_down_shared;
     std::vector<uint256> prf_up;
     std::vector<uint256> prf_dn;
 };
@@ -422,20 +422,18 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
 {
     Phase2Tensors out;
     out.X.resize(p.L_lyr + 1);
-    out.W_up.resize(p.L_lyr);
-    out.W_down.resize(p.L_lyr);
     out.prf_up.resize(p.L_lyr);
     out.prf_dn.resize(p.L_lyr);
 
     const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
     out.X[0] = ExpandMxDequantInt8(seed_X0, p.b_seq, p.d_model);
+    out.W_up_shared = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, "BTX_RC_WUP_V1"),
+                                          p.d_model, p.d_ff);
+    out.W_down_shared = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, "BTX_RC_WDN_V1"),
+                                            p.d_ff, p.d_model);
 
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
         char tag[40];
-        std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
-        out.W_up[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_model, p.d_ff);
-        std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
-        out.W_down[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_ff, p.d_model);
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_UP_%u_V1", l);
         out.prf_up[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
         std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_DN_%u_V1", l);
@@ -451,8 +449,9 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
     // Fused FFN forward pass — always compute; then drop non-checkpoint activations.
     // Backward/Wgrad are GONE: the fused FFN commits only the per-layer output X[l+1].
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        out.X[l + 1] = FusedFfnLayer(out.X[l], out.W_up[l], out.W_down[l], out.prf_up[l],
-                                     out.prf_dn[l], p.b_seq, p.d_model, p.d_ff, gemm);
+        out.X[l + 1] = FusedFfnLayer(out.X[l], out.W_up_shared, out.W_down_shared,
+                                     out.prf_up[l], out.prf_dn[l], p.b_seq, p.d_model,
+                                     p.d_ff, gemm);
     }
     if (ckpt != RCEpisodeOptions::Checkpoint::StoreAll) {
         for (uint32_t l = 1; l <= p.L_lyr; ++l) {
@@ -523,8 +522,9 @@ void EnsurePhase2X(Phase2Tensors& p2, uint32_t layer, const RCEpisodeParams& p,
     while (src > 0 && p2.X[src].empty()) --src;
     assert(!p2.X[src].empty());
     for (uint32_t m = src; m < layer; ++m) {
-        p2.X[m + 1] = FusedFfnLayer(p2.X[m], p2.W_up[m], p2.W_down[m], p2.prf_up[m], p2.prf_dn[m],
-                                    p.b_seq, p.d_model, p.d_ff, gemm);
+        p2.X[m + 1] = FusedFfnLayer(p2.X[m], p2.W_up_shared, p2.W_down_shared,
+                                    p2.prf_up[m], p2.prf_dn[m], p.b_seq, p.d_model,
+                                    p.d_ff, gemm);
     }
     for (uint32_t m = src + 1; m < layer; ++m) {
         if (!need_store(m)) {
@@ -586,10 +586,10 @@ uint256 StreamRoundIntoMerkle(Phase1Result& p1, Phase2Tensors& p2, const RCEpiso
     }
 
     // Weights no longer needed after the last X recompute.
-    p2.W_up.clear();
-    p2.W_up.shrink_to_fit();
-    p2.W_down.clear();
-    p2.W_down.shrink_to_fit();
+    p2.W_up_shared.clear();
+    p2.W_up_shared.shrink_to_fit();
+    p2.W_down_shared.clear();
+    p2.W_down_shared.shrink_to_fit();
     p2.prf_up.clear();
     p2.prf_up.shrink_to_fit();
     p2.prf_dn.clear();
