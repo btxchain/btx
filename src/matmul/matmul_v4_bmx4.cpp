@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_bmx4.h>
 
+#include <bitcoin-build-config.h> // IWYU pragma: keep
 #include <matmul/matmul_pow.h>
 #include <matmul/matmul_v4.h>
 
@@ -17,11 +18,40 @@
 #include <array>
 #include <cassert>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#endif
+
+#if defined(ENABLE_ARM_SHANI)
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#elif defined(__linux__)
+#include <sys/auxv.h>
+#if defined(__aarch64__)
+#include <asm/hwcap.h>
+#elif defined(__arm__)
+#include <asm/hwcap.h>
+#endif
+#endif
+#endif
+
+#if defined(ENABLE_ARM_SHANI)
+namespace sha256_arm_shani {
+void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks);
+}
+namespace sha256_xof_arm_shani {
+void Transform4x41(unsigned char output[4][32], const unsigned char seed[32],
+                   unsigned char domain, uint64_t block0);
+}
+#endif
 
 namespace matmul::v4::bmx4 {
 namespace {
@@ -51,6 +81,300 @@ void SeedBytesLE(const uint256& seed, uint8_t out[32])
 {
     for (size_t i = 0; i < 32; ++i) {
         out[i] = seed.data()[31 - i];
+    }
+}
+
+#if defined(ENABLE_ARM_SHANI)
+bool RuntimeArmSha256Available()
+{
+#if defined(__APPLE__)
+    int val = 0;
+    size_t len = sizeof(val);
+    return sysctlbyname("hw.optional.arm.FEAT_SHA256", &val, &len, nullptr, 0) == 0 && val != 0;
+#elif defined(__linux__) && defined(__aarch64__) && defined(HWCAP_SHA2)
+    return (getauxval(AT_HWCAP) & HWCAP_SHA2) != 0;
+#elif defined(__linux__) && defined(__arm__) && defined(HWCAP2_SHA2)
+    return (getauxval(AT_HWCAP2) & HWCAP2_SHA2) != 0;
+#else
+    return false;
+#endif
+}
+#endif
+
+void XofBlock41(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block, uint8_t hash[32])
+{
+#if defined(ENABLE_ARM_SHANI)
+    static const bool use_arm_sha = RuntimeArmSha256Available();
+    if (use_arm_sha) {
+        unsigned char chunk[64]{};
+        std::memcpy(chunk, seed_bytes, 32);
+        chunk[32] = domain;
+        WriteLE64(chunk + 33, block);
+        chunk[41] = 0x80;
+        WriteBE64(chunk + 56, 41u * 8u);
+        uint32_t s[8] = {
+            0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+            0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        };
+        sha256_arm_shani::Transform(s, chunk, 1);
+        WriteBE32(hash + 0, s[0]);
+        WriteBE32(hash + 4, s[1]);
+        WriteBE32(hash + 8, s[2]);
+        WriteBE32(hash + 12, s[3]);
+        WriteBE32(hash + 16, s[4]);
+        WriteBE32(hash + 20, s[5]);
+        WriteBE32(hash + 24, s[6]);
+        WriteBE32(hash + 28, s[7]);
+        return;
+    }
+#endif
+    CSHA256 hasher;
+    hasher.Write(seed_bytes, 32);
+    hasher.Write(&domain, 1);
+    uint8_t block_le[8];
+    WriteLE64(block_le, block);
+    hasher.Write(block_le, sizeof(block_le));
+    hasher.Finalize(hash);
+}
+
+#if defined(ENABLE_ARM_SHANI)
+void XofBlock41x4Shani(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
+                       uint8_t hashes[4][32])
+{
+    sha256_xof_arm_shani::Transform4x41(hashes, seed_bytes, domain, block0);
+}
+
+bool Xof4ShaniSelfTest()
+{
+    uint8_t seed_bytes[32];
+    for (uint32_t i = 0; i < 32; ++i) seed_bytes[i] = static_cast<uint8_t>(i * 7u + 3u);
+    uint8_t hashes4[4][32];
+    XofBlock41x4Shani(seed_bytes, kMantissaStreamDomain, 0x123456789abcdef0ULL, hashes4);
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        uint8_t ref[32];
+        XofBlock41(seed_bytes, kMantissaStreamDomain, 0x123456789abcdef0ULL + lane, ref);
+        if (std::memcmp(hashes4[lane], ref, 32) != 0) return false;
+    }
+    return true;
+}
+
+bool UseXof4Shani()
+{
+    const char* env = std::getenv("BTX_BMX4_XOF4_SHANI");
+    if (env == nullptr || env[0] != '1' || env[1] != '\0') return false;
+    static const bool ok = RuntimeArmSha256Available() && Xof4ShaniSelfTest();
+    return ok;
+}
+#endif
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+uint32x4_t RotR(uint32x4_t x, int n)
+{
+    switch (n) {
+    case 2: return vorrq_u32(vshrq_n_u32(x, 2), vshlq_n_u32(x, 30));
+    case 6: return vorrq_u32(vshrq_n_u32(x, 6), vshlq_n_u32(x, 26));
+    case 7: return vorrq_u32(vshrq_n_u32(x, 7), vshlq_n_u32(x, 25));
+    case 11: return vorrq_u32(vshrq_n_u32(x, 11), vshlq_n_u32(x, 21));
+    case 13: return vorrq_u32(vshrq_n_u32(x, 13), vshlq_n_u32(x, 19));
+    case 17: return vorrq_u32(vshrq_n_u32(x, 17), vshlq_n_u32(x, 15));
+    case 18: return vorrq_u32(vshrq_n_u32(x, 18), vshlq_n_u32(x, 14));
+    case 19: return vorrq_u32(vshrq_n_u32(x, 19), vshlq_n_u32(x, 13));
+    case 22: return vorrq_u32(vshrq_n_u32(x, 22), vshlq_n_u32(x, 10));
+    case 25: return vorrq_u32(vshrq_n_u32(x, 25), vshlq_n_u32(x, 7));
+    default: assert(false); return x;
+    }
+}
+
+uint32x4_t ShaCh(uint32x4_t x, uint32x4_t y, uint32x4_t z)
+{
+    return veorq_u32(z, vandq_u32(x, veorq_u32(y, z)));
+}
+
+uint32x4_t ShaMaj(uint32x4_t x, uint32x4_t y, uint32x4_t z)
+{
+    return vorrq_u32(vandq_u32(x, y), vandq_u32(z, vorrq_u32(x, y)));
+}
+
+uint32x4_t ShaSigma0(uint32x4_t x)
+{
+    return veorq_u32(veorq_u32(RotR(x, 2), RotR(x, 13)), RotR(x, 22));
+}
+
+uint32x4_t ShaSigma1(uint32x4_t x)
+{
+    return veorq_u32(veorq_u32(RotR(x, 6), RotR(x, 11)), RotR(x, 25));
+}
+
+uint32x4_t ShaSmall0(uint32x4_t x)
+{
+    return veorq_u32(veorq_u32(RotR(x, 7), RotR(x, 18)), vshrq_n_u32(x, 3));
+}
+
+uint32x4_t ShaSmall1(uint32x4_t x)
+{
+    return veorq_u32(veorq_u32(RotR(x, 17), RotR(x, 19)), vshrq_n_u32(x, 10));
+}
+
+uint32_t ReadBE32Local(const uint8_t* p)
+{
+    return (uint32_t{p[0]} << 24) | (uint32_t{p[1]} << 16) | (uint32_t{p[2]} << 8) |
+           uint32_t{p[3]};
+}
+
+void XofBlock41x4Neon(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
+                      uint8_t hashes[4][32])
+{
+    static constexpr uint32_t K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    };
+
+    uint32x4_t w[64];
+    for (int i = 0; i < 8; ++i) {
+        w[i] = vdupq_n_u32(ReadBE32Local(seed_bytes + 4 * i));
+    }
+    alignas(16) uint32_t w8[4];
+    alignas(16) uint32_t w9[4];
+    alignas(16) uint32_t w10[4];
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        const uint64_t b = block0 + lane;
+        w8[lane] = (uint32_t{domain} << 24) |
+                   (static_cast<uint32_t>((b >> 0) & 0xffu) << 16) |
+                   (static_cast<uint32_t>((b >> 8) & 0xffu) << 8) |
+                   static_cast<uint32_t>((b >> 16) & 0xffu);
+        w9[lane] = (static_cast<uint32_t>((b >> 24) & 0xffu) << 24) |
+                   (static_cast<uint32_t>((b >> 32) & 0xffu) << 16) |
+                   (static_cast<uint32_t>((b >> 40) & 0xffu) << 8) |
+                   static_cast<uint32_t>((b >> 48) & 0xffu);
+        w10[lane] = (static_cast<uint32_t>((b >> 56) & 0xffu) << 24) | 0x00800000u;
+    }
+    w[8] = vld1q_u32(w8);
+    w[9] = vld1q_u32(w9);
+    w[10] = vld1q_u32(w10);
+    w[11] = vdupq_n_u32(0);
+    w[12] = vdupq_n_u32(0);
+    w[13] = vdupq_n_u32(0);
+    w[14] = vdupq_n_u32(0);
+    w[15] = vdupq_n_u32(41u * 8u);
+    for (int t = 16; t < 64; ++t) {
+        w[t] = vaddq_u32(vaddq_u32(ShaSmall1(w[t - 2]), w[t - 7]),
+                         vaddq_u32(ShaSmall0(w[t - 15]), w[t - 16]));
+    }
+
+    const uint32x4_t h0 = vdupq_n_u32(0x6a09e667);
+    const uint32x4_t h1 = vdupq_n_u32(0xbb67ae85);
+    const uint32x4_t h2 = vdupq_n_u32(0x3c6ef372);
+    const uint32x4_t h3 = vdupq_n_u32(0xa54ff53a);
+    const uint32x4_t h4 = vdupq_n_u32(0x510e527f);
+    const uint32x4_t h5 = vdupq_n_u32(0x9b05688c);
+    const uint32x4_t h6 = vdupq_n_u32(0x1f83d9ab);
+    const uint32x4_t h7 = vdupq_n_u32(0x5be0cd19);
+    uint32x4_t a = h0, b = h1, c = h2, d = h3, e = h4, f = h5, g = h6, h = h7;
+    for (int t = 0; t < 64; ++t) {
+        const uint32x4_t t1 = vaddq_u32(vaddq_u32(vaddq_u32(vaddq_u32(h, ShaSigma1(e)),
+                                                              ShaCh(e, f, g)),
+                                                   vdupq_n_u32(K[t])),
+                                        w[t]);
+        const uint32x4_t t2 = vaddq_u32(ShaSigma0(a), ShaMaj(a, b, c));
+        h = g;
+        g = f;
+        f = e;
+        e = vaddq_u32(d, t1);
+        d = c;
+        c = b;
+        b = a;
+        a = vaddq_u32(t1, t2);
+    }
+    a = vaddq_u32(a, h0);
+    b = vaddq_u32(b, h1);
+    c = vaddq_u32(c, h2);
+    d = vaddq_u32(d, h3);
+    e = vaddq_u32(e, h4);
+    f = vaddq_u32(f, h5);
+    g = vaddq_u32(g, h6);
+    h = vaddq_u32(h, h7);
+
+    alignas(16) uint32_t out[8][4];
+    vst1q_u32(out[0], a);
+    vst1q_u32(out[1], b);
+    vst1q_u32(out[2], c);
+    vst1q_u32(out[3], d);
+    vst1q_u32(out[4], e);
+    vst1q_u32(out[5], f);
+    vst1q_u32(out[6], g);
+    vst1q_u32(out[7], h);
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        for (uint32_t word = 0; word < 8; ++word) {
+            WriteBE32(hashes[lane] + 4 * word, out[word][lane]);
+        }
+    }
+}
+
+bool Xof4NeonSelfTest()
+{
+    uint8_t seed_bytes[32];
+    for (uint32_t i = 0; i < 32; ++i) seed_bytes[i] = static_cast<uint8_t>(i * 7u + 3u);
+    uint8_t hashes4[4][32];
+    XofBlock41x4Neon(seed_bytes, kMantissaStreamDomain, 0x123456789abcdef0ULL, hashes4);
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        uint8_t ref[32];
+        XofBlock41(seed_bytes, kMantissaStreamDomain, 0x123456789abcdef0ULL + lane, ref);
+        if (std::memcmp(hashes4[lane], ref, 32) != 0) return false;
+    }
+    return true;
+}
+
+bool UseXof4Neon()
+{
+    const char* env = std::getenv("BTX_BMX4_XOF4_NEON");
+    if (env == nullptr || env[0] != '1' || env[1] != '\0') return false;
+    static const bool ok = Xof4NeonSelfTest();
+    return ok;
+}
+#endif
+
+bool UseXof4Fast()
+{
+#if defined(ENABLE_ARM_SHANI)
+    if (UseXof4Shani()) return true;
+#endif
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (UseXof4Neon()) return true;
+#endif
+    return false;
+}
+
+void XofBlock41x4Fast(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
+                      uint8_t hashes[4][32])
+{
+#if defined(ENABLE_ARM_SHANI)
+    if (UseXof4Shani()) {
+        XofBlock41x4Shani(seed_bytes, domain, block0, hashes);
+        return;
+    }
+#endif
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (UseXof4Neon()) {
+        XofBlock41x4Neon(seed_bytes, domain, block0, hashes);
+        return;
+    }
+#endif
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        XofBlock41(seed_bytes, domain, block0 + lane, hashes[lane]);
     }
 }
 
@@ -105,6 +429,31 @@ struct MantissaTable {
 };
 constexpr MantissaTable kMantissaTable{};
 
+struct MantissaByteTable {
+    struct Entry {
+        uint8_t count{0};
+        std::array<int8_t, 2> value{};
+    };
+    std::array<Entry, 256> entry{};
+
+    constexpr MantissaByteTable()
+    {
+        for (uint32_t byte = 0; byte < entry.size(); ++byte) {
+            Entry e{};
+            const uint8_t low = static_cast<uint8_t>(byte & 0x0F);
+            const uint8_t high = static_cast<uint8_t>((byte >> 4) & 0x0F);
+            if (kMantissaTable.accepted[low]) {
+                e.value[e.count++] = kMantissaTable.value[low];
+            }
+            if (kMantissaTable.accepted[high]) {
+                e.value[e.count++] = kMantissaTable.value[high];
+            }
+            entry[byte] = e;
+        }
+    }
+};
+constexpr MantissaByteTable kMantissaByteTable{};
+
 // Compile-time proof that the bijection is exactly 11 accepted / 5 rejected
 // onto M11, with the specified holes.
 constexpr int CountAccepted()
@@ -118,6 +467,43 @@ static_assert(!kMantissaTable.accepted[1] && !kMantissaTable.accepted[3] &&
                   !kMantissaTable.accepted[8] && !kMantissaTable.accepted[9] &&
                   !kMantissaTable.accepted[11],
               "rejected codes must be exactly {0.5,1.5,-0}: nibbles 1,3,8,9,11");
+
+uint32_t ClampThreads(uint32_t threads, size_t jobs)
+{
+    if (threads <= 1 || jobs <= 1) return 1;
+    if (threads > 64) threads = 64;
+    return std::max<uint32_t>(1, std::min<uint32_t>(threads, static_cast<uint32_t>(jobs)));
+}
+
+template <typename Fn>
+void ParallelForBlocks(size_t jobs, uint32_t threads, const Fn& fn)
+{
+    threads = ClampThreads(threads, jobs);
+    if (threads <= 1) {
+        for (size_t i = 0; i < jobs; ++i) fn(i);
+        return;
+    }
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    const size_t chunk = (jobs + threads - 1) / threads;
+    for (uint32_t t = 0; t < threads; ++t) {
+        const size_t begin = static_cast<size_t>(t) * chunk;
+        const size_t end = std::min(jobs, begin + chunk);
+        workers.emplace_back([=, &fn]() {
+            for (size_t i = begin; i < end; ++i) fn(i);
+        });
+    }
+    for (auto& worker : workers) worker.join();
+}
+
+size_t InitialMantissaBlockGuess(size_t count)
+{
+    // Each SHA block gives 64 nibbles and accepts 11/16 in expectation.
+    // Add a small deterministic margin; the extension loop below handles the
+    // rare case where this still undershoots.
+    const size_t expected = (count * 16 + (64 * 11 - 1)) / (64 * 11);
+    return expected + expected / 32 + 16;
+}
 
 } // namespace
 
@@ -138,27 +524,34 @@ void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out)
 
     size_t filled = 0;
     uint64_t block = 0;
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (UseXof4Fast()) {
+        while (filled < count) {
+            uint8_t hashes[4][CSHA256::OUTPUT_SIZE];
+            XofBlock41x4Fast(seed_bytes, kMantissaStreamDomain, block, hashes);
+            for (uint32_t lane = 0; lane < 4 && filled < count; ++lane) {
+                for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
+                    const auto& e = kMantissaByteTable.entry[hashes[lane][i]];
+                    for (uint8_t j = 0; j < e.count; ++j) {
+                        out[filled++] = e.value[j];
+                        if (filled == count) break;
+                    }
+                }
+            }
+            block += 4;
+        }
+        return;
+    }
+#endif
     while (filled < count) {
-        CSHA256 hasher;
-        hasher.Write(seed_bytes, sizeof(seed_bytes));
-        hasher.Write(&kMantissaStreamDomain, 1);
-        uint8_t block_le[8];
-        WriteLE64(block_le, block);
-        hasher.Write(block_le, sizeof(block_le));
-
         uint8_t hash[CSHA256::OUTPUT_SIZE];
-        hasher.Finalize(hash);
+        XofBlock41(seed_bytes, kMantissaStreamDomain, block, hash);
 
         for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
-            const uint8_t nibs[2] = {static_cast<uint8_t>(hash[i] & 0x0F),
-                                     static_cast<uint8_t>((hash[i] >> 4) & 0x0F)};
-            for (uint8_t nib : nibs) {
-                bool accepted = false;
-                const int8_t mu = SampleMantissaNibble(nib, accepted);
-                if (accepted) {
-                    out[filled++] = mu;
-                    if (filled == count) break;
-                }
+            const auto& e = kMantissaByteTable.entry[hash[i]];
+            for (uint8_t j = 0; j < e.count; ++j) {
+                out[filled++] = e.value[j];
+                if (filled == count) break;
             }
         }
         ++block;
@@ -181,22 +574,12 @@ void ExpandMantissaStreamPortable(const uint256& seed, size_t count, int8_t* out
     size_t accepted_total = 0;
     uint64_t block = 0;
     while (accepted_total < count) {
-        CSHA256 hasher;
-        hasher.Write(seed_bytes, sizeof(seed_bytes));
-        hasher.Write(&kMantissaStreamDomain, 1);
-        uint8_t block_le[8];
-        WriteLE64(block_le, block);
-        hasher.Write(block_le, sizeof(block_le));
         std::array<uint8_t, CSHA256::OUTPUT_SIZE> hash{};
-        hasher.Finalize(hash.data());
+        XofBlock41(seed_bytes, kMantissaStreamDomain, block, hash.data());
 
         uint32_t acc = 0;
         for (size_t i = 0; i < CSHA256::OUTPUT_SIZE; ++i) {
-            for (uint8_t shift : {0, 4}) {
-                bool accepted = false;
-                (void)SampleMantissaNibble(static_cast<uint8_t>((hash[i] >> shift) & 0x0F), accepted);
-                if (accepted) ++acc;
-            }
+            acc += kMantissaByteTable.entry[hash[i]].count;
         }
         blocks.push_back(hash);
         accept_per_block.push_back(acc);
@@ -208,17 +591,229 @@ void ExpandMantissaStreamPortable(const uint256& seed, size_t count, int8_t* out
     for (size_t b = 0; b < blocks.size() && filled < count; ++b) {
         const auto& hash = blocks[b];
         for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
-            const uint8_t nibs[2] = {static_cast<uint8_t>(hash[i] & 0x0F),
-                                     static_cast<uint8_t>((hash[i] >> 4) & 0x0F)};
-            for (uint8_t nib : nibs) {
-                bool accepted = false;
-                const int8_t mu = SampleMantissaNibble(nib, accepted);
-                if (accepted) {
-                    out[filled++] = mu;
-                    if (filled == count) break;
-                }
+            const auto& e = kMantissaByteTable.entry[hash[i]];
+            for (uint8_t j = 0; j < e.count; ++j) {
+                out[filled++] = e.value[j];
+                if (filled == count) break;
             }
         }
+    }
+}
+
+void ExpandMantissaStreamParallel(const uint256& seed, size_t count, int8_t* out,
+                                  uint32_t threads)
+{
+    if (count == 0) return;
+    threads = ClampThreads(threads, std::max<size_t>(1, count / 4096));
+    if (threads <= 1 || count < 1u << 20) {
+        ExpandMantissaStream(seed, count, out);
+        return;
+    }
+
+    uint8_t seed_bytes[32];
+    SeedBytesLE(seed, seed_bytes);
+
+    const bool cache_hashes = [] {
+        const char* env = std::getenv("BTX_BMX4_PARALLEL_CACHE_HASHES");
+        if (env != nullptr) return env[0] != '0' || env[1] != '\0';
+        return true;
+    }();
+    if (cache_hashes) {
+        std::vector<std::array<uint8_t, CSHA256::OUTPUT_SIZE>> hashes;
+        std::vector<uint8_t> accept_counts;
+        size_t accepted_total = 0;
+        size_t want_blocks = InitialMantissaBlockGuess(count);
+        while (accepted_total < count) {
+            const size_t old = hashes.size();
+            hashes.resize(want_blocks);
+            accept_counts.resize(want_blocks);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+            if (UseXof4Fast()) {
+                const size_t jobs = want_blocks - old;
+                ParallelForBlocks((jobs + 3) / 4, threads, [&](size_t group) {
+                    const size_t i0 = old + group * 4;
+                    const size_t n = std::min<size_t>(4, want_blocks - i0);
+                    if (n == 4) {
+                        uint8_t h4[4][CSHA256::OUTPUT_SIZE];
+                        XofBlock41x4Fast(seed_bytes, kMantissaStreamDomain,
+                                         static_cast<uint64_t>(i0), h4);
+                        for (size_t lane = 0; lane < 4; ++lane) {
+                            std::memcpy(hashes[i0 + lane].data(), h4[lane], CSHA256::OUTPUT_SIZE);
+                            uint8_t acc = 0;
+                            for (uint8_t b : hashes[i0 + lane])
+                                acc += kMantissaByteTable.entry[b].count;
+                            accept_counts[i0 + lane] = acc;
+                        }
+                    } else {
+                        for (size_t lane = 0; lane < n; ++lane) {
+                            const size_t i = i0 + lane;
+                            XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(i),
+                                       hashes[i].data());
+                            uint8_t acc = 0;
+                            for (uint8_t b : hashes[i]) acc += kMantissaByteTable.entry[b].count;
+                            accept_counts[i] = acc;
+                        }
+                    }
+                });
+            } else
+#endif
+            {
+                ParallelForBlocks(want_blocks - old, threads, [&](size_t rel) {
+                    const size_t i = old + rel;
+                    XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(i),
+                               hashes[i].data());
+                    uint8_t acc = 0;
+                    for (uint8_t b : hashes[i]) acc += kMantissaByteTable.entry[b].count;
+                    accept_counts[i] = acc;
+                });
+            }
+            accepted_total = 0;
+            for (uint8_t c : accept_counts) {
+                accepted_total += c;
+            }
+            if (accepted_total < count) {
+                const size_t remaining = count - accepted_total;
+                want_blocks += InitialMantissaBlockGuess(remaining);
+            }
+        }
+
+        std::vector<size_t> prefix(accept_counts.size());
+        size_t pos0 = 0;
+        for (size_t i = 0; i < accept_counts.size(); ++i) {
+            prefix[i] = pos0;
+            pos0 += accept_counts[i];
+        }
+
+        ParallelForBlocks(hashes.size(), threads, [&](size_t b) {
+            size_t pos = prefix[b];
+            if (pos >= count) return;
+            for (uint8_t h : hashes[b]) {
+                const auto& e = kMantissaByteTable.entry[h];
+                for (uint8_t j = 0; j < e.count; ++j) {
+                    if (pos >= count) return;
+                    out[pos++] = e.value[j];
+                }
+            }
+        });
+        return;
+    }
+
+    std::vector<uint8_t> accept_counts;
+    size_t accepted_total = 0;
+    size_t want_blocks = InitialMantissaBlockGuess(count);
+    while (accepted_total < count) {
+        const size_t old = accept_counts.size();
+        accept_counts.resize(want_blocks);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+        if (UseXof4Fast()) {
+            const size_t jobs = want_blocks - old;
+            ParallelForBlocks((jobs + 3) / 4, threads, [&](size_t group) {
+                const size_t i0 = old + group * 4;
+                const size_t n = std::min<size_t>(4, want_blocks - i0);
+                if (n == 4) {
+                    uint8_t h4[4][CSHA256::OUTPUT_SIZE];
+                    XofBlock41x4Fast(seed_bytes, kMantissaStreamDomain,
+                                     static_cast<uint64_t>(i0), h4);
+                    for (size_t lane = 0; lane < 4; ++lane) {
+                        uint8_t acc = 0;
+                        for (uint8_t b : h4[lane]) acc += kMantissaByteTable.entry[b].count;
+                        accept_counts[i0 + lane] = acc;
+                    }
+                } else {
+                    for (size_t lane = 0; lane < n; ++lane) {
+                        const size_t i = i0 + lane;
+                        uint8_t hash[CSHA256::OUTPUT_SIZE];
+                        XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(i),
+                                   hash);
+                        uint8_t acc = 0;
+                        for (uint8_t b : hash) acc += kMantissaByteTable.entry[b].count;
+                        accept_counts[i] = acc;
+                    }
+                }
+            });
+        } else
+#endif
+        {
+            ParallelForBlocks(want_blocks - old, threads, [&](size_t rel) {
+                const size_t i = old + rel;
+                uint8_t hash[CSHA256::OUTPUT_SIZE];
+                XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(i), hash);
+                uint8_t acc = 0;
+                for (uint8_t b : hash) acc += kMantissaByteTable.entry[b].count;
+                accept_counts[i] = acc;
+            });
+        }
+        accepted_total = 0;
+        for (uint8_t c : accept_counts) {
+            accepted_total += c;
+        }
+        if (accepted_total < count) {
+            const size_t remaining = count - accepted_total;
+            want_blocks += InitialMantissaBlockGuess(remaining);
+        }
+    }
+
+    std::vector<size_t> prefix(accept_counts.size());
+    size_t pos0 = 0;
+    for (size_t i = 0; i < accept_counts.size(); ++i) {
+        prefix[i] = pos0;
+        pos0 += accept_counts[i];
+    }
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (UseXof4Fast()) {
+        ParallelForBlocks((accept_counts.size() + 3) / 4, threads, [&](size_t group) {
+            const size_t b0 = group * 4;
+            const size_t n = std::min<size_t>(4, accept_counts.size() - b0);
+            if (n == 4) {
+                uint8_t h4[4][CSHA256::OUTPUT_SIZE];
+                XofBlock41x4Fast(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(b0),
+                                 h4);
+                for (size_t lane = 0; lane < 4; ++lane) {
+                    size_t pos = prefix[b0 + lane];
+                    if (pos >= count) continue;
+                    for (uint8_t h : h4[lane]) {
+                        const auto& e = kMantissaByteTable.entry[h];
+                        for (uint8_t j = 0; j < e.count; ++j) {
+                            if (pos >= count) break;
+                            out[pos++] = e.value[j];
+                        }
+                    }
+                }
+            } else {
+                for (size_t lane = 0; lane < n; ++lane) {
+                    const size_t b = b0 + lane;
+                    size_t pos = prefix[b];
+                    if (pos >= count) continue;
+                    uint8_t hash[CSHA256::OUTPUT_SIZE];
+                    XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(b),
+                               hash);
+                    for (uint8_t h : hash) {
+                        const auto& e = kMantissaByteTable.entry[h];
+                        for (uint8_t j = 0; j < e.count; ++j) {
+                            if (pos >= count) break;
+                            out[pos++] = e.value[j];
+                        }
+                    }
+                }
+            }
+        });
+    } else
+#endif
+    {
+        ParallelForBlocks(accept_counts.size(), threads, [&](size_t b) {
+            size_t pos = prefix[b];
+            if (pos >= count) return;
+            uint8_t hash[CSHA256::OUTPUT_SIZE];
+            XofBlock41(seed_bytes, kMantissaStreamDomain, static_cast<uint64_t>(b), hash);
+            for (uint8_t h : hash) {
+                const auto& e = kMantissaByteTable.entry[h];
+                for (uint8_t j = 0; j < e.count; ++j) {
+                    if (pos >= count) return;
+                    out[pos++] = e.value[j];
+                }
+            }
+        });
     }
 }
 
@@ -232,15 +827,8 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out)
     size_t filled = 0;
     uint64_t block = 0;
     while (filled < count) {
-        CSHA256 hasher;
-        hasher.Write(seed_bytes, sizeof(seed_bytes));
-        hasher.Write(&kScaleStreamDomain, 1);
-        uint8_t block_le[8];
-        WriteLE64(block_le, block);
-        hasher.Write(block_le, sizeof(block_le));
-
         uint8_t hash[CSHA256::OUTPUT_SIZE];
-        hasher.Finalize(hash);
+        XofBlock41(seed_bytes, kScaleStreamDomain, block, hash);
 
         for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && filled < count; ++i) {
             for (int shift = 0; shift < 8 && filled < count; shift += 2) {
@@ -255,6 +843,30 @@ void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out)
 {
     // Rejection-free: portable schedule == streaming schedule (same counter order).
     ExpandScaleStream(seed, count, out);
+}
+
+void ExpandScaleStreamParallel(const uint256& seed, size_t count, uint8_t* out,
+                               uint32_t threads)
+{
+    if (count == 0) return;
+    const size_t nblocks = (count + 127) / 128; // 32 bytes * four 2-bit codes/byte
+    threads = ClampThreads(threads, nblocks);
+    if (threads <= 1 || count < 1u << 20) {
+        ExpandScaleStream(seed, count, out);
+        return;
+    }
+    uint8_t seed_bytes[32];
+    SeedBytesLE(seed, seed_bytes);
+    ParallelForBlocks(nblocks, threads, [&](size_t block) {
+        uint8_t hash[CSHA256::OUTPUT_SIZE];
+        XofBlock41(seed_bytes, kScaleStreamDomain, static_cast<uint64_t>(block), hash);
+        size_t pos = block * 128;
+        for (size_t i = 0; i < CSHA256::OUTPUT_SIZE && pos < count; ++i) {
+            for (int shift = 0; shift < 8 && pos < count; shift += 2) {
+                out[pos++] = static_cast<uint8_t>((hash[i] >> shift) & 0x03);
+            }
+        }
+    });
 }
 
 uint256 DeriveOperandSeedBMX4C(const CBlockHeader& header, Operand which)

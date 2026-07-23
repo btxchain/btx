@@ -28,7 +28,9 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdlib>
 #include <limits>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -111,6 +113,28 @@ Fixture MakeFixture(const rc::RCEpisodeParams& params, uint64_t nonce)
 }
 
 bool StartsWith(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
+
+class EnvVarGuard
+{
+public:
+    explicit EnvVarGuard(const char* name) : m_name{name}
+    {
+        if (const char* v = std::getenv(name)) {
+            m_old = v;
+        }
+    }
+    ~EnvVarGuard()
+    {
+        if (m_old) {
+            setenv(m_name, m_old->c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv(m_name);
+        }
+    }
+private:
+    const char* m_name;
+    std::optional<std::string> m_old;
+};
 
 } // namespace
 
@@ -402,6 +426,56 @@ BOOST_AUTO_TEST_CASE(frvs_segment_carrier_honest_and_tamper)
         BOOST_REQUIRE(tampered);
         BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
     }
+}
+
+BOOST_AUTO_TEST_CASE(frvs_carrier_parallel_verdict_and_reason_are_thread_invariant)
+{
+    EnvVarGuard guard{"BTX_RC_CARRIER_VERIFY_THREADS"};
+    Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
+    BOOST_REQUIRE(f.ok);
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string bwhy;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kLambda), bwhy);
+
+    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "1", /*overwrite=*/1);
+    std::string why1;
+    rc::RCFreivaldsSampledTiming t1;
+    const bool ok1 = rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why1, &t1);
+
+    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "8", /*overwrite=*/1);
+    std::string why8;
+    rc::RCFreivaldsSampledTiming t8;
+    const bool ok8 = rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why8, &t8);
+
+    BOOST_CHECK(ok1);
+    BOOST_CHECK_EQUAL(ok1, ok8);
+    BOOST_CHECK_EQUAL(why1, why8);
+    BOOST_CHECK_EQUAL(t1.verify_threads, 1u);
+    BOOST_CHECK_GT(t8.verify_threads, 1u);
+
+    rc::RCFreivaldsSampledCarrier bad = carrier;
+    BOOST_REQUIRE(!bad.sampled.empty());
+    BOOST_REQUIRE(!bad.sampled[0].tiles.empty());
+    BOOST_REQUIRE(!bad.sampled[0].tiles[0].extract_out.empty());
+    bad.sampled[0].tiles[0].extract_out[0] ^= 0x01;
+
+    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "1", /*overwrite=*/1);
+    std::string bad_why1;
+    rc::RCFreivaldsSampledTiming bad_t1;
+    const bool bad_ok1 =
+        rc::VerifyEpisodeFreivaldsSampledCarrier(bad, f.h, 0, f.target, &bad_why1, &bad_t1);
+
+    setenv("BTX_RC_CARRIER_VERIFY_THREADS", "8", /*overwrite=*/1);
+    std::string bad_why8;
+    rc::RCFreivaldsSampledTiming bad_t8;
+    const bool bad_ok8 =
+        rc::VerifyEpisodeFreivaldsSampledCarrier(bad, f.h, 0, f.target, &bad_why8, &bad_t8);
+
+    BOOST_CHECK(!bad_ok1);
+    BOOST_CHECK_EQUAL(bad_ok1, bad_ok8);
+    BOOST_CHECK_EQUAL(bad_why1, bad_why8);
+    BOOST_CHECK_EQUAL(bad_why1, "v7fs:recompute_mismatch");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

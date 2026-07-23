@@ -13,20 +13,61 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
+#include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
+#include <limits>
 #include <list>
 #include <map>
 #include <mutex>
+#include <stdexcept>
+#include <thread>
 #include <unordered_map>
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#include <arm_neon.h>
+#if defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
+#if defined(__linux__)
+#include <sys/auxv.h>
+#include <asm/hwcap.h>
+#endif
+#endif
 
 namespace matmul::v4::rc {
 
 namespace {
 
+#if defined(__GNUC__) || defined(__clang__)
+#define BTX_RC_ALWAYS_INLINE inline __attribute__((always_inline))
+#else
+#define BTX_RC_ALWAYS_INLINE inline
+#endif
+
 double Secs(std::chrono::steady_clock::time_point s)
 {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - s).count();
+}
+
+uint32_t CarrierPrewarmInnerThreads(uint32_t total_threads)
+{
+    if (total_threads <= 1) return 1;
+    if (const char* env = std::getenv("BTX_RC_CARRIER_PREWARM_INNER_THREADS")) {
+        const unsigned long requested = std::strtoul(env, nullptr, 10);
+        if (requested > 0) {
+            return static_cast<uint32_t>(
+                std::clamp<unsigned long>(requested, 1, total_threads));
+        }
+    }
+    // Wave scheduling: split work across distinct operands, but let large
+    // operands use enough inner workers that X0/K/V/W do not become serial
+    // prewarm stragglers. 8 is the best default on Apple M-class 14/16-thread
+    // validation hosts; callers can override for measurement.
+    return std::min<uint32_t>(8, total_threads);
 }
 
 // A layer's extract_out is committed to the round tile-tree stream iff it is one
@@ -73,6 +114,285 @@ std::vector<int8_t> TransposeI8Local(const std::vector<int8_t>& src, uint32_t ro
             out[static_cast<size_t>(j) * rows + i] = src[static_cast<size_t>(i) * cols + j];
     return out;
 }
+
+bool DenseRowBlockFitsS32(uint32_t k)
+{
+    // Worst signed-int8 product magnitude is (-128)*(-128)=16384. The FFN
+    // verifier contractions (4096 and 16384) are safely int32-accumulable;
+    // very-wide attention/SV contractions are left on the int64 scalar path.
+    return static_cast<uint64_t>(k) * 128u * 128u <=
+           static_cast<uint64_t>(std::numeric_limits<int32_t>::max());
+}
+
+BTX_RC_ALWAYS_INLINE int64_t DenseDotScalarI64(const int8_t* a, const int8_t* b, uint32_t k)
+{
+    int64_t acc = 0;
+    for (uint32_t i = 0; i < k; ++i) {
+        acc += static_cast<int64_t>(a[i]) * static_cast<int64_t>(b[i]);
+    }
+    return acc;
+}
+
+void DenseRowBlockScalar(const int8_t* lhs, const int8_t* rhs, uint32_t k,
+                         uint32_t rhs_cols, uint32_t rhs_col0,
+                         int64_t out[kRCMxBlockLen])
+{
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) out[c] = 0;
+    for (uint32_t t = 0; t < k; ++t) {
+        const int64_t a = static_cast<int64_t>(lhs[t]);
+        const int8_t* row = rhs + static_cast<size_t>(t) * rhs_cols + rhs_col0;
+        for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+            out[c] += a * static_cast<int64_t>(row[c]);
+        }
+    }
+}
+
+#if defined(__aarch64__) && defined(__ARM_NEON)
+#if defined(__clang__) || defined(__GNUC__)
+#define BTX_RC_TARGET_I8MM __attribute__((target("i8mm")))
+#else
+#define BTX_RC_TARGET_I8MM
+#endif
+
+bool HaveArmI8MM()
+{
+#if defined(__ARM_FEATURE_MATMUL_INT8) || defined(__ARM_FEATURE_I8MM)
+    return true;
+#elif defined(__APPLE__)
+    int val = 0;
+    size_t len = sizeof(val);
+    return sysctlbyname("hw.optional.arm.FEAT_I8MM", &val, &len, nullptr, 0) == 0 && val != 0;
+#elif defined(__linux__) && defined(HWCAP2_I8MM)
+    return (getauxval(AT_HWCAP2) & HWCAP2_I8MM) != 0;
+#else
+    return false;
+#endif
+}
+
+#if defined(__ARM_FEATURE_DOTPROD)
+BTX_RC_ALWAYS_INLINE int32_t DenseDotNeonS32(const int8_t* a, const int8_t* b, uint32_t k)
+{
+    assert(DenseRowBlockFitsS32(k));
+    uint32_t i = 0;
+    int32x4_t acc = vdupq_n_s32(0);
+    for (; i + 16 <= k; i += 16) {
+        acc = vdotq_s32(acc, vld1q_s8(a + i), vld1q_s8(b + i));
+    }
+    alignas(16) int32_t lanes[4];
+    vst1q_s32(lanes, acc);
+    int32_t sum = lanes[0] + lanes[1] + lanes[2] + lanes[3];
+    for (; i < k; ++i) {
+        sum += static_cast<int32_t>(a[i]) * static_cast<int32_t>(b[i]);
+    }
+    return sum;
+}
+#endif
+
+BTX_RC_TARGET_I8MM void DenseRowBlockTransposedI8mmS32(const int8_t* lhs,
+                                                       const int8_t* rhs_t,
+                                                       uint32_t k,
+                                                       uint32_t rhs_cols,
+                                                       uint32_t rhs_col0,
+                                                       int64_t out[kRCMxBlockLen])
+{
+    assert(DenseRowBlockFitsS32(k));
+    assert((k % 8) == 0);
+    assert((kRCMxBlockLen % 2) == 0);
+    (void)rhs_cols;
+
+    int32x4_t acc[kRCMxBlockLen / 2];
+    for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) acc[p] = vdupq_n_s32(0);
+    const int8x8_t zero = vdup_n_s8(0);
+
+    for (uint32_t i = 0; i < k; i += 8) {
+        const int8x16_t a = vcombine_s8(vld1_s8(lhs + i), zero);
+        for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) {
+            const uint32_t c0 = rhs_col0 + 2 * p;
+            const int8x8_t b0 = vld1_s8(rhs_t + static_cast<size_t>(c0) * k + i);
+            const int8x8_t b1 = vld1_s8(rhs_t + static_cast<size_t>(c0 + 1) * k + i);
+            const int8x16_t b = vcombine_s8(b0, b1);
+            acc[p] = vmmlaq_s32(acc[p], a, b);
+        }
+    }
+
+    alignas(16) int32_t lanes[4];
+    for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) {
+        vst1q_s32(lanes, acc[p]);
+        out[2 * p] = static_cast<int64_t>(lanes[0]);
+        out[2 * p + 1] = static_cast<int64_t>(lanes[1]);
+    }
+}
+
+BTX_RC_TARGET_I8MM void DenseTwoRowsBlockTransposedI8mmS32(const int8_t* lhs0,
+                                                           const int8_t* lhs1,
+                                                           const int8_t* rhs_t,
+                                                           uint32_t k,
+                                                           uint32_t rhs_cols,
+                                                           uint32_t rhs_col0,
+                                                           int64_t out0[kRCMxBlockLen],
+                                                           int64_t out1[kRCMxBlockLen])
+{
+    assert(DenseRowBlockFitsS32(k));
+    assert((k % 8) == 0);
+    assert((kRCMxBlockLen % 2) == 0);
+    (void)rhs_cols;
+
+    int32x4_t acc[kRCMxBlockLen / 2];
+    for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) acc[p] = vdupq_n_s32(0);
+
+    for (uint32_t i = 0; i < k; i += 8) {
+        const int8x16_t a = vcombine_s8(vld1_s8(lhs0 + i), vld1_s8(lhs1 + i));
+        for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) {
+            const uint32_t c0 = rhs_col0 + 2 * p;
+            const int8x8_t b0 = vld1_s8(rhs_t + static_cast<size_t>(c0) * k + i);
+            const int8x8_t b1 = vld1_s8(rhs_t + static_cast<size_t>(c0 + 1) * k + i);
+            const int8x16_t b = vcombine_s8(b0, b1);
+            acc[p] = vmmlaq_s32(acc[p], a, b);
+        }
+    }
+
+    alignas(16) int32_t lanes[4];
+    for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) {
+        vst1q_s32(lanes, acc[p]);
+        out0[2 * p] = static_cast<int64_t>(lanes[0]);
+        out0[2 * p + 1] = static_cast<int64_t>(lanes[1]);
+        out1[2 * p] = static_cast<int64_t>(lanes[2]);
+        out1[2 * p + 1] = static_cast<int64_t>(lanes[3]);
+    }
+}
+
+void DenseRowBlockNeonS32(const int8_t* lhs, const int8_t* rhs, uint32_t k,
+                          uint32_t rhs_cols, uint32_t rhs_col0,
+                          int64_t out[kRCMxBlockLen])
+{
+    assert(DenseRowBlockFitsS32(k));
+
+    int32x4_t acc0 = vdupq_n_s32(0);
+    int32x4_t acc1 = vdupq_n_s32(0);
+    int32x4_t acc2 = vdupq_n_s32(0);
+    int32x4_t acc3 = vdupq_n_s32(0);
+    int32x4_t acc4 = vdupq_n_s32(0);
+    int32x4_t acc5 = vdupq_n_s32(0);
+    int32x4_t acc6 = vdupq_n_s32(0);
+    int32x4_t acc7 = vdupq_n_s32(0);
+
+    for (uint32_t t = 0; t < k; ++t) {
+        const int8x8_t a = vdup_n_s8(lhs[t]);
+        const int8_t* row = rhs + static_cast<size_t>(t) * rhs_cols + rhs_col0;
+
+        const int16x8_t p0 = vmull_s8(a, vld1_s8(row + 0));
+        const int16x8_t p1 = vmull_s8(a, vld1_s8(row + 8));
+        const int16x8_t p2 = vmull_s8(a, vld1_s8(row + 16));
+        const int16x8_t p3 = vmull_s8(a, vld1_s8(row + 24));
+
+        acc0 = vaddw_s16(acc0, vget_low_s16(p0));
+        acc1 = vaddw_s16(acc1, vget_high_s16(p0));
+        acc2 = vaddw_s16(acc2, vget_low_s16(p1));
+        acc3 = vaddw_s16(acc3, vget_high_s16(p1));
+        acc4 = vaddw_s16(acc4, vget_low_s16(p2));
+        acc5 = vaddw_s16(acc5, vget_high_s16(p2));
+        acc6 = vaddw_s16(acc6, vget_low_s16(p3));
+        acc7 = vaddw_s16(acc7, vget_high_s16(p3));
+    }
+
+    alignas(16) int32_t tmp[kRCMxBlockLen];
+    vst1q_s32(tmp + 0, acc0);
+    vst1q_s32(tmp + 4, acc1);
+    vst1q_s32(tmp + 8, acc2);
+    vst1q_s32(tmp + 12, acc3);
+    vst1q_s32(tmp + 16, acc4);
+    vst1q_s32(tmp + 20, acc5);
+    vst1q_s32(tmp + 24, acc6);
+    vst1q_s32(tmp + 28, acc7);
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        out[c] = static_cast<int64_t>(tmp[c]);
+    }
+}
+
+bool DenseRowBlockNeonSelfTest()
+{
+    constexpr uint32_t kRows = 257;
+    constexpr uint32_t kCols = 96;
+    constexpr uint32_t kCol0 = 32;
+    std::vector<int8_t> lhs(kRows);
+    std::vector<int8_t> rhs(static_cast<size_t>(kRows) * kCols);
+    for (uint32_t i = 0; i < kRows; ++i) {
+        lhs[i] = static_cast<int8_t>((static_cast<int32_t>((i * 37u + 11u) & 0xffu)) - 128);
+        for (uint32_t j = 0; j < kCols; ++j) {
+            rhs[static_cast<size_t>(i) * kCols + j] =
+                static_cast<int8_t>((static_cast<int32_t>(((i + 3u) * 131u + j * 17u) & 0xffu)) - 128);
+        }
+    }
+    int64_t scalar[kRCMxBlockLen];
+    int64_t neon[kRCMxBlockLen];
+    DenseRowBlockScalar(lhs.data(), rhs.data(), kRows, kCols, kCol0, scalar);
+    DenseRowBlockNeonS32(lhs.data(), rhs.data(), kRows, kCols, kCol0, neon);
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        if (scalar[c] != neon[c]) return false;
+    }
+    return true;
+}
+
+#if defined(__ARM_FEATURE_DOTPROD)
+bool DenseDotNeonSelfTest()
+{
+    constexpr uint32_t kLen = 4097; // crosses vector and tail boundaries
+    std::vector<int8_t> a(kLen);
+    std::vector<int8_t> b(kLen);
+    for (uint32_t i = 0; i < kLen; ++i) {
+        a[i] = static_cast<int8_t>((static_cast<int32_t>((i * 29u + 7u) & 0xffu)) - 128);
+        b[i] = static_cast<int8_t>((static_cast<int32_t>((i * 53u + 19u) & 0xffu)) - 128);
+    }
+    return DenseDotScalarI64(a.data(), b.data(), kLen) ==
+           static_cast<int64_t>(DenseDotNeonS32(a.data(), b.data(), kLen));
+}
+#endif
+
+bool DenseRowBlockI8mmSelfTest()
+{
+    if (!HaveArmI8MM()) return false;
+    constexpr uint32_t kRows = 264; // multiple of 8 plus crosses cache-line boundaries
+    constexpr uint32_t kCols = 96;
+    constexpr uint32_t kCol0 = 32;
+    std::vector<int8_t> lhs(kRows);
+    std::vector<int8_t> rhs(static_cast<size_t>(kRows) * kCols);
+    for (uint32_t i = 0; i < kRows; ++i) {
+        lhs[i] = static_cast<int8_t>((static_cast<int32_t>((i * 41u + 5u) & 0xffu)) - 128);
+        for (uint32_t j = 0; j < kCols; ++j) {
+            rhs[static_cast<size_t>(i) * kCols + j] =
+                static_cast<int8_t>((static_cast<int32_t>(((i + 7u) * 109u + j * 23u) & 0xffu)) - 128);
+        }
+    }
+    const std::vector<int8_t> rhs_t = TransposeI8Local(rhs, kRows, kCols);
+    int64_t scalar[kRCMxBlockLen];
+    int64_t i8mm[kRCMxBlockLen];
+    DenseRowBlockScalar(lhs.data(), rhs.data(), kRows, kCols, kCol0, scalar);
+    DenseRowBlockTransposedI8mmS32(lhs.data(), rhs_t.data(), kRows, kCols, kCol0, i8mm);
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        if (scalar[c] != i8mm[c]) return false;
+    }
+    std::vector<int8_t> lhs1(kRows);
+    for (uint32_t i = 0; i < kRows; ++i) {
+        lhs1[i] = static_cast<int8_t>((static_cast<int32_t>((i * 67u + 13u) & 0xffu)) - 128);
+    }
+    int64_t scalar1[kRCMxBlockLen];
+    int64_t pair0[kRCMxBlockLen];
+    int64_t pair1[kRCMxBlockLen];
+    DenseRowBlockScalar(lhs1.data(), rhs.data(), kRows, kCols, kCol0, scalar1);
+    DenseTwoRowsBlockTransposedI8mmS32(lhs.data(), lhs1.data(), rhs_t.data(), kRows, kCols,
+                                       kCol0, pair0, pair1);
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        if (scalar[c] != pair0[c] || scalar1[c] != pair1[c]) return false;
+    }
+    return true;
+}
+
+bool DenseRowBlockI8mmAvailable()
+{
+    static const bool ok = DenseRowBlockI8mmSelfTest();
+    return ok;
+}
+#endif
 
 // The sampleable-unit list: Λ layer indices whose extract_out is streamed.
 // Identical on prover and verifier — derived from the public wiring only.
@@ -282,6 +602,7 @@ std::vector<TilePlan> TilePositions(const uint256& base_seed, uint32_t layer_ind
 // PRF operand-expansion cache keyed by seed (weights + leaf activations expand
 // once per verify; each Λ seed is domain-separated so it maps to one shape).
 using RegenCache = std::map<uint256, std::vector<int8_t>>;
+using TransposeCache = std::map<uint256, std::vector<int8_t>>;
 // `tm` optional: when non-null, records regen time / cache hit-miss / bytes for the
 // production verify-cost split. Result bytes are identical either way.
 const std::vector<int8_t>& RegenLeaf(RegenCache& cache, const uint256& seed, uint32_t rows,
@@ -304,6 +625,61 @@ const std::vector<int8_t>& RegenLeaf(RegenCache& cache, const uint256& seed, uin
     return cache.emplace(seed, ExpandMxDequantInt8(seed, rows, cols)).first->second;
 }
 
+const std::vector<int8_t>& TransposedLeaf(TransposeCache& cache, const uint256& seed,
+                                          const std::vector<int8_t>& src,
+                                          uint32_t rows, uint32_t cols)
+{
+    auto it = cache.find(seed);
+    if (it != cache.end()) return it->second;
+    return cache.emplace(seed, TransposeI8Local(src, rows, cols)).first->second;
+}
+
+uint32_t CarrierVerifyThreadCount(size_t jobs)
+{
+    if (jobs <= 1) return 1;
+    uint32_t hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    uint32_t requested = hw;
+    if (const char* env = std::getenv("BTX_RC_CARRIER_VERIFY_THREADS")) {
+        char* end = nullptr;
+        const unsigned long v = std::strtoul(env, &end, 10);
+        if (end != env && v > 0) requested = static_cast<uint32_t>(std::min<unsigned long>(v, 64));
+    }
+    return std::max<uint32_t>(1, std::min<uint32_t>(requested, static_cast<uint32_t>(std::min<size_t>(jobs, 64))));
+}
+
+template <typename Fn>
+void ParallelFor(size_t jobs, uint32_t threads, const Fn& fn)
+{
+    if (jobs == 0) return;
+    if (threads <= 1 || jobs <= 1) {
+        for (size_t i = 0; i < jobs; ++i) fn(i);
+        return;
+    }
+    std::atomic<size_t> next{0};
+    std::exception_ptr eptr;
+    std::mutex eptr_mutex;
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (uint32_t t = 0; t < threads; ++t) {
+        workers.emplace_back([&]() {
+            try {
+                for (;;) {
+                    const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                    if (i >= jobs) break;
+                    fn(i);
+                }
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(eptr_mutex);
+                if (!eptr) eptr = std::current_exception();
+                next.store(jobs, std::memory_order_relaxed);
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+    if (eptr) std::rethrow_exception(eptr);
+}
+
 // Extract one 32-col output block (row i, block bj) from an int64 accumulator row,
 // using the position-indexed Extract sampler. Returns the T int8 outputs.
 std::array<int8_t, kRCMxBlockLen> ExtractBlock(const uint256& prf, uint32_t i, uint32_t bj,
@@ -315,6 +691,77 @@ std::array<int8_t, kRCMxBlockLen> ExtractBlock(const uint256& prf, uint32_t i, u
 }
 
 } // namespace
+
+bool RCDenseRowBlockVectorizedAvailable()
+{
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    static const bool self_test_ok = DenseRowBlockNeonSelfTest()
+#if defined(__ARM_FEATURE_DOTPROD)
+        && DenseDotNeonSelfTest()
+#endif
+        ;
+    return self_test_ok;
+#else
+    return false;
+#endif
+}
+
+void RCDenseRowBlockExactI8(const int8_t* lhs, const int8_t* rhs, uint32_t k,
+                            uint32_t rhs_cols, uint32_t rhs_col0,
+                            int64_t out[kRCMxBlockLen])
+{
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (RCDenseRowBlockVectorizedAvailable() && DenseRowBlockFitsS32(k)) {
+        DenseRowBlockNeonS32(lhs, rhs, k, rhs_cols, rhs_col0, out);
+        return;
+    }
+#endif
+    DenseRowBlockScalar(lhs, rhs, k, rhs_cols, rhs_col0, out);
+}
+
+void RCDenseRowBlockTransposedExactI8(const int8_t* lhs, const int8_t* rhs_t, uint32_t k,
+                                      uint32_t rhs_cols, uint32_t rhs_col0,
+                                      int64_t out[kRCMxBlockLen])
+{
+    assert(rhs_col0 + kRCMxBlockLen <= rhs_cols);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (RCDenseRowBlockVectorizedAvailable() && DenseRowBlockFitsS32(k) && (k % 8) == 0 &&
+        DenseRowBlockI8mmAvailable()) {
+        DenseRowBlockTransposedI8mmS32(lhs, rhs_t, k, rhs_cols, rhs_col0, out);
+        return;
+    }
+#endif
+#if defined(__aarch64__) && defined(__ARM_FEATURE_DOTPROD)
+    if (RCDenseRowBlockVectorizedAvailable() && DenseRowBlockFitsS32(k)) {
+        for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+            out[c] = static_cast<int64_t>(
+                DenseDotNeonS32(lhs, rhs_t + static_cast<size_t>(rhs_col0 + c) * k, k));
+        }
+        return;
+    }
+#endif
+    for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+        out[c] = DenseDotScalarI64(lhs, rhs_t + static_cast<size_t>(rhs_col0 + c) * k, k);
+    }
+}
+
+void RCDenseTwoRowsBlockTransposedExactI8(const int8_t* lhs0, const int8_t* lhs1,
+                                          const int8_t* rhs_t, uint32_t k,
+                                          uint32_t rhs_cols, uint32_t rhs_col0,
+                                          int64_t out0[kRCMxBlockLen],
+                                          int64_t out1[kRCMxBlockLen])
+{
+    assert(rhs_col0 + kRCMxBlockLen <= rhs_cols);
+#if defined(__aarch64__) && defined(__ARM_NEON)
+    if (RCDenseRowBlockVectorizedAvailable() && DenseRowBlockFitsS32(k) && (k % 8) == 0 &&
+        DenseRowBlockI8mmAvailable()) {
+        DenseTwoRowsBlockTransposedI8mmS32(lhs0, lhs1, rhs_t, k, rhs_cols, rhs_col0, out0, out1);
+        return;
+    }
+#endif
+    RCDenseRowBlockTransposedExactI8(lhs0, rhs_t, k, rhs_cols, rhs_col0, out0);
+    RCDenseRowBlockTransposedExactI8(lhs1, rhs_t, k, rhs_cols, rhs_col0, out1);
+}
 
 // ---------------------------------------------------------------------------
 // FS sample derivation.
@@ -653,13 +1100,409 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
     const std::vector<uint32_t> units =
         FreivaldsSampleLayers(base_seed, tm.n_units_total, carrier.lambda);
     tm.n_sampled = static_cast<uint32_t>(units.size());
+    tm.recompute_vectorized = RCDenseRowBlockVectorizedAvailable();
     if (carrier.sampled.size() != units.size()) return fail("v7fs:carrier_count");
     tm.gates_s = Secs(t0);
+
+    {
+        const auto t_plan = std::chrono::steady_clock::now();
+        const uint32_t t_leaf = carrier.episode.T_leaf;
+        const uint32_t T = kRCMxBlockLen;
+        struct UnitPlan {
+            size_t carrier_index{0};
+            uint32_t li{0};
+            std::vector<TilePlan> tiles;
+        };
+        struct SeedPlan {
+            uint32_t rows{0};
+            uint32_t cols{0};
+            uint32_t uses{0};
+            bool transpose_for_unitcheck{false};
+        };
+        std::vector<UnitPlan> unit_plans;
+        unit_plans.reserve(units.size());
+        std::map<uint256, SeedPlan> seed_plan;
+        uint64_t seed_uses = 0;
+        auto note_seed = [&](const uint256& seed, uint32_t rows, uint32_t cols,
+                             bool transpose_for_unitcheck = false) -> bool {
+            auto it = seed_plan.find(seed);
+            if (it == seed_plan.end()) {
+                seed_plan.emplace(seed, SeedPlan{rows, cols, 1, transpose_for_unitcheck});
+            } else {
+                if (it->second.rows != rows || it->second.cols != cols) return false;
+                ++it->second.uses;
+                it->second.transpose_for_unitcheck =
+                    it->second.transpose_for_unitcheck || transpose_for_unitcheck;
+            }
+            ++seed_uses;
+            return true;
+        };
+
+        for (size_t j = 0; j < units.size(); ++j) {
+            const uint32_t li = sampleable[units[j]];
+            const RCFreivaldsSampledLayer& e = carrier.sampled[j];
+            if (e.layer_index != li) return fail("v7fs:carrier_order");
+            if (li >= prov.size()) return fail("v7fs:carrier_layer_index");
+            const RCGkrSampledLayerProv& lp = prov[li];
+            if (!(e.kind == lp.kind && e.m == lp.m && e.n == lp.n && e.k == lp.k)) {
+                return fail("v7fs:carrier_layer_mismatch");
+            }
+            if (e.n % T != 0) return fail("v7fs:carrier_n_block");
+            if (e.round >= carrier.round_roots.size()) return fail("v7fs:round_index");
+            const std::vector<TilePlan> plans = TilePositions(base_seed, li, e.m, e.n);
+            if (e.tiles.size() != plans.size()) return fail("v7fs:carrier_tile_count");
+            for (size_t ti = 0; ti < plans.size(); ++ti) {
+                const TilePlan& pl = plans[ti];
+                const RCFreivaldsSampledTile& tile = e.tiles[ti];
+                if (tile.row != pl.row || tile.bcol != pl.bcol) return fail("v7fs:carrier_tile_pos");
+                if (tile.extract_out.size() != T) return fail("v7fs:tile_shape");
+                if (tile.row >= e.m || tile.bcol >= e.n / T) return fail("v7fs:tile_range");
+            }
+            if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
+                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:sv_qkt_src");
+                const RCGkrSampledLayerProv& qkt = prov[lp.a.src_idx];
+                if (qkt.kind != RCGkrLayerKind::GemmPhase1QKt) return fail("v7fs:sv_qkt_kind");
+                const uint32_t d_head = carrier.episode.d_head;
+                const uint32_t n_ctx = e.k;
+                if (n_ctx % T != 0) return fail("v7fs:sv_ctx_block");
+                for (const auto& tile : e.tiles) {
+                    if (!tile.a_prf_regen || !tile.a_row_leaf.empty()) return fail("v7fs:sv_anchor");
+                    if (!note_seed(qkt.a.seed, carrier.episode.n_q, d_head)) return fail("v7fs:seed_shape");
+                    if (!note_seed(qkt.b.seed, n_ctx, d_head)) return fail("v7fs:seed_shape");
+                    if (!note_seed(lp.b.seed, n_ctx, d_head)) return fail("v7fs:seed_shape");
+                }
+            } else {
+                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:down_a_src");
+                const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
+                if (up.kind != RCGkrLayerKind::GemmPhase2FfnUp) return fail("v7fs:down_up_kind");
+                const uint32_t d_model = e.n;
+                const uint32_t d_ff = e.k;
+                if (d_ff % T != 0) return fail("v7fs:down_ff_block");
+                if (d_model > t_leaf) return fail("v7fs:a_row_multileaf");
+                const RCGkrSampledOperandProv& xprov = up.a;
+                for (const auto& tile : e.tiles) {
+                    if (xprov.is_leaf) {
+                        if (!tile.a_prf_regen || !tile.a_row_leaf.empty())
+                            return fail("v7fs:down_l0_anchor");
+                        if (!note_seed(xprov.seed, carrier.episode.b_seq, d_model))
+                            return fail("v7fs:seed_shape");
+                    } else {
+                        if (tile.a_prf_regen) return fail("v7fs:down_anchor_flag");
+                        if (xprov.src_idx >= prov.size()) return fail("v7fs:down_x_src");
+                        const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
+                        const uint64_t off_A = LayerStreamOffset(carrier.episode, src.kind, src.layer) +
+                                               static_cast<uint64_t>(tile.row) * d_model;
+                        if (tile.a_row_stream_offset != off_A) return fail("v7fs:a_off");
+                        const uint32_t a_leaf = static_cast<uint32_t>(off_A / t_leaf);
+                        if (tile.a_row_leaf_index != a_leaf) return fail("v7fs:a_leaf_index");
+                        if (tile.a_row_leaf.size() != t_leaf) return fail("v7fs:a_leaf_size");
+                        const uint64_t rel = off_A - static_cast<uint64_t>(a_leaf) * t_leaf;
+                        if (rel + d_model > t_leaf) return fail("v7fs:a_row_span");
+                    }
+                    if (!note_seed(up.b.seed, d_model, d_ff, /*transpose_w_up=*/true))
+                        return fail("v7fs:seed_shape");
+                    if (!note_seed(lp.b.seed, d_ff, d_model, /*transpose_for_unitcheck=*/true))
+                        return fail("v7fs:seed_shape");
+                }
+            }
+            unit_plans.push_back(UnitPlan{j, li, plans});
+        }
+        tm.plan_s = Secs(t_plan);
+        tm.verify_threads = CarrierVerifyThreadCount(std::max(unit_plans.size(), seed_plan.size()));
+        tm.regen_misses = static_cast<uint32_t>(seed_plan.size());
+        tm.regen_hits = seed_uses > seed_plan.size()
+                            ? static_cast<uint32_t>(seed_uses - seed_plan.size())
+                            : 0;
+        for (const auto& [seed, sp] : seed_plan) {
+            (void)seed;
+            tm.regen_bytes += static_cast<uint64_t>(sp.rows) * sp.cols;
+        }
+
+        struct SeedJob {
+            uint256 seed;
+            uint32_t rows{0};
+            uint32_t cols{0};
+            bool transpose_for_unitcheck{false};
+            std::vector<int8_t> bytes;
+        };
+        std::vector<SeedJob> seed_jobs;
+        seed_jobs.reserve(seed_plan.size());
+        for (const auto& [seed, sp] : seed_plan) {
+            seed_jobs.push_back(SeedJob{seed, sp.rows, sp.cols, sp.transpose_for_unitcheck, {}});
+        }
+        RegenCache regen;
+        TransposeCache transposed_w_up;
+        const auto t_prewarm = std::chrono::steady_clock::now();
+        try {
+            std::sort(seed_jobs.begin(), seed_jobs.end(), [](const SeedJob& a, const SeedJob& b) {
+                const uint64_t abytes = static_cast<uint64_t>(a.rows) * a.cols;
+                const uint64_t bbytes = static_cast<uint64_t>(b.rows) * b.cols;
+                if (abytes != bbytes) return abytes > bbytes;
+                return a.seed < b.seed;
+            });
+            const auto t_regen = std::chrono::steady_clock::now();
+            const uint32_t inner_threads = CarrierPrewarmInnerThreads(tm.verify_threads);
+            const uint32_t outer_threads = std::max<uint32_t>(1, tm.verify_threads / inner_threads);
+            ParallelFor(seed_jobs.size(), outer_threads, [&](size_t i) {
+                seed_jobs[i].bytes =
+                    ExpandMxDequantInt8Parallel(seed_jobs[i].seed, seed_jobs[i].rows,
+                                                seed_jobs[i].cols, inner_threads);
+            });
+            tm.regen_s = Secs(t_regen);
+            for (auto& job : seed_jobs) regen.emplace(job.seed, std::move(job.bytes));
+
+            std::vector<size_t> transpose_jobs;
+            for (size_t i = 0; i < seed_jobs.size(); ++i) {
+                if (seed_jobs[i].transpose_for_unitcheck) transpose_jobs.push_back(i);
+            }
+            std::vector<std::vector<int8_t>> transposed_bytes(transpose_jobs.size());
+            ParallelFor(transpose_jobs.size(), tm.verify_threads, [&](size_t i) {
+                const SeedJob& job = seed_jobs[transpose_jobs[i]];
+                const auto it = regen.find(job.seed);
+                if (it == regen.end()) throw std::runtime_error("missing prewarmed W_up");
+                transposed_bytes[i] = TransposeI8Local(it->second, job.rows, job.cols);
+            });
+            for (size_t i = 0; i < transpose_jobs.size(); ++i) {
+                transposed_w_up.emplace(seed_jobs[transpose_jobs[i]].seed, std::move(transposed_bytes[i]));
+            }
+        } catch (...) {
+            return fail("v7fs:worker_exception");
+        }
+        tm.prewarm_s = Secs(t_prewarm);
+
+        struct UnitResult {
+            bool ok{true};
+            std::string why;
+            uint32_t n_layers_checked{0};
+            uint32_t n_freivalds_calls{0};
+            uint64_t n_extract_tiles{0};
+            uint32_t n_merkle_openings{0};
+            uint64_t n_merkle_hashes{0};
+            double recompute_s{0.0};
+            double merkle_s{0.0};
+        };
+        std::vector<UnitResult> results(unit_plans.size());
+        const RegenCache& regen_ro = regen;
+        const TransposeCache& transposed_ro = transposed_w_up;
+        auto get_seed = [&](const uint256& seed) -> const std::vector<int8_t>& {
+            const auto it = regen_ro.find(seed);
+            if (it == regen_ro.end()) throw std::runtime_error("missing prewarmed seed");
+            return it->second;
+        };
+        auto get_transposed = [&](const uint256& seed) -> const std::vector<int8_t>& {
+            const auto it = transposed_ro.find(seed);
+            if (it == transposed_ro.end()) throw std::runtime_error("missing transposed W_up");
+            return it->second;
+        };
+
+        const auto t_unit = std::chrono::steady_clock::now();
+        try {
+            ParallelFor(unit_plans.size(), tm.verify_threads, [&](size_t pi) {
+                UnitResult r;
+                auto reject = [&](const std::string& m) {
+                    r.ok = false;
+                    r.why = m;
+                };
+                const UnitPlan& plan = unit_plans[pi];
+                const RCFreivaldsSampledLayer& e = carrier.sampled[plan.carrier_index];
+                const RCGkrSampledLayerProv& lp = prov[plan.li];
+                const uint64_t layer_off = LayerStreamOffset(carrier.episode, lp.kind, lp.layer);
+                auto finish_tile = [&](const RCFreivaldsSampledTile& tile,
+                                       const std::array<int8_t, kRCMxBlockLen>& eo) -> bool {
+                    for (uint32_t c = 0; c < T; ++c) {
+                        if (eo[c] != tile.extract_out[c]) {
+                            reject("v7fs:recompute_mismatch");
+                            return false;
+                        }
+                    }
+                    ++r.n_extract_tiles;
+                    ++r.n_freivalds_calls;
+                    const uint64_t off_expect = layer_off + static_cast<uint64_t>(tile.row) * e.n +
+                                                static_cast<uint64_t>(tile.bcol) * T;
+                    if (tile.stream_offset != off_expect) { reject("v7fs:carrier_offset"); return false; }
+                    const uint32_t first_leaf = static_cast<uint32_t>(off_expect / t_leaf);
+                    const uint32_t last_leaf = static_cast<uint32_t>((off_expect + T - 1) / t_leaf);
+                    if (tile.first_leaf != first_leaf) { reject("v7fs:carrier_first_leaf"); return false; }
+                    const uint32_t n_leaves = last_leaf - first_leaf + 1;
+                    if (tile.leaf_bytes.size() != n_leaves || tile.leaf_proofs.size() != n_leaves) {
+                        reject("v7fs:carrier_leaf_count");
+                        return false;
+                    }
+                    for (uint32_t x = 0; x < n_leaves; ++x) {
+                        const uint32_t lf = first_leaf + x;
+                        std::string owhy;
+                        const auto t_mk2 = std::chrono::steady_clock::now();
+                        const bool eo_ok = CheckCoveringLeaf(tile.leaf_bytes[x], lf, tile.leaf_proofs[x],
+                                           carrier.round_roots[e.round], t_leaf, off_expect,
+                                           tile.extract_out, owhy);
+                        r.merkle_s += Secs(t_mk2);
+                        if (!eo_ok) {
+                            reject(owhy);
+                            return false;
+                        }
+                        r.n_merkle_hashes += tile.leaf_proofs[x].siblings.size();
+                        ++r.n_merkle_openings;
+                    }
+                    return true;
+                };
+                if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
+                    for (size_t ti = 0; ti < plan.tiles.size(); ++ti) {
+                        const RCFreivaldsSampledTile& tile = e.tiles[ti];
+                        const RCGkrSampledLayerProv& qkt = prov[lp.a.src_idx];
+                        const uint32_t d_head = carrier.episode.d_head;
+                        const uint32_t n_ctx = e.k;
+                        const std::vector<int8_t>& Q = get_seed(qkt.a.seed);
+                        const std::vector<int8_t>& K = get_seed(qkt.b.seed);
+                        const std::vector<int8_t>& V = get_seed(lp.b.seed);
+                        const auto t_rc_sv = std::chrono::steady_clock::now();
+                        std::vector<int8_t> S_row(n_ctx);
+                        std::array<int64_t, kRCMxBlockLen> blk{};
+                        for (uint32_t bt = 0; bt < n_ctx / T; ++bt) {
+                            for (uint32_t c = 0; c < T; ++c) {
+                                const uint32_t t = bt * T + c;
+                                int64_t acc = 0;
+                                for (uint32_t d = 0; d < d_head; ++d)
+                                    acc += static_cast<int64_t>(Q[static_cast<size_t>(tile.row) * d_head + d]) *
+                                           static_cast<int64_t>(K[static_cast<size_t>(t) * d_head + d]);
+                                blk[c] = acc;
+                            }
+                            const auto so = ExtractBlock(qkt.extract_prf, tile.row, bt, blk.data());
+                            for (uint32_t c = 0; c < T; ++c) S_row[bt * T + c] = so[c];
+                        }
+                        std::array<int64_t, kRCMxBlockLen> yblk{};
+                        const uint32_t out_col0 = tile.bcol * T;
+                        RCDenseRowBlockExactI8(S_row.data(), V.data(), n_ctx, d_head, out_col0,
+                                               yblk.data());
+                        const std::array<int8_t, kRCMxBlockLen> eo =
+                            ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
+                        r.recompute_s += Secs(t_rc_sv);
+                        if (!finish_tile(tile, eo)) break;
+                    }
+                } else {
+                    const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
+                    const uint32_t d_model = e.n;
+                    const uint32_t d_ff = e.k;
+                    const RCGkrSampledOperandProv& xprov = up.a;
+                    const std::vector<int8_t>& W_up_t = get_transposed(up.b.seed);
+                    const std::vector<int8_t>& W_down_t = get_transposed(lp.b.seed);
+                    auto load_x_row = [&](const RCFreivaldsSampledTile& tile,
+                                          std::vector<int8_t>& X_row) -> bool {
+                        X_row.assign(d_model, 0);
+                        if (xprov.is_leaf) {
+                            const std::vector<int8_t>& X0 = get_seed(xprov.seed);
+                            for (uint32_t d = 0; d < d_model; ++d)
+                                X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
+                        } else {
+                            std::string awhy;
+                            const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
+                            const uint64_t off_A = LayerStreamOffset(carrier.episode, src.kind, src.layer) +
+                                                   static_cast<uint64_t>(tile.row) * d_model;
+                            const uint32_t a_leaf = static_cast<uint32_t>(off_A / t_leaf);
+                            const uint64_t rel = off_A - static_cast<uint64_t>(a_leaf) * t_leaf;
+                            for (uint32_t d = 0; d < d_model; ++d)
+                                X_row[d] = static_cast<int8_t>(tile.a_row_leaf[rel + d]);
+                            const auto t_mk = std::chrono::steady_clock::now();
+                            const bool a_ok = CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
+                                                   carrier.round_roots[e.round], t_leaf, off_A, X_row, awhy);
+                            r.merkle_s += Secs(t_mk);
+                            if (!a_ok) { reject(awhy); return false; }
+                            r.n_merkle_hashes += tile.a_row_proof.siblings.size();
+                            ++r.n_merkle_openings;
+                        }
+                        return true;
+                    };
+
+                    for (size_t ti = 0; ti < plan.tiles.size();) {
+                        const bool paired = ti + 1 < plan.tiles.size();
+                        const RCFreivaldsSampledTile& tile0 = e.tiles[ti];
+                        std::vector<int8_t> X0;
+                        if (!load_x_row(tile0, X0)) break;
+                        std::vector<int8_t> X1;
+                        const RCFreivaldsSampledTile* tile1 = nullptr;
+                        if (paired) {
+                            tile1 = &e.tiles[ti + 1];
+                            if (!load_x_row(*tile1, X1)) break;
+                        }
+                        const auto t_rc_dn = std::chrono::steady_clock::now();
+                        std::vector<int8_t> H0(d_ff);
+                        std::vector<int8_t> H1(paired ? d_ff : 0);
+                        std::array<int64_t, kRCMxBlockLen> blk{};
+                        std::array<int64_t, kRCMxBlockLen> blk1{};
+                        for (uint32_t bj = 0; bj < d_ff / T; ++bj) {
+                            const uint32_t col0 = bj * T;
+                            if (paired) {
+                                RCDenseTwoRowsBlockTransposedExactI8(X0.data(), X1.data(), W_up_t.data(),
+                                                                     d_model, d_ff, col0,
+                                                                     blk.data(), blk1.data());
+                            } else {
+                                RCDenseRowBlockTransposedExactI8(X0.data(), W_up_t.data(), d_model,
+                                                                 d_ff, col0, blk.data());
+                            }
+                            const auto h0 = ExtractBlock(up.extract_prf, tile0.row, bj, blk.data());
+                            for (uint32_t c = 0; c < T; ++c) H0[bj * T + c] = h0[c];
+                            if (paired) {
+                                const auto h1 = ExtractBlock(up.extract_prf, tile1->row, bj, blk1.data());
+                                for (uint32_t c = 0; c < T; ++c) H1[bj * T + c] = h1[c];
+                            }
+                        }
+                        auto down_tile = [&](const RCFreivaldsSampledTile& tile,
+                                             const std::vector<int8_t>& X_row,
+                                             const std::vector<int8_t>& H_row) {
+                            std::array<int64_t, kRCMxBlockLen> yblk{};
+                            const uint32_t out_col0 = tile.bcol * T;
+                            RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                             d_model, out_col0, yblk.data());
+                            for (uint32_t c = 0; c < T; ++c)
+                                yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
+                            return ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
+                        };
+                        const std::array<int8_t, kRCMxBlockLen> eo0 = down_tile(tile0, X0, H0);
+                        std::array<int8_t, kRCMxBlockLen> eo1{};
+                        if (paired) eo1 = down_tile(*tile1, X1, H1);
+                        r.recompute_s += Secs(t_rc_dn);
+                        if (!finish_tile(tile0, eo0)) break;
+                        if (paired && !finish_tile(*tile1, eo1)) break;
+                        ti += paired ? 2 : 1;
+                    }
+                }
+                if (r.ok) ++r.n_layers_checked;
+                results[pi] = std::move(r);
+            });
+        } catch (...) {
+            return fail("v7fs:worker_exception");
+        }
+        tm.unitcheck_s = Secs(t_unit);
+
+        const auto t_reduce = std::chrono::steady_clock::now();
+        for (const UnitResult& r : results) {
+            tm.recompute_s += r.recompute_s;
+            tm.merkle_s += r.merkle_s;
+            tm.n_extract_tiles += r.n_extract_tiles;
+            tm.n_freivalds_calls += r.n_freivalds_calls;
+            tm.n_merkle_openings += r.n_merkle_openings;
+            tm.n_merkle_hashes += r.n_merkle_hashes;
+            tm.n_layers_checked += r.n_layers_checked;
+            if (!r.ok) {
+                tm.reduce_s = Secs(t_reduce);
+                return fail(r.why.empty() ? "v7fs:unit_reject" : r.why);
+            }
+        }
+        tm.reduce_s = Secs(t_reduce);
+        tm.perlayer_s = tm.prewarm_s + tm.unitcheck_s + tm.reduce_s;
+        tm.ok = true;
+        tm.total_s = Secs(t0);
+        tm.note = "v7fs anchored carrier: " + std::to_string(tm.n_layers_checked) + "/" +
+                  std::to_string(tm.n_units_total) + " layers recomputed from anchored operands";
+        if (out_timing) *out_timing = tm;
+        if (why) *why = tm.note;
+        return true;
+    }
 
     const auto t_p = std::chrono::steady_clock::now();
     const uint32_t t_leaf = carrier.episode.T_leaf;
     const uint32_t T = kRCMxBlockLen;
     RegenCache regen; // PRF operand expansions (weights + leaf activations), once per verify
+    TransposeCache transposed_w_up; // cached W_upᵀ for contiguous SDOT H-row recompute
     for (size_t j = 0; j < units.size(); ++j) {
         const uint32_t li = sampleable[units[j]];
         const RCFreivaldsSampledLayer& e = carrier.sampled[j];
@@ -718,15 +1561,9 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 }
                 // Y block = S_row · V[:, bcol-block], then Extract(prf_Z). No residual.
                 std::array<int64_t, kRCMxBlockLen> yblk{};
-                yblk.fill(0);
                 const uint32_t out_col0 = tile.bcol * T;
-                for (uint32_t t = 0; t < n_ctx; ++t) {
-                    const int64_t s = static_cast<int64_t>(S_row[t]);
-                    const int8_t* v = V.data() + static_cast<size_t>(t) * d_head + out_col0;
-                    for (uint32_t c = 0; c < T; ++c) {
-                        yblk[c] += s * static_cast<int64_t>(v[c]);
-                    }
-                }
+                RCDenseRowBlockExactI8(S_row.data(), V.data(), n_ctx, d_head, out_col0,
+                                       yblk.data());
                 eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
                 tm.recompute_s += Secs(t_rc_sv);
             } else {
@@ -776,33 +1613,23 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 const std::vector<int8_t>& W_up = RegenLeaf(regen, up.b.seed, d_model, d_ff, &tm);
                 const std::vector<int8_t>& W_down = RegenLeaf(regen, lp.b.seed, d_ff, d_model, &tm);
                 const auto t_rc_dn = std::chrono::steady_clock::now();
+                const std::vector<int8_t>& W_up_t =
+                    TransposedLeaf(transposed_w_up, up.b.seed, W_up, d_model, d_ff);
                 // H-row = Extract(X_row·W_up) over the full d_ff width.
                 std::vector<int8_t> H_row(d_ff);
                 std::array<int64_t, kRCMxBlockLen> blk{};
                 for (uint32_t bj = 0; bj < d_ff / T; ++bj) {
-                    blk.fill(0);
                     const uint32_t col0 = bj * T;
-                    for (uint32_t d = 0; d < d_model; ++d) {
-                        const int64_t x = static_cast<int64_t>(X_row[d]);
-                        const int8_t* w = W_up.data() + static_cast<size_t>(d) * d_ff + col0;
-                        for (uint32_t c = 0; c < T; ++c) {
-                            blk[c] += x * static_cast<int64_t>(w[c]);
-                        }
-                    }
+                    RCDenseRowBlockTransposedExactI8(X_row.data(), W_up_t.data(), d_model,
+                                                     d_ff, col0, blk.data());
                     const auto ho = ExtractBlock(up.extract_prf, tile.row, bj, blk.data());
                     for (uint32_t c = 0; c < T; ++c) H_row[bj * T + c] = ho[c];
                 }
                 // Y-block = Extract(H_row·W_down[:,bcol] + X_row[bcol]) (residual +X[l]).
                 std::array<int64_t, kRCMxBlockLen> yblk{};
-                yblk.fill(0);
                 const uint32_t out_col0 = tile.bcol * T;
-                for (uint32_t t = 0; t < d_ff; ++t) {
-                    const int64_t h = static_cast<int64_t>(H_row[t]);
-                    const int8_t* w = W_down.data() + static_cast<size_t>(t) * d_model + out_col0;
-                    for (uint32_t c = 0; c < T; ++c) {
-                        yblk[c] += h * static_cast<int64_t>(w[c]);
-                    }
-                }
+                RCDenseRowBlockExactI8(H_row.data(), W_down.data(), d_ff, d_model, out_col0,
+                                       yblk.data());
                 for (uint32_t c = 0; c < T; ++c) {
                     yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]); // residual +X[l] (H5)
                 }

@@ -872,11 +872,27 @@ BOOST_AUTO_TEST_CASE(portable_xof_matches_streaming)
     bx::ExpandMantissaStream(seed, count, a.data());
     bx::ExpandMantissaStreamPortable(seed, count, b.data());
     BOOST_CHECK(a == b);
+    for (size_t n : {size_t{1} << 20, (size_t{1} << 20) + 1, (size_t{1} << 20) + 127,
+                     (size_t{1} << 20) + 128, size_t{2'000'003}}) {
+        std::vector<int8_t> p(n), q(n), r(n);
+        bx::ExpandMantissaStream(seed, n, p.data());
+        bx::ExpandMantissaStreamPortable(seed, n, q.data());
+        bx::ExpandMantissaStreamParallel(seed, n, r.data(), /*threads=*/4);
+        BOOST_CHECK(p == q);
+        BOOST_CHECK(p == r);
+    }
 
     std::vector<uint8_t> sa(512), sb(512);
     bx::ExpandScaleStream(seed, sa.size(), sa.data());
     bx::ExpandScaleStreamPortable(seed, sb.size(), sb.data());
     BOOST_CHECK(sa == sb);
+    for (size_t n : {size_t{1} << 20, (size_t{1} << 20) + 1, (size_t{1} << 20) + 127,
+                     (size_t{1} << 20) + 128, size_t{2'000'003}}) {
+        std::vector<uint8_t> spa(n), spb(n);
+        bx::ExpandScaleStream(seed, spa.size(), spa.data());
+        bx::ExpandScaleStreamParallel(seed, spb.size(), spb.data(), /*threads=*/4);
+        BOOST_CHECK(spa == spb);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(streaming_digest_matches_serialized)

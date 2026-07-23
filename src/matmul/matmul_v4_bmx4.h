@@ -140,6 +140,12 @@ void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out);
  *  preserve counter / byte / nibble / rejection order. */
 void ExpandMantissaStreamPortable(const uint256& seed, size_t count, int8_t* out);
 
+/** Parallel block-prefix implementation of ExpandMantissaStream. Byte-identical
+ *  to the scalar stream; intended for verifier throughput where a single large
+ *  operand would otherwise strand worker cores. threads<=1 uses the scalar path. */
+void ExpandMantissaStreamParallel(const uint256& seed, size_t count, int8_t* out,
+                                  uint32_t threads);
+
 /** Deterministically expand `count` E8M0 exponents e in {0,1,2,3} from a seed
  *  via a wide counter-mode SHA-256 XOF (scale-plane domain byte 'e'): 2 bits
  *  per code, 4 codes per keystream byte from the LSB up, rejection-free. This
@@ -148,6 +154,10 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
 
 /** Device-portable schedule for ExpandScaleStream (same bytes). */
 void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out);
+
+/** Parallel implementation of ExpandScaleStream. Byte-identical to scalar. */
+void ExpandScaleStreamParallel(const uint256& seed, size_t count, uint8_t* out,
+                               uint32_t threads);
 
 // --- Seed derivation (design §2.3, V4.2 domain tags) -----------------------
 

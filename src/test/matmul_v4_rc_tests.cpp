@@ -929,6 +929,21 @@ BOOST_AUTO_TEST_CASE(rc_p12_mx_layout_helpers_row_matches_oracle)
     BOOST_CHECK(stub_out.empty());
 }
 
+BOOST_AUTO_TEST_CASE(rc_mx_dequant_parallel_matches_oracle)
+{
+    uint256 seed;
+    for (int i = 0; i < 32; ++i) seed.data()[i] = static_cast<unsigned char>(0x3B + 7 * i);
+    for (const auto [rows, cols] : {
+             std::pair<uint32_t, uint32_t>{1024, 1024},
+             std::pair<uint32_t, uint32_t>{2048, 512},
+             std::pair<uint32_t, uint32_t>{512, 2048},
+         }) {
+        const auto oracle = rc::ExpandMxDequantInt8(seed, rows, cols);
+        const auto par = rc::ExpandMxDequantInt8Parallel(seed, rows, cols, /*threads=*/8);
+        BOOST_CHECK(par == oracle);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(rc_p12_phase2_exactgemm_device_probe)
 {
     // Exercises MakeResolvedExactGemmBackendForRC → LaunchGemmS8S8 when a GPU

@@ -1288,6 +1288,18 @@ uint64_t LayerStreamOffsetBench(const rc::RCEpisodeParams& p, rc::RCGkrLayerKind
     return 0;
 }
 
+std::vector<int8_t> TransposeI8Bench(const std::vector<int8_t>& src, uint32_t rows,
+                                     uint32_t cols)
+{
+    std::vector<int8_t> out(static_cast<size_t>(rows) * cols);
+    for (uint32_t i = 0; i < rows; ++i) {
+        for (uint32_t j = 0; j < cols; ++j) {
+            out[static_cast<size_t>(j) * rows + i] = src[static_cast<size_t>(i) * cols + j];
+        }
+    }
+    return out;
+}
+
 void PutLE32Bench(unsigned char* p, uint32_t v)
 {
     p[0] = static_cast<unsigned char>(v & 0xff);
@@ -1345,6 +1357,19 @@ std::array<int8_t, rc::kRCMxBlockLen> ExtractBlockBench(const uint256& prf, uint
     std::array<int8_t, rc::kRCMxBlockLen> out{};
     rc::ExtractMXTileInt64(prf, i, bj, acc_block, out.data());
     return out;
+}
+
+uint32_t BenchPrewarmInnerThreads(uint32_t total_threads)
+{
+    if (total_threads <= 1) return 1;
+    if (const char* env = std::getenv("BTX_RC_CARRIER_PREWARM_INNER_THREADS")) {
+        const unsigned long requested = std::strtoul(env, nullptr, 10);
+        if (requested > 0) {
+            return static_cast<uint32_t>(
+                std::clamp<unsigned long>(requested, 1, total_threads));
+        }
+    }
+    return std::min<uint32_t>(8, total_threads);
 }
 
 uint32_t PaddedLeafDepthBench(uint64_t stream_bytes, uint32_t t_leaf)
@@ -1440,6 +1465,8 @@ struct ProdCarrierBenchReport {
     uint64_t regen_bytes{0};
     uint64_t planned_regen_misses_full{0};
     uint64_t planned_regen_bytes_full{0};
+    uint64_t recompute_macs{0};
+    uint32_t threads{1};
     bool recompute_vectorized{false};
     uint64_t checksum{0};
 };
@@ -1457,6 +1484,7 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
     BOOST_REQUIRE(target.has_value());
     const rc::RCEpisodeParams p = rc::ResolveRCEpisodeParams(consensus, kHeight);
     BOOST_REQUIRE(RCEpisodeParamsEqual(p, rc::MakeDatacenterRCEpisodeParams()));
+    rep.recompute_vectorized = rc::RCDenseRowBlockVectorizedAvailable();
 
     const uint256 sigma = matmul::v4::DeriveSigma(header);
     std::vector<uint256> round_roots(p.rounds);
@@ -1542,13 +1570,20 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
     rc::SerializeRCFreivaldsCarrier(skeleton, wire);
     rep.carrier_bytes = wire.size();
 
-    std::map<uint256, uint64_t> planned_regen_seed_bytes;
-    auto note_planned_seed = [&](const uint256& seed, uint64_t bytes) {
+    struct PlannedRegenSeed {
+        uint32_t rows{0};
+        uint32_t cols{0};
+        uint32_t uses{0};
+    };
+    std::map<uint256, PlannedRegenSeed> planned_regen_seed_bytes;
+    auto note_planned_seed = [&](const uint256& seed, uint32_t rows, uint32_t cols) {
         auto it = planned_regen_seed_bytes.find(seed);
         if (it == planned_regen_seed_bytes.end()) {
-            planned_regen_seed_bytes.emplace(seed, bytes);
+            planned_regen_seed_bytes.emplace(seed, PlannedRegenSeed{rows, cols, 1});
         } else {
-            BOOST_REQUIRE_EQUAL(it->second, bytes);
+            BOOST_REQUIRE_EQUAL(it->second.rows, rows);
+            BOOST_REQUIRE_EQUAL(it->second.cols, cols);
+            ++it->second.uses;
         }
     };
     for (uint32_t u : units) {
@@ -1556,26 +1591,27 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
         const auto& lp = prov[li];
         if (lp.kind == rc::RCGkrLayerKind::GemmPhase1SV) {
             const auto& qkt = prov[lp.a.src_idx];
-            note_planned_seed(qkt.a.seed, static_cast<uint64_t>(p.n_q) * p.d_head);
-            note_planned_seed(qkt.b.seed, static_cast<uint64_t>(p.n_ctx) * p.d_head);
-            note_planned_seed(lp.b.seed, static_cast<uint64_t>(p.n_ctx) * p.d_head);
+            note_planned_seed(qkt.a.seed, p.n_q, p.d_head);
+            note_planned_seed(qkt.b.seed, p.n_ctx, p.d_head);
+            note_planned_seed(lp.b.seed, p.n_ctx, p.d_head);
         } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
             const auto& up = prov[lp.a.src_idx];
             if (up.a.is_leaf) {
-                note_planned_seed(up.a.seed, static_cast<uint64_t>(p.b_seq) * p.d_model);
+                note_planned_seed(up.a.seed, p.b_seq, p.d_model);
             }
-            note_planned_seed(up.b.seed, static_cast<uint64_t>(p.d_model) * p.d_ff);
-            note_planned_seed(lp.b.seed, static_cast<uint64_t>(p.d_ff) * p.d_model);
+            note_planned_seed(up.b.seed, p.d_model, p.d_ff);
+            note_planned_seed(lp.b.seed, p.d_ff, p.d_model);
         }
     }
     rep.planned_regen_misses_full = planned_regen_seed_bytes.size();
     rep.planned_regen_bytes_full = 0;
-    for (const auto& [seed, bytes] : planned_regen_seed_bytes) {
+    for (const auto& [seed, shape] : planned_regen_seed_bytes) {
         (void)seed;
-        rep.planned_regen_bytes_full += bytes;
+        rep.planned_regen_bytes_full += static_cast<uint64_t>(shape.rows) * shape.cols;
     }
 
     std::map<uint256, std::vector<int8_t>> regen;
+    std::map<uint256, std::vector<int8_t>> transposed_w_up;
     auto elapsed = [&](std::chrono::steady_clock::time_point t0) {
         return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     };
@@ -1593,11 +1629,250 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
         rep.regen_s += elapsed(t0);
         return v;
     };
+    auto transpose_w_up = [&](const uint256& seed, const std::vector<int8_t>& src,
+                              uint32_t rows, uint32_t cols) -> const std::vector<int8_t>& {
+        auto it = transposed_w_up.find(seed);
+        if (it != transposed_w_up.end()) return it->second;
+        return transposed_w_up.emplace(seed, TransposeI8Bench(src, rows, cols)).first->second;
+    };
     const bool full = std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH_FULL") != nullptr;
+    if (const char* env_threads = std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH_THREADS")) {
+        const unsigned long requested = std::strtoul(env_threads, nullptr, 10);
+        rep.threads = static_cast<uint32_t>(std::clamp<unsigned long>(requested, 1, 64));
+    }
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<uint8_t> dummy_leaf(p.T_leaf, 0);
     rc::RCMerkleProof dummy_proof;
     dummy_proof.siblings.resize(rep.tree_depth);
+    if (rep.threads > 1) {
+        struct SeedJob {
+            uint256 seed;
+            uint32_t rows{0};
+            uint32_t cols{0};
+            std::vector<int8_t> bytes;
+        };
+        std::vector<SeedJob> seed_jobs;
+        seed_jobs.reserve(planned_regen_seed_bytes.size());
+        uint64_t planned_uses = 0;
+        for (const auto& [seed, shape] : planned_regen_seed_bytes) {
+            seed_jobs.push_back(SeedJob{seed, shape.rows, shape.cols, {}});
+            planned_uses += shape.uses;
+        }
+        rep.regen_misses = seed_jobs.size();
+        rep.regen_hits = planned_uses > rep.regen_misses ? planned_uses - rep.regen_misses : 0;
+        rep.regen_bytes = rep.planned_regen_bytes_full;
+        auto run_parallel = [&](size_t n, const auto& fn) {
+            std::atomic<size_t> next{0};
+            std::vector<std::thread> workers;
+            const size_t nth = std::min<size_t>(rep.threads, n == 0 ? 1 : n);
+            workers.reserve(nth);
+            for (size_t t = 0; t < nth; ++t) {
+                workers.emplace_back([&]() {
+                    for (;;) {
+                        const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                        if (i >= n) break;
+                        fn(i);
+                    }
+                });
+            }
+            for (auto& w : workers) w.join();
+        };
+
+        std::sort(seed_jobs.begin(), seed_jobs.end(), [](const SeedJob& a, const SeedJob& b) {
+            const uint64_t abytes = static_cast<uint64_t>(a.rows) * a.cols;
+            const uint64_t bbytes = static_cast<uint64_t>(b.rows) * b.cols;
+            if (abytes != bbytes) return abytes > bbytes;
+            return a.seed < b.seed;
+        });
+        const auto t_regen = std::chrono::steady_clock::now();
+        const uint32_t inner_threads = BenchPrewarmInnerThreads(rep.threads);
+        const uint32_t outer_threads = std::max<uint32_t>(1, rep.threads / inner_threads);
+        run_parallel(std::min<size_t>(seed_jobs.size(), outer_threads), [&](size_t worker) {
+            for (size_t i = worker; i < seed_jobs.size(); i += outer_threads) {
+            seed_jobs[i].bytes = rc::ExpandMxDequantInt8Parallel(seed_jobs[i].seed,
+                                                                 seed_jobs[i].rows,
+                                                                 seed_jobs[i].cols,
+                                                                 inner_threads);
+            }
+        });
+        rep.regen_s = elapsed(t_regen);
+        for (auto& job : seed_jobs) {
+            regen.emplace(job.seed, std::move(job.bytes));
+        }
+
+        struct TransposeJobBench {
+            uint256 seed;
+            uint32_t rows{0};
+            uint32_t cols{0};
+        };
+        std::vector<TransposeJobBench> transpose_seeds;
+        for (const auto& [seed, shape] : planned_regen_seed_bytes) {
+            if ((shape.rows == p.d_model && shape.cols == p.d_ff) ||
+                (shape.rows == p.d_ff && shape.cols == p.d_model)) {
+                transpose_seeds.push_back(TransposeJobBench{seed, shape.rows, shape.cols});
+            }
+        }
+        const auto t_transpose = std::chrono::steady_clock::now();
+        std::vector<std::vector<int8_t>> transposed_jobs(transpose_seeds.size());
+        run_parallel(transpose_seeds.size(), [&](size_t i) {
+            const auto& W = regen.find(transpose_seeds[i].seed)->second;
+            transposed_jobs[i] = TransposeI8Bench(W, transpose_seeds[i].rows, transpose_seeds[i].cols);
+        });
+        for (size_t i = 0; i < transpose_seeds.size(); ++i) {
+            transposed_w_up.emplace(transpose_seeds[i].seed, std::move(transposed_jobs[i]));
+        }
+        rep.recompute_s += elapsed(t_transpose);
+
+        struct UnitPartial {
+            bool ok{true};
+            uint64_t extract_tiles{0};
+            uint32_t checked_merkle_openings{0};
+            uint64_t checked_merkle_hashes{0};
+            uint64_t recompute_macs{0};
+            uint64_t checksum{0};
+        };
+        std::vector<UnitPartial> partials(units.size());
+        const auto t_compute = std::chrono::steady_clock::now();
+        run_parallel(units.size(), [&](size_t ui) {
+            UnitPartial local;
+            const uint32_t li = sampleable[units[ui]];
+            const auto& lp = prov[li];
+            const std::vector<TilePlanBench> tile_plans = TilePositionsBench(base_seed, li, lp.m, lp.n);
+            auto finish_bench_tile = [&](const std::array<int8_t, rc::kRCMxBlockLen>& eo) {
+                if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd && lp.layer > 0) {
+                    if (!SimulateMerkleOpenBench(dummy_leaf, /*leaf_index=*/0, dummy_proof)) local.ok = false;
+                    ++local.checked_merkle_openings;
+                    local.checked_merkle_hashes += rep.tree_depth;
+                }
+                if (!SimulateMerkleOpenBench(dummy_leaf, /*leaf_index=*/0, dummy_proof)) local.ok = false;
+                ++local.checked_merkle_openings;
+                local.checked_merkle_hashes += rep.tree_depth;
+                for (int8_t v : eo) local.checksum = local.checksum * 131u + static_cast<unsigned char>(v);
+                ++local.extract_tiles;
+            };
+            if (lp.kind == rc::RCGkrLayerKind::GemmPhase1SV) {
+                for (const TilePlanBench& pl : tile_plans) {
+                    const auto& qkt = prov[lp.a.src_idx];
+                    const uint32_t d_head = p.d_head;
+                    const uint32_t n_ctx = lp.k;
+                    local.recompute_macs += static_cast<uint64_t>(n_ctx) * d_head;
+                    local.recompute_macs += static_cast<uint64_t>(n_ctx) * rc::kRCMxBlockLen;
+                    const std::vector<int8_t>& Q = regen.find(qkt.a.seed)->second;
+                    const std::vector<int8_t>& K = regen.find(qkt.b.seed)->second;
+                    const std::vector<int8_t>& V = regen.find(lp.b.seed)->second;
+                    std::vector<int8_t> S_row(n_ctx);
+                    std::array<int64_t, rc::kRCMxBlockLen> blk{};
+                    for (uint32_t bt = 0; bt < n_ctx / rc::kRCMxBlockLen; ++bt) {
+                        for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                            const uint32_t t = bt * rc::kRCMxBlockLen + c;
+                            int64_t acc = 0;
+                            for (uint32_t d = 0; d < d_head; ++d) {
+                                acc += static_cast<int64_t>(Q[static_cast<size_t>(pl.row) * d_head + d]) *
+                                       static_cast<int64_t>(K[static_cast<size_t>(t) * d_head + d]);
+                            }
+                            blk[c] = acc;
+                        }
+                        const auto so = ExtractBlockBench(qkt.extract_prf, pl.row, bt, blk.data());
+                        for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
+                            S_row[bt * rc::kRCMxBlockLen + c] = so[c];
+                    }
+                    std::array<int64_t, rc::kRCMxBlockLen> yblk{};
+                    const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
+                    rc::RCDenseRowBlockExactI8(S_row.data(), V.data(), n_ctx, d_head, out_col0,
+                                               yblk.data());
+                    const std::array<int8_t, rc::kRCMxBlockLen> eo =
+                        ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
+                    finish_bench_tile(eo);
+                }
+            } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
+                const auto& up = prov[lp.a.src_idx];
+                const uint32_t d_model = lp.n;
+                const uint32_t d_ff = lp.k;
+                const auto& xprov = up.a;
+                const std::vector<int8_t>& W_down_t = transposed_w_up.find(lp.b.seed)->second;
+                const std::vector<int8_t>& W_up_t = transposed_w_up.find(up.b.seed)->second;
+                auto load_x_row = [&](const TilePlanBench& pl, std::vector<int8_t>& X_row) {
+                    X_row.assign(d_model, 0);
+                    if (xprov.is_leaf) {
+                        const std::vector<int8_t>& X0 = regen.find(xprov.seed)->second;
+                        std::copy_n(X0.data() + static_cast<size_t>(pl.row) * d_model, d_model,
+                                    X_row.data());
+                    } else {
+                        for (uint32_t d = 0; d < d_model; ++d) {
+                            X_row[d] = static_cast<int8_t>((pl.row + d + lp.layer) & 0x7f);
+                        }
+                    }
+                };
+                for (size_t ti = 0; ti < tile_plans.size();) {
+                    const bool paired = ti + 1 < tile_plans.size();
+                    const TilePlanBench& pl0 = tile_plans[ti];
+                    const TilePlanBench* pl1 = paired ? &tile_plans[ti + 1] : nullptr;
+                    local.recompute_macs += static_cast<uint64_t>(d_model) * d_ff;
+                    local.recompute_macs += static_cast<uint64_t>(d_ff) * rc::kRCMxBlockLen;
+                    if (paired) {
+                        local.recompute_macs += static_cast<uint64_t>(d_model) * d_ff;
+                        local.recompute_macs += static_cast<uint64_t>(d_ff) * rc::kRCMxBlockLen;
+                    }
+                    std::vector<int8_t> X0;
+                    std::vector<int8_t> X1;
+                    load_x_row(pl0, X0);
+                    if (paired) load_x_row(*pl1, X1);
+                    std::vector<int8_t> H0(d_ff);
+                    std::vector<int8_t> H1(paired ? d_ff : 0);
+                    std::array<int64_t, rc::kRCMxBlockLen> blk{};
+                    std::array<int64_t, rc::kRCMxBlockLen> blk1{};
+                    for (uint32_t bj = 0; bj < d_ff / rc::kRCMxBlockLen; ++bj) {
+                        const uint32_t col0 = bj * rc::kRCMxBlockLen;
+                        if (paired) {
+                            rc::RCDenseTwoRowsBlockTransposedExactI8(X0.data(), X1.data(), W_up_t.data(),
+                                                                     d_model, d_ff, col0,
+                                                                     blk.data(), blk1.data());
+                        } else {
+                            rc::RCDenseRowBlockTransposedExactI8(X0.data(), W_up_t.data(), d_model,
+                                                                 d_ff, col0, blk.data());
+                        }
+                        const auto h0 = ExtractBlockBench(up.extract_prf, pl0.row, bj, blk.data());
+                        for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
+                            H0[bj * rc::kRCMxBlockLen + c] = h0[c];
+                        if (paired) {
+                            const auto h1 = ExtractBlockBench(up.extract_prf, pl1->row, bj, blk1.data());
+                            for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
+                                H1[bj * rc::kRCMxBlockLen + c] = h1[c];
+                        }
+                    }
+                    auto down_tile = [&](const TilePlanBench& pl, const std::vector<int8_t>& X_row,
+                                         const std::vector<int8_t>& H_row) {
+                        std::array<int64_t, rc::kRCMxBlockLen> yblk{};
+                        const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
+                        rc::RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
+                                                             d_model, out_col0, yblk.data());
+                        for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                            yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
+                        }
+                        return ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
+                    };
+                    finish_bench_tile(down_tile(pl0, X0, H0));
+                    if (paired) finish_bench_tile(down_tile(*pl1, X1, H1));
+                    ti += paired ? 2 : 1;
+                }
+            }
+            partials[ui] = local;
+        });
+        rep.recompute_s += elapsed(t_compute);
+        rep.layers_checked = static_cast<uint32_t>(units.size());
+        for (const UnitPartial& part : partials) {
+            BOOST_REQUIRE(part.ok);
+            rep.extract_tiles += part.extract_tiles;
+            rep.checked_merkle_openings += part.checked_merkle_openings;
+            rep.checked_merkle_hashes += part.checked_merkle_hashes;
+            rep.recompute_macs += part.recompute_macs;
+            rep.checksum = rep.checksum * 1315423911u + part.checksum;
+        }
+        rep.merkle_s = 0.0;
+        rep.total_s = elapsed(t0);
+        rep.stopped_at_budget = !full && rep.total_s > 0.900;
+        return rep;
+    }
     for (uint32_t u : units) {
         const uint32_t li = sampleable[u];
         const auto& lp = prov[li];
@@ -1632,6 +1907,8 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 const auto& qkt = prov[lp.a.src_idx];
                 const uint32_t d_head = p.d_head;
                 const uint32_t n_ctx = lp.k;
+                rep.recompute_macs += static_cast<uint64_t>(n_ctx) * d_head;
+                rep.recompute_macs += static_cast<uint64_t>(n_ctx) * rc::kRCMxBlockLen;
                 const std::vector<int8_t>& Q = regen_leaf(qkt.a.seed, p.n_q, d_head);
                 const std::vector<int8_t>& K = regen_leaf(qkt.b.seed, n_ctx, d_head);
                 const std::vector<int8_t>& V = regen_leaf(lp.b.seed, n_ctx, d_head);
@@ -1653,21 +1930,17 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                         S_row[bt * rc::kRCMxBlockLen + c] = so[c];
                 }
                 std::array<int64_t, rc::kRCMxBlockLen> yblk{};
-                yblk.fill(0);
                 const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
-                for (uint32_t t = 0; t < n_ctx; ++t) {
-                    const int64_t s = static_cast<int64_t>(S_row[t]);
-                    const int8_t* v = V.data() + static_cast<size_t>(t) * d_head + out_col0;
-                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
-                        yblk[c] += s * static_cast<int64_t>(v[c]);
-                    }
-                }
+                rc::RCDenseRowBlockExactI8(S_row.data(), V.data(), n_ctx, d_head, out_col0,
+                                           yblk.data());
                 eo = ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
                 rep.recompute_s += elapsed(t_rc_sv);
             } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
                 const auto& up = prov[lp.a.src_idx];
                 const uint32_t d_model = lp.n;
                 const uint32_t d_ff = lp.k;
+                rep.recompute_macs += static_cast<uint64_t>(d_model) * d_ff;
+                rep.recompute_macs += static_cast<uint64_t>(d_ff) * rc::kRCMxBlockLen;
                 std::vector<int8_t> X_row(d_model);
                 const auto& xprov = up.a;
                 if (xprov.is_leaf) {
@@ -1685,32 +1958,21 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 const std::vector<int8_t>& W_up = regen_leaf(up.b.seed, d_model, d_ff);
                 const std::vector<int8_t>& W_down = regen_leaf(lp.b.seed, d_ff, d_model);
                 const auto t_rc_dn = std::chrono::steady_clock::now();
+                const std::vector<int8_t>& W_up_t = transpose_w_up(up.b.seed, W_up, d_model, d_ff);
                 std::vector<int8_t> H_row(d_ff);
                 std::array<int64_t, rc::kRCMxBlockLen> blk{};
                 for (uint32_t bj = 0; bj < d_ff / rc::kRCMxBlockLen; ++bj) {
-                    blk.fill(0);
                     const uint32_t col0 = bj * rc::kRCMxBlockLen;
-                    for (uint32_t d = 0; d < d_model; ++d) {
-                        const int64_t x = static_cast<int64_t>(X_row[d]);
-                        const int8_t* w = W_up.data() + static_cast<size_t>(d) * d_ff + col0;
-                        for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
-                            blk[c] += x * static_cast<int64_t>(w[c]);
-                        }
-                    }
+                    rc::RCDenseRowBlockTransposedExactI8(X_row.data(), W_up_t.data(), d_model,
+                                                         d_ff, col0, blk.data());
                     const auto ho = ExtractBlockBench(up.extract_prf, pl.row, bj, blk.data());
                     for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
                         H_row[bj * rc::kRCMxBlockLen + c] = ho[c];
                 }
                 std::array<int64_t, rc::kRCMxBlockLen> yblk{};
-                yblk.fill(0);
                 const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
-                for (uint32_t t = 0; t < d_ff; ++t) {
-                    const int64_t h = static_cast<int64_t>(H_row[t]);
-                    const int8_t* w = W_down.data() + static_cast<size_t>(t) * d_model + out_col0;
-                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
-                        yblk[c] += h * static_cast<int64_t>(w[c]);
-                    }
-                }
+                rc::RCDenseRowBlockExactI8(H_row.data(), W_down.data(), d_ff, d_model, out_col0,
+                                           yblk.data());
                 for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
                     yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
                 }
@@ -1783,6 +2045,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
                        << " regen_s=" << rep.regen_s
                        << " recompute_s=" << rep.recompute_s
                        << " merkle_s=" << rep.merkle_s
+                       << " threads=" << rep.threads
+                       << " prewarm_s=" << rep.regen_s
+                       << " unitcheck_s=" << rep.recompute_s
+                       << " reduce_s=0"
                        << " first_layer_total_s=" << rep.first_layer_total_s
                        << " first_layer_regen_s=" << rep.first_layer_regen_s
                        << " first_layer_recompute_s=" << rep.first_layer_recompute_s
@@ -1818,6 +2084,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
                        << " regen_misses=" << rep.regen_misses
                        << " regen_hits=" << rep.regen_hits
                        << " regen_bytes=" << rep.regen_bytes
+                       << " regen_GiB_s=" << (rep.regen_s > 0.0 ? (static_cast<double>(rep.regen_bytes) / (1024.0 * 1024.0 * 1024.0)) / rep.regen_s : 0.0)
+                       << " recompute_macs=" << rep.recompute_macs
+                       << " recompute_Gmac_s=" << (rep.recompute_s > 0.0 ? (static_cast<double>(rep.recompute_macs) / 1.0e9) / rep.recompute_s : 0.0)
                        << " first_layer_regen_misses=" << rep.first_layer_regen_misses
                        << " first_layer_regen_hits=" << rep.first_layer_regen_hits
                        << " first_layer_regen_bytes=" << rep.first_layer_regen_bytes

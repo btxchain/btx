@@ -87,8 +87,11 @@ endif()
 
 if(HAVE_ARM_SHANI)
   target_compile_definitions(bitcoin_crypto PRIVATE ENABLE_ARM_SHANI)
-  target_sources(bitcoin_crypto PRIVATE sha256_arm_shani.cpp)
+  target_sources(bitcoin_crypto PRIVATE sha256_arm_shani.cpp sha256_xof_arm_shani.cpp)
   set_property(SOURCE sha256_arm_shani.cpp PROPERTY
+    COMPILE_OPTIONS ${ARM_SHANI_CXXFLAGS}
+  )
+  set_property(SOURCE sha256_xof_arm_shani.cpp PROPERTY
     COMPILE_OPTIONS ${ARM_SHANI_CXXFLAGS}
   )
 endif()

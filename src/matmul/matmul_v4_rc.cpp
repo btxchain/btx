@@ -8,24 +8,28 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_mx_layout.h>
 #include <matmul/matmul_v4_rc_scale.h>
 #include <span.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace matmul::v4::rc {
 namespace {
 
+namespace bx = matmul::v4::bmx4;
 namespace lt = matmul::v4::lt;
 
 // --- tagged SHA helpers -----------------------------------------------------
@@ -67,6 +71,36 @@ uint256 DeriveOperandSeed(const uint256& seed_r, const char* tag)
 // PRF regen cost. Base profile keeps per-layer weights + per-round operands (goldens
 // unchanged). Defined below; forward-declared here for the Phase-1/Phase-2 callers.
 bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p);
+
+uint32_t ClampLocalThreads(uint32_t threads, size_t jobs)
+{
+    if (threads <= 1 || jobs <= 1) return 1;
+    if (threads > 64) threads = 64;
+    return std::max<uint32_t>(1, std::min<uint32_t>(threads, static_cast<uint32_t>(jobs)));
+}
+
+template <typename Fn>
+void ParallelForLocal(size_t jobs, uint32_t threads, const Fn& fn)
+{
+    threads = ClampLocalThreads(threads, jobs);
+    if (threads <= 1) {
+        for (size_t i = 0; i < jobs; ++i) fn(i);
+        return;
+    }
+    std::atomic<size_t> next{0};
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (uint32_t t = 0; t < threads; ++t) {
+        workers.emplace_back([&]() {
+            for (;;) {
+                const size_t i = next.fetch_add(1, std::memory_order_relaxed);
+                if (i >= jobs) break;
+                fn(i);
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+}
 
 // --- ExactGemm helpers ------------------------------------------------------
 
@@ -887,7 +921,60 @@ std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint
     // Col-block packs for S·V / bwd / wgrad live in matmul_v4_rc_mx_layout.*.
     assert(rows % kRCMxBlockLen == 0);
     assert(cols % kRCMxBlockLen == 0);
-    return DequantMxPacked(ExpandMxPacked(seed, rows, cols, RCMxScaleAxis::RowBlock));
+    const size_t count = static_cast<size_t>(rows) * cols;
+    const uint32_t nblk = cols / kRCMxBlockLen;
+    std::vector<int8_t> mu(count);
+    bx::ExpandMantissaStream(seed, count, mu.data());
+    std::vector<uint8_t> scales(static_cast<size_t>(rows) * nblk);
+    bx::ExpandScaleStream(seed, scales.size(), scales.data());
+    std::vector<int8_t> out(count);
+    for (uint32_t i = 0; i < rows; ++i) {
+        const size_t row = static_cast<size_t>(i) * cols;
+        const size_t srow = static_cast<size_t>(i) * nblk;
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            const int32_t scale = int32_t{1} << scales[srow + bj];
+            const size_t base = row + static_cast<size_t>(bj) * kRCMxBlockLen;
+            for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+                out[base + c] = static_cast<int8_t>(static_cast<int32_t>(mu[base + c]) * scale);
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<int8_t> ExpandMxDequantInt8Parallel(const uint256& seed, uint32_t rows, uint32_t cols,
+                                                uint32_t threads)
+{
+    // Byte-identical parallel verifier path. It preserves the consensus stream
+    // order by block-prefixing the rejection-sampled mantissa XOF, then applies
+    // the same row-block scale rule as ExpandMxDequantInt8.
+    assert(rows % kRCMxBlockLen == 0);
+    assert(cols % kRCMxBlockLen == 0);
+    const size_t count = static_cast<size_t>(rows) * cols;
+    threads = ClampLocalThreads(threads, std::max<size_t>(1, count / 4096));
+    if (threads <= 1 || count < (size_t{1} << 20)) {
+        return ExpandMxDequantInt8(seed, rows, cols);
+    }
+
+    const uint32_t nblk = cols / kRCMxBlockLen;
+    std::vector<int8_t> mu(count);
+    bx::ExpandMantissaStreamParallel(seed, count, mu.data(), threads);
+    std::vector<uint8_t> scales(static_cast<size_t>(rows) * nblk);
+    bx::ExpandScaleStreamParallel(seed, scales.size(), scales.data(), threads);
+    std::vector<int8_t> out(count);
+    ParallelForLocal(rows, threads, [&](size_t i0) {
+        const uint32_t i = static_cast<uint32_t>(i0);
+        const size_t row = static_cast<size_t>(i) * cols;
+        const size_t srow = static_cast<size_t>(i) * nblk;
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            const int32_t scale = int32_t{1} << scales[srow + bj];
+            const size_t base = row + static_cast<size_t>(bj) * kRCMxBlockLen;
+            for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
+                out[base + c] = static_cast<int8_t>(static_cast<int32_t>(mu[base + c]) * scale);
+            }
+        }
+    });
+    return out;
 }
 
 std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream, uint32_t t_leaf)

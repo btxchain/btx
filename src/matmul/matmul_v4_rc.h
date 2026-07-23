@@ -313,6 +313,8 @@ struct RCMerkleProof {
 /** Test/harness helpers (not consensus entry points). */
 [[nodiscard]] std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows,
                                                       uint32_t cols);
+[[nodiscard]] std::vector<int8_t> ExpandMxDequantInt8Parallel(const uint256& seed, uint32_t rows,
+                                                              uint32_t cols, uint32_t threads);
 /** Padded-pow2 leaf hashes for a round stream (R.4.2). */
 [[nodiscard]] std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream,
                                                        uint32_t t_leaf);
