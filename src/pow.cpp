@@ -4164,8 +4164,9 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
 }
 
 bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
-                               int32_t block_height)
+                               int32_t block_height, bool* carrier_missing)
 {
+    if (carrier_missing != nullptr) *carrier_missing = false;
     const auto start = std::chrono::steady_clock::now();
     const auto finish = [&](bool passed) {
         RegisterMatMulValidationRuntimeSample(
@@ -4214,6 +4215,11 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
         // RCFreivaldsCarrierStoreGet in matmul_v4_rc_freivalds_sampled.h.)
         matmul::v4::rc::RCFreivaldsSampledCarrier dc_carrier;
         if (!matmul::v4::rc::RCFreivaldsCarrierStoreGet(header.GetHash(), dc_carrier)) {
+            // Carrier not (yet) available. Fail closed — NEVER accept without an
+            // authenticated carrier — but flag the reason so the caller can tell
+            // a merely-late carrier (transient; defer + retry) apart from a
+            // present-but-invalid one (a permanent PoW fault decided below).
+            if (carrier_missing != nullptr) *carrier_missing = true;
             return finish(false);
         }
         // Bind the carried episode to the CONSENSUS-resolved datacenter dims so a

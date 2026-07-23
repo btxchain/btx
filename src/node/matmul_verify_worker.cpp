@@ -115,12 +115,21 @@ void MatMulVerifyWorker::WorkerLoop()
             // INSIDE the pow.cpp recompute branch for the remaining
             // synchronous callers, drop this outer wrap (one-line change) so
             // the guard is not taken re-entrantly with two different scopes.
+            // Datacenter profile-2: a false verdict caused solely by a not-yet-
+            // arrived sampled carrier is a TRANSIENT availability miss, not a
+            // proof-of-work fault, and must NOT be memoized — the verdict memo's
+            // invariant is that a verdict is a pure function of the header, and a
+            // carrier-availability miss is environment-dependent. Memoizing false
+            // here would poison the later carrier-present resubmit (validation's
+            // memo path would replay the stale false and permanently reject a
+            // valid block). Track it and skip CacheMatMulEncDrVerdict below.
+            bool carrier_missing{false};
             MatMulRecomputeSingleFlight sf(hash);
             if (sf.IsLeader()) {
                 if (m_params.IsMatMulRCCoupledActive(job.height)) {
                     ok = CheckMatMulProofOfWork_RCCoupled(*job.block, m_params, job.height);
                 } else if (m_params.IsMatMulRCActive(job.height)) {
-                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height);
+                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height, &carrier_missing);
                 } else {
                     ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
                                                         job.parent_median_time_past);
@@ -133,15 +142,20 @@ void MatMulVerifyWorker::WorkerLoop()
                 if (m_params.IsMatMulRCCoupledActive(job.height)) {
                     ok = CheckMatMulProofOfWork_RCCoupled(*job.block, m_params, job.height);
                 } else if (m_params.IsMatMulRCActive(job.height)) {
-                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height);
+                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height, &carrier_missing);
                 } else {
                     ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
                                                         job.parent_median_time_past);
                 }
             }
-            CacheMatMulEncDrVerdict(hash, ok);
-            LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d\n",
-                     hash.ToString(), job.height, ok);
+            // Only memoize a verdict that is a pure function of the header. A
+            // missing-carrier false is left un-memoized so the resubmit path can
+            // reach the real verdict once the carrier arrives.
+            if (!(carrier_missing && !ok)) {
+                CacheMatMulEncDrVerdict(hash, ok);
+            }
+            LogDebug(BCLog::NET, "matmul async verify: block %s height %d encdr_ok=%d carrier_missing=%d\n",
+                     hash.ToString(), job.height, ok, carrier_missing);
         }
         if (job.completion) job.completion(ok);
     }

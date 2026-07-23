@@ -38,6 +38,7 @@
 #include <policy/rbf.h>
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
+#include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -10457,6 +10458,37 @@ static bool ContextualCheckBlock(const CBlock& block,
             // the MUTATED/permanent classification collapses (§4.1 clause 2)
             // and "high-hash" is always correct here.
             if (!recompute_assumevalid_trusted) {
+                // DATACENTER PROFILE-2 CARRIER-AVAILABILITY GATE (transient, not
+                // permanent). Under nMatMulRCProfile==2 the consensus authority
+                // (CheckMatMulProofOfWork_RC) FAILS CLOSED when the relayed
+                // sampled carrier has not yet arrived in the process-local store.
+                // On the getdata block-download path the carrier is guaranteed to
+                // precede the block by the strict serve-push in ProcessGetBlockData,
+                // but a block reconstructed LOCALLY from mempool via compact blocks
+                // (cmpctblock/blocktxn) is not fetched via getdata `block`, so the
+                // serve-push never fires and the carrier may simply be LATE. If we
+                // let the fail-closed miss fall through to BLOCK_CONSENSUS below,
+                // AcceptBlock marks the block BLOCK_FAILED_VALID PERMANENTLY (only
+                // BLOCK_MUTATED is spared), so a raced-but-VALID profile-2 block
+                // would be rejected forever — a consensus-split/chain-halt risk.
+                //
+                // Detect the missing carrier here and classify it TRANSIENT
+                // (BLOCK_MUTATED, which AcceptBlock does NOT mark failed), so
+                // net_processing can request the carrier (getrccarrier), hold the
+                // block, and resubmit on receipt. This does NOT weaken fail-closed:
+                // a PRESENT carrier still runs the full sampled verifier below (a
+                // present-but-invalid carrier is a real, permanent PoW fault); only
+                // a genuinely late carrier is deferred, and a block is NEVER
+                // accepted without an authenticated carrier. Profile-1/base and the
+                // coupled path are unaffected (they carry no sampled carrier).
+                if (consensusParams.IsMatMulRCActive(nHeight) &&
+                    !consensusParams.IsMatMulRCCoupledActive(nHeight) &&
+                    consensusParams.nMatMulRCProfile == 2 &&
+                    !matmul::v4::rc::RCFreivaldsCarrierStoreHave(block.GetHash())) {
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                         "matmul-rc-carrier-missing",
+                                         "matmul datacenter sampled carrier not yet available");
+                }
                 // G.1: run the ENC-DR predicate WITHOUT cs_main held. On the
                 // cache/accel-miss path it performs the full O(W) one-nonce
                 // reference GEMM; holding the global lock across it would let a
