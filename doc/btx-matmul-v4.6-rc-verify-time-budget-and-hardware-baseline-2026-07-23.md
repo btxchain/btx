@@ -196,11 +196,34 @@ nothing (`nMatMulRCHeight = INT32_MAX`, arbiter hard-disabled):
   `_coupled_tests`, `_freivalds_sampled_tests`; CUDA episode digests match the
   int64 CPU reference on the 5060 Ti).
 
-**Belt-and-suspenders confirmation to record before any activation cutover** (not
-a branch-landing gate, because activation is separately gated behind `INT32_MAX`
-+ external audit): a fixed-vector **ARM ↔ x86 episode-digest hex match** on
-record, and `matmul_v4_rc_gkr_tests` green on x86. These strengthen the audit
-trail; the self-test gating already makes the fast path fail-safe regardless.
+### 7.1 Cross-hardware confirmation — recorded 2026-07-23
+
+The belt-and-suspenders confirmations for the activation audit trail (not
+branch-landing gates; activation is separately gated behind `INT32_MAX` +
+external audit) are now on record, measured on the W-3245 build at tip
+`a8aca34`:
+
+- **`matmul_v4_rc_gkr_tests` on x86: PASS** — 79/79 cases, 1010 assertions
+  (`EXIT_GKR=0`).
+- **ARM ↔ x86 episode-digest byte-identity** — coupled toy vector
+  `MakeCoupHeader(42)`, digest
+  `7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee`, identical
+  across: x86 fast paths on; x86 with the AVX2 multibuffer XOF forced off
+  (`BTX_BMX4_XOF8_AVX2=0`, i.e. scalar CSHA256 XOF); and the ARM frozen toy
+  golden (Mac Studio). `matmul_v4_rc_datacenter_tests` also PASS both ways (47
+  cases, 7855 assertions each).
+
+Coverage note: the digest run directly toggles the **operand-generation XOF**
+(AVX2 multibuffer ↔ scalar CSHA256) and shows it is byte-identical, and the
+cross-arch match pins the AVX2 path to the ARM SHA-ext path. The **VNNI packed
+int8 recompute** is a verifier-path kernel (not part of the reference digest),
+so it is not toggled by these env vars; its byte-identity is enforced by the
+`PackedFastPathSelfTest` multi-vector scalar-oracle gate at init (auto-fallback
+to scalar on any mismatch) and exercised by the datacenter-suite verify
+assertions passing. `BTX_RC_PACKED_I8MM` is **not** currently wired as a runtime
+toggle (no-op); wiring it as an explicit operator kill switch + direct A/B for
+the VNNI recompute is a low-priority hardening follow-on, not a correctness gap
+(the self-test gate already provides the fail-safe).
 
 ---
 
