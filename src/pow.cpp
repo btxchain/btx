@@ -4226,14 +4226,18 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
         // miner cannot substitute a smaller (cheaper) episode: the sampled
         // verifier authenticates the digest→target and the λ sampled layers, but
         // the episode SHAPE is fixed by consensus, not by the prover. These are
-        // the complete 8-field episode shape (identical to the fields the FS seed
-        // binds in RCGkrFsSeedV7); phase1_tile_delta is an RCEpisodeOptions
-        // execution knob, not an RCEpisodeParams shape field.
+        // the complete 9-field episode shape — IDENTICAL to the fields the FS seed
+        // binds in RCGkrFsSeedV7. d_ff is load-bearing: it is the fused-FFN inner
+        // width and the dominant compute lever (FFN MAC = 2·b_seq·d_model·d_ff·L·
+        // rounds, compute/hash margin = 2·d_ff), so omitting it would let a miner
+        // declare a tiny d_ff and pass an honest-but-cheap episode. phase1_tile_
+        // delta is an RCEpisodeOptions execution knob, not a shape field.
         const auto& e = dc_carrier.episode;
         if (!(e.rounds == params_rc.rounds && e.d_head == params_rc.d_head &&
               e.n_q == params_rc.n_q && e.n_ctx == params_rc.n_ctx &&
               e.L_lyr == params_rc.L_lyr && e.d_model == params_rc.d_model &&
-              e.b_seq == params_rc.b_seq && e.T_leaf == params_rc.T_leaf)) {
+              e.b_seq == params_rc.b_seq && e.T_leaf == params_rc.T_leaf &&
+              e.d_ff == params_rc.d_ff)) {
             return finish(false);
         }
         // Bind the sampling breadth λ to the consensus constant: with the SEGMENT

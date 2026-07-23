@@ -7818,15 +7818,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("malformed rccarrier %s: %s", block_hash.ToString(), why));
             return;
         }
-        // (vi) Consensus episode-shape bind — the 8 shape fields, identical to
+        // (vi) Consensus episode-shape bind — the 9 shape fields, identical to
         // CheckMatMulProofOfWork_RC. A carrier committing smaller (cheaper) dims is
-        // rejected here, before the verify.
+        // rejected here, before the verify. d_ff is INCLUDED: it is the fused-FFN
+        // inner width and the dominant compute lever (margin = 2·d_ff), so a carrier
+        // declaring a tiny d_ff must be rejected here too.
         const auto params_rc = matmul::v4::rc::ResolveRCEpisodeParams(consensus, block_height);
         const auto& ce = carrier.episode;
         if (!(ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
               ce.n_q == params_rc.n_q && ce.n_ctx == params_rc.n_ctx &&
               ce.L_lyr == params_rc.L_lyr && ce.d_model == params_rc.d_model &&
-              ce.b_seq == params_rc.b_seq && ce.T_leaf == params_rc.T_leaf)) {
+              ce.b_seq == params_rc.b_seq && ce.T_leaf == params_rc.T_leaf &&
+              ce.d_ff == params_rc.d_ff)) {
             free_slot();
             Misbehaving(*peer, strprintf("rccarrier %s episode-shape mismatch", block_hash.ToString()));
             return;
