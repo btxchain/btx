@@ -222,10 +222,24 @@ void RCDenseRowBlockPackedI8mmExactI8(const int8_t* lhs, const int8_t* rhs_packe
         return;
     }
 #endif
-    // This API requires packed RHS. If the packed kernel is unavailable, callers
-    // must route to the transposed/scalar helper instead.
-    assert(false);
     for (uint32_t c = 0; c < kRCMxBlockLen; ++c) out[c] = 0;
+    assert((k % 8) == 0);
+    assert((rhs_col0 % kRCMxBlockLen) == 0);
+    assert((rhs_cols % kRCMxBlockLen) == 0);
+    const uint32_t chunks = k / 8;
+    const uint32_t block = rhs_col0 / kRCMxBlockLen;
+    const int8_t* block_base = rhs_packed + static_cast<size_t>(block) * chunks * (kRCMxBlockLen / 2) * 16;
+    for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+        const int8_t* packed = block_base + static_cast<size_t>(chunk) * (kRCMxBlockLen / 2) * 16;
+        for (uint32_t lane = 0; lane < 8; ++lane) {
+            const uint32_t t = chunk * 8 + lane;
+            const int64_t a = static_cast<int64_t>(lhs[t]);
+            for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) {
+                out[2 * p] += a * static_cast<int64_t>(packed[p * 16 + lane]);
+                out[2 * p + 1] += a * static_cast<int64_t>(packed[p * 16 + 8 + lane]);
+            }
+        }
+    }
 }
 
 void RCDenseTwoRowsBlockPackedI8mmExactI8(const int8_t* lhs0, const int8_t* lhs1,
@@ -241,10 +255,31 @@ void RCDenseTwoRowsBlockPackedI8mmExactI8(const int8_t* lhs0, const int8_t* lhs1
         return;
     }
 #endif
-    assert(false);
     for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
         out0[c] = 0;
         out1[c] = 0;
+    }
+    assert((k % 8) == 0);
+    assert((rhs_col0 % kRCMxBlockLen) == 0);
+    assert((rhs_cols % kRCMxBlockLen) == 0);
+    const uint32_t chunks = k / 8;
+    const uint32_t block = rhs_col0 / kRCMxBlockLen;
+    const int8_t* block_base = rhs_packed + static_cast<size_t>(block) * chunks * (kRCMxBlockLen / 2) * 16;
+    for (uint32_t chunk = 0; chunk < chunks; ++chunk) {
+        const int8_t* packed = block_base + static_cast<size_t>(chunk) * (kRCMxBlockLen / 2) * 16;
+        for (uint32_t lane = 0; lane < 8; ++lane) {
+            const uint32_t t = chunk * 8 + lane;
+            const int64_t a0 = static_cast<int64_t>(lhs0[t]);
+            const int64_t a1 = static_cast<int64_t>(lhs1[t]);
+            for (uint32_t p = 0; p < kRCMxBlockLen / 2; ++p) {
+                const int64_t b0 = static_cast<int64_t>(packed[p * 16 + lane]);
+                const int64_t b1 = static_cast<int64_t>(packed[p * 16 + 8 + lane]);
+                out0[2 * p] += a0 * b0;
+                out0[2 * p + 1] += a0 * b1;
+                out1[2 * p] += a1 * b0;
+                out1[2 * p + 1] += a1 * b1;
+            }
+        }
     }
 }
 

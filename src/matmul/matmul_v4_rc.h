@@ -186,6 +186,11 @@ inline constexpr char kRCFsTag[] = "BTX_RC_FS_V1";
 inline constexpr uint8_t kRCLeafTag = 0x00;
 inline constexpr uint8_t kRCNodeTag = 0x01;
 inline constexpr uint8_t kRCPadLeafTag = 0x02;
+/** Datacenter Config W X0 row-addressing. X0_r stays chain-bound by
+ *  BTX_RC_X0_V1(seed_r), but datacenter profile-2 expands it as independent
+ *  32-row row blocks so sampled verification regenerates only touched rows. */
+inline constexpr uint32_t kRCX0RowBlockRows = 32;
+inline constexpr char kRCX0RowBlockTag[] = "BTX_RC_X0_ROW_BLOCK_V1";
 /** Fiat–Shamir spot-check query count (optimistic accept-fast pre-filter). */
 inline constexpr uint32_t kRCSpotCheckQueries = 8;
 
@@ -315,6 +320,17 @@ struct RCMerkleProof {
                                                       uint32_t cols);
 [[nodiscard]] std::vector<int8_t> ExpandMxDequantInt8Parallel(const uint256& seed, uint32_t rows,
                                                               uint32_t cols, uint32_t threads);
+[[nodiscard]] bool UseDatacenterRowBlockX0(const RCEpisodeParams& p);
+[[nodiscard]] bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p);
+[[nodiscard]] uint256 DeriveX0RowBlockSeed(const uint256& seed_x0, uint32_t row_block);
+[[nodiscard]] std::vector<int8_t> ExpandX0ForEpisode(const uint256& seed_x0,
+                                                     const RCEpisodeParams& params);
+[[nodiscard]] std::vector<int8_t> ExpandX0RowBlockForEpisode(const uint256& seed_x0,
+                                                             const RCEpisodeParams& params,
+                                                             uint32_t row_block);
+[[nodiscard]] std::vector<int8_t> ExpandX0RowForEpisode(const uint256& seed_x0,
+                                                        const RCEpisodeParams& params,
+                                                        uint32_t row);
 /** Padded-pow2 leaf hashes for a round stream (R.4.2). */
 [[nodiscard]] std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream,
                                                        uint32_t t_leaf);

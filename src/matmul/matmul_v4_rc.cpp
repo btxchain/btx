@@ -66,12 +66,6 @@ uint256 DeriveOperandSeed(const uint256& seed_r, const char* tag)
     return Sha256Tagged(tag, std::strlen(tag), seed_r.data(), 32);
 }
 
-// True only for the datacenter profile: shares FFN weights (per round, not per layer)
-// and the X0/K/V operands (episode-wide, not per round) to cut the sublinear verifier's
-// PRF regen cost. Base profile keeps per-layer weights + per-round operands (goldens
-// unchanged). Defined below; forward-declared here for the Phase-1/Phase-2 callers.
-bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p);
-
 uint32_t ClampLocalThreads(uint32_t threads, size_t jobs)
 {
     if (threads <= 1 || jobs <= 1) return 1;
@@ -409,14 +403,6 @@ struct Phase2Tensors {
     std::vector<uint256> prf_dn;
 };
 
-bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p)
-{
-    const RCEpisodeParams dc = MakeDatacenterRCEpisodeParams();
-    return p.rounds == dc.rounds && p.d_head == dc.d_head && p.n_q == dc.n_q &&
-           p.n_ctx == dc.n_ctx && p.L_lyr == dc.L_lyr && p.d_model == dc.d_model &&
-           p.d_ff == dc.d_ff && p.b_seq == dc.b_seq && p.T_leaf == dc.T_leaf;
-}
-
 /** Exact int8·int8 → int64 GEMM: out[m×n] = A[m×k]·B[k×n]. Contraction k is split
  *  into fixed panels with 2304·chunk < 2^24 (kRCWgradExactChunk) so each panel is
  *  ExactGemm-exact on any FP32 accelerator; int64 accumulation of the exact int32
@@ -496,7 +482,7 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
     // X0_r's sampled rows against seed_r, so the chain is verified at no extra cost.
     // BASE keeps X0 per-round already; seed_r is correct for both, so no branch.
     const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
-    out.X[0] = ExpandMxDequantInt8(seed_X0, p.b_seq, p.d_model);
+    out.X[0] = ExpandX0ForEpisode(seed_X0, p);
     if (out.ffn_weights_shared) {
         // Config W (datacenter): FFN weights SHARED EPISODE-WIDE (sigma-derived, one pair
         // for the whole episode — across all rounds AND all layers). Fable-proven
@@ -918,6 +904,25 @@ RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p, int32_t heigh
     return ConsensusRCEpisodeParamsForHeight(height, p);
 }
 
+bool UseDatacenterRowBlockX0(const RCEpisodeParams& p)
+{
+    const RCEpisodeParams dc = MakeDatacenterRCEpisodeParams();
+    return p.rounds == dc.rounds && p.d_head == dc.d_head && p.n_q == dc.n_q &&
+           p.n_ctx == dc.n_ctx && p.L_lyr == dc.L_lyr && p.d_model == dc.d_model &&
+           p.d_ff == dc.d_ff && p.b_seq == dc.b_seq && p.T_leaf == dc.T_leaf;
+}
+
+bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p)
+{
+    return UseDatacenterRowBlockX0(p);
+}
+
+uint256 DeriveX0RowBlockSeed(const uint256& seed_x0, uint32_t row_block)
+{
+    return Sha256TaggedU32(kRCX0RowBlockTag, sizeof(kRCX0RowBlockTag) - 1, seed_x0,
+                           row_block);
+}
+
 std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint32_t cols)
 {
     // Consensus oracle: row-block E8M0 (LT Extract / MatExpand convention).
@@ -941,6 +946,55 @@ std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint
                 out[base + c] = static_cast<int8_t>(static_cast<int32_t>(mu[base + c]) * scale);
             }
         }
+    }
+    return out;
+}
+
+std::vector<int8_t> ExpandX0RowBlockForEpisode(const uint256& seed_x0,
+                                               const RCEpisodeParams& params,
+                                               uint32_t row_block)
+{
+    assert(params.b_seq % kRCX0RowBlockRows == 0);
+    assert(params.d_model % kRCMxBlockLen == 0);
+    const uint32_t n_blocks = params.b_seq / kRCX0RowBlockRows;
+    assert(row_block < n_blocks);
+    if (!UseDatacenterRowBlockX0(params)) {
+        const std::vector<int8_t> full =
+            ExpandMxDequantInt8(seed_x0, params.b_seq, params.d_model);
+        std::vector<int8_t> block(static_cast<size_t>(kRCX0RowBlockRows) * params.d_model);
+        const size_t off = static_cast<size_t>(row_block) * kRCX0RowBlockRows * params.d_model;
+        std::copy_n(full.data() + off, block.size(), block.data());
+        return block;
+    }
+    return ExpandMxDequantInt8(DeriveX0RowBlockSeed(seed_x0, row_block),
+                               kRCX0RowBlockRows, params.d_model);
+}
+
+std::vector<int8_t> ExpandX0RowForEpisode(const uint256& seed_x0,
+                                          const RCEpisodeParams& params, uint32_t row)
+{
+    assert(row < params.b_seq);
+    const uint32_t row_block = row / kRCX0RowBlockRows;
+    const uint32_t rel = row % kRCX0RowBlockRows;
+    const std::vector<int8_t> block = ExpandX0RowBlockForEpisode(seed_x0, params, row_block);
+    std::vector<int8_t> out(params.d_model);
+    std::copy_n(block.data() + static_cast<size_t>(rel) * params.d_model, params.d_model,
+                out.data());
+    return out;
+}
+
+std::vector<int8_t> ExpandX0ForEpisode(const uint256& seed_x0, const RCEpisodeParams& params)
+{
+    if (!UseDatacenterRowBlockX0(params)) {
+        return ExpandMxDequantInt8(seed_x0, params.b_seq, params.d_model);
+    }
+    assert(params.b_seq % kRCX0RowBlockRows == 0);
+    std::vector<int8_t> out(static_cast<size_t>(params.b_seq) * params.d_model);
+    const uint32_t n_blocks = params.b_seq / kRCX0RowBlockRows;
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        const std::vector<int8_t> block = ExpandX0RowBlockForEpisode(seed_x0, params, b);
+        std::copy(block.begin(), block.end(),
+                  out.begin() + static_cast<size_t>(b) * kRCX0RowBlockRows * params.d_model);
     }
     return out;
 }

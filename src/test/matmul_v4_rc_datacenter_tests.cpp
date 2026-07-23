@@ -955,6 +955,34 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
     BOOST_CHECK(rc::ValidateRCEpisodeParams(dc));
 }
 
+BOOST_AUTO_TEST_CASE(rc_dc_x0_row_blocks_concat_byte_identical)
+{
+    const rc::RCEpisodeParams p = rc::MakeDatacenterRCEpisodeParams();
+    BOOST_REQUIRE(rc::UseDatacenterRowBlockX0(p));
+    BOOST_REQUIRE_EQUAL(p.b_seq % rc::kRCX0RowBlockRows, 0);
+    uint256 seed_x0;
+    for (size_t i = 0; i < 32; ++i) seed_x0.data()[i] = static_cast<unsigned char>(0x41 + i);
+
+    const std::vector<int8_t> full = rc::ExpandX0ForEpisode(seed_x0, p);
+    BOOST_REQUIRE_EQUAL(full.size(), static_cast<size_t>(p.b_seq) * p.d_model);
+    const uint32_t n_blocks = p.b_seq / rc::kRCX0RowBlockRows;
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        const std::vector<int8_t> block = rc::ExpandX0RowBlockForEpisode(seed_x0, p, b);
+        BOOST_REQUIRE_EQUAL(block.size(), static_cast<size_t>(rc::kRCX0RowBlockRows) * p.d_model);
+        const auto first = full.begin() + static_cast<ptrdiff_t>(
+                                            static_cast<size_t>(b) * rc::kRCX0RowBlockRows * p.d_model);
+        BOOST_CHECK_EQUAL_COLLECTIONS(first, first + static_cast<ptrdiff_t>(block.size()),
+                                      block.begin(), block.end());
+    }
+    for (uint32_t row : {0u, 31u, 32u, p.b_seq / 2u, p.b_seq - 1u}) {
+        const std::vector<int8_t> one = rc::ExpandX0RowForEpisode(seed_x0, p, row);
+        BOOST_REQUIRE_EQUAL(one.size(), p.d_model);
+        const auto first = full.begin() + static_cast<ptrdiff_t>(static_cast<size_t>(row) * p.d_model);
+        BOOST_CHECK_EQUAL_COLLECTIONS(first, first + static_cast<ptrdiff_t>(p.d_model),
+                                      one.begin(), one.end());
+    }
+}
+
 // (b) TotalRCEpisodeMacs(datacenter) equals the fused profile's absolute
 //     2.257e15 MAC figure (4.514e15 FLOP). With base d_ff=4·d_model and the
 //     datacenter b_seq lever raised to 87552, this is the exact 16422/1027 ratio.
@@ -1587,6 +1615,18 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
             ++it->second.uses;
         }
     };
+    auto note_planned_x0_row = [&](const rc::RCGkrSampledOperandProv& xprov, uint32_t row,
+                                   uint32_t d_model) {
+        if (xprov.x0_row_blocks) {
+            BOOST_REQUIRE_EQUAL(xprov.erows, p.b_seq);
+            BOOST_REQUIRE_EQUAL(xprov.ecols, d_model);
+            BOOST_REQUIRE_LT(row, p.b_seq);
+            note_planned_seed(rc::DeriveX0RowBlockSeed(xprov.seed, row / rc::kRCX0RowBlockRows),
+                              rc::kRCX0RowBlockRows, d_model);
+        } else {
+            note_planned_seed(xprov.seed, p.b_seq, d_model);
+        }
+    };
     for (uint32_t u : units) {
         const uint32_t li = sampleable[u];
         const auto& lp = prov[li];
@@ -1598,7 +1638,9 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
         } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
             const auto& up = prov[lp.a.src_idx];
             if (up.a.is_leaf) {
-                note_planned_seed(up.a.seed, p.b_seq, p.d_model);
+                for (const TilePlanBench& pl : TilePositionsBench(base_seed, li, lp.m, lp.n)) {
+                    note_planned_x0_row(up.a, pl.row, p.d_model);
+                }
             }
             note_planned_seed(up.b.seed, p.d_model, p.d_ff);
             note_planned_seed(lp.b.seed, p.d_ff, p.d_model);
@@ -1798,9 +1840,18 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 auto load_x_row = [&](const TilePlanBench& pl, std::vector<int8_t>& X_row) {
                     X_row.assign(d_model, 0);
                     if (xprov.is_leaf) {
-                        const std::vector<int8_t>& X0 = regen.find(xprov.seed)->second;
-                        std::copy_n(X0.data() + static_cast<size_t>(pl.row) * d_model, d_model,
-                                    X_row.data());
+                        if (xprov.x0_row_blocks) {
+                            const uint32_t block = pl.row / rc::kRCX0RowBlockRows;
+                            const uint32_t rel = pl.row % rc::kRCX0RowBlockRows;
+                            const std::vector<int8_t>& X0 =
+                                regen.find(rc::DeriveX0RowBlockSeed(xprov.seed, block))->second;
+                            std::copy_n(X0.data() + static_cast<size_t>(rel) * d_model, d_model,
+                                        X_row.data());
+                        } else {
+                            const std::vector<int8_t>& X0 = regen.find(xprov.seed)->second;
+                            std::copy_n(X0.data() + static_cast<size_t>(pl.row) * d_model, d_model,
+                                        X_row.data());
+                        }
                     } else {
                         for (uint32_t d = 0; d < d_model; ++d) {
                             X_row[d] = static_cast<int8_t>((pl.row + d + lp.layer) & 0x7f);
@@ -1964,9 +2015,19 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 std::vector<int8_t> X_row(d_model);
                 const auto& xprov = up.a;
                 if (xprov.is_leaf) {
-                    const std::vector<int8_t>& X0 = regen_leaf(xprov.seed, p.b_seq, d_model);
-                    std::copy_n(X0.data() + static_cast<size_t>(pl.row) * d_model, d_model,
-                                X_row.data());
+                    if (xprov.x0_row_blocks) {
+                        const uint32_t block = pl.row / rc::kRCX0RowBlockRows;
+                        const uint32_t rel = pl.row % rc::kRCX0RowBlockRows;
+                        const std::vector<int8_t>& X0 =
+                            regen_leaf(rc::DeriveX0RowBlockSeed(xprov.seed, block),
+                                       rc::kRCX0RowBlockRows, d_model);
+                        std::copy_n(X0.data() + static_cast<size_t>(rel) * d_model, d_model,
+                                    X_row.data());
+                    } else {
+                        const std::vector<int8_t>& X0 = regen_leaf(xprov.seed, p.b_seq, d_model);
+                        std::copy_n(X0.data() + static_cast<size_t>(pl.row) * d_model, d_model,
+                                    X_row.data());
+                    }
                 } else {
                     // In the real carrier this row is copied from a T_leaf
                     // committed activation leaf. Its values do not affect

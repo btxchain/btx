@@ -205,6 +205,7 @@ struct EpisodeAirLayer {
 struct EpisodeAirLeaf {
     uint256 seed{};         // public operand-expansion seed
     uint32_t rows{0}, cols{0};  // untransposed expansion dims (%32 == 0)
+    bool x0_row_blocks{false};  // datacenter Config W: seed derives 32-row X0 blocks
 };
 
 struct EpisodeAirGemmClaim {

@@ -7,6 +7,7 @@
 #include <crypto/common.h>
 #include <crypto/sha256.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
@@ -199,6 +200,39 @@ bool NativeExpandLeaf(const uint256& seed, uint32_t rows, uint32_t cols,
     return true;
 }
 
+bool NativeExpandEpisodeLeaf(const EpisodeAirLeaf& leaf, const gkr_air::TableTM& tm,
+                             LeafExpansion& out, std::string& why)
+{
+    if (!leaf.x0_row_blocks) return NativeExpandLeaf(leaf.seed, leaf.rows, leaf.cols, tm, out, why);
+    if (leaf.rows % kRCX0RowBlockRows != 0) {
+        why = "x0 row-block leaf rows not aligned";
+        return false;
+    }
+    const size_t count = static_cast<size_t>(leaf.rows) * leaf.cols;
+    out.val.assign(count, 0);
+    out.mu.assign(count, 0);
+    out.nib.assign(count, 0);
+    out.e.assign(count, 0);
+    out.n_xof_digests = 0;
+    const uint32_t n_blocks = leaf.rows / kRCX0RowBlockRows;
+    const size_t block_count = static_cast<size_t>(kRCX0RowBlockRows) * leaf.cols;
+    for (uint32_t b = 0; b < n_blocks; ++b) {
+        LeafExpansion ex;
+        if (!NativeExpandLeaf(DeriveX0RowBlockSeed(leaf.seed, b), kRCX0RowBlockRows,
+                              leaf.cols, tm, ex, why)) {
+            why = "x0 row-block: " + why;
+            return false;
+        }
+        const size_t off = static_cast<size_t>(b) * block_count;
+        std::copy(ex.val.begin(), ex.val.end(), out.val.begin() + off);
+        std::copy(ex.mu.begin(), ex.mu.end(), out.mu.begin() + off);
+        std::copy(ex.nib.begin(), ex.nib.end(), out.nib.begin() + off);
+        std::copy(ex.e.begin(), ex.e.end(), out.e.begin() + off);
+        out.n_xof_digests += ex.n_xof_digests;
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Public (verifier-regenerable) per-row data over the whole episode.
 // ---------------------------------------------------------------------------
@@ -251,7 +285,7 @@ bool BuildEpisodePublicData(const EpisodeAirLayout& layout, bool want_prover_dat
     for (size_t lf = 0; lf < layout.leaves.size(); ++lf) {
         const EpisodeAirLeaf& leaf = layout.leaves[lf];
         LeafExpansion ex;
-        if (!NativeExpandLeaf(leaf.seed, leaf.rows, leaf.cols, tm, ex, why)) return false;
+        if (!NativeExpandEpisodeLeaf(leaf, tm, ex, why)) return false;
         pub.n_xof_digests += ex.n_xof_digests;
         const uint64_t abs = rl.leaf_base[lf];
         const uint64_t rel = abs - rl.elem_total;

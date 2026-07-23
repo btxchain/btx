@@ -603,36 +603,6 @@ std::vector<TilePlan> TilePositions(const uint256& base_seed, uint32_t layer_ind
 // once per verify; each Λ seed is domain-separated so it maps to one shape).
 using RegenCache = std::map<uint256, std::vector<int8_t>>;
 using TransposeCache = std::map<uint256, std::vector<int8_t>>;
-// `tm` optional: when non-null, records regen time / cache hit-miss / bytes for the
-// production verify-cost split. Result bytes are identical either way.
-const std::vector<int8_t>& RegenLeaf(RegenCache& cache, const uint256& seed, uint32_t rows,
-                                     uint32_t cols, RCFreivaldsSampledTiming* tm = nullptr)
-{
-    auto it = cache.find(seed);
-    if (it != cache.end()) {
-        if (tm) ++tm->regen_hits;
-        return it->second;
-    }
-    if (tm) {
-        const auto t = std::chrono::steady_clock::now();
-        const std::vector<int8_t>& v =
-            cache.emplace(seed, ExpandMxDequantInt8(seed, rows, cols)).first->second;
-        tm->regen_s += Secs(t);
-        ++tm->regen_misses;
-        tm->regen_bytes += static_cast<uint64_t>(rows) * cols;
-        return v;
-    }
-    return cache.emplace(seed, ExpandMxDequantInt8(seed, rows, cols)).first->second;
-}
-
-const std::vector<int8_t>& TransposedLeaf(TransposeCache& cache, const uint256& seed,
-                                          const std::vector<int8_t>& src,
-                                          uint32_t rows, uint32_t cols)
-{
-    auto it = cache.find(seed);
-    if (it != cache.end()) return it->second;
-    return cache.emplace(seed, TransposeI8Local(src, rows, cols)).first->second;
-}
 
 uint32_t CarrierVerifyThreadCount(size_t jobs)
 {
@@ -1137,6 +1107,19 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
             ++seed_uses;
             return true;
         };
+        auto note_x0_row = [&](const RCGkrSampledOperandProv& xprov, uint32_t row,
+                               uint32_t d_model) -> bool {
+            if (!xprov.x0_row_blocks) {
+                return note_seed(xprov.seed, carrier.episode.b_seq, d_model);
+            }
+            if (xprov.erows != carrier.episode.b_seq || xprov.ecols != d_model ||
+                row >= carrier.episode.b_seq) {
+                return false;
+            }
+            const uint32_t block = row / kRCX0RowBlockRows;
+            return note_seed(DeriveX0RowBlockSeed(xprov.seed, block), kRCX0RowBlockRows,
+                             d_model);
+        };
 
         for (size_t j = 0; j < units.size(); ++j) {
             const uint32_t li = sampleable[units[j]];
@@ -1184,7 +1167,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     if (xprov.is_leaf) {
                         if (!tile.a_prf_regen || !tile.a_row_leaf.empty())
                             return fail("v7fs:down_l0_anchor");
-                        if (!note_seed(xprov.seed, carrier.episode.b_seq, d_model))
+                        if (!note_x0_row(xprov, tile.row, d_model))
                             return fail("v7fs:seed_shape");
                     } else {
                         if (tile.a_prf_regen) return fail("v7fs:down_anchor_flag");
@@ -1392,9 +1375,18 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                                           std::vector<int8_t>& X_row) -> bool {
                         X_row.assign(d_model, 0);
                         if (xprov.is_leaf) {
-                            const std::vector<int8_t>& X0 = get_seed(xprov.seed);
-                            for (uint32_t d = 0; d < d_model; ++d)
-                                X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
+                            if (xprov.x0_row_blocks) {
+                                const uint32_t block = tile.row / kRCX0RowBlockRows;
+                                const uint32_t rel = tile.row % kRCX0RowBlockRows;
+                                const std::vector<int8_t>& X0 =
+                                    get_seed(DeriveX0RowBlockSeed(xprov.seed, block));
+                                for (uint32_t d = 0; d < d_model; ++d)
+                                    X_row[d] = X0[static_cast<size_t>(rel) * d_model + d];
+                            } else {
+                                const std::vector<int8_t>& X0 = get_seed(xprov.seed);
+                                for (uint32_t d = 0; d < d_model; ++d)
+                                    X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
+                            }
                         } else {
                             std::string awhy;
                             const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
@@ -1516,187 +1508,6 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
         if (why) *why = tm.note;
         return true;
     }
-
-    const auto t_p = std::chrono::steady_clock::now();
-    const uint32_t t_leaf = carrier.episode.T_leaf;
-    const uint32_t T = kRCMxBlockLen;
-    RegenCache regen; // PRF operand expansions (weights + leaf activations), once per verify
-    TransposeCache transposed_w_up; // cached W_upᵀ for contiguous SDOT H-row recompute
-    for (size_t j = 0; j < units.size(); ++j) {
-        const uint32_t li = sampleable[units[j]];
-        const RCFreivaldsSampledLayer& e = carrier.sampled[j];
-        if (e.layer_index != li) return fail("v7fs:carrier_order");
-        if (li >= prov.size()) return fail("v7fs:carrier_layer_index");
-        const RCGkrSampledLayerProv& lp = prov[li];
-        if (!(e.kind == lp.kind && e.m == lp.m && e.n == lp.n && e.k == lp.k)) {
-            return fail("v7fs:carrier_layer_mismatch");
-        }
-        if (e.n % T != 0) return fail("v7fs:carrier_n_block");
-        if (e.round >= carrier.round_roots.size()) return fail("v7fs:round_index");
-        const uint64_t layer_off = LayerStreamOffset(carrier.episode, lp.kind, lp.layer);
-        // Recompute the FS output-tile plan — the miner cannot choose which output
-        // tiles are opened (FS coin is target-bound via base_seed).
-        const std::vector<TilePlan> plans = TilePositions(base_seed, li, e.m, e.n);
-        if (e.tiles.size() != plans.size()) return fail("v7fs:carrier_tile_count");
-        for (size_t ti = 0; ti < plans.size(); ++ti) {
-            const TilePlan& pl = plans[ti];
-            const RCFreivaldsSampledTile& tile = e.tiles[ti];
-            if (tile.row != pl.row || tile.bcol != pl.bcol) return fail("v7fs:carrier_tile_pos");
-            if (tile.extract_out.size() != T) return fail("v7fs:tile_shape");
-            if (tile.row >= e.m || tile.bcol >= e.n / T) return fail("v7fs:tile_range");
-
-            // ANCHORED RECOMPUTE (scratchpad/sound-carrier-design.md §4): recompute
-            // this tile's extract_out from anchored operands, then require it to
-            // equal the committed value opened against target-bound round_roots.
-            std::array<int8_t, kRCMxBlockLen> eo{};
-            if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
-                // SV: regen S row (QKt + Extract from Q,K), then S·V block + Extract.
-                if (!tile.a_prf_regen || !tile.a_row_leaf.empty()) return fail("v7fs:sv_anchor");
-                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:sv_qkt_src");
-                const RCGkrSampledLayerProv& qkt = prov[lp.a.src_idx];
-                if (qkt.kind != RCGkrLayerKind::GemmPhase1QKt) return fail("v7fs:sv_qkt_kind");
-                const uint32_t d_head = carrier.episode.d_head;
-                const uint32_t n_ctx = e.k; // == carrier.episode.n_ctx
-                if (n_ctx % T != 0) return fail("v7fs:sv_ctx_block");
-                const std::vector<int8_t>& Q =
-                    RegenLeaf(regen, qkt.a.seed, carrier.episode.n_q, d_head, &tm);
-                const std::vector<int8_t>& K = RegenLeaf(regen, qkt.b.seed, n_ctx, d_head, &tm);
-                const std::vector<int8_t>& V = RegenLeaf(regen, lp.b.seed, n_ctx, d_head, &tm);
-                const auto t_rc_sv = std::chrono::steady_clock::now();
-                // S row i (int8, n_ctx wide) = Extract(prf_S, Q[i]·Kᵀ).
-                std::vector<int8_t> S_row(n_ctx);
-                std::array<int64_t, kRCMxBlockLen> blk{};
-                for (uint32_t bt = 0; bt < n_ctx / T; ++bt) {
-                    for (uint32_t c = 0; c < T; ++c) {
-                        const uint32_t t = bt * T + c;
-                        int64_t acc = 0;
-                        for (uint32_t d = 0; d < d_head; ++d)
-                            acc += static_cast<int64_t>(Q[static_cast<size_t>(tile.row) * d_head + d]) *
-                                   static_cast<int64_t>(K[static_cast<size_t>(t) * d_head + d]);
-                        blk[c] = acc;
-                    }
-                    const auto so = ExtractBlock(qkt.extract_prf, tile.row, bt, blk.data());
-                    for (uint32_t c = 0; c < T; ++c) S_row[bt * T + c] = so[c];
-                }
-                // Y block = S_row · V[:, bcol-block], then Extract(prf_Z). No residual.
-                std::array<int64_t, kRCMxBlockLen> yblk{};
-                const uint32_t out_col0 = tile.bcol * T;
-                RCDenseRowBlockExactI8(S_row.data(), V.data(), n_ctx, d_head, out_col0,
-                                       yblk.data());
-                eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
-                tm.recompute_s += Secs(t_rc_sv);
-            } else {
-                // DOWN: H-row = Extract(X_row·W_up); Y-block = Extract(H_row·W_down + X_row).
-                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:down_a_src");
-                const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
-                if (up.kind != RCGkrLayerKind::GemmPhase2FfnUp) return fail("v7fs:down_up_kind");
-                const uint32_t d_model = e.n; // == carrier.episode.d_model
-                const uint32_t d_ff = e.k;    // == carrier.episode.d_ff
-                if (d_ff % T != 0) return fail("v7fs:down_ff_block");
-                if (d_model > t_leaf) return fail("v7fs:a_row_multileaf");
-                // Anchor X[l] row (d_model int8).
-                std::vector<int8_t> X_row(d_model);
-                const RCGkrSampledOperandProv& xprov = up.a;
-                if (xprov.is_leaf) {
-                    // l == 0: X0 PRF-regenerated (no committed leaf).
-                    if (!tile.a_prf_regen || !tile.a_row_leaf.empty())
-                        return fail("v7fs:down_l0_anchor");
-                    const std::vector<int8_t>& X0 =
-                        RegenLeaf(regen, xprov.seed, carrier.episode.b_seq, d_model, &tm);
-                    for (uint32_t d = 0; d < d_model; ++d)
-                        X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
-                } else {
-                    // l >= 1: open X[l] committed row from round_roots (one leaf).
-                    if (tile.a_prf_regen) return fail("v7fs:down_anchor_flag");
-                    if (xprov.src_idx >= prov.size()) return fail("v7fs:down_x_src");
-                    const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
-                    const uint64_t off_A = LayerStreamOffset(carrier.episode, src.kind, src.layer) +
-                                           static_cast<uint64_t>(tile.row) * d_model;
-                    if (tile.a_row_stream_offset != off_A) return fail("v7fs:a_off");
-                    const uint32_t a_leaf = static_cast<uint32_t>(off_A / t_leaf);
-                    if (tile.a_row_leaf_index != a_leaf) return fail("v7fs:a_leaf_index");
-                    if (tile.a_row_leaf.size() != t_leaf) return fail("v7fs:a_leaf_size");
-                    const uint64_t rel = off_A - static_cast<uint64_t>(a_leaf) * t_leaf;
-                    if (rel + d_model > t_leaf) return fail("v7fs:a_row_span");
-                    for (uint32_t d = 0; d < d_model; ++d)
-                        X_row[d] = static_cast<int8_t>(tile.a_row_leaf[rel + d]);
-                    std::string awhy;
-                    const auto t_mk = std::chrono::steady_clock::now();
-                    const bool a_ok = CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
-                                           carrier.round_roots[e.round], t_leaf, off_A, X_row, awhy);
-                    tm.merkle_s += Secs(t_mk);
-                    if (!a_ok) return fail(awhy);
-                    tm.n_merkle_hashes += tile.a_row_proof.siblings.size();
-                    ++tm.n_merkle_openings;
-                }
-                const std::vector<int8_t>& W_up = RegenLeaf(regen, up.b.seed, d_model, d_ff, &tm);
-                const std::vector<int8_t>& W_down = RegenLeaf(regen, lp.b.seed, d_ff, d_model, &tm);
-                const auto t_rc_dn = std::chrono::steady_clock::now();
-                const std::vector<int8_t>& W_up_t =
-                    TransposedLeaf(transposed_w_up, up.b.seed, W_up, d_model, d_ff);
-                // H-row = Extract(X_row·W_up) over the full d_ff width.
-                std::vector<int8_t> H_row(d_ff);
-                std::array<int64_t, kRCMxBlockLen> blk{};
-                for (uint32_t bj = 0; bj < d_ff / T; ++bj) {
-                    const uint32_t col0 = bj * T;
-                    RCDenseRowBlockTransposedExactI8(X_row.data(), W_up_t.data(), d_model,
-                                                     d_ff, col0, blk.data());
-                    const auto ho = ExtractBlock(up.extract_prf, tile.row, bj, blk.data());
-                    for (uint32_t c = 0; c < T; ++c) H_row[bj * T + c] = ho[c];
-                }
-                // Y-block = Extract(H_row·W_down[:,bcol] + X_row[bcol]) (residual +X[l]).
-                std::array<int64_t, kRCMxBlockLen> yblk{};
-                const uint32_t out_col0 = tile.bcol * T;
-                RCDenseRowBlockExactI8(H_row.data(), W_down.data(), d_ff, d_model, out_col0,
-                                       yblk.data());
-                for (uint32_t c = 0; c < T; ++c) {
-                    yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]); // residual +X[l] (H5)
-                }
-                eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
-                tm.recompute_s += Secs(t_rc_dn);
-            }
-            // The recomputed extract_out must equal the relayed tile.extract_out.
-            for (uint32_t c = 0; c < T; ++c)
-                if (eo[c] != tile.extract_out[c]) return fail("v7fs:recompute_mismatch");
-            ++tm.n_extract_tiles;
-            ++tm.n_freivalds_calls;
-
-            // (a) open extract_out block against round_roots (binds it to target).
-            const uint64_t off_expect = layer_off + static_cast<uint64_t>(tile.row) * e.n +
-                                        static_cast<uint64_t>(tile.bcol) * T;
-            if (tile.stream_offset != off_expect) return fail("v7fs:carrier_offset");
-            const uint32_t first_leaf = static_cast<uint32_t>(off_expect / t_leaf);
-            const uint32_t last_leaf = static_cast<uint32_t>((off_expect + T - 1) / t_leaf);
-            if (tile.first_leaf != first_leaf) return fail("v7fs:carrier_first_leaf");
-            const uint32_t n_leaves = last_leaf - first_leaf + 1;
-            if (tile.leaf_bytes.size() != n_leaves || tile.leaf_proofs.size() != n_leaves) {
-                return fail("v7fs:carrier_leaf_count");
-            }
-            for (uint32_t x = 0; x < n_leaves; ++x) {
-                const uint32_t lf = first_leaf + x;
-                std::string owhy;
-                const auto t_mk2 = std::chrono::steady_clock::now();
-                const bool eo_ok = CheckCoveringLeaf(tile.leaf_bytes[x], lf, tile.leaf_proofs[x],
-                                       carrier.round_roots[e.round], t_leaf, off_expect,
-                                       tile.extract_out, owhy);
-                tm.merkle_s += Secs(t_mk2);
-                if (!eo_ok) {
-                    return fail(owhy);
-                }
-                tm.n_merkle_hashes += tile.leaf_proofs[x].siblings.size();
-                ++tm.n_merkle_openings;
-            }
-        }
-        ++tm.n_layers_checked;
-    }
-    tm.perlayer_s = Secs(t_p);
-    tm.ok = true;
-    tm.total_s = Secs(t0);
-    tm.note = "v7fs anchored carrier: " + std::to_string(tm.n_layers_checked) + "/" +
-              std::to_string(tm.n_units_total) + " layers recomputed from anchored operands";
-    if (out_timing) *out_timing = tm;
-    if (why) *why = tm.note;
-    return true;
 }
 
 // ===========================================================================

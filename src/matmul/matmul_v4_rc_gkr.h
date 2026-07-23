@@ -694,6 +694,7 @@ struct RCGkrSampledOperandProv {
     uint32_t erows{0}, ecols{0}; // untransposed operand dims
     size_t src_idx{0};         // chained: producing layer index (valid iff !is_leaf)
     bool transpose{false};     // operand = transpose(source/leaf expansion)
+    bool x0_row_blocks{false}; // leaf uses datacenter Config W 32-row X0 block seeds
 };
 
 /** Per-layer provenance the sampled verifier needs (public, verifier-derivable

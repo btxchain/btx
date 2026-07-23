@@ -149,11 +149,6 @@ bool RCEpisodeParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
            a.T_leaf == b.T_leaf;
 }
 
-bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p)
-{
-    return RCEpisodeParamsEqual(p, MakeDatacenterRCEpisodeParams());
-}
-
 void RCGkrProofCacheEvictExpiredLocked(const std::chrono::steady_clock::time_point now)
 {
     for (auto it = g_rc_gkr_proof_cache.begin(); it != g_rc_gkr_proof_cache.end();) {
@@ -787,7 +782,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         // Config W: X0 is the PER-ROUND freshness source — operand() keys off seed_r
         // (chained via round_roots[r-1]), so each round starts from a distinct chain-bound
         // state. This is what lets the FFN weights be shared EPISODE-WIDE below.
-        X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
+        X[0] = ExpandX0ForEpisode(operand("BTX_RC_X0_V1"), p);
         // Config W (datacenter): FFN weights SHARED EPISODE-WIDE — operand_ep() keys off
         // sigma, so ONE (W_up, W_down) serves every round AND every layer. Fable-proven
         // shortcut-free: with X0 the per-round freshness source, reusing one weight pair
@@ -1541,6 +1536,7 @@ struct TensorRef {
     uint32_t erows{0}, ecols{0};  // untransposed leaf/extract dims
     size_t src_idx{0};            // chained: producing layer index
     bool transpose{false};        // operand = transpose(tensor)
+    bool x0_row_blocks{false};     // datacenter Config W X0: seed derives 32-row blocks
 };
 
 struct LayerProv {
@@ -1596,8 +1592,10 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
         // the sampled rows of X0 and checks them against seed_r → the anti-collision chain
         // is verified for free.
         auto X_tensor = [&](uint32_t l, bool tr) {
-            return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
-                            : chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
+            if (l != 0) return chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
+            TensorRef t = leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr);
+            t.x0_row_blocks = UseDatacenterRowBlockX0(p);
+            return t;
         };
         // Config W: datacenter FFN weights are SHARED EPISODE-WIDE — operand_ep() keys off
         // sigma, so ONE (W_up, W_down) serves every round and layer, and the sampled
@@ -1747,10 +1745,30 @@ bool BindOperand(const TensorRef& ref, const std::vector<int8_t>& committed, uin
         if (cand.size() != static_cast<size_t>(ref.erows) * ref.ecols) {
             why = "mxexpand:leaf_dims"; return false;
         }
-        const gkr_air::MxExpandVerifyResult mr =
-            gkr_air::VerifyMxExpandColumn(ref.seed, ref.erows, ref.ecols, cand, tm, gamma, inst_tm);
-        n_sha += mr.n_mantissa_blocks + mr.n_scale_blocks;
-        if (!mr.ok) { why = mr.failure; return false; }
+        if (ref.x0_row_blocks) {
+            if (ref.erows % kRCX0RowBlockRows != 0) {
+                why = "mxexpand:x0_rowblock_rows"; return false;
+            }
+            const uint32_t n_blocks = ref.erows / kRCX0RowBlockRows;
+            std::vector<int8_t> slice(static_cast<size_t>(kRCX0RowBlockRows) * ref.ecols);
+            for (uint32_t b = 0; b < n_blocks; ++b) {
+                for (uint32_t r = 0; r < kRCX0RowBlockRows; ++r) {
+                    const size_t src = (static_cast<size_t>(b) * kRCX0RowBlockRows + r) * ref.ecols;
+                    const size_t dst = static_cast<size_t>(r) * ref.ecols;
+                    std::copy_n(cand.data() + src, ref.ecols, slice.data() + dst);
+                }
+                const gkr_air::MxExpandVerifyResult mr = gkr_air::VerifyMxExpandColumn(
+                    DeriveX0RowBlockSeed(ref.seed, b), kRCX0RowBlockRows, ref.ecols, slice, tm,
+                    gamma, inst_tm);
+                n_sha += mr.n_mantissa_blocks + mr.n_scale_blocks;
+                if (!mr.ok) { why = "x0_rowblock:" + mr.failure; return false; }
+            }
+        } else {
+            const gkr_air::MxExpandVerifyResult mr =
+                gkr_air::VerifyMxExpandColumn(ref.seed, ref.erows, ref.ecols, cand, tm, gamma, inst_tm);
+            n_sha += mr.n_mantissa_blocks + mr.n_scale_blocks;
+            if (!mr.ok) { why = mr.failure; return false; }
+        }
         return true;
     }
     // Chained: operand equals (transpose of) the source layer's extract_out.
@@ -2017,6 +2035,7 @@ std::vector<RCGkrSampledLayerProv> RCGkrEpisodeLayerProvenance(
         o.ecols = t.ecols;
         o.src_idx = t.src_idx;
         o.transpose = t.transpose;
+        o.x0_row_blocks = t.x0_row_blocks;
         return o;
     };
     for (const LayerProv& lp : prov) {
@@ -2957,6 +2976,7 @@ bool BuildEpisodeAirInputsV7(const RCGkrProofV7& proof, const CBlockHeader& head
             leaf.seed = ref.seed;
             leaf.rows = ref.erows;
             leaf.cols = ref.ecols;
+            leaf.x0_row_blocks = ref.x0_row_blocks;
             layout.leaves.push_back(leaf);
             if (wit != nullptr) {
                 wit->leaf_committed.push_back(

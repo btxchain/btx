@@ -41,6 +41,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <set>
 #include <string>
@@ -89,6 +90,38 @@ bool AllInM11(const std::vector<int8_t>& v)
     }
     return true;
 }
+
+class ScopedEnvVar
+{
+public:
+    ScopedEnvVar(const char* name, const char* value) : m_name(name)
+    {
+        const char* current = std::getenv(name);
+        if (current != nullptr) {
+            m_had_original = true;
+            m_original = current;
+        }
+        if (value != nullptr) {
+            ::setenv(name, value, /*overwrite=*/1);
+        } else {
+            ::unsetenv(name);
+        }
+    }
+
+    ~ScopedEnvVar()
+    {
+        if (m_had_original) {
+            ::setenv(m_name, m_original.c_str(), /*overwrite=*/1);
+        } else {
+            ::unsetenv(m_name);
+        }
+    }
+
+private:
+    const char* m_name;
+    bool m_had_original{false};
+    std::string m_original;
+};
 
 } // namespace
 
@@ -880,6 +913,16 @@ BOOST_AUTO_TEST_CASE(portable_xof_matches_streaming)
         bx::ExpandMantissaStreamParallel(seed, n, r.data(), /*threads=*/4);
         BOOST_CHECK(p == q);
         BOOST_CHECK(p == r);
+    }
+    for (const char* cache_hashes : {"0", "1"}) {
+        const ScopedEnvVar cache_env{"BTX_BMX4_PARALLEL_CACHE_HASHES", cache_hashes};
+        const ScopedEnvVar undershoot_env{"BTX_BMX4_PARALLEL_FORCE_UNDERSHOOT", "1"};
+        for (size_t n : {(size_t{1} << 20) + 33'333, size_t{2'000'003}}) {
+            std::vector<int8_t> p(n), q(n);
+            bx::ExpandMantissaStream(seed, n, p.data());
+            bx::ExpandMantissaStreamParallel(seed, n, q.data(), /*threads=*/8);
+            BOOST_CHECK(p == q);
+        }
     }
 
     std::vector<uint8_t> sa(512), sb(512);
