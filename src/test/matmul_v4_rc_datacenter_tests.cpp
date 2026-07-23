@@ -9,7 +9,9 @@
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
+#include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
+#include <matmul/matmul_v4_rc_fri_ext3.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_streamed_strategy.h>
@@ -27,12 +29,16 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
+#include <map>
 #include <optional>
 #include <set>
 #include <string>
@@ -933,7 +939,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
     BOOST_CHECK_EQUAL(dc.L_lyr, rc::kRCLayersDC);
     BOOST_CHECK_EQUAL(dc.L_lyr, 24u);
     BOOST_CHECK_EQUAL(dc.b_seq, rc::kRCBatchSeqDC);
-    BOOST_CHECK_EQUAL(dc.b_seq, 32768u);
+    BOOST_CHECK_EQUAL(dc.b_seq, 87552u);
     // Intensive dims held at epoch-0 values.
     BOOST_CHECK_EQUAL(dc.d_head, 128u);
     BOOST_CHECK_EQUAL(dc.n_q, 512u);
@@ -950,20 +956,22 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
 }
 
 // (b) TotalRCEpisodeMacs(datacenter) equals the fused profile's absolute
-//     8.45e14 MAC figure (1.69e15 FLOP). With base d_ff=4·d_model and
-//     datacenter L=24, this is ~6× the fused base (not ~16× the old 3-GEMM base).
+//     2.257e15 MAC figure (4.514e15 FLOP). With base d_ff=4·d_model and the
+//     datacenter b_seq lever raised to 87552, this is the exact 16422/1027 ratio.
 BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_mac_ratio)
 {
     const uint64_t base_macs = rc::TotalRCEpisodeMacs(rc::DefaultConsensusRCEpisodeParams());
     const uint64_t dc_macs = rc::TotalRCEpisodeMacs(rc::MakeDatacenterRCEpisodeParams());
     BOOST_CHECK_EQUAL(base_macs, 141149805215744ull);  // 1.41e14
-    BOOST_CHECK_EQUAL(dc_macs, 845249563852800ull);    // 8.45e14
+    BOOST_CHECK_EQUAL(dc_macs, 2257022493917184ull);   // 2.257e15
     const double ratio = static_cast<double>(dc_macs) / static_cast<double>(base_macs);
     BOOST_TEST_MESSAGE("fused datacenter/base MAC ratio: " << ratio);
-    BOOST_CHECK_GT(ratio, 5.9);
-    BOOST_CHECK_LT(ratio, 6.1);
+    BOOST_CHECK_GT(ratio, 15.9);
+    BOOST_CHECK_LT(ratio, 16.0);
+    BOOST_CHECK_EQUAL(dc_macs / 137438953472ull, 16422ull); // 2^37 factor
+    BOOST_CHECK_EQUAL(base_macs / 137438953472ull, 1027ull);
     // FLOP = 2× MAC.
-    BOOST_CHECK_EQUAL(2ull * dc_macs, 1690499127705600ull); // 1.69e15
+    BOOST_CHECK_EQUAL(2ull * dc_macs, 4514044987834368ull); // 4.514e15
 }
 
 // (c) ADDITIVE GUARD: profile 1 (default) resolver output is byte-identical to
@@ -1051,10 +1059,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_regtest_profile2_activation)
     BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(reg, 150), dc));
     BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(reg, 5000), dc));
 
-    // Regtest activation also couples the ~16× ASERT loosen to the datacenter
-    // profile + finite height (design §5).
-    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16);
-    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1);
+    // Regtest activation also couples the exact 16422/1027 ASERT loosen to the
+    // datacenter profile + finite height (design §5).
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16422);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1027);
 
     // Default regtest (no override) keeps the network-wide default profile 2 but
     // the RC family stays OFF (height INT32_MAX), so nothing activates.
@@ -1264,7 +1272,395 @@ bool BuildToyCarrier(const CBlockHeader& header, const rc::RCEpisodeParams& para
     std::string why;
     return rc::BuildFreivaldsSampledCarrier(pr.proof, header, height, target, out, &why);
 }
+
+bool LayerInStreamBench(rc::RCGkrLayerKind k)
+{
+    return k == rc::RCGkrLayerKind::GemmPhase1SV || k == rc::RCGkrLayerKind::GemmPhase2Fwd;
+}
+
+uint64_t LayerStreamOffsetBench(const rc::RCEpisodeParams& p, rc::RCGkrLayerKind kind,
+                                uint32_t layer)
+{
+    const uint64_t z = static_cast<uint64_t>(p.n_q) * p.d_head;
+    const uint64_t per_l = static_cast<uint64_t>(p.b_seq) * p.d_model;
+    if (kind == rc::RCGkrLayerKind::GemmPhase1SV) return 0;
+    if (kind == rc::RCGkrLayerKind::GemmPhase2Fwd) return z + static_cast<uint64_t>(layer) * per_l;
+    return 0;
+}
+
+void PutLE32Bench(unsigned char* p, uint32_t v)
+{
+    p[0] = static_cast<unsigned char>(v & 0xff);
+    p[1] = static_cast<unsigned char>((v >> 8) & 0xff);
+    p[2] = static_cast<unsigned char>((v >> 16) & 0xff);
+    p[3] = static_cast<unsigned char>((v >> 24) & 0xff);
+}
+
+uint64_t SegPosU64Bench(const uint256& base_seed, uint32_t layer_index, uint32_t counter)
+{
+    constexpr size_t kTagLen = sizeof(rc::kRCFreivaldsSegPosTag) - 1;
+    std::vector<unsigned char> buf(kTagLen + 32 + 8);
+    std::memcpy(buf.data(), rc::kRCFreivaldsSegPosTag, kTagLen);
+    std::memcpy(buf.data() + kTagLen, base_seed.data(), 32);
+    PutLE32Bench(buf.data() + kTagLen + 32, layer_index);
+    PutLE32Bench(buf.data() + kTagLen + 36, counter);
+    const uint256 h = rc::Sha256dBytes(buf.data(), buf.size());
+    uint64_t v = 0;
+    for (int b = 0; b < 8; ++b) v |= static_cast<uint64_t>(h.data()[b]) << (8 * b);
+    return v;
+}
+
+struct TilePlanBench {
+    uint32_t row{0};
+    uint32_t bcol{0};
+};
+
+std::vector<TilePlanBench> TilePositionsBench(const uint256& base_seed, uint32_t layer_index,
+                                              uint32_t m, uint32_t n)
+{
+    std::vector<TilePlanBench> plans;
+    if (m == 0 || n < rc::kRCMxBlockLen) return plans;
+    const uint32_t n_blocks = n / rc::kRCMxBlockLen;
+    const uint64_t tile_space = static_cast<uint64_t>(m) * n_blocks;
+    const uint32_t want =
+        static_cast<uint32_t>(std::min<uint64_t>(rc::kRCFreivaldsSegOutTiles, tile_space));
+    std::vector<uint64_t> seen;
+    uint32_t ctr = 0;
+    const uint32_t max_iters = (want + 8u) * 64u + 4096u;
+    while (plans.size() < want && ctr < max_iters) {
+        const uint64_t t = SegPosU64Bench(base_seed, layer_index, ctr++);
+        const uint32_t row = static_cast<uint32_t>(t % m);
+        const uint32_t bcol = static_cast<uint32_t>((t / m) % n_blocks);
+        const uint64_t key = (static_cast<uint64_t>(row) << 32) | bcol;
+        if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
+        seen.push_back(key);
+        plans.push_back(TilePlanBench{row, bcol});
+    }
+    return plans;
+}
+
+std::array<int8_t, rc::kRCMxBlockLen> ExtractBlockBench(const uint256& prf, uint32_t i,
+                                                        uint32_t bj, const int64_t* acc_block)
+{
+    std::array<int8_t, rc::kRCMxBlockLen> out{};
+    rc::ExtractMXTileInt64(prf, i, bj, acc_block, out.data());
+    return out;
+}
+
+uint32_t PaddedLeafDepthBench(uint64_t stream_bytes, uint32_t t_leaf)
+{
+    uint64_t n = std::max<uint64_t>(1, (stream_bytes + t_leaf - 1) / t_leaf);
+    uint32_t depth = 0;
+    uint64_t p = 1;
+    while (p < n) {
+        p <<= 1;
+        ++depth;
+    }
+    return depth;
+}
+
+std::vector<uint32_t> SampleableIndicesBench(const std::vector<rc::RCGkrSampledLayerProv>& prov)
+{
+    std::vector<uint32_t> out;
+    for (uint32_t i = 0; i < prov.size(); ++i) {
+        if (LayerInStreamBench(prov[i].kind)) out.push_back(i);
+    }
+    return out;
+}
+
+struct ProdCarrierBenchReport {
+    bool stopped_at_budget{false};
+    double total_s{0.0};
+    uint32_t units_total{0};
+    uint32_t sampled_total{0};
+    uint32_t first_layer_index{0};
+    uint32_t first_layer_kind{0};
+    uint32_t first_m{0};
+    uint32_t first_n{0};
+    uint32_t first_k{0};
+    uint32_t layers_checked{0};
+    uint64_t extract_tiles{0};
+    uint32_t merkle_openings{0};
+    uint64_t merkle_hashes{0};
+    size_t carrier_bytes{0};
+    uint32_t tree_depth{0};
+    uint64_t regen_misses{0};
+    uint64_t regen_hits{0};
+    uint64_t regen_bytes{0};
+    uint64_t planned_regen_bytes_full{0};
+    uint64_t checksum{0};
+};
+
+ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
+{
+    ProdCarrierBenchReport rep;
+    constexpr int32_t kHeight = 10;
+    Consensus::Params consensus = MakeRCActiveParams(/*profile=*/2);
+    consensus.fMatMulRCUseToyDims = false;
+    CBlockHeader header = MakeDcRCHeader(0xBEEFCACE);
+    header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+    header.nBits = UintToArith256(consensus.powLimit).GetCompact();
+    const auto target = DeriveTarget(header.nBits, consensus.powLimit);
+    BOOST_REQUIRE(target.has_value());
+    const rc::RCEpisodeParams p = rc::ResolveRCEpisodeParams(consensus, kHeight);
+    BOOST_REQUIRE(RCEpisodeParamsEqual(p, rc::MakeDatacenterRCEpisodeParams()));
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    std::vector<uint256> round_roots(p.rounds);
+    uint256 prev = sigma;
+    for (uint32_t r = 0; r < p.rounds; ++r) {
+        round_roots[r] = rc::RCGkrRoundSeed(prev, 0xC0FFEEu + r);
+        prev = round_roots[r];
+    }
+    const uint256 digest = rc::RCGkrEpisodeDigestFromRoots(round_roots);
+    header.matmul_digest = digest;
+    const uint256 pow_bind = rc::RCGkrDerivePowBind(digest);
+    std::vector<uint256> round_seeds(p.rounds);
+    for (uint32_t r = 0; r < p.rounds; ++r) {
+        round_seeds[r] = rc::RCGkrRoundSeed(r == 0 ? sigma : round_roots[r - 1], r);
+    }
+    const uint256 base_seed =
+        rc::RCGkrFsSeedV7(header, kHeight, p, *target, digest, sigma, round_roots);
+    const std::vector<rc::RCGkrSampledLayerProv> prov =
+        rc::RCGkrEpisodeLayerProvenance(header, p, round_roots);
+    const std::vector<uint32_t> sampleable = SampleableIndicesBench(prov);
+    const std::vector<uint32_t> units =
+        rc::FreivaldsSampleLayers(base_seed, static_cast<uint32_t>(sampleable.size()),
+                                  rc::kRCFreivaldsSampleCount);
+    rep.units_total = static_cast<uint32_t>(sampleable.size());
+    rep.sampled_total = static_cast<uint32_t>(units.size());
+
+    const uint64_t round_stream_bytes =
+        static_cast<uint64_t>(p.n_q) * p.d_head +
+        static_cast<uint64_t>(p.L_lyr) * p.b_seq * p.d_model;
+    rep.tree_depth = PaddedLeafDepthBench(round_stream_bytes, p.T_leaf);
+
+    // Skeleton carrier with production dimensions and production proof/path
+    // cardinalities. It is only used to measure byte size; the compute loop
+    // below executes the same production-shape PRF/GEMM/Extract work as the
+    // verifier and stops as soon as the 0.9s budget is exceeded.
+    rc::RCFreivaldsSampledCarrier skeleton;
+    skeleton.version = rc::kRCFreivaldsSampledCarrierVersion;
+    skeleton.episode = p;
+    skeleton.height = kHeight;
+    skeleton.claimed_digest = digest;
+    skeleton.pow_bind = pow_bind;
+    skeleton.episode_sigma = sigma;
+    skeleton.round_roots = round_roots;
+    skeleton.round_seeds = round_seeds;
+    skeleton.lambda = rc::kRCFreivaldsSampleCount;
+    for (uint32_t u : units) {
+        const uint32_t li = sampleable[u];
+        const auto& lp = prov[li];
+        rc::RCFreivaldsSampledLayer e;
+        e.layer_index = li;
+        e.round = lp.round;
+        e.kind = lp.kind;
+        e.m = lp.m;
+        e.n = lp.n;
+        e.k = lp.k;
+        for (const TilePlanBench& pl : TilePositionsBench(base_seed, li, lp.m, lp.n)) {
+            rc::RCFreivaldsSampledTile t;
+            t.row = pl.row;
+            t.bcol = pl.bcol;
+            t.extract_out.assign(rc::kRCMxBlockLen, 0);
+            t.stream_offset = LayerStreamOffsetBench(p, lp.kind, lp.layer) +
+                              static_cast<uint64_t>(pl.row) * lp.n +
+                              static_cast<uint64_t>(pl.bcol) * rc::kRCMxBlockLen;
+            t.first_leaf = static_cast<uint32_t>(t.stream_offset / p.T_leaf);
+            t.leaf_bytes.emplace_back(p.T_leaf, 0);
+            t.leaf_proofs.emplace_back();
+            t.leaf_proofs.back().siblings.resize(rep.tree_depth);
+            ++rep.merkle_openings;
+            rep.merkle_hashes += rep.tree_depth;
+            if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd && lp.layer > 0) {
+                t.a_row_leaf.assign(p.T_leaf, 0);
+                t.a_row_proof.siblings.resize(rep.tree_depth);
+                ++rep.merkle_openings;
+                rep.merkle_hashes += rep.tree_depth;
+            } else {
+                t.a_prf_regen = true;
+            }
+            e.tiles.push_back(std::move(t));
+        }
+        skeleton.sampled.push_back(std::move(e));
+    }
+    std::vector<unsigned char> wire;
+    rc::SerializeRCFreivaldsCarrier(skeleton, wire);
+    rep.carrier_bytes = wire.size();
+
+    rep.planned_regen_bytes_full =
+        static_cast<uint64_t>(p.rounds) *
+        (static_cast<uint64_t>(p.n_q) * p.d_head +
+         2ull * static_cast<uint64_t>(p.n_ctx) * p.d_head +
+         static_cast<uint64_t>(p.b_seq) * p.d_model +
+         2ull * static_cast<uint64_t>(p.L_lyr) * p.d_model * p.d_ff);
+
+    std::map<uint256, std::vector<int8_t>> regen;
+    auto regen_leaf = [&](const uint256& seed, uint32_t rows, uint32_t cols) -> const std::vector<int8_t>& {
+        auto it = regen.find(seed);
+        if (it != regen.end()) {
+            ++rep.regen_hits;
+            return it->second;
+        }
+        ++rep.regen_misses;
+        rep.regen_bytes += static_cast<uint64_t>(rows) * cols;
+        return regen.emplace(seed, rc::ExpandMxDequantInt8(seed, rows, cols)).first->second;
+    };
+    auto elapsed = [&](std::chrono::steady_clock::time_point t0) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
+    const bool full = std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH_FULL") != nullptr;
+    const auto t0 = std::chrono::steady_clock::now();
+    for (uint32_t u : units) {
+        const uint32_t li = sampleable[u];
+        const auto& lp = prov[li];
+        if (rep.layers_checked == 0) {
+            rep.first_layer_index = li;
+            rep.first_layer_kind = static_cast<uint32_t>(lp.kind);
+            rep.first_m = lp.m;
+            rep.first_n = lp.n;
+            rep.first_k = lp.k;
+        }
+        for (const TilePlanBench& pl : TilePositionsBench(base_seed, li, lp.m, lp.n)) {
+            std::array<int8_t, rc::kRCMxBlockLen> eo{};
+            if (lp.kind == rc::RCGkrLayerKind::GemmPhase1SV) {
+                const auto& qkt = prov[lp.a.src_idx];
+                const uint32_t d_head = p.d_head;
+                const uint32_t n_ctx = lp.k;
+                const std::vector<int8_t>& Q = regen_leaf(qkt.a.seed, p.n_q, d_head);
+                const std::vector<int8_t>& K = regen_leaf(qkt.b.seed, n_ctx, d_head);
+                const std::vector<int8_t>& V = regen_leaf(lp.b.seed, n_ctx, d_head);
+                std::vector<int8_t> S_row(n_ctx);
+                std::array<int64_t, rc::kRCMxBlockLen> blk{};
+                for (uint32_t bt = 0; bt < n_ctx / rc::kRCMxBlockLen; ++bt) {
+                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                        const uint32_t t = bt * rc::kRCMxBlockLen + c;
+                        int64_t acc = 0;
+                        for (uint32_t d = 0; d < d_head; ++d) {
+                            acc += static_cast<int64_t>(Q[static_cast<size_t>(pl.row) * d_head + d]) *
+                                   static_cast<int64_t>(K[static_cast<size_t>(t) * d_head + d]);
+                        }
+                        blk[c] = acc;
+                    }
+                    const auto so = ExtractBlockBench(qkt.extract_prf, pl.row, bt, blk.data());
+                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
+                        S_row[bt * rc::kRCMxBlockLen + c] = so[c];
+                }
+                std::array<int64_t, rc::kRCMxBlockLen> yblk{};
+                for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                    const uint32_t col = pl.bcol * rc::kRCMxBlockLen + c;
+                    int64_t acc = 0;
+                    for (uint32_t t = 0; t < n_ctx; ++t) {
+                        acc += static_cast<int64_t>(S_row[t]) *
+                               static_cast<int64_t>(V[static_cast<size_t>(t) * d_head + col]);
+                    }
+                    yblk[c] = acc;
+                }
+                eo = ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
+            } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
+                const auto& up = prov[lp.a.src_idx];
+                const uint32_t d_model = lp.n;
+                const uint32_t d_ff = lp.k;
+                std::vector<int8_t> X_row(d_model);
+                const auto& xprov = up.a;
+                if (xprov.is_leaf) {
+                    const std::vector<int8_t>& X0 = regen_leaf(xprov.seed, p.b_seq, d_model);
+                    std::copy_n(X0.data() + static_cast<size_t>(pl.row) * d_model, d_model,
+                                X_row.data());
+                } else {
+                    // In the real carrier this row is copied from a T_leaf
+                    // committed activation leaf. Its values do not affect
+                    // verifier cost; the copy shape is the load-bearing part.
+                    for (uint32_t d = 0; d < d_model; ++d) {
+                        X_row[d] = static_cast<int8_t>((pl.row + d + lp.layer) & 0x7f);
+                    }
+                }
+                const std::vector<int8_t>& W_up = regen_leaf(up.b.seed, d_model, d_ff);
+                const std::vector<int8_t>& W_down = regen_leaf(lp.b.seed, d_ff, d_model);
+                std::vector<int8_t> H_row(d_ff);
+                std::array<int64_t, rc::kRCMxBlockLen> blk{};
+                for (uint32_t bj = 0; bj < d_ff / rc::kRCMxBlockLen; ++bj) {
+                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                        const uint32_t col = bj * rc::kRCMxBlockLen + c;
+                        int64_t acc = 0;
+                        for (uint32_t d = 0; d < d_model; ++d) {
+                            acc += static_cast<int64_t>(X_row[d]) *
+                                   static_cast<int64_t>(W_up[static_cast<size_t>(d) * d_ff + col]);
+                        }
+                        blk[c] = acc;
+                    }
+                    const auto ho = ExtractBlockBench(up.extract_prf, pl.row, bj, blk.data());
+                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
+                        H_row[bj * rc::kRCMxBlockLen + c] = ho[c];
+                }
+                std::array<int64_t, rc::kRCMxBlockLen> yblk{};
+                for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                    const uint32_t col = pl.bcol * rc::kRCMxBlockLen + c;
+                    int64_t acc = 0;
+                    for (uint32_t t = 0; t < d_ff; ++t) {
+                        acc += static_cast<int64_t>(H_row[t]) *
+                               static_cast<int64_t>(W_down[static_cast<size_t>(t) * d_model + col]);
+                    }
+                    acc += static_cast<int64_t>(X_row[col]);
+                    yblk[c] = acc;
+                }
+                eo = ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
+            }
+            for (int8_t v : eo) rep.checksum = rep.checksum * 131u + static_cast<unsigned char>(v);
+            ++rep.extract_tiles;
+        }
+        ++rep.layers_checked;
+        rep.total_s = elapsed(t0);
+        if (!full && rep.total_s > 0.900) {
+            rep.stopped_at_budget = true;
+            break;
+        }
+    }
+    rep.total_s = elapsed(t0);
+    return rep;
+}
 } // namespace
+
+// Off-CI production-shape verifier compute benchmark. This deliberately remains
+// opt-in because it executes production-dimension PRF/GEMM/Extract verifier work.
+// Normal test runs only prove the benchmark is compiled and available.
+BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
+{
+    if (std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH") == nullptr) {
+        BOOST_TEST_MESSAGE("production carrier verify compute benchmark skipped; set BTX_RC_PROD_CARRIER_VERIFY_BENCH=1");
+        BOOST_CHECK(true);
+        return;
+    }
+
+    const auto rep = RunProductionCarrierVerifierComputeBench();
+    BOOST_TEST_MESSAGE("production carrier verify compute benchmark: total_ms="
+                       << (rep.total_s * 1000.0)
+                       << " budget_ms=900"
+                       << " stopped_at_budget=" << (rep.stopped_at_budget ? 1 : 0)
+                       << " units_total=" << rep.units_total
+                       << " sampled_total=" << rep.sampled_total
+                       << " first_layer_index=" << rep.first_layer_index
+                       << " first_layer_kind=" << rep.first_layer_kind
+                       << " first_m=" << rep.first_m
+                       << " first_n=" << rep.first_n
+                       << " first_k=" << rep.first_k
+                       << " layers_checked=" << rep.layers_checked
+                       << " extract_tiles=" << rep.extract_tiles
+                       << " carrier_bytes=" << rep.carrier_bytes
+                       << " tree_depth=" << rep.tree_depth
+                       << " merkle_openings=" << rep.merkle_openings
+                       << " merkle_hashes=" << rep.merkle_hashes
+                       << " regen_misses=" << rep.regen_misses
+                       << " regen_hits=" << rep.regen_hits
+                       << " regen_bytes=" << rep.regen_bytes
+                       << " planned_full_regen_bytes=" << rep.planned_regen_bytes_full
+                       << " checksum=" << rep.checksum);
+
+    BOOST_CHECK_LE(rep.carrier_bytes, rc::kRCFreivaldsCarrierMaxSerializedBytes);
+    BOOST_CHECK_MESSAGE(!rep.stopped_at_budget && rep.total_s <= 0.900,
+                        "production carrier verify compute exceeds 0.9s budget; see metric line");
+}
 
 // (c''') REGRESSION: d_ff is a consensus/relay shape field. A carrier with a
 //       cheaper fused-FFN inner width must not authenticate for a profile-2
@@ -1555,8 +1951,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
     const auto reg = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
     BOOST_CHECK_EQUAL(reg.nMatMulRCProfile, 2u);
     BOOST_CHECK_EQUAL(reg.nMatMulRCHeight, 150);
-    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16);
-    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16422);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1027);
 
     // Mainnet also constructs with the datacenter default (profile 2) while
     // staying gated (INT32_MAX height, ASERT 1/1).
@@ -1582,9 +1978,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_fits_production_ceiling)
     const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
 
     // The size that BLOWS the ceiling: a single Fwd layer's full operands.
-    // Y (int64 b_seq×d_model) alone is ~1 GiB — 89× over the 12 MiB ceiling.
+    // Y (int64 b_seq×d_model) alone is ~2.87 GiB — far over the 12 MiB ceiling.
     const uint64_t fwd_Y_bytes = static_cast<uint64_t>(dc.b_seq) * dc.d_model * 8ull;
-    BOOST_CHECK_EQUAL(fwd_Y_bytes, 1073741824ull);                 // 1 GiB
+    BOOST_CHECK_EQUAL(fwd_Y_bytes, 2868903936ull);                 // ~2.87 GiB
     BOOST_CHECK_GT(fwd_Y_bytes, rc::kRCFreivaldsCarrierMaxSerializedBytes);
     // The full-operand carrier carried Y+extract_in+extract_out+A+B for EVERY one
     // of λ sampled layers — utterly over the ceiling. The segment carrier does not.
