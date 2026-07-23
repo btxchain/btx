@@ -162,20 +162,113 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
-> **Resident Curriculum upgrade (v4.6 — integrated, not yet activated).** This
-> branch integrates the next-generation MatMul workload, "v4.6": an exact-int64
-> AI-training *episode* (attention + micro-training + Merkle) coupled to a V3
-> production puzzle, attested by a succinct GKR/FRI proof with an in-circuit
-> G1–G5 arithmetization (composed soundness ≈71.9 bits, adequate margin over the
-> 2^-64 target). It replaces the single dense matmul described below with a
-> structured, exactly-replayed workload. **v4.6 is OFF on every public network**
-> (all activation heights are `INT32_MAX`, the formal proof arbiter is
-> hard-disabled, and the int64 CPU reference remains the sole consensus
-> authority). A single activation switch is wired but unset; flipping it is gated
-> on an external cryptographic audit, native-silicon qualification, and ASERT
-> calibration. Until then, the live PoW is exactly the single-matmul scheme
-> described in this section. See
-> [`doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`](doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md).
+> **Resident Curriculum upgrade (v4.6 — integrated, code-complete, not yet
+> activated).** This branch integrates the next-generation MatMul workload,
+> "v4.6": an exact-int64 AI-training *episode* (attention + micro-training +
+> Merkle) coupled to a V3 production puzzle, attested by a succinct GKR/FRI proof
+> with an in-circuit G1–G5 arithmetization (composed soundness ≈71.9 bits,
+> adequate margin over the 2^-64 target). It replaces the single dense matmul
+> described below with a structured, exactly-replayed workload, **GPU-accelerated
+> by default** (CUDA / HIP / Metal, auto-selected).
+>
+> The whole RC family is wired to turn on together at a **single activation
+> height** and is code-complete on this branch: the profile-2 sampled-carrier
+> **verifier clears its 900 ms relay budget** on the supported hardware baseline
+> (Apple M4 Max 330 ms GO, 2.7× margin; baseline floor = SHA-NI/SHA-ext +
+> VNNI/i8mm), confirmed byte-identical across ARM and x86. **v4.6 stays OFF on
+> every public network** (all activation heights are `INT32_MAX`, the formal
+> proof arbiter is hard-disabled, and the int64 CPU reference remains the sole
+> consensus authority). Flipping the switch is a deliberate step gated on an
+> external cryptographic audit, native-silicon qualification, and production
+> hashrate benchmarks (to set the activation-height difficulty). Until then the
+> live PoW is exactly the single-matmul scheme described in this section.
+>
+> Turnkey build / benchmark / tuning: **[v4.6 ENC_RC — turnkey build, benchmark &
+> per-architecture tuning](#v46-enc_rc--turnkey-build-benchmark--per-architecture-tuning)**
+> below. Design and status:
+> [`doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`](doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md)
+> and
+> [`doc/btx-matmul-v4.6-rc-verify-time-budget-and-hardware-baseline-2026-07-23.md`](doc/btx-matmul-v4.6-rc-verify-time-budget-and-hardware-baseline-2026-07-23.md).
+
+### v4.6 ENC_RC — turnkey build, benchmark & per-architecture tuning
+
+Everything below runs against the **v4.6 ENC_RC** workload. The consensus
+arbiter is always the int64 CPU reference (`RecomputeResidentCurriculumReference`
+/ `RecomputeCoupledPuzzleReference`); GPU backends and the succinct proof
+accelerate or attest, they never decide validity. Every accelerated path is
+**self-test-gated against the scalar reference with a byte-identical fallback** —
+that is what guarantees no consensus split, so those gates stay on by design; a
+byte-exact mismatch disables the fast path rather than forking.
+
+**Build with GPU acceleration** (default is `auto` — CPU-only build still runs,
+just slower):
+
+```bash
+# CUDA (e.g. sm_120 / Blackwell-class; see src/CMakeLists.txt for native MXFP4 recipes)
+cmake -B build -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120
+# AMD ROCm/HIP and Apple Metal are selected the same way via their backend TUs.
+cmake --build build -j
+```
+
+**Select the mining backend** (auto-detects the best admissible device by
+default; override per run):
+
+```bash
+BTX_MATMUL_V4_BACKEND=auto   # default: CUDA/HIP/Metal if admissible, else CPU
+BTX_MATMUL_V4_BACKEND=cuda   # force a specific backend (falls back to CPU if inadmissible)
+BTX_MATMUL_V4_BACKEND=cpu    # force the portable scalar path
+```
+
+**Benchmark (one canonical entrypoint — do not use the legacy `matmul-v4-report`):**
+
+```bash
+# Validator: sampled-carrier verify time vs the 900 ms relay budget (GO if < 900 ms)
+contrib/matmul-v4/measure-enc-rc-v46.sh verify-carrier --threads <ncores>
+
+# Miner: episode correctness on your accelerator (must match the int64 CPU reference)
+contrib/matmul-v4/measure-enc-rc-v46.sh cuda-episode-tests
+
+# Miner: production-dim throughput (nonce/s) — the activation-height difficulty input
+contrib/matmul-v4/measure-enc-rc-v46.sh cpu rc --coupled-v3-ci
+
+# Stage-G CPU campaigns → rc-gate.py verdict
+contrib/matmul-v4/measure-enc-rc-v46.sh cpu --profile coupled
+```
+
+**Per-architecture tuning knobs** (all default to the fastest self-test-passing
+path; override to A/B or to work around a defect):
+
+| Env var | Effect |
+|---|---|
+| `BTX_MATMUL_V4_BACKEND` | Mining device backend: `auto` (default) / `cuda` / `hip` / `metal` / `cpu`. |
+| `BTX_RC_PACKED_I8MM=0` | Force the non-packed scalar recompute in the verifier (disables ARM SMMLA / x86 VNNI). Process-wide kill switch + whole-suite A/B. Byte-identical to the packed path. |
+| `BTX_BMX4_XOF8_AVX2=0` | Force scalar CSHA256 for the operand XOF on x86 (disables the AVX2 8-way multibuffer path). Byte-identical. |
+| `BTX_RC_PROD_CARRIER_VERIFY_BENCH_THREADS` / `..._FULL` | Verifier bench thread count / full-mode toggle. |
+
+**Optimizing a new architecture.** The verifier's exact recompute is a packed
+int8 → int32 GEMM (`k·127·127 < 2^31`, so the accumulation is exact). To add a
+new SIMD/tensor path, mirror the existing kernels in
+`src/matmul/matmul_v4_rc_freivalds_i8mm.cpp` — ARM SMMLA
+(`DenseRowBlockPackedI8mmS32`) and x86 AVX-512-VNNI (`DenseRowBlockPackedVnniS32`)
+are the reference implementations. Two hard rules: (1) guard the new path behind
+its own `#if defined(<arch>)` so other targets are byte-unchanged, and (2) gate
+it at runtime through `RCDensePackedI8mmAvailable()` / a multi-vector
+`*SelfTest()` against the scalar oracle, with a scalar fallback on any mismatch.
+The operand XOF has the same shape: scalar `XofBlock41` is the reference; ARM
+SHA-ext (`XofBlock41x4Shani`) and x86 AVX2 multibuffer
+(`sha256_xof_avx2::Transform8x41`) are the accelerated mirrors, each
+self-tested. **Never** ship an accelerated path that is not proven byte-identical
+to the scalar reference — a divergence is a consensus split, and the self-test
+gates exist precisely to prevent one from activating.
+
+**End-to-end regtest (turnkey activation for local testing).** On regtest the
+entire RC family can be switched on at one height with toy dims — this is the
+supported way to exercise mine → relay → ExactReplay without touching any public
+network:
+
+```bash
+btxd -regtest -regtestrcunifiedheight=<n>   # sets both RC + coupled heights together
+```
 
 ### How It Works
 

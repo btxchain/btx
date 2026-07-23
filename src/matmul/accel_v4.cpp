@@ -83,10 +83,18 @@ std::atomic_bool g_logged_ascend_batch_fallback{false};
 
 std::string DefaultBackendRequest()
 {
+    // GPU-accelerated by default on every platform. "auto" asks the v4
+    // certification registry for the best ADMISSIBLE device backend (CUDA / HIP /
+    // Metal) and resolves to CPU only when no bit-exact device path is compiled,
+    // present, and §S.1-admissible. This is safe to default on: losing-nonce
+    // digests are CPU-resealed and every device result is VerifySketch-gated with
+    // a CPU-fallback safety net (see ComputeDigest*Dispatched), so a GPU can never
+    // change the consensus digest — it only accelerates the search. Override with
+    // BTX_MATMUL_V4_BACKEND=cpu|cuda|hip|metal|auto.
 #if defined(__APPLE__)
     return "metal";
 #else
-    return "cpu";
+    return "auto";
 #endif
 }
 
