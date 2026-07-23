@@ -588,7 +588,8 @@ uint256 EpisodeDigestFromRoots(const std::vector<uint256>& round_roots)
 
 size_t ExpectedLayerCount(const RCEpisodeParams& p)
 {
-    return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));
+    // Per round: QKt + SV + per layer (FfnUp + Fwd/down) = 2 + 2·L.
+    return static_cast<size_t>(p.rounds) * (2u + 2u * static_cast<size_t>(p.L_lyr));
 }
 
 void AbsorbPowBind(FsTranscript& fs, const uint256& claimed_digest, uint256& out_bind)
@@ -758,77 +759,53 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
                       prf_Z, std::move(Zout));
         }
 
-        // Phase-2: all forward layers, then bwd+wgrad from L-1 down to 0.
+        // Phase-2: fused 2-layer FFN per layer (scratchpad/fused-ffn-episode-design.md).
+        //   H[l]   = Extract_up(X[l]·W_up)          [b_seq×d_ff]  — INTERNAL wire (not streamed)
+        //   X[l+1] = Extract_dn(H[l]·W_down + X[l]) [b_seq×d_model] — streamed (committed), +X[l]
+        // Bwd/Wgrad are gone. Both contractions are row-contiguous → soundly anchorable.
         std::vector<std::vector<int8_t>> X(p.L_lyr + 1);
-        std::vector<std::vector<int8_t>> W(p.L_lyr);
-        std::vector<std::vector<int8_t>> W3(p.L_lyr);   // second forward-projection weight
-        std::vector<uint256> prf_fwd(p.L_lyr), prf_bwd(p.L_lyr), prf_wg(p.L_lyr);
+        std::vector<std::vector<int8_t>> W_up(p.L_lyr), W_down(p.L_lyr);
+        std::vector<uint256> prf_up(p.L_lyr), prf_dn(p.L_lyr);
         X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
             char tag[40];
-            std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
-            W[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_model);
-            std::snprintf(tag, sizeof(tag), "BTX_RC_W3_%u_V1", l);
-            W3[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_model);
-            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_FWD_%u_V1", l);
-            prf_fwd[l] = lt::DeriveMatExpandPrfKey(operand(tag));
-            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_BWD_%u_V1", l);
-            prf_bwd[l] = lt::DeriveMatExpandPrfKey(operand(tag));
-            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_WG_%u_V1", l);
-            prf_wg[l] = lt::DeriveMatExpandPrfKey(operand(tag));
+            std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
+            W_up[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_ff);
+            std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
+            W_down[l] = ExpandMxDequantInt8(operand(tag), p.d_ff, p.d_model);
+            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_UP_%u_V1", l);
+            prf_up[l] = lt::DeriveMatExpandPrfKey(operand(tag));
+            std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_DN_%u_V1", l);
+            prf_dn[l] = lt::DeriveMatExpandPrfKey(operand(tag));
         }
 
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
-            std::vector<int8_t> Wt(static_cast<size_t>(p.d_model) * p.d_model);
-            for (uint32_t i = 0; i < p.d_model; ++i)
-                for (uint32_t j = 0; j < p.d_model; ++j)
-                    Wt[static_cast<size_t>(j) * p.d_model + i] =
-                        W[l][static_cast<size_t>(i) * p.d_model + j];
+            // UP: H = Extract(X[l]·W_up) [b_seq×d_ff]. INTERNAL — pushed as
+            // GemmPhase2FfnUp (LayerInStream=false, like QKt's S). Not committed.
+            std::vector<int64_t> H_gemm;
+            ExactInt64Gemm(X[l], p.b_seq, p.d_model, W_up[l], p.d_ff, H_gemm);
+            std::vector<int8_t> H(H_gemm.size(), 0);
+            ExtractMXMatrixInt64(prf_up[l], H_gemm.data(), p.b_seq, p.d_ff, H.data());
+            push_wire(RCGkrLayerKind::GemmPhase2FfnUp, r, l, p.b_seq, p.d_ff, p.d_model, X[l],
+                      W_up[l], H_gemm, H_gemm, prf_up[l], H);
+
+            // DOWN: X[l+1] = Extract(H·W_down + X[l]) [b_seq×d_model]. Streamed as
+            // GemmPhase2Fwd. H5: residual X[l] is INSIDE the single Extract accumulator.
             std::vector<int64_t> Y_gemm;
-            ExactInt64Gemm(X[l], p.b_seq, p.d_model, Wt, p.d_model, Y_gemm);
-            // H5: residual X[l] is INSIDE the single Extract accumulator (not a second Extract).
+            ExactInt64Gemm(H, p.b_seq, p.d_ff, W_down[l], p.d_model, Y_gemm);
             std::vector<int64_t> Y_acc = Y_gemm;
             for (uint32_t i = 0; i < p.b_seq; ++i)
                 for (uint32_t j = 0; j < p.d_model; ++j)
                     Y_acc[static_cast<size_t>(i) * p.d_model + j] +=
                         X[l][static_cast<size_t>(i) * p.d_model + j];
             X[l + 1].assign(Y_acc.size(), 0);
-            ExtractMXMatrixInt64(prf_fwd[l], Y_acc.data(), p.b_seq, p.d_model, X[l + 1].data());
-            // Sumcheck proves Y_gemm = A·B; LogUp binds (Y_acc, extract_out) for H5.
-            push_wire(RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_model, X[l],
-                      Wt, Y_gemm, Y_acc, prf_fwd[l], X[l + 1]);
+            ExtractMXMatrixInt64(prf_dn[l], Y_acc.data(), p.b_seq, p.d_model, X[l + 1].data());
+            // Sumcheck proves Y_gemm = H·W_down; LogUp binds (Y_acc, extract_out) for H5.
+            // residual = X[l] (the layer INPUT, not the A=H operand): the sampled
+            // verifier binds it by recomputing the anchored X[l] row.
+            push_wire(RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_ff, H,
+                      W_down[l], Y_gemm, Y_acc, prf_dn[l], X[l + 1]);
             out.back().residual = ToFp2I8(X[l]);
-        }
-
-        std::vector<std::vector<int8_t>> G(p.L_lyr + 1);
-        G[p.L_lyr] = ExpandMxDequantInt8(operand("BTX_RC_GL_V1"), p.b_seq, p.d_model);
-        for (int32_t li = static_cast<int32_t>(p.L_lyr) - 1; li >= 0; --li) {
-            const uint32_t l = static_cast<uint32_t>(li);
-            // Bwd: G[l] = Extract(G[l+1] · W[l]) — ExactGemm(G, W).
-            std::vector<int64_t> Y_bwd;
-            ExactInt64Gemm(G[l + 1], p.b_seq, p.d_model, W[l], p.d_model, Y_bwd);
-            G[l].assign(Y_bwd.size(), 0);
-            ExtractMXMatrixInt64(prf_bwd[l], Y_bwd.data(), p.b_seq, p.d_model, G[l].data());
-            push_wire(RCGkrLayerKind::GemmPhase2Bwd, r, l, p.b_seq, p.d_model, p.d_model,
-                      G[l + 1], W[l], Y_bwd, Y_bwd, prf_bwd[l], G[l]);
-
-            // Third GEMM (option C): Y3 = Extract(X[l+1] · W3ᵀ), contraction over
-            // d_model. A = X[l+1] (the Fwd output, committed & row-contiguous),
-            // B = W3ᵀ (PRF weight). Same MAC (b_seq·d_model²) as the former Gᵀ·X
-            // weight-gradient, but the contraction axis is now row-contiguous so the
-            // sampled carrier can soundly anchor both operands (episode-thirdgemm-
-            // redesign.md). Output is b_seq×d_model (Fwd-shaped), no residual.
-            std::vector<int8_t> Wt3(static_cast<size_t>(p.d_model) * p.d_model);
-            for (uint32_t i = 0; i < p.d_model; ++i)
-                for (uint32_t j = 0; j < p.d_model; ++j)
-                    Wt3[static_cast<size_t>(j) * p.d_model + i] =
-                        W3[l][static_cast<size_t>(i) * p.d_model + j];
-            std::vector<int64_t> Y3;
-            ExactInt64Gemm(X[l + 1], p.b_seq, p.d_model, Wt3, p.d_model, Y3);
-            std::vector<int8_t> Y3out(Y3.size());
-            ExtractMXMatrixInt64(prf_wg[l], Y3.data(), p.b_seq, p.d_model, Y3out.data());
-            push_wire(RCGkrLayerKind::GemmPhase2Wgrad, r, l, p.b_seq, p.d_model, p.d_model,
-                      X[l + 1], Wt3, Y3, Y3, prf_wg[l], std::move(Y3out));
         }
     }
 
@@ -1237,31 +1214,22 @@ RCGkrLayout RCGkrTraceLayout(const RCEpisodeParams& p)
         (void)add_layer(RCGkrLayerKind::GemmPhase1SV, r, 0, p.n_q, p.d_head, p.n_ctx, s_ref,
                         v_ref, RCGkrTensor::YSV, RCGkrTensor::Z, p.n_q, p.d_head, -1);
 
-        // Phase 2 forward. X(r,0) expanded; W(r,l) committed once and shared
-        // between Fwd (transposed) and Bwd (plain).
+        // Phase 2 fused FFN (scratchpad/fused-ffn-episode-design.md). Per layer:
+        //   UP:   H = X[l]·W_up      [b_seq×d_ff]  — out tensor Hff, INTERNAL (not streamed)
+        //   DOWN: X[l+1] = H·W_down  [b_seq×d_model] + residual X[l] (H5) — out tensor X, streamed
+        // Bwd/Wgrad removed. Both operands of each GEMM are row-contiguous (anchorable).
         std::vector<RCGkrOperandRef> x_refs(p.L_lyr + 1);
-        std::vector<RCGkrOperandRef> w_refs(p.L_lyr);
         x_refs[0] = add_tensor(RCGkrTensor::X, r, 0, p.b_seq, p.d_model, false);
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
-            w_refs[l] = add_tensor(RCGkrTensor::W, r, l, p.d_model, p.d_model, false);
+            const auto wup_ref = add_tensor(RCGkrTensor::Wup, r, l, p.d_model, p.d_ff, false);
+            const auto h_ref = add_layer(
+                RCGkrLayerKind::GemmPhase2FfnUp, r, l, p.b_seq, p.d_ff, p.d_model, x_refs[l],
+                wup_ref, RCGkrTensor::YFfnUp, RCGkrTensor::Hff, p.b_seq, p.d_ff, -1);
+            const auto wdn_ref = add_tensor(RCGkrTensor::Wdn, r, l, p.d_ff, p.d_model, false);
             x_refs[l + 1] = add_layer(
-                RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_model, x_refs[l],
-                transposed(w_refs[l]), RCGkrTensor::YFwd, RCGkrTensor::X, p.b_seq, p.d_model,
-                static_cast<int32_t>(x_refs[l].first_column));
-        }
-
-        // Phase 2 backward: G(r,L) expanded; G(r,l+1) shared between Bwd (plain
-        // A) and Wgrad (transposed A).
-        std::vector<RCGkrOperandRef> g_refs(p.L_lyr + 1);
-        g_refs[p.L_lyr] = add_tensor(RCGkrTensor::G, r, p.L_lyr, p.b_seq, p.d_model, false);
-        for (int32_t li = static_cast<int32_t>(p.L_lyr) - 1; li >= 0; --li) {
-            const uint32_t l = static_cast<uint32_t>(li);
-            g_refs[l] = add_layer(RCGkrLayerKind::GemmPhase2Bwd, r, l, p.b_seq, p.d_model,
-                                  p.d_model, g_refs[l + 1], w_refs[l], RCGkrTensor::YBwd,
-                                  RCGkrTensor::G, p.b_seq, p.d_model, -1);
-            (void)add_layer(RCGkrLayerKind::GemmPhase2Wgrad, r, l, p.d_model, p.d_model,
-                            p.b_seq, transposed(g_refs[l + 1]), x_refs[l], RCGkrTensor::YWgrad,
-                            RCGkrTensor::D, p.d_model, p.d_model, -1);
+                RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_ff, h_ref,
+                wdn_ref, RCGkrTensor::YFwd, RCGkrTensor::X, p.b_seq, p.d_model,
+                static_cast<int32_t>(x_refs[l].first_column)); // residual = X[l]
         }
     }
     assert(out.layers.size() == RCGkrExpectedLayerCount(p));
@@ -1296,7 +1264,8 @@ uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisod
     // Height.
     AppendBytes(buf, reinterpret_cast<const unsigned char*>("hgt"), 3);
     AppendLE32(buf, static_cast<uint32_t>(height));
-    // Exact episode params (all 8 fields — F13-style dims binding).
+    // Exact episode params (all 9 fields — F13-style dims binding; d_ff added for
+    // the fused-FFN layout).
     AppendBytes(buf, reinterpret_cast<const unsigned char*>("eps"), 3);
     AppendLE32(buf, params.rounds);
     AppendLE32(buf, params.d_head);
@@ -1304,6 +1273,7 @@ uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisod
     AppendLE32(buf, params.n_ctx);
     AppendLE32(buf, params.L_lyr);
     AppendLE32(buf, params.d_model);
+    AppendLE32(buf, params.d_ff);
     AppendLE32(buf, params.b_seq);
     AppendLE32(buf, params.T_leaf);
     // Target AND nBits (nBits already in the header block above; target is the
@@ -1392,7 +1362,8 @@ uint256 RCGkrFsSeedV7Coupled(const CBlockHeader& header, int32_t height,
 
 size_t RCGkrExpectedLayerCount(const RCEpisodeParams& p)
 {
-    return static_cast<size_t>(p.rounds) * (2u + 3u * static_cast<size_t>(p.L_lyr));
+    // Per round: QKt + SV + per layer (FfnUp + Fwd/down) = 2 + 2·L.
+    return static_cast<size_t>(p.rounds) * (2u + 2u * static_cast<size_t>(p.L_lyr));
 }
 
 size_t RCGkrExpectedCoupledLayerCount(const RCCoupParams& p, bool full_bank_schedule)
@@ -1552,11 +1523,12 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
         auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
         const size_t base = out.size();
         const size_t qkt_idx = base + 0;
-        std::vector<size_t> fwd_idx(p.L_lyr), bwd_idx(p.L_lyr);
-        for (uint32_t l = 0; l < p.L_lyr; ++l) fwd_idx[l] = base + 2 + l;
-        for (uint32_t l = 0; l < p.L_lyr; ++l)
-            bwd_idx[l] = base + 2 + p.L_lyr + 2 * static_cast<size_t>(p.L_lyr - 1 - l);
-        // wg_idx[l] = bwd_idx[l] + 1 (Bwd then Wgrad per iteration).
+        // Fused-FFN per-round layout: QKt ‖ SV ‖ for l: (FfnUp_l ‖ Fwd/down_l).
+        std::vector<size_t> up_idx(p.L_lyr), down_idx(p.L_lyr);
+        for (uint32_t l = 0; l < p.L_lyr; ++l) {
+            up_idx[l] = base + 2 + 2 * static_cast<size_t>(l);
+            down_idx[l] = up_idx[l] + 1;
+        }
 
         auto leaf = [&](const uint256& s, uint32_t er, uint32_t ec, bool tr) {
             TensorRef t; t.is_leaf = true; t.seed = s; t.erows = er; t.ecols = ec; t.transpose = tr;
@@ -1566,26 +1538,20 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             TensorRef t; t.is_leaf = false; t.src_idx = src; t.erows = er; t.ecols = ec;
             t.transpose = tr; return t;
         };
-        // Named tensors resolving to leaf-or-chain.
+        // X[l] (the layer input / down-wire residual): X0 leaf at l==0, else the
+        // previous layer's DOWN extract_out (committed, row-contiguous).
         auto X_tensor = [&](uint32_t l, bool tr) {
             return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
-                            : chain(fwd_idx[l - 1], p.b_seq, p.d_model, tr);
+                            : chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
         };
-        auto G_tensor = [&](uint32_t l, bool tr) { // G[l]
-            return (l == p.L_lyr) ? leaf(operand("BTX_RC_GL_V1"), p.b_seq, p.d_model, tr)
-                                  : chain(bwd_idx[l], p.b_seq, p.d_model, tr);
-        };
-        auto W_seed = [&](uint32_t l) {
+        auto Wup_seed = [&](uint32_t l) {
             char tag[40];
-            std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
+            std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
             return operand(tag);
         };
-        // Second forward-projection weight (option-C third GEMM: Y3 = X[l+1]·W3ᵀ,
-        // contraction over d_model so the operand axis is row-contiguous and the
-        // sampled carrier can anchor it — see episode-thirdgemm-redesign.md).
-        auto W3_seed = [&](uint32_t l) {
+        auto Wdn_seed = [&](uint32_t l) {
             char tag[40];
-            std::snprintf(tag, sizeof(tag), "BTX_RC_W3_%u_V1", l);
+            std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
             return operand(tag);
         };
         auto prf_tag = [&](const char* fmt, uint32_t l) {
@@ -1614,45 +1580,29 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             lp.extract_prf = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_Z_V1"));
             out.push_back(lp);
         }
-        // Fwd layers.
+        // Fused FFN layers: UP (internal) then DOWN (streamed), forward order.
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
-            LayerProv lp;
-            lp.kind = RCGkrLayerKind::GemmPhase2Fwd;
-            lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_model;
-            lp.a = X_tensor(l, false);
-            lp.b = leaf(W_seed(l), p.d_model, p.d_model, true); // Wᵀ
-            lp.extract_prf = prf_tag("BTX_RC_PRF_FWD_%u_V1", l);
-            lp.fwd_residual = true;
-            out.push_back(lp);
-        }
-        // Bwd + Wgrad (l = L-1 .. 0).
-        for (int32_t li = static_cast<int32_t>(p.L_lyr) - 1; li >= 0; --li) {
-            const uint32_t l = static_cast<uint32_t>(li);
             {
+                // UP: H = X[l]·W_up [b_seq×d_ff]. Internal (LayerInStream=false).
                 LayerProv lp;
-                lp.kind = RCGkrLayerKind::GemmPhase2Bwd;
-                lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_model;
-                lp.a = G_tensor(l + 1, false);
-                lp.b = leaf(W_seed(l), p.d_model, p.d_model, false);
-                lp.extract_prf = prf_tag("BTX_RC_PRF_BWD_%u_V1", l);
+                lp.kind = RCGkrLayerKind::GemmPhase2FfnUp;
+                lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_ff; lp.k = p.d_model;
+                lp.a = X_tensor(l, false);
+                lp.b = leaf(Wup_seed(l), p.d_model, p.d_ff, false); // W_up (d_model×d_ff)
+                lp.extract_prf = prf_tag("BTX_RC_PRF_UP_%u_V1", l);
                 out.push_back(lp);
             }
             {
-                // Third GEMM (option C): a SECOND forward projection Y3 = X[l+1]·W3ᵀ,
-                // contracting over d_model. Replaces the former weight-gradient
-                // (Gᵀ·X, contraction over b_seq) whose contraction axis was NOT
-                // row-contiguous and so could not be soundly anchored in the bounded
-                // carrier. Same MAC (b_seq·d_model²) as the former Wgrad, so the
-                // datacenter MAC ratio is unchanged; A = X[l+1] is the committed Fwd
-                // output (row opens as one leaf), B = W3ᵀ is a PRF weight. The enum
-                // token GemmPhase2Wgrad is retained as the "third slot" (semantics
-                // now Fwd2); a cosmetic rename is a follow-up.
+                // DOWN: X[l+1] = H·W_down + X[l] [b_seq×d_model]. Streamed; residual
+                // = X[l] (bound by the verifier's anchored X-row recompute, NOT the
+                // A=H operand). A chains to the UP wire's H (internal → regenerated).
                 LayerProv lp;
-                lp.kind = RCGkrLayerKind::GemmPhase2Wgrad;
-                lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_model;
-                lp.a = chain(fwd_idx[l], p.b_seq, p.d_model, false); // X[l+1] = extract_out(Fwd_l)
-                lp.b = leaf(W3_seed(l), p.d_model, p.d_model, true); // W3ᵀ
-                lp.extract_prf = prf_tag("BTX_RC_PRF_WG_%u_V1", l);
+                lp.kind = RCGkrLayerKind::GemmPhase2Fwd;
+                lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_ff;
+                lp.a = chain(up_idx[l], p.b_seq, p.d_ff, false); // H = extract_out(FfnUp_l)
+                lp.b = leaf(Wdn_seed(l), p.d_ff, p.d_model, false); // W_down (d_ff×d_model)
+                lp.extract_prf = prf_tag("BTX_RC_PRF_DN_%u_V1", l);
+                lp.fwd_residual = true;
                 out.push_back(lp);
             }
         }
@@ -1687,27 +1637,24 @@ std::vector<std::vector<Fp3>> BuildV7ColumnsFromWitness(
 std::vector<int8_t> ReconstructRoundStreamFromWitness(
     const std::vector<RCGkrV7WireWitness>& wires, uint32_t round, const RCEpisodeParams& p)
 {
-    const size_t lpr = 2u + 3u * static_cast<size_t>(p.L_lyr);
+    // Fused-FFN round stream: Z ‖ for l: X[l+1] (DOWN extract_out). The UP wire's
+    // H (GemmPhase2FfnUp) is INTERNAL and never streamed. Per round: 2 + 2·L wires.
+    const size_t lpr = 2u + 2u * static_cast<size_t>(p.L_lyr);
     const size_t base = static_cast<size_t>(round) * lpr;
     const std::vector<int8_t>* z = nullptr;
-    std::vector<const std::vector<int8_t>*> fwd(p.L_lyr, nullptr), bwd(p.L_lyr, nullptr),
-        wg(p.L_lyr, nullptr);
+    std::vector<const std::vector<int8_t>*> down(p.L_lyr, nullptr);
     for (size_t li = 0; li < lpr; ++li) {
         const RCGkrV7WireWitness& w = wires[base + li];
         switch (w.kind) {
         case RCGkrLayerKind::GemmPhase1SV: z = &w.extract_out; break;
-        case RCGkrLayerKind::GemmPhase2Fwd: fwd[w.layer] = &w.extract_out; break;
-        case RCGkrLayerKind::GemmPhase2Bwd: bwd[w.layer] = &w.extract_out; break;
-        case RCGkrLayerKind::GemmPhase2Wgrad: wg[w.layer] = &w.extract_out; break;
-        default: break;
+        case RCGkrLayerKind::GemmPhase2Fwd: down[w.layer] = &w.extract_out; break;
+        default: break; // QKt / FfnUp: not streamed.
         }
     }
     std::vector<int8_t> stream;
     if (z) stream.insert(stream.end(), z->begin(), z->end());
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        if (fwd[l]) stream.insert(stream.end(), fwd[l]->begin(), fwd[l]->end());
-        if (bwd[l]) stream.insert(stream.end(), bwd[l]->begin(), bwd[l]->end());
-        if (wg[l]) stream.insert(stream.end(), wg[l]->begin(), wg[l]->end());
+        if (down[l]) stream.insert(stream.end(), down[l]->begin(), down[l]->end());
     }
     return stream;
 }
@@ -1781,14 +1728,27 @@ GroundResult GroundEpisodeInCircuit(const std::vector<RCGkrV7WireWitness>& wires
         if (!BindOperand(lp.b, w.B, w.k, w.n, wires, tm, gamma, inst_tm, res.n_mxexpand_sha, why)) {
             res.failure = "B:" + why; return res;
         }
-        // extract_in binding: = Y (+ A residual for Fwd). Y is sumcheck-bound.
+        // extract_in binding: = Y (+ residual for the fused DOWN layer). Y is
+        // sumcheck-bound. The fused-FFN down residual is X[l] (the layer INPUT),
+        // which is the UP wire's A operand (down.A chains to the UP wire's H) —
+        // NOT w.A (=H). X[l] is itself bound by the UP wire's own BindOperand.
         if (w.extract_in.size() != static_cast<size_t>(w.m) * w.n ||
             w.Y.size() != static_cast<size_t>(w.m) * w.n) {
             res.failure = "extract_in:size"; return res;
         }
+        const std::vector<int8_t>* resid = nullptr;
+        if (lp.fwd_residual) {
+            if (lp.a.is_leaf || lp.a.src_idx >= wires.size()) {
+                res.failure = "extract_in:residual_src"; return res;
+            }
+            resid = &wires[lp.a.src_idx].A;
+            if (resid->size() != w.extract_in.size()) {
+                res.failure = "extract_in:residual_size"; return res;
+            }
+        }
         for (size_t idx = 0; idx < w.extract_in.size(); ++idx) {
             int64_t expect = w.Y[idx];
-            if (lp.fwd_residual) expect += static_cast<int64_t>(w.A[idx]);
+            if (resid) expect += static_cast<int64_t>((*resid)[idx]);
             if (w.extract_in[idx] != expect) { res.failure = "extract_in:binding"; return res; }
         }
         // Extract sampler AIR over ALL tiles + dual-α LogUp feed.
@@ -2458,8 +2418,13 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
         if (w.extract_in.size() == static_cast<size_t>(w.m) * w.n) {
             const Fp3 acc_at_r = MleEvalMatrix3(ToFp3I64(w.extract_in), w.m, w.n, ri, rj);
             if (lp.fwd_residual) {
-                // X̃ is the SAME committed operand A used as the Fwd input (k == n).
-                const Fp3 x_at_r = MleEvalMatrix3(a_col, w.m, w.n, ri, rj);
+                // Fused-FFN down residual is X[l] (the layer INPUT) = the UP wire's
+                // committed A operand (down.A chains to the UP wire's H), evaluated
+                // over the (m×n) output shape. NOT w.A (=H, shaped m×k=b_seq×d_ff).
+                if (lp.a.is_leaf || lp.a.src_idx >= proof.wires.size())
+                    return fail(RCGkrRelation::G5, "residual_src");
+                const std::vector<Fp3> resid_col = ToFp3I8(proof.wires[lp.a.src_idx].A);
+                const Fp3 x_at_r = MleEvalMatrix3(resid_col, w.m, w.n, ri, rj);
                 if (!RCGkrCheckResidualAcc(acc_at_r, c_at_r, x_at_r))
                     return fail(RCGkrRelation::G5, "residual_acc");
             } else if (!Eq(acc_at_r, c_at_r)) {
@@ -3941,9 +3906,10 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
             if (proof.layers.size() != ExpectedLayerCount(proof.episode)) {
                 return fail("layer count");
             }
-            // Canonical (round, kind) order: QKt, SV, then L×(Fwd), then L×(Bwd,Wgrad) descending.
+            // Canonical (round, kind) order: QKt, SV, then per layer (FfnUp, Fwd/down).
+            // Fused FFN: UP is b_seq×d_ff (k=d_model); DOWN is b_seq×d_model (k=d_ff).
             size_t idx = 0;
-            bool saw_qkt = false, saw_sv = false, saw_fwd = false, saw_bwd = false, saw_wg = false;
+            bool saw_qkt = false, saw_sv = false, saw_up = false, saw_fwd = false;
             for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
                 auto need = [&](RCGkrLayerKind kind, uint32_t layer, uint32_t m, uint32_t n,
                                 uint32_t k) -> bool {
@@ -3962,22 +3928,16 @@ bool VerifyWinnerProof(const RCGkrProof& proof, RCGkrTiming* out_timing)
                     return fail("layer order");
                 saw_sv = true;
                 for (uint32_t l = 0; l < ep.L_lyr; ++l) {
-                    if (!need(RCGkrLayerKind::GemmPhase2Fwd, l, ep.b_seq, ep.d_model, ep.d_model))
+                    if (!need(RCGkrLayerKind::GemmPhase2FfnUp, l, ep.b_seq, ep.d_ff, ep.d_model))
+                        return fail("layer order");
+                    saw_up = true;
+                    if (!need(RCGkrLayerKind::GemmPhase2Fwd, l, ep.b_seq, ep.d_model, ep.d_ff))
                         return fail("layer order");
                     saw_fwd = true;
                 }
-                for (int32_t li = static_cast<int32_t>(ep.L_lyr) - 1; li >= 0; --li) {
-                    const uint32_t l = static_cast<uint32_t>(li);
-                    if (!need(RCGkrLayerKind::GemmPhase2Bwd, l, ep.b_seq, ep.d_model, ep.d_model))
-                        return fail("layer order");
-                    saw_bwd = true;
-                    if (!need(RCGkrLayerKind::GemmPhase2Wgrad, l, ep.d_model, ep.d_model, ep.b_seq))
-                        return fail("layer order");
-                    saw_wg = true;
-                }
             }
             if (idx != proof.layers.size()) return fail("repeated layer");
-            if (!(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg)) {
+            if (!(saw_qkt && saw_sv && saw_up && saw_fwd)) {
                 return fail("missing ALL-PHASE layer kind");
             }
         }

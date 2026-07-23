@@ -173,9 +173,10 @@ using gkr_field::Fp3;
 enum class RCGkrLayerKind : uint32_t {
     GemmPhase1QKt = 1, // Q·Kᵀ product layer
     GemmPhase1SV = 2,  // S·V product layer
-    GemmPhase2Fwd = 3, // forward residual GEMM
-    GemmPhase2Bwd = 4, // backward GEMM
-    GemmPhase2Wgrad = 5,
+    GemmPhase2Fwd = 3, // fused-FFN DOWN projection: X[l+1]=Extract(H·W_down+X[l]) (streamed)
+    GemmPhase2Bwd = 4, // DEPRECATED (removed from the fused-FFN trace; never emitted)
+    GemmPhase2Wgrad = 5, // DEPRECATED (removed from the fused-FFN trace; never emitted)
+    GemmPhase2FfnUp = 6, // fused-FFN UP projection: H=Extract(X[l]·W_up) — INTERNAL, not streamed
     /** Coupled: lobe row × bank page ExactGemm (1×W)·(W×W). */
     CoupLobeGemm = 10,
     /** Coupled: barrier non-affine Extract on full active state (LogUp only). */
@@ -219,15 +220,20 @@ enum class RCGkrTensor : uint8_t {
     V = 2,   // expanded operand, per round: n_ctx × d_head
     S = 3,   // extract_out of QKt, per round: n_q × n_ctx
     Z = 4,   // extract_out of SV, per round: n_q × d_head
-    X = 5,   // layer 0 expanded; layer l+1 = extract_out of Fwd(l): b_seq × d_model
-    W = 6,   // expanded operand, per (round, l): d_model × d_model
-    G = 7,   // layer L expanded; layer l = extract_out of Bwd(l): b_seq × d_model
-    D = 8,   // extract_out of Wgrad(l): d_model × d_model
+    X = 5,   // layer 0 expanded; layer l+1 = extract_out of Fwd/down(l): b_seq × d_model
+    W = 6,   // DEPRECATED (old d_model×d_model weight; unused in the fused-FFN layout)
+    G = 7,   // DEPRECATED (backward activation; unused in the fused-FFN layout)
+    D = 8,   // DEPRECATED (weight-gradient; unused in the fused-FFN layout)
     YQKt = 9,  // int64 GEMM output (T-column), n_q × n_ctx
     YSV = 10,  // int64 GEMM output, n_q × d_head
-    YFwd = 11, // int64 GEMM output (pre-residual), b_seq × d_model
-    YBwd = 12, // int64 GEMM output, b_seq × d_model
-    YWgrad = 13, // int64 GEMM output, d_model × d_model
+    YFwd = 11, // int64 down-GEMM output (pre-residual), b_seq × d_model
+    YBwd = 12, // DEPRECATED (unused in the fused-FFN layout)
+    YWgrad = 13, // DEPRECATED (unused in the fused-FFN layout)
+    // Fused-FFN tensors (scratchpad/fused-ffn-episode-design.md):
+    Wup = 14,   // up weight, per (round, l): d_model × d_ff
+    Wdn = 15,   // down weight, per (round, l): d_ff × d_model
+    Hff = 16,   // up extract_out (INTERNAL, not streamed): b_seq × d_ff
+    YFfnUp = 17, // int64 up-GEMM output, b_seq × d_ff
 };
 
 /** One committed column = one κ-bounded chunk of one tensor. */

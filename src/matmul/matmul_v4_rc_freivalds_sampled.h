@@ -125,8 +125,13 @@ inline constexpr char kRCFreivaldsGemmSeedTag[] = "BTX_RC_FRVS_GEMM_V1";
 /** Domain tag: FS derivation of the per-layer output-tile + contraction-segment
  *  positions (segment carrier). */
 inline constexpr char kRCFreivaldsSegPosTag[] = "BTX_RC_FRVS_SEGPOS_V1";
-/** Carrier format version. v2: segment carrier (bounded per-layer relay). */
-inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 2;
+/** Carrier format version. v2: segment carrier (bounded per-layer relay).
+ *  v3: fused-FFN ANCHORED per-tile carrier — the tautological segment/partial-cover
+ *  branch is removed; each sampled DOWN tile relays the anchored A-row (X[l] row,
+ *  opened against round_roots, or PRF-regenerated at l=0) + the committed
+ *  extract_out, and the verifier recomputes H-row + Y-row from anchored operands
+ *  (scratchpad/sound-carrier-design.md §4). */
+inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 3;
 
 /** Upper bound on ONE sampled layer's serialized relay bytes in the segment
  *  carrier — a function of the segment granularity (kRCFreivaldsSegOutTiles,
@@ -199,29 +204,25 @@ struct RCFreivaldsSampledTiming {
 // is what makes the relayed proof — and hence the whole flow — sublinear.
 // ---------------------------------------------------------------------------
 
-/** One sampled OUTPUT TILE of one sampled layer: a single (row i, 32-col block
- *  bj) of the GEMM output, opened by a bounded set of random CONTRACTION SEGMENTS.
- *  Relay is O(s_ctr·L_seg + T_leaf), independent of the full m,n,k. */
+/** One sampled OUTPUT TILE of one sampled layer: a single (row i, 32-col block bj)
+ *  of the committed extract_out, plus the ANCHORED contraction operand needed to
+ *  recompute it. v3 (fused-FFN anchored carrier, scratchpad/sound-carrier-design.md
+ *  §4): NO relayed Y/segments — the verifier recomputes H-row + Y-row from the
+ *  anchored A-row (X[l] row) and the PRF-regenerated weights, then compares against
+ *  the committed extract_out. Relay is O(T_leaf + depth), independent of m,n,k. */
 struct RCFreivaldsSampledTile {
     uint32_t row{0};   // output row i ∈ [0, m)
     uint32_t bcol{0};  // output 32-col block bj ∈ [0, n/32); cols [bj*32, bj*32+32)
-    // Output-block wires (T = kRCMxBlockLen entries each).
-    std::vector<int64_t> Y;           // GEMM product Y[i, bj-block] (int64, T)
-    std::vector<int8_t> extract_out;  // Extract output eo[i, bj-block] (int8, T)
-    // Fwd residual slice A[i, bj-block] (int8, T); empty when the layer has no
-    // residual. extract_in = Y (+ this residual for Fwd).
-    std::vector<int8_t> residual;
-    // Contraction segments opened for the GEMM check (each a slice of the FULL
-    // contraction). A_seg is row i's contraction slice (seg_len int8); B_seg is
-    // that slice × the 32-col output block (seg_len × T int8).
-    struct Segment {
-        uint32_t seg_off{0};           // first contraction index of this segment
-        uint32_t seg_len{0};           // contraction indices covered
-        std::vector<int8_t> A_seg;     // A[i, seg_off:seg_off+seg_len]  (seg_len)
-        std::vector<int8_t> B_seg;     // B[seg_off:seg_off+seg_len, bj-block] (seg_len·T)
-    };
-    std::vector<Segment> segments;
-    bool full_cover{false};  // segments cover [0,k): tile GEMM verified EXACTLY
+    std::vector<int8_t> extract_out;  // committed Extract output eo[i, bj-block] (int8, T)
+    // Anchored contraction input A-row (the LAYER INPUT row: X[l] row i for a DOWN
+    // tile; S row i for SV). For a committed activation (DOWN, l≥1) this is one
+    // T_leaf leaf opened against round_roots; for a PRF-regenerable input (DOWN
+    // l=0 → X0 leaf; SV → S regenerated from Q,K) it is EMPTY and a_prf_regen=true.
+    bool a_prf_regen{false};
+    std::vector<uint8_t> a_row_leaf;   // T_leaf bytes (== A-row when row-aligned)
+    uint64_t a_row_stream_offset{0};   // off_A in the source layer's stream region
+    uint32_t a_row_leaf_index{0};
+    RCMerkleProof a_row_proof;         // Merkle path of a_row_leaf to round_roots[round]
     // Tile-tree opening of extract_out into round_roots[round]. The block occupies
     // stream bytes [stream_offset, stream_offset + T); the covering leaves are
     // [first_leaf, first_leaf + leaf_bytes.size()). Each carried leaf is the FULL

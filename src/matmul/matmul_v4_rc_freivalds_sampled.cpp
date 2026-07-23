@@ -30,35 +30,28 @@ double Secs(std::chrono::steady_clock::time_point s)
 }
 
 // A layer's extract_out is committed to the round tile-tree stream iff it is one
-// of SV / Fwd / Bwd / Wgrad (QKt's output S is not streamed — see header).
+// of SV / Fwd(down). QKt's S and the fused-FFN UP wire's H are NOT streamed (both
+// are recomputed by the verifier from anchored inputs — see header).
 bool LayerInStream(RCGkrLayerKind k)
 {
-    return k == RCGkrLayerKind::GemmPhase1SV || k == RCGkrLayerKind::GemmPhase2Fwd ||
-           k == RCGkrLayerKind::GemmPhase2Bwd || k == RCGkrLayerKind::GemmPhase2Wgrad;
+    return k == RCGkrLayerKind::GemmPhase1SV || k == RCGkrLayerKind::GemmPhase2Fwd;
 }
 
 // Byte offset of a layer's extract_out within its round stream. MUST match the
-// RCGkrReconstructRoundStream layout: Z ‖ for l: (Fwd_l ‖ Bwd_l ‖ Wgrad_l).
+// RCGkrReconstructRoundStream layout: Z ‖ for l: (Down_l). Fused FFN commits ONE
+// output per layer (the DOWN projection X[l+1] = b_seq×d_model); the UP wire's H
+// is internal and never streamed.
 uint64_t LayerStreamOffset(const RCEpisodeParams& p, RCGkrLayerKind kind, uint32_t layer)
 {
     const uint64_t z = static_cast<uint64_t>(p.n_q) * p.d_head;
-    const uint64_t fwd = static_cast<uint64_t>(p.b_seq) * p.d_model;
-    const uint64_t bwd = fwd;
-    // Third GEMM (option C) Y3 = X[l+1]·W3ᵀ now outputs b_seq×d_model (Fwd-shaped),
-    // not the former weight-gradient's d_model×d_model. Keep it == fwd.
-    const uint64_t wg = fwd;
-    const uint64_t per_l = fwd + bwd + wg;
+    const uint64_t per_l = static_cast<uint64_t>(p.b_seq) * p.d_model; // one DOWN output / layer
     switch (kind) {
     case RCGkrLayerKind::GemmPhase1SV:
         return 0;
     case RCGkrLayerKind::GemmPhase2Fwd:
         return z + static_cast<uint64_t>(layer) * per_l;
-    case RCGkrLayerKind::GemmPhase2Bwd:
-        return z + static_cast<uint64_t>(layer) * per_l + fwd;
-    case RCGkrLayerKind::GemmPhase2Wgrad:
-        return z + static_cast<uint64_t>(layer) * per_l + fwd + bwd;
     default:
-        return 0; // QKt: not in stream (never sampled)
+        return 0; // QKt / FfnUp: not in stream (never sampled as a stream unit)
     }
 }
 
@@ -127,7 +120,8 @@ bool CheckLayerFreivaldsExtract(RCGkrLayerKind kind, uint32_t m, uint32_t k, uin
                                 const std::vector<int64_t>& Y,
                                 const std::vector<int64_t>& extract_in,
                                 const std::vector<int8_t>& extract_out,
-                                const uint256& extract_prf, bool fwd_residual,
+                                const uint256& extract_prf,
+                                const std::vector<int8_t>& residual,
                                 const uint256& base_seed, uint32_t layer_index,
                                 uint64_t& n_extract_tiles, std::string& why)
 {
@@ -147,10 +141,13 @@ bool CheckLayerFreivaldsExtract(RCGkrLayerKind kind, uint32_t m, uint32_t k, uin
         why = "v7fs:freivalds:" + fw;
         return false;
     }
-    // (c) accumulator/residual relation: extract_in == Y (+ A for the Fwd residual).
+    // (c) accumulator/residual relation: extract_in == Y (+ residual). For the
+    // fused DOWN layer the residual is X[l] (the layer input, shaped m×n), NOT the
+    // A=H operand; empty for the non-residual kinds.
+    if (!residual.empty() && residual.size() != mn) { why = "v7fs:residual_shape"; return false; }
     for (size_t idx = 0; idx < mn; ++idx) {
         int64_t expect = Y[idx];
-        if (fwd_residual) expect += static_cast<int64_t>(A[idx]);
+        if (!residual.empty()) expect += static_cast<int64_t>(residual[idx]);
         if (extract_in[idx] != expect) { why = "v7fs:extract_in:binding"; return false; }
     }
     // (c) Extract sampler glue, re-executed natively for THIS layer's tiles.
@@ -220,19 +217,19 @@ bool CheckCoveringLeaf(const std::vector<uint8_t>& leaf_bytes, uint32_t leaf_ind
 }
 
 // ===========================================================================
-// SEGMENT carrier: FS-derived output-tile + contraction-segment positions,
-// and the per-tile build/verify. A sampled layer opens s_tile output tiles
-// (each a single (row i, 32-col block bj) of the GEMM output) and, per tile,
-// s_ctr contraction segments — keeping per-layer relay bounded (see header).
+// ANCHORED per-tile carrier (v3, scratchpad/sound-carrier-design.md §4): a
+// sampled layer opens s_tile FS-derived output tiles (each a single (row i,
+// 32-col block bj)); per tile the verifier ANCHORS the layer-input row (open
+// X[l] row from round_roots, or PRF-regenerate at l=0 / SV) and RECOMPUTES the
+// full contraction (H-row + Y-row for DOWN, or S-row + Y for SV) to check the
+// committed extract_out. No relayed Y / contraction segments; no tautology.
 // ===========================================================================
 
-// One output tile's FS-derived plan: which (row, bcol) and which contraction
-// segment offsets (each of length seg_len), plus whether they cover [0,k).
-struct SegTilePlan {
+// One output tile's FS-derived plan: which (row, bcol). Contraction is always
+// full (recomputed from anchored operands), so there is no segment plan.
+struct TilePlan {
     uint32_t row{0};
     uint32_t bcol{0};
-    std::vector<std::pair<uint32_t, uint32_t>> segs; // (seg_off, seg_len)
-    bool full_cover{false};
 };
 
 // SHA256d(kRCFreivaldsSegPosTag ‖ base_seed ‖ LE32(layer_index) ‖ LE32(ctr)).
@@ -254,25 +251,22 @@ uint64_t SegPosU64(const uint256& base_seed, uint32_t layer_index, uint32_t ctr)
     return v;
 }
 
-// Deterministic, verifier-recomputable output-tile + contraction-segment plan
-// for a sampled layer of shape (m, n, k). Identical on prover and verifier.
-std::vector<SegTilePlan> SegPositions(const uint256& base_seed, uint32_t layer_index, uint32_t m,
-                                      uint32_t n, uint32_t k)
+// Deterministic, verifier-recomputable output-tile plan for a sampled layer of
+// shape (m, n). Identical on prover and verifier (the miner cannot choose which
+// output entries are opened). FS derivation is byte-identical to the v2 segment
+// carrier's (SegPosDigest/SegPosU64) so the coin stays target-bound + unbiasable.
+std::vector<TilePlan> TilePositions(const uint256& base_seed, uint32_t layer_index, uint32_t m,
+                                    uint32_t n)
 {
-    std::vector<SegTilePlan> plans;
-    if (m == 0 || n < kRCMxBlockLen || k == 0) return plans;
+    std::vector<TilePlan> plans;
+    if (m == 0 || n < kRCMxBlockLen) return plans;
     const uint32_t n_blocks = n / kRCMxBlockLen;
     const uint64_t tile_space = static_cast<uint64_t>(m) * n_blocks;
     const uint32_t want_tiles =
         static_cast<uint32_t>(std::min<uint64_t>(kRCFreivaldsSegOutTiles, tile_space));
-    // Whole contraction covered by the sampled window ⇒ EXACT tile GEMM.
-    const uint64_t window = static_cast<uint64_t>(kRCFreivaldsSegContractSegs) *
-                            kRCFreivaldsSegContractLen;
-    const bool full_cover = static_cast<uint64_t>(k) <= window;
-
     uint32_t ctr = 0;
     const uint32_t max_iters = (want_tiles + 8u) * 64u + 4096u;
-    std::vector<uint64_t> seen; // (row<<20 | bcol) dedupe (tiny sets)
+    std::vector<uint64_t> seen; // (row<<32 | bcol) dedupe (tiny sets)
     while (plans.size() < want_tiles && ctr < max_iters) {
         const uint64_t t = SegPosU64(base_seed, layer_index, ctr++);
         const uint32_t row = static_cast<uint32_t>(t % m);
@@ -280,39 +274,30 @@ std::vector<SegTilePlan> SegPositions(const uint256& base_seed, uint32_t layer_i
         const uint64_t key = (static_cast<uint64_t>(row) << 32) | bcol;
         if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
         seen.push_back(key);
-        SegTilePlan pl;
-        pl.row = row;
-        pl.bcol = bcol;
-        pl.full_cover = full_cover;
-        if (full_cover) {
-            pl.segs.emplace_back(0u, k); // single segment [0,k) — exact
-        } else {
-            // s_ctr MX-aligned segments of length L_seg placed by FS across [0,k).
-            const uint32_t L = kRCFreivaldsSegContractLen;
-            const uint32_t span = k - L; // >= 0 since k > window >= L
-            for (uint32_t s = 0; s < kRCFreivaldsSegContractSegs; ++s) {
-                const uint64_t r = SegPosU64(base_seed, layer_index, 0x40000000u + ctr * 16u + s);
-                uint32_t off = static_cast<uint32_t>(r % (static_cast<uint64_t>(span) + 1));
-                off -= (off % kRCMxBlockLen); // MX-align
-                pl.segs.emplace_back(off, L);
-            }
-        }
-        plans.push_back(std::move(pl));
+        plans.push_back(TilePlan{row, bcol});
     }
     return plans;
 }
 
-// extract_in for a tile block = Y (+ residual for Fwd), as int64.
-std::array<int64_t, kRCMxBlockLen> TileExtractIn(const std::vector<int64_t>& Y,
-                                                 const std::vector<int8_t>& residual)
+// PRF operand-expansion cache keyed by seed (weights + leaf activations expand
+// once per verify; each Λ seed is domain-separated so it maps to one shape).
+using RegenCache = std::map<uint256, std::vector<int8_t>>;
+const std::vector<int8_t>& RegenLeaf(RegenCache& cache, const uint256& seed, uint32_t rows,
+                                     uint32_t cols)
 {
-    std::array<int64_t, kRCMxBlockLen> in{};
-    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
-        int64_t v = Y[t];
-        if (!residual.empty()) v += static_cast<int64_t>(residual[t]);
-        in[t] = v;
-    }
-    return in;
+    auto it = cache.find(seed);
+    if (it != cache.end()) return it->second;
+    return cache.emplace(seed, ExpandMxDequantInt8(seed, rows, cols)).first->second;
+}
+
+// Extract one 32-col output block (row i, block bj) from an int64 accumulator row,
+// using the position-indexed Extract sampler. Returns the T int8 outputs.
+std::array<int8_t, kRCMxBlockLen> ExtractBlock(const uint256& prf, uint32_t i, uint32_t bj,
+                                               const int64_t* acc_block)
+{
+    std::array<int8_t, kRCMxBlockLen> out{};
+    ExtractMXTileInt64(prf, i, bj, acc_block, out.data());
+    return out;
 }
 
 } // namespace
@@ -418,10 +403,16 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
         const uint32_t li = sampleable[u];
         const RCGkrV7WireWitness& w = proof.wires[li];
         const RCGkrSampledLayerProv& lp = prov[li];
-        // (b)+(c)
+        // (b)+(c). The fused DOWN residual is X[l] (the layer input) = the UP wire's
+        // A operand (down.A chains to the UP wire's H), NOT w.A (=H).
+        std::vector<int8_t> resid;
+        if (lp.fwd_residual) {
+            if (lp.a.is_leaf || lp.a.src_idx >= proof.wires.size()) return fail("v7fs:residual_src");
+            resid = proof.wires[lp.a.src_idx].A;
+        }
         std::string cwhy;
         if (!CheckLayerFreivaldsExtract(lp.kind, w.m, w.k, w.n, w.A, w.B, w.Y, w.extract_in,
-                                        w.extract_out, lp.extract_prf, lp.fwd_residual, base_seed,
+                                        w.extract_out, lp.extract_prf, resid, base_seed,
                                         li, tm.n_extract_tiles, cwhy)) {
             return fail(cwhy);
         }
@@ -479,30 +470,25 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
     return true;
 }
 
-// Per-sampled-layer relay byte bound (segment carrier): independent of m·n·k.
-// A 32-byte output block is 32-aligned in the stream and T_leaf is 64-aligned, so
-// it lands in EXACTLY ONE leaf; tree depth for any reachable N is < 32 (a round
-// stream is < 2^40 bytes and T_leaf ≥ 1024 ⇒ < 2^30 leaves ⇒ depth < 30). The
-// bound uses depth 32 (safe) and is a function of the segment granularity + T_leaf
-// only — NOT of m,n,k — which is what unpins width and keeps λ=512 under 12 MiB.
+// Per-sampled-layer relay byte bound (v3 anchored carrier): a function of T_leaf
+// and the tree depth only — NOT of m,n,k (width unpin). Per tile ≈ the anchored
+// A-row covering leaf (T_leaf + Merkle path) + the extract_out block + its
+// covering leaf (T_leaf + path). Tree depth for any reachable N is < 32 (a round
+// stream is < 2^40 bytes and T_leaf ≥ 64 ⇒ < 2^34 leaves); the bound uses depth 32.
 size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params)
 {
     const uint32_t T = kRCMxBlockLen;              // 32
-    const uint32_t Lseg = kRCFreivaldsSegContractLen;
     constexpr uint32_t kDepth = 32;                // safe tree-depth upper bound
-    const uint64_t per_seg = 8                     // seg_off + seg_len
-                             + 3 + Lseg            // A_seg (<= seg_len)
-                             + 3 + static_cast<uint64_t>(Lseg) * T; // B_seg
+    const uint64_t one_leaf_open = 3 + params.T_leaf          // covering leaf (full bytes)
+                                   + 3 + static_cast<uint64_t>(kDepth) * 32; // Merkle proof
     const uint64_t per_tile =
         8 + 5                       // row + bcol
-        + 3 + static_cast<uint64_t>(T) * 8   // Y int64
         + 3 + T                     // extract_out
-        + 3 + T                     // residual (Fwd)
-        + 1                         // full_cover flag
-        + 3 + static_cast<uint64_t>(kRCFreivaldsSegContractSegs) * per_seg
-        + 9 + 5                     // stream_offset + first_leaf
-        + 3 + (3 + params.T_leaf)          // one covering leaf (full bytes)
-        + 3 + (3 + static_cast<uint64_t>(kDepth) * 32); // one Merkle proof
+        + 1                         // a_prf_regen flag
+        + 9 + 5                     // a_row_stream_offset + a_row_leaf_index
+        + 3 + one_leaf_open         // anchored A-row leaf + proof
+        + 9 + 5                     // extract_out stream_offset + first_leaf
+        + 3 + one_leaf_open;        // extract_out covering leaf + proof
     return static_cast<size_t>(kRCFreivaldsSegOutTiles) * static_cast<size_t>(per_tile) + 64;
 }
 
@@ -568,35 +554,37 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
         const std::vector<uint256>& leaves = leaves_cache.at(r);
         const uint64_t layer_off = LayerStreamOffset(proof.episode, lp.kind, lp.layer);
 
-        const std::vector<SegTilePlan> plans = SegPositions(base_seed, li, w.m, w.n, w.k);
-        for (const SegTilePlan& pl : plans) {
+        const std::vector<TilePlan> plans = TilePositions(base_seed, li, w.m, w.n);
+        for (const TilePlan& pl : plans) {
             RCFreivaldsSampledTile tile;
             tile.row = pl.row;
             tile.bcol = pl.bcol;
-            tile.full_cover = pl.full_cover;
             const size_t ybase = static_cast<size_t>(pl.row) * w.n + static_cast<size_t>(pl.bcol) * T;
-            tile.Y.assign(w.Y.begin() + ybase, w.Y.begin() + ybase + T);
             tile.extract_out.assign(w.extract_out.begin() + ybase, w.extract_out.begin() + ybase + T);
-            if (lp.fwd_residual) {
-                // Fwd residual operand shares Y's (m×n) shape (k==n): A[row, block].
-                tile.residual.assign(w.A.begin() + ybase, w.A.begin() + ybase + T);
-            }
-            for (const auto& sg : pl.segs) {
-                RCFreivaldsSampledTile::Segment seg;
-                seg.seg_off = sg.first;
-                seg.seg_len = sg.second;
-                seg.A_seg.resize(seg.seg_len);
-                const size_t arow = static_cast<size_t>(pl.row) * w.k + seg.seg_off;
-                for (uint32_t t = 0; t < seg.seg_len; ++t) seg.A_seg[t] = w.A[arow + t];
-                seg.B_seg.resize(static_cast<size_t>(seg.seg_len) * T);
-                for (uint32_t t = 0; t < seg.seg_len; ++t) {
-                    const size_t brow = static_cast<size_t>(seg.seg_off + t) * w.n +
-                                        static_cast<size_t>(pl.bcol) * T;
-                    for (uint32_t c = 0; c < T; ++c) seg.B_seg[static_cast<size_t>(t) * T + c] = w.B[brow + c];
+
+            // Anchor the layer-input A-row (X[l] row for DOWN, S row for SV).
+            if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
+                tile.a_prf_regen = true; // S regenerated from Q,K (QKt + Extract)
+            } else {
+                // DOWN: X[l] is the UP wire's A operand (down.A chains to the UP wire).
+                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:build:down_a");
+                const RCGkrSampledOperandProv& xprov = prov[lp.a.src_idx].a;
+                if (xprov.is_leaf) {
+                    tile.a_prf_regen = true; // X0 regenerated at l==0
+                } else {
+                    // Open X[l] committed row from round_roots (same round r).
+                    const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
+                    const uint64_t off_A = LayerStreamOffset(proof.episode, src.kind, src.layer) +
+                                           static_cast<uint64_t>(pl.row) * proof.episode.d_model;
+                    tile.a_row_stream_offset = off_A;
+                    tile.a_row_leaf_index = static_cast<uint32_t>(off_A / t_leaf);
+                    if (tile.a_row_leaf_index >= leaves.size()) return fail("v7fs:build:a_leaf_index");
+                    tile.a_row_leaf = LeafWindow(stream, t_leaf, tile.a_row_leaf_index);
+                    tile.a_row_proof = OpenMerkleProof(leaves, tile.a_row_leaf_index);
                 }
-                tile.segments.push_back(std::move(seg));
             }
-            // Tile-tree opening of this 32-byte output block.
+
+            // Tile-tree opening of this 32-byte extract_out block.
             const uint64_t off = layer_off + static_cast<uint64_t>(pl.row) * w.n +
                                  static_cast<uint64_t>(pl.bcol) * T;
             tile.stream_offset = off;
@@ -657,8 +645,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
     const auto t_p = std::chrono::steady_clock::now();
     const uint32_t t_leaf = carrier.episode.T_leaf;
     const uint32_t T = kRCMxBlockLen;
-    gkr_air::TableTM tmt;
-    gkr_air::TableTX txt;
+    RegenCache regen; // PRF operand expansions (weights + leaf activations), once per verify
     for (size_t j = 0; j < units.size(); ++j) {
         const uint32_t li = sampleable[units[j]];
         const RCFreivaldsSampledLayer& e = carrier.sampled[j];
@@ -669,94 +656,141 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
             return fail("v7fs:carrier_layer_mismatch");
         }
         if (e.n % T != 0) return fail("v7fs:carrier_n_block");
+        if (e.round >= carrier.round_roots.size()) return fail("v7fs:round_index");
         const uint64_t layer_off = LayerStreamOffset(carrier.episode, lp.kind, lp.layer);
-        // Recompute the FS output-tile + segment plan — the miner cannot choose
-        // which output entries / contraction segments are opened.
-        const std::vector<SegTilePlan> plans = SegPositions(base_seed, li, e.m, e.n, e.k);
+        // Recompute the FS output-tile plan — the miner cannot choose which output
+        // tiles are opened (FS coin is target-bound via base_seed).
+        const std::vector<TilePlan> plans = TilePositions(base_seed, li, e.m, e.n);
         if (e.tiles.size() != plans.size()) return fail("v7fs:carrier_tile_count");
-        const uint256 gemm_seed = FreivaldsLayerChallengeSeed(base_seed, li);
         for (size_t ti = 0; ti < plans.size(); ++ti) {
-            const SegTilePlan& pl = plans[ti];
+            const TilePlan& pl = plans[ti];
             const RCFreivaldsSampledTile& tile = e.tiles[ti];
-            if (tile.row != pl.row || tile.bcol != pl.bcol || tile.full_cover != pl.full_cover) {
-                return fail("v7fs:carrier_tile_pos");
-            }
-            if (tile.Y.size() != T || tile.extract_out.size() != T) return fail("v7fs:tile_shape");
-            const bool want_resid = lp.fwd_residual;
-            if (want_resid ? tile.residual.size() != T : !tile.residual.empty()) {
-                return fail("v7fs:tile_residual");
-            }
-            if (tile.segments.size() != pl.segs.size()) return fail("v7fs:tile_seg_count");
+            if (tile.row != pl.row || tile.bcol != pl.bcol) return fail("v7fs:carrier_tile_pos");
+            if (tile.extract_out.size() != T) return fail("v7fs:tile_shape");
+            if (tile.row >= e.m || tile.bcol >= e.n / T) return fail("v7fs:tile_range");
 
-            // (b) GEMM by segment-Freivalds A·(B·r)=Y·r over the sampled segments.
-            std::vector<FreivaldsSegmentOperand> fsegs;
-            fsegs.reserve(tile.segments.size());
-            for (size_t s = 0; s < tile.segments.size(); ++s) {
-                const auto& seg = tile.segments[s];
-                if (seg.seg_off != pl.segs[s].first || seg.seg_len != pl.segs[s].second) {
-                    return fail("v7fs:tile_seg_pos");
-                }
-                if (seg.A_seg.size() != seg.seg_len ||
-                    seg.B_seg.size() != static_cast<size_t>(seg.seg_len) * T) {
-                    return fail("v7fs:tile_seg_shape");
-                }
-                FreivaldsSegmentOperand fo;
-                fo.k_p = seg.seg_len;
-                fo.A_slice = seg.A_seg;   // m=1 × seg_len
-                fo.B_slice = seg.B_seg;   // seg_len × T
-                fsegs.push_back(std::move(fo));
-            }
-            if (tile.full_cover) {
-                // EXACT: the segments cover [0,k), so Σ_p A_seg·B_seg == Y[i,block]
-                // must hold (each rep ≤ 2^-63). Y is anchored by the Extract→root
-                // chain below, so a wrong GEMM output is caught here.
-                std::string fw;
-                if (!FreivaldsCheckGemmSegments(fsegs, tile.Y, /*m=*/1, /*n=*/T, gemm_seed,
-                                                kRCFreivaldsReps, &fw)) {
-                    return fail("v7fs:freivalds_seg:" + fw);
-                }
-            } else {
-                // PARTIAL (deterrence, header): the sampled segments do not cover
-                // the full contraction, so no exact GEMM equality is asserted. We
-                // still verify each covered segment's operand bytes are self-
-                // consistent (they multiply to the partial the verifier recomputes)
-                // — this rejects internally-inconsistent relayed segment bytes; the
-                // uncovered contraction folds into ρ*.
-                std::vector<int64_t> partial(T, 0);
-                for (const auto& seg : tile.segments) {
+            // ANCHORED RECOMPUTE (scratchpad/sound-carrier-design.md §4): recompute
+            // this tile's extract_out from anchored operands, then require it to
+            // equal the committed value opened against target-bound round_roots.
+            std::array<int8_t, kRCMxBlockLen> eo{};
+            if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
+                // SV: regen S row (QKt + Extract from Q,K), then S·V block + Extract.
+                if (!tile.a_prf_regen || !tile.a_row_leaf.empty()) return fail("v7fs:sv_anchor");
+                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:sv_qkt_src");
+                const RCGkrSampledLayerProv& qkt = prov[lp.a.src_idx];
+                if (qkt.kind != RCGkrLayerKind::GemmPhase1QKt) return fail("v7fs:sv_qkt_kind");
+                const uint32_t d_head = carrier.episode.d_head;
+                const uint32_t n_ctx = e.k; // == carrier.episode.n_ctx
+                if (n_ctx % T != 0) return fail("v7fs:sv_ctx_block");
+                const std::vector<int8_t>& Q =
+                    RegenLeaf(regen, qkt.a.seed, carrier.episode.n_q, d_head);
+                const std::vector<int8_t>& K = RegenLeaf(regen, qkt.b.seed, n_ctx, d_head);
+                const std::vector<int8_t>& V = RegenLeaf(regen, lp.b.seed, n_ctx, d_head);
+                // S row i (int8, n_ctx wide) = Extract(prf_S, Q[i]·Kᵀ).
+                std::vector<int8_t> S_row(n_ctx);
+                std::array<int64_t, kRCMxBlockLen> blk{};
+                for (uint32_t bt = 0; bt < n_ctx / T; ++bt) {
                     for (uint32_t c = 0; c < T; ++c) {
+                        const uint32_t t = bt * T + c;
                         int64_t acc = 0;
-                        for (uint32_t t = 0; t < seg.seg_len; ++t) {
-                            acc += static_cast<int64_t>(seg.A_seg[t]) *
-                                   static_cast<int64_t>(seg.B_seg[static_cast<size_t>(t) * T + c]);
-                        }
-                        partial[c] += acc;
+                        for (uint32_t d = 0; d < d_head; ++d)
+                            acc += static_cast<int64_t>(Q[static_cast<size_t>(tile.row) * d_head + d]) *
+                                   static_cast<int64_t>(K[static_cast<size_t>(t) * d_head + d]);
+                        blk[c] = acc;
                     }
+                    const auto so = ExtractBlock(qkt.extract_prf, tile.row, bt, blk.data());
+                    for (uint32_t c = 0; c < T; ++c) S_row[bt * T + c] = so[c];
                 }
-                std::string fw;
-                if (!FreivaldsCheckGemmSegments(fsegs, partial, /*m=*/1, /*n=*/T, gemm_seed,
-                                                kRCFreivaldsReps, &fw)) {
-                    return fail("v7fs:freivalds_seg_partial:" + fw);
+                // Y block = S_row · V[:, bcol-block], then Extract(prf_Z). No residual.
+                std::array<int64_t, kRCMxBlockLen> yblk{};
+                for (uint32_t c = 0; c < T; ++c) {
+                    const uint32_t col = tile.bcol * T + c;
+                    int64_t acc = 0;
+                    for (uint32_t t = 0; t < n_ctx; ++t)
+                        acc += static_cast<int64_t>(S_row[t]) *
+                               static_cast<int64_t>(V[static_cast<size_t>(t) * d_head + col]);
+                    yblk[c] = acc;
                 }
+                eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
+            } else {
+                // DOWN: H-row = Extract(X_row·W_up); Y-block = Extract(H_row·W_down + X_row).
+                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:down_a_src");
+                const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
+                if (up.kind != RCGkrLayerKind::GemmPhase2FfnUp) return fail("v7fs:down_up_kind");
+                const uint32_t d_model = e.n; // == carrier.episode.d_model
+                const uint32_t d_ff = e.k;    // == carrier.episode.d_ff
+                if (d_ff % T != 0) return fail("v7fs:down_ff_block");
+                if (d_model > t_leaf) return fail("v7fs:a_row_multileaf");
+                // Anchor X[l] row (d_model int8).
+                std::vector<int8_t> X_row(d_model);
+                const RCGkrSampledOperandProv& xprov = up.a;
+                if (xprov.is_leaf) {
+                    // l == 0: X0 PRF-regenerated (no committed leaf).
+                    if (!tile.a_prf_regen || !tile.a_row_leaf.empty())
+                        return fail("v7fs:down_l0_anchor");
+                    const std::vector<int8_t>& X0 =
+                        RegenLeaf(regen, xprov.seed, carrier.episode.b_seq, d_model);
+                    for (uint32_t d = 0; d < d_model; ++d)
+                        X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
+                } else {
+                    // l >= 1: open X[l] committed row from round_roots (one leaf).
+                    if (tile.a_prf_regen) return fail("v7fs:down_anchor_flag");
+                    if (xprov.src_idx >= prov.size()) return fail("v7fs:down_x_src");
+                    const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
+                    const uint64_t off_A = LayerStreamOffset(carrier.episode, src.kind, src.layer) +
+                                           static_cast<uint64_t>(tile.row) * d_model;
+                    if (tile.a_row_stream_offset != off_A) return fail("v7fs:a_off");
+                    const uint32_t a_leaf = static_cast<uint32_t>(off_A / t_leaf);
+                    if (tile.a_row_leaf_index != a_leaf) return fail("v7fs:a_leaf_index");
+                    if (tile.a_row_leaf.size() != t_leaf) return fail("v7fs:a_leaf_size");
+                    const uint64_t rel = off_A - static_cast<uint64_t>(a_leaf) * t_leaf;
+                    if (rel + d_model > t_leaf) return fail("v7fs:a_row_span");
+                    for (uint32_t d = 0; d < d_model; ++d)
+                        X_row[d] = static_cast<int8_t>(tile.a_row_leaf[rel + d]);
+                    std::string awhy;
+                    if (!CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
+                                           carrier.round_roots[e.round], t_leaf, off_A, X_row, awhy))
+                        return fail(awhy);
+                    tm.n_merkle_hashes += tile.a_row_proof.siblings.size();
+                    ++tm.n_merkle_openings;
+                }
+                const std::vector<int8_t>& W_up = RegenLeaf(regen, up.b.seed, d_model, d_ff);
+                const std::vector<int8_t>& W_down = RegenLeaf(regen, lp.b.seed, d_ff, d_model);
+                // H-row = Extract(X_row·W_up) over the full d_ff width.
+                std::vector<int8_t> H_row(d_ff);
+                std::array<int64_t, kRCMxBlockLen> blk{};
+                for (uint32_t bj = 0; bj < d_ff / T; ++bj) {
+                    for (uint32_t c = 0; c < T; ++c) {
+                        const uint32_t col = bj * T + c;
+                        int64_t acc = 0;
+                        for (uint32_t d = 0; d < d_model; ++d)
+                            acc += static_cast<int64_t>(X_row[d]) *
+                                   static_cast<int64_t>(W_up[static_cast<size_t>(d) * d_ff + col]);
+                        blk[c] = acc;
+                    }
+                    const auto ho = ExtractBlock(up.extract_prf, tile.row, bj, blk.data());
+                    for (uint32_t c = 0; c < T; ++c) H_row[bj * T + c] = ho[c];
+                }
+                // Y-block = Extract(H_row·W_down[:,bcol] + X_row[bcol]) (residual +X[l]).
+                std::array<int64_t, kRCMxBlockLen> yblk{};
+                for (uint32_t c = 0; c < T; ++c) {
+                    const uint32_t col = tile.bcol * T + c;
+                    int64_t acc = 0;
+                    for (uint32_t t = 0; t < d_ff; ++t)
+                        acc += static_cast<int64_t>(H_row[t]) *
+                               static_cast<int64_t>(W_down[static_cast<size_t>(t) * d_model + col]);
+                    acc += static_cast<int64_t>(X_row[col]); // residual +X[l] (H5)
+                    yblk[c] = acc;
+                }
+                eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
             }
+            // The recomputed extract_out must equal the relayed tile.extract_out.
+            for (uint32_t c = 0; c < T; ++c)
+                if (eo[c] != tile.extract_out[c]) return fail("v7fs:recompute_mismatch");
+            ++tm.n_extract_tiles;
             ++tm.n_freivalds_calls;
 
-            // (c) extract_in == Y (+resid); Extract sampler re-exec → extract_out.
-            const std::array<int64_t, kRCMxBlockLen> ein = TileExtractIn(tile.Y, tile.residual);
-            gkr_air::TilePublic pub;
-            pub.prf_key = lp.extract_prf;
-            pub.i = tile.row;
-            pub.bj = tile.bcol;
-            const gkr_air::TileWitness tw = gkr_air::TraceTile(pub, ein);
-            const gkr_air::TileCheckResult cr = gkr_air::CheckTileConstraints(tw, tmt, txt);
-            if (!cr.ok) return fail("v7fs:extract_air:" + cr.failure);
-            for (uint32_t t = 0; t < T; ++t) {
-                if (tw.out[t] != tile.extract_out[t]) return fail("v7fs:extract_air:out_binding");
-            }
-            ++tm.n_extract_tiles;
-
-            // (a) open extract_out block against round_roots (O(log N)).
-            if (e.round >= carrier.round_roots.size()) return fail("v7fs:round_index");
+            // (a) open extract_out block against round_roots (binds it to target).
             const uint64_t off_expect = layer_off + static_cast<uint64_t>(tile.row) * e.n +
                                         static_cast<uint64_t>(tile.bcol) * T;
             if (tile.stream_offset != off_expect) return fail("v7fs:carrier_offset");
@@ -784,8 +818,8 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
     tm.perlayer_s = Secs(t_p);
     tm.ok = true;
     tm.total_s = Secs(t0);
-    tm.note = "v7fs segment carrier: " + std::to_string(tm.n_layers_checked) + "/" +
-              std::to_string(tm.n_units_total) + " layers checked from segment openings";
+    tm.note = "v7fs anchored carrier: " + std::to_string(tm.n_layers_checked) + "/" +
+              std::to_string(tm.n_units_total) + " layers recomputed from anchored operands";
     if (out_timing) *out_timing = tm;
     if (why) *why = tm.note;
     return true;
@@ -844,6 +878,7 @@ void PutEpisode(std::vector<unsigned char>& b, const RCEpisodeParams& e)
     PutU32(b, e.n_ctx);
     PutU32(b, e.L_lyr);
     PutU32(b, e.d_model);
+    PutU32(b, e.d_ff);
     PutU32(b, e.b_seq);
     PutU32(b, e.T_leaf);
 }
@@ -912,7 +947,7 @@ struct BoundedReader {
     bool Episode(RCEpisodeParams& e)
     {
         return U32(e.rounds) && U32(e.d_head) && U32(e.n_q) && U32(e.n_ctx) &&
-               U32(e.L_lyr) && U32(e.d_model) && U32(e.b_seq) && U32(e.T_leaf);
+               U32(e.L_lyr) && U32(e.d_model) && U32(e.d_ff) && U32(e.b_seq) && U32(e.T_leaf);
     }
     // Read a length-prefixed int8 vector; count bounded by remaining bytes and
     // the whole-carrier element ceiling, so allocation can never exceed input.
@@ -987,22 +1022,17 @@ void SerializeRCFreivaldsCarrier(const RCFreivaldsSampledCarrier& c,
         for (const auto& tile : e.tiles) {
             PutU32(out, tile.row);
             PutU32(out, tile.bcol);
-            out.push_back(tile.full_cover ? 1 : 0);
-            PutCompact(out, tile.Y.size());
-            for (int64_t x : tile.Y) PutU64(out, static_cast<uint64_t>(x));
             PutCompact(out, tile.extract_out.size());
             for (int8_t x : tile.extract_out) out.push_back(static_cast<unsigned char>(x));
-            PutCompact(out, tile.residual.size());
-            for (int8_t x : tile.residual) out.push_back(static_cast<unsigned char>(x));
-            PutCompact(out, tile.segments.size());
-            for (const auto& seg : tile.segments) {
-                PutU32(out, seg.seg_off);
-                PutU32(out, seg.seg_len);
-                PutCompact(out, seg.A_seg.size());
-                for (int8_t x : seg.A_seg) out.push_back(static_cast<unsigned char>(x));
-                PutCompact(out, seg.B_seg.size());
-                for (int8_t x : seg.B_seg) out.push_back(static_cast<unsigned char>(x));
-            }
+            // Anchored A-row (empty + flag when PRF-regenerable).
+            out.push_back(tile.a_prf_regen ? 1 : 0);
+            PutU64(out, tile.a_row_stream_offset);
+            PutU32(out, tile.a_row_leaf_index);
+            PutCompact(out, tile.a_row_leaf.size());
+            PutBytes(out, tile.a_row_leaf.data(), tile.a_row_leaf.size());
+            PutCompact(out, tile.a_row_proof.siblings.size());
+            for (const auto& s : tile.a_row_proof.siblings) PutHash(out, s);
+            // extract_out tile-tree opening.
             PutU64(out, tile.stream_offset);
             PutU32(out, tile.first_leaf);
             PutCompact(out, tile.leaf_bytes.size());
@@ -1057,20 +1087,16 @@ bool DeserializeRCFreivaldsCarrierBounded(Span<const unsigned char> in,
         e.tiles.resize(n_tiles);
         for (uint64_t ti = 0; ti < n_tiles; ++ti) {
             RCFreivaldsSampledTile& tile = e.tiles[ti];
-            uint8_t fc;
-            if (!r.U32(tile.row) || !r.U32(tile.bcol) || !r.U8(fc)) return bad(r.err);
-            tile.full_cover = (fc != 0);
-            if (!r.VecI64(tile.Y) || !r.VecI8(tile.extract_out) || !r.VecI8(tile.residual)) {
-                return bad(r.err);
-            }
-            uint64_t n_segs;
-            if (!r.Compact(n_segs, kRCCarrierMaxSegmentsPerTile)) return bad(r.err);
-            tile.segments.resize(n_segs);
-            for (uint64_t s = 0; s < n_segs; ++s) {
-                RCFreivaldsSampledTile::Segment& seg = tile.segments[s];
-                if (!r.U32(seg.seg_off) || !r.U32(seg.seg_len)) return bad(r.err);
-                if (!r.VecI8(seg.A_seg) || !r.VecI8(seg.B_seg)) return bad(r.err);
-            }
+            if (!r.U32(tile.row) || !r.U32(tile.bcol)) return bad(r.err);
+            if (!r.VecI8(tile.extract_out)) return bad(r.err);
+            // Anchored A-row.
+            uint8_t regen;
+            if (!r.U8(regen)) return bad(r.err);
+            tile.a_prf_regen = (regen != 0);
+            if (!r.U64(tile.a_row_stream_offset) || !r.U32(tile.a_row_leaf_index)) return bad(r.err);
+            if (!r.RawBytes(tile.a_row_leaf)) return bad(r.err);
+            if (!r.VecHash(tile.a_row_proof.siblings, kRCCarrierMaxMerkleSiblings)) return bad(r.err);
+            // extract_out tile-tree opening.
             if (!r.U64(tile.stream_offset) || !r.U32(tile.first_leaf)) return bad(r.err);
             uint64_t n_leaves;
             if (!r.Compact(n_leaves, kRCCarrierMaxLeavesPerTile)) return bad(r.err);

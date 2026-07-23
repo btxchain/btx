@@ -103,30 +103,6 @@ std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
     return device;
 }
 
-std::vector<int8_t> TransposeS8(const std::vector<int8_t>& M, uint32_t rows, uint32_t cols)
-{
-    assert(M.size() == static_cast<size_t>(rows) * cols);
-    std::vector<int8_t> T(static_cast<size_t>(cols) * rows);
-    for (uint32_t r = 0; r < rows; ++r) {
-        for (uint32_t c = 0; c < cols; ++c) {
-            T[static_cast<size_t>(c) * rows + r] = M[static_cast<size_t>(r) * cols + c];
-        }
-    }
-    return T;
-}
-
-/** Backward feature grad via ExactGemm: G_prev = G · W  (row-major).
- *  Bound 2304·d_model < 2^24 at consensus d_model=4096 → s8xs8 ExactGemm OK. */
-std::vector<int32_t> GemmWtS8S8Int32(const std::vector<int8_t>& W, const std::vector<int8_t>& G,
-                                     uint32_t d_model, uint32_t b_seq,
-                                     const lt::ExactGemmBackend& gemm)
-{
-    assert(W.size() == static_cast<size_t>(d_model) * d_model);
-    assert(G.size() == static_cast<size_t>(b_seq) * d_model);
-    // out[i][k] = Σ_j G[i][j]·W[j][k] = ExactGemmS8S8(G, W, b_seq, d_model, d_model)
-    return ExactGemmS8S8Dispatched(gemm, G, W, b_seq, d_model, d_model);
-}
-
 /** G·Xᵀ without materializing Xᵀ over K-range [k0, k0+len): out[r][c] = Σ_t G[k0+t][r]·X[k0+t][c]. */
 std::vector<int64_t> GemmGXtInt64Range(const std::vector<int8_t>& G, const std::vector<int8_t>& X,
                                        uint32_t k0, uint32_t len, uint32_t d_model)
@@ -373,39 +349,70 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParam
 // helpers in matmul_v4_rc_mx_layout.*; oracle stays dequant int8 ExactGemm.
 
 struct Phase2Tensors {
-    std::vector<std::vector<int8_t>> X; // X[0..L]
-    std::vector<std::vector<int8_t>> G; // G[0..L]
-    std::vector<std::vector<int8_t>> D; // D[0..L-1] after one ExtractMX per layer
-    /** Per-layer wgrad int64 segment partials (before Extract); R.4.1 leaves.
-     *  Empty when kRCSegmentLeavesEnabled is false (P1.1: do not retain). */
-    std::vector<std::vector<std::vector<int64_t>>> d_segs; // [L][n_seg][d_model²]
-    /** Forward weights + PRF keys retained so checkpointed X can be recomputed
-     *  during streaming serialization without a full StoreAll rebuild. */
-    std::vector<std::vector<int8_t>> W;
-    std::vector<uint256> prf_fwd;
+    std::vector<std::vector<int8_t>> X; // X[0..L] — fused-FFN layer activations
+    /** Fused-FFN weights + PRF keys retained so checkpointed X can be recomputed
+     *  during streaming serialization without a full StoreAll rebuild. W_up is
+     *  d_model×d_ff, W_down is d_ff×d_model. The intermediate H (b_seq×d_ff) is
+     *  NEVER stored/committed — each layer recomputes it internally. */
+    std::vector<std::vector<int8_t>> W_up;
+    std::vector<std::vector<int8_t>> W_down;
+    std::vector<uint256> prf_up;
+    std::vector<uint256> prf_dn;
 };
 
-std::vector<int8_t> ForwardLayer(const std::vector<int8_t>& W, const std::vector<int8_t>& X,
-                                 const uint256& prf_fwd, uint32_t b_seq, uint32_t d_model,
-                                 const lt::ExactGemmBackend& gemm)
+/** Exact int8·int8 → int64 GEMM: out[m×n] = A[m×k]·B[k×n]. Contraction k is split
+ *  into fixed panels with 2304·chunk < 2^24 (kRCWgradExactChunk) so each panel is
+ *  ExactGemm-exact on any FP32 accelerator; int64 accumulation of the exact int32
+ *  panels is byte-identical to a pure int64 dot (GKR's ExactInt64Gemm). Used by
+ *  the fused-FFN up (k=d_model) and down (k=d_ff>2^24 ceiling) GEMMs alike. */
+std::vector<int64_t> FusedExactGemmInt64(const std::vector<int8_t>& A, uint32_t m, uint32_t k,
+                                         const std::vector<int8_t>& B, uint32_t n,
+                                         const lt::ExactGemmBackend& gemm)
 {
-    // Pin: acc[i][j] = Σ_k W[j][k]·X[i][k] + X[i][j]
-    //     = ExactGemmS8S8(X, Wᵀ)[i][j] + X[i][j]
-    // Residual is INSIDE the single Extract (H5). Bound < 2^24 at consensus.
-    const std::vector<int8_t> Wt = TransposeS8(W, d_model, d_model);
-    std::vector<int32_t> y = ExactGemmS8S8Dispatched(gemm, X, Wt, b_seq, d_model, d_model);
-    assert(y.size() == static_cast<size_t>(b_seq) * d_model);
-    for (uint32_t i = 0; i < b_seq; ++i) {
-        for (uint32_t j = 0; j < d_model; ++j) {
-            y[static_cast<size_t>(i) * d_model + j] +=
-                static_cast<int32_t>(X[static_cast<size_t>(i) * d_model + j]);
-        }
+    assert(A.size() == static_cast<size_t>(m) * k);
+    assert(B.size() == static_cast<size_t>(k) * n);
+    std::vector<int64_t> out(static_cast<size_t>(m) * n, 0);
+    for (uint32_t k0 = 0; k0 < k; k0 += kRCWgradExactChunk) {
+        const uint32_t len = std::min(kRCWgradExactChunk, k - k0);
+        std::vector<int8_t> Ap(static_cast<size_t>(m) * len);
+        std::vector<int8_t> Bp(static_cast<size_t>(len) * n);
+        for (uint32_t i = 0; i < m; ++i)
+            for (uint32_t t = 0; t < len; ++t)
+                Ap[static_cast<size_t>(i) * len + t] = A[static_cast<size_t>(i) * k + (k0 + t)];
+        for (uint32_t t = 0; t < len; ++t)
+            for (uint32_t c = 0; c < n; ++c)
+                Bp[static_cast<size_t>(t) * n + c] = B[static_cast<size_t>(k0 + t) * n + c];
+        const auto partial = ExactGemmS8S8Dispatched(gemm, Ap, Bp, m, len, n);
+        for (size_t i = 0; i < out.size(); ++i) out[i] += static_cast<int64_t>(partial[i]);
     }
-    // Widen before Extract so mining matches GKR's int64 Extract path bit-for-bit
-    // at current bounds (values still fit int32; avoids a latent int32-trunc fork).
-    std::vector<int64_t> y64(y.begin(), y.end());
+    return out;
+}
+
+/** One fused 2-layer FFN (scratchpad/fused-ffn-episode-design.md):
+ *    H     = Extract(X·W_up)            [b_seq×d_ff]  — INTERNAL (not committed)
+ *    X_out = Extract(H·W_down + X)      [b_seq×d_model] — committed (residual +X, H5)
+ *  Only X_out is streamed into the round tile-tree; H is recomputed by the sampled
+ *  verifier from anchored X and the PRF weights. W_up is d_model×d_ff, W_down is
+ *  d_ff×d_model (both natural contraction-major, no transpose). */
+std::vector<int8_t> FusedFfnLayer(const std::vector<int8_t>& X, const std::vector<int8_t>& W_up,
+                                  const std::vector<int8_t>& W_down, const uint256& prf_up,
+                                  const uint256& prf_dn, uint32_t b_seq, uint32_t d_model,
+                                  uint32_t d_ff, const lt::ExactGemmBackend& gemm)
+{
+    // Up projection: H = Extract(X·W_up), contraction over d_model.
+    std::vector<int64_t> h64 = FusedExactGemmInt64(X, b_seq, d_model, W_up, d_ff, gemm);
+    std::vector<int8_t> H(h64.size());
+    ExtractMXMatrixInt64(prf_up, h64.data(), b_seq, d_ff, H.data());
+    std::vector<int64_t>().swap(h64);
+    // Down projection: X_out = Extract(H·W_down + X), contraction over d_ff, residual
+    // +X folded INSIDE the single Extract accumulator (H5).
+    std::vector<int64_t> y64 = FusedExactGemmInt64(H, b_seq, d_ff, W_down, d_model, gemm);
+    for (uint32_t i = 0; i < b_seq; ++i)
+        for (uint32_t j = 0; j < d_model; ++j)
+            y64[static_cast<size_t>(i) * d_model + j] +=
+                static_cast<int64_t>(X[static_cast<size_t>(i) * d_model + j]);
     std::vector<int8_t> out(y64.size());
-    ExtractMXMatrixInt64(prf_fwd, y64.data(), b_seq, d_model, out.data());
+    ExtractMXMatrixInt64(prf_dn, y64.data(), b_seq, d_model, out.data());
     return out;
 }
 
@@ -415,28 +422,24 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
 {
     Phase2Tensors out;
     out.X.resize(p.L_lyr + 1);
-    out.G.resize(p.L_lyr + 1);
-    out.D.resize(p.L_lyr);
-    out.d_segs.resize(p.L_lyr);
-    out.W.resize(p.L_lyr);
-    out.prf_fwd.resize(p.L_lyr);
+    out.W_up.resize(p.L_lyr);
+    out.W_down.resize(p.L_lyr);
+    out.prf_up.resize(p.L_lyr);
+    out.prf_dn.resize(p.L_lyr);
 
     const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
-    const uint256 seed_GL = DeriveOperandSeed(seed_r, "BTX_RC_GL_V1");
     out.X[0] = ExpandMxDequantInt8(seed_X0, p.b_seq, p.d_model);
-    out.G[p.L_lyr] = ExpandMxDequantInt8(seed_GL, p.b_seq, p.d_model);
 
-    std::vector<uint256> prf_bwd(p.L_lyr), prf_wg(p.L_lyr);
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        char tag[32];
-        std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
-        out.W[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_model, p.d_model);
-        std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_FWD_%u_V1", l);
-        out.prf_fwd[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
-        std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_BWD_%u_V1", l);
-        prf_bwd[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
-        std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_WG_%u_V1", l);
-        prf_wg[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
+        char tag[40];
+        std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
+        out.W_up[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_model, p.d_ff);
+        std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
+        out.W_down[l] = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, tag), p.d_ff, p.d_model);
+        std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_UP_%u_V1", l);
+        out.prf_up[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
+        std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_DN_%u_V1", l);
+        out.prf_dn[l] = lt::DeriveMatExpandPrfKey(DeriveOperandSeed(seed_r, tag));
     }
 
     auto need_store = [&](uint32_t layer_idx) -> bool {
@@ -445,9 +448,11 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
         return (layer_idx % 4) == 0; // StoreEvery4
     };
 
-    // Forward — always compute; then drop non-checkpoint activations.
+    // Fused FFN forward pass — always compute; then drop non-checkpoint activations.
+    // Backward/Wgrad are GONE: the fused FFN commits only the per-layer output X[l+1].
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
-        out.X[l + 1] = ForwardLayer(out.W[l], out.X[l], out.prf_fwd[l], p.b_seq, p.d_model, gemm);
+        out.X[l + 1] = FusedFfnLayer(out.X[l], out.W_up[l], out.W_down[l], out.prf_up[l],
+                                     out.prf_dn[l], p.b_seq, p.d_model, p.d_ff, gemm);
     }
     if (ckpt != RCEpisodeOptions::Checkpoint::StoreAll) {
         for (uint32_t l = 1; l <= p.L_lyr; ++l) {
@@ -459,80 +464,8 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
         // Retain X[0] always; X[L] only if need_store(L).
     }
 
-    auto ensure_X = [&](uint32_t layer) {
-        if (!out.X[layer].empty()) return;
-        uint32_t src = layer;
-        while (src > 0 && out.X[src].empty()) --src;
-        assert(!out.X[src].empty());
-        for (uint32_t m = src; m < layer; ++m) {
-            out.X[m + 1] =
-                ForwardLayer(out.W[m], out.X[m], out.prf_fwd[m], p.b_seq, p.d_model, gemm);
-        }
-        // Drop recompute intermediates that are not checkpoints (keep target + X[0]).
-        for (uint32_t m = src + 1; m < layer; ++m) {
-            if (!need_store(m)) {
-                out.X[m].clear();
-                out.X[m].shrink_to_fit();
-            }
-        }
-    };
-
-    constexpr bool keep_d_segs = kRCSegmentLeavesEnabled;
-
-    // Backward + wgrad (Extract once on Σ partials).
-    // A4/F10: segment leaves OFF → chunked ExactGemm K-panels + int64 recombine.
-    // Amendment 1.B: wgrad K=b_seq >2^24 at consensus — never plain LT native FP4.
-    for (int32_t l = static_cast<int32_t>(p.L_lyr) - 1; l >= 0; --l) {
-        ensure_X(static_cast<uint32_t>(l));
-        // G[l+1] is already resident from the previous step (or G[L] seed).
-        auto g_acc = GemmWtS8S8Int32(out.W[l], out.G[l + 1], p.d_model, p.b_seq, gemm);
-        out.G[l].assign(g_acc.size(), 0);
-        {
-            std::vector<int64_t> g64(g_acc.begin(), g_acc.end());
-            ExtractMXMatrixInt64(prf_bwd[l], g64.data(), p.b_seq, p.d_model, out.G[l].data());
-        }
-        {
-            // Free int32 accumulator promptly.
-            std::vector<int32_t>().swap(g_acc);
-        }
-
-        // A4/F10 (WP-E): when segment leaves are OFF, wgrad uses fixed K panels
-        // (kRCWgradExactChunk with 2304·K < 2^24) → ExactGemm int32 partials →
-        // int64 recombine → single final Extract. ExactGemmS8S8Dispatched falls
-        // back to the CPU oracle on device decline.
-        std::vector<int64_t> d_total;
-        if constexpr (keep_d_segs) {
-            auto seg = AccumulateSegmentedGemmGXt(out.G[l + 1], out.X[l], p.b_seq, p.d_model,
-                                                  /*keep_segs=*/true);
-            out.d_segs[l] = std::move(seg.segs);
-            d_total = std::move(seg.total);
-        } else {
-            d_total = GemmGXtViaChunkedExact(out.G[l + 1], out.X[l], p.b_seq, p.d_model, gemm);
-        }
-        out.D[l].assign(d_total.size(), 0);
-        ExtractMXMatrixInt64(prf_wg[l], d_total.data(), p.d_model, p.d_model, out.D[l].data());
-        {
-            std::vector<int64_t>().swap(d_total);
-        }
-
-        // Free G[L] after the top backward step consumes it (not in the round
-        // stream). Keep G[0..L-1] until streaming emit absorbs them.
-        if (static_cast<uint32_t>(l + 1) == p.L_lyr) {
-            out.G[l + 1].clear();
-            out.G[l + 1].shrink_to_fit();
-        }
-
-        // Drop X[l] if not a checkpoint (recompute later for stream emit if needed).
-        // X[0] always kept.
-        if (l > 0 && !need_store(static_cast<uint32_t>(l))) {
-            out.X[l].clear();
-            out.X[l].shrink_to_fit();
-        }
-    }
-
-    // P1.1: do NOT rebuild every missing X here — that defeated checkpoint modes
-    // by materializing the full activation stack before serialization. Streaming
-    // emit recomputes X[l+1] on demand via ensure_X / W / prf_fwd.
+    // P1.1: do NOT rebuild every missing X here — streaming emit recomputes X[l+1]
+    // on demand via EnsurePhase2X / W_up / W_down / prf_up / prf_dn.
     return out;
 }
 
@@ -590,8 +523,8 @@ void EnsurePhase2X(Phase2Tensors& p2, uint32_t layer, const RCEpisodeParams& p,
     while (src > 0 && p2.X[src].empty()) --src;
     assert(!p2.X[src].empty());
     for (uint32_t m = src; m < layer; ++m) {
-        p2.X[m + 1] =
-            ForwardLayer(p2.W[m], p2.X[m], p2.prf_fwd[m], p.b_seq, p.d_model, gemm);
+        p2.X[m + 1] = FusedFfnLayer(p2.X[m], p2.W_up[m], p2.W_down[m], p2.prf_up[m], p2.prf_dn[m],
+                                    p.b_seq, p.d_model, p.d_ff, gemm);
     }
     for (uint32_t m = src + 1; m < layer; ++m) {
         if (!need_store(m)) {
@@ -639,24 +572,13 @@ uint256 StreamRoundIntoMerkle(Phase1Result& p1, Phase2Tensors& p2, const RCEpiso
         return (layer_idx % 4) == 0;
     };
 
+    // Fused-FFN round stream: Z ‖ for l: X[l+1]. Only the per-layer output is
+    // committed; the intermediate H (b_seq×d_ff) is never streamed (the sampled
+    // verifier recomputes it). No G/D (Bwd/Wgrad removed).
     for (uint32_t l = 0; l < p.L_lyr; ++l) {
         EnsurePhase2X(p2, l + 1, p, ckpt, gemm);
         absorb(p2.X[l + 1]);
-        absorb(p2.G[l]);
-        if constexpr (kRCSegmentLeavesEnabled) {
-            for (const auto& seg : p2.d_segs[l]) absorb_i64(seg);
-        }
-        absorb(p2.D[l]);
 
-        // Release layer tensors after absorb (P1.1 low-mem path).
-        p2.G[l].clear();
-        p2.G[l].shrink_to_fit();
-        p2.D[l].clear();
-        p2.D[l].shrink_to_fit();
-        if constexpr (kRCSegmentLeavesEnabled) {
-            p2.d_segs[l].clear();
-            p2.d_segs[l].shrink_to_fit();
-        }
         if (!need_store(l + 1)) {
             p2.X[l + 1].clear();
             p2.X[l + 1].shrink_to_fit();
@@ -664,10 +586,14 @@ uint256 StreamRoundIntoMerkle(Phase1Result& p1, Phase2Tensors& p2, const RCEpiso
     }
 
     // Weights no longer needed after the last X recompute.
-    p2.W.clear();
-    p2.W.shrink_to_fit();
-    p2.prf_fwd.clear();
-    p2.prf_fwd.shrink_to_fit();
+    p2.W_up.clear();
+    p2.W_up.shrink_to_fit();
+    p2.W_down.clear();
+    p2.W_down.shrink_to_fit();
+    p2.prf_up.clear();
+    p2.prf_up.shrink_to_fit();
+    p2.prf_dn.clear();
+    p2.prf_dn.shrink_to_fit();
 
     return merkle.FinalizeRoot();
 }
@@ -773,7 +699,7 @@ bool ValidateRCEpisodeParams(const RCEpisodeParams& p)
     auto mod32 = [](uint32_t v) { return v != 0 && (v % 32) == 0; };
     if (p.rounds == 0 || p.L_lyr == 0) return false;
     if (!mod32(p.d_head) || !mod32(p.n_q) || !mod32(p.n_ctx) || !mod32(p.d_model) ||
-        !mod32(p.b_seq)) {
+        !mod32(p.d_ff) || !mod32(p.b_seq)) {
         return false;
     }
     if (p.T_leaf == 0 || (p.T_leaf % 32) != 0) return false;
@@ -795,7 +721,8 @@ RCEpisodeParams MakeDatacenterRCEpisodeParams()
     // (aicompute-alignment-review.md §4).
     RCEpisodeParams p = DefaultConsensusRCEpisodeParams();
     p.rounds = kRCRoundsDC;         // 8  (2× base)
-    p.L_lyr = kRCLayersDC;          // 64 (4× base)
+    p.L_lyr = kRCLayersDC;          // 24 (fused-FFN depth; rounds=8 ⇒ 15.88× MAC)
+    p.d_ff = kRCFfnDimDC;           // 16384 (transformer 4× expansion; margin 2·d_ff)
     p.b_seq = kRCBatchSeqDC;        // 32768 (2× base)
     p.T_leaf = kRCTileLeafBytesDC;  // 4096 (compute/hash margin lever, §4)
     // HARD GUARDRAIL (aicompute-alignment-review.md §4, the weakest link): the
@@ -817,6 +744,7 @@ RCEpisodeParams MakeToyRCEpisodeParams()
     p.n_ctx = 64;
     p.L_lyr = 2;
     p.d_model = 32;
+    p.d_ff = 4 * p.d_model; // 128 — keep the CI toy self-consistent + tiny (not the 16384 default)
     p.b_seq = 32;
     p.T_leaf = 64; // smaller leaves for tiny streams (still %32==0)
     return p;
@@ -832,6 +760,7 @@ RCEpisodeParams MakeMediumRCEpisodeParams()
     p.n_ctx = 64;
     p.L_lyr = 1;
     p.d_model = 32;
+    p.d_ff = 4 * p.d_model; // 128
     p.b_seq = 8192;
     p.T_leaf = 64;
     return p;
@@ -855,6 +784,7 @@ RCEpisodeParams MakeCostLadderRCEpisodeParams()
     p.n_ctx = 64;
     p.L_lyr = 1;
     p.d_model = 32;
+    p.d_ff = 4 * p.d_model; // 128
     p.b_seq = 256;
     p.T_leaf = 64;
     return p;
@@ -870,6 +800,7 @@ RCEpisodeParams MakeSegTestRCEpisodeParams()
     p.n_ctx = kRCSegLen + 32; // 32800
     p.L_lyr = 1;
     p.d_model = 32;
+    p.d_ff = 4 * p.d_model; // 128
     p.b_seq = 32;
     p.T_leaf = 64;
     return p;
@@ -1041,8 +972,12 @@ bool VerifyRCLeafOpening(const std::vector<int8_t>& stream, uint32_t t_leaf, uin
 
 uint64_t TotalRCEpisodeMacs(const RCEpisodeParams& p)
 {
+    // Attention (QKt + SV) retained per round: 2·n_q·n_ctx·d_head.
     const uint64_t p1 = 2ull * p.n_q * p.n_ctx * p.d_head;
-    const uint64_t p2 = 3ull * p.L_lyr * static_cast<uint64_t>(p.b_seq) * p.d_model * p.d_model;
+    // Fused FFN per layer = up (b_seq·d_model·d_ff) + down (b_seq·d_ff·d_model)
+    // = 2·b_seq·d_model·d_ff. The intermediate H is recomputed by the verifier,
+    // not committed; margin = MAC/committed-byte = 2·d_ff.
+    const uint64_t p2 = 2ull * p.L_lyr * static_cast<uint64_t>(p.b_seq) * p.d_model * p.d_ff;
     return static_cast<uint64_t>(p.rounds) * (p1 + p2);
 }
 

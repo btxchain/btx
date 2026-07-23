@@ -50,6 +50,14 @@ inline constexpr uint32_t kRCLayers = 16;
 inline constexpr uint32_t kRCModelDim = 4096;
 inline constexpr uint32_t kRCBatchSeq = 16'384; // == W_cap/(2*d_model*L_lyr) at epoch 0
 inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8 (Class C)
+/** FFN inner (up-projection) width — the standard transformer 4× expansion.
+ *  Fused-FFN episode (scratchpad/fused-ffn-episode-design.md): each layer is
+ *  X[l+1] = Extract(Extract(X[l]·W_up)·W_down + X[l]) with H = X[l]·W_up of
+ *  width d_ff. Only X[l+1] (b_seq×d_model) is committed; H is recomputed by the
+ *  verifier. Margin = MAC/committed-byte = 2·d_ff ≈ 5.1× the ~6400 knee. */
+inline constexpr uint32_t kRCFfnDim = 4 * kRCModelDim; // 16384
+static_assert(kRCFfnDim % 32 == 0, "kRCFfnDim must be divisible by 32 (MX align)");
+static_assert(kRCFfnDim != 0, "kRCFfnDim must be non-zero");
 
 /**
  * Datacenter-scale episode profile (ADDITIVE — governance-gated, OFF by default).
@@ -72,10 +80,16 @@ inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8 (Class C)
  * MX-block-aligned (%32) and %64==0 so segment openings still bind cleanly to leaves.
  */
 inline constexpr uint32_t kRCRoundsDC = 8;     // 2× epoch-0 rounds (depth)
-inline constexpr uint32_t kRCLayersDC = 64;    // 4× epoch-0 L_lyr (depth)
+// Fused-FFN datacenter depth (scratchpad/fused-ffn-episode-design.md §Dimensioning):
+// per layer-round MAC = 2·b_seq·d_model·d_ff = 4.398 T; the ~15.9× datacenter target
+// (~845 T MAC) at rounds=8 pins L=24 (NOT 64). Was 64 under the 3-GEMM d_model² layer.
+inline constexpr uint32_t kRCLayersDC = 24;    // fused-FFN depth (rounds=8 ⇒ 15.88× MAC)
 inline constexpr uint32_t kRCBatchSeqDC = 32'768; // 2× epoch-0 b_seq (batch)
+inline constexpr uint32_t kRCFfnDimDC = 4 * kRCModelDim; // 16384 (transformer 4× expansion)
 inline constexpr uint32_t kRCTileLeafBytesDC = 4096; // 4× epoch-0 (compute/hash margin)
 static_assert(kRCBatchSeqDC % 32 == 0, "kRCBatchSeqDC must be divisible by 32 (MX align)");
+static_assert(kRCFfnDimDC % 32 == 0 && kRCFfnDimDC != 0,
+              "kRCFfnDimDC must be non-zero and MX(32)-aligned");
 static_assert(kRCRoundsDC != 0 && kRCLayersDC != 0, "datacenter depth axes must be non-zero");
 static_assert(kRCTileLeafBytesDC % 32 == 0 && kRCTileLeafBytesDC % 64 == 0,
               "kRCTileLeafBytesDC must be MX(32)- and SHA-block(64)-aligned for leaf binding");
@@ -89,6 +103,12 @@ static_assert(static_cast<uint64_t>(kRCModelDim) *
                       (static_cast<uint64_t>(kRCMxOperandAbsMax) * kRCMxOperandAbsMax) +
                   static_cast<uint64_t>(kRCMxOperandAbsMax) < (uint64_t{1} << 31),
               "Phase-2 int32 GEMM+Extract needs |acc| < 2^31 at epoch-0 d_model");
+/** Fused-FFN down GEMM (H·W_down) contracts over d_ff (4× d_model); the int32
+ *  Extract path still needs |acc| < 2^31 including the +X[l] residual. */
+static_assert(static_cast<uint64_t>(kRCFfnDim) *
+                      (static_cast<uint64_t>(kRCMxOperandAbsMax) * kRCMxOperandAbsMax) +
+                  static_cast<uint64_t>(kRCMxOperandAbsMax) < (uint64_t{1} << 31),
+              "Fused-FFN down GEMM (k=d_ff) int32 Extract needs |acc| < 2^31");
 
 /** Max K-chunk for wgrad ExactGemm panels: 2304·K < 2^24 (FP32-mantissa ceiling). */
 inline constexpr uint32_t kRCWgradExactChunk = 4096;
@@ -168,6 +188,7 @@ struct RCEpisodeParams {
     uint32_t n_ctx{kRCContextLen};
     uint32_t L_lyr{kRCLayers};
     uint32_t d_model{kRCModelDim};
+    uint32_t d_ff{kRCFfnDim}; // fused-FFN inner width (up: d_model×d_ff, down: d_ff×d_model)
     uint32_t b_seq{kRCBatchSeq};
     uint32_t T_leaf{kRCTileLeafBytes};
 };
