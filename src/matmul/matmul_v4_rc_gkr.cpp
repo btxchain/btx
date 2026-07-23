@@ -761,12 +761,15 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         // Phase-2: all forward layers, then bwd+wgrad from L-1 down to 0.
         std::vector<std::vector<int8_t>> X(p.L_lyr + 1);
         std::vector<std::vector<int8_t>> W(p.L_lyr);
+        std::vector<std::vector<int8_t>> W3(p.L_lyr);   // second forward-projection weight
         std::vector<uint256> prf_fwd(p.L_lyr), prf_bwd(p.L_lyr), prf_wg(p.L_lyr);
         X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
             char tag[40];
             std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
             W[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_model);
+            std::snprintf(tag, sizeof(tag), "BTX_RC_W3_%u_V1", l);
+            W3[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_model);
             std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_FWD_%u_V1", l);
             prf_fwd[l] = lt::DeriveMatExpandPrfKey(operand(tag));
             std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_BWD_%u_V1", l);
@@ -809,18 +812,23 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
             push_wire(RCGkrLayerKind::GemmPhase2Bwd, r, l, p.b_seq, p.d_model, p.d_model,
                       G[l + 1], W[l], Y_bwd, Y_bwd, prf_bwd[l], G[l]);
 
-            // Wgrad: D = Extract(Gᵀ · X) via ExactInt64Gemm(Gt, X).
-            std::vector<int8_t> Gt(static_cast<size_t>(p.d_model) * p.b_seq);
-            for (uint32_t t = 0; t < p.b_seq; ++t)
-                for (uint32_t row = 0; row < p.d_model; ++row)
-                    Gt[static_cast<size_t>(row) * p.b_seq + t] =
-                        G[l + 1][static_cast<size_t>(t) * p.d_model + row];
-            std::vector<int64_t> Y_wg;
-            ExactInt64Gemm(Gt, p.d_model, p.b_seq, X[l], p.d_model, Y_wg);
-            std::vector<int8_t> Dout(Y_wg.size());
-            ExtractMXMatrixInt64(prf_wg[l], Y_wg.data(), p.d_model, p.d_model, Dout.data());
-            push_wire(RCGkrLayerKind::GemmPhase2Wgrad, r, l, p.d_model, p.d_model, p.b_seq, Gt,
-                      X[l], Y_wg, Y_wg, prf_wg[l], std::move(Dout));
+            // Third GEMM (option C): Y3 = Extract(X[l+1] · W3ᵀ), contraction over
+            // d_model. A = X[l+1] (the Fwd output, committed & row-contiguous),
+            // B = W3ᵀ (PRF weight). Same MAC (b_seq·d_model²) as the former Gᵀ·X
+            // weight-gradient, but the contraction axis is now row-contiguous so the
+            // sampled carrier can soundly anchor both operands (episode-thirdgemm-
+            // redesign.md). Output is b_seq×d_model (Fwd-shaped), no residual.
+            std::vector<int8_t> Wt3(static_cast<size_t>(p.d_model) * p.d_model);
+            for (uint32_t i = 0; i < p.d_model; ++i)
+                for (uint32_t j = 0; j < p.d_model; ++j)
+                    Wt3[static_cast<size_t>(j) * p.d_model + i] =
+                        W3[l][static_cast<size_t>(i) * p.d_model + j];
+            std::vector<int64_t> Y3;
+            ExactInt64Gemm(X[l + 1], p.b_seq, p.d_model, Wt3, p.d_model, Y3);
+            std::vector<int8_t> Y3out(Y3.size());
+            ExtractMXMatrixInt64(prf_wg[l], Y3.data(), p.b_seq, p.d_model, Y3out.data());
+            push_wire(RCGkrLayerKind::GemmPhase2Wgrad, r, l, p.b_seq, p.d_model, p.d_model,
+                      X[l + 1], Wt3, Y3, Y3, prf_wg[l], std::move(Y3out));
         }
     }
 
@@ -1572,6 +1580,14 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             std::snprintf(tag, sizeof(tag), "BTX_RC_W_%u_V1", l);
             return operand(tag);
         };
+        // Second forward-projection weight (option-C third GEMM: Y3 = X[l+1]·W3ᵀ,
+        // contraction over d_model so the operand axis is row-contiguous and the
+        // sampled carrier can anchor it — see episode-thirdgemm-redesign.md).
+        auto W3_seed = [&](uint32_t l) {
+            char tag[40];
+            std::snprintf(tag, sizeof(tag), "BTX_RC_W3_%u_V1", l);
+            return operand(tag);
+        };
         auto prf_tag = [&](const char* fmt, uint32_t l) {
             char tag[40];
             std::snprintf(tag, sizeof(tag), fmt, l);
@@ -1622,11 +1638,20 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
                 out.push_back(lp);
             }
             {
+                // Third GEMM (option C): a SECOND forward projection Y3 = X[l+1]·W3ᵀ,
+                // contracting over d_model. Replaces the former weight-gradient
+                // (Gᵀ·X, contraction over b_seq) whose contraction axis was NOT
+                // row-contiguous and so could not be soundly anchored in the bounded
+                // carrier. Same MAC (b_seq·d_model²) as the former Wgrad, so the
+                // datacenter MAC ratio is unchanged; A = X[l+1] is the committed Fwd
+                // output (row opens as one leaf), B = W3ᵀ is a PRF weight. The enum
+                // token GemmPhase2Wgrad is retained as the "third slot" (semantics
+                // now Fwd2); a cosmetic rename is a follow-up.
                 LayerProv lp;
                 lp.kind = RCGkrLayerKind::GemmPhase2Wgrad;
-                lp.round = r; lp.layer = l; lp.m = p.d_model; lp.n = p.d_model; lp.k = p.b_seq;
-                lp.a = G_tensor(l + 1, true); // Gᵀ
-                lp.b = X_tensor(l, false);
+                lp.round = r; lp.layer = l; lp.m = p.b_seq; lp.n = p.d_model; lp.k = p.d_model;
+                lp.a = chain(fwd_idx[l], p.b_seq, p.d_model, false); // X[l+1] = extract_out(Fwd_l)
+                lp.b = leaf(W3_seed(l), p.d_model, p.d_model, true); // W3ᵀ
                 lp.extract_prf = prf_tag("BTX_RC_PRF_WG_%u_V1", l);
                 out.push_back(lp);
             }

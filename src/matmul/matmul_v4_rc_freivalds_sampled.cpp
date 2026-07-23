@@ -44,7 +44,9 @@ uint64_t LayerStreamOffset(const RCEpisodeParams& p, RCGkrLayerKind kind, uint32
     const uint64_t z = static_cast<uint64_t>(p.n_q) * p.d_head;
     const uint64_t fwd = static_cast<uint64_t>(p.b_seq) * p.d_model;
     const uint64_t bwd = fwd;
-    const uint64_t wg = static_cast<uint64_t>(p.d_model) * p.d_model;
+    // Third GEMM (option C) Y3 = X[l+1]·W3ᵀ now outputs b_seq×d_model (Fwd-shaped),
+    // not the former weight-gradient's d_model×d_model. Keep it == fwd.
+    const uint64_t wg = fwd;
     const uint64_t per_l = fwd + bwd + wg;
     switch (kind) {
     case RCGkrLayerKind::GemmPhase1SV:
