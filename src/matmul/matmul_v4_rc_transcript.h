@@ -16,7 +16,7 @@
 
 // ENC_RC Stage B — bounded-memory transcript sinks + non-consensus planners.
 // Normative: FINAL-FORM Stage B. Digests:
-//   V1 (default / ENC_RC): flat tile-tree stream — preserves golden b339d0ff…
+//   V1 (default / ENC_RC): fused-FFN flat tile-tree stream.
 //   V2 (typed subroots): for Stage C coupled puzzle ONLY; new domain tags.
 
 namespace matmul::v4::rc {

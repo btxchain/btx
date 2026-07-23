@@ -4131,6 +4131,7 @@ size_t SerializeRCGkrProof(const RCGkrProof& proof, std::vector<unsigned char>& 
     AppendLE32(out, proof.episode.n_ctx);
     AppendLE32(out, proof.episode.L_lyr);
     AppendLE32(out, proof.episode.d_model);
+    AppendLE32(out, proof.episode.d_ff);
     AppendLE32(out, proof.episode.b_seq);
     AppendLE32(out, proof.episode.T_leaf);
     out.push_back(proof.coupled ? 1 : 0);
@@ -4226,6 +4227,7 @@ std::optional<RCGkrProof> DeserializeRCGkrProof(const std::vector<unsigned char>
     if (!ReadLE32Checked(p, end, proof.episode.n_ctx)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.L_lyr)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.d_model)) return std::nullopt;
+    if (!ReadLE32Checked(p, end, proof.episode.d_ff)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.b_seq)) return std::nullopt;
     if (!ReadLE32Checked(p, end, proof.episode.T_leaf)) return std::nullopt;
     if (p >= end) return std::nullopt;

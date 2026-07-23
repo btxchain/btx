@@ -216,13 +216,13 @@ BOOST_AUTO_TEST_CASE(rc_exec_mode_maps_checkpoint_digest_invariant)
     const uint256 golden =
         rc::RecomputeResidentCurriculumReference(header, toy, 0, o_stream);
     BOOST_CHECK_EQUAL(golden.GetHex(),
-                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+                      "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
 }
 
 BOOST_AUTO_TEST_CASE(rc_v1_sink_matches_episode_collected_stream_root)
 {
     // V1 StreamingSink over the collected toy episode stream must match the
-    // consensus round_root (preserves b339d0ff… episode golden).
+    // consensus round_root (preserves the fused-FFN episode golden).
     const auto header = MakeRCHeader(42);
     const auto params = rc::MakeToyRCEpisodeParams();
     std::vector<rc::RCRoundTranscript> rounds;
@@ -230,7 +230,7 @@ BOOST_AUTO_TEST_CASE(rc_v1_sink_matches_episode_collected_stream_root)
         rc::RecomputeResidentCurriculumReference(header, params, 0, {}, &rounds);
     BOOST_REQUIRE(!rounds.empty());
     BOOST_CHECK_EQUAL(digest.GetHex(),
-                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+                      "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
 
     rc::RCStreamingSink sink(params.T_leaf, rc::kRCTranscriptVersionV1);
     sink.BeginRound(0);

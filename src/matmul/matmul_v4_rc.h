@@ -66,7 +66,7 @@ static_assert(kRCFfnDim != 0, "kRCFfnDim must be non-zero");
  * the intensive GEMM dims (d_head, n_q, n_ctx, d_model) are held at epoch-0 so the
  * int64/int32 accumulator invariants are unchanged. F_ep grows ~16× (FFN 2·4·2=16×;
  * attention 2×). Selected only when Consensus::Params::nMatMulRCProfile == 2
- * (regtest/testnet override); mainnet stays profile 1 with nMatMulRCHeight = INT32_MAX.
+ * (regtest/testnet override); mainnet keeps nMatMulRCHeight = INT32_MAX.
  *
  * HARDWARE-ALIGNMENT LEVER (aicompute-alignment-review.md §4, the weakest link).
  * T_leaf IS raised for the datacenter profile (kRCTileLeafBytesDC): a larger leaf
@@ -150,7 +150,7 @@ static_assert(static_cast<uint64_t>(kRCContextLen) * 2304ull < (uint64_t{1} << 6
 /**
  * Transcript serialization version (FINAL-FORM A1 / F7).
  * ENC_RC_V1 = current V1 stream layout with kRCSegmentLeavesEnabled=false.
- * Frozen toy golden: b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a
+ * Frozen toy golden: 5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4
  * (MakeToyRCEpisodeParams + MakeRCHeader(42)).
  *
  * Silent golden replacement is FORBIDDEN. Bumping the *active* default

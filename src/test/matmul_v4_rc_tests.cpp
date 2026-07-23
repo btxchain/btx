@@ -114,7 +114,7 @@ BOOST_AUTO_TEST_CASE(rc_t1_golden_episode_digest_stable)
     BOOST_CHECK(!d1.IsNull());
     BOOST_CHECK(d1 == d2);
     BOOST_CHECK_EQUAL(d1.GetHex(),
-                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+                      "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
 }
 
 BOOST_AUTO_TEST_CASE(rc_t2_phase1_tile_size_invariance)
@@ -226,7 +226,7 @@ BOOST_AUTO_TEST_CASE(rc_p11_streaming_episode_matches_collected_stream_root)
     const uint256 d = rc::RecomputeResidentCurriculumReference(header, params, 0, {}, &rounds);
     BOOST_REQUIRE(!rounds.empty());
     BOOST_CHECK_EQUAL(d.GetHex(),
-                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+                      "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
     const uint256 from_buf = rc::BuildTileTreeRoot(rounds[0].stream, params.T_leaf);
     BOOST_CHECK(from_buf == rounds[0].round_root);
 
@@ -353,11 +353,11 @@ BOOST_AUTO_TEST_CASE(rc_t5_anti_grinding_shape_nonce_independent)
     // Structural set + total-MAC formula are nonce-independent (R.4.4).
     const uint64_t macs = rc::TotalRCEpisodeMacs(p);
     BOOST_CHECK_EQUAL(rc::TotalRCEpisodeMacs(p), macs);
-    // expected MACs = R·(2·n_q·n_ctx·d_head + 3·L·b_seq·d_model²)
+    // expected MACs = R·(2·n_q·n_ctx·d_head + 2·L·b_seq·d_model·d_ff)
     const uint64_t expected =
         uint64_t{p.rounds} *
         (2ull * p.n_q * p.n_ctx * p.d_head +
-         3ull * p.L_lyr * uint64_t{p.b_seq} * p.d_model * p.d_model);
+         2ull * p.L_lyr * uint64_t{p.b_seq} * p.d_model * p.d_ff);
     BOOST_CHECK_EQUAL(macs, expected);
 
     const uint256 d1 = rc::RecomputeResidentCurriculumReference(h1, p, 0);
@@ -704,7 +704,7 @@ BOOST_AUTO_TEST_CASE(rc_tfp4_segmentation_exactness)
         const size_t z_bytes = static_cast<size_t>(toy.n_q) * toy.d_head;
         BOOST_REQUIRE_GE(rounds[0].stream.size(), z_bytes);
         BOOST_CHECK_LT(rounds[0].stream.size(), rc::RCSegZBytes(toy) + z_bytes);
-        BOOST_CHECK_EQUAL(d.GetHex(), "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+        BOOST_CHECK_EQUAL(d.GetHex(), "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
     }
 
     {
@@ -755,7 +755,7 @@ BOOST_AUTO_TEST_CASE(rc_tfp1_epoch0_reparam_equivalence)
     const auto toy = rc::MakeToyRCEpisodeParams();
     const uint256 d = rc::RecomputeResidentCurriculumReference(header, toy, /*height=*/0);
     BOOST_CHECK_EQUAL(d.GetHex(),
-                      "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+                      "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
 }
 
 BOOST_AUTO_TEST_CASE(rc_tfp2_schedule_monotonic_ratchet)
@@ -1003,13 +1003,13 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK(!CanStartMatMulRCVerification(/*pending=*/0, /*work_units=*/1, p, 49));
 
     // Consensus dims, PROFILE 1 (ExactReplay authority): work units scale by
-    // TotalRCEpisodeMacs / 2^40 (~49 at epoch 0).
+    // TotalRCEpisodeMacs / 2^40 (~129 after fused FFN).
     p.fMatMulRCUseToyDims = false;
     p.nMatMulRCProfile = 1;
     Consensus::FillDefaultRCGrowthTables(p);
     const uint32_t wu = MatMulRCWorkUnits(p, 100);
-    BOOST_CHECK_GE(wu, 40U);
-    BOOST_CHECK_LE(wu, 64U);
+    BOOST_CHECK_GE(wu, 120U);
+    BOOST_CHECK_LE(wu, 140U);
     BOOST_CHECK_EQUAL(EffectiveMatMulRCMaxPendingVerifications(p, 100), wu);
     BOOST_CHECK(CanStartMatMulRCVerification(0, wu, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(1, wu, p, 100));
@@ -1030,7 +1030,7 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_v1_golden_preserved)
 {
     // H: Preserve V1 golden (segment leaves OFF). Silent replacement forbidden.
     constexpr const char* kV1 =
-        "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a";
+        "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4";
     const auto header = MakeRCHeader(42);
     const auto params = rc::MakeToyRCEpisodeParams();
     const uint256 d = rc::RecomputeResidentCurriculumReference(header, params, 0);
@@ -1129,7 +1129,7 @@ BOOST_AUTO_TEST_CASE(rc_stage_h_golden_diff_gate)
     // H: Golden-diff gate — C++ frozen-hex check + required python gate script.
     // CMake also registers `ctest -R rc_golden_gate` so drift fails the build.
     constexpr const char* kV1 =
-        "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a";
+        "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4";
     const auto header = MakeRCHeader(42);
     const auto params = rc::MakeToyRCEpisodeParams();
     BOOST_CHECK_EQUAL(
@@ -1230,7 +1230,7 @@ BOOST_AUTO_TEST_CASE(rc_stage_f_three_axis_schedule_configured)
     const auto toy = rc::MakeToyRCEpisodeParams();
     BOOST_CHECK_EQUAL(
         rc::RecomputeResidentCurriculumReference(header, toy, 0).GetHex(),
-        "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a");
+        "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
 }
 
 BOOST_AUTO_TEST_CASE(rc_stage_h_extract_extremes_int64)

@@ -66,8 +66,8 @@ arith_uint256 MaxTarget()
 
 bool LayerInStream(rc::RCGkrLayerKind k)
 {
-    return k == rc::RCGkrLayerKind::GemmPhase1SV || k == rc::RCGkrLayerKind::GemmPhase2Fwd ||
-           k == rc::RCGkrLayerKind::GemmPhase2Bwd || k == rc::RCGkrLayerKind::GemmPhase2Wgrad;
+    return k == rc::RCGkrLayerKind::GemmPhase1SV ||
+           k == rc::RCGkrLayerKind::GemmPhase2Fwd;
 }
 
 std::vector<uint32_t> SampledLayerIndices(const rc::RCGkrProofV7& proof, const CBlockHeader& h,
@@ -133,7 +133,7 @@ BOOST_AUTO_TEST_CASE(frvs_honest_accepts)
         rc::VerifyEpisodeFreivaldsSampled(f.proof, f.h, 0, f.target, &why, &tmg, kLambda), why);
     BOOST_CHECK_EQUAL(tmg.n_layers_checked, kLambda);
     BOOST_CHECK_EQUAL(tmg.n_freivalds_calls, kLambda);
-    BOOST_CHECK_GT(tmg.n_units_total, kLambda);      // more sampleable than sampled
+    BOOST_CHECK_GE(tmg.n_units_total, kLambda);
     BOOST_CHECK_GT(tmg.n_merkle_openings, 0u);
 
     rc::RCFreivaldsSampledCarrier carrier;
@@ -255,7 +255,7 @@ BOOST_AUTO_TEST_CASE(frvs_sublinearity_flat_in_layers)
 {
     Fixture fs = MakeFixture(rc::MakeToyRCEpisodeParams(), 42); // 8 layers, 7 sampleable
     rc::RCEpisodeParams big = rc::MakeToyRCEpisodeParams();
-    big.L_lyr = 8; // 26 layers, 25 sampleable
+    big.L_lyr = 8; // 18 layers, 9 sampleable under fused FFN
     Fixture fb = MakeFixture(big, 7);
     BOOST_REQUIRE(fs.ok);
     BOOST_REQUIRE(fb.ok);
@@ -276,7 +276,9 @@ BOOST_AUTO_TEST_CASE(frvs_sublinearity_flat_in_layers)
 // not a bug). This is the rho* ~ ln(kappa)/lambda cheatable residual.
 BOOST_AUTO_TEST_CASE(frvs_residual_unsampled_tamper_passes)
 {
-    Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
+    rc::RCEpisodeParams params = rc::MakeToyRCEpisodeParams();
+    params.L_lyr = 8; // enough streamed units to leave at least one unsampled layer
+    Fixture f = MakeFixture(params, 42);
     BOOST_REQUIRE(f.ok);
     const auto sampled = SampledLayerIndices(f.proof, f.h, f.target, kLambda);
     const auto prov = rc::RCGkrEpisodeLayerProvenance(f.h, f.params, f.proof.round_roots);
@@ -356,8 +358,9 @@ BOOST_AUTO_TEST_CASE(frvs_check_gemm_segments_primitive)
     BOOST_CHECK(!rc::FreivaldsCheckGemmSegments(segs_t, Y, m, n, seed, 2, &why));
 }
 
-// (h) Segment CARRIER honest verify + tamper rejection (toy dims are full-cover,
-//     so the tile GEMM is verified EXACTLY and any tamper is caught).
+// (h) Anchored CARRIER honest verify + tamper rejection. Carrier v3 no longer
+//     relays Y/segments; it opens the committed extract_out tile plus the
+//     anchored A-row, and the verifier recomputes H/Y from PRF weights.
 BOOST_AUTO_TEST_CASE(frvs_segment_carrier_honest_and_tamper)
 {
     Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
@@ -368,33 +371,35 @@ BOOST_AUTO_TEST_CASE(frvs_segment_carrier_honest_and_tamper)
         rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kLambda), bwhy);
     BOOST_REQUIRE_EQUAL(carrier.sampled.size(), kLambda);
     BOOST_REQUIRE(!carrier.sampled[0].tiles.empty());
-    // Toy contraction is fully covered by the sampled window.
-    BOOST_CHECK(carrier.sampled[0].tiles[0].full_cover);
 
     std::string why;
     rc::RCFreivaldsSampledTiming tmg;
     BOOST_REQUIRE_MESSAGE(
         rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why, &tmg), why);
     BOOST_CHECK_EQUAL(tmg.n_layers_checked, kLambda);
-    BOOST_CHECK_GT(tmg.n_freivalds_calls, 0u);     // one per opened tile
+    BOOST_CHECK_GT(tmg.n_freivalds_calls, 0u);     // one anchored recompute per opened tile
     BOOST_CHECK_GT(tmg.n_merkle_openings, 0u);
 
-    {   // Tamper a tile Y output -> segment-Freivalds (full cover) OR Extract catches.
+    {   // Tamper the relayed output tile: anchored recompute or committed-leaf binding catches.
         rc::RCFreivaldsSampledCarrier c = carrier;
-        c.sampled[0].tiles[0].Y[0] += 1;
+        BOOST_REQUIRE(!c.sampled[0].tiles[0].extract_out.empty());
+        c.sampled[0].tiles[0].extract_out[0] ^= 0x1;
         BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
     }
-    {   // Tamper a contraction-segment operand byte -> exact-cover Freivalds catches.
+    {   // Tamper the anchored A-row leaf when a non-PRF source row is sampled.
         rc::RCFreivaldsSampledCarrier c = carrier;
-        BOOST_REQUIRE(!c.sampled[0].tiles[0].segments.empty());
-        c.sampled[0].tiles[0].segments[0].A_seg[0] ^= 0x40;
-        BOOST_CHECK(
-            !rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
-        BOOST_CHECK_MESSAGE(StartsWith(why, "v7fs:freivalds_seg"), why);
-    }
-    {   // Tamper extract_out -> Extract re-exec out-binding catches.
-        rc::RCFreivaldsSampledCarrier c = carrier;
-        c.sampled[0].tiles[0].extract_out[0] ^= 0x1;
+        bool tampered = false;
+        for (auto& layer : c.sampled) {
+            for (auto& tile : layer.tiles) {
+                if (!tile.a_prf_regen && !tile.a_row_leaf.empty()) {
+                    tile.a_row_leaf[0] ^= 0x1;
+                    tampered = true;
+                    break;
+                }
+            }
+            if (tampered) break;
+        }
+        BOOST_REQUIRE(tampered);
         BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
     }
 }

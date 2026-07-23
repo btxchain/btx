@@ -104,14 +104,15 @@ RCThreeAxisScale ComputeAxesForEpoch(int32_t epoch)
 
 RCEpisodeParams DeriveDimsFromAxes(const RCThreeAxisScale& scale)
 {
-    // Proxy mapping onto today's RCEpisodeParams surface (pre-Stage-C wire).
-    // Dimensionless ratios (n_q/d_head, L_lyr, d_model, rounds) stay frozen
-    // until Stage G silicon freezes them (F2) — PROVISIONAL.
+    // Proxy mapping onto today's RCEpisodeParams surface.
+    // Dimensionless ratios (n_q/d_head, L_lyr, d_model, d_ff, rounds) stay
+    // frozen until silicon freezes them (F2) — PROVISIONAL.
     RCEpisodeParams out;
     out.rounds = kRCRounds;
     out.d_head = kRCHeadDim;
     out.L_lyr = kRCLayers;
     out.d_model = kRCModelDim;
+    out.d_ff = kRCFfnDim;
     out.T_leaf = kRCTileLeafBytes;
     out.n_q = kRCQueryPerHead * out.d_head;
 
@@ -137,17 +138,13 @@ uint64_t EstimateTranscriptBytesLocal(const RCEpisodeParams& p)
 {
     const uint64_t z_bytes = static_cast<uint64_t>(p.n_q) * p.d_head;
     const uint64_t x_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model;
-    const uint64_t g_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model;
-    const uint64_t d_bytes = static_cast<uint64_t>(p.d_model) * p.d_model;
-    uint64_t per_round =
-        z_bytes + static_cast<uint64_t>(p.L_lyr) * (x_bytes + g_bytes + d_bytes);
+    // Fused-FFN stream commits only Z and X[l+1] per layer. H is internal and
+    // Bwd/Wgrad streams are removed.
+    uint64_t per_round = z_bytes + static_cast<uint64_t>(p.L_lyr) * x_bytes;
     if constexpr (kRCSegmentLeavesEnabled) {
         const uint64_t z_seg_bytes =
             static_cast<uint64_t>(RCNumSegs(p.n_ctx)) * RCSegZBytes(p);
-        const uint64_t d_seg_bytes =
-            static_cast<uint64_t>(RCNumSegs(p.b_seq)) * RCSegDBytes(p) *
-            static_cast<uint64_t>(p.L_lyr);
-        per_round += z_seg_bytes + d_seg_bytes;
+        per_round += z_seg_bytes;
     }
     const uint64_t stream_bytes = static_cast<uint64_t>(p.rounds) * per_round;
     const uint32_t t_leaf = p.T_leaf == 0 ? 1u : p.T_leaf;
@@ -160,14 +157,16 @@ uint64_t EstimateTranscriptBytesLocal(const RCEpisodeParams& p)
 
 uint64_t EstimateRCStreamedPeakBytes(const RCEpisodeParams& p)
 {
-    // Structural Streamed peak: one X page + one G temp + W + one KV bank page
-    // proxy + Q/Z tiles + a small stream ring. NOT measured RSS.
+    // Structural Streamed peak: one X page + one H temp + Wup/Wdown + one KV
+    // bank page proxy + Q/Z tiles + a small stream ring. NOT measured RSS.
     const uint64_t x = static_cast<uint64_t>(p.b_seq) * p.d_model;
-    const uint64_t w = static_cast<uint64_t>(p.d_model) * p.d_model;
+    const uint64_t h = static_cast<uint64_t>(p.b_seq) * p.d_ff;
+    const uint64_t w = static_cast<uint64_t>(p.d_model) * p.d_ff +
+                       static_cast<uint64_t>(p.d_ff) * p.d_model;
     const uint64_t kv = static_cast<uint64_t>(p.n_ctx) * p.d_head * 2ull;
     const uint64_t qz = static_cast<uint64_t>(p.n_q) * p.d_head * 2ull;
     const uint64_t ring = static_cast<uint64_t>(p.T_leaf == 0 ? 1u : p.T_leaf) * 4ull;
-    return x * 2ull + w + kv + qz + ring;
+    return x + h + w + kv + qz + ring;
 }
 
 RCThreeAxisScale RCThreeAxisScaleForHeight(int32_t height, const Consensus::Params& p,
@@ -239,8 +238,8 @@ bool CheckRCThreeAxisInvariants(const RCThreeAxisScale& scale, const RCEpisodePa
     const uint64_t expected =
         static_cast<uint64_t>(derived.rounds) *
         (2ull * derived.n_q * derived.n_ctx * derived.d_head +
-         3ull * derived.L_lyr * static_cast<uint64_t>(derived.b_seq) * derived.d_model *
-             derived.d_model);
+         2ull * derived.L_lyr * static_cast<uint64_t>(derived.b_seq) * derived.d_model *
+             derived.d_ff);
     if (macs != expected) {
         if (reason) *reason = "fixed work MAC formula mismatch";
         return false;

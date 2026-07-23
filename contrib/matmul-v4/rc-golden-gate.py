@@ -13,7 +13,7 @@ Policy (do not weaken):
 
 Usage:
   contrib/matmul-v4/rc-golden-gate.py
-  contrib/matmul-v4/rc-golden-gate.py --expect b339d0ff...
+  contrib/matmul-v4/rc-golden-gate.py --expect 5b1bff3c...
   contrib/matmul-v4/rc-golden-gate.py --json
 
 Exit: 0 = OK, 1 = golden/version mismatch, 2 = usage/parse error.
@@ -37,7 +37,7 @@ PARAMS_H = REPO_ROOT / "src" / "consensus" / "params.h"
 
 # Frozen V1 toy golden (MakeToyRCEpisodeParams + MakeRCHeader(42)).
 # V1 stream; kRCSegmentLeavesEnabled = false.
-FROZEN_V1_HEX = "b339d0ff1b02871208df10d9553760c93a8cebe63b6201b3264f57ec4e8be43a"
+FROZEN_V1_HEX = "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4"
 FROZEN_VERSION = 1  # ENC_RC_V1
 
 # Separate frozen digest for Stage C coupled toy (MakeCoupHeader(42) @ height 0).

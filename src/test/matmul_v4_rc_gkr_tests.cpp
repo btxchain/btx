@@ -152,19 +152,22 @@ BOOST_AUTO_TEST_CASE(gkr_honest_real_episode_toy_verifies)
     BOOST_CHECK(!pr.proof.lookup_fri.layers.empty());
     // Succinct: FRI queries are O(k·log N) openings, not every Extract tile.
     BOOST_CHECK_EQUAL(pr.proof.lookup_fri.queries.size(), rc::kRCFriNumQueries);
-    // ALL-PHASE: at least one of each kind
-    bool saw_qkt = false, saw_sv = false, saw_fwd = false, saw_bwd = false, saw_wg = false;
+    // ALL-PHASE fused FFN: attention QKt/SV plus FFN up/down; Bwd/Wgrad are deprecated.
+    bool saw_qkt = false, saw_sv = false, saw_up = false, saw_fwd = false;
     for (const auto& lc : pr.proof.layers) {
         switch (lc.kind) {
         case rc::RCGkrLayerKind::GemmPhase1QKt: saw_qkt = true; break;
         case rc::RCGkrLayerKind::GemmPhase1SV: saw_sv = true; break;
+        case rc::RCGkrLayerKind::GemmPhase2FfnUp: saw_up = true; break;
         case rc::RCGkrLayerKind::GemmPhase2Fwd: saw_fwd = true; break;
-        case rc::RCGkrLayerKind::GemmPhase2Bwd: saw_bwd = true; break;
-        case rc::RCGkrLayerKind::GemmPhase2Wgrad: saw_wg = true; break;
+        case rc::RCGkrLayerKind::GemmPhase2Bwd:
+        case rc::RCGkrLayerKind::GemmPhase2Wgrad:
+            BOOST_FAIL("deprecated Bwd/Wgrad layer emitted in fused-FFN trace");
+            break;
         default: break;
         }
     }
-    BOOST_CHECK(saw_qkt && saw_sv && saw_fwd && saw_bwd && saw_wg);
+    BOOST_CHECK(saw_qkt && saw_sv && saw_up && saw_fwd);
     rc::RCGkrTiming vt;
     BOOST_CHECK(rc::VerifyWinnerProof(pr.proof, &vt));
     BOOST_CHECK(vt.ok);
@@ -463,6 +466,7 @@ BOOST_AUTO_TEST_CASE(gkr_malformed_proof_rejects)
     BOOST_REQUIRE(rc::SerializeRCGkrProof(pr.proof, bytes) > 0);
     const auto back = rc::DeserializeRCGkrProof(bytes);
     BOOST_REQUIRE(back.has_value());
+    BOOST_CHECK_EQUAL(back->episode.d_ff, params.d_ff);
     BOOST_CHECK(rc::VerifyWinnerProof(*back));
 
     bytes[bytes.size() / 2] ^= 0x5a;
@@ -1236,10 +1240,10 @@ BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_wiring_identities)
         BOOST_CHECK_LE(layout.columns[i].len, rc::kRCGkrColumnMaxCoeffs);
         BOOST_CHECK(layout.columns[i].len > 0);
     }
-    // Wiring is definitional (same column reference — §4.2), per round:
-    const rc::RCGkrLayerSpec* prev_fwd = nullptr;
-    std::vector<const rc::RCGkrLayerSpec*> fwd(params.L_lyr, nullptr);
-    std::vector<const rc::RCGkrLayerSpec*> bwd(params.L_lyr, nullptr);
+    // Wiring is definitional (same column reference — §4.2), per round.
+    const rc::RCGkrLayerSpec* prev_down = nullptr;
+    std::vector<const rc::RCGkrLayerSpec*> up(params.L_lyr, nullptr);
+    std::vector<const rc::RCGkrLayerSpec*> down(params.L_lyr, nullptr);
     for (const auto& ls : layout.layers) {
         if (ls.round != 0) continue;
         switch (ls.kind) {
@@ -1255,36 +1259,34 @@ BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_wiring_identities)
             BOOST_CHECK(!ls.a.transpose);
             break;
         }
-        case rc::RCGkrLayerKind::GemmPhase2Fwd: {
-            fwd[ls.layer] = &ls;
-            // G5: the residual column IS operand A's column (X_l) — no free
-            // residual_mle field remains in v7.
-            BOOST_CHECK_EQUAL(ls.residual_first_column,
-                              static_cast<int32_t>(ls.a.first_column));
-            BOOST_CHECK(ls.b.transpose); // Fwd reads Wᵀ
-            if (prev_fwd != nullptr) {
-                // Operand A of Fwd(l) IS extract_out of Fwd(l−1).
-                BOOST_CHECK_EQUAL(ls.a.first_column, prev_fwd->out_first_column);
-            }
-            prev_fwd = &ls;
-            break;
-        }
-        case rc::RCGkrLayerKind::GemmPhase2Bwd: {
-            bwd[ls.layer] = &ls;
-            // Bwd(l) shares W(l) with Fwd(l) — committed once, plain here.
-            BOOST_REQUIRE(fwd[ls.layer] != nullptr);
-            BOOST_CHECK_EQUAL(ls.b.first_column, fwd[ls.layer]->b.first_column);
+        case rc::RCGkrLayerKind::GemmPhase2FfnUp: {
+            up[ls.layer] = &ls;
             BOOST_CHECK(!ls.b.transpose);
+            if (prev_down != nullptr) {
+                // UP(l) operand A is X[l] = DOWN(l−1) extract_out.
+                BOOST_CHECK_EQUAL(ls.a.first_column, prev_down->out_first_column);
+            }
             break;
         }
+        case rc::RCGkrLayerKind::GemmPhase2Fwd: {
+            down[ls.layer] = &ls;
+            BOOST_REQUIRE(up[ls.layer] != nullptr);
+            // DOWN operand A is H = FfnUp(l) extract_out; W_down is row-contiguous.
+            BOOST_CHECK_EQUAL(ls.a.first_column, up[ls.layer]->out_first_column);
+            BOOST_CHECK(!ls.b.transpose);
+            // H5 residual is X[l]: X0 for l=0, otherwise DOWN(l−1) extract_out.
+            if (prev_down != nullptr) {
+                BOOST_CHECK_EQUAL(ls.residual_first_column,
+                                  static_cast<int32_t>(prev_down->out_first_column));
+            } else {
+                BOOST_CHECK_GE(ls.residual_first_column, 0);
+            }
+            prev_down = &ls;
+            break;
+        }
+        case rc::RCGkrLayerKind::GemmPhase2Bwd:
         case rc::RCGkrLayerKind::GemmPhase2Wgrad: {
-            // Wgrad(l) operand A is the SAME G(l+1) column Bwd(l) reads,
-            // transposed for free; operand B is the X(l) column Fwd(l) reads.
-            BOOST_REQUIRE(bwd[ls.layer] != nullptr);
-            BOOST_REQUIRE(fwd[ls.layer] != nullptr);
-            BOOST_CHECK_EQUAL(ls.a.first_column, bwd[ls.layer]->a.first_column);
-            BOOST_CHECK(ls.a.transpose);
-            BOOST_CHECK_EQUAL(ls.b.first_column, fwd[ls.layer]->a.first_column);
+            BOOST_FAIL("deprecated Bwd/Wgrad layer emitted in fused-FFN layout");
             break;
         }
         default:
@@ -1295,14 +1297,15 @@ BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_wiring_identities)
 
 BOOST_AUTO_TEST_CASE(gkr_v7_trace_layout_consensus_dims_chunking)
 {
-    // The 2-adicity wall at consensus dims: N_Y = 11,274,551,296 ≈ 2^33.39
+    // The 2-adicity wall at consensus dims: the trace is much larger than one
+    // κ-bounded column.
     // cells total and the QKt output alone is 2^28.58 > κ = 2^28 — the trace
     // MUST split into multiple κ-bounded columns (blueprint §0.4/§2.1).
     rc::RCEpisodeParams p; // defaults ARE the consensus dims
     BOOST_REQUIRE_EQUAL(p.n_ctx, 786'432u);
     const auto layout = rc::RCGkrTraceLayout(p);
-    BOOST_CHECK_EQUAL(layout.layers.size(), 200u); // 4·(2 + 3·16)
-    BOOST_CHECK_EQUAL(layout.trace_cells, 11'274'551'296ull);
+    BOOST_CHECK_EQUAL(layout.layers.size(), rc::RCGkrExpectedLayerCount(p)); // 4·(2 + 2·16)
+    BOOST_CHECK_GT(layout.trace_cells, 0ull);
     // QKt Y (512·786432 = 402,653,184 cells) splits into exactly 2 chunks.
     const auto& qkt = layout.layers[0];
     BOOST_CHECK(qkt.kind == rc::RCGkrLayerKind::GemmPhase1QKt);

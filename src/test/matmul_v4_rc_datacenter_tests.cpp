@@ -877,7 +877,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_batch_vs_reference_rows_per_lobe)
 // ---------------------------------------------------------------------------
 // ENC_RC datacenter EPISODE PROFILE (nMatMulRCProfile==2 → MakeDatacenterRC…).
 // Additive: profile 1 reproduces today's base params byte-for-byte; profile 2
-// raises ONLY rounds/L_lyr/b_seq. scratchpad/datacenter-episode-dimensions-design.md.
+// changes the fused-FFN datacenter profile axes. scratchpad/datacenter-episode-
+// dimensions-design.md.
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -885,7 +886,7 @@ bool RCEpisodeParamsEqual(const rc::RCEpisodeParams& a, const rc::RCEpisodeParam
 {
     return a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q &&
            a.n_ctx == b.n_ctx && a.L_lyr == b.L_lyr && a.d_model == b.d_model &&
-           a.b_seq == b.b_seq && a.T_leaf == b.T_leaf;
+           a.d_ff == b.d_ff && a.b_seq == b.b_seq && a.T_leaf == b.T_leaf;
 }
 
 CBlockHeader MakeDcRCHeader(uint64_t nonce)
@@ -930,7 +931,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
     BOOST_CHECK_EQUAL(dc.rounds, rc::kRCRoundsDC);
     BOOST_CHECK_EQUAL(dc.rounds, 8u);
     BOOST_CHECK_EQUAL(dc.L_lyr, rc::kRCLayersDC);
-    BOOST_CHECK_EQUAL(dc.L_lyr, 64u);
+    BOOST_CHECK_EQUAL(dc.L_lyr, 24u);
     BOOST_CHECK_EQUAL(dc.b_seq, rc::kRCBatchSeqDC);
     BOOST_CHECK_EQUAL(dc.b_seq, 32768u);
     // Intensive dims held at epoch-0 values.
@@ -939,6 +940,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
     BOOST_CHECK_EQUAL(dc.n_q, 4u * dc.d_head);
     BOOST_CHECK_EQUAL(dc.n_ctx, 786432u);
     BOOST_CHECK_EQUAL(dc.d_model, 4096u);
+    BOOST_CHECK_EQUAL(dc.d_ff, 16384u);
     // T_leaf is RAISED for the datacenter profile (compute/hash margin lever,
     // aicompute-alignment-review.md §4) — 4× the epoch-0 1024.
     BOOST_CHECK_EQUAL(dc.T_leaf, rc::kRCTileLeafBytesDC);
@@ -947,19 +949,19 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
     BOOST_CHECK(rc::ValidateRCEpisodeParams(dc));
 }
 
-// (b) TotalRCEpisodeMacs(datacenter) ≈ 16× base and equals the design's
-//     8.45e14 MAC figure (1.69e15 FLOP).
+// (b) TotalRCEpisodeMacs(datacenter) equals the fused profile's absolute
+//     8.45e14 MAC figure (1.69e15 FLOP). With base d_ff=4·d_model and
+//     datacenter L=24, this is ~6× the fused base (not ~16× the old 3-GEMM base).
 BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_mac_ratio)
 {
     const uint64_t base_macs = rc::TotalRCEpisodeMacs(rc::DefaultConsensusRCEpisodeParams());
     const uint64_t dc_macs = rc::TotalRCEpisodeMacs(rc::MakeDatacenterRCEpisodeParams());
-    BOOST_CHECK_EQUAL(base_macs, 53188874993664ull);   // 5.32e13
+    BOOST_CHECK_EQUAL(base_macs, 141149805215744ull);  // 1.41e14
     BOOST_CHECK_EQUAL(dc_macs, 845249563852800ull);    // 8.45e14
     const double ratio = static_cast<double>(dc_macs) / static_cast<double>(base_macs);
-    // FFN grows 2·4·2=16×; attention only 2× (0.05% of work) → ratio ≈ 15.89.
-    BOOST_CHECK_CLOSE(ratio, 16.0, 1.0);               // within 1%
-    BOOST_CHECK_GT(ratio, 15.0);
-    BOOST_CHECK_LT(ratio, 16.0);
+    BOOST_TEST_MESSAGE("fused datacenter/base MAC ratio: " << ratio);
+    BOOST_CHECK_GT(ratio, 5.9);
+    BOOST_CHECK_LT(ratio, 6.1);
     // FLOP = 2× MAC.
     BOOST_CHECK_EQUAL(2ull * dc_macs, 1690499127705600ull); // 1.69e15
 }
@@ -980,13 +982,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile1_byte_identical_guard)
     BOOST_CHECK_MESSAGE(RCEpisodeParamsEqual(r1, base),
                         "profile-1 resolver must reproduce base params byte-for-byte");
 
-    // Datacenter holds the intensive GEMM dims at base, raises the free extensive
-    // axes (rounds/L_lyr/b_seq), and raises T_leaf (compute/hash margin lever, §4).
+    // Datacenter holds most intensive GEMM dims at base, changes the fused profile
+    // axes, and raises T_leaf (compute/hash margin lever, §4).
     const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
     BOOST_CHECK_EQUAL(dc.d_head, base.d_head);
     BOOST_CHECK_EQUAL(dc.n_q, base.n_q);
     BOOST_CHECK_EQUAL(dc.n_ctx, base.n_ctx);   // n_ctx guardrail: never grows (§4)
     BOOST_CHECK_EQUAL(dc.d_model, base.d_model);
+    BOOST_CHECK_EQUAL(dc.d_ff, base.d_ff);
     BOOST_CHECK(dc.T_leaf > base.T_leaf);      // raised, not held
     BOOST_CHECK(dc.rounds != base.rounds);
     BOOST_CHECK(dc.L_lyr != base.L_lyr);
@@ -1115,14 +1118,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     rc::RCFreivaldsCarrierStoreClear();
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Tampered sampled layer: flip a Y output of a carried tile. At toy dims
-    // every sampleable layer is carried+sampled and the contraction is fully
-    // covered, so the segment-Freivalds tile check catches it exactly.
+    // Tampered sampled layer: flip a carried committed output tile. Carrier v3
+    // anchors the input row and recomputes the tile, so the forged output is
+    // rejected.
     rc::RCFreivaldsSampledCarrier tampered = carrier;
     bool tampered_one = false;
     for (auto& e : tampered.sampled) {
         for (auto& t : e.tiles) {
-            if (!t.Y.empty()) { t.Y[0] += 1; tampered_one = true; break; }
+            if (!t.extract_out.empty()) { t.extract_out[0] ^= 0x1; tampered_one = true; break; }
         }
         if (tampered_one) break;
     }
@@ -1191,7 +1194,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
     bool tampered_one = false;
     for (auto& e : tampered.sampled) {
         for (auto& t : e.tiles) {
-            if (!t.Y.empty()) { t.Y[0] += 1; tampered_one = true; break; }
+            if (!t.extract_out.empty()) { t.extract_out[0] ^= 0x1; tampered_one = true; break; }
         }
         if (tampered_one) break;
     }
@@ -1262,6 +1265,101 @@ bool BuildToyCarrier(const CBlockHeader& header, const rc::RCEpisodeParams& para
     return rc::BuildFreivaldsSampledCarrier(pr.proof, header, height, target, out, &why);
 }
 } // namespace
+
+// (c''') REGRESSION: d_ff is a consensus/relay shape field. A carrier with a
+//       cheaper fused-FFN inner width must not authenticate for a profile-2
+//       block, even if every other carrier byte came from an honest proof.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_d_ff_mismatch)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    CBlockHeader header = MakeDcRCHeader(0xdff0);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    rc::RCFreivaldsSampledCarrier carrier;
+    BOOST_REQUIRE(BuildToyCarrier(header, params_rc, kHeight, *target, carrier));
+    BOOST_REQUIRE_EQUAL(carrier.episode.d_ff, params_rc.d_ff);
+
+    rc::RCFreivaldsSampledCarrier bad = carrier;
+    bad.episode.d_ff += rc::kRCMxBlockLen; // keep mod-32 shape-valid, but consensus-wrong
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(bad.episode));
+
+    // Consensus authority rejects before the sampled carrier can stand in for a
+    // cheaper episode shape.
+    rc::RCFreivaldsCarrierStoreClear();
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), bad);
+    bool carrier_missing = true;
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+    BOOST_CHECK(!carrier_missing); // present-but-wrong is permanent, not transient
+
+    // The relay/carrier semantic gate also rejects the mutated shape: d_ff is
+    // bound into the FS seed / layer provenance and cannot be changed under an
+    // otherwise honest carrier.
+    std::string why;
+    BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(bad, header, kHeight, *target, &why));
+    BOOST_CHECK_MESSAGE(why.rfind("v7fs:", 0) == 0,
+                        "d_ff mismatch should die inside the v7fs carrier gate, got: " << why);
+    rc::RCFreivaldsCarrierStoreClear();
+}
+
+// (c'''') REGRESSION: the sampled output tile is not self-authenticating relay
+//         data. The verifier must recompute X[l+1] =
+//         Extract(Extract(X·W_up)·W_down + X) from anchored inputs and reject a
+//         forged committed output tile before it can pass via tile-tree tautology.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_forged_output_recompute_rejects)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    CBlockHeader header = MakeDcRCHeader(0xf09d);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    rc::RCFreivaldsSampledCarrier carrier;
+    BOOST_REQUIRE(BuildToyCarrier(header, params_rc, kHeight, *target, carrier));
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, header, kHeight, *target, &why),
+        "honest carrier must verify: " << why);
+
+    rc::RCFreivaldsSampledCarrier forged = carrier;
+    bool flipped = false;
+    for (auto& e : forged.sampled) {
+        if (e.kind != rc::RCGkrLayerKind::GemmPhase2Fwd) continue;
+        for (auto& t : e.tiles) {
+            if (!t.extract_out.empty()) {
+                t.extract_out[0] ^= 0x1;
+                flipped = true;
+                break;
+            }
+        }
+        if (flipped) break;
+    }
+    BOOST_REQUIRE(flipped);
+
+    why.clear();
+    BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(forged, header, kHeight, *target, &why));
+    BOOST_CHECK_EQUAL(why, "v7fs:recompute_mismatch");
+
+    rc::RCFreivaldsCarrierStoreClear();
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), forged);
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    rc::RCFreivaldsCarrierStoreClear();
+}
 
 // (f) Carrier serialization round-trips BYTE-EXACT, and the bounded deserializer
 //     rejects oversize / truncated / trailing-data / wrong-version input.
@@ -1401,12 +1499,12 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_rejects_irrelevant_and_tampered)
     rc::RCFreivaldsCarrierStorePut(header_b.GetHash(), carrier_a);
     BOOST_CHECK(!CheckMatMulProofOfWork_RC(header_b, p, kHeight));
 
-    // TAMPERED: flip a sampled tile Y output; the carrier no longer authenticates.
+    // TAMPERED: flip a sampled output tile; the carrier no longer authenticates.
     rc::RCFreivaldsSampledCarrier tampered = carrier_a;
     bool flipped = false;
     for (auto& e : tampered.sampled) {
         for (auto& t : e.tiles) {
-            if (!t.Y.empty()) { t.Y[0] += 1; flipped = true; break; }
+            if (!t.extract_out.empty()) { t.extract_out[0] ^= 0x1; flipped = true; break; }
         }
         if (flipped) break;
     }
@@ -1552,19 +1650,17 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_lambda512_tleaf_compute_hash_margin)
     BOOST_CHECK_EQUAL(dc.T_leaf, 4096u);
     BOOST_CHECK_GT(dc.T_leaf, base.T_leaf);
 
-    // (c) compute/hash ratio. Model (design §2d / review §4): FFN GEMM does
-    // 1.5·d_model MAC per committed byte; the SHA tile-tree processes
-    // (1 + 64/T_leaf) bytes per committed byte (leaf content + 64-byte internal
-    // nodes). ratio R = 1.5·d_model / (1 + 64/T_leaf) MAC per SHA-byte. Raising
-    // T_leaf shrinks the SHA overhead → R rises. Normalize by a balanced-node knee
-    // (μ·P_peak)/τ_sha ≈ 6400 (review §4) to read the margin.
+    // (c) compute/hash ratio. Fused FFN commits one output byte per layer but
+    // performs up+down work = 2·d_ff MAC per committed byte; the SHA tile-tree
+    // processes (1 + 64/T_leaf) bytes per committed byte (leaf content + 64-byte
+    // internal nodes). Normalize by a balanced-node knee ≈6400 MAC/SHA-byte.
     auto hash_overhead = [](uint32_t t_leaf) { return 1.0 + 64.0 / t_leaf; };
     auto ratio = [&](const rc::RCEpisodeParams& p) {
-        return 1.5 * p.d_model / hash_overhead(p.T_leaf);
+        return 2.0 * p.d_ff / hash_overhead(p.T_leaf);
     };
     const double knee = 6400.0;
-    const double r_epoch0 = ratio(base);   // d_model=4096, T_leaf=1024
-    const double r_dc = ratio(dc);         // d_model=4096, T_leaf=4096
+    const double r_epoch0 = ratio(base);   // d_ff=16384, T_leaf=1024
+    const double r_dc = ratio(dc);         // d_ff=16384, T_leaf=4096
     const double margin_epoch0 = r_epoch0 / knee;
     const double margin_dc = r_dc / knee;
     BOOST_TEST_MESSAGE("compute/hash margin epoch-0 (T_leaf=1024): " << margin_epoch0);
@@ -1574,13 +1670,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_lambda512_tleaf_compute_hash_margin)
     BOOST_CHECK_GT(r_dc, r_epoch0);                       // strictly improved
     BOOST_CHECK_CLOSE(r_dc / r_epoch0,
                       hash_overhead(1024) / hash_overhead(4096), 1e-6); // ≈1.046
-    BOOST_CHECK_GT(margin_dc, 0.94);                      // off the knee (was ~0.90)
+    BOOST_CHECK_GT(margin_dc, 5.0);                       // ≈5.04× the knee
     BOOST_CHECK_LT(margin_epoch0, margin_dc);
-    // Honest bound: the T_leaf lever caps near the ~6% internal-node overhead; the
-    // residual toward the review's 2–4× target is the GEMM-based digest (future).
-    const double max_possible = 1.5 * dc.d_model / 1.0 / knee; // T_leaf → ∞
+    const double max_possible = 2.0 * dc.d_ff / 1.0 / knee; // T_leaf → ∞
     BOOST_CHECK_LT(margin_dc, max_possible);
-    BOOST_CHECK_LT(max_possible, 1.0);  // even a perfect tree stays at the ~0.96 knee
+    BOOST_CHECK_GT(max_possible, 5.1);
 }
 
 // (h) ASYNC-WORKER MEMO INTEGRITY: the ENC-DR verdict memo's invariant is that a
