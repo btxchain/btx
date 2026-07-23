@@ -718,13 +718,14 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 }
                 // Y block = S_row · V[:, bcol-block], then Extract(prf_Z). No residual.
                 std::array<int64_t, kRCMxBlockLen> yblk{};
-                for (uint32_t c = 0; c < T; ++c) {
-                    const uint32_t col = tile.bcol * T + c;
-                    int64_t acc = 0;
-                    for (uint32_t t = 0; t < n_ctx; ++t)
-                        acc += static_cast<int64_t>(S_row[t]) *
-                               static_cast<int64_t>(V[static_cast<size_t>(t) * d_head + col]);
-                    yblk[c] = acc;
+                yblk.fill(0);
+                const uint32_t out_col0 = tile.bcol * T;
+                for (uint32_t t = 0; t < n_ctx; ++t) {
+                    const int64_t s = static_cast<int64_t>(S_row[t]);
+                    const int8_t* v = V.data() + static_cast<size_t>(t) * d_head + out_col0;
+                    for (uint32_t c = 0; c < T; ++c) {
+                        yblk[c] += s * static_cast<int64_t>(v[c]);
+                    }
                 }
                 eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
                 tm.recompute_s += Secs(t_rc_sv);
@@ -779,27 +780,31 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 std::vector<int8_t> H_row(d_ff);
                 std::array<int64_t, kRCMxBlockLen> blk{};
                 for (uint32_t bj = 0; bj < d_ff / T; ++bj) {
-                    for (uint32_t c = 0; c < T; ++c) {
-                        const uint32_t col = bj * T + c;
-                        int64_t acc = 0;
-                        for (uint32_t d = 0; d < d_model; ++d)
-                            acc += static_cast<int64_t>(X_row[d]) *
-                                   static_cast<int64_t>(W_up[static_cast<size_t>(d) * d_ff + col]);
-                        blk[c] = acc;
+                    blk.fill(0);
+                    const uint32_t col0 = bj * T;
+                    for (uint32_t d = 0; d < d_model; ++d) {
+                        const int64_t x = static_cast<int64_t>(X_row[d]);
+                        const int8_t* w = W_up.data() + static_cast<size_t>(d) * d_ff + col0;
+                        for (uint32_t c = 0; c < T; ++c) {
+                            blk[c] += x * static_cast<int64_t>(w[c]);
+                        }
                     }
                     const auto ho = ExtractBlock(up.extract_prf, tile.row, bj, blk.data());
                     for (uint32_t c = 0; c < T; ++c) H_row[bj * T + c] = ho[c];
                 }
                 // Y-block = Extract(H_row·W_down[:,bcol] + X_row[bcol]) (residual +X[l]).
                 std::array<int64_t, kRCMxBlockLen> yblk{};
+                yblk.fill(0);
+                const uint32_t out_col0 = tile.bcol * T;
+                for (uint32_t t = 0; t < d_ff; ++t) {
+                    const int64_t h = static_cast<int64_t>(H_row[t]);
+                    const int8_t* w = W_down.data() + static_cast<size_t>(t) * d_model + out_col0;
+                    for (uint32_t c = 0; c < T; ++c) {
+                        yblk[c] += h * static_cast<int64_t>(w[c]);
+                    }
+                }
                 for (uint32_t c = 0; c < T; ++c) {
-                    const uint32_t col = tile.bcol * T + c;
-                    int64_t acc = 0;
-                    for (uint32_t t = 0; t < d_ff; ++t)
-                        acc += static_cast<int64_t>(H_row[t]) *
-                               static_cast<int64_t>(W_down[static_cast<size_t>(t) * d_model + col]);
-                    acc += static_cast<int64_t>(X_row[col]); // residual +X[l] (H5)
-                    yblk[c] = acc;
+                    yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]); // residual +X[l] (H5)
                 }
                 eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
                 tm.recompute_s += Secs(t_rc_dn);

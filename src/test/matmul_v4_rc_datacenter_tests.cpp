@@ -1359,6 +1359,42 @@ uint32_t PaddedLeafDepthBench(uint64_t stream_bytes, uint32_t t_leaf)
     return depth;
 }
 
+uint256 LeafHashFromBytesBench(const std::vector<uint8_t>& leaf_bytes)
+{
+    std::vector<unsigned char> pre;
+    pre.reserve(1 + leaf_bytes.size());
+    pre.push_back(rc::kRCLeafTag);
+    pre.insert(pre.end(), leaf_bytes.begin(), leaf_bytes.end());
+    return rc::Sha256dBytes(pre.data(), pre.size());
+}
+
+uint256 FoldProofRootBench(uint256 cur, uint32_t index, const rc::RCMerkleProof& proof)
+{
+    uint32_t idx = index;
+    for (const uint256& sib : proof.siblings) {
+        unsigned char buf[1 + 64];
+        buf[0] = rc::kRCNodeTag;
+        if ((idx & 1u) == 0) {
+            std::memcpy(buf + 1, cur.data(), 32);
+            std::memcpy(buf + 1 + 32, sib.data(), 32);
+        } else {
+            std::memcpy(buf + 1, sib.data(), 32);
+            std::memcpy(buf + 1 + 32, cur.data(), 32);
+        }
+        cur = rc::Sha256dBytes(buf, sizeof(buf));
+        idx >>= 1;
+    }
+    return cur;
+}
+
+bool SimulateMerkleOpenBench(const std::vector<uint8_t>& leaf_bytes, uint32_t leaf_index,
+                             const rc::RCMerkleProof& proof)
+{
+    const uint256 leaf = LeafHashFromBytesBench(leaf_bytes);
+    const uint256 root = FoldProofRootBench(leaf, leaf_index, proof);
+    return rc::VerifyMerkleProof(leaf, leaf_index, proof, root);
+}
+
 std::vector<uint32_t> SampleableIndicesBench(const std::vector<rc::RCGkrSampledLayerProv>& prov)
 {
     std::vector<uint32_t> out;
@@ -1371,6 +1407,13 @@ std::vector<uint32_t> SampleableIndicesBench(const std::vector<rc::RCGkrSampledL
 struct ProdCarrierBenchReport {
     bool stopped_at_budget{false};
     double total_s{0.0};
+    double regen_s{0.0};
+    double recompute_s{0.0};
+    double merkle_s{0.0};
+    double first_layer_total_s{0.0};
+    double first_layer_regen_s{0.0};
+    double first_layer_recompute_s{0.0};
+    double first_layer_merkle_s{0.0};
     uint32_t units_total{0};
     uint32_t sampled_total{0};
     uint32_t first_layer_index{0};
@@ -1382,12 +1425,21 @@ struct ProdCarrierBenchReport {
     uint64_t extract_tiles{0};
     uint32_t merkle_openings{0};
     uint64_t merkle_hashes{0};
+    uint32_t checked_merkle_openings{0};
+    uint64_t checked_merkle_hashes{0};
+    uint64_t first_layer_extract_tiles{0};
+    uint32_t first_layer_checked_merkle_openings{0};
+    uint64_t first_layer_checked_merkle_hashes{0};
     size_t carrier_bytes{0};
     uint32_t tree_depth{0};
     uint64_t regen_misses{0};
     uint64_t regen_hits{0};
     uint64_t regen_bytes{0};
+    uint64_t first_layer_regen_misses{0};
+    uint64_t first_layer_regen_hits{0};
+    uint64_t first_layer_regen_bytes{0};
     uint64_t planned_regen_bytes_full{0};
+    bool recompute_vectorized{false};
     uint64_t checksum{0};
 };
 
@@ -1497,6 +1549,9 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
          2ull * static_cast<uint64_t>(p.L_lyr) * p.d_model * p.d_ff);
 
     std::map<uint256, std::vector<int8_t>> regen;
+    auto elapsed = [&](std::chrono::steady_clock::time_point t0) {
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    };
     auto regen_leaf = [&](const uint256& seed, uint32_t rows, uint32_t cols) -> const std::vector<int8_t>& {
         auto it = regen.find(seed);
         if (it != regen.end()) {
@@ -1505,13 +1560,17 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
         }
         ++rep.regen_misses;
         rep.regen_bytes += static_cast<uint64_t>(rows) * cols;
-        return regen.emplace(seed, rc::ExpandMxDequantInt8(seed, rows, cols)).first->second;
-    };
-    auto elapsed = [&](std::chrono::steady_clock::time_point t0) {
-        return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        const auto t0 = std::chrono::steady_clock::now();
+        const std::vector<int8_t>& v =
+            regen.emplace(seed, rc::ExpandMxDequantInt8(seed, rows, cols)).first->second;
+        rep.regen_s += elapsed(t0);
+        return v;
     };
     const bool full = std::getenv("BTX_RC_PROD_CARRIER_VERIFY_BENCH_FULL") != nullptr;
     const auto t0 = std::chrono::steady_clock::now();
+    const std::vector<uint8_t> dummy_leaf(p.T_leaf, 0);
+    rc::RCMerkleProof dummy_proof;
+    dummy_proof.siblings.resize(rep.tree_depth);
     for (uint32_t u : units) {
         const uint32_t li = sampleable[u];
         const auto& lp = prov[li];
@@ -1522,6 +1581,16 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
             rep.first_n = lp.n;
             rep.first_k = lp.k;
         }
+        const double layer_t0 = elapsed(t0);
+        const double layer_regen0 = rep.regen_s;
+        const double layer_recompute0 = rep.recompute_s;
+        const double layer_merkle0 = rep.merkle_s;
+        const uint64_t layer_regen_misses0 = rep.regen_misses;
+        const uint64_t layer_regen_hits0 = rep.regen_hits;
+        const uint64_t layer_regen_bytes0 = rep.regen_bytes;
+        const uint64_t layer_extract_tiles0 = rep.extract_tiles;
+        const uint32_t layer_checked_merkle_openings0 = rep.checked_merkle_openings;
+        const uint64_t layer_checked_merkle_hashes0 = rep.checked_merkle_hashes;
         for (const TilePlanBench& pl : TilePositionsBench(base_seed, li, lp.m, lp.n)) {
             std::array<int8_t, rc::kRCMxBlockLen> eo{};
             if (lp.kind == rc::RCGkrLayerKind::GemmPhase1SV) {
@@ -1531,6 +1600,7 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 const std::vector<int8_t>& Q = regen_leaf(qkt.a.seed, p.n_q, d_head);
                 const std::vector<int8_t>& K = regen_leaf(qkt.b.seed, n_ctx, d_head);
                 const std::vector<int8_t>& V = regen_leaf(lp.b.seed, n_ctx, d_head);
+                const auto t_rc_sv = std::chrono::steady_clock::now();
                 std::vector<int8_t> S_row(n_ctx);
                 std::array<int64_t, rc::kRCMxBlockLen> blk{};
                 for (uint32_t bt = 0; bt < n_ctx / rc::kRCMxBlockLen; ++bt) {
@@ -1548,16 +1618,17 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                         S_row[bt * rc::kRCMxBlockLen + c] = so[c];
                 }
                 std::array<int64_t, rc::kRCMxBlockLen> yblk{};
-                for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
-                    const uint32_t col = pl.bcol * rc::kRCMxBlockLen + c;
-                    int64_t acc = 0;
-                    for (uint32_t t = 0; t < n_ctx; ++t) {
-                        acc += static_cast<int64_t>(S_row[t]) *
-                               static_cast<int64_t>(V[static_cast<size_t>(t) * d_head + col]);
+                yblk.fill(0);
+                const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
+                for (uint32_t t = 0; t < n_ctx; ++t) {
+                    const int64_t s = static_cast<int64_t>(S_row[t]);
+                    const int8_t* v = V.data() + static_cast<size_t>(t) * d_head + out_col0;
+                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                        yblk[c] += s * static_cast<int64_t>(v[c]);
                     }
-                    yblk[c] = acc;
                 }
                 eo = ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
+                rep.recompute_s += elapsed(t_rc_sv);
             } else if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd) {
                 const auto& up = prov[lp.a.src_idx];
                 const uint32_t d_model = lp.n;
@@ -1578,37 +1649,65 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
                 }
                 const std::vector<int8_t>& W_up = regen_leaf(up.b.seed, d_model, d_ff);
                 const std::vector<int8_t>& W_down = regen_leaf(lp.b.seed, d_ff, d_model);
+                const auto t_rc_dn = std::chrono::steady_clock::now();
                 std::vector<int8_t> H_row(d_ff);
                 std::array<int64_t, rc::kRCMxBlockLen> blk{};
                 for (uint32_t bj = 0; bj < d_ff / rc::kRCMxBlockLen; ++bj) {
-                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
-                        const uint32_t col = bj * rc::kRCMxBlockLen + c;
-                        int64_t acc = 0;
-                        for (uint32_t d = 0; d < d_model; ++d) {
-                            acc += static_cast<int64_t>(X_row[d]) *
-                                   static_cast<int64_t>(W_up[static_cast<size_t>(d) * d_ff + col]);
+                    blk.fill(0);
+                    const uint32_t col0 = bj * rc::kRCMxBlockLen;
+                    for (uint32_t d = 0; d < d_model; ++d) {
+                        const int64_t x = static_cast<int64_t>(X_row[d]);
+                        const int8_t* w = W_up.data() + static_cast<size_t>(d) * d_ff + col0;
+                        for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                            blk[c] += x * static_cast<int64_t>(w[c]);
                         }
-                        blk[c] = acc;
                     }
                     const auto ho = ExtractBlockBench(up.extract_prf, pl.row, bj, blk.data());
                     for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c)
                         H_row[bj * rc::kRCMxBlockLen + c] = ho[c];
                 }
                 std::array<int64_t, rc::kRCMxBlockLen> yblk{};
-                for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
-                    const uint32_t col = pl.bcol * rc::kRCMxBlockLen + c;
-                    int64_t acc = 0;
-                    for (uint32_t t = 0; t < d_ff; ++t) {
-                        acc += static_cast<int64_t>(H_row[t]) *
-                               static_cast<int64_t>(W_down[static_cast<size_t>(t) * d_model + col]);
+                yblk.fill(0);
+                const uint32_t out_col0 = pl.bcol * rc::kRCMxBlockLen;
+                for (uint32_t t = 0; t < d_ff; ++t) {
+                    const int64_t h = static_cast<int64_t>(H_row[t]);
+                    const int8_t* w = W_down.data() + static_cast<size_t>(t) * d_model + out_col0;
+                    for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                        yblk[c] += h * static_cast<int64_t>(w[c]);
                     }
-                    acc += static_cast<int64_t>(X_row[col]);
-                    yblk[c] = acc;
+                }
+                for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                    yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
                 }
                 eo = ExtractBlockBench(lp.extract_prf, pl.row, pl.bcol, yblk.data());
+                rep.recompute_s += elapsed(t_rc_dn);
             }
+            const auto t_mk = std::chrono::steady_clock::now();
+            if (lp.kind == rc::RCGkrLayerKind::GemmPhase2Fwd && lp.layer > 0) {
+                BOOST_REQUIRE(SimulateMerkleOpenBench(dummy_leaf, /*leaf_index=*/0, dummy_proof));
+                ++rep.checked_merkle_openings;
+                rep.checked_merkle_hashes += rep.tree_depth;
+            }
+            BOOST_REQUIRE(SimulateMerkleOpenBench(dummy_leaf, /*leaf_index=*/0, dummy_proof));
+            ++rep.checked_merkle_openings;
+            rep.checked_merkle_hashes += rep.tree_depth;
+            rep.merkle_s += elapsed(t_mk);
             for (int8_t v : eo) rep.checksum = rep.checksum * 131u + static_cast<unsigned char>(v);
             ++rep.extract_tiles;
+        }
+        if (rep.layers_checked == 0) {
+            rep.first_layer_total_s = elapsed(t0) - layer_t0;
+            rep.first_layer_regen_s = rep.regen_s - layer_regen0;
+            rep.first_layer_recompute_s = rep.recompute_s - layer_recompute0;
+            rep.first_layer_merkle_s = rep.merkle_s - layer_merkle0;
+            rep.first_layer_regen_misses = rep.regen_misses - layer_regen_misses0;
+            rep.first_layer_regen_hits = rep.regen_hits - layer_regen_hits0;
+            rep.first_layer_regen_bytes = rep.regen_bytes - layer_regen_bytes0;
+            rep.first_layer_extract_tiles = rep.extract_tiles - layer_extract_tiles0;
+            rep.first_layer_checked_merkle_openings =
+                rep.checked_merkle_openings - layer_checked_merkle_openings0;
+            rep.first_layer_checked_merkle_hashes =
+                rep.checked_merkle_hashes - layer_checked_merkle_hashes0;
         }
         ++rep.layers_checked;
         rep.total_s = elapsed(t0);
@@ -1636,6 +1735,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
     const auto rep = RunProductionCarrierVerifierComputeBench();
     BOOST_TEST_MESSAGE("production carrier verify compute benchmark: total_ms="
                        << (rep.total_s * 1000.0)
+                       << " regen_s=" << rep.regen_s
+                       << " recompute_s=" << rep.recompute_s
+                       << " merkle_s=" << rep.merkle_s
+                       << " first_layer_total_s=" << rep.first_layer_total_s
+                       << " first_layer_regen_s=" << rep.first_layer_regen_s
+                       << " first_layer_recompute_s=" << rep.first_layer_recompute_s
+                       << " first_layer_merkle_s=" << rep.first_layer_merkle_s
                        << " budget_ms=900"
                        << " stopped_at_budget=" << (rep.stopped_at_budget ? 1 : 0)
                        << " units_total=" << rep.units_total
@@ -1651,9 +1757,18 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
                        << " tree_depth=" << rep.tree_depth
                        << " merkle_openings=" << rep.merkle_openings
                        << " merkle_hashes=" << rep.merkle_hashes
+                       << " checked_merkle_openings=" << rep.checked_merkle_openings
+                       << " checked_merkle_hashes=" << rep.checked_merkle_hashes
+                       << " first_layer_extract_tiles=" << rep.first_layer_extract_tiles
+                       << " first_layer_checked_merkle_openings=" << rep.first_layer_checked_merkle_openings
+                       << " first_layer_checked_merkle_hashes=" << rep.first_layer_checked_merkle_hashes
                        << " regen_misses=" << rep.regen_misses
                        << " regen_hits=" << rep.regen_hits
                        << " regen_bytes=" << rep.regen_bytes
+                       << " first_layer_regen_misses=" << rep.first_layer_regen_misses
+                       << " first_layer_regen_hits=" << rep.first_layer_regen_hits
+                       << " first_layer_regen_bytes=" << rep.first_layer_regen_bytes
+                       << " recompute_vectorized=" << (rep.recompute_vectorized ? 1 : 0)
                        << " planned_full_regen_bytes=" << rep.planned_regen_bytes_full
                        << " checksum=" << rep.checksum);
 
