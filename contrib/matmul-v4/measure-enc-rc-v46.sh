@@ -87,7 +87,7 @@ case "$cmd" in
     ;;
   cuda-episode-tests)
     BIN=""
-    for d in "$ROOT/build-cuda" "$ROOT/build-measure-cuda" "$ROOT"/build*; do
+    for d in "$ROOT/build-cuda-rc46" "$ROOT/build-cuda" "$ROOT/build-measure-cuda" "$ROOT"/build*; do
       [ -x "$d/bin/test_btx" ] && BIN="$d/bin/test_btx" && break
     done
     if [ -z "$BIN" ]; then
