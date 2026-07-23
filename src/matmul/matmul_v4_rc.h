@@ -80,11 +80,20 @@ static_assert(kRCFfnDim != 0, "kRCFfnDim must be non-zero");
  * MX-block-aligned (%32) and %64==0 so segment openings still bind cleanly to leaves.
  */
 inline constexpr uint32_t kRCRoundsDC = 8;     // 2× epoch-0 rounds (depth)
-// Fused-FFN datacenter depth (scratchpad/fused-ffn-episode-design.md §Dimensioning):
-// per layer-round MAC = 2·b_seq·d_model·d_ff = 4.398 T; the ~15.9× datacenter target
-// (~845 T MAC) at rounds=8 pins L=24 (NOT 64). Was 64 under the 3-GEMM d_model² layer.
-inline constexpr uint32_t kRCLayersDC = 24;    // fused-FFN depth (rounds=8 ⇒ 15.88× MAC)
-inline constexpr uint32_t kRCBatchSeqDC = 32'768; // 2× epoch-0 b_seq (batch)
+// Fused-FFN datacenter dims (scratchpad/fused-ffn-episode-design.md §Dimensioning).
+// SCALE LEVER = b_seq (batch), NOT L_lyr: L raises the sampleable-unit count
+// N = rounds·(1+L), which would push λ·(per-unit bytes) over the 12 MiB carrier
+// ceiling (L=64 ⇒ N=520 ⇒ ~27 MiB) and weaken exhaustive layer coverage. b_seq
+// raises MAC with N, λ, carrier bytes and per-tile verify-cost all HELD (width
+// unpin), so it is the free compute lever; d_ff is the margin lever (gated by
+// verify time). L_lyr stays 24 (N = 8·25 = 200, λ = min(512,200) = 200: every
+// unit sampled). b_seq is raised to restore the intended ~16× datacenter/base
+// differential against the (now fused-FFN, heavier) base:
+//   MAC_dc   = 2^37·16422 = 2 257 022 493 917 184  (~2.257 PMAC, ~16× base)
+//   MAC_base = 2^37·1027   =   141 149 805 215 744
+//   exact reduced ratio = 16422/1027 = 15.990× (drives the ASERT rescale).
+inline constexpr uint32_t kRCLayersDC = 24;    // fused-FFN depth (N=200, λ exhaustive)
+inline constexpr uint32_t kRCBatchSeqDC = 87'552; // = 2736·32 (MX-aligned); ~16× ratio lever
 inline constexpr uint32_t kRCFfnDimDC = 4 * kRCModelDim; // 16384 (transformer 4× expansion)
 inline constexpr uint32_t kRCTileLeafBytesDC = 4096; // 4× epoch-0 (compute/hash margin)
 static_assert(kRCBatchSeqDC % 32 == 0, "kRCBatchSeqDC must be divisible by 32 (MX align)");
