@@ -29,12 +29,70 @@ paying the full O(N) replay on the network path. Its wall-clock time is what the
 900 ms budget bounds — the time a validating node spends verifying one carrier
 before relaying it.
 
-The budget is a **relay-path liveness bound, not a soundness parameter.**
-Soundness comes from k=U forced unit coverage (all ≈400 units checked; single-
-fault detection is linear and non-amplifiable — no Freivalds amortization is
-admissible because H is unpublished) and from exact int32 recompute. The budget
-only decides *which hardware can keep up with block flow*; it never relaxes what
-is checked.
+The budget is a **relay-path liveness bound, not a soundness parameter.** The
+budget only decides *which hardware can keep up with block flow*; it never
+relaxes what is checked.
+
+### 1.1 What the sampled carrier actually enforces (honest bound)
+
+An earlier draft of this section claimed "all ≈400 units checked; single-fault
+detection is linear." That was inaccurate on both counts and is corrected here.
+
+The carrier is checked at two granularities:
+
+- **Unit granularity — exhaustive, not sampled.** The sampleable units are the
+  Λ streamed DOWN-projection outputs, `Λ = rounds · L_lyr = 8 · 24 = 192` at the
+  production datacenter shape (`MakeDatacenterRCEpisodeParams`). The FS sample
+  count is `kRCFreivaldsSampleCount = 512 ≥ Λ`, and `FreivaldsSampleLayers`
+  draws `min(λ, Λ)` distinct units — so **every** streamed unit is checked. There
+  is no unit-level sampling gap. (The "≈400" in the old text was the GKR *wire*
+  count, a different quantity.)
+- **Tile granularity — sampled.** Within each checked unit, the verifier opens
+  `kRCFreivaldsSegOutTiles = 2` output tiles (each a `(row, col-segment)`) out of
+  the layer's full tile space `T ≈ 1.1·10⁷`, and Freivalds-verifies each opened
+  tile's int8·int8→int64 GEMM exactly (per-tile Freivalds false-accept ≤ 2⁻⁶⁴).
+  The two tiles per unit are drawn from the **target-bound, unbiasable** SegPos
+  coin (`kRCFreivaldsSegPosTag`), so a miner cannot see or steer which tiles will
+  be opened before committing operands.
+
+**Consequence — this is a work-skipping bound, not exact completeness.** A single
+isolated wrong tile is *not* reliably caught: P(caught) ≈ `2/T ≈ 1.8·10⁻⁷` per
+layer. What the carrier bounds is the *fraction of episode compute a miner can
+skip and still be accepted*. Let a strategy corrupt fraction `φ_l` of layer `l`'s
+tiles. Per layer, P(both opened tiles land in clean tiles) ≈ `(1−φ_l)²`. Across
+the Λ checked units, `P(accept) ≈ Π_l (1−φ_l)²`. For a total skipped fraction `f`
+the product is **maximized by spreading `f` uniformly** (`log(1−φ)` is concave),
+giving the adversary's best case and hence the soundness bound:
+
+> **P(accept | skip fraction `f` of the carrier's MACs) ≤ (1 − f)^{2Λ} = (1 − f)^{384}.**
+
+Reading off the exponent (`2Λ = 384` at production):
+
+| Skipped compute `f` | Max P(accept) |
+|---|---|
+| 0.18 % | 0.5 |
+| 1 %    | 2.1 · 10⁻² |
+| 5 %    | 2.8 · 10⁻⁹ |
+| 10 %   | 2.7 · 10⁻¹⁸ |
+
+So a miner who wants even a coin-flip chance of acceptance can skip at most
+~0.18 % of the work; skipping 10 % is rejected except with probability ~10⁻¹⁸.
+The only "undetectable" cheating (isolated tiles) saves a negligible fraction of
+energy, so it does not undermine the PoW cost function. This is the property on
+which launch acceptability rests: **not** that every wrong tile is caught, but
+that no *economically meaningful* amount of skipped work survives.
+
+**Scope of the bound.** It covers the FFN DOWN-projection MACs, which are the
+episode's dominant arithmetic intensity; attention (QKt / AV) is deliberately
+held sub-dominant by the `n_ctx` hash-bound guardrail (§, `MakeDatacenterRC…`),
+so the bounded work is the work that matters economically. The DOWN-projection
+matmul itself is enforced exactly per opened tile (recompute-before-open, the
+#101 fix; §9). Exact int32 recompute of each opened tile remains the arithmetic
+authority; the int64 CPU replay stays the sole consensus arbiter.
+
+This is the FS-sampled carrier's **launch** soundness. Closing the tile-level gap
+to exact completeness (every wrong tile caught) is the Stage C succinct-proof
+upgrade — an eventual replacement, not a launch blocker.
 
 ---
 
