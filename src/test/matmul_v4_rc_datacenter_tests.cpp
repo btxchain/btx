@@ -2,18 +2,24 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <chainparams.h>
 #include <cuda/matmul_v4_rc_episode_context.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
+#include <matmul/matmul_v4_rc_freivalds_sampled.h>
+#include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_streamed_strategy.h>
 #include <matmul/matmul_v4_rc_transcript.h>
 
+#include <common/args.h>
 #include <consensus/params.h>
+#include <matmul/matmul_v4_rc_scale.h>
 #include <pow.h>
+#include <util/chaintype.h>
 #include <primitives/block.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -863,6 +869,339 @@ BOOST_AUTO_TEST_CASE(rc_dc_batch_vs_reference_rows_per_lobe)
     // V3 production M must not be silently reduced to 1.
     BOOST_CHECK_EQUAL(rc::MakeProductionV3RCCoupParams().rows_per_lobe, 128u);
     BOOST_CHECK_EQUAL(rc::MakeMediumV3RCCoupParams().rows_per_lobe, 32u);
+}
+
+// ---------------------------------------------------------------------------
+// ENC_RC datacenter EPISODE PROFILE (nMatMulRCProfile==2 → MakeDatacenterRC…).
+// Additive: profile 1 reproduces today's base params byte-for-byte; profile 2
+// raises ONLY rounds/L_lyr/b_seq. scratchpad/datacenter-episode-dimensions-design.md.
+// ---------------------------------------------------------------------------
+
+namespace {
+bool RCEpisodeParamsEqual(const rc::RCEpisodeParams& a, const rc::RCEpisodeParams& b)
+{
+    return a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q &&
+           a.n_ctx == b.n_ctx && a.L_lyr == b.L_lyr && a.d_model == b.d_model &&
+           a.b_seq == b.b_seq && a.T_leaf == b.T_leaf;
+}
+
+CBlockHeader MakeDcRCHeader(uint64_t nonce)
+{
+    CBlockHeader header;
+    header.nVersion = 0x20000004;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.nNonce64 = nonce;
+    header.nNonce = static_cast<uint32_t>(nonce);
+    for (int i = 0; i < 32; ++i) {
+        header.hashPrevBlock.data()[i] = static_cast<unsigned char>(0x51);
+        header.hashMerkleRoot.data()[i] = static_cast<unsigned char>(0xa3);
+        header.seed_a.data()[i] = static_cast<unsigned char>(0x11);
+        header.seed_b.data()[i] = static_cast<unsigned char>(0x22);
+    }
+    return header;
+}
+
+// Consensus params that activate ENC_RC on a toy-dim, max-target regtest-like
+// config at the given profile. Toy dims keep the episode CI-runnable; the profile
+// selects the CONSENSUS AUTHORITY (1=ExactReplay, 2=Freivalds sampled).
+Consensus::Params MakeRCActiveParams(uint32_t profile)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.nMatMulRCProfile = profile;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    return p;
+}
+} // namespace
+
+// (a) The datacenter dims are exactly the design's §3 proposal and pass the
+//     structural validator + the epoch-0 int64/int32 accumulator invariants.
+BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_dims_valid)
+{
+    const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
+    BOOST_CHECK_EQUAL(dc.rounds, rc::kRCRoundsDC);
+    BOOST_CHECK_EQUAL(dc.rounds, 8u);
+    BOOST_CHECK_EQUAL(dc.L_lyr, rc::kRCLayersDC);
+    BOOST_CHECK_EQUAL(dc.L_lyr, 64u);
+    BOOST_CHECK_EQUAL(dc.b_seq, rc::kRCBatchSeqDC);
+    BOOST_CHECK_EQUAL(dc.b_seq, 32768u);
+    // Intensive dims held at epoch-0 values.
+    BOOST_CHECK_EQUAL(dc.d_head, 128u);
+    BOOST_CHECK_EQUAL(dc.n_q, 512u);
+    BOOST_CHECK_EQUAL(dc.n_q, 4u * dc.d_head);
+    BOOST_CHECK_EQUAL(dc.n_ctx, 786432u);
+    BOOST_CHECK_EQUAL(dc.d_model, 4096u);
+    BOOST_CHECK_EQUAL(dc.T_leaf, 1024u);
+    BOOST_CHECK(rc::ValidateRCEpisodeParams(dc));
+}
+
+// (b) TotalRCEpisodeMacs(datacenter) ≈ 16× base and equals the design's
+//     8.45e14 MAC figure (1.69e15 FLOP).
+BOOST_AUTO_TEST_CASE(rc_dc_episode_datacenter_mac_ratio)
+{
+    const uint64_t base_macs = rc::TotalRCEpisodeMacs(rc::DefaultConsensusRCEpisodeParams());
+    const uint64_t dc_macs = rc::TotalRCEpisodeMacs(rc::MakeDatacenterRCEpisodeParams());
+    BOOST_CHECK_EQUAL(base_macs, 53188874993664ull);   // 5.32e13
+    BOOST_CHECK_EQUAL(dc_macs, 845249563852800ull);    // 8.45e14
+    const double ratio = static_cast<double>(dc_macs) / static_cast<double>(base_macs);
+    // FFN grows 2·4·2=16×; attention only 2× (0.05% of work) → ratio ≈ 15.89.
+    BOOST_CHECK_CLOSE(ratio, 16.0, 1.0);               // within 1%
+    BOOST_CHECK_GT(ratio, 15.0);
+    BOOST_CHECK_LT(ratio, 16.0);
+    // FLOP = 2× MAC.
+    BOOST_CHECK_EQUAL(2ull * dc_macs, 1690499127705600ull); // 1.69e15
+}
+
+// (c) ADDITIVE GUARD: profile 1 (default) resolver output is byte-identical to
+//     today's DefaultConsensusRCEpisodeParams(), and datacenter differs ONLY in
+//     rounds/L_lyr/b_seq.
+BOOST_AUTO_TEST_CASE(rc_dc_episode_profile1_byte_identical_guard)
+{
+    const rc::RCEpisodeParams base = rc::DefaultConsensusRCEpisodeParams();
+
+    // Profile 1 stays AVAILABLE and byte-identical to the pre-datacenter base
+    // (the network-wide default is now profile 2 — datacenter — so select 1
+    // explicitly here).
+    Consensus::Params p1;
+    p1.nMatMulRCProfile = 1;
+    const rc::RCEpisodeParams r1 = rc::ResolveRCEpisodeParams(p1, /*height=*/0);
+    BOOST_CHECK_MESSAGE(RCEpisodeParamsEqual(r1, base),
+                        "profile-1 resolver must reproduce base params byte-for-byte");
+
+    // Datacenter differs from base ONLY on the three free extensive axes.
+    const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
+    BOOST_CHECK_EQUAL(dc.d_head, base.d_head);
+    BOOST_CHECK_EQUAL(dc.n_q, base.n_q);
+    BOOST_CHECK_EQUAL(dc.n_ctx, base.n_ctx);
+    BOOST_CHECK_EQUAL(dc.d_model, base.d_model);
+    BOOST_CHECK_EQUAL(dc.T_leaf, base.T_leaf);
+    BOOST_CHECK(dc.rounds != base.rounds);
+    BOOST_CHECK(dc.L_lyr != base.L_lyr);
+    BOOST_CHECK(dc.b_seq != base.b_seq);
+    BOOST_CHECK(!RCEpisodeParamsEqual(dc, base));
+}
+
+// (d) The profile selector is 1|2; the DEFAULT is now 2 (datacenter — owner-
+//     authorized aggressive activation). Mainnet SELECTS profile 2 but keeps the
+//     ACTIVATION height at INT32_MAX (gated on the no-inversion ratification).
+BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
+{
+    Consensus::Params def;
+    BOOST_CHECK_EQUAL(def.nMatMulRCProfile, 2u);  // datacenter is the default
+
+    const auto main =
+        CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
+    BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 2u);
+    // Height stays INT32_MAX: the datacenter profile is SELECTED but not ACTIVE
+    // (finite public height rides BTX_MATMUL_NO_INVERSION_GATE_RATIFIED).
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!main.IsMatMulRCActive(0));
+    // Profile 2 resolves to the datacenter dims via the generic resolver.
+    BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(main, 0),
+                                     rc::MakeDatacenterRCEpisodeParams()));
+
+    // Profile 1 remains available and resolves to the epoch-0 base dims.
+    Consensus::Params base_params;
+    base_params.nMatMulRCProfile = 1;
+    BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(base_params, 0),
+                                     rc::DefaultConsensusRCEpisodeParams()));
+
+    // Toy dims still win over the profile on regtest (CI-scale mining).
+    Consensus::Params dc_params;
+    dc_params.nMatMulRCProfile = 2;
+    dc_params.fMatMulRCUseToyDims = true;
+    BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(dc_params, 0),
+                                     rc::MakeToyRCEpisodeParams()));
+}
+
+// (e) REGTEST ACTIVATION: -regtestrcprofile=2 + a finite -regtestrcheight makes
+//     the resolved episode the datacenter dims, and the RC family activates at
+//     that height (mirrors rc_coup_unified_height_switch).
+BOOST_AUTO_TEST_CASE(rc_dc_episode_regtest_profile2_activation)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestrcprofile", "2");
+    args.ForceSetArg("-regtestrcheight", "150");
+    const auto reg = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(reg.nMatMulRCProfile, 2u);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCHeight, 150);
+
+    // Predicate flips on at the height (and not before).
+    BOOST_CHECK(!reg.IsMatMulRCActive(149));
+    BOOST_CHECK(reg.IsMatMulRCActive(150));
+
+    // At/after the height the resolved episode is the datacenter shape.
+    const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
+    BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(reg, 150), dc));
+    BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(reg, 5000), dc));
+
+    // Regtest activation also couples the ~16× ASERT loosen to the datacenter
+    // profile + finite height (design §5).
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1);
+
+    // Default regtest (no override) keeps the network-wide default profile 2 but
+    // the RC family stays OFF (height INT32_MAX), so nothing activates.
+    const auto reg_def =
+        CreateChainParams(ArgsManager{}, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(reg_def.nMatMulRCProfile, 2u);
+    BOOST_CHECK_EQUAL(reg_def.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK(!reg_def.IsMatMulRCActive(0));
+    // ASERT stays 1/1 while the height is INT32_MAX (coupled 16× applies only with
+    // a finite activation height).
+    BOOST_CHECK_EQUAL(reg_def.nMatMulRCAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(reg_def.nMatMulRCAsertRescaleDen, 1);
+}
+
+// ---------------------------------------------------------------------------
+// CONSENSUS AUTHORITY CUTOVER (pow.cpp CheckMatMulProofOfWork_RC).
+//   profile 2 → Freivalds sampled verifier is the accept/reject authority,
+//     fail-closed if the episode proof is unavailable.
+//   profile 1 → VerifyBoundedExactReplay, unchanged (no proof required).
+// ---------------------------------------------------------------------------
+
+// (c) Profile 2: ACCEPT an honest episode via the Freivalds path; REJECT when no
+//     proof is stored (fail-closed); REJECT a tampered sampled layer.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    CBlockHeader header = MakeDcRCHeader(4242);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);   // toy dims
+    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, rc::MakeToyRCEpisodeParams()));
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    // Fail-closed BEFORE any proof is available.
+    rc::RCGkrProofV7StoreClear();
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    // Build + store the honest v7 episode proof (miner does this at winner time).
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
+                                             header.matmul_digest);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, "toy-dim v7 prove must succeed");
+    rc::RCGkrProofV7StorePut(header.GetHash(), pr.proof);
+
+    // ACCEPT via the Freivalds sampled authority.
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    // Clearing the proof reverts to fail-closed reject.
+    rc::RCGkrProofV7StoreClear();
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    // Tampered sampled layer: flip a Y output of an in-stream (sampleable) layer.
+    // At toy dims n_units < λ=256, so EVERY sampleable layer is sampled → any such
+    // tamper is caught by the per-layer Freivalds check.
+    rc::RCGkrProofV7 tampered = pr.proof;
+    bool tampered_one = false;
+    for (auto& w : tampered.wires) {
+        const bool in_stream = w.kind == rc::RCGkrLayerKind::GemmPhase1SV ||
+                               w.kind == rc::RCGkrLayerKind::GemmPhase2Fwd ||
+                               w.kind == rc::RCGkrLayerKind::GemmPhase2Bwd ||
+                               w.kind == rc::RCGkrLayerKind::GemmPhase2Wgrad;
+        if (in_stream && !w.Y.empty()) {
+            w.Y[0] += 1;
+            tampered_one = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(tampered_one);
+    rc::RCGkrProofV7StorePut(header.GetHash(), tampered);
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    rc::RCGkrProofV7StoreClear();
+}
+
+// (c') Profile 2: an episode proof committing SMALLER-than-consensus dims is
+//      rejected — the episode shape is consensus-fixed, not prover-chosen.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_episode_shape_swap)
+{
+    // Consensus resolves DATACENTER dims (no toy); a proof carrying toy dims must
+    // not be accepted for a datacenter-shaped consensus slot.
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    p.fMatMulRCUseToyDims = false;   // consensus dims = datacenter (profile 2)
+    constexpr int32_t kHeight = 10;
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, rc::MakeDatacenterRCEpisodeParams()));
+
+    CBlockHeader header = MakeDcRCHeader(99);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+
+    // A toy-dim proof (cheap) stored against this header must be rejected by the
+    // episode-shape bind before any accept — without materializing a real
+    // datacenter episode (infeasible in a unit test).
+    const auto toy = rc::MakeToyRCEpisodeParams();
+    header.matmul_digest = rc::RecomputeResidentCurriculumReference(header, toy, kHeight);
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+    const auto pr = rc::ProveWinnerEpisodeV7(header, toy, kHeight, *target, header.matmul_digest);
+    BOOST_REQUIRE(pr.timing.ok);
+    rc::RCGkrProofV7StorePut(header.GetHash(), pr.proof);
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));   // shape mismatch → reject
+    rc::RCGkrProofV7StoreClear();
+}
+
+// (d) Profile 1: ExactReplay remains the authority, needs NO proof, and accepts
+//     an honest episode exactly as before the datacenter cutover.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_profile1_exactreplay_unchanged)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/1);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    CBlockHeader header = MakeDcRCHeader(7);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);   // toy dims
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+
+    // No proof in the store — profile 1 does not consult it; ExactReplay accepts.
+    rc::RCGkrProofV7StoreClear();
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
+
+    // Wrong digest still rejects via ExactReplay.
+    CBlockHeader bad = header;
+    bad.matmul_digest = uint256::ONE;
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(bad, p, kHeight));
+}
+
+// (e) The updated construction invariant ACCEPTS the aggressive datacenter config
+//     (profile 2 default + finite regtest height + coupled 16× ASERT) — building
+//     the chainparams would abort on a bad invariant, so a clean construct is the
+//     positive assertion. Profile ∉ {1,2} is rejected by an assert() at
+//     construction (an abort, not catchable here); documented, not exercised.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
+{
+    ArgsManager args;
+    args.ForceSetArg("-regtestrcprofile", "2");
+    args.ForceSetArg("-regtestrcheight", "150");
+    const auto reg = CreateChainParams(args, ChainType::REGTEST)->GetConsensus();
+    BOOST_CHECK_EQUAL(reg.nMatMulRCProfile, 2u);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCHeight, 150);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleNum, 16);
+    BOOST_CHECK_EQUAL(reg.nMatMulRCAsertRescaleDen, 1);
+
+    // Mainnet also constructs with the datacenter default (profile 2) while
+    // staying gated (INT32_MAX height, ASERT 1/1).
+    const auto main = CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
+    BOOST_CHECK_EQUAL(main.nMatMulRCProfile, 2u);
+    BOOST_CHECK_EQUAL(main.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleNum, 1);
+    BOOST_CHECK_EQUAL(main.nMatMulRCAsertRescaleDen, 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

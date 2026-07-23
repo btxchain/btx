@@ -30,6 +30,7 @@
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
+#include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
@@ -4185,9 +4186,58 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
         matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
     if (!matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) return finish(false);
 
-    // Consensus ε=0 ExactReplay (DISPUTE/fallback path; sole validity by default).
     // F4: reject null committed digest unconditionally (mirrors coupled Check*).
     if (header.matmul_digest.IsNull()) return finish(false);
+
+    // -----------------------------------------------------------------------
+    // CONSENSUS AUTHORITY DISPATCH — profile-selected (design §6.1(A) / §5).
+    //   profile 1 (epoch-0 base dims): VerifyBoundedExactReplay (ε=0) is the
+    //     SOLE authority, exactly as before this change.
+    //   profile 2 (datacenter dims):  the sublinear Freivalds SAMPLED verifier
+    //     is the accept/reject authority — deterrence-based (~0.27% residual;
+    //     ExactReplay cannot re-run the 16×-heavier episode in-budget). Owner-
+    //     activated aggressive posture; no audit/formal-soundness claim.
+    //     ExactReplay REMAINS available as the async ε=0 arbiter / dispute path
+    //     off the hot path (a full node may still run it on challenge).
+    // -----------------------------------------------------------------------
+    if (params.nMatMulRCProfile == 2) {
+        // FAIL-CLOSED: the datacenter episode dims cannot be validated without
+        // the episode proof (its sampled wires + tile-tree openings). Fetch the
+        // in-memory RCGkrProofV7 from the process-local store — same lookup key
+        // (header.GetHash()) as the GKR shadow below. No proof ⇒ REJECT: a
+        // validator that has not received/rebuilt the proof cannot accept a
+        // profile-2 block. (Process-local availability seam — see
+        // RCGkrProofV7StoreGet in matmul_v4_rc_gkr.h.)
+        matmul::v4::rc::RCGkrProofV7 dc_proof;
+        if (!matmul::v4::rc::RCGkrProofV7StoreGet(header.GetHash(), dc_proof)) {
+            return finish(false);
+        }
+        // Bind the carried episode to the CONSENSUS-resolved datacenter dims so a
+        // miner cannot substitute a smaller (cheaper) episode: the sampled
+        // verifier authenticates the digest→target and the λ sampled layers, but
+        // the episode SHAPE is fixed by consensus, not by the prover.
+        const auto& e = dc_proof.episode;
+        if (!(e.rounds == params_rc.rounds && e.d_head == params_rc.d_head &&
+              e.n_q == params_rc.n_q && e.n_ctx == params_rc.n_ctx &&
+              e.L_lyr == params_rc.L_lyr && e.d_model == params_rc.d_model &&
+              e.b_seq == params_rc.b_seq && e.T_leaf == params_rc.T_leaf &&
+              e.phase1_tile_delta == params_rc.phase1_tile_delta)) {
+            return finish(false);
+        }
+        std::string why;
+        if (!matmul::v4::rc::VerifyEpisodeFreivaldsSampled(dc_proof, header, block_height,
+                                                           *bnTarget, &why)) {
+            LogDebug(BCLog::VALIDATION,
+                     "CheckMatMulProofOfWork_RC: profile-2 Freivalds sampled REJECT why=%s\n",
+                     why.c_str());
+            return finish(false);
+        }
+        // Accepted by the sampled authority (deterrence, ~0.27% residual).
+        return finish(true);
+    }
+
+    // Consensus ε=0 ExactReplay (profile 1: the SOLE authority; profile 2's
+    // async arbiter/dispute path). Unchanged from the pre-datacenter posture.
     const auto replay = matmul::v4::rc::VerifyBoundedExactReplay(header, params_rc, block_height,
                                                                 &*bnTarget);
     if (!replay.ok) return finish(false);
@@ -6158,6 +6208,24 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
         }
         if (UintToArith256(resealed) <= effective_target) {
             block.matmul_digest = resealed;
+            // DATACENTER PROFILE (nMatMulRCProfile==2): the Freivalds sampled
+            // verifier is the CONSENSUS authority (CheckMatMulProofOfWork_RC), so
+            // the winner MUST emit the episode proof or its own block fails closed
+            // at verify. Build the v7 episode proof and put it in the process-
+            // local store keyed by the header hash. (Process-local: the
+            // sampled-carrier RELAY over P2P is the remaining net_processing seam;
+            // within a node the miner→validator handoff is complete.)
+            if (params.nMatMulRCProfile == 2) {
+                const auto pr = matmul::v4::rc::ProveWinnerEpisodeV7(
+                    block, params_rc, block_height, effective_target, resealed);
+                if (pr.timing.ok) {
+                    matmul::v4::rc::RCGkrProofV7StorePut(block.GetHash(), pr.proof);
+                } else {
+                    LogWarning("SolveMatMulV4RC: profile-2 winner ProveWinnerEpisodeV7 failed "
+                               "(over_budget=%d); block will fail closed at verify\n",
+                               pr.timing.over_budget ? 1 : 0);
+                }
+            }
             // Optional winner-only GKR prove (off by default — consensus binary unchanged).
             // Enable with env BTX_RC_WINNER_GKR=1. Losers above never reach here.
             // Proof bytes are cached process-locally (empty-body DIGEST_RECOMPUTE);

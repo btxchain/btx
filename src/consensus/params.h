@@ -493,9 +493,32 @@ struct Params {
      *  disabled on every public network until a deliberate clean cutover.
      *  When live, GetMatMulEncodingProfile prefers ENC_RC over DRLT/BMX4C. */
     int32_t nMatMulRCHeight{std::numeric_limits<int32_t>::max()};
-    /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon). */
+    /** One-time ASERT rescale at nMatMulRCHeight (calibrate from silicon).
+     *  Public nets keep 1/1. NOTE: the datacenter profile (nMatMulRCProfile==2)
+     *  raises per-nonce work ~16× (F_ep 5.32e13 → 8.45e14 MAC), so a datacenter
+     *  cutover needs a silicon-calibrated ≈16× loosen here. Do NOT change the
+     *  ratio now — magnitude is MFU-dependent and must be measured on qualified
+     *  silicon before any public height (separate external gate; design §5). */
     int64_t nMatMulRCAsertRescaleNum{1};
     int64_t nMatMulRCAsertRescaleDen{1};
+    /**
+     * ENC_RC episode profile selector (mirrors nMatMulRCCoupledProfile).
+     *   1 = epoch-0 base dims (DefaultConsensus / height-selected schedule)
+     *   2 = datacenter-scale dims (MakeDatacenterRCEpisodeParams: rounds/L_lyr/
+     *       b_seq raised, ~16× F_ep — design §3 / §6.1(A))
+     * DEFAULT 2 = DATACENTER (owner-activated aggressive posture). Under profile 2
+     * the sublinear Freivalds SAMPLED verifier is the consensus accept/reject
+     * authority (deterrence-based, ~0.27% residual — NOT audited/formally sound;
+     * ExactReplay is retained as the async ε=0 arbiter/dispute path). Profile 1
+     * remains available and selects the epoch-0 base dims with ExactReplay as the
+     * sole authority, byte-identical to the pre-datacenter behavior. The profile
+     * selects WHICH dims activate at nMatMulRCHeight, not WHETHER — a public net
+     * still only runs ENC_RC once nMatMulRCHeight is finite (and that finite
+     * public height itself remains gated on BTX_MATMUL_NO_INVERSION_GATE_RATIFIED,
+     * unflipped here). The coupled ~16× ASERT rescale takes effect together with a
+     * finite profile-2 activation height. Values other than {1,2} are rejected at
+     * construction (AssertBMX4CConstructionInvariants). */
+    uint32_t nMatMulRCProfile{2};
     /** REGTEST ONLY — when true, CheckMatMulProofOfWork_RC / SolveMatMulV4 ENC_RC
      *  use MakeToyRCEpisodeParams() instead of DefaultConsensusRCEpisodeParams().
      *  Public nets MUST keep this false (AssertBMX4CConstructionInvariants).

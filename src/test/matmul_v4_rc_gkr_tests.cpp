@@ -595,6 +595,10 @@ BOOST_AUTO_TEST_CASE(gkr_h2_shadow_reuses_prior_exact_replay)
     p.fMatMulPOW = true;
     p.nMatMulV4Height = 1;
     p.nMatMulRCHeight = 1;
+    // Profile 1: ExactReplay is the consensus authority (the GKR shadow observes
+    // it). The network-wide default is now profile 2 (Freivalds authority), so
+    // select 1 explicitly for this ExactReplay-shadow test.
+    p.nMatMulRCProfile = 1;
     p.fMatMulRCUseToyDims = true;
     p.nMatMulV4Dimension = 256;
     p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};

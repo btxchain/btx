@@ -625,6 +625,10 @@ BOOST_AUTO_TEST_CASE(rc_check_pow_toy_dims_mine_and_wrong_digest)
     p.fMatMulPOW = true;
     p.nMatMulV4Height = 1;
     p.nMatMulRCHeight = 1;
+    // Profile 1 = ExactReplay authority (the default is now profile 2 = Freivalds
+    // sampled, which requires a stored episode proof; this test exercises the
+    // unchanged ExactReplay path).
+    p.nMatMulRCProfile = 1;
     p.fMatMulRCUseToyDims = true;
     p.nMatMulV4Dimension = 256;
     p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};

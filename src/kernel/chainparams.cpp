@@ -58,6 +58,23 @@ static constexpr int32_t BTX_V03211_HARDENING_HEIGHT{132'000};
 static constexpr int32_t BTX_SHIELDED_UNSHIELD_VELOCITY_END_HEIGHT{135'000};
 static constexpr CAmount BTX_SHIELDED_UNSHIELD_VELOCITY_MIN_CAP{10'000 * COIN};
 
+// ENC_RC DATACENTER-PROFILE activation constants (design §5/§6).
+// PLACEHOLDER activation height: the owner sets the exact fork block at deploy.
+// It is intentionally far out so no accidental near-tip activation occurs; the
+// real value is chosen alongside flipping the genuine external no-inversion gate
+// (BTX_MATMUL_NO_INVERSION_GATE_RATIFIED) — which is NOT flipped here, so a
+// finite PUBLIC RC height still fails closed at construction until the owner
+// records that gate. See the mainnet block below and the report.
+static constexpr int32_t kRCDatacenterActivationHeight{5'000'000};
+// One-time ASERT rescale coupled to the datacenter cutover: per-nonce work rises
+// ~16× (F_ep 5.32e13 → 8.45e14 MAC), so the difficulty target must LOOSEN ~16× at
+// the activation height to hold the 90 s interval. modeled 16×; wants on-silicon
+// confirmation (MFU-dependent — the effective value is the datacenter miner's
+// real nonce/s, not the raw FLOP ratio). It takes effect together with a finite
+// profile-2 activation height (coupled trio asserted below).
+static constexpr int64_t kRCDatacenterAsertRescaleNum{16};
+static constexpr int64_t kRCDatacenterAsertRescaleDen{1};
+
 // MatMul v4.2 / ENC-BMX4C construction invariants (spec §8.1/§8.2). No-op when
 // the profile is unset (nMatMulBMX4CHeight == INT32_MAX = disabled, e.g.
 // mainnet); when a network sets a BMX4C activation height these MUST hold, so a
@@ -299,12 +316,39 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     }
 
     // ENC_RC / Resident Curriculum (doc/btx-matmul-v4.4-resident-curriculum-unified-proposal).
-    // Public nets stay fail-closed: height INT32_MAX, no toy dims, ASERT rescale 1/1.
-    // Regtest may leave RC disabled; when enabled, toy dims are allowed for CI.
+    // DATACENTER-PROFILE AGGRESSIVE ACTIVATION (owner-authorized, design §5/§6):
+    // nMatMulRCProfile defaults to 2 (datacenter) network-wide; under it the
+    // Freivalds sampled verifier is the consensus authority (deterrence-based,
+    // ~0.27% residual — NOT audited). The three coupled pieces (profile 2 +
+    // finite height + ~16× ASERT) must activate TOGETHER. Public nets still stay
+    // fail-closed at height INT32_MAX with ASERT 1/1 because a finite PUBLIC RC
+    // height rides the genuine external no-inversion gate
+    // (BTX_MATMUL_NO_INVERSION_GATE_RATIFIED, unflipped) below; regtest may set a
+    // finite height + toy dims for CI, where the coupled ASERT is asserted.
     assert(!consensus.fMatMulRCUseToyDims || is_regtest);
     assert(consensus.nMatMulRCAsertRescaleNum > 0);
     assert(consensus.nMatMulRCAsertRescaleDen > 0);
+    // ENC_RC episode profile selector (design §6.1(A)): 1 = epoch-0 base,
+    // 2 = datacenter. Any other value is a misconfiguration — fail closed.
+    assert(consensus.nMatMulRCProfile == 1 || consensus.nMatMulRCProfile == 2);
+    // COUPLED TRIO: whenever the datacenter profile is ACTIVE (profile 2 AND a
+    // finite RC height) the one-time ASERT rescale MUST be the modeled ~16× loosen
+    // — the difficulty re-anchor cannot be silently omitted when the 16×-heavier
+    // episode goes live, and cannot be applied without the datacenter dims.
+    if (consensus.nMatMulRCProfile == 2 &&
+        consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+        assert(consensus.nMatMulRCAsertRescaleNum == kRCDatacenterAsertRescaleNum);
+        assert(consensus.nMatMulRCAsertRescaleDen == kRCDatacenterAsertRescaleDen);
+    }
     if (!is_regtest) {
+        // Public nets remain fail-closed on the ENC_RC ACTIVATION (height): the
+        // datacenter profile is the default SELECTION, but nothing runs until a
+        // finite height is set — and a finite public height itself requires the
+        // no-inversion gate (asserted in the height clause below). While the
+        // height stays INT32_MAX the ASERT rescale stays 1/1 (the coupled 16× is
+        // applied together with the finite height at deploy). NOTE: the former
+        // "nMatMulRCProfile == 1" public assertion is intentionally removed —
+        // datacenter (profile 2) is now the owner-authorized public default.
         assert(consensus.nMatMulRCHeight == std::numeric_limits<int32_t>::max());
         assert(!consensus.fMatMulRCUseToyDims);
         assert(consensus.nMatMulRCAsertRescaleNum == 1);
@@ -511,6 +555,23 @@ public:
         // Q* Phase B seal-as-PoW: implemented but OFF (and inert regardless,
         // since DRLT is INT32_MAX above).
         consensus.fMatMulLTSealAsPoW = false;
+        // ENC_RC DATACENTER PROFILE (owner-authorized aggressive activation).
+        // nMatMulRCProfile defaults to 2 (datacenter) from Consensus::Params, so
+        // mainnet SELECTS the datacenter dims + the Freivalds sampled consensus
+        // authority. The ACTIVATION HEIGHT is the named placeholder
+        // kRCDatacenterActivationHeight (owner sets the exact fork block at
+        // deploy), but it is NOT assigned to consensus.nMatMulRCHeight here: RC
+        // stays INT32_MAX (disabled) because ENC_RC rides IsMatMulV4Active (v4 is
+        // unset above) AND a finite public RC height requires the recorded
+        // no-inversion + L0 ratification gate (BTX_MATMUL_NO_INVERSION_GATE_-
+        // RATIFIED), which is deliberately NOT flipped (doing so would falsely
+        // attest an unperformed silicon measurement). At deploy the owner sets, in
+        // one release: nMatMulV4Height, nMatMulRCHeight = kRCDatacenterActivation-
+        // Height, nMatMulRCAsertRescaleNum/Den = 16/1 (kRCDatacenterAsertRescale*),
+        // and flips the ratification gate — the coupled trio the invariant checks.
+        consensus.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
+        consensus.nMatMulRCAsertRescaleNum = 1;
+        consensus.nMatMulRCAsertRescaleDen = 1;
         consensus.nMaxReorgDepth = 12;
         consensus.nReorgProtectionStartHeight = 61'000;
         consensus.nEmptyBlockSubsidyPenaltyHeight = BTX_EMPTY_BLOCK_SUBSIDY_PENALTY_HEIGHT;
@@ -1666,6 +1727,25 @@ public:
         if (opts.matmul_rc_coupled_profile.has_value()) {
             consensus.nMatMulRCCoupledProfile = *opts.matmul_rc_coupled_profile;
         }
+        // ENC_RC episode profile selector (design §6.1(A)): regtest may switch to
+        // the datacenter dims (profile 2, also the network-wide default) alongside
+        // a finite nMatMulRCHeight so the datacenter episode + Freivalds sampled
+        // consensus authority are TESTABLE. Invalid values (≠{1,2}) fail closed in
+        // AssertBMX4CConstructionInvariants.
+        if (opts.matmul_rc_profile.has_value()) {
+            consensus.nMatMulRCProfile = *opts.matmul_rc_profile;
+        }
+        // COUPLED ASERT: when the datacenter profile (2) is live at a finite RC
+        // height on regtest, apply the modeled ~16× one-time loosen together with
+        // it (design §5) — mirrors the mainnet deploy where profile 2 + finite
+        // height + 16× ASERT activate as one. Satisfies the coupled-trio invariant
+        // in AssertBMX4CConstructionInvariants. (Behaviorally moot on CI toy dims
+        // but keeps the activation shape faithful.)
+        if (consensus.nMatMulRCProfile == 2 &&
+            consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
+            consensus.nMatMulRCAsertRescaleNum = kRCDatacenterAsertRescaleNum;
+            consensus.nMatMulRCAsertRescaleDen = kRCDatacenterAsertRescaleDen;
+        }
         // When RC (or coupled) is live on regtest, unthrottle tip-verify budgets
         // so -regtestrc* functional tests are not paced (mirrors LT above).
         if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max() ||
@@ -1893,6 +1973,7 @@ public:
             opts.matmul_rc_use_toy_dims.has_value() ||
             opts.matmul_rc_coupled_use_toy_dims.has_value() ||
             opts.matmul_rc_coupled_profile.has_value() ||
+            opts.matmul_rc_profile.has_value() ||
             opts.matmul_lt_seal_as_pow.has_value() ||
             opts.matmul_flat_sketch_replay ||
             opts.shielded_tx_binding_activation_height.has_value() ||

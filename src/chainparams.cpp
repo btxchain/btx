@@ -390,6 +390,12 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_rc_coupled_profile =
             ParseRegTestUInt32Arg(args, "-regtestrccoupledprofile");
     }
+    if (args.IsArgSet("-regtestrcprofile")) {
+        // ENC_RC episode profile: 1=epoch-0 base, 2=datacenter dims. Pair with a
+        // finite -regtestrcheight/-regtestrcunifiedheight to activate the
+        // datacenter episode. AssertBMX4CConstructionInvariants rejects ≠{1,2}.
+        options.matmul_rc_profile = ParseRegTestUInt32Arg(args, "-regtestrcprofile");
+    }
     if (args.IsArgSet("-regtestmatmulltsealaspow")) {
         options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", true);
     }

@@ -128,6 +128,17 @@ struct RCGkrProofCacheEntry {
 std::list<uint256> g_rc_gkr_proof_lru;
 std::map<uint256, RCGkrProofCacheEntry> g_rc_gkr_proof_cache;
 
+/** Process-local v7 episode-proof store (struct-valued; datacenter-profile
+ *  Freivalds authority availability seam — see header). Same LRU+TTL policy as
+ *  the V6 byte cache; guarded by the same g_rc_gkr_cache_mu. */
+struct RCGkrProofV7StoreEntry {
+    RCGkrProofV7 proof;
+    std::chrono::steady_clock::time_point expires_at;
+    std::list<uint256>::iterator lru_it;
+};
+std::list<uint256> g_rc_gkr_v7_lru;
+std::map<uint256, RCGkrProofV7StoreEntry> g_rc_gkr_v7_store;
+
 std::atomic<uint64_t> g_exact_replay_invoke_count{0};
 
 bool RCEpisodeParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
@@ -3294,6 +3305,87 @@ size_t RCGkrProofCacheSizeForTest()
     std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
     RCGkrProofCacheEvictExpiredLocked(std::chrono::steady_clock::now());
     return g_rc_gkr_proof_cache.size();
+}
+
+// --- v7 episode-proof store (struct-valued; datacenter-profile authority seam).
+namespace {
+void RCGkrProofV7StoreEvictExpiredLocked(const std::chrono::steady_clock::time_point now)
+{
+    for (auto it = g_rc_gkr_v7_store.begin(); it != g_rc_gkr_v7_store.end();) {
+        if (it->second.expires_at <= now) {
+            g_rc_gkr_v7_lru.erase(it->second.lru_it);
+            it = g_rc_gkr_v7_store.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+void RCGkrProofV7StoreEvictLruLocked()
+{
+    while (g_rc_gkr_v7_store.size() > kRCGkrProofCacheMaxEntries) {
+        assert(!g_rc_gkr_v7_lru.empty());
+        const uint256 oldest = g_rc_gkr_v7_lru.back();
+        g_rc_gkr_v7_lru.pop_back();
+        g_rc_gkr_v7_store.erase(oldest);
+    }
+}
+} // namespace
+
+void RCGkrProofV7StorePut(const uint256& block_hash, RCGkrProofV7 proof)
+{
+    std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
+    const auto now = std::chrono::steady_clock::now();
+    RCGkrProofV7StoreEvictExpiredLocked(now);
+    const auto expires = now + std::chrono::seconds(kRCGkrProofCacheTtlSeconds);
+
+    auto it = g_rc_gkr_v7_store.find(block_hash);
+    if (it != g_rc_gkr_v7_store.end()) {
+        g_rc_gkr_v7_lru.erase(it->second.lru_it);
+        g_rc_gkr_v7_lru.push_front(block_hash);
+        it->second.proof = std::move(proof);
+        it->second.expires_at = expires;
+        it->second.lru_it = g_rc_gkr_v7_lru.begin();
+    } else {
+        g_rc_gkr_v7_lru.push_front(block_hash);
+        RCGkrProofV7StoreEntry entry;
+        entry.proof = std::move(proof);
+        entry.expires_at = expires;
+        entry.lru_it = g_rc_gkr_v7_lru.begin();
+        g_rc_gkr_v7_store.emplace(block_hash, std::move(entry));
+    }
+    RCGkrProofV7StoreEvictLruLocked();
+}
+
+bool RCGkrProofV7StoreGet(const uint256& block_hash, RCGkrProofV7& out_proof)
+{
+    std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
+    const auto now = std::chrono::steady_clock::now();
+    auto it = g_rc_gkr_v7_store.find(block_hash);
+    if (it == g_rc_gkr_v7_store.end()) return false;
+    if (it->second.expires_at <= now) {
+        g_rc_gkr_v7_lru.erase(it->second.lru_it);
+        g_rc_gkr_v7_store.erase(it);
+        return false;
+    }
+    g_rc_gkr_v7_lru.erase(it->second.lru_it);
+    g_rc_gkr_v7_lru.push_front(block_hash);
+    it->second.lru_it = g_rc_gkr_v7_lru.begin();
+    out_proof = it->second.proof;
+    return true;
+}
+
+void RCGkrProofV7StoreClear()
+{
+    std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
+    g_rc_gkr_v7_store.clear();
+    g_rc_gkr_v7_lru.clear();
+}
+
+size_t RCGkrProofV7StoreSizeForTest()
+{
+    std::lock_guard<std::mutex> lock(g_rc_gkr_cache_mu);
+    RCGkrProofV7StoreEvictExpiredLocked(std::chrono::steady_clock::now());
+    return g_rc_gkr_v7_store.size();
 }
 
 uint64_t ExactReplayInvocationCountForTest()

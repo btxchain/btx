@@ -51,6 +51,22 @@ inline constexpr uint32_t kRCModelDim = 4096;
 inline constexpr uint32_t kRCBatchSeq = 16'384; // == W_cap/(2*d_model*L_lyr) at epoch 0
 inline constexpr uint32_t kRCTileLeafBytes = 1024; // 32×32 int8 (Class C)
 
+/**
+ * Datacenter-scale episode profile (ADDITIVE — governance-gated, OFF by default).
+ * scratchpad/datacenter-episode-dimensions-design.md §3 / §6.1(A). Scales the
+ * episode ONLY through the free extensive axes (depth = rounds×L_lyr, batch =
+ * b_seq); the intensive inner dims (d_head, n_q, n_ctx, d_model, T_leaf) are held
+ * at their epoch-0 values so the compute/hash balance and int64/int32 accumulator
+ * invariants are unchanged. F_ep grows ~16× (FFN 2·4·2=16×; attention 2×).
+ * Selected only when Consensus::Params::nMatMulRCProfile == 2 (regtest/testnet
+ * override); mainnet stays profile 1 with nMatMulRCHeight = INT32_MAX.
+ */
+inline constexpr uint32_t kRCRoundsDC = 8;     // 2× epoch-0 rounds (depth)
+inline constexpr uint32_t kRCLayersDC = 64;    // 4× epoch-0 L_lyr (depth)
+inline constexpr uint32_t kRCBatchSeqDC = 32'768; // 2× epoch-0 b_seq (batch)
+static_assert(kRCBatchSeqDC % 32 == 0, "kRCBatchSeqDC must be divisible by 32 (MX align)");
+static_assert(kRCRoundsDC != 0 && kRCLayersDC != 0, "datacenter depth axes must be non-zero");
+
 /** Max |s8| operand magnitude on the RC ExactGemm path (balanced M11×2^{e≤3}). */
 inline constexpr int32_t kRCMxOperandAbsMax = 48; // 6 * 2^3
 /** Phase-2 fwd/bwd ExactGemm is s8×s8→int32 before Extract; keep |acc| < 2^31. */
@@ -189,6 +205,13 @@ struct RCMerkleProof {
 
 /** Epoch-0 consensus dims: EpisodeParamsFromScale({kRCW0Res, kRCW0Cap}). */
 [[nodiscard]] RCEpisodeParams DefaultConsensusRCEpisodeParams();
+/** Datacenter-scale profile (nMatMulRCProfile==2): the epoch-0 base dims with
+ *  ONLY rounds/L_lyr/b_seq raised (kRCRoundsDC/kRCLayersDC/kRCBatchSeqDC). All
+ *  intensive dims (d_head, n_q, n_ctx, d_model, T_leaf) copied unchanged from
+ *  DefaultConsensusRCEpisodeParams so it passes ValidateRCEpisodeParams and the
+ *  epoch invariants. ADDITIVE / governance-gated — see
+ *  scratchpad/datacenter-episode-dimensions-design.md §6.1(A). */
+[[nodiscard]] RCEpisodeParams MakeDatacenterRCEpisodeParams();
 /** Tiny dims for unit tests — every matrix dim divisible by 32 (H13). */
 [[nodiscard]] RCEpisodeParams MakeToyRCEpisodeParams();
 /** Medium dims for self-qual: wgrad contraction exceeds 2^24 (b_seq ≥ 8192). */

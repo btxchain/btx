@@ -247,6 +247,10 @@ public:
         std::optional<bool> matmul_rc_coupled_use_toy_dims{};
         //! REGTEST-ONLY: coupled profile 2 (V2) or 3 (V3). Invalid → zero params.
         std::optional<uint32_t> matmul_rc_coupled_profile{};
+        //! REGTEST-ONLY: ENC_RC episode profile 1 (epoch-0 base) or 2 (datacenter
+        //! dims — MakeDatacenterRCEpisodeParams). Public nets keep the default 1.
+        //! Values other than {1,2} fail AssertBMX4CConstructionInvariants.
+        std::optional<uint32_t> matmul_rc_profile{};
         //! v4.4-LT Q* Phase B seal-as-PoW mode override. Regtest defaults to
         //! enabled; an explicit false selects Phase A for differential tests.
         std::optional<bool> matmul_lt_seal_as_pow{};

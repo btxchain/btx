@@ -786,6 +786,19 @@ RCEpisodeParams DefaultConsensusRCEpisodeParams()
     return EpisodeParamsFromScale(RCScale{kRCW0Res, kRCW0Cap});
 }
 
+RCEpisodeParams MakeDatacenterRCEpisodeParams()
+{
+    // ADDITIVE datacenter profile (design §6.1(A)): copy the exact epoch-0 base
+    // held values and raise ONLY the free extensive axes (rounds/L_lyr/b_seq).
+    // Deriving from DefaultConsensusRCEpisodeParams() guarantees the intensive
+    // dims (d_head, n_q, n_ctx, d_model, T_leaf) track the base byte-for-byte.
+    RCEpisodeParams p = DefaultConsensusRCEpisodeParams();
+    p.rounds = kRCRoundsDC;   // 8  (2× base)
+    p.L_lyr = kRCLayersDC;    // 64 (4× base)
+    p.b_seq = kRCBatchSeqDC;  // 32768 (2× base)
+    return p;
+}
+
 RCEpisodeParams MakeToyRCEpisodeParams()
 {
     RCEpisodeParams p;
@@ -855,8 +868,15 @@ RCEpisodeParams MakeSegTestRCEpisodeParams()
 
 RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p, int32_t height)
 {
-    return p.fMatMulRCUseToyDims ? MakeToyRCEpisodeParams()
-                                 : ConsensusRCEpisodeParamsForHeight(height, p);
+    // Regtest CI-scale toy dims take precedence (unchanged). Otherwise the
+    // profile selector chooses WHICH consensus dims activate (design §6.1(A)):
+    //   profile 2 = datacenter (additive; regtest/testnet override only)
+    //   profile 1 (default) = epoch-0 base via the height-selected schedule
+    // This is the ONLY dispatch change — miner / ExactReplay / Λ layout /
+    // sampled verifier all read RCEpisodeParams generically.
+    if (p.fMatMulRCUseToyDims) return MakeToyRCEpisodeParams();
+    if (p.nMatMulRCProfile == 2) return MakeDatacenterRCEpisodeParams();
+    return ConsensusRCEpisodeParamsForHeight(height, p);
 }
 
 std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint32_t cols)

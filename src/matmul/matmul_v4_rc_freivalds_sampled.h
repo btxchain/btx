@@ -52,11 +52,25 @@
 // under the sampling residual (reps is margin only). The unsampled-layer test
 // asserts this boundary explicitly (deterrence, not a bug).
 //
-// DISCIPLINE. Additive and SHADOW/measurement only; never consensus until an
-// explicit gate flips (exactly like VerifyWinnerProofV7Compact). Composes
-// against the frozen Fable primitive FreivaldsCheckGemm
-// (matmul_v4_rc_freivalds.h); arbiter OFF; does not modify alg_hash/fri/
-// air_quotient/air_recurse; SHA/ExactReplay paths intact.
+// CONSENSUS ROLE (datacenter profile — 2026-07 owner-authorized activation).
+// UNDER nMatMulRCProfile == 2 (the datacenter dims) this sampled verifier IS the
+// consensus accept/reject AUTHORITY in CheckMatMulProofOfWork_RC: at the
+// 16×-heavier datacenter episode ExactReplay cannot re-run the workload inside
+// the block-verify budget, so the sublinear sampled check decides validity. This
+// authority is DETERRENCE-based, NOT complete and NOT audited: an UNSAMPLED
+// tampered layer passes, with residual cheatable fraction ρ* ≈ ln(κ)/λ ≈ 0.27 %
+// (λ=256, κ=2) — see RESIDUAL above. It is an explicit owner risk decision; it is
+// NOT a formal-soundness or audit claim (the external cryptographic audit of the
+// FS coin / Freivalds composition / T-BIND / opening soundness remains OPEN, and
+// kRCGkrFormalSoundnessReady — which gates the SEPARATE GKR/SNARK arbiter, not
+// this path — stays false). ExactReplay is retained as the ε=0 async ARBITER /
+// dispute path a full node can run off the hot path.
+//
+// Under nMatMulRCProfile == 1 (epoch-0 base dims) this path is NOT consensus:
+// ExactReplay is the sole authority exactly as before, and the verifier here is
+// shadow/measurement only. Composes against the frozen Fable primitive
+// FreivaldsCheckGemm (matmul_v4_rc_freivalds.h); does not modify alg_hash/fri/
+// air_quotient/air_recurse; the ExactReplay path is intact for both profiles.
 // ============================================================================
 
 namespace matmul::v4::rc {
