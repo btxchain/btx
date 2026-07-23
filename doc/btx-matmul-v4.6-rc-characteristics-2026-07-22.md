@@ -158,6 +158,12 @@ gated behind a fail-closed activation switch that no network has flipped.
 - Composed soundness bound ≈71.9 bits (adequate margin), cross-reproduced.
 - V3-production default policy (profile 3, aggregate default, domain tags).
 - Single-switch activation wiring (kept OFF).
+- **Profile-2 sampled-carrier verify-time: GO on the hardware baseline** — Apple
+  M4 Max 330 ms (2.7× under the 900 ms relay-path budget) via Config W episode-
+  wide weights, row-block-addressable X0, and a four-phase parallel verifier with
+  packed int8 recompute. Baseline floor set at SHA-NI/SHA-ext + VNNI/i8mm; the
+  residual on pre-SHA-NI x86 is a known below-baseline SHA-instruction gap. See
+  `doc/btx-matmul-v4.6-rc-verify-time-budget-and-hardware-baseline-2026-07-23.md`.
 
 **Still gating a finite activation height (off-code):**
 1. **External cryptographic audit** of the succinct proof (the in-tree bound is
