@@ -735,12 +735,25 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         out_seeds.push_back(seed_r);
 
         auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
+        // DATACENTER shares X0/K/V EPISODE-WIDE (derived from sigma, NOT the per-round
+        // seed) so the sublinear verifier regenerates them ONCE, not per round. Safe
+        // because a round stays DISTINCT via its per-round freshness source: attention
+        // keeps Q per-round (Q_r fresh ⇒ Z_r fresh even with shared K,V), and the FFN
+        // keeps W per-round (W_r fresh ⇒ the layer stack differs even with shared X0).
+        // The only unsafe config — sharing the freshness source itself (both W and X0)
+        // ⇒ identical rounds ⇒ copy shortcut — is NOT used. This cuts K,V and X0 regen
+        // 8×; compute floor and margin are untouched. BASE keeps them per-round (seed_r)
+        // so its goldens are unchanged; the gate matches the FFN-weight sharing predicate.
+        const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
+        auto operand_ep = [&](const char* tag) {
+            return DeriveOperandSeedLocal(shared_ffn_weights ? sigma : seed_r, tag);
+        };
 
         // Phase-1: Q·Kᵀ then Extract S; S·V then Extract Z.
         std::vector<int8_t> S_mat;
         {
             const auto Q = ExpandMxDequantInt8(operand("BTX_RC_Q_V1"), p.n_q, p.d_head);
-            const auto K = ExpandMxDequantInt8(operand("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head);
+            const auto K = ExpandMxDequantInt8(operand_ep("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head);
             std::vector<int8_t> Kt(static_cast<size_t>(p.d_head) * p.n_ctx);
             for (uint32_t t = 0; t < p.n_ctx; ++t)
                 for (uint32_t d = 0; d < p.d_head; ++d)
@@ -755,7 +768,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
                       prf_S, S_mat);
         }
         {
-            const auto V = ExpandMxDequantInt8(operand("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head);
+            const auto V = ExpandMxDequantInt8(operand_ep("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head);
             std::vector<int64_t> Y;
             ExactInt64Gemm(S_mat, p.n_q, p.n_ctx, V, p.d_head, Y);
             const uint256 prf_Z = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_Z_V1"));
@@ -771,7 +784,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         // Bwd/Wgrad are gone. Both contractions are row-contiguous → soundly anchorable.
         std::vector<std::vector<int8_t>> X(p.L_lyr + 1);
         std::vector<uint256> prf_up(p.L_lyr), prf_dn(p.L_lyr);
-        X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
+        X[0] = ExpandMxDequantInt8(operand_ep("BTX_RC_X0_V1"), p.b_seq, p.d_model);
         // FFN weights are SHARED across the round's L layers (one (W_up, W_down) per
         // round). Fable verdict (scratchpad/verify-cost-fable-verdict.md): the iterated
         // fused-FFN map with a single shared (W_up, W_down) is shortcut-free (the MX
@@ -782,7 +795,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         // (the dominant production verify cost: 91% of the per-layer verify time). The
         // per-layer Extract samplers (prf_up/prf_dn) stay distinct — they are small keys,
         // add per-layer diversity, and cost nothing to regenerate.
-        const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
+        // (shared_ffn_weights computed above, next to operand_ep.)
         const std::vector<int8_t> W_up_shared =
             shared_ffn_weights ? ExpandMxDequantInt8(operand("BTX_RC_WUP_V1"), p.d_model, p.d_ff)
                                : std::vector<int8_t>{};
@@ -1549,6 +1562,13 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
                      : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
         auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
+        const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
+        // EPISODE-WIDE operands — datacenter only (sigma-derived, shared across rounds);
+        // base keeps them per-round (seed_r). See the matching comment in
+        // BuildRealEpisodeLayers. Must byte-match the prover: X0, K, V here.
+        auto operand_ep = [&](const char* tag) {
+            return DeriveOperandSeedLocal(shared_ffn_weights ? sigma : seed_r, tag);
+        };
         const size_t base = out.size();
         const size_t qkt_idx = base + 0;
         // Fused-FFN per-round layout: QKt ‖ SV ‖ for l: (FfnUp_l ‖ Fwd/down_l).
@@ -1569,10 +1589,9 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
         // X[l] (the layer input / down-wire residual): X0 leaf at l==0, else the
         // previous layer's DOWN extract_out (committed, row-contiguous).
         auto X_tensor = [&](uint32_t l, bool tr) {
-            return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
+            return (l == 0) ? leaf(operand_ep("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
                             : chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
         };
-        const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
         // Datacenter profile: FFN weights are SHARED across the round's layers
         // (no layer index), so the sampled verifier's per-seed regen cache hits
         // for all but the first sampled layer of a round. Base/toy/profile-1
@@ -1602,7 +1621,7 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             lp.kind = RCGkrLayerKind::GemmPhase1QKt;
             lp.round = r; lp.layer = 0; lp.m = p.n_q; lp.n = p.n_ctx; lp.k = p.d_head;
             lp.a = leaf(operand("BTX_RC_Q_V1"), p.n_q, p.d_head, false);
-            lp.b = leaf(operand("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head, true); // Kᵀ
+            lp.b = leaf(operand_ep("BTX_RC_KV_K_V1"), p.n_ctx, p.d_head, true); // Kᵀ (shared)
             lp.extract_prf = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_S_V1"));
             out.push_back(lp);
         }
@@ -1612,7 +1631,7 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             lp.kind = RCGkrLayerKind::GemmPhase1SV;
             lp.round = r; lp.layer = 0; lp.m = p.n_q; lp.n = p.d_head; lp.k = p.n_ctx;
             lp.a = chain(qkt_idx, p.n_q, p.n_ctx, false); // S = extract_out(QKt)
-            lp.b = leaf(operand("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head, false);
+            lp.b = leaf(operand_ep("BTX_RC_KV_V_V1"), p.n_ctx, p.d_head, false); // V (shared)
             lp.extract_prf = lt::DeriveMatExpandPrfKey(operand("BTX_RC_PRF_Z_V1"));
             out.push_back(lp);
         }

@@ -62,6 +62,12 @@ uint256 DeriveOperandSeed(const uint256& seed_r, const char* tag)
     return Sha256Tagged(tag, std::strlen(tag), seed_r.data(), 32);
 }
 
+// True only for the datacenter profile: shares FFN weights (per round, not per layer)
+// and the X0/K/V operands (episode-wide, not per round) to cut the sublinear verifier's
+// PRF regen cost. Base profile keeps per-layer weights + per-round operands (goldens
+// unchanged). Defined below; forward-declared here for the Phase-1/Phase-2 callers.
+bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p);
+
 // --- ExactGemm helpers ------------------------------------------------------
 
 /** P0.3: qualified device ExactGemm REPLACES CPU on the hot path.
@@ -229,12 +235,18 @@ struct Phase1Result {
     std::vector<std::vector<int64_t>> z_segs;    // each n_q × d_head int64 partial
 };
 
-Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const RCEpisodeParams& p,
-                                     uint32_t tile_delta)
+Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma,
+                                     const RCEpisodeParams& p, uint32_t tile_delta)
 {
+    // Q is per-round (freshness source that keeps each round's attention distinct).
+    // K, V: DATACENTER shares them EPISODE-WIDE (sigma-derived) so the sublinear
+    // verifier regenerates them once, not per round — safe since fresh Q_r ⇒ fresh Z_r.
+    // BASE keeps K, V per-round (seed_r) so its goldens are untouched. Gated by the same
+    // predicate as the FFN weight / X0 sharing.
+    const bool share_ep = UseDatacenterSharedFfnWeights(p);
     const uint256 seed_Q = DeriveOperandSeed(seed_r, "BTX_RC_Q_V1");
-    const uint256 seed_K = DeriveOperandSeed(seed_r, "BTX_RC_KV_K_V1");
-    const uint256 seed_V = DeriveOperandSeed(seed_r, "BTX_RC_KV_V_V1");
+    const uint256 seed_K = DeriveOperandSeed(share_ep ? sigma : seed_r, "BTX_RC_KV_K_V1");
+    const uint256 seed_V = DeriveOperandSeed(share_ep ? sigma : seed_r, "BTX_RC_KV_V_V1");
     const uint256 seed_prf_S = DeriveOperandSeed(seed_r, "BTX_RC_PRF_S_V1");
     const uint256 seed_prf_Z = DeriveOperandSeed(seed_r, "BTX_RC_PRF_Z_V1");
     const uint256 prf_S = lt::DeriveMatExpandPrfKey(seed_prf_S);
@@ -427,7 +439,8 @@ std::vector<int8_t> FusedFfnLayer(const std::vector<int8_t>& X, const std::vecto
     return out;
 }
 
-Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& p,
+Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
+                                  const RCEpisodeParams& p,
                                   RCEpisodeOptions::Checkpoint ckpt,
                                   const lt::ExactGemmBackend& gemm)
 {
@@ -441,9 +454,20 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const RCEpisodeParams& 
     out.prf_up.resize(p.L_lyr);
     out.prf_dn.resize(p.L_lyr);
 
-    const uint256 seed_X0 = DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
+    // X0: DATACENTER shares it EPISODE-WIDE (sigma-derived, one regen for the whole
+    // episode instead of per round) — safe because the FFN keeps W per-round, so fresh
+    // W_r keeps each round distinct even with shared X0. BASE keeps X0 per-round
+    // (seed_r) so its goldens are untouched. Gated by the same predicate as the FFN
+    // weight sharing; matches gkr BuildRealEpisodeLayers.
+    const uint256 seed_X0 = out.ffn_weights_shared
+                                ? DeriveOperandSeed(sigma, "BTX_RC_X0_V1")
+                                : DeriveOperandSeed(seed_r, "BTX_RC_X0_V1");
     out.X[0] = ExpandMxDequantInt8(seed_X0, p.b_seq, p.d_model);
     if (out.ffn_weights_shared) {
+        // FFN weights SHARED across the round's layers (fixed tag, no layer index) — the
+        // per-round freshness source that keeps rounds distinct; cuts verifier PRF regen
+        // ~24× (Fable-proven shortcut-/contraction-free). Expanded ONCE into the shared
+        // members, reused for every layer of the fused-FFN pass.
         out.W_up_shared = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, "BTX_RC_WUP_V1"),
                                               p.d_model, p.d_ff);
         out.W_down_shared = ExpandMxDequantInt8(DeriveOperandSeed(seed_r, "BTX_RC_WDN_V1"),
@@ -662,9 +686,9 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
             seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
         }
         const auto t1 = clock::now();
-        auto p1 = Phase1AssociativeRecall(seed_r, params, options.phase1_tile_delta);
+        auto p1 = Phase1AssociativeRecall(seed_r, sigma, params, options.phase1_tile_delta);
         const auto t2 = clock::now();
-        auto p2 = Phase2MicroTraining(seed_r, params, options.checkpoint, gemm);
+        auto p2 = Phase2MicroTraining(seed_r, sigma, params, options.checkpoint, gemm);
         const auto t3 = clock::now();
 
         // P1.1: stream leaf hashing — no full-round stream buffer on the
