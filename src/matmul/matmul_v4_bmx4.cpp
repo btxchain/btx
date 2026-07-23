@@ -39,6 +39,10 @@
 #endif
 #endif
 
+#if defined(ENABLE_X86_SHANI)
+#include <compat/cpuid.h> // GetCPUID / HAVE_GETCPUID (runtime SHA-NI detection)
+#endif
+
 #if defined(ENABLE_ARM_SHANI)
 namespace sha256_arm_shani {
 void Transform(uint32_t* s, const unsigned char* chunk, size_t blocks);
@@ -52,6 +56,13 @@ void Transform4x41(unsigned char output[4][32], const unsigned char seed[32],
 #if defined(ENABLE_AVX2)
 namespace sha256_xof_avx2 {
 void Transform8x41(unsigned char output[8][32], const unsigned char seed[32],
+                   unsigned char domain, uint64_t block0);
+}
+#endif
+
+#if defined(ENABLE_X86_SHANI)
+namespace sha256_xof_shani {
+void Transform4x41(unsigned char output[4][32], const unsigned char seed[32],
                    unsigned char domain, uint64_t block0);
 }
 #endif
@@ -227,6 +238,71 @@ bool UseXof8Avx2()
 }
 #endif
 
+#if defined(ENABLE_X86_SHANI)
+bool RuntimeX86Sha256Available()
+{
+    // Runtime CPUID gate: a binary compiled with SHA-NI support may still run on
+    // an x86 CPU that lacks the extension (e.g. pre-Ice-Lake Intel), where the
+    // sha256rnds2 path would #UD. Mirrors the leaf-1 SSE4.1 (ecx bit 19) then
+    // leaf-7 SHA (ebx bit 29) probe CSHA256's SHA256AutoDetect uses.
+#if defined(HAVE_GETCPUID)
+    uint32_t eax, ebx, ecx, edx;
+    GetCPUID(1, 0, eax, ebx, ecx, edx);
+    const bool have_sse4 = (ecx >> 19) & 1;
+    if (!have_sse4) return false;
+    GetCPUID(7, 0, eax, ebx, ecx, edx);
+    return (ebx >> 29) & 1;
+#else
+    return false;
+#endif
+}
+
+void XofBlock41x8Shani(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
+                       uint8_t hashes[8][32])
+{
+    // Two 4-lane hardware-SHA passes over eight consecutive counters, matching
+    // the 8-wide interface of the AVX2 multibuffer so the same dispatch and
+    // consumers apply.
+    sha256_xof_shani::Transform4x41(hashes, seed_bytes, domain, block0);
+    sha256_xof_shani::Transform4x41(hashes + 4, seed_bytes, domain, block0 + 4);
+}
+
+bool XofShaniSelfTest()
+{
+    // Multi-vector randomized self-test vs scalar CSHA256 XofBlock41 (several
+    // seeds, counter bases incl. 64-bit wraparound, both stream domains).
+    // Single-vector self-tests were flagged as a fork risk for consensus kernels.
+    const uint64_t bases[] = {0ULL, 7ULL, 0x123456789abcdef0ULL, 0xfffffffffffffff8ULL};
+    for (uint32_t s = 0; s < 5; ++s) {
+        uint8_t seed_bytes[32];
+        for (uint32_t i = 0; i < 32; ++i) {
+            seed_bytes[i] = static_cast<uint8_t>((i * 13u) ^ (s * 29u + 3u));
+        }
+        for (uint64_t base : bases) {
+            for (uint8_t domain : {kMantissaStreamDomain, kScaleStreamDomain}) {
+                uint8_t hashes8[8][32];
+                XofBlock41x8Shani(seed_bytes, domain, base, hashes8);
+                for (uint32_t lane = 0; lane < 8; ++lane) {
+                    uint8_t ref[32];
+                    XofBlock41(seed_bytes, domain, base + lane, ref);
+                    if (std::memcmp(hashes8[lane], ref, 32) != 0) return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool UseXofShaniX86()
+{
+    if (const char* env = std::getenv("BTX_BMX4_XOF_SHANI")) {
+        if (env[0] == '0' && env[1] == '\0') return false;
+    }
+    static const bool ok = RuntimeX86Sha256Available() && XofShaniSelfTest();
+    return ok;
+}
+#endif
+
 bool UseXof4Fast()
 {
 #if defined(ENABLE_ARM_SHANI)
@@ -237,6 +313,10 @@ bool UseXof4Fast()
 
 bool UseXof8Fast()
 {
+    // x86 dispatch order: hardware SHA-NI -> AVX2 software multibuffer -> scalar.
+#if defined(ENABLE_X86_SHANI)
+    if (UseXofShaniX86()) return true;
+#endif
 #if defined(ENABLE_AVX2)
     if (UseXof8Avx2()) return true;
 #endif
@@ -260,6 +340,13 @@ void XofBlock41x4Fast(const uint8_t seed_bytes[32], uint8_t domain, uint64_t blo
 void XofBlock41x8Fast(const uint8_t seed_bytes[32], uint8_t domain, uint64_t block0,
                       uint8_t hashes[8][32])
 {
+    // Same dispatch order as UseXof8Fast: SHA-NI first, then AVX2, then scalar.
+#if defined(ENABLE_X86_SHANI)
+    if (UseXofShaniX86()) {
+        XofBlock41x8Shani(seed_bytes, domain, block0, hashes);
+        return;
+    }
+#endif
 #if defined(ENABLE_AVX2)
     if (UseXof8Avx2()) {
         XofBlock41x8Avx2(seed_bytes, domain, block0, hashes);
@@ -427,7 +514,7 @@ void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out)
 
     size_t filled = 0;
     uint64_t block = 0;
-#if defined(ENABLE_AVX2)
+#if defined(ENABLE_AVX2) || defined(ENABLE_X86_SHANI)
     if (UseXof8Fast()) {
         while (filled < count) {
             uint8_t hashes[8][CSHA256::OUTPUT_SIZE];
@@ -549,7 +636,7 @@ void ExpandMantissaStreamParallel(const uint256& seed, size_t count, int8_t* out
             const size_t old = hashes.size();
             hashes.resize(want_blocks);
             accept_counts.resize(want_blocks);
-#if defined(ENABLE_AVX2)
+#if defined(ENABLE_AVX2) || defined(ENABLE_X86_SHANI)
             if (UseXof8Fast()) {
                 const size_t jobs = want_blocks - old;
                 ParallelForBlocks((jobs + 7) / 8, threads, [&](size_t group) {
@@ -778,7 +865,7 @@ void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out)
 
     size_t filled = 0;
     uint64_t block = 0;
-#if defined(ENABLE_AVX2)
+#if defined(ENABLE_AVX2) || defined(ENABLE_X86_SHANI)
     if (UseXof8Fast()) {
         while (filled < count) {
             uint8_t hashes[8][CSHA256::OUTPUT_SIZE];
