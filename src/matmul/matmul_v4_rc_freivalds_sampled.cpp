@@ -282,11 +282,25 @@ std::vector<TilePlan> TilePositions(const uint256& base_seed, uint32_t layer_ind
 // PRF operand-expansion cache keyed by seed (weights + leaf activations expand
 // once per verify; each Λ seed is domain-separated so it maps to one shape).
 using RegenCache = std::map<uint256, std::vector<int8_t>>;
+// `tm` optional: when non-null, records regen time / cache hit-miss / bytes for the
+// production verify-cost split. Result bytes are identical either way.
 const std::vector<int8_t>& RegenLeaf(RegenCache& cache, const uint256& seed, uint32_t rows,
-                                     uint32_t cols)
+                                     uint32_t cols, RCFreivaldsSampledTiming* tm = nullptr)
 {
     auto it = cache.find(seed);
-    if (it != cache.end()) return it->second;
+    if (it != cache.end()) {
+        if (tm) ++tm->regen_hits;
+        return it->second;
+    }
+    if (tm) {
+        const auto t = std::chrono::steady_clock::now();
+        const std::vector<int8_t>& v =
+            cache.emplace(seed, ExpandMxDequantInt8(seed, rows, cols)).first->second;
+        tm->regen_s += Secs(t);
+        ++tm->regen_misses;
+        tm->regen_bytes += static_cast<uint64_t>(rows) * cols;
+        return v;
+    }
     return cache.emplace(seed, ExpandMxDequantInt8(seed, rows, cols)).first->second;
 }
 
@@ -683,9 +697,10 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 const uint32_t n_ctx = e.k; // == carrier.episode.n_ctx
                 if (n_ctx % T != 0) return fail("v7fs:sv_ctx_block");
                 const std::vector<int8_t>& Q =
-                    RegenLeaf(regen, qkt.a.seed, carrier.episode.n_q, d_head);
-                const std::vector<int8_t>& K = RegenLeaf(regen, qkt.b.seed, n_ctx, d_head);
-                const std::vector<int8_t>& V = RegenLeaf(regen, lp.b.seed, n_ctx, d_head);
+                    RegenLeaf(regen, qkt.a.seed, carrier.episode.n_q, d_head, &tm);
+                const std::vector<int8_t>& K = RegenLeaf(regen, qkt.b.seed, n_ctx, d_head, &tm);
+                const std::vector<int8_t>& V = RegenLeaf(regen, lp.b.seed, n_ctx, d_head, &tm);
+                const auto t_rc_sv = std::chrono::steady_clock::now();
                 // S row i (int8, n_ctx wide) = Extract(prf_S, Q[i]·Kᵀ).
                 std::vector<int8_t> S_row(n_ctx);
                 std::array<int64_t, kRCMxBlockLen> blk{};
@@ -712,6 +727,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     yblk[c] = acc;
                 }
                 eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
+                tm.recompute_s += Secs(t_rc_sv);
             } else {
                 // DOWN: H-row = Extract(X_row·W_up); Y-block = Extract(H_row·W_down + X_row).
                 if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:down_a_src");
@@ -729,7 +745,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     if (!tile.a_prf_regen || !tile.a_row_leaf.empty())
                         return fail("v7fs:down_l0_anchor");
                     const std::vector<int8_t>& X0 =
-                        RegenLeaf(regen, xprov.seed, carrier.episode.b_seq, d_model);
+                        RegenLeaf(regen, xprov.seed, carrier.episode.b_seq, d_model, &tm);
                     for (uint32_t d = 0; d < d_model; ++d)
                         X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
                 } else {
@@ -748,14 +764,17 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     for (uint32_t d = 0; d < d_model; ++d)
                         X_row[d] = static_cast<int8_t>(tile.a_row_leaf[rel + d]);
                     std::string awhy;
-                    if (!CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
-                                           carrier.round_roots[e.round], t_leaf, off_A, X_row, awhy))
-                        return fail(awhy);
+                    const auto t_mk = std::chrono::steady_clock::now();
+                    const bool a_ok = CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
+                                           carrier.round_roots[e.round], t_leaf, off_A, X_row, awhy);
+                    tm.merkle_s += Secs(t_mk);
+                    if (!a_ok) return fail(awhy);
                     tm.n_merkle_hashes += tile.a_row_proof.siblings.size();
                     ++tm.n_merkle_openings;
                 }
-                const std::vector<int8_t>& W_up = RegenLeaf(regen, up.b.seed, d_model, d_ff);
-                const std::vector<int8_t>& W_down = RegenLeaf(regen, lp.b.seed, d_ff, d_model);
+                const std::vector<int8_t>& W_up = RegenLeaf(regen, up.b.seed, d_model, d_ff, &tm);
+                const std::vector<int8_t>& W_down = RegenLeaf(regen, lp.b.seed, d_ff, d_model, &tm);
+                const auto t_rc_dn = std::chrono::steady_clock::now();
                 // H-row = Extract(X_row·W_up) over the full d_ff width.
                 std::vector<int8_t> H_row(d_ff);
                 std::array<int64_t, kRCMxBlockLen> blk{};
@@ -783,6 +802,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     yblk[c] = acc;
                 }
                 eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
+                tm.recompute_s += Secs(t_rc_dn);
             }
             // The recomputed extract_out must equal the relayed tile.extract_out.
             for (uint32_t c = 0; c < T; ++c)
@@ -804,9 +824,12 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
             for (uint32_t x = 0; x < n_leaves; ++x) {
                 const uint32_t lf = first_leaf + x;
                 std::string owhy;
-                if (!CheckCoveringLeaf(tile.leaf_bytes[x], lf, tile.leaf_proofs[x],
+                const auto t_mk2 = std::chrono::steady_clock::now();
+                const bool eo_ok = CheckCoveringLeaf(tile.leaf_bytes[x], lf, tile.leaf_proofs[x],
                                        carrier.round_roots[e.round], t_leaf, off_expect,
-                                       tile.extract_out, owhy)) {
+                                       tile.extract_out, owhy);
+                tm.merkle_s += Secs(t_mk2);
+                if (!eo_ok) {
                     return fail(owhy);
                 }
                 tm.n_merkle_hashes += tile.leaf_proofs[x].siblings.size();
