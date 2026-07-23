@@ -764,15 +764,24 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         //   X[l+1] = Extract_dn(H[l]·W_down + X[l]) [b_seq×d_model] — streamed (committed), +X[l]
         // Bwd/Wgrad are gone. Both contractions are row-contiguous → soundly anchorable.
         std::vector<std::vector<int8_t>> X(p.L_lyr + 1);
-        std::vector<std::vector<int8_t>> W_up(p.L_lyr), W_down(p.L_lyr);
         std::vector<uint256> prf_up(p.L_lyr), prf_dn(p.L_lyr);
         X[0] = ExpandMxDequantInt8(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model);
+        // FFN weights are SHARED across the round's L layers (one (W_up, W_down) per
+        // round). Fable verdict (scratchpad/verify-cost-fable-verdict.md): the iterated
+        // fused-FFN map with a single shared (W_up, W_down) is shortcut-free (the MX
+        // Extract nonlinearity kills associativity/telescoping/squaring/sketching) and
+        // contraction-free for L≤24 (expected steps to a fixed point ≫ 2^256), so every
+        // layer still requires a full evaluation — the compute floor and margin are
+        // untouched. Sharing cuts the SUBLINEAR VERIFIER's PRF weight regeneration ~24×
+        // (the dominant production verify cost: 91% of the per-layer verify time). The
+        // per-layer Extract samplers (prf_up/prf_dn) stay distinct — they are small keys,
+        // add per-layer diversity, and cost nothing to regenerate.
+        const std::vector<int8_t> W_up =
+            ExpandMxDequantInt8(operand("BTX_RC_WUP_V1"), p.d_model, p.d_ff);
+        const std::vector<int8_t> W_down =
+            ExpandMxDequantInt8(operand("BTX_RC_WDN_V1"), p.d_ff, p.d_model);
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
             char tag[40];
-            std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
-            W_up[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_ff);
-            std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
-            W_down[l] = ExpandMxDequantInt8(operand(tag), p.d_ff, p.d_model);
             std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_UP_%u_V1", l);
             prf_up[l] = lt::DeriveMatExpandPrfKey(operand(tag));
             std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_DN_%u_V1", l);
@@ -783,16 +792,16 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
             // UP: H = Extract(X[l]·W_up) [b_seq×d_ff]. INTERNAL — pushed as
             // GemmPhase2FfnUp (LayerInStream=false, like QKt's S). Not committed.
             std::vector<int64_t> H_gemm;
-            ExactInt64Gemm(X[l], p.b_seq, p.d_model, W_up[l], p.d_ff, H_gemm);
+            ExactInt64Gemm(X[l], p.b_seq, p.d_model, W_up, p.d_ff, H_gemm);
             std::vector<int8_t> H(H_gemm.size(), 0);
             ExtractMXMatrixInt64(prf_up[l], H_gemm.data(), p.b_seq, p.d_ff, H.data());
             push_wire(RCGkrLayerKind::GemmPhase2FfnUp, r, l, p.b_seq, p.d_ff, p.d_model, X[l],
-                      W_up[l], H_gemm, H_gemm, prf_up[l], H);
+                      W_up, H_gemm, H_gemm, prf_up[l], H);
 
             // DOWN: X[l+1] = Extract(H·W_down + X[l]) [b_seq×d_model]. Streamed as
             // GemmPhase2Fwd. H5: residual X[l] is INSIDE the single Extract accumulator.
             std::vector<int64_t> Y_gemm;
-            ExactInt64Gemm(H, p.b_seq, p.d_ff, W_down[l], p.d_model, Y_gemm);
+            ExactInt64Gemm(H, p.b_seq, p.d_ff, W_down, p.d_model, Y_gemm);
             std::vector<int64_t> Y_acc = Y_gemm;
             for (uint32_t i = 0; i < p.b_seq; ++i)
                 for (uint32_t j = 0; j < p.d_model; ++j)
@@ -804,7 +813,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
             // residual = X[l] (the layer INPUT, not the A=H operand): the sampled
             // verifier binds it by recomputing the anchored X[l] row.
             push_wire(RCGkrLayerKind::GemmPhase2Fwd, r, l, p.b_seq, p.d_model, p.d_ff, H,
-                      W_down[l], Y_gemm, Y_acc, prf_dn[l], X[l + 1]);
+                      W_down, Y_gemm, Y_acc, prf_dn[l], X[l + 1]);
             out.back().residual = ToFp2I8(X[l]);
         }
     }
@@ -1544,16 +1553,13 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
                             : chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
         };
-        auto Wup_seed = [&](uint32_t l) {
-            char tag[40];
-            std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
-            return operand(tag);
-        };
-        auto Wdn_seed = [&](uint32_t l) {
-            char tag[40];
-            std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
-            return operand(tag);
-        };
+        // FFN weights are SHARED across the round's layers (no layer index): every
+        // sampled layer references the SAME (W_up, W_down) seed, so the sublinear
+        // verifier's per-seed regen cache is hit for all but the first sampled layer
+        // of a round — cutting PRF weight regeneration ~24× (the dominant verify cost).
+        // Shortcut-/contraction-free per the Fable verdict; margin/soundness untouched.
+        auto Wup_seed = [&](uint32_t /*l*/) { return operand("BTX_RC_WUP_V1"); };
+        auto Wdn_seed = [&](uint32_t /*l*/) { return operand("BTX_RC_WDN_V1"); };
         auto prf_tag = [&](const char* fmt, uint32_t l) {
             char tag[40];
             std::snprintf(tag, sizeof(tag), fmt, l);
