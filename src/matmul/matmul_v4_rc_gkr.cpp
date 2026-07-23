@@ -144,8 +144,14 @@ std::atomic<uint64_t> g_exact_replay_invoke_count{0};
 bool RCEpisodeParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
 {
     return a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q && a.n_ctx == b.n_ctx &&
-           a.L_lyr == b.L_lyr && a.d_model == b.d_model && a.b_seq == b.b_seq &&
+           a.L_lyr == b.L_lyr && a.d_model == b.d_model && a.d_ff == b.d_ff &&
+           a.b_seq == b.b_seq &&
            a.T_leaf == b.T_leaf;
+}
+
+bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p)
+{
+    return RCEpisodeParamsEqual(p, MakeDatacenterRCEpisodeParams());
 }
 
 void RCGkrProofCacheEvictExpiredLocked(const std::chrono::steady_clock::time_point now)
@@ -776,12 +782,23 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         // (the dominant production verify cost: 91% of the per-layer verify time). The
         // per-layer Extract samplers (prf_up/prf_dn) stay distinct — they are small keys,
         // add per-layer diversity, and cost nothing to regenerate.
-        const std::vector<int8_t> W_up =
-            ExpandMxDequantInt8(operand("BTX_RC_WUP_V1"), p.d_model, p.d_ff);
-        const std::vector<int8_t> W_down =
-            ExpandMxDequantInt8(operand("BTX_RC_WDN_V1"), p.d_ff, p.d_model);
+        const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
+        const std::vector<int8_t> W_up_shared =
+            shared_ffn_weights ? ExpandMxDequantInt8(operand("BTX_RC_WUP_V1"), p.d_model, p.d_ff)
+                               : std::vector<int8_t>{};
+        const std::vector<int8_t> W_down_shared =
+            shared_ffn_weights ? ExpandMxDequantInt8(operand("BTX_RC_WDN_V1"), p.d_ff, p.d_model)
+                               : std::vector<int8_t>{};
+        std::vector<std::vector<int8_t>> W_up_layers(shared_ffn_weights ? 0 : p.L_lyr);
+        std::vector<std::vector<int8_t>> W_down_layers(shared_ffn_weights ? 0 : p.L_lyr);
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
             char tag[40];
+            if (!shared_ffn_weights) {
+                std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
+                W_up_layers[l] = ExpandMxDequantInt8(operand(tag), p.d_model, p.d_ff);
+                std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
+                W_down_layers[l] = ExpandMxDequantInt8(operand(tag), p.d_ff, p.d_model);
+            }
             std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_UP_%u_V1", l);
             prf_up[l] = lt::DeriveMatExpandPrfKey(operand(tag));
             std::snprintf(tag, sizeof(tag), "BTX_RC_PRF_DN_%u_V1", l);
@@ -789,6 +806,8 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
         }
 
         for (uint32_t l = 0; l < p.L_lyr; ++l) {
+            const std::vector<int8_t>& W_up = shared_ffn_weights ? W_up_shared : W_up_layers[l];
+            const std::vector<int8_t>& W_down = shared_ffn_weights ? W_down_shared : W_down_layers[l];
             // UP: H = Extract(X[l]·W_up) [b_seq×d_ff]. INTERNAL — pushed as
             // GemmPhase2FfnUp (LayerInStream=false, like QKt's S). Not committed.
             std::vector<int64_t> H_gemm;
@@ -1553,13 +1572,24 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
             return (l == 0) ? leaf(operand("BTX_RC_X0_V1"), p.b_seq, p.d_model, tr)
                             : chain(down_idx[l - 1], p.b_seq, p.d_model, tr);
         };
-        // FFN weights are SHARED across the round's layers (no layer index): every
-        // sampled layer references the SAME (W_up, W_down) seed, so the sublinear
-        // verifier's per-seed regen cache is hit for all but the first sampled layer
-        // of a round — cutting PRF weight regeneration ~24× (the dominant verify cost).
-        // Shortcut-/contraction-free per the Fable verdict; margin/soundness untouched.
-        auto Wup_seed = [&](uint32_t /*l*/) { return operand("BTX_RC_WUP_V1"); };
-        auto Wdn_seed = [&](uint32_t /*l*/) { return operand("BTX_RC_WDN_V1"); };
+        const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
+        // Datacenter profile: FFN weights are SHARED across the round's layers
+        // (no layer index), so the sampled verifier's per-seed regen cache hits
+        // for all but the first sampled layer of a round. Base/toy/profile-1
+        // retain their per-layer tags exactly so the V1 golden remains
+        // byte-identical.
+        auto Wup_seed = [&](uint32_t l) {
+            if (shared_ffn_weights) return operand("BTX_RC_WUP_V1");
+            char tag[40];
+            std::snprintf(tag, sizeof(tag), "BTX_RC_WUP_%u_V1", l);
+            return operand(tag);
+        };
+        auto Wdn_seed = [&](uint32_t l) {
+            if (shared_ffn_weights) return operand("BTX_RC_WDN_V1");
+            char tag[40];
+            std::snprintf(tag, sizeof(tag), "BTX_RC_WDN_%u_V1", l);
+            return operand(tag);
+        };
         auto prf_tag = [&](const char* fmt, uint32_t l) {
             char tag[40];
             std::snprintf(tag, sizeof(tag), fmt, l);
