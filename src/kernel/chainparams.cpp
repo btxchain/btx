@@ -28,6 +28,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstdint>
+#include <numeric>
 #include <cstring>
 #include <iterator>
 
@@ -357,6 +358,24 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
         consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulRCAsertRescaleNum == kRCDatacenterAsertRescaleNum);
         assert(consensus.nMatMulRCAsertRescaleDen == kRCDatacenterAsertRescaleDen);
+    }
+    // ASERT-RATIO CONSISTENCY guardrail: the datacenter one-time ASERT rescale
+    // constant MUST equal the EXACT reduced datacenter/base episode-MAC ratio, so
+    // it can never silently drift from the real per-block work uplift when the
+    // episode dims are retuned (e.g. scaling b_seq/d_ff up for a larger datacenter
+    // differential). DERIVED, not trusted: recompute the ratio from the canonical
+    // params and fail construction on any mismatch. TotalRCEpisodeMacs is the O(1)
+    // MAC-count formula (not an actual episode run), so this is cheap at startup.
+    {
+        const uint64_t mac_dc = matmul::v4::rc::TotalRCEpisodeMacs(
+            matmul::v4::rc::MakeDatacenterRCEpisodeParams());
+        const uint64_t mac_base = matmul::v4::rc::TotalRCEpisodeMacs(
+            matmul::v4::rc::DefaultConsensusRCEpisodeParams());
+        assert(mac_base != 0 && mac_dc != 0);
+        const uint64_t g = std::gcd(mac_dc, mac_base);
+        assert(g != 0);
+        assert(static_cast<uint64_t>(kRCDatacenterAsertRescaleNum) == mac_dc / g);
+        assert(static_cast<uint64_t>(kRCDatacenterAsertRescaleDen) == mac_base / g);
     }
     if (!is_regtest) {
         // Public nets remain fail-closed on the ENC_RC ACTIVATION (height): the
