@@ -162,6 +162,23 @@ static constexpr size_t MATMUL_CARRIER_SERVE_GLOBAL_BYTES_PER_SEC{size_t{12} * 1
 static constexpr double MATMUL_CARRIER_RECV_BUCKET_MAX{8.0};
 static_assert(MAX_RCCARRIER_PAYLOAD_SIZE >= matmul::v4::rc::kRCFreivaldsCarrierMaxSerializedBytes,
               "the rccarrier transport ceiling must admit any in-bounds carrier");
+/** Datacenter-profile (nMatMulRCProfile==2) carrier-deferred block bounds. A
+ *  profile-2 block reconstructed locally from mempool via compact blocks is NOT
+ *  fetched over getdata `block`, so the strict pre-block carrier serve-push
+ *  (ProcessGetBlockData) never fires; its consensus-load-bearing sampled carrier
+ *  may simply be LATE. Rather than permanently reject such a raced-but-valid
+ *  block as high-hash (a consensus-split/chain-halt risk), we HOLD it, request
+ *  the carrier (getrccarrier), and resubmit on receipt — mirroring the
+ *  getblocktxn/blocktxn missing-transactions pattern. The hold is strictly
+ *  bounded so it can never become a NEW DoS: a peer whose carriers never arrive
+ *  cannot pin unbounded memory or force acceptance. On timeout the held block is
+ *  DROPPED (never accepted) and the source peer disconnected, as for other
+ *  missing-companion-data stalls. A missing carrier can NEVER resolve to accept:
+ *  a resubmit only fires after an AUTHENTICATED carrier is stored, and validation
+ *  still runs the full sampled verifier. */
+static constexpr size_t MAX_MATMUL_CARRIER_DEFERRALS_TOTAL{16};
+static constexpr size_t MAX_MATMUL_CARRIER_DEFERRALS_PER_PEER{4};
+static constexpr auto MATMUL_CARRIER_DEFER_TIMEOUT{60s};
 /** Maximum depth of blocks we're willing to serve as compact blocks to peers
  *  when requested. For older blocks, a regular BLOCK response will be sent. */
 static const int MAX_CMPCTBLOCK_DEPTH = 5;
@@ -1141,6 +1158,48 @@ private:
     std::chrono::microseconds m_matmul_carrier_serve_global_last_refill GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0us};
     std::map<uint256, std::pair<NodeId, std::chrono::microseconds>> m_matmul_carrier_requested
         GUARDED_BY(cs_main);
+
+    /** Datacenter-profile (nMatMulRCProfile==2) blocks held pending their sampled
+     *  carrier. A fully reconstructed profile-2 block whose carrier has not yet
+     *  arrived is parked here (instead of being permanently rejected as
+     *  high-hash) and resubmitted for validation once the authenticated carrier
+     *  is stored. Bounded by MAX_MATMUL_CARRIER_DEFERRALS_{TOTAL,PER_PEER} and by
+     *  MATMUL_CARRIER_DEFER_TIMEOUT; on timeout the block is dropped and the
+     *  owning peer disconnected. Its own leaf mutex, because it is touched from
+     *  the message thread (defer at reconstruction, resubmit on rccarrier),
+     *  SendMessages (timeout sweep), and FinalizeNode (owner-disconnect cleanup)
+     *  — none of which share a single higher lock. */
+    struct MatMulCarrierDeferredBlock {
+        std::shared_ptr<const CBlock> block;
+        NodeId peer;
+        std::chrono::steady_clock::time_point deadline;
+        bool force_processing;
+        bool min_pow_checked;
+    };
+    mutable Mutex m_matmul_carrier_deferred_mutex;
+    std::map<uint256, MatMulCarrierDeferredBlock> m_matmul_carrier_deferred
+        GUARDED_BY(m_matmul_carrier_deferred_mutex);
+
+    //! Park a fully reconstructed profile-2 block whose sampled carrier has not
+    //! yet arrived, request the carrier, and mark it async-pending so block
+    //! download does not re-request it. Returns true iff the block was deferred
+    //! (caller must NOT then process it): profile-2 active, carrier absent, and a
+    //! bounded deferral slot was available. Returns false when the carrier is
+    //! already held (validate now) or the block is not a profile-2 deferral
+    //! candidate or the DoS bound is hit (caller falls through to a transient,
+    //! non-permanent reject that holds no state).
+    bool MaybeDeferBlockForMatMulCarrier(CNode& pfrom, const std::shared_ptr<const CBlock>& pblock,
+                                         int32_t reference_height, bool force_processing,
+                                         bool min_pow_checked)
+        EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
+    //! On authenticated-carrier arrival, resubmit the held block (if any) for
+    //! full validation against `carrier_deliverer`. cs_main must NOT be held.
+    void ResubmitMatMulCarrierDeferredBlock(CNode& carrier_deliverer, const uint256& block_hash)
+        EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    //! Drop carrier-deferred blocks owned by `nodeid` (peer disconnected). No
+    //! punishment — the peer is already gone; just release the held state.
+    //! Called from FinalizeNode, which already holds cs_main.
+    void DropMatMulCarrierDeferralsForPeer(NodeId nodeid) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
     //! Datacenter profile (nMatMulRCProfile==2): opportunistically request the
     //! sampled CARRIER for a block we are about to download/validate, from the
@@ -2204,6 +2263,11 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
             ++it;
         }
     }
+    // And release any profile-2 blocks parked pending a carrier from this peer:
+    // a departed peer will never deliver the carrier, so drop the held block
+    // (never accepted) and free its async marker / source pin. No punishment —
+    // the peer is already gone.
+    DropMatMulCarrierDeferralsForPeer(nodeid);
 
     if (m_node_states.empty()) {
         // Do a consistency check after the last peer is removed.
@@ -2303,6 +2367,190 @@ void PeerManagerImpl::MaybeRequestMatMulCarrier(CNode& pto, const CBlockIndex& i
     MakeAndPushMessage(pto, NetMsgType::GETRCCARRIER, index.GetBlockHash());
     LogDebug(BCLog::NET, "Requesting matmul carrier %s peer=%d (profile-2 prefetch)\n",
              index.GetBlockHash().ToString(), pto.GetId());
+}
+
+bool PeerManagerImpl::MaybeDeferBlockForMatMulCarrier(CNode& pfrom,
+                                                      const std::shared_ptr<const CBlock>& pblock,
+                                                      int32_t reference_height,
+                                                      bool force_processing, bool min_pow_checked)
+{
+    AssertLockHeld(cs_main);
+    AssertLockHeld(g_msgproc_mutex);
+    const Consensus::Params& consensus = m_chainparams.GetConsensus();
+    // Only the datacenter profile has a consensus-load-bearing sampled carrier.
+    // Everything else (profile-1/base, the coupled path, inactive heights, and
+    // mainnet where profile-2 is gated off) validates now, unchanged.
+    if (!consensus.fMatMulPOW) return false;
+    if (reference_height == std::numeric_limits<int32_t>::max() || reference_height < 0) return false;
+    if (!consensus.IsMatMulRCActive(reference_height)) return false;
+    if (consensus.IsMatMulRCCoupledActive(reference_height)) return false;
+    if (consensus.nMatMulRCProfile != 2) return false;
+    const uint256 hash{pblock->GetHash()};
+    // Carrier already present (prefetch/serve-push won the race): validate now.
+    if (matmul::v4::rc::RCFreivaldsCarrierStoreHave(hash)) return false;
+
+    {
+        LOCK(m_matmul_carrier_deferred_mutex);
+        auto existing = m_matmul_carrier_deferred.find(hash);
+        if (existing != m_matmul_carrier_deferred.end()) {
+            // Already parked (a redundant reconstruction from another peer):
+            // keep the original owner/deadline, do not re-arm or re-request.
+            return true;
+        }
+        // DoS bounds: never hold more than the global cap, nor more than the
+        // per-peer cap. When a bound is hit we do NOT hold this block; the caller
+        // falls through to ordinary validation, which classifies the missing
+        // carrier as TRANSIENT (BLOCK_MUTATED) — non-permanent and un-punished —
+        // so nothing is accepted and no unbounded state accrues.
+        if (m_matmul_carrier_deferred.size() >= MAX_MATMUL_CARRIER_DEFERRALS_TOTAL) {
+            LogDebug(BCLog::NET,
+                     "matmul: not deferring block %s from peer=%d (global carrier-defer cap %u reached)\n",
+                     hash.ToString(), pfrom.GetId(), (unsigned)MAX_MATMUL_CARRIER_DEFERRALS_TOTAL);
+            return false;
+        }
+        size_t owned_by_peer{0};
+        for (const auto& [h, d] : m_matmul_carrier_deferred) {
+            if (d.peer == pfrom.GetId()) ++owned_by_peer;
+        }
+        if (owned_by_peer >= MAX_MATMUL_CARRIER_DEFERRALS_PER_PEER) {
+            LogDebug(BCLog::NET,
+                     "matmul: not deferring block %s from peer=%d (per-peer carrier-defer cap %u reached)\n",
+                     hash.ToString(), pfrom.GetId(), (unsigned)MAX_MATMUL_CARRIER_DEFERRALS_PER_PEER);
+            return false;
+        }
+        m_matmul_carrier_deferred.emplace(
+            hash, MatMulCarrierDeferredBlock{pblock, pfrom.GetId(),
+                                             std::chrono::steady_clock::now() + MATMUL_CARRIER_DEFER_TIMEOUT,
+                                             force_processing, min_pow_checked});
+    }
+    // Mark the hash async-pending so FindNextBlocksToDownload does not
+    // immediately re-request the block while we wait for the carrier, and so a
+    // redundant same-hash body delivery collapses at the admission guard. Pin
+    // the source attribution so a redundant delivery cannot erase it before the
+    // resubmit routes any punishment to the right peer. Cleared on resubmit or
+    // timeout.
+    MarkMatMulAsyncVerification(hash);
+    mapBlockSource.emplace(hash, std::make_pair(pfrom.GetId(), false));
+    PinMatMulBlockSource(hash);
+    // Request the carrier from this peer (dedup + slot-bound inside the helper;
+    // the pre-block serve-push and header-first prefetch may also be racing).
+    if (const CBlockIndex* pindex = m_chainman.m_blockman.LookupBlockIndex(hash)) {
+        MaybeRequestMatMulCarrier(pfrom, *pindex);
+    }
+    LogDebug(BCLog::NET,
+             "matmul: deferring profile-2 block %s from peer=%d pending sampled carrier\n",
+             hash.ToString(), pfrom.GetId());
+    return true;
+}
+
+void PeerManagerImpl::ResubmitMatMulCarrierDeferredBlock(CNode& carrier_deliverer,
+                                                         const uint256& block_hash)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    AssertLockNotHeld(cs_main);
+    MatMulCarrierDeferredBlock held;
+    {
+        LOCK(m_matmul_carrier_deferred_mutex);
+        auto it = m_matmul_carrier_deferred.find(block_hash);
+        if (it == m_matmul_carrier_deferred.end()) return;
+        held = std::move(it->second);
+        m_matmul_carrier_deferred.erase(it);
+    }
+    // Release the async-pending marker BEFORE re-admission (AdmitMatMulBlockVerification
+    // drops a body whose hash is still marked pending). The worker re-marks it for
+    // the duration of the (now carrier-backed) verify.
+    UnmarkMatMulAsyncVerification(block_hash);
+    // Belt-and-suspenders: only resubmit if the carrier really is stored now
+    // (this is called right after a StorePut). If it somehow is not, drop the
+    // held block — never process without a carrier — and release its source pin.
+    if (!matmul::v4::rc::RCFreivaldsCarrierStoreHave(block_hash)) {
+        LOCK(cs_main);
+        UnpinMatMulBlockSource(block_hash);
+        EraseMatMulBlockSourceIfUnpinned(block_hash);
+        return;
+    }
+    // Re-derive admission inputs from current chainstate (the block was parked;
+    // tip/height context may have advanced).
+    bool requires_matmul{false};
+    bool is_ibd{false};
+    int32_t matmul_reference_height{std::numeric_limits<int32_t>::max()};
+    {
+        LOCK(cs_main);
+        const CBlockIndex* prev_block =
+            m_chainman.m_blockman.LookupBlockIndex(held.block->hashPrevBlock);
+        if (prev_block == nullptr) {
+            // Parent vanished (deep reorg); drop the hold. The block will be
+            // re-requested through the ordinary path if it becomes relevant.
+            UnpinMatMulBlockSource(block_hash);
+            EraseMatMulBlockSourceIfUnpinned(block_hash);
+            return;
+        }
+        const Consensus::Params& consensus_params{m_chainparams.GetConsensus()};
+        const int32_t best_known_height{m_chainman.m_best_header != nullptr
+                                            ? m_chainman.m_best_header->nHeight
+                                            : prev_block->nHeight};
+        is_ibd = m_chainman.IsInitialBlockDownload();
+        if (!is_ibd && m_chainman.ActiveHeight() + 10 < best_known_height) is_ibd = true;
+        requires_matmul = CountMatMulExpensiveVerifyChecks(
+                              static_cast<int64_t>(prev_block->nHeight) + 1, /*header_count=*/1,
+                              best_known_height, consensus_params,
+                              m_chainman.GetMatMulValidationMode() ==
+                                  kernel::MatMulValidationMode::CONSENSUS,
+                              is_ibd) > 0;
+        matmul_reference_height =
+            prev_block->nHeight == std::numeric_limits<int>::max()
+                ? std::numeric_limits<int32_t>::max()
+                : prev_block->nHeight + 1;
+    }
+    // Route validation through the ordinary admission + ProcessBlock path so the
+    // accept/reject/BlockChecked pipeline is identical to a fresh delivery. The
+    // block's original source (pinned in mapBlockSource above) receives any
+    // punishment via BlockChecked; `carrier_deliverer` is only the admission
+    // node (budget/disconnect). Release the source pin once processing is done.
+    std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
+    MatMulBlockAdmission matmul_admission;
+    const uint256 hash_copy{block_hash};
+    if (!AdmitMatMulBlockVerification(carrier_deliverer, *held.block, held.force_processing,
+                                      held.min_pow_checked, requires_matmul, is_ibd,
+                                      matmul_reference_height, /*source=*/"rccarrier-deferred",
+                                      pending_matmul_slot, matmul_admission)) {
+        LOCK(cs_main);
+        UnpinMatMulBlockSource(hash_copy);
+        EraseMatMulBlockSourceIfUnpinned(hash_copy);
+        return;
+    }
+    LogDebug(BCLog::NET, "matmul: resubmitting carrier-deferred block %s (carrier from peer=%d)\n",
+             block_hash.ToString(), carrier_deliverer.GetId());
+    ProcessBlock(carrier_deliverer, held.block, held.force_processing, held.min_pow_checked,
+                 std::move(pending_matmul_slot),
+                 /*post_process=*/[this, hash_copy]() {
+                     LOCK(cs_main);
+                     UnpinMatMulBlockSource(hash_copy);
+                     EraseMatMulBlockSourceIfUnpinned(hash_copy);
+                 },
+                 matmul_admission);
+}
+
+void PeerManagerImpl::DropMatMulCarrierDeferralsForPeer(NodeId nodeid)
+{
+    AssertLockHeld(cs_main);
+    std::vector<uint256> dropped;
+    {
+        LOCK(m_matmul_carrier_deferred_mutex);
+        for (auto it = m_matmul_carrier_deferred.begin(); it != m_matmul_carrier_deferred.end();) {
+            if (it->second.peer == nodeid) {
+                dropped.push_back(it->first);
+                it = m_matmul_carrier_deferred.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (const uint256& hash : dropped) {
+        UnmarkMatMulAsyncVerification(hash);
+        UnpinMatMulBlockSource(hash);
+        EraseMatMulBlockSourceIfUnpinned(hash);
+    }
 }
 
 bool PeerManagerImpl::ServeMatMulCarrier(CNode& pfrom, Peer& peer, const uint256& block_hash,
@@ -2780,6 +3028,21 @@ void PeerManagerImpl::MaybePunishNodeForBlock(NodeId nodeid, const BlockValidati
                                               bool via_compact_block, const std::string& message)
 {
     const Consensus::Params& consensus_params = m_chainparams.GetConsensus();
+    // Datacenter profile-2 TRANSIENT carrier-availability miss (see the
+    // validation.cpp carrier gate). This is our-side timing — the block's
+    // consensus-load-bearing sampled carrier is merely late — NOT peer
+    // misbehavior, so it must NEVER be punished, regardless of delivery path
+    // (the generic BLOCK_MUTATED case below would otherwise score a full-BLOCK
+    // sender). The bounded defer machinery + carrier ingress limits bound any
+    // abuse; a peer that never delivers the carrier is dropped on timeout, not
+    // scored here.
+    if (state.GetResult() == BlockValidationResult::BLOCK_MUTATED &&
+        state.GetRejectReason() == "matmul-rc-carrier-missing") {
+        if (!message.empty()) {
+            LogDebug(BCLog::NET, "peer=%d: %s\n", nodeid, message);
+        }
+        return;
+    }
     if (consensus_params.fMatMulPOW && IsMatMulPhase1Failure(state)) {
         HandleDoSPunishment(m_connman, nodeid, MATMUL_PHASE1_FAIL_MISBEHAVIOR, "matmul block header");
         DisconnectNodeNow(m_connman, nodeid);
@@ -5370,6 +5633,22 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         }
     } // Don't hold cs_main when we call into ProcessNewBlock
     if (fBlockRead) {
+        // Datacenter profile-2 carrier gate: this block was reconstructed
+        // locally from mempool (blocktxn), NOT fetched via getdata `block`, so
+        // the strict pre-block carrier serve-push never fired. If its sampled
+        // carrier has not arrived, DEFER (hold + getrccarrier + resubmit on
+        // receipt) instead of running validation into a permanent high-hash
+        // rejection. Bounded; see MaybeDeferBlockForMatMulCarrier.
+        {
+            bool deferred{false};
+            {
+                LOCK(cs_main);
+                deferred = MaybeDeferBlockForMatMulCarrier(
+                    pfrom, pblock, matmul_reference_height,
+                    /*force_processing=*/true, /*min_pow_checked=*/true);
+            }
+            if (deferred) return;
+        }
         std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
         MatMulBlockAdmission matmul_admission;
         if (!AdmitMatMulBlockVerification(
@@ -7049,6 +7328,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         if (fBlockReconstructed) {
             // If we got here, we were able to optimistically reconstruct a
             // block that is in flight from some other peer.
+            // Datacenter profile-2 carrier gate (same rationale as the blocktxn
+            // completion path): a locally reconstructed block bypasses the
+            // getdata `block` serve-push, so DEFER if the sampled carrier has not
+            // arrived rather than rejecting it permanently as high-hash.
+            {
+                bool deferred{false};
+                {
+                    LOCK(cs_main);
+                    deferred = MaybeDeferBlockForMatMulCarrier(
+                        pfrom, pblock, matmul_reference_height,
+                        /*force_processing=*/true, /*min_pow_checked=*/true);
+                }
+                if (deferred) return;
+            }
             std::optional<ScopedMatMulPendingVerification> pending_matmul_slot;
             MatMulBlockAdmission matmul_admission;
             if (!AdmitMatMulBlockVerification(
@@ -7558,6 +7851,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         matmul::v4::rc::RCFreivaldsCarrierStorePut(block_hash, std::move(carrier));
         LogDebug(BCLog::NET, "Stored authenticated matmul carrier %s from peer=%d\n",
                  block_hash.ToString(), pfrom.GetId());
+        // If a profile-2 block was parked pending exactly this (now
+        // AUTHENTICATED, now stored) carrier, resubmit it for full validation.
+        // The carrier passed the SAME sampled verifier the consensus path runs,
+        // so the resubmit can only ACCEPT with an authenticated carrier present —
+        // never without one. cs_main is not held here.
+        ResubmitMatMulCarrierDeferredBlock(pfrom, block_hash);
         return;
     }
 
@@ -8998,6 +9297,32 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 std::chrono::duration_cast<std::chrono::microseconds>(BLOCK_DOWNLOAD_TIMEOUT_MIN));
             if (current_time > state.m_downloading_since + download_timeout) {
                 LogInfo("Timeout downloading block %s, %s\n", queuedBlock.pindex->GetBlockHash().ToString(), pto->DisconnectMsg(fLogIPs));
+                pto->fDisconnect = true;
+                return true;
+            }
+        }
+        // Datacenter profile-2 carrier-deferral timeout. A block parked pending a
+        // sampled carrier from this peer whose deadline has passed is DROPPED
+        // (never accepted without the carrier) and the peer disconnected — the
+        // same treatment other missing-companion-data stalls get. This is the
+        // hard bound that stops a peer from pinning held-block state by sending
+        // profile-2 compact blocks whose carriers never arrive.
+        {
+            const auto steady_now{std::chrono::steady_clock::now()};
+            bool has_expired{false};
+            {
+                LOCK(m_matmul_carrier_deferred_mutex);
+                for (const auto& [h, d] : m_matmul_carrier_deferred) {
+                    if (d.peer == pto->GetId() && steady_now > d.deadline) {
+                        has_expired = true;
+                        break;
+                    }
+                }
+            }
+            if (has_expired) {
+                LogInfo("Timeout awaiting matmul carrier for deferred block, %s\n",
+                        pto->DisconnectMsg(fLogIPs));
+                DropMatMulCarrierDeferralsForPeer(pto->GetId());
                 pto->fDisconnect = true;
                 return true;
             }

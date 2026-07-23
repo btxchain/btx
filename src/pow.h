@@ -282,9 +282,22 @@ bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params
  *  digest == header.matmul_digest and digest ≤ nBits target.
  *  Optional BTX_RC_VERIFY_GKR=1 hook validates a process-cached winner GKR
  *  proof when present; it does NOT replace ExactReplay and does NOT raise
- *  nMatMulRCHeight. */
+ *  nMatMulRCHeight.
+ *
+ *  `carrier_missing` (optional out): under the datacenter profile
+ *  (nMatMulRCProfile==2) the check FAILS CLOSED when the relayed sampled
+ *  carrier has not yet arrived in the process-local store. That failure is not
+ *  a proof-of-work fault — it is a transient availability miss (the carrier may
+ *  simply be LATE, e.g. a block reconstructed locally from mempool via compact
+ *  blocks, where the strict pre-block serve-push never fired). When non-null,
+ *  `*carrier_missing` is set true ONLY for that specific missing-carrier return
+ *  and left untouched otherwise, so a caller can DEFER (request the carrier and
+ *  resubmit) instead of permanently rejecting. The bool return and the
+ *  fail-closed contract are UNCHANGED: a missing carrier still returns false and
+ *  is NEVER accepted without an authenticated carrier. */
 bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
-                               int32_t block_height);
+                               int32_t block_height,
+                               bool* carrier_missing = nullptr);
 
 /** ENC_RC_COUPLED DIGEST_RECOMPUTE checker. Requires
  *  IsMatMulRCCoupledActive(block_height). Recomputes via

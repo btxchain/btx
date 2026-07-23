@@ -14,6 +14,7 @@
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_streamed_strategy.h>
 #include <matmul/matmul_v4_rc_transcript.h>
+#include <node/matmul_verify_worker.h>
 
 #include <common/args.h>
 #include <consensus/params.h>
@@ -26,6 +27,8 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -1129,6 +1132,80 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     rc::RCFreivaldsCarrierStoreClear();
 }
 
+// (c'') CONSENSUS-CORRECTNESS: CheckMatMulProofOfWork_RC's `carrier_missing`
+//       out-param must distinguish a MERELY-LATE carrier (transient; the compact-
+//       block DEFER path) from a PRESENT-BUT-INVALID one (a permanent PoW fault).
+//       This is the discriminator the block-accept path uses to avoid PERMANENTLY
+//       rejecting a raced-but-valid profile-2 block whose carrier is simply late,
+//       WITHOUT ever accepting without an authenticated carrier or reclassifying a
+//       genuinely bad carrier as transient.
+BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    CBlockHeader header = MakeDcRCHeader(0x7373);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);   // toy dims
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    // (1) MISSING carrier: fail-closed reject, AND flagged carrier_missing=true.
+    //     This is the ONLY case the DEFER path may act on (request + retry).
+    rc::RCFreivaldsCarrierStoreClear();
+    {
+        bool carrier_missing = false;
+        BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+        BOOST_CHECK(carrier_missing);   // transient, defer-eligible
+    }
+
+    // (2) PRESENT + VALID carrier: ACCEPT, and carrier_missing MUST be false — a
+    //     missing carrier can never be the reason we accept. Establishes that
+    //     acceptance requires a present, authenticated carrier.
+    rc::RCFreivaldsSampledCarrier carrier;
+    {
+        const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
+                                                 header.matmul_digest);
+        BOOST_REQUIRE(pr.timing.ok);
+        std::string why;
+        BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target,
+                                                       carrier, &why));
+    }
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), carrier);
+    {
+        bool carrier_missing = true;   // must be cleared to false on the accept path
+        BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+        BOOST_CHECK(!carrier_missing);
+    }
+
+    // (3) PRESENT + INVALID carrier (tampered sampled layer): PERMANENT reject,
+    //     and carrier_missing MUST be false — a bad carrier is a real PoW fault,
+    //     NEVER a transient defer. Misclassifying this as transient would let an
+    //     attacker keep a bad block permanently deferrable; the out-param forbids
+    //     it.
+    rc::RCFreivaldsSampledCarrier tampered = carrier;
+    bool tampered_one = false;
+    for (auto& e : tampered.sampled) {
+        if (!e.Y.empty()) { e.Y[0] += 1; tampered_one = true; break; }
+    }
+    BOOST_REQUIRE(tampered_one);
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), tampered);
+    {
+        bool carrier_missing = true;   // present-but-invalid ⇒ must be cleared false
+        BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+        BOOST_CHECK(!carrier_missing);   // permanent, NOT defer-eligible
+    }
+
+    // (4) The default-nullptr overload is unchanged (fail-closed on missing).
+    rc::RCFreivaldsCarrierStoreClear();
+    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    rc::RCFreivaldsCarrierStoreClear();
+}
+
 // (c') Profile 2: an episode proof committing SMALLER-than-consensus dims is
 //      rejected — the episode shape is consensus-fixed, not prover-chosen.
 BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_episode_shape_swap)
@@ -1501,6 +1578,86 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_lambda512_tleaf_compute_hash_margin)
     const double max_possible = 1.5 * dc.d_model / 1.0 / knee; // T_leaf → ∞
     BOOST_CHECK_LT(margin_dc, max_possible);
     BOOST_CHECK_LT(max_possible, 1.0);  // even a perfect tree stays at the ~0.96 knee
+// (h) ASYNC-WORKER MEMO INTEGRITY: the ENC-DR verdict memo's invariant is that a
+//     verdict is a PURE FUNCTION OF THE HEADER. A profile-2 false verdict caused
+//     solely by a not-yet-arrived carrier is environment-dependent, so the worker
+//     must NOT memoize it — otherwise the later carrier-present resubmit would
+//     replay the stale false and PERMANENTLY reject a valid block. Once the
+//     carrier is present, the (now header-pure) true verdict IS memoized.
+BOOST_AUTO_TEST_CASE(rc_dc_worker_does_not_memoize_missing_carrier_verdict)
+{
+    const Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    // Fresh, unique header/hash so the process-global verdict memo cannot carry a
+    // colliding entry from another test/run.
+    CBlockHeader header = MakeDcRCHeader(0xD1CED1CEull);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    auto block = std::make_shared<CBlock>();
+    static_cast<CBlockHeader&>(*block) = header;
+    const uint256 hash = block->GetHash();
+
+    rc::RCFreivaldsCarrierStoreClear();
+    BOOST_REQUIRE(!LookupMatMulEncDrVerdict(hash).has_value());
+
+    const auto wait_completion = [](std::atomic<int>& done) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{20};
+        while (done.load() == 0) {
+            if (std::chrono::steady_clock::now() > deadline) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds{2});
+        }
+    };
+
+    // Real predicate (no override), single worker thread.
+    node::MatMulVerifyWorker worker{p, /*max_threads=*/1};
+
+    // (1) No carrier: the worker's verdict is false, and it MUST NOT be memoized.
+    {
+        std::atomic<int> done{0};
+        std::atomic<bool> verdict{true};
+        node::MatMulVerifyWorker::Job job{block, kHeight, /*parent_mtp=*/std::nullopt,
+                                          [&](bool ok) { verdict = ok; done = 1; }};
+        BOOST_REQUIRE(worker.Enqueue(job));
+        wait_completion(done);
+        BOOST_REQUIRE_EQUAL(done.load(), 1);
+        BOOST_CHECK(!verdict.load());                                  // fail-closed
+        BOOST_CHECK(!LookupMatMulEncDrVerdict(hash).has_value());      // NOT poisoned
+    }
+
+    // (2) Carrier present: verdict is true and now (header-pure) IS memoized.
+    {
+        const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
+                                                 header.matmul_digest);
+        BOOST_REQUIRE(pr.timing.ok);
+        rc::RCFreivaldsSampledCarrier carrier;
+        std::string why;
+        BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target,
+                                                       carrier, &why));
+        rc::RCFreivaldsCarrierStorePut(hash, carrier);
+
+        std::atomic<int> done{0};
+        std::atomic<bool> verdict{false};
+        node::MatMulVerifyWorker::Job job{block, kHeight, /*parent_mtp=*/std::nullopt,
+                                          [&](bool ok) { verdict = ok; done = 1; }};
+        BOOST_REQUIRE(worker.Enqueue(job));
+        wait_completion(done);
+        BOOST_REQUIRE_EQUAL(done.load(), 1);
+        BOOST_CHECK(verdict.load());                                   // accepts with carrier
+        const auto memo = LookupMatMulEncDrVerdict(hash);
+        BOOST_REQUIRE(memo.has_value());
+        BOOST_CHECK(*memo);
+    }
+
+    worker.Stop();
+    rc::RCFreivaldsCarrierStoreClear();
 }
 
 BOOST_AUTO_TEST_SUITE_END()
