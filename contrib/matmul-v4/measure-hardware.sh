@@ -1,27 +1,42 @@
 #!/usr/bin/env bash
 #
-# MatMul v4.1 / v4.2 one-command hardware measurement.
+# MatMul hardware measurement (multi-profile).
 #
-# Run this ON THE MACHINE you want data from (one invocation per backend). It
-# configures + builds ONLY the `matmul-v4-report` tool with the right backend
-# flag (same cmake flags as verify-backend.sh), runs it, and tells you where
-# the JSON landed. Send that JSON back — aggregated across datacenter, consumer,
-# and Apple machines it drives the activation gates.
+# *** ENC_RC v4.6 IS THE CURRENT PRODUCT. ***
+# For Resident Curriculum / v4.6 final measurement use ONLY:
+#   contrib/matmul-v4/measure-enc-rc-v46.sh …
+# Spec: doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md
+# Gate: contrib/matmul-v4/rc-gate.py
 #
-# --- v4.1 (ENC-S8, default profile) ---
+# Bare `measure-hardware.sh cuda|cpu|metal|hip` without `rc` / Stage-G
+# `--profile` builds `matmul-v4-report` and measures LEGACY v4.1 ENC-S8 /
+# v4.2 BMX4C / v4.4-LT PoW. That is NOT ENC_RC and MUST NOT be cited as a
+# v4.6 GO/NO-GO. Those legacy paths require
+# BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 (see below).
+#
+# --- ENC_RC v4.6 (preferred; also via measure-enc-rc-v46.sh) ---
+#
+#   contrib/matmul-v4/measure-hardware.sh cpu rc --toy
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile coupled
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile coupled-medium
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile rc-toy
+#   contrib/matmul-v4/measure-hardware.sh cpu --profile rc-medium
+#   contrib/matmul-v4/measure-enc-rc-v46.sh verify-carrier --threads 32
+#
+# --- LEGACY v4.1 (ENC-S8) — opt-in only ---
 #   B1  bit-exact determinism   (PASS/FAIL — a FAIL is a hard consensus split)
 #   B2b ASERT throughput        (marginal nonce/s; --v3-hashrate -> rescale)
 #   B2g datacenter-vs-consumer  (tensor-stage share + implied INT8 utilization)
 #
-# Usage:
-#   contrib/matmul-v4/measure-hardware.sh cpu                       # any host
-#   contrib/matmul-v4/measure-hardware.sh cuda                      # NVIDIA sm>=75
-#   contrib/matmul-v4/measure-hardware.sh metal                     # Apple M5-class
-#   contrib/matmul-v4/measure-hardware.sh hip                       # AMD CDNA
+# Usage (requires BTX_ALLOW_LEGACY_MATMUL_MEASURE=1):
+#   BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 contrib/matmul-v4/measure-hardware.sh cpu
+#   BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 contrib/matmul-v4/measure-hardware.sh cuda
+#   BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 contrib/matmul-v4/measure-hardware.sh metal
+#   BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 contrib/matmul-v4/measure-hardware.sh hip
 #
 # Extra args after the backend are forwarded to the tool, e.g.:
-#   contrib/matmul-v4/measure-hardware.sh cuda --n 4096 --window 32 \
-#       --device-peak-int8-tops 1979 --v3-hashrate 1200000
+#   BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 contrib/matmul-v4/measure-hardware.sh cuda \
+#       --n 4096 --window 32 --device-peak-int8-tops 1979 --v3-hashrate 1200000
 #
 # --- v4.2 (ENC-BMX4C profile) — THE M-t24 measurement ---
 #
@@ -260,7 +275,17 @@ elif [ "$PROFILE" = "bmx4c" ]; then
 elif [ "$PROFILE" = "bmx4c-lt" ]; then
   echo "== MatMul v4.4-LT (ENC-DR-LT MatExpand+Q*) hardware measurement: $BACKEND =="
 else
-  echo "== MatMul v4.1 hardware measurement: $BACKEND =="
+  if [ "${BTX_ALLOW_LEGACY_MATMUL_MEASURE:-}" != "1" ]; then
+    echo "REFUSED: bare measure-hardware.sh $BACKEND runs LEGACY matmul-v4-report" >&2
+    echo "(v4.1/v4.2/v4.4-LT PoW), NOT ENC_RC v4.6." >&2
+    echo "Use:  contrib/matmul-v4/measure-enc-rc-v46.sh …" >&2
+    echo "  or: contrib/matmul-v4/measure-hardware.sh $BACKEND rc …" >&2
+    echo "  or: contrib/matmul-v4/measure-hardware.sh $BACKEND --profile coupled" >&2
+    echo "Legacy only with: BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 $0 $BACKEND …" >&2
+    exit 2
+  fi
+  echo "== MatMul v4.1 LEGACY hardware measurement: $BACKEND =="
+  echo "WARNING: this is NOT ENC_RC v4.6 — do not cite for RC activation."
 fi
 echo "-- configuring ($BUILD)"
 # ENABLE_WALLET=ON + WITH_SQLITE=ON avoids a known CPU-only link failure; the
