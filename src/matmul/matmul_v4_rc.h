@@ -181,6 +181,11 @@ static_assert(kRCTranscriptVersion == ENC_RC_V1,
 /** Domain-separation tags (frozen byte strings — R.4). ENC_RC_V1 tags. */
 inline constexpr char kRCRoundTag[] = "BTX_RC_ROUND_V1";
 inline constexpr char kRCEpisodeTag[] = "BTX_RC_EPISODE_V1";
+/** ENC_RC_V2 tags: profile-2 hard-fork digest binds output roots and raw
+ *  pre-Extract accumulator roots before Fiat-Shamir sampling. */
+inline constexpr char kRCRoundTagV2[] = "BTX_RC_ROUND_V2";
+inline constexpr char kRCEpisodeTagV2[] = "BTX_RC_EPISODE_V2";
+inline constexpr char kRCRoundCommitTagV2[] = "BTX_RC_ROUND_COMMIT_V2";
 inline constexpr char kRCPadTag[] = "BTX_RC_PAD";
 inline constexpr char kRCFsTag[] = "BTX_RC_FS_V1";
 inline constexpr uint8_t kRCLeafTag = 0x00;
@@ -196,6 +201,9 @@ inline constexpr uint32_t kRCSpotCheckQueries = 8;
 
 /** Per-episode shape (consensus constants or toy dims for tests / harness). */
 struct RCEpisodeParams {
+    /** Consensus transcript format. V2 binds raw pre-Extract accumulator roots
+     *  into the episode digest and Fiat-Shamir carrier seed. */
+    uint32_t transcript_version{ENC_RC_V1};
     uint32_t rounds{kRCRounds};
     uint32_t d_head{kRCHeadDim};
     uint32_t n_q{kRCQueryRows};
@@ -238,6 +246,11 @@ struct RCEpisodeTiming {
 
 struct RCRoundTranscript {
     uint256 round_root{};
+    /** V2 raw-work commitment root. Layout: QKt.extract_in || SV.extract_in ||
+     *  for each fused FFN layer: FfnUp.extract_in || Fwd.extract_in, all as
+     *  int64 little-endian matrices in canonical Λ order. V1 digest ignores this
+     *  field; profile-2 V2 absorbs it into matmul_digest and FS. */
+    uint256 acc_root{};
     /** Round byte stream (R.4.1 + §3 segment leaves); filled when collected via
      *  out_rounds. Layout: [Z_seg0..Z_segN LE int64] ‖ Z_int8 ‖ for each layer
      *  (X[l+1] ‖ G[l] ‖ [D_seg0..D_segM LE int64] ‖ D_int8).
@@ -292,6 +305,17 @@ struct RCMerkleProof {
     RCEpisodeTiming* out_timing = nullptr,
     const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
+/** Recompute one canonical round from the public seed chain and return only its
+ *  output/accumulator roots. Profile-2 uses this as a bounded terminal-round
+ *  canonicality check: it is not full episode replay, but it prevents the final
+ *  root vector from being cheaply re-rolled after the sampled coin is known. */
+[[nodiscard]] bool RecomputeRCEpisodeRoundRoots(
+    const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
+    uint32_t round, const std::vector<uint256>& round_roots,
+    const std::vector<uint256>& acc_roots, RCRoundTranscript& out_round,
+    const RCEpisodeOptions& options = {},
+    const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
 /** Miner entry: same digest as the CPU reference. May inject ExactGemmBackend
  *  after RC self-qualification (fail-closed → empty backend = CPU). */
 [[nodiscard]] uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
@@ -322,6 +346,19 @@ struct RCMerkleProof {
                                                               uint32_t cols, uint32_t threads);
 [[nodiscard]] bool UseDatacenterRowBlockX0(const RCEpisodeParams& p);
 [[nodiscard]] bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p);
+[[nodiscard]] bool UseRCEpisodeDigestV2(const RCEpisodeParams& p);
+[[nodiscard]] uint256 RCRoundCommitV2(const uint256& round_root, const uint256& acc_root);
+[[nodiscard]] uint256 RCEpisodeDigestFromRootsV1(const std::vector<uint256>& round_roots);
+[[nodiscard]] uint256 RCEpisodeDigestFromRootsV2(const std::vector<uint256>& round_roots,
+                                                 const std::vector<uint256>& acc_roots);
+[[nodiscard]] uint256 RCEpisodeDigestForParams(const RCEpisodeParams& params,
+                                               const std::vector<uint256>& round_roots,
+                                               const std::vector<uint256>& acc_roots);
+[[nodiscard]] uint256 RCRoundSeedForParams(const RCEpisodeParams& params,
+                                           const uint256& sigma,
+                                           const std::vector<uint256>& round_roots,
+                                           const std::vector<uint256>& acc_roots,
+                                           uint32_t round);
 [[nodiscard]] uint256 DeriveX0RowBlockSeed(const uint256& seed_x0, uint32_t row_block);
 [[nodiscard]] std::vector<int8_t> ExpandX0ForEpisode(const uint256& seed_x0,
                                                      const RCEpisodeParams& params);
@@ -353,6 +390,7 @@ public:
     void Absorb(const int8_t* data, size_t len);
     void Absorb(const std::vector<int8_t>& v) { Absorb(v.data(), v.size()); }
     /** Append int64 matrix as little-endian bytes (segment-leaf layout). */
+    void AbsorbInt64LE(const int64_t* data, size_t count);
     void AbsorbInt64LE(const std::vector<int64_t>& M);
     /** Finalize last partial leaf (zero-pad) + pow2 pad leaves; return leaves. */
     [[nodiscard]] std::vector<uint256> FinalizeLeaves();

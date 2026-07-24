@@ -149,7 +149,7 @@ static constexpr auto MATMUL_SKETCH_REQUEST_TTL{60s};
  *  8 MiB authentication hash — this bounds that CPU per peer BEFORE hashing. */
 static constexpr double MATMUL_SKETCH_RECV_BUCKET_MAX{8.0};
 /** Datacenter-profile `rccarrier` relay budgets. The carrier is a real
- *  amplification surface (a 32-byte getrccarrier triggers an up-to-12 MiB
+ *  amplification surface (a 32-byte getrccarrier triggers an up-to-near-16 MB
  *  reply) AND, unlike the best-effort sketch, its authentication on receipt
  *  runs the full λ-sampled Freivalds/opening verifier (real CPU). We therefore
  *  reuse the AUDITED sketch relay's exact three-limit serve discipline and
@@ -7818,14 +7818,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("malformed rccarrier %s: %s", block_hash.ToString(), why));
             return;
         }
-        // (vi) Consensus episode-shape bind — the 9 shape fields, identical to
-        // CheckMatMulProofOfWork_RC. A carrier committing smaller (cheaper) dims is
-        // rejected here, before the verify. d_ff is INCLUDED: it is the fused-FFN
-        // inner width and the dominant compute lever (margin = 2·d_ff), so a carrier
-        // declaring a tiny d_ff must be rejected here too.
+        // (vi) Consensus episode-shape bind — transcript version + the 9 shape
+        // fields, identical to CheckMatMulProofOfWork_RC. A carrier committing
+        // smaller (cheaper) dims or the wrong digest format is rejected here,
+        // before the verify. d_ff is INCLUDED: it is the fused-FFN inner width and
+        // the dominant compute lever (margin = 2·d_ff), so a carrier declaring a
+        // tiny d_ff must be rejected here too.
         const auto params_rc = matmul::v4::rc::ResolveRCEpisodeParams(consensus, block_height);
         const auto& ce = carrier.episode;
-        if (!(ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
+        if (!(ce.transcript_version == params_rc.transcript_version &&
+              ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
               ce.n_q == params_rc.n_q && ce.n_ctx == params_rc.n_ctx &&
               ce.L_lyr == params_rc.L_lyr && ce.d_model == params_rc.d_model &&
               ce.b_seq == params_rc.b_seq && ce.T_leaf == params_rc.T_leaf &&

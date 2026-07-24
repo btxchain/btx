@@ -5,11 +5,14 @@
 // SUBLINEAR Freivalds-sampled episode verifier (matmul_v4_rc_freivalds_sampled).
 // Fiat–Shamir-sampled per-layer checking with random-projection (Freivalds)
 // GEMM verification + O(log N) tile-tree openings, replacing the O(N) full
-// re-execution. ADDITIVE / shadow-gated: arbiter OFF, heights INT32_MAX, never
-// consensus. Composes against the frozen Fable FreivaldsCheckGemm.
+// re-execution. V1 remains a shadow/audit path; V2 is the hard-fork profile-2
+// carrier format that additionally binds raw pre-Extract accumulator roots before
+// sampling. Composes against the frozen Fable FreivaldsCheckGemm.
 //
 // Coverage mirrors the frvsampled_selfcheck (a)-(f):
 //  (a) honest episode proof -> wires-mode AND carrier-mode accept
+//  (a2) V2 accumulator roots bind raw pre-Extract tiles, including internal layers
+//  (a3) V2 terminal-round root recompute blocks cheap last-round FS re-rolls
 //  (b) tamper a SAMPLED layer (Y / A / extract_out) -> reject at the right stage
 //  (c) wrong tile-tree opening -> reject
 //  (d) FS-sample determinism + commitment-binding (moving roots/digest moves the set)
@@ -77,16 +80,29 @@ bool LayerInStream(rc::RCGkrLayerKind k)
            k == rc::RCGkrLayerKind::GemmPhase2Fwd;
 }
 
+bool LayerInAccStream(rc::RCGkrLayerKind k)
+{
+    return k == rc::RCGkrLayerKind::GemmPhase1QKt ||
+           k == rc::RCGkrLayerKind::GemmPhase1SV ||
+           k == rc::RCGkrLayerKind::GemmPhase2FfnUp ||
+           k == rc::RCGkrLayerKind::GemmPhase2Fwd;
+}
+
 std::vector<uint32_t> SampledLayerIndices(const rc::RCGkrProofV7& proof, const CBlockHeader& h,
                                           const arith_uint256& target, uint32_t lambda)
 {
-    const auto prov = rc::RCGkrEpisodeLayerProvenance(h, proof.episode, proof.round_roots);
-    const uint256 base = rc::RCGkrFsSeedV7(h, proof.height, proof.episode, target,
-                                           proof.claimed_digest, proof.episode_sigma,
-                                           proof.round_roots);
+    const auto prov =
+        rc::RCGkrEpisodeLayerProvenance(h, proof.episode, proof.round_roots, proof.acc_roots);
+    const uint256 base = rc::RCGkrFsSeedV7WithAccRoots(
+        h, proof.height, proof.episode, target, proof.claimed_digest, proof.episode_sigma,
+        proof.round_roots, proof.acc_roots);
+    const bool include_internal_raw = rc::UseRCEpisodeDigestV2(proof.episode);
     std::vector<uint32_t> sampleable;
     for (uint32_t i = 0; i < prov.size(); ++i)
-        if (LayerInStream(prov[i].kind)) sampleable.push_back(i);
+        if ((include_internal_raw && LayerInAccStream(prov[i].kind)) ||
+            (!include_internal_raw && LayerInStream(prov[i].kind))) {
+            sampleable.push_back(i);
+        }
     const auto units = rc::FreivaldsSampleLayers(base, static_cast<uint32_t>(sampleable.size()),
                                                  lambda);
     std::vector<uint32_t> out;
@@ -117,6 +133,22 @@ Fixture MakeFixture(const rc::RCEpisodeParams& params, uint64_t nonce)
     return f;
 }
 
+rc::RCEpisodeParams MakeToyRCEpisodeParamsV2()
+{
+    rc::RCEpisodeParams params = rc::MakeToyRCEpisodeParams();
+    params.transcript_version = rc::ENC_RC_V2;
+    return params;
+}
+
+void ResealCarrierDigestForTesting(rc::RCFreivaldsSampledCarrier& carrier, CBlockHeader& header)
+{
+    const uint256 digest =
+        rc::RCEpisodeDigestForParams(carrier.episode, carrier.round_roots, carrier.acc_roots);
+    carrier.claimed_digest = digest;
+    carrier.pow_bind = rc::RCGkrDerivePowBind(digest);
+    header.matmul_digest = digest;
+}
+
 bool StartsWith(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }
 
 class EnvVarGuard
@@ -145,7 +177,7 @@ private:
 
 // Discipline invariants: public RC activation remains height-gated; profile-2
 // uses the sampled authority only once that consensus height is made finite.
-BOOST_AUTO_TEST_CASE(frvs_never_consensus)
+BOOST_AUTO_TEST_CASE(frvs_public_activation_height_gated)
 {
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!rc::EnvRCGkrArbiterEnabled());
@@ -176,6 +208,122 @@ BOOST_AUTO_TEST_CASE(frvs_honest_accepts)
     BOOST_REQUIRE_MESSAGE(
         rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &cwhy, &ctmg), cwhy);
     BOOST_CHECK_EQUAL(ctmg.n_layers_checked, tmg.n_layers_checked);
+}
+
+BOOST_AUTO_TEST_CASE(frvs_v2_accumulator_roots_bind_raw_tiles)
+{
+    Fixture f = MakeFixture(MakeToyRCEpisodeParamsV2(), 4242);
+    BOOST_REQUIRE(f.ok);
+    BOOST_REQUIRE(rc::UseRCEpisodeDigestV2(f.params));
+    BOOST_REQUIRE_EQUAL(f.proof.acc_roots.size(), f.params.rounds);
+    for (uint32_t r = 0; r < f.params.rounds; ++r) {
+        const std::vector<int8_t> acc_stream =
+            rc::RCGkrReconstructRoundAccStream(f.proof.wires, r, f.params);
+        BOOST_CHECK(rc::BuildTileTreeRoot(acc_stream, f.params.T_leaf) == f.proof.acc_roots[r]);
+    }
+
+    constexpr uint32_t kAllUnits = 64;
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &why, kAllUnits), why);
+    BOOST_REQUIRE_EQUAL(carrier.episode.transcript_version, rc::ENC_RC_V2);
+    BOOST_REQUIRE_EQUAL(carrier.acc_roots.size(), f.params.rounds);
+
+    bool saw_internal_raw = false;
+    bool saw_qkt = false;
+    bool saw_ffn_up = false;
+    size_t acc_layer = std::numeric_limits<size_t>::max();
+    size_t acc_tile = std::numeric_limits<size_t>::max();
+    for (size_t i = 0; i < carrier.sampled.size(); ++i) {
+        const auto& layer = carrier.sampled[i];
+        if (layer.kind == rc::RCGkrLayerKind::GemmPhase1QKt) saw_qkt = true;
+        if (layer.kind == rc::RCGkrLayerKind::GemmPhase2FfnUp) saw_ffn_up = true;
+        if (!LayerInStream(layer.kind)) saw_internal_raw = true;
+        for (size_t j = 0; j < layer.tiles.size(); ++j) {
+            const auto& tile = layer.tiles[j];
+            BOOST_CHECK(!tile.acc_leaf_bytes.empty());
+            BOOST_CHECK(!tile.acc_leaf_proofs.empty());
+            if (!LayerInStream(layer.kind)) BOOST_CHECK(tile.extract_out.empty());
+            if (acc_layer == std::numeric_limits<size_t>::max()) {
+                acc_layer = i;
+                acc_tile = j;
+            }
+        }
+    }
+    BOOST_CHECK(saw_internal_raw);
+    BOOST_CHECK(saw_qkt);
+    BOOST_CHECK(saw_ffn_up);
+    BOOST_REQUIRE(acc_layer != std::numeric_limits<size_t>::max());
+
+    why.clear();
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why, nullptr), why);
+
+    {
+        rc::RCFreivaldsSampledCarrier bad = carrier;
+        bad.acc_roots[0].data()[0] ^= 0x01;
+        why.clear();
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(bad, f.h, 0, f.target, &why, nullptr));
+        BOOST_CHECK_EQUAL(why, "v7fs:digest_from_roots");
+    }
+    {
+        rc::RCFreivaldsSampledCarrier bad = carrier;
+        bad.sampled[acc_layer].tiles[acc_tile].acc_stream_offset += sizeof(int64_t);
+        why.clear();
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(bad, f.h, 0, f.target, &why, nullptr));
+        BOOST_CHECK_EQUAL(why, "v7fs:acc_off");
+    }
+    {
+        rc::RCFreivaldsSampledCarrier bad = carrier;
+        bad.sampled[acc_layer].tiles[acc_tile].acc_leaf_bytes[0][0] ^= 0x01;
+        why.clear();
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(bad, f.h, 0, f.target, &why, nullptr));
+        BOOST_CHECK_MESSAGE(StartsWith(why, "v7fs:acc_v7fs:tiletree"), why);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(frvs_v2_terminal_round_canonicality_blocks_reroll)
+{
+    Fixture f = MakeFixture(MakeToyRCEpisodeParamsV2(), 4343);
+    BOOST_REQUIRE(f.ok);
+    BOOST_REQUIRE_EQUAL(f.params.rounds, 1u);
+    BOOST_REQUIRE_EQUAL(f.proof.round_roots.size(), 1u);
+    BOOST_REQUIRE_EQUAL(f.proof.acc_roots.size(), 1u);
+
+    rc::RCRoundTranscript terminal;
+    BOOST_REQUIRE(rc::RecomputeRCEpisodeRoundRoots(f.h, f.params, 0, 0, f.proof.round_roots,
+                                                   f.proof.acc_roots, terminal));
+    BOOST_CHECK(terminal.round_root == f.proof.round_roots[0]);
+    BOOST_CHECK(terminal.acc_root == f.proof.acc_roots[0]);
+
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &why, 64), why);
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why, nullptr), why);
+
+    {
+        rc::RCFreivaldsSampledCarrier bad = carrier;
+        CBlockHeader bad_header = f.h;
+        bad.round_roots[0].data()[0] ^= 0x01;
+        ResealCarrierDigestForTesting(bad, bad_header);
+        why.clear();
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(bad, bad_header, 0, f.target,
+                                                              &why, nullptr));
+        BOOST_CHECK_EQUAL(why, "v7fs:terminal_round_root");
+    }
+    {
+        rc::RCFreivaldsSampledCarrier bad = carrier;
+        CBlockHeader bad_header = f.h;
+        bad.acc_roots[0].data()[0] ^= 0x01;
+        ResealCarrierDigestForTesting(bad, bad_header);
+        why.clear();
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(bad, bad_header, 0, f.target,
+                                                              &why, nullptr));
+        BOOST_CHECK_EQUAL(why, "v7fs:terminal_acc_root");
+    }
 }
 
 // (b) tamper a SAMPLED layer -> reject at the right stage.

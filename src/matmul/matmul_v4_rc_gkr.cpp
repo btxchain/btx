@@ -143,7 +143,8 @@ std::atomic<uint64_t> g_exact_replay_invoke_count{0};
 
 bool RCEpisodeParamsEqual(const RCEpisodeParams& a, const RCEpisodeParams& b)
 {
-    return a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q && a.n_ctx == b.n_ctx &&
+    return a.transcript_version == b.transcript_version &&
+           a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q && a.n_ctx == b.n_ctx &&
            a.L_lyr == b.L_lyr && a.d_model == b.d_model && a.d_ff == b.d_ff &&
            a.b_seq == b.b_seq &&
            a.T_leaf == b.T_leaf;
@@ -504,12 +505,14 @@ std::vector<Fp3> ToFp3I64(const std::vector<int64_t>& v)
 
 void AbsorbEpisode(FsTranscript& fs, const RCEpisodeParams& p)
 {
+    fs.AbsorbU32(p.transcript_version);
     fs.AbsorbU32(p.rounds);
     fs.AbsorbU32(p.d_head);
     fs.AbsorbU32(p.n_q);
     fs.AbsorbU32(p.n_ctx);
     fs.AbsorbU32(p.L_lyr);
     fs.AbsorbU32(p.d_model);
+    fs.AbsorbU32(p.d_ff);
     fs.AbsorbU32(p.b_seq);
     fs.AbsorbU32(p.T_leaf);
 }
@@ -577,14 +580,7 @@ uint256 DeriveOperandSeedLocal(const uint256& seed_r, const char* tag)
 
 uint256 EpisodeDigestFromRoots(const std::vector<uint256>& round_roots)
 {
-    std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCEpisodeTag) - 1 + round_roots.size() * 32);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCEpisodeTag),
-               reinterpret_cast<const unsigned char*>(kRCEpisodeTag) + sizeof(kRCEpisodeTag) - 1);
-    for (const uint256& root : round_roots) {
-        buf.insert(buf.end(), root.begin(), root.end());
-    }
-    return Sha256dBytes(buf.data(), buf.size());
+    return RCEpisodeDigestFromRootsV1(round_roots);
 }
 
 size_t ExpectedLayerCount(const RCEpisodeParams& p)
@@ -683,13 +679,15 @@ void ExactInt64Gemm(const std::vector<int8_t>& A, uint32_t m, uint32_t k,
  * Phase-2 GEMM present in the consensus episode (Q·Kᵀ, S·V, Fwd, Bwd, Wgrad).
  * Round seeds match RunEpisode via Sha256TaggedU32 + round_roots.
  */
-std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
-                                              const RCEpisodeParams& p,
-                                              const std::vector<uint256>& round_roots,
-                                              std::vector<uint256>& out_seeds)
+std::vector<LayerWire> BuildRealEpisodeLayersInternal(const CBlockHeader& header,
+                                                      const RCEpisodeParams& p,
+                                                      const std::vector<uint256>& round_roots,
+                                                      const std::vector<uint256>& acc_roots,
+                                                      std::vector<uint256>& out_seeds)
 {
     assert(ValidateRCEpisodeParams(p));
     assert(round_roots.size() == p.rounds);
+    assert(!UseRCEpisodeDigestV2(p) || acc_roots.size() == p.rounds);
     std::vector<LayerWire> out;
     out.reserve(ExpectedLayerCount(p));
     out_seeds.clear();
@@ -721,12 +719,7 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
     };
 
     for (uint32_t r = 0; r < p.rounds; ++r) {
-        uint256 seed_r;
-        if (r == 0) {
-            seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0);
-        } else {
-            seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
-        }
+        const uint256 seed_r = RCRoundSeedForParams(p, sigma, round_roots, acc_roots, r);
         out_seeds.push_back(seed_r);
 
         auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
@@ -849,6 +842,15 @@ std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
     }
 
     return out;
+}
+
+std::vector<LayerWire> BuildRealEpisodeLayers(const CBlockHeader& header,
+                                              const RCEpisodeParams& p,
+                                              const std::vector<uint256>& round_roots,
+                                              std::vector<uint256>& out_seeds)
+{
+    static const std::vector<uint256> empty_acc_roots;
+    return BuildRealEpisodeLayersInternal(header, p, round_roots, empty_acc_roots, out_seeds);
 }
 
 void MarkBudget(RCGkrTiming& t, RCGkrProof& p)
@@ -1279,6 +1281,17 @@ uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisod
                       const arith_uint256& target, const uint256& claimed_digest,
                       const uint256& episode_sigma, const std::vector<uint256>& round_roots)
 {
+    static const std::vector<uint256> empty_acc_roots;
+    return RCGkrFsSeedV7WithAccRoots(header, height, params, target, claimed_digest,
+                                     episode_sigma, round_roots, empty_acc_roots);
+}
+
+uint256 RCGkrFsSeedV7WithAccRoots(const CBlockHeader& header, int32_t height,
+                                  const RCEpisodeParams& params, const arith_uint256& target,
+                                  const uint256& claimed_digest, const uint256& episode_sigma,
+                                  const std::vector<uint256>& round_roots,
+                                  const std::vector<uint256>& acc_roots)
+{
     std::vector<unsigned char> buf;
     // Domain + versions FIRST (blueprint item 7): proof version, domain tag,
     // transcript/FS profile version — all bound before any challenge.
@@ -1331,6 +1344,11 @@ uint256 RCGkrFsSeedV7(const CBlockHeader& header, int32_t height, const RCEpisod
     AppendBytes(buf, reinterpret_cast<const unsigned char*>("rts"), 3);
     AppendLE32(buf, static_cast<uint32_t>(round_roots.size()));
     for (const auto& rt : round_roots) AppendBytes(buf, rt.data(), 32);
+    if (!acc_roots.empty()) {
+        AppendBytes(buf, reinterpret_cast<const unsigned char*>("ars"), 3);
+        AppendLE32(buf, static_cast<uint32_t>(acc_roots.size()));
+        for (const auto& ar : acc_roots) AppendBytes(buf, ar.data(), 32);
+    }
     return Sha256dBytes(buf.data(), buf.size());
 }
 
@@ -1549,17 +1567,18 @@ struct LayerProv {
 
 // Reproduce ONLY the Λ wiring structure of BuildRealEpisodeLayers (public seeds
 // + prf + operand provenance). Runs no GEMM and no Extract — cheap and native.
-std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEpisodeParams& p,
-                                          const std::vector<uint256>& round_roots)
+std::vector<LayerProv> RCGkrEpisodeWiringInternal(const CBlockHeader& header,
+                                                  const RCEpisodeParams& p,
+                                                  const std::vector<uint256>& round_roots,
+                                                  const std::vector<uint256>& acc_roots)
 {
     std::vector<LayerProv> out;
     out.reserve(ExpectedLayerCount(p));
+    assert(!UseRCEpisodeDigestV2(p) || acc_roots.size() == p.rounds);
     const uint256 sigma = matmul::v4::DeriveSigma(header);
 
     for (uint32_t r = 0; r < p.rounds; ++r) {
-        const uint256 seed_r =
-            (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
-                     : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
+        const uint256 seed_r = RCRoundSeedForParams(p, sigma, round_roots, acc_roots, r);
         auto operand = [&](const char* tag) { return DeriveOperandSeedLocal(seed_r, tag); };
         const bool shared_ffn_weights = UseDatacenterSharedFfnWeights(p);
         // EPISODE-WIDE operands — datacenter only (sigma-derived, shared across rounds);
@@ -1668,6 +1687,13 @@ std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEp
         }
     }
     return out;
+}
+
+std::vector<LayerProv> RCGkrEpisodeWiring(const CBlockHeader& header, const RCEpisodeParams& p,
+                                          const std::vector<uint256>& round_roots)
+{
+    static const std::vector<uint256> empty_acc_roots;
+    return RCGkrEpisodeWiringInternal(header, p, round_roots, empty_acc_roots);
 }
 
 std::vector<int8_t> TransposeI8(const std::vector<int8_t>& src, uint32_t rows, uint32_t cols)
@@ -1880,6 +1906,7 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
                                int32_t height, const arith_uint256& target,
                                const uint256& claimed_digest, const uint256& sigma,
                                const std::vector<uint256>& roots,
+                               const std::vector<uint256>& acc_roots,
                                const std::vector<uint256>& seeds,
                                const std::vector<LayerWire>& wires, const char* note)
 {
@@ -1895,6 +1922,7 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
     proof.episode_sigma = sigma;
     proof.round_seeds = seeds;
     proof.round_roots = roots;
+    proof.acc_roots = acc_roots;
 
     // Carry the committed witness columns for the in-circuit AIRs (§5.4/§5.7/§6.3).
     proof.wires.resize(wires.size());
@@ -1915,7 +1943,8 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
     }
 
     const uint256 base_seed =
-        RCGkrFsSeedV7(header, height, params, target, claimed_digest, sigma, roots);
+        RCGkrFsSeedV7WithAccRoots(header, height, params, target, claimed_digest, sigma, roots,
+                                  acc_roots);
 
     // Epoch-1 columns (Fp3-embedded integer witness) and the batch degree
     // (all toy tensors are single-chunk).
@@ -2022,9 +2051,10 @@ RCGkrProveResultV7 ProveV7Core(const CBlockHeader& header, const RCEpisodeParams
 // --- Sublinear Freivalds-sampled seam (additive; see header banner). ---------
 std::vector<RCGkrSampledLayerProv> RCGkrEpisodeLayerProvenance(
     const CBlockHeader& header, const RCEpisodeParams& params,
-    const std::vector<uint256>& round_roots)
+    const std::vector<uint256>& round_roots, const std::vector<uint256>& acc_roots)
 {
-    const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, params, round_roots);
+    const std::vector<LayerProv> prov =
+        RCGkrEpisodeWiringInternal(header, params, round_roots, acc_roots);
     std::vector<RCGkrSampledLayerProv> out;
     out.reserve(prov.size());
     auto conv = [](const TensorRef& t) {
@@ -2061,12 +2091,86 @@ std::vector<int8_t> RCGkrReconstructRoundStream(const std::vector<RCGkrV7WireWit
     return ReconstructRoundStreamFromWitness(wires, round, params);
 }
 
+std::vector<int8_t> RCGkrReconstructRoundAccStream(const std::vector<RCGkrV7WireWitness>& wires,
+                                                   uint32_t round, const RCEpisodeParams& params)
+{
+    std::vector<int8_t> out;
+    auto append_i64 = [&](const int64_t* vals, size_t count) {
+        unsigned char buf[8];
+        for (size_t i = 0; i < count; ++i) {
+            const int64_t v = vals[i];
+            WriteLE64(buf, static_cast<uint64_t>(v));
+            out.insert(out.end(), reinterpret_cast<const int8_t*>(buf),
+                       reinterpret_cast<const int8_t*>(buf) + 8);
+        }
+    };
+    auto append_i64_vec = [&](const std::vector<int64_t>& vals) {
+        append_i64(vals.data(), vals.size());
+    };
+
+    const RCGkrV7WireWitness* qkt = nullptr;
+    const RCGkrV7WireWitness* sv = nullptr;
+    std::vector<const RCGkrV7WireWitness*> up(params.L_lyr, nullptr);
+    std::vector<const RCGkrV7WireWitness*> fwd(params.L_lyr, nullptr);
+    for (const RCGkrV7WireWitness& w : wires) {
+        if (w.round != round) continue;
+        switch (w.kind) {
+        case RCGkrLayerKind::GemmPhase1QKt:
+            qkt = &w;
+            break;
+        case RCGkrLayerKind::GemmPhase1SV:
+            sv = &w;
+            break;
+        case RCGkrLayerKind::GemmPhase2FfnUp:
+            if (w.layer < up.size()) up[w.layer] = &w;
+            break;
+        case RCGkrLayerKind::GemmPhase2Fwd:
+            if (w.layer < fwd.size()) fwd[w.layer] = &w;
+            break;
+        default:
+            break;
+        }
+    }
+
+    // Match RunEpisode's accumulator Merkle input exactly. Phase 1 is row-
+    // interleaved by construction: while producing row i, the miner streams all
+    // QK^T accumulator blocks for that row, then the corresponding SV row.
+    if (qkt != nullptr && sv != nullptr &&
+        qkt->extract_in.size() == static_cast<size_t>(params.n_q) * params.n_ctx &&
+        sv->extract_in.size() == static_cast<size_t>(params.n_q) * params.d_head) {
+        for (uint32_t i = 0; i < params.n_q; ++i) {
+            append_i64(qkt->extract_in.data() + static_cast<size_t>(i) * params.n_ctx,
+                       params.n_ctx);
+            append_i64(sv->extract_in.data() + static_cast<size_t>(i) * params.d_head,
+                       params.d_head);
+        }
+    }
+
+    // Phase 2 streams each fused layer as UP accumulator, then FWD accumulator.
+    for (uint32_t l = 0; l < params.L_lyr; ++l) {
+        if (up[l] != nullptr) append_i64_vec(up[l]->extract_in);
+        if (fwd[l] != nullptr) append_i64_vec(fwd[l]->extract_in);
+    }
+    return out;
+}
+
 // Thin exported wrappers over the file-local FS/digest helpers so the additive
 // sampled verifier runs the byte-identical trivial/digest/round-seed gates
 // without re-deriving them (no drift). Not consensus.
 uint256 RCGkrEpisodeDigestFromRoots(const std::vector<uint256>& round_roots)
 {
     return EpisodeDigestFromRoots(round_roots);
+}
+uint256 RCGkrEpisodeDigestFromRootsV2(const std::vector<uint256>& round_roots,
+                                      const std::vector<uint256>& acc_roots)
+{
+    return RCEpisodeDigestFromRootsV2(round_roots, acc_roots);
+}
+uint256 RCGkrEpisodeDigestForParams(const RCEpisodeParams& params,
+                                    const std::vector<uint256>& round_roots,
+                                    const std::vector<uint256>& acc_roots)
+{
+    return RCEpisodeDigestForParams(params, round_roots, acc_roots);
 }
 uint256 RCGkrDerivePowBind(const uint256& claimed_digest)
 {
@@ -2109,14 +2213,20 @@ RCGkrProveResultV7 ProveWinnerEpisodeV7(const CBlockHeader& header, const RCEpis
         res.timing.note = "episode digest over target";
         return res;
     }
+    const bool use_v2_digest = UseRCEpisodeDigestV2(params);
     std::vector<uint256> roots(params.rounds);
-    for (uint32_t r = 0; r < params.rounds; ++r) roots[r] = transcripts[r].round_root;
+    std::vector<uint256> acc_roots(use_v2_digest ? params.rounds : 0);
+    for (uint32_t r = 0; r < params.rounds; ++r) {
+        roots[r] = transcripts[r].round_root;
+        if (use_v2_digest) acc_roots[r] = transcripts[r].acc_root;
+    }
     const uint256 sigma = matmul::v4::DeriveSigma(header);
     std::vector<uint256> seeds;
-    const std::vector<LayerWire> wires = BuildRealEpisodeLayers(header, params, roots, seeds);
+    const std::vector<LayerWire> wires =
+        BuildRealEpisodeLayersInternal(header, params, roots, acc_roots, seeds);
 
     return ProveV7Core(
-        header, params, height, target, claimed_digest, sigma, roots, seeds, wires,
+        header, params, height, target, claimed_digest, sigma, roots, acc_roots, seeds, wires,
         "v7 witness-carried: batched FRI + sumcheck + eval-arg + exhaustive "
         "Extract/MxExpand/tile-tree checks over committed columns");
 }
@@ -2147,6 +2257,7 @@ size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof)
     const Fri3BatchProof& batch = proof.batch;
     if (proof.round_seeds.size() > kRCGkrMaxRoundSeedsHard ||
         proof.round_roots.size() > kRCGkrMaxRoundSeedsHard ||
+        proof.acc_roots.size() > kRCGkrMaxRoundSeedsHard ||
         proof.layers.size() > kRCGkrMaxLayersHard ||
         proof.wires.size() > kRCGkrMaxLayersHard ||
         batch.columns.size() > kRCFriBatchMaxColumns ||
@@ -2162,7 +2273,7 @@ size_t EstimateRCGkrProofV7PayloadBytes(const RCGkrProofV7& proof)
     // Fixed envelope + count-prefixed public vectors + diagnostic note.
     // (Fp3 field elements are 24 bytes: c0‖c1‖c2 LE64 limbs.)
     if (!add(4 + 4 + 4 + 3 * 32 + 3 * 24 + 8 + 1 + 4) ||
-        !add(proof.round_seeds.size() + proof.round_roots.size(), 32) ||
+        !add(proof.round_seeds.size() + proof.round_roots.size() + proof.acc_roots.size(), 32) ||
         !add(proof.note.size())) {
         return kTooLarge;
     }
@@ -2379,8 +2490,9 @@ RCGkrProveResultV7 ProveMaliciousEpisodeV7ForTest(const CBlockHeader& header,
     // does not perturb the episode wiring or the round roots.
     CBlockHeader hdr = header;
     hdr.matmul_digest = digest;
-    auto res = ProveV7Core(hdr, params, height, target, digest, sigma, roots, seeds, wires,
-                           RCGkrIndepMaliciousGapNote(kind));
+    static const std::vector<uint256> empty_acc_roots;
+    auto res = ProveV7Core(hdr, params, height, target, digest, sigma, roots, empty_acc_roots,
+                           seeds, wires, RCGkrIndepMaliciousGapNote(kind));
     if (res.timing.ok) res.timing.note = RCGkrIndepMaliciousGapNote(kind);
     return res;
 }
@@ -2412,15 +2524,20 @@ RCGkrRelationsResult CheckWinnerProofRelationsV7Impl(const RCGkrProofV7& proof,
 
     // Shape gates (mirror VerifyWinnerProofV7 so the module is self-standing).
     if (proof.round_roots.size() != proof.episode.rounds) return fail(RCGkrRelation::G2, "roots_size");
+    if (UseRCEpisodeDigestV2(proof.episode) && proof.acc_roots.size() != proof.episode.rounds) {
+        return fail(RCGkrRelation::G2, "acc_roots_size");
+    }
     const std::vector<uint256>& roots = proof.round_roots;
     const uint32_t batch_n = proof.batch.n_coeffs;
     if (batch_n == 0 || (batch_n & (batch_n - 1)) != 0) return fail(RCGkrRelation::G1, "batch_n");
 
-    const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, proof.episode, roots);
+    const std::vector<LayerProv> prov =
+        RCGkrEpisodeWiringInternal(header, proof.episode, roots, proof.acc_roots);
     if (prov.size() != proof.wires.size()) return fail(RCGkrRelation::G1, "wiring_count");
 
-    const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
-                                            proof.claimed_digest, proof.episode_sigma, roots);
+    const uint256 base_seed =
+        RCGkrFsSeedV7WithAccRoots(header, height, proof.episode, target, proof.claimed_digest,
+                                  proof.episode_sigma, roots, proof.acc_roots);
 
     // Module-local challenges (independent of the main transcript; soundness only
     // needs uniform-random draws — the FS-binding of the shipped α's is a
@@ -2765,7 +2882,10 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // fresh reference computation.
     const std::vector<uint256>& roots = proof.round_roots;
     if (roots.size() != proof.episode.rounds) return fail("v7:round_roots_size");
-    const uint256 digest = EpisodeDigestFromRoots(roots);
+    if (UseRCEpisodeDigestV2(proof.episode) && proof.acc_roots.size() != proof.episode.rounds) {
+        return fail("v7:acc_roots_size");
+    }
+    const uint256 digest = RCEpisodeDigestForParams(proof.episode, roots, proof.acc_roots);
     if (digest != proof.claimed_digest) return fail("v7:digest_from_roots"); // F15
     if (UintToArith256(digest) > target) return fail("v7:target");           // F14
 
@@ -2773,8 +2893,7 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     const uint256 sigma = proof.episode_sigma;
     for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
         const uint256 expect =
-            (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
-                     : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, roots[r - 1], r);
+            RCRoundSeedForParams(proof.episode, sigma, roots, proof.acc_roots, r);
         if (r >= proof.round_seeds.size() || expect != proof.round_seeds[r])
             return fail("v7:round_seeds");
     }
@@ -2812,8 +2931,9 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
             return fail("v7:column_not_grounded"); // F1/F2/F6 operand/trace/extract forgery
 
     // Thm 2.1: batched Fp3 FRI binds every committed column to a low-degree poly.
-    const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
-                                            proof.claimed_digest, proof.episode_sigma, roots);
+    const uint256 base_seed =
+        RCGkrFsSeedV7WithAccRoots(header, height, proof.episode, target, proof.claimed_digest,
+                                  proof.episode_sigma, roots, proof.acc_roots);
     std::string fri_why;
     if (!Fri3BatchVerify(proof.batch, base_seed, &fri_why)) return fail("v7:fri:" + fri_why);
 
@@ -2870,7 +2990,8 @@ bool VerifyWinnerProofV7(const RCGkrProofV7& proof, const CBlockHeader& header, 
     // soundness mechanism — no int64-reference re-derivation): leaf operands →
     // MxExpandAir, extract_out → Extract sampler AIR over ALL tiles, round_roots
     // → tile-tree AIR. Public seeds/prf are Λ-derived natively.
-    const std::vector<LayerProv> prov = RCGkrEpisodeWiring(header, proof.episode, roots);
+    const std::vector<LayerProv> prov =
+        RCGkrEpisodeWiringInternal(header, proof.episode, roots, proof.acc_roots);
     if (prov.size() != proof.wires.size()) return fail("v7:wiring_count");
     gkr_air::LogUpInstance3 inst_tm, inst_tx, inst_r16;
     const GroundResult gr = GroundEpisodeInCircuit(proof.wires, prov, proof.episode, roots, gamma,
@@ -2943,7 +3064,7 @@ bool BuildEpisodeAirInputsV7(const RCGkrProofV7& proof, const CBlockHeader& head
                              air_episode::EpisodeAirWitness* wit, std::string& why)
 {
     const std::vector<LayerProv> prov =
-        RCGkrEpisodeWiring(header, proof.episode, proof.round_roots);
+        RCGkrEpisodeWiringInternal(header, proof.episode, proof.round_roots, proof.acc_roots);
     if (prov.size() != proof.wires.size() || proof.layers.size() != proof.wires.size()) {
         why = "wiring_count";
         return false;
@@ -3000,9 +3121,9 @@ bool BuildEpisodeAirInputsV7(const RCGkrProofV7& proof, const CBlockHeader& head
 uint256 EpisodeAirSeedV7(const RCGkrProofV7& proof, const CBlockHeader& header, int32_t height,
                          const arith_uint256& target)
 {
-    const uint256 base = RCGkrFsSeedV7(header, height, proof.episode, target,
-                                       proof.claimed_digest, proof.episode_sigma,
-                                       proof.round_roots);
+    const uint256 base =
+        RCGkrFsSeedV7WithAccRoots(header, height, proof.episode, target, proof.claimed_digest,
+                                  proof.episode_sigma, proof.round_roots, proof.acc_roots);
     return air_quotient::AirChallengeDigest(base, "ep_air_root_seed", {}, {});
 }
 
@@ -3063,14 +3184,16 @@ bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
     if (proof.episode_sigma != matmul::v4::DeriveSigma(header)) return fail("v7c:sigma");
     const std::vector<uint256>& roots = proof.round_roots;
     if (roots.size() != proof.episode.rounds) return fail("v7c:round_roots_size");
-    const uint256 digest = EpisodeDigestFromRoots(roots);
+    if (UseRCEpisodeDigestV2(proof.episode) && proof.acc_roots.size() != proof.episode.rounds) {
+        return fail("v7c:acc_roots_size");
+    }
+    const uint256 digest = RCEpisodeDigestForParams(proof.episode, roots, proof.acc_roots);
     if (digest != proof.claimed_digest) return fail("v7c:digest_from_roots");
     if (UintToArith256(digest) > target) return fail("v7c:target");
     const uint256 sigma = proof.episode_sigma;
     for (uint32_t r = 0; r < proof.episode.rounds; ++r) {
         const uint256 expect =
-            (r == 0) ? Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0)
-                     : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, roots[r - 1], r);
+            RCRoundSeedForParams(proof.episode, sigma, roots, proof.acc_roots, r);
         if (r >= proof.round_seeds.size() || expect != proof.round_seeds[r]) {
             return fail("v7c:round_seeds");
         }
@@ -3111,8 +3234,9 @@ bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
 
     // ---- Batched FRI (Thm 2.1). ----
     const auto t_fri = std::chrono::steady_clock::now();
-    const uint256 base_seed = RCGkrFsSeedV7(header, height, proof.episode, target,
-                                            proof.claimed_digest, proof.episode_sigma, roots);
+    const uint256 base_seed =
+        RCGkrFsSeedV7WithAccRoots(header, height, proof.episode, target, proof.claimed_digest,
+                                  proof.episode_sigma, roots, proof.acc_roots);
     std::string fri_why;
     if (!Fri3BatchVerify(proof.batch, base_seed, &fri_why)) return fail("v7c:fri:" + fri_why);
     tm.fri_s = secs(t_fri);
@@ -3196,7 +3320,7 @@ bool VerifyWinnerProofV7Compact(const RCGkrProofV7& proof,
     const auto t_chain = std::chrono::steady_clock::now();
     {
         const std::vector<LayerProv> prov =
-            RCGkrEpisodeWiring(header, proof.episode, proof.round_roots);
+            RCGkrEpisodeWiringInternal(header, proof.episode, proof.round_roots, proof.acc_roots);
         if (prov.size() != proof.wires.size()) return fail("v7c:wiring_count");
         auto chain_ok = [&](const TensorRef& ref, const std::vector<int8_t>& committed) {
             if (ref.is_leaf) return true;
@@ -3247,7 +3371,7 @@ RCGkrGroundScanMeasureV7 MeasureGroundEpisodeScanV7(const RCGkrProofV7& proof,
     RCGkrGroundScanMeasureV7 out;
     const auto t0 = std::chrono::steady_clock::now();
     const std::vector<LayerProv> prov =
-        RCGkrEpisodeWiring(header, proof.episode, proof.round_roots);
+        RCGkrEpisodeWiringInternal(header, proof.episode, proof.round_roots, proof.acc_roots);
     if (prov.size() != proof.wires.size()) {
         out.failure = "wiring_count";
         return out;

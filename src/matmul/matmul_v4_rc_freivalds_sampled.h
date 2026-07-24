@@ -21,53 +21,64 @@
 // checking with random-projection (Freivalds) matrix verification.
 //
 // Replaces the O(N) full re-execution (GroundEpisodeInCircuit / the compact
-// AIR-quotient shard loop) with an O(λ·per-layer + λ·log N) check: draw λ
-// layers by a public post-commitment coin, and for EACH sampled layer verify
-// (a) its committed extract_out opens against round_roots (O(log N) Merkle
-// path — the validator does NOT recompute the O(N) tile-tree root; the miner's
-// submitted roots are the pre-challenge commitments, bound into the target
-// digest and then sampled), (b) its GEMM A·B=Y by Freivalds random projection
-// (O(mk+kn+mn), NEVER O(mkn)), (c) the Extract glue (extract_in→extract_out +
-// the accumulator/residual relation) natively for that one layer, and (d) the
-// chained-operand Λ wiring (A,B == referenced prior layers' extract_out).
+// AIR-quotient shard loop) with an O(λ·per-layer + λ·log N) check. V1/V3 draw
+// streamed output layers. V2 draws raw accumulator layers, including internal
+// QKt and FfnUp, and for EACH sampled layer verifies (a) the exact int64
+// pre-Extract tile opens against acc_roots (O(log N) Merkle path), (b) streamed
+// layers' committed extract_out opens against round_roots, (c) GEMM A·B=Y by
+// Freivalds random projection (O(mk+kn+mn), NEVER O(mkn)), (d) the Extract glue
+// natively for that one layer, and (e) chained-operand Λ wiring.
 //
-// SAMPLING UNIT — whole GEMM layers of the canonical layout Λ whose extract_out
-// is committed into the round tile-tree stream (SV, Fwd, Bwd, Wgrad). QKt is
-// NOT directly sampleable: its output S is never placed in a round stream (it
-// is consumed only as SV's A operand, bound transitively by the chain), so it
-// has no O(log N) opening of its own — see RESIDUAL notes below and the report.
+// SAMPLING UNIT. V1/V3 units are streamed layers (SV and Fwd in the fused trace).
+// V2 units are raw accumulator layers (QKt, SV, FfnUp, Fwd). QKt and FfnUp have
+// no output stream, so their sampled tiles open only against acc_roots and stop
+// after the exact pre-Extract arithmetic check.
 //
-// FS-BINDING (fixed-commitment sampling). The λ sampled indices derive from
-// base_seed = RCGkrFsSeedV7(header,height,params,target,claimed_digest,sigma,
-// round_roots), which absorbs the full round_roots vector and the target. The
-// sampler itself is exact-uniform (SHA256d counter-XOF + rejection-sampled
-// bounded draws + partial Fisher-Yates, no modulo bias). For any fixed
-// pre-challenge root vector, the opened units are therefore verifier-
-// recomputable, distinct, and not miner-selectable. Moving the sample set
-// requires moving the committed roots/digest and finding a fresh target hit.
+// FS-BINDING (fixed-commitment sampling). V2 derives the λ sampled indices from
+// RCGkrFsSeedV7WithAccRoots(... round_roots, acc_roots). The digest itself is
+// SHA256d(EPISODE_V2 || H(round_root_r, acc_root_r)_r), so changing either root
+// vector changes both the target candidate and the sample seed. Because the last
+// round seeds nothing downstream, the carrier verifier also recomputes exactly
+// that terminal round and requires its round_root/acc_root to match. Thus moving
+// the FS coin requires at least one fresh canonical round evaluation, not just a
+// Merkle-leaf mutation of an unsampled terminal tile. The sampler is exact-uniform
+// (SHA256d counter-XOF + rejection-sampled bounded draws + partial Fisher-Yates,
+// no modulo bias). For any fixed pre-challenge root vector, opened units are
+// verifier-recomputable, distinct, and not miner-selectable.
 //
-// RESIDUAL ρ*. This is economic DETERRENCE, not completeness: an UNSAMPLED
-// tampered layer passes. A profit-maximising miner's largest worthwhile fake
-// fraction is ρ* ≈ ln(κ)/λ (κ = mining gross margin); at the deployed λ=512
-// (kRCFreivaldsSampleCount), κ=2 that is ≈ 0.13 %, at competitive κ=1.1 it is
-// ≈ 0.019 %. The full-wires path's Freivalds statistical error is ≤ 2^(−63·reps)
-// per layer — far below ρ*, so it is invisible under the sampling residual (reps
-// is margin only; the v3 anchored carrier recomputes exactly and adds no such
-// error). The unsampled-layer test asserts this boundary (deterrence, not a bug).
+// WORK-SKIPPING BOUND (sampling, not exact completeness). If a fixed committed
+// episode skips/corrupts fraction f of sampleable raw accumulator tiles and the
+// V2 carrier opens q exact-uniform tiles, pass probability is ≤ (1-f)^q up to
+// the finite-population correction. In the datacenter shape there are
+// rounds·(2+2L)=400 raw units; λ=512 samples all units and each unit opens two
+// 32-lane int64 tiles, so q=800. Skipping 10% of raw-tile work survives with
+// probability ≤ 0.9^800 ≈ 2.5e-37; skipping 1% survives with probability
+// ≤ 0.99^800 ≈ 3.2e-4. A single isolated wrong tile is intentionally only caught
+// with its tile-sampling probability. This proves "cannot profitably skip
+// meaningful work", not "every wrong tile is caught".
+//
+// PREMISES. This is a fixed-commitment Fiat-Shamir sampling theorem in the random
+// oracle model with SHA/Merkle binding; it is not exact replay and cannot provide
+// exact completeness for unsampled tiles. V2 closes the Extract-quantization
+// premise for opened tiles by authenticating exact int64 pre-Extract bytes against
+// acc_roots before checking final int8 output. The terminal-round check closes the
+// cheapest last-round mutation grind; residual grinding is bounded by the cost of
+// redoing at least one canonical round per fresh root vector, until Stage-C proof
+// replaces that deterministic terminal anchor. Freivalds statistical error is
+// ≤ p^(-reps) per checked GEMM over Goldilocks p and is dominated by sampling.
 //
 // CONSENSUS ROLE (datacenter profile — 2026-07 owner-authorized activation).
 // UNDER nMatMulRCProfile == 2 (the datacenter dims) this sampled verifier IS the
 // consensus accept/reject AUTHORITY in CheckMatMulProofOfWork_RC: at the
 // 16×-heavier datacenter episode ExactReplay cannot re-run the workload inside
 // the block-verify budget, so the sublinear sampled check decides validity. This
-// authority is DETERRENCE-based, NOT complete and NOT audited: an UNSAMPLED
-// tampered layer passes, with residual cheatable fraction ρ* ≈ ln(κ)/λ ≈ 0.13 %
-// (λ=512, κ=2) — see RESIDUAL above. It is an explicit owner risk decision; it is
-// NOT a formal-soundness or audit claim (the external cryptographic audit of the
-// FS coin / Freivalds composition / T-BIND / opening soundness remains OPEN, and
-// kRCGkrFormalSoundnessReady — which gates the SEPARATE GKR/SNARK arbiter, not
-// this path — stays false). ExactReplay is retained as the ε=0 async ARBITER /
-// dispute path a full node can run off the hot path.
+// authority is sampling-based, NOT exact completeness: an isolated unsampled
+// tamper may pass, while meaningful skipped work is exponentially suppressed by
+// the bound above. The separate GKR/SNARK arbiter remains gated by
+// kRCGkrFormalSoundnessReady=false; this path is the sampled work-skipping
+// verifier under the fixed-commitment assumption. ExactReplay remains available
+// off the hot path for local dispute/diagnostic replay, but is not the profile-2
+// consensus mechanism.
 //
 // Under nMatMulRCProfile == 1 (epoch-0 base dims) this path is NOT consensus:
 // ExactReplay is the sole authority exactly as before, and the verifier here is
@@ -80,53 +91,38 @@ namespace matmul::v4::rc {
 
 /** λ — number of Fiat–Shamir-sampled layers. Raised 256→512 (aicompute-alignment-
  *  review.md §5.2: "cheap soundness insurance"): halves the deterrence residual
- *  ρ* ≈ ln(κ)/λ from ≈0.27%→0.13% (κ=2) / 0.037%→0.019% (competitive). The
- *  anchored per-tile carrier (below) keeps 512 sampled layers UNDER the 12 MiB relay
- *  ceiling at production dims because per-layer relay is bounded by the per-tile
- *  anchored footprint (extract_out + one A-row leaf + Merkle paths), not the full
- *  operand size. */
+ *  ρ* ≈ ln(κ)/λ from ≈0.27%→0.13% (κ=2) / 0.037%→0.019% (competitive). The V2
+ *  raw-work carrier (below) keeps 512 sampled units under the ordinary 16 MB
+ *  protocol-message ceiling because per-unit relay is bounded by opened leaves
+ *  and Merkle paths, not the full operand size. */
 inline constexpr uint32_t kRCFreivaldsSampleCount = 512;
 
 // ---------------------------------------------------------------------------
-// ANCHORED per-tile carrier granularity (datacenter relay-ceiling fit + width
-// unpin). Instead of opening a sampled layer's FULL operands (which at production
-// dims exceed the 12 MiB carrier ceiling — a single Fwd Y is ~1 GiB int64, an SV
-// A operand ~384 MiB int8), each sampled layer opens a BOUNDED set of random
-// OUTPUT TILES; per tile the carrier relays the ANCHORED layer-input A-row (opened
-// against round_roots, or PRF-regenerated) + the committed extract_out, and the
-// verifier EXACT-RECOMPUTES the full contraction from PRF-regenerated weights
-// (v3, scratchpad/sound-carrier-design.md §4). NOTE: this superseded the earlier
-// v2 "segment-Freivalds" carrier — there are no longer relayed Y bytes, relayed
-// contraction segments, or a Freivalds identity in the carrier path; every opened
-// tile's GEMM is checked exactly. The per-sampled-layer relay is INDEPENDENT of
-// m, n and the full k — it is
-//   s_tile · [ T (extract_out) + T_leaf (anchored A-row leaf) + 2·(leaves·T_leaf
-//              + path) ]
-// with T = kRCMxBlockLen (one MX output block, a single output row × 32 cols),
-// so a d_model > 4096 (or n_ctx-scaled) episode carries the SAME bytes — this is
-// the width UNPIN. An output tile is a single (row i, 32-col block bj): contiguous
-// in the round stream (clean O(log N) leaf opening) and exactly one Extract tile.
-inline constexpr uint32_t kRCFreivaldsSegOutTiles = 2;     // output tiles / sampled layer (LIVE)
-// LEGACY (v2 segment carrier): unused by the v3 anchored carrier, which recomputes
-// the FULL contraction per tile rather than sampling contraction segments. Retained
-// only so the FS SegPos derivation domain constants stay pinned.
-inline constexpr uint32_t kRCFreivaldsSegContractSegs = 2; // contraction segments / tile (legacy)
-inline constexpr uint32_t kRCFreivaldsSegContractLen = 64; // MX-aligned length / segment (legacy)
+// RAW-WORK carrier tile granularity (datacenter relay-ceiling fit + width unpin).
+// Instead of opening a sampled layer's FULL operands (which at production dims
+// exceed any ordinary relay envelope), each sampled V2 unit opens a BOUNDED set
+// of random raw accumulator tiles. Streamed units additionally open the matching
+// output tile. The verifier regenerates PRF operands, anchors the input row,
+// recomputes the full exact contraction for that tile, opens the exact int64
+// bytes against acc_roots, then checks Extract output against round_roots when
+// one exists. Relay is independent of m, n and the full k: opened leaves +
+// Merkle paths dominate, not full operands. A tile is one (row i, 32-col block
+// bj), contiguous in the accumulator stream and exactly one Extract tile.
+inline constexpr uint32_t kRCFreivaldsSegOutTiles = 2;     // raw tiles / sampled unit
+inline constexpr uint32_t kRCFreivaldsSegContractSegs = 2; // legacy v2 segment cap; unused by v3
+inline constexpr uint32_t kRCFreivaldsSegContractLen = 64; // legacy v2 segment len; unused by v3
 static_assert(kRCFreivaldsSegContractLen % 32 == 0, "segment length must be MX(32)-aligned");
 static_assert(kRCFreivaldsSegOutTiles >= 1 && kRCFreivaldsSegContractSegs >= 1,
               "at least one output tile and one contraction segment must be sampled");
-/** SOUNDNESS granularity (v3 anchored carrier). Each opened output tile's GEMM is
- *  recomputed EXACTLY from anchored operands over the FULL contraction [0,k), so
- *  the per-tile check is exact (no Freivalds error, no uncovered-contraction gap)
- *  and binds to the committed extract_out opened against round_roots. The only
- *  residual is the SAMPLING one: an UNSAMPLED layer is not checked at all — priced
- *  as ρ* (see RESIDUAL banner), NOT a per-tile soundness gap. This is the honest
- *  datacenter posture. */
+/** SOUNDNESS granularity (v4 raw-work carrier). Each opened raw accumulator tile
+ *  is recomputed exactly from anchored operands over the full contraction [0,k)
+ *  and opened against acc_roots. Streamed units also check Extract output against
+ *  round_roots. The residual is sampling, not contraction-segment sampling. */
 /** Freivalds projections per sampled layer — used by the FULL-WIRES verifier
  *  (VerifyEpisodeFreivaldsSampled, FreivaldsCheckGemm) and the FreivaldsCheckGemm-
- *  Segments primitive, NOT by the v3 anchored carrier (which recomputes exactly).
- *  reps=1 already clears the ~2^-64 consensus scale (2^-63); reps is margin only
- *  and the sampling residual ρ* dominates regardless (see banner). */
+ *  Segments primitive, NOT by the carrier path (which recomputes opened tiles
+ *  exactly). reps=1 already clears the ~2^-64 consensus scale (2^-63); reps is
+ *  margin only and the sampling residual ρ* dominates regardless (see banner). */
 inline constexpr uint32_t kRCFreivaldsReps = 2;
 /** Domain tag: FS derivation of the λ sampled layer indices. */
 inline constexpr char kRCFreivaldsSampleTag[] = "BTX_RC_FRVS_SAMPLE_V1";
@@ -139,16 +135,18 @@ inline constexpr char kRCFreivaldsSegPosTag[] = "BTX_RC_FRVS_SEGPOS_V1";
  *  branch is removed; each sampled DOWN tile relays the anchored A-row (X[l] row,
  *  opened against round_roots, or PRF-regenerated at l=0) + the committed
  *  extract_out, and the verifier recomputes H-row + Y-row from anchored operands
- *  (scratchpad/sound-carrier-design.md §4). */
-inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 3;
+ *  (scratchpad/sound-carrier-design.md §4).
+ *  v4: hard-fork raw-work carrier. Adds pre-challenge accumulator roots,
+ *  sampled Merkle openings of exact int64 pre-Extract tiles against acc_roots,
+ *  and V2 verifier-side terminal-round canonicality. */
+inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 4;
 
-/** Upper bound on ONE sampled layer's serialized relay bytes in the v3 anchored
- *  carrier — a function of the per-tile anchored footprint (kRCFreivaldsSegOutTiles
- *  output tiles, each carrying extract_out + one anchored A-row leaf + Merkle
- *  paths), T_leaf and the tile-tree depth, and INDEPENDENT of the full operand size
- *  m·n·k. This is what keeps λ=512 sampled layers under the 12 MiB ceiling at
- *  production dims and unpins width (d_model > 4096 costs the same). Exposed for
- *  relay sizing/tests. */
+/** Upper bound on ONE sampled layer's serialized relay bytes in the segment
+ *  carrier — a function of the opened-tile count (kRCFreivaldsSegOutTiles),
+ *  T_leaf and the tile-tree depth, and INDEPENDENT of the full operand size
+ *  m·n·k. This is what keeps λ=512 sampled layers under the ordinary 16 MB
+ *  protocol-message ceiling at production dims and unpins width (d_model > 4096
+ *  costs the same). Exposed for relay sizing/tests. */
 [[nodiscard]] size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params);
 
 // ---------------------------------------------------------------------------
@@ -186,9 +184,9 @@ struct RCFreivaldsSampledTiming {
     uint32_t n_layers_checked{0};   // COUNTER: layers actually touched (== n_sampled)
     // Per-unit GEMM-check counter. In the full-wires VerifyEpisodeFreivaldsSampled
     // path this counts genuine Freivalds calls (FreivaldsCheckGemm), one per sampled
-    // layer (== n_sampled). In the v3 anchored CARRIER path there is NO Freivalds —
-    // the counter tallies EXACT per-tile recomputes (one per opened output tile), so
-    // it is ≥ n_sampled there. The field name is kept for instrumentation continuity.
+    // layer (== n_sampled). In the carrier path there is NO Freivalds — the
+    // counter tallies EXACT per-tile recomputes (one per opened tile), so it is
+    // >= n_sampled there. The field name is kept for instrumentation continuity.
     uint32_t n_freivalds_calls{0};
     uint64_t n_extract_tiles{0};    // Extract tiles re-executed (Σ over sampled layers)
     uint32_t n_merkle_openings{0};  // covering leaves opened (O(λ·leaves))
@@ -200,6 +198,7 @@ struct RCFreivaldsSampledTiming {
     double regen_s{0.0};        // Σ ExpandMxDequantInt8 (W_up d_model×d_ff, W_down d_ff×d_model, Q/K/V, X0)
     double recompute_s{0.0};    // Σ dense tile arith: X_row·W_up→H_row, H_row·W_down→Y (+SV S-row, S·V)
     double merkle_s{0.0};       // Σ CheckCoveringLeaf (A-row + extract_out covering leaves)
+    double terminal_s{0.0};     // V2 terminal round canonicality recompute
     double plan_s{0.0};         // four-phase carrier verifier: serial gates+plan wall time
     double prewarm_s{0.0};      // four-phase carrier verifier: deterministic operand prewarm wall time
     double unitcheck_s{0.0};    // four-phase carrier verifier: parallel unit-check wall time
@@ -300,7 +299,13 @@ struct RCFreivaldsSampledTile {
     uint32_t row{0};   // output row i ∈ [0, m)
     uint32_t bcol{0};  // output 32-col block bj ∈ [0, n/32); cols [bj*32, bj*32+32)
     std::vector<int8_t> extract_out;  // committed Extract output eo[i, bj-block] (int8, T)
-    uint256 acc_tag;                  // SHA256d commitment to the exact int64 pre-Extract tile
+    uint256 acc_tag;                  // carrier-local checksum of the exact int64 pre-Extract tile
+    // V4 accumulator-root opening. The exact int64 tile occupies 32*8 bytes at
+    // acc_stream_offset in the round accumulator stream and opens to acc_roots[round].
+    uint64_t acc_stream_offset{0};
+    uint32_t acc_first_leaf{0};
+    std::vector<std::vector<uint8_t>> acc_leaf_bytes;
+    std::vector<RCMerkleProof> acc_leaf_proofs;
     // Anchored contraction input A-row (the LAYER INPUT row: X[l] row i for a DOWN
     // tile; S row i for SV). For a committed activation (DOWN, l≥1) this is one
     // T_leaf leaf opened against round_roots; for a PRF-regenerable input (DOWN
@@ -339,6 +344,7 @@ struct RCFreivaldsSampledCarrier {
     uint256 episode_sigma{};
     std::vector<uint256> round_seeds;
     std::vector<uint256> round_roots;
+    std::vector<uint256> acc_roots;
     uint32_t lambda{kRCFreivaldsSampleCount};
     std::vector<RCFreivaldsSampledLayer> sampled;  // exactly n_sampled entries
 };
@@ -387,16 +393,15 @@ struct RCFreivaldsSampledCarrier {
 // ---------------------------------------------------------------------------
 
 // DoS bounds for the untrusted wire form. The carrier arrives in a single P2P
-// message capped by the net layer at MAX_PROTOCOL_MESSAGE_LENGTH (16 MB); the
-// bound below is the module's own hard ceiling, re-checked on both serve and
-// receive. With the v3 ANCHORED per-tile carrier the honest carrier fits UNDER this
-// ceiling even at full PRODUCTION datacenter dims (design §2c binding relay
-// constraint is resolved): per-sampled-layer relay is bounded by the per-tile
-// anchored footprint (s_tile·(extract_out + A-row leaf + Merkle paths)), independent
-// of the full m,n,k, so λ=512 sampled layers at d_model≥4096 serialize in
-// ~single-digit MiB — the size that blew the full-operand carrier now fits. Oversize
-// carriers are still rejected before parse.
-inline constexpr size_t kRCFreivaldsCarrierMaxSerializedBytes = 12u * 1024u * 1024u;
+// message capped by the net layer at MAX_PROTOCOL_MESSAGE_LENGTH (16,000,000
+// bytes); the bound below is the module's own hard ceiling, re-checked on both
+// serve and receive. With the V2 raw-work carrier the honest datacenter carrier
+// is larger than the old anchored-only 12 MiB ceiling, but still rides in one
+// ordinary protocol message with the block-hash framing kept below net.h's
+// MAX_RCCARRIER_PAYLOAD_SIZE. Per-sampled-unit relay is bounded by opened leaves
+// and paths, independent of the full m,n,k. Oversize carriers are still rejected
+// before parse.
+inline constexpr size_t kRCFreivaldsCarrierMaxSerializedBytes = 15'990'000u;
 /** Count caps (defense-in-depth alongside the byte ceiling): a violated cap
  *  aborts the deserialize, which net_processing scores as peer misbehavior. */
 inline constexpr uint32_t kRCCarrierMaxRounds = 4096;          // round_seeds/round_roots

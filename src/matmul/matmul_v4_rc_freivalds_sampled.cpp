@@ -84,6 +84,12 @@ bool LayerInStream(RCGkrLayerKind k)
     return k == RCGkrLayerKind::GemmPhase1SV || k == RCGkrLayerKind::GemmPhase2Fwd;
 }
 
+bool LayerInAccStream(RCGkrLayerKind k)
+{
+    return k == RCGkrLayerKind::GemmPhase1QKt || k == RCGkrLayerKind::GemmPhase1SV ||
+           k == RCGkrLayerKind::GemmPhase2FfnUp || k == RCGkrLayerKind::GemmPhase2Fwd;
+}
+
 // Byte offset of a layer's extract_out within its round stream. MUST match the
 // RCGkrReconstructRoundStream layout: Z ‖ for l: (Down_l). Fused FFN commits ONE
 // output per layer (the DOWN projection X[l+1] = b_seq×d_model); the UP wire's H
@@ -119,12 +125,11 @@ struct RoundTreeGeom {
     uint32_t real_leaves{0};  // ceil(logical_bytes / T_leaf), min 1 (non-padding leaves)
     uint32_t depth{0};        // log2(next_pow2(real_leaves)) == canonical path length
 };
-RoundTreeGeom RoundStreamTreeGeometry(const RCEpisodeParams& p)
+RoundTreeGeom TreeGeometryForLogicalBytes(uint64_t logical_bytes, uint32_t t_leaf_in)
 {
     RoundTreeGeom g;
-    g.logical_bytes = static_cast<uint64_t>(p.n_q) * p.d_head +
-                      static_cast<uint64_t>(p.L_lyr) * p.b_seq * p.d_model;
-    const uint32_t t_leaf = p.T_leaf ? p.T_leaf : 1;
+    g.logical_bytes = logical_bytes;
+    const uint32_t t_leaf = t_leaf_in ? t_leaf_in : 1;
     uint64_t real = (g.logical_bytes + t_leaf - 1) / t_leaf;
     if (real == 0) real = 1;  // empty stream still emits one zero leaf
     uint64_t padded = 1;
@@ -133,6 +138,73 @@ RoundTreeGeom RoundStreamTreeGeometry(const RCEpisodeParams& p)
     g.real_leaves = static_cast<uint32_t>(real);
     g.depth = depth;
     return g;
+}
+
+RoundTreeGeom RoundStreamTreeGeometry(const RCEpisodeParams& p)
+{
+    return TreeGeometryForLogicalBytes(
+        static_cast<uint64_t>(p.n_q) * p.d_head +
+            static_cast<uint64_t>(p.L_lyr) * p.b_seq * p.d_model,
+        p.T_leaf);
+}
+
+RoundTreeGeom AccStreamTreeGeometry(const RCEpisodeParams& p)
+{
+    const uint64_t elem = sizeof(int64_t);
+    const uint64_t phase1_bytes =
+        static_cast<uint64_t>(p.n_q) *
+        (static_cast<uint64_t>(p.n_ctx) + static_cast<uint64_t>(p.d_head)) * elem;
+    const uint64_t ffn_layer_bytes =
+        static_cast<uint64_t>(p.b_seq) *
+        (static_cast<uint64_t>(p.d_ff) + static_cast<uint64_t>(p.d_model)) * elem;
+    return TreeGeometryForLogicalBytes(phase1_bytes + static_cast<uint64_t>(p.L_lyr) *
+                                                         ffn_layer_bytes,
+                                       p.T_leaf);
+}
+
+bool AccTileStreamOffset(const RCEpisodeParams& p, const RCGkrSampledLayerProv& lp,
+                         uint32_t row, uint32_t bcol, uint64_t& out)
+{
+    if (!LayerInAccStream(lp.kind) || row >= lp.m || lp.n == 0 ||
+        bcol >= lp.n / kRCMxBlockLen) {
+        return false;
+    }
+
+    // RunEpisode streams Phase 1 row-interleaved: QK^T row i, then SV row i.
+    // Phase 2 is layer-contiguous: UP_l, then FWD_l. These offsets are consensus
+    // layout for V2 accumulator-root sampling.
+    const uint64_t elem = sizeof(int64_t);
+    const uint64_t T = kRCMxBlockLen;
+    const uint64_t phase1_row =
+        (static_cast<uint64_t>(p.n_ctx) + static_cast<uint64_t>(p.d_head)) * elem;
+    const uint64_t phase1_bytes = static_cast<uint64_t>(p.n_q) * phase1_row;
+    const uint64_t ffn_up_bytes = static_cast<uint64_t>(p.b_seq) * p.d_ff * elem;
+    const uint64_t ffn_fwd_bytes = static_cast<uint64_t>(p.b_seq) * p.d_model * elem;
+    const uint64_t ffn_layer_bytes = ffn_up_bytes + ffn_fwd_bytes;
+    switch (lp.kind) {
+    case RCGkrLayerKind::GemmPhase1QKt:
+        out = static_cast<uint64_t>(row) * phase1_row +
+              static_cast<uint64_t>(bcol) * T * elem;
+        return true;
+    case RCGkrLayerKind::GemmPhase1SV:
+        out = static_cast<uint64_t>(row) * phase1_row +
+              static_cast<uint64_t>(p.n_ctx) * elem +
+              static_cast<uint64_t>(bcol) * T * elem;
+        return true;
+    case RCGkrLayerKind::GemmPhase2FfnUp:
+        out = phase1_bytes + static_cast<uint64_t>(lp.layer) * ffn_layer_bytes +
+              (static_cast<uint64_t>(row) * p.d_ff + static_cast<uint64_t>(bcol) * T) *
+                  elem;
+        return true;
+    case RCGkrLayerKind::GemmPhase2Fwd:
+        out = phase1_bytes + static_cast<uint64_t>(lp.layer) * ffn_layer_bytes +
+              ffn_up_bytes +
+              (static_cast<uint64_t>(row) * p.d_model + static_cast<uint64_t>(bcol) * T) *
+                  elem;
+        return true;
+    default:
+        return false;
+    }
 }
 
 // SHA256d(kRCLeafTag ‖ bytes) — byte-identical to RoundMerkleStream::EmitLeaf.
@@ -172,6 +244,17 @@ uint256 AccumulatorTileTag(RCGkrLayerKind kind, uint32_t layer_index, uint32_t r
         put64(static_cast<uint64_t>(acc_block[t]));
     }
     return Sha256dBytes(pre.data(), pre.size());
+}
+
+std::vector<int8_t> AccumulatorTileBytes(const int64_t* acc_block)
+{
+    std::vector<int8_t> out(kRCMxBlockLen * sizeof(int64_t));
+    unsigned char tmp[8];
+    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
+        WriteLE64(tmp, static_cast<uint64_t>(acc_block[t]));
+        std::memcpy(out.data() + static_cast<size_t>(t) * sizeof(int64_t), tmp, sizeof(tmp));
+    }
+    return out;
 }
 
 std::vector<int8_t> TransposeI8Local(const std::vector<int8_t>& src, uint32_t rows, uint32_t cols)
@@ -615,11 +698,15 @@ bool DenseRowBlockAvx2Available()
 
 // The sampleable-unit list: Λ layer indices whose extract_out is streamed.
 // Identical on prover and verifier — derived from the public wiring only.
-std::vector<uint32_t> SampleableUnits(const std::vector<RCGkrSampledLayerProv>& prov)
+std::vector<uint32_t> SampleableUnits(const std::vector<RCGkrSampledLayerProv>& prov,
+                                      bool include_internal_raw)
 {
     std::vector<uint32_t> units;
-    for (uint32_t i = 0; i < prov.size(); ++i)
-        if (LayerInStream(prov[i].kind)) units.push_back(i);
+    for (uint32_t i = 0; i < prov.size(); ++i) {
+        if (include_internal_raw ? LayerInAccStream(prov[i].kind) : LayerInStream(prov[i].kind)) {
+            units.push_back(i);
+        }
+    }
     return units;
 }
 
@@ -628,6 +715,7 @@ std::vector<uint32_t> SampleableUnits(const std::vector<RCGkrSampledLayerProv>& 
 bool CheckGatesAndSeed(uint32_t version, const RCEpisodeParams& episode, int32_t proof_height,
                        const uint256& claimed_digest, const uint256& pow_bind,
                        const uint256& episode_sigma, const std::vector<uint256>& round_roots,
+                       const std::vector<uint256>& acc_roots,
                        const std::vector<uint256>& round_seeds, const CBlockHeader& header,
                        int32_t height, const arith_uint256& target, uint256& base_seed,
                        std::string& why)
@@ -639,16 +727,23 @@ bool CheckGatesAndSeed(uint32_t version, const RCEpisodeParams& episode, int32_t
     if (claimed_digest != header.matmul_digest) { why = "v7fs:digest_not_header_bound"; return false; }
     if (episode_sigma != matmul::v4::DeriveSigma(header)) { why = "v7fs:sigma"; return false; }
     if (round_roots.size() != episode.rounds) { why = "v7fs:round_roots_size"; return false; }
-    const uint256 digest = RCGkrEpisodeDigestFromRoots(round_roots);
+    static const std::vector<uint256> empty_acc_roots;
+    const std::vector<uint256>& fs_acc_roots =
+        UseRCEpisodeDigestV2(episode) ? acc_roots : empty_acc_roots;
+    if (UseRCEpisodeDigestV2(episode) && acc_roots.size() != episode.rounds) {
+        why = "v7fs:acc_roots_size";
+        return false;
+    }
+    const uint256 digest = RCGkrEpisodeDigestForParams(episode, round_roots, fs_acc_roots);
     if (digest != claimed_digest) { why = "v7fs:digest_from_roots"; return false; }
     if (UintToArith256(digest) > target) { why = "v7fs:target"; return false; }
     for (uint32_t r = 0; r < episode.rounds; ++r) {
         const uint256 expect =
-            (r == 0) ? RCGkrRoundSeed(episode_sigma, 0) : RCGkrRoundSeed(round_roots[r - 1], r);
+            RCRoundSeedForParams(episode, episode_sigma, round_roots, fs_acc_roots, r);
         if (r >= round_seeds.size() || expect != round_seeds[r]) { why = "v7fs:round_seeds"; return false; }
     }
-    base_seed = RCGkrFsSeedV7(header, height, episode, target, claimed_digest, episode_sigma,
-                              round_roots);
+    base_seed = RCGkrFsSeedV7WithAccRoots(header, height, episode, target, claimed_digest,
+                                          episode_sigma, round_roots, fs_acc_roots);
     return true;
 }
 
@@ -1092,7 +1187,8 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
     uint256 base_seed;
     if (!CheckGatesAndSeed(proof.version, proof.episode, proof.height, proof.claimed_digest,
                            proof.pow_bind, proof.episode_sigma, proof.round_roots,
-                           proof.round_seeds, header, height, target, base_seed, gwhy)) {
+                           proof.acc_roots, proof.round_seeds, header, height, target, base_seed,
+                           gwhy)) {
         return fail(gwhy);
     }
     // Layout parity: wires must equal the canonical Λ enumeration (kind/dims).
@@ -1107,13 +1203,13 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
         }
     }
     const std::vector<RCGkrSampledLayerProv> prov =
-        RCGkrEpisodeLayerProvenance(header, proof.episode, proof.round_roots);
+        RCGkrEpisodeLayerProvenance(header, proof.episode, proof.round_roots, proof.acc_roots);
     if (prov.size() != proof.wires.size()) return fail("v7fs:wiring_count");
     tm.gates_s = Secs(t0);
 
     // FS sample derivation over the sampleable units.
     const auto t_s = std::chrono::steady_clock::now();
-    const std::vector<uint32_t> sampleable = SampleableUnits(prov);
+    const std::vector<uint32_t> sampleable = SampleableUnits(prov, UseRCEpisodeDigestV2(proof.episode));
     tm.n_units_total = static_cast<uint32_t>(sampleable.size());
     const std::vector<uint32_t> units = FreivaldsSampleLayers(base_seed, tm.n_units_total, lambda);
     tm.n_sampled = static_cast<uint32_t>(units.size());
@@ -1199,11 +1295,10 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
     return true;
 }
 
-// Per-sampled-layer relay byte bound (v3 anchored carrier): a function of T_leaf
-// and the tree depth only — NOT of m,n,k (width unpin). Per tile ≈ the anchored
-// A-row covering leaf (T_leaf + Merkle path) + the extract_out block + its
-// covering leaf (T_leaf + path). Tree depth for any reachable N is < 32 (a round
-// stream is < 2^40 bytes and T_leaf ≥ 64 ⇒ < 2^34 leaves); the bound uses depth 32.
+// Per-sampled-unit relay byte bound: a function of T_leaf and the tree depth
+// only, NOT of m,n,k (width unpin). Per tile is dominated by opened leaves and
+// Merkle paths. Tree depth for any reachable N is < 32 (a round stream is < 2^40
+// bytes and T_leaf >= 64 => < 2^34 leaves); the bound uses depth 32.
 size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params)
 {
     const uint32_t T = kRCMxBlockLen;              // 32
@@ -1214,6 +1309,7 @@ size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params)
         8 + 5                       // row + bcol
         + 3 + T                     // extract_out
         + 32                        // exact accumulator tile tag
+        + 9 + 5 + one_leaf_open     // accumulator stream_offset + leaf + proof
         + 1                         // a_prf_regen flag
         + 9 + 5                     // a_row_stream_offset + a_row_leaf_index
         + 3 + one_leaf_open         // anchored A-row leaf + proof
@@ -1240,13 +1336,14 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
     uint256 base_seed;
     if (!CheckGatesAndSeed(proof.version, proof.episode, proof.height, proof.claimed_digest,
                            proof.pow_bind, proof.episode_sigma, proof.round_roots,
-                           proof.round_seeds, header, height, target, base_seed, gwhy)) {
+                           proof.acc_roots, proof.round_seeds, header, height, target, base_seed,
+                           gwhy)) {
         return fail(gwhy);
     }
     const std::vector<RCGkrSampledLayerProv> prov =
-        RCGkrEpisodeLayerProvenance(header, proof.episode, proof.round_roots);
+        RCGkrEpisodeLayerProvenance(header, proof.episode, proof.round_roots, proof.acc_roots);
     if (prov.size() != proof.wires.size()) return fail("v7fs:wiring_count");
-    const std::vector<uint32_t> sampleable = SampleableUnits(prov);
+    const std::vector<uint32_t> sampleable = SampleableUnits(prov, UseRCEpisodeDigestV2(proof.episode));
     const std::vector<uint32_t> units =
         FreivaldsSampleLayers(base_seed, static_cast<uint32_t>(sampleable.size()), lambda);
 
@@ -1259,12 +1356,36 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
     out.episode_sigma = proof.episode_sigma;
     out.round_seeds = proof.round_seeds;
     out.round_roots = proof.round_roots;
+    out.acc_roots = proof.acc_roots;
     out.lambda = lambda;
 
     const uint32_t t_leaf = proof.episode.T_leaf;
     const uint32_t T = kRCMxBlockLen;
     std::unordered_map<uint32_t, std::vector<uint256>> leaves_cache;
     std::unordered_map<uint32_t, std::vector<int8_t>> stream_cache;
+    std::unordered_map<uint32_t, std::vector<uint256>> acc_leaves_cache;
+    std::unordered_map<uint32_t, std::vector<int8_t>> acc_stream_cache;
+    auto ensure_stream = [&](uint32_t r)
+        -> std::pair<const std::vector<int8_t>*, const std::vector<uint256>*> {
+        auto sit = stream_cache.find(r);
+        if (sit == stream_cache.end()) {
+            sit = stream_cache.emplace(r, RCGkrReconstructRoundStream(proof.wires, r, proof.episode))
+                      .first;
+            leaves_cache.emplace(r, BuildTileTreeLeaves(sit->second, t_leaf));
+        }
+        return {&sit->second, &leaves_cache.at(r)};
+    };
+    auto ensure_acc_stream = [&](uint32_t r)
+        -> std::pair<const std::vector<int8_t>*, const std::vector<uint256>*> {
+        auto sit = acc_stream_cache.find(r);
+        if (sit == acc_stream_cache.end()) {
+            sit = acc_stream_cache
+                      .emplace(r, RCGkrReconstructRoundAccStream(proof.wires, r, proof.episode))
+                      .first;
+            acc_leaves_cache.emplace(r, BuildTileTreeLeaves(sit->second, t_leaf));
+        }
+        return {&sit->second, &acc_leaves_cache.at(r)};
+    };
     for (uint32_t u : units) {
         const uint32_t li = sampleable[u];
         const RCGkrV7WireWitness& w = proof.wires[li];
@@ -1276,14 +1397,6 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
         e.m = w.m; e.n = w.n; e.k = w.k;
 
         const uint32_t r = w.round;
-        auto sit = stream_cache.find(r);
-        if (sit == stream_cache.end()) {
-            sit = stream_cache.emplace(r, RCGkrReconstructRoundStream(proof.wires, r, proof.episode))
-                      .first;
-            leaves_cache.emplace(r, BuildTileTreeLeaves(sit->second, t_leaf));
-        }
-        const std::vector<int8_t>& stream = sit->second;
-        const std::vector<uint256>& leaves = leaves_cache.at(r);
         const uint64_t layer_off = LayerStreamOffset(proof.episode, lp.kind, lp.layer);
 
         const std::vector<TilePlan> plans = TilePositions(base_seed, li, w.m, w.n);
@@ -1292,42 +1405,70 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
             tile.row = pl.row;
             tile.bcol = pl.bcol;
             const size_t ybase = static_cast<size_t>(pl.row) * w.n + static_cast<size_t>(pl.bcol) * T;
-            tile.extract_out.assign(w.extract_out.begin() + ybase, w.extract_out.begin() + ybase + T);
+            if (LayerInStream(lp.kind)) {
+                tile.extract_out.assign(w.extract_out.begin() + ybase,
+                                        w.extract_out.begin() + ybase + T);
+            }
             tile.acc_tag = AccumulatorTileTag(lp.kind, li, w.round, pl.row, pl.bcol,
                                               w.extract_in.data() + ybase);
+            if (!proof.acc_roots.empty()) {
+                const auto [acc_stream, acc_leaves] = ensure_acc_stream(r);
+                if (!AccTileStreamOffset(proof.episode, lp, pl.row, pl.bcol,
+                                         tile.acc_stream_offset)) {
+                    return fail("v7fs:build:acc_off");
+                }
+                tile.acc_first_leaf = static_cast<uint32_t>(tile.acc_stream_offset / t_leaf);
+                const uint32_t acc_last_leaf = static_cast<uint32_t>(
+                    (tile.acc_stream_offset + T * sizeof(int64_t) - 1) / t_leaf);
+                for (uint32_t lf = tile.acc_first_leaf; lf <= acc_last_leaf; ++lf) {
+                    if (lf >= acc_leaves->size()) return fail("v7fs:build:acc_leaf_index");
+                    tile.acc_leaf_bytes.push_back(LeafWindow(*acc_stream, t_leaf, lf));
+                    tile.acc_leaf_proofs.push_back(OpenMerkleProof(*acc_leaves, lf));
+                }
+            }
 
             // Anchor the layer-input A-row (X[l] row for DOWN, S row for SV).
             if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
                 tile.a_prf_regen = true; // S regenerated from Q,K (QKt + Extract)
-            } else {
-                // DOWN: X[l] is the UP wire's A operand (down.A chains to the UP wire).
-                if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:build:down_a");
-                const RCGkrSampledOperandProv& xprov = prov[lp.a.src_idx].a;
+            } else if (lp.kind == RCGkrLayerKind::GemmPhase2FfnUp ||
+                       lp.kind == RCGkrLayerKind::GemmPhase2Fwd) {
+                // FfnUp anchors X[l] directly. Fwd anchors the UP wire's A operand,
+                // which is the same X[l] row feeding H=Extract(X[l]*W_up).
+                const RCGkrSampledOperandProv& xprov =
+                    (lp.kind == RCGkrLayerKind::GemmPhase2FfnUp)
+                        ? lp.a
+                        : prov[lp.a.src_idx].a;
                 if (xprov.is_leaf) {
                     tile.a_prf_regen = true; // X0 regenerated at l==0
                 } else {
                     // Open X[l] committed row from round_roots (same round r).
+                    const auto [stream, leaves] = ensure_stream(r);
                     const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
                     const uint64_t off_A = LayerStreamOffset(proof.episode, src.kind, src.layer) +
                                            static_cast<uint64_t>(pl.row) * proof.episode.d_model;
                     tile.a_row_stream_offset = off_A;
                     tile.a_row_leaf_index = static_cast<uint32_t>(off_A / t_leaf);
-                    if (tile.a_row_leaf_index >= leaves.size()) return fail("v7fs:build:a_leaf_index");
-                    tile.a_row_leaf = LeafWindow(stream, t_leaf, tile.a_row_leaf_index);
-                    tile.a_row_proof = OpenMerkleProof(leaves, tile.a_row_leaf_index);
+                    if (tile.a_row_leaf_index >= leaves->size()) return fail("v7fs:build:a_leaf_index");
+                    tile.a_row_leaf = LeafWindow(*stream, t_leaf, tile.a_row_leaf_index);
+                    tile.a_row_proof = OpenMerkleProof(*leaves, tile.a_row_leaf_index);
                 }
+            } else {
+                tile.a_prf_regen = true; // QKt operands are PRF-regenerated by the verifier.
             }
 
-            // Tile-tree opening of this 32-byte extract_out block.
-            const uint64_t off = layer_off + static_cast<uint64_t>(pl.row) * w.n +
-                                 static_cast<uint64_t>(pl.bcol) * T;
-            tile.stream_offset = off;
-            tile.first_leaf = static_cast<uint32_t>(off / t_leaf);
-            const uint32_t last_leaf = static_cast<uint32_t>((off + T - 1) / t_leaf);
-            for (uint32_t lf = tile.first_leaf; lf <= last_leaf; ++lf) {
-                if (lf >= leaves.size()) return fail("v7fs:build:leaf_index");
-                tile.leaf_bytes.push_back(LeafWindow(stream, t_leaf, lf));
-                tile.leaf_proofs.push_back(OpenMerkleProof(leaves, lf));
+            if (LayerInStream(lp.kind)) {
+                const auto [stream, leaves] = ensure_stream(r);
+                // Tile-tree opening of this 32-byte extract_out block.
+                const uint64_t off = layer_off + static_cast<uint64_t>(pl.row) * w.n +
+                                     static_cast<uint64_t>(pl.bcol) * T;
+                tile.stream_offset = off;
+                tile.first_leaf = static_cast<uint32_t>(off / t_leaf);
+                const uint32_t last_leaf = static_cast<uint32_t>((off + T - 1) / t_leaf);
+                for (uint32_t lf = tile.first_leaf; lf <= last_leaf; ++lf) {
+                    if (lf >= leaves->size()) return fail("v7fs:build:leaf_index");
+                    tile.leaf_bytes.push_back(LeafWindow(*stream, t_leaf, lf));
+                    tile.leaf_proofs.push_back(OpenMerkleProof(*leaves, lf));
+                }
             }
             e.tiles.push_back(std::move(tile));
         }
@@ -1367,13 +1508,37 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
     uint256 base_seed;
     if (!CheckGatesAndSeed(kRCGkrProofVersionV7, carrier.episode, carrier.height,
                            carrier.claimed_digest, carrier.pow_bind, carrier.episode_sigma,
-                           carrier.round_roots, carrier.round_seeds, header, height, target,
-                           base_seed, gwhy)) {
+                           carrier.round_roots, carrier.acc_roots, carrier.round_seeds, header,
+                           height, target, base_seed, gwhy)) {
         return fail(gwhy);
     }
+    if (UseRCEpisodeDigestV2(carrier.episode)) {
+        const auto t_terminal = std::chrono::steady_clock::now();
+        if (carrier.episode.rounds == 0 ||
+            carrier.round_roots.size() != carrier.episode.rounds ||
+            carrier.acc_roots.size() != carrier.episode.rounds) {
+            return fail("v7fs:terminal_shape");
+        }
+        const uint32_t terminal_round = carrier.episode.rounds - 1;
+        RCRoundTranscript terminal;
+        if (!RecomputeRCEpisodeRoundRoots(header, carrier.episode, height, terminal_round,
+                                          carrier.round_roots, carrier.acc_roots,
+                                          terminal)) {
+            return fail("v7fs:terminal_recompute");
+        }
+        tm.terminal_s = Secs(t_terminal);
+        if (terminal.round_root != carrier.round_roots[terminal_round]) {
+            return fail("v7fs:terminal_round_root");
+        }
+        if (terminal.acc_root != carrier.acc_roots[terminal_round]) {
+            return fail("v7fs:terminal_acc_root");
+        }
+    }
     const std::vector<RCGkrSampledLayerProv> prov =
-        RCGkrEpisodeLayerProvenance(header, carrier.episode, carrier.round_roots);
-    const std::vector<uint32_t> sampleable = SampleableUnits(prov);
+        RCGkrEpisodeLayerProvenance(header, carrier.episode, carrier.round_roots,
+                                    carrier.acc_roots);
+    const std::vector<uint32_t> sampleable =
+        SampleableUnits(prov, UseRCEpisodeDigestV2(carrier.episode));
     tm.n_units_total = static_cast<uint32_t>(sampleable.size());
     const std::vector<uint32_t> units =
         FreivaldsSampleLayers(base_seed, tm.n_units_total, carrier.lambda);
@@ -1392,6 +1557,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
         // extract_out output-tile opening and the anchored A-row opening target the
         // SAME per-round tree, hence share this one geometry.
         const RoundTreeGeom geom = RoundStreamTreeGeometry(carrier.episode);
+        const RoundTreeGeom acc_geom = AccStreamTreeGeometry(carrier.episode);
         struct UnitPlan {
             size_t carrier_index{0};
             uint32_t li{0};
@@ -1452,10 +1618,37 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 const TilePlan& pl = plans[ti];
                 const RCFreivaldsSampledTile& tile = e.tiles[ti];
                 if (tile.row != pl.row || tile.bcol != pl.bcol) return fail("v7fs:carrier_tile_pos");
-                if (tile.extract_out.size() != T) return fail("v7fs:tile_shape");
+                if (LayerInStream(lp.kind)) {
+                    if (tile.extract_out.size() != T) return fail("v7fs:tile_shape");
+                } else if (!tile.extract_out.empty()) {
+                    return fail("v7fs:internal_extract_out");
+                }
                 if (tile.row >= e.m || tile.bcol >= e.n / T) return fail("v7fs:tile_range");
+                if (!carrier.acc_roots.empty()) {
+                    uint64_t acc_off = 0;
+                    if (!AccTileStreamOffset(carrier.episode, lp, tile.row, tile.bcol, acc_off)) {
+                        return fail("v7fs:acc_off");
+                    }
+                    if (tile.acc_stream_offset != acc_off) return fail("v7fs:acc_off");
+                    if (tile.acc_first_leaf != static_cast<uint32_t>(acc_off / t_leaf)) {
+                        return fail("v7fs:acc_leaf_index");
+                    }
+                    const uint32_t acc_last = static_cast<uint32_t>(
+                        (acc_off + T * sizeof(int64_t) - 1) / t_leaf);
+                    if (tile.acc_leaf_bytes.size() !=
+                            static_cast<size_t>(acc_last - tile.acc_first_leaf + 1) ||
+                        tile.acc_leaf_proofs.size() != tile.acc_leaf_bytes.size()) {
+                        return fail("v7fs:acc_leaf_count");
+                    }
+                }
             }
-            if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
+            if (lp.kind == RCGkrLayerKind::GemmPhase1QKt) {
+                for (const auto& tile : e.tiles) {
+                    if (!tile.a_prf_regen || !tile.a_row_leaf.empty()) return fail("v7fs:qkt_anchor");
+                    if (!note_seed(lp.a.seed, e.m, e.k)) return fail("v7fs:seed_shape");
+                    if (!note_seed(lp.b.seed, e.n, e.k)) return fail("v7fs:seed_shape");
+                }
+            } else if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
                 if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:sv_qkt_src");
                 const RCGkrSampledLayerProv& qkt = prov[lp.a.src_idx];
                 if (qkt.kind != RCGkrLayerKind::GemmPhase1QKt) return fail("v7fs:sv_qkt_kind");
@@ -1468,7 +1661,34 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     if (!note_seed(qkt.b.seed, n_ctx, d_head)) return fail("v7fs:seed_shape");
                     if (!note_seed(lp.b.seed, n_ctx, d_head)) return fail("v7fs:seed_shape");
                 }
-            } else {
+            } else if (lp.kind == RCGkrLayerKind::GemmPhase2FfnUp) {
+                const uint32_t d_model = e.k;
+                const uint32_t d_ff = e.n;
+                if (d_model > t_leaf) return fail("v7fs:up_a_row_multileaf");
+                const RCGkrSampledOperandProv& xprov = lp.a;
+                for (const auto& tile : e.tiles) {
+                    if (xprov.is_leaf) {
+                        if (!tile.a_prf_regen || !tile.a_row_leaf.empty())
+                            return fail("v7fs:up_l0_anchor");
+                        if (!note_x0_row(xprov, tile.row, d_model))
+                            return fail("v7fs:seed_shape");
+                    } else {
+                        if (tile.a_prf_regen) return fail("v7fs:up_anchor_flag");
+                        if (xprov.src_idx >= prov.size()) return fail("v7fs:up_x_src");
+                        const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
+                        const uint64_t off_A = LayerStreamOffset(carrier.episode, src.kind, src.layer) +
+                                               static_cast<uint64_t>(tile.row) * d_model;
+                        if (tile.a_row_stream_offset != off_A) return fail("v7fs:up_a_off");
+                        const uint32_t a_leaf = static_cast<uint32_t>(off_A / t_leaf);
+                        if (tile.a_row_leaf_index != a_leaf) return fail("v7fs:up_a_leaf_index");
+                        if (tile.a_row_leaf.size() != t_leaf) return fail("v7fs:up_a_leaf_size");
+                        const uint64_t rel = off_A - static_cast<uint64_t>(a_leaf) * t_leaf;
+                        if (rel + d_model > t_leaf) return fail("v7fs:up_a_row_span");
+                    }
+                    if (!note_seed(lp.b.seed, d_model, d_ff, /*transpose_w_up=*/true))
+                        return fail("v7fs:seed_shape");
+                }
+            } else if (lp.kind == RCGkrLayerKind::GemmPhase2Fwd) {
                 if (lp.a.is_leaf || lp.a.src_idx >= prov.size()) return fail("v7fs:down_a_src");
                 const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
                 if (up.kind != RCGkrLayerKind::GemmPhase2FfnUp) return fail("v7fs:down_up_kind");
@@ -1501,6 +1721,8 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     if (!note_seed(lp.b.seed, d_ff, d_model, /*transpose_for_unitcheck=*/true))
                         return fail("v7fs:seed_shape");
                 }
+            } else {
+                return fail("v7fs:unsupported_kind");
             }
             unit_plans.push_back(UnitPlan{j, li, plans});
         }
@@ -1616,6 +1838,54 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                         reject("v7fs:acc_tag");
                         return false;
                     }
+                    if (!carrier.acc_roots.empty()) {
+                        if (e.round >= carrier.acc_roots.size()) {
+                            reject("v7fs:acc_round");
+                            return false;
+                        }
+                        const std::vector<int8_t> acc_bytes = AccumulatorTileBytes(acc_block);
+                        const uint32_t first_leaf =
+                            static_cast<uint32_t>(tile.acc_stream_offset / t_leaf);
+                        const uint32_t last_leaf = static_cast<uint32_t>(
+                            (tile.acc_stream_offset + acc_bytes.size() - 1) / t_leaf);
+                        if (tile.acc_first_leaf != first_leaf) {
+                            reject("v7fs:acc_first_leaf");
+                            return false;
+                        }
+                        const uint32_t n_leaves = last_leaf - first_leaf + 1;
+                        if (tile.acc_leaf_bytes.size() != n_leaves ||
+                            tile.acc_leaf_proofs.size() != n_leaves) {
+                            reject("v7fs:acc_leaf_count");
+                            return false;
+                        }
+                        for (uint32_t x = 0; x < n_leaves; ++x) {
+                            const uint32_t lf = first_leaf + x;
+                            std::string awhy;
+                            const auto t_mk_acc = std::chrono::steady_clock::now();
+                            const bool acc_ok =
+                                CheckCoveringLeaf(tile.acc_leaf_bytes[x], lf,
+                                                  tile.acc_leaf_proofs[x],
+                                                  carrier.acc_roots[e.round], t_leaf,
+                                                  tile.acc_stream_offset, acc_bytes, acc_geom,
+                                                  awhy);
+                            r.merkle_s += Secs(t_mk_acc);
+                            if (!acc_ok) {
+                                reject("v7fs:acc_" + awhy);
+                                return false;
+                            }
+                            r.n_merkle_hashes += tile.acc_leaf_proofs[x].siblings.size();
+                            ++r.n_merkle_openings;
+                        }
+                    }
+                    if (!LayerInStream(lp.kind)) {
+                        if (!tile.leaf_bytes.empty() || !tile.leaf_proofs.empty() ||
+                            !tile.extract_out.empty()) {
+                            reject("v7fs:internal_output_opening");
+                            return false;
+                        }
+                        ++r.n_freivalds_calls;
+                        return true;
+                    }
                     for (uint32_t c = 0; c < T; ++c) {
                         if (eo[c] != tile.extract_out[c]) {
                             reject("v7fs:recompute_mismatch");
@@ -1623,8 +1893,8 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                         }
                     }
                     ++r.n_extract_tiles;
-                    // NOTE: the v3 anchored carrier does NOT Freivalds. This counter
-                    // tallies EXACT per-tile recompute checks (one per opened output
+                    // NOTE: the carrier path does NOT Freivalds. This counter
+                    // tallies EXACT per-tile recompute checks (one per opened
                     // tile); the "freivalds" name is retained only for cross-path
                     // instrumentation continuity with the full-wires verifier (which
                     // does run FreivaldsCheckGemm). See the struct-field comment.
@@ -1657,7 +1927,28 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                     }
                     return true;
                 };
-                if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
+                if (lp.kind == RCGkrLayerKind::GemmPhase1QKt) {
+                    const std::vector<int8_t>& Q = get_seed(lp.a.seed);
+                    const std::vector<int8_t>& K = get_seed(lp.b.seed);
+                    for (size_t ti = 0; ti < plan.tiles.size(); ++ti) {
+                        const RCFreivaldsSampledTile& tile = e.tiles[ti];
+                        const auto t_rc_qkt = std::chrono::steady_clock::now();
+                        std::array<int64_t, kRCMxBlockLen> qblk{};
+                        const uint32_t out_col0 = tile.bcol * T;
+                        for (uint32_t c = 0; c < T; ++c) {
+                            const uint32_t ctx = out_col0 + c;
+                            int64_t acc = 0;
+                            for (uint32_t d = 0; d < e.k; ++d) {
+                                acc += static_cast<int64_t>(Q[static_cast<size_t>(tile.row) * e.k + d]) *
+                                       static_cast<int64_t>(K[static_cast<size_t>(ctx) * e.k + d]);
+                            }
+                            qblk[c] = acc;
+                        }
+                        r.recompute_s += Secs(t_rc_qkt);
+                        std::array<int8_t, kRCMxBlockLen> unused_eo{};
+                        if (!finish_tile(tile, qblk.data(), unused_eo)) break;
+                    }
+                } else if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
                     for (size_t ti = 0; ti < plan.tiles.size(); ++ti) {
                         const RCFreivaldsSampledTile& tile = e.tiles[ti];
                         const RCGkrSampledLayerProv& qkt = prov[lp.a.src_idx];
@@ -1689,6 +1980,65 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                             ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
                         r.recompute_s += Secs(t_rc_sv);
                         if (!finish_tile(tile, yblk.data(), eo)) break;
+                    }
+                } else if (lp.kind == RCGkrLayerKind::GemmPhase2FfnUp) {
+                    const uint32_t d_model = e.k;
+                    const uint32_t d_ff = e.n;
+                    const RCGkrSampledOperandProv& xprov = lp.a;
+                    const std::vector<int8_t>& W_up_t = get_transposed(lp.b.seed);
+                    auto load_x_row = [&](const RCFreivaldsSampledTile& tile,
+                                          std::vector<int8_t>& X_row) -> bool {
+                        X_row.assign(d_model, 0);
+                        if (xprov.is_leaf) {
+                            if (xprov.x0_row_blocks) {
+                                const uint32_t block = tile.row / kRCX0RowBlockRows;
+                                const uint32_t rel = tile.row % kRCX0RowBlockRows;
+                                const std::vector<int8_t>& X0 =
+                                    get_seed(DeriveX0RowBlockSeed(xprov.seed, block));
+                                for (uint32_t d = 0; d < d_model; ++d)
+                                    X_row[d] = X0[static_cast<size_t>(rel) * d_model + d];
+                            } else {
+                                const std::vector<int8_t>& X0 = get_seed(xprov.seed);
+                                for (uint32_t d = 0; d < d_model; ++d)
+                                    X_row[d] = X0[static_cast<size_t>(tile.row) * d_model + d];
+                            }
+                        } else {
+                            std::string awhy;
+                            const RCGkrSampledLayerProv& src = prov[xprov.src_idx];
+                            const uint64_t off_A = LayerStreamOffset(carrier.episode, src.kind, src.layer) +
+                                                   static_cast<uint64_t>(tile.row) * d_model;
+                            const uint32_t a_leaf = static_cast<uint32_t>(off_A / t_leaf);
+                            const uint64_t rel = off_A - static_cast<uint64_t>(a_leaf) * t_leaf;
+                            for (uint32_t d = 0; d < d_model; ++d)
+                                X_row[d] = static_cast<int8_t>(tile.a_row_leaf[rel + d]);
+                            const auto t_mk = std::chrono::steady_clock::now();
+                            const bool a_ok = CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
+                                                   carrier.round_roots[e.round], t_leaf, off_A, X_row,
+                                                   geom, awhy);
+                            r.merkle_s += Secs(t_mk);
+                            if (!a_ok) { reject(awhy); return false; }
+                            r.n_merkle_hashes += tile.a_row_proof.siblings.size();
+                            ++r.n_merkle_openings;
+                        }
+                        return true;
+                    };
+                    for (size_t ti = 0; ti < plan.tiles.size(); ++ti) {
+                        const RCFreivaldsSampledTile& tile = e.tiles[ti];
+                        std::vector<int8_t> X_row;
+                        if (!load_x_row(tile, X_row)) break;
+                        const auto t_rc_up = std::chrono::steady_clock::now();
+                        std::array<int64_t, kRCMxBlockLen> hblk{};
+                        const uint32_t out_col0 = tile.bcol * T;
+                        if (use_packed_i8mm) {
+                            RCDenseRowBlockPackedI8mmExactI8(X_row.data(), W_up_t.data(), d_model,
+                                                             d_ff, out_col0, hblk.data());
+                        } else {
+                            RCDenseRowBlockTransposedExactI8(X_row.data(), W_up_t.data(), d_model,
+                                                             d_ff, out_col0, hblk.data());
+                        }
+                        r.recompute_s += Secs(t_rc_up);
+                        std::array<int8_t, kRCMxBlockLen> unused_eo{};
+                        if (!finish_tile(tile, hblk.data(), unused_eo)) break;
                     }
                 } else {
                     const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
@@ -1886,9 +2236,11 @@ void PutBytes(std::vector<unsigned char>& b, const unsigned char* p, size_t n)
 void PutHash(std::vector<unsigned char>& b, const uint256& h) { PutBytes(b, h.data(), 32); }
 void PutEpisode(std::vector<unsigned char>& b, const RCEpisodeParams& e)
 {
-    // Exactly the 8 consensus shape fields, in the canonical order used by the
-    // FS seed (RCGkrFsSeedV7). phase1_tile_delta is an RCEpisodeOptions execution
-    // knob (0 under consensus, never digest-bearing) and is intentionally absent.
+    // Consensus transcript version plus the 9 shape fields, in the canonical order
+    // used by the FS seed (RCGkrFsSeedV7). phase1_tile_delta is an
+    // RCEpisodeOptions execution knob (0 under consensus, never digest-bearing)
+    // and is intentionally absent.
+    PutU32(b, e.transcript_version);
     PutU32(b, e.rounds);
     PutU32(b, e.d_head);
     PutU32(b, e.n_q);
@@ -1963,7 +2315,8 @@ struct BoundedReader {
     }
     bool Episode(RCEpisodeParams& e)
     {
-        return U32(e.rounds) && U32(e.d_head) && U32(e.n_q) && U32(e.n_ctx) &&
+        return U32(e.transcript_version) &&
+               U32(e.rounds) && U32(e.d_head) && U32(e.n_q) && U32(e.n_ctx) &&
                U32(e.L_lyr) && U32(e.d_model) && U32(e.d_ff) && U32(e.b_seq) && U32(e.T_leaf);
     }
     // Read a length-prefixed int8 vector; count bounded by remaining bytes and
@@ -2026,6 +2379,8 @@ void SerializeRCFreivaldsCarrier(const RCFreivaldsSampledCarrier& c,
     for (const auto& h : c.round_seeds) PutHash(out, h);
     PutCompact(out, c.round_roots.size());
     for (const auto& h : c.round_roots) PutHash(out, h);
+    PutCompact(out, c.acc_roots.size());
+    for (const auto& h : c.acc_roots) PutHash(out, h);
     PutU32(out, c.lambda);
     PutCompact(out, c.sampled.size());
     for (const auto& e : c.sampled) {
@@ -2042,6 +2397,18 @@ void SerializeRCFreivaldsCarrier(const RCFreivaldsSampledCarrier& c,
             PutCompact(out, tile.extract_out.size());
             for (int8_t x : tile.extract_out) out.push_back(static_cast<unsigned char>(x));
             PutHash(out, tile.acc_tag);
+            PutU64(out, tile.acc_stream_offset);
+            PutU32(out, tile.acc_first_leaf);
+            PutCompact(out, tile.acc_leaf_bytes.size());
+            for (const auto& lb : tile.acc_leaf_bytes) {
+                PutCompact(out, lb.size());
+                PutBytes(out, lb.data(), lb.size());
+            }
+            PutCompact(out, tile.acc_leaf_proofs.size());
+            for (const auto& pf : tile.acc_leaf_proofs) {
+                PutCompact(out, pf.siblings.size());
+                for (const auto& s : pf.siblings) PutHash(out, s);
+            }
             // Anchored A-row (empty + flag when PRF-regenerable).
             out.push_back(tile.a_prf_regen ? 1 : 0);
             PutU64(out, tile.a_row_stream_offset);
@@ -2087,6 +2454,7 @@ bool DeserializeRCFreivaldsCarrierBounded(Span<const unsigned char> in,
     if (!r.Hash(c.episode_sigma)) return bad(r.err);
     if (!r.VecHash(c.round_seeds, kRCCarrierMaxRounds)) return bad(r.err);
     if (!r.VecHash(c.round_roots, kRCCarrierMaxRounds)) return bad(r.err);
+    if (!r.VecHash(c.acc_roots, kRCCarrierMaxRounds)) return bad(r.err);
     if (!r.U32(c.lambda)) return bad(r.err);
 
     uint64_t n_sampled;
@@ -2108,6 +2476,21 @@ bool DeserializeRCFreivaldsCarrierBounded(Span<const unsigned char> in,
             if (!r.U32(tile.row) || !r.U32(tile.bcol)) return bad(r.err);
             if (!r.VecI8(tile.extract_out)) return bad(r.err);
             if (!r.Hash(tile.acc_tag)) return bad(r.err);
+            if (!r.U64(tile.acc_stream_offset) || !r.U32(tile.acc_first_leaf)) return bad(r.err);
+            uint64_t n_acc_leaves;
+            if (!r.Compact(n_acc_leaves, kRCCarrierMaxLeavesPerTile)) return bad(r.err);
+            tile.acc_leaf_bytes.resize(n_acc_leaves);
+            for (uint64_t x = 0; x < n_acc_leaves; ++x) {
+                if (!r.RawBytes(tile.acc_leaf_bytes[x])) return bad(r.err);
+            }
+            uint64_t n_acc_proofs;
+            if (!r.Compact(n_acc_proofs, kRCCarrierMaxLeavesPerTile)) return bad(r.err);
+            tile.acc_leaf_proofs.resize(n_acc_proofs);
+            for (uint64_t x = 0; x < n_acc_proofs; ++x) {
+                if (!r.VecHash(tile.acc_leaf_proofs[x].siblings, kRCCarrierMaxMerkleSiblings)) {
+                    return bad(r.err);
+                }
+            }
             // Anchored A-row.
             uint8_t regen;
             if (!r.U8(regen)) return bad(r.err);

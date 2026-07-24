@@ -890,9 +890,17 @@ BOOST_AUTO_TEST_CASE(rc_dc_batch_vs_reference_rows_per_lobe)
 namespace {
 bool RCEpisodeParamsEqual(const rc::RCEpisodeParams& a, const rc::RCEpisodeParams& b)
 {
-    return a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q &&
+    return a.transcript_version == b.transcript_version &&
+           a.rounds == b.rounds && a.d_head == b.d_head && a.n_q == b.n_q &&
            a.n_ctx == b.n_ctx && a.L_lyr == b.L_lyr && a.d_model == b.d_model &&
            a.d_ff == b.d_ff && a.b_seq == b.b_seq && a.T_leaf == b.T_leaf;
+}
+
+rc::RCEpisodeParams MakeToyProfile2RCEpisodeParams()
+{
+    rc::RCEpisodeParams p = rc::MakeToyRCEpisodeParams();
+    p.transcript_version = rc::ENC_RC_V2;
+    return p;
 }
 
 CBlockHeader MakeDcRCHeader(uint64_t nonce)
@@ -1063,7 +1071,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_profile_selector_default_and_mainnet)
     dc_params.nMatMulRCProfile = 2;
     dc_params.fMatMulRCUseToyDims = true;
     BOOST_CHECK(RCEpisodeParamsEqual(rc::ResolveRCEpisodeParams(dc_params, 0),
-                                     rc::MakeToyRCEpisodeParams()));
+                                     MakeToyProfile2RCEpisodeParams()));
 }
 
 // (e) REGTEST ACTIVATION: -regtestrcprofile=2 + a finite -regtestrcheight makes
@@ -1125,7 +1133,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     header.nBits = UintToArith256(p.powLimit).GetCompact();
 
     const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);   // toy dims
-    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, rc::MakeToyRCEpisodeParams()));
+    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, MakeToyProfile2RCEpisodeParams()));
     header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
     BOOST_REQUIRE(!header.matmul_digest.IsNull());
 
@@ -1142,9 +1150,26 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
                                              header.matmul_digest);
     BOOST_REQUIRE_MESSAGE(pr.timing.ok, "toy-dim v7 prove must succeed");
+    BOOST_REQUIRE_EQUAL(pr.proof.acc_roots.size(), params_rc.rounds);
+    for (uint32_t r = 0; r < params_rc.rounds; ++r) {
+        const std::vector<int8_t> acc_stream =
+            rc::RCGkrReconstructRoundAccStream(pr.proof.wires, r, params_rc);
+        const uint256 acc_root = rc::BuildTileTreeRoot(acc_stream, params_rc.T_leaf);
+        BOOST_REQUIRE_MESSAGE(acc_root == pr.proof.acc_roots[r],
+                              "acc_root mismatch at round " << r << ": witness="
+                                                            << acc_root.ToString()
+                                                            << " transcript="
+                                                            << pr.proof.acc_roots[r].ToString());
+    }
     rc::RCFreivaldsSampledCarrier carrier;
     std::string why;
     BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target, carrier, &why));
+    BOOST_REQUIRE_EQUAL(carrier.episode.transcript_version, rc::ENC_RC_V2);
+    BOOST_REQUIRE_EQUAL(carrier.acc_roots.size(), params_rc.rounds);
+    std::string vwhy;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, header, kHeight, *target, &vwhy),
+        vwhy);
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), carrier);
 
     // ACCEPT via the Freivalds sampled-carrier authority.
@@ -1175,7 +1200,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
 //   (net_processing.cpp, "if (msg_type == NetMsgType::RCCARRIER)") admits an
 //   untrusted carrier to the process-local store only after the SAME ordered
 //   gates the consensus path (CheckMatMulProofOfWork_RC profile-2 branch,
-//   pow.cpp) applies: (vi) the 9-field episode-shape bind, (vi-b) the fixed-λ
+//   pow.cpp) applies: (vi) the transcript-version + episode-shape bind, (vi-b) the fixed-λ
 //   bind carrier.lambda == kRCFreivaldsSampleCount, and (vii) the full
 //   VerifyEpisodeFreivaldsSampledCarrier authentication. Step (vi-b) was the
 //   audit gap: VerifyEpisodeFreivaldsSampledCarrier authenticates against the
@@ -1236,8 +1261,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_rccarrier_net_store_lambda_matches_consensus)
     // the SAME shared functions the receiver calls (net_processing.cpp steps
     // vi / vi-b / vii). Returns true iff the receiver would StorePut the carrier.
     const auto net_would_store = [&](const rc::RCFreivaldsSampledCarrier& c) -> bool {
-        const auto& ce = c.episode;                       // (vi) 9-field shape bind
-        if (!(ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
+        const auto& ce = c.episode;                       // (vi) transcript + shape bind
+        if (!(ce.transcript_version == params_rc.transcript_version &&
+              ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
               ce.n_q == params_rc.n_q && ce.n_ctx == params_rc.n_ctx &&
               ce.L_lyr == params_rc.L_lyr && ce.d_model == params_rc.d_model &&
               ce.b_seq == params_rc.b_seq && ce.T_leaf == params_rc.T_leaf &&
@@ -2736,13 +2762,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_invariant_accepts_aggressive_config)
 // ---------------------------------------------------------------------------
 // SEGMENT CARRIER: the datacenter relay-ceiling FIT + WIDTH UNPIN + the coupled
 // λ=512 / raised-T_leaf / compute-hash-margin params. The current FULL-operand
-// carrier blows the 12 MiB ceiling at production dims (a single Fwd Y is 1 GiB
-// int64); the segment carrier's per-layer relay is bounded by the segment
-// footprint, independent of m,n,k.
+// carrier blows the single-message ceiling at production dims (a single Fwd Y is
+// GiB-scale int64); the segment carrier's per-layer relay is bounded by the
+// segment footprint, independent of m,n,k.
 // ---------------------------------------------------------------------------
 
 // (i) At PRODUCTION datacenter dims the segment carrier serializes UNDER the
-//     12 MiB ceiling — the size that blows the full-operand carrier.
+//     single-message carrier ceiling — the size that blows the full-operand
+//     carrier.
 BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_fits_production_ceiling)
 {
     const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();
@@ -2759,7 +2786,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_fits_production_ceiling)
     const size_t per_layer = rc::RCFreivaldsSegLayerByteBound(dc);
     BOOST_TEST_MESSAGE("segment per-layer relay bound (bytes): " << per_layer);
     // λ=512 sampled layers + the fixed header (round roots/seeds, digests) still
-    // fits under the 12 MiB ceiling.
+    // fits under the ordinary single-message ceiling.
     const size_t fixed = 4 + 8 * 4 + 4 + 3 * 32 + 2 * (dc.rounds * 32u + 4) + 8;
     const size_t total_bound = static_cast<size_t>(rc::kRCFreivaldsSampleCount) * per_layer + fixed;
     BOOST_TEST_MESSAGE("segment carrier upper-bound at DC dims, λ=512 (bytes): " << total_bound);
@@ -2770,7 +2797,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_fits_production_ceiling)
 
 // (j) WIDTH UNPIN: the per-layer relay bound is INDEPENDENT of d_model (and n_ctx),
 //     so a d_model > 4096 episode's carrier still fits — width is no longer pinned
-//     by the ~32 MB relay budget of full-operand opening.
+//     by full-operand opening.
 BOOST_AUTO_TEST_CASE(rc_dc_segment_carrier_width_unpin)
 {
     const rc::RCEpisodeParams dc = rc::MakeDatacenterRCEpisodeParams();

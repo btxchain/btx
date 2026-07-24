@@ -40,11 +40,11 @@
 //   silicon-qualified. Soft over_budget may recommend ExactReplay (M4 shipping)
 //   but MUST NOT replace the episode with toy-slice arithmetization.
 //
-// Consensus today: ε=0 ExactReplay (CheckMatMulProofOfWork_RC) is the arbiter.
-// Shadow: BTX_RC_GKR_SHADOW=1 (default) generate+verify, log mismatches, never
-// reject. Arbiter cutover is compile-time hard-disabled via
-// kRCGkrFormalSoundnessReady (ignores BTX_RC_GKR_ARBITER) and does NOT raise
-// height. v7 grounding / prove / verify remain callable for tests.
+// Consensus dispatch today: profile 1 uses ε=0 ExactReplay; profile 2 uses the
+// Freivalds sampled carrier. This GKR/SNARK arbiter is separate: BTX_RC_GKR_SHADOW=1
+// can generate+verify and log mismatches, but arbiter cutover is compile-time
+// hard-disabled via kRCGkrFormalSoundnessReady (ignores BTX_RC_GKR_ARBITER).
+// v7 grounding / prove / verify remain callable for tests.
 
 namespace matmul::v4::rc {
 
@@ -102,16 +102,19 @@ inline constexpr const char* kRCGkrSoundnessBoundStatement =
     "malicious constructors currently ACCEPT (see ProveIndepMalicious*). "
     "Coupled: real lobe-GEMM + barrier-Extract format (no toy stand-in) but "
     "bindings incomplete. External crypto audit MANDATORY before arbiter. "
-    "Merkle q=8 is DoS PREFILTER ONLY. ExactReplay remains consensus arbiter "
-    "(kRCGkrFormalSoundnessReady=false ⇒ EnvRCGkrArbiterEnabled ignores "
-    "BTX_RC_GKR_ARBITER). nMatMulRCHeight=INT32_MAX.";
+    "Merkle q=8 is DoS PREFILTER ONLY. The GKR arbiter remains disabled "
+    "(kRCGkrFormalSoundnessReady=false => EnvRCGkrArbiterEnabled ignores "
+    "BTX_RC_GKR_ARBITER); CheckMatMulProofOfWork_RC dispatches profile 1 to "
+    "ExactReplay and profile 2 to the Freivalds sampled carrier. "
+    "nMatMulRCHeight=INT32_MAX.";
 
 inline constexpr const char* kRCGkrSoundnessStatement = kRCGkrSoundnessBoundStatement;
 inline constexpr const char* kRCGkrSoundnessNote = kRCGkrSoundnessBoundStatement;
 
 inline constexpr const char* kRCGkrE5Decision =
     "DECIDED: winner-only GKR/sumcheck direction. Fraud-proof deferred. Shrink/"
-    "ExactReplay is the production fallback until Reality Guardrail gates close.";
+    "ExactReplay remains the profile-1/diagnostic fallback; profile 2 uses the "
+    "Freivalds sampled carrier until Reality Guardrail gates close.";
 
 inline constexpr const char* kRCGkrMerkleQ8PrefilterStatement =
     "kRCSpotCheckQueries=8 Merkle leaf sampling is a bandwidth DoS PREFILTER "
@@ -123,8 +126,8 @@ inline constexpr const char* kRCGkrHbmParkStatement =
     "HBM-scale winner GKR is NOT production-complete under Reality Guardrail. "
     "Consensus-dim ALL-PHASE prove may soft-over_budget on CPU (M4 shipping → "
     "ExactReplay); that is shrink-to-replayable, not shrink-to-toy. PARK HBM "
-    "GKR as production arbiter until budgets close; ship both verifiers and "
-    "keep ε=0 ExactReplay as consensus default.";
+    "GKR as production arbiter until budgets close; profile-2 consensus remains "
+    "the Freivalds sampled carrier, not GKR.";
 
 /** Coupled path (Wave 3B, superseding the fail-closed stand-in): the sound
  *  coupled-R5 arithmetization lives in matmul_v4_rc_gkr_coupled.{h,cpp}
@@ -162,7 +165,7 @@ inline constexpr const char* kRCGkrShadowStatement =
     "BTX_RC_GKR_SHADOW=1 (default): generate+verify winner proof in shadow; "
     "mismatch LogWarning; NEVER rejects CheckMatMulProofOfWork_RC. "
     "kRCGkrFormalSoundnessReady=false: EnvRCGkrArbiterEnabled ignores "
-    "BTX_RC_GKR_ARBITER (no proof-only consensus authority); ExactReplay "
+    "BTX_RC_GKR_ARBITER (no proof-only consensus authority); profile dispatch "
     "decides. Does NOT raise height.";
 
 using gkr_field::Fp;
@@ -319,6 +322,13 @@ struct RCGkrLayout {
                                     const uint256& claimed_digest,
                                     const uint256& episode_sigma,
                                     const std::vector<uint256>& round_roots);
+[[nodiscard]] uint256 RCGkrFsSeedV7WithAccRoots(const CBlockHeader& header, int32_t height,
+                                                const RCEpisodeParams& params,
+                                                const arith_uint256& target,
+                                                const uint256& claimed_digest,
+                                                const uint256& episode_sigma,
+                                                const std::vector<uint256>& round_roots,
+                                                const std::vector<uint256>& acc_roots);
 
 /** Coupled-puzzle variant: binds the exact RCCoupParams + barrier roots under
  *  a distinct sub-domain label (episode/coupled transcripts can never collide). */
@@ -516,9 +526,9 @@ struct RCGkrProveResult {
 // dims this clears the Stage-I happy-path verify budget (over_budget=false). The
 // witness columns are materialized (carried + FRI-bound); the residual toward
 // verifier-sublinearity is the DEEP/quotient opening of the AIR constraint
-// polynomial (open at Q points instead of every row) — at consensus dims the
-// LogUp is ≈2^43 rows and stays PARKED (§11). Arbiter stays OFF,
-// nMatMulRCHeight=INT32_MAX, ExactReplay remains sole authority.
+    // polynomial (open at Q points instead of every row) — at consensus dims the
+    // LogUp is ≈2^43 rows and stays PARKED (§11). GKR arbiter stays OFF; profile
+    // dispatch outside this proof path remains the consensus authority.
 // ============================================================================
 
 /** One layer's v7 sumcheck block. NO (kind,round,dims) — those are Λ outputs.
@@ -567,6 +577,7 @@ struct RCGkrProofV7 {
     uint256 episode_sigma{};
     std::vector<uint256> round_seeds;
     std::vector<uint256> round_roots;
+    std::vector<uint256> acc_roots;
     /** ONE batched Fp3 FRI over ALL columns (per-layer A,B,Y,extract) +
      *  eval-arg f,g. The integer witness embeds into Fp3 as c0=value,
      *  c1=c2=0; challenges live in |F| = p^3 ≈ 2^192. */
@@ -638,7 +649,7 @@ struct RCGkrProveResultV7 {
 //     FRI, per-layer sumcheck, eval argument, FS bindings.
 // ADDITIVE: GroundEpisodeInCircuit and VerifyWinnerProofV7 are unchanged;
 // both paths must agree on accept/reject (asserted by the red-team tests).
-// Arbiter stays OFF; nMatMulRCHeight = INT32_MAX; never consensus.
+// GKR arbiter stays OFF; this compact GKR path is never consensus.
 // ============================================================================
 
 /** Wall-clock decomposition of the compact verify (shadow measurement). */
@@ -683,8 +694,8 @@ struct RCGkrEpisodeAirProveResultV7 {
 // sampled.{h,cpp}). Exposes the file-local Λ wiring provenance and the round-
 // stream reconstruction so the sampled path can, for the λ SAMPLED layers only,
 // re-run the Extract glue, bind chained operands, and open extract_out against
-// round_roots WITHOUT re-deriving the whole episode. ADDITIVE: no existing
-// behavior changes; arbiter stays OFF; never consensus.
+// round_roots WITHOUT re-deriving the whole episode. In profile 2 this sampled
+// carrier is the consensus authority; the separate GKR arbiter stays OFF.
 // ============================================================================
 
 /** One operand's Λ provenance (leaf PRF expansion, or a chained prior output). */
@@ -711,12 +722,16 @@ struct RCGkrSampledLayerProv {
  *  layers[i] corresponds one-to-one with the i-th RCGkrV7WireWitness. */
 [[nodiscard]] std::vector<RCGkrSampledLayerProv> RCGkrEpisodeLayerProvenance(
     const CBlockHeader& header, const RCEpisodeParams& params,
-    const std::vector<uint256>& round_roots);
+    const std::vector<uint256>& round_roots,
+    const std::vector<uint256>& acc_roots = {});
 
 /** Reconstruct round `round`'s tile-tree byte stream (Z ‖ per-layer X‖G‖D) from
  *  the carried wires — byte-identical to the miner's RoundMerkleStream input.
  *  Used by the sampled path to build/verify O(log N) tile-tree openings. */
 [[nodiscard]] std::vector<int8_t> RCGkrReconstructRoundStream(
+    const std::vector<RCGkrV7WireWitness>& wires, uint32_t round,
+    const RCEpisodeParams& params);
+[[nodiscard]] std::vector<int8_t> RCGkrReconstructRoundAccStream(
     const std::vector<RCGkrV7WireWitness>& wires, uint32_t round,
     const RCEpisodeParams& params);
 
@@ -725,6 +740,11 @@ struct RCGkrSampledLayerProv {
  *  pow_bind = tagged(claimed_digest); round seed = Sha256TaggedU32(ROUND, prev
  *  root or sigma, round). Additive; not consensus. */
 [[nodiscard]] uint256 RCGkrEpisodeDigestFromRoots(const std::vector<uint256>& round_roots);
+[[nodiscard]] uint256 RCGkrEpisodeDigestFromRootsV2(const std::vector<uint256>& round_roots,
+                                                    const std::vector<uint256>& acc_roots);
+[[nodiscard]] uint256 RCGkrEpisodeDigestForParams(const RCEpisodeParams& params,
+                                                  const std::vector<uint256>& round_roots,
+                                                  const std::vector<uint256>& acc_roots);
 [[nodiscard]] uint256 RCGkrDerivePowBind(const uint256& claimed_digest);
 [[nodiscard]] uint256 RCGkrRoundSeed(const uint256& prev_root_or_sigma, uint32_t round);
 

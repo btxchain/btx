@@ -264,7 +264,8 @@ struct Phase1Result {
 };
 
 Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma,
-                                     const RCEpisodeParams& p, uint32_t tile_delta)
+                                     const RCEpisodeParams& p, uint32_t tile_delta,
+                                     RoundMerkleStream* acc_merkle)
 {
     // Q is per-round (freshness source that keeps each round's attention distinct).
     // K, V: DATACENTER shares them EPISODE-WIDE (sigma-derived) so the sublinear
@@ -316,6 +317,7 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
 
         auto flush_s_block = [&]() {
             assert(pending_fill == kRCMxBlockLen);
+            if (acc_merkle != nullptr) acc_merkle->AbsorbInt64LE(pending_raw, kRCMxBlockLen);
             int8_t S_tile[kRCMxBlockLen];
             ExtractMXTileInt64(prf_S, i, pending_bj, pending_raw, S_tile);
             for (uint32_t t_off = 0; t_off < kRCMxBlockLen; ++t_off) {
@@ -374,6 +376,7 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
         }
 
         const uint32_t nblk = p.d_head / kRCMxBlockLen;
+        if (acc_merkle != nullptr) acc_merkle->AbsorbInt64LE(acc_Z.data(), acc_Z.size());
         for (uint32_t bj = 0; bj < nblk; ++bj) {
             ExtractMXTileInt64(prf_Z, i, bj, acc_Z.data() + bj * kRCMxBlockLen,
                                out.Z.data() + static_cast<size_t>(i) * p.d_head +
@@ -440,10 +443,12 @@ std::vector<int64_t> FusedExactGemmInt64(const std::vector<int8_t>& A, uint32_t 
 std::vector<int8_t> FusedFfnLayer(const std::vector<int8_t>& X, const std::vector<int8_t>& W_up,
                                   const std::vector<int8_t>& W_down, const uint256& prf_up,
                                   const uint256& prf_dn, uint32_t b_seq, uint32_t d_model,
-                                  uint32_t d_ff, const lt::ExactGemmBackend& gemm)
+                                  uint32_t d_ff, const lt::ExactGemmBackend& gemm,
+                                  RoundMerkleStream* acc_merkle)
 {
     // Up projection: H = Extract(X·W_up), contraction over d_model.
     std::vector<int64_t> h64 = FusedExactGemmInt64(X, b_seq, d_model, W_up, d_ff, gemm);
+    if (acc_merkle != nullptr) acc_merkle->AbsorbInt64LE(h64);
     std::vector<int8_t> H(h64.size());
     ExtractMXMatrixInt64(prf_up, h64.data(), b_seq, d_ff, H.data());
     std::vector<int64_t>().swap(h64);
@@ -454,6 +459,7 @@ std::vector<int8_t> FusedFfnLayer(const std::vector<int8_t>& X, const std::vecto
         for (uint32_t j = 0; j < d_model; ++j)
             y64[static_cast<size_t>(i) * d_model + j] +=
                 static_cast<int64_t>(X[static_cast<size_t>(i) * d_model + j]);
+    if (acc_merkle != nullptr) acc_merkle->AbsorbInt64LE(y64);
     std::vector<int8_t> out(y64.size());
     ExtractMXMatrixInt64(prf_dn, y64.data(), b_seq, d_model, out.data());
     return out;
@@ -462,7 +468,8 @@ std::vector<int8_t> FusedFfnLayer(const std::vector<int8_t>& X, const std::vecto
 Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
                                   const RCEpisodeParams& p,
                                   RCEpisodeOptions::Checkpoint ckpt,
-                                  const lt::ExactGemmBackend& gemm)
+                                  const lt::ExactGemmBackend& gemm,
+                                  RoundMerkleStream* acc_merkle)
 {
     Phase2Tensors out;
     out.X.resize(p.L_lyr + 1);
@@ -528,7 +535,7 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
             out.ffn_weights_shared ? out.W_down_shared : out.W_down_layers[l];
         out.X[l + 1] = FusedFfnLayer(out.X[l], W_up, W_down,
                                      out.prf_up[l], out.prf_dn[l], p.b_seq, p.d_model,
-                                     p.d_ff, gemm);
+                                     p.d_ff, gemm, acc_merkle);
     }
     if (ckpt != RCEpisodeOptions::Checkpoint::StoreAll) {
         for (uint32_t l = 1; l <= p.L_lyr; ++l) {
@@ -605,7 +612,7 @@ void EnsurePhase2X(Phase2Tensors& p2, uint32_t layer, const RCEpisodeParams& p,
             p2.ffn_weights_shared ? p2.W_down_shared : p2.W_down_layers[m];
         p2.X[m + 1] = FusedFfnLayer(p2.X[m], W_up, W_down,
                                     p2.prf_up[m], p2.prf_dn[m], p.b_seq, p.d_model,
-                                    p.d_ff, gemm);
+                                    p.d_ff, gemm, nullptr);
     }
     for (uint32_t m = src + 1; m < layer; ++m) {
         if (!need_store(m)) {
@@ -697,21 +704,23 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
     double phase1_s = 0.0, phase2_s = 0.0, phase3_s = 0.0;
 
     const uint256 sigma = matmul::v4::DeriveSigma(header);
-    uint256 seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0);
-
     std::vector<uint256> round_roots(params.rounds);
+    const bool use_v2_digest = UseRCEpisodeDigestV2(params);
+    std::vector<uint256> acc_roots(use_v2_digest ? params.rounds : 0);
     if (out_rounds) {
         out_rounds->assign(params.rounds, RCRoundTranscript{});
     }
 
     for (uint32_t r = 0; r < params.rounds; ++r) {
-        if (r > 0) {
-            seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
-        }
+        const uint256 seed_r = RCRoundSeedForParams(params, sigma, round_roots, acc_roots, r);
         const auto t1 = clock::now();
-        auto p1 = Phase1AssociativeRecall(seed_r, sigma, params, options.phase1_tile_delta);
+        RoundMerkleStream acc_merkle(params.T_leaf);
+        RoundMerkleStream* acc_merkle_ptr = use_v2_digest ? &acc_merkle : nullptr;
+        auto p1 = Phase1AssociativeRecall(seed_r, sigma, params, options.phase1_tile_delta,
+                                          acc_merkle_ptr);
         const auto t2 = clock::now();
-        auto p2 = Phase2MicroTraining(seed_r, sigma, params, options.checkpoint, gemm);
+        auto p2 = Phase2MicroTraining(seed_r, sigma, params, options.checkpoint, gemm,
+                                      acc_merkle_ptr);
         const auto t3 = clock::now();
 
         // P1.1: stream leaf hashing — no full-round stream buffer on the
@@ -723,9 +732,11 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
         }
         round_roots[r] =
             StreamRoundIntoMerkle(p1, p2, params, options.checkpoint, gemm, merkle, stream_out);
+        if (use_v2_digest) acc_roots[r] = acc_merkle.FinalizeRoot();
         const auto t4 = clock::now();
         if (out_rounds) {
             (*out_rounds)[r].round_root = round_roots[r];
+            (*out_rounds)[r].acc_root = use_v2_digest ? acc_roots[r] : uint256{};
         }
         if (out_timing) {
             phase1_s += std::chrono::duration<double>(t2 - t1).count();
@@ -734,15 +745,7 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
         }
     }
 
-    // episode_digest = SHA256d("BTX_RC_EPISODE_V1" ‖ roots…)
-    std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCEpisodeTag) - 1 + round_roots.size() * 32);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCEpisodeTag),
-               reinterpret_cast<const unsigned char*>(kRCEpisodeTag) + sizeof(kRCEpisodeTag) - 1);
-    for (const uint256& root : round_roots) {
-        buf.insert(buf.end(), root.begin(), root.end());
-    }
-    const uint256 digest = Sha256dBytes(buf.data(), buf.size());
+    const uint256 digest = RCEpisodeDigestForParams(params, round_roots, acc_roots);
     if (out_timing) {
         out_timing->phase1_s = phase1_s;
         out_timing->phase2_s = phase2_s;
@@ -782,6 +785,7 @@ std::vector<uint32_t> DeriveFSChallenges(const uint256& sigma, const uint256& cl
 bool ValidateRCEpisodeParams(const RCEpisodeParams& p)
 {
     auto mod32 = [](uint32_t v) { return v != 0 && (v % 32) == 0; };
+    if (p.transcript_version != ENC_RC_V1 && p.transcript_version != ENC_RC_V2) return false;
     if (p.rounds == 0 || p.L_lyr == 0) return false;
     if (!mod32(p.d_head) || !mod32(p.n_q) || !mod32(p.n_ctx) || !mod32(p.d_model) ||
         !mod32(p.d_ff) || !mod32(p.b_seq)) {
@@ -805,6 +809,7 @@ RCEpisodeParams MakeDatacenterRCEpisodeParams()
     // (kRCTileLeafBytesDC) as the compute/hash hardware-alignment lever
     // (aicompute-alignment-review.md §4).
     RCEpisodeParams p = DefaultConsensusRCEpisodeParams();
+    p.transcript_version = ENC_RC_V2;
     p.rounds = kRCRoundsDC;         // 8  (2× base)
     p.L_lyr = kRCLayersDC;          // 24 (fused-FFN depth; rounds=8 ⇒ 15.88× MAC)
     p.d_ff = kRCFfnDimDC;           // 16384 (transformer 4× expansion; margin 2·d_ff)
@@ -899,7 +904,11 @@ RCEpisodeParams ResolveRCEpisodeParams(const Consensus::Params& p, int32_t heigh
     //   profile 1 (default) = epoch-0 base via the height-selected schedule
     // This is the ONLY dispatch change — miner / ExactReplay / Λ layout /
     // sampled verifier all read RCEpisodeParams generically.
-    if (p.fMatMulRCUseToyDims) return MakeToyRCEpisodeParams();
+    if (p.fMatMulRCUseToyDims) {
+        RCEpisodeParams toy = MakeToyRCEpisodeParams();
+        if (p.nMatMulRCProfile == 2) toy.transcript_version = ENC_RC_V2;
+        return toy;
+    }
     if (p.nMatMulRCProfile == 2) return MakeDatacenterRCEpisodeParams();
     return ConsensusRCEpisodeParamsForHeight(height, p);
 }
@@ -915,6 +924,82 @@ bool UseDatacenterRowBlockX0(const RCEpisodeParams& p)
 bool UseDatacenterSharedFfnWeights(const RCEpisodeParams& p)
 {
     return UseDatacenterRowBlockX0(p);
+}
+
+bool UseRCEpisodeDigestV2(const RCEpisodeParams& p)
+{
+    return p.transcript_version >= ENC_RC_V2;
+}
+
+uint256 RCRoundCommitV2(const uint256& round_root, const uint256& acc_root)
+{
+    std::vector<unsigned char> buf;
+    buf.reserve(sizeof(kRCRoundCommitTagV2) - 1 + 64);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCRoundCommitTagV2),
+               reinterpret_cast<const unsigned char*>(kRCRoundCommitTagV2) +
+                   sizeof(kRCRoundCommitTagV2) - 1);
+    buf.insert(buf.end(), round_root.begin(), round_root.end());
+    buf.insert(buf.end(), acc_root.begin(), acc_root.end());
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+uint256 RCEpisodeDigestFromRootsV1(const std::vector<uint256>& round_roots)
+{
+    std::vector<unsigned char> buf;
+    buf.reserve(sizeof(kRCEpisodeTag) - 1 + round_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCEpisodeTag),
+               reinterpret_cast<const unsigned char*>(kRCEpisodeTag) + sizeof(kRCEpisodeTag) - 1);
+    for (const uint256& root : round_roots) {
+        buf.insert(buf.end(), root.begin(), root.end());
+    }
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+uint256 RCEpisodeDigestFromRootsV2(const std::vector<uint256>& round_roots,
+                                   const std::vector<uint256>& acc_roots)
+{
+    if (round_roots.size() != acc_roots.size()) return uint256{};
+    std::vector<unsigned char> buf;
+    buf.reserve(sizeof(kRCEpisodeTagV2) - 1 + 4 + round_roots.size() * 32);
+    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCEpisodeTagV2),
+               reinterpret_cast<const unsigned char*>(kRCEpisodeTagV2) +
+                   sizeof(kRCEpisodeTagV2) - 1);
+    unsigned char nbuf[4];
+    WriteLE32(nbuf, static_cast<uint32_t>(round_roots.size()));
+    buf.insert(buf.end(), nbuf, nbuf + sizeof(nbuf));
+    for (size_t r = 0; r < round_roots.size(); ++r) {
+        const uint256 commit = RCRoundCommitV2(round_roots[r], acc_roots[r]);
+        buf.insert(buf.end(), commit.begin(), commit.end());
+    }
+    return Sha256dBytes(buf.data(), buf.size());
+}
+
+uint256 RCEpisodeDigestForParams(const RCEpisodeParams& params,
+                                 const std::vector<uint256>& round_roots,
+                                 const std::vector<uint256>& acc_roots)
+{
+    return UseRCEpisodeDigestV2(params) ? RCEpisodeDigestFromRootsV2(round_roots, acc_roots)
+                                       : RCEpisodeDigestFromRootsV1(round_roots);
+}
+
+uint256 RCRoundSeedForParams(const RCEpisodeParams& params, const uint256& sigma,
+                             const std::vector<uint256>& round_roots,
+                             const std::vector<uint256>& acc_roots, uint32_t round)
+{
+    if (round == 0) {
+        return UseRCEpisodeDigestV2(params)
+                   ? Sha256TaggedU32(kRCRoundTagV2, sizeof(kRCRoundTagV2) - 1, sigma, 0)
+                   : Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, sigma, 0);
+    }
+    if (UseRCEpisodeDigestV2(params)) {
+        if (round - 1 >= round_roots.size() || round - 1 >= acc_roots.size()) return uint256{};
+        return Sha256TaggedU32(kRCRoundTagV2, sizeof(kRCRoundTagV2) - 1,
+                               RCRoundCommitV2(round_roots[round - 1], acc_roots[round - 1]),
+                               round);
+    }
+    if (round - 1 >= round_roots.size()) return uint256{};
+    return Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[round - 1],
+                           round);
 }
 
 uint256 DeriveX0RowBlockSeed(const uint256& seed_x0, uint32_t row_block)
@@ -1082,13 +1167,18 @@ void RoundMerkleStream::Absorb(const int8_t* data, size_t len)
     }
 }
 
-void RoundMerkleStream::AbsorbInt64LE(const std::vector<int64_t>& M)
+void RoundMerkleStream::AbsorbInt64LE(const int64_t* data, size_t count)
 {
     unsigned char buf[8];
-    for (int64_t v : M) {
-        WriteLE64(buf, static_cast<uint64_t>(v));
+    for (size_t i = 0; i < count; ++i) {
+        WriteLE64(buf, static_cast<uint64_t>(data[i]));
         Absorb(reinterpret_cast<const int8_t*>(buf), 8);
     }
+}
+
+void RoundMerkleStream::AbsorbInt64LE(const std::vector<int64_t>& M)
+{
+    AbsorbInt64LE(M.data(), M.size());
 }
 
 std::vector<uint256> RoundMerkleStream::FinalizeLeaves()
@@ -1220,6 +1310,39 @@ uint256 RecomputeResidentCurriculumReference(const CBlockHeader& header,
     // height reserved for future height-selected structural variants; currently
     // the structural set is constant (R.0 / R.4.4).
     return RunEpisode(header, params, options, out_rounds, out_timing, gemm);
+}
+
+bool RecomputeRCEpisodeRoundRoots(const CBlockHeader& header, const RCEpisodeParams& params,
+                                  int32_t /*height*/, uint32_t round,
+                                  const std::vector<uint256>& round_roots,
+                                  const std::vector<uint256>& acc_roots,
+                                  RCRoundTranscript& out_round,
+                                  const RCEpisodeOptions& options,
+                                  const lt::ExactGemmBackend& gemm)
+{
+    out_round = RCRoundTranscript{};
+    if (!ValidateRCEpisodeParams(params) || round >= params.rounds ||
+        round_roots.size() != params.rounds) {
+        return false;
+    }
+    const bool use_v2_digest = UseRCEpisodeDigestV2(params);
+    if (use_v2_digest && acc_roots.size() != params.rounds) return false;
+    static const std::vector<uint256> empty_acc_roots;
+    const std::vector<uint256>& seed_acc_roots = use_v2_digest ? acc_roots : empty_acc_roots;
+
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const uint256 seed_r = RCRoundSeedForParams(params, sigma, round_roots, seed_acc_roots, round);
+    RoundMerkleStream acc_merkle(params.T_leaf);
+    RoundMerkleStream* acc_merkle_ptr = use_v2_digest ? &acc_merkle : nullptr;
+    auto p1 = Phase1AssociativeRecall(seed_r, sigma, params, options.phase1_tile_delta,
+                                      acc_merkle_ptr);
+    auto p2 = Phase2MicroTraining(seed_r, sigma, params, options.checkpoint, gemm,
+                                  acc_merkle_ptr);
+    RoundMerkleStream merkle(params.T_leaf);
+    out_round.round_root =
+        StreamRoundIntoMerkle(p1, p2, params, options.checkpoint, gemm, merkle, nullptr);
+    out_round.acc_root = use_v2_digest ? acc_merkle.FinalizeRoot() : uint256{};
+    return true;
 }
 
 uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params, int32_t height,
