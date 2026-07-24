@@ -79,7 +79,10 @@ inline constexpr Fp kP = 0xFFFFFFFF00000001ULL;
     if (x >= 0) {
         return static_cast<Fp>(static_cast<uint64_t>(x) % kP);
     }
-    const uint64_t ax = static_cast<uint64_t>(-x);
+    // Two's-complement magnitude in unsigned arithmetic: well-defined for INT64_MIN
+    // (whose signed negation -x would overflow / is UB). Identical to -x for every
+    // other x < 0.
+    const uint64_t ax = -static_cast<uint64_t>(x);
     return Sub(0, static_cast<Fp>(ax % kP));
 }
 
