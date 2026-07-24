@@ -67,6 +67,9 @@ struct Args {
     bool coupled_production{false};      // V2 production (alias of --coupled-production-v2)
     bool coupled_production_v2{false};   // explicit V2 production label
     bool coupled_v3_ci{false};           // MediumV3 CI shape
+    bool coupled_production_v3{false};   // full V3 production shape
+    bool coupled_v3_width_smoke{false};  // W=8192/M=128, four-page V3 smoke
+    bool skip_reference{false};          // benchmark only; do not run CPU oracle
     bool mode_sweep{false};
     bool mem_cap_sweep{false};
     bool prove_winner_gkr{false};
@@ -89,6 +92,9 @@ void PrintUsage(std::ostream& os)
        << "  --coupled-production       Stage C V2 production HBM dims (off-CI; alias of --coupled-production-v2)\n"
        << "  --coupled-production-v2    Stage C V2 production dims (MakeProductionRCCoupParams)\n"
        << "  --coupled-v3-ci            Stage C V3 CI dims (MakeMediumV3RCCoupParams)\n"
+       << "  --coupled-v3-width-smoke   V3 W=8192/M=128/four-exchange-round smoke (4 pages)\n"
+       << "  --coupled-production-v3    full V3 production dims; bounded Streamed mode only\n"
+       << "  --skip-reference           benchmark only; skip independent CPU ExactGemm replay\n"
        << "  --mem-cap-sweep            production coupled under 512MiB/2GiB/8GiB caps\n"
        << "  --mode-sweep               also time Resident/Checkpointed/Streamed\n"
        << "  --prove-winner-gkr         Stage E winner-only: mine + reseal + ProveWinner* + verify\n"
@@ -197,18 +203,42 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             args.coupled_production = false;
             args.coupled_production_v2 = false;
             args.coupled_v3_ci = false;
+            args.coupled_production_v3 = false;
+            args.coupled_v3_width_smoke = false;
         } else if (a == "--coupled-production" || a == "--coupled-production-v2") {
             args.coupled = true;
             args.coupled_production = true;
             args.coupled_production_v2 = true;
             args.coupled_medium = false;
             args.coupled_v3_ci = false;
+            args.coupled_production_v3 = false;
+            args.coupled_v3_width_smoke = false;
         } else if (a == "--coupled-v3-ci") {
             args.coupled = true;
             args.coupled_v3_ci = true;
             args.coupled_production = false;
             args.coupled_production_v2 = false;
             args.coupled_medium = false;
+            args.coupled_production_v3 = false;
+            args.coupled_v3_width_smoke = false;
+        } else if (a == "--coupled-v3-width-smoke") {
+            args.coupled = true;
+            args.coupled_v3_width_smoke = true;
+            args.coupled_production_v3 = false;
+            args.coupled_v3_ci = false;
+            args.coupled_production = false;
+            args.coupled_production_v2 = false;
+            args.coupled_medium = false;
+        } else if (a == "--coupled-production-v3") {
+            args.coupled = true;
+            args.coupled_production_v3 = true;
+            args.coupled_v3_width_smoke = false;
+            args.coupled_v3_ci = false;
+            args.coupled_production = false;
+            args.coupled_production_v2 = false;
+            args.coupled_medium = false;
+        } else if (a == "--skip-reference") {
+            args.skip_reference = true;
         } else if (a == "--mem-cap-sweep") {
             args.mem_cap_sweep = true;
             args.coupled = true;
@@ -329,6 +359,19 @@ UniValue CoupParamsJson(const rc::RCCoupParams& p)
 /** Resolve coupled harness shape (F8 labels). */
 rc::RCCoupParams SelectCoupledHarnessParams(const Args& args)
 {
+    if (args.coupled_production_v3) return rc::MakeProductionV3RCCoupParams();
+    if (args.coupled_v3_width_smoke) {
+        // Non-consensus diagnostic: retain production W, M, transcript, and all
+        // four material-exchange rounds while reducing the full-bank schedule
+        // to one page at each of four barriers. This is small enough for rapid
+        // RTX 5060 correctness/performance iteration.
+        rc::RCCoupParams p = rc::MakeProductionV3RCCoupParams();
+        p.barriers = 4;
+        p.lobes = 1;
+        p.bank_pages = 4;
+        p.pages_per_barrier_lobe = 1;
+        return p;
+    }
     if (args.coupled_v3_ci) return rc::MakeMediumV3RCCoupParams();
     if (args.coupled_production || args.coupled_production_v2) {
         return rc::MakeProductionRCCoupParams();
@@ -337,8 +380,19 @@ rc::RCCoupParams SelectCoupledHarnessParams(const Args& args)
     return rc::MakeToyRCCoupParams();
 }
 
+rc::RCCoupOptions SelectCoupledHarnessOptions(const Args& args)
+{
+    if (args.coupled_production_v3 || args.coupled_v3_width_smoke) {
+        return rc::MakeV3RCCoupOptions();
+    }
+    if (args.coupled_v3_ci) return rc::MakeMediumV3RCCoupOptions();
+    return {};
+}
+
 const char* CoupledShapeLabel(const Args& args)
 {
+    if (args.coupled_production_v3) return "production-v3";
+    if (args.coupled_v3_width_smoke) return "v3-production-width-smoke";
     if (args.coupled_v3_ci) return "v3-ci";
     if (args.coupled_production || args.coupled_production_v2) return "production-v2";
     if (args.coupled_medium) return "medium";
@@ -442,7 +496,9 @@ int RunCoupledHarness(const Args& args)
     const bool force_streamed_env =
         std::getenv("BTX_RC_COUP_FORCE_STREAMED") != nullptr;
     const bool production_v2 = args.coupled_production || args.coupled_production_v2;
-    if (force_streamed || force_streamed_env) {
+    const bool production_v3 = args.coupled_production_v3;
+    const bool v3_width_smoke = args.coupled_v3_width_smoke;
+    if (force_streamed || force_streamed_env || production_v3 || v3_width_smoke) {
         modes.push_back(rc::RCCoupExecMode::Streamed);
     } else if (production_v2) {
         // Default: measure the resident path against streamed on every production run.
@@ -460,17 +516,24 @@ int RunCoupledHarness(const Args& args)
     rc::RCCoupTiming timed_ref{};
 
     for (size_t i = 0; i < modes.size(); ++i) {
-        rc::RCCoupOptions opt;
+        rc::RCCoupOptions opt = SelectCoupledHarnessOptions(args);
         opt.mode = modes[i];
         // F9: CPU-oracle phases are correctness_reference only — never GPU throughput.
         rc::RCCoupTiming t_ref{};
-        const uint256 d =
-            rc::RecomputeCoupledPuzzleReference(header, /*height=*/0, params, opt, {}, &t_ref);
+        uint256 d;
+        if (!args.skip_reference) {
+            d = rc::RecomputeCoupledPuzzleReference(
+                header, /*height=*/0, params, opt, {}, &t_ref);
+        }
         // F9: wall_s / total_s / nonce_per_s / phase_wall_s time MineCoupledPuzzle.
         rc::RCCoupTiming t_mine{};
         const uint256 d_mine =
             rc::MineCoupledPuzzle(header, /*height=*/0, params, gemm, opt, &t_mine);
-        if (d != d_mine) mine_matches = false;
+        if (args.skip_reference) {
+            d = d_mine;
+        } else if (d != d_mine) {
+            mine_matches = false;
+        }
         if (i == 0) {
             digest_ref = d;
             timed_mine = t_mine;
@@ -482,13 +545,18 @@ int RunCoupledHarness(const Args& args)
         ref_walls.pushKV("bank", t_ref.bank_s);
         ref_walls.pushKV("barriers", t_ref.barriers_s);
         ref_walls.pushKV("total", t_ref.total_s);
-        ref_walls.pushKV("label", "correctness_reference");
-        ref_walls.pushKV("provenance", "cpu_exactgemm_oracle");
+        ref_walls.pushKV("executed", !args.skip_reference);
+        ref_walls.pushKV("label",
+                         args.skip_reference ? "not_run_benchmark_only"
+                                             : "correctness_reference");
+        ref_walls.pushKV("provenance",
+                         args.skip_reference ? "none" : "cpu_exactgemm_oracle");
 
         UniValue mw(UniValue::VOBJ);
         mw.pushKV("mode", CoupModeName(modes[i]));
         mw.pushKV("digest", d.GetHex());
-        mw.pushKV("mine_matches_cpu", d == d_mine);
+        mw.pushKV("cpu_reference_executed", !args.skip_reference);
+        mw.pushKV("mine_matches_cpu", !args.skip_reference && d == d_mine);
         mw.pushKV("bank_s", t_mine.bank_s);
         mw.pushKV("barriers_s", t_mine.barriers_s);
         mw.pushKV("wall_s", t_mine.total_s);
@@ -553,7 +621,10 @@ int RunCoupledHarness(const Args& args)
               << " pages_per_barrier_lobe=" << params.pages_per_barrier_lobe << "\n";
     std::cout << "  digest:     " << digest_ref.GetHex() << "\n";
     std::cout << "  modes_ok:   " << (digests_match ? "true" : "false") << "\n";
-    std::cout << "  mine_ok:    " << (mine_matches ? "true" : "false") << "\n";
+    std::cout << "  cpu_ref:    "
+              << (args.skip_reference ? "not run (benchmark only)"
+                                      : (mine_matches ? "match" : "MISMATCH"))
+              << "\n";
     std::cout << "  device_probe: resolved=" << (device_probe.backend_resolved ? 1 : 0)
               << " provider=" << device_probe.provider << " detail=" << device_probe.detail
               << "\n";
@@ -561,7 +632,8 @@ int RunCoupledHarness(const Args& args)
               << timed_mine.barriers_s << "s total=" << timed_mine.total_s << "s (mine)\n";
     std::cout << "  reference_wall: bank=" << timed_ref.bank_s << "s barriers="
               << timed_ref.barriers_s << "s total=" << timed_ref.total_s
-              << "s (correctness_reference)\n";
+              << (args.skip_reference ? "s (not run; benchmark only)\n"
+                                      : "s (correctness_reference)\n");
     std::cout << "  rss_kib:    before=" << rss_before << " after=" << rss_after
               << " peak=" << peak_rss << "\n";
     if (wall_resident > 0.0) {
@@ -574,17 +646,23 @@ int RunCoupledHarness(const Args& args)
     walls.pushKV("total", timed_mine.total_s);
     walls.pushKV("provenance", "chrono_steady_clock_mine_coupled_puzzle");
     walls.pushKV("evidence_kind",
-                 args.coupled_v3_ci           ? "v3_ci_chrono_measured"
-                 : production_v2             ? "production_chrono_measured"
-                 : args.coupled_medium       ? "chrono_measured"
-                                               : "toy_chrono_measured");
+                 production_v3         ? "production_v3_benchmark"
+                 : v3_width_smoke      ? "v3_production_width_smoke"
+                 : args.coupled_v3_ci  ? "v3_ci_chrono_measured"
+                 : production_v2       ? "production_chrono_measured"
+                 : args.coupled_medium ? "chrono_measured"
+                                       : "toy_chrono_measured");
 
     UniValue ref_walls_root(UniValue::VOBJ);
     ref_walls_root.pushKV("bank", timed_ref.bank_s);
     ref_walls_root.pushKV("barriers", timed_ref.barriers_s);
     ref_walls_root.pushKV("total", timed_ref.total_s);
-    ref_walls_root.pushKV("label", "correctness_reference");
-    ref_walls_root.pushKV("provenance", "cpu_exactgemm_oracle");
+    ref_walls_root.pushKV("executed", !args.skip_reference);
+    ref_walls_root.pushKV("label",
+                          args.skip_reference ? "not_run_benchmark_only"
+                                              : "correctness_reference");
+    ref_walls_root.pushKV("provenance",
+                          args.skip_reference ? "none" : "cpu_exactgemm_oracle");
 
     UniValue rss(UniValue::VOBJ);
     rss.pushKV("before_kib", static_cast<uint64_t>(rss_before));
@@ -629,7 +707,9 @@ int RunCoupledHarness(const Args& args)
     netj.pushKV("stage_i_gate4_pass", false);
 
     UniValue qual(UniValue::VOBJ);
-    qual.pushKV("status", (digests_match && mine_matches) ? "pass" : "fail");
+    qual.pushKV("status", args.skip_reference
+                              ? "not_run_benchmark_only"
+                              : ((digests_match && mine_matches) ? "pass" : "fail"));
     qual.pushKV("episodes", static_cast<uint64_t>(std::max<uint32_t>(1, args.episodes)));
     qual.pushKV("digests_stable", digests_match);
     qual.pushKV("mine_matches_cpu", mine_matches);
@@ -688,16 +768,22 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("backend_requested", args.backend);
     root.pushKV("exact_gemm_inject", gemm.gemm_s8s8 != nullptr);
     root.pushKV("profile", "coupled");
-    root.pushKV("toy", !args.coupled_medium && !production_v2 && !args.coupled_v3_ci);
+    root.pushKV("toy", !args.coupled_medium && !production_v2 && !production_v3 &&
+                            !v3_width_smoke && !args.coupled_v3_ci);
     root.pushKV("medium", args.coupled_medium);
-    root.pushKV("production_dims", production_v2);
+    root.pushKV("production_dims", production_v2 || production_v3);
     root.pushKV("coupled_production_v2", production_v2);
+    root.pushKV("coupled_production_v3", production_v3);
+    root.pushKV("coupled_v3_width_smoke", v3_width_smoke);
     root.pushKV("coupled_v3_ci", args.coupled_v3_ci);
+    root.pushKV("cpu_reference_executed", !args.skip_reference);
     root.pushKV("streamed_peak_bytes_est", streamed_peak);
     root.pushKV("resident_peak_bytes_est", resident_peak);
     root.pushKV("mem_cap_bytes", args.mem_cap);
     root.pushKV("evidence_kind",
-                args.coupled_v3_ci     ? "v3_ci_chrono_measured"
+                production_v3         ? "production_v3_benchmark"
+                : v3_width_smoke      ? "v3_production_width_smoke"
+                : args.coupled_v3_ci  ? "v3_ci_chrono_measured"
                 : production_v2       ? "production_chrono_measured"
                 : args.coupled_medium ? "chrono_measured"
                                       : "toy_chrono_measured");
@@ -705,9 +791,20 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("device_resident", false);
     root.pushKV("native_path_eligible", mxfp4.qualified);
     root.pushKV("params", CoupParamsJson(params));
+    {
+        const rc::RCCoupOptions selected = SelectCoupledHarnessOptions(args);
+        UniValue options(UniValue::VOBJ);
+        options.pushKV("transcript_version",
+                       static_cast<uint64_t>(selected.transcript_version));
+        options.pushKV("full_bank_schedule", selected.full_bank_schedule);
+        options.pushKV("material_exchange", selected.material_exchange);
+        options.pushKV("exchange_rows", static_cast<uint64_t>(selected.exchange_rows));
+        options.pushKV("exchange_rounds", static_cast<uint64_t>(selected.exchange_rounds));
+        root.pushKV("options", options);
+    }
     root.pushKV("digest", digest_ref.GetHex());
     root.pushKV("modes_digest_match", digests_match);
-    root.pushKV("mine_matches_cpu", mine_matches);
+    root.pushKV("mine_matches_cpu", !args.skip_reference && mine_matches);
     root.pushKV("mode_walls", mode_walls);
     root.pushKV("coupled", coupled);
     root.pushKV("extractmx_self_qual", qual);
@@ -755,8 +852,12 @@ int RunCoupledHarness(const Args& args)
               << " (SIMULATED / NOT Stage-I gate 4 evidence)\n";
     std::cout << "  wrote:      " << args.out_path << "\n";
     std::cout << "  consensus:  nMatMulRCHeight=INT32_MAX (NO-GO activation)\n";
-    const bool ok = digests_match && mine_matches;
-    std::cout << (ok ? "RESULT: coupled modes PASS\n" : "RESULT: coupled modes FAIL\n");
+    const bool ok = digests_match && (args.skip_reference || mine_matches);
+    if (args.skip_reference && ok) {
+        std::cout << "RESULT: benchmark completed (CPU correctness reference NOT RUN)\n";
+    } else {
+        std::cout << (ok ? "RESULT: coupled modes PASS\n" : "RESULT: coupled modes FAIL\n");
+    }
     return ok ? 0 : 1;
 }
 
@@ -797,10 +898,12 @@ UniValue ParamsJson(const rc::RCEpisodeParams& p)
 int RunProveWinnerGkrHarness(const Args& args)
 {
     // F8: production dims + GKR proof evidence is refused (clear message).
-    if (args.production || args.coupled_production || args.coupled_production_v2) {
+    if (args.production || args.coupled_production || args.coupled_production_v2 ||
+        args.coupled_production_v3 || args.coupled_v3_width_smoke) {
         std::cerr
             << "error: --prove-winner-gkr cannot be combined with production dims "
-               "(--production / --coupled-production / --coupled-production-v2). "
+               "(--production / --coupled-production-v2 / --coupled-production-v3 / "
+               "--coupled-v3-width-smoke). "
                "Use --coupled / --coupled-medium / --coupled-v3-ci for GKR evidence; "
                "production shapes stay ExactReplay-only.\n";
         return 2;
