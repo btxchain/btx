@@ -1545,10 +1545,14 @@ LtCudaResidentPool& Pool()
     if (left_count > std::numeric_limits<size_t>::max() / sizeof(int32_t)) return false;
     if (left.size() != left_count) return false;
     const size_t scale_count = static_cast<size_t>(width) * (width / 32U);
-    // One block per 32 requested mantissas supplies up to 64 and averages 44.
-    // DeviceScanMantissaCounts makes the vanishingly unlikely short prefix an
-    // explicit decline, after which the caller regenerates with the CPU oracle.
-    const size_t xof_blocks = (page_count + 31U) / 32U;
+    // Match the CPU parallel oracle's deterministic first-pass budget:
+    // 64 nibbles/block × 11/16 acceptance = 44 outputs in expectation, plus
+    // 3.125% and 16 blocks of margin. DeviceScanMantissaCounts makes any
+    // undershoot an explicit decline, after which the caller regenerates with
+    // the CPU oracle.
+    const size_t expected_blocks = (page_count * 16U + 703U) / 704U;
+    const size_t xof_blocks =
+        expected_blocks + expected_blocks / 32U + 16U;
     if (xof_blocks == 0 || xof_blocks > std::numeric_limits<uint32_t>::max()) return false;
 
     auto& pool = Pool();
