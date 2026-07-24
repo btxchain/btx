@@ -1232,6 +1232,24 @@ uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                                                 /*out_timing=*/nullptr, gemm);
 }
 
+uint256 RecomputeRCRoundRoot(const uint256& seed_r, const uint256& sigma,
+                             const RCEpisodeParams& params, const RCEpisodeOptions& options,
+                             const lt::ExactGemmBackend& gemm)
+{
+    // FVT (§4 of the antigrind design doc): identical to one iteration of
+    // RunEpisode's per-round loop body (Phase1AssociativeRecall,
+    // Phase2MicroTraining, StreamRoundIntoMerkle with stream_out=nullptr — the
+    // same streaming path RunEpisode itself uses on the consensus hot path,
+    // i.e. out_rounds==nullptr). Bit-identical to the honest builder's round
+    // root for the same (seed_r, sigma, params); no new numeric kernel.
+    if (!ValidateRCEpisodeParams(params)) return uint256{};
+    auto p1 = Phase1AssociativeRecall(seed_r, sigma, params, options.phase1_tile_delta);
+    auto p2 = Phase2MicroTraining(seed_r, sigma, params, options.checkpoint, gemm);
+    RoundMerkleStream merkle(params.T_leaf);
+    return StreamRoundIntoMerkle(p1, p2, params, options.checkpoint, gemm, merkle,
+                                 /*out_stream=*/nullptr);
+}
+
 bool VerifyRCTranscriptSpotCheck(const CBlockHeader& header, const RCEpisodeParams& params,
                                  int32_t height, const uint256& claimed_digest,
                                  const std::vector<uint32_t>& challenged_leaves,

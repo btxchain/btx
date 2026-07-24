@@ -299,6 +299,23 @@ struct RCMerkleProof {
                                     std::vector<RCRoundTranscript>* out_rounds = nullptr,
                                     const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
+/**
+ * FVT (Fully-Verified Terminal round) primitive — anti-grinding fix, design
+ * doc/btx-matmul-v4.6-rc-antigrind-construction.md §4. Deterministically
+ * recomputes ONE round's Merkle root from its 32-byte round seed, running the
+ * EXACT same per-round reference the honest builder uses inside RunEpisode's
+ * loop body (Phase1AssociativeRecall + Phase2MicroTraining +
+ * StreamRoundIntoMerkle, streamed with no full-round buffer — byte-identical
+ * to the consensus episode path). It touches only the ONE requested round;
+ * it does not recompute the digest, the seed chain, or any other round.
+ * Consensus REJECT / spot-check callers MUST pass an empty ExactGemmBackend
+ * (the CPU int64 reference), exactly like RecomputeResidentCurriculumReference.
+ * Malformed params → null root (caller treats as reject, never asserts). */
+[[nodiscard]] uint256 RecomputeRCRoundRoot(const uint256& seed_r, const uint256& sigma,
+                                           const RCEpisodeParams& params,
+                                           const RCEpisodeOptions& options = {},
+                                           const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
 /** Spot-check verifier (R.5.3): recompute episode streams, open challenged
  *  Merkle leaves against round_roots. If challenged_leaves is empty, derive
  *  q=kRCSpotCheckQueries flat leaf indices via Fiat–Shamir

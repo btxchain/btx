@@ -519,6 +519,29 @@ struct Params {
      * finite profile-2 activation height. Values other than {1,2} are rejected at
      * construction (AssertBMX4CConstructionInvariants). */
     uint32_t nMatMulRCProfile{2};
+    /**
+     * FVT — Fully-Verified Terminal round (anti-grinding fix; design §4 of
+     * doc/btx-matmul-v4.6-rc-antigrind-construction.md). Profile-2's sampled
+     * carrier binds every non-terminal round only at O(λ) sampled tiles, but
+     * round_roots[R-1] (the last round) feeds no downstream seed — it is a
+     * FREE byte string as far as the sampled verifier is concerned, so an
+     * adversary who owns one honest episode can re-roll ONLY the terminal
+     * round's Merkle tree (~0.7% of an episode, no GEMM) to grind a fresh
+     * digest/FS-challenge pair per trial ("last-round grind"). When true,
+     * CheckMatMulProofOfWork_RC additionally fully recomputes round R-1 from
+     * its seed (the exact int64 reference: Phase1AssociativeRecall +
+     * Phase2MicroTraining + StreamRoundIntoMerkle) and REJECTS unless the
+     * recompute equals the carrier's committed round_roots[R-1]. This forces
+     * one real GEMM round of non-amortizable work per fresh accepted digest,
+     * closing the free variable. STRICTLY ADDITIVE: it only rejects carriers
+     * whose terminal round doesn't match its own seed — an honest carrier's
+     * terminal round always recomputes identically, so this can never reject
+     * an honest miner. Digest formula, wire format, and carrier version are
+     * UNCHANGED (see design doc §4.3/§6). DEFAULT true: active whenever
+     * profile 2 is selected, which is safe pre-activation because heights
+     * stay INT32_MAX (nothing live) and, once profile 2 does activate, the
+     * gate can only ever reject dishonest terminal rounds. */
+    bool nMatMulRCProfile2FullyVerifyTerminalRound{true};
     /** REGTEST ONLY — when true, CheckMatMulProofOfWork_RC / SolveMatMulV4 ENC_RC
      *  use MakeToyRCEpisodeParams() instead of DefaultConsensusRCEpisodeParams().
      *  Public nets MUST keep this false (AssertBMX4CConstructionInvariants).

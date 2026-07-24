@@ -1,9 +1,11 @@
 # BTX ENC_RC v4.6 — Profile-2 Sampled-Carrier Anti-Grind Construction (DESIGN SPEC)
 
-Status: **design only** (no consensus code changed; no activation heights changed;
-int64 reference untouched). Target: close the confirmed pre-activation soundness
-break in the profile-2 (datacenter) sampled carrier. Activation heights remain
-`INT32_MAX` (nothing live). Implementation is a later step by another model.
+Status: **FVT IMPLEMENTED** (§4's chosen construction is now consensus code; see
+§8). No activation heights changed; int64 reference untouched; no digest/wire/
+carrier-version change. Activation heights remain `INT32_MAX` (nothing live).
+CAP (the fallback in §2/§3) remains unimplemented design-only, kept as the
+tunable alternative if a full terminal-round recompute ever overruns the 900 ms
+verify budget (λ retune is the first lever; see §8's verify-time note).
 
 Scope note on names: the code entry point the break was demonstrated against is
 `matmul::v4::rc::VerifyEpisodeFreivaldsSampledCarrier`
@@ -419,3 +421,64 @@ production dims: the current attack's per-trial cost and coverage, `P_accept ≈
 advertised `(1−f)^384`, the FVT/CAP forced-work floor, and the verify-budget feasibility
 (`V_int' + V_tail ≤ 900 ms`) across λ retunes and capstone sizes. It is a cost model, not a
 PoC, and imports nothing from the tree.
+
+---
+
+## 8. Implementation record (FVT, this pass)
+
+FVT (§4) is now wired into consensus code, unchanged from the chosen construction above.
+Strictly additive: it only adds a rejection condition to the profile-2 accept path; an
+honest carrier's terminal round always recomputes identically (byte-identical to the
+streaming path the miner itself used), so no honest carrier is newly rejected, and no
+digest/wire-format/carrier-version/golden vector changed. Heights remain `INT32_MAX`.
+
+**Code locations.**
+
+- `Consensus::Params::nMatMulRCProfile2FullyVerifyTerminalRound` (bool, default `true`) —
+  `src/consensus/params.h`, declared immediately after `nMatMulRCProfile`. Gates the FVT
+  check; active whenever profile 2 is selected (safe pre-activation: it can only ever
+  *reject* a dishonest terminal round, never accept anything the pre-FVT verifier would
+  have rejected).
+- `matmul::v4::rc::RecomputeRCRoundRoot(seed_r, sigma, params, options, gemm)` —
+  declared in `src/matmul/matmul_v4_rc.h`, defined in `src/matmul/matmul_v4_rc.cpp`
+  immediately after `MineRCEpisode`. This is the reusable single-round primitive: it runs
+  exactly one iteration of `RunEpisode`'s per-round loop body — `Phase1AssociativeRecall`
+  + `Phase2MicroTraining` + `StreamRoundIntoMerkle` with `stream_out=nullptr` (the same
+  streaming path the consensus episode path already uses) — and returns that round's
+  Merkle root. No new numeric kernel; malformed params return a null root so the caller
+  fails closed rather than asserting.
+- The FVT gate itself — `CheckMatMulProofOfWork_RC`, `src/pow.cpp`, in the
+  `params.nMatMulRCProfile == 2` branch, immediately after
+  `VerifyEpisodeFreivaldsSampledCarrier` succeeds and before the profile-2 `return
+  finish(true)`. It recomputes `round_roots[R-1]` via `RecomputeRCRoundRoot` fed from the
+  carrier's own `round_seeds[R-1]` / `episode_sigma` / `episode` (already byte-verified
+  against the seed chain by `CheckGatesAndSeed`, which ran inside the carrier-verify call
+  just above), and rejects with reason `v7fs:terminal_round_root_mismatch` (or
+  `v7fs:terminal_round_bounds` on a malformed carrier that would index out of range) on
+  any mismatch — matching the `v7fs:`-prefixed reason convention already used throughout
+  `matmul_v4_rc_freivalds_sampled.cpp`.
+
+**Confirmed unchanged (re-verified for this pass).** `DeriveSigma`, the round seed chain,
+per-round `Phase1AssociativeRecall`/`Phase2MicroTraining`, `StreamRoundIntoMerkle`,
+`EpisodeDigestFromRoots`/`digest = H(round_roots)`, `RCGkrFsSeedV7`/`base_seed`, the
+interior sampled-carrier checks (a)–(d), `kRCFreivaldsSampledCarrierVersion` (still 3),
+and every activation height (`nMatMulRCHeight`, profile-2 selection) are all byte-identical
+to before this change — FVT reads only carrier fields the sampled carrier already carries
+(`episode`, `round_seeds`, `round_roots`, `episode_sigma`) and adds a pure comparison; it
+writes nothing new to the wire and re-derives no digest.
+
+**Regression coverage.** `src/test/matmul_v4_rc_datacenter_tests.cpp` adds an FVT test pair:
+(1) an honest datacenter-profile carrier still verifies end-to-end through
+`CheckMatMulProofOfWork_RC`'s profile-2 path with FVT active (the recomputed terminal round
+equals the carried one), and (2) the same carrier's carried `round_roots[R-1]` is corrupted
+post-hoc (the exact scenario the last-round-grind PoC exploited: mutate the terminal round's
+committed root without redoing that round's GEMM) — pre-FVT this passed
+`VerifyEpisodeFreivaldsSampledCarrier` outright (the sampled checks never touch an unopened
+root byte); post-FVT it is rejected by the new gate.
+
+**Verify-time note (not tuned in this pass).** Per §3, a full terminal-round recompute adds
+`V_tail ≈ (episode_recompute)/rounds` to the profile-2 hot path. Whether this fits the
+900 ms budget alongside the existing ~700 ms of interior sampling at production dims is a
+λ-retune (or CAP-fallback) decision, deliberately **out of scope here** — this pass only
+adds the gate and leaves `kRCFreivaldsSampleCount` and all budgets untouched, per the task
+instruction to keep λ/budget tuning a separate decision.

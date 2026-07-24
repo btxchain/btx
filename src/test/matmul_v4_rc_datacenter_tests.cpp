@@ -1171,6 +1171,203 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     rc::RCFreivaldsCarrierStoreClear();
 }
 
+// (c-FVT) FVT — Fully-Verified Terminal round (anti-grinding fix; design
+//   doc/btx-matmul-v4.6-rc-antigrind-construction.md §4, consensus flag
+//   Consensus::Params::nMatMulRCProfile2FullyVerifyTerminalRound).
+//
+//   Reproduces the "last-round grind" break at the carrier level (the same
+//   construction as the audit's grind PoC): plant a provably-wrong output
+//   tile in a TERMINAL-round wire witness (no GEMM re-run — a pure byte
+//   flip), rebuild ONLY that round's Merkle root from the (mostly honest)
+//   tampered stream, refresh claimed_digest/pow_bind (round_seeds are
+//   untouched — the seed chain never depends on round_roots[R-1] because
+//   nothing consumes the terminal root downstream), and re-derive a carrier
+//   from the tampered proof. Because the terminal round's root feeds no
+//   later seed, this "grind" costs one Merkle rebuild (no matmul) and, once
+//   the 2-tile-per-unit sample happens to miss the corrupted tile, produces
+//   a carrier the SAMPLED verifier (VerifyEpisodeFreivaldsSampledCarrier)
+//   accepts on its own — exactly the pre-FVT vulnerable behavior.
+//
+//   Asserts: (1) the sampled verifier alone still accepts the cheat (sanity:
+//   proves the gap is real); (2) with FVT explicitly disabled,
+//   CheckMatMulProofOfWork_RC also accepts it (reproduces the pre-fix bug);
+//   (3) with FVT at its default ON, CheckMatMulProofOfWork_RC REJECTS the
+//   identical cheat carrier with reason v7fs:terminal_round_root_mismatch;
+//   (4) an HONEST carrier still PASSES with FVT ON (strictly additive — no
+//   honest carrier is newly rejected).
+BOOST_AUTO_TEST_CASE(rc_dc_fvt_rejects_lastround_grind_accepts_honest)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    BOOST_REQUIRE(p.nMatMulRCProfile2FullyVerifyTerminalRound); // FVT default ON
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    // Multi-round toy episode (mirrors the grind PoC's params): rounds>=2 so
+    // the terminal round is distinguishable from an interior round, and
+    // enough layers that a terminal-round unit's tile space comfortably
+    // exceeds kRCFreivaldsSegOutTiles (=2 opened tiles/unit), so a corrupted
+    // tile can plausibly hide from the sample without an unbounded grind.
+    rc::RCEpisodeParams params_rc = rc::MakeToyRCEpisodeParams();
+    params_rc.rounds = 3;
+    params_rc.L_lyr = 8;
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(params_rc));
+    const uint32_t R = params_rc.rounds;
+
+    CBlockHeader header = MakeDcRCHeader(0x7f7f7f);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const uint256 real_digest =
+        rc::RecomputeResidentCurriculumReference(header, params_rc, kHeight);
+    BOOST_REQUIRE(!real_digest.IsNull());
+    header.matmul_digest = real_digest;
+
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target, real_digest);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, "toy-dim v7 prove must succeed");
+    const rc::RCGkrProofV7& honest_proof = pr.proof;
+
+    // --- Baseline: the HONEST carrier passes with FVT ON. ---
+    {
+        rc::RCFreivaldsSampledCarrier honest_carrier;
+        std::string bwhy;
+        BOOST_REQUIRE_MESSAGE(rc::BuildFreivaldsSampledCarrier(honest_proof, header, kHeight,
+                                                                *target, honest_carrier, &bwhy),
+                              bwhy);
+        // The terminal round recomputes byte-identically from its own seed —
+        // this is the "strictly additive" property FVT relies on.
+        const uint256 recomputed_honest = rc::RecomputeRCRoundRoot(
+            honest_carrier.round_seeds[R - 1], honest_carrier.episode_sigma,
+            honest_carrier.episode);
+        BOOST_CHECK_EQUAL(recomputed_honest.ToString(),
+                          honest_carrier.round_roots[R - 1].ToString());
+
+        rc::RCFreivaldsCarrierStoreClear();
+        rc::RCFreivaldsCarrierStorePut(header.GetHash(), honest_carrier);
+        BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight)); // FVT ON, honest -> ACCEPT
+        rc::RCFreivaldsCarrierStoreClear();
+    }
+
+    // --- Construct the cheat: a terminal-round unit with tile_space large
+    //     enough that a fixed corrupted tile can plausibly dodge the sample.
+    const auto prov = rc::RCGkrEpisodeLayerProvenance(header, params_rc, honest_proof.round_roots);
+    std::vector<uint32_t> last_round_units;
+    for (uint32_t i = 0; i < prov.size(); ++i) {
+        const bool in_stream = prov[i].kind == rc::RCGkrLayerKind::GemmPhase1SV ||
+                               prov[i].kind == rc::RCGkrLayerKind::GemmPhase2Fwd;
+        if (!in_stream || prov[i].round != R - 1) continue;
+        const uint64_t tile_space =
+            static_cast<uint64_t>(prov[i].m) * (prov[i].n / rc::kRCMxBlockLen);
+        if (tile_space > rc::kRCFreivaldsSegOutTiles) last_round_units.push_back(i);
+    }
+    BOOST_REQUIRE_MESSAGE(!last_round_units.empty(),
+                          "need a last-round unit with >kRCFreivaldsSegOutTiles output tiles");
+
+    bool built_cheat = false;
+    rc::RCFreivaldsSampledCarrier cheat_carrier;
+    CBlockHeader cheat_header;
+    for (uint32_t u : last_round_units) {
+        if (built_cheat) break;
+        const uint32_t m = prov[u].m;
+        const uint32_t n = prov[u].n;
+        const uint32_t nblk = n / rc::kRCMxBlockLen;
+        const uint32_t rstar = m / 2;
+        const uint32_t bstar = nblk / 2;
+        const size_t ybase =
+            static_cast<size_t>(rstar) * n + static_cast<size_t>(bstar) * rc::kRCMxBlockLen;
+
+        constexpr int kMaxGrind = 4000;
+        for (int g = 0; g < kMaxGrind && !built_cheat; ++g) {
+            rc::RCGkrProofV7 tampered = honest_proof;
+            CBlockHeader th = header;
+            // Provably-wrong tile: overwrite it with a value guaranteed to
+            // differ from the honest Extract output. NO GEMM is re-run.
+            auto& eo = tampered.wires[u].extract_out;
+            BOOST_REQUIRE_GE(eo.size(), ybase + rc::kRCMxBlockLen);
+            for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                eo[ybase + c] = static_cast<int8_t>(
+                    honest_proof.wires[u].extract_out[ybase + c] ^ (0x40 | ((g + c) & 0x3f)));
+            }
+            // Rebuild ONLY the terminal round's Merkle root from the mostly-
+            // honest, one-tile-corrupted stream (a hash pass, no GEMM).
+            const std::vector<int8_t> stream =
+                rc::RCGkrReconstructRoundStream(tampered.wires, R - 1, params_rc);
+            tampered.round_roots[R - 1] = rc::BuildTileTreeRoot(stream, params_rc.T_leaf);
+            tampered.claimed_digest = rc::RCGkrEpisodeDigestFromRoots(tampered.round_roots);
+            tampered.pow_bind = rc::RCGkrDerivePowBind(tampered.claimed_digest);
+            // sigma = DeriveSigma(header) excludes matmul_digest, so it is
+            // unaffected by re-pointing the header at the new digest.
+            th.matmul_digest = tampered.claimed_digest;
+
+            rc::RCFreivaldsSampledCarrier c;
+            std::string bwhy;
+            if (!rc::BuildFreivaldsSampledCarrier(tampered, th, kHeight, *target, c, &bwhy)) {
+                continue;
+            }
+            std::string vwhy;
+            if (!rc::VerifyEpisodeFreivaldsSampledCarrier(c, th, kHeight, *target, &vwhy)) {
+                continue; // this trial's sample happened to hit the corrupted tile
+            }
+            // Confirm this really is a cheat: the committed terminal-round
+            // tile provably differs from the honest output.
+            bool differs = false;
+            for (uint32_t c = 0; c < rc::kRCMxBlockLen; ++c) {
+                if (tampered.wires[u].extract_out[ybase + c] !=
+                    honest_proof.wires[u].extract_out[ybase + c]) {
+                    differs = true;
+                }
+            }
+            if (!differs) continue;
+
+            cheat_carrier = c;
+            cheat_header = th;
+            built_cheat = true;
+        }
+    }
+    BOOST_REQUIRE_MESSAGE(
+        built_cheat,
+        "could not construct a sampled-verifier-accepting terminal-round cheat "
+        "(grind budget exhausted) -- cannot exercise the FVT regression without one");
+
+    // Sanity: the cheat's terminal-round root does NOT match a real recompute
+    // from its own seed (it was rebuilt from a corrupted wire stream) -- this
+    // is exactly the mismatch FVT is meant to catch.
+    const uint256 recomputed_cheat = rc::RecomputeRCRoundRoot(
+        cheat_carrier.round_seeds[R - 1], cheat_carrier.episode_sigma, cheat_carrier.episode);
+    BOOST_CHECK(recomputed_cheat.ToString() != cheat_carrier.round_roots[R - 1].ToString());
+
+    // --- Pre-FVT-equivalent: the sampled verifier ALONE still accepts. ---
+    {
+        std::string vwhy;
+        BOOST_CHECK_MESSAGE(
+            rc::VerifyEpisodeFreivaldsSampledCarrier(cheat_carrier, cheat_header, kHeight,
+                                                     *target, &vwhy),
+            "sampled carrier verifier must (still) accept the cheat standalone -- "
+            "that is the gap FVT closes: "
+                << vwhy);
+    }
+
+    // --- FVT explicitly OFF: CheckMatMulProofOfWork_RC still accepts the
+    //     cheat (reproduces the pre-fix vulnerable behavior). ---
+    {
+        Consensus::Params p_off = p;
+        p_off.nMatMulRCProfile2FullyVerifyTerminalRound = false;
+        rc::RCFreivaldsCarrierStoreClear();
+        rc::RCFreivaldsCarrierStorePut(cheat_header.GetHash(), cheat_carrier);
+        BOOST_CHECK(CheckMatMulProofOfWork_RC(cheat_header, p_off, kHeight));
+        rc::RCFreivaldsCarrierStoreClear();
+    }
+
+    // --- FVT ON (default / consensus posture): the SAME cheat is REJECTED. ---
+    {
+        rc::RCFreivaldsCarrierStoreClear();
+        rc::RCFreivaldsCarrierStorePut(cheat_header.GetHash(), cheat_carrier);
+        BOOST_CHECK(!CheckMatMulProofOfWork_RC(cheat_header, p, kHeight));
+        rc::RCFreivaldsCarrierStoreClear();
+    }
+}
+
 // (c-λ) P2P/CONSENSUS PARITY on the sampling breadth λ. The RCCARRIER receiver
 //   (net_processing.cpp, "if (msg_type == NetMsgType::RCCARRIER)") admits an
 //   untrusted carrier to the process-local store only after the SAME ordered

@@ -4255,7 +4255,81 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
                      why.c_str());
             return finish(false);
         }
-        // Accepted by the sampled authority (deterrence, ~0.27% residual).
+
+        // ---------------------------------------------------------------
+        // FVT — Fully-Verified Terminal round (anti-grinding fix; design
+        // doc/btx-matmul-v4.6-rc-antigrind-construction.md §4, consensus
+        // flag Consensus::Params::nMatMulRCProfile2FullyVerifyTerminalRound).
+        //
+        // THE GRIND THIS CLOSES. The sampled carrier above binds every round
+        // only at O(λ) sampled tiles (~4.8e-7 coverage at production dims);
+        // round_roots[R-1] (the terminal round) is the sole root that feeds
+        // NO downstream seed_r (the chain seeds round r off round_roots[r-1],
+        // so nothing consumes the last one). It is therefore a FREE byte
+        // string to the sampled verifier: an adversary holding one honest
+        // episode can mutate unopened terminal-round output tiles, rebuild
+        // just that round's Merkle tree (~0.7% of an episode — one hash pass,
+        // NO GEMM), and obtain a fresh round_roots[R-1] → fresh digest →
+        // fresh Fiat-Shamir sample set (RCGkrFsSeedV7 absorbs claimed_digest
+        // and the full round_roots vector). Repeating this "last-round grind"
+        // turns the advertised single-shot (1-f)^384 soundness into a cheap
+        // hashcash-style re-roll: P_accept ≈ G·p for G grind attempts, not a
+        // single fixed-cost trial.
+        //
+        // THE FIX. Deterministically recompute round R-1 in full from its
+        // seed — the SAME int64 reference the honest builder runs inside
+        // RunEpisode (Phase1AssociativeRecall + Phase2MicroTraining +
+        // StreamRoundIntoMerkle via RecomputeRCRoundRoot) — and reject unless
+        // it equals the carrier's committed round_roots[R-1]. Rounds
+        // regenerate all operands by PRF from (seed_r, sigma) with no
+        // forward-carried tensors, so this needs no extra relay: seed_r and
+        // sigma are already carried (and already byte-verified against the
+        // chain by CheckGatesAndSeed inside VerifyEpisodeFreivaldsSampledCarrier
+        // above, which ran just before this block). Any change to an interior
+        // root_j (j <= R-2) propagates via seed_{R-1} = H(root_{R-2}, R-1) to a
+        // DIFFERENT seed_{R-1}, so the mandatory recompute forces the
+        // adversary to have executed that round's real GEMMs — a fresh
+        // digest now costs >= one full round of non-amortizable field work
+        // (Omega(W_round)), the maximum an in-budget sublinear verifier (this
+        // one) can force without becoming a full ExactReplay (design §1/§3).
+        // L1 (cheap digest re-roll) is closed, so L2 (the free re-sample that
+        // L1 enabled) collapses with it.
+        //
+        // ADDITIVE / NO GOLDEN CHANGE. This only ADDS a rejection condition:
+        // an HONEST carrier's terminal round recomputes to the exact same
+        // root it already carries (byte-identical to the streaming path the
+        // miner itself used), so no honest carrier is newly rejected, no
+        // digest/wire/carrier-version format changes, and no existing check
+        // is loosened. Verify-time cost note (not tuned here — a separate
+        // lambda-retune/CAP decision per §3 of the design doc): this adds
+        // ~one deterministic round recompute to the profile-2 verify path;
+        // relay stays sublinear (no extra carrier bytes — only the 32-byte
+        // seed already present is consumed).
+        if (params.nMatMulRCProfile2FullyVerifyTerminalRound) {
+            const uint32_t r_last = dc_carrier.episode.rounds - 1;
+            // Defensive: VerifyEpisodeFreivaldsSampledCarrier's CheckGatesAndSeed
+            // already required round_seeds.size()==rounds and round_roots.size()==
+            // rounds, but re-check here so this gate never reads out of bounds if
+            // that invariant is ever relaxed independently of this one.
+            if (r_last >= dc_carrier.round_seeds.size() ||
+                r_last >= dc_carrier.round_roots.size()) {
+                LogDebug(BCLog::VALIDATION,
+                         "CheckMatMulProofOfWork_RC: profile-2 REJECT "
+                         "why=v7fs:terminal_round_bounds\n");
+                return finish(false);
+            }
+            const uint256 root_recomputed = matmul::v4::rc::RecomputeRCRoundRoot(
+                dc_carrier.round_seeds[r_last], dc_carrier.episode_sigma, dc_carrier.episode);
+            if (root_recomputed.IsNull() || root_recomputed != dc_carrier.round_roots[r_last]) {
+                LogDebug(BCLog::VALIDATION,
+                         "CheckMatMulProofOfWork_RC: profile-2 REJECT "
+                         "why=v7fs:terminal_round_root_mismatch\n");
+                return finish(false);
+            }
+        }
+
+        // Accepted by the sampled authority (deterrence, ~0.27% residual) plus,
+        // when FVT is active, an unforgeable terminal-round recompute.
         return finish(true);
     }
 
