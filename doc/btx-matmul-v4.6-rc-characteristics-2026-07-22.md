@@ -14,16 +14,94 @@ the single-matmul PoW currently live on `main`.
 v4.6 is the integrated result of PR #89: the **Resident Curriculum (ENC_RC)**
 proof-of-work workload plus its **coupled puzzle (ENC_RC_COUPLED, V3
 production)** and the in-circuit **G1–G5 arithmetization** (four reusable
-finite-field constructions I–IV) verified over a **sound v5 FRI** backend, with
-the coupled **V3 production profile as the default activated path**.
+finite-field constructions I–IV) verified over a **sound v5 FRI** backend. The
+ENC_RC_COUPLED V3 production profile is the **default profile selection** for
+the coupled selector (see §2 below for what "default" does and does not mean —
+it does not mean activated).
 
 It is a *release candidate*: the code, tests, and soundness accounting are in the
 tree and green here, but three off-code gates remain before any finite
-activation height is set (see §6).
+activation height is set (see §7).
 
 ---
 
-## 2. The workload (what a miner actually computes)
+## 2. The two-stage proof of work
+
+The shipping ENC_RC v4.6 design is **two consensus encoding profiles**, selected
+independently by two different consensus params, both wired and tested but
+**both currently disabled** (`nMatMulRCHeight = nMatMulRCCoupledHeight =
+INT32_MAX` on every public network):
+
+- **Stage / Profile 2 — ENC_RC datacenter episode.** Selector
+  `nMatMulRCProfile = 2` (the default; consensus asserts it is 1 or 2). This is
+  the datacenter-scale transformer episode
+  (`MakeDatacenterRCEpisodeParams`: `rounds`, `L_lyr`, and `b_seq` raised over
+  the epoch-0 base — `rounds = 8` alone gives **≈15.9× MAC** vs. the base, the
+  "~16×" figure carried through the ASERT rescale ratio `16422/1027`). Under
+  profile 2:
+  - The **FS-sampled sublinear carrier verifier**
+    (`matmul_v4_rc_freivalds_sampled.cpp`) is the **relay-time accept/reject
+    authority** — the check a validating node runs before forwarding a block,
+    so it never pays the full O(N) replay on the network path. It is a
+    **deterrence-based work-skipping soundness bound**, not a claim that every
+    wrong tile is caught (see §2.1).
+  - The **int64 CPU `ExactReplay` reference**
+    (`RecomputeResidentCurriculumReference`) is retained as the **asynchronous,
+    ε = 0 arbiter and dispute path** — it is the *ultimate* consensus reference
+    that decides validity byte-exactly if a claimed result is ever disputed.
+  - (Profile 1 of this same selector = epoch-0 base dimensions, with
+    `ExactReplay` as the sole authority; it is retained but is not the
+    default.)
+
+- **Stage / Profile 3 — ENC_RC_COUPLED V3 production coupled puzzle.**
+  Selector `nMatMulRCCoupledProfile = 3` (the default). This is the V3 coupled
+  puzzle: **HBM-resident, ~48–51 GiB working set** (packed bank floor 48 GiB /
+  packed ≈51 GiB at the frozen production dimensions). When both the ENC_RC
+  episode and the coupled puzzle are configured live, the coupled profile is
+  **preferred** (`GetMatMulEncodingProfile` selects ENC_RC_COUPLED over plain
+  ENC_RC), and consensus asserts the coupled activation height is **at or above**
+  the ENC_RC height (`nMatMulRCCoupledHeight >= nMatMulRCHeight`) — the coupled
+  puzzle can only activate at the same height as, or after, the episode it
+  couples to, never before. (Profile 2 of the *coupled* selector = the V2
+  medium shape, retained only for explicit regression coverage; it is not the
+  default and is not production.)
+
+**A numbering subtlety worth stating precisely:** `nMatMulRCProfile` and
+`nMatMulRCCoupledProfile` are **two different selectors** with **different**
+default values — the episode selector defaults to **2**, the coupled selector
+defaults to **3**. "Profile 2" and "profile 3" here name positions in two
+separate enumerations, not two profiles of one selector. Read as a slogan: the
+two-stage PoW is **"profile-2 episode + profile-3 coupled."**
+
+### 2.1 The honest soundness bound (do not overclaim)
+
+The FS-sampled carrier's guarantee is a **work-skipping bound**, derived in full
+in `doc/btx-matmul-v4.6-rc-verify-time-budget-and-hardware-baseline-2026-07-23.md`
+§1.1:
+
+> **P(accept | a miner skips fraction `f` of the episode's checked MACs) ≤
+> (1 − f)^(2Λ)**, where `Λ = rounds · L_lyr` is the number of exhaustively
+> sampled streamed units (`Λ = 192` at the production datacenter shape, so the
+> exponent is `2Λ = 384`).
+
+This bound does **not** claim every wrong tile is caught — an isolated wrong
+tile is essentially never caught by the sample (≈2/T per layer, with the tile
+space `T ≈ 1.1·10⁷`), but catching an isolated tile would only save a
+negligible sliver of work anyway. What the bound guarantees is that no
+*economically meaningful* fraction of the episode's compute can be skipped and
+still be accepted with non-negligible probability: skipping just 1% of the work
+already caps acceptance at ≈2.1%, and skipping 10% caps it at ≈2.7·10⁻¹⁸. This
+is **not** "formally sound" or "externally audited" — it is a deterrence
+argument, and it is the property the launch design relies on.
+
+Closing the remaining gap — catching *every* wrong tile, i.e. exact completeness
+rather than a work-skipping bound — is the job of the **succinct proof upgrade
+(Stage C)** described in §4 below. That upgrade is an *eventual* replacement for
+the carrier's role, not part of what ships at launch.
+
+---
+
+## 3. The workload (what a miner actually computes)
 
 Each ENC_RC episode is an **exact int64 GEMM substrate** — no floating-point in
 the consensus object — composed of:
@@ -40,14 +118,38 @@ workload: per-lobe int8 GEMMs (`rows_per_lobe = 128`), page selection over a
 cannot compute one without the other.
 
 The **int64 CPU reference** (`RecomputeResidentCurriculumReference` /
-`RecomputeCoupledPuzzleReference`) is the **sole consensus authority**: a block
-is valid iff its claimed result byte-identically replays under the reference.
-Everything else (GPU kernels, the succinct proof) is an acceleration or an audit
-aid, never the arbiter.
+`RecomputeCoupledPuzzleReference`) is the **ultimate consensus authority**:
+byte-identical replay under the reference is what validity is defined against,
+and it is what the asynchronous dispute path uses to settle any claim. At
+relay time under profile 2, the FS-sampled carrier (§2) stands in for full
+replay as a sublinear accept/reject check; it does not replace the reference,
+it defers to it on dispute. Everything else — GPU kernels, the succinct proof
+below — is an acceleration or an audit aid, never the arbiter.
+
+### 3.1 Acceleration is default-on, gated byte-exact to the reference
+
+Mining is not required to run on CPU: the default acceleration policy
+(`kRCAccelerationPolicyDefault = RCAccelerationPolicy::NativePreferred`) prefers
+a native tensor lane (Ozaki MXFP4 / FP8), falls through to the exact-gated
+dense-INT8 device path (CUDA IMMA / HIP MFMA / Metal tensor / Ascend Cube) when
+native isn't available, and only falls back to the CPU oracle when no device
+path self-qualifies. On CPU, the fast paths are SHA-NI/SHA-ext, AVX2, AVX-512-
+VNNI, and ARM SMMLA/i8mm. None of this needs an experimental flag — it is
+**on by default**.
+
+What makes default-on safe is that **every** accelerated path — GPU native
+MXFP4/FP8, GPU INT8 (CUDA IMMA / HIP MFMA / Metal), CPU SHA-NI/AVX2/AVX-512-
+VNNI/SMMLA alike — is required to prove **byte-identical** output to the int64
+reference via a runtime self-qualification (`BuildExactnessQualCacheKey` /
+`PackedFastPathSelfTest`-style multi-vector scalar-oracle checks) before it is
+used. A path that is not byte-exact on the running hardware is declined and
+mining falls through to the next path down to the CPU oracle; a byte-divergent
+path can never silently win a block — a device is used only when some path has
+been proven byte-identical to the int64 oracle (see `matmul_v4_rc_accel_policy.h`).
 
 ---
 
-## 3. The succinct proof (G1–G5 arithmetization)
+## 4. The succinct proof (G1–G5 arithmetization)
 
 The winner's episode is additionally attested by a succinct proof built from four
 reusable finite-field constructions, wired into `VerifyWinnerProofV7`:
@@ -89,24 +191,30 @@ v4.6. The shipped Q=128/Fp2 bound clears the target on its own.
 > arbiter.** The formal arbiter is hard-disabled
 > (`kRCGkrFormalSoundnessReady = false`): `EnvRCGkrArbiterEnabled` is ignored and
 > the arbiter never gates consensus regardless of environment. int64 exact replay
-> decides validity.
+> decides validity. This proof stack is the mechanism behind the eventual Stage C
+> exact-completeness upgrade referenced in §2.1 — it is in-tree and green, but it
+> is *not* part of what the two-stage design relies on at launch; the FS-sampled
+> carrier's work-skipping bound is.
 
 ---
 
-## 4. Defaults after this PR (the "V3 production is the default" policy)
+## 5. Defaults after this PR (the "V3 production is the default" policy)
 
 | Knob | v4.6 default | Meaning |
 |---|---|---|
+| `nMatMulRCProfile` | **2** (datacenter episode) | selects the datacenter-scale episode dims; FS-sampled carrier is the relay authority under this profile (§2) |
 | `nMatMulRCCoupledProfile` | **3** (was 2) | a finite coupled height alone selects **V3 production** — no hidden profile override |
 | `RCCoupConsensusConfig{}.transcript_version` | **ENC_RC_V3** | aggregate default aligned to V3; domain tags map `V3 → COUP_*_V3` |
 | `nMatMulRCHeight` | `INT32_MAX` | ENC_RC episode **OFF** on every public network |
 | `nMatMulRCCoupledHeight` | `INT32_MAX` | coupled puzzle **OFF** on every public network |
 | `kRCGkrFormalSoundnessReady` | `false` | formal arbiter **hard-disabled** |
 
-Profile **2 (V2 medium)** is retained **only** for explicit regression coverage
-(selected via an explicit `-regtestrccoupledprofile=2`). Profile **1 (V1
-legacy)** remains byte-identical to the pre-v4.6 legacy transcript. Mainnet
-parameter validation asserts the profile default is 3.
+On the **coupled** selector (`nMatMulRCCoupledProfile`), profile **2 (V2
+medium)** is retained **only** for explicit regression coverage (selected via
+an explicit `-regtestrccoupledprofile=2`) — this is a different "profile 2"
+from the episode selector's default (§2). Profile **1 (V1 legacy)** remains
+byte-identical to the pre-v4.6 legacy transcript. Mainnet parameter validation
+asserts the coupled profile default is 3.
 
 ### Single-switch activation (wired, kept OFF)
 
@@ -125,7 +233,7 @@ to both `nMatMulRCHeight` and `nMatMulRCCoupledHeight`, and the profile default
 
 ---
 
-## 5. v4.6 (this PR) vs. v3-on-`main`
+## 6. v4.6 (this PR) vs. v3-on-`main`
 
 `main` today (merge `cc669ce`) runs the original MatMul PoW: **a single dense
 integer matmul** (dimension 512) verified by **Freivalds' check over the
@@ -150,7 +258,7 @@ gated behind a fail-closed activation switch that no network has flipped.
 
 ---
 
-## 6. What is done vs. what gates a finite activation height
+## 7. What is done vs. what gates a finite activation height
 
 **Done (in-tree, green here):**
 - ENC_RC episode + coupled V3 production workload and int64 reference.
@@ -177,11 +285,37 @@ finite value (via the single switch) and pin the calibrated ASERT rescale.
 
 ---
 
-## 7. Benchmarking (ENC_RC v4.6 only)
+## 8. Benchmarking (ENC_RC v4.6 only)
 
-**Canonical entrypoint** (do not use bare `measure-hardware.sh cuda|cpu` — that
-is legacy v4.1/`matmul-v4-report` and is now refused without
-`BTX_ALLOW_LEGACY_MATMUL_MEASURE=1`):
+The legacy `matmul-v4-report` tool and the v4.1/v4.2/v4.4 benchmark binaries
+(`btx-matmul-{cost,solve,metal}-bench`, the `src/bench/matmul_*`
+microbenchmarks) measured superseded workloads and have been **removed** — they
+reported "MatMul PoW" numbers that no longer reflect the shipping ENC_RC v4.6
+workload. Bare `measure-hardware.sh cuda|cpu` is likewise refused without
+`BTX_ALLOW_LEGACY_MATMUL_MEASURE=1`.
+
+**Canonical entrypoint — `contrib/matmul-v4/run-full-benchmark.py`.** This is
+the turnkey, verbose benchmark for current PoW performance: it describes the
+full workload, states per-component which kernel is optimized vs. fallback on
+your hardware, decides resident-vs-streamed from actual VRAM (against the
+~48 GiB coupled resident working set) and explains why, and reports every
+phase separately and combined. It is an observation-only tool — it never
+changes consensus or activation heights — and drives the real episode harness,
+`matmul-v4-rc-harness` (the same code path a miner runs):
+
+```bash
+# fast sanity pass (toy shape, no GPU needed)
+contrib/matmul-v4/run-full-benchmark.py --quick
+
+# the real thing (production dims)
+cmake --build build --target matmul-v4-rc-harness
+contrib/matmul-v4/run-full-benchmark.py --shape production --json report.json
+```
+
+For more granular workflows — Stage G CPU campaigns, the coupled V3 CI harness,
+the production carrier verifier's 900 ms relay-time budget, and CUDA episode
+digest/probe tests — `contrib/matmul-v4/measure-enc-rc-v46.sh` remains the
+entrypoint:
 
 ```bash
 contrib/matmul-v4/measure-enc-rc-v46.sh --help
@@ -193,7 +327,9 @@ contrib/matmul-v4/measure-enc-rc-v46.sh cpu --profile rc-medium
 # Coupled V3 CI harness (v4.6 default coupled family)
 contrib/matmul-v4/measure-enc-rc-v46.sh cpu rc --coupled-v3-ci
 
-# Production Freivalds carrier verifier floor (900 ms budget)
+# Production Freivalds carrier verifier floor (900 ms budget) — see §2's
+# relay-time authority and doc/btx-matmul-v4.6-rc-verify-time-budget-and-
+# hardware-baseline-2026-07-23.md for the full derivation
 contrib/matmul-v4/measure-enc-rc-v46.sh verify-carrier --threads 32
 
 # CUDA episode context digest/probe tests (CUDA-built test_btx)
@@ -204,4 +340,5 @@ Aggregate harness JSON with `contrib/matmul-v4/rc-gate.py`. Toy/PARTIAL never
 raises `nMatMulRCHeight`. For CUDA mine→relay→ExactReplay on regtest and the
 older B200/5090 protocol notes, see
 `doc/btx-matmul-v4.5-v3-b200-5090-measurement-protocol.md` — cite only after
-confirming the workload is ENC_RC (coupled / episode), not v4.1 report.
+confirming the workload is ENC_RC (coupled / episode), not the retired v4.1
+report tool.
