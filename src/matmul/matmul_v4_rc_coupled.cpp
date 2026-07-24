@@ -1276,18 +1276,19 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         const uint32_t lobe_stride0 = M0 * W0;
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             // Nonce-fresh lobe activation (C2): first M rows of a W×W MX tile
-            // (ExpandMxDequantInt8 requires rows % 32 == 0 when M>=32; M=1 takes row 0).
-            const auto tile =
+            // (M>=32 V3 profiles can expand that exact prefix directly because
+            // both mantissa and row-block scale streams are prefix-stable).
+            const bool direct_prefix = M0 >= kRCMxBlockLen &&
+                                       (M0 % kRCMxBlockLen) == 0;
+            const uint32_t expand_rows = direct_prefix ? M0 : W0;
+            const auto activation =
                 options.expansion_threads > 1
-                    ? ExpandMxDequantInt8Parallel(lobe_seeds[ell], W0, W0,
+                    ? ExpandMxDequantInt8Parallel(lobe_seeds[ell], expand_rows, W0,
                                                   options.expansion_threads)
-                    : ExpandMxDequantInt8(lobe_seeds[ell], W0, W0);
-            if (tile.size() != static_cast<size_t>(W0) * W0) {
-                return uint256{};
-            }
-            if (lobe_stride0 > tile.size()) return uint256{};
-            std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0, tile.data(),
-                        lobe_stride0);
+                    : ExpandMxDequantInt8(lobe_seeds[ell], expand_rows, W0);
+            if (activation.size() < lobe_stride0) return uint256{};
+            std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0,
+                        activation.data(), lobe_stride0);
         }
         if (out_timing) {
             out_timing->activation_s =

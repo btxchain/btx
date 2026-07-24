@@ -990,6 +990,27 @@ BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
                       "a4bb0cc42e2b97631d126a0dcdae26ad83b2f287d885322392a564990a95bac4");
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_v3_activation_direct_prefix_matches_full_tile)
+{
+    const auto header = MakeCoupHeader(42);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+    const auto seeds =
+        rc::DeriveCoupledLobeSeeds(sigma, params, rc::ENC_RC_V3);
+    BOOST_REQUIRE(!seeds.empty());
+    BOOST_REQUIRE_EQUAL(params.rows_per_lobe, 32U);
+    BOOST_REQUIRE_EQUAL(params.lobe_width, 64U);
+
+    const auto full = rc::ExpandMxDequantInt8(
+        seeds.front(), params.lobe_width, params.lobe_width);
+    const auto prefix = rc::ExpandMxDequantInt8(
+        seeds.front(), params.rows_per_lobe, params.lobe_width);
+    BOOST_REQUIRE_EQUAL(prefix.size(),
+                        static_cast<size_t>(params.rows_per_lobe) *
+                            params.lobe_width);
+    BOOST_CHECK(std::equal(prefix.begin(), prefix.end(), full.begin()));
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_v3_domains_independent_of_v1_v2)
 {
     // F7: V3/V4 domain strings must not collide with older families.
