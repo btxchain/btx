@@ -433,13 +433,19 @@ int RunCoupledHarness(const Args& args)
     const size_t rss_before = CurrentRssKiB();
 
     std::vector<rc::RCCoupExecMode> modes;
-    const bool allow_resident =
-        std::getenv("BTX_RC_COUP_ALLOW_RESIDENT") != nullptr;
+    // Resident (48 GiB device-resident, the datacenter-advantage path) is DEFAULT-ON:
+    // production runs BOTH Streamed and Resident so the resident-vs-streamed ratio is
+    // always measured, never hidden behind an opt-in. The only escape hatch is a
+    // kill switch (BTX_RC_COUP_FORCE_STREAMED=1) for a card that physically cannot
+    // hold the resident set; --mem-cap also forces streamed when the estimate exceeds
+    // the cap (physical constraint, not a feature gate).
+    const bool force_streamed_env =
+        std::getenv("BTX_RC_COUP_FORCE_STREAMED") != nullptr;
     const bool production_v2 = args.coupled_production || args.coupled_production_v2;
-    if (force_streamed || (production_v2 && !allow_resident)) {
-        // Production defaults to Streamed-only (48 GiB Resident is opt-in via env).
+    if (force_streamed || force_streamed_env) {
         modes.push_back(rc::RCCoupExecMode::Streamed);
-    } else if (production_v2 && allow_resident) {
+    } else if (production_v2) {
+        // Default: measure the resident path against streamed on every production run.
         modes = {rc::RCCoupExecMode::Streamed, rc::RCCoupExecMode::Resident};
     } else {
         modes = {rc::RCCoupExecMode::SequentialLobes, rc::RCCoupExecMode::Checkpointed,
@@ -510,6 +516,34 @@ int RunCoupledHarness(const Args& args)
     std::cout << "== MatMul ENC_RC coupled harness (Stage C) ==\n";
     std::cout << "  device_id:  " << device_id << "\n";
     std::cout << "  backend:    " << args.backend << " → " << backend_resolved << "\n";
+
+    // LOUD native-path status: never let a deactivated FP4/native tensor path hide
+    // behind quiet INT8 numbers. Surface exactly what the runtime selected and, when
+    // a native path is BUILT but not qualified, why it fell back — so "deactivated"
+    // is impossible to miss in the fleet JSON and console. This does NOT gate mining;
+    // it only reports the state the byte-exact self-qual already decided.
+    const matmul::v4::rc::RCOzakiMxfp4Status mxfp4 =
+        matmul::v4::rc::ProbeRcOzakiMxfp4Status();
+    const bool native_requested = (args.backend != "cpu");
+    const bool native_declined =
+        native_requested && (mxfp4.attempted || mxfp4.sm120a_kernel_linked) && !mxfp4.qualified;
+    std::cout << "  native_fp4: linked_sm120a=" << (mxfp4.sm120a_kernel_linked ? 1 : 0)
+              << " attempted=" << (mxfp4.attempted ? 1 : 0)
+              << " qualified=" << (mxfp4.qualified ? 1 : 0)
+              << " selected=" << (mxfp4.backend.empty() ? "none" : mxfp4.backend)
+              << " arch=" << (mxfp4.arch_key.empty() ? "?" : mxfp4.arch_key) << "\n";
+    if (native_declined) {
+        std::cerr << "!! NATIVE MXFP4 PATH DEACTIVATED — mining the INT8 fallback, NOT the "
+                     "native tensor path.\n"
+                     "!! reason: "
+                  << (mxfp4.deficit_reason.empty() ? "unspecified" : mxfp4.deficit_reason)
+                  << "\n!! This is a build/silicon gap to FIX (default-on native was refused "
+                     "by the byte-exact self-qual), not a supported steady state.\n";
+    } else if (native_requested && !mxfp4.qualified && !mxfp4.sm120a_kernel_linked &&
+               !mxfp4.attempted) {
+        std::cerr << "!! NATIVE MXFP4 NOT BUILT INTO THIS BINARY — no sm_120a/sm_100 object "
+                     "linked; mining INT8. Rebuild with the native CUDA path to exercise FP4.\n";
+    }
     std::cout << "  shape:      " << shape << "\n";
     std::cout << "  peak_est:   streamed=" << streamed_peak << " resident=" << resident_peak
               << (force_streamed ? " (auto-Streamed by --mem-cap)" : "") << "\n";
@@ -556,6 +590,19 @@ int RunCoupledHarness(const Args& args)
     rss.pushKV("before_kib", static_cast<uint64_t>(rss_before));
     rss.pushKV("after_kib", static_cast<uint64_t>(rss_after));
     rss.pushKV("peak_kib", static_cast<uint64_t>(peak_rss));
+
+    // Native FP4 status in the fleet JSON: a deactivated native path is now a
+    // first-class, machine-readable field (native_declined=true + reason), not an
+    // absence to be inferred from INT8-looking numbers.
+    UniValue mxfp4_j(UniValue::VOBJ);
+    mxfp4_j.pushKV("sm120a_kernel_linked", mxfp4.sm120a_kernel_linked);
+    mxfp4_j.pushKV("attempted", mxfp4.attempted);
+    mxfp4_j.pushKV("qualified", mxfp4.qualified);
+    mxfp4_j.pushKV("exact_panels_qualified", mxfp4.exact_panels_qualified);
+    mxfp4_j.pushKV("selected_backend", mxfp4.backend);
+    mxfp4_j.pushKV("arch_key", mxfp4.arch_key);
+    mxfp4_j.pushKV("deficit_reason", mxfp4.deficit_reason);
+    mxfp4_j.pushKV("native_declined", native_declined);
 
     UniValue probe_j(UniValue::VOBJ);
     probe_j.pushKV("backend_resolved", device_probe.backend_resolved);
@@ -621,7 +668,7 @@ int RunCoupledHarness(const Args& args)
     coupled.pushKV("streamed_peak_bytes_est", streamed_peak);
     coupled.pushKV("resident_peak_bytes_est", resident_peak);
     coupled.pushKV("mem_cap_bytes", args.mem_cap);
-    coupled.pushKV("auto_streamed", force_streamed || (production_v2 && !allow_resident));
+    coupled.pushKV("auto_streamed", force_streamed || force_streamed_env);
     coupled.pushKV("stream_vs_resident_wall_ratio",
                    wall_resident > 0.0 ? (wall_stream / wall_resident) : 0.0);
     coupled.pushKV("modes", mode_walls);
@@ -656,7 +703,7 @@ int RunCoupledHarness(const Args& args)
                                       : "toy_chrono_measured");
     root.pushKV("wall_clock_provenance", "chrono_steady_clock_mine_coupled_puzzle");
     root.pushKV("device_resident", false);
-    root.pushKV("native_path_eligible", false);
+    root.pushKV("native_path_eligible", mxfp4.qualified);
     root.pushKV("params", CoupParamsJson(params));
     root.pushKV("digest", digest_ref.GetHex());
     root.pushKV("modes_digest_match", digests_match);
@@ -674,6 +721,7 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("allocation_cap_verdicts", caps);
     root.pushKV("verifier_floor", vf);
     root.pushKV("device_probe", probe_j);
+    root.pushKV("native_mxfp4", mxfp4_j);
     root.pushKV("interconnect_sim", netj);
     root.pushKV("gpu_campaign_present", false);
     root.pushKV("nvlink_campaign_present", false);
@@ -948,6 +996,31 @@ int main(int argc, char* argv[])
     std::cout << "== MatMul ENC_RC harness (real episodes) ==\n";
     std::cout << "  device_id:  " << device_id << "\n";
     std::cout << "  backend:    " << args.backend << " → " << backend_resolved << "\n";
+
+    // LOUD native-path status (same contract as the coupled harness): a deactivated
+    // FP4/native tensor path must never hide behind quiet INT8 numbers in the fleet
+    // report. Reports, never gates — the byte-exact self-qual already decided.
+    const matmul::v4::rc::RCOzakiMxfp4Status mxfp4 =
+        matmul::v4::rc::ProbeRcOzakiMxfp4Status();
+    const bool native_requested = (args.backend != "cpu");
+    const bool native_declined =
+        native_requested && (mxfp4.attempted || mxfp4.sm120a_kernel_linked) && !mxfp4.qualified;
+    std::cout << "  native_fp4: linked_sm120a=" << (mxfp4.sm120a_kernel_linked ? 1 : 0)
+              << " attempted=" << (mxfp4.attempted ? 1 : 0)
+              << " qualified=" << (mxfp4.qualified ? 1 : 0)
+              << " selected=" << (mxfp4.backend.empty() ? "none" : mxfp4.backend)
+              << " arch=" << (mxfp4.arch_key.empty() ? "?" : mxfp4.arch_key) << "\n";
+    if (native_declined) {
+        std::cerr << "!! NATIVE MXFP4 PATH DEACTIVATED — mining the INT8 fallback, NOT the "
+                     "native tensor path.\n!! reason: "
+                  << (mxfp4.deficit_reason.empty() ? "unspecified" : mxfp4.deficit_reason)
+                  << "\n!! Build/silicon gap to FIX (default-on native refused by the byte-exact "
+                     "self-qual), not a supported steady state.\n";
+    } else if (native_requested && !mxfp4.qualified && !mxfp4.sm120a_kernel_linked &&
+               !mxfp4.attempted) {
+        std::cerr << "!! NATIVE MXFP4 NOT BUILT INTO THIS BINARY — no sm_120a/sm_100 object "
+                     "linked; mining INT8. Rebuild with the native CUDA path to exercise FP4.\n";
+    }
     std::cout << "  dims:       toy=" << (args.toy ? "true" : "false")
               << " medium=" << (args.medium ? "true" : "false")
               << " production=" << (args.production ? "true" : "false") << "\n";
@@ -1200,6 +1273,20 @@ int main(int argc, char* argv[])
     root.pushKV("device_resident", false);
     root.pushKV("native_path_eligible",
                 selfqual.native_mxfp4_qualified || selfqual.native_fp8_qualified);
+    {
+        // Machine-readable native-FP4 status: a deactivated path is a first-class
+        // field (native_declined + reason), not an absence inferred from INT8 numbers.
+        UniValue mxfp4_j(UniValue::VOBJ);
+        mxfp4_j.pushKV("sm120a_kernel_linked", mxfp4.sm120a_kernel_linked);
+        mxfp4_j.pushKV("attempted", mxfp4.attempted);
+        mxfp4_j.pushKV("qualified", mxfp4.qualified);
+        mxfp4_j.pushKV("exact_panels_qualified", mxfp4.exact_panels_qualified);
+        mxfp4_j.pushKV("selected_backend", mxfp4.backend);
+        mxfp4_j.pushKV("arch_key", mxfp4.arch_key);
+        mxfp4_j.pushKV("deficit_reason", mxfp4.deficit_reason);
+        mxfp4_j.pushKV("native_declined", native_declined);
+        root.pushKV("native_mxfp4", mxfp4_j);
+    }
     if (!tip.empty()) {
         root.pushKV("source_revision", tip);
         root.pushKV("git_tip", tip);

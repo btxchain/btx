@@ -190,8 +190,14 @@ bool Xof4ShaniSelfTest()
 
 bool UseXof4Shani()
 {
-    const char* env = std::getenv("BTX_BMX4_XOF4_SHANI");
-    if (env == nullptr || env[0] != '1' || env[1] != '\0') return false;
+    // Default-ON, self-test-gated (kill-switch polarity, matching UseXof8Avx2 /
+    // UseXofShaniX86): the ARM SHA-NI XOF is used automatically wherever the CPU
+    // has SHA-2 and the byte-exact self-test passes. BTX_BMX4_XOF4_SHANI=0 is the
+    // only escape hatch. Previously this was opt-in (required =1), silently leaving
+    // SHA-NI off on every ARM host by default.
+    if (const char* env = std::getenv("BTX_BMX4_XOF4_SHANI")) {
+        if (env[0] == '0' && env[1] == '\0') return false;
+    }
     static const bool ok = RuntimeArmSha256Available() && Xof4ShaniSelfTest();
     return ok;
 }
