@@ -345,6 +345,73 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         options.matmul_parent_mtp_seed_height =
             ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulparentmtpseedheight");
     }
+    if (args.IsArgSet("-regtestmatmulv4height")) {
+        options.matmul_v4_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestmatmulv4height");
+    }
+    if (args.IsArgSet("-regtestmatmulv4dimension")) {
+        options.matmul_v4_dimension =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulv4dimension");
+    }
+    if (args.IsArgSet("-regtestmatmulv4maxdimension")) {
+        options.matmul_v4_max_dimension =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulv4maxdimension");
+    }
+    if (args.IsArgSet("-regtestbmx4cheight")) {
+        options.matmul_bmx4c_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestbmx4cheight");
+    }
+    if (args.IsArgSet("-regtestdrltheight")) {
+        options.matmul_drlt_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestdrltheight");
+    }
+    if (args.IsArgSet("-regtestrcunifiedheight")) {
+        // v4.6 single-switch: one height activates episode + coupled + V3 together.
+        options.matmul_rc_unified_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestrcunifiedheight");
+    }
+    if (args.IsArgSet("-regtestrcheight")) {
+        options.matmul_rc_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestrcheight");
+    }
+    if (args.IsArgSet("-regtestrccoupledheight")) {
+        options.matmul_rc_coupled_height =
+            ParseRegTestNonNegativeInt32Arg(args, "-regtestrccoupledheight");
+    }
+    if (args.IsArgSet("-regtestrctoydims")) {
+        options.matmul_rc_use_toy_dims = args.GetBoolArg("-regtestrctoydims", false);
+    }
+    if (args.IsArgSet("-regtestrccoupledtoydims")) {
+        options.matmul_rc_coupled_use_toy_dims =
+            args.GetBoolArg("-regtestrccoupledtoydims", false);
+    }
+    if (args.IsArgSet("-regtestrccoupledprofile")) {
+        // Accept any uint32; ResolveRCCoupParams fail-closes on values other than 2|3.
+        options.matmul_rc_coupled_profile =
+            ParseRegTestUInt32Arg(args, "-regtestrccoupledprofile");
+    }
+    if (args.IsArgSet("-regtestrcprofile")) {
+        // ENC_RC episode profile: 1=epoch-0 base, 2=datacenter dims. Pair with a
+        // finite -regtestrcheight/-regtestrcunifiedheight to activate the
+        // datacenter episode. AssertBMX4CConstructionInvariants rejects ≠{1,2}.
+        options.matmul_rc_profile = ParseRegTestUInt32Arg(args, "-regtestrcprofile");
+    }
+    if (args.IsArgSet("-regtestmatmulltsealaspow")) {
+        options.matmul_lt_seal_as_pow = args.GetBoolArg("-regtestmatmulltsealaspow", true);
+    }
+    if (args.IsArgSet("-regtestmatmulltmaxpending")) {
+        options.matmul_lt_max_pending_verifications =
+            ParseRegTestPositiveUInt32Arg(args, "-regtestmatmulltmaxpending");
+    }
+    options.matmul_flat_sketch_replay = args.GetBoolArg("-regtestmatmulflatsketchreplay", false);
+    // Audit dead-code deletion: the -regtestmatmulproofprunedepth parse was removed
+    // along with the dead nMatMulProofPruneDepth field / matmul_proof_prune_depth
+    // option. The arg stays REGISTERED in chainparamsbase.cpp as a harmless unread
+    // no-op (accepted but ignored) for arg compatibility.
+    if (args.IsArgSet("-regtestmatmulproofassumevalidminage")) {
+        options.matmul_proof_assumevalid_min_age =
+            ParseRegTestUInt32Arg(args, "-regtestmatmulproofassumevalidminage");
+    }
 
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};

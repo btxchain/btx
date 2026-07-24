@@ -1,0 +1,98 @@
+{
+  "tool": "rc-episode-harness",
+  "schema_version": 2,
+  "stub": false,
+  "device_id": "cpu-fallback-ref:administrator-MacPro7-1-Rack",
+  "backend": "cpu-fallback",
+  "backend_requested": "cuda",
+  "profile": "episode",
+  "mem_cap_bytes": 0,
+  "toy": true,
+  "medium": false,
+  "production_dims": false,
+  "evidence_kind": "toy_chrono_measured",
+  "wall_clock_provenance": "chrono_steady_clock",
+  "device_resident": false,
+  "native_path_eligible": false,
+  "source_revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+  "git_tip": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+  "peak_rss_kib": 186208,
+  "run_variance": {
+    "episode_cv": 0,
+    "n_runs": 1,
+    "note": "Coefficient of variation across episode walls in this process. Campaign harness aggregates cross-process variance separately."
+  },
+  "params": {
+    "rounds": 1,
+    "d_head": 32,
+    "n_q": 32,
+    "n_ctx": 64,
+    "L_lyr": 2,
+    "d_model": 32,
+    "b_seq": 32,
+    "T_leaf": 64
+  },
+  "working_set_bytes_est": 10240,
+  "extractmx_self_qual": {
+    "status": "pass",
+    "episodes": 1,
+    "digests_stable": true,
+    "exact_gemm_backend_ok": false,
+    "mining_accelerator_ok": false,
+    "native_mxfp4_qualified": false,
+    "native_fp8_qualified": false,
+    "deficit_reason": "cpu_exactgemm_no_device_backend",
+    "boundary_vector_notes": "Toy self-qual: MineRCEpisode(backend) == CPU reference per episode; re-run digest stability. Use --medium for >2^24 wgrad."
+  },
+  "phase_wall_s": {
+    "phase1": 0.000220135,
+    "phase2": 0.000375882,
+    "phase3": 0.000137694,
+    "total": 0.000740094,
+    "provenance": "chrono_steady_clock",
+    "evidence_kind": "toy_chrono_measured"
+  },
+  "k_curve": {
+    "mode": "toy_synthetic_structure",
+    "note": "Toy dims: k estimated as wall(StoreOnlyX0)/wall(StoreAll); not a consensus-dim k(M) curve.",
+    "store_all_wall_s": 0.000712,
+    "store_only_x0_wall_s": 0.000901245,
+    "k_estimate": 1.265793539325843,
+    "digests_match": true,
+    "points": [
+      {
+        "checkpoint": "StoreAll",
+        "wall_s": 0.000712,
+        "recompute_ratio": 1
+      },
+      {
+        "checkpoint": "StoreOnlyX0",
+        "wall_s": 0.000901245,
+        "recompute_ratio": 1.265793539325843
+      }
+    ]
+  },
+  "residency_sweep": [
+    {
+      "working_set_bytes": 10240,
+      "wall_s": 0.000740094,
+      "dims": "toy",
+      "note": "Single working-set point; not a 64→256 MB cliff sweep."
+    }
+  ],
+  "allocation_cap_verdicts": {
+    "512MiB": "skip",
+    "2GiB": "skip",
+    "8GiB": "skip",
+    "note": "Toy footprint << named caps ⇒ skip (not pass). Consensus-dim cap verdicts require running consensus dims."
+  },
+  "verifier_floor": {
+    "measured": false,
+    "binding": true,
+    "evidence_kind": "unmeasured",
+    "note": "Verifier-floor is the binding constraint (doc §R.7.6) and MUST be measured full-episode + full-verify wall-clock at production dims. MAC-count / replay_s_heuristic projections are NOT EVIDENCE and must never raise nMatMulRCHeight."
+  },
+  "gpu_campaign_present": false,
+  "nvlink_campaign_present": false,
+  "consensus_note": "nMatMulRCHeight remains INT32_MAX; ENC_RC activation is NO-GO. This harness never recommends raising consensus height. Projections/MAC estimates are NOT EVIDENCE for rc-gate GO. Missing GPU/NVLink campaigns are Stage G blockers."
+}

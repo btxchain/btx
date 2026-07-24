@@ -24,10 +24,14 @@
 #include <interfaces/mining.h>
 #include <key_io.h>
 #include <logging.h>
+#include <matmul/accel_v4.h>
 #include <matmul/accelerated_solver.h>
 #include <matmul/backend_capabilities.h>
 #include <matmul/field.h>
+#include <matmul/int8_field.h>
 #include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/pow_v4.h>
 #include <net.h>
 #include <net_processing.h>
 #include <node/context.h>
@@ -1009,6 +1013,13 @@ static UniValue BuildValidationRuntimeProfile()
     obj.pushKV("mean_transcript_elapsed_ms", MeanMicrosToMillis(stats.total_transcript_elapsed_us, stats.transcript_checks));
     obj.pushKV("last_transcript_elapsed_ms", MicrosToMillis(stats.last_transcript_elapsed_us));
     obj.pushKV("max_transcript_elapsed_ms", MicrosToMillis(stats.max_transcript_elapsed_us));
+    // G.3+: first-class ENC-DR O(W) recompute counters (additive; recompute
+    // samples are also included in the phase2 aggregate above).
+    obj.pushKV("recompute_checks", stats.recompute_checks);
+    obj.pushKV("total_recompute_elapsed_ms", MicrosToMillis(stats.total_recompute_elapsed_us));
+    obj.pushKV("mean_recompute_elapsed_ms", MeanMicrosToMillis(stats.total_recompute_elapsed_us, stats.recompute_checks));
+    obj.pushKV("last_recompute_elapsed_ms", MicrosToMillis(stats.last_recompute_elapsed_us));
+    obj.pushKV("max_recompute_elapsed_ms", MicrosToMillis(stats.max_recompute_elapsed_us));
     return obj;
 }
 
@@ -1559,7 +1570,58 @@ struct MatMulWorkProfileOptions {
     int32_t pre_hash_epsilon_bits_override{-1};
 };
 
-static UniValue BuildMatMulWorkProfile(
+// Central resolver for the advertised committed-operand ENCODING PROFILE
+// (ENC-S8 vs ENC-BMX4C). getblocktemplate, getmatmulchallenge, and
+// getmatmulchallengeprofile all advertise this field in their "matmul" object
+// at v4 heights; routing them through one function keeps the advertised value
+// byte-identical and stops the three result schemas from drifting (H11).
+static const char* ResolveMatMulEncodingProfileName(
+    const Consensus::Params& consensus, int32_t height)
+{
+    switch (consensus.GetMatMulEncodingProfile(height)) {
+    case Consensus::MatMulEncodingProfile::ENC_RC_COUPLED:
+        return "ENC-RC-COUPLED";
+    case Consensus::MatMulEncodingProfile::ENC_RC:
+        return "ENC-RC";
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C_LT:
+        return "ENC-BMX4C-LT";
+    case Consensus::MatMulEncodingProfile::ENC_BMX4C:
+        return "ENC-BMX4C";
+    default:
+        return "ENC-S8";
+    }
+}
+
+/** Sketch/transcript tile b for the live profile at `height` (v4: per-profile
+ *  MatMulProfileParams; pre-v4: legacy nMatMulTranscriptBlockSize). */
+static uint64_t ResolveMatMulAdvertisedTileB(const Consensus::Params& consensus, int32_t height)
+{
+    if (!consensus.IsMatMulV4Active(height)) {
+        return static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize);
+    }
+    return static_cast<uint64_t>(consensus.GetMatMulProfileParams(height).tile_b);
+}
+
+/** ENC-DR-LT miner hints (Q* schedule + deep-m tile). Present only when the
+ *  live profile is ENC_BMX4C_LT. Q* is a miner-local fat-window hint in Phase A
+ *  (not a consensus seal object); see doc/btx-matmul-v4.4-lt-adversarial-analysis.md. */
+static void PushMatMulLtMinerHints(UniValue& matmul, const Consensus::Params& consensus, int32_t height)
+{
+    if (consensus.GetMatMulEncodingProfile(height) != Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
+        return;
+    }
+    matmul.pushKV("consensus_q_star", static_cast<uint64_t>(consensus.nMatMulConsensusQStar));
+    matmul.pushKV("lt_transcript_block_size",
+                  static_cast<uint64_t>(consensus.nMatMulLTTranscriptBlockSize));
+}
+
+// Central resolver for the deterministic MatMul work profile implied by the
+// active consensus parameters at a height. Single source of truth consumed by
+// getmatmulchallenge and getmatmulchallengeprofile so their identical
+// "work_profile" result schemas cannot drift apart (H11). (getblocktemplate
+// does not emit a work_profile object, so it is intentionally not wired here;
+// see the encoding-profile resolver above for the field the three RPCs share.)
+static UniValue ResolveMatMulWorkProfile(
     const CBlockHeader& challenge_header,
     const Consensus::Params& consensus,
     int32_t block_height,
@@ -1781,7 +1843,13 @@ static UniValue BuildMatMulChallengeResponse(
     challenge_header.nNonce = 0;
     challenge_header.mix_hash.SetNull();
     challenge_header.matmul_digest.SetNull();
-    if (challenge_header.matmul_dim == 0) {
+    // MatMul v4 (spec §H.1/§I): the pooled work-unit advertises the v4 dimension
+    // at and above nMatMulV4Height, matching the consensus getblocktemplate
+    // path; below the fork the v3 dimension is used unchanged.
+    const bool challenge_v4 = consensus.IsMatMulV4Active(next_height);
+    if (challenge_v4) {
+        challenge_header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulV4Dimension);
+    } else if (challenge_header.matmul_dim == 0) {
         challenge_header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
     }
     if (!SetDeterministicMatMulSeeds(challenge_header, consensus, next_height, parent_median_time_past)) {
@@ -1846,15 +1914,25 @@ static UniValue BuildMatMulChallengeResponse(
 
     UniValue matmul(UniValue::VOBJ);
     matmul.pushKV("n", static_cast<uint64_t>(challenge_header.matmul_dim));
-    matmul.pushKV("b", static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize));
-    matmul.pushKV("r", static_cast<uint64_t>(consensus.nMatMulNoiseRank));
-    matmul.pushKV("q", static_cast<uint64_t>(consensus.nMatMulFieldModulus));
+    matmul.pushKV("b", ResolveMatMulAdvertisedTileB(consensus, next_height));
+    matmul.pushKV("r", challenge_v4 ? static_cast<uint64_t>(consensus.nMatMulV4FreivaldsRounds)
+                                    : static_cast<uint64_t>(consensus.nMatMulNoiseRank));
+    matmul.pushKV("q", challenge_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+                                    : static_cast<uint64_t>(consensus.nMatMulFieldModulus));
     matmul.pushKV("min_dimension", static_cast<uint64_t>(consensus.nMatMulMinDimension));
     matmul.pushKV("max_dimension", static_cast<uint64_t>(consensus.nMatMulMaxDimension));
     matmul.pushKV("seed_a", challenge_header.seed_a.GetHex());
     matmul.pushKV("seed_b", challenge_header.seed_b.GetHex());
+    // Audit finding A (RPC): advertise the committed-operand encoding profile so
+    // an external solver knows which encoding to use across the ENC-S8 -> BMX4C
+    // fork (every other field is byte-identical across it).
+    if (challenge_v4) {
+        matmul.pushKV("encoding_profile",
+            ResolveMatMulEncodingProfileName(consensus, next_height));
+        PushMatMulLtMinerHints(matmul, consensus, next_height);
+    }
     obj.pushKV("matmul", std::move(matmul));
-    obj.pushKV("work_profile", BuildMatMulWorkProfile(challenge_header, consensus, next_height));
+    obj.pushKV("work_profile", ResolveMatMulWorkProfile(challenge_header, consensus, next_height));
     UniValue service_profile(UniValue::VOBJ);
     {
         LOCK(cs_main);
@@ -2069,6 +2147,22 @@ struct MatMulServiceChallengeContext {
     uint32_t n{0};
     uint32_t b{0};
     uint32_t r{0};
+    // MatMul v4 (spec §G/§H/§I): at and above nMatMulV4Height the pooled /
+    // service challenge/proof interface mirrors the consensus v4 path -- the
+    // dimension is nMatMulV4Dimension, the digest is the sketch-committed
+    // matmul_v4::ComputeDigest output, and shares are checked with
+    // matmul_v4::VerifySketch instead of the v3 transcript/Freivalds ladder.
+    // Below the fork these stay false/0 and every v3 field/path is unchanged.
+    bool is_v4{false};
+    // MatMul v4.2 / ENC-BMX4C (spec §8.2): at and above nMatMulBMX4CHeight the
+    // pooled/service challenge encodes operands with the ENC-BMX4C profile
+    // (M11 mantissa + E8M0 scale), so shares must be verified with
+    // VerifySketchBMX4C and solved via ComputeDigestBMX4C -- NOT the ENC-S8
+    // matmul_v4::VerifySketch / ComputeDigestDispatched. Selected by the SAME
+    // height-gated profile selector the consensus block path uses.
+    bool is_bmx4c{false};
+    int32_t challenge_height{0};
+    uint32_t v4_rounds{0};
     CBlockHeader header;
     arith_uint256 target;
 };
@@ -2611,6 +2705,10 @@ struct MatMulServiceProofBatchItem {
     UniValue challenge;
     std::string nonce64_hex;
     std::string digest_hex;
+    // MatMul v4 share body: hex of the flat little-endian sketch payload
+    // (matmul_v4::ComputeDigest output), carried through the matrix_c_data
+    // channel. Empty for v3 proofs, which are nonce/digest-only.
+    std::string matrix_c_data_hex;
 };
 
 static Mutex g_matmul_service_challenge_registry_mutex;
@@ -3112,11 +3210,17 @@ static std::vector<MatMulServiceProofBatchItem> ParseMatMulServiceProofBatchItem
             if (!digest_hex.isStr()) {
                 throw JSONRPCError(RPC_INVALID_PARAMETER, "digest_hex must be a string");
             }
+            // Optional v4 sketch body (matrix_c_data channel); absent for v3.
+            const UniValue& matrix_c_data = entry.find_value("matrix_c_data");
+            if (!matrix_c_data.isNull() && !matrix_c_data.isStr()) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "matrix_c_data must be a string");
+            }
 
             MatMulServiceProofBatchItem item;
             item.challenge = challenge;
             item.nonce64_hex = nonce64_hex.get_str();
             item.digest_hex = digest_hex.get_str();
+            item.matrix_c_data_hex = matrix_c_data.isNull() ? std::string{} : matrix_c_data.get_str();
             items.push_back(std::move(item));
         } catch (const UniValue& obj_error) {
             throw JSONRPCError(
@@ -3372,8 +3476,20 @@ static UniValue BuildMatMulServiceChallengeResponse(
     challenge_header.nNonce = 0;
     challenge_header.mix_hash.SetNull();
     challenge_header.matmul_digest.SetNull();
-    challenge_header.matmul_dim =
-        template_header.matmul_dim == 0 ? static_cast<uint16_t>(consensus.nMatMulDimension) : template_header.matmul_dim;
+    // MatMul v4 (spec §H.1/§I): the service challenge advertises the v4 instance
+    // (dimension nMatMulV4Dimension, sketch tile b, v4 Freivalds rounds, prime
+    // q = 2^61-1) at and above nMatMulV4Height so the miner solves and the
+    // verifier checks the same shape the consensus v4 path uses. Below the fork
+    // the v3 template/default dimension and parameters are emitted unchanged.
+    const bool issue_v4 = consensus.IsMatMulV4Active(next_height);
+    challenge_header.matmul_dim = issue_v4
+        ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+        : (template_header.matmul_dim == 0 ? static_cast<uint16_t>(consensus.nMatMulDimension) : template_header.matmul_dim);
+    const uint64_t issue_b = ResolveMatMulAdvertisedTileB(consensus, next_height);
+    const uint64_t issue_r = issue_v4 ? static_cast<uint64_t>(consensus.nMatMulV4FreivaldsRounds)
+                                      : static_cast<uint64_t>(consensus.nMatMulNoiseRank);
+    const uint64_t issue_q = issue_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+                                      : static_cast<uint64_t>(consensus.nMatMulFieldModulus);
     challenge_header.seed_a = DeriveMatMulServiceSeed(challenge_id, challenge_header.hashPrevBlock, "seed_a");
     challenge_header.seed_b = DeriveMatMulServiceSeed(challenge_id, challenge_header.hashPrevBlock, "seed_b");
 
@@ -3431,15 +3547,22 @@ static UniValue BuildMatMulServiceChallengeResponse(
 
     UniValue matmul(UniValue::VOBJ);
     matmul.pushKV("n", static_cast<uint64_t>(challenge_header.matmul_dim));
-    matmul.pushKV("b", static_cast<uint64_t>(consensus.nMatMulTranscriptBlockSize));
-    matmul.pushKV("r", static_cast<uint64_t>(consensus.nMatMulNoiseRank));
-    matmul.pushKV("q", static_cast<uint64_t>(consensus.nMatMulFieldModulus));
+    matmul.pushKV("b", issue_b);
+    matmul.pushKV("r", issue_r);
+    matmul.pushKV("q", issue_q);
     matmul.pushKV("min_dimension", static_cast<uint64_t>(consensus.nMatMulMinDimension));
     matmul.pushKV("max_dimension", static_cast<uint64_t>(consensus.nMatMulMaxDimension));
     matmul.pushKV("seed_a", challenge_header.seed_a.GetHex());
     matmul.pushKV("seed_b", challenge_header.seed_b.GetHex());
+    // Audit finding A (RPC): advertise the committed-operand encoding profile
+    // (ENC-S8 vs ENC-BMX4C) so external solvers pick the right encoding at the fork.
+    if (issue_v4) {
+        matmul.pushKV("encoding_profile",
+            ResolveMatMulEncodingProfileName(consensus, next_height));
+        PushMatMulLtMinerHints(matmul, consensus, next_height);
+    }
     challenge.pushKV("matmul", std::move(matmul));
-    challenge.pushKV("work_profile", BuildMatMulWorkProfile(challenge_header, consensus, next_height, work_profile_options));
+    challenge.pushKV("work_profile", ResolveMatMulWorkProfile(challenge_header, consensus, next_height, work_profile_options));
     {
         LOCK(cs_main);
         challenge.pushKV(
@@ -4111,9 +4234,23 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
             ctx.interval_scale = 1.0;
             ctx.difficulty_clamped = false;
         }
-        ctx.n = static_cast<uint32_t>(consensus.nMatMulDimension);
-        ctx.b = static_cast<uint32_t>(consensus.nMatMulTranscriptBlockSize);
-        ctx.r = static_cast<uint32_t>(consensus.nMatMulNoiseRank);
+        // MatMul v4 (spec §H.1/§I): the challenge anchors on the parent, so the
+        // proof height is anchor_height + 1. At and above nMatMulV4Height the
+        // service instance uses the v4 dimension, the sketch tile b, and the v4
+        // Freivalds round count; below the fork the v3 parameters stand.
+        ctx.challenge_height = ctx.anchor_height + 1;
+        ctx.is_v4 = consensus.IsMatMulV4Active(ctx.challenge_height);
+        ctx.is_bmx4c = consensus.IsBMX4CActive(ctx.challenge_height);
+        if (ctx.is_v4) {
+            ctx.n = static_cast<uint32_t>(consensus.nMatMulV4Dimension);
+            ctx.b = static_cast<uint32_t>(matmul_v4::kTileB);
+            ctx.r = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
+            ctx.v4_rounds = static_cast<uint32_t>(consensus.nMatMulV4FreivaldsRounds);
+        } else {
+            ctx.n = static_cast<uint32_t>(consensus.nMatMulDimension);
+            ctx.b = static_cast<uint32_t>(consensus.nMatMulTranscriptBlockSize);
+            ctx.r = static_cast<uint32_t>(consensus.nMatMulNoiseRank);
+        }
         const int64_t target_solve_time_ms = static_cast<int64_t>(std::llround(ctx.solve_time_target_s * 1000.0));
         const int64_t validation_overhead_ms = static_cast<int64_t>(std::llround(ctx.validation_overhead_s * 1000.0));
         const int64_t propagation_overhead_ms = static_cast<int64_t>(std::llround(ctx.propagation_overhead_s * 1000.0));
@@ -4137,7 +4274,7 @@ static MatMulServiceChallengeContext ParseMatMulServiceChallenge(
         ctx.header.nTime = static_cast<uint32_t>(ctx.issued_at);
         ctx.header.nNonce64 = 0;
         ctx.header.nNonce = 0;
-        ctx.header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+        ctx.header.matmul_dim = static_cast<uint16_t>(ctx.n);
         ctx.header.seed_a = DeriveMatMulServiceSeed(ctx.challenge_id, ctx.anchor_hash, "seed_a");
         ctx.header.seed_b = DeriveMatMulServiceSeed(ctx.challenge_id, ctx.anchor_hash, "seed_b");
         const CBlockIndex* anchor_tip{nullptr};
@@ -4263,7 +4400,13 @@ static std::optional<std::string> GetMatMulServiceChallengeMismatch(
     if (ParseIntegralServiceField<uint32_t>(matmul.find_value("n"), "challenge.matmul.n") != ctx.n) return "challenge.matmul.n";
     if (ParseIntegralServiceField<uint32_t>(matmul.find_value("b"), "challenge.matmul.b") != ctx.b) return "challenge.matmul.b";
     if (ParseIntegralServiceField<uint32_t>(matmul.find_value("r"), "challenge.matmul.r") != ctx.r) return "challenge.matmul.r";
-    if (ParseIntegralServiceField<uint64_t>(matmul.find_value("q"), "challenge.matmul.q") != static_cast<uint64_t>(matmul::field::MODULUS)) return "challenge.matmul.q";
+    // v4 Freivalds runs over the independent prime q = 2^61-1; v3 uses the
+    // legacy transcript field modulus. The challenge advertises whichever the
+    // proof height selects (see ParseMatMulServiceChallenge).
+    const uint64_t expected_q = ctx.is_v4
+        ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+        : static_cast<uint64_t>(matmul::field::MODULUS);
+    if (ParseIntegralServiceField<uint64_t>(matmul.find_value("q"), "challenge.matmul.q") != expected_q) return "challenge.matmul.q";
     if (matmul.find_value("seed_a").get_str() != ctx.header.seed_a.GetHex()) return "challenge.matmul.seed_a";
     if (matmul.find_value("seed_b").get_str() != ctx.header.seed_b.GetHex()) return "challenge.matmul.seed_b";
 
@@ -4320,10 +4463,29 @@ static matmul::PowConfig BuildMatMulServicePowConfig(const MatMulServiceChalleng
     };
 }
 
+// MatMul v4: materialize the service instance as the CBlockHeader that
+// matmul_v4::ComputeDigest / VerifySketch bind against. The challenge's fixed
+// prev/merkle/time/bits/seeds are carried from ctx.header; the miner grinds
+// nNonce64 (which the v4 seed/sigma derivation folds in via the full-header
+// hash) and commits matmul_digest. Mirrors SolveMatMulV4 / the consensus
+// CheckMatMulProofOfWork_V4ProductCommitted header handling in pow.cpp.
+static CBlockHeader BuildMatMulServiceV4Header(
+    const MatMulServiceChallengeContext& ctx, uint64_t nonce64, const uint256& digest)
+{
+    CBlockHeader header = ctx.header;
+    header.nNonce64 = nonce64;
+    header.nNonce = static_cast<uint32_t>(nonce64);
+    header.mix_hash.SetNull();
+    header.matmul_dim = static_cast<uint16_t>(ctx.n);
+    header.matmul_digest = digest;
+    return header;
+}
+
 static UniValue EvaluateMatMulServiceProof(
     const MatMulServiceChallengeContext& ctx,
     const std::string& nonce64_hex,
     const std::string& digest_hex,
+    const std::string& matrix_c_data_hex,
     bool& transcript_valid)
 {
     uint64_t nonce64{0};
@@ -4333,11 +4495,60 @@ static UniValue EvaluateMatMulServiceProof(
     if (digest_hex.size() != 64 || !IsHex(digest_hex)) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "digest_hex must be exactly 64 hex characters");
     }
+    const uint256 digest = ParseUint256HexOrThrow(digest_hex, "digest_hex must be exactly 64 hex characters");
 
-    matmul::PowState state = BuildMatMulServicePowState(
-        ctx,
-        nonce64,
-        ParseUint256HexOrThrow(digest_hex, "digest_hex must be exactly 64 hex characters"));
+    // MatMul v4 (spec §I.2): height-gated dispatch to the sketch verifier,
+    // mirroring CheckMatMulProofOfWork_V4ProductCommitted -- the O(n^2)
+    // Freivalds/digest-seal cascade over the submitted sketch body (carried in
+    // the matrix_c_data channel) plus the difficulty-target check. The v3
+    // transcript path below is left untouched for pre-fork heights.
+    if (ctx.is_v4) {
+        if (!matrix_c_data_hex.empty() && !IsHex(matrix_c_data_hex)) {
+            throw JSONRPCError(RPC_INVALID_PARAMETER, "matrix_c_data must be hexadecimal");
+        }
+        const CBlockHeader header = BuildMatMulServiceV4Header(ctx, nonce64, digest);
+        std::vector<unsigned char> sketch_payload;
+        if (!matrix_c_data_hex.empty()) {
+            const auto parsed = TryParseHex<unsigned char>(matrix_c_data_hex);
+            if (!parsed) {
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "matrix_c_data must be hexadecimal");
+            }
+            sketch_payload = *parsed;
+        }
+        // Seal: the shipped body must hash to the committed digest (a mismatch
+        // is a body mutation, not a valid share). Target: the digest must meet
+        // the challenge difficulty. Transcript: the full O(n^2) sketch-Freivalds
+        // + digest recompute (VerifySketch also re-checks digest==matmul_digest).
+        const bool payload_sealed =
+            !sketch_payload.empty() && matmul_v4::PayloadMatchesCommitment(header, sketch_payload);
+        const bool meets_target = payload_sealed && UintToArith256(digest) <= ctx.target;
+        uint256 recomputed;
+        // ENC-BMX4C (spec §8.2): at BMX4C heights regenerate M11+E8M0 operands via
+        // the BMX4C verifier; below it the ENC-S8 int8 verifier. Same profile
+        // selector the consensus block path uses -- so a share the network accepts
+        // is a share this service accepts, and vice versa.
+        transcript_valid = meets_target &&
+            (ctx.is_bmx4c
+                 ? matmul::v4::bmx4::VerifySketchBMX4C(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed)
+                 : matmul_v4::VerifySketch(header, ctx.n, ctx.v4_rounds, sketch_payload, recomputed));
+
+        UniValue proof(UniValue::VOBJ);
+        proof.pushKV("nonce64_hex", nonce64_hex);
+        proof.pushKV("digest", digest_hex);
+        // v4 sigma follows the v3 full-header rule (matmul_v4::DeriveSigma just
+        // forwards to matmul::DeriveSigma; spec §A.2 invariant I7).
+        proof.pushKV("sigma", matmul::DeriveSigma(header).GetHex());
+        proof.pushKV("matmul_version", 4);
+        // Audit finding B (RPC): disambiguate the v4.1/v4.2 encoding profile the
+        // proof was evaluated under (matmul_version stays 4 for compatibility).
+        proof.pushKV("encoding_profile", ctx.is_bmx4c ? "ENC-BMX4C" : "ENC-S8");
+        proof.pushKV("meets_target", meets_target);
+        proof.pushKV("commitment_valid", meets_target);
+        proof.pushKV("transcript_valid", transcript_valid);
+        return proof;
+    }
+
+    matmul::PowState state = BuildMatMulServicePowState(ctx, nonce64, digest);
     const matmul::PowConfig config = BuildMatMulServicePowConfig(ctx);
 
     const bool commitment_valid = matmul::VerifyCommitment(state, config);
@@ -4358,6 +4569,7 @@ static UniValue BuildMatMulServiceProofResult(
     const UniValue& challenge_value,
     const std::string& nonce64_hex,
     const std::string& digest_hex,
+    const std::string& matrix_c_data_hex,
     bool include_local_registry_status = true)
 {
     const MatMulServiceChallengeContext ctx = ParseMatMulServiceChallenge(chainman, challenge_value);
@@ -4394,7 +4606,7 @@ static UniValue BuildMatMulServiceProofResult(
     }
 
     bool transcript_valid{false};
-    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, transcript_valid);
+    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, matrix_c_data_hex, transcript_valid);
 
     result.pushKV("valid", transcript_valid);
     result.pushKV("expired", false);
@@ -4408,7 +4620,8 @@ static UniValue BuildMatMulServiceRedeemResult(
     ChainstateManager& chainman,
     const UniValue& challenge_value,
     const std::string& nonce64_hex,
-    const std::string& digest_hex)
+    const std::string& digest_hex,
+    const std::string& matrix_c_data_hex)
 {
     const MatMulServiceChallengeContext ctx = ParseMatMulServiceChallenge(chainman, challenge_value);
     const int64_t checked_at = GetTime();
@@ -4466,7 +4679,7 @@ static UniValue BuildMatMulServiceRedeemResult(
     }
 
     bool transcript_valid{false};
-    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, transcript_valid);
+    UniValue proof = EvaluateMatMulServiceProof(ctx, nonce64_hex, digest_hex, matrix_c_data_hex, transcript_valid);
     if (!transcript_valid) {
         registry_status.redeemable = true;
         AppendMatMulServiceRegistryStatus(result, registry_status);
@@ -4708,8 +4921,15 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
     };
 
     if (matmul_active) {
+        // MatMul v4 (spec §I.3, §J#10): at and above nMatMulV4Height the
+        // template/generated block carries the v4 dimension. SolveMatMul
+        // (pow.cpp) internally dispatches to the v4 solver loop
+        // (SolveMatMulV4 -> matmul_v4::ComputeDigest) whenever
+        // IsMatMulV4Active(next_height); no separate call site is needed here.
         if (block.matmul_dim == 0) {
-            block.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+            block.matmul_dim = consensus.IsMatMulV4Active(next_height)
+                ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+                : static_cast<uint16_t>(consensus.nMatMulDimension);
         }
         if (!SetDeterministicMatMulSeeds(block, consensus, next_height, parent_median_time_past)) {
             throw JSONRPCError(RPC_INTERNAL_ERROR, "unable to derive deterministic MatMul seeds");
@@ -4738,11 +4958,44 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         // or once the transcript-binding upgrade makes the optional payload
         // path safe for honest miners again.
         if (include_freivalds_payload && block.matrix_c_data.empty()) {
+            if (consensus.IsMatMulV4Active(next_height)) {
+                // The v4 solver (SolveMatMulV4) always attaches the sketch
+                // payload directly via freivalds_payload_out on success; the
+                // v3 PopulateFreivaldsPayload fallback below assumes v3's
+                // noise/transcript-block-size machinery and must never run
+                // against a v4-dimension block.
+                cleanup_watcher();
+                throw JSONRPCError(RPC_INTERNAL_ERROR,
+                    "matmul v4 solve succeeded without attaching a product sketch payload");
+            }
             // Populate Freivalds' C' payload unless SolveMatMul already
             // generated it via CPU confirmation on the accepted candidate.
             PopulateFreivaldsPayload(block, consensus);
         } else if (!include_freivalds_payload) {
             block.matrix_c_data.clear();
+        }
+        // v4.4 ENC-DR digest-only carriage (tension-resolution §4.1/§4.3): at
+        // DIGEST_RECOMPUTE heights the solver produced the 8·m² sketch above
+        // (mining is byte-identical to v4.3), but it must NOT ride in the block
+        // body — the header's matmul_digest is the entire consensus commitment.
+        // Move the bytes into the local non-consensus sketch cache keyed by the
+        // (now-finalized) block hash and clear the in-body sketch, so the block
+        // serializes digest-only; the winner MAY then serve the sketch to peers
+        // via the best-effort getmmsketch/mmsketch cache transport.
+        if (consensus.IsMatMulV4Active(next_height) &&
+            consensus.GetMatMulProfileParams(next_height).commitment ==
+                Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            OffloadMatMulV4SketchToCache(block);
+        }
+        // Withdrawn HeaderPoW experiment: the helper is a no-op under every
+        // shipped network's UINT32_MAX sentinel. nNonce is NOT in the fixed
+        // 182-byte wire or GetHash; bit 26 is only a historical marker. Do not
+        // enable this path publicly without a new height-contextual design.
+        if (consensus.IsMatMulV4Active(next_height) &&
+            !GrindMatMulHeaderSpamNonce(block, consensus, max_tries)) {
+            cleanup_watcher();
+            if (max_tries == 0 || chainman.m_interrupt) return false;
+            return false;
         }
     } else if (kawpow_active) {
         if (consensus.fSkipKAWPOWValidation) {
@@ -5480,6 +5733,8 @@ static RPCHelpMan getdifficultyhealth()
                             {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
                             {RPCResult::Type::NUM, "park_depth", "Configured local parking depth for candidate reorgs"},
                             {RPCResult::Type::NUM, "local_finality_depth", "Configured practical local-finality depth"},
+                            {RPCResult::Type::NUM, "hysteresis_depth", "Configured reorg hysteresis depth within which a challenger must exceed the active chain by the hysteresis work margin, or 0 when inactive"},
+                            {RPCResult::Type::NUM, "hysteresis_work_margin", "Configured extra-work margin required to switch tips within the hysteresis depth, or 0 when inactive"},
                             {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
                             {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
                             {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
@@ -5499,6 +5754,14 @@ static RPCHelpMan getdifficultyhealth()
                             {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent event"},
                             {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent event"},
                             {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent deep-reorg warning or parking event"},
+                            {RPCResult::Type::NUM, "deferred_reorgs", "Reorgs deferred by hysteresis since process start"},
+                            {RPCResult::Type::NUM, "deepest_deferred_reorg_depth", "Deepest reorg deferred by hysteresis since process start"},
+                            {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Depth of the most recent reorg deferred by hysteresis"},
+                            {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                            {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork point height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate chain height for the most recent deferred candidate, or -1"},
+                            {RPCResult::Type::NUM, "last_deferred_unix", "Unix timestamp when the most recent candidate was deferred, or 0"},
                             {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
                             {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
                                 {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
@@ -5747,6 +6010,9 @@ static RPCHelpMan getmatmulchallenge()
                             {RPCResult::Type::NUM, "max_dimension", "Maximum dimension"},
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
+                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
+                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {128,256,512} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                            {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
                             {RPCResult::Type::NUM, "field_element_bytes", "Bytes per field element"},
@@ -5781,6 +6047,8 @@ static RPCHelpMan getmatmulchallenge()
                                 {RPCResult::Type::STR, "seed_derivation_scope", "Which chain context determines the next block's matrix seeds"},
                                 {RPCResult::Type::STR, "seed_derivation_rule", "Consensus rule used to derive seed_a and seed_b"},
                                 {RPCResult::Type::BOOL, "winner_knows_next_seeds_first", "Whether the current block winner can derive the next block's seeds before peers receive the parent block"},
+                                {RPCResult::Type::BOOL, "private_parent_withholding_head_start_possible", "Whether a miner who privately withholds a found parent block can gain a head start deriving the next block's seeds under standard proof-of-work parent withholding"},
+                                {RPCResult::Type::STR, "private_parent_withholding_head_start_scope", "Scope of any private-parent withholding head start available under the active seed-derivation rule"},
                                 {RPCResult::Type::BOOL, "publicly_precomputable_before_parent_seen", "Whether non-winning miners can derive the next block's seeds before the parent block hash is visible"},
                                 {RPCResult::Type::NUM, "public_precompute_horizon_blocks", "How many blocks ahead the seed inputs are publicly known before the parent is seen"},
                                 {RPCResult::Type::NUM, "fixed_matrix_generation_elements_upper_bound", "Upper bound on matrix-expansion field elements gated by the next block's seeds"},
@@ -5865,6 +6133,11 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "mean_transcript_elapsed_ms", "Mean elapsed time for full transcript checks"},
                                     {RPCResult::Type::NUM, "last_transcript_elapsed_ms", "Elapsed time of the latest full transcript check"},
                                     {RPCResult::Type::NUM, "max_transcript_elapsed_ms", "Slowest full transcript check observed"},
+                                    {RPCResult::Type::NUM, "recompute_checks", "ENC-DR O(W) digest recompute checks recorded since process start"},
+                                    {RPCResult::Type::NUM, "total_recompute_elapsed_ms", "Total elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "mean_recompute_elapsed_ms", "Mean elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "last_recompute_elapsed_ms", "Elapsed time of the latest ENC-DR recompute check"},
+                                    {RPCResult::Type::NUM, "max_recompute_elapsed_ms", "Slowest ENC-DR recompute check observed"},
                                 }},
                                 {RPCResult::Type::OBJ, "propagation_proxy", "", {
                                     {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
@@ -5910,6 +6183,8 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
                                     {RPCResult::Type::NUM, "park_depth", "Configured local parking depth for candidate reorgs"},
                                     {RPCResult::Type::NUM, "local_finality_depth", "Configured practical local-finality depth"},
+                                    {RPCResult::Type::NUM, "hysteresis_depth", "Configured reorg hysteresis depth within which a challenger must exceed the active chain by the hysteresis work margin, or 0 when inactive"},
+                                    {RPCResult::Type::NUM, "hysteresis_work_margin", "Configured extra-work margin required to switch tips within the hysteresis depth, or 0 when inactive"},
                                     {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
                                     {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
                                     {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
@@ -5929,6 +6204,14 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent event"},
                                     {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent event"},
                                     {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent deep-reorg warning or parking event"},
+                                    {RPCResult::Type::NUM, "deferred_reorgs", "Reorgs deferred by hysteresis since process start"},
+                                    {RPCResult::Type::NUM, "deepest_deferred_reorg_depth", "Deepest reorg deferred by hysteresis since process start"},
+                                    {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Depth of the most recent reorg deferred by hysteresis"},
+                                    {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                                    {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                                    {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork point height for the most recent deferred candidate, or -1"},
+                                    {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate chain height for the most recent deferred candidate, or -1"},
+                                    {RPCResult::Type::NUM, "last_deferred_unix", "Unix timestamp when the most recent candidate was deferred, or 0"},
                                     {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
                                     {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
                                         {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
@@ -5938,6 +6221,11 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},
                                     {RPCResult::Type::STR, "active_backend", "Mining backend the daemon actually resolved to; differs from requested_backend on a silent fallback"},
                                     {RPCResult::Type::STR, "backend_selection_reason", "Why the active backend was selected (e.g. why a requested GPU backend fell back to CPU)"},
+                                    {RPCResult::Type::BOOL, "required_backend_enabled", "Whether BTX_MATMUL_REQUIRE_BACKEND is active"},
+                                    {RPCResult::Type::STR, "required_backend", "Required backend when enabled"},
+                                    {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
+                                    {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
+                                    {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
                                     {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
                                     {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
                                     {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
@@ -5955,8 +6243,37 @@ static RPCHelpMan getmatmulchallenge()
                                     {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_auto_disabled_skips", "AUTO-mode GPU input skips after disablement"},
                                     {RPCResult::Type::BOOL, "gpu_input_auto_disabled", "Whether GPU input AUTO mode is disabled"},
+                                    {RPCResult::Type::NUM, "gpu_prehash_scan_attempts", "GPU prehash scan attempts"},
+                                    {RPCResult::Type::NUM, "gpu_prehash_scan_successes", "Successful GPU prehash scans"},
+                                    {RPCResult::Type::NUM, "gpu_prehash_scan_failures", "Failed GPU prehash scans"},
+                                    {RPCResult::Type::NUM, "metal_nonce_seed_scan_fallbacks_to_cpu", "Metal nonce-seed scans that fell back to CPU"},
+                                    {RPCResult::Type::NUM, "cuda_nonce_seed_scan_fallbacks_to_cpu", "CUDA nonce-seed scans that fell back to CPU"},
+                                    {RPCResult::Type::STR, "last_gpu_prehash_scan_backend", "Most recent GPU prehash scan backend"},
+                                    {RPCResult::Type::STR, "last_gpu_prehash_scan_error", "Most recent GPU prehash scan error"},
                                     {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent Metal fallback error"},
                                     {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent CUDA fallback error"},
+                                    {RPCResult::Type::OBJ, "cuda_buffer_pool", "Daemon-local CUDA digest buffer pool state and retained device capacity",
+                                    {
+                                        {RPCResult::Type::BOOL, "available", "Whether the CUDA buffer pool probe is available"},
+                                        {RPCResult::Type::BOOL, "initialized", "Whether the daemon has initialized the CUDA buffer pool"},
+                                        {RPCResult::Type::NUM, "allocation_events", "CUDA digest pool requests that allocated or resized device buffers"},
+                                        {RPCResult::Type::NUM, "reuse_events", "CUDA digest pool requests that reused existing device buffers"},
+                                        {RPCResult::Type::NUM, "wait_events", "CUDA digest pool acquisitions that waited for a slot"},
+                                        {RPCResult::Type::NUM, "completed_submissions", "Completed CUDA digest pool submissions"},
+                                        {RPCResult::Type::NUM, "device_capacity_bytes", "Estimated retained CUDA device-buffer capacity across all digest pool slots"},
+                                        {RPCResult::Type::NUM, "active_device_capacity_bytes", "Estimated retained CUDA device-buffer capacity in currently active slots"},
+                                        {RPCResult::Type::NUM, "max_slot_device_capacity_bytes", "Largest estimated retained CUDA device-buffer capacity of any one digest pool slot"},
+                                        {RPCResult::Type::NUM, "slot_count", "Configured CUDA digest pool slot count"},
+                                        {RPCResult::Type::NUM, "active_slots", "Currently active CUDA digest pool slots"},
+                                        {RPCResult::Type::NUM, "high_water_slots", "Highest concurrently active CUDA digest pool slot count"},
+                                        {RPCResult::Type::NUM, "slots_with_device_buffers", "CUDA digest pool slots with retained device buffers"},
+                                        {RPCResult::Type::NUM, "inflight_submissions", "Currently inflight CUDA digest submissions"},
+                                        {RPCResult::Type::NUM, "peak_inflight_submissions", "Highest observed inflight CUDA digest submissions"},
+                                        {RPCResult::Type::NUM, "n", "Last CUDA digest pool MatMul n"},
+                                        {RPCResult::Type::NUM, "b", "Last CUDA digest pool MatMul block size"},
+                                        {RPCResult::Type::NUM, "r", "Last CUDA digest pool MatMul rank"},
+                                        {RPCResult::Type::STR, "reason", "CUDA buffer pool probe status"},
+                                    }},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},
                             }},
@@ -6075,6 +6392,9 @@ static RPCHelpMan getmatmulchallengeprofile()
                             {RPCResult::Type::NUM, "max_dimension", "Maximum dimension"},
                             {RPCResult::Type::STR_HEX, "seed_a", "Matrix seed A"},
                             {RPCResult::Type::STR_HEX, "seed_b", "Matrix seed B"},
+                            {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
+                            {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {128,256,512} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                            {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                         }},
                         {RPCResult::Type::OBJ, "work_profile", "Deterministic work profile implied by the active MatMul parameters", {
                             {RPCResult::Type::NUM, "field_element_bytes", "Bytes per field element"},
@@ -6109,6 +6429,8 @@ static RPCHelpMan getmatmulchallengeprofile()
                                 {RPCResult::Type::STR, "seed_derivation_scope", "Which chain context determines the next block's matrix seeds"},
                                 {RPCResult::Type::STR, "seed_derivation_rule", "Consensus rule used to derive seed_a and seed_b"},
                                 {RPCResult::Type::BOOL, "winner_knows_next_seeds_first", "Whether the current block winner can derive the next block's seeds before peers receive the parent block"},
+                                {RPCResult::Type::BOOL, "private_parent_withholding_head_start_possible", "Whether a miner who privately withholds a found parent block can gain a head start deriving the next block's seeds under standard proof-of-work parent withholding"},
+                                {RPCResult::Type::STR, "private_parent_withholding_head_start_scope", "Scope of any private-parent withholding head start available under the active seed-derivation rule"},
                                 {RPCResult::Type::BOOL, "publicly_precomputable_before_parent_seen", "Whether non-winning miners can derive the next block's seeds before the parent block hash is visible"},
                                 {RPCResult::Type::NUM, "public_precompute_horizon_blocks", "How many blocks ahead the seed inputs are publicly known before the parent is seen"},
                                 {RPCResult::Type::NUM, "fixed_matrix_generation_elements_upper_bound", "Upper bound on matrix-expansion field elements gated by the next block's seeds"},
@@ -6193,6 +6515,11 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "mean_transcript_elapsed_ms", "Mean elapsed time for full transcript checks"},
                                     {RPCResult::Type::NUM, "last_transcript_elapsed_ms", "Elapsed time of the latest full transcript check"},
                                     {RPCResult::Type::NUM, "max_transcript_elapsed_ms", "Slowest full transcript check observed"},
+                                    {RPCResult::Type::NUM, "recompute_checks", "ENC-DR O(W) digest recompute checks recorded since process start"},
+                                    {RPCResult::Type::NUM, "total_recompute_elapsed_ms", "Total elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "mean_recompute_elapsed_ms", "Mean elapsed time for ENC-DR recompute checks"},
+                                    {RPCResult::Type::NUM, "last_recompute_elapsed_ms", "Elapsed time of the latest ENC-DR recompute check"},
+                                    {RPCResult::Type::NUM, "max_recompute_elapsed_ms", "Slowest ENC-DR recompute check observed"},
                                 }},
                                 {RPCResult::Type::OBJ, "propagation_proxy", "", {
                                     {RPCResult::Type::BOOL, "network_active", "Whether P2P networking is active"},
@@ -6238,6 +6565,8 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "warn_depth", "Configured warning depth for candidate reorgs"},
                                     {RPCResult::Type::NUM, "park_depth", "Configured local parking depth for candidate reorgs"},
                                     {RPCResult::Type::NUM, "local_finality_depth", "Configured practical local-finality depth"},
+                                    {RPCResult::Type::NUM, "hysteresis_depth", "Configured reorg hysteresis depth within which a challenger must exceed the active chain by the hysteresis work margin, or 0 when inactive"},
+                                    {RPCResult::Type::NUM, "hysteresis_work_margin", "Configured extra-work margin required to switch tips within the hysteresis depth, or 0 when inactive"},
                                     {RPCResult::Type::NUM, "locally_finalized_height", "Highest height considered locally finalized by current policy"},
                                     {RPCResult::Type::NUM, "max_reorg_depth", "Compatibility alias for park_depth"},
                                     {RPCResult::Type::NUM, "consensus_max_reorg_depth", "Consensus parameter value used as legacy policy context"},
@@ -6257,6 +6586,14 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "last_rejected_fork_height", "Fork point height for the most recent event"},
                                     {RPCResult::Type::NUM, "last_rejected_candidate_height", "Candidate chain height for the most recent event"},
                                     {RPCResult::Type::NUM, "last_rejected_unix", "Unix timestamp of the most recent deep-reorg warning or parking event"},
+                                    {RPCResult::Type::NUM, "deferred_reorgs", "Reorgs deferred by hysteresis since process start"},
+                                    {RPCResult::Type::NUM, "deepest_deferred_reorg_depth", "Deepest reorg deferred by hysteresis since process start"},
+                                    {RPCResult::Type::NUM, "last_deferred_reorg_depth", "Depth of the most recent reorg deferred by hysteresis"},
+                                    {RPCResult::Type::NUM, "last_deferred_required_work_margin", "Configured extra-work margin that deferred the most recent observed candidate"},
+                                    {RPCResult::Type::NUM, "last_deferred_tip_height", "Active tip height when the most recent candidate was deferred, or -1"},
+                                    {RPCResult::Type::NUM, "last_deferred_fork_height", "Fork point height for the most recent deferred candidate, or -1"},
+                                    {RPCResult::Type::NUM, "last_deferred_candidate_height", "Candidate chain height for the most recent deferred candidate, or -1"},
+                                    {RPCResult::Type::NUM, "last_deferred_unix", "Unix timestamp when the most recent candidate was deferred, or 0"},
                                     {RPCResult::Type::NUM, "parked_branch_count", "Number of locally parked branch roots"},
                                     {RPCResult::Type::ARR, "parked_branch_roots", "Locally parked branch root hashes", {
                                         {RPCResult::Type::STR_HEX, "", "Parked branch root hash"},
@@ -6266,6 +6603,11 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::STR, "requested_backend", "Mining backend requested by the daemon (cpu/metal/cuda)"},
                                     {RPCResult::Type::STR, "active_backend", "Mining backend the daemon actually resolved to; differs from requested_backend on a silent fallback"},
                                     {RPCResult::Type::STR, "backend_selection_reason", "Why the active backend was selected (e.g. why a requested GPU backend fell back to CPU)"},
+                                    {RPCResult::Type::BOOL, "required_backend_enabled", "Whether BTX_MATMUL_REQUIRE_BACKEND is active"},
+                                    {RPCResult::Type::STR, "required_backend", "Required backend when enabled"},
+                                    {RPCResult::Type::BOOL, "required_backend_valid", "Whether the required backend name is recognized"},
+                                    {RPCResult::Type::BOOL, "required_backend_satisfied", "Whether the daemon's active backend satisfies the requirement"},
+                                    {RPCResult::Type::STR, "backend_requirement_reason", "Requirement parsing or enforcement reason"},
                                     {RPCResult::Type::NUM, "digest_requests", "Digest requests served"},
                                     {RPCResult::Type::NUM, "requested_cpu", "Digest requests targeting CPU"},
                                     {RPCResult::Type::NUM, "requested_metal", "Digest requests targeting Metal"},
@@ -6283,8 +6625,37 @@ static RPCHelpMan getmatmulchallengeprofile()
                                     {RPCResult::Type::NUM, "gpu_input_generation_failures", "Failed GPU input-generation attempts"},
                                     {RPCResult::Type::NUM, "gpu_input_auto_disabled_skips", "AUTO-mode GPU input skips after disablement"},
                                     {RPCResult::Type::BOOL, "gpu_input_auto_disabled", "Whether GPU input AUTO mode is disabled"},
+                                    {RPCResult::Type::NUM, "gpu_prehash_scan_attempts", "GPU prehash scan attempts"},
+                                    {RPCResult::Type::NUM, "gpu_prehash_scan_successes", "Successful GPU prehash scans"},
+                                    {RPCResult::Type::NUM, "gpu_prehash_scan_failures", "Failed GPU prehash scans"},
+                                    {RPCResult::Type::NUM, "metal_nonce_seed_scan_fallbacks_to_cpu", "Metal nonce-seed scans that fell back to CPU"},
+                                    {RPCResult::Type::NUM, "cuda_nonce_seed_scan_fallbacks_to_cpu", "CUDA nonce-seed scans that fell back to CPU"},
+                                    {RPCResult::Type::STR, "last_gpu_prehash_scan_backend", "Most recent GPU prehash scan backend"},
+                                    {RPCResult::Type::STR, "last_gpu_prehash_scan_error", "Most recent GPU prehash scan error"},
                                     {RPCResult::Type::STR, "last_metal_fallback_error", "Most recent Metal fallback error"},
                                     {RPCResult::Type::STR, "last_cuda_fallback_error", "Most recent CUDA fallback error"},
+                                    {RPCResult::Type::OBJ, "cuda_buffer_pool", "Daemon-local CUDA digest buffer pool state and retained device capacity",
+                                    {
+                                        {RPCResult::Type::BOOL, "available", "Whether the CUDA buffer pool probe is available"},
+                                        {RPCResult::Type::BOOL, "initialized", "Whether the daemon has initialized the CUDA buffer pool"},
+                                        {RPCResult::Type::NUM, "allocation_events", "CUDA digest pool requests that allocated or resized device buffers"},
+                                        {RPCResult::Type::NUM, "reuse_events", "CUDA digest pool requests that reused existing device buffers"},
+                                        {RPCResult::Type::NUM, "wait_events", "CUDA digest pool acquisitions that waited for a slot"},
+                                        {RPCResult::Type::NUM, "completed_submissions", "Completed CUDA digest pool submissions"},
+                                        {RPCResult::Type::NUM, "device_capacity_bytes", "Estimated retained CUDA device-buffer capacity across all digest pool slots"},
+                                        {RPCResult::Type::NUM, "active_device_capacity_bytes", "Estimated retained CUDA device-buffer capacity in currently active slots"},
+                                        {RPCResult::Type::NUM, "max_slot_device_capacity_bytes", "Largest estimated retained CUDA device-buffer capacity of any one digest pool slot"},
+                                        {RPCResult::Type::NUM, "slot_count", "Configured CUDA digest pool slot count"},
+                                        {RPCResult::Type::NUM, "active_slots", "Currently active CUDA digest pool slots"},
+                                        {RPCResult::Type::NUM, "high_water_slots", "Highest concurrently active CUDA digest pool slot count"},
+                                        {RPCResult::Type::NUM, "slots_with_device_buffers", "CUDA digest pool slots with retained device buffers"},
+                                        {RPCResult::Type::NUM, "inflight_submissions", "Currently inflight CUDA digest submissions"},
+                                        {RPCResult::Type::NUM, "peak_inflight_submissions", "Highest observed inflight CUDA digest submissions"},
+                                        {RPCResult::Type::NUM, "n", "Last CUDA digest pool MatMul n"},
+                                        {RPCResult::Type::NUM, "b", "Last CUDA digest pool MatMul block size"},
+                                        {RPCResult::Type::NUM, "r", "Last CUDA digest pool MatMul rank"},
+                                        {RPCResult::Type::STR, "reason", "CUDA buffer pool probe status"},
+                                    }},
                                     {RPCResult::Type::STR, "last_gpu_input_error", "Most recent GPU input-generation error"},
                                 }},
                             }},
@@ -6931,16 +7302,60 @@ static RPCHelpMan solvematmulservicechallenge()
     const auto ctx = ParseMatMulServiceChallenge(chainman, challenge_value);
     const uint64_t requested_tries = max_tries;
     const auto started_us = GetTime<std::chrono::microseconds>();
-    matmul::PowState state = BuildMatMulServicePowState(ctx, 0, uint256{});
-    const matmul::PowConfig config = BuildMatMulServicePowConfig(ctx);
-    const bool solved = matmul::Solve(
-        state,
-        config,
-        max_tries,
-        {
-            .time_budget_ms = static_cast<uint64_t>(time_budget_ms),
-            .max_worker_threads = static_cast<uint32_t>(solver_threads),
-        });
+
+    bool solved{false};
+    uint64_t solved_nonce{0};
+    uint256 solved_digest;
+    std::vector<unsigned char> solved_payload;
+
+    if (ctx.is_v4) {
+        // MatMul v4 (spec §I.3): grind nNonce64 through the dispatched v4 digest
+        // (matmul_v4::accel::ComputeDigestDispatched -- device backend with a
+        // byte-exact CPU verify/fallback, mirroring SolveMatMulV4 in pow.cpp)
+        // and accept the first nonce whose sketch-committed digest meets the
+        // challenge target. The sketch body travels back in matrix_c_data.
+        uint64_t nonce{0};
+        while (max_tries > 0) {
+            CBlockHeader header = BuildMatMulServiceV4Header(ctx, nonce, uint256{});
+            uint256 digest;
+            std::vector<unsigned char> payload;
+            // ENC-BMX4C (spec §8.2): grind through the BMX4C single-nonce reference
+            // digest at BMX4C heights (M11+E8M0 operands), else the ENC-S8
+            // dispatched digest. ComputeDigestBMX4C is the same function the
+            // consensus solver reseals through, so the emitted share verifies
+            // under the network's VerifySketchBMX4C.
+            const bool ok = ctx.is_bmx4c
+                ? matmul::v4::bmx4::ComputeDigestBMX4C(header, ctx.n, digest, payload)
+                : matmul_v4::accel::ComputeDigestDispatched(header, ctx.n, ctx.v4_rounds, digest, payload);
+            --max_tries;
+            if (ok && UintToArith256(digest) <= ctx.target) {
+                solved = true;
+                solved_nonce = nonce;
+                solved_digest = digest;
+                solved_payload = std::move(payload);
+                break;
+            }
+            if (nonce == std::numeric_limits<uint64_t>::max()) break;
+            ++nonce;
+            if (time_budget_ms > 0 &&
+                ((GetTime<std::chrono::microseconds>() - started_us).count() / 1000) >= time_budget_ms) {
+                break;
+            }
+        }
+    } else {
+        matmul::PowState state = BuildMatMulServicePowState(ctx, 0, uint256{});
+        const matmul::PowConfig config = BuildMatMulServicePowConfig(ctx);
+        solved = matmul::Solve(
+            state,
+            config,
+            max_tries,
+            {
+                .time_budget_ms = static_cast<uint64_t>(time_budget_ms),
+                .max_worker_threads = static_cast<uint32_t>(solver_threads),
+            });
+        solved_nonce = state.nonce;
+        solved_digest = state.digest;
+    }
     const double elapsed_ms = static_cast<double>(
         (GetTime<std::chrono::microseconds>() - started_us).count()) / 1000.0;
 
@@ -6959,8 +7374,8 @@ static RPCHelpMan solvematmulservicechallenge()
         return result;
     }
 
-    const std::string nonce64_hex = strprintf("%016x", state.nonce);
-    const std::string digest_hex = state.digest.GetHex();
+    const std::string nonce64_hex = strprintf("%016x", solved_nonce);
+    const std::string digest_hex = solved_digest.GetHex();
     result.pushKV("reason", "ok");
     result.pushKV("nonce64_hex", nonce64_hex);
     result.pushKV("digest_hex", digest_hex);
@@ -6968,6 +7383,13 @@ static RPCHelpMan solvematmulservicechallenge()
     proof.pushKV("challenge", challenge_value);
     proof.pushKV("nonce64_hex", nonce64_hex);
     proof.pushKV("digest_hex", digest_hex);
+    if (ctx.is_v4) {
+        // Carry the v4 sketch body through the matrix_c_data channel so the
+        // verifier can replay matmul_v4::VerifySketch against it.
+        const std::string matrix_c_data_hex = HexStr(solved_payload);
+        result.pushKV("matrix_c_data", matrix_c_data_hex);
+        proof.pushKV("matrix_c_data", matrix_c_data_hex);
+    }
     result.pushKV("proof", std::move(proof));
     return result;
 },
@@ -6983,6 +7405,7 @@ static RPCHelpMan verifymatmulserviceproof()
                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
                     {MATMUL_SERVICE_VERIFY_LOOKUP_LOCAL_STATUS, RPCArg::Type::BOOL, RPCArg::Default{true}, "Whether to consult the local/shared issued-challenge registry and include issued/redeemed/redeemable fields. Disable this for stateless high-volume verification."},
+                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "MatMul v4 sketch payload (hex) accompanying the share; required for v4 challenges (at and above the v4 activation height) and ignored for v3."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -7014,6 +7437,8 @@ static RPCHelpMan verifymatmulserviceproof()
     const ArgsManager& args = EnsureArgsman(node);
     const bool include_local_registry_status =
         request.params[3].isNull() ? true : request.params[3].get_bool();
+    const std::string matrix_c_data_hex =
+        request.params[4].isNull() ? std::string{} : request.params[4].get_str();
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
@@ -7023,6 +7448,7 @@ static RPCHelpMan verifymatmulserviceproof()
         request.params[0],
         request.params[1].get_str(),
         request.params[2].get_str(),
+        matrix_c_data_hex,
         include_local_registry_status);
 },
     };
@@ -7036,6 +7462,7 @@ static RPCHelpMan redeemmatmulserviceproof()
                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
+                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Default{""}, "MatMul v4 sketch payload (hex) accompanying the share; required for v4 challenges (at and above the v4 activation height) and ignored for v3."},
                 },
                 RPCResult{
                     RPCResult::Type::OBJ, "", "",
@@ -7065,6 +7492,8 @@ static RPCHelpMan redeemmatmulserviceproof()
     NodeContext& node = EnsureAnyNodeContext(request.context);
     ChainstateManager& chainman = EnsureChainman(node);
     const ArgsManager& args = EnsureArgsman(node);
+    const std::string matrix_c_data_hex =
+        request.params[3].isNull() ? std::string{} : request.params[3].get_str();
     if (!chainman.GetConsensus().fMatMulPOW) {
         throw JSONRPCError(RPC_MISC_ERROR, "MatMul proof-of-work is not active on this chain");
     }
@@ -7073,7 +7502,8 @@ static RPCHelpMan redeemmatmulserviceproof()
         chainman,
         request.params[0],
         request.params[1].get_str(),
-        request.params[2].get_str());
+        request.params[2].get_str(),
+        matrix_c_data_hex);
 },
     };
 }
@@ -7090,6 +7520,7 @@ static RPCHelpMan verifymatmulserviceproofs()
                                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
+                                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "MatMul v4 sketch payload (hex); required for v4 challenges and ignored for v3."},
                                 },
                             },
                         },
@@ -7149,6 +7580,7 @@ static RPCHelpMan verifymatmulserviceproofs()
             item.challenge,
             item.nonce64_hex,
             item.digest_hex,
+            item.matrix_c_data_hex,
             include_local_registry_status);
     });
 },
@@ -7167,6 +7599,7 @@ static RPCHelpMan redeemmatmulserviceproofs()
                                     {"challenge", RPCArg::Type::OBJ, RPCArg::Optional::NO, "Challenge envelope returned by getmatmulservicechallenge", std::vector<RPCArg>{}},
                                     {"nonce64_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted 64-bit nonce in hexadecimal"},
                                     {"digest_hex", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Submitted transcript digest in hexadecimal"},
+                                    {"matrix_c_data", RPCArg::Type::STR_HEX, RPCArg::Optional::OMITTED, "MatMul v4 sketch payload (hex); required for v4 challenges and ignored for v3."},
                                 },
                             },
                         },
@@ -7222,7 +7655,8 @@ static RPCHelpMan redeemmatmulserviceproofs()
             chainman,
             item.challenge,
             item.nonce64_hex,
-            item.digest_hex);
+            item.digest_hex,
+            item.matrix_c_data_hex);
     });
 },
     };
@@ -7529,6 +7963,9 @@ static RPCHelpMan getblocktemplate()
                 {
                     {RPCResult::Type::NUM, "max_block_weight", "consensus maximum block weight"},
                     {RPCResult::Type::NUM, "max_block_serialized_size", "consensus maximum serialized block size in bytes"},
+                    {RPCResult::Type::NUM, "max_protocol_message_length", "maximum length in bytes of an ordinary (non-block-bearing) P2P protocol message"},
+                    {RPCResult::Type::NUM, "relay_serialized_limit", "maximum serialized size in bytes of a block-bearing P2P message (block/blocktxn); a fully assembled block must fit within this to be relayable"},
+                    {RPCResult::Type::NUM, "matmul_proof_reserved_bytes", "bytes reserved in the block for the mandatory in-block MatMul v4 product-sketch payload (subtract from max_block_serialized_size for the effective transaction budget); 0 at segregated-proof heights (sketch relayed off-body) and non-v4 heights"},
                     {RPCResult::Type::NUM, "max_block_sigops_cost", "consensus maximum block sigops cost"},
                     {RPCResult::Type::NUM, "default_block_max_weight", "default block template weight target"},
                     {RPCResult::Type::NUM, "policy_block_max_weight", "effective local block template weight target"},
@@ -7563,6 +8000,9 @@ static RPCHelpMan getblocktemplate()
                     {RPCResult::Type::STR_HEX, "seed_b", "MatMul matrix seed B"},
                     {RPCResult::Type::NUM, "min_dimension", "minimum allowed MatMul matrix dimension"},
                     {RPCResult::Type::NUM, "max_dimension", "maximum allowed MatMul matrix dimension"},
+                    {RPCResult::Type::STR, "encoding_profile", /*optional=*/true, "committed-operand encoding profile the miner must use (\"ENC-BMX4C-LT\", \"ENC-BMX4C\", or \"ENC-S8\"); present only under the v4 profile"},
+                    {RPCResult::Type::NUM, "consensus_q_star", /*optional=*/true, "ENC-DR-LT miner fat-window size Q* in {128,256,512} (Phase A schedule hint; present only under ENC-BMX4C-LT)"},
+                    {RPCResult::Type::NUM, "lt_transcript_block_size", /*optional=*/true, "ENC-DR-LT deep-m tile b (present only under ENC-BMX4C-LT)"},
                 }},
                 {RPCResult::Type::NUM, "matmul_n", /*optional=*/true, "MatMul matrix dimension (n)"},
                 {RPCResult::Type::NUM, "matmul_b", /*optional=*/true, "MatMul transcript block size (b)"},
@@ -8002,8 +8442,16 @@ static UniValue TemplateToJSON(
     block_header.nNonce = 0;
     block_header.nNonce64 = 0;
     block_header.mix_hash.SetNull();
+    // MatMul v4 (spec §I.3, §J#10): at and above nMatMulV4Height the template
+    // carries the v4 dimension so the getblocktemplate miner (SolveMatMul ->
+    // SolveMatMulV4) grinds the correct shape; below the fork the v3 dimension
+    // default stands. The heavy solve/sketch-payload work already dispatches to
+    // v4 through SolveMatMul; this only fixes the advertised dimension/params.
+    const bool gbt_matmul_v4 = consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(next_height);
     if (consensusParams.fMatMulPOW) {
-        if (block_header.matmul_dim == 0) {
+        if (gbt_matmul_v4) {
+            block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulV4Dimension);
+        } else if (block_header.matmul_dim == 0) {
             block_header.matmul_dim = static_cast<uint16_t>(consensusParams.nMatMulDimension);
         }
         block_header.matmul_digest.SetNull();
@@ -8132,6 +8580,30 @@ static UniValue TemplateToJSON(
     UniValue block_capacity(UniValue::VOBJ);
     block_capacity.pushKV("max_block_weight", static_cast<int64_t>(MAX_BLOCK_WEIGHT));
     block_capacity.pushKV("max_block_serialized_size", static_cast<int64_t>(MAX_BLOCK_SERIALIZED_SIZE));
+    // Transport ceilings so a self-filling pool sees that a serialized block is
+    // relayed under the block-bearing message limit (block/blocktxn) while any
+    // ordinary P2P message is capped lower. relay_serialized_limit is the
+    // effective ceiling a fully assembled block must fit within on the wire.
+    block_capacity.pushKV("max_protocol_message_length", static_cast<int64_t>(MAX_PROTOCOL_MESSAGE_LENGTH));
+    block_capacity.pushKV("relay_serialized_limit", static_cast<int64_t>(MAX_BLOCK_MESSAGE_LENGTH));
+    // Adversarial finding L1: at legacy IN-BLOCK MatMul v4 heights the solved
+    // block MUST carry a mandatory ~8 MiB product-sketch payload (BlockAssembler
+    // reserves exactly this before tx selection), so the effective transaction
+    // budget is max_block_serialized_size MINUS this reservation. Advertise it so
+    // an external pool that fills a block itself (ignoring the returned tx list)
+    // does not build a self-invalid >max block by filling to the raw ceiling and
+    // then appending the sketch. Zero at v4.4 ENC-DR heights (digest-only
+    // carriage — the block body carries no sketch at all, tension-resolution
+    // §4.1) and at non-v4 heights. Matches the miner's reservation exactly:
+    // 2*m*m uint32 words = 8*m^2 bytes, m = dim / kTileB.
+    int64_t matmul_proof_reserved_bytes = 0;
+    if (matmul_active && consensusParams.IsMatMulV4Active(next_height) &&
+        consensusParams.GetMatMulProfileParams(next_height).commitment ==
+            Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK) {
+        const uint64_t reserve_m = static_cast<uint64_t>(consensusParams.nMatMulV4Dimension) / matmul_v4::kTileB;
+        matmul_proof_reserved_bytes = static_cast<int64_t>(8 * reserve_m * reserve_m);
+    }
+    block_capacity.pushKV("matmul_proof_reserved_bytes", matmul_proof_reserved_bytes);
     block_capacity.pushKV("max_block_sigops_cost", static_cast<int64_t>(MAX_BLOCK_SIGOPS_COST));
     block_capacity.pushKV("default_block_max_weight", static_cast<int64_t>(BlockAssembler::Options{}.nBlockMaxWeight));
     block_capacity.pushKV("policy_block_max_weight", static_cast<int64_t>(block_options.nBlockMaxWeight));
@@ -8170,24 +8642,42 @@ static UniValue TemplateToJSON(
     result.pushKV("bits", strprintf("%08x", block_header.nBits));
     result.pushKV("height", static_cast<int64_t>(next_height));
     if (matmul_active) {
+        // v4 advertises the sketch tile b, v4 Freivalds rounds, and prime
+        // q = 2^61-1; v3 keeps the transcript block size / noise rank / modulus.
+        const uint64_t gbt_matmul_b = ResolveMatMulAdvertisedTileB(consensusParams, next_height);
+        const uint64_t gbt_matmul_r = gbt_matmul_v4 ? static_cast<uint64_t>(consensusParams.nMatMulV4FreivaldsRounds)
+                                                    : static_cast<uint64_t>(consensusParams.nMatMulNoiseRank);
+        const uint64_t gbt_matmul_q = gbt_matmul_v4 ? static_cast<uint64_t>(matmul::int8_field::kFieldPrime)
+                                                    : static_cast<uint64_t>(consensusParams.nMatMulFieldModulus);
         UniValue matmul(UniValue::VOBJ);
         matmul.pushKV("n", block_header.matmul_dim);
-        matmul.pushKV("b", consensusParams.nMatMulTranscriptBlockSize);
-        matmul.pushKV("r", consensusParams.nMatMulNoiseRank);
-        matmul.pushKV("q", static_cast<uint64_t>(consensusParams.nMatMulFieldModulus));
+        matmul.pushKV("b", gbt_matmul_b);
+        matmul.pushKV("r", gbt_matmul_r);
+        matmul.pushKV("q", gbt_matmul_q);
         matmul.pushKV("seed_a", block_header.seed_a.GetHex());
         matmul.pushKV("seed_b", block_header.seed_b.GetHex());
         matmul.pushKV("min_dimension", static_cast<uint64_t>(consensusParams.nMatMulMinDimension));
         matmul.pushKV("max_dimension", static_cast<uint64_t>(consensusParams.nMatMulMaxDimension));
+        // Audit finding A (RPC): advertise the committed-operand ENCODING PROFILE
+        // so an external miner/pool that computes the digest itself knows which
+        // operand encoding to use across the ENC-S8 -> ENC-BMX4C fork. Every other
+        // GBT matmul field (n, b, r, q, seeds) is byte-identical across that fork,
+        // so without this there is NO in-band signal that the profile flipped and
+        // a miner would silently produce ENC-S8 digests the network rejects.
+        if (gbt_matmul_v4) {
+            matmul.pushKV("encoding_profile",
+                ResolveMatMulEncodingProfileName(consensusParams, next_height));
+            PushMatMulLtMinerHints(matmul, consensusParams, next_height);
+        }
         result.pushKV("matmul", std::move(matmul));
 
         // Backward-compatible top-level fields retained for existing miners/tests.
         result.pushKV("matmul_n", block_header.matmul_dim);
-        result.pushKV("matmul_b", consensusParams.nMatMulTranscriptBlockSize);
-        result.pushKV("matmul_r", consensusParams.nMatMulNoiseRank);
+        result.pushKV("matmul_b", gbt_matmul_b);
+        result.pushKV("matmul_r", gbt_matmul_r);
         result.pushKV("seed_a", block_header.seed_a.GetHex());
         result.pushKV("seed_b", block_header.seed_b.GetHex());
-        result.pushKV("matmul_field_modulus", (uint64_t)consensusParams.nMatMulFieldModulus);
+        result.pushKV("matmul_field_modulus", gbt_matmul_q);
         result.pushKV("matmul_min_dimension", static_cast<uint64_t>(consensusParams.nMatMulMinDimension));
         result.pushKV("matmul_max_dimension", static_cast<uint64_t>(consensusParams.nMatMulMaxDimension));
 

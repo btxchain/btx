@@ -253,6 +253,12 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
     result.pushKV("time", blockindex.nTime);
     result.pushKV("mediantime", blockindex.GetMedianTimePast());
     result.pushKV("nonce", blockindex.nNonce);
+    // Audit (wave-3): the real MatMul PoW nonce is nNonce64. The legacy 32-bit
+    // nNonce is NOT on the P2P header wire, so a miner reports low32(nNonce64)
+    // while every relaying node reports 0 for the same block -- node-divergent and
+    // misleading. Expose the authoritative wire-consistent nNonce64 (matching
+    // getblock), which the schema already declares.
+    result.pushKV("nonce64", strprintf("%016x", blockindex.nNonce64));
     result.pushKV("bits", strprintf("%08x", blockindex.nBits));
     result.pushKV("target", GetTarget(blockindex, pow_limit).GetHex());
     result.pushKV("difficulty", GetDifficulty(blockindex));
@@ -269,7 +275,9 @@ UniValue blockheaderToJSON(const CBlockIndex& tip, const CBlockIndex& blockindex
 UniValue blockToJSON(BlockManager& blockman, const CBlock& block, const CBlockIndex& tip, const CBlockIndex& blockindex, TxVerbosity verbosity, const uint256 pow_limit)
 {
     UniValue result = blockheaderToJSON(tip, blockindex, pow_limit);
-    result.pushKV("nonce64", strprintf("%016x", block.nNonce64));
+    // nonce64 is now emitted by blockheaderToJSON (from the index); do not
+    // duplicate it here. (blockindex.nNonce64 == block.nNonce64 for a connected
+    // block.)
     result.pushKV("mixhash", block.mix_hash.GetHex());
     if (block.matmul_dim != 0 || !block.matmul_digest.IsNull() || !block.seed_a.IsNull() || !block.seed_b.IsNull()) {
         result.pushKV("matmul_digest", block.matmul_digest.GetHex());

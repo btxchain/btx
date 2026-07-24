@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# Copyright (c) 2026 The BTX developers
+"""ENC_RC golden-diff CI gate (FINAL-FORM Stage A1 / Stage H).
+
+FAILS if a frozen V1 episode digest changes without an explicit transcript
+version bump (`kRCTranscriptVersion` / `ENC_RC_V1` in matmul_v4_rc.h).
+
+Policy (do not weaken):
+  - Silent golden replacement is FORBIDDEN.
+  - ENC_RC_V1 toy golden (V1 stream, segment leaves OFF) is pinned below.
+  - Coupled V1 toy + V2 medium + V3 medium goldens are ALL retained.
+  - V3 COUP_*_V3 domains must not collide with V1/V2 strings.
+
+Usage:
+  contrib/matmul-v4/rc-golden-gate.py
+  contrib/matmul-v4/rc-golden-gate.py --expect 5b1bff3c...
+  contrib/matmul-v4/rc-golden-gate.py --json
+
+Exit: 0 = OK, 1 = golden/version mismatch, 2 = usage/parse error.
+Stdlib only. Never raises nMatMulRCHeight.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+TEST_CPP = REPO_ROOT / "src" / "test" / "matmul_v4_rc_tests.cpp"
+COUPLED_TEST_CPP = REPO_ROOT / "src" / "test" / "matmul_v4_rc_coupled_tests.cpp"
+RC_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc.h"
+SCALE_AXES_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc_scale_axes.h"
+PARAMS_H = REPO_ROOT / "src" / "consensus" / "params.h"
+
+# Frozen V1 toy golden (MakeToyRCEpisodeParams + MakeRCHeader(42)).
+# V1 stream; kRCSegmentLeavesEnabled = false.
+FROZEN_V1_HEX = "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4"
+FROZEN_VERSION = 1  # ENC_RC_V1
+
+# Separate frozen digest for Stage C coupled toy (MakeCoupHeader(42) @ height 0).
+# Not an episode transcript version — listed so silent replacement is caught.
+FROZEN_COUPLED_TOY_HEX = "7a7ce1065c7881aa2bd2295c26778ebf88c22432e91326f98d098c11885579ee"
+FROZEN_COUPLED_MEDIUM_V2_HEX = "349175d557eba373cd59ea4cb5431d5710481cc8e7e121e90c2a0775df8b5f4c"
+# WP-H: re-pin under COUP_*_V3 (prior 744fd3df… was V1 tags on V3 shape).
+FROZEN_COUPLED_MEDIUM_V3_HEX = "a4bb0cc42e2b97631d126a0dcdae26ad83b2f287d885322392a564990a95bac4"
+COUPLED_H = REPO_ROOT / "src" / "matmul" / "matmul_v4_rc_coupled.h"
+
+def die(msg: str, code: int = 1) -> None:
+    sys.stderr.write("rc-golden-gate: FAIL — " + msg + "\n")
+    sys.exit(code)
+
+
+def parse_uint_constexpr(text: str, name: str) -> int | None:
+    """Parse `inline constexpr uint32_t NAME = <int|ENC_RC_Vk>;`."""
+    m = re.search(
+        rf"inline\s+constexpr\s+uint32_t\s+{re.escape(name)}\s*=\s*([^;]+);",
+        text,
+    )
+    if not m:
+        return None
+    rhs = m.group(1).strip()
+    if rhs.isdigit():
+        return int(rhs)
+    enc = re.fullmatch(r"ENC_RC_V(\d+)", rhs)
+    if enc:
+        return int(enc.group(1))
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", rhs):
+        return parse_uint_constexpr(text, rhs)
+    return None
+
+
+def extract_goldens(text: str) -> list[str]:
+    return re.findall(
+        r'GetHex\(\),\s*\n?\s*"(?P<hex>[0-9a-f]{64})"',
+        text,
+    )
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--expect",
+        default=FROZEN_V1_HEX,
+        help="Expected V1 toy golden hex (default: frozen V1)",
+    )
+    ap.add_argument("--json", action="store_true", help="machine-readable summary")
+    args = ap.parse_args()
+    expect = args.expect.strip().lower()
+    if len(expect) != 64 or any(c not in "0123456789abcdef" for c in expect):
+        die(f"invalid --expect hex: {expect!r}", code=2)
+
+    if not TEST_CPP.is_file():
+        die(f"missing {TEST_CPP}", code=2)
+    if not RC_H.is_file():
+        die(f"missing {RC_H}", code=2)
+
+    hdr = RC_H.read_text(encoding="utf-8")
+    text = TEST_CPP.read_text(encoding="utf-8")
+    errors: list[str] = []
+
+    ver = parse_uint_constexpr(hdr, "kRCTranscriptVersion")
+    enc_v1 = parse_uint_constexpr(hdr, "ENC_RC_V1")
+    enc_v2 = parse_uint_constexpr(hdr, "ENC_RC_V2")
+    enc_v3 = parse_uint_constexpr(hdr, "ENC_RC_V3")
+    if ver is None:
+        errors.append("missing kRCTranscriptVersion in matmul_v4_rc.h")
+    if enc_v1 != 1:
+        errors.append(f"ENC_RC_V1 must be 1 (got {enc_v1})")
+    if enc_v2 != 2:
+        errors.append(f"ENC_RC_V2 must be 2 (got {enc_v2})")
+    if enc_v3 != 3:
+        errors.append(f"ENC_RC_V3 must be 3 (got {enc_v3})")
+    if ver is not None and enc_v1 is not None and ver == 1 and enc_v1 != 1:
+        errors.append(f"ENC_RC_V1={enc_v1} must be 1 while kRCTranscriptVersion==1")
+    if "BTX_RC_ROUND_V1" not in hdr or "BTX_RC_EPISODE_V1" not in hdr:
+        errors.append("ENC_RC_V1 domain tags BTX_RC_ROUND_V1 / BTX_RC_EPISODE_V1 missing")
+    if ver == 1 and not re.search(
+        r"inline\s+constexpr\s+bool\s+kRCSegmentLeavesEnabled\s*=\s*false\s*;",
+        hdr,
+    ):
+        errors.append(
+            "kRCSegmentLeavesEnabled must be false while ENC_RC_V1 is active "
+            "(enabling segment leaves changes the stream and the toy golden)"
+        )
+
+    # F7: independent V1/V2/V3 coupled domain tags (no reuse across versions).
+    if COUPLED_H.is_file():
+        coup_h = COUPLED_H.read_text(encoding="utf-8")
+        for base in ("EPISODE", "BANK", "LOBE", "BARRIER", "PERM", "MIX", "EXTRACT", "FULL_BANK", "MAT_XCHG"):
+            for ver_s in ("V1", "V2", "V3"):
+                tag = f"BTX_RC_COUP_{base}_{ver_s}"
+                if tag not in coup_h:
+                    errors.append(f"missing coupled domain tag {tag}")
+        if "RCCoupDomainTagsForVersion" not in coup_h:
+            errors.append("missing RCCoupDomainTagsForVersion")
+        if "BTX_RC_COUP_MAT_XCHG_ROUNDS_V3" not in coup_h:
+            errors.append("missing BTX_RC_COUP_MAT_XCHG_ROUNDS_V3")
+    else:
+        errors.append(f"missing {COUPLED_H}")
+
+    # Stage F: three-axis schedule ON with AI HBM/fabric epoch-0 dials.
+    # Public activation still NO-GO (nMatMulRCHeight=INT32_MAX). Growth ratios
+    # remain PROVISIONAL; episode n_ctx is capped so toy V1 golden stays stable.
+    if SCALE_AXES_H.is_file():
+        axes = SCALE_AXES_H.read_text(encoding="utf-8")
+        if not re.search(
+            r"inline\s+constexpr\s+bool\s+kRCThreeAxisScheduleEnabled\s*=\s*true\s*;",
+            axes,
+        ):
+            errors.append(
+                "kRCThreeAxisScheduleEnabled must be true (AI datacenter levers configured; "
+                "public height remains INT32_MAX)"
+            )
+        if not re.search(
+            r"kRCAxisW0State\s*=\s*48ull\s*<<\s*30",
+            axes,
+        ):
+            errors.append("kRCAxisW0State must be 48 GiB (MakeProduction resident bank floor)")
+    else:
+        errors.append(f"missing {SCALE_AXES_H}")
+
+    # Activation sentinel: nMatMulRCHeight stays INT32_MAX on the Params default.
+    if PARAMS_H.is_file():
+        params = PARAMS_H.read_text(encoding="utf-8")
+        if not re.search(
+            r"int32_t\s+nMatMulRCHeight\s*\{\s*std::numeric_limits<int32_t>::max\(\)\s*\}",
+            params,
+        ):
+            errors.append(
+                "nMatMulRCHeight must default to std::numeric_limits<int32_t>::max() "
+                "(activation NO-GO)"
+            )
+    else:
+        errors.append(f"missing {PARAMS_H}")
+
+    goldens = extract_goldens(text)
+    if not goldens:
+        errors.append(f"no GetHex() golden literals found in {TEST_CPP.name}")
+
+    v1_hits = [g for g in goldens if g.lower() == expect]
+    other = sorted({g.lower() for g in goldens if g.lower() != expect})
+
+    toy_pin = re.search(
+        r"rc_t1_golden_episode_digest_stable[\s\S]*?"
+        r'BOOST_CHECK_EQUAL\s*\(\s*d1\.GetHex\(\)\s*,\s*"([0-9a-f]{64})"\s*\)',
+        text,
+    )
+
+    if ver == FROZEN_VERSION:
+        if not v1_hits:
+            errors.append(
+                f"frozen V1 golden {expect} not found in {TEST_CPP.name}. "
+                "Silent golden replacement is forbidden — bump kRCTranscriptVersion "
+                "and keep BOTH V1 and V2 goldens."
+            )
+        if toy_pin and toy_pin.group(1).lower() != expect:
+            errors.append(
+                f"rc_t1 toy golden changed to {toy_pin.group(1)} without version bump "
+                f"(kRCTranscriptVersion still {ver})"
+            )
+        elif not toy_pin:
+            errors.append("could not locate rc_t1_golden_episode_digest_stable pin")
+    else:
+        if not v1_hits:
+            errors.append(
+                f"transcript version bumped to {ver} but V1 golden {expect} is gone — "
+                "KEEP BOTH goldens (Stage H)"
+            )
+        if not other:
+            errors.append(
+                f"kRCTranscriptVersion={ver} but no additional V2 golden hex in tests"
+            )
+        if "BTX_RC_ROUND_V2" not in hdr and "BTX_RC_EPISODE_V2" not in hdr:
+            errors.append(
+                "version bump requires new domain tags BTX_RC_ROUND_V2 / "
+                "BTX_RC_EPISODE_V2 (or equivalent V2 tags)"
+            )
+
+    summary = {
+        "ok": not errors,
+        "kRCTranscriptVersion": ver,
+        "ENC_RC_V1": enc_v1,
+        "frozen_toy_golden_v1": expect,
+        "v1_golden_hits": len(v1_hits),
+        "other_goldens": other,
+        "frozen_coupled_toy_golden": FROZEN_COUPLED_TOY_HEX,
+        "coupled_toy_golden_hits": 0,
+        "errors": errors,
+        "kRCThreeAxisScheduleEnabled": True,
+        "policy": (
+            "Silent golden replacement forbidden. V2 requires new domain tags "
+            "+ BOTH goldens kept. Coupled toy golden is a separate frozen digest. "
+            "kRCThreeAxisScheduleEnabled=true with 48 GiB W0 / 4 GiB X0 "
+            "(AI datacenter levers); nMatMulRCHeight stays INT32_MAX."
+        ),
+    }
+
+    # Optional section: Stage C coupled toy golden (separate from V1 episode).
+    coupled_hits = 0
+    if COUPLED_TEST_CPP.is_file():
+        coup_text = COUPLED_TEST_CPP.read_text(encoding="utf-8")
+        coup_pin = re.search(
+            r"rc_coup_golden_digest_stable[\s\S]*?"
+            r'BOOST_CHECK_EQUAL\s*\(\s*d1\.GetHex\(\)\s*,\s*"([0-9a-f]{64})"\s*\)',
+            coup_text,
+        )
+        coup_goldens = extract_goldens(coup_text)
+        coupled_hits = sum(
+            1 for g in coup_goldens if g.lower() == FROZEN_COUPLED_TOY_HEX
+        )
+        summary["coupled_toy_golden_hits"] = coupled_hits
+        if coupled_hits == 0:
+            errors.append(
+                f"frozen coupled toy golden {FROZEN_COUPLED_TOY_HEX} not found in "
+                f"{COUPLED_TEST_CPP.name}"
+            )
+        if coup_pin and coup_pin.group(1).lower() != FROZEN_COUPLED_TOY_HEX:
+            errors.append(
+                f"rc_coup toy golden changed to {coup_pin.group(1)} "
+                f"(expected {FROZEN_COUPLED_TOY_HEX})"
+            )
+        elif not coup_pin:
+            errors.append("could not locate rc_coup_golden_digest_stable pin")
+
+        def pin_case(case: str) -> str | None:
+            m = re.search(
+                rf"{case}[\s\S]*?"
+                r'BOOST_CHECK_EQUAL\s*\(\s*d1\.GetHex\(\)\s*,\s*"([0-9a-f]{64})"\s*\)',
+                coup_text,
+            )
+            return m.group(1).lower() if m else None
+
+        med_v2 = pin_case("rc_coup_medium_golden_digest_stable")
+        med_v3 = pin_case("rc_coup_medium_v3_golden_digest_stable")
+        v2_hits = sum(1 for g in coup_goldens if g.lower() == FROZEN_COUPLED_MEDIUM_V2_HEX)
+        v3_hits = sum(1 for g in coup_goldens if g.lower() == FROZEN_COUPLED_MEDIUM_V3_HEX)
+        summary["coupled_medium_v2_hits"] = v2_hits
+        summary["coupled_medium_v3_hits"] = v3_hits
+        summary["ENC_RC_V2"] = enc_v2
+        summary["ENC_RC_V3"] = enc_v3
+        if v2_hits == 0:
+            errors.append(f"frozen coupled medium V2 golden {FROZEN_COUPLED_MEDIUM_V2_HEX} missing")
+        if med_v2 and med_v2 != FROZEN_COUPLED_MEDIUM_V2_HEX:
+            errors.append(f"medium V2 golden changed to {med_v2}")
+        elif not med_v2:
+            errors.append("could not locate rc_coup_medium_golden_digest_stable pin")
+        if not med_v3:
+            errors.append("could not locate rc_coup_medium_v3_golden_digest_stable pin")
+        elif med_v3 == "744fd3dfda6a58ddcd95474a9895cd2c6b17c2f1c2591848fc631eed78dea6a9":
+            errors.append("medium-V3 still on pre-WP-H digest 744fd3df… — re-pin under COUP_*_V3")
+        elif FROZEN_COUPLED_MEDIUM_V3_HEX == "0"*64:
+            if med_v3 == "0"*64:
+                errors.append("medium-V3 golden still all-zeros placeholder")
+            else:
+                errors.append(
+                    f"FROZEN_COUPLED_MEDIUM_V3_HEX placeholder; test pin is {med_v3}"
+                )
+                summary["coupled_medium_v3_pending_pin"] = med_v3
+        elif med_v3 != FROZEN_COUPLED_MEDIUM_V3_HEX:
+            errors.append(f"medium V3 golden changed to {med_v3}")
+        if "rc_coup_v3_domains_independent_of_v1_v2" not in coup_text:
+            errors.append("missing rc_coup_v3_domains_independent_of_v1_v2 unit test")
+        summary["ok"] = not errors
+        summary["errors"] = errors
+    else:
+        summary["coupled_toy_golden_note"] = "coupled test file absent — skip"
+
+    if args.json:
+        print(json.dumps(summary, indent=2, sort_keys=True))
+    else:
+        if errors:
+            for e in errors:
+                sys.stderr.write(f"rc-golden-gate: FAIL — {e}\n")
+            return 1
+        print("rc-golden-gate: PASS")
+        print(f"  kRCTranscriptVersion = {ver} (ENC_RC_V1={enc_v1})")
+        print(f"  V1 golden: {expect} ({len(v1_hits)} occurrence(s) in {TEST_CPP.name})")
+        if other:
+            print(f"  other GetHex goldens present: {len(other)} (ok if V2+)")
+        print(
+            f"  coupled toy golden: {FROZEN_COUPLED_TOY_HEX} "
+            f"({summary.get('coupled_toy_golden_hits', 0)} occurrence(s))"
+        )
+        print("  rule: silent golden replacement forbidden; V2 needs new tags + BOTH goldens")
+    return 0 if not errors else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

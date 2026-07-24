@@ -1,0 +1,191 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or https://opensource.org/license/mit/.
+
+#ifndef BITCOIN_CUDA_MATMUL_V4_LT_ACCEL_H
+#define BITCOIN_CUDA_MATMUL_V4_LT_ACCEL_H
+
+#include <cuda/matmul_v4_lt_mx_native.h>
+#include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
+#include <uint256.h>
+
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+class CBlockHeader;
+
+// ---------------------------------------------------------------------------
+// NVIDIA backend for MatMul v4.4 ENC-DR-LT (MatExpand).
+//
+// Digests are bit-identical to matmul::v4::lt::ComputeDigestBMX4CLT.
+//
+// When a CUDA device is present and the one-time bit-identity self-test
+// passes, ComputeDigestsOnlyLTCuda runs a persistent device-resident loop:
+//   MatExpand (G*W, Y*H) → ExtractDequant → project (Bhat*V) → F_q combine.
+//
+// B̂·V production default: exact MX scale-partitioned INT8 IMMA/ALU
+// (bit-identical to ComputeProjectedRightMxBlockScaleLT). Dense dequant remains
+// the fallback. The host-vector projection entry may try native MXFP4 / FP8
+// only after self-qual vs the CPU oracle; the resident Q* path reports the exact
+// INT8 lane it actually ran. Float accumulate is never labeled ExactGemm.
+//
+// s8xs8 prefers cuBLASLt IMMA when self-qualified; s32xs8 / IMMA decline use
+// scalar DeviceGemm* (never labeled IMMA). Full-header batches generate W and
+// SHA256d(Chat) on device and return only digests; Host ExactGemm is the
+// fail-closed fallback.
+//
+// Linker stub when BTX_ENABLE_CUDA is off.
+// ---------------------------------------------------------------------------
+
+namespace matmul_v4::cuda {
+
+/** Hard safety bound for the non-certifying telemetry campaign entry below.
+ *  This is deliberately separate from the consensus Q* ABI, whose maximum
+ *  remains kConsensusQStarMax (512). */
+inline constexpr size_t kLtCudaTelemetryCampaignMax = 4096;
+
+/** Alias of the shared MX lane honesty bits (report / ExactMxProjectionBackend). */
+using LtCudaMxProvenance = matmul::v4::lt::MxLaneProvenance;
+
+/** True when per-call provenance identifies a qualified exact projection lane.
+ *  Callers must still compare the produced values with the CPU oracle; this
+ *  helper prevents a valid native result from being rejected merely because it
+ *  did not use the four-pass exact-INT8 fallback. */
+[[nodiscard]] inline bool HasQualifiedLtCudaMxProjectionLane(
+    const LtCudaMxProvenance& provenance) noexcept
+{
+    return provenance.exact_mx_scale_partitioned ||
+           provenance.native_mxfp4_qualified || provenance.native_fp8_qualified;
+}
+
+/** Provenance for the full-header Q* entry. Every field is true only when the
+ *  successful call used that property for every candidate; callers must not
+ *  infer silicon throughput from DigestOnlyBackendStatus alone. */
+struct LtCudaBatchProvenance {
+    bool qstar_device_batched{false};
+    bool device_w_generation{false};
+    bool device_digest{false};
+    bool per_nonce_sync_absent{false};
+    /** Number of candidate results completed by this resident call. */
+    size_t candidate_slots{0};
+    /** Bounded device Chat ring depth and the chunks needed to drain it. */
+    size_t chat_staging_slots{0};
+    size_t chat_staging_chunks{0};
+    /** Non-zero only for the explicitly non-certifying campaign API. */
+    size_t telemetry_windows{0};
+    bool telemetry_campaign{false};
+    matmul::v4::lt::MxLaneProvenance mx{};
+};
+
+/** True iff this build was compiled with CUDA (BTX_ENABLE_CUDA_EXPERIMENTAL),
+ *  a CUDA device is present, and the one-time device bit-identity self-test
+ *  (GEMMs + multi-shape MX projection + a two-header device-resident digest
+ *  differential) has not permanently failed. Callers should treat "false"
+ *  only as "this backend cannot help"; ComputeDigestsOnlyLTCuda still produces
+ *  bit-exact results via the host ExactGemm fail-closed fallback when the
+ *  device path is unavailable (except the ENABLE=OFF stub, which declines). */
+[[nodiscard]] bool IsMatMulLTCudaAvailable();
+
+/** Bit-exact device GEMMs backing MatExpand / projection stages, exported so
+ *  a matmul::v4::lt::ExactGemmBackend can point its callbacks at them
+ *  (signatures match ExactGemmBackend::S8S8Fn / S32S8Fn). Uses the process-
+ *  persistent scratch pool (cross-call reuse). Returns false on any CUDA
+ *  error so the caller falls back to CPU ExactGemm*. Defined only in the
+ *  CUDA build (the stub TU omits them). */
+[[nodiscard]] bool LaunchGemmS8S8(const std::vector<int8_t>& left,
+                                  const std::vector<int8_t>& right,
+                                  uint32_t rows, uint32_t inner, uint32_t cols,
+                                  std::vector<int32_t>& out);
+[[nodiscard]] bool LaunchGemmS32S8(const std::vector<int32_t>& left,
+                                   const std::vector<int8_t>& right,
+                                   uint32_t rows, uint32_t inner, uint32_t cols,
+                                   std::vector<int32_t>& out);
+
+/** Host-callable exact MX scale-partitioned B̂·V (device GEMMs when available).
+ *  On success `out` is byte-identical to ComputeProjectedRightMxBlockScaleLT
+ *  and provenance.exact_mx_scale_partitioned is set (unless a qualified native
+ *  path served the call). Suitable for ExactMxProjectionBackend::project_right. */
+[[nodiscard]] bool LaunchProjectedRightMx(const std::vector<int8_t>& mu,
+                                          const std::vector<uint8_t>& scales,
+                                          const std::vector<int8_t>& V, uint32_t n,
+                                          uint32_t m, std::vector<int32_t>& out,
+                                          matmul::v4::lt::MxLaneProvenance* provenance = nullptr);
+
+/** Alias kept for earlier CUDA call sites / tests. */
+[[nodiscard]] inline bool LaunchProjectedRightMxBlockScale(
+    const std::vector<int8_t>& mu, const std::vector<uint8_t>& scales,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m, std::vector<int32_t>& out)
+{
+    return LaunchProjectedRightMx(mu, scales, V, n, m, out, nullptr);
+}
+
+/** Digest-only ENC-DR-LT mining entry: mine every nonce in `nonces` against
+ *  the shared `tmpl` at dimension `n`. Prefers the persistent device-resident
+ *  MatExpand→project→combine loop; falls back to host ExactGemm /
+ *  WindowSketchMinerLT on decline. `out[i].digest` is BYTE-IDENTICAL to
+ *  matmul::v4::lt::ComputeDigestBMX4CLT for the corresponding header.
+ *  `target_match` is always false (no target in this signature).
+ *  `backend_status` reports bit-exact execution success, but does not prove a
+ *  resident batch: host orchestration may still use successful per-call device
+ *  GEMMs. Callers making mining/performance claims must use the full-header
+ *  overload and require its provenance fields. Returns false only on structural
+ *  failure; on false, `out` is cleared. */
+[[nodiscard]] bool ComputeDigestsOnlyLTCuda(const CBlockHeader& tmpl, uint32_t n,
+                                            const uint64_t* nonces, size_t count,
+                                            std::vector<matmul::v4::lt::DigestOnlyResultLT>& out);
+
+/** Consensus-seeded Q* entry. Unlike the legacy template+nonce ABI, this
+ *  preserves every candidate's nonce-bound seed_a/seed_b. A successful CUDA
+ *  resident call generates W and SHA256d(Chat) on device, returns only one
+ *  digest/status record per candidate, and has no per-candidate
+ *  synchronization. The steady-state candidate loop synchronizes at its
+ *  completion boundary; cold template binding and availability self-tests may
+ *  synchronize separately. Host fallback remains bit-exact but reports all provenance
+ *  fields false. Every header must have the same ComputeTemplateHash, and the
+ *  batch must contain at most kConsensusQStarMax (512) headers; oversized calls
+ *  fail before device allocation or host fallback. */
+[[nodiscard]] bool ComputeDigestsOnlyLTCuda(
+    const std::vector<CBlockHeader>& headers, uint32_t n,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance = nullptr);
+
+/** Non-certifying, telemetry-only multi-window resident campaign.
+ *
+ *  `headers` must contain an integral number of valid Q* windows, share one
+ *  ComputeTemplateHash, and contain at most kLtCudaTelemetryCampaignMax
+ *  candidates. Unlike the consensus entry above, this function never falls
+ *  back to CPU and must never feed mining acceptance, readiness, ASERT, or a
+ *  consensus seal. It exists only to keep enough independent, byte-exact Chat
+ *  transcripts resident for a meaningful GPU throughput measurement. Device
+ *  memory bounds the Chat staging ring; larger campaigns drain through several
+ *  chunks without changing any digest bytes. */
+[[nodiscard]] bool ComputeDigestsOnlyLTCudaTelemetryCampaign(
+    const std::vector<CBlockHeader>& headers, uint32_t n, uint32_t qstar,
+    std::vector<matmul::v4::lt::DigestOnlyResultLT>& out,
+    LtCudaBatchProvenance* provenance = nullptr);
+
+/** Expensive opt-in device validation for release/silicon qualification.
+ *  It compares two full production-shape (n=4096) resident digests with the
+ *  independent CPU reference and separately forces a three-candidate batch
+ *  through two bounded Chat staging chunks. This is intentionally not part of
+ *  IsMatMulLTCudaAvailable(): the production CPU reference is far too costly
+ *  for startup and ordinary CI. On failure, `error` describes the first
+ *  declined/mismatched stage. */
+[[nodiscard]] bool RunMatMulLTCudaExtendedSelfTest(std::string& error);
+
+/** True iff most recent LaunchGemmS8S8 / BackendGemmS8S8 used cuBLASLt IMMA. */
+[[nodiscard]] bool LtLastS8S8UsedImma();
+
+/** Latest process-local MX lane snapshot (exact / native attempt / qualified). */
+[[nodiscard]] matmul::v4::lt::MxLaneProvenance LtLastMxProvenance();
+
+/** True after process-local self-test proved device exact MX scale-partitioned
+ *  projection byte-identical to ComputeProjectedRightMxBlockScaleLT. */
+[[nodiscard]] bool IsLtExactMxScalePartitionedAvailable();
+
+} // namespace matmul_v4::cuda
+
+#endif // BITCOIN_CUDA_MATMUL_V4_LT_ACCEL_H

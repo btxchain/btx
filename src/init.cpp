@@ -29,6 +29,7 @@
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
 #include <index/txindex.h>
+#include <matmul/matmul_sketch_cache.h>
 #include <init/common.h>
 #include <interfaces/chain.h>
 #include <interfaces/init.h>
@@ -155,6 +156,11 @@ using util::ReplaceAll;
 using util::ToString;
 
 static constexpr bool DEFAULT_COREPOLICY{false};
+//! Default v4.4 ENC-DR sketch-cache capacity, in sketches (~8 MiB each at the
+//! production m = 1024). Non-consensus, best-effort (-mmsketchcache=<n>, 0 = off).
+//! (The former segregated-proof archive/prune role, design §3.5, was deleted in
+//! v4.4 ENC-DR: under ENC-DR the block carries no proof bytes to retain or prune.)
+static constexpr int64_t DEFAULT_MMSKETCH_CACHE_ENTRIES{8};
 static constexpr bool DEFAULT_PROXYRANDOMIZE{true};
 static constexpr bool DEFAULT_REST_ENABLE{false};
 static constexpr bool DEFAULT_I2P_ACCEPT_INCOMING{true};
@@ -518,6 +524,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-assumevalid=<hex>", strprintf("If this block is in the chain assume that it and its ancestors are valid and potentially skip script verification for their transactions while still checking other consensus rules (0 to verify all, default: %s, testnet3: %s, testnet4: %s, signet: %s, shieldedv2dev: %s)", defaultChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnetChainParams->GetConsensus().defaultAssumeValid.GetHex(), testnet4ChainParams->GetConsensus().defaultAssumeValid.GetHex(), signetChainParams->GetConsensus().defaultAssumeValid.GetHex(), shieldedv2devChainParams->GetConsensus().defaultAssumeValid.GetHex()), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulvalidation=<mode>", "Select MatMul transcript verification mode: consensus (default), economic, or spv. consensus runs Phase 2 checks within the validation window (full-node tier). economic runs Phase 1-only header checks and trusts full-node majority; it is not a full node. spv is header-only Phase 1.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-matmulservicechallengefile=<file>", "Path to the persistent MatMul service challenge registry. Relative paths are resolved under the network datadir. Point multiple service nodes at the same shared file to let getmatmulservicechallenge issuance and redeemmatmulserviceproof redemption work across the cluster. (default: <netdir>/matmul_service_challenges.dat)", ArgsManager::ALLOW_ANY, OptionsCategory::RPC);
+    argsman.AddArg("-matmulasyncverify", "Run the MatMul v4.4 ENC-DR reference recompute for P2P block deliveries on a bounded background worker pool instead of the network message thread (default: 1). Only effective on networks where the v4 fork height is set; verdicts are identical either way (the recompute is a pure function of the header) — this only changes WHICH thread computes them. Set to 0 to force the historical fully-synchronous path.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-mmsketchcache=<n>", strprintf("Number of MatMul v4.4 ENC-DR sketch-cache entries to retain in memory (~8 MiB each; default: %u, 0 to disable). STRICTLY non-consensus and best-effort: the cache only lets this node verify blocks via the cheap Freivalds path and serve getmmsketch to peers; validation always falls back to the exact digest recompute when it is empty.", DEFAULT_MMSKETCH_CACHE_ENTRIES), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-retainshieldedcommitmentindex", "Keep the shielded commitment-position index in the local LevelDB store across restart and snapshot recovery (default: 1). Set this to 0 only if you explicitly want the slower externalized-retention posture that rebuilds the index in memory after restart in exchange for lower retained shielded-state growth.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-fastshieldedstartup", "Zero-downtime restart: when matching persisted shielded state is available at startup, restore it without forcing the full cross-chain shielded audit (default: 1). The persisted state reaching the restore path already had its frontier root/size matched to the tip and its commitment index/anchor windows validated; settlement/netting metadata may still be synchronized from available blocks, and per-block consensus still runs on newly connected blocks. Set to 0 to force the thorough full-chain drift sync + audit on every restart.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-shieldedstartupaudit", "Audit restored shielded state against historical block data during startup (default: 1). Applies when -fastshieldedstartup is disabled or cannot be taken: set to 0 to keep the persisted-state drift sync but skip the cross-chain audit. Consensus checks still run for newly connected blocks.", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -2243,6 +2251,17 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     bool do_reindex{args.GetBoolArg("-reindex", false)};
     const bool do_reindex_chainstate{args.GetBoolArg("-reindex-chainstate", false)};
+
+    // Size the v4.4 ENC-DR sketch cache (tension-resolution §4.3): a bounded,
+    // memory-only, NON-consensus cache of self-authenticating 8·m² sketch
+    // payloads. Nothing here is load-bearing: every entry is regenerable from
+    // headers by anyone, and validation falls back to the exact digest
+    // recompute whenever the cache is empty or disabled.
+    {
+        const int64_t sketch_cache_entries =
+            std::max<int64_t>(0, args.GetIntArg("-mmsketchcache", DEFAULT_MMSKETCH_CACHE_ENTRIES));
+        matmul::GetMatMulSketchCache().SetCapacity(static_cast<size_t>(sketch_cache_entries));
+    }
 
     // Chainstate initialization and loading may be retried once with reindexing by GUI users
     auto [status, error] = InitAndLoadChainstate(

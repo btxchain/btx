@@ -785,8 +785,34 @@ int V1Transport::readHeader(Span<const uint8_t> msg_bytes)
         return -1;
     }
 
-    // reject messages larger than MAX_SIZE or MAX_PROTOCOL_MESSAGE_LENGTH
-    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_LENGTH) {
+    // Audit P0.5 / P1-1: a consensus-valid block is relayed as a single `block`
+    // (or `blocktxn`) message, so the ceiling for THOSE commands must be at least
+    // the maximum serialized block size, or a valid block becomes un-relayable (a
+    // latent split/eclipse vector). But that larger ceiling must apply ONLY to
+    // block-bearing commands -- raising the GLOBAL limit would let a peer force
+    // 24 MB of buffering/parsing on any arbitrary command (a 50% DoS-envelope
+    // expansion). So ordinary messages keep MAX_PROTOCOL_MESSAGE_LENGTH (16 MB)
+    // and only `block`/`blocktxn` get MAX_BLOCK_MESSAGE_LENGTH (24 MB). The
+    // block-message ceiling is pinned >= a max block at compile time.
+    static_assert(MAX_BLOCK_SERIALIZED_SIZE <= MAX_BLOCK_MESSAGE_LENGTH,
+                  "block-bearing message limit must accommodate a maximum serialized "
+                  "block; otherwise a consensus-valid block cannot be relayed");
+
+    const std::string hdr_msg_type = hdr.GetMessageType();
+    const bool is_block_bearing_msg =
+        (hdr_msg_type == NetMsgType::BLOCK || hdr_msg_type == NetMsgType::BLOCKTXN);
+    // The v4.4 ENC-DR sketch-cache transport (`mmsketch`, tension-resolution §4.3)
+    // carries the 8·m² sketch (~8 MiB at m = 1024) in ONE message + small framing,
+    // so it needs NO command-specific ceiling — it rides under the ordinary
+    // MAX_PROTOCOL_MESSAGE_LENGTH (16 MB) on both v1 and v2 transports. (The
+    // retired segregated-proof relay's 40 MB single-shot / 1 MiB chunked framing
+    // is gone with the subsystem.)
+    const unsigned int msg_size_limit =
+        is_block_bearing_msg  ? MAX_BLOCK_MESSAGE_LENGTH :
+                                MAX_PROTOCOL_MESSAGE_LENGTH;
+
+    // reject messages larger than MAX_SIZE or the command-specific size limit
+    if (hdr.nMessageSize > MAX_SIZE || hdr.nMessageSize > msg_size_limit) {
         LogDebug(BCLog::NET, "Header error: Size too large (%s, %u bytes), peer=%d\n", SanitizeString(hdr.GetMessageType()), hdr.nMessageSize, m_node_id);
         return -1;
     }
@@ -1037,6 +1063,25 @@ bool V2TransportPQOnly() noexcept
     return gArgs.GetBoolArg("-v2pqonly", false);
 }
 } // namespace
+
+/** The maximum contents length a single V2 (BIP324) packet can carry, shared verbatim by the
+ *  receive path (V2Transport::ProcessReceivedPacketBytes) and the send path
+ *  (V2Transport::SetMessageToSend) so both enforce the identical bound. Contents are:
+ *  - 0x00 byte: indicating long message type encoding
+ *  - 12 bytes of message type
+ *  - payload (an ordinary message; capped at MAX_PROTOCOL_MESSAGE_LENGTH, and never above MAX_SIZE)
+ *
+ *  BIP324 encodes each packet's contents length in a 3-byte field (BIP324Cipher::LENGTH_LEN), so a
+ *  packet can never carry more than 0xFFFFFF bytes. The static_assert pins this bound at or below
+ *  that hard ceiling: the send side must never construct a contents length that the 3-byte field
+ *  would silently truncate. NOTE this is why a full 24 MB `block`/`blocktxn` (MAX_BLOCK_MESSAGE_LENGTH)
+ *  cannot traverse V2 as one message -- it must propagate via compact blocks or the v1 transport. */
+static constexpr size_t V2_MAX_CONTENTS_LEN =
+    1 + CMessageHeader::MESSAGE_TYPE_SIZE +
+    std::min<size_t>(MAX_SIZE, MAX_PROTOCOL_MESSAGE_LENGTH);
+static_assert(V2_MAX_CONTENTS_LEN <= 0xFFFFFF,
+              "a V2 packet's contents length must fit in BIP324's 3-byte length field "
+              "(BIP324Cipher::LENGTH_LEN), otherwise Encrypt would silently truncate it");
 
 V2Transport::V2Transport(NodeId nodeid, bool initiating, const CKey& key, Span<const std::byte> ent32, std::vector<uint8_t> garbage) noexcept
     : m_cipher{key, ent32}, m_initiating{initiating}, m_nodeid{nodeid},
@@ -1316,18 +1361,13 @@ bool V2Transport::ProcessReceivedPacketBytes() noexcept
     Assume(m_recv_state == RecvState::VERSION || m_recv_state == RecvState::PQ_CT ||
            m_recv_state == RecvState::APP);
 
-    // The maximum permitted contents length for a packet, consisting of:
-    // - 0x00 byte: indicating long message type encoding
-    // - 12 bytes of message type
-    // - payload
-    static constexpr size_t MAX_CONTENTS_LEN =
-        1 + CMessageHeader::MESSAGE_TYPE_SIZE +
-        std::min<size_t>(MAX_SIZE, MAX_PROTOCOL_MESSAGE_LENGTH);
+    // The maximum permitted contents length for a packet is shared with the send path via the
+    // file-scope V2_MAX_CONTENTS_LEN constant, so receive and send enforce the identical bound.
 
     if (m_recv_buffer.size() == BIP324Cipher::LENGTH_LEN) {
         // Length descriptor received.
         m_recv_len = m_cipher.DecryptLength(MakeByteSpan(m_recv_buffer));
-        if (m_recv_len > MAX_CONTENTS_LEN) {
+        if (m_recv_len > V2_MAX_CONTENTS_LEN) {
             LogDebug(BCLog::NET, "V2 transport error: packet too large (%u bytes), peer=%d\n", m_recv_len, m_nodeid);
             return false;
         }
@@ -1676,6 +1716,33 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
         std::copy(msg.m_type.begin(), msg.m_type.end(), contents.data() + 1);
         std::copy(msg.data.begin(), msg.data.end(), contents.begin() + 1 + CMessageHeader::MESSAGE_TYPE_SIZE);
     }
+    // Fail-closed guard against BIP324's 3-byte packet-length field, mirroring the receive-side
+    // bound so send and receive use the identical V2_MAX_CONTENTS_LEN. A `block`/`blocktxn` may
+    // approach MAX_BLOCK_MESSAGE_LENGTH (24 MB), but a single V2 packet physically cannot carry
+    // more than V2_MAX_CONTENTS_LEN (~16 MB): the encoded length would overflow the 3-byte field
+    // and BIP324Cipher::Encrypt would SILENTLY TRUNCATE it, corrupting the wire length and
+    // desyncing the entire encrypted stream. Such a message must instead propagate via compact
+    // blocks (cmpctblock + blocktxn fragments, each well under the cap) or the v1 transport, so it
+    // never legitimately reaches this point for a v2 peer (see net_processing block-serving path).
+    //
+    // Handling: DROP the message (return true to consume it) rather than truncate it. Two rejected
+    // alternatives:
+    //   * return false -- leaves the message at the head of the queue; SocketSendData never
+    //     advances past it (it only pops on a true return), so it retries forever, a livelock that
+    //     stalls every subsequent message to this peer.
+    //   * disconnect (like the receive side) -- unnecessary here. The receive side MUST tear down
+    //     the peer because a desynced *inbound* ciphertext is unrecoverable; but we reject this
+    //     message BEFORE encryption, so our outbound stream never desyncs and the connection can
+    //     safely keep serving every other message. (V2Transport also has no handle to CNode to set
+    //     fDisconnect; the send-side bool is an overloaded "retry-later" signal, not a fatal
+    //     channel like the receive side's ReceivedBytes()->false.)
+    if (contents.size() > V2_MAX_CONTENTS_LEN) {
+        LogError("V2 transport: dropping oversized %s message (%u byte contents exceed the %u byte "
+                 "v2 packet limit; it cannot cross a v2 link and must relay via compact blocks/v1), peer=%d\n",
+                 SanitizeString(msg.m_type), contents.size(), V2_MAX_CONTENTS_LEN, m_nodeid);
+        ClearShrink(msg.data);
+        return true;
+    }
     // Construct ciphertext in send buffer.
     m_send_buffer.resize(contents.size() + BIP324Cipher::EXPANSION);
     m_cipher.Encrypt(MakeByteSpan(contents), {}, false, MakeWritableByteSpan(m_send_buffer));
@@ -1683,6 +1750,19 @@ bool V2Transport::SetMessageToSend(CSerializedNetMsg& msg) noexcept
     // Release memory
     ClearShrink(msg.data);
     return true;
+}
+
+size_t V2Transport::MaxSendablePayloadBytes() const noexcept
+{
+    AssertLockNotHeld(m_send_mutex);
+    LOCK(m_send_mutex);
+    // In V1 fallback the V1 rules apply. Otherwise mirror SetMessageToSend's
+    // contents framing exactly: worst case is the long message-type encoding
+    // (1 type-length byte + 12 type bytes) ahead of the payload, and the whole
+    // contents must fit the BIP324 3-byte length field bound the send guard
+    // enforces (an oversized message is DROPPED there, not truncated).
+    if (m_send_state == SendState::V1) return m_v1_fallback.MaxSendablePayloadBytes();
+    return V2_MAX_CONTENTS_LEN - 1 - CMessageHeader::MESSAGE_TYPE_SIZE;
 }
 
 Transport::BytesToSend V2Transport::GetBytesToSend(bool have_next_message) const noexcept

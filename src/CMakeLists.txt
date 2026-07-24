@@ -57,8 +57,68 @@ if(APPLE)
 else()
   option(BTX_ENABLE_METAL "Enable optional Metal acceleration helpers for BTX utilities" OFF)
 endif()
-option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable experimental CUDA backend scaffolding for BTX miner integration" OFF)
+# DEPRECATED build tag only. Consensus/P2P header wire is version-bit self-describing
+# (CBlockHeader::BTX_HEADER_POW_COMMIT_VERSION_BIT); this flag must NOT fork peers.
+# Kept so transitional cmake lines still configure; SERIALIZE_METHODS ignores it.
+option(BTX_ENABLE_HEADER_NONCE_ON_WIRE "DEPRECATED no-op build tag (HeaderPoW wire is version-bit gated)." OFF)
+if(BTX_ENABLE_HEADER_NONCE_ON_WIRE)
+  add_compile_definitions(BTX_ENABLE_HEADER_NONCE_ON_WIRE=1)
+  message(STATUS "BTX_ENABLE_HEADER_NONCE_ON_WIRE=ON (deprecated build tag; wire format unchanged)")
+endif()
+# CUTLASS MXFP4 tensor TUs (default OFF): BMX4C grouped + optional LT SM120 OCP.
+# When ON and CUTLASS headers are found, compile the selected TUs;
+# IsGroupedMxfp4TensorKernelLinked / IsLtCutlassMxfp4Linked stay false until
+# process-local self-qual passes. Portable / INT8 exact paths remain the fallback.
+option(BTX_BMX4C_CUTLASS_MXFP4 "Compile CUTLASS grouped MXFP4 tensor TU (requires CUDA + CUTLASS headers)" OFF)
+option(BTX_LT_CUTLASS_MXFP4 "Compile LT SM120 OCP MXFP4 CUTLASS TU (also implied by BTX_BMX4C_CUTLASS_MXFP4)" OFF)
+set(BTX_CUTLASS_INCLUDE_DIR "" CACHE PATH "CUTLASS include root (directory containing cutlass/cutlass.h)")
+# Shared enable: either explicit LT flag or the BMX4C CUTLASS gate pulls LT in.
+set(BTX_BUILD_LT_CUTLASS_MXFP4 OFF)
+if(BTX_LT_CUTLASS_MXFP4 OR BTX_BMX4C_CUTLASS_MXFP4)
+  set(BTX_BUILD_LT_CUTLASS_MXFP4 ON)
+endif()
+# Enable the CUDA backend automatically when a CUDA compiler is present, so a GPU
+# miner does not have to hand-set an "experimental" flag. check_language(CUDA)
+# probes WITHOUT erroring on hosts that lack a CUDA toolkit, so CPU-only / Apple /
+# non-CUDA builds resolve to OFF. Override explicitly with
+# -DBTX_ENABLE_CUDA_EXPERIMENTAL=OFF (or =ON to force).
+include(CheckLanguage)
+check_language(CUDA)
+if(CMAKE_CUDA_COMPILER)
+  set(BTX_ENABLE_CUDA_DEFAULT ON)
+else()
+  set(BTX_ENABLE_CUDA_DEFAULT OFF)
+endif()
+option(BTX_ENABLE_CUDA_EXPERIMENTAL "Enable the CUDA MatMul backend (auto-on when a CUDA compiler is detected)" ${BTX_ENABLE_CUDA_DEFAULT})
 set(BTX_CUDA_ARCHITECTURES "" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)")
+# Feature-qualified sm_120a native MXFP4 (block_scale mxf8f6f4 / QMMA.SF).
+# Default OFF so plain packaging (-DBTX_CUDA_ARCHITECTURES=120 / Guix
+# 120-real;120-virtual) builds with the native MMA body compiled OUT.
+#
+# Two recipes (do NOT put 120a in BTX_CUDA_ARCHITECTURES — CMake 3.28 may
+# reject it; use the isolated object TU instead):
+#   1) Plain / Guix packaging (native MMA OUT):
+#        -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120
+#   2) Rack feature-qualified SM120_MMA (native MMA IN via sm_120a gencode):
+#        -DBTX_ENABLE_CUDA_EXPERIMENTAL=ON -DBTX_CUDA_ARCHITECTURES=120
+#        -DBTX_CUDA_SM120_MXFP4_NATIVE=ON
+#      → compiles cuda/matmul_v4_rc_mx_ozaki_native_sm120a.cu with
+#        -gencode=arch=compute_120a,code=sm_120a (see cmake/BTXCudaSm120a.cmake).
+option(BTX_CUDA_SM120_MXFP4_NATIVE
+  "Native block-scaled MXFP4 MMA sm_120a object TU (default-on in CUDA builds; the configure probe below auto-disables it if the toolkit cannot assemble compute_120a)"
+  ${BTX_ENABLE_CUDA_EXPERIMENTAL})
+# Optional SM100 / B200 native packaging probe (Agent E+I). Default OFF.
+# The configure probe is intentionally fail-closed without B200 evidence —
+# enabling this option FATAL_ERRORs until a real sm_100 MX probe lands.
+# Independent of BTX_CUDA_SM120_MXFP4_NATIVE (SM120 packaging preserved).
+option(BTX_CUDA_SM100_NATIVE
+  "Native SM100/B200 tcgen05 MXFP4 path (default-on in CUDA builds; the configure probe below auto-disables it if the toolkit cannot assemble compute_100a — fail-closed)"
+  ${BTX_ENABLE_CUDA_EXPERIMENTAL})
+# Cloud TPU is served through a separately built, version-pinned PJRT/libtpu
+# bridge that registers the narrow provider ABI in src/tpu. The core never
+# links OpenXLA directly. OFF keeps registration and all launches fail-closed.
+option(BTX_ENABLE_TPU_PJRT "Enable the external Google Cloud TPU PJRT provider ABI" OFF)
+option(BTX_ENABLE_TRAINIUM_NEURON "Enable the external AWS Neuron/NRT bounded-exact provider ABI" OFF)
 set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "Shared")
 if(DEFINED CMAKE_CUDA_RUNTIME_LIBRARY AND NOT CMAKE_CUDA_RUNTIME_LIBRARY STREQUAL "")
   set(BTX_CUDA_RUNTIME_LIBRARY_DEFAULT "${CMAKE_CUDA_RUNTIME_LIBRARY}")
@@ -67,6 +127,13 @@ set(BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES Shared Static)
 set(BTX_CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY_DEFAULT}" CACHE STRING "CUDA runtime library linkage for the experimental CUDA backend: Shared or Static")
 set_property(CACHE BTX_CUDA_RUNTIME_LIBRARY PROPERTY STRINGS Shared Static)
 
+if(BTX_CUDA_SM120_MXFP4_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_CUDA_SM120_MXFP4_NATIVE=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+if(BTX_CUDA_SM100_NATIVE AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_CUDA_SM100_NATIVE=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+
 if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   if(BTX_CUDA_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_CUDA_ARCHITECTURES AND NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "")
     set(BTX_CUDA_ARCHITECTURES "${CMAKE_CUDA_ARCHITECTURES}" CACHE STRING "Semicolon-separated CUDA SM architectures for the experimental MatMul backend (for example 120)" FORCE)
@@ -74,6 +141,9 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   if(BTX_CUDA_ARCHITECTURES STREQUAL "")
     message(FATAL_ERROR "BTX_ENABLE_CUDA_EXPERIMENTAL=ON requires BTX_CUDA_ARCHITECTURES to be set explicitly.")
   endif()
+  include(${PROJECT_SOURCE_DIR}/cmake/BTXCudaSm120a.cmake)
+  include(${PROJECT_SOURCE_DIR}/cmake/BTXCudaSm100.cmake)
+  btx_cuda_reject_feature_qualified_archs(BTX_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}" CACHE STRING "CUDA architectures for compiler detection and BTX CUDA targets" FORCE)
   if(NOT BTX_CUDA_RUNTIME_LIBRARY IN_LIST BTX_CUDA_RUNTIME_LIBRARY_ALLOWED_VALUES)
     message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY must be Shared or Static")
@@ -90,6 +160,220 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
   find_package(CUDAToolkit REQUIRED)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static" AND NOT TARGET CUDA::cudart_static)
     message(FATAL_ERROR "BTX_CUDA_RUNTIME_LIBRARY=Static requires CUDA::cudart_static from the selected CUDA toolkit.")
+  endif()
+  if(BTX_CUDA_SM120_MXFP4_NATIVE)
+    btx_cuda_probe_sm120a_mxfp4(BTX_CUDA_SM120A_MXFP4_PROBE_OK)
+    if(NOT BTX_CUDA_SM120A_MXFP4_PROBE_OK)
+      # Default-on in CUDA builds: a toolkit that cannot assemble compute_120a must
+      # NOT break the build — disable the native MXFP4 object and fall back to the
+      # exact INT8 IMMA path (which still mines). Force-debug with a newer NVCC.
+      unset(BTX_CUDA_SM120_MXFP4_NATIVE CACHE)
+      set(BTX_CUDA_SM120_MXFP4_NATIVE OFF)
+      message(WARNING
+        "sm_120a native MXFP4 probe failed; this NVCC cannot assemble "
+        "${BTX_CUDA_SM120A_GENCODE_FLAG} / mma.sync kind::mxf8f6f4.block_scale. "
+        "Disabling the native MXFP4 object — the CUDA backend still builds and "
+        "mines via the exact INT8 IMMA path.\nProbe log:\n${BTX_CUDA_SM120A_PROBE_LOG}")
+    else()
+      message(STATUS "BTX sm_120a MXFP4 probe OK (${BTX_CUDA_SM120A_GENCODE_FLAG})")
+    endif()
+  endif()
+  # SM100 / B200: real sm_100a tcgen05 configure probe (cmake/BTXCudaSm100.cmake).
+  # Independent of SM120 packaging above (separate ISA / separate latch). Still
+  # fail-closed: a toolkit that cannot assemble the tcgen05 block-scale snippet
+  # under compute_100a FATAL_ERRORs, and even a passing probe only compiles the
+  # object IN — the runtime backend stays fail-closed until the bit-exact self-qual
+  # suite passes on real B200 silicon (SelectedBackend==SM100_MMA).
+  if(BTX_CUDA_SM100_NATIVE)
+    btx_cuda_probe_sm100_native(BTX_CUDA_SM100_NATIVE_PROBE_OK)
+    if(NOT BTX_CUDA_SM100_NATIVE_PROBE_OK)
+      # Default-on in CUDA builds: a toolkit without sm_100a tcgen05 support must
+      # NOT break the build — disable the native object and fall back to the
+      # SM100_CUBLASLT latch / exact INT8 path (both still mine).
+      unset(BTX_CUDA_SM100_NATIVE CACHE)
+      set(BTX_CUDA_SM100_NATIVE OFF)
+      message(WARNING
+        "sm_100a tcgen05 MXFP4 probe failed; this NVCC (need CUDA >= 12.8) cannot "
+        "assemble ${BTX_CUDA_SM100A_GENCODE_FLAG} / tcgen05.mma "
+        "kind::mxf8f6f4.block_scale. Disabling the native object — SM100 still "
+        "builds and runs via SM100_CUBLASLT or the exact INT8 path.\n"
+        "Probe log:\n${BTX_CUDA_SM100_PROBE_LOG}")
+    else()
+      message(STATUS "BTX sm_100a tcgen05 MXFP4 probe OK (${BTX_CUDA_SM100A_GENCODE_FLAG})")
+    endif()
+  endif()
+endif()
+
+# AMD ROCm/HIP backend for the MatMul v4 digest (src/hip/matmul_v4_accel.hip).
+# Mirrors the experimental CUDA backend above but targets AMD CDNA (MFMA)
+# accelerators via a clang HIP compiler. Requires an explicit AMD GPU arch list
+# (e.g. gfx942 for MI300, gfx950 for MI350, gfx90a for MI200, gfx908 for MI100).
+#
+# Amendment v2 §1.D D1: HIP TUs MUST be compiled by clang (HIPCXX / CMAKE_HIP_COMPILER).
+# Never silently fall back to host g++/c++ — Debian/Ubuntu ROCm ships clang++-N
+# as the HIP compiler; export HIPCXX=clang++-19 (or similar) before configure.
+# HIP auto-detect (mirrors the CUDA auto-detect): default ON only when BOTH a HIP
+# clang compiler AND an AMD GPU arch are discoverable, so a ROCm host with an AMD
+# GPU gets the HIP backend without an opt-in flag — but auto-on NEVER trips the
+# mandatory-arch FATAL below (unlike CUDA, HIP needs an explicit gfx target and
+# there is no configure-time arch default). Non-ROCm hosts resolve to OFF.
+# Override explicitly with -DBTX_ENABLE_HIP=OFF|ON.
+set(_btx_hip_detect_cxx "")
+if(DEFINED ENV{HIPCXX} AND NOT "$ENV{HIPCXX}" STREQUAL "")
+  set(_btx_hip_detect_cxx "$ENV{HIPCXX}")
+elseif(CMAKE_HIP_COMPILER)
+  set(_btx_hip_detect_cxx "${CMAKE_HIP_COMPILER}")
+else()
+  foreach(_btx_hip_cand IN ITEMS clang++-19 clang++-18 clang++-17 clang++)
+    find_program(_btx_hip_detect_path NAMES "${_btx_hip_cand}")
+    if(_btx_hip_detect_path)
+      set(_btx_hip_detect_cxx "${_btx_hip_detect_path}")
+      unset(_btx_hip_detect_path CACHE)
+      break()
+    endif()
+    unset(_btx_hip_detect_path CACHE)
+  endforeach()
+endif()
+# Detect the installed AMD GPU arch(s) via amdgpu-arch (ships with ROCm/LLVM); it
+# prints one gfx target per present GPU. Empty on machines with no AMD GPU.
+set(_btx_hip_detect_arch "")
+find_program(_btx_amdgpu_arch_prog NAMES amdgpu-arch)
+if(_btx_amdgpu_arch_prog)
+  execute_process(COMMAND "${_btx_amdgpu_arch_prog}"
+    OUTPUT_VARIABLE _btx_amdgpu_arch_out ERROR_QUIET
+    OUTPUT_STRIP_TRAILING_WHITESPACE RESULT_VARIABLE _btx_amdgpu_arch_rc)
+  if(_btx_amdgpu_arch_rc EQUAL 0 AND NOT _btx_amdgpu_arch_out STREQUAL "")
+    string(REPLACE "\n" ";" _btx_hip_detect_arch "${_btx_amdgpu_arch_out}")
+    list(REMOVE_DUPLICATES _btx_hip_detect_arch)
+  endif()
+endif()
+unset(_btx_amdgpu_arch_prog CACHE)
+set(BTX_ENABLE_HIP_DEFAULT OFF)
+if(NOT _btx_hip_detect_cxx STREQUAL "" AND
+   (NOT _btx_hip_detect_arch STREQUAL "" OR NOT BTX_HIP_ARCHITECTURES STREQUAL ""))
+  set(BTX_ENABLE_HIP_DEFAULT ON)
+endif()
+option(BTX_ENABLE_HIP "Enable the AMD ROCm/HIP MatMul v4 backend (auto-on when a HIP clang compiler and an AMD GPU arch are detected)" ${BTX_ENABLE_HIP_DEFAULT})
+set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)")
+# Seed the arch from auto-detect when the operator did not set it explicitly, so
+# an auto-enabled HIP build has a valid gfx target and skips the FATAL below.
+if(BTX_ENABLE_HIP AND BTX_HIP_ARCHITECTURES STREQUAL "" AND NOT _btx_hip_detect_arch STREQUAL "")
+  set(BTX_HIP_ARCHITECTURES "${_btx_hip_detect_arch}" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)" FORCE)
+endif()
+
+if(BTX_ENABLE_HIP)
+  if(BTX_HIP_ARCHITECTURES STREQUAL "" AND DEFINED CMAKE_HIP_ARCHITECTURES AND NOT CMAKE_HIP_ARCHITECTURES STREQUAL "")
+    set(BTX_HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)" FORCE)
+  endif()
+  if(BTX_HIP_ARCHITECTURES STREQUAL "")
+    message(FATAL_ERROR "BTX_ENABLE_HIP=ON requires BTX_HIP_ARCHITECTURES to be set explicitly (for example gfx942;gfx950).")
+  endif()
+  set(CMAKE_HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}" CACHE STRING "AMD GPU architectures for BTX HIP targets" FORCE)
+
+  # --- D1: resolve CMAKE_HIP_COMPILER to a clang that can compile HIP ----------
+  # Order: HIPCXX env → CMAKE_HIP_COMPILER cache → probe clang++-{19,18,17,}.
+  set(_btx_hipcxx "")
+  if(DEFINED ENV{HIPCXX} AND NOT "$ENV{HIPCXX}" STREQUAL "")
+    set(_btx_hipcxx "$ENV{HIPCXX}")
+  elseif(CMAKE_HIP_COMPILER)
+    set(_btx_hipcxx "${CMAKE_HIP_COMPILER}")
+  else()
+    foreach(_btx_hip_cand IN ITEMS clang++-19 clang++-18 clang++-17 clang++)
+      find_program(_btx_hip_cand_path NAMES "${_btx_hip_cand}")
+      if(_btx_hip_cand_path)
+        set(_btx_hipcxx "${_btx_hip_cand_path}")
+        unset(_btx_hip_cand_path CACHE)
+        break()
+      endif()
+      unset(_btx_hip_cand_path CACHE)
+    endforeach()
+  endif()
+  if(_btx_hipcxx STREQUAL "")
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: no HIP clang compiler found.\n"
+      "  Set HIPCXX to a clang that can compile HIP (e.g. export HIPCXX=clang++-19),\n"
+      "  or pass -DCMAKE_HIP_COMPILER=/usr/bin/clang++-19.\n"
+      "  Host g++/c++ must NEVER be used for HIP translation units.")
+  endif()
+  # Reject host g++/c++ and non-clang drivers even if the user exported them as HIPCXX.
+  get_filename_component(_btx_hipcxx_name "${_btx_hipcxx}" NAME)
+  string(TOLOWER "${_btx_hipcxx_name}" _btx_hipcxx_name_l)
+  if(_btx_hipcxx_name_l MATCHES "^(g\\+\\+|c\\+\\+|gcc|cc)(-[0-9]+)?$")
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: HIPCXX/CMAKE_HIP_COMPILER resolves to '${_btx_hipcxx}', "
+      "which is a host C++ driver — not allowed for HIP TUs.\n"
+      "  export HIPCXX=clang++-19  # (or clang++-18 / clang++-17 / clang++)")
+  endif()
+  execute_process(
+    COMMAND "${_btx_hipcxx}" --version
+    OUTPUT_VARIABLE _btx_hipcxx_ver
+    ERROR_VARIABLE _btx_hipcxx_ver_err
+    RESULT_VARIABLE _btx_hipcxx_ver_rc
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  if(NOT _btx_hipcxx_ver_rc EQUAL 0)
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: cannot run HIP compiler '${_btx_hipcxx}' (--version failed).")
+  endif()
+  string(APPEND _btx_hipcxx_ver "\n${_btx_hipcxx_ver_err}")
+  string(TOLOWER "${_btx_hipcxx_ver}" _btx_hipcxx_ver_l)
+  if(NOT _btx_hipcxx_ver_l MATCHES "clang")
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: '${_btx_hipcxx}' is not a clang driver (HIP requires clang).\n"
+      "  --version output:\n${_btx_hipcxx_ver}\n"
+      "  export HIPCXX=clang++-19  # Debian/Ubuntu ROCm clang")
+  endif()
+  # Smoke-check: clang must accept -x hip (ROCm clang / hip-clang). Fail loudly
+  # rather than discovering a non-HIP clang only when compiling .hip sources.
+  set(_btx_hip_smoke "${CMAKE_BINARY_DIR}/CMakeFiles/btx_hip_compiler_smoke.hip")
+  file(WRITE "${_btx_hip_smoke}" "int main(){return 0;}\n")
+  execute_process(
+    COMMAND "${_btx_hipcxx}" -x hip -c "${_btx_hip_smoke}" -o "${_btx_hip_smoke}.o"
+    OUTPUT_VARIABLE _btx_hip_smoke_out
+    ERROR_VARIABLE _btx_hip_smoke_err
+    RESULT_VARIABLE _btx_hip_smoke_rc
+  )
+  if(NOT _btx_hip_smoke_rc EQUAL 0)
+    message(FATAL_ERROR
+      "BTX_ENABLE_HIP=ON: '${_btx_hipcxx}' cannot compile HIP (-x hip smoke test failed).\n"
+      "  Install ROCm hip-clang / hipcc clang and set HIPCXX to that clang.\n"
+      "  smoke stderr:\n${_btx_hip_smoke_err}")
+  endif()
+  set(CMAKE_HIP_COMPILER "${_btx_hipcxx}" CACHE FILEPATH
+    "HIP compiler — must be a clang that accepts -x hip (set HIPCXX or this cache entry)" FORCE)
+  message(STATUS "BTX HIP compiler (D1): ${CMAKE_HIP_COMPILER}")
+  enable_language(HIP)
+  find_package(hip REQUIRED)
+endif()
+
+# Huawei Ascend 950 (昇腾) ExactGemm host backend (src/ascend/). Default OFF;
+# CI has no CANN SDK — fail closed via stub. When ON, probe ASCEND_HOME /
+# ASCEND_TOOLKIT_HOME / common toolkit paths; define BTX_HAVE_CANN and link
+# acl/ascend libs only when found, otherwise still build the inert stub.
+option(BTX_ENABLE_ASCEND "Enable experimental Huawei Ascend/CANN ExactGemm backend (requires CANN toolkit)" OFF)
+set(BTX_ASCEND_HOME "" CACHE PATH "Ascend/CANN toolkit root (directory containing include/acl/acl.h)")
+set(BTX_HAVE_CANN FALSE)
+if(BTX_ENABLE_ASCEND)
+  set(_btx_cann_root "")
+  if(BTX_ASCEND_HOME AND EXISTS "${BTX_ASCEND_HOME}/include/acl/acl.h")
+    set(_btx_cann_root "${BTX_ASCEND_HOME}")
+  elseif(DEFINED ENV{ASCEND_HOME} AND EXISTS "$ENV{ASCEND_HOME}/include/acl/acl.h")
+    set(_btx_cann_root "$ENV{ASCEND_HOME}")
+  elseif(DEFINED ENV{ASCEND_TOOLKIT_HOME} AND EXISTS "$ENV{ASCEND_TOOLKIT_HOME}/include/acl/acl.h")
+    set(_btx_cann_root "$ENV{ASCEND_TOOLKIT_HOME}")
+  elseif(DEFINED ENV{ASCEND_HOME_PATH} AND EXISTS "$ENV{ASCEND_HOME_PATH}/include/acl/acl.h")
+    set(_btx_cann_root "$ENV{ASCEND_HOME_PATH}")
+  elseif(EXISTS "/usr/local/Ascend/ascend-toolkit/latest/include/acl/acl.h")
+    set(_btx_cann_root "/usr/local/Ascend/ascend-toolkit/latest")
+  elseif(EXISTS "/usr/local/Ascend/latest/include/acl/acl.h")
+    set(_btx_cann_root "/usr/local/Ascend/latest")
+  endif()
+  if(_btx_cann_root)
+    set(BTX_HAVE_CANN TRUE)
+    set(BTX_CANN_ROOT "${_btx_cann_root}" CACHE INTERNAL "Detected CANN toolkit root")
+    message(STATUS "BTX_ENABLE_ASCEND=ON: CANN found at ${BTX_CANN_ROOT} (BTX_HAVE_CANN=1)")
+  else()
+    message(WARNING "BTX_ENABLE_ASCEND=ON but CANN toolkit not found (ASCEND_HOME / include/acl/acl.h); building inert Ascend stub (fail-closed)")
   endif()
 endif()
 
@@ -284,12 +568,68 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   merkleblock.cpp
   matmul/field.cpp
   matmul/freivalds.cpp
+  matmul/int8_field.cpp
   matmul/matrix.cpp
+  matmul/matmul_v4.cpp
+  matmul/matmul_v4_batch.cpp
+  matmul/matmul_v4_bmx4.cpp
+  matmul/matmul_v4_bmx4_batch.cpp
+  matmul/matmul_v4_bmx4_pipeline.cpp
+  matmul/matmul_v4_lt.cpp
+  matmul/matmul_v4_lt_mx_exact.cpp
+  matmul/matmul_v4_rc.cpp
+  matmul/matmul_v4_rc_accel_policy.cpp
+  matmul/matmul_v4_rc_coupled.cpp
+  matmul/matmul_v4_rc_packed_bank.cpp
+  matmul/matmul_v4_rc_coupled_device.cpp
+  matmul/matmul_v4_rc_batch.cpp
+  matmul/matmul_v4_rc_datacenter.cpp
+  matmul/matmul_v4_rc_distributed.cpp
+  matmul/matmul_v4_rc_transcript.cpp
+  matmul/matmul_v4_rc_mx_layout.cpp
+  matmul/matmul_v4_rc_mx_ozaki.cpp
+  matmul/matmul_v4_rc_residency_plan.cpp
+  matmul/matmul_v4_provider_claims.cpp
+  matmul/matmul_v4_rc_scale.cpp
+  matmul/matmul_v4_rc_scale_axes.cpp
+  matmul/matmul_v4_rc_selfqual.cpp
+  matmul/matmul_v4_rc_verify_bakeoff.cpp
+  matmul/matmul_v4_rc_gkr.cpp
+  matmul/matmul_v4_rc_gkr_air.cpp
+  matmul/matmul_v4_rc_gkr_eval.cpp
+  matmul/matmul_v4_rc_gkr_wiring.cpp
+  matmul/matmul_v4_rc_gkr_coupled.cpp
+  matmul/matmul_v4_rc_fri.cpp
+  matmul/matmul_v4_rc_fri_ext3.cpp
+  matmul/matmul_v4_rc_fri_ext3_alg.cpp
+  matmul/matmul_v4_rc_freivalds.cpp
+  matmul/matmul_v4_rc_freivalds_sampled.cpp
+  matmul/matmul_v4_rc_freivalds_i8mm.cpp
+  matmul/matmul_v4_rc_alg_hash.cpp
+  matmul/matmul_v4_rc_air_episode.cpp
+  matmul/matmul_v4_rc_air_quotient.cpp
+  matmul/matmul_v4_rc_air_recurse.cpp
+  matmul/matmul_sketch_cache.cpp
+  matmul/matmul_v4_exact_float.cpp
+  matmul/matmul_v4_fast_exact.cpp
+  # Optional cloud-accelerator boundaries. Both become callable only after a
+  # version-pinned external bridge registers and passes native tensor-engine
+  # attestation plus the bounded-exactness self-qualification.
+  tpu/matmul_v4_lt_accel.cpp
+  tpu/matmul_v4_rc_accel.cpp
+  trainium/matmul_v4_lt_accel.cpp
+  trainium/matmul_v4_rc_accel.cpp
+  matmul/accel_v4.cpp
+  matmul/backend_capabilities_v4.cpp
   matmul/noise.cpp
+  matmul/pow_v4.cpp
   matmul/solver_runtime.cpp
   matmul/matmul_pow.cpp
   matmul/transcript.cpp
   matmul/accelerated_solver.cpp
+  cuda/matmul_v4_bmx4_context.cpp
+  # FP8 five-limb honesty surface (device unavailable until a dedicated TU quals).
+  cuda/matmul_v4_bmx4_fp8_five_limb.cpp
   net_permissions.cpp
   net_types.cpp
   netaddress.cpp
@@ -318,6 +658,35 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   script/signingprovider.cpp
   script/solver.cpp
 )
+if(BTX_ENABLE_TPU_PJRT)
+  target_compile_definitions(bitcoin_common PUBLIC BTX_HAVE_TPU_PJRT=1)
+  message(STATUS "BTX Cloud TPU PJRT provider ABI enabled; runtime remains fail-closed until a provider registers and self-qualifies")
+endif()
+if(BTX_ENABLE_TRAINIUM_NEURON)
+  target_compile_definitions(bitcoin_common PUBLIC BTX_HAVE_NEURON_NRT=1)
+  message(STATUS "BTX AWS Trainium Neuron/NRT provider ABI enabled; runtime remains fail-closed until a provider registers and self-qualifies")
+endif()
+if(BTX_BMX4C_CUTLASS_MXFP4 AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_BMX4C_CUTLASS_MXFP4=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+if(BTX_BUILD_LT_CUTLASS_MXFP4 AND NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR "BTX_LT_CUTLASS_MXFP4/BTX_BMX4C_CUTLASS_MXFP4=ON requires BTX_ENABLE_CUDA_EXPERIMENTAL=ON")
+endif()
+
+# MXFP4 CUTLASS tensor: default honesty stubs (Linked=false). Replaced by CUDA
+# TUs when the matching option is ON and CUDA experimental is enabled.
+if(NOT (BTX_BMX4C_CUTLASS_MXFP4 AND BTX_ENABLE_CUDA_EXPERIMENTAL))
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_bmx4_cutlass_mxfp4_link.cpp)
+endif()
+if(NOT (BTX_BUILD_LT_CUTLASS_MXFP4 AND BTX_ENABLE_CUDA_EXPERIMENTAL))
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_lt_cutlass_mxfp4_link.cpp)
+endif()
+# RC Ozaki CUDA panels: honesty stub when CUDA experimental is OFF. The real
+# TU (matmul_v4_rc_mx_ozaki_native.cu) is added to btx_matmul_backend below.
+if(NOT BTX_ENABLE_CUDA_EXPERIMENTAL)
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_rc_mx_ozaki_native_link.cpp)
+  target_sources(bitcoin_common PRIVATE cuda/matmul_v4_rc_episode_context_link.cpp)
+endif()
 target_link_libraries(bitcoin_common
   PUBLIC
     bitcoin_util
@@ -325,6 +694,7 @@ target_link_libraries(bitcoin_common
   PRIVATE
     core_interface
     bitcoin_consensus
+    bitcoin_db
     bitcoinpqc
     secp256k1
     Boost::headers
@@ -394,8 +764,12 @@ set_source_files_properties(matmul/matmul_pow.cpp PROPERTIES
 
 add_library(btx_matmul_backend STATIC EXCLUDE_FROM_ALL
   matmul/backend_capabilities.cpp
+  matmul/accel_v4_stub.cpp
   cuda/cuda_scheduler.cpp
   metal/matmul_accel_env.cpp
+  # LT ExactGemm tensor preference stubs (IMMA/MFMA/TensorOps). Strong TUs
+  # replace per-vendor namespaces when CUDA/HIP/Metal are enabled.
+  cuda/matmul_v4_lt_tensor_gemm_stub.cpp
 )
 if(APPLE AND BTX_ENABLE_METAL)
   enable_language(OBJCXX)
@@ -404,6 +778,22 @@ if(APPLE AND BTX_ENABLE_METAL)
   )
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel.mm
+    metal/matmul_v4_accel.mm
+    # External review (P1.5): the BMX4-C (v4.2) Metal device backend source was
+    # never listed. With BTX_ENABLE_METAL defined the weak metal stub in
+    # accel_v4_stub.cpp is compiled out, so without this the strong
+    # matmul_v4::metal::ComputeDigestsBMX4CAccel had no definition -- a Metal
+    # build suppressed the weak stub while providing no strong impl (link error /
+    # silently unserved profile). Wire it in alongside its kernels metallib.
+    metal/matmul_v4_bmx4_accel.mm
+    # MatMul v4.4 ENC-DR-LT ("MatExpand") Metal backend: exact integer MSL
+    # GEMM kernels (int8xint8->int32 and int32xint8->int32) self-tested against
+    # matmul::v4::lt::ExactGemm* and injected into WindowSketchMinerLT via
+    # ExactGemmBackend (see matmul_v4_lt_accel.h/.mm).
+    metal/matmul_v4_lt_accel.mm
+    metal/matmul_v4_lt_tensor_gemm.mm
+    # ENC_RC Ozaki ExactPanels on Metal (simdgroup / MPP TensorOps + ALU).
+    metal/matmul_v4_rc_ozaki_accel.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
@@ -419,6 +809,12 @@ if(APPLE AND BTX_ENABLE_METAL)
     set(BTX_ORACLE_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/oracle_accel_kernels.metal)
     set(BTX_ORACLE_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/oracle_accel_kernels.air)
     set(BTX_ORACLE_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/oracle_accel_kernels.metallib)
+    set(BTX_MATMUL_V4_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_accel_kernels.metal)
+    set(BTX_MATMUL_V4_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels.air)
+    set(BTX_MATMUL_V4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_accel_kernels.metallib)
+    set(BTX_MATMUL_V4_BMX4_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_bmx4_accel_kernels.metal)
+    set(BTX_MATMUL_V4_BMX4_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels.air)
+    set(BTX_MATMUL_V4_BMX4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels.metallib)
     add_custom_command(
       OUTPUT ${BTX_MATMUL_METALLIB}
       COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_METAL_SOURCE} -o ${BTX_MATMUL_METAL_AIR}
@@ -435,12 +831,38 @@ if(APPLE AND BTX_ENABLE_METAL)
       COMMENT "Compiling prebuilt Metal oracle kernels"
       VERBATIM
     )
+    # The v4 kernels compile under the default (pre-Metal-4) language version:
+    # the mpp::tensor_ops section is guarded by __METAL_VERSION__/__has_include
+    # and the Metal 4 tensor pipeline is always runtime-compiled by the host
+    # glue with an explicit metal4.0 language version (see matmul_v4_accel.mm).
+    add_custom_command(
+      OUTPUT ${BTX_MATMUL_V4_METALLIB}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_V4_METAL_SOURCE} -o ${BTX_MATMUL_V4_METAL_AIR}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_MATMUL_V4_METAL_AIR} -o ${BTX_MATMUL_V4_METALLIB}
+      DEPENDS ${BTX_MATMUL_V4_METAL_SOURCE}
+      COMMENT "Compiling prebuilt MatMul v4 Metal kernels"
+      VERBATIM
+    )
+    # BMX4-C (v4.2) kernels: same pre-Metal-4 language version as the v4 kernels;
+    # the Metal 4 tensor pipeline is runtime-compiled by matmul_v4_bmx4_accel.mm.
+    add_custom_command(
+      OUTPUT ${BTX_MATMUL_V4_BMX4_METALLIB}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_V4_BMX4_METAL_SOURCE} -o ${BTX_MATMUL_V4_BMX4_METAL_AIR}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib ${BTX_MATMUL_V4_BMX4_METAL_AIR} -o ${BTX_MATMUL_V4_BMX4_METALLIB}
+      DEPENDS ${BTX_MATMUL_V4_BMX4_METAL_SOURCE}
+      COMMENT "Compiling prebuilt MatMul v4 BMX4-C Metal kernels"
+      VERBATIM
+    )
     add_custom_target(btx_matmul_metallib DEPENDS ${BTX_MATMUL_METALLIB})
     add_custom_target(btx_oracle_metallib DEPENDS ${BTX_ORACLE_METALLIB})
-    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib)
+    add_custom_target(btx_matmul_v4_metallib DEPENDS ${BTX_MATMUL_V4_METALLIB})
+    add_custom_target(btx_matmul_v4_bmx4_metallib DEPENDS ${BTX_MATMUL_V4_BMX4_METALLIB})
+    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib btx_matmul_v4_bmx4_metallib)
     target_compile_definitions(btx_matmul_backend PRIVATE
       BTX_MATMUL_METALLIB_PATH=\"${BTX_MATMUL_METALLIB}\"
       BTX_ORACLE_METALLIB_PATH=\"${BTX_ORACLE_METALLIB}\"
+      BTX_MATMUL_V4_METALLIB_PATH=\"${BTX_MATMUL_V4_METALLIB}\"
+      BTX_MATMUL_V4_BMX4_METALLIB_PATH=\"${BTX_MATMUL_V4_BMX4_METALLIB}\"
     )
   else()
     if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS)
@@ -449,7 +871,12 @@ if(APPLE AND BTX_ENABLE_METAL)
       message(STATUS "BTX_MATMUL_METAL_PRECOMPILE_KERNELS=OFF; MatMul Metal backend will compile inline kernels at runtime")
     endif()
   endif()
-  target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_METAL=1)
+  # PUBLIC so the define propagates through bitcoin_common (which PUBLIC-links
+  # btx_matmul_backend) to consumers -- in particular the backend-determinism
+  # test TU (src/test/matmul_v4_backend_determinism_tests.cpp) compiled into
+  # test_btx, which #if-guards its Metal determinism row on BTX_ENABLE_METAL.
+  # PRIVATE would silently compile that row out of the test even in a Metal build.
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_METAL=1)
   target_link_libraries(btx_matmul_backend PRIVATE
     ${BTX_FOUNDATION_FRAMEWORK}
     ${BTX_IOKIT_FRAMEWORK}
@@ -458,6 +885,11 @@ if(APPLE AND BTX_ENABLE_METAL)
 else()
   target_sources(btx_matmul_backend PRIVATE
     metal/matmul_accel_stub.cpp
+    metal/matmul_v4_accel_stub.cpp
+    metal/matmul_v4_bmx4_accel_stub.cpp
+    metal/matmul_v4_lt_accel_stub.cpp
+    # Host / non-Darwin: unit-byte-exact RC Ozaki reference + HARD BLOCKER latch.
+    metal/matmul_v4_rc_ozaki_accel.cpp
     metal/nonce_accel_stub.cpp
     metal/oracle_accel_stub.cpp
   )
@@ -467,24 +899,338 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     cuda/cuda_context.cpp
     cuda/matmul_accel.cu
     cuda/oracle_accel.cu
+    cuda/matmul_v4_accel.cu
+    # External review (vanities): the BMX4-C (v4.2) device backend source was
+    # never listed, so the v4.2 accelerated path never linked. Wire it in so the
+    # profile is dispatchable (it falls back to the INT8 path on NVIDIA, where the
+    # MXFP4 native GEMM is currently unserved by cuBLASLt -- see the round-2
+    # remediation doc). Compile-verified only on real CUDA toolchains.
+    cuda/matmul_v4_bmx4_accel.cu
+    cuda/matmul_v4_lt_accel.cu
+    # Host-side cuBLASLt block-scale orchestration. This TU contains no
+    # architecture-specific PTX, so it intentionally follows the target's
+    # normal CUDA_ARCHITECTURES list (plain 100/120 is sufficient). Native
+    # API availability is gated in-source by CUDART_VERSION >= 12080; actual
+    # MX qualification remains a runtime, oracle-checked operation.
+    cuda/matmul_v4_lt_mx_native.cu
+    cuda/matmul_v4_lt_tensor_gemm.cu
+    # ENC_RC Amendment 1.B — Ozaki MXFP4 (SM120_MMA / SM100_CUBLASLT) + ExactPanels.
+    # Replaces cuda/matmul_v4_rc_mx_ozaki_native_link.cpp (not added when CUDA ON).
+    # Plain BTX_CUDA_ARCHITECTURES=120 / Guix 120-real;120-virtual: this TU must
+    # compile with native block_scale MMA compiled OUT (Agent A). Feature-
+    # qualified SM120_MMA lives in a SEPARATE object target when
+    # BTX_CUDA_SM120_MXFP4_NATIVE=ON (see cmake/BTXCudaSm120a.cmake) —
+    # never put 120a into CMAKE_CUDA_ARCHITECTURES.
+    cuda/matmul_v4_rc_mx_ozaki_native.cu
+    # ENC_RC datacenter episode arena (cudaMallocAsync + Graphs scaffold).
+    # Replaces cuda/matmul_v4_rc_episode_context_link.cpp when CUDA ON.
+    cuda/matmul_v4_rc_episode_context.cu
   )
-  target_compile_definitions(btx_matmul_backend PRIVATE BTX_ENABLE_CUDA_EXPERIMENTAL=1)
+  if(BTX_BMX4C_CUTLASS_MXFP4 OR BTX_BUILD_LT_CUTLASS_MXFP4)
+    set(_btx_cutlass_inc "")
+    if(BTX_CUTLASS_INCLUDE_DIR AND EXISTS "${BTX_CUTLASS_INCLUDE_DIR}/cutlass/cutlass.h")
+      set(_btx_cutlass_inc "${BTX_CUTLASS_INCLUDE_DIR}")
+    elseif(DEFINED CUTLASS_PATH AND EXISTS "${CUTLASS_PATH}/include/cutlass/cutlass.h")
+      set(_btx_cutlass_inc "${CUTLASS_PATH}/include")
+    elseif(EXISTS "/usr/local/cutlass/include/cutlass/cutlass.h")
+      set(_btx_cutlass_inc "/usr/local/cutlass/include")
+    endif()
+    if(_btx_cutlass_inc)
+      target_include_directories(btx_matmul_backend PRIVATE "${_btx_cutlass_inc}")
+      target_compile_definitions(btx_matmul_backend PRIVATE BTX_BMX4C_CUTLASS_HEADERS=1)
+      message(STATUS "CUTLASS MXFP4 headers at ${_btx_cutlass_inc} (BMX4C=${BTX_BMX4C_CUTLASS_MXFP4} LT=${BTX_BUILD_LT_CUTLASS_MXFP4})")
+    else()
+      message(WARNING "CUTLASS MXFP4 option(s) ON but headers not found; tensor TUs fail-closed")
+    endif()
+  endif()
+  if(BTX_BMX4C_CUTLASS_MXFP4)
+    target_sources(btx_matmul_backend PRIVATE cuda/matmul_v4_bmx4_cutlass_mxfp4.cu)
+    target_compile_definitions(btx_matmul_backend PRIVATE BTX_BMX4C_CUTLASS_MXFP4=1)
+  endif()
+  if(BTX_BUILD_LT_CUTLASS_MXFP4)
+    target_sources(btx_matmul_backend PRIVATE cuda/matmul_v4_lt_cutlass_mxfp4.cu)
+    target_compile_definitions(btx_matmul_backend PRIVATE BTX_LT_CUTLASS_MXFP4=1)
+  endif()
+  # PUBLIC so the define propagates to every consumer of btx_matmul_backend.
+  # This subsumes the eligibility-classifier fix: CudaEligibility() lives in
+  # matmul/backend_capabilities_v4.cpp, compiled into bitcoin_common (not
+  # btx_matmul_backend); without the define visible there it takes the
+  # #else -> DisabledByBuild() branch and the whole measurement run silently times
+  # the CPU stub while reporting `compiled=no reason=disabled_by_build` -- so every
+  # GPU number an operator would submit is really a CPU number unless they catch
+  # that line. It also reaches the backend-determinism test TU compiled into
+  # test_btx, whose CUDA determinism row #if-guards on BTX_ENABLE_CUDA_EXPERIMENTAL.
+  # bitcoin_common PUBLIC-links btx_matmul_backend, so the INTERFACE define flows
+  # transitively to bitcoin_common and on to test_btx.
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_CUDA_EXPERIMENTAL=1)
   if(BTX_CUDA_RUNTIME_LIBRARY STREQUAL "Static")
     target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart_static)
   else()
     target_link_libraries(btx_matmul_backend PRIVATE CUDA::cudart)
   endif()
+  # cuBLASLt provides the exact INT8->INT32 (CUDA_R_8I -> CUDA_R_32I,
+  # CUBLAS_COMPUTE_32I) tensor-core GEMMs used by the MatMul v4 backend.
+  target_link_libraries(btx_matmul_backend PRIVATE CUDA::cublasLt)
+  # matmul_v4_accel.cu reuses the exact CPU derivation / serialization / digest
+  # routines (matmul::v4::*, defined in bitcoin_common) to guarantee bit-exact
+  # operands and digest. Both are STATIC libraries and bitcoin_common already
+  # links btx_matmul_backend PUBLIC, so this closes a static-library cycle;
+  # CMake resolves it with a linker group (cyclic deps among STATIC libs are
+  # supported). If a cycle-free layout is preferred, move the ComputeDigestAccel
+  # host orchestration into a bitcoin_common .cpp that calls a device-only entry.
+  target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
   set_target_properties(btx_matmul_backend PROPERTIES
     CUDA_ARCHITECTURES "${BTX_CUDA_ARCHITECTURES}"
     CUDA_RUNTIME_LIBRARY "${BTX_CUDA_RUNTIME_LIBRARY}"
     CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
   )
+  if(BTX_CUDA_SM120_MXFP4_NATIVE)
+    # Dedicated OBJECT lib: CUDA_ARCHITECTURES cleared; explicit
+    # -gencode=arch=compute_120a,code=sm_120a on Agent A marker TU
+    # cuda/matmul_v4_rc_mx_ozaki_native_sm120a.cu (RcOzakiMxfp4Sm120aKernelLinked=true).
+    btx_cuda_add_sm120a_mxfp4_native_object(btx_matmul_backend)
+    # The block-scaled MMA body lives in matmul_v4_rc_mx_ozaki_native.cu under
+    # __CUDA_ARCH_SPECIFIC__==1200. Plain BTX_CUDA_ARCHITECTURES=120 never
+    # defines SPECIFIC, so also attach an sm_120a fatbin slice to that TU only
+    # (do not put 120a into CMAKE_CUDA_ARCHITECTURES for the whole target).
+    set_property(SOURCE cuda/matmul_v4_rc_mx_ozaki_native.cu APPEND PROPERTY
+      COMPILE_OPTIONS ${BTX_CUDA_SM120A_GENCODE_COMPILE_OPTION}
+    )
+  endif()
+  if(BTX_CUDA_SM100_NATIVE)
+    # Datacenter B200 native tcgen05 MXFP4 (SEPARATE ISA/latch from sm_120a).
+    # Dedicated OBJECT lib with explicit -gencode=arch=compute_100a,code=sm_100a
+    # on Agent A marker TU cuda/matmul_v4_rc_mx_ozaki_native_sm100.cu
+    # (RcOzakiMxfp4Sm100NativeLinked=true). See cmake/BTXCudaSm100.cmake.
+    btx_cuda_add_sm100a_mxfp4_native_object(btx_matmul_backend)
+    # The tcgen05 MMA body lives in matmul_v4_rc_mx_ozaki_native.cu under
+    # __CUDA_ARCH_SPECIFIC__==1000. Plain BTX_CUDA_ARCHITECTURES never defines
+    # SPECIFIC, so also attach an sm_100a fatbin slice to that TU only (do not put
+    # 100a into CMAKE_CUDA_ARCHITECTURES for the whole target). This composes with
+    # the sm_120a slice above — both feature-qualified slices may coexist.
+    set_property(SOURCE cuda/matmul_v4_rc_mx_ozaki_native.cu APPEND PROPERTY
+      COMPILE_OPTIONS ${BTX_CUDA_SM100A_GENCODE_COMPILE_OPTION}
+    )
+  endif()
 else()
   target_sources(btx_matmul_backend PRIVATE
     cuda/matmul_accel_stub.cpp
     cuda/oracle_accel_stub.cpp
+    cuda/matmul_v4_accel_stub.cpp
+    cuda/matmul_v4_bmx4_accel_stub.cpp
+    cuda/matmul_v4_lt_accel_stub.cpp
   )
+endif()
+if(BTX_ENABLE_HIP)
+  # --- D2: isolate hip::device from g++ TUs ---------------------------------
+  # Debian hip-config-amd.cmake adds `-x hip` to hip::device INTERFACE flags.
+  # Linking hip::device into btx_matmul_backend would poison every g++ C++ TU
+  # on that target (stubs, bitcoin_common consumers, tests). Keep ALL .hip
+  # sources on a clang-only static lib; link hip::device ONLY there (PRIVATE).
+  # Public ABI headers in src/hip/*.h stay free of HIP includes for non-HIP
+  # consumers (stubs unchanged when BTX_ENABLE_HIP=OFF).
+  add_library(btx_hip_device STATIC EXCLUDE_FROM_ALL
+    hip/matmul_v4_accel.hip
+    # External review (P1.5): the BMX4-C (v4.2) HIP device backend source was
+    # never listed, so the strong matmul_v4::hip::ComputeDigestsBMX4CAccel never
+    # linked and the profile fell back to the (weak) stub on ROCm.
+    hip/matmul_v4_bmx4_accel.hip
+    # MatMul v4.4 ENC-DR-LT ("MatExpand") HIP backend: self-tested device GEMM
+    # kernels (int8xint8->int32 and int32xint8->int32) injected into
+    # WindowSketchMinerLT via ExactGemmBackend (see matmul_v4_lt_accel.h/.hip).
+    hip/matmul_v4_lt_accel.hip
+    hip/matmul_v4_lt_tensor_gemm.hip
+    # Native MXFP4/MXFP8 hipBLASLt block-scale attempt + self-qual (fail-closed
+    # until oracle-identical on gfx950 with toolkit MX enums).
+    hip/matmul_v4_lt_mx_native.hip
+    # ENC_RC Ozaki HIP MXFP4 (opA=T opB=N VEC32) — latch pending gfx950.
+    hip/matmul_v4_rc_mx_ozaki_native.hip
+  )
+  set_source_files_properties(
+    hip/matmul_v4_accel.hip
+    hip/matmul_v4_bmx4_accel.hip
+    hip/matmul_v4_lt_accel.hip
+    hip/matmul_v4_lt_tensor_gemm.hip
+    hip/matmul_v4_lt_mx_native.hip
+    hip/matmul_v4_rc_mx_ozaki_native.hip
+    PROPERTIES LANGUAGE HIP)
+  # Amendment v3 §1.D D4: __HIP_PLATFORM_AMD__ must reach every TU that includes
+  # HIP or shared device headers used by HIP. PUBLIC on btx_hip_device covers
+  # the device lib; PUBLIC on btx_matmul_backend propagates to bitcoin_common
+  # (e.g. backend_capabilities_v4.cpp includes hip_runtime.h under
+  # BTX_ENABLE_HIP). Gated on BTX_ENABLE_HIP so non-HIP builds stay unpoisoned.
+  target_compile_definitions(btx_hip_device PUBLIC __HIP_PLATFORM_AMD__=1)
+  target_link_libraries(btx_hip_device PRIVATE core_interface hip::device)
+  # Amendment v3 §1.D D3: hardening_interface (via core_interface) injects
+  # -fcf-protection=full. That flag is host CET and breaks amdgcn device
+  # compiles. Override for HIP language only; CXX host TUs keep full hardening.
+  # (HIP-off builds never create this target, so the override is HIP-gated.)
+  target_compile_options(btx_hip_device PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-fcf-protection=none>)
+  # PUBLIC so the define reaches the backend-determinism test TU (compiled into
+  # test_btx), whose HIP determinism row #if-guards on BTX_ENABLE_HIP; PRIVATE
+  # would silently drop that row even in a HIP build.
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_HIP=1)
+  target_compile_definitions(btx_matmul_backend PUBLIC __HIP_PLATFORM_AMD__=1)
+  target_link_libraries(btx_matmul_backend PRIVATE btx_hip_device)
+  # Optional hipBLASLt (preferred) and rocBLAS fallback for LT ExactGemm
+  # MFMA-class s8×s8→s32. Discover them independently so an installed
+  # hipBLASLt that declines a shape can fall through to rocBLAS I8II.
+  # HINTS include /usr (+ lib suffixes) so Debian/Ubuntu ROCm packages work
+  # without /opt/rocm; keep ENV ROCM_PATH / HIP_PATH /opt/rocm as well.
+  find_path(BTX_HIPBLASLT_INCLUDE_DIR hipblaslt/hipblaslt.h
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /opt/rocm
+    PATH_SUFFIXES include)
+  find_library(BTX_HIPBLASLT_LIBRARY NAMES hipblaslt
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /usr/lib /opt/rocm
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+  if(BTX_HIPBLASLT_INCLUDE_DIR AND BTX_HIPBLASLT_LIBRARY)
+    target_compile_definitions(btx_hip_device PRIVATE BTX_HAVE_HIPBLASLT=1)
+    target_include_directories(btx_hip_device PRIVATE "${BTX_HIPBLASLT_INCLUDE_DIR}")
+    target_link_libraries(btx_hip_device PRIVATE "${BTX_HIPBLASLT_LIBRARY}")
+    message(STATUS "BTX HIP LT ExactGemm: hipBLASLt linked (MFMA path)")
+    # MXFP4/MXFP8 enums are int constants, not macros — do not use defined(ENUM).
+    # Mirror CUDA's CUDART_VERSION gate: probe whether the installed hipBLASLt
+    # headers expose HIP_R_4F_E2M1 + VEC32 UE8M0 scale, then set BTX_HIP_MXFP4_TYPES.
+    include(CheckCXXSourceCompiles)
+    set(_btx_hip_mx_saved_includes "${CMAKE_REQUIRED_INCLUDES}")
+    set(_btx_hip_mx_saved_flags "${CMAKE_REQUIRED_FLAGS}")
+    set(CMAKE_REQUIRED_INCLUDES "${BTX_HIPBLASLT_INCLUDE_DIR}")
+    # Prefer HIP language flags when available; otherwise plain CXX with includes.
+    check_cxx_source_compiles("
+      #include <hipblaslt/hipblaslt.h>
+      int main() {
+        hipDataType a = HIP_R_4F_E2M1;
+        hipblasLtMatmulMatrixScale_t s = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+        (void)a; (void)s;
+        return 0;
+      }
+    " BTX_HIPBLASLT_HAS_MXFP4_TYPES)
+    set(CMAKE_REQUIRED_INCLUDES "${_btx_hip_mx_saved_includes}")
+    set(CMAKE_REQUIRED_FLAGS "${_btx_hip_mx_saved_flags}")
+    if(BTX_HIPBLASLT_HAS_MXFP4_TYPES)
+      target_compile_definitions(btx_hip_device PRIVATE BTX_HIP_MXFP4_TYPES=1)
+      message(STATUS "BTX HIP LT native MX: MXFP4 types present (BTX_HIP_MXFP4_TYPES=1)")
+      check_cxx_source_compiles("
+        #include <hipblaslt/hipblaslt.h>
+        int main() {
+          hipDataType a = HIP_R_8F_E4M3;
+          hipblasLtMatmulMatrixScale_t s = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+          (void)a; (void)s;
+          return 0;
+        }
+      " BTX_HIPBLASLT_HAS_MXFP8_TYPES)
+      if(BTX_HIPBLASLT_HAS_MXFP8_TYPES)
+        target_compile_definitions(btx_hip_device PRIVATE BTX_HIP_MXFP8_TYPES=1)
+      endif()
+      # Optional BLK32 EXT scale — probe separately; absence is fine.
+      check_cxx_source_compiles("
+        #include <hipblaslt/hipblaslt.h>
+        int main() {
+          hipblasLtMatmulMatrixScale_t s =
+              HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT;
+          (void)s;
+          return 0;
+        }
+      " BTX_HIPBLASLT_HAS_MXFP8_SCALE_BLK32_EXT)
+      if(BTX_HIPBLASLT_HAS_MXFP8_SCALE_BLK32_EXT)
+        target_compile_definitions(btx_hip_device PRIVATE BTX_HIP_MXFP8_SCALE_BLK32_EXT=1)
+      endif()
+    else()
+      message(STATUS
+        "BTX HIP LT native MX: toolkit lacks MXFP4 enums — fail-closed "
+        "(no BTX_HIP_MXFP4_TYPES; #if defined(ENUM) is never used)")
+    endif()
+  endif()
+  find_path(BTX_ROCBLAS_INCLUDE_DIR rocblas/rocblas.h
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /opt/rocm
+    PATH_SUFFIXES include)
+  find_library(BTX_ROCBLAS_LIBRARY NAMES rocblas
+    HINTS ENV ROCM_PATH ENV HIP_PATH /usr /usr/lib /opt/rocm
+    PATH_SUFFIXES lib lib64 lib/x86_64-linux-gnu)
+  if(BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY)
+    target_compile_definitions(btx_hip_device PRIVATE BTX_HAVE_ROCBLAS=1)
+    target_include_directories(btx_hip_device PRIVATE "${BTX_ROCBLAS_INCLUDE_DIR}")
+    target_link_libraries(btx_hip_device PRIVATE "${BTX_ROCBLAS_LIBRARY}")
+    message(STATUS "BTX HIP LT ExactGemm: rocBLAS linked (MFMA fallback)")
+  endif()
+  if(NOT (BTX_HIPBLASLT_INCLUDE_DIR AND BTX_HIPBLASLT_LIBRARY) AND
+     NOT (BTX_ROCBLAS_INCLUDE_DIR AND BTX_ROCBLAS_LIBRARY))
+    message(STATUS "BTX HIP LT ExactGemm: no hipBLASLt/rocBLAS — MFMA flag false; device ALU only")
+  endif()
+  # The HIP backend reuses the shared matmul::v4 host reference (operand
+  # expansion, serialization, digest) from bitcoin_common so its output is
+  # bit-identical to the CPU by construction. bitcoin_common PUBLIC-links
+  # btx_matmul_backend → btx_hip_device, so this closes a STATIC cycle that
+  # CMake resolves by repeating the archives at final link. The cycle only
+  # exists when BTX_ENABLE_HIP=ON (the stub path stays self-contained).
+  target_link_libraries(btx_hip_device PRIVATE bitcoin_common)
+  set_target_properties(btx_hip_device PROPERTIES
+    HIP_ARCHITECTURES "${BTX_HIP_ARCHITECTURES}"
+    HIP_STANDARD 20
+    HIP_STANDARD_REQUIRED ON
+  )
+else()
+  target_sources(btx_matmul_backend PRIVATE
+    hip/matmul_v4_accel_stub.cpp
+    hip/matmul_v4_bmx4_accel_stub.cpp
+    hip/matmul_v4_lt_accel_stub.cpp
+    # Host pack unit-exact + HARD BLOCKER "requires gfx950 silicon".
+    hip/matmul_v4_rc_mx_ozaki_native_stub.cpp
+  )
+endif()
+if(BTX_ENABLE_ASCEND AND BTX_HAVE_CANN)
+  target_sources(btx_matmul_backend PRIVATE
+    ascend/matmul_v4_lt_accel.cpp
+    ascend/matmul_v4_rc_accel.cpp
+  )
+  target_include_directories(btx_matmul_backend PRIVATE
+    "${BTX_CANN_ROOT}/include"
+  )
+  set(_btx_cann_lib_dirs
+    "${BTX_CANN_ROOT}/lib64"
+    "${BTX_CANN_ROOT}/lib"
+    "${BTX_CANN_ROOT}/aarch64-linux/lib64"
+    "${BTX_CANN_ROOT}/x86_64-linux/lib64"
+  )
+  foreach(_d IN LISTS _btx_cann_lib_dirs)
+    if(EXISTS "${_d}")
+      target_link_directories(btx_matmul_backend PRIVATE "${_d}")
+    endif()
+  endforeach()
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_ASCEND=1 BTX_HAVE_CANN=1)
+  target_link_libraries(btx_matmul_backend PRIVATE ascendcl nnopbase)
+  # CANN 8.5+ recommends the split libraries: QuantMatmulV5 is ops-nn while
+  # Calculate/TransMatmulWeight are ops-math. Huawei explicitly says not to
+  # reference generic libopapi and split libopapi_* in the same binary, so use
+  # the split pair only when both are present and otherwise fall back wholly to
+  # generic opapi. The deprecated ops_infer archive is not a CANN 9.x fallback.
+  find_library(_btx_cann_opapi_nn opapi_nn
+    PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+  find_library(_btx_cann_opapi_math opapi_math
+    PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+  find_library(_btx_cann_opapi opapi
+    PATHS ${_btx_cann_lib_dirs} NO_DEFAULT_PATH)
+  if(_btx_cann_opapi_nn AND _btx_cann_opapi_math)
+    target_link_libraries(btx_matmul_backend PRIVATE
+      ${_btx_cann_opapi_nn} ${_btx_cann_opapi_math})
+  elseif(_btx_cann_opapi)
+    target_link_libraries(btx_matmul_backend PRIVATE ${_btx_cann_opapi})
+  else()
+    message(FATAL_ERROR
+      "BTX_ENABLE_ASCEND=ON requires both libopapi_nn and libopapi_math, or generic libopapi")
+  endif()
+  target_link_libraries(btx_matmul_backend PRIVATE bitcoin_common)
+else()
+  target_sources(btx_matmul_backend PRIVATE
+    ascend/matmul_v4_lt_accel_stub.cpp
+    # Host reference + fail-closed Cube episode (deficit: requires CANN+Ascend).
+    ascend/matmul_v4_rc_accel.cpp
+  )
+  if(BTX_ENABLE_ASCEND)
+    target_compile_definitions(btx_matmul_backend PUBLIC BTX_ENABLE_ASCEND=1)
+  endif()
 endif()
 target_link_libraries(btx_matmul_backend PRIVATE core_interface)
 target_link_libraries(bitcoin_common PUBLIC btx_matmul_backend)
@@ -563,6 +1309,11 @@ set(BTX_BASE_ARCHIVES
   leveldb
   crc32c
 )
+# D2: HIP device archive participates in the static cycle group when enabled
+# (btx_hip_device ↔ bitcoin_common via btx_matmul_backend).
+if(BTX_ENABLE_HIP AND TARGET btx_hip_device)
+  list(APPEND BTX_BASE_ARCHIVES btx_hip_device)
+endif()
 
 set(BTX_NODE_ARCHIVES
   bitcoin_node
@@ -656,6 +1407,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/kernel_notifications.cpp
   node/mining_guard.cpp
   node/mempool_args.cpp
+  node/matmul_verify_worker.cpp
   node/mempool_persist.cpp
   node/mempool_persist_args.cpp
   node/miner.cpp
@@ -876,48 +1628,54 @@ if(BUILD_UTIL)
   endif()
   install_binary_component(btx-matmul-backend-info)
 
-  add_executable(btx-matmul-metal-bench btx-matmul-metal-bench.cpp)
-  target_link_libraries(btx-matmul-metal-bench
-    core_interface
-  )
-  if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-matmul-metal-bench ${BTX_BASE_ARCHIVES})
-  else()
-    target_link_libraries(btx-matmul-metal-bench bitcoin_common)
-  endif()
-  install_binary_component(btx-matmul-metal-bench)
+  # NOTE: the legacy standalone MatMul benchmarks (btx-matmul-metal-bench,
+  # btx-matmul-solve-bench, btx-matmul-cost-bench) were REMOVED — they measured
+  # the superseded v3 solve / Metal-transcript workloads, not ENC_RC v4.6, and so
+  # reported misleading "MatMul PoW" numbers. The current turnkey benchmark is
+  # matmul-v4-rc-harness (below), driven by contrib/matmul-v4/run-full-benchmark.py.
 
-  add_executable(btx-matmul-solve-bench btx-matmul-solve-bench.cpp)
-  target_include_directories(btx-matmul-solve-bench PRIVATE
+  # NOTE: matmul-v4-report (the legacy v4.1 ENC-S8 / v4.2 BMX4C / v4.4 ENC-DR-LT
+  # activation-gate report) was REMOVED. ENC-S8 is never a live consensus profile
+  # (empty height window) and BMX4C/DRLT are superseded by ENC_RC at the same fork;
+  # its B1/B2b/B2g gates and the M-t24 accumulator-exactness methodology all have
+  # first-class ENC_RC equivalents (ProbeRCSelfQual byte-exact vs the int64 oracle,
+  # rc-stage-g-campaign.py, contrib/matmul-v4/run-full-benchmark.py, and the RC
+  # Ozaki exact-panels self-qual). Use matmul-v4-rc-harness (below).
+
+  # ENC_RC (Resident Curriculum) real CPU measurement harness — feeds rc-gate.py.
+  # Toy dims by default; never raises nMatMulRCHeight.
+  add_executable(matmul-v4-rc-harness matmul-v4-rc-harness.cpp)
+  target_include_directories(matmul-v4-rc-harness PRIVATE
     $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
   )
-  target_link_libraries(btx-matmul-solve-bench
+  target_link_libraries(matmul-v4-rc-harness
     core_interface
   )
   if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-matmul-solve-bench ${BTX_BASE_ARCHIVES})
+    target_link_btx_linux_archive_group(matmul-v4-rc-harness ${BTX_BASE_ARCHIVES})
   else()
-    target_link_libraries(btx-matmul-solve-bench
+    target_link_libraries(matmul-v4-rc-harness
       bitcoin_shielded
     )
   endif()
-  install_binary_component(btx-matmul-solve-bench)
+  install_binary_component(matmul-v4-rc-harness)
 
-  add_executable(btx-matmul-cost-bench btx-matmul-cost-bench.cpp)
-  target_include_directories(btx-matmul-cost-bench PRIVATE
+  # ENC_RC Stage E verification bake-off (toy prototypes only; not consensus).
+  add_executable(matmul-v4-rc-verify-bakeoff matmul-v4-rc-verify-bakeoff.cpp)
+  target_include_directories(matmul-v4-rc-verify-bakeoff PRIVATE
     $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
   )
-  target_link_libraries(btx-matmul-cost-bench
+  target_link_libraries(matmul-v4-rc-verify-bakeoff
     core_interface
   )
   if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-matmul-cost-bench ${BTX_BASE_ARCHIVES})
+    target_link_btx_linux_archive_group(matmul-v4-rc-verify-bakeoff ${BTX_BASE_ARCHIVES})
   else()
-    target_link_libraries(btx-matmul-cost-bench
+    target_link_libraries(matmul-v4-rc-verify-bakeoff
       bitcoin_shielded
     )
   endif()
-  install_binary_component(btx-matmul-cost-bench)
+  install_binary_component(matmul-v4-rc-verify-bakeoff)
 
   add_executable(btx-genesis btx-genesis.cpp)
   target_link_libraries(btx-genesis

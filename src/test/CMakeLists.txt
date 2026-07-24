@@ -68,15 +68,64 @@ add_executable(test_btx
   matmul_matrix_tests.cpp
   matmul_noise_tests.cpp
   matmul_pow_tests.cpp
+  matmul_verify_worker_tests.cpp
   matmul_accelerated_solver_tests.cpp
   matmul_backend_capabilities_tests.cpp
   matmul_metal_tests.cpp
   matmul_transcript_tests.cpp
   matmul_validation_tests.cpp
+  matmul_chainwork_auth_tests.cpp
   matmul_trust_model_tests.cpp
   matmul_dgw_tests.cpp
+  matmul_unified_activation_tests.cpp
   matmul_subsidy_tests.cpp
   matmul_mining_tests.cpp
+  matmul_v4_batch_tests.cpp
+  matmul_v4_bmx4_tests.cpp
+  matmul_v4_lt_tests.cpp
+  matmul_v4_rc_tests.cpp
+  matmul_v4_rc_sm120_native_capability_tests.cpp
+  matmul_v4_rc_sm100_isolation_tests.cpp
+  matmul_v4_rc_accel_policy_tests.cpp
+  matmul_v4_rc_coupled_tests.cpp
+  matmul_v4_rc_alg_hash_tests.cpp
+  matmul_v4_rc_freivalds_tests.cpp
+  matmul_v4_rc_freivalds_sampled_tests.cpp
+  matmul_v4_rc_packed_bank_tests.cpp
+  matmul_v4_rc_residency_plan_tests.cpp
+  matmul_v4_rc_datacenter_tests.cpp
+  matmul_v4_rc_distributed_tests.cpp
+  matmul_v4_rc_transcript_tests.cpp
+  matmul_v4_rc_verify_bakeoff_tests.cpp
+  matmul_v4_rc_gkr_tests.cpp
+  matmul_v4_rc_gkr_eval_tests.cpp
+  matmul_v4_rc_gkr_v7_soundness_tests.cpp
+  matmul_v4_rc_gkr_air_tests.cpp
+  matmul_v4_rc_air_episode_tests.cpp
+  matmul_v4_rc_air_quotient_tests.cpp
+  matmul_v4_rc_air_recurse_tests.cpp
+  matmul_v4_rc_gkr_wiring_tests.cpp
+  matmul_v4_rc_gkr_integration_tests.cpp
+  matmul_v4_rc_gkr_f0_tests.cpp
+  matmul_v4_rc_gkr_coupled_tests.cpp
+  matmul_v4_rc_gkr_coupled_f0_tests.cpp
+  matmul_v4_rc_gkr_field_ext3_tests.cpp
+  matmul_v4_rc_fri_tests.cpp
+  matmul_v4_rc_fri_ext3_tests.cpp
+  matmul_v4_rc_fri_ext3_alg_tests.cpp
+  matmul_v4_rc_vendor_accel_tests.cpp
+  matmul_v4_provider_contract_tests.cpp
+  matmul_encdr_tests.cpp
+  matmul_v4_bmx4_batch_tests.cpp
+  matmul_v4_exact_float_tests.cpp
+  matmul_v4_fast_exact_tests.cpp
+  matmul_v4_field_tests.cpp
+  matmul_v4_sketch_tests.cpp
+  matmul_v4_pow_tests.cpp
+  matmul_v4_determinism_vectors.cpp
+  matmul_v4_backend_determinism_tests.cpp
+  ../tpu/test/matmul_v4_lt_accel_tests.cpp
+  ../trainium/test/matmul_v4_lt_accel_tests.cpp
   mining_chain_guard_tests.cpp
   mining_crash_guard_tests.cpp
   pq_crypto_tests.cpp
@@ -557,6 +606,17 @@ function(add_all_test_targets)
 endfunction()
 
 add_all_test_targets()
+
+# ENC_RC Stage H / A1: golden-diff CI gate — fails build on silent V1 golden drift
+# without a kRCTranscriptVersion bump (contrib/matmul-v4/rc-golden-gate.py).
+if(Python3_EXECUTABLE)
+  add_test(
+    NAME rc_golden_gate
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/contrib/matmul-v4/rc-golden-gate.py
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+  )
+  set_property(TEST rc_golden_gate PROPERTY LABELS "rc;golden;matmul_v4")
+endif()
 
 # Timing-variance checks are sensitive to host contention; run this suite
 # without concurrent ctest jobs to avoid false negatives under -j.

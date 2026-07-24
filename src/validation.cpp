@@ -38,6 +38,7 @@
 #include <policy/rbf.h>
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
+#include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -6881,7 +6882,11 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         if (it != m_blockman.m_block_index.end()) {
             if (it->second.GetAncestor(pindex->nHeight) == pindex &&
                 m_chainman.m_best_header->GetAncestor(pindex->nHeight) == pindex &&
-                m_chainman.m_best_header->nChainWork >= m_chainman.MinimumChainWork()) {
+                // Audit P0.1/C1: use AUTHENTICATED work so a forged matmul-header
+                // chain cannot inflate best-header work past MinimumChainWork and
+                // thereby relax (skip) expensive script verification. Equal to
+                // nChainWork pre-fork and for any body-verified chain.
+                m_chainman.m_best_header->nAuthenticatedChainWork >= m_chainman.MinimumChainWork()) {
                 // This block is a member of the assumed verified chain and an ancestor of the best header.
                 // Script verification is skipped when connecting blocks under the
                 // assumevalid block. Assuming the assumevalid block is valid this
@@ -8046,6 +8051,7 @@ CoinsCacheSizeState Chainstate::GetCoinsCacheSizeState(
     }
     return CoinsCacheSizeState::OK;
 }
+
 
 bool Chainstate::FlushStateToDisk(
     BlockValidationState &state,
@@ -9539,6 +9545,28 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
     pindexNew->RaiseValidity(BLOCK_VALID_TRANSACTIONS);
     m_blockman.m_dirty_blockindex.insert(pindexNew);
 
+    // Audit P0.1/C1: the block's body (and, at MatMul heights, its MatMul
+    // product-committed proof) has now verified -- ContextualCheckBlock ran before
+    // us. Promote this index's authenticated-work contribution from 0 to its full
+    // GetBlockProof. Handles the case where pprev is not yet connected (the else
+    // branch below); the descendant walk repeats this for every block that becomes
+    // connected, in parent-before-child order.
+    const arith_uint256 old_authenticated_work = pindexNew->nAuthenticatedChainWork;
+    UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
+    if (pindexNew->nAuthenticatedChainWork != old_authenticated_work) {
+        // Header-only descendants already in the index must inherit an updated
+        // authenticated base. Skip the global walk when receipt did not promote
+        // work (the normal pre-v4/disabled-fork case), otherwise ordered IBD and
+        // reindex perform two O(N) index scans per historical body.
+        PropagateAuthenticatedChainWorkDescendants(*pindexNew, GetConsensus(),
+            [this](std::function<void(CBlockIndex&)> visit) {
+                for (auto& entry : m_blockman.m_block_index) {
+                    visit(entry.second);
+                }
+            });
+        RecalculateBestHeader();
+    }
+
     if (pindexNew->pprev == nullptr || pindexNew->pprev->HaveNumChainTxs()) {
         // If pindexNew is the genesis block or all parents are BLOCK_VALID_TRANSACTIONS.
         std::deque<CBlockIndex*> queue;
@@ -9557,6 +9585,10 @@ void ChainstateManager::ReceivedBlockTransactions(const CBlock& block, CBlockInd
                    pindex->nHeight, pindex->m_chain_tx_count, prev_tx_sum(*pindex), CLIENT_NAME, FormatFullVersion(), CLIENT_BUGREPORT);
             }
             pindex->m_chain_tx_count = prev_tx_sum(*pindex);
+            // Audit P0.1/C1: re-derive authenticated chainwork for each block that
+            // just became connected. pprev is always processed before its children
+            // here, so pprev->nAuthenticatedChainWork is final by the time we read it.
+            UpdateAuthenticatedChainWork(*pindex, GetConsensus());
             pindex->nSequenceId = nBlockSequenceId++;
             for (Chainstate *c : GetAll()) {
                 c->TryAddBlockIndexCandidate(pindex);
@@ -9762,6 +9794,13 @@ bool CheckBlock(const CBlock& block, BlockValidationState& state, const Consensu
         return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-length", "size limits failed");
     }
     const uint64_t stripped_block_size = ::GetSerializeSize(TX_NO_WITNESS_WITH_SHIELDED(block));
+    // MatMul v4.4 ENC-DR size accounting (tension-resolution §3.1-ii): at
+    // DIGEST_RECOMPUTE heights the block body carries NO sketch (matrix_c_data
+    // is empty by consensus rule — the miner emits a digest-only body and
+    // ContextualCheckBlock rejects any inline sketch), so serialized_block_size
+    // is headers + txs only and the 24 MB nMaxBlockSerializedSize ceiling is
+    // untouched. On the regtest FLAT_SKETCH_INBLOCK replay path the in-block
+    // sketch is counted here exactly as before.
     const uint64_t serialized_block_size = ::GetSerializeSize(TX_WITH_WITNESS(block));
     if (block.vtx.size() > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
         stripped_block_size > consensusParams.nMaxBlockWeight / WITNESS_SCALE_FACTOR ||
@@ -9971,11 +10010,76 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     if (block.nBits != GetNextWorkRequired(pindexPrev, &block, consensusParams))
         return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-diffbits", "incorrect proof of work");
 
+    // HeaderPoW bit-26 self-describing wire was WITHDRAWN: bit 26 was previously
+    // legal, so gating 182↔186 parse / GetHash on it forks pre-activation peers.
+    // Until a height-contextual wire design lands, do not require or forbid the
+    // bit here. Activation of a commitment-format HeaderPoW remains a hard NO-GO.
+
+    // Audit F1: header-PoW spam gate. At v4 heights the header-level PoW check is
+    // only `matmul_digest <= target`, and matmul_digest is a self-declared field
+    // (not a hash of the header), so header work is forgeable at zero cost -- a
+    // header-flood / best-header-poisoning DoS vector. When enabled this requires
+    // cheap UNFORGEABLE hash work per header. SINGLE ACTIVATION: no gate height of
+    // its own -- it rides the v4 fork and is enabled by a non-sentinel
+    // nMatMulHeaderPoWDiscountBits (default UINT32_MAX = disabled). NOT gated by
+    // fSkipMatMulValidation: it is a one-hash relay/DoS defense, not an
+    // expensive-verify correctness check.
+    if (consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(nHeight) &&
+        consensusParams.IsMatMulHeaderPoWEnabled() &&
+        !CheckMatMulHeaderSpamGate(block, consensusParams)) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER, "bad-matmul-header-pow",
+                             "matmul header proof-of-work spam gate not satisfied");
+    }
+
     // Deterministic seed enforcement: verify MatMul seeds match the active
     // height-gated derivation. This is done contextually (not in Phase 1)
     // because Phase 1 operates on header-only data without block index access.
     // Skip when fSkipMatMulValidation is true (default regtest without -test=matmulstrict).
     if (consensusParams.fMatMulPOW && !consensusParams.fSkipMatMulValidation && !block.hashPrevBlock.IsNull()) {
+        // MatMul v4 (spec §I.1/§I.2): Phase1 (CheckBlockHeader) is
+        // context-free and, when a v4 fork height is configured, leniently
+        // accepts EITHER the v3 or v4 dimension. This is the first
+        // height-aware check point, so enforce the exact height-gated
+        // dimension here.
+        if (consensusParams.IsMatMulV4Active(nHeight)) {
+            // Spec §G.2/§G.4-#2: structural accepted-dimension bounds, enforced
+            // ahead of the exact height-gated dimension below as defense in
+            // depth (reject any out-of-range matmul_dim outright).
+            if (block.matmul_dim < consensusParams.nMatMulV4MinDimension ||
+                block.matmul_dim > consensusParams.nMatMulV4MaxDimension) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul v4 dimension out of range for this height");
+            }
+            if (block.matmul_dim != consensusParams.nMatMulV4Dimension) {
+                return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                     "bad-matmul-dim",
+                                     "matmul v4 dimension mismatch for this height");
+            }
+            // MatMul v4.2 / ENC-BMX4C (spec §1.3/§8.2): at BMX4C heights the
+            // accepted-dim invariant additionally requires n % 32 == 0 (E8M0
+            // block scales run along the contraction dim in blocks of 32).
+            // Trivially true for the 4096/8192 (and regtest 256) dimensions,
+            // enforced here as defense in depth. GetMatMulEncodingProfile is the
+            // single profile selector (no second height compare, spec §8.2).
+            // ENC-BMX4C-LT inherits the same E8M0 block-length gate (MatExpand
+            // dequant still contracts over n with the BMX4 structural bound).
+            {
+                const auto enc = consensusParams.GetMatMulEncodingProfile(nHeight);
+                if ((enc == Consensus::MatMulEncodingProfile::ENC_BMX4C ||
+                     enc == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) &&
+                    (block.matmul_dim % Consensus::BMX4C_SCALE_BLOCK_LENGTH) != 0) {
+                    return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                         "bad-matmul-dim",
+                                         "matmul bmx4c dimension not a multiple of the E8M0 block length");
+                }
+            }
+        } else if (block.matmul_dim != consensusParams.nMatMulDimension) {
+            return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                                 "bad-matmul-dim",
+                                 "matmul dimension mismatch for this height");
+        }
+
         CBlockHeader expected_header{block};
         if (!SetDeterministicMatMulSeeds(expected_header, consensusParams, nHeight, pindexPrev->GetMedianTimePast())) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
@@ -9988,7 +10092,11 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
                                  "matmul seeds do not match deterministic derivation for this height");
         }
 
-        if (fCheckPOW && !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
+        // MatMul v4 (spec §G.3): the pre-hash lottery gate is retired at v4
+        // heights -- CheckMatMulPreHashGate is bypassed (returns true
+        // unconditionally in effect) because v4 has no pre-hash step.
+        if (fCheckPOW && !consensusParams.IsMatMulV4Active(nHeight) &&
+            !CheckMatMulPreHashGate(block, consensusParams, nHeight)) {
             return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
                                  "high-hash",
                                  "matmul pre-hash proof failed");
@@ -10086,6 +10194,170 @@ static bool ContextualCheckBlockHeader(const CBlockHeader& block,
     return true;
 }
 
+namespace {
+/** G.1: RAII scoped release of an already-held cs_main for the duration of an
+ *  expensive, chainstate-INDEPENDENT computation, re-acquiring on scope exit
+ *  (including on exception). Used to run the v4.4 ENC-DR reference recompute —
+ *  a one-nonce O(W) GEMM (~seconds of CPU, ~100 MB transient at n=4096 on the
+ *  cache/accel miss path) — WITHOUT serializing it under the node's global lock.
+ *  Mirrors the LEAVE/ENTER_CRITICAL_SECTION longpoll precedent in
+ *  rpc/mining.cpp, made exception-safe by RAII. Safe here because
+ *  CheckMatMulProofOfWork_V4EncDr reads NO cs_main-guarded state (only the
+ *  caller-owned block, immutable consensus params, and a local height; its only
+ *  mutations are to the sketch cache and the phase2-budget counter, each under
+ *  its OWN mutex), and only a pure bool crosses the release boundary. cs_main
+ *  must be the innermost-held critical section at construction (it is, at the
+ *  ENC-DR recompute point in ContextualCheckBlock). */
+struct CsMainScopedRelease {
+    CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { LEAVE_CRITICAL_SECTION(::cs_main); }
+    ~CsMainScopedRelease() NO_THREAD_SAFETY_ANALYSIS { ENTER_CRITICAL_SECTION(::cs_main); }
+    CsMainScopedRelease(const CsMainScopedRelease&) = delete;
+    CsMainScopedRelease& operator=(const CsMainScopedRelease&) = delete;
+};
+} // namespace
+
+bool ChainstateManager::IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
+{
+    AssertLockHeld(::cs_main);
+    // Factored VERBATIM from ContextualCheckBlock's ASSUMEVALID BURIED-RECOMPUTE
+    // TRUST clause (tension-resolution §3.1-vi); see the in-line rationale there.
+    // Behavior must stay bit-identical to the historical in-line predicate: a
+    // null pindex_self, unset -assumevalid, or missing best header always mean
+    // "not trusted" (=> the recompute runs).
+    if (AssumedValidBlock().IsNull() || m_best_header == nullptr || pindex_self == nullptr) return false;
+    const auto av_it = m_blockman.m_block_index.find(AssumedValidBlock());
+    if (av_it == m_blockman.m_block_index.end()) return false;
+    if (av_it->second.GetAncestor(nHeight) != pindex_self) return false;
+    if (m_best_header->GetAncestor(nHeight) != pindex_self) return false;
+    if (m_best_header->nAuthenticatedChainWork < MinimumChainWork()) return false;
+    return GetBlockProofEquivalentTime(*m_best_header, *pindex_self, *m_best_header, GetConsensus()) >
+           static_cast<int64_t>(GetConsensus().nMatMulProofAssumeValidMinAge);
+}
+
+std::optional<ChainstateManager::MatMulEncDrClassifyResult>
+ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
+                                                bool* verdict_pinned,
+                                                bool* assumevalid_trusted) const
+{
+    AssertLockHeld(::cs_main);
+    if (verdict_pinned != nullptr) *verdict_pinned = false;
+    if (assumevalid_trusted != nullptr) *assumevalid_trusted = false;
+    const Consensus::Params& params = GetConsensus();
+    if (!params.fMatMulPOW) return std::nullopt;
+    const CBlockIndex* prev = m_blockman.LookupBlockIndex(block.hashPrevBlock);
+    // An unknown or overflowing prev means AcceptBlock cannot reach the ENC-DR
+    // seam for this delivery (it fails/queues upstream): keep it synchronous.
+    if (prev == nullptr || prev->nHeight == std::numeric_limits<int>::max()) return std::nullopt;
+    const int32_t nHeight = prev->nHeight + 1;
+    if (!params.IsMatMulV4Active(nHeight)) return std::nullopt;
+    if (params.GetMatMulProfileParams(nHeight).commitment !=
+        Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return std::nullopt;
+    // A non-empty body payload is rejected cheaply at the seam (forbidden
+    // A/B payload, non-empty inline sketch) before any recompute: do not
+    // spend a worker slot on it.
+    if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() || !block.matrix_c_data.empty()) {
+        return std::nullopt;
+    }
+    // Phase B seal-as-PoW: tip verify needs parent MTP for sibling-slot V3
+    // seeds. Prev is known here, so MTP is always available — allow async
+    // enqueue and thread MTP into the worker Job. CheckMatMulProofOfWork_V4EncDr
+    // still fails closed if a Job somehow lacks MTP at seal heights.
+    if (const CBlockIndex* existing = m_blockman.LookupBlockIndex(block.GetHash())) {
+        // Already have the data: AcceptBlock short-circuits before the seam.
+        if (existing->nStatus & BLOCK_HAVE_DATA) return std::nullopt;
+        // Known-invalid: AcceptBlockHeader rejects it for free as "duplicate-invalid".
+        // A failed block stores no data (BLOCK_HAVE_DATA stays unset), so without this
+        // a re-delivered bad block would be enqueued and fully re-recomputed on EVERY
+        // delivery (DoS). Route it synchronous — it fails cheaply, no worker slot spent.
+        if (existing->nStatus & BLOCK_FAILED_MASK) return std::nullopt;
+        // Assumevalid-buried: the seam skips the recompute entirely.
+        if (IsMatMulRecomputeAssumeValidTrusted(existing, nHeight)) {
+            if (assumevalid_trusted != nullptr) *assumevalid_trusted = true;
+            return std::nullopt;
+        }
+    }
+    // A verdict for this exact block is already memoized: the seam will reuse it
+    // without recomputing, so don't occupy a worker slot re-deriving the same answer.
+    if (verdict_pinned != nullptr) {
+        if (PinCachedMatMulEncDrVerdict(block.GetHash()).has_value()) {
+            *verdict_pinned = true;
+            return std::nullopt;
+        }
+    } else if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) {
+        return std::nullopt;
+    }
+    return MatMulEncDrClassifyResult{nHeight, prev->GetMedianTimePast()};
+}
+
+static bool ContextualCheckBlockBodyOnly(const CBlock& block,
+                                         BlockValidationState& state,
+                                         const ChainstateManager& chainman,
+                                         const CBlockIndex* pindexPrev)
+{
+    if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
+        return state.Invalid(BlockValidationResult::BLOCK_INVALID_HEADER,
+                             "bad-blk-height-overflow", "block height overflow");
+    }
+    const int nHeight{pindexPrev == nullptr ? 0 : pindexPrev->nHeight + 1};
+    const Consensus::Params& consensus_params{chainman.GetConsensus()};
+    const bool enforce_mtp{
+        pindexPrev != nullptr && DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CSV)};
+    const int64_t lock_time_cutoff{enforce_mtp ? pindexPrev->GetMedianTimePast()
+                                               : block.GetBlockTime()};
+
+    for (const auto& tx : block.vtx) {
+        if (!IsFinalTx(*tx, nHeight, lock_time_cutoff)) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-txns-nonfinal", "non-final transaction");
+        }
+    }
+
+    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_HEIGHTINCB)) {
+        const CScript expect{CScript() << nHeight};
+        if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
+            !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
+            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                 "bad-cb-height", "block height mismatch in coinbase");
+        }
+    }
+
+    if (!CheckWitnessMalleation(
+            block, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT), state)) {
+        return false;
+    }
+    if (GetBlockWeight(block) > static_cast<int64_t>(consensus_params.nMaxBlockWeight)) {
+        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight",
+                             "ContextualCheckBlock : weight limit failed");
+    }
+    return true;
+}
+
+bool ChainstateManager::CheckMatMulBlockAdmissionPreconditions(
+    const CBlock& block,
+    BlockValidationState& state,
+    bool force_processing,
+    bool min_pow_checked,
+    bool& reaches_contextual_check)
+{
+    AssertLockHeld(::cs_main);
+    reaches_contextual_check = false;
+    if (!CheckBlock(block, state, GetConsensus())) return false;
+
+    CBlockIndex* pindex{nullptr};
+    if (!AcceptBlockHeader(block, state, &pindex, min_pow_checked)) return false;
+    if (pindex == nullptr || !ContextualCheckBlockBodyOnly(block, state, *this, pindex->pprev)) return false;
+
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
+    if (!force_processing) {
+        if (pindex->nTx != 0) return true;
+        if (ActiveTip() != nullptr && pindex->nChainWork < ActiveTip()->nChainWork) return true;
+        if (pindex->nHeight > ActiveHeight() + int(MIN_BLOCKS_TO_KEEP)) return true;
+        if (pindex->nChainWork < MinimumChainWork()) return true;
+    }
+    reaches_contextual_check = true;
+    return true;
+}
+
 /** NOTE: This function is not currently invoked by ConnectBlock(), so we
  *  should consider upgrade issues if we change which consensus rules are
  *  enforced in this function (eg by adding a new consensus rule). See comment
@@ -10096,7 +10368,18 @@ static bool ContextualCheckBlock(const CBlock& block,
                                  BlockValidationState& state,
                                  const ChainstateManager& chainman,
                                  const CBlockIndex* pindexPrev,
-                                 bool fCheckPOW = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
+                                 bool fCheckPOW = true,
+                                 // E: gates whether the ENC-DR recompute below is permitted to
+                                 // release cs_main (see CsMainScopedRelease). AcceptBlock (the hot
+                                 // P2P path) passes true so the O(W) recompute never serializes
+                                 // under the global lock. TestBlockValidity passes false: it holds
+                                 // a stack-local CCoinsViewCache/CBlockIndex and a
+                                 // pindexPrev==Tip() precondition ACROSS this call and then runs
+                                 // ConnectBlock against them, so a mid-call tip advance by a
+                                 // concurrent thread must not be possible. Holding cs_main across
+                                 // the recompute is harmless there (not the hot path, and its
+                                 // fCheckPOW=true callers are single-threaded).
+                                 bool may_release_cs_main = true) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
     AssertLockHeld(::cs_main);
     if (pindexPrev != nullptr && pindexPrev->nHeight == std::numeric_limits<int>::max()) {
@@ -10109,7 +10392,205 @@ static bool ContextualCheckBlock(const CBlock& block,
     const bool is_ibd = chainman.IsInitialBlockDownload();
     const Consensus::Params& consensusParams = chainman.GetConsensus();
 
-    if (fCheckPOW && consensusParams.fMatMulPOW) {
+    if (fCheckPOW && consensusParams.fMatMulPOW && consensusParams.IsMatMulV4Active(nHeight)) {
+        // MatMul v4 (spec §I.2): exclusive cascade at and above nMatMulV4Height
+        // -- no v3 Phase2/Freivalds/ProductCommitted fallback, no transcript
+        // path, no dual-algorithm grace period.
+        if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty()) {
+            return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-forbidden-ab-payload",
+                "matmul v4 block carries forbidden legacy A/B matrix payload");
+        }
+        const Consensus::MatMulProfileParams matmul_profile = consensusParams.GetMatMulProfileParams(nHeight);
+        if (matmul_profile.commitment == Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            // v4.4 ENC-DR path (doc/btx-matmul-v4.4-tension-resolution.md §4.1):
+            // the block carries ZERO consensus proof bytes. The header's
+            // matmul_digest = H(sigma||Chat_true) is the whole commitment; the
+            // predicate is a pure function of the header, decided by exact
+            // recompute (the consensus definition, epsilon = 0) or by the
+            // cache-assisted Freivalds fast path (epsilon <= 2^-180) inside
+            // CheckMatMulProofOfWork_V4EncDr.
+            //
+            // (1) The in-block body sketch MUST be empty (§4.1 clause 2). A
+            // non-empty inline sketch at an ENC-DR height is classified as a
+            // body mutation (BLOCK_MUTATED, non-permanent): matrix_c_data is
+            // body data not covered by the header hash, so a relayer could
+            // append garbage bytes to an honest digest-only block — the honest
+            // empty-body block with the same header hash must not be poisoned.
+            if (!block.matrix_c_data.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "v4-encdr-nonempty-sketch",
+                    "matmul v4.4 ENC-DR block carries a forbidden inline sketch payload");
+            }
+            // (2) ASSUMEVALID BURIED-RECOMPUTE TRUST (tension-resolution
+            // §3.1-vi; retargeted byte-for-byte from the retired segregated
+            // buried-proof trust, design §3.5-2). Below the configured
+            // assumevalid block, a node TRUSTS that the buried chain's PoW
+            // recomputes were verified by the network — the IDENTICAL trust
+            // ConnectBlock already extends to buried scriptSigs — instead of
+            // re-running the O(W) Chat recompute for every historical block.
+            // This predicate is the SOLE bound on deep-history recompute cost
+            // for a default node's IBD; a fully-verifying node
+            // (-assumevalid=0 => AssumedValidBlock null) NEVER trusts and
+            // always recomputes. The trust condition mirrors the ConnectBlock
+            // fScriptChecks skip EXACTLY: the block is an assumed-valid
+            // ancestor of the best header; the best header carries at least
+            // MinimumChainWork of AUTHENTICATED work (C1 — a forged-header
+            // chain cannot induce the skip); and it is buried more than the
+            // 2-week equivalent-time DoS guard. When trusted, the recompute is
+            // skipped for this block (every buried block stays re-auditable
+            // forever by digest-only recompute — re-derivability underneath
+            // the trust, §4.4).
+            // (Predicate factored to ChainstateManager::IsMatMulRecomputeAssumeValidTrusted
+            // so the WP-7 async-verify dispatcher and the WP-8 sketch-prefetch
+            // guard share this single implementation; behavior unchanged.)
+            const bool recompute_assumevalid_trusted =
+                chainman.IsMatMulRecomputeAssumeValidTrusted(
+                    chainman.m_blockman.LookupBlockIndex(block.GetHash()), nHeight) ||
+                // P2P admission may have made the same trust decision under
+                // cs_main immediately before this call. Keep that decision
+                // scoped across ProcessNewBlock so a concurrent best-header
+                // branch change cannot turn the cheap path into an unbudgeted
+                // recomputation. The pin is not an exact-verdict memo and is
+                // released as soon as this validation re-entry completes.
+                IsMatMulEncDrAssumeValidTrustPinned(block.GetHash());
+            // (3) Above assumevalid (or -assumevalid=0): decide the §4.1
+            // predicate. Any failure is a header-level PERMANENT consensus
+            // fault: with an empty body there are no proof bytes to mutate, so
+            // the MUTATED/permanent classification collapses (§4.1 clause 2)
+            // and "high-hash" is always correct here.
+            if (!recompute_assumevalid_trusted) {
+                // DATACENTER PROFILE-2 CARRIER-AVAILABILITY GATE (transient, not
+                // permanent). Under nMatMulRCProfile==2 the consensus authority
+                // (CheckMatMulProofOfWork_RC) FAILS CLOSED when the relayed
+                // sampled carrier has not yet arrived in the process-local store.
+                // On the getdata block-download path the carrier is guaranteed to
+                // precede the block by the strict serve-push in ProcessGetBlockData,
+                // but a block reconstructed LOCALLY from mempool via compact blocks
+                // (cmpctblock/blocktxn) is not fetched via getdata `block`, so the
+                // serve-push never fires and the carrier may simply be LATE. If we
+                // let the fail-closed miss fall through to BLOCK_CONSENSUS below,
+                // AcceptBlock marks the block BLOCK_FAILED_VALID PERMANENTLY (only
+                // BLOCK_MUTATED is spared), so a raced-but-VALID profile-2 block
+                // would be rejected forever — a consensus-split/chain-halt risk.
+                //
+                // Detect the missing carrier here and classify it TRANSIENT
+                // (BLOCK_MUTATED, which AcceptBlock does NOT mark failed), so
+                // net_processing can request the carrier (getrccarrier), hold the
+                // block, and resubmit on receipt. This does NOT weaken fail-closed:
+                // a PRESENT carrier still runs the full sampled verifier below (a
+                // present-but-invalid carrier is a real, permanent PoW fault); only
+                // a genuinely late carrier is deferred, and a block is NEVER
+                // accepted without an authenticated carrier. Profile-1/base and the
+                // coupled path are unaffected (they carry no sampled carrier).
+                if (consensusParams.IsMatMulRCActive(nHeight) &&
+                    !consensusParams.IsMatMulRCCoupledActive(nHeight) &&
+                    consensusParams.nMatMulRCProfile == 2 &&
+                    !matmul::v4::rc::RCFreivaldsCarrierStoreHave(block.GetHash())) {
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
+                                         "matmul-rc-carrier-missing",
+                                         "matmul datacenter sampled carrier not yet available");
+                }
+                // G.1: run the ENC-DR predicate WITHOUT cs_main held. On the
+                // cache/accel-miss path it performs the full O(W) one-nonce
+                // reference GEMM; holding the global lock across it would let a
+                // header-PoW-paying attacker (or a near-tip IBD node) serialize
+                // seconds of CPU under cs_main per non-cached block. The check is
+                // a pure function of the header + immutable params and reads no
+                // cs_main-guarded state (see CsMainScopedRelease), and every
+                // cs_main-dependent decision above (empty-body classification,
+                // assumevalid-trust) is already made; only this bool crosses the
+                // release boundary.
+                bool encdr_ok;
+                if (const auto memo{LookupMatMulEncDrVerdict(block.GetHash())}) {
+                    // WP-7 / C5: the async verify worker (net_processing's
+                    // node::MatMulVerifyWorker) already ran the pure ENC-DR
+                    // predicate for this header off-thread and memoized the
+                    // verdict. The predicate is a pure function of the header +
+                    // process-constant params (the hash pins prev => height =>
+                    // profile), so replaying the verdict here is
+                    // consensus-equivalent to recomputing — and it keeps the
+                    // completion's re-entry through ProcessNewBlock O(1) even
+                    // when the 8-entry sketch cache already evicted the entry
+                    // or the block is INVALID (nothing was ever cached).
+                    encdr_ok = *memo;
+                } else if (may_release_cs_main) {
+                    CsMainScopedRelease release_cs_main_for_recompute;
+                    // DO NOT add cs_main-requiring code in this scope: TSA still
+                    // believes cs_main is held here (the RAII guard is
+                    // NO_THREAD_SAFETY_ANALYSIS), so a guarded call would compile
+                    // yet run unlocked. Keep it to the single pure recompute.
+                    // Parent MTP is a pure scalar from pindexPrev (already
+                    // resolved under cs_main above); Phase B seal-as-PoW needs
+                    // it for sibling-slot V3 seed re-derivation (LT-Q2).
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
+                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
+                    } else {
+                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                  parent_mtp);
+                    }
+                } else {
+                    // E: TestBlockValidity path — keep cs_main held across the
+                    // recompute so the caller's Tip()-pinned viewNew/indexDummy
+                    // cannot be invalidated by a concurrent tip advance. The
+                    // verdict is identical; only the locking discipline differs.
+                    const std::optional<int64_t> parent_mtp =
+                        pindexPrev != nullptr
+                            ? std::optional<int64_t>{pindexPrev->GetMedianTimePast()}
+                            : std::nullopt;
+                    if (consensusParams.IsMatMulRCCoupledActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RCCoupled(block, consensusParams, nHeight);
+                    } else if (consensusParams.IsMatMulRCActive(nHeight)) {
+                        encdr_ok = CheckMatMulProofOfWork_RC(block, consensusParams, nHeight);
+                    } else {
+                        encdr_ok = CheckMatMulProofOfWork_V4EncDr(block, consensusParams, nHeight,
+                                                                  parent_mtp);
+                    }
+                }
+                if (!encdr_ok) {
+                    return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                        "matmul v4 proof of work failed");
+                }
+            }
+        } else {
+            // LEGACY IN-BLOCK path (FLAT_SKETCH_INBLOCK) — v4.4: reachable ONLY
+            // via the regtest-only fMatMulV4FlatSketchReplay differential-
+            // testing switch (tension-resolution §4.5); byte-for-byte the
+            // pre-ENC-DR carriage.
+            if (block.matrix_c_data.empty()) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "missing-product-payload",
+                    "matmul v4 block missing required product sketch payload");
+            }
+            if (!IsMatMulV4PayloadSizeValid(block, consensusParams)) {
+                return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "invalid-product-payload",
+                    "matmul v4 block carries malformed product sketch payload");
+            }
+            if (!CheckMatMulProofOfWork_V4ProductCommitted(block, consensusParams, nHeight)) {
+                // Separate a body MUTATION from a header-level CONSENSUS fault. The
+                // sketch payload lives in the block body while matmul_digest is in
+                // the 182-byte header, so a corrupted payload leaves the block hash
+                // unchanged and a correct payload for that same hash still exists.
+                // Marking such a block permanently invalid (BLOCK_CONSENSUS) would
+                // let an attacker poison a valid header's hash by relaying a
+                // corrupted-payload copy first, blocking the honest block as
+                // "duplicate-invalid". Classify it as BLOCK_MUTATED (non-permanent),
+                // matching the A/B and payload-shape checks above. Only a payload
+                // that DOES reconstruct the committed digest but still fails
+                // (Freivalds mismatch or digest over target) is a real, permanent
+                // PoW failure.
+                if (!MatMulV4PayloadMatchesCommitment(block)) {
+                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED, "bad-matmul-v4-payload",
+                        "matmul v4 sketch payload does not match committed digest");
+                }
+                return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "high-hash",
+                    "matmul v4 proof of work failed");
+            }
+        }
+    } else if (fCheckPOW && consensusParams.fMatMulPOW) {
         const bool has_v2_payload = HasMatMulV2Payload(block);
         const bool payload_shape_valid =
             !has_v2_payload || IsMatMulV2PayloadSizeValid(block, consensusParams);
@@ -10197,57 +10678,7 @@ static bool ContextualCheckBlock(const CBlock& block,
         }
     }
 
-    // Enforce BIP113 (Median Time Past).
-    bool enforce_locktime_median_time_past{false};
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_CSV)) {
-        assert(pindexPrev != nullptr);
-        enforce_locktime_median_time_past = true;
-    }
-
-    const int64_t nLockTimeCutoff{enforce_locktime_median_time_past ?
-                                      pindexPrev->GetMedianTimePast() :
-                                      block.GetBlockTime()};
-
-    // Check that all transactions are finalized
-    for (const auto& tx : block.vtx) {
-        if (!IsFinalTx(*tx, nHeight, nLockTimeCutoff)) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-txns-nonfinal", "non-final transaction");
-        }
-    }
-
-    // Enforce rule that the coinbase starts with serialized block height
-    if (DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_HEIGHTINCB))
-    {
-        CScript expect = CScript() << nHeight;
-        if (block.vtx[0]->vin[0].scriptSig.size() < expect.size() ||
-            !std::equal(expect.begin(), expect.end(), block.vtx[0]->vin[0].scriptSig.begin())) {
-            return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-cb-height", "block height mismatch in coinbase");
-        }
-    }
-
-    // Validation for witness commitments.
-    // * We compute the witness hash (which is the hash including witnesses) of all the block's transactions, except the
-    //   coinbase (where 0x0000....0000 is used instead).
-    // * The coinbase scriptWitness is a stack of a single 32-byte vector, containing a witness reserved value (unconstrained).
-    // * We build a merkle tree with all those witness hashes as leaves (similar to the hashMerkleRoot in the block header).
-    // * There must be at least one output whose scriptPubKey is a single 36-byte push, the first 4 bytes of which are
-    //   {0xaa, 0x21, 0xa9, 0xed}, and the following 32 bytes are SHA256^2(witness root, witness reserved value). In case there are
-    //   multiple, the last one is used.
-    if (!CheckWitnessMalleation(block, DeploymentActiveAfter(pindexPrev, chainman, Consensus::DEPLOYMENT_SEGWIT), state)) {
-        return false;
-    }
-
-    // After the coinbase witness reserved value and commitment are verified,
-    // we can check if the block weight passes (before we've checked the
-    // coinbase witness, it would be possible for the weight to be too
-    // large by filling up the coinbase witness, which doesn't change
-    // the block hash, so we couldn't mark the block as permanently
-    // failed).
-    if (GetBlockWeight(block) > static_cast<int64_t>(consensusParams.nMaxBlockWeight)) {
-        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS, "bad-blk-weight", strprintf("%s : weight limit failed", __func__));
-    }
-
-    return true;
+    return ContextualCheckBlockBodyOnly(block, state, chainman, pindexPrev);
 }
 
 bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationState& state, CBlockIndex** ppindex, bool min_pow_checked)
@@ -10399,7 +10830,9 @@ void ChainstateManager::ReportHeadersPresync(const arith_uint256& work, int64_t 
         // Don't report headers presync progress if we already have a post-minchainwork header chain.
         // This means we lose reporting for potentially legitimate, but unlikely, deep reorgs, but
         // prevent attackers that spam low-work headers from filling our logs.
-        if (m_best_header->nChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
+        // Audit P0.1/C1: gate on AUTHENTICATED work so a forged matmul-header chain
+        // cannot suppress/flip presync reporting. Equal to nChainWork pre-fork.
+        if (m_best_header->nAuthenticatedChainWork >= UintToArith256(GetConsensus().nMinimumChainWork)) return;
         // Rate limit headers presync updates to 4 per second, as these are not subject to DoS
         // protection.
         auto now = std::chrono::steady_clock::now();
@@ -10478,6 +10911,18 @@ bool ChainstateManager::AcceptBlock(const std::shared_ptr<const CBlock>& pblock,
         LogError("%s: %s\n", __func__, state.ToString());
         return false;
     }
+
+    // G.1 duplicate-processing guard: ContextualCheckBlock may have RELEASED
+    // cs_main during the v4.4 ENC-DR recompute, opening a window in which
+    // another thread (a local submitblock/generateblock RPC, or reindex racing
+    // net) could have fully processed this same block — write +
+    // ReceivedBlockTransactions (which sets BLOCK_HAVE_DATA). fAlreadyHave was
+    // sampled BEFORE that window (above), so re-check now under the re-acquired
+    // lock to avoid a duplicate disk write / NewPoWValidBlock /
+    // ReceivedBlockTransactions for the same block. (A remote peer cannot
+    // trigger this — the message handler is single-threaded — but a concurrent
+    // RPC/reindex can.)
+    if (pindex->nStatus & BLOCK_HAVE_DATA) return true;
 
     // Header is valid/has work, merkle tree and segwit merkle tree are good...RELAY NOW
     // (but if it does not build on our best tip, let the SendMessages loop relay it)
@@ -10625,7 +11070,11 @@ bool TestBlockValidity(BlockValidationState& state,
         LogError("%s: Consensus::CheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
-    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW)) {
+    // E: pass may_release_cs_main=false. TestBlockValidity holds viewNew /
+    // indexDummy and the pindexPrev==Tip() precondition across this call and
+    // ConnectBlock below, so ContextualCheckBlock must NOT release cs_main
+    // mid-call even on the fCheckPOW=true ENC-DR recompute branch.
+    if (!ContextualCheckBlock(block, state, chainstate.m_chainman, pindexPrev, fCheckPOW, /*may_release_cs_main=*/false)) {
         LogError("%s: Consensus::ContextualCheckBlock: %s\n", __func__, state.ToString());
         return false;
     }
@@ -11173,8 +11622,10 @@ bool ChainstateManager::LoadBlockIndex()
             if (pindex->nStatus & BLOCK_FAILED_MASK && (!m_best_invalid || pindex->nChainWork > m_best_invalid->nChainWork)) {
                 m_best_invalid = pindex;
             }
-            if (pindex->IsValid(BLOCK_VALID_TREE) && (m_best_header == nullptr || CBlockIndexWorkComparator()(m_best_header, pindex)))
+            if (pindex->IsValid(BLOCK_VALID_TREE) &&
+                (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, *pindex))) {
                 m_best_header = pindex;
+            }
         }
     }
     return true;
@@ -11531,6 +11982,13 @@ void ChainstateManager::CheckBlockIndex()
         assert((pindexFirstNotTransactionsValid == nullptr || pindex == snap_base) == pindex->HaveNumChainTxs());
         assert(pindex->nHeight == nHeight); // nHeight must be consistent.
         assert(pindex->pprev == nullptr || pindex->nChainWork >= pindex->pprev->nChainWork); // For every block except the genesis block, the chainwork must be larger than the parent's.
+        // Authenticated-chainwork invariants (audit: contiguous authenticated prefix).
+        // Authenticated work is a monotone sub-total of claimed work: it never exceeds
+        // nChainWork (the GetTrustAdjustedChainWork subtraction relies on this) and never
+        // decreases parent->child. UpdateAuthenticatedChainWork maintains both; asserting
+        // here surfaces any future desync (e.g. a stale value) in tests/regtest.
+        assert(pindex->nAuthenticatedChainWork <= pindex->nChainWork);
+        assert(pindex->pprev == nullptr || pindex->nAuthenticatedChainWork >= pindex->pprev->nAuthenticatedChainWork);
         assert(nHeight < 2 || (pindex->pskip && (pindex->pskip->nHeight < nHeight))); // The pskip pointer must point back for all but the first 2 blocks.
         assert(pindexFirstNotTreeValid == nullptr); // All m_blockman.m_block_index entries must at least be TREE valid
         if ((pindex->nStatus & BLOCK_VALID_MASK) >= BLOCK_VALID_TREE) assert(pindexFirstNotTreeValid == nullptr); // TREE valid implies all parents are TREE valid
@@ -15002,7 +15460,10 @@ void ChainstateManager::RecalculateBestHeader()
     AssertLockHeld(cs_main);
     m_best_header = ActiveChain().Tip();
     for (auto& entry : m_blockman.m_block_index) {
-        if (!(entry.second.nStatus & BLOCK_FAILED_MASK) && m_best_header->nChainWork < entry.second.nChainWork) {
+        if (entry.second.nStatus & BLOCK_FAILED_MASK) continue;
+        // Trust-adjusted selection: forged header-only branches only receive a
+        // bounded unauth lookahead above their last authenticated ancestor.
+        if (m_best_header == nullptr || PreferTrustAdjustedHeader(*m_best_header, entry.second)) {
             m_best_header = &entry.second;
         }
     }

@@ -61,8 +61,48 @@ static constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
 static constexpr auto FEELER_INTERVAL = 2min;
 /** Run the extra block-relay-only connection loop once every 5 minutes. **/
 static constexpr auto EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL = 5min;
-/** Maximum length of incoming protocol messages. Must accommodate consensus-valid block relay payloads. */
+/** Maximum length of an ordinary incoming protocol message (all commands EXCEPT
+ *  the block-bearing ones below). Kept at 16 MB so a peer cannot force 24 MB of
+ *  buffering/parsing on an arbitrary/unknown command (audit P1-1: raising this
+ *  global limit expands the per-peer allocation + bandwidth DoS envelope by 50%
+ *  for every message type, not just blocks). */
 static const unsigned int MAX_PROTOCOL_MESSAGE_LENGTH = 16 * 1000 * 1000;
+/** Maximum length of a BLOCK-BEARING message (`block`, `blocktxn`), which alone
+ *  may legitimately approach a full serialized block. MUST be >=
+ *  MAX_BLOCK_SERIALIZED_SIZE, or a consensus-valid block becomes un-relayable
+ *  (audit P0.5: a 16-24 MB block was valid but un-relayable over the `block`
+ *  path -- a latent split/eclipse surface). A `block <= block-message`
+ *  static_assert in net.cpp keeps the two from silently diverging. The larger
+ *  ceiling is applied ONLY to these commands (see net.cpp), so ordinary messages
+ *  keep the 16 MB bound. */
+static const unsigned int MAX_BLOCK_MESSAGE_LENGTH = 24 * 1000 * 1000;
+/** Maximum payload of a v4.4 ENC-DR `mmsketch` sketch-cache message: the
+ *  profile's 8·m² serialized sketch (8 MiB at the production m = 1024) plus
+ *  small framing (32-byte block hash + compactSize). Rides in ONE piece under
+ *  BOTH the v2 (BIP324) ~16 MB packet ceiling AND the v1
+ *  MAX_PROTOCOL_MESSAGE_LENGTH (16 MB), so the command needs NO special
+ *  net-layer ceiling (tension-resolution §4.3). If a future shape retarget
+ *  pushes 8·m² past this bound, nodes simply stop serving sketches for that
+ *  profile (peers recompute) — the cache is best-effort, never load-bearing.
+ *  The exact profile-derived cap is re-checked in net_processing on both the
+ *  serve and receive sides. */
+static const unsigned int MAX_MMSKETCH_PAYLOAD_SIZE = 8 * 1024 * 1024 + 64;
+static_assert(MAX_MMSKETCH_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "an mmsketch (payload + framing) must ride under the ordinary "
+              "protocol-message ceiling on both v1 and v2 transports");
+/** Maximum payload of a datacenter-profile `rccarrier` message: a serialized
+ *  RCFreivaldsSampledCarrier (hard-capped at kRCFreivaldsCarrierMaxSerializedBytes
+ *  = 12 MiB in matmul_v4_rc_freivalds_sampled.h) plus small framing (32-byte
+ *  block hash + compactSize). Rides in ONE piece under BOTH the v2 (BIP324)
+ *  ~16 MB packet ceiling AND the v1 MAX_PROTOCOL_MESSAGE_LENGTH (16 MB). The
+ *  exact carrier-derived cap is re-checked in net_processing on both the serve
+ *  and receive sides; a carrier whose bytes exceed the cap is simply not served
+ *  / dropped (peers rebuild), never load-bearing on this transport. A
+ *  net_processing static_assert keeps this in step with the matmul-side ceiling. */
+static const unsigned int MAX_RCCARRIER_PAYLOAD_SIZE = 12u * 1024u * 1024u + 64u;
+static_assert(MAX_RCCARRIER_PAYLOAD_SIZE < MAX_PROTOCOL_MESSAGE_LENGTH,
+              "an rccarrier (payload + framing) must ride under the ordinary "
+              "protocol-message ceiling on both v1 and v2 transports");
 /** Maximum length of the user agent string in `version` message */
 static const unsigned int MAX_SUBVERSION_LENGTH = 256;
 /** Maximum number of automatic outgoing nodes over which we'll relay everything (blocks, tx, addrs, etc) */
@@ -368,6 +408,17 @@ public:
 
     /** Whether upon disconnections, a reconnect with V1 is warranted. */
     virtual bool ShouldReconnectV1() const noexcept = 0;
+
+    /** WP-8 / C4 residual: the largest msg.data payload this transport can
+     *  currently emit as ONE message. V1 carries up to the block-bearing
+     *  ceiling (MAX_BLOCK_MESSAGE_LENGTH, 24 MB); a single V2/BIP324 packet is
+     *  physically capped by its 3-byte contents-length field (~16 MB) and the
+     *  send path DROPS anything larger rather than desyncing the cipher
+     *  stream. Block-serving code must consult this bound BEFORE composing a
+     *  block/blocktxn message so an oversized payload is routed (compact
+     *  block / NOTFOUND) instead of silently vanishing. Call from the message
+     *  handler thread (same discipline as GetInfo()). */
+    virtual size_t MaxSendablePayloadBytes() const noexcept = 0;
 };
 
 class V1Transport final : public Transport
@@ -450,6 +501,13 @@ public:
     void MarkBytesSent(size_t bytes_sent) noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     size_t GetSendMemoryUsage() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
     bool ShouldReconnectV1() const noexcept override { return false; }
+    size_t MaxSendablePayloadBytes() const noexcept override
+    {
+        // V1 frames the payload length in a 4-byte field; the effective bound
+        // is the per-command receive-side ceiling, whose maximum is the
+        // block-bearing limit (readHeader enforces it on the other end).
+        return MAX_BLOCK_MESSAGE_LENGTH;
+    }
 };
 
 class V2Transport final : public Transport
@@ -712,6 +770,7 @@ public:
     // Miscellaneous functions.
     bool ShouldReconnectV1() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex, !m_send_mutex);
     Info GetInfo() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_recv_mutex);
+    size_t MaxSendablePayloadBytes() const noexcept override EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);
 
     /** (Test only) Whether the post-quantum hybrid rekey has been applied to the cipher. */
     bool IsHybridActiveForTest() const noexcept EXCLUSIVE_LOCKS_REQUIRED(!m_send_mutex);

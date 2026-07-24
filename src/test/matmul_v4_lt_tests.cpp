@@ -1,0 +1,2424 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <matmul/backend_capabilities_v4.h>
+#include <matmul/exact_gemm_radix.h>
+#include <matmul/matmul_pow.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_bmx4.h>
+#include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_lt_mx_exact.h>
+#include <matmul/accel_v4.h>
+#if defined(BTX_ENABLE_METAL)
+#include <metal/matmul_v4_lt_accel.h>
+#endif
+
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <crypto/common.h>
+#include <crypto/sha256.h>
+#include <cuda/matmul_v4_lt_accel.h>
+#include <ascend/matmul_v4_lt_accel.h>
+#include <hip/matmul_v4_lt_accel.h>
+#include <metal/matmul_v4_lt_accel.h>
+#include <pow.h>
+#include <primitives/block.h>
+#include <span.h>
+#include <test/util/setup_common.h>
+#include <uint256.h>
+
+#include <boost/test/unit_test.hpp>
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <iterator>
+#include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+namespace lt = matmul::v4::lt;
+
+BOOST_FIXTURE_TEST_SUITE(matmul_v4_lt_tests, BasicTestingSetup)
+
+namespace {
+
+constexpr uint32_t kTestDim = 64;
+
+uint256 ParseUint256(std::string_view hex)
+{
+    const auto parsed = uint256::FromHex(hex);
+    BOOST_REQUIRE(parsed.has_value());
+    return *parsed;
+}
+
+CBlockHeader MakeLTHeader(uint64_t nonce, uint32_t n)
+{
+    CBlockHeader header;
+    header.nVersion = 0x20000004;
+    header.hashPrevBlock = ParseUint256("5151515151515151515151515151515151515151515151515151515151515151");
+    header.hashMerkleRoot = ParseUint256("a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3a3");
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.nNonce64 = nonce;
+    header.nNonce = static_cast<uint32_t>(nonce);
+    header.matmul_dim = static_cast<uint16_t>(n);
+    header.seed_a = ParseUint256("1111111111111111111111111111111111111111111111111111111111111111");
+    header.seed_b = ParseUint256("2222222222222222222222222222222222222222222222222222222222222222");
+    return header;
+}
+
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+class ScopedMatMulV4BackendEnv
+{
+public:
+    explicit ScopedMatMulV4BackendEnv(const char* value)
+    {
+        if (const char* current = std::getenv("BTX_MATMUL_V4_BACKEND")) {
+            m_original = current;
+        }
+        setenv("BTX_MATMUL_V4_BACKEND", value, /*overwrite=*/1);
+    }
+
+    ~ScopedMatMulV4BackendEnv()
+    {
+        if (m_original.has_value()) {
+            setenv("BTX_MATMUL_V4_BACKEND", m_original->c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv("BTX_MATMUL_V4_BACKEND");
+        }
+    }
+
+private:
+    std::optional<std::string> m_original;
+};
+
+class ScopedLtNativePolicyDefault
+{
+public:
+    ScopedLtNativePolicyDefault()
+    {
+        if (const char* value = std::getenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX")) {
+            m_require = value;
+        }
+        if (const char* value = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK")) {
+            m_allow = value;
+        }
+        unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+        unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    }
+
+    ~ScopedLtNativePolicyDefault()
+    {
+        Restore("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", m_require);
+        Restore("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", m_allow);
+    }
+
+private:
+    static void Restore(const char* name, const std::optional<std::string>& value)
+    {
+        if (value) {
+            setenv(name, value->c_str(), /*overwrite=*/1);
+        } else {
+            unsetenv(name);
+        }
+    }
+
+    std::optional<std::string> m_require;
+    std::optional<std::string> m_allow;
+};
+
+bool ExtendedCudaSelfTestRequested()
+{
+    const char* enabled = std::getenv("BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST");
+    return enabled != nullptr &&
+        (std::strcmp(enabled, "1") == 0 || std::strcmp(enabled, "true") == 0 ||
+         std::strcmp(enabled, "yes") == 0);
+}
+#endif
+
+// Device-backend stand-ins for the MatExpand GEMMs. The "mock" pair wraps the
+// CPU ExactGemm* reference bit-for-bit (a device backend MUST reproduce it), so
+// routing through it MUST leave every digest byte-identical. The "fail" pair
+// returns false to exercise the CPU fallback contract.
+int g_mock_s8s8_calls = 0;
+int g_mock_s32s8_calls = 0;
+
+bool MockGemmS8S8(const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                  uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    ++g_mock_s8s8_calls;
+    out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+    return true;
+}
+
+bool MockGemmS32S8(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                   uint32_t rows, uint32_t inner, uint32_t cols, std::vector<int32_t>& out)
+{
+    ++g_mock_s32s8_calls;
+    out = lt::ExactGemmS32S8(L, R, rows, inner, cols);
+    return true;
+}
+
+bool FailGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                  uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
+bool WrongSizeGemmS8S8(const std::vector<int8_t>&, const std::vector<int8_t>&,
+                       uint32_t, uint32_t, uint32_t, std::vector<int32_t>& out)
+{
+    out.assign(1, 0);
+    return true;
+}
+
+bool ThrowGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
+                    uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    throw std::runtime_error{"injected backend failure"};
+}
+
+bool FailGemmS32S8(const std::vector<int32_t>&, const std::vector<int8_t>&,
+                   uint32_t, uint32_t, uint32_t, std::vector<int32_t>&)
+{
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// C-15 falsification helpers (dual pre-review): least-squares surrogates and
+// MatExpand B32 reconstruction. These are empirical witnesses, not proofs.
+// Bound ε = 0.05 on R² for affine / degree≤3 predictors of Extract(B32).
+// ---------------------------------------------------------------------------
+constexpr double kC15SurrogateR2Eps = 0.05;
+
+uint256 DeriveTaggedSeedSha256(const char* tag, size_t taglen, const uint256& hash)
+{
+    CSHA256 hasher;
+    hasher.Write(reinterpret_cast<const unsigned char*>(tag), taglen);
+    hasher.Write(hash.data(), uint256::size());
+    uint8_t out[CSHA256::OUTPUT_SIZE];
+    hasher.Finalize(out);
+    return uint256{Span<const unsigned char>{out, sizeof(out)}};
+}
+
+/** Reconstruct MatExpand B32 = (G*W)*H for nonce-fresh operand B (test-only twin
+ *  of MatExpandCore up to Extract). Tags match src/matmul/matmul_v4_lt.cpp. */
+struct MatExpandB32Bundle {
+    std::vector<int32_t> B32;
+    uint256 prf_key;
+};
+
+MatExpandB32Bundle ExpandOperandBB32ForTest(const CBlockHeader& header, uint32_t n)
+{
+    namespace bx = matmul::v4::bmx4;
+    constexpr char kGTag[] = "BTX_MATEXPAND_G_V44LT";
+    constexpr char kHTag[] = "BTX_MATEXPAND_H_V44LT";
+    constexpr char kWTag[] = "BTX_MATEXPAND_W_V44LT";
+    const uint32_t w = lt::kMatExpandPanelW;
+    const uint256 tmpl = matmul::v4::ComputeTemplateHash(header);
+    const uint256 header_hash = matmul::ComputeMatMulHeaderHash(header);
+    const uint256 seed_g = DeriveTaggedSeedSha256(kGTag, sizeof(kGTag) - 1, tmpl);
+    const uint256 seed_h = DeriveTaggedSeedSha256(kHTag, sizeof(kHTag) - 1, tmpl);
+    const uint256 seed_w = DeriveTaggedSeedSha256(kWTag, sizeof(kWTag) - 1, header_hash);
+
+    const auto G = bx::ExpandProjectorBMX4C(seed_g, n, n);
+    const auto H = bx::ExpandProjectorBMX4C(seed_h, w, n);
+    const auto W = bx::ExpandProjectorBMX4C(seed_w, n, w);
+    const auto Y = lt::ExactGemmS8S8(G, W, n, n, w);
+    MatExpandB32Bundle out;
+    out.B32 = lt::ExactGemmS32S8(Y, H, n, w, n);
+    out.prf_key = lt::DeriveMatExpandPrfKey(seed_w);
+    return out;
+}
+
+struct PolyFit {
+    int degree{0};
+    double x_mean{0.0};
+    double x_scale{1.0};
+    std::array<double, 4> c{}; // c[0] + c[1] t + ... + c[degree] t^degree
+    double r2{0.0};
+};
+
+bool SolveLinearSystem(std::vector<double>& a, std::vector<double>& b, int n)
+{
+    // In-place Gaussian elimination with partial pivoting on n×n row-major `a`.
+    for (int col = 0; col < n; ++col) {
+        int piv = col;
+        double best = std::fabs(a[static_cast<size_t>(col) * n + col]);
+        for (int r = col + 1; r < n; ++r) {
+            const double v = std::fabs(a[static_cast<size_t>(r) * n + col]);
+            if (v > best) {
+                best = v;
+                piv = r;
+            }
+        }
+        if (best < 1e-18) return false;
+        if (piv != col) {
+            for (int c = 0; c < n; ++c) {
+                std::swap(a[static_cast<size_t>(col) * n + c],
+                          a[static_cast<size_t>(piv) * n + c]);
+            }
+            std::swap(b[col], b[piv]);
+        }
+        const double diag = a[static_cast<size_t>(col) * n + col];
+        for (int r = col + 1; r < n; ++r) {
+            const double f = a[static_cast<size_t>(r) * n + col] / diag;
+            b[r] -= f * b[col];
+            for (int c = col; c < n; ++c) {
+                a[static_cast<size_t>(r) * n + c] -= f * a[static_cast<size_t>(col) * n + c];
+            }
+        }
+    }
+    for (int i = n - 1; i >= 0; --i) {
+        double s = b[i];
+        for (int c = i + 1; c < n; ++c) {
+            s -= a[static_cast<size_t>(i) * n + c] * b[c];
+        }
+        const double diag = a[static_cast<size_t>(i) * n + i];
+        if (std::fabs(diag) < 1e-18) return false;
+        b[i] = s / diag;
+    }
+    return true;
+}
+
+bool FitPolyLS(const std::vector<double>& xs, const std::vector<double>& ys, int degree,
+                PolyFit& out)
+{
+    BOOST_REQUIRE(xs.size() == ys.size());
+    BOOST_REQUIRE(degree >= 1 && degree <= 3);
+    const size_t n = xs.size();
+    BOOST_REQUIRE(n > static_cast<size_t>(degree));
+
+    double mean = 0.0;
+    for (double x : xs) mean += x;
+    mean /= static_cast<double>(n);
+    double var = 0.0;
+    for (double x : xs) {
+        const double d = x - mean;
+        var += d * d;
+    }
+    const double scale = std::sqrt(var / static_cast<double>(n));
+    out.degree = degree;
+    out.x_mean = mean;
+    out.x_scale = (scale > 1e-12) ? scale : 1.0;
+    out.c = {};
+
+    const int dim = degree + 1;
+    std::vector<double> ata(static_cast<size_t>(dim) * dim, 0.0);
+    std::vector<double> aty(dim, 0.0);
+    for (size_t i = 0; i < n; ++i) {
+        const double t = (xs[i] - out.x_mean) / out.x_scale;
+        double pk = 1.0;
+        std::array<double, 4> powers{};
+        for (int k = 0; k < dim; ++k) {
+            powers[k] = pk;
+            pk *= t;
+        }
+        for (int r = 0; r < dim; ++r) {
+            aty[r] += powers[r] * ys[i];
+            for (int c = 0; c < dim; ++c) {
+                ata[static_cast<size_t>(r) * dim + c] += powers[r] * powers[c];
+            }
+        }
+    }
+    if (!SolveLinearSystem(ata, aty, dim)) return false;
+    for (int k = 0; k < dim; ++k) out.c[k] = aty[k];
+
+    double y_mean = 0.0;
+    for (double y : ys) y_mean += y;
+    y_mean /= static_cast<double>(n);
+    double ss_tot = 0.0;
+    double ss_res = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = (xs[i] - out.x_mean) / out.x_scale;
+        double pred = 0.0;
+        double pk = 1.0;
+        for (int k = 0; k <= degree; ++k) {
+            pred += out.c[k] * pk;
+            pk *= t;
+        }
+        const double dy = ys[i] - y_mean;
+        const double e = ys[i] - pred;
+        ss_tot += dy * dy;
+        ss_res += e * e;
+    }
+    out.r2 = (ss_tot > 1e-18) ? (1.0 - ss_res / ss_tot) : 0.0;
+    return true;
+}
+
+double EvalPoly(const PolyFit& fit, double x)
+{
+    const double t = (x - fit.x_mean) / fit.x_scale;
+    double pred = 0.0;
+    double pk = 1.0;
+    for (int k = 0; k <= fit.degree; ++k) {
+        pred += fit.c[k] * pk;
+        pk *= t;
+    }
+    return pred;
+}
+
+int8_t ClampPredictInt8(double pred)
+{
+    const long rounded = std::lround(pred);
+    if (rounded > 48) return 48;
+    if (rounded < -48) return -48;
+    return static_cast<int8_t>(rounded);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(fold_int32_to_emax48_range)
+{
+    // Legacy linear fold — non-normative; retained for differential tests.
+    for (int32_t y = -5000; y <= 5000; y += 97) {
+        const int32_t v = lt::FoldInt32ToEmax48(y);
+        BOOST_CHECK(v >= -48 && v <= 48);
+    }
+    BOOST_CHECK_EQUAL(lt::FoldInt32ToEmax48(0), -48);
+    BOOST_CHECK_EQUAL(lt::FoldInt32ToEmax48(48), 0);
+    BOOST_CHECK_EQUAL(lt::FoldInt32ToEmax48(96), 48);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_extract_range_and_determinism)
+{
+    const uint256 seed = ParseUint256(
+        "c0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ffeec0ff");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+    for (int32_t raw = -2000; raw <= 2000; raw += 17) {
+        const int8_t a = lt::ExtractDequantMatExpand(raw, 3, 5, prf_key);
+        const int8_t b = lt::ExtractDequantMatExpand(raw, 3, 5, prf_key);
+        BOOST_CHECK_EQUAL(a, b);
+        BOOST_CHECK(a >= -48 && a <= 48);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_splitmix_extract_signed_dequant_golden)
+{
+    // Pin negative-mantissa dequantization explicitly.  The implementation
+    // must use defined exact arithmetic (not a signed left shift) so these
+    // consensus bytes remain stable across compilers and optimization levels.
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(-2000, 3, 5, 0xC0FFEEULL), -16);
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(-1, 0, 0, 0), -16);
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(42, 1, 2, 0x1234567890ABCDEFULL), -16);
+    BOOST_CHECK_EQUAL(lt::ExtractDequantMatExpandSplitMix(std::numeric_limits<int32_t>::min(),
+                                                         7, 9, 0xA5A5A5A5ULL),
+                      12);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_not_affine_in_raw)
+{
+    // WITNESS (not a proof): Linear fold satisfies f(x+d)-f(x) period structure;
+    // ChaCha PRF Extract must not coincide with Fold on a dense sample
+    // (C15-A non-collapse witness). Dual C-15 pre-review: empirical only —
+    // does not rule out exotic surrogates outside the tested class.
+    const uint256 seed = ParseUint256(
+        "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+    int disagreements = 0;
+    for (int32_t y = -500; y <= 500; ++y) {
+        if (lt::ExtractDequantMatExpand(y, 0, 0, prf_key) !=
+            static_cast<int8_t>(lt::FoldInt32ToEmax48(y))) {
+            ++disagreements;
+        }
+    }
+    BOOST_CHECK(disagreements > 100);
+
+    // Also disagree with legacy SplitMix Extract on a dense sample (proves the
+    // normative path is not silently still SplitMix).
+    constexpr uint64_t salt = 0xA5A5A5A5ULL;
+    int splitmix_diff = 0;
+    for (int32_t y = -200; y <= 200; ++y) {
+        if (lt::ExtractDequantMatExpand(y, 1, 1, prf_key) !=
+            lt::ExtractDequantMatExpandSplitMix(y, 1, 1, salt)) {
+            ++splitmix_diff;
+        }
+    }
+    BOOST_CHECK(splitmix_diff > 50);
+
+    // Homogeneity collapse f(2x)=2f(x) must fail for a non-zero sample point.
+    bool homogeneity_broken = false;
+    for (int32_t x = 1; x <= 200; ++x) {
+        const int8_t fx = lt::ExtractDequantMatExpand(x, 1, 2, prf_key);
+        const int8_t f2x = lt::ExtractDequantMatExpand(2 * x, 1, 2, prf_key);
+        if (fx != 0 && f2x != static_cast<int8_t>(2 * fx)) {
+            homogeneity_broken = true;
+            break;
+        }
+    }
+    BOOST_CHECK(homogeneity_broken);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_position_salt_differential)
+{
+    // WITNESS: MX Extract position salts (i, bj=j/32) and seed_W change outputs.
+    const uint256 seed = ParseUint256(
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+    int differ_i = 0;
+    int differ_bj = 0;
+    for (uint32_t i = 0; i < 64; ++i) {
+        if (lt::ExtractDequantMatExpand(42, i, 0, prf_key) !=
+            lt::ExtractDequantMatExpand(42, i + 1, 0, prf_key)) {
+            ++differ_i;
+        }
+        if (lt::ExtractDequantMatExpand(42, 0, i * 32, prf_key) !=
+            lt::ExtractDequantMatExpand(42, 0, (i + 1) * 32, prf_key)) {
+            ++differ_bj;
+        }
+    }
+    BOOST_CHECK(differ_i > 50);
+    BOOST_CHECK(differ_bj > 50);
+    const uint256 seed2 = ParseUint256(
+        "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdee");
+    const uint256 prf_key2 = lt::DeriveMatExpandPrfKey(seed2);
+    BOOST_CHECK(lt::ExtractDequantMatExpand(42, 0, 0, prf_key) !=
+                lt::ExtractDequantMatExpand(42, 0, 0, prf_key2));
+
+    // High-half position salt on row i (ChaCha nonce_second high half).
+    constexpr uint32_t i0 = 0x00001234u;
+    constexpr uint32_t j0 = 0x00000005u;
+    const int8_t base = lt::ExtractDequantMatExpand(42, i0, j0, prf_key);
+    const int8_t i_hi = lt::ExtractDequantMatExpand(42, i0 | (1u << 16), j0, prf_key);
+    BOOST_CHECK(base != i_hi);
+    BOOST_CHECK_EQUAL(base, lt::ExtractDequantMatExpandAccelReplica(42, i0, j0, prf_key));
+    BOOST_CHECK_EQUAL(i_hi, lt::ExtractDequantMatExpandAccelReplica(42, i0 | (1u << 16), j0, prf_key));
+
+    // Legacy SplitMix position salt still distinct (differential witness).
+    constexpr int32_t raw = 42;
+    constexpr uint64_t salt = 0x1234567890ABCDEFULL;
+    BOOST_CHECK(lt::MixMatExpandEntry(raw, 0, 0, salt) !=
+                lt::MixMatExpandEntry(raw, 0, 1, salt));
+    BOOST_CHECK(lt::MixMatExpandEntry(raw, 0, 0, salt) !=
+                lt::MixMatExpandEntry(raw, 0, 0, salt ^ 1));
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_related_nonce_lane_xor_identity)
+{
+    // WITNESS (not a proof): legacy ChaChaCell MantPRF(raw) = ScalePRF(raw⊕Δ)
+    // with Δ = MANT⊕SCLE = 0x1e020211. Demoted under MX Extract; still pins the
+    // ChaChaCell twin + kit related_nonce_lane_xor pack. C-15 remains OPEN.
+    static_assert(lt::kMatExpandPrfLaneXorDelta == 0x1e020211u);
+    const uint256 seed = ParseUint256(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKeyChaChaCell(seed);
+
+    // Firm pack: 32 related-nonce identity tuples (test-vectors.json).
+    struct RelatedNonceTuple {
+        int32_t raw;
+        uint32_t i;
+        uint32_t j;
+        uint32_t remix;
+        uint64_t mant_le64;
+        uint64_t scale_le64;
+    };
+    const RelatedNonceTuple kRelatedNonceFirmPack[] = {
+        {0, 0u, 0u, 0u, 0x9bc1a59216201233ULL, 0xb56f624d09799212ULL},
+        {1, 0u, 1u, 0u, 0x021104a83dc8c8b2ULL, 0x86a98fbb30a086ecULL},
+        {-1, 1u, 0u, 0u, 0x6323b7682af515b2ULL, 0x3ec11fb1577cf0aeULL},
+        {42, 3u, 5u, 0u, 0x74deee0cb5814942ULL, 0x1de4e58a12efb7b9ULL},
+        {-1000, 7u, 11u, 1u, 0x36ad015ad191de9bULL, 0x51b71690857bd9c8ULL},
+        {2147483647, 2u, 4u, 0u, 0x6f8ce56dabb6fa9eULL, 0x6827306a3d22680dULL},
+        {static_cast<int32_t>(-2147483647 - 1), 9u, 13u, 0u, 0x78a98165ccd69360ULL, 0x5c6b7686c2f714deULL},
+        {7, 1u, 2u, 2u, 0xd64ff8bf2276fe80ULL, 0xb8f61e984fdf983eULL},
+        {-97, 4u, 1u, 0u, 0x267e5fc2d4d9c230ULL, 0xf9969b99ee1feb63ULL},
+        {100, 5u, 6u, 0u, 0x4509f9aa773b9823ULL, 0xa25b205cee8cdd81ULL},
+        {-100, 8u, 3u, 0u, 0x2edae594f778341bULL, 0xa765736f8b49b251ULL},
+        {12345, 10u, 12u, 0u, 0x74498e4df2078b2bULL, 0xea293ff2eff1320dULL},
+        {-54321, 15u, 15u, 1u, 0xa4604cc0bfdac466ULL, 0x63644093de8674e0ULL},
+        {16909060, 31u, 7u, 0u, 0xc015adc104f7627dULL, 0x6731faf62b130f14ULL},
+        {-270544960, 63u, 31u, 0u, 0x7b162a538741efaeULL, 0x653190dd96f7e0f1ULL},
+        {246267631, 127u, 63u, 2u, 0xa7e8f0f36d904d9bULL, 0x05db949c51e6ac4cULL},
+        {-777, 0u, 0u, 0u, 0x90eb4d9f23faa6e2ULL, 0x72484d595280b17fULL},
+        {999, 0u, 1u, 0u, 0x67f87541d0791373ULL, 0x2292706e9b74a06dULL},
+        {2, 1u, 0u, 0u, 0x361340b91a058777ULL, 0x2f7e574d16c29020ULL},
+        {-2, 3u, 5u, 0u, 0x397e2d3bbe99599dULL, 0x8c0e422c32fe8af3ULL},
+        {3, 7u, 11u, 1u, 0x90db285851278d06ULL, 0xe3db9a22c2158cedULL},
+        {-3, 2u, 4u, 0u, 0x33457748aa12ac1bULL, 0x31340b1f6e799db6ULL},
+        {65535, 9u, 13u, 0u, 0xc40dba2090a38002ULL, 0xd22465f7080d98f2ULL},
+        {-65536, 1u, 2u, 2u, 0xbf2faca88907ba30ULL, 0x1ae92fbf92a847b5ULL},
+        {286331153, 4u, 1u, 0u, 0xa036c3dc22839d3dULL, 0xecf6367f49a6c266ULL},
+        {-572662306, 5u, 6u, 0u, 0xf76a318c556735d7ULL, 0x085c314d93fab972ULL},
+        {8675309, 8u, 3u, 0u, 0xf9c0e5e3eeab415bULL, 0x8025796534b388a6ULL},
+        {-314159, 10u, 12u, 0u, 0x11fed0a888fcdf33ULL, 0x129142b53191fc8bULL},
+        {2130771712, 15u, 15u, 1u, 0x50a5844e73a006c0ULL, 0x593741c00e237619ULL},
+        {-16711935, 31u, 7u, 0u, 0x86f137fd59659fc9ULL, 0x93c2e63d68711877ULL},
+        {13, 63u, 31u, 0u, 0x3614d91224c196eeULL, 0xed53a2bffaa256d4ULL},
+        {-26, 127u, 63u, 2u, 0xc7f2831e40e1de64ULL, 0xb5356dae537539c1ULL},
+    };
+    static_assert(std::size(kRelatedNonceFirmPack) >= 32);
+
+    int firm_checked = 0;
+    for (const auto& t : kRelatedNonceFirmPack) {
+        const uint64_t mant = lt::MatExpandPrfLaneLE64(
+            prf_key, t.raw, t.i, t.j, t.remix, lt::kMatExpandPrfLaneMant);
+        const uint64_t scale = lt::MatExpandPrfLaneLE64(
+            prf_key, t.raw, t.i, t.j, t.remix, lt::kMatExpandPrfLaneScale);
+        const int32_t raw_rel = static_cast<int32_t>(
+            static_cast<uint32_t>(t.raw) ^ lt::kMatExpandPrfLaneXorDelta);
+        BOOST_CHECK_EQUAL(mant, t.mant_le64);
+        BOOST_CHECK_EQUAL(scale, t.scale_le64);
+        BOOST_CHECK_EQUAL(
+            mant, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, t.i, t.j, t.remix,
+                                           lt::kMatExpandPrfLaneScale));
+        BOOST_CHECK_EQUAL(
+            scale, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, t.i, t.j, t.remix,
+                                            lt::kMatExpandPrfLaneMant));
+        ++firm_checked;
+    }
+    BOOST_CHECK(firm_checked >= 32);
+
+    // Dense sample: identity holds for all probed (raw,i,j); μ′↔e lock when
+    // first nibble of MantPRF(raw⊕Δ)=ScalePRF(raw) accepts.
+    int checked = 0;
+    int first_nibble_lock = 0;
+    constexpr uint32_t remix = 0;
+    for (int32_t raw = -200; raw <= 200; raw += 17) {
+        for (uint32_t i = 0; i < 3; ++i) {
+            for (uint32_t j = 0; j < 3; ++j) {
+                const uint64_t mant = lt::MatExpandPrfLaneLE64(
+                    prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneMant);
+                const uint64_t scale = lt::MatExpandPrfLaneLE64(
+                    prf_key, raw, i, j, remix, lt::kMatExpandPrfLaneScale);
+                const int32_t raw_rel = static_cast<int32_t>(
+                    static_cast<uint32_t>(raw) ^ lt::kMatExpandPrfLaneXorDelta);
+                BOOST_CHECK_EQUAL(
+                    mant, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, i, j, remix,
+                                                   lt::kMatExpandPrfLaneScale));
+                BOOST_CHECK_EQUAL(
+                    scale, lt::MatExpandPrfLaneLE64(prf_key, raw_rel, i, j, remix,
+                                                    lt::kMatExpandPrfLaneMant));
+                ++checked;
+
+                bool accepted = false;
+                const uint8_t nib = static_cast<uint8_t>(scale & 0x0F);
+                const int8_t mu = matmul::v4::bmx4::SampleMantissaNibble(nib, accepted);
+                if (!accepted) continue;
+                const uint8_t e_from_mant_raw = static_cast<uint8_t>(mant & 0x3);
+                const int8_t v_rel =
+                    lt::ExtractDequantMatExpandChaChaCell(raw_rel, i, j, prf_key);
+                const int32_t expect =
+                    static_cast<int32_t>(mu) * (int32_t{1} << e_from_mant_raw);
+                BOOST_CHECK_EQUAL(static_cast<int>(v_rel), static_cast<int>(expect));
+                ++first_nibble_lock;
+            }
+        }
+    }
+    BOOST_CHECK(checked >= 100);
+    BOOST_CHECK(first_nibble_lock >= 50);
+
+    // Amortization negative control: honest MatExpand B32 on a small grid must
+    // not form a denser-than-chance Δ-mate graph (uniform 32-bit XOR). Even a
+    // perfect 2→1 ChaCha share on rare pairs cannot drop below the GEMM term.
+    {
+        constexpr uint32_t n = 8;
+        const CBlockHeader header = MakeLTHeader(/*nonce=*/0xC15C15Cull, n);
+        const auto bundle = ExpandOperandBB32ForTest(header, n);
+        BOOST_REQUIRE_EQUAL(bundle.B32.size(), static_cast<size_t>(n) * n);
+        const size_t cells = bundle.B32.size();
+        size_t delta_collisions = 0;
+        for (size_t a = 0; a < cells; ++a) {
+            const uint32_t ua = static_cast<uint32_t>(bundle.B32[a]);
+            for (size_t b = a + 1; b < cells; ++b) {
+                const uint32_t ub = static_cast<uint32_t>(bundle.B32[b]);
+                if ((ua ^ ub) == lt::kMatExpandPrfLaneXorDelta) {
+                    ++delta_collisions;
+                }
+            }
+        }
+        // C(64,2)/2^32 ≈ 4.7e-7 — expect 0; allow ≤1 for rare luck.
+        BOOST_CHECK_LE(delta_collisions, static_cast<size_t>(1));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_chacha_prf_golden_vectors)
+{
+    // Legacy ChaChaCell extract goldens (non-normative) + MX ENC_BMX4C_LT digest.
+    const uint256 seed_w = ParseUint256(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    const uint256 cell_key = lt::DeriveMatExpandPrfKeyChaChaCell(seed_w);
+    const uint256 mx_key = lt::DeriveMatExpandPrfKey(seed_w);
+
+    struct ExtractCase {
+        int32_t raw;
+        uint32_t i;
+        uint32_t j;
+        int8_t expected;
+    };
+    // Frozen ChaChaCell goldens (legacy PRF tag).
+    const ExtractCase extract_cases[] = {
+        {0, 0, 0, 4},
+        {1, 0, 1, 1},
+        {-1, 1, 0, 4},
+        {42, 3, 5, 2},
+        {-1000, 7, 11, -16},
+        {2147483647, 2, 4, -8},
+        {static_cast<int32_t>(-2147483647 - 1), 9, 13, 0},
+    };
+    for (const auto& c : extract_cases) {
+        const int8_t got = lt::ExtractDequantMatExpandChaChaCell(c.raw, c.i, c.j, cell_key);
+        BOOST_CHECK_EQUAL(static_cast<int>(got), static_cast<int>(c.expected));
+        BOOST_CHECK(got >= -48 && got <= 48);
+    }
+
+    // Normative MX synthetic-tile Extract goldens (MXPRF tag).
+    const ExtractCase mx_cases[] = {
+        {0, 0, 0, 1},
+        {1, 0, 1, 1},
+        {-1, 1, 0, -1},
+        {42, 3, 5, -4},
+        {-1000, 7, 11, -2},
+        {2147483647, 2, 4, 8},
+        {static_cast<int32_t>(-2147483647 - 1), 9, 13, -2},
+    };
+    for (const auto& c : mx_cases) {
+        const int8_t got = lt::ExtractDequantMatExpand(c.raw, c.i, c.j, mx_key);
+        BOOST_CHECK_EQUAL(static_cast<int>(got), static_cast<int>(c.expected));
+        BOOST_CHECK_EQUAL(static_cast<int>(lt::ExtractDequantMatExpandAccelReplica(
+                              c.raw, c.i, c.j, mx_key)),
+                          static_cast<int>(c.expected));
+    }
+
+    // MX AccelReplica tracks normative synthetic-tile Extract.
+    for (int32_t raw : {0, 1, -1, 7, -7, 97, -97, 1000, -1000, 1 << 20, -(1 << 20)}) {
+        for (uint32_t i = 0; i < 5; ++i) {
+            for (uint32_t j = 0; j < 5; ++j) {
+                const int8_t cpu = lt::ExtractDequantMatExpand(raw, i, j, mx_key);
+                const int8_t accel = lt::ExtractDequantMatExpandAccelReplica(raw, i, j, mx_key);
+                BOOST_CHECK_EQUAL(static_cast<int>(cpu), static_cast<int>(accel));
+            }
+        }
+    }
+
+    auto header = MakeLTHeader(0xdeadbeefULL, kTestDim);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest, payload));
+    BOOST_CHECK_EQUAL(digest.GetHex(),
+                      "d1c0cf51ef4bce683273745af172dd0d90a1e230662f9b1b1d05a87b8aecd002");
+    // CPU bit-identical replay.
+    uint256 digest2;
+    std::vector<unsigned char> payload2;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest2, payload2));
+    BOOST_CHECK(digest == digest2);
+    BOOST_CHECK(payload == payload2);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_mx_scale_partitioned_right_matches_dense)
+{
+    // Logical Lever-B exact-integer lane: Q from (mu,e) must match dense
+    // Bhat*V for every consensus-valid n in {32,64,128}. This CPU test proves
+    // representation identity only; it does not execute or qualify a native
+    // MXFP4 GPU instruction.
+    for (uint32_t n : {uint32_t{32}, uint32_t{64}, uint32_t{128}}) {
+        auto header = MakeLTHeader(0x4d584237ULL ^ n, n);
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        const auto Bhat =
+            lt::ExpandOperandBMatExpandMx(header, n, lt::ExactGemmBackend{}, mu, scales);
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+        (void)seed_u;
+        uint32_t m = 0;
+        BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+        const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+        const auto Q_dense = matmul::v4::ComputeProjectedRight(Bhat, V, n, m);
+        const auto Q_mx = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+        BOOST_CHECK_MESSAGE(Q_dense == Q_mx, "BlockScale vs dense mismatch at n=" << n);
+
+        // GEMM-shaped e-partition lowering (device IMMA/MFMA template) == oracle.
+        const auto Q_gemm =
+            lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu, scales, V, n, m);
+        BOOST_CHECK_MESSAGE(Q_gemm == Q_mx, "ScalePartitionedGemm vs BlockScale at n=" << n);
+        BOOST_CHECK(lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, Q_gemm));
+
+        // The hot miner path skips the otherwise-unused dense Bhat allocation.
+        std::vector<int8_t> mu_components;
+        std::vector<uint8_t> scale_components;
+        lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{},
+                                                mu_components, scale_components);
+        BOOST_CHECK(mu_components == mu);
+        BOOST_CHECK(scale_components == scales);
+        BOOST_CHECK(lt::ComputeProjectedRightMxBlockScaleLT(
+                        mu_components, scale_components, V, n, m) == Q_dense);
+
+        // Null ExactMxProjectionBackend ⇒ CPU oracle; miner provenance may mark
+        // exact_mx_scale_partitioned, but that is NOT a native_*_qualified claim.
+        lt::MxLaneProvenance prov{};
+        const auto Q_disp =
+            lt::ComputeProjectedRightMxDispatched(mu, scales, V, n, m, {}, &prov);
+        BOOST_CHECK(Q_disp == Q_mx);
+        BOOST_CHECK(prov.exact_mx_scale_partitioned);
+        BOOST_CHECK(!prov.native_mxfp4_attempted);
+        BOOST_CHECK(!prov.native_mxfp4_qualified);
+        BOOST_CHECK(!prov.native_fp8_attempted);
+        BOOST_CHECK(!prov.native_fp8_qualified);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lt_mx_projection_fp32_exact_integer_bound)
+{
+    // Breakthrough eligibility math: ENC-DR-LT Q = (μ·2^e)·V with M11×E8M0
+    // stays strictly below 2^24 at production n, so FP32 accumulate can be
+    // exact. This does NOT qualify native MXFP4/FP8 silicon.
+    namespace bx = matmul::v4::bmx4;
+    BOOST_CHECK_EQUAL(lt::kLtMxMantissaMaxAbs, bx::kMantissaMaxAbs);
+    BOOST_CHECK_EQUAL(lt::kLtMxMantissaMaxAbs, 6);
+    BOOST_CHECK_EQUAL(bx::kAlphabetM11.size(), 11U);
+    for (int8_t mu : bx::kAlphabetM11) {
+        BOOST_CHECK(std::abs(static_cast<int>(mu)) <= lt::kLtMxMantissaMaxAbs);
+    }
+    BOOST_CHECK_EQUAL(lt::kLtMxScalePow2Max, 1 << bx::kScaleS);
+    BOOST_CHECK_EQUAL(lt::kLtMxProjPerMac, bx::kProjPerMac);
+    BOOST_CHECK_EQUAL(lt::kLtMxProjPerMac, 288);
+    BOOST_CHECK_EQUAL(lt::LtMxProjectionAbsBound(4096), lt::kLtMxProjAbsBoundAtN4096);
+    BOOST_CHECK_EQUAL(lt::kLtMxProjAbsBoundAtN4096, 1'179'648);
+    BOOST_CHECK_LT(lt::kLtMxProjAbsBoundAtN4096, lt::kLtMxFloat32ExactIntegerCeil);
+    BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(4096, 1024));
+    BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(8192, 2048));
+    BOOST_CHECK(!lt::LtMxProjectionFitsFloat32ExactInteger(0, 0));
+    // First n where 288·n ≥ 2^24: ceil(2^24 / 288) = 58255.
+    BOOST_CHECK(!lt::LtMxProjectionFitsFloat32ExactInteger(58255, 1));
+    BOOST_CHECK(lt::LtMxProjectionFitsFloat32ExactInteger(58254, 1));
+}
+
+BOOST_AUTO_TEST_CASE(lt_peak_mx_exact_fallback_default_and_native_only_env)
+{
+    const char* prev_allow = std::getenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    const char* prev_require = std::getenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+    const std::optional<std::string> original_allow =
+        prev_allow != nullptr ? std::optional<std::string>{prev_allow} : std::nullopt;
+    const std::optional<std::string> original_require =
+        prev_require != nullptr ? std::optional<std::string>{prev_require} : std::nullopt;
+
+    unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+    BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK"));
+    BOOST_CHECK(!lt::LtEnvFlagEnabled("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX"));
+    // Exact INT8 MX is oracle-identical and remains resident by default even
+    // when a peak-capable GPU cannot self-qualify native MX.
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
+
+    setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", "1", /*overwrite=*/1);
+    BOOST_CHECK(!lt::AllowLtExactMxFallback());
+    // Keep the legacy allow flag as an explicit override for old scripts.
+    setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", "1", /*overwrite=*/1);
+    BOOST_CHECK(lt::AllowLtExactMxFallback());
+
+    // Stub peak probes (no GPU / non-peak) never block resident.
+    BOOST_CHECK(!matmul_v4::cuda::LtPeakMxBlocksDeviceResident());
+    BOOST_CHECK(!matmul_v4::hip::LtPeakMxBlocksDeviceResident());
+    const auto cuda_peak = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+    const auto hip_peak = matmul_v4::hip::ProbeLtPeakMxPathStatus();
+    BOOST_CHECK(cuda_peak.allow_exact_mx_fallback);
+    BOOST_CHECK(hip_peak.allow_exact_mx_fallback);
+    // Amendment v2 §1.CORRECT: peak_ready / blocks_device_resident are DERIVED.
+    // production_shape_qualified is REQUIRED — n≤256 suite alone cannot peak_ready.
+    {
+        matmul::v4::lt::LtPeakMxPathStatus ci_only{};
+        ci_only.peak_capable = true;
+        ci_only.resident_native_mx_wired = true;
+        ci_only.native_mxfp4_qualified = true;
+        ci_only.production_shape_qualified = false; // CI/n≤256 only
+        ci_only.allow_exact_mx_fallback = true;
+        matmul::v4::lt::DeriveLtPeakMxFlags(ci_only);
+        BOOST_CHECK(!ci_only.peak_ready);
+    }
+    {
+        matmul::v4::lt::LtPeakMxPathStatus ready{};
+        ready.peak_capable = true;
+        ready.resident_native_mx_wired = true;
+        ready.native_mxfp4_qualified = true;
+        ready.production_shape_qualified = true;
+        ready.allow_exact_mx_fallback = true;
+        matmul::v4::lt::DeriveLtPeakMxFlags(ready);
+        BOOST_CHECK(ready.peak_ready);
+        BOOST_CHECK(!ready.peak_required);
+        BOOST_CHECK(!ready.blocks_device_resident); // deficit MUST be false on ready path
+    }
+    {
+        matmul::v4::lt::LtPeakMxPathStatus blocked{};
+        blocked.peak_capable = true;
+        blocked.resident_native_mx_wired = false;
+        blocked.native_mxfp4_qualified = true;
+        blocked.allow_exact_mx_fallback = false; // REQUIRE_NATIVE_MX
+        matmul::v4::lt::DeriveLtPeakMxFlags(blocked);
+        BOOST_CHECK(!blocked.peak_ready);
+        BOOST_CHECK(blocked.peak_required);
+        BOOST_CHECK(blocked.blocks_device_resident);
+    }
+    // Without a peak-capable device in this process, peak_required stays false.
+    if (!cuda_peak.peak_capable) {
+        BOOST_CHECK(!cuda_peak.peak_required);
+        BOOST_CHECK(!cuda_peak.blocks_device_resident);
+        BOOST_CHECK(!cuda_peak.resident_native_mx_wired);
+        BOOST_CHECK(!cuda_peak.peak_ready);
+    }
+    if (!hip_peak.peak_capable) {
+        BOOST_CHECK(!hip_peak.peak_required);
+        BOOST_CHECK(!hip_peak.blocks_device_resident);
+        BOOST_CHECK(!hip_peak.resident_native_mx_wired);
+        BOOST_CHECK(!hip_peak.peak_ready);
+    }
+
+    if (original_allow) {
+        setenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK", original_allow->c_str(), /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_MATMUL_V4_LT_ALLOW_EXACT_MX_FALLBACK");
+    }
+    if (original_require) {
+        setenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX", original_require->c_str(), /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_MATMUL_V4_LT_REQUIRE_NATIVE_MX");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lt_mx_projection_q_entries_below_fp32_ceil)
+{
+    // Header MX projections and adversarial ±6 / e=3 fillings must emit
+    // integer Q with |q| < 2^24 (and ≤ the analytic 288·n envelope).
+    FastRandomContext rng{/*fDeterministic=*/true};
+    for (uint32_t n : {uint32_t{32}, uint32_t{64}, uint32_t{128}}) {
+        BOOST_REQUIRE(lt::LtMxProjectionFitsFloat32ExactInteger(n, /*m=*/n / 2));
+        const int64_t abs_bound = lt::LtMxProjectionAbsBound(n);
+
+        auto header = MakeLTHeader(0x46503332ULL ^ n, n); // 'FP32'
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{}, mu, scales);
+        uint32_t m = 0;
+        BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+        (void)seed_u;
+        const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+        const auto Q = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+        BOOST_REQUIRE_EQUAL(Q.size(), static_cast<size_t>(n) * m);
+        for (int32_t q : Q) {
+            BOOST_CHECK_LT(std::llabs(static_cast<long long>(q)),
+                           lt::kLtMxFloat32ExactIntegerCeil);
+            BOOST_CHECK_LE(std::llabs(static_cast<long long>(q)), abs_bound);
+        }
+
+        // Worst-case aligned signs: |μ|=6, e=3, |V|=6 → |Q|_ij can hit 288·n.
+        std::vector<int8_t> mu_hi(static_cast<size_t>(n) * n, 6);
+        std::vector<uint8_t> scales_hi(static_cast<size_t>(n) * (n / lt::kMatExpandMxBlockLen), 3);
+        std::vector<int8_t> V_hi(static_cast<size_t>(n) * m, 6);
+        for (size_t i = 0; i < mu_hi.size(); ++i) {
+            if (rng.randbool()) mu_hi[i] = static_cast<int8_t>(-6);
+        }
+        for (size_t i = 0; i < V_hi.size(); ++i) {
+            if (rng.randbool()) V_hi[i] = static_cast<int8_t>(-6);
+        }
+        const auto Q_hi =
+            lt::ComputeProjectedRightMxBlockScaleLT(mu_hi, scales_hi, V_hi, n, m);
+        BOOST_REQUIRE_EQUAL(Q_hi.size(), static_cast<size_t>(n) * m);
+        for (int32_t q : Q_hi) {
+            BOOST_CHECK_LT(std::llabs(static_cast<long long>(q)),
+                           lt::kLtMxFloat32ExactIntegerCeil);
+            BOOST_CHECK_LE(std::llabs(static_cast<long long>(q)), abs_bound);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lt_mx_projection_fp32_accumulate_matches_int32_oracle)
+{
+    // Optional CPU float32 left-to-right accumulate must match the int32
+    // oracle inside the proven window (double path as a second witness).
+    for (uint32_t n : {uint32_t{32}, uint32_t{64}, uint32_t{128}}) {
+        auto header = MakeLTHeader(0x46503341ULL ^ n, n); // 'FP3A'
+        std::vector<int8_t> mu;
+        std::vector<uint8_t> scales;
+        lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{}, mu, scales);
+        uint32_t m = 0;
+        BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+        BOOST_REQUIRE(lt::LtMxProjectionFitsFloat32ExactInteger(n, m));
+        const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+        (void)seed_u;
+        const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+
+        const auto Q_i32 = lt::ComputeProjectedRightMxBlockScaleLT(mu, scales, V, n, m);
+        const auto Q_f32 =
+            lt::SimulateProjectedRightMxFloat32AccumulateLT(mu, scales, V, n, m);
+        BOOST_REQUIRE_EQUAL(Q_f32.size(), Q_i32.size());
+        BOOST_CHECK(Q_f32 == Q_i32);
+
+        // Double accumulate (reference witness) must also match.
+        const uint32_t nblk = n / lt::kMatExpandMxBlockLen;
+        for (uint32_t i = 0; i < n; ++i) {
+            for (uint32_t c = 0; c < m; ++c) {
+                double acc = 0.0;
+                for (uint32_t bj = 0; bj < nblk; ++bj) {
+                    const uint8_t e = scales[static_cast<size_t>(i) * nblk + bj];
+                    const double scale = static_cast<double>(int32_t{1} << e);
+                    const size_t mu_base = static_cast<size_t>(i) * n +
+                                           static_cast<size_t>(bj) * lt::kMatExpandMxBlockLen;
+                    for (uint32_t t = 0; t < lt::kMatExpandMxBlockLen; ++t) {
+                        const uint32_t k = bj * lt::kMatExpandMxBlockLen + t;
+                        acc += static_cast<double>(mu[mu_base + t]) * scale *
+                               static_cast<double>(V[static_cast<size_t>(k) * m + c]);
+                    }
+                }
+                BOOST_CHECK_EQUAL(static_cast<int64_t>(acc),
+                                  static_cast<int64_t>(Q_i32[static_cast<size_t>(i) * m + c]));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_mx_tile_extract_matches_components)
+{
+    // Tile ChaCha Extract over real B32 tiles must reproduce ExpandOperandB
+    // MatExpandMxComponents (mu, e) and the dense Bhat dequant.
+    constexpr uint32_t n = 64;
+    auto header = MakeLTHeader(0xc15bULL, n);
+    const auto bundle = ExpandOperandBB32ForTest(header, n);
+    std::vector<int8_t> mu;
+    std::vector<uint8_t> scales;
+    const auto Bhat =
+        lt::ExpandOperandBMatExpandMx(header, n, lt::ExactGemmBackend{}, mu, scales);
+    BOOST_REQUIRE_EQUAL(bundle.B32.size(), Bhat.size());
+    BOOST_REQUIRE_EQUAL(mu.size(), Bhat.size());
+    const uint32_t nblk = n / lt::kMatExpandMxBlockLen;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        for (uint32_t bj = 0; bj < nblk; ++bj) {
+            int32_t raw32[lt::kMatExpandMxBlockLen];
+            int8_t mu_tile[lt::kMatExpandMxBlockLen];
+            for (uint32_t t = 0; t < lt::kMatExpandMxBlockLen; ++t) {
+                raw32[t] = bundle.B32[static_cast<size_t>(i) * n +
+                                      static_cast<size_t>(bj) * lt::kMatExpandMxBlockLen + t];
+            }
+            lt::ExtractMatExpandMxTileMantissas(bundle.prf_key, i, bj, raw32, mu_tile);
+            const uint8_t e = lt::DeriveMatExpandMxScale(bundle.prf_key, i, bj);
+            BOOST_CHECK_EQUAL(static_cast<unsigned>(e),
+                              static_cast<unsigned>(scales[static_cast<size_t>(i) * nblk + bj]));
+            for (uint32_t t = 0; t < lt::kMatExpandMxBlockLen; ++t) {
+                const size_t idx = static_cast<size_t>(i) * n +
+                                   static_cast<size_t>(bj) * lt::kMatExpandMxBlockLen + t;
+                BOOST_CHECK_EQUAL(static_cast<int>(mu_tile[t]), static_cast<int>(mu[idx]));
+                const int8_t dequant =
+                    static_cast<int8_t>(static_cast<int32_t>(mu_tile[t]) * (int32_t{1} << e));
+                BOOST_CHECK_EQUAL(static_cast<int>(dequant), static_cast<int>(Bhat[idx]));
+                BOOST_CHECK_EQUAL(
+                    static_cast<int>(lt::ExtractDequantMatExpandAt(bundle.B32.data(), n, i,
+                                                                   bj * lt::kMatExpandMxBlockLen + t,
+                                                                   bundle.prf_key)),
+                    static_cast<int>(Bhat[idx]));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(exact_mx_projection_backend_inject_matches_oracle)
+{
+    // Mock ExactMxProjectionBackend wrapping the CPU GEMM-partitioned lowering;
+    // dispatch must accept it only when bit-identical (and may carry exact_mx).
+    constexpr uint32_t n = 32;
+    auto header = MakeLTHeader(0x4d584245ULL, n); // 'MXBE'
+    std::vector<int8_t> mu;
+    std::vector<uint8_t> scales;
+    lt::ExpandOperandBMatExpandMxComponents(header, n, lt::ExactGemmBackend{}, mu, scales);
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+    (void)seed_u;
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+
+    static int g_mx_calls = 0;
+    g_mx_calls = 0;
+    lt::ExactMxProjectionBackend backend;
+    backend.project_right = [](const std::vector<int8_t>& mu_in,
+                               const std::vector<uint8_t>& scales_in,
+                               const std::vector<int8_t>& V_in, uint32_t nn, uint32_t mm,
+                               std::vector<int32_t>& out,
+                               lt::MxLaneProvenance* provenance) -> bool {
+        ++g_mx_calls;
+        out = lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu_in, scales_in, V_in, nn, mm);
+        if (provenance) {
+            provenance->exact_mx_scale_partitioned = true;
+            // Deliberately leave native_* false — exact-MX ≠ native-MX.
+        }
+        return !out.empty();
+    };
+
+    lt::MxLaneProvenance prov{};
+    const auto Q = lt::ComputeProjectedRightMxDispatched(mu, scales, V, n, m, backend, &prov);
+    BOOST_CHECK_EQUAL(g_mx_calls, 1);
+    BOOST_CHECK(lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, Q));
+    BOOST_CHECK(prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!prov.native_mxfp4_qualified);
+    BOOST_CHECK(!prov.native_fp8_qualified);
+
+    // Divergent backend must fall back to CPU and clear native qualification.
+    backend.project_right = [](const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                               const std::vector<int8_t>&, uint32_t nn, uint32_t mm,
+                               std::vector<int32_t>& out,
+                               lt::MxLaneProvenance* provenance) -> bool {
+        out.assign(static_cast<size_t>(nn) * mm, 7); // wrong on purpose
+        if (provenance) {
+            provenance->native_mxfp4_attempted = true;
+            provenance->native_mxfp4_qualified = true; // lie — dispatch must not trust
+        }
+        return true;
+    };
+    prov = {};
+    const auto Q_fb = lt::ComputeProjectedRightMxDispatched(mu, scales, V, n, m, backend, &prov);
+    BOOST_CHECK(lt::MxProjectionMatchesCpuOracle(mu, scales, V, n, m, Q_fb));
+    BOOST_CHECK(prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!prov.native_mxfp4_attempted);
+    BOOST_CHECK(!prov.native_mxfp4_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(window_miner_mx_projection_backend_matches_reference)
+{
+    // WindowSketchMinerLT must invoke an injected ExactMxProjectionBackend and
+    // still produce digests byte-identical to ComputeDigestBMX4CLT. A divergent
+    // mock falls closed through ComputeProjectedRightMxDispatched.
+    auto tmpl = MakeLTHeader(0x4d584d4eULL, kTestDim); // 'MXMN'
+    uint256 cpu_d;
+    std::vector<unsigned char> cpu_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(tmpl, kTestDim, cpu_d, cpu_p));
+
+    static int g_miner_mx_calls = 0;
+    g_miner_mx_calls = 0;
+    lt::ExactMxProjectionBackend good_mx;
+    good_mx.project_right = [](const std::vector<int8_t>& mu_in,
+                               const std::vector<uint8_t>& scales_in,
+                               const std::vector<int8_t>& V_in, uint32_t nn, uint32_t mm,
+                               std::vector<int32_t>& out,
+                               lt::MxLaneProvenance* provenance) -> bool {
+        ++g_miner_mx_calls;
+        out = lt::ComputeProjectedRightMxScalePartitionedGemmLT(mu_in, scales_in, V_in, nn, mm);
+        if (provenance) provenance->exact_mx_scale_partitioned = true;
+        return !out.empty();
+    };
+
+    lt::WindowSketchMinerLT good_miner{tmpl, kTestDim, {}, good_mx};
+    BOOST_REQUIRE(good_miner.Valid());
+    BOOST_CHECK(good_miner.UsingDeviceMxProjection());
+    uint256 good_d;
+    std::vector<unsigned char> good_p;
+    BOOST_REQUIRE(good_miner.MineSlot(tmpl, good_d, &good_p));
+    BOOST_CHECK_EQUAL(g_miner_mx_calls, 1);
+    BOOST_CHECK(good_d == cpu_d);
+    BOOST_CHECK(good_p == cpu_p);
+
+    lt::ExactMxProjectionBackend bad_mx;
+    bad_mx.project_right = [](const std::vector<int8_t>&, const std::vector<uint8_t>&,
+                              const std::vector<int8_t>&, uint32_t nn, uint32_t mm,
+                              std::vector<int32_t>& out,
+                              lt::MxLaneProvenance* provenance) -> bool {
+        out.assign(static_cast<size_t>(nn) * mm, 42);
+        if (provenance) {
+            provenance->native_mxfp4_qualified = true; // lie — dispatch clears
+        }
+        return true;
+    };
+    lt::WindowSketchMinerLT bad_miner{tmpl, kTestDim, {}, bad_mx};
+    BOOST_REQUIRE(bad_miner.Valid());
+    uint256 bad_d;
+    std::vector<unsigned char> bad_p;
+    BOOST_REQUIRE(bad_miner.MineSlot(tmpl, bad_d, &bad_p));
+    BOOST_CHECK(bad_d == cpu_d);
+    BOOST_CHECK(bad_p == cpu_p);
+}
+
+BOOST_AUTO_TEST_CASE(plan_lt_accel_labels_intent_not_runtime_native)
+{
+    // String-to-taxonomy design hint inherited from BMX4. PlanLTAccel neither
+    // probes hardware nor proves that LT dispatched native MXFP4 / FP8.
+    const auto b200 = lt::PlanLTAccel("b200");
+    BOOST_CHECK(b200.projection == matmul::v4::bmx4::ProjectionLane::ScalePartitionedMxfp4);
+    const auto cpu = lt::PlanLTAccel("cpu");
+    BOOST_CHECK(cpu.projection == matmul::v4::bmx4::ProjectionLane::CanonicalInt8);
+    const auto rubin = lt::PlanLTAccel("rubin");
+    BOOST_CHECK(rubin.projection == matmul::v4::bmx4::ProjectionLane::ExactFp8);
+    BOOST_CHECK(rubin.combine == matmul::v4::bmx4::CombineLane::ExactFp8FiveLimb);
+    // Fail-closed defaults: provenance structs never start qualified.
+    lt::MxLaneProvenance blank{};
+    BOOST_CHECK(!blank.exact_mx_scale_partitioned);
+    BOOST_CHECK(!blank.native_mxfp4_qualified);
+    BOOST_CHECK(!blank.native_fp8_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_mx_selftest_accepts_exact_or_qualified_native_lane)
+{
+    // The CUDA baseline self-test independently checks output identity. Its
+    // provenance gate must accept the exact INT8 lane and either qualified
+    // native lane; otherwise native self-qualification would disable CUDA.
+    matmul_v4::cuda::LtCudaMxProvenance provenance{};
+    BOOST_CHECK(!matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+    provenance.exact_mx_scale_partitioned = true;
+    BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+    provenance = {};
+    provenance.native_mxfp4_qualified = true;
+    BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+    provenance = {};
+    provenance.native_fp8_qualified = true;
+    BOOST_CHECK(matmul_v4::cuda::HasQualifiedLtCudaMxProjectionLane(provenance));
+}
+
+BOOST_AUTO_TEST_CASE(cuda_native_mx_compile_gate_uses_runtime_header_version)
+{
+    const uint32_t compiled_cudart = matmul_v4::cuda::LtCudaCompiledRuntimeVersion();
+    const bool block_scale_api = matmul_v4::cuda::IsLtCudaCublasLtBlockScaleApiCompiled();
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+    BOOST_CHECK_NE(compiled_cudart, 0U);
+    BOOST_CHECK_EQUAL(block_scale_api, compiled_cudart >= 12080U);
+#else
+    BOOST_CHECK_EQUAL(compiled_cudart, 0U);
+    BOOST_CHECK(!block_scale_api);
+#endif
+}
+
+#if !defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+BOOST_AUTO_TEST_CASE(cuda_native_mx_selfqual_stub_declines)
+{
+    BOOST_CHECK(!matmul_v4::cuda::SelfQualifyLtNativeMxLanesOnce());
+}
+#endif
+
+BOOST_AUTO_TEST_CASE(accel_dispatch_matches_reference)
+{
+    auto header = MakeLTHeader(21, kTestDim);
+    std::vector<CBlockHeader> headers{header};
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    const uint256 easy_target = ParseUint256(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        headers, kTestDim, /*rounds=*/2, easy_target, digests, payloads));
+    BOOST_REQUIRE_EQUAL(digests.size(), 1U);
+    BOOST_REQUIRE_EQUAL(payloads.size(), 1U);
+    uint256 ref;
+    std::vector<unsigned char> ref_payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref, ref_payload));
+    BOOST_CHECK(digests[0] == ref);
+    BOOST_CHECK(payloads[0] == ref_payload);
+}
+
+BOOST_AUTO_TEST_CASE(accel_dispatch_drops_losing_payload)
+{
+    auto header = MakeLTHeader(22, kTestDim);
+    uint256 ref;
+    std::vector<unsigned char> ref_payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref, ref_payload));
+    BOOST_REQUIRE(UintToArith256(ref) > 0);
+    const uint256 losing_target = ArithToUint256(UintToArith256(ref) - 1);
+
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        {header}, kTestDim, /*rounds=*/2, losing_target, digests, payloads));
+    BOOST_REQUIRE_EQUAL(digests.size(), 1U);
+    BOOST_REQUIRE_EQUAL(payloads.size(), 1U);
+    BOOST_CHECK(digests[0] == ref);
+    BOOST_CHECK(payloads[0].empty());
+}
+
+#if defined(BTX_ENABLE_METAL)
+BOOST_AUTO_TEST_CASE(metal_matexpand_backend_matches_reference)
+{
+    auto header = MakeLTHeader(21, kTestDim);
+    const uint64_t nonce = header.nNonce64;
+
+    BOOST_REQUIRE_MESSAGE(matmul_v4::metal::IsMatMulLTMetalAvailable(),
+                          "Metal build must execute and pass the exact LT GEMM self-test");
+
+    std::vector<lt::DigestOnlyResultLT> results;
+    BOOST_REQUIRE(matmul_v4::metal::ComputeDigestsOnlyLTMetal(
+        header, kTestDim, &nonce, /*count=*/1, results));
+    BOOST_REQUIRE_EQUAL(results.size(), 1U);
+    BOOST_CHECK(results[0].backend_status ==
+                matmul::v4::bmx4::DigestOnlyBackendStatus::Ok);
+
+    uint256 ref;
+    std::vector<unsigned char> ref_payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref, ref_payload));
+    BOOST_CHECK(results[0].digest == ref);
+}
+#endif
+
+BOOST_AUTO_TEST_CASE(qstar_128_seal_distinct)
+{
+    BOOST_CHECK(lt::IsValidConsensusQStar(128));
+    std::vector<uint256> digests(128);
+    for (size_t i = 0; i < digests.size(); ++i) {
+        unsigned char b[32]{};
+        b[0] = static_cast<unsigned char>(i);
+        b[1] = static_cast<unsigned char>(i >> 8);
+        digests[i] = uint256{Span<const unsigned char>{b, sizeof(b)}};
+    }
+    const uint256 root = lt::ComputeWindowMerkleRoot(digests);
+    const uint256 sigma = ParseUint256(
+        "3333333333333333333333333333333333333333333333333333333333333333");
+    BOOST_CHECK(lt::SealWindowCommit(sigma, root, 128) !=
+                lt::SealWindowCommit(sigma, root, 256));
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_a_template_invariant_b_nonce_fresh)
+{
+    auto h0 = MakeLTHeader(1, kTestDim);
+    auto h1 = MakeLTHeader(2, kTestDim);
+    BOOST_CHECK(lt::ExpandOperandAMatExpand(h0, kTestDim) ==
+                lt::ExpandOperandAMatExpand(h1, kTestDim));
+    BOOST_CHECK(lt::ExpandOperandBMatExpand(h0, kTestDim) !=
+                lt::ExpandOperandBMatExpand(h1, kTestDim));
+}
+
+BOOST_AUTO_TEST_CASE(digest_determinism_and_nonce_sensitivity)
+{
+    auto header = MakeLTHeader(7, kTestDim);
+    uint256 d1, d2;
+    std::vector<unsigned char> p1, p2;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, d1, p1));
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, d2, p2));
+    BOOST_CHECK(d1 == d2);
+    BOOST_CHECK(p1 == p2);
+
+    header.nNonce64 = 8;
+    header.nNonce = 8;
+    uint256 d3;
+    std::vector<unsigned char> p3;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, d3, p3));
+    BOOST_CHECK(d1 != d3);
+}
+
+BOOST_AUTO_TEST_CASE(verify_accepts_compute_digest)
+{
+    auto header = MakeLTHeader(9, kTestDim);
+    uint256 digest;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, digest, payload));
+    header.matmul_digest = digest;
+    uint256 vout;
+    BOOST_CHECK(lt::VerifySketchBMX4CLT(header, kTestDim, 2, payload, vout));
+    BOOST_CHECK(vout == digest);
+}
+
+BOOST_AUTO_TEST_CASE(window_merkle_and_seal)
+{
+    std::vector<uint256> digests;
+    for (int i = 0; i < 4; ++i) {
+        char hex[65];
+        for (int j = 0; j < 64; ++j) hex[j] = "0123456789abcdef"[(i + j) % 16];
+        hex[64] = 0;
+        digests.push_back(ParseUint256(hex));
+    }
+    const uint256 root = lt::ComputeWindowMerkleRoot(digests);
+    BOOST_CHECK(!root.IsNull());
+    const uint256 sigma = ParseUint256(
+        "3333333333333333333333333333333333333333333333333333333333333333");
+    BOOST_CHECK(lt::SealWindowCommit(sigma, root, 128) !=
+                lt::SealWindowCommit(sigma, root, 256));
+    BOOST_CHECK(lt::IsValidConsensusQStar(128));
+    BOOST_CHECK(lt::IsValidConsensusQStar(256));
+    BOOST_CHECK(lt::IsValidConsensusQStar(512));
+    BOOST_CHECK(!lt::IsValidConsensusQStar(64));
+    BOOST_CHECK(!lt::IsValidConsensusQStar(32));
+
+    // The current 64-bit slot nonce is explicitly the low-64 projection of a
+    // full upgrade-ready identifier.  This refactor must not alter v4.4 bytes.
+    const uint256 slot0 = lt::DeriveWindowSlotId(sigma, 0);
+    const uint256 slot1 = lt::DeriveWindowSlotId(sigma, 1);
+    BOOST_CHECK(slot0 != slot1);
+    BOOST_CHECK_EQUAL(lt::DeriveWindowSlotNonce(sigma, 0), ReadLE64(slot0.data()));
+    BOOST_CHECK_EQUAL(lt::DeriveWindowSlotNonce(sigma, 1), ReadLE64(slot1.data()));
+}
+
+BOOST_AUTO_TEST_CASE(window_miner_matches_reference)
+{
+    auto tmpl = MakeLTHeader(0, kTestDim);
+    lt::WindowSketchMinerLT miner{tmpl, kTestDim};
+    BOOST_REQUIRE(miner.Valid());
+    const std::vector<uint64_t> nonces{11, 12, 13};
+    std::vector<lt::DigestOnlyResultLT> results;
+    BOOST_REQUIRE(miner.Mine(nonces, uint256::ONE, results, nullptr));
+    BOOST_REQUIRE_EQUAL(results.size(), nonces.size());
+    for (size_t i = 0; i < nonces.size(); ++i) {
+        auto h = tmpl;
+        h.nNonce64 = nonces[i];
+        h.nNonce = static_cast<uint32_t>(nonces[i]);
+        uint256 ref;
+        std::vector<unsigned char> payload;
+        BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, ref, payload));
+        BOOST_CHECK(results[i].digest == ref);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_s32s8_radix256_matches_cpu)
+{
+    constexpr uint32_t rows = 3;
+    constexpr uint32_t inner = 257;
+    constexpr uint32_t cols = 5;
+    std::vector<int32_t> left(static_cast<size_t>(rows) * inner);
+    std::vector<int8_t> right(static_cast<size_t>(inner) * cols);
+    for (size_t i = 0; i < left.size(); ++i) {
+        left[i] = static_cast<int32_t>((i * 1'000'003ULL + 97) % 1'000'001ULL) - 500'000;
+    }
+    for (size_t i = 0; i < right.size(); ++i) {
+        right[i] = static_cast<int8_t>(static_cast<int32_t>((i * 11 + 3) % 13) - 6);
+    }
+
+    uint32_t launches{0};
+    std::vector<int32_t> lowered;
+    BOOST_REQUIRE(lt::ExactGemmS32S8ViaRadix256(
+        left, right, rows, inner, cols, lowered,
+        [&launches](const std::vector<int8_t>& lhs,
+                    const std::vector<int8_t>& rhs,
+                    uint32_t m, uint32_t k, uint32_t n,
+                    std::vector<int32_t>& out) {
+            ++launches;
+            out = lt::ExactGemmS8S8(lhs, rhs, m, k, n);
+            return true;
+        }));
+    BOOST_CHECK_EQUAL(launches, 4U);
+    BOOST_CHECK(lowered == lt::ExactGemmS32S8(left, right, rows, inner, cols));
+
+    // The generic adapter fails closed when it cannot prove that every output
+    // fits S32; callers retain their existing CPU fallback.
+    lowered.assign(1, 123);
+    BOOST_CHECK(!lt::ExactGemmS32S8ViaRadix256(
+        std::vector<int32_t>{std::numeric_limits<int32_t>::max()},
+        std::vector<int8_t>{2}, 1, 1, 1, lowered,
+        [](const auto&, const auto&, uint32_t, uint32_t, uint32_t, auto&) {
+            return true;
+        }));
+    BOOST_CHECK(lowered.empty());
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_mock_matches_cpu)
+{
+    // Injectable backend that wraps ExactGemm* must be byte-identical to the
+    // default CPU path (the contract device backends must also satisfy).
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = +[](const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+                            uint32_t rows, uint32_t inner, uint32_t cols,
+                            std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS8S8(L, R, rows, inner, cols);
+        return true;
+    };
+    backend.gemm_s32s8 = +[](const std::vector<int32_t>& L, const std::vector<int8_t>& R,
+                             uint32_t rows, uint32_t inner, uint32_t cols,
+                             std::vector<int32_t>& out) -> bool {
+        out = lt::ExactGemmS32S8(L, R, rows, inner, cols);
+        return true;
+    };
+    BOOST_CHECK(backend.HasDeviceGemms());
+
+    auto h = MakeLTHeader(42, kTestDim);
+    uint256 cpu_d, backend_d;
+    std::vector<unsigned char> cpu_p, backend_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, cpu_d, cpu_p));
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, backend, backend_d, backend_p));
+    BOOST_CHECK(cpu_d == backend_d);
+    BOOST_CHECK(cpu_p == backend_p);
+
+    lt::WindowSketchMinerLT miner{h, kTestDim, backend};
+    BOOST_REQUIRE(miner.Valid());
+    BOOST_CHECK(miner.UsingDeviceGemms());
+    std::vector<lt::DigestOnlyResultLT> results;
+    BOOST_REQUIRE(miner.Mine({42}, uint256::ONE, results, nullptr));
+    BOOST_REQUIRE_EQUAL(results.size(), 1U);
+    BOOST_CHECK(results[0].digest == cpu_d);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_default_matches_cpu)
+{
+    // A default-constructed (all-nullptr) backend MUST be the CPU reference.
+    auto header = MakeLTHeader(31, kTestDim);
+    uint256 ref_d, be_d;
+    std::vector<unsigned char> ref_p, be_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, lt::ExactGemmBackend{}, be_d, be_p));
+    BOOST_CHECK(be_d == ref_d);
+    BOOST_CHECK(be_p == ref_p);
+
+    // Operand expansion via the empty backend is byte-identical too.
+    const lt::ExactGemmBackend cpu{};
+    BOOST_CHECK(lt::ExpandOperandAMatExpand(header, kTestDim) ==
+                lt::ExpandOperandAMatExpand(header, kTestDim, cpu));
+    BOOST_CHECK(lt::ExpandOperandBMatExpand(header, kTestDim) ==
+                lt::ExpandOperandBMatExpand(header, kTestDim, cpu));
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_mock_matches_reference)
+{
+    // A mock device backend that wraps ExactGemm* bit-for-bit must produce the
+    // exact same digest / payload as the pure-CPU default path, and both GEMM
+    // stages (s8s8 for G*W, s32s8 for (G*W)*H) must actually be invoked.
+    auto header = MakeLTHeader(42, kTestDim);
+    uint256 ref_d, mock_d;
+    std::vector<unsigned char> ref_p, mock_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &MockGemmS8S8;
+    backend.gemm_s32s8 = &MockGemmS32S8;
+    BOOST_CHECK(backend.HasDeviceGemms());
+
+    g_mock_s8s8_calls = 0;
+    g_mock_s32s8_calls = 0;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, mock_d, mock_p));
+    BOOST_CHECK(mock_d == ref_d);
+    BOOST_CHECK(mock_p == ref_p);
+    BOOST_CHECK(g_mock_s8s8_calls > 0);
+    BOOST_CHECK(g_mock_s32s8_calls > 0);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_falls_back_on_false)
+{
+    // A backend whose GEMMs always report failure must transparently fall back
+    // to the CPU reference and still yield the identical digest.
+    auto header = MakeLTHeader(43, kTestDim);
+    uint256 ref_d, fb_d;
+    std::vector<unsigned char> ref_p, fb_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &FailGemmS8S8;
+    backend.gemm_s32s8 = &FailGemmS32S8;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, fb_d, fb_p));
+    BOOST_CHECK(fb_d == ref_d);
+    BOOST_CHECK(fb_p == ref_p);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_falls_back_on_bad_shape_or_exception)
+{
+    auto header = MakeLTHeader(45, kTestDim);
+    uint256 ref_d, fb_d;
+    std::vector<unsigned char> ref_p, fb_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &WrongSizeGemmS8S8;
+    backend.gemm_s32s8 = &ThrowGemmS32S8;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, backend, fb_d, fb_p));
+    BOOST_CHECK(fb_d == ref_d);
+    BOOST_CHECK(fb_p == ref_p);
+}
+
+BOOST_AUTO_TEST_CASE(exact_gemm_backend_partial_slot_matches)
+{
+    // Only one slot supplied: the other stage falls back to CPU. Result must
+    // still match the all-CPU reference regardless of which slot is device-driven.
+    auto header = MakeLTHeader(44, kTestDim);
+    uint256 ref_d;
+    std::vector<unsigned char> ref_p;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, ref_d, ref_p));
+
+    lt::ExactGemmBackend only_s8s8;
+    only_s8s8.gemm_s8s8 = &MockGemmS8S8;
+    uint256 d1;
+    std::vector<unsigned char> p1;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, only_s8s8, d1, p1));
+    BOOST_CHECK(d1 == ref_d);
+    BOOST_CHECK(p1 == ref_p);
+
+    lt::ExactGemmBackend only_s32s8;
+    only_s32s8.gemm_s32s8 = &MockGemmS32S8;
+    uint256 d2;
+    std::vector<unsigned char> p2;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(header, kTestDim, only_s32s8, d2, p2));
+    BOOST_CHECK(d2 == ref_d);
+    BOOST_CHECK(p2 == ref_p);
+}
+
+BOOST_AUTO_TEST_CASE(window_miner_backend_matches_reference)
+{
+    // WindowSketchMinerLT driven by the mock device backend must reproduce the
+    // pure-CPU miner (and hence ComputeDigestBMX4CLT) for every nonce.
+    auto tmpl = MakeLTHeader(0, kTestDim);
+    const std::vector<uint64_t> nonces{101, 102, 103};
+
+    lt::WindowSketchMinerLT cpu_miner{tmpl, kTestDim};
+    BOOST_REQUIRE(cpu_miner.Valid());
+    BOOST_CHECK(!cpu_miner.UsingDeviceGemms());
+    std::vector<lt::DigestOnlyResultLT> cpu_res;
+    BOOST_REQUIRE(cpu_miner.Mine(nonces, uint256::ONE, cpu_res, nullptr));
+
+    lt::ExactGemmBackend backend;
+    backend.gemm_s8s8 = &MockGemmS8S8;
+    backend.gemm_s32s8 = &MockGemmS32S8;
+    lt::WindowSketchMinerLT dev_miner{tmpl, kTestDim, backend};
+    BOOST_REQUIRE(dev_miner.Valid());
+    BOOST_CHECK(dev_miner.UsingDeviceGemms());
+    std::vector<lt::DigestOnlyResultLT> dev_res;
+    BOOST_REQUIRE(dev_miner.Mine(nonces, uint256::ONE, dev_res, nullptr));
+
+    BOOST_REQUIRE_EQUAL(cpu_res.size(), dev_res.size());
+    for (size_t i = 0; i < nonces.size(); ++i) {
+        BOOST_CHECK(dev_res[i].digest == cpu_res[i].digest);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(phase_b_seal_round_trip_and_auth)
+{
+    // Phase B seal helpers: ε=0 seal matches Freivalds seal-auth; wrong merkle
+    // / mutated payload fails commitment match. Slot seeds are identity (copy
+    // template seeds) so the test does not need chain MTP.
+    auto anchor = MakeLTHeader(7, kTestDim);
+    const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
+    constexpr uint32_t Q = 128; // smallest consensus Q*; slowish at n=64 with w=1024
+
+    uint256 seal;
+    std::vector<lt::WindowSlot> slots;
+    std::vector<std::vector<unsigned char>> payloads;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, Q, seed_fn, seal, &slots, &payloads));
+    BOOST_CHECK(!seal.IsNull());
+    BOOST_REQUIRE_EQUAL(slots.size(), Q);
+    BOOST_REQUIRE_EQUAL(payloads.size(), Q);
+
+    // Slot ids are full 256-bit; nNonce64 is the low 64 bits LE.
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    for (uint32_t j = 0; j < Q; ++j) {
+        const uint256 expected_id = lt::DeriveWindowSlotId(sigma, j);
+        BOOST_CHECK(slots[j].slot_id == expected_id);
+        BOOST_CHECK_EQUAL(slots[j].nonce, lt::DeriveWindowSlotNonce(sigma, j));
+        BOOST_CHECK_EQUAL(slots[j].nonce, ReadLE64(expected_id.data()));
+    }
+    // Full-window uniqueness of slot identifiers.
+    for (uint32_t i = 0; i < Q; ++i) {
+        for (uint32_t j = i + 1; j < Q; ++j) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+        }
+    }
+
+    uint256 seal_fv;
+    BOOST_REQUIRE(lt::VerifySealWindowFreivalds(anchor, kTestDim, Q, /*rounds=*/8, seed_fn,
+                                                payloads, seal_fv));
+    BOOST_CHECK(seal_fv == seal);
+
+    anchor.matmul_digest = seal;
+    BOOST_CHECK(lt::SealWindowProofMatchesCommitment(anchor, kTestDim, Q, seed_fn, payloads));
+
+    // Mutate one payload byte → commitment mismatch.
+    auto bad = payloads;
+    BOOST_REQUIRE(!bad[0].empty());
+    bad[0][0] ^= 0x01;
+    BOOST_CHECK(!lt::SealWindowProofMatchesCommitment(anchor, kTestDim, Q, seed_fn, bad));
+
+    // Wrong Q* rejected.
+    uint256 junk;
+    BOOST_CHECK(!lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/32, seed_fn, junk));
+}
+
+BOOST_AUTO_TEST_CASE(seal_env_batch_does_not_change_library_seal)
+{
+    // BTX_MATMUL_LT_BATCH must never alter ComputeSealDigestBMX4CLT — consensus
+    // Q* is an explicit argument. (SolveMatMulV4LT also keeps env off the seal
+    // leaf count; this pins the library boundary.)
+    auto anchor = MakeLTHeader(31, kTestDim);
+    const auto seed_fn = [](CBlockHeader& /*h*/) -> bool { return true; };
+    uint256 seal_a;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/128, seed_fn, seal_a));
+    setenv("BTX_MATMUL_LT_BATCH", "128", /*overwrite=*/1);
+    uint256 seal_b;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, /*Qstar=*/128, seed_fn, seal_b));
+    BOOST_CHECK(seal_a == seal_b);
+    unsetenv("BTX_MATMUL_LT_BATCH");
+}
+
+BOOST_AUTO_TEST_CASE(prepared_template_slot_matches_full_digest)
+{
+    // Production seal path prepares A/U/V/P once via WindowSketchMinerLT; each
+    // slot must remain byte-identical to the single-shot ComputeDigestBMX4CLT.
+    auto anchor = MakeLTHeader(21, kTestDim);
+    lt::WindowSketchMinerLT prepared{anchor, kTestDim};
+    BOOST_REQUIRE(prepared.Valid());
+
+    for (uint32_t j = 0; j < 4; ++j) {
+        CBlockHeader slot = anchor;
+        slot.nNonce64 = lt::DeriveWindowSlotNonce(matmul::v4::DeriveSigma(anchor), j);
+        slot.nNonce = static_cast<uint32_t>(slot.nNonce64);
+        slot.seed_a = ParseUint256("1111111111111111111111111111111111111111111111111111111111111111");
+        slot.seed_b = ParseUint256("2222222222222222222222222222222222222222222222222222222222222222");
+        // Differentiate slots via nonce only for B expansion; vary seed bytes
+        // so the prepared path cannot accidentally ignore seed-bound header hash.
+        slot.seed_a.data()[0] = static_cast<unsigned char>(j + 1);
+        slot.seed_b.data()[0] = static_cast<unsigned char>(j + 100);
+
+        uint256 prepared_digest;
+        std::vector<unsigned char> prepared_payload;
+        BOOST_REQUIRE(prepared.MineSlot(slot, prepared_digest, &prepared_payload));
+
+        uint256 full_digest;
+        std::vector<unsigned char> full_payload;
+        BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(slot, kTestDim, full_digest, full_payload));
+        BOOST_CHECK(prepared_digest == full_digest);
+        BOOST_CHECK(prepared_payload == full_payload);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(phase_b_seal_parent_mtp_slot_seeds_and_encdr)
+{
+    // EncDr seal recompute with parent-MTP-threaded V3 seeds (LT-Q2): changing
+    // MTP must change the seal; missing MTP fails closed; digest matches the
+    // library ComputeSealDigestBMX4CLT under the same SlotSeedFn.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 128;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    BOOST_REQUIRE(p.IsMatMulLTSealAsPoWActive(kHeight));
+
+    auto anchor = MakeLTHeader(11, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal;
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal, &slots));
+    BOOST_REQUIRE_EQUAL(slots.size(), 128U);
+    anchor.matmul_digest = seal;
+
+    // Library seal == EncDr reference recompute.
+    uint256 recomputed;
+    std::vector<unsigned char> sketch;
+    BOOST_REQUIRE(RecomputeMatMulV4SketchReference(anchor, p, kHeight, recomputed, sketch, kMtp));
+    BOOST_CHECK(recomputed == seal);
+    BOOST_CHECK(sketch.empty()); // seal mode leaves no Phase-A Chat payload
+
+    // Missing MTP fails closed.
+    uint256 no_mtp;
+    BOOST_CHECK(!RecomputeMatMulV4SketchReference(anchor, p, kHeight, no_mtp, sketch, std::nullopt));
+
+    CBlock block;
+    static_cast<CBlockHeader&>(block) = anchor;
+    BOOST_CHECK(CheckMatMulProofOfWork_V4EncDr(block, p, kHeight, kMtp));
+    BOOST_CHECK(!CheckMatMulProofOfWork_V4EncDr(block, p, kHeight, std::nullopt));
+
+    // Different parent MTP ⇒ different sibling seeds ⇒ different seal.
+    const auto slot_seed_other = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 1);
+    };
+    uint256 seal_other;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed_other, seal_other));
+    BOOST_CHECK(seal_other != seal);
+}
+
+BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128_pin)
+{
+    // Golden vectors at kTestDim for Q*=128: pin leaf order, uniqueness, parent
+    // MTP binding, and the consensus seal hex. Phase B remains inert on public
+    // nets; these vectors lock the slot-id binding preimage.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 128;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    auto anchor = MakeLTHeader(42, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal;
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal, &slots));
+    BOOST_REQUIRE_EQUAL(slots.size(), 128U);
+
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    std::vector<uint256> leaves;
+    leaves.reserve(128);
+    for (uint32_t j = 0; j < 128; ++j) {
+        BOOST_CHECK(slots[j].slot_id == lt::DeriveWindowSlotId(sigma, j));
+        BOOST_CHECK_EQUAL(slots[j].nonce, ReadLE64(slots[j].slot_id.data()));
+        leaves.push_back(lt::CommitWindowSlotLeaf(slots[j].slot_id, slots[j].digest));
+        for (uint32_t i = 0; i < j; ++i) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+            BOOST_CHECK(leaves[i] != leaves[j]);
+        }
+    }
+    const uint256 merkle = lt::ComputeWindowMerkleRoot(leaves);
+    BOOST_CHECK(lt::SealWindowCommit(sigma, merkle, 128) == seal);
+
+    // Parent MTP flip changes the seal (LT-Q2 + slot-id seed bind).
+    const auto slot_seed_mtp = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp + 7);
+    };
+    uint256 seal_mtp;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed_mtp, seal_mtp));
+    BOOST_CHECK(seal_mtp != seal);
+
+    // Golden: first/last slot id (independent of MatExpand w); leaf/merkle/seal
+    // re-pinned after w=1024 (see failure GetHex if these drift).
+    BOOST_CHECK_EQUAL(slots[0].slot_id.GetHex(),
+                      "aadee863c8d19f4f9468ed076b68f513c7593a7a861fd5758319ac72ae690043");
+    BOOST_CHECK_EQUAL(slots[127].slot_id.GetHex(),
+                      "cb5d2d89025e4675f88d3392adcfece8df050c80c951a491bf8ac6ff73465a2a");
+    BOOST_CHECK_EQUAL(leaves[0].GetHex(),
+                      "056b7099fbef2899bf6e488d2ebf0688896001a28922f55240620d644b28df4e");
+    BOOST_CHECK_EQUAL(merkle.GetHex(),
+                      "7e67f0d8cfd7895195a871a0d41283082084902f43e4202e16ae2bb669fec113");
+    BOOST_CHECK_EQUAL(seal.GetHex(),
+                      "b856426b669753c255dae3ff9907f0244568345774eb5e9b1c849dbec7eed63c");
+}
+
+BOOST_AUTO_TEST_CASE(qstar_slot_id_golden_vectors_q128)
+{
+    // Q*=128 vs Q*=256 at kTestDim — same anchor/MTP; seals must differ.
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulBMX4CHeight = 1;
+    p.nMatMulDRLTHeight = 1;
+    p.nMatMulV4Dimension = kTestDim;
+    p.nMatMulConsensusQStar = 128;
+    p.nMatMulLTTranscriptBlockSize = 2;
+    p.fMatMulLTSealAsPoW = true;
+    p.nMatMulV4FreivaldsRounds = 8;
+    p.powLimit = uint256{"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t kHeight = 10;
+    constexpr int64_t kMtp = 1'700'000'000;
+    auto anchor = MakeLTHeader(42, kTestDim);
+    anchor.nBits = UintToArith256(p.powLimit).GetCompact();
+    BOOST_REQUIRE(SetDeterministicMatMulSeeds(anchor, p, kHeight, kMtp));
+
+    const auto slot_seed = [&](CBlockHeader& h) -> bool {
+        return SetDeterministicMatMulSeeds(h, p, kHeight, kMtp);
+    };
+
+    uint256 seal128, seal256;
+    std::vector<lt::WindowSlot> slots;
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 128, slot_seed, seal128, &slots));
+    BOOST_REQUIRE(lt::ComputeSealDigestBMX4CLT(anchor, kTestDim, 256, slot_seed, seal256));
+    BOOST_REQUIRE_EQUAL(slots.size(), 128U);
+    BOOST_CHECK(seal128 != seal256);
+
+    const uint256 sigma = matmul::v4::DeriveSigma(anchor);
+    for (uint32_t j = 0; j < 128; ++j) {
+        BOOST_CHECK(slots[j].slot_id == lt::DeriveWindowSlotId(sigma, j));
+        for (uint32_t i = 0; i < j; ++i) {
+            BOOST_CHECK(slots[i].slot_id != slots[j].slot_id);
+        }
+    }
+
+    // Seal hex re-pinned after w=1024 MatExpand (digests in leaves change).
+    BOOST_CHECK_EQUAL(seal128.GetHex(),
+                      "b856426b669753c255dae3ff9907f0244568345774eb5e9b1c849dbec7eed63c");
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_additivity_noncollapse)
+{
+    // WITNESS (not a proof): Linear fold satisfies f(x)+f(y) ≈ f(x+y) on a large
+    // fraction of samples; ChaCha PRF Extract must break additivity often enough
+    // to witness non-collapse (C15-A). Position salt (Lemma A / dual pre-review)
+    // further blocks shared-φ spectral reuse — this check alone is not a
+    // cryptographic closure of C-15.
+    const uint256 seed = ParseUint256(
+        "deadbeef42deadbeef42deadbeef42deadbeef42deadbeef42deadbeef42dead");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+    int broken = 0;
+    for (int32_t x = -80; x <= 80; x += 7) {
+        for (int32_t y = -80; y <= 80; y += 11) {
+            const int8_t fx = lt::ExtractDequantMatExpand(x, 2, 3, prf_key);
+            const int8_t fy = lt::ExtractDequantMatExpand(y, 2, 3, prf_key);
+            const int8_t fxy = lt::ExtractDequantMatExpand(x + y, 2, 3, prf_key);
+            const int sum = static_cast<int>(fx) + static_cast<int>(fy);
+            if (sum < -48 || sum > 48 || fxy != static_cast<int8_t>(sum)) {
+                ++broken;
+            }
+        }
+    }
+    BOOST_CHECK(broken > 50);
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_batch_algebra_optimal_equals_full)
+{
+    // Batch algebra: after MatExpand, optimal factoring must equal the full
+    // product sketch (associativity of exact int GEMMs; Extract already applied).
+    auto header = MakeLTHeader(3, kTestDim);
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(kTestDim, m));
+    const auto Ahat = lt::ExpandOperandAMatExpand(header, kTestDim);
+    const auto Bhat = lt::ExpandOperandBMatExpand(header, kTestDim);
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+    const auto U = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_u, m, kTestDim);
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, kTestDim, m);
+
+    const auto C = matmul::v4::ComputeExactProduct(Ahat, Bhat, kTestDim);
+    const auto full = matmul::v4::ComputeSketch(U, C, V, kTestDim, m);
+    const auto P = matmul::v4::ComputeProjectedLeft(U, Ahat, kTestDim, m);
+    const auto Q = matmul::v4::ComputeProjectedRight(Bhat, V, kTestDim, m);
+    const auto opt = matmul::v4::ComputeCombineModQ(P, Q, kTestDim, m);
+    BOOST_CHECK(full == opt);
+}
+
+BOOST_AUTO_TEST_CASE(seal_binding_sigma_and_merkle_leaf)
+{
+    // Seal binds (sigma_anchor, merkle_root, Q*): flipping sigma or one leaf
+    // digest must change SealWindowCommit (adversarial seal-binding witness).
+    // Leaves are CommitWindowSlotLeaf(slot_id, digest), not bare digests.
+    std::vector<uint256> leaves(64);
+    for (size_t i = 0; i < leaves.size(); ++i) {
+        unsigned char idb[32]{};
+        unsigned char db[32]{};
+        idb[0] = static_cast<unsigned char>(i + 1);
+        idb[31] = static_cast<unsigned char>(0x5A ^ i);
+        db[0] = static_cast<unsigned char>(i + 1);
+        db[31] = static_cast<unsigned char>(0xA5 ^ i);
+        const uint256 slot_id{Span<const unsigned char>{idb, sizeof(idb)}};
+        const uint256 digest{Span<const unsigned char>{db, sizeof(db)}};
+        leaves[i] = lt::CommitWindowSlotLeaf(slot_id, digest);
+    }
+    const uint256 root = lt::ComputeWindowMerkleRoot(leaves);
+    const uint256 sigma = ParseUint256(
+        "3333333333333333333333333333333333333333333333333333333333333333");
+    const uint256 sigma2 = ParseUint256(
+        "4444444444444444444444444444444444444444444444444444444444444444");
+    const uint256 seal = lt::SealWindowCommit(sigma, root, 64);
+    BOOST_CHECK(seal != lt::SealWindowCommit(sigma2, root, 64));
+
+    // Flip one leaf's digest binding → different merkle → different seal.
+    leaves[7] = lt::CommitWindowSlotLeaf(uint256::ONE, uint256::ONE);
+    const uint256 root_flip = lt::ComputeWindowMerkleRoot(leaves);
+    BOOST_CHECK(root_flip != root);
+    BOOST_CHECK(lt::SealWindowCommit(sigma, root_flip, 64) != seal);
+
+    // Distinct anchors ⇒ disjoint full slot ids (and therefore low-64 nonces).
+    BOOST_CHECK(lt::DeriveWindowSlotId(sigma, 0) != lt::DeriveWindowSlotId(sigma2, 0));
+    BOOST_CHECK(lt::DeriveWindowSlotId(sigma, 0) != lt::DeriveWindowSlotId(sigma, 1));
+    BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma2, 0));
+    BOOST_CHECK(lt::DeriveWindowSlotNonce(sigma, 0) != lt::DeriveWindowSlotNonce(sigma, 1));
+    // Nonce mapping is exactly low 64 bits of the slot id.
+    BOOST_CHECK_EQUAL(lt::DeriveWindowSlotNonce(sigma, 0),
+                      ReadLE64(lt::DeriveWindowSlotId(sigma, 0).data()));
+}
+
+BOOST_AUTO_TEST_CASE(slot_id_seed_and_leaf_binding)
+{
+    // Full 256-bit slot_id must affect seeds and Merkle leaf, not only nNonce64.
+    const uint256 sigma = ParseUint256(
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    const uint256 id0 = lt::DeriveWindowSlotId(sigma, 0);
+    const uint256 id1 = lt::DeriveWindowSlotId(sigma, 1);
+    BOOST_CHECK(id0 != id1);
+
+    CBlockHeader h = MakeLTHeader(0, kTestDim);
+    h.nNonce64 = ReadLE64(id0.data());
+    h.nNonce = static_cast<uint32_t>(h.nNonce64);
+    CBlockHeader h_bound = h;
+    lt::BindWindowSlotIdIntoSeeds(h_bound, id0);
+    BOOST_CHECK(h_bound.seed_a != h.seed_a);
+    BOOST_CHECK(h_bound.seed_b != h.seed_b);
+
+    // Same V3 seeds + different slot_id ⇒ different bound seeds (high bits matter).
+    CBlockHeader h1 = h;
+    lt::BindWindowSlotIdIntoSeeds(h1, id1);
+    BOOST_CHECK(h1.seed_a != h_bound.seed_a);
+    BOOST_CHECK(h1.seed_b != h_bound.seed_b);
+
+    const uint256 digest = ParseUint256(
+        "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    BOOST_CHECK(lt::CommitWindowSlotLeaf(id0, digest) !=
+                lt::CommitWindowSlotLeaf(id1, digest));
+    BOOST_CHECK(lt::CommitWindowSlotLeaf(id0, digest) !=
+                lt::CommitWindowSlotLeaf(id0, uint256::ONE));
+}
+
+BOOST_AUTO_TEST_CASE(ascend_exactgemm_stub_inert_default_build)
+{
+    // Default CI / no CANN: Ascend ExactGemm + MX twin must stay fail-closed.
+    BOOST_CHECK(!matmul_v4::ascend::IsAscendExactGemmAvailable());
+    BOOST_CHECK(!matmul_v4::ascend::IsAscendExactMxProjectionAvailable());
+    std::vector<int8_t> a(16, 1), b(16, 2);
+    std::vector<int32_t> out;
+    bool used_cube = true;
+    BOOST_CHECK(!matmul_v4::ascend::ExactGemmS8S8Ascend(a, b, 4, 4, 4, out, &used_cube));
+    BOOST_CHECK(!used_cube);
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeGemmS8S8(a, b, 4, 4, 4, out));
+    used_cube = true;
+    BOOST_CHECK(!matmul_v4::ascend::ExactGemmS32S8Ascend(
+        std::vector<int32_t>(16, 1), a, 4, 4, 4, out, &used_cube));
+    BOOST_CHECK(!used_cube);
+    BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeGemmS32S8(
+        std::vector<int32_t>(16, 1), a, 4, 4, 4, out));
+
+    std::vector<int8_t> mu(32 * 32, 1), V(32 * 16, 1);
+    std::vector<uint8_t> scales(32, 0);
+    matmul_v4::ascend::LtAscendDigestProvenance mx_prov;
+    mx_prov.used_cube_path = true;
+    mx_prov.exact_mx_scale_partitioned = true;
+    mx_prov.native_mx_qualified = true;
+    BOOST_CHECK(!matmul_v4::ascend::ComputeProjectedRightMxBlockScaleLTAscend(
+        mu, scales, V, 32, 16, out, &mx_prov));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!mx_prov.used_cube_path);
+    BOOST_CHECK(!mx_prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!mx_prov.native_mx_qualified);
+    matmul::v4::lt::MxLaneProvenance shared_prov;
+    shared_prov.exact_mx_scale_partitioned = true;
+    shared_prov.native_mxfp4_qualified = true;
+    BOOST_CHECK(!matmul_v4::ascend::TryLaunchLtCubeMxProjectRight(
+        mu, scales, V, 32, 16, out, &shared_prov));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!shared_prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!shared_prov.native_mxfp4_qualified);
+
+    std::vector<matmul::v4::lt::DigestOnlyResultLT> digests;
+    const uint64_t nonce = 1;
+    CBlockHeader hdr;
+    matmul_v4::ascend::LtAscendDigestProvenance dig_prov;
+    dig_prov.used_cube_path = true;
+    dig_prov.exact_mx_scale_partitioned = true;
+    dig_prov.native_mx_qualified = true;
+    BOOST_CHECK(!matmul_v4::ascend::ComputeDigestsOnlyLTAscend(
+        hdr, 64, &nonce, 1, digests, &dig_prov));
+    BOOST_CHECK(digests.empty());
+    BOOST_CHECK(!dig_prov.used_cube_path);
+    BOOST_CHECK(!dig_prov.exact_mx_scale_partitioned);
+    BOOST_CHECK(!dig_prov.native_mx_qualified);
+    const auto last = matmul_v4::ascend::LastAscendDigestProvenance();
+    BOOST_CHECK(!last.used_cube_path);
+    BOOST_CHECK(!last.exact_mx_scale_partitioned);
+    BOOST_CHECK(!last.native_mx_qualified);
+
+    const auto elig = matmul_v4::backend::EligibilityFor(matmul_v4::backend::Kind::ASCEND);
+    BOOST_CHECK(!elig.admissible);
+    BOOST_CHECK(matmul_v4::backend::ResolveBackend("ascend").active == matmul_v4::backend::Kind::CPU);
+    BOOST_CHECK(matmul_v4::backend::ResolveBackend("huawei").active == matmul_v4::backend::Kind::CPU);
+}
+
+BOOST_AUTO_TEST_CASE(lt_accel_entry_bit_identity_or_stub_decline)
+{
+    // ENABLE=OFF stubs decline; with calibrated GPU, digests must match CPU.
+    auto tmpl = MakeLTHeader(3, kTestDim);
+    const uint64_t nonces[] = {1, 2};
+    std::vector<lt::DigestOnlyResultLT> out;
+
+    auto check_backend = [&](bool available,
+                             bool (*compute)(const CBlockHeader&, uint32_t, const uint64_t*, size_t,
+                                             std::vector<lt::DigestOnlyResultLT>&)) {
+        out.clear();
+        if (!available) {
+            BOOST_CHECK(!compute(tmpl, kTestDim, nonces, 2, out));
+            BOOST_CHECK(out.empty());
+            return;
+        }
+        BOOST_REQUIRE(compute(tmpl, kTestDim, nonces, 2, out));
+        BOOST_REQUIRE_EQUAL(out.size(), 2);
+        for (size_t i = 0; i < 2; ++i) {
+            CBlockHeader h = tmpl;
+            h.nNonce64 = nonces[i];
+            h.nNonce = static_cast<uint32_t>(nonces[i]);
+            uint256 d;
+            std::vector<unsigned char> payload;
+            BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, d, payload));
+            BOOST_CHECK(out[i].digest == d);
+        }
+    };
+
+    check_backend(matmul_v4::cuda::IsMatMulLTCudaAvailable(),
+                  &matmul_v4::cuda::ComputeDigestsOnlyLTCuda);
+    check_backend(matmul_v4::hip::IsMatMulLTHipAvailable(),
+                  &matmul_v4::hip::ComputeDigestsOnlyLTHip);
+    check_backend(matmul_v4::metal::IsMatMulLTMetalAvailable(),
+                  &matmul_v4::metal::ComputeDigestsOnlyLTMetal);
+    // Ascend entry takes an optional provenance* (default nullptr); wrap so the
+    // shared 5-arg checker type still applies. Digests require Cube ExactGemm
+    // AND the four-pass MX projection self-qual.
+    {
+        out.clear();
+        const bool available = matmul_v4::ascend::IsAscendExactMxProjectionAvailable();
+        if (!available) {
+            BOOST_CHECK(!matmul_v4::ascend::ComputeDigestsOnlyLTAscend(
+                tmpl, kTestDim, nonces, 2, out, nullptr));
+            BOOST_CHECK(out.empty());
+        } else {
+            matmul_v4::ascend::LtAscendDigestProvenance prov;
+            BOOST_REQUIRE(matmul_v4::ascend::ComputeDigestsOnlyLTAscend(
+                tmpl, kTestDim, nonces, 2, out, &prov));
+            BOOST_REQUIRE_EQUAL(out.size(), 2);
+            BOOST_CHECK(prov.used_cube_path);
+            BOOST_CHECK(prov.exact_mx_scale_partitioned);
+            BOOST_CHECK(!prov.native_mx_qualified);
+            for (size_t i = 0; i < 2; ++i) {
+                CBlockHeader h = tmpl;
+                h.nNonce64 = nonces[i];
+                h.nNonce = static_cast<uint32_t>(nonces[i]);
+                uint256 d;
+                std::vector<unsigned char> payload;
+                BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(h, kTestDim, d, payload));
+                BOOST_CHECK(out[i].digest == d);
+            }
+        }
+    }
+
+    uint256 d;
+    std::vector<unsigned char> payload;
+    BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(tmpl, kTestDim, d, payload));
+    BOOST_CHECK(!d.IsNull());
+    BOOST_CHECK(!payload.empty());
+}
+
+#if defined(BTX_ENABLE_CUDA_EXPERIMENTAL)
+BOOST_AUTO_TEST_CASE(cuda_peak_native_deficit_keeps_exact_resident_default)
+{
+    ScopedLtNativePolicyDefault policy_default;
+    if (!matmul_v4::cuda::IsMatMulLTCudaAvailable() ||
+        !matmul_v4::cuda::IsLtPeakMxCapableDevice()) {
+        BOOST_TEST_MESSAGE("skipping Blackwell exact-resident fallback regression");
+        return;
+    }
+
+    const auto status = matmul_v4::cuda::ProbeLtPeakMxPathStatus();
+    const auto lanes = matmul_v4::cuda::ProbeLtCudaMxNativeProvenance();
+    BOOST_CHECK_EQUAL(status.native_mxfp4_attempted, lanes.native_mxfp4_attempted);
+    BOOST_CHECK_EQUAL(status.native_mxfp4_qualified, lanes.native_mxfp4_qualified);
+    BOOST_CHECK_EQUAL(status.native_fp8_attempted, lanes.native_fp8_attempted);
+    BOOST_CHECK_EQUAL(status.native_fp8_qualified, lanes.native_fp8_qualified);
+    if (matmul_v4::cuda::LtCudaCompiledRuntimeVersion() >= 12080U) {
+        // "attempted" proves that the CUDA 12.8+ block-scale surface reached
+        // the Blackwell self-qual. It does not imply either lane qualified.
+        BOOST_CHECK(lanes.native_mxfp4_attempted);
+        BOOST_CHECK(lanes.native_fp8_attempted);
+    }
+    BOOST_CHECK(status.allow_exact_mx_fallback);
+    BOOST_CHECK(!status.peak_required);
+    BOOST_CHECK(!status.blocks_device_resident);
+    BOOST_CHECK(!status.resident_native_mx_wired);
+    BOOST_CHECK(!status.peak_ready);
+
+    std::vector<CBlockHeader> headers{MakeLTHeader(0x5090, kTestDim),
+                                      MakeLTHeader(0x5060, kTestDim)};
+    std::vector<lt::DigestOnlyResultLT> results;
+    matmul_v4::cuda::LtCudaBatchProvenance provenance;
+    BOOST_REQUIRE(matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
+        headers, kTestDim, results, &provenance));
+    BOOST_REQUIRE_EQUAL(results.size(), headers.size());
+    BOOST_CHECK(provenance.qstar_device_batched);
+    BOOST_CHECK(provenance.device_w_generation);
+    BOOST_CHECK(provenance.device_digest);
+    BOOST_CHECK(provenance.per_nonce_sync_absent);
+    BOOST_CHECK(provenance.mx.exact_mx_scale_partitioned);
+    BOOST_CHECK(!provenance.mx.native_mxfp4_qualified);
+    BOOST_CHECK(!provenance.mx.native_fp8_qualified);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_dispatch_winner_and_loser_contract_on_device)
+{
+    if (!ExtendedCudaSelfTestRequested()) {
+        BOOST_TEST_MESSAGE(
+            "skipping forced CUDA dispatch contract; set "
+            "BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST=1 on a qualification host");
+        return;
+    }
+
+    ScopedMatMulV4BackendEnv force_cuda{"cuda"};
+    BOOST_REQUIRE_MESSAGE(matmul_v4::cuda::IsMatMulLTCudaAvailable(),
+                          "CUDA LT backend unavailable or baseline self-test failed");
+    BOOST_REQUIRE(matmul_v4::accel::ResolveBackend() == matmul_v4::accel::Kind::CUDA);
+
+    std::vector<CBlockHeader> headers{MakeLTHeader(31, kTestDim),
+                                      MakeLTHeader(32, kTestDim)};
+    headers[1].seed_a.data()[0] ^= 0x5aU;
+    headers[1].seed_b.data()[31] ^= 0xa5U;
+    std::vector<uint256> reference_digests(headers.size());
+    std::vector<std::vector<unsigned char>> reference_payloads(headers.size());
+    for (size_t i = 0; i < headers.size(); ++i) {
+        BOOST_REQUIRE(lt::ComputeDigestBMX4CLT(
+            headers[i], kTestDim, reference_digests[i], reference_payloads[i]));
+        BOOST_REQUIRE(!reference_digests[i].IsNull());
+    }
+
+    const uint256 easy_target = ParseUint256(
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff");
+    std::vector<uint256> digests;
+    std::vector<std::vector<unsigned char>> payloads;
+    matmul_v4::accel::ResetStats();
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        headers, kTestDim, /*rounds=*/2, easy_target, digests, payloads));
+    BOOST_CHECK(digests == reference_digests);
+    BOOST_CHECK(payloads == reference_payloads);
+    auto stats = matmul_v4::accel::ProbeStats();
+    BOOST_CHECK_EQUAL(stats.cuda_batch_ok, 1U);
+    BOOST_CHECK_EQUAL(stats.cuda_batch_fallback, 0U);
+
+    digests.clear();
+    payloads.clear();
+    matmul_v4::accel::ResetStats();
+    BOOST_REQUIRE(matmul_v4::accel::ComputeDigestsBMX4CLTDispatched(
+        headers, kTestDim, /*rounds=*/2, uint256{}, digests, payloads));
+    BOOST_CHECK(digests == reference_digests);
+    BOOST_REQUIRE_EQUAL(payloads.size(), headers.size());
+    for (const auto& payload : payloads) BOOST_CHECK(payload.empty());
+    stats = matmul_v4::accel::ProbeStats();
+    BOOST_CHECK_EQUAL(stats.cuda_batch_ok, 1U);
+    BOOST_CHECK_EQUAL(stats.cuda_batch_fallback, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_production_full_pipeline_extended_self_test)
+{
+    if (!ExtendedCudaSelfTestRequested()) {
+        BOOST_TEST_MESSAGE(
+            "skipping expensive n=4096 CUDA differential; set "
+            "BTX_MATMUL_V4_LT_CUDA_EXTENDED_SELFTEST=1 on a qualification host");
+        return;
+    }
+
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(matmul_v4::cuda::RunMatMulLTCudaExtendedSelfTest(error), error);
+}
+#endif
+
+#if !defined(BTX_ENABLE_HIP)
+BOOST_AUTO_TEST_CASE(hip_full_header_batch_stub_clears_provenance)
+{
+    std::vector<CBlockHeader> headers{MakeLTHeader(11, kTestDim),
+                                      MakeLTHeader(12, kTestDim)};
+    std::vector<lt::DigestOnlyResultLT> out(1);
+    matmul_v4::hip::LtHipBatchProvenance provenance;
+    provenance.qstar_device_batched = true;
+    provenance.device_w_generation = true;
+    provenance.device_digest = true;
+    provenance.per_nonce_sync_absent = true;
+    BOOST_CHECK(!matmul_v4::hip::ComputeDigestsOnlyLTHip(
+        headers, kTestDim, out, &provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!provenance.qstar_device_batched);
+    BOOST_CHECK(!provenance.device_w_generation);
+    BOOST_CHECK(!provenance.device_digest);
+    BOOST_CHECK(!provenance.per_nonce_sync_absent);
+}
+#endif
+
+BOOST_AUTO_TEST_CASE(full_header_batch_rejects_above_consensus_qstar)
+{
+    const auto header = MakeLTHeader(13, kTestDim);
+    std::vector<CBlockHeader> headers(
+        static_cast<size_t>(lt::kConsensusQStarMax) + 1, header);
+    std::vector<lt::DigestOnlyResultLT> out(1);
+
+    matmul_v4::cuda::LtCudaBatchProvenance cuda_provenance;
+    cuda_provenance.qstar_device_batched = true;
+    cuda_provenance.device_w_generation = true;
+    cuda_provenance.device_digest = true;
+    cuda_provenance.per_nonce_sync_absent = true;
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCuda(
+        headers, kTestDim, out, &cuda_provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!cuda_provenance.qstar_device_batched);
+    BOOST_CHECK(!cuda_provenance.device_w_generation);
+    BOOST_CHECK(!cuda_provenance.device_digest);
+    BOOST_CHECK(!cuda_provenance.per_nonce_sync_absent);
+
+    out.resize(1);
+    matmul_v4::hip::LtHipBatchProvenance hip_provenance;
+    hip_provenance.qstar_device_batched = true;
+    hip_provenance.device_w_generation = true;
+    hip_provenance.device_digest = true;
+    hip_provenance.per_nonce_sync_absent = true;
+    BOOST_CHECK(!matmul_v4::hip::ComputeDigestsOnlyLTHip(
+        headers, kTestDim, out, &hip_provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!hip_provenance.qstar_device_batched);
+    BOOST_CHECK(!hip_provenance.device_w_generation);
+    BOOST_CHECK(!hip_provenance.device_digest);
+    BOOST_CHECK(!hip_provenance.per_nonce_sync_absent);
+}
+
+BOOST_AUTO_TEST_CASE(cuda_telemetry_campaign_is_bounded_and_window_aligned)
+{
+    const auto header = MakeLTHeader(14, kTestDim);
+    std::vector<lt::DigestOnlyResultLT> out(1);
+    matmul_v4::cuda::LtCudaBatchProvenance provenance;
+    provenance.qstar_device_batched = true;
+    provenance.device_w_generation = true;
+    provenance.device_digest = true;
+    provenance.per_nonce_sync_absent = true;
+    provenance.candidate_slots = 1;
+    provenance.chat_staging_slots = 1;
+    provenance.chat_staging_chunks = 1;
+    provenance.telemetry_windows = 1;
+    provenance.telemetry_campaign = true;
+
+    std::vector<CBlockHeader> oversized(
+        matmul_v4::cuda::kLtCudaTelemetryCampaignMax + 1, header);
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+        oversized, kTestDim, /*qstar=*/128, out, &provenance));
+    BOOST_CHECK(out.empty());
+    BOOST_CHECK(!provenance.qstar_device_batched);
+    BOOST_CHECK_EQUAL(provenance.candidate_slots, 0U);
+    BOOST_CHECK_EQUAL(provenance.chat_staging_slots, 0U);
+    BOOST_CHECK_EQUAL(provenance.chat_staging_chunks, 0U);
+    BOOST_CHECK_EQUAL(provenance.telemetry_windows, 0U);
+    BOOST_CHECK(!provenance.telemetry_campaign);
+
+    // The wider entry accepts only complete {128,256,512}-slot windows. It is
+    // not a loophole around the consensus Q* call's structural contract.
+    std::vector<CBlockHeader> partial_window(129, header);
+    out.resize(1);
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+        partial_window, kTestDim, /*qstar=*/128, out, &provenance));
+    BOOST_CHECK(out.empty());
+
+    std::vector<CBlockHeader> invalid_qstar(128, header);
+    out.resize(1);
+    BOOST_CHECK(!matmul_v4::cuda::ComputeDigestsOnlyLTCudaTelemetryCampaign(
+        invalid_qstar, kTestDim, /*qstar=*/64, out, &provenance));
+    BOOST_CHECK(out.empty());
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_extract_r2_nonapproximability)
+{
+    // C15-A quantitative witness (dual pre-review): best LS affine and
+    // degree-2/3 polynomial predictors of Extract(raw) have R² < ε=0.05 on
+    // dense samples across many positions. Degree ≥2 was previously untested.
+    // Empirical only — not a PRF reduction.
+    const uint256 seed = ParseUint256(
+        "c15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15ac15a");
+    const uint256 prf_key = lt::DeriveMatExpandPrfKey(seed);
+
+    const std::pair<uint32_t, uint32_t> positions[] = {
+        {0, 0}, {1, 2}, {3, 5}, {7, 11}, {13, 17}, {19, 23}, {29, 31}, {4, 8},
+    };
+
+    for (const auto& [i, j] : positions) {
+        std::vector<double> xs;
+        std::vector<double> ys;
+        xs.reserve(401);
+        ys.reserve(401);
+        for (int32_t raw = -2000; raw <= 2000; raw += 10) {
+            xs.push_back(static_cast<double>(raw));
+            ys.push_back(static_cast<double>(
+                lt::ExtractDequantMatExpand(raw, i, j, prf_key)));
+        }
+        for (int deg = 1; deg <= 3; ++deg) {
+            PolyFit fit;
+            BOOST_REQUIRE(FitPolyLS(xs, ys, deg, fit));
+            BOOST_CHECK_MESSAGE(
+                fit.r2 < kC15SurrogateR2Eps,
+                "pos=(" << i << "," << j << ") deg=" << deg << " R²=" << fit.r2
+                        << " (want < " << kC15SurrogateR2Eps << ")");
+        }
+    }
+
+    // Sanity: LS harness runs on Fold (modular sawtooth). Global affine R² is
+    // not required to exceed ε; we only require the fit to succeed and that
+    // Extract remains below ε (checked above). Local period affinity of Fold
+    // is covered by matexpand_not_affine_in_raw differentials.
+    {
+        std::vector<double> xs, ys;
+        for (int32_t raw = -2000; raw <= 2000; raw += 10) {
+            xs.push_back(static_cast<double>(raw));
+            ys.push_back(static_cast<double>(lt::FoldInt32ToEmax48(raw)));
+        }
+        PolyFit fold_fit;
+        BOOST_REQUIRE(FitPolyLS(xs, ys, 1, fold_fit));
+        BOOST_CHECK(std::isfinite(fold_fit.r2));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(matexpand_c15b_affine_surrogate_sketch_rejected)
+{
+    // C15-B collapse falsification: fit best global LS affine / deg-2 / deg-3
+    // surrogate Bhat'≈f(B32) on a live MatExpand matrix, forge Ĉ' from Bhat',
+    // and assert VerifySketchBMX4CLT (Freivalds) REJECTS. Witness only —
+    // rules out the linear Freivalds-reassociation class on this sample, not
+    // unrestricted adversaries.
+    constexpr uint32_t n = 32; // small consensus-valid dim (n%32==0, deep tile)
+    auto header = MakeLTHeader(0xc15bULL, n);
+    uint32_t m = 0;
+    BOOST_REQUIRE(lt::ValidateDimsBMX4CLT(n, m));
+
+    const auto bundle = ExpandOperandBB32ForTest(header, n);
+    const auto Bhat = lt::ExpandOperandBMatExpand(header, n);
+    BOOST_REQUIRE_EQUAL(bundle.B32.size(), Bhat.size());
+    // B32→Extract must reproduce honest Bhat (reconstruction sanity).
+    for (size_t idx = 0; idx < Bhat.size(); ++idx) {
+        const uint32_t i = static_cast<uint32_t>(idx / n);
+        const uint32_t j = static_cast<uint32_t>(idx % n);
+        BOOST_REQUIRE_EQUAL(
+            static_cast<int>(lt::ExtractDequantMatExpandAt(bundle.B32.data(), n, i, j,
+                                                           bundle.prf_key)),
+            static_cast<int>(Bhat[idx]));
+    }
+
+    std::vector<double> xs(bundle.B32.size()), ys(Bhat.size());
+    for (size_t idx = 0; idx < Bhat.size(); ++idx) {
+        xs[idx] = static_cast<double>(bundle.B32[idx]);
+        ys[idx] = static_cast<double>(Bhat[idx]);
+    }
+
+    const auto Ahat = lt::ExpandOperandAMatExpand(header, n);
+    const auto [seed_u, seed_v] = lt::DeriveProjectorSeedsBMX4CLT(header);
+    const auto U = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_u, m, n);
+    const auto V = matmul::v4::bmx4::ExpandProjectorBMX4C(seed_v, n, m);
+    const auto P = matmul::v4::ComputeProjectedLeft(U, Ahat, n, m);
+    const uint256 sigma = matmul::v4::DeriveSigma(header);
+
+    for (int deg = 1; deg <= 3; ++deg) {
+        PolyFit fit;
+        BOOST_REQUIRE(FitPolyLS(xs, ys, deg, fit));
+        BOOST_CHECK_MESSAGE(
+            fit.r2 < kC15SurrogateR2Eps,
+            "production B32 global deg=" << deg << " R²=" << fit.r2
+                                         << " (want < " << kC15SurrogateR2Eps << ")");
+
+        std::vector<int8_t> Bhat_surr(Bhat.size());
+        size_t disagree = 0;
+        for (size_t idx = 0; idx < Bhat.size(); ++idx) {
+            Bhat_surr[idx] = ClampPredictInt8(EvalPoly(fit, xs[idx]));
+            if (Bhat_surr[idx] != Bhat[idx]) ++disagree;
+        }
+        BOOST_REQUIRE_MESSAGE(disagree > Bhat.size() / 4,
+                              "surrogate deg=" << deg << " agrees too often: disagree="
+                                               << disagree << "/" << Bhat.size());
+
+        const auto Q_surr = matmul::v4::ComputeProjectedRight(Bhat_surr, V, n, m);
+        const auto Chat_surr = matmul::v4::ComputeCombineModQ(P, Q_surr, n, m);
+        std::vector<unsigned char> payload = matmul::v4::SerializeSketch(Chat_surr);
+        CBlockHeader forged = header;
+        forged.matmul_digest = matmul::v4::ComputeSketchDigest(sigma, payload);
+
+        // Digest is sealed to the forged sketch; Freivalds vs honest Bhat must fail.
+        uint256 vout;
+        BOOST_CHECK_MESSAGE(
+            !lt::VerifySketchBMX4CLT(forged, n, /*rounds=*/2, payload, vout),
+            "C15-B: deg-" << deg << " surrogate sketch must be rejected by VerifySketchBMX4CLT");
+
+        // Direct Freivalds also rejects (same soundness core).
+        std::vector<matmul::v4::Fq> sketch;
+        BOOST_REQUIRE(matmul::v4::ParseSketch(payload, m, sketch));
+        BOOST_CHECK(!matmul::v4::SketchFreivalds(Ahat, Bhat, U, V, sketch, sigma, payload, n, m,
+                                                 /*rounds=*/2));
+    }
+}
+
+BOOST_AUTO_TEST_SUITE_END()

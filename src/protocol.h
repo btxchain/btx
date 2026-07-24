@@ -286,6 +286,66 @@ inline constexpr const char* DLTX{"dltx"};
  * Empty payload.
  */
 inline constexpr const char* DANDELIONACC{"dandelionacc"};
+/**
+ * getmmsketch requests the v4.4 ENC-DR sketch-cache bytes (the 8·m² serialized
+ * sketch, ~8 MiB at m = 1024) for a block, by 32-byte block (header) hash.
+ * STRICTLY NON-CONSENSUS, best-effort (tension-resolution §4.3): the reply is
+ * an accept-side optimization letting the requester run the cheap Freivalds
+ * verifier instead of the full Chat recompute — a peer that never answers
+ * costs the requester nothing but CPU (fallback = recompute; a block is never
+ * held proof-incomplete). Modeled on the getdata/block request-response
+ * pattern (NOT unsolicited gossip). Reply is a single `mmsketch` if the peer
+ * holds the bytes in its sketch cache and its anti-amplification serve limits
+ * (per-peer token bucket + node-wide egress budget + per-(peer,block) dedup)
+ * admit it; else the request is silently ignored. Explicitly NOT advertised
+ * via any NODE_* service bit — serving sketches is not a trust role.
+ * @since MatMul v4.4 ENC-DR.
+ */
+inline constexpr const char* GETMMSKETCH{"getmmsketch"};
+/**
+ * mmsketch carries the full self-authenticating sketch-cache payload for one
+ * block, in response to a `getmmsketch`. Payload:
+ *   block_hash   (uint256)          the block the sketch binds to (header hash);
+ *   sketch_bytes (var-length bytes) the 8·m² serialized sketch.
+ * The bytes are UNTRUSTED: the receiver enforces the profile 8·m² size cap
+ * BEFORE buffering, then authenticates with ONE hash —
+ * H(sigma||bytes) == matmul_digest (sigma header-derived, matmul_digest
+ * header-fixed) — before admitting the bytes to its local sketch cache. A
+ * mismatching payload is dropped and the supplying peer penalized; it is
+ * NEVER evidence about the block itself. At m = 1024 the ~8 MiB message rides
+ * under every transport ceiling (16 MiB BIP324 v2 packet limit) in one piece;
+ * at larger future m a node simply does not serve (peers recompute).
+ * @since MatMul v4.4 ENC-DR.
+ */
+inline constexpr const char* MMSKETCH{"mmsketch"};
+/**
+ * getrccarrier requests the datacenter-profile (nMatMulRCProfile==2) Freivalds
+ * SAMPLED CARRIER for one block (the λ sampled layers' bytes + tile-tree
+ * openings). Payload: block_hash (uint256). Modeled on getmmsketch/getblocktxn:
+ * a node that holds the carrier for the requested block MAY reply with
+ * `rccarrier`; a request for a carrier we don't hold is silently ignored. The
+ * carrier is the availability seam that lets a NON-MINING node validate a
+ * received profile-2 block (CheckMatMulProofOfWork_RC) — unlike the best-effort
+ * sketch, it is consensus-load-bearing, so it is authenticated on receipt.
+ * @since datacenter-profile relay.
+ */
+inline constexpr const char* GETRCCARRIER{"getrccarrier"};
+/**
+ * rccarrier carries a serialized RCFreivaldsSampledCarrier for one block, in
+ * reply to a `getrccarrier` (or pushed by a serving peer immediately BEFORE the
+ * `block` on the same ordered connection, so it is stored before the block is
+ * validated). Payload:
+ *   block_hash    (uint256)          the block the carrier binds to (header hash);
+ *   carrier_bytes (var-length bytes) the bounded RCFreivaldsSampledCarrier wire.
+ * The bytes are UNTRUSTED: the receiver enforces a hard size ceiling BEFORE
+ * buffering, deserializes with every vector length bounded, then AUTHENTICATES
+ * with VerifyEpisodeFreivaldsSampledCarrier + the consensus episode-shape bind
+ * (identical to CheckMatMulProofOfWork_RC) before admitting it to the local
+ * carrier store. A carrier that fails to authenticate is dropped and the peer
+ * penalized; it is NEVER evidence about the block itself.
+ * @since datacenter-profile relay.
+ */
+inline constexpr const char* RCCARRIER{"rccarrier"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -330,6 +390,10 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::SENDTXRCNCL,
     NetMsgType::DLTX,
     NetMsgType::DANDELIONACC,
+    NetMsgType::GETMMSKETCH,
+    NetMsgType::MMSKETCH,
+    NetMsgType::GETRCCARRIER,
+    NetMsgType::RCCARRIER,
 })};
 
 /** nServices flags */
@@ -373,6 +437,11 @@ enum ServiceFlags : uint64_t {
     // BIP process.
 
     NODE_UTREEXO_TMP = (1 << 24),
+
+    // Bit 25 RESERVED (was NODE_MATMUL_PROOF_ARCHIVE, retired with the v4.4
+    // ENC-DR deletion of the segregated-proof subsystem; the best-effort
+    // sketch cache is deliberately NOT service-bit-advertised — serving
+    // sketches is not a trust role, tension-resolution §4.3).
 
     NODE_REPLACE_BY_FEE = (1 << 26),
     // NODE_MATMUL_CONSENSUS indicates the node validates MatMul transcripts

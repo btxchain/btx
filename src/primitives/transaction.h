@@ -352,11 +352,19 @@ public:
     }
 
     /** This deserializing constructor is provided instead of an Unserialize method.
-     *  Unserialize is not possible, since it would require overwriting const fields. */
+     *  Unserialize is not possible, since it would require overwriting const fields.
+     *
+     *  Guarded out under nvcc (__CUDACC__): the experimental CUDA backend pulls this
+     *  header in transitively (via the matmul v4 device sources) but never
+     *  deserializes a transaction on-device, and nvcc's frontend rejects these
+     *  delegating deserialize_type constructors (external review, vanities). The
+     *  host compiler still sees them, so the CPU build is unchanged. */
+#ifndef __CUDACC__
     template <typename Stream>
     CTransaction(deserialize_type, const TransactionSerParams& params, Stream& s) : CTransaction(CMutableTransaction(deserialize, params, s)) {}
     template <typename Stream>
     CTransaction(deserialize_type, Stream& s) : CTransaction(CMutableTransaction(deserialize, s)) {}
+#endif
 
     bool IsNull() const {
         return vin.empty() && vout.empty() && shielded_bundle.IsEmpty();

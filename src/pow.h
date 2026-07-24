@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdint.h>
 #include <string>
@@ -38,6 +39,9 @@ struct MatMulPeerVerificationBudget {
     // Access is externally synchronized in net_processing by peer-specific locks.
     uint32_t expensive_verifications_this_minute{0};
     std::chrono::steady_clock::time_point window_start{};
+    /** ENC_RC recompute units -- independent window/counter from EncDr/LT. */
+    uint32_t expensive_rc_verifications_this_minute{0};
+    std::chrono::steady_clock::time_point rc_window_start{};
     uint32_t phase2_failures{0};
     std::chrono::steady_clock::time_point phase2_first_failure_time{};
 };
@@ -111,6 +115,12 @@ struct MatMulValidationRuntimeStats {
     uint64_t max_phase2_elapsed_us{0};
     uint64_t max_freivalds_elapsed_us{0};
     uint64_t max_transcript_elapsed_us{0};
+    // G.3+: first-class ENC-DR O(W) recompute sub-bucket (v4.4). Additive; the
+    // aggregate phase2_* fields still include recompute samples.
+    uint64_t recompute_checks{0};
+    uint64_t total_recompute_elapsed_us{0};
+    uint64_t last_recompute_elapsed_us{0};
+    uint64_t max_recompute_elapsed_us{0};
 };
 
 struct MatMulAsertHalfLifeInfo {
@@ -154,6 +164,41 @@ uint256 DeterministicMatMulSeedV3(const CBlockHeader& block, uint32_t height, in
     int32_t block_height,
     std::optional<int64_t> parent_median_time_past = std::nullopt);
 bool CheckMatMulProofOfWork_Phase1(const CBlockHeader& block, const Consensus::Params& params);
+/** Validate the immutable MatMul-ASERT schedule parameters (ratios, ordering,
+ *  branch-collision freedom). Purely a function of @p params -- @p next_height is
+ *  used only for log context. Called both at chain-parameter construction
+ *  (AUDIT D1: an invalid immutable config aborts node startup, rather than
+ *  silently weakening current difficulty at some future height) and defensively
+ *  per-block inside MatMulAsert. */
+bool ValidateMatMulAsertParams(const Consensus::Params& params, int32_t next_height);
+/** AUDIT D3: reduce a one-time ASERT rescale ratio num/den to lowest terms; return
+ *  false (and leave outputs unspecified) unless it is strictly positive AND both
+ *  reduced terms fit in uint32. Prevents ScaleTargetByTimespan's independent
+ *  per-term uint32 clamp from distorting a large-but-exact ratio (e.g. 2^40/2^39).*/
+bool ReduceRescaleRatioToU32(int64_t num, int64_t den, uint32_t& out_num, uint32_t& out_den);
+/** AUDIT D1: the fail-CLOSED difficulty result (hardest representable target) used
+ *  when a runtime ASERT invariant is breached, so an invalid config can never
+ *  weaken (fail open to powLimit) current difficulty. */
+unsigned int MatMulAsertFailClosedBits();
+/** Dormant/test-only Header-PoW experiment. Returns true iff H(GetHash() || nNonce)
+ *  meets DeriveMatMulHeaderPoWGateTarget(...). nNonce is decoupled from
+ *  GetHash / ComputeMatMulHeaderHash and is NOT on the P2P wire — enabling this
+ *  gate on a public net remains a hard NO-GO until a safe height-contextual
+ *  HeaderPoW wire design lands (bit-26 self-describing 182↔186 was withdrawn). */
+/** AUDIT H4: the PURE header-PoW throttle target derivation (no header, no hash),
+ *  exposed for direct fixed-vector testing. Returns the target a header claiming
+ *  difficulty @p nBits must hash at or under, or std::nullopt when the throttle
+ *  does not apply / is misconfigured: @p discount_bits == UINT32_MAX (disabled),
+ *  @p discount_bits > 255 (AUDIT H2, out of range), or @p nBits undecodable. The
+ *  target is DeriveTarget(nBits) shifted easier by @p discount_bits, saturating at
+ *  @p pow_limit, so forging cost stays proportional to the claimed work (C2). */
+std::optional<arith_uint256> DeriveMatMulHeaderPoWGateTarget(
+    unsigned int nBits, uint32_t discount_bits, const uint256& pow_limit);
+bool CheckMatMulHeaderSpamGate(const CBlockHeader& block, const Consensus::Params& params);
+/** Grind `block.nNonce` until CheckMatMulHeaderSpamGate passes (or tries/nonce
+ *  space exhausted). No-op success when HeaderPoW is disabled. GetHash stays
+ *  stable (nNonce decoupled). Decrements @p max_tries per attempt. */
+bool GrindMatMulHeaderSpamNonce(CBlockHeader& block, const Consensus::Params& params, uint64_t& max_tries);
 bool CheckMatMulPreHashGate(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height);
 bool CheckMatMulProofOfWork_Phase2(const CBlockHeader& block, const Consensus::Params& params, int32_t block_height = -1);
 bool CheckMatMulProofOfWork_Phase2WithPayload(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
@@ -164,11 +209,233 @@ bool CheckMatMulProofOfWork_Freivalds(const CBlock& block, const Consensus::Para
 /** Product-committed O(n^2) verification: computes digest from (sigma, A', B', C')
  *  and verifies A'*B'==C' via Freivalds. No transcript recomputation needed. */
 bool CheckMatMulProofOfWork_ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
+/** MatMul v4 (doc/btx-matmul-v4-design-spec.md, §I.2): the single v4 expensive
+ *  verification check, run exclusively at and above nMatMulV4Height (no v3
+ *  fallback ladder). Extracts the trailing sketch payload from
+ *  block.matrix_c_data (spec §H.2's "reuses the trailing-payload
+ *  serialization", byte-packed as little-endian uint32 words), regenerates
+ *  A,B from the header seeds, runs matmul_v4::VerifySketch's O(n^2)
+ *  deterministic Freivalds cascade over q = 2^61-1, and checks the
+ *  recomputed digest against the block target. Never recomputes the O(n^3)
+ *  product. */
+bool CheckMatMulProofOfWork_V4ProductCommitted(const CBlock& block, const Consensus::Params& params, int32_t block_height = -1);
+
+/** v4.4 ENC-DR (doc/btx-matmul-v4.4-tension-resolution.md §4.1/§4.2): the
+ *  digest-only consensus check at DIGEST_RECOMPUTE heights. The block carries
+ *  ZERO proof bytes; validity is a pure function of the header:
+ *
+ *      matmul_digest == H(sigma || SerializeSketch(Chat_true(header)))
+ *      AND matmul_digest <= target(nBits)
+ *
+ *  Two consensus-equivalent evaluation strategies decide that predicate:
+ *    - CACHE-ASSISTED fast path (§4.2): if untrusted sketch-cache bytes are
+ *      available for this block hash and authenticate as
+ *      H(sigma||bytes) == matmul_digest (one hash — fail-fast; a mismatching
+ *      cache entry is dropped and is NEVER evidence about the block), the
+ *      existing v4.3 O(n^2) Freivalds verifier runs over them
+ *      (epsilon <= 2^-180). Bypasses the recompute DoS budget entirely.
+ *    - RECOMPUTE reference path (§4.2, the CONSENSUS DEFINITION, epsilon = 0):
+ *      Chat_true is deterministically recomputed from the header via the SAME
+ *      CPU pure-integer reference the miner seals with
+ *      (bmx4::ComputeDigestBMX4C at ENC_BMX4C heights; matmul_v4::ComputeDigest
+ *      at ENC_S8 test heights) and the digest compared EXACTLY.
+ *
+ *  MULTI-PLATFORM TRUSTLESS VERIFICATION (adoption condition): the recompute
+ *  strategy is available on every mining-eligible compute platform — CPU
+ *  reference plus the CUDA / Metal / HIP backends through the same accel_v4
+ *  registry and backend_capabilities_v4 eligibility harness mining uses, and
+ *  open to further backends (Vulkan/SYCL/CPU-SIMD) with NO consensus change,
+ *  because the consensus definition is the CPU integer reference and every
+ *  accelerated backend is only an optional ACCEPT-FAST path validated by the
+ *  same golden vectors. Independent verification is not vendor-locked.
+ *
+ *  R1 CPU-REFERENCE-ANCHORED REJECTION (consensus-safety invariant): a block
+ *  may be pronounced invalid-by-recompute ONLY by the CPU pure-integer
+ *  reference. An accelerated backend may recompute Chat to ACCEPT FAST (a
+ *  digest match reproduces the committed preimage; eligibility bit-identity +
+ *  the miner-side CPU reseal pin it to Chat_true), but ANY digest mismatch or
+ *  device error falls back to the CPU reference BEFORE any reject — no
+ *  GPU/FP/Ozaki path may ever emit a "reject", so a device-side divergence
+ *  can never reject a block CPU nodes accept (mining stays fail-safe;
+ *  verification stays fail-safe by the same rule).
+ *
+ *  Does NOT inspect matrix_c_data (the caller enforces the §4.1 empty-body
+ *  rule and its non-permanent MUTATED classification). On success via the
+ *  recompute path the recomputed sketch bytes are offered to the local sketch
+ *  cache so this node can serve peers (best-effort, non-consensus).
+ *
+ *  Phase B seal-as-PoW (IsMatMulLTSealAsPoWActive): the lottery object is the
+ *  Q* window seal, not H(sigma||Chat). Phase-A sketch-cache auth is skipped
+ *  (single-slot Chat is not the seal preimage). `parent_median_time_past` MUST
+ *  be supplied so every window slot re-derives V3 seeds under the same parent
+ *  MTP rule as ContextualCheckBlockHeader (adversarial LT-Q2); missing MTP
+ *  fails closed. Async EncDr workers enqueue seal-mode heights only when the
+ *  dispatcher can supply parent MTP under cs_main (ClassifyMatMulEncDrRecompute
+ *  threads MTP into MatMulVerifyWorker::Job). */
+bool CheckMatMulProofOfWork_V4EncDr(const CBlock& block, const Consensus::Params& params,
+                                    int32_t block_height,
+                                    std::optional<int64_t> parent_median_time_past = std::nullopt);
+
+/** ENC_RC / Resident Curriculum DIGEST_RECOMPUTE checker. Requires
+ *  IsMatMulRCActive(block_height). Consensus path is ε=0
+ *  VerifyBoundedExactReplay (RecomputeResidentCurriculumReference) checking
+ *  digest == header.matmul_digest and digest ≤ nBits target.
+ *  Optional BTX_RC_VERIFY_GKR=1 hook validates a process-cached winner GKR
+ *  proof when present; it does NOT replace ExactReplay and does NOT raise
+ *  nMatMulRCHeight.
+ *
+ *  `carrier_missing` (optional out): under the datacenter profile
+ *  (nMatMulRCProfile==2) the check FAILS CLOSED when the relayed sampled
+ *  carrier has not yet arrived in the process-local store. That failure is not
+ *  a proof-of-work fault — it is a transient availability miss (the carrier may
+ *  simply be LATE, e.g. a block reconstructed locally from mempool via compact
+ *  blocks, where the strict pre-block serve-push never fired). When non-null,
+ *  `*carrier_missing` is set true ONLY for that specific missing-carrier return
+ *  and left untouched otherwise, so a caller can DEFER (request the carrier and
+ *  resubmit) instead of permanently rejecting. The bool return and the
+ *  fail-closed contract are UNCHANGED: a missing carrier still returns false and
+ *  is NEVER accepted without an authenticated carrier. */
+bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Params& params,
+                               int32_t block_height,
+                               bool* carrier_missing = nullptr);
+
+/** ENC_RC_COUPLED DIGEST_RECOMPUTE checker. Requires
+ *  IsMatMulRCCoupledActive(block_height). Recomputes via
+ *  RecomputeCoupledPuzzleReference (ResolveRCCoupParams dims; CPU ExactGemm)
+ *  and checks digest == header.matmul_digest and digest ≤ nBits target.
+ *  Public nets keep nMatMulRCCoupledHeight = INT32_MAX (unreachable). */
+bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensus::Params& params,
+                                      int32_t block_height);
+
+/** The ENC-DR CPU pure-integer reference recompute (verify-side entry point of
+ *  the SAME code path the miner seals winning blocks with — bit-identical by
+ *  construction, tension-resolution §4.2 RECOMPUTE). Dispatches on the active
+ *  encoding profile (ENC_BMX4C_LT Phase A -> lt::ComputeDigestBMX4CLT;
+ *  ENC_BMX4C -> bmx4::ComputeDigestBMX4C; ENC_S8 -> matmul_v4::ComputeDigest)
+ *  after re-checking the same structural combine/accumulator guards the
+ *  in-block verifier enforces. Under Phase B seal-as-PoW, fills `digest_out`
+ *  with ComputeSealDigestBMX4CLT (requires `parent_median_time_past`) and
+ *  leaves `sketch_out` empty (the seal is not a single Chat preimage). Returns
+ *  false on a structural failure. Runs no target check. NEVER dispatches to an
+ *  accelerated or FP backend (R1). */
+bool RecomputeMatMulV4SketchReference(const CBlockHeader& header,
+                                      const Consensus::Params& params,
+                                      int32_t block_height,
+                                      uint256& digest_out,
+                                      std::vector<unsigned char>& sketch_out,
+                                      std::optional<int64_t> parent_median_time_past = std::nullopt);
+
+// H5: process-wide SINGLE-FLIGHT for the ENC-DR digest recompute. The existing
+// per-block WRITE dedup (validation.cpp) and the global recompute budget
+// (ConsumeGlobalMatMulPhase2Budget) bound total CPU, but two peers delivering
+// the SAME block hash concurrently could still each launch the expensive
+// O(W) recompute. This RAII guard collapses those: for a given block hash only
+// ONE caller (the leader) performs the recompute; concurrent callers for the
+// same hash block in the constructor until the leader finishes, then read the
+// leader's verdict via LeaderResult() (and, on an accepted block, find the
+// sketch already in the local cache — the recompute path Put()s it). The
+// recompute is a pure function of the header, so reusing the leader's verdict
+// is consensus-equivalent to recomputing.
+struct MatMulRecomputeInFlight; // opaque; defined in pow.cpp
+class MatMulRecomputeSingleFlight
+{
+public:
+    /** Elect a leader for `block_hash`. If another thread is already recomputing
+     *  this hash, BLOCKS until it finishes; this caller then becomes a follower
+     *  (IsLeader() == false). Otherwise this caller is the leader
+     *  (IsLeader() == true) and must perform the recompute, publish the verdict
+     *  via SetResult(), and let the guard go out of scope to release waiters. */
+    explicit MatMulRecomputeSingleFlight(const uint256& block_hash);
+    ~MatMulRecomputeSingleFlight();
+    MatMulRecomputeSingleFlight(const MatMulRecomputeSingleFlight&) = delete;
+    MatMulRecomputeSingleFlight& operator=(const MatMulRecomputeSingleFlight&) = delete;
+
+    /** True iff this caller must perform the recompute. */
+    [[nodiscard]] bool IsLeader() const { return m_leader; }
+    /** Leader-only: publish the recompute verdict for waiting followers. No-op
+     *  for a follower. Call before the guard is destroyed. */
+    void SetResult(bool valid);
+    /** Follower-only: the leader's published verdict, or nullopt if the leader
+     *  did not publish one (e.g. it exited before recomputing) — in which case
+     *  the follower must recompute itself. Always nullopt for the leader. */
+    [[nodiscard]] std::optional<bool> LeaderResult() const;
+
+private:
+    std::shared_ptr<MatMulRecomputeInFlight> m_entry;
+    bool m_leader{false};
+};
+
+/** WP-7 / C5: bounded process-wide memo of ENC-DR verdicts. The v4.4 ENC-DR
+ *  predicate (CheckMatMulProofOfWork_V4EncDr) is a PURE function of the header
+ *  + immutable consensus params + the height pinned by hashPrevBlock, so a
+ *  verdict computed once (typically by the async verify worker,
+ *  node::MatMulVerifyWorker) may be reused when the same block re-enters
+ *  validation via ProcessNewBlock -> ContextualCheckBlock, instead of re-running
+ *  the O(W) reference recompute. This complements the sketch cache: the cache
+ *  holds only 8 entries (fewer than the 16 possible pending verifications, so a
+ *  pre-warmed sketch can be FIFO-evicted before re-validation) and an INVALID
+ *  block leaves nothing in the cache at all. Bounded FIFO of 64 entries (~4 KiB);
+ *  consensus-safe because the memoized value is a pure function of the key. */
+void CacheMatMulEncDrVerdict(const uint256& block_hash, bool valid);
+/** Look up a memoized ENC-DR verdict for `block_hash` (nullopt if absent). */
+std::optional<bool> LookupMatMulEncDrVerdict(const uint256& block_hash);
+/** Atomically look up and pin a cached/pinned verdict (nullopt if absent). */
+std::optional<bool> PinCachedMatMulEncDrVerdict(const uint256& block_hash);
+/** Pin a verdict already established by an exact recomputation. */
+void PinMatMulEncDrVerdict(const uint256& block_hash, bool valid);
+void UnpinMatMulEncDrVerdict(const uint256& block_hash);
+/** Scope one assumevalid-trust decision across admission -> validation. Unlike
+ *  a verdict pin this does not claim an exact recomputation occurred; it only
+ *  preserves the trust decision the block would have consumed atomically. */
+void PinMatMulEncDrAssumeValidTrust(const uint256& block_hash);
+bool IsMatMulEncDrAssumeValidTrustPinned(const uint256& block_hash);
+void UnpinMatMulEncDrAssumeValidTrust(const uint256& block_hash);
+
+/** Miner handoff for the ENC-DR sketch cache (tension-resolution §4.3): move a
+ *  freshly-solved block's in-body sketch (matrix_c_data, word-packed) into the
+ *  local non-consensus sketch cache keyed by the block hash, then CLEAR
+ *  matrix_c_data so the block serializes digest-only (the §4.1 empty-body
+ *  rule). Byte-identical mining to v4.3 — the sketch simply is not attached to
+ *  the block; the winner MAY then serve it to peers via getmmsketch. Call ONLY
+ *  after the solver finalized the header (block.GetHash() stable). Returns
+ *  false (no-op) if the body sketch is already empty. */
+bool OffloadMatMulV4SketchToCache(CBlock& block);
+
+/** WP-2 / C3 central producer finalizer: the single place every block PRODUCER
+ *  (generateblock RPC, submitSolution IPC, test mining helpers) routes a
+ *  freshly-solved block through so an ENC-DR block never serializes with a
+ *  non-empty body (validation.cpp rejects a non-empty body at DIGEST_RECOMPUTE
+ *  heights). Wraps the exact guard used by the generate RPC: at heights where
+ *  IsMatMulV4Active(height) AND the active commitment scheme is
+ *  DIGEST_RECOMPUTE, offload the just-committed 8·m² sketch (block.matrix_c_data)
+ *  to the local non-consensus sketch cache and CLEAR the in-block body via
+ *  OffloadMatMulV4SketchToCache. Under FLAT_SKETCH_INBLOCK (regtest replay only)
+ *  the body is left intact. Returns true iff the body was offloaded+cleared.
+ *  Call ONLY after the solver finalized the header (block.GetHash() stable). */
+bool FinalizeMatMulSolvedBlock(CBlock& block, const Consensus::Params& params, int height);
+
+/** True iff the block's v4 sketch payload reconstructs the header's committed
+ *  matmul_digest. A false result means the payload (block body) is a MUTATION of
+ *  the committed body -- the header hash stays valid and a correct payload
+ *  exists, so validators must reject with BLOCK_MUTATED (non-permanent) rather
+ *  than permanently invalidating the header hash. Runs no Freivalds/target
+ *  check; see CheckMatMulProofOfWork_V4ProductCommitted for the full cascade. */
+bool MatMulV4PayloadMatchesCommitment(const CBlock& block);
+/** Coarse DoS-bound shape check for the v4 sketch payload (dimension match,
+ *  non-empty, bounded word count). The authoritative shape/canonicality check
+ *  runs inside matmul_v4::VerifySketch itself. */
+bool IsMatMulV4PayloadSizeValid(const CBlock& block, const Consensus::Params& params);
 bool ShouldIncludeMatMulFreivaldsPayloadForMining(int32_t block_height, const Consensus::Params& params);
 bool HasMatMulV2Payload(const CBlock& block);
 bool HasMatMulFreivaldsPayload(const CBlock& block);
 bool IsMatMulV2PayloadSizeValid(const CBlock& block, const Consensus::Params& params);
 bool IsMatMulFreivaldsPayloadSizeValid(const CBlock& block, const Consensus::Params& params);
+/** True iff the body reaches an expensive MatMul predicate after the cheap
+ *  payload-shape/required-payload checks at `block_height`. Policy decides
+ *  separately whether validation is enabled at that height. */
+bool MatMulBodyReachesExpensiveVerification(const CBlock& block,
+                                            const Consensus::Params& params,
+                                            int32_t block_height);
 /** After mining solves a block, compute the product matrix C' = A'B' and
  *  populate block.matrix_c_data for O(n^2) Freivalds verification. */
 void PopulateFreivaldsPayload(CBlock& block, const Consensus::Params& params);
@@ -188,11 +455,10 @@ uint32_t CountMatMulPhase2Checks(
     const Consensus::Params& params,
     bool phase2_enabled,
     bool is_ibd);
-/** True when consensus will run ANY expensive MatMul verification at this height: either the legacy
- *  phase2/Freivalds path or the post-activation product-committed digest path. Mirrors the disjunction
- *  in ContextualCheckBlock (should_run_phase2 || IsMatMulProductDigestActive). The P2P expensive-
- *  verification budget must be charged for all of these — counting only phase2 (CountMatMulPhase2Checks)
- *  lets post-product-digest blocks bypass the per-peer/global DoS budget. */
+/** True when consensus will run ANY expensive MatMul verification at this height: the mandatory v4
+ *  cascade, the legacy phase2/Freivalds path, or the product-committed digest path. The P2P expensive-
+ *  verification budget must mirror ContextualCheckBlock even when legacy phase2/economic controls are
+ *  disabled; counting only phase2 lets mandatory v4 work bypass the per-peer/global DoS budget. */
 bool ShouldRunMatMulExpensiveVerification(
     int32_t block_height,
     int32_t best_known_height,
@@ -213,15 +479,52 @@ MatMulPhase2Punishment RegisterMatMulPhase2Failure(
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
     uint32_t* failures_out = nullptr);
-uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd);
+// Height-selected DoS verify budgets (spec §G.3/§H.4/§I.5): at and above
+// nMatMulV4Height the v4 budget values apply; below (or with v4 disabled) the
+// v3 values apply. Effective LT values are expressed in EncDr work units;
+// operator-facing LT knobs remain complete jobs/minute and are scaled by Q*
+// while seal-as-PoW is active. reference_height defaults to -1 (== v3),
+// preserving callers that do not supply a height.
+uint32_t EffectiveMatMulPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
+uint32_t EffectiveMatMulGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
+/** Height-selected pending EncDr concurrency cap: LT tip-verify
+ *  (nMatMulLTMaxPendingVerifications) when IsDRLTActive, else
+ *  nMatMulMaxPendingVerifications. reference_height defaults to -1 (== non-LT).
+ *  Cap is expressed in EncDr *work units* (see MatMulEncDrWorkUnits). */
+uint32_t EffectiveMatMulMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
+/** Work units for one EncDr tip-verify job: 1 for a single digest recompute,
+ *  consensus Q* when seal-as-PoW is active at `reference_height`. */
+uint32_t MatMulEncDrWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
+/** One RC-family admission work-unit ~= 2^40 MACs (~1.1T). Epoch-0 RC (~53T MAC)
+ *  ~= 49 units; toy/medium coupled collapse to 1 unit under the same scale. */
+inline constexpr uint64_t kMatMulRCAdmissionMacUnit = uint64_t{1} << 40;
+/** Tip-verify work units for the RC admission pool. When ENC_RC_COUPLED is
+ *  live, prices TotalRCCoupMacs; else when ENC_RC is live, TotalRCEpisodeMacs;
+ *  else returns 1 (callers must still gate on IsMatMulRCFamilyActive). */
+uint32_t MatMulRCWorkUnits(const Consensus::Params& params, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCMaxPendingVerifications(const Consensus::Params& params, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCGlobalVerifyBudgetPerMin(const Consensus::Params& params, int32_t reference_height = -1);
+uint32_t EffectiveMatMulRCPeerVerifyBudgetPerMin(const Consensus::Params& params, bool is_ibd, int32_t reference_height = -1);
 bool ConsumeMatMulPeerVerifyBudget(
     MatMulPeerVerificationBudget& budget,
     const Consensus::Params& params,
     std::chrono::steady_clock::time_point now,
     bool is_ibd = false,
     int32_t reference_height = std::numeric_limits<int32_t>::max());
-bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params);
+bool ConsumeMatMulRCPeerVerifyBudget(
+    MatMulPeerVerificationBudget& budget,
+    const Consensus::Params& params,
+    std::chrono::steady_clock::time_point now,
+    bool is_ibd = false,
+    int32_t reference_height = std::numeric_limits<int32_t>::max());
+bool CanStartMatMulVerification(uint32_t pending_verifications, const Consensus::Params& params,
+                                int32_t reference_height = -1);
+bool CanStartMatMulVerification(uint32_t pending_verifications, uint32_t work_units,
+                                const Consensus::Params& params, int32_t reference_height = -1);
+bool CanStartMatMulRCVerification(uint32_t pending_verifications, uint32_t work_units,
+                                  const Consensus::Params& params, int32_t reference_height = -1);
 bool ConsumeGlobalMatMulPhase2Budget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
+bool ConsumeGlobalMatMulRCBudget(uint32_t max_global_per_minute, uint32_t count, std::chrono::steady_clock::time_point now);
 MatMulSolvePipelineStats ProbeMatMulSolvePipelineStats();
 void ResetMatMulSolvePipelineStats();
 MatMulGpuPreHashScanStats ProbeMatMulGpuPreHashScanStats();

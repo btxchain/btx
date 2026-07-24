@@ -29,8 +29,16 @@ class RejectLowDifficultyHeadersTest(BitcoinTestFramework):
         self.rpc_timeout *= 4  # To avoid timeout when generating BLOCKS_TO_MINE
         self.setup_clean_chain = True
         self.num_nodes = 4
+        # This is a generic (algorithm-agnostic) header-sync / low-work anti-DoS
+        # test. It mines many thousands of blocks; on BTX regtest MatMul v4 (the
+        # heavy ENC-DR validation path) activates at height 100, which makes those
+        # mines/validations prohibitively slow for no benefit here. Keep v4
+        # inactive (INT32_MAX) so the chain uses the cheap pre-v4 PoW throughout;
+        # this does not change any header-sync / minimum-chainwork behavior being
+        # tested (fMatMulPOW, and hence the consensus-peer sync policy, stays on).
+        v4_off = "-regtestmatmulv4height=2147483647"
         # Node0 has no required chainwork; node1 and node2 require increasing minimum chainwork.
-        self.extra_args = [["-minimumchainwork=0x0", "-checkblockindex=0"], ["-minimumchainwork=0x1f", "-checkblockindex=0"], ["-minimumchainwork=0x1000", "-checkblockindex=0"], ["-minimumchainwork=0x1000", "-checkblockindex=0", "-whitelist=noban@127.0.0.1"]]
+        self.extra_args = [["-minimumchainwork=0x0", "-checkblockindex=0", v4_off], ["-minimumchainwork=0x1f", "-checkblockindex=0", v4_off], ["-minimumchainwork=0x1000", "-checkblockindex=0", v4_off], ["-minimumchainwork=0x1000", "-checkblockindex=0", "-whitelist=noban@127.0.0.1", v4_off]]
 
     def setup_network(self):
         self.setup_nodes()

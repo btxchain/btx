@@ -16,6 +16,7 @@
 #include <consensus/tx_verify.h>
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
+#include <matmul/matmul_v4.h>
 #include <logging.h>
 #include <matmul/matrix.h>
 #include <node/context.h>
@@ -992,12 +993,37 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     LogDebug(BCLog::MINING, "CreateNewBlock(): building on tip height=%d hash=%s\n",
              pindexPrev->nHeight, pindexPrev->GetBlockHash().GetHex());
 
+    // Audit P1: at legacy in-block v4 heights the solved block carries a MANDATORY
+    // product-sketch payload (matrix_c_data, ~8 MiB at n=4096) that is attached
+    // AFTER transaction selection but still counts toward the consensus block
+    // size/weight limits (WITNESS_SCALE_FACTOR == 1, so the payload is in
+    // GetBlockWeight and the serialized size). Reserve its EXACT serialized size
+    // up front so the assembler cannot pack transactions that, once the payload is
+    // appended, push the block over nMaxBlockSerializedSize / nMaxBlockWeight --
+    // which would make the miner's OWN solved block invalid (a self-DoS / mining
+    // halt under a full mempool).
+    // v4.4 ENC-DR (DIGEST_RECOMPUTE, the production carriage): the sketch is NOT
+    // carried in-block (the miner offloads it to the non-consensus sketch cache
+    // and emits a digest-only body, see rpc/mining.cpp GenerateBlock), so there is
+    // nothing to reserve. Reserve ONLY on the regtest FLAT_SKETCH_INBLOCK replay
+    // path.
+    if (chainparams.GetConsensus().IsMatMulV4Active(nHeight) &&
+        chainparams.GetConsensus().GetMatMulProfileParams(nHeight).commitment ==
+            Consensus::MatMulCommitmentScheme::FLAT_SKETCH_INBLOCK) {
+        const uint64_t m{static_cast<uint64_t>(chainparams.GetConsensus().nMatMulV4Dimension) / matmul::v4::kTileB};
+        const uint64_t words{2 * m * m};  // 2 uint32 words per F_q sketch element, m*m elements
+        const size_t payload_bytes{GetSizeOfCompactSize(words) + static_cast<size_t>(words) * sizeof(uint32_t)};
+        nBlockSize += payload_bytes;
+        nBlockWeight += payload_bytes * WITNESS_SCALE_FACTOR;
+    }
+
     pblock->nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
     if (chainparams.MineBlocksOnDemand()) {
         pblock->nVersion = gArgs.GetIntArg("-blockversion", pblock->nVersion);
     }
+    // HeaderPoW bit-26 commitment wire is withdrawn — do not force the bit.
 
     pblock->nTime = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
     m_lock_time_cutoff = pindexPrev->GetMedianTimePast();
@@ -1095,7 +1121,13 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     pblock->nNonce64       = 0;
     pblock->mix_hash.SetNull();
     if (chainparams.GetConsensus().fMatMulPOW) {
-        pblock->matmul_dim = static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
+        // MatMul v4 (spec §I.3, §J#9): at and above nMatMulV4Height the
+        // template carries the v4 dimension; SetDeterministicMatMulSeeds
+        // below already dispatches to the v4 (unconditionally nonce/parent-
+        // MTP-bound) seed derivation internally via IsMatMulV4Active.
+        pblock->matmul_dim = chainparams.GetConsensus().IsMatMulV4Active(nHeight)
+            ? static_cast<uint16_t>(chainparams.GetConsensus().nMatMulV4Dimension)
+            : static_cast<uint16_t>(chainparams.GetConsensus().nMatMulDimension);
         if (!SetDeterministicMatMulSeeds(
                 *pblock,
                 chainparams.GetConsensus(),
@@ -1105,10 +1137,12 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         }
         pblock->matmul_digest.SetNull();
         // v1 uses seed-derived matrices; do not store full matrices in block body.
-        // Validators regenerate A and B from seed_a/seed_b on demand.
+        // Validators regenerate A and B from seed_a/seed_b on demand. v4 blocks
+        // are likewise seed-derived only (spec §H.2: A/B payload forbidden).
         pblock->matrix_a_data.clear();
         pblock->matrix_b_data.clear();
-        // C' payload is populated after mining solves the block (see PopulateFreivaldsPayload)
+        // C' / sketch payload is populated after mining solves the block (see
+        // PopulateFreivaldsPayload for v3, SolveMatMul's v4 dispatch for v4).
         pblock->matrix_c_data.clear();
     } else {
         pblock->matmul_dim = 0;

@@ -18,6 +18,7 @@
 #include <validationinterface.h>
 #include <versionbits.h>
 
+#include <cassert>
 #include <limits>
 
 using node::BlockAssembler;
@@ -37,11 +38,19 @@ bool MineHeaderForConsensus(CBlockHeader& header,
                             uint32_t block_height,
                             const Consensus::Params& consensus,
                             uint64_t max_tries,
-                            std::optional<int64_t> parent_median_time_past)
+                            std::optional<int64_t> parent_median_time_past,
+                            std::vector<uint32_t>* v4_payload_out)
 {
     if (consensus.fMatMulPOW) {
         if (header.matmul_dim == 0) {
-            header.matmul_dim = static_cast<uint16_t>(consensus.nMatMulDimension);
+            // Mirror BlockAssembler (src/node/miner.cpp): at product-committed
+            // (v4) heights the header commits to the v4 dimension, otherwise the
+            // legacy v3 dimension. A bare synthetic header (matmul_dim == 0) mined
+            // at a v4 height would otherwise carry the wrong dimension and fail
+            // Phase1 (bad matmul_dim) / solve against the wrong operand size.
+            header.matmul_dim = consensus.IsMatMulV4Active(static_cast<int32_t>(block_height))
+                ? static_cast<uint16_t>(consensus.nMatMulV4Dimension)
+                : static_cast<uint16_t>(consensus.nMatMulDimension);
         }
         if (!SetDeterministicMatMulSeeds(
                 header,
@@ -57,9 +66,10 @@ bool MineHeaderForConsensus(CBlockHeader& header,
             max_tries,
             static_cast<int32_t>(block_height),
             nullptr,
+            v4_payload_out,
             nullptr,
-            nullptr,
-            parent_median_time_past);
+            parent_median_time_past) &&
+               GrindMatMulHeaderSpamNonce(header, consensus, max_tries);
     }
 
     const bool kawpow_active{consensus.fKAWPOW && consensus.nKAWPOWHeight <= static_cast<int>(block_height)};
@@ -99,16 +109,51 @@ bool MineHeaderForConsensus(CBlock& block,
                             uint64_t max_tries,
                             std::optional<int64_t> parent_median_time_past)
 {
+    // At product-committed-digest (v4) heights the block payload must carry the
+    // exact product sketch C' the solver committed to. Capture it directly from
+    // the solver rather than recomputing it with the v3-only
+    // PopulateFreivaldsPayload helper.
+    const bool v4_active{consensus.fMatMulPOW &&
+                         consensus.IsMatMulProductDigestActive(static_cast<int32_t>(block_height))};
+    std::vector<uint32_t> v4_payload;
+
     if (!MineHeaderForConsensus(
             static_cast<CBlockHeader&>(block),
             block_height,
             consensus,
             max_tries,
-            parent_median_time_past)) {
+            parent_median_time_past,
+            v4_active ? &v4_payload : nullptr)) {
         return false;
     }
 
-    if (consensus.fMatMulPOW && consensus.fMatMulFreivaldsEnabled) {
+    if (v4_active) {
+        // v4: attach the solver's product sketch and drop the v3 A'/B' payload.
+        block.matrix_a_data.clear();
+        block.matrix_b_data.clear();
+        block.matrix_c_data = std::move(v4_payload);
+        // Some solver backends (e.g. share-scan fast paths) may not surface the
+        // sketch; fall back to recomputation so the payload is never empty.
+        if (block.matrix_c_data.empty() && consensus.fMatMulFreivaldsEnabled) {
+            PopulateFreivaldsPayload(block, consensus);
+        }
+        // WP-1 / C3: at ENC-DR (DIGEST_RECOMPUTE) heights the block body MUST be
+        // empty (validation rejects a non-empty body at DIGEST_RECOMPUTE), so
+        // route the freshly-committed sketch through the central producer
+        // finalizer, which offloads it to the local cache and clears
+        // matrix_c_data. Without this the helper produces self-rejecting ENC-DR
+        // blocks that break validation_block_tests / mempool_locks_reorg. Under
+        // FLAT_SKETCH_INBLOCK (regtest replay only) the inline sketch is retained.
+        const int height = static_cast<int>(block_height);
+        const bool enc_dr =
+            consensus.IsMatMulV4Active(height) &&
+            consensus.GetMatMulProfileParams(height).commitment ==
+                Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE;
+        FinalizeMatMulSolvedBlock(block, consensus, height);
+        // The ENC-DR block body is now empty; the sketch lives in the cache.
+        assert(!enc_dr || block.matrix_c_data.empty());
+    } else if (consensus.fMatMulPOW && consensus.fMatMulFreivaldsEnabled) {
+        // v3 (pre-product-digest) path: unchanged.
         PopulateFreivaldsPayload(block, consensus);
     }
 

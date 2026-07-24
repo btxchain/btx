@@ -1,3 +1,10 @@
+> **HISTORICAL — superseded by ENC_RC v4.6.** This is a dated record of an earlier
+> design stage, retained for provenance. It does **not** describe the current shipping
+> proof-of-work, which is the two-stage ENC_RC v4.6 design (profile-2 datacenter episode
+> + profile-3 V3 coupled puzzle). For the current design see
+> `doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`. Activation remains disabled
+> (`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`).
+
 # BTX MatMul Proof-of-Work: TDD Engineering Specification (v3)
 
 > Based on "Proofs of Useful Work from Arbitrary Matrix Multiplication"
@@ -3623,8 +3630,8 @@ Requests Merkle inclusion proofs from full-node peers on demand.
 
 - **Phase 2 frequency**: Zero.
 - **Hardware**: Mobile-class (ARM Cortex-A53 or equivalent, 256+ MiB RAM).
-  Storage under 1 GiB (headers only: ~182 bytes/block, ~38 MiB/year at
-  90-second steady-state blocks).
+  Storage under 1 GiB (headers only: ~182 bytes/block, ~60.8 MiB/year at
+  90-second steady-state blocks — the production `nPowTargetSpacing`).
 - **Trust posture**: Trusts full-node majority for both transcript correctness
   and transaction inclusion. Identical to Bitcoin SPV.
 - **Use cases**: Mobile wallets, embedded devices, read-only explorers,
@@ -3643,7 +3650,7 @@ GPU or deferred batch verification to keep up.
 | **0 -- Mining** | High-core-count modern CPU (Zen 4, 16+ cores) OR any CPU with GPU offload | Strongly recommended: CUDA (Ampere+) or Apple Metal (M1+) | 4+ GiB | 50+ GiB (chain + UTXO) | Low-latency broadband |
 | **1 -- Consensus** | Mid-range CPU (4-core Zen 2 / Haswell or better). Must verify 1 block/90s at n=512. ~0.3--1.3% single-threaded CPU at steady state. | Optional; reduces Phase 2 to < 0.1s. Required during fast-mining phase for real-time tracking. | 2+ GiB | 50+ GiB (chain + UTXO) | Broadband |
 | **2 -- Economic** | Any modern CPU (Phase 1 is microseconds) | Not needed | 1+ GiB | 50+ GiB (chain + UTXO) or ~5 GiB pruned | Standard broadband |
-| **3 -- SPV** | Mobile-class (ARM Cortex-A53 or equivalent) | Not needed | 256+ MiB | < 1 GiB (headers: ~38 MiB/year at 90s blocks) | Any (including cellular) |
+| **3 -- SPV** | Mobile-class (ARM Cortex-A53 or equivalent) | Not needed | 256+ MiB | < 1 GiB (headers: ~60.8 MiB/year at 90s blocks) | Any (including cellular) |
 
 #### 12.2.1 Feasibility of Tier 1 on Consumer Hardware
 
@@ -3876,9 +3883,10 @@ perpetually, not just for the portion below the checkpoint.
 #### 12.4.4 Tier 3 -- SPV / Light Node IBD
 
 1. **Header download only**: Fetch the header chain (182 bytes per block).
-   At steady-state (~210,384 blocks/year at 90s), this is ~38 MiB/year of
-   header data. Year 1 includes the fast-mining phase's 50,000 additional
-   blocks (~9 MiB), totaling ~47 MiB for year 1.
+   At steady-state (~350,640 blocks/year at the production 90s
+   `nPowTargetSpacing`), this is ~60.8 MiB/year of header data. Year 1
+   includes the fast-mining phase's 50,000 additional blocks (~9 MiB),
+   totaling ~70 MiB for year 1.
 2. **Phase 1 validation**: Validate `matmul_digest < target` and dimension
    bounds for every header.
 3. **No block bodies**: Does not download transactions or maintain a UTXO set.
@@ -3888,7 +3896,7 @@ perpetually, not just for the portion below the checkpoint.
    Merkle proofs for watched addresses.
 
 **Estimated IBD time** (1-year chain):
-- Header download: ~47 MiB over network (year 1), ~38 MiB/year thereafter
+- Header download: ~70 MiB over network (year 1), ~60.8 MiB/year thereafter (90s blocks)
 - Phase 1 validation: < 1 second total
 - Total: **seconds to minutes** depending on network speed
 

@@ -1,0 +1,151 @@
+{
+  "tool": "rc-episode-harness",
+  "schema_version": 2,
+  "stub": false,
+  "device_id": "cuda-ref:administrator-MacPro7-1-Rack",
+  "backend": "cuda",
+  "backend_requested": "cuda",
+  "exact_gemm_inject": true,
+  "profile": "coupled",
+  "toy": false,
+  "medium": false,
+  "production_dims": true,
+  "streamed_peak_bytes_est": 67698944,
+  "resident_peak_bytes_est": 51540197632,
+  "mem_cap_bytes": 8589934592,
+  "evidence_kind": "production_chrono_measured",
+  "wall_clock_provenance": "chrono_steady_clock",
+  "device_resident": false,
+  "native_path_eligible": false,
+  "params": {
+    "barriers": 8,
+    "lobes": 8,
+    "lobe_width": 8192,
+    "bank_pages": 768,
+    "state_bytes": 65536
+  },
+  "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+  "modes_digest_match": true,
+  "mine_matches_cpu": true,
+  "mode_walls": [
+    {
+      "mode": "Streamed",
+      "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+      "mine_matches_cpu": true,
+      "bank_s": 915.0398125299999,
+      "barriers_s": 67.362210405,
+      "wall_s": 990.548492142,
+      "total_s": 990.548492142,
+      "nonce_per_s": 0.001009541691227616,
+      "peak_rss_kib": 1186696
+    }
+  ],
+  "coupled": {
+    "shape": "production",
+    "streamed_peak_bytes_est": 67698944,
+    "resident_peak_bytes_est": 51540197632,
+    "mem_cap_bytes": 8589934592,
+    "auto_streamed": true,
+    "stream_vs_resident_wall_ratio": 0,
+    "modes": [
+      {
+        "mode": "Streamed",
+        "digest": "a3e485f132e04b3ebd9dd4a057b61ae5f49a16593e488caa56155589d3c0c868",
+        "mine_matches_cpu": true,
+        "bank_s": 915.0398125299999,
+        "barriers_s": 67.362210405,
+        "wall_s": 990.548492142,
+        "total_s": 990.548492142,
+        "nonce_per_s": 0.001009541691227616,
+        "peak_rss_kib": 1186696
+      }
+    ],
+    "digests_match": true,
+    "modes_available": "Sequential,Checkpointed,Streamed,Resident",
+    "interconnect_sim": {
+      "simulated": true,
+      "stage_i_gate4_evidence": false,
+      "label": "SIMULATED / NOT EVIDENCE for Stage-I gate 4 (≥7× same chips)",
+      "fabric_us_per_barrier": 5,
+      "pcie_us_per_barrier": 80,
+      "barriers": 8,
+      "fabric_exchange_us": 40,
+      "pcie_exchange_us": 640,
+      "exchange_slowdown_factor": 16,
+      "stage_i_gate4_threshold": 7,
+      "stage_i_gate4_pass": false
+    }
+  },
+  "extractmx_self_qual": {
+    "status": "pass",
+    "episodes": 3,
+    "digests_stable": true,
+    "mine_matches_cpu": true
+  },
+  "phase_wall_s": {
+    "bank": 915.0398125299999,
+    "barriers": 67.362210405,
+    "total": 990.548492142,
+    "provenance": "chrono_steady_clock",
+    "evidence_kind": "toy_chrono_measured"
+  },
+  "peak_rss_kib": 1317136,
+  "rss_kib": {
+    "before_kib": 1186492,
+    "after_kib": 1186696,
+    "peak_kib": 1317136
+  },
+  "run_variance": {
+    "episode_cv": 0,
+    "n_runs": 1,
+    "note": "Cross-process variance filled by rc-stage-g-campaign.py"
+  },
+  "residency_sweep": [
+    {
+      "working_set_bytes": 65536,
+      "wall_s": 990.548492142,
+      "dims": "toy"
+    }
+  ],
+  "k_curve": {
+    "mode": "toy_synthetic_structure",
+    "digests_match": true,
+    "note": "Coupled campaign placeholder k_curve for rc-gate schema"
+  },
+  "allocation_cap_verdicts": {
+    "512MiB": "skip",
+    "2GiB": "skip",
+    "8GiB": "skip"
+  },
+  "verifier_floor": {
+    "measured": false,
+    "binding": true,
+    "evidence_kind": "unmeasured"
+  },
+  "device_probe": {
+    "backend_resolved": true,
+    "device_gemm_returned": true,
+    "matched_cpu_exactgemm": true,
+    "provider": "cuda_imma",
+    "detail": "ok"
+  },
+  "interconnect_sim": {
+    "simulated": true,
+    "stage_i_gate4_evidence": false,
+    "label": "SIMULATED / NOT EVIDENCE for Stage-I gate 4 (≥7× same chips)",
+    "fabric_us_per_barrier": 5,
+    "pcie_us_per_barrier": 80,
+    "barriers": 8,
+    "fabric_exchange_us": 40,
+    "pcie_exchange_us": 640,
+    "exchange_slowdown_factor": 16,
+    "stage_i_gate4_threshold": 7,
+    "stage_i_gate4_pass": false
+  },
+  "gpu_campaign_present": false,
+  "nvlink_campaign_present": false,
+  "gpu_status": "SILICON-GATED",
+  "consensus_note": "nMatMulRCCoupledHeight remains INT32_MAX on public nets; coupled profile (ENC_RC_COUPLED) is INERT unless regtest sets a finite height. Mining inject uses MakeResolvedExactGemmBackendForRC when active. SIMULATED interconnect is NOT Stage-I gate 4 evidence. This harness never raises height.",
+  "source_revision": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+  "git_tip": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a"
+}

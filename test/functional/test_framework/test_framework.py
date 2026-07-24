@@ -179,8 +179,17 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
                             help="Force test of previous releases (default: %(default)s)")
         parser.add_argument("--coveragedir", dest="coveragedir",
                             help="Write tested RPC commands into this directory")
+        # Prefer source-tree test/config.ini when present; otherwise fall back to
+        # the CMake-generated build/test/config.ini (common when invoking scripts
+        # from the repo root without an out-of-tree symlink).
+        _test_dir = os.path.abspath(os.path.dirname(test_file) + "/..")
+        _default_config = os.path.join(_test_dir, "config.ini")
+        if not os.path.isfile(_default_config):
+            _build_config = os.path.abspath(os.path.join(_test_dir, "..", "build", "test", "config.ini"))
+            if os.path.isfile(_build_config):
+                _default_config = _build_config
         parser.add_argument("--configfile", dest="configfile",
-                            default=os.path.abspath(os.path.dirname(test_file) + "/../config.ini"),
+                            default=_default_config,
                             help="Location of the test framework config file (default: %(default)s)")
         parser.add_argument("--pdbonfailure", dest="pdbonfailure", default=False, action="store_true",
                             help="Attach a python debugger if test fails")

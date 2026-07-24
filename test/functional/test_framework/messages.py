@@ -2023,6 +2023,53 @@ class msg_no_witness_blocktxn(msg_blocktxn):
         return self.block_transactions.serialize(with_witness=False)
 
 
+class msg_getmmsketch:
+    """Request the v4.4 ENC-DR sketch-cache bytes for a block (tension-resolution
+    §4.3). Payload: a single 32-byte block hash. Best-effort request/response,
+    modeled on getdata; a peer that does not hold the sketch silently ignores it."""
+    __slots__ = ("block_hash",)
+    msgtype = b"getmmsketch"
+
+    def __init__(self, block_hash=0):
+        self.block_hash = block_hash
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+
+    def serialize(self):
+        return ser_uint256(self.block_hash)
+
+    def __repr__(self):
+        return "msg_getmmsketch(block_hash=%064x)" % self.block_hash
+
+
+class msg_mmsketch:
+    """Carry the full self-authenticating 8*m^2 sketch-cache payload for one block
+    (v4.4 ENC-DR, tension-resolution §4.3). Payload: 32-byte block hash followed by
+    the length-prefixed raw sketch bytes. The receiver authenticates with ONE hash
+    (H(sigma||bytes) == matmul_digest) before caching; a mismatch penalizes the
+    sender and is never evidence about the block."""
+    __slots__ = ("block_hash", "sketch")
+    msgtype = b"mmsketch"
+
+    def __init__(self, block_hash=0, sketch=b""):
+        self.block_hash = block_hash
+        self.sketch = sketch
+
+    def deserialize(self, f):
+        self.block_hash = deser_uint256(f)
+        self.sketch = deser_string(f)
+
+    def serialize(self):
+        r = b""
+        r += ser_uint256(self.block_hash)
+        r += ser_string(self.sketch)
+        return r
+
+    def __repr__(self):
+        return "msg_mmsketch(block_hash=%064x, sketch_len=%d)" % (self.block_hash, len(self.sketch))
+
+
 class msg_getcfilters:
     __slots__ = ("filter_type", "start_height", "stop_hash")
     msgtype =  b"getcfilters"

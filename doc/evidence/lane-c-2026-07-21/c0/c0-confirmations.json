@@ -1,0 +1,121 @@
+{
+  "tool": "c0-confirmations",
+  "tip": "bf36b7d6d95fcb049d7aa5c8aebee614c58a607a",
+  "device": "RTX 5060 Ti 16GB sm_120",
+  "timestamp": "2026-07-20T18:15:21Z",
+  "toy": {
+    "backend": "cuda",
+    "extractmx_self_qual": {
+      "status": "pass",
+      "episodes": 3,
+      "digests_stable": true,
+      "exact_gemm_backend_ok": true,
+      "mining_accelerator_ok": true,
+      "native_mxfp4_qualified": false,
+      "native_fp8_qualified": false,
+      "deficit_reason": "",
+      "boundary_vector_notes": "Toy self-qual: MineRCEpisode(backend) == CPU reference per episode; re-run digest stability. Use --medium for >2^24 wgrad."
+    },
+    "extractmx_pass": true,
+    "wall_s": 0.0006640556666666666,
+    "native_path_eligible": false,
+    "device_resident": false,
+    "k_curve": {
+      "mode": "toy_synthetic_structure",
+      "note": "Toy dims: k estimated as wall(StoreOnlyX0)/wall(StoreAll); not a consensus-dim k(M) curve.",
+      "store_all_wall_s": 0.000625904,
+      "store_only_x0_wall_s": 0.000872903,
+      "k_estimate": 1.394627610623993,
+      "digests_match": true,
+      "points": [
+        {
+          "checkpoint": "StoreAll",
+          "wall_s": 0.000625904,
+          "recompute_ratio": 1
+        },
+        {
+          "checkpoint": "StoreOnlyX0",
+          "wall_s": 0.000872903,
+          "recompute_ratio": 1.394627610623993
+        }
+      ]
+    },
+    "native_mxfp4": false,
+    "native_fp8": false,
+    "exact_gemm": true,
+    "digests_stable": true
+  },
+  "medium": {
+    "backend": "cuda",
+    "extractmx_self_qual": {
+      "status": "pass",
+      "episodes": 1,
+      "digests_stable": true,
+      "exact_gemm_backend_ok": true,
+      "mining_accelerator_ok": true,
+      "native_mxfp4_qualified": false,
+      "native_fp8_qualified": false,
+      "deficit_reason": "",
+      "boundary_vector_notes": "Medium dims: MineRCEpisode(backend) resealed vs CPU reference; wgrad contraction exceeds 2^24 (int64 oracle)."
+    },
+    "extractmx_pass": true,
+    "wall_s": 0.050613852,
+    "k_curve": {
+      "mode": "toy_synthetic_structure",
+      "note": "Toy dims: k estimated as wall(StoreOnlyX0)/wall(StoreAll); not a consensus-dim k(M) curve.",
+      "store_all_wall_s": 0.050364524,
+      "store_only_x0_wall_s": 0.062016153,
+      "k_estimate": 1.231345956927936,
+      "digests_match": true,
+      "points": [
+        {
+          "checkpoint": "StoreAll",
+          "wall_s": 0.050364524,
+          "recompute_ratio": 1
+        },
+        {
+          "checkpoint": "StoreOnlyX0",
+          "wall_s": 0.062016153,
+          "recompute_ratio": 1.231345956927936
+        }
+      ]
+    },
+    "native_mxfp4": false,
+    "native_fp8": false,
+    "exact_gemm": true,
+    "digests_stable": true
+  },
+  "cpu_oracle_toy": {
+    "backend": "cpu",
+    "wall_s": 0.000710228
+  },
+  "backend_reconcile": {
+    "unset_env_plus_backend_cuda": true,
+    "agreeing_env_cuda": true,
+    "conflict_cpu_env_cuda_flag": true,
+    "conflict_log_excerpt": [
+      "error: conflict: --backend cuda vs BTX_MATMUL_V4_BACKEND=cpu (set them equal, or unset the env)",
+      "conflict_exit=2"
+    ]
+  },
+  "gate_verdict": "NO-GO",
+  "note": "Height/arbiter unchanged; C0 is confirmation-only",
+  "fail_closed_no_gpu": {
+    "backend_resolved": "cpu-fallback",
+    "backend_requested": "cuda",
+    "extractmx_self_qual": {
+      "status": "pass",
+      "episodes": 1,
+      "digests_stable": true,
+      "exact_gemm_backend_ok": false,
+      "mining_accelerator_ok": false,
+      "native_mxfp4_qualified": false,
+      "native_fp8_qualified": false,
+      "deficit_reason": "cpu_exactgemm_no_device_backend",
+      "boundary_vector_notes": "Toy self-qual: MineRCEpisode(backend) == CPU reference per episode; re-run digest stability. Use --medium for >2^24 wgrad."
+    },
+    "native_path_eligible": false,
+    "device_resident": false,
+    "log_excerpt": "== MatMul ENC_RC harness (real episodes) ==\n  device_id:  cpu-fallback-ref:administrator-MacPro7-1-Rack\n  backend:    cuda \u2192 cpu-fallback\n  dims:       toy=true medium=false production=false\n  episodes:   1\n  rounds:     1\n  footprint\u2248  10240 bytes\n  selfqual:   mining_accel=0 exact_gemm=0 native_mxfp4=0 native_fp8=0\n  deficit:    cpu_exactgemm_no_device_backend\n  ExtractMX:  pass digests_stable=true\n  phase_wall: p1=0.000220135s p2=0.000375882s p3=0.000137694s total=0.000740094s\n  episode_cv: 0 peak_rss_kib=186208\n  k_est:      1.26579 (StoreOnlyX0/StoreAll)\n  caps:       512MiB=skip 2GiB=skip 8GiB=skip\n  wrote:      /home/administrator/pr89-lane-c-full/c0/failclosed-no-gpu.json\n  consensus:  nMatMulRCHeight=INT32_MAX (NO-GO activation)\nRESULT: ExtractMX self-qual PASS\n"
+  }
+}

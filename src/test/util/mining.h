@@ -27,12 +27,16 @@ struct NodeContext;
 /** Create a blockchain, starting from genesis */
 std::vector<std::shared_ptr<CBlock>> CreateBlockChain(size_t total_height, const CChainParams& params);
 
-/** Mine a block header using the active consensus PoW algorithm. */
+/** Mine a block header using the active consensus PoW algorithm.
+ *  When @p v4_payload_out is non-null and the height activates the
+ *  product-committed MatMul digest (v4), the solver's product sketch C'
+ *  is captured into it so the caller can attach it as the block payload. */
 [[nodiscard]] bool MineHeaderForConsensus(CBlockHeader& header,
                                           uint32_t block_height,
                                           const Consensus::Params& consensus,
                                           uint64_t max_tries = 5'000'000,
-                                          std::optional<int64_t> parent_median_time_past = std::nullopt);
+                                          std::optional<int64_t> parent_median_time_past = std::nullopt,
+                                          std::vector<uint32_t>* v4_payload_out = nullptr);
 
 /** Mine a full block for the active consensus PoW algorithm. */
 [[nodiscard]] bool MineHeaderForConsensus(CBlock& block,

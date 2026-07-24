@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test that a node in blocksonly mode does not request compact blocks."""
 
+from test_framework.blocktools import REGTEST_GENERIC_P2P_MATMUL_ARGS
 from test_framework.messages import (
     MSG_BLOCK,
     MSG_CMPCT_BLOCK,
@@ -24,13 +25,23 @@ from test_framework.util import assert_equal
 
 class P2PCompactBlocksBlocksOnly(BitcoinTestFramework):
     def set_test_params(self):
-        self.extra_args = [["-blocksonly"], [], [], []]
+        # Fresh chain: -regtestmatmul* overrides invalidate the shared cache.
+        # Blocks are re-serialized through Python CBlock (getblock → from_hex →
+        # msg_block), which does not round-trip Freivalds product payloads —
+        # keep the body-payload requirement inactive (consensus unchanged).
+        self.setup_clean_chain = True
+        matmul = REGTEST_GENERIC_P2P_MATMUL_ARGS
+        self.extra_args = [["-blocksonly", *matmul], list(matmul), list(matmul), list(matmul)]
         self.num_nodes = 4
 
     def setup_network(self):
         self.setup_nodes()
-        # Start network with everyone disconnected
-        self.sync_all()
+        # Peers stay disconnected (original topology). Mine one tip on node2 and
+        # submit it to the others so every node exits IBD before run_test asserts.
+        tip = self.generate(self.nodes[2], 1, sync_fun=self.no_op)[0]
+        block_hex = self.nodes[2].getblock(tip, 0)
+        for i in (0, 1, 3):
+            assert_equal(self.nodes[i].submitblock(block_hex), None)
 
     def build_block_on_tip(self):
         blockhash = self.generate(self.nodes[2], 1, sync_fun=self.no_op)[0]

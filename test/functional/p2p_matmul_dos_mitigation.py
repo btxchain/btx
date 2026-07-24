@@ -20,9 +20,14 @@ class BTXMatMulDosMitigationTest(BitcoinTestFramework):
     def _tampered_candidate(self, node):
         candidate = node.generateblock("raw(51)", [], False, called_by_framework=True)
         bad_hex = candidate["hex"]
-        digest_nibble = (4 + 32 + 32 + 4 + 4 + 8) * 2
-        bad_nibble = "1" if bad_hex[digest_nibble] == "0" else "0"
-        return bad_hex[:digest_nibble] + bad_nibble + bad_hex[digest_nibble + 1:]
+        # Overwrite the entire matmul_digest with an unmistakably over-target
+        # value (all 0xff) so the header fails the phase1 target check and is
+        # rejected "high-hash". A single-nibble flip would leave the digest
+        # under the (easy regtest) target but break its binding to the product
+        # payload, which the node rejects as "invalid-product-payload" instead.
+        digest_start = (4 + 32 + 32 + 4 + 4 + 8) * 2
+        digest_end = digest_start + 64
+        return bad_hex[:digest_start] + ("f" * 64) + bad_hex[digest_end:]
 
     def run_test(self):
         node0, node1 = self.nodes

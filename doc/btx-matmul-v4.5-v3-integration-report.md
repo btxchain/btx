@@ -1,0 +1,46 @@
+> **HISTORICAL — superseded by ENC_RC v4.6.** This is a dated record of an earlier
+> design stage, retained for provenance. It does **not** describe the current shipping
+> proof-of-work, which is the two-stage ENC_RC v4.6 design (profile-2 datacenter episode
+> + profile-3 V3 coupled puzzle). For the current design see
+> `doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`. Activation remains disabled
+> (`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`).
+
+# V3 integration report (Wave completion status)
+
+## Implemented on `wip/v45-production-coupled`
+
+- V3 production parameters (now the integrated default coupled profile) + honest packed/int8 sizes (51 GiB packed / 96 GiB int8 / 12 TiMAC)
+- Digest-affecting material-exchange rounds (`exchange_rounds=4` → 4 GiB R/W estimate; default 0 preserves V1/V2 goldens)
+- Medium-V3 CI shape + uint64 Mix wrap + overflow bounds; golden `744fd3df…`
+- CUDA device-resident barrier tail (permute / mix / ExtractMX / BarrierRoot); episode digest still host-assembled
+- Independent Q-batch (no slot-0 serialize) + Streamed strategy scaffold
+- SM100 fail-closed isolation probe (separate from SM120_MMA); `peak_ready` derived only
+- GKR fabricated-witness suite + V3 binding work (arbiter remains OFF)
+- Rack validated: CPU coupled+packed PASS; CUDA sm120-plain datacenter PASS (toy/medium digest parity)
+
+## F8/F9 profile selectors + benchmark honesty (`wip/v7-hardening`)
+
+| Knob | Values |
+|------|--------|
+| `-regtestrccoupledprofile` | `3`=V3 production (default), `2`=V2 (explicit regression tests only); other → zero params / reject |
+| `-regtestrccoupledtoydims` | `1`=CI toy, `0`=production-V3 (default profile 3) or medium (V2, regression-only profile 2) |
+| Harness | `--coupled-production` / `--coupled-production-v2` / `--coupled-v3-ci` |
+| Timing | `phase_wall_s` / `wall_s` = `MineCoupledPuzzle`; `reference_wall_s` label=`correctness_reference` |
+| GKR | `--prove-winner-gkr` + production dims → clear refuse |
+
+Heights remain `INT32_MAX`. `RCCoupParamsFromConsensusConfig` projects `rows_per_lobe` + `pages_per_barrier_lobe`.
+
+## Still OPEN / not production-complete
+
+| Item | Status |
+|------|--------|
+| Device-assembled episode digest | OPEN (host `AssembleCoupledEpisodeDigest`) |
+| Native MXFP4 device-ptr lobe GEMM (WS-B) | PARKED / portable ALU in graph |
+| SM100 native tcgen05 on B200 | fail-closed; no silicon evidence |
+| GKR soundness → arbiter ON | OPEN; arbiter OFF; heights `INT32_MAX` |
+| B200 / RTX 5090 matched economics | NOT RUN → **PLAUSIBLE BUT UNMEASURED** |
+| Activation | inert (`INT32_MAX`) |
+
+## Screenshot economic claim
+
+**PLAUSIBLE BUT UNMEASURED** (blocked on silicon + optimized Streamed adversarial measurements).

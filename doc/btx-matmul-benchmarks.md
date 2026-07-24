@@ -1,5 +1,20 @@
 > **Note**: This document is from the original design phase. References to 150-second block times reflect the initial target; the current mainnet target is 90 seconds. See README.md for current parameters.
 
+> **Scope note (current guidance):** the numbers below benchmark the original
+> single dense-matmul PoW (`n` up to 512, Freivalds verification), which is
+> still the scheme actually live on every public network today. They predate,
+> and are not comparable to, **ENC_RC v4.6** — the integrated-but-inactive
+> two-stage successor design (profile-2 `nMatMulRCProfile` datacenter episode
+> + profile-3 `nMatMulRCCoupledProfile` V3 coupled puzzle; activation heights
+> stay `INT32_MAX` on every public network). To benchmark the current ENC_RC
+> v4.6 workload, use the turnkey tool
+> [`contrib/matmul-v4/run-full-benchmark.py`](../contrib/matmul-v4/run-full-benchmark.py)
+> (`--quick` for a fast sanity pass, `--shape production` for the real thing);
+> see `doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md` for the design.
+> The legacy `matmul-v4-report` tool and the old `btx-matmul-{cost,solve,metal}-bench`
+> / `verify-backend.sh` / `lt-gate.py` / `k2b-gate.py` scripts have been
+> removed; do not reference them for new benchmarking work.
+
 # BTX MatMul PoW Benchmarks
 
 Generated: 2026-02-19 23:24:24 JST

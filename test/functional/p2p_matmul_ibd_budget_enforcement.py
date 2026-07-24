@@ -39,11 +39,20 @@ class BTXMatMulIBDBudgetEnforcementTest(BitcoinTestFramework):
         attacker.sync_with_ping(timeout=20)
         attacker.send_message(msg_headers(headers=headers[2000:]))
         attacker.sync_with_ping(timeout=20)
+        # All headers must enter the index, but trust-adjusted best-header
+        # selection deliberately stays on the shallow edge of the 32-block
+        # unauthenticated allowance plateau instead of exposing height 2105 as
+        # the node's operational best header.
         attacker.wait_until(
-            lambda: node1.getblockchaininfo()["headers"] == 2105,
+            lambda: any(
+                tip["hash"] == node0.getblockhash(2105)
+                for tip in node1.getchaintips()
+            ),
             timeout=20,
             check_connected=False,
         )
+        operational_header_height = node1.getblockchaininfo()["headers"]
+        assert 0 < operational_header_height < 2105
         attacker.wait_until(
             lambda: attacker.last_message.get("getheaders") is not None,
             timeout=20,

@@ -102,6 +102,12 @@ public:
         int min_smile_v2_version{MIN_SMILE_V2_PROTOCOL_VERSION};
         //! Chain height at which SMILE v2 protocol version enforcement activates.
         int smile_v2_enforcement_height{SMILE_V2_ENFORCEMENT_HEIGHT};
+        //! WP-7 / C5: whether the v4.4 ENC-DR reference recompute for P2P block
+        //! deliveries may run on a bounded off-thread worker pool instead of the
+        //! message-handler thread. Only effective when the MatMul v4 fork height
+        //! is finite (nMatMulV4Height != INT32_MAX); kill-switch:
+        //! -matmulasyncverify=0.
+        bool matmul_async_verify{true};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,
