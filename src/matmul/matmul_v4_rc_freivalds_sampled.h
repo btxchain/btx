@@ -25,12 +25,11 @@
 // layers by a public post-commitment coin, and for EACH sampled layer verify
 // (a) its committed extract_out opens against round_roots (O(log N) Merkle
 // path — the validator does NOT recompute the O(N) tile-tree root; the miner's
-// committed root is trusted because it is target-bound, resolved question (c)
-// of stage-c-sublinear-verification-comparison.md), (b) its GEMM A·B=Y by
-// Freivalds random projection (O(mk+kn+mn), NEVER O(mkn)), (c) the Extract glue
-// (extract_in→extract_out + the accumulator/residual relation) natively for
-// that one layer, and (d) the chained-operand Λ wiring (A,B == referenced prior
-// layers' extract_out).
+// submitted roots are the pre-challenge commitments, bound into the target
+// digest and then sampled), (b) its GEMM A·B=Y by Freivalds random projection
+// (O(mk+kn+mn), NEVER O(mkn)), (c) the Extract glue (extract_in→extract_out +
+// the accumulator/residual relation) natively for that one layer, and (d) the
+// chained-operand Λ wiring (A,B == referenced prior layers' extract_out).
 //
 // SAMPLING UNIT — whole GEMM layers of the canonical layout Λ whose extract_out
 // is committed into the round tile-tree stream (SV, Fwd, Bwd, Wgrad). QKt is
@@ -38,12 +37,14 @@
 // is consumed only as SV's A operand, bound transitively by the chain), so it
 // has no O(log N) opening of its own — see RESIDUAL notes below and the report.
 //
-// FS-BINDING (unbiasable). The λ sampled indices derive from base_seed =
-// RCGkrFsSeedV7(header,height,params,target,claimed_digest,sigma,round_roots),
-// which already absorbs the full round_roots vector hence every committed tile
-// output and the target. Moving the sample set requires a new base_seed, which
-// requires new round_roots → a new digest → a fresh PoW trial (one grind).
-// There is no cheap "same episode, different sample" move.
+// FS-BINDING (fixed-commitment sampling). The λ sampled indices derive from
+// base_seed = RCGkrFsSeedV7(header,height,params,target,claimed_digest,sigma,
+// round_roots), which absorbs the full round_roots vector and the target. The
+// sampler itself is exact-uniform (SHA256d counter-XOF + rejection-sampled
+// bounded draws + partial Fisher-Yates, no modulo bias). For any fixed
+// pre-challenge root vector, the opened units are therefore verifier-
+// recomputable, distinct, and not miner-selectable. Moving the sample set
+// requires moving the committed roots/digest and finding a fresh target hit.
 //
 // RESIDUAL ρ*. This is economic DETERRENCE, not completeness: an UNSAMPLED
 // tampered layer passes. A profit-maximising miner's largest worthwhile fake
@@ -131,8 +132,7 @@ inline constexpr uint32_t kRCFreivaldsReps = 2;
 inline constexpr char kRCFreivaldsSampleTag[] = "BTX_RC_FRVS_SAMPLE_V1";
 /** Domain tag: per-layer Freivalds challenge seed derivation. */
 inline constexpr char kRCFreivaldsGemmSeedTag[] = "BTX_RC_FRVS_GEMM_V1";
-/** Domain tag: FS derivation of the per-layer output-tile + contraction-segment
- *  positions (segment carrier). */
+/** Domain tag: FS derivation of the per-layer output-tile positions. */
 inline constexpr char kRCFreivaldsSegPosTag[] = "BTX_RC_FRVS_SEGPOS_V1";
 /** Carrier format version. v2: segment carrier (bounded per-layer relay).
  *  v3: fused-FFN ANCHORED per-tile carrier — the tautological segment/partial-cover
@@ -157,10 +157,11 @@ inline constexpr uint32_t kRCFreivaldsSampledCarrierVersion = 3;
 
 /**
  * Draw min(lambda, n_units) DISTINCT unit indices in [0, n_units) by a domain-
- * separated SHA256d counter — idx = reduce(SHA256d(kRCFreivaldsSampleTag ‖
- * base_seed ‖ LE32(counter))) mod n_units, incrementing counter and rejecting
- * duplicates. Deterministic, unbiasable, verifier-recomputable. Returns the
- * indices in draw order (a caller may sort). n_units==0 → empty.
+ * separated SHA256d counter-XOF. Each bounded draw uses rejection sampling, and
+ * the distinct set is produced by a partial Fisher-Yates shuffle, so the ordered
+ * sample is exactly uniform without replacement. Deterministic, verifier-
+ * recomputable, and modulo-bias-free. Returns the indices in draw order (a
+ * caller may sort). n_units==0 → empty.
  */
 [[nodiscard]] std::vector<uint32_t> FreivaldsSampleLayers(const uint256& base_seed,
                                                           uint32_t n_units, uint32_t lambda);
@@ -288,15 +289,18 @@ void RCDenseTwoRowsBlockPackedI8mmExactI8(const int8_t* lhs0, const int8_t* lhs1
 // ---------------------------------------------------------------------------
 
 /** One sampled OUTPUT TILE of one sampled layer: a single (row i, 32-col block bj)
- *  of the committed extract_out, plus the ANCHORED contraction operand needed to
- *  recompute it. v3 (fused-FFN anchored carrier, scratchpad/sound-carrier-design.md
- *  §4): NO relayed Y/segments — the verifier recomputes H-row + Y-row from the
- *  anchored A-row (X[l] row) and the PRF-regenerated weights, then compares against
- *  the committed extract_out. Relay is O(T_leaf + depth), independent of m,n,k. */
+ *  of the committed extract_out, plus exact accumulator evidence and the
+ *  ANCHORED contraction operand needed to recompute it. v3 (fused-FFN anchored
+ *  carrier, scratchpad/sound-carrier-design.md §4): NO relayed Y/segments — the
+ *  verifier recomputes H-row + Y-row from the anchored A-row (X[l] row) and the
+ *  PRF-regenerated weights, checks the exact accumulator tag, then compares
+ *  against the committed extract_out. Relay is O(T_leaf + depth), independent of
+ *  m,n,k. */
 struct RCFreivaldsSampledTile {
     uint32_t row{0};   // output row i ∈ [0, m)
     uint32_t bcol{0};  // output 32-col block bj ∈ [0, n/32); cols [bj*32, bj*32+32)
     std::vector<int8_t> extract_out;  // committed Extract output eo[i, bj-block] (int8, T)
+    uint256 acc_tag;                  // SHA256d commitment to the exact int64 pre-Extract tile
     // Anchored contraction input A-row (the LAYER INPUT row: X[l] row i for a DOWN
     // tile; S row i for SV). For a committed activation (DOWN, l≥1) this is one
     // T_leaf leaf opened against round_roots; for a PRF-regenerable input (DOWN

@@ -18,26 +18,48 @@ namespace {
 using gkr_field::Add;
 using gkr_field::Canonical;
 using gkr_field::Fp;
-using gkr_field::FromChallengeBytes;
 using gkr_field::FromSigned;
 using gkr_field::Mul;
+
+uint64_t Low64LE(const unsigned char* bytes)
+{
+    uint64_t w = 0;
+    for (int i = 0; i < 8; ++i) {
+        w |= static_cast<uint64_t>(bytes[i]) << (8 * i);
+    }
+    return w;
+}
+
+Fp FreivaldsChallengeElement(const uint256& challenge_seed, uint32_t rep, uint32_t j)
+{
+    // retry=0 preserves the old transcript prefix; retry>0 appends LE32(retry).
+    constexpr size_t kTagLen = sizeof(kRCFreivaldsDomainTag) - 1; // no NUL
+    constexpr size_t kBaseLen = 32 + kTagLen + 4 + 4;
+    std::vector<unsigned char> buf(kBaseLen + 4);
+    std::memcpy(buf.data(), challenge_seed.data(), 32);
+    std::memcpy(buf.data() + 32, kRCFreivaldsDomainTag, kTagLen);
+    WriteLE32(buf.data() + 32 + kTagLen, rep);
+    WriteLE32(buf.data() + 32 + kTagLen + 4, j);
+    for (uint32_t retry = 0;; ++retry) {
+        size_t len = kBaseLen;
+        if (retry != 0) {
+            WriteLE32(buf.data() + kBaseLen, retry);
+            len += 4;
+        }
+        const uint256 h = Sha256dBytes(buf.data(), len);
+        const uint64_t w = Low64LE(h.data());
+        if (w < gkr_field::kP) return static_cast<Fp>(w);
+    }
+}
 
 } // namespace
 
 std::vector<Fp> FreivaldsChallengeVector(const uint256& challenge_seed,
                                          uint32_t rep, uint32_t n)
 {
-    // Preimage layout (frozen): seed[32] ‖ "BTX_RC_FRV_V1" ‖ LE32(rep) ‖ LE32(j).
-    constexpr size_t kTagLen = sizeof(kRCFreivaldsDomainTag) - 1; // no NUL
-    std::vector<unsigned char> buf(32 + kTagLen + 4 + 4);
-    std::memcpy(buf.data(), challenge_seed.data(), 32);
-    std::memcpy(buf.data() + 32, kRCFreivaldsDomainTag, kTagLen);
-    WriteLE32(buf.data() + 32 + kTagLen, rep);
     std::vector<Fp> r(n);
     for (uint32_t j = 0; j < n; ++j) {
-        WriteLE32(buf.data() + 32 + kTagLen + 4, j);
-        // Low 8 LE digest bytes reduced mod p (gkr_field::FromChallengeBytes).
-        r[j] = FromChallengeBytes(Sha256dBytes(buf.data(), buf.size()).data());
+        r[j] = FreivaldsChallengeElement(challenge_seed, rep, j);
     }
     return r;
 }

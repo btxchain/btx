@@ -9,8 +9,8 @@
 //   (c) flipping one A or one B entry fails (Y stays the honest product);
 //   (d) high-magnitude ±127 entries with large k still verify honest and
 //       reject tampered — the signed embedding is exact, no wraparound;
-//   (e) FreivaldsChallengeVector is a pure function of (seed, rep, n):
-//       deterministic, rep/seed-separated, prefix-consistent in n;
+//   (e) FreivaldsChallengeVector is exact-rejection sampled over Goldilocks and
+//       remains deterministic, rep/seed-separated, prefix-consistent in n;
 //   (f) differential: the O(mk+kn+mn) verdict equals the naive triple-loop
 //       A·B == Y verdict on random honest and tampered instances.
 
@@ -157,8 +157,9 @@ BOOST_AUTO_TEST_CASE(high_magnitude_embedding_exact)
     }
 }
 
-// (e) Challenge vector: pure function of (seed, rep, n); distinct across
-// rep and seed; r_j independent of n (prefix-consistent).
+// (e) Challenge vector: exact rejection-sampled Fp output; pure function of
+// (seed, rep, n); distinct across rep and seed; r_j independent of n
+// (prefix-consistent).
 BOOST_AUTO_TEST_CASE(challenge_vector_deterministic)
 {
     const auto r0 = frv::FreivaldsChallengeVector(SeedFromByte(7), 0, 16);

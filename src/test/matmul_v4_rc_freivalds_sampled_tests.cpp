@@ -28,6 +28,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <cstdint>
 #include <cstdlib>
 #include <limits>
 #include <optional>
@@ -35,6 +36,10 @@
 #include <vector>
 
 namespace rc = matmul::v4::rc;
+
+namespace matmul::v4::rc::test {
+bool FreivaldsSampleCandidateAcceptedForTesting(uint64_t candidate, uint64_t bound, uint64_t& out);
+}
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_freivalds_sampled_tests, BasicTestingSetup)
 
@@ -138,7 +143,8 @@ private:
 
 } // namespace
 
-// Discipline invariants: never consensus.
+// Discipline invariants: public RC activation remains height-gated; profile-2
+// uses the sampled authority only once that consensus height is made finite.
 BOOST_AUTO_TEST_CASE(frvs_never_consensus)
 {
     BOOST_CHECK_EQUAL(Consensus::Params{}.nMatMulRCHeight, std::numeric_limits<int32_t>::max());
@@ -261,8 +267,16 @@ BOOST_AUTO_TEST_CASE(frvs_fs_sample_determinism)
     const auto s2 = rc::FreivaldsSampleLayers(base, 7, kLambda);
     BOOST_CHECK(s1 == s2);              // deterministic
     BOOST_CHECK_EQUAL(s1.size(), kLambda);
-    for (size_t i = 0; i < s1.size(); ++i)   // distinct
+    for (uint32_t s : s1) BOOST_CHECK_LT(s, 7u); // in range
+    for (size_t i = 0; i < s1.size(); ++i)       // distinct
         for (size_t j = i + 1; j < s1.size(); ++j) BOOST_CHECK(s1[i] != s1[j]);
+
+    const auto all = rc::FreivaldsSampleLayers(base, 7, 99);
+    BOOST_CHECK_EQUAL(all.size(), 7u);
+    for (size_t i = 0; i < all.size(); ++i) {
+        BOOST_CHECK_LT(all[i], 7u);
+        for (size_t j = i + 1; j < all.size(); ++j) BOOST_CHECK(all[i] != all[j]);
+    }
 
     auto roots2 = f.proof.round_roots;
     roots2[0].data()[0] ^= 0xff;
@@ -275,6 +289,64 @@ BOOST_AUTO_TEST_CASE(frvs_fs_sample_determinism)
     const uint256 base3 = rc::RCGkrFsSeedV7(f.h, 0, f.params, f.target, dig2, f.proof.episode_sigma,
                                             f.proof.round_roots);
     BOOST_CHECK(rc::FreivaldsSampleLayers(base3, 7, kLambda) != s1); // moving digest moves the set
+}
+
+BOOST_AUTO_TEST_CASE(frvs_carrier_tile_schedule_deterministic_in_range)
+{
+    Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
+    BOOST_REQUIRE(f.ok);
+
+    rc::RCFreivaldsSampledCarrier c1;
+    rc::RCFreivaldsSampledCarrier c2;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, c1, &why, kLambda), why);
+    why.clear();
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, c2, &why, kLambda), why);
+
+    BOOST_REQUIRE_EQUAL(c1.sampled.size(), c2.sampled.size());
+    bool saw_tile = false;
+    for (size_t li = 0; li < c1.sampled.size(); ++li) {
+        const auto& a = c1.sampled[li];
+        const auto& b = c2.sampled[li];
+        BOOST_CHECK_EQUAL(a.layer_index, b.layer_index);
+        BOOST_CHECK_EQUAL(a.round, b.round);
+        BOOST_CHECK_EQUAL(static_cast<uint32_t>(a.kind), static_cast<uint32_t>(b.kind));
+        BOOST_CHECK_EQUAL(a.m, b.m);
+        BOOST_CHECK_EQUAL(a.n, b.n);
+        BOOST_REQUIRE_EQUAL(a.tiles.size(), b.tiles.size());
+        for (size_t ti = 0; ti < a.tiles.size(); ++ti) {
+            const auto& ta = a.tiles[ti];
+            const auto& tb = b.tiles[ti];
+            saw_tile = true;
+            BOOST_CHECK_EQUAL(ta.row, tb.row);
+            BOOST_CHECK_EQUAL(ta.bcol, tb.bcol);
+            BOOST_CHECK_LT(ta.row, a.m);
+            BOOST_CHECK_LT(ta.bcol, a.n / rc::kRCMxBlockLen);
+            for (size_t prev = 0; prev < ti; ++prev) {
+                BOOST_CHECK(ta.row != a.tiles[prev].row || ta.bcol != a.tiles[prev].bcol);
+            }
+        }
+    }
+    BOOST_CHECK(saw_tile);
+}
+
+BOOST_AUTO_TEST_CASE(frvs_bounded_rejection_sampler_rejects_modulo_tail)
+{
+    const uint64_t bound = (uint64_t{1} << 63) + 1;
+    const uint64_t reject_below = (uint64_t{0} - bound) % bound;
+    BOOST_REQUIRE_EQUAL(reject_below, (uint64_t{1} << 63) - 1);
+
+    uint64_t out = 0;
+    BOOST_CHECK(!matmul::v4::rc::test::FreivaldsSampleCandidateAcceptedForTesting(
+        reject_below - 1, bound, out));
+    BOOST_CHECK(matmul::v4::rc::test::FreivaldsSampleCandidateAcceptedForTesting(
+        reject_below, bound, out));
+    BOOST_CHECK_EQUAL(out, reject_below);
+    BOOST_CHECK(matmul::v4::rc::test::FreivaldsSampleCandidateAcceptedForTesting(
+        std::numeric_limits<uint64_t>::max(), bound, out));
+    BOOST_CHECK_EQUAL(out, (uint64_t{1} << 63) - 2);
 }
 
 // (e) SUBLINEARITY: touches exactly lambda layers, flat as total layers grow.
@@ -416,6 +488,12 @@ BOOST_AUTO_TEST_CASE(frvs_segment_carrier_honest_and_tamper)
         BOOST_REQUIRE(!c.sampled[0].tiles[0].extract_out.empty());
         c.sampled[0].tiles[0].extract_out[0] ^= 0x1;
         BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
+    }
+    {   // Tamper exact accumulator evidence while leaving committed int8 bytes intact.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        c.sampled[0].tiles[0].acc_tag.data()[0] ^= 0x1;
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
+        BOOST_CHECK_EQUAL(why, "v7fs:acc_tag");
     }
     {   // Tamper the anchored A-row leaf when a non-PRF source row is sampled.
         rc::RCFreivaldsSampledCarrier c = carrier;

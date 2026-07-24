@@ -43,27 +43,24 @@
 // shapes: no wraparound ambiguity, the verdict is exact. (The test suite
 // exercises the ±127 high-magnitude regime to pin this.)
 //
-// CHALLENGE DERIVATION (frozen; deterministic and re-derivable by anyone
+// CHALLENGE DERIVATION (deterministic and re-derivable by anyone
 // holding the 32-byte seed): the SHA256d counter-XOF of the FRI/AlgHash
 // stack (Sha256dBytes, matmul_v4_rc_fri_ext3.h) with a dedicated domain tag,
 //
-//   r_j = FromChallengeBytes( SHA256d( seed[32 bytes, uint256 memory order]
-//                                      ‖ "BTX_RC_FRV_V1" ‖ LE32(rep)
-//                                      ‖ LE32(j) ) )
+//   retry=0: r_j = low64(SHA256d(seed ‖ "BTX_RC_FRV_V1" ‖ LE32(rep) ‖ LE32(j)))
+//   retry>0: r_j = low64(SHA256d(seed ‖ "BTX_RC_FRV_V1" ‖ LE32(rep) ‖ LE32(j)
+//                                ‖ LE32(retry)))
 //
-// where FromChallengeBytes takes the LOW 8 little-endian bytes of the 32-byte
-// digest as a uint64 and reduces mod p (matmul_v4_rc_gkr_field.h). r_j
-// depends only on (seed, rep, j) — a pure function; in particular the length-n
-// vector for a given rep is prefix-consistent across n.
+// The first candidate < p is accepted. Candidates in [p,2^64) are rejected, not
+// reduced, so r_j is exactly uniform over Goldilocks Fp. r_j depends only on
+// (seed, rep, j) — a pure function; in particular the length-n vector for a
+// given rep is prefix-consistent across n.
 //
-// SOUNDNESS STATEMENT (per rep and total). Modeling the SHA256d digests as
-// uniform 64-bit words, the mod-p reduction gives each field element
-// probability 1/2^64 or 2/2^64 (the 2^32 − 1 residues below 2^64 − p are hit
-// twice; total bias < 2^-32). Plugging max_c Pr[r_j = c] ≤ 2/2^64 into the
-// degree-1 bound above: a FALSE claim survives one rep with probability
-// ≤ 2^-63, and survives all `reps` independent domain-separated reps with
-// probability ≤ 2^(−63·reps). reps = 1 already meets the ~2^-64-scale
-// consensus target; reps is exposed for margin only.
+// SOUNDNESS STATEMENT (per rep and total). Modeling SHA256d as a random oracle,
+// rejection sampling makes every r_j uniform over Fp, so a FALSE claim survives
+// one rep with probability ≤ 1/p and survives all `reps` independent domain-
+// separated reps with probability ≤ p^(-reps). reps = 1 already meets the
+// ~2^-64-scale consensus target; reps is exposed for margin only.
 
 namespace matmul::v4::rc {
 
@@ -72,8 +69,9 @@ inline constexpr char kRCFreivaldsDomainTag[] = "BTX_RC_FRV_V1";
 
 /**
  * The per-rep field-vector challenge derivation, exposed for tests/reuse:
- * r_j = FromChallengeBytes(SHA256d(seed ‖ "BTX_RC_FRV_V1" ‖ LE32(rep) ‖
- * LE32(j))), j ∈ [0, n). Pure function of (challenge_seed, rep, n).
+ * r_j is rejection-sampled from SHA256d(seed ‖ "BTX_RC_FRV_V1" ‖ LE32(rep) ‖
+ * LE32(j) [‖ LE32(retry)]), j in [0, n). Pure function of
+ * (challenge_seed, rep, n).
  */
 [[nodiscard]] std::vector<gkr_field::Fp> FreivaldsChallengeVector(
     const uint256& challenge_seed, uint32_t rep, uint32_t n);
@@ -85,7 +83,7 @@ inline constexpr char kRCFreivaldsDomainTag[] = "BTX_RC_FRV_V1";
  *
  * Fail-closed: returns false (with a `why` message when non-null) on any
  * shape mismatch (A.size() != m·k etc.) or reps == 0. A false claim passes
- * with probability ≤ 2^(−63·reps) over the seed (see header comment).
+ * with probability ≤ p^(-reps) over the seed (see header comment).
  */
 [[nodiscard]] bool FreivaldsCheckGemm(
     const std::vector<int8_t>& A, const std::vector<int8_t>& B,
@@ -112,18 +110,18 @@ inline constexpr char kRCFreivaldsDomainTag[] = "BTX_RC_FRV_V1";
 // holds. Soundness: if Σ_p A_p·B_p ≠ Y then D = (Σ_p A_p·B_p) − Y ≠ 0 in
 // F^{m×n} (same embedding-exactness argument as FreivaldsCheckGemm; each entry
 // |D_ij| ≤ (Σ_p k_p)·2^14 + 2^63 < p), so a false claim survives one rep with
-// probability ≤ 2^-63 and all `reps` reps with probability ≤ 2^(−63·reps).
+// probability ≤ 1/p and all `reps` reps with probability ≤ p^(-reps).
 //
 // COMPOSITION WITH SEGMENT SAMPLING (the carrier's deterrence envelope). The
 // per-check relay footprint of ONE segment p is |seg_p|·(m_rows + n_cols) int8
 // (its operand slices) plus the m_rows·n_cols int64 output — independent of the
 // UNSAMPLED contraction. Passing only a SUBSET Ω ⊂ [P] of segments to this
-// function verifies Σ_{p∈Ω} A_p·B_p == Y_Ω exactly (each rep ≤ 2^-63), where
+// function verifies Σ_{p∈Ω} A_p·B_p == Y_Ω exactly (each rep ≤ 1/p), where
 // Y_Ω is the caller-supplied partial-sum target; the UNSAMPLED contraction
 // [0,k)∖Ω is not covered and folds into the sampling residual ρ* (the
 // deterrence envelope of matmul_v4_rc_freivalds_sampled.h). A layer whose GEMM
 // error is BROAD (a skipped / approximated / low-precision GEMM — its error
-// spans the contraction) is caught with probability ≥ (1−2^(−63·reps)) by ANY
+// spans the contraction) is caught with probability ≥ (1−p^(-reps)) by ANY
 // covered segment; only an error CONCENTRATED entirely in the unsampled
 // contraction escapes — that concentrated-escape is the ρ* residual, priced
 // exactly as the whole-layer sampling residual, NOT a new soundness claim.
@@ -131,7 +129,7 @@ inline constexpr char kRCFreivaldsDomainTag[] = "BTX_RC_FRV_V1";
 // Per-segment / per-layer detection probability (closed form). For a sampled
 // layer with P contraction segments, sampling |Ω| of them, a contraction-
 // localized error confined to one segment is detected with probability
-// |Ω|/P · (1 − 2^(−63·reps)); a broad error is detected w.p. ≥ 1 − 2^(−63·reps).
+// |Ω|/P · (1 − p^(-reps)); a broad error is detected w.p. ≥ 1 − p^(-reps).
 
 /** One contraction segment's operand slices for the sum A·B over its k_p rows:
  *  A_slice is (m × k_p) int8 (the sampled OUTPUT rows × this segment's
@@ -151,7 +149,7 @@ struct FreivaldsSegmentOperand {
  *
  * Fail-closed: returns false (with `why` when non-null) on reps==0, empty
  * segment set, or any per-segment shape mismatch (A_slice.size()!=m·k_p etc.).
- * Completeness EXACT; a false claim passes with probability ≤ 2^(−63·reps).
+ * Completeness EXACT; a false claim passes with probability ≤ p^(-reps).
  */
 [[nodiscard]] bool FreivaldsCheckGemmSegments(
     const std::vector<FreivaldsSegmentOperand>& segments,

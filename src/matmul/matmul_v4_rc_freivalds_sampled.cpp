@@ -4,7 +4,7 @@
 
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
 
-#include <crypto/common.h>                 // WriteLE32
+#include <crypto/common.h>                 // ReadLE64 / WriteLE32 / WriteLE64
 #include <matmul/matmul_v4.h>              // matmul::v4::DeriveSigma
 #include <matmul/matmul_v4_rc.h>           // BuildTileTreeLeaves / Open/VerifyMerkleProof
 #include <matmul/matmul_v4_rc_freivalds.h> // FreivaldsCheckGemm (frozen Fable primitive)
@@ -26,6 +26,7 @@
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 
 #if defined(__aarch64__) && defined(__ARM_NEON)
 #include <arm_neon.h>
@@ -141,6 +142,35 @@ uint256 LeafHashFromBytes(const std::vector<uint8_t>& leaf_bytes)
     pre.reserve(1 + leaf_bytes.size());
     pre.push_back(kRCLeafTag);
     pre.insert(pre.end(), leaf_bytes.begin(), leaf_bytes.end());
+    return Sha256dBytes(pre.data(), pre.size());
+}
+
+uint256 AccumulatorTileTag(RCGkrLayerKind kind, uint32_t layer_index, uint32_t round,
+                           uint32_t row, uint32_t bcol, const int64_t* acc_block)
+{
+    static constexpr char kTag[] = "BTX_RC_FRVS_ACC_TILE_V1";
+    std::vector<unsigned char> pre;
+    pre.reserve(sizeof(kTag) - 1 + 5 * 4 + kRCMxBlockLen * 8);
+    pre.insert(pre.end(), reinterpret_cast<const unsigned char*>(kTag),
+               reinterpret_cast<const unsigned char*>(kTag) + sizeof(kTag) - 1);
+    auto put32 = [&](uint32_t v) {
+        unsigned char tmp[4];
+        WriteLE32(tmp, v);
+        pre.insert(pre.end(), tmp, tmp + 4);
+    };
+    auto put64 = [&](uint64_t v) {
+        unsigned char tmp[8];
+        WriteLE64(tmp, v);
+        pre.insert(pre.end(), tmp, tmp + 8);
+    };
+    put32(static_cast<uint32_t>(kind));
+    put32(layer_index);
+    put32(round);
+    put32(row);
+    put32(bcol);
+    for (uint32_t t = 0; t < kRCMxBlockLen; ++t) {
+        put64(static_cast<uint64_t>(acc_block[t]));
+    }
     return Sha256dBytes(pre.data(), pre.size());
 }
 
@@ -747,6 +777,10 @@ bool CheckCoveringLeaf(const std::vector<uint8_t>& leaf_bytes, uint32_t leaf_ind
 // X[l] row from round_roots, or PRF-regenerate at l=0 / SV) and RECOMPUTES the
 // full contraction (H-row + Y-row for DOWN, or S-row + Y for SV) to check the
 // committed extract_out. No relayed Y / contraction segments; no tautology.
+// The carrier also carries an exact pre-Extract accumulator tag for each opened
+// tile. This is carrier-local integrity evidence for opened samples; a complete
+// quantization-cost proof needs those accumulator commitments bound before the
+// sample challenge.
 // ===========================================================================
 
 // One output tile's FS-derived plan: which (row, bcol). Contraction is always
@@ -756,29 +790,81 @@ struct TilePlan {
     uint32_t bcol{0};
 };
 
-// SHA256d(kRCFreivaldsSegPosTag ‖ base_seed ‖ LE32(layer_index) ‖ LE32(ctr)).
-uint256 SegPosDigest(const uint256& base_seed, uint32_t layer_index, uint32_t ctr)
+bool BoundedSampleCandidate(uint64_t candidate, uint64_t bound, uint64_t& out)
+{
+    assert(bound != 0);
+    const uint64_t reject_below = (uint64_t{0} - bound) % bound;
+    if (candidate < reject_below) return false;
+    out = candidate % bound;
+    return true;
+}
+
+class Sha256dCounterXof
+{
+public:
+    explicit Sha256dCounterXof(std::vector<unsigned char> prefix) :
+        m_msg(std::move(prefix)), m_prefix_len(m_msg.size())
+    {
+        m_msg.resize(m_prefix_len + 8);
+    }
+
+    uint64_t NextU64()
+    {
+        if (m_offset == m_block.size()) Refill();
+        const uint64_t v = ReadLE64(m_block.data() + m_offset);
+        m_offset += 8;
+        return v;
+    }
+
+private:
+    void Refill()
+    {
+        WriteLE64(m_msg.data() + m_prefix_len, m_counter++);
+        const uint256 h = Sha256dBytes(m_msg.data(), m_msg.size());
+        std::memcpy(m_block.data(), h.data(), m_block.size());
+        m_offset = 0;
+    }
+
+    std::vector<unsigned char> m_msg;
+    size_t m_prefix_len{0};
+    uint64_t m_counter{0};
+    std::array<unsigned char, 32> m_block{};
+    size_t m_offset{32};
+};
+
+uint64_t DrawBounded(Sha256dCounterXof& xof, uint64_t bound)
+{
+    assert(bound != 0);
+    for (;;) {
+        uint64_t out = 0;
+        if (BoundedSampleCandidate(xof.NextU64(), bound, out)) return out;
+    }
+}
+
+std::vector<unsigned char> SampleXofPrefix(const uint256& base_seed)
+{
+    constexpr size_t kTagLen = sizeof(kRCFreivaldsSampleTag) - 1;
+    std::vector<unsigned char> buf(kTagLen + 32);
+    std::memcpy(buf.data(), kRCFreivaldsSampleTag, kTagLen);
+    std::memcpy(buf.data() + kTagLen, base_seed.data(), 32);
+    return buf;
+}
+
+std::vector<unsigned char> SegPosXofPrefix(const uint256& base_seed, uint32_t layer_index)
 {
     constexpr size_t kTagLen = sizeof(kRCFreivaldsSegPosTag) - 1;
-    std::vector<unsigned char> buf(kTagLen + 32 + 4 + 4);
+    std::vector<unsigned char> buf(kTagLen + 32 + 4);
     std::memcpy(buf.data(), kRCFreivaldsSegPosTag, kTagLen);
     std::memcpy(buf.data() + kTagLen, base_seed.data(), 32);
     WriteLE32(buf.data() + kTagLen + 32, layer_index);
-    WriteLE32(buf.data() + kTagLen + 32 + 4, ctr);
-    return Sha256dBytes(buf.data(), buf.size());
-}
-uint64_t SegPosU64(const uint256& base_seed, uint32_t layer_index, uint32_t ctr)
-{
-    const uint256 h = SegPosDigest(base_seed, layer_index, ctr);
-    uint64_t v = 0;
-    for (int b = 0; b < 8; ++b) v |= static_cast<uint64_t>(h.data()[b]) << (8 * b);
-    return v;
+    return buf;
 }
 
 // Deterministic, verifier-recomputable output-tile plan for a sampled layer of
 // shape (m, n). Identical on prover and verifier (the miner cannot choose which
-// output entries are opened). FS derivation is byte-identical to the v2 segment
-// carrier's (SegPosDigest/SegPosU64) so the coin stays target-bound + unbiasable.
+// output entries are opened). FS derivation is a SHA256d counter-XOF over the
+// segment-position domain; each bounded draw is exact rejection sampling, so no
+// modulo-reduction bias enters the tile schedule.
 std::vector<TilePlan> TilePositions(const uint256& base_seed, uint32_t layer_index, uint32_t m,
                                     uint32_t n)
 {
@@ -788,16 +874,19 @@ std::vector<TilePlan> TilePositions(const uint256& base_seed, uint32_t layer_ind
     const uint64_t tile_space = static_cast<uint64_t>(m) * n_blocks;
     const uint32_t want_tiles =
         static_cast<uint32_t>(std::min<uint64_t>(kRCFreivaldsSegOutTiles, tile_space));
-    uint32_t ctr = 0;
-    const uint32_t max_iters = (want_tiles + 8u) * 64u + 4096u;
-    std::vector<uint64_t> seen; // (row<<32 | bcol) dedupe (tiny sets)
-    while (plans.size() < want_tiles && ctr < max_iters) {
-        const uint64_t t = SegPosU64(base_seed, layer_index, ctr++);
-        const uint32_t row = static_cast<uint32_t>(t % m);
-        const uint32_t bcol = static_cast<uint32_t>((t / m) % n_blocks);
-        const uint64_t key = (static_cast<uint64_t>(row) << 32) | bcol;
-        if (std::find(seen.begin(), seen.end(), key) != seen.end()) continue;
-        seen.push_back(key);
+    Sha256dCounterXof xof(SegPosXofPrefix(base_seed, layer_index));
+    std::unordered_map<uint64_t, uint64_t> remap;
+    remap.reserve(want_tiles * 2);
+    auto mapped = [&](uint64_t pos) {
+        const auto it = remap.find(pos);
+        return it == remap.end() ? pos : it->second;
+    };
+    for (uint64_t i = 0; i < want_tiles; ++i) {
+        const uint64_t j = i + DrawBounded(xof, tile_space - i);
+        const uint64_t t = mapped(j);
+        remap[j] = mapped(i);
+        const uint32_t row = static_cast<uint32_t>(t / n_blocks);
+        const uint32_t bcol = static_cast<uint32_t>(t - static_cast<uint64_t>(row) * n_blocks);
         plans.push_back(TilePlan{row, bcol});
     }
     return plans;
@@ -865,6 +954,14 @@ std::array<int8_t, kRCMxBlockLen> ExtractBlock(const uint256& prf, uint32_t i, u
 }
 
 } // namespace
+
+namespace test {
+bool FreivaldsSampleCandidateAcceptedForTesting(uint64_t candidate, uint64_t bound, uint64_t& out)
+{
+    if (bound == 0) return false;
+    return BoundedSampleCandidate(candidate, bound, out);
+}
+} // namespace test
 
 bool RCDenseRowBlockVectorizedAvailable()
 {
@@ -965,27 +1062,13 @@ std::vector<uint32_t> FreivaldsSampleLayers(const uint256& base_seed, uint32_t n
     if (n_units == 0 || lambda == 0) return out;
     const uint32_t want = std::min(lambda, n_units);
     out.reserve(want);
-    std::vector<char> chosen(n_units, 0);
-    constexpr size_t kTagLen = sizeof(kRCFreivaldsSampleTag) - 1;
-    std::vector<unsigned char> buf(kTagLen + 32 + 4);
-    std::memcpy(buf.data(), kRCFreivaldsSampleTag, kTagLen);
-    std::memcpy(buf.data() + kTagLen, base_seed.data(), 32);
-    // Domain-separated SHA counter; reject duplicates for distinctness. A bounded
-    // counter guard keeps this terminating even in pathological cases.
-    uint32_t counter = 0;
-    const uint32_t max_iters = (want + 8u) * 64u + 4096u;
-    while (out.size() < want && counter < max_iters) {
-        WriteLE32(buf.data() + kTagLen + 32, counter);
-        ++counter;
-        const uint256 h = Sha256dBytes(buf.data(), buf.size());
-        // Reduce the low 8 LE bytes mod n_units (bias ≤ n_units/2^64, negligible).
-        uint64_t v = 0;
-        for (int b = 0; b < 8; ++b) v |= static_cast<uint64_t>(h.data()[b]) << (8 * b);
-        const uint32_t idx = static_cast<uint32_t>(v % n_units);
-        if (!chosen[idx]) {
-            chosen[idx] = 1;
-            out.push_back(idx);
-        }
+    std::vector<uint32_t> units(n_units);
+    for (uint32_t i = 0; i < n_units; ++i) units[i] = i;
+    Sha256dCounterXof xof(SampleXofPrefix(base_seed));
+    for (uint32_t i = 0; i < want; ++i) {
+        const uint32_t j = i + static_cast<uint32_t>(DrawBounded(xof, n_units - i));
+        std::swap(units[i], units[j]);
+        out.push_back(units[i]);
     }
     return out;
 }
@@ -1130,6 +1213,7 @@ size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params)
     const uint64_t per_tile =
         8 + 5                       // row + bcol
         + 3 + T                     // extract_out
+        + 32                        // exact accumulator tile tag
         + 1                         // a_prf_regen flag
         + 9 + 5                     // a_row_stream_offset + a_row_leaf_index
         + 3 + one_leaf_open         // anchored A-row leaf + proof
@@ -1209,6 +1293,8 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
             tile.bcol = pl.bcol;
             const size_t ybase = static_cast<size_t>(pl.row) * w.n + static_cast<size_t>(pl.bcol) * T;
             tile.extract_out.assign(w.extract_out.begin() + ybase, w.extract_out.begin() + ybase + T);
+            tile.acc_tag = AccumulatorTileTag(lp.kind, li, w.round, pl.row, pl.bcol,
+                                              w.extract_in.data() + ybase);
 
             // Anchor the layer-input A-row (X[l] row for DOWN, S row for SV).
             if (lp.kind == RCGkrLayerKind::GemmPhase1SV) {
@@ -1522,7 +1608,14 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 const RCGkrSampledLayerProv& lp = prov[plan.li];
                 const uint64_t layer_off = LayerStreamOffset(carrier.episode, lp.kind, lp.layer);
                 auto finish_tile = [&](const RCFreivaldsSampledTile& tile,
+                                       const int64_t* acc_block,
                                        const std::array<int8_t, kRCMxBlockLen>& eo) -> bool {
+                    const uint256 expect_acc =
+                        AccumulatorTileTag(lp.kind, plan.li, e.round, tile.row, tile.bcol, acc_block);
+                    if (tile.acc_tag != expect_acc) {
+                        reject("v7fs:acc_tag");
+                        return false;
+                    }
                     for (uint32_t c = 0; c < T; ++c) {
                         if (eo[c] != tile.extract_out[c]) {
                             reject("v7fs:recompute_mismatch");
@@ -1595,7 +1688,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                         const std::array<int8_t, kRCMxBlockLen> eo =
                             ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
                         r.recompute_s += Secs(t_rc_sv);
-                        if (!finish_tile(tile, eo)) break;
+                        if (!finish_tile(tile, yblk.data(), eo)) break;
                     }
                 } else {
                     const RCGkrSampledLayerProv& up = prov[lp.a.src_idx];
@@ -1685,28 +1778,33 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                                 for (uint32_t c = 0; c < T; ++c) H1[bj * T + c] = h1[c];
                             }
                         }
+                        struct TileRecompute {
+                            std::array<int64_t, kRCMxBlockLen> acc{};
+                            std::array<int8_t, kRCMxBlockLen> eo{};
+                        };
                         auto down_tile = [&](const RCFreivaldsSampledTile& tile,
                                              const std::vector<int8_t>& X_row,
                                              const std::vector<int8_t>& H_row) {
-                            std::array<int64_t, kRCMxBlockLen> yblk{};
+                            TileRecompute out;
                             const uint32_t out_col0 = tile.bcol * T;
                             if (use_packed_i8mm) {
                                 RCDenseRowBlockPackedI8mmExactI8(H_row.data(), W_down_t.data(), d_ff,
-                                                                 d_model, out_col0, yblk.data());
+                                                                 d_model, out_col0, out.acc.data());
                             } else {
                                 RCDenseRowBlockTransposedExactI8(H_row.data(), W_down_t.data(), d_ff,
-                                                                 d_model, out_col0, yblk.data());
+                                                                 d_model, out_col0, out.acc.data());
                             }
                             for (uint32_t c = 0; c < T; ++c)
-                                yblk[c] += static_cast<int64_t>(X_row[out_col0 + c]);
-                            return ExtractBlock(lp.extract_prf, tile.row, tile.bcol, yblk.data());
+                                out.acc[c] += static_cast<int64_t>(X_row[out_col0 + c]);
+                            out.eo = ExtractBlock(lp.extract_prf, tile.row, tile.bcol, out.acc.data());
+                            return out;
                         };
-                        const std::array<int8_t, kRCMxBlockLen> eo0 = down_tile(tile0, X0, H0);
-                        std::array<int8_t, kRCMxBlockLen> eo1{};
-                        if (paired) eo1 = down_tile(*tile1, X1, H1);
+                        const TileRecompute rc0 = down_tile(tile0, X0, H0);
+                        TileRecompute rc1;
+                        if (paired) rc1 = down_tile(*tile1, X1, H1);
                         r.recompute_s += Secs(t_rc_dn);
-                        if (!finish_tile(tile0, eo0)) break;
-                        if (paired && !finish_tile(*tile1, eo1)) break;
+                        if (!finish_tile(tile0, rc0.acc.data(), rc0.eo)) break;
+                        if (paired && !finish_tile(*tile1, rc1.acc.data(), rc1.eo)) break;
                         ti += paired ? 2 : 1;
                     }
                 }
@@ -1943,6 +2041,7 @@ void SerializeRCFreivaldsCarrier(const RCFreivaldsSampledCarrier& c,
             PutU32(out, tile.bcol);
             PutCompact(out, tile.extract_out.size());
             for (int8_t x : tile.extract_out) out.push_back(static_cast<unsigned char>(x));
+            PutHash(out, tile.acc_tag);
             // Anchored A-row (empty + flag when PRF-regenerable).
             out.push_back(tile.a_prf_regen ? 1 : 0);
             PutU64(out, tile.a_row_stream_offset);
@@ -2008,6 +2107,7 @@ bool DeserializeRCFreivaldsCarrierBounded(Span<const unsigned char> in,
             RCFreivaldsSampledTile& tile = e.tiles[ti];
             if (!r.U32(tile.row) || !r.U32(tile.bcol)) return bad(r.err);
             if (!r.VecI8(tile.extract_out)) return bad(r.err);
+            if (!r.Hash(tile.acc_tag)) return bad(r.err);
             // Anchored A-row.
             uint8_t regen;
             if (!r.U8(regen)) return bad(r.err);
