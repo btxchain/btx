@@ -6081,7 +6081,7 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
     const matmul::v4::rc::RCCoupParams params_coup =
         matmul::v4::rc::ResolveRCCoupParams(params);
-    const matmul::v4::rc::RCCoupOptions options_coup =
+    matmul::v4::rc::RCCoupOptions options_coup =
         matmul::v4::rc::ResolveRCCoupOptions(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) {
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -6091,6 +6091,13 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
     // F5: resolve + RC self-qual ONCE per solve (cached by provider/arch/epoch).
     // Per-nonce path must never re-enter ProbeRCSelfQual.
     const auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRCCoupled();
+    const bool stream_bank =
+        matmul::v4::rc::EstimateRCCoupResidentPeakBytes(params_coup) > (8ull << 30);
+    if (stream_bank) {
+        options_coup.mode = matmul::v4::rc::RCCoupExecMode::Streamed;
+        options_coup.expansion_threads =
+            std::max(1u, std::thread::hardware_concurrency());
+    }
 
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {
@@ -6104,9 +6111,13 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
         // Q-batch: stack nonces that share the bank template into one
         // TryMineRCCoupledBatch (Q×M×W · W×W ExactGemm per lobe) — not per-nonce GEMV.
-        const uint32_t q_want = std::min<uint32_t>(
-            matmul::v4::rc::dc::kRCMinerBatchQDefault,
-            static_cast<uint32_t>(std::min<uint64_t>(max_tries, matmul::v4::rc::dc::kRCMinerBatchQMax)));
+        const uint32_t q_want =
+            stream_bank
+                ? 1u
+                : std::min<uint32_t>(
+                      matmul::v4::rc::dc::kRCMinerBatchQDefault,
+                      static_cast<uint32_t>(std::min<uint64_t>(
+                          max_tries, matmul::v4::rc::dc::kRCMinerBatchQMax)));
         const uint32_t Q = std::max(1u, q_want);
 
         std::vector<CBlockHeader> window =
@@ -6120,6 +6131,7 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
         matmul::v4::rc::RCMinerBatchConfig cfg;
         cfg.Q = Q;
+        cfg.use_resident_bank = !stream_bank;
         std::vector<uint256> digests;
         if (!matmul::v4::rc::TryMineRCCoupledBatch(window, block_height, params_coup, digests, cfg,
                                                    gemm, options_coup) ||

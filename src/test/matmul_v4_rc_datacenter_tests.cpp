@@ -341,6 +341,27 @@ BOOST_AUTO_TEST_CASE(rc_dc_q_batch_toy_parity_q1_q8_q32)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rc_dc_streamed_batch_and_parallel_expansion_match_reference)
+{
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    const CBlockHeader header = MakeCoupHeader(42033);
+    rc::RCCoupOptions opts = rc::MakeMediumV3RCCoupOptions();
+    opts.expansion_threads = 4;
+
+    rc::RCMinerBatchConfig cfg;
+    cfg.Q = 1;
+    cfg.use_resident_bank = false;
+    std::vector<uint256> streamed;
+    BOOST_REQUIRE(rc::TryMineRCCoupledBatch({header}, 0, params, streamed, cfg, {}, opts));
+    BOOST_REQUIRE_EQUAL(streamed.size(), 1);
+
+    rc::RCCoupOptions scalar = opts;
+    scalar.expansion_threads = 1;
+    BOOST_CHECK_EQUAL(
+        streamed[0],
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, scalar));
+}
+
 /** Harness Q-sweep may exceed kRCMinerBatchQMax; digests still match solo. */
 BOOST_AUTO_TEST_CASE(rc_dc_coupled_q_sweep_beyond_miner_max)
 {

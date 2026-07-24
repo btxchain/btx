@@ -344,6 +344,23 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
     const uint32_t tv = opts.transcript_version;
     const auto& tags = RCCoupDomainTagsForVersion(tv);
 
+    // Capacity-bounded fallback: execute independent streamed episodes instead
+    // of materializing the full expanded bank. Production V3 callers currently
+    // use Q=1 here; keeping the loop generic preserves exact API semantics.
+    if (!use_resident_bank) {
+        opts.mode = RCCoupExecMode::Streamed;
+        digests_out.reserve(headers.size());
+        for (const CBlockHeader& header : headers) {
+            const uint256 digest = MineCoupledPuzzle(header, height, params, gemm, opts);
+            if (digest.IsNull()) {
+                digests_out.clear();
+                return false;
+            }
+            digests_out.push_back(digest);
+        }
+        return true;
+    }
+
     const uint32_t Q = static_cast<uint32_t>(headers.size());
     const uint32_t n = params.StateBytes();
     const uint32_t W = params.lobe_width;
@@ -353,10 +370,8 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
 
     // Bank is template-scoped — derive once from the canonical projection.
     const auto pages = DeriveCoupledBankPages(ProjectRCBankTemplateHeader(headers[0]), height,
-                                              params, tv);
+                                              params, tv, opts.expansion_threads);
     const uint256 bank_root = BankCommitment(pages, params.bank_pages, params.lobe_width, tags);
-    (void)use_resident_bank; // CPU reference always retains pages for the batch.
-
     // Independent per-nonce state — never reuse / overwrite a shared slot 0.
     // Lobe fill matches RecomputeCoupledPuzzleReference: first M rows of W×W MX tile.
     std::vector<uint256> sigmas(Q);
@@ -365,7 +380,11 @@ bool MineRCCoupledBatchIndependent(const std::vector<CBlockHeader>& headers, int
         sigmas[q] = matmul::v4::DeriveSigma(headers[q]);
         const auto lobe_seeds = DeriveCoupledLobeSeeds(sigmas[q], params, tv);
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-            const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W, W);
+            const auto tile =
+                opts.expansion_threads > 1
+                    ? ExpandMxDequantInt8Parallel(lobe_seeds[ell], W, W,
+                                                  opts.expansion_threads)
+                    : ExpandMxDequantInt8(lobe_seeds[ell], W, W);
             if (tile.size() != static_cast<size_t>(W) * W || lobe_stride > tile.size()) {
                 return false;
             }

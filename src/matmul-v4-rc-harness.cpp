@@ -41,6 +41,7 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -76,6 +77,7 @@ struct Args {
     bool prove_winner_gkr{false};
     uint32_t rounds{0};   // 0 ⇒ keep params.rounds
     uint32_t episodes{3}; // default for toy
+    uint32_t expansion_threads{0}; // 0 = auto for production V3, scalar otherwise
     uint64_t mem_cap{0};  // 0 = unlimited
     std::string backend{"cpu"};
     std::string out_path{"rc-report.json"};
@@ -102,6 +104,7 @@ void PrintUsage(std::ostream& os)
        << "                             (refuses --coupled-production* / --production)\n"
        << "  --rounds N                 override episode rounds (default: params)\n"
        << "  --episodes N               ExtractMX self-qual episode count (default: 3)\n"
+       << "  --expand-threads N         MX page expansion workers (production V3 default: auto)\n"
        << "  --backend NAME             cpu|cuda|hip|metal|auto (default: cpu).\n"
        << "                             Non-CPU uses the applicable RC ExactGemm resolver\n"
        << "                             (LT resolve + RC self-qual fail-closed → CPU).\n"
@@ -261,6 +264,12 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
                 err = "invalid --episodes";
                 return false;
             }
+        } else if (a == "--expand-threads") {
+            const char* v = need("--expand-threads");
+            if (!v || !ParseUint32(v, args.expansion_threads)) {
+                err = "invalid --expand-threads";
+                return false;
+            }
         } else if (a == "--backend") {
             const char* v = need("--backend");
             if (!v) return false;
@@ -383,11 +392,18 @@ rc::RCCoupParams SelectCoupledHarnessParams(const Args& args)
 
 rc::RCCoupOptions SelectCoupledHarnessOptions(const Args& args)
 {
+    rc::RCCoupOptions options;
     if (args.coupled_production_v3 || args.coupled_v3_width_smoke) {
-        return rc::MakeV3RCCoupOptions();
+        options = rc::MakeV3RCCoupOptions();
+    } else if (args.coupled_v3_ci) {
+        options = rc::MakeMediumV3RCCoupOptions();
     }
-    if (args.coupled_v3_ci) return rc::MakeMediumV3RCCoupOptions();
-    return {};
+    if (args.expansion_threads != 0) {
+        options.expansion_threads = args.expansion_threads;
+    } else if (args.coupled_production_v3 || args.coupled_v3_width_smoke) {
+        options.expansion_threads = std::max(1u, std::thread::hardware_concurrency());
+    }
+    return options;
 }
 
 const char* CoupledShapeLabel(const Args& args)
@@ -837,6 +853,8 @@ int RunCoupledHarness(const Args& args)
         options.pushKV("material_exchange", selected.material_exchange);
         options.pushKV("exchange_rows", static_cast<uint64_t>(selected.exchange_rows));
         options.pushKV("exchange_rounds", static_cast<uint64_t>(selected.exchange_rounds));
+        options.pushKV("expansion_threads",
+                       static_cast<uint64_t>(selected.expansion_threads));
         root.pushKV("options", options);
     }
     root.pushKV("digest", digest_ref.GetHex());

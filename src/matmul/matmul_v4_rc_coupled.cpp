@@ -179,14 +179,16 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
 
 /** Stream pages into the hasher without retaining the full bank (Streamed). */
 uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
-                                const RCCoupParams& params, uint32_t transcript_version)
+                                const RCCoupParams& params, uint32_t transcript_version,
+                                uint32_t expansion_threads)
 {
     const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(tags.bank), TagLen(tags.bank));
     const size_t page_bytes = static_cast<size_t>(params.lobe_width) * params.lobe_width;
     for (uint32_t p = 0; p < params.bank_pages; ++p) {
-        const auto page = DeriveCoupledBankPage(header, height, p, params, transcript_version);
+        const auto page = DeriveCoupledBankPage(header, height, p, params, transcript_version,
+                                                expansion_threads);
         if (page.size() != page_bytes) return uint256{};
         outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
     }
@@ -931,22 +933,29 @@ uint256 DeriveCoupledBankPageSeed(const CBlockHeader& header, int32_t height, ui
 
 std::vector<int8_t> DeriveCoupledBankPage(const CBlockHeader& header, int32_t height,
                                           uint32_t page, const RCCoupParams& params,
-                                          uint32_t transcript_version)
+                                          uint32_t transcript_version,
+                                          uint32_t expansion_threads)
 {
     const uint256 page_seed =
         DeriveCoupledBankPageSeed(header, height, page, params, transcript_version);
     if (page_seed.IsNull()) return {};
+    if (expansion_threads > 1) {
+        return ExpandMxDequantInt8Parallel(page_seed, params.lobe_width, params.lobe_width,
+                                           expansion_threads);
+    }
     return ExpandMxDequantInt8(page_seed, params.lobe_width, params.lobe_width);
 }
 
 std::vector<std::vector<int8_t>> DeriveCoupledBankPages(const CBlockHeader& header,
                                                         int32_t height,
                                                         const RCCoupParams& params,
-                                                        uint32_t transcript_version)
+                                                        uint32_t transcript_version,
+                                                        uint32_t expansion_threads)
 {
     std::vector<std::vector<int8_t>> pages(params.bank_pages);
     for (uint32_t p = 0; p < params.bank_pages; ++p) {
-        pages[p] = DeriveCoupledBankPage(header, height, p, params, transcript_version);
+        pages[p] = DeriveCoupledBankPage(header, height, p, params, transcript_version,
+                                         expansion_threads);
     }
     return pages;
 }
@@ -1193,7 +1202,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
     {
         const auto t_bank0 = std::chrono::steady_clock::now();
         if (streamed) {
-            bank_root = BankCommitmentStreaming(header, height, params, tv);
+            bank_root = BankCommitmentStreaming(header, height, params, tv,
+                                                options.expansion_threads);
         } else {
             const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);
             bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width, tags);
@@ -1224,7 +1234,11 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         for (uint32_t ell = 0; ell < params.lobes; ++ell) {
             // Nonce-fresh lobe activation (C2): first M rows of a W×W MX tile
             // (ExpandMxDequantInt8 requires rows % 32 == 0 when M>=32; M=1 takes row 0).
-            const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W0, W0);
+            const auto tile =
+                options.expansion_threads > 1
+                    ? ExpandMxDequantInt8Parallel(lobe_seeds[ell], W0, W0,
+                                                  options.expansion_threads)
+                    : ExpandMxDequantInt8(lobe_seeds[ell], W0, W0);
             if (tile.size() != static_cast<size_t>(W0) * W0) {
                 return uint256{};
             }
@@ -1286,7 +1300,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 std::vector<int8_t> page_for_tx;
                 if (streamed) {
                     const auto t_page0 = std::chrono::steady_clock::now();
-                    auto page = DeriveCoupledBankPage(header, height, page_id, params, tv);
+                    auto page = DeriveCoupledBankPage(header, height, page_id, params, tv,
+                                                      options.expansion_threads);
                     if (out_timing) {
                         out_timing->page_expand_s +=
                             std::chrono::duration<double>(

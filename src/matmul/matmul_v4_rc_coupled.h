@@ -276,6 +276,13 @@ struct RCCoupOptions {
     RCCoupExecMode mode{RCCoupExecMode::SequentialLobes};
 
     /**
+     * Digest-invariant execution policy for MX page/lobe expansion. Consensus
+     * validation defaults to one thread; miners/harnesses may raise this because
+     * ExpandMxDequantInt8Parallel is byte-identical to the scalar oracle.
+     */
+    uint32_t expansion_threads{1};
+
+    /**
      * Coupled transcript domain family (F7). Default ENC_RC_V1 preserves frozen
      * V1 toy / V2 medium goldens. V3 MUST set ENC_RC_V3 (MakeV3RCCoupOptions).
      */
@@ -461,7 +468,8 @@ DeriveCoupledBankPages(const CBlockHeader& header, int32_t height);
 [[nodiscard]] std::vector<std::vector<int8_t>>
 DeriveCoupledBankPages(const CBlockHeader& header, int32_t height,
                        const RCCoupParams& params,
-                       uint32_t transcript_version = ENC_RC_V1);
+                       uint32_t transcript_version = ENC_RC_V1,
+                       uint32_t expansion_threads = 1);
 
 /** Single bank page seed / page (Streamed path); same seed as DeriveCoupledBankPages[p]. */
 [[nodiscard]] uint256
@@ -472,7 +480,8 @@ DeriveCoupledBankPageSeed(const CBlockHeader& header, int32_t height, uint32_t p
 [[nodiscard]] std::vector<int8_t>
 DeriveCoupledBankPage(const CBlockHeader& header, int32_t height, uint32_t page,
                       const RCCoupParams& params,
-                      uint32_t transcript_version = ENC_RC_V1);
+                      uint32_t transcript_version = ENC_RC_V1,
+                      uint32_t expansion_threads = 1);
 
 /** Nonce-fresh lobe seeds from sigma (C2) — cannot amortize across nonces. */
 [[nodiscard]] std::array<uint256, kRCCoupLobes> DeriveCoupledLobeSeeds(const uint256& sigma);
