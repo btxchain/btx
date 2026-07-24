@@ -55,9 +55,14 @@ BOOST_AUTO_TEST_CASE(rc_packed_roundtrip_small)
 {
     namespace rc = matmul::v4::rc;
     constexpr uint32_t W = 32;
+    static constexpr int8_t kM11[] = {0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6};
     std::vector<int8_t> page(static_cast<size_t>(W) * W);
-    for (size_t i = 0; i < page.size(); ++i) {
-        page[i] = static_cast<int8_t>((static_cast<int>(i) % 15) - 7);
+    for (size_t base = 0; base < page.size(); base += rc::kRCPackedScaleBlock) {
+        const uint32_t e = static_cast<uint32_t>(base / rc::kRCPackedScaleBlock) % 4u;
+        for (uint32_t i = 0; i < rc::kRCPackedScaleBlock; ++i) {
+            page[base + i] = static_cast<int8_t>(
+                static_cast<int32_t>(kM11[i % std::size(kM11)]) * (int32_t{1} << e));
+        }
     }
     std::vector<uint8_t> packed;
     std::string err;
@@ -66,6 +71,21 @@ BOOST_AUTO_TEST_CASE(rc_packed_roundtrip_small)
     std::vector<int8_t> back;
     BOOST_REQUIRE(rc::UnpackCanonicalPageToExpanded(packed.data(), packed.size(), W, back, &err));
     BOOST_CHECK(back == page);
+    BOOST_CHECK(std::find(page.begin(), page.end(), int8_t{48}) != page.end());
+    BOOST_CHECK(std::find(page.begin(), page.end(), int8_t{-48}) != page.end());
+}
+
+BOOST_AUTO_TEST_CASE(rc_packed_rejects_non_mx_block)
+{
+    namespace rc = matmul::v4::rc;
+    constexpr uint32_t W = 32;
+    std::vector<int8_t> page(static_cast<size_t>(W) * W, 0);
+    page[0] = 5; // 5 is not an M11 mantissa at any admissible power-of-two scale.
+    std::vector<uint8_t> packed;
+    std::string err;
+    BOOST_CHECK(!rc::PackExpandedPageToCanonical(page.data(), W, packed, &err));
+    BOOST_CHECK(packed.empty());
+    BOOST_CHECK(err.find("not exact MX") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(rc_peak_ready_never_manual_true)

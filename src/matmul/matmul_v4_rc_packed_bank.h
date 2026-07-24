@@ -47,11 +47,15 @@ inline constexpr uint64_t kRCPackedDenominator = 32;
     return static_cast<uint64_t>(bank_pages) * page;
 }
 
-/** Pack int8 expanded page (W×W) into canonical E2M1+UE8M0 bytes (exact round-trip). */
+/**
+ * Pack the consensus expanded-int8 page (W×W) into a deterministic
+ * E2M1+VEC32_UE8M0 storage representation. Every 32-value block must be exactly
+ * factorable as M11·2^e for e∈{0,1,2,3}; otherwise this fails closed.
+ */
 [[nodiscard]] bool PackExpandedPageToCanonical(const int8_t* expanded, uint32_t width,
                                                std::vector<uint8_t>& out, std::string* error);
 
-/** Unpack canonical bytes back to int8 expanded page. */
+/** Unpack the storage representation back to the byte-identical int8 page. */
 [[nodiscard]] bool UnpackCanonicalPageToExpanded(const uint8_t* packed, size_t packed_len,
                                                  uint32_t width, std::vector<int8_t>& out,
                                                  std::string* error);
