@@ -1207,9 +1207,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_fvt_rejects_lastround_grind_accepts_honest)
     // enough layers that a terminal-round unit's tile space comfortably
     // exceeds kRCFreivaldsSegOutTiles (=2 opened tiles/unit), so a corrupted
     // tile can plausibly hide from the sample without an unbounded grind.
-    rc::RCEpisodeParams params_rc = rc::MakeToyRCEpisodeParams();
-    params_rc.rounds = 3;
-    params_rc.L_lyr = 8;
+    // Build the carrier at the SHAPE THE CONSENSUS PATH RESOLVES TO
+    // (ResolveRCEpisodeParams under fMatMulRCUseToyDims -> MakeToyRCEpisodeParams),
+    // so CheckMatMulProofOfWork_RC's profile-2 episode-shape bind gate accepts it
+    // and execution actually reaches the FVT block. Overriding rounds/L_lyr on a
+    // local copy (as an earlier draft did) mismatches the consensus-resolved toy
+    // dims and the carrier is rejected at the shape gate BEFORE FVT runs.
+    rc::RCEpisodeParams params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, rc::MakeToyRCEpisodeParams()));
     BOOST_REQUIRE(rc::ValidateRCEpisodeParams(params_rc));
     const uint32_t R = params_rc.rounds;
 
