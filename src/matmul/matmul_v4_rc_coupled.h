@@ -363,6 +363,16 @@ struct RCCoupOptions {
 /** Optional wall-clock timing for harness / measurement (not consensus). */
 struct RCCoupTiming {
     double bank_s{0};
+    double activation_s{0};
+    /** Streamed page regeneration inside the barrier schedule. */
+    double page_expand_s{0};
+    double gemm_s{0};
+    double accumulate_s{0};
+    double permutation_s{0};
+    double mix_s{0};
+    double exchange_s{0};
+    double extract_s{0};
+    double barrier_root_s{0};
     double barriers_s{0};
     double total_s{0};
 };

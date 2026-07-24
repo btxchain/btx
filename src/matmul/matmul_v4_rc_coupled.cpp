@@ -1168,6 +1168,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         if (out_tx) *out_tx = RCCoupEpisodeTranscript{};
         return uint256{};
     }
+    if (out_timing) *out_timing = RCCoupTiming{};
     const auto t0 = std::chrono::steady_clock::now();
     const uint32_t n = params.StateBytes();
     const uint256 sigma = matmul::v4::DeriveSigma(header);
@@ -1213,21 +1214,29 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         }
     }
 
-    const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params, tv);
     std::vector<int8_t> state(n);
-    const uint32_t M0 = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
-    const uint32_t W0 = params.lobe_width;
-    const uint32_t lobe_stride0 = M0 * W0;
-    for (uint32_t ell = 0; ell < params.lobes; ++ell) {
-        // Nonce-fresh lobe activation (C2): first M rows of a W×W MX tile
-        // (ExpandMxDequantInt8 requires rows % 32 == 0 when M>=32; M=1 takes row 0).
-        const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W0, W0);
-        if (tile.size() != static_cast<size_t>(W0) * W0) {
-            return uint256{};
+    {
+        const auto t_activation0 = std::chrono::steady_clock::now();
+        const auto lobe_seeds = DeriveCoupledLobeSeeds(sigma, params, tv);
+        const uint32_t M0 = params.rows_per_lobe == 0 ? 1 : params.rows_per_lobe;
+        const uint32_t W0 = params.lobe_width;
+        const uint32_t lobe_stride0 = M0 * W0;
+        for (uint32_t ell = 0; ell < params.lobes; ++ell) {
+            // Nonce-fresh lobe activation (C2): first M rows of a W×W MX tile
+            // (ExpandMxDequantInt8 requires rows % 32 == 0 when M>=32; M=1 takes row 0).
+            const auto tile = ExpandMxDequantInt8(lobe_seeds[ell], W0, W0);
+            if (tile.size() != static_cast<size_t>(W0) * W0) {
+                return uint256{};
+            }
+            if (lobe_stride0 > tile.size()) return uint256{};
+            std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0, tile.data(),
+                        lobe_stride0);
         }
-        if (lobe_stride0 > tile.size()) return uint256{};
-        std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0, tile.data(),
-                    lobe_stride0);
+        if (out_timing) {
+            out_timing->activation_s =
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - t_activation0)
+                    .count();
+        }
     }
 
     std::vector<uint256> barrier_roots(params.barriers);
@@ -1276,15 +1285,36 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 std::vector<int64_t> partial(static_cast<size_t>(lobe_stride), 0);
                 std::vector<int8_t> page_for_tx;
                 if (streamed) {
+                    const auto t_page0 = std::chrono::steady_clock::now();
                     auto page = DeriveCoupledBankPage(header, height, page_id, params, tv);
+                    if (out_timing) {
+                        out_timing->page_expand_s +=
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_page0)
+                                .count();
+                    }
                     MaybeZeroSkipPage(page, page_id, options);
                     if (out_tx) page_for_tx = page;
+                    const auto t_gemm0 = std::chrono::steady_clock::now();
                     LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride, page, M,
                                   W, partial.data(), gemm);
+                    if (out_timing) {
+                        out_timing->gemm_s +=
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_gemm0)
+                                .count();
+                    }
                 } else {
                     if (out_tx) page_for_tx = pages[page_id];
+                    const auto t_gemm0 = std::chrono::steady_clock::now();
                     LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride,
                                   pages[page_id], M, W, partial.data(), gemm);
+                    if (out_timing) {
+                        out_timing->gemm_s +=
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_gemm0)
+                                .count();
+                    }
                 }
                 if (out_tx) {
                     RCCoupGemmTranscript gt;
@@ -1298,41 +1328,89 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     gt.Y = partial;
                     out_tx->gemms.push_back(std::move(gt));
                 }
-                for (uint32_t i = 0; i < lobe_stride; ++i) {
-                    dest[i] += partial[i];
+                {
+                    const auto t_acc0 = std::chrono::steady_clock::now();
+                    for (uint32_t i = 0; i < lobe_stride; ++i) {
+                        dest[i] += partial[i];
+                    }
+                    if (out_timing) {
+                        out_timing->accumulate_s +=
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_acc0)
+                                .count();
+                    }
                 }
             }
         }
 
         // C3.b — nonce-derived balanced permutation over full active state.
-        const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params, tv);
-        if (!IsBalancedPermutation(pi, n)) return uint256{};
-        ApplyBalancedPermutation(acc, pi);
+        {
+            const auto t_perm0 = std::chrono::steady_clock::now();
+            const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params, tv);
+            if (!IsBalancedPermutation(pi, n)) return uint256{};
+            ApplyBalancedPermutation(acc, pi);
+            if (out_timing) {
+                out_timing->permutation_s +=
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_perm0)
+                        .count();
+            }
+        }
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
         // Material exchange (default ON) absorbs exchange_rows into the mix domain.
-        ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows,
-                         RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
+        {
+            const auto t_mix0 = std::chrono::steady_clock::now();
+            ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows,
+                             RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
+            if (out_timing) {
+                out_timing->mix_s +=
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_mix0)
+                        .count();
+            }
+        }
         // V3: digest-affecting XOR+permute rounds (no-op when exchange_rounds==0).
-        ApplyMaterialExchangeRounds(acc, sigma, b, options);
+        {
+            const auto t_exchange0 = std::chrono::steady_clock::now();
+            ApplyMaterialExchangeRounds(acc, sigma, b, options);
+            if (out_timing) {
+                out_timing->exchange_s +=
+                    std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() - t_exchange0)
+                        .count();
+            }
+        }
 
         // C3.d — non-affine Extract (lookup-argument-shaped for Stage E).
-        const uint256 extract_seed =
-            Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, b,
-                               /*unused=*/0);
-        const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
-        if (!ExtractActiveState(prf_key, acc, state)) return uint256{};
+        {
+            const auto t_extract0 = std::chrono::steady_clock::now();
+            const uint256 extract_seed =
+                Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, b,
+                                   /*unused=*/0);
+            const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
+            if (!ExtractActiveState(prf_key, acc, state)) return uint256{};
+            if (out_timing) {
+                out_timing->extract_s +=
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_extract0)
+                        .count();
+            }
 
-        // C3.e — feed-forward: next barrier reads this Extracted state.
-        barrier_roots[b] = BarrierRoot(b, state, tags);
-        if (out_tx) {
-            RCCoupExtractTranscript et;
-            et.barrier = b;
-            et.extract_prf = prf_key;
-            et.extract_in = acc;
-            et.extract_out = state;
-            et.barrier_root = barrier_roots[b];
-            out_tx->extracts.push_back(std::move(et));
+            // C3.e — feed-forward: next barrier reads this Extracted state.
+            const auto t_root0 = std::chrono::steady_clock::now();
+            barrier_roots[b] = BarrierRoot(b, state, tags);
+            if (out_timing) {
+                out_timing->barrier_root_s +=
+                    std::chrono::duration<double>(std::chrono::steady_clock::now() - t_root0)
+                        .count();
+            }
+            if (out_tx) {
+                RCCoupExtractTranscript et;
+                et.barrier = b;
+                et.extract_prf = prf_key;
+                et.extract_in = acc;
+                et.extract_out = state;
+                et.barrier_root = barrier_roots[b];
+                out_tx->extracts.push_back(std::move(et));
+            }
         }
         checkpoint = state;
 

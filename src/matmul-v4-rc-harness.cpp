@@ -558,6 +558,15 @@ int RunCoupledHarness(const Args& args)
         mw.pushKV("cpu_reference_executed", !args.skip_reference);
         mw.pushKV("mine_matches_cpu", !args.skip_reference && d == d_mine);
         mw.pushKV("bank_s", t_mine.bank_s);
+        mw.pushKV("activation_s", t_mine.activation_s);
+        mw.pushKV("page_expand_s", t_mine.page_expand_s);
+        mw.pushKV("gemm_s", t_mine.gemm_s);
+        mw.pushKV("accumulate_s", t_mine.accumulate_s);
+        mw.pushKV("permutation_s", t_mine.permutation_s);
+        mw.pushKV("mix_s", t_mine.mix_s);
+        mw.pushKV("exchange_s", t_mine.exchange_s);
+        mw.pushKV("extract_s", t_mine.extract_s);
+        mw.pushKV("barrier_root_s", t_mine.barrier_root_s);
         mw.pushKV("barriers_s", t_mine.barriers_s);
         mw.pushKV("wall_s", t_mine.total_s);
         mw.pushKV("total_s", t_mine.total_s);
@@ -630,6 +639,15 @@ int RunCoupledHarness(const Args& args)
               << "\n";
     std::cout << "  phase_wall: bank=" << timed_mine.bank_s << "s barriers="
               << timed_mine.barriers_s << "s total=" << timed_mine.total_s << "s (mine)\n";
+    std::cout << "  barrier_breakdown: activation=" << timed_mine.activation_s
+              << "s page_expand=" << timed_mine.page_expand_s
+              << "s gemm=" << timed_mine.gemm_s
+              << "s accumulate=" << timed_mine.accumulate_s
+              << "s permutation=" << timed_mine.permutation_s
+              << "s mix=" << timed_mine.mix_s
+              << "s exchange=" << timed_mine.exchange_s
+              << "s extract=" << timed_mine.extract_s
+              << "s barrier_root=" << timed_mine.barrier_root_s << "s\n";
     std::cout << "  reference_wall: bank=" << timed_ref.bank_s << "s barriers="
               << timed_ref.barriers_s << "s total=" << timed_ref.total_s
               << (args.skip_reference ? "s (not run; benchmark only)\n"
@@ -642,6 +660,15 @@ int RunCoupledHarness(const Args& args)
 
     UniValue walls(UniValue::VOBJ);
     walls.pushKV("bank", timed_mine.bank_s);
+    walls.pushKV("activation", timed_mine.activation_s);
+    walls.pushKV("page_expand", timed_mine.page_expand_s);
+    walls.pushKV("gemm", timed_mine.gemm_s);
+    walls.pushKV("accumulate", timed_mine.accumulate_s);
+    walls.pushKV("permutation", timed_mine.permutation_s);
+    walls.pushKV("mix", timed_mine.mix_s);
+    walls.pushKV("exchange", timed_mine.exchange_s);
+    walls.pushKV("extract", timed_mine.extract_s);
+    walls.pushKV("barrier_root", timed_mine.barrier_root_s);
     walls.pushKV("barriers", timed_mine.barriers_s);
     walls.pushKV("total", timed_mine.total_s);
     walls.pushKV("provenance", "chrono_steady_clock_mine_coupled_puzzle");
