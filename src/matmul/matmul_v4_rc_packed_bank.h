@@ -5,6 +5,8 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_PACKED_BANK_H
 #define BTX_MATMUL_MATMUL_V4_RC_PACKED_BANK_H
 
+#include <uint256.h>
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -59,6 +61,26 @@ inline constexpr uint64_t kRCPackedDenominator = 32;
 [[nodiscard]] bool UnpackCanonicalPageToExpanded(const uint8_t* packed, size_t packed_len,
                                                  uint32_t width, std::vector<int8_t>& out,
                                                  std::string* error);
+
+/**
+ * Expand the consensus MX mantissa/scale streams directly into their packed
+ * E2M1+VEC32_UE8M0 storage form. If `expanded` is non-null, materialize the
+ * byte-identical int8 page from the same streams without running the XOF twice.
+ *
+ * The source scale is retained. It can differ from PackExpandedPageToCanonical's
+ * largest-factor encoding for ambiguous all-even blocks, but both unpack to the
+ * same consensus page bytes.
+ */
+[[nodiscard]] bool ExpandMxPageToPackedStream(const uint256& seed, uint32_t width,
+                                              uint32_t threads, std::vector<uint8_t>& packed,
+                                              std::vector<int8_t>* expanded,
+                                              std::string* error);
+
+/** Parallel exact unpack for the generated or canonical packed representation. */
+[[nodiscard]] bool UnpackPackedPageToExpandedParallel(const uint8_t* packed, size_t packed_len,
+                                                      uint32_t width, uint32_t threads,
+                                                      std::vector<int8_t>& out,
+                                                      std::string* error);
 
 } // namespace matmul::v4::rc
 

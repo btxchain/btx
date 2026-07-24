@@ -88,6 +88,35 @@ BOOST_AUTO_TEST_CASE(rc_packed_rejects_non_mx_block)
     BOOST_CHECK(err.find("not exact MX") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(rc_generated_packed_stream_matches_expanded_oracle)
+{
+    namespace rc = matmul::v4::rc;
+    constexpr uint32_t W = 64;
+    uint256 seed;
+    for (size_t i = 0; i < seed.size(); ++i) {
+        seed.data()[i] = static_cast<unsigned char>(0x31u + i);
+    }
+
+    const std::vector<int8_t> oracle = rc::ExpandMxDequantInt8(seed, W, W);
+    std::vector<uint8_t> packed;
+    std::vector<int8_t> generated;
+    std::string err;
+    BOOST_REQUIRE(rc::ExpandMxPageToPackedStream(
+        seed, W, /*threads=*/4, packed, &generated, &err));
+    BOOST_CHECK_EQUAL(packed.size(), rc::PackedBytesForPage(W));
+    BOOST_CHECK(generated == oracle);
+
+    std::vector<int8_t> unpacked;
+    BOOST_REQUIRE(rc::UnpackPackedPageToExpandedParallel(
+        packed.data(), packed.size(), W, /*threads=*/4, unpacked, &err));
+    BOOST_CHECK(unpacked == oracle);
+
+    packed[0] = 126; // outside the admitted UE8M0 exponent range
+    BOOST_CHECK(!rc::UnpackPackedPageToExpandedParallel(
+        packed.data(), packed.size(), W, /*threads=*/4, unpacked, &err));
+    BOOST_CHECK(unpacked.empty());
+}
+
 BOOST_AUTO_TEST_CASE(rc_peak_ready_never_manual_true)
 {
     namespace rc = matmul::v4::rc;

@@ -4,9 +4,14 @@
 
 #include <matmul/matmul_v4_rc_packed_bank.h>
 
+#include <matmul/matmul_v4_bmx4.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <thread>
 
 namespace matmul::v4::rc {
 namespace {
@@ -95,6 +100,26 @@ namespace {
     }
 }
 
+template <typename Fn>
+void ParallelRanges(uint64_t jobs, uint32_t threads, const Fn& fn)
+{
+    if (jobs == 0) return;
+    threads = std::max(1u, std::min<uint32_t>(threads, 64u));
+    threads = std::min<uint32_t>(threads, static_cast<uint32_t>(jobs));
+    if (threads <= 1) {
+        fn(0, jobs);
+        return;
+    }
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (uint32_t t = 0; t < threads; ++t) {
+        const uint64_t begin = (jobs * t) / threads;
+        const uint64_t end = (jobs * (t + 1)) / threads;
+        workers.emplace_back([&, begin, end] { fn(begin, end); });
+    }
+    for (auto& worker : workers) worker.join();
+}
+
 } // namespace
 
 bool PackExpandedPageToCanonical(const int8_t* expanded, uint32_t width,
@@ -179,6 +204,130 @@ bool UnpackCanonicalPageToExpanded(const uint8_t* packed, size_t packed_len, uin
             out[base + i + 1] =
                 static_cast<int8_t>(static_cast<int32_t>(hi) * scale);
         }
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool ExpandMxPageToPackedStream(const uint256& seed, uint32_t width, uint32_t threads,
+                                std::vector<uint8_t>& packed, std::vector<int8_t>* expanded,
+                                std::string* error)
+{
+    packed.clear();
+    if (expanded != nullptr) expanded->clear();
+    if (width == 0 || (width % kRCPackedScaleBlock) != 0 || threads == 0) {
+        if (error) *error = "ExpandMxPageToPackedStream: bad args";
+        return false;
+    }
+    const uint64_t elems = static_cast<uint64_t>(width) * width;
+    if (elems > std::numeric_limits<size_t>::max()) {
+        if (error) *error = "ExpandMxPageToPackedStream: page too large";
+        return false;
+    }
+    const uint64_t blocks = elems / kRCPackedScaleBlock;
+    const uint64_t packed_bytes = PackedBytesForElements(elems);
+    if (packed_bytes > std::numeric_limits<size_t>::max()) {
+        if (error) *error = "ExpandMxPageToPackedStream: packed page too large";
+        return false;
+    }
+
+    std::vector<int8_t> mantissas(static_cast<size_t>(elems));
+    std::vector<uint8_t> scales(static_cast<size_t>(blocks));
+    matmul::v4::bmx4::ExpandMantissaStreamParallel(
+        seed, mantissas.size(), mantissas.data(), threads);
+    matmul::v4::bmx4::ExpandScaleStreamParallel(seed, scales.size(), scales.data(), threads);
+
+    packed.resize(static_cast<size_t>(packed_bytes));
+    if (expanded != nullptr) expanded->resize(static_cast<size_t>(elems));
+    std::atomic_bool valid{true};
+    ParallelRanges(blocks, threads, [&](uint64_t begin, uint64_t end) {
+        for (uint64_t block = begin; block < end; ++block) {
+            const uint8_t exponent = scales[static_cast<size_t>(block)];
+            if (exponent > 3u) {
+                valid.store(false, std::memory_order_relaxed);
+                continue;
+            }
+            const size_t packed_base = static_cast<size_t>(block * 17u);
+            const size_t elem_base = static_cast<size_t>(block * kRCPackedScaleBlock);
+            packed[packed_base] = static_cast<uint8_t>(127u + exponent);
+            const int32_t scale = int32_t{1} << exponent;
+            for (uint32_t i = 0; i < kRCPackedScaleBlock; i += 2) {
+                uint8_t lo = 0;
+                uint8_t hi = 0;
+                if (!EncodeE2M1Nibble(mantissas[elem_base + i], lo) ||
+                    !EncodeE2M1Nibble(mantissas[elem_base + i + 1], hi)) {
+                    valid.store(false, std::memory_order_relaxed);
+                    break;
+                }
+                packed[packed_base + 1 + i / 2] = static_cast<uint8_t>(lo | (hi << 4));
+                if (expanded != nullptr) {
+                    (*expanded)[elem_base + i] = static_cast<int8_t>(
+                        static_cast<int32_t>(mantissas[elem_base + i]) * scale);
+                    (*expanded)[elem_base + i + 1] = static_cast<int8_t>(
+                        static_cast<int32_t>(mantissas[elem_base + i + 1]) * scale);
+                }
+            }
+        }
+    });
+    if (!valid.load(std::memory_order_relaxed)) {
+        packed.clear();
+        if (expanded != nullptr) expanded->clear();
+        if (error) *error = "ExpandMxPageToPackedStream: invalid generated MX stream";
+        return false;
+    }
+    if (error) error->clear();
+    return true;
+}
+
+bool UnpackPackedPageToExpandedParallel(const uint8_t* packed, size_t packed_len,
+                                        uint32_t width, uint32_t threads,
+                                        std::vector<int8_t>& out, std::string* error)
+{
+    out.clear();
+    if (packed == nullptr || width == 0 || (width % kRCPackedScaleBlock) != 0 ||
+        threads == 0) {
+        if (error) *error = "UnpackPackedPageToExpandedParallel: bad args";
+        return false;
+    }
+    const uint64_t elems = static_cast<uint64_t>(width) * width;
+    if (elems > std::numeric_limits<size_t>::max() ||
+        packed_len != PackedBytesForElements(elems)) {
+        if (error) *error = "UnpackPackedPageToExpandedParallel: packed length mismatch";
+        return false;
+    }
+    const uint64_t blocks = elems / kRCPackedScaleBlock;
+    out.resize(static_cast<size_t>(elems));
+    std::atomic_bool valid{true};
+    ParallelRanges(blocks, threads, [&](uint64_t begin, uint64_t end) {
+        for (uint64_t block = begin; block < end; ++block) {
+            const size_t packed_base = static_cast<size_t>(block * 17u);
+            const size_t elem_base = static_cast<size_t>(block * kRCPackedScaleBlock);
+            const uint8_t scale_code = packed[packed_base];
+            if (scale_code < 127u || scale_code > 130u) {
+                valid.store(false, std::memory_order_relaxed);
+                continue;
+            }
+            const int32_t scale = int32_t{1} << (scale_code - 127u);
+            for (uint32_t i = 0; i < kRCPackedScaleBlock; i += 2) {
+                const uint8_t byte = packed[packed_base + 1 + i / 2];
+                int8_t lo = 0;
+                int8_t hi = 0;
+                if (!DecodeE2M1Nibble(byte & 0x0f, lo) ||
+                    !DecodeE2M1Nibble(byte >> 4, hi)) {
+                    valid.store(false, std::memory_order_relaxed);
+                    break;
+                }
+                out[elem_base + i] =
+                    static_cast<int8_t>(static_cast<int32_t>(lo) * scale);
+                out[elem_base + i + 1] =
+                    static_cast<int8_t>(static_cast<int32_t>(hi) * scale);
+            }
+        }
+    });
+    if (!valid.load(std::memory_order_relaxed)) {
+        out.clear();
+        if (error) *error = "UnpackPackedPageToExpandedParallel: invalid packed MX page";
+        return false;
     }
     if (error) error->clear();
     return true;

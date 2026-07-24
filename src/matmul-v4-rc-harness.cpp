@@ -22,6 +22,7 @@
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
+#include <matmul/matmul_v4_rc_packed_bank.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
 #include <matmul/matmul_v4_rc_transcript.h>
 #include <primitives/block.h>
@@ -71,6 +72,7 @@ struct Args {
     bool coupled_v3_ci{false};           // MediumV3 CI shape
     bool coupled_production_v3{false};   // full V3 production shape
     bool coupled_v3_width_smoke{false};  // W=8192/M=128, four-page V3 smoke
+    bool coupled_page_codec_bench{false}; // production W page pack/unpack benchmark
     bool skip_reference{false};          // benchmark only; do not run CPU oracle
     bool mode_sweep{false};
     bool mem_cap_sweep{false};
@@ -97,6 +99,7 @@ void PrintUsage(std::ostream& os)
        << "  --coupled-v3-ci            Stage C V3 CI dims (MakeMediumV3RCCoupParams)\n"
        << "  --coupled-v3-width-smoke   V3 W=8192/M=128/four-exchange-round smoke (4 pages)\n"
        << "  --coupled-production-v3    full V3 production dims; bounded Streamed mode only\n"
+       << "  --coupled-page-codec-bench benchmark one production page's exact pack/unpack\n"
        << "  --skip-reference           benchmark only; skip independent CPU ExactGemm replay\n"
        << "  --mem-cap-sweep            production coupled under 512MiB/2GiB/8GiB caps\n"
        << "  --mode-sweep               also time Resident/Checkpointed/Streamed\n"
@@ -241,6 +244,9 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             args.coupled_production = false;
             args.coupled_production_v2 = false;
             args.coupled_medium = false;
+        } else if (a == "--coupled-page-codec-bench") {
+            args.coupled_page_codec_bench = true;
+            args.coupled = false;
         } else if (a == "--skip-reference") {
             args.skip_reference = true;
         } else if (a == "--mem-cap-sweep") {
@@ -425,6 +431,163 @@ const char* CoupModeName(rc::RCCoupExecMode m)
     case rc::RCCoupExecMode::Resident: return "Resident";
     }
     return "unknown";
+}
+
+int RunCoupledPageCodecBench(const Args& args)
+{
+    const rc::RCCoupParams params = rc::MakeProductionV3RCCoupParams();
+    const uint32_t width = params.lobe_width;
+    const uint32_t repetitions = args.episodes;
+    const uint32_t threads =
+        args.expansion_threads != 0
+            ? args.expansion_threads
+            : std::max(1u, std::thread::hardware_concurrency());
+    const CBlockHeader header = MakeHeader(42);
+    const uint256 page_seed =
+        rc::DeriveCoupledBankPageSeed(header, /*height=*/0, /*page=*/0, params, rc::ENC_RC_V3);
+
+    const auto derive_begin = std::chrono::steady_clock::now();
+    const std::vector<int8_t> page = rc::DeriveCoupledBankPage(
+        header, /*height=*/0, /*page=*/0, params, rc::ENC_RC_V3, threads);
+    const double derive_s =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - derive_begin).count();
+    const size_t expected_page_bytes = static_cast<size_t>(width) * width;
+    if (page.size() != expected_page_bytes) {
+        std::cerr << "error: production page derivation returned " << page.size()
+                  << " bytes, expected " << expected_page_bytes << "\n";
+        return 1;
+    }
+
+    std::vector<double> pack_walls;
+    std::vector<double> unpack_walls;
+    std::vector<double> direct_pack_walls;
+    std::vector<double> parallel_unpack_walls;
+    std::vector<uint8_t> packed;
+    std::vector<int8_t> unpacked;
+    std::string codec_error;
+    pack_walls.reserve(repetitions);
+    unpack_walls.reserve(repetitions);
+    direct_pack_walls.reserve(repetitions);
+    parallel_unpack_walls.reserve(repetitions);
+
+    for (uint32_t i = 0; i < repetitions; ++i) {
+        const auto pack_begin = std::chrono::steady_clock::now();
+        if (!rc::PackExpandedPageToCanonical(page.data(), width, packed, &codec_error)) {
+            std::cerr << "error: pack failed: " << codec_error << "\n";
+            return 1;
+        }
+        pack_walls.push_back(
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - pack_begin).count());
+
+        const auto unpack_begin = std::chrono::steady_clock::now();
+        if (!rc::UnpackCanonicalPageToExpanded(
+                packed.data(), packed.size(), width, unpacked, &codec_error)) {
+            std::cerr << "error: unpack failed: " << codec_error << "\n";
+            return 1;
+        }
+        unpack_walls.push_back(std::chrono::duration<double>(
+                                   std::chrono::steady_clock::now() - unpack_begin)
+                                   .count());
+        if (unpacked != page) {
+            std::cerr << "error: exact packed page did not round-trip\n";
+            return 1;
+        }
+
+        std::vector<int8_t> generated;
+        const auto direct_begin = std::chrono::steady_clock::now();
+        if (!rc::ExpandMxPageToPackedStream(
+                page_seed, width, threads, packed, &generated, &codec_error)) {
+            std::cerr << "error: direct packed expansion failed: " << codec_error << "\n";
+            return 1;
+        }
+        direct_pack_walls.push_back(std::chrono::duration<double>(
+                                        std::chrono::steady_clock::now() - direct_begin)
+                                        .count());
+        if (generated != page) {
+            std::cerr << "error: direct packed expansion differed from consensus page\n";
+            return 1;
+        }
+
+        const auto parallel_unpack_begin = std::chrono::steady_clock::now();
+        if (!rc::UnpackPackedPageToExpandedParallel(
+                packed.data(), packed.size(), width, threads, unpacked, &codec_error)) {
+            std::cerr << "error: parallel unpack failed: " << codec_error << "\n";
+            return 1;
+        }
+        parallel_unpack_walls.push_back(std::chrono::duration<double>(
+                                            std::chrono::steady_clock::now() -
+                                            parallel_unpack_begin)
+                                            .count());
+        if (unpacked != page) {
+            std::cerr << "error: parallel unpack differed from consensus page\n";
+            return 1;
+        }
+    }
+
+    auto mean = [](const std::vector<double>& values) {
+        double total = 0.0;
+        for (double value : values) total += value;
+        return values.empty() ? 0.0 : total / static_cast<double>(values.size());
+    };
+    const double pack_mean = mean(pack_walls);
+    const double unpack_mean = mean(unpack_walls);
+    const double direct_pack_mean = mean(direct_pack_walls);
+    const double parallel_unpack_mean = mean(parallel_unpack_walls);
+    const double page_mib = static_cast<double>(page.size()) / static_cast<double>(1u << 20);
+    const double packed_mib =
+        static_cast<double>(packed.size()) / static_cast<double>(1u << 20);
+
+    UniValue root(UniValue::VOBJ);
+    root.pushKV("tool", "rc-coupled-page-codec-bench");
+    root.pushKV("schema_version", 1);
+    root.pushKV("stub", false);
+    root.pushKV("shape", "production-v3-page");
+    root.pushKV("width", static_cast<uint64_t>(width));
+    root.pushKV("expanded_bytes", static_cast<uint64_t>(page.size()));
+    root.pushKV("packed_bytes", static_cast<uint64_t>(packed.size()));
+    root.pushKV("expansion_threads", static_cast<uint64_t>(threads));
+    root.pushKV("repetitions", static_cast<uint64_t>(repetitions));
+    root.pushKV("derive_s", derive_s);
+    root.pushKV("pack_mean_s", pack_mean);
+    root.pushKV("unpack_mean_s", unpack_mean);
+    root.pushKV("direct_packed_expand_mean_s", direct_pack_mean);
+    root.pushKV("parallel_unpack_mean_s", parallel_unpack_mean);
+    root.pushKV("pack_expanded_mib_s", pack_mean > 0.0 ? page_mib / pack_mean : 0.0);
+    root.pushKV("unpack_expanded_mib_s", unpack_mean > 0.0 ? page_mib / unpack_mean : 0.0);
+    root.pushKV("direct_packed_expand_mib_s",
+                direct_pack_mean > 0.0 ? page_mib / direct_pack_mean : 0.0);
+    root.pushKV("parallel_unpack_expanded_mib_s",
+                parallel_unpack_mean > 0.0 ? page_mib / parallel_unpack_mean : 0.0);
+    root.pushKV("packed_mib", packed_mib);
+    root.pushKV("roundtrip_exact", true);
+    root.pushKV("consensus_note", "benchmark only; no activation setting changed");
+
+    std::ofstream ofs(args.out_path, std::ios::trunc);
+    if (!ofs) {
+        std::cerr << "error: cannot write JSON to " << args.out_path << "\n";
+        return 1;
+    }
+    ofs << root.write(2) << "\n";
+
+    std::cout << "== MatMul ENC_RC coupled production-page codec ==\n"
+              << "  width:       " << width << "\n"
+              << "  expanded:    " << page_mib << " MiB\n"
+              << "  packed:      " << packed_mib << " MiB\n"
+              << "  derive:      " << derive_s << " s\n"
+              << "  pack mean:   " << pack_mean << " s ("
+              << (pack_mean > 0.0 ? page_mib / pack_mean : 0.0) << " expanded MiB/s)\n"
+              << "  unpack mean: " << unpack_mean << " s ("
+              << (unpack_mean > 0.0 ? page_mib / unpack_mean : 0.0)
+              << " expanded MiB/s)\n"
+              << "  direct pack: " << direct_pack_mean << " s ("
+              << (direct_pack_mean > 0.0 ? page_mib / direct_pack_mean : 0.0)
+              << " expanded MiB/s)\n"
+              << "  par unpack:  " << parallel_unpack_mean << " s ("
+              << (parallel_unpack_mean > 0.0 ? page_mib / parallel_unpack_mean : 0.0)
+              << " expanded MiB/s)\n"
+              << "  exact:       true\n"
+              << "  wrote:       " << args.out_path << "\n";
+    return 0;
 }
 
 
@@ -1049,6 +1212,10 @@ int main(int argc, char* argv[])
     if (args.help) {
         PrintUsage(std::cout);
         return 0;
+    }
+
+    if (args.coupled_page_codec_bench) {
+        return RunCoupledPageCodecBench(args);
     }
 
     if (args.prove_winner_gkr) {
