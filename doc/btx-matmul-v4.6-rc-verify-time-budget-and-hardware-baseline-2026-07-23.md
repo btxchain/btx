@@ -20,14 +20,18 @@ datacenter-advantage-defaults-2026-07-21.md` (profile-2 rationale).
 
 ## 1. What the budget governs
 
-The consensus arbiter of record is **int64 exact CPU replay**
-(`RecomputeResidentCurriculumReference` / `RecomputeCoupledPuzzleReference`); a
-block is valid iff its claimed result byte-identically replays. The **sampled
-carrier verifier** (`matmul_v4_rc_freivalds_sampled.cpp`) is the *relay-time*
-sublinear check that lets a node accept-and-forward a profile-2 carrier without
-paying the full O(N) replay on the network path. Its wall-clock time is what the
-900 ms budget bounds — the time a validating node spends verifying one carrier
-before relaying it.
+The consensus authority **depends on the profile**. Under **profile 1**, int64
+exact CPU replay (`RecomputeResidentCurriculumReference` /
+`RecomputeCoupledPuzzleReference`) is the sole authority: a block is valid iff its
+claimed result byte-identically replays. Under **profile 2** (the datacenter
+default), the **sampled carrier verifier** (`matmul_v4_rc_freivalds_sampled.cpp`)
+is *itself* the consensus accept/reject authority — `CheckMatMulProofOfWork_RC`
+returns validity directly from it (a deterrence rule with a ~0.27 % residual; see
+§1.1) and does **not** re-run the full replay per block. int64 exact replay
+remains the arithmetic reference used at mining time and the profile-1 authority,
+but for profile 2 it is not a wired per-block dispute mechanism. The 900 ms budget
+bounds the wall-clock time a validating node spends on the profile-2 carrier
+verify before relaying.
 
 The budget is a **relay-path liveness bound, not a soundness parameter.** The
 budget only decides *which hardware can keep up with block flow*; it never
@@ -35,64 +39,89 @@ relaxes what is checked.
 
 ### 1.1 What the sampled carrier actually enforces (honest bound)
 
-An earlier draft of this section claimed "all ≈400 units checked; single-fault
-detection is linear." That was inaccurate on both counts and is corrected here.
+Two earlier drafts of this section were inaccurate — first "all ≈400 units
+checked; single-fault detection is linear," then a `(1−f)^384` *economic*
+work-skipping bound. Both overstated. This is the corrected, deliberately
+conservative statement, aligned with the code and with the two 2026-07-24
+FS/T-BIND audits.
 
 The carrier is checked at two granularities:
 
-- **Unit granularity — exhaustive, not sampled.** The sampleable units are the
-  Λ streamed DOWN-projection outputs, `Λ = rounds · L_lyr = 8 · 24 = 192` at the
-  production datacenter shape (`MakeDatacenterRCEpisodeParams`). The FS sample
-  count is `kRCFreivaldsSampleCount = 512 ≥ Λ`, and `FreivaldsSampleLayers`
-  draws `min(λ, Λ)` distinct units — so **every** streamed unit is checked. There
-  is no unit-level sampling gap. (The "≈400" in the old text was the GKR *wire*
-  count, a different quantity.)
-- **Tile granularity — sampled.** Within each checked unit, the verifier opens
+- **Unit granularity — exhaustive, not sampled.** The sampleable ("streamed")
+  units are the layers whose `extract_out` is committed to a round's tile-tree —
+  by `LayerInStream`, both the per-round **SV** output and each fused-FFN **DOWN**
+  output. At the production datacenter shape (`MakeDatacenterRCEpisodeParams`):
+  `rounds = 8`, `L_lyr = 24`, so there are `8·24 = 192` FFN-DOWN units **plus**
+  `8·1 = 8` SV units = **200 streamed units** (the production carrier benchmark
+  reports `units_total = 200`). The FS sample count is
+  `kRCFreivaldsSampleCount = 512 ≥ 200`, and `FreivaldsSampleLayers` draws
+  `min(λ, 200)` distinct units — so **every** streamed unit is checked; there is
+  no unit-level sampling gap.
+- **Tile granularity — sampled.** Within each checked unit the verifier opens
   `kRCFreivaldsSegOutTiles = 2` output tiles (each a `(row, col-segment)`) out of
-  the layer's full tile space `T ≈ 1.1·10⁷`, and Freivalds-verifies each opened
-  tile's int8·int8→int64 GEMM exactly (per-tile Freivalds false-accept ≤ 2⁻⁶⁴).
-  The two tiles per unit are drawn from the **target-bound, unbiasable** SegPos
-  coin (`kRCFreivaldsSegPosTag`), so a miner cannot see or steer which tiles will
-  be opened before committing operands.
+  the unit's full tile space, giving `192·2 = 384` FFN tile checks + `8·2 = 16`
+  SV tile checks = **400 tile checks** (`extract_tiles = 400`). Each opened tile
+  is **exactly recomputed** — the verifier regenerates/authenticates the anchored
+  input row, recomputes the full selected contraction, applies `Extract`, compares
+  the exact int8 output bytes, and opens those bytes against the round root. This
+  is **not** Freivalds: there is no probabilistic per-tile error term. The two
+  tiles per unit are derived from the SegPos coin (`kRCFreivaldsSegPosTag`) over
+  the **target/header/root-bound** FS transcript, so the sample is fixed by the
+  committed candidate — a miner cannot steer it *within* one candidate (but see
+  the grinding caveat below).
 
-**Consequence — this is a work-skipping bound, not exact completeness.** A single
-isolated wrong tile is *not* reliably caught: P(caught) ≈ `2/T ≈ 1.8·10⁻⁷` per
-layer. What the carrier bounds is the *fraction of episode compute a miner can
-skip and still be accepted*. Let a strategy corrupt fraction `φ_l` of layer `l`'s
-tiles. Per layer, P(both opened tiles land in clean tiles) ≈ `(1−φ_l)²`. Across
-the Λ checked units, `P(accept) ≈ Π_l (1−φ_l)²`. For a total skipped fraction `f`
-the product is **maximized by spreading `f` uniformly** (`log(1−φ)` is concave),
-giving the adversary's best case and hence the soundness bound:
+**What this does and does not give.** A single isolated wrong tile is *not*
+reliably caught: with a per-FFN-unit tile space `N ≈ 1.1·10⁷` and two draws,
+P(caught) ≈ `2/N ≈ 1.8·10⁻⁷` per unit. For a **fixed committed** FFN output with
+bad-tile fraction `φ_l`, two draws without replacement miss all bad tiles with
+probability `((N−b_l)(N−b_l−1))/(N(N−1)) ≤ (1−φ_l)²`. Over the 192 FFN units,
+the product is maximized by spreading a fixed average bad-tile fraction `φ`
+uniformly:
 
-> **P(accept | skip fraction `f` of the carrier's MACs) ≤ (1 − f)^{2Λ} = (1 − f)^{384}.**
+> **Conditional tile bound: P(accept) ≤ (1 − φ)^{384}**, where **`φ` is the
+> average fraction of committed FFN output *tiles* that are wrong** (not the
+> fraction of work skipped), and the 16 SV checks are additional. `384` is the
+> FFN tile-draw count `192·2`, **not** `2 ×` the 200 units.
 
-Reading off the exponent (`2Λ = 384` at production):
+**This is NOT (yet) an economic work-skipping guarantee — three premises are
+unmet.** Converting "average bad-tile fraction `φ`" into "fraction of mining work
+skipped `f`" and calling the result an economic bound is *not currently
+justified*:
 
-| Skipped compute `f` | Max P(accept) |
-|---|---|
-| 0.18 % | 0.5 |
-| 1 %    | 2.1 · 10⁻² |
-| 5 %    | 2.8 · 10⁻⁹ |
-| 10 %   | 2.7 · 10⁻¹⁸ |
+1. **No cost-to-error lemma.** Nothing proves that skipping fraction `f` of the
+   work forces ≥ `f` bad committed tiles. In particular `Extract` is a
+   non-injective quantizer: the checked object is the int8 output, so a *cheaper
+   wrong* accumulator that quantizes to the same int8 bytes passes. Fused UP/DOWN
+   sharing and alternative algorithms further break a 1:1 MAC↔tile identification.
+   So the earlier "skip 10 % of work → 2.7·10⁻¹⁸" reading is **withdrawn**.
+2. **No adaptive-grinding proof.** Binding the target/header/roots into the FS
+   seed fixes the sample *per candidate*; it does not stop a miner from preparing
+   and abandoning many candidates. With per-candidate favorable probability `p`,
+   `G` attempts give `1−(1−p)^G`; the composition with PoW cost is unproven. The
+   code and comments should say "deterministically transcript-bound," **not**
+   "unbiasable."
+3. **Fixed-length T-BIND not enforced.** `VerifyMerkleProof` does not yet enforce
+   the depth/length implied by the consensus-pinned stream (see the R-01 fix); the
+   standard vector-commitment premise the bound assumes is being enforced
+   separately.
 
-So a miner who wants even a coin-flip chance of acceptance can skip at most
-~0.18 % of the work; skipping 10 % is rejected except with probability ~10⁻¹⁸.
-The only "undetectable" cheating (isolated tiles) saves a negligible fraction of
-energy, so it does not undermine the PoW cost function. This is the property on
-which launch acceptability rests: **not** that every wrong tile is caught, but
-that no *economically meaningful* amount of skipped work survives.
+**Consensus authority (stated honestly).** Under profile 2 the **sampled carrier
+is itself the consensus accept/reject authority** — `CheckMatMulProofOfWork_RC`
+returns `true` directly on a passing carrier (`pow.cpp:4258`), accepted "by the
+sampled authority (deterrence, ~0.27 % residual)." The int64 exact-replay
+reference (`VerifyBoundedExactReplay`) is the **profile-1** sole authority and the
+mining-time reference oracle; for profile 2 there is **no wired deterministic
+dispute mechanism** that re-runs it to reverse an acceptance, so it must not be
+described as profile 2's "arbiter." The formal GKR/FRI arbiter is compile-time
+hard-disabled.
 
-**Scope of the bound.** It covers the FFN DOWN-projection MACs, which are the
-episode's dominant arithmetic intensity; attention (QKt / AV) is deliberately
-held sub-dominant by the `n_ctx` hash-bound guardrail (§, `MakeDatacenterRC…`),
-so the bounded work is the work that matters economically. The DOWN-projection
-matmul itself is enforced exactly per opened tile (recompute-before-open, the
-#101 fix; §9). Exact int32 recompute of each opened tile remains the arithmetic
-authority; the int64 CPU replay stays the sole consensus arbiter.
-
-This is the FS-sampled carrier's **launch** soundness. Closing the tile-level gap
-to exact completeness (every wrong tile caught) is the Stage C succinct-proof
-upgrade — an eventual replacement, not a launch blocker.
+**Bottom line for launch.** Profile 2 is a **deterrence rule** with a documented
+~0.27 % residual — which is the basis on which it was accepted as launch PoW — and
+the `(1−φ)^384` tile bound illustrates why *gross* cheating is caught with
+overwhelming probability. It is **not** a formally-proven economic soundness bound;
+the cost-to-error lemma, the grinding game, and fixed-length T-BIND are exactly
+the items the external cryptographic audit (a standing pre-activation gate, heights
+`INT32_MAX`) must close, alongside the eventual Stage C exact-completeness proof.
 
 ---
 
@@ -225,8 +254,9 @@ Rationale:
 
 This is a *baseline*, not a requirement that every node run at the floor: nodes
 above the floor have headroom; nodes below it can still run the full int64 exact
-replay (the consensus arbiter), they simply cannot keep up with the sublinear
-relay-path check at block flow and should not be relied on as relay validators.
+replay (the profile-1 authority and exact reference), they simply cannot keep up
+with the sublinear relay-path check at block flow and should not be relied on as
+profile-2 relay validators.
 
 ---
 

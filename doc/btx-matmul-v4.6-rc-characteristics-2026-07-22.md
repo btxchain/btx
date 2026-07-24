@@ -41,14 +41,19 @@ INT32_MAX` on every public network):
   profile 2:
   - The **FS-sampled sublinear carrier verifier**
     (`matmul_v4_rc_freivalds_sampled.cpp`) is the **relay-time accept/reject
-    authority** — the check a validating node runs before forwarding a block,
-    so it never pays the full O(N) replay on the network path. It is a
-    **deterrence-based work-skipping soundness bound**, not a claim that every
-    wrong tile is caught (see §2.1).
+    authority** — `CheckMatMulProofOfWork_RC` returns block validity directly
+    from it (a deterrence rule, ~0.27% residual; see §2.1), so it never pays the
+    full O(N) replay on the network path. It is **not** a claim that every wrong
+    tile is caught.
   - The **int64 CPU `ExactReplay` reference**
-    (`RecomputeResidentCurriculumReference`) is retained as the **asynchronous,
-    ε = 0 arbiter and dispute path** — it is the *ultimate* consensus reference
-    that decides validity byte-exactly if a claimed result is ever disputed.
+    (`RecomputeResidentCurriculumReference`) is the arithmetic reference used at
+    **mining** time and the **profile-1** consensus authority. For profile 2 it is
+    **not** a wired per-block dispute mechanism — there is currently no
+    deterministic consensus path that re-runs it to reverse a profile-2
+    acceptance, so it must not be described as profile 2's "arbiter." (Adding a
+    real dispute/challenge protocol, or a complete audited succinct proof, is
+    future work; until then profile 2's authority *is* the sampled deterrence
+    rule.)
   - (Profile 1 of this same selector = epoch-0 base dimensions, with
     `ExactReplay` as the sole authority; it is retained but is not the
     default.)
@@ -73,31 +78,47 @@ defaults to **3**. "Profile 2" and "profile 3" here name positions in two
 separate enumerations, not two profiles of one selector. Read as a slogan: the
 two-stage PoW is **"profile-2 episode + profile-3 coupled."**
 
-### 2.1 The honest soundness bound (do not overclaim)
+### 2.1 The honest soundness statement (do not overclaim)
 
-The FS-sampled carrier's guarantee is a **work-skipping bound**, derived in full
-in `doc/btx-matmul-v4.6-rc-verify-time-budget-and-hardware-baseline-2026-07-23.md`
-§1.1:
+The full, corrected derivation is in
+`doc/btx-matmul-v4.6-rc-verify-time-budget-and-hardware-baseline-2026-07-23.md`
+§1.1. In summary:
 
-> **P(accept | a miner skips fraction `f` of the episode's checked MACs) ≤
-> (1 − f)^(2Λ)**, where `Λ = rounds · L_lyr` is the number of exhaustively
-> sampled streamed units (`Λ = 192` at the production datacenter shape, so the
-> exponent is `2Λ = 384`).
+- **Unit coverage is exhaustive.** The streamed units are the per-round SV output
+  **and** each fused-FFN DOWN output (`LayerInStream`): at production that is
+  `8·24 = 192` FFN units **plus** `8` SV units = **200 units** (benchmark:
+  `units_total = 200`). Since `kRCFreivaldsSampleCount = 512 ≥ 200`, every unit is
+  checked.
+- **Tiles are sampled and *exactly recomputed*.** Two tiles per unit are opened
+  = `192·2 = 384` FFN + `8·2 = 16` SV = **400 tile checks**. Each opened tile is
+  **exactly recomputed** (regenerate anchored input row → full contraction →
+  `Extract` → byte-compare → Merkle-open); there is **no** Freivalds probabilistic
+  error term on checked tiles.
+- **The tile bound is conditional.** For a fixed committed FFN output with average
+  bad-*tile* fraction `φ`, `P(accept) ≤ (1 − φ)^384` (the `384` is the FFN
+  tile-draw count, not `2 ×` the 200 units; the 16 SV draws are additional). It
+  does **not** claim every wrong tile is caught — an isolated wrong tile is caught
+  with only ≈`2/N ≈ 1.8·10⁻⁷` per unit.
 
-This bound does **not** claim every wrong tile is caught — an isolated wrong
-tile is essentially never caught by the sample (≈2/T per layer, with the tile
-space `T ≈ 1.1·10⁷`), but catching an isolated tile would only save a
-negligible sliver of work anyway. What the bound guarantees is that no
-*economically meaningful* fraction of the episode's compute can be skipped and
-still be accepted with non-negligible probability: skipping just 1% of the work
-already caps acceptance at ≈2.1%, and skipping 10% caps it at ≈2.7·10⁻¹⁸. This
-is **not** "formally sound" or "externally audited" — it is a deterrence
-argument, and it is the property the launch design relies on.
+**Do not read this as an economic "skip X% of work" guarantee.** Turning "bad-tile
+fraction `φ`" into "fraction of work skipped `f`" needs a cost-to-error lemma that
+is **not proved** — and `Extract` is a non-injective quantizer (the checked object
+is the int8 output, so a *cheaper wrong* accumulator that quantizes to the same
+bytes passes). The earlier "skip 10% → 2.7·10⁻¹⁸" phrasing is **withdrawn**.
+Likewise, the sample is deterministically bound to the target/header/root
+transcript per candidate, but that is **not** proven "unbiasable" against a miner
+who grinds many candidates, and the fixed-length Merkle T-BIND premise is being
+enforced separately (opening-length checks).
 
-Closing the remaining gap — catching *every* wrong tile, i.e. exact completeness
-rather than a work-skipping bound — is the job of the **succinct proof upgrade
-(Stage C)** described in §4 below. That upgrade is an *eventual* replacement for
-the carrier's role, not part of what ships at launch.
+**What profile 2 actually is:** a **deterrence rule** with a documented ~0.27%
+residual, and the sampled carrier is *itself* the profile-2 consensus accept
+authority (int64 exact replay is the profile-1 authority and mining reference, not
+a wired per-block dispute mechanism for profile 2 — see §2). This is the basis on
+which it was accepted as launch PoW. It is **not** "formally sound / externally
+audited"; the cost-to-error lemma, the grinding game, and T-BIND are exactly what
+the standing external cryptographic audit (pre-activation gate; heights
+`INT32_MAX`) must close, alongside the eventual **Stage C** exact-completeness
+proof (§4).
 
 ---
 
@@ -118,12 +139,14 @@ workload: per-lobe int8 GEMMs (`rows_per_lobe = 128`), page selection over a
 cannot compute one without the other.
 
 The **int64 CPU reference** (`RecomputeResidentCurriculumReference` /
-`RecomputeCoupledPuzzleReference`) is the **ultimate consensus authority**:
-byte-identical replay under the reference is what validity is defined against,
-and it is what the asynchronous dispute path uses to settle any claim. At
-relay time under profile 2, the FS-sampled carrier (§2) stands in for full
-replay as a sublinear accept/reject check; it does not replace the reference,
-it defers to it on dispute. Everything else — GPU kernels, the succinct proof
+`RecomputeCoupledPuzzleReference`) defines validity by byte-identical replay and
+is the **profile-1 consensus authority** and the mining-time arithmetic
+reference. **Under profile 2 it is not the per-block authority:** the FS-sampled
+carrier (§2) *is* the accept/reject decision (`CheckMatMulProofOfWork_RC` returns
+directly from it), and there is currently no wired deterministic dispute path that
+re-runs the reference to reverse a profile-2 acceptance. A real dispute/challenge
+protocol (or a complete audited succinct proof) is future work. Everything else —
+GPU kernels, the succinct proof
 below — is an acceleration or an audit aid, never the arbiter.
 
 ### 3.1 Acceleration is default-on, gated byte-exact to the reference
