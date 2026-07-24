@@ -5,7 +5,7 @@
 See doc/btx-matmul-v4.4-resident-curriculum-unified-proposal-2026-07-20.md §8
 (prototype & measurement roadmap G1–G4) and §R (normative exact-integer spec).
 
-Mirrors contrib/matmul-v4/lt-gate.py / k2b-gate.py lightly: point at one or more
+Point at one or more
 rc-episode-harness JSON paths (files or directories of *.json), print a single
 GO / PARTIAL / NO-GO verdict, and optionally write summary.json.
 

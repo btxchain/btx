@@ -2,10 +2,10 @@
 #
 # ENC_RC v4.6 (Resident Curriculum) — canonical hardware / verify measurement.
 #
-# This is the ONLY recommended measure entrypoint on current tips. Do NOT use
-# bare `measure-hardware.sh cuda|cpu` for product decisions: that path builds
-# `matmul-v4-report` and measures LEGACY v4.1 ENC-S8 / v4.2 BMX4C / v4.4-LT PoW,
-# which is NOT the v4.6 Resident Curriculum workload.
+# This is the ONLY recommended measure entrypoint on current tips. The legacy
+# matmul-v4-report tool (v4.1 ENC-S8 / v4.2 BMX4C / v4.4-LT) has been retired;
+# measure-hardware.sh now drives only the ENC_RC harness. For a verbose turnkey
+# full-workload run, prefer contrib/matmul-v4/run-full-benchmark.py.
 #
 # Spec / status: doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md
 # Aggregation:   contrib/matmul-v4/rc-gate.py
@@ -109,8 +109,8 @@ case "$cmd" in
       echo "error: ENC_RC v4.6 measure requires an RC profile or harness args." >&2
       echo "  Example: $0 cpu --profile coupled" >&2
       echo "  Example: $0 cpu rc --coupled-v3-ci" >&2
-      echo "Legacy v4.1/v4.2/LT PoW measure is blocked here; use measure-hardware.sh" >&2
-      echo "with BTX_ALLOW_LEGACY_MATMUL_MEASURE=1 only if you truly need it." >&2
+      echo "Legacy v4.1/v4.2/LT PoW measurement (matmul-v4-report) has been retired;" >&2
+      echo "ENC_RC v4.6 is the only measured workload." >&2
       exit 2
     fi
     # If caller already passed `rc` or --profile Stage-G, forward as-is under RC.

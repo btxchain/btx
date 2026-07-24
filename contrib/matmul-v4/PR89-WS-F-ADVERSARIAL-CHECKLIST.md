@@ -38,7 +38,7 @@ Not an activation decision. Heights remain `INT32_MAX`. Arbiter OFF.
 ## CI / local
 
 - [ ] `matmul_v4_rc_*` + `matmul_v4_lt_*` green on CPU build
-- [ ] `python3 contrib/matmul-v4/test_{rc,lt}_gate.py` + `test_telemetry_schema.py` green
+- [ ] `python3 contrib/matmul-v4/test_rc_gate.py` green
 - [ ] Sanitizer/fuzz opportunistic only — do not block merge on missing ASAN lane
 
 ## Root merge notes

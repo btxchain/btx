@@ -1634,24 +1634,13 @@ if(BUILD_UTIL)
   # reported misleading "MatMul PoW" numbers. The current turnkey benchmark is
   # matmul-v4-rc-harness (below), driven by contrib/matmul-v4/run-full-benchmark.py.
 
-  # One-command MatMul v4.1 hardware measurement report (feeds activation
-  # gates B1 / B2b / B2g). Standalone; drives matmul_v4::accel batched dispatch
-  # and the CPU reference stage boundaries, emits JSON + a human summary.
-  add_executable(matmul-v4-report matmul-v4-report.cpp)
-  target_include_directories(matmul-v4-report PRIVATE
-    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
-  )
-  target_link_libraries(matmul-v4-report
-    core_interface
-  )
-  if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(matmul-v4-report ${BTX_BASE_ARCHIVES})
-  else()
-    target_link_libraries(matmul-v4-report
-      bitcoin_shielded
-    )
-  endif()
-  install_binary_component(matmul-v4-report)
+  # NOTE: matmul-v4-report (the legacy v4.1 ENC-S8 / v4.2 BMX4C / v4.4 ENC-DR-LT
+  # activation-gate report) was REMOVED. ENC-S8 is never a live consensus profile
+  # (empty height window) and BMX4C/DRLT are superseded by ENC_RC at the same fork;
+  # its B1/B2b/B2g gates and the M-t24 accumulator-exactness methodology all have
+  # first-class ENC_RC equivalents (ProbeRCSelfQual byte-exact vs the int64 oracle,
+  # rc-stage-g-campaign.py, contrib/matmul-v4/run-full-benchmark.py, and the RC
+  # Ozaki exact-panels self-qual). Use matmul-v4-rc-harness (below).
 
   # ENC_RC (Resident Curriculum) real CPU measurement harness — feeds rc-gate.py.
   # Toy dims by default; never raises nMatMulRCHeight.
