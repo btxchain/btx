@@ -1,3 +1,10 @@
+> **HISTORICAL — superseded by ENC_RC v4.6.** This is a dated record of an earlier
+> design stage, retained for provenance. It does **not** describe the current shipping
+> proof-of-work, which is the two-stage ENC_RC v4.6 design (profile-2 datacenter episode
+> + profile-3 V3 coupled puzzle). For the current design see
+> `doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`. Activation remains disabled
+> (`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`).
+
 # ENC_RC Stage E — Verification bake-off (toy prototypes)
 
 *Date: 2026-07-20. Tip base: `6b3f06b`. Status: **E5 DECIDED** — winner-only GKR/sumcheck.

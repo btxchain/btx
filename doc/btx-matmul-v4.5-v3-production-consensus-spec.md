@@ -1,3 +1,10 @@
+> **HISTORICAL — superseded by ENC_RC v4.6.** This is a dated record of an earlier
+> design stage, retained for provenance. It does **not** describe the current shipping
+> proof-of-work, which is the two-stage ENC_RC v4.6 design (profile-2 datacenter episode
+> + profile-3 V3 coupled puzzle). For the current design see
+> `doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`. Activation remains disabled
+> (`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`).
+
 # BTX MatMul v4.5 — ENC_RC / ENC_RC_COUPLED V3 production consensus specification
 
 **Status:** INTEGRATED — V3 production is the default coupled profile (`nMatMulRCCoupledProfile` defaults to `3`; the aggregate `RCCoupConsensusConfig{}` default `transcript_version` is `ENC_RC_V3`). Public activation heights remain `INT32_MAX`. GKR arbiter OFF. No hardware attestation.

@@ -37,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 
 # --------------------------------------------------------------------------- #
 # Small terminal helpers (no external deps; degrade to plain text when piped). #
@@ -54,6 +55,13 @@ def yellow(s): return _c("33", s)
 def red(s):    return _c("31", s)
 def cyan(s):   return _c("36", s)
 def dim(s):    return _c("2", s)
+
+
+def _unlink_quiet(path):
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
 
 
 def hr(title=""):
@@ -268,8 +276,12 @@ SHAPE_FLAGS = {
 
 
 def run_harness(harness, shape, episodes, backend, mem_cap):
+    # The harness writes its JSON report to the --out path (it treats "-" as a
+    # literal filename, not stdout), so give it a real temp file and read it back.
+    out_fd, out_path = tempfile.mkstemp(prefix="rc-bench-", suffix=".json")
+    os.close(out_fd)
     argv = [harness] + SHAPE_FLAGS[shape] + \
-        ["--episodes", str(episodes), "--backend", backend, "--out", "-"]
+        ["--episodes", str(episodes), "--backend", backend, "--out", out_path]
     if mem_cap:
         argv += ["--mem-cap", str(mem_cap)]
     print(dim("  $ " + " ".join(argv)))
@@ -277,19 +289,25 @@ def run_harness(harness, shape, episodes, backend, mem_cap):
         proc = subprocess.run(argv, capture_output=True, text=True, timeout=7200)
     except (OSError, subprocess.TimeoutExpired) as e:
         print(red(f"  harness invocation failed: {e}"))
+        _unlink_quiet(out_path)
         return None, ""
-    # Harness prints a human report to stdout AND the JSON blob (last {...}); the
-    # loud native/streamed banners go to stderr — surface both.
+    # The loud native/streamed banners go to stderr — surface them.
     if proc.stderr.strip():
         for ln in proc.stderr.strip().splitlines():
             print(yellow("  " + ln))
     blob = None
-    m = re.search(r"\{.*\}\s*$", proc.stdout, re.DOTALL)
-    if m:
-        try:
-            blob = json.loads(m.group(0))
-        except json.JSONDecodeError:
-            blob = None
+    try:
+        with open(out_path) as f:
+            blob = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        # Fallback: some builds may still emit the JSON as the last {...} on stdout.
+        m = re.search(r"\{.*\}\s*$", proc.stdout, re.DOTALL)
+        if m:
+            try:
+                blob = json.loads(m.group(0))
+            except json.JSONDecodeError:
+                blob = None
+    _unlink_quiet(out_path)
     return blob, proc.stdout
 
 

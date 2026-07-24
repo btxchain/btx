@@ -1,3 +1,10 @@
+> **HISTORICAL — superseded by ENC_RC v4.6.** This is a dated record of an earlier
+> design stage, retained for provenance. It does **not** describe the current shipping
+> proof-of-work, which is the two-stage ENC_RC v4.6 design (profile-2 datacenter episode
+> + profile-3 V3 coupled puzzle). For the current design see
+> `doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`. Activation remains disabled
+> (`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`).
+
 # ENC_RC Section-2 — Succinct proof soundness note (AUDIT-READY, M6/M8 + Fable)
 
 > **Corrected 2026-07-22 (v4.6):** superseded figures updated to the shipped Q=128/Fp2 ≈71.9-bit bound and V3-production default; see doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md.
