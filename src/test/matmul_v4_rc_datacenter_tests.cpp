@@ -1171,6 +1171,117 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     rc::RCFreivaldsCarrierStoreClear();
 }
 
+// (c-λ) P2P/CONSENSUS PARITY on the sampling breadth λ. The RCCARRIER receiver
+//   (net_processing.cpp, "if (msg_type == NetMsgType::RCCARRIER)") admits an
+//   untrusted carrier to the process-local store only after the SAME ordered
+//   gates the consensus path (CheckMatMulProofOfWork_RC profile-2 branch,
+//   pow.cpp) applies: (vi) the 9-field episode-shape bind, (vi-b) the fixed-λ
+//   bind carrier.lambda == kRCFreivaldsSampleCount, and (vii) the full
+//   VerifyEpisodeFreivaldsSampledCarrier authentication. Step (vi-b) was the
+//   audit gap: VerifyEpisodeFreivaldsSampledCarrier authenticates against the
+//   carrier's OWN λ, so a carrier that shrank λ (fewer sampled units ⇒ a larger
+//   deterrence residual ρ* ≈ ln κ/λ) authenticated + stored on the P2P path yet
+//   FAILED consensus — a present-but-invalid store-pollution mismatch. This test
+//   pins net-store admission == consensus admission on the λ dimension.
+//
+//   Why this is a shared-predicate-boundary test rather than a direct
+//   ProcessMessage(RCCARRIER) drive: the receiver's INTERESTED-ONLY gate requires
+//   a header present in the block index at a profile-2 ACTIVE height, but every
+//   shipped chain pins nMatMulRCHeight = INT32_MAX (see rc_dc_public_heights_*),
+//   so exercising the receiver would require mining a valid profile-2 block into
+//   the index plus priming the per-peer ingress token bucket — disproportionate
+//   for a one-predicate parity assertion. Instead we reproduce the receiver's
+//   post-deserialize admission gates (vi/vi-b/vii) via the exact same shared
+//   functions the receiver calls, and assert they agree with consensus.
+BOOST_AUTO_TEST_CASE(rc_dc_rccarrier_net_store_lambda_matches_consensus)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+
+    CBlockHeader header = MakeDcRCHeader(0x1abda);
+    header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);   // toy dims
+    header.matmul_digest = rc::MineRCEpisode(header, params_rc, kHeight);
+    BOOST_REQUIRE(!header.matmul_digest.IsNull());
+    const auto target = DeriveTarget(header.nBits, p.powLimit);
+    BOOST_REQUIRE(target.has_value());
+
+    const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
+                                             header.matmul_digest);
+    BOOST_REQUIRE_MESSAGE(pr.timing.ok, "toy-dim v7 prove must succeed");
+
+    // Honest carrier: λ = kRCFreivaldsSampleCount (the field Build stamps from the
+    // λ argument). Reduced carrier: a smaller λ — internally consistent, so it
+    // authenticates against its OWN λ, which is exactly why step (vii) alone lets
+    // it through.
+    rc::RCFreivaldsSampledCarrier honest;
+    std::string why;
+    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target,
+                                                   honest, &why));
+    BOOST_REQUIRE_EQUAL(honest.lambda, rc::kRCFreivaldsSampleCount);
+
+    // A λ strictly below the consensus constant (and, for the toy episode, below
+    // the sampleable-unit count so it genuinely samples FEWER units).
+    const uint32_t reduced_lambda = honest.sampled.size() > 4 ? 4u : 1u;
+    BOOST_REQUIRE(reduced_lambda != rc::kRCFreivaldsSampleCount);
+    rc::RCFreivaldsSampledCarrier reduced;
+    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target,
+                                                   reduced, &why, reduced_lambda));
+    BOOST_REQUIRE_EQUAL(reduced.lambda, reduced_lambda);
+    BOOST_CHECK_LE(reduced.sampled.size(), honest.sampled.size());
+
+    // Reproduce the RCCARRIER receiver's post-deserialize admission gates using
+    // the SAME shared functions the receiver calls (net_processing.cpp steps
+    // vi / vi-b / vii). Returns true iff the receiver would StorePut the carrier.
+    const auto net_would_store = [&](const rc::RCFreivaldsSampledCarrier& c) -> bool {
+        const auto& ce = c.episode;                       // (vi) 9-field shape bind
+        if (!(ce.rounds == params_rc.rounds && ce.d_head == params_rc.d_head &&
+              ce.n_q == params_rc.n_q && ce.n_ctx == params_rc.n_ctx &&
+              ce.L_lyr == params_rc.L_lyr && ce.d_model == params_rc.d_model &&
+              ce.b_seq == params_rc.b_seq && ce.T_leaf == params_rc.T_leaf &&
+              ce.d_ff == params_rc.d_ff)) {
+            return false;
+        }
+        if (c.lambda != rc::kRCFreivaldsSampleCount) {    // (vi-b) fixed-λ bind (the fix)
+            return false;
+        }
+        std::string vwhy;                                 // (vii) full authentication
+        return rc::VerifyEpisodeFreivaldsSampledCarrier(c, header, kHeight, *target, &vwhy);
+    };
+
+    // Consensus admission: does CheckMatMulProofOfWork_RC accept with this exact
+    // carrier in the store?
+    const auto consensus_accepts = [&](const rc::RCFreivaldsSampledCarrier& c) -> bool {
+        rc::RCFreivaldsCarrierStoreClear();
+        rc::RCFreivaldsCarrierStorePut(header.GetHash(), c);
+        const bool ok = CheckMatMulProofOfWork_RC(header, p, kHeight);
+        rc::RCFreivaldsCarrierStoreClear();
+        return ok;
+    };
+
+    // The reduced carrier AUTHENTICATES against its own λ — so step (vii) alone
+    // (the only carrier check the pre-fix receiver ran) would ADMIT it. It is the
+    // λ bind, not the verify, that must stop it.
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyEpisodeFreivaldsSampledCarrier(reduced, header, kHeight, *target, &why),
+        "reduced-λ carrier must authenticate on its own λ (else the test proves nothing): "
+            << why);
+
+    // Parity, honest carrier: BOTH admit.
+    BOOST_CHECK(net_would_store(honest));
+    BOOST_CHECK(consensus_accepts(honest));
+    BOOST_CHECK_EQUAL(net_would_store(honest), consensus_accepts(honest));
+
+    // Parity, reduced-λ carrier: BOTH reject (the fix closes the mismatch).
+    BOOST_CHECK(!net_would_store(reduced));
+    BOOST_CHECK(!consensus_accepts(reduced));
+    BOOST_CHECK_EQUAL(net_would_store(reduced), consensus_accepts(reduced));
+
+    rc::RCFreivaldsCarrierStoreClear();
+}
+
 // (c'') CONSENSUS-CORRECTNESS: CheckMatMulProofOfWork_RC's `carrier_missing`
 //       out-param must distinguish a MERELY-LATE carrier (transient; the compact-
 //       block DEFER path) from a PRESENT-BUT-INVALID one (a permanent PoW fault).

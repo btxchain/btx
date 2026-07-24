@@ -7834,6 +7834,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             Misbehaving(*peer, strprintf("rccarrier %s episode-shape mismatch", block_hash.ToString()));
             return;
         }
+        // (vi-b) Consensus λ bind — the sampling breadth is fixed by consensus, not
+        // by the relayer. With the SEGMENT carrier a peer could otherwise shrink λ
+        // (fewer sampled layers ⇒ a larger deterrence residual ρ* ≈ ln κ/λ) and pass
+        // the OWN-λ verify+store below while FAILING consensus: CheckMatMulProofOfWork_RC
+        // rejects dc_carrier.lambda != kRCFreivaldsSampleCount. Reject here so net-store
+        // admission matches consensus admission — no present-but-invalid store pollution.
+        if (carrier.lambda != matmul::v4::rc::kRCFreivaldsSampleCount) {
+            free_slot();
+            Misbehaving(*peer, strprintf("rccarrier %s lambda mismatch (%u != %u)",
+                                         block_hash.ToString(), carrier.lambda,
+                                         matmul::v4::rc::kRCFreivaldsSampleCount));
+            return;
+        }
         // (vii) Full sampled-carrier authentication against the header commitment
         // and target — the SAME check the consensus path runs.
         const auto target = DeriveTarget(header.nBits, consensus.powLimit);
