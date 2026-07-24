@@ -1,3 +1,24 @@
+## Status: superseded framing — current design is ENC_RC v4.6 (two-stage: profile-2 episode + profile-3 coupled)
+
+This document is an earlier v4 design stage; its framing and numbers are
+superseded. The shipping design is **ENC_RC v4.6**, a two-stage proof of
+work: Stage/profile 2 is the **ENC_RC datacenter episode**
+(`nMatMulRCProfile = 2`, default) — an exact-int64 AI-training episode
+(attention + micro-training + Merkle); Stage/profile 3 is the
+**ENC_RC_COUPLED V3 production puzzle** (`nMatMulRCCoupledProfile = 3`,
+default), HBM-resident, entangled with the episode via a shared transcript.
+At relay time, accept/reject for the profile-2 carrier is decided by an
+FS-sampled sublinear carrier verifier — an honest **work-skipping soundness**
+bound, not a claim that every wrong tile is caught — while the **int64 CPU
+ExactReplay reference** remains the asynchronous dispute-path arbiter and the
+ultimate consensus authority. Activation is **disabled** on every public
+network (`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`). For the
+current, canonical description see
+`doc/btx-matmul-v4.6-rc-characteristics-2026-07-22.md`. The body below is
+retained unchanged for historical/provenance purposes.
+
+---
+
 # BTX MatMul Proof-of-Work: Engineering Design Specification (v4)
 
 **Status:** Draft for implementation review

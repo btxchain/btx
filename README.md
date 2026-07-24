@@ -162,23 +162,48 @@ multiplication — is the same operation that dominates GPU and TPU workloads fo
 AI/ML training and inference, making the mining hardware directly reusable for
 productive computation.
 
-> **Resident Curriculum upgrade (v4.6 — integrated, code-complete, not yet
-> activated).** This branch integrates the next-generation MatMul workload,
-> "v4.6": an exact-int64 AI-training *episode* (attention + micro-training +
-> Merkle) coupled to a V3 production puzzle, attested by a succinct GKR/FRI proof
-> with an in-circuit G1–G5 arithmetization (composed soundness ≈71.9 bits,
-> adequate margin over the 2^-64 target). It replaces the single dense matmul
-> described below with a structured, exactly-replayed workload, **GPU-accelerated
-> by default** (CUDA / HIP / Metal, auto-selected).
+> **Resident Curriculum upgrade (v4.6 ENC_RC — integrated, code-complete, not
+> yet activated).** This branch integrates the next-generation MatMul workload
+> as a **two-stage proof of work**, both stages selected by consensus params
+> and both currently disabled:
+>
+> - **Stage / profile 2 — ENC_RC datacenter episode** (`nMatMulRCProfile = 2`,
+>   default): an exact-int64 AI-training *episode* (attention + micro-training
+>   + Merkle) raised to datacenter scale (~16x the per-nonce MAC count of the
+>   epoch-0 base dims).
+> - **Stage / profile 3 — ENC_RC_COUPLED V3 production puzzle**
+>   (`nMatMulRCCoupledProfile = 3`, default): an HBM-resident (~48–51 GiB
+>   working set) coupled puzzle, entangled with the Stage-1 episode via a
+>   shared transcript; its activation height must be ≥ the episode height.
+>
+> ("Two-stage PoW" = the profile-2 episode + the profile-3 coupled puzzle;
+> note `nMatMulRCProfile` and `nMatMulRCCoupledProfile` are two different
+> selectors that happen to both default to disjoint numbers.) It replaces the
+> single dense matmul described below with a structured, exactly-replayed
+> workload, **GPU-accelerated by default** (CUDA / HIP / Metal, auto-selected).
+>
+> At relay time, accept/reject for the profile-2 carrier is decided by an
+> **FS-sampled sublinear carrier verifier** — a deterrence-based
+> **work-skipping soundness** bound (P(accept | a miner skips fraction `f` of
+> the episode MACs) ≤ (1−f)^(2Λ)), **not** a claim that every individual wrong
+> tile is caught: an isolated wrong tile is essentially never caught, but that
+> saves the miner a negligible amount of work. The **int64 CPU ExactReplay
+> reference** (`RecomputeResidentCurriculumReference` /
+> `RecomputeCoupledPuzzleReference`) is retained as the asynchronous ε=0
+> dispute-path arbiter and remains the ultimate consensus authority. An
+> additional succinct GKR/FRI proof (in-circuit G1–G5 arithmetization, composed
+> soundness ≈71.9 bits, adequate margin over the 2^-64 target) is wired in as
+> an audit artifact only — its formal arbiter is hard-disabled and it never
+> gates consensus.
 >
 > The whole RC family is wired to turn on together at a **single activation
 > height** and is code-complete on this branch: the profile-2 sampled-carrier
-> **verifier clears its 900 ms relay budget** on the supported hardware baseline
+> verifier clears its 900 ms relay budget on the supported hardware baseline
 > (Apple M4 Max 330 ms GO, 2.7× margin; baseline floor = SHA-NI/SHA-ext +
 > VNNI/i8mm), confirmed byte-identical across ARM and x86. **v4.6 stays OFF on
-> every public network** (all activation heights are `INT32_MAX`, the formal
-> proof arbiter is hard-disabled, and the int64 CPU reference remains the sole
-> consensus authority). Flipping the switch is a deliberate step gated on an
+> every public network:** `nMatMulRCHeight` and `nMatMulRCCoupledHeight` are
+> `INT32_MAX` on every network — activation is not live on mainnet or any
+> public network. Flipping the switch is a deliberate step gated on an
 > external cryptographic audit, native-silicon qualification, and production
 > hashrate benchmarks (to set the activation-height difficulty). Until then the
 > live PoW is exactly the single-matmul scheme described in this section.
@@ -219,7 +244,24 @@ BTX_MATMUL_V4_BACKEND=cuda   # force a specific backend (falls back to CPU if in
 BTX_MATMUL_V4_BACKEND=cpu    # force the portable scalar path
 ```
 
-**Benchmark (one canonical entrypoint — do not use the legacy `matmul-v4-report`):**
+**Benchmark (turnkey entrypoint — the legacy `matmul-v4-report` tool and the
+v4.1/v4.2/v4.4-era `btx-matmul-{cost,solve,metal}-bench`, `verify-backend.sh`,
+`lt-gate.py`, and `k2b-gate.py` were removed with the ENC_RC v4.6 cutover; do
+not use them or the retired `--profile bmx4c` / `bmx4c-lt` paths):**
+
+```bash
+# One command: describes the full workload, labels each component
+# optimized-vs-fallback for your hardware, decides resident-vs-streamed from
+# actual VRAM, and reports every phase separately plus the combined total.
+cmake --build build --target matmul-v4-rc-harness
+contrib/matmul-v4/run-full-benchmark.py --shape production --json report.json
+
+# Fast sanity pass (toy shape, no GPU needed, no binary required)
+contrib/matmul-v4/run-full-benchmark.py --quick
+```
+
+For targeted measurements, `contrib/matmul-v4/measure-enc-rc-v46.sh` remains
+available (it drives the same `matmul-v4-rc-harness`):
 
 ```bash
 # Validator: sampled-carrier verify time vs the 900 ms relay budget (GO if < 900 ms)
