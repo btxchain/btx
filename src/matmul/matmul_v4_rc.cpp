@@ -1164,12 +1164,35 @@ bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index, const RCMerkleP
         cur = Sha256dBytes(buf, sizeof(buf));
         idx >>= 1;
     }
+    // T-BIND (R-01): every index bit ABOVE the supplied path depth must have been
+    // consumed by the fold. If bits remain, `index` addresses a leaf below the
+    // depth this path spans — a high-bit alias (index i and i + 2^siblings fold
+    // along the SAME path). Depth/length are pinned by the callers that know the
+    // canonical tree geometry (CheckCoveringLeaf); this is the geometry-independent
+    // half of that binding and is safe for every honest caller (index < 2^depth).
+    if (idx != 0) return false;
     return cur == root;
+}
+
+bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index, const RCMerkleProof& proof,
+                       const uint256& root, uint32_t expected_depth, uint32_t real_leaves)
+{
+    // T-BIND (R-01): bind the opening to the canonical tree geometry BEFORE the
+    // fold. Length pins the tree height; range pins the leaf to a real (non-pad)
+    // leaf; the delegated fold pins the leaf hash to `root` and consumes all high
+    // index bits (idx == 0). See the header for the attacks this closes.
+    if (proof.siblings.size() != expected_depth) return false;
+    if (index >= real_leaves) return false;
+    return VerifyMerkleProof(leaf_hash, index, proof, root);
 }
 
 bool VerifyRCLeafOpening(const std::vector<int8_t>& stream, uint32_t t_leaf, uint32_t leaf_index,
                          const uint256& round_root)
 {
+    // Geometry is intrinsic here: the tree is rebuilt from the supplied stream, so
+    // leaves.size() IS the canonical padded leaf count and the opened path has the
+    // canonical depth. (The untrusted-proof T-BIND surface is the sampled carrier;
+    // see CheckCoveringLeaf, which pins depth/length from consensus episode params.)
     const std::vector<uint256> leaves = BuildTileTreeLeaves(stream, t_leaf);
     if (leaf_index >= leaves.size()) return false;
     const RCMerkleProof proof = OpenMerkleProof(leaves, leaf_index);

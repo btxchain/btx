@@ -370,6 +370,21 @@ private:
 [[nodiscard]] RCMerkleProof OpenMerkleProof(const std::vector<uint256>& leaves, uint32_t index);
 [[nodiscard]] bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index,
                                      const RCMerkleProof& proof, const uint256& root);
+/**
+ * T-BIND geometry-checked Merkle verify (R-01). Beyond folding the supplied path
+ * to `root`, this pins the opening to the canonical tree shape the verifier
+ * derives from consensus-pinned params: the path MUST have exactly
+ * `expected_depth` siblings, the leaf MUST be a real (non-padding, in-range) leaf
+ * (`index < real_leaves`), and — via the 4-arg fold — every index bit above the
+ * depth MUST be consumed (`idx == 0`). This rejects a shallow tree presented for
+ * the full vector, an over-/under-long path, a high-bit index alias
+ * (i vs i+2^depth), an out-of-range index, and openings to pow2 padding leaves —
+ * none of which the bare `cur == root` fold catches. Honest openings built by
+ * OpenMerkleProof over the canonical padded tree always satisfy all three.
+ */
+[[nodiscard]] bool VerifyMerkleProof(const uint256& leaf_hash, uint32_t index,
+                                     const RCMerkleProof& proof, const uint256& root,
+                                     uint32_t expected_depth, uint32_t real_leaves);
 /** Hash leaf bytes from stream[index] and verify the Merkle path to round_root. */
 [[nodiscard]] bool VerifyRCLeafOpening(const std::vector<int8_t>& stream, uint32_t t_leaf,
                                        uint32_t leaf_index, const uint256& round_root);

@@ -12,7 +12,7 @@
 //  (a) honest episode proof -> wires-mode AND carrier-mode accept
 //  (b) tamper a SAMPLED layer (Y / A / extract_out) -> reject at the right stage
 //  (c) wrong tile-tree opening -> reject
-//  (d) FS-sample determinism + unbiasability
+//  (d) FS-sample determinism + commitment-binding (moving roots/digest moves the set)
 //  (e) SUBLINEARITY: verifier touches only lambda layers, flat as layers grow
 //  (f) RESIDUAL honesty: an UNSAMPLED tampered layer passes (deterrence boundary)
 
@@ -247,7 +247,10 @@ BOOST_AUTO_TEST_CASE(frvs_wrong_tiletree_opening_rejects)
     }
 }
 
-// (d) FS-sample determinism + unbiasability.
+// (d) FS-sample determinism + commitment-binding. This exercises that the sample
+// coin is a deterministic function of the committed roots/digest and that moving
+// either moves the sampled set (no cheap re-bias without a fresh PoW grind). It is
+// NOT a proof of cryptographic unbiasability — that external audit remains OPEN.
 BOOST_AUTO_TEST_CASE(frvs_fs_sample_determinism)
 {
     Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
@@ -324,14 +327,18 @@ BOOST_AUTO_TEST_CASE(frvs_residual_unsampled_tamper_passes)
 }
 
 // ===========================================================================
-// SEGMENT-FREIVALDS: the primitive + the segment CARRIER (bounded per-layer
-// relay, datacenter relay-ceiling fit). matmul_v4_rc_freivalds.h + the segment
-// carrier in matmul_v4_rc_freivalds_sampled.{h,cpp}.
+// FreivaldsCheckGemmSegments PRIMITIVE (frozen Fable, matmul_v4_rc_freivalds.h) +
+// the v3 ANCHORED per-tile CARRIER (bounded per-layer relay, datacenter relay-
+// ceiling fit) in matmul_v4_rc_freivalds_sampled.{h,cpp}. NOTE: the carrier itself
+// no longer runs segment-Freivalds — it exact-recomputes each opened tile from
+// anchored operands (v3). The segments primitive below is still exercised on its
+// own; it is not the carrier's verification path.
 // ===========================================================================
 
-// (g) FreivaldsCheckGemmSegments primitive: completeness EXACT over the segmented
-//     contraction; a wrong claim caught (soundness ≤ 2^(−63·reps)); the segment
-//     partials compose (Σ_p A_p·B_p == Y under one projection).
+// (g) FreivaldsCheckGemmSegments primitive (standalone; NOT the carrier path):
+//     completeness EXACT over the segmented contraction; a wrong claim caught
+//     (soundness ≤ 2^(−63·reps)); the segment partials compose (Σ_p A_p·B_p == Y
+//     under one projection).
 BOOST_AUTO_TEST_CASE(frvs_check_gemm_segments_primitive)
 {
     // Deterministic pseudo-random int8 A (m×k), B (k×n); split k into segments.
@@ -532,6 +539,141 @@ BOOST_AUTO_TEST_CASE(frvs_ffn_matmul_is_enforced_101)
     BOOST_CHECK(
         !rc::VerifyEpisodeFreivaldsSampledCarrier(forged, f.h, 0, f.target, &bad_why, nullptr));
     BOOST_CHECK_EQUAL(bad_why, "v7fs:recompute_mismatch");
+}
+
+// ===========================================================================
+// R-01 T-BIND: fixed-length Merkle openings. The verifier derives the canonical
+// tile-tree geometry (depth + real-leaf count) from consensus-pinned episode
+// params and MUST reject any opening that does not match it — closing the shallow-
+// tree / high-bit-alias / padding-leaf aliases the bare `cur == root` fold admits.
+// ===========================================================================
+
+// (j) Geometry-bound VerifyMerkleProof primitive: each adversarial opening shape
+//     REJECTS; an honest full-depth opening ACCEPTS. Also demonstrates the exact
+//     bare-fold vulnerabilities T-BIND closes (padding leaf + high-bit alias).
+BOOST_AUTO_TEST_CASE(frvs_tbind_merkle_geometry)
+{
+    const uint32_t t_leaf = 64;
+    const size_t logical = 5 * t_leaf + 13;  // 6 real leaves (last one partial)
+    std::vector<int8_t> stream(logical);
+    for (size_t i = 0; i < logical; ++i) stream[i] = static_cast<int8_t>((i * 37 + 11) & 0x7f);
+
+    const std::vector<uint256> leaves = rc::BuildTileTreeLeaves(stream, t_leaf);
+    const uint256 root = rc::BuildTileTreeRoot(stream, t_leaf);
+    const uint32_t real_leaves = static_cast<uint32_t>((logical + t_leaf - 1) / t_leaf);  // 6
+    uint32_t depth = 0;
+    while ((size_t{1} << depth) < leaves.size()) ++depth;  // log2(8) = 3
+    BOOST_REQUIRE_EQUAL(leaves.size(), 8u);   // next_pow2(6)
+    BOOST_REQUIRE_EQUAL(real_leaves, 6u);
+    BOOST_REQUIRE_EQUAL(depth, 3u);
+
+    const uint32_t idx = 2;  // a real leaf
+    const rc::RCMerkleProof proof = rc::OpenMerkleProof(leaves, idx);
+    const uint256& leaf = leaves[idx];
+
+    // Honest full-depth opening ACCEPTS (bare fold AND geometry-checked).
+    BOOST_CHECK(rc::VerifyMerkleProof(leaf, idx, proof, root));
+    BOOST_CHECK(rc::VerifyMerkleProof(leaf, idx, proof, root, depth, real_leaves));
+
+    // (1) EMPTY sibling path -> depth mismatch -> REJECT.
+    BOOST_CHECK(!rc::VerifyMerkleProof(leaf, idx, rc::RCMerkleProof{}, root, depth, real_leaves));
+    // (2) TRUNCATED path (a shallow tree presented for the full vector) -> REJECT.
+    {
+        rc::RCMerkleProof p = proof;
+        p.siblings.pop_back();
+        BOOST_CHECK(!rc::VerifyMerkleProof(leaf, idx, p, root, depth, real_leaves));
+    }
+    // (3) EXTENDED path -> REJECT.
+    {
+        rc::RCMerkleProof p = proof;
+        p.siblings.push_back(uint256::ONE);
+        BOOST_CHECK(!rc::VerifyMerkleProof(leaf, idx, p, root, depth, real_leaves));
+    }
+    // (4) HIGH-BIT ALIAS: index idx and idx+2^depth share the low `depth` bits, so
+    //     the honest siblings fold identically. The bare fold now consumes the high
+    //     bit (idx != 0) AND the geometry range check both REJECT the alias.
+    const uint32_t alias = idx + (1u << depth);  // 2 + 8 = 10
+    BOOST_CHECK(!rc::VerifyMerkleProof(leaf, alias, proof, root));                       // idx!=0 after fold
+    BOOST_CHECK(!rc::VerifyMerkleProof(leaf, alias, proof, root, depth, real_leaves));   // + range
+    // (5) PADDING LEAF (index in [real_leaves, padded)) folds to root, so the bare
+    //     fold ACCEPTS it (the vulnerability); T-BIND range check REJECTS it.
+    const uint32_t pad_idx = 7;  // in [6, 8)
+    const rc::RCMerkleProof pad_proof = rc::OpenMerkleProof(leaves, pad_idx);
+    BOOST_CHECK(rc::VerifyMerkleProof(leaves[pad_idx], pad_idx, pad_proof, root));  // bare fold accepts
+    BOOST_CHECK(!rc::VerifyMerkleProof(leaves[pad_idx], pad_idx, pad_proof, root, depth, real_leaves));
+    // (6) index >= real_leaves at the real depth (out of range) -> REJECT.
+    BOOST_CHECK(!rc::VerifyMerkleProof(leaf, real_leaves, proof, root, depth, real_leaves));
+
+    // (7) WRONG length / cross-shape: a genuinely SHALLOW tree over a shorter stream
+    //     folds to its own shallow root with fewer siblings; it verifies on its OWN
+    //     root but is REJECTED when presented under the full vector's geometry.
+    std::vector<int8_t> shortstream(2 * t_leaf);  // 2 leaves -> depth 1
+    for (size_t i = 0; i < shortstream.size(); ++i) shortstream[i] = static_cast<int8_t>(i & 0x7f);
+    const std::vector<uint256> sleaves = rc::BuildTileTreeLeaves(shortstream, t_leaf);
+    const uint256 sroot = rc::BuildTileTreeRoot(shortstream, t_leaf);
+    const rc::RCMerkleProof sproof = rc::OpenMerkleProof(sleaves, 0);
+    BOOST_CHECK(rc::VerifyMerkleProof(sleaves[0], 0, sproof, sroot));                    // honest on own root
+    BOOST_CHECK(!rc::VerifyMerkleProof(sleaves[0], 0, sproof, sroot, depth, real_leaves));  // wrong geometry
+}
+
+// (k) T-BIND wired into the carrier verifier: geometry is derived from the carried
+//     (consensus-pinned) episode, so a wrong-DEPTH sibling path on a carried opening
+//     REJECTS with a tile-tree depth reason. An honest carrier still ACCEPTS.
+BOOST_AUTO_TEST_CASE(frvs_tbind_carrier_depth_rejects)
+{
+    Fixture f = MakeFixture(rc::MakeToyRCEpisodeParams(), 42);
+    BOOST_REQUIRE(f.ok);
+    rc::RCFreivaldsSampledCarrier carrier;
+    std::string bwhy;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildFreivaldsSampledCarrier(f.proof, f.h, 0, f.target, carrier, &bwhy, kLambda), bwhy);
+    BOOST_REQUIRE(!carrier.sampled.empty());
+    BOOST_REQUIRE(!carrier.sampled[0].tiles.empty());
+    BOOST_REQUIRE(!carrier.sampled[0].tiles[0].leaf_proofs.empty());
+    BOOST_REQUIRE(!carrier.sampled[0].tiles[0].leaf_proofs[0].siblings.empty());
+
+    // Honest carrier ACCEPTS (unchanged behavior — no honest opening is rejected).
+    {
+        std::string why;
+        BOOST_REQUIRE_MESSAGE(
+            rc::VerifyEpisodeFreivaldsSampledCarrier(carrier, f.h, 0, f.target, &why, nullptr), why);
+    }
+    auto expect_depth_reject = [&](const rc::RCFreivaldsSampledCarrier& c) {
+        std::string why;
+        BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(c, f.h, 0, f.target, &why, nullptr));
+        BOOST_CHECK_MESSAGE(StartsWith(why, "v7fs:tiletree:depth"), why);
+    };
+    {   // TRUNCATED (shallow) extract_out path.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        c.sampled[0].tiles[0].leaf_proofs[0].siblings.pop_back();
+        expect_depth_reject(c);
+    }
+    {   // EXTENDED extract_out path.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        c.sampled[0].tiles[0].leaf_proofs[0].siblings.push_back(uint256::ONE);
+        expect_depth_reject(c);
+    }
+    {   // EMPTIED extract_out path.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        c.sampled[0].tiles[0].leaf_proofs[0].siblings.clear();
+        expect_depth_reject(c);
+    }
+    {   // A committed A-row opening (if any sampled DOWN tile carries one) with a
+        // wrong-depth path also REJECTS on the tile-tree depth bind.
+        rc::RCFreivaldsSampledCarrier c = carrier;
+        bool tampered = false;
+        for (auto& layer : c.sampled) {
+            for (auto& tile : layer.tiles) {
+                if (!tile.a_prf_regen && !tile.a_row_proof.siblings.empty()) {
+                    tile.a_row_proof.siblings.pop_back();
+                    tampered = true;
+                    break;
+                }
+            }
+            if (tampered) break;
+        }
+        if (tampered) expect_depth_reject(c);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

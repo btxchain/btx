@@ -101,6 +101,39 @@ uint64_t LayerStreamOffset(const RCEpisodeParams& p, RCGkrLayerKind kind, uint32
     }
 }
 
+// Canonical round tile-tree geometry (R-01 T-BIND), derived SOLELY from the
+// consensus-pinned episode params — never from an attacker-supplied proof/root.
+// The round stream produced by RCGkrReconstructRoundStream is, for EVERY round,
+//     Z (SV extract_out, n_q·d_head bytes) ‖ for l∈[0,L): DOWN_l (b_seq·d_model)
+// so its logical length is CONSTANT across rounds and equals the sum below (this
+// is exactly LayerStreamOffset's z + L·per_l). There is ONE tile-tree per round
+// covering the whole concatenation, so BOTH the SV/Z + FFN-DOWN output-tile
+// openings AND the chained-input-row (A-row) opening — which anchors X[l], itself
+// a DOWN output living in the SAME round stream — share this single geometry.
+// real_leaves matches RoundMerkleStream::FinalizeLeaves (one zero leaf even for an
+// empty stream, final partial leaf zero-padded, then next_pow2 padding); depth is
+// the exact sibling count OpenMerkleProof emits (log2 of the padded leaf count).
+struct RoundTreeGeom {
+    uint64_t logical_bytes{0};
+    uint32_t real_leaves{0};  // ceil(logical_bytes / T_leaf), min 1 (non-padding leaves)
+    uint32_t depth{0};        // log2(next_pow2(real_leaves)) == canonical path length
+};
+RoundTreeGeom RoundStreamTreeGeometry(const RCEpisodeParams& p)
+{
+    RoundTreeGeom g;
+    g.logical_bytes = static_cast<uint64_t>(p.n_q) * p.d_head +
+                      static_cast<uint64_t>(p.L_lyr) * p.b_seq * p.d_model;
+    const uint32_t t_leaf = p.T_leaf ? p.T_leaf : 1;
+    uint64_t real = (g.logical_bytes + t_leaf - 1) / t_leaf;
+    if (real == 0) real = 1;  // empty stream still emits one zero leaf
+    uint64_t padded = 1;
+    uint32_t depth = 0;
+    while (padded < real) { padded <<= 1; ++depth; }
+    g.real_leaves = static_cast<uint32_t>(real);
+    g.depth = depth;
+    return g;
+}
+
 // SHA256d(kRCLeafTag ‖ bytes) — byte-identical to RoundMerkleStream::EmitLeaf.
 uint256 LeafHashFromBytes(const std::vector<uint8_t>& leaf_bytes)
 {
@@ -666,14 +699,29 @@ std::vector<uint8_t> LeafWindow(const std::vector<int8_t>& stream, uint32_t t_le
 
 // Verify a single covering leaf: its bytes hash + Merkle path reproduce
 // round_root, AND its overlap with extract_out[stream_offset .. +len) matches.
+//
+// R-01 T-BIND: `geom` is the canonical round-tree geometry derived from the
+// consensus-pinned episode (RoundStreamTreeGeometry). Before trusting the fold we
+// enforce that the supplied path has EXACTLY the canonical depth and that the leaf
+// index is a REAL (non-padding, in-range) leaf. Together with VerifyMerkleProof's
+// high-bit-consumption check this rejects: a shallow/truncated tree presented for
+// the full production vector, an over-long path, a high-bit index alias
+// (i vs i+2^d), an out-of-range index, and openings to pow2 padding leaves — none
+// of which the bare `cur == root` fold caught. The honest builder is unchanged:
+// OpenMerkleProof already emits exactly geom.depth siblings for in-range leaves.
 bool CheckCoveringLeaf(const std::vector<uint8_t>& leaf_bytes, uint32_t leaf_index,
                        const RCMerkleProof& mproof, const uint256& round_root, uint32_t t_leaf,
                        uint64_t stream_offset, const std::vector<int8_t>& extract_out,
-                       std::string& why)
+                       const RoundTreeGeom& geom, std::string& why)
 {
     if (leaf_bytes.size() != t_leaf) { why = "v7fs:tiletree:leaf_size"; return false; }
+    // Granular reasons for the two geometry binds, then the geometry-checked fold
+    // (which re-asserts depth/range and consumes all high index bits).
+    if (mproof.siblings.size() != geom.depth) { why = "v7fs:tiletree:depth"; return false; }
+    if (leaf_index >= geom.real_leaves) { why = "v7fs:tiletree:leaf_range"; return false; }
     const uint256 leaf_hash = LeafHashFromBytes(leaf_bytes);
-    if (!VerifyMerkleProof(leaf_hash, leaf_index, mproof, round_root)) {
+    if (!VerifyMerkleProof(leaf_hash, leaf_index, mproof, round_root, geom.depth,
+                           geom.real_leaves)) {
         why = "v7fs:tiletree:open";
         return false;
     }
@@ -994,6 +1042,9 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
     std::unordered_map<uint32_t, std::vector<uint256>> leaves_cache;
     std::unordered_map<uint32_t, std::vector<int8_t>> stream_cache;
     const uint32_t t_leaf = proof.episode.T_leaf;
+    // R-01: canonical tile-tree geometry pinned by the episode (same for every
+    // round and every opening type — the whole round stream is one tree).
+    const RoundTreeGeom geom = RoundStreamTreeGeometry(proof.episode);
     for (uint32_t u : units) {
         const uint32_t li = sampleable[u];
         const RCGkrV7WireWitness& w = proof.wires[li];
@@ -1047,7 +1098,7 @@ bool VerifyEpisodeFreivaldsSampled(const RCGkrProofV7& proof, const CBlockHeader
             const std::vector<uint8_t> lb = LeafWindow(stream_r, t_leaf, lf);
             std::string owhy;
             if (!CheckCoveringLeaf(lb, lf, mp, proof.round_roots[r], t_leaf, off, w.extract_out,
-                                   owhy)) {
+                                   geom, owhy)) {
                 return fail(owhy);
             }
             tm.n_merkle_hashes += mp.siblings.size();
@@ -1088,10 +1139,12 @@ size_t RCFreivaldsSegLayerByteBound(const RCEpisodeParams& params)
 }
 
 // ---------------------------------------------------------------------------
-// Carrier builder (miner side) — SEGMENT carrier. For each FS-sampled layer,
-// open s_tile random output tiles (a single (row, 32-col block) each) and, per
-// tile, s_ctr random contraction segments. Relay is bounded by the segment
-// footprint, independent of the full operand size (design §2c resolution).
+// Carrier builder (miner side) — v3 ANCHORED per-tile carrier. For each FS-sampled
+// layer, open s_tile random output tiles (a single (row, 32-col block) each) and,
+// per tile, open the anchored layer-input A-row (against round_roots, or leave it
+// PRF-regenerable) plus the committed extract_out. No relayed Y and no contraction
+// segments (superseded the v2 segment carrier). Relay is bounded by the per-tile
+// anchored footprint, independent of the full operand size (design §2c resolution).
 // O(N) to reconstruct the round leaves once (intrinsic to the miner's digest).
 // ---------------------------------------------------------------------------
 bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader& header,
@@ -1198,12 +1251,17 @@ bool BuildFreivaldsSampledCarrier(const RCGkrProofV7& proof, const CBlockHeader&
 }
 
 // ---------------------------------------------------------------------------
-// Carrier verifier (relay-optimized; operates on the SEGMENT carrier ALONE).
-// Per sampled layer, recompute the FS output-tile + segment positions and, for
-// each carried tile: (b) segment-Freivalds A·(B·r)=Y·r over the sampled
-// contraction (EXACT when the segments cover [0,k); deterrence otherwise —
-// header), (c) extract_in==Y(+resid) → Extract → extract_out re-exec, (a) open
-// extract_out against round_roots. O(λ·s_tile·(s_ctr·L_seg + log N)).
+// Carrier verifier (relay-optimized; operates on the v3 ANCHORED carrier ALONE).
+// Per sampled layer, recompute the FS output-tile positions and, for each carried
+// tile: (b) EXACT-RECOMPUTE the full contraction from anchored operands — H-row +
+// Y-row for a fused-FFN DOWN tile (X·W_up then H·W_down + residual), or the S-row
+// + S·V for an SV tile — with PRF-regenerated weights, and compare byte-for-byte
+// against the committed extract_out. This carrier does NOT run Freivalds and does
+// NOT relay Y or contraction segments (the v2 segment-Freivalds path is gone —
+// header §v3): every opened tile's GEMM is checked exactly. (c) extract glue is
+// covered because the recompute reproduces extract_out through Extract; (a) the
+// committed extract_out (and the anchored A-row) open against round_roots.
+// O(λ·s_tile·(k + log N)) — the contraction k dominates the per-tile recompute.
 // ---------------------------------------------------------------------------
 bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carrier,
                                           const CBlockHeader& header, int32_t height,
@@ -1242,6 +1300,12 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
         const auto t_plan = std::chrono::steady_clock::now();
         const uint32_t t_leaf = carrier.episode.T_leaf;
         const uint32_t T = kRCMxBlockLen;
+        // R-01 T-BIND: canonical round tile-tree geometry from the consensus-pinned
+        // episode. The carrier's leaf_proofs / a_row_proof are UNTRUSTED (P2P), so
+        // every opening below is bound to this depth + real-leaf count. Both the
+        // extract_out output-tile opening and the anchored A-row opening target the
+        // SAME per-round tree, hence share this one geometry.
+        const RoundTreeGeom geom = RoundStreamTreeGeometry(carrier.episode);
         struct UnitPlan {
             size_t carrier_index{0};
             uint32_t li{0};
@@ -1466,6 +1530,11 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                         }
                     }
                     ++r.n_extract_tiles;
+                    // NOTE: the v3 anchored carrier does NOT Freivalds. This counter
+                    // tallies EXACT per-tile recompute checks (one per opened output
+                    // tile); the "freivalds" name is retained only for cross-path
+                    // instrumentation continuity with the full-wires verifier (which
+                    // does run FreivaldsCheckGemm). See the struct-field comment.
                     ++r.n_freivalds_calls;
                     const uint64_t off_expect = layer_off + static_cast<uint64_t>(tile.row) * e.n +
                                                 static_cast<uint64_t>(tile.bcol) * T;
@@ -1484,7 +1553,7 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                         const auto t_mk2 = std::chrono::steady_clock::now();
                         const bool eo_ok = CheckCoveringLeaf(tile.leaf_bytes[x], lf, tile.leaf_proofs[x],
                                            carrier.round_roots[e.round], t_leaf, off_expect,
-                                           tile.extract_out, owhy);
+                                           tile.extract_out, geom, owhy);
                         r.merkle_s += Secs(t_mk2);
                         if (!eo_ok) {
                             reject(owhy);
@@ -1562,7 +1631,8 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                                 X_row[d] = static_cast<int8_t>(tile.a_row_leaf[rel + d]);
                             const auto t_mk = std::chrono::steady_clock::now();
                             const bool a_ok = CheckCoveringLeaf(tile.a_row_leaf, a_leaf, tile.a_row_proof,
-                                                   carrier.round_roots[e.round], t_leaf, off_A, X_row, awhy);
+                                                   carrier.round_roots[e.round], t_leaf, off_A, X_row,
+                                                   geom, awhy);
                             r.merkle_s += Secs(t_mk);
                             if (!a_ok) { reject(awhy); return false; }
                             r.n_merkle_hashes += tile.a_row_proof.siblings.size();
