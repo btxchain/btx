@@ -1628,48 +1628,11 @@ if(BUILD_UTIL)
   endif()
   install_binary_component(btx-matmul-backend-info)
 
-  add_executable(btx-matmul-metal-bench btx-matmul-metal-bench.cpp)
-  target_link_libraries(btx-matmul-metal-bench
-    core_interface
-  )
-  if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-matmul-metal-bench ${BTX_BASE_ARCHIVES})
-  else()
-    target_link_libraries(btx-matmul-metal-bench bitcoin_common)
-  endif()
-  install_binary_component(btx-matmul-metal-bench)
-
-  add_executable(btx-matmul-solve-bench btx-matmul-solve-bench.cpp)
-  target_include_directories(btx-matmul-solve-bench PRIVATE
-    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
-  )
-  target_link_libraries(btx-matmul-solve-bench
-    core_interface
-  )
-  if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-matmul-solve-bench ${BTX_BASE_ARCHIVES})
-  else()
-    target_link_libraries(btx-matmul-solve-bench
-      bitcoin_shielded
-    )
-  endif()
-  install_binary_component(btx-matmul-solve-bench)
-
-  add_executable(btx-matmul-cost-bench btx-matmul-cost-bench.cpp)
-  target_include_directories(btx-matmul-cost-bench PRIVATE
-    $<TARGET_PROPERTY:univalue,INTERFACE_INCLUDE_DIRECTORIES>
-  )
-  target_link_libraries(btx-matmul-cost-bench
-    core_interface
-  )
-  if(UNIX AND NOT APPLE)
-    target_link_btx_linux_archive_group(btx-matmul-cost-bench ${BTX_BASE_ARCHIVES})
-  else()
-    target_link_libraries(btx-matmul-cost-bench
-      bitcoin_shielded
-    )
-  endif()
-  install_binary_component(btx-matmul-cost-bench)
+  # NOTE: the legacy standalone MatMul benchmarks (btx-matmul-metal-bench,
+  # btx-matmul-solve-bench, btx-matmul-cost-bench) were REMOVED — they measured
+  # the superseded v3 solve / Metal-transcript workloads, not ENC_RC v4.6, and so
+  # reported misleading "MatMul PoW" numbers. The current turnkey benchmark is
+  # matmul-v4-rc-harness (below), driven by contrib/matmul-v4/run-full-benchmark.py.
 
   # One-command MatMul v4.1 hardware measurement report (feeds activation
   # gates B1 / B2b / B2g). Standalone; drives matmul_v4::accel batched dispatch

@@ -31,17 +31,6 @@ add_executable(bench_btx
   load_external.cpp
   lockedpool.cpp
   logging.cpp
-  matmul_genesis_calibration.cpp
-  matmul_batch_tuning_bench.cpp
-  matmul_freivalds_bench.cpp
-  matmul_metal_bench.cpp
-  matmul_prehash_bench.cpp
-  matmul_reuse_bench.cpp
-  matmul_solve_bench.cpp
-  matmul_v4_stage_bench.cpp
-  matmul_v4_bmx4_combine_bench.cpp
-  matmul_v4_lt_stage_bench.cpp
-  matmul_v4_combine_tournament_bench.cpp
   mempool_ephemeral_spends.cpp
   mempool_eviction.cpp
   mempool_stress.cpp
