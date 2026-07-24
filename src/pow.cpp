@@ -27,6 +27,7 @@
 #include <matmul/matmul_v4_bmx4_batch.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_bank_root_cache.h>
 #include <matmul/matmul_v4_rc_batch.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
@@ -6097,6 +6098,8 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         options_coup.mode = matmul::v4::rc::RCCoupExecMode::Streamed;
         options_coup.expansion_threads =
             std::max(1u, std::thread::hardware_concurrency());
+        options_coup.bank_root_cache =
+            std::make_shared<matmul::v4::rc::RCCoupBankRootCache>();
     }
 
     while (max_tries > 0) {
@@ -6159,8 +6162,12 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
             // Winner candidate: CPU reseal (empty ExactGemm).
             CBlockHeader cand = window[i];
+            auto reseal_options = options_coup;
+            // Independent winning-candidate replay deliberately recomputes the
+            // bank commitment; it must not trust the mining hot-path memo.
+            reseal_options.bank_root_cache.reset();
             const uint256 resealed = matmul::v4::rc::RecomputeCoupledPuzzleReference(
-                cand, block_height, params_coup, options_coup);
+                cand, block_height, params_coup, reseal_options);
             if (resealed != mined) {
                 LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
                            "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",

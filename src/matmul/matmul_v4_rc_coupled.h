@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace Consensus {
@@ -50,6 +51,8 @@ struct Params;
 //   Resident        — retain full bank + active lobe state across barriers.
 
 namespace matmul::v4::rc {
+
+class RCCoupBankRootCache;
 
 /** Toy-scale coupled-puzzle constants (frozen; Match MakeToyRCCoupParams()). */
 inline constexpr uint32_t kRCCoupRounds = 4;       // barriers
@@ -283,6 +286,13 @@ struct RCCoupOptions {
     uint32_t expansion_threads{1};
 
     /**
+     * Optional mining-only memo for the template-scoped bank commitment.
+     * Consensus validation and independent winning-candidate reseal leave this
+     * null. It stores no pages and cannot affect page contents.
+     */
+    std::shared_ptr<RCCoupBankRootCache> bank_root_cache{};
+
+    /**
      * Coupled transcript domain family (F7). Default ENC_RC_V1 preserves frozen
      * V1 toy / V2 medium goldens. V3 MUST set ENC_RC_V3 (MakeV3RCCoupOptions).
      */
@@ -370,6 +380,7 @@ struct RCCoupOptions {
 /** Optional wall-clock timing for harness / measurement (not consensus). */
 struct RCCoupTiming {
     double bank_s{0};
+    bool bank_cache_hit{false};
     double activation_s{0};
     /** Streamed page regeneration inside the barrier schedule. */
     double page_expand_s{0};

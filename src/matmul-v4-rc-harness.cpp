@@ -17,6 +17,7 @@
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_accel_policy.h>
+#include <matmul/matmul_v4_rc_bank_root_cache.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
@@ -73,6 +74,7 @@ struct Args {
     bool coupled_production_v3{false};   // full V3 production shape
     bool coupled_v3_width_smoke{false};  // W=8192/M=128, four-page V3 smoke
     bool coupled_page_codec_bench{false}; // production W page pack/unpack benchmark
+    bool coupled_bank_root_cache{false}; // template-scoped 32-byte root memo
     bool skip_reference{false};          // benchmark only; do not run CPU oracle
     bool mode_sweep{false};
     bool mem_cap_sweep{false};
@@ -80,6 +82,7 @@ struct Args {
     uint32_t rounds{0};   // 0 ⇒ keep params.rounds
     uint32_t episodes{3}; // default for toy
     uint32_t expansion_threads{0}; // 0 = auto for production V3, scalar otherwise
+    uint32_t cache_runs{1}; // repeated same-template coupled episodes
     uint64_t mem_cap{0};  // 0 = unlimited
     std::string backend{"cpu"};
     std::string out_path{"rc-report.json"};
@@ -100,6 +103,8 @@ void PrintUsage(std::ostream& os)
        << "  --coupled-v3-width-smoke   V3 W=8192/M=128/four-exchange-round smoke (4 pages)\n"
        << "  --coupled-production-v3    full V3 production dims; bounded Streamed mode only\n"
        << "  --coupled-page-codec-bench benchmark one production page's exact pack/unpack\n"
+       << "  --coupled-bank-root-cache  memoize the template bank root between episodes\n"
+       << "  --coupled-cache-runs N      repeat same-template episode to measure reuse\n"
        << "  --skip-reference           benchmark only; skip independent CPU ExactGemm replay\n"
        << "  --mem-cap-sweep            production coupled under 512MiB/2GiB/8GiB caps\n"
        << "  --mode-sweep               also time Resident/Checkpointed/Streamed\n"
@@ -247,6 +252,8 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
         } else if (a == "--coupled-page-codec-bench") {
             args.coupled_page_codec_bench = true;
             args.coupled = false;
+        } else if (a == "--coupled-bank-root-cache") {
+            args.coupled_bank_root_cache = true;
         } else if (a == "--skip-reference") {
             args.skip_reference = true;
         } else if (a == "--mem-cap-sweep") {
@@ -274,6 +281,12 @@ bool ParseArgs(int argc, char** argv, Args& args, std::string& err)
             const char* v = need("--expand-threads");
             if (!v || !ParseUint32(v, args.expansion_threads)) {
                 err = "invalid --expand-threads";
+                return false;
+            }
+        } else if (a == "--coupled-cache-runs") {
+            const char* v = need("--coupled-cache-runs");
+            if (!v || !ParseUint32(v, args.cache_runs)) {
+                err = "invalid --coupled-cache-runs";
                 return false;
             }
         } else if (a == "--backend") {
@@ -694,6 +707,10 @@ int RunCoupledHarness(const Args& args)
     bool mine_matches = true;
     rc::RCCoupTiming timed_mine{};
     rc::RCCoupTiming timed_ref{};
+    std::shared_ptr<rc::RCCoupBankRootCache> bank_root_cache;
+    if (args.coupled_bank_root_cache) {
+        bank_root_cache = std::make_shared<rc::RCCoupBankRootCache>();
+    }
 
     for (size_t i = 0; i < modes.size(); ++i) {
         rc::RCCoupOptions opt = SelectCoupledHarnessOptions(args);
@@ -705,22 +722,6 @@ int RunCoupledHarness(const Args& args)
             d = rc::RecomputeCoupledPuzzleReference(
                 header, /*height=*/0, params, opt, {}, &t_ref);
         }
-        // F9: wall_s / total_s / nonce_per_s / phase_wall_s time MineCoupledPuzzle.
-        rc::RCCoupTiming t_mine{};
-        const uint256 d_mine =
-            rc::MineCoupledPuzzle(header, /*height=*/0, params, gemm, opt, &t_mine);
-        if (args.skip_reference) {
-            d = d_mine;
-        } else if (d != d_mine) {
-            mine_matches = false;
-        }
-        if (i == 0) {
-            digest_ref = d;
-            timed_mine = t_mine;
-            timed_ref = t_ref;
-        } else if (d != digest_ref) {
-            digests_match = false;
-        }
         UniValue ref_walls(UniValue::VOBJ);
         ref_walls.pushKV("bank", t_ref.bank_s);
         ref_walls.pushKV("barriers", t_ref.barriers_s);
@@ -731,30 +732,56 @@ int RunCoupledHarness(const Args& args)
                                              : "correctness_reference");
         ref_walls.pushKV("provenance",
                          args.skip_reference ? "none" : "cpu_exactgemm_oracle");
+        opt.bank_root_cache = bank_root_cache;
+        for (uint32_t cache_run = 0; cache_run < args.cache_runs; ++cache_run) {
+            // F9: wall_s / total_s / nonce_per_s / phase_wall_s time MineCoupledPuzzle.
+            rc::RCCoupTiming t_mine{};
+            const uint256 d_mine =
+                rc::MineCoupledPuzzle(header, /*height=*/0, params, gemm, opt, &t_mine);
+            const uint256 reported = args.skip_reference ? d_mine : d;
+            if (!args.skip_reference && d != d_mine) {
+                mine_matches = false;
+            }
+            if (mode_walls.empty()) {
+                digest_ref = reported;
+            } else if (reported != digest_ref) {
+                digests_match = false;
+            }
+            if (i == 0) {
+                // With repeated cache runs, top-level timings report the final
+                // steady-state episode; every run remains in mode_walls.
+                timed_mine = t_mine;
+                timed_ref = t_ref;
+            }
 
-        UniValue mw(UniValue::VOBJ);
-        mw.pushKV("mode", CoupModeName(modes[i]));
-        mw.pushKV("digest", d.GetHex());
-        mw.pushKV("cpu_reference_executed", !args.skip_reference);
-        mw.pushKV("mine_matches_cpu", !args.skip_reference && d == d_mine);
-        mw.pushKV("bank_s", t_mine.bank_s);
-        mw.pushKV("activation_s", t_mine.activation_s);
-        mw.pushKV("page_expand_s", t_mine.page_expand_s);
-        mw.pushKV("gemm_s", t_mine.gemm_s);
-        mw.pushKV("accumulate_s", t_mine.accumulate_s);
-        mw.pushKV("permutation_s", t_mine.permutation_s);
-        mw.pushKV("mix_s", t_mine.mix_s);
-        mw.pushKV("exchange_s", t_mine.exchange_s);
-        mw.pushKV("extract_s", t_mine.extract_s);
-        mw.pushKV("barrier_root_s", t_mine.barrier_root_s);
-        mw.pushKV("barriers_s", t_mine.barriers_s);
-        mw.pushKV("wall_s", t_mine.total_s);
-        mw.pushKV("total_s", t_mine.total_s);
-        mw.pushKV("nonce_per_s", t_mine.total_s > 0.0 ? (1.0 / t_mine.total_s) : 0.0);
-        mw.pushKV("phase_wall_s", t_mine.total_s);
-        mw.pushKV("reference_wall_s", ref_walls);
-        mw.pushKV("peak_rss_kib", static_cast<uint64_t>(std::max(rss_before, CurrentRssKiB())));
-        mode_walls.push_back(mw);
+            UniValue mw(UniValue::VOBJ);
+            mw.pushKV("mode", CoupModeName(modes[i]));
+            mw.pushKV("cache_run", static_cast<uint64_t>(cache_run + 1));
+            mw.pushKV("digest", reported.GetHex());
+            mw.pushKV("cpu_reference_executed", !args.skip_reference);
+            mw.pushKV("mine_matches_cpu", !args.skip_reference && d == d_mine);
+            mw.pushKV("bank_s", t_mine.bank_s);
+            mw.pushKV("bank_cache_hit", t_mine.bank_cache_hit);
+            mw.pushKV("activation_s", t_mine.activation_s);
+            mw.pushKV("page_expand_s", t_mine.page_expand_s);
+            mw.pushKV("gemm_s", t_mine.gemm_s);
+            mw.pushKV("accumulate_s", t_mine.accumulate_s);
+            mw.pushKV("permutation_s", t_mine.permutation_s);
+            mw.pushKV("mix_s", t_mine.mix_s);
+            mw.pushKV("exchange_s", t_mine.exchange_s);
+            mw.pushKV("extract_s", t_mine.extract_s);
+            mw.pushKV("barrier_root_s", t_mine.barrier_root_s);
+            mw.pushKV("barriers_s", t_mine.barriers_s);
+            mw.pushKV("wall_s", t_mine.total_s);
+            mw.pushKV("total_s", t_mine.total_s);
+            mw.pushKV("nonce_per_s",
+                      t_mine.total_s > 0.0 ? (1.0 / t_mine.total_s) : 0.0);
+            mw.pushKV("phase_wall_s", t_mine.total_s);
+            mw.pushKV("reference_wall_s", ref_walls);
+            mw.pushKV("peak_rss_kib",
+                      static_cast<uint64_t>(std::max(rss_before, CurrentRssKiB())));
+            mode_walls.push_back(mw);
+        }
     }
 
     const size_t rss_after = CurrentRssKiB();
@@ -824,6 +851,10 @@ int RunCoupledHarness(const Args& args)
               << "\n";
     std::cout << "  phase_wall: bank=" << timed_mine.bank_s << "s barriers="
               << timed_mine.barriers_s << "s total=" << timed_mine.total_s << "s (mine)\n";
+    if (bank_root_cache != nullptr) {
+        std::cout << "  bank_cache: hit=" << (timed_mine.bank_cache_hit ? 1 : 0)
+                  << " storage=112 bytes (key + root payload)\n";
+    }
     std::cout << "  barrier_breakdown: activation=" << timed_mine.activation_s
               << "s page_expand=" << timed_mine.page_expand_s
               << "s gemm=" << timed_mine.gemm_s
@@ -845,6 +876,7 @@ int RunCoupledHarness(const Args& args)
 
     UniValue walls(UniValue::VOBJ);
     walls.pushKV("bank", timed_mine.bank_s);
+    walls.pushKV("bank_cache_hit", timed_mine.bank_cache_hit);
     walls.pushKV("activation", timed_mine.activation_s);
     walls.pushKV("page_expand", timed_mine.page_expand_s);
     walls.pushKV("gemm", timed_mine.gemm_s);
@@ -952,7 +984,7 @@ int RunCoupledHarness(const Args& args)
 
     UniValue run_variance(UniValue::VOBJ);
     run_variance.pushKV("episode_cv", 0.0);
-    run_variance.pushKV("n_runs", 1);
+    run_variance.pushKV("n_runs", static_cast<uint64_t>(args.cache_runs));
     run_variance.pushKV("note", "Cross-process variance filled by rc-stage-g-campaign.py");
 
     UniValue coupled(UniValue::VOBJ);
@@ -1018,6 +1050,8 @@ int RunCoupledHarness(const Args& args)
         options.pushKV("exchange_rounds", static_cast<uint64_t>(selected.exchange_rounds));
         options.pushKV("expansion_threads",
                        static_cast<uint64_t>(selected.expansion_threads));
+        options.pushKV("bank_root_cache", bank_root_cache != nullptr);
+        options.pushKV("cache_runs", static_cast<uint64_t>(args.cache_runs));
         root.pushKV("options", options);
     }
     root.pushKV("digest", digest_ref.GetHex());

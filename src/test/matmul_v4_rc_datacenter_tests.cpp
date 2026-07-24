@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_batch.h>
+#include <matmul/matmul_v4_rc_bank_root_cache.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_extract.h>
@@ -39,6 +40,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -360,6 +362,48 @@ BOOST_AUTO_TEST_CASE(rc_dc_streamed_batch_and_parallel_expansion_match_reference
     BOOST_CHECK_EQUAL(
         streamed[0],
         rc::RecomputeCoupledPuzzleReference(header, 0, params, scalar));
+}
+
+BOOST_AUTO_TEST_CASE(rc_dc_bank_root_cache_is_template_scoped_and_digest_invariant)
+{
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    rc::RCCoupOptions options = rc::MakeMediumV3RCCoupOptions();
+    options.mode = rc::RCCoupExecMode::Streamed;
+    options.expansion_threads = 4;
+    options.bank_root_cache = std::make_shared<rc::RCCoupBankRootCache>();
+
+    const CBlockHeader first_header = MakeCoupHeader(31);
+    rc::RCCoupOptions reference_options = options;
+    reference_options.bank_root_cache.reset();
+    const uint256 first_reference = rc::RecomputeCoupledPuzzleReference(
+        first_header, /*height=*/0, params, reference_options);
+
+    rc::RCCoupTiming first_timing{};
+    const uint256 first = rc::MineCoupledPuzzle(
+        first_header, /*height=*/0, params, {}, options, &first_timing);
+    BOOST_CHECK(first == first_reference);
+    BOOST_CHECK(!first_timing.bank_cache_hit);
+
+    CBlockHeader nonce_peer = first_header;
+    nonce_peer.nNonce64 += 1;
+    nonce_peer.nNonce = static_cast<uint32_t>(nonce_peer.nNonce64);
+    const uint256 peer_reference = rc::RecomputeCoupledPuzzleReference(
+        nonce_peer, /*height=*/0, params, reference_options);
+    rc::RCCoupTiming peer_timing{};
+    const uint256 peer = rc::MineCoupledPuzzle(
+        nonce_peer, /*height=*/0, params, {}, options, &peer_timing);
+    BOOST_CHECK(peer == peer_reference);
+    BOOST_CHECK(peer_timing.bank_cache_hit);
+
+    CBlockHeader changed_template = nonce_peer;
+    changed_template.hashMerkleRoot.data()[0] ^= 0x80;
+    const uint256 changed_reference = rc::RecomputeCoupledPuzzleReference(
+        changed_template, /*height=*/0, params, reference_options);
+    rc::RCCoupTiming changed_timing{};
+    const uint256 changed = rc::MineCoupledPuzzle(
+        changed_template, /*height=*/0, params, {}, options, &changed_timing);
+    BOOST_CHECK(changed == changed_reference);
+    BOOST_CHECK(!changed_timing.bank_cache_hit);
 }
 
 /** Harness Q-sweep may exceed kRCMinerBatchQMax; digests still match solo. */

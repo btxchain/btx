@@ -11,6 +11,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_bank_root_cache.h>
 #include <matmul/matmul_v4_rc_datacenter.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <span.h>
@@ -180,8 +181,25 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
 /** Stream pages into the hasher without retaining the full bank (Streamed). */
 uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
                                 const RCCoupParams& params, uint32_t transcript_version,
-                                uint32_t expansion_threads)
+                                uint32_t expansion_threads,
+                                const std::shared_ptr<RCCoupBankRootCache>& root_cache,
+                                RCCoupTiming* timing)
 {
+    RCCoupBankRootCacheKey cache_key;
+    if (root_cache != nullptr) {
+        cache_key.template_hash = RCBankTemplateHash(header);
+        cache_key.params_fingerprint = FingerprintRCCoupParams(params);
+        cache_key.height = height;
+        cache_key.transcript_version = transcript_version;
+        cache_key.bank_pages = params.bank_pages;
+        cache_key.width = params.lobe_width;
+        uint256 cached;
+        if (root_cache->Lookup(cache_key, cached)) {
+            if (timing != nullptr) timing->bank_cache_hit = true;
+            return cached;
+        }
+    }
+
     const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(tags.bank), TagLen(tags.bank));
@@ -196,7 +214,9 @@ uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
     outer.Finalize(d1);
     uint8_t d2[CSHA256::OUTPUT_SIZE];
     CSHA256().Write(d1, sizeof(d1)).Finalize(d2);
-    return uint256{Span<const unsigned char>{d2, sizeof(d2)}};
+    const uint256 root{Span<const unsigned char>{d2, sizeof(d2)}};
+    if (root_cache != nullptr) root_cache->Store(cache_key, root);
+    return root;
 }
 
 /**
@@ -1203,7 +1223,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         const auto t_bank0 = std::chrono::steady_clock::now();
         if (streamed) {
             bank_root = BankCommitmentStreaming(header, height, params, tv,
-                                                options.expansion_threads);
+                                                options.expansion_threads,
+                                                options.bank_root_cache, out_timing);
         } else {
             const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);
             bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width, tags);
