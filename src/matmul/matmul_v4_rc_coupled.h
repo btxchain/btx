@@ -384,6 +384,8 @@ struct RCCoupTiming {
     double activation_s{0};
     /** Streamed page regeneration inside the barrier schedule. */
     double page_expand_s{0};
+    /** Streamed page expansions consumed by the fused seeded accelerator path. */
+    uint64_t seeded_page_gemms{0};
     double gemm_s{0};
     double accumulate_s{0};
     double permutation_s{0};

@@ -135,8 +135,18 @@ struct ExactGemmBackend {
     using S32S8Fn = bool (*)(const std::vector<int32_t>& L, const std::vector<int8_t>& R,
                              uint32_t rows, uint32_t inner, uint32_t cols,
                              std::vector<int32_t>& out);
+    /**
+     * Optional mining-only fused path for RC coupled Streamed execution:
+     * generate the deterministic W×W row-block MX page named by `page_seed`
+     * directly on the accelerator, then compute L(rows×W)·page. Consensus
+     * validation and independent CPU resealing leave this null.
+     */
+    using SeededPageS8S8Fn = bool (*)(const uint256& page_seed,
+                                     const std::vector<int8_t>& L, uint32_t rows,
+                                     uint32_t width, std::vector<int32_t>& out);
     S8S8Fn gemm_s8s8{nullptr};
     S32S8Fn gemm_s32s8{nullptr};
+    SeededPageS8S8Fn seeded_page_s8s8{nullptr};
 
     [[nodiscard]] bool HasDeviceGemms() const
     {

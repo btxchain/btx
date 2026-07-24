@@ -475,6 +475,28 @@ void LobeLocalGemm(const int8_t* lobe_rows, const std::vector<int8_t>& page, uin
     }
 }
 
+bool LobeLocalSeededPageGemm(const uint256& page_seed, const int8_t* lobe_rows,
+                             uint32_t rows, uint32_t lobe_width, int64_t* out_w,
+                             const lt::ExactGemmBackend& gemm)
+{
+    if (gemm.seeded_page_s8s8 == nullptr || page_seed.IsNull()) return false;
+    const size_t nL = static_cast<size_t>(rows) * lobe_width;
+    std::vector<int8_t> L(lobe_rows, lobe_rows + nL);
+    std::vector<int32_t> y;
+    bool ok = false;
+    try {
+        ok = gemm.seeded_page_s8s8(page_seed, L, rows, lobe_width, y) &&
+             y.size() == nL;
+    } catch (...) {
+        ok = false;
+    }
+    if (!ok) return false;
+    for (size_t i = 0; i < nL; ++i) {
+        out_w[i] = static_cast<int64_t>(y[i]);
+    }
+    return true;
+}
+
 uint256 BankRootSeed(const CBlockHeader& header, int32_t height,
                      uint32_t transcript_version)
 {
@@ -1320,25 +1342,50 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 std::vector<int64_t> partial(static_cast<size_t>(lobe_stride), 0);
                 std::vector<int8_t> page_for_tx;
                 if (streamed) {
-                    const auto t_page0 = std::chrono::steady_clock::now();
-                    auto page = DeriveCoupledBankPage(header, height, page_id, params, tv,
-                                                      options.expansion_threads);
-                    if (out_timing) {
-                        out_timing->page_expand_s +=
-                            std::chrono::duration<double>(
-                                std::chrono::steady_clock::now() - t_page0)
-                                .count();
+                    // Mining-only fast path: generate the deterministic page and
+                    // consume it in one device operation. Validation/GKR transcript
+                    // capture/shortcut tests retain the explicit CPU page oracle.
+                    bool fused = false;
+                    if (out_tx == nullptr && !options.skip_bank_page &&
+                        gemm.seeded_page_s8s8 != nullptr) {
+                        const uint256 page_seed = DeriveCoupledBankPageSeed(
+                            header, height, page_id, params, tv);
+                        const auto t_fused0 = std::chrono::steady_clock::now();
+                        fused = LobeLocalSeededPageGemm(
+                            page_seed,
+                            state.data() + static_cast<size_t>(ell) * lobe_stride,
+                            M, W, partial.data(), gemm);
+                        if (out_timing) {
+                            if (fused) ++out_timing->seeded_page_gemms;
+                            out_timing->gemm_s +=
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - t_fused0)
+                                    .count();
+                        }
                     }
-                    MaybeZeroSkipPage(page, page_id, options);
-                    if (out_tx) page_for_tx = page;
-                    const auto t_gemm0 = std::chrono::steady_clock::now();
-                    LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride, page, M,
-                                  W, partial.data(), gemm);
-                    if (out_timing) {
-                        out_timing->gemm_s +=
-                            std::chrono::duration<double>(
-                                std::chrono::steady_clock::now() - t_gemm0)
-                                .count();
+                    if (!fused) {
+                        const auto t_page0 = std::chrono::steady_clock::now();
+                        auto page = DeriveCoupledBankPage(
+                            header, height, page_id, params, tv,
+                            options.expansion_threads);
+                        if (out_timing) {
+                            out_timing->page_expand_s +=
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - t_page0)
+                                    .count();
+                        }
+                        MaybeZeroSkipPage(page, page_id, options);
+                        if (out_tx) page_for_tx = page;
+                        const auto t_gemm0 = std::chrono::steady_clock::now();
+                        LobeLocalGemm(
+                            state.data() + static_cast<size_t>(ell) * lobe_stride,
+                            page, M, W, partial.data(), gemm);
+                        if (out_timing) {
+                            out_timing->gemm_s +=
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - t_gemm0)
+                                    .count();
+                        }
                     }
                 } else {
                     if (out_tx) page_for_tx = pages[page_id];

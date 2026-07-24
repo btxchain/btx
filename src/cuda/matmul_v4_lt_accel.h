@@ -104,6 +104,17 @@ struct LtCudaBatchProvenance {
                                    uint32_t rows, uint32_t inner, uint32_t cols,
                                    std::vector<int32_t>& out);
 
+/**
+ * RC coupled Streamed mining primitive: expand the consensus
+ * ExpandMxDequantInt8(page_seed, width, width) page on-device and immediately
+ * multiply left(rows×width) by it. The page never crosses PCIe and only one
+ * page-sized working set is resident. A one-time multi-shape differential
+ * against the CPU expansion/GEMM oracle gates the path fail-closed.
+ */
+[[nodiscard]] bool LaunchRCCoupledSeededPageGemmS8S8(
+    const uint256& page_seed, const std::vector<int8_t>& left, uint32_t rows,
+    uint32_t width, std::vector<int32_t>& out);
+
 /** Host-callable exact MX scale-partitioned B̂·V (device GEMMs when available).
  *  On success `out` is byte-identical to ComputeProjectedRightMxBlockScaleLT
  *  and provenance.exact_mx_scale_partitioned is set (unless a qualified native

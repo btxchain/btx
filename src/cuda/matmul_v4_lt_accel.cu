@@ -17,6 +17,7 @@
 #include <matmul/matmul_v4_bmx4.h>
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_lt_mx_exact.h>
+#include <matmul/matmul_v4_rc.h>
 #include <primitives/block.h>
 #include <span.h>
 #include <uint256.h>
@@ -311,11 +312,12 @@ __device__ __forceinline__ int8_t DeviceSampleMantissaNibble(uint8_t nibble, boo
     return static_cast<int8_t>(sign ? -mag : mag);
 }
 
-// One SHA-256 block exactly matching ExpandMantissaStream:
-// SHA256(reverse(seed bytes) || 'm' || LE64(counter)). The 41-byte message and
-// its padding fit one compression block.
-__device__ __forceinline__ void DeviceMantissaXofBlock(const uint32_t seed_words[8],
-                                                       uint64_t counter, uint8_t out[32])
+// One SHA-256 block exactly matching the BMX4 counter streams:
+// SHA256(reverse(seed bytes) || domain || LE64(counter)). The 41-byte message
+// and its padding fit one compression block.
+__device__ __forceinline__ void DeviceBmx4XofBlock(const uint32_t seed_words[8],
+                                                   uint8_t domain, uint64_t counter,
+                                                   uint8_t out[32])
 {
     uint8_t block[64];
 #pragma unroll
@@ -324,7 +326,7 @@ __device__ __forceinline__ void DeviceMantissaXofBlock(const uint32_t seed_words
     for (uint32_t i = 0; i < 32; ++i) {
         block[i] = DeviceWordByte(seed_words, 31U - i);
     }
-    block[32] = 0x6d; // BMX4C mantissa XOF domain 'm'
+    block[32] = domain;
 #pragma unroll
     for (uint32_t i = 0; i < 8; ++i) {
         block[33 + i] = static_cast<uint8_t>(counter >> (8U * i));
@@ -339,6 +341,12 @@ __device__ __forceinline__ void DeviceMantissaXofBlock(const uint32_t seed_words
     DeviceSha256Init(state);
     DeviceSha256Compress(state, block);
     DeviceShaStateBytes(state, out);
+}
+
+__device__ __forceinline__ void DeviceMantissaXofBlock(const uint32_t seed_words[8],
+                                                       uint64_t counter, uint8_t out[32])
+{
+    DeviceBmx4XofBlock(seed_words, 0x6d, counter, out); // mantissa domain 'm'
 }
 
 __global__ void DeviceGenerateMantissaXofBlocks(uint8_t* __restrict__ hashes,
@@ -406,6 +414,48 @@ __global__ void DeviceScatterMantissaXof(const uint8_t* __restrict__ hashes,
             ++pos;
         }
     }
+}
+
+// Rejection-free BMX4 E8M0 scale stream. Each SHA-256 block supplies
+// 32 bytes × four little-endian 2-bit codes = 128 scale exponents.
+__global__ void DeviceGenerateScaleXof(uint8_t* __restrict__ scales, size_t count,
+                                       size_t blocks, uint32_t s0, uint32_t s1,
+                                       uint32_t s2, uint32_t s3, uint32_t s4,
+                                       uint32_t s5, uint32_t s6, uint32_t s7)
+{
+    const size_t block_index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (block_index >= blocks) return;
+    const uint32_t seed_words[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    uint8_t digest[32];
+    DeviceBmx4XofBlock(seed_words, 0x65, static_cast<uint64_t>(block_index),
+                       digest); // scale domain 'e'
+    size_t pos = block_index * 128U;
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+#pragma unroll
+        for (int shift = 0; shift < 8; shift += 2) {
+            if (pos < count) {
+                scales[pos] = static_cast<uint8_t>((digest[i] >> shift) & 0x03);
+            }
+            ++pos;
+        }
+    }
+}
+
+// Expand row-block MX exactly as ExpandMxDequantInt8:
+// out[row,col] = mu[row,col] * 2^scale[row,col/32].
+__global__ void DeviceDequantRCCoupledPage(const int8_t* __restrict__ mu,
+                                           const uint8_t* __restrict__ scales,
+                                           int8_t* __restrict__ out, size_t count,
+                                           uint32_t width)
+{
+    const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (idx >= count) return;
+    const size_t row = idx / width;
+    const size_t col = idx - row * width;
+    const size_t scale_index = row * (width / 32U) + col / 32U;
+    out[idx] = static_cast<int8_t>(
+        static_cast<int32_t>(mu[idx]) * (int32_t{1} << scales[scale_index]));
 }
 
 __device__ __noinline__ void DeviceSha256dSketchOne(const uint64_t* __restrict__ chat,
@@ -845,6 +895,18 @@ struct LtCudaResidentPool {
     size_t gemm_s32l_bytes{0};
     size_t gemm_out_bytes{0};
 
+    // RC coupled one-page expansion scratch. This is bounded by one W×W page;
+    // it never attempts to make the 51 GiB packed production bank resident.
+    uint8_t* dRCPageHashes{nullptr};
+    uint32_t* dRCPageAccepted{nullptr};
+    uint32_t* dRCPageOffsets{nullptr};
+    int8_t* dRCPageMu{nullptr};
+    uint8_t* dRCPageScales{nullptr};
+    int* dRCPageStatus{nullptr};
+    size_t rc_page_count_capacity{0};
+    size_t rc_page_blocks_capacity{0};
+    size_t rc_page_scales_capacity{0};
+
     cudaGraph_t matexpand_graph{nullptr};
     cudaGraphExec_t matexpand_exec{nullptr};
     cudaGraph_t project_right_graph{nullptr};
@@ -875,6 +937,9 @@ struct LtCudaResidentPool {
         w_xof_blocks = chat_batch_slots = batch_capacity = 0;
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
+        free_p(dRCPageHashes); free_p(dRCPageAccepted); free_p(dRCPageOffsets);
+        free_p(dRCPageMu); free_p(dRCPageScales); free_p(dRCPageStatus);
+        rc_page_count_capacity = rc_page_blocks_capacity = rc_page_scales_capacity = 0;
         if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
         template_bound = false;
         imma_s8s8 = false;
@@ -899,6 +964,50 @@ struct LtCudaResidentPool {
                grow(dGemmS8R, gemm_s8r_bytes, s8r) &&
                grow(dGemmS32L, gemm_s32l_bytes, s32l) &&
                grow(dGemmOut, gemm_out_bytes, out);
+    }
+
+    [[nodiscard]] bool EnsureRCCoupledPageScratch(size_t count, size_t blocks,
+                                                  size_t scales)
+    {
+        if (count <= rc_page_count_capacity && blocks <= rc_page_blocks_capacity &&
+            scales <= rc_page_scales_capacity && dRCPageStatus != nullptr) {
+            return true;
+        }
+        auto free_p = [](auto*& p) {
+            if (p) {
+                cudaFree(p);
+                p = nullptr;
+            }
+        };
+        free_p(dRCPageHashes);
+        free_p(dRCPageAccepted);
+        free_p(dRCPageOffsets);
+        free_p(dRCPageMu);
+        free_p(dRCPageScales);
+        free_p(dRCPageStatus);
+        rc_page_count_capacity = rc_page_blocks_capacity = rc_page_scales_capacity = 0;
+
+        auto mall = [](void** p, size_t bytes) {
+            return bytes == 0 || cudaMalloc(p, bytes) == cudaSuccess;
+        };
+        if (!mall(reinterpret_cast<void**>(&dRCPageHashes), blocks * 32U) ||
+            !mall(reinterpret_cast<void**>(&dRCPageAccepted), blocks * sizeof(uint32_t)) ||
+            !mall(reinterpret_cast<void**>(&dRCPageOffsets), blocks * sizeof(uint32_t)) ||
+            !mall(reinterpret_cast<void**>(&dRCPageMu), count) ||
+            !mall(reinterpret_cast<void**>(&dRCPageScales), scales) ||
+            !mall(reinterpret_cast<void**>(&dRCPageStatus), sizeof(int))) {
+            free_p(dRCPageHashes);
+            free_p(dRCPageAccepted);
+            free_p(dRCPageOffsets);
+            free_p(dRCPageMu);
+            free_p(dRCPageScales);
+            free_p(dRCPageStatus);
+            return false;
+        }
+        rc_page_count_capacity = count;
+        rc_page_blocks_capacity = blocks;
+        rc_page_scales_capacity = scales;
+        return true;
     }
 
     [[nodiscard]] bool EnsureBatchCapacity(size_t count)
@@ -1422,6 +1531,148 @@ LtCudaResidentPool& Pool()
     return cudaMemcpy(out.data(), pool.dGemmOut, out_bytes, cudaMemcpyDeviceToHost) == cudaSuccess;
 }
 
+[[nodiscard]] bool CudaOkRCCoupledSeededPageGemm(
+    const uint256& page_seed, const std::vector<int8_t>& left, uint32_t rows,
+    uint32_t width, std::vector<int32_t>& out, std::vector<int8_t>* page_copy)
+{
+    out.clear();
+    if (rows == 0 || width == 0 || (width % 32U) != 0) return false;
+    if (width > std::numeric_limits<size_t>::max() / width) return false;
+    const size_t page_count = static_cast<size_t>(width) * width;
+    if (page_count > std::numeric_limits<uint32_t>::max()) return false;
+    if (rows > std::numeric_limits<size_t>::max() / width) return false;
+    const size_t left_count = static_cast<size_t>(rows) * width;
+    if (left_count > std::numeric_limits<size_t>::max() / sizeof(int32_t)) return false;
+    if (left.size() != left_count) return false;
+    const size_t scale_count = static_cast<size_t>(width) * (width / 32U);
+    // One block per 32 requested mantissas supplies up to 64 and averages 44.
+    // DeviceScanMantissaCounts makes the vanishingly unlikely short prefix an
+    // explicit decline, after which the caller regenerates with the CPU oracle.
+    const size_t xof_blocks = (page_count + 31U) / 32U;
+    if (xof_blocks == 0 || xof_blocks > std::numeric_limits<uint32_t>::max()) return false;
+
+    auto& pool = Pool();
+    if (!pool.EnsureScratch(left_count, page_count, 0,
+                            left_count * sizeof(int32_t)) ||
+        !pool.EnsureRCCoupledPageScratch(page_count, xof_blocks, scale_count)) {
+        return false;
+    }
+    if (cudaMemcpy(pool.dGemmS8L, left.data(), left_count, cudaMemcpyHostToDevice) !=
+        cudaSuccess) {
+        return false;
+    }
+
+    uint32_t sw[8];
+    for (int i = 0; i < 8; ++i) {
+        sw[i] = ReadLE32(page_seed.data() + static_cast<size_t>(i) * 4);
+    }
+    constexpr unsigned kThreads = 256;
+    const unsigned mantissa_grid =
+        static_cast<unsigned>((xof_blocks + kThreads - 1U) / kThreads);
+    DeviceGenerateMantissaXofBlocks<<<mantissa_grid, kThreads>>>(
+        pool.dRCPageHashes, pool.dRCPageAccepted, xof_blocks,
+        sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7]);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    DeviceScanMantissaCounts<<<1, 1>>>(pool.dRCPageAccepted, pool.dRCPageOffsets,
+                                      xof_blocks, page_count, pool.dRCPageStatus);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    DeviceScatterMantissaXof<<<mantissa_grid, kThreads>>>(
+        pool.dRCPageHashes, pool.dRCPageOffsets, xof_blocks, page_count,
+        pool.dRCPageStatus, pool.dRCPageMu);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    const size_t scale_blocks = (scale_count + 127U) / 128U;
+    const unsigned scale_grid =
+        static_cast<unsigned>((scale_blocks + kThreads - 1U) / kThreads);
+    DeviceGenerateScaleXof<<<scale_grid, kThreads>>>(
+        pool.dRCPageScales, scale_count, scale_blocks,
+        sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7]);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    const unsigned dequant_grid =
+        static_cast<unsigned>((page_count + kThreads - 1U) / kThreads);
+    DeviceDequantRCCoupledPage<<<dequant_grid, kThreads>>>(
+        pool.dRCPageMu, pool.dRCPageScales, pool.dGemmS8R, page_count, width);
+    if (cudaGetLastError() != cudaSuccess) return false;
+
+    if (page_copy != nullptr) {
+        page_copy->assign(page_count, 0);
+        if (cudaMemcpy(page_copy->data(), pool.dGemmS8R, page_count,
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            page_copy->clear();
+            return false;
+        }
+    }
+
+    // Production must use the self-qualified tensor lane. The scalar device
+    // kernel is retained only for bounded self-test shapes.
+    if (!TryLaunchLtImmaGemmS8S8Device(pool.dGemmS8L, pool.dGemmS8R,
+                                      pool.dGemmOut, rows, width, width, nullptr)) {
+        if (width > 256U) return false;
+        const dim3 block(16, 16, 1);
+        const dim3 grid((width + block.x - 1) / block.x,
+                        (rows + block.y - 1) / block.y, 1);
+        DeviceGemmS8S8Tiled<<<grid, block>>>(
+            pool.dGemmS8L, pool.dGemmS8R, pool.dGemmOut,
+            static_cast<int>(rows), static_cast<int>(width), static_cast<int>(width));
+        if (cudaGetLastError() != cudaSuccess) return false;
+    }
+
+    out.assign(left_count, 0);
+    if (cudaMemcpy(out.data(), pool.dGemmOut, left_count * sizeof(int32_t),
+                   cudaMemcpyDeviceToHost) != cudaSuccess) {
+        out.clear();
+        return false;
+    }
+    int status = 0;
+    if (cudaMemcpy(&status, pool.dRCPageStatus, sizeof(status),
+                   cudaMemcpyDeviceToHost) != cudaSuccess ||
+        status != 1) {
+        out.clear();
+        return false;
+    }
+    return true;
+}
+
+[[nodiscard]] bool SelfTestRCCoupledSeededPageGemmOnce()
+{
+    static std::once_flag once;
+    static bool ok = false;
+    std::call_once(once, [] {
+        const struct {
+            uint32_t width;
+            uint32_t rows;
+            uint8_t seed_base;
+        } cases[] = {{32, 1, 0x17}, {64, 32, 0x53}, {256, 128, 0xa1}};
+        auto& pool = Pool();
+        std::lock_guard<std::mutex> lock(pool.mu);
+        for (const auto& tc : cases) {
+            uint256 seed;
+            for (size_t i = 0; i < uint256::size(); ++i) {
+                seed.data()[i] =
+                    static_cast<unsigned char>(tc.seed_base + i * 29U);
+            }
+            std::vector<int8_t> left(static_cast<size_t>(tc.rows) * tc.width);
+            for (size_t i = 0; i < left.size(); ++i) {
+                left[i] = static_cast<int8_t>((static_cast<int32_t>(i * 7U) % 97) - 48);
+            }
+            const std::vector<int8_t> page =
+                matmul::v4::rc::ExpandMxDequantInt8(seed, tc.width, tc.width);
+            const std::vector<int32_t> reference =
+                matmul::v4::lt::ExactGemmS8S8(left, page, tc.rows, tc.width, tc.width);
+            std::vector<int8_t> generated;
+            std::vector<int32_t> device;
+            if (!CudaOkRCCoupledSeededPageGemm(seed, left, tc.rows, tc.width,
+                                               device, &generated) ||
+                generated != page || device != reference) {
+                ok = false;
+                return;
+            }
+        }
+        ok = true;
+    });
+    return ok;
+}
+
 thread_local bool g_lt_device_gemm_failed = false;
 thread_local bool g_lt_last_s8s8_imma = false;
 
@@ -1808,6 +2059,20 @@ bool LaunchGemmS32S8(const std::vector<int32_t>& left, const std::vector<int8_t>
         return true;
     }
     return CudaOkLaunchGemmS32S8(left, right, rows, k, cols, out);
+}
+
+bool LaunchRCCoupledSeededPageGemmS8S8(const uint256& page_seed,
+                                       const std::vector<int8_t>& left,
+                                       uint32_t rows, uint32_t width,
+                                       std::vector<int32_t>& out)
+{
+    if (!SelfTestRCCoupledSeededPageGemmOnce()) {
+        out.clear();
+        return false;
+    }
+    auto& pool = Pool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    return CudaOkRCCoupledSeededPageGemm(page_seed, left, rows, width, out, nullptr);
 }
 
 bool IsMatMulLTCudaAvailable()

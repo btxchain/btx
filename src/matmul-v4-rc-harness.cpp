@@ -764,6 +764,7 @@ int RunCoupledHarness(const Args& args)
             mw.pushKV("bank_cache_hit", t_mine.bank_cache_hit);
             mw.pushKV("activation_s", t_mine.activation_s);
             mw.pushKV("page_expand_s", t_mine.page_expand_s);
+            mw.pushKV("seeded_page_gemms", t_mine.seeded_page_gemms);
             mw.pushKV("gemm_s", t_mine.gemm_s);
             mw.pushKV("accumulate_s", t_mine.accumulate_s);
             mw.pushKV("permutation_s", t_mine.permutation_s);
@@ -857,7 +858,8 @@ int RunCoupledHarness(const Args& args)
     }
     std::cout << "  barrier_breakdown: activation=" << timed_mine.activation_s
               << "s page_expand=" << timed_mine.page_expand_s
-              << "s gemm=" << timed_mine.gemm_s
+              << "s seeded_page_gemms=" << timed_mine.seeded_page_gemms
+              << " gemm=" << timed_mine.gemm_s
               << "s accumulate=" << timed_mine.accumulate_s
               << "s permutation=" << timed_mine.permutation_s
               << "s mix=" << timed_mine.mix_s
@@ -879,6 +881,7 @@ int RunCoupledHarness(const Args& args)
     walls.pushKV("bank_cache_hit", timed_mine.bank_cache_hit);
     walls.pushKV("activation", timed_mine.activation_s);
     walls.pushKV("page_expand", timed_mine.page_expand_s);
+    walls.pushKV("seeded_page_gemms", timed_mine.seeded_page_gemms);
     walls.pushKV("gemm", timed_mine.gemm_s);
     walls.pushKV("accumulate", timed_mine.accumulate_s);
     walls.pushKV("permutation", timed_mine.permutation_s);
