@@ -1392,6 +1392,121 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_episode_shape_swap)
     rc::RCFreivaldsCarrierStoreClear();
 }
 
+// R-05 (FS/T-BIND audit): the profile-2 consensus carrier MUST bind the BLOCK
+// target (nBits-derived), NEVER the pooled share_target_override. The FS seed
+// (RCGkrFsSeedV7) absorbs the target and drives WHICH layers/tiles are sampled
+// and in WHAT order; CheckMatMulProofOfWork_RC always recomputes that seed with
+// the BLOCK target. Before the fix the solver built the carrier with the (easier)
+// share target, so an honest pool-built candidate that ALSO met the block target
+// shipped a carrier whose FS sample was bound to the share target — a validator
+// recomputing with the block target selected a different sample set and REJECTED
+// it, contradicting the SolveMatMul contract (a returned share meeting the block
+// target is a fully consensus-valid block). This regression drives the REAL solver
+// with an easier share target, lands a share whose digest ALSO meets the block
+// target, round-trips the stored carrier through the P2P wire form, and asserts
+// CheckMatMulProofOfWork_RC ACCEPTS — and that a carrier bound to the SHARE target
+// (the pre-fix behaviour) is REJECTED under block-target verification.
+BOOST_AUTO_TEST_CASE(rc_dc_carrier_binds_block_target_not_share_target)
+{
+    Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
+    constexpr int32_t kHeight = 10;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kHeight));
+    BOOST_REQUIRE(p.IsMatMulV4Active(kHeight));
+    BOOST_REQUIRE(p.GetMatMulEncodingProfile(kHeight) ==
+                  Consensus::MatMulEncodingProfile::ENC_RC);
+
+    const int64_t parent_mtp = 1'700'000'000;
+    // Easiest possible share target (max powLimit). MakeDcRCHeader keeps
+    // nBits=0x207fffff, so the BLOCK target is ~2^255 (~half of powLimit): the
+    // share override is STRICTLY easier and ~50% of toy digests also meet the
+    // block target.
+    const uint256 easy_share_target{p.powLimit};
+
+    // Drive the real solver with the easy share override, scanning start nonces
+    // until a returned share ALSO meets the block target. With the fix the solver
+    // stores a carrier ONLY when the digest meets the BLOCK target (the profile-2
+    // ProveWinnerEpisodeV7 gate now uses the block target); a share that misses the
+    // block target returns true but stores no carrier.
+    CBlockHeader solved{};
+    arith_uint256 block_target;
+    bool got_lucky_share = false;
+    for (uint64_t seed_nonce = 1; seed_nonce <= 64 && !got_lucky_share; ++seed_nonce) {
+        rc::RCFreivaldsCarrierStoreClear();
+        CBlockHeader candidate = MakeDcRCHeader(seed_nonce);
+        candidate.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
+        const auto bt = DeriveTarget(candidate.nBits, p.powLimit);
+        BOOST_REQUIRE(bt.has_value());
+        BOOST_REQUIRE_GT(UintToArith256(easy_share_target), *bt);  // share strictly easier
+
+        uint64_t max_tries = 1;
+        const bool solved_share = SolveMatMul(candidate, p, max_tries, kHeight,
+                                              /*abort_flag=*/nullptr,
+                                              /*freivalds_payload_out=*/nullptr,
+                                              &easy_share_target, parent_mtp);
+        if (!solved_share) continue;
+        // The returned share digest meets the easy target by construction; keep it
+        // only if it ALSO meets the block target (⇒ the solver stored the carrier).
+        if (UintToArith256(candidate.matmul_digest) <= *bt &&
+            rc::RCFreivaldsCarrierStoreHave(candidate.GetHash())) {
+            solved = candidate;
+            block_target = *bt;
+            got_lucky_share = true;
+        }
+    }
+    BOOST_REQUIRE_MESSAGE(got_lucky_share,
+        "expected a share whose digest also meets the block target within the scan");
+
+    // The solve exited on the EASIER share target, yet the digest is a genuine
+    // block (meets the block target).
+    BOOST_CHECK_LE(UintToArith256(solved.matmul_digest), block_target);
+    BOOST_CHECK_LE(UintToArith256(solved.matmul_digest), UintToArith256(easy_share_target));
+    BOOST_CHECK_GT(UintToArith256(easy_share_target), block_target);
+
+    // (ACCEPT, with the fix) the solver-stored carrier, round-tripped through the
+    // exact P2P wire form, is accepted by the consensus verifier (block target).
+    rc::RCFreivaldsSampledCarrier from_solver;
+    BOOST_REQUIRE(rc::RCFreivaldsCarrierStoreGet(solved.GetHash(), from_solver));
+    std::vector<unsigned char> block_wire;
+    rc::SerializeRCFreivaldsCarrier(from_solver, block_wire);
+    rc::RCFreivaldsSampledCarrier round_tripped;
+    std::string dwhy;
+    BOOST_REQUIRE_MESSAGE(
+        rc::DeserializeRCFreivaldsCarrierBounded(block_wire, round_tripped, &dwhy),
+        "carrier wire round-trip failed: " << dwhy);
+    rc::RCFreivaldsCarrierStoreClear();
+    rc::RCFreivaldsCarrierStorePut(solved.GetHash(), round_tripped);
+    BOOST_CHECK_MESSAGE(CheckMatMulProofOfWork_RC(solved, p, kHeight),
+        "block-target-bound carrier must be ACCEPTED under block-target verification");
+
+    // (WOULD-FAIL-BEFORE-FIX) build the carrier against the SHARE target — exactly
+    // what the solver did before R-05 — and show block-target verification REJECTS
+    // it. ProveWinnerEpisodeV7 succeeds against the easier share target (digest
+    // meets it), but the FS seed is bound to the wrong target, so the validator
+    // recomputes a different sample set/order and rejects.
+    const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
+    const auto share_pr = rc::ProveWinnerEpisodeV7(
+        solved, params_rc, kHeight, UintToArith256(easy_share_target), solved.matmul_digest);
+    BOOST_REQUIRE_MESSAGE(share_pr.timing.ok,
+        "prove against the easier share target must succeed (digest meets share target)");
+    rc::RCFreivaldsSampledCarrier share_carrier;
+    std::string swhy;
+    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(
+        share_pr.proof, solved, kHeight, UintToArith256(easy_share_target), share_carrier, &swhy));
+    rc::RCFreivaldsCarrierStoreClear();
+    rc::RCFreivaldsCarrierStorePut(solved.GetHash(), share_carrier);
+    BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_RC(solved, p, kHeight),
+        "share-target-bound carrier must be REJECTED under block-target verification (pre-fix defect)");
+
+    // The two carriers genuinely differ (FS seed divergence ⇒ different sampled
+    // set/order/tiles): the reject above is not vacuous.
+    std::vector<unsigned char> share_wire;
+    rc::SerializeRCFreivaldsCarrier(share_carrier, share_wire);
+    BOOST_CHECK_MESSAGE(share_wire != block_wire,
+        "share-bound and block-bound carriers must differ (FS seed is target-bound)");
+
+    rc::RCFreivaldsCarrierStoreClear();
+}
+
 // ---------------------------------------------------------------------------
 // RELAY: the sampled CARRIER — serialization (byte-exact + bounded) and the P2P
 // availability seam that closes the non-mining-node halt. These exercise the

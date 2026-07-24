@@ -6187,6 +6187,7 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
                             std::vector<uint32_t>* freivalds_payload_out,
                             std::optional<int64_t> parent_median_time_past,
                             const arith_uint256& effective_target,
+                            const arith_uint256& block_target,
                             std::chrono::steady_clock::time_point start)
 {
     if (!parent_median_time_past.has_value()) {
@@ -6263,13 +6264,25 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             // AND what net_processing announces/serves over P2P (RCCARRIER), so the
             // miner→network handoff carries the same object the validator checks.
             if (params.nMatMulRCProfile == 2) {
+                // R-05: the consensus proof/carrier MUST bind the BLOCK target
+                // (nBits-derived), never the pool share_target_override. The FS
+                // seed (RCGkrFsSeedV7) absorbs the target and drives WHICH layers
+                // /tiles are sampled; the consensus verifier
+                // (CheckMatMulProofOfWork_RC → VerifyEpisodeFreivaldsSampledCarrier)
+                // always recomputes that seed with the block target. Building the
+                // carrier with the (easier) share target would bind the FS sample
+                // to the wrong target and a validator would REJECT an honest block
+                // that also meets the block target. share_target_override may relax
+                // ONLY the digest early-exit above (effective_target); the carrier
+                // uses block_target. Solo/consensus mining has
+                // block_target == effective_target, so this is a no-op there.
                 const auto pr = matmul::v4::rc::ProveWinnerEpisodeV7(
-                    block, params_rc, block_height, effective_target, resealed);
+                    block, params_rc, block_height, block_target, resealed);
                 if (pr.timing.ok) {
                     matmul::v4::rc::RCFreivaldsSampledCarrier carrier;
                     std::string cwhy;
                     if (matmul::v4::rc::BuildFreivaldsSampledCarrier(
-                            pr.proof, block, block_height, effective_target, carrier, &cwhy)) {
+                            pr.proof, block, block_height, block_target, carrier, &cwhy)) {
                         matmul::v4::rc::RCFreivaldsCarrierStorePut(block.GetHash(),
                                                                   std::move(carrier));
                     } else {
@@ -6367,8 +6380,12 @@ static bool SolveMatMulV4(CBlockHeader& block,
                                       effective_target, start);
     }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_RC) {
+        // R-05: thread the consensus BLOCK target (*bnTarget) alongside
+        // effective_target. The share override may relax only the digest
+        // early-exit; the profile-2 proof/carrier binds *bnTarget.
         return SolveMatMulV4RC(block, params, max_tries, block_height, abort_flag,
-                               freivalds_payload_out, parent_median_time_past, effective_target, start);
+                               freivalds_payload_out, parent_median_time_past, effective_target,
+                               *bnTarget, start);
     }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_BMX4C_LT) {
         // Pass effective_target (share override when present) so LT Phase A/B
