@@ -30,6 +30,19 @@ namespace matmul_v4::accel {
  *  reuse the cached backend and do NOT re-enter ProbeRCSelfQual. */
 [[nodiscard]] matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC();
 
+/**
+ * Coupled-bank ExactGemm resolver. The consensus bank is generated with MX
+ * scale blocks across each matrix row, but a row-major A·B tensor-core B
+ * operand requires scale blocks down K. Until a scale-axis-aware native kernel
+ * is available, NativePreferred therefore selects the qualified dense exact
+ * backend instead of paying the native adapter's 16-plane base-4 fallback.
+ *
+ * BTX_RC_ACCEL_POLICY=native remains strict and delegates to
+ * MakeResolvedExactGemmBackendForRC (native-or-empty).
+ */
+[[nodiscard]] matmul::v4::lt::ExactGemmBackend
+MakeResolvedExactGemmBackendForRCCoupled();
+
 /** Apply RC self-qual gate to an already-resolved ExactGemm candidate.
  *  Cached by {provider_label, gemm_s8s8 fn ptr, epoch}. epoch=-1 is the
  *  default (non-height) probe used by miners. */

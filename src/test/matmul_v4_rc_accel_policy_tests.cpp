@@ -156,6 +156,31 @@ BOOST_AUTO_TEST_CASE(rc_native_preferred_default_admits_device_like_portable)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rc_coupled_default_selects_exact_dense_backend)
+{
+    const char* prev_env = std::getenv("BTX_RC_ACCEL_POLICY");
+    const std::string previous = prev_env != nullptr ? prev_env : "";
+    const bool had_previous = prev_env != nullptr;
+
+    unsetenv("BTX_RC_ACCEL_POLICY"); // NativePreferred
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    const auto coupled =
+        matmul_v4::accel::MakeResolvedExactGemmBackendForRCCoupled();
+
+    setenv("BTX_RC_ACCEL_POLICY", "portable", /*overwrite=*/1);
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+    const auto portable = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+
+    BOOST_CHECK_EQUAL(coupled.gemm_s8s8, portable.gemm_s8s8);
+
+    if (had_previous) {
+        setenv("BTX_RC_ACCEL_POLICY", previous.c_str(), /*overwrite=*/1);
+    } else {
+        unsetenv("BTX_RC_ACCEL_POLICY");
+    }
+    matmul_v4::accel::ResetRCExactGemmResolveCacheForTest();
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_consensus_config_defaults_ai_production)
 {
     const rc::RCCoupConsensusConfig cfg = rc::MakeDefaultRCCoupConsensusConfig();

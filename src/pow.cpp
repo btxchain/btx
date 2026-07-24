@@ -6090,7 +6090,7 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
     // F5: resolve + RC self-qual ONCE per solve (cached by provider/arch/epoch).
     // Per-nonce path must never re-enter ProbeRCSelfQual.
-    const auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+    const auto gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRCCoupled();
 
     while (max_tries > 0) {
         if (abort_flag != nullptr && abort_flag->load(std::memory_order_relaxed)) {

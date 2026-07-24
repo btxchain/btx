@@ -797,6 +797,27 @@ matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRC()
     return GateExactGemmWithRCSelfQualCached(resolved.backend, resolved.label, /*epoch=*/-1);
 }
 
+matmul::v4::lt::ExactGemmBackend MakeResolvedExactGemmBackendForRCCoupled()
+{
+    using matmul::v4::rc::RCAccelerationPolicy;
+    const RCAccelerationPolicy policy = matmul::v4::rc::ResolveRCAccelerationPolicy();
+
+    // An explicit native requirement is a contract: never substitute dense
+    // INT8. The generic RC resolver returns qualified native or empty.
+    if (policy == RCAccelerationPolicy::NativeRequired) {
+        return MakeResolvedExactGemmBackendForRC();
+    }
+
+    // Coupled bank pages use row-block MX scales. In A(M×K)·B(K×N), B's
+    // tensor-core scale axis is K, orthogonal to that consensus layout. The
+    // current native adapter consequently falls through to 16 base-4 plane
+    // products. Select the exact dense device lane until a scale-axis-aware
+    // native coupled kernel exists.
+    const ResolvedExactGemm resolved = ResolveExactGemmBackendForLT();
+    return GateExactGemmWithRCSelfQualCached(
+        resolved.backend, "rc_coupled_row_scale_dense", /*epoch=*/-1);
+}
+
 matmul::v4::lt::ExactMxProjectionBackend MakeResolvedExactMxProjectionBackend()
 {
     matmul::v4::lt::ExactMxProjectionBackend backend;

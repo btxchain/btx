@@ -25,7 +25,8 @@ RCCoupledDeviceProbe ProbeRCCoupledDevice()
     RCCoupledDeviceProbe st;
     // Same RC-gated ExactGemm resolve used by MineCoupledPuzzle / harness:
     // CUDA/HIP/Metal LaunchGemmS8S8 when available and self-qualified.
-    const lt::ExactGemmBackend backend = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+    const lt::ExactGemmBackend backend =
+        matmul_v4::accel::MakeResolvedExactGemmBackendForRCCoupled();
     if (backend.gemm_s8s8 == nullptr) {
         st.provider = "cpu";
         st.detail = "no_device_backend_after_rc_selfqual";

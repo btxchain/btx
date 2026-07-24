@@ -16,6 +16,7 @@
 #include <crypto/sha256.h>
 #include <matmul/exact_gemm_resolve.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_accel_policy.h>
 #include <matmul/matmul_v4_rc_scale_axes.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_coupled_netcost.h>
@@ -102,7 +103,7 @@ void PrintUsage(std::ostream& os)
        << "  --rounds N                 override episode rounds (default: params)\n"
        << "  --episodes N               ExtractMX self-qual episode count (default: 3)\n"
        << "  --backend NAME             cpu|cuda|hip|metal|auto (default: cpu).\n"
-       << "                             Non-CPU uses MakeResolvedExactGemmBackendForRC\n"
+       << "                             Non-CPU uses the applicable RC ExactGemm resolver\n"
        << "                             (LT resolve + RC self-qual fail-closed → CPU).\n"
        << "                             Digests are always resealed vs empty-backend CPU.\n"
        << "  --mem-cap BYTES            soft RSS/peak budget; auto-Streamed if over (0=off)\n"
@@ -467,12 +468,12 @@ int RunCoupledHarness(const Args& args)
         return 1;
     }
 
-    // Mining ExactGemm: MakeResolvedExactGemmBackendForRC → CUDA/HIP/Metal
-    // LaunchGemmS8S8 after RC self-qual; empty → CPU fail-closed.
+    // Coupled mining ExactGemm: shape-aware resolver → CUDA/HIP/Metal exact
+    // dense lane after RC self-qual; empty → CPU fail-closed.
     matmul::v4::lt::ExactGemmBackend gemm{};
     std::string backend_resolved = "cpu";
     if (args.backend != "cpu") {
-        gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRC();
+        gemm = matmul_v4::accel::MakeResolvedExactGemmBackendForRCCoupled();
         if (gemm.gemm_s8s8 != nullptr) {
             backend_resolved = args.backend;
         } else {
@@ -593,6 +594,11 @@ int RunCoupledHarness(const Args& args)
     std::cout << "== MatMul ENC_RC coupled harness (Stage C) ==\n";
     std::cout << "  device_id:  " << device_id << "\n";
     std::cout << "  backend:    " << args.backend << " → " << backend_resolved << "\n";
+    std::cout << "  gemm_policy: coupled_row_scale_exact_dense"
+              << (rc::ResolveRCAccelerationPolicy() == rc::RCAccelerationPolicy::NativeRequired
+                      ? " (strict native override)"
+                      : "")
+              << "\n";
 
     // LOUD native-path status: never let a deactivated FP4/native tensor path hide
     // behind quiet INT8 numbers. Surface exactly what the runtime selected and, when
@@ -793,6 +799,10 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("device_id", device_id);
     root.pushKV("backend", backend_resolved);
     root.pushKV("backend_requested", args.backend);
+    root.pushKV("coupled_gemm_policy",
+                rc::ResolveRCAccelerationPolicy() == rc::RCAccelerationPolicy::NativeRequired
+                    ? "strict_native_override"
+                    : "row_scale_exact_dense");
     root.pushKV("exact_gemm_inject", gemm.gemm_s8s8 != nullptr);
     root.pushKV("profile", "coupled");
     root.pushKV("toy", !args.coupled_medium && !production_v2 && !production_v3 &&
@@ -853,7 +863,7 @@ int RunCoupledHarness(const Args& args)
     root.pushKV("consensus_note",
                 "nMatMulRCCoupledHeight remains INT32_MAX on public nets; coupled "
                 "profile (ENC_RC_COUPLED) is INERT unless regtest sets a finite height. "
-                "Mining inject uses MakeResolvedExactGemmBackendForRC when active. "
+                "Mining inject uses the coupled row-scale-aware ExactGemm resolver when active. "
                 "SIMULATED interconnect is NOT Stage-I gate 4 evidence. "
                 "phase_wall_s times MineCoupledPuzzle; reference_wall_s is "
                 "correctness_reference (CPU ExactGemm oracle) — not GPU throughput. "
