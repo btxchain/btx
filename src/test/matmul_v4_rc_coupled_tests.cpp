@@ -1118,6 +1118,25 @@ BOOST_AUTO_TEST_CASE(rc_coup_v4_proof_friendly_permutation_is_bijective)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_parallel_permutation_matches_scalar)
+{
+    const uint256 sigma = matmul::v4::DeriveSigma(MakeCoupHeader(91));
+    for (const auto& item :
+         {std::make_pair(rc::MakeMediumV3RCCoupParams(), rc::ENC_RC_V3),
+          std::make_pair(rc::MakeMediumV3RCCoupParams(), rc::ENC_RC_V4)}) {
+        const auto& params = item.first;
+        const uint32_t version = item.second;
+        for (uint32_t barrier = 0; barrier < params.barriers; ++barrier) {
+            const auto scalar = rc::DeriveCoupledBalancedPermutation(
+                sigma, barrier, params, version);
+            const auto parallel = rc::DeriveCoupledBalancedPermutationParallel(
+                sigma, barrier, params, version, /*threads=*/4);
+            BOOST_CHECK(parallel == scalar);
+            BOOST_CHECK(rc::IsBalancedPermutation(parallel, params.StateBytes()));
+        }
+    }
+}
+
 
 BOOST_AUTO_TEST_CASE(rc_coup_full_schedule_page_coverage_unique)
 {

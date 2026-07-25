@@ -519,6 +519,16 @@ DeriveCoupledBalancedPermutation(const uint256& sigma, uint32_t barrier,
                                  const RCCoupParams& params,
                                  uint32_t transcript_version = ENC_RC_V1);
 
+/**
+ * Mining-only parallel construction of the exact same permutation. Counter-XOF
+ * blocks and direct index maps are independent; Fisher-Yates swaps retain the
+ * canonical serial draw order.
+ */
+[[nodiscard]] std::vector<uint32_t>
+DeriveCoupledBalancedPermutationParallel(const uint256& sigma, uint32_t barrier,
+                                         const RCCoupParams& params,
+                                         uint32_t transcript_version, uint32_t threads);
+
 [[nodiscard]] bool IsBalancedPermutation(const std::array<uint32_t, kRCCoupStateBytes>& pi);
 [[nodiscard]] bool IsBalancedPermutation(const std::vector<uint32_t>& pi, uint32_t n);
 

@@ -499,6 +499,17 @@ void ApplyBalancedPermutation(std::vector<int64_t>& s, const std::vector<uint32_
     s = std::move(tmp);
 }
 
+void ApplyBalancedPermutationParallel(std::vector<int64_t>& s,
+                                      const std::vector<uint32_t>& pi,
+                                      uint32_t threads)
+{
+    std::vector<int64_t> tmp(s.size());
+    ParallelForCoupled(s.size(), threads, [&](size_t i) {
+        tmp[pi[i]] = s[i];
+    });
+    s = std::move(tmp);
+}
+
 /**
  * Non-affine Extract (C3.d / C5): ExtractMXTileInt64 per 32-wide tile.
  * Lookup-argument-shaped for Stage E (see header note).
@@ -1213,6 +1224,57 @@ std::vector<uint32_t> DeriveCoupledBalancedPermutation(const uint256& sigma, uin
     return pi;
 }
 
+std::vector<uint32_t> DeriveCoupledBalancedPermutationParallel(
+    const uint256& sigma, uint32_t barrier, const RCCoupParams& params,
+    uint32_t transcript_version, uint32_t threads)
+{
+    const uint32_t n = params.StateBytes();
+    if (threads <= 1 || n < 2) {
+        return DeriveCoupledBalancedPermutation(sigma, barrier, params, transcript_version);
+    }
+    if (RCCoupUsesProofFriendlyPermutation(transcript_version)) {
+        const auto spec = DeriveCoupledProofFriendlyPermutationSpec(
+            sigma, barrier, params, transcript_version);
+        std::vector<uint32_t> pi(n);
+        ParallelForCoupled(n, threads, [&](size_t i) {
+            pi[i] = ApplyCoupledProofFriendlyPermutationIndex(
+                static_cast<uint32_t>(i), spec);
+        });
+        return pi;
+    }
+
+    const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
+    const uint256 perm_seed =
+        Sha256TaggedU32(tags.perm, TagLen(tags.perm), sigma, barrier);
+    const size_t draws = n - 1U;
+    std::vector<uint32_t> random(draws);
+    const size_t blocks = (draws + 7U) / 8U;
+    ParallelForCoupled(blocks, threads, [&](size_t block_index) {
+        unsigned char input[32 + 4];
+        std::memcpy(input, perm_seed.data(), 32);
+        WriteLE32(input + 32, static_cast<uint32_t>(block_index));
+        uint8_t hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(input, sizeof(input)).Finalize(hash);
+        const size_t draw0 = block_index * 8U;
+        for (size_t j = 0; j < 8 && draw0 + j < draws; ++j) {
+            random[draw0 + j] = ReadLE32(hash + j * sizeof(uint32_t));
+        }
+    });
+
+    std::vector<uint32_t> pi(n);
+    ParallelForCoupled(n, threads, [&](size_t i) {
+        pi[i] = static_cast<uint32_t>(i);
+    });
+    size_t draw = 0;
+    for (uint32_t i = n - 1; i > 0; --i) {
+        const uint32_t j = random[draw++] % (i + 1);
+        const uint32_t tmp = pi[i];
+        pi[i] = pi[j];
+        pi[j] = tmp;
+    }
+    return pi;
+}
+
 std::array<uint32_t, kRCCoupStateBytes> DeriveCoupledBalancedPermutation(const uint256& sigma,
                                                                          uint32_t barrier)
 {
@@ -1622,9 +1684,17 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         // C3.b — nonce-derived balanced permutation over full active state.
         {
             const auto t_perm0 = std::chrono::steady_clock::now();
-            const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params, tv);
+            const auto pi =
+                options.expansion_threads > 1
+                    ? DeriveCoupledBalancedPermutationParallel(
+                          sigma, b, params, tv, options.expansion_threads)
+                    : DeriveCoupledBalancedPermutation(sigma, b, params, tv);
             if (!IsBalancedPermutation(pi, n)) return uint256{};
-            ApplyBalancedPermutation(acc, pi);
+            if (options.expansion_threads > 1) {
+                ApplyBalancedPermutationParallel(acc, pi, options.expansion_threads);
+            } else {
+                ApplyBalancedPermutation(acc, pi);
+            }
             if (out_timing) {
                 out_timing->permutation_s +=
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t_perm0)
