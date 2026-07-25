@@ -286,6 +286,13 @@ struct RCCoupOptions {
     uint32_t expansion_threads{1};
 
     /**
+     * Overlap ordered bank hashing with expansion of the following page.
+     * Execution-only: pages are still fed to SHA256 in canonical index order,
+     * and the page producer remains the independent CPU MX oracle.
+     */
+    bool pipeline_bank_commitment{true};
+
+    /**
      * Optional mining-only memo for the template-scoped bank commitment.
      * Consensus validation and independent winning-candidate reseal leave this
      * null. It stores no pages and cannot affect page contents.

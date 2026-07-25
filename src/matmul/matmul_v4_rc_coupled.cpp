@@ -207,7 +207,7 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
 /** Stream pages into the hasher without retaining the full bank (Streamed). */
 uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
                                 const RCCoupParams& params, uint32_t transcript_version,
-                                uint32_t expansion_threads,
+                                uint32_t expansion_threads, bool pipeline_pages,
                                 const std::shared_ptr<RCCoupBankRootCache>& root_cache,
                                 RCCoupTiming* timing)
 {
@@ -230,11 +230,40 @@ uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(tags.bank), TagLen(tags.bank));
     const size_t page_bytes = static_cast<size_t>(params.lobe_width) * params.lobe_width;
-    for (uint32_t p = 0; p < params.bank_pages; ++p) {
-        const auto page = DeriveCoupledBankPage(header, height, p, params, transcript_version,
-                                                expansion_threads);
-        if (page.size() != page_bytes) return uint256{};
-        outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
+    const auto derive_page = [&](uint32_t p, uint32_t threads) {
+        return DeriveCoupledBankPage(header, height, p, params, transcript_version, threads);
+    };
+    if (pipeline_pages && expansion_threads > 1 && params.bank_pages > 1) {
+        // Reserve one logical worker for ordered SHA256 while the next page is
+        // expanded. At most two expanded pages (current + in-flight) exist.
+        const uint32_t producer_threads = expansion_threads - 1;
+        std::vector<int8_t> page = derive_page(0, producer_threads);
+        for (uint32_t p = 0; p < params.bank_pages; ++p) {
+            std::future<std::vector<int8_t>> next;
+            if (p + 1 < params.bank_pages) {
+                try {
+                    next = std::async(std::launch::async, derive_page, p + 1,
+                                      producer_threads);
+                } catch (...) {
+                    return uint256{};
+                }
+            }
+            if (page.size() != page_bytes) return uint256{};
+            outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
+            if (next.valid()) {
+                try {
+                    page = next.get();
+                } catch (...) {
+                    return uint256{};
+                }
+            }
+        }
+    } else {
+        for (uint32_t p = 0; p < params.bank_pages; ++p) {
+            const auto page = derive_page(p, expansion_threads);
+            if (page.size() != page_bytes) return uint256{};
+            outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
+        }
     }
     uint8_t d1[CSHA256::OUTPUT_SIZE];
     outer.Finalize(d1);
@@ -1513,6 +1542,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         if (streamed) {
             bank_root = BankCommitmentStreaming(header, height, params, tv,
                                                 options.expansion_threads,
+                                                options.pipeline_bank_commitment,
                                                 options.bank_root_cache, out_timing);
         } else {
             const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);

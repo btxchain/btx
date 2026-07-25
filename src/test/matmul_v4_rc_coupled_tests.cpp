@@ -643,6 +643,25 @@ BOOST_AUTO_TEST_CASE(rc_coup_soft_4gib_streamed_budget)
     }
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_streamed_bank_pipeline_matches_serial)
+{
+    const auto header = MakeCoupHeader(14);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    auto serial = rc::MakeMediumV3RCCoupOptions();
+    serial.mode = rc::RCCoupExecMode::Streamed;
+    serial.expansion_threads = 4;
+    serial.pipeline_bank_commitment = false;
+    auto pipelined = serial;
+    pipelined.pipeline_bank_commitment = true;
+
+    const uint256 expected =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, serial);
+    const uint256 actual =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, pipelined);
+    BOOST_REQUIRE(!expected.IsNull());
+    BOOST_CHECK_EQUAL(actual, expected);
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_production_dims_provisional)
 {
     // PROVISIONAL production coupled shape — CI checks structure + peak formulas only
