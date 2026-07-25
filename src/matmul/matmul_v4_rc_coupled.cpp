@@ -19,6 +19,7 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
+#include <future>
 #include <limits>
 #include <vector>
 
@@ -1339,7 +1340,137 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 SelectCoupledBankPageIds(b, ell, params, sigma, full_sched, tv);
             if (page_ids.empty()) return uint256{};
             int64_t* dest = acc.data() + static_cast<size_t>(ell) * lobe_stride;
-            for (uint32_t page_id : page_ids) {
+            const int8_t* lobe_rows =
+                state.data() + static_cast<size_t>(ell) * lobe_stride;
+            auto accumulate_partial = [&](const std::vector<int64_t>& partial) {
+                const auto t_acc0 = std::chrono::steady_clock::now();
+                for (uint32_t i = 0; i < lobe_stride; ++i) {
+                    dest[i] += partial[i];
+                }
+                if (out_timing) {
+                    out_timing->accumulate_s +=
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - t_acc0)
+                            .count();
+                }
+            };
+            auto try_fused = [&](uint32_t page_id, std::vector<int64_t>& partial) {
+                const uint256 page_seed =
+                    DeriveCoupledBankPageSeed(header, height, page_id, params, tv);
+                const auto t_fused0 = std::chrono::steady_clock::now();
+                const bool fused = LobeLocalSeededPageGemm(
+                    page_seed, lobe_rows, M, W, partial.data(), gemm);
+                if (out_timing) {
+                    if (fused) ++out_timing->seeded_page_gemms;
+                    out_timing->gemm_s +=
+                        std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - t_fused0)
+                            .count();
+                }
+                return fused;
+            };
+
+            // One host SHA-NI page producer complements the GPU SHA sampler.
+            // Three-page groups preserve accumulation order: expand page 0 on
+            // host while pages 1/2 use fused CUDA, then GEMM page 0 and add
+            // partials in their original schedule order.
+            size_t page_cursor = 0;
+            const bool can_overlap_host =
+                streamed && out_tx == nullptr && !options.skip_bank_page &&
+                options.expansion_threads > 1 && gemm.seeded_page_s8s8 != nullptr &&
+                gemm.gemm_s8s8 != nullptr;
+            if (can_overlap_host) {
+                struct HostPage {
+                    std::vector<int8_t> bytes;
+                    double expand_s{0};
+                };
+                while (page_cursor + 2 < page_ids.size()) {
+                    const uint32_t host_page_id = page_ids[page_cursor];
+                    const uint256 host_seed = DeriveCoupledBankPageSeed(
+                        header, height, host_page_id, params, tv);
+                    std::future<HostPage> host_future;
+                    try {
+                        host_future = std::async(
+                            std::launch::async,
+                            [host_seed, W, threads = options.expansion_threads] {
+                                HostPage result;
+                                const auto t0 = std::chrono::steady_clock::now();
+                                try {
+                                    result.bytes = ExpandMxDequantInt8Parallel(
+                                        host_seed, W, W, threads);
+                                } catch (...) {
+                                    result.bytes.clear();
+                                }
+                                result.expand_s =
+                                    std::chrono::duration<double>(
+                                        std::chrono::steady_clock::now() - t0)
+                                        .count();
+                                return result;
+                            });
+                    } catch (...) {
+                        break;
+                    }
+
+                    std::vector<std::vector<int64_t>> group(
+                        3, std::vector<int64_t>(static_cast<size_t>(lobe_stride), 0));
+                    for (size_t j = 1; j < 3; ++j) {
+                        if (!try_fused(page_ids[page_cursor + j], group[j])) {
+                            const auto t_page0 = std::chrono::steady_clock::now();
+                            const auto page = DeriveCoupledBankPage(
+                                header, height, page_ids[page_cursor + j], params, tv,
+                                options.expansion_threads);
+                            if (out_timing) {
+                                out_timing->page_expand_s +=
+                                    std::chrono::duration<double>(
+                                        std::chrono::steady_clock::now() - t_page0)
+                                        .count();
+                            }
+                            const auto t_gemm0 = std::chrono::steady_clock::now();
+                            LobeLocalGemm(lobe_rows, page, M, W, group[j].data(), gemm);
+                            if (out_timing) {
+                                out_timing->gemm_s +=
+                                    std::chrono::duration<double>(
+                                        std::chrono::steady_clock::now() - t_gemm0)
+                                        .count();
+                            }
+                        }
+                    }
+                    HostPage host_page;
+                    try {
+                        host_page = host_future.get();
+                    } catch (...) {
+                        host_page = HostPage{};
+                    }
+                    if (host_page.bytes.size() != static_cast<size_t>(W) * W) {
+                        const auto t_page0 = std::chrono::steady_clock::now();
+                        host_page.bytes = DeriveCoupledBankPage(
+                            header, height, host_page_id, params, tv,
+                            options.expansion_threads);
+                        if (out_timing) {
+                            out_timing->page_expand_s +=
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - t_page0)
+                                    .count();
+                        }
+                    } else if (out_timing) {
+                        ++out_timing->host_overlap_pages;
+                        out_timing->host_overlap_expand_s += host_page.expand_s;
+                    }
+                    const auto t_gemm0 = std::chrono::steady_clock::now();
+                    LobeLocalGemm(lobe_rows, host_page.bytes, M, W, group[0].data(), gemm);
+                    if (out_timing) {
+                        out_timing->gemm_s +=
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_gemm0)
+                                .count();
+                    }
+                    for (const auto& partial : group) accumulate_partial(partial);
+                    page_cursor += 3;
+                }
+            }
+
+            for (; page_cursor < page_ids.size(); ++page_cursor) {
+                const uint32_t page_id = page_ids[page_cursor];
                 std::vector<int64_t> partial(static_cast<size_t>(lobe_stride), 0);
                 std::vector<int8_t> page_for_tx;
                 if (streamed) {
@@ -1349,20 +1480,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     bool fused = false;
                     if (out_tx == nullptr && !options.skip_bank_page &&
                         gemm.seeded_page_s8s8 != nullptr) {
-                        const uint256 page_seed = DeriveCoupledBankPageSeed(
-                            header, height, page_id, params, tv);
-                        const auto t_fused0 = std::chrono::steady_clock::now();
-                        fused = LobeLocalSeededPageGemm(
-                            page_seed,
-                            state.data() + static_cast<size_t>(ell) * lobe_stride,
-                            M, W, partial.data(), gemm);
-                        if (out_timing) {
-                            if (fused) ++out_timing->seeded_page_gemms;
-                            out_timing->gemm_s +=
-                                std::chrono::duration<double>(
-                                    std::chrono::steady_clock::now() - t_fused0)
-                                    .count();
-                        }
+                        fused = try_fused(page_id, partial);
                     }
                     if (!fused) {
                         const auto t_page0 = std::chrono::steady_clock::now();
@@ -1378,9 +1496,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                         MaybeZeroSkipPage(page, page_id, options);
                         if (out_tx) page_for_tx = page;
                         const auto t_gemm0 = std::chrono::steady_clock::now();
-                        LobeLocalGemm(
-                            state.data() + static_cast<size_t>(ell) * lobe_stride,
-                            page, M, W, partial.data(), gemm);
+                        LobeLocalGemm(lobe_rows, page, M, W, partial.data(), gemm);
                         if (out_timing) {
                             out_timing->gemm_s +=
                                 std::chrono::duration<double>(
@@ -1391,8 +1507,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 } else {
                     if (out_tx) page_for_tx = pages[page_id];
                     const auto t_gemm0 = std::chrono::steady_clock::now();
-                    LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride,
-                                  pages[page_id], M, W, partial.data(), gemm);
+                    LobeLocalGemm(lobe_rows, pages[page_id], M, W,
+                                  partial.data(), gemm);
                     if (out_timing) {
                         out_timing->gemm_s +=
                             std::chrono::duration<double>(
@@ -1405,25 +1521,12 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     gt.barrier = b;
                     gt.lobe = ell;
                     gt.page_id = page_id;
-                    gt.A.assign(state.data() + static_cast<size_t>(ell) * lobe_stride,
-                                state.data() + static_cast<size_t>(ell) * lobe_stride +
-                                    lobe_stride);
+                    gt.A.assign(lobe_rows, lobe_rows + lobe_stride);
                     gt.B = std::move(page_for_tx);
                     gt.Y = partial;
                     out_tx->gemms.push_back(std::move(gt));
                 }
-                {
-                    const auto t_acc0 = std::chrono::steady_clock::now();
-                    for (uint32_t i = 0; i < lobe_stride; ++i) {
-                        dest[i] += partial[i];
-                    }
-                    if (out_timing) {
-                        out_timing->accumulate_s +=
-                            std::chrono::duration<double>(
-                                std::chrono::steady_clock::now() - t_acc0)
-                                .count();
-                    }
-                }
+                accumulate_partial(partial);
             }
         }
 

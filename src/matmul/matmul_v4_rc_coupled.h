@@ -386,6 +386,10 @@ struct RCCoupTiming {
     double page_expand_s{0};
     /** Streamed page expansions consumed by the fused seeded accelerator path. */
     uint64_t seeded_page_gemms{0};
+    /** Pages expanded on host while independent fused GPU pages were in flight. */
+    uint64_t host_overlap_pages{0};
+    /** Sum of host worker expansion time for host_overlap_pages (overlapped wall). */
+    double host_overlap_expand_s{0};
     double gemm_s{0};
     double accumulate_s{0};
     double permutation_s{0};
