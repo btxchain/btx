@@ -1637,11 +1637,11 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             };
 
             // One host SHA-NI page producer complements the GPU SHA sampler.
-            // Four-page groups preserve accumulation order: expand page 0 on
-            // host while pages 1/2/3 use fused CUDA, then GEMM page 0 and add
-            // partials in their original schedule order. The 1:3 split tracks
-            // the measured producer-rate ratio on the RTX 5060.
-            constexpr size_t kHostGpuGroup = 4;
+            // Twelve-page groups preserve accumulation order: expand page 0 on
+            // host while pages 1..11 use fused CUDA, then GEMM page 0 and add
+            // partials in their original schedule order. The 1:11 split tracks
+            // the measured producer-rate ratio after the parallel device scan.
+            constexpr size_t kHostGpuGroup = 12;
             size_t page_cursor = 0;
             const bool can_overlap_host =
                 streamed && out_tx == nullptr && !options.skip_bank_page &&
