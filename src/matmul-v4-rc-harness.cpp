@@ -763,6 +763,8 @@ int RunCoupledHarness(const Args& args)
             mw.pushKV("mine_matches_cpu", !args.skip_reference && d == d_mine);
             mw.pushKV("bank_s", t_mine.bank_s);
             mw.pushKV("bank_cache_hit", t_mine.bank_cache_hit);
+            mw.pushKV("bank_device_pages", t_mine.bank_device_pages);
+            mw.pushKV("bank_cpu_pages", t_mine.bank_cpu_pages);
             mw.pushKV("activation_s", t_mine.activation_s);
             mw.pushKV("page_expand_s", t_mine.page_expand_s);
             mw.pushKV("seeded_page_gemms", t_mine.seeded_page_gemms);
@@ -855,6 +857,8 @@ int RunCoupledHarness(const Args& args)
               << "\n";
     std::cout << "  phase_wall: bank=" << timed_mine.bank_s << "s barriers="
               << timed_mine.barriers_s << "s total=" << timed_mine.total_s << "s (mine)\n";
+    std::cout << "  bank_pages: device=" << timed_mine.bank_device_pages
+              << " cpu=" << timed_mine.bank_cpu_pages << "\n";
     if (bank_root_cache != nullptr) {
         std::cout << "  bank_cache: hit=" << (timed_mine.bank_cache_hit ? 1 : 0)
                   << " storage=112 bytes (key + root payload)\n";
@@ -885,6 +889,8 @@ int RunCoupledHarness(const Args& args)
     UniValue walls(UniValue::VOBJ);
     walls.pushKV("bank", timed_mine.bank_s);
     walls.pushKV("bank_cache_hit", timed_mine.bank_cache_hit);
+    walls.pushKV("bank_device_pages", timed_mine.bank_device_pages);
+    walls.pushKV("bank_cpu_pages", timed_mine.bank_cpu_pages);
     walls.pushKV("activation", timed_mine.activation_s);
     walls.pushKV("page_expand", timed_mine.page_expand_s);
     walls.pushKV("seeded_page_gemms", timed_mine.seeded_page_gemms);

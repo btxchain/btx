@@ -2168,6 +2168,22 @@ bool LaunchRCCoupledSeededPageGemmS8S8(const uint256& page_seed,
     return CudaOkRCCoupledSeededPageGemm(page_seed, left, rows, width, out, nullptr);
 }
 
+bool LaunchRCCoupledSeededPageS8(const uint256& page_seed, uint32_t width,
+                                 std::vector<int8_t>& out)
+{
+    out.clear();
+    if (!SelfTestRCCoupledSeededPageGemmOnce()) return false;
+    // Reuse the already-qualified page generator. A zero left row makes the
+    // trailing exact GEMM/output copy negligible relative to a 64 MiB page
+    // transfer and avoids a second, potentially drifting expansion path.
+    std::vector<int8_t> zero_left(width, 0);
+    std::vector<int32_t> ignored;
+    auto& pool = Pool();
+    std::lock_guard<std::mutex> lock(pool.mu);
+    return CudaOkRCCoupledSeededPageGemm(
+        page_seed, zero_left, /*rows=*/1, width, ignored, &out);
+}
+
 bool IsMatMulLTCudaAvailable()
 {
     const btx::cuda::CudaRuntimeProbe probe = btx::cuda::ProbeCudaRuntime();

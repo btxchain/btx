@@ -208,6 +208,7 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
 uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
                                 const RCCoupParams& params, uint32_t transcript_version,
                                 uint32_t expansion_threads, bool pipeline_pages,
+                                const lt::ExactGemmBackend& gemm,
                                 const std::shared_ptr<RCCoupBankRootCache>& root_cache,
                                 RCCoupTiming* timing)
 {
@@ -230,7 +231,29 @@ uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
     CSHA256 outer;
     outer.Write(reinterpret_cast<const unsigned char*>(tags.bank), TagLen(tags.bank));
     const size_t page_bytes = static_cast<size_t>(params.lobe_width) * params.lobe_width;
+    bool device_page_enabled = gemm.seeded_page_s8 != nullptr;
     const auto derive_page = [&](uint32_t p, uint32_t threads) {
+        if (device_page_enabled) {
+            std::vector<int8_t> device_page;
+            bool ok = false;
+            try {
+                const uint256 seed = DeriveCoupledBankPageSeed(
+                    header, height, p, params, transcript_version);
+                ok = !seed.IsNull() &&
+                     gemm.seeded_page_s8(seed, params.lobe_width, device_page) &&
+                     device_page.size() == page_bytes;
+            } catch (...) {
+                ok = false;
+            }
+            if (ok) {
+                if (timing != nullptr) ++timing->bank_device_pages;
+                return device_page;
+            }
+            // Fail closed to the CPU oracle once. Repeated device retries would
+            // amplify a provider/runtime failure across all 1,536 pages.
+            device_page_enabled = false;
+        }
+        if (timing != nullptr) ++timing->bank_cpu_pages;
         return DeriveCoupledBankPage(header, height, p, params, transcript_version, threads);
     };
     if (pipeline_pages && expansion_threads > 1 && params.bank_pages > 1) {
@@ -1564,6 +1587,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             bank_root = BankCommitmentStreaming(header, height, params, tv,
                                                 options.expansion_threads,
                                                 options.pipeline_bank_commitment,
+                                                gemm,
                                                 options.bank_root_cache, out_timing);
         } else {
             const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);

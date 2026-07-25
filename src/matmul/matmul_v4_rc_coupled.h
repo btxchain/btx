@@ -403,6 +403,10 @@ struct RCCoupOptions {
 struct RCCoupTiming {
     double bank_s{0};
     bool bank_cache_hit{false};
+    /** Cold commitment pages produced by a qualified mining accelerator. */
+    uint64_t bank_device_pages{0};
+    /** Cold commitment pages produced by the independent CPU page oracle. */
+    uint64_t bank_cpu_pages{0};
     double activation_s{0};
     /** Streamed page regeneration inside the barrier schedule. */
     double page_expand_s{0};

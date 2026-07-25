@@ -115,6 +115,13 @@ struct LtCudaBatchProvenance {
     const uint256& page_seed, const std::vector<int8_t>& left, uint32_t rows,
     uint32_t width, std::vector<int32_t>& out);
 
+/**
+ * Qualified cold-commitment page producer. Returns the exact expanded
+ * width×width signed-int8 page; the host retains ordered SHA256 ownership.
+ */
+[[nodiscard]] bool LaunchRCCoupledSeededPageS8(
+    const uint256& page_seed, uint32_t width, std::vector<int8_t>& out);
+
 /** Host-callable exact MX scale-partitioned B̂·V (device GEMMs when available).
  *  On success `out` is byte-identical to ComputeProjectedRightMxBlockScaleLT
  *  and provenance.exact_mx_scale_partitioned is set (unless a qualified native

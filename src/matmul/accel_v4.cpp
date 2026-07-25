@@ -621,6 +621,8 @@ ResolvedExactGemm ResolveExactGemmBackendForLT()
         // LaunchGemm* prefers cuBLASLt IMMA then scalar device tiles.
         resolved.backend.gemm_s8s8 = &matmul_v4::cuda::LaunchGemmS8S8;
         resolved.backend.gemm_s32s8 = &matmul_v4::cuda::LaunchGemmS32S8;
+        resolved.backend.seeded_page_s8 =
+            &matmul_v4::cuda::LaunchRCCoupledSeededPageS8;
         resolved.backend.seeded_page_s8s8 =
             &matmul_v4::cuda::LaunchRCCoupledSeededPageGemmS8S8;
         resolved.label = "cuda";

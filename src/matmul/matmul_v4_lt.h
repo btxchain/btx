@@ -143,6 +143,12 @@ struct ExactGemmBackend {
                              uint32_t rows, uint32_t inner, uint32_t cols,
                              std::vector<int32_t>& out);
     /**
+     * Optional mining-only page producer for a cold streamed bank commitment.
+     * The caller still hashes returned bytes on the host in canonical order.
+     */
+    using SeededPageS8Fn = bool (*)(const uint256& page_seed, uint32_t width,
+                                   std::vector<int8_t>& out);
+    /**
      * Optional mining-only fused path for RC coupled Streamed execution:
      * generate the deterministic W×W row-block MX page named by `page_seed`
      * directly on the accelerator, then compute L(rows×W)·page. Consensus
@@ -153,6 +159,7 @@ struct ExactGemmBackend {
                                      uint32_t width, std::vector<int32_t>& out);
     S8S8Fn gemm_s8s8{nullptr};
     S32S8Fn gemm_s32s8{nullptr};
+    SeededPageS8Fn seeded_page_s8{nullptr};
     SeededPageS8S8Fn seeded_page_s8s8{nullptr};
 
     [[nodiscard]] bool HasDeviceGemms() const

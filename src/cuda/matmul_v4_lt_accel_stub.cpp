@@ -44,6 +44,12 @@ bool LaunchRCCoupledSeededPageGemmS8S8(const uint256&, const std::vector<int8_t>
     return false;
 }
 
+bool LaunchRCCoupledSeededPageS8(const uint256&, uint32_t, std::vector<int8_t>& out)
+{
+    out.clear();
+    return false;
+}
+
 bool LaunchProjectedRightMx(const std::vector<int8_t>&, const std::vector<uint8_t>&,
                             const std::vector<int8_t>&, uint32_t, uint32_t,
                             std::vector<int32_t>& out,

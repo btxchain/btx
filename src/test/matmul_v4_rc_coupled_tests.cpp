@@ -663,6 +663,35 @@ BOOST_AUTO_TEST_CASE(rc_coup_streamed_bank_pipeline_matches_serial)
     BOOST_CHECK_EQUAL(actual, expected);
 }
 
+BOOST_AUTO_TEST_CASE(rc_coup_seeded_bank_page_provider_matches_cpu_commitment)
+{
+    const auto header = MakeCoupHeader(16);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    auto options = rc::MakeMediumV3RCCoupOptions();
+    options.mode = rc::RCCoupExecMode::Streamed;
+    options.expansion_threads = 4;
+
+    rc::RCCoupTiming cpu_timing;
+    const uint256 expected = rc::RecomputeCoupledPuzzleReference(
+        header, 0, params, options, {}, &cpu_timing);
+    lt::ExactGemmBackend provider;
+    provider.seeded_page_s8 =
+        +[](const uint256& seed, uint32_t width, std::vector<int8_t>& out) {
+            out = rc::ExpandMxDequantInt8(seed, width, width);
+            return true;
+        };
+    rc::RCCoupTiming provider_timing;
+    const uint256 actual = rc::RecomputeCoupledPuzzleReference(
+        header, 0, params, options, provider, &provider_timing);
+
+    BOOST_REQUIRE(!expected.IsNull());
+    BOOST_CHECK_EQUAL(actual, expected);
+    BOOST_CHECK_EQUAL(cpu_timing.bank_cpu_pages, params.bank_pages);
+    BOOST_CHECK_EQUAL(cpu_timing.bank_device_pages, 0U);
+    BOOST_CHECK_EQUAL(provider_timing.bank_device_pages, params.bank_pages);
+    BOOST_CHECK_EQUAL(provider_timing.bank_cpu_pages, 0U);
+}
+
 BOOST_AUTO_TEST_CASE(rc_coup_parallel_cpu_gemm_matches_serial)
 {
     const auto header = MakeCoupHeader(15);
