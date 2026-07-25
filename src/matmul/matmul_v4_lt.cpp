@@ -50,13 +50,12 @@ void ExactGemmS8S8RowsAvx2(const std::vector<int8_t>& L,
                            std::vector<int32_t>& out, uint32_t begin,
                            uint32_t end, uint32_t inner, uint32_t cols)
 {
-    for (uint32_t i = begin; i < end; ++i) {
-        const int8_t* l_row = &L[static_cast<size_t>(i) * inner];
-        int32_t* o_row = &out[static_cast<size_t>(i) * cols];
-        for (uint32_t k = 0; k < inner; ++k) {
-            const int32_t l_ik = l_row[k];
+    for (uint32_t k = 0; k < inner; ++k) {
+        const int8_t* r_row = &R[static_cast<size_t>(k) * cols];
+        for (uint32_t i = begin; i < end; ++i) {
+            const int32_t l_ik = L[static_cast<size_t>(i) * inner + k];
             if (l_ik == 0) continue;
-            const int8_t* r_row = &R[static_cast<size_t>(k) * cols];
+            int32_t* o_row = &out[static_cast<size_t>(i) * cols];
             const __m256i l16 = _mm256_set1_epi16(static_cast<int16_t>(l_ik));
             uint32_t c = 0;
             for (; c + 16 <= cols; c += 16) {
