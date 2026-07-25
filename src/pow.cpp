@@ -4327,7 +4327,8 @@ bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensu
     const matmul::v4::rc::RCCoupParams params_coup =
         matmul::v4::rc::ResolveRCCoupParams(params);
     const matmul::v4::rc::RCCoupOptions options_coup =
-        matmul::v4::rc::ResolveRCCoupOptions(params);
+        matmul::v4::rc::MakeCpuRCCoupReplayOptions(
+            params_coup, matmul::v4::rc::ResolveRCCoupOptions(params));
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) return finish(false);
 
     // Consensus REJECT: empty ExactGemm (CPU-only; R1). Profile-selected domains (F7).
@@ -6096,8 +6097,10 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         matmul::v4::rc::EstimateRCCoupResidentPeakBytes(params_coup) > (8ull << 30);
     if (stream_bank) {
         options_coup.mode = matmul::v4::rc::RCCoupExecMode::Streamed;
-        options_coup.expansion_threads =
+        const uint32_t cpu_threads =
             std::max(1u, std::thread::hardware_concurrency());
+        options_coup.expansion_threads = cpu_threads;
+        options_coup.cpu_gemm_threads = cpu_threads;
         options_coup.bank_root_cache =
             std::make_shared<matmul::v4::rc::RCCoupBankRootCache>();
     }
@@ -6162,10 +6165,10 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
             // Winner candidate: CPU reseal (empty ExactGemm).
             CBlockHeader cand = window[i];
-            auto reseal_options = options_coup;
-            // Independent winning-candidate replay deliberately recomputes the
-            // bank commitment; it must not trust the mining hot-path memo.
-            reseal_options.bank_root_cache.reset();
+            // Empty-backend CPU replay with bounded streaming and deterministic
+            // host parallelism. It deliberately clears the mining bank memo.
+            const auto reseal_options =
+                matmul::v4::rc::MakeCpuRCCoupReplayOptions(params_coup, options_coup);
             const uint256 resealed = matmul::v4::rc::RecomputeCoupledPuzzleReference(
                 cand, block_height, params_coup, reseal_options);
             if (resealed != mined) {

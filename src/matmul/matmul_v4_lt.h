@@ -119,6 +119,13 @@ void ExtractMatExpandMxTileMantissas(const uint256& prf_key, uint32_t i, uint32_
 [[nodiscard]] std::vector<int32_t> ExactGemmS8S8(const std::vector<int8_t>& L,
                                                  const std::vector<int8_t>& R,
                                                  uint32_t rows, uint32_t inner, uint32_t cols);
+/**
+ * CPU-only exact GEMM with disjoint output-row workers. Each row preserves the
+ * scalar k/column accumulation order, so output is bit-identical.
+ */
+[[nodiscard]] std::vector<int32_t> ExactGemmS8S8Parallel(
+    const std::vector<int8_t>& L, const std::vector<int8_t>& R,
+    uint32_t rows, uint32_t inner, uint32_t cols, uint32_t threads);
 [[nodiscard]] std::vector<int32_t> ExactGemmS32S8(const std::vector<int32_t>& L,
                                                   const std::vector<int8_t>& R,
                                                   uint32_t rows, uint32_t inner, uint32_t cols);

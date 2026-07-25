@@ -286,6 +286,12 @@ struct RCCoupOptions {
     uint32_t expansion_threads{1};
 
     /**
+     * CPU-only exact-GEMM workers. Used only when the injected device backend
+     * is empty or fails; independent reseal therefore remains CPU-derived.
+     */
+    uint32_t cpu_gemm_threads{1};
+
+    /**
      * Overlap ordered bank hashing with expansion of the following page.
      * Execution-only: pages are still fed to SHA256 in canonical index order,
      * and the page producer remains the independent CPU MX oracle.
@@ -374,6 +380,15 @@ struct RCCoupOptions {
  * Public activation heights remain separate and are not raised by this resolver.
  */
 [[nodiscard]] RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p);
+
+/**
+ * Independent CPU replay policy for winning reseal and consensus validation.
+ * Preserves every digest-affecting option, clears mining memoization, selects
+ * bounded streaming when the expanded bank exceeds 8 GiB, and enables
+ * deterministic host parallelism. No accelerator backend is introduced.
+ */
+[[nodiscard]] RCCoupOptions MakeCpuRCCoupReplayOptions(
+    const RCCoupParams& params, RCCoupOptions options);
 
 /**
  * Digest-affecting material-exchange traffic estimate (read+write):

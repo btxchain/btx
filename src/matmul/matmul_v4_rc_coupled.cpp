@@ -678,9 +678,13 @@ void ApplyBalancedPermutationParallel(std::vector<int64_t>& s,
 std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
                                              const std::vector<int8_t>& L,
                                              const std::vector<int8_t>& R, uint32_t rows,
-                                             uint32_t inner, uint32_t cols)
+                                             uint32_t inner, uint32_t cols,
+                                             uint32_t cpu_threads)
 {
     const auto run_cpu = [&]() {
+        if (cpu_threads > 1) {
+            return lt::ExactGemmS8S8Parallel(L, R, rows, inner, cols, cpu_threads);
+        }
         return lt::ExactGemmS8S8(L, R, rows, inner, cols);
     };
     if (gemm.gemm_s8s8 == nullptr) {
@@ -705,12 +709,14 @@ std::vector<int32_t> ExactGemmS8S8Dispatched(const lt::ExactGemmBackend& gemm,
 
 /** Local lobe GEMM: M×W · W×W → M×W int32, widened to int64 (C3.a). */
 void LobeLocalGemm(const int8_t* lobe_rows, const std::vector<int8_t>& page, uint32_t rows,
-                   uint32_t lobe_width, int64_t* out_w, const lt::ExactGemmBackend& gemm)
+                   uint32_t lobe_width, int64_t* out_w, const lt::ExactGemmBackend& gemm,
+                   uint32_t cpu_threads)
 {
     const size_t nL = static_cast<size_t>(rows) * lobe_width;
     std::vector<int8_t> L(lobe_rows, lobe_rows + nL);
     const auto y =
-        ExactGemmS8S8Dispatched(gemm, L, page, /*rows=*/rows, lobe_width, lobe_width);
+        ExactGemmS8S8Dispatched(gemm, L, page, /*rows=*/rows, lobe_width, lobe_width,
+                                cpu_threads);
     if (y.size() != nL) {
         for (size_t i = 0; i < nL; ++i) out_w[i] = 0;
         return;
@@ -802,7 +808,7 @@ DistEpisodeResult RunCoupledBarrierDistributedImpl(const CBlockHeader& header, i
         auto page = DeriveCoupledBankPage(header, height, page_id, params, kTv);
         std::vector<int64_t> row(params.lobe_width, 0);
         LobeLocalGemm(state.data() + ell * params.lobe_width, page, /*rows=*/1,
-                      params.lobe_width, row.data(), gemm);
+                      params.lobe_width, row.data(), gemm, /*cpu_threads=*/1);
         segs[ell] = row;
         const uint32_t owner = DeviceForSegment(ell, n_devices);
         for (uint32_t c = 0; c < params.lobe_width; ++c) {
@@ -1050,6 +1056,21 @@ RCCoupOptions ResolveRCCoupOptions(const Consensus::Params& p)
     default:
         return RCCoupOptions{};
     }
+}
+
+RCCoupOptions MakeCpuRCCoupReplayOptions(const RCCoupParams& params,
+                                         RCCoupOptions options)
+{
+    constexpr uint64_t kMaxResidentReplayBytes = 8ull << 30;
+    if (EstimateRCCoupResidentPeakBytes(params) > kMaxResidentReplayBytes) {
+        options.mode = RCCoupExecMode::Streamed;
+    }
+    const uint32_t threads =
+        std::max<uint32_t>(1, std::thread::hardware_concurrency());
+    options.expansion_threads = threads;
+    options.cpu_gemm_threads = threads;
+    options.bank_root_cache.reset();
+    return options;
 }
 
 uint64_t MaxRCCoupPageSumAbsBound(const RCCoupParams& p)
@@ -1725,7 +1746,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                                         .count();
                             }
                             const auto t_gemm0 = std::chrono::steady_clock::now();
-                            LobeLocalGemm(lobe_rows, page, M, W, group[j].data(), gemm);
+                            LobeLocalGemm(lobe_rows, page, M, W, group[j].data(), gemm,
+                                          options.cpu_gemm_threads);
                             if (out_timing) {
                                 out_timing->gemm_s +=
                                     std::chrono::duration<double>(
@@ -1756,7 +1778,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                         out_timing->host_overlap_expand_s += host_page.expand_s;
                     }
                     const auto t_gemm0 = std::chrono::steady_clock::now();
-                    LobeLocalGemm(lobe_rows, host_page.bytes, M, W, group[0].data(), gemm);
+                    LobeLocalGemm(lobe_rows, host_page.bytes, M, W, group[0].data(), gemm,
+                                  options.cpu_gemm_threads);
                     if (out_timing) {
                         out_timing->gemm_s +=
                             std::chrono::duration<double>(
@@ -1795,7 +1818,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                         MaybeZeroSkipPage(page, page_id, options);
                         if (out_tx) page_for_tx = page;
                         const auto t_gemm0 = std::chrono::steady_clock::now();
-                        LobeLocalGemm(lobe_rows, page, M, W, partial.data(), gemm);
+                        LobeLocalGemm(lobe_rows, page, M, W, partial.data(), gemm,
+                                      options.cpu_gemm_threads);
                         if (out_timing) {
                             out_timing->gemm_s +=
                                 std::chrono::duration<double>(
@@ -1807,7 +1831,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     if (out_tx) page_for_tx = pages[page_id];
                     const auto t_gemm0 = std::chrono::steady_clock::now();
                     LobeLocalGemm(lobe_rows, pages[page_id], M, W,
-                                  partial.data(), gemm);
+                                  partial.data(), gemm, options.cpu_gemm_threads);
                     if (out_timing) {
                         out_timing->gemm_s +=
                             std::chrono::duration<double>(

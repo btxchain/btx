@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_lt.h>
+#include <matmul/matmul_v4_rc_bank_root_cache.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
@@ -660,6 +661,42 @@ BOOST_AUTO_TEST_CASE(rc_coup_streamed_bank_pipeline_matches_serial)
         rc::RecomputeCoupledPuzzleReference(header, 0, params, pipelined);
     BOOST_REQUIRE(!expected.IsNull());
     BOOST_CHECK_EQUAL(actual, expected);
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_parallel_cpu_gemm_matches_serial)
+{
+    const auto header = MakeCoupHeader(15);
+    const auto params = rc::MakeMediumV3RCCoupParams();
+    auto serial = rc::MakeMediumV3RCCoupOptions();
+    serial.mode = rc::RCCoupExecMode::Streamed;
+    serial.expansion_threads = 4;
+    auto parallel = serial;
+    parallel.cpu_gemm_threads = 4;
+
+    const uint256 expected =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, serial);
+    const uint256 actual =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, parallel);
+    BOOST_REQUIRE(!expected.IsNull());
+    BOOST_CHECK_EQUAL(actual, expected);
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_cpu_replay_policy_is_bounded_and_cpu_only)
+{
+    const auto params = rc::MakeProductionV3RCCoupParams();
+    auto selected = rc::MakeV3RCCoupOptions();
+    selected.bank_root_cache = std::make_shared<rc::RCCoupBankRootCache>();
+    const auto replay = rc::MakeCpuRCCoupReplayOptions(params, selected);
+
+    BOOST_CHECK(replay.mode == rc::RCCoupExecMode::Streamed);
+    BOOST_CHECK_GE(replay.expansion_threads, 1U);
+    BOOST_CHECK_EQUAL(replay.cpu_gemm_threads, replay.expansion_threads);
+    BOOST_CHECK(replay.bank_root_cache == nullptr);
+    BOOST_CHECK_EQUAL(replay.transcript_version, selected.transcript_version);
+    BOOST_CHECK_EQUAL(replay.full_bank_schedule, selected.full_bank_schedule);
+    BOOST_CHECK_EQUAL(replay.material_exchange, selected.material_exchange);
+    BOOST_CHECK_EQUAL(replay.exchange_rows, selected.exchange_rows);
+    BOOST_CHECK_EQUAL(replay.exchange_rounds, selected.exchange_rounds);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_production_dims_provisional)

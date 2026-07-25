@@ -1396,6 +1396,26 @@ BOOST_AUTO_TEST_CASE(exact_gemm_s32s8_radix256_matches_cpu)
     BOOST_CHECK(lowered.empty());
 }
 
+BOOST_AUTO_TEST_CASE(exact_gemm_s8s8_row_parallel_matches_serial)
+{
+    constexpr uint32_t rows = 7;
+    constexpr uint32_t inner = 129;
+    constexpr uint32_t cols = 11;
+    std::vector<int8_t> left(static_cast<size_t>(rows) * inner);
+    std::vector<int8_t> right(static_cast<size_t>(inner) * cols);
+    for (size_t i = 0; i < left.size(); ++i) {
+        left[i] = static_cast<int8_t>(static_cast<int32_t>((i * 13 + 5) % 97) - 48);
+    }
+    for (size_t i = 0; i < right.size(); ++i) {
+        right[i] = static_cast<int8_t>(static_cast<int32_t>((i * 17 + 9) % 97) - 48);
+    }
+    const auto expected = lt::ExactGemmS8S8(left, right, rows, inner, cols);
+    BOOST_CHECK(lt::ExactGemmS8S8Parallel(
+                    left, right, rows, inner, cols, /*threads=*/4) == expected);
+    BOOST_CHECK(lt::ExactGemmS8S8Parallel(
+                    left, right, rows, inner, cols, /*threads=*/64) == expected);
+}
+
 BOOST_AUTO_TEST_CASE(exact_gemm_backend_mock_matches_cpu)
 {
     // Injectable backend that wraps ExactGemm* must be byte-identical to the

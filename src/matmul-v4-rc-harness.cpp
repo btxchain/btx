@@ -422,6 +422,7 @@ rc::RCCoupOptions SelectCoupledHarnessOptions(const Args& args)
     } else if (args.coupled_production_v3 || args.coupled_v3_width_smoke) {
         options.expansion_threads = std::max(1u, std::thread::hardware_concurrency());
     }
+    options.cpu_gemm_threads = options.expansion_threads;
     return options;
 }
 
@@ -1060,6 +1061,10 @@ int RunCoupledHarness(const Args& args)
         options.pushKV("exchange_rounds", static_cast<uint64_t>(selected.exchange_rounds));
         options.pushKV("expansion_threads",
                        static_cast<uint64_t>(selected.expansion_threads));
+        options.pushKV("cpu_gemm_threads",
+                       static_cast<uint64_t>(selected.cpu_gemm_threads));
+        options.pushKV("pipeline_bank_commitment",
+                       selected.pipeline_bank_commitment);
         options.pushKV("bank_root_cache", bank_root_cache != nullptr);
         options.pushKV("cache_runs", static_cast<uint64_t>(args.cache_runs));
         root.pushKV("options", options);

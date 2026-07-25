@@ -24,6 +24,7 @@
 #include <limits>
 #include <cstring>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -541,6 +542,41 @@ std::vector<int32_t> ExactGemmS8S8(const std::vector<int8_t>& L, const std::vect
             }
         }
     }
+    return out;
+}
+
+std::vector<int32_t> ExactGemmS8S8Parallel(const std::vector<int8_t>& L,
+                                           const std::vector<int8_t>& R,
+                                           uint32_t rows, uint32_t inner, uint32_t cols,
+                                           uint32_t threads)
+{
+    threads = std::max<uint32_t>(1, std::min(threads, rows));
+    if (threads <= 1) return ExactGemmS8S8(L, R, rows, inner, cols);
+
+    std::vector<int32_t> out(static_cast<size_t>(rows) * cols, 0);
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (uint32_t t = 0; t < threads; ++t) {
+        workers.emplace_back([&, t] {
+            const uint32_t begin = static_cast<uint32_t>(
+                (static_cast<uint64_t>(rows) * t) / threads);
+            const uint32_t end = static_cast<uint32_t>(
+                (static_cast<uint64_t>(rows) * (t + 1U)) / threads);
+            for (uint32_t i = begin; i < end; ++i) {
+                const int8_t* l_row = &L[static_cast<size_t>(i) * inner];
+                int32_t* o_row = &out[static_cast<size_t>(i) * cols];
+                for (uint32_t k = 0; k < inner; ++k) {
+                    const int32_t l_ik = l_row[k];
+                    if (l_ik == 0) continue;
+                    const int8_t* r_row = &R[static_cast<size_t>(k) * cols];
+                    for (uint32_t c = 0; c < cols; ++c) {
+                        o_row[c] += l_ik * static_cast<int32_t>(r_row[c]);
+                    }
+                }
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
     return out;
 }
 
