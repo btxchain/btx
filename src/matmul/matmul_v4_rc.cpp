@@ -935,7 +935,6 @@ std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint
     bx::ExpandMantissaStream(seed, count, mu.data());
     std::vector<uint8_t> scales(static_cast<size_t>(rows) * nblk);
     bx::ExpandScaleStream(seed, scales.size(), scales.data());
-    std::vector<int8_t> out(count);
     for (uint32_t i = 0; i < rows; ++i) {
         const size_t row = static_cast<size_t>(i) * cols;
         const size_t srow = static_cast<size_t>(i) * nblk;
@@ -943,11 +942,13 @@ std::vector<int8_t> ExpandMxDequantInt8(const uint256& seed, uint32_t rows, uint
             const int32_t scale = int32_t{1} << scales[srow + bj];
             const size_t base = row + static_cast<size_t>(bj) * kRCMxBlockLen;
             for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
-                out[base + c] = static_cast<int8_t>(static_cast<int32_t>(mu[base + c]) * scale);
+                mu[base + c] =
+                    static_cast<int8_t>(
+                        static_cast<int32_t>(mu[base + c]) * scale);
             }
         }
     }
-    return out;
+    return mu;
 }
 
 std::vector<int8_t> ExpandX0RowBlockForEpisode(const uint256& seed_x0,
@@ -1018,7 +1019,6 @@ std::vector<int8_t> ExpandMxDequantInt8Parallel(const uint256& seed, uint32_t ro
     bx::ExpandMantissaStreamParallel(seed, count, mu.data(), threads);
     std::vector<uint8_t> scales(static_cast<size_t>(rows) * nblk);
     bx::ExpandScaleStreamParallel(seed, scales.size(), scales.data(), threads);
-    std::vector<int8_t> out(count);
     ParallelForLocal(rows, threads, [&](size_t i0) {
         const uint32_t i = static_cast<uint32_t>(i0);
         const size_t row = static_cast<size_t>(i) * cols;
@@ -1027,11 +1027,13 @@ std::vector<int8_t> ExpandMxDequantInt8Parallel(const uint256& seed, uint32_t ro
             const int32_t scale = int32_t{1} << scales[srow + bj];
             const size_t base = row + static_cast<size_t>(bj) * kRCMxBlockLen;
             for (uint32_t c = 0; c < kRCMxBlockLen; ++c) {
-                out[base + c] = static_cast<int8_t>(static_cast<int32_t>(mu[base + c]) * scale);
+                mu[base + c] =
+                    static_cast<int8_t>(
+                        static_cast<int32_t>(mu[base + c]) * scale);
             }
         }
     });
-    return out;
+    return mu;
 }
 
 std::vector<uint256> BuildTileTreeLeaves(const std::vector<int8_t>& stream, uint32_t t_leaf)
