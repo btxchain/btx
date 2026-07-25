@@ -424,6 +424,16 @@ rc::RCCoupOptions SelectCoupledHarnessOptions(const Args& args)
     }
     options.cpu_gemm_threads = options.expansion_threads;
     options.pipeline_cpu_page_gemm = options.cpu_gemm_threads > 1;
+    if (args.backend == "cpu" && options.expansion_threads >= 4) {
+        const uint32_t total_threads = options.expansion_threads;
+        options.bank_expansion_threads =
+            std::max<uint32_t>(2, total_threads / 3U);
+        options.expansion_threads =
+            total_threads - options.bank_expansion_threads;
+        options.cpu_gemm_threads = options.expansion_threads;
+        options.pipeline_cpu_page_gemm = options.expansion_threads > 1;
+        options.overlap_cpu_bank_episode = true;
+    }
     return options;
 }
 
@@ -772,6 +782,8 @@ int RunCoupledHarness(const Args& args)
             mw.pushKV("host_overlap_pages", t_mine.host_overlap_pages);
             mw.pushKV("host_overlap_expand_s", t_mine.host_overlap_expand_s);
             mw.pushKV("cpu_overlap_pages", t_mine.cpu_overlap_pages);
+            mw.pushKV("bank_episode_overlap", t_mine.bank_episode_overlap);
+            mw.pushKV("bank_overlap_wait_s", t_mine.bank_overlap_wait_s);
             mw.pushKV("gemm_s", t_mine.gemm_s);
             mw.pushKV("accumulate_s", t_mine.accumulate_s);
             mw.pushKV("permutation_s", t_mine.permutation_s);
@@ -871,6 +883,9 @@ int RunCoupledHarness(const Args& args)
               << " host_overlap_pages=" << timed_mine.host_overlap_pages
               << " host_overlap_expand=" << timed_mine.host_overlap_expand_s
               << "s cpu_overlap_pages=" << timed_mine.cpu_overlap_pages
+              << " bank_episode_overlap=" << timed_mine.bank_episode_overlap
+              << " bank_overlap_wait=" << timed_mine.bank_overlap_wait_s
+              << "s"
               << " gemm=" << timed_mine.gemm_s
               << "s accumulate=" << timed_mine.accumulate_s
               << "s permutation=" << timed_mine.permutation_s
@@ -899,6 +914,8 @@ int RunCoupledHarness(const Args& args)
     walls.pushKV("host_overlap_pages", timed_mine.host_overlap_pages);
     walls.pushKV("host_overlap_expand", timed_mine.host_overlap_expand_s);
     walls.pushKV("cpu_overlap_pages", timed_mine.cpu_overlap_pages);
+    walls.pushKV("bank_episode_overlap", timed_mine.bank_episode_overlap);
+    walls.pushKV("bank_overlap_wait", timed_mine.bank_overlap_wait_s);
     walls.pushKV("gemm", timed_mine.gemm_s);
     walls.pushKV("accumulate", timed_mine.accumulate_s);
     walls.pushKV("permutation", timed_mine.permutation_s);
@@ -1072,10 +1089,14 @@ int RunCoupledHarness(const Args& args)
                        static_cast<uint64_t>(selected.expansion_threads));
         options.pushKV("cpu_gemm_threads",
                        static_cast<uint64_t>(selected.cpu_gemm_threads));
+        options.pushKV("bank_expansion_threads",
+                       static_cast<uint64_t>(selected.bank_expansion_threads));
         options.pushKV("pipeline_bank_commitment",
                        selected.pipeline_bank_commitment);
         options.pushKV("pipeline_cpu_page_gemm",
                        selected.pipeline_cpu_page_gemm);
+        options.pushKV("overlap_cpu_bank_episode",
+                       selected.overlap_cpu_bank_episode);
         options.pushKV("bank_root_cache", bank_root_cache != nullptr);
         options.pushKV("cache_runs", static_cast<uint64_t>(args.cache_runs));
         root.pushKV("options", options);

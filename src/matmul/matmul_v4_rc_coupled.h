@@ -292,6 +292,13 @@ struct RCCoupOptions {
     uint32_t cpu_gemm_threads{1};
 
     /**
+     * CPU-only bank-commitment worker budget, including the ordered SHA worker.
+     * Zero reuses expansion_threads. Independent CPU replay assigns a disjoint
+     * budget when the bank and episode are overlapped.
+     */
+    uint32_t bank_expansion_threads{0};
+
+    /**
      * Overlap ordered bank hashing with expansion of the following page.
      * Execution-only: pages are still fed to SHA256 in canonical index order,
      * and the page producer remains the independent CPU MX oracle.
@@ -303,6 +310,13 @@ struct RCCoupOptions {
      * using bounded, disjoint host-worker budgets.
      */
     bool pipeline_cpu_page_gemm{false};
+
+    /**
+     * CPU replay only: compute the template bank commitment concurrently with
+     * activation/barriers. The root is joined before the final episode hash.
+     * The CPU replay policy assigns disjoint bank and episode worker budgets.
+     */
+    bool overlap_cpu_bank_episode{false};
 
     /**
      * Optional mining-only memo for the template-scoped bank commitment.
@@ -424,6 +438,10 @@ struct RCCoupTiming {
     double host_overlap_expand_s{0};
     /** CPU replay pages whose expansion/GEMM stages used the bounded pipeline. */
     uint64_t cpu_overlap_pages{0};
+    /** True when CPU bank commitment and episode execution ran concurrently. */
+    bool bank_episode_overlap{false};
+    /** Wall time spent joining an overlapped bank after the barriers completed. */
+    double bank_overlap_wait_s{0};
     double gemm_s{0};
     double accumulate_s{0};
     double permutation_s{0};

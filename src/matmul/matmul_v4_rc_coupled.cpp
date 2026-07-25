@@ -1091,9 +1091,22 @@ RCCoupOptions MakeCpuRCCoupReplayOptions(const RCCoupParams& params,
     const uint32_t threads =
         std::min<uint32_t>(
             64, std::max<uint32_t>(1, std::thread::hardware_concurrency()));
-    options.expansion_threads = threads;
-    options.cpu_gemm_threads = threads;
-    options.pipeline_cpu_page_gemm = threads > 1;
+    if (threads >= 4) {
+        // The bank is a separate deterministic input to the final episode hash:
+        // reserve a bounded third of the host for its page producer + ordered
+        // SHA stream while the remaining workers execute the stateful episode.
+        options.bank_expansion_threads = std::max<uint32_t>(2, threads / 3U);
+        options.expansion_threads = threads - options.bank_expansion_threads;
+        options.cpu_gemm_threads = options.expansion_threads;
+        options.pipeline_cpu_page_gemm = options.expansion_threads > 1;
+        options.overlap_cpu_bank_episode = true;
+    } else {
+        options.bank_expansion_threads = threads;
+        options.expansion_threads = threads;
+        options.cpu_gemm_threads = threads;
+        options.pipeline_cpu_page_gemm = threads > 1;
+        options.overlap_cpu_bank_episode = false;
+    }
     options.bank_root_cache.reset();
     return options;
 }
@@ -1581,16 +1594,52 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
 
     // Bank commitment binds the honest epoch/template pages (before any
     // skip_page test mutation). Streamed hashes pages without retaining them.
+    // Independent CPU replay may defer the join until after the barriers:
+    // bank_root and the barrier roots are independent inputs to the final hash.
+    struct BankResult {
+        uint256 root;
+        double elapsed_s{0};
+    };
     uint256 bank_root;
     std::vector<std::vector<int8_t>> pages;
-    {
+    std::future<BankResult> bank_future;
+    const uint32_t bank_threads =
+        options.bank_expansion_threads == 0
+            ? options.expansion_threads
+            : options.bank_expansion_threads;
+    const auto compute_streamed_bank = [&] {
+        const auto started = std::chrono::steady_clock::now();
+        BankResult result;
+        result.root = BankCommitmentStreaming(
+            header, height, params, tv, bank_threads,
+            options.pipeline_bank_commitment, gemm,
+            options.bank_root_cache, out_timing);
+        result.elapsed_s =
+            std::chrono::duration<double>(
+                std::chrono::steady_clock::now() - started)
+                .count();
+        return result;
+    };
+    const bool can_overlap_cpu_bank =
+        streamed && out_tx == nullptr && !options.skip_bank_page &&
+        options.overlap_cpu_bank_episode && bank_threads > 1 &&
+        gemm.gemm_s8s8 == nullptr && gemm.gemm_s32s8 == nullptr &&
+        gemm.seeded_page_s8s8 == nullptr && gemm.seeded_page_s8 == nullptr;
+    if (can_overlap_cpu_bank) {
+        try {
+            bank_future =
+                std::async(std::launch::async, compute_streamed_bank);
+            if (out_timing) out_timing->bank_episode_overlap = true;
+        } catch (...) {
+            bank_future = {};
+        }
+    }
+    if (!bank_future.valid()) {
         const auto t_bank0 = std::chrono::steady_clock::now();
         if (streamed) {
-            bank_root = BankCommitmentStreaming(header, height, params, tv,
-                                                options.expansion_threads,
-                                                options.pipeline_bank_commitment,
-                                                gemm,
-                                                options.bank_root_cache, out_timing);
+            const BankResult result = compute_streamed_bank();
+            bank_root = result.root;
+            if (out_timing) out_timing->bank_s = result.elapsed_s;
         } else {
             const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);
             bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width, tags);
@@ -1601,14 +1650,14 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                               pages[options.skip_page_index].end(), int8_t{0});
                 }
             }
+            if (out_timing) {
+                out_timing->bank_s = std::chrono::duration<double>(
+                                         std::chrono::steady_clock::now() - t_bank0)
+                                         .count();
+            }
         }
         if (bank_root.IsNull()) return uint256{};
         if (out_tx) out_tx->bank_root = bank_root;
-        if (out_timing) {
-            out_timing->bank_s = std::chrono::duration<double>(
-                                     std::chrono::steady_clock::now() - t_bank0)
-                                     .count();
-        }
     }
 
     std::vector<int8_t> state(n);
@@ -1833,7 +1882,9 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 const uint32_t producer_threads =
                     std::max<uint32_t>(1, options.expansion_threads / 2U);
                 const uint32_t gemm_threads =
-                    std::max<uint32_t>(1, options.cpu_gemm_threads / 2U);
+                    std::max<uint32_t>(
+                        1, options.cpu_gemm_threads -
+                               options.cpu_gemm_threads / 2U);
                 const auto start_page = [&](uint32_t page_id) {
                     return std::async(
                         std::launch::async,
@@ -2067,6 +2118,25 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         out_timing->barriers_s = std::chrono::duration<double>(
                                      std::chrono::steady_clock::now() - t_bar0)
                                      .count();
+    }
+
+    if (bank_future.valid()) {
+        const auto t_wait0 = std::chrono::steady_clock::now();
+        BankResult result;
+        try {
+            result = bank_future.get();
+        } catch (...) {
+            return uint256{};
+        }
+        if (out_timing) {
+            out_timing->bank_s = result.elapsed_s;
+            out_timing->bank_overlap_wait_s =
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now() - t_wait0)
+                    .count();
+        }
+        bank_root = result.root;
+        if (bank_root.IsNull()) return uint256{};
     }
 
     // episode_digest = SHA256d(episode_tag ‖ bank_root ‖ barrier_roots…)
