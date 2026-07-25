@@ -210,13 +210,15 @@ struct Fri3CommitResult {
 // CONSTRUCTION (identical shape):
 //  1. Per-column LDE over the COMMON domain D of size N·16; Merkle root per
 //     column; all roots absorbed before any challenge.
-//  2. FS λ; U := Σ_i λ^{i−1}·X^{N−len_i}·P_i (degree-shift = maximal-degree
-//     enforcement).
-//  3. FS z1, z2 ∉ D (dual OOD, extension part (c1,c2)!=(0,0), z1 ≠ z2);
-//     prover ships every column's evaluations at z1, z2; FS weights w1, w2;
+//  2. FS z1, z2 ∉ D (dual OOD, extension part (c1,c2)!=(0,0), z1 ≠ z2);
+//     prover ships every column's evaluations at z1, z2.
+//  3. AFTER the complete evaluation vector is absorbed, draw FS λ and form
+//     U := Σ_i λ^{i−1}·X^{N−len_i}·P_i. This prevents compensating false
+//     per-column evaluations from being selected after λ is known.
+//  4. Draw FS weights w1, w2;
 //     DEEP composition G := w1·(U−U(z1))/(X−z1) + w2·(U−U(z2))/(X−z2), with
 //     U(z_s) recomputed by the VERIFIER from the per-column claims.
-//  4. Fold-commit G exactly as Fri3CommitAndFold folds; Q = 128 FS queries;
+//  5. Fold-commit G exactly as Fri3CommitAndFold folds; Q = 128 FS queries;
 //     each query opens every column at the query index plus G's fold path and
 //     checks the DEEP identity.
 //
@@ -228,8 +230,8 @@ struct Fri3CommitResult {
 // ============================================================================
 
 inline constexpr uint32_t kRCFri3BatchProofMagic = 0x33425246u; // 'FRB3'
-inline constexpr uint32_t kRCFri3BatchProofVersion = 5;
-inline constexpr char kRCFri3BatchDomainTag[] = "BTX_RC_FRIB3_V5";
+inline constexpr uint32_t kRCFri3BatchProofVersion = 6;
+inline constexpr char kRCFri3BatchDomainTag[] = "BTX_RC_FRIB3_V6";
 
 [[nodiscard]] inline int Fri3BatchSoundnessBoundBits()
 {

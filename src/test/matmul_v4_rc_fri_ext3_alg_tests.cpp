@@ -129,6 +129,11 @@ BOOST_AUTO_TEST_CASE(fra3_single_eval_tamper_rejected)
     forged.queries[0].row.values[0].c0 ^= 1;
     BOOST_CHECK(!rc::Fri3AlgBatchVerify(forged, seed, &why));
     BOOST_CHECK_EQUAL(why, "row merkle");
+
+    auto forged_ood = c.proof;
+    forged_ood.evals_z1[0].c0 ^= 1;
+    BOOST_CHECK(!rc::Fri3AlgBatchVerify(forged_ood, seed, &why));
+    BOOST_CHECK_EQUAL(why, "lambda mismatch");
 }
 
 // Gate (c): fold-path tamper rejects (opened pair value and fold challenge).
@@ -174,7 +179,7 @@ BOOST_AUTO_TEST_CASE(fra3_sibling_and_root_tamper_rejected)
     auto forged3 = c.proof;
     forged3.row_commit.root[0] = gf::Add(forged3.row_commit.root[0], 1);
     BOOST_CHECK(!rc::Fri3AlgBatchVerify(forged3, seed, &why));
-    BOOST_CHECK_EQUAL(why, "lambda mismatch"); // row root seeds the FS replay
+    BOOST_CHECK_EQUAL(why, "z1 mismatch"); // row root seeds the FS replay
 
     auto forged4 = c.proof;
     forged4.fold_layers[0].root[0] = gf::Add(forged4.fold_layers[0].root[0], 1);

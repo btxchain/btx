@@ -43,7 +43,7 @@ BOOST_AUTO_TEST_CASE(fri_constants_and_soundness_bits)
     BOOST_CHECK_EQUAL(rc::kRCFriNumQueries, 128u);
     BOOST_CHECK_EQUAL(rc::kRCFriGrindingBits, 40u);
     BOOST_CHECK_EQUAL(rc::kRCFriProofVersion, 5u);
-    BOOST_CHECK_EQUAL(rc::kRCFriBatchProofVersion, 5u);
+    BOOST_CHECK_EQUAL(rc::kRCFriBatchProofVersion, 6u);
     BOOST_CHECK(!rc::kRCFriConjecturedBoundEnabled);
     BOOST_CHECK(rc::FriClaimedBitsMeetTarget());
     BOOST_CHECK_EQUAL(rc::FriSoundnessBoundBits(), 76); // floor(128*log2(32/17))-40
@@ -379,7 +379,7 @@ BOOST_AUTO_TEST_CASE(frib_constants_and_soundness_bits)
                 std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFriBatchSoundnessStatement).find("half-domain") !=
                 std::string::npos);
-    BOOST_CHECK_EQUAL(rc::kRCFriBatchProofVersion, 5u);
+    BOOST_CHECK_EQUAL(rc::kRCFriBatchProofVersion, 6u);
 }
 
 BOOST_AUTO_TEST_CASE(frib_honest_commit_verify_serde_byte_exact)
@@ -426,8 +426,8 @@ BOOST_AUTO_TEST_CASE(frib_honest_commit_verify_serde_byte_exact)
 
 BOOST_AUTO_TEST_CASE(frib_forged_ood_opening_rejected)
 {
-    // (b) A forged column opening at an OOD point must be rejected: the
-    // dual-OOD DEEP identity at the query sites catches it.
+    // The complete OOD-evaluation vector is absorbed before lambda. A changed
+    // claim must therefore change lambda before any DEEP work is trusted.
     const auto cols = MakeBatchColumns();
     const uint256 seed = MakeSeed(0xB2);
     const auto c = rc::FriBatchCommit(cols, seed);
@@ -436,9 +436,11 @@ BOOST_AUTO_TEST_CASE(frib_forged_ood_opening_rejected)
     auto bad = c.proof;
     bad.evals_z1[1].c0 ^= 1;
     BOOST_CHECK(!rc::FriBatchVerify(bad, seed, &why));
+    BOOST_CHECK_EQUAL(why, "lambda mismatch");
     auto bad2 = c.proof;
     bad2.evals_z2[2].c1 ^= 1;
     BOOST_CHECK(!rc::FriBatchVerify(bad2, seed, &why));
+    BOOST_CHECK_EQUAL(why, "lambda mismatch");
 }
 
 BOOST_AUTO_TEST_CASE(frib_forged_column_or_path_rejected)

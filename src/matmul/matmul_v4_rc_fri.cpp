@@ -1127,10 +1127,6 @@ FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns
     // FS: all column roots absorbed BEFORE any challenge (commit-then-challenge).
     FriFs fs = FriBatchFsInit(fs_seed, pow_grind_nonce, n, p.columns, p.column_len);
 
-    // RLC λ over all columns (single batched instance — §2.3).
-    p.lambda = fs.ChallengeFp2("frib_lambda", 0);
-    fs.AbsorbFp2(p.lambda);
-
     // Dual OOD (§2.2): two independent points; single-z caps degree at 2^24.
     uint32_t zctr = 0;
     p.z1 = FriBatchSampleZ(fs, zctr, n_lde, nullptr);
@@ -1147,6 +1143,14 @@ FriBatchCommitResult FriBatchCommit(const std::vector<std::vector<Fp2>>& columns
         fs.AbsorbFp2(p.evals_z1[i]);
         fs.AbsorbFp2(p.evals_z2[i]);
     }
+
+    // RLC lambda MUST be unpredictable when the prover fixes the individual
+    // OOD evaluation claims. If lambda is drawn first, false evaluations in
+    // two columns can be chosen to cancel in U(z), leaving the DEEP identity
+    // unchanged. Version 6 binds the full evaluation vector before batching.
+    p.lambda = fs.ChallengeFp2("frib_lambda", 0);
+    fs.AbsorbFp2(p.lambda);
+
     p.w1 = fs.ChallengeFp2("frib_w", 0);
     p.w2 = fs.ChallengeFp2("frib_w", 1);
     fs.AbsorbFp2(p.w1);
@@ -1291,11 +1295,6 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
     FriFs fs = FriBatchFsInit(fs_seed, proof.pow_grind_nonce, n, proof.columns,
                               proof.column_len);
     {
-        const Fp2 lambda = fs.ChallengeFp2("frib_lambda", 0);
-        if (!Eq(lambda, proof.lambda)) return fail("lambda mismatch");
-        fs.AbsorbFp2(lambda);
-    }
-    {
         uint32_t zctr = 0;
         const Fp2 z1 = FriBatchSampleZ(fs, zctr, n_lde, nullptr);
         if (!Eq(z1, proof.z1)) return fail("z1 mismatch");
@@ -1312,6 +1311,11 @@ bool FriBatchVerify(const FriBatchProof& proof, const uint256& fs_seed, std::str
     for (uint32_t i = 0; i < W; ++i) {
         fs.AbsorbFp2(proof.evals_z1[i]);
         fs.AbsorbFp2(proof.evals_z2[i]);
+    }
+    {
+        const Fp2 lambda = fs.ChallengeFp2("frib_lambda", 0);
+        if (!Eq(lambda, proof.lambda)) return fail("lambda mismatch");
+        fs.AbsorbFp2(lambda);
     }
     {
         const Fp2 w1 = fs.ChallengeFp2("frib_w", 0);

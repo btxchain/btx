@@ -606,10 +606,6 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommit(const std::vector<std::vector<Fp3>>&
     // FS: the row root absorbed BEFORE any challenge (commit-then-challenge).
     Fri3AlgFs fs = Fri3AlgBatchFsInit(fs_seed, pow_grind_nonce, n, p.row_commit, p.column_len);
 
-    // RLC λ over all columns (single batched instance).
-    p.lambda = fs.ChallengeFp3("fra3_lambda", 0);
-    fs.AbsorbFp3(p.lambda);
-
     // Dual OOD: two independent points; single-z caps the bindable degree.
     uint32_t zctr = 0;
     p.z1 = Fri3AlgBatchSampleZ(fs, zctr, nullptr);
@@ -626,6 +622,11 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommit(const std::vector<std::vector<Fp3>>&
         fs.AbsorbFp3(p.evals_z1[i]);
         fs.AbsorbFp3(p.evals_z2[i]);
     }
+    // Version 2 binds each claimed OOD evaluation before sampling the column
+    // batching challenge. The old order admitted compensating false claims.
+    p.lambda = fs.ChallengeFp3("fra3_lambda", 0);
+    fs.AbsorbFp3(p.lambda);
+
     p.w1 = fs.ChallengeFp3("fra3_w", 0);
     p.w2 = fs.ChallengeFp3("fra3_w", 1);
     fs.AbsorbFp3(p.w1);
@@ -774,11 +775,6 @@ bool Fri3AlgBatchVerify(const Fri3AlgBatchProof& proof, const uint256& fs_seed, 
     Fri3AlgFs fs = Fri3AlgBatchFsInit(fs_seed, proof.pow_grind_nonce, n, proof.row_commit,
                                       proof.column_len);
     {
-        const Fp3 lambda = fs.ChallengeFp3("fra3_lambda", 0);
-        if (!Eq(lambda, proof.lambda)) return fail("lambda mismatch");
-        fs.AbsorbFp3(lambda);
-    }
-    {
         uint32_t zctr = 0;
         const Fp3 z1 = Fri3AlgBatchSampleZ(fs, zctr, nullptr);
         if (!Eq(z1, proof.z1)) return fail("z1 mismatch");
@@ -795,6 +791,11 @@ bool Fri3AlgBatchVerify(const Fri3AlgBatchProof& proof, const uint256& fs_seed, 
     for (uint32_t i = 0; i < W; ++i) {
         fs.AbsorbFp3(proof.evals_z1[i]);
         fs.AbsorbFp3(proof.evals_z2[i]);
+    }
+    {
+        const Fp3 lambda = fs.ChallengeFp3("fra3_lambda", 0);
+        if (!Eq(lambda, proof.lambda)) return fail("lambda mismatch");
+        fs.AbsorbFp3(lambda);
     }
     {
         const Fp3 w1 = fs.ChallengeFp3("fra3_w", 0);

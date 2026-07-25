@@ -82,8 +82,8 @@ using gkr_field::Fp3;
 using Fri3AlgDigest = alg_hash::Digest;
 
 inline constexpr uint32_t kRCFri3AlgBatchProofMagic = 0x33414246u; // 'FBA3'
-inline constexpr uint32_t kRCFri3AlgBatchProofVersion = 1;
-inline constexpr char kRCFri3AlgBatchDomainTag[] = "BTX_RC_FRIB3ALG_V1";
+inline constexpr uint32_t kRCFri3AlgBatchProofVersion = 2;
+inline constexpr char kRCFri3AlgBatchDomainTag[] = "BTX_RC_FRIB3ALG_V2";
 
 /** Recursion-path query count (spec §5.2): Q = 148 ≥ ceil((92+40)/0.912928). */
 inline constexpr uint32_t kRCFri3AlgNumQueries = 148;
@@ -189,7 +189,7 @@ struct Fri3AlgBatchProof {
     Fri3AlgLayerCommit row_commit{};
     /** Logical (pre-padding) length ℓ_i of each column = enforced degree bound. */
     std::vector<uint32_t> column_len;
-    /** FS RLC challenge (recomputed and checked by the verifier). */
+    /** FS RLC challenge, drawn after the complete OOD evaluation vector. */
     Fp3 lambda{};
     /** Dual OOD points (FS, both ∉ D, z1 ≠ z2). */
     Fp3 z1{};

@@ -1131,10 +1131,6 @@ Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& colum
     // FS: all column roots absorbed BEFORE any challenge (commit-then-challenge).
     Fri3Fs fs = Fri3BatchFsInit(fs_seed, pow_grind_nonce, n, p.columns, p.column_len);
 
-    // RLC λ over all columns (single batched instance).
-    p.lambda = fs.ChallengeFp3("frib3_lambda", 0);
-    fs.AbsorbFp3(p.lambda);
-
     // Dual OOD: two independent points; single-z caps the bindable degree.
     uint32_t zctr = 0;
     p.z1 = Fri3BatchSampleZ(fs, zctr, n_lde, nullptr);
@@ -1151,6 +1147,12 @@ Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& colum
         fs.AbsorbFp3(p.evals_z1[i]);
         fs.AbsorbFp3(p.evals_z2[i]);
     }
+    // Bind the complete per-column evaluation vector before drawing the
+    // batching coefficient; otherwise compensating false evaluations can
+    // preserve their lambda-weighted aggregate.
+    p.lambda = fs.ChallengeFp3("frib3_lambda", 0);
+    fs.AbsorbFp3(p.lambda);
+
     p.w1 = fs.ChallengeFp3("frib3_w", 0);
     p.w2 = fs.ChallengeFp3("frib3_w", 1);
     fs.AbsorbFp3(p.w1);
@@ -1296,11 +1298,6 @@ bool Fri3BatchVerify(const Fri3BatchProof& proof, const uint256& fs_seed, std::s
     Fri3Fs fs = Fri3BatchFsInit(fs_seed, proof.pow_grind_nonce, n, proof.columns,
                                 proof.column_len);
     {
-        const Fp3 lambda = fs.ChallengeFp3("frib3_lambda", 0);
-        if (!Eq(lambda, proof.lambda)) return fail("lambda mismatch");
-        fs.AbsorbFp3(lambda);
-    }
-    {
         uint32_t zctr = 0;
         const Fp3 z1 = Fri3BatchSampleZ(fs, zctr, n_lde, nullptr);
         if (!Eq(z1, proof.z1)) return fail("z1 mismatch");
@@ -1317,6 +1314,11 @@ bool Fri3BatchVerify(const Fri3BatchProof& proof, const uint256& fs_seed, std::s
     for (uint32_t i = 0; i < W; ++i) {
         fs.AbsorbFp3(proof.evals_z1[i]);
         fs.AbsorbFp3(proof.evals_z2[i]);
+    }
+    {
+        const Fp3 lambda = fs.ChallengeFp3("frib3_lambda", 0);
+        if (!Eq(lambda, proof.lambda)) return fail("lambda mismatch");
+        fs.AbsorbFp3(lambda);
     }
     {
         const Fp3 w1 = fs.ChallengeFp3("frib3_w", 0);

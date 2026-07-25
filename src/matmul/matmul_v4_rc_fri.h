@@ -235,14 +235,18 @@ struct FriCommitResult {
 //  1. Per-column LDE over the COMMON domain D of size N·16 (N = max padded
 //     column length); Merkle root per column; all roots absorbed before any
 //     challenge.
-//  2. FS λ; U := Σ_i λ^{i−1}·X^{N−len_i}·P_i  (degree-shift = maximal-degree
-//     enforcement: U low-degree ⇒ deg P_i < len_i for every i).
-//  3. FS z1, z2 ∉ D (dual OOD); prover ships every column's evaluations at
-//     z1, z2; FS weights w1, w2; DEEP composition
+//  2. FS z1, z2 ∉ D (dual OOD); prover ships every column's evaluations at
+//     z1, z2.
+//  3. AFTER the complete evaluation vector is absorbed, draw FS λ and form
+//     U := Σ_i λ^{i−1}·X^{N−len_i}·P_i (degree-shift = maximal-degree
+//     enforcement: U low-degree ⇒ deg P_i < len_i for every i). This order is
+//     mandatory: a pre-evaluation λ lets compensating false column evaluations
+//     cancel in U(z).
+//  4. Draw FS weights w1, w2; DEEP composition
 //     G := w1·(U − U(z1))/(X − z1) + w2·(U − U(z2))/(X − z2), where U(z_s) is
 //     recomputed by the VERIFIER from the per-column claims (this is what
 //     binds them).
-//  4. Fold-commit G exactly as FriCommitAndFold folds; Q = 128 FS queries;
+//  5. Fold-commit G exactly as FriCommitAndFold folds; Q = 128 FS queries;
 //     each query opens every column at the query index (Merkle path into the
 //     column root) plus G's fold path, and checks the DEEP identity
 //     G(x)·1 = w1(U(x)−v1)/(x−z1) + w2(U(x)−v2)/(x−z2) with
@@ -256,8 +260,8 @@ struct FriCommitResult {
 // ============================================================================
 
 inline constexpr uint32_t kRCFriBatchProofMagic = 0x42495246u; // 'FRIB'
-inline constexpr uint32_t kRCFriBatchProofVersion = 5;
-inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V5";
+inline constexpr uint32_t kRCFriBatchProofVersion = 6;
+inline constexpr char kRCFriBatchDomainTag[] = "BTX_RC_FRIB_V6";
 /** Batched-instance query count. NAMED CONSTANT (soundness table): Q=116
  *  clears 2^-64 with <1 bit margin; Q=128 is the recommended hardening →
  *  floor(128·log2(32/17)) − 40 = 76 bits post-grinding. */
@@ -325,7 +329,13 @@ struct FriBatchProof {
     std::vector<FriLayerCommit> columns;
     /** Logical (pre-padding) length ℓ_i of each column = enforced degree bound. */
     std::vector<uint32_t> column_len;
-    /** FS RLC challenge (recomputed and checked by the verifier). */
+    /**
+     * FS RLC challenge (recomputed and checked by the verifier).
+     *
+     * Version 6 draws this only after evals_z1/evals_z2 have been absorbed.
+     * Drawing it before those claims lets a prover choose compensating false
+     * per-column evaluations whose lambda-weighted sum is unchanged.
+     */
     Fp2 lambda{};
     /** Dual OOD points (FS, both ∉ D, z1 ≠ z2). */
     Fp2 z1{};

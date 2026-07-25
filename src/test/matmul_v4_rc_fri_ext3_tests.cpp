@@ -44,7 +44,7 @@ BOOST_AUTO_TEST_CASE(fri3_constants_and_soundness_bits)
     BOOST_CHECK_EQUAL(rc::kRCFriNumQueries, 128u);
     BOOST_CHECK_EQUAL(rc::kRCFriGrindingBits, 40u);
     BOOST_CHECK_EQUAL(rc::kRCFri3ProofVersion, 5u);
-    BOOST_CHECK_EQUAL(rc::kRCFri3BatchProofVersion, 5u);
+    BOOST_CHECK_EQUAL(rc::kRCFri3BatchProofVersion, 6u);
     BOOST_CHECK(!rc::kRCFriConjecturedBoundEnabled);
     BOOST_CHECK(rc::Fri3ClaimedBitsMeetTarget());
     BOOST_CHECK_EQUAL(rc::Fri3SoundnessBoundBits(), 76); // floor(128*log2(32/17))-40
@@ -388,7 +388,7 @@ BOOST_AUTO_TEST_CASE(frib3_constants_and_soundness_bits)
                 std::string::npos);
     BOOST_CHECK(std::string(rc::kRCFri3BatchSoundnessStatement).find("Fp3") !=
                 std::string::npos);
-    BOOST_CHECK_EQUAL(rc::kRCFri3BatchProofVersion, 5u);
+    BOOST_CHECK_EQUAL(rc::kRCFri3BatchProofVersion, 6u);
 }
 
 BOOST_AUTO_TEST_CASE(frib3_honest_commit_verify_serde_byte_exact)
@@ -435,8 +435,8 @@ BOOST_AUTO_TEST_CASE(frib3_honest_commit_verify_serde_byte_exact)
 
 BOOST_AUTO_TEST_CASE(frib3_forged_ood_opening_rejected)
 {
-    // A forged column opening at an OOD point must be rejected: the dual-OOD
-    // DEEP identity at the query sites catches it.
+    // The complete OOD-evaluation vector is absorbed before lambda. A changed
+    // claim must therefore change lambda before any DEEP work is trusted.
     const auto cols = MakeBatchColumns();
     const uint256 seed = MakeSeed(0xB2);
     const auto c = rc::Fri3BatchCommit(cols, seed);
@@ -445,12 +445,15 @@ BOOST_AUTO_TEST_CASE(frib3_forged_ood_opening_rejected)
     auto bad = c.proof;
     bad.evals_z1[1].c0 ^= 1;
     BOOST_CHECK(!rc::Fri3BatchVerify(bad, seed, &why));
+    BOOST_CHECK_EQUAL(why, "lambda mismatch");
     auto bad2 = c.proof;
     bad2.evals_z2[2].c1 ^= 1;
     BOOST_CHECK(!rc::Fri3BatchVerify(bad2, seed, &why));
+    BOOST_CHECK_EQUAL(why, "lambda mismatch");
     auto bad3 = c.proof;
     bad3.evals_z2[0].c2 ^= 1;
     BOOST_CHECK(!rc::Fri3BatchVerify(bad3, seed, &why));
+    BOOST_CHECK_EQUAL(why, "lambda mismatch");
 }
 
 BOOST_AUTO_TEST_CASE(frib3_forged_column_or_path_rejected)
