@@ -423,6 +423,7 @@ rc::RCCoupOptions SelectCoupledHarnessOptions(const Args& args)
         options.expansion_threads = std::max(1u, std::thread::hardware_concurrency());
     }
     options.cpu_gemm_threads = options.expansion_threads;
+    options.pipeline_cpu_page_gemm = options.cpu_gemm_threads > 1;
     return options;
 }
 
@@ -770,6 +771,7 @@ int RunCoupledHarness(const Args& args)
             mw.pushKV("seeded_page_gemms", t_mine.seeded_page_gemms);
             mw.pushKV("host_overlap_pages", t_mine.host_overlap_pages);
             mw.pushKV("host_overlap_expand_s", t_mine.host_overlap_expand_s);
+            mw.pushKV("cpu_overlap_pages", t_mine.cpu_overlap_pages);
             mw.pushKV("gemm_s", t_mine.gemm_s);
             mw.pushKV("accumulate_s", t_mine.accumulate_s);
             mw.pushKV("permutation_s", t_mine.permutation_s);
@@ -868,7 +870,7 @@ int RunCoupledHarness(const Args& args)
               << "s seeded_page_gemms=" << timed_mine.seeded_page_gemms
               << " host_overlap_pages=" << timed_mine.host_overlap_pages
               << " host_overlap_expand=" << timed_mine.host_overlap_expand_s
-              << "s"
+              << "s cpu_overlap_pages=" << timed_mine.cpu_overlap_pages
               << " gemm=" << timed_mine.gemm_s
               << "s accumulate=" << timed_mine.accumulate_s
               << "s permutation=" << timed_mine.permutation_s
@@ -896,6 +898,7 @@ int RunCoupledHarness(const Args& args)
     walls.pushKV("seeded_page_gemms", timed_mine.seeded_page_gemms);
     walls.pushKV("host_overlap_pages", timed_mine.host_overlap_pages);
     walls.pushKV("host_overlap_expand", timed_mine.host_overlap_expand_s);
+    walls.pushKV("cpu_overlap_pages", timed_mine.cpu_overlap_pages);
     walls.pushKV("gemm", timed_mine.gemm_s);
     walls.pushKV("accumulate", timed_mine.accumulate_s);
     walls.pushKV("permutation", timed_mine.permutation_s);
@@ -1071,6 +1074,8 @@ int RunCoupledHarness(const Args& args)
                        static_cast<uint64_t>(selected.cpu_gemm_threads));
         options.pushKV("pipeline_bank_commitment",
                        selected.pipeline_bank_commitment);
+        options.pushKV("pipeline_cpu_page_gemm",
+                       selected.pipeline_cpu_page_gemm);
         options.pushKV("bank_root_cache", bank_root_cache != nullptr);
         options.pushKV("cache_runs", static_cast<uint64_t>(args.cache_runs));
         root.pushKV("options", options);

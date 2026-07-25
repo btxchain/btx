@@ -1089,9 +1089,11 @@ RCCoupOptions MakeCpuRCCoupReplayOptions(const RCCoupParams& params,
         options.mode = RCCoupExecMode::Streamed;
     }
     const uint32_t threads =
-        std::max<uint32_t>(1, std::thread::hardware_concurrency());
+        std::min<uint32_t>(
+            64, std::max<uint32_t>(1, std::thread::hardware_concurrency()));
     options.expansion_threads = threads;
     options.cpu_gemm_threads = threads;
+    options.pipeline_cpu_page_gemm = threads > 1;
     options.bank_root_cache.reset();
     return options;
 }
@@ -1812,6 +1814,99 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     }
                     for (const auto& partial : group) accumulate_partial(partial);
                     page_cursor += kHostGpuGroup;
+                }
+            }
+
+            // Independent CPU replay: while page p is consumed by exact GEMM,
+            // expand page p+1 on a bounded second worker group. Page results are
+            // still accumulated in schedule order and no device callback is used.
+            const bool can_pipeline_cpu =
+                streamed && out_tx == nullptr && !options.skip_bank_page &&
+                options.pipeline_cpu_page_gemm && options.expansion_threads > 1 &&
+                options.cpu_gemm_threads > 1 && gemm.gemm_s8s8 == nullptr &&
+                gemm.seeded_page_s8s8 == nullptr;
+            if (can_pipeline_cpu && page_cursor < page_ids.size()) {
+                struct CpuPage {
+                    std::vector<int8_t> bytes;
+                    double expand_s{0};
+                };
+                const uint32_t producer_threads =
+                    std::max<uint32_t>(1, options.expansion_threads / 2U);
+                const uint32_t gemm_threads =
+                    std::max<uint32_t>(1, options.cpu_gemm_threads / 2U);
+                const auto start_page = [&](uint32_t page_id) {
+                    return std::async(
+                        std::launch::async,
+                        [&, page_id] {
+                            CpuPage result;
+                            const auto t_page0 = std::chrono::steady_clock::now();
+                            try {
+                                result.bytes = DeriveCoupledBankPage(
+                                    header, height, page_id, params, tv,
+                                    producer_threads);
+                            } catch (...) {
+                                result.bytes.clear();
+                            }
+                            result.expand_s =
+                                std::chrono::duration<double>(
+                                    std::chrono::steady_clock::now() - t_page0)
+                                    .count();
+                            return result;
+                        });
+                };
+
+                std::future<CpuPage> current;
+                try {
+                    current = start_page(page_ids[page_cursor]);
+                } catch (...) {
+                    current = {};
+                }
+                while (current.valid() && page_cursor < page_ids.size()) {
+                    const uint32_t current_page_id = page_ids[page_cursor];
+                    CpuPage host_page;
+                    try {
+                        host_page = current.get();
+                    } catch (...) {
+                        host_page = {};
+                    }
+                    if (host_page.bytes.size() != static_cast<size_t>(W) * W) {
+                        const auto t_page0 = std::chrono::steady_clock::now();
+                        host_page.bytes = DeriveCoupledBankPage(
+                            header, height, current_page_id, params, tv,
+                            producer_threads);
+                        host_page.expand_s =
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_page0)
+                                .count();
+                    }
+                    if (out_timing) {
+                        out_timing->page_expand_s += host_page.expand_s;
+                    }
+
+                    std::future<CpuPage> next;
+                    if (page_cursor + 1 < page_ids.size()) {
+                        try {
+                            next = start_page(page_ids[page_cursor + 1]);
+                        } catch (...) {
+                            next = {};
+                        }
+                    }
+
+                    std::vector<int64_t> partial(
+                        static_cast<size_t>(lobe_stride), 0);
+                    const auto t_gemm0 = std::chrono::steady_clock::now();
+                    LobeLocalGemm(lobe_rows, host_page.bytes, M, W,
+                                  partial.data(), gemm, gemm_threads);
+                    if (out_timing) {
+                        out_timing->gemm_s +=
+                            std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - t_gemm0)
+                                .count();
+                    }
+                    accumulate_partial(partial);
+                    if (out_timing) ++out_timing->cpu_overlap_pages;
+                    ++page_cursor;
+                    current = std::move(next);
                 }
             }
 

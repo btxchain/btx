@@ -701,13 +701,18 @@ BOOST_AUTO_TEST_CASE(rc_coup_parallel_cpu_gemm_matches_serial)
     serial.expansion_threads = 4;
     auto parallel = serial;
     parallel.cpu_gemm_threads = 4;
+    auto pipelined = parallel;
+    pipelined.pipeline_cpu_page_gemm = true;
 
     const uint256 expected =
         rc::RecomputeCoupledPuzzleReference(header, 0, params, serial);
     const uint256 actual =
         rc::RecomputeCoupledPuzzleReference(header, 0, params, parallel);
+    const uint256 pipelined_actual =
+        rc::RecomputeCoupledPuzzleReference(header, 0, params, pipelined);
     BOOST_REQUIRE(!expected.IsNull());
     BOOST_CHECK_EQUAL(actual, expected);
+    BOOST_CHECK_EQUAL(pipelined_actual, expected);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_cpu_replay_policy_is_bounded_and_cpu_only)
@@ -720,6 +725,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_cpu_replay_policy_is_bounded_and_cpu_only)
     BOOST_CHECK(replay.mode == rc::RCCoupExecMode::Streamed);
     BOOST_CHECK_GE(replay.expansion_threads, 1U);
     BOOST_CHECK_EQUAL(replay.cpu_gemm_threads, replay.expansion_threads);
+    BOOST_CHECK(replay.pipeline_cpu_page_gemm);
     BOOST_CHECK(replay.bank_root_cache == nullptr);
     BOOST_CHECK_EQUAL(replay.transcript_version, selected.transcript_version);
     BOOST_CHECK_EQUAL(replay.full_bank_schedule, selected.full_bank_schedule);

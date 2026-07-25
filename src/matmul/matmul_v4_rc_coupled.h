@@ -299,6 +299,12 @@ struct RCCoupOptions {
     bool pipeline_bank_commitment{true};
 
     /**
+     * CPU replay only: overlap expansion of page p+1 with exact GEMM of page p
+     * using bounded, disjoint host-worker budgets.
+     */
+    bool pipeline_cpu_page_gemm{false};
+
+    /**
      * Optional mining-only memo for the template-scoped bank commitment.
      * Consensus validation and independent winning-candidate reseal leave this
      * null. It stores no pages and cannot affect page contents.
@@ -416,6 +422,8 @@ struct RCCoupTiming {
     uint64_t host_overlap_pages{0};
     /** Sum of host worker expansion time for host_overlap_pages (overlapped wall). */
     double host_overlap_expand_s{0};
+    /** CPU replay pages whose expansion/GEMM stages used the bounded pipeline. */
+    uint64_t cpu_overlap_pages{0};
     double gemm_s{0};
     double accumulate_s{0};
     double permutation_s{0};
