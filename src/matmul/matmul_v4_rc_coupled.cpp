@@ -21,6 +21,7 @@
 #include <cstring>
 #include <future>
 #include <limits>
+#include <thread>
 #include <vector>
 
 namespace matmul::v4::rc {
@@ -66,6 +67,28 @@ namespace {
 namespace lt = matmul::v4::lt;
 
 inline size_t TagLen(const char* tag) { return std::strlen(tag); }
+
+template <typename Fn>
+void ParallelForCoupled(size_t jobs, uint32_t threads, const Fn& fn)
+{
+    if (jobs == 0) return;
+    threads = std::max<uint32_t>(
+        1, std::min<uint32_t>({threads, 64U, static_cast<uint32_t>(jobs)}));
+    if (threads <= 1) {
+        for (size_t i = 0; i < jobs; ++i) fn(i);
+        return;
+    }
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (uint32_t t = 0; t < threads; ++t) {
+        workers.emplace_back([&, t] {
+            const size_t begin = (jobs * t) / threads;
+            const size_t end = (jobs * (t + 1U)) / threads;
+            for (size_t i = begin; i < end; ++i) fn(i);
+        });
+    }
+    for (auto& worker : workers) worker.join();
+}
 
 uint256 Sha256Tagged(const char* tag, size_t taglen, const unsigned char* data, size_t len)
 {
@@ -357,6 +380,26 @@ void ApplyXorKeystream(std::vector<int64_t>& s, ShaXof& xof)
     }
 }
 
+/** Parallel counter blocks, identical to ShaXof(seed).NextU64() lane order. */
+void ApplyXorKeystreamParallel(std::vector<int64_t>& s, const uint256& seed,
+                               uint32_t threads)
+{
+    const size_t blocks = (s.size() + 3U) / 4U; // SHA block = four LE64 lanes
+    ParallelForCoupled(blocks, threads, [&](size_t block_index) {
+        unsigned char input[32 + 4];
+        std::memcpy(input, seed.data(), 32);
+        WriteLE32(input + 32, static_cast<uint32_t>(block_index));
+        uint8_t hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(input, sizeof(input)).Finalize(hash);
+        const size_t lane0 = block_index * 4U;
+        for (size_t j = 0; j < 4 && lane0 + j < s.size(); ++j) {
+            const uint64_t key = ReadLE64(hash + j * sizeof(uint64_t));
+            s[lane0 + j] =
+                static_cast<int64_t>(static_cast<uint64_t>(s[lane0 + j]) ^ key);
+        }
+    });
+}
+
 /** Fisher–Yates balanced permutation derived from an arbitrary seed. */
 void ApplyBalancedPermutationFromSeed(std::vector<int64_t>& s, const uint256& seed)
 {
@@ -379,6 +422,48 @@ void ApplyBalancedPermutationFromSeed(std::vector<int64_t>& s, const uint256& se
 }
 
 /**
+ * Parallelize only independent SHA counter blocks and the collision-free
+ * scatter. Fisher–Yates swaps remain in canonical serial draw order.
+ */
+void ApplyBalancedPermutationFromSeedParallel(std::vector<int64_t>& s,
+                                              const uint256& seed, uint32_t threads)
+{
+    const uint32_t n = static_cast<uint32_t>(s.size());
+    if (n == 0) return;
+    const size_t draws = n - 1U;
+    std::vector<uint32_t> random(draws);
+    const size_t blocks = (draws + 7U) / 8U; // SHA block = eight LE32 draws
+    ParallelForCoupled(blocks, threads, [&](size_t block_index) {
+        unsigned char input[32 + 4];
+        std::memcpy(input, seed.data(), 32);
+        WriteLE32(input + 32, static_cast<uint32_t>(block_index));
+        uint8_t hash[CSHA256::OUTPUT_SIZE];
+        CSHA256().Write(input, sizeof(input)).Finalize(hash);
+        const size_t draw0 = block_index * 8U;
+        for (size_t j = 0; j < 8 && draw0 + j < draws; ++j) {
+            random[draw0 + j] = ReadLE32(hash + j * sizeof(uint32_t));
+        }
+    });
+
+    std::vector<uint32_t> pi(n);
+    ParallelForCoupled(n, threads, [&](size_t i) {
+        pi[i] = static_cast<uint32_t>(i);
+    });
+    size_t draw = 0;
+    for (uint32_t i = n - 1; i > 0; --i) {
+        const uint32_t j = random[draw++] % (i + 1);
+        const uint32_t tmp = pi[i];
+        pi[i] = pi[j];
+        pi[j] = tmp;
+    }
+    std::vector<int64_t> tmp(n);
+    ParallelForCoupled(n, threads, [&](size_t i) {
+        tmp[pi[i]] = s[i];
+    });
+    s = std::move(tmp);
+}
+
+/**
  * After ApplyAllToAllMix: when material_exchange && exchange_rounds>0, run that
  * many dependency-linked XOR+permute rounds (V3). No-op when rounds==0.
  */
@@ -391,13 +476,17 @@ void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma,
     for (uint32_t r = 0; r < options.exchange_rounds; ++r) {
         const uint64_t fold = AccXorFold(s);
         const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold, tags);
-        {
+        if (options.expansion_threads > 1) {
+            ApplyXorKeystreamParallel(s, seed, options.expansion_threads);
+            ApplyBalancedPermutationFromSeedParallel(
+                s, seed, options.expansion_threads);
+        } else {
             ShaXof xof(seed);
             ApplyXorKeystream(s, xof);
+            // Fresh XOF from the same seed for the balanced permutation
+            // (independent of keystream consumption above).
+            ApplyBalancedPermutationFromSeed(s, seed);
         }
-        // Fresh XOF from the same seed for the balanced permutation (independent
-        // of keystream consumption above).
-        ApplyBalancedPermutationFromSeed(s, seed);
     }
 }
 

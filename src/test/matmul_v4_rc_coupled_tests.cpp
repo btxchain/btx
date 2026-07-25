@@ -960,12 +960,27 @@ BOOST_AUTO_TEST_CASE(rc_coup_exchange_rounds_v3_digest_and_bytes)
     acc[0] = std::numeric_limits<int64_t>::min();
     acc[1] = std::numeric_limits<int64_t>::max();
     if (acc.size() > 2) acc[2] = -1;
+    const std::vector<int64_t> input_acc = acc;
     std::vector<int8_t> state(toy.StateBytes());
     uint256 root;
     const uint256 sigma = matmul::v4::DeriveSigma(header);
     BOOST_REQUIRE(
         rc::ApplyCoupledBarrierTail(sigma, /*barrier=*/0, toy, acc, state, &root, with_rounds));
     BOOST_CHECK(!root.IsNull());
+
+    // Parallel exchange preserves the exact SHA counter stream, Fisher–Yates
+    // draw order, accumulator, extracted state, and barrier root.
+    auto parallel_options = with_rounds;
+    parallel_options.expansion_threads = 4;
+    std::vector<int64_t> acc_parallel = input_acc;
+    std::vector<int8_t> state_parallel(toy.StateBytes());
+    uint256 root_parallel;
+    BOOST_REQUIRE(rc::ApplyCoupledBarrierTail(
+        sigma, /*barrier=*/0, toy, acc_parallel, state_parallel, &root_parallel,
+        parallel_options));
+    BOOST_CHECK(acc_parallel == acc);
+    BOOST_CHECK(state_parallel == state);
+    BOOST_CHECK(root_parallel == root);
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_medium_v3_golden_digest_stable)
