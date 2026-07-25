@@ -1637,9 +1637,11 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             };
 
             // One host SHA-NI page producer complements the GPU SHA sampler.
-            // Three-page groups preserve accumulation order: expand page 0 on
-            // host while pages 1/2 use fused CUDA, then GEMM page 0 and add
-            // partials in their original schedule order.
+            // Four-page groups preserve accumulation order: expand page 0 on
+            // host while pages 1/2/3 use fused CUDA, then GEMM page 0 and add
+            // partials in their original schedule order. The 1:3 split tracks
+            // the measured producer-rate ratio on the RTX 5060.
+            constexpr size_t kHostGpuGroup = 4;
             size_t page_cursor = 0;
             const bool can_overlap_host =
                 streamed && out_tx == nullptr && !options.skip_bank_page &&
@@ -1650,7 +1652,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     std::vector<int8_t> bytes;
                     double expand_s{0};
                 };
-                while (page_cursor + 2 < page_ids.size()) {
+                while (page_cursor + kHostGpuGroup <= page_ids.size()) {
                     const uint32_t host_page_id = page_ids[page_cursor];
                     const uint256 host_seed = DeriveCoupledBankPageSeed(
                         header, height, host_page_id, params, tv);
@@ -1678,8 +1680,9 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     }
 
                     std::vector<std::vector<int64_t>> group(
-                        3, std::vector<int64_t>(static_cast<size_t>(lobe_stride), 0));
-                    for (size_t j = 1; j < 3; ++j) {
+                        kHostGpuGroup,
+                        std::vector<int64_t>(static_cast<size_t>(lobe_stride), 0));
+                    for (size_t j = 1; j < kHostGpuGroup; ++j) {
                         if (!try_fused(page_ids[page_cursor + j], group[j])) {
                             const auto t_page0 = std::chrono::steady_clock::now();
                             const auto page = DeriveCoupledBankPage(
@@ -1731,7 +1734,7 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                                 .count();
                     }
                     for (const auto& partial : group) accumulate_partial(partial);
-                    page_cursor += 3;
+                    page_cursor += kHostGpuGroup;
                 }
             }
 
