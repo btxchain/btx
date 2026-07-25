@@ -28,11 +28,66 @@
 #include <utility>
 #include <vector>
 
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#include <immintrin.h>
+#endif
+
 namespace matmul::v4::lt {
 
 namespace {
 
 namespace bx = matmul::v4::bmx4;
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+[[nodiscard]] bool RuntimeHasAvx2()
+{
+    return __builtin_cpu_supports("avx2");
+}
+
+__attribute__((target("avx2")))
+void ExactGemmS8S8RowsAvx2(const std::vector<int8_t>& L,
+                           const std::vector<int8_t>& R,
+                           std::vector<int32_t>& out, uint32_t begin,
+                           uint32_t end, uint32_t inner, uint32_t cols)
+{
+    for (uint32_t i = begin; i < end; ++i) {
+        const int8_t* l_row = &L[static_cast<size_t>(i) * inner];
+        int32_t* o_row = &out[static_cast<size_t>(i) * cols];
+        for (uint32_t k = 0; k < inner; ++k) {
+            const int32_t l_ik = l_row[k];
+            if (l_ik == 0) continue;
+            const int8_t* r_row = &R[static_cast<size_t>(k) * cols];
+            const __m256i l16 = _mm256_set1_epi16(static_cast<int16_t>(l_ik));
+            uint32_t c = 0;
+            for (; c + 16 <= cols; c += 16) {
+                const __m128i r8 =
+                    _mm_loadu_si128(reinterpret_cast<const __m128i*>(r_row + c));
+                const __m256i product16 =
+                    _mm256_mullo_epi16(_mm256_cvtepi8_epi16(r8), l16);
+                const __m256i product_lo = _mm256_cvtepi16_epi32(
+                    _mm256_castsi256_si128(product16));
+                const __m256i product_hi = _mm256_cvtepi16_epi32(
+                    _mm256_extracti128_si256(product16, 1));
+                _mm256_storeu_si256(
+                    reinterpret_cast<__m256i*>(o_row + c),
+                    _mm256_add_epi32(
+                        _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(o_row + c)),
+                        product_lo));
+                _mm256_storeu_si256(
+                    reinterpret_cast<__m256i*>(o_row + c + 8),
+                    _mm256_add_epi32(
+                        _mm256_loadu_si256(
+                            reinterpret_cast<const __m256i*>(o_row + c + 8)),
+                        product_hi));
+            }
+            for (; c < cols; ++c) {
+                o_row[c] += l_ik * static_cast<int32_t>(r_row[c]);
+            }
+        }
+    }
+}
+#endif
 
 // V4.4-LT domain-separation tags. Distinct from the V42 (ENC-BMX4C) and V42D
 // tags so LT is a cryptographically independent encoding profile: a seed can
@@ -556,12 +611,21 @@ std::vector<int32_t> ExactGemmS8S8Parallel(const std::vector<int8_t>& L,
     std::vector<int32_t> out(static_cast<size_t>(rows) * cols, 0);
     std::vector<std::thread> workers;
     workers.reserve(threads);
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    const bool use_avx2 = RuntimeHasAvx2();
+#endif
     for (uint32_t t = 0; t < threads; ++t) {
         workers.emplace_back([&, t] {
             const uint32_t begin = static_cast<uint32_t>(
                 (static_cast<uint64_t>(rows) * t) / threads);
             const uint32_t end = static_cast<uint32_t>(
                 (static_cast<uint64_t>(rows) * (t + 1U)) / threads);
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+            if (use_avx2) {
+                ExactGemmS8S8RowsAvx2(L, R, out, begin, end, inner, cols);
+                return;
+            }
+#endif
             for (uint32_t i = begin; i < end; ++i) {
                 const int8_t* l_row = &L[static_cast<size_t>(i) * inner];
                 int32_t* o_row = &out[static_cast<size_t>(i) * cols];
