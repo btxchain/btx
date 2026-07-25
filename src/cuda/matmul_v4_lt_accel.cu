@@ -374,8 +374,7 @@ __global__ void DeviceGenerateMantissaXofBlocks(uint8_t* __restrict__ hashes,
     accepted[block_index] = count;
 }
 
-// The scan is deliberately deterministic and tiny relative to MatExpand. It
-// runs on-device, so no candidate incurs a host readback or synchronization.
+// Scalar reference scan used by the legacy W-expansion path.
 __global__ void DeviceScanMantissaCounts(const uint32_t* __restrict__ accepted,
                                          uint32_t* __restrict__ offsets,
                                          size_t blocks, size_t required,
@@ -390,6 +389,47 @@ __global__ void DeviceScanMantissaCounts(const uint32_t* __restrict__ accepted,
     *status = prefix >= required ? 1 : 0;
 }
 
+constexpr unsigned kMantissaScanBlock = 256;
+
+// Deterministic first-level exclusive scan. Every block covers a fixed
+// contiguous range; integer addition makes its result byte-identical to the
+// scalar scan regardless of scheduling.
+__global__ void DeviceScanMantissaCountsBlocks(
+    const uint32_t* __restrict__ accepted, uint32_t* __restrict__ offsets,
+    uint32_t* __restrict__ block_sums, size_t blocks)
+{
+    __shared__ uint32_t scan[kMantissaScanBlock];
+    const unsigned lane = threadIdx.x;
+    const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + lane;
+    scan[lane] = index < blocks ? accepted[index] : 0U;
+    __syncthreads();
+    for (unsigned distance = 1; distance < kMantissaScanBlock; distance <<= 1U) {
+        const uint32_t add = lane >= distance ? scan[lane - distance] : 0U;
+        __syncthreads();
+        if (lane >= distance) scan[lane] += add;
+        __syncthreads();
+    }
+    if (index < blocks) offsets[index] = scan[lane] - accepted[index];
+    if (lane == kMantissaScanBlock - 1U) block_sums[blockIdx.x] = scan[lane];
+}
+
+// The number of first-level blocks is only about 6,000 for a production page.
+// Scanning that small summary serially preserves simple fail-closed accounting
+// while removing the 1.5-million-entry single-thread walk.
+__global__ void DeviceScanMantissaBlockSums(
+    const uint32_t* __restrict__ block_sums,
+    uint32_t* __restrict__ block_offsets, size_t scan_blocks,
+    size_t required, int* __restrict__ status)
+{
+    if (blockIdx.x != 0 || threadIdx.x != 0) return;
+    size_t prefix = 0;
+    for (size_t i = 0; i < scan_blocks; ++i) {
+        block_offsets[i] = static_cast<uint32_t>(prefix);
+        prefix += block_sums[i];
+    }
+    *status = prefix >= required ? 1 : 0;
+}
+
 __global__ void DeviceScatterMantissaXof(const uint8_t* __restrict__ hashes,
                                          const uint32_t* __restrict__ offsets,
                                          size_t blocks, size_t required,
@@ -399,6 +439,34 @@ __global__ void DeviceScatterMantissaXof(const uint8_t* __restrict__ hashes,
     const size_t block_index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (block_index >= blocks || *status == 0) return;
     size_t pos = offsets[block_index];
+#pragma unroll
+    for (int i = 0; i < 32; ++i) {
+        const uint8_t byte = hashes[block_index * 32 + i];
+        bool ok = false;
+        int8_t value = DeviceSampleMantissaNibble(byte & 0x0f, ok);
+        if (ok) {
+            if (pos < required) out[pos] = value;
+            ++pos;
+        }
+        value = DeviceSampleMantissaNibble(byte >> 4, ok);
+        if (ok) {
+            if (pos < required) out[pos] = value;
+            ++pos;
+        }
+    }
+}
+
+__global__ void DeviceScatterMantissaXofTwoLevel(
+    const uint8_t* __restrict__ hashes, const uint32_t* __restrict__ offsets,
+    const uint32_t* __restrict__ block_offsets, size_t blocks, size_t required,
+    const int* __restrict__ status, int8_t* __restrict__ out)
+{
+    const size_t block_index =
+        static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (block_index >= blocks || *status == 0) return;
+    size_t pos = static_cast<size_t>(
+        offsets[block_index] +
+        block_offsets[block_index / kMantissaScanBlock]);
 #pragma unroll
     for (int i = 0; i < 32; ++i) {
         const uint8_t byte = hashes[block_index * 32 + i];
@@ -900,6 +968,8 @@ struct LtCudaResidentPool {
     uint8_t* dRCPageHashes{nullptr};
     uint32_t* dRCPageAccepted{nullptr};
     uint32_t* dRCPageOffsets{nullptr};
+    uint32_t* dRCPageScanSums{nullptr};
+    uint32_t* dRCPageScanOffsets{nullptr};
     int8_t* dRCPageMu{nullptr};
     uint8_t* dRCPageScales{nullptr};
     int* dRCPageStatus{nullptr};
@@ -938,6 +1008,7 @@ struct LtCudaResidentPool {
         free_p(dGemmS8L); free_p(dGemmS8R); free_p(dGemmS32L); free_p(dGemmOut);
         gemm_s8l_bytes = gemm_s8r_bytes = gemm_s32l_bytes = gemm_out_bytes = 0;
         free_p(dRCPageHashes); free_p(dRCPageAccepted); free_p(dRCPageOffsets);
+        free_p(dRCPageScanSums); free_p(dRCPageScanOffsets);
         free_p(dRCPageMu); free_p(dRCPageScales); free_p(dRCPageStatus);
         rc_page_count_capacity = rc_page_blocks_capacity = rc_page_scales_capacity = 0;
         if (stream) { cudaStreamDestroy(stream); stream = nullptr; }
@@ -982,6 +1053,8 @@ struct LtCudaResidentPool {
         free_p(dRCPageHashes);
         free_p(dRCPageAccepted);
         free_p(dRCPageOffsets);
+        free_p(dRCPageScanSums);
+        free_p(dRCPageScanOffsets);
         free_p(dRCPageMu);
         free_p(dRCPageScales);
         free_p(dRCPageStatus);
@@ -990,15 +1063,23 @@ struct LtCudaResidentPool {
         auto mall = [](void** p, size_t bytes) {
             return bytes == 0 || cudaMalloc(p, bytes) == cudaSuccess;
         };
+        const size_t scan_blocks =
+            (blocks + kMantissaScanBlock - 1U) / kMantissaScanBlock;
         if (!mall(reinterpret_cast<void**>(&dRCPageHashes), blocks * 32U) ||
             !mall(reinterpret_cast<void**>(&dRCPageAccepted), blocks * sizeof(uint32_t)) ||
             !mall(reinterpret_cast<void**>(&dRCPageOffsets), blocks * sizeof(uint32_t)) ||
+            !mall(reinterpret_cast<void**>(&dRCPageScanSums),
+                  scan_blocks * sizeof(uint32_t)) ||
+            !mall(reinterpret_cast<void**>(&dRCPageScanOffsets),
+                  scan_blocks * sizeof(uint32_t)) ||
             !mall(reinterpret_cast<void**>(&dRCPageMu), count) ||
             !mall(reinterpret_cast<void**>(&dRCPageScales), scales) ||
             !mall(reinterpret_cast<void**>(&dRCPageStatus), sizeof(int))) {
             free_p(dRCPageHashes);
             free_p(dRCPageAccepted);
             free_p(dRCPageOffsets);
+            free_p(dRCPageScanSums);
+            free_p(dRCPageScanOffsets);
             free_p(dRCPageMu);
             free_p(dRCPageScales);
             free_p(dRCPageStatus);
@@ -1577,12 +1658,20 @@ LtCudaResidentPool& Pool()
         pool.dRCPageHashes, pool.dRCPageAccepted, xof_blocks,
         sw[0], sw[1], sw[2], sw[3], sw[4], sw[5], sw[6], sw[7]);
     if (cudaGetLastError() != cudaSuccess) return false;
-    DeviceScanMantissaCounts<<<1, 1>>>(pool.dRCPageAccepted, pool.dRCPageOffsets,
-                                      xof_blocks, page_count, pool.dRCPageStatus);
+    const size_t scan_blocks =
+        (xof_blocks + kMantissaScanBlock - 1U) / kMantissaScanBlock;
+    DeviceScanMantissaCountsBlocks<<<static_cast<unsigned>(scan_blocks),
+                                     kMantissaScanBlock>>>(
+        pool.dRCPageAccepted, pool.dRCPageOffsets, pool.dRCPageScanSums,
+        xof_blocks);
     if (cudaGetLastError() != cudaSuccess) return false;
-    DeviceScatterMantissaXof<<<mantissa_grid, kThreads>>>(
-        pool.dRCPageHashes, pool.dRCPageOffsets, xof_blocks, page_count,
-        pool.dRCPageStatus, pool.dRCPageMu);
+    DeviceScanMantissaBlockSums<<<1, 1>>>(
+        pool.dRCPageScanSums, pool.dRCPageScanOffsets, scan_blocks,
+        page_count, pool.dRCPageStatus);
+    if (cudaGetLastError() != cudaSuccess) return false;
+    DeviceScatterMantissaXofTwoLevel<<<mantissa_grid, kThreads>>>(
+        pool.dRCPageHashes, pool.dRCPageOffsets, pool.dRCPageScanOffsets,
+        xof_blocks, page_count, pool.dRCPageStatus, pool.dRCPageMu);
     if (cudaGetLastError() != cudaSuccess) return false;
 
     const size_t scale_blocks = (scale_count + 127U) / 128U;
