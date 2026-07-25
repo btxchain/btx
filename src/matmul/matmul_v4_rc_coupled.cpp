@@ -18,9 +18,11 @@
 
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <future>
 #include <limits>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -314,10 +316,105 @@ void MixButterflyDescending(std::vector<int64_t>& s, uint32_t mask, uint32_t n, 
     }
 }
 
+class CoupledStageBarrier
+{
+public:
+    explicit CoupledStageBarrier(uint32_t workers)
+        : m_workers(workers), m_remaining(workers)
+    {
+    }
+
+    void Wait()
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        const uint64_t generation = m_generation;
+        if (--m_remaining == 0) {
+            m_remaining = m_workers;
+            ++m_generation;
+            lock.unlock();
+            m_cv.notify_all();
+            return;
+        }
+        m_cv.wait(lock, [&] { return m_generation != generation; });
+    }
+
+private:
+    const uint32_t m_workers;
+    uint32_t m_remaining;
+    uint64_t m_generation{0};
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+};
+
+void MixButterflyParallel(std::vector<int64_t>& s, uint32_t mask, uint32_t n,
+                          bool u64_wrap, uint32_t pattern, uint32_t threads)
+{
+    if (n < 2 || (n & (n - 1)) != 0) return;
+    const uint32_t pairs = n / 2U;
+    threads = std::max<uint32_t>(
+        1, std::min<uint32_t>({threads, 64U, pairs}));
+    if (threads <= 1) {
+        if (pattern == 0) {
+            MixButterflyAscending(s, mask, n, u64_wrap);
+        } else {
+            MixButterflyDescending(s, mask, n, u64_wrap);
+        }
+        return;
+    }
+
+    uint32_t bits = 0;
+    for (uint32_t t = n; t > 1; t >>= 1) ++bits;
+    CoupledStageBarrier stage_barrier(threads);
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (uint32_t worker = 0; worker < threads; ++worker) {
+        workers.emplace_back([&, worker] {
+            const uint32_t begin = static_cast<uint32_t>(
+                (static_cast<uint64_t>(pairs) * worker) / threads);
+            const uint32_t end = static_cast<uint32_t>(
+                (static_cast<uint64_t>(pairs) * (worker + 1U)) / threads);
+            for (uint32_t logical_stage = 0; logical_stage < bits; ++logical_stage) {
+                const uint32_t stage =
+                    pattern == 0 ? logical_stage : bits - 1U - logical_stage;
+                const uint32_t stride = uint32_t{1} << stage;
+                for (uint32_t pair = begin; pair < end; ++pair) {
+                    const uint32_t block = pair / stride;
+                    const uint32_t offset = pair - block * stride;
+                    const uint32_t i = block * (stride * 2U) + offset;
+                    const uint32_t j = i + stride;
+                    uint32_t pi = i ^ mask;
+                    uint32_t pj = j ^ mask;
+                    if (pattern != 0) {
+                        constexpr uint32_t rotate = 3;
+                        const uint32_t r = rotate % bits;
+                        pi = ((pi << r) | (pi >> (bits - r))) & (n - 1U);
+                        pj = ((pj << r) | (pj >> (bits - r))) & (n - 1U);
+                    }
+                    if (u64_wrap) {
+                        const uint64_t a = static_cast<uint64_t>(s[pi]);
+                        const uint64_t b = static_cast<uint64_t>(s[pj]);
+                        s[pi] = static_cast<int64_t>(a + b);
+                        s[pj] = static_cast<int64_t>(
+                            pattern == 0 ? a - b : b - a);
+                    } else {
+                        const int64_t a = s[pi];
+                        const int64_t b = s[pj];
+                        s[pi] = a + b;
+                        s[pj] = pattern == 0 ? a - b : b - a;
+                    }
+                }
+                stage_barrier.Wait();
+            }
+        });
+    }
+    for (auto& worker : workers) worker.join();
+}
+
 void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t barrier,
                       uint32_t n, bool material_exchange = false,
                       uint32_t exchange_rows = dc::kRCCoupExchangeRowsDefault,
-                      bool u64_wrap = false, const RCCoupDomainTagSet* tags = nullptr)
+                      bool u64_wrap = false, const RCCoupDomainTagSet* tags = nullptr,
+                      uint32_t threads = 1)
 {
     const RCCoupDomainTagSet& t =
         tags != nullptr ? *tags : RCCoupDomainTagsForVersion(ENC_RC_V1);
@@ -333,7 +430,9 @@ void ApplyAllToAllMix(std::vector<int64_t>& s, const uint256& sigma, uint32_t ba
     ShaXof xof(mix_seed);
     const uint32_t mask = xof.NextU32() & (n - 1);
     const uint32_t pattern = barrier % kRCCoupMixPatterns;
-    if (pattern == 0) {
+    if (threads > 1) {
+        MixButterflyParallel(s, mask, n, u64_wrap, pattern, threads);
+    } else if (pattern == 0) {
         MixButterflyAscending(s, mask, n, u64_wrap);
     } else {
         MixButterflyDescending(s, mask, n, u64_wrap);
@@ -1707,7 +1806,8 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         {
             const auto t_mix0 = std::chrono::steady_clock::now();
             ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows,
-                             RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
+                             RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags,
+                             options.expansion_threads);
             if (out_timing) {
                 out_timing->mix_s +=
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t_mix0)
@@ -1818,7 +1918,8 @@ bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCou
     if (!IsBalancedPermutation(pi, n)) return false;
     ApplyBalancedPermutation(acc, pi);
     ApplyAllToAllMix(acc, sigma, barrier, n, options.material_exchange, options.exchange_rows,
-                     RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
+                     RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags,
+                     options.expansion_threads);
     ApplyMaterialExchangeRounds(acc, sigma, barrier, options);
     const uint256 extract_seed =
         Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, barrier,
