@@ -625,6 +625,22 @@ void ApplyBalancedPermutationParallel(std::vector<int64_t>& s,
     return true;
 }
 
+[[nodiscard]] bool ExtractActiveStateParallel(const uint256& prf_key,
+                                               const std::vector<int64_t>& raw,
+                                               std::vector<int8_t>& out,
+                                               uint32_t threads)
+{
+    if (threads <= 1) return ExtractActiveState(prf_key, raw, out);
+    if (raw.size() != out.size() || raw.size() % kRCMxBlockLen != 0) return false;
+    const size_t n_tiles = raw.size() / kRCMxBlockLen;
+    ParallelForCoupled(n_tiles, threads, [&](size_t tile) {
+        const size_t offset = tile * kRCMxBlockLen;
+        ExtractMXTileInt64(prf_key, /*i=*/0, static_cast<uint32_t>(tile),
+                           raw.data() + offset, out.data() + offset);
+    });
+    return true;
+}
+
 /**
  * Device-first ExactGemmS8S8 (mirrors RC ExactGemmS8S8Dispatched):
  * successful device output replaces CPU; empty/failing backend → CPU.
@@ -1833,7 +1849,10 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                 Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, b,
                                    /*unused=*/0);
             const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
-            if (!ExtractActiveState(prf_key, acc, state)) return uint256{};
+            if (!ExtractActiveStateParallel(
+                    prf_key, acc, state, options.expansion_threads)) {
+                return uint256{};
+            }
             if (out_timing) {
                 out_timing->extract_s +=
                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t_extract0)
@@ -1925,7 +1944,10 @@ bool ApplyCoupledBarrierTail(const uint256& sigma, uint32_t barrier, const RCCou
         Sha256TaggedU32U32(tags.extract, TagLen(tags.extract), sigma, barrier,
                            /*unused=*/0);
     const uint256 prf_key = lt::DeriveMatExpandPrfKey(extract_seed);
-    if (!ExtractActiveState(prf_key, acc, state_out)) return false;
+    if (!ExtractActiveStateParallel(
+            prf_key, acc, state_out, options.expansion_threads)) {
+        return false;
+    }
     if (barrier_root_out) *barrier_root_out = BarrierRoot(barrier, state_out, tags);
     return true;
 }
