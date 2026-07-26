@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -546,6 +547,139 @@ BOOST_AUTO_TEST_CASE(roundtrip_and_tamper_fp3)
     BOOST_REQUIRE_MESSAGE(forced.ok, forced.note);
     BOOST_CHECK(!forced.division_exact);
     BOOST_CHECK(!aq::RcSamplerAirVerify<gf::Fp3>(forced.proof, seed, w.scale_e, tm, &why));
+}
+
+// ---------------------------------------------------------------------------
+// COMPOSITION-SITE (O(W x M) evaluation matrix) — footprint and bit-identity.
+// ---------------------------------------------------------------------------
+
+BOOST_AUTO_TEST_CASE(composition_peak_bytes_models_the_measured_real_shape)
+{
+    // MEASURED shape of the real-role arity-4 aggregate-root self-prove
+    // (AIRQ_SHAPE, BTX_AIRQ_REPORT_BYTES): W=384984 N=256 M=2048, Fp3 = 24 B.
+    constexpr uint64_t kW = 384984;
+    constexpr uint32_t kN = 256;
+    constexpr uint32_t kM = 2048;
+    constexpr uint64_t kElem = sizeof(gf::Fp3);
+    static_assert(kElem == 24, "Fp3 is three Goldilocks limbs");
+
+    // The dense composition matrix is exactly the reported ldeM_bytes.
+    BOOST_CHECK_EQUAL(kW * kM * kElem, 18922733568ULL);
+    // Coset blocking replaces the W x M slab by a W x N slab.
+    BOOST_CHECK_EQUAL(kW * kN * kElem, 2365341696ULL);
+
+    const uint64_t dense = aq::AirQuotientCompositionPeakBytes(
+        kW, kN, kM, kElem, /*coset_blocked=*/false, /*threads=*/8);
+    const uint64_t coset = aq::AirQuotientCompositionPeakBytes(
+        kW, kN, kM, kElem, /*coset_blocked=*/true, /*threads=*/8);
+    BOOST_CHECK_GT(dense, coset);
+    // Only the slab term differs, and it differs by exactly stepM = M/N.
+    BOOST_CHECK_EQUAL(dense - coset, kW * (kM - kN) * kElem);
+    // Sanity on the absolute numbers this whole exercise is about. The dense
+    // composition site alone projects 21,435,958,272 B = 19.96 GiB at 8
+    // prover threads — on its own it does not quite fill the 24 GiB cgroup
+    // that OOM-killed the real-width self-prove, but it leaves under 4 GiB for
+    // the caller-held witness, `shifted`, and everything else, which is why
+    // that run died. Coset blocking takes the same site to under 5 GiB.
+    BOOST_CHECK_EQUAL(dense, 21435958272ULL);
+    BOOST_CHECK_EQUAL(coset, 4878566400ULL);
+    BOOST_CHECK_GT(dense, uint64_t{19} << 30);
+    BOOST_CHECK_LT(coset, uint64_t{5} << 30);
+}
+
+BOOST_AUTO_TEST_CASE(composition_memory_guard_fails_closed_before_allocation)
+{
+    // A shape that passes every PRE-EXISTING guard and is still unallocatable
+    // here: comfortably under the backend column cap, and the commit-site
+    // guard does not look at the composition domain M at all. M grows with the
+    // composed constraint degree, so a wide AIR with degree-256 composition
+    // lands here while nothing else in the prover notices.
+    constexpr uint64_t kW = 384984;
+    constexpr uint32_t kN = 256;
+    constexpr uint32_t kM = 65536; // stepM = 256
+    BOOST_REQUIRE_LT(kW, uint64_t{rc::kRCFri3AlgBatchMaxColumns});
+    // Dense here is ~605 GiB: above any plausible ceiling, so this assertion
+    // does not depend on the exact default.
+    BOOST_REQUIRE_GT(kW * kM * sizeof(gf::Fp3), uint64_t{512} << 30);
+
+    uint64_t projected = 0;
+    std::string why;
+    // Ceiling below the projected peak -> refuse, with a diagnostic that says
+    // which site and that it is not the column cap.
+    BOOST_CHECK(!aq::AirQuotientCompositionFitsMemoryBudget(
+        kW, kN, kM, sizeof(gf::Fp3), /*coset_blocked=*/false, /*threads=*/8,
+        &projected, &why));
+    BOOST_CHECK_GT(projected, 0U);
+    BOOST_CHECK(why.find("COMPOSITION") != std::string::npos);
+    BOOST_CHECK(why.find("not the column cap") != std::string::npos);
+
+    // The coset-blocked schedule of the SAME shape is admitted.
+    uint64_t coset_projected = 0;
+    std::string coset_why;
+    BOOST_CHECK(aq::AirQuotientCompositionFitsMemoryBudget(
+        kW, kN, kM, sizeof(gf::Fp3), /*coset_blocked=*/true, /*threads=*/8,
+        &coset_projected, &coset_why));
+    BOOST_CHECK(coset_why.empty());
+    BOOST_CHECK_LT(coset_projected, projected);
+}
+
+BOOST_AUTO_TEST_CASE(coset_blocked_composition_is_byte_identical_to_dense)
+{
+    const air::TableTM tm;
+    const air::TileWitness& w = SharedWitness();
+    const uint256 seed = MakeSeed(0x5c);
+
+    aq::RcSamplerBuild<gf::Fp3> b = aq::BuildRcSamplerInstance<gf::Fp3>(w, tm, seed);
+    BOOST_REQUIRE_MESSAGE(b.ok, b.note);
+
+    // NON-VACUITY OF THE COMPARISON: the two schedules can only differ when
+    // the composition domain is strictly larger than H, i.e. stepM > 1. If
+    // this instance had M == N the coset route would BE the dense route and a
+    // byte-equal result would prove nothing.
+    const uint32_t M = std::max(
+        b.cs.n_rows,
+        matmul::v4::rc::FriNextPow2(
+            static_cast<uint32_t>(b.cs.MaxComposedDegreeBound() + 1)));
+    BOOST_REQUIRE_GT(M, b.cs.n_rows);
+    BOOST_TEST_MESSAGE("COMPOSITION_ROUTE_SHAPE W=" << b.cs.n_columns
+                       << " N=" << b.cs.n_rows << " M=" << M
+                       << " stepM=" << (M / b.cs.n_rows));
+
+    // Default route: coset-blocked.
+    BOOST_REQUIRE(std::getenv("BTX_AIRQ_DENSE_COMPOSITION") == nullptr);
+    const auto coset =
+        aq::AirQuotientProve<gf::Fp3>(b.cs, b.columns, seed);
+    BOOST_REQUIRE_MESSAGE(coset.ok, coset.note);
+    BOOST_CHECK(coset.division_exact);
+
+    // Dense control, same binary, same inputs.
+    BOOST_REQUIRE_EQUAL(setenv("BTX_AIRQ_DENSE_COMPOSITION", "1", 1), 0);
+    const auto dense =
+        aq::AirQuotientProve<gf::Fp3>(b.cs, b.columns, seed);
+    BOOST_REQUIRE_EQUAL(unsetenv("BTX_AIRQ_DENSE_COMPOSITION"), 0);
+    BOOST_REQUIRE_MESSAGE(dense.ok, dense.note);
+    BOOST_CHECK(dense.division_exact);
+
+    std::vector<unsigned char> coset_bytes;
+    std::vector<unsigned char> dense_bytes;
+    BOOST_REQUIRE(SerializeAirFp3ProofForTest(coset.proof, coset_bytes));
+    BOOST_REQUIRE(SerializeAirFp3ProofForTest(dense.proof, dense_bytes));
+    BOOST_REQUIRE(!coset_bytes.empty());
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        coset_bytes.begin(), coset_bytes.end(),
+        dense_bytes.begin(), dense_bytes.end());
+
+    // Both remainders are the same object too (the quotient, not just the
+    // committed bytes).
+    BOOST_REQUIRE_EQUAL(coset.remainder.size(), dense.remainder.size());
+    for (size_t i = 0; i < coset.remainder.size(); ++i) {
+        BOOST_CHECK(gf::Eq(coset.remainder[i], dense.remainder[i]));
+    }
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        aq::RcSamplerAirVerify<gf::Fp3>(coset.proof, seed, w.scale_e, tm, &why),
+        why);
 }
 
 BOOST_AUTO_TEST_CASE(

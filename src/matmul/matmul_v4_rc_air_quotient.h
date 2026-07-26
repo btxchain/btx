@@ -596,6 +596,76 @@ struct AirQuotientProveResult {
 };
 
 // ---------------------------------------------------------------------------
+// COMPOSITION-SITE MEMORY GUARD.
+//
+// WHY THIS EXISTS (second materialization site).  Streaming the batch commit
+// bounded the (W+1) x n_lde column LDE, but the prover has a SECOND O(W x M)
+// materialization that streaming the commit does not touch: the composition
+// matrix, i.e. every trace column evaluated on the size-M extended subgroup.
+// At the MEASURED real-role arity-4 parent shape (W = 384,984, N = 256,
+// M = 2,048, Fp3 = 24 B) that matrix alone is
+//     384,984 x 2,048 x 24 B = 18,922,733,568 B = 17.6 GiB,
+// which is what OOM-killed a 24 GiB-capped real-width self-prove after 6 h.
+// Neither kRCFri3AlgBatchMaxColumns (a COLUMN cap) nor
+// Fri3AlgCommitFitsMemoryBudget (a COMMIT-site guard) sees this site at all.
+//
+// HOW IT IS BOUNDED.  The composition loop reads exactly two rows of that
+// matrix per output point: row j and row jn = (j + M/N) mod M.  Those two row
+// indices are always congruent mod stepM = M/N, i.e. they lie in the SAME
+// coset of the order-N subgroup H_N inside the order-M subgroup.  So the
+// matrix can be built and consumed ONE COSET AT A TIME: a W x N slab instead
+// of W x M, a factor of stepM = M/N (8 at the real shape).  See
+// AirQuotientCompositionPeakBytes.
+//
+// This is a FOOTPRINT decision only.  Field arithmetic here is exact modular
+// arithmetic and gkr_field::Add/Sub/Mul all return canonical residues in
+// [0, p), so two mathematically equal evaluation schedules produce
+// bit-identical values by construction — not by luck and not approximately.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fail-closed peak-residency ceiling for the composition site, in bytes.
+ * Env override: BTX_AIRQ_COMPOSITION_PEAK_BYTES.
+ *
+ * Liveness guard, not a soundness gate: it never weakens a check, it converts
+ * an unsurvivable allocation into a clean, diagnosable ok=false BEFORE any of
+ * the big vectors are allocated.
+ */
+inline constexpr uint64_t kRCAirQuotientCompositionPeakByteCeiling =
+    uint64_t{32} << 30; // 32 GiB
+
+/**
+ * Projected peak prover-held bytes at the composition site for this shape.
+ *
+ *   coefficient matrix   columns x n_rows x elem_bytes   (held across cosets)
+ *   evaluation slab      columns x (coset_blocked ? n_rows : composition_rows)
+ *                                 x elem_bytes
+ *   composition vector   composition_rows x elem_bytes
+ *   per-thread frames    2 x columns x elem_bytes x threads  (cur/nxt)
+ *
+ * Pure function of shape — no transcript, no soundness parameter.
+ */
+[[nodiscard]] uint64_t AirQuotientCompositionPeakBytes(uint64_t columns,
+                                                       uint32_t n_rows,
+                                                       uint32_t composition_rows,
+                                                       uint64_t elem_bytes,
+                                                       bool coset_blocked,
+                                                       uint32_t threads);
+
+/**
+ * Fail-closed admission check for the composition site.  Returns false (and
+ * fills `why` / `projected`) when the projected peak exceeds the ceiling.
+ */
+[[nodiscard]] bool AirQuotientCompositionFitsMemoryBudget(uint64_t columns,
+                                                          uint32_t n_rows,
+                                                          uint32_t composition_rows,
+                                                          uint64_t elem_bytes,
+                                                          bool coset_blocked,
+                                                          uint32_t threads,
+                                                          uint64_t* projected,
+                                                          std::string* why);
+
+// ---------------------------------------------------------------------------
 // Core API (templates instantiated in the .cpp for Fp2 and Fp3).
 // ---------------------------------------------------------------------------
 

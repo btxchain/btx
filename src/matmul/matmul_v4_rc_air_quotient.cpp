@@ -194,6 +194,49 @@ std::vector<F> AirEvalOnSubgroup(const std::vector<F>& coeffs, uint32_t M)
     return padded;
 }
 
+/**
+ * COSET SLICE of AirEvalOnSubgroup, written into `out` (which is reused
+ * across calls so the composition slab never reallocates).
+ *
+ *   out[t] = P(twist · ω_N^t),  t ∈ [0, N),  P = Σ_i coeffs[i] X^i
+ *
+ * IDENTITY THIS RELIES ON.  Let M = stepM · N and twist = ω_M^s.  Then
+ * ω_M^{s + stepM·t} = ω_M^s · ω_M^{stepM·t} = twist · ω_N^t, so
+ *
+ *   AirEvalOnCosetInto(coeffs, N, ω_M^s, out)  =>
+ *       out[t] == AirEvalOnSubgroup(coeffs, M)[s + stepM·t]
+ *
+ * for every t — the s-th coset of H_N inside the size-M subgroup, in natural
+ * t order.  Ranging s over [0, stepM) therefore covers the M-domain exactly
+ * once, at W x N residency instead of W x M.
+ *
+ * P(twist·ω_N^t) = Σ_i coeffs[i]·twist^i·ω_N^{t·i} and ω_N^{t·i} depends only
+ * on i mod N, so the twisted coefficients fold onto i mod N and one size-N
+ * NTT finishes the job.  (Here coeffs.size() == N, so the fold is a no-op;
+ * it is written out so the helper is correct for any coefficient count.)
+ *
+ * Exactness: Goldilocks Add/Sub/Mul return canonical residues in [0, p), so
+ * this schedule and AirEvalOnSubgroup produce BIT-IDENTICAL vectors, not
+ * merely equal-up-to-representation ones.  Cross-checked against the exact
+ * AirNtt recurrence at (N,M) = (4,32), (8,8), (16,128) and the real-shape
+ * (256, 2048) before this was written.
+ */
+template <typename F>
+void AirEvalOnCosetInto(const std::vector<F>& coeffs, uint32_t N, Fp twist,
+                        std::vector<F>& out)
+{
+    using T = AirField<F>;
+    out.assign(N, T::Zero());
+    Fp tw = 1;
+    for (size_t i = 0; i < coeffs.size(); ++i) {
+        const size_t slot = i % N;
+        const F term = T::Mul(coeffs[i], T::FromBase(tw));
+        out[slot] = (i < N) ? term : T::Add(out[slot], term);
+        tw = gkr_field::Mul(tw, twist);
+    }
+    AirNtt(out, /*inverse=*/false);
+}
+
 /** Coset shift: c_j := c_j · g^j so evaluations happen at y = g·x. */
 template <typename F>
 void AirCosetShiftCoeffs(std::vector<F>& coeffs)
@@ -915,6 +958,70 @@ AuditAirQuotientRowTilesFp3(
 }
 
 // ===========================================================================
+// Composition-site memory guard (see the header for why this site is separate
+// from the commit-site guard).
+// ===========================================================================
+
+uint64_t AirQuotientCompositionPeakBytes(uint64_t columns, uint32_t n_rows,
+                                         uint32_t composition_rows,
+                                         uint64_t elem_bytes, bool coset_blocked,
+                                         uint32_t threads)
+{
+    // Coefficient matrix: held for the whole composition because every coset
+    // re-reads it (the dense route consumes it column-by-column instead, but
+    // its slab is the whole M-domain matrix, so it is strictly worse).
+    const uint64_t coeff_matrix = columns * n_rows * elem_bytes;
+    const uint64_t slab_rows =
+        coset_blocked ? static_cast<uint64_t>(n_rows)
+                      : static_cast<uint64_t>(composition_rows);
+    const uint64_t slab = columns * slab_rows * elem_bytes;
+    const uint64_t cvals =
+        static_cast<uint64_t>(composition_rows) * elem_bytes;
+    // Per-thread cur/nxt row frames.
+    const uint64_t frames =
+        uint64_t{2} * columns * elem_bytes * (threads == 0 ? 1 : threads);
+    return coeff_matrix + slab + cvals + frames;
+}
+
+bool AirQuotientCompositionFitsMemoryBudget(uint64_t columns, uint32_t n_rows,
+                                            uint32_t composition_rows,
+                                            uint64_t elem_bytes,
+                                            bool coset_blocked, uint32_t threads,
+                                            uint64_t* projected, std::string* why)
+{
+    static const uint64_t ceiling = [] {
+        if (const char* e =
+                std::getenv("BTX_AIRQ_COMPOSITION_PEAK_BYTES")) {
+            const long long v = std::atoll(e);
+            if (v > 0) return static_cast<uint64_t>(v);
+        }
+        return kRCAirQuotientCompositionPeakByteCeiling;
+    }();
+    const uint64_t peak = AirQuotientCompositionPeakBytes(
+        columns, n_rows, composition_rows, elem_bytes, coset_blocked, threads);
+    if (projected != nullptr) *projected = peak;
+    if (peak <= ceiling) return true;
+    if (why != nullptr) {
+        // Fail CLOSED and say exactly why. A shape can sit far under
+        // kRCFri3AlgBatchMaxColumns and under the commit-site ceiling and
+        // still be unallocatable HERE, because this site scales with M, not
+        // with n_lde.
+        *why = "projected composition residency " + std::to_string(peak) +
+               " B exceeds ceiling " + std::to_string(ceiling) +
+               " B (columns=" + std::to_string(columns) +
+               " n_rows=" + std::to_string(n_rows) +
+               " composition_rows=" + std::to_string(composition_rows) +
+               " coset_blocked=" + (coset_blocked ? "1" : "0") +
+               " threads=" + std::to_string(threads) +
+               ") — this is a MEMORY guard on the COMPOSITION matrix, a "
+               "different site from Fri3AlgCommitFitsMemoryBudget and not the "
+               "column cap (kRCFri3AlgBatchMaxColumns=" +
+               std::to_string(kRCFri3AlgBatchMaxColumns) + ")";
+    }
+    return false;
+}
+
+// ===========================================================================
 // Prover.
 // ===========================================================================
 
@@ -1052,92 +1159,191 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     //    on the extended subgroup of size M ≥ deg C + 1, then interpolation.
     const uint32_t M = std::max(N, FriNextPow2(static_cast<uint32_t>(dmax + 1)));
     const uint32_t stepM = M / N;
+    // COMPOSITION-SITE FOOTPRINT DECISION (memory only; the two schedules
+    // produce bit-identical proofs — see AirEvalOnCosetInto).
+    //
+    // DEFAULT: coset-blocked. The composition loop reads only rows j and
+    // jn = (j + stepM) mod M, and those are always congruent mod stepM, so
+    // the O(W x M) matrix is built and consumed one W x N coset slab at a
+    // time — a factor of stepM = M/N less resident (8x at the MEASURED real
+    // parent shape, 17.6 GiB -> 2.2 GiB for the slab).
+    //
+    // BTX_AIRQ_DENSE_COMPOSITION restores the old whole-matrix schedule. It
+    // exists ONLY as the bit-identity control for the coset route and is not
+    // a budget decision: route selection here is an explicit env switch, NOT
+    // a footprint threshold, so a dense control can never silently take the
+    // blocked route the way a budget-driven selector could. The route taken
+    // is reported in AIRQ_SHAPE (composition=) so a comparison can be proved
+    // non-vacuous instead of assumed to be.
+    const bool dense_composition =
+        std::getenv("BTX_AIRQ_DENSE_COMPOSITION") != nullptr;
+    const uint32_t prove_threads =
+        static_cast<uint32_t>(BtxProveThreads());
+    const uint64_t composition_peak = AirQuotientCompositionPeakBytes(
+        W, N, M, sizeof(F), !dense_composition, prove_threads);
     // Shape + projected residency, printed BEFORE the big allocations so an
     // out-of-memory prove is still diagnosable. The composition matrix below
     // is O(W x M) and is a SEPARATE materialization from the commit's column
-    // LDE — streaming the commit does not shrink it.
+    // LDE — streaming the commit does not shrink it. ldeM_bytes is the DENSE
+    // figure (what the site would cost unblocked); composition_peak_bytes is
+    // what this run will actually hold.
     if (std::getenv("BTX_AIRQ_REPORT_BYTES") != nullptr) {
         const uint64_t elem = sizeof(F);
         std::fprintf(
             stderr,
             "AIRQ_SHAPE W=%u N=%u M=%u Lq_commit=%u n_coeffs=%u n_lde=%u "
             "stream_rows=%d ldeM_bytes=%llu dense_col_lde_bytes=%llu "
-            "trace_bytes=%llu\n",
+            "trace_bytes=%llu composition=%s stepM=%u "
+            "composition_slab_bytes=%llu composition_peak_bytes=%llu\n",
             W, N, M, Lq_commit, n_coeffs, n_coeffs * kRCFriBlowup,
             static_cast<int>(stream_rows),
             static_cast<unsigned long long>(uint64_t{W} * M * elem),
             static_cast<unsigned long long>(
                 (uint64_t{W} + 1) * n_coeffs * kRCFriBlowup * elem),
-            static_cast<unsigned long long>(uint64_t{W} * N * elem));
+            static_cast<unsigned long long>(uint64_t{W} * N * elem),
+            dense_composition ? "dense" : "coset", stepM,
+            static_cast<unsigned long long>(
+                uint64_t{W} * (dense_composition ? M : N) * elem),
+            static_cast<unsigned long long>(composition_peak));
         std::fflush(stderr);
     }
-    // `coeffs` is dead once its M-domain evaluation exists (only the env-gated
-    // AIRQ_DUMP still reads it), so release each column as it is consumed:
-    // that is another O(W x N) matrix — 2.4 GiB at real-role parent width.
-    const bool keep_coeffs_for_dump =
-        std::getenv("AIRQ_DUMP") != nullptr;
-    std::vector<std::vector<F>> ldeM(W);
-    // Per-column extended-domain NTT (size M): independent, distinct ldeM[c].
-#if defined(_OPENMP)
-#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
-#endif
-    for (uint32_t c = 0; c < W; ++c) {
-        ldeM[c] = AirEvalOnSubgroup(coeffs[c], M);
-        if (!keep_coeffs_for_dump) {
-            std::vector<F>().swap(coeffs[c]);
+    // FAIL CLOSED BEFORE ALLOCATING. kRCFri3AlgBatchMaxColumns (2^20) does not
+    // bound this site at all and neither does the commit-site ceiling: the
+    // MEASURED real shape sits under both and still wants 17.6 GiB here.
+    {
+        std::string composition_why;
+        if (!AirQuotientCompositionFitsMemoryBudget(
+                W, N, M, sizeof(F), !dense_composition, prove_threads,
+                nullptr, &composition_why)) {
+            res.note = composition_why;
+            return res;
         }
     }
+    // `coeffs` is dead once the composition sum is finished (only the
+    // env-gated AIRQ_DUMP still reads it); the dense route can release it
+    // column-by-column as it is consumed, the coset route must hold it until
+    // the last coset. Either way it is another O(W x N) matrix — 2.4 GiB at
+    // real-role parent width.
+    const bool keep_coeffs_for_dump =
+        std::getenv("AIRQ_DUMP") != nullptr;
 
     const Fp omega_M = AirOmegaForSize(M);
     const Fp omega_N = AirOmegaForSize(N);
     const F h_first = T::One();
     const F h_last = T::FromBase(AirPowBase(omega_N, N - 1));
 
+    // ONE copy of the per-row composition arithmetic, used by BOTH schedules,
+    // so the coset route and its dense control cannot drift in operation
+    // order. The per-row acc reduction over constraints stays in-thread, so
+    // the Fp3 operation order is identical to the single-threaded loop →
+    // byte-identical output.
+    const auto compose_row =
+        [&](const std::vector<F>& cur, const std::vector<F>& nxt,
+            const F& y) -> F {
+        F acc = T::Zero();
+        F lp = T::One();
+        for (const auto& con : cs.constraints) {
+            const F v = con.eval(cur, nxt);
+            if (!T::IsZero(v)) {
+                const F sel =
+                    AirSelectorEval<F>(con.kind, N, y, h_first, h_last);
+                acc = T::Add(acc, T::Mul(lp, T::Mul(sel, v)));
+            }
+            lp = T::Mul(lp, lambda);
+        }
+        return acc;
+    };
+
     std::vector<F> cvals(M, T::Zero());
-    // DOMINANT PHASE: composition/quotient evaluation over M LDE rows.
-    // Each row writes a distinct cvals[j]; the per-row acc reduction over
-    // constraints stays in-thread, so the Fp3 operation order is identical to
-    // the single-threaded loop → byte-identical output. The running power
-    // ypow = omega_M^j is replaced by AirPowBase(omega_M, j) (same field
-    // element, no cross-iteration dependency) so the loop parallelizes.
-    // cur/nxt are allocated ONCE PER THREAD (not per row) — with W up to ~16k
-    // columns at node scale that keeps the serial fast path allocation-free and
-    // avoids per-iteration malloc contention under OpenMP.
+    if (!dense_composition) {
+        // DOMINANT PHASE, coset-blocked. Coset s holds the W x N slab
+        //     slab[c][t] = P_c(ω_M^s · ω_N^t) = ldeM[c][s + stepM·t].
+        // Row j = s + stepM·t and its successor jn = j + stepM (mod M)
+        // correspond to t and (t+1) mod N inside the SAME slab, which is the
+        // structural reason this site can be blocked at all. Each t writes a
+        // distinct cvals[j].
+        std::vector<std::vector<F>> slab(W);
+        for (uint32_t s = 0; s < stepM; ++s) {
+            const Fp twist = AirPowBase(omega_M, s);
+            // Per-column coset NTT (size N): independent, distinct slab[c].
+            // slab[c] is reused across cosets, so this reallocates only on
+            // the first pass.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+            for (uint32_t c = 0; c < W; ++c) {
+                AirEvalOnCosetInto<F>(coeffs[c], N, twist, slab[c]);
+            }
+            // cur/nxt are allocated ONCE PER THREAD PER COSET (not per row).
 #if defined(_OPENMP)
 #pragma omp parallel num_threads(BtxProveThreads())
 #endif
-    {
-        std::vector<F> cur(W), nxt(W);
+            {
+                std::vector<F> cur(W), nxt(W);
 #if defined(_OPENMP)
 #pragma omp for schedule(static)
 #endif
-        for (uint32_t j = 0; j < M; ++j) {
-            const F y = T::FromBase(AirPowBase(omega_M, j));
-            const uint32_t jn = (j + stepM) % M;
-            for (uint32_t c = 0; c < W; ++c) {
-                cur[c] = ldeM[c][j];
-                nxt[c] = ldeM[c][jn];
-            }
-            F acc = T::Zero();
-            F lp = T::One();
-            for (const auto& con : cs.constraints) {
-                const F v = con.eval(cur, nxt);
-                if (!T::IsZero(v)) {
-                    const F sel =
-                        AirSelectorEval<F>(con.kind, N, y, h_first, h_last);
-                    acc = T::Add(acc, T::Mul(lp, T::Mul(sel, v)));
+                for (uint32_t t = 0; t < N; ++t) {
+                    const uint32_t tn = (t + 1u == N) ? 0u : t + 1u;
+                    const uint32_t j = s + stepM * t;
+                    const F y = T::FromBase(AirPowBase(omega_M, j));
+                    for (uint32_t c = 0; c < W; ++c) {
+                        cur[c] = slab[c][t];
+                        nxt[c] = slab[c][tn];
+                    }
+                    cvals[j] = compose_row(cur, nxt, y);
                 }
-                lp = T::Mul(lp, lambda);
             }
-            cvals[j] = acc;
         }
+        // The slab is dead the moment the last coset is summed. Release it
+        // here so it never coexists with the batch commit's working set.
+        slab.clear();
+        slab.shrink_to_fit();
+        if (!keep_coeffs_for_dump) {
+            for (uint32_t c = 0; c < W; ++c) {
+                std::vector<F>().swap(coeffs[c]);
+            }
+        }
+    } else {
+        // DENSE CONTROL (BTX_AIRQ_DENSE_COMPOSITION): whole O(W x M) matrix.
+        // Kept only so the coset route can be proved bit-identical against
+        // it on real workloads. Do not use at real width — 17.6 GiB.
+        std::vector<std::vector<F>> ldeM(W);
+        // Per-column extended-domain NTT (size M): independent, distinct
+        // ldeM[c].
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+        for (uint32_t c = 0; c < W; ++c) {
+            ldeM[c] = AirEvalOnSubgroup(coeffs[c], M);
+            if (!keep_coeffs_for_dump) {
+                std::vector<F>().swap(coeffs[c]);
+            }
+        }
+        // The running power ypow = omega_M^j is replaced by
+        // AirPowBase(omega_M, j) (same field element, no cross-iteration
+        // dependency) so the loop parallelizes.
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(BtxProveThreads())
+#endif
+        {
+            std::vector<F> cur(W), nxt(W);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+            for (uint32_t j = 0; j < M; ++j) {
+                const F y = T::FromBase(AirPowBase(omega_M, j));
+                const uint32_t jn = (j + stepM) % M;
+                for (uint32_t c = 0; c < W; ++c) {
+                    cur[c] = ldeM[c][j];
+                    nxt[c] = ldeM[c][jn];
+                }
+                cvals[j] = compose_row(cur, nxt, y);
+            }
+        }
+        ldeM.clear();
+        ldeM.shrink_to_fit();
     }
-    // The M-domain evaluation matrix is dead the moment the composition sum is
-    // finished. Release it here so it never coexists with the batch commit's
-    // working set — at real-role parent width that is the difference between
-    // two ~19 GiB peaks and one.
-    ldeM.clear();
-    ldeM.shrink_to_fit();
     std::vector<F> ccoeffs = AirInterpolate(std::move(cvals));
 
     // 4. Divide by Z_H(X) = X^N − 1 (synthetic; exact iff C vanishes on H).
