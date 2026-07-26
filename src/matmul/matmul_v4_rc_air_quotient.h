@@ -617,6 +617,17 @@ struct AirQuotientProveResult {
 // of W x M, a factor of stepM = M/N (8 at the real shape).  See
 // AirQuotientCompositionPeakBytes.
 //
+// MEASURED RESULT (real-role arity-4 four-slot aggregate-root self-prove,
+// parent_cols = 384,984, 16 prover threads, systemd scope MemoryMax=20G,
+// MemorySwapMax=0):  the prove COMPLETED — prove_ok=true, verify_ok=true,
+// root_produced=true, test exit 0.  getrusage max RSS 17,457,560 KiB
+// = 16.65 GiB; cgroup memory.peak 17,891,889,152 B = 16.66 GiB.  The same
+// workload was previously OOM-killed at a 24 GiB cap after 6 h 11 m.
+// AirQuotientProve total 4,003.9 s, of which the composition phase is 36.5 s
+// (0.9%): trace_ntt+roots 1,695.4 s, composition(M rows) 36.5 s,
+// lde+leafcommit+fri 1,599.1 s, supplemental_openings 672.8 s.
+// The peak is no longer here — it is the FRI/supplemental phase.
+//
 // This is a FOOTPRINT decision only.  Field arithmetic here is exact modular
 // arithmetic and gkr_field::Add/Sub/Mul all return canonical residues in
 // [0, p), so two mathematically equal evaluation schedules produce
