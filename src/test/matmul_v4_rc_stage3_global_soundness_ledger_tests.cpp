@@ -6,6 +6,11 @@
 
 #include <matmul/matmul_v4_rc_stage3_global_soundness_ledger.h>
 
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
+#include <matmul/matmul_v4_rc_stage3_coupled.h>
+#include <matmul/matmul_v4_rc_stage3_episode.h>
+#include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -483,6 +488,73 @@ BOOST_AUTO_TEST_CASE(
             gates_0_to_5);
     // Concretely: composition true, gates 0-5 false -> theorem false.
     BOOST_CHECK(!gates_0_to_5);
+}
+
+//! Each gate is `readiness constant AND independent evidence`. This test pins
+//! the EVIDENCE half, so that flipping a readiness constant on its own cannot
+//! close a gate. It deliberately asserts the evidence predicates are (still)
+//! false/true independently of the constants — if a gate ever closes, it must
+//! be because the evidence below genuinely changed, and this test must be
+//! updated with the run that earned it.
+BOOST_AUTO_TEST_CASE(
+    open_gates_are_held_open_by_evidence_not_only_by_their_constants)
+{
+    namespace rc = matmul::v4::rc;
+    namespace scen = matmul::v4::rc::soundness_scenarios;
+
+    const auto audit =
+        ledger::AssessExecutableGlobalSoundnessLedgerV1();
+
+    // --- g1 evidence: the episode relation gap report is NON-empty. This is
+    // what holds g1 open independently of kRCStage3EpisodeRelationsReady.
+    const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
+    BOOST_CHECK(!gaps.empty());
+    // One entry per required episode role, each with a real missing mask.
+    BOOST_CHECK_EQUAL(gaps.size(), 6U);
+    for (const auto& gap : gaps) {
+        BOOST_CHECK(gap.missing_obligations != 0U);
+        BOOST_CHECK(!gap.reason.empty());
+    }
+    // Therefore g1 is false even though its constant is only one conjunct.
+    BOOST_CHECK(!audit.composition_gate.episode_relations_ready);
+
+    // --- g0 evidence: g0 is a strict downstream of g1 (the mathematical
+    // verifier calls the episode relation verifier unconditionally) and of the
+    // coupled engines. Both are open, so g0 is held open by evidence.
+    BOOST_CHECK(!rc::kRCStage3CoupledRelationEnginesReady);
+    BOOST_CHECK(!audit.composition_gate.mathematical_verifier_ready);
+
+    // --- g2 evidence: recursive aggregation's own
+    // cryptographic_verification_ready depends on g4, which is open.
+    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(!audit.composition_gate.recursive_aggregation_ready);
+
+    // --- g3 evidence: this is the ONE closed gate, and it is closed because
+    // its own executable ledger machine-checks, not because a literal says so.
+    const auto fri3 = scen::AssessFri3AlgBcsRbrLedgerV1();
+    BOOST_CHECK(fri3.parameters_match_construction);
+    BOOST_CHECK(fri3.every_field_round_in_proven_window);
+    BOOST_CHECK(fri3.field_rounds_non_binding);
+    BOOST_CHECK(fri3.query_proximity_matches_construction);
+    BOOST_CHECK(fri3.hash_collision_floor_matches_construction);
+    BOOST_CHECK(fri3.composition_reproduces_135_128);
+    BOOST_CHECK(fri3.bcs_reduction_numerically_instantiated);
+    BOOST_CHECK(fri3.rbr_reduction_machine_checked);
+    // The gate equals the conjunction of the constant and that machine-check.
+    BOOST_CHECK_EQUAL(
+        audit.composition_gate.fri_alg_formal_soundness_ready,
+        rc::kRCFri3AlgFormalSoundnessReady &&
+            fri3.rbr_reduction_machine_checked);
+    BOOST_CHECK(audit.composition_gate.fri_alg_formal_soundness_ready);
+
+    // --- g5 evidence: held open by g4 AND by the full-arity parent-own-FRI
+    // conjunct, whose only evidence runs under BTX_RUN_HEAVY_PARENT_FRI and so
+    // is not standing evidence in the default gate.
+    BOOST_CHECK(!audit.composition_gate.self_similar_fixed_point_closed);
+
+    // --- The live value stays a computed zero.
+    BOOST_CHECK(!audit.composition_gate.all_clear);
+    BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

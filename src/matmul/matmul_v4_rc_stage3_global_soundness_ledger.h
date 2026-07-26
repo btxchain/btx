@@ -138,13 +138,36 @@ struct ExecutableRelationRowsPolicyScenarioV1 {
  * floor becomes certified ONLY when every member is true (via genuine passing
  * tests / landed constructions). No member is flipped by this ledger.
  *
- * Ordered gate list (index = dependency order):
+ * Ordered gate list. The index is PRESENTATIONAL, not causal: the real causal
+ * order runs the other way (gate 4 -> gate 5 -> gate 2 -> gate 1 -> gate 0),
+ * and gate 4 is the single live root blocker for gates 0, 1, 2 and 5.
+ *
+ * Every member is the AND of its honest readiness constant and an INDEPENDENT
+ * evidence predicate recomputed from the tree. That conjunction is strictly
+ * fail-closed — it can only ever remove a `true` — so flipping a readiness
+ * constant on its own no longer closes a gate.
+ *
  *   0 mathematical_verifier_ready       kRCStage3MathematicalVerifierReady
+ *                                       && gate 1 && coupled engines ready
+ *                                       (the verifier calls episode relations
+ *                                       unconditionally, so g0 <= g1)
  *   1 episode_relations_ready           kRCStage3EpisodeRelationsReady
+ *                                       && episode relation gap report empty
  *   2 recursive_aggregation_ready       kRCStage3RecursiveAggregationReady
+ *                                       && gate 4 (recursive.cpp's own
+ *                                       cryptographic_verification_ready
+ *                                       depends on it)
  *   3 fri_alg_formal_soundness_ready    kRCFri3AlgFormalSoundnessReady
- *   4 child_fiat_shamir_replay_closed   (SHA-FS chip lane; ledger FS-replay)
- *   5 self_similar_fixed_point_closed   (parent-own-FRI full arity + gate 4)
+ *                                       && AssessFri3AlgBcsRbrLedgerV1()
+ *                                          .rbr_reduction_machine_checked
+ *   4 child_fiat_shamir_replay_closed   AssessChildFsReplayClosureV1().closed
+ *                                       (SHA-FS chip lane; ledger FS-replay)
+ *   5 self_similar_fixed_point_closed   full-arity parent-own-FRI && gate 4;
+ *                                       the first conjunct is held false here
+ *                                       because its evidence runs only under
+ *                                       BTX_RUN_HEAVY_PARENT_FRI, never in the
+ *                                       default gate (see the .cpp note on the
+ *                                       divergence from recursive.cpp)
  *   6 global_soundness_composition_proved (global additive theorem)
  */
 struct CompositionReadinessGateV1 {

@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
+#include <matmul/matmul_v4_rc_stage3_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_ctl.h>
 #include <matmul/matmul_v4_rc_stage3_episode.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
@@ -622,7 +623,23 @@ AssessExecutableGlobalSoundnessLedgerV1(
     // `note` enumerates exactly which conjunct is still open.
     out.fiat_shamir_replay_complete =
         recursive_parent_air::AssessChildFsReplayClosureV1().closed;
-    out.self_similar_fixed_point_closed = false;
+    // g5 (self-similar fixed point) = full-arity parent-own-FRI round trip AND
+    // g4.  DISCREPANCY, recorded rather than smoothed over: the other in-tree
+    // encoding of this gate (matmul_v4_rc_stage3_recursive.cpp, the
+    // `self_similar_fixed_point_closed` local) sets its first conjunct to a
+    // `constexpr true` on the strength of an OBSERVED 21m37s four-slot
+    // arity-4 self-prove/verify run, so THERE g5 reduces entirely to g4.  That
+    // run is exercised only under BTX_RUN_HEAVY_PARENT_FRI and does NOT execute
+    // in the default gate, so this ledger declines to treat it as standing
+    // evidence and keeps the conjunct false.  Closing g5 here requires that
+    // round trip landed as an ungated regression (or exported as a computed
+    // assessor in the manner of AssessChildFsReplayClosureV1), not merely
+    // re-observed.  Written as an enumerated conjunction, not a bare literal,
+    // so the residual is readable and both conjuncts are visible.
+    const bool parent_own_fri_full_arity_in_default_gate = false;
+    out.self_similar_fixed_point_closed =
+        parent_own_fri_full_arity_in_default_gate &&
+        out.fiat_shamir_replay_complete;
     out.nirop_oracle_separation_complete = false;
     out.pow_composition_theorem_complete = false;
     // global_additive_theorem_complete is COMPUTED below from the executable
@@ -662,11 +679,61 @@ AssessExecutableGlobalSoundnessLedgerV1(
     // gates 0-5 are all true. The composition is machine-checked today, but the
     // dependency gates remain open, so the theorem stays incomplete and no bits
     // are minted. This is the honest, dependency-ordered flip.
-    const bool dependency_gates_0_to_5 =
-        kRCStage3MathematicalVerifierReady &&
-        kRCStage3EpisodeRelationsReady &&
-        kRCStage3RecursiveAggregationReady &&
+    // ---- Gate evidence predicates. -----------------------------------------
+    // Each readiness constant below is conjoined with an INDEPENDENT evidence
+    // predicate computed from the tree. The conjunction is strictly fail-closed:
+    // it can only ever remove a `true`, never add one. Its purpose is that
+    // flipping a readiness constant on its own can no longer close a gate — the
+    // corresponding evidence must genuinely compute closed as well.
+
+    // g3 evidence: the single-lane Fri3Alg round-by-round / BCS reduction,
+    // re-derived here from this backend's construction constants. The ledger
+    // previously trusted the bare header literal; it now recomputes the
+    // machine-check itself, so a regression in Q / rho / blowup / lde or in the
+    // round composition reopens g3 instead of silently keeping it closed.
+    const bool fri3_rbr_machine_checked =
+        scenarios::AssessFri3AlgBcsRbrLedgerV1()
+            .rbr_reduction_machine_checked;
+    const bool gate3_fri_alg_formal_soundness =
         kRCFri3AlgFormalSoundnessReady &&
+        fri3_rbr_machine_checked;
+
+    // g1 evidence: the per-role episode relation gap report must be EMPTY. It
+    // currently carries one entry per required role (six), each with a non-zero
+    // missing-obligation mask, so g1 cannot be closed by flipping
+    // kRCStage3EpisodeRelationsReady alone.
+    const bool episode_relation_gaps_empty =
+        CurrentRCStage3EpisodeRelationGaps().empty();
+    const bool gate1_episode_relations =
+        kRCStage3EpisodeRelationsReady &&
+        episode_relation_gaps_empty;
+
+    // g0 evidence: VerifyRCStage3MathematicalProof calls
+    // VerifyRCStage3EpisodeRelations UNCONDITIONALLY for every statement kind,
+    // and that returns false while g1 is open; a Composed statement additionally
+    // requires the coupled relation engines. g0 is therefore a strict downstream
+    // of g1 and of kRCStage3CoupledRelationEnginesReady, and the ledger now
+    // encodes that dependency instead of reading g0's literal in isolation.
+    const bool gate0_mathematical_verifier =
+        kRCStage3MathematicalVerifierReady &&
+        gate1_episode_relations &&
+        kRCStage3CoupledRelationEnginesReady;
+
+    // g2 evidence: AssessRCStage3RecursiveReadiness makes
+    // cryptographic_verification_ready depend on child_fiat_shamir_replay_closed
+    // (matmul_v4_rc_stage3_recursive.cpp). That value IS this ledger's g4, so it
+    // is conjoined directly — calling the recursive assessor from here would
+    // create a cycle, because recursive.cpp already calls this function to
+    // source its own g4 value.
+    const bool gate2_recursive_aggregation =
+        kRCStage3RecursiveAggregationReady &&
+        out.fiat_shamir_replay_complete;
+
+    const bool dependency_gates_0_to_5 =
+        gate0_mathematical_verifier &&
+        gate1_episode_relations &&
+        gate2_recursive_aggregation &&
+        gate3_fri_alg_formal_soundness &&
         out.fiat_shamir_replay_complete &&
         out.self_similar_fixed_point_closed;
     out.global_additive_theorem_complete =
@@ -678,13 +745,13 @@ AssessExecutableGlobalSoundnessLedgerV1(
     // predicate that flips the live certified_bits off zero.
     CompositionReadinessGateV1 gate;
     gate.mathematical_verifier_ready =
-        kRCStage3MathematicalVerifierReady;
+        gate0_mathematical_verifier;
     gate.episode_relations_ready =
-        kRCStage3EpisodeRelationsReady;
+        gate1_episode_relations;
     gate.recursive_aggregation_ready =
-        kRCStage3RecursiveAggregationReady;
+        gate2_recursive_aggregation;
     gate.fri_alg_formal_soundness_ready =
-        kRCFri3AlgFormalSoundnessReady;
+        gate3_fri_alg_formal_soundness;
     gate.child_fiat_shamir_replay_closed =
         out.fiat_shamir_replay_complete;
     gate.self_similar_fixed_point_closed =
