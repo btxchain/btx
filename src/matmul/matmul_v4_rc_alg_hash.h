@@ -133,11 +133,37 @@ private:
     uint32_t m_columns{0};
     bool m_finalized{false};
 
+    /** Absorb ONE Fp lane into one row's sponge (rate-8 add-absorb with a
+     *  permutation whenever the rate block fills). Shared by the per-column,
+     *  blocked and finalize paths so all three keep one lane order. */
+    static void AbsorbLane(RowState& row, Fp value);
+
 public:
     explicit StreamingRowHasher(uint32_t n_rows);
 
     [[nodiscard]] bool AbsorbColumn(
         const std::vector<Fp3>& column,
+        std::string* why = nullptr);
+    /**
+     * Absorb a CONTIGUOUS BLOCK of `count` already-LDE'd columns
+     * (block[0..count) in ascending column order) in a single pass.
+     *
+     * Absorption order is EXACTLY the order produced by calling
+     * AbsorbColumn(block[0]) .. AbsorbColumn(block[count-1]) in sequence:
+     * for every row the lanes enter the sponge as
+     *   block[0][row].c0, .c1, .c2, block[1][row].c0, ...
+     * so the resulting digests are field-identical to both the per-column
+     * streaming form and the monolithic LeafHashRow. Rows are independent
+     * (each carries its own sponge + pending block), so the row loop is
+     * parallelized; the per-row lane order is untouched by the schedule.
+     *
+     * This is the primitive that makes prover residency O(count x n_rows)
+     * instead of O(W x n_rows): the caller materializes only `count` column
+     * LDEs at a time.
+     */
+    [[nodiscard]] bool AbsorbColumnBlock(
+        const std::vector<std::vector<Fp3>>& block,
+        size_t count,
         std::string* why = nullptr);
     [[nodiscard]] bool Finalize(
         std::vector<Digest>& digests,

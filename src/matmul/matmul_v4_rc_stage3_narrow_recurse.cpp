@@ -292,6 +292,15 @@ NarrowVcsPlan BuildNarrowVcsPlan(const NarrowChildShape& child,
     const uint64_t row_merkle =
         RowLeafPermutationRows(child.child_w) + child.merkle_depth;
     const uint64_t fold = FoldRowsPerQuery(child);
+    // NOTE ON kNarrowStreamBatch.  These two row counts assume a chip that
+    // retires kNarrowStreamBatch (8) accumulator terms per row.  The
+    // executable non-hash chip in stage3_verifier_air is NOT that chip: its
+    // DeepAccumulate row carries exactly one out = a*b + c identity and its
+    // PerPointAccumulate row exactly one a = b*c identity
+    // (BuildScalarConstraints).  Against that chip these schedules are short
+    // by up to a factor of kNarrowStreamBatch, in the same way
+    // FiatShamirReplayRows is short against the exact SHA256d schedule.  Do
+    // not read either count as an executable per-term budget.
     const uint64_t deep = CeilDiv(uint64_t{child.child_w} + 1, kNarrowStreamBatch);
     const uint64_t per_point =
         CeilDiv(child.child_constraints, kNarrowStreamBatch) + 1;

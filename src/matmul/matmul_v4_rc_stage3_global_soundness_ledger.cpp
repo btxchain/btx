@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_stage3_ctl.h>
 #include <matmul/matmul_v4_rc_stage3_episode.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_verify.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
@@ -612,7 +613,15 @@ AssessExecutableGlobalSoundnessLedgerV1(
     out.ali_degree_and_constraint_manifest_complete = false;
     out.ctl_export_and_terminal_reduction_complete = false;
     out.hash_first_collision_hybrid_complete = false;
-    out.fiat_shamir_replay_complete = false;
+    // g4 (child Fiat-Shamir replay).  COMPUTED from the single source of
+    // truth, recursive_parent_air::AssessChildFsReplayClosureV1(), which is a
+    // conjunction over the obligations g4 actually has (bus construction and
+    // adversarial rejection, slot x challenge-kind coverage, FRI-proof-level
+    // discharge of both bus endpoints, and the recursion-carrying parent
+    // hosting the replay).  It is NOT written here and must never be.  Its
+    // `note` enumerates exactly which conjunct is still open.
+    out.fiat_shamir_replay_complete =
+        recursive_parent_air::AssessChildFsReplayClosureV1().closed;
     out.self_similar_fixed_point_closed = false;
     out.nirop_oracle_separation_complete = false;
     out.pow_composition_theorem_complete = false;

@@ -192,7 +192,14 @@ struct NormalizedUniversalParentCandidateV1 {
     bool complete_proof_cell_decoder_in_air{false};
     bool complete_proof_cell_equality_map{false};
     bool complete_splitrap_verifier_in_air{false};
-    bool complete_sha_fiat_shamir_replay_in_air{false};
+    // NOTE: `complete_sha_fiat_shamir_replay_in_air` was RETIRED from this
+    // scaffold (project owner decision).  It could never be set -- `valid`
+    // asserted its negation -- and this candidate explores the
+    // normalized-universal axis (program registry / receipt ABI / transport
+    // root), which is independent of child Fiat-Shamir replay.  g4's obligation
+    // is now sourced from the four-slot self-similar parent, where the SHA
+    // replay and the g4 CTL bus actually live: see
+    // AssessChildFsReplayClosureV1.
     bool host_preprocessed_replay_eliminated{false};
     bool one_child_parent_relation_executable{false};
     uint32_t active_family_receipt_slots{0};
@@ -524,6 +531,9 @@ struct FourSlotSelfSimilarCtlParentV1 {
     // below stays false: the full seed→challenge transcript is not replayed.
     bool child_air_challenge_reconstructed_in_parent_cs{false};
     std::array<uint32_t, 4> child_air_challenge_value_column{};
+    // First of the 24 digest-byte columns per slot (the free preprocessed bytes
+    // the cross-domain CTL boundary reconciles against the SHA output).
+    std::array<uint32_t, 4> child_air_challenge_byte_base{};
     // Deliberately-open gates. Kept false; see the struct documentation.
     bool child_fiat_shamir_replayed_in_parent{false};
     bool parent_own_fri_proof_produced{false};
@@ -608,16 +618,118 @@ struct ChildAirChallengeShaReplayV1 {
     gf::Fp3 consumed_air_lambda{};
     uint256 digest{};              // native SHA256d(buf) cross-check
     uint32_t sha_output_byte_base{0};   // first of 32 SHA-output byte columns
+    // Epoch-R0 base columns of the vertical SHA AIR.  This CS carries
+    // preprocessed ROW-GROUP roots, which the plain AirQuotientVerify refuses
+    // ("preprocessed row-group roots require Split-RAP",
+    // air_quotient.cpp:1623); it must be proved with
+    // AirQuotientProveRowsSplitRap / AirQuotientVerifyRowsSplitRap over these
+    // base indices.  Any g4 bus lane appended afterwards is deliberately NOT in
+    // this list, so it lands in the SECOND (post-challenge) epoch -- which is
+    // exactly where a LogUp/CTL auxiliary lane belongs.
+    std::vector<uint32_t> base_column_indices;
     std::array<uint32_t, 3> challenge_limb_columns{};
     uint32_t sha_semantic_compressions{0};  // SHA256d compression instances
     uint32_t sha_rows{0};               // CS trace-domain rows (compute size)
     uint32_t sha_columns{0};
-    uint32_t witness_violations{0};     // over the FULL cs (SHA + binds)
+    uint32_t witness_violations{0};     // over the FULL cs (SHA + challenge bind)
     // True: the digest bytes the decoder consumes are SHA-compression OUTPUTS
     // (0 violations over the whole SHA cs), not a free preprocessed column.
     bool sha_output_binds_digest_bytes{false};
     bool challenge_bound_to_consumed{false};
+    // NOTE: this struct carries NO cross-domain binding on its own.  The bus
+    // that binds these SHA output bytes to the parent decoder's 24 digest bytes
+    // is the g4 CTL lane below; it is appended to BOTH tables only after the
+    // joint challenge is drawn (post-commitment), and reconciled by
+    // VerifyChildFsShaBoundV1.
 };
+
+// ---------------------------------------------------------------------------
+// g4 CS-domain CTL bus: companion-SHA output bytes <-> parent decoder digest
+// bytes.
+//
+// Bus id / tuple tags, mirroring the tile-tree hash CTL idiom
+// (matmul_v4_rc_stage3_tile_tree_hash_ctl.cpp): the compressed tuple is
+//   T(k, v) = NS + gamma*STAGE + gamma^2*k + gamma^3*v
+// so the namespace/stage tags domain-separate this bus from every other CTL on
+// the same challenge, and gamma^2*k separates byte positions.
+inline constexpr uint32_t kChildFsDigestBusIdV1 = 0x46533234U;      // "FS24"
+inline constexpr uint32_t kChildFsDigestBusNamespaceV1 = 0x46534E31U; // "FSN1"
+inline constexpr uint32_t kChildFsDigestBusStageV1 = 24;
+/** Bytes carried on the bus: exactly the 24 FromChallengeBytes3 digest bytes. */
+inline constexpr uint32_t kChildFsDigestBusBytesV1 = 24;
+
+/**
+ * One dual-lane LogUp bus endpoint appended to a host AIR constraint system.
+ *
+ * Layout (appended at the host's current n_columns):
+ *   inverse1_base .. +23   INV lane 1, one per bus byte
+ *   inverse2_base .. +23   INV lane 2
+ *   running1, running2     per-lane running sums
+ * Constraints (identical on both endpoints, built by the SAME function so the
+ * producer and consumer relations are literally the same relation):
+ *   kFirstRow   inv_l[k] * (alpha_l - T(k, byte[k], gamma_l)) - 1 = 0
+ *   kTransition next[inv_l[k]] = 0                     (padding rows carry 0)
+ *   kFirstRow   running_l = 0
+ *   kTransition next[running_l] - (running_l + sum_k inv_l[k]) = 0
+ *   kLastRow    running_l + sum_k inv_l[k] - terminal_l = 0
+ * so `terminal_l` is pinned by the host AIR to sum_k 1/(alpha_l - T(k, byte[k],
+ * gamma_l)) — a value that determines the byte vector (see the soundness note
+ * on VerifyChildFsShaBoundV1).
+ */
+struct ChildFsDigestBusLaneV1 {
+    bool valid{false};
+    std::string note;
+    uint32_t byte_base{0};
+    uint32_t inverse1_base{0};
+    uint32_t inverse2_base{0};
+    uint32_t running1{0};
+    uint32_t running2{0};
+    uint32_t columns{0};
+    RCStage3CtlTerminal terminal{};
+};
+
+/**
+ * Append the g4 bus endpoint over `byte_base .. byte_base+23` to `cs`.
+ *
+ * When `columns` is non-null the honest witness is filled and the observed
+ * terminal is returned in `out.terminal`; the kLastRow constraint pins the host
+ * AIR to exactly that terminal.  When `columns` is null only constraints are
+ * built (verifier-side AIR reconstruction), and `expected` supplies the pinned
+ * terminal.
+ */
+[[nodiscard]] bool AppendChildFsDigestBusLaneV1(
+    uint32_t byte_base,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal* expected,
+    aq::AirConstraintSystem<gf::Fp3>& cs,
+    std::vector<std::vector<gf::Fp3>>* columns,
+    ChildFsDigestBusLaneV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Draw the g4 bus joint challenge AFTER both byte windows are fixed.
+ *
+ * FS ORDERING IS LOAD-BEARING.  The 24 bus cells are unrange-checked field
+ * elements, so a challenge known in advance lets a forger solve
+ * sum_k 1/(alpha - T(k, B_p[k])) = C_sha directly for some B_p != B_s.  This
+ * therefore absorbs BOTH 24-cell windows (`parent_bus_cells`, `sha_bus_cells`:
+ * the row-0 cells the lane relation reads) -- the CTL idiom's "trace_commitment
+ * absorbed before lookup challenges" -- along with a domain tag, the bus
+ * namespace/stage tags, the slot index, the parent's binding statement
+ * (alg-hash of the full child public IO) and the companion SHA CS's claimed
+ * 32-byte digest.  Lane columns and terminals are produced after, so there is no
+ * Fiat-Shamir fixed point.  Rejection-samples four Fp3 values with the CTL
+ * acceptance rule (each limb word < p), requiring gamma1 != gamma2, alpha1 !=
+ * alpha2, all nonzero.
+ */
+[[nodiscard]] bool DeriveChildFsDigestBusChallengesV1(
+    const ah::Digest& parent_statement,
+    const uint256& sha_digest,
+    uint32_t slot,
+    const std::vector<gf::Fp3>& parent_bus_cells,
+    const std::vector<gf::Fp3>& sha_bus_cells,
+    RCStage3CtlChallenges& out,
+    std::string* why = nullptr);
 
 /**
  * Build the reduced-shape airq_lambda SHA-replay CS for one child slot.  Uses
@@ -633,6 +745,204 @@ BuildChildAirChallengeShaReplayV1(
     uint32_t child_quotient_len,
     uint32_t child_w,
     const gf::Fp3& consumed_air_lambda);
+
+/**
+ * g4 two-table CTL boundary: the parent decoder's 24 airq_lambda digest bytes
+ * are bound to the companion SHA CS's output bytes, IN parent verification.
+ *
+ * THE GAP THIS CLOSES.  BuildFourSlotSelfSimilarCtlParentV1 pins the 24
+ * airq_lambda digest bytes as preprocessed columns and decodes them to
+ * air_lambda (word recompose -> basis reconstruction -> equality with the
+ * consumed challenge).  Nothing in parent_cs says those bytes are
+ * SHA256d(transcript): the decoder only constrains their FIELD IMAGE.  A prover
+ * who wants a chosen air_lambda* simply writes 24 cells whose recomposition is
+ * air_lambda*; no hash inversion is needed.  That is the coordinated
+ * Fiat-Shamir forgery.
+ *
+ * THE CONSTRUCTION.  Two AIRs, one relation.  The SAME lane builder
+ * (AppendChildFsDigestBusLaneV1) is appended to BOTH tables over their
+ * respective 24-byte windows:
+ *   producer = companion SHA CS at `sha_output_byte_base` (bytes that the
+ *              in-AIR SHA256d compression rounds CONSTRAIN to be the digest of
+ *              the canonical transcript preimage);
+ *   consumer = parent_cs at `child_air_challenge_byte_base[slot]` (the exact
+ *              cells the decoder consumes).
+ * Each endpoint's AIR pins a dual-lane LogUp terminal
+ *   C_l = sum_{k<24} 1 / (alpha_l - (NS + gamma_l*STAGE + gamma_l^2*k
+ *                                    + gamma_l^3*byte[k]))    for l in {1,2}.
+ * (alpha_l, gamma_l) are drawn by Fiat-Shamir AFTER BOTH BYTE WINDOWS ARE FIXED
+ * (DeriveChildFsDigestBusChallengesV1 absorbs both 24-cell windows, the parent
+ * statement and the companion SHA digest), so the lanes are post-commitment
+ * auxiliary columns and there is no FS fixed point.  This ordering is
+ * load-bearing, not hygiene: the cells are unrange-checked field elements, so a
+ * forger who saw alpha first could solve for a matching B_p outright.
+ *
+ * This verifier checks three obligations:
+ *   (1) parent_cs + consumer lane satisfied  (CountWitnessViolationsOnH == 0);
+ *   (2) companion SHA cs + producer lane satisfied                 (== 0);
+ *   (3) terminals reconcile: C_1^cons == C_1^prod and C_2^cons == C_2^prod.
+ *
+ * SOUNDNESS.  Write B_p for the parent's 24 cells and B_s for the SHA output
+ * cells.  Suppose B_p != B_s, i.e. B_p[k] != B_s[k] for some k.  Fix gamma and
+ * view f(X) = sum_k [1/(X - T(k,B_p[k])) - 1/(X - T(k,B_s[k]))] as a rational
+ * function of alpha.  Positions are distinct constants 0..23 and the tuple map
+ * is v -> NS + gamma*STAGE + gamma^2*k + gamma^3*v, injective in (k,v) for any
+ * gamma outside a set of size <= 3*24^2 (the vanishing set of the degree-<=3
+ * polynomial gamma^2*(k-k') + gamma^3*(v-v') for each of the <= 24^2 colliding
+ * pairs).  For an injective tuple map the pole at T(k,B_p[k]) appears on the
+ * left and not on the right, so f is not identically zero; clearing
+ * denominators gives a nonzero polynomial in alpha of degree < 48.  alpha is
+ * drawn (in the ROM) after B_p and B_s are absorbed, so Pr[f(alpha) = 0] <=
+ * 48 / p^3 ~ 2^-186 per lane, plus <= 3*576/p^3 for a bad gamma; a forger who
+ * grinds q candidate B_p values gets an independent challenge each time, for
+ * q * 48/p^3.  Two lanes are drawn.  Hence (3) forces B_p = B_s cell for cell,
+ * and B_s is the SHA256d output of the canonical transcript preimage.  To steer
+ * air_lambda the forger would now need a SHA256d preimage.
+ *
+ * The bus reads ROW 0 of each window, which suffices: the parent's decoder
+ * constraints (word recompose, basis reconstruction, bound-to-consumed) are all
+ * kEverywhere, so the full cells -> air_lambda chain already holds at row 0.
+ *
+ * WHAT IS *NOT* CLAIMED.  Obligations (1) and (2) are discharged here by
+ * scanning the honest witness on H, which is what a FRI proof of each AIR would
+ * establish; the parent's own FRI proof is not produced in this path
+ * (parent_own_fri_proof_produced is false), so the argument holds at the
+ * constraint-system level, not yet at the succinct-proof level.  Reduced shape:
+ * one slot, one challenge kind (airq_lambda).  The 4-slot x 8-kind extension is
+ * a compute scale-up over the identical builder.
+ */
+struct ChildFsShaBoundVerifyV1 {
+    bool valid{false};
+    std::string note;
+    bool parent_cs_satisfied{false};
+    bool sha_cs_satisfied{false};
+    bool boundary_reconciled{false};
+    RCStage3CtlChallenges challenges{};
+    ChildFsDigestBusLaneV1 consumer_lane{};
+    ChildFsDigestBusLaneV1 producer_lane{};
+    uint32_t parent_violations{0};
+    uint32_t sha_violations{0};
+    // Terminal lane-1 sums, exposed for adversarial tests.
+    gf::Fp3 c_parent{};
+    gf::Fp3 c_sha{};
+};
+
+[[nodiscard]] ChildFsShaBoundVerifyV1
+VerifyChildFsShaBoundV1(
+    const FourSlotSelfSimilarCtlParentV1& parent,
+    const ChildAirChallengeShaReplayV1& replay,
+    uint32_t slot);
+
+/**
+ * SINGLE SOURCE OF TRUTH for gate g4 (child Fiat-Shamir replay closed).
+ *
+ * Both the global soundness ledger's `fiat_shamir_replay_complete` and the
+ * recursive readiness assessment's `child_fiat_shamir_replay_closed` are meant
+ * to answer the same question, and were each a hard-coded `false` literal in a
+ * different file.  This assessment replaces both with ONE computed conjunction
+ * over the obligations g4 actually has, so that (i) the residual is enumerable
+ * rather than a bare constant, and (ii) the gate can only flip when every
+ * obligation is independently discharged.
+ *
+ * It reports what is BUILT, not what is hoped for.  `closed` is false today and
+ * must stay false until each member below is separately earned; the members are
+ * deliberately NOT collapsed into a single editable boolean.
+ *
+ * This is a static coverage assessment, not a live execution: running the
+ * construction costs ~4.6 minutes per (slot, kind).  The executable evidence
+ * lives in the env-gated test
+ * `four_slot_child_airq_lambda_sha256d_replayed_in_cs_and_coordinated_forgery_
+ * rejected` (BTX_RUN_HEAVY_CHILD_FS_SHA=1) and in the fast
+ * `g4_digest_bus_lane_verifier_side_reconstruction_pins_the_terminal`.
+ */
+struct ChildFsReplayClosureV1 {
+    // --- Obligation 1: the cross-domain bus exists and is adversarially sound.
+    bool bus_constructed{false};
+    bool bus_rejects_coordinated_forgery{false};
+    // --- Obligation 2: COVERAGE.  g4 means every challenge of every child.
+    //
+    // WHY THIS DOES NOT CLOSE BY MECHANICAL EXTENSION (measured).  The bus is
+    // kind-agnostic -- it binds a 24-byte window -- so adding kinds is not a bus
+    // problem.  It is a TRANSCRIPT LENGTH problem:
+    //
+    //  * airq_lambda is uniquely cheap because AirChallengeDigest builds a
+    //    FRESH, SELF-CONTAINED preimage: tag | seed | label | roots | shape =
+    //    113 bytes = 3 SHA256d compressions, giving a companion SHA CS of
+    //    4096 rows x 541 columns (MEASURED).
+    //  * every OTHER child challenge (fri_lambda, z1, z2, w1, w2, fold betas,
+    //    query indices) is drawn by Fri3AlgBatchProve/Verify's SEQUENTIAL
+    //    transcript: ChallengeDigest(suffix) = SHA256d(buf | suffix) where
+    //    `buf` is the whole accumulated transcript.  TWO W-proportional terms
+    //    are in it, and BOTH must be removed or neither helps:
+    //      (i)  4*W from Fri3AlgBatchFsInit (fri_ext3_alg.cpp:1309)
+    //           `for (const uint32_t len : column_len) AppendLE32(fs.buf, len);`
+    //           -- absorbed at FS INIT, so it precedes EVERY challenge,
+    //           including the very first;
+    //      (ii) 48*W from both full OOD evaluation vectors, 2*W Fp3 at 24 B
+    //           each (AbsorbFp3 of evals_z1[i]/evals_z2[i] for all W columns,
+    //           fri_ext3_alg.cpp:1942-1943), which precedes w1/w2 onward.
+    //    Total >= 52*W bytes (plus preamble, roots, batch coefficients, z1, z2
+    //    and the label suffix -- small beside 52*W).  Committing only (ii)
+    //    leaves (i) and buys about 13x, which is nowhere near enough.
+    //
+    // The in-AIR cost follows EXACTLY, not by hand-waving.  A vertical SHA AIR
+    // lays instances out in rows: hash_air.cpp
+    // BuildFixedProgramVerticalWitnessBoundaryInstance sets
+    //   scheduled_instances = next_pow2(compressions)      (>= 2)
+    //   n_rows              = scheduled_instances * LANE_ROWS,  LANE_ROWS = 1024
+    // so with compressions = ceil((52*W + 9) / 64) + 1:
+    //
+    //   airq_lambda   113 B  ->      3 comps -> sched      4 -> 4.10e3 rows
+    //                                        (MEASURED: comps=3, 4096 x 541)
+    //   W =  17108  0.89 MB  ->  13902 comps -> sched  16384 -> 1.68e7 rows
+    //   W = 384984 20.02 MB  -> 312801 comps -> sched 524288 -> 5.37e8 rows
+    //
+    // (The power-of-two rounding absorbs the 48*W -> 52*W correction, so the
+    // ROW figures are unchanged by it; only the compression counts move.)
+    // Those are for ONE challenge of ONE slot.  This is not a labour problem.
+    //
+    // The route that closes this is a PROTOCOL change to the child transcript:
+    // absorb COMMITMENTS (roots) to BOTH the OOD evaluation vectors AND
+    // column_len, so every challenge's preimage becomes short and
+    // self-contained the way AirChallengeDigest's already is.  That change
+    // lives in matmul_v4_rc_fri_ext3_alg.cpp, is consensus-visible, and must
+    // land in BOTH trees (stage3-build and the main repo) or the branches will
+    // not merge.  It is NOT in this lane and must not be made here.  Do NOT
+    // absorb the batched value v1,v2 instead: that is the known attack, with
+    // the kernel exhibited in closed form in
+    // matmul_v4_rc_fri_ext3_alg_order_audit.h:16-35.
+    //
+    // Even with the transcript fixed, coverage is W-INDEPENDENT but not free:
+    // ~2412 compressions, of which ~2220 (92%) are the 148 fra3_query draws
+    // that share an identical `buf` and differ only in a trailing 4 bytes.
+    // Those collapse by FORKING a shared SHA midstate -- a pure companion-CS
+    // change with no transcript, consensus or merge impact.  The chip DOES
+    // support it: see g4_sha_chip_forks_a_shared_midstate_to_divergent_tails.
+    uint32_t slots_required{kNormalizedUniversalParentArityV1};
+    uint32_t challenge_kinds_required{8};
+    uint32_t slots_covered{0};
+    uint32_t challenge_kinds_covered{0};
+    bool real_child_shape_covered{false};
+    bool covers_all_slots_and_kinds{false};
+    // --- Obligation 3: PROOF LEVEL.  Each endpoint must be carried by a real
+    // FRI proof, not by CountWitnessViolationsOnH.
+    bool lane_relation_fri_proven{false};
+    bool producer_endpoint_fri_proven{false};
+    bool consumer_endpoint_fri_proven{false};
+    bool discharged_by_fri_proof{false};
+    // --- Obligation 4: the parent that CARRIES RECURSION must host the replay
+    // and the bus.  This is the substantive parent obligation.
+    bool recursion_parent_hosts_replay{false};
+    // --- Obligation 4 is now the WHOLE parent question.  The scaffold flag
+    // `complete_sha_fiat_shamir_replay_in_air` was retired from
+    // NormalizedUniversalParentCandidateV1 (project owner decision), so there is
+    // no longer a second, unsettable parent flag to reconcile against and no
+    // ownership residual to report.
+    bool closed{false};
+    std::string note;
+};
+
+[[nodiscard]] ChildFsReplayClosureV1 AssessChildFsReplayClosureV1();
 
 /**
  * PR-89 rung-4: a recursion parent's OWN FRI proof.

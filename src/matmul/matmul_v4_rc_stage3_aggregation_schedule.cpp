@@ -5,6 +5,9 @@
 #include <matmul/matmul_v4_rc_stage3_aggregation_schedule.h>
 
 #include <hash.h>
+#include <matmul/matmul_v4_rc_air_quotient.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 
 #include <algorithm>
 #include <limits>
@@ -26,6 +29,12 @@ constexpr char RECEIPT_CHAIN_STEP_DOMAIN[] =
     "BTX_RC_STAGE3_PRODUCTION_AGGREGATION_CHAIN_STEP_V1";
 constexpr char CURSOR_DOMAIN[] =
     "BTX_RC_STAGE3_PRODUCTION_AGGREGATION_CURSOR_V1";
+constexpr char CONSUMED_PARENT_DOMAIN[] =
+    "BTX_RC_STAGE3_PRODUCTION_AGGREGATION_CONSUMED_PARENT_V1";
+constexpr char NODE_CONTEXT_PUB_DOMAIN[] =
+    "BTX_RC_STAGE3_PRODUCTION_AGGREGATION_NODE_PUB_V1";
+constexpr char NODE_CONTEXT_RECEIPT_DOMAIN[] =
+    "BTX_RC_STAGE3_PRODUCTION_AGGREGATION_NODE_RECEIPT_V1";
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -830,6 +839,245 @@ bool ExecuteProductionAggregationPage(
               "cryptographic_child_consumption_pending";
     }
     return true;
+}
+
+// ===========================================================================
+// Cryptographic child consumption.
+// ===========================================================================
+
+namespace {
+
+namespace aq = air_quotient;
+namespace gf = gkr_field;
+namespace rpa = recursive_parent_air;
+
+using AlgB3 = aq::AirFriBackendAlg<gf::Fp3>;
+
+/** Deterministic field lane stream derived from a domain-separated digest. */
+gf::Fp3 LaneFromDigest(const char* domain, const ParentWorkItem& work,
+                       uint32_t lane)
+{
+    HashWriter hash;
+    hash << domain;
+    hash << work.schedule_commitment;
+    hash << work.seed;
+    hash << static_cast<uint16_t>(work.role);
+    hash << work.level;
+    hash << work.parent_index;
+    hash << work.parent_site;
+    hash << lane;
+    const uint256 digest = hash.GetHash();
+    const auto* raw = digest.begin();
+    uint64_t words[3] = {0, 0, 0};
+    for (int limb = 0; limb < 3; ++limb) {
+        for (int byte = 0; byte < 8; ++byte) {
+            words[limb] |= static_cast<uint64_t>(raw[limb * 8 + byte])
+                           << (8 * byte);
+        }
+    }
+    return gf::Fp3{gf::FromU64(words[0]), gf::FromU64(words[1]),
+                   gf::FromU64(words[2])};
+}
+
+} // namespace
+
+rpa::FourSlotNodeContextV1 CanonicalParentNodeContext(
+    const ParentWorkItem& work)
+{
+    rpa::FourSlotNodeContextV1 ctx;
+    ctx.level = work.level;
+    // The schedule's parent_index is a 64-bit ordinal within the level; the
+    // node-context index is the AIR's 32-bit position lane.  Both are
+    // verifier-recomputable; the full 64-bit site is separately absorbed into
+    // every pub/receipt lane below, so no distinct site can collide here.
+    ctx.index = static_cast<uint32_t>(work.parent_index);
+    for (uint32_t lane = 0; lane < rpa::kFourSlotPubLanesV1; ++lane) {
+        ctx.pub[lane] =
+            LaneFromDigest(NODE_CONTEXT_PUB_DOMAIN, work, lane);
+    }
+    for (uint32_t word = 0;
+         word < rpa::Arity4FamilyReceiptLayoutV1::kChildRootWords; ++word) {
+        ctx.parent_receipt_root[word] =
+            LaneFromDigest(NODE_CONTEXT_RECEIPT_DOMAIN, work, word);
+    }
+    return ctx;
+}
+
+uint256 PackParentStatement(const alg_hash::Digest& statement)
+{
+    return Fri3AlgDigestToUint256(statement);
+}
+
+uint256 CommitConsumedParentStatement(const ParentWorkItem& work,
+                                      const uint256& parent_statement)
+{
+    if (work.seed.IsNull() || work.schedule_commitment.IsNull() ||
+        parent_statement.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << CONSUMED_PARENT_DOMAIN;
+    hash << work.schedule_commitment;
+    hash << work.seed;
+    hash << work.parent_ordinal;
+    hash << static_cast<uint16_t>(work.role);
+    hash << work.level;
+    hash << work.parent_index;
+    hash << work.parent_site;
+    hash << work.first_child_site;
+    hash << work.child_count;
+    hash << parent_statement;
+    return hash.GetHash();
+}
+
+CryptographicChildConsumption ConsumeRealChildProofsForParent(
+    const ParentWorkItem& work, const ParentChildProofBundle& bundle)
+{
+    CryptographicChildConsumption out;
+    out.parent_ordinal = work.parent_ordinal;
+    out.parent_site = work.parent_site;
+    out.level = work.level;
+    out.parent_index = work.parent_index;
+    out.child_count = work.child_count;
+
+    if (work.seed.IsNull() || work.schedule_commitment.IsNull()) {
+        out.note = "unbound_work_item";
+        return out;
+    }
+    // The four-slot self-similar primitive is exactly arity four.  A partial
+    // parent (1..3 children, produced when a level is not divisible by four) is
+    // an explicitly charged proof site that this consumption path cannot yet
+    // execute; it fails closed rather than padding a slot with a duplicate.
+    if (work.child_count != kProductionAggregationScheduleArity) {
+        out.note = "partial_arity_parent_not_consumable";
+        return out;
+    }
+    if (bundle.child_fs_seed.IsNull()) {
+        out.note = "missing_child_fs_seed";
+        return out;
+    }
+    if (bundle.child_cs.n_columns == 0 || bundle.child_cs.n_rows == 0 ||
+        bundle.child_cs.constraints.empty()) {
+        out.note = "empty_child_constraint_system";
+        return out;
+    }
+
+    // ---- Stage 1: real, unmodified, standalone proof verification. --------
+    for (uint32_t slot = 0; slot < kProductionAggregationScheduleArity;
+         ++slot) {
+        std::string vwhy;
+        if (!aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+                bundle.child_cs, bundle.child_proofs[slot],
+                bundle.child_fs_seed, &vwhy)) {
+            out.child_verify_reject_reason =
+                "slot" + std::to_string(slot) + ":" + vwhy;
+            out.note = "child_proof_rejected_by_verifier";
+            return out;
+        }
+        ++out.children_standalone_verified;
+    }
+    out.all_children_standalone_verified =
+        out.children_standalone_verified ==
+        kProductionAggregationScheduleArity;
+
+    // ---- Stage 2: in-AIR consumption by the arity-4 parent V_CS. ----------
+    const rpa::FourSlotNodeContextV1 ctx = CanonicalParentNodeContext(work);
+    const alg_hash::Digest statement =
+        rpa::ComputeFourSlotSelfSimilarParentStatementV1(
+            bundle.child_cs, bundle.child_proofs, bundle.child_fs_seed, ctx);
+    const rpa::FourSlotSelfSimilarCtlParentV1 parent =
+        rpa::BuildFourSlotSelfSimilarCtlParentV1(
+            bundle.child_cs, bundle.child_proofs, bundle.child_fs_seed, ctx,
+            statement);
+
+    out.all_children_verified_in_parent_air =
+        parent.all_four_children_verified_in_parent_air;
+    out.terminal_lanes_sourced_from_in_parent_verifier =
+        parent.terminal_lanes_sourced_from_in_parent_verifier;
+    out.four_child_roots_sourced_from_verifier_outputs =
+        parent.four_child_roots_sourced_from_verifier_outputs;
+    out.parent_statement_equals_child_aggregation =
+        parent.parent_statement_equals_child_aggregation;
+    out.self_similar_arity4_shape = parent.self_similar_arity4_shape;
+    out.witness_violations = parent.witness_violations;
+    out.parent_rows = parent.parent_rows;
+    out.parent_columns = parent.parent_columns;
+    out.vcs_columns = parent.vcs_columns;
+    // GAP[8] is reported by the parent AIR itself and is false by construction.
+    out.child_fiat_shamir_replayed_in_parent =
+        parent.child_fiat_shamir_replayed_in_parent;
+
+    if (!parent.valid || parent.witness_violations != 0 ||
+        !parent.all_four_children_verified_in_parent_air ||
+        !parent.terminal_lanes_sourced_from_in_parent_verifier ||
+        !parent.four_child_roots_sourced_from_verifier_outputs ||
+        !parent.parent_statement_equals_child_aggregation) {
+        out.note = parent.note.empty() ? "parent_air_rejected" : parent.note;
+        return out;
+    }
+
+    out.parent_statement = PackParentStatement(parent.computed_parent_statement);
+    if (out.parent_statement.IsNull()) {
+        out.note = "unpackable_parent_statement";
+        return out;
+    }
+    out.parent_commitment =
+        CommitConsumedParentStatement(work, out.parent_statement);
+    if (out.parent_commitment.IsNull()) {
+        out.note = "unbound_parent_commitment";
+        return out;
+    }
+
+    out.valid = true;
+    // Sound recursion additionally requires the child Fiat-Shamir transcript to
+    // be replayed in-parent from a proof-independent role seed (GAP[8]).
+    out.recursion_soundness_admissible =
+        out.child_fiat_shamir_replayed_in_parent;
+    out.note = out.recursion_soundness_admissible
+        ? "cryptographic_child_consumption_ok"
+        : "cryptographic_child_consumption_ok_child_fiat_shamir_replay_"
+          "not_closed";
+    return out;
+}
+
+ParentCallback MakeCryptographicChildConsumingParentCallback(
+    const ChildProofSource& source,
+    std::vector<CryptographicChildConsumption>* trace)
+{
+    return [source, trace](const ParentWorkItem& work, std::string* why)
+               -> std::optional<ParentReceipt> {
+        if (!source) {
+            Fail(why, "missing_child_proof_source");
+            return std::nullopt;
+        }
+        ParentChildProofBundle bundle;
+        std::string source_why;
+        if (!source(work, bundle, &source_why)) {
+            Fail(why, "child_proof_source_failed:" + source_why);
+            return std::nullopt;
+        }
+        const CryptographicChildConsumption consumed =
+            ConsumeRealChildProofsForParent(work, bundle);
+        if (trace != nullptr) trace->push_back(consumed);
+        if (!consumed.valid) {
+            Fail(why,
+                 "child_consumption_rejected:" + consumed.note +
+                     (consumed.child_verify_reject_reason.empty()
+                          ? std::string{}
+                          : ":" + consumed.child_verify_reject_reason));
+            return std::nullopt;
+        }
+        ParentReceipt receipt;
+        receipt.work_seed = work.seed;
+        receipt.parent_commitment = consumed.parent_commitment;
+        receipt.binding = CommitProductionAggregationReceipt(
+            work, receipt.parent_commitment);
+        if (receipt.binding.IsNull()) {
+            Fail(why, "unbound_receipt");
+            return std::nullopt;
+        }
+        return receipt;
+    };
 }
 
 } // namespace matmul::v4::rc::aggregation_scheduler

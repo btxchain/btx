@@ -126,6 +126,9 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_tile_stream_tests.cpp
   matmul_v4_rc_stage3_gemm_extract_tests.cpp
   matmul_v4_rc_stage3_consensus_tests.cpp
+  matmul_v4_rc_stage3_producer_tests.cpp
+  matmul_v4_rc_stage3_producer_e2e_tests.cpp
+  matmul_v4_rc_stage3_air_quotient_codec_tests.cpp
   matmul_v4_rc_stage3_composition_tests.cpp
   matmul_v4_rc_stage3_coupled_tests.cpp
   matmul_v4_rc_stage3_coupled_air_tests.cpp
@@ -173,6 +176,8 @@ add_executable(test_btx
   matmul_v4_rc_stage3_hash_air_tests.cpp
   matmul_v4_rc_stage3_hash_semantic_tests.cpp
   matmul_v4_rc_stage3_root_chain_tests.cpp
+  matmul_v4_rc_stage3_real_episode_harness_tests.cpp
+  matmul_v4_rc_stage3_role_sections_tests.cpp
   matmul_v4_rc_stage3_provenance_graph_tests.cpp
   matmul_v4_rc_stage3_semantic_status_tests.cpp
   matmul_v4_rc_stage3_verifier_air_tests.cpp

@@ -1936,6 +1936,211 @@ BOOST_AUTO_TEST_CASE(pr89_grinding_tax_predicate_enforced)
     BOOST_CHECK(!rc::Fri3AlgCheckSqueezeGrind(input, failing, g));
 }
 
+// PR-89 Construction 2 DEFECT REGRESSION: the prover grind budget must be
+// derived from g, not a flat constant.  The former default was 2^34 while the
+// shipped kRCFri3AlgJointQGrindBits is 40, so an honest prover at the ADVERTISED
+// g exhausted the range with probability 1 - (1 - 2^-40)^(2^34) = 98.4%.  The
+// budget is now 2^(g + kGrindIterationSlackBits).
+BOOST_AUTO_TEST_CASE(pr89_grind_budget_is_derived_from_g)
+{
+    const std::vector<unsigned char> input = {'b', 'u', 'd', 'g', 'e', 't'};
+
+    // The advertised Pi_JQ target must be prover-feasible at all (this is the
+    // property the old flat 2^34 default silently violated).
+    BOOST_CHECK(rc::kRCFri3AlgJointQGrindBits <=
+                rc::kRCFri3AlgMaxGrindableBits);
+
+    // An explicitly SHORT budget must fail: 2^10 trials cannot meet a 20-bit
+    // predicate (expected 2^20).  This is exactly the old defect's shape.
+    BOOST_CHECK(!rc::Fri3AlgGrindSqueeze(input, 20, /*max_iters=*/uint64_t{1}
+                                                    << 10)
+                     .has_value());
+
+    // With the auto-derived budget (2^30 at g=20) the same grind succeeds, and
+    // the nonce it returns satisfies the verifier predicate.
+    auto nonce = rc::Fri3AlgGrindSqueeze(input, 20);
+    BOOST_REQUIRE(nonce.has_value());
+    BOOST_CHECK(rc::Fri3AlgCheckSqueezeGrind(input, *nonce, 20));
+
+    // Fail-fast on an ungrindable target.  Under the old code this spun for the
+    // full flat budget; it must now return immediately.  A wall-clock bound is
+    // the only way to observe "did not spin", so keep it generous but finite.
+    const auto start = std::chrono::steady_clock::now();
+    BOOST_CHECK(!rc::Fri3AlgGrindSqueeze(input, 200).has_value());
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    BOOST_CHECK(std::chrono::duration_cast<std::chrono::seconds>(elapsed)
+                    .count() < 5);
+
+    // The VERIFIER side is deliberately NOT narrowed by the prover-feasibility
+    // bound: it must still evaluate any g <= 256 fail-closed.
+    BOOST_CHECK(!rc::Fri3AlgCheckSqueezeGrind(input, 0, 200));
+    BOOST_CHECK(!rc::Fri3AlgCheckSqueezeGrind(input, 0, 257));
+}
+
+// PR-89 Construction 2, field-native predicate: basic agreement with the
+// trailing-zero definition, and the fail-closed edges.
+BOOST_AUTO_TEST_CASE(pr89_algebraic_grind_predicate_basics)
+{
+    namespace gf = rc::gkr_field;
+    BOOST_CHECK_EQUAL(rc::Fri3AlgTrailingZeroBitsFp(gf::FromU64(0)), 64u);
+    BOOST_CHECK_EQUAL(rc::Fri3AlgTrailingZeroBitsFp(gf::FromU64(1)), 0u);
+    BOOST_CHECK_EQUAL(rc::Fri3AlgTrailingZeroBitsFp(gf::FromU64(1u << 20)),
+                      20u);
+    BOOST_CHECK_EQUAL(rc::Fri3AlgTrailingZeroBitsFp(gf::FromU64(3u << 20)),
+                      20u);
+
+    // g == 0 is vacuously true — which is exactly why a taxed path must
+    // static_assert its own nonzero floor rather than trust this predicate.
+    BOOST_CHECK(rc::Fri3AlgCheckAlgebraicGrind(gf::FromU64(12345), 0));
+    // Above the supported range the predicate is fail-CLOSED, never open.
+    BOOST_CHECK(!rc::Fri3AlgCheckAlgebraicGrind(
+        gf::FromU64(0), rc::kRCFri3AlgMaxAlgebraicGrindBits + 1));
+
+    BOOST_CHECK(rc::Fri3AlgCheckAlgebraicGrind(gf::FromU64(uint64_t{1} << 20),
+                                               20));
+    BOOST_CHECK(!rc::Fri3AlgCheckAlgebraicGrind(
+        gf::FromU64((uint64_t{1} << 20) - 1), 20));
+}
+
+// PR-89 Construction 2, THE VACUITY REGRESSION.
+//
+// This test exists to fail if anyone ever "optimises" the field-native grind
+// predicate to the one-constraint multiplicative form  lane0 == 2^g * h.
+// Over Fp that form is COMPLETELY VACUOUS because 2^g is a unit: a witness h
+// exists for EVERY lane0, so the tax would enforce nothing while looking
+// correct.  The first section below DEMONSTRATES that vacuity executably; the
+// rest pins the real bit-decomposition + canonicity encoding, which rejects
+// both a non-conforming value and the aliased B = x + p witness.
+BOOST_AUTO_TEST_CASE(pr89_algebraic_grind_predicate_is_not_vacuous)
+{
+    namespace gf = rc::gkr_field;
+    const uint32_t g = 20;
+
+    // --- (a) the multiplicative form really is vacuous: pick a lane that does
+    // NOT satisfy the tax and exhibit its witness h with 2^g * h == lane0.
+    const gf::Fp bad_lane = gf::FromU64((uint64_t{1} << 20) - 1);
+    BOOST_REQUIRE(!rc::Fri3AlgCheckAlgebraicGrind(bad_lane, g));
+    const gf::Fp two_pow_g = gf::FromU64(uint64_t{1} << g);
+    const gf::Fp h = gf::Mul(bad_lane, gf::Inv(two_pow_g));
+    BOOST_CHECK(gf::Canonical(gf::Mul(two_pow_g, h)) ==
+                gf::Canonical(bad_lane));
+    // ^ If the predicate were encoded multiplicatively, THAT would satisfy it.
+
+    // --- (b) the real encoding accepts a conforming value...
+    const gf::Fp good_lane = gf::FromU64(uint64_t{7} << 20);
+    BOOST_REQUIRE(rc::Fri3AlgCheckAlgebraicGrind(good_lane, g));
+    const auto good = rc::BuildFri3AlgGrindPredicateAirV1(good_lane, g);
+    BOOST_REQUIRE_MESSAGE(good.valid, good.note);
+    BOOST_CHECK(good.booleanity_constrained);
+    BOOST_CHECK(good.canonicity_constrained);
+    BOOST_CHECK(good.tax_constrained);
+    BOOST_CHECK_EQUAL(good.violations, 0u);
+
+    // --- (c) ...and REJECTS the non-conforming value. This is the assertion
+    // that the multiplicative form would break: there, violations would be 0.
+    const auto bad = rc::BuildFri3AlgGrindPredicateAirV1(bad_lane, g);
+    BOOST_REQUIRE_MESSAGE(bad.valid, bad.note);
+    BOOST_CHECK_GT(bad.violations, 0u);
+
+    // --- (d) canonicity is load-bearing, not decoration.  p = 1 (mod 2^20),
+    // so x = 2^20 - 1 fails the tax while B = x + p has its low 20 bits ZERO
+    // and is representable in 64 bits.  A prover supplying that aliased
+    // decomposition satisfies every tax constraint; ONLY the canonicity
+    // constraint stops it.
+    const auto aliased = rc::BuildFri3AlgGrindPredicateAirV1(
+        bad_lane, g, /*use_aliased_witness=*/true);
+    BOOST_REQUIRE_MESSAGE(aliased.valid, aliased.note);
+    BOOST_CHECK_GT(aliased.violations, 0u);
+
+    // The shape itself, so a regression in column/constraint count is visible.
+    BOOST_CHECK_EQUAL(good.n_rows, 2u);
+    BOOST_CHECK_EQUAL(good.bit_columns, 64u);
+    BOOST_CHECK_EQUAL(good.n_columns, 71u);
+    BOOST_CHECK_EQUAL(good.n_constraints, 72u + g);
+    BOOST_CHECK_EQUAL(good.max_alg_degree, 7u);
+}
+
+// PR-89 Construction 2, ALGEBRAIC taxed deciding squeeze (not activated).
+// Covers the tax round-trip, domain separation, the sole-entropy-source
+// property the credit depends on, and the u64-absorption injectivity trap.
+BOOST_AUTO_TEST_CASE(pr89_algebraic_taxed_squeeze)
+{
+    namespace gf = rc::gkr_field;
+    // The SHIPPED tax is g = 20, but a real g=20 Poseidon2 grind costs ~69 s
+    // MEASURED (Permute is 30.7 us on this build, not the 0.3-1.0 us the
+    // finish-plan microbenchmark reports). Grind at a small g in-test and
+    // assert the shipped constant separately.
+    BOOST_CHECK_EQUAL(rc::kRCFri3AlgTaxedQGrindBits, 20u);
+    const uint32_t g = 12; // fast in-test grind
+
+    std::vector<gf::Fp> sigma_core;
+    for (uint64_t i = 0; i < 12; ++i) sigma_core.push_back(gf::FromU64(i * 7 + 1));
+
+    // --- deterministic, and domain-separated from the plain transcript hash.
+    BOOST_CHECK(rc::Fri3AlgAlgebraicSqueeze(sigma_core, 5) ==
+                rc::Fri3AlgAlgebraicSqueeze(sigma_core, 5));
+    BOOST_CHECK(rc::Fri3AlgAlgebraicSqueeze(sigma_core, 5) !=
+                rc::Fri3AlgAlgebraicTranscriptDigest(sigma_core, 0));
+
+    // --- the honest prover meets the tax, and the verifier accepts it.
+    const auto t0 = std::chrono::steady_clock::now();
+    auto nonce = rc::Fri3AlgGrindAlgebraicSqueeze(sigma_core, g);
+    const auto grind_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0).count();
+    BOOST_REQUIRE(nonce.has_value());
+    BOOST_TEST_MESSAGE("algebraic g=" << g << " grind took " << grind_ms
+                                      << " ms");
+    BOOST_CHECK(rc::Fri3AlgCheckAlgebraicSqueezeGrind(sigma_core, *nonce, g));
+
+    // --- a nonce that does not meet the tax is REJECTED. Search a small range
+    // for a concrete failing nonce; at g=20 essentially all of them fail.
+    bool found_reject = false;
+    for (uint64_t n = 0; n < 64 && !found_reject; ++n) {
+        if (n == *nonce) continue;
+        if (!rc::Fri3AlgCheckAlgebraicSqueezeGrind(sigma_core, n, g)) {
+            found_reject = true;
+        }
+    }
+    BOOST_CHECK(found_reject);
+
+    // --- SOLE ENTROPY SOURCE. Every index is a function of sigma alone, so a
+    // counterfactual sigma (what a regrind would produce) moves them. If this
+    // failed, an adversary would pay the tax once and retarget for free.
+    const uint32_t n_lde = 1u << 12;
+    const auto sigma = rc::Fri3AlgAlgebraicSqueeze(sigma_core, *nonce);
+    const auto sigma_prime = rc::Fri3AlgAlgebraicSqueeze(sigma_core, *nonce + 1);
+    bool any_index_moved = false;
+    for (uint32_t j = 0; j < 88; ++j) {
+        const uint32_t idx = rc::Fri3AlgAlgebraicQueryIndex(sigma, j, n_lde);
+        BOOST_REQUIRE_LT(idx, n_lde);
+        // Deterministic in sigma: same inputs, same index, every time.
+        BOOST_CHECK_EQUAL(idx,
+                          rc::Fri3AlgAlgebraicQueryIndex(sigma, j, n_lde));
+        if (rc::Fri3AlgAlgebraicQueryIndex(sigma_prime, j, n_lde) != idx) {
+            any_index_moved = true;
+        }
+    }
+    BOOST_CHECK(any_index_moved);
+
+    // --- non-power-of-two moduli are refused rather than silently biased.
+    BOOST_CHECK_EQUAL(rc::Fri3AlgAlgebraicQueryIndex(sigma, 0, 1000u), 0u);
+
+    // --- INJECTIVITY TRAP: a uint64 must be absorbed as two 32-bit lanes.
+    // Absorbing it as a single FromU64 lane is LOSSY (reduction mod p), so
+    // nonces differing only above the reduction boundary would collide and the
+    // tax could be replayed. These two differ by exactly p.
+    const uint64_t a = 12345;
+    const uint64_t b = a + gf::kP; // same residue mod p, different u64
+    BOOST_CHECK(rc::Fri3AlgAlgebraicSqueeze(sigma_core, a) !=
+                rc::Fri3AlgAlgebraicSqueeze(sigma_core, b));
+
+    // --- the shipped tax is nonzero and prover-feasible (the g==0 trap).
+    BOOST_CHECK(rc::kRCFri3AlgTaxedQGrindBits > 0u);
+    BOOST_CHECK(!rc::Fri3AlgCheckAlgebraicSqueezeGrind(
+        sigma_core, *nonce, rc::kRCFri3AlgMaxAlgebraicGrindBits + 1));
+}
+
 // ============================================================================
 // PR-89 Construction 1: Pi_JQ joint query squeeze.
 // ============================================================================
@@ -2059,6 +2264,80 @@ BOOST_AUTO_TEST_CASE(pr89_jointq_verify_rejects_subg_tax_nonce)
     BOOST_CHECK_EQUAL(rc::Fri3AlgSoundnessBoundBits(),
                       rc::Fri3AlgProximityBoundBits() -
                           static_cast<int>(rc::kRCFri3AlgUnenforcedRegrindBudgetBits));
+}
+
+// PR-89 rung-5 cap-fix correctness proof. The column-at-a-time STREAMING
+// row-Merkle commit must produce a BIT-IDENTICAL root to the all-columns-
+// resident reference (dense) commit on the SAME data. The equivalence is
+// W-AGNOSTIC: both paths take the same per-column LDE, hash each row with the
+// same LeafHashRow primitive, and build the same Merkle tree in the same order;
+// streaming only changes the memory SCHEDULE (one column resident at a time).
+// Proving it at modest width therefore extends to the 384k-712k-column real
+// recursion-node width, where the dense path is memory-infeasible (~303 GB at
+// W=385k, n_lde=32768) and only the streaming path can run.
+BOOST_AUTO_TEST_CASE(fra3_streaming_row_root_bit_identical_to_dense)
+{
+    for (uint32_t n_coeffs : {uint32_t{4}, uint32_t{16}, uint32_t{64}}) {
+        std::vector<std::vector<rc::Fp3>> cols(777);
+        for (size_t c = 0; c < cols.size(); ++c) {
+            const size_t len = 1 + (c % static_cast<size_t>(n_coeffs));
+            cols[c].resize(len);
+            for (size_t j = 0; j < len; ++j) {
+                cols[c][j] = gf::FromSigned3(
+                    static_cast<int64_t>(11 * c + 5 * j + 2));
+            }
+        }
+        const rc::Fri3AlgDigest dense =
+            rc::Fri3AlgBatchRowRoot(cols, n_coeffs);
+        const rc::Fri3AlgDigest stream =
+            rc::Fri3AlgBatchRowRootStreaming(cols, n_coeffs);
+        const uint256 dense_u = rc::Fri3AlgDigestToUint256(dense);
+        const uint256 stream_u = rc::Fri3AlgDigestToUint256(stream);
+        BOOST_REQUIRE_MESSAGE(
+            !dense_u.IsNull(),
+            "dense row root null at n_coeffs=" + std::to_string(n_coeffs));
+        BOOST_CHECK_MESSAGE(
+            dense_u == stream_u,
+            "streaming row root must be bit-identical to dense at n_coeffs=" +
+                std::to_string(n_coeffs) + " dense=" + dense_u.GetHex() +
+                " stream=" + stream_u.GetHex());
+    }
+}
+
+// PR-89 rung-5 wide-commit BASELINE (single-thread). Env-gated
+// (BTX_TIME_WIDE_COMMIT=1) so it is a no-op in the normal suite. Commit cost is
+// a function of SHAPE only (per-column LDE + row hashing), not witness values,
+// so this synthetic set at the MEASURED real recursion-node shape
+// (W=384984, n_coeffs=256 => n_lde=4096) reproduces the real internal-node
+// streaming-commit wall-clock without the ~60-min parent-witness build.
+BOOST_AUTO_TEST_CASE(fra3_wide_commit_realwidth_timing)
+{
+    if (std::getenv("BTX_TIME_WIDE_COMMIT") == nullptr) {
+        BOOST_TEST_MESSAGE("skipped (set BTX_TIME_WIDE_COMMIT=1 to measure)");
+        return;
+    }
+    const uint32_t W = 384984;
+    const uint32_t n_coeffs = 256;  // measured parent_rows; n_lde = 256*16 = 4096
+    std::vector<std::vector<rc::Fp3>> cols(W);
+    for (uint32_t c = 0; c < W; ++c) {
+        cols[c].resize(n_coeffs);
+        for (uint32_t j = 0; j < n_coeffs; ++j) {
+            cols[c][j] = gf::FromSigned3(
+                static_cast<int64_t>(1315423911u * c + 2654435761u * j + 7u));
+        }
+    }
+    const auto t0 = std::chrono::steady_clock::now();
+    const rc::Fri3AlgDigest d = rc::Fri3AlgBatchRowRootStreaming(cols, n_coeffs);
+    const auto t1 = std::chrono::steady_clock::now();
+    const double ms =
+        std::chrono::duration<double, std::milli>(t1 - t0).count();
+    const uint256 root = rc::Fri3AlgDigestToUint256(d);
+    BOOST_TEST_MESSAGE("WIDE_COMMIT_TIMING W=" << W << " n_coeffs=" << n_coeffs
+                       << " n_lde=" << (n_coeffs * 16u)
+                       << " streaming_commit_ms=" << ms
+                       << " root=" << root.GetHex()
+                       << " null=" << static_cast<int>(root.IsNull()));
+    BOOST_CHECK(!root.IsNull());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

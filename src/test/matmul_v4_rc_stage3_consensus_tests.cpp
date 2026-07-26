@@ -2,6 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 
 #include <consensus/params.h>
@@ -111,7 +112,6 @@ rc::RCStage3SuccinctProof MakeBoundProof(const CBlock& block,
             ? Filled(0x70)
             : uint256{};
     p.final_digest = block.matmul_digest;
-    p.transcript_commitment = Filled(0x80);
 
     const auto roles = rc::RequiredRCStage3RelationRoles(statement);
     for (size_t i = 0; i < roles.size(); ++i) {
@@ -120,6 +120,11 @@ rc::RCStage3SuccinctProof MakeBoundProof(const CBlock& block,
         proof.sections.push_back(
             {roles[i], {static_cast<unsigned char>(i), 0xa5, 0x5a}});
     }
+    // ValidateRCStage3ConsensusBinding now RECOMPUTES and compares this instead
+    // of merely null-checking it, which is what binds the per-role commitment
+    // roots and the section bodies. It can only be computed once the
+    // commitments and sections are in place.
+    p.transcript_commitment = rc::ComputeRCStage3TranscriptCommitment(proof);
     return proof;
 }
 

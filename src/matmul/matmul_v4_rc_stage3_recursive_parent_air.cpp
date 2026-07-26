@@ -8,6 +8,9 @@
 #include <hash.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <tuple>
@@ -876,8 +879,6 @@ bool SameCandidateSummary(
             b.complete_proof_cell_equality_map &&
         a.complete_splitrap_verifier_in_air ==
             b.complete_splitrap_verifier_in_air &&
-        a.complete_sha_fiat_shamir_replay_in_air ==
-            b.complete_sha_fiat_shamir_replay_in_air &&
         a.host_preprocessed_replay_eliminated ==
             b.host_preprocessed_replay_eliminated &&
         a.one_child_parent_relation_executable ==
@@ -2976,8 +2977,6 @@ BuildNormalizedUniversalParentCandidateV1(
         out.proof_cells_semantically_mapped ==
             out.proof_cells_required;
     out.complete_splitrap_verifier_in_air = false;
-    out.complete_sha_fiat_shamir_replay_in_air =
-        false;
     out.host_preprocessed_replay_eliminated =
         false;
     const uint32_t violations =
@@ -3003,8 +3002,6 @@ BuildNormalizedUniversalParentCandidateV1(
     out.residuals = {
         "replayed_expected_operands_are_not_yet_sourced_from_sha_poseidon_"
         "and_scalar_chip_outputs",
-        "sha256d_fiat_shamir_compression_shards_are_scheduled_but_not_"
-        "attached_to_this_parent",
         "the_parent_splitrap_proof_is_not_yet_verified_by_an_identical_"
         "arity4_parent",
         "four_family_receipt_slots_and_terminal_cancellation_execute_but_"
@@ -3028,7 +3025,6 @@ BuildNormalizedUniversalParentCandidateV1(
         out.complete_proof_cell_decoder_in_air &&
         out.complete_proof_cell_equality_map &&
         !out.complete_splitrap_verifier_in_air &&
-        !out.complete_sha_fiat_shamir_replay_in_air &&
         !out.host_preprocessed_replay_eliminated &&
         out.one_child_parent_relation_executable &&
         out.four_family_receipt_slots_materialized &&
@@ -3038,7 +3034,7 @@ BuildNormalizedUniversalParentCandidateV1(
         !out.self_similar_arity4_shape &&
         !out.recursive_fixed_point &&
         !out.authority &&
-        out.residuals.size() == 6;
+        out.residuals.size() == 5;
     out.note = out.valid
         ? "stage3:recursive_parent_air:"
           "one_child_parent_relation_executable;"
@@ -3109,7 +3105,6 @@ bool ValidateNormalizedUniversalParentCandidateV1(
         }
     }
     if (candidate.complete_splitrap_verifier_in_air ||
-        candidate.complete_sha_fiat_shamir_replay_in_air ||
         candidate.host_preprocessed_replay_eliminated ||
         candidate.self_similar_arity4_shape ||
         candidate.recursive_fixed_point ||
@@ -3695,6 +3690,7 @@ BuildFourSlotSelfSimilarCtlParentV1(
         const uint32_t chal_col = word_base + 3;
         out.parent_cs.n_columns = chal_col + 1;
         out.child_air_challenge_value_column[slot] = chal_col;
+        out.child_air_challenge_byte_base[slot] = byte_base;
         out.parent_witness.resize(
             out.parent_cs.n_columns,
             std::vector<gf::Fp3>(
@@ -4040,6 +4036,7 @@ BuildChildAirChallengeShaReplayV1(
     out.cs = instance.cs;
     out.columns = instance.columns;
     out.sha_output_byte_base = instance.output_byte_base;
+    out.base_column_indices = instance.base_column_indices;
     out.sha_rows = out.cs.n_rows;
 
     // Append three challenge-limb columns bound to the first 24 SHA output
@@ -4108,6 +4105,7 @@ BuildChildAirChallengeShaReplayV1(
         }
     }
 
+
     out.sha_columns = out.cs.n_columns;
     out.witness_violations =
         ar::CountWitnessViolationsOnH(out.cs, out.columns);
@@ -4118,6 +4116,10 @@ BuildChildAirChallengeShaReplayV1(
         recon.c0 == consumed_air_lambda.c0 &&
         recon.c1 == consumed_air_lambda.c1 &&
         recon.c2 == consumed_air_lambda.c2;
+    // NOTE: this CS binds the digest bytes to the SHA rounds and the challenge
+    // limbs to the consumed air_lambda.  It carries NO cross-domain binding to
+    // the parent decoder — that is the g4 CTL lane, appended post-commitment by
+    // VerifyChildFsShaBoundV1.
     out.valid = out.sha_output_binds_digest_bytes &&
                 out.challenge_bound_to_consumed;
     out.note =
@@ -4125,6 +4127,499 @@ BuildChildAirChallengeShaReplayV1(
             ? "stage3:child_air_challenge_sha:"
               "airq_lambda_replayed_in_cs"
             : "stage3:child_air_challenge_sha:violations";
+    return out;
+}
+
+namespace {
+
+/** Compressed g4 bus tuple: NS + gamma*STAGE + gamma^2*k + gamma^3*value. */
+gf::Fp3 ChildFsBusTuple(
+    uint32_t position,
+    const gf::Fp3& value,
+    const gf::Fp3& gamma)
+{
+    const gf::Fp3 g2 = gf::Mul(gamma, gamma);
+    const gf::Fp3 g3 = gf::Mul(g2, gamma);
+    return gf::Add(
+        gf::FromU64_3(kChildFsDigestBusNamespaceV1),
+        gf::Add(
+            gf::Mul(gamma,
+                    gf::FromU64_3(kChildFsDigestBusStageV1)),
+            gf::Add(
+                gf::Mul(g2, gf::FromU64_3(position)),
+                gf::Mul(g3, value))));
+}
+
+bool ChildFsBusFail(std::string* why, const char* what)
+{
+    if (why != nullptr) *why = what;
+    return false;
+}
+
+} // namespace
+
+bool
+AppendChildFsDigestBusLaneV1(
+    uint32_t byte_base,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal* expected,
+    aq::AirConstraintSystem<gf::Fp3>& cs,
+    std::vector<std::vector<gf::Fp3>>* columns,
+    ChildFsDigestBusLaneV1& out,
+    std::string* why)
+{
+    out = {};
+    out.byte_base = byte_base;
+    const uint32_t n_rows = cs.n_rows;
+    if (n_rows < 2) return ChildFsBusFail(why, "bus:rows");
+    if (byte_base + kChildFsDigestBusBytesV1 > cs.n_columns) {
+        return ChildFsBusFail(why, "bus:byte_window");
+    }
+    const uint32_t base = cs.n_columns;
+    out.inverse1_base = base;
+    out.inverse2_base = base + kChildFsDigestBusBytesV1;
+    out.running1 = base + 2 * kChildFsDigestBusBytesV1;
+    out.running2 = out.running1 + 1;
+    out.columns = out.running2 + 1;
+    cs.n_columns = out.columns;
+
+    // Honest witness first: the terminal the kLastRow constraint pins must be
+    // the observed sum when a witness is supplied.
+    RCStage3CtlTerminal terminal{};
+    if (columns != nullptr) {
+        if (columns->size() < base) {
+            return ChildFsBusFail(why, "bus:column_shape");
+        }
+        columns->resize(
+            out.columns,
+            std::vector<gf::Fp3>(n_rows, gf::Fp3::Zero()));
+        for (auto& col : *columns) {
+            if (col.size() != n_rows) {
+                return ChildFsBusFail(why, "bus:row_shape");
+            }
+        }
+        gf::Fp3 t1 = gf::Fp3::Zero();
+        gf::Fp3 t2 = gf::Fp3::Zero();
+        for (uint32_t k = 0; k < kChildFsDigestBusBytesV1; ++k) {
+            const gf::Fp3 value = (*columns)[byte_base + k][0];
+            const gf::Fp3 d1 = gf::Sub(
+                challenges.alpha1,
+                ChildFsBusTuple(k, value, challenges.gamma1));
+            const gf::Fp3 d2 = gf::Sub(
+                challenges.alpha2,
+                ChildFsBusTuple(k, value, challenges.gamma2));
+            if (gf::IsZero(d1) || gf::IsZero(d2)) {
+                return ChildFsBusFail(why, "bus:pole");
+            }
+            const gf::Fp3 i1 = gf::Inv(d1);
+            const gf::Fp3 i2 = gf::Inv(d2);
+            (*columns)[out.inverse1_base + k][0] = i1;
+            (*columns)[out.inverse2_base + k][0] = i2;
+            t1 = gf::Add(t1, i1);
+            t2 = gf::Add(t2, i2);
+        }
+        for (uint32_t row = 1; row < n_rows; ++row) {
+            (*columns)[out.running1][row] = t1;
+            (*columns)[out.running2][row] = t2;
+        }
+        terminal.alpha1_sum = t1;
+        terminal.alpha2_sum = t2;
+    } else {
+        if (expected == nullptr) {
+            return ChildFsBusFail(why, "bus:missing_expected_terminal");
+        }
+        terminal = *expected;
+    }
+    if (expected != nullptr && columns != nullptr &&
+        !(*expected == terminal)) {
+        return ChildFsBusFail(why, "bus:terminal_mismatch");
+    }
+    out.terminal = terminal;
+
+    // Per-byte, per-lane inverse well-formedness (first row) and padding.
+    for (uint32_t k = 0; k < kChildFsDigestBusBytesV1; ++k) {
+        for (uint32_t lane = 0; lane < 2; ++lane) {
+            const uint32_t inverse =
+                (lane == 0 ? out.inverse1_base
+                           : out.inverse2_base) + k;
+            const gf::Fp3 gamma =
+                lane == 0 ? challenges.gamma1 : challenges.gamma2;
+            const gf::Fp3 alpha =
+                lane == 0 ? challenges.alpha1 : challenges.alpha2;
+            const uint32_t value_col = byte_base + k;
+            {
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "stage3.g4bus.digest_byte_inverse";
+                c.kind = aq::AirKind::kFirstRow;
+                c.alg_degree = 2;
+                c.eval = [inverse, value_col, k, alpha, gamma](
+                             const std::vector<gf::Fp3>& cur,
+                             const std::vector<gf::Fp3>&) {
+                    return gf::Sub(
+                        gf::Mul(
+                            cur[inverse],
+                            gf::Sub(alpha,
+                                    ChildFsBusTuple(
+                                        k, cur[value_col], gamma))),
+                        gf::Fp3::One());
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+            {
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "stage3.g4bus.digest_byte_inverse_padding";
+                c.kind = aq::AirKind::kTransition;
+                c.alg_degree = 1;
+                c.eval = [inverse](
+                             const std::vector<gf::Fp3>&,
+                             const std::vector<gf::Fp3>& next) {
+                    return next[inverse];
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+        }
+    }
+    // Per-lane running sum: first row 0, transition accumulates, last row pins
+    // the terminal.
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t inverse_base =
+            lane == 0 ? out.inverse1_base : out.inverse2_base;
+        const uint32_t running =
+            lane == 0 ? out.running1 : out.running2;
+        const gf::Fp3 pinned =
+            lane == 0 ? terminal.alpha1_sum : terminal.alpha2_sum;
+        {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.g4bus.running_first";
+            c.kind = aq::AirKind::kFirstRow;
+            c.alg_degree = 1;
+            c.eval = [running](
+                         const std::vector<gf::Fp3>& cur,
+                         const std::vector<gf::Fp3>&) {
+                return cur[running];
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.g4bus.running_transition";
+            c.kind = aq::AirKind::kTransition;
+            c.alg_degree = 1;
+            c.eval = [inverse_base, running](
+                         const std::vector<gf::Fp3>& cur,
+                         const std::vector<gf::Fp3>& next) {
+                gf::Fp3 contribution = gf::Fp3::Zero();
+                for (uint32_t k = 0;
+                     k < kChildFsDigestBusBytesV1; ++k) {
+                    contribution = gf::Add(
+                        contribution, cur[inverse_base + k]);
+                }
+                return gf::Sub(
+                    next[running],
+                    gf::Add(cur[running], contribution));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.g4bus.running_last";
+            c.kind = aq::AirKind::kLastRow;
+            c.alg_degree = 1;
+            c.eval = [inverse_base, running, pinned](
+                         const std::vector<gf::Fp3>& cur,
+                         const std::vector<gf::Fp3>&) {
+                gf::Fp3 contribution = gf::Fp3::Zero();
+                for (uint32_t k = 0;
+                     k < kChildFsDigestBusBytesV1; ++k) {
+                    contribution = gf::Add(
+                        contribution, cur[inverse_base + k]);
+                }
+                return gf::Sub(
+                    gf::Add(cur[running], contribution), pinned);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+    }
+    out.valid = true;
+    return true;
+}
+
+bool
+DeriveChildFsDigestBusChallengesV1(
+    const ah::Digest& parent_statement,
+    const uint256& sha_digest,
+    uint32_t slot,
+    const std::vector<gf::Fp3>& parent_bus_cells,
+    const std::vector<gf::Fp3>& sha_bus_cells,
+    RCStage3CtlChallenges& out,
+    std::string* why)
+{
+    out = {};
+    if (parent_bus_cells.size() != kChildFsDigestBusBytesV1 ||
+        sha_bus_cells.size() != kChildFsDigestBusBytesV1) {
+        return ChildFsBusFail(why, "bus:challenge_cell_count");
+    }
+    // FS ORDERING (load-bearing).  The lane cells are 24 UNRANGE-CHECKED field
+    // elements: with alpha known in advance a forger could simply SOLVE
+    //   sum_k 1/(alpha - T(k, B_p[k])) = C_sha
+    // for a B_p != B_s.  So the challenge must be drawn only after BOTH byte
+    // windows are fixed.  This absorbs the windows themselves (the CTL idiom's
+    // "trace_commitment absorbed before lookup challenges"), plus the parent's
+    // binding statement and the companion SHA CS's claimed digest.  The lane
+    // columns and terminals are then post-challenge auxiliary data, so there is
+    // no Fiat-Shamir fixed point.  A grinding forger gets a fresh challenge per
+    // attempt, each vanishing with probability <= 48/p^3 per lane.
+    std::vector<gf::Fp> base;
+    base.push_back(gf::FromU64(0x4753345F42555331ULL)); // "G4_BUS1"
+    base.push_back(gf::FromU64(kChildFsDigestBusIdV1));
+    base.push_back(gf::FromU64(kChildFsDigestBusNamespaceV1));
+    base.push_back(gf::FromU64(kChildFsDigestBusStageV1));
+    base.push_back(gf::FromU64(slot));
+    for (gf::Fp limb : parent_statement) base.push_back(limb);
+    for (uint32_t i = 0; i < 32; ++i) {
+        base.push_back(gf::FromU64(
+            static_cast<uint64_t>(sha_digest.data()[i])));
+    }
+    for (const gf::Fp3& cell : parent_bus_cells) {
+        base.push_back(cell.c0);
+        base.push_back(cell.c1);
+        base.push_back(cell.c2);
+    }
+    for (const gf::Fp3& cell : sha_bus_cells) {
+        base.push_back(cell.c0);
+        base.push_back(cell.c1);
+        base.push_back(cell.c2);
+    }
+    // Rejection sampling with the CTL acceptance rule: each 64-bit candidate
+    // word must be < p, so accepted limbs are uniform on F_p.
+    uint32_t counter = 0;
+    const auto draw = [&](gf::Fp3& value) {
+        for (uint32_t attempt = 0;
+             attempt < kRCStage3CtlChallengeMaxCandidates * 8;
+             ++attempt) {
+            std::vector<gf::Fp> mix = base;
+            mix.push_back(gf::FromU64(counter++));
+            const ah::Digest d = ah::SpongeHashFp(mix);
+            bool ok = true;
+            std::array<uint64_t, 3> w{};
+            for (uint32_t j = 0; j < 3; ++j) {
+                w[j] = static_cast<uint64_t>(gf::Canonical(d[j]));
+                if (!RCStage3CtlChallengeWordIsAccepted(w[j])) ok = false;
+            }
+            if (!ok) continue;
+            gf::Fp3 candidate{};
+            candidate.c0 = gf::FromU64(w[0]);
+            candidate.c1 = gf::FromU64(w[1]);
+            candidate.c2 = gf::FromU64(w[2]);
+            if (gf::IsZero(candidate)) continue;
+            value = candidate;
+            return true;
+        }
+        return false;
+    };
+    if (!draw(out.gamma1)) return ChildFsBusFail(why, "bus:gamma1");
+    do {
+        if (!draw(out.gamma2)) return ChildFsBusFail(why, "bus:gamma2");
+    } while (gf::Eq(out.gamma1, out.gamma2));
+    if (!draw(out.alpha1)) return ChildFsBusFail(why, "bus:alpha1");
+    do {
+        if (!draw(out.alpha2)) return ChildFsBusFail(why, "bus:alpha2");
+    } while (gf::Eq(out.alpha1, out.alpha2));
+    return true;
+}
+
+ChildFsShaBoundVerifyV1
+VerifyChildFsShaBoundV1(
+    const FourSlotSelfSimilarCtlParentV1& parent,
+    const ChildAirChallengeShaReplayV1& replay,
+    uint32_t slot)
+{
+    ChildFsShaBoundVerifyV1 out;
+    if (slot >= kNormalizedUniversalParentArityV1) {
+        out.note = "stage3:child_fs_sha_bound:slot";
+        return out;
+    }
+    const uint32_t byte_base =
+        parent.child_air_challenge_byte_base[slot];
+    const uint32_t obb = replay.sha_output_byte_base;
+    if (byte_base == 0 ||
+        parent.parent_witness.size() <= byte_base + 23 ||
+        replay.columns.size() <= obb + 23) {
+        out.note = "stage3:child_fs_sha_bound:shape";
+        return out;
+    }
+    // (0) Joint Fiat-Shamir challenge, drawn AFTER both byte windows are fixed.
+    // The lane's inverse constraint is kFirstRow, so the cells that carry the
+    // relation are exactly the row-0 cells of each window; they are what must be
+    // absorbed before the challenge.  (Row 0 is sufficient for the decoder chain
+    // too: the parent's word-recompose / basis-reconstruction /
+    // bound-to-consumed constraints are all kEverywhere, hence hold at row 0.)
+    std::vector<gf::Fp3> parent_cells;
+    std::vector<gf::Fp3> sha_cells;
+    parent_cells.reserve(kChildFsDigestBusBytesV1);
+    sha_cells.reserve(kChildFsDigestBusBytesV1);
+    for (uint32_t k = 0; k < kChildFsDigestBusBytesV1; ++k) {
+        if (parent.parent_witness[byte_base + k].empty() ||
+            replay.columns[obb + k].empty()) {
+            out.note = "stage3:child_fs_sha_bound:empty_bus_cell";
+            return out;
+        }
+        parent_cells.push_back(parent.parent_witness[byte_base + k][0]);
+        sha_cells.push_back(replay.columns[obb + k][0]);
+    }
+    std::string why;
+    if (!DeriveChildFsDigestBusChallengesV1(
+            parent.computed_parent_statement, replay.digest, slot,
+            parent_cells, sha_cells, out.challenges, &why)) {
+        out.note = "stage3:child_fs_sha_bound:" + why;
+        return out;
+    }
+
+    // (1) PRODUCER endpoint on the companion SHA CS, over the SHA output bytes.
+    auto sha_cs = replay.cs;
+    auto sha_columns = replay.columns;
+    if (!AppendChildFsDigestBusLaneV1(
+            obb, out.challenges, nullptr, sha_cs, &sha_columns,
+            out.producer_lane, &why)) {
+        out.note = "stage3:child_fs_sha_bound:producer:" + why;
+        return out;
+    }
+    // (2) CONSUMER endpoint on the parent CS, over the exact digest-byte cells
+    // the parent decoder consumes.  Same builder => same relation.
+    auto parent_cs = parent.parent_cs;
+    auto parent_columns = parent.parent_witness;
+    if (!AppendChildFsDigestBusLaneV1(
+            byte_base, out.challenges, nullptr, parent_cs,
+            &parent_columns, out.consumer_lane, &why)) {
+        out.note = "stage3:child_fs_sha_bound:consumer:" + why;
+        return out;
+    }
+    out.c_sha = out.producer_lane.terminal.alpha1_sum;
+    out.c_parent = out.consumer_lane.terminal.alpha1_sum;
+
+    // (3) Each augmented AIR must be satisfied on H.
+    out.parent_violations =
+        ar::CountWitnessViolationsOnH(parent_cs, parent_columns);
+    out.sha_violations =
+        ar::CountWitnessViolationsOnH(sha_cs, sha_columns);
+    out.parent_cs_satisfied = out.parent_violations == 0;
+    out.sha_cs_satisfied = out.sha_violations == 0;
+    // (4) Cross-domain boundary: both lanes' terminals must coincide.
+    out.boundary_reconciled =
+        out.producer_lane.valid && out.consumer_lane.valid &&
+        out.producer_lane.terminal == out.consumer_lane.terminal;
+    out.valid = out.parent_cs_satisfied &&
+                out.sha_cs_satisfied &&
+                out.boundary_reconciled;
+    out.note = out.valid
+        ? "stage3:child_fs_sha_bound:"
+          "reconciled_in_parent_verification"
+        : (out.boundary_reconciled
+               ? "stage3:child_fs_sha_bound:rejected:table_violations"
+               : "stage3:child_fs_sha_bound:rejected:ctl_boundary");
+    return out;
+}
+
+
+ChildFsReplayClosureV1
+AssessChildFsReplayClosureV1()
+{
+    ChildFsReplayClosureV1 out;
+    // --- Obligation 1.  MEASURED by the env-gated adversarial test: a
+    // compensating digest-cell tamper leaves the four-slot parent_cs at ZERO
+    // violations (accepted without the bus) and is rejected by the CTL boundary
+    // with both tables still satisfied; likewise transcript substitution and
+    // cross-slot replay.
+    out.bus_constructed = true;
+    out.bus_rejects_coordinated_forgery = true;
+
+    // --- Obligation 2: COVERAGE.
+    // Slots: MEASURED at 4/4 on a clean binary.  The heavy test builds four
+    // DISTINCT children (four different trace_commits => four different
+    // airq_lambda digests, asserted), gives each slot its OWN companion SHA
+    // replay, and reconciles all four -- all twelve per-slot checks (each
+    // slot's parent_violations == 0, sha_violations == 0, and consumer lane
+    // anchored at that slot's child_air_challenge_byte_base) passed.
+    // Caveat, recorded rather than smoothed over: the run was terminated
+    // externally partway through the CROSS-SLOT rejection matrix, so 4 of the
+    // 12 mismatched (i,j) pairings are confirmed rejected, not all 12.  The
+    // four-slot COVERAGE claim below does not rest on that matrix; the matrix
+    // is an additional adversarial check.
+    out.slots_covered = 4;
+    // Challenge kinds: 1 of 8.  The parent decodes ONLY airq_lambda; grep of
+    // the four-slot builder shows fri_lambda / z1 / z2 / w1 / w2 / fold betas /
+    // query indices have NO parent decoder at all (only fold_challenges.size()
+    // is read).  The BUS itself is kind-agnostic -- it binds a 24-byte window --
+    // so what is missing is seven parent-side decoders plus a per-kind
+    // transcript replay, not seven buses.  That is parent-AIR construction work.
+    out.challenge_kinds_covered = 1;
+    // Toy child AIR (one boolean column, two rows).
+    out.real_child_shape_covered = false;
+    out.covers_all_slots_and_kinds =
+        out.slots_covered >= out.slots_required &&
+        out.challenge_kinds_covered >=
+            out.challenge_kinds_required &&
+        out.real_child_shape_covered;
+
+    // --- Obligation 3: PROOF LEVEL.
+    // The lane relation itself is carried by real AirQuotientProve/Verify with
+    // five genuine proof-level rejects (lied terminal, coordinated forgery,
+    // inverse tamper, cross-table replay, wrong FS seed) -- MEASURED.
+    out.lane_relation_fri_proven = true;
+    // Producer (companion SHA CS, 4096 rows x 541 columns) and consumer
+    // (bus-augmented four-slot parent, 17158 columns x 256 rows) FRI proofs are
+    // exercised only under BTX_RUN_G4_SHA_FRI / BTX_RUN_G4_PARENT_FRI.  Until
+    // those run in the default gate they are not claimed here.
+    out.producer_endpoint_fri_proven = false;
+    out.consumer_endpoint_fri_proven = false;
+    out.discharged_by_fri_proof =
+        out.lane_relation_fri_proven &&
+        out.producer_endpoint_fri_proven &&
+        out.consumer_endpoint_fri_proven;
+
+    // --- Obligation 4: the recursion-carrying parent hosts the replay + bus.
+    // TRUE for the covered kind: BuildFourSlotSelfSimilarCtlParentV1 owns the
+    // decoder cells and VerifyChildFsShaBoundV1 binds them to the companion SHA
+    // CS.  It becomes unconditionally true when obligation 2 closes.
+    out.recursion_parent_hosts_replay = true;
+
+    out.closed = out.bus_constructed &&
+                 out.bus_rejects_coordinated_forgery &&
+                 out.covers_all_slots_and_kinds &&
+                 out.discharged_by_fri_proof &&
+                 out.recursion_parent_hosts_replay;
+    if (out.closed) {
+        out.note = "stage3:child_fs_replay:closed";
+    } else {
+        out.note = "stage3:child_fs_replay:open:";
+        if (!out.bus_constructed) out.note += "no_bus;";
+        if (!out.bus_rejects_coordinated_forgery) {
+            out.note += "bus_does_not_reject_forgery;";
+        }
+        if (!out.covers_all_slots_and_kinds) {
+            out.note += "coverage_" +
+                std::to_string(out.slots_covered) + "of" +
+                std::to_string(out.slots_required) + "slots_" +
+                std::to_string(out.challenge_kinds_covered) + "of" +
+                std::to_string(out.challenge_kinds_required) +
+                "kinds" +
+                (out.real_child_shape_covered
+                     ? ";"
+                     : "_toy_child_shape;");
+        }
+        if (!out.discharged_by_fri_proof) {
+            out.note += "fri_proof_lane=";
+            out.note += out.lane_relation_fri_proven ? "1" : "0";
+            out.note += "_producer=";
+            out.note += out.producer_endpoint_fri_proven ? "1" : "0";
+            out.note += "_consumer=";
+            out.note += out.consumer_endpoint_fri_proven ? "1" : "0";
+            out.note += ";";
+        }
+        if (!out.recursion_parent_hosts_replay) {
+            out.note += "recursion_parent_has_no_replay;";
+        }
+    }
     return out;
 }
 
@@ -4154,6 +4649,39 @@ ProveParentOwnFriV1(
             "(parent V_CS columns=" +
             std::to_string(cs.n_columns) + " > cap=" +
             std::to_string(kRCFri3AlgBatchMaxColumns) + ")";
+        return out;
+    }
+    // rung-5 diagnostic: isolate the WIDE COMMIT cost at real node width. The
+    // former cap reject fired before any commit ran; with the raised cap the
+    // row-Merkle commit over W real columns is now producible. Time it in
+    // isolation (env-gated so default prove behavior is untouched) — this is the
+    // R_T trace commitment (Fri3AlgBatchRowRoot over all W columns) that the cap
+    // guarded, and it yields the canonical bit-identical root.
+    if (std::getenv("BTX_TIME_PARENT_COMMIT") != nullptr) {
+        // Column-at-a-time (streaming) row-Merkle commit: bit-identical root to
+        // the non-streaming Fri3AlgBatchRowRoot, but materializes ONE column's
+        // LDE at a time. At the MEASURED real shape (W=384984, n_rows=256 =>
+        // n_lde=4096) the non-streaming path would allocate all W column LDEs at
+        // once = 384984·4096·24 B ≈ 38 GB (risky alongside other lanes); the
+        // streaming path is ~O(witness) ≈ 2.4 GB resident. Same canonical root.
+        const auto t0 = std::chrono::steady_clock::now();
+        const Fri3AlgDigest d =
+            Fri3AlgBatchRowRootStreaming(witness, cs.n_rows);
+        const auto t1 = std::chrono::steady_clock::now();
+        const uint256 root = Fri3AlgDigestToUint256(d);
+        const double ms =
+            std::chrono::duration<double, std::milli>(t1 - t0).count();
+        std::fprintf(stderr,
+                     "PARENT_WIDE_COMMIT W=%u n_rows=%u n_lde=%u cap=%u "
+                     "commit_ms=%.1f root=%s null=%d\n",
+                     cs.n_columns, cs.n_rows, cs.n_rows * kRCFriBlowup,
+                     kRCFri3AlgBatchMaxColumns, ms, root.GetHex().c_str(),
+                     static_cast<int>(root.IsNull()));
+        std::fflush(stderr);
+        // Isolated-commit diagnostic mode: stop before the full quotient prove
+        // (whose non-streaming BatchCommit would materialize ~303 GB at real W).
+        out.within_backend_column_cap = true;
+        out.note = "stage3:parent_own_fri:commit_timed_streaming_only";
         return out;
     }
     // Prove the parent V_CS itself: batched FRI over trace + quotient with the
@@ -4196,6 +4724,25 @@ ProveFourSlotSelfSimilarParentOwnFriV1(
     if (!parent.valid || parent.witness_violations != 0) {
         out.note =
             "stage3:parent_own_fri:parent_not_in_air_valid";
+        return out;
+    }
+    // Report the over-cap verdict BEFORE any prove work is attempted.
+    // (ProveParentOwnFriV1 checks the same predicate, but callers read the
+    // four-slot wrapper's result and an early clean verdict is cheaper to
+    // diagnose than a deep failure.)  NOTE: the cap is
+    // kRCFri3AlgBatchMaxColumns = 1<<20, which no longer bounds MEMORY — a
+    // parent at the measured real shape (W=384984, n_rows=256) is well under
+    // the cap yet its non-streaming BatchCommit would materialize ~303 GB.  The
+    // cap is a backend-format bound, not an OOM guard.
+    out.within_backend_column_cap =
+        parent.parent_cs.n_columns <= kRCFri3AlgBatchMaxColumns;
+    if (!out.within_backend_column_cap) {
+        out.note =
+            "stage3:parent_own_fri:prove_failed:bad column count "
+            "(parent V_CS columns=" +
+            std::to_string(parent.parent_cs.n_columns) +
+            " > cap=" +
+            std::to_string(kRCFri3AlgBatchMaxColumns) + ")";
         return out;
     }
     return ProveParentOwnFriV1(

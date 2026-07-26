@@ -87,6 +87,25 @@ RCStage3MandatoryVerifierAirFamilies()
     return {true, true, true, true, true, true};
 }
 
+/**
+ * Canonical standalone codec for ONE role's AirQuotientProof body.
+ *
+ * This is exactly the (batch, trace_commit, next_openings) encoding the
+ * recursive carrier already uses for its aggregate root, exposed so a
+ * per-role Stage-3 proof SECTION can carry a real FRI proof on the wire
+ * without inventing a second, divergent encoding. Deserialization revalidates
+ * the structural bounds and requires canonical re-serialization.
+ */
+[[nodiscard]] bool SerializeRCStage3RoleAirProof(
+    const air_quotient::AirQuotientProof<
+        gkr_field::Fp3, air_quotient::AirFriBackendAlg<gkr_field::Fp3>>& proof,
+    std::vector<unsigned char>& out,
+    std::string* why = nullptr);
+[[nodiscard]] std::optional<air_quotient::AirQuotientProof<
+    gkr_field::Fp3, air_quotient::AirFriBackendAlg<gkr_field::Fp3>>>
+DeserializeRCStage3RoleAirProof(const std::vector<unsigned char>& bytes,
+                                std::string* why = nullptr);
+
 /** Canonical codec. The root FRI proof and supplemental row-wise openings are
  * bounded independently before allocation. */
 [[nodiscard]] bool SerializeRCStage3RecursiveProof(

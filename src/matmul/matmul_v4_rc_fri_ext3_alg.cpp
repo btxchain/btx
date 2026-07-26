@@ -5,14 +5,24 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 
 #include <matmul/matmul_v4_rc_fri_ext3.h> // Sha256dBytes (FS transcript only)
+#include <matmul/matmul_v4_rc_rowleaf_gpu.h> // PR-89 GPU splice #1 (row-leaf sponge)
+#include <matmul/matmul_v4_rc_air_quotient.h> // PR-89 Construction 2 predicate AIR
 #include <crypto/sha256.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <future>
 #include <limits>
+#include <mutex>
 #include <string>
 #include <thread>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 // Algebraic-hash twin of the BATCHED half of matmul_v4_rc_fri_ext3.cpp —
 // see the header for the approach note (spec §2.1 option (b): parallel file,
@@ -28,6 +38,11 @@
 // path-local Stage-3 Q=192 query count.
 
 namespace matmul::v4::rc {
+
+// PR-89 Construction 2 predicate AIR (field-native grind).
+namespace aq = air_quotient;
+namespace gf = gkr_field;
+
 namespace {
 
 using gkr_field::Add;
@@ -39,6 +54,48 @@ using gkr_field::Inv;
 using gkr_field::kP;
 using gkr_field::Mul;
 using gkr_field::Sub;
+
+// Prover thread count: BTX_PROVE_THREADS if set (>0), else all cores.
+// Parallelized phases here (per-leaf hashing, per-column LDE, per-level
+// compress) write only distinct output indices, so thread count / schedule
+// never alter the produced digests — output is byte-identical to serial.
+inline int BtxProveThreads()
+{
+#if defined(_OPENMP)
+    static const int t = [] {
+        if (const char* e = std::getenv("BTX_PROVE_THREADS")) {
+            const int v = std::atoi(e);
+            if (v > 0) return v;
+        }
+        return omp_get_max_threads();
+    }();
+    return t;
+#else
+    return 1;
+#endif
+}
+
+// Per-phase wall-clock instrumentation for the FRI commit, gated by
+// BTX_PROVE_TIMING (unset => no output, no effect on the proof).
+struct BtxFriTimer {
+    const bool on;
+    std::chrono::steady_clock::time_point last;
+    BtxFriTimer()
+        : on(std::getenv("BTX_PROVE_TIMING") != nullptr),
+          last(std::chrono::steady_clock::now()) {}
+    void mark(const char* name)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (on) {
+            const double ms =
+                std::chrono::duration<double, std::milli>(now - last).count();
+            std::fprintf(stderr, "[BTX_TIMING]   fri:%-18s %12.1f ms\n",
+                         name, ms);
+            std::fflush(stderr);
+        }
+        last = now;
+    }
+};
 
 /** Goldilocks 2^32-th root of unity: 7^((p-1)/2^32). */
 constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
@@ -205,6 +262,109 @@ std::vector<Fp3> LdeFromCoeffs(const std::vector<Fp3>& coeffs, uint32_t blowup)
     return padded;
 }
 
+// ===========================================================================
+// STREAMING COLUMN-BLOCK COMMIT (bounded prover residency)
+//
+// The dense prover materializes the WHOLE low-degree extension, W x n_lde Fp3.
+// At the MEASURED arity-4 real-role parent shape (W = 384,984 columns,
+// n_rows = 256 => n_lde = 4096) that single array is
+//   384984 * 4096 * 24 B ~= 35 GiB,
+// which OOM-kills the prover well before any soundness parameter is stressed.
+// Width is NOT the problem here: the column cap is 2^20 and query-proximity
+// soundness is W-independent. Only the FOOTPRINT is.
+//
+// The streaming form walks the column set in blocks of K, materializes only
+// those K column LDEs, and absorbs the block into the resident per-row sponge
+// state (StreamingRowHasher). Peak residency becomes O(K * n_lde) instead of
+// O(W * n_lde) — 6 MiB at K=64/n_lde=4096 instead of 35 GiB.
+//
+// BIT-IDENTICAL BY CONSTRUCTION, not by luck:
+//   * Column absorption order is unchanged. Block b covers columns
+//     [b*K, (b+1)*K); within a block the columns are absorbed in ascending
+//     index order; within a column the lanes are c0, c1, c2. That is exactly
+//     the sequence the monolithic LeafHashRow absorbs.
+//   * Each column LDE is an independent transform of that column's own
+//     coefficients, so blocking cannot perturb a value.
+//   * The Merkle tree is built from the same leaf digests in the same order.
+// Consequently the row root, every opening, and the serialized proof bytes are
+// byte-for-byte equal to the dense path. (Cross-checked against the dense
+// prover in the alg unit tests and, independently, against a CUDA streaming
+// implementation of the same absorb order on real prove data.)
+// ===========================================================================
+
+/** Peak column-LDE staging budget for the streaming commit, in bytes.
+ *  K is reduced below the nominal block size whenever K * n_lde * 24 would
+ *  exceed this, so a large LDE domain cannot reintroduce a huge allocation. */
+inline uint64_t Fri3AlgStreamBlockByteBudget()
+{
+    static const uint64_t b = [] {
+        if (const char* e = std::getenv("BTX_FRI_STREAM_BYTES")) {
+            const long long v = std::atoll(e);
+            if (v > 0) return static_cast<uint64_t>(v);
+        }
+        return kRCFri3AlgStreamBlockByteBudget;
+    }();
+    return b;
+}
+
+/** Nominal columns-per-block K (env-tunable; never changes proof bytes). */
+inline uint32_t Fri3AlgStreamColumnBlockNominal()
+{
+    static const uint32_t k = [] {
+        if (const char* e = std::getenv("BTX_FRI_STREAM_COLS")) {
+            const long v = std::atol(e);
+            if (v > 0 && v <= 65536) {
+                return static_cast<uint32_t>(v);
+            }
+        }
+        return kRCFri3AlgStreamColumnBlock;
+    }();
+    return k;
+}
+
+/** Effective K for an LDE domain of n_lde rows: at least 1, at most the
+ *  nominal K, and small enough to respect the staging byte budget. */
+inline uint32_t Fri3AlgStreamColumnBlockFor(uint32_t n_lde)
+{
+    const uint32_t nominal = Fri3AlgStreamColumnBlockNominal();
+    if (n_lde == 0) return nominal;
+    const uint64_t per_column =
+        static_cast<uint64_t>(n_lde) * sizeof(Fp3);
+    const uint64_t allowed =
+        Fri3AlgStreamBlockByteBudget() / std::max<uint64_t>(per_column, 1);
+    if (allowed <= 1) return 1;
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(nominal, allowed));
+}
+
+/**
+ * Materialize the LDEs of columns [c0, c0 + kc) into block[0..kc).
+ *
+ * `block` is reused across iterations, so the caller's peak staging cost is
+ * kc * n_lde * sizeof(Fp3) regardless of W. The per-column transforms are
+ * independent and write distinct block entries, so the OpenMP schedule cannot
+ * change a single output limb — identical to the dense per-column LDE loop.
+ */
+void BuildColumnLdeBlock(
+    const std::vector<std::vector<Fp3>>& columns,
+    uint32_t c0, uint32_t kc, uint32_t n_coeffs,
+    std::vector<std::vector<Fp3>>& block)
+{
+    if (block.size() < kc) block.resize(kc);
+    const int64_t count = static_cast<int64_t>(kc);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+    for (int64_t t = 0; t < count; ++t) {
+        const std::vector<Fp3>& src =
+            columns[c0 + static_cast<uint32_t>(t)];
+        std::vector<Fp3> padded(n_coeffs, Fp3::Zero());
+        std::copy(src.begin(), src.end(), padded.begin());
+        block[static_cast<size_t>(t)] =
+            LdeFromCoeffs(padded, kRCFriBlowup);
+    }
+}
+
 /** Field-native Merkle tree; public only as a prover-local checked cache. */
 using AlgMerkleTree = Fri3AlgRowTreeCache;
 
@@ -270,11 +430,17 @@ AlgMerkleTree BuildAlgMerkleTreeFromLeaves(
     std::vector<Fri3AlgDigest> level = t.levels[0];
     while (level.size() > 1) {
         if (level.size() % 2 == 1) level.push_back(level.back());
-        std::vector<Fri3AlgDigest> next;
-        next.reserve(level.size() / 2);
-        for (size_t i = 0; i < level.size(); i += 2) {
-            next.push_back(
-                AlgHashCompressForLane(level[i], level[i + 1], lane));
+        const size_t half = level.size() / 2;
+        // Per-level Merkle compress: each parent next[i] is an independent
+        // 2->1 hash of a distinct pair. Indexed writes → byte-identical.
+        std::vector<Fri3AlgDigest> next(half);
+        const int64_t nh = static_cast<int64_t>(half);
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+        for (int64_t i = 0; i < nh; ++i) {
+            next[i] = AlgHashCompressForLane(
+                level[2 * i], level[2 * i + 1], lane);
         }
         t.levels.push_back(next);
         level = std::move(next);
@@ -936,18 +1102,204 @@ std::vector<Fp3> SyntheticQuotient(const std::vector<Fp3>& coeffs, const Fp3& z,
 
 /** Row leaf digests over the common LDE domain: leaf i = LeafHashRow of ALL
  *  W column values at row i, in column order (spec §2.3). */
+std::vector<Fri3AlgDigest> RowLeafDigestsCpu(const std::vector<std::vector<Fp3>>& column_lde,
+                                             uint32_t n_lde,
+                                             int32_t lane)
+{
+    const uint32_t W = static_cast<uint32_t>(column_lde.size());
+    std::vector<Fri3AlgDigest> leaves(n_lde);
+    // LEAF-COMMIT: per-leaf Poseidon2 row hash, independent over the n_lde
+    // leaves. leaves[i] is a distinct write; the W-wide row scratch is
+    // allocated once per thread (not per leaf) to stay allocation-free.
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(BtxProveThreads())
+#endif
+    {
+        std::vector<Fp3> row(W);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (uint32_t i = 0; i < n_lde; ++i) {
+            for (uint32_t c = 0; c < W; ++c) row[c] = column_lde[c][i];
+            leaves[i] = AlgHashRowLeafForLane(row, i, lane);
+        }
+    }
+    return leaves;
+}
+
+// ---------------------------------------------------------------------------
+// PR-89 GPU splice #1: CUDA row-leaf sponge (BTX_GPU_ROWLEAF=1).
+//
+// Policy (no silent fallback):
+//  * env unset            -> CPU path, byte-identical to before this splice.
+//  * BTX_GPU_ROWLEAF=1    -> eligible calls (untagged lane, B256 binding) run
+//                            on the GPU; ANY GPU failure aborts the process.
+//                            Ineligible calls fall through to CPU with a
+//                            mandatory stderr notice (never silent).
+//  * BTX_GPU_ROWLEAF_AUDIT=1 (with =1 above) -> every GPU call ALSO runs the
+//                            CPU reference on the SAME real in-prove data and
+//                            aborts on the first digest mismatch. This is the
+//                            real-structured-data parity gate demanded by the
+//                            lazy-vs-canonical false-positive lesson.
+enum class RowLeafGpuMode { kOff,
+                            kOn,
+                            kAudit };
+
+RowLeafGpuMode RowLeafGpuModeActive()
+{
+    static const RowLeafGpuMode mode = [] {
+        const char* env = std::getenv("BTX_GPU_ROWLEAF");
+        if (env == nullptr || env[0] == '\0' || std::strcmp(env, "0") == 0) {
+            return RowLeafGpuMode::kOff;
+        }
+        if (std::getenv("BTX_GPU_ROWLEAF_AUDIT") != nullptr) {
+            return RowLeafGpuMode::kAudit;
+        }
+        return RowLeafGpuMode::kOn;
+    }();
+    return mode;
+}
+
+bool RowLeafDigestsGpu(const std::vector<std::vector<Fp3>>& column_lde,
+                       uint32_t n_lde,
+                       std::vector<Fri3AlgDigest>& out,
+                       std::string& why)
+{
+    const uint32_t W = static_cast<uint32_t>(column_lde.size());
+    if (W == 0 || n_lde == 0) {
+        why = "empty input";
+        return false;
+    }
+    if (BtxGpuRowLeafAvailable() == 0) {
+        why = "no CUDA device (or non-CUDA build)";
+        return false;
+    }
+    static std::once_flag consts_once;
+    static int consts_rc = -1;
+    std::call_once(consts_once, [] {
+        const auto& c = alg_hash::GetAlgHashConstants();
+        // std::array storage is contiguous: rc_ext flattens to [8][12] u64.
+        consts_rc = BtxGpuRowLeafSetConstants(
+            c.rc_ext.front().data(), c.rc_int.data(), c.mu.data());
+    });
+    if (consts_rc != 0) {
+        why = "constant upload failed";
+        return false;
+    }
+    void* ctx = nullptr;
+    if (BtxGpuRowLeafBegin(n_lde, &ctx) != 0) {
+        why = "Begin failed";
+        return false;
+    }
+    // Stream K-column, lane-major blocks: blk[(3*lc+t)*n_lde + i] =
+    // column_lde[c0+lc][i] limb t. Host staging is capped near 100 MiB.
+    uint32_t cols_per_block = static_cast<uint32_t>(
+        std::max<uint64_t>(1, (uint64_t{1} << 22) / n_lde));
+    if (cols_per_block > W) cols_per_block = W;
+    std::vector<uint64_t> blk(
+        static_cast<size_t>(3) * cols_per_block * n_lde);
+    for (uint32_t c0 = 0; c0 < W; c0 += cols_per_block) {
+        const uint32_t kc = std::min(cols_per_block, W - c0);
+        const int64_t kc64 = kc;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+        for (int64_t lc = 0; lc < kc64; ++lc) {
+            const std::vector<Fp3>& col = column_lde[c0 + lc];
+            uint64_t* b0 = blk.data() + static_cast<size_t>(3 * lc) * n_lde;
+            uint64_t* b1 = b0 + n_lde;
+            uint64_t* b2 = b1 + n_lde;
+            for (uint32_t i = 0; i < n_lde; ++i) {
+                b0[i] = col[i].c0;
+                b1[i] = col[i].c1;
+                b2[i] = col[i].c2;
+            }
+        }
+        if (BtxGpuRowLeafAbsorb(ctx, blk.data(), 3 * kc,
+                                uint64_t{3} * c0) != 0) {
+            BtxGpuRowLeafRelease(ctx);
+            why = "Absorb failed";
+            return false;
+        }
+    }
+    out.assign(n_lde, Fri3AlgDigest{});
+    static_assert(sizeof(Fri3AlgDigest) == 4 * sizeof(uint64_t),
+                  "Fri3AlgDigest must be 4 contiguous u64 limbs");
+    if (BtxGpuRowLeafFinalize(ctx, uint64_t{3} * W,
+                              reinterpret_cast<uint64_t*>(out.data())) != 0) {
+        why = "Finalize failed";
+        return false;
+    }
+    return true;
+}
+
 std::vector<Fri3AlgDigest> RowLeafDigests(const std::vector<std::vector<Fp3>>& column_lde,
                                           uint32_t n_lde,
                                           int32_t lane = -1)
 {
-    const uint32_t W = static_cast<uint32_t>(column_lde.size());
-    std::vector<Fri3AlgDigest> leaves(n_lde);
-    std::vector<Fp3> row(W);
-    for (uint32_t i = 0; i < n_lde; ++i) {
-        for (uint32_t c = 0; c < W; ++c) row[c] = column_lde[c][i];
-        leaves[i] = AlgHashRowLeafForLane(row, i, lane);
+    const RowLeafGpuMode gpu_mode = RowLeafGpuModeActive();
+    if (gpu_mode == RowLeafGpuMode::kOff) {
+        return RowLeafDigestsCpu(column_lde, n_lde, lane);
     }
-    return leaves;
+    if (lane != -1 ||
+        alg_hash::ActiveBindingMode() != alg_hash::BindingMode::B256) {
+        // Non-silent CPU fallthrough: the GPU sponge implements only the
+        // untagged B256 row leaf (the shipped Q192 consensus path).
+        std::fprintf(stderr,
+                     "[BTX_GPU_ROWLEAF] ineligible call (lane=%d, mode=%s) "
+                     "-> CPU reference path\n",
+                     static_cast<int>(lane),
+                     alg_hash::ActiveBindingMode() ==
+                             alg_hash::BindingMode::B256 ?
+                         "B256" :
+                         "B384");
+        return RowLeafDigestsCpu(column_lde, n_lde, lane);
+    }
+    std::vector<Fri3AlgDigest> gpu_leaves;
+    std::string why;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!RowLeafDigestsGpu(column_lde, n_lde, gpu_leaves, why)) {
+        std::fprintf(stderr,
+                     "[BTX_GPU_ROWLEAF] FATAL: GPU row-leaf commit failed "
+                     "(%s); BTX_GPU_ROWLEAF forbids a silent CPU fallback\n",
+                     why.c_str());
+        std::abort();
+    }
+    const double gpu_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0)
+            .count();
+    std::fprintf(stderr,
+                 "[BTX_GPU_ROWLEAF] GPU leaf-commit W=%u n_lde=%u %.1f ms%s\n",
+                 static_cast<uint32_t>(column_lde.size()), n_lde, gpu_ms,
+                 gpu_mode == RowLeafGpuMode::kAudit ? " (audit)" : "");
+    if (gpu_mode == RowLeafGpuMode::kAudit) {
+        const std::vector<Fri3AlgDigest> cpu_leaves =
+            RowLeafDigestsCpu(column_lde, n_lde, lane);
+        size_t mismatches = 0;
+        size_t first_bad = 0;
+        for (size_t i = 0; i < cpu_leaves.size(); ++i) {
+            if (cpu_leaves[i] != gpu_leaves[i]) {
+                if (mismatches == 0) first_bad = i;
+                ++mismatches;
+            }
+        }
+        if (mismatches != 0 || cpu_leaves.size() != gpu_leaves.size()) {
+            std::fprintf(stderr,
+                         "[BTX_GPU_ROWLEAF] AUDIT FAIL W=%u n_lde=%u "
+                         "mismatches=%zu first_bad=%zu — GPU/CPU digest "
+                         "divergence on real prove data\n",
+                         static_cast<uint32_t>(column_lde.size()), n_lde,
+                         mismatches, first_bad);
+            std::abort();
+        }
+        std::fprintf(stderr,
+                     "[BTX_GPU_ROWLEAF] AUDIT PASS W=%u n_lde=%u leaves=%zu "
+                     "(bit-identical CPU vs GPU on real prove data)\n",
+                     static_cast<uint32_t>(column_lde.size()), n_lde,
+                     gpu_leaves.size());
+    }
+    return gpu_leaves;
 }
 
 /** Batch FS preamble: domain-separated from every SHA-path transcript; the
@@ -1006,33 +1358,48 @@ uint256 RowTreeCacheBinding(
     if (columns.empty()) return {};
     static constexpr char CACHE_DOMAIN[] =
         "BTX_RC_FRI3_ALG_ROW_TREE_CACHE_V1";
-    std::vector<unsigned char> encoded(
-        reinterpret_cast<const unsigned char*>(
-            CACHE_DOMAIN),
-        reinterpret_cast<const unsigned char*>(
-            CACHE_DOMAIN) +
-            sizeof(CACHE_DOMAIN) - 1);
+    // The encoded pre-image is 24 bytes per coefficient over the WHOLE column
+    // set — ~2.4 GiB at the real-role parent width, and it used to be built as
+    // one contiguous vector (with reallocation doubling on top). Feed the SAME
+    // byte sequence to the hash one column at a time instead: the digest is
+    // unchanged (SHA256d is defined on the byte stream, not on the buffering),
+    // and the staging cost drops to one column.
+    CSHA256 inner;
+    inner.Write(
+        reinterpret_cast<const unsigned char*>(CACHE_DOMAIN),
+        sizeof(CACHE_DOMAIN) - 1);
+    std::vector<unsigned char> encoded;
     AppendLE32(
         encoded, static_cast<uint32_t>(columns.size()));
     AppendLE32(encoded, n_coeffs);
     AppendAlgDigest(encoded, root);
+    inner.Write(encoded.data(), encoded.size());
     for (const auto& column : columns) {
         if (column.empty() ||
             column.size() >
                 std::numeric_limits<uint32_t>::max()) {
             return {};
         }
+        encoded.clear();
+        encoded.reserve(4 + 24 * column.size());
         AppendLE32(
             encoded,
             static_cast<uint32_t>(column.size()));
         for (const Fp3& coefficient : column) {
             AppendFp3(encoded, coefficient);
         }
+        inner.Write(encoded.data(), encoded.size());
     }
     // This is a prover-local integrity binding, not a protocol commitment.
     // Pin the canonical coefficient limbs as well as shape/order so a cache
     // cannot be reused with an altered same-shaped coefficient matrix.
-    return Sha256dBytes(encoded.data(), encoded.size());
+    uint8_t d1[CSHA256::OUTPUT_SIZE];
+    inner.Finalize(d1);
+    uint8_t d2[CSHA256::OUTPUT_SIZE];
+    CSHA256().Write(d1, sizeof(d1)).Finalize(d2);
+    uint256 out;
+    std::memcpy(out.data(), d2, sizeof(d2));
+    return out;
 }
 
 } // namespace
@@ -1343,9 +1710,25 @@ Fri3AlgDigest Fri3AlgBatchRowRoot(const std::vector<std::vector<Fp3>>& columns, 
         return Fri3AlgDigest{};
     }
     const uint32_t n_lde = n_coeffs * kRCFriBlowup;
-    std::vector<std::vector<Fp3>> column_lde(columns.size());
     for (size_t i = 0; i < columns.size(); ++i) {
         if (columns[i].empty() || columns[i].size() > n_coeffs) return Fri3AlgDigest{};
+    }
+    // Byte-based admission (see Fri3AlgCommitFitsMemoryBudget): this DENSE row
+    // root materializes the whole W x n_lde extension. Refuse a shape that
+    // cannot fit rather than letting the allocator take the process down.
+    if (!Fri3AlgCommitFitsMemoryBudget(
+            columns.size(), n_lde, /*streaming=*/false, nullptr, nullptr)) {
+        return Fri3AlgDigest{};
+    }
+    // LDE-NTT (trace commitment root): forward coset-LDE per column, independent
+    // transforms writing distinct column_lde[i]. This is the DOMINANT node-scale
+    // phase (W up to ~16k columns), parallelized over columns. Bit-identical.
+    const int64_t ncols = static_cast<int64_t>(columns.size());
+    std::vector<std::vector<Fp3>> column_lde(columns.size());
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+    for (int64_t i = 0; i < ncols; ++i) {
         std::vector<Fp3> padded(n_coeffs, Fp3::Zero());
         for (size_t j = 0; j < columns[i].size(); ++j) padded[j] = columns[i][j];
         column_lde[i] = LdeFromCoeffs(padded, kRCFriBlowup);
@@ -1366,21 +1749,29 @@ Fri3AlgDigest Fri3AlgBatchRowRootStreaming(
         return {};
     }
     const uint32_t n_lde = n_coeffs * kRCFriBlowup;
-    alg_hash::StreamingRowHasher row_hasher(n_lde);
     for (const auto& column : columns) {
         if (column.empty() ||
             column.size() > n_coeffs) {
             return {};
         }
-        std::vector<Fp3> padded(
-            n_coeffs, Fp3::Zero());
-        std::copy(
-            column.begin(), column.end(),
-            padded.begin());
-        const std::vector<Fp3> one_column =
-            LdeFromCoeffs(padded, kRCFriBlowup);
-        if (!row_hasher.AbsorbColumn(one_column)) {
-            return {};
+    }
+    // Column-BLOCK streaming: only K column LDEs are resident at a time.
+    // Absorption order (ascending column, then c0/c1/c2) is unchanged, so the
+    // root equals Fri3AlgBatchRowRoot's limb for limb.
+    alg_hash::StreamingRowHasher row_hasher(n_lde);
+    {
+        const uint32_t W =
+            static_cast<uint32_t>(columns.size());
+        const uint32_t K =
+            Fri3AlgStreamColumnBlockFor(n_lde);
+        std::vector<std::vector<Fp3>> block;
+        for (uint32_t c0 = 0; c0 < W; c0 += K) {
+            const uint32_t kc = std::min(K, W - c0);
+            BuildColumnLdeBlock(
+                columns, c0, kc, n_coeffs, block);
+            if (!row_hasher.AbsorbColumnBlock(block, kc)) {
+                return {};
+            }
         }
     }
     std::vector<Fri3AlgDigest> leaves;
@@ -1424,6 +1815,20 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     }
     const uint32_t n_lde = n * kRCFriBlowup;
     const uint32_t W = static_cast<uint32_t>(columns.size());
+    // FAIL CLOSED ON PROJECTED BYTES, before a single column LDE is allocated.
+    // The column cap does not bound memory: the MEASURED real-role parent is
+    // under it and would still need 302.7 GiB densely. Reject cleanly instead
+    // of being OOM-killed.
+    {
+        uint64_t projected = 0;
+        std::string budget_why;
+        if (!Fri3AlgCommitFitsMemoryBudget(
+                W, n_lde, stream_column_lde, &projected, &budget_why)) {
+            out.note = "commit memory budget: " + budget_why;
+            return out;
+        }
+    }
+    BtxFriTimer __fri;
 
     Fri3AlgBatchProof& p = out.proof;
     p.version = config.proof_version;
@@ -1432,6 +1837,11 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     p.n_coeffs = n;
     p.column_len.resize(W);
     if (!stream_column_lde) out.column_lde.resize(W);
+    // LDE-NTT: forward coset-LDE per column, independent transforms writing
+    // distinct out.column_lde[i]. padded scratch is loop-local (thread-private).
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
     for (uint32_t i = 0; i < W; ++i) {
         p.column_len[i] = static_cast<uint32_t>(columns[i].size());
         if (!stream_column_lde) {
@@ -1443,6 +1853,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
                 LdeFromCoeffs(padded, kRCFriBlowup);
         }
     }
+    __fri.mark("lde_ntt(cols)");
     // ROW-WISE commitment (§2.3): ONE tree; leaf i = LeafHashRow of the whole
     // W-value row at LDE index i — one opening path per query instead of W.
     AlgMerkleTree row_tree;
@@ -1468,16 +1879,17 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
         std::vector<Fri3AlgDigest> leaves;
         {
             alg_hash::StreamingRowHasher row_hasher(n_lde);
-            for (uint32_t i = 0; i < W; ++i) {
-                std::vector<Fp3> padded(n, Fp3::Zero());
-                for (size_t j = 0; j < columns[i].size(); ++j) {
-                    padded[j] = columns[i][j];
-                }
-                std::vector<Fp3> one_column =
-                    LdeFromCoeffs(padded, kRCFriBlowup);
+            // Column-BLOCK pass 1: K column LDEs resident at a time.
+            const uint32_t K =
+                Fri3AlgStreamColumnBlockFor(n_lde);
+            std::vector<std::vector<Fp3>> block;
+            for (uint32_t c0 = 0; c0 < W; c0 += K) {
+                const uint32_t kc = std::min(K, W - c0);
+                BuildColumnLdeBlock(
+                    columns, c0, kc, n, block);
                 std::string stream_why;
-                if (!row_hasher.AbsorbColumn(
-                        one_column, &stream_why)) {
+                if (!row_hasher.AbsorbColumnBlock(
+                        block, kc, &stream_why)) {
                     out.note =
                         "streaming row absorb: " + stream_why;
                     return out;
@@ -1500,6 +1912,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     }
     p.row_commit.root = row_tree_view->root;
     p.row_commit.n_leaves = n_lde;
+    __fri.mark("rowleaf+merkle");
 
     // FS: the row root absorbed BEFORE any challenge (commit-then-challenge).
     Fri3AlgFs fs =
@@ -1618,6 +2031,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
         cur = std::move(next);
     }
 
+    __fri.mark("fold_layers");
     // PR-89 Construction 1 (Pi_JQ): T_l = SHA256d(lane-l FS buffer) captured at
     // the terminal fold layer, BEFORE the query loop. The dual driver squeezes
     // sigma_Q from both lanes' T_l and re-enters with config.joint_query set.
@@ -1656,21 +2070,25 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     }
     if (stream_column_lde) {
         // Query indices are transcript-derived only after every fold root is
-        // committed. Recompute one column LDE at a time and retain only the
-        // selected values. This is the second pass; no W×N_LDE matrix exists.
-        for (uint32_t i = 0; i < W; ++i) {
-            std::vector<Fp3> padded(n, Fp3::Zero());
-            for (size_t j = 0; j < columns[i].size(); ++j) {
-                padded[j] = columns[i][j];
-            }
-            const std::vector<Fp3> one_column =
-                LdeFromCoeffs(padded, kRCFriBlowup);
-            for (Fri3AlgBatchQuery& q : p.queries) {
-                q.row.values[i] = one_column[q.index];
+        // committed. Recompute the column LDEs one BLOCK of K at a time and
+        // retain only the selected values. This is the second pass; no
+        // W×N_LDE matrix ever exists.
+        const uint32_t K = Fri3AlgStreamColumnBlockFor(n_lde);
+        std::vector<std::vector<Fp3>> block;
+        for (uint32_t c0 = 0; c0 < W; c0 += K) {
+            const uint32_t kc = std::min(K, W - c0);
+            BuildColumnLdeBlock(columns, c0, kc, n, block);
+            for (uint32_t t = 0; t < kc; ++t) {
+                const std::vector<Fp3>& one_column = block[t];
+                for (Fri3AlgBatchQuery& q : p.queries) {
+                    q.row.values[c0 + t] =
+                        one_column[q.index];
+                }
             }
         }
     }
 
+    __fri.mark("query_openings");
     std::vector<unsigned char> ser;
     out.proof_bytes = SerializeFri3AlgBatchProof(p, ser);
     if (built_row_tree_out != nullptr &&
@@ -1687,6 +2105,76 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
             : "experimental domain-separated Q128 independent-batching algebraic-FRI lane";
     }
     return out;
+}
+
+uint64_t Fri3AlgDenseLdeBytes(uint64_t columns, uint32_t n_lde)
+{
+    return columns * static_cast<uint64_t>(n_lde) *
+           static_cast<uint64_t>(sizeof(Fp3));
+}
+
+bool Fri3AlgShouldStreamColumns(uint64_t columns, uint32_t n_lde)
+{
+    static const uint64_t budget = [] {
+        if (const char* e =
+                std::getenv("BTX_FRI_DENSE_LDE_BYTES")) {
+            // 0 is meaningful: "never materialize densely".
+            return static_cast<uint64_t>(
+                std::max<long long>(0, std::atoll(e)));
+        }
+        return kRCFri3AlgDenseLdeByteBudget;
+    }();
+    return Fri3AlgDenseLdeBytes(columns, n_lde) > budget;
+}
+
+uint64_t Fri3AlgProjectedCommitPeakBytes(uint64_t columns, uint32_t n_lde,
+                                         bool streaming)
+{
+    const uint64_t lde = streaming
+        ? Fri3AlgDenseLdeBytes(
+              Fri3AlgStreamColumnBlockFor(n_lde), n_lde)
+        : Fri3AlgDenseLdeBytes(columns, n_lde);
+    // Row-leaf digests + the Merkle levels above them (~2x the leaf level),
+    // plus the streaming sponge state when that path is active.
+    const uint64_t leaves =
+        static_cast<uint64_t>(n_lde) * sizeof(Fri3AlgDigest) * 2;
+    const uint64_t sponge =
+        streaming
+            ? alg_hash::StreamingRowHasher::WorkingSetBytesForRows(n_lde)
+            : 0;
+    return lde + leaves + sponge;
+}
+
+bool Fri3AlgCommitFitsMemoryBudget(uint64_t columns, uint32_t n_lde,
+                                   bool streaming, uint64_t* projected,
+                                   std::string* why)
+{
+    static const uint64_t ceiling = [] {
+        if (const char* e =
+                std::getenv("BTX_FRI_COMMIT_PEAK_BYTES")) {
+            const long long v = std::atoll(e);
+            if (v > 0) return static_cast<uint64_t>(v);
+        }
+        return kRCFri3AlgCommitPeakByteCeiling;
+    }();
+    const uint64_t peak =
+        Fri3AlgProjectedCommitPeakBytes(columns, n_lde, streaming);
+    if (projected != nullptr) *projected = peak;
+    if (peak <= ceiling) return true;
+    if (why != nullptr) {
+        // Fail CLOSED and say exactly why: a shape can sit far under the
+        // column cap and still be unallocatable.
+        *why = "projected commit residency " +
+               std::to_string(peak) +
+               " B exceeds ceiling " + std::to_string(ceiling) +
+               " B (columns=" + std::to_string(columns) +
+               " n_lde=" + std::to_string(n_lde) +
+               " streaming=" + (streaming ? "1" : "0") +
+               ") — this is a MEMORY guard, not the column cap "
+               "(kRCFri3AlgBatchMaxColumns=" +
+               std::to_string(kRCFri3AlgBatchMaxColumns) + ")";
+    }
+    return false;
 }
 
 Fri3AlgBatchCommitResult Fri3AlgBatchCommit(const std::vector<std::vector<Fp3>>& columns,
@@ -1852,19 +2340,23 @@ bool Fri3AlgBuildRowTreeCacheStreaming(
     }
     std::vector<Fri3AlgDigest> leaves;
     alg_hash::StreamingRowHasher row_hasher(n_lde);
-    for (const auto& column : columns) {
-        std::vector<Fp3> padded(
-            n_coeffs, Fp3::Zero());
-        std::copy(
-            column.begin(), column.end(),
-            padded.begin());
-        const std::vector<Fp3> one_column =
-            LdeFromCoeffs(padded, kRCFriBlowup);
-        std::string stream_why;
-        if (!row_hasher.AbsorbColumn(
-                one_column, &stream_why)) {
-            return fail(
-                "row absorb: " + stream_why);
+    {
+        // Column-BLOCK streaming: peak staging is K * n_lde Fp3, not W * n_lde.
+        const uint32_t W =
+            static_cast<uint32_t>(columns.size());
+        const uint32_t K =
+            Fri3AlgStreamColumnBlockFor(n_lde);
+        std::vector<std::vector<Fp3>> block;
+        for (uint32_t c0 = 0; c0 < W; c0 += K) {
+            const uint32_t kc = std::min(K, W - c0);
+            BuildColumnLdeBlock(
+                columns, c0, kc, n_coeffs, block);
+            std::string block_why;
+            if (!row_hasher.AbsorbColumnBlock(
+                    block, kc, &block_why)) {
+                return fail(
+                    "row absorb: " + block_why);
+            }
         }
     }
     std::string stream_why;
@@ -1917,20 +2409,27 @@ bool Fri3AlgOpenRowsStreamingSharedCached(
         out[opening].siblings =
             PathFromAlgTree(cache, indices[opening]);
     }
-    for (uint32_t column = 0;
-         column < columns.size(); ++column) {
-        std::vector<Fp3> padded(
-            n_coeffs, Fp3::Zero());
-        std::copy(
-            columns[column].begin(),
-            columns[column].end(),
-            padded.begin());
-        const std::vector<Fp3> one_column =
-            LdeFromCoeffs(padded, kRCFriBlowup);
-        for (size_t opening = 0;
-             opening < indices.size(); ++opening) {
-            out[opening].values[column] =
-                one_column[indices[opening]];
+    {
+        // Column-BLOCK opening pass: recompute K column LDEs at a time and
+        // keep only the queried rows. Values land in ascending column order,
+        // exactly as the dense path writes them.
+        const uint32_t W =
+            static_cast<uint32_t>(columns.size());
+        const uint32_t K =
+            Fri3AlgStreamColumnBlockFor(n_lde);
+        std::vector<std::vector<Fp3>> block;
+        for (uint32_t c0 = 0; c0 < W; c0 += K) {
+            const uint32_t kc = std::min(K, W - c0);
+            BuildColumnLdeBlock(
+                columns, c0, kc, n_coeffs, block);
+            for (uint32_t t = 0; t < kc; ++t) {
+                const std::vector<Fp3>& one_column = block[t];
+                for (size_t opening = 0;
+                     opening < indices.size(); ++opening) {
+                    out[opening].values[c0 + t] =
+                        one_column[indices[opening]];
+                }
+            }
         }
     }
     // A retained cache is an untrusted prover hint. Its root/coefficient
@@ -5933,6 +6432,18 @@ std::optional<uint64_t> Fri3AlgGrindSqueeze(
 {
     if (g == 0) return uint64_t{0};
     if (g > 256) return std::nullopt;
+    // Fail fast on a target no prover can actually meet, rather than spinning
+    // for the full budget. The VERIFIER predicate is unaffected and still
+    // accepts any g <= 256, so this cannot weaken a check.
+    if (g > kRCFri3AlgMaxGrindableBits) return std::nullopt;
+    // A g-bit predicate needs 2^g expected trials. The former flat 2^34 default
+    // was SMALLER than the advertised kRCFri3AlgJointQGrindBits = 40 target, so
+    // an honest prover at the shipped g exhausted the range ~98.4% of the time
+    // (P(hit) = 1 - exp(-2^34/2^40) = 0.0155). Derive the bound from g instead:
+    // 2^(g+10) gives P(exhaust) = exp(-1024), i.e. never in practice.
+    if (max_iters == 0) {
+        max_iters = uint64_t{1} << (g + kGrindIterationSlackBits);
+    }
     for (uint64_t nonce = 0; nonce < max_iters; ++nonce) {
         if (Fri3AlgLeadingZeroBits(
                 Fri3AlgSqueezeGrindDigest(squeeze_input, nonce)) >= g) {
@@ -5940,6 +6451,278 @@ std::optional<uint64_t> Fri3AlgGrindSqueeze(
         }
     }
     return std::nullopt;
+}
+
+// ============================================================================
+// PR-89 Construction 2, FIELD-NATIVE difficulty predicate (see header for the
+// VACUITY TRAP this deliberately avoids).
+// ============================================================================
+uint32_t Fri3AlgTrailingZeroBitsFp(Fp x)
+{
+    const uint64_t v = gkr_field::Canonical(x);
+    if (v == 0) return 64;
+    uint32_t bits = 0;
+    while (((v >> bits) & 1u) == 0) ++bits;
+    return bits;
+}
+
+bool Fri3AlgCheckAlgebraicGrind(Fp lane0, uint32_t g)
+{
+    if (g == 0) return true;
+    if (g > kRCFri3AlgMaxAlgebraicGrindBits) return false;
+    return Fri3AlgTrailingZeroBitsFp(lane0) >= g;
+}
+
+namespace {
+
+// Column layout for the predicate AIR: 64 bit columns, the recomposed value,
+// then the high-32 AND chain used by the canonicity check.
+constexpr uint32_t kGrindPredBits = 64;
+constexpr uint32_t kGrindPredHighBits = 32;      // bits 32..63
+constexpr uint32_t kGrindPredAndChunk = 6;       // 6 bits/step => alg_degree 7
+constexpr uint32_t kGrindPredAndSteps =
+    (kGrindPredHighBits + kGrindPredAndChunk - 1) / kGrindPredAndChunk; // 6
+constexpr uint32_t kGrindPredValueCol = kGrindPredBits;          // 64
+constexpr uint32_t kGrindPredAndBase = kGrindPredValueCol + 1;   // 65
+constexpr uint32_t kGrindPredColumns = kGrindPredAndBase + kGrindPredAndSteps;
+
+} // namespace
+
+Fri3AlgGrindPredicateAirV1 BuildFri3AlgGrindPredicateAirV1(
+    Fp lane0, uint32_t g, bool use_aliased_witness)
+{
+    Fri3AlgGrindPredicateAirV1 out;
+    out.tax_bits = g;
+    out.bit_columns = kGrindPredBits;
+    out.n_rows = 2; // structural minimum; the predicate is one logical row
+    out.n_columns = kGrindPredColumns;
+    if (g == 0 || g > kRCFri3AlgMaxAlgebraicGrindBits) {
+        out.note = "grind predicate: g out of range";
+        return out;
+    }
+
+    // The witness the PROVER supplies: either the true canonical decomposition
+    // of lane0, or the aliased B = x + p an attacker would use to fake the tax.
+    const uint64_t canonical = gkr_field::Canonical(lane0);
+    uint64_t bits_source = canonical;
+    if (use_aliased_witness) {
+        // B = x + p is only representable in 64 bits when x < 2^32 - 1.
+        const unsigned __int128 aliased =
+            static_cast<unsigned __int128>(canonical) +
+            static_cast<unsigned __int128>(gkr_field::kP);
+        if (aliased >> 64) {
+            out.note = "grind predicate: value admits no 64-bit alias";
+            return out;
+        }
+        bits_source = static_cast<uint64_t>(aliased);
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    cs.n_rows = out.n_rows;
+    cs.n_columns = out.n_columns;
+    cs.preprocessed_pin_ood = true;
+
+    // --- (1) booleanity of every bit column.
+    for (uint32_t bit = 0; bit < kGrindPredBits; ++bit) {
+        aq::AirConstraint<gf::Fp3> boolean;
+        boolean.name = "stage3.fri3alg.grind.bit_boolean";
+        boolean.kind = aq::AirKind::kEverywhere;
+        boolean.alg_degree = 2;
+        boolean.eval = [bit](const std::vector<gf::Fp3>& row,
+                             const std::vector<gf::Fp3>&) {
+            return gf::Mul(row[bit],
+                           gf::Sub(row[bit], gf::Fp3::One()));
+        };
+        cs.constraints.push_back(std::move(boolean));
+    }
+    out.booleanity_constrained = true;
+
+    // --- (2) recomposition: value == sum b_i 2^i (mod p).
+    {
+        aq::AirConstraint<gf::Fp3> rec;
+        rec.name = "stage3.fri3alg.grind.recomposition";
+        rec.kind = aq::AirKind::kEverywhere;
+        rec.alg_degree = 1;
+        rec.eval = [](const std::vector<gf::Fp3>& row,
+                      const std::vector<gf::Fp3>&) {
+            gf::Fp3 acc = gf::Fp3::Zero();
+            gf::Fp3 power = gf::Fp3::One();
+            for (uint32_t bit = 0; bit < kGrindPredBits; ++bit) {
+                acc = gf::Add(acc, gf::Mul(power, row[bit]));
+                power = gf::Add(power, power);
+            }
+            return gf::Sub(row[kGrindPredValueCol], acc);
+        };
+        cs.constraints.push_back(std::move(rec));
+    }
+
+    // --- (3) high-32 AND chain: and_k == and_{k-1} * prod(next 6 high bits).
+    for (uint32_t step = 0; step < kGrindPredAndSteps; ++step) {
+        const uint32_t first = kGrindPredHighBits + step * kGrindPredAndChunk;
+        const uint32_t last =
+            std::min<uint32_t>(first + kGrindPredAndChunk, kGrindPredBits);
+        aq::AirConstraint<gf::Fp3> chain;
+        chain.name = "stage3.fri3alg.grind.high_and_chain";
+        chain.kind = aq::AirKind::kEverywhere;
+        chain.alg_degree = kGrindPredAndChunk + 1;
+        chain.eval = [step, first, last](const std::vector<gf::Fp3>& row,
+                                         const std::vector<gf::Fp3>&) {
+            gf::Fp3 prod = (step == 0)
+                               ? gf::Fp3::One()
+                               : row[kGrindPredAndBase + step - 1];
+            for (uint32_t bit = first; bit < last; ++bit) {
+                prod = gf::Mul(prod, row[bit]);
+            }
+            return gf::Sub(row[kGrindPredAndBase + step], prod);
+        };
+        cs.constraints.push_back(std::move(chain));
+    }
+
+    // --- (4) canonicity: NOT(high 32 bits all one AND low 32 bits nonzero).
+    // Encoded as and_last * low32 == 0. Without this, B = x + p is accepted and
+    // the tax can be claimed on a value that does not satisfy it.
+    {
+        aq::AirConstraint<gf::Fp3> canon;
+        canon.name = "stage3.fri3alg.grind.canonicity";
+        canon.kind = aq::AirKind::kEverywhere;
+        canon.alg_degree = 2;
+        canon.eval = [](const std::vector<gf::Fp3>& row,
+                        const std::vector<gf::Fp3>&) {
+            gf::Fp3 low = gf::Fp3::Zero();
+            gf::Fp3 power = gf::Fp3::One();
+            for (uint32_t bit = 0; bit < kGrindPredHighBits; ++bit) {
+                low = gf::Add(low, gf::Mul(power, row[bit]));
+                power = gf::Add(power, power);
+            }
+            return gf::Mul(
+                row[kGrindPredAndBase + kGrindPredAndSteps - 1], low);
+        };
+        cs.constraints.push_back(std::move(canon));
+    }
+    out.canonicity_constrained = true;
+
+    // --- (5) the tax itself: the low g bits are zero.
+    for (uint32_t bit = 0; bit < g; ++bit) {
+        aq::AirConstraint<gf::Fp3> tax;
+        tax.name = "stage3.fri3alg.grind.tax_bit_zero";
+        tax.kind = aq::AirKind::kEverywhere;
+        tax.alg_degree = 1;
+        tax.eval = [bit](const std::vector<gf::Fp3>& row,
+                         const std::vector<gf::Fp3>&) { return row[bit]; };
+        cs.constraints.push_back(std::move(tax));
+    }
+    out.tax_constrained = true;
+
+    // Materialise the witness row and count ACTUAL violations.
+    std::vector<gf::Fp3> row(out.n_columns, gf::Fp3::Zero());
+    for (uint32_t bit = 0; bit < kGrindPredBits; ++bit) {
+        row[bit] = gf::Fp3::FromFp(
+            gf::FromU64((bits_source >> bit) & 1u));
+    }
+    row[kGrindPredValueCol] = gf::Fp3::FromFp(lane0);
+    for (uint32_t step = 0; step < kGrindPredAndSteps; ++step) {
+        const uint32_t first = kGrindPredHighBits + step * kGrindPredAndChunk;
+        const uint32_t last =
+            std::min<uint32_t>(first + kGrindPredAndChunk, kGrindPredBits);
+        gf::Fp3 prod = (step == 0)
+                           ? gf::Fp3::One()
+                           : row[kGrindPredAndBase + step - 1];
+        for (uint32_t bit = first; bit < last; ++bit) {
+            prod = gf::Mul(prod, row[bit]);
+        }
+        row[kGrindPredAndBase + step] = prod;
+    }
+    const std::vector<gf::Fp3> next = row; // constant across the 2-row domain
+    for (const auto& c : cs.constraints) {
+        if (!gf::Eq(c.eval(row, next), gf::Fp3::Zero())) ++out.violations;
+        out.max_alg_degree = std::max(out.max_alg_degree, c.alg_degree);
+    }
+
+    out.n_constraints = static_cast<uint32_t>(cs.constraints.size());
+    out.valid = true;
+    out.note = "field-native grind predicate: bit-decomposed with canonicity "
+               "(NOT the vacuous lane0 == 2^g*h form)";
+    return out;
+}
+
+// ============================================================================
+// PR-89 Construction 2: ALGEBRAIC taxed deciding squeeze (NOT ACTIVATED).
+// ============================================================================
+namespace {
+
+// A uint64 is absorbed as TWO 32-bit lanes. Absorbing it as one FromU64 lane
+// would be lossy — FromU64 reduces mod p, so 2^32 - 1 distinct u64 values
+// collide onto the same lane and the transcript would not be injective.
+void AppendU64Lanes(std::vector<Fp>& lanes, uint64_t v)
+{
+    lanes.push_back(gf::FromU64(v & 0xFFFFFFFFull));
+    lanes.push_back(gf::FromU64((v >> 32) & 0xFFFFFFFFull));
+}
+
+} // namespace
+
+Fri3AlgDigest Fri3AlgAlgebraicTranscriptDigest(const std::vector<Fp>& lanes,
+                                               uint64_t domain)
+{
+    std::vector<Fp> buf;
+    buf.reserve(lanes.size() + 2);
+    AppendU64Lanes(buf, domain);
+    buf.insert(buf.end(), lanes.begin(), lanes.end());
+    // SpongeHashFp applies injective 10*-padding at rate 8, so the domain
+    // prefix is a genuine separator rather than a collidable prefix.
+    return alg_hash::SpongeHashFp(buf);
+}
+
+Fri3AlgDigest Fri3AlgAlgebraicSqueeze(const std::vector<Fp>& sigma_core,
+                                      uint64_t nonce)
+{
+    std::vector<Fp> buf(sigma_core);
+    AppendU64Lanes(buf, nonce);
+    return Fri3AlgAlgebraicTranscriptDigest(buf, kRCFri3AlgTaxedQDomain);
+}
+
+bool Fri3AlgCheckAlgebraicSqueezeGrind(const std::vector<Fp>& sigma_core,
+                                       uint64_t nonce, uint32_t g)
+{
+    if (g == 0) return true;
+    if (g > kRCFri3AlgMaxAlgebraicGrindBits) return false;
+    return Fri3AlgCheckAlgebraicGrind(
+        Fri3AlgAlgebraicSqueeze(sigma_core, nonce)[0], g);
+}
+
+std::optional<uint64_t> Fri3AlgGrindAlgebraicSqueeze(
+    const std::vector<Fp>& sigma_core, uint32_t g, uint64_t max_iters)
+{
+    if (g == 0) return uint64_t{0};
+    if (g > kRCFri3AlgMaxAlgebraicGrindBits) return std::nullopt;
+    if (g > kRCFri3AlgMaxGrindableBits) return std::nullopt;
+    if (max_iters == 0) {
+        max_iters = uint64_t{1} << (g + kGrindIterationSlackBits);
+    }
+    for (uint64_t nonce = 0; nonce < max_iters; ++nonce) {
+        if (Fri3AlgCheckAlgebraicGrind(
+                Fri3AlgAlgebraicSqueeze(sigma_core, nonce)[0], g)) {
+            return nonce;
+        }
+    }
+    return std::nullopt;
+}
+
+uint32_t Fri3AlgAlgebraicQueryIndex(const Fri3AlgDigest& sigma, uint32_t j,
+                                    uint32_t n_lde)
+{
+    if (n_lde == 0 || (n_lde & (n_lde - 1)) != 0) return 0;
+    std::vector<Fp> buf;
+    buf.reserve(alg_hash::kAlgHashDigestLen + 2);
+    for (uint32_t lane = 0; lane < alg_hash::kAlgHashDigestLen; ++lane) {
+        buf.push_back(sigma[lane]);
+    }
+    AppendU64Lanes(buf, j);
+    const Fri3AlgDigest d =
+        Fri3AlgAlgebraicTranscriptDigest(buf, kRCFri3AlgTaxedQIndexDomain);
+    const uint32_t le32 =
+        static_cast<uint32_t>(gf::Canonical(d[0]) & 0xFFFFFFFFull);
+    return le32 & (n_lde - 1);
 }
 
 // ============================================================================

@@ -17,6 +17,8 @@
 #include <consensus/validation.h>
 #include <deploymentstatus.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc_stage3.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <logging.h>
 #include <matmul/matrix.h>
 #include <node/context.h>
@@ -1017,7 +1019,49 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
         nBlockWeight += payload_bytes * WITNESS_SCALE_FACTOR;
     }
 
-    pblock->nVersion = m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
+    // PR-89 item 5: the SAME self-DoS applies to the Stage-3 succinct proof.
+    // Once the authority gate closes, every RC-family winner carries a proof in
+    // matrix_c_data, which is non-witness block data (WITNESS_SCALE_FACTOR == 1)
+    // and therefore counts 1:1 against nMaxBlockSerializedSize (validation.cpp
+    // CheckBlock) and nMaxBlockWeight (ContextualCheckBlockBodyOnly). The
+    // assembler must subtract it BEFORE selecting transactions or the miner
+    // packs a block that its own attachment step pushes over the limit.
+    //
+    // The reservation is a MEASURED bound (RCStage3PlannedReservation), derived
+    // from the 35,363,636-byte envelope the section-assembly lane produced from
+    // six real role-section proofs, using the same word-packing and CompactSize
+    // arithmetic the attachment itself uses — so the reservation and the
+    // eventual attachment cannot disagree. It replaces an earlier placeholder
+    // that simply reserved the 16 MiB parse ceiling.
+    //
+    // If that bound does not fit (which is the case TODAY — the measured
+    // envelope is 2.1x the codec cap and larger than a whole block), the miner
+    // must refuse to build the template rather than mine a block it could never
+    // legally complete. Failing here is the earliest and cheapest place to
+    // surface the size wall.
+    if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+        const auto reservation = matmul::v4::rc::RCStage3PlannedReservation(
+            chainparams.GetConsensus(), nHeight);
+        if (reservation.envelope_bytes != 0) {
+            if (!reservation.Usable()) {
+                LogWarning(
+                    "CreateNewBlock(): Stage-3 proof reservation does not fit at "
+                    "height %d: envelope=%u B delta=%u B codec_ok=%d block_ok=%d "
+                    "basis=%s\n",
+                    nHeight, reservation.envelope_bytes,
+                    reservation.block_serialized_delta,
+                    reservation.fits_codec_cap, reservation.fits_block_cap,
+                    reservation.basis);
+                throw std::runtime_error(
+                    "CreateNewBlock(): Stage-3 proof cannot fit in a block at "
+                    "this height");
+            }
+            nBlockSize += reservation.block_serialized_delta;
+            nBlockWeight += reservation.block_serialized_delta * WITNESS_SCALE_FACTOR;
+        }
+    }
+
+    pblock->nVersion =m_chainstate.m_chainman.m_versionbitscache.ComputeBlockVersion(pindexPrev, chainparams.GetConsensus());
     // -regtest only: allow overriding block.nVersion with
     // -blockversion=N to test forking scenarios
     if (chainparams.MineBlocksOnDemand()) {

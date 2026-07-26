@@ -637,6 +637,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_coupled_bank_root_binding.cpp
   matmul/matmul_v4_rc_stage3_coupled_signed_range_binding.cpp
   matmul/matmul_v4_rc_stage3_consensus.cpp
+  matmul/matmul_v4_rc_stage3_producer.cpp
+  matmul/matmul_v4_rc_stage3_air_quotient_codec.cpp
   matmul/matmul_v4_rc_stage3_composition.cpp
   matmul/matmul_v4_rc_stage3_coupled.cpp
   matmul/matmul_v4_rc_stage3_coupled_air.cpp
@@ -660,6 +662,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_coupled_bank_narrow.cpp
   matmul/matmul_v4_rc_stage3_ctl.cpp
   matmul/matmul_v4_rc_stage3_recursive.cpp
+  matmul/matmul_v4_rc_stage3_role_sections.cpp
   matmul/matmul_v4_rc_stage3_unified_root.cpp
   matmul/matmul_v4_rc_stage3_relation_closure.cpp
   matmul/matmul_v4_rc_stage3_stream_endpoint.cpp
@@ -785,6 +788,16 @@ target_link_libraries(bitcoin_common
 if(APPLE)
   find_btx_apple_framework(BTX_ACCELERATE_FRAMEWORK Accelerate)
   target_link_libraries(bitcoin_common PRIVATE ${BTX_ACCELERATE_FRAMEWORK})
+endif()
+
+# OpenMP for the multi-threaded Fp3 recursive prover (composition/quotient
+# eval, per-column LDE-NTT, per-leaf Poseidon2 row hashing, per-level Merkle
+# compress). PUBLIC so the runtime (-fopenmp / libgomp) propagates to every
+# consumer of bitcoin_common (node + test binaries). The pragmas are guarded
+# by _OPENMP, so a build without OpenMP falls back to the serial loops.
+find_package(OpenMP)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(bitcoin_common PUBLIC OpenMP::OpenMP_CXX)
 endif()
 
 # Shielded pool and proof implementation shared by node and wallet targets.
@@ -1006,6 +1019,9 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # ENC_RC datacenter episode arena (cudaMallocAsync + Graphs scaffold).
     # Replaces cuda/matmul_v4_rc_episode_context_link.cpp when CUDA ON.
     cuda/matmul_v4_rc_episode_context.cu
+    # PR-89 GPU splice #1: Poseidon2 row-leaf sponge for the recursion prover
+    # (BTX_GPU_ROWLEAF env gate in matmul_v4_rc_fri_ext3_alg.cpp).
+    cuda/matmul_v4_rc_rowleaf_gpu.cu
   )
   if(BTX_BMX4C_CUTLASS_MXFP4 OR BTX_BUILD_LT_CUTLASS_MXFP4)
     set(_btx_cutlass_inc "")
@@ -1101,6 +1117,7 @@ else()
     cuda/matmul_v4_accel_stub.cpp
     cuda/matmul_v4_bmx4_accel_stub.cpp
     cuda/matmul_v4_lt_accel_stub.cpp
+    cuda/matmul_v4_rc_rowleaf_gpu_stub.cpp
   )
 endif()
 if(BTX_ENABLE_HIP)

@@ -2197,9 +2197,15 @@ bool AssembleScalarRoleAirCS(
 // fully-scalar coupled role. Every kernel column is filled and constant across
 // rows (all kernel constraints are kEverywhere), so the deg-1 endpoint value
 // aliases to the constant opening value hold on every row.
+// `real_mix` (optional): when set, the CoupledMix adder consumes these REAL
+// 64-bit operands (a,b), each as four little-endian 16-bit limbs, instead of the
+// synthetic constants — so the proved sum=a+b / diff=b-a relation is over real
+// block-derived values.  Null => synthetic (unchanged shipped behavior).
 bool BuildScalarRoleKernelWitness(
     RCStage3RelationRole role, uint32_t kernel_w, uint32_t rows,
-    std::vector<std::vector<gf::Fp3>>& cols, std::string* why)
+    std::vector<std::vector<gf::Fp3>>& cols, std::string* why,
+    const std::array<uint32_t, 4>* real_mix_a = nullptr,
+    const std::array<uint32_t, 4>* real_mix_b = nullptr)
 {
     using namespace coupled_air_col;
     cols.assign(kernel_w, std::vector<gf::Fp3>(rows, gf::Fp3::Zero()));
@@ -2215,8 +2221,14 @@ bool BuildScalarRoleKernelWitness(
         return true;
     }
     if (role == RCStage3RelationRole::CoupledMix) {
-        const std::array<uint32_t, 4> a = {0x1234u, 0x5678u, 0x9abcu, 0xdef0u};
-        const std::array<uint32_t, 4> b = {0x1111u, 0x2222u, 0x3333u, 0x4444u};
+        const std::array<uint32_t, 4> a =
+            real_mix_a != nullptr ? *real_mix_a
+                                  : std::array<uint32_t, 4>{0x1234u, 0x5678u,
+                                                            0x9abcu, 0xdef0u};
+        const std::array<uint32_t, 4> b =
+            real_mix_b != nullptr ? *real_mix_b
+                                  : std::array<uint32_t, 4>{0x1111u, 0x2222u,
+                                                            0x3333u, 0x4444u};
         std::array<uint32_t, 4> sum{}, carry{}, diff{}, borrow{};
         uint32_t cin = 0, bin = 0;
         for (uint32_t l = 0; l < 4; ++l) {
@@ -2268,7 +2280,8 @@ bool BuildRCStage3CoupledScalarRoleAirCS(
 
 RCStage3RoleAirProduct BuildRCStage3CoupledScalarRoleAir(
     RCStage3RelationRole role, uint32_t leaf_index, uint32_t path_len,
-    std::string* why)
+    std::string* why, const std::array<uint32_t, 4>* real_mix_a,
+    const std::array<uint32_t, 4>* real_mix_b)
 {
     RCStage3RoleAirProduct out;
     out.role = role;
@@ -2299,7 +2312,8 @@ RCStage3RoleAirProduct BuildRCStage3CoupledScalarRoleAir(
     const uint32_t kernel_w = kcs.n_columns;
 
     std::vector<std::vector<gf::Fp3>> kernel_cols;
-    if (!BuildScalarRoleKernelWitness(role, kernel_w, rows, kernel_cols, why)) {
+    if (!BuildScalarRoleKernelWitness(role, kernel_w, rows, kernel_cols, why,
+                                      real_mix_a, real_mix_b)) {
         out.note = "kernel_witness";
         return out;
     }
@@ -2906,16 +2920,23 @@ RCStage3WiredCloserProduct BuildRCStage3SignedRangeWiredCloserProduct(
     return out;
 }
 
-RCStage3RoleAirProduct BuildRCStage3CoupledGemmRoleAir(std::string* why)
+RCStage3RoleAirProduct BuildRCStage3CoupledGemmRoleAir(
+    std::string* why, const int64_t* real_a, const int64_t* real_b,
+    const uint256* real_sr_root)
 {
     using namespace coupled_air_col;
     RCStage3RoleAirProduct out;
     out.role = RCStage3RelationRole::CoupledGemm;
 
     // The SignedRange wired closer fixes the shared row count (13-lane leaf ->
-    // 6 sponge blocks -> 8 rows). All fragments share it.
+    // 6 sponge blocks -> 8 rows). All fragments share it.  When a REAL range
+    // root is supplied it is pinned as RANGE_VALUE == Y (the honest equality).
     uint256 sr_root;
-    std::fill(sr_root.begin(), sr_root.end(), 0x11); // RANGE_VALUE == Y (honest)
+    if (real_sr_root != nullptr) {
+        sr_root = *real_sr_root;
+    } else {
+        std::fill(sr_root.begin(), sr_root.end(), 0x11);
+    }
     RCStage3WiredCloserProduct wired =
         BuildRCStage3SignedRangeWiredCloserProduct(0, 100, 7, 8, 255, sr_root,
                                                    sr_root, why);
@@ -2931,7 +2952,9 @@ RCStage3RoleAirProduct BuildRCStage3CoupledGemmRoleAir(std::string* why)
     }
 
     // --- GEMM a·b accumulator kernel with CONSTANT operands (so A/B/OUT are
-    // row-constant and can be boundary-aliased to their opening blocks). ---
+    // row-constant and can be boundary-aliased to their opening blocks). When
+    // REAL operands are supplied, (a,b) are the block's GEMM operands and OUT =
+    // rows·a·b is the kernel's faithful accumulation of the real product. ---
     constraint_bytecode::ProgramTable kt;
     if (!BuildRCStage3CoupledLocalKernelProgramTable(
             RCStage3RelationRole::CoupledGemm, kt, why)) {
@@ -2948,18 +2971,24 @@ RCStage3RoleAirProduct BuildRCStage3CoupledGemmRoleAir(std::string* why)
         out.note = "kernel_width";
         return out;
     }
-    const uint64_t a = 3, b = 5;
-    const uint64_t prod = a * b;
+    const bool use_real = (real_a != nullptr && real_b != nullptr);
+    const int64_t ai = use_real ? *real_a : 3;
+    const int64_t bi = use_real ? *real_b : 5;
+    const int64_t prodi = ai * bi;
+    const int64_t out_i = prodi * static_cast<int64_t>(rows);
+    auto cellv = [&](int64_t v) {
+        return use_real ? gf::FromSigned3(v)
+                        : gf::Fp3::FromFp(gf::FromU64(static_cast<uint64_t>(v)));
+    };
     std::vector<std::vector<gf::Fp3>> kernel_cols(
         GEMM_NUM_COLS, std::vector<gf::Fp3>(rows, gf::Fp3::Zero()));
     for (uint32_t r = 0; r < rows; ++r) {
-        kernel_cols[GEMM_A][r] = gf::Fp3::FromFp(gf::FromU64(a));
-        kernel_cols[GEMM_B][r] = gf::Fp3::FromFp(gf::FromU64(b));
+        kernel_cols[GEMM_A][r] = cellv(ai);
+        kernel_cols[GEMM_B][r] = cellv(bi);
         kernel_cols[GEMM_ACTIVE][r] = gf::Fp3::One();
         kernel_cols[GEMM_ACC][r] =
-            gf::Fp3::FromFp(gf::FromU64(prod * (r + 1))); // running sum a·b
-        kernel_cols[GEMM_OUT][r] =
-            gf::Fp3::FromFp(gf::FromU64(prod * rows));    // final accumulator
+            cellv(prodi * static_cast<int64_t>(r + 1)); // running sum a·b
+        kernel_cols[GEMM_OUT][r] = cellv(out_i);        // final accumulator
     }
 
     // --- Compose: kernel ⊕ A/B/Y scalar openings ⊕ SignedRange wired closer. ---
@@ -2977,11 +3006,11 @@ RCStage3RoleAirProduct BuildRCStage3CoupledGemmRoleAir(std::string* why)
     };
     const std::array<ScalarEndpoint, 3> scalars = {
         ScalarEndpoint{RCStage3RelationEndpoint::CoupledGemmOperandA, GEMM_A,
-                       gf::Fp3::FromFp(gf::FromU64(a))},
+                       cellv(ai)},
         ScalarEndpoint{RCStage3RelationEndpoint::CoupledGemmOperandB, GEMM_B,
-                       gf::Fp3::FromFp(gf::FromU64(b))},
+                       cellv(bi)},
         ScalarEndpoint{RCStage3RelationEndpoint::CoupledGemmOutputY, GEMM_OUT,
-                       gf::Fp3::FromFp(gf::FromU64(prod * rows))}};
+                       cellv(out_i)}};
 
     for (const ScalarEndpoint& se : scalars) {
         const RCStage3CommitmentManifest m =
@@ -3105,7 +3134,9 @@ bool BuildRCStage3EpisodeGemmRoleAirCS(
     return true;
 }
 
-RCStage3RoleAirProduct BuildRCStage3EpisodeGemmRoleAir(std::string* why)
+RCStage3RoleAirProduct BuildRCStage3EpisodeGemmRoleAir(
+    std::string* why, const int64_t* real_a, const int64_t* real_b,
+    const uint256* real_sr_root)
 {
     RCStage3RoleAirProduct out;
     out.role = RCStage3RelationRole::EpisodeGemm;
@@ -3115,6 +3146,7 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeGemmRoleAir(std::string* why)
         RequiredRCStage3RelationEndpoints(RCStage3RelationRole::EpisodeGemm);
 
     // Episode GEMM kernel (GF = A·B), constant operands so endpoint cells alias.
+    // With REAL operands, (a,b) is a block GEMM MAC term and Y = a·b exactly.
     constraint_bytecode::ProgramTable kt;
     if (!BuildRCStage3EpisodeLocalKernelProgramTable(
             RCStage3EpisodeAirFamily::GemmEndpointFp3V1, kt, why)) {
@@ -3128,22 +3160,27 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeGemmRoleAir(std::string* why)
         return out;
     }
     const uint32_t kernel_w = kernel_cs.n_columns;
-    const uint64_t a = 3, b = 5, gf_val = a * b;
+    const bool use_real = (real_a != nullptr && real_b != nullptr);
+    const int64_t ai = use_real ? *real_a : 3;
+    const int64_t bi = use_real ? *real_b : 5;
+    const int64_t gfi = ai * bi;
+    auto cellv = [&](int64_t v) {
+        return use_real ? gf::FromSigned3(v)
+                        : gf::Fp3::FromFp(gf::FromU64(static_cast<uint64_t>(v)));
+    };
     std::vector<std::vector<gf::Fp3>> kernel_cols(
         kernel_w, std::vector<gf::Fp3>(rows, gf::Fp3::Zero()));
     for (uint32_t r = 0; r < rows; ++r) {
-        kernel_cols[0][r] = gf::Fp3::FromFp(gf::FromU64(gf_val)); // GF / Y
-        kernel_cols[1][r] = gf::Fp3::FromFp(gf::FromU64(a));      // A
-        kernel_cols[2][r] = gf::Fp3::FromFp(gf::FromU64(b));      // B
+        kernel_cols[0][r] = cellv(gfi); // GF / Y
+        kernel_cols[1][r] = cellv(ai);  // A
+        kernel_cols[2][r] = cellv(bi);  // B
     }
 
     // Per-endpoint cell values (scalar) and committed roots (all endpoints).
     auto endpoint_cell = [&](RCStage3RelationEndpoint e) -> gf::Fp3 {
-        if (e == RCStage3RelationEndpoint::EpisodeGemmOutputY)
-            return gf::Fp3::FromFp(gf::FromU64(gf_val));
-        if (e == RCStage3RelationEndpoint::EpisodeGemmOperandA)
-            return gf::Fp3::FromFp(gf::FromU64(a));
-        return gf::Fp3::FromFp(gf::FromU64(b));
+        if (e == RCStage3RelationEndpoint::EpisodeGemmOutputY) return cellv(gfi);
+        if (e == RCStage3RelationEndpoint::EpisodeGemmOperandA) return cellv(ai);
+        return cellv(bi);
     };
 
     // Build the wired-closer witness products up front (to learn their roots).
@@ -3158,7 +3195,11 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeGemmRoleAir(std::string* why)
         return out;
     }
     uint256 sr_root;
-    std::fill(sr_root.begin(), sr_root.end(), 0x11);
+    if (real_sr_root != nullptr) {
+        sr_root = *real_sr_root;
+    } else {
+        std::fill(sr_root.begin(), sr_root.end(), 0x11);
+    }
     const RCStage3WiredCloserProduct signed_range =
         BuildRCStage3SignedRangeWiredCloserProduct(0, 100, 7, 8, 255, sr_root,
                                                    sr_root, why);
@@ -3293,7 +3334,8 @@ bool BuildRCStage3EpisodeWiringRoleAirCS(
     return true;
 }
 
-RCStage3RoleAirProduct BuildRCStage3EpisodeWiringRoleAir(std::string* why)
+RCStage3RoleAirProduct BuildRCStage3EpisodeWiringRoleAir(
+    std::string* why, const gf::Fp3* real_copy_cell)
 {
     RCStage3RoleAirProduct out;
     out.role = RCStage3RelationRole::EpisodeWiring;
@@ -3315,7 +3357,9 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeWiringRoleAir(std::string* why)
         return out;
     }
     const uint32_t kernel_w = kernel_cs.n_columns; // 2 (U, V)
-    const gf::Fp3 copy_cell = gf::Fp3::FromFp(gf::FromU64(0x99));
+    const gf::Fp3 copy_cell = real_copy_cell != nullptr
+                                  ? *real_copy_cell
+                                  : gf::Fp3::FromFp(gf::FromU64(0x99));
     std::vector<std::vector<gf::Fp3>> kernel_cols(
         kernel_w, std::vector<gf::Fp3>(rows, copy_cell)); // U == V == cell
 
@@ -3584,13 +3628,74 @@ RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAir(RCStage3RelationRole role,
     return out;
 }
 
+RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAirFromRoots(
+    RCStage3RelationRole role,
+    const std::vector<std::array<uint32_t, 8>>& endpoint_root8s,
+    std::string* why)
+{
+    RCStage3RoleAirProduct out;
+    out.role = role;
+    if (!RCStage3RoleIsPureStream(role)) {
+        out.note = "not_pure_stream";
+        if (why != nullptr) *why = "stage3:stream_real:not_pure_stream";
+        return out;
+    }
+    const auto& required = RequiredRCStage3RelationEndpoints(role);
+    if (endpoint_root8s.size() != required.size()) {
+        out.note = "root_count";
+        if (why != nullptr) *why = "stage3:stream_real:root_count";
+        return out;
+    }
+
+    // Each endpoint pins a REAL committed SHA256d root (block data). The light
+    // binding witness carries that exact root8; the CS pins it as public
+    // constants (BuildRCStage3PureStreamRoleAirCS -> UnpackStreamRoot).
+    std::vector<ah::Digest> roots;
+    std::vector<std::vector<std::vector<gf::Fp3>>> frag_witnesses;
+    for (uint32_t i = 0; i < required.size(); ++i) {
+        const std::array<uint32_t, 8>& root8 = endpoint_root8s[i];
+        const gf::Fp3 ctl_value = gf::Fp3::FromFp(gf::FromU64(0x5100u + i));
+        frag_witnesses.push_back(
+            BuildRCStage3StreamEndpointWitness(root8, ctl_value));
+        roots.push_back(PackStreamRoot(root8));
+        out.endpoints.push_back(required[i]);
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> product;
+    std::string awhy;
+    if (!BuildRCStage3PureStreamRoleAirCS(role, roots, product, &awhy)) {
+        out.note = "assemble:" + awhy;
+        if (why != nullptr) *why = awhy;
+        return out;
+    }
+
+    std::vector<std::vector<gf::Fp3>> witness;
+    for (const auto& fw : frag_witnesses)
+        for (const auto& col : fw) witness.push_back(col);
+
+    out.endpoint_committed_roots = std::move(roots);
+    out.fragment_columns = 0;
+    out.opening_blocks = static_cast<uint32_t>(out.endpoints.size());
+    out.cs = std::move(product);
+    out.witness = std::move(witness);
+    out.ok = true;
+    out.note = "assembled_real";
+    return out;
+}
+
 namespace {
 
 // Satisfying kernel witness for a coupled scalar+stream mixed role, constant
 // across rows so its endpoint cells alias to the constant opening value.
+// `real_copy_cell` (CoupledExchange) / `real_nibble` (CoupledBank, 0..15):
+// when set, the kernel is driven by the REAL block-derived value instead of the
+// synthetic constant.  The CoupledBank T_M nibble relation is faithful for any
+// real nibble (ACC/MU from the consensus table, OUT = MU with E0=E1=0).
 bool BuildCoupledMixedKernelWitness(RCStage3RelationRole role, uint32_t kernel_w,
                                     uint32_t rows,
-                                    std::vector<std::vector<gf::Fp3>>& cols)
+                                    std::vector<std::vector<gf::Fp3>>& cols,
+                                    const gf::Fp3* real_copy_cell = nullptr,
+                                    const uint8_t* real_nibble = nullptr)
 {
     using namespace coupled_air_col;
     cols.assign(kernel_w, std::vector<gf::Fp3>(rows, gf::Fp3::Zero()));
@@ -3599,23 +3704,28 @@ bool BuildCoupledMixedKernelWitness(RCStage3RelationRole role, uint32_t kernel_w
             for (uint32_t r = 0; r < rows; ++r) cols[c][r] = v;
     };
     if (role == RCStage3RelationRole::CoupledExchange) {
-        const gf::Fp3 cell = gf::Fp3::FromFp(gf::FromU64(0x77));
+        const gf::Fp3 cell = real_copy_cell != nullptr
+                                 ? *real_copy_cell
+                                 : gf::Fp3::FromFp(gf::FromU64(0x77));
         set(COPY_INPUT, cell);
         set(COPY_OUTPUT, cell); // copy relation
         return true;
     }
     if (role == RCStage3RelationRole::CoupledBank) {
-        // Nibble 0: all bits 0; ACC/MU from the consensus T_M table; OUT = MU.
+        // Real nibble n (0..15): bits n0..n3; ACC/MU from the consensus T_M
+        // table; OUT = MU. E0=E1=0 so OUT = MU*(1+E0)(1+3E1) = MU.
+        const uint8_t n = real_nibble != nullptr ? (*real_nibble & 0x0Fu) : 0u;
         const gkr_air::TableTM tm;
-        const gf::Fp3 acc0 = gf::FromSigned3(tm.acc[0]);
-        const gf::Fp3 mu0 = gf::FromSigned3(tm.mu[0]);
-        set(BANK_NIB, gf::Fp3::Zero());
-        for (uint32_t bit = 0; bit < 4; ++bit) set(BANK_NB0 + bit, gf::Fp3::Zero());
-        set(BANK_ACC, acc0);
-        set(BANK_MU, mu0);
+        const gf::Fp3 acc_n = gf::FromSigned3(tm.acc[n]);
+        const gf::Fp3 mu_n = gf::FromSigned3(tm.mu[n]);
+        set(BANK_NIB, gf::Fp3::FromFp(gf::FromU64(n)));
+        for (uint32_t bit = 0; bit < 4; ++bit)
+            set(BANK_NB0 + bit, gf::Fp3::FromFp(gf::FromU64((n >> bit) & 1u)));
+        set(BANK_ACC, acc_n);
+        set(BANK_MU, mu_n);
         set(BANK_E0, gf::Fp3::Zero());
         set(BANK_E1, gf::Fp3::Zero());
-        set(BANK_OUT, mu0); // OUT = MU*(1+E0)(1+3E1) = MU
+        set(BANK_OUT, mu_n); // OUT = MU*(1+E0)(1+3E1) = MU
         return true;
     }
     return false;
@@ -3685,7 +3795,9 @@ bool BuildRCStage3CoupledMixedRoleAirCS(
 }
 
 RCStage3RoleAirProduct BuildRCStage3CoupledMixedRoleAir(
-    RCStage3RelationRole role, std::string* why)
+    RCStage3RelationRole role, std::string* why, const gf::Fp3* real_copy_cell,
+    const uint8_t* real_nibble,
+    const std::vector<std::array<uint32_t, 8>>* real_stream_roots)
 {
     RCStage3RoleAirProduct out;
     out.role = role;
@@ -3706,30 +3818,39 @@ RCStage3RoleAirProduct BuildRCStage3CoupledMixedRoleAir(
     }
     const uint32_t kernel_w = kernel_cs.n_columns;
     std::vector<std::vector<gf::Fp3>> kernel_cols;
-    if (!BuildCoupledMixedKernelWitness(role, kernel_w, rows, kernel_cols)) {
+    if (!BuildCoupledMixedKernelWitness(role, kernel_w, rows, kernel_cols,
+                                        real_copy_cell, real_nibble)) {
         out.note = "kernel_witness";
         return out;
     }
 
     std::vector<ah::Digest> roots;
     std::vector<std::vector<std::vector<gf::Fp3>>> pieces;
+    uint32_t stream_ix = 0; // index into real_stream_roots (stream endpoints)
     for (uint32_t i = 0; i < required.size(); ++i) {
         const RCStage3RelationEndpoint e = required[i];
         if (IsInCsStreamEndpoint(e)) {
             const RCStage3StreamFamily family = StreamFamilyForEndpoint(e);
-            std::array<uint32_t, 8> stream_value{};
-            for (uint32_t j = 0; j < 8; ++j)
-                stream_value[j] = static_cast<uint32_t>(e) * 131u + j;
-            const RCStage3StreamEndpointManifest manifest =
-                BuildRCStage3StreamEndpointCanonicalManifest(family, stream_value,
-                                                             0, kPureStreamPathLen);
             std::array<uint32_t, 8> root8{};
-            std::string rwhy;
-            if (!RCStage3StreamEndpointCommittedRoot(family, manifest, root8,
-                                                     &rwhy)) {
-                out.note = "committed_root:" + rwhy;
-                return out;
+            if (real_stream_roots != nullptr &&
+                stream_ix < real_stream_roots->size()) {
+                // REAL committed SHA256d root pinned into the light binding.
+                root8 = (*real_stream_roots)[stream_ix];
+            } else {
+                std::array<uint32_t, 8> stream_value{};
+                for (uint32_t j = 0; j < 8; ++j)
+                    stream_value[j] = static_cast<uint32_t>(e) * 131u + j;
+                const RCStage3StreamEndpointManifest manifest =
+                    BuildRCStage3StreamEndpointCanonicalManifest(
+                        family, stream_value, 0, kPureStreamPathLen);
+                std::string rwhy;
+                if (!RCStage3StreamEndpointCommittedRoot(family, manifest, root8,
+                                                         &rwhy)) {
+                    out.note = "committed_root:" + rwhy;
+                    return out;
+                }
             }
+            ++stream_ix;
             const std::vector<std::vector<gf::Fp3>> fw =
                 BuildRCStage3StreamEndpointWitness(root8,
                                                    gf::Fp3::FromFp(gf::FromU64(9)));
@@ -3822,8 +3943,10 @@ bool BuildRCStage3NoKernelRoleAirCS(
     return true;
 }
 
-RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(RCStage3RelationRole role,
-                                                    std::string* why)
+RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(
+    RCStage3RelationRole role, std::string* why,
+    const std::vector<gf::Fp3>* real_open_cells,
+    const std::vector<std::array<uint32_t, 8>>* real_stream_roots)
 {
     RCStage3RoleAirProduct out;
     out.role = role;
@@ -3833,23 +3956,31 @@ RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(RCStage3RelationRole role,
 
     std::vector<ah::Digest> roots;
     std::vector<std::vector<std::vector<gf::Fp3>>> pieces;
+    uint32_t stream_ix = 0; // index into real_stream_roots (stream endpoints)
+    uint32_t open_ix = 0;   // index into real_open_cells (opening endpoints)
     for (uint32_t i = 0; i < required.size(); ++i) {
         const RCStage3RelationEndpoint e = required[i];
         if (IsInCsStreamEndpoint(e)) {
             const RCStage3StreamFamily family = StreamFamilyForEndpoint(e);
-            std::array<uint32_t, 8> stream_value{};
-            for (uint32_t j = 0; j < 8; ++j)
-                stream_value[j] = static_cast<uint32_t>(e) * 131u + j;
-            const RCStage3StreamEndpointManifest manifest =
-                BuildRCStage3StreamEndpointCanonicalManifest(family, stream_value,
-                                                             0, kPureStreamPathLen);
             std::array<uint32_t, 8> root8{};
-            std::string rwhy;
-            if (!RCStage3StreamEndpointCommittedRoot(family, manifest, root8,
-                                                     &rwhy)) {
-                out.note = "committed_root:" + rwhy;
-                return out;
+            if (real_stream_roots != nullptr &&
+                stream_ix < real_stream_roots->size()) {
+                root8 = (*real_stream_roots)[stream_ix]; // REAL committed root
+            } else {
+                std::array<uint32_t, 8> stream_value{};
+                for (uint32_t j = 0; j < 8; ++j)
+                    stream_value[j] = static_cast<uint32_t>(e) * 131u + j;
+                const RCStage3StreamEndpointManifest manifest =
+                    BuildRCStage3StreamEndpointCanonicalManifest(
+                        family, stream_value, 0, kPureStreamPathLen);
+                std::string rwhy;
+                if (!RCStage3StreamEndpointCommittedRoot(family, manifest, root8,
+                                                         &rwhy)) {
+                    out.note = "committed_root:" + rwhy;
+                    return out;
+                }
             }
+            ++stream_ix;
             const std::vector<std::vector<gf::Fp3>> fw =
                 BuildRCStage3StreamEndpointWitness(root8,
                                                    gf::Fp3::FromFp(gf::FromU64(9)));
@@ -3878,8 +4009,13 @@ RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(RCStage3RelationRole role,
             pieces.push_back(sp.witness);
             roots.push_back(sp.digest);
         } else {
-            // Params standalone vector opening.
-            const gf::Fp3 cell = gf::Fp3::FromFp(gf::FromU64(0xB1u + i));
+            // Standalone vector opening (e.g. Params, extract in/out): a REAL
+            // block-derived cell when provided, else synthetic.
+            const gf::Fp3 cell =
+                (real_open_cells != nullptr && open_ix < real_open_cells->size())
+                    ? (*real_open_cells)[open_ix]
+                    : gf::Fp3::FromFp(gf::FromU64(0xB1u + i));
+            ++open_ix;
             const RCStage3CommitmentManifest m =
                 BuildRCStage3CanonicalManifest(e, cell, 0, path_len);
             pieces.push_back(BuildOpeningWitness(cell, cell, m));

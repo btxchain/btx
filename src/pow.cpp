@@ -33,6 +33,7 @@
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
 #include <matmul/transcript.h>
@@ -4379,6 +4380,83 @@ bool FinalizeMatMulSolvedBlock(CBlock& block, const Consensus::Params& params, i
         return OffloadMatMulV4SketchToCache(block);
     }
     return false;
+}
+
+bool FinalizeMatMulSolvedBlockForProduction(CBlock& block,
+                                            const Consensus::Params& params,
+                                            int height,
+                                            std::string* why,
+                                            bool* sketch_offloaded_out)
+{
+    if (sketch_offloaded_out != nullptr) *sketch_offloaded_out = false;
+    if (why != nullptr) why->clear();
+
+    // PR-89 item 5: the PRODUCER half of the mandatory Stage-3 authority. This
+    // is the exact mirror of validation.cpp ContextualCheckBlock's Stage-3
+    // branch (which, once the gate closes, rejects an RC-family block whose
+    // body carries no bound proof as "missing-matmul-stage3-proof"), and it is
+    // gated on the SAME compile-time constant, so producer and validator can
+    // never disagree about whether a proof is required.
+    //
+    // While kRCStage3SuccinctAuthorityReady is false the whole block below is
+    // discarded and this function is FinalizeMatMulSolvedBlock verbatim.
+    if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+        if (params.IsMatMulRCFamilyActive(height)) {
+            // The solver left the 8·m² sketch words in matrix_c_data. Those
+            // words are NOT a Stage-3 payload; if the attach below fails we
+            // must not let them ride the block, or every peer parses them as a
+            // malformed Stage-3 attachment (BLOCK_MUTATED). Drop them first so
+            // the failure mode is the honest "missing" one, and so the size
+            // report below measures "proof added to an empty body" rather than
+            // "proof swapped for a sketch".
+            //
+            // ASSUMPTION ABOUT THE PROVER, stated because it is load-bearing:
+            // the Stage-3 prover is assumed to derive everything it needs from
+            // the finalized HEADER (it re-runs the episode), and therefore not
+            // to need the solver's 8·m² product sketch. If that turns out to be
+            // false, the sketch must be plumbed into RCStage3ProofSource as an
+            // explicit argument — it must NOT be read off block.matrix_c_data,
+            // which this line deliberately empties.
+            block.matrix_c_data.clear();
+            std::string produce_why;
+            matmul::v4::rc::RCStage3AttachmentSizeReport size_report;
+            const auto status =
+                matmul::v4::rc::ProduceAndAttachRCStage3ConsensusProof(
+                    block, params, height, &produce_why, &size_report);
+            if (status != matmul::v4::rc::RCStage3ProduceStatus::Attached) {
+                if (why != nullptr) {
+                    *why = strprintf(
+                        "stage3 proof required at height %d but not produced "
+                        "(%s: %s)",
+                        height,
+                        matmul::v4::rc::RCStage3ProduceStatusName(status),
+                        produce_why);
+                }
+                LogWarning(
+                    "FinalizeMatMulSolvedBlockForProduction: refusing to submit "
+                    "RC-family block at height %d: %s\n",
+                    height,
+                    matmul::v4::rc::RCStage3ProduceStatusName(status));
+                return false;
+            }
+            // Always log the exact encoded size of a winner's proof. This is
+            // the only place a real-width in-block figure will ever be observed
+            // in production, and today every real-width number in this project
+            // is computed rather than measured.
+            LogInfo("FinalizeMatMulSolvedBlockForProduction: height %d %s\n",
+                    height, size_report.ToString());
+            // Deliberately do NOT fall through to the ENC-DR sketch offload:
+            // matrix_c_data now holds the consensus proof and must be kept.
+            // FinalizeMatMulSolvedBlock's own RC-family guard would refuse the
+            // offload anyway; returning here keeps that intent local and
+            // obvious.
+            return true;
+        }
+    }
+
+    const bool offloaded = FinalizeMatMulSolvedBlock(block, params, height);
+    if (sketch_offloaded_out != nullptr) *sketch_offloaded_out = offloaded;
+    return true;
 }
 
 // H5: process-wide single-flight for the ENC-DR digest recompute. Keyed by

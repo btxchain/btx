@@ -14,6 +14,10 @@
 #include <string>
 #include <vector>
 
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+
 // Poseidon2-Goldilocks permutation `AlgHash` — implementation of spec §1
 // (scratchpad/stage-c-buildable-spec.md). All non-frozen constants (RC_ext,
 // RC_int, μ, node/leaf domain seeds) are derived by the domain-separated
@@ -28,6 +32,26 @@ using gkr_field::Add;
 using gkr_field::Canonical;
 using gkr_field::Inv;
 using gkr_field::kP;
+
+// Thread count for the row-parallel streaming absorb. Mirrors the FRI
+// prover's BTX_PROVE_THREADS knob. Rows are independent, so this NEVER
+// changes a digest — output is byte-identical to the serial absorb.
+inline int AlgHashStreamThreads()
+{
+#if defined(_OPENMP)
+    static const int t = [] {
+        if (const char* e =
+                std::getenv("BTX_PROVE_THREADS")) {
+            const int v = std::atoi(e);
+            if (v > 0) return v;
+        }
+        return omp_get_max_threads();
+    }();
+    return t;
+#else
+    return 1;
+#endif
+}
 using gkr_field::Mul;
 using gkr_field::Sub;
 
@@ -181,26 +205,49 @@ template <typename Pred>
 // Linear layers: M_E (frozen block-circulant of M4) and M_I = J + diag(μ)
 // ----------------------------------------------------------------------------
 
-/** FROZEN Poseidon2 MDS block M4 = [5 7 1 3; 4 6 1 1; 1 3 5 7; 1 1 4 6]. */
-constexpr Fp kM4[4][4] = {
+/** FROZEN Poseidon2 MDS block M4 = [5 7 1 3; 4 6 1 1; 1 3 5 7; 1 1 4 6].
+ *  This literal remains THE definition of the external block; ApplyM4 below
+ *  implements it with an add/double chain instead of 16 field multiplies, and
+ *  alg_hash_external_matrix_matches_literal_m4 pins the two against each
+ *  other over random states. Kept (unused at runtime) so the frozen constant
+ *  stays visible and reviewable next to the code that must reproduce it. */
+[[maybe_unused]] constexpr Fp kM4[4][4] = {
     {5, 7, 1, 3},
     {4, 6, 1, 1},
     {1, 3, 5, 7},
     {1, 1, 4, 6},
 };
 
-/** In-place y = M4 · b on four consecutive lanes. */
+/** Double, as an add — every M4 coefficient is a small power-of-two sum, so
+ *  the whole block needs no field multiply at all. */
+[[nodiscard]] Fp Dbl(Fp a) { return Add(a, a); }
+
+/**
+ * In-place y = M4 · b on four consecutive lanes, using the standard Poseidon2
+ * add/double chain instead of 16 general field multiplies. Algebraically
+ * identical to the literal kM4 above:
+ *   t0 = b0+b1                t1 = b2+b3
+ *   t2 = 2·b1 + t1            t3 = 2·b3 + t0
+ *   t4 = 4·t1 + t3            t5 = 4·t0 + t2
+ *   y0 = t3 + t5 = 5b0+7b1+ b2+3b3     y1 = t5 = 4b0+6b1+ b2+ b3
+ *   y2 = t2 + t4 =  b0+3b1+5b2+7b3     y3 = t4 =  b0+ b1+4b2+6b3
+ * i.e. exactly rows [5 7 1 3], [4 6 1 1], [1 3 5 7], [1 1 4 6]. This is the
+ * same chain the CUDA row-leaf kernel uses (`pr_m4`); the equivalence is
+ * re-derived here and pinned against the literal matrix by
+ * alg_hash_external_matrix_matches_literal_m4 rather than inherited.
+ */
 void ApplyM4(Fp* b)
 {
-    Fp y[4];
-    for (int i = 0; i < 4; ++i) {
-        Fp acc = 0;
-        for (int j = 0; j < 4; ++j) {
-            acc = Add(acc, Mul(kM4[i][j], b[j]));
-        }
-        y[i] = acc;
-    }
-    for (int i = 0; i < 4; ++i) b[i] = y[i];
+    const Fp t0 = Add(b[0], b[1]);
+    const Fp t1 = Add(b[2], b[3]);
+    const Fp t2 = Add(Dbl(b[1]), t1);
+    const Fp t3 = Add(Dbl(b[3]), t0);
+    const Fp t4 = Add(Dbl(Dbl(t1)), t3);
+    const Fp t5 = Add(Dbl(Dbl(t0)), t2);
+    b[0] = Add(t3, t5);
+    b[1] = t5;
+    b[2] = Add(t2, t4);
+    b[3] = t4;
 }
 
 // ----------------------------------------------------------------------------
@@ -303,14 +350,24 @@ void ApplyExternalMatrix(State& s)
     }
 }
 
-void ApplyInternalMatrix(State& s)
+namespace {
+/** Internal layer with the constant table ALREADY resolved. Permute runs this
+ *  22 times per permutation; resolving the function-local static inside the
+ *  loop costs a guarded load and a non-inlinable call on every round. Body is
+ *  otherwise identical to ApplyInternalMatrix. */
+void ApplyInternalMatrixWith(const AlgHashConstants& c, State& s)
 {
-    const AlgHashConstants& c = GetAlgHashConstants();
     Fp sigma = 0;
     for (uint32_t j = 0; j < kAlgHashT; ++j) sigma = Add(sigma, s[j]);
     for (uint32_t i = 0; i < kAlgHashT; ++i) {
         s[i] = Add(sigma, Mul(c.mu[i], s[i]));
     }
+}
+} // namespace
+
+void ApplyInternalMatrix(State& s)
+{
+    ApplyInternalMatrixWith(GetAlgHashConstants(), s);
 }
 
 void Permute(State& s)
@@ -328,7 +385,7 @@ void Permute(State& s)
     }
     for (uint32_t r = 0; r < kAlgHashPartialRounds; ++r) { // 22 partial rounds
         s[0] = Pow7(Add(s[0], c.rc_int[r]));
-        ApplyInternalMatrix(s);
+        ApplyInternalMatrixWith(c, s); // same layer, constants already resolved
     }
     for (uint32_t r = 0; r < kHalfFull; ++r) { // 4 final full rounds
         for (uint32_t i = 0; i < kAlgHashT; ++i) {
@@ -405,6 +462,22 @@ StreamingRowHasher::StreamingRowHasher(uint32_t n_rows)
 {
 }
 
+void StreamingRowHasher::AbsorbLane(
+    RowState& row, Fp value)
+{
+    row.pending[row.pending_count++] = Canonical(value);
+    if (row.pending_count == kAlgHashRate) {
+        for (uint32_t lane = 0; lane < kAlgHashRate;
+             ++lane) {
+            row.sponge[lane] =
+                Add(row.sponge[lane], row.pending[lane]);
+            row.pending[lane] = 0;
+        }
+        Permute(row.sponge);
+        row.pending_count = 0;
+    }
+}
+
 bool StreamingRowHasher::AbsorbColumn(
     const std::vector<Fp3>& column, std::string* why)
 {
@@ -439,6 +512,51 @@ bool StreamingRowHasher::AbsorbColumn(
         absorb(m_rows[index], column[index].c2);
     }
     ++m_columns;
+    return true;
+}
+
+bool StreamingRowHasher::AbsorbColumnBlock(
+    const std::vector<std::vector<Fp3>>& block,
+    size_t count, std::string* why)
+{
+    if (m_finalized) {
+        if (why) *why = "streaming row hasher finalized";
+        return false;
+    }
+    if (count > block.size()) {
+        if (why) *why = "streaming row hasher block count";
+        return false;
+    }
+    if (count == 0) return true;
+    for (size_t c = 0; c < count; ++c) {
+        if (block[c].size() != m_rows.size()) {
+            if (why) {
+                *why = "streaming row hasher column height";
+            }
+            return false;
+        }
+    }
+    // Row-parallel: each RowState is touched by exactly one iteration, and
+    // the lane order within a row is the sequential column order, so the
+    // digests are independent of the thread count / schedule.
+    const int64_t rows =
+        static_cast<int64_t>(m_rows.size());
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) \
+    num_threads(AlgHashStreamThreads())
+#endif
+    for (int64_t index = 0; index < rows; ++index) {
+        RowState& row =
+            m_rows[static_cast<size_t>(index)];
+        for (size_t c = 0; c < count; ++c) {
+            const Fp3& v =
+                block[c][static_cast<size_t>(index)];
+            AbsorbLane(row, v.c0);
+            AbsorbLane(row, v.c1);
+            AbsorbLane(row, v.c2);
+        }
+    }
+    m_columns += static_cast<uint32_t>(count);
     return true;
 }
 

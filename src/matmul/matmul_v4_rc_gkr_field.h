@@ -28,15 +28,70 @@ inline constexpr Fp kP = 0xFFFFFFFF00000001ULL;
 
 [[nodiscard]] inline Fp Canonical(Fp x) { return x >= kP ? x - kP : x; }
 
+/** 2^64 ≡ 2^32 − 1 (mod p). This constant is what makes Goldilocks reduction
+ *  division-free; it is the same `GL_NEGP` the CUDA row-leaf kernel uses. */
+inline constexpr uint64_t kEpsilon = 0xFFFFFFFFULL;
+
+/**
+ * Reduce a 128-bit value mod p, returning the CANONICAL representative in
+ * [0, p). Bit-identical to the previous `x % kP` for every 128-bit input, but
+ * without the libgcc `__umodti3` software division that expression compiled
+ * to (a call, not an instruction — it dominated every field multiply and
+ * therefore every Poseidon2 permutation on the verify path).
+ *
+ * Derivation. Write x = lo + hi·2^64 with hi = hh·2^32 + hl. Then
+ *   2^64 ≡ 2^32 − 1 = ε           (mod p)
+ *   2^96 ≡ ε·2^32 = 2^64 − 2^32 ≡ (2^32 − 1) − 2^32 = −1   (mod p)
+ * so x ≡ lo − hh + hl·ε (mod p), which is two 64-bit adds, one 32×32 multiply
+ * and two carry fixups.
+ *
+ * Range safety (why each fixup is exact and why one final subtract suffices):
+ *  • hh < 2^32, so if lo < hh the wrapped lo−hh exceeds 2^64 − 2^32 ≥ ε and
+ *    subtracting ε cannot underflow (borrowing 2^64 costs exactly ε mod p).
+ *  • hl, ε < 2^32 so hl·ε < 2^64 exactly — no overflow in the product.
+ *  • t0 + t1 < 2^65, and after the carry fixup the result is still < 2^64.
+ *  • r < 2^64 = p + ε, hence r − p < ε < p: a single conditional subtract
+ *    canonicalizes.
+ * Pinned against the `% kP` reference over edge cases and randoms by
+ * gkr_field_reduce128_matches_modulo_reference (alg_hash tests).
+ */
 [[nodiscard]] inline Fp Reduce128(unsigned __int128 x)
 {
-    return static_cast<Fp>(x % kP);
+    const uint64_t lo = static_cast<uint64_t>(x);
+    const uint64_t hi = static_cast<uint64_t>(x >> 64);
+    const uint64_t hh = hi >> 32;        // coefficient of 2^96 ≡ −1
+    const uint64_t hl = hi & kEpsilon;   // coefficient of 2^64 ≡ ε
+    uint64_t t0;
+    const uint64_t borrow = static_cast<uint64_t>(__builtin_sub_overflow(lo, hh, &t0));
+    t0 -= kEpsilon * borrow;
+    const uint64_t t1 = hl * kEpsilon;
+    uint64_t r;
+    const uint64_t carry = static_cast<uint64_t>(__builtin_add_overflow(t0, t1, &r));
+    r += kEpsilon * carry;
+    r -= kP * static_cast<uint64_t>(r >= kP);
+    return r;
 }
 
+/**
+ * Bit-identical to the previous 128-bit-widening form for EVERY pair of
+ * uint64 inputs, including non-canonical ones.
+ *
+ * The input Canonical() calls are LOAD-BEARING and must not be dropped as an
+ * "optimization": callers outside the hash core do pass values in [p, 2^64),
+ * and a variant without them diverges from this one on 13 of the edge-grid
+ * cases (measured). With both inputs reduced below p the sum needs at most
+ * one wrap fixup (2^64 ≡ ε) and one conditional subtract, so no 128-bit
+ * intermediate is required.
+ */
 [[nodiscard]] inline Fp Add(Fp a, Fp b)
 {
-    const unsigned __int128 s = static_cast<unsigned __int128>(Canonical(a)) + Canonical(b);
-    return s >= kP ? static_cast<Fp>(s - kP) : static_cast<Fp>(s);
+    a = Canonical(a);
+    b = Canonical(b);
+    uint64_t s;
+    const uint64_t carry = static_cast<uint64_t>(__builtin_add_overflow(a, b, &s));
+    s += kEpsilon * carry;
+    s -= kP * static_cast<uint64_t>(s >= kP);
+    return s;
 }
 
 [[nodiscard]] inline Fp Sub(Fp a, Fp b)

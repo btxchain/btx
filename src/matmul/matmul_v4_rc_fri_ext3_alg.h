@@ -124,29 +124,149 @@ inline constexpr bool kRCFri3AlgFormalSoundnessReady = true;
  *  system whose column count exceeds 2^12 before the self-similar fixed-point
  *  reshaping.
  *
- *  PR-89 rung-4: raised 2^14 -> 2^15. The arity-4 self-similar parent verifies
- *  four Q=192 FRI children in-AIR; that V_CS is ~16996 columns even at the toy
- *  child shape, marginally over 2^14 = 16384, so at 2^14 the four-slot parent
- *  could not commit its OWN FRI proof. 2^15 = 32768 admits it with headroom.
+ *  PR-89 rung-4: raised 2^14 -> 2^15 (toy four-slot V_CS ~16996 cols).
+ *  PR-89 rung-5: raised 2^15 -> 2^20. With REAL role children (W>>1) the
+ *  arity-4 self-similar parent V_CS is 384k-712k COLUMNS (measured:
+ *  RunFourSlotRealRoleChildren, recursive_parent_air_tests) — it arithmetizes
+ *  four real child constraint systems + their Q=192 FRI verifiers in-AIR. At
+ *  2^15 = 32768 the real-child parent could not commit its OWN FRI proof; the
+ *  aggregate root was unprovable at real node width. 2^20 = 1048576 admits the
+ *  full real width with headroom (712k < 2^20).
  *
- *  SOUNDNESS: the reported query-proximity bound Fri3AlgSoundnessBoundBits() =
- *  floor(Q·log2(32/17)) − g = 135 bits is FIELD- and W-INDEPENDENT (it does not
- *  read the column count at all), so raising the cap does not move it. The ONLY
- *  W-dependent term is the batching RLC (W+2)/|Fp3|; at W ≤ 2^15 and
- *  |Fp3| ≈ 2^192 that is ≈ 2^-177 — ~85 bits below the per-node 2^-92 target and
- *  far below the ~67.6-bit composed threat-model floor (query/transport
- *  dominated), so it never becomes the binding term. LDE is per-column and
- *  unaffected (the row/LDE cap kRCFriMaxLdeLog2 = 24 is independent of W); batch
- *  memory and row-tree leaf width grow LINEARLY in W (no quadratic blowup, no
- *  fixed-size array is sized by this constant). Path-local ONLY: the SHA base
- *  path keeps 2^12 untouched. */
-inline constexpr uint32_t kRCFri3AlgBatchMaxColumns = 1u << 15;
+ *  SOUNDNESS (verify, do not assume — the prior note here was WRONG for the
+ *  shipped path). Two distinct soundness dimensions:
+ *   (1) QUERY-PROXIMITY: Fri3AlgSoundnessBoundBits() = Fri3AlgProximityBoundBits()
+ *       (= floor(Q·log2(32/17)) = 175, reads ONLY Q) + grind_credit − regrind
+ *       = 135 bits. Genuinely W-INDEPENDENT — the column count is never read.
+ *       This is the gate-scored quantity (AssessRCStage3RecursiveReadiness) and
+ *       raising the cap does not move it.
+ *   (2) FIELD / BATCHING-RLC: this term IS W-dependent, contrary to the old
+ *       comment. The active recursion config kFri3AlgQ192V3Config holds
+ *       independent_batching_coefficients = FALSE (see .cpp:~522) => the shipped
+ *       path uses SinglePower [1,λ,λ²,…] geometric batching, whose loss is
+ *       batching_loss = log2(W−1) bits (ePrint 2023/1071 Lemma 5.10 (t−1)
+ *       factor; matmul_v4_rc_stage3_soundness_scenarios.cpp:~1720). The
+ *       (W+2)/|Fp3| ≈ 2^-177 RLC bound applies ONLY to the independent-coeff
+ *       path, which is NOT active — so the earlier "W-independent 2^-177"
+ *       rationale described a path that is not shipped and MUST NOT be relied on.
+ *
+ *  Net: the batching cost is only LOGARITHMIC in W. Raising 2^15 -> 2^20 costs
+ *  the field term just log2(2^20/2^15) = 5 bits. field_rbr = |Fp3| − 2·lde_log2
+ *  − theorem_const(≈17.07) − log2(W−1). MEASURED real parent shape
+ *  (RunFourSlotRealRoleChildren, CoupledPermutation): parent_cols=384984,
+ *  parent_rows=256 => n_lde = 256·16 = 4096, lde_log2=12, so field_rbr ≈
+ *  192 − 24 − 17.07 − 18.55 ≈ 132.4 bits at W=385k (≈130.9 at W=2^20). Even at
+ *  the LDE cap kRCFriMaxLdeLog2=24 (worst case): ≈107 bits at W=2^20. All stay
+ *  above the 100-bit per-node target AND the ~78.5/67.6-bit composed floors, so
+ *  batching never becomes the binding term at real width. => The cap is an
+ *  IMPLEMENTATION guard, not a soundness limit; committing 384k-712k columns is
+ *  SOUND, with a small bounded logarithmic field-side cost (NOT because the
+ *  bound is W-independent).
+ *
+ *  MECHANICS: no fixed-size array is sized by this constant (verified: no
+ *  std::array/C-array of extent kRCFri3AlgBatchMaxColumns exists); every use is
+ *  a `> cap` bounds guard or a dynamic allocation LINEAR in W (batch memory,
+ *  row-tree leaf width). LDE is per-column, capped by kRCFriMaxLdeLog2=24
+ *  independently of W. NOTE: recursive.cpp MAX_VECTOR_ITEMS = this cap also
+ *  bounds proof-parse vector lengths, so the untrusted-parse allocation ceiling
+ *  scales 32× with this change (still bounded, dynamically sized). Path-local
+ *  ONLY: the SHA base path keeps 2^12 untouched. */
+inline constexpr uint32_t kRCFri3AlgBatchMaxColumns = 1u << 20;
 static_assert(kRCFri3AlgBatchMaxColumns >= kRCFriBatchMaxColumns,
               "recursion cap must admit at least the shared width");
-// The batching RLC error (W+2)/|Fp3| must stay far under the per-node target:
-// at W = 2^15 over |Fp3| ~ 2^192 it is ~2^-177, so W's soundness cost is nil.
-static_assert(kRCFri3AlgBatchMaxColumns <= (1u << 15),
-              "keep the batching-RLC W-term (W+2)/|Fp3| ~2^-177 << 2^-92 target");
+// SinglePower batching loss = log2(W−1) bits (shipped path; independent-coeff
+// held FALSE). At W = 2^20 that is 20 bits; field_rbr = |Fp3| − 2·lde −
+// theorem_const − 20 stays ≥ ~107 bits even at the lde=24 cap — above the
+// 100-bit per-node target. The cost is LOGARITHMIC, so this ceiling is safe.
+static_assert(kRCFri3AlgBatchMaxColumns <= (1u << 20),
+              "SinglePower batching loss log2(W) at 2^20 = 20 bits keeps "
+              "field_rbr >= ~107 bits > 100-bit target");
+
+/** STREAMING COLUMN-BLOCK COMMIT — prover FOOTPRINT tunables.
+ *
+ *  These are PROVER-LOCAL performance knobs. They are NOT protocol parameters:
+ *  every commit/opening/proof byte is invariant under them (the absorption
+ *  order into the row-leaf sponge is the column order, independent of how the
+ *  columns are grouped into blocks). Changing them can only change how much
+ *  memory the prover holds and how the work is scheduled.
+ *
+ *  Motivation (MEASURED): the arity-4 self-similar parent over real role
+ *  children has W = 384,984 columns at n_rows = 256 (n_lde = 4096). A dense
+ *  W x n_lde Fp3 extension is ~35 GiB and OOM-kills the prover. Blocking at
+ *  K = 64 columns holds ~6 MiB of column LDE instead, so peak prover memory no
+ *  longer depends on W at all.
+ *
+ *  kRCFri3AlgStreamColumnBlock is the nominal K (columns per block).
+ *  kRCFri3AlgStreamBlockByteBudget caps K x n_lde x sizeof(Fp3) so a large LDE
+ *  domain (up to the kRCFriMaxLdeLog2 = 24 ceiling) cannot reintroduce a large
+ *  allocation; K is reduced, never the soundness parameters.
+ *  Env overrides for experiments: BTX_FRI_STREAM_COLS, BTX_FRI_STREAM_BYTES. */
+inline constexpr uint32_t kRCFri3AlgStreamColumnBlock = 64;
+inline constexpr uint64_t kRCFri3AlgStreamBlockByteBudget =
+    uint64_t{256} << 20; // 256 MiB
+static_assert(kRCFri3AlgStreamColumnBlock >= 1,
+              "streaming commit needs at least one column per block");
+
+/** Largest DENSE column-LDE matrix (W x n_lde x sizeof(Fp3)) the prover is
+ *  allowed to materialize before it switches to the streaming column-block
+ *  commit. Above this the dense matrix is the whole memory problem: at the
+ *  real-role arity-4 parent (W=384,984, n_lde=4096) it is ~35 GiB.
+ *
+ *  This is a FOOTPRINT threshold only. Both sides produce byte-identical
+ *  proofs, so crossing it can never change a verifier outcome — it only
+ *  chooses how much memory the prover holds. Env override:
+ *  BTX_FRI_DENSE_LDE_BYTES (bytes; 0 = always stream). */
+inline constexpr uint64_t kRCFri3AlgDenseLdeByteBudget =
+    uint64_t{8} << 30; // 8 GiB
+
+/**
+ * True when a dense `columns x n_lde` Fp3 extension exceeds the prover
+ * residency budget, i.e. when the streaming column-block commit must be used.
+ * Pure function of shape — no transcript, no soundness parameter.
+ */
+[[nodiscard]] bool Fri3AlgShouldStreamColumns(uint64_t columns,
+                                              uint32_t n_lde);
+
+/** Bytes a dense `columns x n_lde` Fp3 extension would occupy (diagnostics). */
+[[nodiscard]] uint64_t Fri3AlgDenseLdeBytes(uint64_t columns,
+                                            uint32_t n_lde);
+
+/** FAIL-CLOSED PEAK-RESIDENCY CEILING for one batch commit.
+ *
+ *  WHY THIS EXISTS: kRCFri3AlgBatchMaxColumns (2^20) is a COLUMN cap and is no
+ *  longer an OOM guard — columns stopped predicting memory once n_lde grew.
+ *  The MEASURED real-role arity-4 parent (W = 384,984, n_lde = 32,768) is
+ *  comfortably UNDER the column cap yet its dense column LDE is
+ *  384,984 x 32,768 x 24 B = 302.7 GiB. No machine here has that. Such a shape
+ *  passes every existing guard and then gets the process OOM-killed, which has
+ *  already cost this project a whole session.
+ *
+ *  So the commit projects its peak column-LDE residency in BYTES and refuses
+ *  before allocating anything. This is a liveness guard, not a soundness gate:
+ *  it never weakens a check, it converts an unsurvivable allocation into a
+ *  clean, diagnosable `ok=false`. Env override: BTX_FRI_COMMIT_PEAK_BYTES. */
+inline constexpr uint64_t kRCFri3AlgCommitPeakByteCeiling =
+    uint64_t{48} << 30; // 48 GiB
+
+/**
+ * Projected peak prover-held bytes for one batch commit at this shape:
+ * the column-LDE working set (dense = the whole W x n_lde matrix; streaming =
+ * one K-column block) plus the row-leaf/Merkle working set.
+ */
+[[nodiscard]] uint64_t Fri3AlgProjectedCommitPeakBytes(uint64_t columns,
+                                                       uint32_t n_lde,
+                                                       bool streaming);
+
+/**
+ * Fail-closed admission check. Returns false (and fills `why` / `projected`)
+ * when the shape's projected peak exceeds the ceiling, so callers reject
+ * BEFORE allocating rather than being OOM-killed mid-commit.
+ */
+[[nodiscard]] bool Fri3AlgCommitFitsMemoryBudget(uint64_t columns,
+                                                 uint32_t n_lde,
+                                                 bool streaming,
+                                                 uint64_t* projected,
+                                                 std::string* why);
 
 static_assert(kRCFri3AlgNumQueries == 192,
               "Stage-3 recursion FRI ships Q=192");
@@ -1163,11 +1283,153 @@ static_assert(!kRCFri3AlgJointQFormalSoundnessReady);
  *  zero bits. g==0 is always satisfied. */
 [[nodiscard]] bool Fri3AlgCheckSqueezeGrind(
     const std::vector<unsigned char>& squeeze_input, uint64_t nonce, uint32_t g);
+/** Slack over the 2^g expected trials used when max_iters is auto-derived.
+ *  2^(g+10) leaves P(exhaust) = exp(-1024): unreachable in practice. */
+inline constexpr uint32_t kGrindIterationSlackBits = 10;
+/** Largest g the PROVER will attempt. Beyond this no honest prover completes,
+ *  so Fri3AlgGrindSqueeze fails fast instead of spinning. This is a prover-side
+ *  feasibility bound ONLY — Fri3AlgCheckSqueezeGrind still enforces any
+ *  g <= 256, so a taxed path can never be weakened by this constant. */
+inline constexpr uint32_t kRCFri3AlgMaxGrindableBits = 48;
+static_assert(kRCFri3AlgMaxGrindableBits + kGrindIterationSlackBits < 64,
+              "auto-derived grind budget must not overflow uint64_t");
+static_assert(kRCFri3AlgJointQGrindBits <= kRCFri3AlgMaxGrindableBits,
+              "the advertised Pi_JQ grind target must be prover-feasible");
+
 /** Prover grind loop: smallest nonce in [0,max_iters) meeting the g-bit
- *  predicate, or nullopt if exhausted. */
+ *  predicate, or nullopt if exhausted. max_iters == 0 (the default) derives the
+ *  bound from g as 2^(g+kGrindIterationSlackBits); a flat default here is a bug
+ *  because it silently under-runs whenever the shipped g exceeds it. */
 [[nodiscard]] std::optional<uint64_t> Fri3AlgGrindSqueeze(
     const std::vector<unsigned char>& squeeze_input, uint32_t g,
-    uint64_t max_iters = (uint64_t{1} << 34));
+    uint64_t max_iters = 0);
+
+// ---------------------------------------------------------------------------
+// PR-89 Construction 2, FIELD-NATIVE (Poseidon2) difficulty predicate.
+//
+// The SHA256d predicate above counts LEADING zero bits of a byte string. That
+// is not well defined on a Goldilocks lane, so the algebraic transcript uses
+// the TRAILING-zero form instead:
+//
+//     satisfied  <=>  Canonical(lane0) == 0 (mod 2^g)
+//
+// MEASURED bias for uniform x in [0,p), p = 2^64 - 2^32 + 1: the relative
+// deviation of P[x = 0 mod 2^20] from 2^-20 is +5.7e-14. The leading-zero
+// analogue is +2.3e-10. Both are negligible; the trailing form is also far
+// cheaper to arithmetise, because only the low g bits are constrained.
+//
+// !!! VACUITY TRAP — DO NOT "OPTIMISE" THIS TO THE MULTIPLICATIVE FORM !!!
+// The tempting one-constraint encoding is  lane0 == 2^g * h  for a witness h.
+// Over Fp that constraint is COMPLETELY VACUOUS: 2^g is a UNIT, so
+// h = lane0 * 2^-g exists for EVERY lane0 and the constraint is satisfied by
+// every digest. It would look like a working tax, cost one constraint, and
+// enforce NOTHING. The predicate must go through an explicit bit decomposition
+// WITH the canonicity check on the recomposed 64-bit integer: without
+// canonicity a prover may present B = x + p (only possible for x < 2^32 - 1),
+// whose low bits differ from x's, and thereby claim the tax on a digest that
+// does not satisfy it. Both failures are covered by unit tests; see
+// pr89_algebraic_grind_predicate_is_not_vacuous.
+// ---------------------------------------------------------------------------
+
+/** Trailing zero bits of the canonical representative of an Fp lane.
+ *  Returns 64 for zero (every bit position is a trailing zero). */
+[[nodiscard]] uint32_t Fri3AlgTrailingZeroBitsFp(Fp x);
+
+/** Largest g the FIELD-NATIVE predicate accepts. Above 63 the only satisfying
+ *  lane is 0 itself (p < 2^64), which is a 2^-64 event, not a 2^-g tax. */
+inline constexpr uint32_t kRCFri3AlgMaxAlgebraicGrindBits = 63;
+
+/** Verifier predicate, field-native: true iff lane0 == 0 (mod 2^g).
+ *  g == 0 is vacuously true, exactly as in the SHA256d form — a taxed path
+ *  MUST static_assert a nonzero g of its own. */
+[[nodiscard]] bool Fri3AlgCheckAlgebraicGrind(Fp lane0, uint32_t g);
+
+/** Built AIR shape for the field-native predicate, plus the number of
+ *  constraints the supplied lane value actually VIOLATES. `violations == 0`
+ *  iff the value satisfies the tax AND its decomposition is canonical, so a
+ *  test can observe rejection directly rather than trusting the shape. */
+struct Fri3AlgGrindPredicateAirV1 {
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint32_t bit_columns{0};
+    uint32_t tax_bits{0};
+    uint32_t max_alg_degree{0};
+    uint32_t violations{0};
+    bool booleanity_constrained{false};
+    bool canonicity_constrained{false};
+    bool tax_constrained{false};
+    bool valid{false};
+    std::string note;
+};
+
+/** Build the predicate constraint system and evaluate it on `lane0`.
+ *  `honest_bits` selects whether the witness is the true canonical
+ *  decomposition of lane0 (false) or the NON-canonical aliased form B = x + p
+ *  (true), which is the decomposition an attacker would supply to fake the
+ *  tax. The canonicity constraints must reject the latter. */
+[[nodiscard]] Fri3AlgGrindPredicateAirV1 BuildFri3AlgGrindPredicateAirV1(
+    Fp lane0, uint32_t g, bool use_aliased_witness = false);
+
+// ---------------------------------------------------------------------------
+// PR-89 Construction 2, ALGEBRAIC taxed deciding squeeze (NOT ACTIVATED).
+//
+// This is the field-native counterpart of Fri3AlgJointQ*'s SHA256d squeeze, for
+// ONE lane. Nothing in the shipped Q192 V3 path calls it; it carries its own
+// domain tag and proof version so it cannot collide with a live transcript.
+//
+// Separability (settled): Pi_JQ's DUAL-lane binding defends against CROSS-LANE
+// independent retargeting — moving lane 1's indices while lane 0's stay put.
+// That attack exists only because there are two lanes. Construction 2 defends
+// against retargeting the index vector AT ALL, by pricing every distinct sigma
+// at 2^g. The two are orthogonal, so the tax is sound single-lane.
+//
+// The SOLE-ENTROPY-SOURCE obligation: sigma must be the only source of every
+// query index. If any index could be resampled without moving sigma, an
+// adversary would pay the tax ONCE and then retarget that index freely, and the
+// credit would collapse from per-attempt to per-session.
+// ---------------------------------------------------------------------------
+
+/** Domain separator for the algebraic single-lane taxed squeeze. */
+inline constexpr uint64_t kRCFri3AlgTaxedQDomain = 0x54415845'44513100ull; // "TAXEDQ1"
+/** Domain separator for the per-index derivation off the taxed squeeze. */
+inline constexpr uint64_t kRCFri3AlgTaxedQIndexDomain =
+    0x54415845'44514958ull; // "TAXEDQIX"
+/** Shipped tax for the algebraic single-lane suite. OWNER DECISION: g = 20 —
+ *  ~0.5 s of honest prover grind, versus ~10 CPU-hours at g = 40. */
+inline constexpr uint32_t kRCFri3AlgTaxedQGrindBits = 20;
+static_assert(kRCFri3AlgTaxedQGrindBits > 0,
+              "a taxed path must fix a NONZERO g: Fri3AlgCheckAlgebraicGrind "
+              "is vacuously true at g == 0, so a zero here silently removes "
+              "the entire tax while leaving the indices sigma-derived");
+static_assert(kRCFri3AlgTaxedQGrindBits <= kRCFri3AlgMaxAlgebraicGrindBits);
+static_assert(kRCFri3AlgTaxedQGrindBits <= kRCFri3AlgMaxGrindableBits,
+              "the shipped tax must be prover-feasible");
+
+/** Poseidon2 sponge digest of an Fp lane sequence under a domain separator. */
+[[nodiscard]] Fri3AlgDigest Fri3AlgAlgebraicTranscriptDigest(
+    const std::vector<Fp>& lanes, uint64_t domain);
+
+/** The taxed deciding squeeze: sigma = Poseidon2(domain, sigma_core, nonce).
+ *  The squeeze that DERIVES the indices IS the squeeze that is taxed — if the
+ *  nonce did not enter here the tax would be pure cost and buy nothing. */
+[[nodiscard]] Fri3AlgDigest Fri3AlgAlgebraicSqueeze(
+    const std::vector<Fp>& sigma_core, uint64_t nonce);
+
+/** Verifier side: one sponge call plus the field-native predicate on lane 0. */
+[[nodiscard]] bool Fri3AlgCheckAlgebraicSqueezeGrind(
+    const std::vector<Fp>& sigma_core, uint64_t nonce, uint32_t g);
+
+/** Prover grind. max_iters == 0 derives 2^(g+kGrindIterationSlackBits). */
+[[nodiscard]] std::optional<uint64_t> Fri3AlgGrindAlgebraicSqueeze(
+    const std::vector<Fp>& sigma_core, uint32_t g, uint64_t max_iters = 0);
+
+/** index_j = LE32(lane0 of Poseidon2(idx_domain, sigma, j)) & (n_lde - 1).
+ *  n_lde MUST be a power of two so the mask is exactly uniform. Mirrors
+ *  Fri3AlgJointQIndex's shape, so the in-AIR mask/bit-decomposition constraint
+ *  system is UNCHANGED — only the digest preimage moves. */
+[[nodiscard]] uint32_t Fri3AlgAlgebraicQueryIndex(const Fri3AlgDigest& sigma,
+                                                  uint32_t j, uint32_t n_lde);
 
 // --- Construction 1: Pi_JQ joint query squeeze ---
 /** index_{l,j} = LE32(SHA256d(sigma_Q || "fra3_joint_query" || l || j)) &

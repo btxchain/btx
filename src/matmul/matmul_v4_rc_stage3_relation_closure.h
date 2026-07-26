@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
 #include <matmul/matmul_v4_rc_stage3_unified_root.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -602,11 +603,16 @@ BuildRCStage3CoupledPermutationRoleAir(const gkr_field::Fp3& cell,
  * kernel column (CoupledEndpointColumn), and one opening block per endpoint is
  * aliased to it.  CountWitnessViolationsOnH(product.cs, product.witness) == 0.
  */
+// `real_mix_a`/`real_mix_b` (optional, CoupledMix only): drive the 64-bit adder
+// kernel with REAL block-derived operands (a,b) as four LE 16-bit limbs each,
+// instead of the synthetic constants.  Null => synthetic (unchanged).
 [[nodiscard]] RCStage3RoleAirProduct
 BuildRCStage3CoupledScalarRoleAir(RCStage3RelationRole role,
                                   uint32_t leaf_index,
                                   uint32_t path_len,
-                                  std::string* why = nullptr);
+                                  std::string* why = nullptr,
+                                  const std::array<uint32_t, 4>* real_mix_a = nullptr,
+                                  const std::array<uint32_t, 4>* real_mix_b = nullptr);
 
 // ===========================================================================
 // Faithful WIRED ledger-fold closer (Poseidon multi-permutation sponge).
@@ -696,8 +702,15 @@ BuildRCStage3SignedRangeWiredCloserProduct(uint32_t shard_index,
  * `endpoint_committed_roots` carries [A, B, Y, SignedRange] roots in required-
  * endpoint order (the authority roots a matching child pin must carry).
  */
+// Optional REAL inputs (null => synthetic a=3,b=5): `real_a`/`real_b` are the
+// block's GEMM operands (e.g. RCCoupEpisodeTranscript.gemms A[k], B[k][j]); the
+// kernel faithfully accumulates rows·a·b into OUT and the A/B/Y openings commit
+// the real values. `real_sr_root` pins a real SignedRange authority root.
 [[nodiscard]] RCStage3RoleAirProduct
-BuildRCStage3CoupledGemmRoleAir(std::string* why = nullptr);
+BuildRCStage3CoupledGemmRoleAir(std::string* why = nullptr,
+                                const int64_t* real_a = nullptr,
+                                const int64_t* real_b = nullptr,
+                                const uint256* real_sr_root = nullptr);
 
 /** Resolver-side wired-closer CS (no witness) for CoupledGemmSignedRange: the
  * sponge squeeze pinned to the committed authority root + the RANGE_VALUE==Y
@@ -731,8 +744,14 @@ BuildRCStage3CoupledGemmRoleAir(std::string* why = nullptr);
  * the Episode GEMM (GF=A·B) kernel ⊕ A/B/Y scalar openings ⊕ the Sumcheck wired
  * ledger-fold closer ⊕ the SignedRange wired closer. First role with TWO wired
  * closers. `endpoint_committed_roots` = [A,B,Y,Sumcheck,SignedRange]. */
+// Optional REAL inputs (null => synthetic a=3,b=5): `real_a`/`real_b` are a real
+// episode GEMM MAC term (A[k], B[k][j]); Y = a·b exactly. `real_sr_root` pins a
+// real SignedRange authority root.
 [[nodiscard]] RCStage3RoleAirProduct
-BuildRCStage3EpisodeGemmRoleAir(std::string* why = nullptr);
+BuildRCStage3EpisodeGemmRoleAir(std::string* why = nullptr,
+                                const int64_t* real_a = nullptr,
+                                const int64_t* real_b = nullptr,
+                                const uint256* real_sr_root = nullptr);
 
 /** Resolver-side EpisodeGemm C_rho CS from the endpoint authority roots. */
 [[nodiscard]] bool BuildRCStage3EpisodeGemmRoleAirCS(
@@ -745,8 +764,13 @@ BuildRCStage3EpisodeGemmRoleAir(std::string* why = nullptr);
  * the Episode wiring (U=V) kernel ⊕ the Copy scalar opening ⊕ the Transpose,
  * Residual and RoundOrder wired ledger-fold closers.
  * `endpoint_committed_roots` = [Copy,Transpose,Residual,RoundOrder]. */
+// Optional REAL input (null => synthetic 0x99): `real_copy_cell` drives the
+// EpisodeWiring copy (U==V) endpoint with a real block-derived value.  The three
+// wired folds (Transpose/Residual/RoundOrder) remain structural — the episode
+// wiring permutation is not exposed as simple openable scalars.
 [[nodiscard]] RCStage3RoleAirProduct
-BuildRCStage3EpisodeWiringRoleAir(std::string* why = nullptr);
+BuildRCStage3EpisodeWiringRoleAir(std::string* why = nullptr,
+                                  const gkr_field::Fp3* real_copy_cell = nullptr);
 
 /** Resolver-side EpisodeWiring C_rho CS from the endpoint authority roots. */
 [[nodiscard]] bool BuildRCStage3EpisodeWiringRoleAirCS(
@@ -775,13 +799,38 @@ BuildRCStage3PureStreamRoleAir(RCStage3RelationRole role,
     air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
     std::string* why = nullptr);
 
+/**
+ * REAL-DATA producer for a pure-stream role: assemble the role's C_rho + a
+ * satisfying witness whose per-endpoint light §4 binding fragments pin the
+ * caller-supplied REAL committed SHA256d roots (one array<uint32,8> per required
+ * endpoint, in RequiredRCStage3RelationEndpoints order).  Unlike
+ * BuildRCStage3PureStreamRoleAir (which synthesizes each endpoint's stream_value
+ * from `uint32(endpoint)*131 + ...`), every pinned root here is real block data
+ * — e.g. the real MineRCEpisode episode digest / round-root fold / tile-tree
+ * roots, or the real coupled bank/barrier/episode-digest roots — so the proved
+ * role C_rho binds the block's actual committed authority, not an arbitrary cell.
+ * The heavy SHA fold remains the deferred aggregation child, exactly as in the
+ * synthetic builder; only the pinned authority roots change to real data. */
+[[nodiscard]] RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAirFromRoots(
+    RCStage3RelationRole role,
+    const std::vector<std::array<uint32_t, 8>>& endpoint_root8s,
+    std::string* why = nullptr);
+
 /** Assemble a coupled scalar+stream mixed role's C_rho + witness on 8 shared
  * rows: the coupled kernel ⊕ per-endpoint scalar opening (kernel-aliased) or
  * light §4 stream fragment. CoupledExchange (Input/Output scalar + HashXof
  * stream) and CoupledBank (Pages scalar + SeedXof + CoupledBankRoot streams). */
+// Optional REAL inputs (null => synthetic, unchanged): `real_copy_cell`
+// (CoupledExchange copy kernel), `real_nibble` 0..15 (CoupledBank T_M nibble),
+// `real_stream_roots` — real committed SHA256d root8 per STREAM endpoint in the
+// order stream endpoints appear (CoupledExchange HashXof; CoupledBank SeedXof +
+// CoupledBankRoot).  Drives the mixed role C_rho from real block data.
 [[nodiscard]] RCStage3RoleAirProduct
-BuildRCStage3CoupledMixedRoleAir(RCStage3RelationRole role,
-                                 std::string* why = nullptr);
+BuildRCStage3CoupledMixedRoleAir(
+    RCStage3RelationRole role, std::string* why = nullptr,
+    const gkr_field::Fp3* real_copy_cell = nullptr,
+    const uint8_t* real_nibble = nullptr,
+    const std::vector<std::array<uint32_t, 8>>* real_stream_roots = nullptr);
 
 /** Resolver-side coupled scalar+stream mixed role CS from the authority roots. */
 [[nodiscard]] bool BuildRCStage3CoupledMixedRoleAirCS(
@@ -797,9 +846,16 @@ BuildRCStage3CoupledMixedRoleAir(RCStage3RelationRole role,
  * (e.g. the extract sampler AIR) is the DEFERRED recursive child, like the SHA
  * folds. Covers EpisodeDeterministicBuilder (Params + SeedChain/OperandXof +
  * BuilderTrace) and CoupledExtract/EpisodeExtract (4 openings + ChaCha stream). */
+// Optional REAL inputs (null => synthetic, unchanged): `real_open_cells` — one
+// real block-derived Fp3 cell per OPENING endpoint (e.g. EpisodeDeterministic-
+// Builder Params, Coupled/EpisodeExtract Input/Sampler/Scale/Output), in the
+// order opening endpoints appear; `real_stream_roots` — one real committed
+// SHA256d root8 per STREAM endpoint (SeedChain/OperandXof/ChaCha), in order.
 [[nodiscard]] RCStage3RoleAirProduct
-BuildRCStage3NoKernelRoleAir(RCStage3RelationRole role,
-                             std::string* why = nullptr);
+BuildRCStage3NoKernelRoleAir(
+    RCStage3RelationRole role, std::string* why = nullptr,
+    const std::vector<gkr_field::Fp3>* real_open_cells = nullptr,
+    const std::vector<std::array<uint32_t, 8>>* real_stream_roots = nullptr);
 
 /** Resolver-side no-kernel role C_rho CS from the endpoint authority roots. */
 [[nodiscard]] bool BuildRCStage3NoKernelRoleAirCS(

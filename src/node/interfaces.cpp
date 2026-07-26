@@ -1117,7 +1117,17 @@ public:
 	            // carries a non-empty body the validator rejects (validation.cpp
 	            // DIGEST_RECOMPUTE empty-body rule), so IPC-submitted ENC-DR blocks
 	            // would be self-rejecting. Mirrors the generateblock RPC path.
-	            FinalizeMatMulSolvedBlock(block, consensus, next_height);
+	            // PR-89 item 5: the production finalizer additionally attaches the
+	            // mandatory Stage-3 succinct proof at RC-family heights once that
+	            // authority gate closes; a winner it cannot prove is abandoned
+	            // rather than submitted, because the validator would reject it as
+	            // missing-matmul-stage3-proof. Inert while the gate is false.
+	            std::string finalize_why;
+	            if (!FinalizeMatMulSolvedBlockForProduction(
+	                    block, consensus, next_height, &finalize_why)) {
+	                LogWarning("submitSolution: %s\n", finalize_why);
+	                return false;
+	            }
 	        }
 
 	        auto block_ptr = std::make_shared<const CBlock>(block);

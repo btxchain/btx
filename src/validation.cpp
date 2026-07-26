@@ -39,6 +39,7 @@
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -10457,25 +10458,31 @@ static bool ContextualCheckBlock(const CBlock& block,
                                 block, consensusParams, nHeight,
                                 ArithToUint256(*target), &stage3_why);
                     }
-                    if (stage3_status ==
-                        matmul::v4::rc::RCStage3AttachmentStatus::Valid) {
+                    // The status -> verdict mapping lives in
+                    // matmul_v4_rc_stage3_producer.h so it can be unit-tested
+                    // while this whole branch is compiled out by the authority
+                    // gate above (see RCStage3ConsensusVerdictFor). Behaviour is
+                    // unchanged from the inline form it replaces, except that an
+                    // unexpected status now fails closed to BLOCK_CONSENSUS
+                    // instead of falling through.
+                    const auto stage3_verdict =
+                        matmul::v4::rc::RCStage3ConsensusVerdictFor(stage3_status);
+                    switch (stage3_verdict.action) {
+                    case matmul::v4::rc::RCStage3ConsensusAction::AcceptProceed:
                         return ContextualCheckBlockBodyOnly(
                             block, state, chainman, pindexPrev);
-                    }
-                    if (matmul::v4::rc::RCStage3AttachmentIsMutation(stage3_status)) {
-                        const char* reject_reason =
-                            stage3_status ==
-                                    matmul::v4::rc::RCStage3AttachmentStatus::Missing
-                                ? "missing-matmul-stage3-proof"
-                                : "bad-matmul-stage3-proof";
+                    case matmul::v4::rc::RCStage3ConsensusAction::RejectMutation:
                         return state.Invalid(
-                            BlockValidationResult::BLOCK_MUTATED, reject_reason,
+                            BlockValidationResult::BLOCK_MUTATED,
+                            stage3_verdict.reject_reason,
                             strprintf("matmul Stage-3 proof body rejected: %s",
                                       stage3_why));
+                    case matmul::v4::rc::RCStage3ConsensusAction::RejectConsensus:
+                        break;
                     }
                     return state.Invalid(
                         BlockValidationResult::BLOCK_CONSENSUS,
-                        "matmul-stage3-authority-unavailable",
+                        stage3_verdict.reject_reason,
                         strprintf("matmul Stage-3 authority failed closed: %s",
                                   stage3_why));
                 }

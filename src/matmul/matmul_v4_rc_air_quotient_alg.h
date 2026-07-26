@@ -88,11 +88,123 @@ struct AirFriBackendAlg<gkr_field::Fp3> {
     /** Field-native Merkle digest (4 Goldilocks lanes). */
     using Digest = Fri3AlgDigest;
 
+    using RowTreeCache = Fri3AlgRowTreeCache;
+
     static BatchCommitResult BatchCommit(const std::vector<std::vector<gkr_field::Fp3>>& cols,
                                          const uint256& fs_seed)
     {
         return Fri3AlgBatchCommit(cols, fs_seed);
     }
+
+    // -----------------------------------------------------------------
+    // PROVER FOOTPRINT POLICY (memory only — never soundness)
+    //
+    // The dense prover materializes the whole W x n_lde Fp3 extension. At the
+    // MEASURED arity-4 real-role parent (W = 384,984, n_rows = 256 =>
+    // n_lde = 4096) that is ~35 GiB and OOM-kills the prover; at the wide end
+    // of the documented role range (~712k columns) ~65 GiB. Width is not the
+    // problem — the column cap is 2^20 and query-proximity soundness is
+    // W-independent — the FOOTPRINT is.
+    //
+    // Above kRCFri3AlgDenseLdeByteBudget this backend therefore takes the
+    // streaming column-block route: it materializes K column LDEs at a time
+    // and absorbs each block into the resident per-row sponge, so peak memory
+    // is O(K x n_lde) and no longer depends on W. Below the budget it keeps
+    // the dense route (which is also where the optional GPU row-leaf splice
+    // lives), because dense is one LDE pass instead of several.
+    //
+    // BOTH ROUTES EMIT BYTE-IDENTICAL PROOFS. The column absorption order into
+    // the row-leaf sponge is the column order in either case, and each column
+    // LDE is an independent transform of its own coefficients. The threshold
+    // can therefore never change a verifier outcome.
+    // -----------------------------------------------------------------
+    static bool StreamRows(uint64_t columns, uint32_t n_lde)
+    {
+        return Fri3AlgShouldStreamColumns(columns, n_lde);
+    }
+
+    /** BatchCommit under the footprint policy. `stream` MUST be the value the
+     *  caller also used for the trace row root, so both halves of the proof
+     *  agree on whether a dense column_lde exists. */
+    static BatchCommitResult BatchCommitStreamed(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        const uint256& fs_seed, bool stream)
+    {
+        return stream
+                   ? Fri3AlgBatchCommitStreamingSharedCached(
+                         cols, fs_seed)
+                   : Fri3AlgBatchCommit(cols, fs_seed);
+    }
+
+    static uint256 RowRootCached(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        uint32_t n_coeffs,
+        std::shared_ptr<RowTreeCache>& cache,
+        std::string* why)
+    {
+        auto built = std::make_shared<RowTreeCache>();
+        if (!Fri3AlgBuildRowTreeCacheStreaming(
+                cols, n_coeffs, *built, why)) {
+            cache.reset();
+            return {};
+        }
+        cache = std::move(built);
+        return Fri3AlgDigestToUint256(cache->root);
+    }
+
+    static bool OpenRows(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        uint32_t n_coeffs,
+        const std::vector<uint32_t>& indices,
+        const Digest& expected_root,
+        std::vector<MerklePath>& out,
+        std::string* why)
+    {
+        std::vector<Fri3AlgRowOpening> opened;
+        if (!Fri3AlgOpenRowsStreamingShared(
+                cols, n_coeffs, indices,
+                expected_root, opened, why) ||
+            opened.size() != indices.size()) {
+            return false;
+        }
+        out.resize(opened.size());
+        for (size_t i = 0; i < opened.size(); ++i) {
+            out[i].index = indices[i];
+            out[i].values = std::move(opened[i].values);
+            out[i].siblings = std::move(opened[i].siblings);
+        }
+        return true;
+    }
+
+    static bool OpenRowsCached(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        uint32_t n_coeffs,
+        const std::vector<uint32_t>& indices,
+        const Digest& expected_root,
+        const std::shared_ptr<RowTreeCache>& cache,
+        std::vector<MerklePath>& out,
+        std::string* why)
+    {
+        if (!cache) {
+            if (why != nullptr) *why = "missing row tree cache";
+            return false;
+        }
+        std::vector<Fri3AlgRowOpening> opened;
+        if (!Fri3AlgOpenRowsStreamingSharedCached(
+                cols, n_coeffs, indices,
+                expected_root, *cache, opened, why) ||
+            opened.size() != indices.size()) {
+            return false;
+        }
+        out.resize(opened.size());
+        for (size_t i = 0; i < opened.size(); ++i) {
+            out[i].index = indices[i];
+            out[i].values = std::move(opened[i].values);
+            out[i].siblings = std::move(opened[i].siblings);
+        }
+        return true;
+    }
+
     static bool BatchVerify(const BatchProof& p, const uint256& fs_seed, std::string* why)
     {
         return Fri3AlgBatchVerify(p, fs_seed, why);
@@ -161,79 +273,28 @@ struct AirFriBackendAlgStreamingRows
                 cols, n_coeffs));
     }
 
-    static uint256 RowRootCached(
-        const std::vector<std::vector<gkr_field::Fp3>>& cols,
-        uint32_t n_coeffs,
-        std::shared_ptr<RowTreeCache>& cache,
-        std::string* why)
+    /** This backend streams UNCONDITIONALLY — that is its whole purpose — so
+     *  it ignores the shared footprint threshold. RowRootCached / OpenRows /
+     *  OpenRowsCached are inherited from the base, which now carries the same
+     *  bounded-residency implementations. */
+    static bool StreamRows(uint64_t /*columns*/,
+                           uint32_t /*n_lde*/)
     {
-        auto built = std::make_shared<RowTreeCache>();
-        if (!Fri3AlgBuildRowTreeCacheStreaming(
-                cols, n_coeffs, *built, why)) {
-            cache.reset();
-            return {};
-        }
-        cache = std::move(built);
-        return Fri3AlgDigestToUint256(cache->root);
-    }
-
-    static bool OpenRows(
-        const std::vector<std::vector<gkr_field::Fp3>>& cols,
-        uint32_t n_coeffs,
-        const std::vector<uint32_t>& indices,
-        const Digest& expected_root,
-        std::vector<MerklePath>& out,
-        std::string* why)
-    {
-        std::vector<Fri3AlgRowOpening> opened;
-        if (!Fri3AlgOpenRowsStreamingShared(
-                cols, n_coeffs, indices,
-                expected_root, opened, why) ||
-            opened.size() != indices.size()) {
-            return false;
-        }
-        out.resize(opened.size());
-        for (size_t i = 0; i < opened.size(); ++i) {
-            out[i].index = indices[i];
-            out[i].values =
-                std::move(opened[i].values);
-            out[i].siblings =
-                std::move(opened[i].siblings);
-        }
         return true;
     }
 
-    static bool OpenRowsCached(
+    static BatchCommitResult BatchCommitStreamed(
         const std::vector<std::vector<gkr_field::Fp3>>& cols,
-        uint32_t n_coeffs,
-        const std::vector<uint32_t>& indices,
-        const Digest& expected_root,
-        const std::shared_ptr<RowTreeCache>& cache,
-        std::vector<MerklePath>& out,
-        std::string* why)
+        const uint256& fs_seed, bool /*stream*/)
     {
-        if (!cache) {
-            if (why != nullptr) *why = "missing row tree cache";
-            return false;
-        }
-        std::vector<Fri3AlgRowOpening> opened;
-        if (!Fri3AlgOpenRowsStreamingSharedCached(
-                cols, n_coeffs, indices,
-                expected_root, *cache, opened, why) ||
-            opened.size() != indices.size()) {
-            return false;
-        }
-        out.resize(opened.size());
-        for (size_t i = 0; i < opened.size(); ++i) {
-            out[i].index = indices[i];
-            out[i].values =
-                std::move(opened[i].values);
-            out[i].siblings =
-                std::move(opened[i].siblings);
-        }
-        return true;
+        return Fri3AlgBatchCommitStreamingSharedCached(
+            cols, fs_seed);
     }
 };
+
+template <>
+inline constexpr bool AirBackendStreamsRowOpenings<
+    AirFriBackendAlg<gkr_field::Fp3>> = true;
 
 template <>
 inline constexpr bool AirBackendStreamsRowOpenings<

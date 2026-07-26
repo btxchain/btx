@@ -1666,6 +1666,39 @@ public:
         consensus.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulLTPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        // ENC_RC / ENC_RC_COUPLED: HARD-FORK BRANCH DEFAULT-ON (PR-89 posture).
+        // matmul-4.6-v3 (ENC_RC_COUPLED profile 3 = V3 production, the default
+        // nMatMulRCCoupledProfile) + the RC episode are the DEFAULT consensus path
+        // on regtest — the new-consensus regime is the default, NOT gated behind a
+        // flag that defaults off. RC/Coupled activate at 101, exactly ONE height
+        // ABOVE the unified v4/BMX4C/DRLT flag day (100). The +1 stagger is REQUIRED,
+        // not cosmetic: the RC episode default profile is 2 (datacenter), whose
+        // one-time ASERT rescale is the non-inert 16422/1027 (~16×) auto-applied
+        // below. ValidateMatMulAsertParams (pow.cpp, AUDIT C5) rejects a NON-inert
+        // rescale whose height collides with an earlier ASERT branch — a datacenter
+        // RC re-anchor sharing height 100 with v4/BMX4C/DRLT would be silently
+        // shadowed, so it must own a distinct dispatch height. This mirrors the
+        // documented mainnet deploy shape (v4 flag day, THEN datacenter RC at a
+        // distinct higher height with the 16422/1027 rescale — see the CMainParams
+        // ENC_RC comment). Coupled == RC (both 101): GetMatMulEncodingProfile
+        // surfaces ENC_RC_COUPLED as the governing puzzle from 101; V3 is "4.6-v3".
+        // Toy dims are REQUIRED for CI-scale mining (consensus n_ctx=786432 is not
+        // functional-test runnable). The profile-2 one-time ASERT 16422/1027 rescale
+        // and the tip-verify budget unthrottle are applied automatically below (the
+        // same code the -regtestrc* flags used to trigger), keyed on the now-finite
+        // RC height. Public nets stay INT32_MAX / fail-closed
+        // (AssertBMX4CConstructionInvariants still requires
+        // BTX_MATMUL_NO_INVERSION_GATE_RATIFIED for any finite public height —
+        // unflipped). Stage-3 SUCCINCT authority remains compile-time disabled
+        // (kRCStage3SuccinctAuthorityReady == false); this default-on config
+        // exercises the RC-family workload with ExactReplay as the authority until
+        // the end-to-end succinct harness lands and the readiness gates are flipped.
+        // A finite RC height can still be refined per-component by the regtest
+        // -regtestrc*height / -regtestrctoydims overrides applied further below.
+        consensus.nMatMulRCHeight = 101;
+        consensus.nMatMulRCCoupledHeight = 101;
+        consensus.fMatMulRCUseToyDims = true;
+        consensus.fMatMulRCCoupledUseToyDims = true;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;

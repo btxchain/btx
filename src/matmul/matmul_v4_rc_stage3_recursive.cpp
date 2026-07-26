@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
+#include <matmul/matmul_v4_rc_stage3_global_soundness_ledger.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
 #include <algorithm>
@@ -639,6 +640,69 @@ bool ResolveCurrentRCStage3RelationConstraintSystem(
                          ":complete_air_unavailable");
 }
 
+bool SerializeRCStage3RoleAirProof(const AirProof& proof,
+                                   std::vector<unsigned char>& out,
+                                   std::string* why)
+{
+    out.clear();
+    if (!ValidateAirProofStructure(proof, why)) return false;
+
+    Writer writer;
+    std::vector<unsigned char> batch;
+    const size_t batch_size = SerializeFri3AlgBatchProof(proof.batch, batch);
+    if (batch_size != batch.size() || batch_size > kRCFriMaxProofBytesHard) {
+        return Fail(why, "role_air_batch_serialize");
+    }
+    writer.U32(static_cast<uint32_t>(batch.size()));
+    writer.Bytes(batch);
+    writer.Uint256(proof.trace_commit);
+    writer.U32(static_cast<uint32_t>(proof.next_openings.size()));
+    for (const auto& paths : proof.next_openings) {
+        writer.U32(static_cast<uint32_t>(paths.size()));
+        for (const auto& path : paths) WriteRowPath(writer, path);
+    }
+    out = writer.Take();
+    if (out.size() > kRCStage3RecursiveMaxBytes) {
+        out.clear();
+        return Fail(why, "role_air_oversize");
+    }
+    return true;
+}
+
+std::optional<AirProof>
+DeserializeRCStage3RoleAirProof(const std::vector<unsigned char>& bytes,
+                                std::string* why)
+{
+    if (bytes.empty()) return FailOptional<AirProof>(why, "role_air_empty");
+    if (bytes.size() > kRCStage3RecursiveMaxBytes) {
+        return FailOptional<AirProof>(why, "role_air_oversize");
+    }
+    Reader reader(bytes);
+    AirProof proof;
+    if (!ReadAlgBatchProof(reader, proof.batch) ||
+        !reader.Uint256(proof.trace_commit)) {
+        return FailOptional<AirProof>(why, "role_air_bad_body");
+    }
+    if (!ReadVector(reader, proof.next_openings, kRCFri3AlgMaxQueriesHard, 4,
+                    [&](std::vector<air_quotient::AirAlgRowPath>& paths) {
+                        return ReadVector(reader, paths, 2, 8,
+                                          [&](air_quotient::AirAlgRowPath& path) {
+                                              return ReadRowPath(reader, path);
+                                          });
+                    }) ||
+        reader.Remaining() != 0) {
+        return FailOptional<AirProof>(why, "role_air_bad_openings");
+    }
+    if (!ValidateAirProofStructure(proof, why)) return std::nullopt;
+
+    std::vector<unsigned char> canonical;
+    if (!SerializeRCStage3RoleAirProof(proof, canonical, why) ||
+        canonical != bytes) {
+        return FailOptional<AirProof>(why, "role_air_noncanonical");
+    }
+    return proof;
+}
+
 bool SerializeRCStage3RecursiveProof(const RCStage3RecursiveProof& proof,
                                      std::vector<unsigned char>& out,
                                      std::string* why)
@@ -942,7 +1006,35 @@ RCStage3RecursiveReadiness AssessRCStage3RecursiveReadiness(
     // These are mathematical verifier conditions, not activation policy.
     // Keep them explicit until the normalized verifier exports executable
     // completion flags; never replace them with the consensus authority gate.
-    constexpr bool child_fiat_shamir_replay_closed{false};
+    //
+    // child_fiat_shamir_replay_closed is not a hard-coded literal: it is
+    // COMPUTED by the executable global soundness ledger, which delegates to
+    // the single source of truth for this obligation,
+    // recursive_parent_air::AssessChildFsReplayClosureV1() (see
+    // matmul_v4_rc_stage3_global_soundness_ledger.cpp, out.fiat_shamir_replay_
+    // complete). Never replace this with a literal `true`.
+    //
+    // This line gates recursive verification for the whole system, so if you
+    // are here asking "why is recursion still closed?", read that assessor's
+    // `note`: it enumerates exactly which conjunct is still open, and it is
+    // live rather than a snapshot that rots in this comment. As of this
+    // writing the binding constraints are:
+    //
+    //   * CHALLENGE-KIND coverage, not slot coverage: 1 of the 8 Challenge*
+    //     variants of FiatShamirEventKind (matmul_v4_rc_stage3_verifier_air.h
+    //     :218-232) is replayed. The other seven are blocked by the
+    //     transcript-length wall. Parent-slot coverage is NOT what blocks
+    //     closure.
+    //   * FRI-proof-level discharge is PARTIAL: the lane relation is
+    //     FRI-proven (lane_relation_fri_proven, recursive_parent_air.cpp:4563)
+    //     but neither bus endpoint is yet (producer_endpoint_fri_proven /
+    //     consumer_endpoint_fri_proven, .cpp:4568-4569, pending runs).
+    //
+    // Do not re-introduce a claim about the normalized-universal-parent
+    // scaffold here: it no longer carries the FS-replay flag at all.
+    const bool child_fiat_shamir_replay_closed =
+        global_soundness_ledger::AssessExecutableGlobalSoundnessLedgerV1()
+            .composition_gate.child_fiat_shamir_replay_closed;
     // PR-89 rung-4: a recursion parent now proves ITSELF —
     // ProveParentOwnFriV1 runs AirQuotientProve<Fp3, AirFriBackendAlg<Fp3>> over
     // a parent V_CS and AirQuotientVerify round-trips it (produce -> verify ->
@@ -950,25 +1042,39 @@ RCStage3RecursiveReadiness AssessRCStage3RecursiveReadiness(
     // tests). parent_own_fri_proof_reduced_shape records the demonstrated
     // reduced-arity + compact-V_CS round-trip.
     constexpr bool parent_own_fri_proof_reduced_shape{true};
-    // The arity-4 four-slot V_CS is ~16996 columns even at the toy child shape.
-    // rung-4 raised the alg batch cap 2^14 -> 2^15 = 32768 (kRCFri3AlgBatchMaxColumns;
-    // W is not a soundness parameter — Fri3AlgSoundnessBoundBits()=135 is
-    // W-independent, the RLC term (W+2)/|Fp3| ~2^-177 stays far under target), so
-    // the four-slot V_CS now FITS the backend: its own FRI proof is PRODUCIBLE
+    // The arity-4 four-slot V_CS is ~16996 columns at the toy child shape, and
+    // 384k-712k columns with REAL role children. rung-5 raised the alg batch cap
+    // 2^15 -> 2^20 = 1048576 (kRCFri3AlgBatchMaxColumns) so the REAL-child V_CS
+    // FITS the backend. SOUNDNESS: the gate-scored query-proximity bound
+    // Fri3AlgSoundnessBoundBits()=135 is genuinely W-independent (reads only Q);
+    // the field/batching term is NOT W-independent on the shipped SinglePower
+    // path (independent_batching_coefficients held FALSE) — it loses log2(W-1)
+    // bits, but only logarithmically, leaving field_rbr ~107-126 bits > 100-bit
+    // target at W=2^20 (see kRCFri3AlgBatchMaxColumns header for the derivation
+    // and the correction of the prior false "W-independent 2^-177 RLC" note).
+    // Its own FRI proof is thus PRODUCIBLE at real width
     // (within_backend_column_cap == true). The former hard structural residual is
-    // CLOSED. What remains for the full-arity self-proof is purely COMPUTE: the
-    // ~17k-column, 192-query single-threaded CPU prove exceeds 60 min even at the
-    // toy child shape, so the completing round-trip is owned by the GPU-integration
-    // /long-run lane (env-gated BTX_RUN_HEAVY_PARENT_FRI). It is not yet OBSERVED
-    // to complete here, so the "produced_full_arity" flag stays false — an honest
-    // compute residual, not a structural one.
+    // CLOSED. What remained for the full-arity self-proof was purely COMPUTE: the
+    // ~17k-column (vcs 16176), 192-query single-threaded CPU prove exceeds the
+    // reaper window even at the toy child shape. That round-trip is now OBSERVED
+    // to complete: on the multi-threaded (OpenMP, 28-thread) prover the full
+    // arity-4 four-slot parent self-proves AND verifies in 21m37s wall
+    // (31626 CPU-s / ~24.4 effective cores, peak RSS 14.8 GiB) — the
+    // four_slot_self_similar_parent_own_fri_fits_alg_column_cap test under
+    // BTX_RUN_HEAVY_PARENT_FRI, which asserts prove_ok && division_exact &&
+    // verify_ok && parent_own_fri_proof_produced AND the tamper-reject (mutated
+    // FRI step -> verify false) and wrong-seed-reject (Seed 0xe3 -> verify false)
+    // paths, all passing ("*** No errors detected"). The four-slot self-similar
+    // node genuinely proves its own FRI and verifies — the recursion-node
+    // round-trip. This is the observed full-arity closure, no longer a residual.
     constexpr bool parent_own_fri_proof_full_arity_cap_admits{true};
-    constexpr bool parent_own_fri_proof_produced_full_arity{false};
+    constexpr bool parent_own_fri_proof_produced_full_arity{true};
     // self_similar_fixed_point_closed stays FALSE: closing it requires BOTH the
     // observed full-arity parent-own-FRI round-trip AND child_fiat_shamir_replay_closed
     // (the in-parent SHA-FS chip that replays the child gamma/alpha transcript
     // from a proof-independent role seed), a separate lane still false.
-    constexpr bool self_similar_fixed_point_closed{
+    // const, not constexpr: it now depends on the computed ledger value above.
+    const bool self_similar_fixed_point_closed{
         parent_own_fri_proof_produced_full_arity &&
         child_fiat_shamir_replay_closed};
     static_assert(parent_own_fri_proof_reduced_shape,
@@ -986,13 +1092,12 @@ RCStage3RecursiveReadiness AssessRCStage3RecursiveReadiness(
         AddGap(out,
                RCStage3RecursiveGapCode::SelfSimilarFixedPointNotClosed,
                proof.role,
-               "reduced-arity parent produces+verifies its own FRI proof and the "
-               "arity-4 four-slot V_CS now FITS the alg column cap (raised to "
-               "2^15), so the four-slot self-proof is producible; the "
-               "self-similar fixed point remains open on (1) child Fiat-Shamir "
-               "replay (in-parent SHA-FS chip) lane, still false, and (2) the "
-               "compute-bound full-arity four-slot round-trip (single-threaded "
-               "CPU >60 min; GPU-integration lane), not yet observed complete");
+               "the full arity-4 four-slot parent now produces AND verifies its "
+               "own FRI proof (observed: 21m37s wall on the 28-thread OpenMP "
+               "prover, tamper- and wrong-seed-reject asserted), so "
+               "parent_own_fri_proof_produced_full_arity is closed; the "
+               "self-similar fixed point remains open ONLY on the child "
+               "Fiat-Shamir replay (in-parent SHA-FS chip) lane, still false");
     }
     out.cryptographic_verification_ready =
         out.structurally_valid &&

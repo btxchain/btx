@@ -22,6 +22,29 @@ namespace matmul::v4::rc::narrow_recurse {
  * implementation is supplied and differential-tested against the native
  * verifier.
  *
+ * WHERE THE EXECUTABLE NARROW V_CS ACTUALLY LIVES.  kNarrowVcsExecutable is a
+ * statement about THIS translation unit and nothing else.  Two other modules
+ * already execute pieces of the layout described below, and a reader looking
+ * for "the narrow AIR" should go there rather than expecting one here:
+ *
+ *   - recursive_fixedpoint (matmul_v4_rc_stage3_recursive_fixedpoint.h):
+ *     CanonicalHashOpeningLayout is the fully-quadratic vertical lane
+ *     (130 permutation cells + 3 x 118 S-box banks), BuildHashOpeningWitness
+ *     materializes it from a REAL child proof, and BuildFoldBusComposition
+ *     joins it to the fold/scalar memory bus.  kHashOpeningAirExecutable and
+ *     kFoldHashScalarMemoryBusExecutable are true; the composed
+ *     kCompleteRecursiveFixedPointExecutable is still false (arbitrary
+ *     per-point child-constraint evaluation and the SHA-FS transcript chip
+ *     are not joined).  Real-child round trips through that path are exercised
+ *     from this module's own tests.
+ *   - stage3_verifier_air (matmul_v4_rc_stage3_verifier_air.h):
+ *     BuildCanonicalVerifierProgram is the fixed schedule counted below and
+ *     BuildVerifierScalarSystem is its 27-column non-hash chip
+ *     (kVerifierScalarAirExecutable), but its witness builder is a
+ *     deterministic synthetic one, not a child-proof extractor, and
+ *     kVerifierFiatShamirAirExecutable / kWholeVerifierWitnessExecutable are
+ *     false.
+ *
  * The central layout change from air_recurse's wide V_CS is:
  *
  *   wide:   one query/row, all hash permutations side-by-side
@@ -582,6 +605,56 @@ AssessFriDualQ128HybridBound(
     const NarrowVcsPlan& leaf_plan,
     const NarrowVcsCapabilities& capabilities = {});
 
+/**
+ * MEASURED SHAPE FIXED POINT OF THE EXECUTABLE NARROW LANE.
+ *
+ * The question this module exists to answer is whether a parent's own proof
+ * can be consumed as a child without the width exploding.  For the dense
+ * arity-4 V_CS the answer is no: its width grows at roughly 677 parent columns
+ * per child column, so a 544-column child already yields a ~384k-column V_CS
+ * and re-entering that V_CS as a child would need ~261M columns against a
+ * kRCFri3AlgBatchMaxColumns cap of 2^20.
+ *
+ * For the vertical narrow lane the expansion factor per child column is ZERO.
+ * Measured with the real, proof-independent hash-opening scheduler on two REAL
+ * role children whose widths differ by 272x (see this module's tests,
+ * narrow_vcs_width_is_constant_in_child_width_on_real_children):
+ *
+ *   child_w = 2   (EpisodeHeaderTarget)  -> 526 columns, 2^15 trace rows
+ *   child_w = 544 (CoupledPermutation)   -> 526 columns, 2^18 trace rows
+ *
+ * The column count is identical; the child is paid for in rows.  Composed with
+ * the fold/scalar/DEEP buses the parent V_CS measures 574 columns at maximum
+ * algebraic degree 3.  Iterating that shape (level 1 MEASURED on a real role
+ * child, later levels COMPUTED by re-running the same real scheduler on the
+ * previous level's shape) converges in two steps for every arity and query
+ * count tried; the row count is stationary from level 2 onward.  The binding
+ * resource is never the column cap (574 is 1827x under 2^20) -- it is the
+ * node's own FRI domain against kRCFriMaxLdeLog2 = 24:
+ *
+ *   arity 1, Q=192 -> 574 x 2^18, node LDE 2^23   FITS (one doubling spare)
+ *   arity 1, Q=136 -> 574 x 2^18, node LDE 2^23   FITS
+ *   arity 2, Q=192 -> 574 x 2^19, node LDE 2^24   FITS exactly at the cap
+ *   arity 2, Q=136 -> 574 x 2^19, node LDE 2^24   FITS exactly at the cap
+ *   arity 4, Q=136 -> 574 x 2^20, node LDE 2^25   DOES NOT FIT (2x over)
+ *
+ * Arity 4 is therefore dead on shape alone.  Q is close to irrelevant at the
+ * fixed point because power-of-two padding dominates: at arity 2 / Q=136 the
+ * active row count is 364,480 against a 524,288-row trace, so ~30% of the
+ * fixed-point node is padding and a ~28% active-row reduction would move
+ * arity 2 down to the arity-1 shape.
+ *
+ * This is a SHAPE result about the chips that exist today, and the omission is
+ * material: the narrow lane does NOT yet verify everything a child needs.
+ * Arbitrary per-point child-constraint evaluation and the SHA256d Fiat-Shamir
+ * transcript chip are not joined, which is why recursive_fixedpoint keeps
+ * kCompleteRecursiveFixedPointExecutable false.  Every number above is
+ * therefore a "SHA-FS excluded" number.  Those chips add O(1)-in-W columns, so
+ * they should move W* without changing the ZERO expansion factor -- but the
+ * rows they add are exactly what the arity-2 cap has no room for, and until
+ * they are built and measured that is an expectation, not a measurement.
+ * Nothing here may be read as a closed recursion.
+ */
 inline constexpr bool kNarrowVcsExecutable = false;
 inline constexpr bool kNarrowVcsProductionReady = false;
 

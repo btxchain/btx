@@ -12,12 +12,17 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <type_traits>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 // AIR constraint-quotient construction — implementation. See the header for
 // the construction map and the per-rule honesty statement (what arithmetizes
@@ -28,6 +33,60 @@ namespace matmul::v4::rc::air_quotient {
 using gkr_field::Fp;
 
 namespace {
+
+// Prover thread count: BTX_PROVE_THREADS if set (>0), else all cores.
+// Every parallelized phase writes only to distinct output indices, so the
+// thread count and OpenMP schedule never change the produced bytes — the
+// multi-threaded proof is byte-identical to the single-threaded one.
+inline int BtxProveThreads()
+{
+#if defined(_OPENMP)
+    static const int t = [] {
+        if (const char* e = std::getenv("BTX_PROVE_THREADS")) {
+            const int v = std::atoi(e);
+            if (v > 0) return v;
+        }
+        return omp_get_max_threads();
+    }();
+    return t;
+#else
+    return 1;
+#endif
+}
+
+// Optional per-phase wall-clock instrumentation, gated by BTX_PROVE_TIMING.
+// Prints nothing (and costs nothing but a clock read) when the env is unset, so
+// it never affects the produced proof.
+struct BtxPhaseTimer {
+    const bool on;
+    std::chrono::steady_clock::time_point last;
+    std::chrono::steady_clock::time_point start;
+    BtxPhaseTimer()
+        : on(std::getenv("BTX_PROVE_TIMING") != nullptr),
+          last(std::chrono::steady_clock::now()),
+          start(last) {}
+    void mark(const char* name)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (on) {
+            const double ms =
+                std::chrono::duration<double, std::milli>(now - last).count();
+            std::fprintf(stderr, "[BTX_TIMING] %-24s %12.1f ms  (threads=%d)\n",
+                         name, ms, BtxProveThreads());
+            std::fflush(stderr);
+        }
+        last = now;
+    }
+    void total(const char* name)
+    {
+        if (!on) return;
+        const auto now = std::chrono::steady_clock::now();
+        const double ms =
+            std::chrono::duration<double, std::milli>(now - start).count();
+        std::fprintf(stderr, "[BTX_TIMING] %-24s %12.1f ms  TOTAL\n", name, ms);
+        std::fflush(stderr);
+    }
+};
 
 // ---------------------------------------------------------------------------
 // Base-field subgroup roots (mirrors the constants in matmul_v4_rc_fri.cpp;
@@ -237,17 +296,35 @@ AirRowTree<B, F> AirBuildRowTree(const std::vector<std::vector<F>>& col_lde, uin
     AirRowTree<B, F> t;
     const size_t n_leaves = col_lde.empty() ? 0 : col_lde[0].size();
     std::vector<typename B::Digest> level(n_leaves);
-    std::vector<F> row(n_cols);
-    for (size_t i = 0; i < n_leaves; ++i) {
-        for (uint32_t c = 0; c < n_cols; ++c) row[c] = col_lde[c][i];
-        level[i] = B::RowLeafHash(row, static_cast<uint32_t>(i));
+    // Row-tree leaf hashing (supplemental-opening Merkle paths): one leaf per
+    // LDE row hashing n_cols values. Independent leaf writes; the per-row scratch
+    // is allocated once per thread. This is one of the dominant node-scale phases
+    // (n_leaves = n_lde, n_cols up to ~16k). Parallel => byte-identical.
+    const int64_t nlv = static_cast<int64_t>(n_leaves);
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(BtxProveThreads())
+#endif
+    {
+        std::vector<F> row(n_cols);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (int64_t i = 0; i < nlv; ++i) {
+            for (uint32_t c = 0; c < n_cols; ++c) row[c] = col_lde[c][i];
+            level[i] = B::RowLeafHash(row, static_cast<uint32_t>(i));
+        }
     }
     t.levels.push_back(level);
     while (level.size() > 1) {
-        std::vector<typename B::Digest> next;
-        next.reserve(level.size() / 2);
-        for (size_t i = 0; i < level.size(); i += 2) {
-            next.push_back(B::NodeHash(level[i], level[i + 1]));
+        const size_t half = level.size() / 2;
+        std::vector<typename B::Digest> next(half);
+        const int64_t nh = static_cast<int64_t>(half);
+        // Per-level Merkle compress: distinct parent writes, byte-identical.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+        for (int64_t i = 0; i < nh; ++i) {
+            next[i] = B::NodeHash(level[2 * i], level[2 * i + 1]);
         }
         t.levels.push_back(next);
         level = std::move(next);
@@ -850,6 +927,7 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     using T = AirField<F>;
     using B = Backend;
     AirQuotientProveResult<F, Backend> res;
+    BtxPhaseTimer __phase;
 
     const uint32_t N = cs.n_rows;
     if (N < 2 || (N & (N - 1)) != 0) {
@@ -889,10 +967,32 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     std::vector<uint256> trace_roots;
     std::shared_ptr<Fri3AlgRowTreeCache>
         streamed_trace_row_cache;
+    // Per-column trace NTT (interpolate + coset shift): each column is an
+    // independent transform writing distinct coeffs[c]/shifted[c].
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
     for (uint32_t c = 0; c < W; ++c) {
         coeffs[c] = AirInterpolate(columns[c]);
         shifted[c] = coeffs[c];
         AirCosetShiftCoeffs(shifted[c]);
+    }
+    // PROVER FOOTPRINT DECISION (memory only; proof bytes are identical
+    // either way). The dense route materializes the full (W+1) x n_lde Fp3
+    // extension — ~35 GiB at the MEASURED real-role arity-4 parent shape
+    // (W = 384,984, n_lde = 4096), which OOM-kills the prover. When that
+    // exceeds the residency budget the backend commits in streaming
+    // column-blocks instead, so peak memory stops depending on W.
+    //
+    // ONE decision, taken on the WIDEST column set the prove will handle
+    // (trace + quotient = W+1), and reused for both the trace row root and
+    // the batch commit, so the two halves can never disagree about whether a
+    // dense column_lde exists.
+    [[maybe_unused]] bool stream_rows = false;
+    if constexpr (AirBackendStreamsRowOpenings<Backend>) {
+        stream_rows = B::StreamRows(
+            static_cast<uint64_t>(W) + 1,
+            n_coeffs * kRCFriBlowup);
     }
     if constexpr (AirBackendIsRowWise<Backend>) {
         if (!opt.checked_trace_root_hints.empty()) {
@@ -902,6 +1002,10 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         }
         if constexpr (
             AirBackendStreamsRowOpenings<Backend>) {
+          if (!stream_rows) {
+            trace_roots.push_back(
+                B::RowRoot(shifted, n_coeffs));
+          } else {
             std::string cache_why;
             const uint256 root =
                 B::RowRootCached(
@@ -916,6 +1020,7 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
                 return res;
             }
             trace_roots.push_back(root);
+          }
         } else {
             trace_roots.push_back(
                 B::RowRoot(shifted, n_coeffs));
@@ -938,6 +1043,7 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         }
     }
 
+    __phase.mark("trace_ntt+roots");
     // 2. FS λ AFTER the trace commitment roots (commit-then-challenge).
     const F lambda =
         DeriveChallenge<F>(fs_seed, "airq_lambda", trace_roots, {N, Lq_commit, W});
@@ -946,8 +1052,41 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     //    on the extended subgroup of size M ≥ deg C + 1, then interpolation.
     const uint32_t M = std::max(N, FriNextPow2(static_cast<uint32_t>(dmax + 1)));
     const uint32_t stepM = M / N;
+    // Shape + projected residency, printed BEFORE the big allocations so an
+    // out-of-memory prove is still diagnosable. The composition matrix below
+    // is O(W x M) and is a SEPARATE materialization from the commit's column
+    // LDE — streaming the commit does not shrink it.
+    if (std::getenv("BTX_AIRQ_REPORT_BYTES") != nullptr) {
+        const uint64_t elem = sizeof(F);
+        std::fprintf(
+            stderr,
+            "AIRQ_SHAPE W=%u N=%u M=%u Lq_commit=%u n_coeffs=%u n_lde=%u "
+            "stream_rows=%d ldeM_bytes=%llu dense_col_lde_bytes=%llu "
+            "trace_bytes=%llu\n",
+            W, N, M, Lq_commit, n_coeffs, n_coeffs * kRCFriBlowup,
+            static_cast<int>(stream_rows),
+            static_cast<unsigned long long>(uint64_t{W} * M * elem),
+            static_cast<unsigned long long>(
+                (uint64_t{W} + 1) * n_coeffs * kRCFriBlowup * elem),
+            static_cast<unsigned long long>(uint64_t{W} * N * elem));
+        std::fflush(stderr);
+    }
+    // `coeffs` is dead once its M-domain evaluation exists (only the env-gated
+    // AIRQ_DUMP still reads it), so release each column as it is consumed:
+    // that is another O(W x N) matrix — 2.4 GiB at real-role parent width.
+    const bool keep_coeffs_for_dump =
+        std::getenv("AIRQ_DUMP") != nullptr;
     std::vector<std::vector<F>> ldeM(W);
-    for (uint32_t c = 0; c < W; ++c) ldeM[c] = AirEvalOnSubgroup(coeffs[c], M);
+    // Per-column extended-domain NTT (size M): independent, distinct ldeM[c].
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+    for (uint32_t c = 0; c < W; ++c) {
+        ldeM[c] = AirEvalOnSubgroup(coeffs[c], M);
+        if (!keep_coeffs_for_dump) {
+            std::vector<F>().swap(coeffs[c]);
+        }
+    }
 
     const Fp omega_M = AirOmegaForSize(M);
     const Fp omega_N = AirOmegaForSize(N);
@@ -955,28 +1094,50 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     const F h_last = T::FromBase(AirPowBase(omega_N, N - 1));
 
     std::vector<F> cvals(M, T::Zero());
-    std::vector<F> cur(W), nxt(W);
-    Fp ypow = 1;
-    for (uint32_t j = 0; j < M; ++j) {
-        const F y = T::FromBase(ypow);
-        ypow = gkr_field::Mul(ypow, omega_M);
-        const uint32_t jn = (j + stepM) % M;
-        for (uint32_t c = 0; c < W; ++c) {
-            cur[c] = ldeM[c][j];
-            nxt[c] = ldeM[c][jn];
-        }
-        F acc = T::Zero();
-        F lp = T::One();
-        for (const auto& con : cs.constraints) {
-            const F v = con.eval(cur, nxt);
-            if (!T::IsZero(v)) {
-                const F sel = AirSelectorEval<F>(con.kind, N, y, h_first, h_last);
-                acc = T::Add(acc, T::Mul(lp, T::Mul(sel, v)));
+    // DOMINANT PHASE: composition/quotient evaluation over M LDE rows.
+    // Each row writes a distinct cvals[j]; the per-row acc reduction over
+    // constraints stays in-thread, so the Fp3 operation order is identical to
+    // the single-threaded loop → byte-identical output. The running power
+    // ypow = omega_M^j is replaced by AirPowBase(omega_M, j) (same field
+    // element, no cross-iteration dependency) so the loop parallelizes.
+    // cur/nxt are allocated ONCE PER THREAD (not per row) — with W up to ~16k
+    // columns at node scale that keeps the serial fast path allocation-free and
+    // avoids per-iteration malloc contention under OpenMP.
+#if defined(_OPENMP)
+#pragma omp parallel num_threads(BtxProveThreads())
+#endif
+    {
+        std::vector<F> cur(W), nxt(W);
+#if defined(_OPENMP)
+#pragma omp for schedule(static)
+#endif
+        for (uint32_t j = 0; j < M; ++j) {
+            const F y = T::FromBase(AirPowBase(omega_M, j));
+            const uint32_t jn = (j + stepM) % M;
+            for (uint32_t c = 0; c < W; ++c) {
+                cur[c] = ldeM[c][j];
+                nxt[c] = ldeM[c][jn];
             }
-            lp = T::Mul(lp, lambda);
+            F acc = T::Zero();
+            F lp = T::One();
+            for (const auto& con : cs.constraints) {
+                const F v = con.eval(cur, nxt);
+                if (!T::IsZero(v)) {
+                    const F sel =
+                        AirSelectorEval<F>(con.kind, N, y, h_first, h_last);
+                    acc = T::Add(acc, T::Mul(lp, T::Mul(sel, v)));
+                }
+                lp = T::Mul(lp, lambda);
+            }
+            cvals[j] = acc;
         }
-        cvals[j] = acc;
     }
+    // The M-domain evaluation matrix is dead the moment the composition sum is
+    // finished. Release it here so it never coexists with the batch commit's
+    // working set — at real-role parent width that is the difference between
+    // two ~19 GiB peaks and one.
+    ldeM.clear();
+    ldeM.shrink_to_fit();
     std::vector<F> ccoeffs = AirInterpolate(std::move(cvals));
 
     // 4. Divide by Z_H(X) = X^N − 1 (synthetic; exact iff C vanishes on H).
@@ -1025,6 +1186,7 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
       }
     }
 
+    __phase.mark("composition(M rows)");
     // 5. ONE batched FRI instance over trace columns + quotient.
     std::vector<std::vector<F>> all_cols = shifted;
     all_cols.push_back(std::move(q_commit));
@@ -1036,6 +1198,11 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         AirBackendStreamsColumnOpenings<Backend>) {
         cr = B::BatchCommitWithStep(
             all_cols, fs_seed, step);
+    } else if constexpr (
+        AirBackendStreamsRowOpenings<Backend>) {
+        // Same footprint decision as the trace row root above.
+        cr = B::BatchCommitStreamed(
+            all_cols, fs_seed, stream_rows);
     } else {
         cr = B::BatchCommit(all_cols, fs_seed);
     }
@@ -1043,6 +1210,7 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         res.note = "batch commit failed: " + cr.note;
         return res;
     }
+    __phase.mark("lde+leafcommit+fri");
     if constexpr (!AirBackendIsRowWise<Backend>) {
         for (uint32_t c = 0; c < W; ++c) {
             if (cr.proof.columns[c].root != trace_roots[c]) {
@@ -1056,8 +1224,62 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     res.proof.next_openings.resize(cr.proof.queries.size());
     if constexpr (AirBackendIsRowWise<Backend>) {
         res.proof.trace_commit = trace_roots[0];
+        // Dense supplemental openings: rebuild both row trees from the
+        // materialized column_lde. Only reachable when the footprint decision
+        // above kept the dense route (cr.column_lde is populated).
+        [[maybe_unused]] const auto emit_dense_row_supplemental =
+            [&]() -> bool {
+            // Full-row tree (must reproduce the batch's row_commit) and the
+            // trace-only tree behind R_T (must reproduce trace_roots[0]).
+            const AirRowTree<B, F> full =
+                AirBuildRowTree<B, F>(
+                    cr.column_lde, W + 1);
+            const AirRowTree<B, F> trace =
+                AirBuildRowTree<B, F>(
+                    cr.column_lde, W);
+            if (B::PackDigest(full.levels.back()[0]) !=
+                B::PackDigest(
+                    cr.proof.row_commit.root)) {
+                res.note =
+                    "internal: rebuilt row tree root mismatch";
+                return false;
+            }
+            if (B::PackDigest(trace.levels.back()[0]) !=
+                trace_roots[0]) {
+                res.note =
+                    "internal: trace row root mismatch vs RowRoot";
+                return false;
+            }
+            for (size_t qi = 0;
+                 qi < cr.proof.queries.size(); ++qi) {
+                const uint32_t src =
+                    cr.proof.queries[qi].index;
+                const uint32_t idx =
+                    (src + step) % n_lde;
+                auto& row =
+                    res.proof.next_openings[qi];
+                row.resize(2);
+                // [0] next-row opening: the full W+1 row against batch root.
+                row[0].index = idx;
+                row[0].values.resize(W + 1);
+                for (uint32_t c = 0; c <= W; ++c) {
+                    row[0].values[c] =
+                        cr.column_lde[c][idx];
+                }
+                row[0].siblings =
+                    AirRowTreePath(full, idx);
+                // [1] trace-binding path reuses current query values.
+                row[1].index = src;
+                row[1].siblings =
+                    AirRowTreePath(trace, src);
+            }
+            return true;
+        };
         if constexpr (
             AirBackendStreamsRowOpenings<Backend>) {
+          if (!stream_rows) {
+            if (!emit_dense_row_supplemental()) return res;
+          } else {
             const auto trace_digest =
                 B::UnpackDigest(trace_roots[0]);
             if (!trace_digest) {
@@ -1109,51 +1331,9 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
                 // The verifier reuses batch-query values when checking R_T.
                 row[1].values.clear();
             }
+          }
         } else {
-            // Full-row tree (must reproduce the batch's row_commit) and the
-            // trace-only tree behind R_T (must reproduce trace_roots[0]).
-            const AirRowTree<B, F> full =
-                AirBuildRowTree<B, F>(
-                    cr.column_lde, W + 1);
-            const AirRowTree<B, F> trace =
-                AirBuildRowTree<B, F>(
-                    cr.column_lde, W);
-            if (B::PackDigest(full.levels.back()[0]) !=
-                B::PackDigest(
-                    cr.proof.row_commit.root)) {
-                res.note =
-                    "internal: rebuilt row tree root mismatch";
-                return res;
-            }
-            if (B::PackDigest(trace.levels.back()[0]) !=
-                trace_roots[0]) {
-                res.note =
-                    "internal: trace row root mismatch vs RowRoot";
-                return res;
-            }
-            for (size_t qi = 0;
-                 qi < cr.proof.queries.size(); ++qi) {
-                const uint32_t src =
-                    cr.proof.queries[qi].index;
-                const uint32_t idx =
-                    (src + step) % n_lde;
-                auto& row =
-                    res.proof.next_openings[qi];
-                row.resize(2);
-                // [0] next-row opening: the full W+1 row against batch root.
-                row[0].index = idx;
-                row[0].values.resize(W + 1);
-                for (uint32_t c = 0; c <= W; ++c) {
-                    row[0].values[c] =
-                        cr.column_lde[c][idx];
-                }
-                row[0].siblings =
-                    AirRowTreePath(full, idx);
-                // [1] trace-binding path reuses current query values.
-                row[1].index = src;
-                row[1].siblings =
-                    AirRowTreePath(trace, src);
-            }
+            if (!emit_dense_row_supplemental()) return res;
         }
     } else {
         if constexpr (AirBackendStreamsColumnOpenings<Backend>) {
@@ -1199,10 +1379,136 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
             }
         }
     }
+    // MEASURED artifact size (env-gated diagnostic; no effect on the proof).
+    // The batch half is a real serialization (cr.proof_bytes is the byte count
+    // SerializeFri3AlgBatchProof actually produced); the supplemental half is
+    // counted from the real containers with the codec's element widths
+    // (Fp3 = 3x8 B, digest = 4x8 B), mirroring EstimateAlgAirProofBytes.
+    // This exists because no real-child-width parent proof had ever been
+    // serialized — every figure at that width was estimator output.
+    if constexpr (AirBackendIsRowWise<Backend> &&
+                  std::is_same_v<F, gkr_field::Fp3> &&
+                  std::is_same_v<typename B::BatchProof,
+                                 Fri3AlgBatchProof>) {
+        if (std::getenv("BTX_AIRQ_REPORT_BYTES") != nullptr) {
+            uint64_t values = 0;
+            uint64_t siblings = 0;
+            uint64_t frame = 0;
+            for (const auto& paths : res.proof.next_openings) {
+                frame += 4;
+                for (const auto& path : paths) {
+                    frame += 8;
+                    values += path.values.size();
+                    siblings += path.siblings.size();
+                }
+            }
+            const uint64_t supplemental =
+                frame + values * 3 * sizeof(uint64_t) +
+                siblings * 4 * sizeof(uint64_t);
+            const uint64_t total =
+                static_cast<uint64_t>(cr.proof_bytes) + 32 + 4 +
+                supplemental;
+            std::fprintf(
+                stderr,
+                "AIRQ_PROOF_BYTES W=%u n_coeffs=%u n_lde=%u queries=%zu "
+                "streamed=%d batch_bytes=%llu trace_commit_bytes=32 "
+                "next_openings_bytes=%llu next_openings_values=%llu "
+                "next_openings_siblings=%llu total_bytes=%llu\n",
+                W, n_coeffs, n_lde, cr.proof.queries.size(),
+                static_cast<int>(stream_rows),
+                static_cast<unsigned long long>(cr.proof_bytes),
+                static_cast<unsigned long long>(supplemental),
+                static_cast<unsigned long long>(values),
+                static_cast<unsigned long long>(siblings),
+                static_cast<unsigned long long>(total));
+            std::fflush(stderr);
+        }
+        // BIT-IDENTICAL GATE: fingerprint the WHOLE emitted artifact (batch
+        // proof bytes + trace commitment + every supplemental opening) so a
+        // dense run and a streamed run of the same real workload can be
+        // compared prove-for-prove, not just at the final assertion. Env-gated;
+        // it re-serializes the batch, so never enable it at real-child width.
+        if (std::getenv("BTX_AIRQ_PROOF_SHA") != nullptr) {
+            std::vector<unsigned char> ser;
+            SerializeFri3AlgBatchProof(cr.proof, ser);
+            CSHA256 h;
+            if (!ser.empty()) h.Write(ser.data(), ser.size());
+            h.Write(res.proof.trace_commit.data(), 32);
+            const auto absorb_u64 = [&h](uint64_t v) {
+                unsigned char b[8];
+                for (int i = 0; i < 8; ++i) {
+                    b[i] = static_cast<unsigned char>(
+                        (v >> (8 * i)) & 0xFF);
+                }
+                h.Write(b, 8);
+            };
+            for (const auto& paths : res.proof.next_openings) {
+                for (const auto& path : paths) {
+                    absorb_u64(path.index);
+                    absorb_u64(path.values.size());
+                    for (const auto& v : path.values) {
+                        absorb_u64(gkr_field::Canonical(v.c0));
+                        absorb_u64(gkr_field::Canonical(v.c1));
+                        absorb_u64(gkr_field::Canonical(v.c2));
+                    }
+                    absorb_u64(path.siblings.size());
+                    for (const auto& s : path.siblings) {
+                        for (uint32_t k = 0; k < 4; ++k) {
+                            absorb_u64(
+                                gkr_field::Canonical(s[k]));
+                        }
+                    }
+                }
+            }
+            uint8_t digest[CSHA256::OUTPUT_SIZE];
+            h.Finalize(digest);
+            std::string hex;
+            hex.reserve(64);
+            static const char* kHex = "0123456789abcdef";
+            for (unsigned char b : digest) {
+                hex.push_back(kHex[b >> 4]);
+                hex.push_back(kHex[b & 0xF]);
+            }
+            std::fprintf(stderr,
+                         "AIRQ_PROOF_SHA W=%u n_coeffs=%u batch_bytes=%zu "
+                         "sha256=%s\n",
+                         W, n_coeffs, ser.size(), hex.c_str());
+            std::fflush(stderr);
+        }
+    }
     res.proof.batch = std::move(cr.proof);
     res.ok = true;
     res.note = res.division_exact ? "exact division; committed"
                                   : "FORCED commit with nonzero remainder";
+    __phase.mark("supplemental_openings");
+    __phase.total("AirQuotientProve");
+
+    // Optional proof-byte dump for the multi-thread determinism harness: writes
+    // the canonically serialized batch proof to $BTX_PROOF_OUT and prints its
+    // SHA256 + length. Alg (Fp3 recursion) backend only; gated by env, so it
+    // never runs on the consensus path.
+    if constexpr (std::is_same_v<F, gkr_field::Fp3> &&
+                  std::is_same_v<Backend,
+                                 AirFriBackendAlg<gkr_field::Fp3>>) {
+        if (const char* po = std::getenv("BTX_PROOF_OUT")) {
+            std::vector<unsigned char> ser;
+            SerializeFri3AlgBatchProof(res.proof.batch, ser);
+            if (std::FILE* f = std::fopen(po, "wb")) {
+                if (!ser.empty()) {
+                    std::fwrite(ser.data(), 1, ser.size(), f);
+                }
+                std::fclose(f);
+            }
+            unsigned char h[32];
+            CSHA256().Write(ser.data(), ser.size()).Finalize(h);
+            std::fprintf(stderr,
+                         "[BTX_PROOF] threads=%d bytes=%zu sha256=",
+                         BtxProveThreads(), ser.size());
+            for (unsigned char b : h) std::fprintf(stderr, "%02x", b);
+            std::fprintf(stderr, "\n");
+            std::fflush(stderr);
+        }
+    }
     return res;
 }
 

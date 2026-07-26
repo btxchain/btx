@@ -407,6 +407,36 @@ bool OffloadMatMulV4SketchToCache(CBlock& block);
  *  Call ONLY after the solver finalized the header (block.GetHash() stable). */
 bool FinalizeMatMulSolvedBlock(CBlock& block, const Consensus::Params& params, int height);
 
+/** PR-89 item 5 — PRODUCTION finalizer. Supersedes FinalizeMatMulSolvedBlock at
+ *  every miner call site (generateblock RPC, submitSolution IPC, test mining
+ *  helpers). It adds exactly one step in front of the ENC-DR sketch offload:
+ *
+ *    at RC-family heights, AND ONLY once matmul::v4::rc::
+ *    kRCStage3SuccinctAuthorityReady is deliberately closed, generate the
+ *    Stage-3 succinct proof and attach it to block.matrix_c_data, because
+ *    validation.cpp's ContextualCheckBlock will then REQUIRE it (a block
+ *    without one is rejected as "missing-matmul-stage3-proof").
+ *
+ *  While the gate is false this is byte-for-byte FinalizeMatMulSolvedBlock: the
+ *  Stage-3 branch is discarded at compile time by an `if constexpr`, so no live
+ *  producer path changes at all.
+ *
+ *  Returns true iff the block is SAFE TO SUBMIT. It returns false only when a
+ *  Stage-3 proof was required and could not be produced — in that case the
+ *  in-body sketch words are cleared (so the winner cannot be relayed carrying a
+ *  malformed Stage-3 payload, which peers would classify BLOCK_MUTATED) and the
+ *  caller must abandon the block rather than submit a self-invalid one. Note
+ *  this differs from FinalizeMatMulSolvedBlock, whose bool means "the sketch was
+ *  offloaded"; that value is reported separately via @p sketch_offloaded_out.
+ *
+ *  Call ONLY after the solver finalized the header (block.GetHash() stable, and
+ *  matmul_digest/nonce/seeds final): the Stage-3 proof binds all of them. */
+bool FinalizeMatMulSolvedBlockForProduction(CBlock& block,
+                                            const Consensus::Params& params,
+                                            int height,
+                                            std::string* why = nullptr,
+                                            bool* sketch_offloaded_out = nullptr);
+
 /** True iff the block's v4 sketch payload reconstructs the header's committed
  *  matmul_digest. A false result means the payload (block body) is a MUTATION of
  *  the committed body -- the header hash stays valid and a correct payload

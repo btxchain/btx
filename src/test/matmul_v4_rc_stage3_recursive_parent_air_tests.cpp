@@ -5,9 +5,12 @@
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
+#include <matmul/matmul_v4_rc_stage3_global_soundness_ledger.h>
+#include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 #include <matmul/matmul_v4_rc_air_recurse.h>
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
 #include <algorithm>
 #include <chrono>
@@ -22,6 +25,7 @@ namespace {
 namespace aq = air_quotient;
 namespace gf = gkr_field;
 namespace sc = splitrap_ctl;
+namespace ha = stage3_hash_air;
 using AlgB3 = aq::AirFriBackendAlg<gf::Fp3>;
 
 uint256 Seed(unsigned char byte)
@@ -1020,16 +1024,21 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     four_slot_child_airq_lambda_sha256d_replayed_in_cs_and_coordinated_forgery_rejected)
 {
-    // g4 MECHANISM: the child's airq_lambda challenge is re-derived through a
-    // REAL in-circuit SHA256d compression whose 32-byte OUTPUT constrains the
-    // digest bytes the decoder consumes (no longer a free preprocessed column).
+    // g4 MECHANISM + ADVERSARIAL DELIVERABLE.
+    //
+    // The parent decoder re-derives air_lambda from 24 "digest bytes" that are
+    // PREPROCESSED cells: parent_cs constrains only their FIELD IMAGE (word
+    // recompose -> basis reconstruction -> equality with the consumed
+    // challenge), never that they are SHA256d(transcript).  The g4 CS-domain
+    // CTL bus binds those exact cells to the companion SHA CS's constrained
+    // output bytes.  This test (a) shows the honest case reconciles, and
+    // (b) constructs TWO coordinated Fiat-Shamir forgeries that parent_cs alone
+    // accepts with ZERO violations, and shows the bus rejects both.
     //
     // HEAVY (env-gated): the airq_lambda transcript is a 113-byte preimage, so
     // its SHA256d is three real fixed-program compressions; building that
-    // vertical AIR + scanning the full CS costs ~1.6k CPU-seconds per instance
-    // (single-slot, single-kind — the full 4-slot × 8-kind coverage is the GPU
-    // scale-up). Gated so the default suite stays fast; run with
-    // BTX_RUN_HEAVY_CHILD_FS_SHA=1.
+    // vertical AIR + scanning the full CS is expensive. Gated so the default
+    // suite stays fast; run with BTX_RUN_HEAVY_CHILD_FS_SHA=1.
     if (std::getenv("BTX_RUN_HEAVY_CHILD_FS_SHA") == nullptr) {
         BOOST_TEST_MESSAGE(
             "skipping heavy airq_lambda SHA256d in-CS replay "
@@ -1038,16 +1047,32 @@ BOOST_AUTO_TEST_CASE(
     }
     const auto child_cs = ToyFriChildCs();
     const uint256 seed = Seed(0x5e);
-    const std::vector<std::vector<gf::Fp3>>
-        columns{{gf::Fp3::Zero(), gf::Fp3::One()}};
-    const auto proved =
-        aq::AirQuotientProve<gf::Fp3, AlgB3>(
-            child_cs, columns, seed, {});
-    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
-    const std::array<
-        FourSlotSelfSimilarCtlParentV1::ChildProof, 4>
-        proofs{proved.proof, proved.proof,
-               proved.proof, proved.proof};
+    // COVERAGE (a): FOUR DISTINCT children, so the four slots carry four
+    // GENUINELY DIFFERENT transcripts (different trace_commit => different
+    // airq_lambda digest => different byte window).  With four identical
+    // children the per-slot binding would be vacuously equal and would prove
+    // nothing about slot separation.  The toy child AIR is one boolean column
+    // over two rows, so (0,1) (1,0) (0,0) (1,1) are four distinct valid
+    // witnesses.
+    const std::array<std::vector<std::vector<gf::Fp3>>, 4> child_columns{
+        std::vector<std::vector<gf::Fp3>>{{gf::Fp3::Zero(), gf::Fp3::One()}},
+        std::vector<std::vector<gf::Fp3>>{{gf::Fp3::One(), gf::Fp3::Zero()}},
+        std::vector<std::vector<gf::Fp3>>{{gf::Fp3::Zero(), gf::Fp3::Zero()}},
+        std::vector<std::vector<gf::Fp3>>{{gf::Fp3::One(), gf::Fp3::One()}}};
+    std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4> proofs{};
+    for (uint32_t i = 0; i < 4; ++i) {
+        const auto p =
+            aq::AirQuotientProve<gf::Fp3, AlgB3>(
+                child_cs, child_columns[i], seed, {});
+        BOOST_REQUIRE_MESSAGE(p.ok, p.note);
+        proofs[i] = p.proof;
+    }
+    // The four transcripts really are distinct.
+    for (uint32_t i = 1; i < 4; ++i) {
+        BOOST_REQUIRE(proofs[i].trace_commit != proofs[0].trace_commit);
+    }
+    const auto proved_first_ok = true;
+    BOOST_REQUIRE(proved_first_ok);
     const auto ctx = NodeContext();
     const auto statement =
         ComputeFourSlotSelfSimilarParentStatementV1(
@@ -1064,9 +1089,13 @@ BOOST_AUTO_TEST_CASE(
 
     const auto replay =
         BuildChildAirChallengeShaReplayV1(
-            seed, proved.proof.trace_commit,
+            seed, proofs[0].trace_commit,
             pi0.child_n_rows, pi0.child_quotient_len,
             pi0.child_w, consumed);
+    BOOST_TEST_MESSAGE(
+        "G4_SHA_CS_SHAPE rows=" << replay.sha_rows
+        << " columns=" << replay.sha_columns
+        << " compressions=" << replay.sha_semantic_compressions);
     BOOST_REQUIRE_MESSAGE(replay.valid, replay.note);
 
     // The in-CS SHA256d output equals the child's real airq_lambda digest, and
@@ -1086,41 +1115,1004 @@ BOOST_AUTO_TEST_CASE(
                 gf::FromU64(replay.digest.data()[k]))));
     }
 
-    // COORDINATED FORGERY (the case the decoder-only pass could NOT catch):
-    // present a fully self-consistent WRONG (digest', challenge') pair — flip a
-    // digest byte AND recompute the challenge limbs so the digest->challenge map
-    // still holds, keeping the SHA input honest. Previously the digest bytes
-    // were a free preprocessed column so this passed; now the in-CS SHA
-    // compression constraints reject it because output != SHA(input). One
-    // full-CS scan (the SHA trace is large — see the per-instance cost note).
+    // ---- HONEST: the two-table CTL boundary reconciles.
+    const auto bound = VerifyChildFsShaBoundV1(parent, replay, 0);
+    BOOST_CHECK_MESSAGE(bound.valid, bound.note);
+    BOOST_CHECK(bound.parent_cs_satisfied);
+    BOOST_CHECK(bound.sha_cs_satisfied);
+    BOOST_CHECK(bound.boundary_reconciled);
+    BOOST_CHECK_EQUAL(bound.parent_violations, 0U);
+    BOOST_CHECK_EQUAL(bound.sha_violations, 0U);
+    BOOST_CHECK(gf::Eq(bound.c_parent, bound.c_sha));
+    // The consumer lane really was appended over the decoder's own cells.
+    BOOST_CHECK_EQUAL(
+        bound.consumer_lane.byte_base,
+        parent.child_air_challenge_byte_base[0]);
+    BOOST_CHECK_EQUAL(bound.producer_lane.byte_base, obb);
+    // Both challenge lanes are distinct and nonzero (no degenerate bus).
+    BOOST_CHECK(!gf::Eq(bound.challenges.gamma1, bound.challenges.gamma2));
+    BOOST_CHECK(!gf::Eq(bound.challenges.alpha1, bound.challenges.alpha2));
+
+    // ---- FORGERY 1: COMPENSATING DIGEST-CELL TAMPER.
+    // The decoder computes word_0 = sum_i byte[i]*256^i in Fp3 and never range-
+    // checks the cells.  So byte[0] += 1 together with byte[1] -= 1/256 leaves
+    // word_0 -- hence the reconstructed challenge, hence EVERY parent
+    // constraint -- untouched.  The forger has changed the claimed transcript
+    // digest without touching anything parent_cs can see.  This is exactly the
+    // coordinated FS forgery: a self-consistent (digest', challenge') pair.
     {
-        auto bad = replay.columns;
-        std::array<unsigned char, 24> dbytes{};
-        for (uint32_t k = 0; k < 24; ++k) {
-            dbytes[k] = replay.digest.data()[k];
+        auto forged = parent;
+        const uint32_t bb = forged.child_air_challenge_byte_base[0];
+        const gf::Fp3 inv256 = gf::Inv(gf::FromU64_3(256));
+        const auto tamper =
+            [&](uint32_t k, const gf::Fp3& delta) {
+                for (auto& cell : forged.parent_witness[bb + k]) {
+                    cell = gf::Add(cell, delta);
+                }
+                for (auto& pp : forged.parent_cs.preprocessed) {
+                    if (pp.first != bb + k) continue;
+                    for (auto& cell : pp.second) {
+                        cell = gf::Add(cell, delta);
+                    }
+                }
+            };
+        tamper(0, gf::Fp3::One());
+        tamper(1, gf::Sub(gf::Fp3::Zero(), inv256));
+
+        // (a) WITHOUT THE BUS the forgery is ACCEPTED: the parent's own
+        //     constraint system is still perfectly satisfied.
+        const uint32_t forged_violations =
+            air_recurse::CountWitnessViolationsOnH(
+                forged.parent_cs, forged.parent_witness);
+        BOOST_CHECK_EQUAL(forged_violations, 0U);
+        // and the digest cells genuinely differ from the SHA output.
+        BOOST_CHECK(!gf::Eq(
+            forged.parent_witness[bb + 0][0],
+            replay.columns[obb + 0][0]));
+
+        // (b) WITH THE BUS it is REJECTED, in parent verification.
+        const auto forged_bound =
+            VerifyChildFsShaBoundV1(forged, replay, 0);
+        BOOST_CHECK_MESSAGE(
+            !forged_bound.valid,
+            "compensating digest tamper was NOT rejected: " +
+                forged_bound.note);
+        BOOST_CHECK(!forged_bound.boundary_reconciled);
+        BOOST_CHECK(!gf::Eq(
+            forged_bound.c_parent, forged_bound.c_sha));
+        // The rejection is the CTL boundary, not a table violation: each table
+        // in isolation is still satisfied.  Only the cross-domain bus sees it.
+        BOOST_CHECK_EQUAL(forged_bound.sha_violations, 0U);
+        BOOST_CHECK_EQUAL(
+            forged_bound.note,
+            std::string(
+                "stage3:child_fs_sha_bound:rejected:ctl_boundary"));
+    }
+
+    // ---- FORGERY 2: TRANSCRIPT SUBSTITUTION.
+    // Two individually-valid tables that do not belong together: a parent built
+    // over transcript seed' paired with the companion SHA replay of transcript
+    // seed.  Each table has zero violations on its own; the mismatch exists
+    // only across the domain boundary.
+    {
+        const uint256 seed2 = Seed(0x5f);
+        std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4> proofs2{};
+        for (uint32_t i = 0; i < 4; ++i) {
+            const auto p2 =
+                aq::AirQuotientProve<gf::Fp3, AlgB3>(
+                    child_cs, child_columns[i], seed2, {});
+            BOOST_REQUIRE_MESSAGE(p2.ok, p2.note);
+            proofs2[i] = p2.proof;
         }
-        dbytes[5] ^= 0x01;
+        const auto statement2 =
+            ComputeFourSlotSelfSimilarParentStatementV1(
+                child_cs, proofs2, seed2, ctx);
+        const auto parent2 =
+            BuildFourSlotSelfSimilarCtlParentV1(
+                child_cs, proofs2, seed2, ctx, statement2);
+        BOOST_REQUIRE_MESSAGE(parent2.valid, parent2.note);
+        // Both tables are individually satisfied.
+        BOOST_CHECK_EQUAL(parent2.witness_violations, 0U);
+        BOOST_CHECK_EQUAL(replay.witness_violations, 0U);
+        // Different transcript => different digest cells.
+        const uint32_t bb2 =
+            parent2.child_air_challenge_byte_base[0];
+        bool any_differs = false;
         for (uint32_t k = 0; k < 24; ++k) {
-            const gf::Fp3 b =
-                gf::FromU64_3(static_cast<uint64_t>(dbytes[k]));
-            for (auto& cell : bad[obb + k]) cell = b;
-        }
-        const gf::Fp3 recon2 =
-            gf::FromChallengeBytes3(dbytes.data());
-        const std::array<gf::Fp3, 3> limbs2 = {
-            gf::Fp3::FromFp(recon2.c0),
-            gf::Fp3::FromFp(recon2.c1),
-            gf::Fp3::FromFp(recon2.c2)};
-        for (uint32_t j = 0; j < 3; ++j) {
-            for (auto& cell :
-                 bad[replay.challenge_limb_columns[j]]) {
-                cell = limbs2[j];
+            if (!gf::Eq(parent2.parent_witness[bb2 + k][0],
+                        replay.columns[obb + k][0])) {
+                any_differs = true;
             }
         }
+        BOOST_REQUIRE(any_differs);
+        const auto mixed =
+            VerifyChildFsShaBoundV1(parent2, replay, 0);
+        BOOST_CHECK_MESSAGE(
+            !mixed.valid,
+            "transcript substitution was NOT rejected: " + mixed.note);
+        BOOST_CHECK(!mixed.boundary_reconciled);
+        BOOST_CHECK(!gf::Eq(mixed.c_parent, mixed.c_sha));
+        BOOST_CHECK_EQUAL(mixed.parent_violations, 0U);
+        BOOST_CHECK_EQUAL(mixed.sha_violations, 0U);
+    }
+
+    // ---- COVERAGE (a): ALL FOUR SLOTS, four genuinely different transcripts.
+    // Each slot gets its OWN companion SHA replay over its own child's
+    // trace_commit, and each slot's bus must reconcile against its own replay.
+    std::array<ChildAirChallengeShaReplayV1, 4> replays{};
+    replays[0] = replay;
+    for (uint32_t slot = 1; slot < 4; ++slot) {
+        const auto& pi = parent.child_verifier.pis[slot];
+        replays[slot] = BuildChildAirChallengeShaReplayV1(
+            seed, proofs[slot].trace_commit, pi.child_n_rows,
+            pi.child_quotient_len, pi.child_w, pi.air_lambda);
+        BOOST_REQUIRE_MESSAGE(replays[slot].valid, replays[slot].note);
+    }
+    // The four digests are genuinely distinct (slot separation is real).
+    for (uint32_t i = 1; i < 4; ++i) {
+        BOOST_CHECK(replays[i].digest != replays[0].digest);
+    }
+    for (uint32_t slot = 0; slot < 4; ++slot) {
+        const auto b = VerifyChildFsShaBoundV1(parent, replays[slot], slot);
+        BOOST_CHECK_MESSAGE(
+            b.valid,
+            "slot " + std::to_string(slot) + " did not reconcile: " + b.note);
+        BOOST_CHECK_EQUAL(b.parent_violations, 0U);
+        BOOST_CHECK_EQUAL(b.sha_violations, 0U);
+        BOOST_CHECK_EQUAL(
+            b.consumer_lane.byte_base,
+            parent.child_air_challenge_byte_base[slot]);
+    }
+
+    // ---- FORGERY 3: CROSS-SLOT REPLAY.  Slot i's decoder window presented
+    // against slot j's companion SHA replay.  Both tables are individually
+    // valid; only the bus sees that the transcripts belong to different
+    // children.  This is the attack that four IDENTICAL children could not
+    // express.
+    for (uint32_t i = 0; i < 4; ++i) {
+        for (uint32_t j = 0; j < 4; ++j) {
+            if (i == j) continue;
+            const auto cross = VerifyChildFsShaBoundV1(parent, replays[j], i);
+            BOOST_CHECK_MESSAGE(
+                !cross.valid,
+                "cross-slot replay " + std::to_string(i) + "<-" +
+                    std::to_string(j) + " was NOT rejected: " + cross.note);
+            BOOST_CHECK(!cross.boundary_reconciled);
+            BOOST_CHECK_EQUAL(cross.parent_violations, 0U);
+            BOOST_CHECK_EQUAL(cross.sha_violations, 0U);
+        }
+    }
+
+    // ---- OBLIGATION (b) ON THE REAL PRODUCER: a genuine FRI proof of the
+    // BUS-AUGMENTED companion SHA CS (real SHA256d rounds + the producer lane),
+    // verified by the real unmodified AirQuotientVerify.  Separately gated: the
+    // SHA CS is wide, so this is the expensive half.
+    if (std::getenv("BTX_RUN_G4_SHA_FRI") != nullptr) {
+        std::vector<gf::Fp3> pcells, ccells;
+        const uint32_t bb0 = parent.child_air_challenge_byte_base[0];
+        for (uint32_t k = 0; k < 24; ++k) {
+            pcells.push_back(parent.parent_witness[bb0 + k][0]);
+            ccells.push_back(replay.columns[obb + k][0]);
+        }
+        RCStage3CtlChallenges ch;
+        std::string why;
+        BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+            parent.computed_parent_statement, replay.digest, 0,
+            pcells, ccells, ch, &why));
+        auto sha_cs = replay.cs;
+        auto sha_cols = replay.columns;
+        ChildFsDigestBusLaneV1 lane;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            obb, ch, nullptr, sha_cs, &sha_cols, lane, &why));
+        BOOST_TEST_MESSAGE(
+            "G4_SHA_BUS_FRI cols=" << sha_cs.n_columns
+            << " rows=" << sha_cs.n_rows
+            << " constraints=" << sha_cs.constraints.size());
+        // The vertical SHA AIR carries preprocessed ROW-GROUP roots, so the
+        // plain AirQuotientVerify refuses it outright ("preprocessed row-group
+        // roots require Split-RAP", air_quotient.cpp:1623) -- with or without
+        // the bus.  It must go through the two-epoch Split-RAP path, where the
+        // SHA AIR's own columns are epoch R0 and the post-challenge bus lane
+        // lands in the second epoch, which is where a CTL auxiliary lane
+        // belongs.
+        const uint256 sseed = Seed(0xc1);
+        BOOST_REQUIRE(!replay.base_column_indices.empty());
+        const auto sp =
+            aq::AirQuotientProveRowsSplitRap(
+                sha_cs, sha_cols, replay.base_column_indices,
+                sseed, {});
+        BOOST_CHECK_MESSAGE(sp.ok, sp.note);
+        if (sp.ok) {
+            BOOST_CHECK(sp.division_exact);
+            BOOST_CHECK(aq::AirQuotientVerifyRowsSplitRap(
+                sha_cs, sp.proof, replay.base_column_indices,
+                sseed, &why));
+            BOOST_CHECK(!aq::AirQuotientVerifyRowsSplitRap(
+                sha_cs, sp.proof, replay.base_column_indices,
+                Seed(0xc9), &why));
+        }
+    } else {
+        BOOST_TEST_MESSAGE(
+            "skipping g4 SHA-CS bus FRI proof "
+            "(set BTX_RUN_G4_SHA_FRI=1 to run)");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_digest_bus_lane_verifier_side_reconstruction_pins_the_terminal)
+{
+    // FAST unit test of the g4 lane itself (no SHA), covering the path a real
+    // recursive verifier uses: rebuild the lane AIR from PUBLIC data only
+    // (constraints, no witness) against a CLAIMED terminal.  The claimed
+    // terminal must be exactly the one the honest cells produce -- that is what
+    // makes the cross-table terminal comparison meaningful.
+    const uint32_t kBytes = 24;
+    const auto make_cs = [&]() {
+        aq::AirConstraintSystem<gf::Fp3> cs;
+        cs.n_rows = 4;
+        cs.n_columns = kBytes;
+        return cs;
+    };
+    // 24 row-constant "digest byte" columns.
+    std::vector<std::vector<gf::Fp3>> cells;
+    std::vector<gf::Fp3> row0;
+    for (uint32_t k = 0; k < kBytes; ++k) {
+        const gf::Fp3 v = gf::FromU64_3(7 * k + 11);
+        cells.emplace_back(4, v);
+        row0.push_back(v);
+    }
+    ah::Digest statement{};
+    const uint256 digest = Seed(0x31);
+    RCStage3CtlChallenges ch;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        DeriveChildFsDigestBusChallengesV1(
+            statement, digest, 0, row0, row0, ch, &why),
+        why);
+    BOOST_CHECK(!gf::Eq(ch.gamma1, ch.gamma2));
+    BOOST_CHECK(!gf::Eq(ch.alpha1, ch.alpha2));
+
+    // PROVER side: build with witness; the lane derives and pins its terminal.
+    auto prover_cs = make_cs();
+    auto prover_cols = cells;
+    ChildFsDigestBusLaneV1 prover_lane;
+    BOOST_REQUIRE_MESSAGE(
+        AppendChildFsDigestBusLaneV1(
+            0, ch, nullptr, prover_cs, &prover_cols, prover_lane, &why),
+        why);
+    BOOST_CHECK(prover_lane.valid);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(prover_cs, prover_cols),
+        0U);
+
+    // VERIFIER side: constraints only, against the CLAIMED terminal.  Same
+    // relation, same column indices, accepts the honest lane witness.
+    {
+        auto verifier_cs = make_cs();
+        ChildFsDigestBusLaneV1 verifier_lane;
+        BOOST_REQUIRE_MESSAGE(
+            AppendChildFsDigestBusLaneV1(
+                0, ch, &prover_lane.terminal, verifier_cs, nullptr,
+                verifier_lane, &why),
+            why);
+        BOOST_CHECK_EQUAL(verifier_lane.columns, prover_lane.columns);
+        BOOST_CHECK_EQUAL(
+            verifier_cs.constraints.size(),
+            prover_cs.constraints.size());
+        BOOST_CHECK_EQUAL(
+            air_recurse::CountWitnessViolationsOnH(
+                verifier_cs, prover_cols),
+            0U);
+    }
+    // A CLAIMED terminal that is not the honest one is rejected: the kLastRow
+    // running constraint no longer closes.  (This is what stops a forger from
+    // simply asserting the producer's terminal on his own cells.)
+    {
+        auto verifier_cs = make_cs();
+        RCStage3CtlTerminal lied = prover_lane.terminal;
+        lied.alpha1_sum = gf::Add(lied.alpha1_sum, gf::Fp3::One());
+        ChildFsDigestBusLaneV1 verifier_lane;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            0, ch, &lied, verifier_cs, nullptr, verifier_lane, &why));
         BOOST_CHECK_GT(
             air_recurse::CountWitnessViolationsOnH(
-                replay.cs, bad),
+                verifier_cs, prover_cols),
             0U);
+    }
+    // Changing ONE cell changes the terminal: the lane is byte-sensitive, which
+    // is the whole point of the cross-domain comparison.
+    {
+        auto other_cols = cells;
+        for (auto& cell : other_cols[3]) {
+            cell = gf::Add(cell, gf::Fp3::One());
+        }
+        std::vector<gf::Fp3> other_row0 = row0;
+        other_row0[3] = gf::Add(other_row0[3], gf::Fp3::One());
+        // Same challenge on purpose: isolate the lane's byte sensitivity from
+        // the FS re-derivation.
+        auto cs2 = make_cs();
+        ChildFsDigestBusLaneV1 lane2;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            0, ch, nullptr, cs2, &other_cols, lane2, &why));
+        BOOST_CHECK(!gf::Eq(
+            lane2.terminal.alpha1_sum,
+            prover_lane.terminal.alpha1_sum));
+        BOOST_CHECK(!gf::Eq(
+            lane2.terminal.alpha2_sum,
+            prover_lane.terminal.alpha2_sum));
+        BOOST_CHECK(!(lane2.terminal == prover_lane.terminal));
+    }
+    // Shape guard: a byte window that runs past the host's columns is refused.
+    {
+        auto cs3 = make_cs();
+        ChildFsDigestBusLaneV1 lane3;
+        BOOST_CHECK(!AppendChildFsDigestBusLaneV1(
+            1, ch, &prover_lane.terminal, cs3, nullptr, lane3, &why));
+        BOOST_CHECK_EQUAL(why, std::string("bus:byte_window"));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_digest_bus_is_discharged_by_real_fri_proofs_and_rejects_five_ways)
+{
+    // OBLIGATION (b): discharge the g4 bus obligations with REAL FRI PROOFS of
+    // the bus-augmented AIRs, not with CountWitnessViolationsOnH.
+    //
+    // Two tables, each carrying the SAME lane relation over its own 24-byte
+    // window, each proved with the production AirQuotientProve<Fp3,
+    // AirFriBackendAlg<Fp3>> and verified with the real unmodified
+    // AirQuotientVerify.  The tables model the two g4 endpoints exactly:
+    //   PRODUCER  bytes are CONSTRAINED to fixed values (what the SHA
+    //             compression rounds do to sha_output_byte_base);
+    //   CONSUMER  bytes are FREE and reachable only through their FIELD IMAGE
+    //             (what the parent decoder does: word recompose -> challenge),
+    //             which is precisely the freedom g4 has to remove.
+    // Structured real data: the byte window is a genuine production
+    // AirChallengeDigest, not synthetic values.
+    const uint256 d = aq::AirChallengeDigest(
+        Seed(0x5e), "airq_lambda", {Seed(0xa7)}, {2u, 4u, 1u});
+    std::array<unsigned char, 24> bytes{};
+    for (uint32_t i = 0; i < 24; ++i) bytes[i] = d.data()[i];
+    const uint32_t kRows = 8;
+    const uint32_t kBytes = 24;
+
+    // word0 = sum_i b[i]*256^i over the first 8 bytes, in Fp3 (the exact
+    // arithmetic the parent decoder uses).
+    const auto word0_of = [&](const std::array<gf::Fp3, 24>& cells) {
+        gf::Fp3 acc = gf::Fp3::Zero();
+        for (uint32_t i = 0; i < 8; ++i) {
+            acc = gf::Add(
+                acc,
+                gf::Mul(cells[i],
+                        gf::FromU64_3(uint64_t{1} << (8 * i))));
+        }
+        return acc;
+    };
+    std::array<gf::Fp3, 24> honest{};
+    for (uint32_t i = 0; i < kBytes; ++i) {
+        honest[i] = gf::FromU64_3(static_cast<uint64_t>(bytes[i]));
+    }
+
+    // --- PRODUCER: bytes pinned by constraints (stands in for the SHA rounds).
+    const auto build_producer =
+        [&](const std::array<gf::Fp3, 24>& cells,
+            aq::AirConstraintSystem<gf::Fp3>& cs,
+            std::vector<std::vector<gf::Fp3>>& cols) {
+            cs = {};
+            cs.n_rows = kRows;
+            cs.n_columns = kBytes;
+            cols.assign(kBytes, std::vector<gf::Fp3>(kRows, gf::Fp3::Zero()));
+            for (uint32_t k = 0; k < kBytes; ++k) {
+                cols[k].assign(kRows, cells[k]);
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "g4test.producer.byte_pinned";
+                c.kind = aq::AirKind::kEverywhere;
+                c.alg_degree = 1;
+                const gf::Fp3 want = cells[k];
+                c.eval = [k, want](const std::vector<gf::Fp3>& r,
+                                   const std::vector<gf::Fp3>&) {
+                    return gf::Sub(r[k], want);
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+        };
+    // --- CONSUMER: bytes FREE, reachable only via word0 (the decoder gap).
+    const auto build_consumer =
+        [&](const std::array<gf::Fp3, 24>& cells,
+            aq::AirConstraintSystem<gf::Fp3>& cs,
+            std::vector<std::vector<gf::Fp3>>& cols) {
+            cs = {};
+            cs.n_rows = kRows;
+            cs.n_columns = kBytes + 1;
+            cols.assign(kBytes + 1,
+                        std::vector<gf::Fp3>(kRows, gf::Fp3::Zero()));
+            for (uint32_t k = 0; k < kBytes; ++k) {
+                cols[k].assign(kRows, cells[k]);
+            }
+            cols[kBytes].assign(kRows, word0_of(cells));
+            {   // word0 - sum b_i*256^i = 0
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "g4test.consumer.word_recompose";
+                c.kind = aq::AirKind::kEverywhere;
+                c.alg_degree = 1;
+                c.eval = [](const std::vector<gf::Fp3>& r,
+                            const std::vector<gf::Fp3>&) {
+                    gf::Fp3 acc = gf::Fp3::Zero();
+                    for (uint32_t i = 0; i < 8; ++i) {
+                        acc = gf::Add(
+                            acc,
+                            gf::Mul(r[i],
+                                    gf::FromU64_3(uint64_t{1} << (8 * i))));
+                    }
+                    return gf::Sub(r[24], acc);
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+            {   // word0 pinned to the HONEST challenge image: the consumer's
+                // challenge is fixed, exactly as the parent binds air_lambda.
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "g4test.consumer.challenge_bound";
+                c.kind = aq::AirKind::kEverywhere;
+                c.alg_degree = 1;
+                const gf::Fp3 want = word0_of(honest);
+                c.eval = [want](const std::vector<gf::Fp3>& r,
+                                const std::vector<gf::Fp3>&) {
+                    return gf::Sub(r[24], want);
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+        };
+
+    std::vector<gf::Fp3> row0(honest.begin(), honest.end());
+    RCStage3CtlChallenges ch;
+    std::string why;
+    ah::Digest statement{};
+    BOOST_REQUIRE_MESSAGE(
+        DeriveChildFsDigestBusChallengesV1(
+            statement, d, 0, row0, row0, ch, &why), why);
+
+    // ---- HONEST: build + append lane + PROVE + VERIFY, both tables.
+    aq::AirConstraintSystem<gf::Fp3> pcs, ccs;
+    std::vector<std::vector<gf::Fp3>> pcols, ccols;
+    ChildFsDigestBusLaneV1 plane, clane;
+    build_producer(honest, pcs, pcols);
+    build_consumer(honest, ccs, ccols);
+    BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+        0, ch, nullptr, pcs, &pcols, plane, &why));
+    BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+        0, ch, nullptr, ccs, &ccols, clane, &why));
+    BOOST_TEST_MESSAGE(
+        "G4_BUS_PROOF_SHAPE producer_cols=" << pcs.n_columns
+        << " consumer_cols=" << ccs.n_columns
+        << " rows=" << kRows
+        << " producer_constraints=" << pcs.constraints.size()
+        << " consumer_constraints=" << ccs.constraints.size());
+
+    const uint256 pseed = Seed(0xb1);
+    const uint256 cseed = Seed(0xb2);
+    const auto pproof =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(pcs, pcols, pseed, {});
+    BOOST_REQUIRE_MESSAGE(pproof.ok, pproof.note);
+    BOOST_CHECK(pproof.division_exact);
+    const auto cproof =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(ccs, ccols, cseed, {});
+    BOOST_REQUIRE_MESSAGE(cproof.ok, cproof.note);
+    BOOST_CHECK(cproof.division_exact);
+    // REAL, UNMODIFIED verifier accepts both bus-augmented AIRs.
+    BOOST_CHECK((aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+        pcs, pproof.proof, pseed, &why)));
+    BOOST_CHECK((aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+        ccs, cproof.proof, cseed, &why)));
+    BOOST_CHECK(!pproof.proof.batch.queries.empty());
+    BOOST_CHECK(!cproof.proof.batch.queries.empty());
+    // Cross-domain boundary reconciles on the PROVEN terminals.
+    BOOST_CHECK(plane.terminal == clane.terminal);
+
+    // ================= FIVE PROOF-LEVEL REJECTS =================
+
+    // REJECT 1 -- LIED TERMINAL.  The consumer claims the producer's terminal
+    // while its cells say otherwise.  The kLastRow running constraint no longer
+    // closes, so the quotient is not exact: there IS NO valid proof.
+    {
+        aq::AirConstraintSystem<gf::Fp3> cs2;
+        std::vector<std::vector<gf::Fp3>> cols2;
+        build_consumer(honest, cs2, cols2);
+        RCStage3CtlTerminal lied = clane.terminal;
+        lied.alpha1_sum = gf::Add(lied.alpha1_sum, gf::Fp3::One());
+        ChildFsDigestBusLaneV1 lane2;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            0, ch, &lied, cs2, nullptr, lane2, &why));
+        cols2.resize(cs2.n_columns,
+                     std::vector<gf::Fp3>(kRows, gf::Fp3::Zero()));
+        for (uint32_t i = 0; i < ccols.size() && i < cols2.size(); ++i) {
+            cols2[i] = ccols[i];
+        }
+        const auto bad =
+            aq::AirQuotientProve<gf::Fp3, AlgB3>(cs2, cols2, cseed, {});
+        const bool accepted =
+            bad.ok && bad.division_exact &&
+            aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+                cs2, bad.proof, cseed, &why);
+        BOOST_CHECK_MESSAGE(!accepted, "lied terminal produced a valid proof");
+    }
+
+    // REJECT 2 -- COORDINATED FS FORGERY, AT PROOF LEVEL.  This is the g4
+    // property.  Compensating tamper (b0 += 1, b1 -= 1/256) leaves word0 -- and
+    // therefore EVERY consumer constraint -- untouched, so the forger obtains a
+    // FULLY VALID FRI PROOF of his consumer AIR.  He is still rejected, because
+    // his PROVEN terminal is not the producer's.
+    {
+        std::array<gf::Fp3, 24> forged = honest;
+        forged[0] = gf::Add(forged[0], gf::Fp3::One());
+        forged[1] = gf::Sub(
+            forged[1], gf::Inv(gf::FromU64_3(256)));
+        BOOST_REQUIRE(gf::Eq(word0_of(forged), word0_of(honest)));
+        aq::AirConstraintSystem<gf::Fp3> cs3;
+        std::vector<std::vector<gf::Fp3>> cols3;
+        build_consumer(forged, cs3, cols3);
+        std::vector<gf::Fp3> frow0(forged.begin(), forged.end());
+        RCStage3CtlChallenges ch3;
+        BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+            statement, d, 0, frow0, row0, ch3, &why));
+        ChildFsDigestBusLaneV1 lane3;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            0, ch3, nullptr, cs3, &cols3, lane3, &why));
+        const auto fproof =
+            aq::AirQuotientProve<gf::Fp3, AlgB3>(cs3, cols3, cseed, {});
+        // The forger's own proof is genuinely VALID -- nothing in his AIR is
+        // violated.  Without the bus this is an accepted parent.
+        BOOST_CHECK_MESSAGE(fproof.ok, fproof.note);
+        BOOST_CHECK(fproof.division_exact);
+        BOOST_CHECK((aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+            cs3, fproof.proof, cseed, &why)));
+        // And the bus rejects him anyway.
+        BOOST_CHECK(!(lane3.terminal == plane.terminal));
+        BOOST_CHECK(!gf::Eq(
+            lane3.terminal.alpha1_sum, plane.terminal.alpha1_sum));
+    }
+
+    // REJECT 3 -- INVERSE-COLUMN TAMPER.  Keep the claimed terminal, corrupt an
+    // inverse cell: the well-formedness constraint breaks, no valid proof.
+    {
+        auto cols4 = ccols;
+        cols4[clane.inverse1_base + 5][0] =
+            gf::Add(cols4[clane.inverse1_base + 5][0], gf::Fp3::One());
+        const auto bad =
+            aq::AirQuotientProve<gf::Fp3, AlgB3>(ccs, cols4, cseed, {});
+        const bool accepted =
+            bad.ok && bad.division_exact &&
+            aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+                ccs, bad.proof, cseed, &why);
+        BOOST_CHECK_MESSAGE(!accepted, "inverse tamper produced a valid proof");
+    }
+
+    // REJECT 4 -- CROSS-TABLE PROOF REPLAY.  The consumer's proof presented
+    // against the producer's AIR (different relation, different pinned
+    // terminal) is refused by the real verifier.
+    {
+        BOOST_CHECK((!aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+            pcs, cproof.proof, pseed, &why)));
+        BOOST_CHECK((!aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+            ccs, pproof.proof, cseed, &why)));
+    }
+
+    // REJECT 5 -- WRONG FIAT-SHAMIR SEED.  A valid proof under a foreign seed
+    // is refused: the bus lane is inside the FS-bound transcript, not beside it.
+    {
+        BOOST_CHECK((!aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+            ccs, cproof.proof, Seed(0xb9), &why)));
+        BOOST_CHECK((!aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+            pcs, pproof.proof, Seed(0xb9), &why)));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_bus_augmented_four_slot_parent_produces_and_verifies_its_own_fri_proof)
+{
+    // OBLIGATION (b), CONSUMER ENDPOINT, ON THE REAL PARENT.
+    //
+    // The g4 consumer lane is appended to the ACTUAL four-slot self-similar
+    // parent_cs, over the ACTUAL cells its airq_lambda decoder consumes, and
+    // the bus-augmented parent is then proved with the production
+    // AirQuotientProve<Fp3, AirFriBackendAlg<Fp3>> and checked by the real
+    // unmodified AirQuotientVerify.  This replaces CountWitnessViolationsOnH
+    // with a real FRI proof on the consumer side.
+    //
+    // The companion SHA CS is NOT rebuilt here (that is the 276 s half, covered
+    // by the heavy replay test); the digest is computed natively with the same
+    // production AirChallengeDigest the SHA AIR reproduces, so the byte window
+    // under test is identical.
+    const auto child_cs = ToyFriChildCs();
+    const uint256 seed = Seed(0x71);
+    const std::vector<std::vector<gf::Fp3>>
+        columns{{gf::Fp3::Zero(), gf::Fp3::One()}};
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(
+            child_cs, columns, seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    const std::array<
+        FourSlotSelfSimilarCtlParentV1::ChildProof, 4>
+        proofs{proved.proof, proved.proof,
+               proved.proof, proved.proof};
+    const auto ctx = NodeContext();
+    const auto statement =
+        ComputeFourSlotSelfSimilarParentStatementV1(
+            child_cs, proofs, seed, ctx);
+    const auto parent =
+        BuildFourSlotSelfSimilarCtlParentV1(
+            child_cs, proofs, seed, ctx, statement);
+    BOOST_REQUIRE_MESSAGE(parent.valid, parent.note);
+
+    const auto& pi0 = parent.child_verifier.pis[0];
+    const uint256 d = aq::AirChallengeDigest(
+        seed, "airq_lambda", {proofs[0].trace_commit},
+        {pi0.child_n_rows, pi0.child_quotient_len, pi0.child_w});
+    const uint32_t bb = parent.child_air_challenge_byte_base[0];
+    BOOST_REQUIRE(bb != 0);
+    // The parent's decoder cells really are the production digest bytes.
+    std::vector<gf::Fp3> pcells, scells;
+    for (uint32_t k = 0; k < 24; ++k) {
+        pcells.push_back(parent.parent_witness[bb + k][0]);
+        scells.push_back(gf::FromU64_3(
+            static_cast<uint64_t>(d.data()[k])));
+        BOOST_REQUIRE(gf::Eq(pcells[k], scells[k]));
+    }
+    RCStage3CtlChallenges ch;
+    std::string why;
+    BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+        parent.computed_parent_statement, d, 0, pcells, scells, ch, &why));
+
+    auto cs = parent.parent_cs;
+    auto cols = parent.parent_witness;
+    ChildFsDigestBusLaneV1 lane;
+    BOOST_REQUIRE_MESSAGE(
+        AppendChildFsDigestBusLaneV1(bb, ch, nullptr, cs, &cols, lane, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "G4_PARENT_BUS_SHAPE base_cols=" << parent.parent_columns
+        << " bus_augmented_cols=" << cs.n_columns
+        << " rows=" << cs.n_rows
+        << " constraints=" << cs.constraints.size()
+        << " cap=" << kRCFri3AlgBatchMaxColumns);
+    // The bus costs 50 columns on a ~17k-column parent.
+    BOOST_CHECK_EQUAL(cs.n_columns, parent.parent_columns + 50);
+    BOOST_CHECK_LE(cs.n_columns, kRCFri3AlgBatchMaxColumns);
+    // The augmented system is satisfied (necessary before proving).
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(cs, cols), 0U);
+
+    if (std::getenv("BTX_RUN_G4_PARENT_FRI") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "skipping bus-augmented parent FRI self-proof "
+            "(set BTX_RUN_G4_PARENT_FRI=1 to run)");
+        return;
+    }
+    // ---- REAL FRI PROOF of the bus-augmented parent.
+    const uint256 pseed = Seed(0x72);
+    const auto own = ProveParentOwnFriV1(cs, cols, pseed);
+    BOOST_REQUIRE_MESSAGE(own.parent_own_fri_proof_produced, own.note);
+    BOOST_CHECK(own.within_backend_column_cap);
+    BOOST_CHECK(own.prove_ok);
+    BOOST_CHECK(own.division_exact);
+    BOOST_CHECK(own.verify_ok);
+    BOOST_CHECK(!own.proof.batch.queries.empty());
+    // FS-bound: a foreign seed is refused.
+    BOOST_CHECK((!aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+        cs, own.proof, Seed(0x79), &why)));
+
+    // ---- COORDINATED FORGERY, REJECTED WITH A VALID PROOF IN HAND.
+    // The forger applies the compensating tamper (b0 += 1, b1 -= 1/256): every
+    // parent constraint still holds, so he obtains a GENUINE FRI PROOF of his
+    // bus-augmented parent.  The bus rejects him on the terminal alone.
+    {
+        auto fcs = parent.parent_cs;
+        auto fcols = parent.parent_witness;
+        const gf::Fp3 inv256 = gf::Inv(gf::FromU64_3(256));
+        const auto tamper = [&](uint32_t k, const gf::Fp3& delta) {
+            for (auto& cell : fcols[bb + k]) cell = gf::Add(cell, delta);
+            for (auto& pp : fcs.preprocessed) {
+                if (pp.first != bb + k) continue;
+                for (auto& cell : pp.second) cell = gf::Add(cell, delta);
+            }
+        };
+        tamper(0, gf::Fp3::One());
+        tamper(1, gf::Sub(gf::Fp3::Zero(), inv256));
+        // Forger's own (post-tamper) challenge and lane.
+        std::vector<gf::Fp3> fcells;
+        for (uint32_t k = 0; k < 24; ++k) {
+            fcells.push_back(fcols[bb + k][0]);
+        }
+        RCStage3CtlChallenges fch;
+        BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+            parent.computed_parent_statement, d, 0, fcells, scells,
+            fch, &why));
+        ChildFsDigestBusLaneV1 flane;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            bb, fch, nullptr, fcs, &fcols, flane, &why));
+        // His augmented parent is fully satisfied ...
+        BOOST_CHECK_EQUAL(
+            air_recurse::CountWitnessViolationsOnH(fcs, fcols), 0U);
+        // ... and genuinely PROVES and VERIFIES.
+        const auto fown = ProveParentOwnFriV1(fcs, fcols, pseed);
+        BOOST_CHECK_MESSAGE(
+            fown.parent_own_fri_proof_produced, fown.note);
+        BOOST_CHECK(fown.division_exact);
+        BOOST_CHECK(fown.verify_ok);
+        // The honest producer terminal for the SAME challenge the forger used.
+        aq::AirConstraintSystem<gf::Fp3> scs;
+        scs.n_rows = 8;
+        scs.n_columns = 24;
+        std::vector<std::vector<gf::Fp3>> scols(
+            24, std::vector<gf::Fp3>(8, gf::Fp3::Zero()));
+        for (uint32_t k = 0; k < 24; ++k) scols[k].assign(8, scells[k]);
+        ChildFsDigestBusLaneV1 slane;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            0, fch, nullptr, scs, &scols, slane, &why));
+        // A VALID FRI PROOF IS NOT ENOUGH: the CTL terminal rejects him.
+        BOOST_CHECK(!(flane.terminal == slane.terminal));
+        BOOST_CHECK(!gf::Eq(
+            flane.terminal.alpha1_sum, slane.terminal.alpha1_sum));
+        BOOST_CHECK(!gf::Eq(
+            flane.terminal.alpha2_sum, slane.terminal.alpha2_sum));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_closure_assessment_is_computed_and_enumerates_its_open_conjuncts)
+{
+    // The ledger's `fiat_shamir_replay_complete` is COMPUTED from this. Assert
+    // the residual is enumerable rather than a bare constant, and that the gate
+    // cannot report closed while any obligation is open.
+    const auto a = AssessChildFsReplayClosureV1();
+    BOOST_TEST_MESSAGE("G4_CLOSURE note=\"" << a.note << "\"");
+    BOOST_TEST_MESSAGE(
+        "G4_CLOSURE slots=" << a.slots_covered << "/" << a.slots_required
+        << " kinds=" << a.challenge_kinds_covered << "/"
+        << a.challenge_kinds_required
+        << " lane_fri=" << a.lane_relation_fri_proven
+        << " producer_fri=" << a.producer_endpoint_fri_proven
+        << " consumer_fri=" << a.consumer_endpoint_fri_proven
+        << " recursion_parent=" << a.recursion_parent_hosts_replay
+        << " closed=" << a.closed);
+    // The bus half is genuinely built and adversarially tested.
+    BOOST_CHECK(a.bus_constructed);
+    BOOST_CHECK(a.bus_rejects_coordinated_forgery);
+    BOOST_CHECK(a.recursion_parent_hosts_replay);
+    BOOST_CHECK(a.lane_relation_fri_proven);
+    // `closed` is a CONJUNCTION, not an assertion: every open obligation must
+    // force it false.
+    BOOST_CHECK_EQUAL(
+        a.closed,
+        a.bus_constructed && a.bus_rejects_coordinated_forgery &&
+            a.covers_all_slots_and_kinds && a.discharged_by_fri_proof &&
+            a.recursion_parent_hosts_replay);
+    BOOST_CHECK_EQUAL(
+        a.discharged_by_fri_proof,
+        a.lane_relation_fri_proven && a.producer_endpoint_fri_proven &&
+            a.consumer_endpoint_fri_proven);
+    BOOST_CHECK_EQUAL(
+        a.covers_all_slots_and_kinds,
+        a.slots_covered >= a.slots_required &&
+            a.challenge_kinds_covered >= a.challenge_kinds_required &&
+            a.real_child_shape_covered);
+    // Today: OPEN, and the note says why.
+    BOOST_CHECK(!a.closed);
+    BOOST_CHECK(a.note.rfind("stage3:child_fs_replay:open:", 0) == 0);
+    BOOST_CHECK(a.note.find("kinds") != std::string::npos);
+    // And the ledger reports exactly this, with zero certified bits.
+    const auto audit =
+        matmul::v4::rc::global_soundness_ledger::
+            AssessExecutableGlobalSoundnessLedgerV1();
+    BOOST_CHECK_EQUAL(audit.fiat_shamir_replay_complete, a.closed);
+    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(!audit.composition_gate.all_clear);
+    BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_sha_chip_forks_a_shared_midstate_to_divergent_tails)
+{
+    // THE fra3_query QUESTION, ANSWERED EXECUTABLY.
+    //
+    // 148 fra3_query draws share an identical transcript `buf` and differ only
+    // in a trailing 4 bytes.  Collapsing them needs the SHA chip to FORK one
+    // midstate into many divergent tail compressions, instead of re-hashing the
+    // shared prefix per draw.  This test builds exactly that shape with the
+    // public API and real, correctly-valued chaining states.
+    //
+    // Two preimages sharing their first 64 bytes and diverging after: their
+    // block-0 boundary is identical, and their block-1 boundaries carry the
+    // SAME h_in (the shared midstate) with DIFFERENT message words.
+    std::vector<uint8_t> pre1(100), pre2(100);
+    for (uint32_t i = 0; i < 100; ++i) {
+        pre1[i] = static_cast<uint8_t>(7 * i + 1);
+        pre2[i] = pre1[i];
+    }
+    for (uint32_t i = 64; i < 100; ++i) {
+        pre2[i] = static_cast<uint8_t>(pre1[i] ^ 0xa5);  // diverge AFTER block 0
+    }
+    std::string why;
+    ha::ShaManifest m1, m2;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildShaManifest(pre1, ha::ShaMode::Double, m1, &why), why);
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildShaManifest(pre2, ha::ShaMode::Double, m2, &why), why);
+    std::vector<ha::FixedProgramBoundaryInstance> b1, b2;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildShaManifestBoundaryInstances(m1, b1, &why), why);
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildShaManifestBoundaryInstances(m2, b2, &why), why);
+    BOOST_REQUIRE_EQUAL(m1.first.padded_blocks.size(), 2U);
+    BOOST_REQUIRE_EQUAL(m2.first.padded_blocks.size(), 2U);
+
+    const auto program =
+        ha::BuildCanonicalProgram(ha::ProgramKind::Sha256Compression);
+    // instance 0 = the SHARED prefix block; instances 1 and 2 = the two
+    // divergent tails, both fed from instance 0's output state.
+    std::vector<ha::FixedProgramBoundaryInstance> boundaries{
+        b1[0], b1[1], b2[1]};
+    // Sanity: the two tails really do differ, and really do share an h_in.
+    BOOST_REQUIRE(b1[1].external_values != b2[1].external_values);
+    for (uint32_t w = 0; w < 8; ++w) {
+        BOOST_REQUIRE_EQUAL(
+            b1[1].external_values[16 + w],
+            b2[1].external_values[16 + w]);
+    }
+
+    std::vector<std::vector<uint8_t>> masks(
+        3, std::vector<uint8_t>(program.external_address_count, 1));
+    std::vector<ha::FixedProgramWitnessBoundaryLink> links;
+    for (uint32_t w = 0; w < 8; ++w) {
+        masks[1][16 + w] = 0;
+        masks[2][16 + w] = 0;
+        // FAN-OUT: both links share source (0, w) AND a single link_id -- the
+        // documented "fan-out-safe LogUp multiplicity" form.
+        links.push_back({.source_instance = 0,
+                         .source_final_word = w,
+                         .target_instance = 1,
+                         .target_external_address = 17 + w,
+                         .link_id = 1000 + w});
+        links.push_back({.source_instance = 0,
+                         .source_final_word = w,
+                         .target_instance = 2,
+                         .target_external_address = 17 + w,
+                         .link_id = 1000 + w});
+    }
+    const auto inst =
+        ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+            program, boundaries, masks, links, Seed(0x4f));
+    BOOST_REQUIRE_MESSAGE(inst.valid, inst.note);
+    BOOST_TEST_MESSAGE(
+        "G4_FORK semantic=" << inst.semantic_instances
+        << " scheduled=" << inst.scheduled_instances
+        << " rows=" << inst.cs.n_rows
+        << " cols=" << inst.cs.n_columns);
+    // The forked AIR is satisfied: one midstate legitimately drives two tails.
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(inst.cs, inst.columns), 0U);
+
+    // NEGATIVE CONTROL: distinct link_ids on the SAME source is the aliasing
+    // form and must be REFUSED -- proving the acceptance above is the
+    // multiplicity-tracked fan-out path, not an unchecked one.
+    {
+        auto bad = links;
+        bad[1].link_id = 9999;  // same source (0,0), different id
+        const auto rej =
+            ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+                program, boundaries, masks, bad, Seed(0x4f));
+        BOOST_CHECK_MESSAGE(
+            !rej.valid,
+            "same-source links with different link_ids were accepted");
+    }
+    // NEGATIVE CONTROL: one id shared across DIFFERENT sources must be refused.
+    {
+        auto bad = links;
+        bad[2].link_id = 1000;  // source (0,1) reusing word 0's id
+        const auto rej =
+            ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+                program, boundaries, masks, bad, Seed(0x4f));
+        BOOST_CHECK_MESSAGE(
+            !rej.valid, "cross-source link_id aliasing was accepted");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_diag_vertical_sha_air_fri_roundtrip_with_and_without_bus)
+{
+    // DIAGNOSTIC for the observed failure: the bus-augmented companion SHA CS
+    // PROVES (division exact) but FAILS AirQuotientVerify.  The missing control
+    // is whether the vertical SHA AIR round-trips through AirQuotientProve/
+    // Verify AT ALL, bus or no bus.  Uses the cheap 3-instance vertical SHA AIR
+    // (same builder as the companion CS), not the 113-byte airq_lambda replay.
+    std::vector<uint8_t> pre(100);
+    for (uint32_t i = 0; i < 100; ++i) pre[i] = static_cast<uint8_t>(7 * i + 1);
+    std::string why;
+    ha::ShaManifest m;
+    BOOST_REQUIRE(ha::BuildShaManifest(pre, ha::ShaMode::Double, m, &why));
+    std::vector<ha::FixedProgramBoundaryInstance> b;
+    BOOST_REQUIRE(ha::BuildShaManifestBoundaryInstances(m, b, &why));
+    const auto program =
+        ha::BuildCanonicalProgram(ha::ProgramKind::Sha256Compression);
+    const uint32_t n_first =
+        static_cast<uint32_t>(m.first.padded_blocks.size());
+    std::vector<std::vector<uint8_t>> masks(
+        b.size(), std::vector<uint8_t>(program.external_address_count, 1));
+    std::vector<ha::FixedProgramWitnessBoundaryLink> links;
+    for (uint32_t i = 1; i < n_first; ++i) {
+        for (uint32_t w = 0; w < 8; ++w) {
+            masks[i][16 + w] = 0;
+            links.push_back({.source_instance = i - 1,
+                             .source_final_word = w,
+                             .target_instance = i,
+                             .target_external_address = 17 + w});
+        }
+    }
+    for (uint32_t w = 0; w < 8; ++w) {
+        masks[n_first][w] = 0;
+        links.push_back({.source_instance = n_first - 1,
+                         .source_final_word = w,
+                         .target_instance = n_first,
+                         .target_external_address = 1 + w});
+    }
+    const auto inst =
+        ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+            program, b, masks, links, Seed(0x61));
+    BOOST_REQUIRE_MESSAGE(inst.valid, inst.note);
+    BOOST_TEST_MESSAGE(
+        "DIAG base cols=" << inst.cs.n_columns << " rows=" << inst.cs.n_rows
+        << " constraints=" << inst.cs.constraints.size()
+        << " preprocessed=" << inst.cs.preprocessed.size()
+        << " pin_ood=" << inst.cs.preprocessed_pin_ood);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(inst.cs, inst.columns), 0U);
+
+    // ---- CONTROL: no bus at all.
+    {
+        const uint256 s = Seed(0x62);
+        const auto p = aq::AirQuotientProveRowsSplitRap(
+            inst.cs, inst.columns, inst.base_column_indices, s, {});
+        BOOST_TEST_MESSAGE("DIAG control(splitrap) prove_ok=" << p.ok
+                           << " div_exact=" << p.division_exact
+                           << " note=\"" << p.note << "\"");
+        if (p.ok) {
+            std::string w2;
+            const bool v = aq::AirQuotientVerifyRowsSplitRap(
+                inst.cs, p.proof, inst.base_column_indices, s, &w2);
+            BOOST_TEST_MESSAGE("DIAG control(splitrap) verify=" << v
+                               << " why=\"" << w2 << "\"");
+            BOOST_CHECK(v);
+        }
+    }
+    // ---- TREATMENT: with the g4 bus lane appended.
+    {
+        auto cs = inst.cs;
+        auto cols = inst.columns;
+        const uint32_t obb = inst.output_byte_base;
+        std::vector<gf::Fp3> cells;
+        for (uint32_t k = 0; k < 24; ++k) cells.push_back(cols[obb + k][0]);
+        RCStage3CtlChallenges ch;
+        ah::Digest st{};
+        BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+            st, Seed(0x63), 0, cells, cells, ch, &why));
+        ChildFsDigestBusLaneV1 lane;
+        BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+            obb, ch, nullptr, cs, &cols, lane, &why));
+        BOOST_CHECK_EQUAL(
+            air_recurse::CountWitnessViolationsOnH(cs, cols), 0U);
+        const uint256 s = Seed(0x62);
+        const auto p = aq::AirQuotientProveRowsSplitRap(
+            cs, cols, inst.base_column_indices, s, {});
+        BOOST_TEST_MESSAGE("DIAG bus(splitrap) prove_ok=" << p.ok
+                           << " div_exact=" << p.division_exact
+                           << " note=\"" << p.note << "\"");
+        if (p.ok) {
+            std::string w2;
+            const bool v = aq::AirQuotientVerifyRowsSplitRap(
+                cs, p.proof, inst.base_column_indices, s, &w2);
+            BOOST_TEST_MESSAGE("DIAG bus(splitrap) verify=" << v
+                               << " why=\"" << w2 << "\"");
+            BOOST_CHECK(v);
+        }
     }
 }
 
@@ -2316,6 +3308,180 @@ BOOST_AUTO_TEST_CASE(parent_full_composition_bytecode_gpu_parity)
         std::fclose(f);
         BOOST_TEST_MESSAGE("PARENT_FULL_BC_WRITTEN " << out);
     }
+}
+
+// ===========================================================================
+// PR-89 LOAD-BEARING INTEGRATION: does the four-slot self-similar aggregation
+// consume REAL normalized role C_rho children (not toy leaves)?  Every prior
+// four-slot test used ToyFriChildCs().  Here the four slots are a REAL role's
+// C_rho FRI proof (CoupledPermutation / CoupledMix), which uses OOD-pinned
+// preprocessed columns.  Honest -> parent accepts (witness_violations==0);
+// tamper a real child proof -> the in-parent verifier rejects (violations>0).
+// The self-similar shape verifies four proofs of ONE identical child_cs, so
+// each homogeneous set is one real role (heterogeneous distinct roles is the
+// HeterogeneousChildDispatchParentV1's job).
+// ===========================================================================
+namespace {
+void RunFourSlotRealRoleChildren(const char* tag,
+                                 const RCStage3RoleAirProduct& product,
+                                 unsigned char seed_byte)
+{
+    BOOST_REQUIRE_MESSAGE(product.ok, product.note);
+    // The real role C_rho uses OOD-pinned preprocessed columns (ae5302e
+    // normalization), not per-column preprocessed Merkle roots.
+    BOOST_CHECK(product.cs.preprocessed_roots.empty());
+    BOOST_CHECK(product.cs.preprocessed_pin_ood);
+    // Honest role witness satisfies C_rho on H.
+    BOOST_REQUIRE_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(product.cs, product.witness), 0U);
+
+    const auto& child_cs = product.cs;
+    const uint256 seed = Seed(seed_byte);
+
+    // A GENUINE role child FRI proof (the same object that verifies standalone).
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(child_cs, product.witness, seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_CHECK(proved.division_exact);
+    std::string vwhy;
+    const bool child_accepts =
+        aq::AirQuotientVerify<gf::Fp3, AlgB3>(child_cs, proved.proof, seed, &vwhy);
+    BOOST_REQUIRE_MESSAGE(
+        child_accepts, std::string(tag) + " standalone verify: " + vwhy);
+
+    // Four slots = four REAL role children of the identical child_cs.
+    const std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4> proofs{
+        proved.proof, proved.proof, proved.proof, proved.proof};
+    const auto ctx = NodeContext();
+    const auto statement =
+        ComputeFourSlotSelfSimilarParentStatementV1(child_cs, proofs, seed, ctx);
+    const auto parent =
+        BuildFourSlotSelfSimilarCtlParentV1(child_cs, proofs, seed, ctx, statement);
+
+    BOOST_TEST_MESSAGE(
+        std::string("REAL_ROLE_FOURSLOT ") + tag
+        << " child_cols=" << child_cs.n_columns
+        << " child_rows=" << child_cs.n_rows
+        << " vcs_cols=" << parent.vcs_columns
+        << " parent_cols=" << parent.parent_columns
+        << " parent_rows=" << parent.parent_rows
+        << " valid=" << parent.valid
+        << " violations=" << parent.witness_violations
+        << " note=\"" << parent.note << "\"");
+
+    // HONEST ACCEPT with real children.
+    BOOST_REQUIRE_MESSAGE(parent.valid, std::string(tag) + ": " + parent.note);
+    BOOST_CHECK_EQUAL(parent.witness_violations, 0U);
+    BOOST_CHECK_EQUAL(parent.active_slots, 4U);
+    BOOST_CHECK(parent.all_four_children_verified_in_parent_air);
+    BOOST_CHECK(parent.merkle_fold_deep_quotient_same_parent);
+    BOOST_CHECK(parent.terminal_lanes_sourced_from_in_parent_verifier);
+    BOOST_CHECK(parent.four_child_roots_sourced_from_verifier_outputs);
+    BOOST_CHECK(parent.parent_statement_equals_child_aggregation);
+    BOOST_CHECK(parent.self_similar_arity4_shape);
+
+    // STAGE 2 probe (aggregate ROOT self-prove): attempt the parent's OWN batched
+    // FRI proof over the real-children parent V_CS.  Executable record of the
+    // backend column-cap residual: with REAL role children (W>>1) the parent V_CS
+    // is far wider than with toy leaves, so this documents whether the aggregate
+    // root can be FRI-proven at real-child shape.
+    {
+        const auto own = ProveFourSlotSelfSimilarParentOwnFriV1(parent, Seed(0x2a));
+        BOOST_TEST_MESSAGE(
+            std::string("REAL_ROLE_FOURSLOT_STAGE2 ") + tag
+            << " parent_cols=" << own.parent_columns
+            << " cap=" << kRCFri3AlgBatchMaxColumns
+            << " within_cap=" << own.within_backend_column_cap
+            << " prove_ok=" << own.prove_ok
+            << " verify_ok=" << own.verify_ok
+            << " root_produced=" << own.parent_own_fri_proof_produced
+            << " note=\"" << own.note << "\"");
+    }
+
+    // CHEAP TAMPER (no rebuild): mutate the pinned statement-sponge digest cell in
+    // the honest parent witness -> the in-circuit AlgHash sponge-output identity
+    // fires (the parent statement is genuinely bound to the four real children's
+    // public IO, not a free column).
+    {
+        auto tw = parent.parent_witness;
+        const uint32_t root_col = parent.statement_sponge.ExpectedRoot(0);
+        const uint32_t term_row =
+            parent.statement_sponge_audit.active_rows - 1;
+        tw[root_col][term_row] = gf::Add(tw[root_col][term_row], gf::Fp3::One());
+        const uint32_t v = air_recurse::CountWitnessViolationsOnH(
+            parent.parent_cs, tw);
+        BOOST_TEST_MESSAGE(std::string("REAL_ROLE_FOURSLOT_TAMPER_STATEMENT ")
+                           + tag << " violations=" << v);
+        BOOST_CHECK_GT(v, 0U);
+    }
+
+    // TAMPER-REJECT PATH A (build-time binding pin): tamper a REAL child proof
+    // (bad Merkle sibling in slot 0) while REUSING the honest statement.  The
+    // forged child's public IO no longer hashes to the pinned statement, so the
+    // parent-statement-binding gate rejects (valid=false, "statement_not_binding
+    // _hash_of_children").  A tampered real child cannot ride the honest claim.
+    auto bad = proved.proof;
+    BOOST_REQUIRE(!bad.batch.queries.empty());
+    BOOST_REQUIRE(!bad.batch.queries[0].row.siblings.empty());
+    bad.batch.queries[0].row.siblings[0][0] =
+        gf::Add(bad.batch.queries[0].row.siblings[0][0], gf::Fp{1});
+    const std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4> tproofs{
+        bad, proved.proof, proved.proof, proved.proof};
+    {
+        const auto tparent = BuildFourSlotSelfSimilarCtlParentV1(
+            child_cs, tproofs, seed, ctx, statement);
+        BOOST_TEST_MESSAGE(
+            std::string("REAL_ROLE_FOURSLOT_TAMPER_BIND ") + tag
+            << " valid=" << tparent.valid
+            << " violations=" << tparent.witness_violations
+            << " note=\"" << tparent.note << "\"");
+        BOOST_CHECK_MESSAGE(!tparent.valid,
+                            std::string(tag) + " tampered child must reject");
+    }
+
+    // TAMPER-REJECT PATH B (in-circuit FRI equation): same forged child, but the
+    // statement is RECOMPUTED over the forged proofs so the binding gate passes
+    // and ONLY the in-parent Merkle/fold equation can expose the bad sibling ->
+    // witness_violations > 0 (the child proof is verified in-constraint, not
+    // host-side).  One extra heavy rebuild.
+    {
+        const auto tstatement = ComputeFourSlotSelfSimilarParentStatementV1(
+            child_cs, tproofs, seed, ctx);
+        const auto tparent = BuildFourSlotSelfSimilarCtlParentV1(
+            child_cs, tproofs, seed, ctx, tstatement);
+        BOOST_TEST_MESSAGE(
+            std::string("REAL_ROLE_FOURSLOT_TAMPER_INCIRCUIT ") + tag
+            << " valid=" << tparent.valid
+            << " violations=" << tparent.witness_violations
+            << " note=\"" << tparent.note << "\"");
+        BOOST_CHECK_MESSAGE(
+            !tparent.valid && tparent.witness_violations > 0U,
+            std::string(tag) + " in-circuit merkle must reject with violations, got"
+                + " valid=" + std::to_string(tparent.valid) + " viol="
+                + std::to_string(tparent.witness_violations) + " note="
+                + tparent.note);
+    }
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(
+    four_slot_self_similar_parent_consumes_real_coupled_permutation_children)
+{
+    const gf::Fp3 cell = gf::Fp3::FromFp(gf::FromU64(0x2bad10ULL));
+    RunFourSlotRealRoleChildren(
+        "CoupledPermutation",
+        BuildRCStage3CoupledPermutationRoleAir(cell, 0, /*path_len=*/3, nullptr),
+        0xd1);
+}
+
+BOOST_AUTO_TEST_CASE(
+    four_slot_self_similar_parent_consumes_real_coupled_mix_children)
+{
+    RunFourSlotRealRoleChildren(
+        "CoupledMix",
+        BuildRCStage3CoupledScalarRoleAir(RCStage3RelationRole::CoupledMix, 0,
+                                          /*path_len=*/3, nullptr),
+        0xd2);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

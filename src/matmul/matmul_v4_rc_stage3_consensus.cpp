@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_stage3_verify.h>
 #include <primitives/block.h>
 
@@ -261,6 +262,22 @@ bool ValidateRCStage3ConsensusBinding(const RCStage3SuccinctProof& proof,
     if (p.final_digest != header.matmul_digest) return Fail(why, "final_digest");
     if (p.transcript_version != ExpectedTranscriptVersion(params, *required)) {
         return Fail(why, "transcript_version");
+    }
+    // AUTHENTICATE THE REST OF THE PAYLOAD.
+    //
+    // Every other public input above is compared against consensus context.
+    // transcript_commitment used to be only NULL-checked
+    // (matmul_v4_rc_stage3_stage3.cpp "null_transcript_commitment"), which left
+    // it, every per-role commitment root, and every section body unauthenticated
+    // by this layer -- 69 of 164 payload words. ComputeRCStage3TranscriptCommitment
+    // binds the statement, every public input other than itself, every
+    // fixed-role commitment root, and the hash of every relation-proof section
+    // in canonical registry order, so recomputing and COMPARING it here binds
+    // all three at once. The mathematical verifier checks this too (via
+    // VerifyRCStage3CompositionLink) but is gated off; the binding layer must
+    // not depend on that.
+    if (p.transcript_commitment != ComputeRCStage3TranscriptCommitment(proof)) {
+        return Fail(why, "transcript_commitment");
     }
 
     if (*required == RCStage3StatementKind::Episode) {
