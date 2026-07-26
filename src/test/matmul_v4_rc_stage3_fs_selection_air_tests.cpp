@@ -797,4 +797,169 @@ BOOST_AUTO_TEST_CASE(
         ar::CountWitnessViolationsOnH(d.cs, cols), 0U);
 }
 
+// ===========================================================================
+// PR-89 Construction 2: the ALGEBRAIC (Poseidon2) query-index rule, in AIR.
+// NOT ACTIVATED.  These tests exist to make the activation decision
+// measurable, and above all to make a protocol/in-AIR DIVERGENCE fail loudly:
+// if the two ever disagree the parent computes different challenges than the
+// child protocol and recursion breaks SILENTLY.
+// ===========================================================================
+
+namespace {
+
+std::array<gf::Fp, 4> AlgSigma(uint64_t seed)
+{
+    std::array<gf::Fp, 4> sigma{};
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        sigma[lane] = gf::FromU64(
+            seed * 0x9E3779B97F4A7C15ull + 0x1234567u + lane);
+    }
+    return sigma;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(
+    pr89_algebraic_query_index_air_replays_the_protocol_rule_exactly)
+{
+    // The whole point: the CS output column must equal the value the SHIPPED
+    // protocol function returns, for every (sigma, j, n_lde) tried.  A single
+    // mismatch is the silent-recursion-break condition.
+    uint32_t checked = 0;
+    for (uint64_t seed = 1; seed <= 24; ++seed) {
+        const auto sigma = AlgSigma(seed);
+        for (uint32_t j : {0u, 1u, 7u, 63u, 1000u}) {
+            for (uint32_t n_lde : {2u, 256u, 4096u, 1u << 20}) {
+                const auto air =
+                    fs::BuildAlgebraicQueryIndexAirV1(sigma, j, n_lde);
+                BOOST_REQUIRE_MESSAGE(
+                    air.valid,
+                    "alg query air invalid: " << air.note);
+                BOOST_CHECK_EQUAL(air.violations, 0U);
+                BOOST_CHECK_EQUAL(air.witness_index, air.protocol_index);
+                BOOST_CHECK(air.matches_protocol);
+                BOOST_CHECK_LT(air.witness_index, n_lde);
+                ++checked;
+            }
+        }
+    }
+    BOOST_CHECK_EQUAL(checked, 24U * 5U * 4U);
+
+    // Shape, MEASURED -- and deliberately NOT the SHA chip's shape.  The SHA
+    // chip pins 32 bit columns fed from digest BYTES; a Goldilocks lane has no
+    // intrinsic 32-bit prefix, so the algebraic replay must pin all 64 bits
+    // and add canonicity.  Anyone who claims "the constraint shape does not
+    // move, only the digest preimage does" should read this assertion.
+    const auto shape =
+        fs::BuildAlgebraicQueryIndexAirV1(AlgSigma(1), 0, 4096u);
+    BOOST_CHECK_EQUAL(fs::kQueryDigestBits, 32U);
+    BOOST_CHECK_EQUAL(fs::kAlgebraicQueryLaneBits, 64U);
+    BOOST_CHECK_EQUAL(shape.n_columns, 72U);   // 64 bits + lane + 6 and + out
+    BOOST_CHECK_EQUAL(shape.n_constraints, 73U); // 64 + 1 + 6 + 1 + 1
+    BOOST_CHECK_EQUAL(shape.max_alg_degree, 7U);
+    BOOST_CHECK(shape.booleanity_constrained);
+    BOOST_CHECK(shape.recomposition_constrained);
+    BOOST_CHECK(shape.canonicity_constrained);
+    BOOST_CHECK(shape.mask_constrained);
+    BOOST_TEST_MESSAGE(
+        "ALG_QUERY_AIR columns=" << shape.n_columns
+        << " constraints=" << shape.n_constraints
+        << " rows=" << shape.n_rows
+        << " max_degree=" << shape.max_alg_degree
+        << "  (SHA mask chip: " << fs::kQueryDigestBits << " bit columns)");
+}
+
+BOOST_AUTO_TEST_CASE(
+    pr89_algebraic_query_index_air_rejects_forged_index_and_aliased_witness)
+{
+    const auto sigma = AlgSigma(7);
+    const uint32_t n_lde = 4096u;
+    const auto honest = fs::BuildAlgebraicQueryIndexAirV1(sigma, 3, n_lde);
+    BOOST_REQUIRE(honest.valid);
+
+    // A forged output column must be REJECTED by the mask constraint, not
+    // merely differ from the protocol value.
+    const uint32_t forged = (honest.protocol_index + 1) & (n_lde - 1);
+    const auto tampered =
+        fs::BuildAlgebraicQueryIndexAirV1(sigma, 3, n_lde, false, forged);
+    BOOST_CHECK_GT(tampered.violations, 0U);
+    BOOST_CHECK(!tampered.valid);
+    BOOST_CHECK(!tampered.matches_protocol);
+
+    // Canonicity is load-bearing, shown on a lane that ACTUALLY admits the
+    // alias B = x + p (only x < 2^32 - 1 does).  Without the canonicity
+    // constraint the aliased witness recomposes to a DIFFERENT low 32 bits,
+    // i.e. a retargeted query index, for free.
+    const gf::Fp aliasable = gf::FromU64(0x0BADC0DEull);
+    const auto canonical_air =
+        fs::BuildAlgebraicQueryIndexAirFromLaneV1(aliasable, n_lde, false);
+    BOOST_REQUIRE(canonical_air.valid);
+    const auto aliased_air =
+        fs::BuildAlgebraicQueryIndexAirFromLaneV1(aliasable, n_lde, true);
+    BOOST_REQUIRE_MESSAGE(
+        aliased_air.note.find("no_64bit_alias") == std::string::npos,
+        "chosen lane must admit the alias: " << aliased_air.note);
+    // The alias moves the index -- that is the attack.
+    BOOST_CHECK_NE(aliased_air.witness_index, canonical_air.witness_index);
+    // And the constraint system rejects it.
+    BOOST_CHECK_GT(aliased_air.violations, 0U);
+    BOOST_CHECK(!aliased_air.valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    pr89_algebraic_query_index_replay_cost_is_width_independent)
+{
+    // MEASURED per-kind in-AIR row cost for fra3_query, for ONE child slot,
+    // under both rules.  128 queries is the shipped dual-lane per-lane count.
+    const uint32_t queries = 128u;
+    const auto toy = fs::MeasureAlgebraicQueryIndexReplayCostV1(queries, 1u);
+    const auto mid =
+        fs::MeasureAlgebraicQueryIndexReplayCostV1(queries, 17108u);
+    const auto real =
+        fs::MeasureAlgebraicQueryIndexReplayCostV1(queries, 384984u);
+    BOOST_REQUIRE(toy.valid && mid.valid && real.valid);
+
+    for (const auto* c : {&toy, &mid, &real}) {
+        BOOST_TEST_MESSAGE(
+            "ALG_QUERY_COST W=" << c->child_w
+            << " queries=" << c->queries
+            << " | alg perms/idx=" << c->alg_permutations_per_index
+            << " perms=" << c->alg_permutations
+            << " poseidon_rows=" << c->alg_poseidon_rows
+            << " x" << c->alg_poseidon_columns << "cols"
+            << " mask_rows=" << c->alg_mask_rows
+            << " x" << c->alg_mask_columns << "cols"
+            << " alg_total_rows=" << c->alg_total_rows
+            << " | sha preimage=" << c->sha_preimage_bytes << "B"
+            << " comps/idx=" << c->sha_compressions_per_index
+            << " rows/idx=" << c->sha_rows_per_index
+            << " sha_total_rows=" << c->sha_total_rows);
+    }
+
+    // The algebraic preimage is 8 lanes GIVEN sigma, whatever W: 2 sponge
+    // permutations (8 lanes exactly fill the rate, so 10*-padding costs a
+    // whole extra block).
+    BOOST_CHECK_EQUAL(toy.alg_permutations_per_index, 2U);
+    BOOST_CHECK_EQUAL(toy.alg_total_rows, mid.alg_total_rows);
+    BOOST_CHECK_EQUAL(toy.alg_total_rows, real.alg_total_rows);
+    BOOST_CHECK(real.alg_width_independent);
+    // One permutation per ROW is the entire structural win over the vertical
+    // SHA AIR's 1024 rows per compression.
+    BOOST_CHECK_EQUAL(real.alg_poseidon_columns, 484U);
+    BOOST_CHECK_EQUAL(real.alg_poseidon_rows, 256U); // next_pow2(128*2)
+
+    // The SHA route is width-proportional and stays so.
+    BOOST_CHECK_LT(toy.sha_total_rows, mid.sha_total_rows);
+    BOOST_CHECK_LT(mid.sha_total_rows, real.sha_total_rows);
+    BOOST_CHECK_GT(real.sha_rows_per_index, real.alg_total_rows);
+
+    // HONEST SCOPE PIN.  This buys ONE of the eight child challenge kinds.
+    // fra3_lambda, fra3_z x2, fra3_w x2 and fra3_fold are Fp3 draws and there
+    // is NO algebraic Fp3 draw in the tree -- matmul_v4_rc_fri_ext3_alg.h
+    // exports exactly Fri3AlgAlgebraicTranscriptDigest / Squeeze /
+    // QueryIndex.  Activating the index rule therefore takes g4 coverage from
+    // 1 of 8 kinds to at most 2 of 8, and closes nothing on its own.
+    BOOST_CHECK(!fs::kAlgebraicQueryIndexActivatedV1);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
