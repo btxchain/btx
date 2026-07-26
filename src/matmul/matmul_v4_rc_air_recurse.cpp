@@ -5,11 +5,14 @@
 #include <matmul/matmul_v4_rc_air_recurse.h>
 
 #include <matmul/matmul_v4_rc_fri.h> // FriNextPow2
+#include <hash.h>
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <utility>
 
 // Poseidon2-as-AIR gadget — implementation. See the header for the flattened
@@ -522,6 +525,14 @@ using ah::kAlgHashRate;
     return L / kAlgHashRate + 1;
 }
 
+/** Generic row-leaf block count for exactly `n_values` Fp3 values plus the
+ *  row index. RowLeafNBlocks(W) is the batch-row specialization n_values=W+1. */
+[[nodiscard]] uint32_t RowLeafNBlocksForValues(uint32_t n_values)
+{
+    const uint32_t L = 3 * n_values + 1;
+    return L / kAlgHashRate + 1;
+}
+
 // ---- base-field domain helpers (mirror matmul_v4_rc_fri_ext3_alg.cpp) -------
 constexpr Fp kOmega2_32R = 0x185629dcda58878cULL;
 Fp PowFpR(Fp base, uint64_t exp)
@@ -561,6 +572,9 @@ struct FoldCols {
 struct PreCols {
     uint32_t idx_fp{0};                // Fp(query index)
     std::vector<uint32_t> row_dir;     // D dir bits for the row path
+    uint32_t next_idx_fp{0};           // Fp(query index + omega_H step)
+    std::vector<uint32_t> next_dir;    // D dir bits for supplemental next row
+    std::vector<uint32_t> trace_dir;   // D dir bits for R_T cross-opening
     // per fold layer
     struct FoldPre {
         uint32_t even_leaf_idx{0};
@@ -576,6 +590,9 @@ struct PreCols {
     uint32_t invd1{0};                 // 1/(x_lde - z1)
     uint32_t invd2{0};                 // 1/(x_lde - z2)
     uint32_t zh{0};                    // y^N - 1, y = g*x_lde
+    uint32_t transition_selector{0};   // y - h_last
+    uint32_t first_selector{0};        // Z_H(y)/(y - 1)
+    uint32_t last_selector{0};         // Z_H(y)/(y - h_last)
 };
 
 struct ChildLayout {
@@ -586,7 +603,19 @@ struct ChildLayout {
     uint32_t row_leaf{0};              // = row_leaf_blocks[0] (block holding the first value lanes)
     std::vector<uint32_t> row_comp;    // D
     std::vector<uint32_t> row_sib;     // D (4 cols each)
+    // Supplemental next-row opening against row_commit_root.
+    std::vector<uint32_t> next_leaf_blocks;
+    std::vector<uint32_t> next_comp;   // D
+    std::vector<uint32_t> next_sib;    // D (4 cols each)
+    // Current trace-only row cross-opening against rt_root.
+    std::vector<uint32_t> trace_leaf_blocks;
+    std::vector<uint32_t> trace_comp;  // D
+    std::vector<uint32_t> trace_sib;   // D (4 cols each)
     std::vector<FoldCols> folds;
+    // Public evaluation claims materialized as witness columns and consumed
+    // directly by vcs.deep.identity. One Fp3 witness column per claim.
+    std::vector<uint32_t> evals_z1;
+    std::vector<uint32_t> evals_z2;
     uint32_t witness_end{0};           // first column past this child's witness cols
     PreCols pre;                       // filled during preprocessed allocation
     uint32_t perms{0};                 // perm blocks in this child (measurement)
@@ -620,6 +649,24 @@ uint32_t AllocChildWitness(ChildLayout& c, uint32_t start, const ChildPublicInpu
         for (uint32_t j = 0; j < c.D; ++j) c.row_comp.push_back(perm_block());
         for (uint32_t j = 0; j < c.D; ++j) c.row_sib.push_back(dig4());
     }
+    if (fam.next_row) {
+        const uint32_t nb = RowLeafNBlocksForValues(c.W + 1);
+        for (uint32_t b = 0; b < nb; ++b)
+            c.next_leaf_blocks.push_back(perm_block());
+        for (uint32_t j = 0; j < c.D; ++j)
+            c.next_comp.push_back(perm_block());
+        for (uint32_t j = 0; j < c.D; ++j)
+            c.next_sib.push_back(dig4());
+    }
+    if (fam.trace_binding) {
+        const uint32_t nb = RowLeafNBlocksForValues(c.W);
+        for (uint32_t b = 0; b < nb; ++b)
+            c.trace_leaf_blocks.push_back(perm_block());
+        for (uint32_t j = 0; j < c.D; ++j)
+            c.trace_comp.push_back(perm_block());
+        for (uint32_t j = 0; j < c.D; ++j)
+            c.trace_sib.push_back(dig4());
+    }
     if (fam.fold) {
         for (uint32_t l = 0; l < c.nf; ++l) {
             FoldCols f;
@@ -634,6 +681,12 @@ uint32_t AllocChildWitness(ChildLayout& c, uint32_t start, const ChildPublicInpu
             c.folds.push_back(std::move(f));
         }
     }
+    if (fam.deep) {
+        for (uint32_t i = 0; i <= c.W; ++i)
+            c.evals_z1.push_back(col++);
+        for (uint32_t i = 0; i <= c.W; ++i)
+            c.evals_z2.push_back(col++);
+    }
     c.witness_end = col;
     return col;
 }
@@ -645,6 +698,15 @@ uint32_t AllocChildPreproc(ChildLayout& c, uint32_t start, const VerifierAirFami
     auto one = [&]() { return col++; };
     c.pre.idx_fp = one();
     if (fam.row_merkle) for (uint32_t j = 0; j < c.D; ++j) c.pre.row_dir.push_back(one());
+    if (fam.next_row) {
+        c.pre.next_idx_fp = one();
+        for (uint32_t j = 0; j < c.D; ++j)
+            c.pre.next_dir.push_back(one());
+    }
+    if (fam.trace_binding) {
+        for (uint32_t j = 0; j < c.D; ++j)
+            c.pre.trace_dir.push_back(one());
+    }
     if (fam.fold) {
         for (uint32_t l = 0; l < c.nf; ++l) {
             PreCols::FoldPre fp;
@@ -663,7 +725,12 @@ uint32_t AllocChildPreproc(ChildLayout& c, uint32_t start, const VerifierAirFami
         c.pre.invd1 = one();
         c.pre.invd2 = one();
     }
-    if (fam.per_point) c.pre.zh = one();
+    if (fam.per_point) {
+        c.pre.zh = one();
+        c.pre.transition_selector = one();
+        c.pre.first_selector = one();
+        c.pre.last_selector = one();
+    }
     return col;
 }
 
@@ -833,11 +900,12 @@ void EmitCapacityCarry(std::vector<AirConstraint<Fp3>>& out, uint32_t block_base
 }
 
 // Emit the whole multi-block row-leaf sponge. `blocks` are the n_blocks perm
-// strips, `idx_col` the preprocessed Fp(query index) column, W the child width.
+// strips, `idx_col` the preprocessed Fp(row index) column, and `n_values` is
+// the exact number of Fp3 values authenticated by this tree.
 void EmitRowLeafSponge(std::vector<AirConstraint<Fp3>>& out, const std::vector<uint32_t>& blocks,
-                       uint32_t idx_col, uint32_t W)
+                       uint32_t idx_col, uint32_t n_values)
 {
-    const uint32_t nabs = 3 * (W + 1); // value coord positions [0, nabs)
+    const uint32_t nabs = 3 * n_values; // value coord positions [0, nabs)
     const uint32_t p_idx = nabs;       // appended query index
     const uint32_t p_pad1 = nabs + 1;  // 10*-padding: the appended 1
     const uint32_t nb = static_cast<uint32_t>(blocks.size());
@@ -855,6 +923,28 @@ void EmitRowLeafSponge(std::vector<AirConstraint<Fp3>>& out, const std::vector<u
         for (uint32_t j = kAlgHashRate; j < kAlgHashT; ++j) // capacity lanes: carry
             EmitCapacityCarry(out, blocks[b], has_prev, prev, j);
     }
+}
+
+/** Emit one complete authenticated row opening: row-leaf sponge, D Merkle
+ *  compressions, and equality of the terminal digest to `root`. */
+void EmitAuthenticatedRowPath(
+    std::vector<AirConstraint<Fp3>>& out,
+    const std::vector<uint32_t>& leaf_blocks,
+    const std::vector<uint32_t>& comp,
+    const std::vector<uint32_t>& siblings,
+    const std::vector<uint32_t>& directions,
+    uint32_t idx_col, uint32_t n_values,
+    const Digest& root, Fp3 node_domain)
+{
+    EmitRowLeafSponge(out, leaf_blocks, idx_col, n_values);
+    uint32_t prev = leaf_blocks.back();
+    for (uint32_t j = 0; j < comp.size(); ++j) {
+        EmitPermSbox(out, comp[j]);
+        EmitCompressWiring(out, comp[j], prev, siblings[j],
+                           directions[j], node_domain);
+        prev = comp[j];
+    }
+    EmitRootPin(out, prev, root);
 }
 
 // Read absorbed coord at stream position p across the multi-block row leaf: for
@@ -876,7 +966,457 @@ Fp3 ReadRowLeafValue(const std::vector<Fp3>& cur, const std::vector<uint32_t>& b
                ReadRowLeafCoord(cur, blocks, 3 * i + 2).c0};
 }
 
+/** Equality-link two row-leaf sponges value-by-value. This is the explicit
+ *  cross-opening linkage between the batch full-row tree and R_T's
+ *  trace-only tree; equality is over Fp3, not merely their terminal hashes. */
+void EmitRowValueEquality(
+    std::vector<AirConstraint<Fp3>>& out,
+    const std::vector<uint32_t>& left,
+    const std::vector<uint32_t>& right,
+    uint32_t n_values)
+{
+    for (uint32_t i = 0; i < n_values; ++i) {
+        AirConstraint<Fp3> c;
+        c.name = "vcs.row.cross_opening.equal";
+        c.kind = AirKind::kEverywhere;
+        c.alg_degree = 1;
+        c.eval = [left, right, i](
+                     const std::vector<Fp3>& cur,
+                     const std::vector<Fp3>&) {
+            return gf::Sub(ReadRowLeafValue(cur, left, i),
+                           ReadRowLeafValue(cur, right, i));
+        };
+        out.push_back(std::move(c));
+    }
+}
+
 } // namespace (Piece 4 internals)
+
+std::vector<VerifierAirRowRootOutput>
+DescribeVerifierAIRRowRootOutputs(
+    const std::vector<ChildPublicInputs>& pis,
+    const VerifierAirFamilies& fam)
+{
+    std::vector<VerifierAirRowRootOutput> out;
+    if (pis.empty() || !fam.row_merkle) return out;
+    const VcsLayout layout = ComputeLayout(
+        static_cast<uint32_t>(pis.size()), pis, fam);
+    out.reserve(pis.size() * kAlgHashDigestLen);
+    for (uint32_t child = 0;
+         child < layout.children.size(); ++child) {
+        const ChildLayout& c = layout.children[child];
+        if (c.row_leaf_blocks.empty()) return {};
+        const uint32_t terminal =
+            c.row_comp.empty()
+                ? c.row_leaf_blocks.back()
+                : c.row_comp.back();
+        for (uint32_t limb = 0;
+             limb < kAlgHashDigestLen; ++limb) {
+            out.push_back({child, limb, terminal});
+        }
+    }
+    return out;
+}
+
+Fp3 EvaluateVerifierAIRRowRootOutput(
+    const VerifierAirRowRootOutput& output,
+    const std::vector<Fp3>& row)
+{
+    if (output.digest_limb >= kAlgHashDigestLen ||
+        output.terminal_permutation_base >
+            row.size() ||
+        row.size() - output.terminal_permutation_base <
+            kPermCellsPerPerm) {
+        return Fp3::Zero();
+    }
+    return PermOutputLane(
+        PermLayout{output.terminal_permutation_base},
+        row, output.digest_limb);
+}
+
+aq::AirConstraint<Fp3>
+BuildVerifierAIRRowRootExportConstraint(
+    const VerifierAirRowRootOutput& output,
+    uint32_t export_column,
+    uint32_t selector_column)
+{
+    aq::AirConstraint<Fp3> constraint;
+    constraint.name =
+        "vcs.export.row_root_terminal.selected_alias";
+    constraint.kind = aq::AirKind::kEverywhere;
+    constraint.alg_degree = 2;
+    constraint.eval =
+        [output, export_column, selector_column](
+            const std::vector<Fp3>& cur,
+            const std::vector<Fp3>&) {
+            if (export_column >= cur.size() ||
+                selector_column >= cur.size()) {
+                return Fp3::One();
+            }
+            return gf::Mul(
+                cur[selector_column],
+                gf::Sub(
+                    cur[export_column],
+                    EvaluateVerifierAIRRowRootOutput(
+                        output, cur)));
+        };
+    return constraint;
+}
+
+std::vector<VerifierAirTranscriptOutput>
+DescribeVerifierAIRFullTranscriptOutputs(
+    const std::vector<ChildPublicInputs>& pis,
+    const VerifierAirFamilies& fam)
+{
+    std::vector<VerifierAirTranscriptOutput> out;
+    if (pis.empty() || !fam.row_merkle || !fam.trace_binding ||
+        !fam.fold || !fam.deep) {
+        return out;
+    }
+    const VcsLayout layout = ComputeLayout(
+        static_cast<uint32_t>(pis.size()), pis, fam);
+
+    // The V6 master statement absorbs both ordered row roots first.
+    for (uint32_t child = 0;
+         child < layout.children.size(); ++child) {
+        const ChildLayout& c = layout.children[child];
+        if (c.row_leaf_blocks.empty()) return {};
+        const uint32_t terminal =
+            c.row_comp.empty()
+                ? c.row_leaf_blocks.back()
+                : c.row_comp.back();
+        for (uint32_t limb = 0;
+             limb < kAlgHashDigestLen; ++limb) {
+            out.push_back({
+                VerifierAirTranscriptOutputKind::RowRoot,
+                child, limb, 0, terminal,
+                "vcs.row.root.pin"});
+        }
+    }
+
+    // Then each lane absorbs its trace root, evaluations and fold roots.
+    for (uint32_t child = 0;
+         child < layout.children.size(); ++child) {
+        const ChildLayout& c = layout.children[child];
+        if (c.trace_leaf_blocks.empty() ||
+            c.evals_z1.size() != c.W + 1 ||
+            c.evals_z2.size() != c.W + 1 ||
+            c.folds.size() != c.nf) {
+            return {};
+        }
+        const uint32_t trace_terminal =
+            c.trace_comp.empty()
+                ? c.trace_leaf_blocks.back()
+                : c.trace_comp.back();
+        for (uint32_t limb = 0;
+             limb < kAlgHashDigestLen; ++limb) {
+            out.push_back({
+                VerifierAirTranscriptOutputKind::TraceRoot,
+                child, limb, 0, trace_terminal,
+                "vcs.trace.root.pin"});
+        }
+        for (uint32_t index = 0; index <= c.W; ++index) {
+            for (uint32_t coordinate = 0;
+                 coordinate < 3; ++coordinate) {
+                out.push_back({
+                    VerifierAirTranscriptOutputKind::EvaluationZ1,
+                    child, index, coordinate, c.evals_z1[index],
+                    "vcs.deep.identity"});
+            }
+        }
+        for (uint32_t index = 0; index <= c.W; ++index) {
+            for (uint32_t coordinate = 0;
+                 coordinate < 3; ++coordinate) {
+                out.push_back({
+                    VerifierAirTranscriptOutputKind::EvaluationZ2,
+                    child, index, coordinate, c.evals_z2[index],
+                    "vcs.deep.identity"});
+            }
+        }
+        for (uint32_t fold = 0; fold < c.nf; ++fold) {
+            const FoldCols& f = c.folds[fold];
+            const uint32_t terminal =
+                f.even_comp.empty()
+                    ? f.even_leaf
+                    : f.even_comp.back();
+            for (uint32_t limb = 0;
+                 limb < kAlgHashDigestLen; ++limb) {
+                out.push_back({
+                    VerifierAirTranscriptOutputKind::FoldRoot,
+                    child, fold, limb, terminal,
+                    "vcs.fold.root.pin"});
+            }
+        }
+    }
+    return out;
+}
+
+std::vector<VerifierAirParentOutput>
+DescribeVerifierAIRParentOutputs(
+    const std::vector<ChildPublicInputs>& pis,
+    uint32_t child_index,
+    const VerifierAirFamilies& fam)
+{
+    std::vector<VerifierAirParentOutput> out;
+    if (child_index >= pis.size() ||
+        !fam.row_merkle || !fam.next_row ||
+        !fam.trace_binding || !fam.per_point) {
+        return out;
+    }
+    const VcsLayout layout = ComputeLayout(
+        static_cast<uint32_t>(pis.size()), pis, fam);
+    if (child_index >= layout.children.size()) return {};
+    const ChildLayout& child = layout.children[child_index];
+    const ChildPublicInputs& pi = pis[child_index];
+    if (child.row_leaf_blocks.empty() ||
+        child.next_leaf_blocks.empty() ||
+        child.trace_leaf_blocks.empty() ||
+        child.pre.folds.empty() ||
+        child.row_comp.empty() ||
+        child.trace_comp.empty()) {
+        return {};
+    }
+
+    auto row_value =
+        [&](VerifierAirParentOutputKind kind,
+            uint32_t item,
+            const std::vector<uint32_t>& blocks) {
+            VerifierAirParentOutput value;
+            value.kind = kind;
+            value.child_index = child_index;
+            value.item_index = item;
+            value.row_leaf_blocks = blocks;
+            out.push_back(std::move(value));
+        };
+    for (uint32_t column = 0;
+         column < child.W; ++column) {
+        row_value(
+            VerifierAirParentOutputKind::CurrentOpening,
+            column, child.row_leaf_blocks);
+    }
+    for (uint32_t column = 0;
+         column < child.W; ++column) {
+        row_value(
+            VerifierAirParentOutputKind::NextOpening,
+            column, child.next_leaf_blocks);
+    }
+    row_value(
+        VerifierAirParentOutputKind::QuotientOpening,
+        child.W, child.row_leaf_blocks);
+
+    VerifierAirParentOutput query;
+    query.kind =
+        VerifierAirParentOutputKind::QueryIndex;
+    query.child_index = child_index;
+    query.source_column = child.pre.idx_fp;
+    out.push_back(query);
+
+    // For layer zero, fp.x is omega^(index mod N/2) and leaf_sel is one
+    // exactly in the first half. Thus (2*leaf_sel-1)*fp.x is omega^index.
+    VerifierAirParentOutput point;
+    point.kind =
+        VerifierAirParentOutputKind::EvaluationPoint;
+    point.child_index = child_index;
+    point.source_column = child.pre.folds[0].x;
+    point.auxiliary_column =
+        child.pre.folds[0].leaf_sel;
+    out.push_back(point);
+
+    VerifierAirParentOutput next_point = point;
+    next_point.kind =
+        VerifierAirParentOutputKind::NextEvaluationPoint;
+    next_point.public_scalar = Fp3::FromFp(
+        OmegaForSizeR(pi.child_n_rows));
+    out.push_back(next_point);
+
+    VerifierAirParentOutput challenge;
+    challenge.kind =
+        VerifierAirParentOutputKind::AirConstraintChallenge;
+    challenge.child_index = child_index;
+    challenge.public_scalar = pi.air_lambda;
+    out.push_back(challenge);
+
+    const uint32_t row_terminal = child.row_comp.back();
+    const uint32_t trace_terminal =
+        child.trace_comp.back();
+    for (uint32_t limb = 0;
+         limb < kAlgHashDigestLen; ++limb) {
+        VerifierAirParentOutput root;
+        root.kind =
+            VerifierAirParentOutputKind::RowRootLimb;
+        root.child_index = child_index;
+        root.item_index = limb;
+        root.terminal_permutation_base =
+            row_terminal;
+        out.push_back(root);
+    }
+    for (uint32_t limb = 0;
+         limb < kAlgHashDigestLen; ++limb) {
+        VerifierAirParentOutput root;
+        root.kind =
+            VerifierAirParentOutputKind::TraceRootLimb;
+        root.child_index = child_index;
+        root.item_index = limb;
+        root.terminal_permutation_base =
+            trace_terminal;
+        out.push_back(root);
+    }
+    return out;
+}
+
+Fp3 EvaluateVerifierAIRParentOutput(
+    const VerifierAirParentOutput& output,
+    const std::vector<Fp3>& row)
+{
+    switch (output.kind) {
+    case VerifierAirParentOutputKind::CurrentOpening:
+    case VerifierAirParentOutputKind::NextOpening:
+    case VerifierAirParentOutputKind::QuotientOpening:
+        if (output.row_leaf_blocks.empty()) {
+            return Fp3::Zero();
+        }
+        return ReadRowLeafValue(
+            row, output.row_leaf_blocks,
+            output.item_index);
+    case VerifierAirParentOutputKind::QueryIndex:
+        return row.at(output.source_column);
+    case VerifierAirParentOutputKind::EvaluationPoint:
+    case VerifierAirParentOutputKind::NextEvaluationPoint: {
+        const Fp3 sign = gf::Sub(
+            gf::Mul(
+                Fp3::FromFp(2),
+                row.at(output.auxiliary_column)),
+            Fp3::One());
+        const Fp3 point = gf::Mul(
+            sign, row.at(output.source_column));
+        return output.kind ==
+                VerifierAirParentOutputKind::
+                    NextEvaluationPoint
+            ? gf::Mul(point, output.public_scalar)
+            : point;
+    }
+    case VerifierAirParentOutputKind::
+            AirConstraintChallenge:
+        return output.public_scalar;
+    case VerifierAirParentOutputKind::RowRootLimb:
+    case VerifierAirParentOutputKind::TraceRootLimb:
+        return PermOutputLane(
+            PermLayout{
+                output.terminal_permutation_base},
+            row, output.item_index);
+    }
+    return Fp3::Zero();
+}
+
+aq::AirConstraint<Fp3>
+BuildVerifierAIRParentOutputConstraint(
+    const VerifierAirParentOutput& output,
+    uint32_t export_column,
+    uint32_t selector_column)
+{
+    aq::AirConstraint<Fp3> constraint;
+    constraint.name =
+        "vcs.parent_output.same_trace_alias";
+    constraint.kind = aq::AirKind::kEverywhere;
+    constraint.alg_degree =
+        output.kind ==
+                    VerifierAirParentOutputKind::
+                        EvaluationPoint ||
+                output.kind ==
+                    VerifierAirParentOutputKind::
+                        NextEvaluationPoint
+            ? 3
+            : 2;
+    constraint.eval =
+        [output, export_column, selector_column](
+            const std::vector<Fp3>& current,
+            const std::vector<Fp3>&) {
+            return gf::Mul(
+                current[selector_column],
+                gf::Sub(
+                    current[export_column],
+                    EvaluateVerifierAIRParentOutput(
+                        output, current)));
+        };
+    return constraint;
+}
+
+Fp3 EvaluateVerifierAIRTranscriptOutput(
+    const VerifierAirTranscriptOutput& output,
+    const std::vector<Fp3>& row)
+{
+    switch (output.kind) {
+    case VerifierAirTranscriptOutputKind::RowRoot:
+    case VerifierAirTranscriptOutputKind::TraceRoot:
+        if (output.item_index >= kAlgHashDigestLen ||
+            output.source_column > row.size() ||
+            row.size() - output.source_column <
+                kPermCellsPerPerm) {
+            return Fp3::Zero();
+        }
+        return PermOutputLane(
+            PermLayout{output.source_column}, row,
+            output.item_index);
+    case VerifierAirTranscriptOutputKind::FoldRoot:
+        if (output.coordinate >= kAlgHashDigestLen ||
+            output.source_column > row.size() ||
+            row.size() - output.source_column <
+                kPermCellsPerPerm) {
+            return Fp3::Zero();
+        }
+        return PermOutputLane(
+            PermLayout{output.source_column}, row,
+            output.coordinate);
+    case VerifierAirTranscriptOutputKind::EvaluationZ1:
+    case VerifierAirTranscriptOutputKind::EvaluationZ2:
+        if (output.source_column >= row.size()) {
+            return Fp3::Zero();
+        }
+        if (output.coordinate == 0) {
+            return Fp3::FromFp(
+                gf::Canonical(row[output.source_column].c0));
+        }
+        if (output.coordinate == 1) {
+            return Fp3::FromFp(
+                gf::Canonical(row[output.source_column].c1));
+        }
+        if (output.coordinate == 2) {
+            return Fp3::FromFp(
+                gf::Canonical(row[output.source_column].c2));
+        }
+        return Fp3::Zero();
+    }
+    return Fp3::Zero();
+}
+
+aq::AirConstraint<Fp3>
+BuildVerifierAIRTranscriptExportConstraint(
+    const VerifierAirTranscriptOutput& output,
+    uint32_t export_column,
+    uint32_t selector_column)
+{
+    aq::AirConstraint<Fp3> constraint;
+    constraint.name =
+        "vcs.export.full_transcript.selected_alias";
+    constraint.kind = aq::AirKind::kEverywhere;
+    constraint.alg_degree = 2;
+    constraint.eval =
+        [output, export_column, selector_column](
+            const std::vector<Fp3>& cur,
+            const std::vector<Fp3>&) {
+            if (export_column >= cur.size() ||
+                selector_column >= cur.size()) {
+                return Fp3::One();
+            }
+            return gf::Mul(
+                cur[selector_column],
+                gf::Sub(
+                    cur[export_column],
+                    EvaluateVerifierAIRTranscriptOutput(
+                        output, cur)));
+        };
+    return constraint;
+}
 
 // ---------------------------------------------------------------------------
 // ExtractChildPublicInputs
@@ -902,6 +1442,36 @@ ChildPublicInputs ExtractChildPublicInputs(const aq::AirConstraintSystem<Fp3>& c
     pi.rt_root = unpack(child.trace_commit);
     for (uint32_t l = 0; l < pi.n_folds; ++l) pi.fold_roots.push_back(b.fold_layers[l].root);
     pi.fri_lambda = b.lambda;
+    // PR-89 blocker #6 (H1): under independent-coefficient batching the single
+    // Q192 base proof persists only the scalar lambda (= coefficients[0]).
+    // Recover the full W = child_w+1 independent batching-coefficient vector by
+    // replaying the single-lane FS transcript (analogue of the per-lane
+    // BuildFri3AlgDualTranscriptWitness) and thread it as a public input so
+    // BuildVerifierAIRPinned consumes the true independent draw rather than
+    // reconstructing geometric powers lam_pow[i]=lam_pow[i-1]*fri_lambda.
+    //
+    // Only genuine single-Q192 proofs (matching the Q192 config's proof
+    // version) are replayed here: the dual-lane V5 callers reuse this extractor
+    // on per-lane VIEWS whose batch carries a different version and then install
+    // the correct per-lane coefficients from their own dual transcript replay,
+    // so this block must leave those untouched rather than fail closed on them.
+    if (Fri3AlgQ192IndependentBatching() &&
+        b.version == kRCFri3AlgBatchProofVersion) {
+        // Bind this extraction to the independent-coefficient regime. On an
+        // honest proof the transcript replay recovers the full W = child_w+1
+        // vector. On a corrupted transcript (e.g. a tampered row commitment)
+        // the replay legitimately fails; we then leave fri_batch_coefficients
+        // EMPTY so BuildVerifierAIRPinned zero-fills the DEEP batching weights
+        // and the verifier AIR becomes unsatisfiable — fail closed, but without
+        // emitting a half-built public-input record that would crash the
+        // downstream CS builders.
+        pi.independent_fri_batching = true;
+        std::vector<Fp3> coeffs;
+        if (Fri3AlgReplayBatchCoefficients(b, child_fs_seed, coeffs) &&
+            coeffs.size() == static_cast<size_t>(pi.child_w) + 1) {
+            pi.fri_batch_coefficients = std::move(coeffs);
+        }
+    }
     pi.z1 = b.z1; pi.z2 = b.z2; pi.w1 = b.w1; pi.w2 = b.w2;
     pi.final_value = b.final_value;
     pi.fold_challenges = b.fold_challenges;
@@ -951,7 +1521,7 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
             // pad1, 0..], 10*-padded to n_blocks rate blocks). Absorb-carry +
             // capacity-carry wiring mirrors ah::SpongeHashFp exactly; the leaf
             // digest is the LAST block's output lanes [0..4).
-            EmitRowLeafSponge(K, c.row_leaf_blocks, c.pre.idx_fp, c.W);
+            EmitRowLeafSponge(K, c.row_leaf_blocks, c.pre.idx_fp, c.W + 1);
             // Compress chain (leaf digest = last sponge block's output).
             uint32_t prev = c.row_leaf_blocks.back();
             for (uint32_t j = 0; j < c.D; ++j) {
@@ -960,6 +1530,31 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
                 prev = c.row_comp[j];
             }
             EmitRootPin(K, prev, pi.row_commit_root);
+        }
+
+        // ---- SUPPLEMENTAL NEXT-ROW OPENING ----
+        // Authenticate every trace column at y·omega_H (plus the quotient
+        // column carried in the same batch row) against row_commit_root. The
+        // trace portion is consumed by per-point transition/boundary rules.
+        if (fam.next_row) {
+            EmitAuthenticatedRowPath(
+                K, c.next_leaf_blocks, c.next_comp, c.next_sib,
+                c.pre.next_dir, c.pre.next_idx_fp, c.W + 1,
+                pi.row_commit_root, node_domain);
+        }
+
+        // ---- TRACE-COMMITMENT CROSS-OPENING ----
+        // Bind the current trace values already opened under row_commit_root
+        // to the trace-only root R_T that seeded airq_lambda.
+        if (fam.trace_binding) {
+            EmitAuthenticatedRowPath(
+                K, c.trace_leaf_blocks, c.trace_comp, c.trace_sib,
+                c.pre.trace_dir, c.pre.idx_fp, c.W,
+                pi.rt_root, node_domain);
+            if (fam.row_merkle) {
+                EmitRowValueEquality(
+                    K, c.row_leaf_blocks, c.trace_leaf_blocks, c.W);
+            }
         }
 
         // ---- (B/C/E) FOLD ----
@@ -1015,16 +1610,80 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
         // ---- (E) DEEP dual-OOD + fold-path leaf consistency ----
         // (D) per-point identity C(y) = Q(y)*Z_H(y).
         if (fam.deep || fam.per_point) {
+            if (fam.deep) {
+                // Materialize every public evaluation claim in the witness.
+                // These pins prevent query-row-specific substitutions, while
+                // vcs.deep.identity below consumes the very same columns.
+                for (uint32_t i = 0; i <= c.W; ++i) {
+                    for (uint32_t which = 0; which < 2; ++which) {
+                        const uint32_t column =
+                            which == 0
+                                ? c.evals_z1[i]
+                                : c.evals_z2[i];
+                        const Fp3 expected =
+                            which == 0
+                                ? pi.evals_z1[i]
+                                : pi.evals_z2[i];
+                        AirConstraint<Fp3> pin;
+                        pin.name = which == 0
+                            ? "vcs.deep.eval_z1.public_pin"
+                            : "vcs.deep.eval_z2.public_pin";
+                        pin.kind = AirKind::kEverywhere;
+                        pin.alg_degree = 1;
+                        pin.eval =
+                            [column, expected](
+                                const std::vector<Fp3>& cur,
+                                const std::vector<Fp3>&) {
+                                return gf::Sub(
+                                    cur[column], expected);
+                            };
+                        K.push_back(std::move(pin));
+                    }
+                }
+            }
             // shared: v1, v2 (global consts from evals).
             std::vector<Fp3> lam_pow(pi.child_w + 1);
-            lam_pow[0] = Fp3::One();
-            for (uint32_t i = 1; i <= pi.child_w; ++i) lam_pow[i] = gf::Mul(lam_pow[i - 1], pi.fri_lambda);
-            Fp3 v1 = Fp3::Zero(), v2 = Fp3::Zero();
+            if (pi.independent_fri_batching) {
+                if (pi.fri_batch_coefficients.size() !=
+                    pi.child_w + 1) {
+                    // A malformed public input must make the system
+                    // unsatisfiable, never silently fall back to V3.
+                    std::fill(
+                        lam_pow.begin(), lam_pow.end(),
+                        Fp3::Zero());
+                } else {
+                    lam_pow = pi.fri_batch_coefficients;
+                }
+            } else {
+                lam_pow[0] = Fp3::One();
+                for (uint32_t i = 1; i <= pi.child_w; ++i)
+                    lam_pow[i] =
+                        gf::Mul(lam_pow[i - 1], pi.fri_lambda);
+            }
+            std::vector<Fp3> z1_weights(pi.child_w + 1);
+            std::vector<Fp3> z2_weights(pi.child_w + 1);
             for (uint32_t i = 0; i <= pi.child_w; ++i) {
                 const uint32_t shift = pi.child_n_coeffs - pi.column_len[i];
-                v1 = gf::Add(v1, gf::Mul(gf::Mul(lam_pow[i], Pow3R(pi.z1, shift)), pi.evals_z1[i]));
-                v2 = gf::Add(v2, gf::Mul(gf::Mul(lam_pow[i], Pow3R(pi.z2, shift)), pi.evals_z2[i]));
+                z1_weights[i] =
+                    gf::Mul(lam_pow[i], Pow3R(pi.z1, shift));
+                z2_weights[i] =
+                    gf::Mul(lam_pow[i], Pow3R(pi.z2, shift));
             }
+            const std::vector<uint32_t> evals_z1 = c.evals_z1;
+            const std::vector<uint32_t> evals_z2 = c.evals_z2;
+            auto eval_claim =
+                [](const std::vector<Fp3>& cur,
+                   const std::vector<uint32_t>& columns,
+                   const std::vector<Fp3>& weights) {
+                    Fp3 value = Fp3::Zero();
+                    for (uint32_t i = 0;
+                         i < columns.size(); ++i) {
+                        value = gf::Add(
+                            value,
+                            gf::Mul(weights[i], cur[columns[i]]));
+                    }
+                    return value;
+                };
             const std::vector<uint32_t> rlb = c.row_leaf_blocks;
             const uint32_t W = c.W;
             const std::vector<uint32_t> xpow = c.pre.xpow;
@@ -1046,9 +1705,16 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
                 const uint32_t even_leaf = f0.even_leaf, odd_leaf = f0.odd_leaf, leaf_sel = fp0.leaf_sel;
                 AirConstraint<Fp3> con;
                 con.name = "vcs.deep.identity"; con.kind = AirKind::kEverywhere; con.alg_degree = 2;
-                con.eval = [eval_Ux, v1, v2, w1, w2, invd1, invd2, even_leaf, odd_leaf, leaf_sel](
+                con.eval = [eval_Ux, eval_claim, evals_z1,
+                            evals_z2, z1_weights, z2_weights,
+                            w1, w2, invd1, invd2, even_leaf,
+                            odd_leaf, leaf_sel](
                                const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
                     const Fp3 U = eval_Ux(cur);
+                    const Fp3 v1 = eval_claim(
+                        cur, evals_z1, z1_weights);
+                    const Fp3 v2 = eval_claim(
+                        cur, evals_z2, z2_weights);
                     const Fp3 g_expect = gf::Add(gf::Mul(w1, gf::Mul(gf::Sub(U, v1), cur[invd1])),
                                                  gf::Mul(w2, gf::Mul(gf::Sub(U, v2), cur[invd2])));
                     const Fp3 ev = ReadTriple(cur, even_leaf, 0);
@@ -1086,23 +1752,68 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
                 }
             }
             if (fam.per_point) {
-                // C(y) = Σ_i air_lambda^i * R_i(cur_child) ; qv = row.values[W].
-                // (kEverywhere child constraints only -> sel_i = 1.)
+                // C(y) = Σ_i air_lambda^i * sel_i(y) *
+                // R_i(cur_child,next_child); qv = row.values[W]. The next
+                // values come from the supplemental row_commit opening.
                 const Fp3 air_lambda = pi.air_lambda;
                 std::vector<aq::AirConstraint<Fp3>> child_cons = pi.child_constraints;
                 const uint32_t zh = c.pre.zh;
+                const uint32_t trans_sel = c.pre.transition_selector;
+                const uint32_t first_sel = c.pre.first_selector;
+                const uint32_t last_sel = c.pre.last_selector;
+                const std::vector<uint32_t> next_rlb =
+                    fam.next_row ? c.next_leaf_blocks : rlb;
+                if (!fam.next_row) {
+                    AirConstraint<Fp3> required;
+                    required.name = "vcs.next_row.required";
+                    required.kind = AirKind::kEverywhere;
+                    required.alg_degree = 0;
+                    required.eval = [](const std::vector<Fp3>&,
+                                       const std::vector<Fp3>&) {
+                        return Fp3::One();
+                    };
+                    K.push_back(std::move(required));
+                }
                 AirConstraint<Fp3> con;
                 con.name = "vcs.perpoint"; con.kind = AirKind::kEverywhere;
                 uint32_t md = 1;
-                for (const auto& cc : child_cons) md = std::max(md, cc.alg_degree);
+                for (const auto& cc : child_cons) {
+                    const uint32_t selector_degree =
+                        cc.kind == AirKind::kEverywhere ? 0U : 1U;
+                    md = std::max(md, cc.alg_degree + selector_degree);
+                }
                 con.alg_degree = md;
-                con.eval = [rlb, W, zh, air_lambda, child_cons](const std::vector<Fp3>& cur, const std::vector<Fp3>&) {
-                    std::vector<Fp3> cur_child(W);
-                    for (uint32_t i = 0; i < W; ++i) cur_child[i] = ReadRowLeafValue(cur, rlb, i);
+                con.eval = [rlb, next_rlb, W, zh, trans_sel, first_sel,
+                            last_sel, air_lambda, child_cons](
+                               const std::vector<Fp3>& cur,
+                               const std::vector<Fp3>&) {
+                    std::vector<Fp3> cur_child(W), next_child(W);
+                    for (uint32_t i = 0; i < W; ++i) {
+                        cur_child[i] = ReadRowLeafValue(cur, rlb, i);
+                        next_child[i] =
+                            ReadRowLeafValue(cur, next_rlb, i);
+                    }
                     const Fp3 qv = ReadRowLeafValue(cur, rlb, W);
                     Fp3 C = Fp3::Zero(), lp = Fp3::One();
                     for (const auto& cc : child_cons) {
-                        C = gf::Add(C, gf::Mul(lp, cc.eval(cur_child, cur_child)));
+                        Fp3 selector = Fp3::One();
+                        switch (cc.kind) {
+                        case AirKind::kEverywhere:
+                            break;
+                        case AirKind::kTransition:
+                            selector = cur[trans_sel];
+                            break;
+                        case AirKind::kFirstRow:
+                            selector = cur[first_sel];
+                            break;
+                        case AirKind::kLastRow:
+                            selector = cur[last_sel];
+                            break;
+                        }
+                        C = gf::Add(
+                            C, gf::Mul(lp, gf::Mul(
+                                   selector,
+                                   cc.eval(cur_child, next_child))));
                         lp = gf::Mul(lp, air_lambda);
                     }
                     return gf::Sub(C, gf::Mul(qv, cur[zh]));
@@ -1131,6 +1842,30 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
                 add_pre(c.pre.row_dir[j], [&pi, j](uint32_t qi) {
                     return Fp3::FromFp(gf::FromU64((pi.query_index[qi] >> j) & 1u));
                 });
+        if (fam.next_row) {
+            const uint32_t step = n_lde / pi.child_n_rows;
+            add_pre(c.pre.next_idx_fp, [&pi, n_lde, step](uint32_t qi) {
+                return Fp3::FromFp(gf::FromU64(
+                    (pi.query_index[qi] + step) % n_lde));
+            });
+            for (uint32_t j = 0; j < c.D; ++j) {
+                add_pre(c.pre.next_dir[j],
+                        [&pi, n_lde, step, j](uint32_t qi) {
+                    const uint32_t idx =
+                        (pi.query_index[qi] + step) % n_lde;
+                    return Fp3::FromFp(
+                        gf::FromU64((idx >> j) & 1u));
+                });
+            }
+        }
+        if (fam.trace_binding) {
+            for (uint32_t j = 0; j < c.D; ++j) {
+                add_pre(c.pre.trace_dir[j], [&pi, j](uint32_t qi) {
+                    return Fp3::FromFp(gf::FromU64(
+                        (pi.query_index[qi] >> j) & 1u));
+                });
+            }
+        }
         if (fam.fold) {
             for (uint32_t l = 0; l < c.nf; ++l) {
                 const auto& fp = c.pre.folds[l];
@@ -1182,10 +1917,40 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
             });
         }
         if (fam.per_point) {
+            const Fp3 h_first = Fp3::One();
+            const Fp3 h_last = Fp3::FromFp(
+                PowFpR(OmegaForSizeR(pi.child_n_rows),
+                       pi.child_n_rows - 1));
+            auto point = [&pi, n_lde, g](uint32_t qi) {
+                const Fp3 x =
+                    DomainPointR(n_lde, pi.query_index[qi]);
+                return gf::Mul(g, x);
+            };
+            auto zh_at = [&pi, point](uint32_t qi) {
+                const Fp3 y = point(qi);
+                return gf::Sub(Pow3R(y, pi.child_n_rows),
+                               Fp3::One());
+            };
             add_pre(c.pre.zh, [&pi, n_lde, g](uint32_t qi) {
                 const Fp3 x = DomainPointR(n_lde, pi.query_index[qi]);
                 const Fp3 y = gf::Mul(g, x);
                 return gf::Sub(Pow3R(y, pi.child_n_rows), Fp3::One());
+            });
+            add_pre(c.pre.transition_selector,
+                    [point, h_last](uint32_t qi) {
+                return gf::Sub(point(qi), h_last);
+            });
+            add_pre(c.pre.first_selector,
+                    [point, zh_at, h_first](uint32_t qi) {
+                return gf::Mul(
+                    zh_at(qi),
+                    gf::Inv(gf::Sub(point(qi), h_first)));
+            });
+            add_pre(c.pre.last_selector,
+                    [point, zh_at, h_last](uint32_t qi) {
+                return gf::Mul(
+                    zh_at(qi),
+                    gf::Inv(gf::Sub(point(qi), h_last)));
             });
         }
     }
@@ -1246,6 +2011,57 @@ void SetDigestCols(std::vector<Fp3>& row, uint32_t base, const Digest& d)
     for (uint32_t j = 0; j < kAlgHashDigestLen; ++j) row[base + j] = Fp3::FromFp(gf::Canonical(d[j]));
 }
 
+Digest FillRowLeafWitness(
+    std::vector<Fp3>& row,
+    const std::vector<uint32_t>& blocks,
+    const std::vector<Fp3>& values,
+    uint32_t index)
+{
+    std::vector<Fp> xs;
+    xs.reserve(3 * values.size() + 1);
+    for (const Fp3& value : values) {
+        xs.push_back(gf::Canonical(value.c0));
+        xs.push_back(gf::Canonical(value.c1));
+        xs.push_back(gf::Canonical(value.c2));
+    }
+    xs.push_back(gf::FromU64(index));
+    xs.push_back(1);
+    while (xs.size() % kAlgHashRate != 0) xs.push_back(0);
+    ah::State state{};
+    for (uint32_t b = 0; b < blocks.size(); ++b) {
+        for (uint32_t j = 0; j < kAlgHashRate; ++j) {
+            state[j] = gf::Add(
+                state[j], xs[b * kAlgHashRate + j]);
+        }
+        const PermWitness witness = BuildPermWitness(state);
+        WritePermWitness(PermLayout{blocks[b]}, witness, row);
+        state = witness.output;
+    }
+    return Digest{state[0], state[1], state[2], state[3]};
+}
+
+void FillAuthenticatedRowPathWitness(
+    std::vector<Fp3>& row,
+    const std::vector<uint32_t>& leaf_blocks,
+    const std::vector<uint32_t>& comp,
+    const std::vector<uint32_t>& sibling_cols,
+    const std::vector<Fp3>& values,
+    uint32_t index,
+    const std::vector<Digest>& siblings,
+    Fp node_domain)
+{
+    Digest acc =
+        FillRowLeafWitness(row, leaf_blocks, values, index);
+    for (uint32_t j = 0; j < comp.size(); ++j) {
+        const bool bit = ((index >> j) & 1u) != 0;
+        SetDigestCols(row, sibling_cols[j], siblings[j]);
+        const ah::State state =
+            CompressState(acc, siblings[j], bit, node_domain);
+        WriteBlock(row, comp[j], state);
+        acc = BlockDigest(state);
+    }
+}
+
 // Honestly fill one child's per-query columns for row `r` (query qi).
 void FillChildRow(std::vector<Fp3>& row, const ChildLayout& c, const ChildPublicInputs& pi,
                   const aq::AirQuotientProof<Fp3, AlgB3>& child, uint32_t qi,
@@ -1256,35 +2072,25 @@ void FillChildRow(std::vector<Fp3>& row, const ChildLayout& c, const ChildPublic
     const auto& q = child.batch.queries[qi];
 
     if (fam.row_merkle) {
-        // Multi-block row-leaf sponge — run the REAL ah::SpongeHashFp stream so
-        // every emitted absorb/carry constraint is satisfied by construction.
-        std::vector<Fp> xs;
-        xs.reserve(3 * (c.W + 1) + 1);
-        for (uint32_t i = 0; i <= c.W; ++i) {
-            xs.push_back(gf::Canonical(q.row.values[i].c0));
-            xs.push_back(gf::Canonical(q.row.values[i].c1));
-            xs.push_back(gf::Canonical(q.row.values[i].c2));
-        }
-        xs.push_back(gf::FromU64(q.index));
-        std::vector<Fp> padded = xs; // 10*-padding (mirror ah::SpongeHashFp)
-        padded.push_back(1);
-        while (padded.size() % kAlgHashRate != 0) padded.push_back(0);
-        ah::State s{}; // capacity lanes [8,12) start 0 and are carried across blocks
-        for (uint32_t b = 0; b < c.row_leaf_blocks.size(); ++b) {
-            for (uint32_t j = 0; j < kAlgHashRate; ++j) // add-absorb onto carried rate
-                s[j] = gf::Add(s[j], padded[b * kAlgHashRate + j]);
-            const PermWitness w = BuildPermWitness(s); // records this block's input + S-boxes
-            WritePermWitness(PermLayout{c.row_leaf_blocks[b]}, w, row);
-            for (uint32_t j = 0; j < kAlgHashT; ++j) s[j] = gf::Canonical(w.output[j]); // carry
-        }
-        Digest acc{s[0], s[1], s[2], s[3]}; // leaf digest = last block's output [0..4)
-        for (uint32_t j = 0; j < c.D; ++j) {
-            const bool bit = ((q.index >> j) & 1u) != 0;
-            SetDigestCols(row, c.row_sib[j], q.row.siblings[j]);
-            const ah::State cs = CompressState(acc, q.row.siblings[j], bit, node_domain);
-            WriteBlock(row, c.row_comp[j], cs);
-            acc = BlockDigest(cs);
-        }
+        FillAuthenticatedRowPathWitness(
+            row, c.row_leaf_blocks, c.row_comp, c.row_sib,
+            q.row.values, q.index, q.row.siblings, node_domain);
+    }
+    if (fam.next_row) {
+        const auto& opening = child.next_openings[qi][0];
+        FillAuthenticatedRowPathWitness(
+            row, c.next_leaf_blocks, c.next_comp, c.next_sib,
+            opening.values, opening.index, opening.siblings,
+            node_domain);
+    }
+    if (fam.trace_binding) {
+        const auto& opening = child.next_openings[qi][1];
+        const std::vector<Fp3> trace_values(
+            q.row.values.begin(), q.row.values.begin() + c.W);
+        FillAuthenticatedRowPathWitness(
+            row, c.trace_leaf_blocks, c.trace_comp, c.trace_sib,
+            trace_values, opening.index, opening.siblings,
+            node_domain);
     }
     if (fam.fold) {
         for (uint32_t l = 0; l < c.nf; ++l) {
@@ -1334,6 +2140,12 @@ void FillChildRow(std::vector<Fp3>& row, const ChildLayout& c, const ChildPublic
             }
         }
     }
+    if (fam.deep) {
+        for (uint32_t i = 0; i < c.evals_z1.size(); ++i) {
+            row[c.evals_z1[i]] = pi.evals_z1[i];
+            row[c.evals_z2[i]] = pi.evals_z2[i];
+        }
+    }
 }
 
 } // namespace (Piece 4 witness)
@@ -1355,6 +2167,47 @@ AggregateWitness BuildAggregateWitness(const aq::AirConstraintSystem<Fp3>& child
     out.n_witness_cols = L.n_witness_cols;
     const uint32_t N = out.cs.n_rows, Q = L.queries;
 
+    for (uint32_t ci = 0; ci < k; ++ci) {
+        const auto& child = children[ci];
+        const auto& pi = out.pis[ci];
+        if (child.batch.queries.size() != Q) {
+            out.note = "child query count mismatch";
+            return out;
+        }
+        if ((fam.next_row || fam.trace_binding) &&
+            child.next_openings.size() != Q) {
+            out.note = "supplemental opening count mismatch";
+            return out;
+        }
+        for (uint32_t qi = 0; qi < Q; ++qi) {
+            const auto& query = child.batch.queries[qi];
+            if ((fam.row_merkle || fam.trace_binding) &&
+                query.row.values.size() != pi.child_w + 1) {
+                out.note = "query row width mismatch";
+                return out;
+            }
+            if (fam.next_row || fam.trace_binding) {
+                const auto& openings = child.next_openings[qi];
+                if (openings.size() != 2) {
+                    out.note = "supplemental opening width mismatch";
+                    return out;
+                }
+                if (fam.next_row &&
+                    (openings[0].values.size() != pi.child_w + 1 ||
+                     openings[0].siblings.size() != pi.merkle_depth)) {
+                    out.note = "next-row opening shape mismatch";
+                    return out;
+                }
+                if (fam.trace_binding &&
+                    (!openings[1].values.empty() ||
+                     openings[1].siblings.size() != pi.merkle_depth)) {
+                    out.note = "trace-binding opening shape mismatch";
+                    return out;
+                }
+            }
+        }
+    }
+
     out.columns.assign(out.cs.n_columns, std::vector<Fp3>(N, Fp3::Zero()));
     for (const auto& [col, vals] : out.cs.preprocessed)
         for (uint32_t r = 0; r < N; ++r) out.columns[col][r] = vals[r];
@@ -1365,6 +2218,115 @@ AggregateWitness BuildAggregateWitness(const aq::AirConstraintSystem<Fp3>& child
         for (uint32_t ci = 0; ci < k; ++ci)
             FillChildRow(row, L.children[ci], out.pis[ci], children[ci], qi, fam);
         for (uint32_t col = 0; col < L.n_witness_cols; ++col) out.columns[col][r] = row[col];
+    }
+    out.ok = true;
+    return out;
+}
+
+AggregateWitness BuildAggregateWitnessHeterogeneous(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<
+        aq::AirQuotientProof<Fp3, AggregateWitness::AlgB3>>&
+        children,
+    const std::vector<uint256>& child_fs_seeds,
+    const VerifierAirFamilies& fam)
+{
+    AggregateWitness out;
+    const uint32_t k = static_cast<uint32_t>(children.size());
+    if (k == 0 || child_css.size() != k ||
+        child_fs_seeds.size() != k) {
+        out.note = "heterogeneous child shape";
+        return out;
+    }
+    out.pis.resize(k);
+    for (uint32_t ci = 0; ci < k; ++ci) {
+        out.pis[ci] = ExtractChildPublicInputs(
+            child_css[ci], children[ci],
+            child_fs_seeds[ci]);
+    }
+    out.cs = BuildVerifierAIRPinned(k, out.pis, fam);
+    const VcsLayout layout = ComputeLayout(k, out.pis, fam);
+    out.n_witness_cols = layout.n_witness_cols;
+    const uint32_t n_rows = out.cs.n_rows;
+    const uint32_t queries = layout.queries;
+
+    for (uint32_t ci = 0; ci < k; ++ci) {
+        const auto& child = children[ci];
+        const auto& pi = out.pis[ci];
+        if (child.batch.queries.size() != queries) {
+            out.note = "heterogeneous child query count mismatch";
+            return out;
+        }
+        if ((fam.next_row || fam.trace_binding) &&
+            child.next_openings.size() != queries) {
+            out.note =
+                "heterogeneous supplemental opening count mismatch";
+            return out;
+        }
+        for (uint32_t qi = 0; qi < queries; ++qi) {
+            const auto& query = child.batch.queries[qi];
+            if ((fam.row_merkle || fam.trace_binding) &&
+                query.row.values.size() != pi.child_w + 1) {
+                out.note =
+                    "heterogeneous query row width mismatch";
+                return out;
+            }
+            if (fam.next_row || fam.trace_binding) {
+                const auto& openings =
+                    child.next_openings[qi];
+                if (openings.size() != 2) {
+                    out.note =
+                        "heterogeneous supplemental opening width mismatch";
+                    return out;
+                }
+                if (fam.next_row &&
+                    (openings[0].values.size() !=
+                         pi.child_w + 1 ||
+                     openings[0].siblings.size() !=
+                         pi.merkle_depth)) {
+                    out.note =
+                        "heterogeneous next-row opening shape mismatch";
+                    return out;
+                }
+                if (fam.trace_binding &&
+                    (!openings[1].values.empty() ||
+                     openings[1].siblings.size() !=
+                         pi.merkle_depth)) {
+                    out.note =
+                        "heterogeneous trace-binding opening shape mismatch";
+                    return out;
+                }
+            }
+        }
+    }
+
+    out.columns.assign(
+        out.cs.n_columns,
+        std::vector<Fp3>(n_rows, Fp3::Zero()));
+    for (const auto& [column, values] :
+         out.cs.preprocessed) {
+        for (uint32_t row = 0; row < n_rows; ++row) {
+            out.columns[column][row] = values[row];
+        }
+    }
+    std::vector<Fp3> row(
+        out.cs.n_columns, Fp3::Zero());
+    for (uint32_t r = 0; r < n_rows; ++r) {
+        const uint32_t query =
+            r < queries ? r : queries - 1;
+        std::fill(
+            row.begin(),
+            row.begin() + layout.n_witness_cols,
+            Fp3::Zero());
+        for (uint32_t ci = 0; ci < k; ++ci) {
+            FillChildRow(
+                row, layout.children[ci], out.pis[ci],
+                children[ci], query, fam);
+        }
+        for (uint32_t column = 0;
+             column < layout.n_witness_cols; ++column) {
+            out.columns[column][r] = row[column];
+        }
     }
     out.ok = true;
     return out;
@@ -1397,6 +2359,582 @@ uint32_t CountWitnessViolationsOnH(const aq::AirConstraintSystem<Fp3>& cs,
     return bad;
 }
 
+namespace {
+
+constexpr char kDualV5AirProofCommitDomain[] =
+    "BTX_RC_RECURSE_DUAL_V5_AIR_PROOF_V1";
+constexpr char kDualV5TranscriptCommitDomain[] =
+    "BTX_RC_RECURSE_DUAL_V5_TRANSCRIPT_V1";
+constexpr char kDualV5PinsCommitDomain[] =
+    "BTX_RC_RECURSE_DUAL_V5_CHILD_PINS_V1";
+constexpr char kDualV5LanePisCommitDomain[] =
+    "BTX_RC_RECURSE_DUAL_V5_LANE_PIS_V1";
+constexpr char kDualV5ParentSeedDomain[] =
+    "BTX_RC_RECURSE_DUAL_V5_PARENT_SEED_V1";
+
+void HashFp3R(HashWriter& hash, const Fp3& value)
+{
+    hash << gf::Canonical(value.c0);
+    hash << gf::Canonical(value.c1);
+    hash << gf::Canonical(value.c2);
+}
+
+void HashDigestR(HashWriter& hash, const Fri3AlgDigest& digest)
+{
+    for (const Fp limb : digest) hash << gf::Canonical(limb);
+}
+
+void HashFp3VectorR(HashWriter& hash, const std::vector<Fp3>& values)
+{
+    hash << static_cast<uint32_t>(values.size());
+    for (const Fp3& value : values) HashFp3R(hash, value);
+}
+
+void HashDigestVectorR(HashWriter& hash,
+                       const std::vector<Fri3AlgDigest>& values)
+{
+    hash << static_cast<uint32_t>(values.size());
+    for (const auto& value : values) HashDigestR(hash, value);
+}
+
+void HashDualQueryR(HashWriter& hash, const Fri3AlgBatchQuery& query)
+{
+    hash << query.index;
+    HashFp3VectorR(hash, query.row.values);
+    HashDigestVectorR(hash, query.row.siblings);
+    hash << static_cast<uint32_t>(query.steps.size());
+    for (const auto& step : query.steps) {
+        hash << step.even_index;
+        hash << step.odd_index;
+        HashFp3R(hash, step.even);
+        HashFp3R(hash, step.odd);
+        HashDigestVectorR(hash, step.even_siblings);
+        HashDigestVectorR(hash, step.odd_siblings);
+    }
+}
+
+void HashAirRowPathR(HashWriter& hash, const aq::AirAlgRowPath& path)
+{
+    hash << path.index;
+    HashFp3VectorR(hash, path.values);
+    HashDigestVectorR(hash, path.siblings);
+}
+
+uint256 CommitDualV5LanePis(
+    const std::vector<ChildPublicInputs>& lane_pis)
+{
+    HashWriter hash;
+    hash << kDualV5LanePisCommitDomain;
+    hash << static_cast<uint32_t>(lane_pis.size());
+    for (const ChildPublicInputs& pi : lane_pis) {
+        hash << pi.child_n_rows;
+        hash << pi.child_w;
+        hash << pi.child_quotient_len;
+        hash << pi.child_n_coeffs;
+        hash << pi.child_n_lde;
+        hash << pi.merkle_depth;
+        hash << pi.n_folds;
+        HashDigestR(hash, pi.row_commit_root);
+        HashDigestR(hash, pi.rt_root);
+        hash << static_cast<uint32_t>(pi.fold_roots.size());
+        for (const auto& root : pi.fold_roots) HashDigestR(hash, root);
+        HashFp3R(hash, pi.fri_lambda);
+        HashFp3R(hash, pi.z1);
+        HashFp3R(hash, pi.z2);
+        HashFp3R(hash, pi.w1);
+        HashFp3R(hash, pi.w2);
+        HashFp3R(hash, pi.final_value);
+        HashFp3R(hash, pi.air_lambda);
+        hash << pi.independent_fri_batching;
+        HashFp3VectorR(hash, pi.fri_batch_coefficients);
+        HashFp3VectorR(hash, pi.fold_challenges);
+        hash << static_cast<uint32_t>(pi.column_len.size());
+        for (const uint32_t length : pi.column_len) hash << length;
+        HashFp3VectorR(hash, pi.evals_z1);
+        HashFp3VectorR(hash, pi.evals_z2);
+        hash << static_cast<uint32_t>(pi.query_index.size());
+        for (const uint32_t query : pi.query_index) hash << query;
+        // Constraint closures are not serializable. The fixed relation
+        // registry authenticates their identity; these metadata catch
+        // reorder/shape/substitution errors at this boundary.
+        hash << static_cast<uint32_t>(pi.child_constraints.size());
+        for (const auto& constraint : pi.child_constraints) {
+            hash << std::string(constraint.name ? constraint.name : "");
+            hash << static_cast<uint8_t>(constraint.kind);
+            hash << constraint.alg_degree;
+        }
+    }
+    return hash.GetHash();
+}
+
+uint256 DeriveDualV5ParentSeed(
+    const uint256& parent_fs_seed,
+    const uint256& pin_commitment,
+    const uint256& lane_pis_commitment)
+{
+    HashWriter hash;
+    hash << kDualV5ParentSeedDomain;
+    hash << parent_fs_seed;
+    hash << pin_commitment;
+    hash << lane_pis_commitment;
+    return hash.GetHash();
+}
+
+std::vector<aq::AirQuotientProof<Fp3, AlgB3>>
+NormalizeDualV5LaneProofs(
+    const std::vector<DualAlgAirProof>& children)
+{
+    std::vector<aq::AirQuotientProof<Fp3, AlgB3>> lanes;
+    lanes.reserve(children.size() * kRCFri3AlgDualNumLanes);
+    for (const DualAlgAirProof& child : children) {
+        for (uint32_t lane = 0; lane < kRCFri3AlgDualNumLanes; ++lane) {
+            aq::AirQuotientProof<Fp3, AlgB3> view;
+            view.batch = child.batch.repeated.lane[lane];
+            view.trace_commit = child.trace_commit;
+            const size_t begin =
+                static_cast<size_t>(lane) *
+                kRCFri3AlgDualQueriesPerLane;
+            const size_t end =
+                begin + kRCFri3AlgDualQueriesPerLane;
+            if (end <= child.next_openings.size()) {
+                view.next_openings.insert(
+                    view.next_openings.end(),
+                    child.next_openings.begin() + begin,
+                    child.next_openings.begin() + end);
+            }
+            lanes.push_back(std::move(view));
+        }
+    }
+    return lanes;
+}
+
+} // namespace
+
+uint256 ComputeDualV5AirProofCommitment(
+    const DualAlgAirProof& proof)
+{
+    std::vector<unsigned char> envelope;
+    if (SerializeFri3AlgDualBatchProof(
+            proof.batch.repeated, envelope) != envelope.size() ||
+        envelope.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << kDualV5AirProofCommitDomain;
+    hash << static_cast<uint32_t>(envelope.size());
+    for (const unsigned char byte : envelope) hash << byte;
+
+    // Bind the flattened AIR view as well. Native verification requires it to
+    // equal the authoritative ordered envelope, but hashing it here prevents a
+    // caller from treating a detached view as the same recursive child.
+    hash << proof.batch.n_coeffs;
+    hash << proof.batch.row_commit.n_leaves;
+    HashDigestR(hash, proof.batch.row_commit.root);
+    hash << static_cast<uint32_t>(proof.batch.column_len.size());
+    for (const uint32_t length : proof.batch.column_len) hash << length;
+    HashFp3R(hash, proof.batch.z1);
+    HashFp3R(hash, proof.batch.z2);
+    HashFp3VectorR(hash, proof.batch.evals_z1);
+    HashFp3VectorR(hash, proof.batch.evals_z2);
+    hash << static_cast<uint32_t>(proof.batch.queries.size());
+    for (const auto& query : proof.batch.queries) HashDualQueryR(hash, query);
+
+    hash << proof.trace_commit;
+    hash << static_cast<uint32_t>(proof.next_openings.size());
+    for (const auto& paths : proof.next_openings) {
+        hash << static_cast<uint32_t>(paths.size());
+        for (const auto& path : paths) HashAirRowPathR(hash, path);
+    }
+    return hash.GetHash();
+}
+
+uint256 ComputeDualV5TranscriptCommitment(
+    const Fri3AlgDualTranscriptWitness& transcript)
+{
+    if (!transcript.valid || !transcript.program.valid) return {};
+    HashWriter hash;
+    hash << kDualV5TranscriptCommitDomain;
+    const auto& program = transcript.program;
+    hash << program.envelope_version;
+    hash << program.lane_version;
+    hash << program.lanes;
+    hash << program.batch_columns;
+    hash << program.n_coeffs;
+    hash << program.n_lde;
+    hash << program.fold_challenges_per_lane;
+    hash << program.queries_per_lane;
+    hash << program.independent_batch_draws_per_lane;
+    hash << program.ood_draws_per_lane;
+    hash << program.deep_weight_draws_per_lane;
+    hash << program.uniform_fp3_draws_per_lane;
+    hash << program.uniform_fp3_hashes_per_lane;
+    hash << program.query_index_hashes_per_lane;
+    hash << program.challenge_hashes_total;
+    hash << program.fixed_ood_schedule;
+    hash << program.independent_batching;
+    hash << program.lane_order_semantic;
+    hash << transcript.master_statement_binding;
+    for (const uint256& binding : transcript.lane_child_binding)
+        hash << binding;
+    for (const auto& lane : transcript.lane) {
+        hash << lane.lane;
+        hash << lane.lane_seed;
+        HashFp3VectorR(hash, lane.batch_coefficients);
+        for (const Fp3& candidate : lane.ood_candidates)
+            HashFp3R(hash, candidate);
+        HashFp3R(hash, lane.selected_z1);
+        HashFp3R(hash, lane.selected_z2);
+        HashFp3R(hash, lane.w1);
+        HashFp3R(hash, lane.w2);
+        HashFp3VectorR(hash, lane.fold_challenges);
+        hash << static_cast<uint32_t>(lane.query_indices.size());
+        for (const uint32_t query : lane.query_indices) hash << query;
+        hash << lane.independent_coefficients_replayed;
+        hash << lane.fixed_ood_schedule_replayed;
+        hash << lane.folds_replayed;
+        hash << lane.queries_replayed;
+    }
+    hash << transcript.common_statement_bound;
+    hash << transcript.ordered_lanes_bound;
+    return hash.GetHash();
+}
+
+uint256 CommitDualV5RecursiveChildPins(
+    const std::vector<DualV5RecursiveChildPin>& pins)
+{
+    HashWriter hash;
+    hash << kDualV5PinsCommitDomain;
+    hash << static_cast<uint32_t>(pins.size());
+    for (const auto& pin : pins) {
+        hash << pin.air_proof_commitment;
+        hash << pin.transcript_commitment;
+        hash << pin.master_statement_binding;
+        for (const uint256& binding : pin.lane_child_binding)
+            hash << binding;
+        for (const uint256& root : pin.lane_row_root) hash << root;
+        hash << pin.host_reports_native_air_accepted;
+        hash << pin.host_reports_exact_transcript_replayed;
+        hash << pin.host_reports_ordered_lane_binding_checked;
+    }
+    return hash.GetHash();
+}
+
+DualV5AggregateWitness BuildDualV5AggregateWitness(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<DualAlgAirProof>& children,
+    const uint256& child_fs_seed,
+    const VerifierAirFamilies& fam)
+{
+    DualV5AggregateWitness out;
+    if (children.empty() || children.size() > 4) {
+        out.note = "dual v5 aggregate: child count";
+        return out;
+    }
+    if (fam.per_point && !fam.next_row) {
+        out.note =
+            "dual v5 aggregate: per-point relation requires authenticated "
+            "next-row openings";
+        return out;
+    }
+    out.child_pins.resize(children.size());
+    std::vector<std::vector<Fp3>> lane_batch_coefficients(
+        children.size() * kRCFri3AlgDualNumLanes);
+    for (size_t child_index = 0;
+         child_index < children.size(); ++child_index) {
+        const DualAlgAirProof& child = children[child_index];
+        std::string why;
+        const auto verify_begin = std::chrono::steady_clock::now();
+        const bool accepted =
+            aq::AirQuotientVerify<Fp3, DualAlgB3>(
+                child_cs, child, child_fs_seed, &why);
+        out.native_verify_micros +=
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - verify_begin)
+                    .count());
+        if (!accepted) {
+            out.note = "dual v5 aggregate: child " +
+                       std::to_string(child_index) +
+                       " rejected: " + why;
+            return out;
+        }
+
+        const auto transcript_begin =
+            std::chrono::steady_clock::now();
+        const Fri3AlgDualTranscriptWitness transcript =
+            BuildFri3AlgDualTranscriptWitness(
+                child.batch.repeated, child_fs_seed);
+        out.transcript_replay_micros +=
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - transcript_begin)
+                    .count());
+        if (!transcript.valid ||
+            !transcript.common_statement_bound ||
+            !transcript.ordered_lanes_bound) {
+            out.note = "dual v5 aggregate: child " +
+                       std::to_string(child_index) +
+                       " transcript: " + transcript.note;
+            return out;
+        }
+        for (uint32_t lane = 0;
+             lane < kRCFri3AlgDualNumLanes; ++lane) {
+            lane_batch_coefficients[
+                child_index * kRCFri3AlgDualNumLanes + lane] =
+                transcript.lane[lane].batch_coefficients;
+        }
+        DualV5RecursiveChildPin& pin =
+            out.child_pins[child_index];
+        pin.air_proof_commitment =
+            ComputeDualV5AirProofCommitment(child);
+        pin.transcript_commitment =
+            ComputeDualV5TranscriptCommitment(transcript);
+        pin.master_statement_binding =
+            child.batch.repeated.master_statement_binding;
+        pin.lane_child_binding =
+            child.batch.repeated.lane_child_binding;
+        for (uint32_t lane = 0;
+             lane < kRCFri3AlgDualNumLanes; ++lane) {
+            pin.lane_row_root[lane] =
+                Fri3AlgDigestToUint256(
+                    child.batch.repeated.lane[lane]
+                        .row_commit.root);
+        }
+        pin.host_reports_native_air_accepted = true;
+        pin.host_reports_exact_transcript_replayed = true;
+        pin.host_reports_ordered_lane_binding_checked =
+            transcript.master_statement_binding ==
+                pin.master_statement_binding &&
+            transcript.lane_child_binding ==
+                pin.lane_child_binding;
+        if (pin.air_proof_commitment.IsNull() ||
+            pin.transcript_commitment.IsNull() ||
+            !pin.host_reports_ordered_lane_binding_checked) {
+            out.note =
+                "dual v5 aggregate: child binding mismatch";
+            return out;
+        }
+    }
+
+    const auto normalized_begin =
+        std::chrono::steady_clock::now();
+    const auto lane_views = NormalizeDualV5LaneProofs(children);
+    out.normalized = BuildAggregateWitness(
+        child_cs, lane_views, child_fs_seed, fam);
+    out.normalized_witness_micros =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - normalized_begin)
+                .count());
+    if (!out.normalized.ok ||
+        out.normalized.pis.size() !=
+            children.size() * kRCFri3AlgDualNumLanes) {
+        out.note = "dual v5 aggregate: normalized witness: " +
+                   out.normalized.note;
+        return out;
+    }
+    for (size_t lane = 0;
+         lane < out.normalized.pis.size(); ++lane) {
+        ChildPublicInputs& pi = out.normalized.pis[lane];
+        if (lane_batch_coefficients[lane].size() !=
+            pi.child_w + 1) {
+            out.note =
+                "dual v5 aggregate: independent coefficient shape";
+            return out;
+        }
+        pi.fri_batch_coefficients =
+            lane_batch_coefficients[lane];
+        pi.independent_fri_batching = true;
+    }
+    // BuildAggregateWitness laid out and filled the proof-derived witness with
+    // legacy public inputs. Independent batching changes no witness column;
+    // it changes the DEEP constraint constants. Rebuild the pinned CS and
+    // refresh its canonical preprocessed columns before scanning.
+    out.normalized.cs = BuildVerifierAIRPinned(
+        static_cast<uint32_t>(out.normalized.pis.size()),
+        out.normalized.pis, fam);
+    if (out.normalized.columns.size() !=
+        out.normalized.cs.n_columns) {
+        out.note =
+            "dual v5 aggregate: normalized column shape changed";
+        return out;
+    }
+    for (const auto& [column, values] :
+         out.normalized.cs.preprocessed) {
+        if (column >= out.normalized.columns.size() ||
+            values.size() != out.normalized.cs.n_rows) {
+            out.note =
+                "dual v5 aggregate: normalized preprocessed shape";
+            return out;
+        }
+        out.normalized.columns[column] = values;
+    }
+    for (size_t child = 0; child < children.size(); ++child) {
+        for (uint32_t lane = 0;
+             lane < kRCFri3AlgDualNumLanes; ++lane) {
+            const size_t pi_index =
+                child * kRCFri3AlgDualNumLanes + lane;
+            if (Fri3AlgDigestToUint256(
+                    out.normalized.pis[pi_index]
+                        .row_commit_root) !=
+                out.child_pins[child].lane_row_root[lane]) {
+                out.note =
+                    "dual v5 aggregate: normalized lane root mismatch";
+                return out;
+            }
+        }
+    }
+    const auto scan_begin = std::chrono::steady_clock::now();
+    uint32_t first_bad_row = 0;
+    std::string first_bad_name;
+    out.normalized_violations = CountWitnessViolationsOnH(
+        out.normalized.cs, out.normalized.columns,
+        &first_bad_row, &first_bad_name);
+    out.normalized_scan_micros =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - scan_begin)
+                .count());
+    if (out.normalized_violations != 0) {
+        out.note =
+            "dual v5 aggregate: normalized witness violations=" +
+            std::to_string(out.normalized_violations) +
+            " first_row=" + std::to_string(first_bad_row) +
+            " first=" + first_bad_name;
+        return out;
+    }
+    const uint256 pins =
+        CommitDualV5RecursiveChildPins(out.child_pins);
+    const uint256 lane_pis =
+        CommitDualV5LanePis(out.normalized.pis);
+    HashWriter statement;
+    statement << kDualV5ParentSeedDomain;
+    statement << pins;
+    statement << lane_pis;
+    out.child_statement_commitment = statement.GetHash();
+    out.ok = true;
+    out.note =
+        "dual v5 aggregate: native+normalized verifier witness accepted; "
+        "next-row and R_T cross-openings constrained; "
+        "SHA transcript equations remain outside AIR";
+    return out;
+}
+
+DualV5AggregateResult ProveAggregateDualV5Checked(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<DualAlgAirProof>& children,
+    const uint256& child_fs_seed,
+    const uint256& parent_fs_seed,
+    const VerifierAirFamilies& fam)
+{
+    DualV5AggregateResult out;
+    DualV5AggregateWitness witness =
+        BuildDualV5AggregateWitness(
+            child_cs, children, child_fs_seed, fam);
+    if (!witness.ok) {
+        out.note = witness.note;
+        return out;
+    }
+    out.lane_pis = witness.normalized.pis;
+    out.child_pins = witness.child_pins;
+    out.child_statement_commitment =
+        witness.child_statement_commitment;
+    const uint256 pin_commitment =
+        CommitDualV5RecursiveChildPins(out.child_pins);
+    const uint256 lane_pis_commitment =
+        CommitDualV5LanePis(out.lane_pis);
+    out.effective_fs_seed = DeriveDualV5ParentSeed(
+        parent_fs_seed, pin_commitment,
+        lane_pis_commitment);
+    out.measurement = MeasureVerifierAIR(
+        static_cast<uint32_t>(out.lane_pis.size()),
+        out.lane_pis, fam);
+    out.all_vcs_families_enabled =
+        fam.row_merkle && fam.fold &&
+        fam.deep && fam.per_point &&
+        fam.next_row && fam.trace_binding;
+    // Even with every current algebraic V_CS family selected, the
+    // SHA/master-binding and full Fiat-Shamir replay equations are open.
+    out.production_semantics_complete = false;
+
+    const auto prove_begin = std::chrono::steady_clock::now();
+    auto proved = aq::AirQuotientProve<Fp3, DualAlgB3>(
+        witness.normalized.cs, witness.normalized.columns,
+        out.effective_fs_seed, {});
+    out.root_prove_micros =
+        static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - prove_begin)
+                .count());
+    out.witness_satisfies = proved.division_exact;
+    out.proof = std::move(proved.proof);
+    out.ok = proved.ok && proved.division_exact;
+    out.note = out.ok
+                   ? "dual v5 aggregate: normalized parent proof emitted; "
+                     "consensus authority remains off"
+                   : "dual v5 aggregate: parent prove: " +
+                         proved.note;
+    return out;
+}
+
+bool VerifyAggregateDualV5Diagnostic(
+    const DualAlgAirProof& root,
+    const std::vector<ChildPublicInputs>& lane_pis,
+    const std::vector<DualV5RecursiveChildPin>& child_pins,
+    const uint256& parent_fs_seed,
+    const VerifierAirFamilies& fam,
+    std::string* why)
+{
+    auto fail = [&](const std::string& reason) {
+        if (why != nullptr)
+            *why = "dual-v5-aggregate:" + reason;
+        return false;
+    };
+    if (child_pins.empty() || child_pins.size() > 4 ||
+        lane_pis.size() !=
+            child_pins.size() * kRCFri3AlgDualNumLanes) {
+        return fail("child shape");
+    }
+    for (size_t child = 0; child < child_pins.size(); ++child) {
+        const auto& pin = child_pins[child];
+        if (!pin.host_reports_native_air_accepted ||
+            !pin.host_reports_exact_transcript_replayed ||
+            !pin.host_reports_ordered_lane_binding_checked ||
+            pin.air_proof_commitment.IsNull() ||
+            pin.transcript_commitment.IsNull() ||
+            pin.master_statement_binding.IsNull()) {
+            return fail("unverified child pin");
+        }
+        for (uint32_t lane = 0;
+             lane < kRCFri3AlgDualNumLanes; ++lane) {
+            const size_t pi_index =
+                child * kRCFri3AlgDualNumLanes + lane;
+            if (Fri3AlgDigestToUint256(
+                    lane_pis[pi_index].row_commit_root) !=
+                pin.lane_row_root[lane] ||
+                pin.lane_child_binding[lane].IsNull()) {
+                return fail("lane binding");
+            }
+        }
+    }
+    const uint256 effective_seed = DeriveDualV5ParentSeed(
+        parent_fs_seed,
+        CommitDualV5RecursiveChildPins(child_pins),
+        CommitDualV5LanePis(lane_pis));
+    const auto cs = BuildVerifierAIRPinned(
+        static_cast<uint32_t>(lane_pis.size()),
+        lane_pis, fam);
+    std::string air_why;
+    if (!aq::AirQuotientVerify<Fp3, DualAlgB3>(
+            cs, root, effective_seed, &air_why)) {
+        return fail("root:" + air_why);
+    }
+    if (why != nullptr)
+        *why =
+            "dual-v5-aggregate:ok-diagnostic-host-claims-not-recursive";
+    return true;
+}
+
 AggregateResult ProveAggregate(const aq::AirConstraintSystem<Fp3>& child_cs,
                                const std::vector<aq::AirQuotientProof<Fp3, AlgB3>>& children,
                                const uint256& child_fs_seed, const uint256& fs_seed,
@@ -1417,6 +2955,300 @@ AggregateResult ProveAggregate(const aq::AirConstraintSystem<Fp3>& child_cs,
     out.proof = pr.proof;
     out.ok = pr.ok;
     out.note = pr.note;
+    return out;
+}
+
+AggregateResult ProveAggregateChecked(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<aq::AirQuotientProof<Fp3, AlgB3>>& children,
+    const uint256& child_fs_seed, const uint256& fs_seed,
+    const VerifierAirFamilies& fam)
+{
+    AggregateResult out;
+    out.fs_seed = fs_seed;
+    if (children.empty()) {
+        out.note = "checked aggregate: no children";
+        return out;
+    }
+    for (uint32_t child = 0; child < children.size(); ++child) {
+        std::string why;
+        if (!aq::AirQuotientVerify<Fp3, AlgB3>(
+                child_cs, children[child], child_fs_seed, &why)) {
+            out.note =
+                "checked aggregate: child " +
+                std::to_string(child) + " rejected: " + why;
+            return out;
+        }
+    }
+    out = ProveAggregate(
+        child_cs, children, child_fs_seed, fs_seed, fam);
+    if (out.ok && !out.witness_satisfies) {
+        out.ok = false;
+        out.note =
+            "checked aggregate: accepted children produced inexact mirror";
+    }
+    return out;
+}
+
+namespace {
+
+uint64_t EstimateAlgAirProofBytes(
+    const aq::AirQuotientProof<Fp3, AlgB3>& proof)
+{
+    std::vector<unsigned char> batch;
+    const size_t batch_size =
+        SerializeFri3AlgBatchProof(proof.batch, batch);
+    if (batch_size != batch.size()) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    uint64_t bytes =
+        static_cast<uint64_t>(batch_size) + 32 + 4;
+    for (const auto& paths : proof.next_openings) {
+        bytes += 4;
+        for (const auto& path : paths) {
+            bytes += 8;
+            bytes +=
+                static_cast<uint64_t>(path.values.size()) *
+                3 * sizeof(uint64_t);
+            bytes +=
+                static_cast<uint64_t>(path.siblings.size()) *
+                ah::kAlgHashDigestLen * sizeof(uint64_t);
+        }
+    }
+    return bytes;
+}
+
+uint64_t MicrosSince(
+    const std::chrono::steady_clock::time_point& start)
+{
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start)
+            .count());
+}
+
+} // namespace
+
+AggregateExecutionProfile ProveAggregateCheckedProfiled(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<aq::AirQuotientProof<Fp3, AlgB3>>& children,
+    const uint256& child_fs_seed, const uint256& fs_seed,
+    const VerifierAirFamilies& fam)
+{
+    AggregateExecutionProfile out;
+    out.aggregate.fs_seed = fs_seed;
+    if (children.empty() || children.size() > 4) {
+        out.note = "profiled aggregate: child count";
+        return out;
+    }
+    for (const auto& child : children) {
+        const uint64_t bytes = EstimateAlgAirProofBytes(child);
+        if (bytes == std::numeric_limits<uint64_t>::max() ||
+            out.child_proof_bytes >
+                std::numeric_limits<uint64_t>::max() - bytes) {
+            out.note = "profiled aggregate: proof size";
+            return out;
+        }
+        out.child_proof_bytes += bytes;
+    }
+
+    auto phase = std::chrono::steady_clock::now();
+    for (uint32_t child = 0; child < children.size(); ++child) {
+        std::string why;
+        if (!aq::AirQuotientVerify<Fp3, AlgB3>(
+                child_cs, children[child],
+                child_fs_seed, &why)) {
+            out.child_verify_micros = MicrosSince(phase);
+            out.note =
+                "profiled aggregate: child " +
+                std::to_string(child) +
+                " rejected: " + why;
+            return out;
+        }
+    }
+    out.child_verify_micros = MicrosSince(phase);
+
+    phase = std::chrono::steady_clock::now();
+    AggregateWitness witness =
+        BuildAggregateWitness(
+            child_cs, children, child_fs_seed, fam);
+    out.witness_build_micros = MicrosSince(phase);
+    if (!witness.ok) {
+        out.note =
+            "profiled aggregate: witness: " + witness.note;
+        return out;
+    }
+    out.witness_cells =
+        static_cast<uint64_t>(witness.cs.n_rows) *
+        witness.cs.n_columns;
+
+    phase = std::chrono::steady_clock::now();
+    uint32_t first_row = 0;
+    std::string first_name;
+    const uint32_t violations =
+        CountWitnessViolationsOnH(
+            witness.cs, witness.columns,
+            &first_row, &first_name);
+    out.witness_scan_micros = MicrosSince(phase);
+    if (violations != 0) {
+        out.note =
+            "profiled aggregate: mirror violation row=" +
+            std::to_string(first_row) +
+            " constraint=" + first_name;
+        return out;
+    }
+
+    out.aggregate.pis = witness.pis;
+    out.aggregate.measurement =
+        MeasureVerifierAIR(
+            static_cast<uint32_t>(children.size()),
+            witness.pis, fam);
+    phase = std::chrono::steady_clock::now();
+    aq::AirProveOptions options;
+    options.force_commit_on_inexact = false;
+    auto proved =
+        aq::AirQuotientProve<Fp3, AlgB3>(
+            witness.cs, witness.columns, fs_seed, options);
+    out.root_prove_micros = MicrosSince(phase);
+    out.aggregate.witness_satisfies =
+        proved.division_exact;
+    out.aggregate.proof = std::move(proved.proof);
+    out.aggregate.ok =
+        proved.ok && proved.division_exact;
+    out.aggregate.note = proved.note;
+    if (!out.aggregate.ok) {
+        out.note =
+            "profiled aggregate: root prove: " + proved.note;
+        return out;
+    }
+    out.root_proof_bytes =
+        EstimateAlgAirProofBytes(out.aggregate.proof);
+    if (out.root_proof_bytes ==
+        std::numeric_limits<uint64_t>::max()) {
+        out.note = "profiled aggregate: root proof size";
+        out.aggregate.ok = false;
+        return out;
+    }
+    out.complete = true;
+    out.note = "profiled aggregate: complete";
+    return out;
+}
+
+StreamingAggregateLevelResult ProveAggregateLevelStreaming(
+    uint64_t input_proofs, uint32_t max_children,
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const uint256& child_fs_seed,
+    const uint256& level_fs_seed,
+    const StreamingProofLoader& loader,
+    const StreamingAggregateSink& sink,
+    const VerifierAirFamilies& fam)
+{
+    StreamingAggregateLevelResult out;
+    out.input_proofs = input_proofs;
+    out.max_children = max_children;
+    if (input_proofs == 0 || max_children == 0 ||
+        max_children > 4 || !loader || !sink) {
+        out.note = "streaming aggregate: invalid configuration";
+        return out;
+    }
+
+    uint64_t input = 0;
+    uint64_t node = 0;
+    while (input < input_proofs) {
+        const uint32_t count =
+            static_cast<uint32_t>(
+                std::min<uint64_t>(
+                    max_children,
+                    input_proofs - input));
+        std::vector<aq::AirQuotientProof<Fp3, AlgB3>>
+            children;
+        children.reserve(count);
+        uint64_t batch_bytes = 0;
+        for (uint32_t child = 0; child < count; ++child) {
+            aq::AirQuotientProof<Fp3, AlgB3> proof;
+            std::string why;
+            if (!loader(input + child, proof, &why)) {
+                out.note =
+                    "streaming aggregate: load: " + why;
+                return out;
+            }
+            const uint64_t bytes =
+                EstimateAlgAirProofBytes(proof);
+            if (bytes ==
+                    std::numeric_limits<uint64_t>::max() ||
+                batch_bytes >
+                    std::numeric_limits<uint64_t>::max() -
+                        bytes) {
+                out.note =
+                    "streaming aggregate: proof size";
+                return out;
+            }
+            batch_bytes += bytes;
+            children.push_back(std::move(proof));
+        }
+        out.peak_loaded_children =
+            std::max(out.peak_loaded_children, count);
+        out.peak_child_proof_bytes =
+            std::max(
+                out.peak_child_proof_bytes, batch_bytes);
+
+        HashWriter node_seed_writer;
+        node_seed_writer << "BTX_RC_STREAMING_AGG_NODE_V1";
+        node_seed_writer << level_fs_seed;
+        node_seed_writer << node;
+        const uint256 node_seed = node_seed_writer.GetHash();
+        AggregateExecutionProfile profile =
+            ProveAggregateCheckedProfiled(
+                child_cs, children, child_fs_seed,
+                node_seed, fam);
+        out.child_verify_micros +=
+            profile.child_verify_micros;
+        out.witness_build_micros +=
+            profile.witness_build_micros;
+        out.witness_scan_micros +=
+            profile.witness_scan_micros;
+        out.root_prove_micros +=
+            profile.root_prove_micros;
+        out.peak_witness_cells =
+            std::max(
+                out.peak_witness_cells,
+                profile.witness_cells);
+        const uint64_t witness_bytes =
+            profile.witness_cells >
+                    std::numeric_limits<uint64_t>::max() /
+                        sizeof(Fp3)
+                ? std::numeric_limits<uint64_t>::max()
+                : profile.witness_cells * sizeof(Fp3);
+        const uint64_t live_bytes =
+            witness_bytes >
+                    std::numeric_limits<uint64_t>::max() -
+                        batch_bytes
+                ? std::numeric_limits<uint64_t>::max()
+                : witness_bytes + batch_bytes;
+        out.peak_estimated_live_bytes =
+            std::max(
+                out.peak_estimated_live_bytes,
+                live_bytes);
+        if (!profile.complete) {
+            out.note =
+                "streaming aggregate: node " +
+                std::to_string(node) + ": " +
+                profile.note;
+            return out;
+        }
+        std::string sink_why;
+        if (!sink(node, std::move(profile), &sink_why)) {
+            out.note =
+                "streaming aggregate: sink: " +
+                sink_why;
+            return out;
+        }
+        input += count;
+        ++node;
+    }
+    out.output_nodes = node;
+    out.complete = true;
+    out.note = "streaming aggregate: complete";
     return out;
 }
 

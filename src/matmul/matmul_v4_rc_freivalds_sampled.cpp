@@ -58,9 +58,10 @@ double Secs(std::chrono::steady_clock::time_point s)
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - s).count();
 }
 
-uint32_t CarrierPrewarmInnerThreads(uint32_t total_threads)
+uint32_t CarrierPrewarmInnerThreads(uint32_t total_threads,
+                                    size_t seed_job_count)
 {
-    if (total_threads <= 1) return 1;
+    if (total_threads <= 1 || seed_job_count == 0) return 1;
     if (const char* env = std::getenv("BTX_RC_CARRIER_PREWARM_INNER_THREADS")) {
         const unsigned long requested = std::strtoul(env, nullptr, 10);
         if (requested > 0) {
@@ -68,11 +69,13 @@ uint32_t CarrierPrewarmInnerThreads(uint32_t total_threads)
                 std::clamp<unsigned long>(requested, 1, total_threads));
         }
     }
-    // Wave scheduling: split work across distinct operands, but let large
-    // operands use enough inner workers that X0/K/V/W do not become serial
-    // prewarm stragglers. 8 is the best default on Apple M-class 14/16-thread
-    // validation hosts; callers can override for measurement.
-    return std::min<uint32_t>(8, total_threads);
+    // Allocate whole cores across independent operands first, then give each
+    // operand the remaining inner parallelism. This avoids serializing the
+    // production profile's 28 seed jobs behind one 8-thread expansion while
+    // still using all available cores when there are only one or two jobs.
+    const uint32_t concurrent_jobs = static_cast<uint32_t>(
+        std::min<size_t>(seed_job_count, total_threads));
+    return std::max<uint32_t>(1, total_threads / concurrent_jobs);
 }
 
 // A layer's extract_out is committed to the round tile-tree stream iff it is one
@@ -1453,7 +1456,8 @@ bool VerifyEpisodeFreivaldsSampledCarrier(const RCFreivaldsSampledCarrier& carri
                 return a.seed < b.seed;
             });
             const auto t_regen = std::chrono::steady_clock::now();
-            const uint32_t inner_threads = CarrierPrewarmInnerThreads(tm.verify_threads);
+            const uint32_t inner_threads =
+                CarrierPrewarmInnerThreads(tm.verify_threads, seed_jobs.size());
             const uint32_t outer_threads = std::max<uint32_t>(1, tm.verify_threads / inner_threads);
             ParallelFor(seed_jobs.size(), outer_threads, [&](size_t i) {
                 seed_jobs[i].bytes =

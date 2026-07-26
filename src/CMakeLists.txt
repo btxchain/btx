@@ -606,9 +606,90 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_freivalds_sampled.cpp
   matmul/matmul_v4_rc_freivalds_i8mm.cpp
   matmul/matmul_v4_rc_alg_hash.cpp
+  matmul/matmul_v4_rc_alg_hash_wide.cpp
   matmul/matmul_v4_rc_air_episode.cpp
   matmul/matmul_v4_rc_air_quotient.cpp
   matmul/matmul_v4_rc_air_recurse.cpp
+  matmul/matmul_v4_rc_stage3.cpp
+  matmul/matmul_v4_rc_stage3_first_collision_audit.cpp
+  matmul/matmul_v4_rc_stage3_hash_domain_sep.cpp
+  matmul/matmul_v4_rc_stage3_episode.cpp
+  matmul/matmul_v4_rc_stage3_episode_air.cpp
+  matmul/matmul_v4_rc_stage3_episode_semantic.cpp
+  matmul/matmul_v4_rc_stage3_episode_relation_product.cpp
+  matmul/matmul_v4_rc_stage3_episode_builder_params.cpp
+  matmul/matmul_v4_rc_stage3_episode_builder_seed_chain.cpp
+  matmul/matmul_v4_rc_stage3_episode_builder_operand_xof.cpp
+  matmul/matmul_v4_rc_stage3_episode_builder_trace.cpp
+  matmul/matmul_v4_rc_stage3_episode_builder_trace_binding.cpp
+  matmul/matmul_v4_rc_stage3_seed_chain_binding.cpp
+  matmul/matmul_v4_rc_stage3_episode_wiring_binding.cpp
+  matmul/matmul_v4_rc_stage3_episode_header_target.cpp
+  matmul/matmul_v4_rc_stage3_episode_round_roots.cpp
+  matmul/matmul_v4_rc_stage3_episode_extract_product.cpp
+  matmul/matmul_v4_rc_stage3_episode_gemm_product.cpp
+  matmul/matmul_v4_rc_stage3_episode_wiring_product.cpp
+  matmul/matmul_v4_rc_stage3_episode_tile_stream.cpp
+  matmul/matmul_v4_rc_stage3_extract_stream_ctl.cpp
+  matmul/matmul_v4_rc_stage3_tile_tree_hash_ctl.cpp
+  matmul/matmul_v4_rc_stage3_gemm_extract.cpp
+  matmul/matmul_v4_rc_stage3_gemm_sumcheck_binding.cpp
+  matmul/matmul_v4_rc_stage3_coupled_bank_root_binding.cpp
+  matmul/matmul_v4_rc_stage3_coupled_signed_range_binding.cpp
+  matmul/matmul_v4_rc_stage3_consensus.cpp
+  matmul/matmul_v4_rc_stage3_composition.cpp
+  matmul/matmul_v4_rc_stage3_coupled.cpp
+  matmul/matmul_v4_rc_stage3_coupled_air.cpp
+  matmul/matmul_v4_rc_stage3_coupled_semantic.cpp
+  matmul/matmul_v4_rc_stage3_coupled_missing_relations.cpp
+  matmul/matmul_v4_rc_stage3_coupled_gemm_product.cpp
+  matmul/matmul_v4_rc_stage3_coupled_initial_state_product.cpp
+  matmul/matmul_v4_rc_stage3_bounded_semantic_composition.cpp
+  matmul/matmul_v4_rc_stage3_bounded_semantic_binding.cpp
+  matmul/matmul_v4_rc_stage3_coupled_chain_product.cpp
+  matmul/matmul_v4_rc_stage3_coupled_bank_product.cpp
+  matmul/matmul_v4_rc_stage3_coupled_bank_hash_bridge.cpp
+  matmul/matmul_v4_rc_stage3_family_fold.cpp
+  matmul/matmul_v4_rc_stage3_global_soundness_ledger.cpp
+  matmul/matmul_v4_rc_stage3_universal_topology.cpp
+  matmul/matmul_v4_rc_stage3_coupled_exchange_permutation_product.cpp
+  matmul/matmul_v4_rc_stage3_coupled_extract_product.cpp
+  matmul/matmul_v4_rc_stage3_coupled_mix_product.cpp
+  matmul/matmul_v4_rc_stage3_extract_barrier_link.cpp
+  matmul/matmul_v4_rc_stage3_coupled_bank_stream.cpp
+  matmul/matmul_v4_rc_stage3_coupled_bank_narrow.cpp
+  matmul/matmul_v4_rc_stage3_ctl.cpp
+  matmul/matmul_v4_rc_stage3_recursive.cpp
+  matmul/matmul_v4_rc_stage3_unified_root.cpp
+  matmul/matmul_v4_rc_stage3_relation_closure.cpp
+  matmul/matmul_v4_rc_stage3_stream_endpoint.cpp
+  matmul/matmul_v4_rc_stage3_narrow_recurse.cpp
+  matmul/matmul_v4_rc_stage3_soundness_scenarios.cpp
+  matmul/matmul_v4_rc_stage3_merkle_multiproof.cpp
+  matmul/matmul_v4_rc_stage3_aggregation_schedule.cpp
+  matmul/matmul_v4_rc_stage3_recursive_site_inventory.cpp
+  matmul/matmul_v4_rc_stage3_recursive_consumption.cpp
+  matmul/matmul_v4_rc_stage3_recursive_fixedpoint.cpp
+  matmul/matmul_v4_rc_stage3_constraint_bytecode.cpp
+  matmul/matmul_v4_rc_stage3_role_bytecode.cpp
+  matmul/matmul_v4_rc_stage3_relation_local_sharding.cpp
+  matmul/matmul_v4_rc_stage3_mlink.cpp
+  matmul/matmul_v4_rc_stage3_family_vm.cpp
+  matmul/matmul_v4_rc_stage3_splitrap_ctl_coordinator.cpp
+  matmul/matmul_v4_rc_stage3_recursive_parent_air.cpp
+  matmul/matmul_v4_rc_stage3_fs_selection_air.cpp
+  matmul/matmul_v4_rc_stage3_recursive_bytecode_air.cpp
+  matmul/matmul_v4_rc_stage3_poseidon_air.cpp
+  matmul/matmul_v4_rc_stage3_poseidon_bytecode.cpp
+  matmul/matmul_v4_rc_stage3_v5_v6_bus.cpp
+  matmul/matmul_v4_rc_stage3_v6_fs.cpp
+  matmul/matmul_v4_rc_stage3_hash_air.cpp
+  matmul/matmul_v4_rc_stage3_hash_semantic.cpp
+  matmul/matmul_v4_rc_stage3_root_chain.cpp
+  matmul/matmul_v4_rc_stage3_provenance_graph.cpp
+  matmul/matmul_v4_rc_stage3_semantic_status.cpp
+  matmul/matmul_v4_rc_stage3_verifier_air.cpp
+  matmul/matmul_v4_rc_stage3_verify.cpp
   matmul/matmul_sketch_cache.cpp
   matmul/matmul_v4_exact_float.cpp
   matmul/matmul_v4_fast_exact.cpp

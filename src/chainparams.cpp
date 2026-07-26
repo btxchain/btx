@@ -393,7 +393,9 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (args.IsArgSet("-regtestrcprofile")) {
         // ENC_RC episode profile: 1=epoch-0 base, 2=datacenter dims. Pair with a
         // finite -regtestrcheight/-regtestrcunifiedheight to activate the
-        // datacenter episode. AssertBMX4CConstructionInvariants rejects ≠{1,2}.
+        // datacenter episode. This selects shape, not proof authority: sampled
+        // carriers are optional prechecks. AssertBMX4CConstructionInvariants
+        // rejects ≠{1,2}.
         options.matmul_rc_profile = ParseRegTestUInt32Arg(args, "-regtestrcprofile");
     }
     if (args.IsArgSet("-regtestmatmulltsealaspow")) {

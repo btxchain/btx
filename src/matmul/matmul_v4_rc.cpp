@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_lt.h>
 #include <matmul/matmul_v4_rc_mx_layout.h>
 #include <matmul/matmul_v4_rc_scale.h>
+#include <matmul/matmul_v4_rc_stage3_hash_domain_sep.h>
 #include <span.h>
 
 #include <algorithm>
@@ -771,7 +772,11 @@ std::vector<uint32_t> DeriveFSChallenges(const uint256& sigma, const uint256& cl
         off += 32;
         WriteLE32(buf + off, q);
         off += 4;
-        const uint256 h = Sha256dBytes(buf, off);
+        // O-ENC production routing: D_FS Fiat-Shamir draw. Default (un-scoped)
+        // legacy model is byte-identical to Sha256dBytes(buf,off); a V8 proof
+        // session prepends the 0xF5 role byte to the whole FS preimage.
+        namespace ds = matmul::v4::rc::stage3::domain_sep;
+        const uint256 h = ds::Sha256dFsPreimage(ds::ActiveHashModel(), buf, off);
         out.push_back(static_cast<uint32_t>(ReadLE32(h.data()) % total));
     }
     return out;

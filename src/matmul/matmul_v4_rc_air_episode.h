@@ -222,7 +222,7 @@ struct EpisodeAirLayout {
 
 /** Prover-side witness references (the carried v7 wire columns). */
 struct EpisodeAirLayerWitness {
-    const std::vector<int8_t>* A{nullptr};            // m×k (residual source)
+    const std::vector<int8_t>* A{nullptr};            // m×n residual X[l] (Fwd only)
     const std::vector<int64_t>* Y{nullptr};           // m×n
     const std::vector<int64_t>* extract_in{nullptr};  // m×n
     const std::vector<int8_t>* extract_out{nullptr};  // m×n

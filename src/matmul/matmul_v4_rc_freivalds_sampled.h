@@ -54,25 +54,18 @@
 // is margin only; the v3 anchored carrier recomputes exactly and adds no such
 // error). The unsampled-layer test asserts this boundary (deterrence, not a bug).
 //
-// CONSENSUS ROLE (datacenter profile — 2026-07 owner-authorized activation).
-// UNDER nMatMulRCProfile == 2 (the datacenter dims) this sampled verifier IS the
-// consensus accept/reject AUTHORITY in CheckMatMulProofOfWork_RC: at the
-// 16×-heavier datacenter episode ExactReplay cannot re-run the workload inside
-// the block-verify budget, so the sublinear sampled check decides validity. This
-// authority is DETERRENCE-based, NOT complete and NOT audited: an UNSAMPLED
-// tampered layer passes, with residual cheatable fraction ρ* ≈ ln(κ)/λ ≈ 0.13 %
-// (λ=512, κ=2) — see RESIDUAL above. It is an explicit owner risk decision; it is
-// NOT a formal-soundness or audit claim (the external cryptographic audit of the
-// FS coin / Freivalds composition / T-BIND / opening soundness remains OPEN, and
-// kRCGkrFormalSoundnessReady — which gates the SEPARATE GKR/SNARK arbiter, not
-// this path — stays false). ExactReplay is retained as the ε=0 async ARBITER /
-// dispute path a full node can run off the hot path.
+// CONSENSUS ROLE. This sampled verifier is a fast relay/precheck only. It is
+// DETERRENCE-based and incomplete: an UNSAMPLED tampered layer passes, with
+// residual cheatable fraction ρ* ≈ ln(κ)/λ — see RESIDUAL above. Therefore
+// CheckMatMulProofOfWork_RC never returns final success from this result. While
+// complete durable Stage-3 authority is disabled, a successful profile-2
+// precheck falls through to deterministic ExactReplay.
 //
 // Under nMatMulRCProfile == 1 (epoch-0 base dims) this path is NOT consensus:
 // ExactReplay is the sole authority exactly as before, and the verifier here is
 // shadow/measurement only. Composes against the frozen Fable primitive
 // FreivaldsCheckGemm (matmul_v4_rc_freivalds.h); does not modify alg_hash/fri/
-// air_quotient/air_recurse; the ExactReplay path is intact for both profiles.
+// air_quotient/air_recurse; the ExactReplay path remains intact.
 // ============================================================================
 
 namespace matmul::v4::rc {

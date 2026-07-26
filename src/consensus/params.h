@@ -506,10 +506,11 @@ struct Params {
      *   1 = epoch-0 base dims (DefaultConsensus / height-selected schedule)
      *   2 = datacenter-scale dims (MakeDatacenterRCEpisodeParams: rounds/L_lyr/
      *       b_seq raised, ~16× F_ep — design §3 / §6.1(A))
-     * DEFAULT 2 = DATACENTER (owner-activated aggressive posture). Under profile 2
-     * the sublinear Freivalds SAMPLED verifier is the consensus accept/reject
-     * authority (deterrence-based, ~0.27% residual — NOT audited/formally sound;
-     * ExactReplay is retained as the async ε=0 arbiter/dispute path). Profile 1
+     * DEFAULT 2 = DATACENTER shape selection. The sublinear Freivalds SAMPLED
+     * verifier is only a relay/precheck and never final consensus authority.
+     * Until complete durable Stage-3 authority is enabled, profile 2 falls
+     * through to ExactReplay after the sampled precheck (safe but expensive).
+     * Profile 1
      * remains available and selects the epoch-0 base dims with ExactReplay as the
      * sole authority, byte-identical to the pre-datacenter behavior. The profile
      * selects WHICH dims activate at nMatMulRCHeight, not WHETHER — a public net
@@ -555,6 +556,19 @@ struct Params {
      * WHAT activates once a height is deliberately made finite, not WHETHER.
      */
     uint32_t nMatMulRCCoupledProfile{3};
+    /**
+     * Stage-3 immutable ProgramTable registry pin. The AlgHash root is the
+     * sole consensus authority and encodes four canonical Goldilocks limbs.
+     * A null AlgHash root leaves Stage-3 fail-closed even at an otherwise
+     * active RC height. The SHA256d root and binding are audit/transport
+     * metadata and cannot substitute for the AlgHash authority.
+     *
+     * All public networks intentionally retain null defaults until the
+     * complete production family registry is built, reviewed, and frozen.
+     */
+    uint256 hashMatMulRCStage3ProgramRegistryAlgRoot{};
+    uint256 hashMatMulRCStage3ProgramRegistryShaAuditRoot{};
+    uint256 hashMatMulRCStage3ProgramRegistryBinding{};
     /** RC tip-verify concurrency (pending full-episode / coupled recomputes).
      *  Default 1 -- a single heavy RC-family tip verify must never share the
      *  EncDr/v4/LT pending counter or allow 16-way parallel recomputes. Cap is

@@ -89,6 +89,8 @@ add_executable(test_btx
   matmul_v4_rc_accel_policy_tests.cpp
   matmul_v4_rc_coupled_tests.cpp
   matmul_v4_rc_alg_hash_tests.cpp
+  matmul_v4_rc_alg_hash_wide_tests.cpp
+  matmul_v4_rc_alg_hash_bind384_tests.cpp
   matmul_v4_rc_freivalds_tests.cpp
   matmul_v4_rc_freivalds_sampled_tests.cpp
   matmul_v4_rc_packed_bank_tests.cpp
@@ -104,6 +106,77 @@ add_executable(test_btx
   matmul_v4_rc_air_episode_tests.cpp
   matmul_v4_rc_air_quotient_tests.cpp
   matmul_v4_rc_air_recurse_tests.cpp
+  matmul_v4_rc_stage3_tests.cpp
+  matmul_v4_rc_stage3_first_collision_audit_tests.cpp
+  matmul_v4_rc_stage3_hash_domain_sep_tests.cpp
+  matmul_v4_rc_stage3_constraint_bytecode_tests.cpp
+  matmul_v4_rc_stage3_episode_tests.cpp
+  matmul_v4_rc_stage3_episode_air_tests.cpp
+  matmul_v4_rc_stage3_episode_semantic_tests.cpp
+  matmul_v4_rc_stage3_episode_relation_product_tests.cpp
+  matmul_v4_rc_stage3_episode_builder_params_tests.cpp
+  matmul_v4_rc_stage3_episode_builder_seed_chain_tests.cpp
+  matmul_v4_rc_stage3_episode_builder_operand_xof_tests.cpp
+  matmul_v4_rc_stage3_episode_builder_trace_tests.cpp
+  matmul_v4_rc_stage3_episode_header_target_tests.cpp
+  matmul_v4_rc_stage3_episode_round_roots_tests.cpp
+  matmul_v4_rc_stage3_episode_extract_product_tests.cpp
+  matmul_v4_rc_stage3_episode_gemm_product_tests.cpp
+  matmul_v4_rc_stage3_episode_wiring_product_tests.cpp
+  matmul_v4_rc_stage3_episode_tile_stream_tests.cpp
+  matmul_v4_rc_stage3_gemm_extract_tests.cpp
+  matmul_v4_rc_stage3_consensus_tests.cpp
+  matmul_v4_rc_stage3_composition_tests.cpp
+  matmul_v4_rc_stage3_coupled_tests.cpp
+  matmul_v4_rc_stage3_coupled_air_tests.cpp
+  matmul_v4_rc_stage3_coupled_semantic_tests.cpp
+  matmul_v4_rc_stage3_coupled_missing_relations_tests.cpp
+  matmul_v4_rc_stage3_coupled_gemm_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_initial_state_product_tests.cpp
+  matmul_v4_rc_stage3_bounded_semantic_composition_tests.cpp
+  matmul_v4_rc_stage3_bounded_semantic_binding_tests.cpp
+  matmul_v4_rc_stage3_coupled_chain_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_bank_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_bank_hash_bridge_tests.cpp
+  matmul_v4_rc_stage3_family_fold_tests.cpp
+  matmul_v4_rc_stage3_global_soundness_ledger_tests.cpp
+  matmul_v4_rc_stage3_universal_topology_tests.cpp
+  matmul_v4_rc_stage3_coupled_exchange_permutation_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_extract_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_mix_product_tests.cpp
+  matmul_v4_rc_stage3_extract_barrier_link_tests.cpp
+  matmul_v4_rc_stage3_coupled_bank_stream_tests.cpp
+  matmul_v4_rc_stage3_ctl_tests.cpp
+  matmul_v4_rc_stage3_recursive_tests.cpp
+  matmul_v4_rc_stage3_unified_root_tests.cpp
+    matmul_v4_rc_stage3_relation_closure_tests.cpp
+  matmul_v4_rc_stage3_stream_endpoint_tests.cpp
+  matmul_v4_rc_stage3_narrow_recurse_tests.cpp
+  matmul_v4_rc_stage3_soundness_scenarios_tests.cpp
+  matmul_v4_rc_stage3_merkle_multiproof_tests.cpp
+  matmul_v4_rc_stage3_aggregation_schedule_tests.cpp
+  matmul_v4_rc_stage3_recursive_site_inventory_tests.cpp
+  matmul_v4_rc_stage3_recursive_consumption_tests.cpp
+  matmul_v4_rc_stage3_recursive_fixedpoint_tests.cpp
+  matmul_v4_rc_stage3_relation_local_sharding_tests.cpp
+  matmul_v4_rc_stage3_mlink_tests.cpp
+  matmul_v4_rc_stage3_family_vm_tests.cpp
+  matmul_v4_rc_stage3_role_bytecode_tests.cpp
+  matmul_v4_rc_stage3_splitrap_ctl_coordinator_tests.cpp
+  matmul_v4_rc_stage3_recursive_parent_air_tests.cpp
+  matmul_v4_rc_stage3_fs_selection_air_tests.cpp
+  matmul_v4_rc_stage3_recursive_bytecode_air_tests.cpp
+  matmul_v4_rc_stage3_poseidon_air_tests.cpp
+  matmul_v4_rc_stage3_poseidon_bytecode_tests.cpp
+  matmul_v4_rc_stage3_v5_v6_bus_tests.cpp
+  matmul_v4_rc_stage3_v6_fs_tests.cpp
+  matmul_v4_rc_stage3_hash_air_tests.cpp
+  matmul_v4_rc_stage3_hash_semantic_tests.cpp
+  matmul_v4_rc_stage3_root_chain_tests.cpp
+  matmul_v4_rc_stage3_provenance_graph_tests.cpp
+  matmul_v4_rc_stage3_semantic_status_tests.cpp
+  matmul_v4_rc_stage3_verifier_air_tests.cpp
+  matmul_v4_rc_stage3_verify_tests.cpp
   matmul_v4_rc_gkr_wiring_tests.cpp
   matmul_v4_rc_gkr_integration_tests.cpp
   matmul_v4_rc_gkr_f0_tests.cpp
@@ -113,6 +186,8 @@ add_executable(test_btx
   matmul_v4_rc_fri_tests.cpp
   matmul_v4_rc_fri_ext3_tests.cpp
   matmul_v4_rc_fri_ext3_alg_tests.cpp
+  matmul_v4_rc_fri_ext3_alg_order_audit_tests.cpp
+  matmul_v4_rc_fri_ext3_alg_fixture_tests.cpp
   matmul_v4_rc_vendor_accel_tests.cpp
   matmul_v4_provider_contract_tests.cpp
   matmul_encdr_tests.cpp

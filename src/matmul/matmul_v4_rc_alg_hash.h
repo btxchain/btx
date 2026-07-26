@@ -9,6 +9,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 // ALGEBRAIC HASH over Goldilocks — Poseidon2 (ePrint 2023/323), the fixed
@@ -114,6 +115,41 @@ void InversePermute(State& s);
 [[nodiscard]] Digest LeafHashRow(const std::vector<Fp3>& row, uint32_t index);
 
 /**
+ * Column-streaming form of LeafHashRow for a fixed row domain.  The prover can
+ * process one LDE column at a time while retaining only one sponge state and
+ * one partial rate block per row.  Finalize appends the row index and exact
+ * 10* padding, producing byte/field-identical LeafHashRow digests.
+ */
+class StreamingRowHasher
+{
+private:
+    struct RowState {
+        State sponge{};
+        std::array<Fp, kAlgHashRate> pending{};
+        uint32_t pending_count{0};
+    };
+
+    std::vector<RowState> m_rows;
+    uint32_t m_columns{0};
+    bool m_finalized{false};
+
+public:
+    explicit StreamingRowHasher(uint32_t n_rows);
+
+    [[nodiscard]] bool AbsorbColumn(
+        const std::vector<Fp3>& column,
+        std::string* why = nullptr);
+    [[nodiscard]] bool Finalize(
+        std::vector<Digest>& digests,
+        std::string* why = nullptr);
+    [[nodiscard]] uint32_t Rows() const;
+    [[nodiscard]] uint32_t Columns() const;
+    [[nodiscard]] uint64_t WorkingSetBytes() const;
+    [[nodiscard]] static uint64_t WorkingSetBytesForRows(
+        uint32_t n_rows);
+};
+
+/**
  * Variable-length sponge over Fp (rate 8, capacity 4, overwrite-free
  * add-absorb, 10*-padding over Fp: append 1 then 0s to a rate multiple).
  * Digest = state[0..4) after the final absorb permutation.
@@ -122,6 +158,130 @@ void InversePermute(State& s);
 
 /** Fp3 list absorption: each element as three lanes c0, c1, c2 (3m Fp total). */
 [[nodiscard]] Digest SpongeHashFp3(const std::vector<Fp3>& xs);
+
+// ===========================================================================
+// PR-89: 384-bit binding-digest MODE — OPTIONAL high-margin config.
+//
+// STATUS: NOT required under the BTX threat model. It is a cheap, additive,
+// env-selectable margin knob. The DEFAULT and shipped consensus path is the
+// 256-bit binding digest (rate 8 / capacity 4 / digest 4), which is UNCHANGED
+// and byte-identical.
+//
+// Why the 256-bit path already suffices: BTX tensor-mining is far costlier than
+// Bitcoin SHA hashing, so the realistic per-block proof-grind budget is
+// q <= ~78 (hash-rate x block/dispute window, tensor-mining as the primary
+// anchor on attackable blocks), NOT the Bitcoin-scale q ~ 94-100. The shipped
+// package (Q136 + enforced per-squeeze grind g=40 + A2 dual-lane + 256-bit
+// c=128) gives the binding floor 2c - 2q = 256 - 2*78 = 100 at q=78, so the
+// >= 100-bit target holds WITHOUT widening the digest. The 384-bit mode is only
+// of interest for the paranoid q > 78 regime that BTX's mining cost precludes.
+//
+// What this mode does: it repartitions the SAME frozen Poseidon2 t=12
+// permutation (identical M_E, M_I, RC tables, R_F=8/R_P=22, 118 S-boxes) as a
+// rate-6 / capacity-6 sponge and squeezes a 6-lane (= 384-bit) digest. rate+cap
+// = 6+6 = 12 = t, so no new permutation or constants are introduced. Absorb
+// into rate lanes [0..6); capacity lanes [6..12) carry the domain seed (lane 6)
+// plus a 384-mode tag (lane 7, cross-mode separation), otherwise 0; 10*-padding
+// at rate 6. This lifts the output/birthday binding CAP (digest_bits - 2q) from
+// 256-2q to 384-2q.
+//
+// HONEST SECURITY LABEL: birthday-192 / algebraic-128.
+//   * The 6-lane capacity raises the GENERIC (birthday) sponge collision floor
+//     to 2^192, and the 6-lane output raises the digest-width birthday term to
+//     384-2q.
+//   * BUT the round count (R_F=8, R_P=22) is dimensioned for a 128-bit
+//     PERMUTATION (algebraic: interpolation / Groebner-basis) target and was
+//     DELIBERATELY NOT re-dimensioned. So the algebraic collision floor stays
+//     ~128, and the EFFECTIVE floor is min(192, 128) = 128 — the same algebraic
+//     level as B256. Widening the capacity alone does not raise the algebraic
+//     resistance of the permutation.
+// A genuine 192-bit ALGEBRAIC floor would require re-dimensioning R_P upward
+// (Poseidon ePrint 2019/458 §5.5, Poseidon2 ePrint 2023/323 §3; R_P is linear
+// in the security level); that is intentionally out of scope here because the
+// BTX threat model does not need it. This mode is additive and MODE-gated; no
+// *_FormalSoundnessReady flag flips and B256 remains the verified default.
+
+enum class BindingMode : uint32_t { B256 = 0, B384 = 1 };
+
+inline constexpr uint32_t kBind384Rate = 6;
+inline constexpr uint32_t kBind384Capacity = 6;
+inline constexpr uint32_t kBind384DigestLen = 6;
+static_assert(kBind384Rate + kBind384Capacity == kAlgHashT,
+              "384 binding split must exactly fill the t=12 permutation width");
+static_assert(kBind384Capacity * 64 / 2 >= 192,
+              "6-lane capacity must give >= 192-bit generic BIRTHDAY floor");
+
+/** 6-lane (384-bit) binding digest. */
+using Digest384 = std::array<Fp, kBind384DigestLen>;
+
+/** Digest lane count / bit width for a binding mode (Goldilocks lane = 64b). */
+[[nodiscard]] constexpr uint32_t BindingDigestLen(BindingMode m)
+{
+    return m == BindingMode::B384 ? kBind384DigestLen : kAlgHashDigestLen;
+}
+[[nodiscard]] constexpr uint32_t BindingDigestBits(BindingMode m)
+{
+    return BindingDigestLen(m) * 64;
+}
+[[nodiscard]] constexpr uint32_t BindingCapacityLanes(BindingMode m)
+{
+    return m == BindingMode::B384 ? kBind384Capacity : kAlgHashCapacity;
+}
+/** GENERIC (birthday) sponge collision floor 2^(c/2), in bits: 128 / 192. */
+[[nodiscard]] constexpr uint32_t BindingCapacityBirthdayFloorBits(BindingMode m)
+{
+    return BindingCapacityLanes(m) * 64 / 2;
+}
+/**
+ * ALGEBRAIC (interpolation / Groebner) collision floor from the permutation
+ * round count. Both modes reuse R_F=8/R_P=22, dimensioned for 128 bits and NOT
+ * re-dimensioned, so this is 128 for BOTH modes.
+ */
+[[nodiscard]] constexpr uint32_t BindingAlgebraicFloorBits(BindingMode)
+{
+    return 128; // R_F=8, R_P=22 => 128-bit permutation target (unchanged)
+}
+/**
+ * EFFECTIVE collision floor = min(birthday capacity, algebraic). B384 is
+ * min(192, 128) = 128 — the SAME algebraic level as B256. B384's only real
+ * gain is the digest-width birthday term 384-2q (see BindingBirthdayFloorBits).
+ */
+[[nodiscard]] constexpr uint32_t BindingEffectiveCollisionFloorBits(BindingMode m)
+{
+    const uint32_t a = BindingCapacityBirthdayFloorBits(m);
+    const uint32_t b = BindingAlgebraicFloorBits(m);
+    return a < b ? a : b;
+}
+
+/**
+ * Process-wide active binding mode. Selector: env BTX_ALGHASH_BINDING_BITS
+ * ("384" => B384; unset / anything else => B256). Read once and cached, so a
+ * single node runs one consistent mode. B256 keeps every consensus path
+ * byte-identical to today.
+ */
+[[nodiscard]] BindingMode ActiveBindingMode();
+
+/**
+ * AlgHash binding-digest birthday/collision CAP as a function of the adversary
+ * hash-query budget q (in the soundness model's scaled unit): digest_bits-2q.
+ * This is the exact floor PR-89 moves 256-2q -> 384-2q.
+ */
+[[nodiscard]] double BindingBirthdayFloorBits(uint32_t q, BindingMode m);
+
+/**
+ * 384-bit domain-separated sponge over the frozen t=12 permutation
+ * (rate 6 / capacity 6). The domain seed occupies capacity lane 6; a fixed
+ * 384-mode tag occupies lane 7. Injective 10*-padding at rate 6.
+ */
+[[nodiscard]] Digest384 SpongeHashFp384(const std::vector<Fp>& xs, Fp domain);
+
+/** 2->1 node compression over 6-lane children under the node domain. */
+[[nodiscard]] Digest384 Compress384(const Digest384& left,
+                                    const Digest384& right);
+
+/** Row leaf: Fp3 columns (c0,c1,c2 order) + index under the leaf domain. */
+[[nodiscard]] Digest384 LeafHashRow384(const std::vector<Fp3>& row,
+                                       uint32_t index);
 
 } // namespace matmul::v4::rc::alg_hash
 

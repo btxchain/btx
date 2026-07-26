@@ -639,7 +639,8 @@ TileWitness TraceTile(const TilePublic& pub, const std::array<int64_t, kRCMxBloc
     const uint32_t nonce_first = pub.bj ^ kLaneMxBlock;
     const uint64_t nonce_second = (static_cast<uint64_t>(pub.i) << 32) | pub.bj;
 
-    while (filled < kRCMxBlockLen) {
+    while (filled < kRCMxBlockLen &&
+           remix < kRCStage3V1MaxRejectionBlocksPer32) {
         std::array<uint32_t, 16> init{};
         init[0] = 0x61707865; init[1] = 0x3320646e; init[2] = 0x79622d32; init[3] = 0x6b206574;
         for (int k = 0; k < 8; ++k) init[4 + k] = key_words[k];
@@ -728,7 +729,10 @@ TileCheckResult CheckTileConstraints(const TileWitness& w, const TableTM& tm, co
     // ---- ChaCha over COMMITTED cells: init binding (public), per-op ARX
     //      identities, dataflow copies, keystream binding (C-E1 source). ----
     {
-        if (w.chacha.size() != w.chacha_blocks ||
+        if (w.chacha_blocks == 0 ||
+            w.chacha_blocks >
+                kRCStage3V1MaxRejectionBlocksPer32 ||
+            w.chacha.size() != w.chacha_blocks ||
             w.keystream.size() != static_cast<size_t>(w.chacha_blocks) * 64) {
             r.failure = "C-E1:chacha_trace_shape"; return r;
         }
@@ -1808,7 +1812,15 @@ MxExpandVerifyResult VerifyMxExpandColumnT(const uint256& seed, uint32_t rows, u
     std::vector<int8_t> mu_stream;
     mu_stream.reserve(count);
     uint64_t block = 0;
+    const uint64_t mantissa_block_cap =
+        ((static_cast<uint64_t>(count) + kRCMxBlockLen - 1) /
+         kRCMxBlockLen) *
+        kRCStage3V1MaxRejectionBlocksPer32;
     while (mu_stream.size() < count) {
+        if (block >= mantissa_block_cap) {
+            r.failure = "mxexpand:rejection_block_cap";
+            return r;
+        }
         const std::array<uint8_t, 41> msg = XofMessage(seed_bytes, kMantissaStreamDomain, block);
         std::vector<ShaCompressTrace> traces;
         const std::array<uint32_t, 8> h = Sha256InCircuit(msg.data(), msg.size(), traces);

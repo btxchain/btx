@@ -402,7 +402,10 @@ struct MxExpandVerifyResult {
  * output equals `committed_out` byte-for-byte, and append the (nib,acc,mu) T_M
  * lookups to `inst_tm` for the dual-α aggregate. RowBlock scale axis (the
  * consensus ExpandMxDequantInt8 convention). Returns ok=false with the first
- * failing constraint id on any deviation.
+ * failing constraint id on any deviation.  The V1 proof builder consumes at
+ * most `kRCStage3V1MaxRejectionBlocksPer32 * ceil(rows*cols/32)` mantissa
+ * blocks; a longer deterministic stream is a fail-closed proof-generation
+ * event and requires the miner to try another nonce.
  */
 [[nodiscard]] MxExpandVerifyResult VerifyMxExpandColumn(const uint256& seed, uint32_t rows,
                                                         uint32_t cols,

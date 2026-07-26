@@ -77,6 +77,37 @@ inline constexpr uint32_t kRCGkrEvalArgVersion = 1;
  *  (soundness table row "RLC batching λ/μ/γ/weights"). */
 inline constexpr uint32_t kRCGkrEvalArgMaxClaims = 1u << 12;
 
+// ---------------------------------------------------------------------------
+// PATH A — DUAL-α transport field-lift (PR 89 blocker #4, H2c binding floor).
+//
+// The §2.4 aggregated identity is a Schwartz–Zippel equality over Fp2 driven by
+// ONE post-commit aggregation challenge family μ ("single-α"). For a receipt-
+// sized cell its certified separation is
+//     log2|Fp2| − log2(Q_H) − log2(N)  =  127.99 − 48.41 − 12  ≈  67.59 bits,
+// where Q_H is the RO/query budget (log2(Q_H) = 48.41, worker-#3 accounting —
+// NOT the fictional −40) and N ≤ 2^12 is the per-cell union count. 67.59 sits
+// only ~3.6 bits above the 2^-64 NO-GO and BELOW the ≥100 target.
+//
+// DUAL-α (c = 2) draws a SECOND independent aggregation family μ' (distinct FS
+// domain tag over the same μ-base) and a SECOND Lemma-1.2 witness pair (f',g')
+// as two MORE columns of the SAME FriBatch. A false claim now has to fool BOTH
+// aggregated identities, whose failure events are independent, so the exponent
+// doubles the field/union terms:
+//     2·(log2|Fp2| − log2(N)) − log2(Q_H) = 2·(127.99 − 12) − 48.41 ≈ 183.57,
+// clearing the ≥100 transport target with wide margin (pre-union 2·127.99 −
+// 48.41 ≈ 207.6). The both-identities-vanish check is ALL-component (every Fp2
+// coordinate, via gkr_field::Eq): a cheat that satisfies one identity/one
+// coordinate but not all is rejected. Formal-soundness flags stay unchanged;
+// this is the code-level challenge amplification, not a machine-checked proof.
+// ---------------------------------------------------------------------------
+/** PATH A challenge count (c = 2 dual-α). */
+inline constexpr uint32_t kRCGkrEvalArgAlphaCount = 2;
+/** Conservative integer floor of the dual-α transport separation (H2c):
+ *  2·(⌊log2|Fp2|⌋ − ⌈log2 N⌉) − ⌈log2 Q_H⌉ = 2·(127 − 12) − 49 = 181 ≥ 100. */
+[[nodiscard]] inline constexpr int RCGkrEvalArgTransportSeparationBits() { return 181; }
+static_assert(RCGkrEvalArgTransportSeparationBits() >= 100,
+              "PATH A dual-α transport lane must clear the >=100 soundness target");
+
 /** One MLE opening claim against a committed column (blueprint §10). */
 struct RCGkrOpeningClaim {
     /** Index into the batched column list (FriBatchProof::columns order). */
@@ -166,12 +197,17 @@ struct RCGkrOpeningClaim3 {
  *  machinery for free. */
 struct RCGkrEvalArgumentProof {
     uint32_t version{kRCGkrEvalArgVersion};
-    /** Aggregated inner product σ = Σ_m μ_m·c_m. Verifier recomputes from the
-     *  claims and FS μ's and REJECTS on mismatch (never trusted). */
+    /** Aggregated inner product σ = Σ_m μ_m·c_m (family α#1). Verifier
+     *  recomputes from the claims and FS μ's and REJECTS on mismatch. */
     Fp2 sigma{};
-    /** Column ids (into the batch) of the Lemma 1.2 witnesses. */
+    /** Column ids (into the batch) of the α#1 Lemma 1.2 witnesses. */
     uint32_t f_column{0};
     uint32_t g_column{0};
+    /** PATH A dual-α: σ' = Σ_m μ'_m·c_m (independent family α#2) and its
+     *  Lemma-1.2 witness columns f',g'. Both identities must vanish. */
+    Fp2 sigma2{};
+    uint32_t f2_column{0};
+    uint32_t g2_column{0};
 };
 
 struct RCGkrEvalArgumentProveResult {
@@ -180,6 +216,10 @@ struct RCGkrEvalArgumentProveResult {
      *  to the column list of the (single) FriBatchCommit invocation. */
     std::vector<Fp2> f_coeffs;
     std::vector<Fp2> g_coeffs;
+    /** PATH A dual-α second witness pair (f',g'), appended AFTER f,g in the
+     *  same FriBatchCommit column list. */
+    std::vector<Fp2> f2_coeffs;
+    std::vector<Fp2> g2_coeffs;
     bool ok{false};
     std::string note;
 };

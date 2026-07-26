@@ -296,6 +296,13 @@ struct Fri3BatchCommitResult {
     Fri3BatchProof proof;
     /** Per-column LDE over the common domain (prover-side; NEVER shipped). */
     std::vector<std::vector<Fp3>> column_lde;
+    /**
+     * Optional prover-local paths collected during the streaming column pass.
+     * These are never serialized. AirQuotientProve consumes them for its
+     * next-row checks without rebuilding every column tree a third time.
+     * Layout is [query][column].
+     */
+    std::vector<std::vector<Fri3MerklePath>> supplemental_openings;
     size_t proof_bytes{0};
     bool ok{false};
     std::string note;
@@ -310,6 +317,41 @@ struct Fri3BatchCommitResult {
 [[nodiscard]] Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& columns,
                                                     const uint256& fs_seed,
                                                     uint64_t pow_grind_nonce = 0);
+
+/**
+ * Same Fri3BatchProof format and Fiat--Shamir transcript as Fri3BatchCommit,
+ * but recomputes one column LDE/Merkle tree at a time after query selection
+ * instead of retaining every column LDE and tree concurrently.
+ */
+[[nodiscard]] Fri3BatchCommitResult Fri3BatchCommitStreamingColumns(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+
+/**
+ * Streaming commit that also opens
+ * `(query_index + supplemental_index_step) mod n_lde` while each tree is
+ * resident for ordinary query openings. Supplemental paths are prover-local
+ * and do not alter the proof encoding or Fiat--Shamir transcript.
+ */
+[[nodiscard]] Fri3BatchCommitResult
+Fri3BatchCommitStreamingColumnsWithStep(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint32_t supplemental_index_step,
+    uint64_t pow_grind_nonce = 0);
+
+/**
+ * Recompute selected per-column openings one column at a time. Every
+ * recomputed tree root must equal `expected_roots[column]`.
+ */
+[[nodiscard]] bool Fri3BatchOpenColumnsStreaming(
+    const std::vector<std::vector<Fp3>>& columns,
+    uint32_t n_coeffs,
+    const std::vector<uint32_t>& indices,
+    const std::vector<uint256>& expected_roots,
+    std::vector<std::vector<Fri3MerklePath>>& out,
+    std::string* why = nullptr);
 
 [[nodiscard]] bool Fri3BatchVerify(const Fri3BatchProof& proof, const uint256& fs_seed,
                                    std::string* why = nullptr);

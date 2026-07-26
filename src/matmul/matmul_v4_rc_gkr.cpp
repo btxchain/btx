@@ -129,7 +129,7 @@ std::list<uint256> g_rc_gkr_proof_lru;
 std::map<uint256, RCGkrProofCacheEntry> g_rc_gkr_proof_cache;
 
 /** Process-local v7 episode-proof store (struct-valued; datacenter-profile
- *  Freivalds authority availability seam — see header). Same LRU+TTL policy as
+ *  Freivalds precheck availability seam — see header). Same LRU+TTL policy as
  *  the V6 byte cache; guarded by the same g_rc_gkr_cache_mu. */
 struct RCGkrProofV7StoreEntry {
     RCGkrProofV7 proof;
@@ -2959,7 +2959,19 @@ bool BuildEpisodeAirInputsV7(const RCGkrProofV7& proof, const CBlockHeader& head
         layout.layers.push_back(al);
         if (wit != nullptr) {
             air_episode::EpisodeAirLayerWitness lw;
-            lw.A = &w.A;
+            // The DOWN/Fwd GEMM's A is H (m×d_ff), but its residual is X[l]
+            // (m×d_model). In the canonical wiring X[l] is the A operand of
+            // the immediately preceding UP wire, selected by lp.a.src_idx.
+            // This must mirror GroundEpisodeInCircuit; pointing at this
+            // DOWN wire's w.A both has the wrong shape and proves the wrong
+            // extract_in = Y + residual relation.
+            if (lp.fwd_residual) {
+                if (lp.a.is_leaf || lp.a.src_idx >= proof.wires.size()) {
+                    why = "fwd_residual_src";
+                    return false;
+                }
+                lw.A = &proof.wires[lp.a.src_idx].A;
+            }
             lw.Y = &w.Y;
             lw.extract_in = &w.extract_in;
             lw.extract_out = &w.extract_out;

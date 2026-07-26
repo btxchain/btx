@@ -1380,7 +1380,9 @@ bool VerifyWinnerCoupledV7(const RCGkrCoupledProofV7& proof, const CBlockHeader&
     const uint32_t nu = Log2Exact(batch_n);
     if (columns.size() != RCGkrCoupledExpectedColumnCount(params))
         return fail("coupled:layout_column_count");
-    if (proof.batch.columns.size() != columns.size() + 2)
+    // PATH A dual-α: the batch carries FOUR eval-argument witness columns
+    // (f,g,f',g') beyond the grounded Λ_coup columns.
+    if (proof.batch.columns.size() != columns.size() + 4)
         return fail("coupled:batch_col_count");
     for (size_t i = 0; i < columns.size(); ++i)
         if (FriBatchColumnRoot(columns[i], batch_n) != proof.batch.columns[i].root)

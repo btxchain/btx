@@ -110,15 +110,13 @@ transcript per candidate, but that is **not** proven "unbiasable" against a mine
 who grinds many candidates, and the fixed-length Merkle T-BIND premise is being
 enforced separately (opening-length checks).
 
-**What profile 2 actually is:** a **deterrence rule** with a documented ~0.27%
-residual, and the sampled carrier is *itself* the profile-2 consensus accept
-authority (int64 exact replay is the profile-1 authority and mining reference, not
-a wired per-block dispute mechanism for profile 2 — see §2). This is the basis on
-which it was accepted as launch PoW. It is **not** "formally sound / externally
-audited"; the cost-to-error lemma, the grinding game, and T-BIND are exactly what
-the standing external cryptographic audit (pre-activation gate; heights
-`INT32_MAX`) must close, alongside the eventual **Stage C** exact-completeness
-proof (§4).
+**What profile 2 currently is:** the sampled carrier is an optional deterrence
+prefilter with a documented residual, never consensus authority. A carrier
+success or failure falls through to int64 ExactReplay while complete durable
+Stage-3 authority is disabled. This preserves deterministic correctness but
+misses the datacenter verifier-time goal. Public activation remains gated at
+`INT32_MAX`; Stage 3 must close the complete proof-only relations, recursion,
+soundness margin, and production timing.
 
 ---
 
@@ -225,7 +223,7 @@ v4.6. The shipped Q=128/Fp2 bound clears the target on its own.
 
 | Knob | v4.6 default | Meaning |
 |---|---|---|
-| `nMatMulRCProfile` | **2** (datacenter episode) | selects the datacenter-scale episode dims; FS-sampled carrier is the relay authority under this profile (§2) |
+| `nMatMulRCProfile` | **2** (datacenter episode) | selects datacenter-scale episode dimensions; the FS-sampled carrier is optional precheck state (§2) |
 | `nMatMulRCCoupledProfile` | **3** (was 2) | a finite coupled height alone selects **V3 production** — no hidden profile override |
 | `RCCoupConsensusConfig{}.transcript_version` | **ENC_RC_V3** | aggregate default aligned to V3; domain tags map `V3 → COUP_*_V3` |
 | `nMatMulRCHeight` | `INT32_MAX` | ENC_RC episode **OFF** on every public network |

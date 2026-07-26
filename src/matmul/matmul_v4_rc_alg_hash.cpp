@@ -9,7 +9,9 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
+#include <string>
 #include <vector>
 
 // Poseidon2-Goldilocks permutation `AlgHash` — implementation of spec §1
@@ -398,6 +400,110 @@ Digest LeafHashRow(const std::vector<Fp3>& row, uint32_t index)
     return SpongeHashFp(xs);
 }
 
+StreamingRowHasher::StreamingRowHasher(uint32_t n_rows)
+    : m_rows(n_rows)
+{
+}
+
+bool StreamingRowHasher::AbsorbColumn(
+    const std::vector<Fp3>& column, std::string* why)
+{
+    if (m_finalized) {
+        if (why) *why = "streaming row hasher finalized";
+        return false;
+    }
+    if (column.size() != m_rows.size()) {
+        if (why) *why = "streaming row hasher column height";
+        return false;
+    }
+    auto absorb =
+        [](RowState& row, Fp value) {
+            row.pending[row.pending_count++] =
+                Canonical(value);
+            if (row.pending_count == kAlgHashRate) {
+                for (uint32_t lane = 0;
+                     lane < kAlgHashRate; ++lane) {
+                    row.sponge[lane] =
+                        Add(row.sponge[lane],
+                            row.pending[lane]);
+                    row.pending[lane] = 0;
+                }
+                Permute(row.sponge);
+                row.pending_count = 0;
+            }
+        };
+    for (uint32_t index = 0;
+         index < m_rows.size(); ++index) {
+        absorb(m_rows[index], column[index].c0);
+        absorb(m_rows[index], column[index].c1);
+        absorb(m_rows[index], column[index].c2);
+    }
+    ++m_columns;
+    return true;
+}
+
+bool StreamingRowHasher::Finalize(
+    std::vector<Digest>& digests, std::string* why)
+{
+    digests.clear();
+    if (m_finalized || m_rows.empty() || m_columns == 0) {
+        if (why) *why = "streaming row hasher finalization state";
+        return false;
+    }
+    auto absorb =
+        [](RowState& row, Fp value) {
+            row.pending[row.pending_count++] =
+                Canonical(value);
+            if (row.pending_count == kAlgHashRate) {
+                for (uint32_t lane = 0;
+                     lane < kAlgHashRate; ++lane) {
+                    row.sponge[lane] =
+                        Add(row.sponge[lane],
+                            row.pending[lane]);
+                    row.pending[lane] = 0;
+                }
+                Permute(row.sponge);
+                row.pending_count = 0;
+            }
+        };
+    digests.resize(m_rows.size());
+    for (uint32_t index = 0;
+         index < m_rows.size(); ++index) {
+        RowState& row = m_rows[index];
+        absorb(row, gkr_field::FromU64(index));
+        absorb(row, 1);
+        while (row.pending_count != 0) absorb(row, 0);
+        digests[index] = {
+            row.sponge[0], row.sponge[1],
+            row.sponge[2], row.sponge[3]};
+    }
+    m_finalized = true;
+    return true;
+}
+
+uint32_t StreamingRowHasher::Rows() const
+{
+    return static_cast<uint32_t>(m_rows.size());
+}
+
+uint32_t StreamingRowHasher::Columns() const
+{
+    return m_columns;
+}
+
+uint64_t StreamingRowHasher::WorkingSetBytes() const
+{
+    return static_cast<uint64_t>(m_rows.capacity()) *
+           sizeof(RowState);
+}
+
+uint64_t StreamingRowHasher::WorkingSetBytesForRows(
+    uint32_t n_rows)
+{
+    return static_cast<uint64_t>(n_rows) *
+           sizeof(RowState);
+}
+
 Digest SpongeHashFp(const std::vector<Fp>& xs)
 {
     // 10*-padding over Fp: ALWAYS append 1, then 0s to the next rate multiple
@@ -430,6 +536,80 @@ Digest SpongeHashFp3(const std::vector<Fp3>& xs)
         flat.push_back(Canonical(v.c2));
     }
     return SpongeHashFp(flat);
+}
+
+// ===========================================================================
+// PR-89: 384-bit binding-digest MODE — OPTIONAL high-margin config
+// (rate 6 / capacity 6 over the SAME frozen t=12 Poseidon2 permutation; same
+// R_F=8/R_P=22, NOT re-dimensioned). Honest label: birthday-192 /
+// algebraic-128. NOT required under the BTX threat model (q<=~78, where the
+// shipped 256-bit c=128 package already clears >=100). Default is B256, which
+// is byte-identical to today. See matmul_v4_rc_alg_hash.h for the full rationale.
+// ===========================================================================
+
+BindingMode ActiveBindingMode()
+{
+    static const BindingMode mode = [] {
+        const char* env = std::getenv("BTX_ALGHASH_BINDING_BITS");
+        if (env != nullptr && std::string(env) == "384") {
+            return BindingMode::B384;
+        }
+        return BindingMode::B256; // default: unchanged consensus path
+    }();
+    return mode;
+}
+
+double BindingBirthdayFloorBits(uint32_t q, BindingMode m)
+{
+    // digest_bits - 2q: the AlgHash binding-digest collision CAP. Widening the
+    // digest 256 -> 384 shifts the whole line up by 128 bits.
+    return static_cast<double>(BindingDigestBits(m)) -
+           2.0 * static_cast<double>(q);
+}
+
+Digest384 SpongeHashFp384(const std::vector<Fp>& xs, Fp domain)
+{
+    // 10*-padding over Fp at rate 6: ALWAYS append 1, then 0s to the next
+    // rate multiple (a full extra block when |xs| ≡ 0 mod 6) — injective.
+    std::vector<Fp> padded;
+    padded.reserve(xs.size() + kBind384Rate);
+    for (const Fp x : xs) padded.push_back(Canonical(x));
+    padded.push_back(1);
+    while (padded.size() % kBind384Rate != 0) padded.push_back(0);
+
+    State s{}; // rate lanes [0..6); capacity lanes [6..12)
+    s[kBind384Rate] = Canonical(domain);              // lane 6: domain seed D/Le
+    s[kBind384Rate + 1] = gkr_field::FromU64(384);    // lane 7: 384-mode tag
+    for (size_t off = 0; off < padded.size(); off += kBind384Rate) {
+        for (uint32_t j = 0; j < kBind384Rate; ++j) {
+            s[j] = Add(s[j], padded[off + j]); // add-absorb into rate lanes
+        }
+        Permute(s);
+    }
+    // Single squeeze of 6 rate lanes = 384-bit digest (digest == rate width).
+    return Digest384{s[0], s[1], s[2], s[3], s[4], s[5]};
+}
+
+Digest384 Compress384(const Digest384& left, const Digest384& right)
+{
+    std::vector<Fp> xs;
+    xs.reserve(2 * kBind384DigestLen);
+    for (const Fp v : left) xs.push_back(Canonical(v));
+    for (const Fp v : right) xs.push_back(Canonical(v));
+    return SpongeHashFp384(xs, GetAlgHashConstants().node_domain);
+}
+
+Digest384 LeafHashRow384(const std::vector<Fp3>& row, uint32_t index)
+{
+    std::vector<Fp> xs;
+    xs.reserve(3 * row.size() + 1);
+    for (const Fp3& v : row) {
+        xs.push_back(Canonical(v.c0));
+        xs.push_back(Canonical(v.c1));
+        xs.push_back(Canonical(v.c2));
+    }
+    xs.push_back(gkr_field::FromU64(index));
+    return SpongeHashFp384(xs, GetAlgHashConstants().leaf_domain);
 }
 
 } // namespace matmul::v4::rc::alg_hash

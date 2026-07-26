@@ -20,18 +20,15 @@ datacenter-advantage-defaults-2026-07-21.md` (profile-2 rationale).
 
 ## 1. What the budget governs
 
-The consensus authority **depends on the profile**. Under **profile 1**, int64
-exact CPU replay (`RecomputeResidentCurriculumReference` /
-`RecomputeCoupledPuzzleReference`) is the sole authority: a block is valid iff its
-claimed result byte-identically replays. Under **profile 2** (the datacenter
-default), the **sampled carrier verifier** (`matmul_v4_rc_freivalds_sampled.cpp`)
-is *itself* the consensus accept/reject authority — `CheckMatMulProofOfWork_RC`
-returns validity directly from it (a deterrence rule with a ~0.27 % residual; see
-§1.1) and does **not** re-run the full replay per block. int64 exact replay
-remains the arithmetic reference used at mining time and the profile-1 authority,
-but for profile 2 it is not a wired per-block dispute mechanism. The 900 ms budget
-bounds the wall-clock time a validating node spends on the profile-2 carrier
-verify before relaying.
+The current consensus authority does **not** depend on the profile. For both
+profiles, int64 exact CPU replay (`RecomputeResidentCurriculumReference` /
+`RecomputeCoupledPuzzleReference`) is the sole authority while complete
+succinct Stage-3 authority is disabled: a block is valid only if its claimed
+result byte-identically replays. Under **profile 2** (the datacenter default),
+the sampled carrier verifier (`matmul_v4_rc_freivalds_sampled.cpp`) is optional
+relay/precheck state. It can reject or prioritize work, but cannot return final
+consensus success. The 900 ms budget bounds that fast carrier path; it is not a
+claim that the current exact-replay consensus path meets the same budget.
 
 The budget is a **relay-path liveness bound, not a soundness parameter.** The
 budget only decides *which hardware can keep up with block flow*; it never
@@ -105,23 +102,18 @@ justified*:
    standard vector-commitment premise the bound assumes is being enforced
    separately.
 
-**Consensus authority (stated honestly).** Under profile 2 the **sampled carrier
-is itself the consensus accept/reject authority** — `CheckMatMulProofOfWork_RC`
-returns `true` directly on a passing carrier (`pow.cpp:4258`), accepted "by the
-sampled authority (deterrence, ~0.27 % residual)." The int64 exact-replay
-reference (`VerifyBoundedExactReplay`) is the **profile-1** sole authority and the
-mining-time reference oracle; for profile 2 there is **no wired deterministic
-dispute mechanism** that re-runs it to reverse an acceptance, so it must not be
-described as profile 2's "arbiter." The formal GKR/FRI arbiter is compile-time
+**Current consensus authority.** The sampled carrier is optional relay/precheck
+state and never returns final consensus success. Profile 2 falls through to
+`VerifyBoundedExactReplay` while the durable Stage-3 authority gate is disabled.
+This is deterministic and safe, but it does not meet the datacenter verifier-time
+goal. The formal GKR/FRI and Stage-3 authorities remain compile-time
 hard-disabled.
 
-**Bottom line for launch.** Profile 2 is a **deterrence rule** with a documented
-~0.27 % residual — which is the basis on which it was accepted as launch PoW — and
-the `(1−φ)^384` tile bound illustrates why *gross* cheating is caught with
-overwhelming probability. It is **not** a formally-proven economic soundness bound;
-the cost-to-error lemma, the grinding game, and fixed-length T-BIND are exactly
-the items the external cryptographic audit (a standing pre-activation gate, heights
-`INT32_MAX`) must close, alongside the eventual Stage C exact-completeness proof.
+**Bottom line for launch.** The `(1−φ)^384` tile bound is useful only as a
+prefilter/deterrence measurement; it is not a formally-proven economic soundness
+bound and cannot authorize a block. Public activation remains at `INT32_MAX`.
+Stage 3 must close complete proof-only relations, recursion, soundness margin,
+and production timing before it can replace ExactReplay.
 
 ---
 

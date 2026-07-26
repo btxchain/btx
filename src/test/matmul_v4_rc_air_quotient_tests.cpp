@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_air_quotient.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
@@ -13,6 +14,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <string>
@@ -21,6 +23,7 @@
 namespace aq = matmul::v4::rc::air_quotient;
 namespace air = matmul::v4::rc::gkr_air;
 namespace gf = matmul::v4::rc::gkr_field;
+namespace rc = matmul::v4::rc;
 using matmul::v4::rc::kRCMxBlockLen;
 
 BOOST_AUTO_TEST_SUITE(matmul_v4_rc_air_quotient_tests)
@@ -39,6 +42,82 @@ uint256 MakeSeed(uint8_t tag)
     std::array<uint8_t, 32> b{};
     for (int i = 0; i < 32; ++i) b[i] = static_cast<uint8_t>(tag * 13 + i * 5 + 3);
     return uint256{Span<const unsigned char>{b.data(), b.size()}};
+}
+
+void AppendU32(std::vector<unsigned char>& out, uint32_t value)
+{
+    for (uint32_t i = 0; i < 4; ++i) {
+        out.push_back(
+            static_cast<unsigned char>(value >> (8U * i)));
+    }
+}
+
+void PutLE32(
+    std::vector<unsigned char>& bytes,
+    size_t offset,
+    uint32_t value)
+{
+    BOOST_REQUIRE_LE(offset + 4, bytes.size());
+    for (uint32_t byte = 0; byte < 4; ++byte) {
+        bytes[offset + byte] =
+            static_cast<unsigned char>(
+                value >> (8 * byte));
+    }
+}
+
+void AppendU64(std::vector<unsigned char>& out, uint64_t value)
+{
+    for (uint32_t i = 0; i < 8; ++i) {
+        out.push_back(
+            static_cast<unsigned char>(value >> (8U * i)));
+    }
+}
+
+void AppendUint256(
+    std::vector<unsigned char>& out, const uint256& value)
+{
+    out.insert(
+        out.end(), value.data(), value.data() + value.size());
+}
+
+void AppendFp3(
+    std::vector<unsigned char>& out, const gf::Fp3& value)
+{
+    AppendU64(out, gf::Canonical(value.c0));
+    AppendU64(out, gf::Canonical(value.c1));
+    AppendU64(out, gf::Canonical(value.c2));
+}
+
+template <typename Backend>
+bool SerializeAirFp3ProofForTest(
+    const aq::AirQuotientProof<gf::Fp3, Backend>& proof,
+    std::vector<unsigned char>& out)
+{
+    std::vector<unsigned char> batch;
+    if (matmul::v4::rc::SerializeFri3BatchProof(
+            proof.batch, batch) == 0) {
+        return false;
+    }
+    out.clear();
+    AppendU32(out, static_cast<uint32_t>(batch.size()));
+    out.insert(out.end(), batch.begin(), batch.end());
+    AppendUint256(out, proof.trace_commit);
+    AppendU32(
+        out, static_cast<uint32_t>(proof.next_openings.size()));
+    for (const auto& row : proof.next_openings) {
+        AppendU32(out, static_cast<uint32_t>(row.size()));
+        for (const auto& path : row) {
+            AppendU32(out, path.index);
+            AppendFp3(out, path.leaf);
+            AppendU32(
+                out,
+                static_cast<uint32_t>(path.siblings.size()));
+            for (const auto& sibling : path.siblings) {
+                AppendUint256(out, sibling);
+            }
+        }
+    }
+    return true;
 }
 
 std::array<int64_t, kRCMxBlockLen> MakeInput(int64_t base)
@@ -231,9 +310,13 @@ BOOST_AUTO_TEST_CASE(overdegree_quotient_rejected_fp2)
 }
 
 // Theorem-5.1 style clone attack: replace the LogUp table side with the
-// witness multiset itself (t := w, m := 1, ψ := φ, S := 0). Every ALGEBRAIC
-// constraint then holds (the division is exact!) — the attack is caught ONLY
-// by the preprocessed-column root regeneration.
+// witness multiset itself (t := w, m := 1, ψ := φ, S := 0). Under the ONLINE
+// fingerprint the committed f = kColTfp is bound by the in-circuit
+// logup.tfp.bind identity to the CHALLENGE-INDEPENDENT preprocessed table
+// columns (tbl_a/b/c). The clone sets f to the witness fingerprint while the
+// table columns stay canonical, so f != tbl_a+γ·tbl_b+γ²·tbl_c on the grafted
+// rows: the ALGEBRA now catches the clone (the division is inexact), where the
+// old γ-baked preprocessed t_fp could only be caught by root regeneration.
 BOOST_AUTO_TEST_CASE(logup_clone_table_rejected_fp2)
 {
     const air::TableTM tm;
@@ -251,21 +334,101 @@ BOOST_AUTO_TEST_CASE(logup_clone_table_rejected_fp2)
             gf::Add(cols[aq::kColMixed][r],
                     gf::Add(gf::Mul(b.gamma, cols[aq::kColAcc][r]),
                             gf::Mul(g2, cols[aq::kColMu][r])));
-        cols[aq::kColTfp][r] = wfp;                       // table := witness (clone)
+        cols[aq::kColTfp][r] = wfp;                       // clone f := witness fp
         cols[aq::kColM][r] = gf::Fp2::One();              // multiplicity 1 each
         cols[aq::kColPsi][r] = cols[aq::kColPhi][r];      // ψ = φ trivially balances
         cols[aq::kColS][r] = gf::Fp2::Zero();             // telescope stays at zero
     }
 
+    // Algebra SEES the clone now: logup.tfp.bind is violated, remainder != 0.
+    aq::AirProveOptions strict;
+    const aq::AirQuotientProveResult<gf::Fp2> strict_pr =
+        aq::AirQuotientProve<gf::Fp2>(b.cs, cols, seed, strict);
+    BOOST_CHECK(!strict_pr.division_exact);
+
     aq::AirProveOptions opt;
+    opt.force_commit_on_inexact = true;
     const aq::AirQuotientProveResult<gf::Fp2> pr =
         aq::AirQuotientProve<gf::Fp2>(b.cs, cols, seed, opt);
     BOOST_REQUIRE_MESSAGE(pr.ok, pr.note);
-    BOOST_CHECK(pr.division_exact);  // algebra alone cannot see the clone
+    BOOST_CHECK(!pr.division_exact);  // in-circuit fingerprint identity catches it
 
     std::string why;
     BOOST_CHECK(!aq::RcSamplerAirVerify<gf::Fp2>(pr.proof, seed, w.scale_e, tm, &why));
-    BOOST_CHECK_EQUAL(why, "preprocessed column root mismatch");
+    BOOST_TEST_MESSAGE("clone rejected by online fingerprint: " << why);
+}
+
+// Differential parity + single-row grind tamper for the online fingerprint.
+// Templated so BOTH field instantiations (Fp2, Fp3) are exercised.
+namespace {
+template <typename F>
+void OnlineFingerprintParityAndTamper(uint8_t seed_tag)
+{
+    using T = aq::AirField<F>;
+    const air::TableTM tm;
+    const air::TileWitness& w = SharedWitness();
+    const uint256 seed = MakeSeed(seed_tag);
+
+    aq::RcSamplerBuild<F> b = aq::BuildRcSamplerInstance<F>(w, tm, seed);
+    BOOST_REQUIRE_MESSAGE(b.ok, b.note);
+    const uint32_t N = b.n_rows;
+    const F g2 = T::Mul(b.gamma, b.gamma);
+
+    // (1) Bit-identical parity: committed f == the legacy γ-baked closed form
+    //     n + γ·acc[n] + γ²·mu[n] AND == the in-circuit tbl_a+γ·tbl_b+γ²·tbl_c.
+    uint32_t mismatches = 0;
+    for (uint32_t r = 0; r < N; ++r) {
+        const uint32_t n = (r < 16) ? r : 0;
+        const F legacy =
+            T::Add(T::FromU64(n),
+                   T::Add(T::Mul(b.gamma, T::FromU64(tm.acc[n])),
+                          T::Mul(g2, T::FromSigned(tm.mu[n]))));
+        const F bound =
+            T::Add(b.columns[aq::kColTblA][r],
+                   T::Add(T::Mul(b.gamma, b.columns[aq::kColTblB][r]),
+                          T::Mul(g2, b.columns[aq::kColTblC][r])));
+        if (!T::Eq(b.columns[aq::kColTfp][r], legacy)) ++mismatches;
+        if (!T::Eq(b.columns[aq::kColTfp][r], bound)) ++mismatches;
+    }
+    BOOST_CHECK_EQUAL(mismatches, 0U);
+
+    // Honest proof still verifies end-to-end (φ/ψ/S unchanged).
+    const aq::AirQuotientProveResult<F> honest =
+        aq::AirQuotientProve<F>(b.cs, b.columns, seed);
+    BOOST_REQUIRE_MESSAGE(honest.ok, honest.note);
+    BOOST_CHECK(honest.division_exact);
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        aq::RcSamplerAirVerify<F>(honest.proof, seed, w.scale_e, tm, &why), why);
+
+    // (2) Single-row grind: bump the committed fingerprint f on one row while
+    //     the pinned table columns stay canonical. logup.tfp.bind rejects it by
+    //     algebra — a grind the γ-baked preprocessed column could not catch
+    //     at the relation level.
+    auto tampered = b.columns;
+    tampered[aq::kColTfp][1] = T::Add(tampered[aq::kColTfp][1], T::One());
+    aq::AirProveOptions strict;
+    const aq::AirQuotientProveResult<F> strict_pr =
+        aq::AirQuotientProve<F>(b.cs, tampered, seed, strict);
+    BOOST_CHECK(!strict_pr.division_exact);
+    aq::AirProveOptions forced_opt;
+    forced_opt.force_commit_on_inexact = true;
+    const aq::AirQuotientProveResult<F> forced =
+        aq::AirQuotientProve<F>(b.cs, tampered, seed, forced_opt);
+    BOOST_REQUIRE_MESSAGE(forced.ok, forced.note);
+    BOOST_CHECK(!forced.division_exact);
+    BOOST_CHECK(!aq::RcSamplerAirVerify<F>(forced.proof, seed, w.scale_e, tm, &why));
+}
+}  // namespace
+
+BOOST_AUTO_TEST_CASE(online_fingerprint_parity_and_tamper_fp2)
+{
+    OnlineFingerprintParityAndTamper<gf::Fp2>(9);
+}
+
+BOOST_AUTO_TEST_CASE(online_fingerprint_parity_and_tamper_fp3)
+{
+    OnlineFingerprintParityAndTamper<gf::Fp3>(10);
 }
 
 // Tampering a supplemental next-row opening is caught by its Merkle path.
@@ -307,6 +470,73 @@ BOOST_AUTO_TEST_CASE(roundtrip_and_tamper_fp3)
     BOOST_CHECK_MESSAGE(
         aq::RcSamplerAirVerify<gf::Fp3>(pr.proof, seed, w.scale_e, tm, &why), why);
 
+    aq::AirProveOptions hinted_options;
+    const uint32_t n_coeffs = matmul::v4::rc::FriNextPow2(
+        std::max(b.cs.n_rows, b.cs.QuotientLen()));
+    hinted_options.checked_trace_root_hints.resize(
+        b.cs.n_columns);
+    for (uint32_t column = 0;
+         column < b.cs.n_columns; ++column) {
+        if ((column & 1U) == 0) {
+            hinted_options.checked_trace_root_hints[column] =
+                aq::AirCommittedValuesRoot<gf::Fp3>(
+                    b.columns[column], n_coeffs);
+        }
+    }
+    const auto hinted =
+        aq::AirQuotientProve<gf::Fp3>(
+            b.cs, b.columns, seed, hinted_options);
+    BOOST_REQUIRE_MESSAGE(hinted.ok, hinted.note);
+    std::vector<unsigned char> ordinary_bytes;
+    std::vector<unsigned char> hinted_bytes;
+    BOOST_REQUIRE(
+        SerializeAirFp3ProofForTest(
+            pr.proof, ordinary_bytes));
+    BOOST_REQUIRE(
+        SerializeAirFp3ProofForTest(
+            hinted.proof, hinted_bytes));
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        ordinary_bytes.begin(), ordinary_bytes.end(),
+        hinted_bytes.begin(), hinted_bytes.end());
+
+    using StreamingBackend =
+        aq::AirFriBackendFp3StreamingColumns;
+    const auto streamed =
+        aq::AirQuotientProve<gf::Fp3, StreamingBackend>(
+            b.cs, b.columns, seed, hinted_options);
+    BOOST_REQUIRE_MESSAGE(streamed.ok, streamed.note);
+    std::vector<unsigned char> streamed_bytes;
+    BOOST_REQUIRE(
+        SerializeAirFp3ProofForTest(
+            streamed.proof, streamed_bytes));
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        ordinary_bytes.begin(), ordinary_bytes.end(),
+        streamed_bytes.begin(), streamed_bytes.end());
+    BOOST_CHECK_MESSAGE(
+        (aq::AirQuotientVerify<gf::Fp3, StreamingBackend>(
+            b.cs, streamed.proof, seed, &why)),
+        why);
+
+    auto wrong_hint_options = hinted_options;
+    wrong_hint_options.checked_trace_root_hints[0] =
+        MakeSeed(0xfe);
+    const auto wrong_hint =
+        aq::AirQuotientProve<gf::Fp3>(
+            b.cs, b.columns, seed, wrong_hint_options);
+    BOOST_CHECK(!wrong_hint.ok);
+    BOOST_CHECK_EQUAL(
+        wrong_hint.note,
+        "internal: trace root mismatch vs FriBatchColumnRoot");
+    auto wrong_size_options = hinted_options;
+    wrong_size_options.checked_trace_root_hints.pop_back();
+    const auto wrong_size =
+        aq::AirQuotientProve<gf::Fp3>(
+            b.cs, b.columns, seed, wrong_size_options);
+    BOOST_CHECK(!wrong_size.ok);
+    BOOST_CHECK_EQUAL(
+        wrong_size.note,
+        "checked trace-root hint count mismatch");
+
     auto cols = b.columns;
     cols[aq::kColOut][7] = gf::Add(cols[aq::kColOut][7], gf::Fp3::One());
     aq::AirProveOptions opt;
@@ -316,6 +546,672 @@ BOOST_AUTO_TEST_CASE(roundtrip_and_tamper_fp3)
     BOOST_REQUIRE_MESSAGE(forced.ok, forced.note);
     BOOST_CHECK(!forced.division_exact);
     BOOST_CHECK(!aq::RcSamplerAirVerify<gf::Fp3>(forced.proof, seed, w.scale_e, tm, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    selector_sparse_row_tiles_and_streamed_fri_are_transcript_identical)
+{
+    constexpr uint32_t N = 8;
+    constexpr uint32_t W = 3;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    cs.n_rows = N;
+    cs.n_columns = W;
+    cs.preprocessed_pin_ood = true;
+    std::vector<std::vector<gf::Fp3>> columns(
+        W, std::vector<gf::Fp3>(
+               N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[0][row] =
+            gf::Fp3::FromFp(gf::FromU64(1));
+        columns[1][row] =
+            gf::Fp3::FromFp(gf::FromU64(1));
+        if (row < 4) {
+            columns[2][row] = gf::Fp3::One();
+        }
+    }
+    cs.preprocessed.emplace_back(2, columns[2]);
+
+    aq::AirConstraint<gf::Fp3> sparse;
+    sparse.name = "streaming.audit.sparse";
+    sparse.kind = aq::AirKind::kEverywhere;
+    sparse.alg_degree = 2;
+    sparse.eval =
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>&) {
+            return gf::Mul(
+                cur[2], gf::Sub(cur[0], cur[1]));
+        };
+    cs.constraints.push_back(std::move(sparse));
+    aq::AirConstraint<gf::Fp3> transition;
+    transition.name = "streaming.audit.transition";
+    transition.kind = aq::AirKind::kTransition;
+    transition.alg_degree = 1;
+    transition.eval =
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>& next) {
+            return gf::Sub(next[0], cur[0]);
+        };
+    cs.constraints.push_back(std::move(transition));
+    aq::AirConstraint<gf::Fp3> first;
+    first.name = "streaming.audit.first";
+    first.kind = aq::AirKind::kFirstRow;
+    first.alg_degree = 1;
+    first.eval =
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>&) {
+            return gf::Sub(cur[0], gf::Fp3::One());
+        };
+    cs.constraints.push_back(std::move(first));
+
+    const uint256 seed = MakeSeed(0x7a);
+    const auto tiled =
+        aq::AuditAirQuotientRowTilesFp3(
+            cs, columns, seed, 3);
+    BOOST_REQUIRE_MESSAGE(tiled.valid, tiled.note);
+    BOOST_CHECK(tiled.callback_schedule_executed);
+    BOOST_CHECK(tiled.composition_values_identical);
+    BOOST_CHECK(tiled.quotient_coefficients_identical);
+    BOOST_CHECK_GT(tiled.tiles_visited, 1U);
+    const auto memory_spill =
+        aq::AuditAirQuotientSpillFp3(
+            cs, columns, seed, 3,
+            aq::AirExternalStoreBackend::kMemory);
+    BOOST_REQUIRE_MESSAGE(
+        memory_spill.valid, memory_spill.note);
+    BOOST_CHECK(memory_spill.all_lde_columns_spilled);
+    BOOST_CHECK(memory_spill.all_tiles_reloaded);
+    BOOST_CHECK(memory_spill.byte_canonical_roundtrip);
+    BOOST_CHECK_GT(
+        memory_spill.store_resident_cells, 0U);
+    BOOST_CHECK_EQUAL(
+        memory_spill.store_resident_cells, 48U);
+    BOOST_CHECK_EQUAL(
+        memory_spill.store_peak_live_cells, 16U);
+    const auto file_spill =
+        aq::AuditAirQuotientSpillFp3(
+            cs, columns, seed, 3,
+            aq::AirExternalStoreBackend::
+                kAnonymousTempFile);
+    BOOST_REQUIRE_MESSAGE(
+        file_spill.valid, file_spill.note);
+    BOOST_CHECK(file_spill.all_lde_columns_spilled);
+    BOOST_CHECK(file_spill.all_tiles_reloaded);
+    BOOST_CHECK(file_spill.byte_canonical_roundtrip);
+    BOOST_CHECK_EQUAL(
+        file_spill.store_resident_cells, 0U);
+    BOOST_CHECK_EQUAL(
+        memory_spill.quotient.composition_rows,
+        file_spill.quotient.composition_rows);
+    BOOST_CHECK_EQUAL(
+        memory_spill.quotient.tiles_visited,
+        file_spill.quotient.tiles_visited);
+    BOOST_CHECK_EQUAL(
+        memory_spill.store_peak_live_cells,
+        file_spill.store_peak_live_cells);
+
+    using Dense =
+        aq::AirFriBackendAlgDual<gf::Fp3>;
+    using StreamAudit =
+        aq::AirFriBackendAlgDualStreamingAudit;
+    const auto dense =
+        aq::AirQuotientProve<gf::Fp3, Dense>(
+            cs, columns, seed);
+    BOOST_REQUIRE_MESSAGE(dense.ok, dense.note);
+    const auto streamed =
+        aq::AirQuotientProve<
+            gf::Fp3, StreamAudit>(
+            cs, columns, seed);
+    BOOST_REQUIRE_MESSAGE(streamed.ok, streamed.note);
+
+    std::vector<unsigned char> dense_bytes;
+    std::vector<unsigned char> streamed_bytes;
+    const size_t dense_size =
+        matmul::v4::rc::SerializeFri3AlgDualBatchProof(
+        dense.proof.batch.repeated, dense_bytes);
+    const size_t streamed_size =
+        matmul::v4::rc::SerializeFri3AlgDualBatchProof(
+        streamed.proof.batch.repeated,
+        streamed_bytes);
+    BOOST_REQUIRE_GT(dense_size, 0U);
+    BOOST_CHECK_EQUAL(dense_size, streamed_size);
+    BOOST_CHECK(dense_bytes == streamed_bytes);
+    BOOST_CHECK_EQUAL(
+        dense.proof.next_openings.size(),
+        streamed.proof.next_openings.size());
+    for (size_t query = 0;
+         query < dense.proof.next_openings.size();
+         ++query) {
+        BOOST_REQUIRE_EQUAL(
+            dense.proof.next_openings[query].size(),
+            streamed.proof.next_openings[query].size());
+        for (size_t opening = 0;
+             opening <
+                 dense.proof.next_openings[query].size();
+             ++opening) {
+            const auto& a =
+                dense.proof.next_openings[query][opening];
+            const auto& b =
+                streamed.proof.next_openings[query][opening];
+            BOOST_CHECK_EQUAL(a.index, b.index);
+            BOOST_REQUIRE_EQUAL(
+                a.values.size(), b.values.size());
+            for (size_t value = 0;
+                 value < a.values.size(); ++value) {
+                BOOST_CHECK(
+                    gf::Eq(
+                        a.values[value],
+                        b.values[value]));
+            }
+            BOOST_CHECK(a.siblings == b.siblings);
+        }
+    }
+    std::string why;
+    const bool verified =
+        aq::AirQuotientVerify<
+            gf::Fp3, StreamAudit>(
+            cs, streamed.proof, seed, &why);
+    BOOST_CHECK_MESSAGE(
+        verified,
+        why);
+}
+
+BOOST_AUTO_TEST_CASE(
+    sampled_two_epoch_cross_opening_is_explicitly_rejected)
+{
+    constexpr uint32_t N = 8;
+    const uint256 seed = MakeSeed(93);
+    std::vector<std::vector<gf::Fp3>> columns(
+        3, std::vector<gf::Fp3>(
+               N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[0][row] =
+            gf::Fp3::FromFp(gf::FromU64(
+                3 + 5 * row + row * row));
+        columns[1][row] =
+            gf::Fp3::FromFp(gf::FromU64(
+                11 + 7 * row));
+    }
+    const auto make_cs = [](const gf::Fp3& challenge) {
+        aq::AirConstraintSystem<gf::Fp3> cs;
+        cs.n_rows = N;
+        cs.n_columns = 3;
+        aq::AirConstraint<gf::Fp3> relation;
+        relation.name =
+            "test.two_epoch.challenge_relation";
+        relation.kind = aq::AirKind::kEverywhere;
+        relation.alg_degree = 1;
+        relation.eval = [challenge](
+            const std::vector<gf::Fp3>& cur,
+            const std::vector<gf::Fp3>&) {
+            return gf::Sub(
+                cur[2],
+                gf::Add(
+                    cur[0],
+                    gf::Mul(challenge, cur[1])));
+        };
+        cs.constraints.push_back(
+            std::move(relation));
+        return cs;
+    };
+    const std::vector<uint32_t> base_indices{0, 1};
+    const auto shape_cs =
+        make_cs(gf::Fp3::Zero());
+    std::string why;
+    const auto r0_session =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            shape_cs, columns, base_indices);
+    BOOST_REQUIRE_MESSAGE(
+        r0_session.valid, r0_session.note);
+    const uint256 r0 =
+        r0_session.base_row_commitment;
+    BOOST_REQUIRE_MESSAGE(!r0.IsNull(), why);
+    const uint256 challenge_digest =
+        aq::AirChallengeDigest(
+            seed, "test_two_epoch_challenge",
+            {r0}, {N, 2});
+    const gf::Fp3 challenge =
+        gf::FromChallengeBytes3(
+            challenge_digest.data());
+    const auto cs = make_cs(challenge);
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[2][row] =
+            gf::Add(
+                columns[0][row],
+                gf::Mul(
+                    challenge, columns[1][row]));
+    }
+
+    const auto proved =
+        aq::AirQuotientProveRowsTwoEpoch(
+            cs, columns, base_indices, seed, {},
+            &r0_session);
+    BOOST_CHECK(!proved.ok);
+    const auto& receipt = proved.receipt;
+    BOOST_CHECK_EQUAL(receipt.trace_rows, N);
+    BOOST_CHECK(receipt.base_row_commitment == r0);
+    BOOST_CHECK(
+        receipt.base_commitment_bound_in_fs);
+    BOOST_CHECK(receipt.same_query_cross_openings);
+    BOOST_CHECK(
+        !receipt.low_degree_proximity_accounted);
+    BOOST_CHECK(!receipt.valid);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsTwoEpoch(
+            cs, receipt, seed, &why));
+    BOOST_CHECK_NE(
+        why.find("global_oracle_equality_unproved"),
+        std::string::npos);
+
+    auto root_attack = receipt;
+    root_attack.base_row_commitment = MakeSeed(94);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsTwoEpoch(
+            cs, root_attack, seed, &why));
+
+    auto value_attack = receipt;
+    BOOST_REQUIRE(
+        !value_attack.base_openings.empty());
+    BOOST_REQUIRE(
+        !value_attack.base_openings[0]
+             .values.empty());
+    value_attack.base_openings[0].values[0] =
+        gf::Add(
+            value_attack.base_openings[0]
+                .values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsTwoEpoch(
+            cs, value_attack, seed, &why));
+
+    auto index_attack = receipt;
+    std::swap(
+        index_attack.base_column_indices[0],
+        index_attack.base_column_indices[1]);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsTwoEpoch(
+            cs, index_attack, seed, &why));
+
+    const auto wrong_cs =
+        make_cs(
+            gf::Add(
+                challenge, gf::Fp3::One()));
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsTwoEpoch(
+            wrong_cs, receipt, seed, &why));
+
+    auto accounting_attack = receipt;
+    accounting_attack.low_degree_proximity_accounted =
+        true;
+    accounting_attack.valid = true;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsTwoEpoch(
+            cs, accounting_attack, seed, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    split_rap_multi_row_closes_current_next_and_air_lambda)
+{
+    constexpr uint32_t N = 8;
+    const uint256 seed = MakeSeed(96);
+    std::vector<std::vector<gf::Fp3>> columns(
+        4, std::vector<gf::Fp3>(
+               N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[0][row] =
+            gf::Fp3::FromFp(
+                gf::FromU64(
+                    3 + 2 * row + row * row));
+        columns[1][row] =
+            gf::Fp3::FromFp(
+                gf::FromU64(
+                    7 + 5 * row));
+    }
+    const auto make_cs =
+        [](const gf::Fp3& relation_challenge) {
+            aq::AirConstraintSystem<gf::Fp3> cs;
+            cs.n_rows = N;
+            cs.n_columns = 4;
+            aq::AirConstraint<gf::Fp3> relation;
+            relation.name =
+                "test.split_rap.challenge_relation";
+            relation.kind =
+                aq::AirKind::kEverywhere;
+            relation.alg_degree = 1;
+            relation.eval =
+                [relation_challenge](
+                    const std::vector<gf::Fp3>& cur,
+                    const std::vector<gf::Fp3>&) {
+                    return gf::Sub(
+                        cur[2],
+                        gf::Add(
+                            cur[0],
+                            gf::Mul(
+                                relation_challenge,
+                                cur[1])));
+                };
+            cs.constraints.push_back(
+                std::move(relation));
+            aq::AirConstraint<gf::Fp3> transition;
+            transition.name =
+                "test.split_rap.next_relation";
+            transition.kind =
+                aq::AirKind::kTransition;
+            transition.alg_degree = 1;
+            transition.eval =
+                [](const std::vector<gf::Fp3>& cur,
+                   const std::vector<gf::Fp3>& next) {
+                    return gf::Sub(
+                        next[3],
+                        gf::Add(cur[3], cur[2]));
+                };
+            cs.constraints.push_back(
+                std::move(transition));
+            return cs;
+        };
+    const std::vector<uint32_t> base_indices{
+        0, 1};
+    const auto shape_cs =
+        make_cs(gf::Fp3::Zero());
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            shape_cs, columns, base_indices);
+    BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+    const uint256 relation_digest =
+        aq::AirChallengeDigest(
+            seed,
+            "test_split_rap_relation_challenge",
+            {r0.base_row_commitment},
+            {N, 4});
+    const gf::Fp3 relation_challenge =
+        gf::FromChallengeBytes3(
+            relation_digest.data());
+    auto cs = make_cs(relation_challenge);
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[2][row] =
+            gf::Add(
+                columns[0][row],
+                gf::Mul(
+                    relation_challenge,
+                    columns[1][row]));
+        if (row + 1 < N) {
+            columns[3][row + 1] =
+                gf::Add(
+                    columns[3][row],
+                    columns[2][row]);
+        }
+    }
+    cs.preprocessed.emplace_back(
+        1, columns[1]);
+    cs.preprocessed_pin_ood = true;
+    cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns = base_indices,
+        .root = r0.base_row_commitment,
+    });
+
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, base_indices,
+            seed, {}, &r0);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok, proved.note);
+    BOOST_CHECK(proved.division_exact);
+    BOOST_CHECK_EQUAL(
+        proved.proof.batch.version,
+        matmul::v4::rc::
+            kRCFri3AlgMultiRowBatchProofVersion);
+    BOOST_CHECK_EQUAL(
+        proved.proof.batch.groups.size(), 3U);
+    BOOST_CHECK_EQUAL(
+        proved.proof.batch.groups[0]
+            .column_count,
+        2U);
+    BOOST_CHECK_EQUAL(
+        proved.proof.batch.groups[1]
+            .column_count,
+        2U);
+    BOOST_CHECK_EQUAL(
+        proved.proof.batch.groups[2]
+            .column_count,
+        1U);
+    BOOST_CHECK_EQUAL(
+        proved.proof.next_trace_group_rows
+            .size(),
+        matmul::v4::rc::
+            kRCFri3AlgNumQueries);
+    BOOST_REQUIRE_EQUAL(
+        proved.group_row_tree_caches.size(),
+        3U);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            cs, proved.proof, base_indices,
+            seed, &why),
+        why);
+    auto wrong_group_root_cs = cs;
+    wrong_group_root_cs
+        .preprocessed_row_group_roots[0]
+        .root.begin()[0] ^= 1U;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            wrong_group_root_cs, proved.proof,
+            base_indices, seed, &why));
+    auto wrong_group_order_cs = cs;
+    std::swap(
+        wrong_group_order_cs
+            .preprocessed_row_group_roots[0]
+            .ordered_columns[0],
+        wrong_group_order_cs
+            .preprocessed_row_group_roots[0]
+            .ordered_columns[1]);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            wrong_group_order_cs, proved.proof,
+            base_indices, seed, &why));
+    auto wrong_group_role_cs = cs;
+    wrong_group_role_cs
+        .preprocessed_row_group_roots[0]
+        .role =
+        aq::AirPreprocessedRowGroupRole::kRdep;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            wrong_group_role_cs, proved.proof,
+            base_indices, seed, &why));
+
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE_GT(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            proved.proof, encoded),
+        0U);
+    BOOST_CHECK_LE(
+        encoded.size(),
+        aq::kAirQuotientSplitRapRowsMaxProofBytesHard);
+    const auto decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(
+            encoded);
+    BOOST_REQUIRE(decoded.has_value());
+    std::vector<unsigned char> encoded_again;
+    BOOST_CHECK_EQUAL(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            *decoded, encoded_again),
+        encoded.size());
+    BOOST_CHECK(encoded_again == encoded);
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            cs, *decoded, base_indices,
+            seed, &why),
+        why);
+
+    auto malformed_codec = proved.proof;
+    std::swap(
+        malformed_codec.base_column_indices[0],
+        malformed_codec.base_column_indices[1]);
+    BOOST_CHECK_EQUAL(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            malformed_codec, encoded_again),
+        0U);
+    malformed_codec = proved.proof;
+    malformed_codec.next_trace_group_rows
+        .pop_back();
+    BOOST_CHECK_EQUAL(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            malformed_codec, encoded_again),
+        0U);
+    malformed_codec = proved.proof;
+    malformed_codec
+        .next_trace_group_rows[0][0]
+        .siblings.pop_back();
+    BOOST_CHECK_EQUAL(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            malformed_codec, encoded_again),
+        0U);
+
+    const size_t air_lambda_offset =
+        16 + base_indices.size() * 4;
+    const size_t batch_size_offset =
+        air_lambda_offset + 24;
+    const size_t next_count_offset =
+        batch_size_offset + 4 +
+        ([&] {
+            std::vector<unsigned char> nested;
+            return rc::
+                SerializeFri3AlgMultiRowBatchProof(
+                    proved.proof.batch,
+                    nested);
+        })();
+    auto bad_codec_wire = encoded;
+    std::fill(
+        bad_codec_wire.begin() +
+            air_lambda_offset,
+        bad_codec_wire.begin() +
+            air_lambda_offset + 8,
+        0xff);
+    BOOST_CHECK(
+        !aq::DeserializeAirQuotientSplitRapRowsProof(
+             bad_codec_wire)
+             .has_value());
+    bad_codec_wire = encoded;
+    PutLE32(
+        bad_codec_wire, batch_size_offset,
+        static_cast<uint32_t>(
+            rc::
+                kRCFri3AlgMultiRowMaxProofBytesHard +
+            1));
+    BOOST_CHECK(
+        !aq::DeserializeAirQuotientSplitRapRowsProof(
+             bad_codec_wire)
+             .has_value());
+    bad_codec_wire = encoded;
+    PutLE32(
+        bad_codec_wire, next_count_offset,
+        rc::kRCFri3AlgNumQueries - 1);
+    BOOST_CHECK(
+        !aq::DeserializeAirQuotientSplitRapRowsProof(
+             bad_codec_wire)
+             .has_value());
+    bad_codec_wire = encoded;
+    bad_codec_wire.push_back(0);
+    BOOST_CHECK(
+        !aq::DeserializeAirQuotientSplitRapRowsProof(
+             bad_codec_wire)
+             .has_value());
+    BOOST_CHECK(
+        !aq::DeserializeAirQuotientSplitRapRowsProof(
+             std::vector<unsigned char>(
+                 aq::
+                     kAirQuotientSplitRapRowsMaxProofBytesHard +
+                     1,
+                 0))
+             .has_value());
+
+    auto air_fri_lambda_swap = proved.proof;
+    air_fri_lambda_swap.air_constraint_lambda =
+        air_fri_lambda_swap.batch.lambda;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, air_fri_lambda_swap,
+            base_indices, seed, &why));
+
+    auto wrong_group_width = proved.proof;
+    ++wrong_group_width.batch.groups[0]
+          .column_count;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, wrong_group_width,
+            base_indices, seed, &why));
+
+    auto wrong_rdep_root = proved.proof;
+    wrong_rdep_root.batch.groups[1]
+        .row_commit.root[0] =
+        gf::Add(
+            wrong_rdep_root.batch.groups[1]
+                .row_commit.root[0],
+            1);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, wrong_rdep_root,
+            base_indices, seed, &why));
+
+    auto wrong_next = proved.proof;
+    wrong_next.next_trace_group_rows[0][1]
+        .values[0] =
+        gf::Add(
+            wrong_next
+                .next_trace_group_rows[0][1]
+                .values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, wrong_next,
+            base_indices, seed, &why));
+
+    auto wrong_indices = proved.proof;
+    std::swap(
+        wrong_indices.base_column_indices[0],
+        wrong_indices.base_column_indices[1]);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, wrong_indices,
+            base_indices, seed, &why));
+
+    const auto wrong_cs =
+        make_cs(
+            gf::Add(
+                relation_challenge,
+                gf::Fp3::One()));
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            wrong_cs, proved.proof,
+            base_indices, seed, &why));
+
+    // A changed Rdep can recompute every later root/transcript and still
+    // emit a proximity proof, but cannot satisfy the immutable relation.
+    auto changed_columns = columns;
+    changed_columns[2][0] =
+        gf::Add(
+            changed_columns[2][0],
+            gf::Fp3::One());
+    aq::AirProveOptions forced;
+    forced.force_commit_on_inexact = true;
+    const auto self_consistent_changed_rdep =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, changed_columns,
+            base_indices, seed, forced,
+            &r0);
+    BOOST_REQUIRE_MESSAGE(
+        self_consistent_changed_rdep.ok,
+        self_consistent_changed_rdep.note);
+    BOOST_CHECK(
+        !self_consistent_changed_rdep
+             .division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs,
+            self_consistent_changed_rdep.proof,
+            base_indices, seed, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

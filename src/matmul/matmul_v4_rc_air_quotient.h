@@ -206,6 +206,17 @@ struct AirFriBackend;
 template <typename Backend>
 inline constexpr bool AirBackendIsRowWise = requires { requires Backend::kRowWiseLayout; };
 
+/** Opt-in for row-wise backends whose BatchCommit intentionally returns no
+ * dense column_lde and instead supplies selected openings on a second pass. */
+template <typename Backend>
+inline constexpr bool AirBackendStreamsRowOpenings = false;
+
+/** true iff a per-column backend emits query openings without retaining the
+ * complete dense column-LDE matrix returned by BatchCommit. */
+template <typename Backend>
+inline constexpr bool AirBackendStreamsColumnOpenings =
+    requires { requires Backend::kStreamsColumnOpenings; };
+
 template <>
 struct AirFriBackend<gkr_field::Fp2> {
     using BatchProof = FriBatchProof;
@@ -266,6 +277,44 @@ struct AirFriBackend<gkr_field::Fp3> {
     static uint32_t NumQueries() { return kRCFriBatchNumQueries; }
 };
 
+/**
+ * Same SHA256d-Merkle Fri3BatchProof format as AirFriBackend<Fp3>, with
+ * two-pass per-column LDE/tree recomputation and no retained W x LDE matrix.
+ * Supplemental next-row paths are retained during pass two.
+ */
+struct AirFriBackendFp3StreamingColumns
+    : public AirFriBackend<gkr_field::Fp3> {
+    static constexpr bool kStreamsColumnOpenings = true;
+
+    static BatchCommitResult BatchCommit(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        const uint256& fs_seed)
+    {
+        return Fri3BatchCommitStreamingColumns(cols, fs_seed);
+    }
+
+    static BatchCommitResult BatchCommitWithStep(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        const uint256& fs_seed,
+        uint32_t supplemental_index_step)
+    {
+        return Fri3BatchCommitStreamingColumnsWithStep(
+            cols, fs_seed, supplemental_index_step);
+    }
+
+    static bool OpenColumns(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        uint32_t n_coeffs,
+        const std::vector<uint32_t>& indices,
+        const std::vector<uint256>& expected_roots,
+        std::vector<std::vector<MerklePath>>& out,
+        std::string* why)
+    {
+        return Fri3BatchOpenColumnsStreaming(
+            cols, n_coeffs, indices, expected_roots, out, why);
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Constraint system description.
 // ---------------------------------------------------------------------------
@@ -280,6 +329,32 @@ enum class AirKind : uint8_t {
     kTransition,      // vanish on rows 0..N−2 (auto-multiplied by (X − h_last))
     kFirstRow,        // vanish on row 0 (auto-multiplied by Z_H/(X − 1))
     kLastRow,         // vanish on row N−1 (auto-multiplied by Z_H/(X − h_last))
+};
+
+/**
+ * Exact row-vector root pin for the Split-RAP MultiRow-V2 backend.
+ *
+ * A row-wise commitment has no independently meaningful per-column root.
+ * Therefore a caller that needs proof-owned preprocessing must pin the
+ * complete ordered R0 or Rdep row group, including its exact column list.
+ * The Split-RAP verifier compares this root to the committed group root; that
+ * root is already absorbed by both the AIR batching challenge and final FRI
+ * seed.  This is deliberately separate from `preprocessed_roots`, whose
+ * entries are per-column roots and remain unsupported for row-wise proofs.
+ */
+enum class AirPreprocessedRowGroupRole : uint8_t {
+    kR0 = 0,
+    kRdep = 1,
+};
+
+struct AirPreprocessedRowGroupRoot {
+    uint16_t version{1};
+    AirPreprocessedRowGroupRole role{
+        AirPreprocessedRowGroupRole::kR0};
+    std::vector<uint32_t> ordered_columns;
+    uint256 root{};
+
+    bool operator==(const AirPreprocessedRowGroupRoot&) const = default;
 };
 
 /**
@@ -327,6 +402,13 @@ struct AirConstraintSystem {
      *  it. A column may appear in both lists (values pin AND root equality)
      *  when the caller needs the values bound to proof-public inputs too. */
     std::vector<std::pair<uint32_t, uint256>> preprocessed_roots;
+    /**
+     * Split-RAP-only root equality for complete ordered row groups.  Legacy
+     * per-column and row-wise verifiers ignore no entries: unsupported use is
+     * rejected fail-closed.
+     */
+    std::vector<AirPreprocessedRowGroupRoot>
+        preprocessed_row_group_roots;
 
     [[nodiscard]] uint64_t ComposedDegreeBound(const AirConstraint<F>& c) const
     {
@@ -402,7 +484,106 @@ struct AirProveOptions {
      *  declared QuotientLen() (adversarial/self-test use — the verifier's
      *  structural degree-bound check must reject the result). */
     uint32_t quotient_len_override{0};
+    /**
+     * Optional per-column trace roots already computed by an earlier
+     * commit-then-challenge phase. The vector is either empty or exactly
+     * `cs.n_columns` long; a null entry is recomputed normally.
+     *
+     * These are checked hints, not trusted inputs: the batched FRI commit
+     * still recomputes every column root and AirQuotientProve rejects any
+     * mismatch before returning a proof. Per-column backends only.
+     */
+    std::vector<uint256> checked_trace_root_hints;
 };
+
+struct AirQuotientRowTileAudit {
+    uint32_t trace_rows{0};
+    uint32_t trace_columns{0};
+    uint32_t composition_rows{0};
+    uint32_t tile_rows{0};
+    uint32_t tiles_visited{0};
+    bool callback_schedule_executed{false};
+    bool composition_values_identical{false};
+    bool quotient_coefficients_identical{false};
+    bool valid{false};
+    std::string note;
+};
+
+enum class AirExternalStoreBackend : uint8_t {
+    kMemory = 0,
+    kAnonymousTempFile = 1,
+};
+
+class AirFp3ExternalColumnStore {
+public:
+    AirFp3ExternalColumnStore(
+        AirExternalStoreBackend backend,
+        uint32_t columns,
+        uint32_t rows);
+    ~AirFp3ExternalColumnStore();
+
+    AirFp3ExternalColumnStore(
+        const AirFp3ExternalColumnStore&) = delete;
+    AirFp3ExternalColumnStore& operator=(
+        const AirFp3ExternalColumnStore&) = delete;
+
+    [[nodiscard]] bool IsOpen() const;
+    [[nodiscard]] bool Write(
+        uint32_t column,
+        uint32_t offset,
+        const std::vector<gkr_field::Fp3>& values,
+        std::string* why = nullptr);
+    [[nodiscard]] bool Read(
+        uint32_t column,
+        uint32_t offset,
+        uint32_t count,
+        std::vector<gkr_field::Fp3>& out,
+        std::string* why = nullptr);
+    [[nodiscard]] uint64_t PeakLiveCells() const;
+    [[nodiscard]] uint64_t ResidentCells() const;
+
+private:
+    AirExternalStoreBackend backend_;
+    uint32_t columns_;
+    uint32_t rows_;
+    std::vector<std::vector<gkr_field::Fp3>> memory_;
+    void* file_{nullptr};
+    uint64_t peak_live_cells_{0};
+};
+
+struct AirQuotientSpillAudit {
+    AirQuotientRowTileAudit quotient;
+    AirExternalStoreBackend backend{
+        AirExternalStoreBackend::kMemory};
+    uint64_t store_peak_live_cells{0};
+    uint64_t store_resident_cells{0};
+    bool all_lde_columns_spilled{false};
+    bool all_tiles_reloaded{false};
+    bool byte_canonical_roundtrip{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Bounded Fp3 audit for the quotient row-tile seam.  The callback schedule
+ * evaluates the same composition rows, in fixed-size contiguous tiles, and
+ * compares both the composition evaluations and interpolated coefficients to
+ * the dense schedule.  It does not commit a production proof.
+ */
+[[nodiscard]] AirQuotientRowTileAudit
+AuditAirQuotientRowTilesFp3(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const uint256& fs_seed,
+    uint32_t tile_rows);
+
+[[nodiscard]] AirQuotientSpillAudit
+AuditAirQuotientSpillFp3(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const uint256& fs_seed,
+    uint32_t tile_rows,
+    AirExternalStoreBackend backend);
 
 template <typename F, typename Backend = AirFriBackend<F>>
 struct AirQuotientProveResult {
@@ -479,7 +660,10 @@ template <typename F, typename Backend = AirFriBackend<F>>
 //     act, kappa, kb0..3, h, hb0..3, mixed, mb0..3, acc, mu, pos, inv_live,
 //     u_mix, gold_q, gold_v, v_low28, vb0..3, e0, e1, mu_out, out
 //   LogUp columns 32..36 (built AFTER γ, α are fixed):
-//     phi, t_fp (PREPROCESSED — canonical T_M fingerprints), m, psi, S
+//     phi, t_fp (COMMITTED fingerprint f, bound to the preprocessed table
+//            columns below by the in-circuit logup.tfp.bind identity), m, psi, S
+//   Preprocessed table columns 37..39 (CHALLENGE-INDEPENDENT canonical T_M
+//     entries, verifier-regenerated): tbl_a=n, tbl_b=acc[n], tbl_c=mu[n]
 // Candidate rows are the real TileWitness cands; padding rows carry the
 // neutral assignment (mixed = 1, a rejected E2M1 code, acc = 0, pos = 32,
 // act = 0) which satisfies every rule. The 16-bit-limb range obligations of
@@ -517,11 +701,20 @@ enum RcSamplerCol : uint32_t {
     kColPad0,          // reserved zero column (keeps the base-column count round)
     kRcSamplerBaseCols,          // = 32
     kColPhi = kRcSamplerBaseCols,
-    kColTfp,
+    kColTfp,           // COMMITTED phase-2 fingerprint f, bound by logup.tfp.bind
     kColM,
     kColPsi,
     kColS,
-    kRcSamplerNumCols            // = 37
+    // Challenge-INDEPENDENT preprocessed table-entry columns (n, acc[n], mu[n]).
+    // The verifier regenerates their roots; f = kColTfp is forced to
+    // tbl_a + gamma*tbl_b + gamma^2*tbl_c by the in-circuit logup.tfp.bind
+    // identity, so the fingerprint carries no post-commitment challenge in any
+    // PREPROCESSED column (RAP two-phase order restored; enables challenge-
+    // independent bytecode migration of the CoupledExtract transport lane).
+    kColTblA,
+    kColTblB,
+    kColTblC,
+    kRcSamplerNumCols            // = 40
 };
 
 /** The constraint set for row count `n_rows`, LogUp challenges (γ, α), the

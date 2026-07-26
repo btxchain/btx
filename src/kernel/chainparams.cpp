@@ -328,10 +328,9 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     }
 
     // ENC_RC / Resident Curriculum (doc/btx-matmul-v4.4-resident-curriculum-unified-proposal).
-    // DATACENTER-PROFILE AGGRESSIVE ACTIVATION (owner-authorized, design §5/§6):
-    // nMatMulRCProfile defaults to 2 (datacenter) network-wide; under it the
-    // Freivalds sampled verifier is the consensus authority (deterrence-based,
-    // ~0.27% residual — NOT audited). The three coupled pieces (profile 2 +
+    // DATACENTER-PROFILE SHAPE (design §5/§6): nMatMulRCProfile defaults to 2
+    // network-wide. Its Freivalds sampled carrier is optional relay/precheck
+    // state, never consensus authority. The three coupled pieces (profile 2 +
     // finite height + ~16× (16422/1027) ASERT) must activate TOGETHER. Public nets still stay
     // fail-closed at height INT32_MAX with ASERT 1/1 because a finite PUBLIC RC
     // height rides the genuine external no-inversion gate
@@ -596,8 +595,10 @@ public:
         consensus.fMatMulLTSealAsPoW = false;
         // ENC_RC DATACENTER PROFILE (owner-authorized aggressive activation).
         // nMatMulRCProfile defaults to 2 (datacenter) from Consensus::Params, so
-        // mainnet SELECTS the datacenter dims + the Freivalds sampled consensus
-        // authority. The ACTIVATION HEIGHT is the named placeholder
+        // mainnet selects the datacenter dimensions. The Freivalds sampled
+        // carrier is only a relay/precheck; it is never consensus authority.
+        // Complete succinct Stage-3 authority remains fail-closed and exact
+        // replay is the fallback. The ACTIVATION HEIGHT is the named placeholder
         // kRCDatacenterActivationHeight (owner sets the exact fork block at
         // deploy), but it is NOT assigned to consensus.nMatMulRCHeight here: RC
         // stays INT32_MAX (disabled) because ENC_RC rides IsMatMulV4Active (v4 is
@@ -1768,9 +1769,10 @@ public:
         }
         // ENC_RC episode profile selector (design §6.1(A)): regtest may switch to
         // the datacenter dims (profile 2, also the network-wide default) alongside
-        // a finite nMatMulRCHeight so the datacenter episode + Freivalds sampled
-        // consensus authority are TESTABLE. Invalid values (≠{1,2}) fail closed in
-        // AssertBMX4CConstructionInvariants.
+        // a finite nMatMulRCHeight so the datacenter episode, optional sampled
+        // precheck, and exact-replay authority are testable. Stage-3 succinct
+        // authority remains independently compile-time disabled. Invalid values
+        // (≠{1,2}) fail closed in AssertBMX4CConstructionInvariants.
         if (opts.matmul_rc_profile.has_value()) {
             consensus.nMatMulRCProfile = *opts.matmul_rc_profile;
         }

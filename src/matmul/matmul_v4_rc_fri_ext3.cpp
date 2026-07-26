@@ -1079,8 +1079,12 @@ uint256 Fri3BatchColumnRoot(const std::vector<Fp3>& column, uint32_t n_coeffs)
     return BuildMerkleTree(lde).root;
 }
 
-Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& columns,
-                                      const uint256& fs_seed, uint64_t pow_grind_nonce)
+static Fri3BatchCommitResult Fri3BatchCommitImpl(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce,
+    bool streaming_columns,
+    uint32_t supplemental_index_step)
 {
     Fri3BatchCommitResult out;
     if (columns.empty() || columns.size() > kRCFriBatchMaxColumns) {
@@ -1107,6 +1111,10 @@ Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& colum
         return out;
     }
     const uint32_t n_lde = n * kRCFriBlowup;
+    if (supplemental_index_step >= n_lde) {
+        out.note = "supplemental opening step out of range";
+        return out;
+    }
     const uint32_t W = static_cast<uint32_t>(columns.size());
 
     Fri3BatchProof& p = out.proof;
@@ -1116,16 +1124,24 @@ Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& colum
     p.n_coeffs = n;
     p.column_len.resize(W);
     p.columns.resize(W);
-    out.column_lde.resize(W);
-    std::vector<MerkleTree> col_trees(W);
+    std::vector<MerkleTree> col_trees;
+    if (!streaming_columns) {
+        out.column_lde.resize(W);
+        col_trees.resize(W);
+    }
     for (uint32_t i = 0; i < W; ++i) {
         p.column_len[i] = static_cast<uint32_t>(columns[i].size());
         std::vector<Fp3> padded(n, Fp3::Zero());
         for (size_t j = 0; j < columns[i].size(); ++j) padded[j] = columns[i][j];
-        out.column_lde[i] = LdeFromCoeffs(padded, kRCFriBlowup);
-        col_trees[i] = BuildMerkleTree(out.column_lde[i]);
-        p.columns[i].root = col_trees[i].root;
+        std::vector<Fp3> lde =
+            LdeFromCoeffs(padded, kRCFriBlowup);
+        MerkleTree tree = BuildMerkleTree(lde);
+        p.columns[i].root = tree.root;
         p.columns[i].n_leaves = n_lde;
+        if (!streaming_columns) {
+            out.column_lde[i] = std::move(lde);
+            col_trees[i] = std::move(tree);
+        }
     }
 
     // FS: all column roots absorbed BEFORE any challenge (commit-then-challenge).
@@ -1231,9 +1247,13 @@ Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& colum
         Fri3BatchQuery q;
         q.index = fs.ChallengeIndex("frib3_query", qi, n_lde);
         q.columns.resize(W);
-        for (uint32_t i = 0; i < W; ++i) {
-            q.columns[i].value = out.column_lde[i][q.index];
-            q.columns[i].siblings = PathFromTree(col_trees[i], q.index);
+        if (!streaming_columns) {
+            for (uint32_t i = 0; i < W; ++i) {
+                q.columns[i].value =
+                    out.column_lde[i][q.index];
+                q.columns[i].siblings =
+                    PathFromTree(col_trees[i], q.index);
+            }
         }
         uint32_t idx = q.index;
         q.steps.reserve(n_folds);
@@ -1245,11 +1265,152 @@ Fri3BatchCommitResult Fri3BatchCommit(const std::vector<std::vector<Fp3>>& colum
         p.queries.push_back(std::move(q));
     }
 
+    if (streaming_columns) {
+        if (supplemental_index_step != 0) {
+            out.supplemental_openings.assign(
+                p.queries.size(),
+                std::vector<Fri3MerklePath>(W));
+        }
+        for (uint32_t i = 0; i < W; ++i) {
+            std::vector<Fp3> padded(n, Fp3::Zero());
+            for (size_t j = 0; j < columns[i].size(); ++j) {
+                padded[j] = columns[i][j];
+            }
+            const std::vector<Fp3> lde =
+                LdeFromCoeffs(padded, kRCFriBlowup);
+            const MerkleTree tree = BuildMerkleTree(lde);
+            if (tree.root != p.columns[i].root) {
+                out.note =
+                    "streaming column root mismatch";
+                return out;
+            }
+            for (uint32_t qi = 0;
+                 qi < p.queries.size(); ++qi) {
+                auto& opening = p.queries[qi].columns[i];
+                opening.value = lde[p.queries[qi].index];
+                opening.siblings =
+                    PathFromTree(
+                        tree, p.queries[qi].index);
+                if (supplemental_index_step != 0) {
+                    const uint32_t supplemental_index =
+                        (p.queries[qi].index +
+                         supplemental_index_step) %
+                        n_lde;
+                    auto& supplemental =
+                        out.supplemental_openings[qi][i];
+                    supplemental.index =
+                        supplemental_index;
+                    supplemental.leaf =
+                        lde[supplemental_index];
+                    supplemental.siblings =
+                        PathFromTree(
+                            tree, supplemental_index);
+                }
+            }
+        }
+    }
+
     std::vector<unsigned char> ser;
     out.proof_bytes = SerializeFri3BatchProof(p, ser);
     out.ok = true;
     out.note = kRCFri3BatchSoundnessStatement;
     return out;
+}
+
+Fri3BatchCommitResult Fri3BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3BatchCommitImpl(
+        columns, fs_seed, pow_grind_nonce, false, 0);
+}
+
+Fri3BatchCommitResult Fri3BatchCommitStreamingColumns(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3BatchCommitImpl(
+        columns, fs_seed, pow_grind_nonce, true, 0);
+}
+
+Fri3BatchCommitResult
+Fri3BatchCommitStreamingColumnsWithStep(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint32_t supplemental_index_step,
+    uint64_t pow_grind_nonce)
+{
+    if (supplemental_index_step == 0) {
+        Fri3BatchCommitResult out;
+        out.note =
+            "supplemental opening step must be nonzero";
+        return out;
+    }
+    return Fri3BatchCommitImpl(
+        columns, fs_seed, pow_grind_nonce, true,
+        supplemental_index_step);
+}
+
+bool Fri3BatchOpenColumnsStreaming(
+    const std::vector<std::vector<Fp3>>& columns,
+    uint32_t n_coeffs,
+    const std::vector<uint32_t>& indices,
+    const std::vector<uint256>& expected_roots,
+    std::vector<std::vector<Fri3MerklePath>>& out,
+    std::string* why)
+{
+    auto fail = [&](const char* detail) {
+        out.clear();
+        if (why != nullptr) *why = detail;
+        return false;
+    };
+    if (columns.empty() ||
+        columns.size() != expected_roots.size() ||
+        indices.empty() ||
+        n_coeffs == 0 ||
+        (n_coeffs & (n_coeffs - 1)) != 0 ||
+        static_cast<uint64_t>(n_coeffs) * kRCFriBlowup >
+            (uint64_t{1} << kRCFriMaxLdeLog2)) {
+        return fail("streaming column opening shape");
+    }
+    const uint32_t n_lde = n_coeffs * kRCFriBlowup;
+    for (uint32_t index : indices) {
+        if (index >= n_lde) {
+            return fail("streaming column opening index");
+        }
+    }
+    out.assign(
+        indices.size(),
+        std::vector<Fri3MerklePath>(columns.size()));
+    for (uint32_t column = 0;
+         column < columns.size(); ++column) {
+        if (columns[column].empty() ||
+            columns[column].size() > n_coeffs ||
+            expected_roots[column].IsNull()) {
+            return fail("streaming column opening column");
+        }
+        std::vector<Fp3> padded(n_coeffs, Fp3::Zero());
+        std::copy(
+            columns[column].begin(), columns[column].end(),
+            padded.begin());
+        const std::vector<Fp3> lde =
+            LdeFromCoeffs(padded, kRCFriBlowup);
+        const MerkleTree tree = BuildMerkleTree(lde);
+        if (tree.root != expected_roots[column]) {
+            return fail("streaming column opening root");
+        }
+        for (uint32_t query = 0;
+             query < indices.size(); ++query) {
+            auto& path = out[query][column];
+            path.index = indices[query];
+            path.leaf = lde[path.index];
+            path.siblings =
+                PathFromTree(tree, path.index);
+        }
+    }
+    return true;
 }
 
 bool Fri3BatchVerify(const Fri3BatchProof& proof, const uint256& fs_seed, std::string* why)

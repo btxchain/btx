@@ -385,4 +385,52 @@ BOOST_AUTO_TEST_CASE(alg_hash_sponge_padding_and_fp3_embedding)
                 gf::Canonical(e[1]) != gf::Canonical(g[1]));
 }
 
+BOOST_AUTO_TEST_CASE(alg_hash_column_streaming_row_leaf_is_exact)
+{
+    constexpr uint32_t ROWS = 32;
+    for (const uint32_t width : {1U, 2U, 7U, 26U}) {
+        std::vector<std::vector<gf::Fp3>> columns(
+            width, std::vector<gf::Fp3>(ROWS));
+        std::vector<std::vector<gf::Fp3>> rows(
+            ROWS, std::vector<gf::Fp3>(width));
+        for (uint32_t column = 0; column < width; ++column) {
+            for (uint32_t row = 0; row < ROWS; ++row) {
+                const gf::Fp3 value{
+                    1000 + 31 * column + row,
+                    2000 + 17 * column + 3 * row,
+                    3000 + 13 * column + 5 * row};
+                columns[column][row] = value;
+                rows[row][column] = value;
+            }
+        }
+        ah::StreamingRowHasher streaming(ROWS);
+        std::string why;
+        for (const auto& column : columns) {
+            BOOST_REQUIRE_MESSAGE(
+                streaming.AbsorbColumn(column, &why), why);
+        }
+        std::vector<ah::Digest> actual;
+        BOOST_REQUIRE_MESSAGE(
+            streaming.Finalize(actual, &why), why);
+        BOOST_CHECK_EQUAL(streaming.Rows(), ROWS);
+        BOOST_CHECK_EQUAL(streaming.Columns(), width);
+        BOOST_CHECK_EQUAL(
+            streaming.WorkingSetBytes(),
+            ah::StreamingRowHasher::
+                WorkingSetBytesForRows(ROWS));
+        for (uint32_t row = 0; row < ROWS; ++row) {
+            const ah::Digest expected =
+                ah::LeafHashRow(rows[row], row);
+            for (uint32_t lane = 0;
+                 lane < ah::kAlgHashDigestLen; ++lane) {
+                BOOST_CHECK_EQUAL(
+                    gf::Canonical(actual[row][lane]),
+                    gf::Canonical(expected[lane]));
+            }
+        }
+        BOOST_CHECK(
+            !streaming.AbsorbColumn(columns[0], &why));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
