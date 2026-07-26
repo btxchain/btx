@@ -1017,21 +1017,32 @@ void RunSingleRoleFullFriRoundtrip(const char* tag,
         << " division_exact=" << proved.division_exact
         << " why=\"" << why << "\"");
 
-    // HONEST CURRENT STATE (g2 role blocker): the role C_ρ binds each opening
-    // block to a COMMITTED preprocessed root (relation_closure populates
-    // cs.preprocessed_roots).  That "root-equality" preprocessed mode is NOT
-    // supported by the row-wise ALG recursion FRI backend (AlgB3), which pins
-    // preprocessed columns only via OOD evaluations.  So the prover commits an
-    // exact-division trace, but AirQuotientVerify rejects the preprocessed-root
-    // mode.  A role must therefore be NORMALIZED through the aggregation V_CS
-    // (ProveAggregate) before it is FRI-provable standalone.  This guards that
-    // precise state so a future normalized-preprocessed role FRI flips it.
-    BOOST_REQUIRE_MESSAGE(!cs.preprocessed_roots.empty(),
-                          "expected committed preprocessed roots on role C_ρ");
-    BOOST_CHECK(!accept);
-    BOOST_CHECK_MESSAGE(
-        why.find("preprocessed root equality unsupported") != std::string::npos,
-        "unexpected verify gap: " + why);
+    // NORMALIZED STATE: the role C_ρ's verifier-owned preprocessed columns (the
+    // opening index-bit column, the sponge terminal-squeeze selector, and the
+    // wired root-equality-bus selectors) are OOD-pinned (canonical values bound
+    // through the batch dual-OOD DEEP evals) rather than bound by a per-column
+    // Merkle root.  The row-wise AlgB3 recursion FRI backend supports exactly
+    // this mode, so the role now PROVES *and* VERIFIES standalone.
+    BOOST_CHECK_MESSAGE(cs.preprocessed_roots.empty(),
+                        "role C_ρ must carry no per-column preprocessed roots");
+    BOOST_CHECK(cs.preprocessed_pin_ood);
+    BOOST_CHECK(!cs.preprocessed.empty());
+    BOOST_CHECK_MESSAGE(accept, "role C_ρ must FRI-verify: " + why);
+
+    // SOUNDNESS: a tampered child cell breaks exact division / the OOD-pinned
+    // binding, so no genuine accept survives (the OOD pin binds the same data a
+    // committed root would have).
+    {
+        auto w = product.witness;
+        w[0][0] = gf::Add(w[0][0], gf::Fp3::One());
+        const auto bad =
+            air_quotient::AirQuotientProve<gf::Fp3, AlgB3>(cs, w, seed, {});
+        const bool bad_accept =
+            bad.ok && bad.division_exact &&
+            air_quotient::AirQuotientVerify<gf::Fp3, AlgB3>(cs, bad.proof, seed,
+                                                            nullptr);
+        BOOST_CHECK_MESSAGE(!bad_accept, "tampered role witness must reject");
+    }
 }
 } // namespace
 

@@ -195,6 +195,10 @@ void CopyConstraintFamily(const AirCS& source,
         destination.preprocessed_roots.emplace_back(
             column_offset + column, root);
     }
+    // Propagate the OOD-pin flag so the composed C_rho verifies on the row-wise
+    // AlgB3 backend (which supports preprocessed_pin_ood, not per-column roots).
+    destination.preprocessed_pin_ood =
+        destination.preprocessed_pin_ood || source.preprocessed_pin_ood;
 }
 
 std::optional<uint32_t> EpisodeEndpointColumn(
@@ -1751,16 +1755,17 @@ aq::AirConstraintSystem<gf::Fp3> BuildOpeningConstraintSystem(
         cs.constraints.push_back(std::move(c));
     }
 
-    // The public index-bit column is preprocessed (root-equality pinned by the
-    // verifier), making the direction pins a public-position statement.
-    const uint32_t coeffs =
-        FriNextPow2(std::max(cs.n_rows, static_cast<uint32_t>(cs.QuotientLen())));
+    // The public index-bit column is verifier-owned preprocessing making the
+    // direction pins a public-position statement.  It is OOD-pinned (canonical
+    // values pinned through the batch dual-OOD DEEP evals) rather than bound by a
+    // per-column Merkle root, because the row-wise AlgB3 recursion backend has no
+    // per-column roots (preprocessed_roots is unsupported there).
     std::vector<gf::Fp3> expected(cs.n_rows, gf::Fp3::Zero());
     for (uint32_t l = 0; l < path_len; ++l) {
         expected[l] = ((index >> l) & 1U) ? gf::Fp3::One() : gf::Fp3::Zero();
     }
-    cs.preprocessed_roots.push_back(
-        {kExpectedDirCol, aq::AirCommittedValuesRoot<gf::Fp3>(expected, coeffs)});
+    cs.preprocessed.push_back({kExpectedDirCol, std::move(expected)});
+    cs.preprocessed_pin_ood = true;
     return cs;
 }
 
@@ -2650,10 +2655,9 @@ void AppendSpongeCS(aq::AirConstraintSystem<gf::Fp3>& cs, uint32_t blocks,
     }
     std::vector<gf::Fp3> sel(n_rows, gf::Fp3::Zero());
     sel[last] = gf::Fp3::One();
-    const uint32_t coeffs = FriNextPow2(std::max(
-        cs.n_rows, static_cast<uint32_t>(cs.QuotientLen())));
-    cs.preprocessed_roots.push_back(
-        {kSpongeSelCol, aq::AirCommittedValuesRoot<gf::Fp3>(sel, coeffs)});
+    // OOD-pinned (row-wise AlgB3 backend has no per-column preprocessed roots).
+    cs.preprocessed.push_back({kSpongeSelCol, std::move(sel)});
+    cs.preprocessed_pin_ood = true;
 }
 
 } // namespace
@@ -2783,16 +2787,14 @@ bool AppendSignedRangeGadgetConstraints(aq::AirConstraintSystem<gf::Fp3>& cs)
              [aA, aS2, c2](const std::vector<gf::Fp3>& cur, const std::vector<gf::Fp3>&) {
                  return gf::Mul(cur[aS2], gf::Sub(cur[aA], cur[c2]));
              }});
-        const uint32_t coeffs = FriNextPow2(std::max(
-            cs.n_rows, static_cast<uint32_t>(cs.QuotientLen())));
         std::vector<gf::Fp3> s1v(n_rows, gf::Fp3::Zero());
         std::vector<gf::Fp3> s2v(n_rows, gf::Fp3::Zero());
         s1v[r1] = gf::Fp3::One();
         s2v[r2] = gf::Fp3::One();
-        cs.preprocessed_roots.push_back(
-            {aS1, aq::AirCommittedValuesRoot<gf::Fp3>(s1v, coeffs)});
-        cs.preprocessed_roots.push_back(
-            {aS2, aq::AirCommittedValuesRoot<gf::Fp3>(s2v, coeffs)});
+        // OOD-pinned selectors (row-wise AlgB3 backend has no per-column roots).
+        cs.preprocessed.push_back({aS1, std::move(s1v)});
+        cs.preprocessed.push_back({aS2, std::move(s2v)});
+        cs.preprocessed_pin_ood = true;
     }
     cs.n_columns = next_col;
     return true;
