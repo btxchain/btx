@@ -89,6 +89,28 @@ enum class RCStage3CoupledProofEngine : uint16_t {
      * not flip kRCStage3CoupledRelationEnginesReady alone.
      */
     BankPageInclusionV1 = 5,
+    /**
+     * CoupledExchange ONLY. Packages measured exchange-stage Fri3 AirQuotient
+     * proofs (fixed-segment equality and optional material XOR/LogUp) reused
+     * from ProveRCStage3CoupledExchangePermutationProduct. Clears the
+     * PublicScheduleBinding / MaterialExchangeHashXof AirGaps when the
+     * measured prototypes are flagged; does not flip Ready alone.
+     */
+    ExchangeStagesV1 = 6,
+    /**
+     * CoupledPermutation ONLY. Packages measured public bit-affine
+     * permutation-stage Fri3 AirQuotient proofs from the exchange/permutation
+     * product. Clears PublicScheduleBinding for this role when measured;
+     * does not flip Ready alone.
+     */
+    PermutationStagesV1 = 7,
+    /**
+     * CoupledMix ONLY. Packages measured mix-seed SHA + full butterfly
+     * schedule + uint64 limb arithmetic Fri3 AirQuotient from
+     * ProveRCStage3CoupledMixProduct. Clears PublicScheduleBinding for Mix
+     * when measured; does not flip Ready alone.
+     */
+    MixArithmeticV1 = 8,
 };
 
 /** Public coupled shape/options copied into every relation receipt. Test-only
@@ -212,6 +234,20 @@ inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
  */
 inline constexpr bool kRCStage3CoupledBankSeedXofPrototypeExecuted = true;
 inline constexpr bool kRCStage3CoupledBankPageInclusionPrototypeExecuted = true;
+
+/**
+ * Measured exchange / permutation / mix schedule + local-AIR prototypes.
+ * Backed by exchange_permutation_product_tests and mix_product_tests prove/
+ * verify round-trips, plus ExchangeStagesV1 / PermutationStagesV1 /
+ * MixArithmeticV1 engine packaging. Retire role-local PublicScheduleBinding
+ * (and MaterialExchangeHashXof) AirGaps only; universal bridge/aggregation
+ * remain, and Ready stays false while Extract/Barrier/Digest engines are open.
+ */
+inline constexpr bool kRCStage3CoupledExchangeSchedulePrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledPermutationSchedulePrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledMixSchedulePrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledMaterialExchangeHashXofPrototypeExecuted =
+    true;
 
 // ============================================================================
 // CoupledBank real proof-only engine (BankDequantPagesV1).
@@ -372,6 +408,66 @@ struct RCStage3CoupledGemmDotOpening {
     const uint256& statement_commitment,
     const uint256& coupled_shape_commitment,
     const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+// ============================================================================
+// CoupledExchange ExchangeStagesV1 / CoupledPermutation PermutationStagesV1 /
+// CoupledMix MixArithmeticV1 — packaging of measured product AIRs.
+// ============================================================================
+
+/** Prover-supplied exchange/permutation openings (barrier-major). */
+struct RCStage3CoupledExchangePermutationOpening {
+    std::vector<std::vector<int64_t>> fixed_exchange_inputs;
+    std::vector<std::vector<int64_t>> material_exchange_inputs;
+    std::vector<std::vector<int64_t>> permutation_inputs;
+
+    bool operator==(const RCStage3CoupledExchangePermutationOpening&) const =
+        default;
+};
+
+[[nodiscard]] bool BuildRCStage3CoupledExchangeEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationOpening& opening,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledExchangeEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool BuildRCStage3CoupledPermutationEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationOpening& opening,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledPermutationEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool BuildRCStage3CoupledMixEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<std::vector<int64_t>>& input_states,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledMixEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
     const std::vector<unsigned char>& engine_receipt,
     uint256& out_trace_root,
     std::string* why = nullptr);

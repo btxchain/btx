@@ -11,7 +11,9 @@
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_stream.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_exchange_permutation_product.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_gemm_product.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_mix_product.h>
 #include <matmul/matmul_v4_rc_stage3_hash_semantic.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
 
@@ -267,7 +269,10 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
         receipt.engine != RCStage3CoupledProofEngine::BankDequantPagesV1 &&
         receipt.engine != RCStage3CoupledProofEngine::GemmDotTilesV1 &&
         receipt.engine != RCStage3CoupledProofEngine::BankSeedXofV1 &&
-        receipt.engine != RCStage3CoupledProofEngine::BankPageInclusionV1) {
+        receipt.engine != RCStage3CoupledProofEngine::BankPageInclusionV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::ExchangeStagesV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::PermutationStagesV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::MixArithmeticV1) {
         return Fail(why, "receipt:unknown_engine");
     }
     if (receipt.engine == RCStage3CoupledProofEngine::BankDequantPagesV1 &&
@@ -282,6 +287,18 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
          receipt.engine == RCStage3CoupledProofEngine::BankPageInclusionV1) &&
         receipt.role != RCStage3RelationRole::CoupledBank) {
         return Fail(why, "receipt:bank_provenance_engine_wrong_role");
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::ExchangeStagesV1 &&
+        receipt.role != RCStage3RelationRole::CoupledExchange) {
+        return Fail(why, "receipt:exchange_engine_wrong_role");
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::PermutationStagesV1 &&
+        receipt.role != RCStage3RelationRole::CoupledPermutation) {
+        return Fail(why, "receipt:permutation_engine_wrong_role");
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::MixArithmeticV1 &&
+        receipt.role != RCStage3RelationRole::CoupledMix) {
+        return Fail(why, "receipt:mix_engine_wrong_role");
     }
     if (!ValidateShape(receipt.shape, why)) return false;
     if (receipt.statement_commitment.IsNull() || receipt.params_commitment.IsNull() ||
@@ -1452,6 +1469,533 @@ bool VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
 
 namespace {
 
+constexpr uint32_t kExchangeEngineMagic = 0x31585345U; // "EXS1"
+constexpr uint16_t kExchangeEngineVersion = 1;
+constexpr uint32_t kPermutationEngineMagic = 0x31534D50U; // "PMS1"
+constexpr uint16_t kPermutationEngineVersion = 1;
+constexpr uint32_t kMixEngineMagic = 0x3158414DU; // "MAX1"
+constexpr uint16_t kMixEngineVersion = 1;
+constexpr char kExchangeEngineTraceDomain[] =
+    "BTX_RC_STAGE3_COUPLED_EXCHANGE_ENGINE_TRACE_V1";
+constexpr char kPermutationEngineTraceDomain[] =
+    "BTX_RC_STAGE3_COUPLED_PERMUTATION_ENGINE_TRACE_V1";
+constexpr char kMixEngineTraceDomain[] =
+    "BTX_RC_STAGE3_COUPLED_MIX_ENGINE_TRACE_V1";
+
+void WriteI64(std::vector<unsigned char>& out, int64_t value)
+{
+    WriteU64(out, static_cast<uint64_t>(value));
+}
+
+bool ReadI64(Reader& reader, int64_t& out)
+{
+    uint64_t raw{0};
+    if (!reader.ReadU64(raw)) return false;
+    out = static_cast<int64_t>(raw);
+    return true;
+}
+
+bool WriteI64Matrix(std::vector<unsigned char>& out,
+                    const std::vector<std::vector<int64_t>>& matrix)
+{
+    if (matrix.size() > (1U << 20)) return false;
+    WriteU32(out, static_cast<uint32_t>(matrix.size()));
+    for (const auto& row : matrix) {
+        if (row.size() > (1U << 20)) return false;
+        WriteU32(out, static_cast<uint32_t>(row.size()));
+        for (int64_t value : row) WriteI64(out, value);
+    }
+    return true;
+}
+
+bool ReadI64Matrix(Reader& reader, std::vector<std::vector<int64_t>>& matrix)
+{
+    uint32_t rows{0};
+    if (!reader.ReadU32(rows) || rows > (1U << 20)) return false;
+    matrix.assign(rows, {});
+    for (uint32_t r = 0; r < rows; ++r) {
+        uint32_t cols{0};
+        if (!reader.ReadU32(cols) || cols > (1U << 20)) return false;
+        matrix[r].resize(cols);
+        for (uint32_t c = 0; c < cols; ++c) {
+            if (!ReadI64(reader, matrix[r][c])) return false;
+        }
+    }
+    return true;
+}
+
+bool WriteOpening(std::vector<unsigned char>& out,
+                  const RCStage3CoupledExchangePermutationOpening& opening)
+{
+    return WriteI64Matrix(out, opening.fixed_exchange_inputs) &&
+           WriteI64Matrix(out, opening.material_exchange_inputs) &&
+           WriteI64Matrix(out, opening.permutation_inputs);
+}
+
+bool ReadOpening(Reader& reader, RCStage3CoupledExchangePermutationOpening& opening)
+{
+    return ReadI64Matrix(reader, opening.fixed_exchange_inputs) &&
+           ReadI64Matrix(reader, opening.material_exchange_inputs) &&
+           ReadI64Matrix(reader, opening.permutation_inputs);
+}
+
+RCStage3CoupledExchangePermutationWitness OpeningToWitness(
+    const RCStage3CoupledExchangePermutationOpening& opening)
+{
+    RCStage3CoupledExchangePermutationWitness witness;
+    witness.fixed_exchange_inputs = opening.fixed_exchange_inputs;
+    witness.material_exchange_inputs = opening.material_exchange_inputs;
+    witness.permutation_inputs = opening.permutation_inputs;
+    return witness;
+}
+
+bool SerializeAirProofBlob(const aq::AirQuotientProof<Fp3>& proof,
+                           std::vector<unsigned char>& body)
+{
+    std::vector<unsigned char> proof_bytes;
+    if (!SerializeFri3AirQuotientProof(proof, proof_bytes) || proof_bytes.empty()) {
+        return false;
+    }
+    WriteU32(body, static_cast<uint32_t>(proof_bytes.size()));
+    body.insert(body.end(), proof_bytes.begin(), proof_bytes.end());
+    return true;
+}
+
+bool ReadAirProofBlob(Reader& reader, aq::AirQuotientProof<Fp3>& proof)
+{
+    uint32_t proof_len{0};
+    std::vector<unsigned char> proof_bytes;
+    if (!reader.ReadU32(proof_len) || proof_len == 0 ||
+        !reader.ReadBytes(proof_len, proof_bytes) ||
+        !DeserializeFri3AirQuotientProof(proof_bytes, proof)) {
+        return false;
+    }
+    return true;
+}
+
+bool SerializeExchangeStageProofs(
+    const RCStage3CoupledExchangeStageProduct& stage,
+    std::vector<unsigned char>& body)
+{
+    WriteU32(body, static_cast<uint32_t>(stage.hash_executions.size()));
+    for (const auto& hash : stage.hash_executions) {
+        if (!SerializeFlatBoundaryBundleProofs(hash.proof, body)) return false;
+    }
+    return SerializeAirProofBlob(stage.proof, body);
+}
+
+bool ReadExchangeStageProofs(Reader& reader,
+                             RCStage3CoupledExchangeStageProduct& stage)
+{
+    uint32_t hash_count{0};
+    if (!reader.ReadU32(hash_count) ||
+        hash_count != stage.hash_executions.size()) {
+        return false;
+    }
+    for (uint32_t i = 0; i < hash_count; ++i) {
+        if (!ReadFlatBoundaryBundleProofs(reader, stage.hash_executions[i].proof)) {
+            return false;
+        }
+        stage.hash_executions[i].proof.endpoint =
+            RCStage3RelationEndpoint::CoupledExchangeHashXof;
+        stage.hash_executions[i].proof.manifest_commitment =
+            stage.hash_executions[i].manifest.commitment;
+    }
+    return ReadAirProofBlob(reader, stage.proof);
+}
+
+void SerializeMixPin(const RCStage3CoupledMixPin& pin, std::vector<unsigned char>& out)
+{
+    WriteU16(out, pin.version);
+    WriteUint256(out, pin.statement_commitment);
+    WriteUint256(out, pin.shape_commitment);
+    WriteUint256(out, pin.sigma);
+    WriteUint256(out, pin.schedule_commitment);
+    WriteU8(out, pin.u64_wrap ? 1 : 0);
+    WriteU32(out, pin.logical_rows);
+    WriteU32(out, pin.n_rows);
+    WriteU32(out, pin.n_coeffs);
+    WriteU32(out, static_cast<uint32_t>(pin.column_roots.size()));
+    for (const auto& root : pin.column_roots) {
+        WriteU32(out, root.column);
+        WriteUint256(out, root.root);
+    }
+    WriteUint256(out, pin.pin_commitment);
+}
+
+bool ReadMixPin(Reader& reader, RCStage3CoupledMixPin& pin)
+{
+    uint8_t wrap{0};
+    uint32_t root_count{0};
+    if (!reader.ReadU16(pin.version) ||
+        !reader.ReadUint256(pin.statement_commitment) ||
+        !reader.ReadUint256(pin.shape_commitment) ||
+        !reader.ReadUint256(pin.sigma) ||
+        !reader.ReadUint256(pin.schedule_commitment) ||
+        !reader.ReadU8(wrap) || wrap > 1 ||
+        !reader.ReadU32(pin.logical_rows) || !reader.ReadU32(pin.n_rows) ||
+        !reader.ReadU32(pin.n_coeffs) || !reader.ReadU32(root_count) ||
+        root_count > kRCStage3CoupledMixColumns) {
+        return false;
+    }
+    pin.u64_wrap = wrap != 0;
+    pin.column_roots.resize(root_count);
+    for (auto& root : pin.column_roots) {
+        if (!reader.ReadU32(root.column) || !reader.ReadUint256(root.root)) {
+            return false;
+        }
+    }
+    return reader.ReadUint256(pin.pin_commitment);
+}
+
+uint256 ComputeExchangeEngineTraceRoot(
+    const RCStage3CoupledExchangePermutationProduct& product)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, kExchangeEngineTraceDomain);
+    WriteUint256(bytes, product.exchange_input_endpoint_root);
+    WriteUint256(bytes, product.exchange_hash_xof_endpoint_root);
+    WriteUint256(bytes, product.exchange_output_endpoint_root);
+    WriteU64(bytes, static_cast<uint64_t>(product.exchange_stages.size()));
+    for (const auto& stage : product.exchange_stages) {
+        WriteUint256(bytes, stage.stage_commitment);
+    }
+    return Sha256d(bytes);
+}
+
+uint256 ComputePermutationEngineTraceRoot(
+    const RCStage3CoupledExchangePermutationProduct& product)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, kPermutationEngineTraceDomain);
+    WriteUint256(bytes, product.permutation_input_endpoint_root);
+    WriteUint256(bytes, product.permutation_output_endpoint_root);
+    WriteU64(bytes, static_cast<uint64_t>(product.permutation_stages.size()));
+    for (const auto& stage : product.permutation_stages) {
+        WriteUint256(bytes, stage.stage_commitment);
+    }
+    return Sha256d(bytes);
+}
+
+uint256 ComputeMixEngineTraceRoot(const RCStage3CoupledMixProduct& product)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, kMixEngineTraceDomain);
+    WriteUint256(bytes, product.schedule_commitment);
+    WriteUint256(bytes, product.arithmetic_pin.pin_commitment);
+    WriteUint256(bytes, product.input_endpoint_root);
+    WriteUint256(bytes, product.arithmetic_endpoint_root);
+    WriteUint256(bytes, product.output_endpoint_root);
+    WriteU64(bytes, static_cast<uint64_t>(product.barrier_seeds.size()));
+    for (const auto& seed : product.barrier_seeds) {
+        WriteUint256(bytes, seed.receipt_commitment);
+    }
+    return Sha256d(bytes);
+}
+
+} // namespace
+
+bool BuildRCStage3CoupledExchangeEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationOpening& opening,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    RCStage3CoupledExchangePermutationProduct product;
+    if (!ProveRCStage3CoupledExchangePermutationProduct(
+            statement, shape, OpeningToWitness(opening), product, why)) {
+        return false;
+    }
+    std::vector<unsigned char> body;
+    WriteU32(body, kExchangeEngineMagic);
+    WriteU16(body, kExchangeEngineVersion);
+    if (!WriteOpening(body, opening)) {
+        return Fail(why, "exchange_engine:opening_codec");
+    }
+    WriteU32(body, static_cast<uint32_t>(product.exchange_stages.size()));
+    for (const auto& stage : product.exchange_stages) {
+        if (!SerializeExchangeStageProofs(stage, body)) {
+            return Fail(why, "exchange_engine:stage_codec");
+        }
+    }
+    if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
+        return Fail(why, "exchange_engine:oversize");
+    }
+    out_trace_root = ComputeExchangeEngineTraceRoot(product);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledExchangeEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    RCStage3CoupledExchangePermutationOpening opening;
+    if (!reader.ReadU32(magic) || magic != kExchangeEngineMagic ||
+        !reader.ReadU16(version) || version != kExchangeEngineVersion ||
+        !ReadOpening(reader, opening)) {
+        return Fail(why, "exchange_engine:header");
+    }
+    RCStage3CoupledExchangePermutationProduct product;
+    if (!BuildRCStage3CoupledExchangePermutationProduct(
+            statement, shape, OpeningToWitness(opening), product, why)) {
+        return Fail(why, "exchange_engine:rebuild");
+    }
+    uint32_t stage_count{0};
+    if (!reader.ReadU32(stage_count) ||
+        stage_count != product.exchange_stages.size()) {
+        return Fail(why, "exchange_engine:stage_count");
+    }
+    for (uint32_t i = 0; i < stage_count; ++i) {
+        if (!ReadExchangeStageProofs(reader, product.exchange_stages[i])) {
+            return Fail(why, "exchange_engine:stage_decode:" + std::to_string(i));
+        }
+        for (auto& hash : product.exchange_stages[i].hash_executions) {
+            hash.proof.statement_commitment = product.statement_commitment;
+        }
+    }
+    if (reader.Remaining() != 0) {
+        return Fail(why, "exchange_engine:trailing_bytes");
+    }
+    if (!VerifyRCStage3CoupledExchangeStages(statement, shape, product, why)) {
+        return false;
+    }
+    out_trace_root = ComputeExchangeEngineTraceRoot(product);
+    return true;
+}
+
+bool BuildRCStage3CoupledPermutationEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationOpening& opening,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    RCStage3CoupledExchangePermutationProduct product;
+    if (!ProveRCStage3CoupledExchangePermutationProduct(
+            statement, shape, OpeningToWitness(opening), product, why)) {
+        return false;
+    }
+    std::vector<unsigned char> body;
+    WriteU32(body, kPermutationEngineMagic);
+    WriteU16(body, kPermutationEngineVersion);
+    if (!WriteOpening(body, opening)) {
+        return Fail(why, "permutation_engine:opening_codec");
+    }
+    // Material-round hash proofs are required for Validate when rounds>0.
+    WriteU32(body, static_cast<uint32_t>(product.exchange_stages.size()));
+    for (const auto& stage : product.exchange_stages) {
+        WriteU32(body, static_cast<uint32_t>(stage.hash_executions.size()));
+        for (const auto& hash : stage.hash_executions) {
+            if (!SerializeFlatBoundaryBundleProofs(hash.proof, body)) {
+                return Fail(why, "permutation_engine:hash_codec");
+            }
+        }
+    }
+    WriteU32(body, static_cast<uint32_t>(product.permutation_stages.size()));
+    for (const auto& stage : product.permutation_stages) {
+        if (!SerializeAirProofBlob(stage.proof, body)) {
+            return Fail(why, "permutation_engine:stage_codec");
+        }
+    }
+    if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
+        return Fail(why, "permutation_engine:oversize");
+    }
+    out_trace_root = ComputePermutationEngineTraceRoot(product);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledPermutationEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    RCStage3CoupledExchangePermutationOpening opening;
+    if (!reader.ReadU32(magic) || magic != kPermutationEngineMagic ||
+        !reader.ReadU16(version) || version != kPermutationEngineVersion ||
+        !ReadOpening(reader, opening)) {
+        return Fail(why, "permutation_engine:header");
+    }
+    RCStage3CoupledExchangePermutationProduct product;
+    if (!BuildRCStage3CoupledExchangePermutationProduct(
+            statement, shape, OpeningToWitness(opening), product, why)) {
+        return Fail(why, "permutation_engine:rebuild");
+    }
+    uint32_t exchange_count{0};
+    if (!reader.ReadU32(exchange_count) ||
+        exchange_count != product.exchange_stages.size()) {
+        return Fail(why, "permutation_engine:exchange_count");
+    }
+    for (uint32_t i = 0; i < exchange_count; ++i) {
+        uint32_t hash_count{0};
+        if (!reader.ReadU32(hash_count) ||
+            hash_count != product.exchange_stages[i].hash_executions.size()) {
+            return Fail(why, "permutation_engine:hash_count");
+        }
+        for (uint32_t j = 0; j < hash_count; ++j) {
+            auto& hash = product.exchange_stages[i].hash_executions[j];
+            if (!ReadFlatBoundaryBundleProofs(reader, hash.proof)) {
+                return Fail(why, "permutation_engine:hash_decode");
+            }
+            hash.proof.endpoint = RCStage3RelationEndpoint::CoupledExchangeHashXof;
+            hash.proof.statement_commitment = product.statement_commitment;
+            hash.proof.manifest_commitment = hash.manifest.commitment;
+        }
+    }
+    uint32_t stage_count{0};
+    if (!reader.ReadU32(stage_count) ||
+        stage_count != product.permutation_stages.size()) {
+        return Fail(why, "permutation_engine:stage_count");
+    }
+    for (uint32_t i = 0; i < stage_count; ++i) {
+        if (!ReadAirProofBlob(reader, product.permutation_stages[i].proof)) {
+            return Fail(why, "permutation_engine:stage_decode:" + std::to_string(i));
+        }
+    }
+    if (reader.Remaining() != 0) {
+        return Fail(why, "permutation_engine:trailing_bytes");
+    }
+    if (!VerifyRCStage3CoupledPermutationStages(statement, shape, product, why)) {
+        return false;
+    }
+    out_trace_root = ComputePermutationEngineTraceRoot(product);
+    return true;
+}
+
+bool BuildRCStage3CoupledMixEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<std::vector<int64_t>>& input_states,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    RCStage3CoupledMixProduct product;
+    if (!ProveRCStage3CoupledMixProduct(statement, shape, input_states, product,
+                                        why)) {
+        return false;
+    }
+    std::vector<unsigned char> body;
+    WriteU32(body, kMixEngineMagic);
+    WriteU16(body, kMixEngineVersion);
+    if (!WriteI64Matrix(body, input_states)) {
+        return Fail(why, "mix_engine:inputs");
+    }
+    WriteU32(body, static_cast<uint32_t>(product.barrier_seeds.size()));
+    for (const auto& seed : product.barrier_seeds) {
+        if (!SerializeFlatBoundaryBundleProofs(seed.mix_seed.proof, body) ||
+            !SerializeFlatBoundaryBundleProofs(seed.mask_block.proof, body)) {
+            return Fail(why, "mix_engine:seed_codec");
+        }
+    }
+    SerializeMixPin(product.arithmetic_pin, body);
+    if (!SerializeAirProofBlob(product.arithmetic_proof, body)) {
+        return Fail(why, "mix_engine:arith_codec");
+    }
+    if (!WriteI64Matrix(body, product.output_states)) {
+        return Fail(why, "mix_engine:outputs");
+    }
+    if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
+        return Fail(why, "mix_engine:oversize");
+    }
+    out_trace_root = ComputeMixEngineTraceRoot(product);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledMixEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    std::vector<std::vector<int64_t>> input_states;
+    if (!reader.ReadU32(magic) || magic != kMixEngineMagic ||
+        !reader.ReadU16(version) || version != kMixEngineVersion ||
+        !ReadI64Matrix(reader, input_states)) {
+        return Fail(why, "mix_engine:header");
+    }
+    RCStage3CoupledMixProduct product;
+    if (!BuildRCStage3CoupledMixProduct(statement, shape, input_states, product,
+                                        why)) {
+        return Fail(why, "mix_engine:rebuild");
+    }
+    uint32_t seed_count{0};
+    if (!reader.ReadU32(seed_count) || seed_count != product.barrier_seeds.size()) {
+        return Fail(why, "mix_engine:seed_count");
+    }
+    for (uint32_t i = 0; i < seed_count; ++i) {
+        auto& seed = product.barrier_seeds[i];
+        if (!ReadFlatBoundaryBundleProofs(reader, seed.mix_seed.proof) ||
+            !ReadFlatBoundaryBundleProofs(reader, seed.mask_block.proof)) {
+            return Fail(why, "mix_engine:seed_decode:" + std::to_string(i));
+        }
+        seed.mix_seed.proof.endpoint = RCStage3RelationEndpoint::CoupledMixArithmetic;
+        seed.mix_seed.proof.statement_commitment = product.statement_commitment;
+        seed.mix_seed.proof.manifest_commitment = seed.mix_seed.manifest.commitment;
+        seed.mask_block.proof.endpoint = RCStage3RelationEndpoint::CoupledMixArithmetic;
+        seed.mask_block.proof.statement_commitment = product.statement_commitment;
+        seed.mask_block.proof.manifest_commitment = seed.mask_block.manifest.commitment;
+    }
+    RCStage3CoupledMixPin wire_pin;
+    if (!ReadMixPin(reader, wire_pin) ||
+        wire_pin.pin_commitment != product.arithmetic_pin.pin_commitment ||
+        wire_pin.statement_commitment != product.arithmetic_pin.statement_commitment ||
+        wire_pin.shape_commitment != product.arithmetic_pin.shape_commitment ||
+        wire_pin.sigma != product.arithmetic_pin.sigma ||
+        wire_pin.schedule_commitment != product.arithmetic_pin.schedule_commitment ||
+        wire_pin.u64_wrap != product.arithmetic_pin.u64_wrap ||
+        wire_pin.logical_rows != product.arithmetic_pin.logical_rows ||
+        wire_pin.n_rows != product.arithmetic_pin.n_rows ||
+        wire_pin.n_coeffs != product.arithmetic_pin.n_coeffs ||
+        wire_pin.column_roots != product.arithmetic_pin.column_roots ||
+        !ReadAirProofBlob(reader, product.arithmetic_proof)) {
+        return Fail(why, "mix_engine:arith_decode");
+    }
+    std::vector<std::vector<int64_t>> output_states;
+    if (!ReadI64Matrix(reader, output_states) ||
+        output_states != product.output_states || reader.Remaining() != 0) {
+        return Fail(why, "mix_engine:outputs_or_trailing");
+    }
+    if (!VerifyRCStage3CoupledMixProduct(statement, shape, product, why)) {
+        return false;
+    }
+    out_trace_root = ComputeMixEngineTraceRoot(product);
+    return true;
+}
+
+
+
+namespace {
+
 bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
                            const RCStage3CoupledRelationReceipt& receipt,
                            std::string* why)
@@ -1519,6 +2063,51 @@ bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
         }
         if (trace_root != receipt.trace_root) {
             return Fail(why, "coupled:bank:bank_page_inclusion_engine_trace_root");
+        }
+        return true;
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::ExchangeStagesV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledExchange) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":exchange_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledExchangeEngineReceipt(
+                statement, receipt.shape, receipt.engine_receipt, trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:exchange:exchange_engine_trace_root");
+        }
+        return true;
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::PermutationStagesV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledPermutation) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":permutation_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledPermutationEngineReceipt(
+                statement, receipt.shape, receipt.engine_receipt, trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:permutation:permutation_engine_trace_root");
+        }
+        return true;
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::MixArithmeticV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledMix) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":mix_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledMixEngineReceipt(
+                statement, receipt.shape, receipt.engine_receipt, trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:mix:mix_engine_trace_root");
         }
         return true;
     }
@@ -1883,13 +2472,11 @@ bool RCStage3CoupledRelationEnginesReady(std::string* why)
     static_assert(!kRCStage3CoupledRelationEnginesReady,
                   "Do not enable without all eight proof-only engines");
     // BankDequantPagesV1 + GemmDotTilesV1 + BankSeedXofV1 + BankPageInclusionV1
-    // are real local engines (BankSeedXof/BankPageInclusion AirGaps cleared via
-    // measured prototypes). Exchange/Permutation/Mix/Extract still fail closed
-    // on ProofOnlyV1 recursive stubs; Barrier/Digest lack immutable AIRs;
-    // CommitmentOpeningBridge + RecursiveAggregation remain on every role.
-    return Fail(why,
-                "proof_engines_missing:exchange,permutation,mix,extract,"
-                "barrier,digest");
+    // + ExchangeStagesV1 + PermutationStagesV1 + MixArithmeticV1 are real local
+    // engines (schedule/XOF AirGaps cleared via measured prototypes). Extract
+    // still fails closed on ProofOnlyV1 recursive stubs; Barrier/Digest lack
+    // immutable AIRs; CommitmentOpeningBridge + RecursiveAggregation remain.
+    return Fail(why, "proof_engines_missing:extract,barrier,digest");
 }
 
 } // namespace matmul::v4::rc

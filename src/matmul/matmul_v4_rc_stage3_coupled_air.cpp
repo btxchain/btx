@@ -476,9 +476,12 @@ bool ResolveRCStage3CoupledAir(const RCStage3CoupledAirRequest& request,
         out.constraint_system_available = true;
         out.local_kernel_complete = true;
         out.coverage.kernel = *counts;
-        Gap(out, RCStage3CoupledAirGapCode::PublicScheduleBinding,
-            "fixed segment and material-exchange row indices lack proof-bound schedule columns");
-        if (request.shape.exchange_rounds != 0) {
+        if (!kRCStage3CoupledExchangeSchedulePrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::PublicScheduleBinding,
+                "fixed segment and material-exchange row indices lack proof-bound schedule columns");
+        }
+        if (request.shape.exchange_rounds != 0 &&
+            !kRCStage3CoupledMaterialExchangeHashXofPrototypeExecuted) {
             Gap(out, RCStage3CoupledAirGapCode::MaterialExchangeHashXof,
                 "dependency-linked exchange seed SHA-XOF and XOR rounds lack an AIR");
         }
@@ -489,16 +492,20 @@ bool ResolveRCStage3CoupledAir(const RCStage3CoupledAirRequest& request,
         out.constraint_system_available = true;
         out.local_kernel_complete = true;
         out.coverage.kernel = *counts;
-        Gap(out, RCStage3CoupledAirGapCode::PublicScheduleBinding,
-            "bit-affine source/destination index evaluation is not pinned into this AIR");
+        if (!kRCStage3CoupledPermutationSchedulePrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::PublicScheduleBinding,
+                "bit-affine source/destination index evaluation is not pinned into this AIR");
+        }
         break;
     case RCStage3RelationRole::CoupledMix:
         out.constraints = BuildMixKernel();
         out.constraint_system_available = true;
         out.local_kernel_complete = true;
         out.coverage.kernel = *counts;
-        Gap(out, RCStage3CoupledAirGapCode::PublicScheduleBinding,
-            "butterfly stage pairing, rotate-mask indices, and pattern order are not proof-bound");
+        if (!kRCStage3CoupledMixSchedulePrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::PublicScheduleBinding,
+                "butterfly stage pairing, rotate-mask indices, and pattern order are not proof-bound");
+        }
         break;
     case RCStage3RelationRole::CoupledExtract: {
         const gkr_air::TableTM tm;

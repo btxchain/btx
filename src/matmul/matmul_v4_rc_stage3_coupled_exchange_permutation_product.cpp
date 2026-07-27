@@ -1632,7 +1632,7 @@ ValidateRCStage3CoupledExchangePermutationProductSchedule(
     return true;
 }
 
-bool VerifyRCStage3CoupledExchangePermutationProduct(
+bool VerifyRCStage3CoupledExchangeStages(
     const RCStage3SuccinctProof& statement,
     const RCStage3CoupledShape& shape,
     const RCStage3CoupledExchangePermutationProduct& product,
@@ -1666,6 +1666,19 @@ bool VerifyRCStage3CoupledExchangePermutationProduct(
             }
         }
     }
+    return true;
+}
+
+bool VerifyRCStage3CoupledPermutationStages(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationProduct& product,
+    std::string* why)
+{
+    if (!ValidateRCStage3CoupledExchangePermutationProductSchedule(
+            statement, shape, product, why)) {
+        return false;
+    }
     for (const auto& stage : product.permutation_stages) {
         if (!VerifyAir(
                 stage.pin,
@@ -1675,6 +1688,18 @@ bool VerifyRCStage3CoupledExchangePermutationProduct(
         }
     }
     return true;
+}
+
+bool VerifyRCStage3CoupledExchangePermutationProduct(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationProduct& product,
+    std::string* why)
+{
+    return VerifyRCStage3CoupledExchangeStages(
+               statement, shape, product, why) &&
+           VerifyRCStage3CoupledPermutationStages(
+               statement, shape, product, why);
 }
 
 RCStage3CoupledExchangePermutationProductAudit

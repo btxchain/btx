@@ -241,7 +241,12 @@ BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_without_proof_only_engines)
     BOOST_CHECK(why.find("proof_engines_missing") != std::string::npos);
     BOOST_CHECK(why.find("bank_seed_xof") == std::string::npos);
     BOOST_CHECK(why.find("bank_page_inclusion") == std::string::npos);
-    BOOST_CHECK(why.find("exchange") != std::string::npos);
+    BOOST_CHECK(why.find("exchange") == std::string::npos);
+    BOOST_CHECK(why.find("permutation") == std::string::npos);
+    BOOST_CHECK(why.find("mix") == std::string::npos);
+    BOOST_CHECK(why.find("extract") != std::string::npos);
+    BOOST_CHECK(why.find("barrier") != std::string::npos);
+    BOOST_CHECK(why.find("digest") != std::string::npos);
     BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(proof, &why));
     BOOST_CHECK(why.find("coupled:bank:recursive_decode") !=
                 std::string::npos);
@@ -1040,6 +1045,166 @@ BOOST_AUTO_TEST_CASE(coupled_bank_seed_xof_engine_opt_in_roundtrip)
         why);
     BOOST_CHECK(verified == trace_root);
     BOOST_TEST_MESSAGE("BankSeedXofV1 engine_bytes=" << receipt.size());
+}
+
+namespace {
+
+rc::RCStage3CoupledShape MakeMixExchangeEngineTestShape()
+{
+    rc::RCStage3CoupledShape out;
+    out.barriers = 4;
+    out.lobes = 1;
+    out.lobe_width = 32;
+    out.bank_pages = 1;
+    out.rows_per_lobe = 1;
+    out.pages_per_barrier_lobe = 1;
+    out.transcript_version = rc::ENC_RC_V4;
+    out.full_bank_schedule = true;
+    out.material_exchange = true;
+    out.exchange_rows = 32;
+    out.exchange_rounds = 0;
+    return out;
+}
+
+rc::RCStage3SuccinctProof MakeMixExchangeEngineStatement(
+    const rc::RCStage3CoupledShape& shape)
+{
+    rc::RCStage3SuccinctProof out;
+    out.statement = rc::RCStage3StatementKind::Coupled;
+    out.public_inputs.height = 811;
+    out.public_inputs.n_bits = 0x207fffffU;
+    out.public_inputs.coupled_profile = 4;
+    out.public_inputs.transcript_version = shape.transcript_version;
+    out.public_inputs.header_commitment = Filled(0x11);
+    out.public_inputs.params_commitment = Filled(0x22);
+    out.public_inputs.target = Filled(0xff);
+    out.public_inputs.sigma = Filled(0x33);
+    out.public_inputs.coupled_digest = Filled(0x44);
+    out.public_inputs.final_digest = Filled(0x44);
+    return out;
+}
+
+std::vector<int64_t> SaltedValues(uint32_t count, uint64_t salt)
+{
+    std::vector<int64_t> out(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint64_t bits =
+            (salt << 48) ^ (uint64_t{i} * UINT64_C(0x9e3779b97f4a7c15));
+        out[i] = static_cast<int64_t>(bits);
+    }
+    return out;
+}
+
+rc::RCStage3CoupledExchangePermutationOpening MakeExchangePermOpening(
+    const rc::RCStage3CoupledShape& shape)
+{
+    rc::RCStage3CoupledExchangePermutationOpening out;
+    const uint32_t lobe_cells = shape.rows_per_lobe * shape.lobe_width;
+    const uint32_t state_cells = shape.lobes * lobe_cells;
+    for (uint32_t barrier = 0; barrier < shape.barriers; ++barrier) {
+        for (uint32_t lobe = 0; lobe < shape.lobes; ++lobe) {
+            out.fixed_exchange_inputs.push_back(
+                SaltedValues(lobe_cells, 10 + barrier * 3 + lobe));
+        }
+        for (uint32_t round = 0; round < shape.exchange_rounds; ++round) {
+            out.material_exchange_inputs.push_back(
+                SaltedValues(state_cells, 40 + barrier * 7 + round));
+        }
+        out.permutation_inputs.push_back(SaltedValues(state_cells, 80 + barrier));
+    }
+    return out;
+}
+
+std::vector<std::vector<int64_t>> MakeMixInputs(const rc::RCStage3CoupledShape& shape)
+{
+    const uint32_t state_cells = shape.lobes * shape.rows_per_lobe * shape.lobe_width;
+    std::vector<std::vector<int64_t>> out(shape.barriers, std::vector<int64_t>(state_cells));
+    for (uint32_t barrier = 0; barrier < shape.barriers; ++barrier) {
+        for (uint32_t i = 0; i < state_cells; ++i) {
+            out[barrier][i] = int64_t{barrier} * 100 + int64_t{i} - 16;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(coupled_exchange_permutation_engines_roundtrip)
+{
+    const auto shape = MakeMixExchangeEngineTestShape();
+    const auto statement = MakeMixExchangeEngineStatement(shape);
+    const auto opening = MakeExchangePermOpening(shape);
+    std::string why;
+
+    std::vector<unsigned char> exchange_receipt;
+    uint256 exchange_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledExchangeEngineReceipt(
+            statement, shape, opening, exchange_receipt, exchange_root, &why),
+        why);
+    uint256 exchange_verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledExchangeEngineReceipt(
+            statement, shape, exchange_receipt, exchange_verified, &why),
+        why);
+    BOOST_CHECK(exchange_verified == exchange_root);
+    auto bad_ex = exchange_receipt;
+    bad_ex.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledExchangeEngineReceipt(
+        statement, shape, bad_ex, exchange_verified, &why));
+
+    std::vector<unsigned char> perm_receipt;
+    uint256 perm_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledPermutationEngineReceipt(
+            statement, shape, opening, perm_receipt, perm_root, &why),
+        why);
+    uint256 perm_verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledPermutationEngineReceipt(
+            statement, shape, perm_receipt, perm_verified, &why),
+        why);
+    BOOST_CHECK(perm_verified == perm_root);
+    auto bad_perm = perm_receipt;
+    bad_perm.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledPermutationEngineReceipt(
+        statement, shape, bad_perm, perm_verified, &why));
+
+    BOOST_TEST_MESSAGE("ExchangeStagesV1 bytes=" << exchange_receipt.size());
+    BOOST_TEST_MESSAGE("PermutationStagesV1 bytes=" << perm_receipt.size());
+}
+
+BOOST_AUTO_TEST_CASE(coupled_mix_engine_opt_in_roundtrip)
+{
+    // MixArithmeticV1 prove is ~14min / ~1.2GiB on the toy 4×32 shape
+    // (same cost as mix_product_tests::full_seed_and_arithmetic_proofs_*).
+    if (std::getenv("BTX_RUN_STAGE3_MIX_ENGINE") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_MIX_ENGINE=1 to run MixArithmeticV1 "
+            "engine roundtrip under MemoryMax≥40G");
+        return;
+    }
+    const auto shape = MakeMixExchangeEngineTestShape();
+    const auto statement = MakeMixExchangeEngineStatement(shape);
+    const auto mix_inputs = MakeMixInputs(shape);
+    std::string why;
+    std::vector<unsigned char> mix_receipt;
+    uint256 mix_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledMixEngineReceipt(
+            statement, shape, mix_inputs, mix_receipt, mix_root, &why),
+        why);
+    uint256 mix_verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledMixEngineReceipt(
+            statement, shape, mix_receipt, mix_verified, &why),
+        why);
+    BOOST_CHECK(mix_verified == mix_root);
+    auto bad_mix = mix_receipt;
+    bad_mix.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledMixEngineReceipt(
+        statement, shape, bad_mix, mix_verified, &why));
+    BOOST_TEST_MESSAGE("MixArithmeticV1 bytes=" << mix_receipt.size());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
