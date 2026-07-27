@@ -22,8 +22,8 @@
 // BuildProductionProgramRegistryV1 was a *_tests.cpp file constructing those
 // stubs (`OneColumnProgram`).
 //
-// This module is the first PRODUCTION (non-test) family-source builder. For
-// every one of the 28 manifest sites it emits either:
+// This is the PRODUCTION (non-test) family-source builder. For every one of
+// the 28 manifest sites it emits either:
 //
 //   (a) a REAL ProgramTable, reused byte-for-byte from an existing,
 //       independently unit-tested role_bytecode.{h,cpp} builder that is
@@ -71,6 +71,28 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::EpisodeTileTreeStream only; LeafHash,
      * InternalHash and Root remain unclosed by any family. */
     EpisodeTileTreeStreamByteBridge = 3,
+    /** BuildRCStage3EpisodeLocalKernelProgramTable(GemmEndpointFp3V1): the
+     * one-constraint gf=a*b identity that is the terminal check of the GKR
+     * sumcheck reduction, already exercised in production by
+     * ResolveRCStage3EpisodeAirConstraintSystem / VerifyRCStage3EpisodeAirShard.
+     * Closes RCStage3RelationEndpoint::EpisodeGemmSumcheck only; OperandA,
+     * OperandB, OutputY and SignedRange remain unclosed by any family. */
+    EpisodeGemmSumcheckEndpoint = 4,
+    /** BuildRCStage3EpisodeLocalKernelProgramTable(WiringEqualityFp3V1): the
+     * one-constraint direct row-copy equality u=v, already exercised in
+     * production by the same AIR-shard verifier as the Gemm endpoint above.
+     * Closes RCStage3RelationEndpoint::EpisodeWiringCopy only; Transpose,
+     * Residual and RoundOrder remain unclosed by any family. */
+    EpisodeWiringCopyEquality = 5,
+    /** BuildRCStage3EpisodeExtractLocalKernelProgramTable(scale_e=0): the
+     * complete 47-constraint, 40-column RcSampler relation as bytecode
+     * (bit-identical to air_quotient::BuildRcSamplerConstraintSystem),
+     * already exercised in production by the same AIR-shard verifier
+     * (ResolveRCStage3EpisodeAirConstraintSystem's ExtractSamplerCoreFp3V1
+     * case delegates to this exact builder at scale_e=0).
+     * Closes RCStage3RelationEndpoint::EpisodeExtractSampler only; Input,
+     * ChaCha, Scale and Output remain unclosed by any family. */
+    EpisodeExtractSamplerCore = 6,
 };
 
 /**
