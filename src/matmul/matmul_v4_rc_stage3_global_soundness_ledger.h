@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 
 #include <cstdint>
+#include <matmul/matmul_v4_rc_fri.h>
 #include <string>
 #include <vector>
 
@@ -97,6 +98,24 @@ inline constexpr uint64_t
 /** Parent columns observed on the measured FOUR_SLOT_SHAPE. */
 inline constexpr uint32_t
     kRCStage3ParentOwnFriFullArityMeasuredParentColumns = 17012;
+
+/**
+ * Mandatory-family V_CS root FRI serialize budget (codec residual).
+ *
+ * Episode recursion prototypes measure a row-vals lower bound BEFORE allocate
+ * (Builder ~379 MiB / Wiring ~575 MiB / Extract ~836 MiB at Q=192) against
+ * kRCFriMaxProofBytesHard (16 MiB). Soft-fail is correct for engine evidence,
+ * but that size residual is NOT ProductionPerformanceUnmeasured (g2 verify
+ * wall-clock) and was previously ORPHANED from CompositionReadinessGateV1.
+ *
+ * Pin the worst measured lower bound (Extract). Flip to a true within-budget
+ * measurement only after a mandatory-family root actually serializes ≤ 16 MiB.
+ */
+inline constexpr uint64_t
+    kRCStage3MeasuredExtractRootBatchRowValsLowerBoundBytes = 835'771'392ULL;
+inline constexpr bool kRCStage3MandatoryFamilyRootSerializeWithinFriBudgetMeasured =
+    kRCStage3MeasuredExtractRootBatchRowValsLowerBoundBytes <=
+    static_cast<uint64_t>(kRCFriMaxProofBytesHard);
 
 /**
  * g5 (self-similar fixed point), first conjunct: whether the full-arity
@@ -265,7 +284,13 @@ struct ExecutableRelationRowsPolicyScenarioV1 {
  *                                          inside the 900 ms relay budget
  *                                          (CurrentRCStage3TwoLevelRootVerify-
  *                                           BudgetV1().within_relay_budget)
- *                                       The last two are g2's OWN blockers:
+ *                                       && mandatory-family root FRI serialize
+ *                                          is within kRCFriMaxProofBytesHard
+ *                                          (kRCStage3MandatoryFamilyRoot-
+ *                                           SerializeWithinFriBudgetMeasured;
+ *                                          codec residual, NOT verify wall-
+ *                                          clock — previously orphaned)
+ *                                       The last three are g2's OWN blockers:
  *                                       without them g2 reduced entirely to
  *                                       "constant && gate 4".
  *   3 fri_alg_formal_soundness_ready    kRCFri3AlgFormalSoundnessReady

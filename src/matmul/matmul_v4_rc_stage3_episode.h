@@ -202,8 +202,12 @@ inline constexpr bool kRCStage3EpisodeWiringRecursionEnginesExecuted = true;
 
 /** Separate readiness predicate for root composition. True iff Gaps().empty():
  * every required episode role's recursion engines measured via
- * matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp. Soft FRI root
- * serialize over-budget is ProductionPerformanceUnmeasured, not a Ready block. */
+ * matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp.
+ * Soft FRI root serialize over kRCFriMaxProofBytesHard (~16 MiB) is deliberately
+ * NOT a Ready block, but it is ALSO NOT ProductionPerformanceUnmeasured: that
+ * gap / g2's within_relay_budget tracks two-level root VERIFY wall-clock only.
+ * Codec-size over-budget is currently an unrepresented completeness residual
+ * outside CompositionReadinessGateV1 — do not claim g2 covers it. */
 inline constexpr bool kRCStage3EpisodeRelationsReady = true;
 [[nodiscard]] constexpr bool RCStage3EpisodeRelationsReady()
 {

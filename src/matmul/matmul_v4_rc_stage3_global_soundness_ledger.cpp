@@ -966,11 +966,19 @@ AssessExecutableGlobalSoundnessLedgerV1(
     }
     const bool two_level_root_verify_within_budget =
         CurrentRCStage3TwoLevelRootVerifyBudgetV1().within_relay_budget;
+    // Codec-size residual (FRI hard proof-byte budget). Distinct from
+    // ProductionPerformanceUnmeasured / within_relay_budget (verify wall-
+    // clock). Measured Extract root-batch row-vals lower bound ≫ 16 MiB, so
+    // this conjunct stays fail-closed until a within-budget serialize is
+    // remeasured and the pin flipped.
+    const bool mandatory_family_root_serialize_within_fri_budget =
+        kRCStage3MandatoryFamilyRootSerializeWithinFriBudgetMeasured;
     const bool gate2_recursive_aggregation =
         kRCStage3RecursiveAggregationReady &&
         out.fiat_shamir_replay_complete &&
         composed_registry_closable &&
-        two_level_root_verify_within_budget;
+        two_level_root_verify_within_budget &&
+        mandatory_family_root_serialize_within_fri_budget;
 
     const bool dependency_gates_0_to_5 =
         gate0_mathematical_verifier &&

@@ -196,9 +196,11 @@ RecursionPrototypeDriveResult DriveEpisodeRoleRecursionPrototype(
     // READINESS first: this is the measured episode-lane evidence behind the
     // kRCStage3Episode*RecursionEnginesExecuted flags. Canonical wire
     // serialization of the mandatory-family V_CS root can independently exceed
-    // kRCFriMaxProofBytesHard (a shared codec/budget residual already tracked
-    // via ProductionPerformanceUnmeasured) — do not treat that as an
-    // episode-role engine failure.
+    // kRCFriMaxProofBytesHard (~16 MiB). That codec residual is NOT covered by
+    // ProductionPerformanceUnmeasured / g2 within_relay_budget (verify wall-
+    // clock only); the ledger now conjoins an explicit serialize-within-budget
+    // measured pin into g2. Do not treat soft-fail as an episode-role engine
+    // failure.
     out.readiness = AssessRCStage3RecursiveReadiness(statement, out.carrier);
     BOOST_CHECK(out.readiness.structurally_valid);
     BOOST_CHECK(out.readiness.mandatory_families);
