@@ -697,6 +697,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_registry_vm_same_parent_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_p2_transcript.cpp
   matmul/matmul_v4_rc_stage3_multirow_p2_consumer_bridge.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_proof_abi.cpp
   matmul/matmul_v4_rc_stage3_poseidon_air.cpp
   matmul/matmul_v4_rc_stage3_poseidon_bytecode.cpp
   matmul/matmul_v4_rc_stage3_v5_v6_bus.cpp

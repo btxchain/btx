@@ -97,7 +97,6 @@ public:
     }
 
     [[nodiscard]] bool Decoding() const { return m_in != nullptr; }
-    [[nodiscard]] bool Good() const { return m_good; }
     [[nodiscard]] const std::string& Why() const { return m_why; }
     [[nodiscard]] const std::vector<SourceCellV1>& Sources() const
     {
