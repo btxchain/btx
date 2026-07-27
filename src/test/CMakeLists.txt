@@ -164,6 +164,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_recursive_site_inventory_tests.cpp
   matmul_v4_rc_stage3_recursive_consumption_tests.cpp
   matmul_v4_rc_stage3_recursive_fixedpoint_tests.cpp
+  matmul_v4_rc_stage3_recursive_receipt_tests.cpp
   matmul_v4_rc_stage3_relation_local_sharding_tests.cpp
   matmul_v4_rc_stage3_mlink_tests.cpp
   matmul_v4_rc_stage3_family_vm_tests.cpp
