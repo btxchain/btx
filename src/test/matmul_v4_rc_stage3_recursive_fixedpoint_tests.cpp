@@ -1213,14 +1213,14 @@ BOOST_AUTO_TEST_CASE(
         migrated.child.proof.batch.queries.size() *
             instruction_count);
     BOOST_CHECK_EQUAL(joined.combined.n_rows, 8192U);
-    BOOST_CHECK_EQUAL(joined.combined.n_columns, 639U);
+    BOOST_CHECK_EQUAL(joined.combined.n_columns, 640U);
 
     const fp::NormalizedParentProofPreflight preflight =
         fp::AssessNormalizedParentProofPreflight(
             joined.combined);
     BOOST_REQUIRE_MESSAGE(preflight.valid, preflight.note);
     BOOST_CHECK_EQUAL(preflight.trace_rows, 8192U);
-    BOOST_CHECK_EQUAL(preflight.trace_columns, 639U);
+    BOOST_CHECK_EQUAL(preflight.trace_columns, 640U);
     BOOST_CHECK_EQUAL(
         preflight.constraints,
         joined.combined.constraints.size());
@@ -1233,19 +1233,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(preflight.n_lde, 524288U);
     BOOST_CHECK_EQUAL(preflight.queries, 192U);
     BOOST_CHECK_EQUAL(
-        preflight.raw_trace_bytes, 125632512U);
+        preflight.raw_trace_bytes, 125829120U);
     BOOST_CHECK_EQUAL(
         preflight.minimum_batch_row_value_bytes,
-        2949120U);
+        2953728U);
     BOOST_CHECK_EQUAL(
         preflight.minimum_next_row_value_bytes,
-        2949120U);
+        2953728U);
     BOOST_CHECK_EQUAL(
         preflight.minimum_total_row_value_bytes,
-        5898240U);
+        5907456U);
     BOOST_CHECK_EQUAL(
         preflight.current_batch_lde_bytes,
-        UINT64_C(8053063680));
+        UINT64_C(8065646592));
     BOOST_CHECK(preflight.degree_supported);
     BOOST_CHECK(preflight.lde_supported);
     BOOST_CHECK(preflight.backend_columns_supported);
@@ -1268,7 +1268,7 @@ BOOST_AUTO_TEST_CASE(
         !preflight.missing_streaming_callback.empty());
 
     // The previous complete EpisodeDigest attachment is a real 32,768-row,
-    // 639-column normalized parent. Apply the same live constraint inventory
+    // 640-column normalized parent. Apply the same live constraint inventory
     // at that production-fixed-point row shape without allocating its trace.
     auto production_shape_cs = joined.combined;
     production_shape_cs.n_rows = 32768;
@@ -1282,7 +1282,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         production_preflight.trace_rows, 32768U);
     BOOST_CHECK_EQUAL(
-        production_preflight.trace_columns, 639U);
+        production_preflight.trace_columns, 640U);
     BOOST_CHECK_EQUAL(
         production_preflight.max_composed_degree,
         131069U);
@@ -1296,13 +1296,13 @@ BOOST_AUTO_TEST_CASE(
         production_preflight.n_lde, 2097152U);
     BOOST_CHECK_EQUAL(
         production_preflight.raw_trace_bytes,
-        502530048U);
+        503316480U);
     BOOST_CHECK_EQUAL(
         production_preflight.minimum_total_row_value_bytes,
-        5898240U);
+        5907456U);
     BOOST_CHECK_EQUAL(
         production_preflight.current_batch_lde_bytes,
-        UINT64_C(32212254720));
+        UINT64_C(32262586368));
     BOOST_CHECK(
         !production_preflight.safe_to_execute_current_prover);
 
@@ -1437,7 +1437,7 @@ BOOST_AUTO_TEST_CASE(
         execution.slot.normalized_semantic_root);
     BOOST_CHECK(
         !interpreter.role_semantic_root_terminal_equality);
-    BOOST_CHECK_EQUAL(joined.combined.n_columns, 647U);
+    BOOST_CHECK_EQUAL(joined.combined.n_columns, 648U);
     BOOST_CHECK_EQUAL(joined.combined.constraints.size(), 622U);
     BOOST_CHECK_EQUAL(joined.violations, 0U);
     const auto alg_hash_audit =
@@ -1504,7 +1504,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         capability.child_relation_constraints, 5U);
     BOOST_CHECK_EQUAL(capability.parent_rows, 8192U);
-    BOOST_CHECK_EQUAL(capability.parent_columns, 647U);
+    BOOST_CHECK_EQUAL(capability.parent_columns, 648U);
     BOOST_CHECK_EQUAL(capability.parent_constraints, 622U);
     BOOST_CHECK(
         capability.native_child_host_verified);
@@ -3833,7 +3833,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(
         interpreter.valid, interpreter.note);
     BOOST_REQUIRE_EQUAL(joined.combined.n_rows, 8192U);
-    BOOST_REQUIRE_EQUAL(joined.combined.n_columns, 639U);
+    BOOST_REQUIRE_EQUAL(joined.combined.n_columns, 640U);
     BOOST_REQUIRE_EQUAL(
         joined.columns.size(),
         joined.combined.n_columns);

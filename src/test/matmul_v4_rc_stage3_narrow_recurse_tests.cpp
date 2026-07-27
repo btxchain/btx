@@ -14,9 +14,24 @@
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_stage3.h>
+#include <matmul/matmul_v4_rc_stage3_hash_air.h>
+#include <matmul/matmul_v4_rc_stage3_role_sections.h>
+#include <pow.h>
+#include <primitives/block.h>
+#include <streams.h>
+#include <test/util/setup_common.h>
+#include <util/strencodings.h>
+
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -1357,6 +1372,87 @@ BOOST_AUTO_TEST_CASE(
     }
 }
 
+// ---------------------------------------------------------------------------
+// ARITY-2 NARROW NODE, fast toy children. Two INDEPENDENT real role children,
+// each with its own constraint system and its own Fiat-Shamir seed, packed into
+// ONE V_CS, proved once and verified once by the real unmodified verifier.
+//
+// The load-bearing claims are (a) the column count does not move at all when a
+// second child is added, and (b) the node is decided by the FRI/AIR verifier.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(narrow_node_packs_two_real_children_into_one_root)
+{
+    const RealRoleChild a = RealHeaderTargetChild(0x71);
+    const RealRoleChild b = RealHeaderTargetChild(0x7b);
+
+    const fpx::FoldBusComposition single =
+        fpx::BuildFoldBusComposition(a.cs, a.proof, a.seed);
+    BOOST_REQUIRE_MESSAGE(single.valid, single.note);
+
+    const fpx::FoldBusComposition node =
+        fpx::BuildFoldBusCompositionMulti(
+            {a.cs, b.cs}, {a.proof, b.proof}, {a.seed, b.seed});
+    BOOST_REQUIRE_MESSAGE(node.valid, node.note);
+    BOOST_CHECK_EQUAL(node.violations, 0U);
+
+    // (a) ZERO column expansion per child.
+    BOOST_CHECK_EQUAL(node.combined.n_columns,
+                      single.combined.n_columns);
+    BOOST_CHECK_GE(node.combined.n_rows, single.combined.n_rows);
+    uint32_t node_degree = 1;
+    for (const auto& constraint : node.combined.constraints) {
+        node_degree = std::max(node_degree, constraint.alg_degree);
+    }
+    BOOST_TEST_MESSAGE(
+        "NARROW_ARITY2 single_cols=" << single.combined.n_columns
+        << " single_rows=" << single.combined.n_rows
+        << " node_cols=" << node.combined.n_columns
+        << " node_rows=" << node.combined.n_rows
+        << " node_max_degree=" << node_degree
+        << " fold_pairs=" << node.fold_pairs);
+    BOOST_CHECK_EQUAL(node_degree, 3U);
+
+    const uint256 node_seed = NarrowSeed(0xa1);
+    const auto proved = aq::AirQuotientProveRows(
+        node.combined, node.columns, node_seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok && proved.division_exact,
+                          proved.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRows(
+            node.combined, proved.proof, node_seed, &why),
+        why);
+
+    // (b) proof-level rejects, decided by the verifier.
+    BOOST_CHECK(!aq::AirQuotientVerifyRows(
+        node.combined, proved.proof, NarrowSeed(0xa2), nullptr));
+    {
+        auto tampered = proved.proof;
+        tampered.batch.final_value =
+            gfx::Add(tampered.batch.final_value, gfx::Fp3::One());
+        BOOST_CHECK(!aq::AirQuotientVerifyRows(
+            node.combined, tampered, node_seed, nullptr));
+    }
+    // A node built from a TAMPERED second child must not produce an accepted
+    // node: the fail-closed native check refuses it before any witness exists.
+    {
+        RealRoleChild bad = b;
+        BOOST_REQUIRE(!bad.proof.batch.queries.empty());
+        BOOST_REQUIRE(!bad.proof.batch.queries[0].row.values.empty());
+        bad.proof.batch.queries[0].row.values[0] =
+            gfx::Add(bad.proof.batch.queries[0].row.values[0],
+                     gfx::Fp3::One());
+        const fpx::FoldBusComposition bad_node =
+            fpx::BuildFoldBusCompositionMulti(
+                {a.cs, bad.cs}, {a.proof, bad.proof},
+                {a.seed, bad.seed});
+        BOOST_CHECK(!bad_node.valid);
+        BOOST_TEST_MESSAGE(
+            "NARROW_ARITY2_REJECT tampered_second_child why=\""
+            << bad_node.note << "\"");
+    }
+}
+
 // The real role whose FULL-WIDE parent was measured at 384,984 columns. This
 // case measures what the narrow construction does with the same child; it
 // proves the parent only when the LDE stays inside a bounded screen, and
@@ -1446,6 +1542,667 @@ BOOST_AUTO_TEST_CASE(
         "NARROW_REAL_CHILD_PROOF child=CoupledPermutation"
         << " batch_bytes=" << batch_bytes
         << " total_proof_bytes=" << proof_bytes);
+}
+
+BOOST_AUTO_TEST_SUITE_END()
+
+// ===========================================================================
+// REAL BLOCK -> NARROW ROOT.
+//
+// Everything above drives the narrow construction on synthetic or single-role
+// children. This suite drives it on the SIX REAL role-section proofs of a REAL
+// mined ENC_RC block, which is the artifact the whole Stage-3 pipeline exists
+// to produce.
+//
+// The block is not read from a file: the default fixture below is byte-identical
+// to `getblock <hash> 0` at height 102 of /home/administrator/rcepisode-chain
+// (RPC 19335), and BTX_REAL_BLOCK_HEADER_HEX overrides it with any RPC-fetched
+// 182-byte header. The statement is only accepted when the locally recomputed
+// episode digest equals header.matmul_digest, so it rests on two sources.
+//
+// Nothing here flips a readiness constant, weakens a check or raises a cap.
+// ===========================================================================
+
+BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_stage3_narrow_block_root_tests,
+                         BasicTestingSetup)
+
+namespace {
+
+using BlkRole = rcx::RCStage3RelationRole;
+using BlkAlgB3 = aq::AirFriBackendAlg<gfx::Fp3>;
+
+uint256 BlkSeed(unsigned char byte)
+{
+    uint256 out;
+    std::fill(out.begin(), out.end(), byte);
+    return out;
+}
+
+//! Real ENC_RC block header, height 102 of /home/administrator/rcepisode-chain.
+//! Verified byte-identical to the node's own `getblockheader <hash> false`.
+const char* kBlkRealHeader102Hex =
+    "0000002091d3c0b1f4b3c49c81c32a9438212765d05ea559a7326658f9a9a246c60352"
+    "cbf8bbf554af210e9eb0c117aacbbca4d0268c52ab1603936efc9109cc3034c6463e08"
+    "666affff7f200000000000000000b7f9cfe3f9719c351f163b56fe4bcd154c7e906190"
+    "47e17f17127c6e77a71607000137cd0e9194be5ef03c797c0b2eaf62be9aca9cea2157"
+    "286921dff19ff0f2c747da8835c1811ed0d18214845c2493871ebc1ce3e638cbd7b6d0"
+    "a608fa5c5bd7ed";
+
+bool BlkEnabled() { return std::getenv("BTX_RUN_BLK_NARROW") != nullptr; }
+
+uint32_t BlkEnvU32(const char* name, uint32_t fallback)
+{
+    const char* raw = std::getenv(name);
+    if (raw == nullptr) return fallback;
+    return static_cast<uint32_t>(std::strtoul(raw, nullptr, 10));
+}
+
+CBlockHeader BlkRealHeader(bool& ok, int32_t& height)
+{
+    CBlockHeader header;
+    ok = false;
+    const char* env_hex = std::getenv("BTX_REAL_BLOCK_HEADER_HEX");
+    const std::string hex = env_hex != nullptr ? std::string(env_hex)
+                                               : std::string(kBlkRealHeader102Hex);
+    height = static_cast<int32_t>(BlkEnvU32("BTX_REAL_BLOCK_HEIGHT", 102));
+    const auto bytes = TryParseHex<unsigned char>(hex);
+    if (!bytes.has_value()) return header;
+    try {
+        DataStream stream{*bytes};
+        stream >> header;
+        ok = true;
+    } catch (const std::exception&) {
+        ok = false;
+    }
+    return header;
+}
+
+//! Consensus params of the RC chain the header came from, with a PLACEHOLDER
+//! ProgramTable pin (the real registry roots are unconfigured on every network;
+//! that is a separate activation blocker and is not touched here).
+Consensus::Params BlkRcChainParams()
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 101;
+    p.nMatMulRCCoupledHeight = 1'000'000;
+    p.nMatMulRCProfile = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+    uint256 alg, sha, bind;
+    for (int i = 0; i < 32; ++i) {
+        alg.data()[i] = 0x08;
+        sha.data()[i] = 0x09;
+        bind.data()[i] = 0x0a;
+    }
+    p.hashMatMulRCStage3ProgramRegistryAlgRoot = alg;
+    p.hashMatMulRCStage3ProgramRegistryShaAuditRoot = sha;
+    p.hashMatMulRCStage3ProgramRegistryBinding = bind;
+    return p;
+}
+
+std::array<uint32_t, 8> BlkRoot8(const uint256& h)
+{
+    std::array<uint32_t, 8> r{};
+    const unsigned char* b = h.begin();
+    for (int j = 0; j < 8; ++j) {
+        r[j] = static_cast<uint32_t>(b[4 * j]) |
+               (static_cast<uint32_t>(b[4 * j + 1]) << 8) |
+               (static_cast<uint32_t>(b[4 * j + 2]) << 16) |
+               (static_cast<uint32_t>(b[4 * j + 3]) << 24);
+    }
+    return r;
+}
+
+/** The six EPISODE role C_rho products, every operand from the REAL episode.
+ *  Identical to the producer-e2e lane's BuildEpisodeRoleProducts. */
+std::vector<rcx::RCStage3RoleAirProduct> BlkBuildEpisodeRoleProducts(
+    const CBlockHeader& header,
+    const rcx::RCEpisodeParams& episode,
+    const std::vector<rcx::RCRoundTranscript>& rounds,
+    const std::vector<uint256>& round_roots,
+    const uint256& mined_digest,
+    const uint256& header_commitment,
+    const uint256& target,
+    const matmul::v4::rc::stage3_hash_air::TileTreeManifest& tt)
+{
+    std::vector<rcx::RCStage3RoleAirProduct> out;
+    {
+        const std::vector<gfx::Fp3> open = {
+            gfx::Fp3::FromFp(gfx::FromU64(episode.rounds))};
+        const std::vector<std::array<uint32_t, 8>> sroots = {
+            BlkRoot8(header.seed_a), BlkRoot8(header.seed_b)};
+        out.push_back(rcx::BuildRCStage3NoKernelRoleAir(
+            BlkRole::EpisodeDeterministicBuilder, nullptr, &open, &sroots));
+    }
+    {
+        const int64_t a = static_cast<int64_t>(rounds[0].stream[0]);
+        const int64_t b = static_cast<int64_t>(
+            rounds[0].stream.size() > 1 ? rounds[0].stream[1]
+                                        : rounds[0].stream[0]);
+        const uint256 sr = round_roots[0];
+        out.push_back(rcx::BuildRCStage3EpisodeGemmRoleAir(nullptr, &a, &b, &sr));
+    }
+    {
+        auto sb = [&](size_t i) {
+            return gfx::FromSigned3(static_cast<int64_t>(
+                rounds[0].stream[i % rounds[0].stream.size()]));
+        };
+        const std::vector<gfx::Fp3> open = {sb(0), sb(2), sb(4), sb(6)};
+        const std::vector<std::array<uint32_t, 8>> sroots = {
+            BlkRoot8(round_roots[0])};
+        out.push_back(rcx::BuildRCStage3NoKernelRoleAir(
+            BlkRole::EpisodeExtract, nullptr, &open, &sroots));
+    }
+    {
+        const gfx::Fp3 cell =
+            gfx::FromSigned3(static_cast<int64_t>(rounds[0].stream[0]));
+        out.push_back(rcx::BuildRCStage3EpisodeWiringRoleAir(nullptr, &cell));
+    }
+    {
+        const uint256 internal =
+            tt.hash_nodes.empty() ? tt.root : tt.hash_nodes.back().digest;
+        const uint256 leaf0 =
+            tt.leaf_hashes.empty() ? tt.root : tt.leaf_hashes[0];
+        const std::vector<std::array<uint32_t, 8>> r8 = {
+            BlkRoot8(tt.commitment), BlkRoot8(leaf0), BlkRoot8(internal),
+            BlkRoot8(tt.root)};
+        out.push_back(rcx::BuildRCStage3PureStreamRoleAirFromRoots(
+            BlkRole::EpisodeTileTree, r8, nullptr));
+    }
+    {
+        const std::vector<std::array<uint32_t, 8>> r8 = {
+            BlkRoot8(round_roots[0]), BlkRoot8(mined_digest),
+            BlkRoot8(header_commitment), BlkRoot8(target)};
+        out.push_back(rcx::BuildRCStage3PureStreamRoleAirFromRoots(
+            BlkRole::EpisodeDigest, r8, nullptr));
+    }
+    return out;
+}
+
+/** One real role section of a real block, kept with everything the narrow
+ *  construction needs: the VERIFIER-REBUILT C_rho, the real FRI proof and the
+ *  statement-derived Fiat-Shamir seed. */
+struct BlkRealSection {
+    BlkRole role{};
+    std::string name;
+    rcx::RCStage3RoleAirSection section;
+    aq::AirConstraintSystem<gfx::Fp3> cs;
+    uint256 seed;
+    size_t encoded_bytes{0};
+    double prove_seconds{0.0};
+};
+
+/** Real block -> statement -> six proved, witness-free-verified role sections.
+ *  Fails the test (never returns a partial set) if any step does not hold. */
+struct BlkRealBlockSections {
+    rcx::RCStage3SuccinctProof statement;
+    std::vector<BlkRealSection> sections;
+    size_t total_section_bytes{0};
+    double total_prove_seconds{0.0};
+    uint256 episode_digest;
+    int32_t height{0};
+};
+
+BlkRealBlockSections BlkProveRealBlockSections()
+{
+    BlkRealBlockSections out;
+    bool ok{false};
+    int32_t height{0};
+    const CBlockHeader header = BlkRealHeader(ok, height);
+    BOOST_REQUIRE_MESSAGE(ok, "real block header did not deserialize");
+    out.height = height;
+
+    const Consensus::Params params = BlkRcChainParams();
+    BOOST_REQUIRE(params.IsMatMulRCFamilyActive(height));
+    const auto required = rcx::RequiredRCStage3Statement(params, height);
+    BOOST_REQUIRE(required.has_value());
+
+    const auto target_arith = DeriveTarget(header.nBits, params.powLimit);
+    BOOST_REQUIRE(target_arith.has_value());
+    const uint256 target = ArithToUint256(*target_arith);
+
+    const rcx::RCEpisodeParams episode =
+        rcx::ResolveRCEpisodeParams(params, height);
+    std::vector<rcx::RCRoundTranscript> rounds;
+    const uint256 digest = rcx::RecomputeResidentCurriculumReference(
+        header, episode, height, {}, &rounds);
+    BOOST_REQUIRE(!digest.IsNull());
+    BOOST_REQUIRE_EQUAL(rounds.size(), episode.rounds);
+    // TWO INDEPENDENT SOURCES: the locally recomputed episode digest must be
+    // the digest the miner committed in the header the node served.
+    BOOST_REQUIRE_MESSAGE(
+        digest == header.matmul_digest,
+        "recomputed episode digest " << digest.ToString()
+            << " != header.matmul_digest " << header.matmul_digest.ToString());
+    out.episode_digest = digest;
+
+    std::vector<uint256> round_roots;
+    for (const auto& r : rounds) round_roots.push_back(r.round_root);
+
+    matmul::v4::rc::stage3_hash_air::TileTreeManifest tt;
+    std::string why;
+    const std::vector<uint8_t> stream0(rounds[0].stream.begin(),
+                                       rounds[0].stream.end());
+    BOOST_REQUIRE_MESSAGE(
+        matmul::v4::rc::stage3_hash_air::BuildTileTreeManifest(
+            stream0, episode.T_leaf, tt, &why),
+        why);
+
+    rcx::ProductionProgramConsensusPinV1 pin;
+    pin.recursive_alg_hash_root =
+        params.hashMatMulRCStage3ProgramRegistryAlgRoot;
+    pin.external_sha256d_audit_root =
+        params.hashMatMulRCStage3ProgramRegistryShaAuditRoot;
+    pin.registry_binding = params.hashMatMulRCStage3ProgramRegistryBinding;
+    BOOST_REQUIRE_MESSAGE(
+        rcx::BuildRCStage3StatementForHeader(
+            header, params, height, *required, pin, digest, uint256{},
+            out.statement, &why),
+        why);
+
+    const auto products = BlkBuildEpisodeRoleProducts(
+        header, episode, rounds, round_roots, digest,
+        out.statement.public_inputs.header_commitment, target, tt);
+    for (const auto& product : products) {
+        BOOST_REQUIRE_MESSAGE(product.ok, product.note);
+    }
+
+    for (const auto& product : products) {
+        const auto proved =
+            rcx::ProveRCStage3RoleAirSection(out.statement, product);
+        BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+        BlkRealSection real;
+        real.role = product.role;
+        real.name = rcx::RCStage3RelationRoleName(product.role);
+        real.section = proved.section;
+        real.prove_seconds = proved.prove_seconds;
+        real.seed = rcx::ComputeRCStage3RoleAirSectionSeed(
+            out.statement, product.role);
+        // The VERIFIER's own rebuild, from section public pins only.
+        BOOST_REQUIRE_MESSAGE(
+            rcx::RebuildRCStage3RoleAirConstraintSystem(
+                proved.section, real.cs, &why),
+            why);
+        // And the real, unmodified witness-free section verifier.
+        BOOST_REQUIRE_MESSAGE(
+            rcx::VerifyRCStage3RoleAirSection(
+                out.statement, proved.section, &why),
+            why);
+        std::vector<unsigned char> encoded;
+        BOOST_REQUIRE(rcx::SerializeRCStage3RoleAirSection(
+            proved.section, encoded, &why));
+        real.encoded_bytes = encoded.size();
+        out.total_section_bytes += encoded.size();
+        out.total_prove_seconds += proved.prove_seconds;
+        out.sections.push_back(std::move(real));
+    }
+    BOOST_REQUIRE_EQUAL(out.sections.size(), 6U);
+    return out;
+}
+
+uint64_t BlkNextPow2(uint64_t n)
+{
+    uint64_t out = 1;
+    while (out < n) out <<= 1;
+    return out;
+}
+
+/** Exact serialized size of one narrow node proof: the alg batch codec plus the
+ *  row-wise trace commitment and the per-query next/trace openings. */
+template <typename Openings>
+uint64_t BlkMeasuredNodeProofBytes(
+    const rcx::Fri3AlgBatchProof& batch,
+    const Openings& next_openings,
+    uint64_t* batch_bytes_out)
+{
+    std::vector<unsigned char> encoded;
+    const size_t batch_bytes =
+        rcx::SerializeFri3AlgBatchProof(batch, encoded);
+    BOOST_REQUIRE_EQUAL(batch_bytes, encoded.size());
+    BOOST_REQUIRE_NE(batch_bytes, 0U);
+    if (batch_bytes_out != nullptr) *batch_bytes_out = batch_bytes;
+    uint64_t total = uint64_t{batch_bytes} + 32 + 4;
+    for (const auto& paths : next_openings) {
+        total += 4;
+        for (const auto& path : paths) {
+            total += 8;
+            total += uint64_t{path.values.size()} * 3 * sizeof(uint64_t);
+            total += uint64_t{path.siblings.size()} *
+                     rcx::alg_hash::kAlgHashDigestLen * sizeof(uint64_t);
+        }
+    }
+    return total;
+}
+
+/** Roles selected into the node, default "4,5" (tiletree + digest).
+ *  BTX_BLK_ROLES is a comma-separated list of indices into the canonical
+ *  six-role order: 0 builder, 1 gemm, 2 extract, 3 wiring, 4 tiletree,
+ *  5 digest. */
+std::vector<uint32_t> BlkSelectedRoles()
+{
+    const char* raw = std::getenv("BTX_BLK_ROLES");
+    std::vector<uint32_t> out;
+    if (raw == nullptr) return {4, 5};
+    std::string text(raw);
+    size_t start = 0;
+    while (start <= text.size()) {
+        const size_t comma = text.find(',', start);
+        const std::string token =
+            text.substr(start, comma == std::string::npos
+                                   ? std::string::npos
+                                   : comma - start);
+        if (!token.empty()) {
+            out.push_back(static_cast<uint32_t>(
+                std::strtoul(token.c_str(), nullptr, 10)));
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return out;
+}
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// STEP 1, and the cheap decisive one: what SHAPE does the narrow construction
+// demand for each of the six real role children? The hash-opening scheduler is
+// proof-INDEPENDENT, so this costs one section prove per role and no parent
+// witness at all. Everything downstream is decided by these numbers.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(real_block_narrow_root_shape_probe)
+{
+    if (!BlkEnabled()) {
+        BOOST_TEST_MESSAGE("set BTX_RUN_BLK_NARROW=1 to run (minutes)");
+        return;
+    }
+    const BlkRealBlockSections real = BlkProveRealBlockSections();
+
+    BOOST_TEST_MESSAGE("BLK_STATEMENT height=" << real.height
+        << " episode_digest=" << real.episode_digest.ToString()
+        << " sections=" << real.sections.size()
+        << " total_section_bytes=" << real.total_section_bytes
+        << " cap=" << rcx::kRCStage3MaxProofBytes
+        << " total_prove_s=" << real.total_prove_seconds);
+
+    const uint32_t hash_lane_columns =
+        fpx::CanonicalHashOpeningLayout().End();
+    uint64_t total_active_rows = 0;
+    for (const BlkRealSection& s : real.sections) {
+        const ar::ChildPublicInputs pi = ar::ExtractChildPublicInputs(
+            s.cs, s.section.air, s.seed);
+        BOOST_REQUIRE_MESSAGE(pi.ok, pi.note);
+        const fpx::HashOpeningProgram program = fpx::BuildHashOpeningProgram(pi);
+        BOOST_REQUIRE_MESSAGE(program.valid, program.note);
+        total_active_rows += program.active_rows;
+
+        // What the parent's OWN batched-FRI would cost at this shape, using the
+        // measured composed narrow width (hash lane + fold/scalar/DEEP buses,
+        // maximum algebraic degree 3).
+        const uint64_t parent_rows = program.trace_rows;
+        const uint64_t quotient_len = 2 * (parent_rows - 1);
+        const uint64_t n_coeffs =
+            BlkNextPow2(std::max<uint64_t>(parent_rows, quotient_len));
+        const uint64_t n_lde = n_coeffs * matmul::v4::rc::kRCFriBlowup;
+        BOOST_TEST_MESSAGE(
+            "BLK_SECTION role=" << s.name
+            << " child_rows=" << s.section.n_rows
+            << " child_cols=" << s.section.n_columns
+            << " section_bytes=" << s.encoded_bytes
+            << " prove_s=" << s.prove_seconds
+            << " | child_w=" << pi.child_w
+            << " child_n_lde=" << pi.child_n_lde
+            << " merkle_depth=" << pi.merkle_depth
+            << " n_folds=" << pi.n_folds
+            << " queries=" << pi.query_index.size()
+            << " | narrow_active_rows=" << program.active_rows
+            << " narrow_trace_rows=" << parent_rows
+            << " narrow_lane_cols=" << hash_lane_columns
+            << " narrow_trace_cells="
+            << uint64_t{hash_lane_columns} * parent_rows
+            << " narrow_n_lde=" << n_lde
+            << " narrow_lde_cells="
+            << uint64_t{hash_lane_columns} * n_lde
+            << " narrow_lde_fits_cap="
+            << (n_lde <= (uint64_t{1} << matmul::v4::rc::kRCFriMaxLdeLog2)));
+    }
+
+    const uint64_t root_rows = BlkNextPow2(total_active_rows);
+    const uint64_t root_quotient = 2 * (root_rows - 1);
+    const uint64_t root_coeffs =
+        BlkNextPow2(std::max<uint64_t>(root_rows, root_quotient));
+    const uint64_t root_lde = root_coeffs * matmul::v4::rc::kRCFriBlowup;
+    BOOST_TEST_MESSAGE(
+        "BLK_SINGLE_ROOT arity=6 total_active_rows=" << total_active_rows
+        << " root_trace_rows=" << root_rows
+        << " root_trace_cells=" << uint64_t{hash_lane_columns} * root_rows
+        << " root_n_lde=" << root_lde
+        << " root_lde_cells=" << uint64_t{hash_lane_columns} * root_lde
+        << " root_lde_fits_cap="
+        << (root_lde <= (uint64_t{1} << matmul::v4::rc::kRCFriMaxLdeLog2))
+        << " root_trace_bytes="
+        << uint64_t{hash_lane_columns} * root_rows * 24);
+}
+
+// ---------------------------------------------------------------------------
+// STEP 2: the artifact. Take the SELECTED real role-section proofs of the real
+// block, pack them into ONE narrow node, prove that node once, verify it with
+// the real unmodified verifier, measure its bytes against the SAME
+// kRCStage3MaxProofBytes ceiling the six flat sections blow, and show it
+// rejects forgeries.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(real_block_narrow_multi_child_root)
+{
+    if (!BlkEnabled()) {
+        BOOST_TEST_MESSAGE("set BTX_RUN_BLK_NARROW=1 to run (minutes)");
+        return;
+    }
+    const BlkRealBlockSections real = BlkProveRealBlockSections();
+    const std::vector<uint32_t> selected = BlkSelectedRoles();
+    BOOST_REQUIRE(!selected.empty());
+
+    std::vector<aq::AirConstraintSystem<gfx::Fp3>> css;
+    std::vector<fpx::AlgAirProof> proofs;
+    std::vector<uint256> seeds;
+    std::string roles;
+    size_t flat_bytes = 0;
+    for (const uint32_t index : selected) {
+        BOOST_REQUIRE_LT(index, real.sections.size());
+        const BlkRealSection& s = real.sections[index];
+        css.push_back(s.cs);
+        proofs.push_back(s.section.air);
+        seeds.push_back(s.seed);
+        roles += (roles.empty() ? "" : "+") + s.name;
+        flat_bytes += s.encoded_bytes;
+    }
+
+    const auto build_start = std::chrono::steady_clock::now();
+    const fpx::FoldBusComposition node =
+        fpx::BuildFoldBusCompositionMulti(css, proofs, seeds);
+    const uint64_t build_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - build_start).count());
+    BOOST_REQUIRE_MESSAGE(node.valid, node.note);
+    BOOST_REQUIRE(node.hash.proof_derived);
+    BOOST_REQUIRE(node.hash.native_child_accepted);
+    BOOST_CHECK_EQUAL(node.violations, 0U);
+    // Bounded width: arity is paid in ROWS. The node is never wider than the
+    // single-child narrow lane plus its fixed bus overhead.
+    BOOST_CHECK_LT(node.combined.n_columns, 1024U);
+
+    uint32_t node_degree = 1;
+    for (const auto& constraint : node.combined.constraints) {
+        node_degree = std::max(node_degree, constraint.alg_degree);
+    }
+    BOOST_TEST_MESSAGE(
+        "BLK_NODE roles=" << roles
+        << " arity=" << selected.size()
+        << " flat_section_bytes=" << flat_bytes
+        << " node_cols=" << node.combined.n_columns
+        << " node_rows=" << node.combined.n_rows
+        << " node_max_degree=" << node_degree
+        << " node_constraints=" << node.combined.constraints.size()
+        << " fold_pairs=" << node.fold_pairs
+        << " witness_build_ms=" << build_ms);
+
+    const uint256 node_seed = BlkSeed(0xb1);
+    const auto prove_start = std::chrono::steady_clock::now();
+    const auto proved = aq::AirQuotientProveRows(
+        node.combined, node.columns, node_seed, {});
+    const uint64_t prove_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - prove_start).count());
+    BOOST_REQUIRE_MESSAGE(proved.ok && proved.division_exact, proved.note);
+
+    std::string why;
+    const auto verify_start = std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRows(
+            node.combined, proved.proof, node_seed, &why),
+        why);
+    const uint64_t verify_ms = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - verify_start).count());
+
+    // The SAME proof container handed to the ordinary recursion-backend
+    // verifier a parent's own consumer would run.
+    fpx::AlgAirProof ordinary;
+    ordinary.batch = proved.proof.batch;
+    ordinary.next_openings = proved.proof.next_openings;
+    ordinary.trace_commit = proved.proof.trace_commit;
+    BOOST_REQUIRE_MESSAGE(
+        (aq::AirQuotientVerify<gfx::Fp3, BlkAlgB3>(
+            node.combined, ordinary, node_seed, &why)),
+        why);
+
+    uint64_t batch_bytes = 0;
+    const uint64_t root_bytes = BlkMeasuredNodeProofBytes(
+        proved.proof.batch, proved.proof.next_openings, &batch_bytes);
+    BOOST_TEST_MESSAGE(
+        "BLK_ROOT roles=" << roles
+        << " prove_ms=" << prove_ms
+        << " verify_ms=" << verify_ms
+        << " batch_bytes=" << batch_bytes
+        << " root_proof_bytes=" << root_bytes
+        << " flat_section_bytes=" << flat_bytes
+        << " compression=" << (double)flat_bytes / (double)root_bytes
+        << " cap=" << rcx::kRCStage3MaxProofBytes
+        << " fits_cap=" << (root_bytes <= rcx::kRCStage3MaxProofBytes)
+        << " fraction_of_cap="
+        << (double)root_bytes / (double)rcx::kRCStage3MaxProofBytes);
+    // THE SIZE CLAIM, asserted rather than only logged.
+    BOOST_CHECK_LE(root_bytes, uint64_t{rcx::kRCStage3MaxProofBytes});
+
+    // -----------------------------------------------------------------------
+    // PROOF-LEVEL REJECTS on the assembled artifact. Every one is decided by
+    // the real verifier's own challenge re-derivation or FRI check, never by a
+    // witness-violation count.
+    // -----------------------------------------------------------------------
+    {
+        std::string r;
+        BOOST_CHECK_MESSAGE(
+            !aq::AirQuotientVerifyRows(
+                node.combined, proved.proof, BlkSeed(0xb2), &r),
+            "wrong-seed root must reject");
+        BOOST_TEST_MESSAGE("BLK_REJECT wrong_seed why=\"" << r << "\"");
+    }
+    {
+        auto tampered = proved.proof;
+        tampered.batch.final_value =
+            gfx::Add(tampered.batch.final_value, gfx::Fp3::One());
+        std::string r;
+        BOOST_CHECK_MESSAGE(
+            !aq::AirQuotientVerifyRows(
+                node.combined, tampered, node_seed, &r),
+            "tampered terminal FRI value must reject");
+        BOOST_TEST_MESSAGE("BLK_REJECT final_value why=\"" << r << "\"");
+    }
+    {
+        auto tampered = proved.proof;
+        BOOST_REQUIRE(!tampered.batch.fold_challenges.empty());
+        tampered.batch.fold_challenges[0] =
+            gfx::Add(tampered.batch.fold_challenges[0], gfx::Fp3::One());
+        std::string r;
+        BOOST_CHECK_MESSAGE(
+            !aq::AirQuotientVerifyRows(
+                node.combined, tampered, node_seed, &r),
+            "tampered fold challenge must reject");
+        BOOST_TEST_MESSAGE("BLK_REJECT fold_challenge why=\"" << r << "\"");
+    }
+    {
+        auto tampered = proved.proof;
+        BOOST_REQUIRE(!tampered.batch.queries.empty());
+        BOOST_REQUIRE(!tampered.batch.queries[0].row.values.empty());
+        tampered.batch.queries[0].row.values[0] =
+            gfx::Add(tampered.batch.queries[0].row.values[0],
+                     gfx::Fp3::One());
+        std::string r;
+        BOOST_CHECK_MESSAGE(
+            !aq::AirQuotientVerifyRows(
+                node.combined, tampered, node_seed, &r),
+            "tampered opened query value must reject");
+        BOOST_TEST_MESSAGE("BLK_REJECT query_value why=\"" << r << "\"");
+    }
+    // THE ONE THAT MATTERS: a valid-looking forgery. One real role section of
+    // this real block is replaced by a TAMPERED one, and the node is rebuilt
+    // HONESTLY from it. The forger controls the whole witness; the refusal is
+    // still fail-closed at the native child verifier, and if that were bypassed
+    // the node's own quotient division would not be exact.
+    if (selected.size() >= 1) {
+        std::vector<fpx::AlgAirProof> forged = proofs;
+        BOOST_REQUIRE(!forged.back().batch.queries.empty());
+        BOOST_REQUIRE(!forged.back().batch.queries[0].row.values.empty());
+        forged.back().batch.queries[0].row.values[0] =
+            gfx::Add(forged.back().batch.queries[0].row.values[0],
+                     gfx::Fp3::One());
+        // The real per-section verifier already refuses the forged section.
+        std::string child_why;
+        BOOST_CHECK_MESSAGE(
+            !(aq::AirQuotientVerify<gfx::Fp3, BlkAlgB3>(
+                css.back(), forged.back(), seeds.back(), &child_why)),
+            "forged section must fail its own verifier");
+        const fpx::FoldBusComposition forged_node =
+            fpx::BuildFoldBusCompositionMulti(css, forged, seeds);
+        bool rejected = !forged_node.valid;
+        std::string r = forged_node.note;
+        if (!rejected) {
+            const auto bad = aq::AirQuotientProveRows(
+                forged_node.combined, forged_node.columns,
+                node_seed, {});
+            rejected = !bad.ok || !bad.division_exact ||
+                       !aq::AirQuotientVerifyRows(
+                           forged_node.combined, bad.proof,
+                           node_seed, &r);
+        }
+        BOOST_CHECK_MESSAGE(
+            rejected, "forged role section must not yield an accepted root");
+        BOOST_TEST_MESSAGE("BLK_REJECT forged_section why=\"" << r << "\"");
+    }
+    // CROSS-STATEMENT REPLAY, decided by the FRI/AIR verifier: the UNTOUCHED
+    // honest root is re-verified against the node V_CS of a DIFFERENT statement
+    // — the same real role sections packed in a different order, which is a
+    // different set of public pins and therefore a different claim.
+    if (selected.size() >= 2) {
+        std::vector<aq::AirConstraintSystem<gfx::Fp3>> other_css(
+            css.rbegin(), css.rend());
+        std::vector<fpx::AlgAirProof> other_proofs(
+            proofs.rbegin(), proofs.rend());
+        std::vector<uint256> other_seeds(
+            seeds.rbegin(), seeds.rend());
+        const fpx::FoldBusComposition other =
+            fpx::BuildFoldBusCompositionMulti(
+                other_css, other_proofs, other_seeds);
+        BOOST_REQUIRE_MESSAGE(other.valid, other.note);
+        std::string r;
+        BOOST_CHECK_MESSAGE(
+            !aq::AirQuotientVerifyRows(
+                other.combined, proved.proof, node_seed, &r),
+            "root must not verify against a different child ordering");
+        BOOST_TEST_MESSAGE("BLK_REJECT cross_statement why=\"" << r << "\"");
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

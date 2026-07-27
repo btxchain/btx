@@ -248,6 +248,7 @@ bool ProgramRowsEqual(
         a.link_to_merkle != b.link_to_merkle ||
         a.terminal != b.terminal ||
         a.direction != b.direction ||
+        a.child != b.child ||
         a.index != b.index ||
         a.query != b.query ||
         a.fold_layer != b.fold_layer ||
@@ -13917,11 +13918,19 @@ CompleteFixedPointScenario SelectCompleteFixedPointV1(
     return out;
 }
 
-HashOpeningProgram BuildHashOpeningProgram(
-    const ar::ChildPublicInputs& pi)
+namespace {
+
+/**
+ * Emit ONE child's schedule at the end of `out.rows`, tagging every emitted row
+ * with `child_index`. Byte-identical to the original single-child body; the tag
+ * is 0 for every existing caller, so no schedule changes.
+ */
+bool AppendChildHashOpeningProgram(
+    HashOpeningProgram& out,
+    const ar::ChildPublicInputs& pi,
+    uint32_t child_index,
+    std::string& note)
 {
-    HashOpeningProgram out;
-    out.public_inputs = pi;
     if (!pi.ok || pi.child_w == 0 ||
         pi.child_n_rows < 2 ||
         pi.child_n_lde == 0 ||
@@ -13929,19 +13938,20 @@ HashOpeningProgram BuildHashOpeningProgram(
         pi.n_folds != Log2Exact(pi.child_n_coeffs) ||
         pi.query_index.empty() ||
         pi.fold_roots.size() != pi.n_folds) {
-        out.note =
+        note =
             "stage3:recursive_fixedpoint:hash_program_shape";
-        return out;
+        return false;
     }
+    const size_t begin = out.rows.size();
     const uint32_t next_step =
         pi.child_n_lde / pi.child_n_rows;
     for (uint32_t query = 0;
          query < pi.query_index.size(); ++query) {
         const uint32_t index = pi.query_index[query];
         if (index >= pi.child_n_lde) {
-            out.note =
+            note =
                 "stage3:recursive_fixedpoint:hash_query_index";
-            return out;
+            return false;
         }
         AppendSpongeProgram(
             out, pi.child_w + 1, index,
@@ -13977,6 +13987,36 @@ HashOpeningProgram BuildHashOpeningProgram(
             reduced = even_index;
         }
     }
+    for (size_t row = begin; row < out.rows.size(); ++row) {
+        out.rows[row].child = child_index;
+    }
+    return true;
+}
+
+} // namespace
+
+HashOpeningProgram BuildHashOpeningProgram(
+    const std::vector<ar::ChildPublicInputs>& children)
+{
+    HashOpeningProgram out;
+    if (children.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:hash_program_shape";
+        return out;
+    }
+    out.public_inputs = children.front();
+    out.children = children;
+    std::string note;
+    for (uint32_t child = 0;
+         child < children.size(); ++child) {
+        out.child_row_offsets.push_back(
+            static_cast<uint32_t>(out.rows.size()));
+        if (!AppendChildHashOpeningProgram(
+                out, children[child], child, note)) {
+            out.note = note;
+            return out;
+        }
+    }
     out.active_rows =
         static_cast<uint32_t>(out.rows.size());
     out.trace_rows = NextPow2(out.active_rows);
@@ -13998,6 +14038,13 @@ HashOpeningProgram BuildHashOpeningProgram(
     return out;
 }
 
+HashOpeningProgram BuildHashOpeningProgram(
+    const ar::ChildPublicInputs& pi)
+{
+    return BuildHashOpeningProgram(
+        std::vector<ar::ChildPublicInputs>{pi});
+}
+
 bool BuildHashOpeningConstraintSystem(
     const HashOpeningProgram& program,
     aq::AirConstraintSystem<Fp3>& out,
@@ -14013,7 +14060,11 @@ bool BuildHashOpeningConstraintSystem(
         return Fail(why, "hash_program_invalid");
     }
     const HashOpeningProgram canonical =
-        BuildHashOpeningProgram(program.public_inputs);
+        BuildHashOpeningProgram(
+            program.children.empty()
+                ? std::vector<ar::ChildPublicInputs>{
+                      program.public_inputs}
+                : program.children);
     if (!canonical.valid ||
         canonical.active_rows != program.active_rows ||
         canonical.trace_rows != program.trace_rows ||
@@ -14407,14 +14458,20 @@ bool BuildHashOpeningConstraintSystem(
 
 namespace {
 
-HashOpeningWitness BuildAcceptedHashOpeningWitness(
-    const ar::ChildPublicInputs& public_inputs,
-    const AlgAirProof& child,
+HashOpeningWitness BuildAcceptedHashOpeningWitnessMulti(
+    const std::vector<ar::ChildPublicInputs>& public_inputs,
+    const std::vector<AlgAirProof>& proofs,
     uint32_t column_base = 0)
 {
     HashOpeningWitness out;
     out.column_base = column_base;
     out.native_child_accepted = true;
+    if (public_inputs.empty() ||
+        public_inputs.size() != proofs.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:multi_child_arity";
+        return out;
+    }
     out.program = BuildHashOpeningProgram(public_inputs);
     if (!out.program.valid) {
         out.note = out.program.note;
@@ -14438,12 +14495,23 @@ HashOpeningWitness BuildAcceptedHashOpeningWitness(
     }
 
     uint32_t cursor = 0;
+    for (uint32_t index = 0;
+         index < public_inputs.size(); ++index) {
+    const ar::ChildPublicInputs& child_pi =
+        public_inputs[index];
+    const AlgAirProof& child = proofs[index];
+    if (child.batch.queries.size() !=
+            child_pi.query_index.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:proof_query_count";
+        return out;
+    }
     for (uint32_t query = 0;
          query < child.batch.queries.size(); ++query) {
         const auto& q = child.batch.queries[query];
         if (child.next_openings.size() <= query ||
             child.next_openings[query].size() != 2 ||
-            q.steps.size() != public_inputs.n_folds) {
+            q.steps.size() != child_pi.n_folds) {
             out.note =
                 "stage3:recursive_fixedpoint:proof_opening_shape";
             return out;
@@ -14466,9 +14534,14 @@ HashOpeningWitness BuildAcceptedHashOpeningWitness(
             return out;
         }
         const auto& trace = child.next_openings[query][1];
+        if (q.row.values.size() < child_pi.child_w) {
+            out.note =
+                "stage3:recursive_fixedpoint:trace_row_width";
+            return out;
+        }
         const std::vector<Fp3> trace_values(
             q.row.values.begin(),
-            q.row.values.begin() + public_inputs.child_w);
+            q.row.values.begin() + child_pi.child_w);
         if (!AppendSpongeWitness(
                 layout, trace_values, trace.index,
                 trace.siblings, out.columns, cursor,
@@ -14478,7 +14551,7 @@ HashOpeningWitness BuildAcceptedHashOpeningWitness(
             return out;
         }
         for (uint32_t layer = 0;
-             layer < public_inputs.n_folds; ++layer) {
+             layer < child_pi.n_folds; ++layer) {
             const auto& step = q.steps[layer];
             if (!AppendSingleValueWitness(
                     layout, step.even, step.even_index,
@@ -14493,6 +14566,7 @@ HashOpeningWitness BuildAcceptedHashOpeningWitness(
                 return out;
             }
         }
+    }
     }
     if (cursor != out.program.active_rows) {
         out.note =
@@ -14540,6 +14614,16 @@ HashOpeningWitness BuildAcceptedHashOpeningWitness(
     return out;
 }
 
+HashOpeningWitness BuildAcceptedHashOpeningWitness(
+    const ar::ChildPublicInputs& public_inputs,
+    const AlgAirProof& child,
+    uint32_t column_base = 0)
+{
+    return BuildAcceptedHashOpeningWitnessMulti(
+        std::vector<ar::ChildPublicInputs>{public_inputs},
+        std::vector<AlgAirProof>{child}, column_base);
+}
+
 AlgAirProof DualLaneView(
     const ar::DualAlgAirProof& child,
     uint32_t lane)
@@ -14584,6 +14668,42 @@ HashOpeningWitness BuildHashOpeningWitness(
         ar::ExtractChildPublicInputs(
             child_cs, child, child_fs_seed);
     return BuildAcceptedHashOpeningWitness(pi, child);
+}
+
+HashOpeningWitness BuildHashOpeningWitnessMulti(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds)
+{
+    HashOpeningWitness out;
+    if (children.empty() ||
+        child_css.size() != children.size() ||
+        child_fs_seeds.size() != children.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:multi_child_arity";
+        return out;
+    }
+    std::vector<ar::ChildPublicInputs> pis;
+    pis.reserve(children.size());
+    for (size_t index = 0; index < children.size(); ++index) {
+        std::string native_why;
+        // FAIL CLOSED: the real, unmodified native verifier decides, per child,
+        // under that child's own constraint system and seed.
+        if (!aq::AirQuotientVerify<
+                Fp3, aq::AirFriBackendAlg<Fp3>>(
+                child_css[index], children[index],
+                child_fs_seeds[index], &native_why)) {
+            out.note =
+                "stage3:recursive_fixedpoint:native_child[" +
+                std::to_string(index) + "]:" + native_why;
+            return out;
+        }
+        pis.push_back(
+            ar::ExtractChildPublicInputs(
+                child_css[index], children[index],
+                child_fs_seeds[index]));
+    }
+    return BuildAcceptedHashOpeningWitnessMulti(pis, children);
 }
 
 HashOpeningWitness BuildDualV5HashOpeningWitness(
@@ -14718,14 +14838,20 @@ uint32_t CountHashOpeningViolations(
 
 namespace {
 
-FoldBusComposition BuildAcceptedFoldBusComposition(
+FoldBusComposition BuildAcceptedFoldBusCompositionMulti(
     HashOpeningWitness hash,
-    const AlgAirProof& child)
+    const std::vector<AlgAirProof>& proofs)
 {
     FoldBusComposition out;
     out.hash = std::move(hash);
     if (!out.hash.valid) {
         out.note = out.hash.note;
+        return out;
+    }
+    if (proofs.empty() ||
+        out.hash.program.children.size() != proofs.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:multi_child_arity";
         return out;
     }
     aq::AirConstraintSystem<Fp3> hash_cs;
@@ -14752,42 +14878,63 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
         out.columns[column] = out.hash.columns[column];
     }
 
+    const std::vector<ar::ChildPublicInputs>& pis =
+        out.hash.program.children;
+    const uint32_t arity =
+        static_cast<uint32_t>(pis.size());
+
+    // GLOBAL, DISJOINT bus address space. Child c's fold tuples occupy
+    // [fold_base[c], fold_base[c+1]) and its chain tuples
+    // [chain_base[c], chain_base[c+1]); no two children can alias one
+    // another's addresses, so the multiset identities close once over the
+    // whole node rather than per child.
+    std::vector<uint64_t> fold_base(arity, 0);
+    std::vector<uint64_t> chain_base(arity, 0);
+    {
+        uint64_t cursor = 1;
+        for (uint32_t c = 0; c < arity; ++c) {
+            fold_base[c] = cursor;
+            cursor += 2 * uint64_t{pis[c].query_index.size()} *
+                      pis[c].n_folds;
+        }
+        for (uint32_t c = 0; c < arity; ++c) {
+            chain_base[c] = cursor;
+            if (pis[c].n_folds == 0) {
+                out.note =
+                    "stage3:recursive_fixedpoint:deep_public_shape";
+                return out;
+            }
+            cursor += uint64_t{pis[c].query_index.size()} *
+                      (pis[c].n_folds - 1);
+        }
+    }
     auto address_of =
-        [&](uint32_t query, uint32_t layer,
+        [&](uint32_t child, uint32_t query, uint32_t layer,
             uint32_t side) {
-            return uint64_t{1} +
-                2 * (uint64_t{query} *
-                         out.hash.program.public_inputs.n_folds +
+            return fold_base[child] +
+                2 * (uint64_t{query} * pis[child].n_folds +
                      layer) +
                 side;
         };
     auto chain_address_of =
-        [&](uint32_t query, uint32_t prior_layer) {
-            const uint64_t fold_address_count =
-                2 * uint64_t{
-                        out.hash.program.public_inputs.
-                            query_index.size()} *
-                    out.hash.program.public_inputs.n_folds;
-            return uint64_t{1} + fold_address_count +
-                uint64_t{query} *
-                    (out.hash.program.public_inputs.n_folds - 1) +
+        [&](uint32_t child, uint32_t query,
+            uint32_t prior_layer) {
+            return chain_base[child] +
+                uint64_t{query} * (pis[child].n_folds - 1) +
                 prior_layer;
         };
     auto selected_fold_side =
-        [&](uint32_t query, uint32_t layer) {
+        [&](uint32_t child, uint32_t query, uint32_t layer) {
             uint32_t reduced =
-                out.hash.program.public_inputs.
-                    query_index[query];
+                pis[child].query_index[query];
             for (uint32_t prior = 0;
                  prior < layer; ++prior) {
                 const uint32_t n_leaves =
-                    out.hash.program.public_inputs.
-                        child_n_lde >> prior;
+                    pis[child].child_n_lde >> prior;
                 reduced %= n_leaves / 2;
             }
             const uint32_t n_leaves =
-                out.hash.program.public_inputs.
-                    child_n_lde >> layer;
+                pis[child].child_n_lde >> layer;
             return static_cast<uint8_t>(
                 reduced < n_leaves / 2 ? 1 : 2);
         };
@@ -14795,7 +14942,16 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
         Fp3::FromFp(gf::Neg(gf::FromU64(1)));
     const Fp3 u{0, 1, 0};
     const Fp3 u2{0, 0, 1};
-    const auto& pi = out.hash.program.public_inputs;
+    std::vector<std::vector<std::vector<Fp3>>> ux_weights(arity);
+    std::vector<std::vector<Fp3>> deep_invd1(arity);
+    std::vector<std::vector<Fp3>> deep_invd2(arity);
+    std::vector<std::vector<Fp3>> deep_v1(arity);
+    std::vector<std::vector<Fp3>> deep_v2(arity);
+    uint64_t expected_chain_pairs = 0;
+    uint64_t expected_final_rows = 0;
+    uint64_t expected_deep_rows = 0;
+    for (uint32_t c = 0; c < arity; ++c) {
+    const ar::ChildPublicInputs& pi = pis[c];
     const uint32_t batch_width = pi.child_w + 1;
     if (pi.column_len.size() != batch_width ||
         pi.evals_z1.size() != batch_width ||
@@ -14805,6 +14961,10 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
             "stage3:recursive_fixedpoint:deep_public_shape";
         return out;
     }
+    expected_chain_pairs +=
+        uint64_t{pi.query_index.size()} * (pi.n_folds - 1);
+    expected_final_rows += pi.query_index.size();
+    expected_deep_rows += pi.query_index.size();
     std::vector<Fp3> batch_coefficients(batch_width);
     if (!pi.fri_batch_coefficients.empty()) {
         if (pi.fri_batch_coefficients.size() != batch_width) {
@@ -14822,15 +14982,13 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
             power = gf::Mul(power, pi.fri_lambda);
         }
     }
-    std::vector<std::vector<Fp3>> ux_weights(
+    ux_weights[c].assign(
         pi.query_index.size(),
         std::vector<Fp3>(batch_width));
-    std::vector<Fp3> deep_invd1(pi.query_index.size());
-    std::vector<Fp3> deep_invd2(pi.query_index.size());
-    std::vector<Fp3> deep_v1(
-        pi.query_index.size(), Fp3::Zero());
-    std::vector<Fp3> deep_v2(
-        pi.query_index.size(), Fp3::Zero());
+    deep_invd1[c].assign(pi.query_index.size(), Fp3::Zero());
+    deep_invd2[c].assign(pi.query_index.size(), Fp3::Zero());
+    deep_v1[c].assign(pi.query_index.size(), Fp3::Zero());
+    deep_v2[c].assign(pi.query_index.size(), Fp3::Zero());
     for (uint32_t query = 0;
          query < pi.query_index.size(); ++query) {
         const Fp3 x =
@@ -14844,8 +15002,9 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                 "deep_challenge_on_domain";
             return out;
         }
-        deep_invd1[query] = gf::Inv(d1);
-        deep_invd2[query] = gf::Inv(d2);
+        // w already multiplied in; see DeepInitialLayout::w1_invd1.
+        deep_invd1[c][query] = gf::Mul(pi.w1, gf::Inv(d1));
+        deep_invd2[c][query] = gf::Mul(pi.w2, gf::Inv(d2));
         for (uint32_t item = 0;
              item < batch_width; ++item) {
             if (pi.column_len[item] >
@@ -14857,7 +15016,7 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
             }
             const uint32_t shift =
                 pi.child_n_coeffs - pi.column_len[item];
-            ux_weights[query][item] =
+            ux_weights[c][query][item] =
                 gf::Mul(
                     batch_coefficients[item],
                     PowFp3(x, shift));
@@ -14869,13 +15028,24 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                 gf::Mul(
                     batch_coefficients[item],
                     PowFp3(pi.z2, shift));
-            deep_v1[query] = gf::Add(
-                deep_v1[query],
+            deep_v1[c][query] = gf::Add(
+                deep_v1[c][query],
                 gf::Mul(z1_weight, pi.evals_z1[item]));
-            deep_v2[query] = gf::Add(
-                deep_v2[query],
+            deep_v2[c][query] = gf::Add(
+                deep_v2[c][query],
                 gf::Mul(z2_weight, pi.evals_z2[item]));
         }
+    }
+    }
+    // Per-row public pin of each child's terminal FRI value.
+    for (uint32_t row = 0; row < out.combined.n_rows; ++row) {
+        const uint32_t child =
+            row < out.hash.program.rows.size()
+                ? std::min(out.hash.program.rows[row].child,
+                           arity - 1)
+                : 0;
+        out.columns[out.deep.child_final_value][row] =
+            pis[child].final_value;
     }
     auto leaf_value =
         [&](uint32_t row) {
@@ -14898,6 +15068,16 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
          row < out.hash.program.active_rows; ++row) {
         const auto& meta =
             out.hash.program.rows[row];
+        if (meta.child >= arity) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "deep_child_metadata";
+            return out;
+        }
+        const uint32_t c = meta.child;
+        const ar::ChildPublicInputs& pi = pis[c];
+        const AlgAirProof& child = proofs[c];
+        const uint32_t batch_width = pi.child_w + 1;
         if (meta.query >= pi.query_index.size()) {
             out.note =
                 "stage3:recursive_fixedpoint:"
@@ -14915,7 +15095,7 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                 const uint32_t item = position / 3;
                 const uint32_t coordinate = position % 3;
                 Fp3 coefficient =
-                    ux_weights[meta.query][item];
+                    ux_weights[c][meta.query][item];
                 if (coordinate == 1) {
                     coefficient =
                         gf::Mul(coefficient, u);
@@ -14932,18 +15112,18 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                 HashRowKind::SingleValueLeaf &&
             meta.fold_layer == 0 &&
             meta.fold_side ==
-                selected_fold_side(meta.query, 0)) {
+                selected_fold_side(c, meta.query, 0)) {
             out.columns[
                 out.deep.identity_selector][row] =
                 Fp3::One();
-            out.columns[out.deep.invd1][row] =
-                deep_invd1[meta.query];
-            out.columns[out.deep.invd2][row] =
-                deep_invd2[meta.query];
+            out.columns[out.deep.w1_invd1][row] =
+                deep_invd1[c][meta.query];
+            out.columns[out.deep.w2_invd2][row] =
+                deep_invd2[c][meta.query];
             out.columns[out.deep.v1][row] =
-                deep_v1[meta.query];
+                deep_v1[c][meta.query];
             out.columns[out.deep.v2][row] =
-                deep_v2[meta.query];
+                deep_v2[c][meta.query];
             ++initial_deep_rows;
         }
         if (meta.fold_terminal &&
@@ -14960,7 +15140,7 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                 leaf_value(row);
             out.columns[out.bus.Address(port)][row] =
                 Fp3::FromFp(gf::FromU64(address_of(
-                    meta.query, meta.fold_layer,
+                    c, meta.query, meta.fold_layer,
                     meta.fold_side - 1)));
             out.columns[
                 out.bus.Multiplicity(port)][row] =
@@ -14970,14 +15150,14 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
             if (meta.fold_layer > 0 &&
                 meta.fold_side ==
                     selected_fold_side(
-                        meta.query,
+                        c, meta.query,
                         meta.fold_layer)) {
                 out.columns[out.chain.value][row] =
                     leaf_value(row);
                 out.columns[out.chain.address][row] =
                     Fp3::FromFp(gf::FromU64(
                         chain_address_of(
-                            meta.query,
+                            c, meta.query,
                             meta.fold_layer - 1)));
                 out.columns[
                     out.chain.multiplicity][row] =
@@ -15010,7 +15190,7 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                     port == 0 ? step.even : step.odd;
                 out.columns[out.bus.Address(port)][row] =
                     Fp3::FromFp(gf::FromU64(address_of(
-                        meta.query, meta.fold_layer,
+                        c, meta.query, meta.fold_layer,
                         port)));
                 out.columns[
                     out.bus.Multiplicity(port)][row] =
@@ -15022,15 +15202,12 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                     Fp3::One();
             }
             const uint32_t n_leaves =
-                out.hash.program.public_inputs.
-                    child_n_lde >>
-                meta.fold_layer;
+                pi.child_n_lde >> meta.fold_layer;
             const Fp3 x =
                 DomainPoint(
                     n_leaves, step.even_index);
             const Fp3 beta =
-                out.hash.program.public_inputs.
-                    fold_challenges[meta.fold_layer];
+                pi.fold_challenges[meta.fold_layer];
             const Fp3 inv2 =
                 gf::Inv(Fp3::FromFp(gf::FromU64(2)));
             const Fp3 even_part =
@@ -15046,14 +15223,13 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
                 gf::Add(
                     even_part,
                     gf::Mul(beta, odd_part));
-            if (meta.fold_layer + 1 <
-                out.hash.program.public_inputs.n_folds) {
+            if (meta.fold_layer + 1 < pi.n_folds) {
                 out.columns[out.chain.value][row] =
                     out.columns[out.bus.folded][row];
                 out.columns[out.chain.address][row] =
                     Fp3::FromFp(gf::FromU64(
                         chain_address_of(
-                            meta.query,
+                            c, meta.query,
                             meta.fold_layer)));
                 out.columns[
                     out.chain.multiplicity][row] =
@@ -15287,12 +15463,13 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
             out.deep.Coefficient(lane),
             out.columns[out.deep.Coefficient(lane)]);
     }
-    const std::array<uint32_t, 4>
+    const std::array<uint32_t, 5>
         deep_preprocessed_columns{
-            out.deep.invd1,
-            out.deep.invd2,
+            out.deep.w1_invd1,
+            out.deep.w2_invd2,
             out.deep.v1,
-            out.deep.v2};
+            out.deep.v2,
+            out.deep.child_final_value};
     for (const uint32_t column :
          deep_preprocessed_columns) {
         out.combined.preprocessed.emplace_back(
@@ -15655,14 +15832,14 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
         "stage3.fixedpoint.fold_chain.final",
         aq::AirKind::kEverywhere, 2,
         [chain = out.chain, bus = out.bus,
-         final_value =
-             out.hash.program.public_inputs.final_value](
+         deep = out.deep](
             const std::vector<Fp3>& cur,
             const std::vector<Fp3>&) {
             return gf::Mul(
                 cur[chain.final_selector],
                 gf::Sub(
-                    cur[bus.folded], final_value));
+                    cur[bus.folded],
+                    cur[deep.child_final_value]));
         });
     add(
         "stage3.fixedpoint.fold_bus.equation",
@@ -15728,8 +15905,7 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
     add(
         "stage3.fixedpoint.deep.initial_identity",
         aq::AirKind::kEverywhere, 3,
-        [deep = out.deep, hash_layout, u, u2,
-         w1 = pi.w1, w2 = pi.w2](
+        [deep = out.deep, hash_layout, u, u2](
             const std::vector<Fp3>& cur,
             const std::vector<Fp3>&) {
             const Fp3 leaf =
@@ -15749,19 +15925,15 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
             const Fp3 expected =
                 gf::Add(
                     gf::Mul(
-                        w1,
-                        gf::Mul(
-                            gf::Sub(
-                                cur[deep.running],
-                                cur[deep.v1]),
-                            cur[deep.invd1])),
+                        gf::Sub(
+                            cur[deep.running],
+                            cur[deep.v1]),
+                        cur[deep.w1_invd1]),
                     gf::Mul(
-                        w2,
-                        gf::Mul(
-                            gf::Sub(
-                                cur[deep.running],
-                                cur[deep.v2]),
-                            cur[deep.invd2])));
+                        gf::Sub(
+                            cur[deep.running],
+                            cur[deep.v2]),
+                        cur[deep.w2_invd2]));
             return gf::Mul(
                 cur[deep.identity_selector],
                 gf::Sub(leaf, expected));
@@ -15777,18 +15949,13 @@ FoldBusComposition BuildAcceptedFoldBusComposition(
         gf::IsZero(chain_running1) &&
         gf::IsZero(chain_running2);
     out.fold_equations = true;
+    // Totals over EVERY packed child; a missing child's rows cannot be hidden
+    // behind another child's count.
     out.fold_chain_and_final_equations =
-        out.fold_chain_pairs ==
-            out.hash.program.public_inputs.
-                query_index.size() *
-                (out.hash.program.public_inputs.n_folds - 1) &&
-        out.fold_final_rows ==
-            out.hash.program.public_inputs.
-                query_index.size();
+        out.fold_chain_pairs == expected_chain_pairs &&
+        out.fold_final_rows == expected_final_rows;
     out.initial_deep_identity =
-        initial_deep_rows ==
-            out.hash.program.public_inputs.
-                query_index.size();
+        initial_deep_rows == expected_deep_rows;
     out.deep_per_point_transition_join = false;
     out.valid =
         out.fold_pairs > 0 &&
@@ -15816,10 +15983,21 @@ FoldBusComposition BuildFoldBusComposition(
     const AlgAirProof& child,
     const uint256& child_fs_seed)
 {
-    return BuildAcceptedFoldBusComposition(
+    return BuildAcceptedFoldBusCompositionMulti(
         BuildHashOpeningWitness(
             child_cs, child, child_fs_seed),
-        child);
+        std::vector<AlgAirProof>{child});
+}
+
+FoldBusComposition BuildFoldBusCompositionMulti(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds)
+{
+    return BuildAcceptedFoldBusCompositionMulti(
+        BuildHashOpeningWitnessMulti(
+            child_css, children, child_fs_seeds),
+        children);
 }
 
 FoldBusComposition BuildDualV5FoldBusComposition(
@@ -15835,10 +16013,10 @@ FoldBusComposition BuildDualV5FoldBusComposition(
         return out;
     }
     AlgAirProof view = DualLaneView(child, lane);
-    return BuildAcceptedFoldBusComposition(
+    return BuildAcceptedFoldBusCompositionMulti(
         BuildDualV5HashOpeningWitness(
             child_cs, child, child_fs_seed, lane),
-        view);
+        std::vector<AlgAirProof>{view});
 }
 
 FoldBusComposition BuildDualV5FoldBusCompositionAtBase(
@@ -15855,11 +16033,11 @@ FoldBusComposition BuildDualV5FoldBusCompositionAtBase(
         return out;
     }
     AlgAirProof view = DualLaneView(child, lane);
-    return BuildAcceptedFoldBusComposition(
+    return BuildAcceptedFoldBusCompositionMulti(
         BuildDualV5HashOpeningWitnessAtBase(
             child_cs, child, child_fs_seed,
             lane, column_base),
-        view);
+        std::vector<AlgAirProof>{view});
 }
 
 BytecodeInterpreterAttachment
