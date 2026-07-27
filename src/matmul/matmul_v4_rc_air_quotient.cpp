@@ -1769,9 +1769,16 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
         // it re-serializes the batch, so never enable it at real-child width.
         if (std::getenv("BTX_AIRQ_PROOF_SHA") != nullptr) {
             std::vector<unsigned char> ser;
-            SerializeFri3AlgBatchProof(cr.proof, ser);
+            const size_t serialized_size =
+                SerializeFri3AlgBatchProof(cr.proof, ser);
+            if (serialized_size == 0 ||
+                serialized_size != ser.size()) {
+                res.note =
+                    "failed to serialize batch proof for fingerprint";
+                return res;
+            }
             CSHA256 h;
-            if (!ser.empty()) h.Write(ser.data(), ser.size());
+            h.Write(ser.data(), ser.size());
             h.Write(res.proof.trace_commit.data(), 32);
             const auto absorb_u64 = [&h](uint64_t v) {
                 unsigned char b[8];
@@ -1831,11 +1838,17 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
                                  AirFriBackendAlg<gkr_field::Fp3>>) {
         if (const char* po = std::getenv("BTX_PROOF_OUT")) {
             std::vector<unsigned char> ser;
-            SerializeFri3AlgBatchProof(res.proof.batch, ser);
+            const size_t serialized_size =
+                SerializeFri3AlgBatchProof(res.proof.batch, ser);
+            if (serialized_size == 0 ||
+                serialized_size != ser.size()) {
+                res.ok = false;
+                res.note =
+                    "failed to serialize batch proof for output";
+                return res;
+            }
             if (std::FILE* f = std::fopen(po, "wb")) {
-                if (!ser.empty()) {
-                    std::fwrite(ser.data(), 1, ser.size(), f);
-                }
+                std::fwrite(ser.data(), 1, ser.size(), f);
                 std::fclose(f);
             }
             unsigned char h[32];
