@@ -16931,6 +16931,233 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
     return out;
 }
 
+NarrowBytecodeShardCompositionAirProveV1
+AirProveNarrowBytecodeShardCompositionV1(
+    const FoldBusComposition& attached_shard)
+{
+    NarrowBytecodeShardCompositionAirProveV1 out;
+    out.streaming = true;
+    if (!attached_shard.valid ||
+        attached_shard.columns.empty() ||
+        attached_shard.combined.n_rows < 2 ||
+        attached_shard.combined.n_columns < 3 ||
+        attached_shard.columns.size() !=
+            attached_shard.combined.n_columns) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_prove_input";
+        return out;
+    }
+    for (const auto& column : attached_shard.columns) {
+        if (column.size() != attached_shard.combined.n_rows) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_shard_air_prove_column_len";
+            return out;
+        }
+    }
+    out.attached = true;
+    out.n_rows = attached_shard.combined.n_rows;
+    out.n_columns = attached_shard.combined.n_columns;
+    out.n_constraints = static_cast<uint32_t>(
+        attached_shard.combined.constraints.size());
+
+    HashWriter seed_hash;
+    seed_hash <<
+        "BTX_RC_STAGE3_BYTECODE_SHARD_COMPOSITION_AIR_V1";
+    seed_hash << out.n_rows;
+    seed_hash << out.n_columns;
+    seed_hash << out.n_constraints;
+    seed_hash << attached_shard.prechallenge_commitment;
+    const uint256 seed = seed_hash.GetHash();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto proved = aq::AirQuotientProveRows(
+        attached_shard.combined, attached_shard.columns, seed,
+        {});
+    const auto t1 = std::chrono::steady_clock::now();
+    out.prove_micros = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            t1 - t0)
+            .count());
+    out.proved = proved.ok && proved.division_exact;
+    if (!out.proved) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_prove:" +
+            proved.note;
+        return out;
+    }
+
+    std::string verify_why;
+    const auto t2 = std::chrono::steady_clock::now();
+    out.verified = aq::AirQuotientVerifyRows(
+        attached_shard.combined, proved.proof, seed,
+        &verify_why);
+    const auto t3 = std::chrono::steady_clock::now();
+    out.verify_micros = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            t3 - t2)
+            .count());
+    if (!out.verified) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_verify:" +
+            verify_why;
+        return out;
+    }
+
+    // Forgery: mutate a live bytecode value; exact division must fail
+    // (force_commit_on_inexact stays false — no second full FRI).
+    auto forged = attached_shard;
+    const uint32_t bytecode_width = BytecodeBusLayout(0).End();
+    if (forged.combined.n_columns >= bytecode_width) {
+        const BytecodeBusLayout bus(
+            forged.combined.n_columns - bytecode_width);
+        uint32_t target_row = 0;
+        bool found = false;
+        for (uint32_t row = 0; row < forged.combined.n_rows;
+             ++row) {
+            if (!gf::IsZero(forged.columns[bus.Active(0)][row]) ||
+                !gf::IsZero(
+                    forged.columns[bus.result_selector][row])) {
+                target_row = row;
+                found = true;
+                break;
+            }
+        }
+        if (!found) target_row = 0;
+        forged.columns[bus.Value(0)][target_row] = gf::Add(
+            forged.columns[bus.Value(0)][target_row],
+            Fp3::One());
+    } else if (!forged.columns.empty() &&
+               !forged.columns[0].empty()) {
+        forged.columns[0][0] =
+            gf::Add(forged.columns[0][0], Fp3::One());
+    }
+    const auto forged_proved = aq::AirQuotientProveRows(
+        forged.combined, forged.columns, seed, {});
+    const bool forged_ok =
+        forged_proved.ok && forged_proved.division_exact;
+    bool forged_verified = false;
+    if (forged_ok) {
+        std::string forged_why;
+        forged_verified = aq::AirQuotientVerifyRows(
+            forged.combined, forged_proved.proof, seed,
+            &forged_why);
+    }
+    out.forgery_rejected = !forged_ok || !forged_verified;
+    out.valid =
+        out.attached && out.proved && out.verified &&
+        out.forgery_rejected;
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:bytecode_shard_air") +
+        ";rows=" + std::to_string(out.n_rows) +
+        ";cols=" + std::to_string(out.n_columns) +
+        ";cons=" + std::to_string(out.n_constraints) +
+        ";programs=" + std::to_string(out.program_count) +
+        ";shard=" + std::to_string(out.shard_index) +
+        ";proved=" + (out.proved ? "1" : "0") +
+        ";verified=" + (out.verified ? "1" : "0") +
+        ";forgery=" + (out.forgery_rejected ? "1" : "0") +
+        ";stream=" + (out.streaming ? "1" : "0") +
+        ";prove_us=" + std::to_string(out.prove_micros) +
+        ";verify_us=" + std::to_string(out.verify_micros) +
+        ";complete_fp=false";
+    return out;
+}
+
+NarrowBytecodeShardCompositionAirProveV1
+ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t shard_index)
+{
+    NarrowBytecodeShardCompositionAirProveV1 out;
+    if (!base.valid ||
+        !constraint_bytecode::ValidateProgramTable(
+            table, nullptr)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_exec_input";
+        return out;
+    }
+    const uint32_t queries = static_cast<uint32_t>(
+        base.hash.program.public_inputs.query_index.size());
+    const uint32_t reserved =
+        CountFoldBusReservedSpongeRows(base);
+    const uint64_t free_rows =
+        base.combined.n_rows > reserved
+            ? uint64_t{base.combined.n_rows - reserved}
+            : 0;
+    const auto shard_groups =
+        PackBytecodeShardsUnderFreeRows(table, queries, free_rows);
+    if (shard_groups.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_exec_no_free_row_shards;free=" +
+            std::to_string(free_rows);
+        return out;
+    }
+
+    // UINT32_MAX (default): smallest free-row shard by program count.
+    // In-range index selects that pack bin explicitly.
+    uint32_t pick = 0;
+    for (uint32_t i = 1; i < shard_groups.size(); ++i) {
+        if (shard_groups[i].size() < shard_groups[pick].size()) {
+            pick = i;
+        }
+    }
+    if (shard_index != UINT32_MAX &&
+        shard_index < shard_groups.size()) {
+        pick = shard_index;
+    }
+    out.shard_index = pick;
+    out.program_count =
+        static_cast<uint32_t>(shard_groups[pick].size());
+
+    constraint_bytecode::ProgramTable shard;
+    std::string why;
+    if (!SliceProgramTableByLeafIndices(
+            table, shard_groups[pick], shard, &why)) {
+        out.note = why;
+        return out;
+    }
+    FoldBusComposition shard_bus;
+    if (!PrepareFoldBusForBytecodeShard(
+            base, table, shard_groups[pick], shard, shard_bus,
+            &why)) {
+        out.note = why;
+        return out;
+    }
+    const BytecodeInterpreterAttachment att =
+        AttachConstraintBytecodeInterpreterShard(
+            shard_bus, shard, shard_groups[pick]);
+    if (!att.valid) {
+        out.note = att.note;
+        return out;
+    }
+    if (!RejectBytecodeShardForgery(shard_bus)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_exec_host_forgery";
+        return out;
+    }
+
+    out = AirProveNarrowBytecodeShardCompositionV1(shard_bus);
+    out.shard_index = pick;
+    out.program_count =
+        static_cast<uint32_t>(shard_groups[pick].size());
+    if (out.valid) {
+        out.note =
+            out.note + ";free_shards=" +
+            std::to_string(shard_groups.size()) +
+            ";free_rows=" + std::to_string(free_rows);
+    }
+    return out;
+}
+
 NarrowBytecodeShardQuotientJoinV1
 JoinNarrowBytecodeShardLocalQuotientsV1(
     const std::vector<Fp3>& parent_q_per_query,
