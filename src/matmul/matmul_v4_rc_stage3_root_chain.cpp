@@ -1603,19 +1603,15 @@ bool ProveRCStage3CoupledRootChain(
     return true;
 }
 
-bool VerifyRCStage3CoupledRootChain(
+bool VerifyRCStage3CoupledBarrierRootChain(
     const RCStage3SuccinctProof& statement,
     const RCStage3CoupledShape& shape,
     const RCStage3CoupledRootChainProof& proof,
     std::string* why)
 {
     if (!IsCoupledStatement(statement) ||
-        proof.barriers.size() != shape.barriers ||
-        !ValidateRCStage3CoupledDigestManifestStructural(
-            shape, proof.digest_manifest, why) ||
-        proof.digest_manifest.direct.digest !=
-            statement.public_inputs.coupled_digest) {
-        return Fail(why, "coupled_outer_shape");
+        proof.barriers.size() != shape.barriers) {
+        return Fail(why, "coupled_barrier_outer_shape");
     }
     const uint256 statement_commitment =
         CommitRCStage3CoupledStatement(statement.public_inputs);
@@ -1623,16 +1619,12 @@ bool VerifyRCStage3CoupledRootChain(
         const auto& entry = proof.barriers[i];
         if (!ValidateRCStage3CoupledBarrierManifestStructural(
                 shape, i, entry.manifest, why) ||
-            entry.manifest.direct.digest !=
-                proof.digest_manifest.barrier_roots[i] ||
             !VerifyRCStage3CoupledBarrierHashSemantic(
                 statement, shape, entry.manifest,
                 entry.hash_bundle, entry.hash_pin, why)) {
-            return Fail(
-                why, "barrier_" + std::to_string(i));
+            return Fail(why, "barrier_" + std::to_string(i));
         }
     }
-
     const uint256 barrier_collection =
         ComputeRCStage3RootChainBarrierCollectionCommitment(
             proof.barriers);
@@ -1652,7 +1644,37 @@ bool VerifyRCStage3CoupledRootChain(
             proof.barrier_outputs_proof, why)) {
         return false;
     }
+    if (why != nullptr) {
+        *why = "stage3:root_chain:coupled_barrier_local_ok";
+    }
+    return true;
+}
 
+bool VerifyRCStage3CoupledDigestRootChain(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledRootChainProof& proof,
+    std::string* why)
+{
+    if (!IsCoupledStatement(statement) ||
+        proof.barriers.size() != shape.barriers ||
+        !ValidateRCStage3CoupledDigestManifestStructural(
+            shape, proof.digest_manifest, why) ||
+        proof.digest_manifest.direct.digest !=
+            statement.public_inputs.coupled_digest) {
+        return Fail(why, "coupled_digest_outer_shape");
+    }
+    const uint256 statement_commitment =
+        CommitRCStage3CoupledStatement(statement.public_inputs);
+    for (uint32_t i = 0; i < proof.barriers.size(); ++i) {
+        const auto& entry = proof.barriers[i];
+        if (!ValidateRCStage3CoupledBarrierManifestStructural(
+                shape, i, entry.manifest, why) ||
+            entry.manifest.direct.digest !=
+                proof.digest_manifest.barrier_roots[i]) {
+            return Fail(why, "digest_barrier_struct_" + std::to_string(i));
+        }
+    }
     const std::vector<uint8_t> digest_inputs =
         CoupledDigestInputBytes(proof.digest_manifest);
     if (!VerifyRCStage3RootChainVector(
@@ -1672,6 +1694,24 @@ bool VerifyRCStage3CoupledRootChain(
             statement_commitment, proof.digest_manifest.commitment,
             digest, proof.digest_value_pin,
             proof.digest_value_proof, why)) {
+        return false;
+    }
+    if (why != nullptr) {
+        *why = "stage3:root_chain:coupled_digest_local_ok";
+    }
+    return true;
+}
+
+bool VerifyRCStage3CoupledRootChain(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledRootChainProof& proof,
+    std::string* why)
+{
+    if (!VerifyRCStage3CoupledBarrierRootChain(
+            statement, shape, proof, why) ||
+        !VerifyRCStage3CoupledDigestRootChain(
+            statement, shape, proof, why)) {
         return false;
     }
     if (why != nullptr) {

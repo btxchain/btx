@@ -1571,11 +1571,13 @@ RCStage3CoupledExchangePermutationWitness OpeningToWitness(
 }
 
 bool SerializeAirProofBlob(const aq::AirQuotientProof<Fp3>& proof,
-                           std::vector<unsigned char>& body)
+                           std::vector<unsigned char>& body,
+                           std::string* why = nullptr)
 {
     std::vector<unsigned char> proof_bytes;
     if (!SerializeFri3AirQuotientProof(proof, proof_bytes) || proof_bytes.empty()) {
-        return false;
+        return Fail(why,
+                    "air_blob:serialize_fri3_batch_or_openings_or_cap");
     }
     WriteU32(body, static_cast<uint32_t>(proof_bytes.size()));
     body.insert(body.end(), proof_bytes.begin(), proof_bytes.end());
@@ -2562,6 +2564,17 @@ bool VerifyRCStage3CoupledBarrierEngineReceipt(
         !ReadBarrierRootProofs(reader, proof) || reader.Remaining() != 0) {
         return Fail(why, "barrier_engine:decode");
     }
+    // FlatBoundaryProofBundle public fields are not on the wire; rebind from
+    // rebuilt manifests + statement (same pattern as Mix/Exchange codecs).
+    const uint256 statement_commitment =
+        CommitRCStage3CoupledStatement(statement.public_inputs);
+    for (auto& entry : proof.barriers) {
+        entry.hash_bundle.endpoint =
+            RCStage3RelationEndpoint::CoupledBarrierHash;
+        entry.hash_bundle.statement_commitment = statement_commitment;
+        entry.hash_bundle.manifest_commitment =
+            entry.manifest.direct.commitment;
+    }
     if (!VerifyRCStage3CoupledBarrierRootChain(statement, shape, proof, why)) {
         return false;
     }
@@ -2622,6 +2635,13 @@ bool VerifyRCStage3CoupledDigestEngineReceipt(
         !ReadDigestRootProofs(reader, proof) || reader.Remaining() != 0) {
         return Fail(why, "digest_engine:decode");
     }
+    const uint256 statement_commitment =
+        CommitRCStage3CoupledStatement(statement.public_inputs);
+    proof.digest_hash_bundle.endpoint =
+        RCStage3RelationEndpoint::CoupledDigestHash;
+    proof.digest_hash_bundle.statement_commitment = statement_commitment;
+    proof.digest_hash_bundle.manifest_commitment =
+        proof.digest_manifest.direct.commitment;
     if (!VerifyRCStage3CoupledDigestRootChain(statement, shape, proof, why)) {
         return false;
     }

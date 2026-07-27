@@ -151,6 +151,10 @@ BOOST_AUTO_TEST_CASE(registry_has_exact_roles_coverage_and_residuals)
     BOOST_CHECK(rc::kRCStage3CoupledPermutationSchedulePrototypeExecuted);
     BOOST_CHECK(rc::kRCStage3CoupledMixSchedulePrototypeExecuted);
     BOOST_CHECK(rc::kRCStage3CoupledMaterialExchangeHashXofPrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledExtractChaChaScalePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledExtractInt64RangePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledBarrierSha256dPrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledDigestSha256dPrototypeExecuted);
     BOOST_CHECK(!HasGap(entries[0], rc::RCStage3CoupledAirGapCode::BankSeedXof));
     BOOST_CHECK(!HasGap(entries[0], rc::RCStage3CoupledAirGapCode::BankPageInclusion));
     BOOST_CHECK(HasGap(entries[0],
@@ -163,11 +167,23 @@ BOOST_AUTO_TEST_CASE(registry_has_exact_roles_coverage_and_residuals)
                         rc::RCStage3CoupledAirGapCode::PublicScheduleBinding));
     BOOST_CHECK(!HasGap(entries[4],
                         rc::RCStage3CoupledAirGapCode::PublicScheduleBinding));
+    BOOST_CHECK(!HasGap(entries[5],
+                        rc::RCStage3CoupledAirGapCode::ExtractChaChaAndScaleSha));
+    BOOST_CHECK(!HasGap(entries[5],
+                        rc::RCStage3CoupledAirGapCode::ExtractInt64AndRangeLookups));
+    BOOST_CHECK(!HasGap(entries[6], rc::RCStage3CoupledAirGapCode::BarrierSha256d));
+    BOOST_CHECK(!HasGap(entries[7], rc::RCStage3CoupledAirGapCode::DigestSha256d));
     BOOST_CHECK(HasGap(entries[2],
                        rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge));
     BOOST_CHECK(HasGap(entries[3],
                        rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
     BOOST_CHECK(HasGap(entries[4],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[5],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[6],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[7],
                        rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
 
     std::string why;
