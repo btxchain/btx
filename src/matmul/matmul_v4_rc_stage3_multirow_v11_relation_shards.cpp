@@ -12,17 +12,6 @@ namespace {
 
 using gf::Fp3;
 
-uint32_t NextPowerOfTwo(uint64_t value)
-{
-    if (value < 2) return 2;
-    uint64_t out = 1;
-    while (out < value) {
-        out <<= 1;
-        if (out > std::numeric_limits<uint32_t>::max()) return 0;
-    }
-    return static_cast<uint32_t>(out);
-}
-
 bool DigestEq(
     const alg_hash::Digest& a,
     const alg_hash::Digest& b)
@@ -107,7 +96,7 @@ bool BuildManifestPreimageV1(
         }
         return false;
     }
-    lanes.reserve(32 + kRelationShardsV1 * 20);
+    lanes.reserve(32 + kRelationShardsV1 * 27);
     lanes.push_back(gf::FromU64(UINT32_C(0x56313152))); // "V11R"
     lanes.push_back(gf::FromU64(UINT32_C(0x53485244))); // "SHRD"
     lanes.push_back(gf::FromU64(kRelationShardVersionV1));
@@ -154,6 +143,10 @@ bool BuildManifestPreimageV1(
         std::string local_why;
         const auto actual_root =
             cb::CommitProgramTableAlgHash(shard.local_table);
+        const auto actual_q64 = np::AssessExecutionDomainV1(
+            shard.local_table, kFallbackQueriesPerShardV1);
+        const auto actual_q96 = np::AssessExecutionDomainV1(
+            shard.local_table, kPreferredQueriesPerShardV1);
         bool raw_constants_canonical = true;
         for (const auto& program : shard.local_table.programs) {
             for (const auto& instruction : program.instructions) {
@@ -174,7 +167,29 @@ bool BuildManifestPreimageV1(
             !cb::ValidateProgramTable(
                 shard.local_table, &local_why) ||
             !raw_constants_canonical ||
-            !DigestEq(actual_root, shard.local_program_root)) {
+            !actual_q64.valid ||
+            !actual_q96.valid ||
+            !DigestEq(actual_root, shard.local_program_root) ||
+            shard.max_constraint_degree !=
+                actual_q64.max_constraint_degree ||
+            actual_q64.max_constraint_degree !=
+                actual_q96.max_constraint_degree ||
+            shard.q64_real_rows != actual_q64.real_rows ||
+            shard.q64_trace_rows != actual_q64.trace_rows ||
+            shard.q64_max_composed_degree !=
+                actual_q64.max_composed_degree ||
+            shard.q64_quotient_len != actual_q64.quotient_len ||
+            shard.q64_coefficient_rows !=
+                actual_q64.coefficient_rows ||
+            shard.q64_lde_rows != actual_q64.lde_rows ||
+            shard.q96_real_rows != actual_q96.real_rows ||
+            shard.q96_trace_rows != actual_q96.trace_rows ||
+            shard.q96_max_composed_degree !=
+                actual_q96.max_composed_degree ||
+            shard.q96_quotient_len != actual_q96.quotient_len ||
+            shard.q96_coefficient_rows !=
+                actual_q96.coefficient_rows ||
+            shard.q96_lde_rows != actual_q96.lde_rows) {
             lanes.clear();
             if (why != nullptr) {
                 *why =
@@ -190,14 +205,29 @@ bool BuildManifestPreimageV1(
         lanes.push_back(gf::FromU64(shard.first_lambda_exponent));
         lanes.push_back(gf::FromU64(
             static_cast<uint32_t>(shard.instruction_count)));
+        lanes.push_back(gf::FromU64(shard.max_constraint_degree));
         lanes.push_back(gf::FromU64(
             static_cast<uint32_t>(shard.q64_real_rows)));
         lanes.push_back(gf::FromU64(shard.q64_trace_rows));
+        lanes.push_back(gf::FromU64(
+            static_cast<uint32_t>(
+                shard.q64_max_composed_degree)));
+        lanes.push_back(gf::FromU64(
+            static_cast<uint32_t>(shard.q64_quotient_len)));
+        lanes.push_back(gf::FromU64(
+            shard.q64_coefficient_rows));
         lanes.push_back(gf::FromU64(
             static_cast<uint32_t>(shard.q64_lde_rows)));
         lanes.push_back(gf::FromU64(
             static_cast<uint32_t>(shard.q96_real_rows)));
         lanes.push_back(gf::FromU64(shard.q96_trace_rows));
+        lanes.push_back(gf::FromU64(
+            static_cast<uint32_t>(
+                shard.q96_max_composed_degree)));
+        lanes.push_back(gf::FromU64(
+            static_cast<uint32_t>(shard.q96_quotient_len)));
+        lanes.push_back(gf::FromU64(
+            shard.q96_coefficient_rows));
         lanes.push_back(gf::FromU64(
             static_cast<uint32_t>(shard.q96_lde_rows)));
         lanes.insert(
@@ -333,34 +363,32 @@ PlanV1 BuildPlanV1(const cb::ProgramTable& full_table)
         shard.instruction_cap_fits =
             shard.instruction_count <=
                 np::kFixedPointInstructionCapV1;
-        shard.q64_real_rows =
-            uint64_t{kFallbackQueriesPerShardV1} *
-            (uint64_t{full_table.current_width} +
-             shard.instruction_count + 3);
-        shard.q64_trace_rows =
-            NextPowerOfTwo(shard.q64_real_rows);
-        shard.q64_lde_rows =
-            uint64_t{shard.q64_trace_rows} * np::kFriBlowupV1;
-        shard.trace_rows_fit =
-            shard.q64_trace_rows != 0 &&
-            shard.q64_trace_rows <= np::kTraceRowsCapV1;
-        shard.lde_rows_fit =
-            shard.q64_lde_rows != 0 &&
-            shard.q64_lde_rows <= np::kLdeRowsCapV1;
-        shard.q96_real_rows =
-            uint64_t{kPreferredQueriesPerShardV1} *
-            (uint64_t{full_table.current_width} +
-             shard.instruction_count + 3);
-        shard.q96_trace_rows =
-            NextPowerOfTwo(shard.q96_real_rows);
-        shard.q96_lde_rows =
-            uint64_t{shard.q96_trace_rows} * np::kFriBlowupV1;
-        shard.q96_trace_rows_fit =
-            shard.q96_trace_rows != 0 &&
-            shard.q96_trace_rows <= np::kTraceRowsCapV1;
-        shard.q96_lde_rows_fit =
-            shard.q96_lde_rows != 0 &&
-            shard.q96_lde_rows <= np::kLdeRowsCapV1;
+        const auto q64 = np::AssessExecutionDomainV1(
+            shard.local_table, kFallbackQueriesPerShardV1);
+        const auto q96 = np::AssessExecutionDomainV1(
+            shard.local_table, kPreferredQueriesPerShardV1);
+        shard.max_constraint_degree =
+            q64.max_constraint_degree;
+        shard.q64_real_rows = q64.real_rows;
+        shard.q64_trace_rows = q64.trace_rows;
+        shard.q64_max_composed_degree =
+            q64.max_composed_degree;
+        shard.q64_quotient_len = q64.quotient_len;
+        shard.q64_coefficient_rows =
+            q64.coefficient_rows;
+        shard.q64_lde_rows = q64.lde_rows;
+        shard.trace_rows_fit = q64.trace_rows_fit;
+        shard.lde_rows_fit = q64.lde_rows_fit;
+        shard.q96_real_rows = q96.real_rows;
+        shard.q96_trace_rows = q96.trace_rows;
+        shard.q96_max_composed_degree =
+            q96.max_composed_degree;
+        shard.q96_quotient_len = q96.quotient_len;
+        shard.q96_coefficient_rows =
+            q96.coefficient_rows;
+        shard.q96_lde_rows = q96.lde_rows;
+        shard.q96_trace_rows_fit = q96.trace_rows_fit;
+        shard.q96_lde_rows_fit = q96.lde_rows_fit;
         shard.valid =
             table_valid &&
             shard.program_boundary_exact &&

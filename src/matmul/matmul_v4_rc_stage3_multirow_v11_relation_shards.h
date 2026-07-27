@@ -52,11 +52,18 @@ struct ShardV1 {
     uint32_t program_count{0};
     uint32_t first_lambda_exponent{0};
     uint64_t instruction_count{0};
+    uint32_t max_constraint_degree{0};
     uint64_t q64_real_rows{0};
     uint32_t q64_trace_rows{0};
+    uint64_t q64_max_composed_degree{0};
+    uint64_t q64_quotient_len{0};
+    uint32_t q64_coefficient_rows{0};
     uint64_t q64_lde_rows{0};
     uint64_t q96_real_rows{0};
     uint32_t q96_trace_rows{0};
+    uint64_t q96_max_composed_degree{0};
+    uint64_t q96_quotient_len{0};
+    uint32_t q96_coefficient_rows{0};
     uint64_t q96_lde_rows{0};
     cb::ProgramTable local_table{};
     alg_hash::Digest local_program_root{};

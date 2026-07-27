@@ -104,10 +104,31 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK_LE(
             shard.instruction_count,
             uint64_t{np::kFixedPointInstructionCapV1});
+        BOOST_CHECK_EQUAL(shard.max_constraint_degree, 2U);
         BOOST_CHECK_LE(shard.q64_trace_rows, 1U << 20);
+        BOOST_CHECK_LE(
+            shard.q64_quotient_len,
+            shard.q64_coefficient_rows);
+        BOOST_CHECK_GE(
+            shard.q64_coefficient_rows,
+            shard.q64_trace_rows);
         BOOST_CHECK_LE(shard.q64_lde_rows, 1U << 24);
         BOOST_CHECK_LE(shard.q96_trace_rows, 1U << 20);
+        BOOST_CHECK_LE(
+            shard.q96_quotient_len,
+            shard.q96_coefficient_rows);
+        BOOST_CHECK_GE(
+            shard.q96_coefficient_rows,
+            shard.q96_trace_rows);
         BOOST_CHECK_LE(shard.q96_lde_rows, 1U << 24);
+        BOOST_CHECK_EQUAL(
+            shard.q64_lde_rows,
+            uint64_t{shard.q64_coefficient_rows} *
+                np::kFriBlowupV1);
+        BOOST_CHECK_EQUAL(
+            shard.q96_lde_rows,
+            uint64_t{shard.q96_coefficient_rows} *
+                np::kFriBlowupV1);
         total_instructions += shard.instruction_count;
         total_programs += shard.program_count;
         BOOST_TEST_MESSAGE(
@@ -118,9 +139,16 @@ BOOST_AUTO_TEST_CASE(
             << " instructions=" << shard.instruction_count
             << " real_rows=" << shard.q64_real_rows
             << " trace_rows=" << shard.q64_trace_rows
+            << " quotient_len=" << shard.q64_quotient_len
+            << " coefficient_rows="
+            << shard.q64_coefficient_rows
             << " lde_rows=" << shard.q64_lde_rows
             << " q96_real_rows=" << shard.q96_real_rows
             << " q96_trace_rows=" << shard.q96_trace_rows
+            << " q96_quotient_len="
+            << shard.q96_quotient_len
+            << " q96_coefficient_rows="
+            << shard.q96_coefficient_rows
             << " q96_lde_rows=" << shard.q96_lde_rows);
     }
     BOOST_CHECK_EQUAL(total_instructions, plan.full_instructions);
@@ -238,6 +266,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!DigestEq(
         fixture.plan.shard_manifest_root,
         ComputeManifestRootV1(fixture.full, local_root)));
+
+    auto forged_domain = fixture.plan.shards;
+    ++forged_domain[0].q96_quotient_len;
+    std::vector<gf::Fp> forged_domain_preimage;
+    BOOST_CHECK(!BuildManifestPreimageV1(
+        fixture.full, forged_domain,
+        forged_domain_preimage));
+    BOOST_CHECK(forged_domain_preimage.empty());
 
     auto raw_alias = fixture.plan.shards;
     bool alias_written = false;

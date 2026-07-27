@@ -306,6 +306,49 @@ uint32_t NextPowerOfTwo(uint64_t value)
     return static_cast<uint32_t>(out);
 }
 
+bool CheckedAdd(uint64_t a, uint64_t b, uint64_t& out)
+{
+    if (a > std::numeric_limits<uint64_t>::max() - b) return false;
+    out = a + b;
+    return true;
+}
+
+bool CheckedMul(uint64_t a, uint64_t b, uint64_t& out)
+{
+    if (a != 0 &&
+        b > std::numeric_limits<uint64_t>::max() / a) {
+        return false;
+    }
+    out = a * b;
+    return true;
+}
+
+bool ComposedDegreeBound(
+    const cb::Program& program,
+    uint32_t trace_rows,
+    uint64_t& out)
+{
+    if (trace_rows < 2) return false;
+    const uint64_t trace_degree =
+        static_cast<uint64_t>(trace_rows) - 1;
+    uint64_t degree = 0;
+    if (!CheckedMul(
+            program.declared_degree, trace_degree, degree)) {
+        return false;
+    }
+    switch (program.kind) {
+    case aq::AirKind::kEverywhere:
+        out = degree;
+        return true;
+    case aq::AirKind::kTransition:
+        return CheckedAdd(degree, 1, out);
+    case aq::AirKind::kFirstRow:
+    case aq::AirKind::kLastRow:
+        return CheckedAdd(degree, trace_degree, out);
+    }
+    return false;
+}
+
 bool DigestEq(
     const alg_hash::Digest& a,
     const alg_hash::Digest& b)
@@ -584,12 +627,79 @@ bool BuildCanonicalProgramTableV1(
     return true;
 }
 
+ExecutionDomainV1 AssessExecutionDomainV1(
+    const cb::ProgramTable& table,
+    uint32_t query_count)
+{
+    ExecutionDomainV1 out;
+    out.query_count = query_count;
+    if (query_count == 0 ||
+        !cb::ValidateProgramTable(table, nullptr)) {
+        return out;
+    }
+
+    const uint64_t instructions = CountInstructions(table);
+    uint64_t row_width = 0;
+    if (!CheckedAdd(
+            static_cast<uint64_t>(table.current_width),
+            instructions, row_width) ||
+        !CheckedAdd(row_width, 3, row_width) ||
+        !CheckedMul(query_count, row_width, out.real_rows)) {
+        return out;
+    }
+    out.trace_rows = NextPowerOfTwo(out.real_rows);
+    if (out.trace_rows == 0) return out;
+
+    for (const auto& program : table.programs) {
+        out.max_constraint_degree = std::max(
+            out.max_constraint_degree,
+            program.declared_degree);
+        uint64_t composed_degree = 0;
+        if (!ComposedDegreeBound(
+                program, out.trace_rows, composed_degree)) {
+            return out;
+        }
+        out.max_composed_degree = std::max(
+            out.max_composed_degree, composed_degree);
+    }
+    out.quotient_len =
+        out.max_composed_degree < out.trace_rows
+        ? 1
+        : out.max_composed_degree - out.trace_rows + 1;
+    // AirConstraintSystem::QuotientLen() and the FRI implementation use a
+    // uint32_t coefficient count.  Refuse an unrepresentable domain rather
+    // than truncating it.
+    if (out.quotient_len >
+        std::numeric_limits<uint32_t>::max()) {
+        return out;
+    }
+    out.coefficient_rows = NextPowerOfTwo(std::max<uint64_t>(
+        out.trace_rows, out.quotient_len));
+    if (out.coefficient_rows == 0 ||
+        !CheckedMul(
+            out.coefficient_rows, kFriBlowupV1, out.lde_rows)) {
+        return out;
+    }
+    out.exact_degree_accounting = true;
+    out.trace_rows_fit =
+        out.trace_rows <= kTraceRowsCapV1;
+    out.lde_rows_fit =
+        out.lde_rows <= kLdeRowsCapV1;
+    out.valid =
+        out.exact_degree_accounting &&
+        out.trace_rows_fit &&
+        out.lde_rows_fit;
+    return out;
+}
+
 ManifestV1 AssessProgramTableV1(
     const cb::ProgramTable& table,
-    uint32_t instruction_cap)
+    uint32_t instruction_cap,
+    uint32_t query_count)
 {
     ManifestV1 out;
     out.fixedpoint_instruction_cap = instruction_cap;
+    out.query_count = query_count;
     out.current_columns = table.current_width;
     out.next_columns = table.next_width;
     out.program_count =
@@ -650,20 +760,20 @@ ManifestV1 AssessProgramTableV1(
         out.unlowered_relations == 0;
     out.instruction_cap_fits =
         out.instruction_count <= instruction_cap;
-    out.exact_vm_real_rows =
-        uint64_t{out.query_count} *
-        (uint64_t{out.current_columns} +
-         out.instruction_count + 3);
-    out.exact_vm_trace_rows =
-        NextPowerOfTwo(out.exact_vm_real_rows);
-    out.exact_vm_lde_rows =
-        uint64_t{out.exact_vm_trace_rows} * kFriBlowupV1;
-    out.trace_rows_fit =
-        out.exact_vm_trace_rows != 0 &&
-        out.exact_vm_trace_rows <= kTraceRowsCapV1;
-    out.lde_rows_fit =
-        out.exact_vm_lde_rows != 0 &&
-        out.exact_vm_lde_rows <= kLdeRowsCapV1;
+    const auto domain =
+        AssessExecutionDomainV1(table, out.query_count);
+    out.exact_vm_real_rows = domain.real_rows;
+    out.exact_vm_trace_rows = domain.trace_rows;
+    out.exact_vm_max_constraint_degree =
+        domain.max_constraint_degree;
+    out.exact_vm_max_composed_degree =
+        domain.max_composed_degree;
+    out.exact_vm_quotient_len = domain.quotient_len;
+    out.exact_vm_coefficient_rows =
+        domain.coefficient_rows;
+    out.exact_vm_lde_rows = domain.lde_rows;
+    out.trace_rows_fit = domain.trace_rows_fit;
+    out.lde_rows_fit = domain.lde_rows_fit;
     std::vector<unsigned char> bytes;
     if (out.canonical_program_table &&
         out.canonical_field_encodings &&
@@ -683,6 +793,9 @@ ManifestV1 AssessProgramTableV1(
     }
     if (!out.instruction_cap_fits) {
         out.residual_mask |= kResidualFixedPointInstructionCap;
+    }
+    if (!domain.valid) {
+        out.residual_mask |= kResidualExecutionDomain;
     }
     out.canonical_program_executable =
         out.residual_mask == 0 &&

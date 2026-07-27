@@ -37,6 +37,31 @@ enum ResidualV1 : uint32_t {
     kResidualUnloweredRelation = 1U << 2,
     kResidualFixedPointInstructionCap = 1U << 3,
     kResidualDifferentialAudit = 1U << 4,
+    kResidualExecutionDomain = 1U << 5,
+};
+
+/**
+ * Exact prover-domain inventory for one normalized bytecode shard.
+ *
+ * `trace_rows * blowup` is not, in general, the FRI LDE size.  The prover
+ * first commits the quotient on a coefficient domain large enough for both
+ * the trace and the declared quotient polynomial.  Keeping every
+ * intermediate here prevents a degree increase from silently passing a
+ * trace-only budget check.
+ */
+struct ExecutionDomainV1 {
+    uint32_t query_count{0};
+    uint64_t real_rows{0};
+    uint32_t trace_rows{0};
+    uint32_t max_constraint_degree{0};
+    uint64_t max_composed_degree{0};
+    uint64_t quotient_len{0};
+    uint32_t coefficient_rows{0};
+    uint64_t lde_rows{0};
+    bool exact_degree_accounting{false};
+    bool trace_rows_fit{false};
+    bool lde_rows_fit{false};
+    bool valid{false};
 };
 
 struct ManifestV1 {
@@ -58,6 +83,10 @@ struct ManifestV1 {
     uint32_t query_count{kVerifierShardQueriesV1};
     uint64_t exact_vm_real_rows{0};
     uint32_t exact_vm_trace_rows{0};
+    uint32_t exact_vm_max_constraint_degree{0};
+    uint64_t exact_vm_max_composed_degree{0};
+    uint64_t exact_vm_quotient_len{0};
+    uint32_t exact_vm_coefficient_rows{0};
     uint64_t exact_vm_lde_rows{0};
     uint32_t residual_mask{0};
     alg_hash::Digest program_root{};
@@ -96,7 +125,18 @@ struct ManifestV1 {
  */
 [[nodiscard]] ManifestV1 AssessProgramTableV1(
     const cb::ProgramTable& table,
-    uint32_t instruction_cap = kFixedPointInstructionCapV1);
+    uint32_t instruction_cap = kFixedPointInstructionCapV1,
+    uint32_t query_count = kVerifierShardQueriesV1);
+
+/**
+ * Compute the exact normalized-VM trace, quotient and LDE domains using the
+ * same AirKind degree rules as AirConstraintSystem::ComposedDegreeBound().
+ * This accepts any valid bytecode table and is shared by the relation-shard
+ * planner for its Q64 and Q96 inventories.
+ */
+[[nodiscard]] ExecutionDomainV1 AssessExecutionDomainV1(
+    const cb::ProgramTable& table,
+    uint32_t query_count);
 
 [[nodiscard]] bool ProgramRootMatchesV1(
     const cb::ProgramTable& table,

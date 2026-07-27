@@ -205,6 +205,53 @@ void Renumber(cb::ProgramTable& table)
     }
 }
 
+cb::ProgramTable DegreeTable(
+    air_quotient::AirKind kind,
+    uint32_t degree,
+    uint32_t width = 5000)
+{
+    cb::ProgramTable table;
+    table.version = cb::kConstraintBytecodeVersion;
+    table.role = RCStage3RelationRole::CompositionLink;
+    table.current_width = width;
+    table.next_width = width;
+    table.challenge_width = 0;
+
+    cb::Program program;
+    program.version = cb::kConstraintBytecodeVersion;
+    program.role = table.role;
+    program.constraint_ordinal = 0;
+    program.kind = kind;
+    program.declared_degree = degree;
+    program.current_width = width;
+    program.next_width = width;
+    program.challenge_width = 0;
+
+    cb::Instruction first;
+    first.opcode = cb::Opcode::Current;
+    first.lhs = 0;
+    program.instructions.push_back(first);
+    uint32_t product = 0;
+    for (uint32_t column = 1; column < degree; ++column) {
+        cb::Instruction load;
+        load.opcode = cb::Opcode::Current;
+        load.lhs = column;
+        program.instructions.push_back(load);
+        const uint32_t loaded =
+            static_cast<uint32_t>(program.instructions.size()) - 1;
+
+        cb::Instruction multiply;
+        multiply.opcode = cb::Opcode::Mul;
+        multiply.lhs = product;
+        multiply.rhs = loaded;
+        program.instructions.push_back(multiply);
+        product =
+            static_cast<uint32_t>(program.instructions.size()) - 1;
+    }
+    table.programs.push_back(std::move(program));
+    return table;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -243,6 +290,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(manifest.query_count, 64U);
     BOOST_CHECK_EQUAL(manifest.exact_vm_real_rows, 1598080U);
     BOOST_CHECK_EQUAL(manifest.exact_vm_trace_rows, 1U << 21);
+    BOOST_CHECK_EQUAL(manifest.exact_vm_max_constraint_degree, 2U);
+    BOOST_CHECK_EQUAL(
+        manifest.exact_vm_max_composed_degree,
+        2U * ((1U << 21) - 1U) + 1U);
+    BOOST_CHECK_EQUAL(
+        manifest.exact_vm_quotient_len, 1U << 21);
+    BOOST_CHECK_EQUAL(
+        manifest.exact_vm_coefficient_rows, 1U << 21);
     BOOST_CHECK_EQUAL(manifest.exact_vm_lde_rows, 1U << 25);
     BOOST_CHECK(!manifest.trace_rows_fit);
     BOOST_CHECK(!manifest.lde_rows_fit);
@@ -268,6 +323,76 @@ BOOST_AUTO_TEST_CASE(
         << " trace_rows=" << manifest.exact_vm_trace_rows
         << " lde_rows=" << manifest.exact_vm_lde_rows
         << " fixedpoint_cap=" << manifest.fixedpoint_instruction_cap);
+}
+
+BOOST_AUTO_TEST_CASE(
+    exact_quotient_domain_matches_air_system_and_q96_cap_boundary)
+{
+    constexpr uint32_t kQ96 = 96;
+    const auto cubic =
+        DegreeTable(air_quotient::AirKind::kEverywhere, 3);
+    BOOST_REQUIRE(cb::ValidateProgramTable(cubic));
+    const auto domain = AssessExecutionDomainV1(cubic, kQ96);
+    BOOST_REQUIRE(domain.exact_degree_accounting);
+    BOOST_CHECK_EQUAL(domain.real_rows, 480768U);
+    BOOST_CHECK_EQUAL(domain.trace_rows, 1U << 19);
+    BOOST_CHECK_EQUAL(domain.max_constraint_degree, 3U);
+    BOOST_CHECK_EQUAL(domain.max_composed_degree, 1572861U);
+    BOOST_CHECK_EQUAL(domain.quotient_len, 1048574U);
+    BOOST_CHECK_EQUAL(domain.coefficient_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(domain.lde_rows, 1U << 24);
+    BOOST_CHECK(domain.trace_rows_fit);
+    BOOST_CHECK(domain.lde_rows_fit);
+    BOOST_CHECK(domain.valid);
+
+    air_quotient::AirConstraintSystem<Fp3> cs;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            cubic, domain.trace_rows, cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        domain.max_composed_degree,
+        cs.MaxComposedDegreeBound());
+    BOOST_CHECK_EQUAL(domain.quotient_len, cs.QuotientLen());
+
+    const auto transition = AssessExecutionDomainV1(
+        DegreeTable(air_quotient::AirKind::kTransition, 3),
+        kQ96);
+    BOOST_REQUIRE(transition.valid);
+    BOOST_CHECK_EQUAL(transition.max_composed_degree, 1572862U);
+    BOOST_CHECK_EQUAL(transition.quotient_len, 1048575U);
+    BOOST_CHECK_EQUAL(transition.coefficient_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(transition.lde_rows, 1U << 24);
+
+    const auto boundary = AssessExecutionDomainV1(
+        DegreeTable(air_quotient::AirKind::kFirstRow, 3),
+        kQ96);
+    BOOST_REQUIRE(boundary.exact_degree_accounting);
+    BOOST_CHECK_EQUAL(boundary.max_composed_degree, 2097148U);
+    BOOST_CHECK_EQUAL(boundary.quotient_len, 1572861U);
+    BOOST_CHECK_EQUAL(boundary.coefficient_rows, 1U << 21);
+    BOOST_CHECK_EQUAL(boundary.lde_rows, 1U << 25);
+    BOOST_CHECK(!boundary.lde_rows_fit);
+    BOOST_CHECK(!boundary.valid);
+
+    const auto quartic = AssessExecutionDomainV1(
+        DegreeTable(air_quotient::AirKind::kEverywhere, 4),
+        kQ96);
+    BOOST_REQUIRE(quartic.exact_degree_accounting);
+    BOOST_CHECK_EQUAL(quartic.max_composed_degree, 2097148U);
+    BOOST_CHECK_EQUAL(quartic.coefficient_rows, 1U << 21);
+    BOOST_CHECK_EQUAL(quartic.lde_rows, 1U << 25);
+    BOOST_CHECK(!quartic.valid);
+
+    auto understated = cubic;
+    understated.programs[0].declared_degree = 2;
+    BOOST_CHECK(!cb::ValidateProgramTable(understated));
+    const auto rejected =
+        AssessExecutionDomainV1(understated, kQ96);
+    BOOST_CHECK(!rejected.exact_degree_accounting);
+    BOOST_CHECK(!rejected.valid);
+    BOOST_CHECK(!AssessExecutionDomainV1(cubic, 0).valid);
 }
 
 BOOST_AUTO_TEST_CASE(
