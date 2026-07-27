@@ -649,4 +649,275 @@ BOOST_AUTO_TEST_CASE(coupled_bank_dequant_engine_wires_into_full_relation_verifi
         why.find("bank_dequant_engine_trace_root") != std::string::npos, why);
 }
 
+rc::RCStage3CoupledShape MakeGemmDotEngineTestShape()
+{
+    // Same toy geometry as the gemm product suite: 4 barriers × 1 lobe × 1
+    // page slot ⇒ 4 scheduled GEMMs, 1 output tile each.
+    return MakeBankDequantEngineTestShape();
+}
+
+rc::RCStage3SuccinctProof MakeGemmDotEngineStatement(
+    const rc::RCStage3CoupledShape& shape)
+{
+    rc::RCStage3SuccinctProof out;
+    out.statement = rc::RCStage3StatementKind::Coupled;
+    out.public_inputs.height = 700;
+    out.public_inputs.n_bits = 0x207fffffU;
+    out.public_inputs.coupled_profile = 2;
+    out.public_inputs.transcript_version = shape.transcript_version;
+    out.public_inputs.header_commitment = Filled(0x11);
+    out.public_inputs.params_commitment = Filled(0x22);
+    out.public_inputs.target = Filled(0xff);
+    out.public_inputs.sigma = Filled(0x33);
+    out.public_inputs.coupled_digest = Filled(0x44);
+    out.public_inputs.final_digest = Filled(0x44);
+    return out;
+}
+
+std::vector<rc::RCStage3CoupledGemmDotOpening> MakeHonestGemmDotOpenings(
+    const rc::RCStage3CoupledShape& shape, size_t count, int64_t y = 32)
+{
+    std::vector<rc::RCStage3CoupledGemmDotOpening> out(count);
+    const size_t a_len =
+        size_t{shape.rows_per_lobe} * shape.lobe_width;
+    const size_t b_len =
+        size_t{shape.lobe_width} * shape.lobe_width;
+    for (auto& opening : out) {
+        opening.operand_a.assign(a_len, 1);
+        opening.operand_b.assign(b_len, 1);
+        opening.output_y.assign(a_len, y);
+    }
+    return out;
+}
+
+BOOST_AUTO_TEST_CASE(coupled_gemm_dot_engine_accepts_honest_witness)
+{
+    const auto shape = MakeGemmDotEngineTestShape();
+    const auto statement = MakeGemmDotEngineStatement(shape);
+    const uint256 statement_commitment =
+        rc::CommitRCStage3CoupledStatement(statement.public_inputs);
+    const uint256 shape_commitment = rc::CommitRCStage3CoupledShape(shape);
+    const auto counts = rc::ExpectedRCStage3CoupledRelationCounts(
+        rc::RCStage3RelationRole::CoupledGemm, shape);
+    BOOST_REQUIRE(counts.has_value());
+    const auto openings =
+        MakeHonestGemmDotOpenings(shape, counts->primary);
+
+    std::vector<unsigned char> engine_receipt;
+    uint256 trace_root;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledGemmDotEngineReceipt(
+            statement, shape, openings, engine_receipt, trace_root, &why),
+        why);
+    BOOST_CHECK(!trace_root.IsNull());
+    BOOST_CHECK(!engine_receipt.empty());
+    BOOST_CHECK_LE(engine_receipt.size(),
+                   rc::kRCStage3CoupledMaxEngineReceiptBytes);
+
+    uint256 verified_trace_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+            shape, statement_commitment, shape_commitment,
+            statement.public_inputs.sigma, engine_receipt, verified_trace_root,
+            &why),
+        why);
+    BOOST_CHECK(verified_trace_root == trace_root);
+
+    // Cross-statement / cross-shape / cross-sigma replay rejected.
+    uint256 out_root;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+        shape, Filled(0x61), shape_commitment, statement.public_inputs.sigma,
+        engine_receipt, out_root, &why));
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+        shape, statement_commitment, Filled(0x62), statement.public_inputs.sigma,
+        engine_receipt, out_root, &why));
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+        shape, statement_commitment, shape_commitment, Filled(0x63),
+        engine_receipt, out_root, &why));
+}
+
+BOOST_AUTO_TEST_CASE(coupled_gemm_dot_engine_rejects_bad_openings_and_tampering)
+{
+    const auto shape = MakeGemmDotEngineTestShape();
+    const auto statement = MakeGemmDotEngineStatement(shape);
+    const uint256 statement_commitment =
+        rc::CommitRCStage3CoupledStatement(statement.public_inputs);
+    const uint256 shape_commitment = rc::CommitRCStage3CoupledShape(shape);
+    const auto counts = rc::ExpectedRCStage3CoupledRelationCounts(
+        rc::RCStage3RelationRole::CoupledGemm, shape);
+    BOOST_REQUIRE(counts.has_value());
+    const auto openings =
+        MakeHonestGemmDotOpenings(shape, counts->primary);
+    std::string why;
+
+    {
+        // Wrong Y sum is rejected at prove time.
+        auto bad_sum = MakeHonestGemmDotOpenings(shape, counts->primary, 31);
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledGemmDotEngineReceipt(
+            statement, shape, bad_sum, out, root, &why));
+    }
+    {
+        auto too_few = openings;
+        too_few.pop_back();
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledGemmDotEngineReceipt(
+            statement, shape, too_few, out, root, &why));
+    }
+
+    std::vector<unsigned char> engine_receipt;
+    uint256 trace_root;
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledGemmDotEngineReceipt(
+        statement, shape, openings, engine_receipt, trace_root, &why));
+
+    {
+        auto tampered = engine_receipt;
+        tampered.back() ^= 0x01;
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+            shape, statement_commitment, shape_commitment,
+            statement.public_inputs.sigma, tampered, out_root, &why));
+    }
+    {
+        auto tampered = engine_receipt;
+        tampered[0] ^= 0x01;
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+            shape, statement_commitment, shape_commitment,
+            statement.public_inputs.sigma, tampered, out_root, &why));
+        BOOST_CHECK_MESSAGE(why.find("header") != std::string::npos, why);
+    }
+    {
+        auto padded = engine_receipt;
+        padded.push_back(0);
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledGemmDotEngineReceipt(
+            shape, statement_commitment, shape_commitment,
+            statement.public_inputs.sigma, padded, out_root, &why));
+        BOOST_CHECK_MESSAGE(why.find("trailing_bytes") != std::string::npos, why);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(coupled_gemm_dot_engine_wires_into_full_relation_verifier)
+{
+    const auto shape = MakeGemmDotEngineTestShape();
+    const auto bank_pages = MakeHonestBankDequantWitness(shape);
+    const auto gemm_counts = rc::ExpectedRCStage3CoupledRelationCounts(
+        rc::RCStage3RelationRole::CoupledGemm, shape);
+    BOOST_REQUIRE(gemm_counts.has_value());
+
+    rc::RCStage3SuccinctProof proof;
+    proof.statement = rc::RCStage3StatementKind::Coupled;
+    auto& public_inputs = proof.public_inputs;
+    public_inputs.height = 42;
+    public_inputs.n_bits = 0x207fffff;
+    public_inputs.coupled_profile = 4;
+    public_inputs.transcript_version = shape.transcript_version;
+    public_inputs.program_consensus_pin.recursive_alg_hash_root = Filled(0x08);
+    public_inputs.program_consensus_pin.external_sha256d_audit_root = Filled(0x09);
+    public_inputs.program_consensus_pin.registry_binding = Filled(0x0a);
+    public_inputs.header_commitment = Filled(0x11);
+    public_inputs.params_commitment = Filled(0x22);
+    public_inputs.target = Filled(0x7f);
+    public_inputs.sigma = Filled(0x33);
+    public_inputs.coupled_digest = Filled(0x44);
+    public_inputs.final_digest = Filled(0x55);
+    public_inputs.transcript_commitment = Filled(0x66);
+
+    const uint256 statement = rc::CommitRCStage3CoupledStatement(public_inputs);
+    const uint256 shape_commitment = rc::CommitRCStage3CoupledShape(shape);
+
+    std::vector<unsigned char> bank_engine_receipt;
+    uint256 bank_trace_root;
+    std::string build_why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement, shape_commitment, public_inputs.sigma, bank_pages,
+            bank_engine_receipt, bank_trace_root, &build_why),
+        build_why);
+
+    rc::RCStage3SuccinctProof prove_statement = proof;
+    const auto openings =
+        MakeHonestGemmDotOpenings(shape, gemm_counts->primary);
+    std::vector<unsigned char> gemm_engine_receipt;
+    uint256 gemm_trace_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledGemmDotEngineReceipt(
+            prove_statement, shape, openings, gemm_engine_receipt,
+            gemm_trace_root, &build_why),
+        build_why);
+
+    uint256 input_root = public_inputs.header_commitment;
+    for (size_t i = 0; i < COUPLED_ROLES.size(); ++i) {
+        rc::RCStage3CoupledRelationReceipt receipt;
+        receipt.role = COUPLED_ROLES[i];
+        receipt.shape = shape;
+        receipt.statement_commitment = statement;
+        receipt.params_commitment = public_inputs.params_commitment;
+        receipt.coupled_shape_commitment = shape_commitment;
+        receipt.sigma = public_inputs.sigma;
+        receipt.input_root = input_root;
+        receipt.output_root =
+            i + 1 == COUPLED_ROLES.size()
+                ? public_inputs.coupled_digest
+                : Filled(static_cast<unsigned char>(0x80 + i));
+        const auto role_counts =
+            rc::ExpectedRCStage3CoupledRelationCounts(receipt.role, shape);
+        BOOST_REQUIRE(role_counts.has_value());
+        receipt.primary_count = role_counts->primary;
+        receipt.secondary_count = role_counts->secondary;
+
+        if (receipt.role == rc::RCStage3RelationRole::CoupledBank) {
+            receipt.engine = rc::RCStage3CoupledProofEngine::BankDequantPagesV1;
+            receipt.engine_receipt = bank_engine_receipt;
+            receipt.trace_root = bank_trace_root;
+        } else if (receipt.role == rc::RCStage3RelationRole::CoupledGemm) {
+            receipt.engine = rc::RCStage3CoupledProofEngine::GemmDotTilesV1;
+            receipt.engine_receipt = gemm_engine_receipt;
+            receipt.trace_root = gemm_trace_root;
+        } else {
+            receipt.trace_root = Filled(static_cast<unsigned char>(0xa0 + i));
+            receipt.engine_receipt = {
+                static_cast<unsigned char>(i), 0xc3, 0x5a, 0xa5};
+        }
+        receipt.aggregate_root = rc::CommitRCStage3CoupledRelationAggregate(receipt);
+
+        std::vector<unsigned char> section;
+        std::string serialize_why;
+        BOOST_REQUIRE_MESSAGE(
+            rc::SerializeRCStage3CoupledRelationReceipt(receipt, section,
+                                                       &serialize_why),
+            "role=" + std::string(rc::RCStage3RelationRoleName(receipt.role)) +
+                " engine_bytes=" + std::to_string(receipt.engine_receipt.size()) +
+                " why=" + serialize_why);
+        proof.commitments.push_back(
+            {receipt.role, rc::CommitRCStage3CoupledSection(section)});
+        proof.sections.push_back({receipt.role, std::move(section)});
+        input_root = receipt.output_root;
+    }
+
+    std::string why;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(proof, &why));
+    // Bank + Gemm real engines must both have verified -- Exchange is the
+    // first remaining ProofOnlyV1 stub to fail.
+    BOOST_CHECK_MESSAGE(
+        why.find("coupled:exchange:recursive_decode") != std::string::npos, why);
+
+    auto tampered_proof = proof;
+    auto tampered_gemm = DecodeAt(tampered_proof, RoleIndex(
+        rc::RCStage3RelationRole::CoupledGemm));
+    tampered_gemm.engine_receipt.back() ^= 0x01;
+    ReplaceAt(tampered_proof,
+              RoleIndex(rc::RCStage3RelationRole::CoupledGemm), tampered_gemm);
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(tampered_proof, &why));
+    BOOST_CHECK_MESSAGE(
+        why.find("gemm_dot_engine") != std::string::npos ||
+            why.find("dot_air") != std::string::npos,
+        why);
+    BOOST_CHECK(why.find("coupled:exchange") == std::string::npos);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
