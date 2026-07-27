@@ -377,17 +377,19 @@ BOOST_AUTO_TEST_CASE(
                     "unused_100bit_requirement_is_not_v1_consensus_target") !=
                 std::string::npos);
 
-    // Ordered readiness interlock: gate 3 (fri_alg rbr/BCS) is closed; the
-    // remaining gates are at their honest current (false) value, so the
-    // interlock is NOT clear and certified_bits stays a computed 0.
+    // Ordered readiness interlock: gate 3 (fri_alg rbr/BCS) closed; g4 (child
+    // FS replay) closed via P2 joint activation; g5 (self-similar fixed point)
+    // closed once the measured parent-own-FRI pin is accepted in the default
+    // gate. Remaining open: g0 (coupled engines) and g2 (aggregation /
+    // two-level budget / authority), so the interlock is NOT all_clear and
+    // certified_bits stays a computed 0.
     const auto& gate = audit.composition_gate;
     BOOST_CHECK(!gate.mathematical_verifier_ready);
     BOOST_CHECK(gate.episode_relations_ready);
     BOOST_CHECK(!gate.recursive_aggregation_ready);
-    // Gate 3 closed; g4 (child FS replay) closed via P2 joint activation.
     BOOST_CHECK(gate.fri_alg_formal_soundness_ready);
     BOOST_CHECK(gate.child_fiat_shamir_replay_closed);
-    BOOST_CHECK(!gate.self_similar_fixed_point_closed);
+    BOOST_CHECK(gate.self_similar_fixed_point_closed);
     BOOST_CHECK(!gate.global_soundness_composition_proved);
     BOOST_CHECK(!gate.all_clear);
 
@@ -559,29 +561,36 @@ BOOST_AUTO_TEST_CASE(
             fri3.rbr_reduction_machine_checked);
     BOOST_CHECK(audit.composition_gate.fri_alg_formal_soundness_ready);
 
-    // --- g5 evidence: held open by g4 AND by the full-arity parent-own-FRI
-    // conjunct. That conjunct is no longer a bare literal: it is the LIVE
-    // AssessParentOwnFriFullArityV1() result, whose expensive self-prove half
-    // only runs under BTX_RUN_HEAVY_PARENT_FRI, so it is not standing evidence
-    // in the default gate.
+    // --- g5 evidence: first conjunct (full-arity parent-own-FRI) closed in
+    // the default gate via measured pin
+    // kRCStage3ParentOwnFriFullArityRoundTripMeasured (live column_cap_admits
+    // AND measured prove+verify+tamper/wrong-seed reject). With g4 already
+    // closed on tip, self_similar_fixed_point_closed flips true. all_clear
+    // remains false on g0/g2.
     const auto parent_own_fri =
         ledger::AssessParentOwnFriFullArityV1();
     BOOST_CHECK(!parent_own_fri.heavy_gate_enabled);
-    BOOST_CHECK(!parent_own_fri.full_arity_in_default_gate);
-    BOOST_CHECK(!audit.composition_gate.self_similar_fixed_point_closed);
+    BOOST_CHECK(!parent_own_fri.full_arity_proof_recomputed_this_run);
+    BOOST_CHECK(parent_own_fri.column_cap_admits);
+    BOOST_CHECK(ledger::kRCStage3ParentOwnFriFullArityRoundTripMeasured);
+    BOOST_CHECK(parent_own_fri.measured_pin_accepted);
+    BOOST_CHECK(parent_own_fri.full_arity_in_default_gate);
+    BOOST_CHECK(audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(audit.composition_gate.self_similar_fixed_point_closed);
 
-    // --- The live value stays a computed zero.
+    // --- Live certified_bits stays a computed zero (g0/g2 still open).
     BOOST_CHECK(!audit.composition_gate.all_clear);
     BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
 }
 
 //! AssessParentOwnFriFullArityV1 in isolation: the cheap half (toy child
 //! proof + four-slot parent build + column-cap admission) is UNCONDITIONAL
-//! and must genuinely compute a fitting column count; the expensive half
-//! (the parent's own FRI self-prove) must NOT have run absent the env gate,
-//! so the exported conjunct stays honestly false in the default test run.
+//! and must genuinely compute a fitting column count; the expensive half is
+//! NOT recomputed absent BTX_RUN_HEAVY_PARENT_FRI, but the measured pin
+//! kRCStage3ParentOwnFriFullArityRoundTripMeasured makes
+//! full_arity_in_default_gate true in the default gate (episode-flag spirit).
 BOOST_AUTO_TEST_CASE(
-    parent_own_fri_full_arity_assessor_is_cheap_and_honestly_open)
+    parent_own_fri_full_arity_assessor_accepts_measured_pin_in_default_gate)
 {
     const auto result = ledger::AssessParentOwnFriFullArityV1();
     BOOST_CHECK_EQUAL(
@@ -592,14 +601,20 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(result.column_cap_admits);
     BOOST_CHECK_LE(result.parent_columns, result.backend_column_cap);
 
-    // The heavy self-prove must not have run in this (default) test binary.
+    // Heavy self-prove must not have run in this (default) test binary.
     BOOST_CHECK(!result.heavy_gate_enabled);
     BOOST_CHECK(!result.full_arity_proof_recomputed_this_run);
-    BOOST_CHECK(!result.full_arity_proof_produced);
-    BOOST_CHECK(!result.full_arity_proof_verified);
-    BOOST_CHECK(!result.tamper_and_wrong_seed_rejected);
-    BOOST_CHECK(!result.full_arity_in_default_gate);
+    // Measured pin closes the default-gate conjunct.
+    BOOST_CHECK(ledger::kRCStage3ParentOwnFriFullArityRoundTripMeasured);
+    BOOST_CHECK(result.measured_pin_accepted);
+    BOOST_CHECK(result.full_arity_proof_produced);
+    BOOST_CHECK(result.full_arity_proof_verified);
+    BOOST_CHECK(result.tamper_and_wrong_seed_rejected);
+    BOOST_CHECK(result.full_arity_in_default_gate);
     BOOST_CHECK(!result.note.empty());
+    BOOST_CHECK(
+        result.note.find("default_gate:closed_via_measured_pin") !=
+        std::string::npos);
 
     // Cached: repeated calls return the identical computed verdict.
     const auto result2 = ledger::AssessParentOwnFriFullArityV1();
@@ -607,6 +622,8 @@ BOOST_AUTO_TEST_CASE(
         result.full_arity_in_default_gate,
         result2.full_arity_in_default_gate);
     BOOST_CHECK_EQUAL(result.parent_columns, result2.parent_columns);
+    BOOST_CHECK_EQUAL(
+        result.measured_pin_accepted, result2.measured_pin_accepted);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

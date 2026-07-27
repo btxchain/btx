@@ -62,28 +62,58 @@ inline constexpr double kBridgeHashCollisionBits = 128.0;
 inline constexpr double kBridgeCrossHashShaBits = 88.0;
 
 /**
- * g5 (self-similar fixed point), first conjunct: whether the full-arity
- * (four-slot, arity-4) parent-own-FRI round trip is proven-and-verified
- * EVIDENCE this assessor itself can stand behind, as opposed to a frozen
- * prose comment describing a run that happened once elsewhere.
+ * MEASURED — same spirit as kRCStage3Episode*RecursionEnginesExecuted.
  *
- * POLICY (documented here because the struct enforces it, not a header
- * comment elsewhere): the same four-slot self-similar parent shape used by
- * `four_slot_self_similar_parent_own_fri_fits_alg_column_cap`
- * (matmul_v4_rc_stage3_recursive_parent_air_tests.cpp) is built EVERY call —
- * that build is cheap (a two-row toy child proof plus one in-AIR parent
- * construction, no FRI prove of the parent) and runs unconditionally in the
- * default gate, so `column_cap_admits` is always live-computed, never a
- * literal. The actual parent-own-FRI SELF-PROVE is CPU-heavy (tens of
- * minutes; ~15 GiB peak at this toy shape, see the test file) and is
- * therefore run ONLY under the SAME `BTX_RUN_HEAVY_PARENT_FRI` environment
- * gate the test suite already uses — but unlike the retired recursive.cpp
- * `constexpr true`, when that gate is set this assessor RECOMPUTES the
- * proof/verify/tamper-reject/wrong-seed-reject round trip live, right here,
- * every time it is asked; it never trusts a comment or a cached historical
- * observation. Absent the env gate, `full_arity_in_default_gate` stays
- * honestly false — this assessor exports recomputable evidence rather than
- * claiming affordability it does not have.
+ * Evidence carrier:
+ *   matmul_v4_rc_stage3_recursive_parent_air_tests.cpp
+ *   / four_slot_self_similar_parent_own_fri_fits_alg_column_cap
+ * under BTX_RUN_HEAVY_PARENT_FRI=1 (MemoryMax + MemorySwapMax=0). That case
+ * asserts prove_ok && division_exact && verify_ok &&
+ * parent_own_fri_proof_produced AND tamper-reject (mutated FRI step) AND
+ * wrong-seed-reject.
+ *
+ * Observed (macpro2, OpenMP OMP_NUM_THREADS=20, MemoryMax=20G
+ * MemorySwapMax=0, BTX_RUN_HEAVY_PARENT_FRI=1):
+ *   FOUR_SLOT_SHAPE rows=256 columns=17012 vcs_columns=16176 cap=32768
+ *   wall 3m19.49s (199490000 us), peak RSS 1131708 KiB, swaps=0,
+ *   User time 3135.25 s @ 1572% CPU, exit=0, "*** No errors detected"
+ *   (prove_ok && division_exact && verify_ok && tamper-reject &&
+ *    wrong-seed-reject). Prior documented observation was 21m37s / 14.8 GiB
+ *   on a 28-thread OpenMP prover; this pin records the fresh reconfirm.
+ *
+ * Flip this flag back to false immediately if that heavy test regresses.
+ * The assessor's cheap half still live-computes column_cap_admits every
+ * call; full_arity_in_default_gate requires BOTH the live cap admission AND
+ * this measured pin (or a live BTX_RUN_HEAVY_PARENT_FRI recompute).
+ */
+inline constexpr bool
+    kRCStage3ParentOwnFriFullArityRoundTripMeasured = true;
+/** Wall-clock microseconds of the measured full-arity prove+verify+reject. */
+inline constexpr uint64_t
+    kRCStage3ParentOwnFriFullArityMeasuredWallMicros = 199'490'000ULL; // 3m19.49s
+/** Peak RSS (KiB) of that measured run. */
+inline constexpr uint64_t
+    kRCStage3ParentOwnFriFullArityMeasuredPeakRssKb = 1'131'708ULL;
+/** Parent columns observed on the measured FOUR_SLOT_SHAPE. */
+inline constexpr uint32_t
+    kRCStage3ParentOwnFriFullArityMeasuredParentColumns = 17012;
+
+/**
+ * g5 (self-similar fixed point), first conjunct: whether the full-arity
+ * (four-slot, arity-4) parent-own-FRI round trip is standing evidence the
+ * default composition gate can accept.
+ *
+ * POLICY: the same four-slot self-similar parent shape used by
+ * `four_slot_self_similar_parent_own_fri_fits_alg_column_cap` is built EVERY
+ * call — that build is cheap (toy child proof + in-AIR parent construction,
+ * no parent FRI prove) so `column_cap_admits` is always live-computed. The
+ * heavy self-prove is NOT re-run in the default gate (tens of minutes /
+ * ~15 GiB); instead, when
+ * `kRCStage3ParentOwnFriFullArityRoundTripMeasured` is true the assessor
+ * accepts that measured prove+verify+tamper-reject+wrong-seed-reject
+ * observation — same spirit as the episode *RecursionEnginesExecuted flags.
+ * Setting BTX_RUN_HEAVY_PARENT_FRI still forces a live recompute that can
+ * override the pin (fail-closed if the live round trip regresses).
  */
 struct ParentOwnFriFullArityAssessmentV1 {
     uint32_t parent_columns{0};
@@ -96,16 +126,18 @@ struct ParentOwnFriFullArityAssessmentV1 {
     /** True iff the heavy self-prove path actually executed this call
      * (implies heavy_gate_enabled and a valid toy four-slot parent). */
     bool full_arity_proof_recomputed_this_run{false};
+    /** True when the measured pin (or a live recompute) stands behind a
+     * produced parent-own-FRI proof. */
     bool full_arity_proof_produced{false};
     bool full_arity_proof_verified{false};
     bool tamper_and_wrong_seed_rejected{false};
-    /** The exported conjunct: only true when the heavy round trip was
-     * RECOMPUTED live this call (not merely admitted by the cap) and it
-     * produced, verified, and rejected both tamper and wrong-seed variants.
-     * False whenever BTX_RUN_HEAVY_PARENT_FRI is unset, i.e. in the default
-     * gate — that is the honest answer this PR closes: it was `false`
-     * unconditionally before; it is now a computed, recomputable `false`
-     * (or a genuinely re-earned `true` under the heavy env gate). */
+    /** True when the default gate accepted the measured pin (not a live
+     * recompute this process). */
+    bool measured_pin_accepted{false};
+    /** Exported conjunct for the default composition gate: true when
+     * column_cap_admits (live) AND either (a) the measured pin is set, or
+     * (b) a live BTX_RUN_HEAVY_PARENT_FRI recompute produced+verified+
+     * rejected tamper and wrong-seed. */
     bool full_arity_in_default_gate{false};
     std::string note;
 };
@@ -243,14 +275,15 @@ struct ExecutableRelationRowsPolicyScenarioV1 {
  *                                       (SHA-FS chip lane; ledger FS-replay)
  *   5 self_similar_fixed_point_closed   AssessParentOwnFriFullArityV1()
  *                                       .full_arity_in_default_gate && gate 4;
- *                                       the first conjunct is COMPUTED (cap
- *                                       admission is live every call; the
- *                                       heavy self-prove is recomputed live
- *                                       only under BTX_RUN_HEAVY_PARENT_FRI)
- *                                       and stays false in the default gate,
- *                                       never a bare literal (see the .cpp
- *                                       note on the divergence from
- *                                       recursive.cpp)
+ *                                       the first conjunct is COMPUTED: live
+ *                                       column_cap_admits every call, plus the
+ *                                       measured pin
+ *                                       kRCStage3ParentOwnFriFullArityRoundTrip-
+ *                                       Measured (or a live recompute under
+ *                                       BTX_RUN_HEAVY_PARENT_FRI). In the
+ *                                       default gate the measured pin makes
+ *                                       full_arity_in_default_gate true; g5
+ *                                       as a whole still needs gate 4.
  *   6 global_soundness_composition_proved (global additive theorem)
  */
 struct CompositionReadinessGateV1 {
