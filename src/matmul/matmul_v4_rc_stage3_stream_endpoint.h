@@ -42,12 +42,28 @@ namespace matmul::v4::rc {
 
 /** The §4 committed-stream families that carry a SHA256d endpoint. Values match
  * stage3_hash_air::GapCode for {Xof,ChaChaInitAndBlock,CompleteStream}Manifest;
- * DirectSha256d covers the CompleteStream DirectSha256dManifest overload. */
+ * DirectSha256d covers the CompleteStream DirectSha256dManifest overload.
+ *
+ * DirectSha256dEpisodeDigest / DirectSha256dCoupledBarrier /
+ * DirectSha256dCoupledDigest are the three §4 DirectSha256d *relation*
+ * families the relation-closure lane distinguishes (RCStage3StreamManifest-
+ * Family::DirectSha256d{EpisodeDigest,CoupledBarrier,CoupledDigest}) but that,
+ * pending that lane's wiring, still fold through the single generic
+ * DirectSha256d value above and therefore share ONE domain separator: a value
+ * opened under one of the three relations is NOT distinguished from the same
+ * value opened under either of the other two.  These three residual values
+ * close that gap at the closer level — each gets its own FamilyDomain() — so a
+ * one-line switch update on the consumer side (mapping each manifest family to
+ * its matching residual value here, instead of the generic fallback) is all
+ * that is needed to bind the three DirectSha256d relations apart. */
 enum class RCStage3StreamFamily : uint8_t {
     XofCounter = 4,
     ChaChaInitAndBlock = 5,
     CompleteStream = 6,
     DirectSha256d = 7,
+    DirectSha256dEpisodeDigest = 8,
+    DirectSha256dCoupledBarrier = 9,
+    DirectSha256dCoupledDigest = 10,
 };
 
 /** One endpoint opening: the private stream value authenticated at leaf_index
