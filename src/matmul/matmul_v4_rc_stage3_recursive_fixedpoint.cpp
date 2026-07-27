@@ -17308,6 +17308,40 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         return out;
     }
 
+    // Family-root WIRE serialize — NOT an Extract/Builder engine receipt.
+    // g2's serialize conjunct gates on this path's SerializeFri3AlgBatchProof
+    // size against kRCFriMaxProofBytesHard (~16 MiB).
+    {
+        std::vector<unsigned char> batch;
+        const size_t batch_bytes =
+            SerializeFri3AlgBatchProof(proved.proof.batch, batch);
+        out.serialize_batch_bytes = static_cast<uint64_t>(batch_bytes);
+        uint64_t root_bytes =
+            out.serialize_batch_bytes + 32 + 4;
+        for (const auto& paths : proved.proof.next_openings) {
+            root_bytes += 4;
+            for (const auto& path : paths) {
+                root_bytes += 8;
+                root_bytes +=
+                    uint64_t{path.values.size()} * 3 *
+                    sizeof(uint64_t);
+                root_bytes +=
+                    uint64_t{path.siblings.size()} *
+                    ah::kAlgHashDigestLen *
+                    sizeof(uint64_t);
+            }
+        }
+        out.serialize_root_bytes = root_bytes;
+    }
+    constexpr uint64_t kRelayBudgetUs = 900ULL * 1000ULL;
+    out.verify_within_relay_budget =
+        out.verify_micros != 0 &&
+        out.verify_micros <= kRelayBudgetUs;
+    out.serialize_within_fri_budget =
+        out.serialize_batch_bytes != 0 &&
+        out.serialize_batch_bytes <=
+            static_cast<uint64_t>(kRCFriMaxProofBytesHard);
+
     out.valid =
         out.fold_bus_built && out.fri_shape_representable &&
         out.proved && out.verified && out.forgery_rejected;
@@ -17324,6 +17358,16 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         ";shape=1;fold=1;proved=1;verified=1;forgery=1" +
         ";prove_us=" + std::to_string(out.prove_micros) +
         ";verify_us=" + std::to_string(out.verify_micros) +
+        ";batch_bytes=" +
+        std::to_string(out.serialize_batch_bytes) +
+        ";root_bytes=" +
+        std::to_string(out.serialize_root_bytes) +
+        (out.verify_within_relay_budget
+             ? ";verify_within_budget"
+             : ";verify_OVER_BUDGET") +
+        (out.serialize_within_fri_budget
+             ? ";serialize_within_fri"
+             : ";serialize_OVER_FRI") +
         ";complete_fp=false";
     return out;
 }

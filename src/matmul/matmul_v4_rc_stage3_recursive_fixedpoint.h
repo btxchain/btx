@@ -3098,7 +3098,9 @@ inline constexpr bool kNarrowBytecodeShardCompositionAirProveReady = false;
  * AirQuotientProveRows / AirQuotientVerifyRows the L2 node. A tampered
  * child must fail native fold-bus acceptance before any L2 witness exists.
  *
- * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
+ * Does NOT flip CompleteFP / AggregationReady / Ready. Measured verify /
+ * serialize may feed CurrentRCStage3TwoLevelRootVerifyBudgetV1 pins when the
+ * light canary remeasures green; Ready constants stay fail-closed.
  */
 struct NarrowMultiChildL2FriConsumeV1 {
     bool valid{false};
@@ -3115,6 +3117,12 @@ struct NarrowMultiChildL2FriConsumeV1 {
     uint32_t n_lde{0};
     uint64_t prove_micros{0};
     uint64_t verify_micros{0};
+    /** SerializeFri3AlgBatchProof size of the L2 family-root batch. */
+    uint64_t serialize_batch_bytes{0};
+    /** Batch + trace_commit + next_openings estimate (wire-ish total). */
+    uint64_t serialize_root_bytes{0};
+    bool verify_within_relay_budget{false};
+    bool serialize_within_fri_budget{false};
     nr::NarrowNodeFriShape fri_shape;
     std::string note;
 };

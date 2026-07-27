@@ -358,11 +358,15 @@ BOOST_AUTO_TEST_CASE(composition_link_closer_records_what_it_does_not_prove)
     //     separate, still-open obligation owned by the role-sections lane.
     BOOST_CHECK(!kRCStage3RoleSectionEndpointProvenanceReady);
 
-    // (3) g2 itself remains closed-off: the readiness constant is untouched and
-    //     the performance half is still unmet.
+    // (3) g2 performance half: dense production_shape stays unrepresentable;
+    //     narrow L2 verify pin is MEASURED within 900ms → within_relay_budget.
+    //     AggregationReady / CompleteFP stay false.
     BOOST_CHECK(!kRCStage3RecursiveAggregationReady);
-    BOOST_CHECK(!CurrentRCStage3TwoLevelRootVerifyBudgetV1()
-                     .within_relay_budget);
+    const auto budget = CurrentRCStage3TwoLevelRootVerifyBudgetV1();
+    BOOST_CHECK(!budget.production_shape_representable);
+    BOOST_CHECK(kRCStage3NarrowL2RootVerifyMeasured);
+    BOOST_CHECK(budget.within_relay_budget);
+    BOOST_CHECK(budget.narrow_l2_within_relay_budget);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

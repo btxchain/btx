@@ -2333,10 +2333,15 @@ BOOST_AUTO_TEST_CASE(real_block_narrow_multi_child_root)
             "relay budget; the recorded g2 narrow-path evidence must be "
             "re-derived");
         BOOST_CHECK(recorded.narrow_multichild_within_relay_budget);
-        // Never a production result: the SHA-FS transcript chip and
+        // Never a complete verifier mirror: the SHA-FS transcript chip and
         // arbitrary per-point child-constraint evaluation are not joined.
         BOOST_CHECK(!recorded.narrow_multichild_complete_verifier_mirror);
-        BOOST_CHECK(!recorded.within_relay_budget);
+        // within_relay_budget flips via the SEPARATE narrow L2 FRI consume
+        // pin (ExecuteNarrowMultiChildL2FriConsumeV1), not via this real-block
+        // partial mirror alone — but once that pin is measured, both share
+        // the same budget struct.
+        BOOST_CHECK(rcx::kRCStage3NarrowL2RootVerifyMeasured);
+        BOOST_CHECK(recorded.within_relay_budget);
     }
 
     // -----------------------------------------------------------------------

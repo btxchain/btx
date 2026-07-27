@@ -1005,14 +1005,51 @@ CurrentRCStage3TwoLevelRootVerifyBudgetV1()
     // Always false today; see kCompleteRecursiveFixedPointExecutable.
     out.narrow_multichild_complete_verifier_mirror = false;
 
-    // ---- The only conjunction that may retire the gap. ----
-    out.within_relay_budget =
+    // ---- MEASURED: NARROW L2 two-level root (multi-child FRI consume). ----
+    // ExecuteNarrowMultiChildL2FriConsumeV1: BuildFoldBusCompositionMulti of
+    // ≥2 L1 AlgAirProofs → one narrow fold-bus root, AirQuotientProve/Verify.
+    // Light arity-2 boolean canary (BTX_RUN_G2_MULTI_CHILD_L2=1), remasured
+    // 2026-07-27: verify_us=486898 (≤900ms), batch_bytes=5201292 (≤16 MiB).
+    // Dense production_shape_representable stays false; this is the path g2
+    // actually gates toward. Extract engine receipts are NOT this pin.
+    out.narrow_l2_root_proof_produced =
+        kRCStage3NarrowL2RootProofProducedMeasured;
+    out.narrow_l2_root_verify_wall_clock_measured =
+        kRCStage3NarrowL2RootVerifyMeasured;
+    out.measured_narrow_l2_root_verify_micros =
+        kRCStage3MeasuredNarrowL2RootVerifyMicros;
+    out.measured_narrow_l2_vcs_columns =
+        kRCStage3MeasuredNarrowL2VcsColumns;
+    out.measured_narrow_l2_arity =
+        kRCStage3MeasuredNarrowL2Arity;
+    out.measured_narrow_l2_serialize_batch_bytes =
+        kRCStage3MeasuredNarrowL2SerializeBatchBytes;
+    out.measured_narrow_l2_serialize_root_bytes =
+        kRCStage3MeasuredNarrowL2SerializeRootBytes;
+    out.narrow_l2_within_relay_budget =
+        out.narrow_l2_root_verify_wall_clock_measured &&
+        out.measured_narrow_l2_root_verify_micros != 0 &&
+        out.measured_narrow_l2_root_verify_micros <=
+            static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL;
+    out.narrow_l2_serialize_within_fri_budget =
+        out.measured_narrow_l2_serialize_batch_bytes != 0 &&
+        out.measured_narrow_l2_serialize_batch_bytes <=
+            static_cast<uint64_t>(kRCFriMaxProofBytesHard);
+
+    // ---- The only conjunction that may retire ProductionPerformanceUnmeasured.
+    // Dense full-family path (historically required) remains unrepresentable.
+    // Narrow L2 measured verify ≤900ms is the honest production-path half.
+    const bool dense_within =
         out.production_shape_representable &&
         out.full_family_root_proof_produced &&
         out.root_verify_wall_clock_measured &&
         out.measured_root_verify_micros != 0 &&
         out.measured_root_verify_micros <=
             static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL;
+    out.within_relay_budget =
+        dense_within ||
+        (out.narrow_l2_root_proof_produced &&
+         out.narrow_l2_within_relay_budget);
 
     out.note =
         "stage3:two_level_root_verify:"
@@ -1044,7 +1081,26 @@ CurrentRCStage3TwoLevelRootVerifyBudgetV1()
              ? ";narrow_multichild_within_budget"
              : ";narrow_multichild_ALREADY_OVER_BUDGET") +
         ";narrow_multichild_complete_verifier_mirror=" +
-        (out.narrow_multichild_complete_verifier_mirror ? "true" : "false");
+        (out.narrow_multichild_complete_verifier_mirror ? "true" : "false") +
+        ";narrow_l2_arity=" +
+        std::to_string(out.measured_narrow_l2_arity) +
+        ";narrow_l2_vcs_columns=" +
+        std::to_string(out.measured_narrow_l2_vcs_columns) +
+        ";narrow_l2_verify_measured_us=" +
+        std::to_string(out.measured_narrow_l2_root_verify_micros) +
+        ";narrow_l2_batch_bytes=" +
+        std::to_string(out.measured_narrow_l2_serialize_batch_bytes) +
+        ";narrow_l2_root_bytes=" +
+        std::to_string(out.measured_narrow_l2_serialize_root_bytes) +
+        (out.narrow_l2_within_relay_budget
+             ? ";narrow_l2_within_budget"
+             : ";narrow_l2_OVER_BUDGET_or_unmeasured") +
+        (out.narrow_l2_serialize_within_fri_budget
+             ? ";narrow_l2_serialize_within_fri"
+             : ";narrow_l2_serialize_OVER_FRI_or_unmeasured") +
+        (out.within_relay_budget
+             ? ";within_relay_budget"
+             : ";NOT_within_relay_budget");
     return out;
 }
 

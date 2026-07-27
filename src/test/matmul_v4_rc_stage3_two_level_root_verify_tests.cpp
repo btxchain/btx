@@ -298,11 +298,15 @@ BOOST_AUTO_TEST_CASE(two_level_root_vcs_width_exceeds_the_backend_column_cap)
         crossover_child_columns);
 
     // Pin the recorded verdict so a future width reduction reopens this test
-    // instead of silently invalidating the g2 note.
+    // instead of silently invalidating the g2 note. Dense path stays
+    // unrepresentable; within_relay_budget flips via measured narrow L2 pins.
     const auto verdict = rc::CurrentRCStage3TwoLevelRootVerifyBudgetV1();
-    BOOST_CHECK(!verdict.within_relay_budget);
     BOOST_CHECK(!verdict.production_shape_representable);
     BOOST_CHECK_EQUAL(verdict.relay_budget_millis, 900U);
+    BOOST_CHECK(rc::kRCStage3NarrowL2RootVerifyMeasured);
+    BOOST_CHECK(verdict.within_relay_budget);
+    BOOST_CHECK(verdict.narrow_l2_within_relay_budget);
+    BOOST_CHECK(verdict.narrow_l2_serialize_within_fri_budget);
 }
 
 // ---------------------------------------------------------------------------
@@ -532,12 +536,15 @@ BOOST_AUTO_TEST_CASE(descendant_free_two_level_root_verify_is_measured)
         << " families=ALL_DISABLED"
         << " NOTE=lower_bound_only_not_a_verifier_mirror");
 
-    // The verdict must NOT count this as the production result, however fast it
-    // is. all_available_algebraic_families is false here by construction.
+    // The dense full-family verdict must NOT count the descendant-free
+    // families-off lower bound as production. Narrow L2 pins are separate and
+    // may make within_relay_budget true without claiming dense representability.
     BOOST_CHECK(!level2.all_available_algebraic_families);
     const auto verdict = rc::CurrentRCStage3TwoLevelRootVerifyBudgetV1();
-    BOOST_CHECK(!verdict.within_relay_budget);
     BOOST_CHECK(!verdict.production_shape_representable);
+    BOOST_CHECK(!verdict.full_family_root_proof_produced);
+    BOOST_CHECK(verdict.within_relay_budget);
+    BOOST_CHECK(verdict.narrow_l2_within_relay_budget);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
