@@ -716,6 +716,90 @@ template <typename F, typename Backend = AirFriBackend<F>>
                                          const std::vector<uint256>& roots,
                                          const std::vector<uint32_t>& extra);
 
+// ===========================================================================
+// PR-89: POSEIDON2 ROUTE for the AIR challenge digest.  NOT ACTIVATED.
+//
+// WHY.  The measured g4 producer-endpoint floor is 58.6 s, of which 41.1 s is
+// one Split-RAP prove over the parent's in-AIR replay of airq_lambda and
+// 16.2 s is building that replay's constraint system.  Both costs are set by
+// the SHA256d vertical chip, which charges lane_rows = 1024 per compression
+// and schedules next_pow2(compressions) instances: airq_lambda's 113-byte
+// preimage is 3 compressions, so 1024 * next_pow2(3) = 4096 rows is the FLOOR
+// for ANY SHA256d replay of it.  It is not tunable from this file.  The
+// in-AIR Poseidon2 chip (matmul_v4_rc_stage3_poseidon_air.{h,cpp}) charges
+// ONE row per permutation, so the same logical preimage costs a handful of
+// rows instead of 4096.
+//
+// WHAT IS AND IS NOT CHANGED HERE.  AirChallengeDigest itself is UNTOUCHED and
+// is still the default on every caller.  It is a SHARED helper: ten distinct
+// labels route through it ("airq_lambda", "airq_gamma", "airq_alpha",
+// "airq_split_rap_*", "airq_two_epoch_r1", "ep_pre_leaf", "ep_shard",
+// "ep_air_root_seed", "stage3_chunk_rlc_coeff_v1"), and it is drawn INSIDE
+// AirQuotientProve/AirQuotientVerify, which are templated over the backend and
+// therefore serve the FROZEN SHA lanes (kRCFri3BatchProofVersion = 5,
+// kRCFriBatchProofVersion = 5) as well as the algebraic one.  Replacing its
+// body unconditionally would silently re-transcript those frozen lanes AND
+// break stage3_recursive_parent_air's SHA companion, which REQUIREs its in-CS
+// SHA output to equal this function's native return.  So the Poseidon2 form is
+// added as a SEPARATE, SEPARATELY VERSIONED route and nothing selects it yet.
+// ===========================================================================
+
+/** Domain tag of the Poseidon2 route.  Distinct string from the SHA256d
+ *  route's "BTX_RC_AIRQ_V1", and absorbed length-prefixed, so no preimage can
+ *  be shared between the two routes. */
+inline constexpr char kAirChallengeP2DomainTag[] = "BTX_RC_AIRQ_P2_V1";
+
+/** Codec/proof version of the Poseidon2 route.  This is a NEW number on a NEW
+ *  lane; kRCFri3BatchProofVersion = 5 and kRCFriBatchProofVersion = 5 are
+ *  frozen SHA paths and are NOT touched. */
+inline constexpr uint32_t kAirChallengeP2RouteVersion = 8;
+
+/** Route activation. False: no producer or verifier selects the Poseidon2
+ *  challenge, and every shipped proof still derives airq_lambda by SHA256d. */
+inline constexpr bool kAirChallengeP2Activated = false;
+static_assert(!kAirChallengeP2Activated,
+              "PR-89 Poseidon2 AIR-challenge route is not activated");
+
+/**
+ * INJECTIVE Fp-lane encoding of the AirChallengeDigest preimage
+ * (tag ‖ version ‖ seed ‖ label ‖ roots ‖ extra).  Exposed rather than kept
+ * private for two reasons: an in-AIR replay must absorb EXACTLY these lanes,
+ * and the injectivity property is testable directly on the lane vector.
+ *
+ * Every variable-length section is length-prefixed, so the concatenation is
+ * prefix-free and no two distinct preimages produce the same lane list.
+ *
+ * THE GOLDILOCKS ALIASING CLASS, and why this encoding is 32-bit-lane based.
+ * gkr_field::FromU64(x) is x mod p with p = 2^64 - 2^32 + 1.  For every
+ * x < 2^32 - 1 the value x + p is a DIFFERENT u64 that maps to the SAME field
+ * element.  A uint256 absorbed as four u64 limbs is therefore NOT injective:
+ * each limb has ~2^32 aliasing partners, so two DIFFERENT trace-commitment
+ * roots can yield an IDENTICAL lane vector and hence an IDENTICAL challenge.
+ * Splitting every u64 into two 32-bit halves keeps each absorbed lane strictly
+ * below 2^32 < p, where reduction mod p is the identity, so the map is
+ * injective by construction.  Driven by an explicit x + p witness in
+ * matmul_v4_rc_air_quotient_tests.cpp.
+ */
+[[nodiscard]] std::vector<gkr_field::Fp> AirChallengeP2Lanes(
+    const uint256& fs_seed, const char* label, const std::vector<uint256>& roots,
+    const std::vector<uint32_t>& extra);
+
+/**
+ * Poseidon2 form of AirChallengeDigest over the same logical preimage, hashed
+ * with alg_hash::SpongeHashFp — the primitive that is ALREADY this backend's
+ * Merkle hash, so no new hash and no new soundness assumption is introduced.
+ * The four output lanes are packed little-endian into the returned uint256;
+ * each is a canonical Goldilocks element (< p), so the packing is injective.
+ */
+[[nodiscard]] uint256 AirChallengeDigestP2(const uint256& fs_seed, const char* label,
+                                           const std::vector<uint256>& roots,
+                                           const std::vector<uint32_t>& extra);
+
+/** Permutation count AirChallengeDigestP2 costs for a given preimage shape —
+ *  i.e. the ROW count of an in-AIR Poseidon2 replay, at 1 row/permutation.
+ *  Computed from the same 10*-padding rule SpongeHashFp applies. */
+[[nodiscard]] uint32_t AirChallengeP2Permutations(size_t n_lanes);
+
 /** Degree-4 E2M1 acceptance selector over the nibble bits (field-generic
  *  mirror of gkr_air::AirAcceptNibblePoly; cross-checked in tests). */
 template <typename F>

@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_air_quotient.h>
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
+#include <matmul/matmul_v4_rc_alg_hash.h>
 
 #include <crypto/common.h>
 #include <crypto/sha256.h>
@@ -435,6 +436,101 @@ uint256 AirChallengeDigest(const uint256& fs_seed, const char* label,
     AppendLE32v(buf, static_cast<uint32_t>(extra.size()));
     for (const uint32_t e : extra) AppendLE32v(buf, e);
     return Sha256dOf(buf);
+}
+
+// ===========================================================================
+// PR-89: Poseidon2 route (NOT ACTIVATED — nothing below is reachable from any
+// producer or verifier; see the header for why AirChallengeDigest above is
+// deliberately left byte-identical).
+// ===========================================================================
+
+namespace {
+
+/** Absorb a u32 as ONE lane.  Safe precisely because every u32 is < 2^32 < p,
+ *  so FromU64's reduction is the identity here and the map is injective. */
+void P2PushU32(std::vector<Fp>& lanes, uint32_t v)
+{
+    lanes.push_back(gkr_field::FromU64(static_cast<uint64_t>(v)));
+}
+
+/** Absorb a byte string length-prefixed, packed 4 bytes per lane, LE.  The
+ *  explicit length makes the section prefix-free, so a shorter string can
+ *  never be a prefix of a longer one's lane image (the zero padding of the
+ *  final partial lane is not ambiguous once the length is pinned). */
+void P2PushBytes(std::vector<Fp>& lanes, const unsigned char* p, size_t len)
+{
+    P2PushU32(lanes, static_cast<uint32_t>(len));
+    for (size_t i = 0; i < len; i += 4) {
+        uint32_t w = 0;
+        for (size_t j = 0; j < 4 && i + j < len; ++j) {
+            w |= static_cast<uint32_t>(p[i + j]) << (8 * j);
+        }
+        P2PushU32(lanes, w);
+    }
+}
+
+/** Absorb a uint256 as EIGHT 32-bit lanes (LE).
+ *
+ *  NOT four u64 lanes.  gkr_field::FromU64(x) = x mod p, p = 2^64 - 2^32 + 1,
+ *  so x and x + p are the same lane for every x < 2^32 - 1.  Four-u64
+ *  absorption would let two DIFFERENT roots collide onto one challenge; eight
+ *  32-bit lanes cannot, because each lane is < 2^32 < p. */
+void P2PushU256(std::vector<Fp>& lanes, const uint256& v)
+{
+    const unsigned char* b = v.data();
+    for (int i = 0; i < 8; ++i) {
+        uint32_t w = 0;
+        for (int j = 0; j < 4; ++j) {
+            w |= static_cast<uint32_t>(b[4 * i + j]) << (8 * j);
+        }
+        P2PushU32(lanes, w);
+    }
+}
+
+} // namespace
+
+std::vector<Fp> AirChallengeP2Lanes(const uint256& fs_seed, const char* label,
+                                    const std::vector<uint256>& roots,
+                                    const std::vector<uint32_t>& extra)
+{
+    std::vector<Fp> lanes;
+    // Domain tag, length-prefixed: separates this route from the SHA256d one
+    // and from every other Poseidon2 sponge in the tree.
+    P2PushBytes(lanes, reinterpret_cast<const unsigned char*>(kAirChallengeP2DomainTag),
+                sizeof(kAirChallengeP2DomainTag) - 1);
+    // Route version, so a future re-layout cannot replay against this one.
+    P2PushU32(lanes, kAirChallengeP2RouteVersion);
+    P2PushU256(lanes, fs_seed);
+    P2PushBytes(lanes, reinterpret_cast<const unsigned char*>(label), std::strlen(label));
+    P2PushU32(lanes, static_cast<uint32_t>(roots.size()));
+    for (const uint256& r : roots) P2PushU256(lanes, r);
+    P2PushU32(lanes, static_cast<uint32_t>(extra.size()));
+    for (const uint32_t e : extra) P2PushU32(lanes, e);
+    return lanes;
+}
+
+uint32_t AirChallengeP2Permutations(size_t n_lanes)
+{
+    // SpongeHashFp's 10*-padding ALWAYS appends a 1 lane, then zero-pads to a
+    // rate multiple (a whole extra block when n_lanes is already a multiple).
+    const size_t padded = ((n_lanes + 1) + alg_hash::kAlgHashRate - 1) /
+                          alg_hash::kAlgHashRate * alg_hash::kAlgHashRate;
+    return static_cast<uint32_t>(padded / alg_hash::kAlgHashRate);
+}
+
+uint256 AirChallengeDigestP2(const uint256& fs_seed, const char* label,
+                             const std::vector<uint256>& roots,
+                             const std::vector<uint32_t>& extra)
+{
+    const alg_hash::Digest d =
+        alg_hash::SpongeHashFp(AirChallengeP2Lanes(fs_seed, label, roots, extra));
+    // Pack the four canonical lanes LE.  Each is < p, so this is injective and
+    // the resulting uint256 limbs are canonical by construction.
+    unsigned char out[32];
+    for (int i = 0; i < 4; ++i) {
+        WriteLE64(out + 8 * i, static_cast<uint64_t>(d[i]));
+    }
+    return uint256{Span<const unsigned char>{out, 32}};
 }
 
 template <typename F>

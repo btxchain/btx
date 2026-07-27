@@ -5,6 +5,8 @@
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_air_quotient.h>
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
+#include <matmul/matmul_v4_rc_alg_hash.h>
+#include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_fri.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
@@ -16,6 +18,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -1346,6 +1349,294 @@ BOOST_AUTO_TEST_CASE(
             cs,
             self_consistent_changed_rdep.proof,
             base_indices, seed, &why));
+}
+
+// ===========================================================================
+// PR-89: Poseidon2 route for the AIR challenge digest (NOT ACTIVATED).
+// ===========================================================================
+
+namespace {
+
+/** p = 2^64 - 2^32 + 1. */
+constexpr uint64_t kGoldilocksP = 0xFFFFFFFF00000001ULL;
+
+uint256 U256FromLimbs(const std::array<uint64_t, 4>& limbs)
+{
+    std::array<unsigned char, 32> b{};
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            b[8 * i + j] = static_cast<unsigned char>((limbs[i] >> (8 * j)) & 0xFF);
+        }
+    }
+    return uint256{Span<const unsigned char>{b.data(), b.size()}};
+}
+
+/** The encoding this lane REJECTED: one u64 limb -> one lane, via FromU64.
+ *  Present only so the aliasing collision can be exhibited as a live failure
+ *  rather than asserted in prose. */
+std::vector<gf::Fp> NaiveU64LimbLanes(const uint256& v)
+{
+    std::vector<gf::Fp> lanes;
+    const unsigned char* b = v.data();
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = 0;
+        for (int j = 0; j < 8; ++j) w |= static_cast<uint64_t>(b[8 * i + j]) << (8 * j);
+        lanes.push_back(gf::FromU64(w));
+    }
+    return lanes;
+}
+
+} // namespace
+
+// The SHA256d route is UNCHANGED by this lane. Pinned against a value computed
+// INDEPENDENTLY (Python hashlib over the hand-assembled 113-byte preimage), not
+// captured from this binary, so the check cannot agree with itself.
+BOOST_AUTO_TEST_CASE(airq_legacy_sha_challenge_digest_is_byte_identical_kat)
+{
+    const uint256 seed = MakePrf(3);
+    const uint256 root = MakePrf(9);
+    const uint256 d = aq::AirChallengeDigest(seed, "airq_lambda", {root}, {64, 8, 3});
+    BOOST_CHECK_EQUAL(
+        d.ToString(),
+        "c277093fb3628769031f319a7d48e9ab90466b78292fe549d63b26cadacace44");
+}
+
+// The documented 113-byte / 3-compression preimage shape, recomputed here so a
+// silent layout drift in the legacy route is caught by the cost model too.
+BOOST_AUTO_TEST_CASE(airq_p2_preimage_lane_and_permutation_count)
+{
+    const uint256 seed = MakePrf(3);
+    const uint256 root = MakePrf(9);
+    const auto lanes = aq::AirChallengeP2Lanes(seed, "airq_lambda", {root}, {64, 8, 3});
+
+    // 6 tag + 1 version + 8 seed + 4 label + 1 nroots + 8 root + 1 nextra + 3 extra.
+    BOOST_CHECK_EQUAL(lanes.size(), 32u);
+    // 32 lanes + the mandatory 10* "1" lane -> 40 -> 5 rate blocks.
+    BOOST_CHECK_EQUAL(aq::AirChallengeP2Permutations(lanes.size()), 5u);
+
+    // Every absorbed lane is < 2^32, which is the whole reason the encoding is
+    // injective: reduction mod p is the identity on this range.
+    for (const gf::Fp x : lanes) {
+        BOOST_CHECK_LT(static_cast<uint64_t>(x), (uint64_t{1} << 32));
+    }
+
+    // At one row per permutation the in-AIR replay is 5 rows, against the
+    // 1024 * next_pow2(3) = 4096 rows the SHA256d vertical chip charges.
+    BOOST_CHECK_LT(aq::AirChallengeP2Permutations(lanes.size()), 4096u);
+}
+
+// THE GOLDILOCKS ALIASING CLASS, driven rather than described.
+// B = x + p is a DIFFERENT u64 that FromU64 maps to the SAME field element.
+// The test first shows the rejected encoding genuinely collides (so the guard
+// is not vacuous), then shows the shipped encoding separates the two roots.
+BOOST_AUTO_TEST_CASE(airq_p2_rejects_goldilocks_x_plus_p_aliased_root)
+{
+    const uint64_t x = 5;
+    const uint64_t x_plus_p = x + kGoldilocksP; // 0xFFFFFFFF00000006, no wrap
+    BOOST_REQUIRE_GT(x_plus_p, x);
+    BOOST_REQUIRE_EQUAL(gf::FromU64(x), gf::FromU64(x_plus_p)); // the alias
+
+    const uint256 root_a = U256FromLimbs({x, 11, 22, 33});
+    const uint256 root_b = U256FromLimbs({x_plus_p, 11, 22, 33});
+    BOOST_REQUIRE(root_a != root_b); // genuinely two different commitments
+
+    // (a) NON-VACUITY: the rejected u64-limb encoding really does collide.
+    BOOST_CHECK(NaiveU64LimbLanes(root_a) == NaiveU64LimbLanes(root_b));
+
+    // (b) The shipped 32-bit-lane encoding does NOT.
+    const uint256 seed = MakePrf(3);
+    const auto lanes_a = aq::AirChallengeP2Lanes(seed, "airq_lambda", {root_a}, {64, 8, 3});
+    const auto lanes_b = aq::AirChallengeP2Lanes(seed, "airq_lambda", {root_b}, {64, 8, 3});
+    BOOST_CHECK(lanes_a != lanes_b);
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_lambda", {root_a}, {64, 8, 3}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {root_b}, {64, 8, 3}));
+
+    // The same alias in the SEED position, which binds the recursion node/slot.
+    const uint256 seed_a = U256FromLimbs({x, 1, 2, 3});
+    const uint256 seed_b = U256FromLimbs({x_plus_p, 1, 2, 3});
+    BOOST_REQUIRE(seed_a != seed_b);
+    BOOST_CHECK(NaiveU64LimbLanes(seed_a) == NaiveU64LimbLanes(seed_b));
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed_a, "airq_lambda", {root_a}, {64, 8, 3}) !=
+                aq::AirChallengeDigestP2(seed_b, "airq_lambda", {root_a}, {64, 8, 3}));
+}
+
+// Length-prefixing makes the concatenation prefix-free: moving a byte between
+// two adjacent variable-length sections must not preserve the digest.
+BOOST_AUTO_TEST_CASE(airq_p2_preimage_is_injective_across_sections)
+{
+    const uint256 seed = MakePrf(3);
+    const uint256 r1 = MakePrf(9);
+    const uint256 r2 = MakePrf(10);
+
+    // Label boundary: "ab" + no-root vs "a" + "b"-ish shifts are impossible to
+    // build directly, so exercise the count fields, which are what pins them.
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_lambda", {r1, r2}, {64, 8, 3}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}));
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3, 0}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}));
+    // Label separation (same length, and different length).
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_gammaX", {r1}, {64, 8, 3}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}));
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_gamma", {r1}, {64, 8, 3}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}));
+    // Root ORDER is bound.
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_lambda", {r2, r1}, {64, 8, 3}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1, r2}, {64, 8, 3}));
+    // Extra ORDER is bound.
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {8, 64, 3}) !=
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}));
+    // Determinism.
+    BOOST_CHECK(aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}) ==
+                aq::AirChallengeDigestP2(seed, "airq_lambda", {r1}, {64, 8, 3}));
+}
+
+// The two routes are separate: same logical preimage, different digest, and the
+// Poseidon2 output is four CANONICAL Goldilocks lanes (never a limb >= p).
+BOOST_AUTO_TEST_CASE(airq_p2_route_is_domain_separated_and_canonical)
+{
+    const uint256 seed = MakePrf(3);
+    const uint256 root = MakePrf(9);
+    const uint256 sha = aq::AirChallengeDigest(seed, "airq_lambda", {root}, {64, 8, 3});
+    const uint256 p2 = aq::AirChallengeDigestP2(seed, "airq_lambda", {root}, {64, 8, 3});
+    BOOST_CHECK(sha != p2);
+
+    const unsigned char* b = p2.data();
+    for (int i = 0; i < 4; ++i) {
+        uint64_t limb = 0;
+        for (int j = 0; j < 8; ++j) limb |= static_cast<uint64_t>(b[8 * i + j]) << (8 * j);
+        BOOST_CHECK_LT(limb, kGoldilocksP);
+    }
+
+    // The route is NOT activated: nothing selects it yet.
+    BOOST_CHECK(!aq::kAirChallengeP2Activated);
+}
+
+// ---------------------------------------------------------------------------
+// COST OF THE REPLACEMENT COMPANION.
+//
+// The MEASURED g4 producer-endpoint floor (commit 5faa019) is 58.571 s:
+//   build SHA companion CS   16.166 s
+//   Split-RAP PROVE          41.149 s   over 591 columns x 4096 rows
+// The 4096 rows are 1024 (hash_air's pinned lane_rows) x next_pow2(3
+// compressions). Under the Poseidon2 route the same logical preimage is 5
+// permutations, and the in-AIR Poseidon2 chip charges ONE row per permutation,
+// so the replacement table is 8 rows (next power of two >= 5).
+//
+// THIS TEST MEASURES THE REPLACEMENT SHAPE'S Split-RAP PROVE, so the "after"
+// number is a measurement rather than a model. It is honest about two gaps:
+//   * it proves the Poseidon2 OPERATION TABLE (484 columns, 4*118 quadratic
+//     identities). It does NOT include the sponge-chaining/padding constraints
+//     or the LogUp bus lane the real companion also needs. Those add columns
+//     (~+53 at the SHA companion's ratio) at the SAME row count, so they move
+//     width by ~11%, not the 512x row factor that dominates.
+//   * the Split-RAP split used is the chip's own 130 base / 354 auxiliary
+//     partition, which is a structural property of the table, not a tuning
+//     choice made to flatter the number.
+// Env-gated because it proves; the default gate must stay fast.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(airq_p2_companion_replacement_prove_cost)
+{
+    if (std::getenv("BTX_RUN_AIRQ_P2_COMPANION_COST") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "AIRQ_P2_COST skipped (set BTX_RUN_AIRQ_P2_COMPANION_COST=1)");
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    namespace pa = matmul::v4::rc::stage3_poseidon_air;
+    namespace ah = matmul::v4::rc::alg_hash;
+
+    const uint256 seed = MakePrf(3);
+    const uint256 root = MakePrf(9);
+    const auto lanes = aq::AirChallengeP2Lanes(seed, "airq_lambda", {root}, {64, 8, 3});
+    const uint32_t perms = aq::AirChallengeP2Permutations(lanes.size());
+    uint32_t min_rows = 2;
+    while (min_rows < perms) min_rows <<= 1;
+
+    // TWO row counts, deliberately.
+    //   min_rows (8) is the TRUE replay size, but n_lde = 8*16 = 128 is BELOW
+    //     the 192-query budget, so a STANDALONE proof at that size is
+    //     query-degenerate and its timing must not be quoted as the honest
+    //     "after" number. It is reported only to isolate the row effect.
+    //   1024 rows gives n_lde = 16384 > 192 queries, the same regime the
+    //     MEASURED 591x4096 SHA number was taken in, so it is the defensible
+    //     apples-to-apples figure -- and it is still 4x FEWER rows than 4096
+    //     while carrying 205x more Poseidon2 permutations than this preimage
+    //     actually needs.
+    for (const uint32_t n_rows : {min_rows, 1024u}) {
+    std::string why;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    BOOST_REQUIRE_MESSAGE(pa::BuildFixedSystem(n_rows, cs, &why), why);
+    const auto layout = pa::CanonicalLayout(0);
+
+    // Replicate SpongeHashFp's absorb schedule exactly: 10* padding, then
+    // add-absorb into the 8 rate lanes and permute, one permutation per row.
+    std::vector<gf::Fp> padded = lanes;
+    padded.push_back(1);
+    while (padded.size() % ah::kAlgHashRate != 0) padded.push_back(0);
+    BOOST_REQUIRE_EQUAL(padded.size() / ah::kAlgHashRate, perms);
+
+    std::vector<std::vector<gf::Fp3>> columns(
+        cs.n_columns, std::vector<gf::Fp3>(n_rows, gf::Fp3::Zero()));
+    ah::State s{};
+    ah::State sponge_out{};
+    for (uint32_t i = 0; i < n_rows; ++i) {
+        if (i < perms) {
+            for (uint32_t j = 0; j < ah::kAlgHashRate; ++j) {
+                s[j] = gf::Add(s[j], padded[i * ah::kAlgHashRate + j]);
+            }
+        } else {
+            s = ah::State{}; // filler rows are still honest permutation rows
+        }
+        const pa::Witness w = pa::BuildWitness(layout, s);
+        BOOST_REQUIRE_EQUAL(w.row.size(), layout.End());
+        for (uint32_t c = 0; c < layout.End() && c < cs.n_columns; ++c) {
+            columns[c][i] = w.row[c];
+        }
+        s = w.output;
+        // Capture BEFORE the filler rows overwrite the chain.
+        if (i + 1 == perms) sponge_out = w.output;
+    }
+
+    // The sponge the AIR rows just replayed must be the native digest, or the
+    // measurement is of an unrelated table.
+    const ah::Digest native = ah::SpongeHashFp(lanes);
+    for (int i = 0; i < 4; ++i) BOOST_REQUIRE_EQUAL(sponge_out[i], native[i]);
+
+    // Split-RAP needs a genuine two-epoch split. Use the chip's OWN partition:
+    // the 130 flattened permutation cells are the base commitment, the 3*118
+    // S-box auxiliary cells are the dependent epoch.
+    const auto m = pa::Measure(n_rows);
+    BOOST_REQUIRE_EQUAL(m.base_columns + m.auxiliary_columns, cs.n_columns);
+    std::vector<uint32_t> base_indices(m.base_columns);
+    for (uint32_t c = 0; c < m.base_columns; ++c) base_indices[c] = c;
+
+    const uint32_t n_lde = cs.n_rows * matmul::v4::rc::kRCFriBlowup;
+    BOOST_TEST_MESSAGE("AIRQ_P2_SHAPE rows=" << cs.n_rows
+                       << " cols=" << cs.n_columns
+                       << " constraints=" << cs.constraints.size()
+                       << " permutations=" << perms
+                       << " lanes=" << lanes.size()
+                       << " n_lde=" << n_lde
+                       << " query_sound=" << (n_lde > 192u ? "yes" : "NO"));
+
+    auto t = Clock::now();
+    const auto sp = aq::AirQuotientProveRowsSplitRap(cs, columns, base_indices, seed, {});
+    const double t_prove =
+        std::chrono::duration<double>(Clock::now() - t).count();
+    BOOST_REQUIRE_MESSAGE(sp.ok, sp.note);
+
+    t = Clock::now();
+    const bool vok =
+        aq::AirQuotientVerifyRowsSplitRap(cs, sp.proof, base_indices, seed, &why);
+    const double t_verify =
+        std::chrono::duration<double>(Clock::now() - t).count();
+    BOOST_CHECK_MESSAGE(vok, why);
+
+    BOOST_TEST_MESSAGE("AIRQ_P2_PROVE rows=" << cs.n_rows << " " << t_prove << " s"
+                       << " | AIRQ_P2_VERIFY " << t_verify << " s"
+                       << " | SHA_MEASURED_PROVE 41.149 s @591x4096"
+                       << " | ratio=" << (41.149 / std::max(1e-9, t_prove)));
+    } // end row-count sweep
 }
 
 BOOST_AUTO_TEST_SUITE_END()
