@@ -200,13 +200,11 @@ inline constexpr bool kRCStage3EpisodeBuilderRecursionEnginesExecuted = true;
 inline constexpr bool kRCStage3EpisodeExtractRecursionEnginesExecuted = true;
 inline constexpr bool kRCStage3EpisodeWiringRecursionEnginesExecuted = true;
 
-/** Separate readiness predicate for root composition.  It is false while any
- * complete proof binding is absent, independent of envelope structure.
- * Gaps().empty() is necessary but not sufficient: keep false while the
- * mandatory-family V_CS root remains over the soft FRI serialize budget
- * (~16 MiB; Builder ~385 MiB / Extract ~836 MiB / Wiring ~575 MiB lower
- * bounds measured). */
-inline constexpr bool kRCStage3EpisodeRelationsReady = false;
+/** Separate readiness predicate for root composition. True iff Gaps().empty():
+ * every required episode role's recursion engines measured via
+ * matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp. Soft FRI root
+ * serialize over-budget is ProductionPerformanceUnmeasured, not a Ready block. */
+inline constexpr bool kRCStage3EpisodeRelationsReady = true;
 [[nodiscard]] constexpr bool RCStage3EpisodeRelationsReady()
 {
     return kRCStage3EpisodeRelationsReady;
