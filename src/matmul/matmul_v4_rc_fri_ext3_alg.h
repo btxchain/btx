@@ -159,22 +159,30 @@ inline constexpr bool kRCFri3AlgShortFsActivatedV1 = true;
  *  computes different challenges than the child and recursion breaks
  *  SILENTLY. */
 inline constexpr uint32_t kRCFri3AlgActiveBatchProofVersion =
-    kRCFri3AlgShortFsActivatedV1 ? kRCFri3AlgShortFsLaneProofVersion
-                                 : kRCFri3AlgBatchProofVersion;
+    kRCFri3AlgP2SqueezeActivatedV1 ? kRCFri3AlgP2SqueezeLaneProofVersion
+    : kRCFri3AlgShortFsActivatedV1 ? kRCFri3AlgShortFsLaneProofVersion
+                                   : kRCFri3AlgBatchProofVersion;
 inline constexpr const char* kRCFri3AlgActiveBatchDomainTag =
-    kRCFri3AlgShortFsActivatedV1 ? kRCFri3AlgShortFsDomainTag
-                                 : kRCFri3AlgBatchDomainTag;
+    kRCFri3AlgP2SqueezeActivatedV1 ? kRCFri3AlgP2SqueezeDomainTag
+    : kRCFri3AlgShortFsActivatedV1 ? kRCFri3AlgShortFsDomainTag
+                                   : kRCFri3AlgBatchDomainTag;
 /** The two tags have DIFFERENT lengths (23 vs 31) and several transcript
  *  models size their preamble with sizeof(tag)-1.  Reading this instead is
  *  what keeps those models byte-exact across the flip. */
 inline constexpr uint32_t kRCFri3AlgActiveBatchDomainTagLen =
-    kRCFri3AlgShortFsActivatedV1
-        ? static_cast<uint32_t>(sizeof(kRCFri3AlgShortFsDomainTag) - 1)
-        : static_cast<uint32_t>(sizeof(kRCFri3AlgBatchDomainTag) - 1);
+    kRCFri3AlgP2SqueezeActivatedV1
+        ? static_cast<uint32_t>(sizeof(kRCFri3AlgP2SqueezeDomainTag) - 1)
+        : kRCFri3AlgShortFsActivatedV1
+              ? static_cast<uint32_t>(sizeof(kRCFri3AlgShortFsDomainTag) - 1)
+              : static_cast<uint32_t>(sizeof(kRCFri3AlgBatchDomainTag) - 1);
 /** True iff the live Q192 lane absorbs the SHAPE and OOD-EVAL commitments in
- *  place of the 4*W and 48*W verbatim bodies. */
+ *  place of the 4*W and 48*W verbatim bodies.  P2-squeeze inherits short-FS
+ *  absorbs. */
 inline constexpr bool kRCFri3AlgActiveShortTranscript =
-    kRCFri3AlgShortFsActivatedV1;
+    kRCFri3AlgP2SqueezeActivatedV1 || kRCFri3AlgShortFsActivatedV1;
+/** True iff live challenges are Poseidon2 squeezes (not SHA256d). */
+inline constexpr bool kRCFri3AlgActiveP2Squeeze =
+    kRCFri3AlgP2SqueezeActivatedV1;
 
 /** Stage-3 recursion query count: Q=192 supports a 2^28-site union budget. */
 inline constexpr uint32_t kRCFri3AlgNumQueries = 192;
@@ -1570,6 +1578,18 @@ inline constexpr uint64_t kRCFri3AlgSigmaCoreDomain =
     0x53494743'4F524500ull; // "SIGCORE"
 inline constexpr uint64_t kRCFri3AlgAlgebraicFp3DrawDomain =
     0x46503344'52415700ull; // "FP3DRAW"
+/** Domain for the P2-squeeze lane's ChallengeDigest replacement. */
+inline constexpr uint64_t kRCFri3AlgP2SqueezeDrawDomain =
+    0x50325351'5A445257ull; // "P2SQZDRW"
+
+/**
+ * Poseidon2 squeeze over a Fri3AlgFs byte buffer — the challenge function of
+ * the P2-squeeze lane.  Packs `buf` as length-prefixed 32-bit LE lanes (same
+ * injectivity discipline as aq::AirChallengeP2Lanes), appends the label bytes
+ * and idx, and returns three canonical sponge lanes as Fp3.
+ */
+[[nodiscard]] Fp3 Fri3AlgP2SqueezeChallengeFp3(
+    const std::vector<unsigned char>& buf, const char* label, uint32_t idx);
 
 /**
  * Commitment to the child's SHAPE vector, replacing the 4*W-byte column_len
@@ -1722,6 +1742,16 @@ MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
     const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
     uint64_t pow_grind_nonce = 0);
 [[nodiscard]] bool Fri3AlgShortFsBatchVerify(
+    const Fri3AlgBatchProof& proof, const uint256& fs_seed,
+    std::string* why = nullptr);
+
+/** P2-squeeze lane commit/verify (version 8). Short-FS absorbs + Poseidon2
+ *  challenge squeezes. Not selected by Fri3AlgBatchCommit until
+ *  kRCFri3AlgP2SqueezeActivatedV1. */
+[[nodiscard]] Fri3AlgBatchCommitResult Fri3AlgP2SqueezeBatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+[[nodiscard]] bool Fri3AlgP2SqueezeBatchVerify(
     const Fri3AlgBatchProof& proof, const uint256& fs_seed,
     std::string* why = nullptr);
 

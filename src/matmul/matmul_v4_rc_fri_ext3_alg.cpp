@@ -667,6 +667,11 @@ struct Fri3AlgProtocolConfig {
     // shipped `false` without being edited. Adding it earlier would silently
     // re-point their positional initializers.
     bool short_transcript_commitments{false};
+    // PR-89 g4 / recommendation #1: Poseidon2 challenge squeeze. When true,
+    // ProtocolChallengeFp3/Index draw via Fri3AlgP2SqueezeChallengeFp3 over
+    // fs.buf instead of SHA256d(buf || suffix). Independent of
+    // short_transcript_commitments (which only changes absorbs).
+    bool p2_squeeze_challenges{false};
     // PR-89 Construction 1 (Pi_JQ): when joint_query is set, the "fra3_query"
     // index draw is REPLACED by the joint squeeze derivation
     //   index_{l,j} = LE32(SHA256d(sigma_Q || "fra3_joint_query" || l || j))
@@ -731,19 +736,39 @@ constexpr Fri3AlgProtocolConfig kFri3AlgQ192ShortFsV7Config{
     true,
 };
 
+// PR-89 g4 / recommendation #1: short-FS absorbs + Poseidon2 squeezes.
+constexpr Fri3AlgProtocolConfig kFri3AlgQ192P2SqueezeV8Config{
+    kRCFri3AlgP2SqueezeLaneProofVersion,
+    kRCFri3AlgP2SqueezeDomainTag,
+    kRCFri3AlgDualUniformDrawDomainTag,
+    kRCFri3AlgDualIndexDrawDomainTag,
+    kRCFri3AlgNumQueries,
+    0,
+    false,
+    false,
+    -1,
+    true,
+    true,  // short_transcript_commitments
+    true,  // p2_squeeze_challenges
+};
+
 // PR-89 g4 ACTIVATION.  The ONE selector every Q192 producer and consumer in
 // this file reads.  Held as a constexpr object rather than a reference so the
 // version/tag/short-transcript members cannot drift apart from
 // kRCFri3AlgActiveBatchProofVersion.
 constexpr Fri3AlgProtocolConfig kFri3AlgQ192ActiveConfig =
-    kRCFri3AlgShortFsActivatedV1 ? kFri3AlgQ192ShortFsV7Config
-                                 : kFri3AlgQ192V3Config;
+    kRCFri3AlgP2SqueezeActivatedV1 ? kFri3AlgQ192P2SqueezeV8Config
+    : kRCFri3AlgShortFsActivatedV1 ? kFri3AlgQ192ShortFsV7Config
+                                   : kFri3AlgQ192V3Config;
 static_assert(kFri3AlgQ192ActiveConfig.proof_version ==
                   kRCFri3AlgActiveBatchProofVersion,
               "the active config and the active version constant must agree");
 static_assert(kFri3AlgQ192ActiveConfig.short_transcript_commitments ==
                   kRCFri3AlgActiveShortTranscript,
               "the active config and the active layout flag must agree");
+static_assert(kFri3AlgQ192ActiveConfig.p2_squeeze_challenges ==
+                  kRCFri3AlgActiveP2Squeeze,
+              "the active config and the active squeeze flag must agree");
 static_assert(kFri3AlgQ192ActiveConfig.query_count == kRCFri3AlgNumQueries,
               "activation must not move Q");
 static_assert(kFri3AlgQ192ActiveConfig.require_q192_proximity_guard,
@@ -756,8 +781,8 @@ static_assert(kFri3AlgQ192ActiveConfig.uniform_challenges ==
                       kFri3AlgQ192V3Config.alg_hash_lane &&
                   kFri3AlgQ192ActiveConfig.ood_candidates ==
                       kFri3AlgQ192V3Config.ood_candidates,
-              "activation moves the TRANSCRIPT LAYOUT and nothing else: every "
-              "other soundness-bearing parameter must equal the V3 lane's");
+              "activation moves the TRANSCRIPT LAYOUT/SQUEEZE and nothing else: "
+              "every other soundness-bearing parameter must equal the V3 lane's");
 
 constexpr Fri3AlgProtocolConfig kFri3AlgDualLane0Config{
     kRCFri3AlgDualLaneProofVersion,
@@ -905,6 +930,10 @@ Fri3AlgProtocolConfig DualLaneConfigForScenario(
 bool ProtocolChallengeFp3(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
                           const char* label, uint32_t idx, Fp3& out)
 {
+    if (config.p2_squeeze_challenges) {
+        out = Fri3AlgP2SqueezeChallengeFp3(fs.buf, label, idx);
+        return true;
+    }
     if (config.uniform_challenges) {
         return fs.ChallengeFp3Uniform(
             config.uniform_draw_domain_tag,
@@ -944,6 +973,17 @@ bool ProtocolChallengeIndex(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
         // squeeze already bound both lanes' terminal states.
         out = Fri3AlgJointQIndexInternal(
             *config.joint_query_sigma, config.joint_query_lane, idx, modulus);
+        return true;
+    }
+    if (config.p2_squeeze_challenges) {
+        if (modulus == 0) return false;
+        const Fp3 ch = Fri3AlgP2SqueezeChallengeFp3(fs.buf, label, idx);
+        // Preserve the V3 index RULE (low bits of canonical c0 when modulus
+        // is a power of two) — only the digest preimage moves to Poseidon2.
+        const unsigned __int128 wide =
+            (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) |
+            Canonical(ch.c0);
+        out = static_cast<uint32_t>(wide % modulus);
         return true;
     }
     if (config.uniform_challenges)
@@ -3098,6 +3138,21 @@ bool Fri3AlgShortFsBatchVerify(const Fri3AlgBatchProof& proof,
     // to Fri3AlgBatchVerify, fails at "bad batch version" before any FS work.
     return Fri3AlgBatchVerifyConfigured(proof, fs_seed,
                                         kFri3AlgQ192ShortFsV7Config, why);
+}
+
+Fri3AlgBatchCommitResult Fri3AlgP2SqueezeBatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3AlgBatchCommitConfigured(columns, fs_seed, pow_grind_nonce,
+                                        kFri3AlgQ192P2SqueezeV8Config);
+}
+
+bool Fri3AlgP2SqueezeBatchVerify(const Fri3AlgBatchProof& proof,
+                                 const uint256& fs_seed, std::string* why)
+{
+    return Fri3AlgBatchVerifyConfigured(proof, fs_seed,
+                                        kFri3AlgQ192P2SqueezeV8Config, why);
 }
 
 bool Fri3AlgQ192IndependentBatching()
@@ -7303,6 +7358,38 @@ Fp3 Fri3AlgAlgebraicChallengeFp3(const std::vector<Fp>& core,
     // rejection sampler, no failure tail: the SHA route's
     // Fri3AlgSelectUniformFp3Words exists only because SHA emits BYTES, which
     // must be rejected when a 64-bit word lands in [p, 2^64).
+    return Fp3{gf::Canonical(d[0]), gf::Canonical(d[1]), gf::Canonical(d[2])};
+}
+
+Fp3 Fri3AlgP2SqueezeChallengeFp3(const std::vector<unsigned char>& buf,
+                                 const char* label, uint32_t idx)
+{
+    // Length-prefixed 32-bit LE packing of buf — injective for arbitrary byte
+    // strings (same discipline as aq::AirChallengeP2Lanes / P2PushBytes).
+    std::vector<Fp> lanes;
+    lanes.reserve(2 + (buf.size() + 3) / 4 + 8);
+    lanes.push_back(gf::FromU64(static_cast<uint64_t>(buf.size())));
+    for (size_t i = 0; i < buf.size(); i += 4) {
+        uint32_t w = 0;
+        for (size_t j = 0; j < 4 && i + j < buf.size(); ++j) {
+            w |= static_cast<uint32_t>(buf[i + j]) << (8 * j);
+        }
+        lanes.push_back(gf::FromU64(w));
+    }
+    const size_t n = std::strlen(label);
+    lanes.push_back(gf::FromU64(static_cast<uint64_t>(n)));
+    for (size_t i = 0; i < n; i += 4) {
+        uint32_t w = 0;
+        for (size_t j = 0; j < 4 && i + j < n; ++j) {
+            w |= static_cast<uint32_t>(
+                     static_cast<unsigned char>(label[i + j]))
+                 << (8 * j);
+        }
+        lanes.push_back(gf::FromU64(w));
+    }
+    lanes.push_back(gf::FromU64(idx));
+    const Fri3AlgDigest d = Fri3AlgAlgebraicTranscriptDigest(
+        lanes, kRCFri3AlgP2SqueezeDrawDomain);
     return Fp3{gf::Canonical(d[0]), gf::Canonical(d[1]), gf::Canonical(d[2])};
 }
 
