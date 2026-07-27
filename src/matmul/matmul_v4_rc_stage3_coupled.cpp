@@ -2606,7 +2606,10 @@ bool BuildRCStage3CoupledDigestEngineReceipt(
         return Fail(why, "digest_engine:codec");
     }
     if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
-        return Fail(why, "digest_engine:oversize");
+        return Fail(why,
+                    "digest_engine:oversize:" + std::to_string(body.size()) +
+                        ">" +
+                        std::to_string(kRCStage3CoupledMaxEngineReceiptBytes));
     }
     out_trace_root = ComputeDigestEngineTraceRoot(proof);
     out_engine_receipt = std::move(body);
