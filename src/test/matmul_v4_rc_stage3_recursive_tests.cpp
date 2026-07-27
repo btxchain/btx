@@ -126,7 +126,9 @@ RCStage3RecursiveProof Carrier()
             proof.role, proof.ctl_child_commitment, proof.children);
 
     auto& batch = proof.root.batch;
-    batch.version = kRCFri3AlgBatchProofVersion;
+    // PR-89 g4 ACTIVATION: the codec validates against the LIVE lane
+    // version, so this synthetic carrier must move with it.
+    batch.version = kRCFri3AlgActiveBatchProofVersion;
     batch.blowup = kRCFriBlowup;
     batch.n_coeffs = 2;
     batch.row_commit.root = Digest(31);

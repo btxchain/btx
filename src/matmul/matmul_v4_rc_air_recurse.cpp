@@ -1456,7 +1456,7 @@ ChildPublicInputs ExtractChildPublicInputs(const aq::AirConstraintSystem<Fp3>& c
     // the correct per-lane coefficients from their own dual transcript replay,
     // so this block must leave those untouched rather than fail closed on them.
     if (Fri3AlgQ192IndependentBatching() &&
-        b.version == kRCFri3AlgBatchProofVersion) {
+        b.version == kRCFri3AlgActiveBatchProofVersion) {
         // Bind this extraction to the independent-coefficient regime. On an
         // honest proof the transcript replay recovers the full W = child_w+1
         // vector. On a corrupted transcript (e.g. a tampered row commitment)

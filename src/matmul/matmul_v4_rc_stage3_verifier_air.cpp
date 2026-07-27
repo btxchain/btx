@@ -710,9 +710,16 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
     }
 
     const uint64_t columns = static_cast<uint64_t>(child.child_w) + 1;
+    // PR-89 g4 ACTIVATION.  Fri3AlgBatchFsInit's per-column `4 * columns`
+    // block is exactly the term (i) the short-transcript lane replaces with a
+    // single 32-byte Fri3AlgShapeCommit.  W itself stays in the clear (the
+    // `4 +` before it), because the verifier must size its vectors before it
+    // can hash anything -- and the commitment re-binds W anyway.
+    const uint64_t shape_bytes =
+        kRCFri3AlgActiveShortTranscript ? uint64_t{32} : 4 * columns;
     const uint64_t preamble_bytes =
-        (sizeof(kRCFri3AlgBatchDomainTag) - 1) + 32 + 8 + 4 + 4 +
-        4 + 4 + 4 * columns + 32;
+        kRCFri3AlgActiveBatchDomainTagLen + 32 + 8 + 4 + 4 +
+        4 + 4 + shape_bytes + 32;
     if (preamble_bytes > std::numeric_limits<uint32_t>::max()) {
         out.note = "stage3:verifier_air:fs_preamble_overflow";
         return out;
@@ -787,9 +794,16 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
         }
     }
     add(FiatShamirEventKind::AbsorbZ1Z2, 0, 48);
-    for (uint32_t column = 0; column < columns; ++column) {
-        add(FiatShamirEventKind::AbsorbOodEvaluationPair,
-            column, 48);
+    if (kRCFri3AlgActiveShortTranscript) {
+        // Term (ii): 48*W bytes -> 32.  ONE event, and deliberately a
+        // DIFFERENT kind, so a program built for one layout can never
+        // validate against the other.
+        add(FiatShamirEventKind::AbsorbOodEvalCommitment, 0, 32);
+    } else {
+        for (uint32_t column = 0; column < columns; ++column) {
+            add(FiatShamirEventKind::AbsorbOodEvaluationPair,
+                column, 48);
+        }
     }
     add(FiatShamirEventKind::ChallengeW1, 0, 0);
     add(FiatShamirEventKind::ChallengeW2, 1, 0);
@@ -879,7 +893,7 @@ FiatShamirWitness BuildFiatShamirWitness(
     }
     const auto& batch = child_proof.batch;
     const uint32_t columns = program.child_shape.child_w + 1;
-    if (batch.version != kRCFri3AlgBatchProofVersion ||
+    if (batch.version != kRCFri3AlgActiveBatchProofVersion ||
         batch.blowup != kRCFriBlowup ||
         batch.n_coeffs != program.child_shape.child_n_coeffs ||
         static_cast<uint64_t>(batch.n_coeffs) * batch.blowup !=
@@ -959,18 +973,26 @@ FiatShamirWitness BuildFiatShamirWitness(
         case FiatShamirEventKind::AbsorbPreamble: {
             const auto* domain =
                 reinterpret_cast<const unsigned char*>(
-                    kRCFri3AlgBatchDomainTag);
+                    kRCFri3AlgActiveBatchDomainTag);
             event.absorbed_payload.insert(
                 event.absorbed_payload.end(), domain,
-                domain + sizeof(kRCFri3AlgBatchDomainTag) - 1);
+                domain + kRCFri3AlgActiveBatchDomainTagLen);
             AppendHash(event.absorbed_payload, child_fs_seed);
             AppendU64(event.absorbed_payload, batch.pow_grind_nonce);
             AppendU32(event.absorbed_payload, batch.blowup);
             AppendU32(event.absorbed_payload, batch.n_coeffs);
             AppendU32(event.absorbed_payload, batch.version);
             AppendU32(event.absorbed_payload, columns);
-            for (const uint32_t length : batch.column_len) {
-                AppendU32(event.absorbed_payload, length);
+            if (kRCFri3AlgActiveShortTranscript) {
+                // Byte-for-byte what Fri3AlgBatchFsInit absorbs on this lane.
+                AppendHash(
+                    event.absorbed_payload,
+                    Fri3AlgDigestToUint256(Fri3AlgShapeCommit(
+                        batch.n_coeffs, batch.column_len)));
+            } else {
+                for (const uint32_t length : batch.column_len) {
+                    AppendU32(event.absorbed_payload, length);
+                }
             }
             AppendHash(
                 event.absorbed_payload,
@@ -1010,6 +1032,13 @@ FiatShamirWitness BuildFiatShamirWitness(
             AppendFp3(
                 event.absorbed_payload,
                 batch.evals_z2.at(spec.index));
+            break;
+        case FiatShamirEventKind::AbsorbOodEvalCommitment:
+            AppendHash(
+                event.absorbed_payload,
+                Fri3AlgDigestToUint256(Fri3AlgOodEvalCommit(
+                    batch.z1, batch.z2, batch.evals_z1,
+                    batch.evals_z2)));
             break;
         case FiatShamirEventKind::ChallengeW1:
             event.has_fp3_challenge = true;
@@ -1398,6 +1427,19 @@ BuildFiatShamirShaExecutionPlanV1(
             }
             return origins;
         };
+    // PR-89 g4 ACTIVATION.  A run of bytes that is a Poseidon2 commitment lane
+    // rather than a verbatim proof byte.  Kept as its own kind so a consumer
+    // can tell the SHA chip cannot discharge it.
+    const auto algebraic_origins =
+        [](OriginKind kind, uint32_t size) {
+            std::vector<Origin> origins;
+            origins.reserve(size);
+            for (uint32_t byte = 0;
+                 byte < size; ++byte) {
+                origins.push_back({kind, byte});
+            }
+            return origins;
+        };
     const auto trace_origins =
         [](uint32_t size) {
             std::vector<Origin> origins;
@@ -1489,9 +1531,7 @@ BuildFiatShamirShaExecutionPlanV1(
                 append_origins(
                     origins,
                     constant_origins(
-                        sizeof(
-                            kRCFri3AlgBatchDomainTag) -
-                        1));
+                        kRCFri3AlgActiveBatchDomainTagLen));
                 append_origins(
                     origins,
                     public_seed_origins(32));
@@ -1510,10 +1550,25 @@ BuildFiatShamirShaExecutionPlanV1(
                 append_origins(
                     origins,
                     batch_origins(60, 4));
-                append_origins(
-                    origins,
-                    batch_origins(
-                        64, 4 * width));
+                if (kRCFri3AlgActiveShortTranscript) {
+                    // PR-89 g4 ACTIVATION.  These 32 bytes are NOT bytes the
+                    // child shipped -- they are Poseidon2 lanes over the
+                    // column_len region.  Claiming batch_origins(64, 4*width)
+                    // here would assert a provenance the SHA plan cannot
+                    // discharge, so they get their own kind and the plan
+                    // reports them as un-owned by the SHA chip.
+                    append_origins(
+                        origins,
+                        algebraic_origins(
+                            FiatShamirShaByteOriginKindV1::
+                                AlgebraicShapeCommitment,
+                            32));
+                } else {
+                    append_origins(
+                        origins,
+                        batch_origins(
+                            64, 4 * width));
+                }
                 append_origins(
                     origins,
                     batch_origins(24, 32));
@@ -1550,6 +1605,15 @@ BuildFiatShamirShaExecutionPlanV1(
                         eval2_base +
                             24 * spec.index,
                         24));
+                break;
+            case FiatShamirEventKind::
+                    AbsorbOodEvalCommitment:
+                append_origins(
+                    origins,
+                    algebraic_origins(
+                        FiatShamirShaByteOriginKindV1::
+                            AlgebraicOodEvalCommitment,
+                        32));
                 break;
             case FiatShamirEventKind::
                     AbsorbW1W2:

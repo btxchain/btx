@@ -2037,20 +2037,40 @@ BOOST_AUTO_TEST_CASE(
             << " | preimage_a=" << cov.preimage_bytes_a[k]
             << " preimage_b=" << cov.preimage_bytes_b[k]
             << " width_independent=" << cov.preimage_width_independent[k]
-            << " companion_sha_rows=" << cov.companion_sha_rows[k]);
+            << " companion_sha_rows=" << cov.companion_sha_rows[k]
+            << " companion_built=" << cov.companion_cs_built[k]
+            << " companion_cols=" << cov.companion_cs_columns[k]
+            << " companion_rows=" << cov.companion_cs_rows[k]);
     }
     // NON-VACUITY of the width probe: the two probes really are at different
     // batch widths, so "preimage unchanged" is information and not tautology.
     BOOST_REQUIRE_NE(cov.probe_child_w_a, cov.probe_child_w_b);
-    // And the discrimination is real in BOTH directions: airq_lambda's
-    // preimage does not move with width, every FRI-transcript kind's does.
+    // PR-89 g4 ACTIVATION changed what this probe measures, and the check is
+    // rewritten to the post-activation FACT rather than deleted.
+    //
+    // BEFORE: exactly one kind (airq_lambda) had a width-independent preimage;
+    // the other seven inherited the 4*W column_len block and the 48*W OOD
+    // evaluation block, so their preimages moved with the child's width and
+    // the assertion below was `== is_airq`.
+    // AFTER: the short-transcript lane replaces both blocks with 32-byte
+    // Poseidon2 commitments, so EVERY kind is width-independent.  That is the
+    // whole point of the activation and it is asserted here.
+    //
+    // NON-VACUITY is preserved in two ways: the two probes are still at
+    // different batch widths (BOOST_REQUIRE_NE above), and every preimage is
+    // still required to be NONZERO -- a kind that simply failed to be drawn
+    // would otherwise read as trivially width-independent.
+    BOOST_CHECK(kRCFri3AlgShortFsActivatedV1);
     for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
-        const bool is_airq =
-            k == static_cast<uint32_t>(ChildFsChallengeKindV1::AirqLambda);
-        BOOST_CHECK_EQUAL(cov.preimage_width_independent[k], is_airq);
-        if (!is_airq) {
-            BOOST_CHECK_NE(cov.preimage_bytes_a[k], cov.preimage_bytes_b[k]);
-        }
+        BOOST_CHECK_MESSAGE(
+            cov.preimage_bytes_a[k] != 0 && cov.preimage_bytes_b[k] != 0,
+            "kind " << k << " has no measured preimage at one of the probes");
+        BOOST_CHECK_MESSAGE(
+            cov.preimage_width_independent[k],
+            "kind " << k << " preimage still moves with width: "
+                    << cov.preimage_bytes_a[k] << " vs "
+                    << cov.preimage_bytes_b[k]);
+        BOOST_CHECK_EQUAL(cov.preimage_bytes_a[k], cov.preimage_bytes_b[k]);
     }
     BOOST_CHECK_EQUAL(cov.table_violations, 0U);
     // Every kind decoded, every kind's tamper rejected.
@@ -2063,10 +2083,28 @@ BOOST_AUTO_TEST_CASE(
     }
     BOOST_CHECK_EQUAL(cov.kinds_decoded, kChildFsChallengeKindCountV1);
     BOOST_CHECK_EQUAL(cov.kinds_replayed, kChildFsChallengeKindCountV1);
-    // ... and the honest residual: SEVEN kinds' digest bytes are still free
-    // public cells.  If this ever reads 8 without a companion hash CS for the
-    // other kinds landing first, something was flipped rather than earned.
-    BOOST_CHECK_EQUAL(cov.kinds_transcript_bound, 1U);
+    // The standing warning on this counter was: "if this ever reads 8 without
+    // a companion hash CS for the other kinds landing first, something was
+    // flipped rather than earned."  ACTIVATION alone WOULD have done exactly
+    // that -- it makes both of the old conjuncts (width independence, chip
+    // capacity) true for all eight kinds without building anything.  So the
+    // predicate gained a third conjunct in the same change, and what is
+    // asserted here is the companion CS itself, not the cost model.
+    for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+        BOOST_CHECK_MESSAGE(
+            cov.companion_cs_built[k],
+            "kind " << k << " has NO built companion hash CS -- its digest "
+                       "bytes are still free public cells");
+        // The counter may never exceed the thing that earns it.
+        if (cov.transcript_bound_in_air[k]) {
+            BOOST_CHECK(cov.companion_cs_built[k]);
+        }
+    }
+    BOOST_CHECK_EQUAL(cov.kinds_companion_built,
+                      kChildFsChallengeKindCountV1);
+    BOOST_CHECK_EQUAL(cov.kinds_transcript_bound,
+                      kChildFsChallengeKindCountV1);
+    BOOST_CHECK_LE(cov.kinds_transcript_bound, cov.kinds_companion_built);
     BOOST_CHECK(cov.transcript_bound_in_air[
         static_cast<uint32_t>(ChildFsChallengeKindV1::AirqLambda)]);
 
@@ -2074,6 +2112,86 @@ BOOST_AUTO_TEST_CASE(
     // constraint system per draw.
     BOOST_CHECK_GE(cov.table_rows, cov.draws_decoded);
     BOOST_CHECK_LT(cov.table_columns, 256U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_poseidon2_companion_replays_airq_lambda_and_rejects_forgery)
+{
+    // The Poseidon2 companion, built and adversarially checked at the DEFAULT
+    // (query-sound) height.  Cheap enough to run in the default suite, which is
+    // itself part of the point -- the SHA companion is not.
+    const auto child_cs = ToyFriChildCs();
+    const uint256 seed = Seed(0x5e);
+    const std::vector<std::vector<gf::Fp3>> cols{
+        {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(child_cs, cols, seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    const auto pi = air_recurse::ExtractChildPublicInputs(
+        child_cs, proved.proof, seed);
+    BOOST_REQUIRE(pi.ok);
+
+    // The consumed challenge for the Poseidon2 ROUTE is that route's own
+    // digest -- the SHA route's airq_lambda is a different value by
+    // construction (distinct domain tag), which is exactly what makes the two
+    // routes non-interchangeable.
+    const uint256 d_p2 = aq::AirChallengeDigestP2(
+        seed, "airq_lambda", {proved.proof.trace_commit},
+        {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
+    const gf::Fp3 consumed_p2 = gf::FromChallengeBytes3(d_p2.data());
+    BOOST_CHECK_MESSAGE(
+        !gf::Eq(consumed_p2, pi.air_lambda),
+        "P2 and SHA routes must not share a challenge value");
+
+    const auto p2 = BuildChildAirChallengeP2ReplayV1(
+        seed, proved.proof.trace_commit, pi.child_n_rows,
+        pi.child_quotient_len, pi.child_w, consumed_p2);
+    BOOST_TEST_MESSAGE(
+        "G4_P2_COMPANION note=\"" << p2.note << "\""
+        << " lanes=" << p2.n_lanes
+        << " permutations=" << p2.permutations
+        << " rows=" << p2.n_rows
+        << " cols=" << p2.n_columns
+        << " constraints=" << p2.n_constraints
+        << " max_deg=" << p2.max_alg_degree
+        << " n_lde=" << p2.n_lde
+        << " query_sound=" << p2.query_sound_shape
+        << " violations=" << p2.witness_violations);
+    BOOST_REQUIRE_MESSAGE(p2.valid, p2.note);
+    BOOST_CHECK_EQUAL(p2.witness_violations, 0U);
+    BOOST_CHECK(p2.sponge_chained_in_cs);
+    BOOST_CHECK(p2.query_sound_shape);
+    // 32 lanes -> 40 after 10*-padding -> 5 permutations, ONE ROW EACH.
+    BOOST_CHECK_EQUAL(p2.permutations, 5U);
+    BOOST_CHECK_EQUAL(p2.n_rows, kChildAirChallengeP2QuerySoundRowsV1);
+    // The whole decode is three lane pins: no 24 byte columns, no recompose.
+    BOOST_CHECK_LT(p2.n_columns, 500U);
+
+    // FORGERY: a challenge that is not the sponge output must be REJECTED, not
+    // merely different.  This is the constraint that makes the companion mean
+    // anything.
+    const gf::Fp3 forged = gf::Add(consumed_p2, gf::Fp3::One());
+    const auto bad = BuildChildAirChallengeP2ReplayV1(
+        seed, proved.proof.trace_commit, pi.child_n_rows,
+        pi.child_quotient_len, pi.child_w, consumed_p2, 0, &forged);
+    BOOST_CHECK_GT(bad.witness_violations, 0U);
+    BOOST_CHECK(!bad.valid);
+
+    // QUERY DEGENERACY IS REPORTED, NOT SILENTLY ACCEPTED.  At 8 rows the
+    // n_lde is 128 < 192 queries; such a table proves fast and proves nothing,
+    // and the builder must refuse to call it valid.
+    const auto degenerate = BuildChildAirChallengeP2ReplayV1(
+        seed, proved.proof.trace_commit, pi.child_n_rows,
+        pi.child_quotient_len, pi.child_w, consumed_p2, 8);
+    BOOST_TEST_MESSAGE(
+        "G4_P2_DEGENERATE rows=" << degenerate.n_rows
+        << " n_lde=" << degenerate.n_lde
+        << " query_sound=" << degenerate.query_sound_shape
+        << " violations=" << degenerate.witness_violations
+        << " note=\"" << degenerate.note << "\"");
+    BOOST_CHECK_EQUAL(degenerate.witness_violations, 0U);
+    BOOST_CHECK(!degenerate.query_sound_shape);
+    BOOST_CHECK(!degenerate.valid);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -2187,6 +2305,53 @@ BOOST_AUTO_TEST_CASE(
         << " scan_share=" << (100.0 * t_scan / total) << "%"
         << " verify_share=" << (100.0 * t_verify / total) << "%"
         << " | PROVE/VERIFY ratio=" << (t_prove / std::max(1e-9, t_verify)));
+
+    // ---- HEAD TO HEAD: the SAME phases over the POSEIDON2 companion, which is
+    // the proposed replacement for the vertical SHA replay above.  Measured in
+    // the same process, on the same box, back to back -- the only comparison
+    // worth quoting.
+    const uint256 d_p2 = aq::AirChallengeDigestP2(
+        seed, "airq_lambda", {proved.proof.trace_commit},
+        {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
+    const gf::Fp3 consumed_p2 = gf::FromChallengeBytes3(d_p2.data());
+
+    t = Clock::now();
+    const auto p2 = BuildChildAirChallengeP2ReplayV1(
+        seed, proved.proof.trace_commit, pi.child_n_rows,
+        pi.child_quotient_len, pi.child_w, consumed_p2);
+    BOOST_REQUIRE_MESSAGE(p2.valid, p2.note);
+    const double t_p2_build = mark("P2_A_build_companion_cs", t);
+    BOOST_TEST_MESSAGE(
+        "G4_P2_SHAPE rows=" << p2.n_rows << " cols=" << p2.n_columns
+        << " constraints=" << p2.n_constraints
+        << " permutations=" << p2.permutations
+        << " max_deg=" << p2.max_alg_degree
+        << " n_lde=" << p2.n_lde);
+
+    // The Poseidon2 companion has no preprocessed ROW-GROUP roots, so unlike
+    // the SHA companion it can use the plain algebraic prover.
+    t = Clock::now();
+    const auto p2p = aq::AirQuotientProve<gf::Fp3, AlgB3>(
+        p2.cs, p2.columns, Seed(0xc2), {});
+    BOOST_REQUIRE_MESSAGE(p2p.ok, p2p.note);
+    const double t_p2_prove = mark("P2_D_PROVE", t);
+
+    t = Clock::now();
+    BOOST_CHECK((aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+        p2.cs, p2p.proof, Seed(0xc2))));
+    const double t_p2_verify = mark("P2_E_VERIFY", t);
+
+    const double p2_total = t_p2_build + t_p2_prove + t_p2_verify;
+    BOOST_TEST_MESSAGE(
+        "G4_P2_TOTAL " << p2_total << " s"
+        << " | vs SHA companion "
+        << (t_build + t_prove + t_verify) << " s"
+        << " | build_speedup="
+        << (t_build / std::max(1e-9, t_p2_build))
+        << " prove_speedup="
+        << (t_prove / std::max(1e-9, t_p2_prove))
+        << " end_to_end_speedup="
+        << ((t_build + t_prove + t_verify) / std::max(1e-9, p2_total)));
 }
 
 BOOST_AUTO_TEST_CASE(

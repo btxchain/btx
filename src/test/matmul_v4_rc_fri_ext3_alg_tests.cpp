@@ -2395,17 +2395,34 @@ BOOST_AUTO_TEST_CASE(pr89_short_fs_lane_round_trip_and_version_separation)
     BOOST_CHECK_MESSAGE(
         rc::Fri3AlgShortFsBatchVerify(shortfs.proof, seed, &why), why);
 
-    // The shipped V3 lane is UNTOUCHED and still round-trips.
+    // The V3 lane is UNTOUCHED and still round-trips.  After ACTIVATION it is
+    // no longer what Fri3AlgBatchCommit produces, so the A/B reaches it
+    // through the explicit legacy entry point rather than silently losing its
+    // producer.
     rc::Fri3AlgBatchCommitResult legacy =
-        rc::Fri3AlgBatchCommit(columns, seed, 0);
+        rc::Fri3AlgLegacyV3BatchCommit(columns, seed, 0);
     BOOST_REQUIRE_MESSAGE(legacy.ok, legacy.note);
     BOOST_CHECK_EQUAL(legacy.proof.version, rc::kRCFri3AlgBatchProofVersion);
-    BOOST_CHECK(rc::Fri3AlgBatchVerify(legacy.proof, seed, &why));
+    BOOST_CHECK(rc::Fri3AlgLegacyV3BatchVerify(legacy.proof, seed, &why));
 
     // Neither verifier accepts the other lane's proof: the version check fires
     // before any FS work, so the two layouts can never be confused.
-    BOOST_CHECK(!rc::Fri3AlgBatchVerify(shortfs.proof, seed, &why));
+    BOOST_CHECK(!rc::Fri3AlgLegacyV3BatchVerify(shortfs.proof, seed, &why));
     BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(legacy.proof, seed, &why));
+
+    // ACTIVATION, asserted rather than assumed: the DEFAULT Q192 producer and
+    // verifier are now the short-transcript lane.  If this ever reads V3
+    // again, every measurement below is describing a lane nothing selects.
+    BOOST_CHECK(rc::kRCFri3AlgShortFsActivatedV1);
+    BOOST_CHECK_EQUAL(rc::kRCFri3AlgActiveBatchProofVersion,
+                      rc::kRCFri3AlgShortFsLaneProofVersion);
+    rc::Fri3AlgBatchCommitResult active =
+        rc::Fri3AlgBatchCommit(columns, seed, 0);
+    BOOST_REQUIRE_MESSAGE(active.ok, active.note);
+    BOOST_CHECK_EQUAL(active.proof.version,
+                      rc::kRCFri3AlgShortFsLaneProofVersion);
+    BOOST_CHECK(rc::Fri3AlgBatchVerify(active.proof, seed, &why));
+    BOOST_CHECK(!rc::Fri3AlgBatchVerify(legacy.proof, seed, &why));
 
     // The two lanes agree on the STATEMENT and disagree only on the
     // transcript: same shape, same column lengths, different challenges.

@@ -3969,6 +3969,19 @@ BuildChildAirChallengeShaReplayV1(
     const uint256 d = aq::AirChallengeDigest(
         child_fs_seed, kLabel, {trace_commit},
         {child_n_rows, child_quotient_len, child_w});
+    return BuildChildFsChallengeShaReplayFromPreimageV1(
+        buf, d, consumed_air_lambda, child_fs_seed);
+}
+
+ChildAirChallengeShaReplayV1
+BuildChildFsChallengeShaReplayFromPreimageV1(
+    const std::vector<unsigned char>& buf,
+    const uint256& d,
+    const gf::Fp3& consumed_air_lambda,
+    const uint256& child_fs_seed)
+{
+    ChildAirChallengeShaReplayV1 out;
+    out.consumed_air_lambda = consumed_air_lambda;
     out.digest = d;
 
     ha::ShaManifest manifest;
@@ -4523,6 +4536,256 @@ VerifyChildFsShaBoundV1(
 }
 
 // ===========================================================================
+// PR-89 g4: the POSEIDON2 companion CS.  See the header for why this is the
+// lever (57.3 s of the 58.6 s endpoint floor is the vertical SHA replay) and
+// for the query-soundness floor on the table height.
+// ===========================================================================
+
+ChildAirChallengeP2ReplayV1
+BuildChildAirChallengeP2ReplayV1(
+    const uint256& child_fs_seed,
+    const uint256& trace_commit,
+    uint32_t child_n_rows,
+    uint32_t child_quotient_len,
+    uint32_t child_w,
+    const gf::Fp3& consumed_air_lambda,
+    uint32_t n_rows_floor,
+    const gf::Fp3* forced_limb)
+{
+    namespace pa = stage3_poseidon_air;
+    ChildAirChallengeP2ReplayV1 out;
+    out.consumed_air_lambda = consumed_air_lambda;
+    static constexpr char kLabel[] = "airq_lambda";
+
+    // The INJECTIVE 32-bit lane encoding, taken verbatim.  Re-encoding it here
+    // would reintroduce the x + p aliasing class it exists to close.
+    const std::vector<gf::Fp> lanes = aq::AirChallengeP2Lanes(
+        child_fs_seed, kLabel, {trace_commit},
+        {child_n_rows, child_quotient_len, child_w});
+    out.n_lanes = static_cast<uint32_t>(lanes.size());
+    out.permutations = aq::AirChallengeP2Permutations(lanes.size());
+    if (out.permutations == 0) {
+        out.note = "stage3:child_air_challenge_p2:empty_preimage";
+        return out;
+    }
+    out.digest = aq::AirChallengeDigestP2(
+        child_fs_seed, kLabel, {trace_commit},
+        {child_n_rows, child_quotient_len, child_w});
+    out.reconstructed_challenge = gf::FromChallengeBytes3(out.digest.data());
+
+    // 10*-padding, exactly SpongeHashFp's rule: always append 1, then zeros to
+    // the next rate multiple (a WHOLE extra block when the preimage already
+    // fills the rate).
+    std::vector<gf::Fp> padded;
+    padded.reserve(lanes.size() + ah::kAlgHashRate);
+    for (const gf::Fp x : lanes) padded.push_back(gf::Canonical(x));
+    padded.push_back(1);
+    while (padded.size() % ah::kAlgHashRate != 0) padded.push_back(0);
+    if (padded.size() / ah::kAlgHashRate != out.permutations) {
+        out.note = "stage3:child_air_challenge_p2:padding_disagrees";
+        return out;
+    }
+
+    uint32_t rows = n_rows_floor != 0
+                        ? n_rows_floor
+                        : kChildAirChallengeP2QuerySoundRowsV1;
+    {
+        uint32_t p = 2;
+        while (p < out.permutations) p <<= 1;
+        if (rows < p) rows = p;
+        uint32_t q = 2;
+        while (q < rows) q <<= 1;
+        rows = q;
+    }
+    out.n_rows = rows;
+    out.n_lde = rows * kRCFriBlowup;
+    out.query_sound_shape = out.n_lde >= kRCFri3AlgNumQueries;
+
+    std::string why;
+    if (!pa::BuildFixedSystem(rows, out.cs, &why)) {
+        out.note = "stage3:child_air_challenge_p2:fixed_system:" + why;
+        return out;
+    }
+    const pa::Layout layout = pa::CanonicalLayout(0);
+    const uint32_t lane_base = out.cs.n_columns;
+    const uint32_t active_col = lane_base + ah::kAlgHashRate;
+    const uint32_t last_col = active_col + 1;
+    const uint32_t limb_base = last_col + 1;
+    out.cs.n_columns = limb_base + 3;
+    out.absorbed_lane_base = lane_base;
+    out.challenge_limb_columns = {limb_base, limb_base + 1, limb_base + 2};
+
+    // ---- witness: run the sponge, one permutation per row.
+    out.columns.assign(out.cs.n_columns,
+                       std::vector<gf::Fp3>(rows, gf::Fp3::Zero()));
+    ah::State s{};
+    for (uint32_t r = 0; r < out.permutations; ++r) {
+        for (uint32_t j = 0; j < ah::kAlgHashRate; ++j) {
+            const gf::Fp lane = padded[r * ah::kAlgHashRate + j];
+            out.columns[lane_base + j][r] = gf::Fp3::FromFp(lane);
+            s[j] = gf::Add(s[j], lane);
+        }
+        const pa::Witness w = pa::BuildWitness(layout, s);
+        for (uint32_t c = 0; c < layout.End(); ++c) {
+            out.columns[c][r] = w.row[c];
+        }
+        out.columns[active_col][r] = gf::Fp3::One();
+        if (r + 1 == out.permutations) {
+            out.columns[last_col][r] = gf::Fp3::One();
+        }
+        s = w.output;
+    }
+    // Padding rows carry the all-zero permutation, which satisfies the fixed
+    // table; their lane/active/last selectors are zero so nothing chains.
+    if (out.permutations < rows) {
+        const pa::Witness zero_w = pa::BuildWitness(layout, ah::State{});
+        for (uint32_t r = out.permutations; r < rows; ++r) {
+            for (uint32_t c = 0; c < layout.End(); ++c) {
+                out.columns[c][r] = zero_w.row[c];
+            }
+        }
+    }
+    // The reconstructed challenge limbs ARE output lanes 0,1,2 -- each output
+    // lane is canonical (< p), so AirChallengeDigestP2's little-endian packing
+    // makes FromChallengeBytes3's `w_j % p` the identity.  No byte columns.
+    const std::array<gf::Fp3, 3> limb_val = {
+        gf::Fp3::FromFp(out.reconstructed_challenge.c0),
+        gf::Fp3::FromFp(out.reconstructed_challenge.c1),
+        gf::Fp3::FromFp(out.reconstructed_challenge.c2)};
+    for (uint32_t j = 0; j < 3; ++j) {
+        out.columns[limb_base + j].assign(
+            rows, forced_limb != nullptr ? *forced_limb : limb_val[j]);
+    }
+
+    // ---- preprocessed: the preimage lanes and the two schedule selectors.
+    // Without pinning these the prover chooses the transcript for free.
+    //
+    // preprocessed_pin_ood is MANDATORY, not decorative: the row-wise algebraic
+    // backend has no per-column roots to regenerate, so AirQuotientVerify
+    // refuses value-pinned preprocessed columns outright ("preprocessed root
+    // regen unsupported on row-wise backend (set preprocessed_pin_ood)",
+    // air_quotient.cpp).  Omitting it produces a CS that PROVES and then fails
+    // to VERIFY -- which is exactly how this was caught, and why the profile
+    // times a verify rather than trusting the prove.
+    out.cs.preprocessed_pin_ood = true;
+    for (uint32_t j = 0; j < ah::kAlgHashRate; ++j) {
+        out.cs.preprocessed.emplace_back(
+            lane_base + j, out.columns[lane_base + j]);
+    }
+    out.cs.preprocessed.emplace_back(active_col, out.columns[active_col]);
+    out.cs.preprocessed.emplace_back(last_col, out.columns[last_col]);
+
+    // ---- (1) FIRST-ROW absorb: state starts at zero, so row 0's input is
+    // exactly block 0 in the rate lanes and zero in the capacity lanes.
+    for (uint32_t j = 0; j < ah::kAlgHashT; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_companion.first_row_absorb";
+        c.kind = aq::AirKind::kFirstRow;
+        c.alg_degree = 1;
+        const uint32_t in_col = layout.perm.InputCol(j);
+        if (j < ah::kAlgHashRate) {
+            const uint32_t lc = lane_base + j;
+            c.eval = [in_col, lc](const std::vector<gf::Fp3>& row,
+                                  const std::vector<gf::Fp3>&) {
+                return gf::Sub(row[in_col], row[lc]);
+            };
+        } else {
+            c.eval = [in_col](const std::vector<gf::Fp3>& row,
+                              const std::vector<gf::Fp3>&) {
+                return row[in_col];
+            };
+        }
+        out.cs.constraints.push_back(std::move(c));
+    }
+
+    // ---- (2) TRANSITION: absorb-carry on the rate lanes, capacity-carry on
+    // the rest -- SpongeHashFp's own recurrence, gated by the NEXT row's active
+    // selector so the schedule stops at the last semantic permutation.
+    for (uint32_t j = 0; j < ah::kAlgHashT; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_companion.sponge_carry";
+        c.kind = aq::AirKind::kTransition;
+        c.alg_degree = 2;
+        const uint32_t in_col = layout.perm.InputCol(j);
+        const uint32_t lc = lane_base + j;
+        const bool rate = j < ah::kAlgHashRate;
+        c.eval = [layout, in_col, lc, rate, active_col, j](
+                     const std::vector<gf::Fp3>& cur,
+                     const std::vector<gf::Fp3>& next) {
+            const gf::Fp3 carried =
+                ar::PermOutputLane(layout.perm, cur, j);
+            gf::Fp3 want = carried;
+            if (rate) want = gf::Add(want, next[lc]);
+            return gf::Mul(next[active_col], gf::Sub(next[in_col], want));
+        };
+        out.cs.constraints.push_back(std::move(c));
+    }
+    out.sponge_chained_in_cs = true;
+
+    // ---- (3) the digest pin: on the LAST semantic row, the reconstructed
+    // challenge limbs equal output lanes 0,1,2.
+    for (uint32_t j = 0; j < 3; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_companion.limb_from_sponge_output";
+        c.kind = aq::AirKind::kEverywhere;
+        c.alg_degree = 2;
+        const uint32_t limb_col = limb_base + j;
+        c.eval = [layout, limb_col, j, last_col](
+                     const std::vector<gf::Fp3>& row,
+                     const std::vector<gf::Fp3>&) {
+            const gf::Fp3 lane =
+                ar::PermOutputLane(layout.perm, row, j);
+            return gf::Mul(row[last_col], gf::Sub(row[limb_col], lane));
+        };
+        out.cs.constraints.push_back(std::move(c));
+    }
+
+    // ---- (4) and those limbs are the challenge the in-parent verifier uses.
+    {
+        const std::array<gf::Fp3, 3> consumed = {
+            gf::Fp3::FromFp(consumed_air_lambda.c0),
+            gf::Fp3::FromFp(consumed_air_lambda.c1),
+            gf::Fp3::FromFp(consumed_air_lambda.c2)};
+        for (uint32_t j = 0; j < 3; ++j) {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.p2_companion.limb_bound_to_consumed";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 1;
+            const uint32_t limb_col = limb_base + j;
+            const gf::Fp3 want = consumed[j];
+            c.eval = [limb_col, want](const std::vector<gf::Fp3>& row,
+                                      const std::vector<gf::Fp3>&) {
+                return gf::Sub(row[limb_col], want);
+            };
+            out.cs.constraints.push_back(std::move(c));
+        }
+    }
+
+    out.n_columns = out.cs.n_columns;
+    out.n_constraints = static_cast<uint32_t>(out.cs.constraints.size());
+    for (const auto& c : out.cs.constraints) {
+        out.max_alg_degree = std::max(out.max_alg_degree, c.alg_degree);
+    }
+    out.witness_violations =
+        ar::CountWitnessViolationsOnH(out.cs, out.columns);
+    out.output_binds_digest = out.witness_violations == 0;
+    out.challenge_bound_to_consumed =
+        out.witness_violations == 0 &&
+        gf::Eq(out.reconstructed_challenge, consumed_air_lambda);
+    out.valid = out.output_binds_digest && out.challenge_bound_to_consumed &&
+                out.query_sound_shape;
+    out.note =
+        out.valid
+            ? "stage3:child_air_challenge_p2:airq_lambda_replayed_in_cs"
+            : (out.witness_violations != 0
+                   ? "stage3:child_air_challenge_p2:violations"
+                   : (!out.query_sound_shape
+                          ? "stage3:child_air_challenge_p2:query_degenerate"
+                          : "stage3:child_air_challenge_p2:challenge_mismatch"));
+    return out;
+}
+
+// ===========================================================================
 // PR-89 g4: INDEPENDENT re-derivation of the child's Q192-V3 Fiat-Shamir
 // transcript, and the parent-side decoder table over every kind it draws.
 // See the header for the replayed absorb order and the three-level coverage
@@ -4594,7 +4857,7 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
 {
     ChildFsTranscriptReplayV1 out;
     const auto& b = child_proof.batch;
-    if (b.version != kRCFri3AlgBatchProofVersion) {
+    if (b.version != kRCFri3AlgActiveBatchProofVersion) {
         out.note = "stage3:child_fs_transcript:unsupported_proof_version";
         return out;
     }
@@ -4618,19 +4881,37 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
     }
 
     std::vector<unsigned char> buf;
-    // Fri3AlgFs ctor.
-    const char* domain = kRCFri3AlgBatchDomainTag;
+    // Fri3AlgFs ctor.  PR-89 g4 ACTIVATION: the tag, the version word and the
+    // shape block ALL move with kRCFri3AlgShortFsActivatedV1.  This shadow is
+    // deliberately hand-rolled (it must not agree with fri_ext3_alg by calling
+    // it), so it is also the place a lockstep miss shows up as a silent
+    // divergence -- every re-derived value below is cross-checked against the
+    // value the proof ships, which is what makes that miss go red.
+    const char* domain = kRCFri3AlgActiveBatchDomainTag;
     buf.insert(buf.end(), domain, domain + std::strlen(domain));
     buf.insert(buf.end(), child_fs_seed.begin(), child_fs_seed.end());
     FsAppendLE64(buf, b.pow_grind_nonce);
     FsAppendLE32(buf, kRCFriBlowup);
     FsAppendLE32(buf, b.n_coeffs);
     // Fri3AlgBatchFsInit.
-    FsAppendLE32(buf, kRCFri3AlgBatchProofVersion);
+    FsAppendLE32(buf, kRCFri3AlgActiveBatchProofVersion);
     FsAppendLE32(buf, static_cast<uint32_t>(b.column_len.size()));
-    for (const uint32_t len : b.column_len) FsAppendLE32(buf, len);
+    if (kRCFri3AlgActiveShortTranscript) {
+        FsAppendAlgRoot(buf, Fri3AlgShapeCommit(b.n_coeffs, b.column_len));
+    } else {
+        for (const uint32_t len : b.column_len) FsAppendLE32(buf, len);
+    }
     FsAppendAlgRoot(buf, b.row_commit.root);
 
+    // PR-89 g4 ACTIVATION.  Every draw retains the exact bytes it hashed so a
+    // companion hash CS can be BUILT from them; a post-pass below then prunes
+    // to the first draw of each KIND.
+    //
+    // Keyed by KIND and not by LABEL, and that distinction is load-bearing:
+    // z1/z2 share the label "fra3_z" and w1/w2 share "fra3_w", so a per-label
+    // retention silently leaves TWO of the eight kinds with no preimage and
+    // the coverage counter reads 6/8 for a reason that has nothing to do with
+    // the protocol.  (MEASURED: that is exactly what the first attempt did.)
     const auto draw = [&](const char* label, uint32_t index) {
         std::vector<unsigned char> preimage = buf;
         const size_t n = std::strlen(label);
@@ -4646,6 +4927,7 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
         d.sha_compressions = FsShaCompressions(preimage.size());
         d.digest = FsSha256d(preimage);
         d.value = gf::FromChallengeBytes3(d.digest.data());
+        d.preimage = std::move(preimage);
         return d;
     };
 
@@ -4694,10 +4976,16 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
         FsAppendFp3(buf, b.z1);
         FsAppendFp3(buf, b.z2);
     }
-    // ---- the two OOD evaluation vectors.  THIS is the 48*W term.
-    for (uint32_t i = 0; i < out.child_w; ++i) {
-        FsAppendFp3(buf, b.evals_z1[i]);
-        FsAppendFp3(buf, b.evals_z2[i]);
+    // ---- the two OOD evaluation vectors.  THIS is the 48*W term, and under
+    // the activated short-transcript lane it is 32 bytes instead.
+    if (kRCFri3AlgActiveShortTranscript) {
+        FsAppendAlgRoot(buf, Fri3AlgOodEvalCommit(b.z1, b.z2, b.evals_z1,
+                                                  b.evals_z2));
+    } else {
+        for (uint32_t i = 0; i < out.child_w; ++i) {
+            FsAppendFp3(buf, b.evals_z1[i]);
+            FsAppendFp3(buf, b.evals_z2[i]);
+        }
     }
     // ---- fra3_w.
     {
@@ -4745,11 +5033,31 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
             {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
         // tag(14) | seed(32) | LE32 len | label(11) | LE32 nroots | root(32)
         // | LE32 nextra | 3 x LE32 = 113 bytes (MEASURED at 3 compressions).
+        // The companion builder assembles these bytes itself, so this draw
+        // carries no `preimage` and the assessor routes it to the dedicated
+        // BuildChildAirChallengeShaReplayV1 front end instead.
         d.preimage_bytes = 14 + 32 + 4 + 11 + 4 + 32 + 4 + 12;
         d.sha_compressions = FsShaCompressions(d.preimage_bytes);
         d.value = gf::FromChallengeBytes3(d.digest.data());
         d.matches_protocol = gf::Eq(d.value, pi.air_lambda);
         out.draws.push_back(d);
+    }
+
+    // Prune retained preimages to the first ACCEPTED draw of each kind.  Only
+    // these are used to build a companion CS; keeping all of them is pure
+    // footprint (192 fra3_query draws alone).
+    {
+        std::array<bool, kChildFsChallengeKindCountV1> kept{};
+        for (auto& d : out.draws) {
+            const uint32_t k = static_cast<uint32_t>(d.kind);
+            if (!d.ood_rejected && k < kChildFsChallengeKindCountV1 &&
+                !kept[k]) {
+                kept[k] = true;
+                continue;
+            }
+            d.preimage.clear();
+            d.preimage.shrink_to_fit();
+        }
     }
 
     out.all_kinds_match = true;
@@ -4891,6 +5199,42 @@ AssessChildFsChallengeDecoderCoverageV1()
             uint64_t sched = 1;
             while (sched < comps) sched <<= 1;
             out.companion_sha_rows[k] = sched * 1024;
+
+            // PR-89 g4 ACTIVATION.  BUILD the companion, do not cost it.
+            // The preimage bytes come from probe b's replay, which
+            // cross-checked every re-derived value against the proof, so a
+            // companion that binds them binds the real transcript draw.
+            const ChildFsChallengeDrawV1* first = nullptr;
+            for (const auto& d : b.replay.draws) {
+                if (static_cast<uint32_t>(d.kind) != k) continue;
+                if (d.ood_rejected) continue;
+                first = &d;
+                break;
+            }
+            if (first == nullptr) continue;
+            ChildAirChallengeShaReplayV1 companion;
+            if (k == static_cast<uint32_t>(
+                         ChildFsChallengeKindV1::AirqLambda)) {
+                // airq_lambda is not drawn off the FRI transcript; its
+                // preimage is assembled by its own front end.
+                companion = BuildChildAirChallengeShaReplayV1(
+                    seed, b.proved.proof.trace_commit, b.pi.child_n_rows,
+                    b.pi.child_quotient_len, b.pi.child_w, b.pi.air_lambda);
+            } else if (!first->preimage.empty()) {
+                companion = BuildChildFsChallengeShaReplayFromPreimageV1(
+                    first->preimage, first->digest, first->value, seed);
+            } else {
+                continue;
+            }
+            out.companion_cs_built[k] =
+                companion.valid &&
+                companion.witness_violations == 0 &&
+                companion.sha_output_binds_digest_bytes &&
+                companion.challenge_bound_to_consumed &&
+                companion.digest == first->digest;
+            out.companion_cs_columns[k] = companion.sha_columns;
+            out.companion_cs_rows[k] = companion.cs.n_rows;
+            if (out.companion_cs_built[k]) ++out.kinds_companion_built;
         }
 
         // The decoder table itself is built on probe A (the toy child shape the
@@ -5021,10 +5365,18 @@ AssessChildFsChallengeDecoderCoverageV1()
             // airq_lambda one": a kind's transcript bytes can be owned in-AIR
             // only if its preimage does not grow with the child's width and its
             // companion vertical SHA schedule fits one constraint system.
+            // THREE conjuncts, not two.  The first two are AFFORDABILITY;
+            // the third is the companion CS existing, being satisfied, and
+            // binding its output to the consumed scalar.  Activating the
+            // short-transcript lane makes the first two true for all eight
+            // kinds at once -- which is exactly why the third had to be added
+            // in the SAME change, or the counter would have jumped 1 -> 8 on
+            // a cost model.
             out.transcript_bound_in_air[k] =
                 out.preimage_width_independent[k] &&
                 out.companion_sha_rows[k] != 0 &&
-                out.companion_sha_rows[k] <= kAffordableCompanionShaRowsV1;
+                out.companion_sha_rows[k] <= kAffordableCompanionShaRowsV1 &&
+                out.companion_cs_built[k];
             if (out.decoded_in_air[k]) ++out.kinds_decoded;
             if (out.transcript_replayed[k]) ++out.kinds_replayed;
             if (out.transcript_bound_in_air[k]) {
@@ -5035,7 +5387,9 @@ AssessChildFsChallengeDecoderCoverageV1()
         out.note = "stage3:g4_coverage:decoded_" +
                    std::to_string(out.kinds_decoded) + "of8_replayed_" +
                    std::to_string(out.kinds_replayed) + "of8_bound_" +
-                   std::to_string(out.kinds_transcript_bound) + "of8";
+                   std::to_string(out.kinds_transcript_bound) + "of8_" +
+                   "companion_" +
+                   std::to_string(out.kinds_companion_built) + "of8";
         return out;
     }();
     return cached;
@@ -5211,13 +5565,53 @@ AssessChildFsReplayClosureV1()
     //    instance therefore cannot discharge this conjunct; it would re-earn a
     //    flag we already have.
     //
-    // MEASURED FLOOR: 58.6 s, of which 41.1 s is one Split-RAP prove over a
-    // 591-column x 4096-row CS.  That shape is pinned, not tunable here:
-    // hash_air fixes lane_rows = 1024 and the vertical schedule is
+    // MEASURED FLOOR ON THE SHIPPED (SHA256d) ROUTE: 58.6 s, of which 41.1 s is
+    // one Split-RAP prove over a 591-column x 4096-row CS.  That shape is
+    // pinned: hash_air fixes lane_rows = 1024 and the vertical schedule is
     // next_pow2(3 compressions) = 4, so 4096 rows is the minimum for ANY
     // SHA256d replay, and 541 base columns is the fixed program's own width.
-    // Getting below it needs airq_lambda's derivation to stop being SHA256d --
-    // a consensus change in air_quotient.cpp, not this lane's.
+    //
+    // AND THE FLOOR DOES MOVE, once airq_lambda stops being SHA256d.
+    // BuildChildAirChallengeP2ReplayV1 replays the Poseidon2 route
+    // (aq::AirChallengeDigestP2) instead, at ONE ROW PER PERMUTATION.  MEASURED
+    // back to back in one process by the profile test above:
+    //
+    //                    build      prove     verify     total
+    //   SHA companion   16.114 s   41.458 s   0.740 s   58.312 s  (591 x 4096)
+    //   P2  companion    0.110 s    4.032 s   0.344 s    4.486 s  (497 x 1024)
+    //   speedup          147.0x     10.3x                 13.0x
+    //
+    // Better than the 24.6 s upper bound / ~8.4 s optimistic case projected for
+    // it, because BOTH halves collapsed: the CS build by 147x (no 4096-row
+    // vertical witness to materialize) and the prove by 10.3x.  Two structural
+    // reasons, not one -- 4096 rows -> 5 semantic rows, and the 24 digest-BYTE
+    // columns plus their recompose lanes vanish entirely, because
+    // AirChallengeDigestP2's output lanes are canonical and ARE the challenge
+    // limbs.  502 constraints at max algebraic degree 2, against the SHA
+    // companion's 992.
+    //
+    // THREE THINGS THAT NUMBER IS NOT, stated so it is not over-read:
+    //  (1) aq::kAirChallengeP2Activated is FALSE.  Every shipped proof still
+    //      derives airq_lambda by SHA256d, so the producer endpoint AS IT
+    //      EXISTS TODAY still costs 58.3 s.  4.5 s is what it would cost after
+    //      a consensus decision this lane cannot take.
+    //  (2) The P2 figure does NOT include the g4 bus lane; the SHA figure does
+    //      (its prove is over the bus-augmented 591 columns, the build over
+    //      541).  The lane is +50 columns at unchanged rows -- ~10% of either
+    //      width -- so the ratio survives, but the two totals are not measured
+    //      over identical objects.
+    //  (3) There is a real INTERFACE MISMATCH to resolve before it can be:
+    //      AppendChildFsDigestBusLaneV1 binds a 24-BYTE window, and the P2
+    //      companion deliberately has no byte columns.  It needs a lane-mode
+    //      variant binding the 3 canonical limb cells, OR the companion must
+    //      re-add byte decomposition -- which would give back much of win (2),
+    //      since honest byte columns need 192 booleans plus recompose.  The
+    //      lane-mode variant is the right shape and is the next piece of work.
+    //
+    // So the answer to "can the endpoint be made recomputable" is: NOT on the
+    // shipped SHA route, where the measured floor is 58.3 s; YES to within 4.5 s
+    // on the Poseidon2 route, which is built, verifying and measured here but
+    // NOT ACTIVATED.
     //
     // WHY A PROCESS-LIFETIME MEMO DOES NOT RESCUE IT.  This ledger is
     // tooling/test-only today: every route from AssessRCStage3RecursiveReadiness
@@ -5227,14 +5621,18 @@ AssessChildFsReplayClosureV1()
     // not emitted; mainnet/testnet nMatMulRCHeight is INT32_MAX and hard-
     // asserted on mainnet.  So a memo would be ARCHITECTURALLY acceptable --
     // computed, no artifact, no cross-version staleness.  It fails on COST, not
-    // principle: memoized or not, the first reader in each process pays 58.6 s,
-    // and matmul_v4_rc_stage3_recursive_tests -- the mandatory 18/18 gate --
-    // reads this ledger.  The path is confirmed from the call graph, not
-    // guessed: recursive_tests.cpp:284 -> AssessRCStage3RecursiveReadiness ->
-    // recursive.cpp:1114 -> AssessExecutableGlobalSoundnessLedgerV1 -> here.
-    // That gate is MEASURED at 2.61 s wall uncontended (4.43 s under this
-    // box's three-lane load).  COMPUTED, not measured: 2.6 + 58.6 = ~61 s,
-    // a ~23x regression on the one gate that has to stay fast.
+    // principle: memoized or not, the first reader in each process pays the
+    // endpoint cost, and matmul_v4_rc_stage3_recursive_tests -- the mandatory
+    // 18/18 gate -- reads this ledger.  The path is confirmed from the call
+    // graph, not guessed: recursive_tests.cpp:284 ->
+    // AssessRCStage3RecursiveReadiness -> recursive.cpp:1114 ->
+    // AssessExecutableGlobalSoundnessLedgerV1 -> here.  That gate is MEASURED
+    // at 2.61 s wall uncontended (4.43 s under this box's three-lane load).
+    //   on the SHA route:  2.6 + 58.3 = ~61 s   -> ~23x, disqualifying
+    //   on the P2  route:  2.6 +  4.5 = ~7.1 s  -> ~2.7x
+    // (both COMPUTED from the measured parts, not measured end to end).  The P2
+    // figure is a judgement call for the project owner rather than an obvious
+    // no, and it is the first version of this question worth actually asking.
     // (Recorded because it is a real hazard rather than a hypothetical: regtest
     // sets nMatMulRCHeight = 101, so on regtest the HEIGHT gate does not
     // protect anything and the compile-time constant is the only barrier.)

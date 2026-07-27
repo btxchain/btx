@@ -8342,7 +8342,7 @@ bool BuildNormalizedDeepSitesV1(
         static_cast<uint32_t>(
             batch.queries.size());
     if (batch.version !=
-            kRCFri3AlgBatchProofVersion ||
+            kRCFri3AlgActiveBatchProofVersion ||
         width == 0 ||
         queries == 0 ||
         batch.evals_z1.size() != width ||

@@ -223,6 +223,12 @@ enum class FiatShamirEventKind : uint8_t {
     ChallengeZ2 = 5,
     AbsorbZ1Z2 = 6,
     AbsorbOodEvaluationPair = 7,
+    /** PR-89 g4 ACTIVATION.  Under the short-transcript lane the 48*W bytes of
+     *  verbatim OOD-evaluation absorption are replaced by ONE 32-byte
+     *  Poseidon2 commitment (Fri3AlgOodEvalCommit).  A distinct kind, not a
+     *  re-indexed AbsorbOodEvaluationPair: the two absorb DIFFERENT bytes and
+     *  a program that confuses them would replay a different transcript. */
+    AbsorbOodEvalCommitment = 15,
     ChallengeW1 = 8,
     ChallengeW2 = 9,
     AbsorbW1W2 = 10,
@@ -467,6 +473,17 @@ enum class FiatShamirShaByteOriginKindV1 : uint8_t {
     // Distinct from PublicSeed: the 32 seed bytes are not caller-arbitrary but
     // bound by equality to the parent's binding of the child statement.
     ParentBindingDigest = 4,
+    // PR-89 g4 ACTIVATION.  A transcript byte that is NOT a verbatim slice of
+    // the child's serialized batch proof but a lane of a Poseidon2 commitment
+    // OVER a region of it (Fri3AlgShapeCommit / Fri3AlgOodEvalCommit).
+    //
+    // This kind exists because short-FS BREAKS the invariant the other four
+    // kinds encode -- "every absorbed byte is a constant, the seed, or a byte
+    // the child shipped".  Discharging it needs an in-AIR Poseidon2 sponge
+    // over the named region; a SHA-only companion CANNOT own these bytes.
+    // Recording them as Constant or BatchCodec would be a LIE that type-checks.
+    AlgebraicShapeCommitment = 5,
+    AlgebraicOodEvalCommitment = 6,
 };
 
 struct FiatShamirShaByteOriginV1 {

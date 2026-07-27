@@ -90,6 +90,61 @@ inline constexpr uint32_t kRCFri3AlgBatchProofMagic = 0x33414246u; // 'FBA3'
 inline constexpr uint32_t kRCFri3AlgBatchProofVersion = 3;
 inline constexpr char kRCFri3AlgBatchDomainTag[] = "BTX_RC_FRIB3ALG_Q192_V3";
 
+/** Lane proof version for the short-transcript Q192 lane. Distinct from 3
+ *  (Q192 V3), 5 (dual V5 lane) and 6 (dual Q136 lane); a proof of one version
+ *  is rejected by every other lane's verifier at the version check. */
+inline constexpr uint32_t kRCFri3AlgShortFsLaneProofVersion = 7;
+inline constexpr char kRCFri3AlgShortFsDomainTag[] =
+    "BTX_RC_FRIB3ALG_Q192_SHORTFS_V7";
+
+// ===========================================================================
+// PR-89 g4 ACTIVATION.  The short-transcript lane is the lane the Q192
+// recursion now PRODUCES and CONSUMES.  Everything the flip changes is derived
+// from this ONE constant, so the protocol and every in-AIR / shadow replay of
+// it move together or not at all.  There is exactly one place to look to know
+// which layout is live.
+//
+// WHAT THE FLIP DOES NOT DO, recorded here because each is easy to over-read:
+//   * The CHALLENGE FUNCTION IS STILL SHA256d.  Fri3AlgFs is a byte-buffer
+//     SHA256d transcript and stays one; short-FS replaces two ABSORBED bodies
+//     with Poseidon2 commitments -- it does not move the squeeze.  A parent
+//     replaying a child challenge in-AIR still replays SHA256d, over 151..591
+//     bytes instead of >= 52*W.  That is the whole saving, and it is not the
+//     same claim as "the transcript is Poseidon2".
+//   * It does NOT change the query-index RULE.  ProtocolChallengeIndex's
+//     non-uniform branch is untouched, so every in-AIR index chip and every
+//     shadow of that rule stays valid WITHOUT EDIT.  Moving the index rule to
+//     the ALGEBRAIC (sigma_core) form is Construction 2, a SEPARATE change.
+//   * It does NOT create individual-claim binding.  That is an ORDERING
+//     property (roots -> alpha -> z -> claims) and
+//     AuditFri3AlgAdaptiveEvaluationOrder still hard-codes
+//     legacy_order_individual_eval_binding = false.
+// ===========================================================================
+inline constexpr bool kRCFri3AlgShortFsActivatedV1 = true;
+
+/** The proof version / domain tag the Q192 recursion lane actually produces.
+ *  Every version gate, every shadow parser and every in-AIR transcript model
+ *  MUST read these rather than kRCFri3AlgBatchProofVersion, or the parent
+ *  computes different challenges than the child and recursion breaks
+ *  SILENTLY. */
+inline constexpr uint32_t kRCFri3AlgActiveBatchProofVersion =
+    kRCFri3AlgShortFsActivatedV1 ? kRCFri3AlgShortFsLaneProofVersion
+                                 : kRCFri3AlgBatchProofVersion;
+inline constexpr const char* kRCFri3AlgActiveBatchDomainTag =
+    kRCFri3AlgShortFsActivatedV1 ? kRCFri3AlgShortFsDomainTag
+                                 : kRCFri3AlgBatchDomainTag;
+/** The two tags have DIFFERENT lengths (23 vs 31) and several transcript
+ *  models size their preamble with sizeof(tag)-1.  Reading this instead is
+ *  what keeps those models byte-exact across the flip. */
+inline constexpr uint32_t kRCFri3AlgActiveBatchDomainTagLen =
+    kRCFri3AlgShortFsActivatedV1
+        ? static_cast<uint32_t>(sizeof(kRCFri3AlgShortFsDomainTag) - 1)
+        : static_cast<uint32_t>(sizeof(kRCFri3AlgBatchDomainTag) - 1);
+/** True iff the live Q192 lane absorbs the SHAPE and OOD-EVAL commitments in
+ *  place of the 4*W and 48*W verbatim bodies. */
+inline constexpr bool kRCFri3AlgActiveShortTranscript =
+    kRCFri3AlgShortFsActivatedV1;
+
 /** Stage-3 recursion query count: Q=192 supports a 2^28-site union budget. */
 inline constexpr uint32_t kRCFri3AlgNumQueries = 192;
 /** Path-local hard cap (DoS bound for deserialization/verify) — the shared
@@ -604,7 +659,7 @@ struct Fri3AlgBatchQuery {
  *  in meaning (lambda, z1, z2, evals_z1/z2, w1, w2, fold layers, final_value,
  *  fold_challenges, pow_grind_nonce, n_coeffs, blowup). */
 struct Fri3AlgBatchProof {
-    uint32_t version{kRCFri3AlgBatchProofVersion};
+    uint32_t version{kRCFri3AlgActiveBatchProofVersion};
     uint64_t pow_grind_nonce{0};
     uint32_t blowup{kRCFriBlowup};
     /** Common padded column length N (power of two); LDE domain = N·blowup. */
@@ -1467,12 +1522,10 @@ static_assert(kRCFri3AlgTaxedQGrindBits <= kRCFri3AlgMaxGrindableBits,
 // (matmul_v4_rc_fri_ext3_alg_order_audit.h:16-35).
 // ===========================================================================
 
-/** Lane proof version for the short-transcript Q192 lane. Distinct from 3
- *  (Q192 V3), 5 (dual V5 lane) and 6 (dual Q136 lane); a proof of one version
- *  is rejected by every other lane's verifier at the version check. */
-inline constexpr uint32_t kRCFri3AlgShortFsLaneProofVersion = 7;
-inline constexpr char kRCFri3AlgShortFsDomainTag[] =
-    "BTX_RC_FRIB3ALG_Q192_SHORTFS_V7";
+// kRCFri3AlgShortFsLaneProofVersion / kRCFri3AlgShortFsDomainTag and the
+// kRCFri3AlgActive* selectors are declared at the TOP of this header, beside
+// kRCFri3AlgBatchProofVersion, because Fri3AlgBatchProof's default member
+// initializer and several early shape helpers need them.
 
 /** Poseidon2 domain separators (ASCII, LE-packed) for the new preimages.
  *  Each enters SpongeHashFp as TWO 32-bit lanes via the same
@@ -1616,6 +1669,22 @@ struct Fri3AlgTranscriptReplayCostV1 {
 [[nodiscard]] Fri3AlgTranscriptReplayCostV1
 MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
 
+/** LEGACY V3 lane commit/verify, exported ONLY so the A/B that isolates the
+ *  transcript layout still has a producer after activation.
+ *
+ *  Before activation the A/B was Fri3AlgBatchCommit (V3) vs
+ *  Fri3AlgShortFsBatchCommit (V7).  Activation makes Fri3AlgBatchCommit the V7
+ *  lane, which would have left the V3 arm of that comparison with no producer
+ *  at all -- i.e. the evidence that the two layouts are distinguishable would
+ *  have quietly stopped being computed.  Nothing on any consensus path selects
+ *  these; they exist so the comparison keeps being MEASURED. */
+[[nodiscard]] Fri3AlgBatchCommitResult Fri3AlgLegacyV3BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+[[nodiscard]] bool Fri3AlgLegacyV3BatchVerify(
+    const Fri3AlgBatchProof& proof, const uint256& fs_seed,
+    std::string* why = nullptr);
+
 /** Short-transcript lane commit/verify. Same statement, same Q=192, same
  *  proximity guard; only the FS preimage layout and the version/tag move. */
 [[nodiscard]] Fri3AlgBatchCommitResult Fri3AlgShortFsBatchCommit(
@@ -1628,10 +1697,6 @@ MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
 /** Built, executable and measurable; consumed by NO consensus path. Mirrors
  *  the kAlgebraicQueryIndexActivatedV1 precedent in fs_selection_air. */
 inline constexpr bool kRCFri3AlgShortFsExecutableV1 = true;
-inline constexpr bool kRCFri3AlgShortFsActivatedV1 = false;
-static_assert(!kRCFri3AlgShortFsActivatedV1,
-              "the short-transcript lane is not on any consensus path: it "
-              "carries its own version/tag and no producer selects it");
 static_assert(kRCFri3AlgShortFsLaneProofVersion != kRCFri3AlgBatchProofVersion &&
                   kRCFri3AlgShortFsLaneProofVersion !=
                       kRCFri3AlgDualLaneProofVersion &&

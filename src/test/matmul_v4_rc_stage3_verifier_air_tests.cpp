@@ -57,7 +57,8 @@ va::AlgAirProof ToyProof(const nr::NarrowChildShape& shape)
 {
     va::AlgAirProof proof;
     auto& batch = proof.batch;
-    batch.version = rc::kRCFri3AlgBatchProofVersion;
+    // PR-89 g4 ACTIVATION: follow the live lane version.
+    batch.version = rc::kRCFri3AlgActiveBatchProofVersion;
     batch.blowup = rc::kRCFriBlowup;
     batch.n_coeffs = shape.child_n_coeffs;
     batch.row_commit.root = Digest(10);
@@ -275,8 +276,21 @@ BOOST_AUTO_TEST_CASE(production_q192_schedule_matches_fixed_point_planner)
     const uint64_t naive_parallel_rows =
         non_fs_rows_per_child +
         fs_program.minimum_sha256_compression_blocks;
-    BOOST_CHECK_GT(naive_vertical_rows, uint64_t{1} << 19);
+    // PR-89 g4 ACTIVATION MOVED THIS NUMBER, and the check is rewritten to
+    // the measured post-activation value rather than loosened.
+    //
+    // The old lower bound (> 2^19) was asserting that a naive vertical SHA
+    // replay of the child transcript does NOT fit the parent -- the problem
+    // statement.  Activating the short-transcript lane removes the 4*W and
+    // 48*W bodies from every challenge preimage, so at this shape the naive
+    // vertical cost is now 422,136 rows, BELOW 2^19.  Asserting the old bound
+    // would now be asserting that the saving did not happen.
+    //
+    // What still has to hold, and is what this test is for: the naive vertical
+    // schedule is still the EXPENSIVE arrangement -- strictly worse than the
+    // parallel one -- and still inside the 2^20 envelope.
     BOOST_CHECK_LE(naive_vertical_rows, uint64_t{1} << 20);
+    BOOST_CHECK_GT(naive_vertical_rows, naive_parallel_rows);
     BOOST_CHECK_LE(naive_parallel_rows, uint64_t{1} << 19);
 
     nr::NarrowVcsConfig parallel_config;
@@ -454,7 +468,29 @@ BOOST_AUTO_TEST_CASE(fiat_shamir_manifest_is_exact_and_exposes_row_underbudget)
     const va::FiatShamirProgram program =
         va::BuildCanonicalFiatShamirProgram(shape);
     BOOST_REQUIRE_MESSAGE(program.valid, program.note);
-    BOOST_CHECK_EQUAL(program.events.size(), 16U);
+    // PR-89 g4 ACTIVATION: the (child_w + 1) per-column
+    // AbsorbOodEvaluationPair events collapse to ONE
+    // AbsorbOodEvalCommitment event, so the canonical event count drops by
+    // child_w.  Written as a formula, not a magic number, so it stays
+    // meaningful at other shapes.
+    BOOST_CHECK(rc::kRCFri3AlgShortFsActivatedV1);
+    BOOST_CHECK_EQUAL(program.events.size(), 16U - shape.child_w);
+    BOOST_CHECK_EQUAL(
+        std::count_if(
+            program.events.begin(), program.events.end(),
+            [](const va::FiatShamirEventSpec& e) {
+                return e.kind ==
+                       va::FiatShamirEventKind::AbsorbOodEvalCommitment;
+            }),
+        1);
+    BOOST_CHECK_EQUAL(
+        std::count_if(
+            program.events.begin(), program.events.end(),
+            [](const va::FiatShamirEventSpec& e) {
+                return e.kind ==
+                       va::FiatShamirEventKind::AbsorbOodEvaluationPair;
+            }),
+        0);
     BOOST_CHECK_EQUAL(
         program.scheduled_rows, nr::FiatShamirReplayRows(shape));
     BOOST_CHECK_GT(program.minimum_sha256_compression_blocks,
@@ -534,7 +570,9 @@ BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
     BOOST_REQUIRE(v3.valid);
     BOOST_CHECK_EQUAL(v3.ood_candidates, 0U);
     BOOST_CHECK(!v3.rejection_loop_bounded);
-    BOOST_CHECK_EQUAL(v3.events.size(), 16U);
+    // See fiat_shamir_manifest_is_exact_...: one commitment event replaces the
+    // (child_w + 1) per-column absorbs after activation.
+    BOOST_CHECK_EQUAL(v3.events.size(), 16U - shape.child_w);
 
     const va::FiatShamirProgram bounded =
         va::BuildBoundedFiatShamirProgram(shape, 2);

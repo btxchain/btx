@@ -710,6 +710,34 @@ constexpr Fri3AlgProtocolConfig kFri3AlgQ192ShortFsV7Config{
     true,
 };
 
+// PR-89 g4 ACTIVATION.  The ONE selector every Q192 producer and consumer in
+// this file reads.  Held as a constexpr object rather than a reference so the
+// version/tag/short-transcript members cannot drift apart from
+// kRCFri3AlgActiveBatchProofVersion.
+constexpr Fri3AlgProtocolConfig kFri3AlgQ192ActiveConfig =
+    kRCFri3AlgShortFsActivatedV1 ? kFri3AlgQ192ShortFsV7Config
+                                 : kFri3AlgQ192V3Config;
+static_assert(kFri3AlgQ192ActiveConfig.proof_version ==
+                  kRCFri3AlgActiveBatchProofVersion,
+              "the active config and the active version constant must agree");
+static_assert(kFri3AlgQ192ActiveConfig.short_transcript_commitments ==
+                  kRCFri3AlgActiveShortTranscript,
+              "the active config and the active layout flag must agree");
+static_assert(kFri3AlgQ192ActiveConfig.query_count == kRCFri3AlgNumQueries,
+              "activation must not move Q");
+static_assert(kFri3AlgQ192ActiveConfig.require_q192_proximity_guard,
+              "activation must not drop the Q192 proximity guard");
+static_assert(kFri3AlgQ192ActiveConfig.uniform_challenges ==
+                  kFri3AlgQ192V3Config.uniform_challenges &&
+                  kFri3AlgQ192ActiveConfig.independent_batching_coefficients ==
+                      kFri3AlgQ192V3Config.independent_batching_coefficients &&
+                  kFri3AlgQ192ActiveConfig.alg_hash_lane ==
+                      kFri3AlgQ192V3Config.alg_hash_lane &&
+                  kFri3AlgQ192ActiveConfig.ood_candidates ==
+                      kFri3AlgQ192V3Config.ood_candidates,
+              "activation moves the TRANSCRIPT LAYOUT and nothing else: every "
+              "other soundness-bearing parameter must equal the V3 lane's");
+
 constexpr Fri3AlgProtocolConfig kFri3AlgDualLane0Config{
     kRCFri3AlgDualLaneProofVersion,
     kRCFri3AlgDualLane0DomainTag,
@@ -2254,7 +2282,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommit(const std::vector<std::vector<Fp3>>&
                                             const uint256& fs_seed, uint64_t pow_grind_nonce)
 {
     return Fri3AlgBatchCommitConfigured(columns, fs_seed, pow_grind_nonce,
-                                        kFri3AlgQ192V3Config);
+                                        kFri3AlgQ192ActiveConfig);
 }
 
 Fri3AlgBatchCommitResult Fri3AlgBatchCommitStreamingShared(
@@ -2264,7 +2292,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitStreamingShared(
 {
     return Fri3AlgBatchCommitConfigured(
         columns, fs_seed, pow_grind_nonce,
-        kFri3AlgQ192V3Config,
+        kFri3AlgQ192ActiveConfig,
         /*stream_column_lde=*/true);
 }
 
@@ -2359,7 +2387,7 @@ Fri3AlgBatchCommitStreamingSharedCached(
     Fri3AlgBatchCommitResult out =
         Fri3AlgBatchCommitConfigured(
             columns, fs_seed, pow_grind_nonce,
-            kFri3AlgQ192V3Config,
+            kFri3AlgQ192ActiveConfig,
             /*stream_column_lde=*/true,
             /*reused_row_tree=*/nullptr,
             &built);
@@ -2831,7 +2859,23 @@ bool Fri3AlgBatchVerifyConfigured(const Fri3AlgBatchProof& proof, const uint256&
 
 bool Fri3AlgBatchVerify(const Fri3AlgBatchProof& proof, const uint256& fs_seed, std::string* why)
 {
-    return Fri3AlgBatchVerifyConfigured(proof, fs_seed, kFri3AlgQ192V3Config, why);
+    return Fri3AlgBatchVerifyConfigured(proof, fs_seed, kFri3AlgQ192ActiveConfig,
+                                        why);
+}
+
+Fri3AlgBatchCommitResult Fri3AlgLegacyV3BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3AlgBatchCommitConfigured(columns, fs_seed, pow_grind_nonce,
+                                        kFri3AlgQ192V3Config);
+}
+
+bool Fri3AlgLegacyV3BatchVerify(const Fri3AlgBatchProof& proof,
+                                const uint256& fs_seed, std::string* why)
+{
+    return Fri3AlgBatchVerifyConfigured(proof, fs_seed, kFri3AlgQ192V3Config,
+                                        why);
 }
 
 Fri3AlgBatchCommitResult Fri3AlgShortFsBatchCommit(
@@ -2854,7 +2898,7 @@ bool Fri3AlgShortFsBatchVerify(const Fri3AlgBatchProof& proof,
 
 bool Fri3AlgQ192IndependentBatching()
 {
-    return kFri3AlgQ192V3Config.independent_batching_coefficients;
+    return kFri3AlgQ192ActiveConfig.independent_batching_coefficients;
 }
 
 bool Fri3AlgReplayBatchCoefficients(const Fri3AlgBatchProof& proof,
@@ -2862,7 +2906,7 @@ bool Fri3AlgReplayBatchCoefficients(const Fri3AlgBatchProof& proof,
                                     std::vector<Fp3>& out_coefficients)
 {
     out_coefficients.clear();
-    if (proof.version != kFri3AlgQ192V3Config.proof_version) return false;
+    if (proof.version != kFri3AlgQ192ActiveConfig.proof_version) return false;
     const uint32_t n = proof.n_coeffs;
     if (n == 0 || (n & (n - 1)) != 0) return false;
     const uint32_t W = static_cast<uint32_t>(proof.column_len.size());
@@ -2877,9 +2921,10 @@ bool Fri3AlgReplayBatchCoefficients(const Fri3AlgBatchProof& proof,
     // lengths, then replay ProtocolBatchCoefficients under the Q192 config.
     Fri3AlgFs fs = Fri3AlgBatchFsInit(fs_seed, proof.pow_grind_nonce, n,
                                       proof.row_commit, proof.column_len,
-                                      kFri3AlgQ192V3Config);
+                                      kFri3AlgQ192ActiveConfig);
     Fp3 encoded_first_or_lambda{};
-    if (!ProtocolBatchCoefficients(fs, kFri3AlgQ192V3Config, W, out_coefficients,
+    if (!ProtocolBatchCoefficients(fs, kFri3AlgQ192ActiveConfig, W,
+                                   out_coefficients,
                                    encoded_first_or_lambda)) {
         out_coefficients.clear();
         return false;
@@ -4795,7 +4840,7 @@ std::optional<Fri3AlgBatchProof> DeserializeFri3AlgBatchProof(
     const std::vector<unsigned char>& in)
 {
     return DeserializeFri3AlgBatchProofConfigured(
-        in, kRCFri3AlgBatchProofVersion, kRCFri3AlgMaxQueriesHard,
+        in, kRCFri3AlgActiveBatchProofVersion, kRCFri3AlgMaxQueriesHard,
         /*require_canonical_fp3=*/false);
 }
 

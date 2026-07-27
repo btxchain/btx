@@ -390,7 +390,7 @@ bool ReadAlgBatchProof(Reader& reader, Fri3AlgBatchProof& proof)
     uint32_t magic{0};
     if (!nested.U32(magic) || magic != kRCFri3AlgBatchProofMagic ||
         !nested.U32(proof.version) ||
-        proof.version != kRCFri3AlgBatchProofVersion ||
+        proof.version != kRCFri3AlgActiveBatchProofVersion ||
         !nested.U64(proof.pow_grind_nonce) || !nested.U32(proof.blowup) ||
         !nested.U32(proof.n_coeffs) || !nested.Digest(proof.row_commit.root) ||
         !nested.U32(proof.row_commit.n_leaves) ||
@@ -456,7 +456,7 @@ bool ValidateAirProofStructure(const AirProof& proof, std::string* why)
 {
     const auto& batch = proof.batch;
     const size_t columns = batch.column_len.size();
-    if (batch.version != kRCFri3AlgBatchProofVersion ||
+    if (batch.version != kRCFri3AlgActiveBatchProofVersion ||
         batch.blowup != kRCFriBlowup || !IsPowerOfTwo(batch.n_coeffs) ||
         batch.n_coeffs > kRCFriMaxCoeffsHard || columns == 0 ||
         columns > kRCFri3AlgBatchMaxColumns) {

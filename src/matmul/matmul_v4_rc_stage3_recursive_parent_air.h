@@ -747,6 +747,30 @@ BuildChildAirChallengeShaReplayV1(
     const gf::Fp3& consumed_air_lambda);
 
 /**
+ * PR-89 g4 ACTIVATION.  The SAME companion construction over an ARBITRARY
+ * self-contained preimage.
+ *
+ * BuildChildAirChallengeShaReplayV1 is now a thin front end over this: it
+ * assembles airq_lambda's 113 bytes and calls here.  Nothing about the SHA
+ * manifest, the boundary instances, the digest-byte binding or the
+ * challenge-limb reconstruction was airq_lambda-specific; only the preimage
+ * was, and before the short-transcript lane was activated no OTHER kind had a
+ * preimage short enough to assemble.
+ *
+ * `consumed_challenge` is the scalar the in-parent verifier consumes for this
+ * draw, so `challenge_bound_to_consumed` means the same thing here as there.
+ * For a kind whose consumed object is an INDEX rather than an Fp3 (fra3_query)
+ * pass the draw's Fp3 value: the index is a constrained function of it, decoded
+ * by the challenge table, and binding the Fp3 is the stronger of the two.
+ */
+[[nodiscard]] ChildAirChallengeShaReplayV1
+BuildChildFsChallengeShaReplayFromPreimageV1(
+    const std::vector<unsigned char>& preimage,
+    const uint256& expected_digest,
+    const gf::Fp3& consumed_challenge,
+    const uint256& child_fs_seed);
+
+/**
  * g4 two-table CTL boundary: the parent decoder's 24 airq_lambda digest bytes
  * are bound to the companion SHA CS's output bytes, IN parent verification.
  *
@@ -856,6 +880,102 @@ VerifyChildFsShaBoundV1(
  * `g4_digest_bus_lane_verifier_side_reconstruction_pins_the_terminal`.
  */
 /**
+ * PR-89 g4: the POSEIDON2 companion CS -- the replacement for the vertical
+ * SHA256d replay that owns 57.3 s of the 58.6 s producer-endpoint floor.
+ *
+ * WHY THIS IS THE LEVER.  The endpoint cost was PROFILED (see
+ * AssessChildFsReplayClosureV1) at 16.166 s of companion-CS build plus
+ * 41.149 s of Split-RAP prove over a 591 x 4096 CS.  Both halves are driven by
+ * hash_air's vertical schedule, which charges 1024 rows PER COMPRESSION; the
+ * airq_lambda preimage is 3 compressions, so next_pow2(3) * 1024 = 4096 rows is
+ * that chip's floor and no transcript change can move it.  The Poseidon2 route
+ * charges ONE ROW PER PERMUTATION and the same preimage is 5 permutations.
+ *
+ * TWO STRUCTURAL WINS, not one:
+ *
+ *  (1) ROWS.  4096 -> 5 semantic rows.  The table is still padded to a
+ *      query-sound height (see below), but the work per row is one permutation
+ *      instead of a 1024-row lane.
+ *
+ *  (2) THE DECODE DISAPPEARS.  The SHA companion must pin 24 digest-BYTE
+ *      columns and recompose three 64-bit words from them.  AirChallengeDigestP2
+ *      packs four CANONICAL Goldilocks lanes little-endian into the uint256, so
+ *      bytes[0..8) is exactly lane0 and FromChallengeBytes3's `w0 % p` is the
+ *      identity on it.  The challenge limbs ARE output lanes 0,1,2 -- three
+ *      degree-1 pins, no byte columns, no recompose lanes at all.
+ *
+ * QUERY SOUNDNESS IS A HARD FLOOR ON THE HEIGHT, and it is why this builder
+ * defaults to 1024 rows rather than the 8 the permutation count would allow.
+ * n_lde = n_rows * kRCFriBlowup must admit the configured query count; at 8
+ * rows n_lde = 128 < 192 queries and the shape is QUERY-DEGENERATE -- it would
+ * prove fast and mean nothing.  The transcript lane measured and then
+ * DISCARDED that 1.664 s figure for exactly this reason; do not resurrect it.
+ *
+ * NOT ACTIVATED.  aq::kAirChallengeP2Activated is false, so every shipped proof
+ * still derives airq_lambda by SHA256d and BuildChildAirChallengeShaReplayV1
+ * remains the companion on the live path.  This builder replays the Poseidon2
+ * route so its cost is MEASURABLE before anyone decides to switch.
+ *
+ * ALIASING.  The absorbed lanes come from aq::AirChallengeP2Lanes, which splits
+ * every u64 into two 32-bit halves precisely because FromU64(x) = x mod p makes
+ * x and x + p the same field element -- naive four-u64 absorption lets two
+ * DIFFERENT trace-commitment roots derive the SAME challenge.  This builder
+ * absorbs that lane vector verbatim and pins it as preprocessed columns; it
+ * must never re-encode it.
+ */
+struct ChildAirChallengeP2ReplayV1 {
+    uint256 digest{};
+    gf::Fp3 reconstructed_challenge{};
+    gf::Fp3 consumed_air_lambda{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint32_t n_lanes{0};
+    uint32_t permutations{0};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint32_t max_alg_degree{0};
+    uint32_t witness_violations{1};
+    /** n_rows * kRCFriBlowup; must be >= the configured query count or the
+     *  shape is query-degenerate and the prove figure is meaningless. */
+    uint32_t n_lde{0};
+    bool query_sound_shape{false};
+    /** First of the 8 preprocessed absorbed-lane columns (the tamper handle:
+     *  these are the preimage, and a prover must not be able to vary them). */
+    uint32_t absorbed_lane_base{0};
+    std::array<uint32_t, 3> challenge_limb_columns{};
+    /** Absorb-carry + capacity-carry are real constraints, not an assumption. */
+    bool sponge_chained_in_cs{false};
+    bool output_binds_digest{false};
+    bool challenge_bound_to_consumed{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Build the Poseidon2 companion for one child's airq_lambda draw.
+ *
+ * `n_rows_floor` pads the table (default kChildAirChallengeP2QuerySoundRowsV1);
+ * pass a smaller value ONLY to demonstrate the degenerate shape being rejected.
+ * `forced_limb` (when not nullptr) overwrites the reconstructed-challenge
+ * columns so a test can observe the constraints rejecting a forgery rather
+ * than assume they would.
+ */
+[[nodiscard]] ChildAirChallengeP2ReplayV1
+BuildChildAirChallengeP2ReplayV1(
+    const uint256& child_fs_seed,
+    const uint256& trace_commit,
+    uint32_t child_n_rows,
+    uint32_t child_quotient_len,
+    uint32_t child_w,
+    const gf::Fp3& consumed_air_lambda,
+    uint32_t n_rows_floor = 0,
+    const gf::Fp3* forced_limb = nullptr);
+
+/** Smallest height whose n_lde = rows * kRCFriBlowup admits 192 queries. */
+inline constexpr uint32_t kChildAirChallengeP2QuerySoundRowsV1 = 1024;
+
+/**
  * PR-89 g4, parent side: the eight child challenge KINDS the parent must
  * decode.  The ordinals are the ledger's coverage vector index; do not
  * renumber them without moving the ledger's per-kind evidence with them.
@@ -891,6 +1011,12 @@ struct ChildFsChallengeDrawV1 {
     bool ood_rejected{false};
     /** The re-derivation agrees with the value the child's proof ships. */
     bool matches_protocol{false};
+    /** PR-89 g4 ACTIVATION.  The EXACT bytes hashed for this draw, retained
+     *  only for the FIRST draw of each kind so a companion hash CS can be
+     *  BUILT from them rather than costed from a byte count.  Empty on every
+     *  other draw: at 192 query draws this would otherwise be the largest
+     *  object in the replay. */
+    std::vector<unsigned char> preimage;
 };
 
 /**
@@ -908,12 +1034,15 @@ struct ChildFsChallengeDrawV1 {
  * ABSORB ORDER REPLAYED (matmul_v4_rc_fri_ext3_alg.cpp, Fri3AlgFs ctor +
  * Fri3AlgBatchFsInit + Fri3AlgBatchCommitConfigured):
  *   domain_tag | seed | LE64(nonce) | LE32(blowup) | LE32(n_coeffs)
- *   | LE32(version) | LE32(|column_len|) | LE32(column_len[i])...
+ *   | LE32(version) | LE32(|column_len|)
+ *   | SHORT-FS ACTIVE: Fri3AlgShapeCommit(n_coeffs, column_len)(32)
+ *     otherwise:       LE32(column_len[i])...
  *   | row_commit.root(32)
  *   -> draw fra3_lambda(0) ; absorb lambda
  *   -> draw fra3_z(ctr++) until accepted -> z1 ; continue -> z2
  *      absorb z1, absorb z2
- *   -> absorb evals_z1[i], evals_z2[i] interleaved, i < W
+ *   -> SHORT-FS ACTIVE: absorb Fri3AlgOodEvalCommit(z1,z2,e1,e2)(32)
+ *      otherwise:       absorb evals_z1[i], evals_z2[i] interleaved, i < W
  *   -> draw fra3_w(0) -> w1, fra3_w(1) -> w2 ; absorb w1, absorb w2
  *   -> for fold in [0, n_folds]: absorb fold_layers[fold].root ;
  *      if fold < n_folds: draw fra3_fold(fold) (the beta is NOT absorbed)
@@ -921,10 +1050,12 @@ struct ChildFsChallengeDrawV1 {
  * airq_lambda is drawn OUTSIDE this transcript, from aq::AirChallengeDigest's
  * own self-contained 113-byte preimage.
  *
- * SCOPE.  Only the shipped single-lane kFri3AlgQ192V3Config is replayed:
+ * SCOPE.  Only the ACTIVE single-lane Q192 config is replayed:
  * uniform_challenges = false, independent_batching_coefficients = false,
  * joint_query = false.  A proof whose `version` is not
- * kRCFri3AlgBatchProofVersion is refused rather than mis-replayed.
+ * kRCFri3AlgActiveBatchProofVersion is refused rather than mis-replayed --
+ * which is what stops a legacy-layout proof from being replayed under the
+ * short-transcript absorb order and silently producing different challenges.
  */
 struct ChildFsTranscriptReplayV1 {
     bool valid{false};
@@ -976,11 +1107,24 @@ struct ChildFsTranscriptReplayV1 {
  *                           transcript by ReplayChildFsTranscriptV1 and agreed
  *                           with the value the child's proof ships.
  *  transcript_bound_in_air[k]
- *                           the pinned bytes CAN be a constrained output of an
+ *                           the pinned bytes ARE a constrained output of an
  *                           in-AIR hash: kind k's preimage is self-contained
  *                           (MEASURED width-independent across two child
- *                           widths) AND its companion vertical SHA AIR fits
- *                           inside ONE constraint system.
+ *                           widths), its companion vertical SHA AIR fits
+ *                           inside ONE constraint system, AND that companion
+ *                           CS has been BUILT over the kind's real preimage
+ *                           with zero violations and its output bound to the
+ *                           consumed scalar.
+ *
+ *                           The third conjunct was added at ACTIVATION and is
+ *                           strictly fail-closed: before it, this counter
+ *                           measured AFFORDABILITY, and activating the
+ *                           short-transcript lane would have moved it 1 -> 8
+ *                           without a single new companion being built.  That
+ *                           is precisely the "flipped rather than earned" jump
+ *                           the test below was written to catch, so the
+ *                           predicate was tightened rather than the test
+ *                           relaxed.
  *
  * Only the third can make the bytes unforgeable in-circuit, and it is
  * deliberately COMPUTED from two measurements rather than written down as "the
@@ -1035,10 +1179,21 @@ struct ChildFsChallengeDecoderCoverageV1 {
     std::array<uint64_t, kChildFsChallengeKindCountV1> preimage_bytes_b{};
     /** Vertical SHA rows one draw of this kind would cost. */
     std::array<uint64_t, kChildFsChallengeKindCountV1> companion_sha_rows{};
+    /** PR-89 g4 ACTIVATION.  A companion hash CS for kind k was actually
+     *  BUILT over that kind's real preimage, has ZERO witness violations, its
+     *  in-CS hash output equals the digest the transcript replay derived, and
+     *  its reconstructed challenge limbs are bound to the scalar the in-parent
+     *  verifier consumes.  This is the conjunct that separates "the transcript
+     *  bytes COULD be owned in-AIR" from "they ARE". */
+    std::array<bool, kChildFsChallengeKindCountV1> companion_cs_built{};
+    std::array<uint32_t, kChildFsChallengeKindCountV1>
+        companion_cs_columns{};
+    std::array<uint32_t, kChildFsChallengeKindCountV1> companion_cs_rows{};
     uint32_t probe_child_w_a{0};
     uint32_t probe_child_w_b{0};
     uint32_t kinds_decoded{0};
     uint32_t kinds_replayed{0};
+    uint32_t kinds_companion_built{0};
     uint32_t kinds_transcript_bound{0};
     uint32_t table_rows{0};
     uint32_t table_columns{0};
