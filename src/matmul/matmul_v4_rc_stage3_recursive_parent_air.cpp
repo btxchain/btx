@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 
 #include <hash.h>
+#include <span.h>
 
 #include <algorithm>
 #include <chrono>
@@ -5385,9 +5386,30 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
         d.label = label;
         d.index = index;
         d.preimage_bytes = preimage.size();
-        d.sha_compressions = FsShaCompressions(preimage.size());
-        d.digest = FsSha256d(preimage);
-        d.value = gf::FromChallengeBytes3(d.digest.data());
+        if (kRCFri3AlgActiveP2Squeeze) {
+            // Poseidon2 squeeze: digest is packed from three canonical lanes;
+            // sha_compressions is left 0 (not a SHA object).
+            d.sha_compressions = 0;
+            const gf::Fp3 ch =
+                Fri3AlgP2SqueezeChallengeFp3(preimage, label, index);
+            unsigned char outb[32]{};
+            const uint64_t limbs[3] = {gf::Canonical(ch.c0),
+                                       gf::Canonical(ch.c1),
+                                       gf::Canonical(ch.c2)};
+            for (int li = 0; li < 3; ++li) {
+                for (int bi = 0; bi < 8; ++bi) {
+                    outb[8 * li + bi] =
+                        static_cast<unsigned char>((limbs[li] >> (8 * bi)) &
+                                                   0xFF);
+                }
+            }
+            d.digest = uint256{Span<const unsigned char>{outb, 32}};
+            d.value = ch;
+        } else {
+            d.sha_compressions = FsShaCompressions(preimage.size());
+            d.digest = FsSha256d(preimage);
+            d.value = gf::FromChallengeBytes3(d.digest.data());
+        }
         d.preimage = std::move(preimage);
         return d;
     };
@@ -5489,8 +5511,9 @@ ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
         d.kind = ChildFsChallengeKindV1::AirqLambda;
         d.label = "airq_lambda";
         d.index = 0;
-        d.digest = aq::AirChallengeDigest(
-            child_fs_seed, "airq_lambda", {child_proof.trace_commit},
+        d.digest = aq::AirChallengeDigestSelected(
+            aq::kAirChallengeP2Activated, child_fs_seed, "airq_lambda",
+            {child_proof.trace_commit},
             {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
         // tag(14) | seed(32) | LE32 len | label(11) | LE32 nroots | root(32)
         // | LE32 nextra | 3 x LE32 = 113 bytes (MEASURED at 3 compressions).

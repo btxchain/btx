@@ -2444,6 +2444,45 @@ BOOST_AUTO_TEST_CASE(pr89_short_fs_lane_round_trip_and_version_separation)
                                        shortfs.proof.column_len));
 }
 
+BOOST_AUTO_TEST_CASE(pr89_p2_squeeze_lane_round_trip_and_version_separation)
+{
+    // Recommendation #1 evidence: short-FS absorbs + Poseidon2 squeezes, as a
+    // SEPARATE proof version (8). Not activated — ActiveConfig stays on v7.
+    const uint256 seed = MakeSeed(0x5b);
+    const auto columns = MakeShortFsColumns(4, 8);
+
+    rc::Fri3AlgBatchCommitResult p2 =
+        rc::Fri3AlgP2SqueezeBatchCommit(columns, seed, 0);
+    BOOST_REQUIRE_MESSAGE(p2.ok, p2.note);
+    BOOST_CHECK_EQUAL(p2.proof.version, rc::kRCFri3AlgP2SqueezeLaneProofVersion);
+    BOOST_CHECK_EQUAL(rc::kRCFri3AlgP2SqueezeLaneProofVersion, 8u);
+    BOOST_CHECK(!rc::kRCFri3AlgP2SqueezeActivatedV1);
+    BOOST_CHECK(!rc::kRCFri3AlgActiveP2Squeeze);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        rc::Fri3AlgP2SqueezeBatchVerify(p2.proof, seed, &why), why);
+
+    // Cross-lane rejection: short-FS (v7) and P2-squeeze (v8) do not mix.
+    rc::Fri3AlgBatchCommitResult shortfs =
+        rc::Fri3AlgShortFsBatchCommit(columns, seed, 0);
+    BOOST_REQUIRE(shortfs.ok);
+    BOOST_CHECK(!rc::Fri3AlgP2SqueezeBatchVerify(shortfs.proof, seed, &why));
+    BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(p2.proof, seed, &why));
+
+    // Same statement shape; challenges differ (SHA vs Poseidon2 squeeze).
+    BOOST_CHECK_EQUAL(p2.proof.n_coeffs, shortfs.proof.n_coeffs);
+    BOOST_CHECK(!gf::Eq(p2.proof.lambda, shortfs.proof.lambda));
+
+    // Deterministic squeeze helper.
+    std::vector<unsigned char> buf{1, 2, 3, 4, 5};
+    const rc::Fp3 a =
+        rc::Fri3AlgP2SqueezeChallengeFp3(buf, "fra3_lambda", 0);
+    BOOST_CHECK(gf::Eq(a, rc::Fri3AlgP2SqueezeChallengeFp3(buf, "fra3_lambda", 0)));
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgP2SqueezeChallengeFp3(buf, "fra3_w", 0)));
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgP2SqueezeChallengeFp3(buf, "fra3_lambda", 1)));
+}
+
 // MEASURED, on the production transcript: the two W-proportional terms are
 // gone, and the slope of the LEGACY route is exactly the documented 52*W.
 BOOST_AUTO_TEST_CASE(pr89_short_fs_transcript_preimages_are_width_independent)
