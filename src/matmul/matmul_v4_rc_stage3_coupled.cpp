@@ -2440,7 +2440,10 @@ bool BuildRCStage3CoupledExtractEngineReceipt(
         }
     }
     if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
-        return Fail(why, "extract_engine:oversize");
+        return Fail(why,
+                    "extract_engine:oversize:" + std::to_string(body.size()) +
+                        ">" +
+                        std::to_string(kRCStage3CoupledMaxEngineReceiptBytes));
     }
     out_trace_root = ComputeExtractEngineTraceRoot(product);
     out_engine_receipt = std::move(body);
