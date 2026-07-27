@@ -314,11 +314,12 @@ BOOST_AUTO_TEST_CASE(mix_kernel_enforces_uint64_wrap_not_field_wrap)
     BOOST_CHECK(Violations(entry, bad_carry) > 0);
 }
 
-BOOST_AUTO_TEST_CASE(extract_and_sha_residuals_are_explicit)
+BOOST_AUTO_TEST_CASE(extract_barrier_digest_local_gaps_cleared_after_engines_ready)
 {
-    // Role-local Extract/Barrier/Digest AirGaps retire via measured prototypes;
-    // universal RecursiveAggregation residual remains. Barrier/Digest still
+    // Role-local Extract/Barrier/Digest AirGaps retire via measured prototypes
+    // + engines Ready; universal bridge/aggregation remain. Barrier/Digest still
     // lack immutable AirConstraintSystem resolvers.
+    BOOST_CHECK(rc::kRCStage3CoupledRelationEnginesReady);
     const auto entries =
         rc::AssessRCStage3CoupledAirRegistry(Shape(), Fp3{3, 5, 7}, Fp3{11, 13, 17});
     BOOST_REQUIRE_EQUAL(entries.size(), 8U);
@@ -344,6 +345,12 @@ BOOST_AUTO_TEST_CASE(extract_and_sha_residuals_are_explicit)
                        rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
     BOOST_CHECK(HasGap(entries[7],
                        rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[5],
+                       rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge) ||
+                HasGap(entries[6],
+                       rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge) ||
+                HasGap(entries[7],
+                       rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

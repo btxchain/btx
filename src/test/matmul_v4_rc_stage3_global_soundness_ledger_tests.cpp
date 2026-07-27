@@ -377,14 +377,11 @@ BOOST_AUTO_TEST_CASE(
                     "unused_100bit_requirement_is_not_v1_consensus_target") !=
                 std::string::npos);
 
-    // Ordered readiness interlock: gate 3 (fri_alg rbr/BCS) closed; g4 (child
-    // FS replay) closed via P2 joint activation; g5 (self-similar fixed point)
-    // closed once the measured parent-own-FRI pin is accepted in the default
-    // gate. Remaining open: g0 (coupled engines) and g2 (aggregation /
-    // two-level budget / authority), so the interlock is NOT all_clear and
-    // certified_bits stays a computed 0.
+    // Ordered readiness interlock: g0/g1/g3/g4/g5 closed; g2 recursive
+    // aggregation / two-level budget / authority still open → all_clear false
+    // and certified_bits stays a computed 0.
     const auto& gate = audit.composition_gate;
-    BOOST_CHECK(!gate.mathematical_verifier_ready);
+    BOOST_CHECK(gate.mathematical_verifier_ready);
     BOOST_CHECK(gate.episode_relations_ready);
     BOOST_CHECK(!gate.recursive_aggregation_ready);
     BOOST_CHECK(gate.fri_alg_formal_soundness_ready);
@@ -487,7 +484,7 @@ BOOST_AUTO_TEST_CASE(
         audit.composed_certified_bits_target);
 
     // Gate 6 completes ONLY when the composition machine-checks AND gates 0-5
-    // are true. The composition is machine-checked, but gates 0-5 are open, so
+    // are true. Composition machine-checks; g0/g1/g3/g4 closed but g2/g5 open, so
     // the theorem stays incomplete and gate 6 stays down. Honest flip.
     BOOST_CHECK(!audit.global_additive_theorem_complete);
     BOOST_CHECK(
@@ -533,11 +530,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(rc::kRCStage3EpisodeRelationsReady);
     BOOST_CHECK(audit.composition_gate.episode_relations_ready);
 
-    // --- g0 evidence: g0 is a strict downstream of g1 (the mathematical
-    // verifier calls the episode relation verifier unconditionally) and of the
-    // coupled engines. Both are open, so g0 is held open by evidence.
-    BOOST_CHECK(!rc::kRCStage3CoupledRelationEnginesReady);
-    BOOST_CHECK(!audit.composition_gate.mathematical_verifier_ready);
+    // --- g0 evidence: Engines Ready + MathVerifierReady close g0; g2 remains.
+    BOOST_CHECK(rc::kRCStage3CoupledRelationEnginesReady);
+    BOOST_CHECK(audit.composition_gate.mathematical_verifier_ready);
 
     // --- g2 evidence: recursive aggregation still not production-ready even
     // when child FS replay is closed (authority / two-level budget residuals).

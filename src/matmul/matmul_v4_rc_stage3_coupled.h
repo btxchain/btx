@@ -45,10 +45,10 @@ inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
  *
  * Measured engine receipts (toy shapes) under this cap:
  *   BarrierSha256dV1 ≈51 MiB, DigestSha256dV1 ≈73 MiB (EXIT:0, ~674–711s).
- *   MixArithmeticV1  ≈323 MiB (338685623 bytes; EXIT:0, ~897s, ~2.0 GiB RSS).
- *   ExtractTilesV1 exceeds 512 MiB after prove (~1768s / ~3.4 GiB RSS →
- *   extract_engine:oversize). Cap is 1 GiB so Extract packaging fits;
- *   production wire/relay budgets remain g2 / kRCFriMaxProofBytesHard. */
+ *   MixArithmeticV1  ≈323 MiB (338685623 bytes; EXIT:0, ~897–938s, ~2.0 GiB).
+ *   ExtractTilesV1   ≈813 MiB (852756558 bytes; EXIT:0, ~2008s, ~3.5 GiB RSS)
+ *   under the 1 GiB receipt cap after Extract verify rebind. Production
+ *   wire/relay budgets remain g2 / kRCFriMaxProofBytesHard. */
 inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 1024U * 1024U * 1024U;
 
 /** Consensus proof-engine ABI. The identifier reserves a stable encoding; it
@@ -250,7 +250,9 @@ VerifyRCStage3CoupledRelations(const RCStage3SuccinctProof& proof,
  * Extract/Barrier/Digest). Does NOT require AirRegistryReady,
  * CommitmentOpeningBridge, or RecursiveAggregation. */
 [[nodiscard]] bool RCStage3CoupledRelationEnginesReady(std::string* why = nullptr);
-inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
+/** True after measured EXIT:0 for Bank/GEMM/Exchange/Perm/Mix/Extract/Barrier/
+ * Digest. AirGaps CommitmentOpeningBridge + RecursiveAggregation remain. */
+inline constexpr bool kRCStage3CoupledRelationEnginesReady = true;
 
 /**
  * Measured prototype evidence (episode-style). Backed by
@@ -258,7 +260,7 @@ inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
  * (Prove/VerifyRCStage3CoupledBankProduct FlatBoundary SHA+CounterXof) and by
  * BankSeedXofV1 / BankPageInclusionV1 engine round-trips when exercised under
  * MemoryMax≥40G. These flags retire the CoupledBank-local AirGap codes only;
- * CommitmentOpeningBridge + RecursiveAggregation remain, and Ready stays false.
+ * CommitmentOpeningBridge + RecursiveAggregation remain AirGaps after engines Ready.
  */
 inline constexpr bool kRCStage3CoupledBankSeedXofPrototypeExecuted = true;
 inline constexpr bool kRCStage3CoupledBankPageInclusionPrototypeExecuted = true;

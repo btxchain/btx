@@ -3190,17 +3190,15 @@ bool VerifyRCStage3CoupledRelations(const RCStage3SuccinctProof& proof, std::str
 
 bool RCStage3CoupledRelationEnginesReady(std::string* why)
 {
-    static_assert(!kRCStage3CoupledRelationEnginesReady,
-                  "Flip only after all eight engines are measured green");
-    // Bank/GEMM/Exchange/Perm packaged earlier; Barrier/Digest EXIT:0
-    // (≈51/73 MiB); MixArithmeticV1 EXIT:0 (338685623 bytes ≈323 MiB under
-    // 512 MiB cap). ExtractTilesV1 still pending remasure under 512 MiB
-    // (failed *:oversize at 256). CommitmentOpeningBridge +
-    // RecursiveAggregation remain AirGaps (tracked by AirRegistryReady /
-    // kRCStage3RecursiveAggregationReady), not Ready blockers for this
-    // engines predicate.
+    static_assert(kRCStage3CoupledRelationEnginesReady,
+                  "Engines Ready requires measured EXIT:0 for all eight engines");
+    // Eight engines measured green (toy shapes): BankDequant/BankSeedXof/
+    // BankPageInclusion + GemmDot (earlier packaging); Exchange/Perm;
+    // Barrier/Digest ≈51/73 MiB; Mix ≈323 MiB (338685623); Extract ≈813 MiB
+    // (852756558 bytes, EXIT:0 ~2008s / ~3.5 GiB RSS, 1 GiB cap + verify rebind).
+    // CommitmentOpeningBridge + RecursiveAggregation remain AirGaps.
     if (!kRCStage3CoupledRelationEnginesReady) {
-        return Fail(why, "proof_engines_pending_measure:extract");
+        return Fail(why, "proof_engines_pending_measure");
     }
     if (why != nullptr) *why = "stage3:coupled:engines_ready";
     return true;

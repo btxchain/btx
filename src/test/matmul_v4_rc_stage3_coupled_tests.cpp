@@ -232,23 +232,15 @@ BOOST_AUTO_TEST_CASE(coupled_statement_commitment_has_no_proof_hash_cycle)
     BOOST_CHECK(rc::CommitRCStage3CoupledStatement(changed_statement) != commitment);
 }
 
-BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_without_proof_only_engines)
+BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_stub_proof_after_engines_ready)
 {
     const auto proof = MakeCoupledProof();
     std::string why;
     BOOST_REQUIRE(rc::ValidateRCStage3ProofStructure(proof, &why));
-    BOOST_CHECK(!rc::kRCStage3CoupledRelationEnginesReady);
-    BOOST_CHECK(!rc::RCStage3CoupledRelationEnginesReady(&why));
-    BOOST_CHECK(why.find("proof_engines_pending_measure") != std::string::npos ||
-                why.find("proof_engines_missing") != std::string::npos);
-    BOOST_CHECK(why.find("bank_seed_xof") == std::string::npos);
-    BOOST_CHECK(why.find("bank_page_inclusion") == std::string::npos);
-    BOOST_CHECK(why.find("exchange") == std::string::npos);
-    BOOST_CHECK(why.find("permutation") == std::string::npos);
-    BOOST_CHECK(why.find("barrier") == std::string::npos);
-    BOOST_CHECK(why.find("digest") == std::string::npos);
-    BOOST_CHECK(why.find("extract") != std::string::npos);
-    BOOST_CHECK(why.find("mix") == std::string::npos);
+    BOOST_CHECK(rc::kRCStage3CoupledRelationEnginesReady);
+    BOOST_CHECK(rc::RCStage3CoupledRelationEnginesReady(&why));
+    BOOST_CHECK_EQUAL(why, "stage3:coupled:engines_ready");
+    // Stub MakeCoupledProof still fails relation verify (no real engine body).
     BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(proof, &why));
     BOOST_CHECK(why.find("coupled:bank:recursive_decode") !=
                 std::string::npos);
@@ -1338,6 +1330,7 @@ BOOST_AUTO_TEST_CASE(coupled_extract_engine_opt_in_roundtrip)
         rc::BuildRCStage3CoupledExtractEngineReceipt(
             statement, shape, inputs, receipt, root, &why),
         why);
+    BOOST_TEST_MESSAGE("ExtractTilesV1 bytes=" << receipt.size());
     uint256 verified;
     BOOST_REQUIRE_MESSAGE(
         rc::VerifyRCStage3CoupledExtractEngineReceipt(
