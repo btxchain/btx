@@ -182,6 +182,7 @@ RecursionPrototypeDriveResult DriveEpisodeRoleRecursionPrototype(
     out.carrier.role = role;
     out.carrier.ctl_child_commitment = ctl_child_commitment;
     out.carrier.fixed_role_commitment = fixed_role_commitment;
+    out.carrier.child_fs_seed = child_seed;
     out.carrier.root = aggregate.proof;
     for (ar::ChildPublicInputs child_pi : aggregate.pis) {
         child_pi.endpoint_authority_roots = product.endpoint_committed_roots;
@@ -221,12 +222,29 @@ RecursionPrototypeDriveResult DriveEpisodeRoleRecursionPrototype(
                 std::to_string(static_cast<int>(gap.code)));
     }
 
-    BOOST_CHECK(!out.readiness.cryptographic_verification_ready);
+    // After g4 joint P2 activation, child_fiat_shamir_replay_closed (and thus
+    // self_similar_fixed_point_closed) flips true, so
+    // cryptographic_verification_ready becomes true. Verify then exercises
+    // child FS binding: carriers set child_fs_seed to the prove seed and bind
+    // via AirChallengeDigestSelected (Poseidon2 when activated). Shared
+    // residuals AuthorityDisabled / ProductionPerformanceUnmeasured remain
+    // gaps but do not block cryptographic_verification_ready.
     std::string verify_why;
-    BOOST_CHECK(!VerifyRCStage3RecursiveProof(statement, out.carrier, &verify_why));
-    BOOST_TEST_MESSAGE(label << " verify_why=" << verify_why);
-    BOOST_CHECK(verify_why.rfind("stage3:recursive:cryptographic_not_ready:", 0) ==
-                0);
+    const bool verified =
+        VerifyRCStage3RecursiveProof(statement, out.carrier, &verify_why);
+    BOOST_TEST_MESSAGE(label << " cryptographic_verification_ready="
+                             << out.readiness.cryptographic_verification_ready
+                             << " verify_ok=" << verified
+                             << " verify_why=" << verify_why);
+    if (out.readiness.cryptographic_verification_ready) {
+        BOOST_CHECK_MESSAGE(verified, std::string(label) + " verify_why=" +
+                                          verify_why);
+    } else {
+        BOOST_CHECK(!verified);
+        BOOST_CHECK(
+            verify_why.rfind("stage3:recursive:cryptographic_not_ready:", 0) ==
+            0);
+    }
 
     // Canonical wire serialization of the mandatory-family V_CS root is a
     // shared codec/budget residual (ProductionPerformanceUnmeasured). With
@@ -234,6 +252,8 @@ RecursionPrototypeDriveResult DriveEpisodeRoleRecursionPrototype(
     // PureStream V_CS (~10k cols) and ~380 MiB at Builder (~82k cols), both
     // over kRCFriMaxProofBytesHard (~16 MiB). Estimate BEFORE allocating so
     // large roles do not thrash on a doomed SerializeFri3AlgBatchProof.
+    // Soft budget only — do NOT treat over-budget serialize as an episode
+    // Gaps()/Ready flip condition.
     {
         constexpr size_t kFp3Bytes = 24;
         const size_t n_cols = out.carrier.root.batch.column_len.size();

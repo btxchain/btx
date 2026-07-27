@@ -377,14 +377,15 @@ BOOST_AUTO_TEST_CASE(recursive_role_proof_binds_exact_ctl_public_pin)
 
 // The raw per-child AIR-batching challenge exactly as
 // air_recurse::ExtractChildPublicInputs derives it: FromChallengeBytes3 over
-// AirChallengeDigest(seed, "airq_lambda", {trace_commit}, {N, quotient_len, W}).
+// AirChallengeDigestSelected(kAirChallengeP2Activated, seed, "airq_lambda",
+// {trace_commit}, {N, quotient_len, W}).
 Fp3 DeriveAirLambda(const uint256& seed,
                     const air_recurse::ChildPublicInputs& pin)
 {
     const uint256 trace_commit = Fri3AlgDigestToUint256(pin.rt_root);
     const std::vector<uint256> roots{trace_commit};
-    const uint256 d = air_quotient::AirChallengeDigest(
-        seed, "airq_lambda", roots,
+    const uint256 d = air_quotient::AirChallengeDigestSelected(
+        air_quotient::kAirChallengeP2Activated, seed, "airq_lambda", roots,
         {pin.child_n_rows, pin.child_quotient_len, pin.child_w});
     return gkr_field::FromChallengeBytes3(d.data());
 }

@@ -59,6 +59,15 @@ struct RCStage3RecursiveProof {
     uint256 ctl_child_commitment{};
     std::vector<RCStage3RecursiveChildPin> children;
     air_quotient::AirQuotientProof<gkr_field::Fp3, AlgB3> root;
+    /**
+     * In-memory prove-time child FS seed (NOT serialized). When non-null,
+     * VerifyRCStage3RecursiveProof re-derives air_lambda from this seed via
+     * AirChallengeDigestSelected — matching ExtractChildPublicInputs — instead
+     * of ChildFsPoint(role_seed, slot). Role-seed position binding already
+     * domain-separates the aggregate; per-slot ChildFsPoint prove wiring for
+     * k>1 remains a separate P4 residual.
+     */
+    uint256 child_fs_seed{};
 };
 
 /**
