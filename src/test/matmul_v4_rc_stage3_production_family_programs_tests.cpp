@@ -181,6 +181,76 @@ BOOST_AUTO_TEST_CASE(
             rc::RCStage3RelationEndpoint::EpisodeExtractSampler));
     BOOST_CHECK(extract.semantic_relation_complete);
 
+    const size_t coupled_bank_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledBank);
+    const auto& coupled_bank = sources[coupled_bank_idx];
+    BOOST_CHECK(coupled_bank.role == rc::RCStage3RelationRole::CoupledBank);
+    BOOST_CHECK_EQUAL(coupled_bank.program.current_width, 6U);
+    BOOST_CHECK_EQUAL(coupled_bank.program.programs.size(), 5U);
+    BOOST_REQUIRE_EQUAL(coupled_bank.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_bank.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledBankPages));
+    BOOST_CHECK(coupled_bank.semantic_relation_complete);
+
+    const size_t coupled_gemm_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledGemm);
+    const auto& coupled_gemm = sources[coupled_gemm_idx];
+    BOOST_CHECK(coupled_gemm.role == rc::RCStage3RelationRole::CoupledGemm);
+    BOOST_CHECK_EQUAL(coupled_gemm.program.current_width, 5U);
+    BOOST_CHECK_EQUAL(coupled_gemm.program.programs.size(), 6U);
+    BOOST_REQUIRE_EQUAL(coupled_gemm.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_gemm.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledGemmOutputY));
+    BOOST_CHECK(coupled_gemm.semantic_relation_complete);
+
+    const size_t coupled_extract_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledExtractCore);
+    const auto& coupled_extract = sources[coupled_extract_idx];
+    BOOST_CHECK(
+        coupled_extract.role == rc::RCStage3RelationRole::CoupledExtract);
+    BOOST_CHECK_EQUAL(
+        coupled_extract.program.current_width, aq::kRcSamplerNumCols);
+    BOOST_CHECK_EQUAL(coupled_extract.program.challenge_width, 2U);
+    BOOST_CHECK_EQUAL(coupled_extract.program.programs.size(), 47U);
+    BOOST_REQUIRE_EQUAL(coupled_extract.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_extract.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledExtractSampler));
+    BOOST_CHECK(coupled_extract.semantic_relation_complete);
+
+    const size_t coupled_barrier_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledBarrierSha256d);
+    const auto& coupled_barrier = sources[coupled_barrier_idx];
+    BOOST_CHECK(
+        coupled_barrier.role == rc::RCStage3RelationRole::CoupledBarrier);
+    BOOST_CHECK_EQUAL(coupled_barrier.program.current_width, 144U);
+    BOOST_CHECK_EQUAL(coupled_barrier.program.programs.size(), 462U);
+    BOOST_REQUIRE_EQUAL(coupled_barrier.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_barrier.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledBarrierHash));
+    BOOST_CHECK(coupled_barrier.semantic_relation_complete);
+
+    const size_t coupled_digest_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledDigestSha256d);
+    const auto& coupled_digest = sources[coupled_digest_idx];
+    BOOST_CHECK(
+        coupled_digest.role == rc::RCStage3RelationRole::CoupledDigest);
+    BOOST_CHECK_EQUAL(coupled_digest.program.current_width, 144U);
+    BOOST_CHECK_EQUAL(coupled_digest.program.programs.size(), 462U);
+    BOOST_REQUIRE_EQUAL(coupled_digest.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_digest.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledDigestHash));
+    BOOST_CHECK(coupled_digest.semantic_relation_complete);
+
     // A site this session did not reach stays an honest, INCOMPLETE stub:
     // one column, one constraint, no endpoint claim -- not "complete" the way
     // the *_tests.cpp OneColumnProgram helper would mark it.
@@ -197,8 +267,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         status.families_total,
         static_cast<uint32_t>(manifest.entries.size()));
-    BOOST_CHECK_EQUAL(status.families_real, 6U);
-    BOOST_CHECK_EQUAL(status.roles_with_real_program, 6U);
+    BOOST_CHECK_EQUAL(status.families_real, 11U);
+    BOOST_CHECK_EQUAL(status.roles_with_real_program, 11U);
     BOOST_CHECK_EQUAL(status.roles_total, 14U);
     const std::vector<rc::RCStage3RelationRole> expected_roles{
         rc::RCStage3RelationRole::EpisodeDeterministicBuilder,
@@ -206,7 +276,12 @@ BOOST_AUTO_TEST_CASE(
         rc::RCStage3RelationRole::EpisodeExtract,
         rc::RCStage3RelationRole::EpisodeWiring,
         rc::RCStage3RelationRole::EpisodeTileTree,
-        rc::RCStage3RelationRole::EpisodeDigest};
+        rc::RCStage3RelationRole::EpisodeDigest,
+        rc::RCStage3RelationRole::CoupledBank,
+        rc::RCStage3RelationRole::CoupledGemm,
+        rc::RCStage3RelationRole::CoupledExtract,
+        rc::RCStage3RelationRole::CoupledBarrier,
+        rc::RCStage3RelationRole::CoupledDigest};
     auto sorted_roles = expected_roles;
     std::sort(sorted_roles.begin(), sorted_roles.end());
     BOOST_CHECK(status.real_roles == sorted_roles);
@@ -222,7 +297,17 @@ BOOST_AUTO_TEST_CASE(
         static_cast<uint16_t>(
             rc::RCStage3RelationEndpoint::EpisodeTileTreeStream),
         static_cast<uint16_t>(
-            rc::RCStage3RelationEndpoint::EpisodeDigestPow)};
+            rc::RCStage3RelationEndpoint::EpisodeDigestPow),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledBankPages),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledGemmOutputY),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledExtractSampler),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledBarrierHash),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledDigestHash)};
     auto sorted_expected = expected_endpoints;
     std::sort(sorted_expected.begin(), sorted_expected.end());
     BOOST_CHECK(status.real_endpoints == sorted_expected);
@@ -243,7 +328,7 @@ BOOST_AUTO_TEST_CASE(
     const auto registry = ut::BuildProductionProgramRegistryV1(
         manifest, schedule, sources, verifier, verifier);
     BOOST_REQUIRE(!registry.external_registry_commitment.IsNull());
-    // Honest: only 6 of 28 families are real, so the registry-wide
+    // Honest: only 11 of 28 families are real, so the registry-wide
     // completeness flag must stay false. A registry that flips this true
     // from stub-only or partially-real families would be exactly the
     // structural-only theatre this module exists to avoid.
@@ -282,6 +367,45 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(extract_entry.constraint_count, 47U);
     BOOST_CHECK(extract_entry.semantic_relation_complete);
 
+    const size_t coupled_bank_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledBank);
+    const auto& coupled_bank_entry = registry.families[coupled_bank_idx];
+    BOOST_CHECK_EQUAL(coupled_bank_entry.maximum_columns, 6U);
+    BOOST_CHECK_EQUAL(coupled_bank_entry.constraint_count, 5U);
+    BOOST_CHECK(coupled_bank_entry.semantic_relation_complete);
+
+    const size_t coupled_gemm_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledGemm);
+    const auto& coupled_gemm_entry = registry.families[coupled_gemm_idx];
+    BOOST_CHECK_EQUAL(coupled_gemm_entry.maximum_columns, 5U);
+    BOOST_CHECK_EQUAL(coupled_gemm_entry.constraint_count, 6U);
+    BOOST_CHECK(coupled_gemm_entry.semantic_relation_complete);
+
+    const size_t coupled_extract_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledExtractCore);
+    const auto& coupled_extract_entry =
+        registry.families[coupled_extract_idx];
+    BOOST_CHECK_EQUAL(
+        coupled_extract_entry.maximum_columns, aq::kRcSamplerNumCols);
+    BOOST_CHECK_EQUAL(coupled_extract_entry.constraint_count, 47U);
+    BOOST_CHECK(coupled_extract_entry.semantic_relation_complete);
+
+    const size_t coupled_barrier_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledBarrierSha256d);
+    const auto& coupled_barrier_entry =
+        registry.families[coupled_barrier_idx];
+    BOOST_CHECK_EQUAL(coupled_barrier_entry.maximum_columns, 144U);
+    BOOST_CHECK_EQUAL(coupled_barrier_entry.constraint_count, 462U);
+    BOOST_CHECK(coupled_barrier_entry.semantic_relation_complete);
+
+    const size_t coupled_digest_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledDigestSha256d);
+    const auto& coupled_digest_entry =
+        registry.families[coupled_digest_idx];
+    BOOST_CHECK_EQUAL(coupled_digest_entry.maximum_columns, 144U);
+    BOOST_CHECK_EQUAL(coupled_digest_entry.constraint_count, 462U);
+    BOOST_CHECK(coupled_digest_entry.semantic_relation_complete);
+
     const size_t stub_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeGemmOpenings);
     const auto& stub_entry = registry.families[stub_idx];
@@ -296,7 +420,9 @@ BOOST_AUTO_TEST_CASE(
     // consensus-facing commitments rather than being decorative. Checked for
     // every real family this session wired, not just the first one.
     for (const size_t real_idx :
-         {builder_idx, gemm_idx, wiring_idx, extract_idx}) {
+         {builder_idx, gemm_idx, wiring_idx, extract_idx,
+          coupled_bank_idx, coupled_gemm_idx, coupled_extract_idx,
+          coupled_barrier_idx, coupled_digest_idx}) {
         auto tampered_sources = sources;
         auto& load = *std::find_if(
             tampered_sources[real_idx]
@@ -429,6 +555,47 @@ BOOST_AUTO_TEST_CASE(
     // above by the registry-commitment tamper test, which shows this exact
     // 47-program table (not a placeholder) drives the production registry's
     // consensus-facing commitments.
+
+    // --- CoupledBank: same six-column dequant relation as
+    // EpisodeBuilderTraceDequant above, committed under a different role. ---
+    {
+        const size_t idx = FindFamilyIndex(
+            manifest, ss::ProductionProofSiteKind::CoupledBank);
+        const auto& table = sources[idx].program;
+        std::vector<Fp3> row{
+            gf::FromSigned3(-7), U(2), U(0), U(1), U(4),
+            gf::FromSigned3(-28)};
+        const std::vector<Fp3> next(6, Fp3::Zero());
+        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        auto tampered = row;
+        tampered[5] = gf::FromSigned3(-27); // wrong output
+        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+    }
+
+    // --- CoupledGemm: five-column running-accumulation identity. Columns
+    // are [A, B, ACC, OUT, ACTIVE]. current: a=3, b=4, acc=a*b=12 (first-row
+    // identity), out=12, active=1. next: acc advances to
+    // current_acc + next_active*next_a*next_b = 12 + 1*3*4 = 24, out stays
+    // 12 (transition), active=1 (so the active-gated A/B-zero constraints,
+    // which only read CURRENT, are vacuously satisfied). ---
+    {
+        const size_t idx = FindFamilyIndex(
+            manifest, ss::ProductionProofSiteKind::CoupledGemm);
+        const auto& table = sources[idx].program;
+        const std::vector<Fp3> row{U(3), U(4), U(12), U(12), Fp3::One()};
+        const std::vector<Fp3> next{U(3), U(4), U(24), U(12), Fp3::One()};
+        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        auto tampered = row;
+        tampered[2] = U(13); // acc no longer equals a*b
+        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+    }
+
+    // --- CoupledExtract and the two coupled hash kernels (CoupledBarrier /
+    // CoupledDigest, 144-column / 462-constraint SHA-256 compression AIR)
+    // are, like EpisodeExtract above, differentially tested against their
+    // canonical constraint-system builders elsewhere
+    // (matmul_v4_rc_stage3_role_bytecode_tests.cpp); non-vacuity for all
+    // three is proved above by the registry-commitment tamper test.
 }
 
 BOOST_AUTO_TEST_SUITE_END()

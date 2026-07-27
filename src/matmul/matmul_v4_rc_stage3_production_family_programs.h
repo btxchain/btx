@@ -93,6 +93,42 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::EpisodeExtractSampler only; Input,
      * ChaCha, Scale and Output remain unclosed by any family. */
     EpisodeExtractSamplerCore = 6,
+    /** BuildRCStage3CoupledBankDequantProgramTableCanonical: the six-column
+     * bank dequantization relation, the role-separated twin of
+     * EpisodeBuilderTraceDequant above and already exercised in production
+     * by BuildRCStage3CoupledBankDequantProgramTable / ProveRCStage3-
+     * CoupledBankProduct / VerifyRCStage3CoupledBankProduct.
+     * Closes RCStage3RelationEndpoint::CoupledBankPages only; SeedXof and
+     * Root remain unclosed by any family. */
+    CoupledBankPagesDequant = 7,
+    /** BuildRCStage3CoupledLocalKernelProgramTable(CoupledGemm): the
+     * five-column running-accumulation identity (per-row a*b accumulate,
+     * terminal ACC==OUT), already exercised in production by
+     * matmul_v4_rc_stage3_relation_closure.cpp's coupled-gemm endpoint
+     * resolvers. Closes RCStage3RelationEndpoint::CoupledGemmOutputY only;
+     * OperandA, OperandB and SignedRange remain unclosed by any family. */
+    CoupledGemmOutputIdentity = 8,
+    /** BuildRCStage3CoupledExtractLocalKernelProgramTable(scale_e=0): the
+     * coupled analogue of EpisodeExtractSamplerCore above -- the identical
+     * 47-constraint, 40-column RcSampler relation committed under the
+     * CoupledExtract role instead.
+     * Closes RCStage3RelationEndpoint::CoupledExtractSampler only; Input,
+     * ChaCha, Scale and Output remain unclosed by any family. */
+    CoupledExtractSamplerCore = 9,
+    /** BuildRCStage3CoupledHashKernelProgramTable(CoupledBarrier): the
+     * selector-pinned SHA-256 compression AIR (462 constraints, 144
+     * columns), already exercised in production by the same hash-kernel
+     * builder shared with CoupledDigest below.
+     * Closes RCStage3RelationEndpoint::CoupledBarrierHash only; Input and
+     * Output remain unclosed by any family. */
+    CoupledBarrierHashKernel = 10,
+    /** BuildRCStage3CoupledHashKernelProgramTable(CoupledDigest): the same
+     * SHA-256 compression AIR as CoupledBarrierHashKernel above, committed
+     * under the CoupledDigest role instead (the committed table role
+     * prevents cross-role replay).
+     * Closes RCStage3RelationEndpoint::CoupledDigestHash only;
+     * BankAndBarriers and Value remain unclosed by any family. */
+    CoupledDigestHashKernel = 11,
 };
 
 /**
