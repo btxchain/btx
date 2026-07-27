@@ -773,13 +773,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.sha_execution_plan_valid);
     BOOST_CHECK(gap.sha_fixed_schedule);
     BOOST_CHECK(gap.sha_codec_origins_complete);
-    BOOST_CHECK(!gap.sha_recursively_consumed);
+    BOOST_CHECK(gap.sha_recursively_consumed);
     BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
-    // selection + air_kinds closed; two Executable predicates remain open.
-    BOOST_CHECK_EQUAL(gap.open_predicates, 2U);
+    // whole-verifier SHA equations remain the sole Executable blocker.
+    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
@@ -835,6 +835,49 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(kinds.kinds_reconstructed, 8U);
     BOOST_CHECK_EQUAL(
         kinds.values_bound_to_consumed, kinds.kinds_required);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+}
+
+// Light opt-in: MultiRow SHA schedule + vertical boundary AIRs + arity-4
+// join consume every FS SHA call on the honest bounded canary.
+BOOST_AUTO_TEST_CASE(
+    bounded_sha_fs_canary_sha_recursively_consumed)
+{
+    const uint256 seed = Filled(0xd1);
+    const va::AlgAirProof proof = HonestBoundedShaFsCanaryProof(seed);
+    const nr::NarrowChildShape shape = ShapeForProof(proof);
+    const va::FiatShamirProgram bounded =
+        va::BuildBoundedFiatShamirProgram(
+            shape, va::kRCFiatShamirOodCandidateSchedule);
+    BOOST_REQUIRE(bounded.valid);
+
+    const va::FiatShamirShaRecursivelyConsumedV1 recursive =
+        va::MeasureFiatShamirShaRecursivelyConsumedV1(
+            bounded, seed, proof);
+    BOOST_TEST_MESSAGE(recursive.note);
+    BOOST_REQUIRE_MESSAGE(recursive.consumed, recursive.note);
+    BOOST_CHECK(recursive.digest_plan_ready);
+    BOOST_CHECK(recursive.schedule_exact);
+    BOOST_CHECK(recursive.arity_four_join_complete);
+    BOOST_CHECK(recursive.shard_boundary_airs_execute);
+    BOOST_CHECK(recursive.join_tamper_rejects);
+    BOOST_CHECK(recursive.boundary_tamper_rejects);
+    BOOST_CHECK_GT(recursive.sha_calls, 0U);
+    BOOST_CHECK_EQUAL(
+        recursive.calls_boundary_air_green, recursive.sha_calls);
+    BOOST_CHECK_EQUAL(
+        recursive.shards_joined, recursive.parent_shards);
+
+    const va::VerifierFiatShamirAirChipGapV1 gap =
+        va::AssessVerifierFiatShamirAirChipGapV1(
+            bounded, seed, proof);
+    BOOST_TEST_MESSAGE(gap.note);
+    BOOST_CHECK(gap.sha_recursively_consumed);
+    BOOST_CHECK(gap.challenge_selection_air_constrained);
+    BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
+    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(!gap.executable_ready);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 

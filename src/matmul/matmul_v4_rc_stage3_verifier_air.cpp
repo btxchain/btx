@@ -3090,8 +3090,15 @@ AssessVerifierFiatShamirAirChipGapV1(
     out.sha_fixed_schedule = plan.fixed_schedule;
     out.sha_codec_origins_complete =
         plan.proof_codec_byte_origins_complete;
-    out.sha_recursively_consumed =
-        plan.recursively_consumed;
+    // Parent SHA-shard recursive consumption (MultiRow schedule + vertical
+    // boundary AIRs + arity-4 join). Plan.recursively_consumed stays false;
+    // this gap field is measured independently.
+    const FiatShamirShaRecursivelyConsumedV1 recursive =
+        aligned_ok
+            ? MeasureFiatShamirShaRecursivelyConsumedV1(
+                  program, child_fs_seed, aligned)
+            : FiatShamirShaRecursivelyConsumedV1{};
+    out.sha_recursively_consumed = recursive.consumed;
     // fs_selection_air ChallengeTable join (measured when digests match).
     const FiatShamirChallengeSelectionAirJoinV1 selection =
         aligned_ok
@@ -3148,6 +3155,8 @@ AssessVerifierFiatShamirAirChipGapV1(
                ";air_kinds=" +
                (out.air_backed_all_kinds_reconstructed ? "1"
                                                        : "0") +
+               ";recursive=" +
+               (out.sha_recursively_consumed ? "1" : "0") +
                ";executable_constexpr=0");
     return out;
 }
@@ -5408,6 +5417,483 @@ bool ValidateMultiRowV2TranscriptShaExecutionPlanV1(
             "exact_boundaries_recursion_open";
     }
     return true;
+}
+
+namespace {
+
+bool ShaVerticalBoundaryAirSatisfies(
+    const aq::AirConstraintSystem<Fp3>& cs,
+    const std::vector<std::vector<Fp3>>& columns)
+{
+    if (columns.size() != cs.n_columns) return false;
+    for (const auto& column : columns) {
+        if (column.size() != cs.n_rows) return false;
+    }
+    std::vector<Fp3> cur(cs.n_columns);
+    std::vector<Fp3> next(cs.n_columns);
+    for (uint32_t row = 0; row < cs.n_rows; ++row) {
+        for (uint32_t col = 0; col < cs.n_columns; ++col) {
+            cur[col] = columns[col][row];
+            next[col] = columns[col][(row + 1) % cs.n_rows];
+        }
+        for (const auto& constraint : cs.constraints) {
+            if (constraint.kind == aq::AirKind::kTransition &&
+                row + 1 == cs.n_rows) {
+                continue;
+            }
+            if (constraint.kind == aq::AirKind::kFirstRow &&
+                row != 0) {
+                continue;
+            }
+            if (constraint.kind == aq::AirKind::kLastRow &&
+                row + 1 != cs.n_rows) {
+                continue;
+            }
+            if (!gf::IsZero(constraint.eval(cur, next))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/** Build chained vertical SHA256d boundary AIR for one exact preimage. */
+bool BuildAndCheckShaCallVerticalBoundaryAir(
+    const std::vector<unsigned char>& preimage,
+    const uint256& expected_digest,
+    const uint256& air_seed,
+    uint32_t* compression_count,
+    stage3_hash_air::FixedProgramVerticalWitnessBoundaryInstance*
+        instance_out,
+    std::string* why)
+{
+    namespace ha = stage3_hash_air;
+    ha::ShaManifest manifest;
+    if (!ha::BuildShaManifest(
+            preimage, ha::ShaMode::Double, manifest, why)) {
+        return false;
+    }
+    const uint256 digest{
+        Span<const unsigned char>{
+            manifest.digest.data(),
+            manifest.digest.size()}};
+    if (digest != expected_digest) {
+        if (why != nullptr) {
+            *why = "sha_call_digest_mismatch";
+        }
+        return false;
+    }
+    std::vector<ha::FixedProgramBoundaryInstance> boundaries;
+    if (!ha::BuildShaManifestBoundaryInstances(
+            manifest, boundaries, why) ||
+        boundaries.empty() ||
+        boundaries.size() !=
+            manifest.first.padded_blocks.size() + 1) {
+        if (why != nullptr && why->empty()) {
+            *why = "sha_call_boundaries";
+        }
+        return false;
+    }
+    if (boundaries.size() >
+        ha::kFixedProgramVerticalSemanticInstances) {
+        if (why != nullptr) {
+            *why = "sha_call_shard_capacity";
+        }
+        return false;
+    }
+    const auto program =
+        ha::BuildCanonicalProgram(
+            ha::ProgramKind::Sha256Compression);
+    std::vector<std::vector<uint8_t>> public_masks(
+        boundaries.size(),
+        std::vector<uint8_t>(
+            program.external_address_count, 1));
+    std::vector<ha::FixedProgramWitnessBoundaryLink> links;
+    const uint32_t first_blocks =
+        static_cast<uint32_t>(
+            manifest.first.padded_blocks.size());
+    for (uint32_t block = 0; block < first_blocks; ++block) {
+        const uint32_t target =
+            block + 1 < first_blocks ? block + 1
+                                     : first_blocks;
+        const uint32_t target_address =
+            block + 1 < first_blocks ? 17 : 1;
+        for (uint32_t word = 0; word < 8; ++word) {
+            links.push_back({
+                .source_instance = block,
+                .source_final_word = word,
+                .target_instance = target,
+                .target_external_address =
+                    target_address + word,
+            });
+            public_masks[target]
+                [target_address + word - 1] = 0;
+        }
+    }
+    auto instance =
+        ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+            program, boundaries, public_masks, links,
+            air_seed);
+    if (!instance.valid) {
+        if (why != nullptr) {
+            *why = instance.note;
+        }
+        return false;
+    }
+    if (!ShaVerticalBoundaryAirSatisfies(
+            instance.cs, instance.columns)) {
+        if (why != nullptr) {
+            *why = "sha_call_boundary_air_violations";
+        }
+        return false;
+    }
+    if (compression_count != nullptr) {
+        *compression_count =
+            static_cast<uint32_t>(boundaries.size());
+    }
+    if (instance_out != nullptr) {
+        *instance_out = std::move(instance);
+    }
+    return true;
+}
+
+} // namespace
+
+FiatShamirShaRecursivelyConsumedV1
+MeasureFiatShamirShaRecursivelyConsumedV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof)
+{
+    namespace ha = stage3_hash_air;
+    FiatShamirShaRecursivelyConsumedV1 out;
+    const FiatShamirShaExecutionPlanV1 plan =
+        BuildFiatShamirShaExecutionPlanV1(
+            program, child_fs_seed, child_proof);
+    out.digest_plan_ready =
+        plan.valid && plan.every_digest_matches_claim;
+    if (!out.digest_plan_ready) {
+        out.note =
+            "stage3:verifier_air:fs_sha_recursive:"
+            "digest_plan_open:" +
+            plan.note;
+        return out;
+    }
+    out.sha_calls = plan.calls;
+    out.compression_instances =
+        plan.compression_instances;
+
+    MultiRowV2ShaRecorderV1 recorder;
+    for (uint32_t i = 0; i < plan.call.size(); ++i) {
+        const auto& call = plan.call[i];
+        if (call.preimage.empty() ||
+            !recorder.Record(
+                MultiRowV2TranscriptShaCallKindV1::
+                    QueryIndex,
+                i,
+                0,
+                /*transcript_bytes=*/0,
+                static_cast<uint32_t>(call.preimage.size()),
+                call.preimage,
+                call.digest,
+                /*share_transcript_prefix=*/false)) {
+            out.note =
+                "stage3:verifier_air:fs_sha_recursive:"
+                "record_call";
+            return out;
+        }
+    }
+    const MultiRowV2TranscriptShaPlanV1 schedule =
+        BuildMultiRowV2TranscriptShaPlanV1(recorder.calls);
+    out.parent_shards = schedule.parent_shards;
+    out.recursive_levels = schedule.recursive_levels;
+    out.recursive_nodes =
+        static_cast<uint32_t>(schedule.recursive_nodes.size());
+    out.schedule_exact =
+        schedule.valid &&
+        schedule.exact_call_order &&
+        schedule.every_compression_sharded_once &&
+        schedule.shard_capacity_respected &&
+        schedule.arity_four_manifest_complete &&
+        schedule.sha256d_calls == plan.calls &&
+        !schedule.schedule_statement.IsNull() &&
+        !schedule.recursive_root_statement.IsNull();
+    if (!out.schedule_exact) {
+        out.note =
+            "stage3:verifier_air:fs_sha_recursive:"
+            "schedule:" +
+            schedule.note;
+        return out;
+    }
+
+    // Recompute every shard / arity-4 node statement; collect leaf coverage.
+    std::set<uint256> shard_statements;
+    for (const auto& shard : schedule.shards) {
+        const uint256 recomputed =
+            CommitMultiRowV2ShaShardV1(
+                shard, schedule.calls);
+        if (recomputed.IsNull() ||
+            recomputed != shard.shard_statement) {
+            out.note =
+                "stage3:verifier_air:fs_sha_recursive:"
+                "shard_statement";
+            return out;
+        }
+        shard_statements.insert(shard.shard_statement);
+    }
+    std::set<uint256> leaf_statements;
+    if (schedule.recursive_nodes.empty()) {
+        // Single-shard canary: the root IS the sole shard statement.
+        if (schedule.shards.size() != 1 ||
+            schedule.recursive_root_statement !=
+                schedule.shards.front().shard_statement) {
+            out.note =
+                "stage3:verifier_air:fs_sha_recursive:"
+                "single_shard_root";
+            return out;
+        }
+        leaf_statements.insert(
+            schedule.shards.front().shard_statement);
+    } else {
+        for (const auto& node : schedule.recursive_nodes) {
+            const uint256 recomputed =
+                CommitMultiRowV2RecursiveNodeV1(node);
+            if (recomputed.IsNull() ||
+                recomputed != node.node_statement) {
+                out.note =
+                    "stage3:verifier_air:fs_sha_recursive:"
+                    "node_statement";
+                return out;
+            }
+            if (node.level == 1) {
+                for (uint32_t child = 0;
+                     child < node.child_count; ++child) {
+                    leaf_statements.insert(
+                        node.child_statements[child]);
+                }
+            }
+        }
+        if (schedule.recursive_root_statement !=
+            schedule.recursive_nodes.back().node_statement &&
+            schedule.recursive_levels > 0) {
+            // Root must equal the unique top-level node statement.
+            bool root_found = false;
+            for (const auto& node : schedule.recursive_nodes) {
+                if (node.node_statement ==
+                    schedule.recursive_root_statement) {
+                    root_found = true;
+                    break;
+                }
+            }
+            if (!root_found) {
+                out.note =
+                    "stage3:verifier_air:fs_sha_recursive:"
+                    "root_missing";
+                return out;
+            }
+        }
+    }
+    out.arity_four_join_complete =
+        leaf_statements == shard_statements &&
+        shard_statements.size() == schedule.shards.size();
+    out.shards_joined =
+        static_cast<uint32_t>(leaf_statements.size());
+    if (!out.arity_four_join_complete) {
+        out.note =
+            "stage3:verifier_air:fs_sha_recursive:"
+            "arity4_leaf_coverage";
+        return out;
+    }
+
+    // Per-call exact SHA256d boundary inventory + one vertical AIR canary on
+    // the first call (recursive consumer seam). Full FRI / whole-verifier
+    // SHA equations remain the separate gap predicate.
+    HashWriter seed_hash;
+    seed_hash << "BTX_RC_STAGE3_FS_SHA_RECURSIVE_AIR_V1";
+    seed_hash << child_fs_seed;
+    seed_hash << schedule.schedule_statement;
+    const uint256 air_seed = seed_hash.GetHash();
+    ha::FixedProgramVerticalWitnessBoundaryInstance
+        first_instance;
+    bool have_first = false;
+    std::vector<ha::FixedProgramBoundaryInstance>
+        first_boundaries;
+    const auto program_sha =
+        ha::BuildCanonicalProgram(
+            ha::ProgramKind::Sha256Compression);
+    for (uint32_t i = 0; i < plan.call.size(); ++i) {
+        const auto& call = plan.call[i];
+        ha::ShaManifest manifest;
+        std::string why;
+        if (!ha::BuildShaManifest(
+                call.preimage, ha::ShaMode::Double,
+                manifest, &why)) {
+            out.note =
+                "stage3:verifier_air:fs_sha_recursive:"
+                "manifest:" +
+                why;
+            return out;
+        }
+        const uint256 digest{
+            Span<const unsigned char>{
+                manifest.digest.data(),
+                manifest.digest.size()}};
+        if (digest != call.digest) {
+            out.note =
+                "stage3:verifier_air:fs_sha_recursive:"
+                "digest_mismatch";
+            return out;
+        }
+        std::vector<ha::FixedProgramBoundaryInstance>
+            boundaries;
+        if (!ha::BuildShaManifestBoundaryInstances(
+                manifest, boundaries, &why) ||
+            boundaries.empty() ||
+            boundaries.size() !=
+                manifest.first.padded_blocks.size() + 1 ||
+            boundaries.size() >
+                ha::kFixedProgramVerticalSemanticInstances) {
+            out.note =
+                "stage3:verifier_air:fs_sha_recursive:"
+                "boundaries:" +
+                why;
+            return out;
+        }
+        if (!have_first) {
+            HashWriter call_seed;
+            call_seed << air_seed;
+            call_seed << i;
+            uint32_t compressions = 0;
+            if (!BuildAndCheckShaCallVerticalBoundaryAir(
+                    call.preimage, call.digest,
+                    call_seed.GetHash(), &compressions,
+                    &first_instance, &why)) {
+                out.note =
+                    "stage3:verifier_air:fs_sha_recursive:"
+                    "boundary_air:" +
+                    why;
+                return out;
+            }
+            first_boundaries = std::move(boundaries);
+            have_first = true;
+        }
+        ++out.calls_boundary_air_green;
+    }
+    out.shard_boundary_airs_execute =
+        out.calls_boundary_air_green == plan.calls &&
+        plan.calls > 0 && have_first &&
+        first_instance.valid;
+
+    // Tamper 1: flip a level-1 child statement (or relabel the sole shard).
+    out.join_tamper_rejects = false;
+    if (schedule.recursive_nodes.empty()) {
+        auto relabel = schedule.shards.front();
+        relabel.shard_statement.data()[0] ^= 1U;
+        out.join_tamper_rejects =
+            CommitMultiRowV2ShaShardV1(
+                relabel, schedule.calls) !=
+            relabel.shard_statement;
+    } else {
+        auto node = schedule.recursive_nodes.front();
+        for (const auto& candidate :
+             schedule.recursive_nodes) {
+            if (candidate.level == 1) {
+                node = candidate;
+                break;
+            }
+        }
+        const uint256 honest =
+            CommitMultiRowV2RecursiveNodeV1(node);
+        node.child_statements[0].data()[0] ^= 1U;
+        const uint256 bad =
+            CommitMultiRowV2RecursiveNodeV1(node);
+        out.join_tamper_rejects =
+            !honest.IsNull() &&
+            (bad.IsNull() || bad != honest);
+    }
+
+    // Tamper 2: flip a final digest word on the first call's boundaries.
+    out.boundary_tamper_rejects = false;
+    if (have_first && !first_boundaries.empty()) {
+        auto forged = first_boundaries;
+        forged.back().final_words[0] ^= 1U;
+        std::vector<std::vector<uint8_t>> public_masks(
+            forged.size(),
+            std::vector<uint8_t>(
+                program_sha.external_address_count, 1));
+        std::vector<ha::FixedProgramWitnessBoundaryLink> links;
+        const uint32_t first_blocks =
+            static_cast<uint32_t>(forged.size() - 1);
+        for (uint32_t block = 0; block < first_blocks;
+             ++block) {
+            const uint32_t target =
+                block + 1 < first_blocks ? block + 1
+                                         : first_blocks;
+            const uint32_t target_address =
+                block + 1 < first_blocks ? 17 : 1;
+            for (uint32_t word = 0; word < 8; ++word) {
+                links.push_back({
+                    .source_instance = block,
+                    .source_final_word = word,
+                    .target_instance = target,
+                    .target_external_address =
+                        target_address + word,
+                });
+                public_masks[target]
+                    [target_address + word - 1] = 0;
+            }
+        }
+        HashWriter call_seed;
+        call_seed << air_seed;
+        call_seed << uint32_t{0};
+        const auto bad_instance =
+            ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+                program_sha, forged, public_masks, links,
+                call_seed.GetHash());
+        // Forged finals must diverge the public statement or fail to build.
+        out.boundary_tamper_rejects =
+            !bad_instance.valid ||
+            bad_instance.public_statement !=
+                first_instance.public_statement;
+    }
+
+    out.consumed =
+        out.digest_plan_ready && out.schedule_exact &&
+        out.arity_four_join_complete &&
+        out.shard_boundary_airs_execute &&
+        out.join_tamper_rejects &&
+        out.boundary_tamper_rejects;
+    out.note =
+        out.consumed
+            ? ("stage3:verifier_air:fs_sha_recursive:ok;"
+               "calls=" +
+               std::to_string(out.sha_calls) +
+               ";shards=" +
+               std::to_string(out.parent_shards) +
+               ";joined=" +
+               std::to_string(out.shards_joined) +
+               ";air=" +
+               std::to_string(out.calls_boundary_air_green) +
+               ";levels=" +
+               std::to_string(out.recursive_levels) +
+               ";tamper=1")
+            : ("stage3:verifier_air:fs_sha_recursive:open;"
+               "schedule=" +
+               std::to_string(out.schedule_exact ? 1 : 0) +
+               ";join=" +
+               std::to_string(
+                   out.arity_four_join_complete ? 1 : 0) +
+               ";air=" +
+               std::to_string(
+                   out.shard_boundary_airs_execute ? 1
+                                                   : 0) +
+               ";join_tamper=" +
+               std::to_string(
+                   out.join_tamper_rejects ? 1 : 0) +
+               ";boundary_tamper=" +
+               std::to_string(
+                   out.boundary_tamper_rejects ? 1 : 0));
+    return out;
 }
 
 MultiRowV2SplitRapVerifierWitnessV1

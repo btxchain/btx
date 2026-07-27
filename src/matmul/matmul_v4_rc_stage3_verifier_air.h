@@ -693,6 +693,43 @@ MeasureFiatShamirAirBackedAllKindsV1(
     const AlgAirProof& child_proof);
 
 /**
+ * Parent SHA-shard recursive consumption for the bounded Fiat–Shamir plan.
+ *
+ * Reuses MultiRow-V2 SHA scheduling: each exact SHA256d call is recorded,
+ * sharded at ≤63 compressions, and joined by the arity-four recursive
+ * manifest. Every call expands to exact SHA manifests/boundaries; the first
+ * call additionally builds a FixedProgram vertical witness-boundary instance
+ * whose AIR columns satisfy the constraint system (recursive consumer seam).
+ * A recursive-node child-statement tamper and a boundary final-word tamper
+ * must both go red. Does NOT flip kVerifierFiatShamirAirExecutable —
+ * whole-verifier SHA equations remain a separate gap predicate.
+ */
+struct FiatShamirShaRecursivelyConsumedV1 {
+    uint32_t sha_calls{0};
+    uint64_t compression_instances{0};
+    uint32_t parent_shards{0};
+    uint32_t recursive_levels{0};
+    uint32_t recursive_nodes{0};
+    uint32_t shards_joined{0};
+    uint32_t calls_boundary_air_green{0};
+    bool digest_plan_ready{false};
+    bool schedule_exact{false};
+    bool shard_boundary_airs_execute{false};
+    bool arity_four_join_complete{false};
+    bool join_tamper_rejects{false};
+    bool boundary_tamper_rejects{false};
+    /** Gap predicate: schedule + join + boundary AIRs + both tampers. */
+    bool consumed{false};
+    std::string note;
+};
+
+[[nodiscard]] FiatShamirShaRecursivelyConsumedV1
+MeasureFiatShamirShaRecursivelyConsumedV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof);
+
+/**
  * Rewrite batch.lambda/z1/z2/w/fold/query draws to the SHA256d transcript
  * selection for `program` (ood_candidates>=1 for the OOD window).  Leaves a
  * P2-squeezed production proof's FRI openings inconsistent with the new z —
