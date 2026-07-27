@@ -3180,19 +3180,15 @@ bool RCStage3CoupledRelationEnginesReady(std::string* why)
 {
     static_assert(!kRCStage3CoupledRelationEnginesReady,
                   "Flip only after all eight engines are measured green");
-    // BankDequantPagesV1 + GemmDotTilesV1 + BankSeedXofV1 + BankPageInclusionV1
-    // + ExchangeStagesV1 + PermutationStagesV1 + MixArithmeticV1 +
-    // ExtractTilesV1 + BarrierSha256dV1 + DigestSha256dV1 are packaged; Ready
-    // flips to true once measured evidence lands and the constexpr is set.
-    // CommitmentOpeningBridge + RecursiveAggregation remain AirGaps (tracked
-    // by AirRegistryReady / kRCStage3RecursiveAggregationReady), not Ready
-    // blockers for this engines predicate.
+    // Bank/GEMM/Exchange/Perm packaged earlier; Barrier/Digest EXIT:0
+    // (≈51/73 MiB); MixArithmeticV1 EXIT:0 (338685623 bytes ≈323 MiB under
+    // 512 MiB cap). ExtractTilesV1 still pending remasure under 512 MiB
+    // (failed *:oversize at 256). CommitmentOpeningBridge +
+    // RecursiveAggregation remain AirGaps (tracked by AirRegistryReady /
+    // kRCStage3RecursiveAggregationReady), not Ready blockers for this
+    // engines predicate.
     if (!kRCStage3CoupledRelationEnginesReady) {
-        // BarrierSha256dV1 / DigestSha256dV1 measured green on macpro2
-        // (51 089 683 / 76 525 971 bytes, EXIT:0, ~674s). MixArithmeticV1 +
-        // ExtractTilesV1 still pending remasure under the 512 MiB engine
-        // receipt cap (both hit oversize at 256 MiB).
-        return Fail(why, "proof_engines_pending_measure:extract,mix");
+        return Fail(why, "proof_engines_pending_measure:extract");
     }
     if (why != nullptr) *why = "stage3:coupled:engines_ready";
     return true;
