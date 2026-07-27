@@ -1367,6 +1367,14 @@ RCStage3RecursiveProveResult ProveRCStage3RecursiveProof(
     for (const AirProof& child : children) {
         ChildPI pi = air_recurse::ExtractChildPublicInputs(
             child_cs, child, child_fs_seed);
+        // ExtractChildPublicInputs never fills endpoint_authority_roots: they
+        // are proof-external metadata (the endpoints a role's C_rho opens),
+        // not something derivable from the FRI proof bytes alone. child_shape
+        // is the caller's pin for THIS role/shape, so it carries the real
+        // committed roots; without this, every RCStage3RoleIsInCsClosable
+        // role's resolver rejects the pin as empty-roots (see
+        // matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp).
+        pi.endpoint_authority_roots = child_shape.endpoint_authority_roots;
         pi.child_constraints.clear();
         pi.ok = true;
         pi.note.clear();
@@ -1392,6 +1400,10 @@ RCStage3RecursiveProveResult ProveRCStage3RecursiveProof(
     out.proof.root = std::move(aggregate.proof);
     out.proof.children.reserve(aggregate.pis.size());
     for (auto& pi : aggregate.pis) {
+        // Same reasoning as preliminary_pins above: thread the real roots
+        // onto the post-aggregate pins too, so the carrier this function
+        // returns resolves for the same reason it committed to above.
+        pi.endpoint_authority_roots = child_shape.endpoint_authority_roots;
         pi.child_constraints.clear();
         pi.ok = true;
         pi.note.clear();
