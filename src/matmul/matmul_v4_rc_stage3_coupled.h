@@ -34,12 +34,33 @@ namespace matmul::v4::rc {
 
 inline constexpr uint32_t kRCStage3CoupledReceiptMagic = 0x31524343U; // "CCR1"
 inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
-inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 2U * 1024U * 1024U;
+/** Per-relation opaque engine payload bound. Sized to admit a small
+ * BankDequantPagesV1 witness (one or two lobe_width=32 pages of Split-RAP
+ * row proofs) while still rejecting multi-MiB forgeries. Production shapes
+ * must aggregate under recursion before this bound can carry every page. */
+inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 4U * 1024U * 1024U;
 
 /** Consensus proof-engine ABI. The identifier reserves a stable encoding; it
  * does not imply that the engine is implemented or ready. */
 enum class RCStage3CoupledProofEngine : uint16_t {
     ProofOnlyV1 = 1,
+    /**
+     * CoupledBank ONLY. A real, executable Split-RAP AirQuotient proof of the
+     * six-column endpoint-28 dequant relation
+     * (BuildRCStage3CoupledBankDequantProgramTableCanonical /
+     * VerifyRCStage3CoupledBankDequantProof) for every one of the receipt's
+     * declared bank pages. See BuildRCStage3CoupledBankDequantEngineReceipt /
+     * VerifyRCStage3CoupledBankDequantEngineReceipt below for the exact
+     * honest scope: it proves mu*(1+e0)*(1+3e1)=output for every declared
+     * page and binds `trace_root` to the ordered page commitments, but does
+     * NOT prove the mantissa/scale witness is the honest SHA-XOF expansion
+     * of the bank seed (BankSeedXof gap) or that the proved pages are the
+     * ones the barrier/lobe schedule actually selects (BankPageInclusion
+     * gap) -- see RCStage3CoupledAirGapCode. It therefore does not, by
+     * itself, retire CoupledBank's Gap() or move
+     * kRCStage3CoupledRelationEnginesReady.
+     */
+    BankDequantPagesV1 = 2,
 };
 
 /** Public coupled shape/options copied into every relation receipt. Test-only
@@ -152,6 +173,74 @@ VerifyRCStage3CoupledRelations(const RCStage3SuccinctProof& proof,
 /** Hard readiness predicate for consensus composition. */
 [[nodiscard]] bool RCStage3CoupledRelationEnginesReady(std::string* why = nullptr);
 inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
+
+// ============================================================================
+// CoupledBank real proof-only engine (BankDequantPagesV1).
+//
+// This is the first non-stub RCStage3CoupledProofEngine dispatch: a genuine
+// Split-RAP AirQuotient proof/verify round trip over the existing production
+// six-column dequant relation, reused byte-for-byte from
+// BuildRCStage3CoupledBankDequantProgramTableCanonical /
+// VerifyRCStage3CoupledBankDequantProof (matmul_v4_rc_stage3_coupled_bank_product.*),
+// the same relation already exercised by ProveRCStage3CoupledBankProduct.
+//
+// Honest scope: for every declared page it proves
+//   output = mantissa * (1+e0) * (1+3*e1)   with e0,e1 booleans, e=e0+2*e1,
+// over `shape.lobe_width * shape.lobe_width` cells, and binds the proof to
+// `statement_commitment` / `coupled_shape_commitment` / `sigma` so a proof
+// cannot be replayed across statements or shapes. It returns an aggregate
+// `trace_root` (a domain-separated hash of the ordered per-page R0 row-group
+// roots); the caller (VerifyProofOnlyEngine) requires this to equal the
+// receipt's own `trace_root`, so a receipt cannot claim a trace this engine
+// did not verify.
+//
+// NOT covered (see RCStage3CoupledAirGapCode / RCStage3CoupledBankProductAudit):
+//   - BankSeedXof:       the mantissa/scale witness is not tied to the honest
+//                        SHA-XOF expansion of the bank root seed.
+//   - BankPageInclusion: the proved pages are not tied to the barrier/lobe
+//                        selection schedule (`secondary_count` scheduled
+//                        instances) -- only their raw byte content.
+// Consequently this engine is real cryptography for a real sub-relation, but
+// does not by itself retire CoupledBank's Gap(), close
+// RCStage3CoupledAirRegistryReady for CoupledBank, or move
+// kRCStage3CoupledRelationEnginesReady.
+// ============================================================================
+
+/** One page's honest dequant witness: `mantissa`/`scale` must both have
+ * exactly `shape.lobe_width * shape.lobe_width` entries, one per output
+ * cell, with `scale` values in [0,3]. */
+struct RCStage3CoupledBankDequantPageWitness {
+    std::vector<int8_t> mantissa;
+    std::vector<uint8_t> scale;
+
+    bool operator==(const RCStage3CoupledBankDequantPageWitness&) const = default;
+};
+
+/** Bounded prover helper. Builds one real Split-RAP AirQuotient proof per
+ * page and serializes them into an opaque `engine_receipt` payload suitable
+ * for RCStage3CoupledRelationReceipt::engine_receipt when
+ * `engine == BankDequantPagesV1`. `pages.size()` must equal `shape.bank_pages`
+ * and pages must be supplied in page-index order. */
+[[nodiscard]] bool BuildRCStage3CoupledBankDequantEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<RCStage3CoupledBankDequantPageWitness>& pages,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+/** Verify every page proof in `engine_receipt` and return the aggregate
+ * trace root it commits to. Never performs native bank derivation. */
+[[nodiscard]] bool VerifyRCStage3CoupledBankDequantEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
 
 } // namespace matmul::v4::rc
 
