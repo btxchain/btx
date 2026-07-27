@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_coupled.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
 
 #include <test/util/setup_common.h>
 
@@ -11,6 +12,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
 #include <string>
 #include <vector>
@@ -237,6 +239,9 @@ BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_without_proof_only_engines)
     BOOST_CHECK(!rc::kRCStage3CoupledRelationEnginesReady);
     BOOST_CHECK(!rc::RCStage3CoupledRelationEnginesReady(&why));
     BOOST_CHECK(why.find("proof_engines_missing") != std::string::npos);
+    BOOST_CHECK(why.find("bank_seed_xof") == std::string::npos);
+    BOOST_CHECK(why.find("bank_page_inclusion") == std::string::npos);
+    BOOST_CHECK(why.find("exchange") != std::string::npos);
     BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(proof, &why));
     BOOST_CHECK(why.find("coupled:bank:recursive_decode") !=
                 std::string::npos);
@@ -918,6 +923,123 @@ BOOST_AUTO_TEST_CASE(coupled_gemm_dot_engine_wires_into_full_relation_verifier)
             why.find("dot_air") != std::string::npos,
         why);
     BOOST_CHECK(why.find("coupled:exchange") == std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_bank_page_inclusion_engine_roundtrip_and_mutations)
+{
+    const auto shape = MakeBankDequantEngineTestShape();
+    const auto statement = MakeGemmDotEngineStatement(shape);
+    const uint256 sigma = statement.public_inputs.sigma;
+    const uint256 statement_commitment =
+        rc::CommitRCStage3CoupledStatement(statement.public_inputs);
+    const uint256 shape_commitment = rc::CommitRCStage3CoupledShape(shape);
+
+    std::vector<std::vector<int8_t>> pages(shape.bank_pages);
+    const uint32_t logical = shape.lobe_width * shape.lobe_width;
+    for (uint32_t p = 0; p < shape.bank_pages; ++p) {
+        pages[p].resize(logical);
+        for (uint32_t cell = 0; cell < logical; ++cell) {
+            pages[p][cell] =
+                static_cast<int8_t>((static_cast<int>(cell) + static_cast<int>(p) * 3) % 17 - 8);
+        }
+    }
+
+    std::vector<unsigned char> receipt;
+    uint256 trace_root;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledBankPageInclusionEngineReceipt(
+            statement, shape, sigma, pages, receipt, trace_root, &why),
+        why);
+    BOOST_CHECK(!receipt.empty());
+    BOOST_CHECK(!trace_root.IsNull());
+
+    uint256 verified_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, receipt,
+            verified_root, &why),
+        why);
+    BOOST_CHECK(verified_root == trace_root);
+
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+        shape, Filled(0xaa), shape_commitment, sigma, receipt, verified_root, &why));
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+        shape, statement_commitment, Filled(0xbb), sigma, receipt, verified_root, &why));
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+        shape, statement_commitment, shape_commitment, Filled(0xcc), receipt,
+        verified_root, &why));
+    auto bad = receipt;
+    bad.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+        shape, statement_commitment, shape_commitment, sigma, bad, verified_root, &why));
+
+    auto wrong_pages = pages;
+    wrong_pages[0][0] ^= 1;
+    std::vector<unsigned char> wrong_receipt;
+    uint256 wrong_root;
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledBankPageInclusionEngineReceipt(
+        statement, shape, sigma, wrong_pages, wrong_receipt, wrong_root, &why));
+    BOOST_CHECK(wrong_root != trace_root);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_bank_seed_xof_engine_opt_in_roundtrip)
+{
+    // Full FlatBoundary packaging for lobe_width=32 is multi-minute; keep the
+    // default suite fast. Set BTX_RUN_STAGE3_BANK_SEED_XOF_ENGINE=1 (and
+    // MemoryMax≥40G) to exercise the real BankSeedXofV1 prove/verify path.
+    // Prototype evidence for Gap clearance remains
+    // matmul_v4_rc_stage3_coupled_bank_product_tests.
+    if (std::getenv("BTX_RUN_STAGE3_BANK_SEED_XOF_ENGINE") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_BANK_SEED_XOF_ENGINE=1 to run BankSeedXofV1 "
+            "engine roundtrip");
+        return;
+    }
+
+    CBlockHeader header;
+    header.nVersion = 7;
+    header.hashPrevBlock = Filled(0x10);
+    header.hashMerkleRoot = Filled(0x20);
+    header.nTime = 123456;
+    header.nBits = 0x207fffffU;
+    header.nNonce = 99;
+    header.nNonce64 = 123;
+    header.seed_a = Filled(0x30);
+    header.seed_b = Filled(0x40);
+    header.matmul_digest = Filled(0x50);
+
+    const auto shape = MakeBankDequantEngineTestShape();
+    rc::RCStage3SuccinctProof statement;
+    statement.statement = rc::RCStage3StatementKind::Coupled;
+    statement.public_inputs.height = 700;
+    statement.public_inputs.n_bits = header.nBits;
+    statement.public_inputs.coupled_profile = 4;
+    statement.public_inputs.transcript_version = shape.transcript_version;
+    statement.public_inputs.header_commitment = rc::RCStage3HeaderCommitment(header);
+    statement.public_inputs.params_commitment = Filled(0x22);
+    statement.public_inputs.target = Filled(0xff);
+    statement.public_inputs.sigma = Filled(0x33);
+    statement.public_inputs.coupled_digest = Filled(0x44);
+    statement.public_inputs.final_digest = Filled(0x44);
+
+    std::vector<unsigned char> receipt;
+    uint256 trace_root;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledBankSeedXofEngineReceipt(
+            statement, header, shape, receipt, trace_root, &why),
+        why);
+    BOOST_CHECK(!receipt.empty());
+    BOOST_CHECK(receipt.size() <= rc::kRCStage3CoupledMaxEngineReceiptBytes);
+
+    uint256 verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledBankSeedXofEngineReceipt(
+            statement, shape, receipt, verified, &why),
+        why);
+    BOOST_CHECK(verified == trace_root);
+    BOOST_TEST_MESSAGE("BankSeedXofV1 engine_bytes=" << receipt.size());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
