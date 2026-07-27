@@ -1756,6 +1756,98 @@ BuildFiatShamirShaExecutionPlanV1(
                 FiatShamirEventKind::ChallengeZ1 ||
             spec.kind ==
                 FiatShamirEventKind::ChallengeZ2) {
+            const bool is_z1 =
+                spec.kind ==
+                FiatShamirEventKind::ChallengeZ1;
+            const Fp3 claimed =
+                is_z1 ? child_proof.batch.z1
+                      : child_proof.batch.z2;
+            if (program.ood_candidates > 0) {
+                // Bounded fixed schedule: one SHA draw per reserved candidate
+                // slot. Emit the whole K-candidate window on the first event
+                // of each OOD kind; later reserved-index events are no-ops.
+                if (spec.index != 0) {
+                    continue;
+                }
+                std::vector<Fp3> candidates;
+                candidates.reserve(
+                    program.ood_candidates);
+                struct PendingCall {
+                    uint32_t draw{0};
+                    std::vector<unsigned char> preimage;
+                    std::vector<Origin> origins;
+                };
+                std::vector<PendingCall> pending;
+                pending.reserve(
+                    program.ood_candidates);
+                for (uint32_t k = 0;
+                     k < program.ood_candidates;
+                     ++k) {
+                    const uint32_t draw = z_counter++;
+                    auto preimage_and_origins =
+                        challenge_preimage(
+                            "fra3_z", draw);
+                    const uint256 digest =
+                        Sha256dBytes(
+                            preimage_and_origins
+                                .first.data(),
+                            preimage_and_origins
+                                .first.size());
+                    candidates.push_back(
+                        gf::FromChallengeBytes3(
+                            digest.data()));
+                    pending.push_back({
+                        draw,
+                        std::move(
+                            preimage_and_origins
+                                .first),
+                        std::move(
+                            preimage_and_origins
+                                .second)});
+                }
+                const Fp3* distinct_from =
+                    have_z1 ? &selected_z1 : nullptr;
+                const uint32_t selected_idx =
+                    SelectFirstAcceptableOodIndex(
+                        candidates, distinct_from);
+                if (selected_idx >=
+                    program.ood_candidates) {
+                    out.note =
+                        "stage3:verifier_air:"
+                        "fs_sha_bounded_z_exhausted";
+                    return out;
+                }
+                if (!gf::Eq(
+                        candidates[selected_idx],
+                        claimed)) {
+                    out.note =
+                        "stage3:verifier_air:"
+                        "fs_sha_bounded_z_mismatch";
+                    return out;
+                }
+                for (uint32_t k = 0;
+                     k < program.ood_candidates;
+                     ++k) {
+                    // Selected draw already Eq-checked against the claim;
+                    // rejected / post-selected reserved slots are honest
+                    // no-ops under the fixed selector.
+                    append_call(
+                        event_index,
+                        pending[k].draw,
+                        std::move(
+                            pending[k].preimage),
+                        std::move(
+                            pending[k].origins),
+                        true);
+                }
+                if (is_z1) {
+                    selected_z1 =
+                        candidates[selected_idx];
+                    have_z1 = true;
+                }
+                continue;
+            }
+            // Legacy V3: unbounded while(true) rejection sampler.
             bool selected = false;
             for (uint32_t attempt = 0;
                  attempt <
@@ -1800,9 +1892,7 @@ BuildFiatShamirShaExecutionPlanV1(
                     semantic_match);
                 if (!accepted) continue;
                 selected = semantic_match;
-                if (spec.kind ==
-                    FiatShamirEventKind::
-                        ChallengeZ1) {
+                if (is_z1) {
                     selected_z1 = candidate;
                     have_z1 = true;
                 }
@@ -1918,10 +2008,13 @@ BuildFiatShamirShaExecutionPlanV1(
         out.manifest.size() ==
             out.call.size() &&
         !out.boundaries.empty();
-    // The accepted V3 trace is finite, but the protocol's OOD schedule is
-    // unbounded.  Do not promote this exact execution to a fixed recursive
-    // scheduler claim.
-    out.fixed_schedule = false;
+    // fixed_schedule is the recursive-AIR claim: a statically laid K-candidate
+    // OOD window whose all-rejected failure is proven <= 2^-target_bits.
+    // Legacy V3 (ood_candidates==0) is never a fixed schedule. K=1 is a fixed
+    // WIDTH but does not clear the 128-bit target, so it stays false.
+    out.fixed_schedule =
+        program.ood_candidates > 0 &&
+        program.rejection_loop_bounded;
     out.proof_codec_byte_origins_complete =
         std::all_of(
             out.call.begin(), out.call.end(),
@@ -1947,31 +2040,326 @@ BuildFiatShamirShaExecutionPlanV1(
                         case
                             FiatShamirShaByteOriginKindV1::
                                 SupplementalTraceCommit:
+                        case
+                            FiatShamirShaByteOriginKindV1::
+                                ParentBindingDigest:
                             return origin.byte_offset < 32;
                         case
                             FiatShamirShaByteOriginKindV1::
                                 BatchCodec:
                             return origin.byte_offset <
                                 batch_codec.size();
+                        case
+                            FiatShamirShaByteOriginKindV1::
+                                AlgebraicShapeCommitment:
+                        case
+                            FiatShamirShaByteOriginKindV1::
+                                AlgebraicOodEvalCommitment:
+                            // Poseidon2 commitment lanes: size-checked at
+                            // construction; SHA chip cannot own them.
+                            return origin.byte_offset < 32;
                         }
                         return false;
                     });
             });
     out.recursively_consumed = false;
+    const bool schedule_consistent =
+        out.fixed_schedule ==
+        (program.ood_candidates > 0 &&
+         program.rejection_loop_bounded);
     out.valid =
         out.exact_domain_tags_and_order &&
         out.every_digest_matches_claim &&
         out.exact_sha256d_padding_and_chaining &&
-        !out.fixed_schedule &&
+        schedule_consistent &&
         out.proof_codec_byte_origins_complete &&
         !out.recursively_consumed;
-    out.note = out.valid
-        ? "stage3:verifier_air:"
-          "legacy_fs_exact_sha_execution;"
-          "codec_origins_complete;"
-          "unbounded_z_and_recursive_consumption_open"
-        : "stage3:verifier_air:"
-          "legacy_fs_sha_execution_invalid";
+    if (out.valid) {
+        out.note =
+            out.fixed_schedule
+                ? "stage3:verifier_air:"
+                  "bounded_fs_exact_sha_execution;"
+                  "fixed_ood_schedule;"
+                  "codec_origins_complete;"
+                  "sha_air_and_recursive_consumption_open"
+                : "stage3:verifier_air:"
+                  "legacy_fs_exact_sha_execution;"
+                  "codec_origins_complete;"
+                  "unbounded_z_and_recursive_consumption_open";
+    } else {
+        out.note =
+            "stage3:verifier_air:"
+            "fs_sha_execution_invalid";
+    }
+    return out;
+}
+
+bool AlignAlgAirProofOodToBoundedShaScheduleV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    AlgAirProof& child_proof,
+    std::string* why)
+{
+    if (program.ood_candidates == 0 ||
+        !program.valid) {
+        if (why != nullptr) {
+            *why =
+                "stage3:verifier_air:"
+                "align_ood_requires_bounded_program";
+        }
+        return false;
+    }
+    const FiatShamirWitness witness =
+        BuildFiatShamirWitness(
+            program, child_fs_seed, child_proof);
+    if (!witness.valid ||
+        witness.events.size() !=
+            program.events.size()) {
+        if (why != nullptr) {
+            *why =
+                "stage3:verifier_air:align_ood_witness";
+        }
+        return false;
+    }
+    std::vector<unsigned char> transcript;
+    uint32_t z_counter = 0;
+    Fp3 selected_z1{};
+    Fp3 selected_z2{};
+    bool have_z1 = false;
+    bool have_z2 = false;
+    const auto challenge_digest =
+        [&transcript](
+            const char* label, uint32_t index) {
+            std::vector<unsigned char> preimage =
+                transcript;
+            preimage.insert(
+                preimage.end(),
+                reinterpret_cast<const unsigned char*>(
+                    label),
+                reinterpret_cast<const unsigned char*>(
+                    label) +
+                    std::strlen(label));
+            AppendU32(preimage, index);
+            return Sha256dBytes(
+                preimage.data(), preimage.size());
+        };
+    for (uint32_t event_index = 0;
+         event_index < program.events.size();
+         ++event_index) {
+        const auto& spec = program.events[event_index];
+        const auto& event = witness.events[event_index];
+        if (spec.kind ==
+            FiatShamirEventKind::AbsorbZ1Z2) {
+            if (!have_z1 || !have_z2) {
+                if (why != nullptr) {
+                    *why =
+                        "stage3:verifier_air:"
+                        "align_ood_absorb_before_select";
+                }
+                return false;
+            }
+            AppendFp3(transcript, selected_z1);
+            AppendFp3(transcript, selected_z2);
+            continue;
+        }
+        if (!event.absorbed_payload.empty()) {
+            transcript.insert(
+                transcript.end(),
+                event.absorbed_payload.begin(),
+                event.absorbed_payload.end());
+            continue;
+        }
+        if (spec.kind ==
+                FiatShamirEventKind::ChallengeZ1 ||
+            spec.kind ==
+                FiatShamirEventKind::ChallengeZ2) {
+            if (spec.index != 0) continue;
+            std::vector<Fp3> candidates;
+            candidates.reserve(program.ood_candidates);
+            for (uint32_t k = 0;
+                 k < program.ood_candidates; ++k) {
+                const uint32_t draw = z_counter++;
+                const uint256 digest =
+                    challenge_digest("fra3_z", draw);
+                candidates.push_back(
+                    gf::FromChallengeBytes3(
+                        digest.data()));
+            }
+            const Fp3* distinct =
+                have_z1 ? &selected_z1 : nullptr;
+            const uint32_t selected =
+                SelectFirstAcceptableOodIndex(
+                    candidates, distinct);
+            if (selected >= program.ood_candidates) {
+                if (why != nullptr) {
+                    *why =
+                        "stage3:verifier_air:"
+                        "align_ood_exhausted";
+                }
+                return false;
+            }
+            if (spec.kind ==
+                FiatShamirEventKind::ChallengeZ1) {
+                selected_z1 = candidates[selected];
+                have_z1 = true;
+            } else {
+                selected_z2 = candidates[selected];
+                have_z2 = true;
+            }
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeW1) {
+            child_proof.batch.w1 =
+                gf::FromChallengeBytes3(
+                    challenge_digest("fra3_w", 0)
+                        .data());
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeW2) {
+            child_proof.batch.w2 =
+                gf::FromChallengeBytes3(
+                    challenge_digest("fra3_w", 1)
+                        .data());
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeFold) {
+            if (spec.index >=
+                child_proof.batch.fold_challenges
+                    .size()) {
+                if (why != nullptr) {
+                    *why =
+                        "stage3:verifier_air:"
+                        "align_ood_fold_index";
+                }
+                return false;
+            }
+            child_proof.batch.fold_challenges[spec.index] =
+                gf::FromChallengeBytes3(
+                    challenge_digest(
+                        "fra3_fold", spec.index)
+                        .data());
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeQueryIndex) {
+            if (spec.index >=
+                child_proof.batch.queries.size()) {
+                if (why != nullptr) {
+                    *why =
+                        "stage3:verifier_air:"
+                        "align_ood_query_index";
+                }
+                return false;
+            }
+            const Fp3 challenge =
+                gf::FromChallengeBytes3(
+                    challenge_digest(
+                        "fra3_query", spec.index)
+                        .data());
+            const unsigned __int128 wide =
+                (static_cast<unsigned __int128>(
+                     gf::Canonical(challenge.c1))
+                 << 64) |
+                gf::Canonical(challenge.c0);
+            if (program.child_shape.child_n_lde == 0) {
+                if (why != nullptr) {
+                    *why =
+                        "stage3:verifier_air:"
+                        "align_ood_query_lde";
+                }
+                return false;
+            }
+            child_proof.batch.queries[spec.index].index =
+                static_cast<uint32_t>(
+                    wide %
+                    program.child_shape.child_n_lde);
+            continue;
+        }
+    }
+    if (!have_z1 || !have_z2) {
+        if (why != nullptr) {
+            *why =
+                "stage3:verifier_air:align_ood_incomplete";
+        }
+        return false;
+    }
+    child_proof.batch.z1 = selected_z1;
+    child_proof.batch.z2 = selected_z2;
+    return true;
+}
+
+VerifierFiatShamirAirChipGapV1
+AssessVerifierFiatShamirAirChipGapV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof)
+{
+    VerifierFiatShamirAirChipGapV1 out;
+    out.bounded_ood_program_legislated =
+        program.valid && program.ood_candidates > 0;
+    out.bounded_ood_rejection_loop_bounded =
+        program.valid && program.rejection_loop_bounded;
+
+    AlgAirProof aligned = child_proof;
+    std::string align_why;
+    bool aligned_ok = true;
+    if (out.bounded_ood_program_legislated) {
+        aligned_ok =
+            AlignAlgAirProofOodToBoundedShaScheduleV1(
+                program, child_fs_seed, aligned,
+                &align_why);
+    }
+    const FiatShamirShaExecutionPlanV1 plan =
+        aligned_ok
+            ? BuildFiatShamirShaExecutionPlanV1(
+                  program, child_fs_seed, aligned)
+            : FiatShamirShaExecutionPlanV1{};
+    out.sha_execution_plan_valid = plan.valid;
+    out.sha_fixed_schedule = plan.fixed_schedule;
+    out.sha_codec_origins_complete =
+        plan.proof_codec_byte_origins_complete;
+    out.sha_recursively_consumed =
+        plan.recursively_consumed;
+    // Selection AIR / air-backed reconstruction / whole-verifier SHA
+    // equations remain open chips (measured false until joined).
+    out.challenge_selection_air_constrained = false;
+    out.air_backed_all_kinds_reconstructed = false;
+    out.whole_verifier_sha_equations_in_air = false;
+
+    const auto bump = [&](bool ok) {
+        if (!ok) ++out.open_predicates;
+    };
+    bump(out.bounded_ood_program_legislated);
+    bump(out.bounded_ood_rejection_loop_bounded);
+    bump(out.sha_execution_plan_valid);
+    bump(out.sha_fixed_schedule);
+    bump(out.sha_codec_origins_complete);
+    bump(out.sha_recursively_consumed);
+    bump(out.challenge_selection_air_constrained);
+    bump(out.air_backed_all_kinds_reconstructed);
+    bump(out.whole_verifier_sha_equations_in_air);
+    // Fail-closed: never claim executable while the constexpr is false.
+    out.executable_ready =
+        out.open_predicates == 0 &&
+        kVerifierFiatShamirAirExecutable;
+    out.note =
+        !aligned_ok && out.bounded_ood_program_legislated
+            ? ("stage3:verifier_air:fs_chip_gap:"
+               "bounded_align:" +
+               align_why)
+            : (std::string(
+                   "stage3:verifier_air:fs_chip_gap:") +
+               "open=" +
+               std::to_string(out.open_predicates) +
+               ";fixed_schedule=" +
+               (out.sha_fixed_schedule ? "1" : "0") +
+               ";plan_valid=" +
+               (out.sha_execution_plan_valid ? "1"
+                                             : "0") +
+               ";executable_constexpr=0");
     return out;
 }
 
