@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 
+#include <matmul/matmul_v4_rc_stage3_episode_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
@@ -94,6 +95,36 @@ bool RealFamilyFor(
             return false;
         }
         endpoint = RCStage3RelationEndpoint::EpisodeTileTreeStream;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeGemmSumcheck:
+        if (role != RCStage3RelationRole::EpisodeGemm) return false;
+        if (!BuildRCStage3EpisodeLocalKernelProgramTable(
+                RCStage3EpisodeAirFamily::GemmEndpointFp3V1,
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeGemmSumcheck;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeWiring:
+        if (role != RCStage3RelationRole::EpisodeWiring) return false;
+        if (!BuildRCStage3EpisodeLocalKernelProgramTable(
+                RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeWiringCopy;
+        return true;
+    case sites::ProductionProofSiteKind::EpisodeExtractCore:
+        if (role != RCStage3RelationRole::EpisodeExtract) return false;
+        // scale_e=0 is the canonical wired default (matches
+        // ResolveRCStage3EpisodeAirConstraintSystem's ExtractSamplerCoreFp3V1
+        // case); other public scale exponents are proved by the same
+        // builder at a different scale_e, not a different table shape.
+        if (!BuildRCStage3EpisodeExtractLocalKernelProgramTable(
+                /*scale_e=*/0, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::EpisodeExtractSampler;
         return true;
     default:
         return false;

@@ -141,11 +141,51 @@ BOOST_AUTO_TEST_CASE(
             rc::RCStage3RelationEndpoint::EpisodeTileTreeStream));
     BOOST_CHECK(tile.semantic_relation_complete);
 
+    const size_t gemm_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::EpisodeGemmSumcheck);
+    const auto& gemm = sources[gemm_idx];
+    BOOST_CHECK(gemm.role == rc::RCStage3RelationRole::EpisodeGemm);
+    BOOST_CHECK_EQUAL(gemm.program.current_width, 3U);
+    BOOST_CHECK_EQUAL(gemm.program.programs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(gemm.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        gemm.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::EpisodeGemmSumcheck));
+    BOOST_CHECK(gemm.semantic_relation_complete);
+
+    const size_t wiring_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::EpisodeWiring);
+    const auto& wiring = sources[wiring_idx];
+    BOOST_CHECK(wiring.role == rc::RCStage3RelationRole::EpisodeWiring);
+    BOOST_CHECK_EQUAL(wiring.program.current_width, 2U);
+    BOOST_CHECK_EQUAL(wiring.program.programs.size(), 1U);
+    BOOST_REQUIRE_EQUAL(wiring.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        wiring.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::EpisodeWiringCopy));
+    BOOST_CHECK(wiring.semantic_relation_complete);
+
+    const size_t extract_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::EpisodeExtractCore);
+    const auto& extract = sources[extract_idx];
+    BOOST_CHECK(extract.role == rc::RCStage3RelationRole::EpisodeExtract);
+    BOOST_CHECK_EQUAL(extract.program.current_width, aq::kRcSamplerNumCols);
+    BOOST_CHECK_EQUAL(extract.program.challenge_width, 2U);
+    BOOST_CHECK_EQUAL(extract.program.programs.size(), 47U);
+    BOOST_REQUIRE_EQUAL(extract.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        extract.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::EpisodeExtractSampler));
+    BOOST_CHECK(extract.semantic_relation_complete);
+
     // A site this session did not reach stays an honest, INCOMPLETE stub:
     // one column, one constraint, no endpoint claim -- not "complete" the way
     // the *_tests.cpp OneColumnProgram helper would mark it.
     const size_t untouched_idx = FindFamilyIndex(
-        manifest, ss::ProductionProofSiteKind::EpisodeGemmSumcheck);
+        manifest, ss::ProductionProofSiteKind::EpisodeGemmOpenings);
     const auto& untouched = sources[untouched_idx];
     BOOST_CHECK_EQUAL(untouched.program.current_width, 1U);
     BOOST_CHECK_EQUAL(untouched.program.programs.size(), 1U);
@@ -157,17 +197,28 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         status.families_total,
         static_cast<uint32_t>(manifest.entries.size()));
-    BOOST_CHECK_EQUAL(status.families_real, 3U);
-    BOOST_CHECK_EQUAL(status.roles_with_real_program, 3U);
+    BOOST_CHECK_EQUAL(status.families_real, 6U);
+    BOOST_CHECK_EQUAL(status.roles_with_real_program, 6U);
     BOOST_CHECK_EQUAL(status.roles_total, 14U);
     const std::vector<rc::RCStage3RelationRole> expected_roles{
         rc::RCStage3RelationRole::EpisodeDeterministicBuilder,
+        rc::RCStage3RelationRole::EpisodeGemm,
+        rc::RCStage3RelationRole::EpisodeExtract,
+        rc::RCStage3RelationRole::EpisodeWiring,
         rc::RCStage3RelationRole::EpisodeTileTree,
         rc::RCStage3RelationRole::EpisodeDigest};
-    BOOST_CHECK(status.real_roles == expected_roles);
+    auto sorted_roles = expected_roles;
+    std::sort(sorted_roles.begin(), sorted_roles.end());
+    BOOST_CHECK(status.real_roles == sorted_roles);
     const std::vector<uint16_t> expected_endpoints{
         static_cast<uint16_t>(
             rc::RCStage3RelationEndpoint::EpisodeBuilderTrace),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::EpisodeGemmSumcheck),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::EpisodeExtractSampler),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::EpisodeWiringCopy),
         static_cast<uint16_t>(
             rc::RCStage3RelationEndpoint::EpisodeTileTreeStream),
         static_cast<uint16_t>(
@@ -192,7 +243,7 @@ BOOST_AUTO_TEST_CASE(
     const auto registry = ut::BuildProductionProgramRegistryV1(
         manifest, schedule, sources, verifier, verifier);
     BOOST_REQUIRE(!registry.external_registry_commitment.IsNull());
-    // Honest: only 3 of 28 families are real, so the registry-wide
+    // Honest: only 6 of 28 families are real, so the registry-wide
     // completeness flag must stay false. A registry that flips this true
     // from stub-only or partially-real families would be exactly the
     // structural-only theatre this module exists to avoid.
@@ -210,44 +261,70 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GE(builder_entry.maximum_constraint_degree, 2U);
     BOOST_CHECK(builder_entry.semantic_relation_complete);
 
-    const size_t stub_idx = FindFamilyIndex(
+    const size_t gemm_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeGemmSumcheck);
+    const auto& gemm_entry = registry.families[gemm_idx];
+    BOOST_CHECK_EQUAL(gemm_entry.maximum_columns, 3U);
+    BOOST_CHECK_EQUAL(gemm_entry.constraint_count, 1U);
+    BOOST_CHECK(gemm_entry.semantic_relation_complete);
+
+    const size_t wiring_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::EpisodeWiring);
+    const auto& wiring_entry = registry.families[wiring_idx];
+    BOOST_CHECK_EQUAL(wiring_entry.maximum_columns, 2U);
+    BOOST_CHECK_EQUAL(wiring_entry.constraint_count, 1U);
+    BOOST_CHECK(wiring_entry.semantic_relation_complete);
+
+    const size_t extract_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::EpisodeExtractCore);
+    const auto& extract_entry = registry.families[extract_idx];
+    BOOST_CHECK_EQUAL(extract_entry.maximum_columns, aq::kRcSamplerNumCols);
+    BOOST_CHECK_EQUAL(extract_entry.constraint_count, 47U);
+    BOOST_CHECK(extract_entry.semantic_relation_complete);
+
+    const size_t stub_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::EpisodeGemmOpenings);
     const auto& stub_entry = registry.families[stub_idx];
     BOOST_CHECK_EQUAL(stub_entry.maximum_columns, 1U);
     BOOST_CHECK_EQUAL(stub_entry.constraint_count, 1U);
     BOOST_CHECK_EQUAL(stub_entry.maximum_constraint_degree, 1U);
     BOOST_CHECK(!stub_entry.semantic_relation_complete);
 
-    // Non-vacuity of the wiring itself: tampering the real program's bytes
-    // (not merely the stub) must change BOTH root commitments the registry
-    // is pinned by, proving the ProgramTable content actually flows into
-    // consensus-facing commitments rather than being decorative.
-    auto tampered_sources = sources;
-    auto& load = *std::find_if(
-        tampered_sources[builder_idx]
-            .program.programs.back()
-            .instructions.begin(),
-        tampered_sources[builder_idx]
-            .program.programs.back()
-            .instructions.end(),
-        [](const cb::Instruction& instr) {
-            return instr.opcode == cb::Opcode::Current;
-        });
-    load.lhs = (load.lhs + 1) %
-        tampered_sources[builder_idx].program.current_width;
-    const auto tampered_registry = ut::BuildProductionProgramRegistryV1(
-        manifest, schedule, tampered_sources, verifier, verifier);
-    BOOST_REQUIRE(!tampered_registry.external_registry_commitment.IsNull());
-    BOOST_CHECK(
-        tampered_registry.external_registry_commitment !=
-        registry.external_registry_commitment);
-    BOOST_CHECK(
-        tampered_registry.recursive_registry_commitment !=
-        registry.recursive_registry_commitment);
-    BOOST_CHECK(!ut::ValidateProductionProgramRegistryV1(
-        manifest, schedule, tampered_registry,
-        registry.external_registry_commitment,
-        registry.recursive_registry_commitment));
+    // Non-vacuity of the wiring itself: tampering a real program's bytes
+    // (not merely a stub) must change BOTH root commitments the registry is
+    // pinned by, proving the ProgramTable content actually flows into
+    // consensus-facing commitments rather than being decorative. Checked for
+    // every real family this session wired, not just the first one.
+    for (const size_t real_idx :
+         {builder_idx, gemm_idx, wiring_idx, extract_idx}) {
+        auto tampered_sources = sources;
+        auto& load = *std::find_if(
+            tampered_sources[real_idx]
+                .program.programs.back()
+                .instructions.begin(),
+            tampered_sources[real_idx]
+                .program.programs.back()
+                .instructions.end(),
+            [](const cb::Instruction& instr) {
+                return instr.opcode == cb::Opcode::Current;
+            });
+        load.lhs = (load.lhs + 1) %
+            tampered_sources[real_idx].program.current_width;
+        const auto tampered_registry = ut::BuildProductionProgramRegistryV1(
+            manifest, schedule, tampered_sources, verifier, verifier);
+        BOOST_REQUIRE(
+            !tampered_registry.external_registry_commitment.IsNull());
+        BOOST_CHECK(
+            tampered_registry.external_registry_commitment !=
+            registry.external_registry_commitment);
+        BOOST_CHECK(
+            tampered_registry.recursive_registry_commitment !=
+            registry.recursive_registry_commitment);
+        BOOST_CHECK(!ut::ValidateProductionProgramRegistryV1(
+            manifest, schedule, tampered_registry,
+            registry.external_registry_commitment,
+            registry.recursive_registry_commitment));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -316,6 +393,42 @@ BOOST_AUTO_TEST_CASE(
         tampered[6] = Fp3::Zero(); // wrong sign bit
         BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
     }
+
+    // --- EpisodeGemm: terminal sumcheck identity gf = a*b, 3 columns. ---
+    {
+        const size_t idx = FindFamilyIndex(
+            manifest, ss::ProductionProofSiteKind::EpisodeGemmSumcheck);
+        const auto& table = sources[idx].program;
+        const std::vector<Fp3> row{U(12), U(3), U(4)}; // gf, a, b: 12 == 3*4
+        const std::vector<Fp3> next(3, Fp3::Zero());
+        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        auto tampered = row;
+        tampered[0] = U(13); // gf no longer equals a*b
+        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+    }
+
+    // --- EpisodeWiring: direct row-copy equality u = v, 2 columns. ---
+    {
+        const size_t idx = FindFamilyIndex(
+            manifest, ss::ProductionProofSiteKind::EpisodeWiring);
+        const auto& table = sources[idx].program;
+        const std::vector<Fp3> row{U(41), U(41)};
+        const std::vector<Fp3> next(2, Fp3::Zero());
+        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        auto tampered = row;
+        tampered[1] = U(42); // copy no longer matches its source
+        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+    }
+
+    // --- EpisodeExtract: full RcSampler local kernel is differentially
+    // tested bit-identical to air_quotient::BuildRcSamplerConstraintSystem
+    // over genuine (non-zero) rows and the [gamma, alpha] challenge class
+    // elsewhere (matmul_v4_rc_stage3_role_bytecode_tests.cpp); a hand-picked
+    // 40-column/47-constraint all-zero witness is not a meaningfully
+    // different check, so non-vacuity for this family is instead proved
+    // above by the registry-commitment tamper test, which shows this exact
+    // 47-program table (not a placeholder) drives the production registry's
+    // consensus-facing commitments.
 }
 
 BOOST_AUTO_TEST_SUITE_END()
