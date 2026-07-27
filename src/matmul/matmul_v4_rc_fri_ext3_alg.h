@@ -116,12 +116,13 @@ inline constexpr char kRCFri3AlgShortFsDomainTag[] =
 inline constexpr uint32_t kRCFri3AlgP2SqueezeLaneProofVersion = 8;
 inline constexpr char kRCFri3AlgP2SqueezeDomainTag[] =
     "BTX_RC_FRIB3ALG_Q192_P2SQZ_V8";
-/** Poseidon2 squeeze activation. False: ActiveConfig stays on short-FS v7
- *  (SHA squeeze). Flip only with prove/verify round-trip evidence and a
- *  matching ReplayChildFsTranscriptV1 path. */
-inline constexpr bool kRCFri3AlgP2SqueezeActivatedV1 = false;
-static_assert(!kRCFri3AlgP2SqueezeActivatedV1,
-              "PR-89 Poseidon2 FRI-squeeze lane is not activated");
+/** Poseidon2 squeeze activation. When true, ActiveConfig selects proof
+ *  version 8 (short-FS absorbs + Poseidon2 squeezes) for the live Q192
+ *  recursion lane. Joint-flip only with aq::kAirChallengeP2Activated so the
+ *  recursive verifier is not permanently mixed SHA/P2. */
+inline constexpr bool kRCFri3AlgP2SqueezeActivatedV1 = true;
+static_assert(kRCFri3AlgP2SqueezeActivatedV1,
+              "PR-89 Poseidon2 FRI-squeeze lane is activated (g4 joint flip)");
 static_assert(kRCFri3AlgP2SqueezeLaneProofVersion !=
                       kRCFri3AlgBatchProofVersion &&
                   kRCFri3AlgP2SqueezeLaneProofVersion !=
@@ -1589,6 +1590,12 @@ inline constexpr uint64_t kRCFri3AlgP2SqueezeDrawDomain =
  * and idx, and returns three canonical sponge lanes as Fp3.
  */
 [[nodiscard]] Fp3 Fri3AlgP2SqueezeChallengeFp3(
+    const std::vector<unsigned char>& buf, const char* label, uint32_t idx);
+
+/** Full sponge absorb lane vector for Fri3AlgP2SqueezeChallengeFp3 — domain
+ *  separator (two 32-bit lanes) then length-prefixed buf / label / idx. An
+ *  in-AIR companion must absorb EXACTLY these lanes. */
+[[nodiscard]] std::vector<gkr_field::Fp> Fri3AlgP2SqueezeAbsorbLanes(
     const std::vector<unsigned char>& buf, const char* label, uint32_t idx);
 
 /**

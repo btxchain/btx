@@ -2411,18 +2411,20 @@ BOOST_AUTO_TEST_CASE(pr89_short_fs_lane_round_trip_and_version_separation)
     BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(legacy.proof, seed, &why));
 
     // ACTIVATION, asserted rather than assumed: the DEFAULT Q192 producer and
-    // verifier are now the short-transcript lane.  If this ever reads V3
-    // again, every measurement below is describing a lane nothing selects.
+    // verifier are now the P2-squeeze lane (short-FS absorbs + Poseidon2
+    // squeezes).  Short-FS remains a named lane for A/B; ActiveConfig selects v8.
     BOOST_CHECK(rc::kRCFri3AlgShortFsActivatedV1);
+    BOOST_CHECK(rc::kRCFri3AlgP2SqueezeActivatedV1);
     BOOST_CHECK_EQUAL(rc::kRCFri3AlgActiveBatchProofVersion,
-                      rc::kRCFri3AlgShortFsLaneProofVersion);
+                      rc::kRCFri3AlgP2SqueezeLaneProofVersion);
     rc::Fri3AlgBatchCommitResult active =
         rc::Fri3AlgBatchCommit(columns, seed, 0);
     BOOST_REQUIRE_MESSAGE(active.ok, active.note);
     BOOST_CHECK_EQUAL(active.proof.version,
-                      rc::kRCFri3AlgShortFsLaneProofVersion);
+                      rc::kRCFri3AlgP2SqueezeLaneProofVersion);
     BOOST_CHECK(rc::Fri3AlgBatchVerify(active.proof, seed, &why));
     BOOST_CHECK(!rc::Fri3AlgBatchVerify(legacy.proof, seed, &why));
+    BOOST_CHECK(!rc::Fri3AlgBatchVerify(shortfs.proof, seed, &why));
 
     // The two lanes agree on the STATEMENT and disagree only on the
     // transcript: same shape, same column lengths, different challenges.
@@ -2446,8 +2448,8 @@ BOOST_AUTO_TEST_CASE(pr89_short_fs_lane_round_trip_and_version_separation)
 
 BOOST_AUTO_TEST_CASE(pr89_p2_squeeze_lane_round_trip_and_version_separation)
 {
-    // Recommendation #1 evidence: short-FS absorbs + Poseidon2 squeezes, as a
-    // SEPARATE proof version (8). Not activated — ActiveConfig stays on v7.
+    // Recommendation #1: short-FS absorbs + Poseidon2 squeezes as proof
+    // version 8 — jointly activated with aq::kAirChallengeP2Activated.
     const uint256 seed = MakeSeed(0x5b);
     const auto columns = MakeShortFsColumns(4, 8);
 
@@ -2456,8 +2458,11 @@ BOOST_AUTO_TEST_CASE(pr89_p2_squeeze_lane_round_trip_and_version_separation)
     BOOST_REQUIRE_MESSAGE(p2.ok, p2.note);
     BOOST_CHECK_EQUAL(p2.proof.version, rc::kRCFri3AlgP2SqueezeLaneProofVersion);
     BOOST_CHECK_EQUAL(rc::kRCFri3AlgP2SqueezeLaneProofVersion, 8u);
-    BOOST_CHECK(!rc::kRCFri3AlgP2SqueezeActivatedV1);
-    BOOST_CHECK(!rc::kRCFri3AlgActiveP2Squeeze);
+    BOOST_CHECK(rc::kRCFri3AlgP2SqueezeActivatedV1);
+    BOOST_CHECK(rc::kRCFri3AlgActiveP2Squeeze);
+    // ActiveConfig now selects the P2-squeeze lane.
+    BOOST_CHECK_EQUAL(rc::kRCFri3AlgActiveBatchProofVersion,
+                      rc::kRCFri3AlgP2SqueezeLaneProofVersion);
 
     std::string why;
     BOOST_CHECK_MESSAGE(

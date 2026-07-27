@@ -972,6 +972,21 @@ BuildChildAirChallengeP2ReplayV1(
     uint32_t n_rows_floor = 0,
     const gf::Fp3* forced_limb = nullptr);
 
+/**
+ * Generic Poseidon2 sponge companion over an arbitrary Fp-lane preimage.
+ * Used by the coverage assessor for the seven FRI challenge kinds under
+ * kRCFri3AlgP2SqueezeActivatedV1 (lanes = Fri3AlgP2SqueezeAbsorbLanes).
+ * `digest_packed` must equal the three-limb packing the transcript replay
+ * stores for that draw.
+ */
+[[nodiscard]] ChildAirChallengeP2ReplayV1
+BuildChildFsChallengeP2ReplayFromLanesV1(
+    const std::vector<gkr_field::Fp>& lanes,
+    const uint256& digest_packed,
+    const gf::Fp3& consumed_challenge,
+    uint32_t n_rows_floor = 0,
+    const gf::Fp3* forced_limb = nullptr);
+
 /** Smallest height whose n_lde = rows * kRCFriBlowup admits 192 queries. */
 inline constexpr uint32_t kChildAirChallengeP2QuerySoundRowsV1 = 1024;
 
@@ -1503,6 +1518,50 @@ ProveProducerEndpointFriP2V1(const uint256& child_fs_seed,
                              uint32_t child_n_rows,
                              uint32_t child_quotient_len,
                              uint32_t child_w);
+
+/**
+ * PR-89 g4: recompute the CONSUMER endpoint FRI on the Poseidon2 decoder
+ * (limb-mode bus-augmented). Parallel to ProveProducerEndpointFriP2V1: the
+ * live consumer half under aq::kAirChallengeP2Activated is the 3-limb
+ * decoder relation the four-slot parent embeds, not the SHA 24-byte window.
+ * Query-sound height (1024 rows); process-lifetime memo in the closure
+ * assessor.
+ */
+struct ConsumerEndpointFriP2ResultV1 {
+    bool prove_ok{false};
+    bool verify_ok{false};
+    bool query_sound_shape{false};
+    bool decoder_valid{false};
+    bool bus_appended{false};
+    uint32_t rows{0};
+    uint32_t columns{0};
+    double build_seconds{0};
+    double prove_seconds{0};
+    double verify_seconds{0};
+    bool ok{false};
+    std::string note;
+};
+
+[[nodiscard]] ConsumerEndpointFriP2ResultV1
+ProveConsumerEndpointFriP2V1(const uint256& digest_p2,
+                             const gf::Fp3& consumed_challenge);
+
+/**
+ * PR-89 g4: default-gate evidence that the g4 P2 limb bus reconciles on four
+ * DISTINCT child transcripts whose AIR is a real coupled-bank dequant role
+ * (not ToyFriChildCs), each with a distinct witness => distinct airq_lambda.
+ */
+struct RealChildShapeCoverageV1 {
+    bool ok{false};
+    uint32_t distinct_transcripts{0};
+    uint32_t slots_bus_reconciled{0};
+    uint32_t child_columns{0};
+    uint32_t child_rows{0};
+    std::string note;
+};
+
+[[nodiscard]] RealChildShapeCoverageV1
+AssessRealChildShapeCoverageV1();
 
 /**
  * PR-89 rung-4: a recursion parent's OWN FRI proof.

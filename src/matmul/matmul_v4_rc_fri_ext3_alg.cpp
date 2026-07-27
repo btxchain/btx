@@ -1663,9 +1663,15 @@ bool Fri3AlgBatchSampleZ(Fri3AlgFs& fs, uint32_t& ctr, const Fp3* distinct_from,
                          const Fri3AlgProtocolConfig& config, Fp3& out)
 {
     if (!config.uniform_challenges) {
-        // V3 baseline behavior, deliberately preserved.
+        // V3 baseline schedule (unbounded rejection). Route through
+        // ProtocolChallengeFp3 so P2-squeeze activation covers z1/z2 as well
+        // as every other challenge kind — the old fs.ChallengeFp3 call left
+        // a permanent mixed SHA/P2 hole on the OOD sampler.
         while (true) {
-            const Fp3 z = fs.ChallengeFp3("fra3_z", ctr++);
+            Fp3 z;
+            if (!ProtocolChallengeFp3(fs, config, "fra3_z", ctr++, z)) {
+                return false;
+            }
             if (!Fri3AlgHasExtCoord(z)) continue;
             if (distinct_from != nullptr && Eq(z, *distinct_from)) continue;
             out = z;
@@ -7361,13 +7367,16 @@ Fp3 Fri3AlgAlgebraicChallengeFp3(const std::vector<Fp>& core,
     return Fp3{gf::Canonical(d[0]), gf::Canonical(d[1]), gf::Canonical(d[2])};
 }
 
-Fp3 Fri3AlgP2SqueezeChallengeFp3(const std::vector<unsigned char>& buf,
-                                 const char* label, uint32_t idx)
+std::vector<Fp> Fri3AlgP2SqueezeAbsorbLanes(
+    const std::vector<unsigned char>& buf, const char* label, uint32_t idx)
 {
-    // Length-prefixed 32-bit LE packing of buf — injective for arbitrary byte
-    // strings (same discipline as aq::AirChallengeP2Lanes / P2PushBytes).
+    // Domain (two 32-bit lanes) + length-prefixed buf / label / idx — must
+    // match Fri3AlgAlgebraicTranscriptDigest(preimage, P2SQZDRW) byte-exact.
     std::vector<Fp> lanes;
-    lanes.reserve(2 + (buf.size() + 3) / 4 + 8);
+    lanes.reserve(4 + (buf.size() + 3) / 4 + 8);
+    const uint64_t domain = kRCFri3AlgP2SqueezeDrawDomain;
+    lanes.push_back(gf::FromU64(domain & 0xFFFFFFFFull));
+    lanes.push_back(gf::FromU64((domain >> 32) & 0xFFFFFFFFull));
     lanes.push_back(gf::FromU64(static_cast<uint64_t>(buf.size())));
     for (size_t i = 0; i < buf.size(); i += 4) {
         uint32_t w = 0;
@@ -7388,8 +7397,16 @@ Fp3 Fri3AlgP2SqueezeChallengeFp3(const std::vector<unsigned char>& buf,
         lanes.push_back(gf::FromU64(w));
     }
     lanes.push_back(gf::FromU64(idx));
-    const Fri3AlgDigest d = Fri3AlgAlgebraicTranscriptDigest(
-        lanes, kRCFri3AlgP2SqueezeDrawDomain);
+    return lanes;
+}
+
+Fp3 Fri3AlgP2SqueezeChallengeFp3(const std::vector<unsigned char>& buf,
+                                 const char* label, uint32_t idx)
+{
+    // AbsorbLanes already prefixes the domain; hash the lane vector directly
+    // (do not call Fri3AlgAlgebraicTranscriptDigest, which would double-prefix).
+    const Fri3AlgDigest d =
+        alg_hash::SpongeHashFp(Fri3AlgP2SqueezeAbsorbLanes(buf, label, idx));
     return Fp3{gf::Canonical(d[0]), gf::Canonical(d[1]), gf::Canonical(d[2])};
 }
 

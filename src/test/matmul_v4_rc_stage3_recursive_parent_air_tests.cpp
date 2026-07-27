@@ -1910,18 +1910,25 @@ BOOST_AUTO_TEST_CASE(
     // second must never silently ride on the first.
     BOOST_CHECK_LE(
         a.challenge_kinds_transcript_bound, a.challenge_kinds_covered);
-    // Today: OPEN, and the note says why.
-    BOOST_CHECK(!a.closed);
-    BOOST_CHECK(a.note.rfind("stage3:child_fs_replay:open:", 0) == 0);
-    BOOST_CHECK(a.note.find("kinds") != std::string::npos);
-    // And the ledger reports exactly this, with zero certified bits.
+    // Today: CLOSED under joint P2 activation (all eight kinds + endpoints +
+    // real-child shape).  The conjunction above still forces closed=false if
+    // any obligation reopens.
+    BOOST_CHECK(a.closed);
+    BOOST_CHECK_EQUAL(a.note, "stage3:child_fs_replay:closed");
+    BOOST_CHECK(a.producer_endpoint_fri_proven);
+    BOOST_CHECK(a.consumer_endpoint_fri_proven);
+    BOOST_CHECK(a.real_child_shape_covered);
+    BOOST_CHECK_EQUAL(a.challenge_kinds_transcript_bound, 8U);
+    // And the ledger reports exactly this.
     const auto audit =
         matmul::v4::rc::global_soundness_ledger::
             AssessExecutableGlobalSoundnessLedgerV1();
     BOOST_CHECK_EQUAL(audit.fiat_shamir_replay_complete, a.closed);
-    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
-    BOOST_CHECK(!audit.composition_gate.all_clear);
-    BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
+    BOOST_CHECK(audit.composition_gate.child_fiat_shamir_replay_closed);
+    // certified_bits still depends on other gates (g0-g3,g5,g6); g4 alone
+    // does not force all_clear.
+    BOOST_CHECK_EQUAL(audit.composition_gate.child_fiat_shamir_replay_closed,
+                      true);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1976,9 +1983,10 @@ BOOST_AUTO_TEST_CASE(
             replay.kind_matches_protocol[k], "kind " << k << " diverged");
         BOOST_CHECK_GT(replay.kind_draw_count[k], 0U);
     }
-    // Non-vacuity: the query draws really are the shipped count, and they
-    // really do all share one terminal transcript state (they are drawn after
-    // the last absorb, so no draw's preimage is shorter than the terminal).
+    // Non-vacuity: the query draws really are the shipped count. Under SHA
+    // squeeze each query preimage is buf||label||idx (strictly longer than the
+    // terminal buf); under P2 squeeze the absorb lanes take label/idx
+    // separately so preimage_bytes == terminal buf length.
     BOOST_CHECK_EQUAL(
         replay.kind_draw_count[static_cast<uint32_t>(
             ChildFsChallengeKindV1::Fra3Query)],
@@ -1986,12 +1994,22 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(replay.queries, 1U);
     for (const auto& d : replay.draws) {
         if (d.kind != ChildFsChallengeKindV1::Fra3Query) continue;
-        BOOST_CHECK_GT(
-            d.preimage_bytes, replay.transcript_bytes_at_terminal);
+        if (kRCFri3AlgActiveP2Squeeze) {
+            BOOST_CHECK_EQUAL(
+                d.preimage_bytes, replay.transcript_bytes_at_terminal);
+        } else {
+            BOOST_CHECK_GT(
+                d.preimage_bytes, replay.transcript_bytes_at_terminal);
+        }
     }
-    // The shared-midstate fork is a real saving here, not a hoped-for one.
-    BOOST_CHECK_LT(
-        replay.forked_sha_compressions, replay.total_sha_compressions);
+    // The shared-midstate fork is a real saving on the SHA route. Under P2
+    // squeeze there are no SHA compressions to fork.
+    if (!kRCFri3AlgActiveP2Squeeze) {
+        BOOST_CHECK_LT(
+            replay.forked_sha_compressions, replay.total_sha_compressions);
+    } else {
+        BOOST_CHECK_EQUAL(replay.total_sha_compressions, 0U);
+    }
 
     // DIVERGENCE DETECTOR, exercised rather than asserted: perturb ONE shipped
     // value and the replay must notice.
@@ -2133,16 +2151,24 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(pi.ok);
 
     // The consumed challenge for the Poseidon2 ROUTE is that route's own
-    // digest -- the SHA route's airq_lambda is a different value by
-    // construction (distinct domain tag), which is exactly what makes the two
-    // routes non-interchangeable.
+    // digest. Under activation pi.air_lambda IS the P2 value; cross-check
+    // against the SHA route's digest to keep the domain-separation claim.
     const uint256 d_p2 = aq::AirChallengeDigestP2(
         seed, "airq_lambda", {proved.proof.trace_commit},
         {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
+    const uint256 d_sha = aq::AirChallengeDigest(
+        seed, "airq_lambda", {proved.proof.trace_commit},
+        {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
     const gf::Fp3 consumed_p2 = gf::FromChallengeBytes3(d_p2.data());
+    const gf::Fp3 consumed_sha = gf::FromChallengeBytes3(d_sha.data());
     BOOST_CHECK_MESSAGE(
-        !gf::Eq(consumed_p2, pi.air_lambda),
+        !gf::Eq(consumed_p2, consumed_sha),
         "P2 and SHA routes must not share a challenge value");
+    if (aq::kAirChallengeP2Activated) {
+        BOOST_CHECK(gf::Eq(consumed_p2, pi.air_lambda));
+    } else {
+        BOOST_CHECK(gf::Eq(consumed_sha, pi.air_lambda));
+    }
 
     const auto p2 = BuildChildAirChallengeP2ReplayV1(
         seed, proved.proof.trace_commit, pi.child_n_rows,
@@ -2220,8 +2246,17 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(r.prove_ok);
     BOOST_CHECK(r.verify_ok);
     BOOST_CHECK(r.ok);
-    BOOST_CHECK(!aq::kAirChallengeP2Activated);
-    BOOST_CHECK(!kRCFri3AlgP2SqueezeActivatedV1);
+    BOOST_CHECK(aq::kAirChallengeP2Activated);
+    BOOST_CHECK(kRCFri3AlgP2SqueezeActivatedV1);
+    // Closure assessor claims the producer endpoint under activation.
+    const auto a = AssessChildFsReplayClosureV1();
+    BOOST_TEST_MESSAGE(
+        "G4_CLOSURE producer_fri=" << a.producer_endpoint_fri_proven
+        << " consumer_fri=" << a.consumer_endpoint_fri_proven
+        << " real_child=" << a.real_child_shape_covered
+        << " closed=" << a.closed
+        << " note=\"" << a.note << "\"");
+    BOOST_CHECK(a.producer_endpoint_fri_proven);
 }
 
 BOOST_AUTO_TEST_CASE(

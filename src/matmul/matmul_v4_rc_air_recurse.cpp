@@ -1480,10 +1480,13 @@ ChildPublicInputs ExtractChildPublicInputs(const aq::AirConstraintSystem<Fp3>& c
     pi.evals_z2 = b.evals_z2;
     for (const auto& q : b.queries) pi.query_index.push_back(q.index);
     // AIR-level lambda (airq_lambda) — recompute from R_T (row-wise: 1 root).
+    // Backend-gated: when aq::kAirChallengeP2Activated the algebraic child
+    // proof drew Poseidon2, so extraction must select the same route.
     {
         std::vector<uint256> roots{child.trace_commit};
-        const uint256 d = aq::AirChallengeDigest(child_fs_seed, "airq_lambda", roots,
-                                                 {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
+        const uint256 d = aq::AirChallengeDigestSelected(
+            aq::kAirChallengeP2Activated, child_fs_seed, "airq_lambda", roots,
+            {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
         pi.air_lambda = gf::FromChallengeBytes3(d.data());
     }
     pi.child_constraints = child_cs.constraints;

@@ -776,7 +776,7 @@ inline constexpr uint32_t kAirChallengeP2RouteVersion = 8;
  *  Flip only with measured evidence that the four-slot parent decoder and the
  *  g4 producer companion also consume the P2 route (see recursive_parent_air).
  */
-inline constexpr bool kAirChallengeP2Activated = false;
+inline constexpr bool kAirChallengeP2Activated = true;
 
 /** true iff this Backend should draw AIR challenges on the Poseidon2 route.
  *  Row-wise algebraic backends only; SHA per-column backends never. */
