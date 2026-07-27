@@ -1117,4 +1117,362 @@ AlgebraicQueryIndexReplayCostV1 MeasureAlgebraicQueryIndexReplayCostV1(
     return out;
 }
 
+// ===========================================================================
+// PR-89 g4: the ROW-WISE child-challenge decoder table.  See the header for
+// what one row does and does NOT constrain.
+// ===========================================================================
+
+OodEvalCommitReplayCostV1 MeasureOodEvalCommitReplayCostV1(uint32_t child_w)
+{
+    OodEvalCommitReplayCostV1 out;
+    out.child_w = child_w;
+    if (child_w == 0) {
+        out.note = "stage3:fs_selection_air:ood_commit_cost_shape";
+        return out;
+    }
+    // 2 length lanes + 3 lanes each for z1 and z2 + 3 lanes per Fp3 cell in
+    // each of the two W-long evaluation vectors.
+    out.preimage_lanes = 2 + 3 + 3 + uint64_t{6} * child_w;
+    // SpongeHashFp appends 1 then pads to the next whole rate block, so a
+    // preimage that exactly fills the rate costs one more permutation.
+    out.permutations =
+        (out.preimage_lanes + 1 + ah::kAlgHashRate - 1) / ah::kAlgHashRate;
+    out.poseidon_rows = NextPow2U64(out.permutations);
+    const auto perm = pa::Measure(2);
+    out.poseidon_columns = perm.fixed_columns;
+    out.poseidon_max_degree = perm.fixed_max_degree;
+    // The legacy absorb this replaces: 2W Fp3 at 24 bytes = 48*W bytes, i.e.
+    // 0.75*W SHA compressions -- and it was paid inside EVERY challenge
+    // preimage, not once.  The vertical SHA chip charges 1024 rows apiece.
+    out.legacy_sha_compressions_per_challenge = (uint64_t{48} * child_w) / 64;
+    out.legacy_sha_rows_per_challenge =
+        NextPow2U64(out.legacy_sha_compressions_per_challenge) * 1024;
+    out.valid = true;
+    out.note = "stage3:fs_selection_air:ood_commit_cost_measured";
+    return out;
+}
+
+uint32_t Fri3AlgV3QueryIndexFromChallengeV1(
+    const gf::Fp3& challenge, uint32_t modulus)
+{
+    if (modulus == 0) return 0;
+    // The shipped non-uniform branch of ProtocolChallengeIndex, recomputed
+    // here from the challenge rather than by calling into fri_ext3_alg, so the
+    // in-AIR mask below is cross-checked against an INDEPENDENT evaluation of
+    // the same rule.  A one-sided edit shows up as a mismatch instead of
+    // agreeing with itself.
+    const unsigned __int128 wide =
+        (static_cast<unsigned __int128>(gf::Canonical(challenge.c1)) << 64) |
+        gf::Canonical(challenge.c0);
+    return static_cast<uint32_t>(wide % modulus);
+}
+
+ChallengeTableAirV1 BuildChallengeTableAirV1(
+    const std::vector<ChallengeTableRowV1>& draws,
+    uint32_t n_lde,
+    uint32_t forced_row,
+    const gf::Fp3& forced_challenge)
+{
+    ChallengeTableAirV1 out;
+    out.n_lde = n_lde;
+    out.n_draws = static_cast<uint32_t>(draws.size());
+    if (draws.empty()) {
+        out.note = "stage3:fs_selection_air:challenge_table_empty";
+        return out;
+    }
+    if (n_lde == 0 || (n_lde & (n_lde - 1)) != 0) {
+        out.note = "stage3:fs_selection_air:challenge_table_shape";
+        return out;
+    }
+    for (uint32_t value = n_lde; value > 1; value >>= 1) ++out.domain_bits;
+
+    const ChallengeTableLayoutV1 layout;
+    out.layout = layout;
+    uint32_t rows = 2;
+    while (rows < draws.size()) rows <<= 1;
+    out.n_rows = rows;
+    out.n_columns = layout.End();
+    out.cs.n_rows = out.n_rows;
+    out.cs.n_columns = out.n_columns;
+    out.cs.preprocessed_pin_ood = true;
+
+    // ---- (a) word_j - sum_i byte[8j+i] * 256^i = 0.
+    for (uint32_t j = 0; j < 3; ++j) {
+        aq::AirConstraint<gf::Fp3> word;
+        word.name = "stage3.fs.challenge_table.word_recompose";
+        word.kind = aq::AirKind::kEverywhere;
+        word.alg_degree = 1;
+        word.eval = [layout, j](const std::vector<gf::Fp3>& row,
+                                const std::vector<gf::Fp3>&) {
+            gf::Fp3 acc = gf::Fp3::Zero();
+            for (uint32_t i = 0; i < 8; ++i) {
+                acc = gf::Add(
+                    acc,
+                    gf::Mul(row[layout.Byte(8 * j + i)],
+                            gf::FromU64_3(uint64_t{1} << (8 * i))));
+            }
+            return gf::Sub(row[layout.Word(j)], acc);
+        };
+        out.cs.constraints.push_back(std::move(word));
+    }
+    out.recompose_constrained = true;
+
+    // ---- (b) chal - (word0 + word1*X + word2*X^2) = 0.
+    {
+        aq::AirConstraint<gf::Fp3> basis;
+        basis.name = "stage3.fs.challenge_table.basis_reconstruction";
+        basis.kind = aq::AirKind::kEverywhere;
+        basis.alg_degree = 1;
+        basis.eval = [layout](const std::vector<gf::Fp3>& row,
+                              const std::vector<gf::Fp3>&) {
+            const gf::Fp3 x{0, 1, 0};
+            const gf::Fp3 x2{0, 0, 1};
+            gf::Fp3 acc = row[layout.Word(0)];
+            acc = gf::Add(acc, gf::Mul(row[layout.Word(1)], x));
+            acc = gf::Add(acc, gf::Mul(row[layout.Word(2)], x2));
+            return gf::Sub(row[layout.Challenge()], acc);
+        };
+        out.cs.constraints.push_back(std::move(basis));
+    }
+    out.basis_reconstruction_constrained = true;
+
+    // ---- (c) chal - consumed = 0.  THE BINDING: the decode of the pinned
+    // transcript bytes must be exactly the scalar the in-parent verifier uses.
+    {
+        aq::AirConstraint<gf::Fp3> bind;
+        bind.name = "stage3.fs.challenge_table.bound_to_consumed";
+        bind.kind = aq::AirKind::kEverywhere;
+        bind.alg_degree = 1;
+        bind.eval = [layout](const std::vector<gf::Fp3>& row,
+                             const std::vector<gf::Fp3>&) {
+            return gf::Sub(row[layout.Challenge()], row[layout.Consumed()]);
+        };
+        out.cs.constraints.push_back(std::move(bind));
+    }
+    out.bound_to_consumed_constrained = true;
+
+    // ---- (d) 64 boolean bits, recomposed to word0, plus canonicity.
+    for (uint32_t bit = 0; bit < kChallengeTableLaneBits; ++bit) {
+        aq::AirConstraint<gf::Fp3> boolean;
+        boolean.name = "stage3.fs.challenge_table.bit_boolean";
+        boolean.kind = aq::AirKind::kEverywhere;
+        boolean.alg_degree = 2;
+        boolean.eval = [column = layout.Bit(bit)](
+                           const std::vector<gf::Fp3>& row,
+                           const std::vector<gf::Fp3>&) {
+            return gf::Mul(row[column],
+                           gf::Sub(row[column], gf::Fp3::One()));
+        };
+        out.cs.constraints.push_back(std::move(boolean));
+    }
+    out.booleanity_constrained = true;
+    {
+        aq::AirConstraint<gf::Fp3> rec;
+        rec.name = "stage3.fs.challenge_table.lane_recomposition";
+        rec.kind = aq::AirKind::kEverywhere;
+        rec.alg_degree = 1;
+        rec.eval = [layout](const std::vector<gf::Fp3>& row,
+                            const std::vector<gf::Fp3>&) {
+            gf::Fp3 acc = gf::Fp3::Zero();
+            gf::Fp3 power = gf::Fp3::One();
+            for (uint32_t bit = 0; bit < kChallengeTableLaneBits; ++bit) {
+                acc = gf::Add(acc, gf::Mul(power, row[layout.Bit(bit)]));
+                power = gf::Add(power, power);
+            }
+            return gf::Sub(row[layout.Word(0)], acc);
+        };
+        out.cs.constraints.push_back(std::move(rec));
+    }
+    for (uint32_t step = 0; step < kChallengeTableAndSteps; ++step) {
+        const uint32_t first =
+            kAlgebraicQueryHighBits + step * kAlgebraicQueryAndChunk;
+        const uint32_t last = std::min<uint32_t>(
+            first + kAlgebraicQueryAndChunk, kChallengeTableLaneBits);
+        aq::AirConstraint<gf::Fp3> chain;
+        chain.name = "stage3.fs.challenge_table.high_and_chain";
+        chain.kind = aq::AirKind::kEverywhere;
+        chain.alg_degree = kAlgebraicQueryAndChunk + 1;
+        chain.eval = [layout, step, first, last](
+                         const std::vector<gf::Fp3>& row,
+                         const std::vector<gf::Fp3>&) {
+            gf::Fp3 prod = (step == 0) ? gf::Fp3::One()
+                                       : row[layout.And(step - 1)];
+            for (uint32_t bit = first; bit < last; ++bit) {
+                prod = gf::Mul(prod, row[layout.Bit(bit)]);
+            }
+            return gf::Sub(row[layout.And(step)], prod);
+        };
+        out.cs.constraints.push_back(std::move(chain));
+    }
+    {
+        // NOT(high32 all ones AND low32 != 0).  word0 is a Goldilocks element,
+        // so without this the prover presents word0 + p and moves the masked
+        // index for free -- the same trap the algebraic chip documents.
+        aq::AirConstraint<gf::Fp3> canon;
+        canon.name = "stage3.fs.challenge_table.canonicity";
+        canon.kind = aq::AirKind::kEverywhere;
+        canon.alg_degree = 2;
+        canon.eval = [layout](const std::vector<gf::Fp3>& row,
+                              const std::vector<gf::Fp3>&) {
+            gf::Fp3 low = gf::Fp3::Zero();
+            gf::Fp3 power = gf::Fp3::One();
+            for (uint32_t bit = 0; bit < kAlgebraicQueryHighBits; ++bit) {
+                low = gf::Add(low, gf::Mul(power, row[layout.Bit(bit)]));
+                power = gf::Add(power, power);
+            }
+            return gf::Mul(row[layout.And(kChallengeTableAndSteps - 1)], low);
+        };
+        out.cs.constraints.push_back(std::move(canon));
+    }
+    out.canonicity_constrained = true;
+
+    // ---- (e)/(f) the shipped V3 query-index rule, gated by is_query.
+    {
+        aq::AirConstraint<gf::Fp3> sel;
+        sel.name = "stage3.fs.challenge_table.is_query_boolean";
+        sel.kind = aq::AirKind::kEverywhere;
+        sel.alg_degree = 2;
+        sel.eval = [layout](const std::vector<gf::Fp3>& row,
+                            const std::vector<gf::Fp3>&) {
+            return gf::Mul(row[layout.IsQuery()],
+                           gf::Sub(row[layout.IsQuery()], gf::Fp3::One()));
+        };
+        out.cs.constraints.push_back(std::move(sel));
+    }
+    {
+        aq::AirConstraint<gf::Fp3> mask;
+        mask.name = "stage3.fs.challenge_table.power_of_two_mask";
+        mask.kind = aq::AirKind::kEverywhere;
+        mask.alg_degree = 2;
+        mask.eval = [layout, bits = out.domain_bits](
+                        const std::vector<gf::Fp3>& row,
+                        const std::vector<gf::Fp3>&) {
+            gf::Fp3 expected = gf::Fp3::Zero();
+            gf::Fp3 power = gf::Fp3::One();
+            for (uint32_t bit = 0; bit < bits; ++bit) {
+                expected =
+                    gf::Add(expected, gf::Mul(power, row[layout.Bit(bit)]));
+                power = gf::Add(power, power);
+            }
+            return gf::Mul(row[layout.IsQuery()],
+                           gf::Sub(row[layout.Index()], expected));
+        };
+        out.cs.constraints.push_back(std::move(mask));
+    }
+    out.mask_constrained = true;
+    {
+        aq::AirConstraint<gf::Fp3> bind;
+        bind.name = "stage3.fs.challenge_table.index_bound_to_consumed";
+        bind.kind = aq::AirKind::kEverywhere;
+        bind.alg_degree = 2;
+        bind.eval = [layout](const std::vector<gf::Fp3>& row,
+                             const std::vector<gf::Fp3>&) {
+            return gf::Mul(
+                row[layout.IsQuery()],
+                gf::Sub(row[layout.Index()], row[layout.ConsumedIndex()]));
+        };
+        out.cs.constraints.push_back(std::move(bind));
+    }
+    {
+        aq::AirConstraint<gf::Fp3> off;
+        off.name = "stage3.fs.challenge_table.non_query_index_zero";
+        off.kind = aq::AirKind::kEverywhere;
+        off.alg_degree = 2;
+        off.eval = [layout](const std::vector<gf::Fp3>& row,
+                            const std::vector<gf::Fp3>&) {
+            return gf::Mul(
+                gf::Sub(gf::Fp3::One(), row[layout.IsQuery()]),
+                row[layout.Index()]);
+        };
+        out.cs.constraints.push_back(std::move(off));
+    }
+    out.n_constraints = static_cast<uint32_t>(out.cs.constraints.size());
+    for (const auto& constraint : out.cs.constraints) {
+        out.max_alg_degree =
+            std::max(out.max_alg_degree, constraint.alg_degree);
+    }
+
+    // ---- witness.  Rows past n_draws stay all-zero, which satisfies every
+    // constraint above (zero bytes -> zero words -> zero challenge -> zero
+    // consumed; the AND chain is zero because bits 32..63 are zero, so
+    // canonicity holds; is_query = 0 disables the mask and the index binding).
+    out.columns.assign(out.n_columns,
+                       std::vector<gf::Fp3>(out.n_rows, gf::Fp3::Zero()));
+    std::vector<uint32_t> preprocessed_columns;
+    for (uint32_t i = 0; i < kChallengeTableBytes; ++i) {
+        preprocessed_columns.push_back(layout.Byte(i));
+    }
+    preprocessed_columns.push_back(layout.Consumed());
+    preprocessed_columns.push_back(layout.IsQuery());
+    preprocessed_columns.push_back(layout.ConsumedIndex());
+
+    for (uint32_t r = 0; r < draws.size(); ++r) {
+        const ChallengeTableRowV1& d = draws[r];
+        for (uint32_t i = 0; i < kChallengeTableBytes; ++i) {
+            out.columns[layout.Byte(i)][r] =
+                gf::FromU64_3(static_cast<uint64_t>(d.digest_bytes[i]));
+        }
+        std::array<uint64_t, 3> words{0, 0, 0};
+        for (uint32_t j = 0; j < 3; ++j) {
+            for (uint32_t i = 0; i < 8; ++i) {
+                words[j] |=
+                    static_cast<uint64_t>(d.digest_bytes[8 * j + i])
+                    << (8 * i);
+            }
+            out.columns[layout.Word(j)][r] = gf::FromU64_3(words[j]);
+        }
+        const gf::Fp3 decoded = gf::FromChallengeBytes3(d.digest_bytes.data());
+        out.columns[layout.Challenge()][r] = decoded;
+        out.columns[layout.Consumed()][r] = d.consumed;
+        if (gf::Eq(decoded, d.consumed)) ++out.rows_bound_to_consumed;
+
+        // Bits decompose Canonical(word0) -- word0 was reduced mod p by the
+        // Fp construction above, exactly as FromChallengeBytes3 does.
+        const uint64_t lane = gf::Canonical(
+            gf::FromU64(words[0]));
+        for (uint32_t bit = 0; bit < kChallengeTableLaneBits; ++bit) {
+            out.columns[layout.Bit(bit)][r] =
+                gf::FromU64_3((lane >> bit) & 1ull);
+        }
+        gf::Fp3 prod = gf::Fp3::One();
+        for (uint32_t step = 0; step < kChallengeTableAndSteps; ++step) {
+            const uint32_t first =
+                kAlgebraicQueryHighBits + step * kAlgebraicQueryAndChunk;
+            const uint32_t last = std::min<uint32_t>(
+                first + kAlgebraicQueryAndChunk, kChallengeTableLaneBits);
+            for (uint32_t bit = first; bit < last; ++bit) {
+                prod = gf::Mul(prod, out.columns[layout.Bit(bit)][r]);
+            }
+            out.columns[layout.And(step)][r] = prod;
+        }
+        if (d.is_query) {
+            ++out.query_rows;
+            out.columns[layout.IsQuery()][r] = gf::Fp3::One();
+            const uint32_t masked =
+                static_cast<uint32_t>(lane & 0xFFFFFFFFull) & (n_lde - 1);
+            out.columns[layout.Index()][r] =
+                gf::FromU64_3(static_cast<uint64_t>(masked));
+            out.columns[layout.ConsumedIndex()][r] =
+                gf::FromU64_3(static_cast<uint64_t>(d.consumed_index));
+            if (masked == d.consumed_index) {
+                ++out.query_rows_bound_to_consumed_index;
+            }
+        }
+    }
+    if (forced_row != std::numeric_limits<uint32_t>::max() &&
+        forced_row < out.n_rows) {
+        out.columns[layout.Challenge()][forced_row] = forced_challenge;
+    }
+    for (const uint32_t column : preprocessed_columns) {
+        out.cs.preprocessed.emplace_back(column, out.columns[column]);
+    }
+
+    out.violations = CountViolationsV1(out.cs, out.columns);
+    out.valid = out.violations == 0;
+    out.note = out.valid
+                   ? "stage3:fs_selection_air:challenge_table_ok"
+                   : "stage3:fs_selection_air:challenge_table_violation";
+    return out;
+}
+
 } // namespace matmul::v4::rc::stage3_fs_selection_air

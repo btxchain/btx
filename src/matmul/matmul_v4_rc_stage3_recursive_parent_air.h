@@ -855,15 +855,246 @@ VerifyChildFsShaBoundV1(
  * rejected` (BTX_RUN_HEAVY_CHILD_FS_SHA=1) and in the fast
  * `g4_digest_bus_lane_verifier_side_reconstruction_pins_the_terminal`.
  */
+/**
+ * PR-89 g4, parent side: the eight child challenge KINDS the parent must
+ * decode.  The ordinals are the ledger's coverage vector index; do not
+ * renumber them without moving the ledger's per-kind evidence with them.
+ */
+enum class ChildFsChallengeKindV1 : uint32_t {
+    AirqLambda = 0,  // aq::AirChallengeDigest, "airq_lambda"
+    Fra3Lambda = 1,  // ProtocolBatchCoefficients, "fra3_lambda" idx 0
+    Fra3Z1 = 2,      // Fri3AlgBatchSampleZ, "fra3_z", first ACCEPTED draw
+    Fra3Z2 = 3,      // Fri3AlgBatchSampleZ, "fra3_z", second ACCEPTED draw
+    Fra3W1 = 4,      // "fra3_w" idx 0
+    Fra3W2 = 5,      // "fra3_w" idx 1
+    Fra3Fold = 6,    // "fra3_fold" idx l, l < n_folds
+    Fra3Query = 7,   // "fra3_query" idx q, q < query_count
+};
+inline constexpr uint32_t kChildFsChallengeKindCountV1 = 8;
+
+/** One re-derived challenge draw of the child's Fiat-Shamir transcript. */
+struct ChildFsChallengeDrawV1 {
+    ChildFsChallengeKindV1 kind{ChildFsChallengeKindV1::AirqLambda};
+    std::string label;
+    uint32_t index{0};
+    /** SHA256d(buf || label || LE32(index)), re-derived here. */
+    uint256 digest{};
+    /** |buf| + |suffix| at this draw. */
+    uint64_t preimage_bytes{0};
+    /** ceil((preimage_bytes + 9) / 64) first-pass + 1 second-pass. */
+    uint64_t sha_compressions{0};
+    gf::Fp3 value{};
+    /** fra3_query only: the shipped V3 128-bit-modulo index rule. */
+    uint32_t index_value{0};
+    /** True iff a `fra3_z` draw was REJECTED by the OOD sampler (no ext coord
+     *  or equal to z1).  Rejected draws consume a counter but carry no kind. */
+    bool ood_rejected{false};
+    /** The re-derivation agrees with the value the child's proof ships. */
+    bool matches_protocol{false};
+};
+
+/**
+ * INDEPENDENT re-derivation of a child's whole Fri3Alg Q192-V3 Fiat-Shamir
+ * transcript from the child's PUBLIC proof data plus the parent-owned seed.
+ *
+ * This does not call fri_ext3_alg's transcript object; it rebuilds `buf` from
+ * the documented absorb order and hashes it with plain SHA256d.  The point is
+ * the cross-check: every re-derived value is compared against the value the
+ * child's proof actually carries, so if the protocol transcript and this
+ * replay are ever edited apart, `all_kinds_match` goes false while each half
+ * still looks internally consistent.  That is the same divergence-detector
+ * discipline as BuildAlgebraicQueryIndexAirV1 in fs_selection_air.
+ *
+ * ABSORB ORDER REPLAYED (matmul_v4_rc_fri_ext3_alg.cpp, Fri3AlgFs ctor +
+ * Fri3AlgBatchFsInit + Fri3AlgBatchCommitConfigured):
+ *   domain_tag | seed | LE64(nonce) | LE32(blowup) | LE32(n_coeffs)
+ *   | LE32(version) | LE32(|column_len|) | LE32(column_len[i])...
+ *   | row_commit.root(32)
+ *   -> draw fra3_lambda(0) ; absorb lambda
+ *   -> draw fra3_z(ctr++) until accepted -> z1 ; continue -> z2
+ *      absorb z1, absorb z2
+ *   -> absorb evals_z1[i], evals_z2[i] interleaved, i < W
+ *   -> draw fra3_w(0) -> w1, fra3_w(1) -> w2 ; absorb w1, absorb w2
+ *   -> for fold in [0, n_folds]: absorb fold_layers[fold].root ;
+ *      if fold < n_folds: draw fra3_fold(fold) (the beta is NOT absorbed)
+ *   -> for q < query_count: draw fra3_query(q)  (nothing further absorbed)
+ * airq_lambda is drawn OUTSIDE this transcript, from aq::AirChallengeDigest's
+ * own self-contained 113-byte preimage.
+ *
+ * SCOPE.  Only the shipped single-lane kFri3AlgQ192V3Config is replayed:
+ * uniform_challenges = false, independent_batching_coefficients = false,
+ * joint_query = false.  A proof whose `version` is not
+ * kRCFri3AlgBatchProofVersion is refused rather than mis-replayed.
+ */
+struct ChildFsTranscriptReplayV1 {
+    bool valid{false};
+    uint32_t child_w{0};        // batch columns = |column_len|
+    uint32_t n_coeffs{0};
+    uint32_t n_lde{0};
+    uint32_t n_folds{0};
+    uint32_t queries{0};
+    /** |buf| once the last fold root is absorbed -- the state every query
+     *  index is drawn from, and the object a companion hash CS would have to
+     *  reproduce. */
+    uint64_t transcript_bytes_at_terminal{0};
+    std::vector<ChildFsChallengeDrawV1> draws;
+    std::array<uint32_t, kChildFsChallengeKindCountV1> kind_draw_count{};
+    std::array<bool, kChildFsChallengeKindCountV1> kind_matches_protocol{};
+    /** Every draw of every kind re-derived to the shipped value. */
+    bool all_kinds_match{false};
+    /** COMPUTED cost of replaying the whole transcript in a vertical SHA AIR,
+     *  one compression per instance, 1024 rows per compression. */
+    uint64_t total_sha_compressions{0};
+    /** Same, when the shared transcript prefix is compressed once and each
+     *  draw only pays its own divergent tail (the midstate fork the chip is
+     *  known to support). */
+    uint64_t forked_sha_compressions{0};
+    uint64_t total_sha_rows{0};
+    uint64_t forked_sha_rows{0};
+    std::string note;
+};
+
+[[nodiscard]] ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
+    const uint256& child_fs_seed,
+    const FourSlotSelfSimilarCtlParentV1::ChildProof& child_proof,
+    const air_recurse::ChildPublicInputs& pi);
+
+/**
+ * Per-kind evidence for the g4 coverage obligation, recomputed from a built
+ * decoder table rather than asserted.
+ *
+ * THE THREE LEVELS ARE NOT THE SAME CLAIM and are deliberately not collapsed:
+ *
+ *  decoded_in_air[k]        a row of the parent-side decoder table decodes
+ *                           kind k from 24 PINNED transcript bytes through the
+ *                           FromChallengeBytes3 relation, the result is bound
+ *                           by an EVERYWHERE equality to the scalar the
+ *                           in-parent verifier consumes, the table has zero
+ *                           violations, AND tampering that row's challenge
+ *                           column produces violations > 0.
+ *  transcript_replayed[k]   the pinned bytes were re-derived from the child's
+ *                           transcript by ReplayChildFsTranscriptV1 and agreed
+ *                           with the value the child's proof ships.
+ *  transcript_bound_in_air[k]
+ *                           the pinned bytes CAN be a constrained output of an
+ *                           in-AIR hash: kind k's preimage is self-contained
+ *                           (MEASURED width-independent across two child
+ *                           widths) AND its companion vertical SHA AIR fits
+ *                           inside ONE constraint system.
+ *
+ * Only the third can make the bytes unforgeable in-circuit, and it is
+ * deliberately COMPUTED from two measurements rather than written down as "the
+ * airq_lambda one".  Its two conjuncts are:
+ *
+ *   (i)  width independence.  The replay is run on two children of DIFFERENT
+ *        width and kind k's preimage length compared.  Every draw that reads
+ *        the accumulated FRI transcript inherits the 4*W column_len block and
+ *        the 48*W OOD evaluation block, so it moves; airq_lambda's
+ *        AirChallengeDigest preimage is a fresh 113 bytes and does not.
+ *   (ii) chip capacity.  hash_air pins lane_rows = 1024 and caps a vertical
+ *        schedule at kFixedProgramVerticalSemanticInstances = 63 PER
+ *        CONSTRAINT SYSTEM, so a companion that needs more than
+ *        kAffordableCompanionShaRowsV1 rows cannot be built as one CS.
+ *
+ * A kind passing both is one whose transcript bytes this construction could
+ * own.  It is NOT a claim that the companion CS has been built for that kind:
+ * today exactly one has (BuildChildAirChallengeShaReplayV1 for airq_lambda,
+ * reconciled through the g4 CTL bus).  Because the coverage conjunction
+ * requires this counter at 8 and it measures 1, the direction of any residual
+ * imprecision is fail-closed.
+ *
+ * A THIRD SCOPING CAVEAT, recorded because it is easy to read past.  The
+ * decoder table is its OWN constraint system.  It is not appended to
+ * parent_cs, and no CTL lane yet ties its 24 byte cells to the four-slot
+ * parent's decoder windows the way VerifyChildFsShaBoundV1 ties the airq_lambda
+ * companion.  So `decoded_in_air` means "the parent-side decoder relation for
+ * kind k exists, is satisfied on H, and rejects a tamper on the value the
+ * in-parent verifier consumes" -- NOT "the proven four-slot parent_cs contains
+ * it".  Fusing them is the natural next step and is a BUS problem, not a new
+ * construction: AppendChildFsDigestBusLaneV1 is kind-agnostic (it binds a
+ * 24-byte window) and cost +50 columns on a 17,108-column parent and the same
+ * +50 on the 384,984-column real one.  Until that fusion lands, read this
+ * counter as covering the DECODER obligation, with the parent-fusion and
+ * transcript-provenance obligations tracked separately.
+ */
+/** next_pow2(63 + 1) * 1024: the largest vertical SHA schedule that fits one
+ *  constraint system, from hash_air's own structural cap. */
+inline constexpr uint64_t kAffordableCompanionShaRowsV1 = 65536;
+
+struct ChildFsChallengeDecoderCoverageV1 {
+    std::array<bool, kChildFsChallengeKindCountV1> decoded_in_air{};
+    std::array<bool, kChildFsChallengeKindCountV1> transcript_replayed{};
+    std::array<bool, kChildFsChallengeKindCountV1>
+        transcript_bound_in_air{};
+    std::array<bool, kChildFsChallengeKindCountV1> tamper_rejected{};
+    /** MEASURED across two child widths, not asserted. */
+    std::array<bool, kChildFsChallengeKindCountV1>
+        preimage_width_independent{};
+    /** Longest preimage of any draw of this kind, at each probe width. */
+    std::array<uint64_t, kChildFsChallengeKindCountV1> preimage_bytes_a{};
+    std::array<uint64_t, kChildFsChallengeKindCountV1> preimage_bytes_b{};
+    /** Vertical SHA rows one draw of this kind would cost. */
+    std::array<uint64_t, kChildFsChallengeKindCountV1> companion_sha_rows{};
+    uint32_t probe_child_w_a{0};
+    uint32_t probe_child_w_b{0};
+    uint32_t kinds_decoded{0};
+    uint32_t kinds_replayed{0};
+    uint32_t kinds_transcript_bound{0};
+    uint32_t table_rows{0};
+    uint32_t table_columns{0};
+    uint32_t table_constraints{0};
+    uint32_t table_max_alg_degree{0};
+    uint32_t table_violations{1};
+    uint32_t draws_decoded{0};
+    /** The child shape the evidence was taken at (toy today). */
+    uint32_t child_w{0};
+    uint32_t child_n_rows{0};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Build a real toy child proof, replay its transcript, build the row-wise
+ * decoder table over EVERY draw of all eight kinds bound to the public inputs
+ * the in-parent verifier consumes, and report per-kind evidence.
+ *
+ * Cached in a function-local static: the g4 ledger calls this on every
+ * assessment and the ledger is read by several suites.
+ */
+[[nodiscard]] const ChildFsChallengeDecoderCoverageV1&
+AssessChildFsChallengeDecoderCoverageV1();
+
 struct ChildFsReplayClosureV1 {
     // --- Obligation 1: the cross-domain bus exists and is adversarially sound.
     bool bus_constructed{false};
     bool bus_rejects_coordinated_forgery{false};
     // --- Obligation 2: COVERAGE.  g4 means every challenge of every child.
     //
-    // WHY THIS DOES NOT CLOSE BY MECHANICAL EXTENSION (measured).  The bus is
-    // kind-agnostic -- it binds a 24-byte window -- so adding kinds is not a bus
-    // problem.  It is a TRANSCRIPT LENGTH problem:
+    // WHAT MOVED, and what did not.  The parent now DECODES all eight kinds:
+    // ReplayChildFsTranscriptV1 re-derives the child's whole Q192-V3 transcript
+    // independently and BuildChallengeTableAirV1 decodes every draw in one
+    // row-per-draw AIR bound to the scalars the in-parent verifier consumes.
+    // MEASURED at the toy child shape (batch W=2, n_coeffs=2, n_lde=32,
+    // n_folds=1, 192 queries): 199 draws, table 256 rows x 102 columns, 81
+    // constraints, max alg degree 7, zero violations, and a per-kind tamper
+    // rejected for all eight.  The decode is WIDTH-INDEPENDENT: the draw count
+    // is 6 + n_folds + query_count (+ any rejected OOD re-draws) and never
+    // reads W -- MEASURED 6 + 1 + 192 = 199 draws.  That is why one table
+    // replaces the ~80k columns that one constraint system per draw would
+    // need, and why the table's 102 columns do not move with the child.
+    //
+    // WHAT DID NOT MOVE is the other counter, and the reason is unchanged from
+    // the analysis below: decoding a kind does not OWN its transcript bytes.
+    // For seven of eight kinds those 24 bytes are still pinned public cells.
+    // MEASURED width probe (batch W=2 vs W=4): airq_lambda's preimage stays at
+    // 113 bytes; every FRI-transcript kind's preimage moves with W, because it
+    // is the accumulated buffer carrying the two terms enumerated next.  The
+    // whole toy transcript costs 1571 SHA compressions to replay naively and
+    // 234 with the shared-midstate fork -- and that is at W=2.
+    //
+    // WHY THE SECOND COUNTER DOES NOT CLOSE BY MECHANICAL EXTENSION (measured).
+    // The bus is kind-agnostic -- it binds a 24-byte window -- so adding kinds
+    // is not a bus problem.  It is a TRANSCRIPT LENGTH problem:
     //
     //  * airq_lambda is uniquely cheap because AirChallengeDigest builds a
     //    FRESH, SELF-CONTAINED preimage: tag | seed | label | roots | shape =
@@ -918,10 +1149,20 @@ struct ChildFsReplayClosureV1 {
     // Those collapse by FORKING a shared SHA midstate -- a pure companion-CS
     // change with no transcript, consensus or merge impact.  The chip DOES
     // support it: see g4_sha_chip_forks_a_shared_midstate_to_divergent_tails.
+    //
+    // THE COUNTER IS SPLIT, because "the parent decodes kind k" and "the
+    // prover cannot choose kind k's transcript bytes" are different claims and
+    // collapsing them is exactly how a gate ends up protecting nothing.
+    // `challenge_kinds_covered` counts kinds with a parent DECODER bound to the
+    // consumed scalar and a cross-checked transcript re-derivation;
+    // `challenge_kinds_transcript_bound` counts kinds whose digest bytes are a
+    // constrained output of an in-AIR hash.  Coverage requires BOTH at 8, so
+    // adding the second counter can only ever remove a `true`.
     uint32_t slots_required{kNormalizedUniversalParentArityV1};
     uint32_t challenge_kinds_required{8};
     uint32_t slots_covered{0};
     uint32_t challenge_kinds_covered{0};
+    uint32_t challenge_kinds_transcript_bound{0};
     bool real_child_shape_covered{false};
     bool covers_all_slots_and_kinds{false};
     // --- Obligation 3: PROOF LEVEL.  Each endpoint must be carried by a real
@@ -962,16 +1203,25 @@ struct ChildFsReplayClosureV1 {
  * self_similar_fixed_point additionally requires the child Fiat-Shamir replay
  * (SHA-FS chip) lane, owned separately.
  *
- * COLUMN-CAP NOTE.  AirFriBackendAlg<Fp3> caps a batch at kRCFri3AlgBatchMaxColumns.
- * The arity-4 four-slot parent verifies four 192-query FRI children in-AIR; even
- * at the minimal (toy) child shape that V_CS is ~16996 columns wide.  PR-89
- * rung-4 raised the cap 2^14 -> 2^15 = 32768 (W is not a soundness parameter here;
- * see the constant's definition), so the full four-slot parent now FITS and
- * within_backend_column_cap is true.  Its ~17k-column self-prove is CPU-heavy
- * (tens of minutes); the reduced-arity one-slot parent (one active child + three
- * padding slots, ~4.2k columns) round-trips cheaply, and ProveParentOwnFriV1 over
- * a compact V_CS advances parent_own_fri_proof_produced quickly.  Full-shape
- * proving is the GPU-integration lane's concern.
+ * COLUMN-CAP NOTE.  AirFriBackendAlg<Fp3> caps a batch at
+ * kRCFri3AlgBatchMaxColumns, which is CURRENTLY 1u << 20 = 1,048,576
+ * (matmul_v4_rc_fri_ext3_alg.h; the static_assert ceiling is the same 2^20).
+ * The 2^14 -> 2^15 = 32768 figure that used to appear here was PR-89 rung-4
+ * and is HISTORY, not a live constraint: rung-5 raised it again to 2^20 so a
+ * real-role arity-4 parent (384k-712k columns) could commit its own FRI proof.
+ * Read it as history; four separate lanes have now misdiagnosed an over-cap
+ * condition from the stale wording.
+ *
+ * The arity-4 four-slot parent verifies four 192-query FRI children in-AIR; at
+ * the minimal (toy) child shape that V_CS is ~16996 columns wide and at real
+ * role width it is 384,984 (385,034 bus-augmented).  BOTH fit, with ~2.7x
+ * headroom at real width, so within_backend_column_cap is true at every shape
+ * this lane builds.  What is expensive is TIME, not the cap: the ~17k-column
+ * toy self-prove is tens of minutes and the real-width one was MEASURED at
+ * 4,003.9 s of AirQuotientProve inside a 16.65 GiB peak (commit bec2c48).  The
+ * reduced-arity one-slot parent (one active child + three padding slots, ~4.2k
+ * columns) round-trips cheaply, and ProveParentOwnFriV1 over a compact V_CS
+ * advances parent_own_fri_proof_produced quickly.
  */
 struct ParentOwnFriResultV1 {
     bool prove_ok{false};
@@ -1003,10 +1253,21 @@ ProveParentOwnFriV1(
 
 /**
  * Four-slot self-similar (arity-4) parent self-proof.  Only an honest, in-AIR
- * valid parent (parent.valid, witness_violations==0) is proven.  NOTE: at every
- * shape down to the toy child the four-slot V_CS exceeds the alg column cap, so
- * this returns parent_own_fri_proof_produced=false, within_backend_column_cap
- * =false — an executable record of the four-slot column-cap residual.
+ * valid parent (parent.valid, witness_violations==0) is proven.
+ *
+ * CORRECTION.  This used to say the four-slot V_CS "exceeds the alg column cap
+ * at every shape down to the toy child" and therefore always returned
+ * within_backend_column_cap=false.  That is NOT what the implementation does
+ * and has not been true since the cap became 2^20: the flag is COMPUTED as
+ * `parent_cs.n_columns <= kRCFri3AlgBatchMaxColumns`, and both the toy
+ * (~17k) and real-role (384,984) four-slot shapes satisfy it.  There is no
+ * four-slot column-cap residual.
+ *
+ * The real residual is MEMORY and TIME, which the cap does not bound: at the
+ * measured real shape a non-streaming BatchCommit would materialize ~303 GB,
+ * and the streamed real-width self-prove was MEASURED at 4,003.9 s / 16.65 GiB
+ * peak (commit bec2c48).  Read within_backend_column_cap as a backend-format
+ * bound only, never as an OOM guard.
  */
 [[nodiscard]] ParentOwnFriResultV1
 ProveFourSlotSelfSimilarParentOwnFriV1(

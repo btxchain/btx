@@ -4,6 +4,8 @@
 
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
+#include <matmul/matmul_v4_rc_stage3_fs_selection_air.h>
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 
 #include <hash.h>
 
@@ -4520,6 +4522,524 @@ VerifyChildFsShaBoundV1(
     return out;
 }
 
+// ===========================================================================
+// PR-89 g4: INDEPENDENT re-derivation of the child's Q192-V3 Fiat-Shamir
+// transcript, and the parent-side decoder table over every kind it draws.
+// See the header for the replayed absorb order and the three-level coverage
+// distinction.
+// ===========================================================================
+namespace {
+
+namespace fs_air = stage3_fs_selection_air;
+
+void FsAppendLE32(std::vector<unsigned char>& buf, uint32_t v)
+{
+    for (int i = 0; i < 4; ++i) {
+        buf.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
+    }
+}
+void FsAppendLE64(std::vector<unsigned char>& buf, uint64_t v)
+{
+    for (int i = 0; i < 8; ++i) {
+        buf.push_back(static_cast<unsigned char>((v >> (8 * i)) & 0xFF));
+    }
+}
+void FsAppendFp3(std::vector<unsigned char>& buf, const gf::Fp3& v)
+{
+    FsAppendLE64(buf, gf::Canonical(v.c0));
+    FsAppendLE64(buf, gf::Canonical(v.c1));
+    FsAppendLE64(buf, gf::Canonical(v.c2));
+}
+void FsAppendAlgRoot(std::vector<unsigned char>& buf, const Fri3AlgDigest& d)
+{
+    const uint256 packed = Fri3AlgDigestToUint256(d);
+    buf.insert(buf.end(), packed.begin(), packed.end());
+}
+
+/** Plain SHA256d over an explicit byte string -- deliberately NOT the
+ *  incremental Fri3AlgFs::ChallengeDigest cache, so the two are independent
+ *  computations of the same function. */
+uint256 FsSha256d(const std::vector<unsigned char>& buf)
+{
+    uint256 first;
+    CSHA256().Write(buf.data(), buf.size()).Finalize(first.begin());
+    uint256 second;
+    CSHA256()
+        .Write(first.begin(), first.size())
+        .Finalize(second.begin());
+    return second;
+}
+
+/** SHA256 compressions for a `bytes`-long message: the 1-then-zeros-then-LE64
+ *  length padding costs 9 extra bytes, rounded up to whole 64-byte blocks,
+ *  plus one second-pass block for the 32-byte inner digest. */
+uint64_t FsShaCompressions(uint64_t bytes)
+{
+    return (bytes + 9 + 63) / 64 + 1;
+}
+
+/** Fri3AlgHasExtCoord's rejection predicate: a z with (c1,c2) == (0,0) lies in
+ *  the base field and is refused by the OOD sampler. */
+bool FsHasExtCoord(const gf::Fp3& z)
+{
+    return gf::Canonical(z.c1) != 0 || gf::Canonical(z.c2) != 0;
+}
+
+} // namespace
+
+ChildFsTranscriptReplayV1 ReplayChildFsTranscriptV1(
+    const uint256& child_fs_seed,
+    const FourSlotSelfSimilarCtlParentV1::ChildProof& child_proof,
+    const air_recurse::ChildPublicInputs& pi)
+{
+    ChildFsTranscriptReplayV1 out;
+    const auto& b = child_proof.batch;
+    if (b.version != kRCFri3AlgBatchProofVersion) {
+        out.note = "stage3:child_fs_transcript:unsupported_proof_version";
+        return out;
+    }
+    if (b.column_len.empty() || b.n_coeffs == 0 ||
+        (b.n_coeffs & (b.n_coeffs - 1)) != 0) {
+        out.note = "stage3:child_fs_transcript:shape";
+        return out;
+    }
+    out.child_w = static_cast<uint32_t>(b.column_len.size());
+    out.n_coeffs = b.n_coeffs;
+    out.n_lde = b.n_coeffs * kRCFriBlowup;
+    out.n_folds = 0;
+    for (uint32_t v = b.n_coeffs; v > 1; v >>= 1) ++out.n_folds;
+    out.queries = static_cast<uint32_t>(b.queries.size());
+    if (b.evals_z1.size() != out.child_w ||
+        b.evals_z2.size() != out.child_w ||
+        b.fold_layers.size() != out.n_folds + 1 ||
+        b.fold_challenges.size() != out.n_folds) {
+        out.note = "stage3:child_fs_transcript:proof_arity";
+        return out;
+    }
+
+    std::vector<unsigned char> buf;
+    // Fri3AlgFs ctor.
+    const char* domain = kRCFri3AlgBatchDomainTag;
+    buf.insert(buf.end(), domain, domain + std::strlen(domain));
+    buf.insert(buf.end(), child_fs_seed.begin(), child_fs_seed.end());
+    FsAppendLE64(buf, b.pow_grind_nonce);
+    FsAppendLE32(buf, kRCFriBlowup);
+    FsAppendLE32(buf, b.n_coeffs);
+    // Fri3AlgBatchFsInit.
+    FsAppendLE32(buf, kRCFri3AlgBatchProofVersion);
+    FsAppendLE32(buf, static_cast<uint32_t>(b.column_len.size()));
+    for (const uint32_t len : b.column_len) FsAppendLE32(buf, len);
+    FsAppendAlgRoot(buf, b.row_commit.root);
+
+    const auto draw = [&](const char* label, uint32_t index) {
+        std::vector<unsigned char> preimage = buf;
+        const size_t n = std::strlen(label);
+        preimage.insert(
+            preimage.end(),
+            reinterpret_cast<const unsigned char*>(label),
+            reinterpret_cast<const unsigned char*>(label) + n);
+        FsAppendLE32(preimage, index);
+        ChildFsChallengeDrawV1 d;
+        d.label = label;
+        d.index = index;
+        d.preimage_bytes = preimage.size();
+        d.sha_compressions = FsShaCompressions(preimage.size());
+        d.digest = FsSha256d(preimage);
+        d.value = gf::FromChallengeBytes3(d.digest.data());
+        return d;
+    };
+
+    // ---- fra3_lambda.  Legacy geometric batching: one draw, then absorbed.
+    {
+        ChildFsChallengeDrawV1 d = draw("fra3_lambda", 0);
+        d.kind = ChildFsChallengeKindV1::Fra3Lambda;
+        d.matches_protocol = gf::Eq(d.value, b.lambda);
+        out.draws.push_back(d);
+        FsAppendFp3(buf, b.lambda);
+    }
+    // ---- fra3_z, shared rejection counter across z1 and z2.  The rejected
+    // draws are recorded (they are real transcript queries) but carry no kind.
+    {
+        uint32_t ctr = 0;
+        gf::Fp3 accepted[2]{};
+        for (uint32_t slot = 0; slot < 2; ++slot) {
+            bool got = false;
+            // The shipped loop is unbounded; a corrupt transcript could spin,
+            // so bound it and fail closed rather than hang the ledger.
+            for (uint32_t attempt = 0; attempt < 4096 && !got; ++attempt) {
+                ChildFsChallengeDrawV1 d = draw("fra3_z", ctr++);
+                const bool ext = FsHasExtCoord(d.value);
+                const bool dup =
+                    slot == 1 && gf::Eq(d.value, accepted[0]);
+                if (!ext || dup) {
+                    d.ood_rejected = true;
+                    d.kind = slot == 0 ? ChildFsChallengeKindV1::Fra3Z1
+                                       : ChildFsChallengeKindV1::Fra3Z2;
+                    out.draws.push_back(d);
+                    continue;
+                }
+                d.kind = slot == 0 ? ChildFsChallengeKindV1::Fra3Z1
+                                   : ChildFsChallengeKindV1::Fra3Z2;
+                d.matches_protocol =
+                    gf::Eq(d.value, slot == 0 ? b.z1 : b.z2);
+                accepted[slot] = d.value;
+                out.draws.push_back(d);
+                got = true;
+            }
+            if (!got) {
+                out.note = "stage3:child_fs_transcript:ood_sampling_exhausted";
+                return out;
+            }
+        }
+        FsAppendFp3(buf, b.z1);
+        FsAppendFp3(buf, b.z2);
+    }
+    // ---- the two OOD evaluation vectors.  THIS is the 48*W term.
+    for (uint32_t i = 0; i < out.child_w; ++i) {
+        FsAppendFp3(buf, b.evals_z1[i]);
+        FsAppendFp3(buf, b.evals_z2[i]);
+    }
+    // ---- fra3_w.
+    {
+        ChildFsChallengeDrawV1 d1 = draw("fra3_w", 0);
+        d1.kind = ChildFsChallengeKindV1::Fra3W1;
+        d1.matches_protocol = gf::Eq(d1.value, b.w1);
+        out.draws.push_back(d1);
+        ChildFsChallengeDrawV1 d2 = draw("fra3_w", 1);
+        d2.kind = ChildFsChallengeKindV1::Fra3W2;
+        d2.matches_protocol = gf::Eq(d2.value, b.w2);
+        out.draws.push_back(d2);
+        FsAppendFp3(buf, b.w1);
+        FsAppendFp3(buf, b.w2);
+    }
+    // ---- fold roots and betas.  The beta is drawn but NOT absorbed; the next
+    // round's root absorption is what advances the transcript.
+    for (uint32_t fold = 0; fold <= out.n_folds; ++fold) {
+        FsAppendAlgRoot(buf, b.fold_layers[fold].root);
+        if (fold == out.n_folds) break;
+        ChildFsChallengeDrawV1 d = draw("fra3_fold", fold);
+        d.kind = ChildFsChallengeKindV1::Fra3Fold;
+        d.matches_protocol = gf::Eq(d.value, b.fold_challenges[fold]);
+        out.draws.push_back(d);
+    }
+    out.transcript_bytes_at_terminal = buf.size();
+    // ---- fra3_query.  Every index is drawn from this one terminal state and
+    // differs only in the trailing LE32(q) -- the shared-midstate shape.
+    for (uint32_t q = 0; q < out.queries; ++q) {
+        ChildFsChallengeDrawV1 d = draw("fra3_query", q);
+        d.kind = ChildFsChallengeKindV1::Fra3Query;
+        d.index_value = fs_air::Fri3AlgV3QueryIndexFromChallengeV1(
+            d.value, out.n_lde);
+        d.matches_protocol = d.index_value == b.queries[q].index;
+        out.draws.push_back(d);
+    }
+    // ---- airq_lambda, drawn outside the FRI transcript from its own
+    // self-contained preimage.
+    {
+        ChildFsChallengeDrawV1 d;
+        d.kind = ChildFsChallengeKindV1::AirqLambda;
+        d.label = "airq_lambda";
+        d.index = 0;
+        d.digest = aq::AirChallengeDigest(
+            child_fs_seed, "airq_lambda", {child_proof.trace_commit},
+            {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
+        // tag(14) | seed(32) | LE32 len | label(11) | LE32 nroots | root(32)
+        // | LE32 nextra | 3 x LE32 = 113 bytes (MEASURED at 3 compressions).
+        d.preimage_bytes = 14 + 32 + 4 + 11 + 4 + 32 + 4 + 12;
+        d.sha_compressions = FsShaCompressions(d.preimage_bytes);
+        d.value = gf::FromChallengeBytes3(d.digest.data());
+        d.matches_protocol = gf::Eq(d.value, pi.air_lambda);
+        out.draws.push_back(d);
+    }
+
+    out.all_kinds_match = true;
+    for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+        out.kind_matches_protocol[k] = false;
+    }
+    std::array<bool, kChildFsChallengeKindCountV1> seen{};
+    std::array<bool, kChildFsChallengeKindCountV1> ok{};
+    ok.fill(true);
+    for (const auto& d : out.draws) {
+        const uint32_t k = static_cast<uint32_t>(d.kind);
+        out.total_sha_compressions += d.sha_compressions;
+        if (d.ood_rejected) continue;   // a rejected z carries no protocol value
+        ++out.kind_draw_count[k];
+        seen[k] = true;
+        if (!d.matches_protocol) ok[k] = false;
+    }
+    for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+        out.kind_matches_protocol[k] = seen[k] && ok[k];
+        if (!out.kind_matches_protocol[k]) out.all_kinds_match = false;
+    }
+    // Forked cost: the longest shared prefix is the terminal transcript state,
+    // paid once; each draw then pays only the blocks its own suffix touches
+    // plus its second pass.  Draws before the terminal state keep their full
+    // cost -- they sit at different prefixes.
+    {
+        const uint64_t shared =
+            FsShaCompressions(out.transcript_bytes_at_terminal) - 1;
+        out.forked_sha_compressions = shared;
+        for (const auto& d : out.draws) {
+            if (d.kind == ChildFsChallengeKindV1::Fra3Query) {
+                const uint64_t full =
+                    (d.preimage_bytes + 9 + 63) / 64;
+                const uint64_t tail = full > shared ? full - shared : 0;
+                out.forked_sha_compressions += tail + 1;
+            } else {
+                out.forked_sha_compressions += d.sha_compressions;
+            }
+        }
+    }
+    const auto rows = [](uint64_t compressions) -> uint64_t {
+        uint64_t p = 1;
+        while (p < compressions) p <<= 1;
+        return p * 1024;
+    };
+    out.total_sha_rows = rows(out.total_sha_compressions);
+    out.forked_sha_rows = rows(out.forked_sha_compressions);
+
+    out.valid = true;
+    out.note = out.all_kinds_match
+                   ? "stage3:child_fs_transcript:replayed_all_kinds"
+                   : "stage3:child_fs_transcript:diverged_from_protocol";
+    return out;
+}
+
+const ChildFsChallengeDecoderCoverageV1&
+AssessChildFsChallengeDecoderCoverageV1()
+{
+    static const ChildFsChallengeDecoderCoverageV1 cached = [] {
+        ChildFsChallengeDecoderCoverageV1 out;
+        using AlgBackend = FourSlotSelfSimilarCtlParentV1::AlgBackend;
+        uint256 seed;
+        std::fill(seed.begin(), seed.end(), static_cast<unsigned char>(0x5e));
+
+        // A real child AIR + a real proof of it, so the transcript below is a
+        // genuine one and not a synthetic byte string.  Two WIDTHS, because
+        // width independence of a kind's preimage is measured, not assumed.
+        struct Probe {
+            aq::AirConstraintSystem<gf::Fp3> cs;
+            std::vector<std::vector<gf::Fp3>> columns;
+            ChildFsTranscriptReplayV1 replay;
+            air_recurse::ChildPublicInputs pi;
+            aq::AirQuotientProveResult<gf::Fp3, AlgBackend> proved;
+        };
+        const auto build_probe = [&](uint32_t width, Probe& p) -> bool {
+            p.cs.n_rows = 2;
+            p.cs.n_columns = width;
+            for (uint32_t c = 0; c < width; ++c) {
+                aq::AirConstraint<gf::Fp3> boolean;
+                boolean.name = "stage3.g4_coverage.toy.boolean";
+                boolean.kind = aq::AirKind::kEverywhere;
+                boolean.alg_degree = 2;
+                boolean.eval = [c](const std::vector<gf::Fp3>& r,
+                                   const std::vector<gf::Fp3>&) {
+                    return gf::Mul(r[c], gf::Sub(r[c], gf::Fp3::One()));
+                };
+                p.cs.constraints.push_back(std::move(boolean));
+            }
+            p.columns.assign(
+                width, std::vector<gf::Fp3>{gf::Fp3::Zero(), gf::Fp3::One()});
+            p.proved = aq::AirQuotientProve<gf::Fp3, AlgBackend>(
+                p.cs, p.columns, seed, {});
+            if (!p.proved.ok) return false;
+            p.pi = ar::ExtractChildPublicInputs(p.cs, p.proved.proof, seed);
+            if (!p.pi.ok) return false;
+            p.replay = ReplayChildFsTranscriptV1(seed, p.proved.proof, p.pi);
+            return p.replay.valid;
+        };
+
+        Probe a, b;
+        if (!build_probe(1, a)) {
+            out.note = "stage3:g4_coverage:probe_a:" +
+                       (a.proved.ok ? a.replay.note : a.proved.note);
+            return out;
+        }
+        if (!build_probe(3, b)) {
+            out.note = "stage3:g4_coverage:probe_b:" +
+                       (b.proved.ok ? b.replay.note : b.proved.note);
+            return out;
+        }
+        out.probe_child_w_a = a.replay.child_w;
+        out.probe_child_w_b = b.replay.child_w;
+        if (out.probe_child_w_a == out.probe_child_w_b) {
+            // Non-vacuity: two probes at the SAME batch width would make every
+            // kind look width independent.
+            out.note = "stage3:g4_coverage:probe_widths_not_distinct";
+            return out;
+        }
+        const auto longest = [](const ChildFsTranscriptReplayV1& r,
+                                uint32_t kind) {
+            uint64_t best = 0;
+            for (const auto& d : r.draws) {
+                if (static_cast<uint32_t>(d.kind) != kind) continue;
+                best = std::max(best, d.preimage_bytes);
+            }
+            return best;
+        };
+        for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+            out.preimage_bytes_a[k] = longest(a.replay, k);
+            out.preimage_bytes_b[k] = longest(b.replay, k);
+            out.preimage_width_independent[k] =
+                out.preimage_bytes_a[k] != 0 &&
+                out.preimage_bytes_a[k] == out.preimage_bytes_b[k];
+            uint64_t comps = 0;
+            for (const auto& d : b.replay.draws) {
+                if (static_cast<uint32_t>(d.kind) != k) continue;
+                comps = std::max(comps, d.sha_compressions);
+            }
+            uint64_t sched = 1;
+            while (sched < comps) sched <<= 1;
+            out.companion_sha_rows[k] = sched * 1024;
+        }
+
+        // The decoder table itself is built on probe A (the toy child shape the
+        // existing g4 coverage claim is scoped to).
+        const auto& child_cs = a.cs;
+        const auto& pi = a.pi;
+        const auto& replay = a.replay;
+        out.child_w = child_cs.n_columns;
+        out.child_n_rows = child_cs.n_rows;
+        for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+            out.transcript_replayed[k] = replay.kind_matches_protocol[k];
+        }
+
+        // The scalar the in-parent verifier consumes, per kind.  These are the
+        // ChildPublicInputs the V_CS builder pins as literals -- binding the
+        // decode to them is what makes the decode load-bearing.
+        std::vector<fs_air::ChallengeTableRowV1> rows;
+        std::vector<uint32_t> row_kind;
+        uint32_t fold_seen = 0;
+        uint32_t query_seen = 0;
+        for (const auto& d : replay.draws) {
+            if (d.ood_rejected) continue;
+            fs_air::ChallengeTableRowV1 row;
+            for (uint32_t i = 0; i < 24; ++i) {
+                row.digest_bytes[i] = d.digest.data()[i];
+            }
+            row.kind = static_cast<uint32_t>(d.kind);
+            switch (d.kind) {
+            case ChildFsChallengeKindV1::AirqLambda:
+                row.consumed = pi.air_lambda;
+                break;
+            case ChildFsChallengeKindV1::Fra3Lambda:
+                row.consumed = pi.fri_lambda;
+                break;
+            case ChildFsChallengeKindV1::Fra3Z1:
+                row.consumed = pi.z1;
+                break;
+            case ChildFsChallengeKindV1::Fra3Z2:
+                row.consumed = pi.z2;
+                break;
+            case ChildFsChallengeKindV1::Fra3W1:
+                row.consumed = pi.w1;
+                break;
+            case ChildFsChallengeKindV1::Fra3W2:
+                row.consumed = pi.w2;
+                break;
+            case ChildFsChallengeKindV1::Fra3Fold:
+                if (fold_seen >= pi.fold_challenges.size()) {
+                    out.note = "stage3:g4_coverage:fold_arity";
+                    return out;
+                }
+                row.consumed = pi.fold_challenges[fold_seen++];
+                break;
+            case ChildFsChallengeKindV1::Fra3Query:
+                if (query_seen >= pi.query_index.size()) {
+                    out.note = "stage3:g4_coverage:query_arity";
+                    return out;
+                }
+                // A query row's Fp3 challenge is still decoded and bound; the
+                // index is the additional masked output.
+                row.consumed = d.value;
+                row.consumed_index = pi.query_index[query_seen++];
+                row.is_query = true;
+                break;
+            }
+            rows.push_back(row);
+            row_kind.push_back(row.kind);
+        }
+        if (rows.empty()) {
+            out.note = "stage3:g4_coverage:no_draws";
+            return out;
+        }
+        const auto table =
+            fs_air::BuildChallengeTableAirV1(rows, replay.n_lde);
+        out.table_rows = table.n_rows;
+        out.table_columns = table.n_columns;
+        out.table_constraints = table.n_constraints;
+        out.table_max_alg_degree = table.max_alg_degree;
+        out.table_violations = table.violations;
+        out.draws_decoded = static_cast<uint32_t>(rows.size());
+        if (!table.valid) {
+            out.note = "stage3:g4_coverage:" + table.note;
+            return out;
+        }
+        // Every row's decode reproduced its consumed scalar, and every query
+        // row's mask reproduced the index the child's proof carries.  Without
+        // these the table could be satisfied by a consumed column that is
+        // simply whatever the decode produced.
+        const bool all_bound =
+            table.rows_bound_to_consumed == rows.size() &&
+            table.query_rows_bound_to_consumed_index == table.query_rows;
+
+        // TAMPER, per kind.  If the constraints do not go red, the "binding" is
+        // decorative and the kind must not count.
+        //  * Fp3 kinds: move that kind's first row's CONSUMED cell off the
+        //    decode.  This hits the bound_to_consumed constraint specifically,
+        //    not the recompose lanes, so it tests the binding rather than the
+        //    decoder.
+        //  * fra3_query: a query row's consumed object is its INDEX (the child
+        //    proof carries no separate Fp3 for it), so move consumed_index and
+        //    watch index_bound_to_consumed fire.
+        std::array<bool, kChildFsChallengeKindCountV1> tampered{};
+        for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+            uint32_t target = UINT32_MAX;
+            for (uint32_t r = 0; r < row_kind.size(); ++r) {
+                if (row_kind[r] == k) { target = r; break; }
+            }
+            if (target == UINT32_MAX) continue;
+            std::vector<fs_air::ChallengeTableRowV1> forged = rows;
+            if (forged[target].is_query) {
+                forged[target].consumed_index =
+                    (forged[target].consumed_index + 1) % replay.n_lde;
+            } else {
+                forged[target].consumed =
+                    gf::Add(forged[target].consumed, gf::Fp3::One());
+            }
+            const auto bad =
+                fs_air::BuildChallengeTableAirV1(forged, replay.n_lde);
+            tampered[k] = bad.violations > 0;
+        }
+
+        for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+            out.tamper_rejected[k] = tampered[k];
+            out.decoded_in_air[k] =
+                replay.kind_draw_count[k] > 0 && all_bound &&
+                table.valid && tampered[k];
+            // COMPUTED from two measurements, not written down as "the
+            // airq_lambda one": a kind's transcript bytes can be owned in-AIR
+            // only if its preimage does not grow with the child's width and its
+            // companion vertical SHA schedule fits one constraint system.
+            out.transcript_bound_in_air[k] =
+                out.preimage_width_independent[k] &&
+                out.companion_sha_rows[k] != 0 &&
+                out.companion_sha_rows[k] <= kAffordableCompanionShaRowsV1;
+            if (out.decoded_in_air[k]) ++out.kinds_decoded;
+            if (out.transcript_replayed[k]) ++out.kinds_replayed;
+            if (out.transcript_bound_in_air[k]) {
+                ++out.kinds_transcript_bound;
+            }
+        }
+        out.valid = true;
+        out.note = "stage3:g4_coverage:decoded_" +
+                   std::to_string(out.kinds_decoded) + "of8_replayed_" +
+                   std::to_string(out.kinds_replayed) + "of8_bound_" +
+                   std::to_string(out.kinds_transcript_bound) + "of8";
+        return out;
+    }();
+    return cached;
+}
 
 ChildFsReplayClosureV1
 AssessChildFsReplayClosureV1()
@@ -4546,18 +5066,75 @@ AssessChildFsReplayClosureV1()
     // four-slot COVERAGE claim below does not rest on that matrix; the matrix
     // is an additional adversarial check.
     out.slots_covered = 4;
-    // Challenge kinds: 1 of 8.  The parent decodes ONLY airq_lambda; grep of
-    // the four-slot builder shows fri_lambda / z1 / z2 / w1 / w2 / fold betas /
-    // query indices have NO parent decoder at all (only fold_challenges.size()
-    // is read).  The BUS itself is kind-agnostic -- it binds a 24-byte window --
-    // so what is missing is seven parent-side decoders plus a per-kind
-    // transcript replay, not seven buses.  That is parent-AIR construction work.
-    out.challenge_kinds_covered = 1;
-    // Toy child AIR (one boolean column, two rows).
+    // Challenge kinds: COMPUTED, not asserted.  The coverage assessor builds a
+    // real toy child proof, re-derives its whole Q192-V3 transcript
+    // independently of fri_ext3_alg, cross-checks every re-derived value
+    // against the value the child's proof ships, builds the row-wise decoder
+    // table over EVERY draw, and requires a per-kind tamper to go red before
+    // that kind may count.  Anything that fails leaves the count below 8 and
+    // the gate open.
+    const ChildFsChallengeDecoderCoverageV1& cov =
+        AssessChildFsChallengeDecoderCoverageV1();
+    out.challenge_kinds_covered = 0;
+    for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+        if (cov.decoded_in_air[k] && cov.transcript_replayed[k]) {
+            ++out.challenge_kinds_covered;
+        }
+    }
+    // The SECOND counter, and the one that is still nearly empty: for how many
+    // kinds are the 24 decoded bytes a CONSTRAINED OUTPUT of an in-AIR hash
+    // rather than a pinned public cell?  Only airq_lambda, whose preimage is a
+    // self-contained 113 bytes.  Every other kind's preimage is the child's
+    // accumulated FRI transcript, which carries the >= 52*W terms enumerated on
+    // this struct; at real role width that is 5.37e8 in-AIR rows for ONE draw
+    // of ONE slot.  Decoding a kind and OWNING its transcript bytes are not the
+    // same claim and are not merged here.
+    out.challenge_kinds_transcript_bound = cov.kinds_transcript_bound;
+    // --- real_child_shape_covered: RULED ON, and DELIBERATELY LEFT FALSE.
+    //
+    // The evidence exists and is real.  The env-gated
+    // four_slot_real_coupled_permutation_child_g4_bus_reconciles_and_rejects_
+    // forgery (BTX_RUN_G4_REAL_CHILD_BUS=1) MEASURED the g4 bus reconciling on
+    // all four slots of the REAL CoupledPermutation four-slot parent
+    // (W = 384,984 x 256 rows; bus-augmented 385,034 -- the same +50-column
+    // lane as the toy 17,108 -> 17,158), with the companion SHA CS staying
+    // 4096 x 541 / 3 compressions exactly as the W-independence of the
+    // airq_lambda preimage predicts, in 418 s at 12.72 GB peak.  Both forgeries
+    // expressible at that shape were rejected: the compensating digest-cell
+    // tamper (real-shape parent_cs alone at ZERO violations, CTL boundary
+    // rejecting with both tables satisfied) and transcript substitution.
+    //
+    // It is still false for TWO independent reasons, either of which suffices.
+    //
+    // (1) The default gate cannot check it.  The run lives behind an env var,
+    //     and this ledger claims only what the default build executes -- the
+    //     same standard that keeps producer_endpoint_fri_proven and
+    //     consumer_endpoint_fri_proven false (see the endpoint note below).
+    //
+    // (2) It would demonstrate LESS than the toy result on the axis the
+    //     conjunction next to it claims.  A real role's honest witness is
+    //     CS-DETERMINED -- (role, cell, leaf_index, path_len) flow into the
+    //     canonical manifests and therefore into child_cs itself -- so four
+    //     slots of one identical real child_cs necessarily carry four
+    //     IDENTICAL transcripts.  Slot separation over four DISTINCT
+    //     transcripts is expressible only at toy shape.  Setting this true
+    //     beside slots_covered = 4 would read as "four distinct slots verified
+    //     at real width", which is not what was measured; the real-shape
+    //     cross-transcript result is substitution rejection, not the cross-slot
+    //     matrix.  Promoting the flag would make the pair of claims stronger
+    //     than their evidence, which is the failure mode this ledger exists to
+    //     prevent.
+    //
+    // Closing it honestly needs a real child family whose four members differ
+    // (distinct roles or distinct pinned cells, so four distinct child_cs and
+    // four distinct transcripts) AND a default-gate-affordable way to check it.
+    // Neither is a flip of this line.
     out.real_child_shape_covered = false;
     out.covers_all_slots_and_kinds =
         out.slots_covered >= out.slots_required &&
         out.challenge_kinds_covered >=
+            out.challenge_kinds_required &&
+        out.challenge_kinds_transcript_bound >=
             out.challenge_kinds_required &&
         out.real_child_shape_covered;
 
@@ -4566,10 +5143,43 @@ AssessChildFsReplayClosureV1()
     // five genuine proof-level rejects (lied terminal, coordinated forgery,
     // inverse tamper, cross-table replay, wrong FS seed) -- MEASURED.
     out.lane_relation_fri_proven = true;
-    // Producer (companion SHA CS, 4096 rows x 541 columns) and consumer
-    // (bus-augmented four-slot parent, 17158 columns x 256 rows) FRI proofs are
-    // exercised only under BTX_RUN_G4_SHA_FRI / BTX_RUN_G4_PARENT_FRI.  Until
-    // those run in the default gate they are not claimed here.
+    // --- THE TWO ENDPOINT PROOFS: measured, and STILL NOT CLAIMED.  This is a
+    // structural finding, not a to-do.
+    //
+    // PRODUCER (companion SHA CS, 4096 rows x 541 columns; 591 columns and 992
+    // constraints once the bus lane is appended).  It genuinely proves and
+    // verifies: AirQuotientProveRowsSplitRap + AirQuotientVerifyRowsSplitRap,
+    // with the wrong-seed reject firing.  It MUST go through Split-RAP -- the
+    // vertical SHA AIR carries preprocessed_row_group_roots and the plain
+    // AirQuotientVerify refuses those outright (air_quotient.cpp, "preprocessed
+    // row-group roots require Split-RAP").  MEASURED end to end, this lane,
+    // 3:37.87 wall / 1975.7 s CPU / 1.50 GB peak RSS.  Its separate
+    // BTX_RUN_G4_SHA_FRI gate has been REMOVED: the FRI proof was never the
+    // dominant cost (the SHA replay build is), so the second gate bought
+    // nothing and produced runs that reported PASS having proved nothing.  It
+    // now runs whenever the enclosing BTX_RUN_HEAVY_CHILD_FS_SHA case runs.
+    //
+    // CONSUMER (bus-augmented four-slot parent, 17158 columns x 256 rows).
+    // Documented at tens of minutes; the real-width analogue was MEASURED at
+    // 4,003.9 s of AirQuotientProve inside a 16.65 GiB peak (commit bec2c48).
+    //
+    // WHY NEITHER FLAG IS SET, precisely.  The obstacle is NOT that the tests
+    // are env-gated -- that is a symptom.  It is that this assessor is called
+    // by the global soundness ledger, which several suites read, so anything it
+    // claims must be RECOMPUTABLE on every call.  A ~218 s producer prove and a
+    // ~40 min consumer prove cannot be.  Making the tests unconditional would
+    // let a full test run check them, but these two booleans would still be
+    // literals -- exactly the vacuous-gate shape the ledger was hardened to
+    // remove.  So the conjunct `discharged_by_fri_proof` is, as currently
+    // specified, UNSATISFIABLE by any evidence-computed assessor.
+    //
+    // The route that actually closes it: PERSIST the two proofs as artifacts
+    // and have this assessor VERIFY rather than re-prove.  Verification is the
+    // cheap direction -- AirQuotientVerifyRowsSplitRap on the producer proof is
+    // seconds against 1975 s of proving -- and a verify-only assessor is
+    // genuinely evidence-computed, because a stale or forged artifact fails the
+    // check.  That needs an artifact path and a fixture convention, which is a
+    // deliberate design decision and not this lane's to make unilaterally.
     out.producer_endpoint_fri_proven = false;
     out.consumer_endpoint_fri_proven = false;
     out.discharged_by_fri_proof =
@@ -4602,7 +5212,11 @@ AssessChildFsReplayClosureV1()
                 std::to_string(out.slots_required) + "slots_" +
                 std::to_string(out.challenge_kinds_covered) + "of" +
                 std::to_string(out.challenge_kinds_required) +
-                "kinds" +
+                "kinds_" +
+                std::to_string(out.challenge_kinds_transcript_bound) +
+                "of" +
+                std::to_string(out.challenge_kinds_required) +
+                "transcript_bound" +
                 (out.real_child_shape_covered
                      ? ";"
                      : "_toy_child_shape;");

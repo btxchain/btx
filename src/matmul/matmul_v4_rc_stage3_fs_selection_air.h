@@ -385,6 +385,201 @@ static_assert(kUniformFp3SelectionAirExecutableV1);
 static_assert(kPowerOfTwoQueryIndexAirExecutableV1);
 static_assert(!kUniformFp3SelectionRecursiveAuthorityV1);
 
+// ===========================================================================
+// PR-89 g4: the ROW-WISE child-challenge decoder table.
+//
+// The decoders that already exist here (BuildDirectChallengeWitnessV1,
+// BuildQueryIndexWitnessV1, BuildAlgebraicQueryIndexAirFromLaneV1) each occupy
+// a WHOLE constraint system for ONE challenge: their columns are constant down
+// every row.  A recursion parent must decode every challenge of every child --
+// for the shipped Q192 single-lane child that is 1 airq_lambda + 1 fra3_lambda
+// + (>= 2) fra3_z + 2 fra3_w + n_folds fra3_fold + 192 fra3_query draws, times
+// four slots.  One CS per draw does not fit any parent: at ~100 columns each,
+// 4 x ~200 draws is ~80k columns against a 32768 column cap.
+//
+// This table transposes that.  ONE ROW PER CHALLENGE DRAW, uniform layout, all
+// constraints kEverywhere -- the same structural move that makes the Poseidon2
+// chip (1 row per permutation) affordable where the vertical SHA chip (1024
+// rows per compression) is not.  Rows scale with the draw count; columns do
+// not.
+//
+// WHAT ONE ROW CONSTRAINS
+//   (a) word_j  - sum_i byte[8j+i]*256^i          = 0    (three lanes)
+//   (b) chal    - (word0 + word1*X + word2*X^2)   = 0    (FromChallengeBytes3)
+//   (c) chal    - consumed                        = 0    (the binding)
+//   (d) 64 boolean bit columns, recomposed to word0, plus the Goldilocks
+//       canonicity predicate NOT(high32 all ones AND low32 != 0)
+//   (e) is_query * (index - sum_{b<domain_bits} bit_b * 2^b) = 0
+//   (f) is_query * (index - consumed_index)       = 0
+//       (1 - is_query) * index                    = 0
+//
+// (d)+(e) are the SHIPPED V3 query-index rule, not the Construction-2 one:
+//   ProtocolChallengeIndex's non-uniform branch computes
+//     out = ((Canonical(c1) << 64) | Canonical(c0)) % n_lde
+//   and n_lde is a power of two dividing 2^64, so the c1 term vanishes and the
+//   rule is exactly the low log2(n_lde) bits of Canonical(c0).  c0 IS a
+//   Goldilocks field element, so the canonicity trap documented above for the
+//   algebraic chip bites here for the same reason and is enforced the same way.
+//   Fri3AlgV3QueryIndexFromChallengeV1 recomputes the 128-bit modulo form
+//   independently so the two can be cross-checked rather than assumed equal.
+//
+// WHAT ONE ROW DOES *NOT* CONSTRAIN.  The 24 digest bytes are PREPROCESSED
+// (public) cells.  Nothing here says they are SHA256d(child transcript); that
+// is the companion-hash half, and for every kind except airq_lambda it is
+// still open.  A table with zero violations therefore proves "the parent's
+// decode of these pinned bytes is the value the in-parent verifier consumes",
+// not "these bytes are the child's real transcript".  Do not read the two as
+// the same claim.
+// ===========================================================================
+
+/** One decoded challenge draw = one table row. */
+struct ChallengeTableRowV1 {
+    std::array<unsigned char, 24> digest_bytes{};
+    /** The value the in-parent verifier actually consumes for this draw. */
+    gf::Fp3 consumed{};
+    /** fra3_query rows only: the index the child's proof actually carries. */
+    uint32_t consumed_index{0};
+    bool is_query{false};
+    /** Free-form kind tag, carried through for reporting only. */
+    uint32_t kind{0};
+};
+
+inline constexpr uint32_t kChallengeTableBytes = 24;
+inline constexpr uint32_t kChallengeTableLaneBits = kAlgebraicQueryLaneBits;
+inline constexpr uint32_t kChallengeTableAndSteps = kAlgebraicQueryAndSteps;
+
+struct ChallengeTableLayoutV1 {
+    [[nodiscard]] constexpr uint32_t Byte(uint32_t i) const { return i; }
+    [[nodiscard]] constexpr uint32_t Word(uint32_t j) const
+    {
+        return kChallengeTableBytes + j;
+    }
+    [[nodiscard]] constexpr uint32_t Challenge() const
+    {
+        return kChallengeTableBytes + 3;
+    }
+    [[nodiscard]] constexpr uint32_t Consumed() const
+    {
+        return kChallengeTableBytes + 4;
+    }
+    [[nodiscard]] constexpr uint32_t IsQuery() const
+    {
+        return kChallengeTableBytes + 5;
+    }
+    [[nodiscard]] constexpr uint32_t Bit(uint32_t b) const
+    {
+        return kChallengeTableBytes + 6 + b;
+    }
+    [[nodiscard]] constexpr uint32_t And(uint32_t step) const
+    {
+        return Bit(kChallengeTableLaneBits) + step;
+    }
+    [[nodiscard]] constexpr uint32_t Index() const
+    {
+        return And(kChallengeTableAndSteps);
+    }
+    [[nodiscard]] constexpr uint32_t ConsumedIndex() const
+    {
+        return Index() + 1;
+    }
+    [[nodiscard]] constexpr uint32_t End() const
+    {
+        return ConsumedIndex() + 1;
+    }
+};
+
+struct ChallengeTableAirV1 {
+    ChallengeTableLayoutV1 layout;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint32_t n_draws{0};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint32_t max_alg_degree{0};
+    uint32_t n_lde{0};
+    uint32_t domain_bits{0};
+    uint32_t violations{1};
+    /** Per-row: the decode reproduced the supplied `consumed` value. */
+    uint32_t rows_bound_to_consumed{0};
+    /** Per-row (query rows only): the mask reproduced `consumed_index`. */
+    uint32_t query_rows_bound_to_consumed_index{0};
+    uint32_t query_rows{0};
+    bool recompose_constrained{false};
+    bool basis_reconstruction_constrained{false};
+    bool bound_to_consumed_constrained{false};
+    bool booleanity_constrained{false};
+    bool canonicity_constrained{false};
+    bool mask_constrained{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * The SHIPPED V3 query-index rule, recomputed here INDEPENDENTLY of
+ * fri_ext3_alg's ProtocolChallengeIndex so the in-AIR mask can be cross-checked
+ * against it rather than against itself.  Returns
+ *   ((Canonical(c1) << 64) | Canonical(c0)) % modulus
+ * for any modulus > 0 (the 128-bit form, not the mask shortcut).
+ */
+[[nodiscard]] uint32_t Fri3AlgV3QueryIndexFromChallengeV1(
+    const gf::Fp3& challenge, uint32_t modulus);
+
+/**
+ * Build the row-wise table over `draws`.  `n_lde` is the child's LDE domain
+ * size and MUST be a power of two (the shipped rule's own precondition).
+ * `forced_row` / `forced_challenge`, when forced_row != UINT32_MAX, overwrite
+ * that row's challenge column with an attacker-chosen value so a test can
+ * observe the constraints rejecting it rather than assume they would.
+ */
+[[nodiscard]] ChallengeTableAirV1 BuildChallengeTableAirV1(
+    const std::vector<ChallengeTableRowV1>& draws,
+    uint32_t n_lde,
+    uint32_t forced_row = std::numeric_limits<uint32_t>::max(),
+    const gf::Fp3& forced_challenge = gf::Fp3{});
+
+/**
+ * PR-89 g4, the obligation the SHORT-FS lane (proof version 7,
+ * kRCFri3AlgShortFsActivatedV1 = false) hands to the parent.
+ *
+ * Committing the two OOD evaluation vectors removes the 48*W-byte absorb from
+ * EVERY challenge preimage, but the commitment binds nothing in-circuit unless
+ * the parent RECOMPUTES Fri3AlgOodEvalCommit in-AIR over all 2W cells.  That
+ * recompute happens ONCE, not once per challenge -- which is the whole saving.
+ *
+ * COMPUTED here from the shipped preimage layout and the real sponge padding
+ * rule rather than adopted from the transcript lane's figure, so the two are
+ * cross-checked.  Preimage lanes (fri_ext3_alg.h Fri3AlgOodEvalCommit):
+ *   |e1| | |e2| | z1.c0,c1,c2 | z2.c0,c1,c2 | e1[i].{c0,c1,c2} | e2[i].{c0,c1,c2}
+ * = 8 + 6W lanes, absorbed at rate kAlgHashRate with injective 10* padding,
+ * one Poseidon2 permutation per rate block and ONE ROW per permutation.
+ */
+struct OodEvalCommitReplayCostV1 {
+    uint32_t child_w{0};
+    uint64_t preimage_lanes{0};
+    uint64_t permutations{0};
+    uint64_t poseidon_rows{0};
+    uint32_t poseidon_columns{0};
+    uint32_t poseidon_max_degree{0};
+    /** What the legacy 48*W-byte absorb cost in SHA compressions, PER
+     *  CHALLENGE, for the same vectors: 48*W/64 = 0.75*W. */
+    uint64_t legacy_sha_compressions_per_challenge{0};
+    uint64_t legacy_sha_rows_per_challenge{0};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] OodEvalCommitReplayCostV1
+MeasureOodEvalCommitReplayCostV1(uint32_t child_w);
+
+/** Built and exercised; consumed by the g4 coverage assessor, not by consensus. */
+inline constexpr bool kChallengeTableAirExecutableV1 = true;
+inline constexpr bool kChallengeTableRecursiveAuthorityV1 = false;
+static_assert(kChallengeTableAirExecutableV1);
+static_assert(!kChallengeTableRecursiveAuthorityV1,
+              "the decoder table binds pinned digest bytes to consumed "
+              "challenges; it is not a transcript-provenance proof");
+
 } // namespace matmul::v4::rc::stage3_fs_selection_air
 
 #endif
