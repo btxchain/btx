@@ -2702,6 +2702,11 @@ AssessNormalizedParentProofPreflight(
  * kCompleteRecursiveFixedPointExecutable: that still requires the chips to be
  * differentially joined and forgery-tested inside the parent AIR
  * (va::kVerifierFiatShamirAirExecutable may remain false).
+ *
+ * When a single 575-col node cannot absorb the pad (capacity_closed), the
+ * hierarchical fields reuse narrow_recurse::PlanHierarchicalNarrowAggregation
+ * over per-program row leaves so the attach path is NOT required to pad one
+ * node past the LDE cap. hierarchical_attach_fits is shape arithmetic only.
  */
 struct NarrowBytecodePerPointJoinBudgetV1 {
     uint32_t fold_bus_columns{0};
@@ -2720,7 +2725,44 @@ struct NarrowBytecodePerPointJoinBudgetV1 {
     bool projected_columns_narrow{false};
     bool p2_fs_replay_closed{false};
     bool capacity_closed{false};
+    /** Single-node pad refuses under AssessNarrowNodeFriShape (degree-aware). */
+    bool single_node_fri_representable{false};
+    /** Hierarchy from PlanNarrowBytecodeHierarchicalAttachV1 is valid. */
+    bool hierarchical_attach_planned{false};
+    /** Every planned node fits column/LDE caps (shape only). */
+    bool hierarchical_attach_fits{false};
+    uint32_t hierarchical_depth{0};
+    uint32_t hierarchical_node_count{0};
+    uint64_t hierarchical_single_level_rows{0};
     bool valid{false};
+    std::string note;
+};
+
+/**
+ * Hierarchical row-budget plan for hash-kernel / bytecode vertical attach.
+ *
+ * Each ProgramTable program is a leaf charged
+ * `queries * (instructions + 1)` active rows (conservative vs the table-wide
+ * `queries * (sum_insn + 1)` attach formula). Packing reuses
+ * PlanHierarchicalNarrowAggregation + AssessNarrowNodeFriShape so a single
+ * 575-col fold-bus node is not required to absorb an LDE-over-cap pad.
+ *
+ * Shape / schedule only — does not attach, prove, or flip CompleteFP /
+ * AggregationReady / within_relay_budget.
+ */
+struct NarrowBytecodeHierarchicalAttachPlanV1 {
+    bool valid{false};
+    bool single_node_fits{false};
+    bool hierarchical_fits{false};
+    bool all_programs_covered{false};
+    uint32_t program_count{0};
+    uint32_t queries{0};
+    uint64_t instructions{0};
+    uint64_t total_leaf_rows{0};
+    uint32_t node_count{0};
+    uint32_t depth{0};
+    nr::NarrowNodeFriShape single_node_shape;
+    nr::NarrowHierarchicalAggregationPlan hierarchy;
     std::string note;
 };
 
@@ -2741,14 +2783,47 @@ AssessNarrowBytecodePerPointJoinBudgetV1(
     const constraint_bytecode::ProgramTable& table);
 
 /**
+ * Build per-program hierarchy leaves for bytecode vertical attach.
+ * `active_rows = queries * (program.instructions.size() + 1)`.
+ */
+[[nodiscard]] std::vector<nr::NarrowHierarchyLeaf>
+BuildNarrowBytecodeHierarchyLeaves(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t queries);
+
+/**
+ * Plan a hierarchical attach tree for a ProgramTable under the measured
+ * narrow FRI/column caps. Reuses PlanHierarchicalNarrowAggregation.
+ */
+[[nodiscard]] NarrowBytecodeHierarchicalAttachPlanV1
+PlanNarrowBytecodeHierarchicalAttachV1(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t queries,
+    const nr::NarrowHierarchyPlanConfig& config = {});
+
+/**
  * Expand the fold-bus trace with trailing free rows so a subsequent
  * AttachConstraintBytecodeInterpreter has `rows_needed` free slots. Fails
  * closed if the projected power-of-two height's LDE would exceed
  * kRCFriMaxLdeLog2 (honest capacity-close — does not invent headroom).
+ * On LDE-over-cap refusal the why string records whether a hierarchical
+ * ProgramTable attach plan fits under AssessNarrowNodeFriShape.
  */
 [[nodiscard]] bool PadFoldBusFreeRowsForBytecode(
     FoldBusComposition& composition,
     uint64_t rows_needed,
+    std::string* why = nullptr);
+
+/**
+ * Same as PadFoldBusFreeRowsForBytecode, but when the single-node pad would
+ * exceed the LDE cap and `table` is supplied, annotate `why` with the
+ * PlanNarrowBytecodeHierarchicalAttachV1 summary (still returns false —
+ * hierarchical attach is a different tree, not an in-place pad).
+ */
+[[nodiscard]] bool PadFoldBusFreeRowsForBytecode(
+    FoldBusComposition& composition,
+    uint64_t rows_needed,
+    const constraint_bytecode::ProgramTable* table,
     std::string* why = nullptr);
 
 /**
