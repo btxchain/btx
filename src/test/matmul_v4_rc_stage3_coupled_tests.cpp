@@ -128,6 +128,41 @@ void ReplaceAt(rc::RCStage3SuccinctProof& proof, size_t index,
     proof.commitments[index].root = rc::CommitRCStage3CoupledSection(section);
 }
 
+// Minimal shape satisfying ValidateShape (barriers in [4,8], MX-aligned power
+// of two state, proof-friendly V4 permutation domain) but with lobe_width=32
+// and only 1 bank page so BankDequantPagesV1 proofs fit the receipt bound and
+// the suite stays fast (~1.8 MiB / ~4s per honest prove).
+rc::RCStage3CoupledShape MakeBankDequantEngineTestShape()
+{
+    rc::RCCoupParams params;
+    params.barriers = 4;
+    params.lobes = 1;
+    params.lobe_width = 32;
+    params.bank_pages = 1;
+    params.rows_per_lobe = 1;
+    params.pages_per_barrier_lobe = 1;
+    BOOST_REQUIRE(rc::ValidateRCCoupParams(params));
+    return rc::MakeRCStage3CoupledShape(params, rc::MakeMediumV4RCCoupOptions());
+}
+
+std::vector<rc::RCStage3CoupledBankDequantPageWitness>
+MakeHonestBankDequantWitness(const rc::RCStage3CoupledShape& shape)
+{
+    const uint32_t logical = shape.lobe_width * shape.lobe_width;
+    std::vector<rc::RCStage3CoupledBankDequantPageWitness> pages(shape.bank_pages);
+    for (uint32_t p = 0; p < shape.bank_pages; ++p) {
+        pages[p].mantissa.resize(logical);
+        pages[p].scale.resize(logical);
+        for (uint32_t cell = 0; cell < logical; ++cell) {
+            const int64_t mantissa =
+                static_cast<int64_t>((cell + p * 7) % 11) - 5; // [-5,5]
+            pages[p].mantissa[cell] = static_cast<int8_t>(mantissa);
+            pages[p].scale[cell] = static_cast<uint8_t>((cell + p) % 4); // [0,3]
+        }
+    }
+    return pages;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(coupled_exact_relation_coverage_counts)
@@ -289,6 +324,329 @@ BOOST_AUTO_TEST_CASE(coupled_rejects_commitment_aggregate_and_public_mutations)
     public_mutation.public_inputs.sigma = Filled(0xef);
     BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(public_mutation, &why));
     BOOST_CHECK(why.find("public_binding") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_bank_dequant_engine_accepts_honest_witness)
+{
+    const auto shape = MakeBankDequantEngineTestShape();
+    const uint256 statement_commitment = Filled(0x51);
+    const uint256 shape_commitment = Filled(0x52);
+    const uint256 sigma = Filled(0x53);
+    const auto pages = MakeHonestBankDequantWitness(shape);
+
+    std::vector<unsigned char> engine_receipt;
+    uint256 trace_root;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, pages,
+            engine_receipt, trace_root, &why),
+        why);
+    BOOST_CHECK(!trace_root.IsNull());
+    BOOST_CHECK(!engine_receipt.empty());
+
+    uint256 verified_trace_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, engine_receipt,
+            verified_trace_root, &why),
+        why);
+    BOOST_CHECK(verified_trace_root == trace_root);
+
+    // Rebuilding from the identical witness reproduces the same trace root
+    // (deterministic honest prover).
+    std::vector<unsigned char> engine_receipt2;
+    uint256 trace_root2;
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+        shape, statement_commitment, shape_commitment, sigma, pages,
+        engine_receipt2, trace_root2, &why));
+    BOOST_CHECK(trace_root2 == trace_root);
+
+    // A different honest witness produces a different trace root.
+    auto other_pages = pages;
+    other_pages[0].mantissa[0] =
+        static_cast<int8_t>(other_pages[0].mantissa[0] == 5 ? 4 : 5);
+    std::vector<unsigned char> other_engine_receipt;
+    uint256 other_trace_root;
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+        shape, statement_commitment, shape_commitment, sigma, other_pages,
+        other_engine_receipt, other_trace_root, &why));
+    BOOST_CHECK(other_trace_root != trace_root);
+}
+
+BOOST_AUTO_TEST_CASE(coupled_bank_dequant_engine_rejects_bad_witness_at_build_time)
+{
+    const auto shape = MakeBankDequantEngineTestShape();
+    const uint256 statement_commitment = Filled(0x51);
+    const uint256 shape_commitment = Filled(0x52);
+    const uint256 sigma = Filled(0x53);
+    const auto pages = MakeHonestBankDequantWitness(shape);
+    std::string why;
+
+    {
+        // Wrong page count vs shape.bank_pages.
+        auto too_few = pages;
+        too_few.pop_back();
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, too_few, out,
+            root, &why));
+        BOOST_CHECK(why.find("page_count") != std::string::npos);
+    }
+    {
+        // Wrong per-page cell count (must be lobe_width^2).
+        auto bad_shape_pages = pages;
+        bad_shape_pages[0].mantissa.pop_back();
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, bad_shape_pages,
+            out, root, &why));
+        BOOST_CHECK(why.find("page_shape") != std::string::npos);
+    }
+    {
+        auto bad_scale_len = pages;
+        bad_scale_len[0].scale.pop_back();
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, bad_scale_len,
+            out, root, &why));
+        BOOST_CHECK(why.find("page_shape") != std::string::npos);
+    }
+    {
+        // Scale must be in [0,3] (two-bit factor exponent).
+        auto bad_scale_range = pages;
+        bad_scale_range[0].scale[0] = 4;
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma,
+            bad_scale_range, out, root, &why));
+        BOOST_CHECK(why.find("scale_range") != std::string::npos);
+    }
+    {
+        // Non-power-of-two logical row count is rejected up front.
+        auto odd_shape = shape;
+        odd_shape.lobe_width = 3; // 3*3=9, not a power of two
+        std::vector<unsigned char> out;
+        uint256 root;
+        BOOST_CHECK(!rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            odd_shape, statement_commitment, shape_commitment, sigma, pages, out,
+            root, &why));
+        BOOST_CHECK(why.find("logical_rows") != std::string::npos);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(coupled_bank_dequant_engine_rejects_tampered_receipts)
+{
+    const auto shape = MakeBankDequantEngineTestShape();
+    const uint256 statement_commitment = Filled(0x51);
+    const uint256 shape_commitment = Filled(0x52);
+    const uint256 sigma = Filled(0x53);
+    const auto pages = MakeHonestBankDequantWitness(shape);
+
+    std::vector<unsigned char> engine_receipt;
+    uint256 trace_root;
+    std::string why;
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+        shape, statement_commitment, shape_commitment, sigma, pages,
+        engine_receipt, trace_root, &why));
+
+    // Flipping the trailing proof byte breaks either the wire codec or the
+    // AirQuotient verification itself.
+    {
+        auto tampered = engine_receipt;
+        tampered.back() ^= 0x01;
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, tampered,
+            out_root, &why));
+    }
+
+    // Flipping a byte inside the first page's serialized pin.statement_commitment
+    // (header(10) + page_index(4) + pin.version(2) == byte offset 16) must be
+    // caught as an explicit public-binding failure.
+    {
+        auto tampered = engine_receipt;
+        BOOST_REQUIRE(tampered.size() > 20);
+        tampered[20] ^= 0x01;
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, tampered,
+            out_root, &why));
+        BOOST_CHECK_MESSAGE(why.find("page_binding") != std::string::npos, why);
+    }
+
+    // Corrupting the header magic/version/page-count is rejected up front.
+    {
+        auto tampered = engine_receipt;
+        tampered[0] ^= 0x01;
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, tampered,
+            out_root, &why));
+        BOOST_CHECK_MESSAGE(why.find("header") != std::string::npos, why);
+    }
+
+    // No cross-statement / cross-shape / cross-sigma replay.
+    {
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, Filled(0x61), shape_commitment, sigma, engine_receipt, out_root,
+            &why));
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, Filled(0x62), sigma, engine_receipt,
+            out_root, &why));
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, Filled(0x63),
+            engine_receipt, out_root, &why));
+    }
+
+    // Declaring more bank pages than the receipt proves is rejected before
+    // any page proof is even checked.
+    {
+        auto more_pages_shape = shape;
+        more_pages_shape.bank_pages = 2;
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            more_pages_shape, statement_commitment, shape_commitment, sigma,
+            engine_receipt, out_root, &why));
+        BOOST_CHECK_MESSAGE(why.find("header") != std::string::npos, why);
+    }
+
+    // Truncated and padded engine receipts are rejected.
+    {
+        auto truncated = engine_receipt;
+        truncated.resize(truncated.size() / 2);
+        uint256 out_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, truncated,
+            out_root, &why));
+
+        auto padded = engine_receipt;
+        padded.push_back(0);
+        uint256 padded_root;
+        BOOST_CHECK(!rc::VerifyRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement_commitment, shape_commitment, sigma, padded,
+            padded_root, &why));
+        BOOST_CHECK_MESSAGE(why.find("trailing_bytes") != std::string::npos, why);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(coupled_bank_dequant_engine_wires_into_full_relation_verifier)
+{
+    const auto shape = MakeBankDequantEngineTestShape();
+    const auto pages = MakeHonestBankDequantWitness(shape);
+
+    rc::RCStage3SuccinctProof proof;
+    proof.statement = rc::RCStage3StatementKind::Coupled;
+    auto& public_inputs = proof.public_inputs;
+    public_inputs.height = 42;
+    public_inputs.n_bits = 0x207fffff;
+    public_inputs.coupled_profile = 4;
+    public_inputs.transcript_version = shape.transcript_version;
+    public_inputs.program_consensus_pin.recursive_alg_hash_root = Filled(0x08);
+    public_inputs.program_consensus_pin.external_sha256d_audit_root = Filled(0x09);
+    public_inputs.program_consensus_pin.registry_binding = Filled(0x0a);
+    public_inputs.header_commitment = Filled(0x11);
+    public_inputs.params_commitment = Filled(0x22);
+    public_inputs.target = Filled(0x7f);
+    public_inputs.sigma = Filled(0x33);
+    public_inputs.coupled_digest = Filled(0x44);
+    public_inputs.final_digest = Filled(0x55);
+    public_inputs.transcript_commitment = Filled(0x66);
+
+    const uint256 statement = rc::CommitRCStage3CoupledStatement(public_inputs);
+    const uint256 shape_commitment = rc::CommitRCStage3CoupledShape(shape);
+
+    std::vector<unsigned char> bank_engine_receipt;
+    uint256 bank_trace_root;
+    std::string build_why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledBankDequantEngineReceipt(
+            shape, statement, shape_commitment, public_inputs.sigma, pages,
+            bank_engine_receipt, bank_trace_root, &build_why),
+        build_why);
+
+    uint256 input_root = public_inputs.header_commitment;
+    for (size_t i = 0; i < COUPLED_ROLES.size(); ++i) {
+        rc::RCStage3CoupledRelationReceipt receipt;
+        receipt.role = COUPLED_ROLES[i];
+        receipt.shape = shape;
+        receipt.statement_commitment = statement;
+        receipt.params_commitment = public_inputs.params_commitment;
+        receipt.coupled_shape_commitment = shape_commitment;
+        receipt.sigma = public_inputs.sigma;
+        receipt.input_root = input_root;
+        receipt.output_root =
+            i + 1 == COUPLED_ROLES.size()
+                ? public_inputs.coupled_digest
+                : Filled(static_cast<unsigned char>(0x80 + i));
+        const auto counts =
+            rc::ExpectedRCStage3CoupledRelationCounts(receipt.role, shape);
+        BOOST_REQUIRE(counts.has_value());
+        receipt.primary_count = counts->primary;
+        receipt.secondary_count = counts->secondary;
+
+        if (receipt.role == rc::RCStage3RelationRole::CoupledBank) {
+            receipt.engine = rc::RCStage3CoupledProofEngine::BankDequantPagesV1;
+            receipt.engine_receipt = bank_engine_receipt;
+            receipt.trace_root = bank_trace_root;
+        } else {
+            receipt.trace_root = Filled(static_cast<unsigned char>(0xa0 + i));
+            receipt.engine_receipt = {
+                static_cast<unsigned char>(i), 0xc3, 0x5a, 0xa5};
+        }
+        receipt.aggregate_root = rc::CommitRCStage3CoupledRelationAggregate(receipt);
+
+        std::vector<unsigned char> section;
+        std::string serialize_why;
+        BOOST_REQUIRE_MESSAGE(
+            rc::SerializeRCStage3CoupledRelationReceipt(receipt, section, &serialize_why),
+            "role=" + std::string(rc::RCStage3RelationRoleName(receipt.role)) +
+                " engine_bytes=" + std::to_string(receipt.engine_receipt.size()) +
+                " why=" + serialize_why);
+        proof.commitments.push_back(
+            {receipt.role, rc::CommitRCStage3CoupledSection(section)});
+        proof.sections.push_back({receipt.role, std::move(section)});
+        input_root = receipt.output_root;
+    }
+
+    std::string why;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(proof, &why));
+    // CoupledBank's real engine must have verified successfully -- the very
+    // next role (Gemm) is the first to fail on its ProofOnlyV1 stub, proving
+    // Bank's real dispatch actually ran rather than being short-circuited.
+    BOOST_CHECK_MESSAGE(
+        why.find("coupled:gemm:recursive_decode") != std::string::npos, why);
+
+    // Tampering the bank engine receipt now surfaces a bank-specific failure
+    // before the verifier ever reaches Gemm's stub engine.
+    auto tampered_proof = proof;
+    auto tampered_bank = DecodeAt(tampered_proof, 0);
+    tampered_bank.engine_receipt.back() ^= 0x01;
+    ReplaceAt(tampered_proof, 0, tampered_bank);
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(tampered_proof, &why));
+    // Either our engine prefix or the underlying Split-RAP verify note is fine;
+    // the hard requirement is that Gemm's stub path is never reached.
+    BOOST_CHECK_MESSAGE(
+        why.find("bank_dequant_engine") != std::string::npos ||
+            why.find("dequant_air") != std::string::npos ||
+            why.find("split_rap_verify") != std::string::npos,
+        why);
+    BOOST_CHECK(why.find("coupled:gemm") == std::string::npos);
+
+    // Tampering the receipt's own trace_root (not the engine payload) trips
+    // the trace-root binding check in VerifyProofOnlyEngine.
+    auto retampered_proof = proof;
+    auto bad_trace = DecodeAt(retampered_proof, 0);
+    bad_trace.trace_root = Filled(0xcc);
+    ReplaceAt(retampered_proof, 0, bad_trace);
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(retampered_proof, &why));
+    BOOST_CHECK_MESSAGE(
+        why.find("bank_dequant_engine_trace_root") != std::string::npos, why);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

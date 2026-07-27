@@ -5,6 +5,9 @@
 #include <matmul/matmul_v4_rc_stage3_coupled.h>
 
 #include <crypto/sha256.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
+#include <matmul/matmul_v4_rc_gkr_field_ext3.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
 
 #include <algorithm>
@@ -14,6 +17,9 @@
 
 namespace matmul::v4::rc {
 namespace {
+
+namespace aq = air_quotient;
+using gkr_field::Fp3;
 
 constexpr std::array<RCStage3RelationRole, 8> COUPLED_ROLES{
     RCStage3RelationRole::CoupledBank,
@@ -249,8 +255,13 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
         return Fail(why, "receipt:bad_version");
     }
     if (!IsCoupledRole(receipt.role)) return Fail(why, "receipt:bad_role");
-    if (receipt.engine != RCStage3CoupledProofEngine::ProofOnlyV1) {
+    if (receipt.engine != RCStage3CoupledProofEngine::ProofOnlyV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::BankDequantPagesV1) {
         return Fail(why, "receipt:unknown_engine");
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::BankDequantPagesV1 &&
+        receipt.role != RCStage3RelationRole::CoupledBank) {
+        return Fail(why, "receipt:bank_dequant_engine_wrong_role");
     }
     if (!ValidateShape(receipt.shape, why)) return false;
     if (receipt.statement_commitment.IsNull() || receipt.params_commitment.IsNull() ||
@@ -266,10 +277,258 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
     return true;
 }
 
+constexpr uint32_t kBankDequantEngineMagic = 0x31514442U; // "BDQ1"
+constexpr uint16_t kBankDequantEngineVersion = 1;
+
+const std::vector<uint32_t>& BankDequantBaseColumns()
+{
+    static const std::vector<uint32_t> columns{0, 1, 2, 3, 4, 5};
+    return columns;
+}
+
+void SerializeBankDequantPin(const RCStage3CoupledBankDequantPin& pin,
+                             std::vector<unsigned char>& out)
+{
+    WriteU16(out, pin.version);
+    WriteUint256(out, pin.statement_commitment);
+    WriteUint256(out, pin.shape_commitment);
+    WriteUint256(out, pin.sigma);
+    WriteU32(out, pin.page_index);
+    WriteU32(out, pin.logical_rows);
+    WriteU32(out, pin.n_rows);
+    WriteU32(out, pin.n_coeffs);
+    WriteUint256(out, pin.r0_row_group_root);
+    WriteUint256(out, pin.pin_commitment);
+}
+
+bool ReadBankDequantPin(Reader& reader, RCStage3CoupledBankDequantPin& pin)
+{
+    return reader.ReadU16(pin.version) &&
+           reader.ReadUint256(pin.statement_commitment) &&
+           reader.ReadUint256(pin.shape_commitment) &&
+           reader.ReadUint256(pin.sigma) &&
+           reader.ReadU32(pin.page_index) &&
+           reader.ReadU32(pin.logical_rows) &&
+           reader.ReadU32(pin.n_rows) &&
+           reader.ReadU32(pin.n_coeffs) &&
+           reader.ReadUint256(pin.r0_row_group_root) &&
+           reader.ReadUint256(pin.pin_commitment);
+}
+
+uint256 ComputeBankDequantEngineTraceRoot(const std::vector<uint256>& page_roots)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, "BTX_RC_STAGE3_COUPLED_BANK_DEQUANT_ENGINE_TRACE_V1");
+    WriteU64(bytes, static_cast<uint64_t>(page_roots.size()));
+    for (const uint256& root : page_roots) WriteUint256(bytes, root);
+    return Sha256d(bytes);
+}
+
+bool BankDequantLogicalRows(const RCStage3CoupledShape& shape, uint32_t& out,
+                            std::string* why)
+{
+    uint64_t logical{0};
+    if (!CheckedMul(shape.lobe_width, shape.lobe_width, logical) || logical < 2 ||
+        (logical & (logical - 1)) != 0 ||
+        logical > std::numeric_limits<uint32_t>::max()) {
+        return Fail(why, "bank_dequant_engine:logical_rows");
+    }
+    out = static_cast<uint32_t>(logical);
+    return true;
+}
+
+} // namespace
+
+bool BuildRCStage3CoupledBankDequantEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<RCStage3CoupledBankDequantPageWitness>& pages,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    uint32_t logical{0};
+    if (!BankDequantLogicalRows(shape, logical, why)) return false;
+    if (pages.empty() || pages.size() != shape.bank_pages) {
+        return Fail(why, "bank_dequant_engine:page_count");
+    }
+
+    std::vector<unsigned char> body;
+    WriteU32(body, kBankDequantEngineMagic);
+    WriteU16(body, kBankDequantEngineVersion);
+    WriteU32(body, static_cast<uint32_t>(pages.size()));
+
+    std::vector<uint256> page_roots;
+    page_roots.reserve(pages.size());
+    for (uint32_t i = 0; i < pages.size(); ++i) {
+        const RCStage3CoupledBankDequantPageWitness& page = pages[i];
+        if (page.mantissa.size() != logical || page.scale.size() != logical) {
+            return Fail(why, "bank_dequant_engine:page_shape:" + std::to_string(i));
+        }
+        std::vector<std::vector<Fp3>> columns(
+            static_cast<size_t>(kRCStage3CoupledBankDequantColumns) + 1,
+            std::vector<Fp3>(logical, Fp3::Zero()));
+        for (uint32_t cell = 0; cell < logical; ++cell) {
+            const uint8_t scale = page.scale[cell];
+            if (scale > 3) {
+                return Fail(why, "bank_dequant_engine:scale_range:" + std::to_string(i));
+            }
+            const uint8_t bit0 = scale & 1U;
+            const uint8_t bit1 = (scale >> 1) & 1U;
+            const int64_t factor = int64_t{1} << scale;
+            const int64_t mantissa = page.mantissa[cell];
+            columns[kRCStage3CoupledBankMantissa][cell] = gkr_field::FromSigned3(mantissa);
+            columns[kRCStage3CoupledBankRepeatedScale][cell] = gkr_field::FromU64_3(scale);
+            columns[kRCStage3CoupledBankScaleBit0][cell] = gkr_field::FromU64_3(bit0);
+            columns[kRCStage3CoupledBankScaleBit1][cell] = gkr_field::FromU64_3(bit1);
+            columns[kRCStage3CoupledBankScaleFactor][cell] =
+                gkr_field::FromU64_3(static_cast<uint64_t>(factor));
+            columns[kRCStage3CoupledBankOutput][cell] =
+                gkr_field::FromSigned3(mantissa * factor);
+        }
+
+        RCStage3CoupledBankDequantPin pin;
+        pin.version = kRCStage3CoupledBankProductVersion;
+        pin.statement_commitment = statement_commitment;
+        pin.shape_commitment = coupled_shape_commitment;
+        pin.sigma = sigma;
+        pin.page_index = i;
+        pin.logical_rows = logical;
+        pin.n_rows = logical;
+        pin.n_coeffs = logical;
+
+        aq::AirConstraintSystem<Fp3> row_shape;
+        row_shape.n_rows = logical;
+        row_shape.n_columns = static_cast<uint32_t>(columns.size());
+        const auto r0 = aq::AirQuotientBuildTwoEpochBaseRowSession(
+            row_shape, columns, BankDequantBaseColumns());
+        if (!r0.valid) {
+            return Fail(why, "bank_dequant_engine:r0:" + std::to_string(i));
+        }
+        pin.r0_row_group_root = r0.base_row_commitment;
+        pin.pin_commitment = ComputeRCStage3CoupledBankDequantPinCommitment(pin);
+        if (pin.pin_commitment.IsNull()) {
+            return Fail(why, "bank_dequant_engine:pin:" + std::to_string(i));
+        }
+
+        aq::AirConstraintSystem<Fp3> cs;
+        if (!BuildRCStage3CoupledBankDequantConstraintSystem(pin, cs, why)) return false;
+
+        auto proved = aq::AirQuotientProveRowsSplitRap(
+            cs, columns, BankDequantBaseColumns(),
+            ComputeRCStage3CoupledBankDequantSeed(pin), {}, &r0);
+        if (!proved.ok || !proved.division_exact) {
+            return Fail(why, "bank_dequant_engine:prove:" + std::to_string(i) + ":" +
+                                 proved.note);
+        }
+        if (!VerifyRCStage3CoupledBankDequantProof(pin, proved.proof, why)) return false;
+
+        std::vector<unsigned char> proof_bytes;
+        if (aq::SerializeAirQuotientSplitRapRowsProof(proved.proof, proof_bytes) == 0) {
+            return Fail(why, "bank_dequant_engine:proof_codec:" + std::to_string(i));
+        }
+        WriteU32(body, i);
+        SerializeBankDequantPin(pin, body);
+        WriteU32(body, static_cast<uint32_t>(proof_bytes.size()));
+        body.insert(body.end(), proof_bytes.begin(), proof_bytes.end());
+        page_roots.push_back(pin.r0_row_group_root);
+    }
+
+    out_trace_root = ComputeBankDequantEngineTraceRoot(page_roots);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledBankDequantEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    uint32_t logical{0};
+    if (!BankDequantLogicalRows(shape, logical, why)) return false;
+
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    uint32_t page_count{0};
+    if (!reader.ReadU32(magic) || magic != kBankDequantEngineMagic ||
+        !reader.ReadU16(version) || version != kBankDequantEngineVersion ||
+        !reader.ReadU32(page_count) || page_count == 0 ||
+        page_count != shape.bank_pages) {
+        return Fail(why, "bank_dequant_engine:header");
+    }
+
+    std::vector<uint256> page_roots;
+    page_roots.reserve(page_count);
+    for (uint32_t i = 0; i < page_count; ++i) {
+        uint32_t page_index{0};
+        RCStage3CoupledBankDequantPin pin;
+        uint32_t proof_len{0};
+        std::vector<unsigned char> proof_bytes;
+        if (!reader.ReadU32(page_index) || page_index != i ||
+            !ReadBankDequantPin(reader, pin) || !reader.ReadU32(proof_len) ||
+            proof_len == 0 || !reader.ReadBytes(proof_len, proof_bytes)) {
+            return Fail(why, "bank_dequant_engine:page_decode:" + std::to_string(i));
+        }
+        if (pin.statement_commitment != statement_commitment ||
+            pin.shape_commitment != coupled_shape_commitment || pin.sigma != sigma ||
+            pin.page_index != i || pin.logical_rows != logical ||
+            pin.n_rows != logical || pin.n_coeffs != logical ||
+            pin.pin_commitment.IsNull() ||
+            pin.pin_commitment != ComputeRCStage3CoupledBankDequantPinCommitment(pin)) {
+            return Fail(why, "bank_dequant_engine:page_binding:" + std::to_string(i));
+        }
+        const auto proof = aq::DeserializeAirQuotientSplitRapRowsProof(proof_bytes);
+        if (!proof.has_value()) {
+            return Fail(why, "bank_dequant_engine:proof_codec:" + std::to_string(i));
+        }
+        std::string page_why;
+        if (!VerifyRCStage3CoupledBankDequantProof(pin, *proof, &page_why)) {
+            return Fail(why, "bank_dequant_engine:page_verify:" + std::to_string(i) + ":" +
+                                 page_why);
+        }
+        page_roots.push_back(pin.r0_row_group_root);
+    }
+    if (reader.Remaining() != 0) {
+        return Fail(why, "bank_dequant_engine:trailing_bytes");
+    }
+    out_trace_root = ComputeBankDequantEngineTraceRoot(page_roots);
+    return true;
+}
+
+namespace {
+
 bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
                            const RCStage3CoupledRelationReceipt& receipt,
                            std::string* why)
 {
+    if (receipt.engine == RCStage3CoupledProofEngine::BankDequantPagesV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledBank) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":bank_dequant_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledBankDequantEngineReceipt(
+                receipt.shape, receipt.statement_commitment,
+                receipt.coupled_shape_commitment, receipt.sigma, receipt.engine_receipt,
+                trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:bank:bank_dequant_engine_trace_root");
+        }
+        return true;
+    }
+
     // Do not substitute VerifyWinnerCoupledV7 here: it calls BuildCoupledWires
     // and natively re-derives the coupled witness. ProofOnlyV1 is the recursive
     // aggregate carrier; its local registry still fails closed until each of
@@ -629,9 +888,12 @@ bool RCStage3CoupledRelationEnginesReady(std::string* why)
 {
     static_assert(!kRCStage3CoupledRelationEnginesReady,
                   "Do not enable without all eight proof-only engines");
+    // BankDequantPagesV1 is a real Split-RAP engine for CoupledBank's dequant
+    // sub-relation, but BankSeedXof / BankPageInclusion remain open and the
+    // other seven roles still fail closed on ProofOnlyV1 recursive stubs.
     return Fail(why,
-                "proof_engines_missing:bank,gemm,exchange,permutation,mix,"
-                "extract,barrier,digest");
+                "proof_engines_missing:bank_seed_xof,bank_page_inclusion,gemm,"
+                "exchange,permutation,mix,extract,barrier,digest");
 }
 
 } // namespace matmul::v4::rc
