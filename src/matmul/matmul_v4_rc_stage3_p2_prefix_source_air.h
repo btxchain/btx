@@ -159,6 +159,7 @@ struct AttachmentV1 {
     bool sponge_state_transitions_constrained{false};
     bool exact_10star_padding{false};
     bool digest_outputs_canonical_bytes{false};
+    /** Fail-closed sentinel; Attach sets false only after auditing every pin. */
     bool source_values_preprocessed{true};
     bool selectors_only_preprocessed{false};
     bool complete_child_verifier_same_parent{false};
