@@ -7,6 +7,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
+#include <matmul/matmul_v4_rc_stage3_narrow_recurse.h>
 
 #include <array>
 #include <cstdint>
@@ -401,11 +402,43 @@ inline constexpr bool
 inline constexpr bool kBinaryV1ScheduleScenarioExecutable = true;
 inline constexpr bool kBinaryV1AllNodeExecutionComplete = false;
 
+// ===========================================================================
+// Narrow hierarchical production path (blk ownership).
+//
+// The dense arity-4 / two-level wide V_CS path above remains the structural
+// scheduler for relation-leaf site accounting, but it is NOT the production
+// aggregation shape: column explosion kills representability.  The production
+// route is the row-budget-aware NARROW tree in
+// matmul_v4_rc_stage3_narrow_recurse.h (PlanCanonicalSixEpisodeNarrowHierarchy).
+// These aliases re-export that planner's readiness so aggregation callers have
+// one place to look; nothing here flips AggregationReady.
+// ===========================================================================
+inline constexpr bool kNarrowHierarchicalAggregationPlannerExecutable =
+    narrow_recurse::kNarrowHierarchicalAggregationPlannerExecutable;
+inline constexpr bool kNarrowHierarchicalAggregationReady =
+    narrow_recurse::kNarrowHierarchicalAggregationReady;
+
+/**
+ * Build the measured six-episode narrow hierarchy (L1-A / L1-B / L2).
+ * Shape arithmetic only — see narrow_recurse::PlanCanonicalSixEpisodeNarrowHierarchy.
+ */
+[[nodiscard]] inline narrow_recurse::NarrowHierarchicalAggregationPlan
+BuildNarrowHierarchicalSixEpisodePlan(
+    const std::array<uint64_t, 6>& measured_active_rows =
+        narrow_recurse::kMeasuredSixEpisodeNarrowActiveRows,
+    const narrow_recurse::NarrowHierarchyPlanConfig& config = {})
+{
+    return narrow_recurse::PlanCanonicalSixEpisodeNarrowHierarchy(
+        measured_active_rows, config);
+}
+
 static_assert(kProductionAggregationStructuralSchedulerExecutable);
 static_assert(kProductionAggregationRealChildProofConsumptionExecutable);
 static_assert(!kProductionAggregationCryptographicChildConsumptionReady);
 static_assert(kBinaryV1ScheduleScenarioExecutable);
 static_assert(!kBinaryV1AllNodeExecutionComplete);
+static_assert(kNarrowHierarchicalAggregationPlannerExecutable);
+static_assert(!kNarrowHierarchicalAggregationReady);
 
 } // namespace matmul::v4::rc::aggregation_scheduler
 

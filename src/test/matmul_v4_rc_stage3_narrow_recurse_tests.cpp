@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_stage3_episode_header_target.h>
 #include <matmul/matmul_v4_rc_stage3_narrow_recurse.h>
+#include <matmul/matmul_v4_rc_stage3_aggregation_schedule.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
@@ -53,6 +54,129 @@ BOOST_AUTO_TEST_CASE(canonical_lane_is_contiguous_and_192_columns)
     BOOST_CHECK_EQUAL(lane.width, 192U);
     BOOST_CHECK_EQUAL(lane.permutation.count, 130U);
     BOOST_CHECK_EQUAL(lane.reserved.End(), lane.width);
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchical narrow aggregation under row/LDE budgets (recommendation #3).
+// Cheap COMPUTED shape arithmetic — no prove, no BTX_RUN_BLK_NARROW.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(narrow_node_fri_shape_pins_lde_budget_at_degree_three)
+{
+    // At degree 3, trace 2^19 -> quotient ~2^20, n_lde 2^24: FITS exactly.
+    const nr::NarrowNodeFriShape fits = nr::AssessNarrowNodeFriShape(473664);
+    BOOST_CHECK_EQUAL(fits.trace_rows, 1U << 19);
+    BOOST_CHECK_EQUAL(fits.n_lde, 1U << 24);
+    BOOST_CHECK(fits.representable);
+    BOOST_CHECK(fits.fits_column_cap);
+    BOOST_CHECK_EQUAL(fits.vcs_columns, nr::kMeasuredNarrowComposedColumns);
+
+    // One more doubling of the trace blows the LDE cap.
+    const nr::NarrowNodeFriShape over =
+        nr::AssessNarrowNodeFriShape(uint64_t{1} << 19);
+    // active == 2^19 pads to 2^19 and still fits; active just over needs 2^20.
+    const nr::NarrowNodeFriShape over2 =
+        nr::AssessNarrowNodeFriShape((uint64_t{1} << 19) + 1);
+    BOOST_CHECK(over.representable);
+    BOOST_CHECK(!over2.representable);
+    BOOST_CHECK_EQUAL(over2.trace_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(over2.n_lde, 1U << 25);
+}
+
+BOOST_AUTO_TEST_CASE(canonical_six_episode_narrow_hierarchy_fits_under_budgets)
+{
+    const nr::NarrowHierarchicalAggregationPlan plan =
+        nr::PlanCanonicalSixEpisodeNarrowHierarchy();
+    BOOST_REQUIRE_MESSAGE(plan.valid, plan.note);
+    BOOST_CHECK(!plan.single_level_fits);
+    BOOST_CHECK(plan.hierarchical_fits);
+    BOOST_CHECK(plan.all_leaves_covered);
+    BOOST_CHECK(!plan.complete_verifier_mirror);
+    BOOST_CHECK_EQUAL(plan.leaf_count, 6U);
+    BOOST_CHECK_EQUAL(plan.node_count, 3U);
+    BOOST_CHECK_EQUAL(plan.depth, 2U);
+    BOOST_CHECK_EQUAL(plan.vcs_columns, 575U);
+
+    // Single-level over all six is the known 854,400-row wall.
+    BOOST_CHECK_EQUAL(plan.single_level_shape.active_rows, 854400U);
+    BOOST_CHECK(!plan.single_level_shape.representable);
+    BOOST_CHECK_EQUAL(plan.single_level_shape.n_lde, 1U << 25);
+
+    BOOST_REQUIRE_EQUAL(plan.nodes.size(), 3U);
+    // L1-A gemm+wiring+tiletree+digest
+    BOOST_CHECK_EQUAL(plan.nodes[0].level, 1U);
+    BOOST_CHECK_EQUAL(plan.nodes[0].active_rows, 473664U);
+    BOOST_CHECK(plan.nodes[0].shape.representable);
+    BOOST_CHECK_EQUAL(plan.nodes[0].child_leaf_indices.size(), 4U);
+    BOOST_CHECK_EQUAL(plan.nodes[0].child_leaf_indices[0], 1U);
+    BOOST_CHECK_EQUAL(plan.nodes[0].child_leaf_indices[1], 3U);
+    BOOST_CHECK_EQUAL(plan.nodes[0].child_leaf_indices[2], 4U);
+    BOOST_CHECK_EQUAL(plan.nodes[0].child_leaf_indices[3], 5U);
+    // L1-B builder+extract
+    BOOST_CHECK_EQUAL(plan.nodes[1].level, 1U);
+    BOOST_CHECK_EQUAL(plan.nodes[1].active_rows, 380736U);
+    BOOST_CHECK(plan.nodes[1].shape.representable);
+    BOOST_CHECK_EQUAL(plan.nodes[1].child_leaf_indices.size(), 2U);
+    BOOST_CHECK_EQUAL(plan.nodes[1].child_leaf_indices[0], 0U);
+    BOOST_CHECK_EQUAL(plan.nodes[1].child_leaf_indices[1], 2U);
+    // L2 over both L1 proofs
+    BOOST_CHECK_EQUAL(plan.nodes[2].level, 2U);
+    BOOST_CHECK_EQUAL(plan.nodes[2].active_rows, 515328U);
+    BOOST_CHECK(plan.nodes[2].shape.representable);
+    BOOST_CHECK_EQUAL(plan.nodes[2].child_node_indices.size(), 2U);
+    BOOST_CHECK_EQUAL(plan.nodes[2].shape.n_lde, 1U << 24);
+    BOOST_CHECK_LE(plan.nodes[2].shape.vcs_columns,
+                   matmul::v4::rc::kRCFri3AlgBatchMaxColumns);
+
+    // Headroom at L2: 515328 / 524288 ≈ 1.7% spare before the next doubling.
+    BOOST_CHECK_LT(plan.nodes[2].active_rows, plan.nodes[2].shape.trace_rows);
+    BOOST_CHECK_EQUAL(plan.nodes[2].shape.trace_rows, 1U << 19);
+
+    BOOST_CHECK(nr::kNarrowHierarchicalAggregationPlannerExecutable);
+    BOOST_CHECK(!nr::kNarrowHierarchicalAggregationReady);
+}
+
+BOOST_AUTO_TEST_CASE(hierarchical_packer_closes_six_roles_when_single_level_cannot)
+{
+    std::vector<nr::NarrowHierarchyLeaf> leaves;
+    static constexpr std::array<const char*, 6> kNames = {
+        "episode:builder", "episode:gemm", "episode:extract",
+        "episode:wiring", "episode:tiletree", "episode:digest",
+    };
+    for (uint32_t i = 0; i < 6; ++i) {
+        nr::NarrowHierarchyLeaf leaf;
+        leaf.role_index = i;
+        leaf.name = kNames[i];
+        leaf.active_rows = nr::kMeasuredSixEpisodeNarrowActiveRows[i];
+        leaves.push_back(std::move(leaf));
+    }
+    const nr::NarrowHierarchicalAggregationPlan plan =
+        nr::PlanHierarchicalNarrowAggregation(leaves);
+    BOOST_REQUIRE_MESSAGE(plan.valid, plan.note);
+    BOOST_CHECK(!plan.single_level_fits);
+    BOOST_CHECK(plan.hierarchical_fits);
+    BOOST_CHECK(plan.all_leaves_covered);
+    BOOST_CHECK_GE(plan.depth, 2U);
+    BOOST_CHECK_GE(plan.node_count, 3U);
+    for (const nr::NarrowHierarchyNode& node : plan.nodes) {
+        BOOST_CHECK_MESSAGE(node.shape.representable, node.label);
+        BOOST_CHECK_LE(node.shape.vcs_columns,
+                       matmul::v4::rc::kRCFri3AlgBatchMaxColumns);
+        BOOST_CHECK_LE(uint64_t{node.shape.n_lde},
+                       uint64_t{1} << matmul::v4::rc::kRCFriMaxLdeLog2);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(aggregation_schedule_reexports_narrow_hierarchy_plan)
+{
+    namespace sched = matmul::v4::rc::aggregation_scheduler;
+    BOOST_CHECK(sched::kNarrowHierarchicalAggregationPlannerExecutable);
+    BOOST_CHECK(!sched::kNarrowHierarchicalAggregationReady);
+    const auto plan = sched::BuildNarrowHierarchicalSixEpisodePlan();
+    BOOST_REQUIRE_MESSAGE(plan.valid, plan.note);
+    BOOST_CHECK_EQUAL(plan.node_count, 3U);
+    BOOST_CHECK_EQUAL(plan.nodes[0].active_rows, 473664U);
+    BOOST_CHECK_EQUAL(plan.nodes[1].active_rows, 380736U);
+    BOOST_CHECK_EQUAL(plan.nodes[2].active_rows, 515328U);
 }
 
 BOOST_AUTO_TEST_CASE(decomposed_x7_profile_has_explicit_x2_x4_and_degree_four)

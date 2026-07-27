@@ -655,8 +655,175 @@ AssessFriDualQ128HybridBound(
  * they are built and measured that is an expectation, not a measurement.
  * Nothing here may be read as a closed recursion.
  */
+
+// ===========================================================================
+// Hierarchical narrow aggregation under row / LDE budgets.
+//
+// Dense two-level roots are dead on shape (column explosion).  The production
+// path packs REAL episode-role children into ARITY-N narrow nodes whose V_CS
+// width is constant; the binding resource is summed ACTIVE ROWS against
+// kRCFriMaxLdeLog2.  A single node over all six episode roles does NOT fit
+// (854,400 active rows -> node n_lde 2^25).  The measured route that DOES
+// close all six is a TWO-LEVEL tree (see PlanCanonicalSixEpisodeNarrowHierarchy).
+//
+// This planner is SHAPE/SCHEDULE arithmetic only.  It does not prove, does not
+// flip AggregationReady / within_relay_budget, and does not claim a complete
+// verifier mirror (SHA-FS + per-point chips still open — g2 owns those).
+// ===========================================================================
+
+/** Measured composed narrow V_CS width after the multi-child +1 DEEP column. */
+inline constexpr uint32_t kMeasuredNarrowComposedColumns = 575;
+/** Measured max algebraic degree of the composed narrow parent. */
+inline constexpr uint32_t kMeasuredNarrowMaxAlgebraicDegree = 3;
+
+/**
+ * Proof-independent hash-opening active rows for the six episode roles on the
+ * measured real block (height 102, rcepisode-chain).  Order is canonical:
+ * builder, gemm, extract, wiring, tiletree, digest.
+ */
+inline constexpr std::array<uint64_t, 6>
+    kMeasuredSixEpisodeNarrowActiveRows = {
+        118656, // episode:builder
+        264768, // episode:gemm
+        262080, // episode:extract
+        180096, // episode:wiring
+        14400,  // episode:tiletree
+        14400,  // episode:digest
+};
+
+/**
+ * When a level-1 narrow node of shape (575 cols x 2^19 rows, degree 3) is
+ * re-entered as a child, BuildHashOpeningProgram yields this many active rows
+ * (COMPUTED by re-running the real scheduler on that shape).  Two such
+ * children pack into the measured L2 root at 515,328 active rows.
+ */
+inline constexpr uint64_t kMeasuredNarrowL1AsChildActiveRows = 257664;
+
+/** FRI-domain shape of one narrow aggregation node given its active row sum. */
+struct NarrowNodeFriShape {
+    uint64_t active_rows{0};
+    uint32_t vcs_columns{0};
+    uint32_t max_algebraic_degree{0};
+    uint32_t trace_rows{0};
+    uint32_t quotient_len{0};
+    uint32_t n_coeffs{0};
+    uint32_t n_lde{0};
+    uint32_t lde_log2_cap{0};
+    uint32_t column_cap{0};
+    bool fits_lde_cap{false};
+    bool fits_column_cap{false};
+    bool representable{false};
+    std::string note;
+};
+
+/**
+ * Pure arithmetic: next_pow2(active) trace, quotient (d-1)*(trace-1), then
+ * n_coeffs / n_lde against the backend LDE and column caps.  No crypto.
+ */
+[[nodiscard]] NarrowNodeFriShape AssessNarrowNodeFriShape(
+    uint64_t active_rows,
+    uint32_t vcs_columns = kMeasuredNarrowComposedColumns,
+    uint32_t max_algebraic_degree = kMeasuredNarrowMaxAlgebraicDegree,
+    uint32_t lde_log2_cap = 24,
+    uint32_t column_cap = (1u << 20));
+
+/** One leaf contribution to a hierarchical narrow tree. */
+struct NarrowHierarchyLeaf {
+    uint32_t role_index{0};
+    std::string name;
+    uint64_t active_rows{0};
+    uint32_t child_w{0};
+    uint32_t child_n_lde{0};
+};
+
+/** One planned narrow aggregation node (leaf children and/or prior nodes). */
+struct NarrowHierarchyNode {
+    uint32_t level{0};
+    uint32_t node_index{0};
+    std::string label;
+    std::vector<uint32_t> child_leaf_indices;
+    std::vector<uint32_t> child_node_indices;
+    uint64_t active_rows{0};
+    NarrowNodeFriShape shape;
+};
+
+/**
+ * Verifier-recomputable hierarchical plan.  `hierarchical_fits` means every
+ * planned node is representable under the column/LDE caps.  It does NOT mean
+ * AggregationReady: `complete_verifier_mirror` stays false until g2 joins the
+ * remaining chips.
+ */
+struct NarrowHierarchicalAggregationPlan {
+    bool valid{false};
+    bool single_level_fits{false};
+    bool hierarchical_fits{false};
+    bool all_leaves_covered{false};
+    bool complete_verifier_mirror{false};
+    uint32_t leaf_count{0};
+    uint32_t node_count{0};
+    uint32_t depth{0};
+    uint32_t vcs_columns{0};
+    uint32_t max_algebraic_degree{0};
+    uint32_t lde_log2_cap{0};
+    uint32_t column_cap{0};
+    uint64_t composed_child_active_rows{0};
+    NarrowNodeFriShape single_level_shape;
+    std::vector<NarrowHierarchyLeaf> leaves;
+    std::vector<NarrowHierarchyNode> nodes;
+    std::string note;
+};
+
+struct NarrowHierarchyPlanConfig {
+    uint32_t vcs_columns{kMeasuredNarrowComposedColumns};
+    uint32_t max_algebraic_degree{kMeasuredNarrowMaxAlgebraicDegree};
+    uint32_t lde_log2_cap{24};
+    uint32_t column_cap{1u << 20};
+    /**
+     * Active rows charged when a prior-level narrow node is consumed as a
+     * child.  For the measured 575 x 2^19 / degree-3 fixed point this is
+     * kMeasuredNarrowL1AsChildActiveRows.  Callers that re-run
+     * BuildHashOpeningProgram on a different L1 shape must supply that
+     * schedule's active_rows here.
+     */
+    uint64_t composed_child_active_rows{kMeasuredNarrowL1AsChildActiveRows};
+    /** Soft preference only; the LDE row budget is the hard constraint. */
+    uint32_t preferred_max_children{4};
+};
+
+/**
+ * Pack leaves into a hierarchical narrow tree under the LDE/column budgets.
+ * Strategy: if the single-level sum fits, emit one root; otherwise first-fit
+ * decreasing into L1 nodes that each fit, then a binary-ish L2+ over the L1
+ * nodes using `composed_child_active_rows` per prior node.
+ */
+[[nodiscard]] NarrowHierarchicalAggregationPlan
+PlanHierarchicalNarrowAggregation(
+    const std::vector<NarrowHierarchyLeaf>& leaves,
+    const NarrowHierarchyPlanConfig& config = {});
+
+/**
+ * Canonical measured partition that closes all six episode roles:
+ *
+ *   L1-A  gemm+wiring+tiletree+digest   473,664 rows  FITS
+ *   L1-B  builder+extract               380,736 rows  FITS
+ *   L2    over the two L1 node proofs   515,328 rows  FITS
+ *
+ * `measured_active_rows` must match kMeasuredSixEpisodeNarrowActiveRows (or
+ * any equal permutation totals that recreate the same partition sums).  The
+ * returned plan pins the exact child sets above rather than relying on a
+ * packer's non-deterministic bin layout.
+ */
+[[nodiscard]] NarrowHierarchicalAggregationPlan
+PlanCanonicalSixEpisodeNarrowHierarchy(
+    const std::array<uint64_t, 6>& measured_active_rows =
+        kMeasuredSixEpisodeNarrowActiveRows,
+    const NarrowHierarchyPlanConfig& config = {});
+
 inline constexpr bool kNarrowVcsExecutable = false;
 inline constexpr bool kNarrowVcsProductionReady = false;
+/** Planner exists; cryptographic aggregation readiness is owned by g2. */
+inline constexpr bool kNarrowHierarchicalAggregationPlannerExecutable = true;
+inline constexpr bool kNarrowHierarchicalAggregationReady = false;
 
 } // namespace matmul::v4::rc::narrow_recurse
 
