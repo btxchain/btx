@@ -92,6 +92,20 @@ BuildRCStage3CoupledExtractSchedule(
     RCStage3CoupledExtractProduct& out,
     std::string* why = nullptr);
 
+/**
+ * Recompute tile / semantic-bundle / endpoint47 link / endpoint / product
+ * commitments after proof blobs are attached to a structural rebuild.
+ * FlatBundle commitment hashes proof column roots + trace_commit, so a
+ * prove=false rebuild's commitments are stale once wire AirQuotient proofs
+ * are installed (otherwise Validate fails with validate_shape). Endpoint47
+ * pin embeds extract_outputs.bundle_commitment and must be rebuilt too.
+ */
+[[nodiscard]] bool RebindRCStage3CoupledExtractProductProofCommitments(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    RCStage3CoupledExtractProduct& product,
+    std::string* why = nullptr);
+
 /** Schedule/root validation only; no native Extract/hash acceptance. */
 [[nodiscard]] bool ValidateRCStage3CoupledExtractProductSchedule(
     const RCStage3SuccinctProof& statement,
