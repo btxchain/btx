@@ -174,6 +174,9 @@ add_executable(test_btx
   matmul_v4_rc_stage3_recursive_parent_air_tests.cpp
   matmul_v4_rc_stage3_fs_selection_air_tests.cpp
   matmul_v4_rc_stage3_recursive_bytecode_air_tests.cpp
+  matmul_v4_rc_stage3_constant_width_bytecode_air_tests.cpp
+  matmul_v4_rc_stage3_registry_membership_air_tests.cpp
+  matmul_v4_rc_stage3_registry_vm_same_parent_join_tests.cpp
   matmul_v4_rc_stage3_poseidon_air_tests.cpp
   matmul_v4_rc_stage3_poseidon_bytecode_tests.cpp
   matmul_v4_rc_stage3_v5_v6_bus_tests.cpp
