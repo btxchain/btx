@@ -2830,17 +2830,50 @@ struct NarrowBytecodeHierarchicalAttachNodeResultV1 {
 };
 
 /**
+ * L2 cryptographic join of shard-local quotients toward the authenticated
+ * parent AIR q opening.
+ *
+ * When free-row shards partition the full ProgramTable and each L1 uses
+ * global rho^ordinal weights, Σ_s local_q_s(y) must equal the authenticated
+ * child AIR quotient opening at each query. Relative partition closure
+ * (Σ parts == union local_q) holds for any covered subset.
+ *
+ * Does NOT flip CompleteFP / AggregationReady / complete_verifier_mirror /
+ * within_relay_budget. AirQuotientProve of shards and the SHA-FS transcript
+ * chip remain separate measured join steps.
+ */
+struct NarrowBytecodeShardQuotientJoinV1 {
+    bool valid{false};
+    bool parent_extracted{false};
+    bool shards_extracted{false};
+    bool covers_full_table{false};
+    bool sum_equals_parent{false};
+    bool partition_closed{false};
+    bool forgery_rejected{false};
+    uint32_t queries{0};
+    uint32_t shard_count{0};
+    uint32_t programs_covered{0};
+    uint32_t programs_total{0};
+    std::vector<Fp3> parent_q_per_query;
+    std::vector<Fp3> sum_local_q_per_query;
+    std::string note;
+};
+
+/**
  * Execute the hierarchical bytecode attach plan against a hash-kernel
  * fold-bus. FRI L1/L2/L3 shape is recorded from
  * PlanNarrowBytecodeHierarchicalAttachV1. Actual L1 attach packs programs
  * into free-row shards (pad-after-challenge is forbidden), subsets
  * child_constraints, and runs AttachConstraintBytecodeInterpreterShard
- * with local synthesized q + forgery rejects. L2/L3 remain schedule-only.
+ * with local synthesized q + forgery rejects. When all L1 shards attach,
+ * JoinNarrowBytecodeShardLocalQuotientsV1 binds Σ local_q to the parent
+ * authenticated opening (absolute iff shards cover the full table).
+ * L2/L3 FRI nodes remain schedule-only until AirQuotientProve consumption.
  *
  * Does NOT flip kCompleteRecursiveFixedPointExecutable /
  * kNarrowHierarchicalAggregationReady / within_relay_budget /
- * complete_verifier_mirror. AirQuotientProve of shards and multi-child
- * L2/L3 consumption remain the next measured join step toward the 575-col
+ * complete_verifier_mirror. AirQuotientProve of shards and the SHA-FS
+ * transcript chip remain the next measured join steps toward the 575-col
  * complete verifier mirror.
  */
 struct NarrowBytecodeHierarchicalAttachExecutionV1 {
@@ -2858,6 +2891,7 @@ struct NarrowBytecodeHierarchicalAttachExecutionV1 {
     uint32_t depth{0};
     uint32_t node_count{0};
     NarrowBytecodeHierarchicalAttachPlanV1 plan;
+    NarrowBytecodeShardQuotientJoinV1 quotient_join;
     std::vector<NarrowBytecodeHierarchicalAttachNodeResultV1> nodes;
     std::string note;
 };
@@ -2886,9 +2920,42 @@ struct NarrowBytecodeHierarchicalAttachExecutionV1 {
     std::string* why = nullptr);
 
 /**
+ * Read authenticated child AIR quotient openings (item == current_width)
+ * from the fold-bus hash-opening current-row sponges. One Fp3 per query.
+ */
+[[nodiscard]] bool ExtractAuthenticatedParentQuotientOpenings(
+    const FoldBusComposition& base,
+    uint32_t current_width,
+    std::vector<Fp3>& out_per_query,
+    std::string* why = nullptr);
+
+/**
+ * Read synthesized local q openings from an attached shard fold-bus
+ * (BytecodeBusLayout Value(3) on Quotient rows), in query order.
+ */
+[[nodiscard]] bool ExtractShardLocalQuotientOpenings(
+    const FoldBusComposition& shard_bus,
+    std::vector<Fp3>& out_per_query,
+    std::string* why = nullptr);
+
+/**
+ * Join shard-local quotients: Σ_s local_q_s == parent opening when the
+ * shards cover `programs_total`, else report relative extraction only.
+ * Forgery: omitting any single shard breaks equality with the full sum
+ * (and with parent when covers_full_table).
+ */
+[[nodiscard]] NarrowBytecodeShardQuotientJoinV1
+JoinNarrowBytecodeShardLocalQuotientsV1(
+    const std::vector<Fp3>& parent_q_per_query,
+    const std::vector<std::vector<Fp3>>& shard_local_q,
+    uint32_t programs_covered,
+    uint32_t programs_total);
+
+/**
  * Execute hierarchical shard attach. When `attach_l1` is false, only the
  * FRI plan + free-row shard capacity + L2/L3 schedule are checked. When
- * true, each free-row shard is attached sequentially with forgery rejects.
+ * true, each free-row shard is attached sequentially with forgery rejects
+ * and the L2 local-q join is measured against the parent opening.
  */
 [[nodiscard]] NarrowBytecodeHierarchicalAttachExecutionV1
 ExecuteNarrowBytecodeHierarchicalAttachV1(
@@ -2896,9 +2963,24 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
     const constraint_bytecode::ProgramTable& table,
     bool attach_l1 = true);
 
+/**
+ * Light measured join path: attach an explicit partition of leaf indices
+ * (each group one shard) and join local qs. Intended for small subsets so
+ * the absolute/relative join can be remasured without the full 462-program
+ * hierarchical free-row pack.
+ */
+[[nodiscard]] NarrowBytecodeShardQuotientJoinV1
+ExecuteNarrowBytecodeShardQuotientJoinV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<std::vector<uint32_t>>& shard_leaf_groups);
+
 /** Planner+executor exist; readiness owned by measured complete mirror. */
 inline constexpr bool kNarrowBytecodeHierarchicalAttachExecutable = true;
 inline constexpr bool kNarrowBytecodeHierarchicalAttachReady = false;
+/** Local-q join helper exists; absolute parent binding measured per run. */
+inline constexpr bool kNarrowBytecodeShardQuotientJoinExecutable = true;
+inline constexpr bool kNarrowBytecodeShardQuotientJoinReady = false;
 
 /**
  * Expand the fold-bus trace with trailing free rows so a subsequent
@@ -3024,6 +3106,8 @@ static_assert(!kCompleteRecursiveFixedPointExecutable);
 static_assert(!kRecursiveFixedPointConsensusAuthority);
 static_assert(kNarrowBytecodeHierarchicalAttachExecutable);
 static_assert(!kNarrowBytecodeHierarchicalAttachReady);
+static_assert(kNarrowBytecodeShardQuotientJoinExecutable);
+static_assert(!kNarrowBytecodeShardQuotientJoinReady);
 
 } // namespace matmul::v4::rc::recursive_fixedpoint
 
