@@ -1296,8 +1296,10 @@ BOOST_AUTO_TEST_CASE(coupled_extract_engine_opt_in_roundtrip)
             "engine roundtrip under MemoryMax≥40G");
         return;
     }
+    // Match coupled_extract_product_tests::Shape — ValidateRCCoupParams
+    // requires barriers ∈ [4, 8].
     rc::RCStage3CoupledShape shape;
-    shape.barriers = 1;
+    shape.barriers = 4;
     shape.lobes = 1;
     shape.lobe_width = 32;
     shape.bank_pages = 1;
@@ -1321,11 +1323,13 @@ BOOST_AUTO_TEST_CASE(coupled_extract_engine_opt_in_roundtrip)
     statement.public_inputs.coupled_digest = Filled(0x44);
     statement.public_inputs.final_digest = Filled(0x44);
 
-    std::vector<std::array<int64_t, rc::kRCMxBlockLen>> inputs(1);
-    for (uint32_t i = 0; i < inputs[0].size(); ++i) {
-        inputs[0][i] = static_cast<int64_t>(
-            (UINT64_C(1) << 40) ^
-            (uint64_t{i} * UINT64_C(0x9e3779b97f4a7c15)));
+    std::vector<std::array<int64_t, rc::kRCMxBlockLen>> inputs(4);
+    for (uint32_t barrier = 0; barrier < inputs.size(); ++barrier) {
+        for (uint32_t i = 0; i < inputs[barrier].size(); ++i) {
+            inputs[barrier][i] = static_cast<int64_t>(
+                (uint64_t{barrier + 1} << 40) ^
+                (uint64_t{i} * UINT64_C(0x9e3779b97f4a7c15)));
+        }
     }
     std::string why;
     std::vector<unsigned char> receipt;
