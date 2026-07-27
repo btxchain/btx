@@ -35,6 +35,53 @@ std::array<uint32_t, 8> RootOf(RCStage3StreamFamily fam,
 
 BOOST_AUTO_TEST_SUITE(matmul_v4_rc_stage3_stream_endpoint_tests)
 
+// The three residual DirectSha256d relation families (EpisodeDigest /
+// CoupledBarrier / CoupledDigest) each get their own domain separator, so a
+// value opened under one relation cannot be replayed as an opening under
+// either of the other two -- closing the gap where all three previously
+// folded through the single generic DirectSha256d family and therefore
+// shared one domain word. Covers every distinct pair among all seven
+// families (the four pre-existing plus the three residual ones).
+BOOST_AUTO_TEST_CASE(stream_endpoint_residual_direct_sha256d_families_are_domain_separated)
+{
+    const std::array<RCStage3StreamFamily, 7> families = {
+        RCStage3StreamFamily::XofCounter,
+        RCStage3StreamFamily::ChaChaInitAndBlock,
+        RCStage3StreamFamily::CompleteStream,
+        RCStage3StreamFamily::DirectSha256d,
+        RCStage3StreamFamily::DirectSha256dEpisodeDigest,
+        RCStage3StreamFamily::DirectSha256dCoupledBarrier,
+        RCStage3StreamFamily::DirectSha256dCoupledDigest,
+    };
+    const uint32_t leaf_index = 2U;
+    const uint32_t path_len = 3U;
+
+    // Same siblings/directions for every family (borrowed from family[0]'s
+    // canonical manifest); only the leaf preimage's family domain word and
+    // the stream value vary. This isolates the family domain word as the
+    // source of any root difference, rather than relying on the (also
+    // family-seeded) canonical sibling values to carry the separation.
+    const auto reference = BuildRCStage3StreamEndpointCanonicalManifest(
+        families[0], Value(), leaf_index, path_len);
+
+    std::vector<std::array<uint32_t, 8>> roots;
+    for (const RCStage3StreamFamily fam : families) {
+        RCStage3StreamEndpointManifest m;
+        m.leaf_index = leaf_index;
+        m.stream_value = Value();
+        m.siblings = reference.siblings;
+        m.directions = reference.directions;
+        roots.push_back(RootOf(fam, m));
+    }
+    for (size_t i = 0; i < roots.size(); ++i) {
+        for (size_t j = i + 1; j < roots.size(); ++j) {
+            BOOST_CHECK_MESSAGE(roots[i] != roots[j],
+                                "families at indices " << i << " and " << j
+                                                        << " collide");
+        }
+    }
+}
+
 // The §4 SHA256d Merkle fold (leaf(domain ‖ index ‖ value) folded up the
 // authentication path) is value / sibling / index / family binding: any change
 // to what is authenticated moves the committed root. This is the fold the

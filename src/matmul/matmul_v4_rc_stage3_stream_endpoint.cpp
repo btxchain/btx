@@ -73,6 +73,12 @@ const char* FamilyDomain(RCStage3StreamFamily family)
         return "BTX_RC_STAGE3_STREAM_ENDPOINT_COMPLETESTREAM_V1";
     case RCStage3StreamFamily::DirectSha256d:
         return "BTX_RC_STAGE3_STREAM_ENDPOINT_DIRECTSHA256D_V1";
+    case RCStage3StreamFamily::DirectSha256dEpisodeDigest:
+        return "BTX_RC_STAGE3_STREAM_ENDPOINT_DIRECTSHA256D_EPISODEDIGEST_V1";
+    case RCStage3StreamFamily::DirectSha256dCoupledBarrier:
+        return "BTX_RC_STAGE3_STREAM_ENDPOINT_DIRECTSHA256D_COUPLEDBARRIER_V1";
+    case RCStage3StreamFamily::DirectSha256dCoupledDigest:
+        return "BTX_RC_STAGE3_STREAM_ENDPOINT_DIRECTSHA256D_COUPLEDDIGEST_V1";
     }
     return "BTX_RC_STAGE3_STREAM_ENDPOINT_UNKNOWN_V1";
 }
