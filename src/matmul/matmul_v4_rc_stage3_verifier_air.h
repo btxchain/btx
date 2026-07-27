@@ -404,9 +404,13 @@ BuildCanonicalFiatShamirProgram(const NarrowChildShape& child);
  */
 struct FiatShamirChallengeReconstructionInputV1 {
     FiatShamirEventKind kind{};
-    std::array<uint64_t, 8> ood_words{};          // z1, z2
-    std::array<unsigned char, 24> direct_bytes{}; // airq-lambda,lambda,w1,w2,fold
-    std::array<unsigned char, 4> query_bytes{};   // query-index
+    // MultiRow-V2 uniform OOD decoder (8 LE words from two SHA256d digests).
+    std::array<uint64_t, 8> ood_words{};
+    // ChallengeFp3 / FromChallengeBytes3 map (24 SHA digest bytes). Used for
+    // airq-lambda/lambda/w1/w2/fold, and for z1/z2 when ood_words are unused
+    // (SHA-FS canary path; WitnessV1 when any ood_word is nonzero).
+    std::array<unsigned char, 24> direct_bytes{};
+    std::array<unsigned char, 4> query_bytes{}; // query-index
     uint32_t query_modulus{0};
 };
 
@@ -656,6 +660,34 @@ struct FiatShamirChallengeSelectionAirJoinV1 {
 
 [[nodiscard]] FiatShamirChallengeSelectionAirJoinV1
 MeasureFiatShamirChallengeSelectionAirJoinV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof);
+
+/**
+ * AIR-backed reconstruction of all eight FS challenge kinds from the child's
+ * SHA transcript digests (BuildFiatShamirAirBackedWitnessV1).
+ *
+ * Pins each kind's decoder input to the accepted SHA256d digest bytes, checks
+ * covers_all_challenge_types, binds reconstructed values to the consumed
+ * batch/airq challenges, and requires a one-input tamper to diverge. Does NOT
+ * flip kVerifierFiatShamirAirExecutable.
+ */
+struct FiatShamirAirBackedAllKindsV1 {
+    uint32_t kinds_reconstructed{0};
+    uint32_t kinds_required{8};
+    uint32_t values_bound_to_consumed{0};
+    bool digest_plan_ready{false};
+    bool covers_all_challenge_types{false};
+    bool values_match_consumed{false};
+    bool tamper_diverges{false};
+    /** Gap predicate: 8/8 in-AIR + bound + tamper red. */
+    bool reconstructed{false};
+    std::string note;
+};
+
+[[nodiscard]] FiatShamirAirBackedAllKindsV1
+MeasureFiatShamirAirBackedAllKindsV1(
     const FiatShamirProgram& program,
     const uint256& child_fs_seed,
     const AlgAirProof& child_proof);

@@ -1157,10 +1157,24 @@ FiatShamirAirBackedWitnessV1 BuildFiatShamirAirBackedWitnessV1(
         switch (in.kind) {
         case FiatShamirEventKind::ChallengeZ1:
         case FiatShamirEventKind::ChallengeZ2: {
-            const fss::WitnessV1 sel =
-                fss::BuildWitnessV1(in.ood_words);
-            constrained = sel.valid;
-            value = sel.selected_value;
+            // MultiRow-V2 uniform path when ood_words are supplied (synthetic
+            // 8-word tests). SHA-FS ChallengeFp3 canary leaves ood_words zero
+            // and feeds the selected digest's 24 bytes through DirectChallenge.
+            const bool has_ood_words = std::any_of(
+                in.ood_words.begin(), in.ood_words.end(),
+                [](uint64_t w) { return w != 0; });
+            if (has_ood_words) {
+                const fss::WitnessV1 sel =
+                    fss::BuildWitnessV1(in.ood_words);
+                constrained = sel.valid;
+                value = sel.selected_value;
+            } else {
+                const fss::DirectChallengeWitnessV1 d =
+                    fss::BuildDirectChallengeWitnessV1(
+                        in.direct_bytes);
+                constrained = d.valid;
+                value = d.value;
+            }
             break;
         }
         case FiatShamirEventKind::ChallengeQueryIndex: {
@@ -2663,6 +2677,389 @@ MeasureFiatShamirChallengeSelectionAirJoinV1(
     return out;
 }
 
+FiatShamirAirBackedAllKindsV1
+MeasureFiatShamirAirBackedAllKindsV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof)
+{
+    namespace fss = stage3_fs_selection_air;
+    FiatShamirAirBackedAllKindsV1 out;
+    const FiatShamirShaExecutionPlanV1 plan =
+        BuildFiatShamirShaExecutionPlanV1(
+            program, child_fs_seed, child_proof);
+    out.digest_plan_ready =
+        plan.valid && plan.every_digest_matches_claim;
+    if (!out.digest_plan_ready) {
+        out.note =
+            "stage3:verifier_air:fs_air_backed_kinds:"
+            "digest_plan_open:" +
+            plan.note;
+        return out;
+    }
+    const FiatShamirWitness witness =
+        BuildFiatShamirWitness(
+            program, child_fs_seed, child_proof);
+    if (!witness.valid ||
+        witness.events.size() != program.events.size()) {
+        out.note =
+            "stage3:verifier_air:fs_air_backed_kinds:witness";
+        return out;
+    }
+
+    std::vector<FiatShamirChallengeReconstructionInputV1> inputs;
+    std::vector<Fp3> expected_values;
+    std::set<uint8_t> seen_kinds;
+    std::vector<unsigned char> transcript;
+    uint32_t z_counter = 0;
+    Fp3 selected_z1{};
+    bool have_z1 = false;
+    const auto challenge_digest =
+        [&transcript](const char* label, uint32_t index) {
+            std::vector<unsigned char> preimage = transcript;
+            preimage.insert(
+                preimage.end(),
+                reinterpret_cast<const unsigned char*>(label),
+                reinterpret_cast<const unsigned char*>(label) +
+                    std::strlen(label));
+            AppendU32(preimage, index);
+            return Sha256dBytes(preimage.data(), preimage.size());
+        };
+    const auto push_direct =
+        [&inputs, &expected_values, &seen_kinds](
+            FiatShamirEventKind kind, const uint256& digest,
+            const Fp3& consumed) {
+            if (!seen_kinds.insert(static_cast<uint8_t>(kind))
+                     .second) {
+                return;
+            }
+            FiatShamirChallengeReconstructionInputV1 in;
+            in.kind = kind;
+            for (uint32_t i = 0; i < 24; ++i) {
+                in.direct_bytes[i] = digest.data()[i];
+            }
+            inputs.push_back(in);
+            expected_values.push_back(consumed);
+        };
+
+    for (uint32_t event_index = 0;
+         event_index < program.events.size();
+         ++event_index) {
+        const FiatShamirEventSpec& spec =
+            program.events[event_index];
+        const FiatShamirEventWitness& event =
+            witness.events[event_index];
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeAirQuotientLambda) {
+            const uint256 digest = aq::AirChallengeDigest(
+                child_fs_seed, "airq_lambda",
+                {child_proof.trace_commit},
+                {program.child_shape.child_n_rows,
+                 child_proof.batch.column_len.back(),
+                 program.child_shape.child_w});
+            const Fp3 decoded =
+                gf::FromChallengeBytes3(digest.data());
+            if (!event.has_fp3_challenge ||
+                !gf::Eq(decoded, event.claimed_challenge)) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "airq_mismatch";
+                return out;
+            }
+            push_direct(spec.kind, digest, decoded);
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::AbsorbZ1Z2) {
+            if (!have_z1) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "absorb_z_before_select";
+                return out;
+            }
+            AppendFp3(transcript, child_proof.batch.z1);
+            AppendFp3(transcript, child_proof.batch.z2);
+            continue;
+        }
+        if (!event.absorbed_payload.empty()) {
+            transcript.insert(
+                transcript.end(),
+                event.absorbed_payload.begin(),
+                event.absorbed_payload.end());
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeLambda) {
+            const uint256 digest =
+                challenge_digest("fra3_lambda", 0);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.lambda)) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "lambda_mismatch";
+                return out;
+            }
+            push_direct(
+                spec.kind, digest, child_proof.batch.lambda);
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeZ1 ||
+            spec.kind == FiatShamirEventKind::ChallengeZ2) {
+            if (program.ood_candidates == 0) {
+                const uint32_t draw = z_counter++;
+                const uint256 digest =
+                    challenge_digest("fra3_z", draw);
+                const Fp3 decoded =
+                    gf::FromChallengeBytes3(digest.data());
+                const Fp3 claimed =
+                    spec.kind ==
+                            FiatShamirEventKind::ChallengeZ1
+                        ? child_proof.batch.z1
+                        : child_proof.batch.z2;
+                const bool has_ext =
+                    gf::Canonical(decoded.c1) != 0 ||
+                    gf::Canonical(decoded.c2) != 0;
+                const bool distinct =
+                    !have_z1 || !gf::Eq(decoded, selected_z1);
+                if (!has_ext || !distinct) continue;
+                if (!gf::Eq(decoded, claimed)) {
+                    out.note =
+                        "stage3:verifier_air:fs_air_backed_kinds:"
+                        "legacy_z_mismatch";
+                    return out;
+                }
+                push_direct(spec.kind, digest, claimed);
+                if (spec.kind ==
+                    FiatShamirEventKind::ChallengeZ1) {
+                    selected_z1 = decoded;
+                    have_z1 = true;
+                }
+                continue;
+            }
+            if (spec.index != 0) continue;
+            std::vector<Fp3> candidates;
+            std::vector<uint256> digests;
+            candidates.reserve(program.ood_candidates);
+            digests.reserve(program.ood_candidates);
+            for (uint32_t k = 0; k < program.ood_candidates;
+                 ++k) {
+                const uint32_t draw = z_counter++;
+                const uint256 digest =
+                    challenge_digest("fra3_z", draw);
+                digests.push_back(digest);
+                candidates.push_back(
+                    gf::FromChallengeBytes3(digest.data()));
+            }
+            const Fp3* distinct =
+                have_z1 ? &selected_z1 : nullptr;
+            const uint32_t selected =
+                SelectFirstAcceptableOodIndex(
+                    candidates, distinct);
+            if (selected >= program.ood_candidates) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "ood_exhausted";
+                return out;
+            }
+            const Fp3 claimed =
+                spec.kind == FiatShamirEventKind::ChallengeZ1
+                    ? child_proof.batch.z1
+                    : child_proof.batch.z2;
+            if (!gf::Eq(candidates[selected], claimed)) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "ood_claim_mismatch";
+                return out;
+            }
+            push_direct(
+                spec.kind, digests[selected], claimed);
+            if (spec.kind ==
+                FiatShamirEventKind::ChallengeZ1) {
+                selected_z1 = candidates[selected];
+                have_z1 = true;
+            }
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeW1) {
+            const uint256 digest =
+                challenge_digest("fra3_w", 0);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.w1)) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "w1_mismatch";
+                return out;
+            }
+            push_direct(
+                spec.kind, digest, child_proof.batch.w1);
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeW2) {
+            const uint256 digest =
+                challenge_digest("fra3_w", 1);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.w2)) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "w2_mismatch";
+                return out;
+            }
+            push_direct(
+                spec.kind, digest, child_proof.batch.w2);
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeFold) {
+            if (spec.index >=
+                child_proof.batch.fold_challenges.size()) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "fold_arity";
+                return out;
+            }
+            const uint256 digest =
+                challenge_digest("fra3_fold", spec.index);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.fold_challenges[spec.index])) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "fold_mismatch";
+                return out;
+            }
+            push_direct(
+                spec.kind, digest,
+                child_proof.batch.fold_challenges[spec.index]);
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeQueryIndex) {
+            if (spec.index >=
+                    child_proof.batch.queries.size() ||
+                program.child_shape.child_n_lde == 0 ||
+                (program.child_shape.child_n_lde &
+                 (program.child_shape.child_n_lde - 1)) != 0) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "query_arity";
+                return out;
+            }
+            const uint256 digest =
+                challenge_digest("fra3_query", spec.index);
+            const uint32_t claimed =
+                child_proof.batch.queries[spec.index].index;
+            if (!seen_kinds
+                     .insert(static_cast<uint8_t>(spec.kind))
+                     .second) {
+                continue;
+            }
+            FiatShamirChallengeReconstructionInputV1 in;
+            in.kind = spec.kind;
+            for (uint32_t i = 0; i < 4; ++i) {
+                in.query_bytes[i] = digest.data()[i];
+            }
+            in.query_modulus = program.child_shape.child_n_lde;
+            const fss::QueryIndexWitnessV1 q =
+                fss::BuildQueryIndexWitnessV1(
+                    in.query_bytes, in.query_modulus);
+            if (!q.valid || q.query_index != claimed) {
+                out.note =
+                    "stage3:verifier_air:fs_air_backed_kinds:"
+                    "query_index_mismatch";
+                return out;
+            }
+            inputs.push_back(in);
+            expected_values.push_back(
+                Fp3::FromFp(gf::FromU64(claimed)));
+            continue;
+        }
+    }
+
+    if (inputs.size() < out.kinds_required) {
+        out.note =
+            "stage3:verifier_air:fs_air_backed_kinds:"
+            "incomplete_kinds:" +
+            std::to_string(inputs.size());
+        return out;
+    }
+
+    const FiatShamirAirBackedWitnessV1 air =
+        BuildFiatShamirAirBackedWitnessV1(inputs);
+    out.kinds_reconstructed = air.reconstructed_challenge_types;
+    out.covers_all_challenge_types =
+        air.covers_all_challenge_types && air.valid;
+    if (!out.covers_all_challenge_types) {
+        out.note =
+            "stage3:verifier_air:fs_air_backed_kinds:"
+            "decoder_open:" +
+            air.note;
+        return out;
+    }
+    if (air.reconstructed_values.size() !=
+        expected_values.size()) {
+        out.note =
+            "stage3:verifier_air:fs_air_backed_kinds:"
+            "value_arity";
+        return out;
+    }
+    out.values_match_consumed = true;
+    for (size_t i = 0; i < expected_values.size(); ++i) {
+        if (!gf::Eq(
+                air.reconstructed_values[i],
+                expected_values[i])) {
+            out.values_match_consumed = false;
+            break;
+        }
+        ++out.values_bound_to_consumed;
+    }
+    if (!out.values_match_consumed) {
+        out.note =
+            "stage3:verifier_air:fs_air_backed_kinds:"
+            "value_mismatch";
+        return out;
+    }
+
+    // One-input byte tamper must change a reconstructed value.
+    {
+        auto forged = inputs;
+        if (forged[0].kind ==
+            FiatShamirEventKind::ChallengeQueryIndex) {
+            forged[0].query_bytes[0] ^= 0xFFu;
+        } else {
+            forged[0].direct_bytes[0] ^= 0xFFu;
+        }
+        const FiatShamirAirBackedWitnessV1 bad =
+            BuildFiatShamirAirBackedWitnessV1(forged);
+        out.tamper_diverges =
+            !bad.valid ||
+            bad.reconstructed_values.empty() ||
+            !gf::Eq(
+                bad.reconstructed_values[0],
+                air.reconstructed_values[0]);
+    }
+
+    out.reconstructed =
+        out.covers_all_challenge_types &&
+        out.values_match_consumed && out.tamper_diverges;
+    out.note =
+        out.reconstructed
+            ? ("stage3:verifier_air:fs_air_backed_kinds:ok;"
+               "kinds=" +
+               std::to_string(out.kinds_reconstructed) +
+               ";bound=" +
+               std::to_string(out.values_bound_to_consumed) +
+               ";tamper=1")
+            : ("stage3:verifier_air:fs_air_backed_kinds:open;"
+               "kinds=" +
+               std::to_string(out.kinds_reconstructed) +
+               ";bound=" +
+               std::to_string(
+                   out.values_match_consumed ? 1 : 0) +
+               ";tamper=" +
+               std::to_string(out.tamper_diverges ? 1 : 0));
+    return out;
+}
+
 VerifierFiatShamirAirChipGapV1
 AssessVerifierFiatShamirAirChipGapV1(
     const FiatShamirProgram& program,
@@ -2703,8 +3100,15 @@ AssessVerifierFiatShamirAirChipGapV1(
             : FiatShamirChallengeSelectionAirJoinV1{};
     out.challenge_selection_air_constrained =
         selection.constrained;
-    // air-backed 8/8 reconstruction / whole-verifier SHA remain open.
-    out.air_backed_all_kinds_reconstructed = false;
+    // 8/8 challenge-kind AIR reconstruction from SHA digests (canary path).
+    const FiatShamirAirBackedAllKindsV1 air_kinds =
+        aligned_ok
+            ? MeasureFiatShamirAirBackedAllKindsV1(
+                  program, child_fs_seed, aligned)
+            : FiatShamirAirBackedAllKindsV1{};
+    out.air_backed_all_kinds_reconstructed =
+        air_kinds.reconstructed;
+    // Whole-verifier SHA equations remain open.
     out.whole_verifier_sha_equations_in_air = false;
 
     const auto bump = [&](bool ok) {
@@ -2741,6 +3145,9 @@ AssessVerifierFiatShamirAirChipGapV1(
                (out.challenge_selection_air_constrained
                     ? "1"
                     : "0") +
+               ";air_kinds=" +
+               (out.air_backed_all_kinds_reconstructed ? "1"
+                                                       : "0") +
                ";executable_constexpr=0");
     return out;
 }
