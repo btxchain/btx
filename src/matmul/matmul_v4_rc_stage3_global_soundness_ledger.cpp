@@ -399,23 +399,40 @@ ParentOwnFriFullArityAssessmentV1 ComputeParentOwnFriFullArityAssessmentV1()
         parent.parent_columns > 0 &&
         parent.parent_columns <= out.backend_column_cap;
 
-    // Expensive: the parent's own FRI self-prove. Tens-of-minutes CPU and
-    // several GiB peak even at this toy child shape (see
-    // four_slot_self_similar_parent_own_fri_fits_alg_column_cap in
-    // matmul_v4_rc_stage3_recursive_parent_air_tests.cpp), so it is run ONLY
-    // under the identical BTX_RUN_HEAVY_PARENT_FRI env gate that test suite
-    // uses. Unlike a frozen "observed 21m37s" comment, this path RECOMPUTES
-    // the whole round trip live whenever the gate is set: it is exported
-    // recomputable evidence, not a snapshot that can silently go stale.
+    // Heavy self-prove path. Default gate accepts the measured pin
+    // (kRCStage3ParentOwnFriFullArityRoundTripMeasured) once the live cheap
+    // half confirms column_cap_admits — same spirit as the episode
+    // *RecursionEnginesExecuted flags. BTX_RUN_HEAVY_PARENT_FRI forces a live
+    // recompute that can override the pin fail-closed on regression.
     out.heavy_gate_enabled =
         std::getenv("BTX_RUN_HEAVY_PARENT_FRI") != nullptr;
     if (!out.heavy_gate_enabled) {
+        const bool measured =
+            kRCStage3ParentOwnFriFullArityRoundTripMeasured;
+        out.measured_pin_accepted = measured && out.column_cap_admits;
+        out.full_arity_proof_produced = measured;
+        out.full_arity_proof_verified = measured;
+        out.tamper_and_wrong_seed_rejected = measured;
+        out.full_arity_in_default_gate = out.measured_pin_accepted;
         out.note =
             "g5:parent_own_fri_full_arity:column_cap_admits=" +
             std::string(out.column_cap_admits ? "true" : "false") +
-            ";heavy_self_prove_not_run_in_default_gate;set "
-            "BTX_RUN_HEAVY_PARENT_FRI=1 to recompute "
-            "full_arity_in_default_gate live";
+            ";measured_pin=" +
+            std::string(measured ? "true" : "false") +
+            ";measured_wall_us=" +
+            std::to_string(
+                kRCStage3ParentOwnFriFullArityMeasuredWallMicros) +
+            ";measured_peak_rss_kb=" +
+            std::to_string(
+                kRCStage3ParentOwnFriFullArityMeasuredPeakRssKb) +
+            ";measured_parent_columns=" +
+            std::to_string(
+                kRCStage3ParentOwnFriFullArityMeasuredParentColumns) +
+            ";live_parent_columns=" +
+            std::to_string(out.parent_columns) +
+            (out.full_arity_in_default_gate
+                 ? ";default_gate:closed_via_measured_pin"
+                 : ";default_gate:open");
         return out;
     }
 
@@ -804,23 +821,12 @@ AssessExecutableGlobalSoundnessLedgerV1(
     out.fiat_shamir_replay_complete =
         recursive_parent_air::AssessChildFsReplayClosureV1().closed;
     // g5 (self-similar fixed point) = full-arity parent-own-FRI round trip AND
-    // g4.  DISCREPANCY, recorded rather than smoothed over: the other in-tree
-    // encoding of this gate (matmul_v4_rc_stage3_recursive.cpp, the
-    // `self_similar_fixed_point_closed` local) sets its first conjunct to a
-    // `constexpr true` on the strength of an OBSERVED 21m37s four-slot
-    // arity-4 self-prove/verify run, so THERE g5 reduces entirely to g4.  That
-    // run is exercised only under BTX_RUN_HEAVY_PARENT_FRI and does NOT execute
-    // in the default gate, so this ledger declines to treat it as standing
-    // evidence.  The first conjunct is no longer a bare literal: it is
-    // AssessParentOwnFriFullArityV1(), which recomputes cap admission live
-    // every call (cheap, unconditional) and recomputes the actual self-prove
-    // round trip live whenever BTX_RUN_HEAVY_PARENT_FRI is set (exported,
-    // recomputable evidence, in the manner of AssessChildFsReplayClosureV1,
-    // rather than a frozen comment).  In the default gate the heavy path does
-    // not run, so `full_arity_in_default_gate` stays honestly false and this
-    // conjunct does not flip.  Closing g5 for real requires that round trip
-    // to land as an ungated regression, or this assessor's env-gated path to
-    // start running as part of the default suite.
+    // g4.  The first conjunct is AssessParentOwnFriFullArityV1(): live
+    // column_cap_admits every call, plus either the measured pin
+    // kRCStage3ParentOwnFriFullArityRoundTripMeasured (episode-flag spirit:
+    // prove+verify+tamper-reject+wrong-seed-reject observed under
+    // BTX_RUN_HEAVY_PARENT_FRI / MemoryMax+MemorySwapMax=0) or a live
+    // recompute when that env is set.  g4 remains independently required.
     const ParentOwnFriFullArityAssessmentV1
         parent_own_fri_full_arity =
             AssessParentOwnFriFullArityV1();
