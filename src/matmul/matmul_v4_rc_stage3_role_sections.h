@@ -56,16 +56,16 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3.h>
+#include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_root_chain.h>
+#include <primitives/block.h>
 
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
-
-class CBlockHeader;
 
 namespace Consensus {
 struct Params;
@@ -239,16 +239,31 @@ struct RCStage3RoleSectionProveResult {
 // prover may simply declare convenient roots. This layer binds the declared
 // roots to values the statement already commits.
 //
-// It applies to PURE-STREAM roles only (EpisodeTileTree, EpisodeDigest,
-// CoupledBarrier, CoupledDigest). For those, the endpoint authority root is a
-// pure repacking of a 32-byte SHA256d root: limb[i] is the little-endian
-// uint64 read of root bytes [8i, 8i+8) — see PackStreamRoot/Root8 in
-// matmul_v4_rc_stage3_relation_closure.cpp. The verifier therefore recomputes
-// the expected Digest from a uint256 it already knows and requires equality.
+// TWO derivation shapes are used, and they are kept distinct on purpose.
 //
-// For scalar / wired roles the endpoint root is an alg-hash commitment to the
-// OPENED VALUE, not a repacked block root, so this derivation does not apply
-// at all; those endpoints are reported unanchored.
+//  (A) REPACK. For a stream endpoint the authority root is a pure repacking of
+//      a 32-byte SHA256d root: limb[i] is the little-endian uint64 read of root
+//      bytes [8i, 8i+8) — see PackStreamRoot/Root8 in
+//      matmul_v4_rc_stage3_relation_closure.cpp. The verifier recomputes the
+//      expected Digest from a uint256 it already knows and requires equality.
+//
+//  (B) CANONICAL REBUILD. For a scalar / wired endpoint the authority root is
+//      an alg-hash commitment to the OPENED VALUE (a canonical opening
+//      manifest, or a Poseidon ledger-fold of a wired leaf row), so (A) does
+//      not apply. Instead the verifier re-runs the SAME shipped role builder a
+//      producer must use — BuildRCStage3NoKernelRoleAir /
+//      BuildRCStage3EpisodeGemmRoleAir / BuildRCStage3EpisodeWiringRoleAir —
+//      on inputs it has itself derived from block material the statement binds,
+//      and requires the whole endpoint_committed_roots vector to match
+//      elementwise. Nothing is reimplemented here, so the provenance rule and
+//      the producer cannot drift apart.
+//
+// The block material feeding (B) is carried in RCStage3EndpointProvenance and
+// is itself verified against the statement before it is used: the header
+// against statement.header_commitment, the ordered round roots against
+// statement.episode_digest (digest root chain), and the round tile-tree
+// manifest against the round root at the declared index. See
+// RCStage3EndpointAnchorSource for the per-endpoint attribution.
 // ===========================================================================
 
 enum class RCStage3EndpointAnchorSource : uint8_t {
@@ -258,9 +273,31 @@ enum class RCStage3EndpointAnchorSource : uint8_t {
     StatementHeaderCommitment = 2,
     StatementTarget = 3,
     StatementCoupledDigest = 4,
-    /** One of the per-round transcript roots the episode digest root chain
-     * binds to statement.public_inputs.episode_digest. */
+    /** The per-round transcript root at the declared round index, in the
+     * ordered list the episode digest root chain binds to
+     * statement.public_inputs.episode_digest. POSITIONAL, not membership. */
     EpisodeRoundRoot = 5,
+    /** A field of the real block header, whose preimage is bound by
+     * RCStage3HeaderCommitment == statement.public_inputs.header_commitment. */
+    HeaderPreimage = 6,
+    /** A cell of the round byte stream, or a node of that round's tile tree.
+     * Bound because the tile-tree manifest revalidates canonically from its own
+     * stream AND its root is the committed round root at the declared index. */
+    EpisodeStreamCell = 7,
+    /** The resolved episode shape (round count), cross-checked by the digest
+     * root chain, which only verifies at the right number of rounds. */
+    EpisodeShapeParam = 8,
+    /**
+     * Fixed by the immutable role builder and carrying NO block data at all —
+     * the wired ledger-fold leaf rows (EpisodeBuilderTrace, EpisodeGemmSumcheck,
+     * EpisodeWiringTranspose/Residual/RoundOrder) are hard-coded constant rows.
+     *
+     * A prover has zero freedom here, which is what endpoint provenance is
+     * about, but the committed value is a PLACEHOLDER, not the block's. This is
+     * counted separately and is the whole remaining reason
+     * kRCStage3RoleSectionEndpointProvenanceReady is false.
+     */
+    ProtocolConstant = 9,
 };
 
 /** Immutable endpoint -> anchor table. This is the canonical definition of
@@ -279,38 +316,140 @@ RCStage3EndpointAnchorSourceFor(RCStage3RelationEndpoint endpoint);
     const uint256& root, alg_hash::Digest& out);
 
 /**
- * Provenance material carried alongside the sections.
+ * Provenance material carried alongside the sections. NONE of it is trusted:
+ * every member is checked against a statement public input by
+ * VerifyRCStage3EndpointProvenanceMaterial before any expected root is derived
+ * from it. A member that is absent does not weaken any check — the endpoints
+ * that would have depended on it are reported unanchored instead.
  *
  * `digest_chain` is the real, unmodified episode digest root chain
  * (ProveRCStage3EpisodeDigestRootChain). Verifying it establishes
  * round_roots -> typed preimage -> SHA256d provenance -> episode digest ->
- * statement.public_inputs.episode_digest, which is what lets an
- * EpisodeRoundRoot-anchored endpoint be checked at all.
+ * statement.public_inputs.episode_digest.
  */
 struct RCStage3EndpointProvenance {
     bool has_digest_chain{false};
     RCStage3EpisodeDigestRootChainProof digest_chain;
+
+    /**
+     * The single episode round these role sections are about: an INDEX into the
+     * verified chain's ORDERED round_roots, not a root.
+     *
+     * Every round-root-anchored endpoint of every section must equal
+     * round_roots[round_index] exactly, so a proof cannot mix one round's
+     * tile-tree root with another round's digest round root. The index itself
+     * is declared, not statement-pinned — the statement carries no round index
+     * — so what this closes is cross-round substitution, not absolute position;
+     * and one round of `expected_rounds` is what the section set covers.
+     */
+    uint32_t round_index{0};
+
+    /** The real block header. Bound by RCStage3HeaderCommitment(header) ==
+     * statement.public_inputs.header_commitment. Supplies seed_a / seed_b. */
+    bool has_header{false};
+    CBlockHeader header;
+
+    /** The round-`round_index` tile-tree manifest. Bound by canonical
+     * revalidation (ValidateTileTreeManifest recomputes the whole tree from the
+     * manifest's own stream) AND root == round_roots[round_index]. Supplies the
+     * round byte stream and the tile-tree nodes. */
+    bool has_tile_tree{false};
+    stage3_hash_air::TileTreeManifest tile_tree;
 };
 
+/**
+ * Per-endpoint attribution. The five `anchored_*` counters partition the
+ * endpoints whose declared root was RE-DERIVED and matched; `unanchored`
+ * counts those for which no derivation was available. The sum is always
+ * `endpoints_total`.
+ *
+ * `anchored_to_protocol_constant` is deliberately NOT merged into the others:
+ * those endpoints are pinned but their committed value is a placeholder rather
+ * than block data.
+ */
 struct RCStage3EndpointProvenanceReport {
     uint32_t endpoints_total{0};
     uint32_t anchored_to_statement{0};
     uint32_t anchored_to_round_roots{0};
+    uint32_t anchored_to_header_preimage{0};
+    uint32_t anchored_to_episode_stream{0};
+    uint32_t anchored_to_episode_shape{0};
+    uint32_t anchored_to_protocol_constant{0};
     uint32_t unanchored{0};
     std::vector<std::string> unanchored_reasons;
 };
 
+/** Block material accepted by VerifyRCStage3EndpointProvenanceMaterial. Only
+ * members whose `have_*` flag is set were verified against the statement. */
+struct RCStage3VerifiedEndpointMaterial {
+    bool have_round_roots{false};
+    uint32_t round_index{0};
+    uint256 round_root;
+    std::vector<uint256> round_roots;
+
+    bool have_header{false};
+    CBlockHeader header;
+
+    bool have_tile_tree{false};
+    const stage3_hash_air::TileTreeManifest* tile_tree{nullptr};
+
+    uint32_t episode_rounds{0};
+};
+
+/**
+ * Check every piece of carried provenance against a statement public input.
+ *
+ * Returns false (hard reject) when a carried piece is present but does NOT
+ * check out — a forged header preimage, a chain that does not verify, a
+ * non-canonical tile tree, a tile tree whose root is not the committed round
+ * root at the declared index, an out-of-range round index. Absent material is
+ * not an error; it simply leaves `out`'s corresponding have_* flag false.
+ */
+[[nodiscard]] bool VerifyRCStage3EndpointProvenanceMaterial(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EndpointProvenance& provenance,
+    uint32_t expected_rounds,
+    RCStage3VerifiedEndpointMaterial& out,
+    std::string* why = nullptr);
+
+/**
+ * The canonical, immutable rule for what an EPISODE role's endpoint authority
+ * roots are REQUIRED to be, derived from verified block material only.
+ *
+ * This is the (B) CANONICAL REBUILD route and covers the four scalar/wired
+ * episode roles only; it fails closed for EpisodeTileTree / EpisodeDigest,
+ * whose every endpoint root is a pure repack handled by route (A). It also
+ * returns false when the material the role needs was not supplied (`why` names
+ * it), which is reported as unanchored rather than accepted.
+ *
+ * CONVENTION, stated plainly: this fixes which block cell each scalar endpoint
+ * opens (round stream bytes 0/1 for the GEMM operands, 0/2/4/6 for Extract,
+ * byte 0 for the wiring copy, tile-tree leaf 0 and the last internal node).
+ * That convention did not previously exist anywhere; it is created here and it
+ * matches the only producer in the tree. A producer that opens different cells
+ * is now REJECTED, not silently accepted.
+ */
+[[nodiscard]] bool RCStage3CanonicalEpisodeRoleEndpointRoots(
+    const RCStage3VerifiedEndpointMaterial& material,
+    RCStage3RelationRole role,
+    std::vector<alg_hash::Digest>& out,
+    std::string* why = nullptr);
+
 /**
  * Enforce endpoint provenance for ONE section.
  *
- * Every endpoint whose anchor is statement-derivable MUST match; a mismatch is
- * a hard reject. Endpoints with no anchor are counted and reported, never
- * accepted as if checked.
+ * Every endpoint whose anchor is derivable MUST match; a mismatch is a hard
+ * reject. Endpoints with no anchor are counted and reported, never accepted as
+ * if checked.
  *
- * RESIDUAL, stated plainly: EpisodeRoundRoot anchoring establishes MEMBERSHIP
- * (the declared root is some genuine committed round root of this episode's
- * verified digest chain), not POSITION (which round). The statement does not
- * pin a round index for these endpoints, so position cannot be checked here.
+ * RESIDUALS, stated plainly:
+ *  - the round INDEX is declared in the provenance, not pinned by the
+ *    statement, so what is enforced is that every round-root-anchored endpoint
+ *    of every section names the SAME committed round, at that position in the
+ *    verified chain's ordered list. Cross-round substitution is closed;
+ *    absolute position is not, and the section set covers one round of
+ *    `expected_rounds`;
+ *  - ProtocolConstant endpoints are pinned to a placeholder, not to block data.
  */
 [[nodiscard]] bool VerifyRCStage3RoleAirSectionEndpointProvenance(
     const RCStage3SuccinctProof& statement,
@@ -331,19 +470,33 @@ struct RCStage3EndpointProvenanceReport {
 /**
  * Hard gate, separate from every other Stage-3 gate.
  *
- * STILL FALSE, now for an enumerated set of reasons rather than "no binding
- * exists". What IS closed: every pure-stream endpoint whose anchor is
- * statement-derivable is enforced against the statement, and
- * EpisodeRoundRoot-anchored endpoints are enforced against a really-verified
- * episode digest root chain. What remains open:
+ * STILL FALSE, for a much smaller and more precise residual than before.
  *
- *   (1) scalar / wired role endpoints (EpisodeDeterministicBuilder,
- *       EpisodeGemm, EpisodeExtract, EpisodeWiring and their coupled
- *       counterparts) commit an alg-hash of the OPENED VALUE; there is no
- *       derivation from any statement public input, so nothing anchors them;
- *   (2) EpisodeTileTreeStream / LeafHash / InternalHash and the coupled
- *       bank/barrier roots have no statement-carried source;
- *   (3) EpisodeRoundRoot anchoring is membership-only, not position.
+ * CLOSED for an Episode statement (MEASURED on a real mined block; the counts
+ * are asserted in matmul_v4_rc_stage3_role_sections_tests so they cannot
+ * drift):
+ *   - scalar / wired role endpoints now DO have a derivation. The verifier
+ *     re-runs the shipped role builder on cells it derived itself from the
+ *     round tile-tree stream, from the header preimage, and from the resolved
+ *     episode shape, and requires the declared roots to match elementwise;
+ *   - EpisodeTileTreeStream / LeafHash / InternalHash are derived from a
+ *     canonically revalidated tile-tree manifest whose root must be the
+ *     committed round root;
+ *   - round-root anchoring is POSITIONAL against one declared round index that
+ *     is uniform across the whole proof, so a section can no longer be anchored
+ *     to a different round than its siblings.
+ *
+ * STILL OPEN, and the only reason this is false:
+ *   (1) five endpoints — EpisodeBuilderTrace, EpisodeGemmSumcheck,
+ *       EpisodeWiringTranspose / Residual / RoundOrder — are wired ledger-fold
+ *       leaf rows that the role builder hard-codes as CONSTANTS. A prover has
+ *       no freedom in them, but they commit a placeholder rather than the
+ *       block's wiring/sumcheck data, so calling them "bound to the block"
+ *       would be false;
+ *   (2) the round index is prover-declared (see RCStage3EndpointProvenance),
+ *       and the section set covers one round of the episode;
+ *   (3) Coupled and Composed statements are untouched by this work: the coupled
+ *       roles have no canonical derivation and remain unanchored.
  *
  * Never flip this to make a test pass.
  */

@@ -15,7 +15,9 @@
 #include <primitives/block.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
+#include <cstdint>
 
 namespace matmul::v4::rc {
 namespace {
@@ -529,20 +531,54 @@ RCStage3EndpointAnchorSource
 RCStage3EndpointAnchorSourceFor(RCStage3RelationEndpoint endpoint)
 {
     using E = RCStage3RelationEndpoint;
+    using S = RCStage3EndpointAnchorSource;
     switch (endpoint) {
-    // The tile-tree ROOT of a round is exactly that round's transcript root.
-    case E::EpisodeTileTreeRoot: return RCStage3EndpointAnchorSource::EpisodeRoundRoot;
-    case E::EpisodeDigestRoundRoots:
-        return RCStage3EndpointAnchorSource::EpisodeRoundRoot;
-    case E::EpisodeDigestValue:
-        return RCStage3EndpointAnchorSource::StatementEpisodeDigest;
-    case E::EpisodeDigestHeaderTarget:
-        return RCStage3EndpointAnchorSource::StatementHeaderCommitment;
-    case E::EpisodeDigestPow:
-        return RCStage3EndpointAnchorSource::StatementTarget;
-    case E::CoupledDigestValue:
-        return RCStage3EndpointAnchorSource::StatementCoupledDigest;
-    default: return RCStage3EndpointAnchorSource::None;
+    // ---- Direct statement public inputs (repack). ----
+    case E::EpisodeDigestValue: return S::StatementEpisodeDigest;
+    case E::EpisodeDigestHeaderTarget: return S::StatementHeaderCommitment;
+    case E::EpisodeDigestPow: return S::StatementTarget;
+    case E::CoupledDigestValue: return S::StatementCoupledDigest;
+
+    // ---- The committed round root at the declared round index. ----
+    // The tile-tree ROOT of a round is exactly that round's transcript root;
+    // the digest role's round-roots endpoint pins the same value; the Extract
+    // ChaCha stream endpoint repacks it; the GEMM signed-range wired closer's
+    // only free input is it.
+    case E::EpisodeTileTreeRoot: return S::EpisodeRoundRoot;
+    case E::EpisodeDigestRoundRoots: return S::EpisodeRoundRoot;
+    case E::EpisodeExtractChaCha: return S::EpisodeRoundRoot;
+    case E::EpisodeGemmSignedRange: return S::EpisodeRoundRoot;
+
+    // ---- Header preimage (bound by statement.header_commitment). ----
+    case E::EpisodeBuilderSeedChain: return S::HeaderPreimage;
+    case E::EpisodeBuilderOperandXof: return S::HeaderPreimage;
+
+    // ---- Resolved episode shape (cross-checked by the digest root chain). ----
+    case E::EpisodeBuilderParams: return S::EpisodeShapeParam;
+
+    // ---- Round stream cells / tile-tree nodes (bound via the tile tree). ----
+    case E::EpisodeGemmOperandA:
+    case E::EpisodeGemmOperandB:
+    case E::EpisodeGemmOutputY:
+    case E::EpisodeExtractInput:
+    case E::EpisodeExtractSampler:
+    case E::EpisodeExtractScale:
+    case E::EpisodeExtractOutput:
+    case E::EpisodeWiringCopy:
+    case E::EpisodeTileTreeStream:
+    case E::EpisodeTileTreeLeafHash:
+    case E::EpisodeTileTreeInternalHash:
+        return S::EpisodeStreamCell;
+
+    // ---- Hard-coded wired ledger-fold leaf rows: pinned, but placeholders. ----
+    case E::EpisodeBuilderTrace:
+    case E::EpisodeGemmSumcheck:
+    case E::EpisodeWiringTranspose:
+    case E::EpisodeWiringResidual:
+    case E::EpisodeWiringRoundOrder:
+        return S::ProtocolConstant;
+
+    default: return S::None;
     }
 }
 
@@ -577,10 +613,88 @@ const char* AnchorName(RCStage3EndpointAnchorSource source)
     case RCStage3EndpointAnchorSource::StatementCoupledDigest:
         return "statement.coupled_digest";
     case RCStage3EndpointAnchorSource::EpisodeRoundRoot:
-        return "episode_digest_root_chain.round_roots";
+        return "episode_digest_root_chain.round_roots[round_index]";
+    case RCStage3EndpointAnchorSource::HeaderPreimage:
+        return "header_preimage_bound_by_statement.header_commitment";
+    case RCStage3EndpointAnchorSource::EpisodeStreamCell:
+        return "round_stream_cell_or_tile_tree_node_rooted_at_the_round_root";
+    case RCStage3EndpointAnchorSource::EpisodeShapeParam:
+        return "resolved_episode_round_count";
+    case RCStage3EndpointAnchorSource::ProtocolConstant:
+        return "immutable_role_builder_constant_not_block_data";
     case RCStage3EndpointAnchorSource::None: return "none";
     }
     return "none";
+}
+
+/** SHA256d root -> the eight little-endian uint32 the stream builders take. */
+std::array<uint32_t, 8> Root8Of(const uint256& h)
+{
+    std::array<uint32_t, 8> r{};
+    const unsigned char* b = h.begin();
+    for (int j = 0; j < 8; ++j) {
+        r[j] = static_cast<uint32_t>(b[4 * j]) |
+               (static_cast<uint32_t>(b[4 * j + 1]) << 8) |
+               (static_cast<uint32_t>(b[4 * j + 2]) << 16) |
+               (static_cast<uint32_t>(b[4 * j + 3]) << 24);
+    }
+    return r;
+}
+
+void CountAnchored(RCStage3EndpointProvenanceReport* report,
+                   RCStage3EndpointAnchorSource source)
+{
+    if (report == nullptr) return;
+    switch (source) {
+    case RCStage3EndpointAnchorSource::StatementEpisodeDigest:
+    case RCStage3EndpointAnchorSource::StatementHeaderCommitment:
+    case RCStage3EndpointAnchorSource::StatementTarget:
+    case RCStage3EndpointAnchorSource::StatementCoupledDigest:
+        ++report->anchored_to_statement;
+        return;
+    case RCStage3EndpointAnchorSource::EpisodeRoundRoot:
+        ++report->anchored_to_round_roots;
+        return;
+    case RCStage3EndpointAnchorSource::HeaderPreimage:
+        ++report->anchored_to_header_preimage;
+        return;
+    case RCStage3EndpointAnchorSource::EpisodeStreamCell:
+        ++report->anchored_to_episode_stream;
+        return;
+    case RCStage3EndpointAnchorSource::EpisodeShapeParam:
+        ++report->anchored_to_episode_shape;
+        return;
+    case RCStage3EndpointAnchorSource::ProtocolConstant:
+        ++report->anchored_to_protocol_constant;
+        return;
+    case RCStage3EndpointAnchorSource::None:
+        ++report->unanchored;
+        return;
+    }
+}
+
+/** Which verified material an endpoint's derivation consumes. Absent material
+ * means "report unanchored", never "accept". */
+bool MaterialAvailableFor(const RCStage3VerifiedEndpointMaterial& m,
+                          RCStage3EndpointAnchorSource source,
+                          std::string& missing)
+{
+    switch (source) {
+    case RCStage3EndpointAnchorSource::EpisodeRoundRoot:
+        if (!m.have_round_roots) { missing = "no_verified_episode_digest_root_chain"; return false; }
+        return true;
+    case RCStage3EndpointAnchorSource::HeaderPreimage:
+        if (!m.have_header) { missing = "no_verified_header_preimage"; return false; }
+        return true;
+    case RCStage3EndpointAnchorSource::EpisodeStreamCell:
+        if (!m.have_tile_tree) { missing = "no_verified_round_tile_tree"; return false; }
+        return true;
+    case RCStage3EndpointAnchorSource::EpisodeShapeParam:
+        if (m.episode_rounds == 0) { missing = "no_resolved_episode_round_count"; return false; }
+        return true;
+    default:
+        return true;
+    }
 }
 
 bool StatementValueForAnchor(const RCStage3SuccinctProof& statement,
@@ -605,7 +719,228 @@ bool StatementValueForAnchor(const RCStage3SuccinctProof& statement,
     }
 }
 
+/**
+ * The uint256 an endpoint's authority root must be a pure REPACK of, when such
+ * a value exists. Returns false for endpoints whose root is an alg-hash of an
+ * opened value / a Poseidon ledger fold — those go through the canonical role
+ * rebuild instead.
+ */
+bool DirectAnchorValue(RCStage3RelationEndpoint endpoint,
+                       const RCStage3SuccinctProof& statement,
+                       const RCStage3VerifiedEndpointMaterial& material,
+                       uint256& out)
+{
+    using E = RCStage3RelationEndpoint;
+    switch (endpoint) {
+    case E::EpisodeDigestValue:
+    case E::EpisodeDigestHeaderTarget:
+    case E::EpisodeDigestPow:
+    case E::CoupledDigestValue:
+        return StatementValueForAnchor(
+            statement, RCStage3EndpointAnchorSourceFor(endpoint), out);
+
+    // The tile-tree root, the digest role's round-root pin and the Extract
+    // ChaCha stream root are all the SAME committed round root, repacked.
+    case E::EpisodeTileTreeRoot:
+    case E::EpisodeDigestRoundRoots:
+    case E::EpisodeExtractChaCha:
+        if (!material.have_round_roots) return false;
+        out = material.round_root;
+        return !out.IsNull();
+
+    case E::EpisodeBuilderSeedChain:
+        if (!material.have_header) return false;
+        out = material.header.seed_a;
+        return !out.IsNull();
+    case E::EpisodeBuilderOperandXof:
+        if (!material.have_header) return false;
+        out = material.header.seed_b;
+        return !out.IsNull();
+
+    // Tile-tree nodes: the canonical manifest commitment, leaf 0, and the last
+    // internal node. The manifest revalidated canonically and its root is the
+    // committed round root, so each of these is block data.
+    case E::EpisodeTileTreeStream:
+        if (!material.have_tile_tree) return false;
+        out = material.tile_tree->commitment;
+        return !out.IsNull();
+    case E::EpisodeTileTreeLeafHash:
+        if (!material.have_tile_tree) return false;
+        out = material.tile_tree->leaf_hashes.empty()
+                  ? material.tile_tree->root
+                  : material.tile_tree->leaf_hashes[0];
+        return !out.IsNull();
+    case E::EpisodeTileTreeInternalHash:
+        if (!material.have_tile_tree) return false;
+        out = material.tile_tree->hash_nodes.empty()
+                  ? material.tile_tree->root
+                  : material.tile_tree->hash_nodes.back().digest;
+        return !out.IsNull();
+
+    default:
+        return false;
+    }
+}
+
 } // namespace
+
+bool VerifyRCStage3EndpointProvenanceMaterial(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EndpointProvenance& provenance,
+    uint32_t expected_rounds,
+    RCStage3VerifiedEndpointMaterial& out,
+    std::string* why)
+{
+    out = {};
+    out.episode_rounds = expected_rounds;
+
+    // (1) Ordered round roots <- episode digest root chain <- statement digest.
+    if (provenance.has_digest_chain) {
+        std::string chain_why;
+        if (!VerifyRCStage3EpisodeDigestRootChain(
+                statement, expected_rounds, provenance.digest_chain,
+                &chain_why)) {
+            return Fail(why, "provenance:digest_root_chain:" + chain_why);
+        }
+        out.round_roots = provenance.digest_chain.manifest.round_roots;
+        if (out.round_roots.empty()) {
+            return Fail(why, "provenance:digest_root_chain_has_no_round_roots");
+        }
+        if (provenance.round_index >= out.round_roots.size()) {
+            return Fail(why, "provenance:round_index_out_of_range");
+        }
+        out.round_index = provenance.round_index;
+        out.round_root = out.round_roots[out.round_index];
+        if (out.round_root.IsNull()) {
+            return Fail(why, "provenance:null_round_root");
+        }
+        out.have_round_roots = true;
+    }
+
+    // (2) Header preimage <- statement.header_commitment.
+    if (provenance.has_header) {
+        if (RCStage3HeaderCommitment(provenance.header) !=
+            statement.public_inputs.header_commitment) {
+            return Fail(why,
+                        "provenance:header_preimage_does_not_match_statement_"
+                        "header_commitment");
+        }
+        out.header = provenance.header;
+        out.have_header = true;
+    }
+
+    // (3) Round tile tree <- canonical revalidation AND the round root at the
+    // declared index. Without (1) there is nothing to root it to, so a tile
+    // tree offered on its own is REJECTED rather than used unanchored.
+    if (provenance.has_tile_tree) {
+        std::string tt_why;
+        if (!stage3_hash_air::ValidateTileTreeManifest(provenance.tile_tree,
+                                                       &tt_why)) {
+            return Fail(why, "provenance:tile_tree_noncanonical:" + tt_why);
+        }
+        if (!out.have_round_roots) {
+            return Fail(why,
+                        "provenance:tile_tree_supplied_without_a_verified_"
+                        "digest_root_chain");
+        }
+        if (provenance.tile_tree.root != out.round_root) {
+            return Fail(why,
+                        "provenance:tile_tree_root_is_not_the_committed_round_"
+                        "root_at_this_round_index");
+        }
+        out.tile_tree = &provenance.tile_tree;
+        out.have_tile_tree = true;
+    }
+    return true;
+}
+
+bool RCStage3CanonicalEpisodeRoleEndpointRoots(
+    const RCStage3VerifiedEndpointMaterial& material,
+    RCStage3RelationRole role,
+    std::vector<alg_hash::Digest>& out,
+    std::string* why)
+{
+    using Role = RCStage3RelationRole;
+    out.clear();
+
+    // The two pure-stream episode roles need no rebuild: every one of their
+    // endpoint roots is a pure repack (DirectAnchorValue covers them).
+    if (role == Role::EpisodeTileTree || role == Role::EpisodeDigest) {
+        return Fail(why, "canonical:pure_stream_role_uses_direct_repack");
+    }
+
+    // Round stream cells. tile_tree.stream is the round byte stream itself:
+    // the manifest revalidated canonically FROM these bytes and its root is the
+    // committed round root, so a cell of it is block data.
+    const std::vector<uint8_t>* stream =
+        material.have_tile_tree ? &material.tile_tree->stream : nullptr;
+    const auto cell_i8 = [&](size_t i) -> int64_t {
+        return static_cast<int64_t>(
+            static_cast<int8_t>((*stream)[i % stream->size()]));
+    };
+
+    RCStage3RoleAirProduct product;
+    switch (role) {
+    case Role::EpisodeDeterministicBuilder: {
+        if (!material.have_header) return Fail(why, "canonical:needs_header_preimage");
+        if (material.episode_rounds == 0) {
+            return Fail(why, "canonical:needs_episode_round_count");
+        }
+        const std::vector<gkr_field::Fp3> open = {
+            gkr_field::Fp3::FromFp(gkr_field::FromU64(material.episode_rounds))};
+        const std::vector<std::array<uint32_t, 8>> sroots = {
+            Root8Of(material.header.seed_a), Root8Of(material.header.seed_b)};
+        product = BuildRCStage3NoKernelRoleAir(role, nullptr, &open, &sroots);
+        break;
+    }
+    case Role::EpisodeGemm: {
+        if (stream == nullptr || stream->empty()) {
+            return Fail(why, "canonical:needs_round_tile_tree");
+        }
+        if (!material.have_round_roots) {
+            return Fail(why, "canonical:needs_round_root");
+        }
+        const int64_t a = cell_i8(0);
+        const int64_t b = stream->size() > 1 ? cell_i8(1) : cell_i8(0);
+        const uint256 sr = material.round_root;
+        product = BuildRCStage3EpisodeGemmRoleAir(nullptr, &a, &b, &sr);
+        break;
+    }
+    case Role::EpisodeExtract: {
+        if (stream == nullptr || stream->empty()) {
+            return Fail(why, "canonical:needs_round_tile_tree");
+        }
+        if (!material.have_round_roots) {
+            return Fail(why, "canonical:needs_round_root");
+        }
+        const std::vector<gkr_field::Fp3> open = {
+            gkr_field::FromSigned3(cell_i8(0)), gkr_field::FromSigned3(cell_i8(2)),
+            gkr_field::FromSigned3(cell_i8(4)), gkr_field::FromSigned3(cell_i8(6))};
+        const std::vector<std::array<uint32_t, 8>> sroots = {
+            Root8Of(material.round_root)};
+        product = BuildRCStage3NoKernelRoleAir(role, nullptr, &open, &sroots);
+        break;
+    }
+    case Role::EpisodeWiring: {
+        if (stream == nullptr || stream->empty()) {
+            return Fail(why, "canonical:needs_round_tile_tree");
+        }
+        const gkr_field::Fp3 copy = gkr_field::FromSigned3(cell_i8(0));
+        product = BuildRCStage3EpisodeWiringRoleAir(nullptr, &copy);
+        break;
+    }
+    default:
+        return Fail(why, "canonical:role_has_no_episode_derivation");
+    }
+
+    if (!product.ok) return Fail(why, "canonical:builder:" + product.note);
+    if (product.endpoint_committed_roots.size() !=
+        RequiredRCStage3RelationEndpoints(role).size()) {
+        return Fail(why, "canonical:builder_root_count");
+    }
+    out = product.endpoint_committed_roots;
+    return true;
+}
 
 bool VerifyRCStage3RoleAirSectionEndpointProvenance(
     const RCStage3SuccinctProof& statement,
@@ -618,53 +953,34 @@ bool VerifyRCStage3RoleAirSectionEndpointProvenance(
     const std::string tag =
         std::string(RCStage3RelationRoleName(section.role)) + ":provenance:";
     const auto& required = RequiredRCStage3RelationEndpoints(section.role);
-    if (report != nullptr) report->endpoints_total += static_cast<uint32_t>(required.size());
-
-    // Scalar / wired roles commit an alg-hash of the opened value, not a
-    // repacked block root. Record every endpoint as unanchored; do NOT pretend
-    // the check applied.
-    if (!RCStage3RoleIsPureStream(section.role)) {
-        if (report != nullptr) {
-            report->unanchored += static_cast<uint32_t>(required.size());
-            report->unanchored_reasons.push_back(
-                tag + "scalar_or_wired_role:endpoint_root_is_alg_hash_of_"
-                      "opened_value_not_a_repacked_block_root");
-        }
-        return true;
+    if (report != nullptr) {
+        report->endpoints_total += static_cast<uint32_t>(required.size());
     }
-
     if (section.endpoint_authority_roots.size() != required.size()) {
         return Fail(why, tag + "endpoint_root_count");
     }
 
-    // EpisodeRoundRoot anchoring needs a really-verified digest chain.
-    bool chain_verified = false;
-    std::vector<uint256> round_roots;
-    const bool needs_chain =
-        std::any_of(required.begin(), required.end(),
-                    [](RCStage3RelationEndpoint e) {
-                        return RCStage3EndpointAnchorSourceFor(e) ==
-                               RCStage3EndpointAnchorSource::EpisodeRoundRoot;
-                    });
-    if (needs_chain && provenance.has_digest_chain) {
-        std::string chain_why;
-        if (!VerifyRCStage3EpisodeDigestRootChain(
-                statement, expected_rounds, provenance.digest_chain,
-                &chain_why)) {
-            return Fail(why, tag + "digest_root_chain:" + chain_why);
-        }
-        chain_verified = true;
-        round_roots = provenance.digest_chain.manifest.round_roots;
-        if (round_roots.empty()) {
-            return Fail(why, tag + "digest_root_chain_has_no_round_roots");
-        }
+    // Material messages are per-proof, not per-role, so they are forwarded
+    // unchanged rather than re-tagged.
+    RCStage3VerifiedEndpointMaterial material;
+    if (!VerifyRCStage3EndpointProvenanceMaterial(
+            statement, provenance, expected_rounds, material, why)) {
+        return false;
     }
 
+    // The canonical role rebuild is computed at most once per section, and only
+    // for the endpoints that are not pure repacks.
+    bool canonical_tried = false;
+    bool canonical_ok = false;
+    std::string canonical_why;
+    std::vector<alg_hash::Digest> canonical;
+
     for (size_t i = 0; i < required.size(); ++i) {
+        const RCStage3RelationEndpoint endpoint = required[i];
         const RCStage3EndpointAnchorSource source =
-            RCStage3EndpointAnchorSourceFor(required[i]);
+            RCStage3EndpointAnchorSourceFor(endpoint);
         const std::string endpoint_tag =
-            tag + "endpoint" + std::to_string(static_cast<uint16_t>(required[i])) +
+            tag + "endpoint" + std::to_string(static_cast<uint16_t>(endpoint)) +
             ":";
 
         if (source == RCStage3EndpointAnchorSource::None) {
@@ -675,54 +991,52 @@ bool VerifyRCStage3RoleAirSectionEndpointProvenance(
             }
             continue;
         }
-
-        if (source == RCStage3EndpointAnchorSource::EpisodeRoundRoot) {
-            if (!chain_verified) {
-                if (report != nullptr) {
-                    ++report->unanchored;
-                    report->unanchored_reasons.push_back(
-                        endpoint_tag + "no_verified_episode_digest_root_chain");
-                }
-                continue;
+        std::string missing;
+        if (!MaterialAvailableFor(material, source, missing)) {
+            if (report != nullptr) {
+                ++report->unanchored;
+                report->unanchored_reasons.push_back(endpoint_tag + missing);
             }
-            // MEMBERSHIP, not position: the declared root must be one of the
-            // round roots the verified chain binds to the statement digest.
-            bool matched = false;
-            for (const uint256& candidate : round_roots) {
-                alg_hash::Digest expected;
-                if (!RCStage3StreamAuthorityRootFromUint256(candidate, expected)) {
-                    continue;
-                }
-                if (expected == section.endpoint_authority_roots[i]) {
-                    matched = true;
-                    break;
-                }
-            }
-            if (!matched) {
-                return Fail(why, endpoint_tag +
-                                     "declared_root_is_not_a_committed_round_"
-                                     "root_of_this_episode");
-            }
-            if (report != nullptr) ++report->anchored_to_round_roots;
             continue;
         }
 
+        // (A) REPACK route.
         uint256 value;
-        if (!StatementValueForAnchor(statement, source, value)) {
-            return Fail(why, endpoint_tag + "statement_missing:" +
-                                 AnchorName(source));
+        if (DirectAnchorValue(endpoint, statement, material, value)) {
+            alg_hash::Digest expected;
+            if (!RCStage3StreamAuthorityRootFromUint256(value, expected)) {
+                return Fail(why, endpoint_tag +
+                                     "anchor_value_not_representable_as_"
+                                     "authority_digest:" + AnchorName(source));
+            }
+            if (expected != section.endpoint_authority_roots[i]) {
+                return Fail(why, endpoint_tag + "declared_root_mismatch_vs_" +
+                                     AnchorName(source));
+            }
+            CountAnchored(report, source);
+            continue;
         }
-        alg_hash::Digest expected;
-        if (!RCStage3StreamAuthorityRootFromUint256(value, expected)) {
+
+        // (B) CANONICAL REBUILD route.
+        if (!canonical_tried) {
+            canonical_tried = true;
+            canonical_ok = RCStage3CanonicalEpisodeRoleEndpointRoots(
+                material, section.role, canonical, &canonical_why);
+        }
+        if (!canonical_ok || canonical.size() != required.size()) {
+            if (report != nullptr) {
+                ++report->unanchored;
+                report->unanchored_reasons.push_back(endpoint_tag +
+                                                     canonical_why);
+            }
+            continue;
+        }
+        if (canonical[i] != section.endpoint_authority_roots[i]) {
             return Fail(why, endpoint_tag +
-                                 "anchor_value_not_representable_as_authority_"
-                                 "digest:" + AnchorName(source));
+                                 "declared_root_mismatch_vs_canonical_role_"
+                                 "rebuild:" + AnchorName(source));
         }
-        if (expected != section.endpoint_authority_roots[i]) {
-            return Fail(why, endpoint_tag + "declared_root_mismatch_vs_" +
-                                 AnchorName(source));
-        }
-        if (report != nullptr) ++report->anchored_to_statement;
+        CountAnchored(report, source);
     }
     return true;
 }
