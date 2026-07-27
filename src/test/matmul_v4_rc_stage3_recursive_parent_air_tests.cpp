@@ -2077,6 +2077,119 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    g4_producer_endpoint_recompute_cost_is_profiled_phase_by_phase)
+{
+    // LEVER 1: PROFILE BEFORE OPTIMISING.  The producer endpoint was MEASURED
+    // at 3:37.87 wall for the WHOLE enclosing heavy case, which mixes four
+    // child proves, a four-slot parent build, the SHA replay build, two full
+    // CS scans and the Split-RAP prove/verify.  That number cannot tell us
+    // which phase to attack.  This isolates the phases the ledger assessor
+    // would actually have to recompute, and times each one separately.
+    //
+    // Gated because the whole point is that it is expensive; run with
+    // BTX_RUN_G4_PRODUCER_PROFILE=1.
+    if (std::getenv("BTX_RUN_G4_PRODUCER_PROFILE") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "skipping producer-endpoint profile "
+            "(set BTX_RUN_G4_PRODUCER_PROFILE=1 to run)");
+        return;
+    }
+    using Clock = std::chrono::steady_clock;
+    const auto mark = [](const char* what, Clock::time_point since) {
+        const double s =
+            std::chrono::duration<double>(Clock::now() - since).count();
+        BOOST_TEST_MESSAGE("G4_PROD_PHASE " << what << " " << s << " s");
+        return s;
+    };
+
+    const auto child_cs = ToyFriChildCs();
+    const uint256 seed = Seed(0x5e);
+    const std::vector<std::vector<gf::Fp3>> cols{
+        {gf::Fp3::Zero(), gf::Fp3::One()}};
+
+    auto t = Clock::now();
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(child_cs, cols, seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    const double t_child = mark("child_prove", t);
+
+    t = Clock::now();
+    const auto pi = air_recurse::ExtractChildPublicInputs(
+        child_cs, proved.proof, seed);
+    BOOST_REQUIRE(pi.ok);
+    const double t_pi = mark("extract_public_inputs", t);
+
+    // PHASE A: build the companion SHA CS (the airq_lambda transcript replay).
+    t = Clock::now();
+    const auto replay = BuildChildAirChallengeShaReplayV1(
+        seed, proved.proof.trace_commit, pi.child_n_rows,
+        pi.child_quotient_len, pi.child_w, pi.air_lambda);
+    BOOST_REQUIRE_MESSAGE(replay.valid, replay.note);
+    const double t_build = mark("A_build_sha_companion_cs", t);
+    BOOST_TEST_MESSAGE(
+        "G4_PROD_SHAPE sha_rows=" << replay.sha_rows
+        << " sha_cols=" << replay.sha_columns
+        << " compressions=" << replay.sha_semantic_compressions
+        << " constraints=" << replay.cs.constraints.size()
+        << " base_cols=" << replay.base_column_indices.size());
+
+    // PHASE B: the full-CS violation scan the builder already does once.
+    t = Clock::now();
+    const uint32_t viol =
+        air_recurse::CountWitnessViolationsOnH(replay.cs, replay.columns);
+    const double t_scan = mark("B_count_violations_on_H", t);
+    BOOST_CHECK_EQUAL(viol, 0U);
+
+    // PHASE C: derive bus challenges + append the producer lane.
+    t = Clock::now();
+    const uint32_t obb = replay.sha_output_byte_base;
+    std::vector<gf::Fp3> pcells, ccells;
+    for (uint32_t k = 0; k < 24; ++k) {
+        pcells.push_back(replay.columns[obb + k][0]);
+        ccells.push_back(replay.columns[obb + k][0]);
+    }
+    RCStage3CtlChallenges ch;
+    std::string why;
+    ah::Digest fake_statement{};
+    BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+        fake_statement, replay.digest, 0, pcells, ccells, ch, &why));
+    auto sha_cs = replay.cs;
+    auto sha_cols = replay.columns;
+    ChildFsDigestBusLaneV1 lane;
+    BOOST_REQUIRE(AppendChildFsDigestBusLaneV1(
+        obb, ch, nullptr, sha_cs, &sha_cols, lane, &why));
+    const double t_bus = mark("C_derive_challenges_and_append_bus", t);
+    BOOST_TEST_MESSAGE(
+        "G4_PROD_BUS_SHAPE cols=" << sha_cs.n_columns
+        << " rows=" << sha_cs.n_rows
+        << " constraints=" << sha_cs.constraints.size());
+
+    // PHASE D: the Split-RAP PROVE -- the phase everyone assumes dominates.
+    t = Clock::now();
+    const uint256 sseed = Seed(0xc1);
+    const auto sp = aq::AirQuotientProveRowsSplitRap(
+        sha_cs, sha_cols, replay.base_column_indices, sseed, {});
+    BOOST_REQUIRE_MESSAGE(sp.ok, sp.note);
+    const double t_prove = mark("D_splitrap_PROVE", t);
+
+    // PHASE E: the Split-RAP VERIFY -- the direction an assessor could afford.
+    t = Clock::now();
+    BOOST_CHECK(aq::AirQuotientVerifyRowsSplitRap(
+        sha_cs, sp.proof, replay.base_column_indices, sseed, &why));
+    const double t_verify = mark("E_splitrap_VERIFY", t);
+
+    const double total =
+        t_child + t_pi + t_build + t_scan + t_bus + t_prove + t_verify;
+    BOOST_TEST_MESSAGE(
+        "G4_PROD_TOTAL " << total << " s"
+        << " | prove_share=" << (100.0 * t_prove / total) << "%"
+        << " build_share=" << (100.0 * t_build / total) << "%"
+        << " scan_share=" << (100.0 * t_scan / total) << "%"
+        << " verify_share=" << (100.0 * t_verify / total) << "%"
+        << " | PROVE/VERIFY ratio=" << (t_prove / std::max(1e-9, t_verify)));
+}
+
+BOOST_AUTO_TEST_CASE(
     g4_ood_eval_commit_in_air_recompute_is_budgeted_and_cross_checked)
 {
     // THE OBLIGATION THE SHORT-FS LANE (proof version 7, NOT ACTIVATED) HANDS

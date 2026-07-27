@@ -5163,23 +5163,85 @@ AssessChildFsReplayClosureV1()
     // Documented at tens of minutes; the real-width analogue was MEASURED at
     // 4,003.9 s of AirQuotientProve inside a 16.65 GiB peak (commit bec2c48).
     //
-    // WHY NEITHER FLAG IS SET, precisely.  The obstacle is NOT that the tests
-    // are env-gated -- that is a symptom.  It is that this assessor is called
-    // by the global soundness ledger, which several suites read, so anything it
-    // claims must be RECOMPUTABLE on every call.  A ~218 s producer prove and a
-    // ~40 min consumer prove cannot be.  Making the tests unconditional would
-    // let a full test run check them, but these two booleans would still be
-    // literals -- exactly the vacuous-gate shape the ledger was hardened to
-    // remove.  So the conjunct `discharged_by_fri_proof` is, as currently
-    // specified, UNSATISFIABLE by any evidence-computed assessor.
+    // WHY NEITHER FLAG IS SET, with the floor MEASURED rather than asserted.
     //
-    // The route that actually closes it: PERSIST the two proofs as artifacts
-    // and have this assessor VERIFY rather than re-prove.  Verification is the
-    // cheap direction -- AirQuotientVerifyRowsSplitRap on the producer proof is
-    // seconds against 1975 s of proving -- and a verify-only assessor is
-    // genuinely evidence-computed, because a stale or forged artifact fails the
-    // check.  That needs an artifact path and a fixture convention, which is a
-    // deliberate design decision and not this lane's to make unilaterally.
+    // Project-owner decision: the endpoint evidence must be RECOMPUTABLE, not a
+    // persisted artifact.  Persisting was rejected because it converts a
+    // computation into a trusted blob, adding a provenance question and a
+    // staleness surface -- and a persisted proof of a CS that has since changed
+    // would report green forever.  That is the right call; the paragraph that
+    // used to recommend persisting is deleted rather than left to mislead.
+    //
+    // PROFILED phase by phase, this lane, at the isolated producer-endpoint
+    // recompute path (the enclosing 218 s heavy case also builds four child
+    // proofs, a four-slot parent and two forgeries, none of which the assessor
+    // needs).  Test: g4_producer_endpoint_recompute_cost_is_profiled_phase_by_
+    // phase, BTX_RUN_G4_PRODUCER_PROFILE=1.
+    //
+    //   child_prove                         0.228 s
+    //   extract_public_inputs               0.000 s
+    //   build SHA companion CS             16.166 s   27.6%
+    //   CountWitnessViolationsOnH           0.356 s    0.6%
+    //   derive challenges + append bus      0.007 s
+    //   Split-RAP PROVE                    41.149 s   70.3%   <-- binding
+    //   Split-RAP VERIFY                    0.665 s    1.1%
+    //   TOTAL                              58.571 s   PROVE/VERIFY = 61.9x
+    //
+    // THE ASSUMED DOMINANT PHASE WAS AGAIN THE WRONG ONE.  The standing note in
+    // this file attributed the cost to the SHA replay build; the build is 27.6%
+    // and the prove is 70.3%.
+    //
+    // WHICH LEVERS APPLY, checked rather than assumed:
+    //  * Goldilocks fast-reduce: SPENT.  AirQuotientProveRowsSplitRap emits a
+    //    Fri3AlgMultiRowBatchProof, i.e. the ALGEBRAIC (Poseidon2) backend, so
+    //    the 8.6x port is already inside these 41.1 s.
+    //  * Short-FS transcript (1b9c694): DOES NOT APPLY to this endpoint.  It
+    //    edits only fri_ext3_alg.{cpp,h}; airq_lambda comes from
+    //    aq::AirChallengeDigest in air_quotient.cpp, which it does not touch.
+    //    The companion CS here replays airq_lambda's 113-byte preimage, which
+    //    is ALREADY short and ALREADY W-independent -- 3 compressions.  Short-FS
+    //    is decisive for challenge_kinds_transcript_bound (the other seven
+    //    kinds), not for producer endpoint cost.
+    //  * SHA midstate fork: DOES NOT APPLY either.  It collapses the 192
+    //    fra3_query draws, which are not in this companion.
+    //  * A reduced instance: COLLAPSES INTO AN EXISTING FLAG.  The producer
+    //    endpoint's entire content is "the lane relation holds over the REAL
+    //    companion SHA CS".  Proving the lane over a small synthetic carrier is
+    //    exactly lane_relation_fri_proven, which is already true.  A reduced
+    //    instance therefore cannot discharge this conjunct; it would re-earn a
+    //    flag we already have.
+    //
+    // MEASURED FLOOR: 58.6 s, of which 41.1 s is one Split-RAP prove over a
+    // 591-column x 4096-row CS.  That shape is pinned, not tunable here:
+    // hash_air fixes lane_rows = 1024 and the vertical schedule is
+    // next_pow2(3 compressions) = 4, so 4096 rows is the minimum for ANY
+    // SHA256d replay, and 541 base columns is the fixed program's own width.
+    // Getting below it needs airq_lambda's derivation to stop being SHA256d --
+    // a consensus change in air_quotient.cpp, not this lane's.
+    //
+    // WHY A PROCESS-LIFETIME MEMO DOES NOT RESCUE IT.  This ledger is
+    // tooling/test-only today: every route from AssessRCStage3RecursiveReadiness
+    // to validation, mining or P2P is cut by `if constexpr
+    // (kRCStage3SuccinctAuthorityReady)` with that constant false
+    // (matmul_v4_rc_stage3.h:214), so the branch is a discarded statement and is
+    // not emitted; mainnet/testnet nMatMulRCHeight is INT32_MAX and hard-
+    // asserted on mainnet.  So a memo would be ARCHITECTURALLY acceptable --
+    // computed, no artifact, no cross-version staleness.  It fails on COST, not
+    // principle: memoized or not, the first reader in each process pays 58.6 s,
+    // and matmul_v4_rc_stage3_recursive_tests -- the mandatory 18/18 gate --
+    // reads this ledger.  The path is confirmed from the call graph, not
+    // guessed: recursive_tests.cpp:284 -> AssessRCStage3RecursiveReadiness ->
+    // recursive.cpp:1114 -> AssessExecutableGlobalSoundnessLedgerV1 -> here.
+    // That gate is MEASURED at 2.61 s wall uncontended (4.43 s under this
+    // box's three-lane load).  COMPUTED, not measured: 2.6 + 58.6 = ~61 s,
+    // a ~23x regression on the one gate that has to stay fast.
+    // (Recorded because it is a real hazard rather than a hypothetical: regtest
+    // sets nMatMulRCHeight = 101, so on regtest the HEIGHT gate does not
+    // protect anything and the compile-time constant is the only barrier.)
+    //
+    // So: `discharged_by_fri_proof` is not satisfiable cheaply, and the reason
+    // is a 41 s prove over a shape this lane cannot shrink.  Both flags stay
+    // false and the gate stays open, which is the honest state.
     out.producer_endpoint_fri_proven = false;
     out.consumer_endpoint_fri_proven = false;
     out.discharged_by_fri_proof =
