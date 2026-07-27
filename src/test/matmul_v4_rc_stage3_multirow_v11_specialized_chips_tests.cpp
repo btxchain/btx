@@ -475,6 +475,99 @@ BOOST_AUTO_TEST_CASE(
         " receipt_consumption=0 authority=0");
 }
 
+BOOST_AUTO_TEST_CASE(
+    conservative_static_q96_domain_fits_only_after_cubic_split)
+{
+    const auto audit =
+        AssessStaticVerifierDomainV1();
+    BOOST_REQUIRE_MESSAGE(
+        audit.valid_capacity_foundation,
+        audit.note);
+    BOOST_CHECK_EQUAL(audit.query_count, 96U);
+    BOOST_CHECK_EQUAL(
+        audit.retained_parent_columns, 1298U);
+    BOOST_CHECK_EQUAL(audit.poseidon_columns, 424U);
+    BOOST_CHECK_EQUAL(audit.split_columns, 28U);
+    BOOST_CHECK_EQUAL(audit.static_columns, 1750U);
+    BOOST_CHECK_EQUAL(
+        audit.retained_parent_programs, 70U);
+    BOOST_CHECK_EQUAL(audit.poseidon_programs, 108U);
+    BOOST_CHECK_EQUAL(audit.split_programs, 29U);
+    BOOST_CHECK_EQUAL(audit.total_programs, 207U);
+    BOOST_CHECK_EQUAL(
+        audit.retained_parent_instructions, 1285U);
+    BOOST_CHECK_EQUAL(
+        audit.poseidon_instructions, 1668U);
+    BOOST_CHECK_EQUAL(
+        audit.split_instructions, 167U);
+    BOOST_CHECK_EQUAL(
+        audit.total_instructions, 3120U);
+    BOOST_CHECK_EQUAL(
+        audit.domain.real_rows, 467808U);
+    BOOST_CHECK_EQUAL(
+        audit.domain.trace_rows, 1U << 19);
+    BOOST_CHECK_EQUAL(
+        audit.domain.max_constraint_degree, 3U);
+    BOOST_CHECK_EQUAL(
+        audit.domain.max_composed_degree, 1572861U);
+    BOOST_CHECK_EQUAL(
+        audit.domain.quotient_len, 1048574U);
+    BOOST_CHECK_EQUAL(
+        audit.domain.coefficient_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(
+        audit.domain.lde_rows, 1U << 24);
+    BOOST_CHECK(audit.domain.valid);
+    BOOST_CHECK(audit.exact_retained_partition);
+    BOOST_CHECK(audit.disjoint_column_ranges);
+    BOOST_CHECK(audit.static_program_root_bound);
+    BOOST_CHECK(audit.challenge_independent);
+    BOOST_CHECK(audit.proof_independent_construction);
+    BOOST_CHECK_EQUAL(
+        audit.proof_dependent_preprocessed_columns, 0U);
+    BOOST_CHECK(!audit.component_buses_executable);
+    BOOST_CHECK(!audit.child_acceptance_executable);
+    BOOST_CHECK(!audit.recursive_authority_ready);
+
+    auto quartic = audit.program_table;
+    bool promoted = false;
+    for (auto& program : quartic.programs) {
+        if (program.declared_degree != 3) {
+            continue;
+        }
+        cb::Instruction load;
+        load.opcode = cb::Opcode::Current;
+        load.lhs = 0;
+        program.instructions.push_back(load);
+        cb::Instruction multiply;
+        multiply.opcode = cb::Opcode::Mul;
+        multiply.lhs =
+            static_cast<uint32_t>(
+                program.instructions.size()) - 2;
+        multiply.rhs =
+            static_cast<uint32_t>(
+                program.instructions.size()) - 1;
+        program.instructions.push_back(multiply);
+        program.declared_degree = 4;
+        promoted = true;
+        break;
+    }
+    BOOST_REQUIRE(promoted);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(quartic, &why),
+        why);
+    const auto rejected =
+        np::AssessExecutionDomainV1(
+            quartic, audit.query_count);
+    BOOST_CHECK_EQUAL(
+        rejected.max_constraint_degree, 4U);
+    BOOST_CHECK_EQUAL(
+        rejected.coefficient_rows, 1U << 21);
+    BOOST_CHECK_EQUAL(
+        rejected.lde_rows, 1U << 25);
+    BOOST_CHECK(!rejected.valid);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace matmul::v4::rc::stage3_multirow_v11_specialized_chips

@@ -157,6 +157,51 @@ uint64_t InstructionCount(
     return total;
 }
 
+bool AppendProgramRangeAtOffset(
+    cb::ProgramTable& out,
+    const cb::ProgramTable& source,
+    uint32_t first,
+    uint32_t count,
+    uint32_t column_offset)
+{
+    if (first > source.programs.size() ||
+        count > source.programs.size() - first) {
+        return false;
+    }
+    for (uint32_t ordinal = first;
+         ordinal < first + count;
+         ++ordinal) {
+        auto program = source.programs[ordinal];
+        for (auto& instruction :
+             program.instructions) {
+            if (instruction.opcode !=
+                    cb::Opcode::Current &&
+                instruction.opcode !=
+                    cb::Opcode::Next) {
+                continue;
+            }
+            if (instruction.lhs >
+                std::numeric_limits<uint32_t>::max() -
+                    column_offset) {
+                return false;
+            }
+            instruction.lhs += column_offset;
+        }
+        program.constraint_ordinal =
+            static_cast<uint32_t>(
+                out.programs.size());
+        program.current_width =
+            out.current_width;
+        program.next_width =
+            out.next_width;
+        program.challenge_width =
+            out.challenge_width;
+        out.programs.push_back(
+            std::move(program));
+    }
+    return true;
+}
+
 aq::AirConstraintSystem<Fp3>
 ConstraintSystemFromTable(
     const cb::ProgramTable& table,
@@ -1705,6 +1750,217 @@ CostAuditV1 AssessSpecializedCostV1(
           ":total=" +
           std::to_string(
               out.specialized_total_instructions);
+    return out;
+}
+
+StaticVerifierDomainAuditV1
+AssessStaticVerifierDomainV1()
+{
+    StaticVerifierDomainAuditV1 out;
+    out.query_count = 96;
+
+    cb::ProgramTable generic;
+    cb::ProgramTable poseidon;
+    cb::ProgramTable split;
+    std::string why;
+    if (!np::BuildCanonicalProgramTableV1(
+            generic, nullptr, &why) ||
+        !BuildPoseidonRoundProgramTableV1(
+            poseidon, &why) ||
+        !BuildCanonicalSplitProgramTableV1(
+            split, &why)) {
+        out.note =
+            "stage3:v11_specialized:"
+            "static_domain_source:" + why;
+        return out;
+    }
+
+    out.retained_parent_columns =
+        generic.current_width;
+    out.poseidon_columns =
+        poseidon.current_width;
+    out.split_columns =
+        split.current_width;
+    const uint64_t static_columns =
+        uint64_t{out.retained_parent_columns} +
+        out.poseidon_columns +
+        out.split_columns;
+    if (static_columns >
+        std::numeric_limits<uint32_t>::max()) {
+        out.note =
+            "stage3:v11_specialized:"
+            "static_domain_column_overflow";
+        return out;
+    }
+    out.static_columns =
+        static_cast<uint32_t>(
+            static_columns);
+
+    out.program_table.version =
+        cb::kConstraintBytecodeVersion;
+    out.program_table.role =
+        RCStage3RelationRole::CompositionLink;
+    out.program_table.current_width =
+        out.static_columns;
+    out.program_table.next_width =
+        out.static_columns;
+    out.program_table.challenge_width = 0;
+
+    constexpr uint32_t kParentFirst =
+        np::kPoseidonProgramsV1 +
+        np::kTranscriptGlueProgramsV1;
+    constexpr uint32_t kPublicAbsorbPrograms =
+        pj::kPublicAbsorbSlotsV1 * 3;
+    constexpr uint32_t kPublicSplitPrograms =
+        pj::kPublicFieldSlotsV1 * 106;
+    constexpr uint32_t kCandidateSplitPrograms =
+        pj::kCandidateDigestLimbsV1 * 104;
+    constexpr uint32_t kUnrolledSplitPrograms =
+        kPublicSplitPrograms +
+        kCandidateSplitPrograms;
+    constexpr uint32_t kUnrolledSplitFirst =
+        kParentFirst + kPublicAbsorbPrograms;
+    constexpr uint32_t kParentTailFirst =
+        kUnrolledSplitFirst +
+        kUnrolledSplitPrograms;
+    constexpr uint32_t kParentTailPrograms =
+        np::kExpectedProgramsV1 -
+        kParentTailFirst;
+
+    const bool assembled =
+        AppendProgramRangeAtOffset(
+            out.program_table, generic,
+            np::kPoseidonProgramsV1,
+            np::kTranscriptGlueProgramsV1 +
+                kPublicAbsorbPrograms,
+            0) &&
+        AppendProgramRangeAtOffset(
+            out.program_table, generic,
+            kParentTailFirst,
+            kParentTailPrograms,
+            0) &&
+        AppendProgramRangeAtOffset(
+            out.program_table, poseidon,
+            0,
+            static_cast<uint32_t>(
+                poseidon.programs.size()),
+            out.retained_parent_columns) &&
+        AppendProgramRangeAtOffset(
+            out.program_table, split,
+            0,
+            static_cast<uint32_t>(
+                split.programs.size()),
+            out.retained_parent_columns +
+                out.poseidon_columns);
+    if (!assembled ||
+        !cb::ValidateProgramTable(
+            out.program_table, &why)) {
+        out.note =
+            "stage3:v11_specialized:"
+            "static_domain_table:" + why;
+        return out;
+    }
+
+    out.retained_parent_programs =
+        np::kTranscriptGlueProgramsV1 +
+        kPublicAbsorbPrograms +
+        kParentTailPrograms;
+    out.poseidon_programs =
+        static_cast<uint32_t>(
+            poseidon.programs.size());
+    out.split_programs =
+        static_cast<uint32_t>(
+            split.programs.size());
+    out.total_programs =
+        static_cast<uint32_t>(
+            out.program_table.programs.size());
+    out.retained_parent_instructions =
+        InstructionCount(
+            generic,
+            np::kPoseidonProgramsV1,
+            np::kTranscriptGlueProgramsV1 +
+                kPublicAbsorbPrograms) +
+        InstructionCount(
+            generic,
+            kParentTailFirst,
+            kParentTailPrograms);
+    out.poseidon_instructions =
+        InstructionCount(poseidon);
+    out.split_instructions =
+        InstructionCount(split);
+    out.total_instructions =
+        InstructionCount(out.program_table);
+    out.domain =
+        np::AssessExecutionDomainV1(
+            out.program_table,
+            out.query_count);
+    out.program_root =
+        cb::CommitProgramTable(
+            out.program_table);
+    out.proof_dependent_preprocessed_columns = 0;
+    out.exact_retained_partition =
+        out.retained_parent_programs == 70 &&
+        out.retained_parent_instructions == 1285 &&
+        out.poseidon_programs == 108 &&
+        out.poseidon_instructions == 1668 &&
+        out.split_programs == 29 &&
+        out.split_instructions == 167 &&
+        out.total_programs == 207 &&
+        out.total_instructions == 3120;
+    out.disjoint_column_ranges =
+        out.retained_parent_columns == 1298 &&
+        out.poseidon_columns == 424 &&
+        out.split_columns == 28 &&
+        out.static_columns == 1750;
+    out.static_program_root_bound =
+        !out.program_root.IsNull();
+    out.challenge_independent =
+        cb::ProgramTableIsChallengeIndependent(
+            out.program_table);
+    out.proof_independent_construction =
+        out.proof_dependent_preprocessed_columns == 0 &&
+        out.challenge_independent;
+    out.component_buses_executable = false;
+    out.child_acceptance_executable = false;
+    out.recursive_authority_ready = false;
+    out.valid_capacity_foundation =
+        out.exact_retained_partition &&
+        out.disjoint_column_ranges &&
+        out.static_program_root_bound &&
+        out.proof_independent_construction &&
+        out.domain.valid &&
+        out.domain.max_constraint_degree <= 3 &&
+        out.domain.real_rows < (uint64_t{1} << 19) &&
+        out.domain.lde_rows <=
+            np::kLdeRowsCapV1 &&
+        !out.component_buses_executable &&
+        !out.child_acceptance_executable &&
+        !out.recursive_authority_ready;
+    out.note = out.valid_capacity_foundation
+        ? "stage3:v11_specialized:"
+          "q96_static_domain_fits;"
+          "component_buses_and_acceptance_pending"
+        : "stage3:v11_specialized:"
+          "q96_static_domain_failure:"
+          "partition=" +
+          std::to_string(
+              out.exact_retained_partition ? 1 : 0) +
+          ":ranges=" +
+          std::to_string(
+              out.disjoint_column_ranges ? 1 : 0) +
+          ":root=" +
+          std::to_string(
+              out.static_program_root_bound ? 1 : 0) +
+          ":proof_independent=" +
+          std::to_string(
+              out.proof_independent_construction ? 1 : 0) +
+          ":rows=" +
+          std::to_string(out.domain.real_rows) +
+          ":degree=" +
+          std::to_string(
+              out.domain.max_constraint_degree) +
+          ":lde=" +
+          std::to_string(out.domain.lde_rows);
     return out;
 }
 

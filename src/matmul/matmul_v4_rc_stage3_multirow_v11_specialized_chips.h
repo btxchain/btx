@@ -250,6 +250,51 @@ struct CostAuditV1 {
     const cb::ProgramTable& poseidon_round_table,
     const cb::ProgramTable& canonical_split_table);
 
+/**
+ * Conservative, proof-independent normalized verifier layout.
+ *
+ * The retained parent bytecode, round-serial Poseidon chip and canonical-u64
+ * chip occupy disjoint column ranges.  This deliberately does not take credit
+ * for the audited 460-column Poseidon substitution: the capacity result
+ * therefore survives even if that optimization is never integrated.
+ *
+ * The table is a static relation/capacity witness only.  The row-tagged buses
+ * that join its three components to decoded proof cells are still required
+ * before it can consume a child proof, so authority remains fail-closed.
+ */
+struct StaticVerifierDomainAuditV1 {
+    cb::ProgramTable program_table{};
+    uint256 program_root{};
+    uint32_t query_count{0};
+    uint32_t retained_parent_columns{0};
+    uint32_t poseidon_columns{0};
+    uint32_t split_columns{0};
+    uint32_t static_columns{0};
+    uint32_t retained_parent_programs{0};
+    uint32_t poseidon_programs{0};
+    uint32_t split_programs{0};
+    uint32_t total_programs{0};
+    uint64_t retained_parent_instructions{0};
+    uint64_t poseidon_instructions{0};
+    uint64_t split_instructions{0};
+    uint64_t total_instructions{0};
+    np::ExecutionDomainV1 domain{};
+    uint32_t proof_dependent_preprocessed_columns{0};
+    bool exact_retained_partition{false};
+    bool disjoint_column_ranges{false};
+    bool static_program_root_bound{false};
+    bool challenge_independent{false};
+    bool proof_independent_construction{false};
+    bool component_buses_executable{false};
+    bool child_acceptance_executable{false};
+    bool recursive_authority_ready{false};
+    bool valid_capacity_foundation{false};
+    std::string note;
+};
+
+[[nodiscard]] StaticVerifierDomainAuditV1
+AssessStaticVerifierDomainV1();
+
 inline constexpr bool kSpecializedVerifierChipsExecutableV1 = true;
 inline constexpr bool kSpecializedRecursiveReceiptConsumptionReadyV1 = false;
 inline constexpr bool kSpecializedRecursiveAuthorityReadyV1 = false;
