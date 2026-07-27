@@ -2968,6 +2968,31 @@ struct NarrowBytecodeHierarchicalAttachExecutionV1 {
     std::string* why = nullptr);
 
 /**
+ * AirQuotientProve/Verify of one attached fold-bus + bytecode shard
+ * composition (the combined V_CS + witness columns), with a column-mutate
+ * forgery reject. Uses the row-streaming prover seam so hash-kernel free-row
+ * shapes (≈131k×640) stay under a MemoryMax cgroup.
+ *
+ * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
+ */
+struct NarrowBytecodeShardCompositionAirProveV1 {
+    bool valid{false};
+    bool attached{false};
+    bool proved{false};
+    bool verified{false};
+    bool forgery_rejected{false};
+    bool streaming{true};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint32_t program_count{0};
+    uint32_t shard_index{0};
+    uint64_t prove_micros{0};
+    uint64_t verify_micros{0};
+    std::string note;
+};
+
+/**
  * AIR-prove/verify Σ_s shard_local_q[s][q] == bound_q[q] for every query,
  * with a drop/mutate forgery reject. `absolute_parent_bound` is recorded
  * into the result note only (does not change the residual).
@@ -2977,6 +3002,26 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
     const std::vector<Fp3>& bound_q_per_query,
     const std::vector<std::vector<Fp3>>& shard_local_q,
     bool absolute_parent_bound);
+
+/**
+ * Prove/verify an already-attached fold-bus+bytecode composition via
+ * AirQuotientProveRows / AirQuotientVerifyRows. Forgery mutates a live
+ * bytecode value limb and must fail exact division (or verify).
+ */
+[[nodiscard]] NarrowBytecodeShardCompositionAirProveV1
+AirProveNarrowBytecodeShardCompositionV1(
+    const FoldBusComposition& attached_shard);
+
+/**
+ * Pack free-row L1 shards under the bound fold-bus, attach one shard, then
+ * AirProve the composition. `shard_index == UINT32_MAX` (default) selects
+ * the smallest pack bin by program count; otherwise the indexed bin.
+ */
+[[nodiscard]] NarrowBytecodeShardCompositionAirProveV1
+ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t shard_index = UINT32_MAX);
 
 /**
  * Join shard-local quotients: Σ_s local_q_s == parent opening when the
@@ -3022,6 +3067,10 @@ inline constexpr bool kNarrowBytecodeHierarchicalAttachReady = false;
 /** Local-q join helper exists; absolute parent binding measured per run. */
 inline constexpr bool kNarrowBytecodeShardQuotientJoinExecutable = true;
 inline constexpr bool kNarrowBytecodeShardQuotientJoinReady = false;
+/** Streaming L1 shard composition prove exists; Ready parked until multi-child
+ *  FRI consume + SHA-FS + relay/serialize pins all measure green. */
+inline constexpr bool kNarrowBytecodeShardCompositionAirProveExecutable = true;
+inline constexpr bool kNarrowBytecodeShardCompositionAirProveReady = false;
 
 /**
  * Expand the fold-bus trace with trailing free rows so a subsequent
@@ -3149,6 +3198,8 @@ static_assert(kNarrowBytecodeHierarchicalAttachExecutable);
 static_assert(!kNarrowBytecodeHierarchicalAttachReady);
 static_assert(kNarrowBytecodeShardQuotientJoinExecutable);
 static_assert(!kNarrowBytecodeShardQuotientJoinReady);
+static_assert(kNarrowBytecodeShardCompositionAirProveExecutable);
+static_assert(!kNarrowBytecodeShardCompositionAirProveReady);
 
 } // namespace matmul::v4::rc::recursive_fixedpoint
 

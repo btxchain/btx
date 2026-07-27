@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 
 namespace aq = matmul::v4::rc::air_quotient;
@@ -4540,6 +4541,107 @@ BOOST_AUTO_TEST_CASE(
         << mirror.verify_micros << " complete_fp=false");
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
+}
+
+// g2 chip A: AirQuotientProveRows one free-row L1 shard composition
+// (fold-bus + bytecode) with forgery reject. Heavy (≈131k×640 streaming);
+// opt-in via BTX_RUN_G2_L1_SHARD_COMPOSITION_AIR=1. Does NOT flip Ready.
+BOOST_AUTO_TEST_CASE(
+    hash_kernel_one_free_row_l1_shard_composition_air_prove)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_L1_SHARD_COMPOSITION_AIR");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_L1_SHARD_COMPOSITION_AIR=1 "
+            "for free-row L1 shard composition AirQuotientProveRows");
+        return;
+    }
+
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs, hash_child.proof, hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+    BOOST_CHECK_EQUAL(base.combined.n_columns, 575U);
+    BOOST_CHECK_EQUAL(base.combined.n_rows, 131072U);
+
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(table.programs.size(), 462U);
+
+    const fp::NarrowBytecodeShardCompositionAirProveV1 proved =
+        fp::ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
+            base, table);
+    BOOST_REQUIRE_MESSAGE(proved.valid, proved.note);
+    BOOST_CHECK(proved.attached);
+    BOOST_CHECK(proved.proved);
+    BOOST_CHECK(proved.verified);
+    BOOST_CHECK(proved.forgery_rejected);
+    BOOST_CHECK(proved.streaming);
+    BOOST_CHECK_EQUAL(proved.n_rows, 131072U);
+    BOOST_CHECK_EQUAL(proved.n_columns, 640U);
+    BOOST_CHECK_GT(proved.program_count, 0U);
+    BOOST_CHECK_GT(proved.prove_micros, 0ULL);
+    BOOST_TEST_MESSAGE(proved.note);
+    BOOST_TEST_MESSAGE(
+        "L1_SHARD_COMPOSITION_AIR rows="
+        << proved.n_rows << " cols=" << proved.n_columns
+        << " programs=" << proved.program_count
+        << " shard=" << proved.shard_index
+        << " prove_us=" << proved.prove_micros
+        << " verify_us=" << proved.verify_micros
+        << " forgery=1 complete_fp=false");
+
+    static_assert(
+        fp::kNarrowBytecodeShardCompositionAirProveExecutable);
+    static_assert(
+        !fp::kNarrowBytecodeShardCompositionAirProveReady);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!nr::kNarrowHierarchicalAggregationReady);
+}
+
+// g2 chip A canary: same AirProve helper on the 575-col fold-bus alone
+// (boolean child, no bytecode) — proves streaming composition path + forgery
+// reject under a light shape without the hash-kernel free-row pack.
+BOOST_AUTO_TEST_CASE(
+    boolean_fold_bus_composition_air_prove_rejects_forgery)
+{
+    const HonestChild child = BuildHonestChild(0xA1);
+    const fp::FoldBusComposition joined =
+        fp::BuildFoldBusComposition(
+            child.cs, child.proof, child.seed);
+    BOOST_REQUIRE_MESSAGE(joined.valid, joined.note);
+    BOOST_CHECK_EQUAL(joined.combined.n_columns, 575U);
+    BOOST_CHECK_EQUAL(joined.combined.n_rows, 8192U);
+
+    const fp::NarrowBytecodeShardCompositionAirProveV1 proved =
+        fp::AirProveNarrowBytecodeShardCompositionV1(joined);
+    BOOST_REQUIRE_MESSAGE(proved.valid, proved.note);
+    BOOST_CHECK(proved.attached);
+    BOOST_CHECK(proved.proved);
+    BOOST_CHECK(proved.verified);
+    BOOST_CHECK(proved.forgery_rejected);
+    BOOST_CHECK_EQUAL(proved.n_rows, 8192U);
+    BOOST_CHECK_EQUAL(proved.n_columns, 575U);
+    BOOST_TEST_MESSAGE(proved.note);
+    BOOST_TEST_MESSAGE(
+        "FOLD_BUS_COMPOSITION_AIR rows="
+        << proved.n_rows << " cols=" << proved.n_columns
+        << " prove_us=" << proved.prove_micros
+        << " verify_us=" << proved.verify_micros
+        << " forgery=1 complete_fp=false");
+    static_assert(
+        fp::kNarrowBytecodeShardCompositionAirProveExecutable);
+    static_assert(
+        !fp::kNarrowBytecodeShardCompositionAirProveReady);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
