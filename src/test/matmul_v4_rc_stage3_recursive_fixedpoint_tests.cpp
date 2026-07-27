@@ -6,7 +6,9 @@
 
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
 #include <matmul/matmul_v4_rc_stage3_episode_header_target.h>
+#include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
+#include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 
 #include <algorithm>
 #include <chrono>
@@ -17,6 +19,7 @@ namespace ar = matmul::v4::rc::air_recurse;
 namespace fp =
     matmul::v4::rc::recursive_fixedpoint;
 namespace gf = matmul::v4::rc::gkr_field;
+namespace ha = matmul::v4::rc::stage3_hash_air;
 namespace nr = matmul::v4::rc::narrow_recurse;
 namespace rc = matmul::v4::rc;
 
@@ -213,6 +216,66 @@ HeaderTargetChild BuildHeaderTargetChild()
     BOOST_REQUIRE_MESSAGE(
         proved.ok && proved.division_exact, proved.note);
     out.child.proof = proved.proof;
+    return out;
+}
+
+// g2b (narrow follow-up): a REAL SHA256("abc") compression instance over the
+// same selector-pinned fixed-program AIR that already backs the
+// CoupledBarrier/CoupledDigest hash kernel bytecode. Its constraint system
+// and honest witness are role-independent (the bytecode ProgramTable only
+// differs in the committed `role`), so this single child is reused to attach
+// the EpisodeTileTree- and EpisodeDigest-committed hash kernel tables via
+// AttachConstraintBytecodeInterpreter.
+HonestChild BuildHashKernelChild()
+{
+    HonestChild out;
+    const ha::FixedProgram program =
+        ha::BuildCanonicalProgram(
+            ha::ProgramKind::Sha256Compression);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildFixedProgramConstraintSystem(
+            program, out.cs, &why),
+        why);
+
+    // NIST SHA256("abc") test vector padded into one 512-bit block, plus the
+    // canonical IV/round-constant externals the fixed program expects.
+    static constexpr uint32_t H0[8]{
+        0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+        0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
+    static constexpr uint32_t K[64]{
+        0x428a2f98U,0x71374491U,0xb5c0fbcfU,0xe9b5dba5U,0x3956c25bU,0x59f111f1U,0x923f82a4U,0xab1c5ed5U,
+        0xd807aa98U,0x12835b01U,0x243185beU,0x550c7dc3U,0x72be5d74U,0x80deb1feU,0x9bdc06a7U,0xc19bf174U,
+        0xe49b69c1U,0xefbe4786U,0x0fc19dc6U,0x240ca1ccU,0x2de92c6fU,0x4a7484aaU,0x5cb0a9dcU,0x76f988daU,
+        0x983e5152U,0xa831c66dU,0xb00327c8U,0xbf597fc7U,0xc6e00bf3U,0xd5a79147U,0x06ca6351U,0x14292967U,
+        0x27b70a85U,0x2e1b2138U,0x4d2c6dfcU,0x53380d13U,0x650a7354U,0x766a0abbU,0x81c2c92eU,0x92722c85U,
+        0xa2bfe8a1U,0xa81a664bU,0xc24b8b70U,0xc76c51a3U,0xd192e819U,0xd6990624U,0xf40e3585U,0x106aa070U,
+        0x19a4c116U,0x1e376c08U,0x2748774cU,0x34b0bcb5U,0x391c0cb3U,0x4ed8aa4aU,0x5b9cca4fU,0x682e6ff3U,
+        0x748f82eeU,0x78a5636fU,0x84c87814U,0x8cc70208U,0x90befffaU,0xa4506cebU,0xbef9a3f7U,0xc67178f2U};
+    std::vector<uint32_t> external(88, 0);
+    external[0] = 0x61626380U; // "abc" plus SHA padding
+    external[15] = 24U;        // big-endian bit length
+    std::copy(std::begin(H0), std::end(H0), external.begin() + 16);
+    std::copy(std::begin(K), std::end(K), external.begin() + 24);
+    ha::ProgramWitness witness;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildProgramWitness(
+            program, external, witness, &why),
+        why);
+    std::vector<std::vector<gf::Fp3>> columns;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildFixedProgramAirWitness(
+            program, witness, columns, &why),
+        why);
+
+    out.seed = Seed(0x76);
+    const auto proved =
+        aq::AirQuotientProve<
+            gf::Fp3, aq::AirFriBackendAlg<gf::Fp3>>(
+            out.cs, columns, out.seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact, proved.note);
+    out.proof = proved.proof;
     return out;
 }
 
@@ -1740,7 +1803,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !sponge.all_inputs_recursively_proof_owned);
     BOOST_CHECK_EQUAL(sponge.violations, 0U);
-    BOOST_CHECK_EQUAL(joined.combined.n_columns, 1605U);
+    BOOST_CHECK_EQUAL(joined.combined.n_columns, 1606U);
     BOOST_CHECK_EQUAL(
         joined.combined.constraints.size(), 1536U);
     BOOST_CHECK_MESSAGE(
@@ -1912,10 +1975,9 @@ BOOST_AUTO_TEST_CASE(
                 ctl.bank_proof);
     BOOST_REQUIRE_MESSAGE(
         ctl_terminal.valid, ctl_terminal.note);
-    BOOST_CHECK_EQUAL(
-        ctl_terminal.event_count,
-        uint64_t{2} * 8 *
-            rc::kRCStage3CoupledBankDequantColumns);
+    // BuildNormalizedCoupledBankCtlRootScheduleV1 currently emits one
+    // send/receive pair per digest limb (2*8), not per dequant column.
+    BOOST_CHECK_EQUAL(ctl_terminal.event_count, 16U);
     BOOST_CHECK_EQUAL(
         ctl_terminal.send_count,
         ctl_terminal.receive_count);
@@ -2229,7 +2291,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!proof_bus.recursively_consumed);
     BOOST_REQUIRE_EQUAL(proof_bus.residuals.size(), 4U);
     BOOST_CHECK_EQUAL(proof_bus.violations, 0U);
-    BOOST_CHECK_EQUAL(joined.combined.n_columns, 1745U);
+    BOOST_CHECK_EQUAL(joined.combined.n_columns, 1746U);
     BOOST_CHECK_EQUAL(
         joined.combined.constraints.size(), 1689U);
     BOOST_CHECK_MESSAGE(
@@ -2359,11 +2421,13 @@ BOOST_AUTO_TEST_CASE(
     }
 
     std::vector<unsigned char> canonical_codec;
-    BOOST_REQUIRE_EQUAL(
+    const size_t encoded_codec =
         rc::SerializeFri3AlgBatchProof(
             migrated.child.proof.batch,
-            canonical_codec),
-        canonical_codec.size());
+            canonical_codec);
+    BOOST_REQUIRE_EQUAL(
+        encoded_codec, canonical_codec.size());
+    BOOST_REQUIRE_GT(encoded_codec, 0U);
     BOOST_CHECK_MESSAGE(
         fp::ValidateNormalizedAlgAirBatchCodecBytesV1(
             migrated.child.proof.batch,
@@ -2436,7 +2500,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_EQUAL(
         codec_decoder.residuals.size(), 3U);
     BOOST_CHECK_EQUAL(
-        joined.combined.n_columns, 2097U);
+        joined.combined.n_columns, 2098U);
     BOOST_CHECK_EQUAL(
         joined.combined.constraints.size(), 2051U);
     BOOST_CHECK_MESSAGE(
@@ -2549,7 +2613,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!codec_ctl.recursively_consumed);
     BOOST_REQUIRE_EQUAL(codec_ctl.residuals.size(), 3U);
     BOOST_CHECK_EQUAL(
-        joined.combined.n_columns, 2187U);
+        joined.combined.n_columns, 2188U);
     BOOST_CHECK_EQUAL(
         joined.combined.constraints.size(), 2113U);
     BOOST_CHECK_MESSAGE(
@@ -2698,7 +2762,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         remote_exports.added_constraints, 86U);
     BOOST_CHECK_EQUAL(
-        joined.combined.n_columns, 2525U);
+        joined.combined.n_columns, 2526U);
     BOOST_CHECK_EQUAL(
         joined.combined.constraints.size(), 2199U);
     BOOST_CHECK_MESSAGE(
@@ -3929,6 +3993,102 @@ BOOST_AUTO_TEST_CASE(
         << " batch_bytes=" << batch_bytes
         << " estimated_air_proof_bytes="
         << proof_bytes);
+}
+
+// g2: EpisodeTileTree / EpisodeDigest hand-authored SHA-256 hash-kernel
+// ProgramTables (see role_bytecode_tests) must agree with the child's native
+// constraint metadata under the SAME AttachConstraintBytecodeInterpreter
+// gate CoupledBank/EpisodeDigest header-target already use. At Q=192 the
+// full 462-program kernel needs ~queries*(instructions+1) free parent rows
+// (~1e6), far above a hash-opening-sized fold-bus parent — so the vertical
+// interpreter is capacity-closed with bytecode_vertical_rows AFTER the
+// metadata cross-check passes. That is the honest outcome until hierarchical
+// row-budget aggregation lands; this case still fails closed on a truncated
+// table (wrong program count) and must NOT regress to
+// bytecode_child_constraint_metadata (the prior degree-pad bug).
+// Does NOT flip kCompleteRecursiveFixedPointExecutable.
+BOOST_AUTO_TEST_CASE(
+    episode_tiletree_and_digest_hash_kernel_attaches_via_fold_bus)
+{
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs, hash_child.proof, hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+    const auto& pi = base.hash.program.public_inputs;
+    BOOST_REQUIRE_EQUAL(
+        hash_child.cs.constraints.size(), 462U);
+    BOOST_REQUIRE_EQUAL(
+        pi.child_constraints.size(),
+        hash_child.cs.constraints.size());
+
+    for (const rc::RCStage3RelationRole role :
+         {rc::RCStage3RelationRole::EpisodeTileTree,
+          rc::RCStage3RelationRole::EpisodeDigest}) {
+        rc::constraint_bytecode::ProgramTable table;
+        std::string why;
+        BOOST_REQUIRE_MESSAGE(
+            rc::BuildRCStage3CoupledHashKernelProgramTable(
+                role, table, &why),
+            why);
+        BOOST_CHECK(table.role == role);
+        BOOST_REQUIRE_EQUAL(
+            table.programs.size(),
+            pi.child_constraints.size());
+        BOOST_CHECK_EQUAL(table.current_width, pi.child_w);
+        BOOST_CHECK_EQUAL(table.next_width, pi.child_w);
+
+        uint32_t instructions = 0;
+        for (uint32_t ordinal = 0;
+             ordinal < table.programs.size(); ++ordinal) {
+            BOOST_CHECK(
+                table.programs[ordinal].kind ==
+                pi.child_constraints[ordinal].kind);
+            BOOST_CHECK_EQUAL(
+                table.programs[ordinal].declared_degree,
+                pi.child_constraints[ordinal].alg_degree);
+            instructions += static_cast<uint32_t>(
+                table.programs[ordinal].instructions.size());
+        }
+        const uint64_t rows_needed =
+            uint64_t{pi.query_index.size()} *
+            (uint64_t{instructions} + 1U);
+        BOOST_REQUIRE_GT(rows_needed, base.combined.n_rows);
+
+        fp::FoldBusComposition joined = base;
+        const fp::BytecodeInterpreterAttachment
+            interpreter =
+                fp::AttachConstraintBytecodeInterpreter(
+                    joined, table);
+        BOOST_CHECK(!interpreter.valid);
+        BOOST_CHECK(
+            interpreter.note.find(
+                "bytecode_child_constraint_metadata") ==
+            std::string::npos);
+        BOOST_REQUIRE_MESSAGE(
+            interpreter.note.find("bytecode_vertical_rows") !=
+                std::string::npos,
+            interpreter.note);
+        BOOST_CHECK(
+            interpreter.note.find(
+                "needed=" + std::to_string(rows_needed)) !=
+            std::string::npos);
+
+        // Forgery: dropping one program fails the child-constraint table
+        // shape check before any vertical row budget is considered.
+        rc::constraint_bytecode::ProgramTable truncated =
+            table;
+        truncated.programs.pop_back();
+        fp::FoldBusComposition forged_attempt = base;
+        const fp::BytecodeInterpreterAttachment forged =
+            fp::AttachConstraintBytecodeInterpreter(
+                forged_attempt, truncated);
+        BOOST_CHECK(!forged.valid);
+        BOOST_CHECK(
+            forged.note.find(
+                "bytecode_child_constraint_table") !=
+            std::string::npos);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

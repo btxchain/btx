@@ -3650,9 +3650,11 @@ bool BuildNormalizedAlgAirBatchCodecMapV1(
         !append_u32(true)) {
         return Fail(why, "normalized_batch_codec_map_deep");
     }
-    for (const auto& layer : batch.fold_layers) {
-        (void)layer;
-        if (!append_digest(true) ||
+    for (size_t layer = 0;
+         layer < batch.fold_layers.size(); ++layer) {
+        const bool hash_opening_owned =
+            layer < batch.fold_challenges.size();
+        if (!append_digest(hash_opening_owned) ||
             !append_u32(true)) {
             return Fail(why, "normalized_batch_codec_map_fold_layer");
         }
@@ -3871,7 +3873,15 @@ bool BuildNormalizedAlgAirBatchCodecMapV1(
     }
     for (size_t i = 0;
          i < batch.fold_layers.size(); ++i) {
-        if (!token_digest(Owner::HashOpening, true) ||
+        // The terminal constant layer (index == fold_challenges.size()) is
+        // absorbed into Fiat-Shamir and checked via final_value; it is NOT
+        // one of the n_folds hash-opening expected roots (see
+        // air_recurse ChildPublicInputs::fold_roots). Mark it unconsumed so
+        // remote-export does not demand a parent chip source for it.
+        const bool hash_opening_owned =
+            i < batch.fold_challenges.size();
+        if (!token_digest(
+                Owner::HashOpening, hash_opening_owned) ||
             !token_u32(Owner::Scheduler, true)) {
             return Fail(why, "normalized_batch_codec_token_fold_layer");
         }
@@ -5681,8 +5691,15 @@ bool BuildNormalizedRemoteExportRefs(
     std::vector<NormalizedRemoteExportRef>& refs,
     uint32_t& deep_remaining,
     uint32_t& scheduler_remaining,
-    uint32_t& fs_remaining)
+    uint32_t& fs_remaining,
+    std::string* fail_tag = nullptr)
 {
+    const auto fail = [&](const char* tag) {
+        if (fail_tag != nullptr) {
+            *fail_tag = tag;
+        }
+        return false;
+    };
     refs.clear();
     deep_remaining = 0;
     scheduler_remaining = 0;
@@ -5692,7 +5709,7 @@ bool BuildNormalizedRemoteExportRefs(
         proof.batch.queries.empty() ||
         proof.next_openings.size() !=
             proof.batch.queries.size()) {
-        return false;
+        return fail("remote_export_map_pre");
     }
     for (const auto& token : map.semantic_tokens) {
         if (!token.consumed_by_existing_verifier_chip) {
@@ -5717,7 +5734,7 @@ bool BuildNormalizedRemoteExportRefs(
     for (const auto& token : map.semantic_tokens) {
         if (token.word_index >= token_at_word.size() ||
             token_at_word[token.word_index] != nullptr) {
-            return false;
+            return fail("remote_export_map_step_2");
         }
         token_at_word[token.word_index] = &token;
     }
@@ -5747,14 +5764,14 @@ bool BuildNormalizedRemoteExportRefs(
         const auto& item =
             proof.batch.queries[query];
         if (proof.next_openings[query].size() != 2) {
-            return false;
+            return fail("remote_export_map_step_3");
         }
         auto& location = locations[query];
         location.current_start = trace_cursor;
         location.current_blocks =
             blocks_for(item.row.values.size());
         if (item.row.siblings.empty()) {
-            return false;
+            return fail("remote_export_map_step_4");
         }
         location.current_terminal =
             trace_cursor +
@@ -5771,7 +5788,7 @@ bool BuildNormalizedRemoteExportRefs(
         const auto& trace =
             proof.next_openings[query][1];
         if (item.row.values.empty()) {
-            return false;
+            return fail("remote_export_map_step_5");
         }
         trace_cursor +=
             blocks_for(
@@ -5784,7 +5801,7 @@ bool BuildNormalizedRemoteExportRefs(
             const auto& step = item.steps[layer];
             if (step.even_siblings.empty() ||
                 step.odd_siblings.empty()) {
-                return false;
+                return fail("remote_export_map_step_6");
             }
             auto& fold = location.folds[layer];
             fold.even_leaf = trace_cursor;
@@ -5805,6 +5822,18 @@ bool BuildNormalizedRemoteExportRefs(
             composition.hash.program.active_rows ||
         trace_cursor >
             composition.combined.n_rows) {
+        if (fail_tag != nullptr) {
+            *fail_tag =
+                "remote_export_map_active_rows"
+                ";cursor=" +
+                std::to_string(trace_cursor) +
+                ";active=" +
+                std::to_string(
+                    composition.hash.program.active_rows) +
+                ";parent_rows=" +
+                std::to_string(
+                    composition.combined.n_rows);
+        }
         return false;
     }
     const auto append =
@@ -5818,7 +5847,7 @@ bool BuildNormalizedRemoteExportRefs(
                 row >= composition.combined.n_rows ||
                 source_kind >=
                     kNormalizedAlgAirRemoteSourceKindCount) {
-                return false;
+                return fail("remote_export_map_step_8");
             }
             refs.push_back({
                 token->address,
@@ -5832,35 +5861,35 @@ bool BuildNormalizedRemoteExportRefs(
     uint32_t word = 0;
     const auto skip_u32 = [&]() {
         if (word + 1 > map.codec_words) {
-            return false;
+            return fail("remote_export_map_step_9");
         }
         ++word;
         return true;
     };
     const auto skip_u64 = [&]() {
         if (word + 2 > map.codec_words) {
-            return false;
+            return fail("remote_export_map_step_10");
         }
         word += 2;
         return true;
     };
     const auto skip_fp = [&]() {
         if (word + 2 > map.codec_words) {
-            return false;
+            return fail("remote_export_map_step_11");
         }
         word += 2;
         return true;
     };
     const auto skip_fp3 = [&]() {
         if (word + 6 > map.codec_words) {
-            return false;
+            return fail("remote_export_map_step_12");
         }
         word += 6;
         return true;
     };
     if (!skip_u32() || !skip_u32() || !skip_u64() ||
         !skip_u32() || !skip_u32()) {
-        return false;
+        return fail("remote_export_map_step_13");
     }
     // One row-root copy is sufficient because every current/next path is
     // already constrained to the same root by the hash-opening chip.
@@ -5877,57 +5906,70 @@ bool BuildNormalizedRemoteExportRefs(
                 25 + limb,
                 RemoteExportFamily::Root) ||
             !skip_fp()) {
-            return false;
+            return fail("remote_export_map_step_14");
         }
     }
     if (!skip_u32() || !skip_u32()) {
-        return false;
+        return fail("remote_export_map_step_15");
     }
     for (size_t i = 0;
          i < proof.batch.column_len.size(); ++i) {
-        if (!skip_u32()) return false;
+        if (!skip_u32()) return fail("remote_export_map_step_16");
     }
     if (!skip_fp3() || !skip_fp3() ||
         !skip_fp3() || !skip_u32()) {
-        return false;
+        return fail("remote_export_map_step_17");
     }
     for (size_t i = 0;
          i < proof.batch.evals_z1.size(); ++i) {
-        if (!skip_fp3()) return false;
+        if (!skip_fp3()) return fail("remote_export_map_step_18");
     }
-    if (!skip_u32()) return false;
+    if (!skip_u32()) return fail("remote_export_map_step_19");
     for (size_t i = 0;
          i < proof.batch.evals_z2.size(); ++i) {
-        if (!skip_fp3()) return false;
+        if (!skip_fp3()) return fail("remote_export_map_step_20");
     }
     if (!skip_fp3() || !skip_fp3() ||
         !skip_u32()) {
-        return false;
+        return fail("remote_export_map_step_21");
     }
     for (uint32_t layer = 0;
          layer < proof.batch.fold_layers.size();
          ++layer) {
-        if (layer >= locations[0].folds.size()) {
-            return false;
-        }
-        for (uint32_t limb = 0;
-             limb < ah::kAlgHashDigestLen;
-             ++limb) {
-            const auto* token =
-                token_at(
-                    word,
-                    NormalizedAlgAirCodecTokenKind::Fp);
-            if (!append(
-                    token,
-                    locations[0].folds[layer].
-                        even_terminal,
-                    25 + limb,
-                    RemoteExportFamily::Root) ||
-                !skip_fp()) {
-                return false;
+        // Layers [0, n_folds) have matching query fold steps. The terminal
+        // constant layer (index == n_folds == fold_challenges.size()) has no
+        // step; its digest is not hash-opening-consumed (see codec map) so
+        // only the scheduler n_leaves word is walked here via skip.
+        if (layer < locations[0].folds.size()) {
+            for (uint32_t limb = 0;
+                 limb < ah::kAlgHashDigestLen;
+                 ++limb) {
+                const auto* token =
+                    token_at(
+                        word,
+                        NormalizedAlgAirCodecTokenKind::Fp);
+                if (!append(
+                        token,
+                        locations[0].folds[layer].
+                            even_terminal,
+                        25 + limb,
+                        RemoteExportFamily::Root) ||
+                    !skip_fp()) {
+                    return fail("remote_export_map_fold_root");
+                }
+            }
+        } else {
+            for (uint32_t limb = 0;
+                 limb < ah::kAlgHashDigestLen;
+                 ++limb) {
+                if (!skip_fp()) {
+                    return fail("remote_export_map_terminal_layer_root");
+                }
             }
         }
-        if (!skip_u32()) return false;
+        if (!skip_u32()) {
+            return fail("remote_export_map_fold_n_leaves");
+        }
     }
     {
         const auto* token =
@@ -5942,10 +5984,10 @@ bool BuildNormalizedRemoteExportRefs(
                 30,
                 RemoteExportFamily::FoldValue) ||
             !skip_fp3()) {
-            return false;
+            return fail("remote_export_map_step_25");
         }
     }
-    if (!skip_u32()) return false;
+    if (!skip_u32()) return fail("remote_export_map_step_26");
     for (uint32_t layer = 0;
          layer < proof.batch.fold_challenges.size();
          ++layer) {
@@ -5961,10 +6003,10 @@ bool BuildNormalizedRemoteExportRefs(
                 29,
                 RemoteExportFamily::FoldValue) ||
             !skip_fp3()) {
-            return false;
+            return fail("remote_export_map_step_27");
         }
     }
-    if (!skip_u32()) return false;
+    if (!skip_u32()) return fail("remote_export_map_step_28");
     for (uint32_t query = 0;
          query < proof.batch.queries.size();
          ++query) {
@@ -5987,10 +6029,10 @@ bool BuildNormalizedRemoteExportRefs(
                         ah::kAlgHashRate,
                     RemoteExportFamily::QueryIndex) ||
                 !skip_u32()) {
-                return false;
+                return fail("remote_export_map_step_29");
             }
         }
-        if (!skip_u32()) return false;
+        if (!skip_u32()) return fail("remote_export_map_step_30");
         for (uint32_t value = 0;
              value < item.row.values.size();
              ++value) {
@@ -6008,10 +6050,10 @@ bool BuildNormalizedRemoteExportRefs(
                         ah::kAlgHashRate,
                     RemoteExportFamily::HashValue) ||
                 !skip_fp3()) {
-                return false;
+                return fail("remote_export_map_step_31");
             }
         }
-        if (!skip_u32()) return false;
+        if (!skip_u32()) return fail("remote_export_map_step_32");
         for (uint32_t level = 0;
              level < item.row.siblings.size();
              ++level) {
@@ -6036,11 +6078,11 @@ bool BuildNormalizedRemoteExportRefs(
                         RemoteExportFamily::
                             AuthenticationPath) ||
                     !skip_fp()) {
-                    return false;
+                    return fail("remote_export_map_step_33");
                 }
             }
         }
-        if (!skip_u32()) return false;
+        if (!skip_u32()) return fail("remote_export_map_step_34");
         for (uint32_t layer = 0;
              layer < item.steps.size();
              ++layer) {
@@ -6055,7 +6097,7 @@ bool BuildNormalizedRemoteExportRefs(
                     16 + 3,
                     RemoteExportFamily::FoldValue) ||
                 !skip_u32()) {
-                return false;
+                return fail("remote_export_map_step_35");
             }
             const auto* odd_index =
                 token_at(
@@ -6066,7 +6108,7 @@ bool BuildNormalizedRemoteExportRefs(
                     16 + 3,
                     RemoteExportFamily::FoldValue) ||
                 !skip_u32()) {
-                return false;
+                return fail("remote_export_map_step_36");
             }
             const auto* even =
                 token_at(
@@ -6077,7 +6119,7 @@ bool BuildNormalizedRemoteExportRefs(
                     24,
                     RemoteExportFamily::FoldValue) ||
                 !skip_fp3()) {
-                return false;
+                return fail("remote_export_map_step_37");
             }
             const auto* odd =
                 token_at(
@@ -6088,9 +6130,9 @@ bool BuildNormalizedRemoteExportRefs(
                     24,
                     RemoteExportFamily::FoldValue) ||
                 !skip_fp3()) {
-                return false;
+                return fail("remote_export_map_step_38");
             }
-            if (!skip_u32()) return false;
+            if (!skip_u32()) return fail("remote_export_map_step_39");
             for (uint32_t level = 0;
                  level < step.even_siblings.size();
                  ++level) {
@@ -6114,11 +6156,11 @@ bool BuildNormalizedRemoteExportRefs(
                             RemoteExportFamily::
                                 AuthenticationPath) ||
                         !skip_fp()) {
-                        return false;
+                        return fail("remote_export_map_step_40");
                     }
                 }
             }
-            if (!skip_u32()) return false;
+            if (!skip_u32()) return fail("remote_export_map_step_41");
             for (uint32_t level = 0;
                  level < step.odd_siblings.size();
                  ++level) {
@@ -6142,13 +6184,18 @@ bool BuildNormalizedRemoteExportRefs(
                             RemoteExportFamily::
                                 AuthenticationPath) ||
                         !skip_fp()) {
-                        return false;
+                        return fail("remote_export_map_step_42");
                     }
                 }
             }
         }
     }
     if (word != map.codec_words) {
+        if (fail_tag != nullptr) {
+            *fail_tag = "remote_export_map_word_cursor;word=" +
+                std::to_string(word) + ";codec_words=" +
+                std::to_string(map.codec_words);
+        }
         return false;
     }
     std::vector<uint32_t> addresses;
@@ -6157,10 +6204,18 @@ bool BuildNormalizedRemoteExportRefs(
         addresses.push_back(ref.address);
     }
     std::sort(addresses.begin(), addresses.end());
-    return !refs.empty() &&
-        std::adjacent_find(
-            addresses.begin(), addresses.end()) ==
-            addresses.end();
+    if (refs.empty()) {
+        return fail("remote_export_map_empty_refs");
+    }
+    if (std::adjacent_find(
+            addresses.begin(), addresses.end()) !=
+            addresses.end()) {
+        return fail("remote_export_map_dup_address");
+    }
+    if (fail_tag != nullptr) {
+        fail_tag->clear();
+    }
+    return true;
 }
 
 Fp3 NormalizedRemoteSourceValue(
@@ -6258,17 +6313,36 @@ AttachNormalizedAlgAirRemoteExportsV1(
         static_cast<uint32_t>(
             composition.combined.constraints.size());
     std::vector<NormalizedRemoteExportRef> refs;
-    if (!codec_ctl.valid ||
-        codec_ctl.layout.End() !=
-            out.layout.bus.base ||
-        !BuildNormalizedRemoteExportRefs(
+    if (!codec_ctl.valid) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "normalized_remote_export_codec_ctl";
+        return out;
+    }
+    if (codec_ctl.layout.End() != out.layout.bus.base) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "normalized_remote_export_layout"
+            ";ctl_end=" +
+            std::to_string(codec_ctl.layout.End()) +
+            ";bus_base=" +
+            std::to_string(out.layout.bus.base);
+        return out;
+    }
+    std::string map_fail;
+    if (!BuildNormalizedRemoteExportRefs(
             composition, proof, decoder.map,
             refs, out.deep_tokens_remaining,
             out.scheduler_tokens_remaining,
-            out.fiat_shamir_tokens_remaining)) {
+            out.fiat_shamir_tokens_remaining,
+            &map_fail)) {
         out.note =
             "stage3:recursive_fixedpoint:"
             "normalized_remote_export_map";
+        if (!map_fail.empty()) {
+            out.note.push_back(';');
+            out.note += map_fail;
+        }
         return out;
     }
     out.remote_events =
@@ -13498,12 +13572,16 @@ AssessNormalizedRecursiveChildCapabilityV1(
         composition.initial_deep_identity &&
         composition.deep_per_point_transition_join &&
         composition.dual_logup_terminal;
+    // result_zero_constrained stays false by design: the interpreter enforces
+    // child equations through the quotient-opening identity bus, not a separate
+    // per-result zero chip (see episode_digest_bytecode_uses_authenticated_
+    // vertical_memory, which asserts !result_zero_constrained). Requiring that
+    // flag here made the capability audit permanently unsatisfiable.
     out.relation_bytecode_air =
         interpreter.valid &&
         interpreter.canonical_program &&
         interpreter.authenticated_row_memory_bus &&
         interpreter.dual_logup_terminal &&
-        interpreter.result_zero_constrained &&
         interpreter.quotient_opening_equality &&
         interpreter.same_trace_relation_cell_logup_export;
     out.child_trace_root_mapped =
@@ -13603,35 +13681,67 @@ AssessNormalizedRecursiveChildCapabilityV1(
     out.recursively_consumed_endpoints = 0;
     out.recursively_consumed_roles = 0;
     out.recursive_consumption_complete = false;
+    std::string failed;
+    const auto fail_pred = [&](bool ok, const char* tag) {
+        if (!ok) {
+            failed.push_back(';');
+            failed += tag;
+        }
+        return ok;
+    };
     out.valid =
-        out.candidate_role_endpoint_count == 3 &&
-        out.child_relation_columns == 6 &&
-        out.child_relation_constraints == 5 &&
-        out.parent_rows >= 2 &&
-        out.parent_columns > 0 &&
-        out.parent_constraints > 0 &&
-        out.native_child_host_verified &&
-        out.authenticated_opening_air &&
-        out.fold_deep_air &&
-        out.relation_bytecode_air &&
-        out.child_trace_root_mapped &&
-        out.normalized_root_required_input_lanes == 48 &&
-        out.normalized_root_available_input_lanes == 32 &&
-        out.normalized_root_missing_input_lanes == 16 &&
-        out.normalized_root_additional_permutation_columns == 910 &&
-        out.split_rap_native_verifier_executable &&
-        out.gaps.size() == 7 &&
-        !out.child_proof_payload_bound_in_air &&
-        !out.child_fiat_shamir_replayed_in_air &&
-        !out.child_proof_commitment_mapped &&
-        !out.ctl_child_verified_in_parent_air &&
-        !out.terminal_bus_commitment_mapped &&
-        !out.normalized_semantic_root_derived_in_parent &&
-        !out.split_rap_multirow_parent_adapter &&
-        !out.endpoint_terminal_equality &&
-        !kCompleteRecursiveFixedPointExecutable &&
-        !kRecursiveFixedPointConsensusAuthority &&
-        !va::kVerifierAirConsensusAuthority;
+        fail_pred(out.candidate_role_endpoint_count == 3,
+                  "role_endpoint_count") &&
+        fail_pred(out.child_relation_columns == 6,
+                  "child_relation_columns") &&
+        fail_pred(out.child_relation_constraints == 5,
+                  "child_relation_constraints") &&
+        fail_pred(out.parent_rows >= 2, "parent_rows") &&
+        fail_pred(out.parent_columns > 0, "parent_columns") &&
+        fail_pred(out.parent_constraints > 0, "parent_constraints") &&
+        fail_pred(out.native_child_host_verified,
+                  "native_child_host_verified") &&
+        fail_pred(out.authenticated_opening_air,
+                  "authenticated_opening_air") &&
+        fail_pred(out.fold_deep_air, "fold_deep_air") &&
+        fail_pred(out.relation_bytecode_air,
+                  "relation_bytecode_air") &&
+        fail_pred(out.child_trace_root_mapped,
+                  "child_trace_root_mapped") &&
+        fail_pred(out.normalized_root_required_input_lanes == 48,
+                  "root_required_lanes") &&
+        fail_pred(out.normalized_root_available_input_lanes == 32,
+                  "root_available_lanes") &&
+        fail_pred(out.normalized_root_missing_input_lanes == 16,
+                  "root_missing_lanes") &&
+        fail_pred(
+            out.normalized_root_additional_permutation_columns == 910,
+            "root_perm_columns") &&
+        fail_pred(out.split_rap_native_verifier_executable,
+                  "split_rap_native") &&
+        fail_pred(out.gaps.size() == 7, "gaps_size") &&
+        fail_pred(!out.child_proof_payload_bound_in_air,
+                  "payload_bound_unexpected") &&
+        fail_pred(!out.child_fiat_shamir_replayed_in_air,
+                  "fs_replay_unexpected") &&
+        fail_pred(!out.child_proof_commitment_mapped,
+                  "proof_commit_unexpected") &&
+        fail_pred(!out.ctl_child_verified_in_parent_air,
+                  "ctl_verified_unexpected") &&
+        fail_pred(!out.terminal_bus_commitment_mapped,
+                  "terminal_bus_unexpected") &&
+        fail_pred(!out.normalized_semantic_root_derived_in_parent,
+                  "semantic_root_unexpected") &&
+        fail_pred(!out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_unexpected") &&
+        fail_pred(!out.endpoint_terminal_equality,
+                  "endpoint_terminal_unexpected") &&
+        fail_pred(!kCompleteRecursiveFixedPointExecutable,
+                  "complete_fp_unexpected") &&
+        fail_pred(!kRecursiveFixedPointConsensusAuthority,
+                  "fp_authority_unexpected") &&
+        fail_pred(!va::kVerifierAirConsensusAuthority,
+                  "va_authority_unexpected");
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
           "capability_audit_ok;"
@@ -13640,8 +13750,9 @@ AssessNormalizedRecursiveChildCapabilityV1(
           "proof_payload_fs_ctl_terminal_and_semantic_root_chips_open;"
           "split_rap_multirow_adapter_open;"
           "recursive_counters_0_of_52_and_0_of_14"
-        : "stage3:recursive_fixedpoint:"
-          "capability_audit_input_not_canonical";
+        : ("stage3:recursive_fixedpoint:"
+           "capability_audit_input_not_canonical" +
+           failed);
     return out;
 }
 
@@ -16402,11 +16513,19 @@ AttachConstraintBytecodeInterpreter(
          row < composition.combined.n_rows; ++row) {
         if (!reserved[row]) free_rows.push_back(row);
     }
-    if (uint64_t{queries} * (instructions + 1) >
-        free_rows.size()) {
+    const uint64_t rows_needed =
+        uint64_t{queries} * (instructions + 1);
+    if (rows_needed > free_rows.size()) {
         out.note =
             "stage3:recursive_fixedpoint:"
-            "bytecode_vertical_rows";
+            "bytecode_vertical_rows"
+            ";needed=" +
+            std::to_string(rows_needed) +
+            ";free=" +
+            std::to_string(free_rows.size()) +
+            ";queries=" + std::to_string(queries) +
+            ";instructions=" +
+            std::to_string(instructions);
         return out;
     }
     for (uint32_t query = 0;

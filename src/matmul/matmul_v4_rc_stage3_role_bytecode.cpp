@@ -380,6 +380,18 @@ uint32_t EmitMajority(ProgramBuilder& b, uint32_t a, uint32_t c, uint32_t d)
 // Native stage3_hash_air::TransformBit over word-0 bits: rotate-right reads
 // bit (out+amount)&31; shift-right reads (out+amount) or a zero constant when
 // the source falls off the high end.
+//
+// The off-the-high-end case is padded as Constant(0)*Current(col) rather than
+// a bare Constant(0): both evaluate to the identical field value (zero), but
+// the padded form keeps this operand's RAW SSA degree at 1, matching the
+// degree of the ordinary in-range read. Native declares every sigma S-box
+// constraint's alg_degree as a uniform 4 regardless of which bit is being
+// produced (see stage3_hash_air::BuildFixedProgramConstraintSystem), so the
+// bytecode's auto-derived declared_degree (RawDegree of the actual
+// instruction DAG) must also come out to a uniform 4 for every bit, not drop
+// to 3 whenever this fallback fires -- otherwise AttachConstraintBytecodeInterpreter's
+// per-ordinal (kind, alg_degree) cross-check against the child's native
+// constraint list fails closed for those specific bit ordinals.
 uint32_t EmitTransformBit(
     ProgramBuilder& b, uint32_t out,
     ha::BitTransformKind kind, uint8_t amount)
@@ -388,8 +400,8 @@ uint32_t EmitTransformBit(
         return b.Current(ha::BitColumn(0, (out + amount) & 31U));
     }
     const uint32_t source = out + amount;
-    return source < 32U ? b.Current(ha::BitColumn(0, source))
-                        : b.Constant(Fp3::Zero());
+    if (source < 32U) return b.Current(ha::BitColumn(0, source));
+    return b.Mul(b.Constant(Fp3::Zero()), b.Current(ha::BitColumn(0, 0)));
 }
 
 // XorRot rotate amounts for fixed-program selectors 1..4 (native ROTS).
@@ -1597,12 +1609,16 @@ bool BuildRCStage3EpisodeExtractLocalKernelProgramTable(
 }
 
 // ---------------------------------------------------------------------------
-// CoupledBarrier / CoupledDigest hash kernel: the selector-pinned SHA-256
-// compression AIR as bytecode. This is the bytecode form of
-// stage3_hash_air::BuildFixedProgramConstraintSystem over the canonical
-// Sha256Compression program, in the identical 462-constraint order over the
-// 144-column fixed-program layout. Both roles are DirectSha256d relations
-// executed by the same compression program, so they share this kernel; only the
+// CoupledBarrier / CoupledDigest / EpisodeTileTree / EpisodeDigest hash
+// kernel: the selector-pinned SHA-256 compression AIR as bytecode. This is
+// the bytecode form of stage3_hash_air::BuildFixedProgramConstraintSystem
+// over the canonical Sha256Compression program, in the identical
+// 462-constraint order over the 144-column fixed-program layout. All four
+// roles are executed by the same compression program (EpisodeDigest via
+// DirectHashRelation::EpisodeDigest, EpisodeTileTree via
+// BuildTileTreeManifestBoundaryInstances -> BuildShaManifestBoundaryInstances,
+// both bit-identical callers of the same fixed-program AIR already used by
+// CoupledBarrier/CoupledDigest), so they share this kernel; only the
 // committed table role differs (anti cross-role replay).
 // ---------------------------------------------------------------------------
 bool BuildRCStage3CoupledHashKernelProgramTable(
@@ -1611,7 +1627,9 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
     std::string* why)
 {
     if (role != RCStage3RelationRole::CoupledBarrier &&
-        role != RCStage3RelationRole::CoupledDigest) {
+        role != RCStage3RelationRole::CoupledDigest &&
+        role != RCStage3RelationRole::EpisodeTileTree &&
+        role != RCStage3RelationRole::EpisodeDigest) {
         return Fail(why, "hash_kernel_role");
     }
     out = {};
