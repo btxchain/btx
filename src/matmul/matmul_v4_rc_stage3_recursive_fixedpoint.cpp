@@ -5734,7 +5734,7 @@ bool BuildNormalizedRemoteExportRefs(
     for (const auto& token : map.semantic_tokens) {
         if (token.word_index >= token_at_word.size() ||
             token_at_word[token.word_index] != nullptr) {
-            return fail("remote_export_map_step_2");
+            return false;
         }
         token_at_word[token.word_index] = &token;
     }
@@ -5764,14 +5764,14 @@ bool BuildNormalizedRemoteExportRefs(
         const auto& item =
             proof.batch.queries[query];
         if (proof.next_openings[query].size() != 2) {
-            return fail("remote_export_map_step_3");
+            return false;
         }
         auto& location = locations[query];
         location.current_start = trace_cursor;
         location.current_blocks =
             blocks_for(item.row.values.size());
         if (item.row.siblings.empty()) {
-            return fail("remote_export_map_step_4");
+            return false;
         }
         location.current_terminal =
             trace_cursor +
@@ -5788,7 +5788,7 @@ bool BuildNormalizedRemoteExportRefs(
         const auto& trace =
             proof.next_openings[query][1];
         if (item.row.values.empty()) {
-            return fail("remote_export_map_step_5");
+            return false;
         }
         trace_cursor +=
             blocks_for(
@@ -5801,7 +5801,7 @@ bool BuildNormalizedRemoteExportRefs(
             const auto& step = item.steps[layer];
             if (step.even_siblings.empty() ||
                 step.odd_siblings.empty()) {
-                return fail("remote_export_map_step_6");
+                return false;
             }
             auto& fold = location.folds[layer];
             fold.even_leaf = trace_cursor;
@@ -5847,7 +5847,7 @@ bool BuildNormalizedRemoteExportRefs(
                 row >= composition.combined.n_rows ||
                 source_kind >=
                     kNormalizedAlgAirRemoteSourceKindCount) {
-                return fail("remote_export_map_step_8");
+                return false;
             }
             refs.push_back({
                 token->address,
@@ -5861,35 +5861,35 @@ bool BuildNormalizedRemoteExportRefs(
     uint32_t word = 0;
     const auto skip_u32 = [&]() {
         if (word + 1 > map.codec_words) {
-            return fail("remote_export_map_step_9");
+            return false;
         }
         ++word;
         return true;
     };
     const auto skip_u64 = [&]() {
         if (word + 2 > map.codec_words) {
-            return fail("remote_export_map_step_10");
+            return false;
         }
         word += 2;
         return true;
     };
     const auto skip_fp = [&]() {
         if (word + 2 > map.codec_words) {
-            return fail("remote_export_map_step_11");
+            return false;
         }
         word += 2;
         return true;
     };
     const auto skip_fp3 = [&]() {
         if (word + 6 > map.codec_words) {
-            return fail("remote_export_map_step_12");
+            return false;
         }
         word += 6;
         return true;
     };
     if (!skip_u32() || !skip_u32() || !skip_u64() ||
         !skip_u32() || !skip_u32()) {
-        return fail("remote_export_map_step_13");
+        return false;
     }
     // One row-root copy is sufficient because every current/next path is
     // already constrained to the same root by the hash-opening chip.
@@ -5906,32 +5906,32 @@ bool BuildNormalizedRemoteExportRefs(
                 25 + limb,
                 RemoteExportFamily::Root) ||
             !skip_fp()) {
-            return fail("remote_export_map_step_14");
+            return false;
         }
     }
     if (!skip_u32() || !skip_u32()) {
-        return fail("remote_export_map_step_15");
+        return false;
     }
     for (size_t i = 0;
          i < proof.batch.column_len.size(); ++i) {
-        if (!skip_u32()) return fail("remote_export_map_step_16");
+        if (!skip_u32()) return false;
     }
     if (!skip_fp3() || !skip_fp3() ||
         !skip_fp3() || !skip_u32()) {
-        return fail("remote_export_map_step_17");
+        return false;
     }
     for (size_t i = 0;
          i < proof.batch.evals_z1.size(); ++i) {
-        if (!skip_fp3()) return fail("remote_export_map_step_18");
+        if (!skip_fp3()) return false;
     }
-    if (!skip_u32()) return fail("remote_export_map_step_19");
+    if (!skip_u32()) return false;
     for (size_t i = 0;
          i < proof.batch.evals_z2.size(); ++i) {
-        if (!skip_fp3()) return fail("remote_export_map_step_20");
+        if (!skip_fp3()) return false;
     }
     if (!skip_fp3() || !skip_fp3() ||
         !skip_u32()) {
-        return fail("remote_export_map_step_21");
+        return false;
     }
     for (uint32_t layer = 0;
          layer < proof.batch.fold_layers.size();
@@ -5984,10 +5984,10 @@ bool BuildNormalizedRemoteExportRefs(
                 30,
                 RemoteExportFamily::FoldValue) ||
             !skip_fp3()) {
-            return fail("remote_export_map_step_25");
+            return false;
         }
     }
-    if (!skip_u32()) return fail("remote_export_map_step_26");
+    if (!skip_u32()) return false;
     for (uint32_t layer = 0;
          layer < proof.batch.fold_challenges.size();
          ++layer) {
@@ -6003,10 +6003,10 @@ bool BuildNormalizedRemoteExportRefs(
                 29,
                 RemoteExportFamily::FoldValue) ||
             !skip_fp3()) {
-            return fail("remote_export_map_step_27");
+            return false;
         }
     }
-    if (!skip_u32()) return fail("remote_export_map_step_28");
+    if (!skip_u32()) return false;
     for (uint32_t query = 0;
          query < proof.batch.queries.size();
          ++query) {
@@ -6029,10 +6029,10 @@ bool BuildNormalizedRemoteExportRefs(
                         ah::kAlgHashRate,
                     RemoteExportFamily::QueryIndex) ||
                 !skip_u32()) {
-                return fail("remote_export_map_step_29");
+                return false;
             }
         }
-        if (!skip_u32()) return fail("remote_export_map_step_30");
+        if (!skip_u32()) return false;
         for (uint32_t value = 0;
              value < item.row.values.size();
              ++value) {
@@ -6050,10 +6050,10 @@ bool BuildNormalizedRemoteExportRefs(
                         ah::kAlgHashRate,
                     RemoteExportFamily::HashValue) ||
                 !skip_fp3()) {
-                return fail("remote_export_map_step_31");
+                return false;
             }
         }
-        if (!skip_u32()) return fail("remote_export_map_step_32");
+        if (!skip_u32()) return false;
         for (uint32_t level = 0;
              level < item.row.siblings.size();
              ++level) {
@@ -6078,11 +6078,11 @@ bool BuildNormalizedRemoteExportRefs(
                         RemoteExportFamily::
                             AuthenticationPath) ||
                     !skip_fp()) {
-                    return fail("remote_export_map_step_33");
+                    return false;
                 }
             }
         }
-        if (!skip_u32()) return fail("remote_export_map_step_34");
+        if (!skip_u32()) return false;
         for (uint32_t layer = 0;
              layer < item.steps.size();
              ++layer) {
@@ -6097,7 +6097,7 @@ bool BuildNormalizedRemoteExportRefs(
                     16 + 3,
                     RemoteExportFamily::FoldValue) ||
                 !skip_u32()) {
-                return fail("remote_export_map_step_35");
+                return false;
             }
             const auto* odd_index =
                 token_at(
@@ -6108,7 +6108,7 @@ bool BuildNormalizedRemoteExportRefs(
                     16 + 3,
                     RemoteExportFamily::FoldValue) ||
                 !skip_u32()) {
-                return fail("remote_export_map_step_36");
+                return false;
             }
             const auto* even =
                 token_at(
@@ -6119,7 +6119,7 @@ bool BuildNormalizedRemoteExportRefs(
                     24,
                     RemoteExportFamily::FoldValue) ||
                 !skip_fp3()) {
-                return fail("remote_export_map_step_37");
+                return false;
             }
             const auto* odd =
                 token_at(
@@ -6130,9 +6130,9 @@ bool BuildNormalizedRemoteExportRefs(
                     24,
                     RemoteExportFamily::FoldValue) ||
                 !skip_fp3()) {
-                return fail("remote_export_map_step_38");
+                return false;
             }
-            if (!skip_u32()) return fail("remote_export_map_step_39");
+            if (!skip_u32()) return false;
             for (uint32_t level = 0;
                  level < step.even_siblings.size();
                  ++level) {
@@ -6156,11 +6156,11 @@ bool BuildNormalizedRemoteExportRefs(
                             RemoteExportFamily::
                                 AuthenticationPath) ||
                         !skip_fp()) {
-                        return fail("remote_export_map_step_40");
+                        return false;
                     }
                 }
             }
-            if (!skip_u32()) return fail("remote_export_map_step_41");
+            if (!skip_u32()) return false;
             for (uint32_t level = 0;
                  level < step.odd_siblings.size();
                  ++level) {
@@ -6184,7 +6184,7 @@ bool BuildNormalizedRemoteExportRefs(
                             RemoteExportFamily::
                                 AuthenticationPath) ||
                         !skip_fp()) {
-                        return fail("remote_export_map_step_42");
+                        return false;
                     }
                 }
             }
