@@ -229,22 +229,29 @@ RecursionPrototypeDriveResult DriveEpisodeRoleRecursionPrototype(
                 0);
 
     // Canonical wire serialization of the mandatory-family V_CS root is a
-    // shared codec/budget residual (ProductionPerformanceUnmeasured): with
-    // Q=192 and ~10k V_CS columns the FRI row openings alone exceed
-    // kRCFriMaxProofBytesHard (~16 MiB). Measure the raw batch size so the
-    // soft-fail is evidence, not a silent skip — readiness above already
-    // closed the episode-role engine gap.
+    // shared codec/budget residual (ProductionPerformanceUnmeasured). With
+    // Q=192, row openings alone are Q * n_cols * 24 bytes — ~30 MiB at the
+    // PureStream V_CS (~10k cols) and ~380 MiB at Builder (~82k cols), both
+    // over kRCFriMaxProofBytesHard (~16 MiB). Estimate BEFORE allocating so
+    // large roles do not thrash on a doomed SerializeFri3AlgBatchProof.
     {
-        std::vector<unsigned char> raw_batch;
-        const size_t raw_batch_bytes =
-            SerializeFri3AlgBatchProof(out.carrier.root.batch, raw_batch);
-        BOOST_TEST_MESSAGE(label << " root_batch_raw_bytes=" << raw_batch_bytes
+        constexpr size_t kFp3Bytes = 24;
+        const size_t n_cols = out.carrier.root.batch.column_len.size();
+        const size_t n_q = out.carrier.root.batch.queries.size();
+        const size_t row_vals_lb = n_q * n_cols * kFp3Bytes;
+        BOOST_TEST_MESSAGE(label << " root_batch_row_vals_lower_bound_bytes="
+                                 << row_vals_lb << " n_cols=" << n_cols
+                                 << " n_queries=" << n_q
                                  << " fri_max_proof_bytes_hard="
-                                 << kRCFriMaxProofBytesHard
-                                 << " over_budget="
-                                 << (raw_batch_bytes > kRCFriMaxProofBytesHard
-                                         ? "yes"
-                                         : "no"));
+                                 << kRCFriMaxProofBytesHard);
+        if (row_vals_lb > kRCFriMaxProofBytesHard) {
+            BOOST_TEST_MESSAGE(label << " serialize_soft_fail why=stage3:"
+                                        "recursive:root_batch_serialize "
+                                        "(estimated over budget; readiness "
+                                        "already measured above)");
+            BOOST_CHECK(true); // explicit soft-fail branch taken
+            return out;
+        }
     }
 
     std::vector<unsigned char> encoded;

@@ -531,18 +531,20 @@ BOOST_AUTO_TEST_CASE(
     const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
     BOOST_CHECK(!gaps.empty());
     // g1 (episode) now carries one entry per still-open required episode
-    // role. EpisodeGemm/TileTree/Digest dropped out of this report: their
-    // recursive engines genuinely execute end-to-end for real instances (see
-    // rc::kRCStage3Episode*RecursionEnginesExecuted and
+    // role. EpisodeGemm/TileTree/Digest/Builder dropped out of this report:
+    // their recursive engines genuinely execute end-to-end for real instances
+    // (see rc::kRCStage3Episode*RecursionEnginesExecuted and
     // matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp), which is
     // real evidence, not a flipped constant -- and they alone are not enough
-    // to close g1: Builder/Extract/Wiring are still fully open, so
+    // to close g1: Extract/Wiring are still fully open, so
     // episode_relation_gaps_empty (and therefore gate1) stays false.
-    BOOST_CHECK_EQUAL(gaps.size(), 3U);
+    BOOST_CHECK_EQUAL(gaps.size(), 2U);
     for (const auto& gap : gaps) {
         BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeGemm);
         BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeTileTree);
         BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeDigest);
+        BOOST_CHECK(gap.role !=
+                    rc::RCStage3RelationRole::EpisodeDeterministicBuilder);
         BOOST_CHECK(gap.missing_obligations != 0U);
         BOOST_CHECK(!gap.reason.empty());
     }
