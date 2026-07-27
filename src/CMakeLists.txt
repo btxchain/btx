@@ -698,6 +698,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_root_chain.cpp
   matmul/matmul_v4_rc_stage3_provenance_graph.cpp
   matmul/matmul_v4_rc_stage3_semantic_status.cpp
+  matmul/matmul_v4_rc_stage3_semantic_root_closure.cpp
   matmul/matmul_v4_rc_stage3_verifier_air.cpp
   matmul/matmul_v4_rc_stage3_verify.cpp
   matmul/matmul_sketch_cache.cpp
