@@ -89,6 +89,7 @@ add_executable(test_btx
   matmul_v4_rc_accel_policy_tests.cpp
   matmul_v4_rc_coupled_tests.cpp
   matmul_v4_rc_alg_hash_tests.cpp
+  matmul_v4_rc_alg_hash_typed_tests.cpp
   matmul_v4_rc_rowleaf_gpu_tests.cpp
   matmul_v4_rc_fp3_lde_gpu_tests.cpp
   matmul_v4_rc_alg_hash_wide_tests.cpp
@@ -203,6 +204,8 @@ add_executable(test_btx
   matmul_v4_rc_stage3_multirow_v11_normalized_program_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_receipt_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_receipt_join_q96_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_q96_child_verifier_bridge_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_unified_verifier_air_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_relation_shards_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_relation_quotient_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_specialized_chips_tests.cpp

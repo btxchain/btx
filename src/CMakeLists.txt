@@ -608,6 +608,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_freivalds_sampled.cpp
   matmul/matmul_v4_rc_freivalds_i8mm.cpp
   matmul/matmul_v4_rc_alg_hash.cpp
+  matmul/matmul_v4_rc_alg_hash_typed.cpp
   matmul/matmul_v4_rc_alg_hash_wide.cpp
   matmul/matmul_v4_rc_air_episode.cpp
   matmul/matmul_v4_rc_air_quotient.cpp
@@ -703,6 +704,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_multirow_v11_proof_abi.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_backend.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_parent_join.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_q96_child_verifier_bridge.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_unified_verifier_air.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_merkle_fold.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_decoder_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_deep_vm.cpp
