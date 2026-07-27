@@ -677,18 +677,12 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_recursive_consumption.cpp
   matmul/matmul_v4_rc_stage3_recursive_fixedpoint.cpp
   matmul/matmul_v4_rc_stage3_recursive_receipt.cpp
-  matmul/matmul_v4_rc_stage3_recursive_receipt_v2.cpp
-  matmul/matmul_v4_rc_stage3_receipt_public_statement.cpp
-  matmul/matmul_v4_rc_stage3_recursive_hierarchy.cpp
-  matmul/matmul_v4_rc_stage3_direct_parent_spine.cpp
   matmul/matmul_v4_rc_stage3_p2_transcript_air.cpp
   matmul/matmul_v4_rc_stage3_p2_transcript_binding.cpp
   matmul/matmul_v4_rc_stage3_airq_p2_transcript.cpp
   matmul/matmul_v4_rc_stage3_p2_same_parent_join.cpp
   matmul/matmul_v4_rc_stage3_p2_normalized_exports.cpp
   matmul/matmul_v4_rc_stage3_p2_prefix_source_air.cpp
-  matmul/matmul_v4_rc_stage3_temporal_induction.cpp
-  matmul/matmul_v4_rc_stage3_recursive_provenance_join.cpp
   matmul/matmul_v4_rc_stage3_ali_manifest.cpp
   matmul/matmul_v4_rc_stage3_ali_same_parent_bridge.cpp
   matmul/matmul_v4_rc_stage3_pow_composition.cpp

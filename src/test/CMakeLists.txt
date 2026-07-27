@@ -167,18 +167,12 @@ add_executable(test_btx
   matmul_v4_rc_stage3_recursive_consumption_tests.cpp
   matmul_v4_rc_stage3_recursive_fixedpoint_tests.cpp
   matmul_v4_rc_stage3_recursive_receipt_tests.cpp
-  matmul_v4_rc_stage3_recursive_receipt_v2_tests.cpp
-  matmul_v4_rc_stage3_receipt_public_statement_tests.cpp
-  matmul_v4_rc_stage3_recursive_hierarchy_tests.cpp
-  matmul_v4_rc_stage3_direct_parent_spine_tests.cpp
   matmul_v4_rc_stage3_p2_transcript_air_tests.cpp
   matmul_v4_rc_stage3_p2_transcript_binding_tests.cpp
   matmul_v4_rc_stage3_airq_p2_transcript_tests.cpp
   matmul_v4_rc_stage3_p2_same_parent_join_tests.cpp
   matmul_v4_rc_stage3_p2_normalized_exports_tests.cpp
   matmul_v4_rc_stage3_p2_prefix_source_air_tests.cpp
-  matmul_v4_rc_stage3_temporal_induction_tests.cpp
-  matmul_v4_rc_stage3_recursive_provenance_join_tests.cpp
   matmul_v4_rc_stage3_ali_manifest_tests.cpp
   matmul_v4_rc_stage3_ali_same_parent_bridge_tests.cpp
   matmul_v4_rc_stage3_pow_composition_tests.cpp
