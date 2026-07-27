@@ -248,13 +248,15 @@ if(_btx_amdgpu_arch_prog)
   endif()
 endif()
 unset(_btx_amdgpu_arch_prog CACHE)
+set(BTX_HIP_ARCHITECTURES "" CACHE STRING
+  "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)")
 set(BTX_ENABLE_HIP_DEFAULT OFF)
-if(NOT _btx_hip_detect_cxx STREQUAL "" AND
-   (NOT _btx_hip_detect_arch STREQUAL "" OR NOT BTX_HIP_ARCHITECTURES STREQUAL ""))
+if(NOT "${_btx_hip_detect_cxx}" STREQUAL "" AND
+   (NOT "${_btx_hip_detect_arch}" STREQUAL "" OR
+    NOT "${BTX_HIP_ARCHITECTURES}" STREQUAL ""))
   set(BTX_ENABLE_HIP_DEFAULT ON)
 endif()
 option(BTX_ENABLE_HIP "Enable the AMD ROCm/HIP MatMul v4 backend (auto-on when a HIP clang compiler and an AMD GPU arch are detected)" ${BTX_ENABLE_HIP_DEFAULT})
-set(BTX_HIP_ARCHITECTURES "" CACHE STRING "Semicolon-separated AMD GPU archs for the HIP MatMul backend (for example gfx942;gfx950)")
 # Seed the arch from auto-detect when the operator did not set it explicitly, so
 # an auto-enabled HIP build has a valid gfx target and skips the FATAL below.
 if(BTX_ENABLE_HIP AND BTX_HIP_ARCHITECTURES STREQUAL "" AND NOT _btx_hip_detect_arch STREQUAL "")
@@ -816,6 +818,42 @@ endif()
 find_package(OpenMP)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(bitcoin_common PUBLIC OpenMP::OpenMP_CXX)
+elseif(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+  # AppleClang does not ship an OpenMP runtime and CMake's FindOpenMP cannot
+  # infer the driver flag/runtime pairing supplied by Homebrew libomp. Detect
+  # that standard installation explicitly so an otherwise fully capable M-
+  # series prover does not silently run every Stage-3 loop on one CPU core.
+  find_path(BTX_APPLE_LIBOMP_INCLUDE_DIR omp.h
+    HINTS
+      /opt/homebrew/opt/libomp
+      /usr/local/opt/libomp
+    PATH_SUFFIXES include
+  )
+  find_library(BTX_APPLE_LIBOMP_LIBRARY NAMES omp
+    HINTS
+      /opt/homebrew/opt/libomp
+      /usr/local/opt/libomp
+    PATH_SUFFIXES lib
+  )
+  if(BTX_APPLE_LIBOMP_INCLUDE_DIR AND BTX_APPLE_LIBOMP_LIBRARY)
+    add_library(btx_apple_openmp INTERFACE)
+    target_compile_options(btx_apple_openmp INTERFACE
+      $<$<COMPILE_LANGUAGE:CXX>:-Xpreprocessor>
+      $<$<COMPILE_LANGUAGE:CXX>:-fopenmp>
+    )
+    target_include_directories(btx_apple_openmp SYSTEM INTERFACE
+      ${BTX_APPLE_LIBOMP_INCLUDE_DIR}
+    )
+    target_link_libraries(btx_apple_openmp INTERFACE
+      ${BTX_APPLE_LIBOMP_LIBRARY}
+    )
+    target_link_libraries(bitcoin_common PUBLIC btx_apple_openmp)
+    message(STATUS
+      "Using AppleClang OpenMP runtime: ${BTX_APPLE_LIBOMP_LIBRARY}")
+  else()
+    message(STATUS
+      "AppleClang OpenMP unavailable; Stage-3 prover loops are serial")
+  endif()
 endif()
 
 # Shielded pool and proof implementation shared by node and wallet targets.
@@ -883,8 +921,41 @@ add_library(btx_matmul_backend STATIC EXCLUDE_FROM_ALL
   # replace per-vendor namespaces when CUDA/HIP/Metal are enabled.
   cuda/matmul_v4_lt_tensor_gemm_stub.cpp
 )
+if(APPLE AND BTX_ENABLE_METAL AND BTX_ENABLE_CUDA_EXPERIMENTAL)
+  message(FATAL_ERROR
+    "Metal and experimental CUDA cannot both provide the Stage-3 "
+    "BtxGpuRowLeaf ABI in one Apple build; select exactly one GPU provider")
+endif()
 if(APPLE AND BTX_ENABLE_METAL)
   enable_language(OBJCXX)
+  # Stage-3 row-leaf kernels are also embedded for an installed-binary runtime
+  # fallback. Generate the C++ raw string from the authoritative .metal file
+  # so the precompiled and runtime-compiled paths cannot drift.
+  set(BTX_RC_ROWLEAF_METAL_SOURCE
+      ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_rowleaf_gpu_kernels.metal)
+  set(BTX_RC_FP3_LDE_METAL_SOURCE
+      ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_fp3_lde_gpu.metal)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${BTX_RC_ROWLEAF_METAL_SOURCE}
+    ${BTX_RC_FP3_LDE_METAL_SOURCE}
+  )
+  file(READ ${BTX_RC_ROWLEAF_METAL_SOURCE}
+       BTX_RC_ROWLEAF_METAL_SOURCE_TEXT)
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_rowleaf_gpu_source.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/matmul_v4_rc_rowleaf_gpu_source.h
+    @ONLY
+  )
+  file(READ ${BTX_RC_FP3_LDE_METAL_SOURCE}
+       BTX_RC_FP3_LDE_METAL_SOURCE_TEXT)
+  configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_rc_fp3_lde_gpu_source.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/matmul_v4_rc_fp3_lde_gpu_source.h
+    @ONLY
+  )
+  target_include_directories(btx_matmul_backend PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/generated
+  )
   target_compile_options(btx_matmul_backend PRIVATE
     $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>
   )
@@ -906,6 +977,12 @@ if(APPLE AND BTX_ENABLE_METAL)
     metal/matmul_v4_lt_tensor_gemm.mm
     # ENC_RC Ozaki ExactPanels on Metal (simdgroup / MPP TensorOps + ALU).
     metal/matmul_v4_rc_ozaki_accel.mm
+    # Stage-3 recursive prover: exact Poseidon2-Goldilocks row-leaf sponge.
+    # Implements the same BtxGpuRowLeaf* ABI as the CUDA provider, retaining
+    # the existing structured-proof audit and hard-failure policy.
+    metal/matmul_v4_rc_rowleaf_gpu.mm
+    # Stage-3 prover Fp3 NTT/LDE; CPU roots remain the protocol authority.
+    metal/matmul_v4_rc_fp3_lde_gpu.mm
     metal/nonce_accel.mm
     metal/oracle_accel.mm
   )
@@ -927,6 +1004,10 @@ if(APPLE AND BTX_ENABLE_METAL)
     set(BTX_MATMUL_V4_BMX4_METAL_SOURCE ${CMAKE_CURRENT_SOURCE_DIR}/metal/matmul_v4_bmx4_accel_kernels.metal)
     set(BTX_MATMUL_V4_BMX4_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels.air)
     set(BTX_MATMUL_V4_BMX4_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_bmx4_accel_kernels.metallib)
+    set(BTX_RC_ROWLEAF_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_rc_rowleaf_gpu_kernels.air)
+    set(BTX_RC_ROWLEAF_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_rc_rowleaf_gpu_kernels.metallib)
+    set(BTX_RC_FP3_LDE_METAL_AIR ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_rc_fp3_lde_gpu.air)
+    set(BTX_RC_FP3_LDE_METALLIB ${CMAKE_CURRENT_BINARY_DIR}/matmul_v4_rc_fp3_lde_gpu.metallib)
     add_custom_command(
       OUTPUT ${BTX_MATMUL_METALLIB}
       COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c ${BTX_MATMUL_METAL_SOURCE} -o ${BTX_MATMUL_METAL_AIR}
@@ -965,16 +1046,40 @@ if(APPLE AND BTX_ENABLE_METAL)
       COMMENT "Compiling prebuilt MatMul v4 BMX4-C Metal kernels"
       VERBATIM
     )
+    add_custom_command(
+      OUTPUT ${BTX_RC_ROWLEAF_METALLIB}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c
+              ${BTX_RC_ROWLEAF_METAL_SOURCE} -o ${BTX_RC_ROWLEAF_METAL_AIR}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib
+              ${BTX_RC_ROWLEAF_METAL_AIR} -o ${BTX_RC_ROWLEAF_METALLIB}
+      DEPENDS ${BTX_RC_ROWLEAF_METAL_SOURCE}
+      COMMENT "Compiling prebuilt Stage-3 row-leaf Metal kernels"
+      VERBATIM
+    )
+    add_custom_command(
+      OUTPUT ${BTX_RC_FP3_LDE_METALLIB}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metal -c
+              ${BTX_RC_FP3_LDE_METAL_SOURCE} -o ${BTX_RC_FP3_LDE_METAL_AIR}
+      COMMAND ${BTX_XCRUN_EXECUTABLE} -sdk macosx metallib
+              ${BTX_RC_FP3_LDE_METAL_AIR} -o ${BTX_RC_FP3_LDE_METALLIB}
+      DEPENDS ${BTX_RC_FP3_LDE_METAL_SOURCE}
+      COMMENT "Compiling prebuilt Stage-3 Fp3 LDE Metal kernels"
+      VERBATIM
+    )
     add_custom_target(btx_matmul_metallib DEPENDS ${BTX_MATMUL_METALLIB})
     add_custom_target(btx_oracle_metallib DEPENDS ${BTX_ORACLE_METALLIB})
     add_custom_target(btx_matmul_v4_metallib DEPENDS ${BTX_MATMUL_V4_METALLIB})
     add_custom_target(btx_matmul_v4_bmx4_metallib DEPENDS ${BTX_MATMUL_V4_BMX4_METALLIB})
-    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib btx_matmul_v4_bmx4_metallib)
+    add_custom_target(btx_rc_rowleaf_metallib DEPENDS ${BTX_RC_ROWLEAF_METALLIB})
+    add_custom_target(btx_rc_fp3_lde_metallib DEPENDS ${BTX_RC_FP3_LDE_METALLIB})
+    add_dependencies(btx_matmul_backend btx_matmul_metallib btx_oracle_metallib btx_matmul_v4_metallib btx_matmul_v4_bmx4_metallib btx_rc_rowleaf_metallib btx_rc_fp3_lde_metallib)
     target_compile_definitions(btx_matmul_backend PRIVATE
       BTX_MATMUL_METALLIB_PATH=\"${BTX_MATMUL_METALLIB}\"
       BTX_ORACLE_METALLIB_PATH=\"${BTX_ORACLE_METALLIB}\"
       BTX_MATMUL_V4_METALLIB_PATH=\"${BTX_MATMUL_V4_METALLIB}\"
       BTX_MATMUL_V4_BMX4_METALLIB_PATH=\"${BTX_MATMUL_V4_BMX4_METALLIB}\"
+      BTX_RC_ROWLEAF_METALLIB_PATH=\"${BTX_RC_ROWLEAF_METALLIB}\"
+      BTX_RC_FP3_LDE_METALLIB_PATH=\"${BTX_RC_FP3_LDE_METALLIB}\"
     )
   else()
     if(BTX_MATMUL_METAL_PRECOMPILE_KERNELS)
@@ -1000,6 +1105,7 @@ else()
     metal/matmul_v4_accel_stub.cpp
     metal/matmul_v4_bmx4_accel_stub.cpp
     metal/matmul_v4_lt_accel_stub.cpp
+    metal/matmul_v4_rc_fp3_lde_gpu_stub.cpp
     # Host / non-Darwin: unit-byte-exact RC Ozaki reference + HARD BLOCKER latch.
     metal/matmul_v4_rc_ozaki_accel.cpp
     metal/nonce_accel_stub.cpp
@@ -1135,8 +1241,12 @@ else()
     cuda/matmul_v4_accel_stub.cpp
     cuda/matmul_v4_bmx4_accel_stub.cpp
     cuda/matmul_v4_lt_accel_stub.cpp
-    cuda/matmul_v4_rc_rowleaf_gpu_stub.cpp
   )
+  if(NOT (APPLE AND BTX_ENABLE_METAL))
+    target_sources(btx_matmul_backend PRIVATE
+      cuda/matmul_v4_rc_rowleaf_gpu_stub.cpp
+    )
+  endif()
 endif()
 if(BTX_ENABLE_HIP)
   # --- D2: isolate hip::device from g++ TUs ---------------------------------

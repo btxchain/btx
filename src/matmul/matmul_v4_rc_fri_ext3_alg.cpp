@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 
 #include <matmul/matmul_v4_rc_fri_ext3.h> // Sha256dBytes (FS transcript only)
+#include <matmul/matmul_v4_rc_fp3_lde_gpu.h>
 #include <matmul/matmul_v4_rc_rowleaf_gpu.h> // PR-89 GPU splice #1 (row-leaf sponge)
 #include <matmul/matmul_v4_rc_air_quotient.h> // PR-89 Construction 2 predicate AIR
 #include <crypto/sha256.h>
@@ -19,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <type_traits>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -108,9 +110,12 @@ constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
 // unchanged. When linked (the GPU prove harness) and BTX_GPU_PROVE=1, the
 // row-leaf digest stage of every row-Merkle commit runs on the GPU, producing
 // digests bit-identical to alg_hash::LeafHashRow.
-extern "C" void gpu_row_leaf_digests(const unsigned long long* h_lde, unsigned int W,
-                                     unsigned int n_lde,
-                                     unsigned long long* h_dig) __attribute__((weak));
+#if !defined(__APPLE__)
+#define BTX_GPU_PROVE_WEAK __attribute__((weak))
+extern "C" void gpu_row_leaf_digests(const unsigned long long* h_lde,
+                                     unsigned int W, unsigned int n_lde,
+                                     unsigned long long* h_dig)
+    BTX_GPU_PROVE_WEAK;
 
 bool GpuProveEnabled()
 {
@@ -120,6 +125,7 @@ bool GpuProveEnabled()
     }();
     return on;
 }
+#endif
 
 void AppendLE32(std::vector<unsigned char>& buf, uint32_t v)
 {
@@ -283,6 +289,101 @@ std::vector<Fp3> LdeFromCoeffs(const std::vector<Fp3>& coeffs, uint32_t blowup)
     return padded;
 }
 
+bool MetalFp3LdeEnabled()
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("BTX_GPU_LDE");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
+bool MetalFp3LdeAuditEnabled()
+{
+    static const bool enabled = [] {
+        const char* env = std::getenv("BTX_GPU_LDE_AUDIT");
+        return env != nullptr && env[0] == '1';
+    }();
+    return enabled;
+}
+
+struct MetalFp3LdeThreadContext {
+    uint32_t domain_size{0};
+    void* handle{nullptr};
+
+    ~MetalFp3LdeThreadContext()
+    {
+        BtxMetalFp3LdeRelease(handle);
+    }
+
+    bool Ensure(uint32_t requested_domain)
+    {
+        if (handle != nullptr && domain_size == requested_domain) {
+            return true;
+        }
+        BtxMetalFp3LdeRelease(handle);
+        handle = nullptr;
+        domain_size = 0;
+        if (requested_domain == 0 ||
+            (requested_domain & (requested_domain - 1)) != 0) {
+            return false;
+        }
+        const uint32_t root_count =
+            requested_domain > 1 ? requested_domain / 2 : 0;
+        std::vector<uint64_t> forward(root_count);
+        std::vector<uint64_t> inverse(root_count);
+        if (root_count != 0) {
+            const Fp omega = OmegaForSize(requested_domain);
+            const Fp omega_inverse = Inv(omega);
+            forward[0] = 1;
+            inverse[0] = 1;
+            for (uint32_t i = 1; i < root_count; ++i) {
+                forward[i] = Mul(forward[i - 1], omega);
+                inverse[i] = Mul(inverse[i - 1], omega_inverse);
+            }
+        }
+        const int status = BtxMetalFp3LdeBegin(
+            requested_domain,
+            forward.empty() ? nullptr : forward.data(), root_count,
+            inverse.empty() ? nullptr : inverse.data(), root_count,
+            Inv(static_cast<Fp>(requested_domain)), &handle);
+        if (status != 0 || handle == nullptr) {
+            BtxMetalFp3LdeRelease(handle);
+            handle = nullptr;
+            return false;
+        }
+        domain_size = requested_domain;
+        return true;
+    }
+};
+
+thread_local MetalFp3LdeThreadContext g_metal_fp3_lde_context;
+
+bool BuildColumnLdeMetal(
+    const std::vector<Fp3>& source, uint32_t n_coeffs,
+    std::vector<Fp3>& output)
+{
+    static_assert(sizeof(Fp3) == 3 * sizeof(uint64_t));
+    static_assert(std::is_trivially_copyable_v<Fp3>);
+    if (source.size() > n_coeffs ||
+        n_coeffs > std::numeric_limits<uint32_t>::max() / kRCFriBlowup) {
+        return false;
+    }
+    const uint32_t n_lde = n_coeffs * kRCFriBlowup;
+    if (BtxMetalFp3LdeAvailable() != 1 ||
+        !g_metal_fp3_lde_context.Ensure(n_lde)) {
+        return false;
+    }
+    output.resize(n_lde);
+    return BtxMetalFp3LdeForward(
+               g_metal_fp3_lde_context.handle,
+               source.empty()
+                   ? nullptr
+                   : reinterpret_cast<const uint64_t*>(source.data()),
+               static_cast<uint32_t>(source.size()),
+               reinterpret_cast<uint64_t*>(output.data())) == 0;
+}
+
 // ===========================================================================
 // STREAMING COLUMN-BLOCK COMMIT (bounded prover residency)
 //
@@ -313,9 +414,10 @@ std::vector<Fp3> LdeFromCoeffs(const std::vector<Fp3>& coeffs, uint32_t blowup)
 // implementation of the same absorb order on real prove data.)
 // ===========================================================================
 
-/** Peak column-LDE staging budget for the streaming commit, in bytes.
- *  K is reduced below the nominal block size whenever K * n_lde * 24 would
- *  exceed this, so a large LDE domain cannot reintroduce a huge allocation. */
+/** Target column-LDE staging budget for the streaming commit, in bytes.
+ *  K is reduced below the nominal block size whenever possible. It cannot be
+ *  reduced below one column; that explicit minimum may exceed this target at
+ *  n_lde=2^24 and is charged by the global peak-residency guard. */
 inline uint64_t Fri3AlgStreamBlockByteBudget()
 {
     static const uint64_t b = [] {
@@ -344,7 +446,8 @@ inline uint32_t Fri3AlgStreamColumnBlockNominal()
 }
 
 /** Effective K for an LDE domain of n_lde rows: at least 1, at most the
- *  nominal K, and small enough to respect the staging byte budget. */
+ *  nominal K, and small enough to respect the staging target whenever one
+ *  full Fp3 column itself fits. */
 inline uint32_t Fri3AlgStreamColumnBlockFor(uint32_t n_lde)
 {
     const uint32_t nominal = Fri3AlgStreamColumnBlockNominal();
@@ -379,6 +482,39 @@ void BuildColumnLdeBlock(
     for (int64_t t = 0; t < count; ++t) {
         const std::vector<Fp3>& src =
             columns[c0 + static_cast<uint32_t>(t)];
+        if (MetalFp3LdeEnabled()) {
+            auto& out = block[static_cast<size_t>(t)];
+            if (!BuildColumnLdeMetal(src, n_coeffs, out)) {
+                std::fprintf(
+                    stderr,
+                    "[BTX_GPU_LDE] selected Metal Fp3 LDE failed "
+                    "(column=%u n_coeffs=%u)\n",
+                    c0 + static_cast<uint32_t>(t), n_coeffs);
+                std::fflush(stderr);
+                std::abort();
+            }
+            if (MetalFp3LdeAuditEnabled()) {
+                std::vector<Fp3> padded(n_coeffs, Fp3::Zero());
+                std::copy(src.begin(), src.end(), padded.begin());
+                const std::vector<Fp3> expected =
+                    LdeFromCoeffs(padded, kRCFriBlowup);
+                if (expected.size() != out.size() ||
+                    !std::equal(
+                        expected.begin(), expected.end(), out.begin(),
+                        [](const Fp3& a, const Fp3& b) {
+                            return Eq(a, b);
+                        })) {
+                    std::fprintf(
+                        stderr,
+                        "[BTX_GPU_LDE] CPU/Metal parity mismatch "
+                        "(column=%u n_coeffs=%u)\n",
+                        c0 + static_cast<uint32_t>(t), n_coeffs);
+                    std::fflush(stderr);
+                    std::abort();
+                }
+            }
+            continue;
+        }
         std::vector<Fp3> padded(n_coeffs, Fp3::Zero());
         std::copy(src.begin(), src.end(), padded.begin());
         block[static_cast<size_t>(t)] =
@@ -866,11 +1002,6 @@ constexpr Fri3AlgProtocolConfig
         false,
     };
 
-const Fri3AlgProtocolConfig& DualLaneConfig(uint32_t lane)
-{
-    return lane == 0 ? kFri3AlgDualLane0Config : kFri3AlgDualLane1Config;
-}
-
 struct Fri3AlgDualProtocolSuite {
     uint32_t envelope_magic;
     uint32_t envelope_version;
@@ -1256,6 +1387,7 @@ std::vector<Fri3AlgDigest> RowLeafDigestsCpu(const std::vector<std::vector<Fp3>>
                                              int32_t lane)
 {
     const uint32_t W = static_cast<uint32_t>(column_lde.size());
+#if !defined(__APPLE__)
     if (GpuProveEnabled() && gpu_row_leaf_digests != nullptr && W > 0 && n_lde > 0) {
         // Column-major flatten to the kernel layout lde[(3*c+comp)*n_lde + i];
         // the kernel canonicalizes (gl_canon) so raw limbs are fine.
@@ -1280,6 +1412,7 @@ std::vector<Fri3AlgDigest> RowLeafDigestsCpu(const std::vector<std::vector<Fp3>>
         }
         return leaves;
     }
+#endif
     std::vector<Fri3AlgDigest> leaves(n_lde);
     // LEAF-COMMIT: per-leaf Poseidon2 row hash, independent over the n_lde
     // leaves. leaves[i] is a distinct write; the W-wide row scratch is
@@ -1301,12 +1434,13 @@ std::vector<Fri3AlgDigest> RowLeafDigestsCpu(const std::vector<std::vector<Fp3>>
 }
 
 // ---------------------------------------------------------------------------
-// PR-89 GPU splice #1: CUDA row-leaf sponge (BTX_GPU_ROWLEAF=1).
+// PR-89 GPU splice #1: CUDA/Metal row-leaf sponge (BTX_GPU_ROWLEAF=1).
 //
 // Policy (no silent fallback):
 //  * env unset            -> CPU path, byte-identical to before this splice.
 //  * BTX_GPU_ROWLEAF=1    -> eligible calls (untagged lane, B256 binding) run
-//                            on the GPU; ANY GPU failure aborts the process.
+//                            on the selected provider; ANY device failure
+//                            aborts the process.
 //                            Ineligible calls fall through to CPU with a
 //                            mandatory stderr notice (never silent).
 //  * BTX_GPU_ROWLEAF_AUDIT=1 (with =1 above) -> every GPU call ALSO runs the
@@ -1344,7 +1478,7 @@ bool RowLeafDigestsGpu(const std::vector<std::vector<Fp3>>& column_lde,
         return false;
     }
     if (BtxGpuRowLeafAvailable() == 0) {
-        why = "no CUDA device (or non-CUDA build)";
+        why = "no CUDA/Metal row-leaf provider";
         return false;
     }
     static std::once_flag consts_once;
@@ -1498,7 +1632,7 @@ bool RowLeafDigestsStreamingGpu(const std::vector<std::vector<Fp3>>& columns,
         return false;
     }
     if (BtxGpuRowLeafAvailable() == 0) {
-        why = "no CUDA device (or non-CUDA build)";
+        why = "no CUDA/Metal row-leaf provider";
         return false;
     }
     static std::once_flag consts_once;
@@ -2524,7 +2658,34 @@ uint64_t Fri3AlgProjectedCommitPeakBytes(uint64_t columns, uint32_t n_lde,
         streaming
             ? alg_hash::StreamingRowHasher::WorkingSetBytesForRows(n_lde)
             : 0;
-    return lde + leaves + sponge;
+    uint64_t accelerator_extra = 0;
+    const bool accelerator_active =
+        streaming &&
+        RowLeafGpuModeActive() != RowLeafGpuMode::kOff &&
+        alg_hash::ActiveBindingMode() ==
+            alg_hash::BindingMode::B256 &&
+        BtxGpuRowLeafAvailable() != 0;
+    if (accelerator_active && n_lde != 0) {
+        // In addition to the CPU Fp3 block counted by `lde`, the streaming
+        // provider holds: a lane-major host repack of the same block; a
+        // ~256 MiB device/shared staging buffer (with the same minimum-three-
+        // lane exception as both CUDA and Metal); and four-limb device/shared
+        // output digests. `sponge` already charges the provider's resident
+        // 12-lane states, while `leaves` charges host output/Merkle levels.
+        uint64_t lanes =
+            (uint64_t{1} << 28) /
+            (static_cast<uint64_t>(n_lde) * sizeof(Fp));
+        lanes = std::clamp<uint64_t>(lanes, 3, 3072);
+        const uint64_t host_lane_pack = lde;
+        const uint64_t provider_staging =
+            static_cast<uint64_t>(n_lde) * lanes * sizeof(Fp);
+        const uint64_t provider_digests =
+            static_cast<uint64_t>(n_lde) * 4 * sizeof(Fp);
+        accelerator_extra =
+            host_lane_pack + provider_staging +
+            provider_digests;
+    }
+    return lde + leaves + sponge + accelerator_extra;
 }
 
 bool Fri3AlgCommitFitsMemoryBudget(uint64_t columns, uint32_t n_lde,
@@ -2720,30 +2881,17 @@ bool Fri3AlgBuildRowTreeCacheStreaming(
             return fail("column length");
         }
     }
+    // Use the same audited provider selection as the batch commitment. This
+    // trace-root cache was the remaining direct StreamingRowHasher call, so
+    // an explicitly selected CUDA/Metal accelerator previously served only
+    // the later batch root while the equally large first root stayed on CPU.
+    // The helper retains the exact CPU implementation when the env gate is off
+    // and preserves the hard-failure plus structured-data audit policy when on.
     std::vector<Fri3AlgDigest> leaves;
-    alg_hash::StreamingRowHasher row_hasher(n_lde);
-    {
-        // Column-BLOCK streaming: peak staging is K * n_lde Fp3, not W * n_lde.
-        const uint32_t W =
-            static_cast<uint32_t>(columns.size());
-        const uint32_t K =
-            Fri3AlgStreamColumnBlockFor(n_lde);
-        std::vector<std::vector<Fp3>> block;
-        for (uint32_t c0 = 0; c0 < W; c0 += K) {
-            const uint32_t kc = std::min(K, W - c0);
-            BuildColumnLdeBlock(
-                columns, c0, kc, n_coeffs, block);
-            std::string block_why;
-            if (!row_hasher.AbsorbColumnBlock(
-                    block, kc, &block_why)) {
-                return fail(
-                    "row absorb: " + block_why);
-            }
-        }
-    }
     std::string stream_why;
-    if (!row_hasher.Finalize(leaves, &stream_why)) {
-        return fail("row finalize: " + stream_why);
+    if (!RowLeafDigestsStreamingCpuOrGpu(
+            columns, n_lde, n_coeffs, leaves, &stream_why)) {
+        return fail("row leaves: " + stream_why);
     }
     out =
         BuildAlgMerkleTreeFromLeaves(std::move(leaves));

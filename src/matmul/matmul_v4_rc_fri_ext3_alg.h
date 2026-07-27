@@ -342,9 +342,12 @@ static_assert(kRCFri3AlgBatchMaxColumns <= (1u << 20),
  *  longer depends on W at all.
  *
  *  kRCFri3AlgStreamColumnBlock is the nominal K (columns per block).
- *  kRCFri3AlgStreamBlockByteBudget caps K x n_lde x sizeof(Fp3) so a large LDE
- *  domain (up to the kRCFriMaxLdeLog2 = 24 ceiling) cannot reintroduce a large
- *  allocation; K is reduced, never the soundness parameters.
+ *  kRCFri3AlgStreamBlockByteBudget bounds K x n_lde x sizeof(Fp3) whenever
+ *  one column fits. K cannot fall below one: at the kRCFriMaxLdeLog2 = 24
+ *  ceiling a single Fp3 column is 384 MiB, so that minimum-one-column
+ *  exception is charged honestly by Fri3AlgProjectedCommitPeakBytes and the
+ *  global fail-closed residency ceiling. K is reduced, never the soundness
+ *  parameters.
  *  Env overrides for experiments: BTX_FRI_STREAM_COLS, BTX_FRI_STREAM_BYTES. */
 inline constexpr uint32_t kRCFri3AlgStreamColumnBlock = 64;
 inline constexpr uint64_t kRCFri3AlgStreamBlockByteBudget =
@@ -396,7 +399,9 @@ inline constexpr uint64_t kRCFri3AlgCommitPeakByteCeiling =
 /**
  * Projected peak prover-held bytes for one batch commit at this shape:
  * the column-LDE working set (dense = the whole W x n_lde matrix; streaming =
- * one K-column block) plus the row-leaf/Merkle working set.
+ * one K-column block) plus the row-leaf/Merkle working set. When the selected
+ * CUDA/Metal row-leaf provider is active, this also includes its host lane
+ * pack and device/shared state, staging, and digest buffers.
  */
 [[nodiscard]] uint64_t Fri3AlgProjectedCommitPeakBytes(uint64_t columns,
                                                        uint32_t n_lde,

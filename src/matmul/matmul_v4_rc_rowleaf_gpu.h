@@ -1,7 +1,7 @@
 // Copyright (c) 2026 The Bitcoin Core developers
 // Distributed under the MIT software license.
 //
-// PR-89 GPU splice #1 — Poseidon2 ROW-LEAF sponge on CUDA.
+// PR-89 GPU splice #1 — provider-neutral Poseidon2 ROW-LEAF accelerator.
 //
 // Device-side implementation of the alg_hash row-leaf sponge
 // (LeafHashRow / StreamingRowHasher semantics, B256 mode, untagged lane):
@@ -22,7 +22,8 @@
 // device permutation can never drift from the consensus constants.
 //
 // All functions return 0 on success / nonzero on failure and never exit().
-// The non-CUDA build links matmul_v4_rc_rowleaf_gpu_stub.cpp (Available()==0).
+// CUDA and Apple Metal provide the same exact C ABI. Other builds link
+// matmul_v4_rc_rowleaf_gpu_stub.cpp (Available()==0).
 
 #ifndef BITCOIN_MATMUL_MATMUL_V4_RC_ROWLEAF_GPU_H
 #define BITCOIN_MATMUL_MATMUL_V4_RC_ROWLEAF_GPU_H
@@ -31,11 +32,13 @@
 
 extern "C" {
 
-/** 1 iff a usable CUDA device is present (0 on the stub / no device). */
+/** 1 iff a usable CUDA or Apple Metal provider is present. */
 int BtxGpuRowLeafAvailable(void);
 
 /** Upload Poseidon2-GL12 constants (from GetAlgHashConstants()). rc_ext is
- *  row-major [8][12]. Idempotent; must precede Begin. Returns 0 on success. */
+ *  row-major [8][12]. Identical repeated uploads are idempotent; a provider
+ *  may reject replacement with different bytes after initialization. Must
+ *  precede Begin. Returns 0 on success. */
 int BtxGpuRowLeafSetConstants(const uint64_t* rc_ext_8x12,
                               const uint64_t* rc_int_22,
                               const uint64_t* mu_12);

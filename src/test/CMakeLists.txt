@@ -89,6 +89,8 @@ add_executable(test_btx
   matmul_v4_rc_accel_policy_tests.cpp
   matmul_v4_rc_coupled_tests.cpp
   matmul_v4_rc_alg_hash_tests.cpp
+  matmul_v4_rc_rowleaf_gpu_tests.cpp
+  matmul_v4_rc_fp3_lde_gpu_tests.cpp
   matmul_v4_rc_alg_hash_wide_tests.cpp
   matmul_v4_rc_alg_hash_bind384_tests.cpp
   matmul_v4_rc_freivalds_tests.cpp
