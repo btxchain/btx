@@ -190,6 +190,10 @@ FamilyVmPlanV1 BuildFamilyVmPlanV1(
                 break;
             case cb::Opcode::Constant:
                 break;
+            case cb::Opcode::Challenge:
+                out.note =
+                    "stage3:family_vm:challenge_opcode_unsupported";
+                return out;
             }
         }
         instruction_count +=
@@ -2152,6 +2156,9 @@ bool FillCanonicalTrace(
                         operand_a, operand_b);
                     selector = IS_MUL;
                     break;
+                case cb::Opcode::Challenge:
+                    why = "challenge_opcode_unsupported";
+                    return false;
                 }
                 registers.push_back(result);
                 columns[RECORD_TYPE][cursor] =

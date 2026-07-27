@@ -1470,7 +1470,7 @@ static bool EmitRcSamplerLocalKernel(
         b.Sub(b.Current(aq::kColAcc), accept);
     });
     // -- liveness: act*((32 - pos)*inv_live - 1). --
-    AppendAuto(out, E, [kBlockLen](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         const uint32_t lv = b.Sub(
             b.Mul(b.Sub(b.Constant(U(kBlockLen)), b.Current(aq::kColPos)),
                   b.Current(aq::kColInvLive)),
@@ -1478,7 +1478,7 @@ static bool EmitRcSamplerLocalKernel(
         b.Mul(b.Current(aq::kColAct), lv);
     });
     // -- inactive.pos: (1 - act)*(pos - 32). --
-    AppendAuto(out, E, [kBlockLen](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         b.Mul(b.Sub(b.Constant(Fp3::One()), b.Current(aq::kColAct)),
               b.Sub(b.Current(aq::kColPos), b.Constant(U(kBlockLen))));
     });
@@ -1576,7 +1576,7 @@ static bool EmitRcSamplerLocalKernel(
     AppendAuto(out, FR, [pub_e1](ProgramBuilder& b) {
         b.Sub(b.Current(aq::kColE1), b.Constant(U(pub_e1)));
     });
-    AppendAuto(out, LR, [kBlockLen](ProgramBuilder& b) {
+    AppendAuto(out, LR, [](ProgramBuilder& b) {
         b.Sub(b.Add(b.Current(aq::kColPos), b.Current(aq::kColAcc)),
               b.Constant(U(kBlockLen)));
     });
@@ -1660,11 +1660,11 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
         });
     }
     // -- carry boolean. --
-    AppendAuto(out, E, [carry](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         EmitBool(b, b.Current(carry));
     });
     // -- selector sum is boolean (at most one active). --
-    AppendAuto(out, E, [sel](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         uint32_t sum = b.Current(sel);
         for (uint32_t i = 1; i < ha::kFixedProgramOpcodeCount; ++i) {
             sum = b.Add(sum, b.Current(sel + i));
@@ -1673,7 +1673,7 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
     });
     // -- padding rows (no selector active) force each word slot to zero. --
     for (uint32_t word = 0; word < 4; ++word) {
-        AppendAuto(out, E, [word, sel](ProgramBuilder& b) {
+        AppendAuto(out, E, [word](ProgramBuilder& b) {
             uint32_t active = b.Current(sel);
             for (uint32_t i = 1; i < ha::kFixedProgramOpcodeCount; ++i) {
                 active = b.Add(active, b.Current(sel + i));
@@ -1683,12 +1683,12 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
         });
     }
     // -- add carry is zero off the add selector. --
-    AppendAuto(out, E, [sel, carry](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         b.Mul(b.Sub(b.Constant(Fp3::One()), b.Current(sel)),
               b.Current(carry));
     });
     // -- add32: sel0 * (v0 + v1 - v2 - 2^32*carry). --
-    AppendAuto(out, E, [sel, carry](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         const uint32_t residual = b.Sub(
             b.Sub(b.Add(b.Current(ha::ValueColumn(0)),
                         b.Current(ha::ValueColumn(1))),
@@ -1701,7 +1701,7 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
         for (uint32_t bit = 0; bit < 32; ++bit) {
             const uint32_t source =
                 (bit + 32U - SHA_FIXED_ROTS[which]) & 31U;
-            AppendAuto(out, E, [which, bit, source, sel](ProgramBuilder& b) {
+            AppendAuto(out, E, [which, bit, source](ProgramBuilder& b) {
                 const uint32_t residual = b.Sub(
                     b.Current(ha::BitColumn(2, bit)),
                     EmitXor2(b, b.Current(ha::BitColumn(0, source)),
@@ -1712,7 +1712,7 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
     }
     // -- choice (selector 5) and majority (selector 6), interleaved per bit. --
     for (uint32_t bit = 0; bit < 32; ++bit) {
-        AppendAuto(out, E, [bit, sel](ProgramBuilder& b) {
+        AppendAuto(out, E, [bit](ProgramBuilder& b) {
             const uint32_t residual = b.Sub(
                 b.Current(ha::BitColumn(3, bit)),
                 EmitChoice(b, b.Current(ha::BitColumn(0, bit)),
@@ -1720,7 +1720,7 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
                            b.Current(ha::BitColumn(2, bit))));
             b.Mul(b.Current(sel + 5), residual);
         });
-        AppendAuto(out, E, [bit, sel](ProgramBuilder& b) {
+        AppendAuto(out, E, [bit](ProgramBuilder& b) {
             const uint32_t residual = b.Sub(
                 b.Current(ha::BitColumn(3, bit)),
                 EmitMajority(b, b.Current(ha::BitColumn(0, bit)),
@@ -1734,7 +1734,7 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
         const std::array<ha::BitTransform, 3> transforms =
             SigmaTransforms(which);
         for (uint32_t bit = 0; bit < 32; ++bit) {
-            AppendAuto(out, E, [which, bit, sel, transforms](ProgramBuilder& b) {
+            AppendAuto(out, E, [which, bit, transforms](ProgramBuilder& b) {
                 const uint32_t residual = b.Sub(
                     b.Current(ha::BitColumn(1, bit)),
                     EmitXor3(
@@ -1750,14 +1750,14 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
         }
     }
     // -- word slot 3 unused unless choice/majority. --
-    AppendAuto(out, E, [sel](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         const uint32_t use_word3 =
             b.Add(b.Current(sel + 5), b.Current(sel + 6));
         b.Mul(b.Sub(b.Constant(Fp3::One()), use_word3),
               b.Current(ha::ValueColumn(3)));
     });
     // -- word slot 2 unused on the sigma S-boxes. --
-    AppendAuto(out, E, [sel](ProgramBuilder& b) {
+    AppendAuto(out, E, [](ProgramBuilder& b) {
         uint32_t selected = b.Current(sel + 7);
         for (uint32_t i = 8; i <= 10; ++i) {
             selected = b.Add(selected, b.Current(sel + i));
