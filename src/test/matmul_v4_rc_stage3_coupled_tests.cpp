@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_hash_air.h>
 
 #include <test/util/setup_common.h>
 
@@ -238,7 +239,8 @@ BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_without_proof_only_engines)
     BOOST_REQUIRE(rc::ValidateRCStage3ProofStructure(proof, &why));
     BOOST_CHECK(!rc::kRCStage3CoupledRelationEnginesReady);
     BOOST_CHECK(!rc::RCStage3CoupledRelationEnginesReady(&why));
-    BOOST_CHECK(why.find("proof_engines_missing") != std::string::npos);
+    BOOST_CHECK(why.find("proof_engines_pending_measure") != std::string::npos ||
+                why.find("proof_engines_missing") != std::string::npos);
     BOOST_CHECK(why.find("bank_seed_xof") == std::string::npos);
     BOOST_CHECK(why.find("bank_page_inclusion") == std::string::npos);
     BOOST_CHECK(why.find("exchange") == std::string::npos);
@@ -1205,6 +1207,144 @@ BOOST_AUTO_TEST_CASE(coupled_mix_engine_opt_in_roundtrip)
     BOOST_CHECK(!rc::VerifyRCStage3CoupledMixEngineReceipt(
         statement, shape, bad_mix, mix_verified, &why));
     BOOST_TEST_MESSAGE("MixArithmeticV1 bytes=" << mix_receipt.size());
+}
+
+BOOST_AUTO_TEST_CASE(coupled_barrier_digest_engines_roundtrip)
+{
+    rc::RCStage3CoupledShape shape;
+    shape.barriers = 1;
+    shape.transcript_version = rc::ENC_RC_V4;
+    shape.lobes = 1;
+    shape.lobe_width = 32;
+    shape.bank_pages = 1;
+    shape.rows_per_lobe = 1;
+    shape.pages_per_barrier_lobe = 1;
+
+    rc::RCStage3CoupledBarrierDigestOpening opening;
+    opening.bank_root = Filled(0x81);
+    opening.barrier_state_bytes = {{4, 3, 2, 1}};
+
+    namespace ha = matmul::v4::rc::stage3_hash_air;
+    ha::CoupledBarrierManifest barrier;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildCoupledBarrierManifest(
+            shape.transcript_version, shape.barriers, 0,
+            opening.barrier_state_bytes[0], barrier, &why),
+        why);
+    ha::CoupledDigestManifest digest;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildCoupledDigestManifest(
+            shape.transcript_version, shape.barriers, opening.bank_root,
+            {barrier.direct.digest}, digest, &why),
+        why);
+
+    rc::RCStage3SuccinctProof statement;
+    statement.statement = rc::RCStage3StatementKind::Coupled;
+    statement.public_inputs.height = 88;
+    statement.public_inputs.coupled_profile = 4;
+    statement.public_inputs.transcript_version = shape.transcript_version;
+    statement.public_inputs.header_commitment = Filled(0x82);
+    statement.public_inputs.params_commitment = Filled(0x83);
+    statement.public_inputs.sigma = Filled(0x84);
+    statement.public_inputs.coupled_digest = digest.direct.digest;
+    statement.public_inputs.final_digest = digest.direct.digest;
+
+    std::vector<unsigned char> barrier_receipt;
+    uint256 barrier_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledBarrierEngineReceipt(
+            statement, shape, opening, barrier_receipt, barrier_root, &why),
+        why);
+    uint256 barrier_verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledBarrierEngineReceipt(
+            statement, shape, barrier_receipt, barrier_verified, &why),
+        why);
+    BOOST_CHECK(barrier_verified == barrier_root);
+    auto bad_barrier = barrier_receipt;
+    bad_barrier.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledBarrierEngineReceipt(
+        statement, shape, bad_barrier, barrier_verified, &why));
+
+    std::vector<unsigned char> digest_receipt;
+    uint256 digest_root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledDigestEngineReceipt(
+            statement, shape, opening, digest_receipt, digest_root, &why),
+        why);
+    uint256 digest_verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledDigestEngineReceipt(
+            statement, shape, digest_receipt, digest_verified, &why),
+        why);
+    BOOST_CHECK(digest_verified == digest_root);
+    auto bad_digest = digest_receipt;
+    bad_digest.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledDigestEngineReceipt(
+        statement, shape, bad_digest, digest_verified, &why));
+
+    BOOST_TEST_MESSAGE("BarrierSha256dV1 bytes=" << barrier_receipt.size());
+    BOOST_TEST_MESSAGE("DigestSha256dV1 bytes=" << digest_receipt.size());
+}
+
+BOOST_AUTO_TEST_CASE(coupled_extract_engine_opt_in_roundtrip)
+{
+    if (std::getenv("BTX_RUN_STAGE3_EXTRACT_ENGINE") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_EXTRACT_ENGINE=1 to run ExtractTilesV1 "
+            "engine roundtrip under MemoryMax≥40G");
+        return;
+    }
+    rc::RCStage3CoupledShape shape;
+    shape.barriers = 1;
+    shape.lobes = 1;
+    shape.lobe_width = 32;
+    shape.bank_pages = 1;
+    shape.rows_per_lobe = 1;
+    shape.pages_per_barrier_lobe = 1;
+    shape.transcript_version = rc::ENC_RC_V4;
+    shape.full_bank_schedule = true;
+    shape.material_exchange = true;
+    shape.exchange_rows = 32;
+
+    rc::RCStage3SuccinctProof statement;
+    statement.statement = rc::RCStage3StatementKind::Coupled;
+    statement.public_inputs.height = 907;
+    statement.public_inputs.n_bits = 0x207fffffU;
+    statement.public_inputs.coupled_profile = 4;
+    statement.public_inputs.transcript_version = shape.transcript_version;
+    statement.public_inputs.header_commitment = Filled(0x11);
+    statement.public_inputs.params_commitment = Filled(0x22);
+    statement.public_inputs.target = Filled(0xff);
+    statement.public_inputs.sigma = Filled(0x33);
+    statement.public_inputs.coupled_digest = Filled(0x44);
+    statement.public_inputs.final_digest = Filled(0x44);
+
+    std::vector<std::array<int64_t, rc::kRCMxBlockLen>> inputs(1);
+    for (uint32_t i = 0; i < inputs[0].size(); ++i) {
+        inputs[0][i] = static_cast<int64_t>(
+            (UINT64_C(1) << 40) ^
+            (uint64_t{i} * UINT64_C(0x9e3779b97f4a7c15)));
+    }
+    std::string why;
+    std::vector<unsigned char> receipt;
+    uint256 root;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledExtractEngineReceipt(
+            statement, shape, inputs, receipt, root, &why),
+        why);
+    uint256 verified;
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3CoupledExtractEngineReceipt(
+            statement, shape, receipt, verified, &why),
+        why);
+    BOOST_CHECK(verified == root);
+    auto bad = receipt;
+    bad.back() ^= 0x01;
+    BOOST_CHECK(!rc::VerifyRCStage3CoupledExtractEngineReceipt(
+        statement, shape, bad, verified, &why));
+    BOOST_TEST_MESSAGE("ExtractTilesV1 bytes=" << receipt.size());
 }
 
 BOOST_AUTO_TEST_SUITE_END()

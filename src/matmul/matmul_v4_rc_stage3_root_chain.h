@@ -239,6 +239,24 @@ struct RCStage3CoupledRootChainProof {
     const RCStage3CoupledRootChainProof& proof,
     std::string* why = nullptr);
 
+/** Barrier-role slice of the coupled root chain: every barrier SHA child plus
+ * the exact barrier input/output vector AIRs. Digest proofs may be absent;
+ * used by BarrierSha256dV1. */
+[[nodiscard]] bool VerifyRCStage3CoupledBarrierRootChain(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledRootChainProof& proof,
+    std::string* why = nullptr);
+
+/** Digest-role slice: structural barrier manifests (roots into the digest
+ * preimage), digest input/hash/value AIRs, and public coupled_digest binding.
+ * Used by DigestSha256dV1; does not re-execute barrier hash AirQuotient. */
+[[nodiscard]] bool VerifyRCStage3CoupledDigestRootChain(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledRootChainProof& proof,
+    std::string* why = nullptr);
+
 /**
  * Exact immediate producer seams for endpoint 50.
  *

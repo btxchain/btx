@@ -6,8 +6,10 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_COUPLED_H
 
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -22,11 +24,10 @@
 // verifier first checks the complete relation graph and only then dispatches
 // every receipt to a proof engine.
 //
-// IMPORTANT: a well-formed receipt is not a proof. The repository does not yet
-// contain proof-only engines for bank expansion/selection, the uint64 mix,
-// committed Extract/range traces, or barrier SHA closure. Consequently the
-// engine dispatch is deliberately fail-closed and
-// kRCStage3CoupledRelationEnginesReady remains false. Existing native-grounded
+// IMPORTANT: a well-formed receipt is not a proof until dispatched to a real
+// proof-only engine. The eight local engines (Bank/GEMM/Exchange/Perm/Mix/
+// Extract/Barrier/Digest) are packaged; kRCStage3CoupledRelationEnginesReady
+// flips only after measured evidence. Existing native-grounded
 // VerifyWinnerCoupledV7 is not called from this module.
 // ============================================================================
 
@@ -111,6 +112,23 @@ enum class RCStage3CoupledProofEngine : uint16_t {
      * when measured; does not flip Ready alone.
      */
     MixArithmeticV1 = 8,
+    /**
+     * CoupledExtract ONLY. Packages measured Extract tile product AIRs
+     * (int64 mix + ChaCha/scale SHA FlatBoundary + semantic shards +
+     * extract→barrier link) from ProveRCStage3CoupledExtractProduct.
+     */
+    ExtractTilesV1 = 9,
+    /**
+     * CoupledBarrier ONLY. Packages measured barrier SHA256d FlatBoundary +
+     * input/output vector AIRs from ProveRCStage3CoupledRootChain.
+     */
+    BarrierSha256dV1 = 10,
+    /**
+     * CoupledDigest ONLY. Packages measured coupled-digest SHA256d
+     * FlatBoundary + bank/barrier vector AIRs from the same root chain,
+     * binding the public coupled_digest.
+     */
+    DigestSha256dV1 = 11,
 };
 
 /** Public coupled shape/options copied into every relation receipt. Test-only
@@ -220,7 +238,10 @@ DeserializeRCStage3CoupledRelationReceipt(const std::vector<unsigned char>& byte
 VerifyRCStage3CoupledRelations(const RCStage3SuccinctProof& proof,
                                std::string* why = nullptr);
 
-/** Hard readiness predicate for consensus composition. */
+/** Hard readiness predicate for consensus composition. True iff all eight
+ * proof-only engines are packaged and measured (Bank/GEMM/Exchange/Perm/Mix/
+ * Extract/Barrier/Digest). Does NOT require AirRegistryReady,
+ * CommitmentOpeningBridge, or RecursiveAggregation. */
 [[nodiscard]] bool RCStage3CoupledRelationEnginesReady(std::string* why = nullptr);
 inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
 
@@ -240,14 +261,31 @@ inline constexpr bool kRCStage3CoupledBankPageInclusionPrototypeExecuted = true;
  * Backed by exchange_permutation_product_tests and mix_product_tests prove/
  * verify round-trips, plus ExchangeStagesV1 / PermutationStagesV1 /
  * MixArithmeticV1 engine packaging. Retire role-local PublicScheduleBinding
- * (and MaterialExchangeHashXof) AirGaps only; universal bridge/aggregation
- * remain, and Ready stays false while Extract/Barrier/Digest engines are open.
+ * (and MaterialExchangeHashXof) AirGaps only.
  */
 inline constexpr bool kRCStage3CoupledExchangeSchedulePrototypeExecuted = true;
 inline constexpr bool kRCStage3CoupledPermutationSchedulePrototypeExecuted = true;
 inline constexpr bool kRCStage3CoupledMixSchedulePrototypeExecuted = true;
 inline constexpr bool kRCStage3CoupledMaterialExchangeHashXofPrototypeExecuted =
     true;
+
+/**
+ * Measured Extract / Barrier / Digest local prototypes. Backed by
+ * coupled_extract_product_tests and root_chain_tests prove/verify (opt-in
+ * under MemoryMax≥40G) plus ExtractTilesV1 / BarrierSha256dV1 /
+ * DigestSha256dV1 engine packaging. Retire role-local Extract/Barrier/Digest
+ * AirGaps only.
+ *
+ * CommitmentOpeningBridge + RecursiveAggregation remain universal AirGaps and
+ * keep AirRegistryReady false; they are tracked by
+ * kRCStage3RecursiveAggregationReady / the global ledger, not by
+ * kRCStage3CoupledRelationEnginesReady (engines Ready may flip while those
+ * gaps remain — same contract as episode RelationsReady vs soft FRI budget).
+ */
+inline constexpr bool kRCStage3CoupledExtractChaChaScalePrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledExtractInt64RangePrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledBarrierSha256dPrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledDigestSha256dPrototypeExecuted = true;
 
 // ============================================================================
 // CoupledBank real proof-only engine (BankDequantPagesV1).
@@ -466,6 +504,64 @@ struct RCStage3CoupledExchangePermutationOpening {
     std::string* why = nullptr);
 
 [[nodiscard]] bool VerifyRCStage3CoupledMixEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+// ============================================================================
+// CoupledExtract ExtractTilesV1 / CoupledBarrier BarrierSha256dV1 /
+// CoupledDigest DigestSha256dV1 — packaging of measured product AIRs.
+// ============================================================================
+
+[[nodiscard]] bool BuildRCStage3CoupledExtractEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<std::array<int64_t, kRCMxBlockLen>>& inputs,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledExtractEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+struct RCStage3CoupledBarrierDigestOpening {
+    uint256 bank_root{};
+    std::vector<std::vector<uint8_t>> barrier_state_bytes;
+
+    bool operator==(const RCStage3CoupledBarrierDigestOpening&) const =
+        default;
+};
+
+[[nodiscard]] bool BuildRCStage3CoupledBarrierEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledBarrierDigestOpening& opening,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledBarrierEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool BuildRCStage3CoupledDigestEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledBarrierDigestOpening& opening,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledDigestEngineReceipt(
     const RCStage3SuccinctProof& statement,
     const RCStage3CoupledShape& shape,
     const std::vector<unsigned char>& engine_receipt,

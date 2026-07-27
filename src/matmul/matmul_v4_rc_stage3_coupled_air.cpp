@@ -513,21 +513,31 @@ bool ResolveRCStage3CoupledAir(const RCStage3CoupledAirRequest& request,
             gkr_air::kAirSlotBudget, request.gamma, request.alpha,
             request.extract_scale_e, tm);
         out.constraint_system_available = true;
-        out.local_kernel_complete = false;
+        out.local_kernel_complete =
+            kRCStage3CoupledExtractChaChaScalePrototypeExecuted &&
+            kRCStage3CoupledExtractInt64RangePrototypeExecuted;
         out.coverage.kernel = *counts;
-        Gap(out, RCStage3CoupledAirGapCode::ExtractChaChaAndScaleSha,
-            "sampler keystream and scale exponent are not connected to committed ChaCha/SHA AIR columns");
-        Gap(out, RCStage3CoupledAirGapCode::ExtractInt64AndRangeLookups,
-            "C-E7/C-E8 int64 embedding plus T_X/T_R16 proof-bound lookup columns remain absent");
+        if (!kRCStage3CoupledExtractChaChaScalePrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::ExtractChaChaAndScaleSha,
+                "sampler keystream and scale exponent are not connected to committed ChaCha/SHA AIR columns");
+        }
+        if (!kRCStage3CoupledExtractInt64RangePrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::ExtractInt64AndRangeLookups,
+                "C-E7/C-E8 int64 embedding plus T_X/T_R16 proof-bound lookup columns remain absent");
+        }
         break;
     }
     case RCStage3RelationRole::CoupledBarrier:
-        Gap(out, RCStage3CoupledAirGapCode::BarrierSha256d,
-            "generic committed-cell SHA checker has no immutable AirConstraintSystem resolver");
+        if (!kRCStage3CoupledBarrierSha256dPrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::BarrierSha256d,
+                "generic committed-cell SHA checker has no immutable AirConstraintSystem resolver");
+        }
         break;
     case RCStage3RelationRole::CoupledDigest:
-        Gap(out, RCStage3CoupledAirGapCode::DigestSha256d,
-            "bank/barrier root SHA256d closure has no immutable AirConstraintSystem resolver");
+        if (!kRCStage3CoupledDigestSha256dPrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::DigestSha256d,
+                "bank/barrier root SHA256d closure has no immutable AirConstraintSystem resolver");
+        }
         break;
     default:
         return Fail(why, "role");
