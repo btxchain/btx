@@ -196,7 +196,7 @@ CurrentRCStage3EpisodeRelationGaps();
 inline constexpr bool kRCStage3EpisodeGemmRecursionEnginesExecuted = true;
 inline constexpr bool kRCStage3EpisodeTileTreeRecursionEnginesExecuted = true;
 inline constexpr bool kRCStage3EpisodeDigestRecursionEnginesExecuted = true;
-inline constexpr bool kRCStage3EpisodeBuilderRecursionEnginesExecuted = false;
+inline constexpr bool kRCStage3EpisodeBuilderRecursionEnginesExecuted = true;
 inline constexpr bool kRCStage3EpisodeExtractRecursionEnginesExecuted = false;
 inline constexpr bool kRCStage3EpisodeWiringRecursionEnginesExecuted = false;
 
