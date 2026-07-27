@@ -45,6 +45,26 @@
 // RCStage3TwoLevelRootVerifyBudgetV1 (matmul_v4_rc_stage3_recursive.h), which
 // is fail-closed: it can only ever KEEP the ProductionPerformanceUnmeasured
 // gap, never remove it on the strength of a number produced here.
+//
+// g2 UPDATE — the DENSE mirror above (this file) is not the only construction
+// in the tree. recursive_fixedpoint::BuildFoldBusCompositionMulti is a NARROW
+// ARITY-N node (vertical hash-opening/fold/scalar buses; column count
+// independent of arity and child width) that IS executable
+// (kFoldHashScalarMemoryBusExecutable). Exercised on a REAL block's REAL
+// role-section proofs in
+// matmul_v4_rc_stage3_narrow_recurse_tests.cpp
+// (real_block_narrow_multi_child_root), a two-child node over the two
+// smallest real roles verifies in under 700 ms — INSIDE the 900 ms budget and
+// roughly a 10x reduction versus this file's dense single-level floor on the
+// same box. See RCStage3TwoLevelRootVerifyBudgetV1::
+// measured_narrow_multichild_* for the pinned numbers. It STILL cannot retire
+// this gap: kCompleteRecursiveFixedPointExecutable is false (arbitrary
+// per-point child-constraint evaluation and the SHA256d FS transcript chip
+// are not joined), so it is a partial verifier mirror, same caveat as (1)
+// above. It also does not generalize to all six real roles at once: their
+// combined FRI domain exceeds kRCFriMaxLdeLog2 starting at the third role in
+// natural order (real_block_narrow_root_shape_probe), a REPRESENTABILITY
+// bound on summed active rows, not on a fixed arity count.
 // ============================================================================
 
 #include <matmul/matmul_v4_rc_air_quotient.h>
@@ -353,6 +373,27 @@ BOOST_AUTO_TEST_CASE(full_family_two_level_root_does_not_commit_at_toy_width)
                        << " vcs_cols=" << n0.measurement.n_columns
                        << " budget_s=" << kRelayBudgetSeconds
                        << " within_budget=" << (l1_verify_s <= kRelayBudgetSeconds));
+
+    // Same lever as above but with the Q=192 per-query loop split across
+    // threads (AirQuotientVerify's new `verify_threads` parameter, still
+    // default 1 / fully sequential for every other caller in the tree). The
+    // per-query checks are mutually independent — distinct Merkle indices,
+    // distinct local scratch — so this changes only wall-clock, never the
+    // accept/reject verdict; `ok0_mt` is required to agree with `ok0`.
+    // Thread count matches this session's own core cap, not a claim about
+    // relay-node hardware in general.
+    std::string why0_mt;
+    const auto v0_mt = std::chrono::steady_clock::now();
+    const bool ok0_mt = ar::VerifyAggregate(n0.proof, n0.pis, l1_seed, 2, fam, &why0_mt, 4);
+    const double l1_verify_mt_s = Since(v0_mt);
+    BOOST_CHECK_MESSAGE(ok0_mt, why0_mt);
+    BOOST_CHECK_EQUAL(ok0_mt, ok0);
+    BOOST_TEST_MESSAGE("TWOLEVEL_L1_VERIFY_MT4 measured_s=" << l1_verify_mt_s
+                       << " vcs_cols=" << n0.measurement.n_columns
+                       << " budget_s=" << kRelayBudgetSeconds
+                       << " within_budget=" << (l1_verify_mt_s <= kRelayBudgetSeconds)
+                       << " speedup_x=" << (l1_verify_s / l1_verify_mt_s)
+                       << " NOTE=opt_in_not_the_recorded_production_number");
 
     // The SINGLE-LEVEL FLOOR. This shape is the smallest aggregate the mirror
     // admits, so if it misses the budget nothing wider can make it. Re-pin the

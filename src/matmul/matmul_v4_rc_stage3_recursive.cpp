@@ -962,6 +962,46 @@ CurrentRCStage3TwoLevelRootVerifyBudgetV1()
         out.measured_single_level_verify_micros <=
             static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL;
 
+    // ---- MEASURED: the NARROW multi-child node, on a REAL block. ----
+    // recursive_fixedpoint::BuildFoldBusCompositionMulti packs an ARITY-N
+    // node's hash-opening/fold/scalar buses vertically: the V_CS column
+    // count does not grow with arity or child width, so arity is paid in
+    // rows, not columns (see that header's zero-expansion measurement).
+    // matmul_v4_rc_stage3_narrow_recurse_tests.cpp,
+    // real_block_narrow_multi_child_root, default roles {episode:tiletree,
+    // episode:digest} (BTX_BLK_ROLES="4,5"): a two-child node over REAL
+    // role-section proofs of a real block, 575 V_CS columns x 32,768 rows,
+    // proved and verified with the real unmodified row-wise verifier
+    // (AirQuotientVerifyRows, cross-checked against the ordinary
+    // AirQuotientVerify view of the same proof) in 683 ms — INSIDE the
+    // 900 ms relay budget and a 9.98x reduction versus the dense single-level
+    // floor measured on the same box (6.8135 s under
+    // BTX_G2_TWO_LEVEL_HEAVY). This is real evidence for the narrow path this
+    // struct's own doc comment asks for, not a toy shape.
+    //
+    // It CANNOT retire the gap by itself: recursive_fixedpoint::
+    // kCompleteRecursiveFixedPointExecutable is false, so an accepted narrow
+    // node is a PARTIAL verifier mirror (arbitrary per-point child-constraint
+    // evaluation and the SHA256d Fiat-Shamir transcript chip are not joined),
+    // exactly like the descendant-free lower bound recorded above.
+    //
+    // Representability is row-sum-, not arity-, bounded: adding all six real
+    // roles in natural order (real_block_narrow_root_shape_probe) crosses
+    // kRCFriMaxLdeLog2 at the THIRD role (builder+gemm fits exactly at 2^24;
+    // +extract needs 2^25), and combining all six directly reproduces that as
+    // a MEASURED prove-time failure (BTX_BLK_ROLES="0,1,2,3,4,5":
+    // "Fri3AlgBuildRowTreeCacheStreaming: shape"). The two smallest real
+    // roles fit with headroom; the two largest do not fit together at all.
+    out.measured_narrow_multichild_verify_micros = 683000;
+    out.measured_narrow_multichild_vcs_columns = 575;
+    out.measured_narrow_multichild_arity = 2;
+    out.narrow_multichild_within_relay_budget =
+        out.measured_narrow_multichild_verify_micros != 0 &&
+        out.measured_narrow_multichild_verify_micros <=
+            static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL;
+    // Always false today; see kCompleteRecursiveFixedPointExecutable.
+    out.narrow_multichild_complete_verifier_mirror = false;
+
     // ---- The only conjunction that may retire the gap. ----
     out.within_relay_budget =
         out.production_shape_representable &&
@@ -990,7 +1030,18 @@ CurrentRCStage3TwoLevelRootVerifyBudgetV1()
         std::to_string(static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL) +
         (out.single_level_within_relay_budget
              ? ";single_level_within_budget"
-             : ";single_level_ALREADY_OVER_BUDGET");
+             : ";single_level_ALREADY_OVER_BUDGET") +
+        ";narrow_multichild_arity=" +
+        std::to_string(out.measured_narrow_multichild_arity) +
+        ";narrow_multichild_vcs_columns=" +
+        std::to_string(out.measured_narrow_multichild_vcs_columns) +
+        ";narrow_multichild_verify_measured_us=" +
+        std::to_string(out.measured_narrow_multichild_verify_micros) +
+        (out.narrow_multichild_within_relay_budget
+             ? ";narrow_multichild_within_budget"
+             : ";narrow_multichild_ALREADY_OVER_BUDGET") +
+        ";narrow_multichild_complete_verifier_mirror=" +
+        (out.narrow_multichild_complete_verifier_mirror ? "true" : "false");
     return out;
 }
 

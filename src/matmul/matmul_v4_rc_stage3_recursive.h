@@ -336,6 +336,53 @@ struct RCStage3TwoLevelRootVerifyBudgetV1 {
     uint64_t measured_single_level_verify_micros{0};
     uint32_t measured_single_level_vcs_columns{0};
     bool single_level_within_relay_budget{false};
+    /**
+     * g2 NARROW-PATH EVIDENCE. The dense arity-4 verifier mirror above is not
+     * the only construction: recursive_fixedpoint::BuildFoldBusCompositionMulti
+     * is an ARITY-N narrow node (kFoldHashScalarMemoryBusExecutable — real,
+     * executable, differentially tested) whose V_CS column count does not grow
+     * with arity or child width; arity is paid entirely in rows.
+     *
+     * MEASURED on a REAL block's REAL role-section proofs (not a toy shape),
+     * matmul_v4_rc_stage3_narrow_recurse_tests.cpp,
+     * real_block_narrow_multi_child_root, roles {episode:tiletree,
+     * episode:digest} (BTX_BLK_ROLES default "4,5"): a two-child narrow node,
+     * 575 V_CS columns x 32,768 rows, proved and verified with the real
+     * unmodified row-wise verifier in 683 ms — INSIDE the 900 ms relay budget,
+     * and a 9.98x reduction versus the single-level dense floor measured on
+     * the same box (6.8135 s; see BTX_G2_TWO_LEVEL_HEAVY run notes). This is
+     * the >5.6x-reduction narrow path the g2 gap string was missing evidence
+     * for.
+     *
+     * It does NOT retire the gap. recursive_fixedpoint::
+     * kCompleteRecursiveFixedPointExecutable is false: arbitrary per-point
+     * child-constraint evaluation and the SHA256d Fiat-Shamir transcript chip
+     * are not joined to this node, so an accepted narrow root does not by
+     * itself imply the children's native verifiers accept. It is a
+     * PARTIAL verifier mirror, exactly like the descendant-free lower bound
+     * above, and is recorded for the same reason: it changes what closing g2
+     * would require, from "make a two-level root 5.6x faster" (representable
+     * nowhere) to "join two already-fast chips to an already-fast, in-budget
+     * node."
+     *
+     * REPRESENTABILITY is arity- and shape-dependent here too, but on total
+     * ACTIVE ROWS, not on a single child-width crossover: the combined node's
+     * FRI domain must fit kRCFriMaxLdeLog2. Adding all six real roles in
+     * natural order (matmul_v4_rc_stage3_narrow_recurse_tests.cpp,
+     * real_block_narrow_root_shape_probe) crosses that cap at the THIRD role
+     * (builder+gemm fits at exactly 2^24; +extract needs 2^25) — MEASURED
+     * failure to commit reproduced directly (BTX_BLK_ROLES="0,1,2,3,4,5",
+     * Fri3AlgBuildRowTreeCacheStreaming: shape). The two smallest real roles
+     * fit comfortably; the two largest do not fit together at all. No single
+     * "arity ceiling" integer describes this — the binding resource is the
+     * summed row count, and which roles are combined matters as much as how
+     * many.
+     */
+    uint64_t measured_narrow_multichild_verify_micros{0};
+    uint32_t measured_narrow_multichild_vcs_columns{0};
+    uint32_t measured_narrow_multichild_arity{0};
+    bool narrow_multichild_within_relay_budget{false};
+    bool narrow_multichild_complete_verifier_mirror{false};
     /** The only conjunction that may retire the gap. */
     bool within_relay_budget{false};
     std::string note;
