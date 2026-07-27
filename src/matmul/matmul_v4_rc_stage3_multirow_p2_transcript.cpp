@@ -45,6 +45,35 @@ inline constexpr uint64_t kQueryCandidateDomain =
 inline constexpr uint64_t kPaddingDomain =
     0x4d525032'50414430ull; // "MRP2PAD0"
 
+constexpr bool TranscriptDomainsAreDistinct()
+{
+    constexpr std::array<uint64_t, 14> domains{
+        kShapeDomain,
+        kAirLambdaDomain,
+        kFriSeedDomain,
+        kZ1Domain,
+        kZ2Domain,
+        kOodDomain,
+        kBatchSeedDomain,
+        kCoefficientDomain,
+        kWeightDomain,
+        kFoldStateDomain,
+        kFoldBetaDomain,
+        kQuerySeedDomain,
+        kQueryCandidateDomain,
+        kPaddingDomain,
+    };
+    for (uint32_t left = 0; left < domains.size(); ++left) {
+        for (uint32_t right = left + 1;
+             right < domains.size(); ++right) {
+            if (domains[left] == domains[right]) return false;
+        }
+    }
+    return true;
+}
+
+static_assert(TranscriptDomainsAreDistinct());
+
 struct HashEvent {
     uint64_t domain{0};
     std::vector<Fp> lanes;
@@ -157,7 +186,7 @@ bool OodValid(const Fp3& z, uint32_t n_lde)
         !gf::Eq(Pow(z, n_lde), Fp3::One());
 }
 
-bool StatementShape(const StatementV1& s, uint32_t& n_lde)
+bool SkeletonShape(const TranscriptSkeletonV1& s, uint32_t& n_lde)
 {
     if (s.statement_version != kStatementVersionV1 ||
         s.protocol_version != kProtocolVersionV1 ||
@@ -194,9 +223,7 @@ bool StatementShape(const StatementV1& s, uint32_t& n_lde)
         n_lde < kMinLdeRowsV1 ||
         n_lde > kMaxLdeRowsV1 ||
         s.column_len.empty() ||
-        s.evals_z1.size() != s.column_len.size() ||
-        s.evals_z2.size() != s.column_len.size() ||
-        s.folds.empty()) {
+        s.fold_n_leaves.empty()) {
         return false;
     }
     const std::array<Fri3AlgMultiRowGroupRole, 3> roles{
@@ -232,20 +259,20 @@ bool StatementShape(const StatementV1& s, uint32_t& n_lde)
     for (uint32_t value = s.n_coeffs; value > 1; value >>= 1) {
         ++fold_count;
     }
-    if (s.folds.size() != fold_count + 1) return false;
+    if (s.fold_n_leaves.size() != fold_count + 1) return false;
     uint32_t leaves = n_lde;
-    for (uint32_t fold = 0; fold < s.folds.size(); ++fold) {
-        if (s.folds[fold].n_leaves != leaves ||
+    for (uint32_t fold = 0; fold < s.fold_n_leaves.size(); ++fold) {
+        if (s.fold_n_leaves[fold] != leaves ||
             leaves < s.blowup) {
             return false;
         }
-        if (fold + 1 < s.folds.size()) leaves >>= 1;
+        if (fold + 1 < s.fold_n_leaves.size()) leaves >>= 1;
     }
     return leaves == s.blowup &&
-        s.folds.back().n_leaves == s.blowup;
+        s.fold_n_leaves.back() == s.blowup;
 }
 
-std::vector<Fp> ShapeLanes(const StatementV1& s)
+std::vector<Fp> ShapeLanes(const TranscriptSkeletonV1& s)
 {
     std::vector<Fp> lanes;
     lanes.reserve(s.column_len.size() + 2);
@@ -255,38 +282,70 @@ std::vector<Fp> ShapeLanes(const StatementV1& s)
     return lanes;
 }
 
-std::vector<Fp> OodLanes(const StatementV1& s, const Fp3& z1,
-                         const Fp3& z2)
+std::vector<Fp> OodLanes(
+    const std::vector<Fp3>& evals_z1,
+    const std::vector<Fp3>& evals_z2,
+    const Fp3& z1,
+    const Fp3& z2)
 {
     std::vector<Fp> lanes;
-    lanes.reserve(8 + 6 * s.column_len.size());
-    AppendU32(lanes, static_cast<uint32_t>(s.evals_z1.size()));
-    AppendU32(lanes, static_cast<uint32_t>(s.evals_z2.size()));
+    lanes.reserve(8 + 3 * (evals_z1.size() + evals_z2.size()));
+    AppendU32(lanes, static_cast<uint32_t>(evals_z1.size()));
+    AppendU32(lanes, static_cast<uint32_t>(evals_z2.size()));
     AppendFp3(lanes, z1);
     AppendFp3(lanes, z2);
-    for (const auto& value : s.evals_z1) AppendFp3(lanes, value);
-    for (const auto& value : s.evals_z2) AppendFp3(lanes, value);
+    for (const auto& value : evals_z1) AppendFp3(lanes, value);
+    for (const auto& value : evals_z2) AppendFp3(lanes, value);
     return lanes;
 }
 
-ReceiptV1 DeriveInternal(const StatementV1& s,
-                         std::vector<HashEvent>* events)
+Fri3AlgDigest StateHash(
+    IncrementalTranscriptV1& transcript,
+    std::vector<HashEvent>* events,
+    uint64_t domain,
+    const std::vector<Fp>& lanes)
 {
-    ReceiptV1 out;
-    out.statement_version = s.statement_version;
-    out.protocol_version = s.protocol_version;
-    out.protocol_domain = s.protocol_domain;
+    ++transcript.hash_events;
+    return Hash(events, domain, lanes);
+}
+
+bool FailIncremental(
+    IncrementalTranscriptV1& transcript,
+    const char* note)
+{
+    transcript.stage = IncrementalStageV1::Failed;
+    transcript.valid = false;
+    transcript.note = note;
+    transcript.receipt.valid = false;
+    transcript.receipt.note = note;
+    return false;
+}
+
+IncrementalTranscriptV1 BeginIncrementalInternal(
+    const TranscriptSkeletonV1& s,
+    std::vector<HashEvent>* events)
+{
+    IncrementalTranscriptV1 out;
+    out.receipt.statement_version = s.statement_version;
+    out.receipt.protocol_version = s.protocol_version;
+    out.receipt.protocol_domain = s.protocol_domain;
     uint32_t n_lde = 0;
-    if (!StatementShape(s, n_lde)) {
-        out.note = "stage3:multirow_p2:statement_shape";
+    if (!SkeletonShape(s, n_lde)) {
+        FailIncremental(
+            out, "stage3:multirow_p2:statement_shape");
         return out;
     }
+    out.n_lde = n_lde;
+    out.column_len = s.column_len;
+    out.fold_n_leaves = s.fold_n_leaves;
 
-    out.shape_commit = Hash(events, kShapeDomain, ShapeLanes(s));
+    out.receipt.shape_commit =
+        StateHash(out, events, kShapeDomain, ShapeLanes(s));
     if (!DigestEqual(
-            out.shape_commit,
+            out.receipt.shape_commit,
             Fri3AlgShapeCommit(s.n_coeffs, s.column_len))) {
-        out.note = "stage3:multirow_p2:shape_commit_mismatch";
+        FailIncremental(
+            out, "stage3:multirow_p2:shape_commit_mismatch");
         return out;
     }
 
@@ -305,8 +364,8 @@ ReceiptV1 DeriveInternal(const StatementV1& s,
     }
     AppendDigest(lanes, s.groups[0].root);
     AppendDigest(lanes, s.groups[1].root);
-    out.air_lambda =
-        DigestFp3(Hash(events, kAirLambdaDomain, lanes));
+    out.receipt.air_lambda = DigestFp3(
+        StateHash(out, events, kAirLambdaDomain, lanes));
 
     lanes.clear();
     AppendU32(lanes, kProtocolVersionV1);
@@ -314,7 +373,7 @@ ReceiptV1 DeriveInternal(const StatementV1& s,
     // Split-RAP fixes this to zero today. It is placed only after Rq exists,
     // so a future taxed nonce cannot grind the AIR-composition lambda.
     AppendU64(lanes, s.pow_grind_nonce);
-    AppendFp3(lanes, out.air_lambda);
+    AppendFp3(lanes, out.receipt.air_lambda);
     AppendU32(lanes, s.trace_rows);
     AppendU32(lanes, s.trace_columns);
     AppendU32(lanes, s.quotient_len);
@@ -324,7 +383,7 @@ ReceiptV1 DeriveInternal(const StatementV1& s,
     for (uint32_t index : s.base_column_indices) {
         AppendU32(lanes, index);
     }
-    AppendDigest(lanes, out.shape_commit);
+    AppendDigest(lanes, out.receipt.shape_commit);
     for (const auto& group : s.groups) {
         AppendU32(lanes, static_cast<uint32_t>(group.role));
         AppendU32(lanes, group.first_column);
@@ -332,146 +391,281 @@ ReceiptV1 DeriveInternal(const StatementV1& s,
         AppendU32(lanes, group.n_leaves);
         AppendDigest(lanes, group.root);
     }
-    out.fri_seed = Hash(events, kFriSeedDomain, lanes);
+    out.receipt.fri_seed =
+        StateHash(out, events, kFriSeedDomain, lanes);
 
     for (uint32_t candidate = 0;
          candidate < kOodCandidatesV1; ++candidate) {
         lanes.clear();
-        AppendDigest(lanes, out.fri_seed);
+        AppendDigest(lanes, out.receipt.fri_seed);
         AppendU32(lanes, n_lde);
         AppendU32(lanes, candidate);
-        out.z1_candidates[candidate] =
-            DigestFp3(Hash(events, kZ1Domain, lanes));
-        if (out.z1_selected == kOodCandidatesV1 &&
-            OodValid(out.z1_candidates[candidate], n_lde)) {
-            out.z1_selected = candidate;
-            out.z1 = out.z1_candidates[candidate];
+        out.receipt.z1_candidates[candidate] =
+            DigestFp3(StateHash(out, events, kZ1Domain, lanes));
+        if (out.receipt.z1_selected == kOodCandidatesV1 &&
+            OodValid(
+                out.receipt.z1_candidates[candidate], n_lde)) {
+            out.receipt.z1_selected = candidate;
+            out.receipt.z1 =
+                out.receipt.z1_candidates[candidate];
         }
     }
-    if (out.z1_selected == kOodCandidatesV1) {
-        out.note = "stage3:multirow_p2:z1_k2_exhausted";
+    if (out.receipt.z1_selected == kOodCandidatesV1) {
+        FailIncremental(
+            out, "stage3:multirow_p2:z1_k2_exhausted");
         return out;
     }
     for (uint32_t candidate = 0;
          candidate < kOodCandidatesV1; ++candidate) {
         lanes.clear();
-        AppendDigest(lanes, out.fri_seed);
-        AppendFp3(lanes, out.z1);
+        AppendDigest(lanes, out.receipt.fri_seed);
+        AppendFp3(lanes, out.receipt.z1);
         AppendU32(lanes, n_lde);
         AppendU32(lanes, candidate);
-        out.z2_candidates[candidate] =
-            DigestFp3(Hash(events, kZ2Domain, lanes));
-        if (out.z2_selected == kOodCandidatesV1 &&
-            OodValid(out.z2_candidates[candidate], n_lde) &&
-            !Fp3Equal(out.z2_candidates[candidate], out.z1)) {
-            out.z2_selected = candidate;
-            out.z2 = out.z2_candidates[candidate];
+        out.receipt.z2_candidates[candidate] =
+            DigestFp3(StateHash(out, events, kZ2Domain, lanes));
+        if (out.receipt.z2_selected == kOodCandidatesV1 &&
+            OodValid(
+                out.receipt.z2_candidates[candidate], n_lde) &&
+            !Fp3Equal(
+                out.receipt.z2_candidates[candidate],
+                out.receipt.z1)) {
+            out.receipt.z2_selected = candidate;
+            out.receipt.z2 =
+                out.receipt.z2_candidates[candidate];
         }
     }
-    if (out.z2_selected == kOodCandidatesV1) {
-        out.note = "stage3:multirow_p2:z2_k2_exhausted";
+    if (out.receipt.z2_selected == kOodCandidatesV1) {
+        FailIncremental(
+            out, "stage3:multirow_p2:z2_k2_exhausted");
         return out;
     }
 
-    out.ood_eval_commit =
-        Hash(events, kOodDomain, OodLanes(s, out.z1, out.z2));
+    out.stage = IncrementalStageV1::SkeletonBound;
+    out.stage_commitment = out.receipt.fri_seed;
+    out.valid = true;
+    out.note = "stage3:multirow_p2:skeleton_bound";
+    return out;
+}
+
+bool BindEvaluationsInternal(
+    IncrementalTranscriptV1& out,
+    const std::vector<Fp3>& evals_z1,
+    const std::vector<Fp3>& evals_z2,
+    std::vector<HashEvent>* events)
+{
+    if (!out.valid ||
+        out.stage != IncrementalStageV1::SkeletonBound) {
+        return FailIncremental(
+            out, "stage3:multirow_p2:evaluation_stage_order");
+    }
+    if (evals_z1.size() != out.column_len.size() ||
+        evals_z2.size() != out.column_len.size()) {
+        return FailIncremental(
+            out, "stage3:multirow_p2:evaluation_shape");
+    }
+
+    out.receipt.ood_eval_commit = StateHash(
+        out, events, kOodDomain,
+        OodLanes(
+            evals_z1, evals_z2,
+            out.receipt.z1, out.receipt.z2));
     if (!DigestEqual(
-            out.ood_eval_commit,
+            out.receipt.ood_eval_commit,
             Fri3AlgOodEvalCommit(
-                out.z1, out.z2, s.evals_z1, s.evals_z2))) {
-        out.note = "stage3:multirow_p2:ood_commit_mismatch";
-        return out;
+                out.receipt.z1, out.receipt.z2,
+                evals_z1, evals_z2))) {
+        return FailIncremental(
+            out, "stage3:multirow_p2:ood_commit_mismatch");
     }
 
-    lanes.clear();
-    AppendDigest(lanes, out.fri_seed);
-    AppendFp3(lanes, out.z1);
-    AppendFp3(lanes, out.z2);
-    AppendDigest(lanes, out.ood_eval_commit);
-    out.batch_seed = Hash(events, kBatchSeedDomain, lanes);
-    out.batching_coefficients.reserve(s.column_len.size());
-    for (uint32_t column = 0; column < s.column_len.size(); ++column) {
+    std::vector<Fp> lanes;
+    AppendDigest(lanes, out.receipt.fri_seed);
+    AppendFp3(lanes, out.receipt.z1);
+    AppendFp3(lanes, out.receipt.z2);
+    AppendDigest(lanes, out.receipt.ood_eval_commit);
+    out.receipt.batch_seed =
+        StateHash(out, events, kBatchSeedDomain, lanes);
+    out.receipt.batching_coefficients.clear();
+    out.receipt.batching_coefficients.reserve(
+        out.column_len.size());
+    for (uint32_t column = 0;
+         column < out.column_len.size(); ++column) {
         lanes.clear();
-        AppendDigest(lanes, out.batch_seed);
+        AppendDigest(lanes, out.receipt.batch_seed);
         AppendU32(lanes, column);
-        out.batching_coefficients.push_back(
-            DigestFp3(Hash(events, kCoefficientDomain, lanes)));
+        out.receipt.batching_coefficients.push_back(
+            DigestFp3(StateHash(
+                out, events, kCoefficientDomain, lanes)));
     }
     lanes.clear();
-    AppendDigest(lanes, out.batch_seed);
+    AppendDigest(lanes, out.receipt.batch_seed);
     AppendU32(lanes, 1);
-    out.w1 = DigestFp3(Hash(events, kWeightDomain, lanes));
+    out.receipt.w1 = DigestFp3(
+        StateHash(out, events, kWeightDomain, lanes));
     lanes.back() = gf::FromU64(2);
-    out.w2 = DigestFp3(Hash(events, kWeightDomain, lanes));
+    out.receipt.w2 = DigestFp3(
+        StateHash(out, events, kWeightDomain, lanes));
 
     lanes.clear();
-    AppendDigest(lanes, out.batch_seed);
-    AppendFp3(lanes, out.w1);
-    AppendFp3(lanes, out.w2);
-    Fri3AlgDigest fold_state =
-        Hash(events, kFoldStateDomain, lanes);
-    out.fold_challenges.reserve(s.folds.size() - 1);
-    for (uint32_t fold = 0; fold < s.folds.size(); ++fold) {
-        lanes.clear();
-        AppendDigest(lanes, fold_state);
-        AppendU32(lanes, fold);
-        AppendU32(lanes, s.folds[fold].n_leaves);
-        AppendDigest(lanes, s.folds[fold].root);
-        fold_state = Hash(events, kFoldStateDomain, lanes);
-        // The terminal constant layer is committed and enters the query
-        // seed, but there is no fold after it and therefore no beta.
-        if (fold + 1 < s.folds.size()) {
-            lanes.clear();
-            AppendDigest(lanes, fold_state);
-            AppendU32(lanes, fold);
-            out.fold_challenges.push_back(
-                DigestFp3(Hash(events, kFoldBetaDomain, lanes)));
-        }
+    AppendDigest(lanes, out.receipt.batch_seed);
+    AppendFp3(lanes, out.receipt.w1);
+    AppendFp3(lanes, out.receipt.w2);
+    out.fold_state =
+        StateHash(out, events, kFoldStateDomain, lanes);
+    out.stage_commitment = out.fold_state;
+    out.receipt.fold_challenges.clear();
+    out.receipt.fold_challenges.reserve(
+        out.fold_n_leaves.size() - 1);
+    out.stage = IncrementalStageV1::EvaluationsBound;
+    out.note = "stage3:multirow_p2:evaluations_bound";
+    return true;
+}
+
+FoldStepV1 AbsorbFoldInternal(
+    IncrementalTranscriptV1& out,
+    const FoldClaimV1& fold,
+    std::vector<HashEvent>* events)
+{
+    FoldStepV1 step;
+    step.fold_index = out.next_fold;
+    if (!out.valid ||
+        (out.stage != IncrementalStageV1::EvaluationsBound &&
+         out.stage != IncrementalStageV1::FoldsInProgress)) {
+        FailIncremental(
+            out, "stage3:multirow_p2:fold_stage_order");
+        step.note = out.note;
+        return step;
+    }
+    if (out.next_fold >= out.fold_n_leaves.size() ||
+        fold.n_leaves != out.fold_n_leaves[out.next_fold]) {
+        FailIncremental(
+            out, "stage3:multirow_p2:fold_shape_or_order");
+        step.note = out.note;
+        return step;
     }
 
-    lanes.clear();
-    AppendDigest(lanes, fold_state);
-    AppendFp3(lanes, s.final_value);
+    std::vector<Fp> lanes;
+    AppendDigest(lanes, out.fold_state);
+    AppendU32(lanes, out.next_fold);
+    AppendU32(lanes, fold.n_leaves);
+    AppendDigest(lanes, fold.root);
+    out.fold_state =
+        StateHash(out, events, kFoldStateDomain, lanes);
+    out.stage_commitment = out.fold_state;
+
+    const bool terminal =
+        out.next_fold + 1 == out.fold_n_leaves.size();
+    if (!terminal) {
+        lanes.clear();
+        AppendDigest(lanes, out.fold_state);
+        AppendU32(lanes, out.next_fold);
+        step.beta = DigestFp3(
+            StateHash(out, events, kFoldBetaDomain, lanes));
+        step.beta_derived = true;
+        out.receipt.fold_challenges.push_back(step.beta);
+    }
+    ++out.next_fold;
+    out.stage = terminal
+        ? IncrementalStageV1::FoldsComplete
+        : IncrementalStageV1::FoldsInProgress;
+    out.note = terminal
+        ? "stage3:multirow_p2:folds_complete"
+        : "stage3:multirow_p2:fold_absorbed";
+    step.valid = true;
+    step.note = out.note;
+    return step;
+}
+
+bool FinalizeQueriesInternal(
+    IncrementalTranscriptV1& out,
+    const Fp3& final_value,
+    std::vector<HashEvent>* events)
+{
+    if (!out.valid ||
+        out.stage != IncrementalStageV1::FoldsComplete ||
+        out.next_fold != out.fold_n_leaves.size() ||
+        out.receipt.fold_challenges.size() + 1 !=
+            out.fold_n_leaves.size()) {
+        return FailIncremental(
+            out, "stage3:multirow_p2:query_stage_order");
+    }
+
+    std::vector<Fp> lanes;
+    AppendDigest(lanes, out.fold_state);
+    AppendFp3(lanes, final_value);
     AppendU32(lanes, kQueriesV1);
     AppendU32(lanes, kQueryCandidatesV1);
-    out.query_seed = Hash(events, kQuerySeedDomain, lanes);
+    out.receipt.query_seed =
+        StateHash(out, events, kQuerySeedDomain, lanes);
 
     for (uint32_t query = 0; query < kQueriesV1; ++query) {
-        auto& q = out.queries[query];
+        auto& q = out.receipt.queries[query];
         for (uint32_t candidate = 0;
              candidate < kQueryCandidatesV1; ++candidate) {
             lanes.clear();
-            AppendDigest(lanes, out.query_seed);
+            AppendDigest(lanes, out.receipt.query_seed);
             // q < 256 and candidate < 256: one injective u32 schedule word.
             AppendU32(lanes, (query << 8) | candidate);
             q.candidate_digest[candidate] =
-                Hash(events, kQueryCandidateDomain, lanes);
+                StateHash(
+                    out, events, kQueryCandidateDomain, lanes);
             if (events != nullptr) {
                 events->back().query_candidate = true;
                 events->back().query_first = candidate == 0;
             }
-            const uint64_t raw =
-                gf::Canonical(q.candidate_digest[candidate][0]);
-            // p = 1 (mod 2^k), so rejecting p-1 before masking removes the
-            // sole biased residue for every supported power-of-two N.
-            (void)raw;
         }
         const auto selection =
-            AuditQuerySelectionV1(q.candidate_digest, n_lde);
+            AuditQuerySelectionV1(
+                q.candidate_digest, out.n_lde);
         if (!selection.valid) {
-            out.note = "stage3:multirow_p2:q192_candidate_exhausted";
-            return out;
+            return FailIncremental(
+                out,
+                "stage3:multirow_p2:q192_candidate_exhausted");
         }
         q.selected_ordinal = selection.selected_ordinal;
         q.index = selection.index;
     }
-    out.q192_with_replacement = true;
+    if (out.hash_events != ExpectedHashEventsV1(
+            static_cast<uint32_t>(out.column_len.size()),
+            static_cast<uint32_t>(out.fold_n_leaves.size()))) {
+        return FailIncremental(
+            out, "stage3:multirow_p2:hash_event_count");
+    }
+    out.receipt.q192_with_replacement = true;
+    out.receipt.valid = true;
+    out.receipt.note =
+        "stage3:multirow_p2:q192_k2_with_replacement;"
+        "backend_hook_pending";
+    out.stage = IncrementalStageV1::Finalized;
+    out.stage_commitment = out.receipt.query_seed;
     out.valid = true;
-    out.note = out.valid
-        ? "stage3:multirow_p2:q192_k2_with_replacement;"
-          "backend_hook_pending"
-        : "stage3:multirow_p2:query_sampling";
-    return out;
+    out.note = out.receipt.note;
+    return true;
+}
+
+ReceiptV1 DeriveInternal(
+    const StatementV1& s,
+    std::vector<HashEvent>* events)
+{
+    auto transcript =
+        BeginIncrementalInternal(BuildSkeletonV1(s), events);
+    if (!transcript.valid ||
+        !BindEvaluationsInternal(
+            transcript, s.evals_z1, s.evals_z2, events)) {
+        return transcript.receipt;
+    }
+    for (const auto& fold : s.folds) {
+        if (!AbsorbFoldInternal(
+                transcript, fold, events).valid) {
+            return transcript.receipt;
+        }
+    }
+    if (!FinalizeQueriesInternal(
+            transcript, s.final_value, events)) {
+        return transcript.receipt;
+    }
+    return transcript.receipt;
 }
 
 bool ReceiptEqual(const ReceiptV1& a, const ReceiptV1& b)
@@ -803,6 +997,75 @@ void BuildConstraints(const LayoutV1& layout,
 }
 
 } // namespace
+
+TranscriptSkeletonV1 BuildSkeletonV1(
+    const StatementV1& statement)
+{
+    TranscriptSkeletonV1 out;
+    out.statement_version = statement.statement_version;
+    out.protocol_version = statement.protocol_version;
+    out.protocol_domain = statement.protocol_domain;
+    out.public_fs_seed = statement.public_fs_seed;
+    out.pow_grind_nonce = statement.pow_grind_nonce;
+    out.trace_rows = statement.trace_rows;
+    out.trace_columns = statement.trace_columns;
+    out.quotient_len = statement.quotient_len;
+    out.n_coeffs = statement.n_coeffs;
+    out.blowup = statement.blowup;
+    out.base_column_indices = statement.base_column_indices;
+    out.groups = statement.groups;
+    out.column_len = statement.column_len;
+    out.fold_n_leaves.reserve(statement.folds.size());
+    for (const auto& fold : statement.folds) {
+        out.fold_n_leaves.push_back(fold.n_leaves);
+    }
+    return out;
+}
+
+IncrementalTranscriptV1 BeginIncrementalV1(
+    const TranscriptSkeletonV1& skeleton)
+{
+    return BeginIncrementalInternal(skeleton, nullptr);
+}
+
+bool BindEvaluationsV1(
+    IncrementalTranscriptV1& transcript,
+    const std::vector<Fp3>& evals_z1,
+    const std::vector<Fp3>& evals_z2)
+{
+    return BindEvaluationsInternal(
+        transcript, evals_z1, evals_z2, nullptr);
+}
+
+FoldStepV1 AbsorbFoldV1(
+    IncrementalTranscriptV1& transcript,
+    const FoldClaimV1& fold)
+{
+    return AbsorbFoldInternal(transcript, fold, nullptr);
+}
+
+bool FinalizeQueriesV1(
+    IncrementalTranscriptV1& transcript,
+    const Fp3& final_value)
+{
+    return FinalizeQueriesInternal(
+        transcript, final_value, nullptr);
+}
+
+uint32_t ExpectedHashEventsV1(
+    uint32_t columns,
+    uint32_t folds)
+{
+    if (columns == 0 || folds == 0) return 0;
+    // 7 skeleton hashes; W+5 evaluation/batching hashes; 2F-1 fold
+    // hashes; one query-seed hash and Q*K query-candidate hashes.
+    const uint64_t total =
+        uint64_t{columns} + 2ULL * folds +
+        7ULL + 5ULL - 1ULL + 1ULL +
+        uint64_t{kQueriesV1} * kQueryCandidatesV1;
+    if (total > std::numeric_limits<uint32_t>::max()) return 0;
+    return static_cast<uint32_t>(total);
+}
 
 ReceiptV1 DeriveV1(const StatementV1& statement)
 {

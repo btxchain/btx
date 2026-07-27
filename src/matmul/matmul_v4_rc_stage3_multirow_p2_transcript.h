@@ -108,6 +108,106 @@ struct ReceiptV1 {
     std::string note;
 };
 
+/**
+ * Commitment-time transcript inputs.  Evaluation values, fold roots, and the
+ * terminal value are deliberately absent: a streaming backend learns those
+ * only after the corresponding commitments have been produced.
+ */
+struct TranscriptSkeletonV1 {
+    uint16_t statement_version{kStatementVersionV1};
+    uint32_t protocol_version{kProtocolVersionV1};
+    uint64_t protocol_domain{kProtocolDomainV1};
+    uint256 public_fs_seed{};
+    uint64_t pow_grind_nonce{0};
+    uint32_t trace_rows{0};
+    uint32_t trace_columns{0};
+    uint32_t quotient_len{0};
+    uint32_t n_coeffs{0};
+    uint32_t blowup{kRCFriBlowup};
+    std::vector<uint32_t> base_column_indices;
+    std::array<GroupClaimV1, kGroupsV1> groups{};
+    std::vector<uint32_t> column_len;
+    std::vector<uint32_t> fold_n_leaves;
+};
+
+enum class IncrementalStageV1 : uint8_t {
+    Empty = 0,
+    SkeletonBound,
+    EvaluationsBound,
+    FoldsInProgress,
+    FoldsComplete,
+    Finalized,
+    Failed,
+};
+
+/**
+ * One-pass V11 transcript state.  Each transcript hash is evaluated exactly
+ * once; no stage replays the O(W) evaluation/coefficient prefix or preceding
+ * fold roots.
+ */
+struct IncrementalTranscriptV1 {
+    IncrementalStageV1 stage{IncrementalStageV1::Empty};
+    ReceiptV1 receipt{};
+    uint32_t n_lde{0};
+    uint32_t next_fold{0};
+    uint32_t hash_events{0};
+    std::vector<uint32_t> column_len;
+    std::vector<uint32_t> fold_n_leaves;
+    Fri3AlgDigest fold_state{};
+    /** Domain-separated commitment at the current stage boundary. */
+    Fri3AlgDigest stage_commitment{};
+    bool valid{false};
+    std::string note;
+};
+
+struct FoldStepV1 {
+    uint32_t fold_index{0};
+    bool beta_derived{false};
+    gf::Fp3 beta{};
+    bool valid{false};
+    std::string note;
+};
+
+/** Extract the commitment-time skeleton without reading evaluation values. */
+[[nodiscard]] TranscriptSkeletonV1 BuildSkeletonV1(
+    const StatementV1& statement);
+
+/**
+ * Stage 1: validate the exact proof shape, bind all ordered group roots, and
+ * derive shape/air-lambda/FRI seed plus the two-candidate OOD points.
+ */
+[[nodiscard]] IncrementalTranscriptV1 BeginIncrementalV1(
+    const TranscriptSkeletonV1& skeleton);
+
+/**
+ * Stage 2: bind the actual OOD evaluations once and derive the independent
+ * batching coefficients and two DEEP weights.
+ */
+[[nodiscard]] bool BindEvaluationsV1(
+    IncrementalTranscriptV1& transcript,
+    const std::vector<gf::Fp3>& evals_z1,
+    const std::vector<gf::Fp3>& evals_z2);
+
+/**
+ * Stage 3: absorb the next actual fold root.  Every non-terminal fold derives
+ * exactly one beta; the terminal constant layer derives none.
+ */
+[[nodiscard]] FoldStepV1 AbsorbFoldV1(
+    IncrementalTranscriptV1& transcript,
+    const FoldClaimV1& fold);
+
+/**
+ * Stage 4: bind the terminal value and derive the query seed and Q192
+ * independent K2 with-replacement indices.
+ */
+[[nodiscard]] bool FinalizeQueriesV1(
+    IncrementalTranscriptV1& transcript,
+    const gf::Fp3& final_value);
+
+/** Exact number of domain-separated hashes for a complete valid transcript. */
+[[nodiscard]] uint32_t ExpectedHashEventsV1(
+    uint32_t columns, uint32_t folds);
+
 /** Exact native derivation. No legacy SHA/FMR2 state is accepted. */
 [[nodiscard]] ReceiptV1 DeriveV1(const StatementV1& statement);
 

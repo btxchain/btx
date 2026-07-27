@@ -134,6 +134,289 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    incremental_backend_api_is_exactly_one_shot_equivalent)
+{
+    const auto statement = Statement();
+    const auto one_shot = DeriveV1(statement);
+    BOOST_REQUIRE_MESSAGE(one_shot.valid, one_shot.note);
+
+    auto transcript =
+        BeginIncrementalV1(BuildSkeletonV1(statement));
+    BOOST_REQUIRE_MESSAGE(transcript.valid, transcript.note);
+    BOOST_CHECK(
+        transcript.stage == IncrementalStageV1::SkeletonBound);
+    BOOST_CHECK_EQUAL(transcript.hash_events, 7U);
+    BOOST_CHECK(!Different(
+        transcript.stage_commitment,
+        transcript.receipt.fri_seed));
+
+    BOOST_REQUIRE_MESSAGE(
+        BindEvaluationsV1(
+            transcript, statement.evals_z1, statement.evals_z2),
+        transcript.note);
+    BOOST_CHECK(
+        transcript.stage ==
+        IncrementalStageV1::EvaluationsBound);
+    BOOST_CHECK_EQUAL(
+        transcript.hash_events,
+        7U + statement.column_len.size() + 5U);
+    BOOST_CHECK(!Different(
+        transcript.stage_commitment, transcript.fold_state));
+
+    uint32_t expected_events = transcript.hash_events;
+    uint32_t betas = 0;
+    for (uint32_t fold = 0; fold < statement.folds.size(); ++fold) {
+        const auto step =
+            AbsorbFoldV1(transcript, statement.folds[fold]);
+        BOOST_REQUIRE_MESSAGE(step.valid, step.note);
+        BOOST_CHECK_EQUAL(step.fold_index, fold);
+        const bool terminal = fold + 1 == statement.folds.size();
+        BOOST_CHECK_EQUAL(step.beta_derived, !terminal);
+        expected_events += terminal ? 1U : 2U;
+        BOOST_CHECK_EQUAL(transcript.hash_events, expected_events);
+        if (!terminal) {
+            BOOST_REQUIRE_LT(
+                betas, one_shot.fold_challenges.size());
+            BOOST_CHECK(gf::Eq(
+                step.beta, one_shot.fold_challenges[betas]));
+            ++betas;
+        }
+    }
+    BOOST_CHECK(
+        transcript.stage == IncrementalStageV1::FoldsComplete);
+    BOOST_CHECK_EQUAL(betas, statement.folds.size() - 1);
+
+    BOOST_REQUIRE_MESSAGE(
+        FinalizeQueriesV1(transcript, statement.final_value),
+        transcript.note);
+    BOOST_CHECK(
+        transcript.stage == IncrementalStageV1::Finalized);
+    BOOST_CHECK(transcript.receipt.valid);
+    BOOST_CHECK_EQUAL(
+        transcript.hash_events,
+        ExpectedHashEventsV1(
+            static_cast<uint32_t>(statement.column_len.size()),
+            static_cast<uint32_t>(statement.folds.size())));
+    BOOST_CHECK_EQUAL(transcript.hash_events, 424U);
+    BOOST_CHECK(!Different(
+        transcript.stage_commitment,
+        transcript.receipt.query_seed));
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        VerifyReceiptV1(statement, transcript.receipt, &why), why);
+
+    const auto product = BuildProductV1(statement);
+    BOOST_REQUIRE_MESSAGE(product.valid, product.note);
+    BOOST_CHECK_EQUAL(product.hash_events, transcript.hash_events);
+}
+
+BOOST_AUTO_TEST_CASE(
+    incremental_stage_omission_and_reordering_fail_closed)
+{
+    const auto statement = Statement();
+    {
+        IncrementalTranscriptV1 empty;
+        BOOST_CHECK(!BindEvaluationsV1(
+            empty, statement.evals_z1, statement.evals_z2));
+        BOOST_CHECK(empty.stage == IncrementalStageV1::Failed);
+    }
+    {
+        auto transcript =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(transcript.valid);
+        const auto early =
+            AbsorbFoldV1(transcript, statement.folds.front());
+        BOOST_CHECK(!early.valid);
+        BOOST_CHECK(transcript.stage == IncrementalStageV1::Failed);
+    }
+    {
+        auto transcript =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(transcript.valid);
+        BOOST_CHECK(!FinalizeQueriesV1(
+            transcript, statement.final_value));
+        BOOST_CHECK(transcript.stage == IncrementalStageV1::Failed);
+    }
+    {
+        auto transcript =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(BindEvaluationsV1(
+            transcript, statement.evals_z1, statement.evals_z2));
+        BOOST_CHECK(!BindEvaluationsV1(
+            transcript, statement.evals_z1, statement.evals_z2));
+        BOOST_CHECK(transcript.stage == IncrementalStageV1::Failed);
+    }
+    {
+        auto transcript =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(BindEvaluationsV1(
+            transcript, statement.evals_z1, statement.evals_z2));
+        // The decreasing leaf count is an explicit stage-order tag.
+        const auto reordered =
+            AbsorbFoldV1(transcript, statement.folds[1]);
+        BOOST_CHECK(!reordered.valid);
+        BOOST_CHECK(transcript.stage == IncrementalStageV1::Failed);
+    }
+    {
+        auto transcript =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(BindEvaluationsV1(
+            transcript, statement.evals_z1, statement.evals_z2));
+        for (uint32_t fold = 0;
+             fold + 1 < statement.folds.size(); ++fold) {
+            BOOST_REQUIRE(
+                AbsorbFoldV1(
+                    transcript, statement.folds[fold]).valid);
+        }
+        BOOST_CHECK(!FinalizeQueriesV1(
+            transcript, statement.final_value));
+        BOOST_CHECK(transcript.stage == IncrementalStageV1::Failed);
+    }
+    {
+        auto transcript =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(BindEvaluationsV1(
+            transcript, statement.evals_z1, statement.evals_z2));
+        for (const auto& fold : statement.folds) {
+            BOOST_REQUIRE(
+                AbsorbFoldV1(transcript, fold).valid);
+        }
+        BOOST_CHECK(!AbsorbFoldV1(
+            transcript, statement.folds.back()).valid);
+        BOOST_CHECK(transcript.stage == IncrementalStageV1::Failed);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    incremental_root_eval_fold_terminal_and_nonce_mutations_bind)
+{
+    const auto statement = Statement();
+    auto honest =
+        BeginIncrementalV1(BuildSkeletonV1(statement));
+    BOOST_REQUIRE(honest.valid);
+
+    {
+        auto changed = statement;
+        changed.groups[1].root[2] = gf::Add(
+            changed.groups[1].root[2], gf::FromU64(1));
+        const auto mutated =
+            BeginIncrementalV1(BuildSkeletonV1(changed));
+        BOOST_REQUIRE(mutated.valid);
+        BOOST_CHECK(Different(
+            mutated.stage_commitment, honest.stage_commitment));
+    }
+    {
+        auto changed = statement;
+        changed.pow_grind_nonce = 1;
+        const auto mutated =
+            BeginIncrementalV1(BuildSkeletonV1(changed));
+        BOOST_CHECK(!mutated.valid);
+        BOOST_CHECK(mutated.stage == IncrementalStageV1::Failed);
+    }
+
+    BOOST_REQUIRE(BindEvaluationsV1(
+        honest, statement.evals_z1, statement.evals_z2));
+    {
+        auto mutated =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        auto evals = statement.evals_z1;
+        evals[3] = gf::Add(evals[3], U(1));
+        BOOST_REQUIRE(BindEvaluationsV1(
+            mutated, evals, statement.evals_z2));
+        BOOST_CHECK(Different(
+            mutated.stage_commitment, honest.stage_commitment));
+        BOOST_CHECK(!gf::Eq(
+            mutated.receipt.batching_coefficients[0],
+            honest.receipt.batching_coefficients[0]));
+    }
+    {
+        auto mutated =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        auto short_evals = statement.evals_z1;
+        short_evals.pop_back();
+        BOOST_CHECK(!BindEvaluationsV1(
+            mutated, short_evals, statement.evals_z2));
+        BOOST_CHECK(mutated.stage == IncrementalStageV1::Failed);
+    }
+
+    for (uint32_t fold = 0; fold < 3; ++fold) {
+        BOOST_REQUIRE(
+            AbsorbFoldV1(honest, statement.folds[fold]).valid);
+    }
+    {
+        auto mutated =
+            BeginIncrementalV1(BuildSkeletonV1(statement));
+        BOOST_REQUIRE(BindEvaluationsV1(
+            mutated, statement.evals_z1, statement.evals_z2));
+        for (uint32_t fold = 0; fold < 3; ++fold) {
+            BOOST_REQUIRE(
+                AbsorbFoldV1(
+                    mutated, statement.folds[fold]).valid);
+        }
+        auto changed_fold = statement.folds[3];
+        changed_fold.root[1] = gf::Add(
+            changed_fold.root[1], gf::FromU64(1));
+        const auto changed_step =
+            AbsorbFoldV1(mutated, changed_fold);
+        const auto honest_step =
+            AbsorbFoldV1(honest, statement.folds[3]);
+        BOOST_REQUIRE(changed_step.valid);
+        BOOST_REQUIRE(honest_step.valid);
+        BOOST_CHECK(changed_step.beta_derived);
+        BOOST_CHECK(!gf::Eq(
+            changed_step.beta, honest_step.beta));
+        BOOST_CHECK(Different(
+            mutated.stage_commitment, honest.stage_commitment));
+    }
+
+    auto terminal_a =
+        BeginIncrementalV1(BuildSkeletonV1(statement));
+    auto terminal_b =
+        BeginIncrementalV1(BuildSkeletonV1(statement));
+    BOOST_REQUIRE(BindEvaluationsV1(
+        terminal_a, statement.evals_z1, statement.evals_z2));
+    BOOST_REQUIRE(BindEvaluationsV1(
+        terminal_b, statement.evals_z1, statement.evals_z2));
+    for (uint32_t fold = 0; fold < statement.folds.size(); ++fold) {
+        auto a = statement.folds[fold];
+        auto b = a;
+        if (fold + 1 == statement.folds.size()) {
+            b.root[0] = gf::Add(b.root[0], gf::FromU64(1));
+        }
+        const auto step_a = AbsorbFoldV1(terminal_a, a);
+        const auto step_b = AbsorbFoldV1(terminal_b, b);
+        BOOST_REQUIRE(step_a.valid);
+        BOOST_REQUIRE(step_b.valid);
+        if (fold + 1 == statement.folds.size()) {
+            BOOST_CHECK(!step_a.beta_derived);
+            BOOST_CHECK(!step_b.beta_derived);
+        }
+    }
+    BOOST_REQUIRE(FinalizeQueriesV1(
+        terminal_a, statement.final_value));
+    BOOST_REQUIRE(FinalizeQueriesV1(
+        terminal_b, statement.final_value));
+    BOOST_CHECK(Different(
+        terminal_a.receipt.query_seed,
+        terminal_b.receipt.query_seed));
+
+    auto terminal_value =
+        BeginIncrementalV1(BuildSkeletonV1(statement));
+    BOOST_REQUIRE(BindEvaluationsV1(
+        terminal_value, statement.evals_z1, statement.evals_z2));
+    for (const auto& fold : statement.folds) {
+        BOOST_REQUIRE(
+            AbsorbFoldV1(terminal_value, fold).valid);
+    }
+    BOOST_REQUIRE(FinalizeQueriesV1(
+        terminal_value,
+        gf::Add(statement.final_value, U(1))));
+    BOOST_CHECK(Different(
+        terminal_a.receipt.query_seed,
+        terminal_value.receipt.query_seed));
+}
+
+BOOST_AUTO_TEST_CASE(
     with_replacement_distribution_and_exhaustion_theorem)
 {
     // Goldilocks p = 1 mod 2^k for every supported k. Thus [0,p-2]
