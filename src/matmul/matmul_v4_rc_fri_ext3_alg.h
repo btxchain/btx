@@ -129,6 +129,56 @@ static_assert(kRCFri3AlgP2SqueezeLaneProofVersion !=
                       kRCFri3AlgShortFsLaneProofVersion,
               "P2-squeeze proof version must not collide with Q192 SHA lanes");
 
+/** Test-only bounded SHA execution-plan canary.  Its challenge primitive,
+ * query count and proximity policy differ from the active Q192 V8 protocol,
+ * so it must never share the active proof version or domain tag. */
+inline constexpr uint32_t kRCFri3AlgShaFsCanaryProofVersion = 9;
+inline constexpr char kRCFri3AlgShaFsCanaryDomainTag[] =
+    "BTX_RC_FRIB3ALG_SHA_FS_BOUNDED_CANARY_V9";
+static_assert(
+    kRCFri3AlgShaFsCanaryProofVersion !=
+        kRCFri3AlgP2SqueezeLaneProofVersion &&
+    kRCFri3AlgShaFsCanaryProofVersion !=
+        kRCFri3AlgShortFsLaneProofVersion &&
+    kRCFri3AlgShaFsCanaryProofVersion !=
+        kRCFri3AlgBatchProofVersion,
+    "bounded SHA canary must be protocol-separated from every live lane");
+
+// ===========================================================================
+// Additive bounded-recursion protocol: P2 / Q192 / fixed OOD K=2 (V10).
+//
+// This lane keeps the active V8 statement, Q=192 proximity screen, short
+// transcript commitments and Poseidon2 challenge primitive, but replaces the
+// unbounded OOD rejection loop with exactly two reserved candidates per OOD
+// point.  It has its own proof version and domain so no V8 proof can be
+// interpreted under the bounded transcript (or vice versa).
+//
+// Deliberately NOT selected by any active-protocol constant.  Its wrappers
+// below are the only producer/consumer entry points until the complete V10
+// parent transcript AIR and its global theorem are integrated.
+// ===========================================================================
+inline constexpr uint32_t kRCFri3AlgP2Q192K2ProofVersionV10 = 10;
+inline constexpr char kRCFri3AlgP2Q192K2DomainTagV10[] =
+    "BTX_RC_FRIB3ALG_Q192_P2_K2_V10";
+inline constexpr uint32_t kRCFri3AlgP2Q192K2OodCandidatesV10 = 2;
+inline constexpr bool kRCFri3AlgP2Q192K2ActivatedV10 = false;
+static_assert(
+    kRCFri3AlgP2Q192K2ProofVersionV10 !=
+            kRCFri3AlgP2SqueezeLaneProofVersion &&
+        kRCFri3AlgP2Q192K2ProofVersionV10 !=
+            kRCFri3AlgShaFsCanaryProofVersion &&
+        kRCFri3AlgP2Q192K2ProofVersionV10 !=
+            kRCFri3AlgShortFsLaneProofVersion &&
+        kRCFri3AlgP2Q192K2ProofVersionV10 !=
+            kRCFri3AlgBatchProofVersion,
+    "bounded P2/Q192/K2 must have a unique single-lane proof version");
+static_assert(
+    kRCFri3AlgP2Q192K2OodCandidatesV10 == 2,
+    "V10 recursive replay has a fixed two-candidate OOD schedule");
+static_assert(
+    !kRCFri3AlgP2Q192K2ActivatedV10,
+    "V10 is additive evidence, not the active consensus protocol");
+
 // ===========================================================================
 // PR-89 g4 ACTIVATION.  The short-transcript lane is the lane the Q192
 // recursion now PRODUCES and CONSUMES.  Everything the flip changes is derived
@@ -1763,10 +1813,32 @@ MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
     std::string* why = nullptr);
 
 /**
+ * Additive V10 P2/Q192/fixed-K=2 producer and verifier.
+ *
+ * These wrappers use a protocol config that differs from active V8 only in
+ * proof version, transcript domain and the fixed two-candidate OOD schedule.
+ * They do not alter Fri3AlgBatchCommit/Fri3AlgBatchVerify or any activation
+ * selector.
+ */
+[[nodiscard]] Fri3AlgBatchCommitResult
+Fri3AlgP2Q192K2V10BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+[[nodiscard]] bool Fri3AlgP2Q192K2V10BatchVerify(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why = nullptr);
+[[nodiscard]] std::optional<Fri3AlgBatchProof>
+DeserializeFri3AlgP2Q192K2V10BatchProof(
+    const std::vector<unsigned char>& in);
+
+/**
  * SHA-FS digest-match canary commit (NOT consensus / NOT Fri3AlgBatchCommit).
  *
- * Same absorb layout as the active P2-squeeze lane (version 8, short-FS
- * commitment lanes) but draws challenges via SHA256d and samples z1/z2 from a
+ * Same short-FS commitment-lane encoding as the active P2-squeeze lane, but
+ * uses a distinct test-only version/tag, draws challenges via SHA256d, and
+ * samples z1/z2 from a
  * fixed K=2 OOD window. Lets BuildFiatShamirShaExecutionPlanV1 measure
  * every_digest_matches_claim on an honestly bounded-sampled proof while
  * production keeps Poseidon2 squeezes. Small query_count for light MemoryMax
@@ -1775,6 +1847,9 @@ MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
 [[nodiscard]] Fri3AlgBatchCommitResult Fri3AlgShaFsBoundedOodCanaryBatchCommit(
     const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
     uint64_t pow_grind_nonce = 0);
+[[nodiscard]] bool Fri3AlgShaFsBoundedOodCanaryBatchVerify(
+    const Fri3AlgBatchProof& proof, const uint256& fs_seed,
+    std::string* why = nullptr);
 
 /** Built, executable and measurable; consumed by NO consensus path. Mirrors
  *  the kAlgebraicQueryIndexActivatedV1 precedent in fs_selection_air. */

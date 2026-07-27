@@ -165,6 +165,12 @@ add_executable(test_btx
   matmul_v4_rc_stage3_recursive_consumption_tests.cpp
   matmul_v4_rc_stage3_recursive_fixedpoint_tests.cpp
   matmul_v4_rc_stage3_recursive_receipt_tests.cpp
+  matmul_v4_rc_stage3_p2_transcript_air_tests.cpp
+  matmul_v4_rc_stage3_p2_transcript_binding_tests.cpp
+  matmul_v4_rc_stage3_airq_p2_transcript_tests.cpp
+  matmul_v4_rc_stage3_p2_same_parent_join_tests.cpp
+  matmul_v4_rc_stage3_p2_normalized_exports_tests.cpp
+  matmul_v4_rc_stage3_p2_prefix_source_air_tests.cpp
   matmul_v4_rc_stage3_ali_manifest_tests.cpp
   matmul_v4_rc_stage3_ali_same_parent_bridge_tests.cpp
   matmul_v4_rc_stage3_relation_local_sharding_tests.cpp
@@ -180,6 +186,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_registry_membership_air_tests.cpp
   matmul_v4_rc_stage3_registry_vm_same_parent_join_tests.cpp
   matmul_v4_rc_stage3_poseidon_air_tests.cpp
+  matmul_v4_rc_stage3_multirow_p2_transcript_tests.cpp
   matmul_v4_rc_stage3_poseidon_bytecode_tests.cpp
   matmul_v4_rc_stage3_v5_v6_bus_tests.cpp
   matmul_v4_rc_stage3_v6_fs_tests.cpp
@@ -203,6 +210,7 @@ add_executable(test_btx
   matmul_v4_rc_fri_ext3_tests.cpp
   matmul_v4_rc_fri_ext3_alg_tests.cpp
   matmul_v4_rc_fri_ext3_alg_order_audit_tests.cpp
+  matmul_v4_rc_fri_ext3_alg_p2_k2_v10_tests.cpp
   matmul_v4_rc_fri_ext3_alg_fixture_tests.cpp
   matmul_v4_rc_vendor_accel_tests.cpp
   matmul_v4_provider_contract_tests.cpp

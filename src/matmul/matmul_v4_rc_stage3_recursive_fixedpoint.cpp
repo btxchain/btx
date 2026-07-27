@@ -3469,6 +3469,28 @@ bool ValidateNormalizedAlgAirProofFieldBusV1(
     return true;
 }
 
+namespace {
+
+std::optional<Fri3AlgBatchProof>
+DeserializeNormalizedAlgAirBatchCodecV1(
+    const Fri3AlgBatchProof& proof,
+    const std::vector<unsigned char>& encoded)
+{
+    if (proof.version ==
+            kRCFri3AlgP2Q192K2ProofVersionV10) {
+        return
+            DeserializeFri3AlgP2Q192K2V10BatchProof(
+                encoded);
+    }
+    if (proof.version !=
+            kRCFri3AlgActiveBatchProofVersion) {
+        return std::nullopt;
+    }
+    return DeserializeFri3AlgBatchProof(encoded);
+}
+
+} // namespace
+
 bool ValidateNormalizedAlgAirBatchCodecBytesV1(
     const Fri3AlgBatchProof& proof,
     const std::vector<unsigned char>& encoded,
@@ -3483,7 +3505,8 @@ bool ValidateNormalizedAlgAirBatchCodecBytesV1(
             "normalized_batch_codec_not_exact_proof_encoding");
     }
     const auto decoded =
-        DeserializeFri3AlgBatchProof(encoded);
+        DeserializeNormalizedAlgAirBatchCodecV1(
+            proof, encoded);
     if (!decoded.has_value()) {
         return Fail(
             why,
@@ -3517,7 +3540,8 @@ bool BuildNormalizedAlgAirBatchCodecMapV1(
         return false;
     }
     const auto decoded =
-        DeserializeFri3AlgBatchProof(encoded);
+        DeserializeNormalizedAlgAirBatchCodecV1(
+            proof, encoded);
     if (!decoded.has_value()) {
         return Fail(
             why,

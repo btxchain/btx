@@ -752,6 +752,34 @@ constexpr Fri3AlgProtocolConfig kFri3AlgQ192P2SqueezeV8Config{
     true,  // p2_squeeze_challenges
 };
 
+// Additive bounded-recursion lane.  The active selector below intentionally
+// does not mention this config: V10 remains reachable only through its named
+// producer/verifier wrappers until the corresponding parent AIR is complete.
+constexpr Fri3AlgProtocolConfig kFri3AlgP2Q192K2V10Config{
+    kRCFri3AlgP2Q192K2ProofVersionV10,
+    kRCFri3AlgP2Q192K2DomainTagV10,
+    kRCFri3AlgDualUniformDrawDomainTag,
+    kRCFri3AlgDualIndexDrawDomainTag,
+    kRCFri3AlgNumQueries,
+    kRCFri3AlgP2Q192K2OodCandidatesV10,
+    false, // same legacy challenge distribution as active V8
+    false, // same geometric batching coefficients as active V8
+    -1,    // same unprefixed AlgHash lane as active V8
+    true,  // retain the Q192 proximity guard
+    true,  // short transcript commitments
+    true,  // Poseidon2 challenge squeezes
+};
+static_assert(
+    kFri3AlgP2Q192K2V10Config.query_count ==
+            kRCFri3AlgNumQueries &&
+        kFri3AlgP2Q192K2V10Config.ood_candidates == 2 &&
+        kFri3AlgP2Q192K2V10Config
+            .require_q192_proximity_guard &&
+        kFri3AlgP2Q192K2V10Config
+            .short_transcript_commitments &&
+        kFri3AlgP2Q192K2V10Config.p2_squeeze_challenges,
+    "V10 must remain P2/Q192 with a fixed K=2 OOD schedule");
+
 // PR-89 g4 ACTIVATION.  The ONE selector every Q192 producer and consumer in
 // this file reads.  Held as a constexpr object rather than a reference so the
 // version/tag/short-transcript members cannot drift apart from
@@ -3157,16 +3185,36 @@ Fri3AlgBatchCommitResult Fri3AlgP2SqueezeBatchCommit(
                                         kFri3AlgQ192P2SqueezeV8Config);
 }
 
+Fri3AlgBatchCommitResult Fri3AlgP2Q192K2V10BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3AlgBatchCommitConfigured(
+        columns, fs_seed, pow_grind_nonce,
+        kFri3AlgP2Q192K2V10Config);
+}
+
+bool Fri3AlgP2Q192K2V10BatchVerify(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why)
+{
+    return Fri3AlgBatchVerifyConfigured(
+        proof, fs_seed,
+        kFri3AlgP2Q192K2V10Config, why);
+}
+
 Fri3AlgProtocolConfig Fri3AlgShaFsBoundedOodCanaryConfig()
 {
-    // Active absorb layout (version 8 / short-FS Poseidon2 commitment lanes)
-    // with SHA256d challenge squeezes and a K=2 fixed OOD window. Measurement
-    // only: production Fri3AlgBatchCommit keeps p2_squeeze_challenges=true and
-    // ood_candidates=0. query_count stays small so SHA-FS light canaries fit
-    // MemoryMax caps; proximity guard is off because Q!=192.
+    // Active short-FS commitment-lane encoding with SHA256d challenge
+    // squeezes and a K=2 fixed OOD window.  The version/tag are deliberately
+    // canary-only because its primitive, Q and proximity policy differ from
+    // production.  Production Fri3AlgBatchCommit keeps
+    // p2_squeeze_challenges=true and ood_candidates=0.
     Fri3AlgProtocolConfig config{
-        kRCFri3AlgP2SqueezeLaneProofVersion,
-        kRCFri3AlgP2SqueezeDomainTag,
+        kRCFri3AlgShaFsCanaryProofVersion,
+        kRCFri3AlgShaFsCanaryDomainTag,
         kRCFri3AlgDualUniformDrawDomainTag,
         kRCFri3AlgDualIndexDrawDomainTag,
         /*query_count=*/2,
@@ -3188,6 +3236,14 @@ Fri3AlgBatchCommitResult Fri3AlgShaFsBoundedOodCanaryBatchCommit(
     return Fri3AlgBatchCommitConfigured(
         columns, fs_seed, pow_grind_nonce,
         Fri3AlgShaFsBoundedOodCanaryConfig());
+}
+
+bool Fri3AlgShaFsBoundedOodCanaryBatchVerify(
+    const Fri3AlgBatchProof& proof, const uint256& fs_seed,
+    std::string* why)
+{
+    return Fri3AlgBatchVerifyConfigured(
+        proof, fs_seed, Fri3AlgShaFsBoundedOodCanaryConfig(), why);
 }
 
 bool Fri3AlgP2SqueezeBatchVerify(const Fri3AlgBatchProof& proof,
@@ -5142,6 +5198,16 @@ std::optional<Fri3AlgBatchProof> DeserializeFri3AlgBatchProof(
 {
     return DeserializeFri3AlgBatchProofConfigured(
         in, kRCFri3AlgActiveBatchProofVersion, kRCFri3AlgMaxQueriesHard,
+        /*require_canonical_fp3=*/false);
+}
+
+std::optional<Fri3AlgBatchProof>
+DeserializeFri3AlgP2Q192K2V10BatchProof(
+    const std::vector<unsigned char>& in)
+{
+    return DeserializeFri3AlgBatchProofConfigured(
+        in, kRCFri3AlgP2Q192K2ProofVersionV10,
+        kRCFri3AlgNumQueries,
         /*require_canonical_fp3=*/false);
 }
 
