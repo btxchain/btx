@@ -1431,6 +1431,214 @@ static_assert(kRCFri3AlgTaxedQGrindBits <= kRCFri3AlgMaxGrindableBits,
 [[nodiscard]] uint32_t Fri3AlgAlgebraicQueryIndex(const Fri3AlgDigest& sigma,
                                                   uint32_t j, uint32_t n_lde);
 
+// ===========================================================================
+// PR-89 g4, TRANSCRIPT HALF — SHORT SELF-CONTAINED FIAT-SHAMIR PREIMAGES.
+// NOT ACTIVATED: carries its OWN proof version and domain tag; the shipped
+// Q192 V3 lane (kRCFri3AlgBatchProofVersion = 3) is byte-identical to before.
+//
+// THE PROBLEM THIS SOLVES (measured; recursive_parent_air.h
+// ChildFsReplayClosureV1 carries the same figures).  Every challenge on the
+// shipped lane is ChallengeDigest(suffix) = SHA256d(buf || suffix) where `buf`
+// is the WHOLE accumulated transcript, and `buf` contains two W-proportional
+// terms:
+//   (i)  4*W  bytes, the per-column `column_len` loop absorbed in
+//        Fri3AlgBatchFsInit — at FS INIT, so it precedes EVERY challenge
+//        including the very first;
+//   (ii) 48*W bytes, both full OOD evaluation vectors (2*W Fp3 at 24 B) —
+//        precedes w1/w2, every fold beta and every query index.
+// Replaying one challenge in the parent's AIR therefore costs
+// next_pow2(ceil((52*W + 9)/64) + 1) * 1024 rows: 5.37e8 rows per challenge at
+// the real child width W = 384,984.  BOTH terms must go: committing only (ii)
+// buys ~13x and leaves ~8,000x above the airq_lambda baseline.
+//
+// THE FIX.  Absorb a domain-tagged Poseidon2 COMMITMENT over the same data
+// instead of the data.  The commitment reuses alg_hash::SpongeHashFp — the
+// SAME primitive that is already this backend's Merkle hash — so no new
+// cryptographic assumption is introduced, and its in-AIR replay is the
+// Poseidon2 companion CS that the parent lane is already building.
+//
+// SOUNDNESS (full argument at the definition site in the .cpp).  Absorbing
+// Commit(E) instead of E preserves EXACTLY the property the shipped
+// transcript provides — every post-claim challenge is a function of the whole
+// claim vector — up to a Poseidon2 collision, floor 2^128 (capacity 4;
+// alg_hash::BindingEffectiveCollisionFloorBits).  Do NOT substitute the
+// batched values v1,v2: that is a rank-2 LOSSY image of a 2W-dimensional
+// claim space whose kernel is computable in closed form
+// (matmul_v4_rc_fri_ext3_alg_order_audit.h:16-35).
+// ===========================================================================
+
+/** Lane proof version for the short-transcript Q192 lane. Distinct from 3
+ *  (Q192 V3), 5 (dual V5 lane) and 6 (dual Q136 lane); a proof of one version
+ *  is rejected by every other lane's verifier at the version check. */
+inline constexpr uint32_t kRCFri3AlgShortFsLaneProofVersion = 7;
+inline constexpr char kRCFri3AlgShortFsDomainTag[] =
+    "BTX_RC_FRIB3ALG_Q192_SHORTFS_V7";
+
+/** Poseidon2 domain separators (ASCII, LE-packed) for the new preimages.
+ *  Each enters SpongeHashFp as TWO 32-bit lanes via the same
+ *  Fri3AlgAlgebraicTranscriptDigest wrapper the taxed squeeze uses, so
+ *  domain separation is by injective prefix, not by lane truncation. */
+inline constexpr uint64_t kRCFri3AlgShapeCommitDomain =
+    0x53484150'45433100ull; // "SHAPEC1"
+inline constexpr uint64_t kRCFri3AlgOodEvalCommitDomain =
+    0x4F4F4445'56433100ull; // "OODEVC1"
+inline constexpr uint64_t kRCFri3AlgSigmaCoreDomain =
+    0x53494743'4F524500ull; // "SIGCORE"
+inline constexpr uint64_t kRCFri3AlgAlgebraicFp3DrawDomain =
+    0x46503344'52415700ull; // "FP3DRAW"
+
+/**
+ * Commitment to the child's SHAPE vector, replacing the 4*W-byte column_len
+ * loop at FS init.  Lanes: W, n_coeffs, then column_len[0..W).  Every value is
+ * < 2^32 so each occupies one Goldilocks lane injectively; SpongeHashFp's
+ * 10*-padding makes the whole lane sequence injective, so the leading W also
+ * pins the split.
+ */
+[[nodiscard]] Fri3AlgDigest Fri3AlgShapeCommit(
+    uint32_t n_coeffs, const std::vector<uint32_t>& column_len);
+
+/**
+ * Commitment to BOTH full OOD evaluation vectors, replacing the 48*W bytes of
+ * AbsorbFp3.  Lanes: W, z1(c0,c1,c2), z2(c0,c1,c2), then for i in [0,W) the
+ * six lanes evals_z1[i], evals_z2[i].  z1/z2 are included even though they are
+ * absorbed separately — it costs six lanes and makes the commitment bind the
+ * (point, claim) PAIR rather than a bare claim vector.
+ */
+[[nodiscard]] Fri3AlgDigest Fri3AlgOodEvalCommit(
+    const Fp3& z1, const Fp3& z2,
+    const std::vector<Fp3>& evals_z1,
+    const std::vector<Fp3>& evals_z2);
+
+/**
+ * sigma_core for Construction 2 — THE MISSING DEFINITION.
+ *
+ * Fri3AlgAlgebraicSqueeze / Fri3AlgAlgebraicQueryIndex take sigma as an INPUT
+ * and no sigma_core was defined anywhere in the tree, so the mechanism had no
+ * protocol-side producer and the only callers were unit tests passing literal
+ * vectors.  This is that producer: the Goldilocks-lane encoding of the child's
+ * transcript AT THE TERMINAL FOLD, i.e. every message the child committed
+ * before the first query index is drawn.
+ *
+ * Lane layout (all multi-byte scalars split into 32-bit halves by
+ * AppendU64Lanes so no two distinct values alias onto one Goldilocks lane):
+ *   proof_version | fs_seed (8) | pow_grind_nonce (2) | blowup | n_coeffs |
+ *   W | row_commit.root (4) | shape_commit (4) | ood_eval_commit (4) |
+ *   lambda (3) | z1 (3) | z2 (3) | w1 (3) | w2 (3) |
+ *   for each fold layer: n_leaves | root (4);
+ *   for each fold challenge: beta (3);
+ *   final_value (3)
+ * Length is O(log n_coeffs), NOT O(W): 133 lanes at n_coeffs = 2048.
+ *
+ * VERIFIER-DERIVABLE, and only sound because of that.  Every field read here
+ * is one the verifier has ALREADY re-derived from its own FS replay and
+ * compared (lambda, z1, z2, w1, w2, fold betas) or is a commitment it checks
+ * (row root, fold roots, final constant layer).  Calling this on a proof whose
+ * FS replay has not yet been checked binds nothing.
+ *
+ * SOLE-ENTROPY-SOURCE obligation (fri_ext3_alg.h, Construction 2): sigma must
+ * be the only source of every query index.  It is, on this lane: the query
+ * loop draws no transcript challenge, and every input above is fixed by the
+ * fold phase, so moving any index requires moving sigma and paying the tax
+ * again.
+ */
+[[nodiscard]] std::vector<Fp> Fri3AlgAlgebraicSigmaCore(
+    const uint256& fs_seed, const Fri3AlgBatchProof& proof);
+
+/** Which challenge the algebraic Fp3 draw is producing. The kind enters the
+ *  preimage as its own lane, so two kinds at the same index cannot collide. */
+enum class Fri3AlgAlgebraicDrawKind : uint32_t {
+    Lambda = 1, // fra3_lambda / fra3_batch_coeff
+    Ood = 2,    // fra3_z
+    Weight = 3, // fra3_w
+    Fold = 4,   // fra3_fold
+};
+
+/**
+ * ALGEBRAIC Fp3 challenge draw — the primitive fri_ext3_alg.h did not export.
+ * Without it fra3_lambda, fra3_z x2, fra3_w x2 and fra3_fold cannot leave
+ * SHA, and the algebraic query-index rule covers 1 of 8 challenge kinds.
+ *
+ *   draw = (d[0], d[1], d[2]) where
+ *   d = Poseidon2(kRCFri3AlgAlgebraicFp3DrawDomain, core, kind, idx)
+ *
+ * EXACTLY UNIFORM WITH NO REJECTION SAMPLER.  A Poseidon2 output lane is a
+ * Goldilocks field element by construction, so the three lanes are already
+ * uniform on Fp^3 under the same permutation-is-ideal assumption the Merkle
+ * tree makes.  The SHA route has to draw eight 64-bit words and reject the
+ * non-canonical ones (Fri3AlgSelectUniformFp3Words, two hash blocks, a
+ * binomial failure tail the global ledger charges); none of that survives
+ * here.  That removes a failure mode as well as a cost.
+ */
+[[nodiscard]] Fp3 Fri3AlgAlgebraicChallengeFp3(
+    const std::vector<Fp>& core, Fri3AlgAlgebraicDrawKind kind, uint32_t idx);
+
+/**
+ * MEASURED transcript-length and in-AIR replay cost, per challenge kind.
+ *
+ * `*_prefix_bytes` are read off a REAL Fri3AlgFs buffer built by the real
+ * prover at the given width — not modelled.  The SHA row figures use the
+ * shipped vertical SHA AIR schedule (hash_air.cpp
+ * BuildFixedProgramVerticalWitnessBoundaryInstance:
+ * n_rows = next_pow2(compressions) * 1024, LANE_ROWS = 1024), the same formula
+ * stage3_fs_selection_air::MeasureAlgebraicQueryIndexReplayCostV1 uses, so the
+ * two are directly comparable.
+ */
+struct Fri3AlgTranscriptChallengeCostV1 {
+    /** "fra3_lambda", "fra3_z", "fra3_w", "fra3_fold", "fra3_query". */
+    std::string label;
+    /** fs.buf.size() immediately before this challenge's ChallengeDigest. */
+    uint64_t prefix_bytes{0};
+    uint64_t compressions{0};
+    uint64_t rows{0};
+};
+
+struct Fri3AlgTranscriptReplayCostV1 {
+    uint32_t child_w{0};
+    uint32_t n_coeffs{0};
+    uint32_t queries{0};
+    /** One entry per DISTINCT challenge kind, at its FIRST occurrence. */
+    std::vector<Fri3AlgTranscriptChallengeCostV1> legacy;
+    std::vector<Fri3AlgTranscriptChallengeCostV1> short_fs;
+    /** Sum over every challenge actually drawn (all kinds, all indices). */
+    uint64_t legacy_total_rows{0};
+    uint64_t short_fs_total_rows{0};
+    /** Widest single-challenge cost on each route. */
+    uint64_t legacy_max_rows{0};
+    uint64_t short_fs_max_rows{0};
+    bool short_fs_width_independent{false};
+    bool valid{false};
+    std::string note;
+};
+
+/** Run BOTH lanes at `child_w` columns of `column_len` coefficients each and
+ *  report the measured transcript lengths. Small widths only — this runs the
+ *  real prover twice. */
+[[nodiscard]] Fri3AlgTranscriptReplayCostV1
+MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
+
+/** Short-transcript lane commit/verify. Same statement, same Q=192, same
+ *  proximity guard; only the FS preimage layout and the version/tag move. */
+[[nodiscard]] Fri3AlgBatchCommitResult Fri3AlgShortFsBatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+[[nodiscard]] bool Fri3AlgShortFsBatchVerify(
+    const Fri3AlgBatchProof& proof, const uint256& fs_seed,
+    std::string* why = nullptr);
+
+/** Built, executable and measurable; consumed by NO consensus path. Mirrors
+ *  the kAlgebraicQueryIndexActivatedV1 precedent in fs_selection_air. */
+inline constexpr bool kRCFri3AlgShortFsExecutableV1 = true;
+inline constexpr bool kRCFri3AlgShortFsActivatedV1 = false;
+static_assert(!kRCFri3AlgShortFsActivatedV1,
+              "the short-transcript lane is not on any consensus path: it "
+              "carries its own version/tag and no producer selects it");
+static_assert(kRCFri3AlgShortFsLaneProofVersion != kRCFri3AlgBatchProofVersion &&
+                  kRCFri3AlgShortFsLaneProofVersion !=
+                      kRCFri3AlgDualLaneProofVersion &&
+                  kRCFri3AlgShortFsLaneProofVersion !=
+                      kRCFri3AlgDualQ136LaneProofVersion,
+              "a new FS layout MUST NOT reuse a live lane's proof version");
+
 // --- Construction 1: Pi_JQ joint query squeeze ---
 /** index_{l,j} = LE32(SHA256d(sigma_Q || "fra3_joint_query" || l || j)) &
  *  (n_lde-1). n_lde must be a power of two. */

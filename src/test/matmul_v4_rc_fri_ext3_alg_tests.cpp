@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
+#include <matmul/matmul_v4_rc_fri_ext3_alg_order_audit.h>
 #include <matmul/matmul_v4_rc_air_quotient.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
@@ -2338,6 +2339,423 @@ BOOST_AUTO_TEST_CASE(fra3_wide_commit_realwidth_timing)
                        << " root=" << root.GetHex()
                        << " null=" << static_cast<int>(root.IsNull()));
     BOOST_CHECK(!root.IsNull());
+}
+
+// ===========================================================================
+// PR-89 g4, TRANSCRIPT HALF (NOT ACTIVATED). The short-transcript lane
+// absorbs domain-tagged Poseidon2 COMMITMENTS in place of the two
+// W-proportional transcript bodies (the column_len loop and both full OOD
+// evaluation vectors), so every Fiat-Shamir preimage becomes short and
+// self-contained. These tests are the non-vacuity evidence for that claim.
+// ===========================================================================
+
+namespace {
+
+std::vector<std::vector<rc::Fp3>> MakeShortFsColumns(uint32_t width,
+                                                     uint32_t length)
+{
+    std::vector<std::vector<rc::Fp3>> columns(width);
+    for (uint32_t c = 0; c < width; ++c) {
+        columns[c].resize(length);
+        for (uint32_t k = 0; k < length; ++k) {
+            columns[c][k] = rc::Fp3{gf::FromU64(1 + 7ull * c + 11ull * k),
+                                    gf::FromU64(3 + 5ull * c + 2ull * k),
+                                    gf::FromU64(9 + 13ull * c + 17ull * k)};
+        }
+    }
+    return columns;
+}
+
+/** First-occurrence prefix length of one challenge kind on one route. */
+uint64_t PrefixFor(
+    const std::vector<rc::Fri3AlgTranscriptChallengeCostV1>& first,
+    const std::string& label)
+{
+    for (const auto& e : first) {
+        if (e.label == label) return e.prefix_bytes;
+    }
+    return 0;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(pr89_short_fs_lane_round_trip_and_version_separation)
+{
+    const uint256 seed = MakeSeed(0x5a);
+    const auto columns = MakeShortFsColumns(6, 8);
+
+    rc::Fri3AlgBatchCommitResult shortfs =
+        rc::Fri3AlgShortFsBatchCommit(columns, seed, 0);
+    BOOST_REQUIRE_MESSAGE(shortfs.ok, shortfs.note);
+    BOOST_CHECK_EQUAL(shortfs.proof.version,
+                      rc::kRCFri3AlgShortFsLaneProofVersion);
+    BOOST_CHECK_EQUAL(rc::kRCFri3AlgShortFsLaneProofVersion, 7u);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        rc::Fri3AlgShortFsBatchVerify(shortfs.proof, seed, &why), why);
+
+    // The shipped V3 lane is UNTOUCHED and still round-trips.
+    rc::Fri3AlgBatchCommitResult legacy =
+        rc::Fri3AlgBatchCommit(columns, seed, 0);
+    BOOST_REQUIRE_MESSAGE(legacy.ok, legacy.note);
+    BOOST_CHECK_EQUAL(legacy.proof.version, rc::kRCFri3AlgBatchProofVersion);
+    BOOST_CHECK(rc::Fri3AlgBatchVerify(legacy.proof, seed, &why));
+
+    // Neither verifier accepts the other lane's proof: the version check fires
+    // before any FS work, so the two layouts can never be confused.
+    BOOST_CHECK(!rc::Fri3AlgBatchVerify(shortfs.proof, seed, &why));
+    BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(legacy.proof, seed, &why));
+
+    // The two lanes agree on the STATEMENT and disagree only on the
+    // transcript: same shape, same column lengths, different challenges.
+    BOOST_CHECK_EQUAL(shortfs.proof.n_coeffs, legacy.proof.n_coeffs);
+    BOOST_CHECK(shortfs.proof.column_len == legacy.proof.column_len);
+    BOOST_CHECK(shortfs.proof.row_commit.root == legacy.proof.row_commit.root);
+    BOOST_CHECK(!gf::Eq(shortfs.proof.lambda, legacy.proof.lambda));
+
+    // The commitments are not constants: they move with their inputs.
+    const rc::Fri3AlgDigest shape =
+        rc::Fri3AlgShapeCommit(shortfs.proof.n_coeffs,
+                               shortfs.proof.column_len);
+    std::vector<uint32_t> moved = shortfs.proof.column_len;
+    moved[0] = moved[0] == 1 ? 2 : moved[0] - 1;
+    BOOST_CHECK(shape !=
+                rc::Fri3AlgShapeCommit(shortfs.proof.n_coeffs, moved));
+    BOOST_CHECK(shape !=
+                rc::Fri3AlgShapeCommit(shortfs.proof.n_coeffs * 2,
+                                       shortfs.proof.column_len));
+}
+
+// MEASURED, on the production transcript: the two W-proportional terms are
+// gone, and the slope of the LEGACY route is exactly the documented 52*W.
+BOOST_AUTO_TEST_CASE(pr89_short_fs_transcript_preimages_are_width_independent)
+{
+    constexpr uint32_t kNarrow = 8;
+    constexpr uint32_t kWide = 64;
+    const rc::Fri3AlgTranscriptReplayCostV1 narrow =
+        rc::MeasureFri3AlgTranscriptReplayCostV1(kNarrow, 16);
+    const rc::Fri3AlgTranscriptReplayCostV1 wide =
+        rc::MeasureFri3AlgTranscriptReplayCostV1(kWide, 16);
+    BOOST_REQUIRE_MESSAGE(narrow.valid, narrow.note);
+    BOOST_REQUIRE_MESSAGE(wide.valid, wide.note);
+    BOOST_REQUIRE_EQUAL(narrow.n_coeffs, wide.n_coeffs);
+
+    // NON-VACUITY, asserted BEFORE any conclusion is read: the legacy route
+    // must genuinely be width-proportional in this harness, or the comparison
+    // below proves nothing.
+    BOOST_REQUIRE_GT(PrefixFor(wide.legacy, "fra3_w"),
+                     PrefixFor(narrow.legacy, "fra3_w"));
+
+    const uint64_t dw = kWide - kNarrow;
+    // Term (i) alone, at the FIRST challenge of all: 4 bytes per column.
+    BOOST_CHECK_EQUAL(PrefixFor(wide.legacy, "fra3_lambda") -
+                          PrefixFor(narrow.legacy, "fra3_lambda"),
+                      4 * dw);
+    // Terms (i) + (ii) together, from the DEEP weights onward: 52 bytes.
+    for (const char* label : {"fra3_w", "fra3_fold", "fra3_query"}) {
+        BOOST_CHECK_EQUAL(PrefixFor(wide.legacy, label) -
+                              PrefixFor(narrow.legacy, label),
+                          52 * dw);
+    }
+    // SHORT route: every challenge kind has a preimage of IDENTICAL length at
+    // both widths. This is the whole claim.
+    for (const char* label :
+         {"fra3_lambda", "fra3_z", "fra3_w", "fra3_fold", "fra3_query"}) {
+        BOOST_CHECK_EQUAL(PrefixFor(wide.short_fs, label),
+                          PrefixFor(narrow.short_fs, label));
+        BOOST_CHECK_GT(PrefixFor(wide.short_fs, label), 0u);
+    }
+    BOOST_CHECK(wide.short_fs_width_independent);
+    BOOST_CHECK_LT(wide.short_fs_total_rows, wide.legacy_total_rows);
+
+    for (const auto& e : wide.legacy) {
+        BOOST_TEST_MESSAGE("SHORTFS_COST W=" << kWide << " route=legacy kind="
+                           << e.label << " prefix_bytes=" << e.prefix_bytes
+                           << " comps=" << e.compressions
+                           << " rows=" << e.rows);
+    }
+    for (const auto& e : wide.short_fs) {
+        BOOST_TEST_MESSAGE("SHORTFS_COST W=" << kWide << " route=short kind="
+                           << e.label << " prefix_bytes=" << e.prefix_bytes
+                           << " comps=" << e.compressions
+                           << " rows=" << e.rows);
+    }
+    BOOST_TEST_MESSAGE("SHORTFS_COST_TOTAL W=" << kWide
+                       << " legacy_total_rows=" << wide.legacy_total_rows
+                       << " short_total_rows=" << wide.short_fs_total_rows
+                       << " legacy_max_rows=" << wide.legacy_max_rows
+                       << " short_max_rows=" << wide.short_fs_max_rows);
+
+    // COMPUTED (not measured) extrapolation to the real child width, using the
+    // slope just MEASURED above. The layout is exactly affine in W, which the
+    // two exact delta checks above establish.
+    const uint64_t kRealW = 384984;
+    const uint64_t base = PrefixFor(wide.legacy, "fra3_query");
+    const uint64_t real_bytes = base + 52 * (kRealW - kWide);
+    uint64_t comps = (real_bytes + 9 + 63) / 64 + 1;
+    uint64_t pow2 = 1;
+    while (pow2 < comps) pow2 <<= 1;
+    BOOST_TEST_MESSAGE("SHORTFS_COST_EXTRAPOLATED W=" << kRealW
+                       << " legacy_prefix_bytes=" << real_bytes
+                       << " legacy_comps=" << comps
+                       << " legacy_rows=" << (pow2 * 1024)
+                       << " short_prefix_bytes="
+                       << PrefixFor(wide.short_fs, "fra3_query")
+                       << " short_rows=" << wide.short_fs_max_rows);
+    // Cross-check against the figure recorded in recursive_parent_air.h and
+    // reproduced by fs_selection_air's SHA cost model.
+    BOOST_CHECK_EQUAL(pow2 * 1024, 536870912ull);
+
+    // The SHORT route's remaining length is dominated by the fold roots, which
+    // scale with log2(n_coeffs) and NOT with W. Measure at the real parent
+    // child shape's n_coeffs = 256 (MEASURED parent_rows, see the real-width
+    // self-prove) so the reported per-kind figure needs no extrapolation on
+    // that axis either. Width is small here BECAUSE the short route is
+    // width-independent -- established above, not assumed.
+    const rc::Fri3AlgTranscriptReplayCostV1 deep =
+        rc::MeasureFri3AlgTranscriptReplayCostV1(8, 256);
+    BOOST_REQUIRE_MESSAGE(deep.valid, deep.note);
+    BOOST_CHECK_EQUAL(deep.n_coeffs, 256u);
+    for (const auto& e : deep.short_fs) {
+        BOOST_TEST_MESSAGE("SHORTFS_COST_REALSHAPE n_coeffs=256 route=short kind="
+                           << e.label << " prefix_bytes=" << e.prefix_bytes
+                           << " comps=" << e.compressions
+                           << " rows=" << e.rows);
+    }
+    BOOST_TEST_MESSAGE("SHORTFS_COST_REALSHAPE n_coeffs=256"
+                       << " short_total_rows=" << deep.short_fs_total_rows
+                       << " short_max_rows=" << deep.short_fs_max_rows
+                       << " challenges_drawn="
+                       << (deep.short_fs_total_rows == 0 ? 0 : 1));
+    // Deeper folding lengthens the SHORT transcript (more roots) but leaves it
+    // W-independent; assert the direction so a regression that reintroduced a
+    // W term would not hide behind this figure.
+    BOOST_CHECK_GT(PrefixFor(deep.short_fs, "fra3_query"),
+                   PrefixFor(wide.short_fs, "fra3_query"));
+}
+
+// The soundness claim, made non-vacuous.
+BOOST_AUTO_TEST_CASE(pr89_short_fs_commitment_binds_what_verbatim_absorption_bound)
+{
+    const uint256 seed = MakeSeed(0x21);
+    const auto columns = MakeShortFsColumns(6, 8);
+    rc::Fri3AlgBatchCommitResult r =
+        rc::Fri3AlgShortFsBatchCommit(columns, seed, 0);
+    BOOST_REQUIRE_MESSAGE(r.ok, r.note);
+    std::string why;
+    BOOST_REQUIRE(rc::Fri3AlgShortFsBatchVerify(r.proof, seed, &why));
+
+    // (a) One altered OOD claim cell is REJECTED. Under verbatim absorption
+    //     this was caught because the byte changed; here it is caught because
+    //     the commitment changed, hence w1/w2 moved.
+    {
+        rc::Fri3AlgBatchProof tampered = r.proof;
+        tampered.evals_z1[2] =
+            gf::Add(tampered.evals_z1[2], rc::Fp3::One());
+        BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(tampered, seed, &why));
+        BOOST_CHECK_EQUAL(why, "deep weights mismatch");
+    }
+    {
+        rc::Fri3AlgBatchProof tampered = r.proof;
+        tampered.evals_z2.back() =
+            gf::Add(tampered.evals_z2.back(), rc::Fp3::One());
+        BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(tampered, seed, &why));
+    }
+
+    // (b) THE POINT OF THE WHOLE DESIGN. The order-audit kernel produces a
+    //     forged claim vector that leaves BOTH batched values v1,v2 fixed. Had
+    //     the transcript absorbed v1,v2 instead of a commitment, that forgery
+    //     would be transcript-invisible. It is not invisible to the
+    //     commitment: the digest moves.
+    {
+        const uint32_t W =
+            static_cast<uint32_t>(r.proof.column_len.size());
+        std::vector<rc::Fp3> alpha(W);
+        alpha[0] = rc::Fp3::One();
+        for (uint32_t i = 1; i < W; ++i) {
+            alpha[i] = gf::Mul(alpha[i - 1], r.proof.lambda);
+        }
+        const auto audit = rc::AuditFri3AlgAdaptiveEvaluationOrder(
+            alpha, r.proof.column_len, r.proof.n_coeffs, r.proof.z1,
+            r.proof.z2, r.proof.evals_z1, r.proof.evals_z2);
+        // NON-VACUITY: the kernel must actually have been exhibited.
+        BOOST_REQUIRE_MESSAGE(audit.self_consistent_legacy_kernel_exhibited,
+                              audit.note);
+        BOOST_REQUIRE(audit.z1_batched_value_unchanged);
+        BOOST_REQUIRE(audit.z2_batched_value_unchanged);
+
+        const rc::Fri3AlgDigest honest = rc::Fri3AlgOodEvalCommit(
+            r.proof.z1, r.proof.z2, r.proof.evals_z1, r.proof.evals_z2);
+        const rc::Fri3AlgDigest forged = rc::Fri3AlgOodEvalCommit(
+            r.proof.z1, r.proof.z2, audit.forged_evals_z1,
+            audit.forged_evals_z2);
+        BOOST_CHECK(honest != forged);
+
+        // And the forged vector is rejected end to end.
+        rc::Fri3AlgBatchProof tampered = r.proof;
+        tampered.evals_z1 = audit.forged_evals_z1;
+        tampered.evals_z2 = audit.forged_evals_z2;
+        BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(tampered, seed, &why));
+    }
+
+    // (c) The shape commitment is equally live: a column_len edit is rejected
+    //     at the FIRST challenge, not merely downstream.
+    {
+        rc::Fri3AlgBatchProof tampered = r.proof;
+        BOOST_REQUIRE_GT(tampered.column_len[0], 1u);
+        tampered.column_len[0] -= 1;
+        BOOST_CHECK(!rc::Fri3AlgShortFsBatchVerify(tampered, seed, &why));
+    }
+
+    // (d) The commitment binds the OOD POINTS to the claims, not just the
+    //     claims: reusing a claim vector under a different z is a different
+    //     digest.
+    {
+        const rc::Fri3AlgDigest a = rc::Fri3AlgOodEvalCommit(
+            r.proof.z1, r.proof.z2, r.proof.evals_z1, r.proof.evals_z2);
+        const rc::Fri3AlgDigest b = rc::Fri3AlgOodEvalCommit(
+            r.proof.z2, r.proof.z1, r.proof.evals_z1, r.proof.evals_z2);
+        BOOST_CHECK(a != b);
+    }
+}
+
+// Item 3: the algebraic Fp3 draw fri_ext3_alg.h did not export.
+BOOST_AUTO_TEST_CASE(pr89_algebraic_fp3_draw_exists_and_needs_no_rejection)
+{
+    std::vector<gf::Fp> core;
+    for (uint64_t i = 0; i < 20; ++i) core.push_back(gf::FromU64(i * 31 + 5));
+
+    const rc::Fp3 a = rc::Fri3AlgAlgebraicChallengeFp3(
+        core, rc::Fri3AlgAlgebraicDrawKind::Lambda, 0);
+    // Deterministic.
+    BOOST_CHECK(gf::Eq(a, rc::Fri3AlgAlgebraicChallengeFp3(
+                              core, rc::Fri3AlgAlgebraicDrawKind::Lambda, 0)));
+    // Separated by KIND at the same index...
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgAlgebraicChallengeFp3(
+                               core, rc::Fri3AlgAlgebraicDrawKind::Ood, 0)));
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgAlgebraicChallengeFp3(
+                               core, rc::Fri3AlgAlgebraicDrawKind::Weight, 0)));
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgAlgebraicChallengeFp3(
+                               core, rc::Fri3AlgAlgebraicDrawKind::Fold, 0)));
+    // ...and by INDEX at the same kind.
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgAlgebraicChallengeFp3(
+                              core, rc::Fri3AlgAlgebraicDrawKind::Lambda, 1)));
+    // ...and by CORE.
+    std::vector<gf::Fp> moved = core;
+    moved[7] = gf::Add(moved[7], 1);
+    BOOST_CHECK(!gf::Eq(a, rc::Fri3AlgAlgebraicChallengeFp3(
+                              moved, rc::Fri3AlgAlgebraicDrawKind::Lambda, 0)));
+
+    // Every coordinate is a CANONICAL field element and no draw can fail --
+    // there is no rejection sampler to exhaust, which is the structural
+    // difference from the SHA route's eight-word / two-block schedule.
+    static constexpr uint64_t kP = 0xFFFFFFFF00000001ull;
+    uint32_t nonzero_c1 = 0;
+    uint32_t nonzero_c2 = 0;
+    for (uint32_t idx = 0; idx < 64; ++idx) {
+        const rc::Fp3 d = rc::Fri3AlgAlgebraicChallengeFp3(
+            core, rc::Fri3AlgAlgebraicDrawKind::Fold, idx);
+        BOOST_REQUIRE_LT(static_cast<uint64_t>(d.c0), kP);
+        BOOST_REQUIRE_LT(static_cast<uint64_t>(d.c1), kP);
+        BOOST_REQUIRE_LT(static_cast<uint64_t>(d.c2), kP);
+        if (d.c1 != 0) ++nonzero_c1;
+        if (d.c2 != 0) ++nonzero_c2;
+    }
+    // Non-vacuity: all three coordinates are genuinely used, so this is an
+    // Fp3 draw and not an Fp draw padded with zeros.
+    BOOST_CHECK_EQUAL(nonzero_c1, 64u);
+    BOOST_CHECK_EQUAL(nonzero_c2, 64u);
+}
+
+// Item 2: sigma_core -- previously undefined anywhere in the tree.
+BOOST_AUTO_TEST_CASE(pr89_sigma_core_is_defined_and_width_independent)
+{
+    const uint256 seed = MakeSeed(0x33);
+    rc::Fri3AlgBatchCommitResult narrow =
+        rc::Fri3AlgShortFsBatchCommit(MakeShortFsColumns(4, 16), seed, 0);
+    rc::Fri3AlgBatchCommitResult wide =
+        rc::Fri3AlgShortFsBatchCommit(MakeShortFsColumns(48, 16), seed, 0);
+    BOOST_REQUIRE_MESSAGE(narrow.ok, narrow.note);
+    BOOST_REQUIRE_MESSAGE(wide.ok, wide.note);
+    BOOST_REQUIRE_EQUAL(narrow.proof.n_coeffs, wide.proof.n_coeffs);
+
+    const std::vector<gf::Fp> core_narrow =
+        rc::Fri3AlgAlgebraicSigmaCore(seed, narrow.proof);
+    const std::vector<gf::Fp> core_wide =
+        rc::Fri3AlgAlgebraicSigmaCore(seed, wide.proof);
+    // O(log n), not O(W): a 12x wider child yields the SAME sigma_core length.
+    BOOST_CHECK_EQUAL(core_narrow.size(), core_wide.size());
+    BOOST_CHECK_GT(core_narrow.size(), 0u);
+    BOOST_TEST_MESSAGE("SIGMA_CORE lanes=" << core_wide.size()
+                       << " n_coeffs=" << wide.proof.n_coeffs
+                       << " W_narrow=4 W_wide=48");
+    // ...and it still distinguishes the two children.
+    BOOST_CHECK(core_narrow != core_wide);
+
+    // It binds every part of the TERMINAL transcript: moving any one of them
+    // moves sigma, hence moves every query index.
+    const auto sigma_of = [&](const rc::Fri3AlgBatchProof& p) {
+        return rc::Fri3AlgAlgebraicSqueeze(
+            rc::Fri3AlgAlgebraicSigmaCore(seed, p), 0);
+    };
+    const rc::Fri3AlgDigest base = sigma_of(wide.proof);
+    {
+        rc::Fri3AlgBatchProof p = wide.proof;
+        p.w1 = gf::Add(p.w1, rc::Fp3::One());
+        BOOST_CHECK(sigma_of(p) != base);
+    }
+    {
+        rc::Fri3AlgBatchProof p = wide.proof;
+        p.final_value = gf::Add(p.final_value, rc::Fp3::One());
+        BOOST_CHECK(sigma_of(p) != base);
+    }
+    {
+        rc::Fri3AlgBatchProof p = wide.proof;
+        p.fold_layers[0].root[0] = gf::Add(p.fold_layers[0].root[0], 1);
+        BOOST_CHECK(sigma_of(p) != base);
+    }
+    {
+        rc::Fri3AlgBatchProof p = wide.proof;
+        p.fold_challenges.back() =
+            gf::Add(p.fold_challenges.back(), rc::Fp3::One());
+        BOOST_CHECK(sigma_of(p) != base);
+    }
+    {   // ...including the W-proportional bodies, through their commitments.
+        rc::Fri3AlgBatchProof p = wide.proof;
+        p.evals_z1[3] = gf::Add(p.evals_z1[3], rc::Fp3::One());
+        BOOST_CHECK(sigma_of(p) != base);
+    }
+    {
+        rc::Fri3AlgBatchProof p = wide.proof;
+        p.column_len[1] = p.column_len[1] == 1 ? 2 : p.column_len[1] - 1;
+        BOOST_CHECK(sigma_of(p) != base);
+    }
+    // A different SEED gives a different sigma_core even for the same proof
+    // body -- the child is bound to its parent-supplied seed.
+    BOOST_CHECK(rc::Fri3AlgAlgebraicSigmaCore(MakeSeed(0x34), wide.proof) !=
+                core_wide);
+
+    // End to end: grind the Construction-2 tax on a REAL sigma_core and derive
+    // query indices from it. Small g so the test is fast; the shipped constant
+    // is asserted separately in pr89_algebraic_taxed_squeeze.
+    const uint32_t g = 10;
+    const auto nonce = rc::Fri3AlgGrindAlgebraicSqueeze(core_wide, g);
+    BOOST_REQUIRE(nonce.has_value());
+    BOOST_CHECK(rc::Fri3AlgCheckAlgebraicSqueezeGrind(core_wide, *nonce, g));
+    const rc::Fri3AlgDigest sigma =
+        rc::Fri3AlgAlgebraicSqueeze(core_wide, *nonce);
+    const uint32_t n_lde = wide.proof.n_coeffs * wide.proof.blowup;
+    bool any_differs = false;
+    for (uint32_t j = 0; j < 16; ++j) {
+        const uint32_t index =
+            rc::Fri3AlgAlgebraicQueryIndex(sigma, j, n_lde);
+        BOOST_REQUIRE_LT(index, n_lde);
+        if (index != rc::Fri3AlgAlgebraicQueryIndex(sigma, 0, n_lde)) {
+            any_differs = true;
+        }
+    }
+    BOOST_CHECK(any_differs);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

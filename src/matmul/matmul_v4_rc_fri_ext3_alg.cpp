@@ -634,6 +634,18 @@ struct Fri3AlgProtocolConfig {
     // row/fold leaf and internal node input.
     int32_t alg_hash_lane;
     bool require_q192_proximity_guard;
+    // PR-89 g4 TRANSCRIPT HALF. false: the shipped byte layout, in which the
+    // W column lengths and both full OOD evaluation vectors are absorbed
+    // VERBATIM, so every challenge preimage is >= 52*W bytes. true: absorb a
+    // domain-tagged Poseidon2 commitment over exactly the same data instead,
+    // making every challenge preimage O(log n) and W-INDEPENDENT.
+    //
+    // This member is declared AFTER require_q192_proximity_guard and carries a
+    // default member initializer on purpose: every existing constexpr config
+    // above initializes exactly ten members positionally, so they all keep the
+    // shipped `false` without being edited. Adding it earlier would silently
+    // re-point their positional initializers.
+    bool short_transcript_commitments{false};
     // PR-89 Construction 1 (Pi_JQ): when joint_query is set, the "fra3_query"
     // index draw is REPLACED by the joint squeeze derivation
     //   index_{l,j} = LE32(SHA256d(sigma_Q || "fra3_joint_query" || l || j))
@@ -675,6 +687,26 @@ constexpr Fri3AlgProtocolConfig kFri3AlgQ192V3Config{
     // without a passing recursive_fixedpoint under the independent draw.
     false,
     -1,
+    true,
+};
+
+// PR-89 g4 TRANSCRIPT HALF. Identical to kFri3AlgQ192V3Config in EVERY
+// soundness-bearing parameter — Q = 192, the same proximity guard, the same
+// legacy (non-uniform) draws, the same one-power batching, the same
+// unprefixed AlgHash lane — so an A/B between the two isolates the transcript
+// layout and nothing else. Only the version, the domain tag and
+// short_transcript_commitments differ.
+constexpr Fri3AlgProtocolConfig kFri3AlgQ192ShortFsV7Config{
+    kRCFri3AlgShortFsLaneProofVersion,
+    kRCFri3AlgShortFsDomainTag,
+    kRCFri3AlgDualUniformDrawDomainTag,
+    kRCFri3AlgDualIndexDrawDomainTag,
+    kRCFri3AlgNumQueries,
+    0,
+    false,
+    false,
+    -1,
+    true,
     true,
 };
 
@@ -1312,7 +1344,18 @@ Fri3AlgFs Fri3AlgBatchFsInit(const uint256& fs_seed, uint64_t pow_grind_nonce, u
     Fri3AlgFs fs(fs_seed, pow_grind_nonce, kRCFriBlowup, n_coeffs, config.domain_tag);
     AppendLE32(fs.buf, config.proof_version);
     AppendLE32(fs.buf, static_cast<uint32_t>(column_len.size()));
-    for (const uint32_t len : column_len) AppendLE32(fs.buf, len);
+    if (config.short_transcript_commitments) {
+        // PR-89 g4 TRANSCRIPT HALF, term (i). The 4*W-byte column_len loop is
+        // the term that precedes EVERY challenge, including fra3_lambda, the
+        // very first one. Replaced by a single 32-byte Poseidon2 commitment
+        // over exactly the same data (plus n_coeffs and W, which the loop left
+        // implicit). W itself stays in the clear above: it is one word, the
+        // verifier needs it before it can even size its vectors, and it is
+        // re-bound inside the commitment anyway.
+        fs.AbsorbAlgRoot(Fri3AlgShapeCommit(n_coeffs, column_len));
+    } else {
+        for (const uint32_t len : column_len) AppendLE32(fs.buf, len);
+    }
     fs.AbsorbAlgRoot(row_commit.root);
     return fs;
 }
@@ -1787,8 +1830,21 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     bool stream_column_lde = false,
     const AlgMerkleTree* reused_row_tree = nullptr,
     AlgMerkleTree* built_row_tree_out = nullptr,
-    uint256* terminal_fold_transcript_out = nullptr)
+    uint256* terminal_fold_transcript_out = nullptr,
+    // PR-89 g4 measurement hook. When non-null, records fs.buf.size() at the
+    // instant BEFORE each Fiat-Shamir challenge is drawn -- i.e. the exact
+    // preimage length the parent's in-AIR replay of that challenge must hash.
+    // Read off the PRODUCTION transcript; nothing here is re-derived.
+    std::vector<Fri3AlgTranscriptChallengeCostV1>* fs_prefix_trace_out = nullptr)
 {
+    const auto trace_prefix = [&](const char* label,
+                                  const std::vector<unsigned char>& buf) {
+        if (fs_prefix_trace_out == nullptr) return;
+        Fri3AlgTranscriptChallengeCostV1 e;
+        e.label = label;
+        e.prefix_bytes = buf.size();
+        fs_prefix_trace_out->push_back(std::move(e));
+    };
     Fri3AlgBatchCommitResult out;
     if (columns.empty() || columns.size() > kRCFri3AlgBatchMaxColumns) {
         out.note = "bad column count";
@@ -1923,6 +1979,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     // retained in the codec and carries either the legacy lambda or, in V5,
     // coefficient[0], so transcript tampering remains directly observable.
     std::vector<Fp3> batch_coefficients;
+    trace_prefix("fra3_lambda", fs.buf);
     if (!ProtocolBatchCoefficients(
             fs, config, W, batch_coefficients, p.lambda)) {
         out.note = "uniform batching-coefficient sampling exhausted";
@@ -1931,6 +1988,8 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
 
     // Dual OOD: two independent points; single-z caps the bindable degree.
     uint32_t zctr = 0;
+    trace_prefix("fra3_z", fs.buf);
+    trace_prefix("fra3_z", fs.buf);
     if (!Fri3AlgBatchSampleZ(fs, zctr, nullptr, config, p.z1) ||
         !Fri3AlgBatchSampleZ(fs, zctr, &p.z1, config, p.z2)) {
         out.note = "bounded OOD sampling exhausted";
@@ -1945,9 +2004,21 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     for (uint32_t i = 0; i < W; ++i) {
         p.evals_z1[i] = EvalPolyCoeffs(columns[i], p.z1);
         p.evals_z2[i] = EvalPolyCoeffs(columns[i], p.z2);
-        fs.AbsorbFp3(p.evals_z1[i]);
-        fs.AbsorbFp3(p.evals_z2[i]);
+        if (!config.short_transcript_commitments) {
+            fs.AbsorbFp3(p.evals_z1[i]);
+            fs.AbsorbFp3(p.evals_z2[i]);
+        }
     }
+    if (config.short_transcript_commitments) {
+        // PR-89 g4 TRANSCRIPT HALF, term (ii). 48*W bytes -> 32. Every
+        // post-claim challenge (w1, w2, every fold beta, every query index)
+        // still depends on the WHOLE 2W-cell claim vector, now through a
+        // collision-resistant commitment instead of verbatim absorption.
+        fs.AbsorbAlgRoot(
+            Fri3AlgOodEvalCommit(p.z1, p.z2, p.evals_z1, p.evals_z2));
+    }
+    trace_prefix("fra3_w", fs.buf);
+    trace_prefix("fra3_w", fs.buf);
     if (!ProtocolChallengeFp3(fs, config, "fra3_w", 0, p.w1) ||
         !ProtocolChallengeFp3(fs, config, "fra3_w", 1, p.w2)) {
         out.note = "uniform DEEP-weight sampling exhausted";
@@ -2016,6 +2087,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
             break;
         }
         Fp3 beta{};
+        trace_prefix("fra3_fold", fs.buf);
         if (!ProtocolChallengeFp3(
                 fs, config, "fra3_fold",
                 static_cast<uint32_t>(p.fold_challenges.size()), beta)) {
@@ -2045,6 +2117,7 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
     p.queries.reserve(config.query_count);
     for (uint32_t qi = 0; qi < config.query_count; ++qi) {
         Fri3AlgBatchQuery q;
+        trace_prefix("fra3_query", fs.buf);
         if (!ProtocolChallengeIndex(
                 fs, config, "fra3_query", qi, n_lde, q.index)) {
             out.note = "uniform query-index sampling failed";
@@ -2548,9 +2621,19 @@ bool Fri3AlgBatchVerifyConfigured(const Fri3AlgBatchProof& proof, const uint256&
         Eq(proof.z1, proof.z2)) {
         return fail("OOD points invalid");
     }
-    for (uint32_t i = 0; i < W; ++i) {
-        fs.AbsorbFp3(proof.evals_z1[i]);
-        fs.AbsorbFp3(proof.evals_z2[i]);
+    if (config.short_transcript_commitments) {
+        // Mirror of the prover's term (ii). The verifier RECOMPUTES the
+        // commitment from the claimed evaluation vectors it was shipped, so a
+        // single altered cell moves the commitment, moves w1/w2, and is caught
+        // by the `Eq(w1, proof.w1)` check below — the same rejection the
+        // verbatim absorption produced.
+        fs.AbsorbAlgRoot(Fri3AlgOodEvalCommit(
+            proof.z1, proof.z2, proof.evals_z1, proof.evals_z2));
+    } else {
+        for (uint32_t i = 0; i < W; ++i) {
+            fs.AbsorbFp3(proof.evals_z1[i]);
+            fs.AbsorbFp3(proof.evals_z2[i]);
+        }
     }
     {
         Fp3 w1{};
@@ -2749,6 +2832,24 @@ bool Fri3AlgBatchVerifyConfigured(const Fri3AlgBatchProof& proof, const uint256&
 bool Fri3AlgBatchVerify(const Fri3AlgBatchProof& proof, const uint256& fs_seed, std::string* why)
 {
     return Fri3AlgBatchVerifyConfigured(proof, fs_seed, kFri3AlgQ192V3Config, why);
+}
+
+Fri3AlgBatchCommitResult Fri3AlgShortFsBatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3AlgBatchCommitConfigured(columns, fs_seed, pow_grind_nonce,
+                                        kFri3AlgQ192ShortFsV7Config);
+}
+
+bool Fri3AlgShortFsBatchVerify(const Fri3AlgBatchProof& proof,
+                              const uint256& fs_seed, std::string* why)
+{
+    // Version check inside Fri3AlgBatchVerifyConfigured is what keeps the two
+    // layouts from ever being confused: a V3 proof fed here, or a V7 proof fed
+    // to Fri3AlgBatchVerify, fails at "bad batch version" before any FS work.
+    return Fri3AlgBatchVerifyConfigured(proof, fs_seed,
+                                        kFri3AlgQ192ShortFsV7Config, why);
 }
 
 bool Fri3AlgQ192IndependentBatching()
@@ -6723,6 +6824,320 @@ uint32_t Fri3AlgAlgebraicQueryIndex(const Fri3AlgDigest& sigma, uint32_t j,
     const uint32_t le32 =
         static_cast<uint32_t>(gf::Canonical(d[0]) & 0xFFFFFFFFull);
     return le32 & (n_lde - 1);
+}
+
+// ===========================================================================
+// PR-89 g4, TRANSCRIPT HALF — implementation.
+//
+// SOUNDNESS ARGUMENT, in full, for replacing verbatim absorption of the OOD
+// evaluation vectors by a commitment.
+//
+// WHAT THE SHIPPED TRANSCRIPT ACTUALLY BUYS.  Be precise about the property
+// being preserved, because it is weaker than "the transcript binds the
+// evaluations".  The shipped Q192 V3 order is
+//     roots -> alpha -> z1,z2 -> claims E -> w1,w2 -> folds -> queries,
+// i.e. the batching vector alpha is fixed BEFORE the claims.  Under that
+// order the individual claims are NOT bound at all, and this is already an
+// executable finding in this tree, not a new observation: the verifier's only
+// algebraic use of E is through the two batched values
+//     v_s = sum_i alpha_i * z_s^{shift_i} * E_s[i],
+// and AuditFri3AlgAdaptiveEvaluationOrder exhibits, in closed form, a
+// nonzero delta with delta_i = 1 and
+// delta_j = -(alpha_i z^{shift_i})/(alpha_j z^{shift_j}) that changes E while
+// leaving both v_s fixed; `legacy_order_individual_eval_binding` is hard false
+// there.  Absorbing E verbatim therefore does exactly ONE thing: it makes
+// every POST-CLAIM challenge -- w1, w2, every fold beta, every query index --
+// a function of the whole 2W-cell claim vector, so a prover who moves any cell
+// must redo the entire fold and query phase against fresh challenges.  It
+// removes adaptivity; it does not bind cells.
+//
+// WHAT THE COMMITMENT PRESERVES.  Absorbing C = Commit(z1,z2,E) instead makes
+// every post-claim challenge a function of C.  The map E |-> C is the same
+// Poseidon2 sponge (rate 8, capacity 4) that this backend already uses as its
+// Merkle hash, so:
+//   * for any two claim vectors E != E', the challenges differ UNLESS
+//     Commit(E) = Commit(E'), i.e. unless the adversary exhibits a sponge
+//     collision.  alg_hash::BindingEffectiveCollisionFloorBits(B256) = 128,
+//     and that same 128 already appears as the "shared Poseidon2 collision"
+//     term of the single-lane BCS/rbr ledger, so this introduces NO new
+//     assumption and NO new term -- it reuses one already charged.
+//   * conditioned on no collision, the adversary's view is EXACTLY the view
+//     he had under verbatim absorption: challenges are a deterministic
+//     function of the same data, drawn after it.  The reduction is therefore
+//     an identity, not a new argument.
+//
+// WHAT AN ADVERSARY COULD DO IF BINDING WERE WEAKER.  Suppose Commit were
+// only q-to-one on some subset -- concretely, suppose he could find E' != E
+// with Commit(E') = Commit(E).  Then he could run the honest prover to
+// completion on E, obtain w1, w2, the betas and the query indices, build and
+// commit the fold layers for the DEEP composition of E, and only THEN ship
+// E'.  The verifier would replay the transcript, get the identical challenges
+// (same commitment), and proceed.  Whether that forgery then passes is
+// decided by the DEEP identity at the queried points, which reconstructs
+// v_s from E' -- so the attack succeeds precisely when E' also preserves
+// v_1 and v_2, i.e. when the collision lands inside the order-audit kernel.
+// The cost of that is a 2^128 collision search intersected with a linear
+// constraint; the shipped verbatim transcript gives no protection against the
+// kernel either (see above), so this is not a regression, but it is exactly
+// why the commitment must be COLLISION-RESISTANT and not merely "some
+// function of E".
+//
+// WHY v1,v2 IS NOT AN ACCEPTABLE SUBSTITUTE -- AND THIS IS THE WHOLE POINT.
+// Absorbing the two batched values instead of a commitment looks like the
+// same idea and is a different thing entirely.  E |-> (v1,v2) is LINEAR and
+// its image is 2-dimensional over a 2W-dimensional domain, so it has a kernel
+// of dimension 2W-2, and that kernel is not merely large but CONSTRUCTIBLE
+// with two field inversions -- the audit's delta above.  Under that variant
+// the adversary does not need any collision search at all: he computes a
+// preserving delta directly, and the post-claim challenges do not move.  The
+// gap between the two designs is 2^128 versus 2^0.
+//
+// WHAT THIS CHANGE DOES NOT FIX.  It does not create individual-cell binding,
+// because that is an ORDERING property (alpha must be drawn AFTER the claims;
+// AuditFri3AlgAdaptiveEvaluationOrder's
+// post_claim_random_batching_blocks_adaptive_kernel and the V2 multi-row
+// codec's transcript order are the fix) and not a hashing property.  This
+// lane deliberately keeps the shipped V3 ordering so that an A/B against
+// kFri3AlgQ192V3Config isolates the transcript LAYOUT.  Combining the two --
+// short preimages AND post-claim alpha -- is a separate, compatible step and
+// is NOT claimed here.
+//
+// The shape commitment (term (i)) needs a much shorter argument: column_len is
+// public shape data that the verifier is shipped in the clear and validates
+// structurally (each in [1, n], FriNextPow2(max) == n) before FS replay.
+// Committing to it preserves the only property the loop provided, namely that
+// the very first challenge already depends on the whole shape vector.
+// ===========================================================================
+
+namespace {
+
+/** Fp3 -> three canonical Goldilocks lanes, coordinate order. */
+void AppendFp3Lanes(std::vector<Fp>& lanes, const Fp3& v)
+{
+    lanes.push_back(gf::Canonical(v.c0));
+    lanes.push_back(gf::Canonical(v.c1));
+    lanes.push_back(gf::Canonical(v.c2));
+}
+
+void AppendDigestLanes(std::vector<Fp>& lanes, const Fri3AlgDigest& d)
+{
+    for (uint32_t i = 0; i < alg_hash::kAlgHashDigestLen; ++i) {
+        lanes.push_back(gf::Canonical(d[i]));
+    }
+}
+
+/** uint256 -> EIGHT 32-bit lanes. NOT four 64-bit lanes: a 64-bit limb can
+ *  exceed p, FromU64 would reduce it, and two distinct seeds would alias onto
+ *  one lane sequence. Same reason AppendU64Lanes splits. */
+void AppendUint256Lanes(std::vector<Fp>& lanes, const uint256& v)
+{
+    for (uint32_t word = 0; word < 8; ++word) {
+        uint32_t packed = 0;
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            packed |= static_cast<uint32_t>(v.data()[4 * word + byte])
+                      << (8 * byte);
+        }
+        lanes.push_back(gf::FromU64(packed));
+    }
+}
+
+[[nodiscard]] uint64_t Fri3AlgNextPow2U64(uint64_t v)
+{
+    uint64_t p = 1;
+    while (p < v) p <<= 1;
+    return p;
+}
+
+/** SHA256d compressions needed to hash a `bytes`-long transcript prefix, using
+ *  the SAME accounting as
+ *  stage3_fs_selection_air::MeasureAlgebraicQueryIndexReplayCostV1: length
+ *  block + padding on the first hash, plus one compression for the second.
+ *  The per-challenge label suffix (~15 B) is NOT counted, exactly as there, so
+ *  the two cost models stay directly comparable. */
+[[nodiscard]] uint64_t Fri3AlgShaCompressionsForPrefix(uint64_t bytes)
+{
+    return (bytes + 9 + 63) / 64 + 1;
+}
+
+/** Vertical SHA AIR schedule (hash_air.cpp
+ *  BuildFixedProgramVerticalWitnessBoundaryInstance):
+ *  scheduled_instances = max(2, next_pow2(compressions)), LANE_ROWS = 1024. */
+[[nodiscard]] uint64_t Fri3AlgShaAirRowsForCompressions(uint64_t compressions)
+{
+    return std::max<uint64_t>(2, Fri3AlgNextPow2U64(compressions)) * 1024;
+}
+
+} // namespace
+
+Fri3AlgDigest Fri3AlgShapeCommit(uint32_t n_coeffs,
+                                 const std::vector<uint32_t>& column_len)
+{
+    std::vector<Fp> lanes;
+    lanes.reserve(column_len.size() + 2);
+    lanes.push_back(gf::FromU64(column_len.size()));
+    lanes.push_back(gf::FromU64(n_coeffs));
+    for (const uint32_t len : column_len) {
+        lanes.push_back(gf::FromU64(len));
+    }
+    return Fri3AlgAlgebraicTranscriptDigest(lanes, kRCFri3AlgShapeCommitDomain);
+}
+
+Fri3AlgDigest Fri3AlgOodEvalCommit(const Fp3& z1, const Fp3& z2,
+                                   const std::vector<Fp3>& evals_z1,
+                                   const std::vector<Fp3>& evals_z2)
+{
+    std::vector<Fp> lanes;
+    lanes.reserve(3 * (evals_z1.size() + evals_z2.size()) + 8);
+    // Both counts, then both vectors in full: no min()/truncation, so a
+    // malformed (unequal-length) pair still hashes injectively rather than
+    // silently colliding with a well-formed one.
+    lanes.push_back(gf::FromU64(evals_z1.size()));
+    lanes.push_back(gf::FromU64(evals_z2.size()));
+    AppendFp3Lanes(lanes, z1);
+    AppendFp3Lanes(lanes, z2);
+    for (const Fp3& e : evals_z1) AppendFp3Lanes(lanes, e);
+    for (const Fp3& e : evals_z2) AppendFp3Lanes(lanes, e);
+    return Fri3AlgAlgebraicTranscriptDigest(lanes,
+                                            kRCFri3AlgOodEvalCommitDomain);
+}
+
+std::vector<Fp> Fri3AlgAlgebraicSigmaCore(const uint256& fs_seed,
+                                          const Fri3AlgBatchProof& proof)
+{
+    std::vector<Fp> lanes;
+    // Own separator lane pair. Fri3AlgAlgebraicSqueeze will additionally
+    // prefix kRCFri3AlgTaxedQDomain, so a sigma_core can never be confused
+    // with a bare lane vector supplied by a caller.
+    AppendU64Lanes(lanes, kRCFri3AlgSigmaCoreDomain);
+    lanes.push_back(gf::FromU64(proof.version));
+    AppendUint256Lanes(lanes, fs_seed);
+    AppendU64Lanes(lanes, proof.pow_grind_nonce);
+    lanes.push_back(gf::FromU64(proof.blowup));
+    lanes.push_back(gf::FromU64(proof.n_coeffs));
+    lanes.push_back(gf::FromU64(proof.column_len.size()));
+    AppendDigestLanes(lanes, proof.row_commit.root);
+    // The two W-proportional bodies enter as their commitments -- this is what
+    // keeps sigma_core O(log n) rather than O(W), and it is the same binding
+    // the transcript itself now uses.
+    AppendDigestLanes(lanes,
+                      Fri3AlgShapeCommit(proof.n_coeffs, proof.column_len));
+    AppendDigestLanes(lanes, Fri3AlgOodEvalCommit(proof.z1, proof.z2,
+                                                  proof.evals_z1,
+                                                  proof.evals_z2));
+    AppendFp3Lanes(lanes, proof.lambda);
+    AppendFp3Lanes(lanes, proof.z1);
+    AppendFp3Lanes(lanes, proof.z2);
+    AppendFp3Lanes(lanes, proof.w1);
+    AppendFp3Lanes(lanes, proof.w2);
+    lanes.push_back(gf::FromU64(proof.fold_layers.size()));
+    for (const Fri3AlgLayerCommit& layer : proof.fold_layers) {
+        lanes.push_back(gf::FromU64(layer.n_leaves));
+        AppendDigestLanes(lanes, layer.root);
+    }
+    lanes.push_back(gf::FromU64(proof.fold_challenges.size()));
+    for (const Fp3& beta : proof.fold_challenges) AppendFp3Lanes(lanes, beta);
+    AppendFp3Lanes(lanes, proof.final_value);
+    return lanes;
+}
+
+Fp3 Fri3AlgAlgebraicChallengeFp3(const std::vector<Fp>& core,
+                                 Fri3AlgAlgebraicDrawKind kind, uint32_t idx)
+{
+    std::vector<Fp> lanes;
+    lanes.reserve(core.size() + 3);
+    lanes.insert(lanes.end(), core.begin(), core.end());
+    lanes.push_back(gf::FromU64(static_cast<uint32_t>(kind)));
+    AppendU64Lanes(lanes, idx);
+    const Fri3AlgDigest d = Fri3AlgAlgebraicTranscriptDigest(
+        lanes, kRCFri3AlgAlgebraicFp3DrawDomain);
+    // Three sponge output lanes ARE three Goldilocks field elements. No
+    // rejection sampler, no failure tail: the SHA route's
+    // Fri3AlgSelectUniformFp3Words exists only because SHA emits BYTES, which
+    // must be rejected when a 64-bit word lands in [p, 2^64).
+    return Fp3{gf::Canonical(d[0]), gf::Canonical(d[1]), gf::Canonical(d[2])};
+}
+
+Fri3AlgTranscriptReplayCostV1 MeasureFri3AlgTranscriptReplayCostV1(
+    uint32_t child_w, uint32_t column_len)
+{
+    Fri3AlgTranscriptReplayCostV1 out;
+    out.child_w = child_w;
+    if (child_w == 0 || child_w > kRCFri3AlgBatchMaxColumns ||
+        column_len == 0) {
+        out.note = "fri3_alg_transcript_cost:shape";
+        return out;
+    }
+
+    // Deterministic non-degenerate columns; the transcript LENGTH does not
+    // depend on the values, but a degenerate all-zero input can make the
+    // terminal-layer constancy check trivial, so vary them.
+    std::vector<std::vector<Fp3>> columns(child_w);
+    for (uint32_t c = 0; c < child_w; ++c) {
+        columns[c].resize(column_len);
+        for (uint32_t k = 0; k < column_len; ++k) {
+            columns[c][k] = Fp3{gf::FromU64(1 + 7ull * c + 11ull * k),
+                                gf::FromU64(3 + 5ull * c + 2ull * k),
+                                gf::FromU64(9 + 13ull * c + 17ull * k)};
+        }
+    }
+    const uint256 seed = uint256::ONE;
+
+    const auto run = [&](const Fri3AlgProtocolConfig& config,
+                         std::vector<Fri3AlgTranscriptChallengeCostV1>& trace,
+                         uint32_t& n_coeffs_out) {
+        std::vector<Fri3AlgTranscriptChallengeCostV1> raw;
+        Fri3AlgBatchCommitResult r = Fri3AlgBatchCommitConfigured(
+            columns, seed, 0, config, /*stream_column_lde=*/false,
+            /*reused_row_tree=*/nullptr, /*built_row_tree_out=*/nullptr,
+            /*terminal_fold_transcript_out=*/nullptr,
+            /*fs_prefix_trace_out=*/&raw);
+        if (!r.ok) return false;
+        n_coeffs_out = r.proof.n_coeffs;
+        trace = std::move(raw);
+        return true;
+    };
+
+    std::vector<Fri3AlgTranscriptChallengeCostV1> legacy_raw;
+    std::vector<Fri3AlgTranscriptChallengeCostV1> short_raw;
+    uint32_t n_legacy = 0;
+    uint32_t n_short = 0;
+    if (!run(kFri3AlgQ192V3Config, legacy_raw, n_legacy) ||
+        !run(kFri3AlgQ192ShortFsV7Config, short_raw, n_short) ||
+        n_legacy != n_short || legacy_raw.size() != short_raw.size()) {
+        out.note = "fri3_alg_transcript_cost:prove_failed_or_asymmetric";
+        return out;
+    }
+    out.n_coeffs = n_legacy;
+    out.queries = kRCFri3AlgNumQueries;
+
+    const auto fill = [](std::vector<Fri3AlgTranscriptChallengeCostV1>& raw,
+                         std::vector<Fri3AlgTranscriptChallengeCostV1>& first,
+                         uint64_t& total_rows, uint64_t& max_rows) {
+        for (Fri3AlgTranscriptChallengeCostV1& e : raw) {
+            e.compressions = Fri3AlgShaCompressionsForPrefix(e.prefix_bytes);
+            e.rows = Fri3AlgShaAirRowsForCompressions(e.compressions);
+            total_rows += e.rows;
+            max_rows = std::max(max_rows, e.rows);
+            bool seen = false;
+            for (const Fri3AlgTranscriptChallengeCostV1& f : first) {
+                if (f.label == e.label) { seen = true; break; }
+            }
+            if (!seen) first.push_back(e);
+        }
+    };
+    fill(legacy_raw, out.legacy, out.legacy_total_rows, out.legacy_max_rows);
+    fill(short_raw, out.short_fs, out.short_fs_total_rows,
+         out.short_fs_max_rows);
+
+    // The short-transcript preimage contains no per-column term at all: W
+    // enters only as the single LE32 count and inside two fixed-width
+    // commitments. A caller proves width-independence by comparing two widths;
+    // this flag records the STRUCTURAL fact that no entry's prefix scales with
+    // W, which the two-width test in the unit suite checks empirically.
+    out.short_fs_width_independent = true;
+    out.valid = true;
+    out.note = "fri3_alg_transcript_cost:measured_on_production_transcript";
+    return out;
 }
 
 // ============================================================================
