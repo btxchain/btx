@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 
 namespace matmul::v4::rc::recursive_fixedpoint {
@@ -16773,6 +16774,163 @@ bool ExtractShardLocalQuotientOpenings(
     return true;
 }
 
+NarrowBytecodeShardQuotientJoinAirMirrorV1
+AirMirrorNarrowBytecodeShardLocalQuotientsV1(
+    const std::vector<Fp3>& bound_q_per_query,
+    const std::vector<std::vector<Fp3>>& shard_local_q,
+    bool absolute_parent_bound)
+{
+    NarrowBytecodeShardQuotientJoinAirMirrorV1 out;
+    out.absolute_parent_bound = absolute_parent_bound;
+    out.shard_count =
+        static_cast<uint32_t>(shard_local_q.size());
+    if (bound_q_per_query.empty() ||
+        shard_local_q.size() < 2) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_air_input";
+        return out;
+    }
+    const uint32_t queries =
+        static_cast<uint32_t>(bound_q_per_query.size());
+    out.queries = queries;
+    for (const auto& shard : shard_local_q) {
+        if (shard.size() != queries) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_q_join_air_query_mismatch";
+            return out;
+        }
+    }
+    // Residual identity check before proving.
+    for (uint32_t q = 0; q < queries; ++q) {
+        Fp3 sum = Fp3::Zero();
+        for (const auto& shard : shard_local_q) {
+            sum = gf::Add(sum, shard[q]);
+        }
+        if (!gf::IsZero(gf::Sub(sum, bound_q_per_query[q]))) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_q_join_air_bound_mismatch";
+            return out;
+        }
+    }
+
+    const uint32_t n_rows = NextPow2(queries);
+    const uint32_t n_columns =
+        1U + static_cast<uint32_t>(shard_local_q.size());
+    if (n_rows < 2 || n_columns < 3) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_air_shape";
+        return out;
+    }
+    out.n_rows = n_rows;
+    out.n_columns = n_columns;
+
+    aq::AirConstraintSystem<Fp3> cs;
+    cs.n_rows = n_rows;
+    cs.n_columns = n_columns;
+    const uint32_t shard_count = out.shard_count;
+    cs.constraints.push_back(
+        {"bytecode_q_join_sum_eq_bound",
+         aq::AirKind::kEverywhere,
+         /*alg_degree=*/1,
+         [shard_count](
+             const std::vector<Fp3>& cur,
+             const std::vector<Fp3>&) {
+             Fp3 sum = Fp3::Zero();
+             for (uint32_t s = 0; s < shard_count; ++s) {
+                 sum = gf::Add(sum, cur[1U + s]);
+             }
+             return gf::Sub(sum, cur[0]);
+         }});
+
+    std::vector<std::vector<Fp3>> columns(
+        n_columns, std::vector<Fp3>(n_rows, Fp3::Zero()));
+    for (uint32_t q = 0; q < queries; ++q) {
+        columns[0][q] = bound_q_per_query[q];
+        for (uint32_t s = 0; s < shard_count; ++s) {
+            columns[1U + s][q] = shard_local_q[s][q];
+        }
+    }
+    // Padding rows: bound = 0 and shards = 0 keep the residual zero.
+
+    HashWriter seed_hash;
+    seed_hash <<
+        "BTX_RC_STAGE3_BYTECODE_Q_JOIN_AIR_MIRROR_V1";
+    seed_hash << queries;
+    seed_hash << shard_count;
+    seed_hash << n_rows;
+    seed_hash << static_cast<uint8_t>(
+        absolute_parent_bound ? 1 : 0);
+    for (uint32_t q = 0; q < queries; ++q) {
+        seed_hash << gf::Canonical(bound_q_per_query[q].c0);
+        seed_hash << gf::Canonical(bound_q_per_query[q].c1);
+        seed_hash << gf::Canonical(bound_q_per_query[q].c2);
+    }
+    const uint256 seed = seed_hash.GetHash();
+
+    const auto proved =
+        aq::AirQuotientProve<Fp3>(cs, columns, seed);
+    out.proved = proved.ok && proved.division_exact;
+    if (!out.proved) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_air_prove:" +
+            proved.note;
+        return out;
+    }
+
+    std::string verify_why;
+    const auto t0 = std::chrono::steady_clock::now();
+    out.verified = aq::AirQuotientVerify<Fp3>(
+        cs, proved.proof, seed, &verify_why);
+    const auto t1 = std::chrono::steady_clock::now();
+    out.verify_micros = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            t1 - t0)
+            .count());
+    if (!out.verified) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_air_verify:" +
+            verify_why;
+        return out;
+    }
+
+    // Forgery: mutate shard-0 at query 0; honest residual must break.
+    auto forged = columns;
+    forged[1][0] = gf::Add(forged[1][0], Fp3::One());
+    const auto forged_proved =
+        aq::AirQuotientProve<Fp3>(cs, forged, seed);
+    const bool forged_ok =
+        forged_proved.ok && forged_proved.division_exact;
+    bool forged_verified = false;
+    if (forged_ok) {
+        std::string forged_why;
+        forged_verified = aq::AirQuotientVerify<Fp3>(
+            cs, forged_proved.proof, seed, &forged_why);
+    }
+    out.forgery_rejected = !forged_ok || !forged_verified;
+    out.valid =
+        out.proved && out.verified && out.forgery_rejected;
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:bytecode_q_join_air") +
+        ";shards=" + std::to_string(out.shard_count) +
+        ";queries=" + std::to_string(out.queries) +
+        ";rows=" + std::to_string(out.n_rows) +
+        ";cols=" + std::to_string(out.n_columns) +
+        ";abs=" + (out.absolute_parent_bound ? "1" : "0") +
+        ";proved=" + (out.proved ? "1" : "0") +
+        ";verified=" + (out.verified ? "1" : "0") +
+        ";forgery=" + (out.forgery_rejected ? "1" : "0") +
+        ";verify_us=" + std::to_string(out.verify_micros) +
+        ";complete_fp=false";
+    return out;
+}
+
 NarrowBytecodeShardQuotientJoinV1
 JoinNarrowBytecodeShardLocalQuotientsV1(
     const std::vector<Fp3>& parent_q_per_query,
@@ -16904,6 +17062,18 @@ JoinNarrowBytecodeShardLocalQuotientsV1(
             out.shards_extracted && out.partition_closed &&
             out.forgery_rejected;
     }
+
+    if (out.valid) {
+        const std::vector<Fp3>& bound =
+            out.sum_equals_parent ? out.parent_q_per_query
+                                  : out.sum_local_q_per_query;
+        out.air_mirror =
+            AirMirrorNarrowBytecodeShardLocalQuotientsV1(
+                bound, shard_local_q, out.sum_equals_parent);
+        out.air_mirrored = out.air_mirror.valid;
+        // Host join stays valid even if AIR mirror fails; mirror is additive.
+    }
+
     out.note =
         std::string(
             "stage3:recursive_fixedpoint:bytecode_q_join") +
@@ -16916,7 +17086,15 @@ JoinNarrowBytecodeShardLocalQuotientsV1(
         ";sum_eq=" + (out.sum_equals_parent ? "1" : "0") +
         ";part=" + (out.partition_closed ? "1" : "0") +
         ";forgery=" + (out.forgery_rejected ? "1" : "0") +
-        ";mirror=0;complete_fp=false";
+        ";mirror=" + (out.air_mirrored ? "1" : "0") +
+        ";complete_fp=false";
+    if (out.air_mirrored) {
+        out.note +=
+            ";air_verify_us=" +
+            std::to_string(out.air_mirror.verify_micros);
+    } else if (!out.air_mirror.note.empty()) {
+        out.note += ";" + out.air_mirror.note;
+    }
     return out;
 }
 
@@ -17237,8 +17415,16 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         out.l1_count > 0 &&
         (attach_l1 ? out.all_l1_attached &&
                          out.all_l1_forgeries_rejected
-                   : true) &&
-        !out.complete_verifier_mirror;
+                   : true);
+    // Absolute AIR-mirrored join earns runtime complete_verifier_mirror.
+    // CompleteFP / AggregationReady constexprs stay false (SHA-FS +
+    // multi-child FRI consumption still open).
+    out.complete_verifier_mirror =
+        attach_l1 && out.valid && out.p2_fs_replay_closed &&
+        out.quotient_join.valid &&
+        out.quotient_join.sum_equals_parent &&
+        out.quotient_join.air_mirrored &&
+        out.quotient_join.air_mirror.forgery_rejected;
     std::string first_fail;
     for (const auto& node : out.nodes) {
         if (node.label.rfind("freeL1-", 0) == 0 && attach_l1 &&
@@ -17270,7 +17456,9 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         (out.quotient_join.valid ? "1" : "0") +
         ";q_sum_eq=" +
         (out.quotient_join.sum_equals_parent ? "1" : "0") +
-        ";mirror=0;complete_fp=false" + first_fail;
+        ";mirror=" +
+        (out.complete_verifier_mirror ? "1" : "0") +
+        ";complete_fp=false" + first_fail;
     return out;
 }
 
