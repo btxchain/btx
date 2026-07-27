@@ -16165,6 +16165,202 @@ FoldBusComposition BuildDualV5FoldBusCompositionAtBase(
         std::vector<AlgAirProof>{view});
 }
 
+uint64_t CountProgramTableInstructions(
+    const constraint_bytecode::ProgramTable& table)
+{
+    uint64_t instructions = 0;
+    for (const auto& program : table.programs) {
+        instructions += program.instructions.size();
+    }
+    return instructions;
+}
+
+uint32_t CountFoldBusReservedSpongeRows(
+    const FoldBusComposition& composition)
+{
+    if (!composition.valid || !composition.hash.valid ||
+        composition.hash.program.rows.size() <
+            composition.hash.program.active_rows) {
+        return 0;
+    }
+    uint32_t reserved = 0;
+    for (uint32_t row = 0;
+         row < composition.hash.program.active_rows;
+         ++row) {
+        const auto& meta =
+            composition.hash.program.rows[row];
+        if (meta.current_row_sponge ||
+            meta.next_row_sponge) {
+            ++reserved;
+        }
+    }
+    return reserved;
+}
+
+NarrowBytecodePerPointJoinBudgetV1
+AssessNarrowBytecodePerPointJoinBudgetV1(
+    const FoldBusComposition& composition,
+    const constraint_bytecode::ProgramTable& table)
+{
+    NarrowBytecodePerPointJoinBudgetV1 out;
+    out.p2_fs_replay_closed =
+        recursive_parent_air::AssessChildFsReplayClosureV1()
+            .closed;
+    if (!composition.valid ||
+        !constraint_bytecode::ValidateProgramTable(
+            table, nullptr)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_bytecode_join_budget_base_invalid";
+        return out;
+    }
+    const auto& pi =
+        composition.hash.program.public_inputs;
+    out.fold_bus_columns = composition.combined.n_columns;
+    out.fold_bus_rows = composition.combined.n_rows;
+    out.reserved_sponge_rows =
+        CountFoldBusReservedSpongeRows(composition);
+    out.free_rows =
+        out.fold_bus_rows > out.reserved_sponge_rows
+            ? out.fold_bus_rows - out.reserved_sponge_rows
+            : 0;
+    out.bytecode_added_columns =
+        BytecodeBusLayout(out.fold_bus_columns).End() -
+        out.fold_bus_columns;
+    out.projected_columns =
+        out.fold_bus_columns + out.bytecode_added_columns;
+    // Narrow family stays well under 1024 columns (575-col
+    // multi-child measurement + ~65 bytecode ports).
+    out.projected_columns_narrow =
+        out.fold_bus_columns < 1024U &&
+        out.projected_columns < 1024U;
+    out.queries =
+        static_cast<uint32_t>(pi.query_index.size());
+    out.instructions = CountProgramTableInstructions(table);
+    out.rows_needed =
+        uint64_t{out.queries} * (out.instructions + 1U);
+    out.rows_fit_without_pad =
+        out.rows_needed <= out.free_rows;
+    const uint64_t deficit =
+        out.rows_fit_without_pad
+            ? 0
+            : (out.rows_needed - out.free_rows);
+    const uint64_t min_rows =
+        uint64_t{out.fold_bus_rows} + deficit;
+    out.projected_trace_rows = NextPow2(min_rows);
+    if (out.projected_trace_rows == 0) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_bytecode_join_budget_row_overflow";
+        return out;
+    }
+    out.projected_lde =
+        out.projected_trace_rows * kRCFriBlowup;
+    out.projected_lde_supported =
+        out.projected_lde <=
+        (uint64_t{1} << kRCFriMaxLdeLog2);
+    out.capacity_closed =
+        !out.rows_fit_without_pad &&
+        !out.projected_lde_supported;
+    out.valid =
+        out.projected_columns_narrow &&
+        out.queries > 0 &&
+        out.instructions > 0 &&
+        out.rows_needed > 0;
+    out.note =
+        out.valid
+            ? (std::string(
+                   "stage3:recursive_fixedpoint:"
+                   "narrow_bytecode_join_budget") +
+               ";fold_cols=" +
+               std::to_string(out.fold_bus_columns) +
+               ";fold_rows=" +
+               std::to_string(out.fold_bus_rows) +
+               ";free=" + std::to_string(out.free_rows) +
+               ";bytecode_cols=" +
+               std::to_string(out.bytecode_added_columns) +
+               ";projected_cols=" +
+               std::to_string(out.projected_columns) +
+               ";queries=" + std::to_string(out.queries) +
+               ";instructions=" +
+               std::to_string(out.instructions) +
+               ";needed=" +
+               std::to_string(out.rows_needed) +
+               ";projected_rows=" +
+               std::to_string(out.projected_trace_rows) +
+               ";projected_lde=" +
+               std::to_string(out.projected_lde) +
+               (out.rows_fit_without_pad
+                    ? ";fits_free"
+                    : ";needs_pad") +
+               (out.projected_lde_supported
+                    ? ";lde_ok"
+                    : ";lde_over_cap") +
+               (out.p2_fs_replay_closed
+                    ? ";p2_fs_closed"
+                    : ";p2_fs_open") +
+               (out.capacity_closed
+                    ? ";capacity_closed"
+                    : ";join_representable_if_padded") +
+               ";complete_fp=false")
+            : "stage3:recursive_fixedpoint:"
+              "narrow_bytecode_join_budget_invalid";
+    return out;
+}
+
+bool PadFoldBusFreeRowsForBytecode(
+    FoldBusComposition& composition,
+    uint64_t rows_needed,
+    std::string* why)
+{
+    if (!composition.valid || rows_needed == 0) {
+        return Fail(why, "bytecode_pad_input");
+    }
+    const uint32_t reserved =
+        CountFoldBusReservedSpongeRows(composition);
+    const uint32_t n_rows = composition.combined.n_rows;
+    const uint32_t free =
+        n_rows > reserved ? n_rows - reserved : 0;
+    if (rows_needed <= free) {
+        if (why != nullptr) {
+            *why =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_pad_already_fits";
+        }
+        return true;
+    }
+    const uint64_t deficit = rows_needed - free;
+    const uint64_t min_rows = uint64_t{n_rows} + deficit;
+    const uint32_t projected = NextPow2(min_rows);
+    if (projected == 0 ||
+        uint64_t{projected} * kRCFriBlowup >
+            (uint64_t{1} << kRCFriMaxLdeLog2)) {
+        return Fail(
+            why,
+            "bytecode_pad_lde_over_cap;needed=" +
+                std::to_string(rows_needed) +
+                ";free=" + std::to_string(free) +
+                ";min_rows=" +
+                std::to_string(min_rows));
+    }
+    composition.combined.n_rows = projected;
+    for (auto& column : composition.columns) {
+        column.resize(projected, Fp3::Zero());
+    }
+    for (auto& [col, values] :
+         composition.combined.preprocessed) {
+        (void)col;
+        values.resize(projected, Fp3::Zero());
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_pad_ok;rows=" +
+            std::to_string(projected);
+    }
+    return true;
+}
+
 BytecodeInterpreterAttachment
 AttachConstraintBytecodeInterpreter(
     FoldBusComposition& composition,
