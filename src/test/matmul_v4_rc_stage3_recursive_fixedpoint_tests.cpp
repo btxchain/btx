@@ -4644,4 +4644,74 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
 }
 
+// g2 chip B: multi-child L2 FRI consume of ≥2 L1 proofs under FRI shape
+// (BuildFoldBusCompositionMulti cryptographic join — NOT host Σ local_q /
+// AIR-mirror). Light arity-2 canary on two boolean children. Opt-in via
+// BTX_RUN_G2_MULTI_CHILD_L2=1. Does NOT flip Ready / AggregationReady.
+BOOST_AUTO_TEST_CASE(
+    boolean_arity2_l2_fri_consume_rejects_child_forgery)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_MULTI_CHILD_L2");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_MULTI_CHILD_L2=1 for "
+            "arity-2 L2 FRI multi-child consume "
+            "(BuildFoldBusCompositionMulti + AirProve)");
+        return;
+    }
+
+    const HonestChild a = BuildHonestChild(0xB1);
+    const HonestChild b = BuildHonestChild(0xB2);
+
+    // Shape-only first (prove=false): fold-bus + FRI + forgery.
+    const fp::NarrowMultiChildL2FriConsumeV1 shape =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            {a.cs, b.cs}, {a.proof, b.proof},
+            {a.seed, b.seed}, /*prove=*/false);
+    BOOST_REQUIRE_MESSAGE(shape.valid, shape.note);
+    BOOST_CHECK(shape.fold_bus_built);
+    BOOST_CHECK(shape.fri_shape_representable);
+    BOOST_CHECK(shape.forgery_rejected);
+    BOOST_CHECK(!shape.proved);
+    BOOST_CHECK_EQUAL(shape.arity, 2U);
+    BOOST_CHECK_EQUAL(shape.n_columns, 575U);
+    BOOST_CHECK_GE(shape.n_rows, 8192U);
+    BOOST_CHECK_LE(shape.n_lde, uint32_t{1} << 24);
+    BOOST_TEST_MESSAGE(shape.note);
+
+    // Full cryptographic L2 consume: AirQuotientProve/Verify the joined node.
+    const fp::NarrowMultiChildL2FriConsumeV1 consumed =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            {a.cs, b.cs}, {a.proof, b.proof},
+            {a.seed, b.seed}, /*prove=*/true);
+    BOOST_REQUIRE_MESSAGE(consumed.valid, consumed.note);
+    BOOST_CHECK(consumed.fold_bus_built);
+    BOOST_CHECK(consumed.fri_shape_representable);
+    BOOST_CHECK(consumed.proved);
+    BOOST_CHECK(consumed.verified);
+    BOOST_CHECK(consumed.forgery_rejected);
+    BOOST_CHECK_EQUAL(consumed.arity, 2U);
+    BOOST_CHECK_EQUAL(consumed.n_columns, 575U);
+    BOOST_CHECK_EQUAL(consumed.n_rows, shape.n_rows);
+    BOOST_CHECK_GT(consumed.prove_micros, 0ULL);
+    BOOST_CHECK_GT(consumed.verify_micros, 0ULL);
+    BOOST_TEST_MESSAGE(consumed.note);
+    BOOST_TEST_MESSAGE(
+        "MULTI_CHILD_L2_FRI arity=" << consumed.arity
+        << " rows=" << consumed.n_rows
+        << " cols=" << consumed.n_columns
+        << " active=" << consumed.active_rows
+        << " n_lde=" << consumed.n_lde
+        << " prove_us=" << consumed.prove_micros
+        << " verify_us=" << consumed.verify_micros
+        << " forgery=1 complete_fp=false");
+
+    static_assert(fp::kNarrowMultiChildL2FriConsumeExecutable);
+    static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!nr::kNarrowHierarchicalAggregationReady);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

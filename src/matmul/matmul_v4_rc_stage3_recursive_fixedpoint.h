@@ -2868,7 +2868,8 @@ struct NarrowBytecodeShardQuotientJoinAirMirrorV1 {
  * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
  * Runtime complete_verifier_mirror on the hierarchical execution may become
  * true once absolute sum_eq is AIR-mirrored; SHA-FS transcript chip and
- * multi-child FRI consumption remain separate toward AggregationReady.
+ * hierarchical L2/L3 wiring of ExecuteNarrowMultiChildL2FriConsumeV1 remain
+ * separate toward AggregationReady.
  */
 struct NarrowBytecodeShardQuotientJoinV1 {
     bool valid{false};
@@ -2898,8 +2899,10 @@ struct NarrowBytecodeShardQuotientJoinV1 {
  * with local synthesized q + forgery rejects. When all L1 shards attach,
  * JoinNarrowBytecodeShardLocalQuotientsV1 binds Σ local_q to the parent
  * authenticated opening (absolute iff shards cover the full table) and
- * AIR-mirrors that identity. L2/L3 FRI multi-child consumption and the
- * SHA-FS transcript chip remain open toward AggregationReady / CompleteFP.
+ * AIR-mirrors that identity. L2 FRI multi-child consume of ≥2 L1 proofs is
+ * available via ExecuteNarrowMultiChildL2FriConsumeV1 (opt-in measured);
+ * wiring that into every hierarchical L2/L3 composed node plus the SHA-FS
+ * transcript chip remain open toward AggregationReady / CompleteFP.
  *
  * Does NOT flip kCompleteRecursiveFixedPointExecutable /
  * kNarrowHierarchicalAggregationReady / within_relay_budget. Runtime
@@ -3073,6 +3076,54 @@ inline constexpr bool kNarrowBytecodeShardCompositionAirProveExecutable = true;
 inline constexpr bool kNarrowBytecodeShardCompositionAirProveReady = false;
 
 /**
+ * L2 cryptographic multi-child FRI consume — distinct from host Σ local_q /
+ * AIR-mirror of openings (JoinNarrowBytecodeShardLocalQuotientsV1).
+ *
+ * Packs arity ≥2 independent L1 AlgAirProofs into ONE narrow fold-bus via
+ * BuildFoldBusCompositionMulti (zero column expansion; arity paid in rows),
+ * assesses AssessNarrowNodeFriShape on the measured active schedule, then
+ * AirQuotientProveRows / AirQuotientVerifyRows the L2 node. A tampered
+ * child must fail native fold-bus acceptance before any L2 witness exists.
+ *
+ * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
+ */
+struct NarrowMultiChildL2FriConsumeV1 {
+    bool valid{false};
+    bool fri_shape_representable{false};
+    bool fold_bus_built{false};
+    bool proved{false};
+    bool verified{false};
+    bool forgery_rejected{false};
+    uint32_t arity{0};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint64_t active_rows{0};
+    uint32_t n_lde{0};
+    uint64_t prove_micros{0};
+    uint64_t verify_micros{0};
+    nr::NarrowNodeFriShape fri_shape;
+    std::string note;
+};
+
+/**
+ * Cryptographic L2 join of ≥2 child proofs under FRI shape.
+ * `prove=false` measures fold-bus + FRI shape + forgery only (light).
+ * `prove=true` additionally AirQuotientProve/Verify the L2 node.
+ */
+[[nodiscard]] NarrowMultiChildL2FriConsumeV1
+ExecuteNarrowMultiChildL2FriConsumeV1(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds,
+    bool prove = true);
+
+/** Multi-child L2 FRI consume exists; Ready parked until hier wiring +
+ *  SHA-FS + relay/serialize pins all measure green. */
+inline constexpr bool kNarrowMultiChildL2FriConsumeExecutable = true;
+inline constexpr bool kNarrowMultiChildL2FriConsumeReady = false;
+
+/**
  * Expand the fold-bus trace with trailing free rows so a subsequent
  * AttachConstraintBytecodeInterpreter has `rows_needed` free slots. Fails
  * closed if the projected power-of-two height's LDE would exceed
@@ -3200,6 +3251,8 @@ static_assert(kNarrowBytecodeShardQuotientJoinExecutable);
 static_assert(!kNarrowBytecodeShardQuotientJoinReady);
 static_assert(kNarrowBytecodeShardCompositionAirProveExecutable);
 static_assert(!kNarrowBytecodeShardCompositionAirProveReady);
+static_assert(kNarrowMultiChildL2FriConsumeExecutable);
+static_assert(!kNarrowMultiChildL2FriConsumeReady);
 
 } // namespace matmul::v4::rc::recursive_fixedpoint
 
