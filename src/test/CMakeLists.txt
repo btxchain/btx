@@ -167,6 +167,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_mlink_tests.cpp
   matmul_v4_rc_stage3_family_vm_tests.cpp
   matmul_v4_rc_stage3_role_bytecode_tests.cpp
+  matmul_v4_rc_stage3_production_family_programs_tests.cpp
   matmul_v4_rc_stage3_splitrap_ctl_coordinator_tests.cpp
   matmul_v4_rc_stage3_recursive_parent_air_tests.cpp
   matmul_v4_rc_stage3_fs_selection_air_tests.cpp
