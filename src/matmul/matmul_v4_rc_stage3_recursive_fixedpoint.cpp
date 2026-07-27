@@ -17574,17 +17574,85 @@ ExecuteNarrowBytecodeShardQuotientJoinV1(
         static_cast<uint32_t>(table.programs.size()));
 }
 
+namespace {
+
+namespace gf = gkr_field;
+
+/** Tiny W=1 boolean child used only as a hierarchical L2-wire stand-in
+ *  until real free-row L1 AirProofs are available. */
+bool BuildBooleanStandInChildrenForHierL2Wire(
+    uint32_t arity,
+    unsigned char seed_tag,
+    std::vector<aq::AirConstraintSystem<Fp3>>& out_css,
+    std::vector<AlgAirProof>& out_proofs,
+    std::vector<uint256>& out_seeds)
+{
+    out_css.clear();
+    out_proofs.clear();
+    out_seeds.clear();
+    if (arity < 2) return false;
+    out_css.reserve(arity);
+    out_proofs.reserve(arity);
+    out_seeds.reserve(arity);
+    for (uint32_t i = 0; i < arity; ++i) {
+        aq::AirConstraintSystem<Fp3> cs;
+        cs.n_rows = 2;
+        cs.n_columns = 1;
+        aq::AirConstraint<Fp3> boolean;
+        boolean.name = "stage3.fixedpoint.hier_l2_wire.boolean";
+        boolean.kind = aq::AirKind::kEverywhere;
+        boolean.alg_degree = 2;
+        boolean.eval =
+            [](const std::vector<Fp3>& cur,
+               const std::vector<Fp3>&) {
+                return gf::Mul(
+                    cur[0], gf::Sub(cur[0], Fp3::One()));
+            };
+        cs.constraints.push_back(std::move(boolean));
+
+        HashWriter seed_hash;
+        seed_hash << "BTX_RC_HIER_L2_WIRE_STANDIN_V1";
+        seed_hash << seed_tag;
+        seed_hash << i;
+        seed_hash << arity;
+        const uint256 seed = seed_hash.GetHash();
+
+        std::vector<std::vector<Fp3>> columns(
+            1, std::vector<Fp3>(2, Fp3::Zero()));
+        columns[0][1] = Fp3::One();
+        const auto proved =
+            aq::AirQuotientProve<Fp3, aq::AirFriBackendAlg<Fp3>>(
+                cs, columns, seed, {});
+        if (!proved.ok || !proved.division_exact) {
+            return false;
+        }
+        out_css.push_back(std::move(cs));
+        out_proofs.push_back(proved.proof);
+        out_seeds.push_back(seed);
+    }
+    return out_css.size() == arity &&
+           out_proofs.size() == arity &&
+           out_seeds.size() == arity;
+}
+
+} // namespace
+
 NarrowBytecodeHierarchicalAttachExecutionV1
 ExecuteNarrowBytecodeHierarchicalAttachV1(
     const FoldBusComposition& base,
     const constraint_bytecode::ProgramTable& table,
-    bool attach_l1)
+    bool attach_l1,
+    bool wire_l2_fri_consume,
+    bool l2_prove)
 {
     NarrowBytecodeHierarchicalAttachExecutionV1 out;
     out.p2_fs_replay_closed =
         recursive_parent_air::AssessChildFsReplayClosureV1()
             .closed;
     out.complete_verifier_mirror = false;
+    // When wiring, start true and clear on any arity≥2 compose failure.
+    // When not wiring, stays false (wire not claimed).
+    out.all_composed_l2_wired = wire_l2_fri_consume;
     if (!base.valid ||
         !constraint_bytecode::ValidateProgramTable(
             table, nullptr)) {
@@ -17606,6 +17674,33 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
             "bytecode_hier_exec_plan_invalid:" +
             out.plan.note;
         return out;
+    }
+
+    // Stand-in boolean children for the hierarchical L2/L3 wire path.
+    // Real free-row L1 AirProof children remain a separate AggregationReady
+    // blocker (await measured chip-A proofs). Built once up to max arity.
+    std::vector<aq::AirConstraintSystem<Fp3>> wire_css;
+    std::vector<AlgAirProof> wire_proofs;
+    std::vector<uint256> wire_seeds;
+    if (wire_l2_fri_consume) {
+        uint32_t max_arity = 2;
+        for (const auto& node : out.plan.hierarchy.nodes) {
+            if (node.level >= 2) {
+                max_arity = std::max(
+                    max_arity,
+                    static_cast<uint32_t>(
+                        node.child_node_indices.size()));
+            }
+        }
+        if (!BuildBooleanStandInChildrenForHierL2Wire(
+                max_arity, /*seed_tag=*/0xC2U, wire_css,
+                wire_proofs, wire_seeds)) {
+            out.all_composed_l2_wired = false;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_hier_l2_wire_standin_build";
+            return out;
+        }
     }
 
     out.all_nodes_representable = true;
@@ -17637,6 +17732,9 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         ++out.composed_count;
         if (node.child_node_indices.empty()) {
             out.all_composed_scheduled = false;
+            if (wire_l2_fri_consume) {
+                out.all_composed_l2_wired = false;
+            }
             nr.note = "composed_missing_children";
             out.nodes.push_back(std::move(nr));
             continue;
@@ -17656,12 +17754,83 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
                 break;
             }
         }
-        nr.note = children_ok
-            ? "composed_scheduled;crypto_join_pending;"
-              "l2_fri_consume_executable"
-            : "composed_child_link_invalid";
-        if (!children_ok) out.all_composed_scheduled = false;
+        if (!children_ok) {
+            out.all_composed_scheduled = false;
+            if (wire_l2_fri_consume) {
+                out.all_composed_l2_wired = false;
+            }
+            nr.note = "composed_child_link_invalid";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+
+        if (!wire_l2_fri_consume) {
+            nr.note =
+                "composed_scheduled;crypto_join_pending;"
+                "l2_fri_consume_executable";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+
+        // Hierarchical L2/L3 wire: invoke multi-child FRI consume.
+        if (nr.child_node_count < 2U) {
+            ++out.composed_l2_arity_lt2;
+            // Unary composed edges are schedule-ok but cannot exercise
+            // the arity≥2 multi-child consume API.
+            nr.note =
+                "composed_scheduled;crypto_join_arity_lt2;"
+                "l2_fri_consume_skipped";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        if (wire_css.size() < nr.child_node_count) {
+            out.all_composed_l2_wired = false;
+            nr.note =
+                "composed_scheduled;crypto_join_wire_standin_short";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        std::vector<aq::AirConstraintSystem<Fp3>> child_css(
+            wire_css.begin(),
+            wire_css.begin() + nr.child_node_count);
+        std::vector<AlgAirProof> children(
+            wire_proofs.begin(),
+            wire_proofs.begin() + nr.child_node_count);
+        std::vector<uint256> child_seeds(
+            wire_seeds.begin(),
+            wire_seeds.begin() + nr.child_node_count);
+        const NarrowMultiChildL2FriConsumeV1 consumed =
+            ExecuteNarrowMultiChildL2FriConsumeV1(
+                child_css, children, child_seeds, l2_prove);
+        nr.l2_fri_consume_invoked = true;
+        nr.l2_fri_consume_valid = consumed.valid;
+        nr.l2_fri_consume_arity = consumed.arity;
+        nr.forgery_rejected = consumed.forgery_rejected;
+        if (consumed.valid) {
+            ++out.composed_l2_wired;
+            nr.note =
+                std::string("composed_scheduled;crypto_join_wired;") +
+                consumed.note;
+        } else {
+            out.all_composed_l2_wired = false;
+            nr.note =
+                std::string(
+                    "composed_scheduled;crypto_join_wire_failed;") +
+                consumed.note;
+        }
         out.nodes.push_back(std::move(nr));
+    }
+
+    if (wire_l2_fri_consume) {
+        // Arity-lt2 composed nodes do not block the wire (no multi-child
+        // API to invoke); require every arity≥2 composed node wired.
+        const uint32_t need =
+            out.composed_count > out.composed_l2_arity_lt2
+                ? out.composed_count - out.composed_l2_arity_lt2
+                : 0;
+        out.all_composed_l2_wired =
+            out.all_composed_l2_wired &&
+            out.composed_l2_wired == need && need > 0;
     }
 
     const uint32_t reserved =
@@ -17816,8 +17985,7 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
                    : true);
     // Absolute AIR-mirrored join earns runtime complete_verifier_mirror.
     // CompleteFP / AggregationReady constexprs stay false (SHA-FS +
-    // hierarchical wiring of ExecuteNarrowMultiChildL2FriConsumeV1 still
-    // open).
+    // real free-row L1 AirProof children for hier L2 consume still open).
     out.complete_verifier_mirror =
         attach_l1 && out.valid && out.p2_fs_replay_closed &&
         out.quotient_join.valid &&
@@ -17850,6 +18018,10 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         (out.all_l1_forgeries_rejected ? "1" : "0") +
         ";composed_ok=" +
         (out.all_composed_scheduled ? "1" : "0") +
+        ";l2_wire=" + (wire_l2_fri_consume ? "1" : "0") +
+        ";l2_wired=" + std::to_string(out.composed_l2_wired) +
+        ";l2_all=" + (out.all_composed_l2_wired ? "1" : "0") +
+        ";l2_prove=" + (l2_prove ? "1" : "0") +
         ";p2_fs=" + (out.p2_fs_replay_closed ? "1" : "0") +
         ";q_join=" +
         (out.quotient_join.valid ? "1" : "0") +

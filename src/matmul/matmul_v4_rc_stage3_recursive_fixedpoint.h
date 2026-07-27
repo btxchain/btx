@@ -2804,9 +2804,10 @@ PlanNarrowBytecodeHierarchicalAttachV1(
 /**
  * One executed node from ExecuteNarrowBytecodeHierarchicalAttachV1.
  * Level-1 nodes may carry a real AttachConstraintBytecodeInterpreter result
- * against a child_constraints-sliced fold-bus pad. Level ≥2 nodes are the
- * composed schedule (child_node_indices + FRI shape) — their cryptographic
- * consumption of L1 proofs is a later join step.
+ * against a child_constraints-sliced fold-bus pad. Level ≥2 composed nodes
+ * schedule child_node_indices + FRI shape; when `wire_l2_fri_consume` is
+ * enabled they invoke ExecuteNarrowMultiChildL2FriConsumeV1 (stand-in
+ * boolean children until real free-row L1 AirProofs are available).
  */
 struct NarrowBytecodeHierarchicalAttachNodeResultV1 {
     uint32_t level{0};
@@ -2825,6 +2826,9 @@ struct NarrowBytecodeHierarchicalAttachNodeResultV1 {
     bool dual_logup_terminal{false};
     bool quotient_opening_equality{false};
     bool forgery_rejected{false};
+    bool l2_fri_consume_invoked{false};
+    bool l2_fri_consume_valid{false};
+    uint32_t l2_fri_consume_arity{0};
     uint32_t violations{0};
     std::string note;
 };
@@ -2868,7 +2872,7 @@ struct NarrowBytecodeShardQuotientJoinAirMirrorV1 {
  * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
  * Runtime complete_verifier_mirror on the hierarchical execution may become
  * true once absolute sum_eq is AIR-mirrored; SHA-FS transcript chip and
- * hierarchical L2/L3 wiring of ExecuteNarrowMultiChildL2FriConsumeV1 remain
+ * real free-row L1 AirProof children for hierarchical L2/L3 consume remain
  * separate toward AggregationReady.
  */
 struct NarrowBytecodeShardQuotientJoinV1 {
@@ -2899,10 +2903,10 @@ struct NarrowBytecodeShardQuotientJoinV1 {
  * with local synthesized q + forgery rejects. When all L1 shards attach,
  * JoinNarrowBytecodeShardLocalQuotientsV1 binds Σ local_q to the parent
  * authenticated opening (absolute iff shards cover the full table) and
- * AIR-mirrors that identity. L2 FRI multi-child consume of ≥2 L1 proofs is
- * available via ExecuteNarrowMultiChildL2FriConsumeV1 (opt-in measured);
- * wiring that into every hierarchical L2/L3 composed node plus the SHA-FS
- * transcript chip remain open toward AggregationReady / CompleteFP.
+ * AIR-mirrors that identity. When `wire_l2_fri_consume` is set, every
+ * composed node with arity ≥2 invokes ExecuteNarrowMultiChildL2FriConsumeV1
+ * (stand-in boolean children; real free-row L1 AirProof children + SHA-FS
+ * remain open toward AggregationReady / CompleteFP).
  *
  * Does NOT flip kCompleteRecursiveFixedPointExecutable /
  * kNarrowHierarchicalAggregationReady / within_relay_budget. Runtime
@@ -2914,12 +2918,15 @@ struct NarrowBytecodeHierarchicalAttachExecutionV1 {
     bool all_l1_attached{false};
     bool all_l1_forgeries_rejected{false};
     bool all_composed_scheduled{false};
+    bool all_composed_l2_wired{false};
     bool all_nodes_representable{false};
     bool p2_fs_replay_closed{false};
     bool complete_verifier_mirror{false};
     uint32_t l1_count{0};
     uint32_t l1_attached{0};
     uint32_t composed_count{0};
+    uint32_t composed_l2_wired{0};
+    uint32_t composed_l2_arity_lt2{0};
     uint32_t depth{0};
     uint32_t node_count{0};
     NarrowBytecodeHierarchicalAttachPlanV1 plan;
@@ -3045,12 +3052,18 @@ JoinNarrowBytecodeShardLocalQuotientsV1(
  * FRI plan + free-row shard capacity + L2/L3 schedule are checked. When
  * true, each free-row shard is attached sequentially with forgery rejects
  * and the L2 local-q join is measured against the parent opening.
+ *
+ * When `wire_l2_fri_consume` is true, every composed node with arity ≥2
+ * calls ExecuteNarrowMultiChildL2FriConsumeV1 (stand-in boolean children;
+ * `l2_prove=false` is shape-only). Does NOT flip Ready / AggregationReady.
  */
 [[nodiscard]] NarrowBytecodeHierarchicalAttachExecutionV1
 ExecuteNarrowBytecodeHierarchicalAttachV1(
     const FoldBusComposition& base,
     const constraint_bytecode::ProgramTable& table,
-    bool attach_l1 = true);
+    bool attach_l1 = true,
+    bool wire_l2_fri_consume = false,
+    bool l2_prove = false);
 
 /**
  * Light measured join path: attach an explicit partition of leaf indices
