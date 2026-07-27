@@ -48,6 +48,14 @@ struct TranscriptDomainV1 {
     const char* label{nullptr};
 };
 
+/** One exact event in the proposed continuous SAFE absorb/squeeze pattern. */
+struct SafeIoEventV1 {
+    TranscriptRoleV1 role{};
+    uint32_t ordinal{0};
+    uint32_t absorb_lanes{0};
+    uint32_t squeeze_lanes{0};
+};
+
 /** Exact, reviewable list used by the independent replay audit. */
 [[nodiscard]] const std::array<
     TranscriptDomainV1, kTranscriptDomainCountV1>&
@@ -86,6 +94,7 @@ struct TranscriptDagAuditV1 {
     uint32_t independently_replayed_hash_events{0};
     uint32_t queries{0};
     uint32_t query_candidates{0};
+    std::vector<SafeIoEventV1> proposed_safe_io_events;
 
     bool statement_shape_precedes_shape_commit{false};
     bool statement_prefix_precedes_r0_rdep_roots_in_air_lambda{false};
@@ -237,6 +246,167 @@ struct TypedHashSeparationAuditV1 {
  */
 [[nodiscard]] TypedHashSeparationAuditV1
 AuditTypedHashSeparationV1();
+
+// -------------------------------------------------------------------------
+// Two honest production paths from the V11 audit.
+// -------------------------------------------------------------------------
+
+struct SharedPermutationBudgetV1 {
+    uint64_t proof_sites{0};
+    uint64_t fs_permutation_calls_per_site{0};
+    uint64_t merkle_permutation_calls_per_site{0};
+    uint64_t receipt_program_calls_per_site{0};
+    uint64_t adversary_permutation_queries_per_site{0};
+    /** Unique H(IO,D) queries in the SAFECore theorem, including adversary. */
+    uint64_t safe_tag_hash_queries{0};
+    bool exact_manifest_derived{false};
+};
+
+struct TypedAddAbsorbHybridAuditV1 {
+    SharedPermutationBudgetV1 budget{};
+    double goldilocks_bits{0.0};
+    double shared_permutation_queries_log2{0.0};
+    double generic_capacity_first_collision_bits{0.0};
+    double poseidon_algebraic_floor_after_site_union_bits{0.0};
+    double effective_first_collision_bits{0.0};
+    bool all_shared_permutation_queries_summed_before_square{false};
+    bool adaptive_multiblock_capacity_collisions_accounted{false};
+    bool typed_initial_role_ivs_disjoint{false};
+    bool ten_star_message_encoding_prefix_free{false};
+    bool add_absorb_next_input_injective_given_prior_state{false};
+    bool concrete_poseidon_ideal_permutation_assumption_disclosed{false};
+    bool custom_reduction_formally_complete{false};
+    bool exact_global_call_manifest_enforced{false};
+    bool active_native_transcript_matches{false};
+    bool recursive_air_transcript_matches{false};
+    bool gpu_friendly_poseidon_preserved{false};
+    bool numeric_v1_security_screen_met{false};
+    bool production_theorem_complete{false};
+    std::vector<std::string> assumptions;
+    std::string note;
+};
+
+/**
+ * Numeric first-collision screen for path A. Every use of the shared
+ * permutation is summed before the birthday square; no role is treated as an
+ * independent lane. This is not itself a proof of the custom reduction.
+ */
+[[nodiscard]] TypedAddAbsorbHybridAuditV1
+AssessTypedAddAbsorbHybridV1(
+    const SharedPermutationBudgetV1& budget);
+
+struct OverwriteDuplexFsAuditV1 {
+    uint32_t minimum_capacity_lanes{0};
+    uint32_t persistent_duplex_state_lanes{0};
+    uint32_t poseidon_air_columns_per_parameter_set{0};
+    uint32_t minimum_independent_oracle_families{0};
+    uint32_t additional_poseidon_parameter_sets_vs_v11{0};
+    bool published_transform_is_overwrite_mode{false};
+    bool published_start_capacity_is_instance_derived{false};
+    bool published_bcs_keeps_merkle_compression_separate{false};
+    bool current_v11_add_absorb_matches{false};
+    bool current_v11_zero_capacity_start_matches{false};
+    bool same_parameter_set_domain_tags_are_proven_independent{false};
+    bool independent_start_fs_merkle_parameter_sets_executable{false};
+    bool native_overwrite_transcript_executable{false};
+    bool recursive_overwrite_transcript_executable{false};
+    bool gpu_friendly_if_poseidon_parameter_sets_added{false};
+    bool published_dsfs_premises_instantiated{false};
+    bool production_theorem_complete{false};
+    std::vector<std::string> assumptions;
+    std::string note;
+};
+
+/** Fail-closed implementation delta for path B (ePrint 2025/536 DSFS). */
+[[nodiscard]] OverwriteDuplexFsAuditV1
+AssessOverwriteDuplexFsV1();
+
+/**
+ * Published SAFECore route (ePrint 2023/520, Theorem 2).
+ *
+ * SAFE API 2023/522 writes at most c/2 tag elements. For Goldilocks c=4,
+ * the security report explains that profile only screens at |Fp|^(c/4),
+ * about 64 bits. The improved SAFECore theorem initializes the entire
+ * c-element inner part with H(IO,D), recovering |Fp|^(c/2).
+ */
+struct SafeCoreMigrationAuditV1 {
+    uint32_t rate_lanes{0};
+    uint32_t capacity_lanes{0};
+    uint32_t width_lanes{0};
+    uint32_t safe_api_spec_tag_lanes{0};
+    uint32_t proved_safecore_tag_lanes{0};
+    double safe_api_spec_query_ceiling_bits{0.0};
+    double proved_safecore_query_ceiling_bits{0.0};
+    uint32_t v11_transcript_hash_events{0};
+    uint32_t proposed_safe_io_absorb_squeeze_events{0};
+    uint64_t theorem_unique_h_queries{0};
+    double theorem_unique_permutation_queries_log2{0.0};
+    double theorem_indifferentiability_bits{0.0};
+    double conditional_poseidon_algebraic_floor_bits{0.0};
+    double conditional_effective_bits{0.0};
+
+    bool theorem2_bound_computed{false};
+    bool theorem2_numeric_v1_screen_met{false};
+    bool safe_api_two_lane_profile_meets_v1_screen{false};
+    bool current_v11_resets_state_per_hash_event{false};
+    bool current_v11_is_one_continuous_safe_state{false};
+    bool current_v11_capacity_is_full_h_io_domain_tag{false};
+    bool current_v11_io_pattern_fixed_and_enforced{false};
+    bool current_v11_padding_matches_safecore_pad{false};
+    bool typed_v12_static_iv_is_full_h_io_domain_tag{false};
+
+    bool proposed_fs_is_one_continuous_absorb_squeeze_state{false};
+    bool proposed_fs_has_fixed_io_pattern{false};
+    bool proposed_native_seed_feedback_removed{false};
+    bool proposed_merkle_instances_have_separate_tags{false};
+    bool proposed_receipt_program_instances_have_separate_tags{false};
+    bool proposed_uses_full_capacity_tag{false};
+    bool proposed_tag_hash_to_fp4_is_canonical{false};
+    bool proposed_tag_registry_root_pinned{false};
+    bool exact_safe_io_pattern_manifest_enforced{false};
+    bool native_safe_transcript_executable{false};
+    bool recursive_safe_transcript_executable{false};
+    bool gpu_friendly_poseidon_preserved{false};
+    bool tag_hash_random_oracle_assumption_disclosed{false};
+    bool poseidon_random_permutation_assumption_disclosed{false};
+    bool concrete_tag_hash_reduction_complete{false};
+    bool concrete_poseidon_reduction_complete{false};
+    bool published_safecore_premises_instantiated{false};
+    bool production_theorem_complete{false};
+    std::vector<std::string> premise_mismatches;
+    std::vector<std::string> required_protocol_changes;
+    std::string note;
+};
+
+/**
+ * Compare actual V11 semantics with SAFE/SAFECore and evaluate the exact
+ * Theorem-2 advantage expression under the supplied global query budget.
+ */
+[[nodiscard]] SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
+    const p2::StatementV1& statement,
+    const SharedPermutationBudgetV1& budget);
+
+enum class RecommendedNiropPathV1 : uint8_t {
+    None = 0,
+    TypedAddAbsorbCustomReduction = 1,
+    IndependentOverwriteDuplex = 2,
+    PublishedSafeCore = 3,
+};
+
+struct NiropPathComparisonV1 {
+    TypedAddAbsorbHybridAuditV1 typed_add_absorb;
+    OverwriteDuplexFsAuditV1 overwrite_duplex;
+    SafeCoreMigrationAuditV1 safe_core;
+    RecommendedNiropPathV1 recommended{
+        RecommendedNiropPathV1::None};
+    bool recommendation_preserves_current_gpu_poseidon_path{false};
+    bool recommendation_is_production_selectable{false};
+    std::string rationale;
+};
+
+[[nodiscard]] NiropPathComparisonV1 CompareNiropPathsV1(
+    const p2::StatementV1& statement,
+    const SharedPermutationBudgetV1& budget);
 
 } // namespace matmul::v4::rc::stage3_multirow_v11_nirop_hybrid
 

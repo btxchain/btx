@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <set>
 #include <utility>
 
@@ -152,9 +153,30 @@ Fp3 DigestFp3(const Fri3AlgDigest& digest)
 
 Fri3AlgDigest Hash(
     uint64_t domain, const std::vector<Fp>& lanes,
-    uint32_t& event_count)
+    uint32_t& event_count,
+    std::vector<SafeIoEventV1>* safe_io_events = nullptr)
 {
+    const uint32_t ordinal = event_count;
     ++event_count;
+    if (safe_io_events != nullptr) {
+        const auto item = std::find_if(
+            kDomains.begin(), kDomains.end(),
+            [domain](const TranscriptDomainV1& candidate) {
+                return candidate.domain == domain;
+            });
+        if (item != kDomains.end()) {
+            /*
+             * The continuous V12 SAFE message prepends the semantic role
+             * and exact event ordinal. The old two-u32 rate-domain prefix
+             * is replaced by this canonical pair.
+             */
+            safe_io_events->push_back({
+                item->role,
+                ordinal,
+                static_cast<uint32_t>(lanes.size() + 2),
+                alg_hash::kAlgHashDigestLen});
+        }
+    }
     return Fri3AlgAlgebraicTranscriptDigest(lanes, domain);
 }
 
@@ -330,7 +352,8 @@ TranscriptDagAuditV1 AssessV1(
         AppendU32(lanes, length);
     }
     const auto shape = Hash(
-        kRCFri3AlgShapeCommitDomain, lanes, events);
+        kRCFri3AlgShapeCommitDomain, lanes, events,
+        &out.proposed_safe_io_events);
     exact &= DigestEqual(shape, native.shape_commit);
 
     lanes.clear();
@@ -349,7 +372,9 @@ TranscriptDagAuditV1 AssessV1(
     AppendDigest(lanes, statement.groups[0].root);
     AppendDigest(lanes, statement.groups[1].root);
     const auto air_lambda =
-        DigestFp3(Hash(kAirLambdaDomain, lanes, events));
+        DigestFp3(Hash(
+            kAirLambdaDomain, lanes, events,
+            &out.proposed_safe_io_events));
     exact &= Fp3Equal(air_lambda, native.air_lambda);
 
     lanes.clear();
@@ -374,7 +399,9 @@ TranscriptDagAuditV1 AssessV1(
         AppendU32(lanes, group.n_leaves);
         AppendDigest(lanes, group.root);
     }
-    const auto fri_seed = Hash(kFriSeedDomain, lanes, events);
+    const auto fri_seed = Hash(
+        kFriSeedDomain, lanes, events,
+        &out.proposed_safe_io_events);
     exact &= DigestEqual(fri_seed, native.fri_seed);
 
     for (uint32_t candidate = 0;
@@ -385,7 +412,9 @@ TranscriptDagAuditV1 AssessV1(
             statement.n_coeffs * statement.blowup);
         AppendU32(lanes, candidate);
         exact &= Fp3Equal(
-            DigestFp3(Hash(kZ1Domain, lanes, events)),
+            DigestFp3(Hash(
+                kZ1Domain, lanes, events,
+                &out.proposed_safe_io_events)),
             native.z1_candidates[candidate]);
     }
     for (uint32_t candidate = 0;
@@ -397,7 +426,9 @@ TranscriptDagAuditV1 AssessV1(
             statement.n_coeffs * statement.blowup);
         AppendU32(lanes, candidate);
         exact &= Fp3Equal(
-            DigestFp3(Hash(kZ2Domain, lanes, events)),
+            DigestFp3(Hash(
+                kZ2Domain, lanes, events,
+                &out.proposed_safe_io_events)),
             native.z2_candidates[candidate]);
     }
 
@@ -411,7 +442,8 @@ TranscriptDagAuditV1 AssessV1(
     for (const auto& value : statement.evals_z1) AppendFp3(lanes, value);
     for (const auto& value : statement.evals_z2) AppendFp3(lanes, value);
     const auto ood = Hash(
-        kRCFri3AlgOodEvalCommitDomain, lanes, events);
+        kRCFri3AlgOodEvalCommitDomain, lanes, events,
+        &out.proposed_safe_io_events);
     exact &= DigestEqual(ood, native.ood_eval_commit);
 
     lanes.clear();
@@ -420,7 +452,9 @@ TranscriptDagAuditV1 AssessV1(
     AppendFp3(lanes, native.z2);
     AppendDigest(lanes, ood);
     const auto batch_seed =
-        Hash(kBatchSeedDomain, lanes, events);
+        Hash(
+            kBatchSeedDomain, lanes, events,
+            &out.proposed_safe_io_events);
     exact &= DigestEqual(batch_seed, native.batch_seed);
     for (uint32_t column = 0;
          column < statement.column_len.size(); ++column) {
@@ -428,23 +462,31 @@ TranscriptDagAuditV1 AssessV1(
         AppendDigest(lanes, batch_seed);
         AppendU32(lanes, column);
         exact &= Fp3Equal(
-            DigestFp3(Hash(kCoefficientDomain, lanes, events)),
+            DigestFp3(Hash(
+                kCoefficientDomain, lanes, events,
+                &out.proposed_safe_io_events)),
             native.batching_coefficients[column]);
     }
     lanes.clear();
     AppendDigest(lanes, batch_seed);
     AppendU32(lanes, 1);
     exact &= Fp3Equal(
-        DigestFp3(Hash(kWeightDomain, lanes, events)), native.w1);
+        DigestFp3(Hash(
+            kWeightDomain, lanes, events,
+            &out.proposed_safe_io_events)), native.w1);
     lanes.back() = gf::FromU64(2);
     exact &= Fp3Equal(
-        DigestFp3(Hash(kWeightDomain, lanes, events)), native.w2);
+        DigestFp3(Hash(
+            kWeightDomain, lanes, events,
+            &out.proposed_safe_io_events)), native.w2);
 
     lanes.clear();
     AppendDigest(lanes, batch_seed);
     AppendFp3(lanes, native.w1);
     AppendFp3(lanes, native.w2);
-    auto fold_state = Hash(kFoldStateDomain, lanes, events);
+    auto fold_state = Hash(
+        kFoldStateDomain, lanes, events,
+        &out.proposed_safe_io_events);
     uint32_t beta_index = 0;
     for (uint32_t fold = 0; fold < statement.folds.size(); ++fold) {
         lanes.clear();
@@ -452,13 +494,17 @@ TranscriptDagAuditV1 AssessV1(
         AppendU32(lanes, fold);
         AppendU32(lanes, statement.folds[fold].n_leaves);
         AppendDigest(lanes, statement.folds[fold].root);
-        fold_state = Hash(kFoldStateDomain, lanes, events);
+        fold_state = Hash(
+            kFoldStateDomain, lanes, events,
+            &out.proposed_safe_io_events);
         if (fold + 1 != statement.folds.size()) {
             lanes.clear();
             AppendDigest(lanes, fold_state);
             AppendU32(lanes, fold);
             exact &= Fp3Equal(
-                DigestFp3(Hash(kFoldBetaDomain, lanes, events)),
+                DigestFp3(Hash(
+                    kFoldBetaDomain, lanes, events,
+                    &out.proposed_safe_io_events)),
                 native.fold_challenges[beta_index++]);
         }
     }
@@ -468,7 +514,9 @@ TranscriptDagAuditV1 AssessV1(
     AppendU32(lanes, p2::kQueriesV1);
     AppendU32(lanes, p2::kQueryCandidatesV1);
     const auto query_seed =
-        Hash(kQuerySeedDomain, lanes, events);
+        Hash(
+            kQuerySeedDomain, lanes, events,
+            &out.proposed_safe_io_events);
     exact &= DigestEqual(query_seed, native.query_seed);
     std::set<uint32_t> schedule_words;
     for (uint32_t query = 0; query < p2::kQueriesV1; ++query) {
@@ -480,7 +528,9 @@ TranscriptDagAuditV1 AssessV1(
             schedule_words.insert(word);
             AppendU32(lanes, word);
             exact &= DigestEqual(
-                Hash(kQueryCandidateDomain, lanes, events),
+                Hash(
+                    kQueryCandidateDomain, lanes, events,
+                    &out.proposed_safe_io_events),
                 native.queries[query].candidate_digest[candidate]);
         }
     }
@@ -801,6 +851,444 @@ TypedHashSeparationAuditV1 AuditTypedHashSeparationV1()
         "stage3:v12_typed_hash:host_air_parity_and_role_iv_disjoint;"
         "additive_api_only;v11_native_and_recursive_migration_pending;"
         "first_collision_hybrid_false;authority_false";
+    return out;
+}
+
+TypedAddAbsorbHybridAuditV1 AssessTypedAddAbsorbHybridV1(
+    const SharedPermutationBudgetV1& budget)
+{
+    TypedAddAbsorbHybridAuditV1 out;
+    out.budget = budget;
+    out.goldilocks_bits =
+        static_cast<double>(
+            std::log2(static_cast<long double>(gf::kP)));
+    out.concrete_poseidon_ideal_permutation_assumption_disclosed = true;
+    out.gpu_friendly_poseidon_preserved = true;
+    out.assumptions = {
+        "Concrete Poseidon2 is assumed to behave as one shared ideal "
+        "permutation, subject also to a conservative 128-bit algebraic "
+        "security floor; this is an assumption, not a BTX theorem.",
+        "Every native, recursive and adversarial call to that shared "
+        "permutation must be included in one enforced manifest before the "
+        "birthday square. Domain tags are not independent lanes.",
+        "The typed add-absorb/hash-chain first-collision reduction for "
+        "adaptive multi-block messages remains to be proved in the ideal-"
+        "permutation model.",
+        "The round-by-round FRI and BCS terms are external published inputs "
+        "from ePrint 2023/1071 and do not by themselves establish NIROP "
+        "separation for this hash construction."};
+
+    const long double calls_per_site =
+        static_cast<long double>(
+            budget.fs_permutation_calls_per_site) +
+        static_cast<long double>(
+            budget.merkle_permutation_calls_per_site) +
+        static_cast<long double>(
+            budget.receipt_program_calls_per_site) +
+        static_cast<long double>(
+            budget.adversary_permutation_queries_per_site);
+    if (budget.proof_sites == 0 || calls_per_site <= 0.0L) {
+        out.note =
+            "stage3:v12_typed_add_absorb:invalid_zero_budget;"
+            "numeric_screen_false;custom_reduction_false;"
+            "native_recursive_false;authority_false";
+        return out;
+    }
+
+    /*
+     * This is deliberately more conservative than a per-site union bound.
+     * The permutation is shared, so a cross-role or cross-site first
+     * collision can use any pair among
+     *
+     *     proof_sites * sum(calls_per_site).
+     *
+     * We therefore square the global total.  More precisely, lazy sampling
+     * of a random permutation gives the conservative bad-event bound
+     *
+     *   2 T (T + 2 R) / p^4,
+     *
+     * where T is the global query count and R is the number of fixed typed
+     * role IVs.  The factor covers both capacity-projection collisions
+     * (including an output hitting a fixed IV) and final four-lane digest
+     * collisions, including the without-replacement denominator.  It is
+     * valid in the only relevant regime T <= p^12/2.  A future reviewed
+     * reduction may justify a tighter partition, but this audit does not
+     * assume one.
+     */
+    const long double global_queries_log2 =
+        std::log2(static_cast<long double>(budget.proof_sites)) +
+        std::log2(calls_per_site);
+    out.shared_permutation_queries_log2 =
+        static_cast<double>(global_queries_log2);
+    const long double global_queries =
+        static_cast<long double>(budget.proof_sites) * calls_per_site;
+    const long double role_ivs =
+        static_cast<long double>(kTypedRoles.size());
+    const long double bad_event_numerator_log2 =
+        1.0L + std::log2(global_queries) +
+        std::log2(global_queries + 2.0L * role_ivs);
+    out.generic_capacity_first_collision_bits = std::max(
+        0.0,
+        4.0 * out.goldilocks_bits -
+            static_cast<double>(bad_event_numerator_log2));
+    out.poseidon_algebraic_floor_after_site_union_bits = std::max(
+        0.0,
+        128.0 - std::log2(
+            static_cast<double>(budget.proof_sites)));
+    out.effective_first_collision_bits = std::min(
+        out.generic_capacity_first_collision_bits,
+        out.poseidon_algebraic_floor_after_site_union_bits);
+    out.all_shared_permutation_queries_summed_before_square = true;
+    out.adaptive_multiblock_capacity_collisions_accounted = true;
+
+    const auto typed = AuditTypedHashSeparationV1();
+    out.typed_initial_role_ivs_disjoint =
+        typed.initial_call_role_encodings_disjoint &&
+        typed.fixed_leaf_node_vs_sponge_starts_disjoint;
+    out.ten_star_message_encoding_prefix_free =
+        typed.variable_length_padding_injective;
+    /*
+     * For a fixed prior state, coordinate-wise field addition is a
+     * bijection in the absorbed block.  This local fact is not the missing
+     * global reduction: after a permutation call, adaptive state/capacity
+     * collisions still have to be bounded.
+     */
+    out.add_absorb_next_input_injective_given_prior_state = true;
+    out.custom_reduction_formally_complete = false;
+    out.exact_global_call_manifest_enforced =
+        budget.exact_manifest_derived;
+    out.active_native_transcript_matches = false;
+    out.recursive_air_transcript_matches = false;
+    out.numeric_v1_security_screen_met =
+        out.effective_first_collision_bits >= 64.0;
+    out.production_theorem_complete =
+        out.all_shared_permutation_queries_summed_before_square &&
+        out.adaptive_multiblock_capacity_collisions_accounted &&
+        out.typed_initial_role_ivs_disjoint &&
+        out.ten_star_message_encoding_prefix_free &&
+        out.add_absorb_next_input_injective_given_prior_state &&
+        out.concrete_poseidon_ideal_permutation_assumption_disclosed &&
+        out.custom_reduction_formally_complete &&
+        out.exact_global_call_manifest_enforced &&
+        out.active_native_transcript_matches &&
+        out.recursive_air_transcript_matches &&
+        out.numeric_v1_security_screen_met;
+    out.note =
+        "stage3:v12_typed_add_absorb:global_shared_queries_squared;"
+        "capacity4_numeric_screen=" +
+        std::to_string(out.effective_first_collision_bits) +
+        ";typed_iv_and_10star_foundation_green;"
+        "custom_adaptive_reduction_false;"
+        "exact_manifest=" +
+        std::string(
+            out.exact_global_call_manifest_enforced ? "true" : "false") +
+        ";native_recursive_false;authority_false";
+    return out;
+}
+
+OverwriteDuplexFsAuditV1 AssessOverwriteDuplexFsV1()
+{
+    OverwriteDuplexFsAuditV1 out;
+    out.minimum_capacity_lanes = 4;
+    out.persistent_duplex_state_lanes =
+        static_cast<uint32_t>(alg_hash::kAlgHashT);
+    out.poseidon_air_columns_per_parameter_set =
+        stage3_poseidon_air::kFixedColumns;
+    /*
+     * ePrint 2025/536 models (1) the instance hash/random function h,
+     * (2) the duplex ideal permutation p,p^-1, and (3) the Merkle
+     * compression oracle separately.  Replacing those ideal objects with
+     * concrete Poseidon2 families needs three independently justified
+     * families, not three domain strings under one unproved permutation.
+     */
+    out.minimum_independent_oracle_families = 3;
+    out.additional_poseidon_parameter_sets_vs_v11 = 2;
+    out.published_transform_is_overwrite_mode = true;
+    out.published_start_capacity_is_instance_derived = true;
+    out.published_bcs_keeps_merkle_compression_separate = true;
+    out.current_v11_add_absorb_matches = false;
+    out.current_v11_zero_capacity_start_matches = false;
+    out.same_parameter_set_domain_tags_are_proven_independent = false;
+    out.independent_start_fs_merkle_parameter_sets_executable = false;
+    out.native_overwrite_transcript_executable = false;
+    out.recursive_overwrite_transcript_executable = false;
+    out.gpu_friendly_if_poseidon_parameter_sets_added = true;
+    out.published_dsfs_premises_instantiated =
+        out.published_transform_is_overwrite_mode &&
+        out.published_start_capacity_is_instance_derived &&
+        out.published_bcs_keeps_merkle_compression_separate &&
+        out.independent_start_fs_merkle_parameter_sets_executable &&
+        out.native_overwrite_transcript_executable &&
+        out.recursive_overwrite_transcript_executable;
+    out.production_theorem_complete = false;
+    out.assumptions = {
+        "ePrint 2025/536 proves its transform in an ideal "
+        "(h,p,p^-1) oracle model, with overwrite-mode duplexing and "
+        "capacity initialized from h(instance).",
+        "Its BCS composition keeps Merkle compression separate; reusing "
+        "one concrete Poseidon2 parameter set with role tags is not shown "
+        "to instantiate independent h, duplex and Merkle oracles.",
+        "Concrete independently parameterized Poseidon2 families require "
+        "their own algebraic-security and cross-family-independence "
+        "arguments.",
+        "Native and recursive AIR implementations must replay the exact "
+        "persistent overwrite state before the published premise applies."};
+    out.note =
+        "stage3:v12_overwrite_dsfs:published_transform_identified;"
+        "requires_3_oracle_families_and_2_additional_p2_parameter_sets;"
+        "poseidon_air_columns_each=" +
+        std::to_string(out.poseidon_air_columns_per_parameter_set) +
+        ";native_recursive_and_independence_false;authority_false";
+    return out;
+}
+
+SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
+    const p2::StatementV1& statement,
+    const SharedPermutationBudgetV1& budget)
+{
+    SafeCoreMigrationAuditV1 out;
+    out.rate_lanes = alg_hash::kAlgHashRate;
+    out.capacity_lanes = alg_hash::kAlgHashCapacity;
+    out.width_lanes = alg_hash::kAlgHashT;
+    out.safe_api_spec_tag_lanes =
+        alg_hash::kAlgHashCapacity / 2;
+    out.proved_safecore_tag_lanes =
+        alg_hash::kAlgHashCapacity;
+    const double field_bits =
+        static_cast<double>(
+            std::log2(static_cast<long double>(gf::kP)));
+    /*
+     * 2023/520, pp. 3-4: hashing (IO,D) into c/2 field elements
+     * gives only |Fp|^(c/4) collision security.  Its improved SAFECore
+     * hashes into all c elements and proves security to |Fp|^(c/2).
+     */
+    out.safe_api_spec_query_ceiling_bits =
+        field_bits * static_cast<double>(
+            out.safe_api_spec_tag_lanes) / 2.0;
+    out.proved_safecore_query_ceiling_bits =
+        field_bits * static_cast<double>(
+            out.proved_safecore_tag_lanes) / 2.0;
+    out.safe_api_two_lane_profile_meets_v1_screen =
+        out.safe_api_spec_query_ceiling_bits >= 64.0;
+
+    const auto v11 = AssessV1(statement);
+    out.v11_transcript_hash_events =
+        v11.independently_replayed_hash_events;
+    out.proposed_safe_io_absorb_squeeze_events =
+        v11.expected_hash_events;
+    out.current_v11_resets_state_per_hash_event =
+        v11.independent_replay_matches_native_receipt;
+    out.current_v11_is_one_continuous_safe_state = false;
+    out.current_v11_capacity_is_full_h_io_domain_tag = false;
+    out.current_v11_io_pattern_fixed_and_enforced = false;
+    out.current_v11_padding_matches_safecore_pad = false;
+    out.typed_v12_static_iv_is_full_h_io_domain_tag = false;
+
+    /*
+     * Migration target:
+     *  - one continuous online SAFE API state for the FS transcript;
+     *  - one fixed absorb/squeeze pair per replayed V11 hash event, with
+     *    phase role and ordinal included in the absorbed fields;
+     *  - separately tagged fixed-pattern SAFE instances for row leaf,
+     *    fold leaf, internal node, receipt, ProgramTable and application
+     *    statements;
+     *  - full four-field H(IO,D) tag, not the two-field 2023/522 profile.
+     *
+     * These are requirements recorded by this audit, not executable code.
+     * Algorithm 3 SAFECore is not itself the online state machine: §5.3
+     * proves the online SAFE API transcript by mapping each challenge
+     * prefix to a SAFECore evaluation under the same fixed IO pattern.
+     */
+    out.proposed_fs_is_one_continuous_absorb_squeeze_state = true;
+    bool safe_events_well_formed =
+        v11.proposed_safe_io_events.size() ==
+            v11.expected_hash_events;
+    for (uint32_t event = 0;
+         event < v11.proposed_safe_io_events.size(); ++event) {
+        const auto& item = v11.proposed_safe_io_events[event];
+        safe_events_well_formed &=
+            item.ordinal == event &&
+            item.absorb_lanes >= 2 &&
+            item.squeeze_lanes == alg_hash::kAlgHashDigestLen &&
+            static_cast<uint32_t>(item.role) >=
+                static_cast<uint32_t>(TranscriptRoleV1::ShapeCommit) &&
+            static_cast<uint32_t>(item.role) <=
+                static_cast<uint32_t>(TranscriptRoleV1::Padding);
+    }
+    out.proposed_fs_has_fixed_io_pattern =
+        v11.expected_hash_events != 0 &&
+        v11.expected_hash_events ==
+            v11.independently_replayed_hash_events &&
+        safe_events_well_formed;
+    /*
+     * The executable event inventory still measures the old messages,
+     * several of which re-absorb a previous digest/seed.  SAFE should
+     * absorb newly received protocol data and squeeze from the persistent
+     * state instead of emulating nested hash calls.  The normalized
+     * seed-free payload manifest is therefore still open.
+     */
+    out.proposed_native_seed_feedback_removed = false;
+    out.proposed_merkle_instances_have_separate_tags = true;
+    out.proposed_receipt_program_instances_have_separate_tags = true;
+    out.proposed_uses_full_capacity_tag = true;
+    out.proposed_tag_hash_to_fp4_is_canonical = false;
+    out.proposed_tag_registry_root_pinned = false;
+    out.exact_safe_io_pattern_manifest_enforced = false;
+    out.native_safe_transcript_executable = false;
+    out.recursive_safe_transcript_executable = false;
+    out.gpu_friendly_poseidon_preserved = true;
+    out.tag_hash_random_oracle_assumption_disclosed = true;
+    out.poseidon_random_permutation_assumption_disclosed = true;
+    out.conditional_poseidon_algebraic_floor_bits = 128.0;
+    out.concrete_tag_hash_reduction_complete = false;
+    out.concrete_poseidon_reduction_complete = false;
+
+    const long double calls_per_site =
+        static_cast<long double>(
+            budget.fs_permutation_calls_per_site) +
+        static_cast<long double>(
+            budget.merkle_permutation_calls_per_site) +
+        static_cast<long double>(
+            budget.receipt_program_calls_per_site) +
+        static_cast<long double>(
+            budget.adversary_permutation_queries_per_site);
+    const long double q_h =
+        static_cast<long double>(budget.safe_tag_hash_queries);
+    const long double q_p =
+        static_cast<long double>(budget.proof_sites) *
+        calls_per_site;
+    out.theorem_unique_h_queries = budget.safe_tag_hash_queries;
+    if (q_h > 0.0L && q_p > 0.0L) {
+        out.theorem_unique_permutation_queries_log2 =
+            static_cast<double>(std::log2(q_p));
+        const auto choose_two = [](long double q) {
+            return q > 1.0L ? q * (q - 1.0L) / 2.0L : 0.0L;
+        };
+        /*
+         * ePrint 2023/520, Theorem 2:
+         *
+         *  [3*C(QH,2) + 2*C(QP,2) + 4*QP*QH] / p^c
+         *      + 3*C(QP,2) / p^b.
+         *
+         * QP contains every shared native, recursive, Merkle and
+         * adversarial query.  We deliberately use total calls as an upper
+         * bound on unique calls.
+         */
+        const long double capacity_numerator =
+            3.0L * choose_two(q_h) +
+            2.0L * choose_two(q_p) +
+            4.0L * q_p * q_h;
+        const long double width_numerator =
+            3.0L * choose_two(q_p);
+        const long double p =
+            static_cast<long double>(gf::kP);
+        const long double advantage =
+            capacity_numerator /
+                std::pow(p, out.capacity_lanes) +
+            width_numerator /
+                std::pow(p, out.width_lanes);
+        if (advantage > 0.0L && std::isfinite(advantage)) {
+            out.theorem_indifferentiability_bits =
+                std::max(
+                    0.0,
+                    static_cast<double>(-std::log2(advantage)));
+            out.theorem2_bound_computed = true;
+            out.conditional_effective_bits = std::min(
+                out.theorem_indifferentiability_bits,
+                out.conditional_poseidon_algebraic_floor_bits);
+            out.theorem2_numeric_v1_screen_met =
+                out.conditional_effective_bits >= 64.0;
+        }
+    }
+
+    out.premise_mismatches = {
+        "V11 creates a fresh zero-capacity SpongeHashFp for each event; "
+        "SAFE Fiat-Shamir uses one START followed by a continuous fixed "
+        "ABSORB/SQUEEZE schedule.",
+        "V11 places a role domain in the outer/rate message. SAFECore "
+        "initializes the full inner capacity with H(IO,D).",
+        "The additive V12 typed IV is a fixed tuple, not an output of the "
+        "random-oracle H(IO,D) required by SAFECore Theorem 2.",
+        "V11 uses injective 10* padding for independently nested hashes; "
+        "SAFECore uses its fixed-pattern round padding and blank squeeze "
+        "blocks.",
+        "No native or recursive implementation currently enforces START, "
+        "the exact IO pattern, FINISH, or a canonical full-Fp4 tag."};
+    out.required_protocol_changes = {
+        "Version-bump to a continuous V12 SAFE FS transcript. Encode every "
+        "phase role and ordinal in the absorbed fields and pin the complete "
+        "fixed IO pattern derived from the transcript manifest. Remove "
+        "re-absorption of prior digest/seed outputs; squeeze subsequent "
+        "challenges from the persistent state.",
+        "Define H(IO,D)->Fp^4 with rejection-sampled canonical Goldilocks "
+        "lanes; precompute and consensus-pin the tag registry root. Do not "
+        "reduce arbitrary u64 chunks modulo p.",
+        "Assign distinct (IO,D) tags to FS, row leaf, fold leaf, Merkle "
+        "node, receipt, ProgramTable and application-statement instances.",
+        "Implement identical START/ABSORB/SQUEEZE/FINISH semantics in the "
+        "native prover/verifier and recursive AIR, with proof-level rejects "
+        "for IO length, role, ordinal, tag and unfinished patterns.",
+        "Derive and enforce exact global QH/QP manifests before consuming "
+        "the published advantage bound."};
+    out.published_safecore_premises_instantiated =
+        out.proposed_tag_hash_to_fp4_is_canonical &&
+        out.proposed_tag_registry_root_pinned &&
+        out.proposed_native_seed_feedback_removed &&
+        out.exact_safe_io_pattern_manifest_enforced &&
+        out.native_safe_transcript_executable &&
+        out.recursive_safe_transcript_executable &&
+        out.concrete_tag_hash_reduction_complete &&
+        out.concrete_poseidon_reduction_complete &&
+        budget.exact_manifest_derived &&
+        out.theorem2_bound_computed &&
+        out.theorem2_numeric_v1_screen_met;
+    out.production_theorem_complete =
+        out.published_safecore_premises_instantiated;
+    out.note =
+        "stage3:v12_safecore:published_theorem2_bound=" +
+        std::to_string(out.theorem_indifferentiability_bits) +
+        ";v11_nested_zero_capacity_mismatch;"
+        "safe_api_c_over_2_tag_profile_below_64;"
+        "require_full_c_tag;io_manifest_tag_registry_native_recursive_false;"
+        "concrete_h_p_reductions_false;"
+        "authority_false";
+    return out;
+}
+
+NiropPathComparisonV1 CompareNiropPathsV1(
+    const p2::StatementV1& statement,
+    const SharedPermutationBudgetV1& budget)
+{
+    NiropPathComparisonV1 out;
+    out.typed_add_absorb =
+        AssessTypedAddAbsorbHybridV1(budget);
+    out.overwrite_duplex = AssessOverwriteDuplexFsV1();
+    out.safe_core =
+        AssessSafeCoreMigrationV1(statement, budget);
+    /*
+     * The SAFE API with the SAFECore §5.3 reduction is the V12 engineering
+     * recommendation because it preserves Poseidon2 while replacing the
+     * bespoke security reduction with a published theorem that explicitly
+     * covers multiple sponge invocations and multi-round Fiat-Shamir. This
+     * is not a readiness selection.
+     */
+    out.recommended =
+        RecommendedNiropPathV1::PublishedSafeCore;
+    out.recommendation_preserves_current_gpu_poseidon_path = true;
+    out.recommendation_is_production_selectable =
+        out.safe_core.production_theorem_complete;
+    out.rationale =
+        "Prefer a full-capacity online SAFE API V12 transcript, reduced "
+        "prefix-by-prefix to SAFECore as in ePrint 2023/520 section 5.3. "
+        "That work proves cross-oracle and multi-round Fiat-Shamir security "
+        "for multiple invocations under random-H/random-P assumptions, "
+        "while retaining the existing Poseidon2 permutation and GPU path. "
+        "The c/2-lane tag profile in the 2023/522 API is insufficient for "
+        "Goldilocks c=4; use SAFECore's full c=4 H(IO,D) tag. This remains "
+        "unselectable until the fixed IO/tag registry, exact QH/QP manifest, "
+        "native transcript and recursive replay are executable. Typed "
+        "bespoke add-absorb requires a new proof; independent overwrite "
+        "duplex requires a larger transcript/oracle redesign.";
     return out;
 }
 
