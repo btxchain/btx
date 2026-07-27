@@ -2693,6 +2693,65 @@ AssessNormalizedParentProofPreflight(
     const aq::AirConstraintSystem<Fp3>& parent_cs);
 
 /**
+ * Measured budget for joining arbitrary bytecode / per-point evaluation (and
+ * the ledger's g4 P2 Fiat-Shamir closure) into a fold-bus / narrow node.
+ *
+ * The production narrow multi-child measurement is 575 V_CS columns × 32,768
+ * rows. Bytecode attach adds a fixed BytecodeBusLayout column delta and needs
+ * `queries * (instructions + 1)` free vertical rows. This assessor never flips
+ * kCompleteRecursiveFixedPointExecutable: that still requires the chips to be
+ * differentially joined and forgery-tested inside the parent AIR
+ * (va::kVerifierFiatShamirAirExecutable may remain false).
+ */
+struct NarrowBytecodePerPointJoinBudgetV1 {
+    uint32_t fold_bus_columns{0};
+    uint32_t fold_bus_rows{0};
+    uint32_t reserved_sponge_rows{0};
+    uint32_t free_rows{0};
+    uint32_t bytecode_added_columns{0};
+    uint32_t projected_columns{0};
+    uint32_t queries{0};
+    uint64_t instructions{0};
+    uint64_t rows_needed{0};
+    uint64_t projected_trace_rows{0};
+    uint64_t projected_lde{0};
+    bool rows_fit_without_pad{false};
+    bool projected_lde_supported{false};
+    bool projected_columns_narrow{false};
+    bool p2_fs_replay_closed{false};
+    bool capacity_closed{false};
+    bool valid{false};
+    std::string note;
+};
+
+/** Count ProgramTable SSA instructions (sum of each program's instruction list). */
+[[nodiscard]] uint64_t CountProgramTableInstructions(
+    const constraint_bytecode::ProgramTable& table);
+
+/**
+ * Count fold-bus rows currently reserved as hash-opening current/next sponges
+ * (the only rows AttachConstraintBytecodeInterpreter marks non-free).
+ */
+[[nodiscard]] uint32_t CountFoldBusReservedSpongeRows(
+    const FoldBusComposition& composition);
+
+[[nodiscard]] NarrowBytecodePerPointJoinBudgetV1
+AssessNarrowBytecodePerPointJoinBudgetV1(
+    const FoldBusComposition& composition,
+    const constraint_bytecode::ProgramTable& table);
+
+/**
+ * Expand the fold-bus trace with trailing free rows so a subsequent
+ * AttachConstraintBytecodeInterpreter has `rows_needed` free slots. Fails
+ * closed if the projected power-of-two height's LDE would exceed
+ * kRCFriMaxLdeLog2 (honest capacity-close — does not invent headroom).
+ */
+[[nodiscard]] bool PadFoldBusFreeRowsForBytecode(
+    FoldBusComposition& composition,
+    uint64_t rows_needed,
+    std::string* why = nullptr);
+
+/**
  * Append one canonical constraint program to the same trace as the
  * proof-derived current/next row Merkle openings. Raw authenticated Fp limbs
  * are memory producers; Current/Next instructions consume their three limbs,

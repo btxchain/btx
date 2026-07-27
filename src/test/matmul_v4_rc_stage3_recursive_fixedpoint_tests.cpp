@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_stage3_episode_header_target.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 
 #include <algorithm>
@@ -4025,6 +4026,10 @@ BOOST_AUTO_TEST_CASE(
 // table (wrong program count) and must NOT regress to
 // bytecode_child_constraint_metadata (the prior degree-pad bug).
 // Does NOT flip kCompleteRecursiveFixedPointExecutable.
+//
+// Also measures NarrowBytecodePerPointJoinBudgetV1: P2 FS closure is consumed
+// from the ledger, column projection stays narrow (<1024), and pad-to-fit is
+// refused when projected LDE exceeds kRCFriMaxLdeLog2 (honest capacity-close).
 BOOST_AUTO_TEST_CASE(
     episode_tiletree_and_digest_hash_kernel_attaches_via_fold_bus)
 {
@@ -4072,6 +4077,21 @@ BOOST_AUTO_TEST_CASE(
             uint64_t{pi.query_index.size()} *
             (uint64_t{instructions} + 1U);
         BOOST_REQUIRE_GT(rows_needed, base.combined.n_rows);
+        BOOST_CHECK_EQUAL(
+            fp::CountProgramTableInstructions(table),
+            instructions);
+
+        const fp::NarrowBytecodePerPointJoinBudgetV1 budget =
+            fp::AssessNarrowBytecodePerPointJoinBudgetV1(
+                base, table);
+        BOOST_REQUIRE_MESSAGE(budget.valid, budget.note);
+        BOOST_CHECK(budget.p2_fs_replay_closed);
+        BOOST_CHECK(budget.projected_columns_narrow);
+        BOOST_CHECK_EQUAL(budget.rows_needed, rows_needed);
+        BOOST_CHECK(!budget.rows_fit_without_pad);
+        BOOST_CHECK(budget.capacity_closed);
+        BOOST_CHECK(!budget.projected_lde_supported);
+        BOOST_TEST_MESSAGE(budget.note);
 
         fp::FoldBusComposition joined = base;
         const fp::BytecodeInterpreterAttachment
@@ -4092,6 +4112,15 @@ BOOST_AUTO_TEST_CASE(
                 "needed=" + std::to_string(rows_needed)) !=
             std::string::npos);
 
+        // Pad refuses when LDE would exceed the FRI domain cap — same
+        // capacity-close the budget assessor reports.
+        fp::FoldBusComposition padded = base;
+        BOOST_CHECK(!fp::PadFoldBusFreeRowsForBytecode(
+            padded, rows_needed, &why));
+        BOOST_CHECK(
+            why.find("bytecode_pad_lde_over_cap") !=
+            std::string::npos);
+
         // Forgery: dropping one program fails the child-constraint table
         // shape check before any vertical row budget is considered.
         rc::constraint_bytecode::ProgramTable truncated =
@@ -4107,6 +4136,66 @@ BOOST_AUTO_TEST_CASE(
                 "bytecode_child_constraint_table") !=
             std::string::npos);
     }
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+}
+
+// Fast (no prove): pin hash-kernel instruction/row projection against the
+// measured 575-col × 32,768-row narrow multi-child shape. Documents that the
+// full 462-program kernel cannot join vertically even after consuming all
+// 32,768 rows as free — projected LDE exceeds 2^kRCFriMaxLdeLog2. P2 FS
+// closure is true via the ledger; CompleteFP stays false.
+BOOST_AUTO_TEST_CASE(
+    hash_kernel_narrow_575_bytecode_join_budget_capacity_closed)
+{
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(table.programs.size(), 462U);
+    const uint64_t instructions =
+        fp::CountProgramTableInstructions(table);
+    BOOST_REQUIRE_GT(instructions, 0U);
+    constexpr uint32_t kNarrowCols = 575;
+    constexpr uint32_t kNarrowRows = 32768;
+    constexpr uint32_t kQueries = 192;
+    const uint64_t rows_needed =
+        uint64_t{kQueries} * (instructions + 1U);
+    BOOST_REQUIRE_GT(rows_needed, kNarrowRows);
+    const uint64_t projected =
+        [&]() -> uint64_t {
+            uint64_t out = 1;
+            const uint64_t min_rows =
+                uint64_t{kNarrowRows} +
+                (rows_needed - kNarrowRows);
+            while (out < min_rows) {
+                if (out > (uint64_t{1} << 30)) return 0;
+                out <<= 1;
+            }
+            return out;
+        }();
+    BOOST_REQUIRE_GT(projected, 0U);
+    const uint64_t projected_lde = projected * 16U;
+    BOOST_CHECK_GT(
+        projected_lde, uint64_t{1} << 24);
+    const uint32_t bytecode_cols =
+        fp::BytecodeBusLayout(kNarrowCols).End() -
+        kNarrowCols;
+    BOOST_CHECK_LT(kNarrowCols + bytecode_cols, 1024U);
+    BOOST_CHECK(
+        rc::recursive_parent_air::
+            AssessChildFsReplayClosureV1()
+                .closed);
+    BOOST_TEST_MESSAGE(
+        "NARROW_575_JOIN instructions=" << instructions
+        << " needed=" << rows_needed
+        << " projected_rows=" << projected
+        << " projected_lde=" << projected_lde
+        << " bytecode_cols=" << bytecode_cols
+        << " capacity_closed=true complete_fp=false");
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
