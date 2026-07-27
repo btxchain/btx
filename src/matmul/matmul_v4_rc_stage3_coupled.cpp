@@ -10,13 +10,18 @@
 #include <matmul/matmul_v4_rc_fri_ext3.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_bank_stream.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_gemm_product.h>
+#include <matmul/matmul_v4_rc_stage3_hash_semantic.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
+
+#include <streams.h>
 
 #include <algorithm>
 #include <array>
 #include <cstring>
 #include <limits>
+#include <set>
 
 namespace matmul::v4::rc {
 namespace {
@@ -260,7 +265,9 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
     if (!IsCoupledRole(receipt.role)) return Fail(why, "receipt:bad_role");
     if (receipt.engine != RCStage3CoupledProofEngine::ProofOnlyV1 &&
         receipt.engine != RCStage3CoupledProofEngine::BankDequantPagesV1 &&
-        receipt.engine != RCStage3CoupledProofEngine::GemmDotTilesV1) {
+        receipt.engine != RCStage3CoupledProofEngine::GemmDotTilesV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::BankSeedXofV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::BankPageInclusionV1) {
         return Fail(why, "receipt:unknown_engine");
     }
     if (receipt.engine == RCStage3CoupledProofEngine::BankDequantPagesV1 &&
@@ -270,6 +277,11 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
     if (receipt.engine == RCStage3CoupledProofEngine::GemmDotTilesV1 &&
         receipt.role != RCStage3RelationRole::CoupledGemm) {
         return Fail(why, "receipt:gemm_dot_engine_wrong_role");
+    }
+    if ((receipt.engine == RCStage3CoupledProofEngine::BankSeedXofV1 ||
+         receipt.engine == RCStage3CoupledProofEngine::BankPageInclusionV1) &&
+        receipt.role != RCStage3RelationRole::CoupledBank) {
+        return Fail(why, "receipt:bank_provenance_engine_wrong_role");
     }
     if (!ValidateShape(receipt.shape, why)) return false;
     if (receipt.statement_commitment.IsNull() || receipt.params_commitment.IsNull() ||
@@ -893,6 +905,553 @@ bool VerifyRCStage3CoupledGemmDotEngineReceipt(
 
 namespace {
 
+constexpr uint32_t kBankSeedXofEngineMagic = 0x31585342U; // "BSX1"
+constexpr uint16_t kBankSeedXofEngineVersion = 1;
+constexpr uint32_t kBankPageInclusionEngineMagic = 0x31495042U; // "BPI1"
+constexpr uint16_t kBankPageInclusionEngineVersion = 1;
+constexpr char kBankPageInclusionScheduleDomain[] =
+    "BTX_RC_STAGE3_COUPLED_BANK_PAGE_INCLUSION_SCHEDULE_V1";
+constexpr char kBankPageInclusionTraceDomain[] =
+    "BTX_RC_STAGE3_COUPLED_BANK_PAGE_INCLUSION_TRACE_V1";
+constexpr char kBankSeedXofTraceDomain[] =
+    "BTX_RC_STAGE3_COUPLED_BANK_SEED_XOF_TRACE_V1";
+
+namespace hs = stage3_hash_semantic;
+namespace ha = stage3_hash_air;
+
+bool SerializeProvenanceAirProof(const ha::FixedProgramProvenanceAirProof& proof,
+                                 std::vector<unsigned char>& out)
+{
+    out.clear();
+    std::vector<unsigned char> quotient;
+    if (!proof.valid || !SerializeFri3AirQuotientProof(proof.quotient, quotient) ||
+        quotient.empty()) {
+        return false;
+    }
+    WriteU16(out, proof.version);
+    WriteUint256(out, proof.boundary_statement);
+    WriteUint256(out, proof.challenge_commitment);
+    WriteU32(out, static_cast<uint32_t>(quotient.size()));
+    out.insert(out.end(), quotient.begin(), quotient.end());
+    return true;
+}
+
+bool DeserializeProvenanceAirProof(Reader& reader,
+                                   ha::FixedProgramProvenanceAirProof& out)
+{
+    out = {};
+    uint32_t quotient_len{0};
+    std::vector<unsigned char> quotient_bytes;
+    if (!reader.ReadU16(out.version) || !reader.ReadUint256(out.boundary_statement) ||
+        !reader.ReadUint256(out.challenge_commitment) || !reader.ReadU32(quotient_len) ||
+        quotient_len == 0 || !reader.ReadBytes(quotient_len, quotient_bytes) ||
+        !DeserializeFri3AirQuotientProof(quotient_bytes, out.quotient)) {
+        return false;
+    }
+    out.valid = true;
+    return true;
+}
+
+bool SerializeFlatBoundaryBundleProofs(
+    const hs::FlatBoundaryProofBundle& bundle, std::vector<unsigned char>& body)
+{
+    if (bundle.proofs.size() > hs::kMaxFlatBoundaryProofs) return false;
+    WriteU32(body, static_cast<uint32_t>(bundle.proofs.size()));
+    for (const auto& proof : bundle.proofs) {
+        std::vector<unsigned char> proof_bytes;
+        if (!SerializeProvenanceAirProof(proof, proof_bytes) || proof_bytes.empty()) {
+            return false;
+        }
+        WriteU32(body, static_cast<uint32_t>(proof_bytes.size()));
+        body.insert(body.end(), proof_bytes.begin(), proof_bytes.end());
+    }
+    return true;
+}
+
+bool ReadFlatBoundaryBundleProofs(Reader& reader, hs::FlatBoundaryProofBundle& bundle)
+{
+    uint32_t count{0};
+    if (!reader.ReadU32(count) || count == 0 || count > hs::kMaxFlatBoundaryProofs) {
+        return false;
+    }
+    bundle.proofs.clear();
+    bundle.proofs.reserve(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t proof_len{0};
+        std::vector<unsigned char> proof_bytes;
+        if (!reader.ReadU32(proof_len) || proof_len == 0 ||
+            !reader.ReadBytes(proof_len, proof_bytes)) {
+            return false;
+        }
+        Reader proof_reader(proof_bytes);
+        ha::FixedProgramProvenanceAirProof proof;
+        if (!DeserializeProvenanceAirProof(proof_reader, proof) ||
+            proof_reader.Remaining() != 0) {
+            return false;
+        }
+        bundle.proofs.push_back(std::move(proof));
+    }
+    return true;
+}
+
+uint256 ComputeBankSeedXofEngineTraceRoot(const RCStage3CoupledBankProduct& product)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, kBankSeedXofTraceDomain);
+    WriteUint256(bytes, product.seed_xof_endpoint_root);
+    WriteUint256(bytes, product.bank_root_seed.manifest.commitment);
+    WriteU64(bytes, static_cast<uint64_t>(product.pages.size()));
+    for (const auto& page : product.pages) {
+        WriteU32(bytes, page.page_index);
+        WriteUint256(bytes, page.page_seed.manifest.commitment);
+        WriteUint256(bytes, page.mantissa.commitment);
+        WriteUint256(bytes, page.scale.commitment);
+    }
+    return Sha256d(bytes);
+}
+
+bool VerifyBankSeedXofBundles(const RCStage3CoupledBankProduct& product,
+                              std::string* why)
+{
+    if (!hs::VerifyShaManifestBundle(RCStage3RelationEndpoint::CoupledBankSeedXof,
+                                     product.bank_root_seed.manifest,
+                                     product.bank_root_seed.proof, why)) {
+        return Fail(why, "bank_seed_xof_engine:root_seed");
+    }
+    for (uint32_t i = 0; i < product.pages.size(); ++i) {
+        const auto& page = product.pages[i];
+        if (!hs::VerifyShaManifestBundle(RCStage3RelationEndpoint::CoupledBankSeedXof,
+                                         page.page_seed.manifest, page.page_seed.proof,
+                                         why) ||
+            !hs::VerifyCounterXofManifestBundle(
+                RCStage3RelationEndpoint::CoupledBankSeedXof, page.mantissa,
+                page.mantissa_proof, why) ||
+            !hs::VerifyCounterXofManifestBundle(
+                RCStage3RelationEndpoint::CoupledBankSeedXof, page.scale,
+                page.scale_proof, why)) {
+            return Fail(why, "bank_seed_xof_engine:page:" + std::to_string(i));
+        }
+    }
+    return true;
+}
+
+struct BankPageInclusionScheduleEntry {
+    uint64_t schedule_index{0};
+    uint32_t barrier{0};
+    uint32_t lobe{0};
+    uint32_t page_slot{0};
+    uint32_t page_id{0};
+
+    bool operator==(const BankPageInclusionScheduleEntry&) const = default;
+};
+
+bool BuildBankPageInclusionSchedule(const RCStage3CoupledShape& shape,
+                                    const uint256& sigma,
+                                    std::vector<BankPageInclusionScheduleEntry>& out,
+                                    uint256& schedule_commitment,
+                                    std::string* why)
+{
+    out.clear();
+    schedule_commitment.SetNull();
+    RCCoupParams params;
+    params.barriers = shape.barriers;
+    params.lobes = shape.lobes;
+    params.lobe_width = shape.lobe_width;
+    params.bank_pages = shape.bank_pages;
+    params.rows_per_lobe = shape.rows_per_lobe;
+    params.pages_per_barrier_lobe = shape.pages_per_barrier_lobe;
+    if (!ValidateRCCoupParams(params)) {
+        return Fail(why, "bank_page_inclusion_engine:schedule_public");
+    }
+    uint64_t ordinal{0};
+    for (uint32_t barrier = 0; barrier < shape.barriers; ++barrier) {
+        for (uint32_t lobe = 0; lobe < shape.lobes; ++lobe) {
+            const auto pages = SelectCoupledBankPageIds(
+                barrier, lobe, params, sigma, shape.full_bank_schedule,
+                shape.transcript_version);
+            if (pages.size() != shape.pages_per_barrier_lobe) {
+                return Fail(why, "bank_page_inclusion_engine:schedule_page_count");
+            }
+            for (uint32_t slot = 0; slot < pages.size(); ++slot) {
+                if (pages[slot] >= shape.bank_pages) {
+                    return Fail(why, "bank_page_inclusion_engine:schedule_page_id");
+                }
+                BankPageInclusionScheduleEntry entry;
+                entry.schedule_index = ordinal++;
+                entry.barrier = barrier;
+                entry.lobe = lobe;
+                entry.page_slot = slot;
+                entry.page_id = pages[slot];
+                out.push_back(entry);
+            }
+        }
+    }
+    const auto counts =
+        ExpectedRCStage3CoupledRelationCounts(RCStage3RelationRole::CoupledBank, shape, why);
+    if (!counts.has_value() || counts->secondary != out.size()) {
+        return Fail(why, "bank_page_inclusion_engine:schedule_count");
+    }
+    HashWriter hash;
+    hash << kBankPageInclusionScheduleDomain;
+    hash << CommitRCStage3CoupledShape(shape);
+    hash << sigma;
+    hash << static_cast<uint64_t>(out.size());
+    for (const auto& entry : out) {
+        hash << entry.schedule_index << entry.barrier << entry.lobe << entry.page_slot
+             << entry.page_id;
+    }
+    schedule_commitment = hash.GetHash();
+    return !schedule_commitment.IsNull() ||
+           Fail(why, "bank_page_inclusion_engine:schedule_commitment");
+}
+
+uint256 ComputeBankPageInclusionTraceRoot(const uint256& schedule_commitment,
+                                          const uint256& bank_page_byte_root,
+                                          const std::vector<uint256>& page_roots)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, kBankPageInclusionTraceDomain);
+    WriteUint256(bytes, schedule_commitment);
+    WriteUint256(bytes, bank_page_byte_root);
+    WriteU64(bytes, static_cast<uint64_t>(page_roots.size()));
+    for (const uint256& root : page_roots) WriteUint256(bytes, root);
+    return Sha256d(bytes);
+}
+
+} // namespace
+
+bool BuildRCStage3CoupledBankSeedXofEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const CBlockHeader& header,
+    const RCStage3CoupledShape& shape,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    if (RCStage3HeaderCommitment(header) != statement.public_inputs.header_commitment) {
+        return Fail(why, "bank_seed_xof_engine:header_commitment");
+    }
+    RCStage3CoupledBankProduct product;
+    if (!ProveRCStage3CoupledBankProduct(statement, header, shape, product, why)) {
+        return Fail(why, "bank_seed_xof_engine:prove");
+    }
+    if (!VerifyBankSeedXofBundles(product, why)) return false;
+
+    DataStream header_ss{};
+    header_ss << header;
+    std::vector<unsigned char> body;
+    WriteU32(body, kBankSeedXofEngineMagic);
+    WriteU16(body, kBankSeedXofEngineVersion);
+    WriteU32(body, static_cast<uint32_t>(header_ss.size()));
+    for (std::byte b : header_ss) {
+        body.push_back(static_cast<unsigned char>(b));
+    }
+    WriteU32(body, static_cast<uint32_t>(product.pages.size()));
+    WriteUint256(body, product.seed_xof_endpoint_root);
+    if (!SerializeFlatBoundaryBundleProofs(product.bank_root_seed.proof, body)) {
+        return Fail(why, "bank_seed_xof_engine:root_codec");
+    }
+    for (const auto& page : product.pages) {
+        WriteU32(body, page.page_index);
+        if (!SerializeFlatBoundaryBundleProofs(page.page_seed.proof, body) ||
+            !SerializeFlatBoundaryBundleProofs(page.mantissa_proof, body) ||
+            !SerializeFlatBoundaryBundleProofs(page.scale_proof, body)) {
+            return Fail(why, "bank_seed_xof_engine:page_codec");
+        }
+    }
+    if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
+        return Fail(why, "bank_seed_xof_engine:oversize");
+    }
+    out_trace_root = ComputeBankSeedXofEngineTraceRoot(product);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledBankSeedXofEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    uint32_t header_len{0};
+    std::vector<unsigned char> header_bytes;
+    if (!reader.ReadU32(magic) || magic != kBankSeedXofEngineMagic ||
+        !reader.ReadU16(version) || version != kBankSeedXofEngineVersion ||
+        !reader.ReadU32(header_len) || header_len == 0 ||
+        !reader.ReadBytes(header_len, header_bytes)) {
+        return Fail(why, "bank_seed_xof_engine:header_prefix");
+    }
+    CBlockHeader header;
+    try {
+        DataStream ss{header_bytes};
+        ss >> header;
+        if (!ss.empty()) return Fail(why, "bank_seed_xof_engine:header_trailing");
+    } catch (...) {
+        return Fail(why, "bank_seed_xof_engine:header_decode");
+    }
+    if (RCStage3HeaderCommitment(header) != statement.public_inputs.header_commitment) {
+        return Fail(why, "bank_seed_xof_engine:header_commitment");
+    }
+
+    RCStage3CoupledBankProduct product;
+    if (!BuildRCStage3CoupledBankProduct(statement, header, shape, product, why)) {
+        return Fail(why, "bank_seed_xof_engine:rebuild");
+    }
+
+    uint32_t page_count{0};
+    uint256 seed_xof_endpoint_root;
+    if (!reader.ReadU32(page_count) || page_count != product.pages.size() ||
+        !reader.ReadUint256(seed_xof_endpoint_root) ||
+        seed_xof_endpoint_root != product.seed_xof_endpoint_root) {
+        return Fail(why, "bank_seed_xof_engine:header");
+    }
+    if (!ReadFlatBoundaryBundleProofs(reader, product.bank_root_seed.proof)) {
+        return Fail(why, "bank_seed_xof_engine:root_decode");
+    }
+    product.bank_root_seed.proof.endpoint = RCStage3RelationEndpoint::CoupledBankSeedXof;
+    product.bank_root_seed.proof.statement_commitment = product.statement_commitment;
+    product.bank_root_seed.proof.manifest_commitment =
+        product.bank_root_seed.manifest.commitment;
+    for (uint32_t i = 0; i < page_count; ++i) {
+        uint32_t page_index{0};
+        if (!reader.ReadU32(page_index) || page_index != i ||
+            !ReadFlatBoundaryBundleProofs(reader, product.pages[i].page_seed.proof) ||
+            !ReadFlatBoundaryBundleProofs(reader, product.pages[i].mantissa_proof) ||
+            !ReadFlatBoundaryBundleProofs(reader, product.pages[i].scale_proof)) {
+            return Fail(why, "bank_seed_xof_engine:page_decode:" + std::to_string(i));
+        }
+        auto& page = product.pages[i];
+        page.page_seed.proof.endpoint = RCStage3RelationEndpoint::CoupledBankSeedXof;
+        page.page_seed.proof.statement_commitment = product.statement_commitment;
+        page.page_seed.proof.manifest_commitment = page.page_seed.manifest.commitment;
+        page.mantissa_proof.endpoint = RCStage3RelationEndpoint::CoupledBankSeedXof;
+        page.mantissa_proof.statement_commitment = product.statement_commitment;
+        page.mantissa_proof.manifest_commitment = page.mantissa.commitment;
+        page.scale_proof.endpoint = RCStage3RelationEndpoint::CoupledBankSeedXof;
+        page.scale_proof.statement_commitment = product.statement_commitment;
+        page.scale_proof.manifest_commitment = page.scale.commitment;
+    }
+    if (reader.Remaining() != 0) {
+        return Fail(why, "bank_seed_xof_engine:trailing_bytes");
+    }
+    if (!ValidateRCStage3CoupledBankProductSchedule(statement, header, shape, product,
+                                                    why) ||
+        !VerifyBankSeedXofBundles(product, why)) {
+        return false;
+    }
+    out_trace_root = ComputeBankSeedXofEngineTraceRoot(product);
+    return true;
+}
+
+bool BuildRCStage3CoupledBankPageInclusionEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const uint256& sigma,
+    const std::vector<std::vector<int8_t>>& pages,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    const uint256 statement_commitment =
+        CommitRCStage3CoupledStatement(statement.public_inputs);
+    const uint256 shape_commitment = CommitRCStage3CoupledShape(shape);
+    if (statement_commitment.IsNull() || shape_commitment.IsNull() || sigma.IsNull() ||
+        pages.size() != shape.bank_pages) {
+        return Fail(why, "bank_page_inclusion_engine:public");
+    }
+    const uint64_t page_cells = uint64_t{shape.lobe_width} * shape.lobe_width;
+    std::vector<uint8_t> flat;
+    flat.reserve(static_cast<size_t>(page_cells) * pages.size());
+    std::vector<uint256> page_roots;
+    page_roots.reserve(pages.size());
+    for (uint32_t i = 0; i < pages.size(); ++i) {
+        if (pages[i].size() != page_cells) {
+            return Fail(why, "bank_page_inclusion_engine:page_shape");
+        }
+        HashWriter page_hash;
+        page_hash << std::string{"BTX_RC_STAGE3_COUPLED_BANK_PAGE_BYTES_V1"};
+        page_hash << i;
+        page_hash << static_cast<uint64_t>(pages[i].size());
+        for (int8_t value : pages[i]) {
+            const auto byte = static_cast<uint8_t>(value);
+            flat.push_back(byte);
+            page_hash << byte;
+        }
+        page_roots.push_back(page_hash.GetHash());
+    }
+
+    uint256 bank_page_byte_root;
+    RCStage3CoupledBankSourceOpening probe;
+    if (!BuildRCStage3CoupledBankSourceOpeningForTest(flat, 0, bank_page_byte_root, probe,
+                                                     why)) {
+        return Fail(why, "bank_page_inclusion_engine:source_root");
+    }
+
+    std::vector<BankPageInclusionScheduleEntry> schedule;
+    uint256 schedule_commitment;
+    if (!BuildBankPageInclusionSchedule(shape, sigma, schedule, schedule_commitment, why)) {
+        return false;
+    }
+    std::set<uint32_t> scheduled_pages;
+    for (const auto& entry : schedule) scheduled_pages.insert(entry.page_id);
+    if (scheduled_pages.empty()) {
+        return Fail(why, "bank_page_inclusion_engine:empty_schedule");
+    }
+    for (uint32_t page_id : scheduled_pages) {
+        if (page_id >= pages.size()) {
+            return Fail(why, "bank_page_inclusion_engine:page_id");
+        }
+    }
+
+    std::vector<unsigned char> body;
+    WriteU32(body, kBankPageInclusionEngineMagic);
+    WriteU16(body, kBankPageInclusionEngineVersion);
+    WriteUint256(body, statement_commitment);
+    WriteUint256(body, shape_commitment);
+    WriteUint256(body, sigma);
+    WriteUint256(body, schedule_commitment);
+    WriteUint256(body, bank_page_byte_root);
+    WriteU32(body, static_cast<uint32_t>(pages.size()));
+    for (uint32_t i = 0; i < pages.size(); ++i) {
+        WriteUint256(body, page_roots[i]);
+        WriteU32(body, static_cast<uint32_t>(pages[i].size()));
+        for (int8_t value : pages[i]) WriteU8(body, static_cast<uint8_t>(value));
+    }
+    WriteU64(body, static_cast<uint64_t>(schedule.size()));
+    for (const auto& entry : schedule) {
+        WriteU64(body, entry.schedule_index);
+        WriteU32(body, entry.barrier);
+        WriteU32(body, entry.lobe);
+        WriteU32(body, entry.page_slot);
+        WriteU32(body, entry.page_id);
+    }
+    WriteU32(body, static_cast<uint32_t>(scheduled_pages.size()));
+    for (uint32_t page_id : scheduled_pages) WriteU32(body, page_id);
+
+    if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
+        return Fail(why, "bank_page_inclusion_engine:oversize");
+    }
+    out_trace_root =
+        ComputeBankPageInclusionTraceRoot(schedule_commitment, bank_page_byte_root, page_roots);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    uint256 got_statement;
+    uint256 got_shape;
+    uint256 got_sigma;
+    uint256 schedule_commitment;
+    uint256 bank_page_byte_root;
+    uint32_t page_count{0};
+    if (!reader.ReadU32(magic) || magic != kBankPageInclusionEngineMagic ||
+        !reader.ReadU16(version) || version != kBankPageInclusionEngineVersion ||
+        !reader.ReadUint256(got_statement) || got_statement != statement_commitment ||
+        !reader.ReadUint256(got_shape) || got_shape != coupled_shape_commitment ||
+        !reader.ReadUint256(got_sigma) || got_sigma != sigma ||
+        !reader.ReadUint256(schedule_commitment) ||
+        !reader.ReadUint256(bank_page_byte_root) || !reader.ReadU32(page_count) ||
+        page_count != shape.bank_pages) {
+        return Fail(why, "bank_page_inclusion_engine:header");
+    }
+
+    const uint64_t page_cells = uint64_t{shape.lobe_width} * shape.lobe_width;
+    std::vector<uint8_t> flat;
+    std::vector<uint256> page_roots(page_count);
+    for (uint32_t i = 0; i < page_count; ++i) {
+        uint32_t nbytes{0};
+        std::vector<unsigned char> page_bytes;
+        if (!reader.ReadUint256(page_roots[i]) || page_roots[i].IsNull() ||
+            !reader.ReadU32(nbytes) || nbytes != page_cells ||
+            !reader.ReadBytes(nbytes, page_bytes)) {
+            return Fail(why, "bank_page_inclusion_engine:page_bytes");
+        }
+        HashWriter page_hash;
+        page_hash << std::string{"BTX_RC_STAGE3_COUPLED_BANK_PAGE_BYTES_V1"};
+        page_hash << i;
+        page_hash << static_cast<uint64_t>(page_bytes.size());
+        for (unsigned char byte : page_bytes) {
+            flat.push_back(byte);
+            page_hash << byte;
+        }
+        if (page_hash.GetHash() != page_roots[i]) {
+            return Fail(why, "bank_page_inclusion_engine:page_root_mismatch");
+        }
+    }
+
+    uint256 rebuilt_root;
+    RCStage3CoupledBankSourceOpening probe;
+    if (!BuildRCStage3CoupledBankSourceOpeningForTest(flat, 0, rebuilt_root, probe, why) ||
+        rebuilt_root != bank_page_byte_root) {
+        return Fail(why, "bank_page_inclusion_engine:bank_root");
+    }
+
+    std::vector<BankPageInclusionScheduleEntry> expected;
+    uint256 expected_schedule;
+    if (!BuildBankPageInclusionSchedule(shape, sigma, expected, expected_schedule, why) ||
+        expected_schedule != schedule_commitment) {
+        return Fail(why, "bank_page_inclusion_engine:schedule_mismatch");
+    }
+    uint64_t schedule_len{0};
+    if (!reader.ReadU64(schedule_len) || schedule_len != expected.size()) {
+        return Fail(why, "bank_page_inclusion_engine:schedule_len");
+    }
+    for (uint64_t i = 0; i < schedule_len; ++i) {
+        BankPageInclusionScheduleEntry entry;
+        if (!reader.ReadU64(entry.schedule_index) || !reader.ReadU32(entry.barrier) ||
+            !reader.ReadU32(entry.lobe) || !reader.ReadU32(entry.page_slot) ||
+            !reader.ReadU32(entry.page_id) ||
+            !(entry == expected[static_cast<size_t>(i)])) {
+            return Fail(why, "bank_page_inclusion_engine:schedule_entry");
+        }
+    }
+
+    std::set<uint32_t> expected_pages;
+    for (const auto& entry : expected) expected_pages.insert(entry.page_id);
+    uint32_t scheduled_page_count{0};
+    if (!reader.ReadU32(scheduled_page_count) ||
+        scheduled_page_count != expected_pages.size()) {
+        return Fail(why, "bank_page_inclusion_engine:scheduled_pages");
+    }
+    for (uint32_t i = 0; i < scheduled_page_count; ++i) {
+        uint32_t page_id{0};
+        if (!reader.ReadU32(page_id) || expected_pages.count(page_id) == 0) {
+            return Fail(why, "bank_page_inclusion_engine:scheduled_page_id");
+        }
+        expected_pages.erase(page_id);
+    }
+    if (!expected_pages.empty() || reader.Remaining() != 0) {
+        return Fail(why, "bank_page_inclusion_engine:trailing");
+    }
+    out_trace_root =
+        ComputeBankPageInclusionTraceRoot(schedule_commitment, bank_page_byte_root, page_roots);
+    return true;
+}
+
+
+namespace {
+
 bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
                            const RCStage3CoupledRelationReceipt& receipt,
                            std::string* why)
@@ -928,6 +1487,38 @@ bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
         }
         if (trace_root != receipt.trace_root) {
             return Fail(why, "coupled:gemm:gemm_dot_engine_trace_root");
+        }
+        return true;
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::BankSeedXofV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledBank) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":bank_seed_xof_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledBankSeedXofEngineReceipt(
+                statement, receipt.shape, receipt.engine_receipt, trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:bank:bank_seed_xof_engine_trace_root");
+        }
+        return true;
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::BankPageInclusionV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledBank) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":bank_page_inclusion_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
+                receipt.shape, receipt.statement_commitment,
+                receipt.coupled_shape_commitment, receipt.sigma, receipt.engine_receipt,
+                trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:bank:bank_page_inclusion_engine_trace_root");
         }
         return true;
     }
@@ -1291,13 +1882,14 @@ bool RCStage3CoupledRelationEnginesReady(std::string* why)
 {
     static_assert(!kRCStage3CoupledRelationEnginesReady,
                   "Do not enable without all eight proof-only engines");
-    // BankDequantPagesV1 + GemmDotTilesV1 are real local engines, but
-    // BankSeedXof / BankPageInclusion remain open and the other six roles
-    // still fail closed on ProofOnlyV1 recursive stubs (plus GEMM provenance
-    // residuals keep TransitivelyComplete=false).
+    // BankDequantPagesV1 + GemmDotTilesV1 + BankSeedXofV1 + BankPageInclusionV1
+    // are real local engines (BankSeedXof/BankPageInclusion AirGaps cleared via
+    // measured prototypes). Exchange/Permutation/Mix/Extract still fail closed
+    // on ProofOnlyV1 recursive stubs; Barrier/Digest lack immutable AIRs;
+    // CommitmentOpeningBridge + RecursiveAggregation remain on every role.
     return Fail(why,
-                "proof_engines_missing:bank_seed_xof,bank_page_inclusion,"
-                "exchange,permutation,mix,extract,barrier,digest");
+                "proof_engines_missing:exchange,permutation,mix,extract,"
+                "barrier,digest");
 }
 
 } // namespace matmul::v4::rc

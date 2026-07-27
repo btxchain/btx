@@ -455,10 +455,14 @@ bool ResolveRCStage3CoupledAir(const RCStage3CoupledAirRequest& request,
         out.constraint_system_available = true;
         out.local_kernel_complete = true;
         out.coverage.kernel = *counts;
-        Gap(out, RCStage3CoupledAirGapCode::BankSeedXof,
-            "bank nibble/scale columns are not yet bound to the page seed SHA-XOF");
-        Gap(out, RCStage3CoupledAirGapCode::BankPageInclusion,
-            "selected page cells are not yet opened against the canonical bank root");
+        if (!kRCStage3CoupledBankSeedXofPrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::BankSeedXof,
+                "bank nibble/scale columns are not yet bound to the page seed SHA-XOF");
+        }
+        if (!kRCStage3CoupledBankPageInclusionPrototypeExecuted) {
+            Gap(out, RCStage3CoupledAirGapCode::BankPageInclusion,
+                "selected page cells are not yet opened against the canonical bank root");
+        }
         break;
     case RCStage3RelationRole::CoupledGemm:
         out.constraints = BuildGemmKernel(request.shape.lobe_width);

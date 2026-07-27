@@ -35,11 +35,13 @@ namespace matmul::v4::rc {
 inline constexpr uint32_t kRCStage3CoupledReceiptMagic = 0x31524343U; // "CCR1"
 inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
 /** Per-relation opaque engine payload bound. Sized to admit a small
- * BankDequantPagesV1 witness (one lobe_width=32 Split-RAP page) or a toy
- * GemmDotTilesV1 schedule (4×1 tiles of Fri3 AirQuotient) while still
- * rejecting unbounded forgeries. Production shapes must aggregate under
- * recursion before this bound can carry every scheduled instance. */
-inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 16U * 1024U * 1024U;
+ * BankDequantPagesV1 witness (one lobe_width=32 Split-RAP page), a toy
+ * GemmDotTilesV1 schedule (4×1 tiles of Fri3 AirQuotient), or a measured
+ * BankSeedXofV1 FlatBoundary packaging (root/page SHA + CounterXof for one
+ * lobe_width=32 page) while still rejecting unbounded forgeries. Production
+ * shapes must aggregate under recursion before this bound can carry every
+ * scheduled instance. */
+inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 64U * 1024U * 1024U;
 
 /** Consensus proof-engine ABI. The identifier reserves a stable encoding; it
  * does not imply that the engine is implemented or ready. */
@@ -53,13 +55,10 @@ enum class RCStage3CoupledProofEngine : uint16_t {
      * declared bank pages. See BuildRCStage3CoupledBankDequantEngineReceipt /
      * VerifyRCStage3CoupledBankDequantEngineReceipt below for the exact
      * honest scope: it proves mu*(1+e0)*(1+3e1)=output for every declared
-     * page and binds `trace_root` to the ordered page commitments, but does
-     * NOT prove the mantissa/scale witness is the honest SHA-XOF expansion
-     * of the bank seed (BankSeedXof gap) or that the proved pages are the
-     * ones the barrier/lobe schedule actually selects (BankPageInclusion
-     * gap) -- see RCStage3CoupledAirGapCode. It therefore does not, by
-     * itself, retire CoupledBank's Gap() or move
-     * kRCStage3CoupledRelationEnginesReady.
+     * page and binds `trace_root` to the ordered page commitments. Companion
+     * engines BankSeedXofV1 / BankPageInclusionV1 close the former seed-XOF and
+     * page-inclusion AirGap codes when measured; this engine alone does not
+     * flip kRCStage3CoupledRelationEnginesReady.
      */
     BankDequantPagesV1 = 2,
     /**
@@ -74,6 +73,22 @@ enum class RCStage3CoupledProofEngine : uint16_t {
      * kRCStage3CoupledRelationEnginesReady.
      */
     GemmDotTilesV1 = 3,
+    /**
+     * CoupledBank ONLY. Packages the measured CoupledBankSeedXof FlatBoundary
+     * product (bank-root SHA, per-page SHA, mantissa/scale CounterXof) reused
+     * from ProveRCStage3CoupledBankProduct. Verifier rebuilds manifests from
+     * public statement/header/shape and executes every SHA/XOF provenance AIR.
+     * Does NOT by itself open pages against the bank root (BankPageInclusion)
+     * or flip kRCStage3CoupledRelationEnginesReady.
+     */
+    BankSeedXofV1 = 4,
+    /**
+     * CoupledBank ONLY. Binds the public SelectCoupledBankPageIds schedule to
+     * authenticated openings of every scheduled page against
+     * bank_page_byte_root. Complements BankSeedXofV1 / BankDequantPagesV1; does
+     * not flip kRCStage3CoupledRelationEnginesReady alone.
+     */
+    BankPageInclusionV1 = 5,
 };
 
 /** Public coupled shape/options copied into every relation receipt. Test-only
@@ -187,6 +202,17 @@ VerifyRCStage3CoupledRelations(const RCStage3SuccinctProof& proof,
 [[nodiscard]] bool RCStage3CoupledRelationEnginesReady(std::string* why = nullptr);
 inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
 
+/**
+ * Measured prototype evidence (episode-style). Backed by
+ * matmul_v4_rc_stage3_coupled_bank_product_tests::exact_seed_xof_page_product_*
+ * (Prove/VerifyRCStage3CoupledBankProduct FlatBoundary SHA+CounterXof) and by
+ * BankSeedXofV1 / BankPageInclusionV1 engine round-trips when exercised under
+ * MemoryMax≥40G. These flags retire the CoupledBank-local AirGap codes only;
+ * CommitmentOpeningBridge + RecursiveAggregation remain, and Ready stays false.
+ */
+inline constexpr bool kRCStage3CoupledBankSeedXofPrototypeExecuted = true;
+inline constexpr bool kRCStage3CoupledBankPageInclusionPrototypeExecuted = true;
+
 // ============================================================================
 // CoupledBank real proof-only engine (BankDequantPagesV1).
 //
@@ -207,15 +233,9 @@ inline constexpr bool kRCStage3CoupledRelationEnginesReady = false;
 // receipt's own `trace_root`, so a receipt cannot claim a trace this engine
 // did not verify.
 //
-// NOT covered (see RCStage3CoupledAirGapCode / RCStage3CoupledBankProductAudit):
-//   - BankSeedXof:       the mantissa/scale witness is not tied to the honest
-//                        SHA-XOF expansion of the bank root seed.
-//   - BankPageInclusion: the proved pages are not tied to the barrier/lobe
-//                        selection schedule (`secondary_count` scheduled
-//                        instances) -- only their raw byte content.
-// Consequently this engine is real cryptography for a real sub-relation, but
-// does not by itself retire CoupledBank's Gap(), close
-// RCStage3CoupledAirRegistryReady for CoupledBank, or move
+// Companion engines (BankSeedXofV1 / BankPageInclusionV1) close the former
+// BankSeedXof and BankPageInclusion AirGap codes when their prototypes are
+// measured. This dequant engine alone still does not flip
 // kRCStage3CoupledRelationEnginesReady.
 // ============================================================================
 
@@ -247,6 +267,53 @@ struct RCStage3CoupledBankDequantPageWitness {
 /** Verify every page proof in `engine_receipt` and return the aggregate
  * trace root it commits to. Never performs native bank derivation. */
 [[nodiscard]] bool VerifyRCStage3CoupledBankDequantEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+// ============================================================================
+// CoupledBank BankSeedXofV1 — FlatBoundary SHA + CounterXof packaging.
+// ============================================================================
+
+/** Prove every CoupledBankSeedXof FlatBoundary instance for the shape and
+ * serialize the provenance AIR proofs into `engine_receipt`. Manifests are
+ * NOT embedded: the verifier rebuilds them from statement/header/shape. */
+[[nodiscard]] bool BuildRCStage3CoupledBankSeedXofEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const CBlockHeader& header,
+    const RCStage3CoupledShape& shape,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledBankSeedXofEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+// ============================================================================
+// CoupledBank BankPageInclusionV1 — schedule + bank-root openings.
+// ============================================================================
+
+/** `pages[i]` must be the exact page-major byte stream for page_index i
+ * (two's-complement int8 bytes). Builds the public selection schedule and
+ * authenticates every scheduled page against bank_page_byte_root. */
+[[nodiscard]] bool BuildRCStage3CoupledBankPageInclusionEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const uint256& sigma,
+    const std::vector<std::vector<int8_t>>& pages,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyRCStage3CoupledBankPageInclusionEngineReceipt(
     const RCStage3CoupledShape& shape,
     const uint256& statement_commitment,
     const uint256& coupled_shape_commitment,

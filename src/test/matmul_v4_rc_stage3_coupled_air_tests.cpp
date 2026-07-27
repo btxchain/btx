@@ -141,6 +141,15 @@ BOOST_AUTO_TEST_CASE(registry_has_exact_roles_coverage_and_residuals)
         }
     }
 
+    // Measured BankSeedXof / BankPageInclusion prototypes retire those two
+    // CoupledBank-local AirGap codes; universal bridge/aggregation remain.
+    BOOST_CHECK(rc::kRCStage3CoupledBankSeedXofPrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledBankPageInclusionPrototypeExecuted);
+    BOOST_CHECK(!HasGap(entries[0], rc::RCStage3CoupledAirGapCode::BankSeedXof));
+    BOOST_CHECK(!HasGap(entries[0], rc::RCStage3CoupledAirGapCode::BankPageInclusion));
+    BOOST_CHECK(HasGap(entries[0],
+                       rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge));
+
     std::string why;
     BOOST_CHECK(!rc::RCStage3CoupledAirRegistryReady(shape, gamma, alpha, &why));
     BOOST_CHECK(why.find("residual_gaps") != std::string::npos);
