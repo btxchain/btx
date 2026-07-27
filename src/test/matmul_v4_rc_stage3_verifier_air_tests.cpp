@@ -774,12 +774,39 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.sha_fixed_schedule);
     BOOST_CHECK(gap.sha_codec_origins_complete);
     BOOST_CHECK(!gap.sha_recursively_consumed);
-    BOOST_CHECK(!gap.challenge_selection_air_constrained);
+    BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(!gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
-    // plan_valid closed; four Executable predicates remain open (+ constexpr).
-    BOOST_CHECK_EQUAL(gap.open_predicates, 4U);
+    // plan_valid + selection closed; three Executable predicates remain open.
+    BOOST_CHECK_EQUAL(gap.open_predicates, 3U);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+}
+
+// Light opt-in: fs_selection_air ChallengeTable binds SHA digests to consumed
+// challenges on the honest bounded canary; consumed tamper goes red.
+BOOST_AUTO_TEST_CASE(
+    bounded_sha_fs_canary_challenge_selection_air_join)
+{
+    const uint256 seed = Filled(0xcf);
+    const va::AlgAirProof proof = HonestBoundedShaFsCanaryProof(seed);
+    const nr::NarrowChildShape shape = ShapeForProof(proof);
+    const va::FiatShamirProgram bounded =
+        va::BuildBoundedFiatShamirProgram(
+            shape, va::kRCFiatShamirOodCandidateSchedule);
+    BOOST_REQUIRE(bounded.valid);
+
+    const va::FiatShamirChallengeSelectionAirJoinV1 join =
+        va::MeasureFiatShamirChallengeSelectionAirJoinV1(
+            bounded, seed, proof);
+    BOOST_TEST_MESSAGE(join.note);
+    BOOST_REQUIRE_MESSAGE(join.constrained, join.note);
+    BOOST_CHECK(join.digest_plan_ready);
+    BOOST_CHECK(join.table_valid);
+    BOOST_CHECK(join.tamper_rejects);
+    BOOST_CHECK_EQUAL(join.table_violations, 0U);
+    BOOST_CHECK_GE(join.draws, 6U);
+    BOOST_CHECK_EQUAL(join.rows_bound_to_consumed, join.draws);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 

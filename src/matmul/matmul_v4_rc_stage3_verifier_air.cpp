@@ -2306,6 +2306,363 @@ bool AlignAlgAirProofOodToBoundedShaScheduleV1(
     return true;
 }
 
+FiatShamirChallengeSelectionAirJoinV1
+MeasureFiatShamirChallengeSelectionAirJoinV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof)
+{
+    namespace fss = stage3_fs_selection_air;
+    FiatShamirChallengeSelectionAirJoinV1 out;
+    const FiatShamirShaExecutionPlanV1 plan =
+        BuildFiatShamirShaExecutionPlanV1(
+            program, child_fs_seed, child_proof);
+    out.digest_plan_ready =
+        plan.valid && plan.every_digest_matches_claim;
+    if (!out.digest_plan_ready) {
+        out.note =
+            "stage3:verifier_air:fs_selection_join:"
+            "digest_plan_open:" +
+            plan.note;
+        return out;
+    }
+    const FiatShamirWitness witness =
+        BuildFiatShamirWitness(
+            program, child_fs_seed, child_proof);
+    if (!witness.valid ||
+        witness.events.size() != program.events.size()) {
+        out.note =
+            "stage3:verifier_air:fs_selection_join:witness";
+        return out;
+    }
+
+    std::vector<fss::ChallengeTableRowV1> rows;
+    std::vector<unsigned char> transcript;
+    uint32_t z_counter = 0;
+    Fp3 selected_z1{};
+    bool have_z1 = false;
+    const auto challenge_digest =
+        [&transcript](const char* label, uint32_t index) {
+            std::vector<unsigned char> preimage = transcript;
+            preimage.insert(
+                preimage.end(),
+                reinterpret_cast<const unsigned char*>(label),
+                reinterpret_cast<const unsigned char*>(label) +
+                    std::strlen(label));
+            AppendU32(preimage, index);
+            return Sha256dBytes(preimage.data(), preimage.size());
+        };
+    const auto push_fp3_row =
+        [&rows](const uint256& digest, const Fp3& consumed,
+                uint32_t kind_tag) {
+            fss::ChallengeTableRowV1 row;
+            for (uint32_t i = 0; i < 24; ++i) {
+                row.digest_bytes[i] = digest.data()[i];
+            }
+            row.consumed = consumed;
+            row.kind = kind_tag;
+            rows.push_back(row);
+        };
+
+    for (uint32_t event_index = 0;
+         event_index < program.events.size();
+         ++event_index) {
+        const FiatShamirEventSpec& spec =
+            program.events[event_index];
+        const FiatShamirEventWitness& event =
+            witness.events[event_index];
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeAirQuotientLambda) {
+            const uint256 digest = aq::AirChallengeDigest(
+                child_fs_seed, "airq_lambda",
+                {child_proof.trace_commit},
+                {program.child_shape.child_n_rows,
+                 child_proof.batch.column_len.back(),
+                 program.child_shape.child_w});
+            const Fp3 decoded =
+                gf::FromChallengeBytes3(digest.data());
+            if (!event.has_fp3_challenge ||
+                !gf::Eq(decoded, event.claimed_challenge)) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "airq_mismatch";
+                return out;
+            }
+            push_fp3_row(
+                digest, decoded,
+                static_cast<uint32_t>(spec.kind));
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::AbsorbZ1Z2) {
+            if (!have_z1) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "absorb_z_before_select";
+                return out;
+            }
+            AppendFp3(transcript, child_proof.batch.z1);
+            AppendFp3(transcript, child_proof.batch.z2);
+            continue;
+        }
+        if (!event.absorbed_payload.empty()) {
+            transcript.insert(
+                transcript.end(),
+                event.absorbed_payload.begin(),
+                event.absorbed_payload.end());
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeLambda) {
+            const uint256 digest =
+                challenge_digest("fra3_lambda", 0);
+            const Fp3 decoded =
+                gf::FromChallengeBytes3(digest.data());
+            if (!gf::Eq(decoded, child_proof.batch.lambda)) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "lambda_mismatch";
+                return out;
+            }
+            push_fp3_row(
+                digest, child_proof.batch.lambda,
+                static_cast<uint32_t>(spec.kind));
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeZ1 ||
+            spec.kind == FiatShamirEventKind::ChallengeZ2) {
+            if (program.ood_candidates == 0) {
+                // Legacy single-draw: one digest must equal the claim.
+                const uint32_t draw = z_counter++;
+                const uint256 digest =
+                    challenge_digest("fra3_z", draw);
+                const Fp3 decoded =
+                    gf::FromChallengeBytes3(digest.data());
+                const Fp3 claimed =
+                    spec.kind ==
+                            FiatShamirEventKind::ChallengeZ1
+                        ? child_proof.batch.z1
+                        : child_proof.batch.z2;
+                const bool has_ext =
+                    gf::Canonical(decoded.c1) != 0 ||
+                    gf::Canonical(decoded.c2) != 0;
+                const bool distinct =
+                    !have_z1 || !gf::Eq(decoded, selected_z1);
+                if (!has_ext || !distinct) {
+                    // Rejection draw: not consumed by the verifier.
+                    continue;
+                }
+                if (!gf::Eq(decoded, claimed)) {
+                    out.note =
+                        "stage3:verifier_air:fs_selection_join:"
+                        "legacy_z_mismatch";
+                    return out;
+                }
+                push_fp3_row(
+                    digest, claimed,
+                    static_cast<uint32_t>(spec.kind));
+                if (spec.kind ==
+                    FiatShamirEventKind::ChallengeZ1) {
+                    selected_z1 = decoded;
+                    have_z1 = true;
+                }
+                continue;
+            }
+            if (spec.index != 0) continue;
+            std::vector<Fp3> candidates;
+            std::vector<uint256> digests;
+            candidates.reserve(program.ood_candidates);
+            digests.reserve(program.ood_candidates);
+            for (uint32_t k = 0; k < program.ood_candidates;
+                 ++k) {
+                const uint32_t draw = z_counter++;
+                const uint256 digest =
+                    challenge_digest("fra3_z", draw);
+                digests.push_back(digest);
+                candidates.push_back(
+                    gf::FromChallengeBytes3(digest.data()));
+            }
+            const Fp3* distinct =
+                have_z1 ? &selected_z1 : nullptr;
+            const uint32_t selected =
+                SelectFirstAcceptableOodIndex(
+                    candidates, distinct);
+            if (selected >= program.ood_candidates) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "ood_exhausted";
+                return out;
+            }
+            const Fp3 claimed =
+                spec.kind == FiatShamirEventKind::ChallengeZ1
+                    ? child_proof.batch.z1
+                    : child_proof.batch.z2;
+            if (!gf::Eq(candidates[selected], claimed)) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "ood_claim_mismatch";
+                return out;
+            }
+            push_fp3_row(
+                digests[selected], claimed,
+                static_cast<uint32_t>(spec.kind));
+            if (spec.kind ==
+                FiatShamirEventKind::ChallengeZ1) {
+                selected_z1 = candidates[selected];
+                have_z1 = true;
+            }
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeW1) {
+            const uint256 digest =
+                challenge_digest("fra3_w", 0);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.w1)) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "w1_mismatch";
+                return out;
+            }
+            push_fp3_row(
+                digest, child_proof.batch.w1,
+                static_cast<uint32_t>(spec.kind));
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeW2) {
+            const uint256 digest =
+                challenge_digest("fra3_w", 1);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.w2)) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "w2_mismatch";
+                return out;
+            }
+            push_fp3_row(
+                digest, child_proof.batch.w2,
+                static_cast<uint32_t>(spec.kind));
+            continue;
+        }
+        if (spec.kind == FiatShamirEventKind::ChallengeFold) {
+            if (spec.index >=
+                child_proof.batch.fold_challenges.size()) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "fold_arity";
+                return out;
+            }
+            const uint256 digest =
+                challenge_digest("fra3_fold", spec.index);
+            if (!gf::Eq(
+                    gf::FromChallengeBytes3(digest.data()),
+                    child_proof.batch.fold_challenges[spec.index])) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "fold_mismatch";
+                return out;
+            }
+            push_fp3_row(
+                digest,
+                child_proof.batch.fold_challenges[spec.index],
+                static_cast<uint32_t>(spec.kind));
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeQueryIndex) {
+            if (spec.index >=
+                    child_proof.batch.queries.size() ||
+                program.child_shape.child_n_lde == 0) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "query_arity";
+                return out;
+            }
+            const uint256 digest =
+                challenge_digest("fra3_query", spec.index);
+            const Fp3 challenge =
+                gf::FromChallengeBytes3(digest.data());
+            const unsigned __int128 wide =
+                (static_cast<unsigned __int128>(
+                     gf::Canonical(challenge.c1))
+                 << 64) |
+                gf::Canonical(challenge.c0);
+            const uint32_t index = static_cast<uint32_t>(
+                wide % program.child_shape.child_n_lde);
+            if (index !=
+                child_proof.batch.queries[spec.index].index) {
+                out.note =
+                    "stage3:verifier_air:fs_selection_join:"
+                    "query_index_mismatch";
+                return out;
+            }
+            fss::ChallengeTableRowV1 row;
+            for (uint32_t i = 0; i < 24; ++i) {
+                row.digest_bytes[i] = digest.data()[i];
+            }
+            row.consumed = challenge;
+            row.consumed_index = index;
+            row.is_query = true;
+            row.kind = static_cast<uint32_t>(spec.kind);
+            rows.push_back(row);
+            continue;
+        }
+    }
+
+    out.draws = static_cast<uint32_t>(rows.size());
+    if (rows.empty()) {
+        out.note =
+            "stage3:verifier_air:fs_selection_join:no_draws";
+        return out;
+    }
+    const auto table = fss::BuildChallengeTableAirV1(
+        rows, program.child_shape.child_n_lde);
+    out.table_rows = table.n_rows;
+    out.table_constraints = table.n_constraints;
+    out.table_violations = table.violations;
+    out.rows_bound_to_consumed = table.rows_bound_to_consumed;
+    out.query_rows = table.query_rows;
+    out.query_rows_bound_to_consumed_index =
+        table.query_rows_bound_to_consumed_index;
+    out.table_valid = table.valid;
+    const bool all_bound =
+        table.rows_bound_to_consumed == rows.size() &&
+        table.query_rows_bound_to_consumed_index ==
+            table.query_rows;
+
+    // One-row consumed tamper must go red or the binding is decorative.
+    {
+        std::vector<fss::ChallengeTableRowV1> forged = rows;
+        if (forged[0].is_query) {
+            forged[0].consumed_index =
+                (forged[0].consumed_index + 1) %
+                program.child_shape.child_n_lde;
+        } else {
+            forged[0].consumed =
+                gf::Add(forged[0].consumed, gf::Fp3::One());
+        }
+        const auto bad = fss::BuildChallengeTableAirV1(
+            forged, program.child_shape.child_n_lde);
+        out.tamper_rejects = bad.violations > 0;
+    }
+
+    out.constrained =
+        out.table_valid && all_bound && out.tamper_rejects;
+    out.note =
+        out.constrained
+            ? ("stage3:verifier_air:fs_selection_join:ok;"
+               "draws=" +
+               std::to_string(out.draws) +
+               ";rows=" + std::to_string(out.table_rows) +
+               ";violations=0;tamper=1")
+            : ("stage3:verifier_air:fs_selection_join:open;" +
+               table.note +
+               ";bound=" +
+               std::to_string(all_bound ? 1 : 0) +
+               ";tamper=" +
+               std::to_string(out.tamper_rejects ? 1 : 0));
+    return out;
+}
+
 VerifierFiatShamirAirChipGapV1
 AssessVerifierFiatShamirAirChipGapV1(
     const FiatShamirProgram& program,
@@ -2338,9 +2695,15 @@ AssessVerifierFiatShamirAirChipGapV1(
         plan.proof_codec_byte_origins_complete;
     out.sha_recursively_consumed =
         plan.recursively_consumed;
-    // Selection AIR / air-backed reconstruction / whole-verifier SHA
-    // equations remain open chips (measured false until joined).
-    out.challenge_selection_air_constrained = false;
+    // fs_selection_air ChallengeTable join (measured when digests match).
+    const FiatShamirChallengeSelectionAirJoinV1 selection =
+        aligned_ok
+            ? MeasureFiatShamirChallengeSelectionAirJoinV1(
+                  program, child_fs_seed, aligned)
+            : FiatShamirChallengeSelectionAirJoinV1{};
+    out.challenge_selection_air_constrained =
+        selection.constrained;
+    // air-backed 8/8 reconstruction / whole-verifier SHA remain open.
     out.air_backed_all_kinds_reconstructed = false;
     out.whole_verifier_sha_equations_in_air = false;
 
@@ -2374,6 +2737,10 @@ AssessVerifierFiatShamirAirChipGapV1(
                ";plan_valid=" +
                (out.sha_execution_plan_valid ? "1"
                                              : "0") +
+               ";selection=" +
+               (out.challenge_selection_air_constrained
+                    ? "1"
+                    : "0") +
                ";executable_constexpr=0");
     return out;
 }
