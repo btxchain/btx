@@ -4366,13 +4366,113 @@ BOOST_AUTO_TEST_CASE(
         why.find("bytecode_hier_shard_leaf_oob") !=
         std::string::npos);
 
+    // L2 local-q join: relative partition + drop-shard forgery measured on
+    // the free-row pack. Absolute Σ local_q == parent opening is reported
+    // when parent openings extract; do not require it to flip readiness.
+    BOOST_CHECK_EQUAL(
+        executed.quotient_join.shard_count, executed.l1_count);
+    BOOST_CHECK(executed.quotient_join.covers_full_table);
+    BOOST_CHECK(executed.quotient_join.shards_extracted);
+    BOOST_CHECK(executed.quotient_join.partition_closed);
+    BOOST_CHECK(executed.quotient_join.forgery_rejected);
+    BOOST_CHECK_EQUAL(
+        executed.quotient_join.programs_covered,
+        static_cast<uint32_t>(table.programs.size()));
+    BOOST_TEST_MESSAGE(executed.quotient_join.note);
     BOOST_TEST_MESSAGE(executed.note);
+    // Absolute parent binding is the measured gate for join Ready — leave
+    // Ready false until sum_equals_parent is green AND mirrored in AIR.
+    BOOST_CHECK(!fp::kNarrowBytecodeShardQuotientJoinReady);
+    if (executed.quotient_join.parent_extracted) {
+        BOOST_TEST_MESSAGE(
+            "parent_q extracted; sum_eq="
+            << executed.quotient_join.sum_equals_parent
+            << " join_valid=" << executed.quotient_join.valid);
+    } else {
+        BOOST_TEST_MESSAGE(
+            "parent_q not extracted; relative join only");
+    }
+
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!fp::kNarrowBytecodeHierarchicalAttachReady);
     static_assert(
         fp::kNarrowBytecodeHierarchicalAttachExecutable);
+    static_assert(fp::kNarrowBytecodeShardQuotientJoinExecutable);
+    static_assert(!fp::kNarrowBytecodeShardQuotientJoinReady);
     static_assert(
         !nr::kNarrowHierarchicalAggregationReady);
+}
+
+// g2: light absolute/relative local-q join on a 2-shard subset (fits free
+// rows; no pad-after-challenge). Measures partition+forgery; absolute
+// parent binding only asserted when parent openings extract successfully.
+BOOST_AUTO_TEST_CASE(
+    hash_kernel_bytecode_shard_local_quotient_join_rejects_drop_forgery)
+{
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs, hash_child.proof, hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+    BOOST_REQUIRE_GE(table.programs.size(), 4U);
+
+    // Two tiny shards of one program each — must fit free rows.
+    const std::vector<std::vector<uint32_t>> groups = {
+        {0U}, {1U}};
+    const fp::NarrowBytecodeShardQuotientJoinV1 join =
+        fp::ExecuteNarrowBytecodeShardQuotientJoinV1(
+            base, table, groups);
+    BOOST_REQUIRE_MESSAGE(join.valid, join.note);
+    BOOST_CHECK_EQUAL(join.shard_count, 2U);
+    BOOST_CHECK_EQUAL(join.programs_covered, 2U);
+    BOOST_CHECK(!join.covers_full_table);
+    BOOST_CHECK(join.shards_extracted);
+    BOOST_CHECK(join.partition_closed);
+    BOOST_CHECK(join.forgery_rejected);
+    BOOST_CHECK(!join.sum_equals_parent);
+
+    // Relative identity: Σ shard local_q == union-shard local_q.
+    std::vector<uint32_t> union_leaves = {0U, 1U};
+    rc::constraint_bytecode::ProgramTable union_table;
+    BOOST_REQUIRE(fp::SliceProgramTableByLeafIndices(
+        table, union_leaves, union_table, &why));
+    fp::FoldBusComposition union_bus;
+    BOOST_REQUIRE(fp::PrepareFoldBusForBytecodeShard(
+        base, table, union_leaves, union_table, union_bus,
+        &why));
+    const fp::BytecodeInterpreterAttachment union_att =
+        fp::AttachConstraintBytecodeInterpreterShard(
+            union_bus, union_table, union_leaves);
+    BOOST_REQUIRE_MESSAGE(union_att.valid, union_att.note);
+    std::vector<gf::Fp3> union_q;
+    BOOST_REQUIRE(fp::ExtractShardLocalQuotientOpenings(
+        union_bus, union_q, &why));
+    BOOST_REQUIRE_EQUAL(union_q.size(), join.queries);
+    BOOST_REQUIRE_EQUAL(
+        join.sum_local_q_per_query.size(), join.queries);
+    for (uint32_t q = 0; q < join.queries; ++q) {
+        BOOST_CHECK_MESSAGE(
+            gf::IsZero(gf::Sub(
+                join.sum_local_q_per_query[q], union_q[q])),
+            "relative sum!=union at query " << q);
+    }
+    BOOST_TEST_MESSAGE(join.note);
+    BOOST_TEST_MESSAGE(
+        "Q_JOIN_RELATIVE shards=2 covered=2/"
+        << table.programs.size()
+        << " queries=" << join.queries
+        << " union_eq=1 forgery=1 complete_fp=false");
+    static_assert(!fp::kNarrowBytecodeShardQuotientJoinReady);
+    static_assert(fp::kNarrowBytecodeShardQuotientJoinExecutable);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

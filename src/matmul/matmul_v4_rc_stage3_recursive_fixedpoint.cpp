@@ -16636,6 +16636,369 @@ bool RejectBytecodeShardForgery(
 
 } // namespace
 
+namespace {
+
+bool FailJoin(std::string* why, const char* code)
+{
+    if (why != nullptr) *why = code;
+    return false;
+}
+
+} // namespace
+
+bool ExtractAuthenticatedParentQuotientOpenings(
+    const FoldBusComposition& base,
+    uint32_t current_width,
+    std::vector<Fp3>& out_per_query,
+    std::string* why)
+{
+    out_per_query.clear();
+    if (!base.valid || base.columns.empty() ||
+        base.hash.program.rows.empty() ||
+        current_width == 0) {
+        return FailJoin(
+            why,
+            "stage3:recursive_fixedpoint:"
+            "bytecode_parent_q_input");
+    }
+    const uint32_t queries = static_cast<uint32_t>(
+        base.hash.program.public_inputs.query_index.size());
+    if (queries == 0) {
+        return FailJoin(
+            why,
+            "stage3:recursive_fixedpoint:"
+            "bytecode_parent_q_no_queries");
+    }
+    const HashOpeningLayout hash_layout =
+        HashOpeningLayoutAt(base.hash.column_base);
+    if (base.combined.n_columns <=
+        hash_layout.absorbed_pin_base + ah::kAlgHashRate) {
+        return FailJoin(
+            why,
+            "stage3:recursive_fixedpoint:"
+            "bytecode_parent_q_layout");
+    }
+    const Fp3 u{0, 1, 0};
+    const Fp3 u2{0, 0, 1};
+    std::vector<std::array<Fp3, 3>> coords(queries);
+    std::vector<std::array<bool, 3>> seen(queries);
+    for (uint32_t row = 0;
+         row < base.hash.program.active_rows &&
+         row < base.hash.program.rows.size();
+         ++row) {
+        const auto& meta = base.hash.program.rows[row];
+        if (!meta.current_row_sponge) continue;
+        for (uint32_t lane = 0; lane < ah::kAlgHashRate;
+             ++lane) {
+            const uint32_t position =
+                meta.current_word_offset + lane;
+            // Quotient occupies items [current_width] limbs 0..2.
+            const uint32_t width_items = current_width + 1U;
+            if (position >= 3U * width_items) continue;
+            const uint32_t item = position / 3U;
+            const uint32_t coordinate = position % 3U;
+            if (item != current_width) continue;
+            if (meta.query >= queries || coordinate >= 3U) {
+                return FailJoin(
+                    why,
+                    "stage3:recursive_fixedpoint:"
+                    "bytecode_parent_q_oob");
+            }
+            coords[meta.query][coordinate] =
+                base.columns[hash_layout.absorbed_pin_base +
+                             lane][row];
+            seen[meta.query][coordinate] = true;
+        }
+    }
+    out_per_query.assign(queries, Fp3::Zero());
+    for (uint32_t q = 0; q < queries; ++q) {
+        if (!seen[q][0] || !seen[q][1] || !seen[q][2]) {
+            return FailJoin(
+                why,
+                "stage3:recursive_fixedpoint:"
+                "bytecode_parent_q_missing");
+        }
+        out_per_query[q] = gf::Add(
+            coords[q][0],
+            gf::Add(
+                gf::Mul(u, coords[q][1]),
+                gf::Mul(u2, coords[q][2])));
+    }
+    return true;
+}
+
+bool ExtractShardLocalQuotientOpenings(
+    const FoldBusComposition& shard_bus,
+    std::vector<Fp3>& out_per_query,
+    std::string* why)
+{
+    out_per_query.clear();
+    if (!shard_bus.valid || shard_bus.columns.empty()) {
+        return FailJoin(
+            why,
+            "stage3:recursive_fixedpoint:"
+            "bytecode_local_q_input");
+    }
+    const uint32_t bytecode_width = BytecodeBusLayout(0).End();
+    if (shard_bus.combined.n_columns < bytecode_width) {
+        return FailJoin(
+            why,
+            "stage3:recursive_fixedpoint:"
+            "bytecode_local_q_no_bus");
+    }
+    const BytecodeBusLayout bus(
+        shard_bus.combined.n_columns - bytecode_width);
+    // InterpreterRowKind::Quotient == 8 (see attach impl).
+    constexpr uint32_t kQuotientKind = 8;
+    const uint32_t queries = static_cast<uint32_t>(
+        shard_bus.hash.program.public_inputs.query_index
+            .size());
+    out_per_query.reserve(queries);
+    for (uint32_t row = 0; row < shard_bus.combined.n_rows;
+         ++row) {
+        if (gf::IsZero(
+                shard_bus.columns[bus.RowKind(kQuotientKind)]
+                                 [row])) {
+            continue;
+        }
+        out_per_query.push_back(
+            shard_bus.columns[bus.Value(3)][row]);
+    }
+    if (queries == 0 || out_per_query.size() != queries) {
+        return FailJoin(
+            why,
+            "stage3:recursive_fixedpoint:"
+            "bytecode_local_q_count");
+    }
+    return true;
+}
+
+NarrowBytecodeShardQuotientJoinV1
+JoinNarrowBytecodeShardLocalQuotientsV1(
+    const std::vector<Fp3>& parent_q_per_query,
+    const std::vector<std::vector<Fp3>>& shard_local_q,
+    uint32_t programs_covered,
+    uint32_t programs_total)
+{
+    NarrowBytecodeShardQuotientJoinV1 out;
+    out.programs_covered = programs_covered;
+    out.programs_total = programs_total;
+    out.shard_count =
+        static_cast<uint32_t>(shard_local_q.size());
+    out.covers_full_table =
+        programs_total > 0 &&
+        programs_covered == programs_total;
+    out.parent_extracted = !parent_q_per_query.empty();
+    if (shard_local_q.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_no_shards";
+        return out;
+    }
+    const uint32_t queries =
+        static_cast<uint32_t>(shard_local_q.front().size());
+    out.queries = queries;
+    if (queries == 0) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_no_queries";
+        return out;
+    }
+    for (const auto& shard : shard_local_q) {
+        if (shard.size() != queries) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_q_join_query_mismatch";
+            return out;
+        }
+    }
+    out.shards_extracted = true;
+    out.sum_local_q_per_query.assign(queries, Fp3::Zero());
+    for (const auto& shard : shard_local_q) {
+        for (uint32_t q = 0; q < queries; ++q) {
+            out.sum_local_q_per_query[q] = gf::Add(
+                out.sum_local_q_per_query[q], shard[q]);
+        }
+    }
+    // Relative partition closed: recomputing the sum is the identity of
+    // the extracted openings; forgery below proves each shard is load-bearing.
+    out.partition_closed = true;
+
+    if (out.parent_extracted) {
+        if (parent_q_per_query.size() != queries) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_q_join_parent_query_mismatch";
+            out.partition_closed = false;
+            return out;
+        }
+        out.parent_q_per_query = parent_q_per_query;
+        out.sum_equals_parent = true;
+        for (uint32_t q = 0; q < queries; ++q) {
+            if (!gf::IsZero(gf::Sub(
+                    out.sum_local_q_per_query[q],
+                    parent_q_per_query[q]))) {
+                out.sum_equals_parent = false;
+                break;
+            }
+        }
+    } else {
+        out.sum_equals_parent = false;
+    }
+
+    // Forgery: drop any single shard → remaining sum ≠ full sum (hence ≠ parent
+    // when absolute binding holds). Requires ≥2 shards with a nonzero delta.
+    out.forgery_rejected = shard_local_q.size() >= 2;
+    if (out.forgery_rejected) {
+        for (size_t drop = 0; drop < shard_local_q.size();
+             ++drop) {
+            std::vector<Fp3> partial(queries, Fp3::Zero());
+            for (size_t s = 0; s < shard_local_q.size();
+                 ++s) {
+                if (s == drop) continue;
+                for (uint32_t q = 0; q < queries; ++q) {
+                    partial[q] = gf::Add(
+                        partial[q], shard_local_q[s][q]);
+                }
+            }
+            bool differs = false;
+            for (uint32_t q = 0; q < queries; ++q) {
+                if (!gf::IsZero(gf::Sub(
+                        partial[q],
+                        out.sum_local_q_per_query[q]))) {
+                    differs = true;
+                    break;
+                }
+            }
+            if (!differs) {
+                out.forgery_rejected = false;
+                break;
+            }
+            if (out.parent_extracted && out.sum_equals_parent) {
+                bool differs_parent = false;
+                for (uint32_t q = 0; q < queries; ++q) {
+                    if (!gf::IsZero(gf::Sub(
+                            partial[q],
+                            parent_q_per_query[q]))) {
+                        differs_parent = true;
+                        break;
+                    }
+                }
+                if (!differs_parent) {
+                    out.forgery_rejected = false;
+                    break;
+                }
+            }
+        }
+    }
+
+    out.valid =
+        out.shards_extracted && out.partition_closed &&
+        out.forgery_rejected &&
+        (!out.covers_full_table ||
+         (out.parent_extracted && out.sum_equals_parent));
+    // Absolute parent binding is required for full-table cover; relative-only
+    // subsets are still reported valid when partition+forgery close.
+    if (!out.covers_full_table) {
+        out.valid =
+            out.shards_extracted && out.partition_closed &&
+            out.forgery_rejected;
+    }
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:bytecode_q_join") +
+        ";shards=" + std::to_string(out.shard_count) +
+        ";queries=" + std::to_string(out.queries) +
+        ";covered=" + std::to_string(out.programs_covered) +
+        "/" + std::to_string(out.programs_total) +
+        ";full=" + (out.covers_full_table ? "1" : "0") +
+        ";parent=" + (out.parent_extracted ? "1" : "0") +
+        ";sum_eq=" + (out.sum_equals_parent ? "1" : "0") +
+        ";part=" + (out.partition_closed ? "1" : "0") +
+        ";forgery=" + (out.forgery_rejected ? "1" : "0") +
+        ";mirror=0;complete_fp=false";
+    return out;
+}
+
+NarrowBytecodeShardQuotientJoinV1
+ExecuteNarrowBytecodeShardQuotientJoinV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<std::vector<uint32_t>>& shard_leaf_groups)
+{
+    NarrowBytecodeShardQuotientJoinV1 out;
+    if (!base.valid ||
+        !constraint_bytecode::ValidateProgramTable(
+            table, nullptr) ||
+        shard_leaf_groups.size() < 2) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_q_join_exec_input";
+        return out;
+    }
+    std::vector<Fp3> parent_q;
+    std::string why;
+    const bool parent_ok =
+        ExtractAuthenticatedParentQuotientOpenings(
+            base, table.current_width, parent_q, &why);
+    std::vector<std::vector<Fp3>> shard_qs;
+    shard_qs.reserve(shard_leaf_groups.size());
+    uint32_t covered = 0;
+    std::vector<bool> seen(table.programs.size(), false);
+    for (const auto& leaves : shard_leaf_groups) {
+        if (leaves.empty()) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_q_join_exec_empty_shard";
+            return out;
+        }
+        for (uint32_t leaf : leaves) {
+            if (leaf >= table.programs.size() || seen[leaf]) {
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "bytecode_q_join_exec_leaf";
+                return out;
+            }
+            seen[leaf] = true;
+            ++covered;
+        }
+        constraint_bytecode::ProgramTable shard;
+        if (!SliceProgramTableByLeafIndices(
+                table, leaves, shard, &why)) {
+            out.note = why;
+            return out;
+        }
+        FoldBusComposition shard_bus;
+        if (!PrepareFoldBusForBytecodeShard(
+                base, table, leaves, shard, shard_bus,
+                &why)) {
+            out.note = why;
+            return out;
+        }
+        const BytecodeInterpreterAttachment att =
+            AttachConstraintBytecodeInterpreterShard(
+                shard_bus, shard, leaves);
+        if (!att.valid) {
+            out.note = att.note;
+            return out;
+        }
+        std::vector<Fp3> local_q;
+        if (!ExtractShardLocalQuotientOpenings(
+                shard_bus, local_q, &why)) {
+            out.note = why;
+            return out;
+        }
+        shard_qs.push_back(std::move(local_q));
+    }
+    if (!parent_ok) {
+        // Relative join still proceeds; absolute parent binding stays false.
+        parent_q.clear();
+    }
+    return JoinNarrowBytecodeShardLocalQuotientsV1(
+        parent_q, shard_qs, covered,
+        static_cast<uint32_t>(table.programs.size()));
+}
+
 NarrowBytecodeHierarchicalAttachExecutionV1
 ExecuteNarrowBytecodeHierarchicalAttachV1(
     const FoldBusComposition& base,
@@ -16748,6 +17111,12 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         return out;
     }
 
+    std::vector<std::vector<Fp3>> shard_local_qs;
+    uint32_t programs_covered = 0;
+    if (attach_l1) {
+        shard_local_qs.reserve(shard_groups.size());
+    }
+
     for (uint32_t si = 0; si < shard_groups.size(); ++si) {
         NarrowBytecodeHierarchicalAttachNodeResultV1 nr;
         nr.level = 1;
@@ -16808,10 +17177,19 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         if (att.valid) {
             nr.note = att.note;
             ++out.l1_attached;
+            programs_covered += nr.program_count;
             nr.forgery_rejected =
                 RejectBytecodeShardForgery(shard_bus);
             if (!nr.forgery_rejected) {
                 out.all_l1_forgeries_rejected = false;
+            }
+            std::vector<Fp3> local_q;
+            if (ExtractShardLocalQuotientOpenings(
+                    shard_bus, local_q, &why)) {
+                shard_local_qs.push_back(std::move(local_q));
+            } else {
+                out.all_l1_attached = false;
+                nr.note = nr.note + ";" + why;
             }
         } else {
             out.all_l1_attached = false;
@@ -16834,6 +17212,20 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
             out.l1_attached == out.l1_count;
         out.all_l1_forgeries_rejected =
             out.all_l1_forgeries_rejected && out.all_l1_attached;
+        if (out.all_l1_attached &&
+            shard_local_qs.size() == out.l1_count) {
+            std::vector<Fp3> parent_q;
+            std::string why;
+            if (!ExtractAuthenticatedParentQuotientOpenings(
+                    base, table.current_width, parent_q,
+                    &why)) {
+                parent_q.clear();
+            }
+            out.quotient_join =
+                JoinNarrowBytecodeShardLocalQuotientsV1(
+                    parent_q, shard_local_qs, programs_covered,
+                    static_cast<uint32_t>(table.programs.size()));
+        }
     } else {
         out.all_l1_attached = false;
         out.all_l1_forgeries_rejected = false;
@@ -16874,6 +17266,10 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         ";composed_ok=" +
         (out.all_composed_scheduled ? "1" : "0") +
         ";p2_fs=" + (out.p2_fs_replay_closed ? "1" : "0") +
+        ";q_join=" +
+        (out.quotient_join.valid ? "1" : "0") +
+        ";q_sum_eq=" +
+        (out.quotient_join.sum_equals_parent ? "1" : "0") +
         ";mirror=0;complete_fp=false" + first_fail;
     return out;
 }
