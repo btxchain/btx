@@ -3,7 +3,7 @@
 > **Status: ANALYSIS ONLY. Not CLOSED, not audited, not activated.** Consensus
 > authority remains ExactReplay; `kRCGkrFormalSoundnessReady = false`; heights
 > `nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`. This is the independent
-> (local-box) soundness reconciliation for PR-89 step 5, built on macpro2's Stage-3
+> (local-box) soundness reconciliation for PR-89 step 5, built on the relay host's Stage-3
 > findings. External cryptographic audit remains a hard precondition for any claim.
 
 ## 0. What this resolves
@@ -35,7 +35,7 @@ Two prior positions were both wrong:
 | composition (II) | 144 | `kRCGkrCompositionSepBits` |
 | LogUp / lookup (III) — **CTL terminals live here** | 256 | `kRCGkrLookupSepBits` |
 | wiring (IV) | 147.19 | min(equality, permutation-dual) |
-| FRI proximity | 76.8 (episode) / **92.6** (stage3 screen) | `FriSoundnessBoundBits()` / macpro2 |
+| FRI proximity | 76.8 (episode) / **92.6** (stage3 screen) | `FriSoundnessBoundBits()` / the relay host |
 | SHA256d computational | **88** | `kRCGkrShaSepBits` |
 
 Recursion shape (from the synthesis): 244 shards → 256 leaves (`4⁴`) + 85 internal =
@@ -78,7 +78,7 @@ bare episode floor (76.8, → 68.4).
 1. **84.1 is contingent on an unverified input.** It requires the stage3 FRI screen **92.6**,
    which **appears nowhere in the committed code** — `RCGkrComposedSeparationBits()` pins to
    **76.80** (machine-validated by `gkr_integration_composed_separation_bound`). 92.6 is
-   macpro2's measurement on the *uncommitted* stage3 tree. Under the **shipped** floor 76.80,
+   the relay host's measurement on the *uncommitted* stage3 tree. Under the **shipped** floor 76.80,
    the 341-node union is **76.80 − log₂341 = 68.4 bits** (clears 64, **fails** the 71 policy).
 2. **Even granting 92.6, the binding floor is lower.** An adversarial lane hunt (wave 2) found
    the **Fp2 child-proof-cell transport (H2c) caps at ~67.6 bits** — below FRI, below policy.

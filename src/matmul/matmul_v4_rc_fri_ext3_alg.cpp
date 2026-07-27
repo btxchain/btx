@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3.h> // Sha256dBytes (FS transcript only)
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -38,6 +39,27 @@ using gkr_field::Sub;
 
 /** Goldilocks 2^32-th root of unity: 7^((p-1)/2^32). */
 constexpr Fp kOmega2_32 = 0x185629dcda58878cULL;
+
+// --- GPU prove splice (env-gated, off by default) -------------------------
+// Weak extern-"C" hook into the CUDA row-leaf Poseidon2 kernel (gpu_rowleaf.cu,
+// gl_fix/p2_fix canonical arithmetic). WEAK: when the GPU glue TU is NOT linked
+// (the normal bitcoind build), the symbol resolves to nullptr and every call
+// site falls back to the CPU path — the default build is byte-for-byte
+// unchanged. When linked (the GPU prove harness) and BTX_GPU_PROVE=1, the
+// row-leaf digest stage of every row-Merkle commit runs on the GPU, producing
+// digests bit-identical to alg_hash::LeafHashRow.
+extern "C" void gpu_row_leaf_digests(const unsigned long long* h_lde, unsigned int W,
+                                     unsigned int n_lde,
+                                     unsigned long long* h_dig) __attribute__((weak));
+
+bool GpuProveEnabled()
+{
+    static const bool on = []() {
+        const char* e = std::getenv("BTX_GPU_PROVE");
+        return e != nullptr && e[0] == '1';
+    }();
+    return on;
+}
 
 void AppendLE32(std::vector<unsigned char>& buf, uint32_t v)
 {
@@ -452,6 +474,30 @@ std::vector<Fri3AlgDigest> RowLeafDigests(const std::vector<std::vector<Fp3>>& c
                                           uint32_t n_lde)
 {
     const uint32_t W = static_cast<uint32_t>(column_lde.size());
+    if (GpuProveEnabled() && gpu_row_leaf_digests != nullptr && W > 0 && n_lde > 0) {
+        // Column-major flatten to the kernel layout lde[(3*c+comp)*n_lde + i];
+        // the kernel canonicalizes (gl_canon) so raw limbs are fine.
+        std::vector<unsigned long long> flat(static_cast<size_t>(3) * W * n_lde);
+        for (uint32_t c = 0; c < W; ++c) {
+            const std::vector<Fp3>& col = column_lde[c];
+            unsigned long long* d0 = flat.data() + static_cast<size_t>(3 * c + 0) * n_lde;
+            unsigned long long* d1 = flat.data() + static_cast<size_t>(3 * c + 1) * n_lde;
+            unsigned long long* d2 = flat.data() + static_cast<size_t>(3 * c + 2) * n_lde;
+            for (uint32_t i = 0; i < n_lde; ++i) {
+                d0[i] = col[i].c0;
+                d1[i] = col[i].c1;
+                d2[i] = col[i].c2;
+            }
+        }
+        std::vector<unsigned long long> dig(static_cast<size_t>(n_lde) * 4);
+        gpu_row_leaf_digests(flat.data(), W, n_lde, dig.data());
+        std::vector<Fri3AlgDigest> leaves(n_lde);
+        for (uint32_t i = 0; i < n_lde; ++i) {
+            const unsigned long long* r = dig.data() + static_cast<size_t>(i) * 4;
+            leaves[i] = Fri3AlgDigest{r[0], r[1], r[2], r[3]};
+        }
+        return leaves;
+    }
     std::vector<Fri3AlgDigest> leaves(n_lde);
     std::vector<Fp3> row(W);
     for (uint32_t i = 0; i < n_lde; ++i) {

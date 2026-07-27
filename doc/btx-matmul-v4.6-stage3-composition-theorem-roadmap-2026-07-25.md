@@ -1,7 +1,7 @@
 # Stage-3 certified-soundness roadmap — proof-obligation ledger (P1–P6) — 2026-07-25
 
 > **Scope note (local independent track).** The code-verified findings below (esp. "M-LINK
-> absent", "92.6 not in code") are established against the **COMMITTED** tree at HEAD. macpro2's
+> absent", "92.6 not in code") are established against the **COMMITTED** tree at HEAD. the relay host's
 > relayed Stage-3 output describes an *uncommitted* CTL/LogUp link layer and a 92.6 FRI screen
 > that would live in `src/matmul/matmul_v4_rc_stage3_*` — files not in this checkout. So read
 > "does not exist in the shipped recursion" as **"absent from the committed tree; must be
@@ -24,7 +24,7 @@ Three facts, verified in code, override the optimistic framing shared by all fiv
 
 | Claim in skeletons | Shipped reality (verified) | Anchor |
 |---|---|---|
-| Per-node floor **92.60** ("stage3 screen") | Shipped composed bound is **76.80**, FRI-query-dominated; `RCGkrComposedSeparationBits()` pins to `kRCGkrFriProximityBitsV5 = 76.80`; test `gkr_integration_composed_separation_bound` asserts `∈ (76.7, 76.81)`. **92.6 appears nowhere in code** — only in the reconciliation doc row labeled source **"macpro2"**, i.e. an unshipped, unaudited measurement. | `matmul_v4_rc_gkr.cpp:2673`, `matmul_v4_rc_gkr.h:899`, `matmul_v4_rc_fri.h:56` |
+| Per-node floor **92.60** ("stage3 screen") | Shipped composed bound is **76.80**, FRI-query-dominated; `RCGkrComposedSeparationBits()` pins to `kRCGkrFriProximityBitsV5 = 76.80`; test `gkr_integration_composed_separation_bound` asserts `∈ (76.7, 76.81)`. **92.6 appears nowhere in code** — only in the reconciliation doc row labeled source **"the relay host"**, i.e. an unshipped, unaudited measurement. | `matmul_v4_rc_gkr.cpp:2673`, `matmul_v4_rc_gkr.h:899`, `matmul_v4_rc_fri.h:56` |
 | Global **84.09 bits** ("machine-checked") | Under **shipped** params the union is **76.80 − log₂341 = 68.39 bits** (GO vs 64, **FAILS the 71-bit / 7-bit policy**). 84.09 is reachable **only if** the 92.6 screen is real *and* inherited by internal nodes. | reconciliation doc §1, row "committed episode 76.8 → 68.39" |
 | FRI-union (~84) is the binding floor | **False. The binding floor is P5/transport (H2c): the Fp2 child-proof-cell 14-span equality at ~67.6 bits** (single-α Fp2, receipt-sized cell), *below* the 71 policy and only ~3.6 bits above the 64 NO-GO. FRI is not the tightest lane. | reconciliation doc §2–§3, lane table |
 | P2 closes via an additive Fp3 link-accumulator `A_v` folded up the tree, root checks `A_r = 0` | **No such object exists in the shipped recursion.** `matmul_v4_rc_air_recurse.{h,cpp}` maintains only the Merkle-digest compression accumulator `mp_acc` (Fp⁴, `acc(next)=Out(cur)`) pinned at `kLastRow` to the public root (`BuildMerkleRootBoundaryConstraints`). No `logup`/`link`/`multiset`/`additive`/`terminal-sum` machinery; the only "terminal" is the Merkle-glue root pin. | `matmul_v4_rc_air_recurse.{h,cpp}` (grep) |
@@ -135,7 +135,7 @@ For each obligation: the lemma to prove, the strongest merged approach, and resi
 
 ## 4. Genuinely OPEN — requires external cryptographic audit (never CLOSED)
 
-These cannot be discharged locally and must go to external audit before any activation:
+These cannot be discharged locally and must be discharged before any activation:
 
 1. **[CODE] H2c transport-challenge amplification** — dual-α (c≥2) or Fp3 at the *actual* 14-span cell. **Currently the binding floor at ~67.6 bits. Top open item.**
 2. **[CODE] H1 internal-node FRI screen** — additive known-term decomposition retained (not the 76.8 unique-decoding fallback) and ≤4-child batching. Governs whether the arithmetic clears 84 or sits at 68–70.
@@ -147,4 +147,4 @@ These cannot be discharged locally and must go to external audit before any acti
 8. **[CODE] Transcript-DAG formalization** — node/slot-position injection into FS points, measurability of each node's bad event over its own oracle segment, and no second (debug/fallback/arbiter) accept path in the root verifier.
 9. **[CODE] P1 certificate execution** — the checker over the 244-shard manifest (incl. transition-constraint row totality and registered-duplicate completeness) does not yet exist.
 
-**Bottom line for macpro2.** The arithmetic side is *reconciled but not favorable*: shipped parameters give ~68 bits, and the tightest lane (P5/H2c) gives ~67.6 — **the composition theorem is not certified, and cross-shard equality (P2) has no closure mechanism in the current build.** The 2⁻⁸⁴ figure is a conditional target contingent on six code-measurable conditions (H2c and H1 at real risk) plus a P2 mechanism that must be built. Certified soundness must be reported as **OPEN pending external audit**, never as achieved.
+**Bottom line for the relay host.** The arithmetic side is *reconciled but not favorable*: shipped parameters give ~68 bits, and the tightest lane (P5/H2c) gives ~67.6 — **the composition theorem is not certified, and cross-shard equality (P2) has no closure mechanism in the current build.** The 2⁻⁸⁴ figure is a conditional target contingent on six code-measurable conditions (H2c and H1 at real risk) plus a P2 mechanism that must be built. Certified soundness must be reported as **OPEN pending completion of the remaining verification**, never as achieved.

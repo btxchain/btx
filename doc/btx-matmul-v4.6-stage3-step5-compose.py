@@ -2,7 +2,7 @@
 # Step-5 global-composition recomputation for PR-89 relation-local-sharding recursion.
 # Mirrors the COMMITTED log-sum-exp in RCGkrComposedSeparation (matmul_v4_rc_gkr.cpp:2673)
 # and extends it with the arity-4 recursion union-over-nodes penalty.
-# Cross-checks against committed per-term screens + macpro2's newest stage3 FRI screens.
+# Cross-checks against committed per-term screens + the relay host's newest stage3 FRI screens.
 import math
 
 def lse_bits(terms):
@@ -19,7 +19,7 @@ COMP_IV     = 147.19  # min(wiring equality, permutation dual)
 SHA         = 88.0    # kRCGkrShaSepBits (SHA256d computational, 2^40-query adv.)
 FRI_FP2_EP  = 76.80   # committed episode FRI floor: 128*log2(32/17) - 40  (Q=128, rho=1/16)
 
-# ---- macpro2 stage3 FRI screens (relayed; post-grind conservative diagnostic) ----
+# ---- the relay host stage3 FRI screens (relayed; post-grind conservative diagnostic) ----
 FRI_S3_1LANE = 92.5983   # single-lane Fp3 saturation (21,672,707,874-site diagnostic)
 FRI_S3_Q192  = 92.0279   # Q192 additive known-term screen ("increasing Q cannot solve")
 OLDER_TOPO   = 100.3767  # canonical older topology conditional screen
@@ -56,10 +56,10 @@ def report(label, fri_term):
 print("[A] COMMITTED episode floor (Fp2-era FRI 76.8) -- what the workflow used:")
 report("  committed-episode", FRI_FP2_EP)
 print()
-print("[B] macpro2 stage3 single-lane Fp3 FRI screen (92.60):")
+print("[B] the relay host stage3 single-lane Fp3 FRI screen (92.60):")
 report("  stage3-1lane", FRI_S3_1LANE)
 print()
-print("[C] macpro2 Q192 additive known-term screen (92.03):")
+print("[C] the relay host Q192 additive known-term screen (92.03):")
 report("  stage3-q192", FRI_S3_Q192)
 print("="*72)
 
