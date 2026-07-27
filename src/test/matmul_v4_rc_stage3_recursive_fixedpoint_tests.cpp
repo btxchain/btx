@@ -4714,4 +4714,101 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
 }
 
+// g2 chip B wire: hierarchical composed nodes call
+// ExecuteNarrowMultiChildL2FriConsumeV1 (shape-only prove=false stand-in
+// boolean children). Replaces crypto_join_pending. Opt-in via
+// BTX_RUN_G2_HIER_L2_WIRE=1. Does NOT flip Ready / AggregationReady.
+BOOST_AUTO_TEST_CASE(
+    hierarchical_composed_nodes_wire_l2_fri_consume_shape_only)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_HIER_L2_WIRE");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_HIER_L2_WIRE=1 for "
+            "hierarchical composed-node L2 FRI consume wire "
+            "(shape-only prove=false)");
+        return;
+    }
+
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs, hash_child.proof, hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(table.programs.size(), 462U);
+
+    // attach_l1=false keeps this light; wire_l2 + prove=false exercises
+    // the composed-node call path without AirQuotientProve of the L2 node.
+    const fp::NarrowBytecodeHierarchicalAttachExecutionV1 wired =
+        fp::ExecuteNarrowBytecodeHierarchicalAttachV1(
+            base, table, /*attach_l1=*/false,
+            /*wire_l2_fri_consume=*/true, /*l2_prove=*/false);
+    BOOST_REQUIRE_MESSAGE(wired.plan_valid, wired.note);
+    BOOST_CHECK(wired.all_composed_scheduled);
+    BOOST_CHECK_GE(wired.composed_count, 1U);
+    BOOST_REQUIRE_MESSAGE(
+        wired.all_composed_l2_wired, wired.note);
+    BOOST_CHECK_GE(wired.composed_l2_wired, 1U);
+    BOOST_CHECK(!wired.complete_verifier_mirror);
+    BOOST_TEST_MESSAGE(wired.note);
+
+    uint32_t wired_nodes = 0;
+    uint32_t pending_nodes = 0;
+    for (const auto& node : wired.nodes) {
+        if (node.level < 2) continue;
+        if (node.child_node_count >= 2U) {
+            ++wired_nodes;
+            BOOST_CHECK(node.l2_fri_consume_invoked);
+            BOOST_CHECK(node.l2_fri_consume_valid);
+            BOOST_CHECK_EQUAL(
+                node.l2_fri_consume_arity, node.child_node_count);
+            BOOST_CHECK(node.forgery_rejected);
+            BOOST_CHECK(
+                node.note.find("crypto_join_wired") !=
+                std::string::npos);
+            BOOST_CHECK(
+                node.note.find("crypto_join_pending") ==
+                std::string::npos);
+            BOOST_TEST_MESSAGE(
+                node.label
+                << " arity=" << node.l2_fri_consume_arity
+                << " wired=1 valid=1 note=" << node.note);
+        } else {
+            BOOST_CHECK(!node.l2_fri_consume_invoked);
+            BOOST_CHECK(
+                node.note.find("crypto_join_arity_lt2") !=
+                    std::string::npos ||
+                node.note.find("composed_scheduled") !=
+                    std::string::npos);
+        }
+        if (node.note.find("crypto_join_pending") !=
+            std::string::npos) {
+            ++pending_nodes;
+        }
+    }
+    BOOST_CHECK_EQUAL(wired_nodes, wired.composed_l2_wired);
+    BOOST_CHECK_EQUAL(pending_nodes, 0U);
+    BOOST_TEST_MESSAGE(
+        "HIER_L2_WIRE composed=" << wired.composed_count
+        << " wired=" << wired.composed_l2_wired
+        << " arity_lt2=" << wired.composed_l2_arity_lt2
+        << " complete_fp=false");
+
+    static_assert(fp::kNarrowMultiChildL2FriConsumeExecutable);
+    static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
+    static_assert(!fp::kNarrowBytecodeHierarchicalAttachReady);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!nr::kNarrowHierarchicalAggregationReady);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
