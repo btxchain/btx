@@ -45,11 +45,11 @@ inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
  *
  * Measured engine receipts (toy shapes) under this cap:
  *   BarrierSha256dV1 ≈51 MiB, DigestSha256dV1 ≈73 MiB (EXIT:0, ~674–711s).
- *   MixArithmeticV1  ≈323 MiB (338685623 bytes; EXIT:0, ~938s, ~2.0 GiB RSS).
- *   ExtractTilesV1 still pending remasure under 512 MiB (failed *:oversize at 256).
- * Cap is 512 MiB so Mix packaging fits; production wire/relay budgets remain
- * g2 / kRCFriMaxProofBytesHard. */
-inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 512U * 1024U * 1024U;
+ *   MixArithmeticV1  ≈323 MiB (338685623 bytes; EXIT:0, ~897s, ~2.0 GiB RSS).
+ *   ExtractTilesV1 exceeds 512 MiB after prove (~1768s / ~3.4 GiB RSS →
+ *   extract_engine:oversize). Cap is 1 GiB so Extract packaging fits;
+ *   production wire/relay budgets remain g2 / kRCFriMaxProofBytesHard. */
+inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 1024U * 1024U * 1024U;
 
 /** Consensus proof-engine ABI. The identifier reserves a stable encoding; it
  * does not imply that the engine is implemented or ready. */
