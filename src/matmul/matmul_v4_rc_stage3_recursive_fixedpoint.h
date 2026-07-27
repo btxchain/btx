@@ -2802,6 +2802,105 @@ PlanNarrowBytecodeHierarchicalAttachV1(
     const nr::NarrowHierarchyPlanConfig& config = {});
 
 /**
+ * One executed node from ExecuteNarrowBytecodeHierarchicalAttachV1.
+ * Level-1 nodes may carry a real AttachConstraintBytecodeInterpreter result
+ * against a child_constraints-sliced fold-bus pad. Level ≥2 nodes are the
+ * composed schedule (child_node_indices + FRI shape) — their cryptographic
+ * consumption of L1 proofs is a later join step.
+ */
+struct NarrowBytecodeHierarchicalAttachNodeResultV1 {
+    uint32_t level{0};
+    uint32_t node_index{0};
+    std::string label;
+    uint32_t program_count{0};
+    uint32_t child_node_count{0};
+    uint64_t instructions{0};
+    uint64_t rows_needed{0};
+    uint64_t active_rows{0};
+    uint32_t trace_rows{0};
+    uint32_t n_lde{0};
+    bool shape_representable{false};
+    bool pad_ok{false};
+    bool attached{false};
+    bool dual_logup_terminal{false};
+    bool quotient_opening_equality{false};
+    bool forgery_rejected{false};
+    uint32_t violations{0};
+    std::string note;
+};
+
+/**
+ * Execute the hierarchical bytecode attach plan against a hash-kernel
+ * fold-bus. FRI L1/L2/L3 shape is recorded from
+ * PlanNarrowBytecodeHierarchicalAttachV1. Actual L1 attach packs programs
+ * into free-row shards (pad-after-challenge is forbidden), subsets
+ * child_constraints, and runs AttachConstraintBytecodeInterpreterShard
+ * with local synthesized q + forgery rejects. L2/L3 remain schedule-only.
+ *
+ * Does NOT flip kCompleteRecursiveFixedPointExecutable /
+ * kNarrowHierarchicalAggregationReady / within_relay_budget /
+ * complete_verifier_mirror. AirQuotientProve of shards and multi-child
+ * L2/L3 consumption remain the next measured join step toward the 575-col
+ * complete verifier mirror.
+ */
+struct NarrowBytecodeHierarchicalAttachExecutionV1 {
+    bool valid{false};
+    bool plan_valid{false};
+    bool all_l1_attached{false};
+    bool all_l1_forgeries_rejected{false};
+    bool all_composed_scheduled{false};
+    bool all_nodes_representable{false};
+    bool p2_fs_replay_closed{false};
+    bool complete_verifier_mirror{false};
+    uint32_t l1_count{0};
+    uint32_t l1_attached{0};
+    uint32_t composed_count{0};
+    uint32_t depth{0};
+    uint32_t node_count{0};
+    NarrowBytecodeHierarchicalAttachPlanV1 plan;
+    std::vector<NarrowBytecodeHierarchicalAttachNodeResultV1> nodes;
+    std::string note;
+};
+
+/**
+ * Slice `table.programs` by hierarchy leaf indices (stable order).
+ * Fails closed on out-of-range indices.
+ */
+[[nodiscard]] bool SliceProgramTableByLeafIndices(
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>& leaf_indices,
+    constraint_bytecode::ProgramTable& out,
+    std::string* why = nullptr);
+
+/**
+ * Copy `base`, subset child_constraints to `leaf_indices`. Fails closed if
+ * the shard needs more free rows than the bound fold-bus already has
+ * (pad-after-challenge is forbidden).
+ */
+[[nodiscard]] bool PrepareFoldBusForBytecodeShard(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& full_table,
+    const std::vector<uint32_t>& leaf_indices,
+    const constraint_bytecode::ProgramTable& shard_table,
+    FoldBusComposition& out,
+    std::string* why = nullptr);
+
+/**
+ * Execute hierarchical shard attach. When `attach_l1` is false, only the
+ * FRI plan + free-row shard capacity + L2/L3 schedule are checked. When
+ * true, each free-row shard is attached sequentially with forgery rejects.
+ */
+[[nodiscard]] NarrowBytecodeHierarchicalAttachExecutionV1
+ExecuteNarrowBytecodeHierarchicalAttachV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    bool attach_l1 = true);
+
+/** Planner+executor exist; readiness owned by measured complete mirror. */
+inline constexpr bool kNarrowBytecodeHierarchicalAttachExecutable = true;
+inline constexpr bool kNarrowBytecodeHierarchicalAttachReady = false;
+
+/**
  * Expand the fold-bus trace with trailing free rows so a subsequent
  * AttachConstraintBytecodeInterpreter has `rows_needed` free slots. Fails
  * closed if the projected power-of-two height's LDE would exceed
@@ -2848,6 +2947,20 @@ AttachConstraintBytecodeInterpreter(
 AttachConstraintBytecodeInterpreter(
     FoldBusComposition& composition,
     const constraint_bytecode::ProgramTable& table);
+
+/**
+ * Hierarchical L1 shard attach. `shard_global_ordinals[i]` is the full-table
+ * constraint ordinal of `table.programs[i]` (used for rho^ordinal weights).
+ * The authenticated full-child AIR quotient opening is NOT required to equal
+ * the shard accumulator — L1 synthesizes a local q = accumulator/zh so the
+ * interpreter + dual-logup close on the shard alone. Binding shard locals
+ * into the parent quotient is the later L2/L3 crypto join.
+ */
+[[nodiscard]] BytecodeInterpreterAttachment
+AttachConstraintBytecodeInterpreterShard(
+    FoldBusComposition& composition,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>& shard_global_ordinals);
 
 /**
  * Join every authenticated fold even/odd leaf to the fold scalar equation.
@@ -2909,6 +3022,8 @@ static_assert(kHashOpeningAirExecutable);
 static_assert(kFoldHashScalarMemoryBusExecutable);
 static_assert(!kCompleteRecursiveFixedPointExecutable);
 static_assert(!kRecursiveFixedPointConsensusAuthority);
+static_assert(kNarrowBytecodeHierarchicalAttachExecutable);
+static_assert(!kNarrowBytecodeHierarchicalAttachReady);
 
 } // namespace matmul::v4::rc::recursive_fixedpoint
 

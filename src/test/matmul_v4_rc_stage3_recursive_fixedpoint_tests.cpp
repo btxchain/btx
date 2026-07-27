@@ -4253,4 +4253,126 @@ BOOST_AUTO_TEST_CASE(
         !nr::kNarrowHierarchicalAggregationReady);
 }
 
+// g2: actually EXECUTE hierarchical bytecode shard attach — not just plan.
+// FRI plan (depth=3, nodes=6) closes under AssessNarrowNodeFriShape. L1
+// attach packs programs into free-row shards (pad-after-challenge is
+// forbidden on an already-bound fold-bus), AttachConstraintBytecodeInterpreterShard
+// closes dual-logup with a local synthesized q, and bus forgeries are
+// rejected. L2/L3 nodes are schedule-checked. CompleteFP stays false.
+BOOST_AUTO_TEST_CASE(
+    hash_kernel_hierarchical_bytecode_shard_attach_executes_l1_with_forgery_rejects)
+{
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs, hash_child.proof, hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(table.programs.size(), 462U);
+
+    const fp::NarrowBytecodeHierarchicalAttachExecutionV1
+        scheduled =
+            fp::ExecuteNarrowBytecodeHierarchicalAttachV1(
+                base, table, /*attach_l1=*/false);
+    BOOST_REQUIRE_MESSAGE(scheduled.plan_valid, scheduled.note);
+    BOOST_CHECK_GE(scheduled.l1_count, 2U);
+    BOOST_CHECK_GE(scheduled.composed_count, 1U);
+    BOOST_CHECK_EQUAL(scheduled.depth, 3U);
+    BOOST_CHECK_EQUAL(scheduled.node_count, 6U);
+    BOOST_CHECK(scheduled.all_nodes_representable);
+    BOOST_CHECK(scheduled.all_composed_scheduled);
+    BOOST_CHECK(scheduled.p2_fs_replay_closed);
+    BOOST_CHECK(!scheduled.complete_verifier_mirror);
+    BOOST_CHECK(!scheduled.all_l1_attached);
+    BOOST_TEST_MESSAGE(scheduled.note);
+
+    const fp::NarrowBytecodeHierarchicalAttachExecutionV1
+        executed =
+            fp::ExecuteNarrowBytecodeHierarchicalAttachV1(
+                base, table, /*attach_l1=*/true);
+    BOOST_REQUIRE_MESSAGE(executed.valid, executed.note);
+    BOOST_CHECK(executed.all_l1_attached);
+    BOOST_CHECK(executed.all_l1_forgeries_rejected);
+    BOOST_CHECK_EQUAL(executed.l1_attached, executed.l1_count);
+    BOOST_CHECK_GE(executed.l1_count, 2U);
+    BOOST_CHECK(executed.all_composed_scheduled);
+    BOOST_CHECK(!executed.complete_verifier_mirror);
+    BOOST_CHECK(executed.p2_fs_replay_closed);
+
+    uint32_t free_l1 = 0;
+    uint32_t composed_seen = 0;
+    for (const auto& node : executed.nodes) {
+        if (node.label.rfind("freeL1-", 0) == 0) {
+            ++free_l1;
+            BOOST_CHECK(node.pad_ok);
+            BOOST_CHECK(node.attached);
+            BOOST_CHECK(node.dual_logup_terminal);
+            BOOST_CHECK(node.quotient_opening_equality);
+            BOOST_CHECK(node.forgery_rejected);
+            BOOST_CHECK_EQUAL(node.violations, 0U);
+            BOOST_CHECK_GT(node.program_count, 0U);
+            BOOST_TEST_MESSAGE(
+                node.label
+                << " programs=" << node.program_count
+                << " insn=" << node.instructions
+                << " needed=" << node.rows_needed
+                << " attached=1 forgery=1");
+        } else if (node.level >= 2) {
+            ++composed_seen;
+            BOOST_CHECK(node.shape_representable);
+            BOOST_CHECK_LE(node.n_lde, uint32_t{1} << 24);
+            BOOST_CHECK(
+                node.note.find("composed_scheduled") !=
+                std::string::npos);
+        }
+    }
+    BOOST_CHECK_EQUAL(free_l1, executed.l1_count);
+    BOOST_CHECK_EQUAL(composed_seen, executed.composed_count);
+
+    BOOST_REQUIRE(!executed.plan.hierarchy.nodes.empty());
+    const auto& fri_l1 = executed.plan.hierarchy.nodes.front();
+    BOOST_REQUIRE_EQUAL(fri_l1.level, 1U);
+    BOOST_REQUIRE_GE(fri_l1.child_leaf_indices.size(), 1U);
+    std::vector<uint32_t> small_leaves = {
+        fri_l1.child_leaf_indices.front()};
+    rc::constraint_bytecode::ProgramTable shard;
+    BOOST_REQUIRE(fp::SliceProgramTableByLeafIndices(
+        table, small_leaves, shard, &why));
+    auto truncated = shard;
+    truncated.programs.pop_back();
+    fp::FoldBusComposition forged_bus;
+    BOOST_CHECK(!fp::PrepareFoldBusForBytecodeShard(
+        base, table, small_leaves, truncated, forged_bus,
+        &why));
+    BOOST_CHECK(
+        why.find("bytecode_hier_shard_prepare_input") !=
+            std::string::npos ||
+        why.find("bytecode_hier_shard_metadata") !=
+            std::string::npos);
+
+    std::vector<uint32_t> oob = small_leaves;
+    oob.push_back(static_cast<uint32_t>(table.programs.size()));
+    rc::constraint_bytecode::ProgramTable oob_table;
+    BOOST_CHECK(!fp::SliceProgramTableByLeafIndices(
+        table, oob, oob_table, &why));
+    BOOST_CHECK(
+        why.find("bytecode_hier_shard_leaf_oob") !=
+        std::string::npos);
+
+    BOOST_TEST_MESSAGE(executed.note);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!fp::kNarrowBytecodeHierarchicalAttachReady);
+    static_assert(
+        fp::kNarrowBytecodeHierarchicalAttachExecutable);
+    static_assert(
+        !nr::kNarrowHierarchicalAggregationReady);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
