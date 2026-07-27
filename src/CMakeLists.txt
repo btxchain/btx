@@ -677,12 +677,18 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_recursive_consumption.cpp
   matmul/matmul_v4_rc_stage3_recursive_fixedpoint.cpp
   matmul/matmul_v4_rc_stage3_recursive_receipt.cpp
+  matmul/matmul_v4_rc_stage3_recursive_receipt_v2.cpp
+  matmul/matmul_v4_rc_stage3_receipt_public_statement.cpp
+  matmul/matmul_v4_rc_stage3_recursive_hierarchy.cpp
+  matmul/matmul_v4_rc_stage3_direct_parent_spine.cpp
   matmul/matmul_v4_rc_stage3_p2_transcript_air.cpp
   matmul/matmul_v4_rc_stage3_p2_transcript_binding.cpp
   matmul/matmul_v4_rc_stage3_airq_p2_transcript.cpp
   matmul/matmul_v4_rc_stage3_p2_same_parent_join.cpp
   matmul/matmul_v4_rc_stage3_p2_normalized_exports.cpp
   matmul/matmul_v4_rc_stage3_p2_prefix_source_air.cpp
+  matmul/matmul_v4_rc_stage3_temporal_induction.cpp
+  matmul/matmul_v4_rc_stage3_recursive_provenance_join.cpp
   matmul/matmul_v4_rc_stage3_ali_manifest.cpp
   matmul/matmul_v4_rc_stage3_ali_same_parent_bridge.cpp
   matmul/matmul_v4_rc_stage3_pow_composition.cpp
@@ -707,7 +713,10 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_multirow_v11_decoder_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_deep_vm.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_recursive_parent.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_fixedpoint.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_recursive_verifier.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_semantic_ctl.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_semantic_exports.cpp
   matmul/matmul_v4_rc_stage3_poseidon_air.cpp
   matmul/matmul_v4_rc_stage3_poseidon_bytecode.cpp
   matmul/matmul_v4_rc_stage3_v5_v6_bus.cpp
