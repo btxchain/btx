@@ -3254,10 +3254,10 @@ StreamingAggregateLevelResult ProveAggregateLevelStreaming(
 
 bool VerifyAggregate(const aq::AirQuotientProof<Fp3, AlgB3>& root,
                      const std::vector<ChildPublicInputs>& pis, const uint256& fs_seed, uint32_t k,
-                     const VerifierAirFamilies& fam, std::string* why)
+                     const VerifierAirFamilies& fam, std::string* why, uint32_t verify_threads)
 {
     const aq::AirConstraintSystem<Fp3> cs = BuildVerifierAIRPinned(k, pis, fam);
-    return aq::AirQuotientVerify<Fp3, AlgB3>(cs, root, fs_seed, why);
+    return aq::AirQuotientVerify<Fp3, AlgB3>(cs, root, fs_seed, why, verify_threads);
 }
 
 bool VerifyEpisodeAggregate(const EpisodeAggregateProof& agg, const uint256& episode_seed,

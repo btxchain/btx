@@ -849,12 +849,21 @@ ProveAggregateLevelStreaming(
     const StreamingAggregateSink& sink,
     const VerifierAirFamilies& families = {});
 
-/** Verify a parent proof: rebuild the SAME V_CS from `pis` and run
- *  AirQuotientVerify<Fp3, AlgB3> (spec §4.1). */
+/**
+ * Verify a parent proof: rebuild the SAME V_CS from `pis` and run
+ * AirQuotientVerify<Fp3, AlgB3> (spec §4.1).
+ *
+ * `verify_threads` forwards to AirQuotientVerify's per-query parallelism
+ * (see that function's header comment). Default 1 is the unchanged
+ * sequential verify every existing caller gets; it is exposed here only so
+ * a g2 wall-clock measurement can request more without a second entry
+ * point. It changes nothing about which proofs are accepted.
+ */
 [[nodiscard]] bool
 VerifyAggregate(const air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>& root,
                 const std::vector<ChildPublicInputs>& pis, const uint256& fs_seed, uint32_t k,
-                const VerifierAirFamilies& families = {}, std::string* why = nullptr);
+                const VerifierAirFamilies& families = {}, std::string* why = nullptr,
+                uint32_t verify_threads = 1);
 
 // ---------------------------------------------------------------------------
 // Episode integration carrier (Piece 6): the single recursion-root aggregate
