@@ -138,6 +138,12 @@ struct HashOpeningProgramRow {
     bool link_to_merkle{false};
     bool terminal{false};
     bool direction{false};
+    /**
+     * Which child of a multi-child (vertically packed) narrow node this row
+     * belongs to. Always 0 for the single-child construction, so every existing
+     * schedule, witness and canonicity comparison is bit-identical.
+     */
+    uint32_t child{0};
     uint32_t index{0};
     uint32_t query{0};
     uint32_t fold_layer{0};
@@ -163,10 +169,29 @@ struct DeepInitialLayout {
     uint32_t reset_next;
     uint32_t identity_selector;
     uint32_t coefficient_base;
-    uint32_t invd1;
-    uint32_t invd2;
+    /**
+     * The DEEP weight ALREADY MULTIPLIED INTO the inverse denominator:
+     * w1/(x - z1) and w2/(x - z2). Both factors are public and are recomputed
+     * by the verifier from the child's public inputs, so pinning the product
+     * pins exactly what pinning the two factors did.
+     *
+     * They are products rather than the bare inverses because a multi-child
+     * node packs children with DIFFERENT w1/w2 into ONE trace: as whole-node
+     * constants the weights could no longer be captured, and carrying them as
+     * separate per-row columns would raise the identity from algebraic degree
+     * 3 to 4 — which doubles the node's own FRI domain and halves the arity
+     * that fits under kRCFriMaxLdeLog2. The product keeps degree 3.
+     */
+    uint32_t w1_invd1;
+    uint32_t w2_invd2;
     uint32_t v1;
     uint32_t v2;
+    /**
+     * PER-ROW public pin of the child's terminal FRI value. Per-row for the
+     * same reason: with one child every row carries the same value, so the
+     * arity-1 relation is unchanged.
+     */
+    uint32_t child_final_value;
 
     explicit constexpr DeepInitialLayout(uint32_t start = 0)
         : base(start),
@@ -174,10 +199,11 @@ struct DeepInitialLayout {
           reset_next(running + 1),
           identity_selector(reset_next + 1),
           coefficient_base(identity_selector + 1),
-          invd1(coefficient_base + ah::kAlgHashRate),
-          invd2(invd1 + 1),
-          v1(invd2 + 1),
-          v2(v1 + 1)
+          w1_invd1(coefficient_base + ah::kAlgHashRate),
+          w2_invd2(w1_invd1 + 1),
+          v1(w2_invd2 + 1),
+          v2(v1 + 1),
+          child_final_value(v2 + 1)
     {
     }
 
@@ -185,11 +211,24 @@ struct DeepInitialLayout {
     {
         return coefficient_base + lane;
     }
-    [[nodiscard]] uint32_t End() const { return v2 + 1; }
+    [[nodiscard]] uint32_t End() const
+    {
+        return child_final_value + 1;
+    }
 };
 
 struct HashOpeningProgram {
+    /** children[0]; kept for every single-child caller. */
     ar::ChildPublicInputs public_inputs;
+    /**
+     * Ordered children packed into ONE narrow node. The single-child builder
+     * fills this with exactly one entry equal to `public_inputs`, so nothing
+     * downstream has to special-case arity 1. Arity multiplies ROWS and never
+     * columns — that is the whole point of the vertical lane.
+     */
+    std::vector<ar::ChildPublicInputs> children;
+    /** Row at which each child's schedule starts (children.size() entries). */
+    std::vector<uint32_t> child_row_offsets;
     uint32_t active_rows{0};
     uint32_t trace_rows{0};
     std::vector<HashOpeningProgramRow> rows;
@@ -287,6 +326,16 @@ struct HashOpeningWitness {
 [[nodiscard]] HashOpeningProgram
 BuildHashOpeningProgram(const ar::ChildPublicInputs& pi);
 
+/**
+ * ARITY-N variant: pack `children` into ONE narrow node by concatenating their
+ * schedules vertically. The column layout is byte-identical to the single-child
+ * one (CanonicalHashOpeningLayout), because every child-dependent quantity is a
+ * per-ROW pin. With one child the result is bit-identical to the overload above.
+ */
+[[nodiscard]] HashOpeningProgram
+BuildHashOpeningProgram(
+    const std::vector<ar::ChildPublicInputs>& children);
+
 /** Build the exact quadratic AIR for the canonical schedule. */
 [[nodiscard]] bool BuildHashOpeningConstraintSystem(
     const HashOpeningProgram& program,
@@ -303,6 +352,17 @@ BuildHashOpeningProgram(const ar::ChildPublicInputs& pi);
     const aq::AirConstraintSystem<Fp3>& child_cs,
     const AlgAirProof& child,
     const uint256& child_fs_seed);
+
+/**
+ * ARITY-N counterpart. Every child is FIRST accepted by the real, unmodified
+ * native verifier under its own constraint system and its own Fiat-Shamir seed;
+ * only then is its transcript materialized into the shared vertical trace. The
+ * three vectors must be the same length and non-empty.
+ */
+[[nodiscard]] HashOpeningWitness BuildHashOpeningWitnessMulti(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds);
 
 /**
  * V5-safe adapter for one ordered lane of a dual-Q128 child.  The complete
@@ -2667,6 +2727,27 @@ AttachConstraintBytecodeInterpreter(
     const aq::AirConstraintSystem<Fp3>& child_cs,
     const AlgAirProof& child,
     const uint256& child_fs_seed);
+
+/**
+ * ARITY-N narrow node: ONE V_CS, ONE witness and therefore ONE root proof over
+ * `children.size()` independent child proofs, each with its own constraint
+ * system and its own Fiat-Shamir seed.
+ *
+ * The column count is the SAME as for one child (the measured zero-expansion
+ * property); arity is paid entirely in rows. Bus addresses are offset per child
+ * so two children can never alias one another's fold tuples, and the fold /
+ * chain multiset identities close once, globally, over the whole node.
+ *
+ * SCOPE, unchanged by arity: this is the same partial verifier mirror the
+ * single-child path is. kCompleteRecursiveFixedPointExecutable stays false —
+ * arbitrary per-point child-constraint evaluation and the SHA256d Fiat-Shamir
+ * transcript chip are still not joined — so an accepted node does NOT by itself
+ * imply the children's native verifiers accept.
+ */
+[[nodiscard]] FoldBusComposition BuildFoldBusCompositionMulti(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds);
 
 /** Dual-Q128/V5 counterpart of BuildFoldBusComposition. */
 [[nodiscard]] FoldBusComposition BuildDualV5FoldBusComposition(
