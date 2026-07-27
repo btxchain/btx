@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 
+#include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
@@ -125,6 +126,48 @@ bool RealFamilyFor(
             return false;
         }
         endpoint = RCStage3RelationEndpoint::EpisodeExtractSampler;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledBank:
+        if (role != RCStage3RelationRole::CoupledBank) return false;
+        if (!BuildRCStage3CoupledBankDequantProgramTableCanonical(
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledBankPages;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledGemm:
+        if (role != RCStage3RelationRole::CoupledGemm) return false;
+        if (!BuildRCStage3CoupledLocalKernelProgramTable(
+                RCStage3RelationRole::CoupledGemm, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledGemmOutputY;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledExtractCore:
+        if (role != RCStage3RelationRole::CoupledExtract) return false;
+        // scale_e=0 is the canonical wired default, matching the
+        // EpisodeExtractCore family above.
+        if (!BuildRCStage3CoupledExtractLocalKernelProgramTable(
+                /*scale_e=*/0, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledExtractSampler;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledBarrierSha256d:
+        if (role != RCStage3RelationRole::CoupledBarrier) return false;
+        if (!BuildRCStage3CoupledHashKernelProgramTable(
+                RCStage3RelationRole::CoupledBarrier, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledBarrierHash;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledDigestSha256d:
+        if (role != RCStage3RelationRole::CoupledDigest) return false;
+        if (!BuildRCStage3CoupledHashKernelProgramTable(
+                RCStage3RelationRole::CoupledDigest, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledDigestHash;
         return true;
     default:
         return false;
