@@ -236,14 +236,29 @@ BuildRCStage3CoupledExtractSamplerTransportConstraintSystem(
     std::string* why = nullptr);
 
 /**
- * CoupledBarrier / CoupledDigest hash kernel: the selector-pinned SHA-256
- * compression AIR as bytecode. This is the bytecode form of
- * stage3_hash_air::BuildFixedProgramConstraintSystem over the canonical
- * Sha256Compression program, in the identical 462-constraint order over the
- * 144-column fixed-program layout. Both roles are DirectSha256d relations
- * executed by the same compression program and share this kernel; only the
- * committed table `role` differs so a table cannot be replayed across roles.
- * Only CoupledBarrier and CoupledDigest are accepted.
+ * CoupledBarrier / CoupledDigest / EpisodeTileTree / EpisodeDigest hash
+ * kernel: the selector-pinned SHA-256 compression AIR as bytecode. This is
+ * the bytecode form of stage3_hash_air::BuildFixedProgramConstraintSystem
+ * over the canonical Sha256Compression program, in the identical
+ * 462-constraint order over the 144-column fixed-program layout.
+ *
+ * All four roles execute the identical compression program and therefore
+ * share this kernel; only the committed table `role` differs, so a table
+ * cannot be replayed across roles. This covers exactly the per-block
+ * compression relation: CoupledBarrier/CoupledDigest reach it through
+ * BuildDirectSha256dManifestBoundaryInstances, EpisodeDigest through the
+ * identical DirectHashRelation::EpisodeDigest path
+ * (BuildEpisodeDigestManifest -> BuildDirectSha256dManifest), and
+ * EpisodeTileTree through BuildTileTreeManifestBoundaryInstances (each
+ * leaf/internal node hash is itself one DirectSha256d instance built by
+ * BuildShaManifestBoundaryInstances). The multi-block/tree boundary
+ * chaining that sequences several compression instances into one message
+ * or one tree remains a separate, still-opaque, obligation -- this table
+ * closes only the per-instance compression relation, exactly as it already
+ * did for CoupledBarrier/CoupledDigest.
+ *
+ * Only CoupledBarrier, CoupledDigest, EpisodeTileTree and EpisodeDigest are
+ * accepted.
  */
 [[nodiscard]] bool BuildRCStage3CoupledHashKernelProgramTable(
     RCStage3RelationRole role,

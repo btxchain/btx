@@ -1150,4 +1150,266 @@ BOOST_AUTO_TEST_CASE(
             rc::RCStage3RelationRole::CoupledBank, rejected, &why));
 }
 
+// g2b (narrow follow-up): EpisodeTileTree and EpisodeDigest reach the exact
+// same DirectSha256d-style fixed-program compression relation as
+// CoupledBarrier/CoupledDigest (EpisodeDigest through
+// DirectHashRelation::EpisodeDigest, EpisodeTileTree through
+// BuildTileTreeManifestBoundaryInstances -> BuildShaManifestBoundaryInstances,
+// see matmul_v4_rc_stage3_hash_air.cpp). This hand-authors + commits the two
+// roles' ProgramTables (reusing the shared kernel body), differentially
+// tests bytecode eval against the live stage3_hash_air AirConstraint
+// closures on random AND boundary points (including a REAL SHA256("abc")
+// compression witness, which must satisfy every bytecode constraint to
+// exactly zero), and proves a mutated instruction rejects that same honest
+// witness while also changing the committed table hash.
+BOOST_AUTO_TEST_CASE(
+    episode_tiletree_and_digest_hash_kernel_bytecode_matches_native_and_rejects_forgery)
+{
+    namespace ha = rc::stage3_hash_air;
+    const ha::FixedProgram program =
+        ha::BuildCanonicalProgram(ha::ProgramKind::Sha256Compression);
+    rc::air_quotient::AirConstraintSystem<Fp3> native;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildFixedProgramConstraintSystem(program, native, &why), why);
+
+    // A REAL SHA256("abc") compression witness (NIST test vector), so the
+    // boundary/forgery checks below run over genuine satisfying columns, not
+    // just uniform random field points.
+    static constexpr uint32_t H0[8]{
+        0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
+        0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U};
+    static constexpr uint32_t K[64]{
+        0x428a2f98U,0x71374491U,0xb5c0fbcfU,0xe9b5dba5U,0x3956c25bU,0x59f111f1U,0x923f82a4U,0xab1c5ed5U,
+        0xd807aa98U,0x12835b01U,0x243185beU,0x550c7dc3U,0x72be5d74U,0x80deb1feU,0x9bdc06a7U,0xc19bf174U,
+        0xe49b69c1U,0xefbe4786U,0x0fc19dc6U,0x240ca1ccU,0x2de92c6fU,0x4a7484aaU,0x5cb0a9dcU,0x76f988daU,
+        0x983e5152U,0xa831c66dU,0xb00327c8U,0xbf597fc7U,0xc6e00bf3U,0xd5a79147U,0x06ca6351U,0x14292967U,
+        0x27b70a85U,0x2e1b2138U,0x4d2c6dfcU,0x53380d13U,0x650a7354U,0x766a0abbU,0x81c2c92eU,0x92722c85U,
+        0xa2bfe8a1U,0xa81a664bU,0xc24b8b70U,0xc76c51a3U,0xd192e819U,0xd6990624U,0xf40e3585U,0x106aa070U,
+        0x19a4c116U,0x1e376c08U,0x2748774cU,0x34b0bcb5U,0x391c0cb3U,0x4ed8aa4aU,0x5b9cca4fU,0x682e6ff3U,
+        0x748f82eeU,0x78a5636fU,0x84c87814U,0x8cc70208U,0x90befffaU,0xa4506cebU,0xbef9a3f7U,0xc67178f2U};
+    std::vector<uint32_t> external(88, 0);
+    external[0] = 0x61626380U; // "abc" plus SHA padding
+    external[15] = 24U;        // big-endian bit length
+    std::copy(std::begin(H0), std::end(H0), external.begin() + 16);
+    std::copy(std::begin(K), std::end(K), external.begin() + 24);
+    ha::ProgramWitness witness;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildProgramWitness(program, external, witness, &why), why);
+    std::vector<std::vector<Fp3>> columns;
+    BOOST_REQUIRE_MESSAGE(
+        ha::BuildFixedProgramAirWitness(program, witness, columns, &why),
+        why);
+    const uint32_t n_rows = native.n_rows;
+    BOOST_REQUIRE_EQUAL(columns.size(), ha::kFixedProgramColumns);
+
+    auto row_vectors = [&](const std::vector<std::vector<Fp3>>& cols,
+                           uint32_t row, std::vector<Fp3>& cur,
+                           std::vector<Fp3>& next) {
+        cur.resize(cols.size());
+        next.resize(cols.size());
+        for (uint32_t col = 0; col < cols.size(); ++col) {
+            cur[col] = cols[col][row];
+            next[col] = cols[col][(row + 1) % n_rows];
+        }
+    };
+
+    std::vector<cb::ProgramTable> tables_this_run;
+    for (const rc::RCStage3RelationRole role :
+         {rc::RCStage3RelationRole::EpisodeTileTree,
+          rc::RCStage3RelationRole::EpisodeDigest}) {
+        cb::ProgramTable table;
+        BOOST_REQUIRE_MESSAGE(
+            rc::BuildRCStage3CoupledHashKernelProgramTable(
+                role, table, &why),
+            why);
+        BOOST_CHECK(table.role == role);
+        BOOST_CHECK_EQUAL(table.current_width, ha::kFixedProgramColumns);
+        BOOST_CHECK_EQUAL(table.challenge_width, 0U);
+        BOOST_REQUIRE_EQUAL(
+            table.programs.size(), native.constraints.size());
+        BOOST_CHECK_EQUAL(table.programs.size(), 462U);
+        BOOST_CHECK(cb::ProgramTableIsChallengeIndependent(table));
+
+        for (uint32_t i = 0; i < table.programs.size(); ++i) {
+            BOOST_CHECK_MESSAGE(
+                table.programs[i].kind == native.constraints[i].kind &&
+                    table.programs[i].declared_degree ==
+                        native.constraints[i].alg_degree,
+                "metadata mismatch at ordinal " << i
+                << " table.degree=" << table.programs[i].declared_degree
+                << " native.degree=" << native.constraints[i].alg_degree
+                << " native.name=" << native.constraints[i].name);
+        }
+
+        uint32_t mismatches = 0;
+
+        // (1) Random-point differential test: 32 uniform trials.
+        uint64_t rng = 0xB7E151628AED2A6BULL ^
+            (role == rc::RCStage3RelationRole::EpisodeTileTree
+                 ? 0xA5A5A5A5ULL
+                 : 0x5A5A5A5AULL);
+        const auto next_field = [&rng]() {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            return U(rng);
+        };
+        for (uint32_t trial = 0; trial < 32; ++trial) {
+            std::vector<Fp3> current(table.current_width);
+            std::vector<Fp3> next(table.next_width);
+            for (auto& v : current) v = next_field();
+            for (auto& v : next) v = next_field();
+            for (uint32_t i = 0; i < table.programs.size(); ++i) {
+                const Fp3 native_value =
+                    native.constraints[i].eval(current, next);
+                Fp3 interpreted;
+                BOOST_REQUIRE(cb::EvaluateProgram(
+                    table.programs[i], current, next, interpreted));
+                if (!gf::Eq(native_value, interpreted)) ++mismatches;
+            }
+        }
+
+        // (2) Boundary-point differential test: all-zero, all-one, and the
+        // REAL SHA256("abc") witness rows (first, middle, last).
+        std::vector<std::vector<Fp3>> boundary_current = {
+            std::vector<Fp3>(table.current_width, Fp3::Zero()),
+            std::vector<Fp3>(table.current_width, Fp3::One())};
+        std::vector<std::vector<Fp3>> boundary_next = {
+            std::vector<Fp3>(table.next_width, Fp3::Zero()),
+            std::vector<Fp3>(table.next_width, Fp3::One())};
+        for (uint32_t row : {0U, n_rows / 2, n_rows - 1}) {
+            std::vector<Fp3> cur, next;
+            row_vectors(columns, row, cur, next);
+            boundary_current.push_back(cur);
+            boundary_next.push_back(next);
+        }
+        for (size_t b = 0; b < boundary_current.size(); ++b) {
+            for (uint32_t i = 0; i < table.programs.size(); ++i) {
+                const Fp3 native_value = native.constraints[i].eval(
+                    boundary_current[b], boundary_next[b]);
+                Fp3 interpreted;
+                BOOST_REQUIRE(cb::EvaluateProgram(
+                    table.programs[i], boundary_current[b],
+                    boundary_next[b], interpreted));
+                if (!gf::Eq(native_value, interpreted)) ++mismatches;
+            }
+        }
+        BOOST_CHECK_EQUAL(mismatches, 0U);
+
+        // (3) The REAL honest witness must satisfy every bytecode
+        // constraint to exactly zero (not merely agree with the native
+        // evaluator on an unconstrained point).
+        uint32_t violations = 0;
+        for (uint32_t row = 0; row < n_rows; ++row) {
+            std::vector<Fp3> cur, next;
+            row_vectors(columns, row, cur, next);
+            for (const auto& prog : table.programs) {
+                Fp3 value;
+                BOOST_REQUIRE(
+                    cb::EvaluateProgram(prog, cur, next, value));
+                if (!gf::IsZero(value)) ++violations;
+            }
+        }
+        BOOST_CHECK_EQUAL(violations, 0U);
+
+        // (4) Forgery, sneaky variant: mutate the Constant(1) inside the
+        // first constraint's EmitBool(v) = v*(v-1) to Constant(2). This
+        // preserves every opcode/operand/degree (so ValidateProgram still
+        // accepts the forged program structurally), but the SAME real
+        // honest witness that satisfied every row of the honest program
+        // must violate the forged one on at least one row (v*(v-1)==
+        // v*(v-2) only when v==0; the honest bitstream is not all-zero),
+        // and the committed table hash must change.
+        cb::ProgramTable forged_constant = table;
+        bool mutated_constant = false;
+        for (auto& instr : forged_constant.programs.front().instructions) {
+            if (instr.opcode == cb::Opcode::Constant &&
+                gf::Eq(instr.constant, Fp3::One())) {
+                instr.constant = gf::Add(instr.constant, Fp3::One());
+                mutated_constant = true;
+                break;
+            }
+        }
+        BOOST_REQUIRE(mutated_constant);
+        BOOST_CHECK(
+            cb::CommitProgramTable(forged_constant) !=
+            cb::CommitProgramTable(table));
+
+        uint32_t forged_constant_violations = 0;
+        for (uint32_t row = 0; row < n_rows; ++row) {
+            std::vector<Fp3> cur, next;
+            row_vectors(columns, row, cur, next);
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                forged_constant.programs.front(), cur, next, value));
+            if (!gf::IsZero(value)) ++forged_constant_violations;
+        }
+        BOOST_CHECK_GT(forged_constant_violations, 0U);
+
+        // (5) Forgery, structural variant: swapping the final Mul for Add
+        // changes the program's raw SSA degree without touching
+        // declared_degree, so ValidateProgram (invoked by EvaluateProgram)
+        // must refuse it outright -- a stronger defense than a value-level
+        // mismatch, defeating this class of bytecode tamper before any
+        // witness is even evaluated.
+        cb::ProgramTable forged_opcode = table;
+        bool mutated_opcode = false;
+        for (auto& instr : forged_opcode.programs.front().instructions) {
+            if (instr.opcode == cb::Opcode::Mul) {
+                instr.opcode = cb::Opcode::Add;
+                mutated_opcode = true;
+                break;
+            }
+        }
+        BOOST_REQUIRE(mutated_opcode);
+        BOOST_CHECK(
+            cb::CommitProgramTable(forged_opcode) !=
+            cb::CommitProgramTable(table));
+        std::vector<Fp3> cur0, next0;
+        row_vectors(columns, 0, cur0, next0);
+        Fp3 forged_opcode_value;
+        BOOST_CHECK(!cb::EvaluateProgram(
+            forged_opcode.programs.front(), cur0, next0,
+            forged_opcode_value));
+
+        tables_this_run.push_back(table);
+    }
+
+    // Role separation: identical instructions across all four hash-kernel
+    // roles, but every committed table hash differs (anti cross-role replay
+    // now spans EpisodeTileTree/EpisodeDigest as well as CoupledBarrier/
+    // CoupledDigest).
+    cb::ProgramTable coupled_barrier;
+    cb::ProgramTable coupled_digest;
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledHashKernelProgramTable(
+        rc::RCStage3RelationRole::CoupledBarrier, coupled_barrier, &why));
+    BOOST_REQUIRE(rc::BuildRCStage3CoupledHashKernelProgramTable(
+        rc::RCStage3RelationRole::CoupledDigest, coupled_digest, &why));
+    const std::vector<cb::ProgramTable> all_four{
+        tables_this_run[0], tables_this_run[1], coupled_barrier,
+        coupled_digest};
+    for (size_t i = 0; i < all_four.size(); ++i) {
+        BOOST_REQUIRE_EQUAL(
+            all_four[i].programs.size(), all_four[0].programs.size());
+        for (uint32_t p = 0; p < all_four[i].programs.size(); ++p) {
+            BOOST_CHECK(
+                all_four[i].programs[p].instructions ==
+                all_four[0].programs[p].instructions);
+        }
+        for (size_t j = i + 1; j < all_four.size(); ++j) {
+            BOOST_CHECK(
+                cb::CommitProgramTable(all_four[i]) !=
+                cb::CommitProgramTable(all_four[j]));
+        }
+    }
+
+    // Roles with no DirectSha256d-style relation are still refused.
+    cb::ProgramTable rejected;
+    BOOST_CHECK(!rc::BuildRCStage3CoupledHashKernelProgramTable(
+        rc::RCStage3RelationRole::EpisodeGemm, rejected, &why));
+    BOOST_CHECK(!rc::BuildRCStage3CoupledHashKernelProgramTable(
+        rc::RCStage3RelationRole::CoupledBank, rejected, &why));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
