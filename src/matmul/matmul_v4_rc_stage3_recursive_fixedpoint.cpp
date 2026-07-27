@@ -6,6 +6,7 @@
 
 #include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <algorithm>
@@ -13592,8 +13593,14 @@ AssessNormalizedRecursiveChildCapabilityV1(
     // child transcript in the parent AIR.
     out.child_proof_payload_bound_in_air =
         va::kVerifierProofRowsBoundInAir;
+    // g4 child Fiat-Shamir replay is owned by recursive_parent_air. The
+    // ledger's fiat_shamir_replay_complete is COMPUTED from
+    // AssessChildFsReplayClosureV1().closed — consume that same predicate
+    // here (do NOT use va::kVerifierFiatShamirAirExecutable, still false;
+    // do NOT re-own parent_air / air_quotient).
     out.child_fiat_shamir_replayed_in_air =
-        va::kVerifierFiatShamirAirExecutable;
+        recursive_parent_air::AssessChildFsReplayClosureV1()
+            .closed;
     out.child_proof_commitment_mapped =
         root.child_proof_commitment_mapped;
     out.ctl_child_verified_in_parent_air = false;
@@ -13625,8 +13632,12 @@ AssessNormalizedRecursiveChildCapabilityV1(
                 FiatShamirReplayAir,
             "complete_child_fiat_shamir_replay",
             0, 0, 0, out.child_fiat_shamir_replayed_in_air,
-            "host replay exists; SHA/XOF rejection sampling and all "
-            "challenge-to-proof equalities are absent from the parent AIR",
+            out.child_fiat_shamir_replayed_in_air
+                ? "ledger g4 AssessChildFsReplayClosureV1().closed; "
+                  "va::kVerifierFiatShamirAirExecutable remains false"
+                : "host replay exists; SHA/XOF rejection sampling and all "
+                  "challenge-to-proof equalities are absent from the parent "
+                  "AIR; ledger fiat_shamir_replay_complete is still open",
         },
         {
             NormalizedRecursiveVerifierGapCode::
@@ -13722,8 +13733,8 @@ AssessNormalizedRecursiveChildCapabilityV1(
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
         fail_pred(!out.child_proof_payload_bound_in_air,
                   "payload_bound_unexpected") &&
-        fail_pred(!out.child_fiat_shamir_replayed_in_air,
-                  "fs_replay_unexpected") &&
+        fail_pred(out.child_fiat_shamir_replayed_in_air,
+                  "fs_replay_required") &&
         fail_pred(!out.child_proof_commitment_mapped,
                   "proof_commit_unexpected") &&
         fail_pred(!out.ctl_child_verified_in_parent_air,
@@ -13741,13 +13752,16 @@ AssessNormalizedRecursiveChildCapabilityV1(
         fail_pred(!kRecursiveFixedPointConsensusAuthority,
                   "fp_authority_unexpected") &&
         fail_pred(!va::kVerifierAirConsensusAuthority,
-                  "va_authority_unexpected");
+                  "va_authority_unexpected") &&
+        fail_pred(!va::kVerifierFiatShamirAirExecutable,
+                  "va_fs_chip_unexpected");
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
           "capability_audit_ok;"
           "coupled_bank_pages_is_smallest_current_parent_candidate;"
           "algebraic_child_equations_execute;"
-          "proof_payload_fs_ctl_terminal_and_semantic_root_chips_open;"
+          "ledger_g4_fiat_shamir_replay_closed;"
+          "proof_payload_ctl_terminal_and_semantic_root_chips_open;"
           "split_rap_multirow_adapter_open;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
