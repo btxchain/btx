@@ -146,6 +146,17 @@ void AirBitReverse(std::vector<F>& a)
     }
 }
 
+template <typename F>
+F AirMulBase(const F& value, Fp scalar)
+{
+    if constexpr (std::is_same_v<F, gkr_field::Fp3>) {
+        return gkr_field::MulBase(value, scalar);
+    } else {
+        return AirField<F>::Mul(
+            value, AirField<F>::FromBase(scalar));
+    }
+}
+
 /** Radix-2 NTT over F using base-field roots (mirror of the FRI NTT so the
  *  coefficient/evaluation conventions — natural-order evals at ω^i — agree). */
 template <typename F>
@@ -163,7 +174,8 @@ void AirNtt(std::vector<F>& a, bool inverse)
             Fp w = 1;
             for (size_t j = 0; j < len / 2; ++j) {
                 const F u = a[i + j];
-                const F v = T::Mul(a[i + j + len / 2], T::FromBase(w));
+                const F v =
+                    AirMulBase(a[i + j + len / 2], w);
                 a[i + j] = T::Add(u, v);
                 a[i + j + len / 2] = T::Sub(u, v);
                 w = gkr_field::Mul(w, w_len);
@@ -171,8 +183,11 @@ void AirNtt(std::vector<F>& a, bool inverse)
         }
     }
     if (inverse) {
-        const F inv_n = T::FromBase(gkr_field::Inv(static_cast<Fp>(n)));
-        for (auto& x : a) x = T::Mul(x, inv_n);
+        const Fp inv_n =
+            gkr_field::Inv(static_cast<Fp>(n));
+        for (auto& x : a) {
+            x = AirMulBase(x, inv_n);
+        }
     }
 }
 
@@ -231,7 +246,7 @@ void AirEvalOnCosetInto(const std::vector<F>& coeffs, uint32_t N, Fp twist,
     Fp tw = 1;
     for (size_t i = 0; i < coeffs.size(); ++i) {
         const size_t slot = i % N;
-        const F term = T::Mul(coeffs[i], T::FromBase(tw));
+        const F term = AirMulBase(coeffs[i], tw);
         out[slot] = (i < N) ? term : T::Add(out[slot], term);
         tw = gkr_field::Mul(tw, twist);
     }
@@ -242,10 +257,9 @@ void AirEvalOnCosetInto(const std::vector<F>& coeffs, uint32_t N, Fp twist,
 template <typename F>
 void AirCosetShiftCoeffs(std::vector<F>& coeffs)
 {
-    using T = AirField<F>;
     Fp gp = 1;
     for (auto& c : coeffs) {
-        c = T::Mul(c, T::FromBase(gp));
+        c = AirMulBase(c, gp);
         gp = gkr_field::Mul(gp, kAirCosetShift);
     }
 }

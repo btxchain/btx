@@ -164,7 +164,8 @@ void NttFp3(std::vector<Fp3>& a, bool inverse)
             Fp w = 1;
             for (size_t j = 0; j < len / 2; ++j) {
                 const Fp3 u = a[i + j];
-                const Fp3 v = Mul(a[i + j + len / 2], Fp3::FromFp(w));
+                const Fp3 v =
+                    gkr_field::MulBase(a[i + j + len / 2], w);
                 a[i + j] = Add(u, v);
                 a[i + j + len / 2] = Sub(u, v);
                 w = Mul(w, w_len);
@@ -173,8 +174,7 @@ void NttFp3(std::vector<Fp3>& a, bool inverse)
     }
     if (inverse) {
         const Fp inv_n = Inv(static_cast<Fp>(n));
-        const Fp3 inv = Fp3::FromFp(inv_n);
-        for (auto& x : a) x = Mul(x, inv);
+        for (auto& x : a) x = gkr_field::MulBase(x, inv_n);
     }
 }
 

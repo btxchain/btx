@@ -86,6 +86,18 @@ struct Fp3 {
     return Fp3{Neg(a.c0), Neg(a.c1), Neg(a.c2)};
 }
 
+/** Multiply an extension value by an embedded base-field scalar.
+ *
+ * This is mathematically identical to Mul(a, Fp3::FromFp(s)), but the six
+ * products against known zero limbs and the cubic-reduction terms vanish.
+ * NTT roots and normalization factors always lie in the base field, making
+ * this the exact three-multiply butterfly primitive.
+ */
+[[nodiscard]] inline Fp3 MulBase(const Fp3& a, Fp s)
+{
+    return Fp3{Mul(a.c0, s), Mul(a.c1, s), Mul(a.c2, s)};
+}
+
 /**
  * (a0 + a1 x + a2 x^2)(b0 + b1 x + b2 x^2) reduced by x^3 = W3.
  * Schoolbook degrees 0..4, then fold x^3 -> W3 and x^4 -> W3 x:

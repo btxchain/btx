@@ -201,6 +201,33 @@ BOOST_AUTO_TEST_CASE(gkr_field_ext3_mul_matches_schoolbook)
     BOOST_CHECK(gf::Eq(gf::Mul(x2, x2), gf::Fp3{0, gf::kFp3W, 0}));
 }
 
+BOOST_AUTO_TEST_CASE(gkr_field_ext3_mul_base_matches_embedded_extension)
+{
+    static constexpr std::array<gf::Fp, 7> edges{
+        0, 1, gf::kP - 1, gf::kP, gf::kP + 1,
+        UINT64_C(0xFFFFFFFF00000000),
+        UINT64_C(0xFFFFFFFFFFFFFFFF)};
+    for (gf::Fp c0 : edges) {
+        for (gf::Fp c1 : edges) {
+            const gf::Fp3 value{c0, c1, c0 ^ c1};
+            for (gf::Fp scalar : edges) {
+                BOOST_CHECK(gf::Eq(
+                    gf::MulBase(value, scalar),
+                    gf::Mul(value, gf::Fp3::FromFp(scalar))));
+            }
+        }
+    }
+    uint64_t state = UINT64_C(0x6D756C4261736533);
+    for (uint32_t iteration = 0; iteration < 256; ++iteration) {
+        const gf::Fp3 value{
+            SplitMix64(state), SplitMix64(state), SplitMix64(state)};
+        const gf::Fp scalar = SplitMix64(state);
+        BOOST_CHECK(gf::Eq(
+            gf::MulBase(value, scalar),
+            gf::Mul(value, gf::Fp3::FromFp(scalar))));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(gkr_field_ext3_challenge_bytes)
 {
     // 24 FS bytes -> (c0, c1, c2), each 8 LE bytes reduced mod p
