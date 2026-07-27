@@ -60,10 +60,9 @@ inline constexpr uint32_t kRCGkrProofMagic = 0x524b4737u; // 'RKG7'
  * BTX_RC_GKR_ARBITER — no path may accept GKR as proof-only consensus winner.
  * Does NOT disable: shadow observe, prove/verify APIs, or v7 native re-derivation
  * grounding in VerifyWinnerProofV7 / Coupled V7 (sound by grounding against the
- * int64 reference). This gate governs ONLY the GKR/SNARK arbiter; it is
- * independent of the datacenter Freivalds sampled authority. The ENC_RC consensus
- * authority is ExactReplay under nMatMulRCProfile==1 and the Freivalds sampled
- * verifier under nMatMulRCProfile==2 — the GKR arbiter is never it while false.
+ * int64 reference). This gate governs ONLY the legacy GKR/SNARK arbiter. The
+ * Freivalds sampled carrier is a precheck, never final consensus authority;
+ * complete durable Stage 3 is separately gated.
  *
  * Flip only after formal ≤2^{-64}-after-grind + G1–G5 succinct bindings +
  * external audit. G1–G5 remain OPEN/PARKED until then.
@@ -1087,21 +1086,19 @@ void RCGkrProofCacheClear();
 [[nodiscard]] size_t RCGkrProofCacheSizeForTest();
 
 // ---------------------------------------------------------------------------
-// v7 EPISODE-PROOF STORE (process-local) — the availability seam for the
-// datacenter-profile Freivalds sampled CONSENSUS authority.
+// v7 EPISODE-PROOF STORE (process-local) — an availability seam for the
+// datacenter-profile Freivalds sampled precheck.
 //
-// Under nMatMulRCProfile==2 the sampled verifier is the accept/reject authority
-// (pow.cpp CheckMatMulProofOfWork_RC), and it needs the in-memory RCGkrProofV7
-// (its carried wires), not the V6 byte cache above. There is no canonical v7
+// Under nMatMulRCProfile==2 the sampled precheck needs the in-memory
+// RCGkrProofV7 (its carried wires), not the V6 byte cache above. It cannot return
+// final consensus success. There is no canonical v7
 // byte serializer yet (the full witness is large; see EstimateRCGkrProofV7Pay-
 // loadBytes), and — like RCGkrProofCache — this store is PROCESS-LOCAL: it is
 // populated by the node that mined/verified the episode (SolveMatMulV4RC winner
-// path, or a test), NOT carried over P2P. A validator that received a profile-2
-// block over the wire has no proof here and FAILS CLOSED (rejects) until the
-// sampled-carrier relay (BuildFreivaldsSampledCarrier / the segregated witness
-// transport) is wired into net_processing. That relay carriage is the remaining
-// production seam; the consensus DISPATCH and the within-process honest/tamper/
-// missing paths are complete and tested.
+// path, or a test), NOT carried as durable block data. A validator without it
+// proceeds to the durable Stage-3 attachment or ExactReplay. The separate
+// sampled-carrier relay is optional acceleration state and never changes the
+// consensus verdict.
 void RCGkrProofV7StorePut(const uint256& block_hash, RCGkrProofV7 proof);
 [[nodiscard]] bool RCGkrProofV7StoreGet(const uint256& block_hash, RCGkrProofV7& out_proof);
 void RCGkrProofV7StoreClear();

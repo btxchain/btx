@@ -8,6 +8,7 @@
 #include <consensus/merkle.h>
 #include <consensus/validation.h>
 #include <key_io.h>
+#include <matmul/matmul_v4_rc_stage3.h>
 #include <node/context.h>
 #include <pow.h>
 #include <primitives/transaction.h>
@@ -149,9 +150,22 @@ bool MineHeaderForConsensus(CBlock& block,
             consensus.IsMatMulV4Active(height) &&
             consensus.GetMatMulProfileParams(height).commitment ==
                 Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE;
-        FinalizeMatMulSolvedBlock(block, consensus, height);
+        // PR-89 item 5: the production finalizer also attaches the Stage-3
+        // consensus proof at RC-family heights once that authority gate closes.
+        // While it is false this is FinalizeMatMulSolvedBlock verbatim.
+        std::string finalize_why;
+        if (!FinalizeMatMulSolvedBlockForProduction(block, consensus, height,
+                                                    &finalize_why)) {
+            return false;
+        }
         // The ENC-DR block body is now empty; the sketch lives in the cache.
-        assert(!enc_dr || block.matrix_c_data.empty());
+        // EXCEPTION once the Stage-3 authority gate closes: at RC-family
+        // heights the body deliberately carries the succinct proof instead of
+        // being empty, so the invariant is "empty unless Stage-3 owns it".
+        const bool stage3_owns_body =
+            matmul::v4::rc::kRCStage3SuccinctAuthorityReady &&
+            consensus.IsMatMulRCFamilyActive(height);
+        assert(!enc_dr || stage3_owns_body || block.matrix_c_data.empty());
     } else if (consensus.fMatMulPOW && consensus.fMatMulFreivaldsEnabled) {
         // v3 (pre-product-digest) path: unchanged.
         PopulateFreivaldsPayload(block, consensus);

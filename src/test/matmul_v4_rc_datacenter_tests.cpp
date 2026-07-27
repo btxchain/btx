@@ -914,7 +914,8 @@ CBlockHeader MakeDcRCHeader(uint64_t nonce)
 
 // Consensus params that activate ENC_RC on a toy-dim, max-target regtest-like
 // config at the given profile. Toy dims keep the episode CI-runnable; the profile
-// selects the CONSENSUS AUTHORITY (1=ExactReplay, 2=Freivalds sampled).
+// selects episode shape. Sampled carriers are optional prechecks; Stage 3 is
+// disabled and ExactReplay remains the final authority in these tests.
 Consensus::Params MakeRCActiveParams(uint32_t profile)
 {
     Consensus::Params p;
@@ -1106,14 +1107,14 @@ BOOST_AUTO_TEST_CASE(rc_dc_episode_regtest_profile2_activation)
 }
 
 // ---------------------------------------------------------------------------
-// CONSENSUS AUTHORITY CUTOVER (pow.cpp CheckMatMulProofOfWork_RC).
-//   profile 2 → Freivalds sampled verifier is the accept/reject authority,
-//     fail-closed if the episode proof is unavailable.
-//   profile 1 → VerifyBoundedExactReplay, unchanged (no proof required).
+// PROFILE-2 PRECHECK (pow.cpp CheckMatMulProofOfWork_RC).
+//   profile 2 → optional Freivalds sampled precheck, then ExactReplay while
+//     durable Stage-3 authority remains disabled.
+//   profile 1 → VerifyBoundedExactReplay directly.
 // ---------------------------------------------------------------------------
 
-// (c) Profile 2: ACCEPT an honest episode via the Freivalds path; REJECT when no
-//     proof is stored (fail-closed); REJECT a tampered sampled layer.
+// (c) Profile 2: an honest episode has the same consensus verdict with no
+//     carrier, an honest carrier, or a tampered optional carrier.
 BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -1132,13 +1133,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     const auto target = DeriveTarget(header.nBits, p.powLimit);
     BOOST_REQUIRE(target.has_value());
 
-    // Fail-closed BEFORE any carrier is available (the non-mining-node halt).
+    // Missing process-local carrier state cannot change the exact verdict.
     rc::RCFreivaldsCarrierStoreClear();
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 
     // Build + store the honest sampled CARRIER (miner does this at winner time;
-    // it is also exactly what the RCCARRIER relay carries). The consensus
-    // authority now reads the CARRIER store, not the full-wire v7 proof store.
+    // it is also exactly what the RCCARRIER relay carries) as an optional
+    // precheck.
     const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
                                              header.matmul_digest);
     BOOST_REQUIRE_MESSAGE(pr.timing.ok, "toy-dim v7 prove must succeed");
@@ -1147,16 +1148,15 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target, carrier, &why));
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), carrier);
 
-    // ACCEPT via the Freivalds sampled-carrier authority.
+    // The precheck passes and ExactReplay remains the accepting authority.
     BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Clearing the carrier reverts to fail-closed reject.
+    // Clearing optional acceleration state leaves the verdict unchanged.
     rc::RCFreivaldsCarrierStoreClear();
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Tampered sampled layer: flip a carried committed output tile. Carrier v3
-    // anchors the input row and recomputes the tile, so the forged output is
-    // rejected.
+    // Tampered sampled layer: the optional precheck fails internally, but
+    // process-local relay/cache state cannot change the exact consensus verdict.
     rc::RCFreivaldsSampledCarrier tampered = carrier;
     bool tampered_one = false;
     for (auto& e : tampered.sampled) {
@@ -1167,7 +1167,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_freivalds_accept_reject)
     }
     BOOST_REQUIRE(tampered_one);
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), tampered);
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
     rc::RCFreivaldsCarrierStoreClear();
 }
 
@@ -1375,16 +1375,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_fvt_rejects_lastround_grind_accepts_honest)
 
 // (c-λ) P2P/CONSENSUS PARITY on the sampling breadth λ. The RCCARRIER receiver
 //   (net_processing.cpp, "if (msg_type == NetMsgType::RCCARRIER)") admits an
-//   untrusted carrier to the process-local store only after the SAME ordered
-//   gates the consensus path (CheckMatMulProofOfWork_RC profile-2 branch,
-//   pow.cpp) applies: (vi) the 9-field episode-shape bind, (vi-b) the fixed-λ
-//   bind carrier.lambda == kRCFreivaldsSampleCount, and (vii) the full
-//   VerifyEpisodeFreivaldsSampledCarrier authentication. Step (vi-b) was the
-//   audit gap: VerifyEpisodeFreivaldsSampledCarrier authenticates against the
-//   carrier's OWN λ, so a carrier that shrank λ (fewer sampled units ⇒ a larger
-//   deterrence residual ρ* ≈ ln κ/λ) authenticated + stored on the P2P path yet
-//   FAILED consensus — a present-but-invalid store-pollution mismatch. This test
-//   pins net-store admission == consensus admission on the λ dimension.
+//   untrusted carrier to the process-local store only after the episode-shape,
+//   fixed-λ, and sampled-proof checks. Consensus does not depend on that
+//   process-local state: a rejected carrier still falls through ExactReplay.
 //
 //   Why this is a shared-predicate-boundary test rather than a direct
 //   ProcessMessage(RCCARRIER) drive: the receiver's INTERESTED-ONLY gate requires
@@ -1394,7 +1387,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_fvt_rejects_lastround_grind_accepts_honest)
 //   the index plus priming the per-peer ingress token bucket — disproportionate
 //   for a one-predicate parity assertion. Instead we reproduce the receiver's
 //   post-deserialize admission gates (vi/vi-b/vii) via the exact same shared
-//   functions the receiver calls, and assert they agree with consensus.
+//   functions the receiver calls, and separately pin consensus independence.
 BOOST_AUTO_TEST_CASE(rc_dc_rccarrier_net_store_lambda_matches_consensus)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -1453,8 +1446,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_rccarrier_net_store_lambda_matches_consensus)
         return rc::VerifyEpisodeFreivaldsSampledCarrier(c, header, kHeight, *target, &vwhy);
     };
 
-    // Consensus admission: does CheckMatMulProofOfWork_RC accept with this exact
-    // carrier in the store?
+    // Consensus verdict with this exact optional carrier in the store.
     const auto consensus_accepts = [&](const rc::RCFreivaldsSampledCarrier& c) -> bool {
         rc::RCFreivaldsCarrierStoreClear();
         rc::RCFreivaldsCarrierStorePut(header.GetHash(), c);
@@ -1471,26 +1463,21 @@ BOOST_AUTO_TEST_CASE(rc_dc_rccarrier_net_store_lambda_matches_consensus)
         "reduced-λ carrier must authenticate on its own λ (else the test proves nothing): "
             << why);
 
-    // Parity, honest carrier: BOTH admit.
+    // The honest carrier is admitted and the exact episode accepts.
     BOOST_CHECK(net_would_store(honest));
     BOOST_CHECK(consensus_accepts(honest));
-    BOOST_CHECK_EQUAL(net_would_store(honest), consensus_accepts(honest));
 
-    // Parity, reduced-λ carrier: BOTH reject (the fix closes the mismatch).
+    // The reduced-λ carrier is not admitted by relay policy. Even if process-local
+    // state is polluted directly, it cannot turn an exact-valid block into a
+    // consensus failure.
     BOOST_CHECK(!net_would_store(reduced));
-    BOOST_CHECK(!consensus_accepts(reduced));
-    BOOST_CHECK_EQUAL(net_would_store(reduced), consensus_accepts(reduced));
+    BOOST_CHECK(consensus_accepts(reduced));
 
     rc::RCFreivaldsCarrierStoreClear();
 }
 
-// (c'') CONSENSUS-CORRECTNESS: CheckMatMulProofOfWork_RC's `carrier_missing`
-//       out-param must distinguish a MERELY-LATE carrier (transient; the compact-
-//       block DEFER path) from a PRESENT-BUT-INVALID one (a permanent PoW fault).
-//       This is the discriminator the block-accept path uses to avoid PERMANENTLY
-//       rejecting a raced-but-valid profile-2 block whose carrier is simply late,
-//       WITHOUT ever accepting without an authenticated carrier or reclassifying a
-//       genuinely bad carrier as transient.
+// (c'') `carrier_missing` is observability only. Missing, valid, and invalid
+//       optional carriers all reach the same exact consensus verdict.
 BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -1506,18 +1493,16 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
     const auto target = DeriveTarget(header.nBits, p.powLimit);
     BOOST_REQUIRE(target.has_value());
 
-    // (1) MISSING carrier: fail-closed reject, AND flagged carrier_missing=true.
-    //     This is the ONLY case the DEFER path may act on (request + retry).
+    // (1) MISSING carrier: exact validation still accepts; the out-param is
+    //     observability only.
     rc::RCFreivaldsCarrierStoreClear();
     {
         bool carrier_missing = false;
-        BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
-        BOOST_CHECK(carrier_missing);   // transient, defer-eligible
+        BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+        BOOST_CHECK(carrier_missing);
     }
 
-    // (2) PRESENT + VALID carrier: ACCEPT, and carrier_missing MUST be false — a
-    //     missing carrier can never be the reason we accept. Establishes that
-    //     acceptance requires a present, authenticated carrier.
+    // (2) PRESENT + VALID carrier: precheck passes, then ExactReplay accepts.
     rc::RCFreivaldsSampledCarrier carrier;
     {
         const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
@@ -1534,11 +1519,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
         BOOST_CHECK(!carrier_missing);
     }
 
-    // (3) PRESENT + INVALID carrier (tampered sampled layer): PERMANENT reject,
-    //     and carrier_missing MUST be false — a bad carrier is a real PoW fault,
-    //     NEVER a transient defer. Misclassifying this as transient would let an
-    //     attacker keep a bad block permanently deferrable; the out-param forbids
-    //     it.
+    // (3) PRESENT + INVALID carrier: carrier_missing remains false, but the
+    //     precheck failure is ignored and ExactReplay still accepts.
     rc::RCFreivaldsSampledCarrier tampered = carrier;
     bool tampered_one = false;
     for (auto& e : tampered.sampled) {
@@ -1551,13 +1533,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), tampered);
     {
         bool carrier_missing = true;   // present-but-invalid ⇒ must be cleared false
-        BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
-        BOOST_CHECK(!carrier_missing);   // permanent, NOT defer-eligible
+        BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+        BOOST_CHECK(!carrier_missing);
     }
 
-    // (4) The default-nullptr overload is unchanged (fail-closed on missing).
+    // (4) The default-nullptr overload also continues through ExactReplay.
     rc::RCFreivaldsCarrierStoreClear();
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
     rc::RCFreivaldsCarrierStoreClear();
 }
 
@@ -1565,36 +1547,45 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_carrier_missing_discriminates)
 //      rejected — the episode shape is consensus-fixed, not prover-chosen.
 BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_episode_shape_swap)
 {
-    // Consensus resolves DATACENTER dims (no toy); a proof carrying toy dims must
-    // not be accepted for a datacenter-shaped consensus slot.
+    // Use an exact-valid toy episode, then replace only the untrusted carrier's
+    // claimed episode shape. This exercises the shape bind without forcing a
+    // production-sized ExactReplay in a unit test.
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
-    p.fMatMulRCUseToyDims = false;   // consensus dims = datacenter (profile 2)
     constexpr int32_t kHeight = 10;
     const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
-    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, rc::MakeDatacenterRCEpisodeParams()));
+    BOOST_REQUIRE(RCEpisodeParamsEqual(params_rc, rc::MakeToyRCEpisodeParams()));
 
     CBlockHeader header = MakeDcRCHeader(99);
     header.matmul_dim = static_cast<uint16_t>(p.nMatMulV4Dimension);
     header.nBits = UintToArith256(p.powLimit).GetCompact();
-
-    // A toy-dim proof (cheap) stored against this header must be rejected by the
-    // episode-shape bind before any accept — without materializing a real
-    // datacenter episode (infeasible in a unit test).
-    const auto toy = rc::MakeToyRCEpisodeParams();
-    header.matmul_digest = rc::RecomputeResidentCurriculumReference(header, toy, kHeight);
+    header.matmul_digest =
+        rc::RecomputeResidentCurriculumReference(header, params_rc, kHeight);
     const auto target = DeriveTarget(header.nBits, p.powLimit);
     BOOST_REQUIRE(target.has_value());
-    const auto pr = rc::ProveWinnerEpisodeV7(header, toy, kHeight, *target, header.matmul_digest);
+    const auto pr =
+        rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target, header.matmul_digest);
     BOOST_REQUIRE(pr.timing.ok);
-    rc::RCFreivaldsSampledCarrier toy_carrier;
+    rc::RCFreivaldsSampledCarrier wrong_shape;
     std::string why;
-    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(pr.proof, header, kHeight, *target, toy_carrier, &why));
-    rc::RCFreivaldsCarrierStorePut(header.GetHash(), toy_carrier);
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));   // shape mismatch → reject
+    BOOST_REQUIRE(rc::BuildFreivaldsSampledCarrier(
+        pr.proof, header, kHeight, *target, wrong_shape, &why));
+    wrong_shape.episode = rc::MakeDatacenterRCEpisodeParams();
+
+    // Relay/precheck validation rejects the shape-swapped carrier itself.
+    BOOST_CHECK(
+        !rc::VerifyEpisodeFreivaldsSampledCarrier(
+            wrong_shape, header, kHeight, *target, &why));
+
+    // Process-local carrier state is not consensus authority: the exact-valid
+    // block still accepts after the optional carrier is discarded.
+    rc::RCFreivaldsCarrierStorePut(header.GetHash(), wrong_shape);
+    bool carrier_missing = true;
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+    BOOST_CHECK(!carrier_missing);
     rc::RCFreivaldsCarrierStoreClear();
 }
 
-// R-05 (FS/T-BIND audit): the profile-2 consensus carrier MUST bind the BLOCK
+// R-05 (FS/T-BIND audit): an admitted profile-2 optional carrier binds the BLOCK
 // target (nBits-derived), NEVER the pooled share_target_override. The FS seed
 // (RCGkrFsSeedV7) absorbs the target and drives WHICH layers/tiles are sampled
 // and in WHAT order; CheckMatMulProofOfWork_RC always recomputes that seed with
@@ -1606,8 +1597,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_episode_shape_swap)
 // target is a fully consensus-valid block). This regression drives the REAL solver
 // with an easier share target, lands a share whose digest ALSO meets the block
 // target, round-trips the stored carrier through the P2P wire form, and asserts
-// CheckMatMulProofOfWork_RC ACCEPTS — and that a carrier bound to the SHARE target
-// (the pre-fix behaviour) is REJECTED under block-target verification.
+// CheckMatMulProofOfWork_RC ACCEPTS. A carrier bound to the SHARE target differs
+// and fails its precheck, but cannot change the exact consensus verdict.
 BOOST_AUTO_TEST_CASE(rc_dc_carrier_binds_block_target_not_share_target)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -1680,11 +1671,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_binds_block_target_not_share_target)
     BOOST_CHECK_MESSAGE(CheckMatMulProofOfWork_RC(solved, p, kHeight),
         "block-target-bound carrier must be ACCEPTED under block-target verification");
 
-    // (WOULD-FAIL-BEFORE-FIX) build the carrier against the SHARE target — exactly
-    // what the solver did before R-05 — and show block-target verification REJECTS
-    // it. ProveWinnerEpisodeV7 succeeds against the easier share target (digest
-    // meets it), but the FS seed is bound to the wrong target, so the validator
-    // recomputes a different sample set/order and rejects.
+    // Build the carrier against the SHARE target — exactly what the solver did
+    // before R-05. Its optional precheck is bound to the wrong target, but the
+    // exact-valid block must still have the same consensus verdict.
     const auto params_rc = rc::ResolveRCEpisodeParams(p, kHeight);
     const auto share_pr = rc::ProveWinnerEpisodeV7(
         solved, params_rc, kHeight, UintToArith256(easy_share_target), solved.matmul_digest);
@@ -1696,11 +1685,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_binds_block_target_not_share_target)
         share_pr.proof, solved, kHeight, UintToArith256(easy_share_target), share_carrier, &swhy));
     rc::RCFreivaldsCarrierStoreClear();
     rc::RCFreivaldsCarrierStorePut(solved.GetHash(), share_carrier);
-    BOOST_CHECK_MESSAGE(!CheckMatMulProofOfWork_RC(solved, p, kHeight),
-        "share-target-bound carrier must be REJECTED under block-target verification (pre-fix defect)");
+    BOOST_CHECK_MESSAGE(CheckMatMulProofOfWork_RC(solved, p, kHeight),
+        "invalid optional carrier state must not change the exact block verdict");
 
     // The two carriers genuinely differ (FS seed divergence ⇒ different sampled
-    // set/order/tiles): the reject above is not vacuous.
+    // set/order/tiles): the optional precheck distinction is not vacuous.
     std::vector<unsigned char> share_wire;
     rc::SerializeRCFreivaldsCarrier(share_carrier, share_wire);
     BOOST_CHECK_MESSAGE(share_wire != block_wire,
@@ -1710,10 +1699,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_binds_block_target_not_share_target)
 }
 
 // ---------------------------------------------------------------------------
-// RELAY: the sampled CARRIER — serialization (byte-exact + bounded) and the P2P
-// availability seam that closes the non-mining-node halt. These exercise the
-// object CheckMatMulProofOfWork_RC now consumes (RCFreivaldsCarrierStore) and
-// the wire form net_processing relays (RCCARRIER).
+// RELAY: the sampled CARRIER — serialization (byte-exact + bounded) and optional
+// P2P precheck transport. These exercise the process-local carrier store and the
+// wire form net_processing relays (RCCARRIER).
 // ---------------------------------------------------------------------------
 
 namespace {
@@ -1815,9 +1803,10 @@ std::array<int8_t, rc::kRCMxBlockLen> ExtractBlockBench(const uint256& prf, uint
     return out;
 }
 
-uint32_t BenchPrewarmInnerThreads(uint32_t total_threads)
+uint32_t BenchPrewarmInnerThreads(uint32_t total_threads,
+                                  size_t seed_job_count)
 {
-    if (total_threads <= 1) return 1;
+    if (total_threads <= 1 || seed_job_count == 0) return 1;
     if (const char* env = std::getenv("BTX_RC_CARRIER_PREWARM_INNER_THREADS")) {
         const unsigned long requested = std::strtoul(env, nullptr, 10);
         if (requested > 0) {
@@ -1825,7 +1814,9 @@ uint32_t BenchPrewarmInnerThreads(uint32_t total_threads)
                 std::clamp<unsigned long>(requested, 1, total_threads));
         }
     }
-    return std::min<uint32_t>(8, total_threads);
+    const uint32_t concurrent_jobs = static_cast<uint32_t>(
+        std::min<size_t>(seed_job_count, total_threads));
+    return std::max<uint32_t>(1, total_threads / concurrent_jobs);
 }
 
 uint32_t PaddedLeafDepthBench(uint64_t stream_bytes, uint32_t t_leaf)
@@ -2170,7 +2161,8 @@ ProdCarrierBenchReport RunProductionCarrierVerifierComputeBench()
             return a.seed < b.seed;
         });
         const auto t_regen = std::chrono::steady_clock::now();
-        const uint32_t inner_threads = BenchPrewarmInnerThreads(rep.threads);
+        const uint32_t inner_threads =
+            BenchPrewarmInnerThreads(rep.threads, seed_jobs.size());
         const uint32_t outer_threads = std::max<uint32_t>(1, rep.threads / inner_threads);
         run_parallel(std::min<size_t>(seed_jobs.size(), outer_threads), [&](size_t worker) {
             for (size_t i = worker; i < seed_jobs.size(); i += outer_threads) {
@@ -2634,9 +2626,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_production_carrier_verify_compute_benchmark)
                         "production carrier verify compute exceeds 0.9s budget; see metric line");
 }
 
-// (c''') REGRESSION: d_ff is a consensus/relay shape field. A carrier with a
-//       cheaper fused-FFN inner width must not authenticate for a profile-2
-//       block, even if every other carrier byte came from an honest proof.
+// (c''') REGRESSION: d_ff is a relay/precheck shape field. A carrier with a
+//       cheaper fused-FFN inner width must not authenticate, but optional state
+//       cannot change the exact consensus verdict.
 BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_d_ff_mismatch)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -2660,13 +2652,13 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_d_ff_mismatch)
     bad.episode.d_ff += rc::kRCMxBlockLen; // keep mod-32 shape-valid, but consensus-wrong
     BOOST_REQUIRE(rc::ValidateRCEpisodeParams(bad.episode));
 
-    // Consensus authority rejects before the sampled carrier can stand in for a
-    // cheaper episode shape.
+    // Direct store pollution with a wrong-shape optional carrier still reaches
+    // ExactReplay, which accepts this exact-valid header.
     rc::RCFreivaldsCarrierStoreClear();
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), bad);
     bool carrier_missing = true;
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
-    BOOST_CHECK(!carrier_missing); // present-but-wrong is permanent, not transient
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight, &carrier_missing));
+    BOOST_CHECK(!carrier_missing);
 
     // The relay/carrier semantic gate also rejects the mutated shape: d_ff is
     // bound into the FS seed / layer provenance and cannot be changed under an
@@ -2681,7 +2673,8 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_rejects_d_ff_mismatch)
 // (c'''') REGRESSION: the sampled output tile is not self-authenticating relay
 //         data. The verifier must recompute X[l+1] =
 //         Extract(Extract(X·W_up)·W_down + X) from anchored inputs and reject a
-//         forged committed output tile before it can pass via tile-tree tautology.
+//         forged committed output tile. That precheck failure cannot change the
+//         exact consensus verdict.
 BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_forged_output_recompute_rejects)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -2725,7 +2718,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_authority_profile2_forged_output_recompute_rejects)
 
     rc::RCFreivaldsCarrierStoreClear();
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), forged);
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
     rc::RCFreivaldsCarrierStoreClear();
 }
 
@@ -2793,10 +2786,9 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_serialize_roundtrip_and_bounds)
     }
 }
 
-// (g) HALT CLOSURE: a profile-2 node WITHOUT the carrier fail-closed REJECTS a
-//     valid block; once the RELAYED carrier (round-tripped through the wire form,
-//     as net_processing stores it) is populated, the SAME block ACCEPTS.
-BOOST_AUTO_TEST_CASE(rc_dc_carrier_relay_closes_halt)
+// (g) Optional relay state: the same valid block accepts before and after a
+//     sampled carrier is round-tripped into the process-local store.
+BOOST_AUTO_TEST_CASE(rc_dc_carrier_relay_is_optional_acceleration)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
     constexpr int32_t kHeight = 10;
@@ -2809,10 +2801,10 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_relay_closes_halt)
     const auto target = DeriveTarget(header.nBits, p.powLimit);
     BOOST_REQUIRE(target.has_value());
 
-    // Non-mining node: no carrier yet → the described halt (fail-closed reject).
+    // Non-mining node: no carrier; ExactReplay still decides the block.
     rc::RCFreivaldsCarrierStoreClear();
     rc::RCGkrProofV7StoreClear();
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 
     // Miner builds the carrier; it travels over the wire (serialize → bounded
     // deserialize) exactly as the RCCARRIER relay carries it; the receiver stores
@@ -2826,18 +2818,17 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_relay_closes_halt)
     BOOST_REQUIRE(rc::DeserializeRCFreivaldsCarrierBounded(wire, received, &why));
     rc::RCFreivaldsCarrierStorePut(header.GetHash(), received);
 
-    // With the relayed carrier populated BEFORE validation, the block ACCEPTS.
+    // With the relayed carrier populated, the precheck and ExactReplay pass.
     BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 
-    // Evicting the carrier reverts to fail-closed reject (proves the store, not
-    // some other path, is load-bearing).
+    // Evicting optional carrier state leaves the exact verdict unchanged.
     rc::RCFreivaldsCarrierStoreClear();
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header, p, kHeight));
 }
 
-// (h) DoS / soundness of the store gate: a carrier for a DIFFERENT header does
-//     not authenticate for this block (so a mis-keyed or spoofed carrier can
-//     never make an unrelated block accept), and a tampered carrier is rejected.
+// (h) DoS / soundness of the store gate: a carrier for a DIFFERENT header and a
+//     tampered carrier fail their optional prechecks, but neither can change the
+//     exact consensus verdict.
 BOOST_AUTO_TEST_CASE(rc_dc_carrier_rejects_irrelevant_and_tampered)
 {
     Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
@@ -2860,12 +2851,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_rejects_irrelevant_and_tampered)
     rc::RCFreivaldsSampledCarrier carrier_a;
     BOOST_REQUIRE(BuildToyCarrier(header_a, params_rc, kHeight, *ta, carrier_a));
 
-    // IRRELEVANT: A's carrier stored under B's hash must NOT let B accept — the
-    // carrier is header-bound, so its verify fails against B. (This is exactly the
-    // consensus check the net-layer 'interested + authenticate' gate mirrors.)
+    // IRRELEVANT: A's carrier stored under B's hash fails its header-bound
+    // precheck. Header B remains exact-valid and therefore accepts.
     rc::RCFreivaldsCarrierStoreClear();
     rc::RCFreivaldsCarrierStorePut(header_b.GetHash(), carrier_a);
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header_b, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header_b, p, kHeight));
 
     // TAMPERED: flip a sampled output tile; the carrier no longer authenticates.
     rc::RCFreivaldsSampledCarrier tampered = carrier_a;
@@ -2881,7 +2871,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_carrier_rejects_irrelevant_and_tampered)
     BOOST_CHECK(!rc::VerifyEpisodeFreivaldsSampledCarrier(tampered, header_a, kHeight, *ta, &why));
     rc::RCFreivaldsCarrierStoreClear();
     rc::RCFreivaldsCarrierStorePut(header_a.GetHash(), tampered);
-    BOOST_CHECK(!CheckMatMulProofOfWork_RC(header_a, p, kHeight));
+    BOOST_CHECK(CheckMatMulProofOfWork_RC(header_a, p, kHeight));
     rc::RCFreivaldsCarrierStoreClear();
 }
 
@@ -3045,13 +3035,11 @@ BOOST_AUTO_TEST_CASE(rc_dc_segment_lambda512_tleaf_compute_hash_margin)
     BOOST_CHECK_GT(max_possible, 5.1);
 }
 
-// (h) ASYNC-WORKER MEMO INTEGRITY: the ENC-DR verdict memo's invariant is that a
-//     verdict is a PURE FUNCTION OF THE HEADER. A profile-2 false verdict caused
-//     solely by a not-yet-arrived carrier is environment-dependent, so the worker
-//     must NOT memoize it — otherwise the later carrier-present resubmit would
-//     replay the stale false and PERMANENTLY reject a valid block. Once the
-//     carrier is present, the (now header-pure) true verdict IS memoized.
-BOOST_AUTO_TEST_CASE(rc_dc_worker_does_not_memoize_missing_carrier_verdict)
+// (h) ASYNC-WORKER MEMO INTEGRITY: the ENC-DR verdict is a pure function of the
+//     header. Missing optional carrier state falls through ExactReplay, and the
+//     resulting true verdict is memoized. Later carrier arrival does not change
+//     that verdict or its cache identity.
+BOOST_AUTO_TEST_CASE(rc_dc_worker_memoizes_exact_verdict_without_carrier)
 {
     const Consensus::Params p = MakeRCActiveParams(/*profile=*/2);
     constexpr int32_t kHeight = 10;
@@ -3086,20 +3074,22 @@ BOOST_AUTO_TEST_CASE(rc_dc_worker_does_not_memoize_missing_carrier_verdict)
     // Real predicate (no override), single worker thread.
     node::MatMulVerifyWorker worker{p, /*max_threads=*/1};
 
-    // (1) No carrier: the worker's verdict is false, and it MUST NOT be memoized.
+    // (1) No carrier: ExactReplay accepts and the header-pure verdict is memoized.
     {
         std::atomic<int> done{0};
-        std::atomic<bool> verdict{true};
+        std::atomic<bool> verdict{false};
         node::MatMulVerifyWorker::Job job{block, kHeight, /*parent_mtp=*/std::nullopt,
                                           [&](bool ok) { verdict = ok; done = 1; }};
         BOOST_REQUIRE(worker.Enqueue(job));
         wait_completion(done);
         BOOST_REQUIRE_EQUAL(done.load(), 1);
-        BOOST_CHECK(!verdict.load());                                  // fail-closed
-        BOOST_CHECK(!LookupMatMulEncDrVerdict(hash).has_value());      // NOT poisoned
+        BOOST_CHECK(verdict.load());
+        const auto memo = LookupMatMulEncDrVerdict(hash);
+        BOOST_REQUIRE(memo.has_value());
+        BOOST_CHECK(*memo);
     }
 
-    // (2) Carrier present: verdict is true and now (header-pure) IS memoized.
+    // (2) Carrier present: the memoized exact verdict remains true.
     {
         const auto pr = rc::ProveWinnerEpisodeV7(header, params_rc, kHeight, *target,
                                                  header.matmul_digest);
@@ -3117,7 +3107,7 @@ BOOST_AUTO_TEST_CASE(rc_dc_worker_does_not_memoize_missing_carrier_verdict)
         BOOST_REQUIRE(worker.Enqueue(job));
         wait_completion(done);
         BOOST_REQUIRE_EQUAL(done.load(), 1);
-        BOOST_CHECK(verdict.load());                                   // accepts with carrier
+        BOOST_CHECK(verdict.load());
         const auto memo = LookupMatMulEncDrVerdict(hash);
         BOOST_REQUIRE(memo.has_value());
         BOOST_CHECK(*memo);

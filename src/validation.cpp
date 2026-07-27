@@ -38,7 +38,8 @@
 #include <policy/rbf.h>
 #include <policy/settings.h>
 #include <policy/truc_policy.h>
-#include <matmul/matmul_v4_rc_freivalds_sampled.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
@@ -10252,10 +10253,23 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
     if (!params.IsMatMulV4Active(nHeight)) return std::nullopt;
     if (params.GetMatMulProfileParams(nHeight).commitment !=
         Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) return std::nullopt;
-    // A non-empty body payload is rejected cheaply at the seam (forbidden
-    // A/B payload, non-empty inline sketch) before any recompute: do not
-    // spend a worker slot on it.
-    if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() || !block.matrix_c_data.empty()) {
+    bool stage3_authority_job{false};
+    if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+        stage3_authority_job = params.IsMatMulRCFamilyActive(nHeight);
+    }
+    // Do not enqueue an oversized proof body only to parse/verify it before
+    // the ordinary contextual weight check. Stage-3 bytes are non-witness
+    // block bytes and therefore receive the full weight multiplier.
+    if (stage3_authority_job &&
+        GetBlockWeight(block) >
+            static_cast<int64_t>(params.nMaxBlockWeight)) {
+        return std::nullopt;
+    }
+    // A/B payloads remain forbidden. A C payload is admissible only for the
+    // durable Stage-3 authority: its proof body is verified off-thread and is
+    // cached by (header, registry, payload), never by the header alone.
+    if (!block.matrix_a_data.empty() || !block.matrix_b_data.empty() ||
+        (!stage3_authority_job && !block.matrix_c_data.empty())) {
         return std::nullopt;
     }
     // Phase B seal-as-PoW: tip verify needs parent MTP for sibling-slot V3
@@ -10276,15 +10290,18 @@ ChainstateManager::ClassifyMatMulEncDrRecompute(const CBlock& block,
             return std::nullopt;
         }
     }
-    // A verdict for this exact block is already memoized: the seam will reuse it
-    // without recomputing, so don't occupy a worker slot re-deriving the same answer.
-    if (verdict_pinned != nullptr) {
-        if (PinCachedMatMulEncDrVerdict(block.GetHash()).has_value()) {
-            *verdict_pinned = true;
+    // The legacy verdict memo is header-keyed. Stage-3 attachments are body
+    // data, so only VerifyRCStage3ConsensusAttachment's proof-aware cache may
+    // short-circuit them.
+    if (!stage3_authority_job) {
+        if (verdict_pinned != nullptr) {
+            if (PinCachedMatMulEncDrVerdict(block.GetHash()).has_value()) {
+                *verdict_pinned = true;
+                return std::nullopt;
+            }
+        } else if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) {
             return std::nullopt;
         }
-    } else if (LookupMatMulEncDrVerdict(block.GetHash()).has_value()) {
-        return std::nullopt;
     }
     return MatMulEncDrClassifyResult{nHeight, prev->GetMedianTimePast()};
 }
@@ -10402,6 +10419,74 @@ static bool ContextualCheckBlock(const CBlock& block,
         }
         const Consensus::MatMulProfileParams matmul_profile = consensusParams.GetMatMulProfileParams(nHeight);
         if (matmul_profile.commitment == Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
+            // Stage 3 replaces the header-only/sampled dispatch only after its
+            // compile-time authority gate is deliberately closed. Its proof is
+            // durable matrix_c_data, so all parse/binding/relation failures are
+            // BLOCK_MUTATED: the header hash is unchanged and a valid full
+            // block body may still exist (notably after compact reconstruction,
+            // whose wire format carries no Stage-3 body).
+            if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+                if (consensusParams.IsMatMulRCFamilyActive(nHeight)) {
+                    // The complete proof parser is bounded independently, but
+                    // a consensus-invalid oversized body must be rejected
+                    // before any recursive verification work is attempted.
+                    if (GetBlockWeight(block) >
+                        static_cast<int64_t>(
+                            consensusParams.nMaxBlockWeight)) {
+                        return state.Invalid(
+                            BlockValidationResult::BLOCK_CONSENSUS,
+                            "bad-blk-weight",
+                            "ContextualCheckBlock : weight limit failed");
+                    }
+                    const auto target = DeriveTarget(block.nBits, consensusParams.powLimit);
+                    if (!target.has_value()) {
+                        return state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                                             "bad-matmul-stage3-target",
+                                             "matmul Stage-3 target is noncanonical");
+                    }
+                    matmul::v4::rc::RCStage3AttachmentStatus stage3_status;
+                    std::string stage3_why;
+                    if (may_release_cs_main) {
+                        CsMainScopedRelease release_cs_main_for_stage3;
+                        stage3_status =
+                            matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
+                                block, consensusParams, nHeight,
+                                ArithToUint256(*target), &stage3_why);
+                    } else {
+                        stage3_status =
+                            matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
+                                block, consensusParams, nHeight,
+                                ArithToUint256(*target), &stage3_why);
+                    }
+                    // The status -> verdict mapping lives in
+                    // matmul_v4_rc_stage3_producer.h so it can be unit-tested
+                    // while this whole branch is compiled out by the authority
+                    // gate above (see RCStage3ConsensusVerdictFor). Behaviour is
+                    // unchanged from the inline form it replaces, except that an
+                    // unexpected status now fails closed to BLOCK_CONSENSUS
+                    // instead of falling through.
+                    const auto stage3_verdict =
+                        matmul::v4::rc::RCStage3ConsensusVerdictFor(stage3_status);
+                    switch (stage3_verdict.action) {
+                    case matmul::v4::rc::RCStage3ConsensusAction::AcceptProceed:
+                        return ContextualCheckBlockBodyOnly(
+                            block, state, chainman, pindexPrev);
+                    case matmul::v4::rc::RCStage3ConsensusAction::RejectMutation:
+                        return state.Invalid(
+                            BlockValidationResult::BLOCK_MUTATED,
+                            stage3_verdict.reject_reason,
+                            strprintf("matmul Stage-3 proof body rejected: %s",
+                                      stage3_why));
+                    case matmul::v4::rc::RCStage3ConsensusAction::RejectConsensus:
+                        break;
+                    }
+                    return state.Invalid(
+                        BlockValidationResult::BLOCK_CONSENSUS,
+                        stage3_verdict.reject_reason,
+                        strprintf("matmul Stage-3 authority failed closed: %s",
+                                  stage3_why));
+                }
+            }
             // v4.4 ENC-DR path (doc/btx-matmul-v4.4-tension-resolution.md §4.1):
             // the block carries ZERO consensus proof bytes. The header's
             // matmul_digest = H(sigma||Chat_true) is the whole commitment; the
@@ -10458,37 +10543,6 @@ static bool ContextualCheckBlock(const CBlock& block,
             // the MUTATED/permanent classification collapses (§4.1 clause 2)
             // and "high-hash" is always correct here.
             if (!recompute_assumevalid_trusted) {
-                // DATACENTER PROFILE-2 CARRIER-AVAILABILITY GATE (transient, not
-                // permanent). Under nMatMulRCProfile==2 the consensus authority
-                // (CheckMatMulProofOfWork_RC) FAILS CLOSED when the relayed
-                // sampled carrier has not yet arrived in the process-local store.
-                // On the getdata block-download path the carrier is guaranteed to
-                // precede the block by the strict serve-push in ProcessGetBlockData,
-                // but a block reconstructed LOCALLY from mempool via compact blocks
-                // (cmpctblock/blocktxn) is not fetched via getdata `block`, so the
-                // serve-push never fires and the carrier may simply be LATE. If we
-                // let the fail-closed miss fall through to BLOCK_CONSENSUS below,
-                // AcceptBlock marks the block BLOCK_FAILED_VALID PERMANENTLY (only
-                // BLOCK_MUTATED is spared), so a raced-but-VALID profile-2 block
-                // would be rejected forever — a consensus-split/chain-halt risk.
-                //
-                // Detect the missing carrier here and classify it TRANSIENT
-                // (BLOCK_MUTATED, which AcceptBlock does NOT mark failed), so
-                // net_processing can request the carrier (getrccarrier), hold the
-                // block, and resubmit on receipt. This does NOT weaken fail-closed:
-                // a PRESENT carrier still runs the full sampled verifier below (a
-                // present-but-invalid carrier is a real, permanent PoW fault); only
-                // a genuinely late carrier is deferred, and a block is NEVER
-                // accepted without an authenticated carrier. Profile-1/base and the
-                // coupled path are unaffected (they carry no sampled carrier).
-                if (consensusParams.IsMatMulRCActive(nHeight) &&
-                    !consensusParams.IsMatMulRCCoupledActive(nHeight) &&
-                    consensusParams.nMatMulRCProfile == 2 &&
-                    !matmul::v4::rc::RCFreivaldsCarrierStoreHave(block.GetHash())) {
-                    return state.Invalid(BlockValidationResult::BLOCK_MUTATED,
-                                         "matmul-rc-carrier-missing",
-                                         "matmul datacenter sampled carrier not yet available");
-                }
                 // G.1: run the ENC-DR predicate WITHOUT cs_main held. On the
                 // cache/accel-miss path it performs the full O(W) one-nonce
                 // reference GEMM; holding the global lock across it would let a

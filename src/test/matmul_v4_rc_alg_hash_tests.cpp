@@ -385,4 +385,250 @@ BOOST_AUTO_TEST_CASE(alg_hash_sponge_padding_and_fp3_embedding)
                 gf::Canonical(e[1]) != gf::Canonical(g[1]));
 }
 
+BOOST_AUTO_TEST_CASE(alg_hash_column_streaming_row_leaf_is_exact)
+{
+    constexpr uint32_t ROWS = 32;
+    for (const uint32_t width : {1U, 2U, 7U, 26U}) {
+        std::vector<std::vector<gf::Fp3>> columns(
+            width, std::vector<gf::Fp3>(ROWS));
+        std::vector<std::vector<gf::Fp3>> rows(
+            ROWS, std::vector<gf::Fp3>(width));
+        for (uint32_t column = 0; column < width; ++column) {
+            for (uint32_t row = 0; row < ROWS; ++row) {
+                const gf::Fp3 value{
+                    1000 + 31 * column + row,
+                    2000 + 17 * column + 3 * row,
+                    3000 + 13 * column + 5 * row};
+                columns[column][row] = value;
+                rows[row][column] = value;
+            }
+        }
+        ah::StreamingRowHasher streaming(ROWS);
+        std::string why;
+        for (const auto& column : columns) {
+            BOOST_REQUIRE_MESSAGE(
+                streaming.AbsorbColumn(column, &why), why);
+        }
+        std::vector<ah::Digest> actual;
+        BOOST_REQUIRE_MESSAGE(
+            streaming.Finalize(actual, &why), why);
+        BOOST_CHECK_EQUAL(streaming.Rows(), ROWS);
+        BOOST_CHECK_EQUAL(streaming.Columns(), width);
+        BOOST_CHECK_EQUAL(
+            streaming.WorkingSetBytes(),
+            ah::StreamingRowHasher::
+                WorkingSetBytesForRows(ROWS));
+        for (uint32_t row = 0; row < ROWS; ++row) {
+            const ah::Digest expected =
+                ah::LeafHashRow(rows[row], row);
+            for (uint32_t lane = 0;
+                 lane < ah::kAlgHashDigestLen; ++lane) {
+                BOOST_CHECK_EQUAL(
+                    gf::Canonical(actual[row][lane]),
+                    gf::Canonical(expected[lane]));
+            }
+        }
+        BOOST_CHECK(
+            !streaming.AbsorbColumn(columns[0], &why));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (g) Goldilocks reduction: the division-free Reduce128 must agree with the
+// plain `x % p` reference on EVERY 128-bit input. This arithmetic underpins
+// every field multiply, hence every Poseidon2 permutation, hence every Merkle
+// root and every proof in the system — a divergence here would corrupt
+// commitments silently rather than fail loudly, so it is pinned against an
+// independent oracle over edge cases as well as randoms.
+// ---------------------------------------------------------------------------
+namespace {
+
+/** Independent oracle: the obvious (slow) modulo. NOT the implementation. */
+[[nodiscard]] Fp ReferenceReduce128(unsigned __int128 x)
+{
+    return static_cast<Fp>(x % gf::kP);
+}
+
+[[nodiscard]] unsigned __int128 U128(uint64_t hi, uint64_t lo)
+{
+    return (static_cast<unsigned __int128>(hi) << 64) | lo;
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(gkr_field_reduce128_matches_modulo_reference)
+{
+    constexpr uint64_t P = gf::kP;
+    constexpr uint64_t EPS = 0xFFFFFFFFULL; // 2^64 mod p
+    constexpr uint64_t U64MAX = ~uint64_t{0};
+
+    // Structural edge values: zero, the canonicity boundary and its aliases,
+    // both sides of every power-of-two the reduction identity pivots on.
+    const std::vector<uint64_t> edges = {
+        0, 1, 2, EPS - 1, EPS, EPS + 1,
+        uint64_t{1} << 31, uint64_t{1} << 32, (uint64_t{1} << 32) + 1,
+        P - 2, P - 1, P, P + 1, P + EPS - 1,
+        U64MAX - 1, U64MAX,
+        uint64_t{1} << 63, (uint64_t{1} << 63) + 1,
+    };
+
+    // Full cross product of edge hi/lo halves — covers 2^96/2^64 coefficient
+    // extremes (hh = 0xFFFFFFFF, hl = 0xFFFFFFFF) including x = 2^128 − 1.
+    for (const uint64_t hi : edges) {
+        for (const uint64_t lo : edges) {
+            const unsigned __int128 x = U128(hi, lo);
+            const Fp got = gf::Reduce128(x);
+            BOOST_REQUIRE_MESSAGE(got == ReferenceReduce128(x),
+                                  "Reduce128 mismatch hi=" << hi << " lo=" << lo);
+            BOOST_REQUIRE_MESSAGE(got < P, "Reduce128 non-canonical hi=" << hi
+                                                                        << " lo=" << lo);
+        }
+    }
+
+    // Products of edge field values — the actual shape Mul() feeds in.
+    for (const uint64_t a : edges) {
+        for (const uint64_t b : edges) {
+            const unsigned __int128 x = static_cast<unsigned __int128>(a) * b;
+            BOOST_REQUIRE_EQUAL(gf::Reduce128(x), ReferenceReduce128(x));
+        }
+    }
+
+    // Randoms across the whole 128-bit range.
+    uint64_t st = 0xC0FFEE123456789ULL;
+    for (int i = 0; i < 200000; ++i) {
+        const uint64_t hi = SplitMix64(st);
+        const uint64_t lo = SplitMix64(st);
+        const unsigned __int128 x = U128(hi, lo);
+        const Fp got = gf::Reduce128(x);
+        BOOST_REQUIRE_MESSAGE(got == ReferenceReduce128(x),
+                              "Reduce128 random mismatch hi=" << hi << " lo=" << lo);
+        BOOST_REQUIRE(got < P);
+    }
+
+    // Mul is canonical and alias-insensitive: for a < 2^32−1 the value a+p is
+    // a distinct 64-bit encoding of the same field element and must multiply
+    // identically (Canonical() folds it back).
+    for (int i = 0; i < 20000; ++i) {
+        const uint64_t a = SplitMix64(st) % EPS; // a + P cannot overflow
+        const uint64_t b = SplitMix64(st) % P;
+        BOOST_REQUIRE_EQUAL(gf::Mul(a, b), gf::Mul(a + P, b));
+        BOOST_REQUIRE_EQUAL(gf::Mul(a, b), gf::Mul(b, a));
+        BOOST_REQUIRE(gf::Mul(a, b) < P);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (g2) Add is likewise division-free now. It MUST keep canonicalizing its
+// inputs: callers outside the hash core pass values in [p, 2^64), and a
+// variant that skips that step diverges on exactly the cases below. Pinned
+// against the previous 128-bit-widening form as an independent oracle.
+// ---------------------------------------------------------------------------
+namespace {
+
+/** Independent oracle: the previous widening implementation of Add. */
+[[nodiscard]] Fp ReferenceAdd(Fp a, Fp b)
+{
+    const unsigned __int128 s =
+        static_cast<unsigned __int128>(gf::Canonical(a)) + gf::Canonical(b);
+    return s >= gf::kP ? static_cast<Fp>(s - gf::kP) : static_cast<Fp>(s);
+}
+
+} // namespace
+
+BOOST_AUTO_TEST_CASE(gkr_field_add_matches_widening_reference)
+{
+    constexpr uint64_t P = gf::kP;
+    constexpr uint64_t EPS = 0xFFFFFFFFULL;
+    constexpr uint64_t U64MAX = ~uint64_t{0};
+
+    // Includes NON-CANONICAL encodings (>= p) on purpose — that is precisely
+    // where an over-eager rewrite breaks.
+    const std::vector<uint64_t> edges = {
+        0, 1, 2, EPS - 1, EPS, EPS + 1,
+        P - 2, P - 1, P, P + 1, P + EPS - 1,
+        U64MAX - 1, U64MAX, uint64_t{1} << 63, uint64_t{1} << 32,
+    };
+    for (const uint64_t a : edges) {
+        for (const uint64_t b : edges) {
+            const Fp got = gf::Add(a, b);
+            BOOST_REQUIRE_MESSAGE(got == ReferenceAdd(a, b),
+                                  "Add mismatch a=" << a << " b=" << b);
+            BOOST_REQUIRE_MESSAGE(got < P, "Add non-canonical a=" << a << " b=" << b);
+        }
+    }
+    uint64_t st = 0xADD5EEDULL;
+    for (int i = 0; i < 500000; ++i) {
+        const uint64_t a = SplitMix64(st);
+        const uint64_t b = SplitMix64(st);
+        const Fp got = gf::Add(a, b);
+        BOOST_REQUIRE_MESSAGE(got == ReferenceAdd(a, b),
+                              "Add random mismatch a=" << a << " b=" << b);
+        BOOST_REQUIRE(got < P);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// (h) Permutation bit-identity on edge states. The frozen vectors above pin
+// Permute on the zero and ramp states; this widens that to the canonicity
+// boundary and to non-canonical input encodings, which is where an arithmetic
+// rewrite would most plausibly diverge without tripping the golden vectors.
+// Both absorb implementations (SpongeHashFp/LeafHashRow and
+// StreamingRowHasher) route through Permute, so pinning Permute pins both.
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(alg_hash_permute_edge_states_and_noncanonical_aliases)
+{
+    constexpr uint64_t P = gf::kP;
+    constexpr uint64_t EPS = 0xFFFFFFFFULL;
+
+    // Non-canonical alias invariance: s and s + p (per lane, where that does
+    // not overflow) are the same field element, so Permute must agree.
+    uint64_t st = 0x5EEDF00D5EEDF00DULL;
+    for (int trial = 0; trial < 500; ++trial) {
+        ah::State a{}, b{};
+        for (uint32_t i = 0; i < ah::kAlgHashT; ++i) {
+            const uint64_t v = SplitMix64(st) % EPS; // v + P cannot overflow
+            a[i] = v;
+            b[i] = v + P;
+        }
+        ah::Permute(a);
+        ah::Permute(b);
+        for (uint32_t i = 0; i < ah::kAlgHashT; ++i) {
+            BOOST_REQUIRE_EQUAL(gf::Canonical(a[i]), gf::Canonical(b[i]));
+        }
+    }
+
+    // Extreme uniform states must permute to canonical output and must not
+    // collide with each other.
+    const std::vector<uint64_t> fills = {0, 1, EPS, P - 1, uint64_t{1} << 63};
+    std::vector<ah::State> outs;
+    for (const uint64_t f : fills) {
+        ah::State s{};
+        for (uint32_t i = 0; i < ah::kAlgHashT; ++i) s[i] = f;
+        ah::Permute(s);
+        for (uint32_t i = 0; i < ah::kAlgHashT; ++i) {
+            BOOST_REQUIRE_MESSAGE(gf::Canonical(s[i]) == s[i],
+                                  "Permute produced non-canonical lane for fill " << f);
+        }
+        outs.push_back(s);
+    }
+    for (size_t i = 0; i < outs.size(); ++i) {
+        for (size_t j = i + 1; j < outs.size(); ++j) {
+            BOOST_CHECK(outs[i] != outs[j]);
+        }
+    }
+
+    // The permutation stays a bijection on these edge states (layer-by-layer
+    // inverse composes to the identity) — catches a linear-layer rewrite that
+    // is self-consistent but no longer matches the frozen matrix.
+    for (const uint64_t f : fills) {
+        ah::State s{}, orig{};
+        for (uint32_t i = 0; i < ah::kAlgHashT; ++i) s[i] = orig[i] = f;
+        ah::Permute(s);
+        ah::InversePermute(s);
+        for (uint32_t i = 0; i < ah::kAlgHashT; ++i) {
+            BOOST_REQUIRE_EQUAL(gf::Canonical(s[i]), gf::Canonical(orig[i]));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

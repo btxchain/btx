@@ -1515,14 +1515,19 @@ BOOST_AUTO_TEST_CASE(gkr_v7_eval_argument_honest_and_forged)
 
     const auto ev = rc::EvalArgumentProve(claims, cols, seed);
     BOOST_REQUIRE_MESSAGE(ev.ok, ev.note);
+    // PATH A dual-α: the batch carries BOTH Lemma-1.2 witness pairs.
     auto all = cols;
     all.push_back(ev.f_coeffs);
     all.push_back(ev.g_coeffs);
+    all.push_back(ev.f2_coeffs);
+    all.push_back(ev.g2_coeffs);
+    BOOST_CHECK_EQUAL(ev.proof.f2_column, ev.proof.g_column + 1);
+    BOOST_CHECK_EQUAL(ev.proof.g2_column, ev.proof.g_column + 2);
     const auto bc = rc::FriBatchCommit(all, seed);
     BOOST_REQUIRE_MESSAGE(bc.ok, bc.note);
     std::string why;
     BOOST_REQUIRE(rc::FriBatchVerify(bc.proof, seed, &why));
-    // Honest openings verify.
+    // Honest openings verify (both aggregated identities vanish, all-component).
     BOOST_CHECK_MESSAGE(rc::EvalArgumentVerify(claims, bc.proof, ev.proof, seed, &why), why);
 
     // (a) Forged claim VALUE rejects (false ṽ(r) → identity fails at z1/z2).
@@ -1543,6 +1548,21 @@ BOOST_AUTO_TEST_CASE(gkr_v7_eval_argument_honest_and_forged)
         auto badb = bc.proof;
         badb.evals_z1[ev.proof.g_column].c0 ^= 1;
         // FriBatchVerify itself catches a forged OOD eval; the eval arg would too.
+        BOOST_CHECK(!rc::FriBatchVerify(badb, seed, &why));
+    }
+    // (d) DUAL-α TAMPER: a cheat that fixes the α#1 aggregate but not α#2 is
+    //     rejected — the second, independent identity does not vanish.
+    {
+        auto badp = ev.proof;
+        badp.sigma2.c0 ^= 1; // α#1 σ still matches; α#2 σ' now wrong.
+        BOOST_CHECK(!rc::EvalArgumentVerify(claims, bc.proof, badp, seed, &why));
+        BOOST_CHECK_MESSAGE(why == "eval:sigma2_mismatch", why);
+    }
+    // (e) DUAL-α TAMPER: forging only the α#2 witness column opening (f'/g')
+    //     breaks the second identity even though α#1 is untouched.
+    {
+        auto badb = bc.proof;
+        badb.evals_z2[ev.proof.g2_column].c1 ^= 1;
         BOOST_CHECK(!rc::FriBatchVerify(badb, seed, &why));
     }
 }

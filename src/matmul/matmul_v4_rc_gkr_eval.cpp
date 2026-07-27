@@ -114,15 +114,22 @@ uint256 MuBase(const std::vector<RCGkrOpeningClaim>& claims, const uint256& fs_s
     return Sha256dOf(b);
 }
 
-Fp2 MuChallenge(const uint256& base, uint32_t m)
+/** μ challenge for aggregation family `tag` at index m. PATH A draws two
+ *  INDEPENDENT families from the same μ-base via distinct domain tags
+ *  ("mu" = α#1, "mu2a" = α#2); the tag separation makes the two challenge
+ *  vectors pseudo-independent, so their SZ failure events multiply. */
+Fp2 MuChallengeTagged(const uint256& base, const char* tag, uint32_t m)
 {
     std::vector<unsigned char> b;
     b.insert(b.end(), base.begin(), base.end());
-    const char* tag = "mu";
-    b.insert(b.end(), tag, tag + 2);
+    b.insert(b.end(), tag, tag + std::strlen(tag));
     AppendLE32(b, m);
     return gkr_field::FromChallengeBytes2(Sha256dOf(b).data());
 }
+
+/** Domain tags for the dual-α aggregation families (must never collide). */
+constexpr char kMuTagAlpha1[] = "mu";
+constexpr char kMuTagAlpha2[] = "mu2a";
 
 /** q*_r(z) = z^{n-1}·q_r(z^{-1}) — coefficient-reversed eq-kernel, O(ν). */
 Fp2 QStarAt(const std::vector<Fp2>& r, const Fp2& z, uint32_t n)
@@ -171,48 +178,59 @@ RCGkrEvalArgumentProveResult EvalArgumentProve(const std::vector<RCGkrOpeningCla
     }
     const uint256 mu_base = MuBase(claims, fs_seed);
 
-    // σ = Σ_m μ_m·c_m and h(X) = X·Σ_m μ_m·P_{v_m}(X)·q*_{r_m}(X) (deg < 2n).
-    Fp2 sigma = Fp2::Zero();
-    std::vector<Fp2> h(2 * static_cast<size_t>(n), Fp2::Zero());
-    for (size_t m = 0; m < claims.size(); ++m) {
-        const Fp2 mu = MuChallenge(mu_base, static_cast<uint32_t>(m));
-        sigma = gkr_field::Add(sigma, gkr_field::Mul(mu, claims[m].value));
-
-        const std::vector<Fp2>& P = columns[claims[m].column_id];
-        const std::vector<Fp2> q = RCGkrEqKernelCoeffs(claims[m].point); // length n
-        // q*[j] = q[n-1-j]; h += μ·X·(P * q*).
-        for (size_t i = 0; i < P.size(); ++i) {
-            if (gkr_field::IsZero(P[i])) continue;
-            const Fp2 pw = gkr_field::Mul(mu, P[i]);
-            for (uint32_t j = 0; j < n; ++j) {
-                const Fp2& qc = q[n - 1 - j];
-                if (gkr_field::IsZero(qc)) continue;
-                const size_t k = i + j + 1; // +1 for the leading X
-                h[k] = gkr_field::Add(h[k], gkr_field::Mul(pw, qc));
-            }
-        }
-    }
-
-    // Lemma 1.2 witnesses. With H(X)=h(X)−σ (σ subtracted from the constant):
-    //   g_j = h_{j+n}                 (j = 0..n-1)
-    //   f_i = h_{i+1} + h_{i+1+n}     (i = 0..n-2)
+    // One aggregation family: given a μ domain `tag`, build σ = Σ_m μ_m·c_m and
+    // h(X) = X·Σ_m μ_m·P_{v_m}(X)·q*_{r_m}(X) (deg < 2n), then split into the
+    // Lemma-1.2 witnesses. With H(X)=h(X)−σ (σ subtracted from the constant):
+    //   g_j = h_{j+n}              (j = 0..n-1)
+    //   f_i = h_{i+1} + h_{i+1+n}  (i = 0..n-2)
     // Consistency H_0+H_n = c0−σ = 0 holds iff every claim is true; the
     // witnesses are well-defined regardless, so a false claim makes the
     // identity fail (by a nonzero constant, caught at both z_s).
-    res.g_coeffs.assign(n, Fp2::Zero());
-    res.f_coeffs.assign(n > 1 ? n - 1 : 1, Fp2::Zero());
-    for (uint32_t j = 0; j < n; ++j) res.g_coeffs[j] = h[static_cast<size_t>(j) + n];
-    for (uint32_t i = 0; i + 1 < n; ++i) {
-        res.f_coeffs[i] = gkr_field::Add(h[static_cast<size_t>(i) + 1],
-                                         h[static_cast<size_t>(i) + 1 + n]);
-    }
+    auto aggregate = [&](const char* tag, Fp2& sigma_out, std::vector<Fp2>& f_out,
+                         std::vector<Fp2>& g_out) {
+        sigma_out = Fp2::Zero();
+        std::vector<Fp2> h(2 * static_cast<size_t>(n), Fp2::Zero());
+        for (size_t m = 0; m < claims.size(); ++m) {
+            const Fp2 mu = MuChallengeTagged(mu_base, tag, static_cast<uint32_t>(m));
+            sigma_out = gkr_field::Add(sigma_out, gkr_field::Mul(mu, claims[m].value));
+
+            const std::vector<Fp2>& P = columns[claims[m].column_id];
+            const std::vector<Fp2> q = RCGkrEqKernelCoeffs(claims[m].point); // length n
+            // q*[j] = q[n-1-j]; h += μ·X·(P * q*).
+            for (size_t i = 0; i < P.size(); ++i) {
+                if (gkr_field::IsZero(P[i])) continue;
+                const Fp2 pw = gkr_field::Mul(mu, P[i]);
+                for (uint32_t j = 0; j < n; ++j) {
+                    const Fp2& qc = q[n - 1 - j];
+                    if (gkr_field::IsZero(qc)) continue;
+                    const size_t k = i + j + 1; // +1 for the leading X
+                    h[k] = gkr_field::Add(h[k], gkr_field::Mul(pw, qc));
+                }
+            }
+        }
+        g_out.assign(n, Fp2::Zero());
+        f_out.assign(n > 1 ? n - 1 : 1, Fp2::Zero());
+        for (uint32_t j = 0; j < n; ++j) g_out[j] = h[static_cast<size_t>(j) + n];
+        for (uint32_t i = 0; i + 1 < n; ++i) {
+            f_out[i] = gkr_field::Add(h[static_cast<size_t>(i) + 1],
+                                      h[static_cast<size_t>(i) + 1 + n]);
+        }
+    };
+
+    // PATH A dual-α: two INDEPENDENT aggregation families α#1 / α#2.
+    Fp2 sigma1, sigma2;
+    aggregate(kMuTagAlpha1, sigma1, res.f_coeffs, res.g_coeffs);
+    aggregate(kMuTagAlpha2, sigma2, res.f2_coeffs, res.g2_coeffs);
 
     res.proof.version = kRCGkrEvalArgVersion;
-    res.proof.sigma = sigma;
-    // f/g take the next two column ids after the epoch-1 columns (the caller
-    // appends f_coeffs then g_coeffs in that order).
+    res.proof.sigma = sigma1;
+    res.proof.sigma2 = sigma2;
+    // f,g,f',g' take the next FOUR column ids after the epoch-1 columns (the
+    // caller appends f_coeffs, g_coeffs, f2_coeffs, g2_coeffs in that order).
     res.proof.f_column = static_cast<uint32_t>(columns.size());
     res.proof.g_column = static_cast<uint32_t>(columns.size() + 1);
+    res.proof.f2_column = static_cast<uint32_t>(columns.size() + 2);
+    res.proof.g2_column = static_cast<uint32_t>(columns.size() + 3);
     res.ok = true;
     res.note = "ok";
     return res;
@@ -234,10 +252,12 @@ bool EvalArgumentVerify(const std::vector<RCGkrOpeningClaim>& claims, const FriB
     if (n == 0 || (n & (n - 1)) != 0) return fail("eval:n_not_pow2");
     const uint32_t nu = Log2Pow2(n);
 
-    // f/g must be real columns of the batch (their z-openings are bound by a
-    // PRIOR successful FriBatchVerify — the caller MUST have run it first).
+    // f/g and the dual-α f'/g' must be real columns of the batch (their
+    // z-openings are bound by a PRIOR successful FriBatchVerify — the caller
+    // MUST have run it first).
     const uint32_t ncols = static_cast<uint32_t>(batch.columns.size());
     if (proof.f_column >= ncols || proof.g_column >= ncols) return fail("eval:fg_col_range");
+    if (proof.f2_column >= ncols || proof.g2_column >= ncols) return fail("eval:fg2_col_range");
     if (batch.evals_z1.size() != ncols || batch.evals_z2.size() != ncols)
         return fail("eval:evals_shape");
 
@@ -246,20 +266,27 @@ bool EvalArgumentVerify(const std::vector<RCGkrOpeningClaim>& claims, const FriB
         if (c.point.size() != nu) return fail("eval:claim_point_dim");
     }
 
-    // Recompute μ and σ from the CLAIMS — proof.sigma is never trusted.
+    // Recompute the TWO independent μ families and σ's from the CLAIMS — the
+    // proof's σ/σ' are never trusted beyond an equality check.
     const uint256 mu_base = MuBase(claims, fs_seed);
-    Fp2 sigma = Fp2::Zero();
-    std::vector<Fp2> mu(claims.size());
+    Fp2 sigma1 = Fp2::Zero();
+    Fp2 sigma2 = Fp2::Zero();
+    std::vector<Fp2> mu1(claims.size());
+    std::vector<Fp2> mu2(claims.size());
     for (size_t m = 0; m < claims.size(); ++m) {
-        mu[m] = MuChallenge(mu_base, static_cast<uint32_t>(m));
-        sigma = gkr_field::Add(sigma, gkr_field::Mul(mu[m], claims[m].value));
+        mu1[m] = MuChallengeTagged(mu_base, kMuTagAlpha1, static_cast<uint32_t>(m));
+        mu2[m] = MuChallengeTagged(mu_base, kMuTagAlpha2, static_cast<uint32_t>(m));
+        sigma1 = gkr_field::Add(sigma1, gkr_field::Mul(mu1[m], claims[m].value));
+        sigma2 = gkr_field::Add(sigma2, gkr_field::Mul(mu2[m], claims[m].value));
     }
-    if (!gkr_field::Eq(sigma, proof.sigma)) return fail("eval:sigma_mismatch");
+    if (!gkr_field::Eq(sigma1, proof.sigma)) return fail("eval:sigma_mismatch");
+    if (!gkr_field::Eq(sigma2, proof.sigma2)) return fail("eval:sigma2_mismatch");
 
-    // Check the Lemma 1.2 identity at BOTH bound OOD points.
-    for (int s = 0; s < 2; ++s) {
-        const Fp2 z = (s == 0) ? batch.z1 : batch.z2;
-        const std::vector<Fp2>& ev = (s == 0) ? batch.evals_z1 : batch.evals_z2;
+    // One aggregated Lemma-1.2 identity at a bound OOD point z, for family
+    // (mu, sigma, f_col, g_col). ALL-component equality (every Fp2 coordinate,
+    // via gkr_field::Eq) — a cheat that fixes one coordinate but not all fails.
+    auto identity_holds = [&](const std::vector<Fp2>& mu, const Fp2& sigma, uint32_t f_col,
+                              uint32_t g_col, const Fp2& z, const std::vector<Fp2>& ev) -> bool {
         // LHS: h(z) = z·Σ_m μ_m·C_m(z)·q*_{r_m}(z).
         Fp2 lhs = Fp2::Zero();
         for (size_t m = 0; m < claims.size(); ++m) {
@@ -270,10 +297,20 @@ bool EvalArgumentVerify(const std::vector<RCGkrOpeningClaim>& claims, const FriB
         lhs = gkr_field::Mul(z, lhs);
         // RHS: g(z)·(z^n − 1) + z·f(z) + σ.
         const Fp2 zn_minus_1 = gkr_field::Sub(PowFp2(z, n), Fp2::One());
-        Fp2 rhs = gkr_field::Mul(ev[proof.g_column], zn_minus_1);
-        rhs = gkr_field::Add(rhs, gkr_field::Mul(z, ev[proof.f_column]));
+        Fp2 rhs = gkr_field::Mul(ev[g_col], zn_minus_1);
+        rhs = gkr_field::Add(rhs, gkr_field::Mul(z, ev[f_col]));
         rhs = gkr_field::Add(rhs, sigma);
-        if (!gkr_field::Eq(lhs, rhs)) return fail(s == 0 ? "eval:identity_z1" : "eval:identity_z2");
+        return gkr_field::Eq(lhs, rhs);
+    };
+
+    // BOTH dual-α identities must vanish at BOTH bound OOD points (four checks).
+    for (int s = 0; s < 2; ++s) {
+        const Fp2 z = (s == 0) ? batch.z1 : batch.z2;
+        const std::vector<Fp2>& ev = (s == 0) ? batch.evals_z1 : batch.evals_z2;
+        if (!identity_holds(mu1, sigma1, proof.f_column, proof.g_column, z, ev))
+            return fail(s == 0 ? "eval:identity_z1" : "eval:identity_z2");
+        if (!identity_holds(mu2, sigma2, proof.f2_column, proof.g2_column, z, ev))
+            return fail(s == 0 ? "eval:identity2_z1" : "eval:identity2_z2");
     }
     return true;
 }
@@ -873,7 +910,7 @@ RCGkrBatchedOpeningProveResult BatchedOpeningProveCore(
         res.note = "constr1:no_columns";
         return res;
     }
-    if (columns.size() + 2 > kRCFriBatchMaxColumns) {
+    if (columns.size() + 4 > kRCFriBatchMaxColumns) {
         res.note = "constr1:too_many_columns";
         return res;
     }
@@ -917,9 +954,13 @@ RCGkrBatchedOpeningProveResult BatchedOpeningProveCore(
         return res;
     }
     res.proof.eval = ev.proof;
+    // PATH A dual-α: append BOTH Lemma-1.2 witness pairs (f,g,f',g') to the
+    // ONE FriBatch so their dual-OOD/query openings ride the batch for free.
     std::vector<std::vector<Fp2>> all = columns;
     all.push_back(ev.f_coeffs);
     all.push_back(ev.g_coeffs);
+    all.push_back(ev.f2_coeffs);
+    all.push_back(ev.g2_coeffs);
 
     const auto bc = FriBatchCommit(all, fs_seed);
     if (!bc.ok) {
@@ -963,11 +1004,13 @@ bool BatchedOpeningVerify(const std::vector<RCGkrOpeningClaim>& claims,
     };
     if (proof.version != kRCGkrConstructionIVersion) return fail("constr1:version");
 
-    // Shape: exactly two Stage-2 columns (f,g) after the epoch-1 columns.
+    // Shape: exactly four Stage-2 columns (f,g,f',g') after the epoch-1
+    // columns (PATH A dual-α — two Lemma-1.2 witness pairs).
     const size_t n_cols = proof.batch.columns.size();
-    if (n_cols < 3) return fail("constr1:too_few_columns");
-    const uint32_t n_epoch1 = static_cast<uint32_t>(n_cols - 2);
-    if (proof.eval.f_column != n_epoch1 || proof.eval.g_column != n_epoch1 + 1) {
+    if (n_cols < 5) return fail("constr1:too_few_columns");
+    const uint32_t n_epoch1 = static_cast<uint32_t>(n_cols - 4);
+    if (proof.eval.f_column != n_epoch1 || proof.eval.g_column != n_epoch1 + 1 ||
+        proof.eval.f2_column != n_epoch1 + 2 || proof.eval.g2_column != n_epoch1 + 3) {
         return fail("constr1:fg_columns");
     }
     const uint32_t batch_n = proof.batch.n_coeffs;

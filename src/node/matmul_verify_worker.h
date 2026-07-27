@@ -37,11 +37,12 @@ namespace node {
  *     and a completion closure. Parent MTP is required for Phase B seal-as-PoW
  *     sibling-slot V3 seeds; Classify only enqueues seal heights when MTP can
  *     be supplied, and the pure predicate fails closed without it.
- *   - The worker computes only the pure predicate
- *     CheckMatMulProofOfWork_V4EncDr (never touching cs_main or
- *     g_msgproc_mutex), under the process-wide MatMulRecomputeSingleFlight
- *     leader/follower guard so duplicate deliveries of one hash collapse to a
- *     single recompute, then memoizes the verdict via CacheMatMulEncDrVerdict.
+ *   - The worker computes only the pure proof-of-work predicate (never
+ *     touching cs_main or g_msgproc_mutex). Legacy ENC-DR uses the
+ *     header-keyed MatMulRecomputeSingleFlight/verdict memo. Once Stage-3
+ *     authority is enabled, its body proof bypasses both and uses the
+ *     proof-aware (header, registry, payload) cache/single-flight owned by
+ *     VerifyRCStage3ConsensusAttachment.
  *   - The completion (still on the worker thread) re-enters the ordinary
  *     acceptance machinery (ProcessNewBlock); the validation.cpp ENC-DR seam
  *     short-circuits on the memoized verdict, so the expensive step is not
@@ -67,9 +68,10 @@ public:
         //! dispatcher classifies a recompute (prev is known). Phase B seal
         //! EncDr fails closed if missing.
         std::optional<int64_t> parent_median_time_past;
-        //! Runs on the worker thread after the verdict is memoized. May be
-        //! empty. NOT run for jobs still queued when Stop() destroys the queue
-        //! (their captured RAII state releases resources on destruction).
+        //! Runs on the worker thread after verification (and after the
+        //! applicable legacy or proof-aware memo is updated). May be empty.
+        //! NOT run for jobs still queued when Stop() destroys the queue (their
+        //! captured RAII state releases resources on destruction).
         std::function<void(bool encdr_ok)> completion;
     };
 

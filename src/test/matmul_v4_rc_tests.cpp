@@ -1030,13 +1030,12 @@ BOOST_AUTO_TEST_CASE(rc_dos_admission_separate_from_v4_lt)
     BOOST_CHECK(!CanStartMatMulRCVerification(1, wu, p, 100));
     BOOST_CHECK(!CanStartMatMulRCVerification(0, wu + 1, p, 100));
 
-    // Consensus dims, PROFILE 2 (datacenter): the authority is the SUBLINEAR
-    // Freivalds sampled verifier, so admission is priced by the λ-sampled verify
-    // — flat in episode depth and MUCH cheaper than the 16× full-episode MACs.
-    // A datacenter block must not be throttled by its compute size.
+    // Consensus dims, PROFILE 2 (datacenter): the sampled carrier is only a
+    // precheck. Until Stage 3 is complete, ExactReplay remains authoritative,
+    // so admission is priced by the full datacenter episode.
     p.nMatMulRCProfile = 2;
     const uint32_t wu_dc = MatMulRCWorkUnits(p, 100);
-    BOOST_CHECK_LE(wu_dc, wu);  // sublinear verify ⇒ no MORE units than epoch-0 replay
+    BOOST_CHECK_GT(wu_dc, wu);
 }
 
 // --- Stage H required-test scaffolding (final-form build spec) -------------

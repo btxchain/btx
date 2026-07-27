@@ -182,6 +182,12 @@ public:
     std::vector<uint32_t> matrix_b_data;
     // Optional Freivalds' product matrix payload: the claimed C' = A'B'.
     // Enables O(n^2) probabilistic verification instead of O(n^3) recomputation.
+    //
+    // Reserved Stage-3 use: after its separate compile-time/height gates close,
+    // this same already-durable vector carries the versioned word envelope from
+    // matmul_v4_rc_stage3.h. The magic + exact byte length distinguish it from
+    // a legacy product matrix. While Stage-3 authority is OFF, existing
+    // contextual DIGEST_RECOMPUTE rules continue to require this vector empty.
     std::vector<uint32_t> matrix_c_data;
 
     // Memory-only flags for caching expensive checks

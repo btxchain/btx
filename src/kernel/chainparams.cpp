@@ -328,10 +328,9 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     }
 
     // ENC_RC / Resident Curriculum (doc/btx-matmul-v4.4-resident-curriculum-unified-proposal).
-    // DATACENTER-PROFILE AGGRESSIVE ACTIVATION (owner-authorized, design §5/§6):
-    // nMatMulRCProfile defaults to 2 (datacenter) network-wide; under it the
-    // Freivalds sampled verifier is the consensus authority (deterrence-based,
-    // ~0.27% residual — NOT audited). The three coupled pieces (profile 2 +
+    // DATACENTER-PROFILE SHAPE (design §5/§6): nMatMulRCProfile defaults to 2
+    // network-wide. Its Freivalds sampled carrier is optional relay/precheck
+    // state, never consensus authority. The three coupled pieces (profile 2 +
     // finite height + ~16× (16422/1027) ASERT) must activate TOGETHER. Public nets still stay
     // fail-closed at height INT32_MAX with ASERT 1/1 because a finite PUBLIC RC
     // height rides the genuine external no-inversion gate
@@ -596,8 +595,10 @@ public:
         consensus.fMatMulLTSealAsPoW = false;
         // ENC_RC DATACENTER PROFILE (owner-authorized aggressive activation).
         // nMatMulRCProfile defaults to 2 (datacenter) from Consensus::Params, so
-        // mainnet SELECTS the datacenter dims + the Freivalds sampled consensus
-        // authority. The ACTIVATION HEIGHT is the named placeholder
+        // mainnet selects the datacenter dimensions. The Freivalds sampled
+        // carrier is only a relay/precheck; it is never consensus authority.
+        // Complete succinct Stage-3 authority remains fail-closed and exact
+        // replay is the fallback. The ACTIVATION HEIGHT is the named placeholder
         // kRCDatacenterActivationHeight (owner sets the exact fork block at
         // deploy), but it is NOT assigned to consensus.nMatMulRCHeight here: RC
         // stays INT32_MAX (disabled) because ENC_RC rides IsMatMulV4Active (v4 is
@@ -1665,6 +1666,39 @@ public:
         consensus.nMatMulLTMaxPendingVerifications = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulLTGlobalVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
         consensus.nMatMulLTPeerVerifyBudgetPerMin = std::numeric_limits<uint32_t>::max();
+        // ENC_RC / ENC_RC_COUPLED: HARD-FORK BRANCH DEFAULT-ON (PR-89 posture).
+        // matmul-4.6-v3 (ENC_RC_COUPLED profile 3 = V3 production, the default
+        // nMatMulRCCoupledProfile) + the RC episode are the DEFAULT consensus path
+        // on regtest — the new-consensus regime is the default, NOT gated behind a
+        // flag that defaults off. RC/Coupled activate at 101, exactly ONE height
+        // ABOVE the unified v4/BMX4C/DRLT flag day (100). The +1 stagger is REQUIRED,
+        // not cosmetic: the RC episode default profile is 2 (datacenter), whose
+        // one-time ASERT rescale is the non-inert 16422/1027 (~16×) auto-applied
+        // below. ValidateMatMulAsertParams (pow.cpp, AUDIT C5) rejects a NON-inert
+        // rescale whose height collides with an earlier ASERT branch — a datacenter
+        // RC re-anchor sharing height 100 with v4/BMX4C/DRLT would be silently
+        // shadowed, so it must own a distinct dispatch height. This mirrors the
+        // documented mainnet deploy shape (v4 flag day, THEN datacenter RC at a
+        // distinct higher height with the 16422/1027 rescale — see the CMainParams
+        // ENC_RC comment). Coupled == RC (both 101): GetMatMulEncodingProfile
+        // surfaces ENC_RC_COUPLED as the governing puzzle from 101; V3 is "4.6-v3".
+        // Toy dims are REQUIRED for CI-scale mining (consensus n_ctx=786432 is not
+        // functional-test runnable). The profile-2 one-time ASERT 16422/1027 rescale
+        // and the tip-verify budget unthrottle are applied automatically below (the
+        // same code the -regtestrc* flags used to trigger), keyed on the now-finite
+        // RC height. Public nets stay INT32_MAX / fail-closed
+        // (AssertBMX4CConstructionInvariants still requires
+        // BTX_MATMUL_NO_INVERSION_GATE_RATIFIED for any finite public height —
+        // unflipped). Stage-3 SUCCINCT authority remains compile-time disabled
+        // (kRCStage3SuccinctAuthorityReady == false); this default-on config
+        // exercises the RC-family workload with ExactReplay as the authority until
+        // the end-to-end succinct harness lands and the readiness gates are flipped.
+        // A finite RC height can still be refined per-component by the regtest
+        // -regtestrc*height / -regtestrctoydims overrides applied further below.
+        consensus.nMatMulRCHeight = 101;
+        consensus.nMatMulRCCoupledHeight = 101;
+        consensus.fMatMulRCUseToyDims = true;
+        consensus.fMatMulRCCoupledUseToyDims = true;
         consensus.nPowTargetSpacingFastMs = 250;
         consensus.nFastMineDifficultyScale = 4;
         consensus.nPowTargetSpacingNormal = 90;
@@ -1768,9 +1802,10 @@ public:
         }
         // ENC_RC episode profile selector (design §6.1(A)): regtest may switch to
         // the datacenter dims (profile 2, also the network-wide default) alongside
-        // a finite nMatMulRCHeight so the datacenter episode + Freivalds sampled
-        // consensus authority are TESTABLE. Invalid values (≠{1,2}) fail closed in
-        // AssertBMX4CConstructionInvariants.
+        // a finite nMatMulRCHeight so the datacenter episode, optional sampled
+        // precheck, and exact-replay authority are testable. Stage-3 succinct
+        // authority remains independently compile-time disabled. Invalid values
+        // (≠{1,2}) fail closed in AssertBMX4CConstructionInvariants.
         if (opts.matmul_rc_profile.has_value()) {
             consensus.nMatMulRCProfile = *opts.matmul_rc_profile;
         }

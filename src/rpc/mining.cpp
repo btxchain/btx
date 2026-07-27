@@ -4982,10 +4982,32 @@ static bool GenerateBlock(ChainstateManager& chainman, CBlock&& block, uint64_t&
         // (now-finalized) block hash and clear the in-body sketch, so the block
         // serializes digest-only; the winner MAY then serve the sketch to peers
         // via the best-effort getmmsketch/mmsketch cache transport.
-        if (consensus.IsMatMulV4Active(next_height) &&
-            consensus.GetMatMulProfileParams(next_height).commitment ==
-                Consensus::MatMulCommitmentScheme::DIGEST_RECOMPUTE) {
-            OffloadMatMulV4SketchToCache(block);
+        //
+        // PR-89 item 5: route through FinalizeMatMulSolvedBlockForProduction
+        // rather than calling OffloadMatMulV4SketchToCache directly. The direct
+        // call bypassed FinalizeMatMulSolvedBlock's RC-family guard entirely, so
+        // once the Stage-3 authority gate closes this site would have offloaded
+        // (and thereby destroyed) the proof body it must instead attach. The
+        // production finalizer performs the Stage-3 attachment first and only
+        // then applies the ENC-DR offload.
+        //
+        // While the Stage-3 gate is false this differs from the previous code in
+        // exactly one respect, and deliberately: it now goes through the same
+        // FinalizeMatMulSolvedBlock the OTHER two producers already use
+        // (node/interfaces.cpp submitSolution, test/util/mining.cpp), so this
+        // site also picks up that function's LT seal-as-PoW body clear. That
+        // branch is inert on every shipped network (DRLT is INT32_MAX), and
+        // having the three producer paths agree is the point of a central
+        // finalizer.
+        {
+            std::string finalize_why;
+            if (!FinalizeMatMulSolvedBlockForProduction(
+                    block, consensus, next_height, &finalize_why)) {
+                cleanup_watcher();
+                throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                   "unable to finalize solved MatMul block: " +
+                                       finalize_why);
+            }
         }
         // Withdrawn HeaderPoW experiment: the helper is a no-op under every
         // shipped network's UINT32_MAX sentinel. nNonce is NOT in the fixed

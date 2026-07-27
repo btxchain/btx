@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -287,12 +288,17 @@ BuildSinglePermCompressSystem(uint32_t n_rows);
 // deliverable, checked by the differential test (§6 Piece 4b).
 //
 // LAYOUT CHOICE (this build): WIDE, one-query-per-row. Each of the child FRI's
-// Q query sites occupies ONE V_CS trace row; every constraint is kEverywhere
-// and reads only `cur`, so there is no cross-row chaining, no per-segment
-// kLastRow boundary, and no selector bookkeeping — the simplest structure that
-// is a faithful mirror. A row lays the per-query hash-permutation blocks side
-// by side (flattened 130-cell Piece-3 blocks) and wires each block's virtual
-// output (PermOutputLane) into the next block's input within the same row. The
+// Q query sites occupies ONE V_CS trace row. A row lays the per-query
+// hash-permutation blocks side by side (flattened 130-cell Piece-3 blocks) and
+// wires each block's virtual output (PermOutputLane) into the next block's
+// input within the same row. Supplemental child-proof openings authenticate
+// the shifted next row against row_commit and the current trace-only row
+// against R_T. Thus child transition/first/last constraints are evaluated
+// directly at (cur,next), with their coset selector values pinned as
+// preprocessed columns. All V_CS rules themselves remain kEverywhere because
+// each V_CS row is an independent child query site.
+//
+// The
 // child FRI's SHARED public roots (row_commit, fold-layer roots) are global
 // constants; the PER-QUERY public data (query index, fold domain points, y,
 // Z_H(y), …) are preprocessed columns pinned through the batch dual-OOD DEEP
@@ -320,6 +326,15 @@ struct ChildPublicInputs {
     alg_hash::Digest row_commit_root{};
     alg_hash::Digest rt_root{};                       // trace_commit R_T
     std::vector<alg_hash::Digest> fold_roots;         // fold_layers[l].root, l<n_folds
+    // Per-endpoint Poseidon VectorRootAlg AUTHORITY roots the child committed,
+    // one per RequiredRCStage3RelationEndpoints(role) IN THAT ORDER. The Stage-3
+    // role-AIR resolver pins each in-trace opening block to the endpoint's
+    // committed root from here — never a canonical stand-in — so the opening
+    // authenticates the root the child genuinely committed. Bound (not free) via
+    // WriteChildPI -> ComputeRCStage3RecursiveChildPinsCommitment ->
+    // fixed_role_commitment (absorbed before any FS challenge). Empty for
+    // children carrying no in-trace opened endpoints (legacy/toy pins).
+    std::vector<alg_hash::Digest> endpoint_authority_roots;
     // FS scalars (public inputs, not arithmetized).
     Fp3 fri_lambda{};
     Fp3 z1{};
@@ -328,6 +343,13 @@ struct ChildPublicInputs {
     Fp3 w2{};
     Fp3 final_value{};
     Fp3 air_lambda{};                                 // airq_lambda (AIR batching)
+    /**
+     * V5 independent-coordinate FRI batching coefficients. Empty means the
+     * legacy V3 vector [1, fri_lambda, ...]. When nonempty its length is W+1
+     * and V_CS uses it directly in U(X), v1 and v2.
+     */
+    std::vector<Fp3> fri_batch_coefficients;
+    bool independent_fri_batching{false};
     std::vector<Fp3> fold_challenges;                 // beta_l
     std::vector<uint32_t> column_len;                 // W+1 entries
     std::vector<Fp3> evals_z1;                         // W+1
@@ -355,7 +377,156 @@ struct VerifierAirFamilies {
     bool fold{true};          // (B/C/E) fold even/odd paths + HalfDomainFoldPair
     bool deep{true};          // (E) dual-OOD DEEP + fold-path leaf consistency
     bool per_point{true};     // (D) C(y) = Q(y)·Z_H(y)
+    bool next_row{true};      // supplemental full next-row path → row_commit_root
+    bool trace_binding{true}; // supplemental trace-only current path → R_T
 };
+
+/**
+ * Immutable location of one row-commitment digest limb in the normalized
+ * verifier witness. The value is the affine output of the final permutation
+ * on that child's authenticated row-Merkle path, not a copied public input.
+ */
+struct VerifierAirRowRootOutput {
+    uint32_t child_index{0};
+    uint32_t digest_limb{0};
+    uint32_t terminal_permutation_base{0};
+};
+
+enum class VerifierAirTranscriptOutputKind : uint8_t {
+    RowRoot = 1,
+    TraceRoot = 2,
+    EvaluationZ1 = 3,
+    EvaluationZ2 = 4,
+    FoldRoot = 5,
+};
+
+/**
+ * Immutable source of one base-field transcript word in the normalized V5
+ * verifier witness. Digest words are affine terminal-permutation outputs.
+ * Evaluation words are coordinates of witness columns consumed by the V5
+ * DEEP identity; they are not copied host fixtures.
+ */
+struct VerifierAirTranscriptOutput {
+    VerifierAirTranscriptOutputKind kind{
+        VerifierAirTranscriptOutputKind::RowRoot};
+    uint32_t child_index{0};
+    /** Digest limb, evaluation-column index, or fold index. */
+    uint32_t item_index{0};
+    /** Fp3 coordinate for evaluations, or digest limb for a fold root. */
+    uint32_t coordinate{0};
+    /** Permutation base for roots, direct witness column for evaluations. */
+    uint32_t source_column{0};
+    /** Human-readable name of the V5 equation consuming this source. */
+    const char* equation_consumer{nullptr};
+};
+
+/** Ordered child-major, digest-limb-minor row-root output map. */
+[[nodiscard]] std::vector<VerifierAirRowRootOutput>
+DescribeVerifierAIRRowRootOutputs(
+    const std::vector<ChildPublicInputs>& pis,
+    const VerifierAirFamilies& families = {});
+
+/** Evaluate a mapped row-root output on one normalized V_CS witness row. */
+[[nodiscard]] Fp3 EvaluateVerifierAIRRowRootOutput(
+    const VerifierAirRowRootOutput& output,
+    const std::vector<Fp3>& row);
+
+/**
+ * Degree-two selected alias:
+ *   selector * (export - mapped_row_root_output) = 0.
+ *
+ * The selector is a verifier-pinned preprocessed column. This is used by the
+ * same-trace V5->V6 time-multiplexed export bus.
+ */
+[[nodiscard]] air_quotient::AirConstraint<Fp3>
+BuildVerifierAIRRowRootExportConstraint(
+    const VerifierAirRowRootOutput& output,
+    uint32_t export_column,
+    uint32_t selector_column);
+
+/**
+ * Complete V6 payload order: all ordered row roots first, followed by each
+ * child's trace root, z1 evaluations, z2 evaluations and fold roots.
+ */
+[[nodiscard]] std::vector<VerifierAirTranscriptOutput>
+DescribeVerifierAIRFullTranscriptOutputs(
+    const std::vector<ChildPublicInputs>& pis,
+    const VerifierAirFamilies& families = {});
+
+/** Evaluate one transcript output as a base-field embedding in Fp3. */
+[[nodiscard]] Fp3 EvaluateVerifierAIRTranscriptOutput(
+    const VerifierAirTranscriptOutput& output,
+    const std::vector<Fp3>& row);
+
+/** Degree-two selected alias from a V5 transcript output to the export bus. */
+[[nodiscard]] air_quotient::AirConstraint<Fp3>
+BuildVerifierAIRTranscriptExportConstraint(
+    const VerifierAirTranscriptOutput& output,
+    uint32_t export_column,
+    uint32_t selector_column);
+
+/**
+ * Same-trace output expressions consumed by the normalized arity-four parent.
+ *
+ * Unlike the older MultiRow-V2 EXPECTED columns, every expression below is
+ * read from a cell already consumed by an executable V_CS family:
+ *  - current/next/q values are absorbed row-opening cells;
+ *  - query indices and evaluation points are the canonical V_CS query cells;
+ *  - the AIR batching challenge is the exact public scalar used by
+ *    vcs.perpoint; and
+ *  - row/trace roots are terminal permutation outputs, not copied constants.
+ *
+ * Fiat-Shamir derivation of the public scalar remains outside V_CS.  Exporting
+ * it here closes the copy seam but deliberately does not claim SHA replay.
+ */
+enum class VerifierAirParentOutputKind : uint8_t {
+    CurrentOpening = 1,
+    NextOpening = 2,
+    QuotientOpening = 3,
+    QueryIndex = 4,
+    EvaluationPoint = 5,
+    NextEvaluationPoint = 6,
+    AirConstraintChallenge = 7,
+    RowRootLimb = 8,
+    TraceRootLimb = 9,
+};
+
+struct VerifierAirParentOutput {
+    VerifierAirParentOutputKind kind{
+        VerifierAirParentOutputKind::CurrentOpening};
+    uint32_t child_index{0};
+    uint32_t item_index{0};
+    uint32_t source_column{0};
+    uint32_t auxiliary_column{0};
+    uint32_t terminal_permutation_base{0};
+    std::vector<uint32_t> row_leaf_blocks;
+    Fp3 public_scalar{};
+};
+
+/**
+ * Describe the immutable slot-output map for one normalized V_CS child.
+ * The map is shape-only and is identical on every verifier trace row.
+ */
+[[nodiscard]] std::vector<VerifierAirParentOutput>
+DescribeVerifierAIRParentOutputs(
+    const std::vector<ChildPublicInputs>& pis,
+    uint32_t child_index,
+    const VerifierAirFamilies& families = {});
+
+/** Evaluate one mapped output on one normalized V_CS witness row. */
+[[nodiscard]] Fp3 EvaluateVerifierAIRParentOutput(
+    const VerifierAirParentOutput& output,
+    const std::vector<Fp3>& row);
+
+/**
+ * Degree-two selected same-trace alias:
+ *   selector * (export - mapped_vcs_output) = 0.
+ */
+[[nodiscard]] air_quotient::AirConstraint<Fp3>
+BuildVerifierAIRParentOutputConstraint(
+    const VerifierAirParentOutput& output,
+    uint32_t export_column,
+    uint32_t selector_column);
 
 /** The measured V_CS shape (spec §3.4 cell-budget gate). */
 struct VerifierAirMeasurement {
@@ -415,6 +586,22 @@ BuildAggregateWitness(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
                       const std::vector<air_quotient::AirQuotientProof<Fp3, AggregateWitness::AlgB3>>& children,
                       const uint256& child_fs_seed, const VerifierAirFamilies& families = {});
 
+/**
+ * Heterogeneous public-statement form used by binary recursion nodes.
+ * Every child has its own pinned constraint system and independent FS seed;
+ * the normalized parent still shares one verifier trace. Relation shapes
+ * must be compatible with the selected V_CS layout, but proof-specific
+ * preprocessed pins and transcript challenges need not be equal.
+ */
+[[nodiscard]] AggregateWitness
+BuildAggregateWitnessHeterogeneous(
+    const std::vector<air_quotient::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<
+        air_quotient::AirQuotientProof<
+            Fp3, AggregateWitness::AlgB3>>& children,
+    const std::vector<uint256>& child_fs_seeds,
+    const VerifierAirFamilies& families = {});
+
 /** Count constraints that fail to vanish on their applicable rows of H (fast,
  *  no FRI). 0 ⇔ the witness is a satisfying assignment. Reports the first
  *  offending (row, constraint name) if pointers are given. */
@@ -422,6 +609,138 @@ BuildAggregateWitness(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
 CountWitnessViolationsOnH(const air_quotient::AirConstraintSystem<Fp3>& cs,
                           const std::vector<std::vector<Fp3>>& columns,
                           uint32_t* first_row = nullptr, std::string* first_name = nullptr);
+
+// ---------------------------------------------------------------------------
+// Dual-Q128/V5 child adapter.
+//
+// Design A (native adapter) verifies the complete dual envelope on the host
+// and commits its exact finite transcript into the parent Fiat-Shamir seed.
+// Design B (selected below) additionally normalizes the two V5 lanes into two
+// ordinary V_CS child blocks, so the parent AIR proves the Merkle/fold/DEEP/
+// quotient equations for both ordered lanes.  SHA256d Fiat-Shamir derivation
+// and the envelope master/child-binding hashes are still host checked, not AIR
+// equations; the result therefore remains an R&D recursive proof and cannot
+// enable consensus authority.
+// ---------------------------------------------------------------------------
+
+using DualAlgB3 = air_quotient::AirFriBackendAlgDual<Fp3>;
+using DualAlgAirProof = air_quotient::AirQuotientProof<Fp3, DualAlgB3>;
+
+struct DualV5RecursiveChildPin {
+    uint256 air_proof_commitment{};
+    uint256 transcript_commitment{};
+    uint256 master_statement_binding{};
+    std::array<uint256, kRCFri3AlgDualNumLanes> lane_child_binding{};
+    std::array<uint256, kRCFri3AlgDualNumLanes> lane_row_root{};
+    /** Diagnostic host reports. These bits are seed-bound metadata, not
+     * proof-derived facts inside the parent AIR. An adversarial prover can set
+     * them; consensus must never treat them as recursive verification. */
+    bool host_reports_native_air_accepted{false};
+    bool host_reports_exact_transcript_replayed{false};
+    bool host_reports_ordered_lane_binding_checked{false};
+};
+
+/** Canonical commitment to the complete V5 envelope plus supplemental AIR
+ * next-row/trace-binding openings. */
+[[nodiscard]] uint256
+ComputeDualV5AirProofCommitment(const DualAlgAirProof& proof);
+
+/** Commitment to every draw in the fixed finite V5 transcript witness. */
+[[nodiscard]] uint256
+ComputeDualV5TranscriptCommitment(
+    const Fri3AlgDualTranscriptWitness& transcript);
+
+/** Commitment used to bind the ordered child pins into the parent FS seed. */
+[[nodiscard]] uint256
+CommitDualV5RecursiveChildPins(
+    const std::vector<DualV5RecursiveChildPin>& pins);
+
+struct DualV5AggregateWitness {
+    bool ok{false};
+    std::string note;
+    /** Two normalized V_CS blocks per logical dual proof, lane 0 then lane 1. */
+    AggregateWitness normalized;
+    std::vector<DualV5RecursiveChildPin> child_pins;
+    uint256 child_statement_commitment{};
+    uint64_t native_verify_micros{0};
+    uint64_t transcript_replay_micros{0};
+    uint64_t normalized_witness_micros{0};
+    uint64_t normalized_scan_micros{0};
+    uint32_t normalized_violations{0};
+};
+
+/**
+ * Fail-closed direct V5 child consumption. Native verification and the exact
+ * finite transcript replay happen before any witness is emitted. The two
+ * ordered lanes are then represented as two V_CS blocks and scanned.
+ */
+[[nodiscard]] DualV5AggregateWitness
+BuildDualV5AggregateWitness(
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<DualAlgAirProof>& children,
+    const uint256& child_fs_seed,
+    const VerifierAirFamilies& families = {});
+
+struct DualV5AggregateResult {
+    bool ok{false};
+    bool witness_satisfies{false};
+    std::string note;
+    DualAlgAirProof proof;
+    std::vector<ChildPublicInputs> lane_pis;
+    std::vector<DualV5RecursiveChildPin> child_pins;
+    uint256 child_statement_commitment{};
+    uint256 effective_fs_seed{};
+    VerifierAirMeasurement measurement;
+    uint64_t root_prove_micros{0};
+    bool all_vcs_families_enabled{false};
+    bool production_semantics_complete{false};
+};
+
+/**
+ * Produce a dual-Q128/V5 parent over the normalized two-lane V_CS witness.
+ * This gives a self-similar proof type for experimental aggregation. It does
+ * not claim complete recursion until SHA256d transcript/master-binding
+ * equations are represented inside the parent AIR.
+ */
+[[nodiscard]] DualV5AggregateResult
+ProveAggregateDualV5Checked(
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<DualAlgAirProof>& children,
+    const uint256& child_fs_seed,
+    const uint256& parent_fs_seed,
+    const VerifierAirFamilies& families = {});
+
+/**
+ * Diagnostic verifier for the normalized V5 parent and ordered child-pin
+ * commitment. The child pins contain host reports and the parent AIR still
+ * omits SHA256d/master-binding equations. This function is deliberately named
+ * Diagnostic so it cannot be mistaken for recursive consensus verification.
+ */
+[[nodiscard]] bool
+VerifyAggregateDualV5Diagnostic(
+    const DualAlgAirProof& root,
+    const std::vector<ChildPublicInputs>& lane_pis,
+    const std::vector<DualV5RecursiveChildPin>& child_pins,
+    const uint256& parent_fs_seed,
+    const VerifierAirFamilies& families = {},
+    std::string* why = nullptr);
+
+inline constexpr bool kDualV5NativeChildAdapterExecutable = true;
+inline constexpr bool kDualV5NormalizedPartialVerifierAirExecutable = true;
+inline constexpr bool kDualV5CompleteVerifierAirExecutable = false;
+inline constexpr bool kDualV5FiatShamirEquationsInAir = false;
+inline constexpr bool kDualV5MasterBindingEquationsInAir = false;
+inline constexpr bool kDualV5TraceBindingOpeningsInAir = true;
+inline constexpr bool kDualV5TransitionNextOpeningsInAir = true;
+/** Ordered two-lane row-root terminals have immutable witness-output maps. */
+inline constexpr bool kDualV5RowRootExportBusInAir = true;
+/** Roots and evaluation coordinates have complete named V5 witness maps. */
+inline constexpr bool kDualV5FullTranscriptExportBusInAir = true;
+inline constexpr bool kDualV5RecursiveConsensusAuthority = false;
+static_assert(!kDualV5CompleteVerifierAirExecutable);
+static_assert(kDualV5RowRootExportBusInAir);
+static_assert(kDualV5FullTranscriptExportBusInAir);
+static_assert(!kDualV5RecursiveConsensusAuthority);
 
 /** Result of aggregating k child proofs into one parent proof (§4.1). */
 struct AggregateResult {
@@ -448,6 +767,87 @@ ProveAggregate(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
                const std::vector<air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>>& children,
                const uint256& child_fs_seed, const uint256& fs_seed,
                const VerifierAirFamilies& families = {});
+
+/**
+ * Fail-closed aggregation entry point.  Every child is first accepted by the
+ * authoritative native verifier under child_fs_seed; only accepted children
+ * are consumed by the recursive witness builder.  ProveAggregate remains
+ * available to adversarial differential tests that intentionally commit an
+ * inexact witness.
+ */
+[[nodiscard]] AggregateResult
+ProveAggregateChecked(
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<
+        air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>>& children,
+    const uint256& child_fs_seed, const uint256& fs_seed,
+    const VerifierAirFamilies& families = {});
+
+struct AggregateExecutionProfile {
+    AggregateResult aggregate;
+    uint64_t child_verify_micros{0};
+    uint64_t witness_build_micros{0};
+    uint64_t witness_scan_micros{0};
+    uint64_t root_prove_micros{0};
+    uint64_t child_proof_bytes{0};
+    uint64_t root_proof_bytes{0};
+    uint64_t witness_cells{0};
+    bool complete{false};
+    std::string note;
+};
+
+/** Phase-separated, fail-closed aggregate execution used by streaming prover
+ * measurements.  Unlike ProveAggregate's adversarial test seam, an invalid
+ * native child or a nonzero V_CS violation count stops before root proving. */
+[[nodiscard]] AggregateExecutionProfile
+ProveAggregateCheckedProfiled(
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<
+        air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>>& children,
+    const uint256& child_fs_seed, const uint256& fs_seed,
+    const VerifierAirFamilies& families = {});
+
+using StreamingProofLoader = std::function<bool(
+    uint64_t index,
+    air_quotient::AirQuotientProof<Fp3, AggregateResult::AlgB3>& proof,
+    std::string* why)>;
+using StreamingAggregateSink = std::function<bool(
+    uint64_t node_index,
+    AggregateExecutionProfile&& profile,
+    std::string* why)>;
+
+struct StreamingAggregateLevelResult {
+    uint64_t input_proofs{0};
+    uint64_t output_nodes{0};
+    uint32_t max_children{0};
+    uint32_t peak_loaded_children{0};
+    uint64_t peak_child_proof_bytes{0};
+    uint64_t peak_witness_cells{0};
+    uint64_t peak_estimated_live_bytes{0};
+    uint64_t child_verify_micros{0};
+    uint64_t witness_build_micros{0};
+    uint64_t witness_scan_micros{0};
+    uint64_t root_prove_micros{0};
+    bool complete{false};
+    std::string note;
+};
+
+/**
+ * Shard-first bounded-memory aggregation of one tree level.  At most
+ * max_children (1..4) proofs and one V_CS witness are resident; each completed
+ * parent is passed to sink before the next batch is loaded.  Calling this for
+ * successive levels gives a spillable two-level prover without retaining the
+ * entire leaf frontier in RAM.
+ */
+[[nodiscard]] StreamingAggregateLevelResult
+ProveAggregateLevelStreaming(
+    uint64_t input_proofs, uint32_t max_children,
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const uint256& child_fs_seed,
+    const uint256& level_fs_seed,
+    const StreamingProofLoader& loader,
+    const StreamingAggregateSink& sink,
+    const VerifierAirFamilies& families = {});
 
 /** Verify a parent proof: rebuild the SAME V_CS from `pis` and run
  *  AirQuotientVerify<Fp3, AlgB3> (spec §4.1). */

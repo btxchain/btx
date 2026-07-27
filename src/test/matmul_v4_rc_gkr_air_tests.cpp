@@ -424,6 +424,32 @@ BOOST_AUTO_TEST_CASE(air_mxexpand_byte_exact_and_tamper)
     }
 }
 
+BOOST_AUTO_TEST_CASE(stage3_v1_extract_rejection_trace_is_hard_bounded)
+{
+    air::TableTM tm;
+    air::TableTX tx;
+    air::TilePublic pub = MakePub(11, 3, 7);
+    std::array<int64_t, kRCMxBlockLen> input{};
+    for (uint32_t i = 0; i < input.size(); ++i) {
+        input[i] = static_cast<int64_t>(i) * 0x102030405LL - 17;
+    }
+    air::TileWitness honest = air::TraceTile(pub, input);
+    BOOST_REQUIRE_LE(
+        honest.chacha_blocks,
+        matmul::v4::rc::kRCStage3V1MaxRejectionBlocksPer32);
+    BOOST_REQUIRE(air::CheckTileConstraints(honest, tm, tx).ok);
+
+    // A proof cannot make the global manifest false by appending an otherwise
+    // well-formed fifth block: shape rejection occurs before ARX traversal.
+    auto oversized = honest;
+    oversized.chacha_blocks =
+        matmul::v4::rc::kRCStage3V1MaxRejectionBlocksPer32 + 1;
+    const air::TileCheckResult rejected =
+        air::CheckTileConstraints(oversized, tm, tx);
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK_EQUAL(rejected.failure, "C-E1:chacha_trace_shape");
+}
+
 // ---------------------------------------------------------------------------
 // CONSTRUCTION II: the composition polynomial over the full constraint set.
 // COMPLETENESS: on an honest assignment every constraint polynomial evaluates

@@ -206,6 +206,17 @@ struct AirFriBackend;
 template <typename Backend>
 inline constexpr bool AirBackendIsRowWise = requires { requires Backend::kRowWiseLayout; };
 
+/** Opt-in for row-wise backends whose BatchCommit intentionally returns no
+ * dense column_lde and instead supplies selected openings on a second pass. */
+template <typename Backend>
+inline constexpr bool AirBackendStreamsRowOpenings = false;
+
+/** true iff a per-column backend emits query openings without retaining the
+ * complete dense column-LDE matrix returned by BatchCommit. */
+template <typename Backend>
+inline constexpr bool AirBackendStreamsColumnOpenings =
+    requires { requires Backend::kStreamsColumnOpenings; };
+
 template <>
 struct AirFriBackend<gkr_field::Fp2> {
     using BatchProof = FriBatchProof;
@@ -266,6 +277,44 @@ struct AirFriBackend<gkr_field::Fp3> {
     static uint32_t NumQueries() { return kRCFriBatchNumQueries; }
 };
 
+/**
+ * Same SHA256d-Merkle Fri3BatchProof format as AirFriBackend<Fp3>, with
+ * two-pass per-column LDE/tree recomputation and no retained W x LDE matrix.
+ * Supplemental next-row paths are retained during pass two.
+ */
+struct AirFriBackendFp3StreamingColumns
+    : public AirFriBackend<gkr_field::Fp3> {
+    static constexpr bool kStreamsColumnOpenings = true;
+
+    static BatchCommitResult BatchCommit(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        const uint256& fs_seed)
+    {
+        return Fri3BatchCommitStreamingColumns(cols, fs_seed);
+    }
+
+    static BatchCommitResult BatchCommitWithStep(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        const uint256& fs_seed,
+        uint32_t supplemental_index_step)
+    {
+        return Fri3BatchCommitStreamingColumnsWithStep(
+            cols, fs_seed, supplemental_index_step);
+    }
+
+    static bool OpenColumns(
+        const std::vector<std::vector<gkr_field::Fp3>>& cols,
+        uint32_t n_coeffs,
+        const std::vector<uint32_t>& indices,
+        const std::vector<uint256>& expected_roots,
+        std::vector<std::vector<MerklePath>>& out,
+        std::string* why)
+    {
+        return Fri3BatchOpenColumnsStreaming(
+            cols, n_coeffs, indices, expected_roots, out, why);
+    }
+};
+
 // ---------------------------------------------------------------------------
 // Constraint system description.
 // ---------------------------------------------------------------------------
@@ -280,6 +329,32 @@ enum class AirKind : uint8_t {
     kTransition,      // vanish on rows 0..N−2 (auto-multiplied by (X − h_last))
     kFirstRow,        // vanish on row 0 (auto-multiplied by Z_H/(X − 1))
     kLastRow,         // vanish on row N−1 (auto-multiplied by Z_H/(X − h_last))
+};
+
+/**
+ * Exact row-vector root pin for the Split-RAP MultiRow-V2 backend.
+ *
+ * A row-wise commitment has no independently meaningful per-column root.
+ * Therefore a caller that needs proof-owned preprocessing must pin the
+ * complete ordered R0 or Rdep row group, including its exact column list.
+ * The Split-RAP verifier compares this root to the committed group root; that
+ * root is already absorbed by both the AIR batching challenge and final FRI
+ * seed.  This is deliberately separate from `preprocessed_roots`, whose
+ * entries are per-column roots and remain unsupported for row-wise proofs.
+ */
+enum class AirPreprocessedRowGroupRole : uint8_t {
+    kR0 = 0,
+    kRdep = 1,
+};
+
+struct AirPreprocessedRowGroupRoot {
+    uint16_t version{1};
+    AirPreprocessedRowGroupRole role{
+        AirPreprocessedRowGroupRole::kR0};
+    std::vector<uint32_t> ordered_columns;
+    uint256 root{};
+
+    bool operator==(const AirPreprocessedRowGroupRoot&) const = default;
 };
 
 /**
@@ -327,6 +402,13 @@ struct AirConstraintSystem {
      *  it. A column may appear in both lists (values pin AND root equality)
      *  when the caller needs the values bound to proof-public inputs too. */
     std::vector<std::pair<uint32_t, uint256>> preprocessed_roots;
+    /**
+     * Split-RAP-only root equality for complete ordered row groups.  Legacy
+     * per-column and row-wise verifiers ignore no entries: unsupported use is
+     * rejected fail-closed.
+     */
+    std::vector<AirPreprocessedRowGroupRoot>
+        preprocessed_row_group_roots;
 
     [[nodiscard]] uint64_t ComposedDegreeBound(const AirConstraint<F>& c) const
     {
@@ -402,7 +484,106 @@ struct AirProveOptions {
      *  declared QuotientLen() (adversarial/self-test use — the verifier's
      *  structural degree-bound check must reject the result). */
     uint32_t quotient_len_override{0};
+    /**
+     * Optional per-column trace roots already computed by an earlier
+     * commit-then-challenge phase. The vector is either empty or exactly
+     * `cs.n_columns` long; a null entry is recomputed normally.
+     *
+     * These are checked hints, not trusted inputs: the batched FRI commit
+     * still recomputes every column root and AirQuotientProve rejects any
+     * mismatch before returning a proof. Per-column backends only.
+     */
+    std::vector<uint256> checked_trace_root_hints;
 };
+
+struct AirQuotientRowTileAudit {
+    uint32_t trace_rows{0};
+    uint32_t trace_columns{0};
+    uint32_t composition_rows{0};
+    uint32_t tile_rows{0};
+    uint32_t tiles_visited{0};
+    bool callback_schedule_executed{false};
+    bool composition_values_identical{false};
+    bool quotient_coefficients_identical{false};
+    bool valid{false};
+    std::string note;
+};
+
+enum class AirExternalStoreBackend : uint8_t {
+    kMemory = 0,
+    kAnonymousTempFile = 1,
+};
+
+class AirFp3ExternalColumnStore {
+public:
+    AirFp3ExternalColumnStore(
+        AirExternalStoreBackend backend,
+        uint32_t columns,
+        uint32_t rows);
+    ~AirFp3ExternalColumnStore();
+
+    AirFp3ExternalColumnStore(
+        const AirFp3ExternalColumnStore&) = delete;
+    AirFp3ExternalColumnStore& operator=(
+        const AirFp3ExternalColumnStore&) = delete;
+
+    [[nodiscard]] bool IsOpen() const;
+    [[nodiscard]] bool Write(
+        uint32_t column,
+        uint32_t offset,
+        const std::vector<gkr_field::Fp3>& values,
+        std::string* why = nullptr);
+    [[nodiscard]] bool Read(
+        uint32_t column,
+        uint32_t offset,
+        uint32_t count,
+        std::vector<gkr_field::Fp3>& out,
+        std::string* why = nullptr);
+    [[nodiscard]] uint64_t PeakLiveCells() const;
+    [[nodiscard]] uint64_t ResidentCells() const;
+
+private:
+    AirExternalStoreBackend backend_;
+    uint32_t columns_;
+    uint32_t rows_;
+    std::vector<std::vector<gkr_field::Fp3>> memory_;
+    void* file_{nullptr};
+    uint64_t peak_live_cells_{0};
+};
+
+struct AirQuotientSpillAudit {
+    AirQuotientRowTileAudit quotient;
+    AirExternalStoreBackend backend{
+        AirExternalStoreBackend::kMemory};
+    uint64_t store_peak_live_cells{0};
+    uint64_t store_resident_cells{0};
+    bool all_lde_columns_spilled{false};
+    bool all_tiles_reloaded{false};
+    bool byte_canonical_roundtrip{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Bounded Fp3 audit for the quotient row-tile seam.  The callback schedule
+ * evaluates the same composition rows, in fixed-size contiguous tiles, and
+ * compares both the composition evaluations and interpolated coefficients to
+ * the dense schedule.  It does not commit a production proof.
+ */
+[[nodiscard]] AirQuotientRowTileAudit
+AuditAirQuotientRowTilesFp3(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const uint256& fs_seed,
+    uint32_t tile_rows);
+
+[[nodiscard]] AirQuotientSpillAudit
+AuditAirQuotientSpillFp3(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const uint256& fs_seed,
+    uint32_t tile_rows,
+    AirExternalStoreBackend backend);
 
 template <typename F, typename Backend = AirFriBackend<F>>
 struct AirQuotientProveResult {
@@ -413,6 +594,87 @@ struct AirQuotientProveResult {
     std::vector<F> remainder;
     AirQuotientProof<F, Backend> proof;
 };
+
+// ---------------------------------------------------------------------------
+// COMPOSITION-SITE MEMORY GUARD.
+//
+// WHY THIS EXISTS (second materialization site).  Streaming the batch commit
+// bounded the (W+1) x n_lde column LDE, but the prover has a SECOND O(W x M)
+// materialization that streaming the commit does not touch: the composition
+// matrix, i.e. every trace column evaluated on the size-M extended subgroup.
+// At the MEASURED real-role arity-4 parent shape (W = 384,984, N = 256,
+// M = 2,048, Fp3 = 24 B) that matrix alone is
+//     384,984 x 2,048 x 24 B = 18,922,733,568 B = 17.6 GiB,
+// which is what OOM-killed a 24 GiB-capped real-width self-prove after 6 h.
+// Neither kRCFri3AlgBatchMaxColumns (a COLUMN cap) nor
+// Fri3AlgCommitFitsMemoryBudget (a COMMIT-site guard) sees this site at all.
+//
+// HOW IT IS BOUNDED.  The composition loop reads exactly two rows of that
+// matrix per output point: row j and row jn = (j + M/N) mod M.  Those two row
+// indices are always congruent mod stepM = M/N, i.e. they lie in the SAME
+// coset of the order-N subgroup H_N inside the order-M subgroup.  So the
+// matrix can be built and consumed ONE COSET AT A TIME: a W x N slab instead
+// of W x M, a factor of stepM = M/N (8 at the real shape).  See
+// AirQuotientCompositionPeakBytes.
+//
+// MEASURED RESULT (real-role arity-4 four-slot aggregate-root self-prove,
+// parent_cols = 384,984, 16 prover threads, systemd scope MemoryMax=20G,
+// MemorySwapMax=0):  the prove COMPLETED — prove_ok=true, verify_ok=true,
+// root_produced=true, test exit 0.  getrusage max RSS 17,457,560 KiB
+// = 16.65 GiB; cgroup memory.peak 17,891,889,152 B = 16.66 GiB.  The same
+// workload was previously OOM-killed at a 24 GiB cap after 6 h 11 m.
+// AirQuotientProve total 4,003.9 s, of which the composition phase is 36.5 s
+// (0.9%): trace_ntt+roots 1,695.4 s, composition(M rows) 36.5 s,
+// lde+leafcommit+fri 1,599.1 s, supplemental_openings 672.8 s.
+// The peak is no longer here — it is the FRI/supplemental phase.
+//
+// This is a FOOTPRINT decision only.  Field arithmetic here is exact modular
+// arithmetic and gkr_field::Add/Sub/Mul all return canonical residues in
+// [0, p), so two mathematically equal evaluation schedules produce
+// bit-identical values by construction — not by luck and not approximately.
+// ---------------------------------------------------------------------------
+
+/**
+ * Fail-closed peak-residency ceiling for the composition site, in bytes.
+ * Env override: BTX_AIRQ_COMPOSITION_PEAK_BYTES.
+ *
+ * Liveness guard, not a soundness gate: it never weakens a check, it converts
+ * an unsurvivable allocation into a clean, diagnosable ok=false BEFORE any of
+ * the big vectors are allocated.
+ */
+inline constexpr uint64_t kRCAirQuotientCompositionPeakByteCeiling =
+    uint64_t{32} << 30; // 32 GiB
+
+/**
+ * Projected peak prover-held bytes at the composition site for this shape.
+ *
+ *   coefficient matrix   columns x n_rows x elem_bytes   (held across cosets)
+ *   evaluation slab      columns x (coset_blocked ? n_rows : composition_rows)
+ *                                 x elem_bytes
+ *   composition vector   composition_rows x elem_bytes
+ *   per-thread frames    2 x columns x elem_bytes x threads  (cur/nxt)
+ *
+ * Pure function of shape — no transcript, no soundness parameter.
+ */
+[[nodiscard]] uint64_t AirQuotientCompositionPeakBytes(uint64_t columns,
+                                                       uint32_t n_rows,
+                                                       uint32_t composition_rows,
+                                                       uint64_t elem_bytes,
+                                                       bool coset_blocked,
+                                                       uint32_t threads);
+
+/**
+ * Fail-closed admission check for the composition site.  Returns false (and
+ * fills `why` / `projected`) when the projected peak exceeds the ceiling.
+ */
+[[nodiscard]] bool AirQuotientCompositionFitsMemoryBudget(uint64_t columns,
+                                                          uint32_t n_rows,
+                                                          uint32_t composition_rows,
+                                                          uint64_t elem_bytes,
+                                                          bool coset_blocked,
+                                                          uint32_t threads,
+                                                          uint64_t* projected,
+                                                          std::string* why);
 
 // ---------------------------------------------------------------------------
 // Core API (templates instantiated in the .cpp for Fp2 and Fp3).
@@ -454,6 +716,90 @@ template <typename F, typename Backend = AirFriBackend<F>>
                                          const std::vector<uint256>& roots,
                                          const std::vector<uint32_t>& extra);
 
+// ===========================================================================
+// PR-89: POSEIDON2 ROUTE for the AIR challenge digest.  NOT ACTIVATED.
+//
+// WHY.  The measured g4 producer-endpoint floor is 58.6 s, of which 41.1 s is
+// one Split-RAP prove over the parent's in-AIR replay of airq_lambda and
+// 16.2 s is building that replay's constraint system.  Both costs are set by
+// the SHA256d vertical chip, which charges lane_rows = 1024 per compression
+// and schedules next_pow2(compressions) instances: airq_lambda's 113-byte
+// preimage is 3 compressions, so 1024 * next_pow2(3) = 4096 rows is the FLOOR
+// for ANY SHA256d replay of it.  It is not tunable from this file.  The
+// in-AIR Poseidon2 chip (matmul_v4_rc_stage3_poseidon_air.{h,cpp}) charges
+// ONE row per permutation, so the same logical preimage costs a handful of
+// rows instead of 4096.
+//
+// WHAT IS AND IS NOT CHANGED HERE.  AirChallengeDigest itself is UNTOUCHED and
+// is still the default on every caller.  It is a SHARED helper: ten distinct
+// labels route through it ("airq_lambda", "airq_gamma", "airq_alpha",
+// "airq_split_rap_*", "airq_two_epoch_r1", "ep_pre_leaf", "ep_shard",
+// "ep_air_root_seed", "stage3_chunk_rlc_coeff_v1"), and it is drawn INSIDE
+// AirQuotientProve/AirQuotientVerify, which are templated over the backend and
+// therefore serve the FROZEN SHA lanes (kRCFri3BatchProofVersion = 5,
+// kRCFriBatchProofVersion = 5) as well as the algebraic one.  Replacing its
+// body unconditionally would silently re-transcript those frozen lanes AND
+// break stage3_recursive_parent_air's SHA companion, which REQUIREs its in-CS
+// SHA output to equal this function's native return.  So the Poseidon2 form is
+// added as a SEPARATE, SEPARATELY VERSIONED route and nothing selects it yet.
+// ===========================================================================
+
+/** Domain tag of the Poseidon2 route.  Distinct string from the SHA256d
+ *  route's "BTX_RC_AIRQ_V1", and absorbed length-prefixed, so no preimage can
+ *  be shared between the two routes. */
+inline constexpr char kAirChallengeP2DomainTag[] = "BTX_RC_AIRQ_P2_V1";
+
+/** Codec/proof version of the Poseidon2 route.  This is a NEW number on a NEW
+ *  lane; kRCFri3BatchProofVersion = 5 and kRCFriBatchProofVersion = 5 are
+ *  frozen SHA paths and are NOT touched. */
+inline constexpr uint32_t kAirChallengeP2RouteVersion = 8;
+
+/** Route activation. False: no producer or verifier selects the Poseidon2
+ *  challenge, and every shipped proof still derives airq_lambda by SHA256d. */
+inline constexpr bool kAirChallengeP2Activated = false;
+static_assert(!kAirChallengeP2Activated,
+              "PR-89 Poseidon2 AIR-challenge route is not activated");
+
+/**
+ * INJECTIVE Fp-lane encoding of the AirChallengeDigest preimage
+ * (tag ‖ version ‖ seed ‖ label ‖ roots ‖ extra).  Exposed rather than kept
+ * private for two reasons: an in-AIR replay must absorb EXACTLY these lanes,
+ * and the injectivity property is testable directly on the lane vector.
+ *
+ * Every variable-length section is length-prefixed, so the concatenation is
+ * prefix-free and no two distinct preimages produce the same lane list.
+ *
+ * THE GOLDILOCKS ALIASING CLASS, and why this encoding is 32-bit-lane based.
+ * gkr_field::FromU64(x) is x mod p with p = 2^64 - 2^32 + 1.  For every
+ * x < 2^32 - 1 the value x + p is a DIFFERENT u64 that maps to the SAME field
+ * element.  A uint256 absorbed as four u64 limbs is therefore NOT injective:
+ * each limb has ~2^32 aliasing partners, so two DIFFERENT trace-commitment
+ * roots can yield an IDENTICAL lane vector and hence an IDENTICAL challenge.
+ * Splitting every u64 into two 32-bit halves keeps each absorbed lane strictly
+ * below 2^32 < p, where reduction mod p is the identity, so the map is
+ * injective by construction.  Driven by an explicit x + p witness in
+ * matmul_v4_rc_air_quotient_tests.cpp.
+ */
+[[nodiscard]] std::vector<gkr_field::Fp> AirChallengeP2Lanes(
+    const uint256& fs_seed, const char* label, const std::vector<uint256>& roots,
+    const std::vector<uint32_t>& extra);
+
+/**
+ * Poseidon2 form of AirChallengeDigest over the same logical preimage, hashed
+ * with alg_hash::SpongeHashFp — the primitive that is ALREADY this backend's
+ * Merkle hash, so no new hash and no new soundness assumption is introduced.
+ * The four output lanes are packed little-endian into the returned uint256;
+ * each is a canonical Goldilocks element (< p), so the packing is injective.
+ */
+[[nodiscard]] uint256 AirChallengeDigestP2(const uint256& fs_seed, const char* label,
+                                           const std::vector<uint256>& roots,
+                                           const std::vector<uint32_t>& extra);
+
+/** Permutation count AirChallengeDigestP2 costs for a given preimage shape —
+ *  i.e. the ROW count of an in-AIR Poseidon2 replay, at 1 row/permutation.
+ *  Computed from the same 10*-padding rule SpongeHashFp applies. */
+[[nodiscard]] uint32_t AirChallengeP2Permutations(size_t n_lanes);
+
 /** Degree-4 E2M1 acceptance selector over the nibble bits (field-generic
  *  mirror of gkr_air::AirAcceptNibblePoly; cross-checked in tests). */
 template <typename F>
@@ -479,7 +825,10 @@ template <typename F, typename Backend = AirFriBackend<F>>
 //     act, kappa, kb0..3, h, hb0..3, mixed, mb0..3, acc, mu, pos, inv_live,
 //     u_mix, gold_q, gold_v, v_low28, vb0..3, e0, e1, mu_out, out
 //   LogUp columns 32..36 (built AFTER γ, α are fixed):
-//     phi, t_fp (PREPROCESSED — canonical T_M fingerprints), m, psi, S
+//     phi, t_fp (COMMITTED fingerprint f, bound to the preprocessed table
+//            columns below by the in-circuit logup.tfp.bind identity), m, psi, S
+//   Preprocessed table columns 37..39 (CHALLENGE-INDEPENDENT canonical T_M
+//     entries, verifier-regenerated): tbl_a=n, tbl_b=acc[n], tbl_c=mu[n]
 // Candidate rows are the real TileWitness cands; padding rows carry the
 // neutral assignment (mixed = 1, a rejected E2M1 code, acc = 0, pos = 32,
 // act = 0) which satisfies every rule. The 16-bit-limb range obligations of
@@ -517,11 +866,20 @@ enum RcSamplerCol : uint32_t {
     kColPad0,          // reserved zero column (keeps the base-column count round)
     kRcSamplerBaseCols,          // = 32
     kColPhi = kRcSamplerBaseCols,
-    kColTfp,
+    kColTfp,           // COMMITTED phase-2 fingerprint f, bound by logup.tfp.bind
     kColM,
     kColPsi,
     kColS,
-    kRcSamplerNumCols            // = 37
+    // Challenge-INDEPENDENT preprocessed table-entry columns (n, acc[n], mu[n]).
+    // The verifier regenerates their roots; f = kColTfp is forced to
+    // tbl_a + gamma*tbl_b + gamma^2*tbl_c by the in-circuit logup.tfp.bind
+    // identity, so the fingerprint carries no post-commitment challenge in any
+    // PREPROCESSED column (RAP two-phase order restored; enables challenge-
+    // independent bytecode migration of the CoupledExtract transport lane).
+    kColTblA,
+    kColTblB,
+    kColTblC,
+    kRcSamplerNumCols            // = 40
 };
 
 /** The constraint set for row count `n_rows`, LogUp challenges (γ, α), the

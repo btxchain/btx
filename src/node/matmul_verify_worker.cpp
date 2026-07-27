@@ -4,8 +4,10 @@
 
 #include <node/matmul_verify_worker.h>
 
+#include <arith_uint256.h>
 #include <consensus/params.h>
 #include <logging.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <pow.h>
 #include <uint256.h>
 #include <util/check.h>
@@ -107,6 +109,46 @@ void MatMulVerifyWorker::WorkerLoop()
         if (m_verify_override) {
             ok = m_verify_override(*job.block, job.height, job.parent_median_time_past);
         } else {
+            // A Stage-3 attachment is block-body data and is deliberately not
+            // committed by CBlockHeader::GetHash(). Therefore neither the
+            // header-keyed legacy single-flight nor its verdict memo may wrap
+            // this path: two deliveries can share a header while carrying
+            // different proof bodies. VerifyRCStage3ConsensusAttachment owns
+            // the proof-aware (header, registry, payload) cache/single-flight.
+            if constexpr (
+                matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
+                if (m_params.IsMatMulRCFamilyActive(job.height)) {
+                    const auto target =
+                        DeriveTarget(job.block->nBits, m_params.powLimit);
+                    ok = target.has_value() &&
+                         matmul::v4::rc::VerifyRCStage3ConsensusAttachment(
+                             *job.block, m_params, job.height,
+                             ArithToUint256(*target), nullptr) ==
+                             matmul::v4::rc::RCStage3AttachmentStatus::Valid;
+                    LogDebug(BCLog::NET,
+                             "matmul async Stage-3 verify: block %s height %d ok=%d\n",
+                             hash.ToString(), job.height, ok);
+                    if (job.completion) job.completion(ok);
+                    continue;
+                }
+            }
+
+            bool carrier_missing{false};
+            const auto verify_pure = [&]() {
+                if (m_params.IsMatMulRCCoupledActive(
+                        job.height)) {
+                    return CheckMatMulProofOfWork_RCCoupled(
+                        *job.block, m_params, job.height);
+                }
+                if (m_params.IsMatMulRCActive(job.height)) {
+                    return CheckMatMulProofOfWork_RC(
+                        *job.block, m_params, job.height,
+                        &carrier_missing);
+                }
+                return CheckMatMulProofOfWork_V4EncDr(
+                    *job.block, m_params, job.height,
+                    job.parent_median_time_past);
+            };
             // Single-flight wiring (H5 primitive): duplicate deliveries of the
             // same hash across worker threads collapse to ONE recompute; the
             // followers reuse the leader's verdict (pure function of the
@@ -115,42 +157,19 @@ void MatMulVerifyWorker::WorkerLoop()
             // INSIDE the pow.cpp recompute branch for the remaining
             // synchronous callers, drop this outer wrap (one-line change) so
             // the guard is not taken re-entrantly with two different scopes.
-            // Datacenter profile-2: a false verdict caused solely by a not-yet-
-            // arrived sampled carrier is a TRANSIENT availability miss, not a
-            // proof-of-work fault, and must NOT be memoized — the verdict memo's
-            // invariant is that a verdict is a pure function of the header, and a
-            // carrier-availability miss is environment-dependent. Memoizing false
-            // here would poison the later carrier-present resubmit (validation's
-            // memo path would replay the stale false and permanently reject a
-            // valid block). Track it and skip CacheMatMulEncDrVerdict below.
-            bool carrier_missing{false};
+            // Datacenter profile-2: a false verdict caused solely by a
+            // not-yet-arrived sampled carrier is a transient availability
+            // miss and must not poison the header verdict memo.
             MatMulRecomputeSingleFlight sf(hash);
             if (sf.IsLeader()) {
-                if (m_params.IsMatMulRCCoupledActive(job.height)) {
-                    ok = CheckMatMulProofOfWork_RCCoupled(*job.block, m_params, job.height);
-                } else if (m_params.IsMatMulRCActive(job.height)) {
-                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height, &carrier_missing);
-                } else {
-                    ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
-                                                        job.parent_median_time_past);
-                }
+                ok = verify_pure();
                 sf.SetResult(ok); // publish before ~sf releases waiters
             } else if (const auto leader_result{sf.LeaderResult()}) {
                 ok = *leader_result; // sketch already Put() on an accepted block
             } else {
                 // Leader exited without publishing: decide ourselves.
-                if (m_params.IsMatMulRCCoupledActive(job.height)) {
-                    ok = CheckMatMulProofOfWork_RCCoupled(*job.block, m_params, job.height);
-                } else if (m_params.IsMatMulRCActive(job.height)) {
-                    ok = CheckMatMulProofOfWork_RC(*job.block, m_params, job.height, &carrier_missing);
-                } else {
-                    ok = CheckMatMulProofOfWork_V4EncDr(*job.block, m_params, job.height,
-                                                        job.parent_median_time_past);
-                }
+                ok = verify_pure();
             }
-            // Only memoize a verdict that is a pure function of the header. A
-            // missing-carrier false is left un-memoized so the resubmit path can
-            // reach the real verdict once the carrier arrives.
             if (!(carrier_missing && !ok)) {
                 CacheMatMulEncDrVerdict(hash, ok);
             }

@@ -248,6 +248,7 @@ BOOST_AUTO_TEST_CASE(air_recurse_feasibility_measurement)
 // ---------------------------------------------------------------------------
 namespace {
 using AlgB3 = aq::AirFriBackendAlg<Fp3>;
+using AlgDualB3 = aq::AirFriBackendAlgDual<Fp3>;
 
 aq::AirConstraintSystem<Fp3> ToyChildCS()
 {
@@ -262,6 +263,45 @@ aq::AirConstraintSystem<Fp3> ToyChildCS()
         return gf::Mul(cur[0], gf::Sub(cur[0], Fp3::One()));
     };
     cs.constraints.push_back(std::move(b));
+    return cs;
+}
+
+aq::AirConstraintSystem<Fp3> TransitionBoundaryChildCS()
+{
+    aq::AirConstraintSystem<Fp3> cs;
+    cs.n_rows = 4;
+    cs.n_columns = 1;
+
+    aq::AirConstraint<Fp3> transition;
+    transition.name = "toy.increment";
+    transition.kind = aq::AirKind::kTransition;
+    transition.alg_degree = 1;
+    transition.eval = [](const std::vector<Fp3>& cur,
+                         const std::vector<Fp3>& next) {
+        return gf::Sub(
+            gf::Sub(next[0], cur[0]), Fp3::One());
+    };
+    cs.constraints.push_back(std::move(transition));
+
+    aq::AirConstraint<Fp3> first;
+    first.name = "toy.first.zero";
+    first.kind = aq::AirKind::kFirstRow;
+    first.alg_degree = 1;
+    first.eval = [](const std::vector<Fp3>& cur,
+                    const std::vector<Fp3>&) {
+        return cur[0];
+    };
+    cs.constraints.push_back(std::move(first));
+
+    aq::AirConstraint<Fp3> last;
+    last.name = "toy.last.three";
+    last.kind = aq::AirKind::kLastRow;
+    last.alg_degree = 1;
+    last.eval = [](const std::vector<Fp3>& cur,
+                   const std::vector<Fp3>&) {
+        return gf::Sub(cur[0], Fp3::FromFp(3));
+    };
+    cs.constraints.push_back(std::move(last));
     return cs;
 }
 
@@ -334,6 +374,310 @@ bool VcsSatisfiable(const aq::AirConstraintSystem<Fp3>& child_cs,
 }
 } // namespace
 
+BOOST_AUTO_TEST_CASE(piece4_dual_q128_air_policy_round_trip)
+{
+    const uint256 child_seed = SeedByte(19);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {
+        {Fp3::FromFp(0), Fp3::FromFp(1)}};
+
+    auto pr =
+        aq::AirQuotientProve<Fp3, AlgDualB3>(child_cs, cols, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(pr.ok && pr.division_exact, pr.note);
+    BOOST_CHECK_EQUAL(pr.proof.batch.repeated.lane[0].queries.size(),
+                      matmul::v4::rc::kRCFri3AlgDualQueriesPerLane);
+    BOOST_CHECK_EQUAL(pr.proof.batch.repeated.lane[1].queries.size(),
+                      matmul::v4::rc::kRCFri3AlgDualQueriesPerLane);
+    BOOST_CHECK_EQUAL(pr.proof.batch.queries.size(),
+                      matmul::v4::rc::kRCFri3AlgDualTotalQueries);
+    BOOST_CHECK_EQUAL(pr.proof.next_openings.size(),
+                      matmul::v4::rc::kRCFri3AlgDualTotalQueries);
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        (aq::AirQuotientVerify<Fp3, AlgDualB3>(
+            child_cs, pr.proof, child_seed, &why)),
+        why);
+
+    auto copied = pr.proof;
+    copied.batch.repeated.lane[1] = copied.batch.repeated.lane[0];
+    BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgDualB3>(
+        child_cs, copied, child_seed, &why)));
+
+    auto detached_view = pr.proof;
+    detached_view.batch.queries[0].index ^= 1;
+    BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgDualB3>(
+        child_cs, detached_view, child_seed, &why)));
+    BOOST_CHECK_EQUAL(why, "dual AIR query view mismatch");
+}
+
+BOOST_AUTO_TEST_CASE(piece4_dual_q128_v5_normalized_child_adapter)
+{
+    static_assert(
+        ar::kDualV5NativeChildAdapterExecutable);
+    static_assert(
+        ar::kDualV5NormalizedPartialVerifierAirExecutable);
+    static_assert(
+        !ar::kDualV5CompleteVerifierAirExecutable);
+    static_assert(
+        !ar::kDualV5FiatShamirEquationsInAir);
+    static_assert(
+        !ar::kDualV5MasterBindingEquationsInAir);
+    static_assert(
+        ar::kDualV5TraceBindingOpeningsInAir);
+    static_assert(
+        ar::kDualV5TransitionNextOpeningsInAir);
+    static_assert(
+        !ar::kDualV5RecursiveConsensusAuthority);
+
+    const uint256 child_seed = SeedByte(29);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {
+        {Fp3::FromFp(0), Fp3::FromFp(1)}};
+    auto pr =
+        aq::AirQuotientProve<Fp3, AlgDualB3>(
+            child_cs, cols, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        pr.ok && pr.division_exact, pr.note);
+
+    const ar::DualV5AggregateWitness witness =
+        ar::BuildDualV5AggregateWitness(
+            child_cs, {pr.proof}, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(witness.ok, witness.note);
+    BOOST_CHECK_EQUAL(witness.child_pins.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        witness.normalized.pis.size(),
+        matmul::v4::rc::kRCFri3AlgDualNumLanes);
+    BOOST_CHECK_EQUAL(witness.normalized_violations, 0U);
+    BOOST_CHECK(
+        witness.child_pins[0]
+            .host_reports_native_air_accepted);
+    BOOST_CHECK(
+        witness.child_pins[0]
+            .host_reports_exact_transcript_replayed);
+    BOOST_CHECK(
+        witness.child_pins[0]
+            .host_reports_ordered_lane_binding_checked);
+    BOOST_CHECK(
+        !witness.child_pins[0]
+             .air_proof_commitment.IsNull());
+    BOOST_CHECK(
+        !witness.child_pins[0]
+             .transcript_commitment.IsNull());
+    BOOST_CHECK(
+        !witness.child_statement_commitment.IsNull());
+    BOOST_TEST_MESSAGE(
+        "dual-v5 normalized child: native_us="
+        << witness.native_verify_micros
+        << " transcript_us="
+        << witness.transcript_replay_micros
+        << " witness_us="
+        << witness.normalized_witness_micros
+        << " scan_us="
+        << witness.normalized_scan_micros
+        << " rows=" << witness.normalized.cs.n_rows
+        << " cols=" << witness.normalized.cs.n_columns);
+
+    auto copied_lane = pr.proof;
+    copied_lane.batch.repeated.lane[1] =
+        copied_lane.batch.repeated.lane[0];
+    const auto rejected_copy =
+        ar::BuildDualV5AggregateWitness(
+            child_cs, {copied_lane}, child_seed, {});
+    BOOST_CHECK(!rejected_copy.ok);
+
+    auto detached_query = pr.proof;
+    detached_query.batch.queries[0].index ^= 1U;
+    const auto rejected_detached =
+        ar::BuildDualV5AggregateWitness(
+            child_cs, {detached_query}, child_seed, {});
+    BOOST_CHECK(!rejected_detached.ok);
+
+    auto master_tamper = pr.proof;
+    master_tamper.batch.repeated
+        .master_statement_binding.begin()[0] ^= 1U;
+    const auto rejected_master =
+        ar::BuildDualV5AggregateWitness(
+            child_cs, {master_tamper}, child_seed, {});
+    BOOST_CHECK(!rejected_master.ok);
+
+    auto transition_cs = child_cs;
+    transition_cs.constraints[0].kind =
+        aq::AirKind::kTransition;
+    const auto rejected_transition =
+        ar::BuildDualV5AggregateWitness(
+            transition_cs, {pr.proof}, child_seed, {});
+    BOOST_CHECK(!rejected_transition.ok);
+    BOOST_CHECK(
+        rejected_transition.note.find("rejected") !=
+        std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(piece4_dual_q128_v5_transition_boundary_opening_closure)
+{
+    const uint256 child_seed = SeedByte(33);
+    const aq::AirConstraintSystem<Fp3> child_cs =
+        TransitionBoundaryChildCS();
+    const std::vector<std::vector<Fp3>> columns = {{
+        Fp3::FromFp(0), Fp3::FromFp(1),
+        Fp3::FromFp(2), Fp3::FromFp(3)}};
+
+    auto proved = aq::AirQuotientProve<Fp3, AlgDualB3>(
+        child_cs, columns, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact, proved.note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        (aq::AirQuotientVerify<Fp3, AlgDualB3>(
+            child_cs, proved.proof, child_seed, &why)),
+        why);
+
+    ar::DualV5AggregateWitness honest =
+        ar::BuildDualV5AggregateWitness(
+            child_cs, {proved.proof}, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(honest.ok, honest.note);
+    BOOST_CHECK_EQUAL(honest.normalized_violations, 0U);
+    BOOST_CHECK_EQUAL(
+        ar::CountWitnessViolationsOnH(
+            honest.normalized.cs, honest.normalized.columns),
+        0U);
+
+    // Direct scenario-A layout: current full-row opening, then supplemental
+    // next full-row opening, then trace-only R_T cross-opening. Mutating an
+    // authenticated next-row cell or trace-only cell makes V_CS nonzero.
+    const ar::ChildPublicInputs& pi = honest.normalized.pis[0];
+    const uint32_t full_leaf_blocks =
+        (3 * (pi.child_w + 1) + 1) / ah::kAlgHashRate + 1;
+    const uint32_t full_path_columns =
+        full_leaf_blocks * ar::kPermCellsPerPerm +
+        pi.merkle_depth * ar::kPermCellsPerPerm +
+        pi.merkle_depth * ah::kAlgHashDigestLen;
+    const uint32_t next_leaf_base = full_path_columns;
+    const uint32_t trace_leaf_base =
+        full_path_columns + full_path_columns;
+
+    auto bad_next_witness = honest.normalized.columns;
+    bad_next_witness[next_leaf_base][0] =
+        gf::Add(bad_next_witness[next_leaf_base][0], Fp3::One());
+    const uint32_t bad_next_violations =
+        ar::CountWitnessViolationsOnH(
+            honest.normalized.cs, bad_next_witness);
+    BOOST_CHECK_GT(bad_next_violations, 0U);
+
+    auto bad_trace_witness = honest.normalized.columns;
+    bad_trace_witness[trace_leaf_base][0] =
+        gf::Add(bad_trace_witness[trace_leaf_base][0], Fp3::One());
+    const uint32_t bad_trace_violations =
+        ar::CountWitnessViolationsOnH(
+            honest.normalized.cs, bad_trace_witness);
+    BOOST_CHECK_GT(bad_trace_violations, 0U);
+
+    // Proof-level mutations fail before aggregation and therefore cannot be
+    // converted into a parent witness.
+    auto bad_next_proof = proved.proof;
+    bad_next_proof.next_openings[0][0].values[0] =
+        gf::Add(
+            bad_next_proof.next_openings[0][0].values[0],
+            Fp3::One());
+    BOOST_CHECK(!ar::BuildDualV5AggregateWitness(
+                     child_cs, {bad_next_proof}, child_seed, {})
+                     .ok);
+
+    auto bad_trace_proof = proved.proof;
+    bad_trace_proof.next_openings[0][1].siblings[0][0] =
+        gf::Add(
+            bad_trace_proof.next_openings[0][1].siblings[0][0],
+            gf::FromU64(1));
+    BOOST_CHECK(!ar::BuildDualV5AggregateWitness(
+                     child_cs, {bad_trace_proof}, child_seed, {})
+                     .ok);
+
+    BOOST_TEST_MESSAGE(
+        "dual-v5 transition/boundary closure: rows="
+        << honest.normalized.cs.n_rows
+        << " cols=" << honest.normalized.cs.n_columns
+        << " honest_violations="
+        << honest.normalized_violations
+        << " bad_next_violations=" << bad_next_violations
+        << " bad_trace_violations=" << bad_trace_violations);
+}
+
+BOOST_AUTO_TEST_CASE(piece4_dual_q128_v5_parent_binding_fail_closed)
+{
+    const uint256 child_seed = SeedByte(30);
+    const uint256 parent_seed = SeedByte(31);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {
+        {Fp3::FromFp(0), Fp3::FromFp(1)}};
+    auto child =
+        aq::AirQuotientProve<Fp3, AlgDualB3>(
+            child_cs, cols, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        child.ok && child.division_exact, child.note);
+
+    // The reduced family selection keeps this codec/seed-binding test small.
+    // The preceding test executes and scans the complete normalized V_CS.
+    ar::VerifierAirFamilies reduced;
+    reduced.row_merkle = false;
+    reduced.fold = false;
+    reduced.deep = false;
+    reduced.per_point = false;
+    reduced.next_row = false;
+    reduced.trace_binding = false;
+    const ar::DualV5AggregateResult parent =
+        ar::ProveAggregateDualV5Checked(
+            child_cs, {child.proof}, child_seed,
+            parent_seed, reduced);
+    BOOST_REQUIRE_MESSAGE(parent.ok, parent.note);
+    BOOST_CHECK(parent.witness_satisfies);
+    BOOST_CHECK(!parent.all_vcs_families_enabled);
+    BOOST_CHECK(!parent.production_semantics_complete);
+    BOOST_CHECK(
+        !parent.effective_fs_seed.IsNull());
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        ar::VerifyAggregateDualV5Diagnostic(
+            parent.proof, parent.lane_pis,
+            parent.child_pins, parent_seed,
+            reduced, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "dual-v5 reduced parent: prove_us="
+        << parent.root_prove_micros
+        << " rows=" << parent.measurement.n_rows
+        << " cols=" << parent.measurement.n_columns);
+
+    auto bad_pin = parent.child_pins;
+    bad_pin[0].transcript_commitment.begin()[0] ^= 1U;
+    BOOST_CHECK(
+        !ar::VerifyAggregateDualV5Diagnostic(
+            parent.proof, parent.lane_pis,
+            bad_pin, parent_seed, reduced, &why));
+
+    auto bad_pis = parent.lane_pis;
+    bad_pis[1].query_index[0] ^= 1U;
+    BOOST_CHECK(
+        !ar::VerifyAggregateDualV5Diagnostic(
+            parent.proof, bad_pis,
+            parent.child_pins, parent_seed,
+            reduced, &why));
+
+    BOOST_CHECK(
+        !ar::VerifyAggregateDualV5Diagnostic(
+            parent.proof, parent.lane_pis,
+            parent.child_pins, SeedByte(32),
+            reduced, &why));
+
+    auto copied_root = parent.proof;
+    copied_root.batch.repeated.lane[1] =
+        copied_root.batch.repeated.lane[0];
+    BOOST_CHECK(
+        !ar::VerifyAggregateDualV5Diagnostic(
+            copied_root, parent.lane_pis,
+            parent.child_pins, parent_seed,
+            reduced, &why));
+}
+
 BOOST_AUTO_TEST_CASE(piece4_vcs_differential_equivalence)
 {
     const uint256 child_seed = SeedByte(11);
@@ -373,6 +717,91 @@ BOOST_AUTO_TEST_CASE(piece4_vcs_differential_equivalence)
         BOOST_CHECK((!aq::AirQuotientVerify<Fp3, AlgB3>(child_cs, c, child_seed, nullptr)));
         BOOST_CHECK(!VcsSatisfiable(child_cs, c, child_seed, fam));
     }
+}
+
+BOOST_AUTO_TEST_CASE(piece4_checked_aggregate_rejects_before_recursive_proving)
+{
+    const uint256 child_seed = SeedByte(12);
+    const uint256 root_seed = SeedByte(13);
+    const aq::AirConstraintSystem<Fp3> child_cs = ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {
+        {Fp3::FromFp(0), Fp3::FromFp(1)}};
+    auto proved =
+        aq::AirQuotientProve<Fp3, AlgB3>(
+            child_cs, cols, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact, proved.note);
+
+    auto tampered = proved.proof;
+    tampered.batch.queries[0].row.values[0] =
+        gf::Add(
+            tampered.batch.queries[0].row.values[0],
+            Fp3::One());
+    const ar::AggregateResult rejected =
+        ar::ProveAggregateChecked(
+            child_cs, {tampered}, child_seed,
+            root_seed, {});
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(
+        rejected.note.find("child 0 rejected") !=
+        std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(piece4_streaming_level_bounds_residency_and_fails_closed)
+{
+    const uint256 child_seed = SeedByte(14);
+    const uint256 level_seed = SeedByte(15);
+    const aq::AirConstraintSystem<Fp3> child_cs =
+        ToyChildCS();
+    const std::vector<std::vector<Fp3>> cols = {
+        {Fp3::FromFp(0), Fp3::FromFp(1)}};
+    auto proved =
+        aq::AirQuotientProve<Fp3, AlgB3>(
+            child_cs, cols, child_seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact, proved.note);
+    auto tampered = proved.proof;
+    tampered.batch.queries[0].row.values[0] =
+        gf::Add(
+            tampered.batch.queries[0].row.values[0],
+            Fp3::One());
+
+    uint32_t loads = 0;
+    bool sink_called = false;
+    const ar::StreamingAggregateLevelResult result =
+        ar::ProveAggregateLevelStreaming(
+            /*input_proofs=*/4, /*max_children=*/2,
+            child_cs, child_seed, level_seed,
+            [&](uint64_t index,
+                aq::AirQuotientProof<Fp3, AlgB3>& proof,
+                std::string*) {
+                ++loads;
+                proof =
+                    index == 0 ? tampered : proved.proof;
+                return true;
+            },
+            [&](uint64_t, ar::AggregateExecutionProfile&&,
+                std::string*) {
+                sink_called = true;
+                return true;
+            });
+    BOOST_CHECK(!result.complete);
+    BOOST_CHECK_EQUAL(loads, 2U);
+    BOOST_CHECK(!sink_called);
+    BOOST_CHECK_EQUAL(result.peak_loaded_children, 2U);
+    BOOST_CHECK_GT(result.peak_child_proof_bytes, 0U);
+    BOOST_CHECK(
+        result.note.find("child 0 rejected") !=
+        std::string::npos);
+
+    const ar::StreamingAggregateLevelResult invalid =
+        ar::ProveAggregateLevelStreaming(
+            0, 2, child_cs, child_seed, level_seed,
+            {}, {});
+    BOOST_CHECK(!invalid.complete);
+    BOOST_CHECK(
+        invalid.note.find("invalid configuration") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(piece4_vcs_cell_budget_and_k2)
@@ -416,7 +845,9 @@ BOOST_AUTO_TEST_CASE(piece4_vcs_cell_budget_and_k2)
 // blocks. Production episode shards have W=26 -> 82 elements -> 11 blocks; the
 // former single-block guard rejected any W with 3*(W+1)+1 > 8. These gates pin
 // completeness at W ∈ {1,2,7,26} (1/2/4/11 blocks), a non-first-block soundness
-// tamper (value + carried capacity), and the W=26 cell measurement vs 2^21.
+// tamper (value + carried capacity), and the W=26 cell measurement. Complete
+// next-row and R_T cross-openings intentionally expose that the original
+// 2^21 R&D cell objective is exceeded; it is not a backend correctness cap.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(blocker2_multiblock_row_leaf_completeness)
 {
@@ -499,7 +930,13 @@ BOOST_AUTO_TEST_CASE(blocker2_multiblock_row_leaf_measurement_w26)
     BOOST_TEST_MESSAGE("W=26 V_CS k=1 cells=" << m1.cell_count << " k=2 cells=" << m2.cell_count
                                               << " (2^21=" << (1ull << 21) << ")");
     BOOST_CHECK_EQUAL(m1.max_alg_degree, 7U);
-    BOOST_CHECK_LE(m2.cell_count, (1ULL << 21)); // §3.4 k=2 budget
+    // Direct scenario-A closure authenticates two additional trees per child.
+    // The result is executable but exceeds the old §3.4 optimization target;
+    // do not disguise that gap by silently raising the target.
+    BOOST_CHECK_GT(m2.cell_count, (1ULL << 21));
+    // Full-transcript closure materializes z1/z2 evaluation claims as
+    // 2*(W+1) witness columns per child, adding 108*256 cells at k=2.
+    BOOST_CHECK_EQUAL(m2.cell_count, 4039168ULL);
 }
 
 // Piece 6: the episode-integration seam (EpisodeAggregateProof +

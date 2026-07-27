@@ -201,6 +201,62 @@ BOOST_AUTO_TEST_CASE(constr1_invalid_scalar_detected_at_root_binding)
 }
 
 // ---------------------------------------------------------------------------
+// PATH A dual-α transport field-lift (PR 89 blocker #4): the §2.4 aggregated
+// opening carries TWO independent Lemma-1.2 witness pairs (f,g,f',g') and BOTH
+// identities must vanish, all-component. A cheat that fixes one identity / one
+// Fp2 coordinate but not the other is REJECTED; the honest proof passes with 0
+// violations. Lifts the H2c transport separation 67.6 → ~183.6 bits (>=100).
+// ---------------------------------------------------------------------------
+BOOST_AUTO_TEST_CASE(constr1_dual_alpha_transport_lift)
+{
+    // Accounting sanity: the conservative integer floor clears >=100.
+    BOOST_CHECK_EQUAL(rc::kRCGkrEvalArgAlphaCount, 2u);
+    BOOST_CHECK_GE(rc::RCGkrEvalArgTransportSeparationBits(), 100);
+
+    const uint256 seed = MakeSeed(0xA9);
+    std::vector<std::vector<rc::Fp2>> cols;
+    cols.push_back(MakeColumn(16, 4, -1));
+    cols.push_back(MakeColumn(16, -2, 7));
+
+    const auto z0 = MakePoint({{6, 3}, {2, 5}, {9, 1}, {4, 8}});
+    const auto z1 = MakePoint({{1, 7}, {8, 2}, {3, 6}, {5, 0}});
+    std::vector<rc::RCGkrOpeningClaim> claims;
+    claims.push_back({0, z0, rc::RCGkrMleEval1D2(cols[0], z0)});
+    claims.push_back({1, z1, rc::RCGkrMleEval1D2(cols[1], z1)});
+
+    const auto pr = rc::BatchedOpeningProve(claims, cols, seed);
+    BOOST_REQUIRE_MESSAGE(pr.ok, pr.note);
+    std::string why;
+    // Honest: both aggregated identities vanish → 0 violations.
+    BOOST_CHECK_MESSAGE(rc::BatchedOpeningVerify(claims, pr.proof, seed, &why), why);
+
+    // Shape: exactly FOUR Stage-2 witness columns (f,g,f',g') ride the batch.
+    const uint32_t n_epoch1 = 2;
+    BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(), n_epoch1 + 4u);
+    BOOST_CHECK_EQUAL(pr.proof.eval.f_column, n_epoch1);
+    BOOST_CHECK_EQUAL(pr.proof.eval.g_column, n_epoch1 + 1u);
+    BOOST_CHECK_EQUAL(pr.proof.eval.f2_column, n_epoch1 + 2u);
+    BOOST_CHECK_EQUAL(pr.proof.eval.g2_column, n_epoch1 + 3u);
+
+    // TAMPER (a): fix the α#1 aggregate but corrupt ONE Fp2 coordinate of the
+    // α#2 aggregate σ' — the independent second identity no longer vanishes.
+    {
+        auto bad = pr.proof;
+        bad.eval.sigma2.c0 ^= 1;
+        BOOST_CHECK(!rc::BatchedOpeningVerify(claims, bad, seed, &why));
+        BOOST_CHECK_MESSAGE(why == "eval:sigma2_mismatch", why);
+    }
+    // TAMPER (b): a mismatched dual-α witness column index is a structural
+    // reject (the four witness columns are position-pinned after epoch-1).
+    {
+        auto bad = pr.proof;
+        bad.eval.g2_column ^= 1u;
+        BOOST_CHECK(!rc::BatchedOpeningVerify(claims, bad, seed, &why));
+        BOOST_CHECK_MESSAGE(why == "constr1:fg_columns", why);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Obligation (c2): a wrong batched γ-combination is detected at Stage 1.
 // ---------------------------------------------------------------------------
 BOOST_AUTO_TEST_CASE(constr1_wrong_gamma_combination_detected)

@@ -37,6 +37,17 @@ struct Params;
 namespace matmul::v4::rc {
 
 /**
+ * Stage-3 V1 proof-shape rule for every rejection-sampled group of 32
+ * mantissas.  This does not change the legacy exact-replay oracle: a candidate
+ * whose deterministic stream exceeds the cap remains a valid legacy
+ * computation but is not provable by the V1 succinct format and the miner must
+ * try another nonce.  Keeping the cap beside the oracle declarations gives
+ * the builder, Extract AIR and global site manifest one consensus-reviewable
+ * source of truth.
+ */
+inline constexpr uint32_t kRCStage3V1MaxRejectionBlocksPer32 = 4;
+
+/**
  * Consensus structural parameters (R.0) — epoch-0 / Class B frozen bases.
  * Equal to EpisodeParamsFromScale({kRCW0Res, kRCW0Cap}) in matmul_v4_rc_scale.h.
  * Class A dials (W_res/W_cap) may grow with height; these literals stay the

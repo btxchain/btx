@@ -101,7 +101,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_positive_path_byte_parity)
     BOOST_CHECK_EQUAL(pr.proof.lobes.size(), rc::RCGkrCoupledExpectedLobeCount(params));
     BOOST_CHECK_EQUAL(pr.proof.feed_evals.size(), rc::RCGkrCoupledExpectedFeedCount(params));
     BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
-                      rc::RCGkrCoupledExpectedColumnCount(params) + 2); // + eval f,g
+                      rc::RCGkrCoupledExpectedColumnCount(params) + 4); // + dual-α eval f,g,f',g'
     // Every coupled Extract tile is AIR-checked and included in the dual-α
     // canonical LogUp aggregate. This used to be a 16-tile sample.
     BOOST_CHECK(pr.proof.extract_all_tiles);
@@ -150,7 +150,7 @@ BOOST_AUTO_TEST_CASE(coupled_v7_medium_v3_rows_per_lobe_byte_parity)
     BOOST_CHECK_EQUAL(pr.proof.lobes.size(), rc::RCGkrCoupledExpectedLobeCount(params));
     BOOST_CHECK_EQUAL(pr.proof.feed_evals.size(), rc::RCGkrCoupledExpectedFeedCount(params));
     BOOST_CHECK_EQUAL(pr.proof.batch.columns.size(),
-                      rc::RCGkrCoupledExpectedColumnCount(params) + 2);
+                      rc::RCGkrCoupledExpectedColumnCount(params) + 4);
     BOOST_CHECK(pr.proof.extract_all_tiles);
     BOOST_CHECK_EQUAL(pr.proof.extract_tiles_covered,
                       static_cast<uint64_t>(params.barriers) *
