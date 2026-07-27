@@ -223,6 +223,7 @@ BuildCanonicalBytecodeQuotientAirV1(
     for (const auto& row : rows) {
         if (row.current.size() != table.current_width ||
             row.next.size() != table.next_width ||
+            row.challenge.size() != table.challenge_width ||
             row.query_index >=
                 domain.evaluation_rows ||
             gf::IsZero(
@@ -256,6 +257,8 @@ BuildCanonicalBytecodeQuotientAirV1(
         take(table.current_width);
     out.source_next_base =
         take(table.next_width);
+    out.source_challenge_base =
+        take(table.challenge_width);
     out.source_lambda = take(1);
     out.source_query_index = take(1);
     out.source_evaluation_point = take(1);
@@ -265,6 +268,8 @@ BuildCanonicalBytecodeQuotientAirV1(
         take(table.current_width);
     out.interpreter_next_base =
         take(table.next_width);
+    out.interpreter_challenge_base =
+        take(table.challenge_width);
     out.interpreter_selector_base =
         take(table.programs.size());
     out.interpreter_lambda = take(1);
@@ -331,6 +336,15 @@ BuildCanonicalBytecodeQuotientAirV1(
             out.witness[
                 out.interpreter_next_base + column][row] =
                 rows[row].next[column];
+        }
+        for (uint32_t column = 0;
+             column < table.challenge_width; ++column) {
+            out.witness[
+                out.source_challenge_base + column][row] =
+                rows[row].challenge[column];
+            out.witness[
+                out.interpreter_challenge_base + column][row] =
+                rows[row].challenge[column];
         }
         out.witness[out.source_lambda][row] =
             rows[row].constraint_lambda;
@@ -431,6 +445,11 @@ BuildCanonicalBytecodeQuotientAirV1(
                 case cb::Opcode::Next:
                     value =
                         rows[row].next[
+                            instruction.lhs];
+                    break;
+                case cb::Opcode::Challenge:
+                    value =
+                        rows[row].challenge[
                             instruction.lhs];
                     break;
                 case cb::Opcode::Constant:
@@ -552,6 +571,26 @@ BuildCanonicalBytecodeQuotientAirV1(
              source = out.source_next_base + column,
              interpreted =
                  out.interpreter_next_base + column](
+                const std::vector<Fp3>& current,
+                const std::vector<Fp3>&) {
+                return gf::Mul(
+                    current[active],
+                    gf::Sub(
+                        current[interpreted],
+                        current[source]));
+            });
+    }
+    for (uint32_t column = 0;
+         column < table.challenge_width; ++column) {
+        Add(
+            out.cs,
+            "stage3.recursive_bytecode.challenge_alias",
+            aq::AirKind::kEverywhere, 2,
+            [active = out.active,
+             source =
+                 out.source_challenge_base + column,
+             interpreted =
+                 out.interpreter_challenge_base + column](
                 const std::vector<Fp3>& current,
                 const std::vector<Fp3>&) {
                 return gf::Mul(
@@ -892,6 +931,8 @@ BuildCanonicalBytecodeQuotientAirV1(
                      out.interpreter_current_base,
                  next_base =
                      out.interpreter_next_base,
+                 challenge_base =
+                     out.interpreter_challenge_base,
                  instruction](
                     const std::vector<Fp3>& row,
                     const std::vector<Fp3>&) {
@@ -905,6 +946,11 @@ BuildCanonicalBytecodeQuotientAirV1(
                     case cb::Opcode::Next:
                         expected =
                             row[next_base +
+                                instruction.lhs];
+                        break;
+                    case cb::Opcode::Challenge:
+                        expected =
+                            row[challenge_base +
                                 instruction.lhs];
                         break;
                     case cb::Opcode::Constant:
@@ -1067,6 +1113,7 @@ BuildCanonicalBytecodeQuotientAirV1(
     out.caller_selected_program_key =
         canonical_key == selected_program_key;
     out.current_next_direct_aliases = true;
+    out.challenge_columns_direct_aliases = true;
     out.selectors_derived_from_evaluation_point =
         true;
     out.lambda_direct_alias = true;
@@ -1090,6 +1137,7 @@ BuildCanonicalBytecodeQuotientAirV1(
     out.valid =
         out.caller_selected_program_key &&
         out.current_next_direct_aliases &&
+        out.challenge_columns_direct_aliases &&
         out.selectors_derived_from_evaluation_point &&
         out.lambda_direct_alias &&
         out.next_opening_point_is_omega_z &&
@@ -1151,6 +1199,8 @@ bool ValidateCanonicalBytecodeQuotientAirV1(
             expected.caller_selected_program_key ||
         candidate.current_next_direct_aliases !=
             expected.current_next_direct_aliases ||
+        candidate.challenge_columns_direct_aliases !=
+            expected.challenge_columns_direct_aliases ||
         candidate.selectors_derived_from_evaluation_point !=
             expected.selectors_derived_from_evaluation_point ||
         candidate.lambda_direct_alias !=

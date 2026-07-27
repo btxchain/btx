@@ -91,6 +91,31 @@ cb::ProgramTable Table()
     return out;
 }
 
+cb::ProgramTable ChallengeTable()
+{
+    cb::ProgramTable out;
+    out.role = RCStage3RelationRole::CoupledBank;
+    out.current_width = 2;
+    out.next_width = 2;
+    out.challenge_width = 1;
+
+    cb::Program product;
+    product.role = out.role;
+    product.constraint_ordinal = 0;
+    product.kind = air_quotient::AirKind::kEverywhere;
+    product.declared_degree = 2;
+    product.current_width = out.current_width;
+    product.next_width = out.next_width;
+    product.challenge_width = out.challenge_width;
+    product.instructions = {
+        {cb::Opcode::Current, 0, 0, gf::Fp3::Zero()},
+        {cb::Opcode::Challenge, 0, 0, gf::Fp3::Zero()},
+        {cb::Opcode::Mul, 0, 1, gf::Fp3::Zero()},
+    };
+    out.programs.push_back(std::move(product));
+    return out;
+}
+
 std::vector<QuotientOpeningRowV1> Rows()
 {
     const auto domain = Domain();
@@ -149,6 +174,26 @@ std::vector<QuotientOpeningRowV1> Rows()
         opening.quotient_opening =
             gf::Mul(weighted, gf::Inv(zh));
         out.push_back(std::move(opening));
+    }
+    return out;
+}
+
+std::vector<QuotientOpeningRowV1> ChallengeRows()
+{
+    const auto domain = Domain();
+    auto out = Rows();
+    for (uint32_t row = 0; row < out.size(); ++row) {
+        auto& opening = out[row];
+        opening.challenge = {gf::FromU64_3(101 + row)};
+        const gf::Fp3 terminal = gf::Mul(
+            opening.current[0], opening.challenge[0]);
+        const gf::Fp3 zh = gf::Sub(
+            Pow3(
+                opening.evaluation_point,
+                domain.trace_rows),
+            gf::Fp3::One());
+        opening.quotient_opening =
+            gf::Mul(terminal, gf::Inv(zh));
     }
     return out;
 }
@@ -290,6 +335,89 @@ BOOST_AUTO_TEST_CASE(
         !BuildCanonicalBytecodeQuotientAirV1(
              changed_table, key,
              domain, rows)
+             .valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    post_challenge_columns_execute_and_are_directly_aliased)
+{
+    const auto table = ChallengeTable();
+    BOOST_REQUIRE(cb::ValidateProgramTable(table));
+    const auto key =
+        cb::CommitProgramTableAlgHash(table);
+    const auto domain = Domain();
+    const auto rows = ChallengeRows();
+    const auto candidate =
+        BuildCanonicalBytecodeQuotientAirV1(
+            table, key, domain, rows);
+    BOOST_REQUIRE_MESSAGE(
+        candidate.valid, candidate.note);
+    BOOST_CHECK(
+        candidate.challenge_columns_direct_aliases);
+    BOOST_CHECK_EQUAL(
+        candidate.interpreter_challenge_base,
+        candidate.source_quotient_opening + 1 +
+            table.current_width + table.next_width);
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        ValidateCanonicalBytecodeQuotientAirV1(
+            table, key, domain,
+            rows, candidate, &why),
+        why);
+
+    auto source_attack = candidate;
+    source_attack.witness[
+        source_attack.source_challenge_base][0] =
+        gf::Add(
+            source_attack.witness[
+                source_attack.source_challenge_base][0],
+            gf::Fp3::One());
+    std::vector<gf::Fp3> attacked_row(
+        source_attack.columns, gf::Fp3::Zero());
+    std::vector<gf::Fp3> attacked_next(
+        source_attack.columns, gf::Fp3::Zero());
+    for (uint32_t column = 0;
+         column < source_attack.columns; ++column) {
+        attacked_row[column] =
+            source_attack.witness[column][0];
+        attacked_next[column] =
+            source_attack.witness[column][1];
+    }
+    bool alias_constraint_rejects = false;
+    for (const auto& constraint :
+         source_attack.cs.constraints) {
+        if (std::string{constraint.name} ==
+                "stage3.recursive_bytecode.challenge_alias" &&
+            !gf::IsZero(
+                constraint.eval(
+                    attacked_row, attacked_next))) {
+            alias_constraint_rejects = true;
+        }
+    }
+    BOOST_CHECK(alias_constraint_rejects);
+    BOOST_CHECK(
+        !ValidateCanonicalBytecodeQuotientAirV1(
+            table, key, domain, rows,
+            source_attack, &why));
+
+    auto interpreter_attack = candidate;
+    interpreter_attack.witness[
+        interpreter_attack.interpreter_challenge_base][0] =
+        gf::Add(
+            interpreter_attack.witness[
+                interpreter_attack.interpreter_challenge_base][0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !ValidateCanonicalBytecodeQuotientAirV1(
+            table, key, domain, rows,
+            interpreter_attack, &why));
+
+    auto missing_challenge = rows;
+    missing_challenge[0].challenge.clear();
+    BOOST_CHECK(
+        !BuildCanonicalBytecodeQuotientAirV1(
+             table, key, domain,
+             missing_challenge)
              .valid);
 }
 

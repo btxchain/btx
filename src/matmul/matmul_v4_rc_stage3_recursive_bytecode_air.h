@@ -30,6 +30,8 @@ inline constexpr uint16_t kRecursiveBytecodeAirVersionV1 = 1;
 struct QuotientOpeningRowV1 {
     std::vector<gf::Fp3> current;
     std::vector<gf::Fp3> next;
+    /** Verifier-owned post-commitment columns, in canonical table order. */
+    std::vector<gf::Fp3> challenge;
     gf::Fp3 constraint_lambda{};
     uint32_t query_index{0};
     gf::Fp3 evaluation_point{};
@@ -66,6 +68,7 @@ struct CanonicalBytecodeQuotientAirV1 {
     uint32_t instruction_registers{0};
     uint32_t source_current_base{0};
     uint32_t source_next_base{0};
+    uint32_t source_challenge_base{0};
     uint32_t source_lambda{0};
     uint32_t source_query_index{0};
     uint32_t source_evaluation_point{0};
@@ -73,6 +76,7 @@ struct CanonicalBytecodeQuotientAirV1 {
     uint32_t source_quotient_opening{0};
     uint32_t interpreter_current_base{0};
     uint32_t interpreter_next_base{0};
+    uint32_t interpreter_challenge_base{0};
     uint32_t interpreter_selector_base{0};
     uint32_t interpreter_lambda{0};
     uint32_t query_bit_base{0};
@@ -93,6 +97,7 @@ struct CanonicalBytecodeQuotientAirV1 {
     std::vector<std::vector<gf::Fp3>> witness;
     bool caller_selected_program_key{false};
     bool current_next_direct_aliases{false};
+    bool challenge_columns_direct_aliases{false};
     bool selectors_derived_from_evaluation_point{false};
     bool lambda_direct_alias{false};
     bool next_opening_point_is_omega_z{false};
