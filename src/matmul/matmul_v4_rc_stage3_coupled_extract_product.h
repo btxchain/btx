@@ -92,6 +92,27 @@ BuildRCStage3CoupledExtractSchedule(
     RCStage3CoupledExtractProduct& out,
     std::string* why = nullptr);
 
+/**
+ * Recompute tile / semantic-bundle / endpoint / product commitments after
+ * proof blobs are attached to a structural rebuild. Required by the
+ * ExtractTilesV1 engine verifier: FlatBundle commitment hashes proof column
+ * roots, so a prove=false rebuild's commitments are stale once wire proofs
+ * are installed (otherwise Validate fails with validate_shape).
+ */
+[[nodiscard]] bool RebindRCStage3CoupledExtractProductProofCommitments(
+    RCStage3CoupledExtractProduct& product,
+    std::string* why = nullptr);
+
+/**
+ * After engine-receipt decode injects real AIR proofs into a prove=false
+ * rebuild, recompute bundle / endpoint / product commitments that hash proof
+ * column roots + trace_commit. Without this, Validate sees structural stub
+ * commitments vs proof-injected shards (validate_shape).
+ */
+[[nodiscard]] bool RebindRCStage3CoupledExtractProductAfterProofInject(
+    RCStage3CoupledExtractProduct& product,
+    std::string* why = nullptr);
+
 /** Schedule/root validation only; no native Extract/hash acceptance. */
 [[nodiscard]] bool ValidateRCStage3CoupledExtractProductSchedule(
     const RCStage3SuccinctProof& statement,

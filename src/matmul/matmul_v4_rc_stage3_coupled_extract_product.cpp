@@ -1004,6 +1004,43 @@ bool ProveRCStage3CoupledExtractProduct(
         statement, shape, inputs, true, out, why);
 }
 
+bool RebindRCStage3CoupledExtractProductProofCommitments(
+    RCStage3CoupledExtractProduct& product,
+    std::string* why)
+{
+    for (auto& tile : product.tiles) {
+        tile.tile_commitment =
+            ComputeRCStage3CoupledExtractTileCommitment(tile);
+        if (tile.tile_commitment.IsNull()) {
+            return Fail(why, "rebind_tile_commitment");
+        }
+    }
+    for (auto* bundle : {
+             &product.input_cells, &product.sampler_cells,
+             &product.scale_cells,
+             &product.output_to_barrier.extract_outputs}) {
+        bundle->bundle_commitment =
+            ComputeRCStage3CoupledSemanticFlatBundleCommitment(*bundle);
+        if (bundle->bundle_commitment.IsNull()) {
+            return Fail(why, "rebind_bundle_commitment");
+        }
+    }
+    product.input_endpoint_root = EndpointRoot(
+        RCStage3RelationEndpoint::CoupledExtractInput, product);
+    product.sampler_endpoint_root = EndpointRoot(
+        RCStage3RelationEndpoint::CoupledExtractSampler, product);
+    product.chacha_endpoint_root = EndpointRoot(
+        RCStage3RelationEndpoint::CoupledExtractChaCha, product);
+    product.scale_endpoint_root = EndpointRoot(
+        RCStage3RelationEndpoint::CoupledExtractScale, product);
+    product.output_endpoint_root = EndpointRoot(
+        RCStage3RelationEndpoint::CoupledExtractOutput, product);
+    product.product_commitment =
+        ComputeRCStage3CoupledExtractProductCommitment(product);
+    return !product.product_commitment.IsNull() ||
+           Fail(why, "rebind_product_commitment");
+}
+
 bool ValidateRCStage3CoupledExtractProductSchedule(
     const RCStage3SuccinctProof& statement,
     const RCStage3CoupledShape& shape,
