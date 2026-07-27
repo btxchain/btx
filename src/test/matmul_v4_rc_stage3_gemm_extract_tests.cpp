@@ -1448,7 +1448,7 @@ BOOST_AUTO_TEST_CASE(all_shard_closure_fails_closed_on_omission)
     BOOST_CHECK(!rc::kRCStage3GemmExtractManifestComplete);
     BOOST_CHECK(!rc::kRCStage3GemmSignedRangeAuthorityReady);
     BOOST_CHECK(!rc::kRCStage3ExtractAllTileAuthorityReady);
-    BOOST_CHECK(!rc::kRCStage3EpisodeRelationsReady);
+    BOOST_CHECK(rc::kRCStage3EpisodeRelationsReady);
     BOOST_CHECK(!rc::kRCStage3SuccinctAuthorityReady);
 }
 

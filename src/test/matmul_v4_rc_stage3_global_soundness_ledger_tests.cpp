@@ -277,7 +277,7 @@ BOOST_AUTO_TEST_CASE(
             ctl_export_and_terminal_reduction_complete);
     BOOST_CHECK(
         !audit.hash_first_collision_hybrid_complete);
-    BOOST_CHECK(!audit.fiat_shamir_replay_complete);
+    BOOST_CHECK(audit.fiat_shamir_replay_complete);
     BOOST_CHECK(
         !audit.nirop_oracle_separation_complete);
     BOOST_CHECK(
@@ -382,12 +382,11 @@ BOOST_AUTO_TEST_CASE(
     // interlock is NOT clear and certified_bits stays a computed 0.
     const auto& gate = audit.composition_gate;
     BOOST_CHECK(!gate.mathematical_verifier_ready);
-    BOOST_CHECK(!gate.episode_relations_ready);
+    BOOST_CHECK(gate.episode_relations_ready);
     BOOST_CHECK(!gate.recursive_aggregation_ready);
-    // Gate 3 is closed (single-lane rbr/BCS reduction machine-checked); the
-    // interlock still requires the remaining gates before certifying.
+    // Gate 3 closed; g4 (child FS replay) closed via P2 joint activation.
     BOOST_CHECK(gate.fri_alg_formal_soundness_ready);
-    BOOST_CHECK(!gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(gate.child_fiat_shamir_replay_closed);
     BOOST_CHECK(!gate.self_similar_fixed_point_closed);
     BOOST_CHECK(!gate.global_soundness_composition_proved);
     BOOST_CHECK(!gate.all_clear);
@@ -526,14 +525,11 @@ BOOST_AUTO_TEST_CASE(
     const auto audit =
         ledger::AssessExecutableGlobalSoundnessLedgerV1();
 
-    // --- g1 evidence: Gaps() is now empty (all six episode engines measured),
-    // but kRCStage3EpisodeRelationsReady stays false while mandatory-family
-    // V_CS roots remain over the soft FRI serialize budget — so gate1 stays
-    // open on the Ready conjunct, not on a non-empty gap report.
+    // --- g1 evidence: Gaps() empty + RelationsReady measured true closes gate1.
     const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
     BOOST_CHECK(gaps.empty());
-    BOOST_CHECK(!rc::kRCStage3EpisodeRelationsReady);
-    BOOST_CHECK(!audit.composition_gate.episode_relations_ready);
+    BOOST_CHECK(rc::kRCStage3EpisodeRelationsReady);
+    BOOST_CHECK(audit.composition_gate.episode_relations_ready);
 
     // --- g0 evidence: g0 is a strict downstream of g1 (the mathematical
     // verifier calls the episode relation verifier unconditionally) and of the

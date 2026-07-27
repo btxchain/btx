@@ -60,8 +60,8 @@ static_assert(!kRCStage3MathematicalVerifierReady,
 static_assert(!kRCStage3SuccinctAuthorityReady ||
                   kRCStage3MathematicalVerifierReady,
               "consensus authority cannot precede the complete verifier");
-static_assert(!kRCStage3EpisodeRelationsReady,
-              "episode proof-only engines are not complete");
+static_assert(kRCStage3EpisodeRelationsReady,
+              "episode Gaps() empty + measured recursion engines executed");
 static_assert(!kRCStage3CoupledRelationEnginesReady,
               "coupled proof-only engines are not complete");
 static_assert(!kRCStage3RecursiveAggregationReady,

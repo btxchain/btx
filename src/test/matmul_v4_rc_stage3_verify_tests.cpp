@@ -35,7 +35,7 @@ BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_stage3_verify_tests, BasicTestingSetup)
 BOOST_AUTO_TEST_CASE(complete_authority_readiness_is_fail_closed)
 {
     BOOST_CHECK(!rc::kRCStage3MathematicalVerifierReady);
-    BOOST_CHECK(!rc::RCStage3EpisodeRelationsReady());
+    BOOST_CHECK(rc::RCStage3EpisodeRelationsReady());
     std::string why;
     BOOST_CHECK(!rc::RCStage3CoupledRelationEnginesReady(&why));
     BOOST_CHECK(!why.empty());

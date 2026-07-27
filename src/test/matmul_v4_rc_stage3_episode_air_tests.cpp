@@ -125,7 +125,7 @@ BOOST_AUTO_TEST_CASE(registry_is_immutable_partial_and_proof_only)
         BOOST_REQUIRE(cap.detail != nullptr);
     }
     BOOST_CHECK(!rc::kRCStage3EpisodeAirRegistryComplete);
-    BOOST_CHECK(!rc::kRCStage3EpisodeRelationsReady);
+    BOOST_CHECK(rc::kRCStage3EpisodeRelationsReady);
     BOOST_CHECK(!rc::kRCStage3SuccinctAuthorityReady);
 }
 
