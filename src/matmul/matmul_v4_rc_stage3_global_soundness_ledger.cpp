@@ -910,14 +910,11 @@ AssessExecutableGlobalSoundnessLedgerV1(
         kRCFri3AlgFormalSoundnessReady &&
         fri3_rbr_machine_checked;
 
-    // g1 evidence: the per-role episode relation gap report must be EMPTY. It
-    // currently carries one entry per still-open required role (two of the
-    // six: EpisodeGemm/TileTree/Digest/Builder recursive engines now genuinely
-    // execute end-to-end for real instances, see
-    // kRCStage3Episode*RecursionEnginesExecuted in matmul_v4_rc_stage3_episode.h
-    // and the prototype tests they cite), each with a non-zero
-    // missing-obligation mask, so g1 cannot be closed by flipping
-    // kRCStage3EpisodeRelationsReady alone.
+    // g1 evidence: the per-role episode relation gap report must be EMPTY
+    // (all six Episode*RecursionEnginesExecuted flags are now true — see
+    // matmul_v4_rc_stage3_episode.h + recursion prototype tests). Gate1 still
+    // requires kRCStage3EpisodeRelationsReady, which stays false while
+    // mandatory-family V_CS roots remain over the soft FRI serialize budget.
     const bool episode_relation_gaps_empty =
         CurrentRCStage3EpisodeRelationGaps().empty();
     const bool gate1_episode_relations =

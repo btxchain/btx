@@ -526,29 +526,13 @@ BOOST_AUTO_TEST_CASE(
     const auto audit =
         ledger::AssessExecutableGlobalSoundnessLedgerV1();
 
-    // --- g1 evidence: the episode relation gap report is NON-empty. This is
-    // what holds g1 open independently of kRCStage3EpisodeRelationsReady.
+    // --- g1 evidence: Gaps() is now empty (all six episode engines measured),
+    // but kRCStage3EpisodeRelationsReady stays false while mandatory-family
+    // V_CS roots remain over the soft FRI serialize budget — so gate1 stays
+    // open on the Ready conjunct, not on a non-empty gap report.
     const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
-    BOOST_CHECK(!gaps.empty());
-    // g1 (episode) now carries one entry per still-open required episode
-    // role. EpisodeGemm/TileTree/Digest/Builder dropped out of this report:
-    // their recursive engines genuinely execute end-to-end for real instances
-    // (see rc::kRCStage3Episode*RecursionEnginesExecuted and
-    // matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp), which is
-    // real evidence, not a flipped constant -- and they alone are not enough
-    // to close g1: Extract/Wiring are still fully open, so
-    // episode_relation_gaps_empty (and therefore gate1) stays false.
-    BOOST_CHECK_EQUAL(gaps.size(), 2U);
-    for (const auto& gap : gaps) {
-        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeGemm);
-        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeTileTree);
-        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeDigest);
-        BOOST_CHECK(gap.role !=
-                    rc::RCStage3RelationRole::EpisodeDeterministicBuilder);
-        BOOST_CHECK(gap.missing_obligations != 0U);
-        BOOST_CHECK(!gap.reason.empty());
-    }
-    // Therefore g1 is false even though its constant is only one conjunct.
+    BOOST_CHECK(gaps.empty());
+    BOOST_CHECK(!rc::kRCStage3EpisodeRelationsReady);
     BOOST_CHECK(!audit.composition_gate.episode_relations_ready);
 
     // --- g0 evidence: g0 is a strict downstream of g1 (the mathematical
@@ -557,9 +541,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!rc::kRCStage3CoupledRelationEnginesReady);
     BOOST_CHECK(!audit.composition_gate.mathematical_verifier_ready);
 
-    // --- g2 evidence: recursive aggregation's own
-    // cryptographic_verification_ready depends on g4, which is open.
-    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
+    // --- g2 evidence: recursive aggregation still not production-ready even
+    // when child FS replay is closed (authority / two-level budget residuals).
     BOOST_CHECK(!audit.composition_gate.recursive_aggregation_ready);
 
     // --- g3 evidence: this is the ONE closed gate, and it is closed because

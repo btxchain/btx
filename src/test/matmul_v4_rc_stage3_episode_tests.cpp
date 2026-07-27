@@ -202,6 +202,9 @@ BOOST_AUTO_TEST_CASE(incomplete_coverage_and_native_engines_never_authorize)
 {
     auto proof = MakeEpisodeProof();
     std::string why;
+    // Gaps() is empty but RelationsReady stays false (serialize soft-budget).
+    // MakeEpisodeProof still carries native engines, so verify fails closed on
+    // the engine before the Ready gate.
     BOOST_CHECK(!rc::RCStage3EpisodeRelationsReady());
     BOOST_CHECK(!rc::VerifyRCStage3EpisodeRelations(proof, &why));
     BOOST_CHECK(why.find("native_witness_engine_forbidden") != std::string::npos);
@@ -234,36 +237,23 @@ BOOST_AUTO_TEST_CASE(coupled_only_is_rejected_and_prover_emits_no_partial_author
     BOOST_CHECK(!result.ok);
     BOOST_CHECK(result.commitments.empty());
     BOOST_CHECK(result.sections.empty());
-    // EpisodeGemm/TileTree/Digest/Builder recursive engines now genuinely
-    // execute (see kRCStage3Episode*RecursionEnginesExecuted / matmul_v4_rc_
-    // stage3_episode_recursion_prototype_tests.cpp), so they are no longer
-    // reported as gaps; Extract/Wiring remain open.
-    BOOST_CHECK_EQUAL(result.gaps.size(), 2U);
+    // All six episode recursive engines now genuinely execute (see
+    // kRCStage3Episode*RecursionEnginesExecuted /
+    // matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp), so Gaps()
+    // is empty; RelationsReady is true on that invariant.
+    BOOST_CHECK(result.gaps.empty());
     BOOST_CHECK(result.note.find("no_complete_proof_only_engine") !=
                 std::string::npos);
 }
 
-BOOST_AUTO_TEST_CASE(gap_report_names_every_still_open_episode_role)
+BOOST_AUTO_TEST_CASE(gap_report_empty_when_all_episode_engines_executed)
 {
     const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
-    const auto roles =
-        rc::RequiredRCStage3RelationRoles(rc::RCStage3StatementKind::Episode);
-    // EpisodeGemm/TileTree/Digest/Builder are the required roles whose
-    // recursive engines now genuinely execute for a real instance (see
-    // kRCStage3Episode*RecursionEnginesExecuted); they are therefore absent
-    // from the gap report while Extract/Wiring remain open.
-    BOOST_REQUIRE_EQUAL(gaps.size(), 2U);
-    for (const auto& gap : gaps) {
-        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeGemm);
-        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeTileTree);
-        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeDigest);
-        BOOST_CHECK(gap.role !=
-                    rc::RCStage3RelationRole::EpisodeDeterministicBuilder);
-        BOOST_CHECK(std::find(roles.begin(), roles.end(), gap.role) !=
-                    roles.end());
-        BOOST_CHECK_NE(gap.missing_obligations, 0U);
-        BOOST_CHECK(!gap.reason.empty());
-    }
+    // All six required episode roles' recursive engines now execute; Gaps()
+    // empty is exactly the invariant that permits RelationsReady.
+    BOOST_REQUIRE(gaps.empty());
+    BOOST_CHECK(rc::kRCStage3EpisodeRelationsReady);
+    BOOST_CHECK(rc::RCStage3EpisodeRelationsReady());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
