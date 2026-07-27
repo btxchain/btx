@@ -200,9 +200,11 @@ add_executable(test_btx
   matmul_v4_rc_stage3_multirow_v11_recursive_parent_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_fixedpoint_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_normalized_program_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_receipt_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_recursive_verifier_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_semantic_ctl_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_semantic_exports_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_semantic_heavy_tests.cpp
   matmul_v4_rc_stage3_poseidon_bytecode_tests.cpp
   matmul_v4_rc_stage3_v5_v6_bus_tests.cpp
   matmul_v4_rc_stage3_v6_fs_tests.cpp
