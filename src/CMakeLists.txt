@@ -654,6 +654,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_family_fold.cpp
   matmul/matmul_v4_rc_stage3_global_soundness_ledger.cpp
   matmul/matmul_v4_rc_stage3_universal_topology.cpp
+  matmul/matmul_v4_rc_stage3_production_family_programs.cpp
   matmul/matmul_v4_rc_stage3_coupled_exchange_permutation_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_extract_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_mix_product.cpp
