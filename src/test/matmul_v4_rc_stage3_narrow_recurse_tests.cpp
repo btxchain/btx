@@ -1270,7 +1270,12 @@ BOOST_AUTO_TEST_CASE(narrow_recursion_shape_fixed_point_iteration)
         << " narrow_rows=" << level1.combined.n_rows
         << " narrow_max_degree=" << narrow_max_degree
         << " queries=" << queries);
-    level1 = fpx::FoldBusComposition{}; // release the level-1 witness columns
+    // Release both retained copies of the large witness explicitly.
+    // AppleClang correctly rejects aggregate value-initialization here because
+    // FoldBusComposition contains FoldBusLayout, whose defaulted-argument
+    // constructor is explicit.
+    decltype(level1.columns){}.swap(level1.columns);
+    decltype(level1.hash.columns){}.swap(level1.hash.columns);
 
     const auto log2_exact = [](uint64_t n) {
         uint32_t out = 0;
