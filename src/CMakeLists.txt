@@ -710,10 +710,14 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_multirow_v11_fixedpoint.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_normalized_program.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join_q96.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_relation_shards.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_relation_quotient_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_recursive_verifier.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_semantic_ctl.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_semantic_exports.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_semantic_heavy.cpp
+  matmul/matmul_v4_rc_stage3_multirow_v11_semantic_recursive.cpp
   matmul/matmul_v4_rc_stage3_poseidon_air.cpp
   matmul/matmul_v4_rc_stage3_poseidon_bytecode.cpp
   matmul/matmul_v4_rc_stage3_v5_v6_bus.cpp
