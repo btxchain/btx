@@ -2506,17 +2506,20 @@ bool VerifyRCStage3CoupledExtractEngineReceipt(
                 reader, product.output_to_barrier.barriers[i].hash_proofs)) {
             return Fail(why, "extract_engine:barrier_decode");
         }
+        product.output_to_barrier.barriers[i].hash_proofs.endpoint =
+            RCStage3RelationEndpoint::CoupledBarrierHash;
         product.output_to_barrier.barriers[i].hash_proofs.statement_commitment =
             product.statement_commitment;
         product.output_to_barrier.barriers[i].hash_proofs.manifest_commitment =
-            product.output_to_barrier.barriers[i].manifest.commitment;
+            product.output_to_barrier.barriers[i].manifest.direct.commitment;
     }
     if (reader.Remaining() != 0) {
         return Fail(why, "extract_engine:trailing_bytes");
     }
-    // Structural rebuild computed FlatBundle commitments over empty proof
-    // columns; wire proofs are now installed — rebind before Validate.
-    if (!RebindRCStage3CoupledExtractProductProofCommitments(product, why)) {
+    // Structural rebuild used prove=false (empty proof columns); wire proofs
+    // are installed — rebind FlatBundle / link / endpoint commitments.
+    if (!RebindRCStage3CoupledExtractProductProofCommitments(
+            statement, shape, product, why)) {
         return false;
     }
     if (!VerifyRCStage3CoupledExtractProduct(statement, shape, product, why)) {

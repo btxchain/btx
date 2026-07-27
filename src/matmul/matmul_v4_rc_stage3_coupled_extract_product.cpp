@@ -1005,6 +1005,8 @@ bool ProveRCStage3CoupledExtractProduct(
 }
 
 bool RebindRCStage3CoupledExtractProductProofCommitments(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
     RCStage3CoupledExtractProduct& product,
     std::string* why)
 {
@@ -1024,6 +1026,15 @@ bool RebindRCStage3CoupledExtractProductProofCommitments(
         if (bundle->bundle_commitment.IsNull()) {
             return Fail(why, "rebind_bundle_commitment");
         }
+    }
+    // Link pin embeds extract_outputs.bundle_commitment; rebuild before
+    // endpoint/product roots that hash link_commitment.
+    if (!BuildRCStage3ExtractBarrierLinkPin(
+            statement, shape,
+            product.output_to_barrier.extract_outputs,
+            product.output_to_barrier.barriers,
+            product.output_to_barrier.pin, why)) {
+        return false;
     }
     product.input_endpoint_root = EndpointRoot(
         RCStage3RelationEndpoint::CoupledExtractInput, product);
