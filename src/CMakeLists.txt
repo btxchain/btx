@@ -675,6 +675,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_recursive_consumption.cpp
   matmul/matmul_v4_rc_stage3_recursive_fixedpoint.cpp
   matmul/matmul_v4_rc_stage3_recursive_receipt.cpp
+  matmul/matmul_v4_rc_stage3_ali_manifest.cpp
+  matmul/matmul_v4_rc_stage3_ali_same_parent_bridge.cpp
   matmul/matmul_v4_rc_stage3_constraint_bytecode.cpp
   matmul/matmul_v4_rc_stage3_role_bytecode.cpp
   matmul/matmul_v4_rc_stage3_relation_local_sharding.cpp
