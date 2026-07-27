@@ -175,6 +175,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_p2_prefix_source_air_tests.cpp
   matmul_v4_rc_stage3_ali_manifest_tests.cpp
   matmul_v4_rc_stage3_ali_same_parent_bridge_tests.cpp
+  matmul_v4_rc_stage3_pow_composition_tests.cpp
   matmul_v4_rc_stage3_relation_local_sharding_tests.cpp
   matmul_v4_rc_stage3_mlink_tests.cpp
   matmul_v4_rc_stage3_family_vm_tests.cpp
