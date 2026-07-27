@@ -1048,7 +1048,438 @@ FriDualQ128HybridBoundAssessment AssessFriDualQ128HybridBound(
     return out;
 }
 
+NarrowNodeFriShape AssessNarrowNodeFriShape(
+    uint64_t active_rows,
+    uint32_t vcs_columns,
+    uint32_t max_algebraic_degree,
+    uint32_t lde_log2_cap,
+    uint32_t column_cap)
+{
+    NarrowNodeFriShape out;
+    out.active_rows = active_rows;
+    out.vcs_columns = vcs_columns;
+    out.max_algebraic_degree = max_algebraic_degree;
+    out.lde_log2_cap = lde_log2_cap;
+    out.column_cap = column_cap;
+    out.fits_column_cap = vcs_columns > 0 && vcs_columns <= column_cap;
+
+    if (active_rows == 0 || max_algebraic_degree < 2 || lde_log2_cap > 31) {
+        out.note = "narrow_hierarchy:invalid_fri_shape_inputs";
+        return out;
+    }
+    out.trace_rows = NextPow2Checked(active_rows);
+    if (out.trace_rows == 0) {
+        out.note = "narrow_hierarchy:trace_row_overflow";
+        return out;
+    }
+    const uint64_t quotient =
+        uint64_t{max_algebraic_degree - 1} * (uint64_t{out.trace_rows} - 1);
+    if (quotient > std::numeric_limits<uint32_t>::max()) {
+        out.note = "narrow_hierarchy:quotient_overflow";
+        return out;
+    }
+    out.quotient_len = static_cast<uint32_t>(quotient);
+    out.n_coeffs =
+        NextPow2Checked(std::max<uint64_t>(out.trace_rows, out.quotient_len));
+    if (out.n_coeffs == 0 ||
+        uint64_t{out.n_coeffs} * kRCFriBlowup >
+            std::numeric_limits<uint32_t>::max()) {
+        out.note = "narrow_hierarchy:fri_domain_overflow";
+        return out;
+    }
+    out.n_lde = out.n_coeffs * kRCFriBlowup;
+    const uint64_t lde_cap = uint64_t{1} << lde_log2_cap;
+    out.fits_lde_cap = out.n_lde <= lde_cap;
+    out.representable = out.fits_column_cap && out.fits_lde_cap;
+    out.note = out.representable ? "narrow_hierarchy:node_representable"
+                                 : "narrow_hierarchy:node_exceeds_budget";
+    return out;
+}
+
+namespace {
+
+NarrowHierarchyNode MakeLeafNode(
+    uint32_t level,
+    uint32_t node_index,
+    const std::string& label,
+    const std::vector<uint32_t>& leaf_indices,
+    uint64_t active_rows,
+    const NarrowHierarchyPlanConfig& config)
+{
+    NarrowHierarchyNode node;
+    node.level = level;
+    node.node_index = node_index;
+    node.label = label;
+    node.child_leaf_indices = leaf_indices;
+    node.active_rows = active_rows;
+    node.shape = AssessNarrowNodeFriShape(
+        active_rows,
+        config.vcs_columns,
+        config.max_algebraic_degree,
+        config.lde_log2_cap,
+        config.column_cap);
+    return node;
+}
+
+NarrowHierarchyNode MakeComposedNode(
+    uint32_t level,
+    uint32_t node_index,
+    const std::string& label,
+    const std::vector<uint32_t>& child_nodes,
+    uint64_t active_rows,
+    const NarrowHierarchyPlanConfig& config)
+{
+    NarrowHierarchyNode node;
+    node.level = level;
+    node.node_index = node_index;
+    node.label = label;
+    node.child_node_indices = child_nodes;
+    node.active_rows = active_rows;
+    node.shape = AssessNarrowNodeFriShape(
+        active_rows,
+        config.vcs_columns,
+        config.max_algebraic_degree,
+        config.lde_log2_cap,
+        config.column_cap);
+    return node;
+}
+
+bool HierarchyCoversAllLeaves(
+    const NarrowHierarchicalAggregationPlan& plan)
+{
+    std::vector<uint8_t> seen(plan.leaves.size(), 0);
+    for (const NarrowHierarchyNode& node : plan.nodes) {
+        for (uint32_t leaf : node.child_leaf_indices) {
+            if (leaf >= plan.leaves.size()) return false;
+            seen[leaf] = 1;
+        }
+    }
+    for (uint8_t bit : seen) {
+        if (bit == 0) return false;
+    }
+    return !plan.leaves.empty();
+}
+
+} // namespace
+
+NarrowHierarchicalAggregationPlan PlanHierarchicalNarrowAggregation(
+    const std::vector<NarrowHierarchyLeaf>& leaves,
+    const NarrowHierarchyPlanConfig& config)
+{
+    NarrowHierarchicalAggregationPlan out;
+    out.leaves = leaves;
+    out.leaf_count = static_cast<uint32_t>(leaves.size());
+    out.vcs_columns = config.vcs_columns;
+    out.max_algebraic_degree = config.max_algebraic_degree;
+    out.lde_log2_cap = config.lde_log2_cap;
+    out.column_cap = config.column_cap;
+    out.composed_child_active_rows = config.composed_child_active_rows;
+    out.complete_verifier_mirror = false;
+
+    if (leaves.empty()) {
+        out.note = "narrow_hierarchy:empty_leaves";
+        return out;
+    }
+    for (const NarrowHierarchyLeaf& leaf : leaves) {
+        if (leaf.active_rows == 0) {
+            out.note = "narrow_hierarchy:zero_leaf_active_rows";
+            return out;
+        }
+        const NarrowNodeFriShape alone = AssessNarrowNodeFriShape(
+            leaf.active_rows,
+            config.vcs_columns,
+            config.max_algebraic_degree,
+            config.lde_log2_cap,
+            config.column_cap);
+        if (!alone.representable) {
+            out.note = "narrow_hierarchy:leaf_alone_exceeds_budget:" + leaf.name;
+            return out;
+        }
+    }
+
+    uint64_t total_rows = 0;
+    for (const NarrowHierarchyLeaf& leaf : leaves) {
+        if (!CheckedAdd(total_rows, leaf.active_rows, total_rows)) {
+            out.note = "narrow_hierarchy:leaf_row_overflow";
+            return out;
+        }
+    }
+    out.single_level_shape = AssessNarrowNodeFriShape(
+        total_rows,
+        config.vcs_columns,
+        config.max_algebraic_degree,
+        config.lde_log2_cap,
+        config.column_cap);
+    out.single_level_fits = out.single_level_shape.representable;
+
+    if (out.single_level_fits) {
+        std::vector<uint32_t> all(leaves.size());
+        for (uint32_t i = 0; i < leaves.size(); ++i) all[i] = i;
+        out.nodes.push_back(MakeLeafNode(
+            1, 0, "single_level_root", all, total_rows, config));
+        out.node_count = 1;
+        out.depth = 1;
+        out.all_leaves_covered = true;
+        out.hierarchical_fits = out.nodes.front().shape.representable;
+        out.valid = out.hierarchical_fits;
+        out.note = out.valid ? "narrow_hierarchy:single_level_fits"
+                             : "narrow_hierarchy:single_level_shape_failed";
+        return out;
+    }
+
+    // First-fit decreasing into L1 bins under the LDE row budget.
+    std::vector<uint32_t> order(leaves.size());
+    for (uint32_t i = 0; i < leaves.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+        if (leaves[a].active_rows != leaves[b].active_rows) {
+            return leaves[a].active_rows > leaves[b].active_rows;
+        }
+        return a < b;
+    });
+
+    struct Bin {
+        std::vector<uint32_t> leaves;
+        uint64_t active_rows{0};
+    };
+    std::vector<Bin> bins;
+    for (uint32_t leaf_index : order) {
+        const uint64_t add = leaves[leaf_index].active_rows;
+        bool placed = false;
+        for (Bin& bin : bins) {
+            if (config.preferred_max_children > 0 &&
+                bin.leaves.size() >= config.preferred_max_children) {
+                continue;
+            }
+            uint64_t candidate = 0;
+            if (!CheckedAdd(bin.active_rows, add, candidate)) continue;
+            if (AssessNarrowNodeFriShape(
+                    candidate,
+                    config.vcs_columns,
+                    config.max_algebraic_degree,
+                    config.lde_log2_cap,
+                    config.column_cap)
+                    .representable) {
+                bin.leaves.push_back(leaf_index);
+                bin.active_rows = candidate;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            bins.push_back(Bin{{leaf_index}, add});
+            if (!AssessNarrowNodeFriShape(
+                     add,
+                     config.vcs_columns,
+                     config.max_algebraic_degree,
+                     config.lde_log2_cap,
+                     config.column_cap)
+                     .representable) {
+                out.note = "narrow_hierarchy:cannot_place_leaf";
+                return out;
+            }
+        }
+    }
+
+    for (uint32_t i = 0; i < bins.size(); ++i) {
+        std::string label = "L1-" + std::to_string(i);
+        out.nodes.push_back(MakeLeafNode(
+            1, i, label, bins[i].leaves, bins[i].active_rows, config));
+        if (!out.nodes.back().shape.representable) {
+            out.note = "narrow_hierarchy:l1_node_exceeds_budget";
+            return out;
+        }
+    }
+
+    // Aggregate prior-level nodes until a single root remains.  Each prior
+    // node is charged `composed_child_active_rows` (measured fixed-point cost
+    // of re-entering a narrow parent as a child).
+    std::vector<uint32_t> frontier;
+    frontier.reserve(bins.size());
+    for (uint32_t i = 0; i < bins.size(); ++i) frontier.push_back(i);
+    uint32_t level = 2;
+    while (frontier.size() > 1) {
+        std::vector<uint32_t> next_frontier;
+        size_t cursor = 0;
+        while (cursor < frontier.size()) {
+            std::vector<uint32_t> group;
+            uint64_t group_rows = 0;
+            while (cursor < frontier.size()) {
+                if (config.preferred_max_children > 0 &&
+                    group.size() >= config.preferred_max_children) {
+                    break;
+                }
+                const uint64_t add = config.composed_child_active_rows;
+                uint64_t candidate = 0;
+                if (!CheckedAdd(group_rows, add, candidate)) break;
+                if (!AssessNarrowNodeFriShape(
+                         candidate,
+                         config.vcs_columns,
+                         config.max_algebraic_degree,
+                         config.lde_log2_cap,
+                         config.column_cap)
+                         .representable) {
+                    if (group.empty()) {
+                        out.note =
+                            "narrow_hierarchy:composed_child_alone_exceeds_budget";
+                        return out;
+                    }
+                    break;
+                }
+                group.push_back(frontier[cursor]);
+                group_rows = candidate;
+                ++cursor;
+            }
+            if (group.empty()) {
+                out.note = "narrow_hierarchy:empty_composed_group";
+                return out;
+            }
+            const uint32_t node_index =
+                static_cast<uint32_t>(out.nodes.size());
+            out.nodes.push_back(MakeComposedNode(
+                level,
+                node_index,
+                "L" + std::to_string(level) + "-" +
+                    std::to_string(next_frontier.size()),
+                group,
+                group_rows,
+                config));
+            if (!out.nodes.back().shape.representable) {
+                out.note = "narrow_hierarchy:composed_node_exceeds_budget";
+                return out;
+            }
+            next_frontier.push_back(node_index);
+        }
+        frontier = std::move(next_frontier);
+        ++level;
+        if (level > 64) {
+            out.note = "narrow_hierarchy:depth_overflow";
+            return out;
+        }
+    }
+
+    out.node_count = static_cast<uint32_t>(out.nodes.size());
+    out.depth = out.nodes.empty() ? 0 : out.nodes.back().level;
+    out.all_leaves_covered = HierarchyCoversAllLeaves(out);
+    out.hierarchical_fits = out.all_leaves_covered;
+    for (const NarrowHierarchyNode& node : out.nodes) {
+        if (!node.shape.representable) {
+            out.hierarchical_fits = false;
+            break;
+        }
+    }
+    out.valid = out.hierarchical_fits && !out.single_level_fits;
+    out.note = out.valid ? "narrow_hierarchy:multi_level_fits"
+                         : "narrow_hierarchy:multi_level_failed";
+    return out;
+}
+
+NarrowHierarchicalAggregationPlan PlanCanonicalSixEpisodeNarrowHierarchy(
+    const std::array<uint64_t, 6>& measured_active_rows,
+    const NarrowHierarchyPlanConfig& config)
+{
+    NarrowHierarchicalAggregationPlan out;
+    out.vcs_columns = config.vcs_columns;
+    out.max_algebraic_degree = config.max_algebraic_degree;
+    out.lde_log2_cap = config.lde_log2_cap;
+    out.column_cap = config.column_cap;
+    out.composed_child_active_rows = config.composed_child_active_rows;
+    out.complete_verifier_mirror = false;
+    out.leaf_count = 6;
+
+    static constexpr std::array<const char*, 6> kNames = {
+        "episode:builder",
+        "episode:gemm",
+        "episode:extract",
+        "episode:wiring",
+        "episode:tiletree",
+        "episode:digest",
+    };
+    for (uint32_t i = 0; i < 6; ++i) {
+        if (measured_active_rows[i] !=
+            kMeasuredSixEpisodeNarrowActiveRows[i]) {
+            out.note =
+                "narrow_hierarchy:six_episode_rows_disagree_with_measured";
+            return out;
+        }
+        NarrowHierarchyLeaf leaf;
+        leaf.role_index = i;
+        leaf.name = kNames[i];
+        leaf.active_rows = measured_active_rows[i];
+        out.leaves.push_back(std::move(leaf));
+    }
+
+    uint64_t total = 0;
+    for (uint64_t rows : measured_active_rows) {
+        if (!CheckedAdd(total, rows, total)) {
+            out.note = "narrow_hierarchy:six_episode_total_overflow";
+            return out;
+        }
+    }
+    out.single_level_shape = AssessNarrowNodeFriShape(
+        total,
+        config.vcs_columns,
+        config.max_algebraic_degree,
+        config.lde_log2_cap,
+        config.column_cap);
+    out.single_level_fits = out.single_level_shape.representable;
+
+    // Pin the measured partition (NOT a packer output):
+    //   L1-A gemm+wiring+tiletree+digest
+    //   L1-B builder+extract
+    //   L2   over both L1 proofs
+    constexpr std::array<uint32_t, 4> kL1A = {1, 3, 4, 5};
+    constexpr std::array<uint32_t, 2> kL1B = {0, 2};
+    uint64_t l1a_rows = 0;
+    uint64_t l1b_rows = 0;
+    for (uint32_t idx : kL1A) {
+        if (!CheckedAdd(l1a_rows, measured_active_rows[idx], l1a_rows)) {
+            out.note = "narrow_hierarchy:l1a_overflow";
+            return out;
+        }
+    }
+    for (uint32_t idx : kL1B) {
+        if (!CheckedAdd(l1b_rows, measured_active_rows[idx], l1b_rows)) {
+            out.note = "narrow_hierarchy:l1b_overflow";
+            return out;
+        }
+    }
+    out.nodes.push_back(MakeLeafNode(
+        1, 0, "L1-A:gemm+wiring+tiletree+digest",
+        std::vector<uint32_t>(kL1A.begin(), kL1A.end()), l1a_rows, config));
+    out.nodes.push_back(MakeLeafNode(
+        1, 1, "L1-B:builder+extract",
+        std::vector<uint32_t>(kL1B.begin(), kL1B.end()), l1b_rows, config));
+
+    uint64_t l2_rows = 0;
+    if (!CheckedAdd(config.composed_child_active_rows,
+                    config.composed_child_active_rows, l2_rows)) {
+        out.note = "narrow_hierarchy:l2_overflow";
+        return out;
+    }
+    out.nodes.push_back(MakeComposedNode(
+        2, 2, "L2:over_L1A_L1B", std::vector<uint32_t>{0, 1}, l2_rows,
+        config));
+
+    out.node_count = static_cast<uint32_t>(out.nodes.size());
+    out.depth = 2;
+    out.all_leaves_covered = HierarchyCoversAllLeaves(out);
+    out.hierarchical_fits = out.all_leaves_covered;
+    for (const NarrowHierarchyNode& node : out.nodes) {
+        if (!node.shape.representable) {
+            out.hierarchical_fits = false;
+            break;
+        }
+    }
+    out.valid = out.hierarchical_fits && !out.single_level_fits;
+    out.note = out.valid
+                   ? "narrow_hierarchy:canonical_six_episode_tree_fits"
+                   : "narrow_hierarchy:canonical_six_episode_tree_failed";
+    return out;
+}
+
 static_assert(!kNarrowVcsExecutable);
 static_assert(!kNarrowVcsProductionReady);
+static_assert(kNarrowHierarchicalAggregationPlannerExecutable);
+static_assert(!kNarrowHierarchicalAggregationReady);
 
 } // namespace matmul::v4::rc::narrow_recurse
