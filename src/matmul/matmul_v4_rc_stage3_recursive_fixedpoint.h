@@ -2575,9 +2575,12 @@ struct NormalizedRecursiveVerifierGap {
  *
  * This audit deliberately distinguishes those algebraic equations from
  * cryptographic recursive consumption. The current parent still lacks an
- * in-AIR all-proof-field bus, complete Fiat-Shamir replay, the child-proof
- * commitment/CTL-terminal inputs to its semantic-root sponge, and endpoint
- * terminal equality. It also records that EpisodeGemmSignedRange's sound
+ * in-AIR all-proof-field bus, the child-proof commitment/CTL-terminal inputs
+ * to its semantic-root sponge, and endpoint terminal equality. Child
+ * Fiat-Shamir replay is consumed from the ledger's g4 assessor
+ * (`AssessChildFsReplayClosureV1().closed` via
+ * `fiat_shamir_replay_complete`); `va::kVerifierFiatShamirAirExecutable`
+ * may remain false. It also records that EpisodeGemmSignedRange's sound
  * three-group Split-RAP proof has no MultiRow-V2 recursive verifier adapter.
  *
  * `valid` means the audit was reconstructed from the supplied checked

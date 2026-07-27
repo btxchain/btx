@@ -1578,7 +1578,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !capability.child_proof_payload_bound_in_air);
     BOOST_CHECK(
-        !capability.child_fiat_shamir_replayed_in_air);
+        capability.child_fiat_shamir_replayed_in_air);
     BOOST_CHECK(
         !capability.child_proof_commitment_mapped);
     BOOST_CHECK(
@@ -1607,6 +1607,24 @@ BOOST_AUTO_TEST_CASE(
             normalized_root_additional_permutation_columns,
         910U);
     BOOST_REQUIRE_EQUAL(capability.gaps.size(), 7U);
+    {
+        // Six residuals remain open; FiatShamirReplayAir is present via
+        // ledger g4 (AssessChildFsReplayClosureV1().closed).
+        uint32_t open_gaps = 0;
+        bool fs_gap_present = false;
+        for (const auto& gap : capability.gaps) {
+            if (!gap.present_in_parent_air) {
+                ++open_gaps;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    FiatShamirReplayAir) {
+                fs_gap_present = gap.present_in_parent_air;
+            }
+        }
+        BOOST_CHECK(fs_gap_present);
+        BOOST_CHECK_EQUAL(open_gaps, 6U);
+    }
     BOOST_CHECK_EQUAL(
         capability.recursively_consumed_endpoints, 0U);
     BOOST_CHECK_EQUAL(
@@ -1643,7 +1661,7 @@ BOOST_AUTO_TEST_CASE(
             execution, reordered_gap, &why));
 
     auto invented_fs = capability;
-    invented_fs.child_fiat_shamir_replayed_in_air = true;
+    invented_fs.child_fiat_shamir_replayed_in_air = false;
     BOOST_CHECK(
         !fp::ValidateNormalizedRecursiveChildCapabilityV1(
             joined, interpreter, migrated.row_pin,
