@@ -45,9 +45,10 @@ inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
  *
  * Measured BarrierSha256dV1 / DigestSha256dV1 (toy barriers=1) on macpro2:
  *   Barrier ≈51 MiB, Digest ≈73 MiB (EXIT:0, elapsed≈674s, maxrss≈1.4 GiB).
- * MixArithmeticV1 toy 4×32 still exceeds 256 MiB after prove (~14 min /
- * ~1.8 GiB RSS → mix_engine:oversize). Raise to 512 MiB for CoupledReady
- * engine evidence; production wire/relay budgets remain g2 /
+ * MixArithmeticV1 toy 4×32 and ExtractTilesV1 (barriers=4) both exceeded
+ * 256 MiB after prove (Mix ~14 min / ~1.8 GiB RSS; Extract ~31 min /
+ * ~3.5 GiB RSS → *:oversize). Cap raised to 512 MiB for CoupledReady
+ * engine remasure; production wire/relay budgets remain g2 /
  * kRCFriMaxProofBytesHard. */
 inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 512U * 1024U * 1024U;
 

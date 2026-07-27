@@ -245,10 +245,10 @@ BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_without_proof_only_engines)
     BOOST_CHECK(why.find("bank_page_inclusion") == std::string::npos);
     BOOST_CHECK(why.find("exchange") == std::string::npos);
     BOOST_CHECK(why.find("permutation") == std::string::npos);
-    BOOST_CHECK(why.find("mix") == std::string::npos);
+    BOOST_CHECK(why.find("barrier") == std::string::npos);
+    BOOST_CHECK(why.find("digest") == std::string::npos);
     BOOST_CHECK(why.find("extract") != std::string::npos);
-    BOOST_CHECK(why.find("barrier") != std::string::npos);
-    BOOST_CHECK(why.find("digest") != std::string::npos);
+    BOOST_CHECK(why.find("mix") != std::string::npos);
     BOOST_CHECK(!rc::VerifyRCStage3CoupledRelations(proof, &why));
     BOOST_CHECK(why.find("coupled:bank:recursive_decode") !=
                 std::string::npos);
