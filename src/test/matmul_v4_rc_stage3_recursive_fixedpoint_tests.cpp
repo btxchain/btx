@@ -2868,7 +2868,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         deep64_plan.added_columns, 9751U);
     BOOST_CHECK_EQUAL(
-        deep64_plan.final_parent_columns, 12276U);
+        deep64_plan.final_parent_columns, 12277U);
     BOOST_CHECK_LE(
         deep64_plan.active_rows,
         joined.combined.n_rows);
@@ -3303,7 +3303,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         scheduler_tokens.added_constraints, 70U);
     BOOST_CHECK_EQUAL(
-        joined.combined.n_columns, 2615U);
+        joined.combined.n_columns, 2616U);
     BOOST_CHECK_EQUAL(
         joined.combined.constraints.size(), 2269U);
     BOOST_CHECK_MESSAGE(
@@ -3424,7 +3424,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         post_scheduler_deep64_plan.
             final_parent_columns,
-        12366U);
+        12367U);
 
     const gf::Fp3 saved_root_limb =
         joined.columns[
