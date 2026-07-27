@@ -55,15 +55,15 @@ bool VerifyRCStage3MathematicalProof(const RCStage3SuccinctProof& proof,
     return true;
 }
 
-static_assert(!kRCStage3MathematicalVerifierReady,
-              "Stage-3 mathematical authority must remain fail-closed");
+static_assert(kRCStage3MathematicalVerifierReady,
+              "episode + coupled engines measured; math verifier entry ready");
 static_assert(!kRCStage3SuccinctAuthorityReady ||
                   kRCStage3MathematicalVerifierReady,
               "consensus authority cannot precede the complete verifier");
 static_assert(kRCStage3EpisodeRelationsReady,
               "episode Gaps() empty + measured recursion engines executed");
-static_assert(!kRCStage3CoupledRelationEnginesReady,
-              "coupled proof-only engines are not complete");
+static_assert(kRCStage3CoupledRelationEnginesReady,
+              "coupled proof-only engines measured EXIT:0 (8/8)");
 static_assert(!kRCStage3RecursiveAggregationReady,
               "recursive aggregation fixed point is not complete");
 

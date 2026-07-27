@@ -44,7 +44,9 @@ namespace matmul::v4::rc {
  * only the relations required by that statement, but public activation must
  * wait for the complete composed authority.
  */
-inline constexpr bool kRCStage3MathematicalVerifierReady = false;
+/** True once episode RelationsReady and coupled engines Ready are measured;
+ * RecursiveAggregation / SuccinctAuthority remain separate fail-closed gates. */
+inline constexpr bool kRCStage3MathematicalVerifierReady = true;
 
 } // namespace matmul::v4::rc
 

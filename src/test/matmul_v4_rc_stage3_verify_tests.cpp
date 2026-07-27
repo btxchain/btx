@@ -32,13 +32,15 @@ namespace rc = matmul::v4::rc;
 
 BOOST_FIXTURE_TEST_SUITE(matmul_v4_rc_stage3_verify_tests, BasicTestingSetup)
 
-BOOST_AUTO_TEST_CASE(complete_authority_readiness_is_fail_closed)
+BOOST_AUTO_TEST_CASE(complete_authority_readiness_episode_and_coupled_engines)
 {
-    BOOST_CHECK(!rc::kRCStage3MathematicalVerifierReady);
+    BOOST_CHECK(rc::kRCStage3MathematicalVerifierReady);
     BOOST_CHECK(rc::RCStage3EpisodeRelationsReady());
     std::string why;
-    BOOST_CHECK(!rc::RCStage3CoupledRelationEnginesReady(&why));
-    BOOST_CHECK(!why.empty());
+    BOOST_CHECK(rc::RCStage3CoupledRelationEnginesReady(&why));
+    BOOST_CHECK_EQUAL(why, "stage3:coupled:engines_ready");
+    BOOST_CHECK(!rc::kRCStage3SuccinctAuthorityReady);
+    BOOST_CHECK(!rc::kRCStage3RecursiveAggregationReady);
 }
 
 BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
