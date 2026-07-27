@@ -970,6 +970,7 @@ CanonicalSplitChipLayoutV1()
     out.high_sum_after = next++;
     out.high_and_before = next++;
     out.high_and_after = next++;
+    out.high_prefix_bit = next++;
     out.claim_lo = next++;
     out.claim_hi = next++;
     out.expected_lo = next++;
@@ -986,6 +987,7 @@ CanonicalSplitChipLayoutV1()
     out.high_first = next++;
     out.weight = next++;
     out.expected_active = next++;
+    out.public_split_active = next++;
     out.query_ordinal = next++;
     out.split_ordinal = next++;
     out.bit_ordinal = next++;
@@ -1007,7 +1009,7 @@ bool BuildCanonicalSplitProgramTableV1(
     out.current_width = l.n_columns;
     out.next_width = l.n_columns;
     out.challenge_width = 0;
-    out.programs.reserve(27);
+    out.programs.reserve(29);
     AppendProgram(out, [=](Expr& e) {
         e.Boolean(l.bit);
     });
@@ -1064,6 +1066,13 @@ bool BuildCanonicalSplitProgramTableV1(
                 e.Current(l.high_sum_after)));
     });
     AppendProgram(out, [=](Expr& e) {
+        e.Sub(
+            e.Current(l.high_prefix_bit),
+            e.Mul(
+                e.Current(l.high_and_before),
+                e.Current(l.bit)));
+    });
+    AppendProgram(out, [=](Expr& e) {
         const uint32_t high_first =
             e.Current(l.high_first);
         const uint32_t bit =
@@ -1074,9 +1083,7 @@ bool BuildCanonicalSplitProgramTableV1(
                 e.Mul(
                     e.Current(l.high_mask),
                     e.Sub(e.One(), high_first)),
-                e.Mul(
-                    e.Current(l.high_and_before),
-                    bit)));
+                e.Current(l.high_prefix_bit)));
         e.Sub(
             e.Current(l.high_and_after),
             value);
@@ -1138,26 +1145,29 @@ bool BuildCanonicalSplitProgramTableV1(
                     e.Current(l.replay))));
     });
     AppendProgram(out, [=](Expr& e) {
-        e.Mul(
-            e.Current(l.last),
+        e.Sub(
+            e.Current(l.public_split_active),
             e.Mul(
                 e.Current(l.expected_active),
-                e.Mul(
-                    e.Current(l.split_active),
-                    e.Sub(
-                        e.Current(l.claim_lo),
-                        e.Current(l.expected_lo)))));
+                e.Current(l.split_active)));
     });
     AppendProgram(out, [=](Expr& e) {
         e.Mul(
             e.Current(l.last),
             e.Mul(
-                e.Current(l.expected_active),
-                e.Mul(
-                    e.Current(l.split_active),
-                    e.Sub(
-                        e.Current(l.claim_hi),
-                        e.Current(l.expected_hi)))));
+                e.Current(l.public_split_active),
+                e.Sub(
+                    e.Current(l.claim_lo),
+                    e.Current(l.expected_lo))));
+    });
+    AppendProgram(out, [=](Expr& e) {
+        e.Mul(
+            e.Current(l.last),
+            e.Mul(
+                e.Current(l.public_split_active),
+                e.Sub(
+                    e.Current(l.claim_hi),
+                    e.Current(l.expected_hi))));
     });
     AppendProgram(out, [=](Expr& e) {
         e.Mul(
@@ -1184,7 +1194,7 @@ bool BuildCanonicalSplitProgramTableV1(
                 e.Current(l.high_and_after),
                 e.Current(l.low_nonzero)));
     });
-    if (out.programs.size() != 27 ||
+    if (out.programs.size() != 29 ||
         !cb::ValidateProgramTable(out, why)) {
         if (why != nullptr && why->empty()) {
             *why =
@@ -1260,6 +1270,12 @@ BuildCanonicalSplitProductV1(
                 out.note =
                     "stage3:v11_specialized:"
                     "split_public_schedule";
+                return out;
+            }
+            if (!input.active) {
+                out.note =
+                    "stage3:v11_specialized:"
+                    "split_active_schedule";
                 return out;
             }
             const uint32_t low =
@@ -1355,6 +1371,12 @@ BuildCanonicalSplitProductV1(
                     ? Fp3::One()
                     : Fp3::Zero());
                 set(
+                    out.layout.high_prefix_bit,
+                    row,
+                    high_and_before && value
+                    ? Fp3::One()
+                    : Fp3::Zero());
+                set(
                     out.layout.claim_lo, row,
                     Fp3::FromFp(
                         gf::FromU64(low)));
@@ -1427,6 +1449,12 @@ BuildCanonicalSplitProductV1(
                     ? Fp3::One()
                     : Fp3::Zero());
                 set(
+                    out.layout.public_split_active,
+                    row,
+                    expected_public && input.active
+                    ? Fp3::One()
+                    : Fp3::Zero());
+                set(
                     out.layout.query_ordinal,
                     row,
                     Fp3::FromFp(
@@ -1453,6 +1481,7 @@ BuildCanonicalSplitProductV1(
     out.preprocessed_columns = {
         out.layout.expected_lo,
         out.layout.expected_hi,
+        out.layout.split_active,
         out.layout.first,
         out.layout.last,
         out.layout.continue_bit,
@@ -1485,11 +1514,11 @@ BuildCanonicalSplitProductV1(
             kCanonicalSplitsV1 * 64 &&
         out.scheduler_reserve_rows == 4096;
     out.goldilocks_alias_rejected =
-        out.programs == 27;
+        out.programs == 29;
     out.executable =
-        out.instructions == 162 &&
-        out.trace_columns == 26 &&
-        out.max_degree <= 4 &&
+        out.instructions == 167 &&
+        out.trace_columns == 28 &&
+        out.max_degree <= 3 &&
         out.violations == 0;
     out.recursive_authority_ready = false;
     out.valid =
@@ -1624,9 +1653,9 @@ CostAuditV1 AssessSpecializedCostV1(
             out.retained_parent_instructions;
     out.specialized_cost_below_fixedpoint_cap =
         out.specialized_poseidon_instructions == 1668 &&
-        out.specialized_split_instructions == 162 &&
-        out.specialized_total_instructions == 3115 &&
-        out.instruction_headroom == 1045;
+        out.specialized_split_instructions == 167 &&
+        out.specialized_total_instructions == 3120 &&
+        out.instruction_headroom == 1040;
     out.generic_fallback_preserved =
         generic_table.programs.size() ==
             np::kExpectedProgramsV1 &&

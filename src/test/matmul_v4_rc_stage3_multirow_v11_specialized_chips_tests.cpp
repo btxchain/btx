@@ -334,10 +334,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(product.active_rows, 28672U);
     BOOST_CHECK_EQUAL(
         product.scheduler_reserve_rows, 4096U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 26U);
-    BOOST_CHECK_EQUAL(product.programs, 27U);
-    BOOST_CHECK_EQUAL(product.instructions, 162U);
-    BOOST_CHECK_LE(product.max_degree, 4U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 28U);
+    BOOST_CHECK_EQUAL(product.programs, 29U);
+    BOOST_CHECK_EQUAL(product.instructions, 167U);
+    BOOST_CHECK_EQUAL(product.max_degree, 3U);
     BOOST_CHECK_EQUAL(product.violations, 0U);
     BOOST_CHECK_EQUAL(
         GenericPublicSplitViolations(
@@ -355,6 +355,52 @@ BOOST_AUTO_TEST_CASE(
         BuildCanonicalSplitProductV1(inputs);
     BOOST_CHECK(!rejected.valid);
     BOOST_CHECK_GT(rejected.violations, 0U);
+
+    auto forged = product.columns;
+    forged[product.layout.high_prefix_bit][33] =
+        gf::Add(
+            forged[product.layout.high_prefix_bit][33],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(
+            product.cs, forged,
+            product.preprocessed_columns,
+            product.preprocessed_row_group_root),
+        0U);
+
+    forged = product.columns;
+    forged[product.layout.public_split_active][0] =
+        gf::Sub(
+            gf::Fp3::One(),
+            forged[product.layout.public_split_active][0]);
+    BOOST_CHECK_GT(
+        RecountViolationsV1(
+            product.cs, forged,
+            product.preprocessed_columns,
+            product.preprocessed_row_group_root),
+        0U);
+
+    forged = product.columns;
+    forged[product.layout.split_active][0] =
+        gf::Fp3::Zero();
+    forged[product.layout.public_split_active][0] =
+        gf::Fp3::Zero();
+    BOOST_CHECK_GT(
+        RecountViolationsV1(
+            product.cs, forged,
+            product.preprocessed_columns,
+            product.preprocessed_row_group_root),
+        0U);
+
+    inputs = SplitInputs();
+    inputs[0][0].active = false;
+    const auto inactive =
+        BuildCanonicalSplitProductV1(inputs);
+    BOOST_CHECK(!inactive.valid);
+    BOOST_CHECK_EQUAL(
+        inactive.note,
+        "stage3:v11_specialized:"
+        "split_active_schedule");
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -397,15 +443,15 @@ BOOST_AUTO_TEST_CASE(
         1668U);
     BOOST_CHECK_EQUAL(
         audit.specialized_split_instructions,
-        162U);
+        167U);
     BOOST_CHECK_EQUAL(
         audit.specialized_total_instructions,
-        3115U);
+        3120U);
     BOOST_CHECK_EQUAL(
         audit.fixedpoint_instruction_cap,
         4160U);
     BOOST_CHECK_EQUAL(
-        audit.instruction_headroom, 1045U);
+        audit.instruction_headroom, 1040U);
     BOOST_CHECK_EQUAL(
         audit.generic_relation_shards, 6U);
     BOOST_CHECK_EQUAL(
@@ -422,8 +468,8 @@ BOOST_AUTO_TEST_CASE(
         " minus_poseidon=17412"
         " minus_unrolled_split=4972"
         " plus_round_poseidon=1668"
-        " plus_row_split=162"
-        " total=3115 cap=4160 headroom=1045"
+        " plus_row_split=167"
+        " total=3120 cap=4160 headroom=1040"
         " generic_fallback_shards=6"
         " specialized_partitions=1"
         " receipt_consumption=0 authority=0");

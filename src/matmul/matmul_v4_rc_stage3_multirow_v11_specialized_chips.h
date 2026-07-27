@@ -154,6 +154,7 @@ struct CanonicalSplitLayoutV1 {
     uint32_t high_sum_after{0};
     uint32_t high_and_before{0};
     uint32_t high_and_after{0};
+    uint32_t high_prefix_bit{0};
     uint32_t claim_lo{0};
     uint32_t claim_hi{0};
     uint32_t expected_lo{0};
@@ -170,6 +171,7 @@ struct CanonicalSplitLayoutV1 {
     uint32_t high_first{0};
     uint32_t weight{0};
     uint32_t expected_active{0};
+    uint32_t public_split_active{0};
     uint32_t query_ordinal{0};
     uint32_t split_ordinal{0};
     uint32_t bit_ordinal{0};
