@@ -629,6 +629,38 @@ AssessVerifierFiatShamirAirChipGapV1(
     const AlgAirProof& child_proof);
 
 /**
+ * fs_selection_air ChallengeTable join for SHA-FS challenge selection.
+ *
+ * Replays the bounded/canonical transcript, pins each accepted challenge's
+ * SHA256d digest bytes to the scalar the verifier consumes (batch lambda /
+ * z1 / z2 / w / fold / query index, plus airq_lambda), and measures
+ * BuildChallengeTableAirV1 with a one-row consumed tamper. Does NOT flip
+ * kVerifierFiatShamirAirExecutable — only reports whether selection AIR
+ * constraints hold on this (program, seed, proof).
+ */
+struct FiatShamirChallengeSelectionAirJoinV1 {
+    uint32_t draws{0};
+    uint32_t table_rows{0};
+    uint32_t table_constraints{0};
+    uint32_t table_violations{1};
+    uint32_t rows_bound_to_consumed{0};
+    uint32_t query_rows{0};
+    uint32_t query_rows_bound_to_consumed_index{0};
+    bool digest_plan_ready{false};
+    bool table_valid{false};
+    bool tamper_rejects{false};
+    /** Gap predicate: table green + all rows bound + tamper red. */
+    bool constrained{false};
+    std::string note;
+};
+
+[[nodiscard]] FiatShamirChallengeSelectionAirJoinV1
+MeasureFiatShamirChallengeSelectionAirJoinV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof);
+
+/**
  * Rewrite batch.lambda/z1/z2/w/fold/query draws to the SHA256d transcript
  * selection for `program` (ood_candidates>=1 for the OOD window).  Leaves a
  * P2-squeezed production proof's FRI openings inconsistent with the new z —
