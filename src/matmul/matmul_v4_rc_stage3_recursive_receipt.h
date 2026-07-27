@@ -132,17 +132,38 @@ struct ShardReceiptOwnershipAuditV1 {
 };
 
 /**
+ * Parent-AIR pin of the ordered receipt-set root.
+ *
+ * Installs eight public/preprocessed limb cells (LE u32 of the uint256 root)
+ * and equality-constrains a claimed witness column to them. Light prove /
+ * verify / forgery rejects. Does NOT flip Ready / AggregationReady /
+ * CompleteFP / kShardReceiptRecursiveOwnershipReadyV1.
+ */
+struct OrderedReceiptSetRootParentAirPinV1 {
+    bool valid{false};
+    bool public_cells_installed{false};
+    bool equality_constrained{false};
+    bool proved{false};
+    bool verified{false};
+    bool forgery_rejected{false};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint256 ordered_receipt_set_root{};
+    std::string note;
+};
+
+/**
  * Receipt-to-L2 integration result.
  *
  * This is the canonical bridge between serialized proof-aware cache entries
  * and ExecuteNarrowMultiChildL2FriConsumeV1. It verifies and decodes every
  * receipt before passing its real child proof, constraint system and seed to
- * the native multi-child fold-bus.
+ * the native multi-child fold-bus, then pins the ordered receipt-set root as
+ * a parent-AIR public cell (residual 1 closed on this type).
  *
- * `ordered_receipt_root_parent_air_bound` deliberately remains false: the
- * current L2 construction consumes each child proof, but has no public parent
- * cell that equality-constrains the ordered receipt-set root. Consequently
- * this type is an executable integration milestone, not a readiness flag.
+ * `full_parent_q_join_recursively_consumed` remains false here: the
+ * receipt-owned quotient-join recursive consume lives on
+ * ShardReceiptQuotientJoinV1 (residual 2). Ready stays false.
  */
 struct ShardReceiptL2ConsumeV1 {
     bool valid{false};
@@ -161,7 +182,26 @@ struct ShardReceiptL2ConsumeV1 {
     uint64_t encoded_child_bytes{0};
     uint256 ordered_receipt_set_root{};
     fp::NarrowMultiChildL2FriConsumeV1 l2;
+    OrderedReceiptSetRootParentAirPinV1 ordered_root_pin;
     std::vector<std::string> residuals;
+    std::string note;
+};
+
+/**
+ * Recursively consume a retained receipt-owned quotient-join AIR proof as a
+ * normalized-parent child (plus a tiny companion boolean child for arity≥2
+ * multi-child fold-bus). Light prove=false by default. Does NOT flip Ready.
+ */
+struct ReceiptOwnedQuotientJoinParentConsumeV1 {
+    bool valid{false};
+    bool join_air_proof_retained{false};
+    bool companion_child_built{false};
+    bool parent_fold_bus_built{false};
+    bool cryptographically_consumed{false};
+    bool forgery_rejected{false};
+    uint32_t join_n_rows{0};
+    uint32_t join_n_columns{0};
+    fp::NarrowMultiChildL2FriConsumeV1 parent;
     std::string note;
 };
 
@@ -169,9 +209,10 @@ struct ShardReceiptL2ConsumeV1 {
  * Proof-level Σ(local shard q) = full-parent q bridge whose local operands
  * come only from verified receipts.
  *
- * This removes the compensated-value freedom of the older raw host-vector
- * mirror. The join proof itself still has to become another recursively
- * consumed child at the normalized parent, so readiness remains false.
+ * After the AIR-mirrored join closes, the retained join proof is recursively
+ * consumed as a normalized-parent child (residual 2 closed on this type).
+ * Ownership Ready / AggregationReady / CompleteFP remain false: hier L2
+ * still needs real free-row L1 receipts end-to-end (vs boolean stand-ins).
  */
 struct ShardReceiptQuotientJoinV1 {
     bool valid{false};
@@ -189,6 +230,7 @@ struct ShardReceiptQuotientJoinV1 {
     uint32_t queries{0};
     uint256 ordered_receipt_set_root{};
     fp::NarrowBytecodeShardQuotientJoinAirMirrorV1 air_join;
+    ReceiptOwnedQuotientJoinParentConsumeV1 parent_consume;
     std::vector<std::string> residuals;
     std::string note;
 };
@@ -257,9 +299,10 @@ AssessShardReceiptOwnershipV1(
 
 /**
  * Verify canonical receipts and feed their decoded proofs to the executable
- * arity>=2 L2 FRI consumer. `prove=false` performs the light native-child,
+ * arity≥2 L2 FRI consumer. `prove=false` performs the light native-child,
  * fold-bus, FRI-shape and forgery checks. `prove=true` additionally produces
- * and verifies the L2 proof.
+ * and verifies the L2 proof. On success, pins the ordered receipt-set root
+ * as a parent-AIR public cell (residual 1).
  */
 [[nodiscard]] ShardReceiptL2ConsumeV1
 ConsumeShardReceiptsL2V1(
@@ -269,9 +312,18 @@ ConsumeShardReceiptsL2V1(
     bool prove = false);
 
 /**
+ * Equality-constrain `ordered_receipt_set_root` as eight public/preprocessed
+ * LE-u32 limb cells in a tiny parent AIR. Light prove/verify/forgery.
+ */
+[[nodiscard]] OrderedReceiptSetRootParentAirPinV1
+PinOrderedReceiptSetRootParentAirV1(
+    const uint256& ordered_receipt_set_root);
+
+/**
  * Extract the full-parent quotient opening from an accepted fold-bus, verify
- * the receipt-owned local q cells cover `programs_total`, and prove their
- * pointwise sum equals that authenticated opening.
+ * the receipt-owned local q cells cover `programs_total`, prove their
+ * pointwise sum equals that authenticated opening, and recursively consume
+ * the retained join AIR proof as a normalized-parent child (residual 2).
  */
 [[nodiscard]] ShardReceiptQuotientJoinV1
 JoinShardReceiptLocalQuotientsV1(
@@ -281,6 +333,17 @@ JoinShardReceiptLocalQuotientsV1(
     const std::vector<aq::AirConstraintSystem<gf::Fp3>>& child_css,
     const std::vector<ShardTerminalBindingV1>& bindings,
     const std::vector<ShardReceiptV1>& receipts);
+
+/**
+ * Retain the AIR-mirrored receipt-owned q-join proof and consume it (with a
+ * companion boolean child) via ExecuteNarrowMultiChildL2FriConsumeV1.
+ */
+[[nodiscard]] ReceiptOwnedQuotientJoinParentConsumeV1
+ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
+    const std::vector<gf::Fp3>& bound_q_per_query,
+    const std::vector<std::vector<gf::Fp3>>& shard_local_q,
+    bool absolute_parent_bound,
+    bool prove = false);
 
 [[nodiscard]] bool SerializeShardReceiptV1(
     const ShardReceiptV1& receipt,

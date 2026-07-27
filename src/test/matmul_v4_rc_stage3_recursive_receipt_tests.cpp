@@ -411,13 +411,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         consumed.ordered_receipt_set_root == set_root);
     BOOST_CHECK(
-        !consumed
-             .ordered_receipt_root_parent_air_bound);
+        consumed.ordered_receipt_root_parent_air_bound);
+    BOOST_CHECK(consumed.ordered_root_pin.valid);
+    BOOST_CHECK(
+        consumed.ordered_root_pin.equality_constrained);
+    BOOST_CHECK(consumed.ordered_root_pin.proved);
+    BOOST_CHECK(consumed.ordered_root_pin.verified);
+    BOOST_CHECK(
+        consumed.ordered_root_pin.forgery_rejected);
     BOOST_CHECK(
         !consumed
              .full_parent_q_join_recursively_consumed);
     BOOST_REQUIRE_EQUAL(
-        consumed.residuals.size(), 2U);
+        consumed.residuals.size(), 1U);
     BOOST_CHECK(consumed.l2.fold_bus_built);
     BOOST_CHECK(consumed.l2.fri_shape_representable);
     BOOST_CHECK(consumed.l2.forgery_rejected);
@@ -563,8 +569,18 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(joined.air_join_verified);
     BOOST_CHECK(joined.air_join_forgery_rejected);
     BOOST_CHECK(
-        !joined.recursively_consumed_by_parent);
-    BOOST_REQUIRE_EQUAL(joined.residuals.size(), 1U);
+        joined.recursively_consumed_by_parent);
+    BOOST_CHECK(joined.parent_consume.valid);
+    BOOST_CHECK(
+        joined.parent_consume.join_air_proof_retained);
+    BOOST_CHECK(
+        joined.parent_consume.companion_child_built);
+    BOOST_CHECK(
+        joined.parent_consume.cryptographically_consumed);
+    BOOST_CHECK(
+        joined.parent_consume.forgery_rejected);
+    BOOST_CHECK(
+        joined.residuals.empty());
 
     // Coverage is semantic data, not a caller-controlled readiness flag.
     BOOST_CHECK(
@@ -630,6 +646,96 @@ BOOST_AUTO_TEST_CASE(
              tampered_receipts).valid);
 
     BOOST_TEST_MESSAGE(joined.note);
+}
+
+BOOST_AUTO_TEST_CASE(
+    ordered_receipt_set_root_parent_air_pin_forgery_rejects)
+{
+    auto first = BuildSyntheticAttachedShard();
+    auto second = BuildSyntheticAttachedShard();
+    second.interpreter.prechallenge_commitment =
+        Seed(0x44);
+    const auto first_binding =
+        rr::BindShardLocalQuotientTerminalsV1(
+            first.composition, first.interpreter, 2);
+    const auto second_binding =
+        rr::BindShardLocalQuotientTerminalsV1(
+            second.composition, second.interpreter, 5);
+    BOOST_REQUIRE(first_binding.valid);
+    BOOST_REQUIRE(second_binding.valid);
+    const auto first_proved =
+        rr::ProveShardReceiptV1(
+            first.composition, first_binding);
+    const auto second_proved =
+        rr::ProveShardReceiptV1(
+            second.composition, second_binding);
+    BOOST_REQUIRE(first_proved.valid);
+    BOOST_REQUIRE(second_proved.valid);
+    const std::vector<rr::ShardReceiptV1> receipts{
+        first_proved.receipt, second_proved.receipt};
+    const uint256 root =
+        rr::ComputeOrderedShardReceiptSetRootV1(receipts);
+    BOOST_REQUIRE(!root.IsNull());
+
+    const auto pin =
+        rr::PinOrderedReceiptSetRootParentAirV1(root);
+    BOOST_REQUIRE_MESSAGE(pin.valid, pin.note);
+    BOOST_CHECK(pin.public_cells_installed);
+    BOOST_CHECK(pin.equality_constrained);
+    BOOST_CHECK(pin.proved);
+    BOOST_CHECK(pin.verified);
+    BOOST_CHECK(pin.forgery_rejected);
+    BOOST_CHECK_EQUAL(pin.n_rows, 8U);
+    BOOST_CHECK_EQUAL(pin.n_columns, 2U);
+    BOOST_CHECK(
+        !rr::PinOrderedReceiptSetRootParentAirV1({})
+             .valid);
+    BOOST_TEST_MESSAGE(pin.note);
+    static_assert(
+        !rr::kShardReceiptRecursiveOwnershipReadyV1);
+}
+
+BOOST_AUTO_TEST_CASE(
+    receipt_owned_q_join_normalized_parent_child_consume)
+{
+    const AuthenticatedParent parent =
+        BuildAuthenticatedParent();
+    std::vector<gf::Fp3> first_q(
+        parent.quotient.size(), gf::Fp3::One());
+    std::vector<gf::Fp3> second_q(
+        parent.quotient.size(), gf::Fp3::Zero());
+    for (size_t query = 0;
+         query < parent.quotient.size(); ++query) {
+        second_q[query] =
+            gf::Sub(
+                parent.quotient[query],
+                first_q[query]);
+    }
+    const auto consumed =
+        rr::ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
+            parent.quotient,
+            {first_q, second_q},
+            /*absolute_parent_bound=*/true,
+            /*prove=*/false);
+    BOOST_REQUIRE_MESSAGE(consumed.valid, consumed.note);
+    BOOST_CHECK(consumed.join_air_proof_retained);
+    BOOST_CHECK(consumed.companion_child_built);
+    BOOST_CHECK(consumed.parent_fold_bus_built);
+    BOOST_CHECK(consumed.cryptographically_consumed);
+    BOOST_CHECK(consumed.forgery_rejected);
+    BOOST_CHECK(consumed.parent.fri_shape_representable);
+    BOOST_CHECK(!consumed.parent.proved);
+
+    // Bound mismatch must refuse retain before parent consume.
+    auto bad_bound = parent.quotient;
+    bad_bound[0] = gf::Add(bad_bound[0], gf::Fp3::One());
+    BOOST_CHECK(
+        !rr::ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
+             bad_bound, {first_q, second_q}, true, false)
+             .valid);
+    BOOST_TEST_MESSAGE(consumed.note);
+    static_assert(
+        !rr::kShardReceiptRecursiveOwnershipReadyV1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
