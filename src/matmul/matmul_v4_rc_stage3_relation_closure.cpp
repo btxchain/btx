@@ -3497,18 +3497,10 @@ bool IsInCsStreamEndpoint(RCStage3RelationEndpoint e)
 }
 
 // Map the closure's stream family to the stream-endpoint closer's family.
+// Thin wrapper over the exported 1:1 mapper (keeps call sites short).
 RCStage3StreamFamily StreamFamilyForEndpoint(RCStage3RelationEndpoint e)
 {
-    switch (RCStage3StreamEndpointManifestFamily(e)) {
-    case RCStage3StreamManifestFamily::XofCounter:
-        return RCStage3StreamFamily::XofCounter;
-    case RCStage3StreamManifestFamily::ChaChaInitAndBlock:
-        return RCStage3StreamFamily::ChaChaInitAndBlock;
-    case RCStage3StreamManifestFamily::CompleteStreamTileTree:
-        return RCStage3StreamFamily::CompleteStream;
-    default:
-        return RCStage3StreamFamily::DirectSha256d;
-    }
+    return RCStage3StreamFamilyForEndpoint(e);
 }
 
 // SHA256d root (8 uint32) <-> Digest (4 uint64), lossless 2-uint32-per-lane pack.
@@ -4325,6 +4317,30 @@ RCStage3StreamManifestFamily RCStage3StreamEndpointManifestFamily(
     default:
         return RCStage3StreamManifestFamily::None;
     }
+}
+
+RCStage3StreamFamily
+RCStage3StreamFamilyForEndpoint(RCStage3RelationEndpoint endpoint)
+{
+    switch (RCStage3StreamEndpointManifestFamily(endpoint)) {
+    case RCStage3StreamManifestFamily::XofCounter:
+        return RCStage3StreamFamily::XofCounter;
+    case RCStage3StreamManifestFamily::ChaChaInitAndBlock:
+        return RCStage3StreamFamily::ChaChaInitAndBlock;
+    case RCStage3StreamManifestFamily::CompleteStreamTileTree:
+        return RCStage3StreamFamily::CompleteStream;
+    case RCStage3StreamManifestFamily::DirectSha256dEpisodeDigest:
+        return RCStage3StreamFamily::DirectSha256dEpisodeDigest;
+    case RCStage3StreamManifestFamily::DirectSha256dCoupledBarrier:
+        return RCStage3StreamFamily::DirectSha256dCoupledBarrier;
+    case RCStage3StreamManifestFamily::DirectSha256dCoupledDigest:
+        return RCStage3StreamFamily::DirectSha256dCoupledDigest;
+    case RCStage3StreamManifestFamily::None:
+        // CoupledBankRoot / EpisodeBuilderSeedChain close through the generic
+        // DirectSha256d closer (no residual-family domain of their own).
+        return RCStage3StreamFamily::DirectSha256d;
+    }
+    return RCStage3StreamFamily::DirectSha256d;
 }
 
 bool RCStage3EndpointHasStreamOpening(RCStage3RelationEndpoint endpoint)

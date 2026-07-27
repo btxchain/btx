@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_alg_hash.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
+#include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 #include <matmul/matmul_v4_rc_stage3_unified_root.h>
 
 #include <array>
@@ -1029,6 +1030,18 @@ struct RCStage3StreamEndpointOpening {
  * committed hash/stream column bound by a §4 recursive binding). */
 [[nodiscard]] RCStage3StreamManifestFamily
 RCStage3StreamEndpointManifestFamily(RCStage3RelationEndpoint endpoint);
+
+/**
+ * Map a relation endpoint onto the stream-endpoint closer's family enum.
+ *
+ * The three DirectSha256d residual relation families
+ * (EpisodeDigest / CoupledBarrier / CoupledDigest) map 1:1 onto the matching
+ * RCStage3StreamFamily values so each keeps its own FamilyDomain() separator.
+ * They must NOT collapse onto the generic DirectSha256d value — that would
+ * re-open the cross-family replay gap the residual enum values closed.
+ */
+[[nodiscard]] RCStage3StreamFamily
+RCStage3StreamFamilyForEndpoint(RCStage3RelationEndpoint endpoint);
 
 /** True iff the endpoint closes via a §4 stream-root pin (family != None). */
 [[nodiscard]] bool RCStage3EndpointHasStreamOpening(
