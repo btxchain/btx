@@ -445,19 +445,53 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(
         selected_manifest.complete_global_upper_bound_manifest_derived);
     BOOST_REQUIRE_GT(selected_manifest.total_proof_sites, 0U);
+
+    // Derive the expected composition directly from the exact live site
+    // count and the canonical Q128/V5 lane theorem terms, instead of
+    // pinning magic literals that silently go stale whenever the
+    // production proof-site manifest is revised (they depend on
+    // selected_manifest.total_proof_sites, which is not a compile-time
+    // constant). The union-of-two-failure-events algebra mirrors
+    // AssessFriDualQ128HybridBound's own -log2(2^-a + 2^-b) composition.
+    const double expected_site_log2 = std::log2(
+        static_cast<double>(selected_manifest.total_proof_sites));
+    const nr::FriBcsRepetitionAssessment exact_fri =
+        nr::AssessFriBcsRepetition(
+            2, 128, 192, 24, 4, 3, 40, 0, 256, 1U << 14,
+            nr::FriBatchingChallengeMode::IndependentCoefficients);
+    BOOST_REQUIRE(exact_fri.fri_rbr_parameter_domain_valid);
+    const double expected_fri_all_query_bits = std::min(
+        exact_fri.all_query_rbr_branch_work_bits -
+            expected_site_log2 / 2.0,
+        exact_fri.all_query_ro_branch_work_bits -
+            expected_site_log2 / 4.0);
+    const auto composed_union_of = [](double a, double b) {
+        const double smaller = std::min(a, b);
+        const double larger = std::max(a, b);
+        return smaller - std::log2(1.0 + std::exp2(smaller - larger));
+    };
+
     const nr::FriDualQ128HybridBoundAssessment exact_shared =
         nr::AssessFriDualQ128HybridBound(
             selected_manifest.total_proof_sites,
             nr::FriDualCommitmentTopology::SharedMaster);
     BOOST_REQUIRE(exact_shared.parameters_valid);
+    const double expected_shared_binding_bits =
+        static_cast<double>(rcx::kRCFri3AlgDualAlgHashCollisionBits) -
+        expected_site_log2;
     BOOST_CHECK_CLOSE(
-        exact_shared.global_site_log2, 25.9864322154, 1e-7);
+        exact_shared.global_site_log2, expected_site_log2, 1e-9);
     BOOST_CHECK_CLOSE(
-        exact_shared.fri_all_query_bits, 102.8115402123, 1e-7);
+        exact_shared.fri_all_query_bits, expected_fri_all_query_bits,
+        1e-9);
     BOOST_CHECK_CLOSE(
-        exact_shared.commitment_binding_bits, 102.0135677846, 1e-7);
+        exact_shared.commitment_binding_bits,
+        expected_shared_binding_bits, 1e-9);
     BOOST_CHECK_CLOSE(
-        exact_shared.composed_union_bits, 101.3580722077, 1e-7);
+        exact_shared.composed_union_bits,
+        composed_union_of(
+            expected_fri_all_query_bits, expected_shared_binding_bits),
+        1e-9);
     BOOST_CHECK(exact_shared.numerical_target_met);
     BOOST_CHECK(!exact_shared.exact_site_manifest_backend_enforced);
     BOOST_CHECK(!exact_shared.commitment_hybrid_reduction_complete);
@@ -469,8 +503,14 @@ BOOST_AUTO_TEST_CASE(
             selected_manifest.total_proof_sites,
             nr::FriDualCommitmentTopology::FullyDuplicatedLanes);
     BOOST_REQUIRE(exact_duplicated.parameters_valid);
+    const double expected_duplicated_binding_bits =
+        static_cast<double>(rcx::kRCFri3AlgDualAlgHashCollisionBits) -
+        expected_site_log2 - std::log2(2.0);
     BOOST_CHECK_CLOSE(
-        exact_duplicated.composed_union_bits, 100.6489074269, 1e-7);
+        exact_duplicated.composed_union_bits,
+        composed_union_of(
+            expected_fri_all_query_bits, expected_duplicated_binding_bits),
+        1e-9);
     BOOST_CHECK(exact_duplicated.numerical_target_met);
     BOOST_CHECK(!exact_duplicated.authority_eligible);
 
