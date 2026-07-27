@@ -81,6 +81,29 @@ Receipts()
     return out;
 }
 
+std::array<
+    rv::ShardReceiptV1,
+    kQ96QueryShardsV1>
+Q96Receipts()
+{
+    const auto q64 = Receipts();
+    std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1> out{
+            q64[0], q64[1]};
+    const auto ranges =
+        CanonicalQ96QueryRangesV1();
+    for (uint32_t shard = 0;
+         shard < out.size();
+         ++shard) {
+        out[shard].range = ranges[shard];
+        out[shard].receipt_root =
+            rv::ComputeShardReceiptRootV1(
+                out[shard]);
+    }
+    return out;
+}
+
 bool Different(const uint256& a, const uint256& b)
 {
     return a.GetHex() != b.GetHex();
@@ -114,6 +137,157 @@ void RequireInexactProofRejected(
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_multirow_v11_receipt_join_tests)
+
+BOOST_AUTO_TEST_CASE(
+    q96_two_shard_capacity_is_exact_but_inventory_conditional)
+{
+    const auto audit =
+        AuditQ96TwoShardV1(
+            1298, 1276, 5, 6);
+    BOOST_REQUIRE_MESSAGE(
+        audit.valid_as_capacity_evaluation,
+        audit.note);
+    BOOST_CHECK_EQUAL(
+        audit.rows_per_query, 7680U);
+    BOOST_CHECK_EQUAL(
+        audit.raw_rows_per_shard, 737280U);
+    BOOST_CHECK_EQUAL(
+        audit.rounded_trace_rows, 1048576U);
+    BOOST_CHECK_EQUAL(
+        audit.lde_rows, 16777216U);
+    BOOST_CHECK_EQUAL(
+        audit.maximum_rows_per_query, 10922U);
+    BOOST_CHECK_EQUAL(
+        audit.rows_per_query_headroom, 3242U);
+    BOOST_CHECK_EQUAL(
+        audit.q64_parent_leaf_receipts, 18U);
+    BOOST_CHECK_EQUAL(
+        audit.q96_parent_leaf_receipts, 12U);
+    BOOST_CHECK(
+        audit.exact_single_q192_partition);
+    BOOST_CHECK(!audit.independent_query_lanes);
+    BOOST_CHECK(audit.fits_trace_cap);
+    BOOST_CHECK(audit.fits_lde_cap);
+    BOOST_CHECK(
+        !audit
+             .executable_program_inventory_measured);
+    BOOST_TEST_MESSAGE(
+        "V11_Q96_CAP"
+        << " rows_per_query="
+        << audit.rows_per_query
+        << " raw_rows="
+        << audit.raw_rows_per_shard
+        << " trace_rows="
+        << audit.rounded_trace_rows
+        << " lde_rows=" << audit.lde_rows
+        << " headroom_rows_per_query="
+        << audit.rows_per_query_headroom
+        << " leaf_receipts="
+        << audit.q64_parent_leaf_receipts
+        << "->"
+        << audit.q96_parent_leaf_receipts
+        << " one_q192_transcript=1"
+        << " independent_lanes=0"
+        << " inventory_conditional=1");
+
+    BOOST_CHECK(
+        !AuditQ96TwoShardV1(
+             0, 1276, 5, 6)
+             .valid_as_capacity_evaluation);
+    BOOST_CHECK(
+        !AuditQ96TwoShardV1(
+             UINT32_MAX, UINT32_MAX,
+             UINT32_MAX, 6)
+             .valid_as_capacity_evaluation);
+}
+
+BOOST_AUTO_TEST_CASE(
+    q96_binding_profile_binds_partition_order_and_common_identity)
+{
+    const auto receipts = Q96Receipts();
+    const auto profile =
+        BuildQ96ReceiptSetV1(receipts);
+    BOOST_REQUIRE_MESSAGE(
+        profile.valid_as_binding_profile,
+        profile.note);
+    BOOST_CHECK(
+        profile.exact_single_q192_partition);
+    BOOST_CHECK(profile.common_child_identity);
+    BOOST_CHECK(profile.leaf_roots_recomputed);
+    BOOST_CHECK(profile.canonical_alg_hash_root);
+    BOOST_CHECK(!profile.executable_join_air);
+    BOOST_CHECK(
+        !profile.recursive_authority_ready);
+    BOOST_TEST_MESSAGE(
+        "V11_Q96_RECEIPT_SET"
+        << " ranges=[0,96),[96,192)"
+        << " root="
+        << profile.receipt_set_root.GetHex()
+        << " executable_join_air=0"
+        << " authority=0");
+
+    auto omitted = receipts;
+    omitted[1].range.query_count = 0;
+    omitted[1].receipt_root =
+        rv::ComputeShardReceiptRootV1(
+            omitted[1]);
+    const auto omitted_profile =
+        BuildQ96ReceiptSetV1(omitted);
+    BOOST_CHECK(
+        !omitted_profile
+             .valid_as_binding_profile);
+    BOOST_CHECK(
+        !omitted_profile
+             .exact_single_q192_partition);
+    BOOST_CHECK(Different(
+        profile.receipt_set_root,
+        omitted_profile.receipt_set_root));
+
+    auto reordered = receipts;
+    std::swap(reordered[0], reordered[1]);
+    const auto reordered_profile =
+        BuildQ96ReceiptSetV1(reordered);
+    BOOST_CHECK(
+        !reordered_profile
+             .valid_as_binding_profile);
+    BOOST_CHECK(
+        !reordered_profile
+             .exact_single_q192_partition);
+    BOOST_CHECK(Different(
+        profile.receipt_set_root,
+        reordered_profile.receipt_set_root));
+
+    auto split_transcript = receipts;
+    split_transcript[1]
+        .full_q192_transcript_root = Root(201);
+    split_transcript[1].receipt_root =
+        rv::ComputeShardReceiptRootV1(
+            split_transcript[1]);
+    const auto split_profile =
+        BuildQ96ReceiptSetV1(
+            split_transcript);
+    BOOST_CHECK(
+        !split_profile
+             .valid_as_binding_profile);
+    BOOST_CHECK(
+        !split_profile.common_child_identity);
+
+    auto alias = receipts;
+    const uint256 old_leaf =
+        alias[0].receipt_root;
+    alias[0].materialized_trace_cells +=
+        gf::kP;
+    const uint256 new_leaf =
+        rv::ComputeShardReceiptRootV1(
+            alias[0]);
+    BOOST_CHECK(Different(old_leaf, new_leaf));
+    const auto alias_profile =
+        BuildQ96ReceiptSetV1(alias);
+    BOOST_CHECK(
+        !alias_profile.valid_as_binding_profile);
+    BOOST_CHECK(
+        !alias_profile.leaf_roots_recomputed);
+}
 
 BOOST_AUTO_TEST_CASE(
     exact_receipt_codec_and_binary_air_shape_close)

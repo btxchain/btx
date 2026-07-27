@@ -22,6 +22,8 @@ constexpr uint64_t kBinaryNodeDomainV1 =
     0x31564a52'4e494252ULL; // "RBINRJV1"
 constexpr uint64_t kPaddingDomainV1 =
     0x31564a52'44415052ULL; // "RPADRJV1"
+constexpr uint64_t kQ96SetDomainV1 =
+    0x31564a52'36395152ULL; // "RQ96RJV1"
 
 constexpr uint32_t kReceiptProgramRootV1 = 46;
 constexpr uint32_t kReceiptProgramRootEndV1 = 50;
@@ -88,6 +90,44 @@ bool CanonicalDigest(const alg_hash::Digest& digest)
         [](Fp limb) {
             return limb < gf::kP;
         });
+}
+
+bool CheckedMul(
+    uint64_t lhs,
+    uint64_t rhs,
+    uint64_t& out)
+{
+    if (lhs != 0 &&
+        rhs >
+            std::numeric_limits<uint64_t>::max() /
+                lhs) {
+        return false;
+    }
+    out = lhs * rhs;
+    return true;
+}
+
+bool CheckedAdd(
+    uint64_t lhs,
+    uint64_t rhs,
+    uint64_t& out)
+{
+    if (lhs >
+        std::numeric_limits<uint64_t>::max() -
+            rhs) {
+        return false;
+    }
+    out = lhs + rhs;
+    return true;
+}
+
+uint32_t NextPowerOfTwo(uint64_t value)
+{
+    if (value < 2) return 2;
+    if (value > (uint64_t{1} << 31)) return 0;
+    uint32_t out = 1;
+    while (out < value) out <<= 1;
+    return out;
 }
 
 std::vector<Fp> BuildDirectSetPreimage(
@@ -191,6 +231,41 @@ bool ExactCommonIdentity(const StatementV1& statement)
         }
     }
     return true;
+}
+
+bool ExactQ96CommonIdentity(
+    const std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1>& receipts)
+{
+    const auto& first = receipts[0];
+    if (first.child_abi_root.IsNull() ||
+        first.child_wire_root.IsNull() ||
+        first.child_statement_root.IsNull() ||
+        first.full_q192_transcript_root.IsNull() ||
+        first.public_fs_seed.IsNull() ||
+        first.parent_join_r0_root.IsNull() ||
+        !CanonicalDigest(first.program_root) ||
+        !Nonzero(first.program_root)) {
+        return false;
+    }
+    const auto& second = receipts[1];
+    return
+        second.child_abi_root ==
+            first.child_abi_root &&
+        second.child_wire_root ==
+            first.child_wire_root &&
+        second.child_statement_root ==
+            first.child_statement_root &&
+        second.full_q192_transcript_root ==
+            first.full_q192_transcript_root &&
+        second.public_fs_seed ==
+            first.public_fs_seed &&
+        CanonicalDigest(second.program_root) &&
+        second.program_root ==
+            first.program_root &&
+        second.parent_join_r0_root ==
+            first.parent_join_r0_root;
 }
 
 void AddConstraint(
@@ -539,6 +614,219 @@ void AddU32Job(
 }
 
 } // namespace
+
+Q96CapAuditV1 AuditQ96TwoShardV1(
+    uint32_t child_columns,
+    uint32_t child_constraints,
+    uint32_t assumed_instructions_per_constraint,
+    uint32_t relation_receipts_per_query_shard)
+{
+    Q96CapAuditV1 out;
+    out.child_columns = child_columns;
+    out.child_constraints = child_constraints;
+    out.assumed_instructions_per_constraint =
+        assumed_instructions_per_constraint;
+    out.relation_receipts_per_query_shard =
+        relation_receipts_per_query_shard;
+    out.exact_single_q192_partition = true;
+    out.independent_query_lanes = false;
+    out.executable_program_inventory_measured =
+        false;
+    if (child_columns == 0 ||
+        child_constraints == 0 ||
+        assumed_instructions_per_constraint ==
+            0 ||
+        relation_receipts_per_query_shard ==
+            0) {
+        out.note =
+            "stage3:v11_receipt_join:q96:"
+            "zero_shape";
+        return out;
+    }
+    uint64_t instruction_rows = 0;
+    if (!CheckedMul(
+            child_constraints,
+            assumed_instructions_per_constraint,
+            instruction_rows) ||
+        !CheckedAdd(
+            child_columns,
+            instruction_rows,
+            out.rows_per_query) ||
+        !CheckedAdd(
+            out.rows_per_query,
+            2,
+            out.rows_per_query) ||
+        !CheckedMul(
+            out.rows_per_query,
+            kQ96QueriesPerShardV1,
+            out.raw_rows_per_shard)) {
+        out.note =
+            "stage3:v11_receipt_join:q96:"
+            "overflow";
+        return out;
+    }
+    out.rounded_trace_rows =
+        NextPowerOfTwo(
+            out.raw_rows_per_shard);
+    uint64_t lde = 0;
+    if (out.rounded_trace_rows != 0 &&
+        CheckedMul(
+            out.rounded_trace_rows,
+            kRCFriBlowup, lde) &&
+        lde <=
+            std::numeric_limits<
+                uint32_t>::max()) {
+        out.lde_rows =
+            static_cast<uint32_t>(lde);
+    }
+    out.maximum_rows_per_query =
+        rv::kTraceRowsCapV1 /
+        kQ96QueriesPerShardV1;
+    if (out.rows_per_query <=
+        out.maximum_rows_per_query) {
+        out.rows_per_query_headroom =
+            out.maximum_rows_per_query -
+            out.rows_per_query;
+    }
+    uint64_t q64_receipts = 0;
+    uint64_t q96_receipts = 0;
+    if (!CheckedMul(
+            rv::kQueryShardsV1,
+            relation_receipts_per_query_shard,
+            q64_receipts) ||
+        !CheckedMul(
+            kQ96QueryShardsV1,
+            relation_receipts_per_query_shard,
+            q96_receipts) ||
+        q64_receipts >
+            std::numeric_limits<uint32_t>::max() ||
+        q96_receipts >
+            std::numeric_limits<uint32_t>::max()) {
+        out.note =
+            "stage3:v11_receipt_join:q96:"
+            "receipt_overflow";
+        return out;
+    }
+    out.q64_parent_leaf_receipts =
+        static_cast<uint32_t>(q64_receipts);
+    out.q96_parent_leaf_receipts =
+        static_cast<uint32_t>(q96_receipts);
+    out.fits_trace_cap =
+        out.rounded_trace_rows != 0 &&
+        out.rounded_trace_rows <=
+            rv::kTraceRowsCapV1;
+    out.fits_lde_cap =
+        out.lde_rows != 0 &&
+        out.lde_rows <=
+            rv::kLdeRowsCapV1;
+    out.valid_as_capacity_evaluation =
+        out.exact_single_q192_partition &&
+        !out.independent_query_lanes &&
+        out.fits_trace_cap &&
+        out.fits_lde_cap &&
+        !out.executable_program_inventory_measured;
+    out.note =
+        out.valid_as_capacity_evaluation
+        ? "stage3:v11_receipt_join:q96:"
+          "capacity_fits_at_caps;"
+          "program_inventory_unmeasured"
+        : "stage3:v11_receipt_join:q96:"
+          "capacity_not_closed";
+    return out;
+}
+
+uint256 ComputeQ96ReceiptSetRootV1(
+    const std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1>& receipts)
+{
+    std::vector<Fp> preimage;
+    preimage.reserve(27);
+    AppendU64(preimage, kQ96SetDomainV1);
+    AppendU32(preimage, kReceiptJoinVersionV1);
+    AppendU32(preimage, 0);
+    AppendU32(preimage, kQ96QueryShardsV1);
+    for (const auto& receipt : receipts) {
+        AppendU32(
+            preimage,
+            receipt.range.ordinal);
+        AppendU32(
+            preimage,
+            receipt.range.first_query);
+        AppendU32(
+            preimage,
+            receipt.range.query_count);
+        AppendUint256(
+            preimage,
+            receipt.receipt_root);
+    }
+    preimage[3] =
+        gf::FromU64(
+            static_cast<uint32_t>(
+                preimage.size()));
+    return Pack(
+        alg_hash::SpongeHashFp(
+            preimage));
+}
+
+Q96ReceiptSetV1 BuildQ96ReceiptSetV1(
+    const std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1>& receipts)
+{
+    Q96ReceiptSetV1 out;
+    out.receipts = receipts;
+    const auto ranges =
+        CanonicalQ96QueryRangesV1();
+    out.exact_single_q192_partition = true;
+    out.leaf_roots_recomputed = true;
+    for (uint32_t shard = 0;
+         shard < receipts.size();
+         ++shard) {
+        out.exact_single_q192_partition =
+            out.exact_single_q192_partition &&
+            receipts[shard].version ==
+                rv::kRecursiveVerifierVersionV1 &&
+            receipts[shard].range ==
+                ranges[shard];
+        const auto canonical =
+            Fri3AlgDigestFromUint256(
+                receipts[shard]
+                    .receipt_root);
+        out.leaf_roots_recomputed =
+            out.leaf_roots_recomputed &&
+            canonical.has_value() &&
+            receipts[shard].receipt_root ==
+                rv::ComputeShardReceiptRootV1(
+                    receipts[shard]);
+    }
+    out.common_child_identity =
+        ExactQ96CommonIdentity(receipts);
+    out.receipt_set_root =
+        ComputeQ96ReceiptSetRootV1(
+            receipts);
+    out.canonical_alg_hash_root =
+        !out.receipt_set_root.IsNull() &&
+        Fri3AlgDigestFromUint256(
+            out.receipt_set_root).has_value();
+    out.executable_join_air = false;
+    out.recursive_authority_ready = false;
+    out.valid_as_binding_profile =
+        out.exact_single_q192_partition &&
+        out.common_child_identity &&
+        out.leaf_roots_recomputed &&
+        out.canonical_alg_hash_root &&
+        !out.executable_join_air &&
+        !out.recursive_authority_ready;
+    out.note =
+        out.valid_as_binding_profile
+        ? "stage3:v11_receipt_join:q96:"
+          "exact_q192_binding_profile;"
+          "join_air_unexecuted"
+        : "stage3:v11_receipt_join:q96:"
+          "binding_failure";
+    return out;
+}
 
 std::vector<Fp> BuildReceiptPreimageV1(
     const rv::ShardReceiptV1& receipt)

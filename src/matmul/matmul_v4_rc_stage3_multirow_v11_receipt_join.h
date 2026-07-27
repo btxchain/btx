@@ -39,6 +39,85 @@ inline constexpr uint32_t kBinaryRootExportRowV1 =
 static_assert(kRealHashRowsV1 == 52);
 static_assert(kTraceRowsV1 >= kRealHashRowsV1);
 
+// Additive throughput profile. These are two disjoint slices of the same
+// canonical Q192 transcript, never two independent query lanes.
+inline constexpr uint32_t kQ96QueryShardsV1 = 2;
+inline constexpr uint32_t kQ96QueriesPerShardV1 = 96;
+static_assert(
+    kQ96QueryShardsV1 *
+        kQ96QueriesPerShardV1 ==
+    rv::abi::kQueryCountV11);
+
+[[nodiscard]] constexpr std::array<
+    rv::QueryRangeV1,
+    kQ96QueryShardsV1>
+CanonicalQ96QueryRangesV1()
+{
+    return {{
+        {0, 0, kQ96QueriesPerShardV1},
+        {1, kQ96QueriesPerShardV1,
+         kQ96QueriesPerShardV1},
+    }};
+}
+
+struct Q96CapAuditV1 {
+    uint32_t child_columns{0};
+    uint32_t child_constraints{0};
+    uint32_t assumed_instructions_per_constraint{0};
+    uint32_t relation_receipts_per_query_shard{0};
+    uint64_t rows_per_query{0};
+    uint64_t raw_rows_per_shard{0};
+    uint32_t rounded_trace_rows{0};
+    uint32_t lde_rows{0};
+    uint64_t maximum_rows_per_query{0};
+    uint64_t rows_per_query_headroom{0};
+    uint32_t q64_parent_leaf_receipts{0};
+    uint32_t q96_parent_leaf_receipts{0};
+    bool exact_single_q192_partition{false};
+    bool independent_query_lanes{false};
+    bool fits_trace_cap{false};
+    bool fits_lde_cap{false};
+    bool executable_program_inventory_measured{false};
+    bool valid_as_capacity_evaluation{false};
+    std::string note;
+};
+
+/**
+ * Checked capacity arithmetic only. The caller-supplied instruction count
+ * remains an assumption until the canonical verifier ProgramTable inventory
+ * is measured; therefore this function never claims executable recursion.
+ */
+[[nodiscard]] Q96CapAuditV1 AuditQ96TwoShardV1(
+    uint32_t child_columns,
+    uint32_t child_constraints,
+    uint32_t assumed_instructions_per_constraint,
+    uint32_t relation_receipts_per_query_shard);
+
+struct Q96ReceiptSetV1 {
+    std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1> receipts{};
+    uint256 receipt_set_root{};
+    bool exact_single_q192_partition{false};
+    bool common_child_identity{false};
+    bool leaf_roots_recomputed{false};
+    bool canonical_alg_hash_root{false};
+    bool executable_join_air{false};
+    bool recursive_authority_ready{false};
+    bool valid_as_binding_profile{false};
+    std::string note;
+};
+
+[[nodiscard]] uint256 ComputeQ96ReceiptSetRootV1(
+    const std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1>& receipts);
+
+[[nodiscard]] Q96ReceiptSetV1 BuildQ96ReceiptSetV1(
+    const std::array<
+        rv::ShardReceiptV1,
+        kQ96QueryShardsV1>& receipts);
+
 /**
  * The statement carries the three materialized verifier-shard receipts and
  * both ordered aggregate roots. expected_shard_set_root is byte-compatible
