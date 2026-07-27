@@ -1949,7 +1949,10 @@ bool BuildRCStage3CoupledMixEngineReceipt(
         return Fail(why, "mix_engine:outputs");
     }
     if (body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
-        return Fail(why, "mix_engine:oversize");
+        return Fail(why,
+                    "mix_engine:oversize:" + std::to_string(body.size()) +
+                        ">" +
+                        std::to_string(kRCStage3CoupledMaxEngineReceiptBytes));
     }
     out_trace_root = ComputeMixEngineTraceRoot(product);
     out_engine_receipt = std::move(body);
