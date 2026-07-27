@@ -177,6 +177,54 @@ va::AlgAirProof HonestToyProof(const uint256& seed)
     return proved.proof;
 }
 
+/**
+ * Honest bounded-OOD + SHA256d-squeeze FRI batch under the active short-FS
+ * absorb layout. Production Fri3AlgBatchCommit keeps Poseidon2 squeezes;
+ * this canary exists so every_digest_matches_claim can be measured without
+ * AlignAlgAirProofOodToBoundedShaScheduleV1 rewriting claims.
+ */
+va::AlgAirProof HonestBoundedShaFsCanaryProof(const uint256& seed)
+{
+    const std::vector<std::vector<gf::Fp3>> columns{
+        {gf::Fp3::Zero(), gf::Fp3::One()},
+        {gf::Fp3::One(), gf::Fp3::FromFp(3)}};
+    const rc::Fri3AlgBatchCommitResult committed =
+        rc::Fri3AlgShaFsBoundedOodCanaryBatchCommit(columns, seed);
+    BOOST_REQUIRE_MESSAGE(
+        committed.ok && !committed.proof.queries.empty(),
+        committed.note);
+    va::AlgAirProof proof;
+    proof.batch = committed.proof;
+    proof.trace_commit = Filled(0xa1);
+    const auto& shape_batch = proof.batch;
+    const uint32_t depth = [&]() {
+        uint32_t d = 0;
+        uint32_t n = shape_batch.row_commit.n_leaves;
+        while (n > 1) {
+            n >>= 1;
+            ++d;
+        }
+        return d;
+    }();
+    const uint32_t columns_w =
+        static_cast<uint32_t>(shape_batch.column_len.size());
+    proof.next_openings.resize(shape_batch.queries.size());
+    for (uint32_t qi = 0; qi < shape_batch.queries.size(); ++qi) {
+        rc::air_quotient::AirAlgRowPath current;
+        current.index = shape_batch.queries[qi].index;
+        current.values.assign(columns_w, gf::Fp3::One());
+        current.siblings.assign(depth, Digest(200));
+        rc::air_quotient::AirAlgRowPath next;
+        next.index =
+            (current.index + 1) % shape_batch.row_commit.n_leaves;
+        // Trace-binding slot: values stay empty (witness shape gate).
+        next.siblings.assign(depth, Digest(210));
+        proof.next_openings[qi] = {
+            std::move(current), std::move(next)};
+    }
+    return proof;
+}
+
 nr::NarrowChildShape ShapeForProof(
     const va::AlgAirProof& proof)
 {
@@ -679,6 +727,59 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK_GE(gap.open_predicates, 3U);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+}
+
+// Honest SHA-squeeze + K=2 OOD canary: every_digest_matches_claim without Align.
+// Production ActiveConfig keeps Poseidon2 squeezes; Executable stays false.
+BOOST_AUTO_TEST_CASE(
+    bounded_sha_fs_canary_every_digest_matches_claim_on_honest_proof)
+{
+    const uint256 seed = Filled(0xce);
+    const va::AlgAirProof proof = HonestBoundedShaFsCanaryProof(seed);
+    const nr::NarrowChildShape shape = ShapeForProof(proof);
+    BOOST_CHECK_EQUAL(shape.queries, 2U);
+
+    const va::FiatShamirProgram bounded =
+        va::BuildBoundedFiatShamirProgram(
+            shape, va::kRCFiatShamirOodCandidateSchedule);
+    BOOST_REQUIRE(bounded.valid);
+    BOOST_CHECK(bounded.rejection_loop_bounded);
+    BOOST_CHECK_EQUAL(
+        bounded.ood_candidates, va::kRCFiatShamirOodCandidateSchedule);
+
+    // No Align: z/w/lambda come from the honest canary prover.
+    const va::FiatShamirShaExecutionPlanV1 plan =
+        va::BuildFiatShamirShaExecutionPlanV1(bounded, seed, proof);
+    BOOST_TEST_MESSAGE(
+        plan.note
+        << " fixed=" << plan.fixed_schedule
+        << " digests=" << plan.every_digest_matches_claim
+        << " valid=" << plan.valid
+        << " calls=" << plan.calls);
+    BOOST_REQUIRE_MESSAGE(
+        plan.every_digest_matches_claim, plan.note);
+    BOOST_CHECK(plan.fixed_schedule);
+    BOOST_CHECK(plan.exact_domain_tags_and_order);
+    BOOST_CHECK(plan.exact_sha256d_padding_and_chaining);
+    BOOST_CHECK(plan.proof_codec_byte_origins_complete);
+    BOOST_CHECK(plan.valid);
+    BOOST_CHECK(!plan.recursively_consumed);
+
+    const va::VerifierFiatShamirAirChipGapV1 gap =
+        va::AssessVerifierFiatShamirAirChipGapV1(
+            bounded, seed, proof);
+    BOOST_TEST_MESSAGE(gap.note);
+    BOOST_CHECK(gap.sha_execution_plan_valid);
+    BOOST_CHECK(gap.sha_fixed_schedule);
+    BOOST_CHECK(gap.sha_codec_origins_complete);
+    BOOST_CHECK(!gap.sha_recursively_consumed);
+    BOOST_CHECK(!gap.challenge_selection_air_constrained);
+    BOOST_CHECK(!gap.air_backed_all_kinds_reconstructed);
+    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(!gap.executable_ready);
+    // plan_valid closed; four Executable predicates remain open (+ constexpr).
+    BOOST_CHECK_EQUAL(gap.open_predicates, 4U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 

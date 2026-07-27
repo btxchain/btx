@@ -1657,12 +1657,15 @@ Fri3AlgFs Fri3AlgBatchFsInit(const uint256& fs_seed, uint64_t pow_grind_nonce, u
 }
 
 /** Dual-OOD sampling: FS challenges rejected until (c1,c2)!=(0,0) (⇒ ∉ D) and
- *  distinct. The rejection counter is deterministic, so prover and verifier agree.
- *  V5 lanes use a bounded number of attempts for finite recursive replay. */
+  *  distinct. The rejection counter is deterministic, so prover and verifier agree.
+  *  ood_candidates==0 keeps the V3 unbounded while(true) sampler. ood_candidates>0
+  *  lays a fixed K-candidate window (V5 dual lanes and the SHA-FS digest-match
+  *  canary) so recursive replay / BuildFiatShamirShaExecutionPlanV1 share a
+  *  statically bounded draw schedule. */
 bool Fri3AlgBatchSampleZ(Fri3AlgFs& fs, uint32_t& ctr, const Fp3* distinct_from,
                          const Fri3AlgProtocolConfig& config, Fp3& out)
 {
-    if (!config.uniform_challenges) {
+    if (config.ood_candidates == 0) {
         // V3 baseline schedule (unbounded rejection). Route through
         // ProtocolChallengeFp3 so P2-squeeze activation covers z1/z2 as well
         // as every other challenge kind — the old fs.ChallengeFp3 call left
@@ -1679,10 +1682,10 @@ bool Fri3AlgBatchSampleZ(Fri3AlgFs& fs, uint32_t& ctr, const Fp3* distinct_from,
         }
     }
 
-    // V5 fixed schedule: materialize both uniformly sampled candidates, then
-    // select the first valid OOD point. Both prover and verifier execute the
-    // same number of RO calls regardless of which candidate is selected.
-    std::array<Fp3, kRCFri3AlgDualOodCandidates> candidate{};
+    // Fixed K-candidate schedule: materialize every reserved draw, then select
+    // the first acceptable OOD point. Encoding follows ProtocolChallengeFp3
+    // (SHA ChallengeFp3, ChallengeFp3Uniform, or P2 squeeze).
+    std::vector<Fp3> candidate(config.ood_candidates);
     for (Fp3& z : candidate) {
         if (!ProtocolChallengeFp3(fs, config, "fra3_z", ctr++, z)) return false;
     }
@@ -3152,6 +3155,39 @@ Fri3AlgBatchCommitResult Fri3AlgP2SqueezeBatchCommit(
 {
     return Fri3AlgBatchCommitConfigured(columns, fs_seed, pow_grind_nonce,
                                         kFri3AlgQ192P2SqueezeV8Config);
+}
+
+Fri3AlgProtocolConfig Fri3AlgShaFsBoundedOodCanaryConfig()
+{
+    // Active absorb layout (version 8 / short-FS Poseidon2 commitment lanes)
+    // with SHA256d challenge squeezes and a K=2 fixed OOD window. Measurement
+    // only: production Fri3AlgBatchCommit keeps p2_squeeze_challenges=true and
+    // ood_candidates=0. query_count stays small so SHA-FS light canaries fit
+    // MemoryMax caps; proximity guard is off because Q!=192.
+    Fri3AlgProtocolConfig config{
+        kRCFri3AlgP2SqueezeLaneProofVersion,
+        kRCFri3AlgP2SqueezeDomainTag,
+        kRCFri3AlgDualUniformDrawDomainTag,
+        kRCFri3AlgDualIndexDrawDomainTag,
+        /*query_count=*/2,
+        kRCFri3AlgDualOodCandidates,
+        /*uniform_challenges=*/false,
+        /*independent_batching_coefficients=*/false,
+        /*alg_hash_lane=*/-1,
+        /*require_q192_proximity_guard=*/false,
+        /*short_transcript_commitments=*/true,
+        /*p2_squeeze_challenges=*/false,
+    };
+    return config;
+}
+
+Fri3AlgBatchCommitResult Fri3AlgShaFsBoundedOodCanaryBatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3AlgBatchCommitConfigured(
+        columns, fs_seed, pow_grind_nonce,
+        Fri3AlgShaFsBoundedOodCanaryConfig());
 }
 
 bool Fri3AlgP2SqueezeBatchVerify(const Fri3AlgBatchProof& proof,
