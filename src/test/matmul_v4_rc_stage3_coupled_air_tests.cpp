@@ -316,20 +316,34 @@ BOOST_AUTO_TEST_CASE(mix_kernel_enforces_uint64_wrap_not_field_wrap)
 
 BOOST_AUTO_TEST_CASE(extract_and_sha_residuals_are_explicit)
 {
+    // Role-local Extract/Barrier/Digest AirGaps retire via measured prototypes;
+    // universal RecursiveAggregation residual remains. Barrier/Digest still
+    // lack immutable AirConstraintSystem resolvers.
     const auto entries =
         rc::AssessRCStage3CoupledAirRegistry(Shape(), Fp3{3, 5, 7}, Fp3{11, 13, 17});
     BOOST_REQUIRE_EQUAL(entries.size(), 8U);
-    BOOST_CHECK(HasGap(entries[5],
-                       rc::RCStage3CoupledAirGapCode::ExtractChaChaAndScaleSha));
-    BOOST_CHECK(HasGap(entries[5],
-                       rc::RCStage3CoupledAirGapCode::ExtractInt64AndRangeLookups));
-    BOOST_CHECK(HasGap(entries[6],
-                       rc::RCStage3CoupledAirGapCode::BarrierSha256d));
-    BOOST_CHECK(HasGap(entries[7],
-                       rc::RCStage3CoupledAirGapCode::DigestSha256d));
-    BOOST_CHECK(!entries[5].local_kernel_complete);
+    BOOST_CHECK(rc::kRCStage3CoupledExtractChaChaScalePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledExtractInt64RangePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledBarrierSha256dPrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledDigestSha256dPrototypeExecuted);
+    BOOST_CHECK(!HasGap(entries[5],
+                        rc::RCStage3CoupledAirGapCode::ExtractChaChaAndScaleSha));
+    BOOST_CHECK(!HasGap(entries[5],
+                        rc::RCStage3CoupledAirGapCode::ExtractInt64AndRangeLookups));
+    BOOST_CHECK(!HasGap(entries[6],
+                        rc::RCStage3CoupledAirGapCode::BarrierSha256d));
+    BOOST_CHECK(!HasGap(entries[7],
+                        rc::RCStage3CoupledAirGapCode::DigestSha256d));
+    BOOST_CHECK(entries[5].local_kernel_complete);
+    BOOST_CHECK(entries[5].constraint_system_available);
     BOOST_CHECK(!entries[6].constraint_system_available);
     BOOST_CHECK(!entries[7].constraint_system_available);
+    BOOST_CHECK(HasGap(entries[5],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[6],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[7],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
