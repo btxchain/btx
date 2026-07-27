@@ -194,6 +194,24 @@ ValidateRCStage3CoupledExchangePermutationProductSchedule(
     const RCStage3CoupledExchangePermutationProduct& product,
     std::string* why = nullptr);
 
+/** Schedule-validate the joint product, then execute only CoupledExchange
+ * stage AIRs (and material SHA/XOF children). Permutation proofs may be
+ * absent; used by ExchangeStagesV1. */
+[[nodiscard]] bool VerifyRCStage3CoupledExchangeStages(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationProduct& product,
+    std::string* why = nullptr);
+
+/** Schedule-validate the joint product, then execute only CoupledPermutation
+ * stage AIRs. Exchange proofs may be absent when exchange_rounds==0; used by
+ * PermutationStagesV1. */
+[[nodiscard]] bool VerifyRCStage3CoupledPermutationStages(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledExchangePermutationProduct& product,
+    std::string* why = nullptr);
+
 struct RCStage3CoupledExchangePermutationProductAudit {
     bool exact_exchange_schedule{false};
     bool fixed_segment_equality_executable{false};

@@ -142,13 +142,33 @@ BOOST_AUTO_TEST_CASE(registry_has_exact_roles_coverage_and_residuals)
     }
 
     // Measured BankSeedXof / BankPageInclusion prototypes retire those two
-    // CoupledBank-local AirGap codes; universal bridge/aggregation remain.
+    // CoupledBank-local AirGap codes; exchange/perm/mix schedule prototypes
+    // retire PublicScheduleBinding (+ MaterialExchangeHashXof). Universal
+    // bridge/aggregation remain.
     BOOST_CHECK(rc::kRCStage3CoupledBankSeedXofPrototypeExecuted);
     BOOST_CHECK(rc::kRCStage3CoupledBankPageInclusionPrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledExchangeSchedulePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledPermutationSchedulePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledMixSchedulePrototypeExecuted);
+    BOOST_CHECK(rc::kRCStage3CoupledMaterialExchangeHashXofPrototypeExecuted);
     BOOST_CHECK(!HasGap(entries[0], rc::RCStage3CoupledAirGapCode::BankSeedXof));
     BOOST_CHECK(!HasGap(entries[0], rc::RCStage3CoupledAirGapCode::BankPageInclusion));
     BOOST_CHECK(HasGap(entries[0],
                        rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge));
+    BOOST_CHECK(!HasGap(entries[2],
+                        rc::RCStage3CoupledAirGapCode::PublicScheduleBinding));
+    BOOST_CHECK(!HasGap(entries[2],
+                        rc::RCStage3CoupledAirGapCode::MaterialExchangeHashXof));
+    BOOST_CHECK(!HasGap(entries[3],
+                        rc::RCStage3CoupledAirGapCode::PublicScheduleBinding));
+    BOOST_CHECK(!HasGap(entries[4],
+                        rc::RCStage3CoupledAirGapCode::PublicScheduleBinding));
+    BOOST_CHECK(HasGap(entries[2],
+                       rc::RCStage3CoupledAirGapCode::CommitmentOpeningBridge));
+    BOOST_CHECK(HasGap(entries[3],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
+    BOOST_CHECK(HasGap(entries[4],
+                       rc::RCStage3CoupledAirGapCode::RecursiveAggregation));
 
     std::string why;
     BOOST_CHECK(!rc::RCStage3CoupledAirRegistryReady(shape, gamma, alpha, &why));
