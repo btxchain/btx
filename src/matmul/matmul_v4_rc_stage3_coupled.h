@@ -35,10 +35,11 @@ namespace matmul::v4::rc {
 inline constexpr uint32_t kRCStage3CoupledReceiptMagic = 0x31524343U; // "CCR1"
 inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
 /** Per-relation opaque engine payload bound. Sized to admit a small
- * BankDequantPagesV1 witness (one or two lobe_width=32 pages of Split-RAP
- * row proofs) while still rejecting multi-MiB forgeries. Production shapes
- * must aggregate under recursion before this bound can carry every page. */
-inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 4U * 1024U * 1024U;
+ * BankDequantPagesV1 witness (one lobe_width=32 Split-RAP page) or a toy
+ * GemmDotTilesV1 schedule (4×1 tiles of Fri3 AirQuotient) while still
+ * rejecting unbounded forgeries. Production shapes must aggregate under
+ * recursion before this bound can carry every scheduled instance. */
+inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 16U * 1024U * 1024U;
 
 /** Consensus proof-engine ABI. The identifier reserves a stable encoding; it
  * does not imply that the engine is implemented or ready. */
@@ -61,6 +62,18 @@ enum class RCStage3CoupledProofEngine : uint16_t {
      * kRCStage3CoupledRelationEnginesReady.
      */
     BankDequantPagesV1 = 2,
+    /**
+     * CoupledGemm ONLY. A real Fri3 AirQuotient proof of every scheduled
+     * GEMM dot-product tile (BuildRCStage3CoupledGemmDotConstraintSystem /
+     * VerifyRCStage3CoupledGemmDotProof), reused from
+     * ProveRCStage3CoupledGemmProduct. Proves the nine-column accumulate
+     * relation for each shape-derived schedule entry and binds `trace_root`
+     * to the ordered pin commitments, but does NOT close bank-page or prior-
+     * state producer provenance (see RCStage3CoupledGemmProductAudit) and
+     * therefore does not, by itself, move
+     * kRCStage3CoupledRelationEnginesReady.
+     */
+    GemmDotTilesV1 = 3,
 };
 
 /** Public coupled shape/options copied into every relation receipt. Test-only
@@ -234,6 +247,60 @@ struct RCStage3CoupledBankDequantPageWitness {
 /** Verify every page proof in `engine_receipt` and return the aggregate
  * trace root it commits to. Never performs native bank derivation. */
 [[nodiscard]] bool VerifyRCStage3CoupledBankDequantEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+// ============================================================================
+// CoupledGemm real proof-only engine (GemmDotTilesV1).
+//
+// Second non-stub RCStage3CoupledProofEngine dispatch: Fri3 AirQuotient
+// prove/verify over every shape-derived GEMM schedule tile, reused from
+// BuildRCStage3CoupledGemmDotConstraintSystem /
+// VerifyRCStage3CoupledGemmDotProof (matmul_v4_rc_stage3_coupled_gemm_product.*).
+//
+// Honest scope: for every scheduled (barrier, lobe, page_slot) instance and
+// every output tile, proves the nine-column accumulate relation
+//   product = A*B; after = before + product; start ⇒ before=0; end ⇒ Y=after
+// over lobe_width*MX contraction rows, binds statement/shape/schedule/sigma,
+// and returns an aggregate `trace_root` over ordered pin commitments.
+//
+// NOT covered (see RCStage3CoupledGemmProductAudit):
+//   - bank_page_producer_provenance / prior_state_producer_provenance
+//   - production streaming / recursive consumption / TransitivelyComplete
+// Consequently this engine is real cryptography for the local GEMM sub-
+// relation but does not by itself flip kRCStage3CoupledRelationEnginesReady.
+// ============================================================================
+
+/** Prover-supplied flat openings for one scheduled GEMM instance. */
+struct RCStage3CoupledGemmDotOpening {
+    std::vector<int8_t> operand_a;
+    std::vector<int8_t> operand_b;
+    std::vector<int64_t> output_y;
+
+    bool operator==(const RCStage3CoupledGemmDotOpening&) const = default;
+};
+
+/** Bounded prover helper. Builds one Fri3 AirQuotient proof per scheduled
+ * GEMM tile and serializes them into an opaque `engine_receipt` payload
+ * suitable for RCStage3CoupledRelationReceipt::engine_receipt when
+ * `engine == GemmDotTilesV1`. `openings.size()` must equal the shape-derived
+ * GEMM schedule length. */
+[[nodiscard]] bool BuildRCStage3CoupledGemmDotEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<RCStage3CoupledGemmDotOpening>& openings,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why = nullptr);
+
+/** Verify every tile proof in `engine_receipt` and return the aggregate
+ * trace root it commits to. Never performs native GEMM. */
+[[nodiscard]] bool VerifyRCStage3CoupledGemmDotEngineReceipt(
     const RCStage3CoupledShape& shape,
     const uint256& statement_commitment,
     const uint256& coupled_shape_commitment,

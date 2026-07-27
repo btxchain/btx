@@ -5,9 +5,12 @@
 #include <matmul/matmul_v4_rc_stage3_coupled.h>
 
 #include <crypto/sha256.h>
+#include <hash.h>
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
+#include <matmul/matmul_v4_rc_fri_ext3.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
 
 #include <algorithm>
@@ -256,12 +259,17 @@ bool ValidateReceiptStructure(const RCStage3CoupledRelationReceipt& receipt,
     }
     if (!IsCoupledRole(receipt.role)) return Fail(why, "receipt:bad_role");
     if (receipt.engine != RCStage3CoupledProofEngine::ProofOnlyV1 &&
-        receipt.engine != RCStage3CoupledProofEngine::BankDequantPagesV1) {
+        receipt.engine != RCStage3CoupledProofEngine::BankDequantPagesV1 &&
+        receipt.engine != RCStage3CoupledProofEngine::GemmDotTilesV1) {
         return Fail(why, "receipt:unknown_engine");
     }
     if (receipt.engine == RCStage3CoupledProofEngine::BankDequantPagesV1 &&
         receipt.role != RCStage3RelationRole::CoupledBank) {
         return Fail(why, "receipt:bank_dequant_engine_wrong_role");
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::GemmDotTilesV1 &&
+        receipt.role != RCStage3RelationRole::CoupledGemm) {
+        return Fail(why, "receipt:gemm_dot_engine_wrong_role");
     }
     if (!ValidateShape(receipt.shape, why)) return false;
     if (receipt.statement_commitment.IsNull() || receipt.params_commitment.IsNull() ||
@@ -507,6 +515,384 @@ bool VerifyRCStage3CoupledBankDequantEngineReceipt(
 
 namespace {
 
+constexpr uint32_t kGemmDotEngineMagic = 0x31544447U; // "GDT1"
+constexpr uint16_t kGemmDotEngineVersion = 1;
+constexpr char kGemmScheduleDomain[] = "BTX_RC_STAGE3_COUPLED_GEMM_SCHEDULE_V1";
+constexpr uint32_t kFri3AirQuotientMagic = 0x31514146U; // "FAQ1"
+
+bool WriteFp3(std::vector<unsigned char>& out, const Fp3& value)
+{
+    WriteU64(out, gkr_field::Canonical(value.c0));
+    WriteU64(out, gkr_field::Canonical(value.c1));
+    WriteU64(out, gkr_field::Canonical(value.c2));
+    return true;
+}
+
+bool ReadFp3(Reader& reader, Fp3& value)
+{
+    uint64_t c0{0}, c1{0}, c2{0};
+    if (!reader.ReadU64(c0) || !reader.ReadU64(c1) || !reader.ReadU64(c2) ||
+        c0 >= gkr_field::kP || c1 >= gkr_field::kP || c2 >= gkr_field::kP) {
+        return false;
+    }
+    value = {c0, c1, c2};
+    return true;
+}
+
+bool SerializeFri3AirQuotientProof(const aq::AirQuotientProof<Fp3>& proof,
+                                   std::vector<unsigned char>& out)
+{
+    out.clear();
+    std::vector<unsigned char> batch;
+    if (SerializeFri3BatchProof(proof.batch, batch) == 0 || batch.empty() ||
+        batch.size() > kRCFriMaxProofBytesHard ||
+        proof.next_openings.size() > kRCFriMaxQueriesHard) {
+        return false;
+    }
+    uint64_t exact = 4 + 2 + 4 + batch.size() + 32 + 4;
+    for (const auto& paths : proof.next_openings) {
+        if (paths.size() > kRCFriBatchMaxColumns) return false;
+        exact += 4;
+        for (const auto& path : paths) {
+            if (path.siblings.size() > kRCFriMaxFoldLayersHard) return false;
+            exact += 4 + 24 + 4 + uint64_t{path.siblings.size()} * 32;
+        }
+    }
+    if (exact > kRCStage3CoupledMaxEngineReceiptBytes ||
+        exact > std::numeric_limits<size_t>::max()) {
+        return false;
+    }
+    out.reserve(static_cast<size_t>(exact));
+    WriteU32(out, kFri3AirQuotientMagic);
+    WriteU16(out, 1);
+    WriteU32(out, static_cast<uint32_t>(batch.size()));
+    out.insert(out.end(), batch.begin(), batch.end());
+    WriteUint256(out, proof.trace_commit);
+    WriteU32(out, static_cast<uint32_t>(proof.next_openings.size()));
+    for (const auto& paths : proof.next_openings) {
+        WriteU32(out, static_cast<uint32_t>(paths.size()));
+        for (const auto& path : paths) {
+            WriteU32(out, path.index);
+            WriteFp3(out, path.leaf);
+            WriteU32(out, static_cast<uint32_t>(path.siblings.size()));
+            for (const uint256& sibling : path.siblings) WriteUint256(out, sibling);
+        }
+    }
+    return out.size() == exact;
+}
+
+bool DeserializeFri3AirQuotientProof(const std::vector<unsigned char>& bytes,
+                                     aq::AirQuotientProof<Fp3>& out)
+{
+    out = {};
+    Reader reader(bytes);
+    uint32_t magic{0};
+    uint16_t version{0};
+    uint32_t batch_len{0};
+    std::vector<unsigned char> batch_bytes;
+    if (!reader.ReadU32(magic) || magic != kFri3AirQuotientMagic ||
+        !reader.ReadU16(version) || version != 1 || !reader.ReadU32(batch_len) ||
+        batch_len == 0 || batch_len > kRCFriMaxProofBytesHard ||
+        !reader.ReadBytes(batch_len, batch_bytes)) {
+        return false;
+    }
+    const auto batch = DeserializeFri3BatchProof(batch_bytes);
+    if (!batch.has_value()) return false;
+    std::vector<unsigned char> canonical;
+    if (SerializeFri3BatchProof(*batch, canonical) != batch_bytes.size() ||
+        canonical != batch_bytes) {
+        return false;
+    }
+    out.batch = *batch;
+    uint32_t query_count{0};
+    if (!reader.ReadUint256(out.trace_commit) || !reader.ReadU32(query_count) ||
+        query_count > kRCFriMaxQueriesHard) {
+        return false;
+    }
+    out.next_openings.resize(query_count);
+    for (auto& paths : out.next_openings) {
+        uint32_t path_count{0};
+        if (!reader.ReadU32(path_count) || path_count > kRCFriBatchMaxColumns) {
+            return false;
+        }
+        paths.resize(path_count);
+        for (auto& path : paths) {
+            uint32_t sibling_count{0};
+            if (!reader.ReadU32(path.index) || !ReadFp3(reader, path.leaf) ||
+                !reader.ReadU32(sibling_count) ||
+                sibling_count > kRCFriMaxFoldLayersHard) {
+                return false;
+            }
+            path.siblings.resize(sibling_count);
+            for (uint256& sibling : path.siblings) {
+                if (!reader.ReadUint256(sibling)) return false;
+            }
+        }
+    }
+    return reader.Remaining() == 0;
+}
+
+void SerializeGemmDotPin(const RCStage3CoupledGemmDotPin& pin,
+                         std::vector<unsigned char>& out)
+{
+    WriteU16(out, pin.version);
+    WriteUint256(out, pin.statement_commitment);
+    WriteUint256(out, pin.shape_commitment);
+    WriteUint256(out, pin.schedule_commitment);
+    WriteU64(out, pin.schedule_index);
+    WriteU64(out, pin.output_tile_index);
+    WriteU32(out, pin.contraction_size);
+    WriteU32(out, pin.logical_rows);
+    WriteU32(out, pin.n_rows);
+    WriteU32(out, pin.n_coeffs);
+    WriteU32(out, static_cast<uint32_t>(pin.column_roots.size()));
+    for (const auto& root : pin.column_roots) {
+        WriteU32(out, root.column);
+        WriteUint256(out, root.root);
+    }
+    WriteUint256(out, pin.pin_commitment);
+}
+
+bool ReadGemmDotPin(Reader& reader, RCStage3CoupledGemmDotPin& pin)
+{
+    uint32_t root_count{0};
+    if (!reader.ReadU16(pin.version) ||
+        !reader.ReadUint256(pin.statement_commitment) ||
+        !reader.ReadUint256(pin.shape_commitment) ||
+        !reader.ReadUint256(pin.schedule_commitment) ||
+        !reader.ReadU64(pin.schedule_index) ||
+        !reader.ReadU64(pin.output_tile_index) ||
+        !reader.ReadU32(pin.contraction_size) ||
+        !reader.ReadU32(pin.logical_rows) || !reader.ReadU32(pin.n_rows) ||
+        !reader.ReadU32(pin.n_coeffs) || !reader.ReadU32(root_count) ||
+        root_count > kRCStage3CoupledGemmColumns + 1) {
+        return false;
+    }
+    pin.column_roots.resize(root_count);
+    for (auto& root : pin.column_roots) {
+        if (!reader.ReadU32(root.column) || !reader.ReadUint256(root.root)) {
+            return false;
+        }
+    }
+    return reader.ReadUint256(pin.pin_commitment);
+}
+
+uint256 ComputeGemmDotEngineTraceRoot(const std::vector<uint256>& pin_commitments)
+{
+    std::vector<unsigned char> bytes;
+    WriteDomain(bytes, "BTX_RC_STAGE3_COUPLED_GEMM_DOT_ENGINE_TRACE_V1");
+    WriteU64(bytes, static_cast<uint64_t>(pin_commitments.size()));
+    for (const uint256& root : pin_commitments) WriteUint256(bytes, root);
+    return Sha256d(bytes);
+}
+
+bool RebuildGemmSchedule(const RCStage3CoupledShape& shape,
+                         const uint256& statement_commitment,
+                         const uint256& sigma,
+                         std::vector<RCStage3CoupledGemmScheduleEntry>& out,
+                         uint256& schedule_commitment,
+                         std::string* why)
+{
+    out.clear();
+    schedule_commitment.SetNull();
+    const auto counts =
+        ExpectedRCStage3CoupledRelationCounts(RCStage3RelationRole::CoupledGemm,
+                                              shape, why);
+    if (sigma.IsNull() || statement_commitment.IsNull() || !counts.has_value()) {
+        return Fail(why, "gemm_dot_engine:schedule_public");
+    }
+    RCCoupParams params;
+    params.barriers = shape.barriers;
+    params.lobes = shape.lobes;
+    params.lobe_width = shape.lobe_width;
+    params.bank_pages = shape.bank_pages;
+    params.rows_per_lobe = shape.rows_per_lobe;
+    params.pages_per_barrier_lobe = shape.pages_per_barrier_lobe;
+    out.reserve(counts->primary);
+    for (uint32_t barrier = 0; barrier < shape.barriers; ++barrier) {
+        for (uint32_t lobe = 0; lobe < shape.lobes; ++lobe) {
+            const auto pages = SelectCoupledBankPageIds(
+                barrier, lobe, params, sigma, shape.full_bank_schedule,
+                shape.transcript_version);
+            if (pages.size() != shape.pages_per_barrier_lobe) {
+                return Fail(why, "gemm_dot_engine:schedule_page_count");
+            }
+            for (uint32_t slot = 0; slot < pages.size(); ++slot) {
+                if (pages[slot] >= shape.bank_pages) {
+                    return Fail(why, "gemm_dot_engine:schedule_page_id");
+                }
+                out.push_back({out.size(), barrier, lobe, slot, pages[slot]});
+            }
+        }
+    }
+    if (out.size() != counts->primary) {
+        return Fail(why, "gemm_dot_engine:schedule_count");
+    }
+    HashWriter hash;
+    hash << kGemmScheduleDomain;
+    hash << kRCStage3CoupledGemmProductVersion;
+    hash << statement_commitment;
+    hash << CommitRCStage3CoupledShape(shape);
+    hash << sigma;
+    hash << static_cast<uint64_t>(out.size());
+    for (const auto& entry : out) {
+        hash << entry.schedule_index << entry.barrier << entry.lobe
+             << entry.page_slot << entry.page_id;
+    }
+    schedule_commitment = hash.GetHash();
+    return !schedule_commitment.IsNull() ||
+           Fail(why, "gemm_dot_engine:schedule_commitment");
+}
+
+} // namespace
+
+bool BuildRCStage3CoupledGemmDotEngineReceipt(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const std::vector<RCStage3CoupledGemmDotOpening>& openings,
+    std::vector<unsigned char>& out_engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_engine_receipt.clear();
+    out_trace_root.SetNull();
+    std::vector<RCStage3CoupledGemmOpening> product_openings;
+    product_openings.reserve(openings.size());
+    for (const auto& opening : openings) {
+        product_openings.push_back(
+            {opening.operand_a, opening.operand_b, opening.output_y});
+    }
+    RCStage3CoupledGemmProduct product;
+    if (!ProveRCStage3CoupledGemmProduct(statement, shape, product_openings,
+                                         product, why)) {
+        return false;
+    }
+
+    std::vector<unsigned char> body;
+    WriteU32(body, kGemmDotEngineMagic);
+    WriteU16(body, kGemmDotEngineVersion);
+    WriteUint256(body, product.schedule_commitment);
+    WriteU64(body, product.expected_gemms);
+    WriteU64(body, product.expected_output_tiles);
+
+    std::vector<uint256> pin_commitments;
+    pin_commitments.reserve(product.expected_output_tiles);
+    uint64_t tiles_written{0};
+    for (const auto& gemm : product.gemms) {
+        for (const auto& tile : gemm.tiles) {
+            std::vector<unsigned char> proof_bytes;
+            if (!SerializeFri3AirQuotientProof(tile.proof, proof_bytes) ||
+                proof_bytes.empty()) {
+                return Fail(why, "gemm_dot_engine:proof_codec");
+            }
+            WriteU64(body, tile.pin.schedule_index);
+            WriteU64(body, tile.output_tile_index);
+            SerializeGemmDotPin(tile.pin, body);
+            WriteU32(body, static_cast<uint32_t>(proof_bytes.size()));
+            body.insert(body.end(), proof_bytes.begin(), proof_bytes.end());
+            pin_commitments.push_back(tile.pin.pin_commitment);
+            ++tiles_written;
+        }
+    }
+    if (tiles_written != product.expected_output_tiles ||
+        body.size() > kRCStage3CoupledMaxEngineReceiptBytes) {
+        return Fail(why, "gemm_dot_engine:tile_count_or_oversize");
+    }
+    out_trace_root = ComputeGemmDotEngineTraceRoot(pin_commitments);
+    out_engine_receipt = std::move(body);
+    return true;
+}
+
+bool VerifyRCStage3CoupledGemmDotEngineReceipt(
+    const RCStage3CoupledShape& shape,
+    const uint256& statement_commitment,
+    const uint256& coupled_shape_commitment,
+    const uint256& sigma,
+    const std::vector<unsigned char>& engine_receipt,
+    uint256& out_trace_root,
+    std::string* why)
+{
+    out_trace_root.SetNull();
+    std::vector<RCStage3CoupledGemmScheduleEntry> schedule;
+    uint256 expected_schedule_commitment;
+    if (!RebuildGemmSchedule(shape, statement_commitment, sigma, schedule,
+                             expected_schedule_commitment, why)) {
+        return false;
+    }
+    const uint64_t tiles_per_gemm =
+        uint64_t{shape.rows_per_lobe} * (shape.lobe_width / kRCMxBlockLen);
+    if (tiles_per_gemm == 0 || shape.lobe_width % kRCMxBlockLen != 0) {
+        return Fail(why, "gemm_dot_engine:tile_geometry");
+    }
+    const uint64_t expected_tiles = tiles_per_gemm * schedule.size();
+
+    Reader reader(engine_receipt);
+    uint32_t magic{0};
+    uint16_t version{0};
+    uint256 schedule_commitment;
+    uint64_t expected_gemms{0};
+    uint64_t expected_output_tiles{0};
+    if (!reader.ReadU32(magic) || magic != kGemmDotEngineMagic ||
+        !reader.ReadU16(version) || version != kGemmDotEngineVersion ||
+        !reader.ReadUint256(schedule_commitment) ||
+        !reader.ReadU64(expected_gemms) || !reader.ReadU64(expected_output_tiles) ||
+        schedule_commitment != expected_schedule_commitment ||
+        expected_gemms != schedule.size() ||
+        expected_output_tiles != expected_tiles) {
+        return Fail(why, "gemm_dot_engine:header");
+    }
+
+    std::vector<uint256> pin_commitments;
+    pin_commitments.reserve(expected_tiles);
+    for (uint64_t tile_ordinal = 0; tile_ordinal < expected_tiles; ++tile_ordinal) {
+        const uint64_t schedule_index = tile_ordinal / tiles_per_gemm;
+        const uint64_t output_tile_index = tile_ordinal % tiles_per_gemm;
+        uint64_t wire_schedule{0};
+        uint64_t wire_tile{0};
+        RCStage3CoupledGemmDotPin pin;
+        uint32_t proof_len{0};
+        std::vector<unsigned char> proof_bytes;
+        if (!reader.ReadU64(wire_schedule) || wire_schedule != schedule_index ||
+            !reader.ReadU64(wire_tile) || wire_tile != output_tile_index ||
+            !ReadGemmDotPin(reader, pin) || !reader.ReadU32(proof_len) ||
+            proof_len == 0 || !reader.ReadBytes(proof_len, proof_bytes)) {
+            return Fail(why, "gemm_dot_engine:tile_decode:" +
+                                 std::to_string(tile_ordinal));
+        }
+        if (pin.statement_commitment != statement_commitment ||
+            pin.shape_commitment != coupled_shape_commitment ||
+            pin.schedule_commitment != schedule_commitment ||
+            pin.schedule_index != schedule_index ||
+            pin.output_tile_index != output_tile_index ||
+            pin.contraction_size != shape.lobe_width ||
+            pin.logical_rows != shape.lobe_width * kRCMxBlockLen ||
+            pin.n_rows == 0 || pin.n_coeffs != pin.n_rows ||
+            pin.pin_commitment.IsNull() ||
+            pin.pin_commitment != ComputeRCStage3CoupledGemmDotPinCommitment(pin)) {
+            return Fail(why, "gemm_dot_engine:tile_binding:" +
+                                 std::to_string(tile_ordinal));
+        }
+        aq::AirQuotientProof<Fp3> proof;
+        if (!DeserializeFri3AirQuotientProof(proof_bytes, proof)) {
+            return Fail(why, "gemm_dot_engine:proof_codec:" +
+                                 std::to_string(tile_ordinal));
+        }
+        std::string tile_why;
+        if (!VerifyRCStage3CoupledGemmDotProof(pin, proof, &tile_why)) {
+            return Fail(why, "gemm_dot_engine:tile_verify:" +
+                                 std::to_string(tile_ordinal) + ":" + tile_why);
+        }
+        pin_commitments.push_back(pin.pin_commitment);
+    }
+    if (reader.Remaining() != 0) {
+        return Fail(why, "gemm_dot_engine:trailing_bytes");
+    }
+    out_trace_root = ComputeGemmDotEngineTraceRoot(pin_commitments);
+    return true;
+}
+
+namespace {
+
 bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
                            const RCStage3CoupledRelationReceipt& receipt,
                            std::string* why)
@@ -525,6 +911,23 @@ bool VerifyProofOnlyEngine(const RCStage3SuccinctProof& statement,
         }
         if (trace_root != receipt.trace_root) {
             return Fail(why, "coupled:bank:bank_dequant_engine_trace_root");
+        }
+        return true;
+    }
+    if (receipt.engine == RCStage3CoupledProofEngine::GemmDotTilesV1) {
+        if (receipt.role != RCStage3RelationRole::CoupledGemm) {
+            return Fail(why, std::string(RCStage3RelationRoleName(receipt.role)) +
+                                 ":gemm_dot_engine_wrong_role");
+        }
+        uint256 trace_root;
+        if (!VerifyRCStage3CoupledGemmDotEngineReceipt(
+                receipt.shape, receipt.statement_commitment,
+                receipt.coupled_shape_commitment, receipt.sigma, receipt.engine_receipt,
+                trace_root, why)) {
+            return false;
+        }
+        if (trace_root != receipt.trace_root) {
+            return Fail(why, "coupled:gemm:gemm_dot_engine_trace_root");
         }
         return true;
     }
@@ -888,11 +1291,12 @@ bool RCStage3CoupledRelationEnginesReady(std::string* why)
 {
     static_assert(!kRCStage3CoupledRelationEnginesReady,
                   "Do not enable without all eight proof-only engines");
-    // BankDequantPagesV1 is a real Split-RAP engine for CoupledBank's dequant
-    // sub-relation, but BankSeedXof / BankPageInclusion remain open and the
-    // other seven roles still fail closed on ProofOnlyV1 recursive stubs.
+    // BankDequantPagesV1 + GemmDotTilesV1 are real local engines, but
+    // BankSeedXof / BankPageInclusion remain open and the other six roles
+    // still fail closed on ProofOnlyV1 recursive stubs (plus GEMM provenance
+    // residuals keep TransitivelyComplete=false).
     return Fail(why,
-                "proof_engines_missing:bank_seed_xof,bank_page_inclusion,gemm,"
+                "proof_engines_missing:bank_seed_xof,bank_page_inclusion,"
                 "exchange,permutation,mix,extract,barrier,digest");
 }
 
