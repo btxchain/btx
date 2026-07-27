@@ -177,38 +177,111 @@ uint256 Sha256d(const std::vector<unsigned char>& bytes)
 
 std::vector<RCStage3EpisodeRelationGap> Gaps()
 {
-    return {
-        {RCStage3RelationRole::EpisodeDeterministicBuilder, BUILDER_COVERAGE,
-         "no proof-only header/params/seed/XOF builder; V7 and episode AIR "
-         "regenerate or trust SHA-derived preprocessing natively"},
-        {RCStage3RelationRole::EpisodeGemm,
-         Bit(RCStage3EpisodeObligation::GemmEveryLayer) |
-             Bit(RCStage3EpisodeObligation::GemmOperandOpenings) |
-             Bit(RCStage3EpisodeObligation::GemmSignedAccumulatorRange),
-         "sumcheck endpoint support plus an exact Λ manifest, range AIR, "
-         "A/B/Y proof obligations, and range-to-Extract CTL pins exist, but "
-         "the recursive child proof engines are not executed"},
-        {RCStage3RelationRole::EpisodeExtract,
-         Bit(RCStage3EpisodeObligation::ExtractEveryTile) |
-             Bit(RCStage3EpisodeObligation::ExtractSamplerWalk) |
-             Bit(RCStage3EpisodeObligation::ExtractChaChaBinding) |
-             Bit(RCStage3EpisodeObligation::ExtractScaleBinding) |
-             Bit(RCStage3EpisodeObligation::ExtractDequantAndRange) |
-             Bit(RCStage3EpisodeObligation::ExtractOutputBinding),
-         "episode AIR covers accepted-slot low-degree rules and the sibling "
-         "manifest exactly partitions every tile with CTL/scale obligations, "
-         "but its recursive roots, SHA scale proof, and ChaCha proof are not "
-         "executed"},
-        {RCStage3RelationRole::EpisodeWiring, WIRING_COVERAGE,
-         "copy/transpose/residual/round-order checks still scan carried native "
-         "wires and are not bound by a durable proof-only permutation argument"},
-        {RCStage3RelationRole::EpisodeTileTree, TILETREE_COVERAGE,
-         "tile-tree closure still hashes the full native stream directly; no "
-         "complete recursive hash/stream proof is serialized"},
-        {RCStage3RelationRole::EpisodeDigest, DIGEST_COVERAGE,
-         "episode digest and PoW bindings are native gates over roots that are "
-         "not yet supplied by complete proof-only builder/tile-tree relations"},
+    // Per-role missing masks are COMPUTED from the measured
+    // kRCStage3Episode*RecursionEnginesExecuted flags (matmul_v4_rc_stage3_
+    // episode.h). Each true flag is backed by the matching case in
+    // matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp driving that
+    // role's real C_rho through AirQuotientProve/Verify +
+    // air_recurse::ProveAggregate/VerifyAggregate to
+    // constraints_resolved && backend_shape_supported. Shared cross-lane
+    // recursive authority gates remain tracked independently by the ledger.
+    const uint64_t builder_missing =
+        kRCStage3EpisodeBuilderRecursionEnginesExecuted ? 0 : BUILDER_COVERAGE;
+    const uint64_t gemm_missing =
+        kRCStage3EpisodeGemmRecursionEnginesExecuted
+            ? 0
+            : (Bit(RCStage3EpisodeObligation::GemmEveryLayer) |
+               Bit(RCStage3EpisodeObligation::GemmOperandOpenings) |
+               Bit(RCStage3EpisodeObligation::GemmSignedAccumulatorRange));
+    const uint64_t extract_missing =
+        kRCStage3EpisodeExtractRecursionEnginesExecuted ? 0 : EXTRACT_COVERAGE;
+    const uint64_t wiring_missing =
+        kRCStage3EpisodeWiringRecursionEnginesExecuted ? 0 : WIRING_COVERAGE;
+    const uint64_t tiletree_missing =
+        kRCStage3EpisodeTileTreeRecursionEnginesExecuted ? 0 : TILETREE_COVERAGE;
+    const uint64_t digest_missing =
+        kRCStage3EpisodeDigestRecursionEnginesExecuted ? 0 : DIGEST_COVERAGE;
+
+    const std::string builder_reason =
+        kRCStage3EpisodeBuilderRecursionEnginesExecuted
+            ? "BuildRCStage3NoKernelRoleAir (Params opening + SeedChain/"
+              "OperandXof stream + BuilderTrace wired) now executes through "
+              "AirQuotientProve/Verify + ProveAggregate/VerifyAggregate to "
+              "constraints_resolved && backend_shape_supported; authority "
+              "remains blocked ONLY by shared cross-lane recursive gates"
+            : "no proof-only header/params/seed/XOF builder; V7 and episode AIR "
+              "regenerate or trust SHA-derived preprocessing natively";
+    const std::string gemm_reason =
+        kRCStage3EpisodeGemmRecursionEnginesExecuted
+            ? "sumcheck endpoint support plus an exact Λ manifest, range AIR, "
+              "A/B/Y proof obligations, and range-to-Extract CTL pins exist, "
+              "and matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp "
+              "now drives the real recursive child proof engine "
+              "(BuildRCStage3EpisodeGemmRoleAir -> AirQuotientProve/Verify -> "
+              "air_recurse::ProveAggregate/VerifyAggregate) to "
+              "constraints_resolved && backend_shape_supported for a genuine "
+              "relation instance; the role's authority remains blocked ONLY "
+              "by the shared cross-lane recursive gates in "
+              "matmul_v4_rc_stage3_recursive.h, tracked independently"
+            : "sumcheck endpoint support plus an exact Λ manifest, range AIR, "
+              "A/B/Y proof obligations, and range-to-Extract CTL pins exist, "
+              "but the recursive child proof engines are not executed";
+    const std::string extract_reason =
+        kRCStage3EpisodeExtractRecursionEnginesExecuted
+            ? "BuildRCStage3NoKernelRoleAir (Input/Sampler/Scale/Output "
+              "openings + ChaCha stream) now executes through "
+              "AirQuotientProve/Verify + ProveAggregate/VerifyAggregate to "
+              "constraints_resolved && backend_shape_supported; authority "
+              "remains blocked ONLY by shared cross-lane recursive gates"
+            : "episode AIR covers accepted-slot low-degree rules and the sibling "
+              "manifest exactly partitions every tile with CTL/scale obligations, "
+              "but its recursive roots, SHA scale proof, and ChaCha proof are not "
+              "executed";
+    const std::string wiring_reason =
+        kRCStage3EpisodeWiringRecursionEnginesExecuted
+            ? "BuildRCStage3EpisodeWiringRoleAir (Copy opening + Transpose/"
+              "Residual/RoundOrder wired ledger folds) now executes through "
+              "AirQuotientProve/Verify + ProveAggregate/VerifyAggregate to "
+              "constraints_resolved && backend_shape_supported; authority "
+              "remains blocked ONLY by shared cross-lane recursive gates"
+            : "copy/transpose/residual/round-order checks still scan carried native "
+              "wires and are not bound by a durable proof-only permutation argument";
+    const std::string tiletree_reason =
+        kRCStage3EpisodeTileTreeRecursionEnginesExecuted
+            ? "BuildRCStage3PureStreamRoleAir(EpisodeTileTree) now executes "
+              "through AirQuotientProve/Verify + ProveAggregate/VerifyAggregate "
+              "to constraints_resolved && backend_shape_supported; authority "
+              "remains blocked ONLY by shared cross-lane recursive gates"
+            : "tile-tree closure still hashes the full native stream directly; no "
+              "complete recursive hash/stream proof is serialized";
+    const std::string digest_reason =
+        kRCStage3EpisodeDigestRecursionEnginesExecuted
+            ? "BuildRCStage3PureStreamRoleAir(EpisodeDigest) now executes "
+              "through AirQuotientProve/Verify + ProveAggregate/VerifyAggregate "
+              "to constraints_resolved && backend_shape_supported; authority "
+              "remains blocked ONLY by shared cross-lane recursive gates"
+            : "episode digest and PoW bindings are native gates over roots that are "
+              "not yet supplied by complete proof-only builder/tile-tree relations";
+
+    std::vector<RCStage3EpisodeRelationGap> gaps{
+        {RCStage3RelationRole::EpisodeDeterministicBuilder, builder_missing,
+         builder_reason},
+        {RCStage3RelationRole::EpisodeGemm, gemm_missing, gemm_reason},
+        {RCStage3RelationRole::EpisodeExtract, extract_missing, extract_reason},
+        {RCStage3RelationRole::EpisodeWiring, wiring_missing, wiring_reason},
+        {RCStage3RelationRole::EpisodeTileTree, tiletree_missing, tiletree_reason},
+        {RCStage3RelationRole::EpisodeDigest, digest_missing, digest_reason},
     };
+    // A role with no missing obligations is not a gap: drop it so
+    // Gaps().empty() is exactly true only when every role is genuinely
+    // clear, matching the invariant matmul_v4_rc_stage3_global_soundness_
+    // ledger.cpp's g1 evidence relies on.
+    gaps.erase(std::remove_if(gaps.begin(), gaps.end(),
+                              [](const RCStage3EpisodeRelationGap& gap) {
+                                  return gap.missing_obligations == 0;
+                              }),
+              gaps.end());
+    return gaps;
 }
 
 bool VerifyCompleteEngine(const RCStage3SuccinctProof& statement,

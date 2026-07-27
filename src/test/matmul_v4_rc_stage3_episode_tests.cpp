@@ -234,21 +234,33 @@ BOOST_AUTO_TEST_CASE(coupled_only_is_rejected_and_prover_emits_no_partial_author
     BOOST_CHECK(!result.ok);
     BOOST_CHECK(result.commitments.empty());
     BOOST_CHECK(result.sections.empty());
-    BOOST_CHECK_EQUAL(result.gaps.size(), 6U);
+    // EpisodeGemm/TileTree/Digest recursive engines now genuinely execute (see
+    // kRCStage3Episode*RecursionEnginesExecuted / matmul_v4_rc_stage3_
+    // episode_recursion_prototype_tests.cpp), so they are no longer reported as
+    // gaps; Builder/Extract/Wiring remain open.
+    BOOST_CHECK_EQUAL(result.gaps.size(), 3U);
     BOOST_CHECK(result.note.find("no_complete_proof_only_engine") !=
                 std::string::npos);
 }
 
-BOOST_AUTO_TEST_CASE(gap_report_names_every_registered_episode_role)
+BOOST_AUTO_TEST_CASE(gap_report_names_every_still_open_episode_role)
 {
     const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
     const auto roles =
         rc::RequiredRCStage3RelationRoles(rc::RCStage3StatementKind::Episode);
-    BOOST_REQUIRE_EQUAL(gaps.size(), roles.size());
-    for (size_t i = 0; i < gaps.size(); ++i) {
-        BOOST_CHECK(gaps[i].role == roles[i]);
-        BOOST_CHECK_NE(gaps[i].missing_obligations, 0U);
-        BOOST_CHECK(!gaps[i].reason.empty());
+    // EpisodeGemm/TileTree/Digest are the required roles whose recursive
+    // engines now genuinely execute for a real instance (see
+    // kRCStage3Episode*RecursionEnginesExecuted); they are therefore absent
+    // from the gap report while Builder/Extract/Wiring remain open.
+    BOOST_REQUIRE_EQUAL(gaps.size(), 3U);
+    for (const auto& gap : gaps) {
+        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeGemm);
+        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeTileTree);
+        BOOST_CHECK(gap.role != rc::RCStage3RelationRole::EpisodeDigest);
+        BOOST_CHECK(std::find(roles.begin(), roles.end(), gap.role) !=
+                    roles.end());
+        BOOST_CHECK_NE(gap.missing_obligations, 0U);
+        BOOST_CHECK(!gap.reason.empty());
     }
 }
 

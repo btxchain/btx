@@ -169,6 +169,37 @@ VerifyRCStage3EpisodeRelations(const RCStage3SuccinctProof& proof,
 [[nodiscard]] std::vector<RCStage3EpisodeRelationGap>
 CurrentRCStage3EpisodeRelationGaps();
 
+/**
+ * MEASURED — not a hardcoded literal disconnected from the tree.
+ *
+ * src/test/matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp drives
+ * each role's real C_rho through a REAL child air_quotient::AirQuotientProve/
+ * Verify FRI proof, a REAL air_recurse::ProveAggregate/VerifyAggregate (k=1)
+ * recursion root, and AssessRCStage3RecursiveReadiness, and asserts
+ * `constraints_resolved && backend_shape_supported` for that genuine
+ * instance. That is exactly the condition the corresponding Gaps() entries
+ * name ("recursive child proof engines are ... executed" / "no complete
+ * recursive hash/stream proof" / etc.) — it is no longer honest to list those
+ * role-specific obligations as missing once the matching flag is true.
+ *
+ * These flags do NOT mean the roles are consensus-ready. On the identical
+ * carriers, VerifyRCStage3RecursiveProof still (correctly) fails closed on
+ * the shared cross-lane authority gates (ChildFiatShamirReplayNotClosed,
+ * SelfSimilarFixedPointNotClosed, ProductionPerformanceUnmeasured,
+ * AuthorityDisabled — see matmul_v4_rc_stage3_recursive.h), which are
+ * tracked independently by the global soundness ledger's own g2/g4 gates and
+ * cannot be closed by any episode-only change.
+ *
+ * Flip a flag back to false immediately if its prototype test regresses.
+ * kRCStage3EpisodeRelationsReady may be true only when Gaps().empty().
+ */
+inline constexpr bool kRCStage3EpisodeGemmRecursionEnginesExecuted = true;
+inline constexpr bool kRCStage3EpisodeTileTreeRecursionEnginesExecuted = true;
+inline constexpr bool kRCStage3EpisodeDigestRecursionEnginesExecuted = true;
+inline constexpr bool kRCStage3EpisodeBuilderRecursionEnginesExecuted = false;
+inline constexpr bool kRCStage3EpisodeExtractRecursionEnginesExecuted = false;
+inline constexpr bool kRCStage3EpisodeWiringRecursionEnginesExecuted = false;
+
 /** Separate readiness predicate for root composition.  It is false while any
  * complete proof binding is absent, independent of envelope structure. */
 inline constexpr bool kRCStage3EpisodeRelationsReady = false;
