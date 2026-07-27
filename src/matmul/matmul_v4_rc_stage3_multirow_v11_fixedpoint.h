@@ -133,10 +133,16 @@ struct LevelShapeV1 {
     uint32_t normalized_trace_rows{0};
     uint64_t lde_rows{0};
     size_t projected_max_proof_bytes{0};
+    size_t measured_reference_proof_bytes{0};
+    size_t measured_normalized_root_proof_bytes{0};
     size_t measured_root_receipt_bytes{0};
-    uint64_t measured_root_verify_micros{0};
+    uint64_t measured_reference_verify_micros{0};
+    uint64_t measured_normalized_root_verify_micros{0};
     bool columns_fit{false};
     bool lde_fit{false};
+    bool projected_wire_fits{false};
+    bool normalized_root_wire_measured{false};
+    bool normalized_root_verify_measured{false};
     bool every_wire_proof_fits{false};
     bool root_verify_within_budget{false};
 };
@@ -195,7 +201,17 @@ struct FixedPointAssessmentV1 {
 [[nodiscard]] FixedPointAssessmentV1 AssessFixedPointV1(
     const ExecutableInventoryV1& level1,
     const ExecutableInventoryV1& level2,
-    const WireMeasurementV1& parent_join_wire,
+    const WireMeasurementV1& level1_wire,
+    const WireMeasurementV1& level2_wire,
+    const cb::ProgramTable* canonical_parent_table,
+    uint32_t arity = rp::kRecursiveParentArityV1,
+    uint32_t scheduler_columns = kDefaultSchedulerColumnsV1);
+
+/** Convenience screen when one reference measurement projects both levels. */
+[[nodiscard]] FixedPointAssessmentV1 AssessFixedPointV1(
+    const ExecutableInventoryV1& level1,
+    const ExecutableInventoryV1& level2,
+    const WireMeasurementV1& reference_wire,
     const cb::ProgramTable* canonical_parent_table,
     uint32_t arity = rp::kRecursiveParentArityV1,
     uint32_t scheduler_columns = kDefaultSchedulerColumnsV1);

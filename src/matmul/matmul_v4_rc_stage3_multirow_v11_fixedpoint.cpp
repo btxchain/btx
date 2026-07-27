@@ -178,10 +178,31 @@ LevelShapeV1 AssessLevel(
         uint64_t{out.normalized_trace_rows} * kRCFriBlowup;
     out.projected_max_proof_bytes = ProjectWireBytes(
         wire, out.normalized_columns, out.normalized_trace_rows);
+    out.measured_reference_proof_bytes =
+        wire.proof_bytes_evidence == EvidenceClassV1::Measured
+        ? wire.proof_bytes : 0;
+    out.measured_reference_verify_micros =
+        wire.verify_evidence == EvidenceClassV1::Measured
+        ? wire.verify_micros : 0;
+    const bool exact_normalized_shape =
+        wire.columns == out.normalized_columns &&
+        wire.trace_rows == out.normalized_trace_rows;
+    out.normalized_root_wire_measured =
+        exact_normalized_shape &&
+        wire.proof_bytes_evidence == EvidenceClassV1::Measured &&
+        wire.proof_bytes != 0;
+    out.normalized_root_verify_measured =
+        exact_normalized_shape &&
+        wire.verify_evidence == EvidenceClassV1::Measured &&
+        wire.verify_micros != 0;
+    out.measured_normalized_root_proof_bytes =
+        out.normalized_root_wire_measured
+        ? wire.proof_bytes : 0;
+    out.measured_normalized_root_verify_micros =
+        out.normalized_root_verify_measured
+        ? wire.verify_micros : 0;
     out.measured_root_receipt_bytes =
         inventory.recursive_parent_receipt_bytes;
-    out.measured_root_verify_micros =
-        inventory.recursive_parent_verify_micros;
     out.columns_fit =
         out.normalized_columns != 0 &&
         out.normalized_columns <= kRCFri3AlgBatchMaxColumns;
@@ -189,14 +210,19 @@ LevelShapeV1 AssessLevel(
         out.normalized_trace_rows != 0 &&
         out.lde_rows <=
             (uint64_t{1} << kRCFriMaxLdeLog2);
-    out.every_wire_proof_fits =
+    out.projected_wire_fits =
         out.projected_max_proof_bytes != 0 &&
-        out.projected_max_proof_bytes <= kWireBudgetBytesV1 &&
+        out.projected_max_proof_bytes <= kWireBudgetBytesV1;
+    out.every_wire_proof_fits =
+        out.normalized_root_wire_measured &&
+        out.measured_normalized_root_proof_bytes <=
+            kWireBudgetBytesV1 &&
         out.measured_root_receipt_bytes != 0 &&
         out.measured_root_receipt_bytes <= kWireBudgetBytesV1;
     out.root_verify_within_budget =
-        out.measured_root_verify_micros != 0 &&
-        out.measured_root_verify_micros <= kRelayBudgetMicrosV1;
+        out.normalized_root_verify_measured &&
+        out.measured_normalized_root_verify_micros <=
+            kRelayBudgetMicrosV1;
     return out;
 }
 
@@ -367,7 +393,8 @@ QueryShardPlanV1 SearchQueryShardsV1(
 FixedPointAssessmentV1 AssessFixedPointV1(
     const ExecutableInventoryV1& level1,
     const ExecutableInventoryV1& level2,
-    const WireMeasurementV1& parent_join_wire,
+    const WireMeasurementV1& level1_wire,
+    const WireMeasurementV1& level2_wire,
     const cb::ProgramTable* canonical_parent_table,
     uint32_t arity,
     uint32_t scheduler_columns)
@@ -384,10 +411,10 @@ FixedPointAssessmentV1 AssessFixedPointV1(
         MaxChipColumns(level2) + scheduler_columns,
         canonical_parent_table);
     out.level1 = AssessLevel(
-        level1, parent_join_wire, arity,
+        level1, level1_wire, arity,
         scheduler_columns, 0);
     out.level2 = AssessLevel(
-        level2, parent_join_wire, arity,
+        level2, level2_wire, arity,
         scheduler_columns, out.parent_vm.trace_rows);
     const uint64_t merkle_all =
         MerkleRowsAllQueries(level2);
@@ -421,7 +448,7 @@ FixedPointAssessmentV1 AssessFixedPointV1(
         out.level1.normalized_columns ==
             out.level2.normalized_columns;
     out.scheduler_columns_headroom = SchedulerHeadroom(
-        parent_join_wire,
+        level2_wire,
         std::max(
             out.level1.normalized_trace_rows,
             out.level2.normalized_trace_rows));
@@ -441,12 +468,12 @@ FixedPointAssessmentV1 AssessFixedPointV1(
     out.residual_mask |=
         kResidualChildVerifierNotInParentAir |
         kResidualSemanticCtlNotRecursivelyConsumed;
-    if (parent_join_wire.verify_evidence !=
-        EvidenceClassV1::Measured) {
+    if (!out.level1.normalized_root_verify_measured ||
+        !out.level2.normalized_root_verify_measured) {
         out.residual_mask |= kResidualWholeRootVerifyUnmeasured;
     }
-    if (parent_join_wire.proof_bytes_evidence !=
-        EvidenceClassV1::Measured) {
+    if (!out.level1.normalized_root_wire_measured ||
+        !out.level2.normalized_root_wire_measured) {
         out.residual_mask |= kResidualWholeRootWireUnmeasured;
     }
     if (!level1.full_query_shards_materialized ||
@@ -467,6 +494,19 @@ FixedPointAssessmentV1 AssessFixedPointV1(
         : "stage3:v11_fixedpoint:shape_screen;"
           "recursive_child_verifier_pending";
     return out;
+}
+
+FixedPointAssessmentV1 AssessFixedPointV1(
+    const ExecutableInventoryV1& level1,
+    const ExecutableInventoryV1& level2,
+    const WireMeasurementV1& reference_wire,
+    const cb::ProgramTable* canonical_parent_table,
+    uint32_t arity,
+    uint32_t scheduler_columns)
+{
+    return AssessFixedPointV1(
+        level1, level2, reference_wire, reference_wire,
+        canonical_parent_table, arity, scheduler_columns);
 }
 
 ReentryAuditV1 AuditLevelOneToLevelTwoV1(

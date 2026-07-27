@@ -149,8 +149,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_LE(
         assessed.level2.projected_max_proof_bytes,
         kWireBudgetBytesV1);
-    BOOST_CHECK(
-        assessed.level2.root_verify_within_budget);
+    BOOST_CHECK(assessed.level2.projected_wire_fits);
+    BOOST_CHECK(!assessed.level2.normalized_root_wire_measured);
+    BOOST_CHECK(!assessed.level2.normalized_root_verify_measured);
+    BOOST_CHECK(!assessed.level2.every_wire_proof_fits);
+    BOOST_CHECK(!assessed.level2.root_verify_within_budget);
     BOOST_CHECK(!assessed.level_two_fits);
     BOOST_CHECK(!assessed.complete_fixed_point);
     BOOST_CHECK(!assessed.aggregation_ready);
@@ -163,6 +166,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         assessed.residual_mask &
         kResidualSemanticCtlNotRecursivelyConsumed);
+    BOOST_CHECK(
+        assessed.residual_mask &
+        kResidualWholeRootWireUnmeasured);
+    BOOST_CHECK(
+        assessed.residual_mask &
+        kResidualWholeRootVerifyUnmeasured);
 
     BOOST_CHECK(assessed.shard_plan.exact_vm_inventory);
     BOOST_CHECK(
@@ -206,15 +215,54 @@ BOOST_AUTO_TEST_CASE(
     const auto assessed = AssessFixedPointV1(
         inventory, inventory, missing, &table, 1, 32);
     BOOST_CHECK(!assessed.level1.every_wire_proof_fits);
-    // The native 74-column root receipt was measured below 900 ms; the
-    // missing measurement here is the whole 1,298-column normalized proof.
-    BOOST_CHECK(assessed.level1.root_verify_within_budget);
+    // The native 74-column root receipt was measured below 900 ms. It is not
+    // evidence for the whole 1,330-column normalized proof.
+    BOOST_CHECK(!assessed.level1.root_verify_within_budget);
     BOOST_CHECK(
         assessed.residual_mask &
         kResidualWholeRootWireUnmeasured);
     BOOST_CHECK(
         assessed.residual_mask &
         kResidualWholeRootVerifyUnmeasured);
+    BOOST_CHECK(!assessed.complete_fixed_point);
+}
+
+BOOST_AUTO_TEST_CASE(
+    only_exact_normalized_shape_measurement_clears_measurement_residuals)
+{
+    const auto inventory = Inventory(74);
+    const auto table = ParentTable(1276);
+    const auto shape = AssessFixedPointV1(
+        inventory, inventory, ParentJoinWire(), &table, 1, 32);
+    WireMeasurementV1 exact_level1;
+    exact_level1.trace_rows = shape.level1.normalized_trace_rows;
+    exact_level1.columns = shape.level1.normalized_columns;
+    exact_level1.proof_bytes = kWireBudgetBytesV1 - 1;
+    exact_level1.verify_micros = kRelayBudgetMicrosV1 - 1;
+    exact_level1.proof_bytes_evidence = EvidenceClassV1::Measured;
+    exact_level1.verify_evidence = EvidenceClassV1::Measured;
+    auto exact_level2 = exact_level1;
+    exact_level2.trace_rows = shape.level2.normalized_trace_rows;
+    exact_level2.columns = shape.level2.normalized_columns;
+    const auto assessed = AssessFixedPointV1(
+        inventory, inventory, exact_level1, exact_level2,
+        &table, 1, 32);
+    BOOST_CHECK(assessed.level1.normalized_root_wire_measured);
+    BOOST_CHECK(assessed.level1.normalized_root_verify_measured);
+    BOOST_CHECK(assessed.level1.every_wire_proof_fits);
+    BOOST_CHECK(assessed.level1.root_verify_within_budget);
+    BOOST_CHECK_EQUAL(
+        assessed.residual_mask &
+            kResidualWholeRootWireUnmeasured,
+        0U);
+    BOOST_CHECK_EQUAL(
+        assessed.residual_mask &
+            kResidualWholeRootVerifyUnmeasured,
+        0U);
+    // Exact performance evidence still cannot substitute for recursion.
+    BOOST_CHECK(
+        assessed.residual_mask &
+        kResidualChildVerifierNotInParentAir);
     BOOST_CHECK(!assessed.complete_fixed_point);
 }
 
