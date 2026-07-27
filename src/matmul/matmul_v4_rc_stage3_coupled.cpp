@@ -3188,7 +3188,11 @@ bool RCStage3CoupledRelationEnginesReady(std::string* why)
     // by AirRegistryReady / kRCStage3RecursiveAggregationReady), not Ready
     // blockers for this engines predicate.
     if (!kRCStage3CoupledRelationEnginesReady) {
-        return Fail(why, "proof_engines_pending_measure:extract,barrier,digest");
+        // BarrierSha256dV1 / DigestSha256dV1 measured green on macpro2
+        // (51 089 683 / 76 525 971 bytes, EXIT:0, ~674s). MixArithmeticV1 +
+        // ExtractTilesV1 still pending remasure under the 512 MiB engine
+        // receipt cap (both hit oversize at 256 MiB).
+        return Fail(why, "proof_engines_pending_measure:extract,mix");
     }
     if (why != nullptr) *why = "stage3:coupled:engines_ready";
     return true;
