@@ -16262,6 +16262,26 @@ AssessNarrowBytecodePerPointJoinBudgetV1(
     out.capacity_closed =
         !out.rows_fit_without_pad &&
         !out.projected_lde_supported;
+
+    // Degree-aware single-node FRI shape (stricter than blowup-only).
+    const nr::NarrowNodeFriShape fri_shape =
+        nr::AssessNarrowNodeFriShape(min_rows);
+    out.single_node_fri_representable = fri_shape.representable;
+
+    // Hierarchical attach: reuse blk planner so one 575-col node is not
+    // required to absorb the full LDE-over-cap pad.
+    const NarrowBytecodeHierarchicalAttachPlanV1 hier =
+        PlanNarrowBytecodeHierarchicalAttachV1(
+            table, out.queries);
+    out.hierarchical_attach_planned =
+        hier.valid || hier.hierarchical_fits ||
+        hier.single_node_fits;
+    out.hierarchical_attach_fits =
+        hier.hierarchical_fits || hier.single_node_fits;
+    out.hierarchical_depth = hier.depth;
+    out.hierarchical_node_count = hier.node_count;
+    out.hierarchical_single_level_rows = hier.total_leaf_rows;
+
     out.valid =
         out.projected_columns_narrow &&
         out.queries > 0 &&
@@ -16296,21 +16316,171 @@ AssessNarrowBytecodePerPointJoinBudgetV1(
                (out.projected_lde_supported
                     ? ";lde_ok"
                     : ";lde_over_cap") +
+               (out.single_node_fri_representable
+                    ? ";fri_ok"
+                    : ";fri_over_cap") +
                (out.p2_fs_replay_closed
                     ? ";p2_fs_closed"
                     : ";p2_fs_open") +
                (out.capacity_closed
                     ? ";capacity_closed"
                     : ";join_representable_if_padded") +
+               ";hier_fits=" +
+               (out.hierarchical_attach_fits ? "1" : "0") +
+               ";hier_depth=" +
+               std::to_string(out.hierarchical_depth) +
+               ";hier_nodes=" +
+               std::to_string(out.hierarchical_node_count) +
+               ";hier_leaf_rows=" +
+               std::to_string(
+                   out.hierarchical_single_level_rows) +
                ";complete_fp=false")
             : "stage3:recursive_fixedpoint:"
               "narrow_bytecode_join_budget_invalid";
     return out;
 }
 
+std::vector<nr::NarrowHierarchyLeaf>
+BuildNarrowBytecodeHierarchyLeaves(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t queries)
+{
+    std::vector<nr::NarrowHierarchyLeaf> leaves;
+    if (queries == 0) return leaves;
+    leaves.reserve(table.programs.size());
+    for (uint32_t i = 0; i < table.programs.size(); ++i) {
+        nr::NarrowHierarchyLeaf leaf;
+        leaf.role_index = i;
+        leaf.name = "bytecode:program:" + std::to_string(i);
+        const uint64_t insn = static_cast<uint64_t>(
+            table.programs[i].instructions.size());
+        // Conservative per-program attach cost (matches shard attach).
+        leaf.active_rows = uint64_t{queries} * (insn + 1U);
+        leaf.child_w = table.current_width;
+        leaves.push_back(std::move(leaf));
+    }
+    return leaves;
+}
+
+NarrowBytecodeHierarchicalAttachPlanV1
+PlanNarrowBytecodeHierarchicalAttachV1(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t queries,
+    const nr::NarrowHierarchyPlanConfig& config)
+{
+    NarrowBytecodeHierarchicalAttachPlanV1 out;
+    out.queries = queries;
+    out.program_count =
+        static_cast<uint32_t>(table.programs.size());
+    out.instructions = CountProgramTableInstructions(table);
+    if (queries == 0 || table.programs.empty() ||
+        !constraint_bytecode::ValidateProgramTable(
+            table, nullptr)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_hier_attach_input_invalid";
+        return out;
+    }
+    const auto leaves =
+        BuildNarrowBytecodeHierarchyLeaves(table, queries);
+    if (leaves.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_hier_attach_empty_leaves";
+        return out;
+    }
+    for (const auto& leaf : leaves) {
+        out.total_leaf_rows += leaf.active_rows;
+    }
+    // Bytecode programs are tiny vs episode-role children. Disable the
+    // soft arity-4 preference so first-fit packs by LDE row budget; the
+    // episode six-role planner keeps preferred_max_children=4 separately.
+    nr::NarrowHierarchyPlanConfig attach_config = config;
+    if (attach_config.preferred_max_children == 4) {
+        attach_config.preferred_max_children = 0;
+    }
+    out.single_node_shape = nr::AssessNarrowNodeFriShape(
+        out.total_leaf_rows,
+        attach_config.vcs_columns,
+        attach_config.max_algebraic_degree,
+        attach_config.lde_log2_cap,
+        attach_config.column_cap);
+    out.single_node_fits = out.single_node_shape.representable;
+
+    out.hierarchy = nr::PlanHierarchicalNarrowAggregation(
+        leaves, attach_config);
+    out.hierarchical_fits = out.hierarchy.hierarchical_fits;
+    out.all_programs_covered =
+        out.hierarchy.all_leaves_covered;
+    out.node_count = out.hierarchy.node_count;
+    out.depth = out.hierarchy.depth;
+    // Accept single-level or multi-level closure under budgets.
+    out.valid = out.hierarchical_fits &&
+                out.all_programs_covered &&
+                out.hierarchy.node_count > 0;
+    out.note =
+        out.valid
+            ? (std::string(
+                   "stage3:recursive_fixedpoint:"
+                   "bytecode_hier_attach") +
+               ";programs=" +
+               std::to_string(out.program_count) +
+               ";queries=" + std::to_string(out.queries) +
+               ";instructions=" +
+               std::to_string(out.instructions) +
+               ";leaf_rows=" +
+               std::to_string(out.total_leaf_rows) +
+               ";single_fits=" +
+               (out.single_node_fits ? "1" : "0") +
+               ";hier_fits=" +
+               (out.hierarchical_fits ? "1" : "0") +
+               ";depth=" + std::to_string(out.depth) +
+               ";nodes=" + std::to_string(out.node_count) +
+               ";single_lde=" +
+               std::to_string(out.single_node_shape.n_lde) +
+               ";complete_fp=false")
+            : (std::string(
+                   "stage3:recursive_fixedpoint:"
+                   "bytecode_hier_attach_failed:") +
+               out.hierarchy.note);
+    return out;
+}
+
+namespace {
+
+std::string HierarchicalAttachWhySuffix(
+    const constraint_bytecode::ProgramTable* table,
+    uint32_t queries)
+{
+    if (table == nullptr || queries == 0) return {};
+    const NarrowBytecodeHierarchicalAttachPlanV1 hier =
+        PlanNarrowBytecodeHierarchicalAttachV1(*table, queries);
+    return ";hier_fits=" +
+           std::string(
+               hier.hierarchical_fits || hier.single_node_fits
+                   ? "1"
+                   : "0") +
+           ";hier_depth=" + std::to_string(hier.depth) +
+           ";hier_nodes=" + std::to_string(hier.node_count) +
+           ";hier_leaf_rows=" +
+           std::to_string(hier.total_leaf_rows);
+}
+
+} // namespace
+
 bool PadFoldBusFreeRowsForBytecode(
     FoldBusComposition& composition,
     uint64_t rows_needed,
+    std::string* why)
+{
+    return PadFoldBusFreeRowsForBytecode(
+        composition, rows_needed, nullptr, why);
+}
+
+bool PadFoldBusFreeRowsForBytecode(
+    FoldBusComposition& composition,
+    uint64_t rows_needed,
+    const constraint_bytecode::ProgramTable* table,
     std::string* why)
 {
     if (!composition.valid || rows_needed == 0) {
@@ -16332,6 +16502,9 @@ bool PadFoldBusFreeRowsForBytecode(
     const uint64_t deficit = rows_needed - free;
     const uint64_t min_rows = uint64_t{n_rows} + deficit;
     const uint32_t projected = NextPow2(min_rows);
+    const uint32_t queries = static_cast<uint32_t>(
+        composition.hash.program.public_inputs.query_index
+            .size());
     if (projected == 0 ||
         uint64_t{projected} * kRCFriBlowup >
             (uint64_t{1} << kRCFriMaxLdeLog2)) {
@@ -16341,7 +16514,22 @@ bool PadFoldBusFreeRowsForBytecode(
                 std::to_string(rows_needed) +
                 ";free=" + std::to_string(free) +
                 ";min_rows=" +
-                std::to_string(min_rows));
+                std::to_string(min_rows) +
+                HierarchicalAttachWhySuffix(table, queries));
+    }
+    // Degree-aware FRI shape (arity-2 / degree-3 LDE bound).
+    const nr::NarrowNodeFriShape fri =
+        nr::AssessNarrowNodeFriShape(min_rows);
+    if (!fri.representable) {
+        return Fail(
+            why,
+            "bytecode_pad_fri_over_cap;needed=" +
+                std::to_string(rows_needed) +
+                ";free=" + std::to_string(free) +
+                ";min_rows=" +
+                std::to_string(min_rows) +
+                ";n_lde=" + std::to_string(fri.n_lde) +
+                HierarchicalAttachWhySuffix(table, queries));
     }
     composition.combined.n_rows = projected;
     for (auto& column : composition.columns) {
@@ -16726,6 +16914,12 @@ AttachConstraintBytecodeInterpreter(
     const uint64_t rows_needed =
         uint64_t{queries} * (instructions + 1);
     if (rows_needed > free_rows.size()) {
+        // Single-node vertical attach cannot absorb the pad. Annotate
+        // whether PlanHierarchicalNarrowAggregation closes the same
+        // ProgramTable under LDE/column caps (shape only — not an attach).
+        const NarrowBytecodeHierarchicalAttachPlanV1 hier =
+            PlanNarrowBytecodeHierarchicalAttachV1(
+                table, queries);
         out.note =
             "stage3:recursive_fixedpoint:"
             "bytecode_vertical_rows"
@@ -16735,7 +16929,14 @@ AttachConstraintBytecodeInterpreter(
             std::to_string(free_rows.size()) +
             ";queries=" + std::to_string(queries) +
             ";instructions=" +
-            std::to_string(instructions);
+            std::to_string(instructions) +
+            ";hier_fits=" +
+            (hier.hierarchical_fits || hier.single_node_fits
+                 ? "1"
+                 : "0") +
+            ";hier_depth=" + std::to_string(hier.depth) +
+            ";hier_nodes=" +
+            std::to_string(hier.node_count);
         return out;
     }
     for (uint32_t query = 0;

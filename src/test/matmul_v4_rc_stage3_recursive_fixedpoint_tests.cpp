@@ -4021,11 +4021,10 @@ BOOST_AUTO_TEST_CASE(
 // full 462-program kernel needs ~queries*(instructions+1) free parent rows
 // (~1e6), far above a hash-opening-sized fold-bus parent — so the vertical
 // interpreter is capacity-closed with bytecode_vertical_rows AFTER the
-// metadata cross-check passes. That is the honest outcome until hierarchical
-// row-budget aggregation lands; this case still fails closed on a truncated
-// table (wrong program count) and must NOT regress to
-// bytecode_child_constraint_metadata (the prior degree-pad bug).
-// Does NOT flip kCompleteRecursiveFixedPointExecutable.
+// metadata cross-check passes. Hierarchical row-budget planning (reusing
+// PlanHierarchicalNarrowAggregation) shows the same ProgramTable CAN close
+// under LDE/column caps when sharded across nodes; single-node pad still
+// refuses. Does NOT flip kCompleteRecursiveFixedPointExecutable.
 //
 // Also measures NarrowBytecodePerPointJoinBudgetV1: P2 FS closure is consumed
 // from the ledger, column projection stays narrow (<1024), and pad-to-fit is
@@ -4091,7 +4090,29 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!budget.rows_fit_without_pad);
         BOOST_CHECK(budget.capacity_closed);
         BOOST_CHECK(!budget.projected_lde_supported);
+        BOOST_CHECK(!budget.single_node_fri_representable);
+        // Hierarchical planner closes the same table under budgets.
+        BOOST_CHECK(budget.hierarchical_attach_planned);
+        BOOST_CHECK(budget.hierarchical_attach_fits);
+        BOOST_CHECK_GE(budget.hierarchical_depth, 2U);
+        BOOST_CHECK_GE(budget.hierarchical_node_count, 3U);
         BOOST_TEST_MESSAGE(budget.note);
+
+        const fp::NarrowBytecodeHierarchicalAttachPlanV1 hier =
+            fp::PlanNarrowBytecodeHierarchicalAttachV1(
+                table,
+                static_cast<uint32_t>(pi.query_index.size()));
+        BOOST_REQUIRE_MESSAGE(hier.valid, hier.note);
+        BOOST_CHECK(!hier.single_node_fits);
+        BOOST_CHECK(hier.hierarchical_fits);
+        BOOST_CHECK(hier.all_programs_covered);
+        for (const auto& node : hier.hierarchy.nodes) {
+            BOOST_CHECK_MESSAGE(
+                node.shape.representable, node.label);
+            BOOST_CHECK_LE(
+                node.shape.n_lde, uint32_t{1} << 24);
+        }
+        BOOST_TEST_MESSAGE(hier.note);
 
         fp::FoldBusComposition joined = base;
         const fp::BytecodeInterpreterAttachment
@@ -4111,15 +4132,23 @@ BOOST_AUTO_TEST_CASE(
             interpreter.note.find(
                 "needed=" + std::to_string(rows_needed)) !=
             std::string::npos);
+        BOOST_CHECK(
+            interpreter.note.find("hier_fits=1") !=
+            std::string::npos);
 
         // Pad refuses when LDE would exceed the FRI domain cap — same
-        // capacity-close the budget assessor reports.
+        // capacity-close the budget assessor reports. Hierarchy note is
+        // recorded so callers do not try to invent single-node headroom.
         fp::FoldBusComposition padded = base;
         BOOST_CHECK(!fp::PadFoldBusFreeRowsForBytecode(
-            padded, rows_needed, &why));
+            padded, rows_needed, &table, &why));
         BOOST_CHECK(
             why.find("bytecode_pad_lde_over_cap") !=
-            std::string::npos);
+                std::string::npos ||
+            why.find("bytecode_pad_fri_over_cap") !=
+                std::string::npos);
+        BOOST_CHECK(
+            why.find("hier_fits=1") != std::string::npos);
 
         // Forgery: dropping one program fails the child-constraint table
         // shape check before any vertical row budget is considered.
@@ -4141,9 +4170,11 @@ BOOST_AUTO_TEST_CASE(
 
 // Fast (no prove): pin hash-kernel instruction/row projection against the
 // measured 575-col × 32,768-row narrow multi-child shape. Documents that the
-// full 462-program kernel cannot join vertically even after consuming all
-// 32,768 rows as free — projected LDE exceeds 2^kRCFriMaxLdeLog2. P2 FS
-// closure is true via the ledger; CompleteFP stays false.
+// full 462-program kernel cannot join vertically on ONE node even after
+// consuming all rows as free — projected LDE exceeds 2^kRCFriMaxLdeLog2 —
+// while PlanNarrowBytecodeHierarchicalAttachV1 closes the same table under
+// AssessNarrowNodeFriShape. P2 FS closure is true via the ledger; CompleteFP
+// stays false.
 BOOST_AUTO_TEST_CASE(
     hash_kernel_narrow_575_bytecode_join_budget_capacity_closed)
 {
@@ -4188,14 +4219,38 @@ BOOST_AUTO_TEST_CASE(
         rc::recursive_parent_air::
             AssessChildFsReplayClosureV1()
                 .closed);
+
+    const fp::NarrowBytecodeHierarchicalAttachPlanV1 hier =
+        fp::PlanNarrowBytecodeHierarchicalAttachV1(
+            table, kQueries);
+    BOOST_REQUIRE_MESSAGE(hier.valid, hier.note);
+    BOOST_CHECK(!hier.single_node_fits);
+    BOOST_CHECK(hier.hierarchical_fits);
+    BOOST_CHECK(hier.all_programs_covered);
+    BOOST_CHECK_GE(hier.depth, 2U);
+    BOOST_CHECK_GE(hier.node_count, 3U);
+    BOOST_CHECK_GT(hier.total_leaf_rows, rows_needed);
+    for (const auto& node : hier.hierarchy.nodes) {
+        BOOST_CHECK(node.shape.representable);
+        BOOST_CHECK_LE(node.shape.n_lde, uint32_t{1} << 24);
+        BOOST_CHECK_EQUAL(
+            node.shape.vcs_columns, 575U);
+    }
+
     BOOST_TEST_MESSAGE(
         "NARROW_575_JOIN instructions=" << instructions
         << " needed=" << rows_needed
         << " projected_rows=" << projected
         << " projected_lde=" << projected_lde
         << " bytecode_cols=" << bytecode_cols
-        << " capacity_closed=true complete_fp=false");
+        << " capacity_closed=true"
+        << " hier_fits=1 depth=" << hier.depth
+        << " nodes=" << hier.node_count
+        << " leaf_rows=" << hier.total_leaf_rows
+        << " complete_fp=false");
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(
+        !nr::kNarrowHierarchicalAggregationReady);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
