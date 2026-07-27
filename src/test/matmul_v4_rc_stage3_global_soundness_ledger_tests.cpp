@@ -548,13 +548,53 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(audit.composition_gate.fri_alg_formal_soundness_ready);
 
     // --- g5 evidence: held open by g4 AND by the full-arity parent-own-FRI
-    // conjunct, whose only evidence runs under BTX_RUN_HEAVY_PARENT_FRI and so
-    // is not standing evidence in the default gate.
+    // conjunct. That conjunct is no longer a bare literal: it is the LIVE
+    // AssessParentOwnFriFullArityV1() result, whose expensive self-prove half
+    // only runs under BTX_RUN_HEAVY_PARENT_FRI, so it is not standing evidence
+    // in the default gate.
+    const auto parent_own_fri =
+        ledger::AssessParentOwnFriFullArityV1();
+    BOOST_CHECK(!parent_own_fri.heavy_gate_enabled);
+    BOOST_CHECK(!parent_own_fri.full_arity_in_default_gate);
     BOOST_CHECK(!audit.composition_gate.self_similar_fixed_point_closed);
 
     // --- The live value stays a computed zero.
     BOOST_CHECK(!audit.composition_gate.all_clear);
     BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
+}
+
+//! AssessParentOwnFriFullArityV1 in isolation: the cheap half (toy child
+//! proof + four-slot parent build + column-cap admission) is UNCONDITIONAL
+//! and must genuinely compute a fitting column count; the expensive half
+//! (the parent's own FRI self-prove) must NOT have run absent the env gate,
+//! so the exported conjunct stays honestly false in the default test run.
+BOOST_AUTO_TEST_CASE(
+    parent_own_fri_full_arity_assessor_is_cheap_and_honestly_open)
+{
+    const auto result = ledger::AssessParentOwnFriFullArityV1();
+    BOOST_CHECK_EQUAL(
+        result.backend_column_cap, matmul::v4::rc::kRCFri3AlgBatchMaxColumns);
+    BOOST_CHECK_GT(result.parent_columns, 0U);
+    // Four 192-query FRI children verified in one parent V_CS comfortably
+    // fits the (2^20) alg batch column cap even at the toy child shape.
+    BOOST_CHECK(result.column_cap_admits);
+    BOOST_CHECK_LE(result.parent_columns, result.backend_column_cap);
+
+    // The heavy self-prove must not have run in this (default) test binary.
+    BOOST_CHECK(!result.heavy_gate_enabled);
+    BOOST_CHECK(!result.full_arity_proof_recomputed_this_run);
+    BOOST_CHECK(!result.full_arity_proof_produced);
+    BOOST_CHECK(!result.full_arity_proof_verified);
+    BOOST_CHECK(!result.tamper_and_wrong_seed_rejected);
+    BOOST_CHECK(!result.full_arity_in_default_gate);
+    BOOST_CHECK(!result.note.empty());
+
+    // Cached: repeated calls return the identical computed verdict.
+    const auto result2 = ledger::AssessParentOwnFriFullArityV1();
+    BOOST_CHECK_EQUAL(
+        result.full_arity_in_default_gate,
+        result2.full_arity_in_default_gate);
+    BOOST_CHECK_EQUAL(result.parent_columns, result2.parent_columns);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

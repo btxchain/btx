@@ -22,7 +22,9 @@
 #include <matmul/matmul_v4_rc_stage3_unified_root.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <initializer_list>
 #include <limits>
 
@@ -30,6 +32,9 @@ namespace matmul::v4::rc::global_soundness_ledger {
 namespace {
 
 namespace scenarios = soundness_scenarios;
+namespace rpa = recursive_parent_air;
+namespace aq = air_quotient;
+namespace gf = gkr_field;
 
 double ComposeBits(
     std::initializer_list<double> bits)
@@ -298,7 +303,182 @@ uint64_t FamilyBatchedProofInstances(
            manifest.final_tree_aggregation_sites;
 }
 
+// --- g5 (self-similar fixed point) parent-own-FRI full-arity assessor ------
+//
+// The same minimal single-column boolean AIR the recursive_parent_air test
+// suite calls `ToyFriChildCs()`. It is not exported by that module (it is a
+// file-local test fixture), so it is reproduced here rather than reaching
+// into test code from the library: any single-constraint, two-row AIR that
+// `AirQuotientProve` accepts is sufficient to exercise the four-slot parent
+// SHAPE this assessor needs (the parent's own column count and cap
+// admission), and this is exactly the shape the heavy-gated test proves.
+aq::AirConstraintSystem<gf::Fp3> ParentOwnFriAssessorToyChildCsV1()
+{
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    cs.n_rows = 2;
+    cs.n_columns = 1;
+    aq::AirConstraint<gf::Fp3> boolean;
+    boolean.name = "g5.parent_own_fri_full_arity.toy.boolean";
+    boolean.kind = aq::AirKind::kEverywhere;
+    boolean.alg_degree = 2;
+    boolean.eval =
+        [](const std::vector<gf::Fp3>& current,
+           const std::vector<gf::Fp3>&) {
+            return gf::Mul(
+                current[0],
+                gf::Sub(current[0], gf::Fp3::One()));
+        };
+    cs.constraints.push_back(std::move(boolean));
+    return cs;
+}
+
+uint256 ParentOwnFriAssessorSeedV1(unsigned char byte)
+{
+    uint256 out;
+    out.SetNull();
+    out.data()[0] = byte;
+    return out;
+}
+
+ParentOwnFriFullArityAssessmentV1 ComputeParentOwnFriFullArityAssessmentV1()
+{
+    using AlgB3 = aq::AirFriBackendAlg<gf::Fp3>;
+    ParentOwnFriFullArityAssessmentV1 out;
+    out.backend_column_cap = kRCFri3AlgBatchMaxColumns;
+
+    // Cheap: a two-row toy child proof plus one in-AIR four-slot parent
+    // construction (build only, no parent FRI prove). This runs
+    // UNCONDITIONALLY, in every gate, so `column_cap_admits` is always a
+    // live recomputation, matching the "cap-fit asserted cheaply always"
+    // policy the test suite documents for this exact shape.
+    const auto child_cs = ParentOwnFriAssessorToyChildCsV1();
+    const uint256 child_seed = ParentOwnFriAssessorSeedV1(0xf1);
+    const std::vector<std::vector<gf::Fp3>> columns{
+        {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const auto proved_child =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(
+            child_cs, columns, child_seed, {});
+    if (!proved_child.ok) {
+        out.note =
+            "g5:parent_own_fri_full_arity:toy_child_prove_failed:" +
+            proved_child.note;
+        return out;
+    }
+
+    const std::array<
+        rpa::FourSlotSelfSimilarCtlParentV1::ChildProof, 4>
+        proofs{
+            proved_child.proof, proved_child.proof,
+            proved_child.proof, proved_child.proof};
+    rpa::FourSlotNodeContextV1 ctx;
+    ctx.level = 1;
+    ctx.index = 0;
+    ctx.pub[0] = gf::FromU64_3(0x9001);
+    ctx.pub[1] = gf::FromU64_3(0x9002);
+    for (uint32_t word = 0;
+         word < rpa::Arity4FamilyReceiptLayoutV1::kChildRootWords;
+         ++word) {
+        ctx.parent_receipt_root[word] =
+            gf::FromU64_3(0x7000 + word);
+    }
+
+    const auto statement =
+        rpa::ComputeFourSlotSelfSimilarParentStatementV1(
+            child_cs, proofs, child_seed, ctx);
+    const auto parent =
+        rpa::BuildFourSlotSelfSimilarCtlParentV1(
+            child_cs, proofs, child_seed, ctx, statement);
+    out.parent_columns = parent.parent_columns;
+    if (!parent.valid || parent.witness_violations != 0) {
+        out.note =
+            "g5:parent_own_fri_full_arity:toy_four_slot_parent_invalid:" +
+            parent.note;
+        return out;
+    }
+    out.column_cap_admits =
+        parent.parent_columns > 0 &&
+        parent.parent_columns <= out.backend_column_cap;
+
+    // Expensive: the parent's own FRI self-prove. Tens-of-minutes CPU and
+    // several GiB peak even at this toy child shape (see
+    // four_slot_self_similar_parent_own_fri_fits_alg_column_cap in
+    // matmul_v4_rc_stage3_recursive_parent_air_tests.cpp), so it is run ONLY
+    // under the identical BTX_RUN_HEAVY_PARENT_FRI env gate that test suite
+    // uses. Unlike a frozen "observed 21m37s" comment, this path RECOMPUTES
+    // the whole round trip live whenever the gate is set: it is exported
+    // recomputable evidence, not a snapshot that can silently go stale.
+    out.heavy_gate_enabled =
+        std::getenv("BTX_RUN_HEAVY_PARENT_FRI") != nullptr;
+    if (!out.heavy_gate_enabled) {
+        out.note =
+            "g5:parent_own_fri_full_arity:column_cap_admits=" +
+            std::string(out.column_cap_admits ? "true" : "false") +
+            ";heavy_self_prove_not_run_in_default_gate;set "
+            "BTX_RUN_HEAVY_PARENT_FRI=1 to recompute "
+            "full_arity_in_default_gate live";
+        return out;
+    }
+
+    out.full_arity_proof_recomputed_this_run = true;
+    const uint256 parent_seed = ParentOwnFriAssessorSeedV1(0xf2);
+    const auto own =
+        rpa::ProveFourSlotSelfSimilarParentOwnFriV1(
+            parent, parent_seed);
+    out.full_arity_proof_produced = own.parent_own_fri_proof_produced;
+    out.full_arity_proof_verified =
+        own.prove_ok && own.division_exact && own.verify_ok;
+
+    bool tamper_and_wrong_seed_rejected = false;
+    if (out.full_arity_proof_verified) {
+        std::string why;
+        const bool wrong_seed_rejected =
+            !aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+                parent.parent_cs, own.proof,
+                ParentOwnFriAssessorSeedV1(0xf3), &why);
+        bool tamper_rejected = false;
+        if (!own.proof.batch.queries.empty() &&
+            !own.proof.batch.queries[0].steps.empty()) {
+            auto tampered = own.proof;
+            tampered.batch.queries[0].steps[0].even =
+                gf::Add(
+                    tampered.batch.queries[0].steps[0].even,
+                    gf::Fp3::One());
+            tamper_rejected =
+                !aq::AirQuotientVerify<gf::Fp3, AlgB3>(
+                    parent.parent_cs, tampered, parent_seed, &why);
+        }
+        tamper_and_wrong_seed_rejected =
+            wrong_seed_rejected && tamper_rejected;
+    }
+    out.tamper_and_wrong_seed_rejected =
+        tamper_and_wrong_seed_rejected;
+
+    out.full_arity_in_default_gate =
+        out.column_cap_admits &&
+        out.full_arity_proof_produced &&
+        out.full_arity_proof_verified &&
+        out.tamper_and_wrong_seed_rejected;
+    out.note =
+        out.full_arity_in_default_gate
+            ? "g5:parent_own_fri_full_arity:recomputed_live_under_"
+              "BTX_RUN_HEAVY_PARENT_FRI:closed"
+            : "g5:parent_own_fri_full_arity:recomputed_live_under_"
+              "BTX_RUN_HEAVY_PARENT_FRI:not_closed:" + own.note;
+    return out;
+}
+
 } // namespace
+
+ParentOwnFriFullArityAssessmentV1 AssessParentOwnFriFullArityV1()
+{
+    // Cached: this can be called from the global ledger assessment AND
+    // directly by tests/other callers. BTX_RUN_HEAVY_PARENT_FRI does not
+    // change mid-process, so a single live computation per process is both
+    // correct and cheap to repeat-read.
+    static const ParentOwnFriFullArityAssessmentV1 cached =
+        ComputeParentOwnFriFullArityAssessmentV1();
+    return cached;
+}
 
 ExecutableGlobalAdditiveCompositionV1
 ComposeExecutableGlobalAdditiveBoundV1(
@@ -631,14 +811,21 @@ AssessExecutableGlobalSoundnessLedgerV1(
     // arity-4 self-prove/verify run, so THERE g5 reduces entirely to g4.  That
     // run is exercised only under BTX_RUN_HEAVY_PARENT_FRI and does NOT execute
     // in the default gate, so this ledger declines to treat it as standing
-    // evidence and keeps the conjunct false.  Closing g5 here requires that
-    // round trip landed as an ungated regression (or exported as a computed
-    // assessor in the manner of AssessChildFsReplayClosureV1), not merely
-    // re-observed.  Written as an enumerated conjunction, not a bare literal,
-    // so the residual is readable and both conjuncts are visible.
-    const bool parent_own_fri_full_arity_in_default_gate = false;
+    // evidence.  The first conjunct is no longer a bare literal: it is
+    // AssessParentOwnFriFullArityV1(), which recomputes cap admission live
+    // every call (cheap, unconditional) and recomputes the actual self-prove
+    // round trip live whenever BTX_RUN_HEAVY_PARENT_FRI is set (exported,
+    // recomputable evidence, in the manner of AssessChildFsReplayClosureV1,
+    // rather than a frozen comment).  In the default gate the heavy path does
+    // not run, so `full_arity_in_default_gate` stays honestly false and this
+    // conjunct does not flip.  Closing g5 for real requires that round trip
+    // to land as an ungated regression, or this assessor's env-gated path to
+    // start running as part of the default suite.
+    const ParentOwnFriFullArityAssessmentV1
+        parent_own_fri_full_arity =
+            AssessParentOwnFriFullArityV1();
     out.self_similar_fixed_point_closed =
-        parent_own_fri_full_arity_in_default_gate &&
+        parent_own_fri_full_arity.full_arity_in_default_gate &&
         out.fiat_shamir_replay_complete;
     out.nirop_oracle_separation_complete = false;
     out.pow_composition_theorem_complete = false;
