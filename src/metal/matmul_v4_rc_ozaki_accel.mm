@@ -157,7 +157,11 @@ bool HostReferenceRcOzakiExactPanelsGemmS8S8Int64(const std::vector<int8_t>& lef
         return false;
     }
     std::vector<int64_t> dense;
-    DenseInt64(left, right, rows, inner, cols, dense);
+    if (!DenseInt64(left, right, rows, inner, cols, dense)) {
+        if (error) *error = "metal_rc_ozaki_dense_oracle_failed";
+        out.clear();
+        return false;
+    }
     if (out != dense) {
         if (error) *error = "metal_rc_ozaki_host_mismatch_vs_int64_oracle";
         out.clear();
