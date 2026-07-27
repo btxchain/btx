@@ -705,11 +705,24 @@ template <typename F, typename Backend = AirFriBackend<F>>
  * preprocessed_pin_ood (there are no per-column roots to regenerate), and
  * the preprocessed_roots root-equality mode is unsupported (same reason);
  * both are rejected with an explicit message rather than mis-verified.
+ *
+ * `verify_threads`: the Q per-query checks (Merkle re-hash + quotient
+ * identity) are mutually independent, so they may be split across threads
+ * with NO change to the accepted/rejected verdict — same field arithmetic,
+ * same Merkle roots, same equality tests, just reordered. Default 1 keeps
+ * every existing caller byte-for-byte sequential (the parameter is new and
+ * additive). >1 only takes effect for ROW-WISE backends built with OpenMP;
+ * other backends and non-OpenMP builds silently ignore it and stay
+ * sequential — never a correctness fork, only a wall-clock one. When
+ * multiple queries fail, `why` receives an arbitrary one of their messages
+ * rather than deterministically the first (diagnostic text only; the
+ * accept/reject boolean is unaffected).
  */
 template <typename F, typename Backend = AirFriBackend<F>>
 [[nodiscard]] bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
                                      const AirQuotientProof<F, Backend>& proof,
-                                     const uint256& fs_seed, std::string* why = nullptr);
+                                     const uint256& fs_seed, std::string* why = nullptr,
+                                     uint32_t verify_threads = 1);
 
 /** FS challenge over fs_seed ‖ label ‖ roots ‖ extra (SHA256d, domain-tagged). */
 [[nodiscard]] uint256 AirChallengeDigest(const uint256& fs_seed, const char* label,

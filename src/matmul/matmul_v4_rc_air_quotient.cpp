@@ -1821,7 +1821,7 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
 template <typename F, typename Backend>
 bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
                        const AirQuotientProof<F, Backend>& proof, const uint256& fs_seed,
-                       std::string* why)
+                       std::string* why, uint32_t verify_threads)
 {
     using T = AirField<F>;
     using B = Backend;
@@ -1955,33 +1955,40 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
     const F h_last = T::FromBase(AirPowBase(omega_N, N - 1));
     const F g = T::FromBase(kAirCosetShift);
 
-    std::vector<F> cur(W), nxt(W);
-    for (size_t qi = 0; qi < batch.queries.size(); ++qi) {
+    // One query's worth of the loop body below, factored out so the
+    // sequential and (row-wise-only) threaded paths run IDENTICAL logic.
+    // nullptr = accepted; otherwise a literal from the same fail() vocabulary
+    // as the rest of this function. `cur`/`nxt` are function-local (not
+    // shared scratch), which is what makes concurrent calls with distinct
+    // `qi` data-race-free: every element of both is written before it is
+    // read, on every call, for every backend branch below.
+    auto verify_one_query = [&](size_t qi) -> const char* {
+        std::vector<F> cur(W), nxt(W);
         const auto& q = batch.queries[qi];
         const auto& no = proof.next_openings[qi];
         const uint32_t nidx = (q.index + step) % n_lde;
         F qv = T::Zero();
         if constexpr (AirBackendIsRowWise<Backend>) {
-            if (q.row.values.size() != W + 1) return fail("query row width");
-            if (no.size() != 2) return fail("next-opening width");
+            if (q.row.values.size() != W + 1) return "query row width";
+            if (no.size() != 2) return "next-opening width";
             // [0] next-row opening: the FULL row (leaf recomputation needs
             // every column value) against the batch's single row_commit.
-            if (no[0].index != nidx) return fail("next-opening index");
-            if (no[0].values.size() != W + 1) return fail("next-opening row width");
+            if (no[0].index != nidx) return "next-opening index";
+            if (no[0].values.size() != W + 1) return "next-opening row width";
             if (!B::VerifyRowPath(B::RowLeafHash(no[0].values, nidx), nidx, no[0].siblings,
                                   batch.row_commit.root, n_lde)) {
-                return fail("next-opening merkle");
+                return "next-opening merkle";
             }
             // [1] trace-binding opening: the λ-seeding trace commitment R_T
             // must agree with the batch's own (already Merkle-verified) trace
             // row values at this FS query index — same α = 17/32 per-query
             // soundness as the FRI itself.
-            if (no[1].index != q.index) return fail("trace-binding index");
-            if (!no[1].values.empty()) return fail("trace-binding values not empty");
+            if (no[1].index != q.index) return "trace-binding index";
+            if (!no[1].values.empty()) return "trace-binding values not empty";
             const std::vector<F> trow(q.row.values.begin(), q.row.values.begin() + W);
             if (!B::VerifyRowPath(B::RowLeafHash(trow, q.index), q.index, no[1].siblings,
                                   rt_digest, n_lde)) {
-                return fail("trace-binding merkle");
+                return "trace-binding merkle";
             }
             for (uint32_t c = 0; c < W; ++c) {
                 cur[c] = q.row.values[c];
@@ -1989,12 +1996,12 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
             }
             qv = q.row.values[W];
         } else {
-            if (q.columns.size() != W + 1) return fail("query column count");
-            if (no.size() != W) return fail("next-opening width");
+            if (q.columns.size() != W + 1) return "query column count";
+            if (no.size() != W) return "next-opening width";
             for (uint32_t c = 0; c < W; ++c) {
-                if (no[c].index != nidx) return fail("next-opening index");
+                if (no[c].index != nidx) return "next-opening index";
                 if (!B::VerifyPath(no[c], batch.columns[c].root, n_lde)) {
-                    return fail("next-opening merkle");
+                    return "next-opening merkle";
                 }
                 cur[c] = q.columns[c].value;
                 nxt[c] = no[c].leaf;
@@ -2004,7 +2011,7 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
         // Actual evaluation point y = g·ω^index (coset — Z_H(y) ≠ 0).
         const F y = T::Mul(g, T::FromBase(AirPowBase(omega_lde, q.index)));
         const F zh = T::Sub(AirPow(y, N), T::One());
-        if (T::IsZero(zh)) return fail("Z_H vanishes at query point (coset violated)");
+        if (T::IsZero(zh)) return "Z_H vanishes at query point (coset violated)";
 
         F csum = T::Zero();
         F lp = T::One();
@@ -2016,7 +2023,37 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
             }
             lp = T::Mul(lp, lambda);
         }
-        if (!T::Eq(csum, T::Mul(qv, zh))) return fail("quotient identity C(y) != Q(y)*Z_H(y)");
+        if (!T::Eq(csum, T::Mul(qv, zh))) return "quotient identity C(y) != Q(y)*Z_H(y)";
+        return nullptr;
+    };
+
+    const size_t n_queries = batch.queries.size();
+    bool used_parallel = false;
+#if defined(_OPENMP)
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        if (verify_threads > 1 && n_queries > 1) {
+            used_parallel = true;
+            const char* first_error = nullptr;
+            const int threads = static_cast<int>(
+                std::min<size_t>(verify_threads, n_queries));
+            #pragma omp parallel for num_threads(threads) schedule(static)
+            for (long qi = 0; qi < static_cast<long>(n_queries); ++qi) {
+                const char* e = verify_one_query(static_cast<size_t>(qi));
+                if (e != nullptr) {
+                    #pragma omp critical(air_quotient_verify_first_error)
+                    {
+                        if (first_error == nullptr) first_error = e;
+                    }
+                }
+            }
+            if (first_error != nullptr) return fail(first_error);
+        }
+    }
+#endif
+    if (!used_parallel) {
+        for (size_t qi = 0; qi < n_queries; ++qi) {
+            if (const char* e = verify_one_query(qi)) return fail(e);
+        }
     }
     if (why) *why = "AirQuotientVerify ok";
     return true;
@@ -4178,9 +4215,11 @@ template AirQuotientProveResult<Fp3> AirQuotientProve<Fp3>(
     const AirProveOptions&);
 
 template bool AirQuotientVerify<Fp2>(const AirConstraintSystem<Fp2>&,
-                                     const AirQuotientProof<Fp2>&, const uint256&, std::string*);
+                                     const AirQuotientProof<Fp2>&, const uint256&, std::string*,
+                                     uint32_t);
 template bool AirQuotientVerify<Fp3>(const AirConstraintSystem<Fp3>&,
-                                     const AirQuotientProof<Fp3>&, const uint256&, std::string*);
+                                     const AirQuotientProof<Fp3>&, const uint256&, std::string*,
+                                     uint32_t);
 
 template AirQuotientProveResult<Fp3, StreamingColumnsB3>
 AirQuotientProve<Fp3, StreamingColumnsB3>(
@@ -4192,7 +4231,8 @@ template bool AirQuotientVerify<Fp3, StreamingColumnsB3>(
     const AirConstraintSystem<Fp3>&,
     const AirQuotientProof<Fp3, StreamingColumnsB3>&,
     const uint256&,
-    std::string*);
+    std::string*,
+    uint32_t);
 
 template uint256 AirCommittedValuesRoot<Fp3, AlgB3>(const std::vector<Fp3>&, uint32_t);
 template AirQuotientProveResult<Fp3, AlgB3> AirQuotientProve<Fp3, AlgB3>(
@@ -4200,7 +4240,7 @@ template AirQuotientProveResult<Fp3, AlgB3> AirQuotientProve<Fp3, AlgB3>(
     const AirProveOptions&);
 template bool AirQuotientVerify<Fp3, AlgB3>(const AirConstraintSystem<Fp3>&,
                                             const AirQuotientProof<Fp3, AlgB3>&, const uint256&,
-                                            std::string*);
+                                            std::string*, uint32_t);
 
 template AirQuotientProveResult<
     Fp3, AirFriBackendAlgStreamingRows>
@@ -4215,7 +4255,8 @@ AirQuotientVerify<Fp3, AirFriBackendAlgStreamingRows>(
     const AirQuotientProof<
         Fp3, AirFriBackendAlgStreamingRows>&,
     const uint256&,
-    std::string*);
+    std::string*,
+    uint32_t);
 
 template uint256 AirCommittedValuesRoot<Fp3, AlgDualB3>(const std::vector<Fp3>&, uint32_t);
 template AirQuotientProveResult<Fp3, AlgDualB3> AirQuotientProve<Fp3, AlgDualB3>(
@@ -4223,7 +4264,7 @@ template AirQuotientProveResult<Fp3, AlgDualB3> AirQuotientProve<Fp3, AlgDualB3>
     const AirProveOptions&);
 template bool AirQuotientVerify<Fp3, AlgDualB3>(
     const AirConstraintSystem<Fp3>&, const AirQuotientProof<Fp3, AlgDualB3>&,
-    const uint256&, std::string*);
+    const uint256&, std::string*, uint32_t);
 
 template AirQuotientProveResult<
     Fp3, AlgDualStreamingAuditB3>
@@ -4236,7 +4277,7 @@ template bool AirQuotientVerify<
     const AirConstraintSystem<Fp3>&,
     const AirQuotientProof<
         Fp3, AlgDualStreamingAuditB3>&,
-    const uint256&, std::string*);
+    const uint256&, std::string*, uint32_t);
 
 template AirConstraintSystem<Fp2> BuildRcSamplerConstraintSystem<Fp2>(
     uint32_t, const Fp2&, const Fp2&, uint8_t, const gkr_air::TableTM&);
