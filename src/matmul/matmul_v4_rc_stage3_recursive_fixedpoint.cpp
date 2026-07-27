@@ -16446,6 +16446,439 @@ PlanNarrowBytecodeHierarchicalAttachV1(
     return out;
 }
 
+bool SliceProgramTableByLeafIndices(
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>& leaf_indices,
+    constraint_bytecode::ProgramTable& out,
+    std::string* why)
+{
+    out = constraint_bytecode::ProgramTable{};
+    out.version = table.version;
+    out.role = table.role;
+    out.current_width = table.current_width;
+    out.next_width = table.next_width;
+    out.challenge_width = table.challenge_width;
+    out.programs.reserve(leaf_indices.size());
+    for (uint32_t idx : leaf_indices) {
+        if (idx >= table.programs.size()) {
+            return Fail(why, "bytecode_hier_shard_leaf_oob");
+        }
+        out.programs.push_back(table.programs[idx]);
+        // ValidateProgramTable requires constraint_ordinal == table index.
+        out.programs.back().constraint_ordinal =
+            static_cast<uint32_t>(out.programs.size() - 1);
+    }
+    if (!constraint_bytecode::ValidateProgramTable(out, why)) {
+        return false;
+    }
+    return true;
+}
+
+bool PrepareFoldBusForBytecodeShard(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& full_table,
+    const std::vector<uint32_t>& leaf_indices,
+    const constraint_bytecode::ProgramTable& shard_table,
+    FoldBusComposition& out,
+    std::string* why)
+{
+    if (!base.valid || leaf_indices.empty() ||
+        leaf_indices.size() != shard_table.programs.size()) {
+        return Fail(why, "bytecode_hier_shard_prepare_input");
+    }
+    out = base;
+    auto& pi = out.hash.program.public_inputs;
+    if (pi.child_constraints.size() != full_table.programs.size()) {
+        return Fail(why, "bytecode_hier_shard_full_table_mismatch");
+    }
+    std::vector<aq::AirConstraint<Fp3>> sliced;
+    sliced.reserve(leaf_indices.size());
+    for (size_t i = 0; i < leaf_indices.size(); ++i) {
+        const uint32_t idx = leaf_indices[i];
+        if (idx >= pi.child_constraints.size() ||
+            idx >= full_table.programs.size()) {
+            return Fail(why, "bytecode_hier_shard_constraint_oob");
+        }
+        if (full_table.programs[idx].kind !=
+                pi.child_constraints[idx].kind ||
+            full_table.programs[idx].declared_degree !=
+                pi.child_constraints[idx].alg_degree ||
+            shard_table.programs[i].kind !=
+                full_table.programs[idx].kind ||
+            shard_table.programs[i].declared_degree !=
+                full_table.programs[idx].declared_degree) {
+            return Fail(why, "bytecode_hier_shard_metadata");
+        }
+        sliced.push_back(pi.child_constraints[idx]);
+    }
+    pi.child_constraints = std::move(sliced);
+    if (!out.hash.program.children.empty()) {
+        out.hash.program.children.front().child_constraints =
+            pi.child_constraints;
+    }
+    const uint32_t queries =
+        static_cast<uint32_t>(pi.query_index.size());
+    const uint64_t rows_needed =
+        uint64_t{queries} *
+        (CountProgramTableInstructions(shard_table) + 1U);
+    // Extending n_rows after fold-bus challenge derivation rebinds
+    // committed column roots. Only accept shards that fit free rows.
+    const uint32_t reserved =
+        CountFoldBusReservedSpongeRows(out);
+    const uint32_t free =
+        out.combined.n_rows > reserved
+            ? out.combined.n_rows - reserved
+            : 0;
+    if (rows_needed > free) {
+        return Fail(
+            why,
+            "bytecode_hier_shard_needs_pad;needed=" +
+                std::to_string(rows_needed) +
+                ";free=" + std::to_string(free) +
+                ";pad_after_challenge_forbidden");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_hier_shard_fits_free;needed=" +
+            std::to_string(rows_needed) +
+            ";free=" + std::to_string(free);
+    }
+    return true;
+}
+
+namespace {
+
+std::vector<std::vector<uint32_t>>
+PackBytecodeShardsUnderFreeRows(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t queries,
+    uint64_t free_rows)
+{
+    std::vector<std::vector<uint32_t>> bins;
+    if (queries == 0 || free_rows == 0 || table.programs.empty()) {
+        return bins;
+    }
+    std::vector<uint32_t> order(table.programs.size());
+    for (uint32_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(
+        order.begin(), order.end(), [&](uint32_t a, uint32_t b) {
+            const auto sa = table.programs[a].instructions.size();
+            const auto sb = table.programs[b].instructions.size();
+            if (sa != sb) return sa > sb;
+            return a < b;
+        });
+    struct Bin {
+        std::vector<uint32_t> leaves;
+        uint64_t instructions{0};
+    };
+    std::vector<Bin> packed;
+    for (uint32_t leaf : order) {
+        const uint64_t insn = static_cast<uint64_t>(
+            table.programs[leaf].instructions.size());
+        if (uint64_t{queries} * (insn + 1U) > free_rows) {
+            return {};
+        }
+        bool placed = false;
+        for (Bin& bin : packed) {
+            const uint64_t candidate = bin.instructions + insn;
+            if (uint64_t{queries} * (candidate + 1U) <= free_rows) {
+                bin.leaves.push_back(leaf);
+                bin.instructions = candidate;
+                placed = true;
+                break;
+            }
+        }
+        if (!placed) {
+            packed.push_back(Bin{{leaf}, insn});
+        }
+    }
+    bins.reserve(packed.size());
+    for (auto& bin : packed) {
+        std::sort(bin.leaves.begin(), bin.leaves.end());
+        bins.push_back(std::move(bin.leaves));
+    }
+    return bins;
+}
+
+bool RejectBytecodeShardForgery(
+    const FoldBusComposition& honest)
+{
+    if (!honest.valid || honest.columns.empty() ||
+        honest.combined.n_rows == 0 ||
+        honest.combined.n_columns == 0) {
+        return false;
+    }
+    const uint32_t bytecode_width = BytecodeBusLayout(0).End();
+    if (honest.combined.n_columns < bytecode_width) {
+        return false;
+    }
+    const BytecodeBusLayout bus(
+        honest.combined.n_columns - bytecode_width);
+    uint32_t target_row = 0;
+    bool found = false;
+    for (uint32_t row = 0; row < honest.combined.n_rows; ++row) {
+        if (!gf::IsZero(honest.columns[bus.Active(0)][row]) ||
+            !gf::IsZero(
+                honest.columns[bus.result_selector][row])) {
+            target_row = row;
+            found = true;
+            break;
+        }
+    }
+    if (!found) target_row = 0;
+    auto forged_cols = honest.columns;
+    forged_cols[bus.Value(0)][target_row] = gf::Add(
+        forged_cols[bus.Value(0)][target_row], Fp3::One());
+    return CountHashOpeningViolations(
+               honest.combined, forged_cols) > 0;
+}
+
+} // namespace
+
+NarrowBytecodeHierarchicalAttachExecutionV1
+ExecuteNarrowBytecodeHierarchicalAttachV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    bool attach_l1)
+{
+    NarrowBytecodeHierarchicalAttachExecutionV1 out;
+    out.p2_fs_replay_closed =
+        recursive_parent_air::AssessChildFsReplayClosureV1()
+            .closed;
+    out.complete_verifier_mirror = false;
+    if (!base.valid ||
+        !constraint_bytecode::ValidateProgramTable(
+            table, nullptr)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_hier_exec_input_invalid";
+        return out;
+    }
+    const uint32_t queries = static_cast<uint32_t>(
+        base.hash.program.public_inputs.query_index.size());
+    out.plan =
+        PlanNarrowBytecodeHierarchicalAttachV1(table, queries);
+    out.plan_valid = out.plan.valid;
+    out.depth = out.plan.depth;
+    out.node_count = out.plan.node_count;
+    if (!out.plan_valid) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_hier_exec_plan_invalid:" +
+            out.plan.note;
+        return out;
+    }
+
+    out.all_nodes_representable = true;
+    out.all_composed_scheduled = true;
+    for (const auto& node : out.plan.hierarchy.nodes) {
+        NarrowBytecodeHierarchicalAttachNodeResultV1 nr;
+        nr.level = node.level;
+        nr.node_index = node.node_index;
+        nr.label = node.label;
+        nr.active_rows = node.active_rows;
+        nr.trace_rows = node.shape.trace_rows;
+        nr.n_lde = node.shape.n_lde;
+        nr.shape_representable = node.shape.representable;
+        nr.program_count =
+            static_cast<uint32_t>(node.child_leaf_indices.size());
+        nr.child_node_count =
+            static_cast<uint32_t>(node.child_node_indices.size());
+        if (!nr.shape_representable) {
+            out.all_nodes_representable = false;
+            nr.note = "shape_not_representable";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        if (node.level == 1) {
+            nr.note = "fri_l1_scheduled;attach_via_free_row_shards";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        ++out.composed_count;
+        if (node.child_node_indices.empty()) {
+            out.all_composed_scheduled = false;
+            nr.note = "composed_missing_children";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        bool children_ok = true;
+        for (uint32_t child : node.child_node_indices) {
+            if (child >= node.node_index ||
+                child >= out.plan.hierarchy.nodes.size()) {
+                children_ok = false;
+                break;
+            }
+            const auto& child_node =
+                out.plan.hierarchy.nodes[child];
+            if (child_node.level >= node.level ||
+                !child_node.shape.representable) {
+                children_ok = false;
+                break;
+            }
+        }
+        nr.note = children_ok
+            ? "composed_scheduled;crypto_join_pending"
+            : "composed_child_link_invalid";
+        if (!children_ok) out.all_composed_scheduled = false;
+        out.nodes.push_back(std::move(nr));
+    }
+
+    const uint32_t reserved =
+        CountFoldBusReservedSpongeRows(base);
+    const uint64_t free_rows =
+        base.combined.n_rows > reserved
+            ? uint64_t{base.combined.n_rows - reserved}
+            : 0;
+    const auto shard_groups =
+        PackBytecodeShardsUnderFreeRows(table, queries, free_rows);
+    out.l1_count = static_cast<uint32_t>(shard_groups.size());
+    out.all_l1_attached = attach_l1 && !shard_groups.empty();
+    out.all_l1_forgeries_rejected =
+        attach_l1 && !shard_groups.empty();
+    if (shard_groups.empty()) {
+        out.all_l1_attached = false;
+        out.all_l1_forgeries_rejected = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_hier_exec_no_free_row_shards;free=" +
+            std::to_string(free_rows);
+        out.valid = false;
+        return out;
+    }
+
+    for (uint32_t si = 0; si < shard_groups.size(); ++si) {
+        NarrowBytecodeHierarchicalAttachNodeResultV1 nr;
+        nr.level = 1;
+        nr.node_index = static_cast<uint32_t>(out.nodes.size());
+        nr.label = "freeL1-" + std::to_string(si);
+        nr.program_count =
+            static_cast<uint32_t>(shard_groups[si].size());
+        constraint_bytecode::ProgramTable shard;
+        std::string why;
+        if (!SliceProgramTableByLeafIndices(
+                table, shard_groups[si], shard, &why)) {
+            out.all_l1_attached = false;
+            out.all_l1_forgeries_rejected = false;
+            nr.note = why;
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        nr.instructions = CountProgramTableInstructions(shard);
+        nr.rows_needed =
+            uint64_t{queries} * (nr.instructions + 1U);
+        nr.active_rows = nr.rows_needed;
+        const nr::NarrowNodeFriShape shape =
+            nr::AssessNarrowNodeFriShape(nr.rows_needed);
+        nr.trace_rows = shape.trace_rows;
+        nr.n_lde = shape.n_lde;
+        nr.shape_representable = shape.representable;
+        nr.pad_ok = nr.rows_needed <= free_rows;
+        if (!nr.pad_ok || !nr.shape_representable) {
+            out.all_l1_attached = false;
+            out.all_l1_forgeries_rejected = false;
+            nr.note = "free_row_shard_capacity";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        if (!attach_l1) {
+            nr.note = "free_row_shard_capacity_ok;attach_deferred";
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        FoldBusComposition shard_bus;
+        if (!PrepareFoldBusForBytecodeShard(
+                base, table, shard_groups[si], shard,
+                shard_bus, &why)) {
+            out.all_l1_attached = false;
+            out.all_l1_forgeries_rejected = false;
+            nr.note = why;
+            out.nodes.push_back(std::move(nr));
+            continue;
+        }
+        const BytecodeInterpreterAttachment att =
+            AttachConstraintBytecodeInterpreterShard(
+                shard_bus, shard, shard_groups[si]);
+        nr.attached = att.valid;
+        nr.dual_logup_terminal = att.dual_logup_terminal;
+        nr.quotient_opening_equality =
+            att.quotient_opening_equality;
+        nr.violations = att.violations;
+        if (att.valid) {
+            nr.note = att.note;
+            ++out.l1_attached;
+            nr.forgery_rejected =
+                RejectBytecodeShardForgery(shard_bus);
+            if (!nr.forgery_rejected) {
+                out.all_l1_forgeries_rejected = false;
+            }
+        } else {
+            out.all_l1_attached = false;
+            out.all_l1_forgeries_rejected = false;
+            nr.note =
+                att.note +
+                ";violations=" +
+                std::to_string(att.violations) +
+                ";logup=" +
+                (att.dual_logup_terminal ? "1" : "0") +
+                ";quot=" +
+                (att.quotient_opening_equality ? "1" : "0");
+        }
+        out.nodes.push_back(std::move(nr));
+    }
+
+    if (attach_l1) {
+        out.all_l1_attached =
+            out.all_l1_attached && out.l1_count > 0 &&
+            out.l1_attached == out.l1_count;
+        out.all_l1_forgeries_rejected =
+            out.all_l1_forgeries_rejected && out.all_l1_attached;
+    } else {
+        out.all_l1_attached = false;
+        out.all_l1_forgeries_rejected = false;
+    }
+
+    out.valid =
+        out.plan_valid && out.all_nodes_representable &&
+        out.all_composed_scheduled && out.composed_count > 0 &&
+        out.l1_count > 0 &&
+        (attach_l1 ? out.all_l1_attached &&
+                         out.all_l1_forgeries_rejected
+                   : true) &&
+        !out.complete_verifier_mirror;
+    std::string first_fail;
+    for (const auto& node : out.nodes) {
+        if (node.label.rfind("freeL1-", 0) == 0 && attach_l1 &&
+            (!node.attached || !node.forgery_rejected ||
+             !node.pad_ok)) {
+            first_fail = ";" + node.label + ":" + node.note;
+            break;
+        }
+    }
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:bytecode_hier_exec") +
+        ";plan_valid=" + (out.plan_valid ? "1" : "0") +
+        ";free_shards=" + std::to_string(out.l1_count) +
+        ";l1_attached=" + std::to_string(out.l1_attached) +
+        ";fri_composed=" +
+        std::to_string(out.composed_count) +
+        ";fri_depth=" + std::to_string(out.depth) +
+        ";fri_nodes=" + std::to_string(out.node_count) +
+        ";free_rows=" + std::to_string(free_rows) +
+        ";attach=" + (attach_l1 ? "1" : "0") +
+        ";all_l1=" + (out.all_l1_attached ? "1" : "0") +
+        ";forgery=" +
+        (out.all_l1_forgeries_rejected ? "1" : "0") +
+        ";composed_ok=" +
+        (out.all_composed_scheduled ? "1" : "0") +
+        ";p2_fs=" + (out.p2_fs_replay_closed ? "1" : "0") +
+        ";mirror=0;complete_fp=false" + first_fail;
+    return out;
+}
+
+
 namespace {
 
 std::string HierarchicalAttachWhySuffix(
@@ -16549,10 +16982,13 @@ bool PadFoldBusFreeRowsForBytecode(
     return true;
 }
 
+namespace {
+
 BytecodeInterpreterAttachment
-AttachConstraintBytecodeInterpreter(
+AttachConstraintBytecodeInterpreterImpl(
     FoldBusComposition& composition,
-    const constraint_bytecode::ProgramTable& table)
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>* shard_global_ordinals)
 {
     BytecodeInterpreterAttachment out;
     out.program_table = table;
@@ -16569,6 +17005,16 @@ AttachConstraintBytecodeInterpreter(
             ? "stage3:recursive_fixedpoint:"
               "bytecode_base_invalid"
             : why;
+        return out;
+    }
+    const bool shard_mode =
+        shard_global_ordinals != nullptr;
+    if (shard_mode &&
+        shard_global_ordinals->size() !=
+            table.programs.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_ordinal_size";
         return out;
     }
     const auto& pi =
@@ -16812,11 +17258,13 @@ AttachConstraintBytecodeInterpreter(
                 composition.columns[
                     hash_layout.absorbed_pin_base +
                     lane][row];
+            // Shard L1 synthesizes a local quotient; do not emit memory-bus
+            // events for the full-child AIR q opening (item == current_width).
             const uint32_t reads =
                 is_next
                 ? next_reads[item]
                 : (item == table.current_width
-                       ? 1U
+                       ? (shard_mode ? 0U : 1U)
                        : current_reads[item]);
             if (is_next) {
                 next_coordinates[meta.query][item]
@@ -16939,27 +17387,44 @@ AttachConstraintBytecodeInterpreter(
             std::to_string(hier.node_count);
         return out;
     }
-    for (uint32_t query = 0;
-         query < queries; ++query) {
-        for (uint32_t coordinate = 0;
-             coordinate < 3; ++coordinate) {
-            if (!current_seen[query][table.current_width]
-                             [coordinate]) {
-                out.note =
-                    "stage3:recursive_fixedpoint:"
-                    "bytecode_quotient_source_missing";
-                return out;
+    if (!shard_mode) {
+        for (uint32_t query = 0;
+             query < queries; ++query) {
+            for (uint32_t coordinate = 0;
+                 coordinate < 3; ++coordinate) {
+                if (!current_seen[query][table.current_width]
+                                 [coordinate]) {
+                    out.note =
+                        "stage3:recursive_fixedpoint:"
+                        "bytecode_quotient_source_missing";
+                    return out;
+                }
             }
         }
     }
     std::vector<Fp3> rho_powers(
         table.programs.size(), Fp3::One());
-    for (uint32_t ordinal = 1;
-         ordinal < table.programs.size(); ++ordinal) {
-        rho_powers[ordinal] =
-            gf::Mul(
-                rho_powers[ordinal - 1],
-                pi.air_lambda);
+    if (shard_mode) {
+        // Weight each shard program by the full-table ordinal so a later
+        // L2/L3 join can line up with the parent AIR linearization.
+        for (uint32_t ordinal = 0;
+             ordinal < table.programs.size(); ++ordinal) {
+            const uint32_t global =
+                (*shard_global_ordinals)[ordinal];
+            Fp3 weight = Fp3::One();
+            for (uint32_t i = 0; i < global; ++i) {
+                weight = gf::Mul(weight, pi.air_lambda);
+            }
+            rho_powers[ordinal] = weight;
+        }
+    } else {
+        for (uint32_t ordinal = 1;
+             ordinal < table.programs.size(); ++ordinal) {
+            rho_powers[ordinal] =
+                gf::Mul(
+                    rho_powers[ordinal - 1],
+                    pi.air_lambda);
+        }
     }
     const Fp3 h_last =
         DomainPoint(pi.child_n_rows,
@@ -17151,37 +17616,40 @@ AttachConstraintBytecodeInterpreter(
                     InterpreterRowKind::Quotient))]
                                [quotient_row] =
             Fp3::One();
-        Fp3 quotient_value = Fp3::Zero();
-        for (uint32_t coordinate = 0;
-             coordinate < 3; ++coordinate) {
-            const Fp3 raw =
-                current_coordinates[query]
-                                   [table.current_width]
-                                   [coordinate];
-            if (!set_event(
-                    quotient_row, coordinate, raw,
-                    source_address(
-                        query, false,
-                        table.current_width,
-                        coordinate),
-                    -1)) {
-                out.note =
-                    "stage3:recursive_fixedpoint:"
-                    "bytecode_quotient_event";
-                return out;
+        if (!shard_mode) {
+            Fp3 quotient_value = Fp3::Zero();
+            for (uint32_t coordinate = 0;
+                 coordinate < 3; ++coordinate) {
+                const Fp3 raw =
+                    current_coordinates[query]
+                                       [table.current_width]
+                                       [coordinate];
+                if (!set_event(
+                        quotient_row, coordinate, raw,
+                        source_address(
+                            query, false,
+                            table.current_width,
+                            coordinate),
+                        -1)) {
+                    out.note =
+                        "stage3:recursive_fixedpoint:"
+                        "bytecode_quotient_event";
+                    return out;
+                }
+                quotient_value =
+                    coordinate == 0
+                    ? raw
+                    : gf::Add(
+                          quotient_value,
+                          gf::Mul(
+                              coordinate == 1 ? u : u2,
+                              raw));
             }
-            quotient_value =
-                coordinate == 0
-                ? raw
-                : gf::Add(
-                      quotient_value,
-                      gf::Mul(
-                          coordinate == 1 ? u : u2,
-                          raw));
+            composition.columns[
+                out.layout.Value(3)][quotient_row] =
+                quotient_value;
         }
-        composition.columns[
-            out.layout.Value(3)][quotient_row] =
-            quotient_value;
+        // Shard mode: Value(0..3) filled after accumulator as local q.
         composition.columns[
             out.layout.zh][quotient_row] = zh;
         composition.columns[
@@ -17212,6 +17680,41 @@ AttachConstraintBytecodeInterpreter(
         if (!gf::IsZero(composition.columns[
                 out.layout.reset_next][row])) {
             constraint_accumulator = Fp3::Zero();
+        }
+    }
+    if (shard_mode) {
+        // L1 shard: parent AIR q opening is for the FULL constraint vector.
+        // Synthesize local q = accumulator/zh and Fp3 limbs on Value(0..2)
+        // so load + quotient_identity close; parent-q binding is later join.
+        const uint32_t quotient_kind =
+            static_cast<uint32_t>(InterpreterRowKind::Quotient);
+        for (uint32_t row = 0;
+             row < composition.combined.n_rows; ++row) {
+            if (gf::IsZero(composition.columns[
+                    out.layout.RowKind(quotient_kind)][row])) {
+                continue;
+            }
+            const Fp3 zh_v =
+                composition.columns[out.layout.zh][row];
+            if (gf::IsZero(zh_v)) {
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "bytecode_shard_zh_zero";
+                return out;
+            }
+            const Fp3 local_q = gf::Mul(
+                composition.columns[
+                    out.layout.constraint_accumulator][row],
+                gf::Inv(zh_v));
+            // load constraint: Value(3) == Value(0)+u*Value(1)+u2*Value(2)
+            composition.columns[out.layout.Value(0)][row] =
+                Fp3::FromFp(local_q.c0);
+            composition.columns[out.layout.Value(1)][row] =
+                Fp3::FromFp(local_q.c1);
+            composition.columns[out.layout.Value(2)][row] =
+                Fp3::FromFp(local_q.c2);
+            composition.columns[out.layout.Value(3)][row] =
+                local_q;
         }
     }
 
@@ -17717,8 +18220,11 @@ AttachConstraintBytecodeInterpreter(
         out.violations == 0;
     out.note =
         out.valid
-        ? "stage3:recursive_fixedpoint:"
-          "bytecode_table_selector_quotient_ok"
+        ? (shard_mode
+               ? "stage3:recursive_fixedpoint:"
+                 "bytecode_shard_selector_local_quotient_ok"
+               : "stage3:recursive_fixedpoint:"
+                 "bytecode_table_selector_quotient_ok")
         : "stage3:recursive_fixedpoint:"
           "bytecode_interpreter_violation";
     composition.violations = out.violations;
@@ -17732,6 +18238,27 @@ AttachConstraintBytecodeInterpreter(
     }
     (void)old_columns;
     return out;
+}
+
+} // namespace
+
+BytecodeInterpreterAttachment
+AttachConstraintBytecodeInterpreter(
+    FoldBusComposition& composition,
+    const constraint_bytecode::ProgramTable& table)
+{
+    return AttachConstraintBytecodeInterpreterImpl(
+        composition, table, nullptr);
+}
+
+BytecodeInterpreterAttachment
+AttachConstraintBytecodeInterpreterShard(
+    FoldBusComposition& composition,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>& shard_global_ordinals)
+{
+    return AttachConstraintBytecodeInterpreterImpl(
+        composition, table, &shard_global_ordinals);
 }
 
 BytecodeInterpreterAttachment
