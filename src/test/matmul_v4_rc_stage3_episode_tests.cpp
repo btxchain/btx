@@ -240,8 +240,9 @@ BOOST_AUTO_TEST_CASE(coupled_only_is_rejected_and_prover_emits_no_partial_author
     // All six episode recursive engines now genuinely execute (see
     // kRCStage3Episode*RecursionEnginesExecuted /
     // matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp), so Gaps()
-    // is empty; RelationsReady is true on that invariant.
+    // is empty. RelationsReady stays false (FRI serialize soft-budget).
     BOOST_CHECK(result.gaps.empty());
+    BOOST_CHECK(!rc::kRCStage3EpisodeRelationsReady);
     BOOST_CHECK(result.note.find("no_complete_proof_only_engine") !=
                 std::string::npos);
 }
@@ -250,10 +251,11 @@ BOOST_AUTO_TEST_CASE(gap_report_empty_when_all_episode_engines_executed)
 {
     const auto gaps = rc::CurrentRCStage3EpisodeRelationGaps();
     // All six required episode roles' recursive engines now execute; Gaps()
-    // empty is exactly the invariant that permits RelationsReady.
+    // empty is necessary for Ready but not sufficient — serialize soft-budget
+    // keeps RelationsReady false (see episode.h).
     BOOST_REQUIRE(gaps.empty());
-    BOOST_CHECK(rc::kRCStage3EpisodeRelationsReady);
-    BOOST_CHECK(rc::RCStage3EpisodeRelationsReady());
+    BOOST_CHECK(!rc::kRCStage3EpisodeRelationsReady);
+    BOOST_CHECK(!rc::RCStage3EpisodeRelationsReady());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
