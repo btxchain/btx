@@ -7220,7 +7220,7 @@ bool BuildNormalizedSchedulerTokenRefs(
             batch_width ||
         proof.batch.evals_z2.size() !=
             batch_width ||
-        proof.batch.fold_layers.size() != folds ||
+        proof.batch.fold_layers.size() != folds + 1 ||
         proof.batch.fold_challenges.size() != folds ||
         proof.batch.queries.size() != queries) {
         return false;
@@ -7303,12 +7303,12 @@ bool BuildNormalizedSchedulerTokenRefs(
         !skip(6 * batch_width) ||
         !skip(12) ||
         !append(
-            folds,
+            folds + 1,
             SchedulerTokenCategory::Fold)) {
         return false;
     }
     for (uint32_t layer = 0;
-         layer < folds; ++layer) {
+         layer < folds + 1; ++layer) {
         if (!skip(8) ||
             !append(
                 pi.child_n_lde >> layer,
