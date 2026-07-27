@@ -41,8 +41,13 @@ inline constexpr uint16_t kRCStage3CoupledReceiptVersion = 1;
  * BankSeedXofV1 FlatBoundary packaging (root/page SHA + CounterXof for one
  * lobe_width=32 page) while still rejecting unbounded forgeries. Production
  * shapes must aggregate under recursion before this bound can carry every
- * scheduled instance. */
-inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 64U * 1024U * 1024U;
+ * scheduled instance.
+ *
+ * Measured DigestSha256dV1 root-chain packaging (toy barriers=1) exceeds 64 MiB
+ * after ProveRCStage3CoupledRootChain (~12 min / ~1.4 GiB RSS →
+ * digest_engine:oversize). Raise to 256 MiB for CoupledReady engine evidence;
+ * production wire/relay budgets remain g2 / kRCFriMaxProofBytesHard. */
+inline constexpr size_t kRCStage3CoupledMaxEngineReceiptBytes = 256U * 1024U * 1024U;
 
 /** Consensus proof-engine ABI. The identifier reserves a stable encoding; it
  * does not imply that the engine is implemented or ready. */
