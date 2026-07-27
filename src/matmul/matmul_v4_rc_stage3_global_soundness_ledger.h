@@ -30,6 +30,20 @@ inline constexpr uint32_t kCtlBusesPerSiteEnvelope = 52;
 inline constexpr uint32_t kCtlEventsPerBusEnvelope = 1U << 24;
 inline constexpr uint32_t kFsSamplerDrawsPerCtlBus = 25;
 
+// --- V1 consensus / security target (recommendation #6) -------------------
+// Explicit Stage-3 V1 decision: the intended security class is 64 bits, with
+// the shipped machine-computed global composed floor ~79 (= F(q*=76) per-site
+// 104 minus the 25-bit site-union charge). This is NOT an unused 100-bit
+// requirement. Diagnostic FRI screens that still report "reach 100 bits" remain
+// inventory only; they do not redefine the V1 consensus target, and they do not
+// flip certified_bits or readiness gates.
+/** V1 consensus security class (bits). */
+inline constexpr uint32_t kV1ConsensusSecurityClassBits = 64;
+/** Shipped integer global composed floor the ledger certifies on gate-clear. */
+inline constexpr uint32_t kV1ShippedGlobalComposedFloorBits = 79;
+/** Explicit non-target: a 100-bit requirement is NOT the V1 consensus decision. */
+inline constexpr uint32_t kUnusedHundredBitRequirementBits = 100;
+
 // --- #1 statement-decomposition bridge (PR-89) ---------------------------
 // The arity-4 relation-local recursion tree over which the straight-line ROM
 // extractor composes ADDITIVELY. The confirmed shape is 244 shards -> 256
@@ -139,7 +153,9 @@ struct ExecutableGlobalSiteScenarioV1 {
     double q192_fri_bcs_bits{0.0};
     double maximum_single_lane_fri_bcs_bits{0.0};
     uint32_t fri_saturation_queries{0};
-    /** Zero means no single-lane Q can meet 100 bits under this site count. */
+    /** Zero means no single-lane Q can meet the diagnostic 100-bit FRI screen
+     * under this site count. That screen is inventory only — it is NOT the V1
+     * consensus security target (see kV1ConsensusSecurityClassBits). */
     uint32_t minimum_numeric_q_for_fri_100{0};
     bool fri_100_reachable_by_any_single_lane_q{false};
     /** Q=192 is the only selected executable Split-RAP query shape. */
@@ -399,8 +415,20 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     uint32_t per_site_composed_floor_bits{0};
     /** Global (site-union charged) composed floor ~79; the value certified_bits
      * yields the moment `composition_gate.all_clear` becomes true. Computed
-     * unconditionally so the ledger is correct now; not itself certified. */
+     * unconditionally so the ledger is correct now; not itself certified.
+     * This is the V1 shipped floor (kV1ShippedGlobalComposedFloorBits), above
+     * the V1 64-bit security class — not a 100-bit requirement. */
     uint32_t composed_certified_bits_target{0};
+
+    /**
+     * Explicit V1 consensus/security-target decision encoding. Documents that
+     * the intended target is the 64-bit class with the computed ~79-bit global
+     * composed floor. Does not flip certified_bits or readiness gates.
+     */
+    bool v1_security_target_is_64bit_class{false};
+    bool v1_global_floor_matches_shipped_79{false};
+    bool v1_unused_100bit_requirement_is_not_target{false};
+    bool v1_security_target_decision_encoded{false};
 
     bool theorem_complete{false};
     /** Live certified soundness. Stays 0 until composition_gate.all_clear, then

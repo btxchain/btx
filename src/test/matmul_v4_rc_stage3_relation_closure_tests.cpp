@@ -22,6 +22,7 @@
 #include <matmul/matmul_v4_rc_stage3_seed_chain_binding.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
+#include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <hash.h>
 
@@ -1251,6 +1252,71 @@ BOOST_AUTO_TEST_CASE(stream_endpoints_pin_to_section4_manifest_binding_root)
         BOOST_CHECK(!none.opens);
         BOOST_CHECK(none.family == RCStage3StreamManifestFamily::None);
     }
+}
+
+// Recommendation #5: DirectSha256d residual relation families map 1:1 onto the
+// stream-endpoint closer's residual RCStage3StreamFamily values (not the
+// generic DirectSha256d fallback), so each keeps a distinct FamilyDomain.
+BOOST_AUTO_TEST_CASE(
+    direct_sha256d_residual_families_map_one_to_one_onto_stream_family)
+{
+    using Manifest = RCStage3StreamManifestFamily;
+    using Stream = RCStage3StreamFamily;
+
+    const struct {
+        RCStage3RelationEndpoint endpoint;
+        Manifest manifest;
+        Stream stream;
+    } cases[] = {
+        {RCStage3RelationEndpoint::EpisodeDigestValue,
+         Manifest::DirectSha256dEpisodeDigest,
+         Stream::DirectSha256dEpisodeDigest},
+        {RCStage3RelationEndpoint::EpisodeDigestPow,
+         Manifest::DirectSha256dEpisodeDigest,
+         Stream::DirectSha256dEpisodeDigest},
+        {RCStage3RelationEndpoint::CoupledBarrierHash,
+         Manifest::DirectSha256dCoupledBarrier,
+         Stream::DirectSha256dCoupledBarrier},
+        {RCStage3RelationEndpoint::CoupledBarrierOutput,
+         Manifest::DirectSha256dCoupledBarrier,
+         Stream::DirectSha256dCoupledBarrier},
+        {RCStage3RelationEndpoint::CoupledDigestHash,
+         Manifest::DirectSha256dCoupledDigest,
+         Stream::DirectSha256dCoupledDigest},
+        {RCStage3RelationEndpoint::CoupledDigestValue,
+         Manifest::DirectSha256dCoupledDigest,
+         Stream::DirectSha256dCoupledDigest},
+    };
+
+    for (const auto& c : cases) {
+        BOOST_CHECK(RCStage3StreamEndpointManifestFamily(c.endpoint) ==
+                    c.manifest);
+        BOOST_CHECK(RCStage3StreamFamilyForEndpoint(c.endpoint) == c.stream);
+        BOOST_CHECK(RCStage3StreamFamilyForEndpoint(c.endpoint) !=
+                    Stream::DirectSha256d);
+    }
+
+    // Cross-family domain separation: identical stream_value / path under the
+    // three residual families must produce three distinct committed roots.
+    constexpr uint32_t kPathLen = 3;
+    std::array<uint32_t, 8> stream_value{};
+    for (uint32_t j = 0; j < 8; ++j) stream_value[j] = 0xA5u + 17u * j;
+    const Stream residuals[] = {
+        Stream::DirectSha256dEpisodeDigest,
+        Stream::DirectSha256dCoupledBarrier,
+        Stream::DirectSha256dCoupledDigest,
+    };
+    std::array<std::array<uint32_t, 8>, 3> roots{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        const auto manifest = BuildRCStage3StreamEndpointCanonicalManifest(
+            residuals[i], stream_value, /*leaf_index=*/0, kPathLen);
+        std::string why;
+        BOOST_REQUIRE(RCStage3StreamEndpointCommittedRoot(
+            residuals[i], manifest, roots[i], &why));
+    }
+    BOOST_CHECK(roots[0] != roots[1]);
+    BOOST_CHECK(roots[0] != roots[2]);
+    BOOST_CHECK(roots[1] != roots[2]);
 }
 
 // Blocker A (value-vector facet): EpisodeBuilderParams opens a cell of the

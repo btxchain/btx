@@ -847,6 +847,31 @@ AssessExecutableGlobalSoundnessLedgerV1(
         std::llround(
             out.composed_floor.global_composed_floor_bits));
 
+    // V1 consensus/security-target decision (recommendation #6). Intended
+    // target is the 64-bit class with the computed ~79-bit global composed
+    // floor — NOT an unused 100-bit requirement. Encoding only; does not flip
+    // certified_bits or readiness gates.
+    out.v1_security_target_is_64bit_class =
+        out.composed_floor.global_meets_64 &&
+        out.composed_certified_bits_target >=
+            kV1ConsensusSecurityClassBits;
+    out.v1_global_floor_matches_shipped_79 =
+        out.composed_certified_bits_target ==
+            kV1ShippedGlobalComposedFloorBits &&
+        out.composed_floor.global_meets_64 &&
+        !out.composed_floor.global_meets_100;
+    out.v1_unused_100bit_requirement_is_not_target =
+        kUnusedHundredBitRequirementBits >
+            kV1ConsensusSecurityClassBits &&
+        out.composed_certified_bits_target <
+            kUnusedHundredBitRequirementBits &&
+        out.composed_certified_bits_target ==
+            kV1ShippedGlobalComposedFloorBits;
+    out.v1_security_target_decision_encoded =
+        out.v1_security_target_is_64bit_class &&
+        out.v1_global_floor_matches_shipped_79 &&
+        out.v1_unused_100bit_requirement_is_not_target;
+
     // Executable, machine-checked global additive composition (gate 6). It
     // recomposes the global bound from the #1 statement-decomposition bridge
     // (341*kappa additive union), the dual-lane A2 terms, the flat M-LINK/P2 +
@@ -1009,6 +1034,8 @@ AssessExecutableGlobalSoundnessLedgerV1(
         "family_residual_vm_binding_open;"
         "product_diagnostic_fri_saturates_below_100;"
         "composed_floor_Fqstar_per_site_104_global_79_computed;"
+        "v1_security_target_64bit_class_with_shipped_global_floor_79;"
+        "unused_100bit_requirement_is_not_v1_consensus_target;"
         "certified_bits_gated_on_readiness_interlock_currently_zero;"
         "assumptions_M2_A2_field_bounds_hash_model_recorded_audit_input;"
         "global_reductions_open";

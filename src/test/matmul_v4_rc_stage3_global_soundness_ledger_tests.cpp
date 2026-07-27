@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 namespace ledger =
     matmul::v4::rc::global_soundness_ledger;
@@ -355,6 +356,26 @@ BOOST_AUTO_TEST_CASE(
         audit.per_site_composed_floor_bits, 104U);
     BOOST_CHECK_EQUAL(
         audit.composed_certified_bits_target, 79U);
+    BOOST_CHECK_EQUAL(
+        audit.composed_certified_bits_target,
+        ledger::kV1ShippedGlobalComposedFloorBits);
+
+    // Recommendation #6: V1 consensus/security target is the 64-bit class with
+    // the computed ~79-bit global composed floor — not an unused 100-bit
+    // requirement. Encoding only; certified_bits stays gated at 0.
+    BOOST_CHECK_EQUAL(ledger::kV1ConsensusSecurityClassBits, 64U);
+    BOOST_CHECK_EQUAL(ledger::kV1ShippedGlobalComposedFloorBits, 79U);
+    BOOST_CHECK_EQUAL(ledger::kUnusedHundredBitRequirementBits, 100U);
+    BOOST_CHECK(audit.v1_security_target_is_64bit_class);
+    BOOST_CHECK(audit.v1_global_floor_matches_shipped_79);
+    BOOST_CHECK(audit.v1_unused_100bit_requirement_is_not_target);
+    BOOST_CHECK(audit.v1_security_target_decision_encoded);
+    BOOST_CHECK(audit.note.find(
+                    "v1_security_target_64bit_class_with_shipped_global_floor_79") !=
+                std::string::npos);
+    BOOST_CHECK(audit.note.find(
+                    "unused_100bit_requirement_is_not_v1_consensus_target") !=
+                std::string::npos);
 
     // Ordered readiness interlock: gate 3 (fri_alg rbr/BCS) is closed; the
     // remaining gates are at their honest current (false) value, so the
