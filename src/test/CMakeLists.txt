@@ -187,6 +187,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_registry_vm_same_parent_join_tests.cpp
   matmul_v4_rc_stage3_poseidon_air_tests.cpp
   matmul_v4_rc_stage3_multirow_p2_transcript_tests.cpp
+  matmul_v4_rc_stage3_multirow_p2_consumer_bridge_tests.cpp
   matmul_v4_rc_stage3_poseidon_bytecode_tests.cpp
   matmul_v4_rc_stage3_v5_v6_bus_tests.cpp
   matmul_v4_rc_stage3_v6_fs_tests.cpp
