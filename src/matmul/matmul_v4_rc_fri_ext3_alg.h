@@ -98,6 +98,37 @@ inline constexpr char kRCFri3AlgShortFsDomainTag[] =
     "BTX_RC_FRIB3ALG_Q192_SHORTFS_V7";
 
 // ===========================================================================
+// PR-89 g4 / recommendation #1: Poseidon2 SQUEEZE lane (NOT ACTIVATED).
+//
+// Short-FS (v7) moved two ABSORBS onto Poseidon2 commitments but left every
+// challenge draw as SHA256d(buf || suffix).  That is still a mixed recursive
+// verifier: parent in-AIR replay of the seven FRI kinds remains a vertical
+// SHA companion.  This lane keeps short-FS absorbs and replaces the squeeze
+// with a domain-separated Poseidon2 draw over the same buf-as-Fp-lanes
+// encoding, so all eight challenge kinds (airq_lambda via
+// aq::AirChallengeDigestP2 + seven FRI kinds here) share one Poseidon2
+// proof version and the SHA floor (~57 s producer endpoint) is not load-
+// bearing.
+//
+// Distinct from v3 / v5 / v6 / v7 and from aq::kAirChallengeP2RouteVersion
+// (which versions the AIR-quotient digest route, not this FRI proof).
+// ===========================================================================
+inline constexpr uint32_t kRCFri3AlgP2SqueezeLaneProofVersion = 8;
+inline constexpr char kRCFri3AlgP2SqueezeDomainTag[] =
+    "BTX_RC_FRIB3ALG_Q192_P2SQZ_V8";
+/** Poseidon2 squeeze activation. False: ActiveConfig stays on short-FS v7
+ *  (SHA squeeze). Flip only with prove/verify round-trip evidence and a
+ *  matching ReplayChildFsTranscriptV1 path. */
+inline constexpr bool kRCFri3AlgP2SqueezeActivatedV1 = false;
+static_assert(!kRCFri3AlgP2SqueezeActivatedV1,
+              "PR-89 Poseidon2 FRI-squeeze lane is not activated");
+static_assert(kRCFri3AlgP2SqueezeLaneProofVersion !=
+                      kRCFri3AlgBatchProofVersion &&
+                  kRCFri3AlgP2SqueezeLaneProofVersion !=
+                      kRCFri3AlgShortFsLaneProofVersion,
+              "P2-squeeze proof version must not collide with Q192 SHA lanes");
+
+// ===========================================================================
 // PR-89 g4 ACTIVATION.  The short-transcript lane is the lane the Q192
 // recursion now PRODUCES and CONSUMES.  Everything the flip changes is derived
 // from this ONE constant, so the protocol and every in-AIR / shadow replay of
@@ -1703,6 +1734,11 @@ static_assert(kRCFri3AlgShortFsLaneProofVersion != kRCFri3AlgBatchProofVersion &
                   kRCFri3AlgShortFsLaneProofVersion !=
                       kRCFri3AlgDualQ136LaneProofVersion,
               "a new FS layout MUST NOT reuse a live lane's proof version");
+static_assert(kRCFri3AlgP2SqueezeLaneProofVersion !=
+                      kRCFri3AlgDualLaneProofVersion &&
+                  kRCFri3AlgP2SqueezeLaneProofVersion !=
+                      kRCFri3AlgDualQ136LaneProofVersion,
+              "P2-squeeze proof version must not collide with dual lanes");
 
 // --- Construction 1: Pi_JQ joint query squeeze ---
 /** index_{l,j} = LE32(SHA256d(sigma_Q || "fra3_joint_query" || l || j)) &

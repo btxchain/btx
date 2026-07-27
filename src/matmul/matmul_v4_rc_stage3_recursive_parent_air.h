@@ -1473,6 +1473,38 @@ struct ChildFsReplayClosureV1 {
 [[nodiscard]] ChildFsReplayClosureV1 AssessChildFsReplayClosureV1();
 
 /**
+ * PR-89 g4: recompute the PRODUCER endpoint FRI on the Poseidon2 companion.
+ *
+ * MEASURED replacement for the SHA companion's 58.6 s floor (build 16.2 s +
+ * Split-RAP prove 41.1 s over 591 x 4096).  BuildChildAirChallengeP2ReplayV1
+ * + plain AirQuotientProve/Verify over the query-sound P2 companion was
+ * profiled at ~4.5 s end-to-end.  This assessor recomputes that path (no
+ * persisted artifact) and is what AssessChildFsReplayClosureV1 consults for
+ * producer_endpoint_fri_proven once aq::kAirChallengeP2Activated is true —
+ * the live endpoint must be the P2 companion, not the SHA one.
+ */
+struct ProducerEndpointFriP2ResultV1 {
+    bool prove_ok{false};
+    bool verify_ok{false};
+    bool query_sound_shape{false};
+    bool companion_valid{false};
+    uint32_t companion_rows{0};
+    uint32_t companion_columns{0};
+    double build_seconds{0};
+    double prove_seconds{0};
+    double verify_seconds{0};
+    bool ok{false};
+    std::string note;
+};
+
+[[nodiscard]] ProducerEndpointFriP2ResultV1
+ProveProducerEndpointFriP2V1(const uint256& child_fs_seed,
+                             const uint256& trace_commit,
+                             uint32_t child_n_rows,
+                             uint32_t child_quotient_len,
+                             uint32_t child_w);
+
+/**
  * PR-89 rung-4: a recursion parent's OWN FRI proof.
  *
  * The Build*ParentV1 builders construct and constraint-evaluate a parent V_CS

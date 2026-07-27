@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <cstdlib>
 #include <map>
@@ -2192,6 +2193,35 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(degenerate.witness_violations, 0U);
     BOOST_CHECK(!degenerate.query_sound_shape);
     BOOST_CHECK(!degenerate.valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_producer_endpoint_fri_on_p2_companion_proves_and_verifies)
+{
+    // Default-suite evidence for the Poseidon2 producer-endpoint FRI path.
+    // AssessChildFsReplayClosureV1 only claims producer_endpoint_fri_proven
+    // once aq::kAirChallengeP2Activated (live companion = P2); this test
+    // measures the recompute that memo will run.
+    const auto r = ProveProducerEndpointFriP2V1(
+        Seed(0x5e), Seed(0xa1), /*child_n_rows=*/2, /*child_quotient_len=*/2,
+        /*child_w=*/1);
+    BOOST_TEST_MESSAGE(
+        "G4_PRODUCER_P2_FRI ok=" << r.ok
+        << " prove_ok=" << r.prove_ok
+        << " verify_ok=" << r.verify_ok
+        << " rows=" << r.companion_rows
+        << " cols=" << r.companion_columns
+        << " build_s=" << r.build_seconds
+        << " prove_s=" << r.prove_seconds
+        << " verify_s=" << r.verify_seconds
+        << " note=\"" << r.note << "\"");
+    BOOST_CHECK(r.companion_valid);
+    BOOST_CHECK(r.query_sound_shape);
+    BOOST_CHECK(r.prove_ok);
+    BOOST_CHECK(r.verify_ok);
+    BOOST_CHECK(r.ok);
+    BOOST_CHECK(!aq::kAirChallengeP2Activated);
+    BOOST_CHECK(!kRCFri3AlgP2SqueezeActivatedV1);
 }
 
 BOOST_AUTO_TEST_CASE(

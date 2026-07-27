@@ -768,10 +768,40 @@ inline constexpr char kAirChallengeP2DomainTag[] = "BTX_RC_AIRQ_P2_V1";
 inline constexpr uint32_t kAirChallengeP2RouteVersion = 8;
 
 /** Route activation. False: no producer or verifier selects the Poseidon2
- *  challenge, and every shipped proof still derives airq_lambda by SHA256d. */
+ *  challenge, and every shipped proof still derives airq_lambda by SHA256d.
+ *
+ *  WHEN TRUE: row-wise (algebraic / recursion) AirQuotientProve/Verify select
+ *  AirChallengeDigestP2 via AirChallengeDigestForBackend; per-column SHA
+ *  backends keep AirChallengeDigest so frozen SHA lanes stay byte-identical.
+ *  Flip only with measured evidence that the four-slot parent decoder and the
+ *  g4 producer companion also consume the P2 route (see recursive_parent_air).
+ */
 inline constexpr bool kAirChallengeP2Activated = false;
-static_assert(!kAirChallengeP2Activated,
-              "PR-89 Poseidon2 AIR-challenge route is not activated");
+
+/** true iff this Backend should draw AIR challenges on the Poseidon2 route.
+ *  Row-wise algebraic backends only; SHA per-column backends never. */
+template <typename Backend>
+inline constexpr bool AirBackendUsesP2Challenge =
+    kAirChallengeP2Activated && AirBackendIsRowWise<Backend>;
+
+/**
+ * Select SHA256d or Poseidon2 digest for the same logical preimage.
+ * `use_p2` is the sole route bit; callers must not pass true for frozen SHA
+ * lanes (use AirBackendUsesP2Challenge / AirChallengeDigestForBackend).
+ */
+[[nodiscard]] uint256 AirChallengeDigestSelected(
+    bool use_p2, const uint256& fs_seed, const char* label,
+    const std::vector<uint256>& roots, const std::vector<uint32_t>& extra);
+
+/** Backend-gated digest: Poseidon2 iff AirBackendUsesP2Challenge<Backend>. */
+template <typename Backend>
+[[nodiscard]] uint256 AirChallengeDigestForBackend(
+    const uint256& fs_seed, const char* label, const std::vector<uint256>& roots,
+    const std::vector<uint32_t>& extra)
+{
+    return AirChallengeDigestSelected(AirBackendUsesP2Challenge<Backend>, fs_seed,
+                                      label, roots, extra);
+}
 
 /**
  * INJECTIVE Fp-lane encoding of the AirChallengeDigest preimage
