@@ -4,8 +4,6 @@
 
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_recursive_verifier.h>
 
-#include <hash.h>
-
 #include <algorithm>
 #include <limits>
 #include <set>
@@ -23,6 +21,46 @@ constexpr uint64_t kWireDomainV1 =
     0x31565253'45524957ULL; // "WIERSRV1"
 constexpr uint64_t kTranscriptDomainV1 =
     0x31565253'4e525454ULL; // "TTRNSRV1"
+
+void AppendU32(std::vector<gf::Fp>& lanes, uint32_t value)
+{
+    lanes.push_back(gf::FromU64(value));
+}
+
+void AppendU64(std::vector<gf::Fp>& lanes, uint64_t value)
+{
+    // Never absorb an arbitrary u64 as one Goldilocks field element: x and
+    // x+p would alias.  Two canonical u32 limbs make the map injective.
+    AppendU32(lanes, static_cast<uint32_t>(value));
+    AppendU32(lanes, static_cast<uint32_t>(value >> 32));
+}
+
+void AppendUint256(std::vector<gf::Fp>& lanes, const uint256& value)
+{
+    for (uint32_t word = 0; word < 4; ++word) {
+        AppendU64(lanes, value.GetUint64(word));
+    }
+}
+
+void AppendDigest(
+    std::vector<gf::Fp>& lanes,
+    const alg_hash::Digest& digest)
+{
+    lanes.insert(lanes.end(), digest.begin(), digest.end());
+}
+
+void AppendFp3(std::vector<gf::Fp>& lanes, const gf::Fp3& value)
+{
+    lanes.push_back(value.c0);
+    lanes.push_back(value.c1);
+    lanes.push_back(value.c2);
+}
+
+uint256 PackAlgHash(const std::vector<gf::Fp>& lanes)
+{
+    return Fri3AlgDigestToUint256(
+        alg_hash::SpongeHashFp(lanes));
+}
 
 uint32_t NextPowerOfTwo(uint64_t value)
 {
@@ -60,25 +98,40 @@ uint256 HashAbi(const backend::ProofV1& proof)
         words.empty()) {
         return {};
     }
-    HashWriter hash;
-    hash << kAbiDomainV1;
-    hash << static_cast<uint32_t>(words.size());
-    for (uint32_t word : words) hash << word;
-    return hash.GetHash();
+    std::vector<gf::Fp> lanes;
+    lanes.reserve(4 + words.size());
+    AppendU64(lanes, kAbiDomainV1);
+    AppendU32(lanes, static_cast<uint32_t>(words.size()));
+    for (uint32_t word : words) AppendU32(lanes, word);
+    return PackAlgHash(lanes);
 }
 
 uint256 HashWire(const backend::ProofV1& proof)
 {
     std::vector<unsigned char> wire;
-    if (backend::SerializeV1(proof, wire) != wire.size() ||
-        wire.empty()) {
+    // Capture the return before reading wire.size().  Comparing
+    // SerializeV1(proof, wire) and wire.size() in one expression is not
+    // portable because the operand evaluation order can observe the old
+    // zero size on GCC.
+    const size_t serialized = backend::SerializeV1(proof, wire);
+    if (serialized != wire.size() || wire.empty()) {
         return {};
     }
-    HashWriter hash;
-    hash << kWireDomainV1;
-    hash << static_cast<uint32_t>(wire.size());
-    for (unsigned char byte : wire) hash << byte;
-    return hash.GetHash();
+    std::vector<gf::Fp> lanes;
+    lanes.reserve(4 + (wire.size() + 3) / 4);
+    AppendU64(lanes, kWireDomainV1);
+    AppendU32(lanes, static_cast<uint32_t>(wire.size()));
+    for (size_t offset = 0; offset < wire.size(); offset += 4) {
+        uint32_t word = 0;
+        for (size_t byte = 0;
+             byte < 4 && offset + byte < wire.size();
+             ++byte) {
+            word |= static_cast<uint32_t>(wire[offset + byte])
+                << (8 * byte);
+        }
+        AppendU32(lanes, word);
+    }
+    return PackAlgHash(lanes);
 }
 
 std::optional<abi::DecodedV1> Decode(
@@ -201,34 +254,35 @@ CapAuditV1 AuditDirectAndQ64RowsV1(
 uint256 ComputeShardReceiptRootV1(
     const ShardReceiptV1& receipt)
 {
-    HashWriter hash;
-    hash << kReceiptDomainV1;
-    hash << receipt.version;
-    hash << receipt.range.ordinal;
-    hash << receipt.range.first_query;
-    hash << receipt.range.query_count;
-    hash << receipt.child_abi_root;
-    hash << receipt.child_wire_root;
-    hash << receipt.child_statement_root;
-    hash << receipt.full_q192_transcript_root;
-    hash << receipt.public_fs_seed;
-    for (gf::Fp limb : receipt.program_root) hash << limb;
-    hash << receipt.parent_join_r0_root;
-    hash << receipt.merkle_hash_r0_root;
-    hash << receipt.merkle_fold_r0_root;
-    hash << receipt.deep_vm_r0_root;
-    hash << receipt.decoder_join_r0_root;
-    hash << receipt.merkle_hash_rows;
-    hash << receipt.merkle_hash_columns;
-    hash << receipt.merkle_fold_rows;
-    hash << receipt.merkle_fold_columns;
-    hash << receipt.deep_vm_rows;
-    hash << receipt.deep_vm_columns;
-    hash << receipt.decoder_join_rows;
-    hash << receipt.decoder_join_columns;
-    hash << receipt.materialized_trace_cells;
-    hash << receipt.measured_unaggregated_wire_bytes;
-    return hash.GetHash();
+    std::vector<gf::Fp> lanes;
+    lanes.reserve(96);
+    AppendU64(lanes, kReceiptDomainV1);
+    AppendU32(lanes, receipt.version);
+    AppendU32(lanes, receipt.range.ordinal);
+    AppendU32(lanes, receipt.range.first_query);
+    AppendU32(lanes, receipt.range.query_count);
+    AppendUint256(lanes, receipt.child_abi_root);
+    AppendUint256(lanes, receipt.child_wire_root);
+    AppendUint256(lanes, receipt.child_statement_root);
+    AppendUint256(lanes, receipt.full_q192_transcript_root);
+    AppendUint256(lanes, receipt.public_fs_seed);
+    AppendDigest(lanes, receipt.program_root);
+    AppendUint256(lanes, receipt.parent_join_r0_root);
+    AppendUint256(lanes, receipt.merkle_hash_r0_root);
+    AppendUint256(lanes, receipt.merkle_fold_r0_root);
+    AppendUint256(lanes, receipt.deep_vm_r0_root);
+    AppendUint256(lanes, receipt.decoder_join_r0_root);
+    AppendU32(lanes, receipt.merkle_hash_rows);
+    AppendU32(lanes, receipt.merkle_hash_columns);
+    AppendU32(lanes, receipt.merkle_fold_rows);
+    AppendU32(lanes, receipt.merkle_fold_columns);
+    AppendU32(lanes, receipt.deep_vm_rows);
+    AppendU32(lanes, receipt.deep_vm_columns);
+    AppendU32(lanes, receipt.decoder_join_rows);
+    AppendU32(lanes, receipt.decoder_join_columns);
+    AppendU64(lanes, receipt.materialized_trace_cells);
+    AppendU64(lanes, receipt.measured_unaggregated_wire_bytes);
+    return PackAlgHash(lanes);
 }
 
 uint256 ComputeFullTranscriptRootV1(
@@ -238,64 +292,80 @@ uint256 ComputeFullTranscriptRootV1(
         !transcript.q192_with_replacement) {
         return {};
     }
-    HashWriter hash;
-    hash << kTranscriptDomainV1;
-    hash << transcript.statement_version;
-    hash << transcript.protocol_version;
-    hash << transcript.protocol_domain;
-    for (gf::Fp limb : transcript.shape_commit) hash << limb;
-    hash << transcript.air_lambda.c0;
-    hash << transcript.air_lambda.c1;
-    hash << transcript.air_lambda.c2;
-    for (gf::Fp limb : transcript.fri_seed) hash << limb;
+    std::vector<gf::Fp> lanes;
+    lanes.reserve(
+        64 +
+        3 * (transcript.z1_candidates.size() +
+             transcript.z2_candidates.size()) +
+        3 * transcript.batching_coefficients.size() +
+        3 * transcript.fold_challenges.size() +
+        transcript.queries.size() *
+            (3 + 4 * alg_hash::kAlgHashDigestLen));
+    AppendU64(lanes, kTranscriptDomainV1);
+    AppendU32(lanes, transcript.statement_version);
+    AppendU32(lanes, transcript.protocol_version);
+    AppendU64(lanes, transcript.protocol_domain);
+    AppendDigest(lanes, transcript.shape_commit);
+    AppendFp3(lanes, transcript.air_lambda);
+    AppendDigest(lanes, transcript.fri_seed);
     for (const auto& candidate : transcript.z1_candidates) {
-        hash << candidate.c0 << candidate.c1 << candidate.c2;
+        AppendFp3(lanes, candidate);
     }
     for (const auto& candidate : transcript.z2_candidates) {
-        hash << candidate.c0 << candidate.c1 << candidate.c2;
+        AppendFp3(lanes, candidate);
     }
-    hash << transcript.z1_selected << transcript.z2_selected;
-    hash << transcript.z1.c0 << transcript.z1.c1 << transcript.z1.c2;
-    hash << transcript.z2.c0 << transcript.z2.c1 << transcript.z2.c2;
-    for (gf::Fp limb : transcript.ood_eval_commit) hash << limb;
-    for (gf::Fp limb : transcript.batch_seed) hash << limb;
-    hash << static_cast<uint32_t>(
-        transcript.batching_coefficients.size());
+    AppendU32(lanes, transcript.z1_selected);
+    AppendU32(lanes, transcript.z2_selected);
+    AppendFp3(lanes, transcript.z1);
+    AppendFp3(lanes, transcript.z2);
+    AppendDigest(lanes, transcript.ood_eval_commit);
+    AppendDigest(lanes, transcript.batch_seed);
+    AppendU32(
+        lanes,
+        static_cast<uint32_t>(
+            transcript.batching_coefficients.size()));
     for (const auto& coefficient :
          transcript.batching_coefficients) {
-        hash << coefficient.c0 << coefficient.c1 << coefficient.c2;
+        AppendFp3(lanes, coefficient);
     }
-    hash << transcript.w1.c0 << transcript.w1.c1 << transcript.w1.c2;
-    hash << transcript.w2.c0 << transcript.w2.c1 << transcript.w2.c2;
-    hash << static_cast<uint32_t>(
-        transcript.fold_challenges.size());
+    AppendFp3(lanes, transcript.w1);
+    AppendFp3(lanes, transcript.w2);
+    AppendU32(
+        lanes,
+        static_cast<uint32_t>(
+            transcript.fold_challenges.size()));
     for (const auto& challenge : transcript.fold_challenges) {
-        hash << challenge.c0 << challenge.c1 << challenge.c2;
+        AppendFp3(lanes, challenge);
     }
-    for (gf::Fp limb : transcript.query_seed) hash << limb;
-    hash << static_cast<uint32_t>(transcript.queries.size());
+    AppendDigest(lanes, transcript.query_seed);
+    AppendU32(
+        lanes,
+        static_cast<uint32_t>(transcript.queries.size()));
     for (uint32_t query = 0;
          query < transcript.queries.size(); ++query) {
         const auto& item = transcript.queries[query];
-        hash << query << item.selected_ordinal << item.index;
+        AppendU32(lanes, query);
+        AppendU32(lanes, item.selected_ordinal);
+        AppendU32(lanes, item.index);
         for (const auto& candidate : item.candidate_digest) {
-            for (gf::Fp limb : candidate) hash << limb;
+            AppendDigest(lanes, candidate);
         }
     }
-    return hash.GetHash();
+    return PackAlgHash(lanes);
 }
 
 uint256 ComputeShardSetRootV1(
     const std::array<ShardReceiptV1, kQueryShardsV1>& receipts)
 {
-    HashWriter hash;
-    hash << kSetDomainV1;
-    hash << kRecursiveVerifierVersionV1;
-    hash << kQueryShardsV1;
+    std::vector<gf::Fp> lanes;
+    lanes.reserve(4 + kQueryShardsV1 * kReceiptRootWordsV1);
+    AppendU64(lanes, kSetDomainV1);
+    AppendU32(lanes, kRecursiveVerifierVersionV1);
+    AppendU32(lanes, kQueryShardsV1);
     for (const auto& receipt : receipts) {
-        hash << receipt.receipt_root;
+        AppendUint256(lanes, receipt.receipt_root);
     }
-    return hash.GetHash();
+    return PackAlgHash(lanes);
 }
 
 ShardProductV1 BuildSingleShardAuditV1(

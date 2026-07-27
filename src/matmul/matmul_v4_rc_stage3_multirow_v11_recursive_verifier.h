@@ -130,6 +130,16 @@ struct ShardReceiptV1 {
     uint256 receipt_root{};
 };
 
+/**
+ * The ABI, wire, transcript, receipt and shard-set roots computed by this
+ * module use the production Poseidon2/AlgHash sponge and canonical
+ * Fri3AlgDigestToUint256 packing.  Arbitrary external uint256 roots are
+ * absorbed as eight u32 lanes; arbitrary u64 inputs are split into two u32
+ * lanes; wire bytes are length-bound little-endian u32 words.  This makes
+ * the preimages injective over the base field and permits the exact
+ * commitments to be replayed by the existing Poseidon2 AIR.
+ */
+
 struct ShardProductV1 {
     QueryRangeV1 range{};
     mf::ShardProductV1 merkle_fold{};

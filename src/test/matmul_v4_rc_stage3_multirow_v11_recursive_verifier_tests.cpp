@@ -315,6 +315,9 @@ BOOST_AUTO_TEST_CASE(
             honest.decoder_join_columns;
     honest.receipt_root = ComputeShardReceiptRootV1(honest);
     BOOST_REQUIRE(!honest.receipt_root.IsNull());
+    BOOST_REQUIRE(
+        Fri3AlgDigestFromUint256(
+            honest.receipt_root).has_value());
 
     auto attack = honest;
     attack.range.first_query ^= 1U;
@@ -356,6 +359,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(Different(
         ComputeShardReceiptRootV1(attack),
         honest.receipt_root));
+    // Regression for the Goldilocks x / x+p alias: arbitrary u64 fields are
+    // committed as two u32 limbs, so adding p cannot preserve the root.
+    attack = honest;
+    attack.materialized_trace_cells += gf::kP;
+    BOOST_CHECK(Different(
+        ComputeShardReceiptRootV1(attack),
+        honest.receipt_root));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -378,6 +388,18 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(product.receipt.materialized_trace_cells, 0U);
     BOOST_CHECK_EQUAL(
         product.receipt.measured_unaggregated_wire_bytes, 0U);
+    BOOST_CHECK(
+        Fri3AlgDigestFromUint256(
+            product.receipt.child_abi_root).has_value());
+    BOOST_CHECK(
+        Fri3AlgDigestFromUint256(
+            product.receipt.child_wire_root).has_value());
+    BOOST_CHECK(
+        Fri3AlgDigestFromUint256(
+            product.receipt.full_q192_transcript_root).has_value());
+    BOOST_CHECK(
+        Fri3AlgDigestFromUint256(
+            product.receipt.receipt_root).has_value());
     BOOST_TEST_MESSAGE(
         "V11_RECURSIVE_SHARD q=1 hash="
         << product.receipt.merkle_hash_rows << "x"
@@ -410,6 +432,32 @@ BOOST_AUTO_TEST_CASE(
     out_of_range.first_query = abi::kQueryCountV11;
     BOOST_CHECK(!BuildSingleShardAuditV1(
         input, out_of_range).valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    shard_set_alg_hash_binds_all_receipts_and_order)
+{
+    std::array<ShardReceiptV1, kQueryShardsV1> receipts{};
+    for (uint32_t shard = 0; shard < receipts.size(); ++shard) {
+        receipts[shard].range = CanonicalQueryRangesV1()[shard];
+        receipts[shard].receipt_root = H(500 + shard);
+    }
+    const uint256 honest = ComputeShardSetRootV1(receipts);
+    BOOST_REQUIRE(!honest.IsNull());
+    BOOST_REQUIRE(
+        Fri3AlgDigestFromUint256(honest).has_value());
+
+    auto substituted = receipts;
+    substituted[1].receipt_root = H(600);
+    BOOST_CHECK(Different(
+        ComputeShardSetRootV1(substituted), honest));
+
+    auto reordered = receipts;
+    std::swap(
+        reordered[0].receipt_root,
+        reordered[1].receipt_root);
+    BOOST_CHECK(Different(
+        ComputeShardSetRootV1(reordered), honest));
 }
 
 BOOST_AUTO_TEST_CASE(readiness_is_exact_and_fail_closed)
