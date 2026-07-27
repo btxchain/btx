@@ -1407,6 +1407,189 @@ std::vector<Fri3AlgDigest> RowLeafDigests(const std::vector<std::vector<Fp3>>& c
     return gpu_leaves;
 }
 
+// PR-89 GPU splice #1b: STREAMING counterpart of RowLeafDigestsGpu.
+//
+// RowLeafDigestsGpu (above) requires the caller's WHOLE W x n_lde column_lde
+// resident on the host — the same dense residency the CPU-side
+// alg_hash::StreamingRowHasher exists to avoid. At the real recursion-node
+// width (W ~ 385k) that residency is memory-infeasible, so every real-width
+// row-commit takes the streaming path and never reached the GPU splice.
+// This function closes that gap: it drives the SAME device context
+// (Begin/Absorb/Finalize) as the dense path, but is fed one already-LDE'd
+// column BLOCK at a time (kc columns, kc << W), exactly matching
+// StreamingRowHasher::AbsorbColumnBlock's absorption order (ascending
+// column, c0/c1/c2 per column) so the digests are field-identical.
+bool RowLeafDigestsStreamingGpu(const std::vector<std::vector<Fp3>>& columns,
+                                uint32_t n_lde, uint32_t n_coeffs,
+                                std::vector<Fri3AlgDigest>& out,
+                                std::string& why)
+{
+    const uint32_t W = static_cast<uint32_t>(columns.size());
+    if (W == 0 || n_lde == 0) {
+        why = "empty input";
+        return false;
+    }
+    if (BtxGpuRowLeafAvailable() == 0) {
+        why = "no CUDA device (or non-CUDA build)";
+        return false;
+    }
+    static std::once_flag consts_once;
+    static int consts_rc = -1;
+    std::call_once(consts_once, [] {
+        const auto& c = alg_hash::GetAlgHashConstants();
+        consts_rc = BtxGpuRowLeafSetConstants(
+            c.rc_ext.front().data(), c.rc_int.data(), c.mu.data());
+    });
+    if (consts_rc != 0) {
+        why = "constant upload failed";
+        return false;
+    }
+    void* ctx = nullptr;
+    if (BtxGpuRowLeafBegin(n_lde, &ctx) != 0) {
+        why = "Begin failed";
+        return false;
+    }
+    const uint32_t K = Fri3AlgStreamColumnBlockFor(n_lde);
+    std::vector<std::vector<Fp3>> block;
+    std::vector<uint64_t> blk;
+    for (uint32_t c0 = 0; c0 < W; c0 += K) {
+        const uint32_t kc = std::min(K, W - c0);
+        BuildColumnLdeBlock(columns, c0, kc, n_coeffs, block);
+        // Same lane-major layout as RowLeafDigestsGpu: blk[(3*lc+t)*n_lde+i].
+        blk.assign(static_cast<size_t>(3) * kc * n_lde, 0);
+        const int64_t kc64 = kc;
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
+#endif
+        for (int64_t lc = 0; lc < kc64; ++lc) {
+            const std::vector<Fp3>& col = block[lc];
+            uint64_t* b0 = blk.data() + static_cast<size_t>(3 * lc) * n_lde;
+            uint64_t* b1 = b0 + n_lde;
+            uint64_t* b2 = b1 + n_lde;
+            for (uint32_t i = 0; i < n_lde; ++i) {
+                b0[i] = col[i].c0;
+                b1[i] = col[i].c1;
+                b2[i] = col[i].c2;
+            }
+        }
+        if (BtxGpuRowLeafAbsorb(ctx, blk.data(), 3 * kc, uint64_t{3} * c0) != 0) {
+            BtxGpuRowLeafRelease(ctx);
+            why = "Absorb failed";
+            return false;
+        }
+    }
+    out.assign(n_lde, Fri3AlgDigest{});
+    static_assert(sizeof(Fri3AlgDigest) == 4 * sizeof(uint64_t),
+                  "Fri3AlgDigest must be 4 contiguous u64 limbs");
+    if (BtxGpuRowLeafFinalize(ctx, uint64_t{3} * W,
+                              reinterpret_cast<uint64_t*>(out.data())) != 0) {
+        why = "Finalize failed";
+        return false;
+    }
+    return true;
+}
+
+// Streaming row-leaf builder: CPU (alg_hash::StreamingRowHasher) unless
+// BTX_GPU_ROWLEAF selects the GPU streaming path above. Same no-silent-
+// fallback / hard-abort / audit-parity policy as RowLeafDigests. This is the
+// primitive actually exercised at real recursion-node width (both
+// Fri3AlgBatchRowRootStreaming and the streaming branch of
+// Fri3AlgBatchCommitConfigured route through here).
+bool RowLeafDigestsStreamingCpuOrGpu(const std::vector<std::vector<Fp3>>& columns,
+                                     uint32_t n_lde, uint32_t n_coeffs,
+                                     std::vector<Fri3AlgDigest>& out,
+                                     std::string* note)
+{
+    const uint32_t W = static_cast<uint32_t>(columns.size());
+    const uint32_t K = Fri3AlgStreamColumnBlockFor(n_lde);
+    const auto run_cpu_streaming = [&](std::vector<Fri3AlgDigest>& leaves,
+                                       std::string* err) -> bool {
+        alg_hash::StreamingRowHasher row_hasher(n_lde);
+        std::vector<std::vector<Fp3>> block;
+        for (uint32_t c0 = 0; c0 < W; c0 += K) {
+            const uint32_t kc = std::min(K, W - c0);
+            BuildColumnLdeBlock(columns, c0, kc, n_coeffs, block);
+            std::string why;
+            if (!row_hasher.AbsorbColumnBlock(block, kc, &why)) {
+                if (err) *err = "streaming row absorb: " + why;
+                return false;
+            }
+        }
+        std::string why;
+        if (!row_hasher.Finalize(leaves, &why)) {
+            if (err) *err = "streaming row finalize: " + why;
+            return false;
+        }
+        return true;
+    };
+
+    const RowLeafGpuMode gpu_mode = RowLeafGpuModeActive();
+    const bool gpu_eligible = gpu_mode != RowLeafGpuMode::kOff &&
+        alg_hash::ActiveBindingMode() == alg_hash::BindingMode::B256;
+    if (gpu_mode == RowLeafGpuMode::kOff) {
+        return run_cpu_streaming(out, note);
+    }
+    if (!gpu_eligible) {
+        std::fprintf(stderr,
+                     "[BTX_GPU_ROWLEAF] ineligible streaming call (mode=%s) "
+                     "-> CPU reference path\n",
+                     alg_hash::ActiveBindingMode() ==
+                             alg_hash::BindingMode::B256 ?
+                         "B256" :
+                         "B384");
+        return run_cpu_streaming(out, note);
+    }
+    std::string why;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (!RowLeafDigestsStreamingGpu(columns, n_lde, n_coeffs, out, why)) {
+        std::fprintf(stderr,
+                     "[BTX_GPU_ROWLEAF] FATAL: GPU streaming row-leaf commit "
+                     "failed (%s); BTX_GPU_ROWLEAF forbids a silent CPU "
+                     "fallback\n",
+                     why.c_str());
+        std::abort();
+    }
+    const double gpu_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - t0)
+            .count();
+    std::fprintf(stderr,
+                 "[BTX_GPU_ROWLEAF] GPU streaming leaf-commit W=%u n_lde=%u "
+                 "%.1f ms%s\n",
+                 W, n_lde, gpu_ms,
+                 gpu_mode == RowLeafGpuMode::kAudit ? " (audit)" : "");
+    if (gpu_mode == RowLeafGpuMode::kAudit) {
+        std::vector<Fri3AlgDigest> cpu_leaves;
+        std::string audit_err;
+        if (!run_cpu_streaming(cpu_leaves, &audit_err)) {
+            if (note) *note = "audit " + audit_err;
+            return false;
+        }
+        size_t mismatches = 0;
+        size_t first_bad = 0;
+        for (size_t i = 0; i < cpu_leaves.size(); ++i) {
+            if (cpu_leaves[i] != out[i]) {
+                if (mismatches == 0) first_bad = i;
+                ++mismatches;
+            }
+        }
+        if (mismatches != 0 || cpu_leaves.size() != out.size()) {
+            std::fprintf(stderr,
+                         "[BTX_GPU_ROWLEAF] AUDIT FAIL (streaming) W=%u "
+                         "n_lde=%u mismatches=%zu first_bad=%zu — GPU/CPU "
+                         "digest divergence on real prove data\n",
+                         W, n_lde, mismatches, first_bad);
+            std::abort();
+        }
+        std::fprintf(stderr,
+                     "[BTX_GPU_ROWLEAF] AUDIT PASS (streaming) W=%u n_lde=%u "
+                     "leaves=%zu (bit-identical CPU vs GPU on real prove "
+                     "data)\n",
+                     W, n_lde, out.size());
+    }
+    return true;
+}
+
 /** Batch FS preamble: domain-separated from every SHA-path transcript; the
  *  SINGLE row root replaces the per-column root list of the SHA batch. */
 Fri3AlgFs Fri3AlgBatchFsInit(const uint256& fs_seed, uint64_t pow_grind_nonce, uint32_t n_coeffs,
@@ -1873,25 +2056,14 @@ Fri3AlgDigest Fri3AlgBatchRowRootStreaming(
     }
     // Column-BLOCK streaming: only K column LDEs are resident at a time.
     // Absorption order (ascending column, then c0/c1/c2) is unchanged, so the
-    // root equals Fri3AlgBatchRowRoot's limb for limb.
-    alg_hash::StreamingRowHasher row_hasher(n_lde);
-    {
-        const uint32_t W =
-            static_cast<uint32_t>(columns.size());
-        const uint32_t K =
-            Fri3AlgStreamColumnBlockFor(n_lde);
-        std::vector<std::vector<Fp3>> block;
-        for (uint32_t c0 = 0; c0 < W; c0 += K) {
-            const uint32_t kc = std::min(K, W - c0);
-            BuildColumnLdeBlock(
-                columns, c0, kc, n_coeffs, block);
-            if (!row_hasher.AbsorbColumnBlock(block, kc)) {
-                return {};
-            }
-        }
-    }
+    // root equals Fri3AlgBatchRowRoot's limb for limb. Routes through the GPU
+    // splice when BTX_GPU_ROWLEAF selects it (see RowLeafDigestsStreamingGpu):
+    // this is the ONLY row-commit path reachable at real recursion-node width.
     std::vector<Fri3AlgDigest> leaves;
-    if (!row_hasher.Finalize(leaves)) return {};
+    if (!RowLeafDigestsStreamingCpuOrGpu(columns, n_lde, n_coeffs, leaves,
+                                        nullptr)) {
+        return {};
+    }
     return BuildAlgMerkleTreeFromLeaves(
                std::move(leaves))
         .root;
@@ -2007,27 +2179,14 @@ Fri3AlgBatchCommitResult Fri3AlgBatchCommitConfigured(
         }
         std::vector<Fri3AlgDigest> leaves;
         {
-            alg_hash::StreamingRowHasher row_hasher(n_lde);
-            // Column-BLOCK pass 1: K column LDEs resident at a time.
-            const uint32_t K =
-                Fri3AlgStreamColumnBlockFor(n_lde);
-            std::vector<std::vector<Fp3>> block;
-            for (uint32_t c0 = 0; c0 < W; c0 += K) {
-                const uint32_t kc = std::min(K, W - c0);
-                BuildColumnLdeBlock(
-                    columns, c0, kc, n, block);
-                std::string stream_why;
-                if (!row_hasher.AbsorbColumnBlock(
-                        block, kc, &stream_why)) {
-                    out.note =
-                        "streaming row absorb: " + stream_why;
-                    return out;
-                }
-            }
-            std::string stream_why;
-            if (!row_hasher.Finalize(leaves, &stream_why)) {
-                out.note =
-                    "streaming row finalize: " + stream_why;
+            // Routes through the GPU splice when BTX_GPU_ROWLEAF selects it
+            // (see RowLeafDigestsStreamingGpu): the real recursion-node
+            // width (W ~ 385k) is memory-infeasible densely, so this
+            // streaming branch is the ONLY row-commit path it ever takes.
+            std::string stream_note;
+            if (!RowLeafDigestsStreamingCpuOrGpu(columns, n_lde, n, leaves,
+                                                &stream_note)) {
+                out.note = stream_note;
                 return out;
             }
         }
