@@ -450,6 +450,21 @@ struct RCStage3VerifiedEndpointMaterial {
  *    absolute position is not, and the section set covers one round of
  *    `expected_rounds`;
  *  - ProtocolConstant endpoints are pinned to a placeholder, not to block data.
+ *
+ * COST, MEASURED on real block 101 — a verifier-side check that cannot be
+ * recomputed per call is not a check, so the expensive artefact is produced
+ * ONCE by the producer and only VERIFIED here:
+ *   episode digest root chain PROVE  161.6 s (1 round) / 250.9 s (2 rounds)
+ *   whole provenance case wall       196.4 s, max RSS 1,101,848 KiB
+ * The remaining 34.8 s covers 18 material verifications plus 7 FRI section
+ * proves, 6 FRI section verifies, the episode recompute and the tile-tree
+ * build, so ONE material verification is under ~1.9 s. That is an upper bound,
+ * not a measurement of the verification alone.
+ *
+ * KNOWN INEFFICIENCY: VerifyRCStage3RoleAirSectionsWithProvenance re-verifies
+ * the same digest chain once per section (6x per proof) because the material
+ * check lives inside this per-section entry point. Hoisting it to one per proof
+ * is a straightforward follow-up and changes no verdict.
  */
 [[nodiscard]] bool VerifyRCStage3RoleAirSectionEndpointProvenance(
     const RCStage3SuccinctProof& statement,
