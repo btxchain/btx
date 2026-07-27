@@ -198,6 +198,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_provenance_graph_tests.cpp
   matmul_v4_rc_stage3_semantic_status_tests.cpp
   matmul_v4_rc_stage3_semantic_root_closure_tests.cpp
+  matmul_v4_rc_stage3_semantic_endpoint_program_bridge_tests.cpp
   matmul_v4_rc_stage3_verifier_air_tests.cpp
   matmul_v4_rc_stage3_verify_tests.cpp
   matmul_v4_rc_gkr_wiring_tests.cpp
