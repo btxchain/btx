@@ -1310,13 +1310,36 @@ bool VerifyRCStage3RecursiveProof(const RCStage3SuccinctProof& statement,
     }
     const uint256 seed = ComputeRCStage3RecursiveRoleSeed(
         statement, proof.role, proof.fixed_role_commitment, position);
-    // P4 cross-slot replay gate: every child receipt's pinned FS challenge must
-    // re-derive from the position-bound child FS point. A pin proved for another
-    // (node_id, slot_index) fails here before the aggregate verify.
+    // Child FS binding for air_lambda. Two bases are honest:
+    //
+    //  * In-memory research carriers (episode recursion prototypes,
+    //    ProveRCStage3RecursiveProof) set proof.child_fs_seed to the seed the
+    //    children were actually proved under. Re-derive with
+    //    AirChallengeDigestSelected on that seed — byte-identical to
+    //    ExtractChildPublicInputs / AirQuotientProve. Using role_seed here was
+    //    the latent air_lambda_position_mismatch once g4 closed
+    //    cryptographic_verification_ready (SHA-vs-P2 made it visible first;
+    //    role_seed≠prove_seed remains wrong even on a single hash).
+    //
+    //  * Carriers without child_fs_seed keep the P4 ChildFsPoint(role_seed,
+    //    slot) path (unit-tested in fs_point_binds_node_and_slot_position_p4).
     for (uint32_t slot = 0; slot < pis.size(); ++slot) {
         const RCStage3RecursivePosition child_position{position.node_id, slot};
-        if (!VerifyRCStage3RecursiveChildFsBinding(
-                seed, proof.role, child_position, pis[slot], why)) {
+        if (!proof.child_fs_seed.IsNull()) {
+            const uint256 trace_commit =
+                Fri3AlgDigestToUint256(pis[slot].rt_root);
+            const std::vector<uint256> roots{trace_commit};
+            const uint256 digest = air_quotient::AirChallengeDigestSelected(
+                air_quotient::kAirChallengeP2Activated, proof.child_fs_seed,
+                "airq_lambda", roots,
+                {pis[slot].child_n_rows, pis[slot].child_quotient_len,
+                 pis[slot].child_w});
+            const Fp3 expected = gkr_field::FromChallengeBytes3(digest.data());
+            if (!gkr_field::Eq(pis[slot].air_lambda, expected)) {
+                return Fail(why, "child_fs_binding:air_lambda_position_mismatch");
+            }
+        } else if (!VerifyRCStage3RecursiveChildFsBinding(
+                       seed, proof.role, child_position, pis[slot], why)) {
             return false;
         }
     }
@@ -1401,6 +1424,7 @@ RCStage3RecursiveProveResult ProveRCStage3RecursiveProof(
         return out;
     }
     out.proof.root = std::move(aggregate.proof);
+    out.proof.child_fs_seed = child_fs_seed;
     out.proof.children.reserve(aggregate.pis.size());
     for (auto& pi : aggregate.pis) {
         // Same reasoning as preliminary_pins above: thread the real roots
