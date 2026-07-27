@@ -615,11 +615,88 @@ void AddU32Job(
 
 } // namespace
 
+namespace {
+
+Q96CapAuditV1 AuditQ96TwoShardImplV1(
+    uint32_t child_columns,
+    uint32_t child_constraints,
+    uint32_t assumed_instructions_per_constraint,
+    uint32_t relation_receipts_per_query_shard,
+    const aq::AirConstraintSystem<Fp3>* verifier_cs);
+
+} // namespace
+
 Q96CapAuditV1 AuditQ96TwoShardV1(
     uint32_t child_columns,
     uint32_t child_constraints,
     uint32_t assumed_instructions_per_constraint,
     uint32_t relation_receipts_per_query_shard)
+{
+    return AuditQ96TwoShardImplV1(
+        child_columns,
+        child_constraints,
+        assumed_instructions_per_constraint,
+        relation_receipts_per_query_shard,
+        nullptr);
+}
+
+namespace {
+
+uint32_t MaxConstraintDegree(
+    const aq::AirConstraintSystem<Fp3>& cs)
+{
+    uint32_t out = 0;
+    for (const auto& constraint : cs.constraints) {
+        out = std::max(
+            out, constraint.alg_degree);
+    }
+    return out;
+}
+
+uint64_t LdeRowsForShape(
+    const aq::AirConstraintSystem<Fp3>& profile,
+    uint32_t trace_rows)
+{
+    if (trace_rows < 2) return 0;
+    auto cs = profile;
+    cs.n_rows = trace_rows;
+    const uint32_t quotient_len =
+        cs.QuotientLen();
+    const uint32_t coefficients =
+        FriNextPow2(
+            std::max(
+                trace_rows, quotient_len));
+    return uint64_t{coefficients} *
+        kRCFriBlowup;
+}
+
+uint32_t MaximumTraceRowsForProfile(
+    const aq::AirConstraintSystem<Fp3>& profile)
+{
+    uint32_t out = 0;
+    for (uint32_t rows = 2;
+         rows <= rv::kTraceRowsCapV1;
+         rows <<= 1) {
+        const uint64_t lde =
+            LdeRowsForShape(profile, rows);
+        if (lde == 0 ||
+            lde > rv::kLdeRowsCapV1) {
+            break;
+        }
+        out = rows;
+        if (rows == rv::kTraceRowsCapV1) {
+            break;
+        }
+    }
+    return out;
+}
+
+Q96CapAuditV1 AuditQ96TwoShardImplV1(
+    uint32_t child_columns,
+    uint32_t child_constraints,
+    uint32_t assumed_instructions_per_constraint,
+    uint32_t relation_receipts_per_query_shard,
+    const aq::AirConstraintSystem<Fp3>* verifier_cs)
 {
     Q96CapAuditV1 out;
     out.child_columns = child_columns;
@@ -668,25 +745,45 @@ Q96CapAuditV1 AuditQ96TwoShardV1(
     out.rounded_trace_rows =
         NextPowerOfTwo(
             out.raw_rows_per_shard);
-    uint64_t lde = 0;
-    if (out.rounded_trace_rows != 0 &&
-        CheckedMul(
-            out.rounded_trace_rows,
-            kRCFriBlowup, lde) &&
-        lde <=
-            std::numeric_limits<
-                uint32_t>::max()) {
-        out.lde_rows =
-            static_cast<uint32_t>(lde);
-    }
-    out.maximum_rows_per_query =
-        rv::kTraceRowsCapV1 /
-        kQ96QueriesPerShardV1;
-    if (out.rows_per_query <=
-        out.maximum_rows_per_query) {
-        out.rows_per_query_headroom =
-            out.maximum_rows_per_query -
-            out.rows_per_query;
+    const bool exact_cs =
+        verifier_cs != nullptr &&
+        verifier_cs->n_rows ==
+            out.rounded_trace_rows &&
+        verifier_cs->n_columns != 0 &&
+        !verifier_cs->constraints.empty();
+    if (exact_cs) {
+        out.maximum_algebraic_degree =
+            MaxConstraintDegree(*verifier_cs);
+        out.quotient_len =
+            verifier_cs->QuotientLen();
+        out.coefficient_domain_rows =
+            FriNextPow2(
+                std::max(
+                    out.rounded_trace_rows,
+                    out.quotient_len));
+        const uint64_t lde =
+            uint64_t{
+                out.coefficient_domain_rows} *
+            kRCFriBlowup;
+        if (out.maximum_algebraic_degree != 0 &&
+            out.quotient_len != 0 &&
+            out.coefficient_domain_rows != 0 &&
+            lde <=
+                std::numeric_limits<
+                    uint32_t>::max()) {
+            out.lde_rows =
+                static_cast<uint32_t>(lde);
+        }
+        out.maximum_rows_per_query =
+            MaximumTraceRowsForProfile(
+                *verifier_cs) /
+            kQ96QueriesPerShardV1;
+        if (out.rows_per_query <=
+            out.maximum_rows_per_query) {
+            out.rows_per_query_headroom =
+                out.maximum_rows_per_query -
+                out.rows_per_query;
+        }
     }
     uint64_t q64_receipts = 0;
     uint64_t q96_receipts = 0;
@@ -716,23 +813,47 @@ Q96CapAuditV1 AuditQ96TwoShardV1(
         out.rounded_trace_rows <=
             rv::kTraceRowsCapV1;
     out.fits_lde_cap =
+        exact_cs &&
         out.lde_rows != 0 &&
         out.lde_rows <=
             rv::kLdeRowsCapV1;
+    out.actual_constraint_system_supplied =
+        exact_cs;
     out.valid_as_capacity_evaluation =
         out.exact_single_q192_partition &&
         !out.independent_query_lanes &&
         out.fits_trace_cap &&
         out.fits_lde_cap &&
+        out.actual_constraint_system_supplied &&
         !out.executable_program_inventory_measured;
     out.note =
         out.valid_as_capacity_evaluation
         ? "stage3:v11_receipt_join:q96:"
-          "capacity_fits_at_caps;"
+          "degree_aware_actual_cs_fits;"
           "program_inventory_unmeasured"
+        : !exact_cs
+        ? "stage3:v11_receipt_join:q96:"
+          "actual_cs_required_for_lde"
         : "stage3:v11_receipt_join:q96:"
-          "capacity_not_closed";
+          "degree_aware_capacity_exceeded";
     return out;
+}
+
+} // namespace
+
+Q96CapAuditV1 AuditQ96TwoShardV1(
+    uint32_t child_columns,
+    uint32_t child_constraints,
+    uint32_t assumed_instructions_per_constraint,
+    uint32_t relation_receipts_per_query_shard,
+    const aq::AirConstraintSystem<Fp3>& verifier_cs)
+{
+    return AuditQ96TwoShardImplV1(
+        child_columns,
+        child_constraints,
+        assumed_instructions_per_constraint,
+        relation_receipts_per_query_shard,
+        &verifier_cs);
 }
 
 uint256 ComputeQ96ReceiptSetRootV1(

@@ -68,6 +68,9 @@ struct Q96CapAuditV1 {
     uint64_t rows_per_query{0};
     uint64_t raw_rows_per_shard{0};
     uint32_t rounded_trace_rows{0};
+    uint32_t maximum_algebraic_degree{0};
+    uint32_t quotient_len{0};
+    uint32_t coefficient_domain_rows{0};
     uint32_t lde_rows{0};
     uint64_t maximum_rows_per_query{0};
     uint64_t rows_per_query_headroom{0};
@@ -77,6 +80,7 @@ struct Q96CapAuditV1 {
     bool independent_query_lanes{false};
     bool fits_trace_cap{false};
     bool fits_lde_cap{false};
+    bool actual_constraint_system_supplied{false};
     bool executable_program_inventory_measured{false};
     bool valid_as_capacity_evaluation{false};
     std::string note;
@@ -92,6 +96,20 @@ struct Q96CapAuditV1 {
     uint32_t child_constraints,
     uint32_t assumed_instructions_per_constraint,
     uint32_t relation_receipts_per_query_shard);
+
+/**
+ * Degree-aware overload. `verifier_cs` must be the actual normalized
+ * verifier constraint system at the rounded Q96 trace shape. Its real
+ * AirKind/degree inventory determines QuotientLen, the coefficient domain,
+ * and therefore the LDE. Passing only row/instruction counts to the overload
+ * above deliberately leaves the LDE verdict open.
+ */
+[[nodiscard]] Q96CapAuditV1 AuditQ96TwoShardV1(
+    uint32_t child_columns,
+    uint32_t child_constraints,
+    uint32_t assumed_instructions_per_constraint,
+    uint32_t relation_receipts_per_query_shard,
+    const aq::AirConstraintSystem<gf::Fp3>& verifier_cs);
 
 struct Q96ReceiptSetV1 {
     std::array<

@@ -109,6 +109,22 @@ bool Different(const uint256& a, const uint256& b)
     return a.GetHex() != b.GetHex();
 }
 
+aq::AirConstraintSystem<gf::Fp3> CapacityCs(
+    uint32_t rows,
+    uint32_t degree,
+    aq::AirKind kind = aq::AirKind::kEverywhere)
+{
+    aq::AirConstraintSystem<gf::Fp3> out;
+    out.n_rows = rows;
+    out.n_columns = 1;
+    out.constraints.push_back({
+        "q96_capacity_profile", kind, degree,
+        [](const auto&, const auto&) {
+            return gf::Fp3::Zero();
+        }});
+    return out;
+}
+
 void RequireInexactProofRejected(
     const StatementV1& statement)
 {
@@ -139,56 +155,109 @@ BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_multirow_v11_receipt_join_tests)
 
 BOOST_AUTO_TEST_CASE(
-    q96_two_shard_capacity_is_exact_but_inventory_conditional)
+    q96_two_shard_capacity_uses_actual_quotient_domain)
 {
-    const auto audit =
+    const auto shape_only =
         AuditQ96TwoShardV1(
             1298, 1276, 5, 6);
-    BOOST_REQUIRE_MESSAGE(
-        audit.valid_as_capacity_evaluation,
-        audit.note);
-    BOOST_CHECK_EQUAL(
-        audit.rows_per_query, 7680U);
-    BOOST_CHECK_EQUAL(
-        audit.raw_rows_per_shard, 737280U);
-    BOOST_CHECK_EQUAL(
-        audit.rounded_trace_rows, 1048576U);
-    BOOST_CHECK_EQUAL(
-        audit.lde_rows, 16777216U);
-    BOOST_CHECK_EQUAL(
-        audit.maximum_rows_per_query, 10922U);
-    BOOST_CHECK_EQUAL(
-        audit.rows_per_query_headroom, 3242U);
-    BOOST_CHECK_EQUAL(
-        audit.q64_parent_leaf_receipts, 18U);
-    BOOST_CHECK_EQUAL(
-        audit.q96_parent_leaf_receipts, 12U);
     BOOST_CHECK(
-        audit.exact_single_q192_partition);
-    BOOST_CHECK(!audit.independent_query_lanes);
-    BOOST_CHECK(audit.fits_trace_cap);
-    BOOST_CHECK(audit.fits_lde_cap);
+        !shape_only.valid_as_capacity_evaluation);
+    BOOST_CHECK(shape_only.fits_trace_cap);
+    BOOST_CHECK(!shape_only.fits_lde_cap);
+    BOOST_CHECK_EQUAL(shape_only.lde_rows, 0U);
     BOOST_CHECK(
-        !audit
+        !shape_only.actual_constraint_system_supplied);
+    BOOST_CHECK(
+        !shape_only
              .executable_program_inventory_measured);
+
+    const auto degree_two =
+        AuditQ96TwoShardV1(
+            1298, 1276, 5, 6,
+            CapacityCs(1U << 20, 2));
+    BOOST_REQUIRE_MESSAGE(
+        degree_two.valid_as_capacity_evaluation,
+        degree_two.note);
+    BOOST_CHECK_EQUAL(
+        degree_two.rows_per_query, 7680U);
+    BOOST_CHECK_EQUAL(
+        degree_two.raw_rows_per_shard, 737280U);
+    BOOST_CHECK_EQUAL(
+        degree_two.rounded_trace_rows, 1048576U);
+    BOOST_CHECK_EQUAL(
+        degree_two.maximum_algebraic_degree, 2U);
+    BOOST_CHECK_EQUAL(
+        degree_two.quotient_len, 1048575U);
+    BOOST_CHECK_EQUAL(
+        degree_two.coefficient_domain_rows,
+        1048576U);
+    BOOST_CHECK_EQUAL(
+        degree_two.lde_rows, 16777216U);
+    BOOST_CHECK_EQUAL(
+        degree_two.maximum_rows_per_query, 10922U);
+    BOOST_CHECK_EQUAL(
+        degree_two.rows_per_query_headroom, 3242U);
+    BOOST_CHECK(
+        degree_two.exact_single_q192_partition);
+    BOOST_CHECK(!degree_two.independent_query_lanes);
+    BOOST_CHECK(degree_two.fits_trace_cap);
+    BOOST_CHECK(degree_two.fits_lde_cap);
+    BOOST_CHECK(
+        degree_two.actual_constraint_system_supplied);
+    BOOST_CHECK(
+        !degree_two
+            .executable_program_inventory_measured);
+
+    const auto degree_three =
+        AuditQ96TwoShardV1(
+            1298, 1276, 5, 6,
+            CapacityCs(1U << 20, 3));
+    BOOST_CHECK(
+        !degree_three.valid_as_capacity_evaluation);
+    BOOST_CHECK(degree_three.fits_trace_cap);
+    BOOST_CHECK(!degree_three.fits_lde_cap);
+    BOOST_CHECK(
+        degree_three.actual_constraint_system_supplied);
+    BOOST_CHECK_EQUAL(
+        degree_three.maximum_algebraic_degree, 3U);
+    BOOST_CHECK_EQUAL(
+        degree_three.quotient_len, 2097150U);
+    BOOST_CHECK_EQUAL(
+        degree_three.coefficient_domain_rows,
+        2097152U);
+    BOOST_CHECK_EQUAL(
+        degree_three.lde_rows, 33554432U);
+    BOOST_CHECK_EQUAL(
+        degree_three.maximum_rows_per_query, 5461U);
+    BOOST_CHECK_EQUAL(
+        degree_three.rows_per_query_headroom, 0U);
+    BOOST_CHECK_EQUAL(
+        degree_three.q64_parent_leaf_receipts, 18U);
+    BOOST_CHECK_EQUAL(
+        degree_three.q96_parent_leaf_receipts, 12U);
+
     BOOST_TEST_MESSAGE(
         "V11_Q96_CAP"
         << " rows_per_query="
-        << audit.rows_per_query
+        << degree_three.rows_per_query
         << " raw_rows="
-        << audit.raw_rows_per_shard
+        << degree_three.raw_rows_per_shard
         << " trace_rows="
-        << audit.rounded_trace_rows
-        << " lde_rows=" << audit.lde_rows
-        << " headroom_rows_per_query="
-        << audit.rows_per_query_headroom
+        << degree_three.rounded_trace_rows
+        << " degree2_lde="
+        << degree_two.lde_rows
+        << " degree3_lde="
+        << degree_three.lde_rows
+        << " degree3_quotient="
+        << degree_three.quotient_len
         << " leaf_receipts="
-        << audit.q64_parent_leaf_receipts
+        << degree_three.q64_parent_leaf_receipts
         << "->"
-        << audit.q96_parent_leaf_receipts
+        << degree_three.q96_parent_leaf_receipts
         << " one_q192_transcript=1"
         << " independent_lanes=0"
-        << " inventory_conditional=1");
+        << " missing_cs_fails_closed=1"
+        << " degree3_over_cap=1");
 
     BOOST_CHECK(
         !AuditQ96TwoShardV1(
