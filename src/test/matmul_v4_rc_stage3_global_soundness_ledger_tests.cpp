@@ -561,7 +561,7 @@ BOOST_AUTO_TEST_CASE(
     // kRCStage3ParentOwnFriFullArityRoundTripMeasured (live column_cap_admits
     // AND measured prove+verify+tamper/wrong-seed reject). With g4 already
     // closed on tip, self_similar_fixed_point_closed flips true. all_clear
-    // remains false on g0/g2.
+    // remains false on g2 (g0 closed by CoupledReady + MathVerifierReady).
     const auto parent_own_fri =
         ledger::AssessParentOwnFriFullArityV1();
     BOOST_CHECK(!parent_own_fri.heavy_gate_enabled);
@@ -573,7 +573,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(audit.composition_gate.child_fiat_shamir_replay_closed);
     BOOST_CHECK(audit.composition_gate.self_similar_fixed_point_closed);
 
-    // --- Live certified_bits stays a computed zero (g0/g2 still open).
+    // --- Live certified_bits stays a computed zero (g2 still open).
     BOOST_CHECK(!audit.composition_gate.all_clear);
     BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
 }
