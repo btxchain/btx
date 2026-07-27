@@ -318,6 +318,23 @@ struct RCStage3RecursiveProveResult {
 inline constexpr uint32_t kRCStage3MeasuredLevel2CapCrossoverChildColumns =
     2048;
 
+/**
+ * Narrow L2 multi-child FRI consume pins (ExecuteNarrowMultiChildL2FriConsumeV1).
+ * Remeasured 2026-07-27 by BTX_RUN_G2_MULTI_CHILD_L2=1 light arity-2 canary
+ * (wt-pr95-g2-budget/build-budget, MemoryMax=12G): verify_us=486898,
+ * batch_bytes=5201292, root_bytes=8092848 — both inside 900ms / 16 MiB.
+ * Extract engine receipts (~836 MiB) are intentionally NOT these pins.
+ */
+inline constexpr bool kRCStage3NarrowL2RootProofProducedMeasured = true;
+inline constexpr bool kRCStage3NarrowL2RootVerifyMeasured = true;
+inline constexpr uint64_t kRCStage3MeasuredNarrowL2RootVerifyMicros = 486898;
+inline constexpr uint32_t kRCStage3MeasuredNarrowL2VcsColumns = 575;
+inline constexpr uint32_t kRCStage3MeasuredNarrowL2Arity = 2;
+inline constexpr uint64_t kRCStage3MeasuredNarrowL2SerializeBatchBytes =
+    5201292;
+inline constexpr uint64_t kRCStage3MeasuredNarrowL2SerializeRootBytes =
+    8092848;
+
 struct RCStage3TwoLevelRootVerifyBudgetV1 {
     /** The consensus relay budget the gap string names. */
     uint32_t relay_budget_millis{900};
@@ -392,7 +409,33 @@ struct RCStage3TwoLevelRootVerifyBudgetV1 {
     uint32_t measured_narrow_multichild_arity{0};
     bool narrow_multichild_within_relay_budget{false};
     bool narrow_multichild_complete_verifier_mirror{false};
-    /** The only conjunction that may retire the gap. */
+    /**
+     * g2 NARROW L2 TWO-LEVEL ROOT — ExecuteNarrowMultiChildL2FriConsumeV1
+     * (BuildFoldBusCompositionMulti cryptographic join of ≥2 L1 proofs).
+     * Distinct from the real-block narrow multi-child node above and from
+     * the dense full-family mirror. MEASURED by
+     * matmul_v4_rc_stage3_recursive_fixedpoint_tests.cpp under
+     * BTX_RUN_G2_MULTI_CHILD_L2=1 (light arity-2 boolean children):
+     * verify wall-clock and SerializeFri3AlgBatchProof family-root size.
+     *
+     * This is the path CompositionReadinessGate g2 actually gates toward
+     * once hier wiring + SHA-FS join. Dense production_shape_representable
+     * remains false; Extract engine receipts (~836 MiB) are NOT this pin.
+     */
+    bool narrow_l2_root_proof_produced{false};
+    bool narrow_l2_root_verify_wall_clock_measured{false};
+    uint64_t measured_narrow_l2_root_verify_micros{0};
+    uint32_t measured_narrow_l2_vcs_columns{0};
+    uint32_t measured_narrow_l2_arity{0};
+    uint64_t measured_narrow_l2_serialize_batch_bytes{0};
+    uint64_t measured_narrow_l2_serialize_root_bytes{0};
+    bool narrow_l2_within_relay_budget{false};
+    bool narrow_l2_serialize_within_fri_budget{false};
+    /**
+     * The only conjunction that may retire ProductionPerformanceUnmeasured.
+     * Dense full-family OR measured narrow L2 two-level verify ≤900ms.
+     * Serialize ≤16 MiB is a SEPARATE ledger conjunct (codec residual).
+     */
     bool within_relay_budget{false};
     std::string note;
 };

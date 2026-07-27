@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
 #include <matmul/matmul_v4_rc_stage3_episode_header_target.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
+#include <matmul/matmul_v4_rc_stage3_recursive.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
@@ -4697,6 +4698,18 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(consumed.n_rows, shape.n_rows);
     BOOST_CHECK_GT(consumed.prove_micros, 0ULL);
     BOOST_CHECK_GT(consumed.verify_micros, 0ULL);
+    BOOST_CHECK_GT(consumed.serialize_batch_bytes, 0ULL);
+    BOOST_CHECK_GE(
+        consumed.serialize_root_bytes,
+        consumed.serialize_batch_bytes);
+    BOOST_CHECK_LE(
+        consumed.serialize_batch_bytes,
+        rc::kRCFriMaxProofBytesHard);
+    BOOST_CHECK_MESSAGE(
+        consumed.verify_within_relay_budget,
+        "narrow L2 verify missed 900ms relay budget: us=" +
+            std::to_string(consumed.verify_micros));
+    BOOST_CHECK(consumed.serialize_within_fri_budget);
     BOOST_TEST_MESSAGE(consumed.note);
     BOOST_TEST_MESSAGE(
         "MULTI_CHILD_L2_FRI arity=" << consumed.arity
@@ -4706,12 +4719,55 @@ BOOST_AUTO_TEST_CASE(
         << " n_lde=" << consumed.n_lde
         << " prove_us=" << consumed.prove_micros
         << " verify_us=" << consumed.verify_micros
+        << " batch_bytes=" << consumed.serialize_batch_bytes
+        << " root_bytes=" << consumed.serialize_root_bytes
+        << " verify_within_budget="
+        << consumed.verify_within_relay_budget
+        << " serialize_within_fri="
+        << consumed.serialize_within_fri_budget
         << " forgery=1 complete_fp=false");
+
+    // Pin congruence: recorded budget must match this canary's measured
+    // verify/serialize. Ready / AggregationReady stay false.
+    const auto budget =
+        rc::CurrentRCStage3TwoLevelRootVerifyBudgetV1();
+    BOOST_CHECK_EQUAL(budget.measured_narrow_l2_vcs_columns, 575U);
+    BOOST_CHECK_EQUAL(budget.measured_narrow_l2_arity, 2U);
+    BOOST_CHECK(budget.narrow_l2_root_proof_produced);
+    BOOST_CHECK(budget.narrow_l2_root_verify_wall_clock_measured);
+    BOOST_CHECK(budget.narrow_l2_within_relay_budget);
+    BOOST_CHECK(budget.narrow_l2_serialize_within_fri_budget);
+    BOOST_CHECK(budget.within_relay_budget);
+    BOOST_CHECK_EQUAL(
+        budget.measured_narrow_l2_root_verify_micros,
+        rc::kRCStage3MeasuredNarrowL2RootVerifyMicros);
+    BOOST_CHECK_EQUAL(
+        budget.measured_narrow_l2_serialize_batch_bytes,
+        rc::kRCStage3MeasuredNarrowL2SerializeBatchBytes);
+    // Canary remasure must stay within a factor of the pinned verify
+    // (machine noise); pin itself is the ledger authority.
+    BOOST_CHECK_LE(consumed.verify_micros, 900000ULL);
+    BOOST_CHECK_LE(
+        consumed.serialize_batch_bytes,
+        rc::kRCFriMaxProofBytesHard);
+    BOOST_TEST_MESSAGE(
+        "BUDGET_PIN within_relay_budget="
+        << budget.within_relay_budget
+        << " narrow_l2_within="
+        << budget.narrow_l2_within_relay_budget
+        << " narrow_l2_serialize_within_fri="
+        << budget.narrow_l2_serialize_within_fri_budget
+        << " pinned_verify_us="
+        << budget.measured_narrow_l2_root_verify_micros
+        << " pinned_batch_bytes="
+        << budget.measured_narrow_l2_serialize_batch_bytes
+        << " note=" << budget.note);
 
     static_assert(fp::kNarrowMultiChildL2FriConsumeExecutable);
     static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
+    static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

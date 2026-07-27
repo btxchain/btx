@@ -968,11 +968,13 @@ AssessExecutableGlobalSoundnessLedgerV1(
         CurrentRCStage3TwoLevelRootVerifyBudgetV1().within_relay_budget;
     // Codec-size residual (FRI hard proof-byte budget). Distinct from
     // ProductionPerformanceUnmeasured / within_relay_budget (verify wall-
-    // clock). Measured Extract root-batch row-vals lower bound ≫ 16 MiB, so
-    // this conjunct stays fail-closed until a within-budget serialize is
-    // remeasured and the pin flipped.
+    // clock). Gates on the MEASURED narrow L2 family-root
+    // SerializeFri3AlgBatchProof size — NOT Extract engine receipts
+    // (~836 MiB), which remain documented oversize evidence only.
     const bool mandatory_family_root_serialize_within_fri_budget =
-        kRCStage3MandatoryFamilyRootSerializeWithinFriBudgetMeasured;
+        kRCStage3MandatoryFamilyRootSerializeWithinFriBudgetMeasured &&
+        CurrentRCStage3TwoLevelRootVerifyBudgetV1()
+            .narrow_l2_serialize_within_fri_budget;
     const bool gate2_recursive_aggregation =
         kRCStage3RecursiveAggregationReady &&
         out.fiat_shamir_replay_complete &&

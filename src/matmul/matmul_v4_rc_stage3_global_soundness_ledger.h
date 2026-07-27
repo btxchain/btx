@@ -103,19 +103,34 @@ inline constexpr uint32_t
  * Mandatory-family V_CS root FRI serialize budget (codec residual).
  *
  * Episode recursion prototypes measure a row-vals lower bound BEFORE allocate
- * (Builder ~379 MiB / Wiring ~575 MiB / Extract ~836 MiB at Q=192) against
- * kRCFriMaxProofBytesHard (16 MiB). Soft-fail is correct for engine evidence,
- * but that size residual is NOT ProductionPerformanceUnmeasured (g2 verify
- * wall-clock) and was previously ORPHANED from CompositionReadinessGateV1.
+ * (Builder ~379 MiB / Wiring ~575 MiB / Extract ~836 MiB at Q=192). Those are
+ * ENGINE RECEIPTS for dense mandatory-family packaging — NOT family-root wire
+ * proofs on the narrow/recursive path g2 gates on. Soft-fail is correct for
+ * engine evidence; pretending they are wire proofs would lie about the codec.
  *
- * Pin the worst measured lower bound (Extract). Flip to a true within-budget
- * measurement only after a mandatory-family root actually serializes ≤ 16 MiB.
+ * g2's serialize conjunct gates on the MEASURED narrow L2 family-root
+ * SerializeFri3AlgBatchProof size below (must stay in sync with
+ * kRCStage3MeasuredNarrowL2SerializeBatchBytes in
+ * matmul_v4_rc_stage3_recursive.h). Flip only after that wire path actually
+ * serializes ≤ kRCFriMaxProofBytesHard.
  */
 inline constexpr uint64_t
     kRCStage3MeasuredExtractRootBatchRowValsLowerBoundBytes = 835'771'392ULL;
-inline constexpr bool kRCStage3MandatoryFamilyRootSerializeWithinFriBudgetMeasured =
-    kRCStage3MeasuredExtractRootBatchRowValsLowerBoundBytes <=
+/** Engine-receipt oversize evidence only — does NOT gate g2 serialize. */
+inline constexpr bool kRCStage3ExtractEngineReceiptOverFriBudget =
+    kRCStage3MeasuredExtractRootBatchRowValsLowerBoundBytes >
     static_cast<uint64_t>(kRCFriMaxProofBytesHard);
+/**
+ * Wire-path serialize pin (narrow L2 family-root batch). Must equal
+ * kRCStage3MeasuredNarrowL2SerializeBatchBytes (remeasured 2026-07-27:
+ * 5201292 ≤ 16 MiB). Extract engine receipts stay separate oversize evidence.
+ */
+inline constexpr uint64_t
+    kRCStage3MeasuredNarrowL2FamilyRootSerializeBatchBytes = 5201292;
+inline constexpr bool kRCStage3MandatoryFamilyRootSerializeWithinFriBudgetMeasured =
+    kRCStage3MeasuredNarrowL2FamilyRootSerializeBatchBytes != 0 &&
+    kRCStage3MeasuredNarrowL2FamilyRootSerializeBatchBytes <=
+        static_cast<uint64_t>(kRCFriMaxProofBytesHard);
 
 /**
  * g5 (self-similar fixed point), first conjunct: whether the full-arity
