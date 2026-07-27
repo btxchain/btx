@@ -848,12 +848,15 @@ bool VerifyRCStage3RecursiveChildFsBinding(
     // Re-derive the child's AIR-batching challenge from the position-bound FS
     // point exactly as air_recurse::ExtractChildPublicInputs derives it from the
     // raw seed (label "airq_lambda" over the trace-commit root and child dims).
+    // Route must follow aq::kAirChallengeP2Activated — ExtractChildPublicInputs
+    // and AirQuotientProve already select Poseidon2 when activated; a permanent
+    // SHA re-derive here is the air_lambda_position_mismatch after g4 joint P2.
     const uint256 point =
         ComputeRCStage3RecursiveChildFsPoint(base_child_fs_seed, role, position);
     const uint256 trace_commit = Fri3AlgDigestToUint256(pin.rt_root);
     const std::vector<uint256> roots{trace_commit};
-    const uint256 digest = air_quotient::AirChallengeDigest(
-        point, "airq_lambda", roots,
+    const uint256 digest = air_quotient::AirChallengeDigestSelected(
+        air_quotient::kAirChallengeP2Activated, point, "airq_lambda", roots,
         {pin.child_n_rows, pin.child_quotient_len, pin.child_w});
     const Fp3 expected = gkr_field::FromChallengeBytes3(digest.data());
     if (!gkr_field::Eq(pin.air_lambda, expected)) {
