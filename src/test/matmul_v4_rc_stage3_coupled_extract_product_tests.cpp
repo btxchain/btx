@@ -170,6 +170,56 @@ BOOST_AUTO_TEST_CASE(
             Statement(), Shape(), barrier, &why));
 }
 
+BOOST_AUTO_TEST_CASE(
+    proof_overlay_rebind_restores_flat_bundle_commitments)
+{
+    // Simulate engine verify: structural rebuild + wire proof public
+    // material that differs from StructuralProofRoots stubs.
+    auto product = StructuralProduct();
+    std::string why;
+    BOOST_REQUIRE(
+        !product.input_cells.shards.empty() &&
+        !product.input_cells.shards[0].proof.batch.columns.empty());
+    BOOST_REQUIRE(
+        !product.output_to_barrier.extract_outputs.shards.empty() &&
+        !product.output_to_barrier.extract_outputs.shards[0]
+             .proof.batch.columns.empty());
+    const uint256 stale_input = product.input_cells.bundle_commitment;
+    const uint256 stale_output =
+        product.output_to_barrier.extract_outputs.bundle_commitment;
+    const uint256 stale_link =
+        product.output_to_barrier.pin.link_commitment;
+    product.input_cells.shards[0].proof.trace_commit = H(0xab);
+    product.input_cells.shards[0].proof.batch.columns.back().root =
+        H(0xcd);
+    product.output_to_barrier.extract_outputs.shards[0].proof.trace_commit =
+        H(0xef);
+    product.output_to_barrier.extract_outputs.shards[0]
+        .proof.batch.columns.back()
+        .root = H(0x11);
+    BOOST_CHECK(
+        rc::ComputeRCStage3CoupledSemanticFlatBundleCommitment(
+            product.input_cells) != stale_input);
+    BOOST_REQUIRE_MESSAGE(
+        rc::RebindRCStage3CoupledExtractProductProofCommitments(
+            Statement(), Shape(), product, &why),
+        why);
+    BOOST_CHECK(
+        product.input_cells.bundle_commitment ==
+        rc::ComputeRCStage3CoupledSemanticFlatBundleCommitment(
+            product.input_cells));
+    BOOST_CHECK(product.input_cells.bundle_commitment != stale_input);
+    BOOST_CHECK(
+        product.output_to_barrier.extract_outputs.bundle_commitment !=
+        stale_output);
+    BOOST_CHECK(
+        product.output_to_barrier.pin.link_commitment != stale_link);
+    BOOST_CHECK_MESSAGE(
+        rc::ValidateRCStage3CoupledExtractProductSchedule(
+            Statement(), Shape(), product, &why),
+        why);
+}
+
 BOOST_AUTO_TEST_CASE(full_exact_prove_verify_optional)
 {
     if (std::getenv(

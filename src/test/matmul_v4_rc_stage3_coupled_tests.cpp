@@ -1338,6 +1338,7 @@ BOOST_AUTO_TEST_CASE(coupled_extract_engine_opt_in_roundtrip)
         rc::BuildRCStage3CoupledExtractEngineReceipt(
             statement, shape, inputs, receipt, root, &why),
         why);
+    BOOST_TEST_MESSAGE("ExtractTilesV1 bytes=" << receipt.size());
     uint256 verified;
     BOOST_REQUIRE_MESSAGE(
         rc::VerifyRCStage3CoupledExtractEngineReceipt(
