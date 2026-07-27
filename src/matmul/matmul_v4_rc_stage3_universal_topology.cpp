@@ -319,6 +319,15 @@ ByteCommitmentPairV1 CommitCanonicalBytesV1(
     return out;
 }
 
+std::vector<alg_hash::Fp>
+BuildProductionProgramRegistryAlgHashPreimageV1(
+    const ProductionProgramRegistryV1& registry)
+{
+    return BytesToAlgPreimage(
+        REGISTRY_BYTES_DOMAIN,
+        RegistryBytes(registry));
+}
+
 ProductionProgramRegistryV1 BuildProductionProgramRegistryV1(
     const sites::ProductionProofSiteManifest& manifest,
     const sched::ProductionAggregationSchedule& schedule,

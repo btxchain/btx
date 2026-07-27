@@ -36,10 +36,27 @@ struct ByteCommitmentPairV1 {
     bool operator==(const ByteCommitmentPairV1&) const = default;
 };
 
+struct ProductionProgramRegistryV1;
+
 /** Both digests commit the same length-delimited bytes. */
 [[nodiscard]] ByteCommitmentPairV1 CommitCanonicalBytesV1(
     const char* domain,
     const std::vector<unsigned char>& bytes);
+
+/**
+ * Canonical field preimage consumed by the recursive AlgHash registry
+ * commitment.  This is intentionally exported: the normalized parent must
+ * replay the exact registry sponge in AIR rather than trust a host-side
+ * resolver or a caller-selected ProgramTable.
+ *
+ * Every payload lane is one little-endian u32 packed from the canonical
+ * registry bytes (plus length-delimited domain framing), so every lane is
+ * injective in the Goldilocks base field.  In particular, no u64 x/x+p alias
+ * is introduced at this boundary.
+ */
+[[nodiscard]] std::vector<alg_hash::Fp>
+BuildProductionProgramRegistryAlgHashPreimageV1(
+    const ProductionProgramRegistryV1& registry);
 
 /**
  * Build-time source for one immutable production family. The ProgramTable is
