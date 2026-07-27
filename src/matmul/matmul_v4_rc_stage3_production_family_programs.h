@@ -129,6 +129,28 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::CoupledDigestHash only;
      * BankAndBarriers and Value remain unclosed by any family. */
     CoupledDigestHashKernel = 11,
+    /** BuildRCStage3CoupledLocalKernelProgramTable(CoupledMix): the 280-column
+     * limb-reconstructed uint64 add/sub identity (A+B and B-A with per-limb
+     * carry/borrow), already exercised in production by
+     * BuildRCStage3CoupledMixedRoleAir / the coupled-mix role product.
+     * Closes RCStage3RelationEndpoint::CoupledMixArithmetic only; Input,
+     * Output and the public butterfly/rotate schedule remain unclosed. */
+    CoupledMixArithmeticKernel = 12,
+    /** BuildRCStage3CoupledPermutationTransportProgramTable: the six-
+     * constraint indexed-permutation LogUp grand-product transport lane
+     * (14 columns, challenge-independent beta/gamma class), already
+     * differentially tested against the native coupled permutation product.
+     * Closes RCStage3RelationEndpoint::CoupledPermutationOutput only; Input
+     * and the bit-affine schedule XOF remain unclosed by any family. */
+    CoupledPermutationTransport = 13,
+    /** BuildRCStage3CoupledExchangeTransportProgramTable: the same two
+     * LogUp grand-product lanes as CoupledPermutationTransport, over the
+     * 214-column material-exchange layout (mixed-limb source, output-limb
+     * destination). Mixing boolean/xor/limb-recompose constraints stay
+     * pre-challenge and are not claimed here.
+     * Closes RCStage3RelationEndpoint::CoupledExchangeOutput only; Input
+     * and HashXof remain unclosed by any family. */
+    CoupledExchangeTransport = 14,
 };
 
 /**

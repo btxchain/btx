@@ -169,6 +169,37 @@ bool RealFamilyFor(
         }
         endpoint = RCStage3RelationEndpoint::CoupledDigestHash;
         return true;
+    case sites::ProductionProofSiteKind::CoupledMix:
+        if (role != RCStage3RelationRole::CoupledMix) return false;
+        // Full limb-reconstructed add/sub kernel (not the trivial
+        // Exchange/Permutation copy check). Schedule binding remains a
+        // residual Gap() on the coupled-air resolver.
+        if (!BuildRCStage3CoupledLocalKernelProgramTable(
+                RCStage3RelationRole::CoupledMix, program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledMixArithmetic;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledPermutation:
+        if (role != RCStage3RelationRole::CoupledPermutation) return false;
+        // Prefer the migrated LogUp transport over the trivial local copy
+        // kernel: the transport binds indexed source/dest limbs, so it can
+        // honestly claim CoupledPermutationOutput. Input + schedule XOF stay
+        // unclosed.
+        if (!BuildRCStage3CoupledPermutationTransportProgramTable(
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledPermutationOutput;
+        return true;
+    case sites::ProductionProofSiteKind::CoupledExchange:
+        if (role != RCStage3RelationRole::CoupledExchange) return false;
+        if (!BuildRCStage3CoupledExchangeTransportProgramTable(
+                program, why)) {
+            return false;
+        }
+        endpoint = RCStage3RelationEndpoint::CoupledExchangeOutput;
+        return true;
     default:
         return false;
     }

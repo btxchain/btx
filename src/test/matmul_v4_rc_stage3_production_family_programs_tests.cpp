@@ -5,9 +5,11 @@
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
 #include <algorithm>
+#include <array>
 
 namespace rc = matmul::v4::rc;
 namespace ut = rc::universal_topology;
@@ -251,6 +253,50 @@ BOOST_AUTO_TEST_CASE(
             rc::RCStage3RelationEndpoint::CoupledDigestHash));
     BOOST_CHECK(coupled_digest.semantic_relation_complete);
 
+    const size_t coupled_mix_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledMix);
+    const auto& coupled_mix = sources[coupled_mix_idx];
+    BOOST_CHECK(coupled_mix.role == rc::RCStage3RelationRole::CoupledMix);
+    BOOST_CHECK_EQUAL(
+        coupled_mix.program.current_width, rc::coupled_air_col::MIX_NUM_COLS);
+    BOOST_CHECK_EQUAL(coupled_mix.program.programs.size(), 288U);
+    BOOST_REQUIRE_EQUAL(coupled_mix.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_mix.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledMixArithmetic));
+    BOOST_CHECK(coupled_mix.semantic_relation_complete);
+
+    const size_t coupled_perm_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledPermutation);
+    const auto& coupled_perm = sources[coupled_perm_idx];
+    BOOST_CHECK(
+        coupled_perm.role == rc::RCStage3RelationRole::CoupledPermutation);
+    BOOST_CHECK_EQUAL(coupled_perm.program.current_width, 14U);
+    BOOST_CHECK_EQUAL(coupled_perm.program.challenge_width, 12U);
+    BOOST_CHECK_EQUAL(coupled_perm.program.programs.size(), 6U);
+    BOOST_REQUIRE_EQUAL(coupled_perm.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_perm.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledPermutationOutput));
+    BOOST_CHECK(coupled_perm.semantic_relation_complete);
+
+    const size_t coupled_exch_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledExchange);
+    const auto& coupled_exch = sources[coupled_exch_idx];
+    BOOST_CHECK(
+        coupled_exch.role == rc::RCStage3RelationRole::CoupledExchange);
+    BOOST_CHECK_EQUAL(coupled_exch.program.current_width, 214U);
+    BOOST_CHECK_EQUAL(coupled_exch.program.challenge_width, 12U);
+    BOOST_CHECK_EQUAL(coupled_exch.program.programs.size(), 6U);
+    BOOST_REQUIRE_EQUAL(coupled_exch.semantic_endpoints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        coupled_exch.semantic_endpoints[0],
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledExchangeOutput));
+    BOOST_CHECK(coupled_exch.semantic_relation_complete);
+
     // A site this session did not reach stays an honest, INCOMPLETE stub:
     // one column, one constraint, no endpoint claim -- not "complete" the way
     // the *_tests.cpp OneColumnProgram helper would mark it.
@@ -267,8 +313,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         status.families_total,
         static_cast<uint32_t>(manifest.entries.size()));
-    BOOST_CHECK_EQUAL(status.families_real, 11U);
-    BOOST_CHECK_EQUAL(status.roles_with_real_program, 11U);
+    BOOST_CHECK_EQUAL(status.families_real, 14U);
+    BOOST_CHECK_EQUAL(status.roles_with_real_program, 14U);
     BOOST_CHECK_EQUAL(status.roles_total, 14U);
     const std::vector<rc::RCStage3RelationRole> expected_roles{
         rc::RCStage3RelationRole::EpisodeDeterministicBuilder,
@@ -279,6 +325,9 @@ BOOST_AUTO_TEST_CASE(
         rc::RCStage3RelationRole::EpisodeDigest,
         rc::RCStage3RelationRole::CoupledBank,
         rc::RCStage3RelationRole::CoupledGemm,
+        rc::RCStage3RelationRole::CoupledExchange,
+        rc::RCStage3RelationRole::CoupledPermutation,
+        rc::RCStage3RelationRole::CoupledMix,
         rc::RCStage3RelationRole::CoupledExtract,
         rc::RCStage3RelationRole::CoupledBarrier,
         rc::RCStage3RelationRole::CoupledDigest};
@@ -302,6 +351,12 @@ BOOST_AUTO_TEST_CASE(
             rc::RCStage3RelationEndpoint::CoupledBankPages),
         static_cast<uint16_t>(
             rc::RCStage3RelationEndpoint::CoupledGemmOutputY),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledExchangeOutput),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledPermutationOutput),
+        static_cast<uint16_t>(
+            rc::RCStage3RelationEndpoint::CoupledMixArithmetic),
         static_cast<uint16_t>(
             rc::RCStage3RelationEndpoint::CoupledExtractSampler),
         static_cast<uint16_t>(
@@ -328,7 +383,7 @@ BOOST_AUTO_TEST_CASE(
     const auto registry = ut::BuildProductionProgramRegistryV1(
         manifest, schedule, sources, verifier, verifier);
     BOOST_REQUIRE(!registry.external_registry_commitment.IsNull());
-    // Honest: only 11 of 28 families are real, so the registry-wide
+    // Honest: only 14 of 28 families are real, so the registry-wide
     // completeness flag must stay false. A registry that flips this true
     // from stub-only or partially-real families would be exactly the
     // structural-only theatre this module exists to avoid.
@@ -406,6 +461,28 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(coupled_digest_entry.constraint_count, 462U);
     BOOST_CHECK(coupled_digest_entry.semantic_relation_complete);
 
+    const size_t coupled_mix_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledMix);
+    const auto& coupled_mix_entry = registry.families[coupled_mix_idx];
+    BOOST_CHECK_EQUAL(
+        coupled_mix_entry.maximum_columns, rc::coupled_air_col::MIX_NUM_COLS);
+    BOOST_CHECK_EQUAL(coupled_mix_entry.constraint_count, 288U);
+    BOOST_CHECK(coupled_mix_entry.semantic_relation_complete);
+
+    const size_t coupled_perm_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledPermutation);
+    const auto& coupled_perm_entry = registry.families[coupled_perm_idx];
+    BOOST_CHECK_EQUAL(coupled_perm_entry.maximum_columns, 14U);
+    BOOST_CHECK_EQUAL(coupled_perm_entry.constraint_count, 6U);
+    BOOST_CHECK(coupled_perm_entry.semantic_relation_complete);
+
+    const size_t coupled_exch_idx = FindFamilyIndex(
+        manifest, ss::ProductionProofSiteKind::CoupledExchange);
+    const auto& coupled_exch_entry = registry.families[coupled_exch_idx];
+    BOOST_CHECK_EQUAL(coupled_exch_entry.maximum_columns, 214U);
+    BOOST_CHECK_EQUAL(coupled_exch_entry.constraint_count, 6U);
+    BOOST_CHECK(coupled_exch_entry.semantic_relation_complete);
+
     const size_t stub_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeGemmOpenings);
     const auto& stub_entry = registry.families[stub_idx];
@@ -422,7 +499,8 @@ BOOST_AUTO_TEST_CASE(
     for (const size_t real_idx :
          {builder_idx, gemm_idx, wiring_idx, extract_idx,
           coupled_bank_idx, coupled_gemm_idx, coupled_extract_idx,
-          coupled_barrier_idx, coupled_digest_idx}) {
+          coupled_barrier_idx, coupled_digest_idx, coupled_mix_idx,
+          coupled_perm_idx, coupled_exch_idx}) {
         auto tampered_sources = sources;
         auto& load = *std::find_if(
             tampered_sources[real_idx]
@@ -590,12 +668,64 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
     }
 
-    // --- CoupledExtract and the two coupled hash kernels (CoupledBarrier /
-    // CoupledDigest, 144-column / 462-constraint SHA-256 compression AIR)
-    // are, like EpisodeExtract above, differentially tested against their
-    // canonical constraint-system builders elsewhere
-    // (matmul_v4_rc_stage3_role_bytecode_tests.cpp); non-vacuity for all
-    // three is proved above by the registry-commitment tamper test.
+    // --- CoupledMix: 280-column limb-reconstructed add/sub. Synthetic
+    // a={0x1234..}, b={0x1111..} limbs with matching bit cells, sum, diff,
+    // carry and borrow (mirrors BuildScalarRoleKernelWitness). ---
+    {
+        using namespace rc::coupled_air_col;
+        const size_t idx = FindFamilyIndex(
+            manifest, ss::ProductionProofSiteKind::CoupledMix);
+        const auto& table = sources[idx].program;
+        std::vector<Fp3> row(MIX_NUM_COLS, Fp3::Zero());
+        const std::array<uint32_t, 4> a{0x1234u, 0x5678u, 0x9abcu, 0xdef0u};
+        const std::array<uint32_t, 4> b{0x1111u, 0x2222u, 0x3333u, 0x4444u};
+        std::array<uint32_t, 4> sum{}, carry{}, diff{}, borrow{};
+        uint32_t cin = 0;
+        uint32_t bin = 0;
+        for (uint32_t l = 0; l < 4; ++l) {
+            const uint32_t s = a[l] + b[l] + cin;
+            sum[l] = s & 0xFFFFu;
+            carry[l] = s >> 16;
+            cin = carry[l];
+            int32_t d = static_cast<int32_t>(b[l]) -
+                        static_cast<int32_t>(a[l]) -
+                        static_cast<int32_t>(bin);
+            if (d < 0) {
+                d += 0x10000;
+                borrow[l] = 1;
+            } else {
+                borrow[l] = 0;
+            }
+            diff[l] = static_cast<uint32_t>(d);
+            bin = borrow[l];
+        }
+        const std::array<uint32_t, 16> arith = {
+            a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3],
+            sum[0], sum[1], sum[2], sum[3],
+            diff[0], diff[1], diff[2], diff[3]};
+        for (uint32_t limb = 0; limb < 16; ++limb) {
+            row[limb] = U(arith[limb]);
+            for (uint32_t bit = 0; bit < 16; ++bit) {
+                row[MIX_BITS + limb * 16u + bit] =
+                    U((arith[limb] >> bit) & 1u);
+            }
+        }
+        for (uint32_t l = 0; l < 4; ++l) {
+            row[MIX_CARRY + l] = U(carry[l]);
+            row[MIX_BORROW + l] = U(borrow[l]);
+        }
+        const std::vector<Fp3> next(MIX_NUM_COLS, Fp3::Zero());
+        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        auto tampered = row;
+        tampered[MIX_SUM_LIMB] = U(sum[0] ^ 1u); // break add limb 0
+        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+    }
+
+    // --- CoupledPermutation / CoupledExchange transport lanes and the
+    // CoupledExtract / CoupledBarrier / CoupledDigest kernels are
+    // differentially tested against their canonical builders elsewhere
+    // (matmul_v4_rc_stage3_role_bytecode_tests.cpp); non-vacuity for those
+    // families is proved above by the registry-commitment tamper test.
 }
 
 BOOST_AUTO_TEST_SUITE_END()
