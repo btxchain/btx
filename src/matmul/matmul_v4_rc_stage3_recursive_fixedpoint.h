@@ -2830,17 +2830,45 @@ struct NarrowBytecodeHierarchicalAttachNodeResultV1 {
 };
 
 /**
+ * AIR-mirror of the L2 local-q join identity.
+ *
+ * Trace: one power-of-two row domain; column 0 is the bound opening
+ * (authenticated parent q when absolute, Σ local_q when relative); columns
+ * 1..S carry shard openings. Everywhere residual Σ shards − bound == 0 is
+ * proved/verified via AirQuotientProve/Verify. Forgery mutates one shard
+ * limb and must fail exact division or verify.
+ *
+ * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
+ */
+struct NarrowBytecodeShardQuotientJoinAirMirrorV1 {
+    bool valid{false};
+    bool proved{false};
+    bool verified{false};
+    bool forgery_rejected{false};
+    bool absolute_parent_bound{false};
+    uint32_t queries{0};
+    uint32_t shard_count{0};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint64_t verify_micros{0};
+    std::string note;
+};
+
+/**
  * L2 cryptographic join of shard-local quotients toward the authenticated
  * parent AIR q opening.
  *
  * When free-row shards partition the full ProgramTable and each L1 uses
  * global rho^ordinal weights, Σ_s local_q_s(y) must equal the authenticated
  * child AIR quotient opening at each query. Relative partition closure
- * (Σ parts == union local_q) holds for any covered subset.
+ * (Σ parts == union local_q) holds for any covered subset. When the host
+ * join closes, AirMirrorNarrowBytecodeShardLocalQuotientsV1 AIR-proves the
+ * same identity.
  *
- * Does NOT flip CompleteFP / AggregationReady / complete_verifier_mirror /
- * within_relay_budget. AirQuotientProve of shards and the SHA-FS transcript
- * chip remain separate measured join steps.
+ * Does NOT flip CompleteFP / AggregationReady / within_relay_budget.
+ * Runtime complete_verifier_mirror on the hierarchical execution may become
+ * true once absolute sum_eq is AIR-mirrored; SHA-FS transcript chip and
+ * multi-child FRI consumption remain separate toward AggregationReady.
  */
 struct NarrowBytecodeShardQuotientJoinV1 {
     bool valid{false};
@@ -2850,12 +2878,14 @@ struct NarrowBytecodeShardQuotientJoinV1 {
     bool sum_equals_parent{false};
     bool partition_closed{false};
     bool forgery_rejected{false};
+    bool air_mirrored{false};
     uint32_t queries{0};
     uint32_t shard_count{0};
     uint32_t programs_covered{0};
     uint32_t programs_total{0};
     std::vector<Fp3> parent_q_per_query;
     std::vector<Fp3> sum_local_q_per_query;
+    NarrowBytecodeShardQuotientJoinAirMirrorV1 air_mirror;
     std::string note;
 };
 
@@ -2867,14 +2897,13 @@ struct NarrowBytecodeShardQuotientJoinV1 {
  * child_constraints, and runs AttachConstraintBytecodeInterpreterShard
  * with local synthesized q + forgery rejects. When all L1 shards attach,
  * JoinNarrowBytecodeShardLocalQuotientsV1 binds Σ local_q to the parent
- * authenticated opening (absolute iff shards cover the full table).
- * L2/L3 FRI nodes remain schedule-only until AirQuotientProve consumption.
+ * authenticated opening (absolute iff shards cover the full table) and
+ * AIR-mirrors that identity. L2/L3 FRI multi-child consumption and the
+ * SHA-FS transcript chip remain open toward AggregationReady / CompleteFP.
  *
  * Does NOT flip kCompleteRecursiveFixedPointExecutable /
- * kNarrowHierarchicalAggregationReady / within_relay_budget /
- * complete_verifier_mirror. AirQuotientProve of shards and the SHA-FS
- * transcript chip remain the next measured join steps toward the 575-col
- * complete verifier mirror.
+ * kNarrowHierarchicalAggregationReady / within_relay_budget. Runtime
+ * complete_verifier_mirror may become true after absolute AIR-mirrored join.
  */
 struct NarrowBytecodeHierarchicalAttachExecutionV1 {
     bool valid{false};
@@ -2939,10 +2968,22 @@ struct NarrowBytecodeHierarchicalAttachExecutionV1 {
     std::string* why = nullptr);
 
 /**
+ * AIR-prove/verify Σ_s shard_local_q[s][q] == bound_q[q] for every query,
+ * with a drop/mutate forgery reject. `absolute_parent_bound` is recorded
+ * into the result note only (does not change the residual).
+ */
+[[nodiscard]] NarrowBytecodeShardQuotientJoinAirMirrorV1
+AirMirrorNarrowBytecodeShardLocalQuotientsV1(
+    const std::vector<Fp3>& bound_q_per_query,
+    const std::vector<std::vector<Fp3>>& shard_local_q,
+    bool absolute_parent_bound);
+
+/**
  * Join shard-local quotients: Σ_s local_q_s == parent opening when the
  * shards cover `programs_total`, else report relative extraction only.
  * Forgery: omitting any single shard breaks equality with the full sum
- * (and with parent when covers_full_table).
+ * (and with parent when covers_full_table). On host closure, runs the
+ * AIR mirror against parent (absolute) or Σ local_q (relative).
  */
 [[nodiscard]] NarrowBytecodeShardQuotientJoinV1
 JoinNarrowBytecodeShardLocalQuotientsV1(

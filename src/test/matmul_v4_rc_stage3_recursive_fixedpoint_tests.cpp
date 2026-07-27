@@ -4303,8 +4303,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(executed.l1_attached, executed.l1_count);
     BOOST_CHECK_GE(executed.l1_count, 2U);
     BOOST_CHECK(executed.all_composed_scheduled);
-    BOOST_CHECK(!executed.complete_verifier_mirror);
     BOOST_CHECK(executed.p2_fs_replay_closed);
+    // complete_verifier_mirror earned below when absolute AIR-mirrored join
+    // closes; scheduled path (attach_l1=false) must stay false.
+    BOOST_CHECK(!scheduled.complete_verifier_mirror);
 
     uint32_t free_l1 = 0;
     uint32_t composed_seen = 0;
@@ -4379,18 +4381,36 @@ BOOST_AUTO_TEST_CASE(
         executed.quotient_join.programs_covered,
         static_cast<uint32_t>(table.programs.size()));
     BOOST_TEST_MESSAGE(executed.quotient_join.note);
+    BOOST_TEST_MESSAGE(executed.quotient_join.air_mirror.note);
     BOOST_TEST_MESSAGE(executed.note);
-    // Absolute parent binding is the measured gate for join Ready — leave
-    // Ready false until sum_equals_parent is green AND mirrored in AIR.
+    // Absolute parent binding + AIR mirror earn runtime
+    // complete_verifier_mirror; Ready constexprs stay false.
     BOOST_CHECK(!fp::kNarrowBytecodeShardQuotientJoinReady);
     if (executed.quotient_join.parent_extracted) {
         BOOST_TEST_MESSAGE(
             "parent_q extracted; sum_eq="
             << executed.quotient_join.sum_equals_parent
-            << " join_valid=" << executed.quotient_join.valid);
+            << " join_valid=" << executed.quotient_join.valid
+            << " air_mirrored="
+            << executed.quotient_join.air_mirrored
+            << " complete_verifier_mirror="
+            << executed.complete_verifier_mirror);
+        if (executed.quotient_join.sum_equals_parent) {
+            BOOST_REQUIRE_MESSAGE(
+                executed.quotient_join.air_mirrored,
+                executed.quotient_join.air_mirror.note);
+            BOOST_CHECK(executed.complete_verifier_mirror);
+            BOOST_CHECK(
+                executed.quotient_join.air_mirror
+                    .absolute_parent_bound);
+            BOOST_CHECK(
+                executed.quotient_join.air_mirror
+                    .forgery_rejected);
+        }
     } else {
         BOOST_TEST_MESSAGE(
             "parent_q not extracted; relative join only");
+        BOOST_CHECK(!executed.complete_verifier_mirror);
     }
 
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
@@ -4438,6 +4458,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(join.partition_closed);
     BOOST_CHECK(join.forgery_rejected);
     BOOST_CHECK(!join.sum_equals_parent);
+    BOOST_REQUIRE_MESSAGE(
+        join.air_mirrored, join.air_mirror.note);
+    BOOST_CHECK(join.air_mirror.proved);
+    BOOST_CHECK(join.air_mirror.verified);
+    BOOST_CHECK(join.air_mirror.forgery_rejected);
+    BOOST_CHECK(!join.air_mirror.absolute_parent_bound);
+    BOOST_CHECK_EQUAL(join.air_mirror.shard_count, 2U);
+    BOOST_CHECK_EQUAL(join.air_mirror.queries, join.queries);
 
     // Relative identity: Σ shard local_q == union-shard local_q.
     std::vector<uint32_t> union_leaves = {0U, 1U};
@@ -4465,14 +4493,53 @@ BOOST_AUTO_TEST_CASE(
             "relative sum!=union at query " << q);
     }
     BOOST_TEST_MESSAGE(join.note);
+    BOOST_TEST_MESSAGE(join.air_mirror.note);
     BOOST_TEST_MESSAGE(
-        "Q_JOIN_RELATIVE shards=2 covered=2/"
+        "Q_JOIN_AIR_MIRROR shards=2 covered=2/"
         << table.programs.size()
         << " queries=" << join.queries
-        << " union_eq=1 forgery=1 complete_fp=false");
+        << " union_eq=1 forgery=1 mirror=1 abs=0"
+        << " verify_us=" << join.air_mirror.verify_micros
+        << " complete_fp=false");
     static_assert(!fp::kNarrowBytecodeShardQuotientJoinReady);
     static_assert(fp::kNarrowBytecodeShardQuotientJoinExecutable);
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+}
+
+// g2: pure AIR-mirror of absolute Σ shards == parent (synthetic openings;
+// no fold-bus). Proves/verifies with forgery reject under ≤900ms-scale.
+BOOST_AUTO_TEST_CASE(
+    hash_kernel_bytecode_q_join_air_mirror_absolute_synthetic)
+{
+    constexpr uint32_t kQueries = 8;
+    constexpr uint32_t kShards = 3;
+    std::vector<std::vector<gf::Fp3>> shards(
+        kShards, std::vector<gf::Fp3>(kQueries));
+    std::vector<gf::Fp3> parent(kQueries, gf::Fp3::Zero());
+    for (uint32_t q = 0; q < kQueries; ++q) {
+        for (uint32_t s = 0; s < kShards; ++s) {
+            shards[s][q] = gf::Fp3::FromFp(
+                gf::Fp{uint64_t{1000 + 17 * q + 3 * s}});
+            parent[q] = gf::Add(parent[q], shards[s][q]);
+        }
+    }
+    const fp::NarrowBytecodeShardQuotientJoinAirMirrorV1 mirror =
+        fp::AirMirrorNarrowBytecodeShardLocalQuotientsV1(
+            parent, shards, /*absolute_parent_bound=*/true);
+    BOOST_REQUIRE_MESSAGE(mirror.valid, mirror.note);
+    BOOST_CHECK(mirror.proved);
+    BOOST_CHECK(mirror.verified);
+    BOOST_CHECK(mirror.forgery_rejected);
+    BOOST_CHECK(mirror.absolute_parent_bound);
+    BOOST_CHECK_EQUAL(mirror.queries, kQueries);
+    BOOST_CHECK_EQUAL(mirror.shard_count, kShards);
+    BOOST_CHECK_LT(mirror.verify_micros, 900000ULL);
+    BOOST_TEST_MESSAGE(mirror.note);
+    BOOST_TEST_MESSAGE(
+        "Q_JOIN_AIR_ABS_SYNTH mirror=1 forgery=1 verify_us="
+        << mirror.verify_micros << " complete_fp=false");
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!nr::kNarrowHierarchicalAggregationReady);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
