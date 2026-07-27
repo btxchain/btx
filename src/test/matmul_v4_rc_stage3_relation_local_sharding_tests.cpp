@@ -680,14 +680,21 @@ BOOST_AUTO_TEST_CASE(
 
     cb::ProgramTable unsupported;
     std::string why;
+    // All three episode AIR families are now bytecode-backed. Reject an
+    // out-of-enum family so the fail-closed default arm stays covered.
     BOOST_CHECK(
         !BuildRCStage3EpisodeLocalKernelProgramTable(
+            static_cast<RCStage3EpisodeAirFamily>(0xff),
+            unsupported, &why));
+    // EpisodeExtract + CoupledExtract and the two SHA256d hash roles are
+    // migrated to canonical bytecode; the local-kernel builders return
+    // real tables.
+    cb::ProgramTable migrated;
+    BOOST_CHECK(
+        BuildRCStage3EpisodeLocalKernelProgramTable(
             RCStage3EpisodeAirFamily::
                 ExtractSamplerCoreFp3V1,
-            unsupported, &why));
-    // CoupledExtract and the two SHA256d hash roles are now migrated to
-    // canonical bytecode; the local-kernel builder returns real tables.
-    cb::ProgramTable migrated;
+            migrated, &why));
     BOOST_CHECK(
         BuildRCStage3CoupledLocalKernelProgramTable(
             RCStage3RelationRole::CoupledExtract,
