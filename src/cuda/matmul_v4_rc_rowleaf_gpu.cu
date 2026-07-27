@@ -182,6 +182,19 @@ __global__ void k_finalize(u64* __restrict__ state, u64* __restrict__ dig,
     for (int j = 0; j < 4; j++) dig[(u64)i * 4 + j] = gl_canon(s[j]);
 }
 
+/** Initialize the four capacity lanes for a typed row-leaf context. */
+__global__ void k_init_typed(u64* __restrict__ state, u32 n_lde,
+                             u64 iv0, u64 iv1, u64 iv2, u64 iv3)
+{
+    const u32 i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n_lde) return;
+    u64* row = state + static_cast<u64>(i) * P2_T;
+    row[8] = iv0;
+    row[9] = iv1;
+    row[10] = iv2;
+    row[11] = iv3;
+}
+
 struct RowLeafCtx {
     u64* d_state = nullptr; // [n_lde][12]
     u64* d_blk = nullptr;   // staging, lane-major [max_lanes][n_lde]
@@ -203,6 +216,76 @@ int MapErr(cudaError_t e, const char* what)
 }
 
 constexpr u32 kMaxLanesPerAbsorb = 3072; // 3 * 1024 columns per block
+
+int BeginImpl(u32 n_lde, const u64* capacity_iv, void** ctx_out)
+{
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (ctx_out == nullptr || n_lde == 0 ||
+        (n_lde & (n_lde - 1)) != 0) {
+        return -1;
+    }
+    *ctx_out = nullptr;
+    if (capacity_iv != nullptr) {
+        for (u32 lane = 0; lane < 4; ++lane) {
+            if (capacity_iv[lane] >= GL_P) {
+                std::fprintf(stderr,
+                    "[BTX_GPU_ROWLEAF] noncanonical typed capacity IV\n");
+                return -1;
+            }
+        }
+    }
+    if (!g_constants_set) {
+        std::fprintf(stderr,
+            "[BTX_GPU_ROWLEAF] %s before SetConstants\n",
+            capacity_iv == nullptr ? "Begin" : "BeginTyped");
+        return -1;
+    }
+    RowLeafCtx* ctx = new RowLeafCtx();
+    ctx->n_lde = n_lde;
+    // Device staging budget ~256 MiB (min 3 lanes = one Fp3 column).
+    {
+        u64 lanes = (u64{1} << 28) / ((u64)n_lde * sizeof(u64));
+        if (lanes < 3) lanes = 3;
+        if (lanes > kMaxLanesPerAbsorb) lanes = kMaxLanesPerAbsorb;
+        ctx->max_lanes = (u32)lanes;
+    }
+    int rc = 0;
+    rc = MapErr(cudaMalloc(&ctx->d_state,
+                            (u64)n_lde * P2_T * sizeof(u64)),
+                "Begin(cudaMalloc state)");
+    if (rc == 0) {
+        rc = MapErr(cudaMalloc(&ctx->d_blk,
+                               (u64)ctx->max_lanes * n_lde * sizeof(u64)),
+                    "Begin(cudaMalloc blk)");
+    }
+    if (rc == 0) {
+        rc = MapErr(cudaMalloc(&ctx->d_dig,
+                               (u64)n_lde * 4 * sizeof(u64)),
+                    "Begin(cudaMalloc dig)");
+    }
+    if (rc == 0) {
+        rc = MapErr(cudaMemset(ctx->d_state, 0,
+                              (u64)n_lde * P2_T * sizeof(u64)),
+                    "Begin(memset state)");
+    }
+    if (rc == 0 && capacity_iv != nullptr) {
+        const u32 tpb = 256;
+        const u32 nblk = (n_lde + tpb - 1) / tpb;
+        k_init_typed<<<nblk, tpb>>>(
+            ctx->d_state, n_lde, capacity_iv[0], capacity_iv[1],
+            capacity_iv[2], capacity_iv[3]);
+        rc = MapErr(cudaGetLastError(), "BeginTyped(init launch)");
+        if (rc == 0) {
+            rc = MapErr(cudaDeviceSynchronize(), "BeginTyped(init sync)");
+        }
+    }
+    if (rc != 0) {
+        BtxGpuRowLeafRelease(ctx);
+        return rc;
+    }
+    *ctx_out = ctx;
+    return 0;
+}
 
 } // namespace
 
@@ -232,33 +315,14 @@ extern "C" int BtxGpuRowLeafSetConstants(const uint64_t* rc_ext_8x12,
 
 extern "C" int BtxGpuRowLeafBegin(uint32_t n_lde, void** ctx_out)
 {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (ctx_out == nullptr || n_lde == 0 || (n_lde & (n_lde - 1)) != 0) return -1;
-    if (!g_constants_set) {
-        std::fprintf(stderr, "[BTX_GPU_ROWLEAF] Begin before SetConstants\n");
-        return -1;
-    }
-    *ctx_out = nullptr;
-    RowLeafCtx* ctx = new RowLeafCtx();
-    ctx->n_lde = n_lde;
-    // Device staging budget ~256 MiB (min 3 lanes = one Fp3 column).
-    {
-        u64 lanes = (u64{1} << 28) / ((u64)n_lde * sizeof(u64));
-        if (lanes < 3) lanes = 3;
-        if (lanes > kMaxLanesPerAbsorb) lanes = kMaxLanesPerAbsorb;
-        ctx->max_lanes = (u32)lanes;
-    }
-    int rc = 0;
-    rc = MapErr(cudaMalloc(&ctx->d_state, (u64)n_lde * P2_T * sizeof(u64)), "Begin(cudaMalloc state)");
-    if (rc == 0) rc = MapErr(cudaMalloc(&ctx->d_blk, (u64)ctx->max_lanes * n_lde * sizeof(u64)), "Begin(cudaMalloc blk)");
-    if (rc == 0) rc = MapErr(cudaMalloc(&ctx->d_dig, (u64)n_lde * 4 * sizeof(u64)), "Begin(cudaMalloc dig)");
-    if (rc == 0) rc = MapErr(cudaMemset(ctx->d_state, 0, (u64)n_lde * P2_T * sizeof(u64)), "Begin(memset state)");
-    if (rc != 0) {
-        BtxGpuRowLeafRelease(ctx);
-        return rc;
-    }
-    *ctx_out = ctx;
-    return 0;
+    return BeginImpl(n_lde, nullptr, ctx_out);
+}
+
+extern "C" int BtxGpuRowLeafBeginTyped(
+    uint32_t n_lde, const uint64_t capacity_iv_4[4], void** ctx_out)
+{
+    if (capacity_iv_4 == nullptr) return -1;
+    return BeginImpl(n_lde, capacity_iv_4, ctx_out);
 }
 
 extern "C" int BtxGpuRowLeafAbsorb(void* vctx, const uint64_t* blk,

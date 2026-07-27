@@ -33,6 +33,7 @@ constexpr u32 kPoseidonWidth = 12;
 constexpr u32 kDigestWidth = 4;
 constexpr u32 kMaxLanesPerAbsorb = 3072;
 constexpr u64 kStagingBudgetBytes = u64{1} << 28; // match CUDA: 256 MiB
+constexpr u64 kGoldilocksP = UINT64_C(0xFFFFFFFF00000001);
 
 struct alignas(8) P2Constants {
     u64 rc_ext[8 * 12];
@@ -265,6 +266,80 @@ bool DispatchFinalize(MetalRowLeafRuntime& runtime, RowLeafCtx& ctx,
     }
 }
 
+int BeginImpl(u32 n_lde, const u64* capacity_iv, void** ctx_out)
+{
+    if (ctx_out == nullptr || n_lde == 0 ||
+        (n_lde & (n_lde - 1)) != 0) {
+        return -1;
+    }
+    *ctx_out = nullptr;
+    if (capacity_iv != nullptr) {
+        for (u32 lane = 0; lane < 4; ++lane) {
+            if (capacity_iv[lane] >= kGoldilocksP) {
+                Report("BeginTyped", "noncanonical capacity IV");
+                return -1;
+            }
+        }
+    }
+    MetalRowLeafRuntime& runtime = Runtime();
+    std::lock_guard<std::mutex> lock(runtime.mutex);
+    if (!runtime.Ready() || !runtime.constants_set) {
+        Report(capacity_iv == nullptr ? "Begin" : "BeginTyped",
+               runtime.Ready() ? "constants not set" : runtime.error);
+        return -2;
+    }
+
+    RowLeafCtx* ctx = new (std::nothrow) RowLeafCtx();
+    if (ctx == nullptr) return -2;
+    ctx->n_lde = n_lde;
+    u64 lanes = kStagingBudgetBytes / (u64{n_lde} * sizeof(u64));
+    lanes = std::clamp<u64>(lanes, 3, kMaxLanesPerAbsorb);
+    ctx->max_lanes = static_cast<u32>(lanes);
+
+    NSUInteger state_bytes = 0;
+    NSUInteger block_bytes = 0;
+    NSUInteger digest_bytes = 0;
+    if (!CheckedBytes(u64{n_lde} * kPoseidonWidth, sizeof(u64), state_bytes) ||
+        !CheckedBytes(u64{n_lde} * ctx->max_lanes, sizeof(u64), block_bytes) ||
+        !CheckedBytes(u64{n_lde} * kDigestWidth, sizeof(u64), digest_bytes) ||
+        state_bytes > runtime.device.maxBufferLength ||
+        block_bytes > runtime.device.maxBufferLength ||
+        digest_bytes > runtime.device.maxBufferLength) {
+        Report(capacity_iv == nullptr ? "Begin" : "BeginTyped",
+               "requested buffer exceeds Metal device limits");
+        delete ctx;
+        return -2;
+    }
+    @autoreleasepool {
+        ctx->state = [runtime.device
+            newBufferWithLength:state_bytes
+                        options:MTLResourceStorageModeShared];
+        ctx->block = [runtime.device
+            newBufferWithLength:block_bytes
+                        options:MTLResourceStorageModeShared |
+                            MTLResourceCPUCacheModeWriteCombined];
+        ctx->digests = [runtime.device
+            newBufferWithLength:digest_bytes
+                        options:MTLResourceStorageModeShared];
+    }
+    if (ctx->state == nil || ctx->block == nil || ctx->digests == nil) {
+        Report(capacity_iv == nullptr ? "Begin" : "BeginTyped",
+               "Metal buffer allocation failed");
+        delete ctx;
+        return -2;
+    }
+    std::memset(ctx->state.contents, 0, state_bytes);
+    if (capacity_iv != nullptr) {
+        auto* state = static_cast<u64*>(ctx->state.contents);
+        for (u32 row = 0; row < n_lde; ++row) {
+            std::copy_n(capacity_iv, 4,
+                        state + static_cast<u64>(row) * kPoseidonWidth + 8);
+        }
+    }
+    *ctx_out = ctx;
+    return 0;
+}
+
 } // namespace
 
 extern "C" int BtxGpuRowLeafAvailable(void)
@@ -323,58 +398,14 @@ extern "C" int BtxGpuRowLeafSetConstants(const u64* rc_ext_8x12,
 
 extern "C" int BtxGpuRowLeafBegin(u32 n_lde, void** ctx_out)
 {
-    if (ctx_out == nullptr || n_lde == 0 ||
-        (n_lde & (n_lde - 1)) != 0) {
-        return -1;
-    }
-    *ctx_out = nullptr;
-    MetalRowLeafRuntime& runtime = Runtime();
-    std::lock_guard<std::mutex> lock(runtime.mutex);
-    if (!runtime.Ready() || !runtime.constants_set) {
-        Report("Begin", runtime.Ready() ? "constants not set" : runtime.error);
-        return -2;
-    }
+    return BeginImpl(n_lde, nullptr, ctx_out);
+}
 
-    RowLeafCtx* ctx = new (std::nothrow) RowLeafCtx();
-    if (ctx == nullptr) return -2;
-    ctx->n_lde = n_lde;
-    u64 lanes = kStagingBudgetBytes / (u64{n_lde} * sizeof(u64));
-    lanes = std::clamp<u64>(lanes, 3, kMaxLanesPerAbsorb);
-    ctx->max_lanes = static_cast<u32>(lanes);
-
-    NSUInteger state_bytes = 0;
-    NSUInteger block_bytes = 0;
-    NSUInteger digest_bytes = 0;
-    if (!CheckedBytes(u64{n_lde} * kPoseidonWidth, sizeof(u64), state_bytes) ||
-        !CheckedBytes(u64{n_lde} * ctx->max_lanes, sizeof(u64), block_bytes) ||
-        !CheckedBytes(u64{n_lde} * kDigestWidth, sizeof(u64), digest_bytes) ||
-        state_bytes > runtime.device.maxBufferLength ||
-        block_bytes > runtime.device.maxBufferLength ||
-        digest_bytes > runtime.device.maxBufferLength) {
-        Report("Begin", "requested buffer exceeds Metal device limits");
-        delete ctx;
-        return -2;
-    }
-    @autoreleasepool {
-        ctx->state = [runtime.device
-            newBufferWithLength:state_bytes
-                        options:MTLResourceStorageModeShared];
-        ctx->block = [runtime.device
-            newBufferWithLength:block_bytes
-                        options:MTLResourceStorageModeShared |
-                            MTLResourceCPUCacheModeWriteCombined];
-        ctx->digests = [runtime.device
-            newBufferWithLength:digest_bytes
-                        options:MTLResourceStorageModeShared];
-    }
-    if (ctx->state == nil || ctx->block == nil || ctx->digests == nil) {
-        Report("Begin", "Metal buffer allocation failed");
-        delete ctx;
-        return -2;
-    }
-    std::memset(ctx->state.contents, 0, state_bytes);
-    *ctx_out = ctx;
-    return 0;
+extern "C" int BtxGpuRowLeafBeginTyped(
+    u32 n_lde, const u64 capacity_iv_4[4], void** ctx_out)
+{
+    if (capacity_iv_4 == nullptr) return -1;
+    return BeginImpl(n_lde, capacity_iv_4, ctx_out);
 }
 
 extern "C" int BtxGpuRowLeafAbsorb(void* opaque, const u64* block,

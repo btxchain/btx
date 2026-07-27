@@ -46,6 +46,16 @@ int BtxGpuRowLeafSetConstants(const uint64_t* rc_ext_8x12,
 /** Allocate a streaming row-commit context with n_lde resident sponges. */
 int BtxGpuRowLeafBegin(uint32_t n_lde, void** ctx_out);
 
+/**
+ * Allocate a typed streaming row-commit context. The four canonical capacity
+ * lanes are copied into state[8..12) for every row before the first absorb.
+ * Each IV limb must be < Goldilocks p; noncanonical IVs are rejected rather
+ * than silently aliased. Legacy Begin remains the all-zero-capacity V11 path.
+ */
+int BtxGpuRowLeafBeginTyped(uint32_t n_lde,
+                            const uint64_t capacity_iv_4[4],
+                            void** ctx_out);
+
 /** Absorb one lane-major block: value for row i, absorb position base_pos+k,
  *  is blk[k*n_lde + i]. Values may be any u64 (canonicalized on device).
  *  Blocks must be presented in strictly increasing base_pos order with no
