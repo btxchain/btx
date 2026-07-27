@@ -4786,6 +4786,397 @@ BuildChildAirChallengeP2ReplayV1(
 }
 
 // ===========================================================================
+// PR-89 g4: LIMB-MODE CTL bus -- the P2 companion's analogue of the byte-mode
+// g4 digest bus.  See the header block above ChildFsLimbBusLaneV1 for why the
+// window narrows from 24 bytes to 3 canonical Fp3 lanes and why that is a
+// real structural win, not a cosmetic one.
+// ===========================================================================
+namespace {
+
+/** Limb-mode compressed CTL tuple: same shape as ChildFsBusTuple
+ *  (NS + gamma*STAGE + gamma^2*k + gamma^3*value), own NS/STAGE tags so a
+ *  byte-mode absorb transcript can never be replayed as a limb-mode one. */
+gf::Fp3 ChildFsLimbBusTuple(
+    uint32_t position,
+    const gf::Fp3& value,
+    const gf::Fp3& gamma)
+{
+    const gf::Fp3 g2 = gf::Mul(gamma, gamma);
+    const gf::Fp3 g3 = gf::Mul(g2, gamma);
+    return gf::Add(
+        gf::FromU64_3(kChildFsLimbBusNamespaceV1),
+        gf::Add(
+            gf::Mul(gamma, gf::FromU64_3(kChildFsLimbBusStageV1)),
+            gf::Add(
+                gf::Mul(g2, gf::FromU64_3(position)),
+                gf::Mul(g3, value))));
+}
+
+} // namespace
+
+bool
+AppendChildFsLimbBusLaneV1(
+    uint32_t limb_base,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal* expected,
+    aq::AirConstraintSystem<gf::Fp3>& cs,
+    std::vector<std::vector<gf::Fp3>>* columns,
+    ChildFsLimbBusLaneV1& out,
+    std::string* why)
+{
+    out = {};
+    out.limb_base = limb_base;
+    const uint32_t n_rows = cs.n_rows;
+    if (n_rows < 2) return ChildFsBusFail(why, "limb_bus:rows");
+    if (limb_base + kChildFsLimbBusCellsV1 > cs.n_columns) {
+        return ChildFsBusFail(why, "limb_bus:window");
+    }
+    const uint32_t base = cs.n_columns;
+    out.inverse1_base = base;
+    out.inverse2_base = base + kChildFsLimbBusCellsV1;
+    out.running1 = base + 2 * kChildFsLimbBusCellsV1;
+    out.running2 = out.running1 + 1;
+    out.columns = out.running2 + 1;
+    cs.n_columns = out.columns;
+
+    RCStage3CtlTerminal terminal{};
+    if (columns != nullptr) {
+        if (columns->size() < base) {
+            return ChildFsBusFail(why, "limb_bus:column_shape");
+        }
+        columns->resize(
+            out.columns, std::vector<gf::Fp3>(n_rows, gf::Fp3::Zero()));
+        for (auto& col : *columns) {
+            if (col.size() != n_rows) {
+                return ChildFsBusFail(why, "limb_bus:row_shape");
+            }
+        }
+        gf::Fp3 t1 = gf::Fp3::Zero();
+        gf::Fp3 t2 = gf::Fp3::Zero();
+        for (uint32_t k = 0; k < kChildFsLimbBusCellsV1; ++k) {
+            const gf::Fp3 value = (*columns)[limb_base + k][0];
+            const gf::Fp3 d1 = gf::Sub(
+                challenges.alpha1,
+                ChildFsLimbBusTuple(k, value, challenges.gamma1));
+            const gf::Fp3 d2 = gf::Sub(
+                challenges.alpha2,
+                ChildFsLimbBusTuple(k, value, challenges.gamma2));
+            if (gf::IsZero(d1) || gf::IsZero(d2)) {
+                return ChildFsBusFail(why, "limb_bus:pole");
+            }
+            const gf::Fp3 i1 = gf::Inv(d1);
+            const gf::Fp3 i2 = gf::Inv(d2);
+            (*columns)[out.inverse1_base + k][0] = i1;
+            (*columns)[out.inverse2_base + k][0] = i2;
+            t1 = gf::Add(t1, i1);
+            t2 = gf::Add(t2, i2);
+        }
+        for (uint32_t row = 1; row < n_rows; ++row) {
+            (*columns)[out.running1][row] = t1;
+            (*columns)[out.running2][row] = t2;
+        }
+        terminal.alpha1_sum = t1;
+        terminal.alpha2_sum = t2;
+    } else {
+        if (expected == nullptr) {
+            return ChildFsBusFail(why, "limb_bus:missing_expected_terminal");
+        }
+        terminal = *expected;
+    }
+    if (expected != nullptr && columns != nullptr &&
+        !(*expected == terminal)) {
+        return ChildFsBusFail(why, "limb_bus:terminal_mismatch");
+    }
+    out.terminal = terminal;
+
+    for (uint32_t k = 0; k < kChildFsLimbBusCellsV1; ++k) {
+        for (uint32_t lane = 0; lane < 2; ++lane) {
+            const uint32_t inverse =
+                (lane == 0 ? out.inverse1_base : out.inverse2_base) + k;
+            const gf::Fp3 gamma =
+                lane == 0 ? challenges.gamma1 : challenges.gamma2;
+            const gf::Fp3 alpha =
+                lane == 0 ? challenges.alpha1 : challenges.alpha2;
+            const uint32_t value_col = limb_base + k;
+            {
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "stage3.g4bus_limb.inverse";
+                c.kind = aq::AirKind::kFirstRow;
+                c.alg_degree = 2;
+                c.eval = [inverse, value_col, k, alpha, gamma](
+                             const std::vector<gf::Fp3>& cur,
+                             const std::vector<gf::Fp3>&) {
+                    return gf::Sub(
+                        gf::Mul(
+                            cur[inverse],
+                            gf::Sub(alpha,
+                                    ChildFsLimbBusTuple(
+                                        k, cur[value_col], gamma))),
+                        gf::Fp3::One());
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+            {
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "stage3.g4bus_limb.inverse_padding";
+                c.kind = aq::AirKind::kTransition;
+                c.alg_degree = 1;
+                c.eval = [inverse](
+                             const std::vector<gf::Fp3>&,
+                             const std::vector<gf::Fp3>& next) {
+                    return next[inverse];
+                };
+                cs.constraints.push_back(std::move(c));
+            }
+        }
+    }
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t inverse_base =
+            lane == 0 ? out.inverse1_base : out.inverse2_base;
+        const uint32_t running = lane == 0 ? out.running1 : out.running2;
+        const gf::Fp3 pinned =
+            lane == 0 ? terminal.alpha1_sum : terminal.alpha2_sum;
+        {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.g4bus_limb.running_first";
+            c.kind = aq::AirKind::kFirstRow;
+            c.alg_degree = 1;
+            c.eval = [running](
+                         const std::vector<gf::Fp3>& cur,
+                         const std::vector<gf::Fp3>&) {
+                return cur[running];
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.g4bus_limb.running_transition";
+            c.kind = aq::AirKind::kTransition;
+            c.alg_degree = 1;
+            c.eval = [inverse_base, running](
+                         const std::vector<gf::Fp3>& cur,
+                         const std::vector<gf::Fp3>& next) {
+                gf::Fp3 contribution = gf::Fp3::Zero();
+                for (uint32_t k = 0; k < kChildFsLimbBusCellsV1; ++k) {
+                    contribution = gf::Add(contribution, cur[inverse_base + k]);
+                }
+                return gf::Sub(
+                    next[running], gf::Add(cur[running], contribution));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.g4bus_limb.running_last";
+            c.kind = aq::AirKind::kLastRow;
+            c.alg_degree = 1;
+            c.eval = [inverse_base, running, pinned](
+                         const std::vector<gf::Fp3>& cur,
+                         const std::vector<gf::Fp3>&) {
+                gf::Fp3 contribution = gf::Fp3::Zero();
+                for (uint32_t k = 0; k < kChildFsLimbBusCellsV1; ++k) {
+                    contribution = gf::Add(contribution, cur[inverse_base + k]);
+                }
+                return gf::Sub(gf::Add(cur[running], contribution), pinned);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+    }
+    out.valid = true;
+    return true;
+}
+
+bool
+DeriveChildFsLimbBusChallengesV1(
+    const ah::Digest& parent_statement,
+    const uint256& p2_digest,
+    uint32_t slot,
+    const std::vector<gf::Fp3>& parent_limb_cells,
+    const std::vector<gf::Fp3>& p2_limb_cells,
+    RCStage3CtlChallenges& out,
+    std::string* why)
+{
+    out = {};
+    if (parent_limb_cells.size() != kChildFsLimbBusCellsV1 ||
+        p2_limb_cells.size() != kChildFsLimbBusCellsV1) {
+        return ChildFsBusFail(why, "limb_bus:challenge_cell_count");
+    }
+    // Same FS-ordering discipline as DeriveChildFsDigestBusChallengesV1: the
+    // challenge is drawn only after BOTH 3-cell windows, the parent statement
+    // and the P2 digest are absorbed, and the tag ("G4_BUS2") plus the
+    // limb-mode NS/STAGE constants keep this transcript independent of the
+    // byte-mode one even given an identical (statement, digest, slot).
+    std::vector<gf::Fp> base;
+    base.push_back(gf::FromU64(0x4753345F42555332ULL)); // "G4_BUS2"
+    base.push_back(gf::FromU64(kChildFsLimbBusNamespaceV1));
+    base.push_back(gf::FromU64(kChildFsLimbBusStageV1));
+    base.push_back(gf::FromU64(slot));
+    for (gf::Fp limb : parent_statement) base.push_back(limb);
+    for (uint32_t i = 0; i < 32; ++i) {
+        base.push_back(gf::FromU64(static_cast<uint64_t>(p2_digest.data()[i])));
+    }
+    for (const gf::Fp3& cell : parent_limb_cells) {
+        base.push_back(cell.c0);
+        base.push_back(cell.c1);
+        base.push_back(cell.c2);
+    }
+    for (const gf::Fp3& cell : p2_limb_cells) {
+        base.push_back(cell.c0);
+        base.push_back(cell.c1);
+        base.push_back(cell.c2);
+    }
+    uint32_t counter = 0;
+    const auto draw = [&](gf::Fp3& value) {
+        for (uint32_t attempt = 0;
+             attempt < kRCStage3CtlChallengeMaxCandidates * 8; ++attempt) {
+            std::vector<gf::Fp> mix = base;
+            mix.push_back(gf::FromU64(counter++));
+            const ah::Digest d = ah::SpongeHashFp(mix);
+            bool ok = true;
+            std::array<uint64_t, 3> w{};
+            for (uint32_t j = 0; j < 3; ++j) {
+                w[j] = static_cast<uint64_t>(gf::Canonical(d[j]));
+                if (!RCStage3CtlChallengeWordIsAccepted(w[j])) ok = false;
+            }
+            if (!ok) continue;
+            gf::Fp3 candidate{};
+            candidate.c0 = gf::FromU64(w[0]);
+            candidate.c1 = gf::FromU64(w[1]);
+            candidate.c2 = gf::FromU64(w[2]);
+            if (gf::IsZero(candidate)) continue;
+            value = candidate;
+            return true;
+        }
+        return false;
+    };
+    if (!draw(out.gamma1)) return ChildFsBusFail(why, "limb_bus:gamma1");
+    do {
+        if (!draw(out.gamma2)) return ChildFsBusFail(why, "limb_bus:gamma2");
+    } while (gf::Eq(out.gamma1, out.gamma2));
+    if (!draw(out.alpha1)) return ChildFsBusFail(why, "limb_bus:alpha1");
+    do {
+        if (!draw(out.alpha2)) return ChildFsBusFail(why, "limb_bus:alpha2");
+    } while (gf::Eq(out.alpha1, out.alpha2));
+    return true;
+}
+
+ChildFsChallengeP2DecoderV1
+BuildChildFsChallengeP2DecoderV1(
+    const uint256& digest_p2,
+    const gf::Fp3& consumed_challenge,
+    const gf::Fp3* forced_consumed)
+{
+    ChildFsChallengeP2DecoderV1 out;
+    const gf::Fp3 reconstructed = gf::FromChallengeBytes3(digest_p2.data());
+    const std::array<gf::Fp3, kChildFsLimbBusCellsV1> lane_val = {
+        gf::Fp3::FromFp(reconstructed.c0),
+        gf::Fp3::FromFp(reconstructed.c1),
+        gf::Fp3::FromFp(reconstructed.c2)};
+    const gf::Fp3 want_challenge =
+        forced_consumed != nullptr ? *forced_consumed : consumed_challenge;
+    const std::array<gf::Fp3, kChildFsLimbBusCellsV1> want = {
+        gf::Fp3::FromFp(want_challenge.c0),
+        gf::Fp3::FromFp(want_challenge.c1),
+        gf::Fp3::FromFp(want_challenge.c2)};
+
+    out.cs.n_rows = 2;
+    out.cs.n_columns = kChildFsLimbBusCellsV1;
+    out.limb_base = 0;
+    out.columns.assign(
+        kChildFsLimbBusCellsV1,
+        std::vector<gf::Fp3>(out.cs.n_rows, gf::Fp3::Zero()));
+    out.cs.preprocessed_pin_ood = true;
+    for (uint32_t j = 0; j < kChildFsLimbBusCellsV1; ++j) {
+        std::vector<gf::Fp3> col(out.cs.n_rows, lane_val[j]);
+        out.columns[j] = col;
+        out.cs.preprocessed.emplace_back(j, std::move(col));
+    }
+    for (uint32_t j = 0; j < kChildFsLimbBusCellsV1; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_decoder.limb_bound_to_consumed";
+        c.kind = aq::AirKind::kEverywhere;
+        c.alg_degree = 1;
+        const uint32_t col = j;
+        const gf::Fp3 target = want[j];
+        c.eval = [col, target](const std::vector<gf::Fp3>& r,
+                                const std::vector<gf::Fp3>&) {
+            return gf::Sub(r[col], target);
+        };
+        out.cs.constraints.push_back(std::move(c));
+    }
+    out.witness_violations =
+        ar::CountWitnessViolationsOnH(out.cs, out.columns);
+    out.valid = out.witness_violations == 0;
+    out.note = out.valid ? "stage3:p2_decoder:bound_to_consumed"
+                          : "stage3:p2_decoder:violations";
+    return out;
+}
+
+ChildFsP2BoundVerifyV1
+VerifyChildFsP2BoundV1(
+    const ChildFsChallengeP2DecoderV1& decoder,
+    const ChildAirChallengeP2ReplayV1& p2)
+{
+    ChildFsP2BoundVerifyV1 out;
+    if (decoder.cs.n_columns < decoder.limb_base + kChildFsLimbBusCellsV1 ||
+        p2.cs.n_columns <
+            p2.challenge_limb_columns[0] + kChildFsLimbBusCellsV1) {
+        out.note = "stage3:child_fs_p2_bound:shape";
+        return out;
+    }
+    std::vector<gf::Fp3> decoder_cells;
+    std::vector<gf::Fp3> p2_cells;
+    decoder_cells.reserve(kChildFsLimbBusCellsV1);
+    p2_cells.reserve(kChildFsLimbBusCellsV1);
+    for (uint32_t k = 0; k < kChildFsLimbBusCellsV1; ++k) {
+        decoder_cells.push_back(decoder.columns[decoder.limb_base + k][0]);
+        p2_cells.push_back(p2.columns[p2.challenge_limb_columns[0] + k][0]);
+    }
+    std::string why;
+    const ah::Digest zero_statement{};
+    if (!DeriveChildFsLimbBusChallengesV1(
+            zero_statement, p2.digest, 0, decoder_cells, p2_cells,
+            out.challenges, &why)) {
+        out.note = "stage3:child_fs_p2_bound:" + why;
+        return out;
+    }
+
+    auto decoder_cs = decoder.cs;
+    auto decoder_columns = decoder.columns;
+    if (!AppendChildFsLimbBusLaneV1(
+            decoder.limb_base, out.challenges, nullptr, decoder_cs,
+            &decoder_columns, out.consumer_lane, &why)) {
+        out.note = "stage3:child_fs_p2_bound:consumer:" + why;
+        return out;
+    }
+    auto p2_cs = p2.cs;
+    auto p2_columns = p2.columns;
+    if (!AppendChildFsLimbBusLaneV1(
+            p2.challenge_limb_columns[0], out.challenges, nullptr, p2_cs,
+            &p2_columns, out.producer_lane, &why)) {
+        out.note = "stage3:child_fs_p2_bound:producer:" + why;
+        return out;
+    }
+
+    out.decoder_violations =
+        ar::CountWitnessViolationsOnH(decoder_cs, decoder_columns);
+    out.p2_violations = ar::CountWitnessViolationsOnH(p2_cs, p2_columns);
+    out.decoder_cs_satisfied = out.decoder_violations == 0;
+    out.p2_cs_satisfied = out.p2_violations == 0;
+    out.boundary_reconciled =
+        out.consumer_lane.valid && out.producer_lane.valid &&
+        out.consumer_lane.terminal == out.producer_lane.terminal;
+    out.valid = out.decoder_cs_satisfied && out.p2_cs_satisfied &&
+                out.boundary_reconciled;
+    out.note = out.valid
+        ? "stage3:child_fs_p2_bound:reconciled"
+        : (out.boundary_reconciled
+               ? "stage3:child_fs_p2_bound:rejected:table_violations"
+               : "stage3:child_fs_p2_bound:rejected:ctl_boundary");
+    return out;
+}
+
+// ===========================================================================
 // PR-89 g4: INDEPENDENT re-derivation of the child's Q192-V3 Fiat-Shamir
 // transcript, and the parent-side decoder table over every kind it draws.
 // See the header for the replayed absorb order and the three-level coverage
@@ -5600,13 +5991,27 @@ AssessChildFsReplayClosureV1()
     //      541).  The lane is +50 columns at unchanged rows -- ~10% of either
     //      width -- so the ratio survives, but the two totals are not measured
     //      over identical objects.
-    //  (3) There is a real INTERFACE MISMATCH to resolve before it can be:
+    //  (3) The INTERFACE MISMATCH is CLOSED, but only as far as the interface.
     //      AppendChildFsDigestBusLaneV1 binds a 24-BYTE window, and the P2
-    //      companion deliberately has no byte columns.  It needs a lane-mode
-    //      variant binding the 3 canonical limb cells, OR the companion must
-    //      re-add byte decomposition -- which would give back much of win (2),
-    //      since honest byte columns need 192 booleans plus recompose.  The
-    //      lane-mode variant is the right shape and is the next piece of work.
+    //      companion deliberately has no byte columns, so it could not be
+    //      reconciled with anything through that bus without re-adding byte
+    //      decomposition -- which would give back much of win (2), since
+    //      honest byte columns need 192 booleans plus recompose.
+    //      AppendChildFsLimbBusLaneV1 (+ DeriveChildFsLimbBusChallengesV1,
+    //      BuildChildFsChallengeP2DecoderV1, VerifyChildFsP2BoundV1) is that
+    //      lane-mode variant: the SAME dual-lane LogUp CTL idiom over the 3
+    //      canonical limb cells, own NS/STAGE domain tag, MEASURED reconciling
+    //      an honest (P2 companion, P2 decoder) pair and rejecting a
+    //      compensating-digest forgery
+    //      (g4_p2_limb_bus_reconciles_producer_and_decoder_and_rejects_forgery).
+    //      What remains is WIRING, not interface: BuildChildFsChallengeP2DecoderV1
+    //      is a STANDALONE 3-column CS shaped like the real parent's P2 decoder
+    //      would be, not an addition to BuildFourSlotSelfSimilarCtlParentV1,
+    //      which still decodes the SHA route on all four slots. Swapping that
+    //      decoder block, threading the four slots' P2 digests through it, and
+    //      re-deriving the parent's claimed statement over the new challenge
+    //      are real activation work, gated on aq::kAirChallengeP2Activated,
+    //      and are not done here.
     //
     // So the answer to "can the endpoint be made recomputable" is: NOT on the
     // shipped SHA route, where the measured floor is 58.3 s; YES to within 4.5 s

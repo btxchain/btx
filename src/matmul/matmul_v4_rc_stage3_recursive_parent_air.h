@@ -975,6 +975,138 @@ BuildChildAirChallengeP2ReplayV1(
 /** Smallest height whose n_lde = rows * kRCFriBlowup admits 192 queries. */
 inline constexpr uint32_t kChildAirChallengeP2QuerySoundRowsV1 = 1024;
 
+// ---------------------------------------------------------------------------
+// g4 CS-domain CTL bus, LIMB MODE -- the Poseidon2 companion's analogue of
+// AppendChildFsDigestBusLaneV1 / VerifyChildFsShaBoundV1.
+//
+// THE INTERFACE MISMATCH THIS CLOSES.  AppendChildFsDigestBusLaneV1 binds a
+// 24-BYTE window because both the SHA companion's output and the parent's
+// pinned digest cells are byte columns.  ChildAirChallengeP2ReplayV1
+// deliberately has none: AirChallengeDigestP2's four output lanes are already
+// CANONICAL Goldilocks elements, so BuildChildAirChallengeP2ReplayV1 pins the
+// reconstructed challenge directly as three limb columns
+// (`challenge_limb_columns`) with no byte decomposition and no recompose
+// lanes -- that is the whole of win (2) documented on that struct. Reusing
+// the byte-mode bus would mean adding 24 boolean byte columns plus recompose
+// back onto the P2 companion, giving back most of that win. This is the
+// SAME dual-lane LogUp CTL idiom (T(k,v) = NS + gamma*STAGE + gamma^2*k +
+// gamma^3*v, two independent lanes, challenge drawn AFTER both windows are
+// fixed) over a 3-CELL window instead of 24, with its OWN namespace/stage tag
+// so a byte-mode transcript can never be replayed as a limb-mode one or vice
+// versa.
+// ---------------------------------------------------------------------------
+inline constexpr uint32_t kChildFsLimbBusNamespaceV1 = 0x46534E32U; // "FSN2"
+inline constexpr uint32_t kChildFsLimbBusStageV1 = 3;
+inline constexpr uint32_t kChildFsLimbBusCellsV1 = 3;
+
+/** Same fields as ChildFsDigestBusLaneV1, over `limb_base .. limb_base+2`. */
+struct ChildFsLimbBusLaneV1 {
+    bool valid{false};
+    std::string note;
+    uint32_t limb_base{0};
+    uint32_t inverse1_base{0};
+    uint32_t inverse2_base{0};
+    uint32_t running1{0};
+    uint32_t running2{0};
+    uint32_t columns{0};
+    RCStage3CtlTerminal terminal{};
+};
+
+/** Append the 3-cell limb-mode lane over `limb_base .. limb_base+2` to `cs`.
+ *  Semantics identical to AppendChildFsDigestBusLaneV1 with the window
+ *  narrowed from 24 to kChildFsLimbBusCellsV1 and the tuple's NS/STAGE tags
+ *  swapped to the limb-mode constants above. */
+[[nodiscard]] bool AppendChildFsLimbBusLaneV1(
+    uint32_t limb_base,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal* expected,
+    aq::AirConstraintSystem<gf::Fp3>& cs,
+    std::vector<std::vector<gf::Fp3>>* columns,
+    ChildFsLimbBusLaneV1& out,
+    std::string* why = nullptr);
+
+/** Draw the limb-mode bus's joint challenge AFTER both 3-cell windows are
+ *  fixed -- same FS-ordering discipline and same absorb shape as
+ *  DeriveChildFsDigestBusChallengesV1, over `p2_digest` and the two 3-cell
+ *  windows rather than a SHA digest and two 24-byte windows. */
+[[nodiscard]] bool DeriveChildFsLimbBusChallengesV1(
+    const ah::Digest& parent_statement,
+    const uint256& p2_digest,
+    uint32_t slot,
+    const std::vector<gf::Fp3>& parent_limb_cells,
+    const std::vector<gf::Fp3>& p2_limb_cells,
+    RCStage3CtlChallenges& out,
+    std::string* why = nullptr);
+
+/**
+ * Minimal CONSUMER-side decoder for the Poseidon2 route: pins
+ * AirChallengeDigestP2's three canonical output lanes as preprocessed
+ * columns and binds them, by EVERYWHERE equality, to `consumed_challenge`.
+ * No byte columns and no word recompose -- the P2 digest's lanes already ARE
+ * the three limbs, so the decoder that would consume them is strictly
+ * smaller than the SHA route's (24 preprocessed bytes + 3 recompose
+ * equalities + 1 bound-to-consumed equality) collapsing to (3 preprocessed
+ * limbs + 3 bound-to-consumed equalities).
+ *
+ * THIS IS NOT THE REAL PARENT.  BuildFourSlotSelfSimilarCtlParentV1's decoder
+ * still consumes the SHA route (aq::AirChallengeDigest); wiring a P2-native
+ * decoder into it is real activation work, gated on
+ * aq::kAirChallengeP2Activated, and is not done by this builder. This is a
+ * standalone constraint system that lets the limb-mode bus be exercised, and
+ * its cost measured, against a decoder shaped exactly like the real one would
+ * be if it consumed the P2 digest -- the interface, not the activation.
+ *
+ * `forced_consumed` (when not nullptr) overwrites the comparison target
+ * fed to the bound-to-consumed equalities, independent of the digest-derived
+ * preprocessed columns, so a test can observe a coordinated
+ * (real digest, wrong consumed challenge) tamper being rejected.
+ */
+struct ChildFsChallengeP2DecoderV1 {
+    bool valid{false};
+    std::string note;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint32_t limb_base{0};
+    uint32_t witness_violations{1};
+};
+
+[[nodiscard]] ChildFsChallengeP2DecoderV1
+BuildChildFsChallengeP2DecoderV1(
+    const uint256& digest_p2,
+    const gf::Fp3& consumed_challenge,
+    const gf::Fp3* forced_consumed = nullptr);
+
+/**
+ * g4 P2-route two-table CTL boundary, mirroring VerifyChildFsShaBoundV1's
+ * three obligations (decoder_cs_satisfied, p2_cs_satisfied,
+ * boundary_reconciled) but with the byte-mode bus/lane types replaced by
+ * their limb-mode counterparts and no `slot` (this is the single-endpoint
+ * interface demonstration, not the four-slot parent). The soundness argument
+ * is VerifyChildFsShaBoundV1's, verbatim, with "24 bytes" read as "3
+ * canonical Fp3 lanes": for an injective tuple map (true off a vanishing set
+ * of size <= 3*9 per lane, negligible in Goldilocks^3), a coordinated
+ * (producer, consumer) mismatch on even one lane makes the two lanes' terminal
+ * sums disagree except with probability <= O(1)/p^3 per lane, and two
+ * independent lanes are drawn.
+ */
+struct ChildFsP2BoundVerifyV1 {
+    bool valid{false};
+    std::string note;
+    bool decoder_cs_satisfied{false};
+    bool p2_cs_satisfied{false};
+    bool boundary_reconciled{false};
+    RCStage3CtlChallenges challenges{};
+    ChildFsLimbBusLaneV1 consumer_lane{};
+    ChildFsLimbBusLaneV1 producer_lane{};
+    uint32_t decoder_violations{0};
+    uint32_t p2_violations{0};
+};
+
+[[nodiscard]] ChildFsP2BoundVerifyV1
+VerifyChildFsP2BoundV1(
+    const ChildFsChallengeP2DecoderV1& decoder,
+    const ChildAirChallengeP2ReplayV1& p2);
+
 /**
  * PR-89 g4, parent side: the eight child challenge KINDS the parent must
  * decode.  The ordinals are the ledger's coverage vector index; do not

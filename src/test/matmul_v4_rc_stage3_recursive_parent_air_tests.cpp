@@ -2195,6 +2195,101 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    g4_p2_limb_bus_reconciles_producer_and_decoder_and_rejects_forgery)
+{
+    // THE INTERFACE MISMATCH, CLOSED.  BuildChildAirChallengeP2ReplayV1's
+    // companion has no byte columns -- its three challenge_limb_columns ARE
+    // the canonical output lanes.  AppendChildFsDigestBusLaneV1 binds a
+    // 24-BYTE window, so it cannot reconcile that companion with anything
+    // without re-adding byte decomposition (defeating the point). This test
+    // exercises the LIMB-MODE bus (AppendChildFsLimbBusLaneV1) added for
+    // exactly this: a minimal P2-route decoder
+    // (BuildChildFsChallengeP2DecoderV1, no byte columns, no recompose) as
+    // consumer, the P2 companion as producer, reconciled the same
+    // post-commitment dual-lane LogUp way VerifyChildFsShaBoundV1 reconciles
+    // the SHA route -- proving the INTERFACE, not activation: this decoder is
+    // NOT wired into BuildFourSlotSelfSimilarCtlParentV1, which still
+    // consumes the SHA digest.
+    const auto child_cs = ToyFriChildCs();
+    const uint256 seed = Seed(0x5e);
+    const std::vector<std::vector<gf::Fp3>> cols{
+        {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(child_cs, cols, seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    const auto pi = air_recurse::ExtractChildPublicInputs(
+        child_cs, proved.proof, seed);
+    BOOST_REQUIRE(pi.ok);
+
+    const uint256 d_p2 = aq::AirChallengeDigestP2(
+        seed, "airq_lambda", {proved.proof.trace_commit},
+        {pi.child_n_rows, pi.child_quotient_len, pi.child_w});
+    const gf::Fp3 consumed_p2 = gf::FromChallengeBytes3(d_p2.data());
+
+    const auto p2 = BuildChildAirChallengeP2ReplayV1(
+        seed, proved.proof.trace_commit, pi.child_n_rows,
+        pi.child_quotient_len, pi.child_w, consumed_p2);
+    BOOST_REQUIRE_MESSAGE(p2.valid, p2.note);
+
+    const auto decoder =
+        BuildChildFsChallengeP2DecoderV1(d_p2, consumed_p2);
+    BOOST_TEST_MESSAGE(
+        "G4_P2_DECODER note=\"" << decoder.note << "\""
+        << " violations=" << decoder.witness_violations
+        << " columns=" << decoder.cs.n_columns);
+    BOOST_REQUIRE_MESSAGE(decoder.valid, decoder.note);
+    // The decoder that would consume the P2 route is strictly smaller than
+    // the SHA route's parent-side block: 3 preprocessed limb columns and 3
+    // bound-to-consumed equalities, no 24 bytes and no word recompose.
+    BOOST_CHECK_EQUAL(decoder.cs.n_columns, kChildFsLimbBusCellsV1);
+    BOOST_CHECK_EQUAL(
+        static_cast<uint32_t>(decoder.cs.constraints.size()),
+        kChildFsLimbBusCellsV1);
+
+    const auto ok = VerifyChildFsP2BoundV1(decoder, p2);
+    BOOST_TEST_MESSAGE(
+        "G4_P2_BOUND note=\"" << ok.note << "\""
+        << " decoder_ok=" << ok.decoder_cs_satisfied
+        << " p2_ok=" << ok.p2_cs_satisfied
+        << " reconciled=" << ok.boundary_reconciled);
+    BOOST_REQUIRE_MESSAGE(ok.valid, ok.note);
+    BOOST_CHECK_EQUAL(ok.decoder_violations, 0U);
+    BOOST_CHECK_EQUAL(ok.p2_violations, 0U);
+    BOOST_CHECK(ok.boundary_reconciled);
+
+    // FORGERY 1: a decoder that is SELF-consistent (its own pinned digest and
+    // its own "consumed" target agree, so decoder_violations == 0) but pinned
+    // from a DIFFERENT P2 digest than the one the producer actually built.
+    // This is the compensating-tamper shape: neither table alone is
+    // violated, only the cross-domain boundary can catch it.
+    const uint256 d_other = aq::AirChallengeDigestP2(
+        seed, "airq_lambda", {proved.proof.trace_commit},
+        {pi.child_n_rows, pi.child_quotient_len, pi.child_w + 1});
+    BOOST_REQUIRE(d_other != d_p2);
+    const gf::Fp3 consumed_other = gf::FromChallengeBytes3(d_other.data());
+    const auto forged_decoder =
+        BuildChildFsChallengeP2DecoderV1(d_other, consumed_other);
+    BOOST_REQUIRE_MESSAGE(forged_decoder.valid, forged_decoder.note);
+    const auto rejected = VerifyChildFsP2BoundV1(forged_decoder, p2);
+    BOOST_TEST_MESSAGE(
+        "G4_P2_BOUND_FORGED_DIGEST note=\"" << rejected.note << "\"");
+    BOOST_CHECK(!rejected.valid);
+    BOOST_CHECK(rejected.decoder_cs_satisfied);
+    BOOST_CHECK(rejected.p2_cs_satisfied);
+    BOOST_CHECK(!rejected.boundary_reconciled);
+
+    // FORGERY 2: the decoder's pinned digest is the REAL one (so its window
+    // matches the producer's), but the consumed target it is bound to is
+    // wrong -- caught locally, by the decoder's own constraints, same as the
+    // SHA route's bound-to-consumed equality.
+    const gf::Fp3 wrong_consumed = gf::Add(consumed_p2, gf::Fp3::One());
+    const auto bad_decoder =
+        BuildChildFsChallengeP2DecoderV1(d_p2, consumed_p2, &wrong_consumed);
+    BOOST_CHECK_GT(bad_decoder.witness_violations, 0U);
+    BOOST_CHECK(!bad_decoder.valid);
+}
+
+BOOST_AUTO_TEST_CASE(
     g4_producer_endpoint_recompute_cost_is_profiled_phase_by_phase)
 {
     // LEVER 1: PROFILE BEFORE OPTIMISING.  The producer endpoint was MEASURED
