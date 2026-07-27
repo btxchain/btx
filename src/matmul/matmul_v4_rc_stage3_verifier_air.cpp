@@ -2163,10 +2163,25 @@ bool AlignAlgAirProofOodToBoundedShaScheduleV1(
             continue;
         }
         if (!event.absorbed_payload.empty()) {
+            if (spec.kind ==
+                FiatShamirEventKind::AbsorbLambda) {
+                // Prefer the SHA-aligned lambda when ChallengeLambda already
+                // rewrote batch.lambda; fall back to the witness payload.
+                AppendFp3(transcript, child_proof.batch.lambda);
+                continue;
+            }
             transcript.insert(
                 transcript.end(),
                 event.absorbed_payload.begin(),
                 event.absorbed_payload.end());
+            continue;
+        }
+        if (spec.kind ==
+            FiatShamirEventKind::ChallengeLambda) {
+            child_proof.batch.lambda =
+                gf::FromChallengeBytes3(
+                    challenge_digest("fra3_lambda", 0)
+                        .data());
             continue;
         }
         if (spec.kind ==

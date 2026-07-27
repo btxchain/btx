@@ -629,10 +629,12 @@ AssessVerifierFiatShamirAirChipGapV1(
     const AlgAirProof& child_proof);
 
 /**
- * Rewrite batch.z1/z2 to the bounded K-window SHA selection for `program`
- * (ood_candidates>=1).  Leaves a V3-sampled proof's FRI openings inconsistent
- * with the new z — light schedule canaries only.  Returns false if the
- * program is not bounded or the window exhausts.
+ * Rewrite batch.lambda/z1/z2/w/fold/query draws to the SHA256d transcript
+ * selection for `program` (ood_candidates>=1 for the OOD window).  Leaves a
+ * P2-squeezed production proof's FRI openings inconsistent with the new z —
+ * light schedule / digest-match canaries only. Prefer
+ * Fri3AlgShaFsBoundedOodCanaryBatchCommit for honest bounded SHA sampling.
+ * Returns false if the program is not bounded or the window exhausts.
  */
 [[nodiscard]] bool AlignAlgAirProofOodToBoundedShaScheduleV1(
     const FiatShamirProgram& program,

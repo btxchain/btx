@@ -1762,6 +1762,20 @@ MeasureFri3AlgTranscriptReplayCostV1(uint32_t child_w, uint32_t column_len);
     const Fri3AlgBatchProof& proof, const uint256& fs_seed,
     std::string* why = nullptr);
 
+/**
+ * SHA-FS digest-match canary commit (NOT consensus / NOT Fri3AlgBatchCommit).
+ *
+ * Same absorb layout as the active P2-squeeze lane (version 8, short-FS
+ * commitment lanes) but draws challenges via SHA256d and samples z1/z2 from a
+ * fixed K=2 OOD window. Lets BuildFiatShamirShaExecutionPlanV1 measure
+ * every_digest_matches_claim on an honestly bounded-sampled proof while
+ * production keeps Poseidon2 squeezes. Small query_count for light MemoryMax
+ * canaries; do not treat as Q192 proximity evidence.
+ */
+[[nodiscard]] Fri3AlgBatchCommitResult Fri3AlgShaFsBoundedOodCanaryBatchCommit(
+    const std::vector<std::vector<Fp3>>& columns, const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+
 /** Built, executable and measurable; consumed by NO consensus path. Mirrors
  *  the kAlgebraicQueryIndexActivatedV1 precedent in fs_selection_air. */
 inline constexpr bool kRCFri3AlgShortFsExecutableV1 = true;
