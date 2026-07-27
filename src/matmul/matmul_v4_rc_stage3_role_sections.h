@@ -44,10 +44,22 @@
 //    to the block's committed roots is a separate obligation
 //    (kRCStage3RoleSectionEndpointProvenanceReady, below, is FALSE).
 //
-//  * RCStage3RelationRole::CompositionLink has no role AIR at all
-//    (RCStage3RoleIsInCsClosable(CompositionLink) == false), so a Composed
-//    statement can NEVER be fully section-verified here. Composed fails closed
-//    with an explicit reason. Episode / Coupled statements are fully covered.
+//  * RCStage3RelationRole::CompositionLink DOES have a role AIR as of the g2
+//    lane's c690764 — RCStage3RoleIsInCsClosable(CompositionLink) is now true,
+//    so a Composed statement is no longer blocked here at the role-AIR level.
+//    (It previously had none, and this file used to say so; that is stale.)
+//
+//    What is NOT automatic is its endpoint accounting. CompositionLink carries
+//    no entry in RequiredRCStage3RelationEndpoints, so anything that sizes
+//    itself off that registry sees ZERO endpoints for it — the same vacuity
+//    shape c690764 avoided on the closer-count side by stating
+//    kRCStage3CompositionLinkInCsClosers = 3 explicitly. The provenance layer
+//    below therefore special-cases the role by NAME rather than by registry
+//    size, so its three authority roots are counted, and reported, and can
+//    never contribute a silent zero. Two of the three (the episode and coupled
+//    leg roots) are anchored to the statement; the link digest is not. See the
+//    CompositionLink branch of
+//    VerifyRCStage3RoleAirSectionEndpointProvenance.
 //
 // No consensus authority is granted by anything in this file.
 // ============================================================================
@@ -449,7 +461,12 @@ struct RCStage3VerifiedEndpointMaterial {
  *    verified chain's ordered list. Cross-round substitution is closed;
  *    absolute position is not, and the section set covers one round of
  *    `expected_rounds`;
- *  - ProtocolConstant endpoints are pinned to a placeholder, not to block data.
+ *  - ProtocolConstant endpoints are pinned to a placeholder, not to block data;
+ *  - CompositionLink contributes 3 more roots that no endpoint registry knows
+ *    about. Two are anchored to the statement's episode / coupled digests; the
+ *    LINK DIGEST is not, because the leg values the sponge absorbs are
+ *    producer-chosen. Composed statements therefore carry at least one
+ *    unanchored root on top of whatever their episode and coupled sections do.
  *
  * COST, MEASURED on real block 101 — a verifier-side check that cannot be
  * recomputed per call is not a check, so the expensive artefact is produced
@@ -510,8 +527,12 @@ struct RCStage3VerifiedEndpointMaterial {
  *       would be false;
  *   (2) the round index is prover-declared (see RCStage3EndpointProvenance),
  *       and the section set covers one round of the episode;
- *   (3) Coupled and Composed statements are untouched by this work: the coupled
- *       roles have no canonical derivation and remain unanchored.
+ *   (3) Coupled statements are untouched by this work: the coupled roles have
+ *       no canonical derivation and remain unanchored;
+ *   (4) Composed statements additionally carry CompositionLink's LINK DIGEST,
+ *       whose absorbed leg values have no statement-derivable source. Its two
+ *       leg authority roots ARE anchored, so the CompositionLink contribution
+ *       is 3 endpoints = 2 anchored + 1 unanchored.
  *
  * Never flip this to make a test pass.
  */

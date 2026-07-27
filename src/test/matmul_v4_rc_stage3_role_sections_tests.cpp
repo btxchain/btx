@@ -1258,9 +1258,28 @@ BOOST_AUTO_TEST_CASE(round_root_anchoring_is_positional_not_membership)
     BOOST_CHECK(!check("index_out_of_range", digest_section, 2));
 }
 
-BOOST_AUTO_TEST_CASE(composition_link_has_no_role_air)
+// ===========================================================================
+// CompositionLink USED to have no role AIR at all, and this case used to assert
+// that. The g2 lane built one (c690764), so the assertion is INVERTED rather
+// than deleted -- the fact that role 32 is now CS-closable is worth pinning.
+//
+// What replaces it is the thing that actually bites this lane. CompositionLink
+// carries NO entry in RequiredRCStage3RelationEndpoints, so anything that sizes
+// itself off that registry sees ZERO endpoints for it. That is the same vacuity
+// shape c690764 avoided on the closer-count side by stating
+// kRCStage3CompositionLinkInCsClosers = 3 explicitly instead of deriving it.
+// Here the same trap is asserted shut on the PROVENANCE side: its three
+// authority roots must appear in the accounting, and must not be able to
+// contribute a silent zero.
+//
+// No FRI proof is involved: endpoint provenance never reads section.air, so the
+// section is a bare struct carrying only the declared roots. This case is
+// therefore NOT env-gated and runs in the default suite.
+// ===========================================================================
+BOOST_AUTO_TEST_CASE(composition_link_has_a_role_air_and_three_counted_roots)
 {
-    BOOST_CHECK(!rc::RCStage3RoleIsInCsClosable(Role::CompositionLink));
+    // (1) INVERTED: role 32 now resolves a real C_rho.
+    BOOST_CHECK(rc::RCStage3RoleIsInCsClosable(Role::CompositionLink));
     for (const Role role :
          rc::RequiredRCStage3RelationRoles(rc::RCStage3StatementKind::Episode)) {
         BOOST_CHECK_MESSAGE(rc::RCStage3RoleIsInCsClosable(role),
@@ -1273,6 +1292,104 @@ BOOST_AUTO_TEST_CASE(composition_link_has_no_role_air)
                             std::string("coupled role must be CS-closable: ") +
                                 rc::RCStage3RelationRoleName(role));
     }
+    for (const Role role :
+         rc::RequiredRCStage3RelationRoles(rc::RCStage3StatementKind::Composed)) {
+        BOOST_CHECK_MESSAGE(rc::RCStage3RoleIsInCsClosable(role),
+                            std::string("composed role must be CS-closable: ") +
+                                rc::RCStage3RelationRoleName(role));
+    }
+
+    // (2) THE TRAP. The endpoint registry still answers 0 for role 32, so the
+    //     closer count must NOT be derived from it.
+    BOOST_CHECK(rc::RequiredRCStage3RelationEndpoints(Role::CompositionLink)
+                    .empty());
+    BOOST_CHECK_EQUAL(rc::RCStage3RequiredInCsOpeningBlocks(Role::CompositionLink),
+                      rc::kRCStage3CompositionLinkInCsClosers);
+    BOOST_CHECK_EQUAL(rc::kRCStage3CompositionLinkInCsClosers, 3U);
+
+    // (3) A Composed statement carrying both digests. Provenance reads only the
+    //     public inputs, so no header, no episode recompute and no proof are
+    //     needed to pin the accounting.
+    rc::RCStage3SuccinctProof statement;
+    statement.statement = rc::RCStage3StatementKind::Composed;
+    for (int i = 0; i < 32; ++i) {
+        statement.public_inputs.episode_digest.data()[i] =
+            static_cast<unsigned char>(0x31 + i);
+        statement.public_inputs.coupled_digest.data()[i] =
+            static_cast<unsigned char>(0x71 + i);
+    }
+    const auto repack = [](const uint256& v) {
+        rc::alg_hash::Digest d{};
+        BOOST_REQUIRE(rc::RCStage3StreamAuthorityRootFromUint256(v, d));
+        return d;
+    };
+
+    rc::RCStage3RoleAirSection link;
+    link.role = Role::CompositionLink;
+    rc::alg_hash::Digest link_digest{0x1111ULL, 0x2222ULL, 0x3333ULL, 0x4444ULL};
+    link.endpoint_authority_roots = {
+        repack(statement.public_inputs.episode_digest),
+        repack(statement.public_inputs.coupled_digest), link_digest};
+
+    const rc::RCStage3EndpointProvenance none;
+    std::string why;
+    rc::RCStage3EndpointProvenanceReport report;
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyRCStage3RoleAirSectionEndpointProvenance(
+            statement, link, none, /*expected_rounds=*/1, &report, &why),
+        why);
+    BOOST_TEST_MESSAGE("COMPOSITION_LINK endpoints_total="
+                       << report.endpoints_total << " anchored_to_statement="
+                       << report.anchored_to_statement
+                       << " unanchored=" << report.unanchored);
+    for (const auto& reason : report.unanchored_reasons) {
+        BOOST_TEST_MESSAGE("  UNANCHORED: " << reason);
+    }
+    // THE ANTI-VACUITY ASSERTION: three roots counted, not zero.
+    BOOST_CHECK_EQUAL(report.endpoints_total, 3U);
+    BOOST_CHECK_EQUAL(report.anchored_to_statement, 2U);
+    BOOST_CHECK_EQUAL(report.unanchored, 1U);
+
+    // (4) Both leg roots are really enforced, not merely counted.
+    {
+        auto forged = link;
+        forged.endpoint_authority_roots[0] =
+            repack(statement.public_inputs.coupled_digest);
+        std::string bad_why;
+        BOOST_CHECK(!rc::VerifyRCStage3RoleAirSectionEndpointProvenance(
+            statement, forged, none, 1, nullptr, &bad_why));
+        BOOST_TEST_MESSAGE("COMPOSITION_LINK REJECT episode_leg why=" << bad_why);
+    }
+    {
+        auto forged = link;
+        forged.endpoint_authority_roots[1] =
+            repack(statement.public_inputs.episode_digest);
+        std::string bad_why;
+        BOOST_CHECK(!rc::VerifyRCStage3RoleAirSectionEndpointProvenance(
+            statement, forged, none, 1, nullptr, &bad_why));
+        BOOST_TEST_MESSAGE("COMPOSITION_LINK REJECT coupled_leg why=" << bad_why);
+    }
+    // A wrong root COUNT fails closed rather than being read as "no endpoints".
+    {
+        auto forged = link;
+        forged.endpoint_authority_roots.pop_back();
+        std::string bad_why;
+        BOOST_CHECK(!rc::VerifyRCStage3RoleAirSectionEndpointProvenance(
+            statement, forged, none, 1, nullptr, &bad_why));
+        BOOST_TEST_MESSAGE("COMPOSITION_LINK REJECT root_count why=" << bad_why);
+    }
+    // The link digest is FREE: changing it changes no verdict, which is exactly
+    // why it is reported unanchored rather than treated as checked.
+    {
+        auto other = link;
+        other.endpoint_authority_roots[2][0] ^= 0xabcdULL;
+        rc::RCStage3EndpointProvenanceReport r2;
+        BOOST_CHECK(rc::VerifyRCStage3RoleAirSectionEndpointProvenance(
+            statement, other, none, 1, &r2, &why));
+        BOOST_CHECK_EQUAL(r2.unanchored, 1U);
+        BOOST_CHECK_EQUAL(r2.anchored_to_statement, 2U);
+    }
+
     BOOST_CHECK(!rc::kRCStage3RoleSectionEndpointProvenanceReady);
 }
 

@@ -782,6 +782,79 @@ bool DirectAnchorValue(RCStage3RelationEndpoint endpoint,
     }
 }
 
+/**
+ * CompositionLink's three authority roots, which no endpoint registry knows
+ * about. Order is fixed by BuildRCStage3CompositionLinkRoleAirCS:
+ *   [0] EPISODE leg authority root -> repack of statement.episode_digest
+ *   [1] COUPLED leg authority root -> repack of statement.coupled_digest
+ *   [2] the committed LINK digest  -> an alg_hash sponge fold of the two
+ *       absorbed LEG VALUES, which are producer-chosen Fp3 scalars with no
+ *       statement-carried source. UNANCHORED, and reported as such.
+ *
+ * The two leg roots are exactly the semantic endpoints the g2 builder itself
+ * declares for them (out.endpoints = {EpisodeDigestValue, CoupledDigestValue}),
+ * so this is that declaration made enforceable rather than a new convention.
+ */
+bool VerifyCompositionLinkEndpointProvenance(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3RoleAirSection& section,
+    const std::string& tag,
+    RCStage3EndpointProvenanceReport* report,
+    std::string* why)
+{
+    if (report != nullptr) {
+        report->endpoints_total += kRCStage3CompositionLinkInCsClosers;
+    }
+    if (section.endpoint_authority_roots.size() !=
+        kRCStage3CompositionLinkInCsClosers) {
+        return Fail(why, tag + "composition_link_root_count");
+    }
+
+    const std::array<RCStage3EndpointAnchorSource, 2> leg_sources{
+        RCStage3EndpointAnchorSource::StatementEpisodeDigest,
+        RCStage3EndpointAnchorSource::StatementCoupledDigest};
+    const std::array<const char*, 2> leg_names{"episode_leg", "coupled_leg"};
+
+    for (size_t i = 0; i < leg_sources.size(); ++i) {
+        const std::string leg_tag = tag + leg_names[i] + ":";
+        uint256 value;
+        if (!StatementValueForAnchor(statement, leg_sources[i], value)) {
+            // A statement that does not carry this digest (e.g. an Episode
+            // statement) anchors nothing here. Counted, never assumed checked.
+            if (report != nullptr) {
+                ++report->unanchored;
+                report->unanchored_reasons.push_back(
+                    leg_tag + "statement_does_not_carry:" +
+                    AnchorName(leg_sources[i]));
+            }
+            continue;
+        }
+        alg_hash::Digest expected;
+        if (!RCStage3StreamAuthorityRootFromUint256(value, expected)) {
+            return Fail(why, leg_tag +
+                                 "anchor_value_not_representable_as_authority_"
+                                 "digest:" + AnchorName(leg_sources[i]));
+        }
+        if (expected != section.endpoint_authority_roots[i]) {
+            return Fail(why, leg_tag + "declared_root_mismatch_vs_" +
+                                 AnchorName(leg_sources[i]));
+        }
+        CountAnchored(report, leg_sources[i]);
+    }
+
+    // The link digest. The g2 AIR forces the sponge's absorbed message to BE
+    // the two bound leg VALUES, so the digest is determined in-CS by them — but
+    // those values are not themselves pinned to anything the statement carries,
+    // so the digest is only as anchored as they are, which is not at all.
+    if (report != nullptr) {
+        ++report->unanchored;
+        report->unanchored_reasons.push_back(
+            tag + "link_digest:absorbed_leg_values_have_no_statement_derivable_"
+                  "source");
+    }
+    return true;
+}
+
 } // namespace
 
 bool VerifyRCStage3EndpointProvenanceMaterial(
@@ -952,6 +1025,22 @@ bool VerifyRCStage3RoleAirSectionEndpointProvenance(
 {
     const std::string tag =
         std::string(RCStage3RelationRoleName(section.role)) + ":provenance:";
+
+    // CompositionLink is sized by NAME, not by the endpoint registry.
+    //
+    // It carries no entry in RequiredRCStage3RelationEndpoints, so every
+    // registry-sized quantity reads 0 for it. Left alone, this function would
+    // add 0 to endpoints_total and then hard-fail "endpoint_root_count" on a
+    // perfectly well-formed 3-root section: either way its three authority
+    // roots would be INVISIBLE to the accounting. They are enumerated
+    // explicitly instead, exactly as c690764 states
+    // kRCStage3CompositionLinkInCsClosers rather than deriving it from a
+    // registry that would have answered 0.
+    if (section.role == RCStage3RelationRole::CompositionLink) {
+        return VerifyCompositionLinkEndpointProvenance(statement, section, tag,
+                                                       report, why);
+    }
+
     const auto& required = RequiredRCStage3RelationEndpoints(section.role);
     if (report != nullptr) {
         report->endpoints_total += static_cast<uint32_t>(required.size());
