@@ -1971,6 +1971,14 @@ BOOST_AUTO_TEST_CASE(real_block_narrow_root_shape_probe)
     const uint32_t hash_lane_columns =
         fpx::CanonicalHashOpeningLayout().End();
     uint64_t total_active_rows = 0;
+    // g2 NARROW ARITY-CEILING PROBE. Cumulative in the sections' natural
+    // (role-index) order: at which prefix arity does ONE narrow root over
+    // ALL roles up to that point stop being representable? This is COMPUTED
+    // shape arithmetic only (no NTT, no Merkle, no prove) — identical to the
+    // per-section n_lde derivation above, applied to the running row sum.
+    uint32_t narrow_lde_cap_fits_through_arity = 0;
+    uint32_t narrow_lde_cap_crossover_arity = 0;
+    uint64_t cumulative_active_rows = 0;
     for (const BlkRealSection& s : real.sections) {
         const ar::ChildPublicInputs pi = ar::ExtractChildPublicInputs(
             s.cs, s.section.air, s.seed);
@@ -1978,6 +1986,30 @@ BOOST_AUTO_TEST_CASE(real_block_narrow_root_shape_probe)
         const fpx::HashOpeningProgram program = fpx::BuildHashOpeningProgram(pi);
         BOOST_REQUIRE_MESSAGE(program.valid, program.note);
         total_active_rows += program.active_rows;
+
+        cumulative_active_rows += program.active_rows;
+        {
+            const uint32_t prefix_arity =
+                static_cast<uint32_t>(&s - &real.sections[0]) + 1;
+            const uint64_t prefix_rows = BlkNextPow2(cumulative_active_rows);
+            const uint64_t prefix_quotient = 2 * (prefix_rows - 1);
+            const uint64_t prefix_coeffs =
+                BlkNextPow2(std::max<uint64_t>(prefix_rows, prefix_quotient));
+            const uint64_t prefix_lde = prefix_coeffs * matmul::v4::rc::kRCFriBlowup;
+            const bool prefix_fits =
+                prefix_lde <= (uint64_t{1} << matmul::v4::rc::kRCFriMaxLdeLog2);
+            if (prefix_fits) {
+                narrow_lde_cap_fits_through_arity = prefix_arity;
+            } else if (narrow_lde_cap_crossover_arity == 0) {
+                narrow_lde_cap_crossover_arity = prefix_arity;
+            }
+            BOOST_TEST_MESSAGE(
+                "BLK_PREFIX_ROOT arity=" << prefix_arity
+                << " cumulative_active_rows=" << cumulative_active_rows
+                << " prefix_trace_rows=" << prefix_rows
+                << " prefix_n_lde=" << prefix_lde
+                << " prefix_fits_cap=" << prefix_fits);
+        }
 
         // What the parent's OWN batched-FRI would cost at this shape, using the
         // measured composed narrow width (hash lane + fold/scalar/DEEP buses,
@@ -2025,6 +2057,23 @@ BOOST_AUTO_TEST_CASE(real_block_narrow_root_shape_probe)
         << (root_lde <= (uint64_t{1} << matmul::v4::rc::kRCFriMaxLdeLog2))
         << " root_trace_bytes="
         << uint64_t{hash_lane_columns} * root_rows * 24);
+
+    // g2 EXACT ARITY CEILING, in the sections' natural order (builder, gemm,
+    // extract, wiring, tiletree, digest): a single narrow root over the first
+    // TWO roles (builder+gemm) fits kRCFriMaxLdeLog2 exactly at 2^24; adding
+    // the third (extract) needs 2^25 and does not fit. This is COMPUTED shape
+    // arithmetic reproduced fresh every run, not a fitted or extrapolated
+    // number, and it is a DIFFERENT (larger, real, still real-role) shape
+    // than the {tiletree, digest} pair real_block_narrow_multi_child_root
+    // measures a full prove+verify for. Representability is bounded by the
+    // SUM of active rows, not by a fixed arity count: which roles are
+    // combined matters as much as how many.
+    BOOST_CHECK_EQUAL(narrow_lde_cap_fits_through_arity, 2U);
+    BOOST_CHECK_EQUAL(narrow_lde_cap_crossover_arity, 3U);
+    BOOST_TEST_MESSAGE(
+        "BLK_ARITY_CEILING fits_through_arity=" << narrow_lde_cap_fits_through_arity
+        << " crossover_arity=" << narrow_lde_cap_crossover_arity
+        << " order=builder,gemm,extract,wiring,tiletree,digest");
 }
 
 // ---------------------------------------------------------------------------
@@ -2135,6 +2184,36 @@ BOOST_AUTO_TEST_CASE(real_block_narrow_multi_child_root)
         << (double)root_bytes / (double)rcx::kRCStage3MaxProofBytes);
     // THE SIZE CLAIM, asserted rather than only logged.
     BOOST_CHECK_LE(root_bytes, uint64_t{rcx::kRCStage3MaxProofBytes});
+
+    // ---- g2 relay-budget evidence -----------------------------------------
+    // The default selection {episode:tiletree, episode:digest} is the exact
+    // shape RCStage3TwoLevelRootVerifyBudgetV1 records as
+    // measured_narrow_multichild_*. Re-derive and re-assert it here so a
+    // regression in either direction reopens this test instead of silently
+    // stranding a stale number in matmul_v4_rc_stage3_recursive.cpp.
+    constexpr uint64_t kRelayBudgetMillis = 900;
+    BOOST_TEST_MESSAGE(
+        "BLK_BUDGET roles=" << roles << " arity=" << selected.size()
+        << " verify_ms=" << verify_ms << " budget_ms=" << kRelayBudgetMillis
+        << " within_budget=" << (verify_ms <= kRelayBudgetMillis)
+        << " NOTE=partial_verifier_mirror_not_a_production_two_level_root");
+    if (selected.size() == 2 && selected[0] == 4 && selected[1] == 5) {
+        const auto recorded = rcx::CurrentRCStage3TwoLevelRootVerifyBudgetV1();
+        BOOST_CHECK_EQUAL(recorded.measured_narrow_multichild_vcs_columns,
+                          node.combined.n_columns);
+        BOOST_CHECK_EQUAL(recorded.measured_narrow_multichild_arity,
+                          static_cast<uint32_t>(selected.size()));
+        BOOST_CHECK_MESSAGE(
+            verify_ms <= kRelayBudgetMillis,
+            "the narrow two-child real-block root verify now misses the "
+            "relay budget; the recorded g2 narrow-path evidence must be "
+            "re-derived");
+        BOOST_CHECK(recorded.narrow_multichild_within_relay_budget);
+        // Never a production result: the SHA-FS transcript chip and
+        // arbitrary per-point child-constraint evaluation are not joined.
+        BOOST_CHECK(!recorded.narrow_multichild_complete_verifier_mirror);
+        BOOST_CHECK(!recorded.within_relay_budget);
+    }
 
     // -----------------------------------------------------------------------
     // PROOF-LEVEL REJECTS on the assembled artifact. Every one is decided by
