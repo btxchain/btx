@@ -115,6 +115,13 @@ struct TranscriptDagAuditV1 {
     bool fold_leaf_capacity_domain_separated{false};
     bool row_leaf_role_domain_separated{false};
     bool merkle_oracle_and_fs_sponge_inputs_disjoint{false};
+    /** V11's SpongeHashFp adds blocks into the rate; it is not overwrite DS. */
+    bool v11_uses_add_absorb_sponge{false};
+    bool v11_uses_overwrite_mode_duplex{false};
+    /** DSFS starts capacity from h(instance); V11 starts it at zero. */
+    bool v11_uses_instance_derived_capacity_start{false};
+    bool published_duplex_fs_premises_match{false};
+    bool custom_add_absorb_hash_chain_hybrid_complete{false};
     CrossRoleIdenticalInputV1 row_leaf_vs_coefficient;
     CrossRoleIdenticalInputV1 row_leaf_vs_fold_beta;
     CrossRoleIdenticalInputV1 row_leaf_vs_query_candidate;

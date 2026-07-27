@@ -142,6 +142,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!audit.fold_leaf_capacity_domain_separated);
     BOOST_CHECK(!audit.row_leaf_role_domain_separated);
     BOOST_CHECK(!audit.merkle_oracle_and_fs_sponge_inputs_disjoint);
+    BOOST_CHECK(audit.v11_uses_add_absorb_sponge);
+    BOOST_CHECK(!audit.v11_uses_overwrite_mode_duplex);
+    BOOST_CHECK(!audit.v11_uses_instance_derived_capacity_start);
+    BOOST_CHECK(!audit.published_duplex_fs_premises_match);
+    BOOST_CHECK(!audit.custom_add_absorb_hash_chain_hybrid_complete);
     BOOST_CHECK(!audit.poseidon_first_collision_hybrid_complete);
     BOOST_CHECK(!audit.nirop_bcs_composition_complete);
     BOOST_CHECK(!audit.production_authority_ready);

@@ -531,6 +531,11 @@ TranscriptDagAuditV1 AssessV1(
     out.merkle_node_capacity_domain_separated =
         node_domain != 0 && node_domain != leaf_domain;
     out.row_leaf_role_domain_separated = false;
+    out.v11_uses_add_absorb_sponge = true;
+    out.v11_uses_overwrite_mode_duplex = false;
+    out.v11_uses_instance_derived_capacity_start = false;
+    out.published_duplex_fs_premises_match = false;
+    out.custom_add_absorb_hash_chain_hybrid_complete = false;
 
     out.row_leaf_vs_coefficient = IdenticalRowWitness(
         TranscriptRoleV1::BatchCoefficient,
@@ -567,11 +572,16 @@ TranscriptDagAuditV1 AssessV1(
         "typed-hash-version) tuple for row leaves, fold leaves, internal "
         "nodes, each of the fourteen FS stages, receipt commitments and "
         "ProgramTable commitments; migrate native prove/verify and recursive "
-        "replay together. V11 cannot be reinterpreted in place.";
+        "replay together. Then either prove a custom ideal-permutation "
+        "first-collision reduction for BTX's add-absorb hash chain, or move "
+        "Fiat-Shamir to the instance-derived-capacity overwrite duplex "
+        "construction analyzed in ePrint 2025/536; typed IVs alone do not "
+        "instantiate that theorem. V11 cannot be reinterpreted in place.";
     out.note =
         "stage3:v11_nirop_hybrid:transcript_dag_replayed;"
         "q192_k2_and_rbr_inventory_checked;"
         "BLOCKED_zero_work_row_leaf_vs_fs_identical_preimage;"
+        "BLOCKED_add_absorb_hash_chain_not_published_overwrite_dsfs;"
         "typed_v12_migration_required;"
         "authority_false";
     return out;
