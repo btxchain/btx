@@ -601,7 +601,13 @@ bool ResolveCurrentRCStage3RelationConstraintSystem(
         std::string awhy;
         air_quotient::AirConstraintSystem<Fp3> cs;
         bool built = false;
-        if (RCStage3RoleIsPureStream(role)) {
+        if (role == RCStage3RelationRole::CompositionLink) {
+            // The fifteenth relation. Two §4 leg bindings + the sponge ledger
+            // fold that ties them to the committed link digest. It takes no
+            // path_len: its C_rho is 2 rows like the other §4 stream closers.
+            built = BuildRCStage3CompositionLinkRoleAirCS(
+                pin.endpoint_authority_roots, cs, &awhy);
+        } else if (RCStage3RoleIsPureStream(role)) {
             built = BuildRCStage3PureStreamRoleAirCS(
                 role, pin.endpoint_authority_roots, cs, &awhy);
         } else if (role == RCStage3RelationRole::CoupledGemm) {
@@ -896,6 +902,98 @@ bool ValidateRCStage3RecursiveCtlBinding(
     return true;
 }
 
+RCStage3TwoLevelRootVerifyBudgetV1
+CurrentRCStage3TwoLevelRootVerifyBudgetV1()
+{
+    RCStage3TwoLevelRootVerifyBudgetV1 out;
+
+    // ---- COMPUTED: is a PRODUCTION two-level root representable at all? ----
+    // "Root verify" is air_recurse::VerifyAggregate = BuildVerifierAIRPinned(k,
+    // pis) + exactly ONE AirQuotientVerify. So the question "can a two-level
+    // root verify come in under 900 ms" is downstream of a prior question that
+    // had never been asked: can a two-level root V_CS be COMMITTED at all?
+    //
+    // The k-child verifier AIR width is monotone non-decreasing in the child
+    // trace width (each additional child column contributes a fixed DEEP /
+    // per-point / row-leaf cell budget and removes none), and it crosses
+    // kRCFri3AlgBatchMaxColumns at the MEASURED child width below. That ladder
+    // is remeasured from freshly built V_CS instances — not fitted, not
+    // extrapolated — by matmul_v4_rc_stage3_two_level_root_verify_tests, which
+    // also pins this constant and reproduces the tree's own MEASURED four-slot
+    // toy width (16176 columns at child W=1).
+    //
+    // A LEVEL-2 root ingests four LEVEL-1 parents, and the level-1 parent's own
+    // trace width at the real-role child shape is the MEASURED 384,984 columns
+    // (bec2c48, AIRQ_SHAPE W=384984) — two orders of magnitude past the
+    // crossover.
+    constexpr uint32_t kMeasuredRealRoleParentColumns = 384984;
+    out.production_shape_representable =
+        kMeasuredRealRoleParentColumns <
+        kRCStage3MeasuredLevel2CapCrossoverChildColumns;
+
+    // ---- MEASURED: has a full-family level-2 root proof ever committed? ----
+    // No. The only two-level attempt in the tree
+    // (matmul_v4_rc_air_recurse_tests.cpp:1085) proves a level-2 root and never
+    // verifies it, and the level-2 V_CS exceeds the backend column cap at every
+    // shape tried so far. The one working two-level chain
+    // (matmul_v4_rc_stage3_coupled_bank_stream_tests.cpp:400) disables EVERY
+    // V_CS mirror family, so its wall-clock is a lower bound on a real root
+    // verify and is deliberately NOT recorded as one here.
+    out.full_family_root_proof_produced = false;
+    out.root_verify_wall_clock_measured = false;
+    out.measured_root_verify_micros = 0;
+
+    // ---- MEASURED: the SINGLE-level floor. ----
+    // This is the number that changes what the gap means. A k=2 aggregate over
+    // the SMALLEST child the verifier mirror admits (W=1 toy child; V_CS 8,088
+    // columns x 256 rows; Q=192) was proved and then VERIFIED in 5.006 s, on
+    // this box, with the full mirror families, AFTER the Goldilocks fast-reduce
+    // port. Pinned and remeasured by
+    // matmul_v4_rc_stage3_two_level_root_verify_tests under BTX_G2_TWO_LEVEL_HEAVY.
+    //
+    // So the 900 ms relay budget is already missed by 5.56x at the smallest
+    // aggregation shape that exists — before widening to the production child
+    // (V_CS 350,092 columns at W=544, ~43x wider) and before adding a second
+    // level at all. The two-level question is not the binding one.
+    out.measured_single_level_verify_micros = 5005620;
+    out.measured_single_level_vcs_columns = 8088;
+    out.single_level_within_relay_budget =
+        out.measured_single_level_verify_micros != 0 &&
+        out.measured_single_level_verify_micros <=
+            static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL;
+
+    // ---- The only conjunction that may retire the gap. ----
+    out.within_relay_budget =
+        out.production_shape_representable &&
+        out.full_family_root_proof_produced &&
+        out.root_verify_wall_clock_measured &&
+        out.measured_root_verify_micros != 0 &&
+        out.measured_root_verify_micros <=
+            static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL;
+
+    out.note =
+        "stage3:two_level_root_verify:"
+        "level1_parent_columns=" +
+        std::to_string(kMeasuredRealRoleParentColumns) +
+        ";vcs_cap_crossover_child_columns=" +
+        std::to_string(kRCStage3MeasuredLevel2CapCrossoverChildColumns) +
+        ";backend_column_cap=" + std::to_string(kRCFri3AlgBatchMaxColumns) +
+        (out.production_shape_representable
+             ? ";representable"
+             : ";NOT_representable_no_artifact_to_verify") +
+        ";root_verify_wall_clock=unmeasured"
+        ";single_level_floor_measured_us=" +
+        std::to_string(out.measured_single_level_verify_micros) +
+        ";single_level_vcs_columns=" +
+        std::to_string(out.measured_single_level_vcs_columns) +
+        ";relay_budget_us=" +
+        std::to_string(static_cast<uint64_t>(out.relay_budget_millis) * 1000ULL) +
+        (out.single_level_within_relay_budget
+             ? ";single_level_within_budget"
+             : ";single_level_ALREADY_OVER_BUDGET");
+    return out;
+}
+
 RCStage3RecursiveReadiness AssessRCStage3RecursiveReadiness(
     const RCStage3SuccinctProof& statement,
     const RCStage3RecursiveProof& proof,
@@ -1107,9 +1205,20 @@ RCStage3RecursiveReadiness AssessRCStage3RecursiveReadiness(
         soundness_target_met &&
         child_fiat_shamir_replay_closed &&
         self_similar_fixed_point_closed;
-    AddGap(out, RCStage3RecursiveGapCode::ProductionPerformanceUnmeasured,
-           proof.role,
-           "production two-level root verification has no <=900ms result");
+    // g2 performance half. This was an UNCONDITIONAL AddGap with no field for a
+    // measurement to land in, so it could neither be cleared by a benchmark nor
+    // reopened by a regression. It is now sourced from the recorded verdict and
+    // is strictly fail-closed: the gap is emitted unless a PRODUCTION-shape
+    // two-level root proof is representable, was produced, and its verify was
+    // timed inside the relay budget.
+    const RCStage3TwoLevelRootVerifyBudgetV1 two_level_budget =
+        CurrentRCStage3TwoLevelRootVerifyBudgetV1();
+    if (!two_level_budget.within_relay_budget) {
+        AddGap(out, RCStage3RecursiveGapCode::ProductionPerformanceUnmeasured,
+               proof.role,
+               "production two-level root verification has no <=900ms result: " +
+                   two_level_budget.note);
+    }
     if (!kRCStage3RecursiveAggregationReady ||
         !kRCStage3SuccinctAuthorityReady) {
         AddGap(out, RCStage3RecursiveGapCode::AuthorityDisabled, proof.role,

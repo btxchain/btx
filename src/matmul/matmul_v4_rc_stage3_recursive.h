@@ -276,6 +276,75 @@ struct RCStage3RecursiveProveResult {
         ResolveCurrentRCStage3RelationConstraintSystem,
     const RCStage3RecursivePosition& position = {});
 
+/**
+ * g2 PERFORMANCE HALF — the recorded state of the two-level root verify.
+ *
+ * AssessRCStage3RecursiveReadiness emits ProductionPerformanceUnmeasured with
+ * the detail "production two-level root verification has no <=900ms result".
+ * That gap used to be emitted UNCONDITIONALLY, with no field anywhere for a
+ * measurement to land in, so no amount of benchmarking could ever have cleared
+ * it and no regression could ever have reopened it. This struct is that field.
+ *
+ * It is STRICTLY FAIL-CLOSED. `within_relay_budget` requires BOTH a producible
+ * production-shape root proof AND a measured verify inside the budget; either
+ * missing leaves the gap in place. It is not a readiness constant and flipping
+ * one of its members by hand does not close g2 — the gate additionally requires
+ * the evidence predicate in matmul_v4_rc_stage3_global_soundness_ledger.cpp.
+ *
+ * MEASURED / COMPUTED state recorded here is reproduced by
+ * src/test/matmul_v4_rc_stage3_two_level_root_verify_tests.cpp, which fails if
+ * the tree moves underneath it.
+ */
+/**
+ * MEASURED. The smallest child trace width on the tested ladder at which the
+ * arity-4 verifier AIR (air_recurse::BuildVerifierAIR, full mirror families)
+ * exceeds kRCFri3AlgBatchMaxColumns. V_CS width is monotone non-decreasing in
+ * the child width, so every child at least this wide is over the cap.
+ *
+ * Remeasured and pinned by
+ * src/test/matmul_v4_rc_stage3_two_level_root_verify_tests.cpp, which also
+ * checks the ladder's W=1 point against the tree's own MEASURED four-slot toy
+ * V_CS width (16176 columns). It is NOT a fitted or extrapolated figure.
+ */
+inline constexpr uint32_t kRCStage3MeasuredLevel2CapCrossoverChildColumns =
+    2048;
+
+struct RCStage3TwoLevelRootVerifyBudgetV1 {
+    /** The consensus relay budget the gap string names. */
+    uint32_t relay_budget_millis{900};
+    /**
+     * COMPUTED. Whether a level-2 root V_CS over four level-1 parents at the
+     * MEASURED real-role parent width fits kRCFri3AlgBatchMaxColumns. While
+     * this is false there is no artifact to verify, so the gap is a
+     * REPRESENTABILITY gap, not a missing benchmark.
+     */
+    bool production_shape_representable{false};
+    /** MEASURED. Whether a full-family level-2 root proof was ever committed. */
+    bool full_family_root_proof_produced{false};
+    /** MEASURED. Whether a level-2 root verify wall-clock exists at all. */
+    bool root_verify_wall_clock_measured{false};
+    /** MEASURED, microseconds; 0 when no root verify has ever been timed. */
+    uint64_t measured_root_verify_micros{0};
+    /**
+     * MEASURED — the SINGLE-level floor. A k=2 aggregate over the SMALLEST
+     * child the mirror admits (W=1 toy, V_CS 8,088 columns x 256 rows, Q=192)
+     * verified in 5.006 s on this box AFTER the Goldilocks fast-reduce port.
+     * That is 5.56x the relay budget at the smallest shape that exists, so the
+     * budget is missed before any question about two levels or production width
+     * is reached. Recorded because it changes what the gap MEANS.
+     */
+    uint64_t measured_single_level_verify_micros{0};
+    uint32_t measured_single_level_vcs_columns{0};
+    bool single_level_within_relay_budget{false};
+    /** The only conjunction that may retire the gap. */
+    bool within_relay_budget{false};
+    std::string note;
+};
+
+/** The recorded verdict, recomputed from the constants above. Never a literal. */
+[[nodiscard]] RCStage3TwoLevelRootVerifyBudgetV1
+CurrentRCStage3TwoLevelRootVerifyBudgetV1();
+
 /** Separate hard gate. Recursive codecs and diagnostics may ship while false. */
 inline constexpr bool kRCStage3RecursiveAggregationReady = false;
 

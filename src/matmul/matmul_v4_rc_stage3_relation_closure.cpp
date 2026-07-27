@@ -2063,6 +2063,14 @@ bool RCStage3RoleIsInCsClosable(RCStage3RelationRole role)
         role == RCStage3RelationRole::EpisodeExtract) {
         return true;
     }
+    // CompositionLink (role 32) — the fifteenth relation. It carries NO entry in
+    // RequiredRCStage3RelationEndpoints (that registry is the semantic CTL/site
+    // manifest and is deliberately left alone), so it can never become closable
+    // via RCStage3RoleIsPureStream; its closer is named explicitly here and its
+    // in-CS closer count comes from kRCStage3CompositionLinkInCsClosers below.
+    // See BuildRCStage3CompositionLinkRoleAirCS for exactly what it does and
+    // does not prove.
+    if (role == RCStage3RelationRole::CompositionLink) return true;
     // Pure §4 stream roles (light binding fragment per endpoint; SHA fold is the
     // deferred aggregation child): CoupledBarrier/Digest, EpisodeTileTree/Digest.
     return RCStage3RoleIsPureStream(role);
@@ -2071,6 +2079,15 @@ bool RCStage3RoleIsInCsClosable(RCStage3RelationRole role)
 uint32_t RCStage3RequiredInCsOpeningBlocks(RCStage3RelationRole role)
 {
     if (!RCStage3RoleIsInCsClosable(role)) return 0;
+    // CompositionLink's endpoints are not in the semantic endpoint registry
+    // (RequiredRCStage3RelationEndpoints returns EMPTY_ENDPOINTS for it), so
+    // deriving the count from that registry would return 0 and the completeness
+    // gate in RebuildRCStage3RoleAirConstraintSystem would accept a
+    // ZERO-CLOSER CompositionLink AIR. The count is stated here instead so the
+    // gate genuinely bites: two §4 leg bindings + one sponge ledger fold.
+    if (role == RCStage3RelationRole::CompositionLink) {
+        return kRCStage3CompositionLinkInCsClosers;
+    }
     return static_cast<uint32_t>(
         RequiredRCStage3RelationEndpoints(role).size());
 }
@@ -3680,6 +3697,228 @@ RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAirFromRoots(
     out.witness = std::move(witness);
     out.ok = true;
     out.note = "assembled_real";
+    return out;
+}
+
+// ===========================================================================
+// CompositionLink (role 32) — the fifteenth relation's in-CS closer.
+//
+// CompositionLink was the ONE required role of a Composed statement with no
+// role AIR at all: RCStage3RoleIsInCsClosable(CompositionLink) was false, so
+// RebuildRCStage3RoleAirConstraintSystem failed "no_role_air:composition:link"
+// and a Composed statement could NEVER be fully section-verified, while the
+// recursive resolver returned "complete_air_unavailable".
+//
+// The native relation (matmul_v4_rc_stage3_composition.cpp:112) is:
+//     final_digest == SHA256d(ctx ‖ episode_digest ‖ coupled_digest)
+// i.e. the two proved LEGS folded into one value. The in-CS closer mirrors
+// exactly that structure on the algebraic side:
+//
+//   [0,10)    §4 stream binding fragment, EPISODE leg  — pins authority root 0
+//   [10,20)   §4 stream binding fragment, COUPLED leg  — pins authority root 1
+//   [20,159)  Poseidon sponge ledger fold over the row [episode, coupled],
+//             terminal squeeze pinned to authority root 2 (the link digest)
+//   + composition_link:{episode,coupled}_leg_recompose — degree-1 aliases
+//     forcing the sponge's absorbed message to BE the two bound leg values
+//   + composition_link:{index,pad}_pin — pins the sponge's index and 10*
+//     padding lanes so the absorbed message cannot be retargeted
+//
+// WHAT THIS PROVES: a satisfying assignment exhibits two leg values that open
+// against the two committed leg authority roots AND fold, under the tree's
+// algebraic hash, to the committed link digest. Substituting either leg value,
+// either leg root, or the link digest has no satisfying assignment.
+//
+// WHAT IT DOES NOT PROVE — read before quoting this as closure:
+//  (a) The fold is the ALGEBRAIC hash (alg_hash / Poseidon sponge), not the
+//      consensus SHA256d of ComputeRCStage3FinalDigest. Bridging the two is the
+//      A-EXACT / external_sha256d_audit_root obligation. This is the SAME
+//      deferral the four existing pure-stream roles already carry ("the SHA
+//      fold is the DEFERRED recursive child"), not a new one — but it is a
+//      deferral, and CompositionLink inherits it.
+//      The executable SHA256d route exists (stage3_hash_air::
+//      BuildComposedFinalDigestManifest -> BuildDirectSha256dManifestBoundary-
+//      Instances -> BuildFixedProgramBoundaryConstraintSystem, 4 compressions
+//      for the 179-byte composed preimage) and is NOT wired here.
+//  (b) The three authority roots are section-carried PUBLIC PINS. Anchoring
+//      them to the statement's episode_digest / coupled_digest / final_digest
+//      is kRCStage3RoleSectionEndpointProvenanceReady, which is FALSE.
+//
+// No readiness constant is flipped by anything below.
+// ===========================================================================
+
+/** Columns of the CompositionLink C_rho: two §4 leg fragments + one sponge. */
+const uint32_t kCompositionLinkEpisodeBase = 0;
+const uint32_t kCompositionLinkCoupledBase =
+    kRCStage3StreamEndpointBindWidth;
+const uint32_t kCompositionLinkSpongeBase =
+    2 * kRCStage3StreamEndpointBindWidth;
+const uint32_t kCompositionLinkColumns =
+    kCompositionLinkSpongeBase + kRCStage3SpongeRowWidth;
+
+bool BuildRCStage3CompositionLinkRoleAirCS(
+    const std::vector<ah::Digest>& endpoint_roots,
+    aq::AirConstraintSystem<gf::Fp3>& out, std::string* why)
+{
+    out = {};
+    if (endpoint_roots.size() != kRCStage3CompositionLinkInCsClosers) {
+        if (why != nullptr) *why = "stage3:composition_link_cs:root_count";
+        return false;
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> product;
+    product.n_rows = 2;
+
+    // --- (1) the two §4 leg binding fragments, each pinning its authority root.
+    const std::array<RCStage3RelationEndpoint, 2> legs{
+        RCStage3RelationEndpoint::EpisodeDigestValue,
+        RCStage3RelationEndpoint::CoupledDigestValue,
+    };
+    for (uint32_t i = 0; i < 2; ++i) {
+        const std::array<uint32_t, 8> root8 =
+            UnpackStreamRoot(endpoint_roots[i]);
+        const aq::AirConstraintSystem<gf::Fp3> frag =
+            BuildRCStage3StreamEndpointConstraintSystem(
+                StreamFamilyForEndpoint(legs[i]), /*leaf_index=*/0, root8,
+                kPureStreamPathLen);
+        if (frag.n_columns != kRCStage3StreamEndpointBindWidth ||
+            frag.n_rows != 2) {
+            if (why != nullptr) {
+                *why = "stage3:composition_link_cs:leg_fragment_shape";
+            }
+            return false;
+        }
+        CopyConstraintFamily(frag, i * kRCStage3StreamEndpointBindWidth,
+                             product);
+    }
+
+    // --- (2) the sponge ledger fold over the row [episode_leg, coupled_leg],
+    //         terminal squeeze pinned to the committed link digest.
+    aq::AirConstraintSystem<gf::Fp3> sponge_cs;
+    if (!BuildRCStage3WiredLeafCloserCS(endpoint_roots[2], /*n_row_lanes=*/2,
+                                        /*target_n_rows=*/2, sponge_cs, why)) {
+        return false;
+    }
+    if (sponge_cs.n_columns != kRCStage3SpongeRowWidth ||
+        sponge_cs.n_rows != 2) {
+        if (why != nullptr) *why = "stage3:composition_link_cs:sponge_shape";
+        return false;
+    }
+    CopyConstraintFamily(sponge_cs, kCompositionLinkSpongeBase, product);
+
+    // --- (3) the RELATION: the folded message IS the two bound leg values.
+    // SpongePaddedMessage lays a row of Fp3 lanes out as base coordinates
+    // [c0,c1,c2] per lane, then the index, then the 10* padding — so lane L
+    // occupies message positions 3L, 3L+1, 3L+2, all inside the single rate
+    // block (3*2 + 1 + 1 = 8 == kAlgHashRate), i.e. all on row 0.
+    const uint32_t msg_base =
+        kCompositionLinkSpongeBase + air_recurse::kPermCellsPerPerm;
+    const gf::Fp3 t{0, 1, 0};
+    const gf::Fp3 t2{0, 0, 1};
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t value_col =
+            lane * kRCStage3StreamEndpointBindWidth +
+            kRCStage3StreamEndpointBindValueColumn;
+        const uint32_t m0 = msg_base + 3 * lane;
+        const uint32_t m1 = m0 + 1;
+        const uint32_t m2 = m0 + 2;
+        product.constraints.push_back(
+            {lane == 0 ? "composition_link:episode_leg_recompose"
+                       : "composition_link:coupled_leg_recompose",
+             aq::AirKind::kFirstRow, 1,
+             [value_col, m0, m1, m2, t, t2](const std::vector<gf::Fp3>& cur,
+                                            const std::vector<gf::Fp3>&) {
+                 const gf::Fp3 recomposed = gf::Add(
+                     cur[m0], gf::Add(gf::Mul(t, cur[m1]), gf::Mul(t2, cur[m2])));
+                 return gf::Sub(cur[value_col], recomposed);
+             }});
+    }
+    // Pin the index lane (6) and the 10* pad lane (7). Without these the prover
+    // chooses the tail of the absorbed message freely and the fold no longer
+    // determines the link digest from the legs alone.
+    const uint32_t index_col = msg_base + 6;
+    const uint32_t pad_col = msg_base + 7;
+    product.constraints.push_back(
+        {"composition_link:index_pin", aq::AirKind::kFirstRow, 1,
+         [index_col](const std::vector<gf::Fp3>& cur,
+                     const std::vector<gf::Fp3>&) { return cur[index_col]; }});
+    product.constraints.push_back(
+        {"composition_link:pad_pin", aq::AirKind::kFirstRow, 1,
+         [pad_col](const std::vector<gf::Fp3>& cur,
+                   const std::vector<gf::Fp3>&) {
+             return gf::Sub(cur[pad_col], gf::Fp3::One());
+         }});
+
+    product.n_columns = kCompositionLinkColumns;
+    out = std::move(product);
+    return true;
+}
+
+RCStage3RoleAirProduct BuildRCStage3CompositionLinkRoleAir(
+    const gf::Fp3& episode_leg, const gf::Fp3& coupled_leg,
+    const std::array<uint32_t, 8>& episode_root8,
+    const std::array<uint32_t, 8>& coupled_root8, std::string* why)
+{
+    RCStage3RoleAirProduct out;
+    out.role = RCStage3RelationRole::CompositionLink;
+
+    // The honest fold: LeafHashRow([episode_leg, coupled_leg], 0). Its digest IS
+    // the committed link authority root the CS pins, so the pin is derived from
+    // the legs, never chosen independently of them.
+    const std::vector<gf::Fp3> row{episode_leg, coupled_leg};
+    RCStage3SpongeProduct sponge =
+        BuildRCStage3LeafHashRowSpongeProduct(row, /*index=*/0,
+                                              /*target_n_rows=*/2, why);
+    if (!sponge.ok) {
+        out.note = "sponge:" + sponge.note;
+        return out;
+    }
+
+    std::vector<ah::Digest> roots{
+        PackStreamRoot(episode_root8),
+        PackStreamRoot(coupled_root8),
+        sponge.digest,
+    };
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::string awhy;
+    if (!BuildRCStage3CompositionLinkRoleAirCS(roots, cs, &awhy)) {
+        out.note = "assemble:" + awhy;
+        if (why != nullptr) *why = awhy;
+        return out;
+    }
+
+    // Witness: the two leg fragments then the sponge, in CS column order.
+    std::vector<std::vector<gf::Fp3>> witness;
+    for (const auto& col :
+         BuildRCStage3StreamEndpointWitness(episode_root8, episode_leg)) {
+        witness.push_back(col);
+    }
+    for (const auto& col :
+         BuildRCStage3StreamEndpointWitness(coupled_root8, coupled_leg)) {
+        witness.push_back(col);
+    }
+    for (auto& col : sponge.witness) witness.push_back(std::move(col));
+    if (witness.size() != cs.n_columns) {
+        out.note = "witness_width";
+        if (why != nullptr) *why = "stage3:composition_link:witness_width";
+        return out;
+    }
+
+    out.endpoints = {
+        RCStage3RelationEndpoint::EpisodeDigestValue,
+        RCStage3RelationEndpoint::CoupledDigestValue,
+    };
+    out.endpoint_value_columns = {
+        kCompositionLinkEpisodeBase + kRCStage3StreamEndpointBindValueColumn,
+        kCompositionLinkCoupledBase + kRCStage3StreamEndpointBindValueColumn,
+    };
+    out.endpoint_committed_roots = std::move(roots);
+    out.fragment_columns = 0;
+    out.opening_blocks = kRCStage3CompositionLinkInCsClosers;
+    out.cs = std::move(cs);
+    out.witness = std::move(witness);
+    out.ok = true;
+    out.note = "assembled_composition_link";
     return out;
 }
 

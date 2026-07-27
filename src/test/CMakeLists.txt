@@ -150,7 +150,9 @@ add_executable(test_btx
   matmul_v4_rc_stage3_extract_barrier_link_tests.cpp
   matmul_v4_rc_stage3_coupled_bank_stream_tests.cpp
   matmul_v4_rc_stage3_ctl_tests.cpp
+  matmul_v4_rc_stage3_composition_link_air_tests.cpp
   matmul_v4_rc_stage3_recursive_tests.cpp
+  matmul_v4_rc_stage3_two_level_root_verify_tests.cpp
   matmul_v4_rc_stage3_unified_root_tests.cpp
     matmul_v4_rc_stage3_relation_closure_tests.cpp
   matmul_v4_rc_stage3_stream_endpoint_tests.cpp

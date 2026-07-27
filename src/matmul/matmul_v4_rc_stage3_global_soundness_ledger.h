@@ -157,6 +157,17 @@ struct ExecutableRelationRowsPolicyScenarioV1 {
  *                                       && gate 4 (recursive.cpp's own
  *                                       cryptographic_verification_ready
  *                                       depends on it)
+ *                                       && every role a Composed statement
+ *                                          requires is in-CS closable through
+ *                                          the immutable registry
+ *                                       && the two-level root verify is
+ *                                          representable, produced and MEASURED
+ *                                          inside the 900 ms relay budget
+ *                                          (CurrentRCStage3TwoLevelRootVerify-
+ *                                           BudgetV1().within_relay_budget)
+ *                                       The last two are g2's OWN blockers:
+ *                                       without them g2 reduced entirely to
+ *                                       "constant && gate 4".
  *   3 fri_alg_formal_soundness_ready    kRCFri3AlgFormalSoundnessReady
  *                                       && AssessFri3AlgBcsRbrLedgerV1()
  *                                          .rbr_reduction_machine_checked

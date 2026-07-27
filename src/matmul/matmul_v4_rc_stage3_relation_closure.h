@@ -866,6 +866,46 @@ BuildRCStage3NoKernelRoleAir(
     std::string* why = nullptr);
 
 /**
+ * In-CS closers a COMPLETE CompositionLink C_rho must carry: the EPISODE leg
+ * §4 binding, the COUPLED leg §4 binding, and the sponge ledger fold that ties
+ * them to the committed link digest. CompositionLink has no entry in
+ * RequiredRCStage3RelationEndpoints, so RCStage3RequiredInCsOpeningBlocks reads
+ * this constant instead of that registry's size — otherwise the completeness
+ * gate would compare against 0 and accept a zero-closer AIR.
+ */
+inline constexpr uint32_t kRCStage3CompositionLinkInCsClosers = 3;
+
+/**
+ * Resolver-side CompositionLink C_rho. `endpoint_roots` must be exactly
+ * kRCStage3CompositionLinkInCsClosers entries, in order:
+ *   [0] EPISODE leg authority root  (SHA256d root packed into a Digest)
+ *   [1] COUPLED leg authority root  (likewise)
+ *   [2] the committed LINK digest   (a real alg_hash sponge digest)
+ *
+ * Read the SOUNDNESS SCOPE comment above the implementation before treating
+ * this as closing the composition relation: the in-CS fold is the ALGEBRAIC
+ * hash, not the consensus SHA256d of ComputeRCStage3FinalDigest, and the three
+ * roots are public pins whose provenance is a separate obligation
+ * (kRCStage3RoleSectionEndpointProvenanceReady, currently false).
+ */
+[[nodiscard]] bool BuildRCStage3CompositionLinkRoleAirCS(
+    const std::vector<alg_hash::Digest>& endpoint_roots,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    std::string* why = nullptr);
+
+/**
+ * CompositionLink C_rho + a satisfying witness. The committed link digest is
+ * DERIVED from the two leg values (LeafHashRow([episode, coupled], 0)), never
+ * chosen independently, so a test that mutates a leg genuinely invalidates the
+ * pin rather than trivially agreeing with it.
+ */
+[[nodiscard]] RCStage3RoleAirProduct BuildRCStage3CompositionLinkRoleAir(
+    const gkr_field::Fp3& episode_leg, const gkr_field::Fp3& coupled_leg,
+    const std::array<uint32_t, 8>& episode_root8,
+    const std::array<uint32_t, 8>& coupled_root8,
+    std::string* why = nullptr);
+
+/**
  * True iff every required endpoint of `role` closes via an in-trace same-trace
  * scalar alg_hash opening (IsOpenedRelationEndpoint + a resolvable fragment
  * kernel column), so a COMPLETE C_rho can be assembled purely from scalar

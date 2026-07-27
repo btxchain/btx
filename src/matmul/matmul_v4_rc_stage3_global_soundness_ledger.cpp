@@ -725,9 +725,36 @@ AssessExecutableGlobalSoundnessLedgerV1(
     // is conjoined directly — calling the recursive assessor from here would
     // create a cycle, because recursive.cpp already calls this function to
     // source its own g4 value.
+    //
+    // g2 additionally carries TWO blockers of its own, neither of which is
+    // implied by g4. Before they were conjoined here, g2 reduced ENTIRELY to
+    // "constant && g4", so closing g4 would have closed g2 with no evidence at
+    // all about aggregation. Both are strictly fail-closed additions.
+    //
+    //  (i) REGISTRY COMPLETENESS. Every role a Composed statement requires must
+    //      resolve to a real C_rho through the immutable registry. This was
+    //      false for RCStage3RelationRole::CompositionLink — a Composed
+    //      statement could never be fully section-verified — and is recomputed
+    //      here across the actual required-role list rather than asserted.
+    // (ii) THE TWO-LEVEL ROOT VERIFY BUDGET. The recursive readiness report's
+    //      ProductionPerformanceUnmeasured gap. Recomputed from
+    //      CurrentRCStage3TwoLevelRootVerifyBudgetV1(), which is itself
+    //      fail-closed on representability, production, and measurement.
+    bool composed_registry_closable = true;
+    for (const RCStage3RelationRole role :
+         RequiredRCStage3RelationRoles(RCStage3StatementKind::Composed)) {
+        if (!RCStage3RoleIsInCsClosable(role)) {
+            composed_registry_closable = false;
+            break;
+        }
+    }
+    const bool two_level_root_verify_within_budget =
+        CurrentRCStage3TwoLevelRootVerifyBudgetV1().within_relay_budget;
     const bool gate2_recursive_aggregation =
         kRCStage3RecursiveAggregationReady &&
-        out.fiat_shamir_replay_complete;
+        out.fiat_shamir_replay_complete &&
+        composed_registry_closable &&
+        two_level_root_verify_within_budget;
 
     const bool dependency_gates_0_to_5 =
         gate0_mathematical_verifier &&
