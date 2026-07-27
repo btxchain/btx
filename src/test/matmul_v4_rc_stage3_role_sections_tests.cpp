@@ -569,11 +569,6 @@ BOOST_AUTO_TEST_CASE(real_block_section_tamper_rejects)
 }
 
 // ===========================================================================
-// Composed statements can NEVER be fully section-verified: CompositionLink has
-// no role AIR. Record that fail-closed boundary explicitly so it cannot be
-// quietly lost.
-// ===========================================================================
-// ===========================================================================
 // ENDPOINT PROVENANCE: the declared endpoint authority roots must be the
 // block's roots, not roots of the prover's choosing.
 //
