@@ -603,6 +603,85 @@ BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
     BOOST_CHECK_EQUAL(k1.events.size(), v3.events.size());
 }
 
+// g2 SHA-FS chip: bounded K-window SHA execution sets fixed_schedule when
+// rejection_loop_bounded; gap assessor inventories remaining Executable
+// blockers. Does NOT flip kVerifierFiatShamirAirExecutable / Ready.
+BOOST_AUTO_TEST_CASE(
+    bounded_fs_sha_execution_fixed_schedule_and_chip_gap_inventory)
+{
+    const uint256 seed = Filled(0xcd);
+    va::AlgAirProof proof = HonestToyProof(seed);
+    const nr::NarrowChildShape shape = ShapeForProof(proof);
+
+    const va::FiatShamirProgram v3 =
+        va::BuildCanonicalFiatShamirProgram(shape);
+    BOOST_REQUIRE(v3.valid);
+    BOOST_CHECK_EQUAL(v3.ood_candidates, 0U);
+    BOOST_CHECK(!v3.rejection_loop_bounded);
+    // Legacy V3 SHA inventory: when the plan builds, fixed_schedule stays false.
+    {
+        const va::FiatShamirShaExecutionPlanV1 v3_plan =
+            va::BuildFiatShamirShaExecutionPlanV1(
+                v3, seed, proof);
+        if (v3_plan.valid) {
+            BOOST_CHECK(!v3_plan.fixed_schedule);
+            BOOST_CHECK(!v3_plan.recursively_consumed);
+        } else {
+            BOOST_TEST_MESSAGE(
+                "v3_sha_plan_open:" << v3_plan.note);
+        }
+    }
+
+    // Bounded K=2: align post-z claims to the fixed K-window selection, then
+    // the SHA plan must report fixed_schedule without claiming Executable.
+    const va::FiatShamirProgram bounded =
+        va::BuildBoundedFiatShamirProgram(
+            shape, va::kRCFiatShamirOodCandidateSchedule);
+    BOOST_REQUIRE(bounded.valid);
+    BOOST_CHECK(bounded.rejection_loop_bounded);
+    std::string align_why;
+    BOOST_REQUIRE_MESSAGE(
+        va::AlignAlgAirProofOodToBoundedShaScheduleV1(
+            bounded, seed, proof, &align_why),
+        align_why);
+    const va::FiatShamirShaExecutionPlanV1 b_plan =
+        va::BuildFiatShamirShaExecutionPlanV1(
+            bounded, seed, proof);
+    BOOST_TEST_MESSAGE(
+        b_plan.note
+        << " fixed=" << b_plan.fixed_schedule
+        << " digests=" << b_plan.every_digest_matches_claim
+        << " origins=" << b_plan.proof_codec_byte_origins_complete
+        << " calls=" << b_plan.calls);
+    // Chip deliverable: bounded K-window lays a fixed schedule. Full plan.valid
+    // may still be false when unrelated transcript residuals (e.g. airq map)
+    // leave every_digest_matches_claim open — inventory that honestly.
+    BOOST_CHECK(b_plan.fixed_schedule);
+    BOOST_CHECK(b_plan.exact_domain_tags_and_order);
+    BOOST_CHECK(b_plan.exact_sha256d_padding_and_chaining);
+    BOOST_CHECK(b_plan.proof_codec_byte_origins_complete);
+    BOOST_CHECK(!b_plan.recursively_consumed);
+    BOOST_CHECK_GE(
+        b_plan.calls,
+        2U * va::kRCFiatShamirOodCandidateSchedule);
+
+    const va::VerifierFiatShamirAirChipGapV1 gap =
+        va::AssessVerifierFiatShamirAirChipGapV1(
+            bounded, seed, proof);
+    BOOST_TEST_MESSAGE(gap.note);
+    BOOST_CHECK(gap.bounded_ood_program_legislated);
+    BOOST_CHECK(gap.bounded_ood_rejection_loop_bounded);
+    BOOST_CHECK(gap.sha_fixed_schedule);
+    BOOST_CHECK(gap.sha_codec_origins_complete);
+    BOOST_CHECK(!gap.sha_recursively_consumed);
+    BOOST_CHECK(!gap.challenge_selection_air_constrained);
+    BOOST_CHECK(!gap.air_backed_all_kinds_reconstructed);
+    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(!gap.executable_ready);
+    BOOST_CHECK_GE(gap.open_predicates, 3U);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+}
+
 BOOST_AUTO_TEST_CASE(fiat_shamir_witness_binds_every_claim_without_claiming_sha_air)
 {
     const nr::NarrowChildShape shape = ToyShape();

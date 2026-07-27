@@ -556,8 +556,13 @@ BuildFiatShamirSeedOwnershipBusV1(
  * including every rejected OOD draw, and expands it to canonical SHA
  * compression boundaries.  Legacy V3 still has an unbounded OOD rejection
  * loop, so `fixed_schedule` remains false even for an accepted finite proof.
- * This plan is an exact input to recursive SHA shards, not a claim that those
- * shards have already been consumed by the normalized parent.
+ * Bounded programs (`ood_candidates>=1` with `rejection_loop_bounded`) lay a
+ * fixed K-candidate window per OOD challenge and set `fixed_schedule=true`
+ * when the all-rejected failure is proven <= 2^-target_bits.  This plan is
+ * an exact input to recursive SHA shards, not a claim that those shards have
+ * already been consumed by the normalized parent — `recursively_consumed`
+ * and `kVerifierFiatShamirAirExecutable` stay false until the SHA AIR and
+ * parent join measure green.
  */
 struct FiatShamirShaExecutionPlanV1 {
     uint32_t calls{0};
@@ -582,6 +587,58 @@ BuildFiatShamirShaExecutionPlanV1(
     const FiatShamirProgram& program,
     const uint256& child_fs_seed,
     const AlgAirProof& child_proof);
+
+/**
+ * Inventory of predicates that still block flipping
+ * `kVerifierFiatShamirAirExecutable`.  Fail-closed: `executable_ready` is
+ * true only when every conjunct below is measured green.  Does NOT flip the
+ * constexpr — callers must keep Ready/CompleteFP false until this reports
+ * ready AND the SHA AIR / parent join are differentially tested.
+ */
+struct VerifierFiatShamirAirChipGapV1 {
+    bool bounded_ood_program_legislated{false};
+    bool bounded_ood_rejection_loop_bounded{false};
+    bool sha_execution_plan_valid{false};
+    bool sha_fixed_schedule{false};
+    bool sha_codec_origins_complete{false};
+    bool sha_recursively_consumed{false};
+    bool challenge_selection_air_constrained{false};
+    bool air_backed_all_kinds_reconstructed{false};
+    bool whole_verifier_sha_equations_in_air{false};
+    /** Conjunction; must stay false until every field above is true. */
+    bool executable_ready{false};
+    uint32_t open_predicates{0};
+    std::string note;
+};
+
+/**
+ * Assess the SHA-FS chip gap against a concrete (program, seed, proof).
+ * Prefer a bounded program (`BuildBoundedFiatShamirProgram`) when measuring
+ * the fixed-schedule conjunct; legacy V3 programs correctly leave
+ * `sha_fixed_schedule` false.
+ *
+ * When `program.ood_candidates>0`, the child's z1/z2 must equal the bounded
+ * K-window selection under the same absorb prefix (consensus-bounded sampler).
+ * Use AlignAlgAirProofOodToBoundedShaScheduleV1 to patch a host proof for
+ * light schedule canaries — never for production Ready.
+ */
+[[nodiscard]] VerifierFiatShamirAirChipGapV1
+AssessVerifierFiatShamirAirChipGapV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof);
+
+/**
+ * Rewrite batch.z1/z2 to the bounded K-window SHA selection for `program`
+ * (ood_candidates>=1).  Leaves a V3-sampled proof's FRI openings inconsistent
+ * with the new z — light schedule canaries only.  Returns false if the
+ * program is not bounded or the window exhausts.
+ */
+[[nodiscard]] bool AlignAlgAirProofOodToBoundedShaScheduleV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    AlgAirProof& child_proof,
+    std::string* why = nullptr);
 
 [[nodiscard]] FiatShamirReplayResult ReplayFiatShamirWitness(
     const FiatShamirProgram& program,

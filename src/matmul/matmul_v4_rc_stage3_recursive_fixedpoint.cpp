@@ -17158,6 +17158,176 @@ ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
     return out;
 }
 
+NarrowMultiChildL2FriConsumeV1
+ExecuteNarrowMultiChildL2FriConsumeV1(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds,
+    bool prove)
+{
+    NarrowMultiChildL2FriConsumeV1 out;
+    out.arity = static_cast<uint32_t>(children.size());
+    if (child_css.size() != children.size() ||
+        child_fs_seeds.size() != children.size() ||
+        children.size() < 2) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume_arity";
+        return out;
+    }
+
+    // Cryptographic join: BuildFoldBusCompositionMulti packs ≥2 L1 proofs
+    // into one narrow V_CS (zero column expansion). Distinct from host Σ
+    // local_q / AIR-mirror of openings.
+    const FoldBusComposition node =
+        BuildFoldBusCompositionMulti(
+            child_css, children, child_fs_seeds);
+    out.fold_bus_built = node.valid;
+    if (!node.valid) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume_fold_bus:" +
+            node.note;
+        return out;
+    }
+    out.n_rows = node.combined.n_rows;
+    out.n_columns = node.combined.n_columns;
+    out.n_constraints = static_cast<uint32_t>(
+        node.combined.constraints.size());
+    out.active_rows =
+        node.hash.valid
+            ? uint64_t{node.hash.program.active_rows}
+            : uint64_t{node.combined.n_rows};
+
+    out.fri_shape = nr::AssessNarrowNodeFriShape(out.active_rows);
+    out.n_lde = out.fri_shape.n_lde;
+    out.fri_shape_representable = out.fri_shape.representable;
+    if (!out.fri_shape_representable) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume_shape:" +
+            out.fri_shape.note;
+        return out;
+    }
+
+    // Forgery: mutate one live limb of child[1]; native fold-bus must refuse
+    // before any L2 witness is built.
+    {
+        auto forged_children = children;
+        bool mutated = false;
+        if (!forged_children[1].batch.queries.empty() &&
+            !forged_children[1].batch.queries[0].row.values
+                 .empty()) {
+            forged_children[1].batch.queries[0].row.values[0] =
+                gf::Add(
+                    forged_children[1]
+                        .batch.queries[0]
+                        .row.values[0],
+                    Fp3::One());
+            mutated = true;
+        }
+        if (!mutated) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "multi_child_l2_fri_consume_forgery_no_limb";
+            return out;
+        }
+        const FoldBusComposition forged_node =
+            BuildFoldBusCompositionMulti(
+                child_css, forged_children, child_fs_seeds);
+        out.forgery_rejected = !forged_node.valid;
+        if (!out.forgery_rejected) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "multi_child_l2_fri_consume_forgery_accepted";
+            return out;
+        }
+    }
+
+    if (!prove) {
+        out.valid =
+            out.fold_bus_built && out.fri_shape_representable &&
+            out.forgery_rejected;
+        out.note =
+            std::string(
+                "stage3:recursive_fixedpoint:"
+                "multi_child_l2_fri_consume") +
+            ";arity=" + std::to_string(out.arity) +
+            ";rows=" + std::to_string(out.n_rows) +
+            ";cols=" + std::to_string(out.n_columns) +
+            ";active=" + std::to_string(out.active_rows) +
+            ";n_lde=" + std::to_string(out.n_lde) +
+            ";shape=1;fold=1;forgery=1;prove=0" +
+            ";complete_fp=false";
+        return out;
+    }
+
+    HashWriter seed_hash;
+    seed_hash << "BTX_RC_STAGE3_MULTI_CHILD_L2_FRI_CONSUME_V1";
+    seed_hash << out.arity;
+    seed_hash << out.n_rows;
+    seed_hash << out.n_columns;
+    seed_hash << out.n_constraints;
+    seed_hash << node.prechallenge_commitment;
+    for (const auto& seed : child_fs_seeds) {
+        seed_hash << seed;
+    }
+    const uint256 parent_seed = seed_hash.GetHash();
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto proved = aq::AirQuotientProveRows(
+        node.combined, node.columns, parent_seed, {});
+    const auto t1 = std::chrono::steady_clock::now();
+    out.prove_micros = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            t1 - t0)
+            .count());
+    out.proved = proved.ok && proved.division_exact;
+    if (!out.proved) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume_prove:" +
+            proved.note;
+        return out;
+    }
+
+    std::string verify_why;
+    const auto t2 = std::chrono::steady_clock::now();
+    out.verified = aq::AirQuotientVerifyRows(
+        node.combined, proved.proof, parent_seed, &verify_why);
+    const auto t3 = std::chrono::steady_clock::now();
+    out.verify_micros = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            t3 - t2)
+            .count());
+    if (!out.verified) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume_verify:" +
+            verify_why;
+        return out;
+    }
+
+    out.valid =
+        out.fold_bus_built && out.fri_shape_representable &&
+        out.proved && out.verified && out.forgery_rejected;
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume") +
+        ";arity=" + std::to_string(out.arity) +
+        ";rows=" + std::to_string(out.n_rows) +
+        ";cols=" + std::to_string(out.n_columns) +
+        ";cons=" + std::to_string(out.n_constraints) +
+        ";active=" + std::to_string(out.active_rows) +
+        ";n_lde=" + std::to_string(out.n_lde) +
+        ";shape=1;fold=1;proved=1;verified=1;forgery=1" +
+        ";prove_us=" + std::to_string(out.prove_micros) +
+        ";verify_us=" + std::to_string(out.verify_micros) +
+        ";complete_fp=false";
+    return out;
+}
+
 NarrowBytecodeShardQuotientJoinV1
 JoinNarrowBytecodeShardLocalQuotientsV1(
     const std::vector<Fp3>& parent_q_per_query,
@@ -17487,7 +17657,8 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
             }
         }
         nr.note = children_ok
-            ? "composed_scheduled;crypto_join_pending"
+            ? "composed_scheduled;crypto_join_pending;"
+              "l2_fri_consume_executable"
             : "composed_child_link_invalid";
         if (!children_ok) out.all_composed_scheduled = false;
         out.nodes.push_back(std::move(nr));
@@ -17645,7 +17816,8 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
                    : true);
     // Absolute AIR-mirrored join earns runtime complete_verifier_mirror.
     // CompleteFP / AggregationReady constexprs stay false (SHA-FS +
-    // multi-child FRI consumption still open).
+    // hierarchical wiring of ExecuteNarrowMultiChildL2FriConsumeV1 still
+    // open).
     out.complete_verifier_mirror =
         attach_l1 && out.valid && out.p2_fs_replay_closed &&
         out.quotient_join.valid &&
