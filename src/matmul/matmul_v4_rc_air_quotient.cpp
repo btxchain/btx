@@ -413,7 +413,19 @@ template <typename F>
 F DeriveChallenge(const uint256& fs_seed, const char* label, const std::vector<uint256>& roots,
                   const std::vector<uint32_t>& extra)
 {
+    // Default SHA path — used by callers that are not Backend-templated
+    // (Split-RAP two-epoch helpers). Prove/Verify use DeriveChallengeForBackend.
     const uint256 d = AirChallengeDigest(fs_seed, label, roots, extra);
+    return AirField<F>::FromChallenge(d.data());
+}
+
+template <typename F, typename Backend>
+F DeriveChallengeForBackend(const uint256& fs_seed, const char* label,
+                            const std::vector<uint256>& roots,
+                            const std::vector<uint32_t>& extra)
+{
+    const uint256 d =
+        AirChallengeDigestForBackend<Backend>(fs_seed, label, roots, extra);
     return AirField<F>::FromChallenge(d.data());
 }
 
@@ -531,6 +543,14 @@ uint256 AirChallengeDigestP2(const uint256& fs_seed, const char* label,
         WriteLE64(out + 8 * i, static_cast<uint64_t>(d[i]));
     }
     return uint256{Span<const unsigned char>{out, 32}};
+}
+
+uint256 AirChallengeDigestSelected(bool use_p2, const uint256& fs_seed, const char* label,
+                                   const std::vector<uint256>& roots,
+                                   const std::vector<uint32_t>& extra)
+{
+    return use_p2 ? AirChallengeDigestP2(fs_seed, label, roots, extra)
+                  : AirChallengeDigest(fs_seed, label, roots, extra);
 }
 
 template <typename F>
@@ -861,7 +881,7 @@ AuditAirQuotientSpillFp3(
         AirFriBackendAlg<F>::RowRoot(
             shifted, n_coeffs);
     const F lambda =
-        DeriveChallenge<F>(
+        DeriveChallengeForBackend<F, AirFriBackendAlg<F>>(
             fs_seed, "airq_lambda", {trace_root},
             {N, Lq, W});
     const Fp omega_M = AirOmegaForSize(M);
@@ -1248,8 +1268,11 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
 
     __phase.mark("trace_ntt+roots");
     // 2. FS λ AFTER the trace commitment roots (commit-then-challenge).
+    // Backend-gated: row-wise algebraic path may select Poseidon2 when
+    // kAirChallengeP2Activated; SHA per-column backends stay on SHA256d.
     const F lambda =
-        DeriveChallenge<F>(fs_seed, "airq_lambda", trace_roots, {N, Lq_commit, W});
+        DeriveChallengeForBackend<F, Backend>(
+            fs_seed, "airq_lambda", trace_roots, {N, Lq_commit, W});
 
     // 3. Build C(X) = Σ_i λ^i · sel_i(X) · R_i(P(X), P(ω_H X)) by evaluation
     //    on the extended subgroup of size M ≥ deg C + 1, then interpolation.
@@ -1941,7 +1964,8 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
         trace_roots.resize(W);
         for (uint32_t c = 0; c < W; ++c) trace_roots[c] = batch.columns[c].root;
     }
-    const F lambda = DeriveChallenge<F>(fs_seed, "airq_lambda", trace_roots, {N, Lq, W});
+    const F lambda = DeriveChallengeForBackend<F, Backend>(
+        fs_seed, "airq_lambda", trace_roots, {N, Lq, W});
 
     const uint32_t n_lde = batch.n_coeffs * kRCFriBlowup;
     const uint32_t step = n_lde / N;
