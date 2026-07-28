@@ -13,6 +13,7 @@
 #include <primitives/block.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace matmul::v4::rc::canonical_parent_production_verifier {
 namespace {
@@ -110,6 +111,12 @@ uint256 RoleProgramRoot(
         const bridge::SemanticEndpointProgramBindingV1*>&
         endpoints)
 {
+    // This root selects the immutable ProgramTable/output ABI, not evidence
+    // that a live leaf proof already exports and CTL-aliases the cell.
+    // `relation_column_exact` and `same_trace_ctl_alias` remain production
+    // semantic-closure gates; requiring them here would circularly prevent
+    // construction of the frozen recursive verifier that must consume those
+    // leaf proofs.
     if (endpoints.empty()) return {};
     HashWriter hash;
     hash <<
@@ -121,8 +128,7 @@ uint256 RoleProgramRoot(
         if (endpoint == nullptr ||
             !endpoint->selected_program_key ||
             !endpoint->exact_program_table_match ||
-            !endpoint->canonical_output_metadata ||
-            !endpoint->relation_column_exact) {
+            !endpoint->canonical_output_metadata) {
             return {};
         }
         hash << static_cast<uint16_t>(
@@ -191,6 +197,364 @@ bool RegistryPinMatches(
         pin.registry_binding ==
             params
                 .hashMatMulRCStage3ProgramRegistryBinding;
+}
+
+bool IsPowerOfTwo(uint32_t value)
+{
+    return value != 0 &&
+        (value & (value - 1U)) == 0;
+}
+
+uint32_t NextPowerOfTwo(uint32_t value)
+{
+    if (value == 0) return 0;
+    --value;
+    value |= value >> 1;
+    value |= value >> 2;
+    value |= value >> 4;
+    value |= value >> 8;
+    value |= value >> 16;
+    return value ==
+            std::numeric_limits<uint32_t>::max()
+        ? 0
+        : value + 1;
+}
+
+uint32_t Log2Exact(uint32_t value)
+{
+    if (!IsPowerOfTwo(value)) return 0;
+    uint32_t out = 0;
+    while (value > 1) {
+        value >>= 1;
+        ++out;
+    }
+    return out;
+}
+
+bool AppendProgramComponent(
+    const constraint_bytecode::ProgramTable& component,
+    constraint_bytecode::ProgramTable& aggregate,
+    uint32_t& column_offset,
+    uint32_t& challenge_offset,
+    std::string* why)
+{
+    namespace cb = constraint_bytecode;
+    if (!cb::ValidateProgramTable(component, why) ||
+        column_offset >
+            std::numeric_limits<uint32_t>::max() -
+                component.current_width ||
+        challenge_offset >
+            std::numeric_limits<uint32_t>::max() -
+                component.challenge_width ||
+        aggregate.programs.size() >
+            cb::kConstraintBytecodeMaxInstructions -
+                component.programs.size()) {
+        return Fail(why, "role_half_component");
+    }
+    for (const auto& source : component.programs) {
+        cb::Program program = source;
+        program.role =
+            RCStage3RelationRole::CompositionLink;
+        program.constraint_ordinal =
+            static_cast<uint32_t>(
+                aggregate.programs.size());
+        for (auto& instruction : program.instructions) {
+            switch (instruction.opcode) {
+            case cb::Opcode::Current:
+            case cb::Opcode::Next:
+                instruction.lhs += column_offset;
+                break;
+            case cb::Opcode::Challenge:
+                instruction.lhs += challenge_offset;
+                break;
+            default:
+                break;
+            }
+        }
+        aggregate.programs.push_back(
+            std::move(program));
+    }
+    // A boundary-only component may declare next_width < current_width.
+    // Embedding it in the aggregate's square current/next trace only adds
+    // unused next-row columns; it does not alter or manufacture a relation.
+    column_offset += component.current_width;
+    challenge_offset += component.challenge_width;
+    return true;
+}
+
+bool AppendConstantPublicOutputColumns(
+    uint32_t first_column,
+    uint32_t count,
+    constraint_bytecode::ProgramTable& table,
+    std::string* why)
+{
+    namespace cb = constraint_bytecode;
+    if (count == 0 ||
+        first_column >
+            std::numeric_limits<uint32_t>::max() - count ||
+        table.programs.size() >
+            cb::kConstraintBytecodeMaxInstructions - count) {
+        return Fail(why, "role_half_public_output_count");
+    }
+    const uint32_t final_width = first_column + count;
+    for (uint32_t offset = 0; offset < count; ++offset) {
+        cb::Program program;
+        program.role =
+            RCStage3RelationRole::CompositionLink;
+        program.constraint_ordinal =
+            static_cast<uint32_t>(table.programs.size());
+        program.kind =
+            air_quotient::AirKind::kTransition;
+        program.declared_degree = 1;
+        program.current_width = final_width;
+        program.next_width = final_width;
+        program.challenge_width =
+            table.challenge_width;
+        const uint32_t column = first_column + offset;
+        program.instructions = {
+            {cb::Opcode::Current, column, 0,
+             gkr_field::Fp3::Zero()},
+            {cb::Opcode::Next, column, 0,
+             gkr_field::Fp3::Zero()},
+            {cb::Opcode::Sub, 0, 1,
+             gkr_field::Fp3::Zero()},
+        };
+        table.programs.push_back(std::move(program));
+    }
+    table.current_width = final_width;
+    table.next_width = final_width;
+    for (auto& program : table.programs) {
+        program.current_width = final_width;
+        program.next_width = final_width;
+        program.challenge_width =
+            table.challenge_width;
+    }
+    return cb::ValidateProgramTable(table, why);
+}
+
+bool BuildManifestDerivedShape(
+    const sites::ProductionProofSiteManifest& manifest,
+    const constraint_bytecode::ProgramTable& program,
+    universal_two_child_parent::PublicShapeV1& out,
+    std::string* why)
+{
+    namespace cb = constraint_bytecode;
+    namespace aq = air_quotient;
+    out = {};
+    const uint32_t rows =
+        manifest.policy.relation_rows_per_site;
+    if (!IsPowerOfTwo(rows) ||
+        rows == 0 ||
+        rows > manifest.policy.max_air_trace_rows ||
+        !cb::ValidateProgramTable(program, why)) {
+        return Fail(why, "role_half_shape_rows");
+    }
+    aq::AirConstraintSystem<gkr_field::Fp3> cs;
+    // This adapter needs only the manifest-derived degree/shape.  Challenge
+    // values cannot change a canonical program's declared degree, kind,
+    // column width or quotient length; they affect evaluation values only.
+    // Supply an exact-width placeholder solely to instantiate the typed
+    // evaluator so challenge-bearing production tables do not masquerade as
+    // challenge-free tables.  No proof is evaluated or accepted here, and
+    // the executable parent must still replay the proof-owned challenge epoch.
+    const std::vector<gkr_field::Fp3> shape_challenges(
+        program.challenge_width,
+        gkr_field::Fp3::Zero());
+    if (!cb::BuildAirConstraintSystemFromProgramTable(
+            program, rows, shape_challenges, cs, why)) {
+        return Fail(why, "role_half_shape_cs");
+    }
+    const uint32_t quotient_len = cs.QuotientLen();
+    const uint32_t coefficients =
+        NextPowerOfTwo(
+            std::max(rows, quotient_len));
+    if (quotient_len == 0 ||
+        coefficients == 0 ||
+        coefficients >
+            std::numeric_limits<uint32_t>::max() /
+                kRCFriBlowup) {
+        return Fail(why, "role_half_shape_domain");
+    }
+    const uint32_t lde = coefficients * kRCFriBlowup;
+    out.version =
+        universal_two_child_parent::
+            kUniversalTwoChildParentVersionV1;
+    out.child_rows = rows;
+    out.child_columns = program.current_width;
+    out.child_quotient_len = quotient_len;
+    out.child_coefficients = coefficients;
+    out.child_lde = lde;
+    out.merkle_depth = Log2Exact(lde);
+    out.folds = Log2Exact(coefficients);
+    out.queries = kRCFri3AlgNumQueries;
+    out.independent_fri_batching =
+        Fri3AlgQ192IndependentBatching();
+    out.column_lengths.assign(
+        uint64_t{out.child_columns} + 1U, rows);
+    out.column_lengths.back() = quotient_len;
+    return out.merkle_depth != 0 &&
+        out.folds != 0;
+}
+
+bool SameFrozenSpec(
+    const cpc::FrozenBinaryParentSpecV1& lhs,
+    const cpc::FrozenBinaryParentSpecV1& rhs)
+{
+    return lhs.version == rhs.version &&
+        lhs.child_shape == rhs.child_shape &&
+        lhs.child_registry == rhs.child_registry &&
+        lhs.role_schedule == rhs.role_schedule &&
+        lhs.child_public_output ==
+            rhs.child_public_output;
+}
+
+bool ValidateRoleHalfAdapter(
+    const cpc::FrozenBinaryParentSpecV1& expected,
+    const cpc::FrozenBinaryParentSpecV1& candidate,
+    std::string* why)
+{
+    namespace cb = constraint_bytecode;
+    if (!SameFrozenSpec(expected, candidate)) {
+        return Fail(why, "role_half_adapter_substitution");
+    }
+    for (uint32_t child = 0; child < 2; ++child) {
+        const auto& registry =
+            candidate.child_registry[child];
+        if (!cb::ValidateProgramTable(
+                registry.child_relation_program, why) ||
+            registry.program_root.IsNull() ||
+            registry.program_root !=
+                cb::CommitProgramTable(
+                    registry.child_relation_program) ||
+            registry.child_relation_program.current_width !=
+                candidate.child_shape[child]
+                    .child_columns ||
+            registry.child_relation_program.next_width !=
+                candidate.child_shape[child]
+                    .child_columns) {
+            return Fail(why, "role_half_program_root");
+        }
+        const uint32_t cells =
+            cpc::CanonicalChildPublicOutputCellCountV1(
+                candidate, child);
+        const uint64_t end =
+            uint64_t{
+                candidate.child_public_output[child]
+                    .first_trace_column} +
+            cells;
+        if (cells == 0 ||
+            end !=
+                candidate.child_shape[child]
+                    .child_columns) {
+            return Fail(why, "role_half_public_output_abi");
+        }
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:canonical_parent_production_verifier:"
+            "canonical_role_half_adapter_valid";
+    }
+    return true;
+}
+
+bool BuildCanonicalRoleHalfAdapter(
+    const sites::ProductionProofSiteManifest& manifest,
+    const pcr::AssessmentV1& registry,
+    const std::vector<cpc::FrozenRoleScheduleV1>& roles,
+    cpc::FrozenBinaryParentSpecV1& out,
+    std::string* why)
+{
+    namespace cb = constraint_bytecode;
+    namespace utp = universal_topology;
+    out = {};
+    out.role_schedule = roles;
+    if (roles.size() != nav3::kRoleCountV3 ||
+        !registry.canonical_family_sources ||
+        registry.family_migration.families_structural_stubs != 0) {
+        return Fail(why, "role_half_canonical_sources");
+    }
+    const auto sources =
+        utp::BuildProductionFamilyProgramSourcesV1(
+            manifest);
+    if (!utp::ValidateProductionFamilyProgramSourcesV1(
+            manifest, sources, why) ||
+        sources.size() != manifest.entries.size()) {
+        return Fail(why, "role_half_source_inventory");
+    }
+    const auto& order = RCStage3UnifiedRoleOrder();
+    for (uint32_t child = 0; child < 2; ++child) {
+        cb::ProgramTable aggregate;
+        aggregate.role =
+            RCStage3RelationRole::CompositionLink;
+        uint32_t column_offset = 0;
+        uint32_t challenge_offset = 0;
+        std::array<bool, cpc::kCanonicalRoleSplitV1>
+            role_present{};
+        const uint32_t begin =
+            child == 0 ? 0 : cpc::kCanonicalRoleSplitV1;
+        const uint32_t end =
+            child == 0
+            ? cpc::kCanonicalRoleSplitV1
+            : nav3::kRoleCountV3;
+        for (const auto& source : sources) {
+            const auto found =
+                std::find(
+                    order.begin() + begin,
+                    order.begin() + end,
+                    source.role);
+            if (found == order.begin() + end) {
+                continue;
+            }
+            role_present[
+                static_cast<size_t>(
+                    found - (order.begin() + begin))] =
+                true;
+            if (!AppendProgramComponent(
+                    source.program, aggregate,
+                    column_offset, challenge_offset,
+                    why)) {
+                out = {};
+                return false;
+            }
+        }
+        if (aggregate.programs.empty() ||
+            std::find(
+                role_present.begin(),
+                role_present.end(), false) !=
+                role_present.end()) {
+            out = {};
+            return Fail(why, "role_half_role_coverage");
+        }
+        aggregate.current_width = column_offset;
+        aggregate.next_width = column_offset;
+        aggregate.challenge_width =
+            challenge_offset;
+        out.child_public_output[child]
+            .first_trace_column = column_offset;
+        const uint32_t cells =
+            cpc::CanonicalChildPublicOutputCellCountV1(
+                out, child);
+        if (!AppendConstantPublicOutputColumns(
+                column_offset, cells, aggregate, why)) {
+            out = {};
+            return false;
+        }
+        auto& frozen = out.child_registry[child];
+        frozen.child_relation_program =
+            std::move(aggregate);
+        frozen.program_root =
+            cb::CommitProgramTable(
+                frozen.child_relation_program);
+        if (frozen.program_root.IsNull() ||
+            !BuildManifestDerivedShape(
+                manifest,
+                frozen.child_relation_program,
+                out.child_shape[child], why)) {
+            out = {};
+            return false;
+        }
+    }
+    return ValidateRoleHalfAdapter(out, out, why);
 }
 
 } // namespace
@@ -326,8 +690,7 @@ AssessFrozenBinaryParentSpecV1(
                 !endpoint->selected_program_key ||
                 !endpoint->exact_program_table_match ||
                 !endpoint
-                     ->canonical_output_metadata ||
-                !endpoint->relation_column_exact) {
+                     ->canonical_output_metadata) {
                 complete = false;
                 ++endpoint_ordinal;
                 continue;
@@ -382,21 +745,47 @@ AssessFrozenBinaryParentSpecV1(
             "all_14_role_program_schedules");
     }
 
-    // The immutable registry currently exposes family, universal-parent and
-    // normalized-root programs.  It does not expose either exact seven-role
-    // aggregate child ProgramTable consumed by FrozenBinaryParentSpecV1.
-    out.role_half_programs_available = false;
-    out.role_half_shapes_available = false;
-    out.public_output_abi_available = false;
-    Missing(
-        out, kResidualRoleHalfPrograms,
-        "two_canonical_seven_role_child_program_tables");
-    Missing(
-        out, kResidualRoleHalfShapes,
-        "two_manifest_derived_child_fri_shapes");
-    Missing(
-        out, kResidualPublicOutputAbi,
-        "registry_pinned_child_public_output_column_bases");
+    std::string adapter_why;
+    const bool adapter =
+        BuildCanonicalRoleHalfAdapter(
+            out.site_manifest, out.registry,
+            out.diagnostic_role_schedule,
+            out.diagnostic_frozen_spec,
+            &adapter_why);
+    out.role_half_adapter_note = adapter_why;
+    out.role_half_programs_available =
+        adapter &&
+        !out.diagnostic_frozen_spec
+             .child_registry[0].program_root.IsNull() &&
+        !out.diagnostic_frozen_spec
+             .child_registry[1].program_root.IsNull();
+    out.role_half_shapes_available =
+        adapter &&
+        out.diagnostic_frozen_spec
+                .child_shape[0].child_rows != 0 &&
+        out.diagnostic_frozen_spec
+                .child_shape[1].child_rows != 0;
+    out.public_output_abi_available =
+        adapter &&
+        cpc::CanonicalChildPublicOutputCellCountV1(
+            out.diagnostic_frozen_spec, 0) != 0 &&
+        cpc::CanonicalChildPublicOutputCellCountV1(
+            out.diagnostic_frozen_spec, 1) != 0;
+    if (!out.role_half_programs_available) {
+        Missing(
+            out, kResidualRoleHalfPrograms,
+            "two_canonical_seven_role_child_program_tables");
+    }
+    if (!out.role_half_shapes_available) {
+        Missing(
+            out, kResidualRoleHalfShapes,
+            "two_manifest_derived_child_fri_shapes");
+    }
+    if (!out.public_output_abi_available) {
+        Missing(
+            out, kResidualPublicOutputAbi,
+            "registry_pinned_child_public_output_column_bases");
+    }
 
     out.spec_derivable =
         out.residual_mask == 0 &&
@@ -439,11 +828,37 @@ bool BuildFrozenBinaryParentSpecV1(
     if (!local.spec_derivable) {
         return Fail(why, "frozen_spec_unavailable");
     }
-    // This assignment becomes reachable only when the production registry
-    // exposes the two role-half ProgramTables, shapes and public-output bases.
-    // Keeping it unreachable now is intentional: manufacturing those objects
-    // from family widths would recreate the structural-stub vulnerability.
-    return Fail(why, "role_half_registry_adapter_missing");
+    if (!ValidateRoleHalfAdapter(
+            local.diagnostic_frozen_spec,
+            local.diagnostic_frozen_spec, why)) {
+        return false;
+    }
+    out = local.diagnostic_frozen_spec;
+    if (why != nullptr) {
+        *why =
+            "stage3:canonical_parent_production_verifier:"
+            "frozen_spec_built_from_canonical_registry";
+    }
+    return true;
+}
+
+bool ValidateDiagnosticRoleHalfAdapterV1(
+    const FrozenSpecAssessmentV1& assessment,
+    const cpc::FrozenBinaryParentSpecV1& candidate,
+    std::string* why)
+{
+    if (!assessment.registry_rebuilt_from_canonical_sources ||
+        !assessment.exact_endpoint_order ||
+        !assessment.exact_endpoint_occurrence_schedule ||
+        !assessment.exact_role_program_schedule ||
+        !assessment.role_half_programs_available ||
+        !assessment.role_half_shapes_available ||
+        !assessment.public_output_abi_available) {
+        return Fail(why, "diagnostic_adapter_prerequisites");
+    }
+    return ValidateRoleHalfAdapter(
+        assessment.diagnostic_frozen_spec,
+        candidate, why);
 }
 
 MechanismVerifyStatusV1

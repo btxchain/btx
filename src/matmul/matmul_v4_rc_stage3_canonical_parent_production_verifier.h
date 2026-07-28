@@ -62,6 +62,13 @@ struct FrozenSpecAssessmentV1 {
         endpoint_program_map;
     std::vector<cpc::FrozenRoleScheduleV1>
         diagnostic_role_schedule;
+    /**
+     * Canonically rebuilt role-half adapter.  This is diagnostic while any
+     * other residual remains: it is not a caller-selectable registry and is
+     * copied into the consensus spec only by BuildFrozenBinaryParentSpecV1
+     * after every independent production residual is closed.
+     */
+    cpc::FrozenBinaryParentSpecV1 diagnostic_frozen_spec;
     uint256 block_dimension_commitment{};
     uint32_t derived_endpoint_occurrences{0};
     uint32_t derived_role_programs{0};
@@ -79,6 +86,7 @@ struct FrozenSpecAssessmentV1 {
     bool public_output_abi_available{false};
     bool spec_derivable{false};
     bool authority{false};
+    std::string role_half_adapter_note;
     std::vector<std::string> missing_inputs;
     std::string note;
 };
@@ -100,6 +108,19 @@ AssessFrozenBinaryParentSpecV1(
     int32_t height,
     cpc::FrozenBinaryParentSpecV1& out,
     FrozenSpecAssessmentV1* assessment = nullptr,
+    std::string* why = nullptr);
+
+/**
+ * Test/audit validator for the diagnostic adapter already rebuilt by
+ * AssessFrozenBinaryParentSpecV1.  It checks exact equality to the canonical
+ * role schedule, ProgramTables, manifest-derived shapes and ABI bases and
+ * rechecks every ProgramTable commitment.  It is deliberately not an
+ * authority API: BuildFrozenBinaryParentSpecV1 always performs its own
+ * receipt-independent assessment.
+ */
+[[nodiscard]] bool ValidateDiagnosticRoleHalfAdapterV1(
+    const FrozenSpecAssessmentV1& assessment,
+    const cpc::FrozenBinaryParentSpecV1& candidate,
     std::string* why = nullptr);
 
 enum class MechanismVerifyStatusV1 : uint8_t {

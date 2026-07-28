@@ -70,15 +70,59 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         first.residual_mask &
         cpv::kResidualCanonicalRegistry);
-    BOOST_CHECK(
+    BOOST_REQUIRE_MESSAGE(
+        first.role_half_programs_available,
+        first.role_half_adapter_note);
+    BOOST_REQUIRE_MESSAGE(
+        first.role_half_shapes_available,
+        first.role_half_adapter_note);
+    BOOST_REQUIRE_MESSAGE(
+        first.public_output_abi_available,
+        first.role_half_adapter_note);
+    BOOST_CHECK_EQUAL(
         first.residual_mask &
-        cpv::kResidualRoleHalfPrograms);
-    BOOST_CHECK(
+            cpv::kResidualRoleHalfPrograms,
+        0U);
+    BOOST_CHECK_EQUAL(
         first.residual_mask &
-        cpv::kResidualRoleHalfShapes);
-    BOOST_CHECK(
+            cpv::kResidualRoleHalfShapes,
+        0U);
+    BOOST_CHECK_EQUAL(
         first.residual_mask &
-        cpv::kResidualPublicOutputAbi);
+            cpv::kResidualPublicOutputAbi,
+        0U);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cpv::ValidateDiagnosticRoleHalfAdapterV1(
+            first, first.diagnostic_frozen_spec,
+            &why),
+        why);
+    for (uint32_t child = 0; child < 2; ++child) {
+        const auto& shape =
+            first.diagnostic_frozen_spec
+                .child_shape[child];
+        const auto& registry =
+            first.diagnostic_frozen_spec
+                .child_registry[child];
+        BOOST_CHECK_EQUAL(
+            shape.child_rows,
+            first.site_manifest.policy
+                .relation_rows_per_site);
+        BOOST_CHECK_EQUAL(
+            shape.child_columns,
+            registry.child_relation_program
+                .current_width);
+        BOOST_CHECK_EQUAL(
+            first.diagnostic_frozen_spec
+                    .child_public_output[child]
+                    .first_trace_column +
+                matmul::v4::rc::
+                    canonical_parent_consensus::
+                        CanonicalChildPublicOutputCellCountV1(
+                            first.diagnostic_frozen_spec,
+                            child),
+            shape.child_columns);
+    }
 
     const auto pin =
         ut::BuildProductionProgramConsensusPinV1(
@@ -114,6 +158,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         first.diagnostic_role_schedule ==
         second.diagnostic_role_schedule);
+    BOOST_CHECK(
+        first.diagnostic_frozen_spec.child_shape ==
+        second.diagnostic_frozen_spec.child_shape);
+    BOOST_CHECK(
+        first.diagnostic_frozen_spec.child_registry ==
+        second.diagnostic_frozen_spec.child_registry);
+    BOOST_CHECK(
+        first.diagnostic_frozen_spec.child_public_output ==
+        second.diagnostic_frozen_spec.child_public_output);
     BOOST_CHECK_EQUAL(
         first.residual_mask,
         second.residual_mask);
@@ -121,7 +174,6 @@ BOOST_AUTO_TEST_CASE(
     matmul::v4::rc::canonical_parent_consensus::
         FrozenBinaryParentSpecV1 frozen;
     cpv::FrozenSpecAssessmentV1 assessed;
-    std::string why;
     BOOST_CHECK(
         !cpv::BuildFrozenBinaryParentSpecV1(
             substituted, params, 101,
@@ -131,6 +183,62 @@ BOOST_AUTO_TEST_CASE(
         std::string::npos);
     BOOST_CHECK(
         frozen.role_schedule.empty());
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_role_half_adapter_rejects_inventory_abi_and_root_substitution)
+{
+    const CBlock block = Block();
+    Consensus::Params params = Params();
+    const auto assessed =
+        cpv::AssessFrozenBinaryParentSpecV1(
+            block, params, 101);
+    BOOST_REQUIRE_MESSAGE(
+        assessed.role_half_programs_available,
+        assessed.role_half_adapter_note);
+    BOOST_REQUIRE_MESSAGE(
+        assessed.role_half_shapes_available,
+        assessed.role_half_adapter_note);
+    BOOST_REQUIRE_MESSAGE(
+        assessed.public_output_abi_available,
+        assessed.role_half_adapter_note);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cpv::ValidateDiagnosticRoleHalfAdapterV1(
+            assessed, assessed.diagnostic_frozen_spec,
+            &why),
+        why);
+
+    {
+        auto omitted = assessed.diagnostic_frozen_spec;
+        omitted.role_schedule.pop_back();
+        BOOST_CHECK(
+            !cpv::ValidateDiagnosticRoleHalfAdapterV1(
+                assessed, omitted, &why));
+    }
+    {
+        auto duplicate = assessed.diagnostic_frozen_spec;
+        duplicate.role_schedule[1] =
+            duplicate.role_schedule[0];
+        BOOST_CHECK(
+            !cpv::ValidateDiagnosticRoleHalfAdapterV1(
+                assessed, duplicate, &why));
+    }
+    {
+        auto wrong_abi = assessed.diagnostic_frozen_spec;
+        ++wrong_abi.child_public_output[0]
+              .first_trace_column;
+        BOOST_CHECK(
+            !cpv::ValidateDiagnosticRoleHalfAdapterV1(
+                assessed, wrong_abi, &why));
+    }
+    {
+        auto wrong_root = assessed.diagnostic_frozen_spec;
+        wrong_root.child_registry[1].program_root.SetNull();
+        BOOST_CHECK(
+            !cpv::ValidateDiagnosticRoleHalfAdapterV1(
+                assessed, wrong_root, &why));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
