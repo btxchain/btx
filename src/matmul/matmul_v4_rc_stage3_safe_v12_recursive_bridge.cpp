@@ -1258,6 +1258,49 @@ constexpr gf::Fp kTypedEventReceiptMagicV13 =
 constexpr char kTypedEventReceiptDomainV13[] =
     "BTX_RC_STAGE3_TYPED_SAFE_EVENT_RECEIPT_V13";
 
+std::vector<uint32_t> TypedEventR0BaseColumnsV13()
+{
+    const TypedSafeEventParentLayoutV13 layout;
+    std::vector<uint32_t> out;
+    out.reserve(layout.end - 2 * kTypedSafeEventCtlLanesV13);
+    for (uint32_t column = 0;
+         column < layout.end; ++column) {
+        const bool dependent_acc =
+            column >= layout.ctl_acc_base &&
+            column <
+                layout.ctl_acc_base +
+                    kTypedSafeEventCtlLanesV13;
+        const bool dependent_inverse =
+            column >= layout.ctl_inverse_base &&
+            column <
+                layout.ctl_inverse_base +
+                    kTypedSafeEventCtlLanesV13;
+        if (!dependent_acc && !dependent_inverse) {
+            out.push_back(column);
+        }
+    }
+    return out;
+}
+
+bool CanonicalSplitRapProofV13(
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    std::vector<unsigned char> bytes;
+    const size_t encoded =
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            proof, bytes);
+    if (encoded == 0 || encoded != bytes.size()) {
+        return false;
+    }
+    const auto decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(bytes);
+    if (!decoded.has_value()) return false;
+    std::vector<unsigned char> roundtrip;
+    return aq::SerializeAirQuotientSplitRapRowsProof(
+               *decoded, roundtrip) == bytes.size() &&
+        roundtrip == bytes;
+}
+
 struct TypedEventRowPlanV13 {
     bool active{false};
     bool reset{false};
@@ -1456,21 +1499,35 @@ bool ValidateTypedEventProgramV13(
 }
 
 std::array<Fp3, 4> TypedEventCtlChallengesV13(
-    const uint256& relation_seed)
+    const uint256& relation_seed,
+    const uint256& r0_row_group_root,
+    const alg_hash::Digest& program_root,
+    const alg_hash::Digest& transcript_commitment)
 {
     std::vector<gf::Fp> base{
         kTypedEventReceiptMagicV13,
         gf::FromU64(kTypedSafeEventParentVersionV13),
     };
-    for (uint32_t word = 0; word < 8; ++word) {
-        uint32_t value = 0;
-        for (uint32_t byte = 0; byte < 4; ++byte) {
-            value |= static_cast<uint32_t>(
-                         relation_seed.data()[4 * word + byte])
-                << (8 * byte);
-        }
-        base.push_back(gf::FromU64(value));
-    }
+    const auto append_uint256 =
+        [&base](const uint256& value) {
+            for (uint32_t word = 0; word < 8; ++word) {
+                uint32_t packed = 0;
+                for (uint32_t byte = 0; byte < 4; ++byte) {
+                    packed |= static_cast<uint32_t>(
+                                  value.data()[4 * word + byte])
+                        << (8 * byte);
+                }
+                base.push_back(gf::FromU64(packed));
+            }
+        };
+    append_uint256(relation_seed);
+    append_uint256(r0_row_group_root);
+    base.insert(
+        base.end(), program_root.begin(), program_root.end());
+    base.insert(
+        base.end(),
+        transcript_commitment.begin(),
+        transcript_commitment.end());
     std::array<Fp3, 4> out{};
     for (uint32_t draw = 0; draw < out.size(); ++draw) {
         auto lanes = base;
@@ -1880,7 +1937,7 @@ bool BuildTypedEventCsV13(
     const std::vector<TypedSafeEventProgramV13>& program,
     const alg_hash::Digest& program_root,
     const alg_hash::Digest& expected_commitment,
-    const uint256& relation_seed,
+    const std::array<Fp3, 4>& challenges,
     TypedEventPlanV13& plan,
     aq::AirConstraintSystem<Fp3>& cs,
     std::vector<std::vector<Fp3>>* columns,
@@ -2300,8 +2357,6 @@ bool BuildTypedEventCsV13(
         }
     }
 
-    const auto challenges =
-        TypedEventCtlChallengesV13(relation_seed);
     if (std::any_of(
             challenges.begin(), challenges.end(),
             [](const Fp3& value) { return gf::IsZero(value); })) {
@@ -2793,10 +2848,13 @@ bool BuildTypedSafeEventParentV13(
         return false;
     }
 
+    const std::array<Fp3, 4> placeholder_challenges{
+        U32(2), U32(3), U32(5), U32(7)};
     TypedEventPlanV13 plan;
     if (!BuildTypedEventCsV13(
             program, out.program_root,
-            out.transcript_commitment, relation_seed,
+            out.transcript_commitment,
+            placeholder_challenges,
             plan, out.cs, &out.columns, why)) {
         return false;
     }
@@ -2856,8 +2914,63 @@ bool BuildTypedSafeEventParentV13(
         }
     }
 
-    const auto challenges =
-        TypedEventCtlChallengesV13(relation_seed);
+    // Commit every challenge-independent column before sampling LogUp
+    // challenges. Accumulators and denominator inverses are the only Rdep
+    // columns. This is the two-epoch RAP order required against an adaptive
+    // prover; deriving these challenges from relation_seed alone would let
+    // the prover choose transcript cells after seeing alpha/gamma.
+    out.r0_base_column_indices =
+        TypedEventR0BaseColumnsV13();
+    out.r0_session =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            out.cs, out.columns,
+            out.r0_base_column_indices);
+    if (!out.r0_session.valid ||
+        out.r0_session.base_row_commitment.IsNull()) {
+        return Fail(
+            why, "v13_event_r0_commit:" +
+                out.r0_session.note);
+    }
+    out.r0_row_group_root =
+        out.r0_session.base_row_commitment;
+    out.receipt_ctl_challenges =
+        TypedEventCtlChallengesV13(
+            relation_seed, out.r0_row_group_root,
+            out.program_root,
+            out.transcript_commitment);
+    if (std::any_of(
+            out.receipt_ctl_challenges.begin(),
+            out.receipt_ctl_challenges.end(),
+            [](const Fp3& value) {
+                return gf::IsZero(value);
+            })) {
+        return Fail(why, "v13_event_r0_challenge_zero");
+    }
+    TypedEventPlanV13 challenge_plan;
+    aq::AirConstraintSystem<Fp3> challenge_cs;
+    if (!BuildTypedEventCsV13(
+            program, out.program_root,
+            out.transcript_commitment,
+            out.receipt_ctl_challenges,
+            challenge_plan, challenge_cs,
+            nullptr, why) ||
+        challenge_plan.trace_rows != plan.trace_rows ||
+        challenge_plan.semantic_count !=
+            plan.semantic_count) {
+        return Fail(why, "v13_event_r0_cs_rebuild");
+    }
+    out.cs = std::move(challenge_cs);
+    out.cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns =
+            out.r0_base_column_indices,
+        .root = out.r0_row_group_root,
+    });
+
+    const auto& challenges =
+        out.receipt_ctl_challenges;
     for (uint32_t ctl = 0; ctl < 2; ++ctl) {
         const uint32_t acc = layout.ctl_acc_base + ctl;
         const uint32_t inv = layout.ctl_inverse_base + ctl;
@@ -2929,12 +3042,16 @@ bool BuildTypedSafeEventParentV13(
     out.poseidon_relations_executable = true;
     out.dual_fp3_receipt_ctl_terminal =
         out.violations == 0;
+    out.receipt_ctl_challenges_after_r0 =
+        !out.r0_row_group_root.IsNull() &&
+        out.r0_session.valid;
     out.proof_cells_are_ordinary_columns = true;
     out.parent_owns_real_fri_relation = false;
     out.normalized_child_cells_bound = false;
     out.recursive_authority_ready = false;
     out.valid =
         out.violations == 0 &&
+        out.receipt_ctl_challenges_after_r0 &&
         out.complete_challenge_kind_coverage &&
         out.unique_query_seed_event &&
         out.every_query_uses_seed_output &&
@@ -2961,26 +3078,39 @@ bool ProveTypedSafeEventParentV13(
     if (!product.valid ||
         product.normalized_child_cells_bound ||
         product.recursive_authority_ready ||
+        !product.receipt_ctl_challenges_after_r0 ||
+        !product.r0_session.valid ||
+        product.r0_row_group_root.IsNull() ||
         product.violations != 0 ||
         CountViolationsV12(product.cs, product.columns) != 0) {
         return Fail(why, "v13_event_product_for_prove");
     }
     const auto proved =
-        aq::AirQuotientProveRows(
-            product.cs, product.columns, relation_seed);
-    if (!proved.ok || !proved.division_exact) {
+        aq::AirQuotientProveRowsSplitRap(
+            product.cs, product.columns,
+            product.r0_base_column_indices,
+            relation_seed, {}, &product.r0_session);
+    if (!proved.ok || !proved.division_exact ||
+        proved.proof.batch.groups.empty() ||
+        Fri3AlgDigestToUint256(
+            proved.proof.batch.groups[0]
+                .row_commit.root) !=
+            product.r0_row_group_root) {
         return Fail(why, "v13_event_air_prove:" + proved.note);
     }
     out.program_root = product.program_root;
     out.transcript_commitment =
         product.transcript_commitment;
+    out.r0_row_group_root =
+        product.r0_row_group_root;
     out.proof = proved.proof;
     out.trace_rows = product.trace_rows;
     out.event_count =
         static_cast<uint32_t>(product.program.size());
     out.canonical_proof_encoding =
-        CanonicalRowsProof(out.proof);
+        CanonicalSplitRapProofV13(out.proof);
     out.verified = false;
+    out.receipt_ctl_challenges_after_r0 = true;
     out.normalized_child_cells_bound = false;
     out.recursive_authority_ready = false;
     out.note =
@@ -3005,23 +3135,51 @@ bool VerifyTypedSafeEventParentProofV13(
         proof.program_root != program_root ||
         !Canonical(proof.transcript_commitment) ||
         proof.transcript_commitment == alg_hash::Digest{} ||
+        proof.r0_row_group_root.IsNull() ||
         proof.event_count != program.size() ||
         proof.normalized_child_cells_bound ||
         proof.recursive_authority_ready ||
-        !CanonicalRowsProof(proof.proof)) {
+        !proof.receipt_ctl_challenges_after_r0 ||
+        !CanonicalSplitRapProofV13(proof.proof) ||
+        proof.proof.batch.groups.empty() ||
+        Fri3AlgDigestToUint256(
+            proof.proof.batch.groups[0]
+                .row_commit.root) !=
+            proof.r0_row_group_root) {
         return Fail(why, "v13_event_proof_envelope");
+    }
+    const auto challenges =
+        TypedEventCtlChallengesV13(
+            relation_seed, proof.r0_row_group_root,
+            program_root, proof.transcript_commitment);
+    if (std::any_of(
+            challenges.begin(), challenges.end(),
+            [](const Fp3& value) {
+                return gf::IsZero(value);
+            })) {
+        return Fail(why, "v13_event_verifier_challenge");
     }
     TypedEventPlanV13 plan;
     aq::AirConstraintSystem<Fp3> cs;
     if (!BuildTypedEventCsV13(
             program, program_root,
-            proof.transcript_commitment, relation_seed,
+            proof.transcript_commitment, challenges,
             plan, cs, nullptr, why) ||
         proof.trace_rows != plan.trace_rows) {
         return Fail(why, "v13_event_verifier_rebuild");
     }
-    return aq::AirQuotientVerifyRows(
-        cs, proof.proof, relation_seed, why);
+    const auto base_indices =
+        TypedEventR0BaseColumnsV13();
+    cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns = base_indices,
+        .root = proof.r0_row_group_root,
+    });
+    return aq::AirQuotientVerifyRowsSplitRap(
+        cs, proof.proof, base_indices,
+        relation_seed, why);
 }
 
 } // namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge

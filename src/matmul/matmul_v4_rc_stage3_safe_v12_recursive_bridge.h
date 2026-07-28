@@ -533,6 +533,10 @@ struct TypedSafeEventParentProductV13 {
         output_locations;
     aq::AirConstraintSystem<gf::Fp3> cs;
     std::vector<std::vector<gf::Fp3>> columns;
+    std::vector<uint32_t> r0_base_column_indices;
+    aq::AirQuotientTwoEpochBaseRowSession r0_session;
+    uint256 r0_row_group_root{};
+    std::array<gf::Fp3, 4> receipt_ctl_challenges{};
     uint32_t trace_rows{0};
     uint32_t active_permutation_rows{0};
     uint32_t proof_owned_message_cells{0};
@@ -547,6 +551,7 @@ struct TypedSafeEventParentProductV13 {
     bool complete_challenge_kind_coverage{false};
     bool poseidon_relations_executable{false};
     bool dual_fp3_receipt_ctl_terminal{false};
+    bool receipt_ctl_challenges_after_r0{false};
     bool proof_cells_are_ordinary_columns{false};
     bool parent_owns_real_fri_relation{false};
     bool normalized_child_cells_bound{false};
@@ -559,10 +564,12 @@ struct TypedSafeEventParentProofV13 {
     uint16_t version{kTypedSafeEventParentVersionV13};
     alg_hash::Digest program_root{};
     alg_hash::Digest transcript_commitment{};
-    aq::AirQuotientRowsProof proof{};
+    aq::AirQuotientSplitRapRowsProof proof{};
+    uint256 r0_row_group_root{};
     uint32_t trace_rows{0};
     uint32_t event_count{0};
     bool canonical_proof_encoding{false};
+    bool receipt_ctl_challenges_after_r0{false};
     bool verified{false};
     bool normalized_child_cells_bound{false};
     bool recursive_authority_ready{false};
@@ -575,8 +582,11 @@ CommitTypedSafeEventProgramV13(
     const std::vector<TypedSafeEventProgramV13>& program);
 
 /**
- * Build the direct parent relation and witness.  The relation seed derives
- * the two Fp3 LogUp challenges and is replayed by the verifier.
+ * Build the direct parent relation and witness. Every challenge-independent
+ * cell is first committed in R0. The public relation seed, authenticated R0
+ * root, program root and transcript commitment then derive two independent
+ * Fp3 LogUp challenge pairs; only accumulators/inverses live in Rdep. The
+ * verifier repeats this exact two-epoch derivation from the Split-RAP proof.
  */
 [[nodiscard]] bool BuildTypedSafeEventParentV13(
     const std::vector<TypedSafeEventProgramV13>& program,

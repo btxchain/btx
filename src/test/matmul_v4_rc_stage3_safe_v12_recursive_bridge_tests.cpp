@@ -631,6 +631,9 @@ BOOST_AUTO_TEST_CASE(
         bridge::kTypedSafeEventRequiredKindsV13);
     BOOST_CHECK(product.poseidon_relations_executable);
     BOOST_CHECK(product.dual_fp3_receipt_ctl_terminal);
+    BOOST_CHECK(product.receipt_ctl_challenges_after_r0);
+    BOOST_CHECK(!product.r0_row_group_root.IsNull());
+    BOOST_CHECK(product.r0_session.valid);
     BOOST_CHECK(product.proof_cells_are_ordinary_columns);
     BOOST_CHECK(!product.parent_owns_real_fri_relation);
     BOOST_CHECK(!product.normalized_child_cells_bound);
@@ -708,6 +711,47 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(
         bridge::CountViolationsV12(alias.cs, alias.columns),
         0U);
+
+    // The rational-identity challenges are sampled only after committing R0.
+    // Changing one proof-owned transcript cell changes both the authenticated
+    // R0 group and its derived alpha/gamma tuple.
+    auto changed_witness = witness;
+    bool changed_one = false;
+    for (uint32_t event = 0;
+         event < program.size() && !changed_one; ++event) {
+        for (uint32_t ordinal = 0;
+             ordinal < program[event].message.size(); ++ordinal) {
+            if (program[event].message[ordinal].binding !=
+                bridge::TypedSafeMessageBindingV13::ProofOwned) {
+                continue;
+            }
+            changed_witness[event].message[ordinal] =
+                gf::Add(
+                    changed_witness[event].message[ordinal], 1);
+            changed_one = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(changed_one);
+    bridge::TypedSafeEventParentProductV13 changed_product;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildTypedSafeEventParentV13(
+            program, changed_witness, seed,
+            changed_product, &why),
+        why);
+    BOOST_CHECK(
+        changed_product.r0_row_group_root !=
+        product.r0_row_group_root);
+    bool challenge_changed = false;
+    for (uint32_t lane = 0;
+         lane < product.receipt_ctl_challenges.size(); ++lane) {
+        challenge_changed =
+            challenge_changed ||
+            !gf::Eq(
+                changed_product.receipt_ctl_challenges[lane],
+                product.receipt_ctl_challenges[lane]);
+    }
+    BOOST_CHECK(challenge_changed);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -860,12 +904,18 @@ BOOST_AUTO_TEST_CASE(
                std::chrono::milliseconds>(end - begin).count());
 
     BOOST_REQUIRE(!proof.proof.batch.queries.empty());
-    BOOST_REQUIRE(!proof.proof.batch.queries[0].row.values.empty());
+    BOOST_REQUIRE(
+        !proof.proof.batch.queries[0].group_rows.empty());
+    BOOST_REQUIRE(
+        !proof.proof.batch.queries[0]
+             .group_rows[0].values.empty());
     {
         auto tampered = proof;
-        tampered.proof.batch.queries[0].row.values[0] =
+        tampered.proof.batch.queries[0]
+            .group_rows[0].values[0] =
             gf::Add(
-                tampered.proof.batch.queries[0].row.values[0],
+                tampered.proof.batch.queries[0]
+                    .group_rows[0].values[0],
                 gf::Fp3::One());
         BOOST_CHECK(
             !bridge::VerifyTypedSafeEventParentProofV13(
@@ -893,6 +943,13 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(
             !bridge::VerifyTypedSafeEventParentProofV13(
                 program, commitment, seed, &why));
+    }
+    {
+        auto r0_substitution = proof;
+        r0_substitution.r0_row_group_root.begin()[0] ^= 1U;
+        BOOST_CHECK(
+            !bridge::VerifyTypedSafeEventParentProofV13(
+                program, r0_substitution, seed, &why));
     }
     BOOST_CHECK(
         bridge::kTypedSafeEventParentExecutableV13);
