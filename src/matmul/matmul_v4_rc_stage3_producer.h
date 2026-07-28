@@ -313,10 +313,10 @@ enum class RCStage3NormalizedProviderStatus : uint8_t {
  *
  * On Produced, `receipt_bytes` must be exactly the output of
  * SerializeNormalizedAuthorityReceiptV3 and must round-trip through the strict
- * decoder. On every other status it is empty. This split makes the outstanding
- * boundary explicit: producing a canonical receipt is separate from attaching
- * it, because attachment is forbidden until consensus consumes and executes
- * that same normalized proof.
+ * decoder. On every other status it is empty. The mechanism layer may place
+ * these bytes in the distinct BNV3 block envelope, but the live entry point
+ * remains compile-time disabled until consensus independently rebuilds and
+ * executes the same parent.
  */
 [[nodiscard]] RCStage3NormalizedProviderStatus
 BuildRCStage3NormalizedAuthorityReceipt(
@@ -330,9 +330,12 @@ BuildRCStage3NormalizedAuthorityReceipt(
 
 /**
  * MECHANISM layer for the production provider, intentionally callable in tests
- * while authority is disabled. Atomic: until both the normalized builder and
- * the matching consensus consumer exist, it returns ProverFailed and leaves
- * the block byte-identical.
+ * while authority is disabled. Atomic: on Produced it strictly packs the NAV3
+ * bytes into the BNV3 block envelope, measures the actual block/codec limits,
+ * and attaches only when all limits fit. The matching native verifier is
+ * normalized_block_transport::VerifyAttachedReceiptV3. This does not authorize
+ * consensus use; the gated live entry point remains disabled until the
+ * canonical verifier-side parent rebuild is complete.
  */
 [[nodiscard]] RCStage3ProduceStatus
 AttachRCStage3ProofFromProductionProvider(

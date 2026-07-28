@@ -4,7 +4,11 @@
 
 #include <matmul/matmul_v4_rc_stage3_normalized_authority_receipt.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_authority_composition.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_block_transport.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
+#include <primitives/block.h>
+#include <primitives/transaction.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -19,6 +23,8 @@ namespace na =
 namespace aq = matmul::v4::rc::air_quotient;
 namespace gf = matmul::v4::rc::gkr_field;
 namespace rc = matmul::v4::rc;
+namespace transport =
+    matmul::v4::rc::normalized_block_transport;
 
 BOOST_FIXTURE_TEST_SUITE(
     matmul_v4_rc_stage3_normalized_authority_receipt_tests,
@@ -419,6 +425,117 @@ BOOST_AUTO_TEST_CASE(
             honest.cs, parent_proof, fixed,
             honest.receipt.parent_fs_seed, &why),
         why);
+}
+
+BOOST_AUTO_TEST_CASE(
+    block_transport_round_trip_executes_fresh_native_parent_verifier)
+{
+    const HonestFixture& honest = Honest();
+    std::vector<unsigned char> receipt_bytes;
+    BOOST_REQUIRE_GT(
+        na::SerializeNormalizedAuthorityReceiptV3(
+            honest.receipt, receipt_bytes),
+        0U);
+
+    CBlock block;
+    block.nVersion = 4;
+    block.nTime = 1;
+    // CBlock deliberately omits all MatMul payload vectors from the
+    // headers-message shim (vtx empty). A durable full-block carrier therefore
+    // needs a transaction, just like every mined block.
+    block.vtx.push_back(
+        MakeTransactionRef(CMutableTransaction{}));
+    const uint256 header_hash = block.GetHash();
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        transport::AttachReceiptV3(
+            block, receipt_bytes, &why),
+        why);
+    BOOST_REQUIRE(
+        transport::IsReceiptWordsV3(
+            block.matrix_c_data));
+    BOOST_CHECK_EQUAL(block.GetHash(), header_hash);
+
+    // Exercise the actual block serialization boundary.  The fresh verifier
+    // receives only the independently rebuilt CS/inputs and the body bytes.
+    DataStream stream;
+    stream << TX_WITH_WITNESS(block);
+    CBlock decoded;
+    stream >> TX_WITH_WITNESS(decoded);
+    BOOST_CHECK(decoded.matrix_c_data ==
+                block.matrix_c_data);
+    BOOST_CHECK_EQUAL(decoded.GetHash(), header_hash);
+
+    aq::AirQuotientSplitRapRowsProof decoded_proof;
+    BOOST_REQUIRE_MESSAGE(
+        transport::VerifyAttachedReceiptV3(
+            decoded, honest.cs, honest.rebuilt,
+            &decoded_proof, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        why,
+        "stage3:normalized_block_transport_v3:"
+        "fresh_parent_verified");
+
+    // Transport corruption is rejected before the mathematical verifier.
+    {
+        CBlock changed = decoded;
+        changed.matrix_c_data[
+            changed.matrix_c_data.size() / 2] ^= 1U;
+        BOOST_CHECK(
+            !transport::VerifyAttachedReceiptV3(
+                changed, honest.cs, honest.rebuilt,
+                nullptr, &why));
+    }
+    {
+        CBlock changed = decoded;
+        changed.matrix_c_data.push_back(0);
+        BOOST_CHECK(
+            !transport::VerifyAttachedReceiptV3(
+                changed, honest.cs, honest.rebuilt,
+                nullptr, &why));
+        BOOST_CHECK(
+            why.find("payload_word_count") !=
+            std::string::npos);
+    }
+    {
+        CBlock changed = decoded;
+        changed.matrix_c_data[1] -= 1;
+        BOOST_CHECK(
+            !transport::VerifyAttachedReceiptV3(
+                changed, honest.cs, honest.rebuilt,
+                nullptr, &why));
+    }
+
+    // A canonical receipt is not sufficient: independent verifier-input or CS
+    // substitutions still reach and fail the native parent verification path.
+    {
+        auto rebuilt = honest.rebuilt;
+        rebuilt.parent_context_binding = H(0xB001);
+        BOOST_CHECK(
+            !transport::VerifyAttachedReceiptV3(
+                decoded, honest.cs, rebuilt,
+                nullptr, &why));
+        BOOST_CHECK(
+            why.find("verifier_input_substitution") !=
+            std::string::npos);
+    }
+    {
+        auto changed_cs = honest.cs;
+        changed_cs.constraints[0].eval =
+            [](const std::vector<gf::Fp3>& current,
+               const std::vector<gf::Fp3>&) {
+                return gf::Sub(
+                    current[1],
+                    gf::Add(
+                        gf::Add(current[0], current[0]),
+                        current[0]));
+            };
+        BOOST_CHECK(
+            !transport::VerifyAttachedReceiptV3(
+                decoded, changed_cs, honest.rebuilt,
+                nullptr, &why));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(

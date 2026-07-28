@@ -9,6 +9,7 @@
 #include <consensus/validation.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_block_transport.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
 #include <pow.h>
@@ -312,23 +313,18 @@ RCStage3ProduceStatus AttachRCStage3ProofFromProductionProvider(
     if (size_out != nullptr) *size_out = {};
     // This is deliberately not adapted through RCStage3ProofSource. That
     // callback emits the legacy section envelope, while production authority
-    // is the normalized root receipt. The only sound completion of this seam
-    // is:
+    // is the normalized root receipt. Build the canonical receipt and place
+    // those exact bytes in the distinct BNV3 body envelope. The matching fresh
+    // native-verifier mechanism is
+    // normalized_block_transport::VerifyAttachedReceiptV3; it requires an
+    // independently rebuilt parent CS and verifier inputs and executes
+    // AirQuotientVerifyRowsSplitRapSafeFixedV3.
     //
-    //  1. independently construct every RebuiltVerifierInputsV3 component
-    //     (registry/topology/schedule/V13/V14/ABI/selection/hash roots, the
-    //     canonical 14-role/52-endpoint pins, fixed trace, and parent CS);
-    //  2. prove that parent and serialize NormalizedAuthorityReceiptV3;
-    //  3. attach it through a consensus envelope whose verifier parses the same
-    //     bytes, rebuilds the same inputs/CS, calls
-    //     ValidateAndDecodeVerifierInputsV3, and finally executes
-    //     AirQuotientVerifyRowsSplitRapSafeFixedV3.
-    //
-    // The strict receipt codec/verifier prerequisite now exists, but neither
-    // the block-to-parent builder nor the outer consensus consumer does.
-    // Returning a legacy REP3/OAS3 object, or accepting hash validation without
-    // executing the decoded proof, would recreate the exact authority gap this
-    // path is meant to close.
+    // This mechanism is still unreachable from the live miner while
+    // kRCStage3SuccinctAuthorityReady is false. Completing the block-to-parent
+    // builder and consensus-side canonical rebuild remains mandatory before
+    // activation; no receipt hash or serialized readiness bit can substitute
+    // for that native verification.
     std::vector<unsigned char> receipt_bytes;
     std::string provider_why;
     const auto provider_status = BuildRCStage3NormalizedAuthorityReceipt(
@@ -346,15 +342,32 @@ RCStage3ProduceStatus AttachRCStage3ProofFromProductionProvider(
             why,
             std::string{"production_provider:"} +
                 RCStage3NormalizedProviderStatusName(provider_status) + ":" +
-                provider_why + ";normalized_consensus_consumer_unavailable");
+                provider_why);
         return RCStage3ProduceStatus::ProverFailed;
     }
 
-    // Reaching Produced before the matching outer consumer is implemented is
-    // still not authority. Keep the block untouched and fail closed.
-    (void)receipt_bytes;
-    Note(why, "normalized_consensus_consumer_unavailable");
-    return RCStage3ProduceStatus::ProverFailed;
+    CBlock scratch = block;
+    std::string attach_why;
+    if (!normalized_block_transport::AttachReceiptV3(
+            scratch, receipt_bytes, &attach_why)) {
+        Note(why, "normalized_receipt_attach:" + attach_why);
+        return RCStage3ProduceStatus::BindingRejected;
+    }
+    const RCStage3AttachmentSizeReport report =
+        MeasureRCStage3Attachment(
+            block, scratch.matrix_c_data, params);
+    if (size_out != nullptr) *size_out = report;
+    if (!report.Fits()) {
+        Note(why, "size_budget:" + report.ToString());
+        return RCStage3ProduceStatus::ExceedsSizeBudget;
+    }
+    block.matrix_c_data =
+        std::move(scratch.matrix_c_data);
+    Note(
+        why,
+        "normalized_receipt_attached:" +
+            report.ToString());
+    return RCStage3ProduceStatus::Attached;
 }
 
 RCStage3ProduceStatus AttachRCStage3ProofFromSource(
