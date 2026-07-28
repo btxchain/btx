@@ -3831,12 +3831,12 @@ bool BuildRCStage3CompositionLinkRoleAirCS(
     const uint32_t pad_col = msg_base + 7;
     product.constraints.push_back(
         {"composition_link:index_pin", aq::AirKind::kFirstRow, 1,
-         [index_col](const std::vector<gf::Fp3>& cur,
-                     const std::vector<gf::Fp3>&) { return cur[index_col]; }});
+         [](const std::vector<gf::Fp3>& cur,
+            const std::vector<gf::Fp3>&) { return cur[index_col]; }});
     product.constraints.push_back(
         {"composition_link:pad_pin", aq::AirKind::kFirstRow, 1,
-         [pad_col](const std::vector<gf::Fp3>& cur,
-                   const std::vector<gf::Fp3>&) {
+         [](const std::vector<gf::Fp3>& cur,
+            const std::vector<gf::Fp3>&) {
              return gf::Sub(cur[pad_col], gf::Fp3::One());
          }});
 
