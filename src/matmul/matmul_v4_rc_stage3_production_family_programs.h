@@ -51,6 +51,17 @@
 namespace matmul::v4::rc::universal_topology {
 
 /**
+ * Canonical, pin-independent signed-range ProgramTable used by the production
+ * EpisodeSignedRange family.  The table includes the complete local range
+ * polynomial system and explicit MAX_ABS/LOGICAL_ROWS parameter columns.
+ * Ownership of those parameters, the source roots, all-instance aggregation,
+ * and recursive consumption remain separate residuals.
+ */
+[[nodiscard]] bool BuildProductionSignedRangeLocalProgramTableV1(
+    constraint_bytecode::ProgramTable& out,
+    std::string* why = nullptr);
+
+/**
  * Semantically complete family sources currently wired into the production
  * registry path, keyed by exact ProductionProofSiteKind. Extending this list
  * is the concrete, checkable unit of semantic registry migration: each entry

@@ -662,7 +662,7 @@ bool RealFamilyFor(
         return true;
     case sites::ProductionProofSiteKind::CoupledBarrierSha256d:
         if (role != RCStage3RelationRole::CoupledBarrier) return false;
-        if (!BuildRCStage3CoupledHashKernelProgramTable(
+        if (!BuildRCStage3HashKernelOutputProgramTable(
                 RCStage3RelationRole::CoupledBarrier, program, why)) {
             return false;
         }
@@ -670,7 +670,7 @@ bool RealFamilyFor(
         return true;
     case sites::ProductionProofSiteKind::CoupledDigestSha256d:
         if (role != RCStage3RelationRole::CoupledDigest) return false;
-        if (!BuildRCStage3CoupledHashKernelProgramTable(
+        if (!BuildRCStage3HashKernelOutputProgramTable(
                 RCStage3RelationRole::CoupledDigest, program, why)) {
             return false;
         }
@@ -841,6 +841,13 @@ bool SameSource(
 }
 
 } // namespace
+
+bool BuildProductionSignedRangeLocalProgramTableV1(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    return BuildSignedRangeLocalFragment(out, why);
+}
 
 std::vector<ProductionFamilyProgramSourceV1>
 BuildProductionFamilyProgramSourcesV1(

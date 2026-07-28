@@ -265,6 +265,27 @@ BuildRCStage3CoupledExtractSamplerTransportConstraintSystem(
     constraint_bytecode::ProgramTable& out,
     std::string* why = nullptr);
 
+/**
+ * Canonical fixed-program SHA kernel with one additional, constrained output
+ * cell.  The base opcode AIR uses a different value slot for Add/Xor,
+ * Choice/Majority, and Sigma rows.  This wrapper appends OUTPUT and proves
+ *
+ *   OUTPUT =
+ *       (SEL_ADD + SEL_XOR*) * VALUE2
+ *     + (SEL_CH  + SEL_MAJ ) * VALUE3
+ *     + (SEL_SIGMA*)          * VALUE1.
+ *
+ * The immutable selector columns make OUTPUT the unique operation result on
+ * every active row and zero on padding.  It is therefore the canonical cell
+ * that endpoint/program routing may name; selecting one of the base value
+ * slots directly would be wrong for at least one opcode family.
+ */
+inline constexpr uint32_t kRCStage3HashKernelOutputColumnV1 = 144;
+[[nodiscard]] bool BuildRCStage3HashKernelOutputProgramTable(
+    RCStage3RelationRole role,
+    constraint_bytecode::ProgramTable& out,
+    std::string* why = nullptr);
+
 } // namespace matmul::v4::rc
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_ROLE_BYTECODE_H

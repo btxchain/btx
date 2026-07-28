@@ -5,6 +5,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
+#include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_semantic_endpoint_program_bridge.h>
 
 #include <algorithm>
@@ -51,9 +52,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.registry_semantic_claim_endpoints, 14U);
     BOOST_CHECK_EQUAL(
-        manifest.selected_program_key_endpoints, 27U);
+        manifest.selected_program_key_endpoints, 28U);
     BOOST_CHECK_EQUAL(
-        manifest.canonical_output_metadata_endpoints, 21U);
+        manifest.canonical_output_metadata_endpoints, 28U);
     BOOST_CHECK_EQUAL(
         manifest.executed_relation_cell_endpoints, 22U);
     BOOST_CHECK_EQUAL(
@@ -64,6 +65,41 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(manifest.complete_roles, 0U);
     BOOST_CHECK(!manifest.recursive_semantic_closure_complete);
     BOOST_CHECK(!manifest.production_authority);
+
+    const std::vector<RCStage3RelationEndpoint>
+        missing_output_recipes{
+            RCStage3RelationEndpoint::EpisodeBuilderParams,
+            RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
+            RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
+            RCStage3RelationEndpoint::EpisodeExtractInput,
+            RCStage3RelationEndpoint::EpisodeExtractChaCha,
+            RCStage3RelationEndpoint::EpisodeExtractScale,
+            RCStage3RelationEndpoint::EpisodeWiringTranspose,
+            RCStage3RelationEndpoint::EpisodeWiringResidual,
+            RCStage3RelationEndpoint::EpisodeWiringRoundOrder,
+            RCStage3RelationEndpoint::EpisodeTileTreeLeafHash,
+            RCStage3RelationEndpoint::EpisodeTileTreeInternalHash,
+            RCStage3RelationEndpoint::EpisodeTileTreeRoot,
+            RCStage3RelationEndpoint::EpisodeDigestRoundRoots,
+            RCStage3RelationEndpoint::EpisodeDigestValue,
+            RCStage3RelationEndpoint::EpisodeDigestHeaderTarget,
+            RCStage3RelationEndpoint::CoupledBankSeedXof,
+            RCStage3RelationEndpoint::CoupledBankRoot,
+            RCStage3RelationEndpoint::CoupledGemmSignedRange,
+            RCStage3RelationEndpoint::CoupledExchangeHashXof,
+            RCStage3RelationEndpoint::CoupledExtractChaCha,
+            RCStage3RelationEndpoint::CoupledBarrierInput,
+            RCStage3RelationEndpoint::CoupledBarrierOutput,
+            RCStage3RelationEndpoint::CoupledDigestBankAndBarriers,
+            RCStage3RelationEndpoint::CoupledDigestValue,
+        };
+    std::vector<RCStage3RelationEndpoint> observed_missing;
+    for (const auto& endpoint : manifest.endpoints) {
+        if (!endpoint.canonical_output_metadata) {
+            observed_missing.push_back(endpoint.endpoint);
+        }
+    }
+    BOOST_CHECK(observed_missing == missing_output_recipes);
 
     // A single exact family genuinely owns three endpoint cells.  This is the
     // one-to-many expansion the old single semantic_endpoints claim omitted.
@@ -87,8 +123,23 @@ BOOST_AUTO_TEST_CASE(
         manifest, RCStage3RelationEndpoint::EpisodeGemmSumcheck);
     BOOST_CHECK(sumcheck.selected_program_key);
     BOOST_CHECK(sumcheck.registry_semantic_claim);
-    BOOST_CHECK(!sumcheck.canonical_output_metadata);
+    BOOST_CHECK_EQUAL(sumcheck.relation_column, 0U);
+    BOOST_CHECK(sumcheck.canonical_output_metadata);
     BOOST_CHECK(!sumcheck.direct_alias_ready);
+
+    const auto& signed_range = Endpoint(
+        manifest, RCStage3RelationEndpoint::EpisodeGemmSignedRange);
+    BOOST_CHECK_EQUAL(signed_range.relation_column, 2U);
+    BOOST_CHECK(signed_range.canonical_output_metadata);
+    BOOST_CHECK(!signed_range.direct_alias_ready);
+
+    const auto& barrier = Endpoint(
+        manifest, RCStage3RelationEndpoint::CoupledBarrierHash);
+    BOOST_CHECK_EQUAL(
+        barrier.relation_column,
+        matmul::v4::rc::kRCStage3HashKernelOutputColumnV1);
+    BOOST_CHECK(barrier.canonical_output_metadata);
+    BOOST_CHECK(!barrier.direct_alias_ready);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -112,8 +163,10 @@ BOOST_AUTO_TEST_CASE(
         manifest,
         RCStage3RelationEndpoint::EpisodeGemmSignedRange);
     BOOST_CHECK(signed_range.executed_relation_cell);
-    BOOST_CHECK(!signed_range.selected_program_key);
-    BOOST_CHECK(!signed_range.canonical_output_metadata);
+    BOOST_CHECK(signed_range.selected_program_key);
+    BOOST_CHECK(signed_range.canonical_output_metadata);
+    BOOST_CHECK_EQUAL(signed_range.relation_column, 2U);
+    BOOST_CHECK(!signed_range.same_trace_ctl_alias);
     BOOST_CHECK(!signed_range.direct_alias_ready);
 }
 

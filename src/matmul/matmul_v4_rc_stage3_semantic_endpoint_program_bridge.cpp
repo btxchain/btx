@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_air_quotient.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
+#include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 
 #include <hash.h>
@@ -137,10 +138,20 @@ FamilyRecipe MakeRecipe(
     FamilyRecipe out{kind, role, std::move(outputs), {}, false};
     std::string why;
     switch (kind) {
+    case sites::ProductionProofSiteKind::EpisodeBuilderCounterXof:
+        out.canonical_built =
+            BuildRCStage3EpisodeBuilderTraceProgramTable(
+                out.canonical, &why);
+        break;
     case sites::ProductionProofSiteKind::EpisodeGemmSumcheck:
         out.canonical_built =
             BuildRCStage3EpisodeLocalKernelProgramTable(
                 RCStage3EpisodeAirFamily::GemmEndpointFp3V1,
+                out.canonical, &why);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeSignedRange:
+        out.canonical_built =
+            topo::BuildProductionSignedRangeLocalProgramTableV1(
                 out.canonical, &why);
         break;
     case sites::ProductionProofSiteKind::EpisodeExtractCore:
@@ -152,6 +163,16 @@ FamilyRecipe MakeRecipe(
         out.canonical_built =
             BuildRCStage3EpisodeLocalKernelProgramTable(
                 RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
+                out.canonical, &why);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeTileTreeSha256d:
+        out.canonical_built =
+            BuildRCStage3EpisodeTileTreeByteBridgeProgramTable(
+                out.canonical, &why);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeDigestSha256d:
+        out.canonical_built =
+            BuildRCStage3EpisodePowProgramTable(
                 out.canonical, &why);
         break;
     case sites::ProductionProofSiteKind::CoupledBank:
@@ -180,6 +201,12 @@ FamilyRecipe MakeRecipe(
             BuildRCStage3CoupledExtractLocalKernelProgramTable(
                 0, out.canonical, &why);
         break;
+    case sites::ProductionProofSiteKind::CoupledBarrierSha256d:
+    case sites::ProductionProofSiteKind::CoupledDigestSha256d:
+        out.canonical_built =
+            BuildRCStage3HashKernelOutputProgramTable(
+                role, out.canonical, &why);
+        break;
     default:
         break;
     }
@@ -195,6 +222,13 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
     using namespace coupled_air_col;
     return {
         MakeRecipe(
+            sites::ProductionProofSiteKind::EpisodeBuilderCounterXof,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            {
+                {RCStage3RelationEndpoint::EpisodeBuilderTrace,
+                 5, "episode_builder:DEQUANT_OUTPUT"},
+            }),
+        MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeGemmSumcheck,
             RCStage3RelationRole::EpisodeGemm,
             {
@@ -204,6 +238,16 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                  2, "episode_gemm:GEMM_B"},
                 {RCStage3RelationEndpoint::EpisodeGemmOutputY,
                  0, "episode_gemm:GEMM_GF"},
+                {RCStage3RelationEndpoint::EpisodeGemmSumcheck,
+                 0, "episode_gemm:SUMCHECK_TERMINAL_GF"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::EpisodeSignedRange,
+            RCStage3RelationRole::EpisodeGemm,
+            {
+                {RCStage3RelationEndpoint::EpisodeGemmSignedRange,
+                 kRCStage3RangeValue,
+                 "episode_gemm_signed_range:VALUE"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeExtractCore,
@@ -222,6 +266,20 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
             {
                 {RCStage3RelationEndpoint::EpisodeWiringCopy,
                  0, "episode_wiring:U"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::EpisodeTileTreeSha256d,
+            RCStage3RelationRole::EpisodeTileTree,
+            {
+                {RCStage3RelationEndpoint::EpisodeTileTreeStream,
+                 4, "episode_tile_tree:BYTE_BRIDGE_EXPORT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::EpisodeDigestSha256d,
+            RCStage3RelationRole::EpisodeDigest,
+            {
+                {RCStage3RelationEndpoint::EpisodeDigestPow,
+                 0, "episode_digest_pow:DIGEST_BYTE"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledBank,
@@ -286,6 +344,22 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                 {RCStage3RelationEndpoint::CoupledExtractOutput,
                  air_quotient::kColOut,
                  "coupled_extract:OUT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::CoupledBarrierSha256d,
+            RCStage3RelationRole::CoupledBarrier,
+            {
+                {RCStage3RelationEndpoint::CoupledBarrierHash,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "coupled_barrier:FIXED_PROGRAM_OUTPUT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::CoupledDigestSha256d,
+            RCStage3RelationRole::CoupledDigest,
+            {
+                {RCStage3RelationEndpoint::CoupledDigestHash,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "coupled_digest:FIXED_PROGRAM_OUTPUT"},
             }),
     };
 }

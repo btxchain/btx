@@ -1767,4 +1767,57 @@ bool BuildRCStage3CoupledHashKernelProgramTable(
     return Finalize(out, why);
 }
 
+bool BuildRCStage3HashKernelOutputProgramTable(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    if (!BuildRCStage3CoupledHashKernelProgramTable(
+            role, out, why)) {
+        return false;
+    }
+    static_assert(
+        ha::kFixedProgramColumns ==
+        kRCStage3HashKernelOutputColumnV1);
+    out.current_width =
+        kRCStage3HashKernelOutputColumnV1 + 1U;
+    out.next_width = out.current_width;
+    for (auto& program : out.programs) {
+        program.current_width = out.current_width;
+        program.next_width = out.next_width;
+    }
+    AppendAuto(out, aq::AirKind::kEverywhere,
+        [](ProgramBuilder& b) {
+            const uint32_t selector =
+                ha::kFixedProgramSelectorBase;
+            uint32_t selected = b.Constant(Fp3::Zero());
+            for (uint32_t opcode = 0; opcode <= 4; ++opcode) {
+                selected = b.Add(
+                    selected,
+                    b.Mul(
+                        b.Current(selector + opcode),
+                        b.Current(ha::ValueColumn(2))));
+            }
+            for (uint32_t opcode = 5; opcode <= 6; ++opcode) {
+                selected = b.Add(
+                    selected,
+                    b.Mul(
+                        b.Current(selector + opcode),
+                        b.Current(ha::ValueColumn(3))));
+            }
+            for (uint32_t opcode = 7; opcode <= 10; ++opcode) {
+                selected = b.Add(
+                    selected,
+                    b.Mul(
+                        b.Current(selector + opcode),
+                        b.Current(ha::ValueColumn(1))));
+            }
+            b.Sub(
+                b.Current(
+                    kRCStage3HashKernelOutputColumnV1),
+                selected);
+        });
+    return Finalize(out, why);
+}
+
 } // namespace matmul::v4::rc

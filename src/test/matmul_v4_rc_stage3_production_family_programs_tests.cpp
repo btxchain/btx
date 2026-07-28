@@ -250,8 +250,8 @@ BOOST_AUTO_TEST_CASE(
     const auto& coupled_barrier = sources[coupled_barrier_idx];
     BOOST_CHECK(
         coupled_barrier.role == rc::RCStage3RelationRole::CoupledBarrier);
-    BOOST_CHECK_EQUAL(coupled_barrier.program.current_width, 144U);
-    BOOST_CHECK_EQUAL(coupled_barrier.program.programs.size(), 462U);
+    BOOST_CHECK_EQUAL(coupled_barrier.program.current_width, 145U);
+    BOOST_CHECK_EQUAL(coupled_barrier.program.programs.size(), 463U);
     BOOST_REQUIRE_EQUAL(coupled_barrier.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         coupled_barrier.semantic_endpoints[0],
@@ -264,8 +264,8 @@ BOOST_AUTO_TEST_CASE(
     const auto& coupled_digest = sources[coupled_digest_idx];
     BOOST_CHECK(
         coupled_digest.role == rc::RCStage3RelationRole::CoupledDigest);
-    BOOST_CHECK_EQUAL(coupled_digest.program.current_width, 144U);
-    BOOST_CHECK_EQUAL(coupled_digest.program.programs.size(), 462U);
+    BOOST_CHECK_EQUAL(coupled_digest.program.current_width, 145U);
+    BOOST_CHECK_EQUAL(coupled_digest.program.programs.size(), 463U);
     BOOST_REQUIRE_EQUAL(coupled_digest.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         coupled_digest.semantic_endpoints[0],
@@ -559,16 +559,16 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::CoupledBarrierSha256d);
     const auto& coupled_barrier_entry =
         registry.families[coupled_barrier_idx];
-    BOOST_CHECK_EQUAL(coupled_barrier_entry.maximum_columns, 144U);
-    BOOST_CHECK_EQUAL(coupled_barrier_entry.constraint_count, 462U);
+    BOOST_CHECK_EQUAL(coupled_barrier_entry.maximum_columns, 145U);
+    BOOST_CHECK_EQUAL(coupled_barrier_entry.constraint_count, 463U);
     BOOST_CHECK(coupled_barrier_entry.semantic_relation_complete);
 
     const size_t coupled_digest_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::CoupledDigestSha256d);
     const auto& coupled_digest_entry =
         registry.families[coupled_digest_idx];
-    BOOST_CHECK_EQUAL(coupled_digest_entry.maximum_columns, 144U);
-    BOOST_CHECK_EQUAL(coupled_digest_entry.constraint_count, 462U);
+    BOOST_CHECK_EQUAL(coupled_digest_entry.maximum_columns, 145U);
+    BOOST_CHECK_EQUAL(coupled_digest_entry.constraint_count, 463U);
     BOOST_CHECK(coupled_digest_entry.semantic_relation_complete);
 
     const size_t exchange_idx = FindFamilyIndex(
@@ -1244,11 +1244,75 @@ BOOST_AUTO_TEST_CASE(
     }
 
     // --- CoupledExtract and the two coupled hash kernels (CoupledBarrier /
-    // CoupledDigest, 144-column / 462-constraint SHA-256 compression AIR)
+    // CoupledDigest, 145 columns / 463 constraints including the canonical
+    // opcode-output mux)
     // are, like EpisodeExtract above, differentially tested against their
     // canonical constraint-system builders elsewhere
     // (matmul_v4_rc_stage3_role_bytecode_tests.cpp); non-vacuity for all
     // three is proved above by the registry-commitment tamper test.
+}
+
+BOOST_AUTO_TEST_CASE(
+    hash_family_output_mux_names_the_actual_opcode_result)
+{
+    namespace ha = rc::stage3_hash_air;
+    const auto manifest =
+        ss::BuildProductionProofSiteManifest(
+            ss::SelectedProductionProofSitePolicy());
+    const auto sources =
+        ut::BuildProductionFamilyProgramSourcesV1(manifest);
+    const size_t index = FindFamilyIndex(
+        manifest,
+        ss::ProductionProofSiteKind::CoupledBarrierSha256d);
+    const auto& table = sources[index].program;
+    BOOST_REQUIRE_EQUAL(
+        table.current_width,
+        rc::kRCStage3HashKernelOutputColumnV1 + 1U);
+    BOOST_REQUIRE_EQUAL(table.programs.size(), 463U);
+    const auto& output_program = table.programs.back();
+
+    for (uint32_t opcode = 0; opcode < 11; ++opcode) {
+        std::vector<Fp3> current(
+            table.current_width, Fp3::Zero());
+        std::vector<Fp3> next(
+            table.next_width, Fp3::Zero());
+        current[
+            ha::kFixedProgramSelectorBase + opcode] =
+            Fp3::One();
+        const uint32_t result_slot =
+            opcode <= 4 ? 2U : (opcode <= 6 ? 3U : 1U);
+        current[ha::ValueColumn(result_slot)] = U(0x1234U);
+        current[rc::kRCStage3HashKernelOutputColumnV1] =
+            U(0x1234U);
+        Fp3 residual;
+        BOOST_REQUIRE(
+            cb::EvaluateProgram(
+                output_program, current, next, residual));
+        BOOST_CHECK(gf::IsZero(residual));
+
+        current[rc::kRCStage3HashKernelOutputColumnV1] =
+            U(0x1235U);
+        BOOST_REQUIRE(
+            cb::EvaluateProgram(
+                output_program, current, next, residual));
+        BOOST_CHECK(!gf::IsZero(residual));
+    }
+
+    std::vector<Fp3> padding(
+        table.current_width, Fp3::Zero());
+    std::vector<Fp3> next(
+        table.next_width, Fp3::Zero());
+    Fp3 residual;
+    BOOST_REQUIRE(
+        cb::EvaluateProgram(
+            output_program, padding, next, residual));
+    BOOST_CHECK(gf::IsZero(residual));
+    padding[rc::kRCStage3HashKernelOutputColumnV1] =
+        Fp3::One();
+    BOOST_REQUIRE(
+        cb::EvaluateProgram(
+            output_program, padding, next, residual));
+    BOOST_CHECK(!gf::IsZero(residual));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
