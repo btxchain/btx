@@ -280,7 +280,7 @@ inline bool BuildFriChannel(
             out, builder, CallRoleV12::AbsorbFriPreamble,
             aht::RoleV12::TranscriptFriSeed,
             PayloadSourceV12::FriPreamble, 0,
-            static_cast<uint32_t>(columns), 18, why) ||
+            static_cast<uint32_t>(columns), 16, why) ||
         !AddAbsorb(
             out, builder, CallRoleV12::BindBatchCoefficientVector,
             aht::RoleV12::TranscriptBatchSeed,
@@ -369,11 +369,50 @@ inline bool BuildFriChannel(
         }
     }
 
+    // Query sampling has its own post-tax channel. Close this SAFE program
+    // with a typed receipt of the fully absorbed OOD/fold transcript. The
+    // shared g20 sigma consumes both receipts before either query squeeze.
+    if (!AddSqueeze(
+            out, builder,
+            CallRoleV12::SqueezeFriTerminalReceipt,
+            aht::RoleV12::TranscriptFoldState,
+            shape.n_folds, 1, ah::kAlgHashDigestLen, why) ||
+        !builder.Build(
+            out.typed_domain, out.safe_manifest, why)) {
+        out = {};
+        return false;
+    }
+    out.valid = true;
+    return true;
+}
+
+inline bool BuildQueryChannel(
+    const ShapeV12& shape, uint32_t lane,
+    ChannelManifestV12& out, std::string* why)
+{
+    out = {};
+    out.channel =
+        lane == 0 ? ChannelV12::QueryLane0
+                  : ChannelV12::QueryLane1;
+    out.lane = lane;
+    out.capacity_role = aht::RoleV12::TranscriptQuerySeed;
+    out.application_domain =
+        ApplicationDomain(out.channel, lane, shape);
+    if (!safe::TypedDomainV12(
+            out.capacity_role, out.application_domain,
+            out.typed_domain, why)) {
+        return false;
+    }
+
+    safe::TranscriptPatternManifestBuilderV12 builder;
+    // SAFE requires an absorb/squeeze pattern.  The shared taxed seed and the
+    // exact draw shape therefore form one canonical query request; separating
+    // them into adjacent absorbs would not be a valid SAFE IO transcript.
     if (!AddAbsorb(
-            out, builder, CallRoleV12::BindQueryVector,
+            out, builder, CallRoleV12::AbsorbSharedQueryTax,
             aht::RoleV12::TranscriptQuerySeed,
-            PayloadSourceV12::DrawDescriptor, 0,
-            kQueryCandidatesPerLaneV12, 2, why) ||
+            PayloadSourceV12::SharedQueryTax, 0,
+            kQueryCandidatesPerLaneV12, 9, why) ||
         !AddSqueeze(
             out, builder, CallRoleV12::SqueezeQueryVector,
             aht::RoleV12::TranscriptQueryCandidate, 0,
@@ -463,7 +502,10 @@ inline bool SelectZ2(DerivedV12& derived)
 inline bool RecordSqueeze(
     const CallSpecV12& spec, const ShapeV12& shape,
     const std::vector<gf::Fp>& values, DerivedV12& derived,
-    std::vector<uint32_t>& query_indices, std::string* why)
+    std::vector<uint32_t>& query_indices,
+    ah::Digest& fri_terminal_receipt,
+    bool& fri_terminal_receipt_emitted,
+    std::string* why)
 {
     if (values.size() != spec.elements) {
         return Fail(why, "squeeze width mismatch");
@@ -490,6 +532,15 @@ inline bool RecordSqueeze(
     case CallRoleV12::SqueezeQueryVector:
         return qsampler::SelectFirstDistinctV12(
             values, shape.n_lde, query_indices, nullptr, why);
+    case CallRoleV12::SqueezeFriTerminalReceipt:
+        if (values.size() != ah::kAlgHashDigestLen) {
+            return Fail(why, "FRI terminal receipt width mismatch");
+        }
+        std::copy(
+            values.begin(), values.end(),
+            fri_terminal_receipt.begin());
+        fri_terminal_receipt_emitted = true;
+        return true;
     default:
         return true;
     }
@@ -531,11 +582,8 @@ inline bool BuildAbsorbValues(
                 inputs.parent_statement.parent_fs_seed)) {
             return false;
         }
-        values.push_back(
-            gf::FromU64(static_cast<uint32_t>(in.pow_grind_nonce)));
-        values.push_back(
-            gf::FromU64(
-                static_cast<uint32_t>(in.pow_grind_nonce >> 32)));
+        // The one V12 grind nonce is post-FRI. Absorbing it here would
+        // create nonce -> receipt -> sigma -> nonce circularity.
         values.push_back(gf::FromU64(kFriBlowupV12));
         values.push_back(gf::FromU64(shape.n_coeffs));
         values.push_back(gf::FromU64(kProtocolVersionV12));
@@ -614,6 +662,28 @@ inline bool BuildAbsorbValues(
         }
         break;
     }
+    case PayloadSourceV12::SharedQueryTax:
+        if (!require_digest(
+                inputs.parent_statement.
+                    shared_query_tax_sigma)) {
+            return false;
+        }
+        values.push_back(gf::FromU64(
+            static_cast<uint32_t>(
+                inputs.parent_statement.
+                    shared_query_tax_nonce)));
+        values.push_back(gf::FromU64(
+            static_cast<uint32_t>(
+                inputs.parent_statement.
+                    shared_query_tax_nonce >> 32)));
+        values.push_back(gf::FromU64(
+            kSharedQueryTaxBitsV12));
+        // Bind the complete draw descriptor in the same SAFE absorb as the
+        // taxed seed.  This prevents a prover from relabelling the shared
+        // sigma/nonce as a different-size candidate request.
+        values.push_back(gf::FromU64(spec.items));
+        values.push_back(gf::FromU64(3 * spec.items));
+        break;
     case PayloadSourceV12::None:
         return Fail(why, "absorb without payload source");
     }
@@ -624,14 +694,14 @@ inline bool BuildAbsorbValues(
     return true;
 }
 
-inline bool ValidInputs(
+inline bool ValidFriInputs(
     const ManifestV12& manifest, const TranscriptInputsV12& inputs,
     std::string* why)
 {
     if (!CanonicalDigest(
             inputs.parent_statement.parent_fs_seed) ||
         !CanonicalDigest(inputs.proof_witness.trace_commit)) {
-        return Fail(why, "noncanonical AIR statement digest");
+        return Fail(why, "noncanonical pre-tax FRI statement digest");
     }
     for (uint32_t lane = 0; lane < kFriLaneCountV12; ++lane) {
         const ProofWitnessInputsV12::FriLaneV12& in =
@@ -650,6 +720,16 @@ inline bool ValidInputs(
         }
     }
     return true;
+}
+
+inline bool ValidInputs(
+    const ManifestV12& manifest, const TranscriptInputsV12& inputs,
+    std::string* why)
+{
+    return ValidFriInputs(manifest, inputs, why) &&
+        (CanonicalDigest(
+             inputs.parent_statement.shared_query_tax_sigma) ||
+         Fail(why, "noncanonical query-tax sigma"));
 }
 
 inline bool ExecuteNativeChannel(
@@ -687,7 +767,9 @@ inline bool ExecuteNativeChannel(
                     spec.elements, trace.values, why) ||
                 !RecordSqueeze(
                     spec, manifest.shape, trace.values, derived,
-                    out.query_indices, why)) {
+                    out.query_indices,
+                    out.fri_terminal_receipt,
+                    out.fri_terminal_receipt_emitted, why)) {
                 return false;
             }
         }
@@ -846,7 +928,11 @@ inline bool BuildAirChannel(
                     spec.elements, call_index, trace.values, why) ||
                 !RecordSqueeze(
                     spec, manifest.shape, trace.values, derived,
-                    out.projected_execution.query_indices, why)) {
+                    out.projected_execution.query_indices,
+                    out.projected_execution.fri_terminal_receipt,
+                    out.projected_execution.
+                        fri_terminal_receipt_emitted,
+                    why)) {
                 return false;
             }
             if (spec.role == CallRoleV12::SqueezeQueryVector) {
@@ -894,6 +980,10 @@ inline bool SameExecution(
         left.final_state != right.final_state ||
         left.permutation_calls != right.permutation_calls ||
         left.query_indices != right.query_indices ||
+        left.fri_terminal_receipt !=
+            right.fri_terminal_receipt ||
+        left.fri_terminal_receipt_emitted !=
+            right.fri_terminal_receipt_emitted ||
         left.completed != right.completed ||
         left.calls.size() != right.calls.size()) {
         return false;
@@ -998,6 +1088,11 @@ bool BuildManifestV12(
             out = {};
             return false;
         }
+        if (!detail::BuildQueryChannel(
+                shape, lane, out.query_lane[lane], why)) {
+            out = {};
+            return false;
+        }
     }
 
     constexpr std::array<aht::RoleV12, 3> merkle_roles{{
@@ -1005,9 +1100,10 @@ bool BuildManifestV12(
         aht::RoleV12::MerkleFoldLeaf,
         aht::RoleV12::MerkleInternalNode,
     }};
-    constexpr std::array<aht::RoleV12, 2> fs_roles{{
+    constexpr std::array<aht::RoleV12, 3> fs_roles{{
         aht::RoleV12::TranscriptAirLambda,
         aht::RoleV12::TranscriptFriSeed,
+        aht::RoleV12::TranscriptQuerySeed,
     }};
     for (uint32_t i = 0; i < merkle_roles.size(); ++i) {
         if (!aht::CapacityIvForRoleV12(
@@ -1034,7 +1130,11 @@ bool BuildManifestV12(
         out.fri_lane[0].typed_domain !=
             out.fri_lane[1].typed_domain &&
         out.fri_lane[0].safe_manifest.tag !=
-            out.fri_lane[1].safe_manifest.tag;
+            out.fri_lane[1].safe_manifest.tag &&
+        out.query_lane[0].typed_domain !=
+            out.query_lane[1].typed_domain &&
+        out.query_lane[0].safe_manifest.tag !=
+            out.query_lane[1].safe_manifest.tag;
     out.lane_seeds_derived_from_common_parent = true;
     out.proof_witness_cells_not_preprocessed = true;
     out.proof_dependent_preprocessed_columns = 0;
@@ -1046,6 +1146,11 @@ bool BuildManifestV12(
                 safe_manifest.online_poseidon_air_rows;
         out.total_poseidon_air_rows +=
             out.fri_lane_poseidon_rows[lane];
+        out.query_lane_poseidon_rows[lane] =
+            out.query_lane[lane].
+                safe_manifest.online_poseidon_air_rows;
+        out.total_poseidon_air_rows +=
+            out.query_lane_poseidon_rows[lane];
         out.query_sampler_air_rows[lane] =
             qsampler::kTraceRowsV12;
         out.total_query_sampler_air_rows +=
@@ -1115,6 +1220,12 @@ bool ValidateManifestV12(
                 expected.fri_lane[lane])) {
             return detail::Fail(why, "FRI lane manifest mismatch");
         }
+        if (!detail::SameChannelManifest(
+                manifest.query_lane[lane],
+                expected.query_lane[lane])) {
+            return detail::Fail(
+                why, "query lane manifest mismatch");
+        }
     }
     if (manifest.merkle_capacity != expected.merkle_capacity ||
         manifest.fs_capacity != expected.fs_capacity ||
@@ -1133,6 +1244,8 @@ bool ValidateManifestV12(
             expected.air_quotient_poseidon_rows ||
         manifest.fri_lane_poseidon_rows !=
             expected.fri_lane_poseidon_rows ||
+        manifest.query_lane_poseidon_rows !=
+            expected.query_lane_poseidon_rows ||
         manifest.total_poseidon_air_rows !=
             expected.total_poseidon_air_rows ||
         manifest.query_sampler_air_rows !=
@@ -1160,6 +1273,33 @@ bool ValidateManifestV12(
     return true;
 }
 
+bool DeriveFriTerminalReceiptsV12(
+    const ManifestV12& manifest, const TranscriptInputsV12& inputs,
+    std::array<ah::Digest, kFriLaneCountV12>& receipts,
+    std::string* why)
+{
+    receipts = {};
+    if (!ValidateManifestV12(manifest, why) ||
+        !detail::ValidFriInputs(manifest, inputs, why)) {
+        return false;
+    }
+    for (uint32_t lane = 0; lane < kFriLaneCountV12; ++lane) {
+        ChannelExecutionV12 execution;
+        if (!detail::ExecuteNativeChannel(
+                manifest, manifest.fri_lane[lane], inputs, lane,
+                execution, why) ||
+            !execution.fri_terminal_receipt_emitted ||
+            !detail::CanonicalDigest(
+                execution.fri_terminal_receipt)) {
+            receipts = {};
+            return detail::Fail(
+                why, "pre-tax FRI terminal receipt derivation failed");
+        }
+        receipts[lane] = execution.fri_terminal_receipt;
+    }
+    return true;
+}
+
 bool ExecuteNativeV12(
     const ManifestV12& manifest, const TranscriptInputsV12& inputs,
     NativeExecutionV12& out, std::string* why)
@@ -1182,10 +1322,18 @@ bool ExecuteNativeV12(
             out = {};
             return false;
         }
+        if (!detail::ExecuteNativeChannel(
+                manifest, manifest.query_lane[lane], inputs, lane,
+                out.query_lane[lane], why)) {
+            out = {};
+            return false;
+        }
     }
     out.independent_lane_tags =
         manifest.fri_lane[0].safe_manifest.tag !=
-        manifest.fri_lane[1].safe_manifest.tag;
+            manifest.fri_lane[1].safe_manifest.tag &&
+        manifest.query_lane[0].safe_manifest.tag !=
+            manifest.query_lane[1].safe_manifest.tag;
     out.valid = out.independent_lane_tags;
     out.note = out.valid
         ? "stage3:safe_v12_fs_air:native_ok"
@@ -1215,6 +1363,12 @@ bool BuildAirWitnessV12(
             out = {};
             return false;
         }
+        if (!detail::BuildAirChannel(
+                manifest, manifest.query_lane[lane], inputs, lane,
+                out.query_lane[lane], why)) {
+            out = {};
+            return false;
+        }
     }
     out.native_differential_equal =
         detail::SameExecution(
@@ -1225,10 +1379,16 @@ bool BuildAirWitnessV12(
             detail::SameExecution(
                 native.fri_lane[lane],
                 out.fri_lane[lane].projected_execution);
+        out.native_differential_equal &=
+            detail::SameExecution(
+                native.query_lane[lane],
+                out.query_lane[lane].projected_execution);
     }
     out.lane_order_bound =
         out.fri_lane[0].projected_execution.final_state !=
-        out.fri_lane[1].projected_execution.final_state;
+            out.fri_lane[1].projected_execution.final_state &&
+        out.query_lane[0].projected_execution.final_state !=
+            out.query_lane[1].projected_execution.final_state;
     out.valid =
         out.native_differential_equal &&
         out.lane_order_bound &&
@@ -1236,12 +1396,16 @@ bool BuildAirWitnessV12(
         out.air_quotient.io_wiring_checked &&
         out.fri_lane[0].poseidon_constraints_zero &&
         out.fri_lane[1].poseidon_constraints_zero &&
-        out.fri_lane[0].query_sampler_air_valid &&
-        out.fri_lane[1].query_sampler_air_valid &&
-        out.fri_lane[0].query_sampler_source_call_typed &&
-        out.fri_lane[1].query_sampler_source_call_typed &&
         out.fri_lane[0].io_wiring_checked &&
-        out.fri_lane[1].io_wiring_checked;
+        out.fri_lane[1].io_wiring_checked &&
+        out.query_lane[0].poseidon_constraints_zero &&
+        out.query_lane[1].poseidon_constraints_zero &&
+        out.query_lane[0].query_sampler_air_valid &&
+        out.query_lane[1].query_sampler_air_valid &&
+        out.query_lane[0].query_sampler_source_call_typed &&
+        out.query_lane[1].query_sampler_source_call_typed &&
+        out.query_lane[0].io_wiring_checked &&
+        out.query_lane[1].io_wiring_checked;
     out.note = out.valid
         ? "stage3:safe_v12_fs_air:native_air_differential_ok"
         : "stage3:safe_v12_fs_air:native_air_differential_failure";
@@ -1269,6 +1433,12 @@ bool ValidateAirWitnessV12(
                 witness.fri_lane[lane],
                 expected.fri_lane[lane])) {
             return detail::Fail(why, "AIR witness lane mismatch");
+        }
+        if (!detail::SameAirChannel(
+                witness.query_lane[lane],
+                expected.query_lane[lane])) {
+            return detail::Fail(
+                why, "AIR witness query lane mismatch");
         }
     }
     return true;

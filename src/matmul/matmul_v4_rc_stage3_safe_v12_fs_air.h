@@ -54,19 +54,22 @@ inline constexpr uint32_t kFriBlowupV12 = 16;
 inline constexpr uint32_t kEventHeaderLanesV12 = 5;
 inline constexpr gf::Fp kEventHeaderMagicV12 =
     UINT64_C(0x4254584653414952); // "BTXFSAIR"
+inline constexpr uint32_t kSharedQueryTaxBitsV12 = 20;
 inline constexpr uint32_t kProductionBatchColumnsV12 = 1750;
 inline constexpr uint32_t kProductionFoldsV12 = 20;
 inline constexpr uint32_t kProductionStaticDomainHeadroomRowsV12 = 56480;
-inline constexpr uint32_t kProductionExpectedSafeAirRowsV12 = 2831;
+inline constexpr uint32_t kProductionExpectedSafeAirRowsV12 = 2835;
 inline constexpr uint32_t
     kProductionExpectedQuerySamplerAirRowsV12 = 512;
 inline constexpr uint32_t
-    kProductionExpectedTotalRecursiveAirRowsV12 = 3343;
+    kProductionExpectedTotalRecursiveAirRowsV12 = 3347;
 
 enum class ChannelV12 : uint8_t {
     AirQuotient = 0,
     FriLane0 = 1,
     FriLane1 = 2,
+    QueryLane0 = 3,
+    QueryLane1 = 4,
 };
 
 enum class CallRoleV12 : uint16_t {
@@ -91,8 +94,12 @@ enum class CallRoleV12 : uint16_t {
     AbsorbFoldRoot = 24,
     BindFoldBeta = 25,
     SqueezeFoldBeta = 26,
+    // Reserved legacy split-absorb code point. Canonical V12 combines the
+    // tax and draw descriptor in AbsorbSharedQueryTax.
     BindQueryVector = 27,
     SqueezeQueryVector = 28,
+    AbsorbSharedQueryTax = 29,
+    SqueezeFriTerminalReceipt = 30,
 };
 
 enum class PayloadSourceV12 : uint8_t {
@@ -106,6 +113,7 @@ enum class PayloadSourceV12 : uint8_t {
     OodEvaluationCommitment = 7,
     DeepWeightFeedback = 8,
     FoldRoot = 9,
+    SharedQueryTax = 10,
 };
 
 struct ShapeV12 {
@@ -151,8 +159,9 @@ struct ManifestV12 {
     ShapeV12 shape{};
     ChannelManifestV12 air_quotient;
     std::array<ChannelManifestV12, kFriLaneCountV12> fri_lane{};
+    std::array<ChannelManifestV12, kFriLaneCountV12> query_lane{};
     std::array<aht::CapacityIvV12, 3> merkle_capacity{};
-    std::array<aht::CapacityIvV12, 2> fs_capacity{};
+    std::array<aht::CapacityIvV12, 3> fs_capacity{};
     bool proof_independent{false};
     bool exact_pr95_roles{false};
     bool q96_lanes_domain_independent{false};
@@ -163,6 +172,8 @@ struct ManifestV12 {
     uint64_t air_quotient_poseidon_rows{0};
     std::array<uint64_t, kFriLaneCountV12>
         fri_lane_poseidon_rows{};
+    std::array<uint64_t, kFriLaneCountV12>
+        query_lane_poseidon_rows{};
     uint64_t total_poseidon_air_rows{0};
     std::array<uint64_t, kFriLaneCountV12>
         query_sampler_air_rows{};
@@ -182,9 +193,11 @@ struct ManifestV12 {
     std::string note;
 };
 
-/** Parent-statement data shared by all three transcript channels. */
+/** Verifier-derived data shared by all five transcript channels. */
 struct ParentStatementInputsV12 {
     ah::Digest parent_fs_seed{};
+    ah::Digest shared_query_tax_sigma{};
+    uint64_t shared_query_tax_nonce{0};
 };
 
 /**
@@ -194,7 +207,6 @@ struct ParentStatementInputsV12 {
 struct ProofWitnessInputsV12 {
     ah::Digest trace_commit{};
     struct FriLaneV12 {
-        uint64_t pow_grind_nonce{0};
         ah::Digest shape_commit{};
         ah::Digest row_root{};
         ah::Digest ood_evaluation_commit{};
@@ -222,12 +234,15 @@ struct ChannelExecutionV12 {
     ah::State final_state{};
     uint64_t permutation_calls{0};
     std::vector<uint32_t> query_indices;
+    ah::Digest fri_terminal_receipt{};
+    bool fri_terminal_receipt_emitted{false};
     bool completed{false};
 };
 
 struct NativeExecutionV12 {
     ChannelExecutionV12 air_quotient;
     std::array<ChannelExecutionV12, kFriLaneCountV12> fri_lane{};
+    std::array<ChannelExecutionV12, kFriLaneCountV12> query_lane{};
     bool independent_lane_tags{false};
     bool valid{false};
     std::string note;
@@ -255,6 +270,7 @@ struct AirChannelWitnessV12 {
 struct AirWitnessV12 {
     AirChannelWitnessV12 air_quotient;
     std::array<AirChannelWitnessV12, kFriLaneCountV12> fri_lane{};
+    std::array<AirChannelWitnessV12, kFriLaneCountV12> query_lane{};
     bool native_differential_equal{false};
     bool lane_order_bound{false};
     bool valid{false};
@@ -279,6 +295,15 @@ struct AirWitnessV12 {
     NativeExecutionV12& out, std::string* why = nullptr);
 
 /**
+ * Execute only the two pre-tax FRI lanes and export their terminal receipts.
+ * This is the prover-ordering seam: no grind nonce or query-tax sigma is read.
+ */
+[[nodiscard]] bool DeriveFriTerminalReceiptsV12(
+    const ManifestV12& manifest, const TranscriptInputsV12& inputs,
+    std::array<ah::Digest, kFriLaneCountV12>& receipts,
+    std::string* why = nullptr);
+
+/**
  * Independent AIR-witness projection. Every permutation row is a real
  * stage3_poseidon_air witness and all 472 quadratic identities are evaluated.
  */
@@ -298,12 +323,14 @@ inline constexpr bool kNativeAirDifferentialHarnessImplementedV12 = true;
 inline constexpr bool kPoseidonPermutationRowsExecutableV12 = true;
 inline constexpr bool
     kWithoutReplacementQuerySamplerAirExecutableV12 = true;
+inline constexpr bool kSharedTaxOnlyQueryChannelExecutableV12 = true;
+inline constexpr bool kFriTerminalReceiptExecutableV12 = true;
 
 inline constexpr bool kProofPayloadMappingCompleteV12 = false;
 inline constexpr bool kRecursiveIoWiringConstraintsExecutableV12 = false;
 inline constexpr bool
     kQuerySamplerSafeSourceEqualityRecursivelyConsumedV12 = false;
-inline constexpr bool kQuerySamplerSoleProductionQuerySourceV12 = false;
+inline constexpr bool kQuerySamplerSoleProductionQuerySourceV12 = true;
 inline constexpr bool kSafeFsRegistryPinnedV12 = false;
 inline constexpr bool kDualQ96NiropReductionCertifiedV12 = false;
 inline constexpr bool kDualQ96CommonCommitmentHybridCertifiedV12 = false;
@@ -314,6 +341,8 @@ inline constexpr bool kSafeFsAuthorityReadyV12 =
     kNativeAirDifferentialHarnessImplementedV12 &&
     kPoseidonPermutationRowsExecutableV12 &&
     kWithoutReplacementQuerySamplerAirExecutableV12 &&
+    kSharedTaxOnlyQueryChannelExecutableV12 &&
+    kFriTerminalReceiptExecutableV12 &&
     kProofPayloadMappingCompleteV12 &&
     kRecursiveIoWiringConstraintsExecutableV12 &&
     kQuerySamplerSafeSourceEqualityRecursivelyConsumedV12 &&

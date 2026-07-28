@@ -23,11 +23,13 @@
  *   - the application statement;
  *   - the immutable verifier/program table;
  *   - the common trace;
- *   - both lanes' shape, row, OOD-evaluation and fold commitments.
+ *   - both lanes' shape and initial row commitments.
  *
- * A single nonce is absorbed by both transcripts and must satisfy the
- * field-native g=20 tax.  Thus changing only one lane's proof commitments or
- * nonce cannot preserve an already accepted transcript receipt.
+ * Each lane then absorbs its OOD/fold commitments in challenge order and
+ * exports a typed terminal receipt.  One post-FRI sigma binds both receipts;
+ * a single nonce pays the field-native g=20 tax on that sigma immediately
+ * before the two query squeezes.  This ordering is acyclic and ensures a
+ * change to either lane's future commitments changes the taxed queries.
  *
  * The numeric ledger encodes the conditional hybrid expression
  *
@@ -44,8 +46,8 @@
  * This file deliberately does not turn the conditional expression into a
  * security certificate.  The root-to-trace equality AIR is executable, but
  * its normalized-recursive consumption, the concrete SAFE reductions,
- * sole-query-source tax integration and recursively enforced site manifest
- * remain explicit false premises.
+ * recursive SAFE-output-to-sampler equality and recursively enforced site
+ * manifest remain explicit false premises.
  */
 namespace matmul::v4::rc::stage3_safe_v12_nirop_reduction {
 
@@ -181,7 +183,7 @@ struct CommonBindingReceiptV12 {
     bool both_lanes_equal_common_cells{false};
     bool proof_bundle_bound_to_parent_seed{false};
     bool transcript_trace_equals_common_trace{false};
-    bool both_lanes_use_shared_nonce{false};
+    bool fri_preamble_nonce_free{false};
     bool valid{false};
     std::string note;
 
@@ -199,12 +201,18 @@ struct HybridReceiptV12 {
     Fri3AlgGrindPredicateAirV1 tax_predicate_air{};
     std::array<std::vector<uint32_t>, kLaneCountV12>
         query_indices{};
+    std::array<ah::Digest, kLaneCountV12>
+        fri_terminal_receipts{};
     bool manifest_valid{false};
     bool common_binding_valid{false};
     bool trace_root_equality_air_valid{false};
     bool native_air_transcript_valid{false};
     bool typed_lane_domains_distinct{false};
     bool query_vectors_distinct{false};
+    bool tax_sigma_and_nonce_bound_to_query_channels{false};
+    bool query_channels_are_only_index_source{false};
+    bool acyclic_prover_order_enforced{false};
+    bool fri_terminal_receipts_bound{false};
     bool tax_satisfied{false};
     bool tax_air_constraints_zero{false};
     bool valid{false};
@@ -259,11 +267,13 @@ struct HybridReceiptV12 {
     aht::RoleV12 role, ah::Digest& seed,
     std::string* why = nullptr);
 
-/** Canonical preimage of the one taxed nonce shared by both lanes. */
+/** Canonical post-FRI preimage binding both typed terminal receipts. */
 [[nodiscard]] bool BuildTaxSigmaCoreV12(
     const fsair::ManifestV12& manifest,
     const CommonCommitmentsV12& common,
     const ah::Digest& parent_fs_seed,
+    const std::array<ah::Digest, kLaneCountV12>&
+        fri_terminal_receipts,
     std::vector<gf::Fp>& sigma_core,
     std::string* why = nullptr);
 
@@ -273,8 +283,8 @@ struct HybridReceiptV12 {
 
 /**
  * Prover helper.  max_iters=0 uses the bounded production helper's canonical
- * 2^(g+slack) ceiling.  No transcript query is derived until this nonce is
- * copied into both lane preambles.
+ * 2^(g+slack) ceiling. No transcript query is derived until both terminal
+ * receipts are bound and this one post-FRI tax is paid.
  */
 [[nodiscard]] bool FindSharedGrindNonceV12(
     const std::vector<gf::Fp>& sigma_core, uint64_t& nonce,

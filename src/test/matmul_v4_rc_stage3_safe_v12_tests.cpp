@@ -87,13 +87,14 @@ fsair::TranscriptInputsV12 TestFsAirInputs()
 {
     fsair::TranscriptInputsV12 out;
     out.parent_statement.parent_fs_seed = TestDigest(10);
+    out.parent_statement.shared_query_tax_sigma = TestDigest(30);
+    out.parent_statement.shared_query_tax_nonce =
+        UINT64_C(0x1234567800000000);
     out.proof_witness.trace_commit = TestDigest(20);
     for (uint32_t lane = 0;
          lane < fsair::kFriLaneCountV12; ++lane) {
         auto& one = out.proof_witness.fri_lane[lane];
         const uint64_t base = 100 + 100 * lane;
-        one.pow_grind_nonce =
-            UINT64_C(0x1234567800000000) + lane;
         one.shape_commit = TestDigest(base + 10);
         one.row_root = TestDigest(base + 20);
         one.ood_evaluation_commit = TestDigest(base + 30);
@@ -699,8 +700,35 @@ BOOST_AUTO_TEST_CASE(
         manifest.fri_lane[1].safe_manifest.tag);
 
     for (const auto& channel : manifest.fri_lane) {
+        uint32_t terminal_receipts = 0;
+        BOOST_REQUIRE(!channel.calls.empty());
+        BOOST_CHECK(
+            channel.calls.front().role ==
+            fsair::CallRoleV12::AbsorbFriPreamble);
+        BOOST_TEST(channel.calls.front().payload_lanes == 16U);
+        BOOST_CHECK(std::none_of(
+            channel.calls.begin(), channel.calls.end(),
+            [](const auto& call) {
+                return call.role ==
+                    fsair::CallRoleV12::SqueezeQueryVector;
+            }));
+        for (const auto& call : channel.calls) {
+            if (call.role ==
+                fsair::CallRoleV12::
+                    SqueezeFriTerminalReceipt) {
+                ++terminal_receipts;
+                BOOST_TEST(
+                    call.elements == ah::kAlgHashDigestLen);
+            }
+        }
+        BOOST_TEST(terminal_receipts == 1U);
+        BOOST_CHECK(
+            channel.calls.back().role ==
+            fsair::CallRoleV12::SqueezeFriTerminalReceipt);
+    }
+    for (const auto& channel : manifest.query_lane) {
         uint32_t query_vectors = 0;
-        uint32_t coefficient_vectors = 0;
+        uint32_t tax_absorbs = 0;
         for (const fsair::CallSpecV12& call : channel.calls) {
             BOOST_CHECK(fsair::IsFiatShamirRoleV12(call.typed_role));
             BOOST_CHECK(!fsair::IsMerkleRoleV12(call.typed_role));
@@ -716,20 +744,25 @@ BOOST_AUTO_TEST_CASE(
             }
             if (call.role ==
                 fsair::CallRoleV12::
-                    SqueezeBatchCoefficientVector) {
-                ++coefficient_vectors;
-                BOOST_TEST(call.items == 4U);
-                BOOST_TEST(call.elements == 12U);
+                    AbsorbSharedQueryTax) {
+                ++tax_absorbs;
+                BOOST_TEST(
+                    call.items ==
+                    fsair::kQueryCandidatesPerLaneV12);
+                BOOST_TEST(call.payload_lanes == 9U);
+                BOOST_TEST(call.elements == 14U);
             }
         }
         BOOST_TEST(query_vectors == 1U);
-        BOOST_TEST(coefficient_vectors == 1U);
+        BOOST_TEST(tax_absorbs == 1U);
+        BOOST_TEST(channel.calls.size() == 2U);
     }
 
     BOOST_TEST(fsair::kProofIndependentManifestImplementedV12);
     BOOST_TEST(fsair::kDualQ96TypedDomainsImplementedV12);
     BOOST_TEST(fsair::kNativeAirDifferentialHarnessImplementedV12);
     BOOST_TEST(fsair::kPoseidonPermutationRowsExecutableV12);
+    BOOST_TEST(fsair::kFriTerminalReceiptExecutableV12);
     BOOST_TEST(!fsair::kProofPayloadMappingCompleteV12);
     BOOST_TEST(
         !fsair::kRecursiveIoWiringConstraintsExecutableV12);
@@ -749,9 +782,17 @@ BOOST_AUTO_TEST_CASE(
         /*n_folds=*/fsair::kProductionFoldsV12,
     };
     fsair::ManifestV12 production_manifest;
+    const bool production_built = fsair::BuildManifestV12(
+        production, production_manifest, &why);
+    BOOST_TEST_MESSAGE(
+        "V12 measured rows: SAFE="
+        << production_manifest.total_poseidon_air_rows
+        << " sampler="
+        << production_manifest.total_query_sampler_air_rows
+        << " total="
+        << production_manifest.total_recursive_air_rows);
     BOOST_REQUIRE_MESSAGE(
-        fsair::BuildManifestV12(
-            production, production_manifest, &why),
+        production_built,
         why);
     BOOST_CHECK(production_manifest.production_reference_shape);
     BOOST_CHECK(
@@ -760,11 +801,11 @@ BOOST_AUTO_TEST_CASE(
         production_manifest.total_poseidon_air_rows ==
         fsair::kProductionExpectedSafeAirRowsV12);
     BOOST_TEST(
-        production_manifest.total_poseidon_air_rows == 2831U);
+        production_manifest.total_poseidon_air_rows == 2835U);
     BOOST_TEST(
         production_manifest.total_query_sampler_air_rows == 512U);
     BOOST_TEST(
-        production_manifest.total_recursive_air_rows == 3343U);
+        production_manifest.total_recursive_air_rows == 3347U);
     BOOST_TEST(
         production_manifest.query_sampler_air_columns == 562U);
     BOOST_TEST(
@@ -773,7 +814,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_TEST(
         production_manifest.static_domain_headroom_rows == 56480U);
     BOOST_TEST(
-        production_manifest.static_domain_margin_rows == 53137U);
+        production_manifest.static_domain_margin_rows == 53133U);
     BOOST_CHECK(production_manifest.fits_static_domain_headroom);
 }
 
@@ -803,11 +844,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(witness.lane_order_bound);
     BOOST_CHECK(witness.valid);
     BOOST_TEST(
-        native.fri_lane[0].query_indices.size() ==
+        native.query_lane[0].query_indices.size() ==
         fsair::kQueriesPerLaneV12);
     BOOST_TEST(
-        native.fri_lane[1].query_indices.size() ==
+        native.query_lane[1].query_indices.size() ==
         fsair::kQueriesPerLaneV12);
+    for (const auto& lane : native.fri_lane) {
+        BOOST_CHECK(lane.fri_terminal_receipt_emitted);
+        BOOST_CHECK(lane.fri_terminal_receipt != ah::Digest{});
+    }
     BOOST_CHECK(
         native.fri_lane[0].final_state !=
         native.fri_lane[1].final_state);
@@ -826,14 +871,16 @@ BOOST_AUTO_TEST_CASE(
     check_channel(witness.air_quotient);
     check_channel(witness.fri_lane[0]);
     check_channel(witness.fri_lane[1]);
+    check_channel(witness.query_lane[0]);
+    check_channel(witness.query_lane[1]);
     for (uint32_t lane = 0;
          lane < fsair::kFriLaneCountV12; ++lane) {
         const auto& sampler =
-            witness.fri_lane[lane].query_sampler_air;
+            witness.query_lane[lane].query_sampler_air;
         BOOST_CHECK(
-            witness.fri_lane[lane].query_sampler_air_valid);
+            witness.query_lane[lane].query_sampler_air_valid);
         BOOST_CHECK(
-            witness.fri_lane[lane].
+            witness.query_lane[lane].
                 query_sampler_source_call_typed);
         BOOST_CHECK(sampler.valid);
         BOOST_TEST(sampler.cs.n_rows == 256U);
@@ -867,7 +914,7 @@ BOOST_AUTO_TEST_CASE(
         !fsair::
             kQuerySamplerSafeSourceEqualityRecursivelyConsumedV12);
     BOOST_CHECK(
-        !fsair::kQuerySamplerSoleProductionQuerySourceV12);
+        fsair::kQuerySamplerSoleProductionQuerySourceV12);
     BOOST_CHECK(!fsair::kSafeFsAuthorityReadyV12);
 }
 
@@ -943,8 +990,8 @@ BOOST_AUTO_TEST_CASE(
     // its lane id and its ordered source candidates belong to the typed
     // lane-0 SAFE transcript.
     fsair::AirWitnessV12 shared_sampler = witness;
-    shared_sampler.fri_lane[1].query_sampler_air =
-        shared_sampler.fri_lane[0].query_sampler_air;
+    shared_sampler.query_lane[1].query_sampler_air =
+        shared_sampler.query_lane[0].query_sampler_air;
     BOOST_CHECK(!fsair::ValidateAirWitnessV12(
         manifest, inputs, shared_sampler, &why));
 
@@ -963,6 +1010,27 @@ BOOST_AUTO_TEST_CASE(
         gf::Add(feedback_call->values.back(), 1);
     BOOST_CHECK(!fsair::ValidateAirWitnessV12(
         manifest, inputs, feedback, &why));
+
+    // The final FRI squeeze is a binding receipt, not padding. Altering it
+    // after moving query sampling to a dedicated channel is rejected.
+    fsair::AirWitnessV12 terminal_receipt = witness;
+    terminal_receipt.fri_lane[0].projected_execution.
+        fri_terminal_receipt[0] = gf::Add(
+            terminal_receipt.fri_lane[0].projected_execution.
+                fri_terminal_receipt[0],
+            1);
+    BOOST_CHECK(!fsair::ValidateAirWitnessV12(
+        manifest, inputs, terminal_receipt, &why));
+
+    // The taxed sigma is part of the single canonical query request.
+    fsair::TranscriptInputsV12 changed_tax = inputs;
+    changed_tax.parent_statement.shared_query_tax_sigma[0] =
+        gf::Add(
+            changed_tax.parent_statement.
+                shared_query_tax_sigma[0],
+            1);
+    BOOST_CHECK(!fsair::ValidateAirWitnessV12(
+        manifest, changed_tax, witness, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

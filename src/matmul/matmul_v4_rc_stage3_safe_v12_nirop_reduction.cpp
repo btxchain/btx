@@ -144,6 +144,8 @@ bool SameHybridReceipt(
             left.tax_predicate_air,
             right.tax_predicate_air) &&
         left.query_indices == right.query_indices &&
+        left.fri_terminal_receipts ==
+            right.fri_terminal_receipts &&
         left.manifest_valid == right.manifest_valid &&
         left.common_binding_valid ==
             right.common_binding_valid &&
@@ -155,6 +157,14 @@ bool SameHybridReceipt(
             right.typed_lane_domains_distinct &&
         left.query_vectors_distinct ==
             right.query_vectors_distinct &&
+        left.tax_sigma_and_nonce_bound_to_query_channels ==
+            right.tax_sigma_and_nonce_bound_to_query_channels &&
+        left.query_channels_are_only_index_source ==
+            right.query_channels_are_only_index_source &&
+        left.acyclic_prover_order_enforced ==
+            right.acyclic_prover_order_enforced &&
+        left.fri_terminal_receipts_bound ==
+            right.fri_terminal_receipts_bound &&
         left.tax_satisfied == right.tax_satisfied &&
         left.tax_air_constraints_zero ==
             right.tax_air_constraints_zero &&
@@ -598,12 +608,16 @@ bool DeriveParentFsSeedV12(
     }
 
     std::vector<gf::Fp> message;
-    message.reserve(
-        16 + 12 +
-        2 * (12 + 4 * (manifest.shape.n_folds + 1)));
+    // This seed is deliberately pre-FRI.  It may bind only values known
+    // before OOD and fold challenges are sampled; future fold roots enter
+    // sequentially in each typed FRI channel and are joined by the post-FRI
+    // tax sigma through the two terminal receipts.
+    message.reserve(16 + 12 + 2 * 9);
     message.push_back(kCommonBindingMagicV12);
     AppendU32(message, kProtocolVersionV12);
     AppendU32(message, kQueriesPerLaneV12);
+    AppendU32(
+        message, fsair::kQueryCandidatesPerLaneV12);
     AppendU32(message, kLaneCountV12);
     AppendU32(message, manifest.shape.child_w);
     AppendU32(message, manifest.shape.child_n_rows);
@@ -619,13 +633,6 @@ bool DeriveParentFsSeedV12(
         AppendU32(message, lane);
         AppendDigest(message, proof.shape_commit);
         AppendDigest(message, proof.row_root);
-        AppendDigest(message, proof.ood_evaluation_commit);
-        AppendU32(
-            message,
-            static_cast<uint32_t>(proof.fold_roots.size()));
-        for (const ah::Digest& root : proof.fold_roots) {
-            AppendDigest(message, root);
-        }
     }
     safe::SafeCoreResultV12 audit;
     if (!safe::SafeCoreDigestV12(
@@ -644,28 +651,43 @@ bool BuildTaxSigmaCoreV12(
     const fsair::ManifestV12& manifest,
     const CommonCommitmentsV12& common,
     const ah::Digest& parent_fs_seed,
+    const std::array<ah::Digest, kLaneCountV12>&
+        fri_terminal_receipts,
     std::vector<gf::Fp>& sigma_core,
     std::string* why)
 {
     sigma_core.clear();
     if (!fsair::ValidateManifestV12(manifest, why) ||
         !CanonicalCommon(common) ||
-        !CanonicalDigest(parent_fs_seed)) {
+        !CanonicalDigest(parent_fs_seed) ||
+        !std::all_of(
+            fri_terminal_receipts.begin(),
+            fri_terminal_receipts.end(),
+            [](const ah::Digest& receipt) {
+                return CanonicalDigest(receipt) &&
+                    receipt != ah::Digest{};
+            })) {
         return Fail(why, "invalid tax sigma inputs");
     }
-    sigma_core.reserve(40);
+    sigma_core.reserve(48);
     sigma_core.push_back(kCommonBindingMagicV12);
     AppendU32(sigma_core, kProtocolVersionV12);
     AppendU32(sigma_core, kQueriesPerLaneV12);
+    AppendU32(
+        sigma_core, fsair::kQueryCandidatesPerLaneV12);
     AppendU32(sigma_core, kTaxedGrindBitsV12);
     AppendDigest(sigma_core, parent_fs_seed);
     AppendDigest(sigma_core, common.statement);
     AppendDigest(sigma_core, common.program);
     AppendDigest(sigma_core, common.trace);
+    AppendDigest(sigma_core, fri_terminal_receipts[0]);
+    AppendDigest(sigma_core, fri_terminal_receipts[1]);
     for (const auto& tag : {
              manifest.air_quotient.safe_manifest.tag,
              manifest.fri_lane[0].safe_manifest.tag,
-             manifest.fri_lane[1].safe_manifest.tag}) {
+             manifest.fri_lane[1].safe_manifest.tag,
+             manifest.query_lane[0].safe_manifest.tag,
+             manifest.query_lane[1].safe_manifest.tag}) {
         sigma_core.insert(
             sigma_core.end(), tag.begin(), tag.end());
     }
@@ -744,13 +766,15 @@ bool BuildHybridReceiptV12(
     binding.transcript_trace_equals_common_trace =
         inputs.transcript.proof_witness.trace_commit ==
         inputs.common.trace;
-    binding.both_lanes_use_shared_nonce =
+    binding.fri_preamble_nonce_free =
         std::all_of(
-            inputs.transcript.proof_witness.fri_lane.begin(),
-            inputs.transcript.proof_witness.fri_lane.end(),
-            [&](const auto& lane) {
-                return lane.pow_grind_nonce ==
-                    inputs.shared_grind_nonce;
+            manifest.fri_lane.begin(),
+            manifest.fri_lane.end(),
+            [](const auto& lane) {
+                return !lane.calls.empty() &&
+                    lane.calls.front().role ==
+                        fsair::CallRoleV12::AbsorbFriPreamble &&
+                    lane.calls.front().payload_lanes == 16;
             });
     if (!DeriveParentFsSeedV12(
             manifest, inputs.common,
@@ -767,7 +791,7 @@ bool BuildHybridReceiptV12(
         binding.both_lanes_equal_common_cells &&
         binding.proof_bundle_bound_to_parent_seed &&
         binding.transcript_trace_equals_common_trace &&
-        binding.both_lanes_use_shared_nonce &&
+        binding.fri_preamble_nonce_free &&
         binding.proof_dependent_preprocessed_columns == 0;
     binding.note = binding.valid
         ? "stage3:safe_v12_nirop:common_transcript_join_ok"
@@ -792,8 +816,21 @@ bool BuildHybridReceiptV12(
     }
     receipt.trace_root_equality_air_valid = true;
 
+    if (!fsair::DeriveFriTerminalReceiptsV12(
+            manifest, inputs.transcript,
+            receipt.fri_terminal_receipts, why)) {
+        return false;
+    }
+    receipt.fri_terminal_receipts_bound =
+        receipt.fri_terminal_receipts[0] != ah::Digest{} &&
+        receipt.fri_terminal_receipts[1] != ah::Digest{};
+    if (!receipt.fri_terminal_receipts_bound) {
+        return Fail(why, "empty FRI terminal receipt");
+    }
+
     if (!BuildTaxSigmaCoreV12(
             manifest, inputs.common, binding.parent_fs_seed,
+            receipt.fri_terminal_receipts,
             receipt.tax_sigma_core, why)) {
         return false;
     }
@@ -819,6 +856,15 @@ bool BuildHybridReceiptV12(
     if (!receipt.tax_air_constraints_zero) {
         return Fail(why, "tax predicate AIR failed");
     }
+    receipt.tax_sigma_and_nonce_bound_to_query_channels =
+        inputs.transcript.parent_statement.
+            shared_query_tax_sigma == receipt.tax_sigma &&
+        inputs.transcript.parent_statement.
+            shared_query_tax_nonce == inputs.shared_grind_nonce;
+    if (!receipt.tax_sigma_and_nonce_bound_to_query_channels) {
+        return Fail(
+            why, "query channel does not consume taxed sigma/nonce");
+    }
 
     if (!fsair::BuildAirWitnessV12(
             manifest, inputs.transcript,
@@ -833,10 +879,23 @@ bool BuildHybridReceiptV12(
         manifest.fri_lane[0].typed_domain !=
             manifest.fri_lane[1].typed_domain &&
         manifest.fri_lane[0].safe_manifest.tag !=
-            manifest.fri_lane[1].safe_manifest.tag;
+            manifest.fri_lane[1].safe_manifest.tag &&
+        manifest.query_lane[0].typed_domain !=
+            manifest.query_lane[1].typed_domain &&
+        manifest.query_lane[0].safe_manifest.tag !=
+            manifest.query_lane[1].safe_manifest.tag;
     for (uint32_t lane = 0; lane < kLaneCountV12; ++lane) {
-        receipt.query_indices[lane] =
+        const auto& fri_execution =
             receipt.transcript_air.fri_lane[lane].
+                projected_execution;
+        if (!fri_execution.fri_terminal_receipt_emitted ||
+            fri_execution.fri_terminal_receipt !=
+                receipt.fri_terminal_receipts[lane]) {
+            return Fail(
+                why, "FRI terminal receipt AIR mismatch");
+        }
+        receipt.query_indices[lane] =
+            receipt.transcript_air.query_lane[lane].
                 projected_execution.query_indices;
         if (receipt.query_indices[lane].size() !=
             kQueriesPerLaneV12) {
@@ -846,6 +905,23 @@ bool BuildHybridReceiptV12(
     receipt.query_vectors_distinct =
         receipt.query_indices[0] !=
         receipt.query_indices[1];
+    const auto emits_queries = [](const auto& channel) {
+        return !channel.projected_execution.query_indices.empty();
+    };
+    receipt.query_channels_are_only_index_source =
+        !emits_queries(receipt.transcript_air.air_quotient) &&
+        !emits_queries(receipt.transcript_air.fri_lane[0]) &&
+        !emits_queries(receipt.transcript_air.fri_lane[1]) &&
+        emits_queries(receipt.transcript_air.query_lane[0]) &&
+        emits_queries(receipt.transcript_air.query_lane[1]) &&
+        receipt.transcript_air.query_lane[0].
+            query_sampler_air_valid &&
+        receipt.transcript_air.query_lane[1].
+            query_sampler_air_valid;
+    receipt.acyclic_prover_order_enforced =
+        binding.fri_preamble_nonce_free &&
+        receipt.fri_terminal_receipts_bound &&
+        receipt.tax_sigma_and_nonce_bound_to_query_channels;
     receipt.valid =
         receipt.manifest_valid &&
         receipt.common_binding_valid &&
@@ -853,6 +929,10 @@ bool BuildHybridReceiptV12(
         receipt.native_air_transcript_valid &&
         receipt.typed_lane_domains_distinct &&
         receipt.query_vectors_distinct &&
+        receipt.tax_sigma_and_nonce_bound_to_query_channels &&
+        receipt.query_channels_are_only_index_source &&
+        receipt.acyclic_prover_order_enforced &&
+        receipt.fri_terminal_receipts_bound &&
         receipt.tax_satisfied &&
         receipt.tax_air_constraints_zero;
     receipt.note = receipt.valid
@@ -979,11 +1059,17 @@ AssessShippedSoundnessReductionV12(
         receipt.tax_air_constraints_zero &&
         receipt.tax_predicate_air.tax_bits ==
             kTaxedGrindBitsV12;
-    // The current V12 manifest squeezes lane queries before this outer joint
-    // tax is checked. Every accepted nonce is taxed and shared, but sigma is
-    // not yet the sole source of every query cell. Do not claim the stronger
-    // Construction-2 premise.
-    out.shared_nonce_tax_is_sole_query_entropy_source = false;
+    // Query candidates now live in two dedicated typed channels. Their only
+    // variable absorb is the verifier-recomputed taxed sigma and its shared
+    // nonce; all other query-call cells are fixed descriptors/domain tags.
+    // Recursive equality from those SAFE outputs into the sampler remains a
+    // separate false premise below.
+    out.shared_nonce_tax_is_sole_query_entropy_source =
+        receipt.tax_sigma_and_nonce_bound_to_query_channels &&
+        receipt.query_channels_are_only_index_source &&
+        receipt.acyclic_prover_order_enforced &&
+        receipt.fri_terminal_receipts_bound &&
+        fsair::kQuerySamplerSoleProductionQuerySourceV12;
 
     const auto site_manifest =
         scenarios::BuildProductionProofSiteManifest(
@@ -1085,7 +1171,8 @@ AssessShippedSoundnessReductionV12(
         "+ 2^-128 + eps_SAFE_NIROP), "
         "conditioned on eps_SAFE_NIROP <= 2^-128";
     out.residual_premises = {
-        "Make the taxed sigma the sole source of all 192 query indices.",
+        "Recursively equality-bind both dedicated taxed-query SAFE outputs "
+        "to the two without-replacement sampler candidate vectors.",
         "Prove two typed SAFE lane domains instantiate the required "
         "independent-oracle hybrid under the shared concrete Poseidon2.",
         "Append the executable shared trace/shape/row-root equality AIR "

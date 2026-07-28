@@ -99,25 +99,32 @@ FixtureV12 BuildFixture()
     out.inputs.transcript.parent_statement.parent_fs_seed =
         parent_seed;
 
+    std::array<ah::Digest, kLaneCountV12> terminal_receipts{};
+    if (!fsair::DeriveFriTerminalReceiptsV12(
+            out.manifest, out.inputs.transcript,
+            terminal_receipts, &why)) {
+        throw std::runtime_error(why);
+    }
     std::vector<gf::Fp> sigma_core;
     if (!BuildTaxSigmaCoreV12(
             out.manifest, out.inputs.common, parent_seed,
+            terminal_receipts,
             sigma_core, &why)) {
         throw std::runtime_error(why);
     }
-    // Deterministic KAT produced by FindSharedGrindNonceV12 for this exact
-    // shared-commitment sigma core. The verifier recomputes the full g=20
-    // predicate; pinning the answer avoids a prover search in normal CI.
-    out.inputs.shared_grind_nonce = UINT64_C(68'939);
+    // Deterministic KAT for the acyclic transcript. The verifier recomputes
+    // the full g20 predicate; pinning avoids a prover search in normal CI:
+    // pre-FRI seed -> two terminal receipts -> one g20 tax -> queries.
+    out.inputs.shared_grind_nonce = UINT64_C(831'039);
+    out.inputs.transcript.parent_statement.
+        shared_query_tax_nonce =
+            out.inputs.shared_grind_nonce;
     if (!CheckSharedGrindNonceV12(
-            sigma_core, out.inputs.shared_grind_nonce, nullptr)) {
+            sigma_core, out.inputs.shared_grind_nonce,
+            &out.inputs.transcript.parent_statement.
+                shared_query_tax_sigma)) {
         throw std::runtime_error(
             "stage3:safe_v12_nirop:shared g20 KAT mismatch");
-    }
-    for (auto& lane :
-         out.inputs.transcript.proof_witness.fri_lane) {
-        lane.pow_grind_nonce =
-            out.inputs.shared_grind_nonce;
     }
     if (!BuildHybridReceiptV12(
             out.manifest, out.inputs, out.receipt, &why) ||
@@ -161,6 +168,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         fixture.receipt.typed_lane_domains_distinct);
     BOOST_CHECK(fixture.receipt.query_vectors_distinct);
+    BOOST_CHECK(
+        fixture.receipt.
+            tax_sigma_and_nonce_bound_to_query_channels);
+    BOOST_CHECK(
+        fixture.receipt.query_channels_are_only_index_source);
     BOOST_CHECK(fixture.receipt.tax_satisfied);
     BOOST_CHECK(fixture.receipt.tax_air_constraints_zero);
     BOOST_TEST(
@@ -174,7 +186,9 @@ BOOST_AUTO_TEST_CASE(
             proof_bundle_bound_to_parent_seed);
     BOOST_CHECK(
         fixture.receipt.common_binding.
-            both_lanes_use_shared_nonce);
+            fri_preamble_nonce_free);
+    BOOST_CHECK(fixture.receipt.fri_terminal_receipts_bound);
+    BOOST_CHECK(fixture.receipt.acyclic_prover_order_enforced);
     const auto& trace_air =
         fixture.receipt.trace_root_equality_air;
     BOOST_CHECK(trace_air.valid);
@@ -263,7 +277,7 @@ BOOST_AUTO_TEST_CASE(
         !reduction.
             proof_site_upper_bound_recursively_enforced);
     BOOST_CHECK(
-        !reduction.
+        reduction.
             shared_nonce_tax_is_sole_query_entropy_source);
     BOOST_CHECK(
         !reduction.lane_independence_reduction_complete);
@@ -438,6 +452,18 @@ BOOST_AUTO_TEST_CASE(
         fixture.manifest, fixture.inputs,
         changed_equality_air, &why));
 
+    // The final SAFE outputs are part of the child receipt and the post-FRI
+    // tax preimage. They cannot be discarded or substituted.
+    HybridReceiptV12 changed_terminal_receipt = fixture.receipt;
+    changed_terminal_receipt.fri_terminal_receipts[0][0] =
+        gf::Add(
+            changed_terminal_receipt.
+                fri_terminal_receipts[0][0],
+            1);
+    BOOST_CHECK(!ValidateHybridReceiptV12(
+        fixture.manifest, fixture.inputs,
+        changed_terminal_receipt, &why));
+
     // Re-tagging the common parent derivation with an unrelated oracle role
     // gives a real digest, but never the canonical parent FS seed.
     ah::Digest role_swapped_seed{};
@@ -471,17 +497,22 @@ BOOST_AUTO_TEST_CASE(
     }
     HybridInputsV12 untaxed = fixture.inputs;
     untaxed.shared_grind_nonce = cheap_nonce;
-    for (auto& lane :
-         untaxed.transcript.proof_witness.fri_lane) {
-        lane.pow_grind_nonce = cheap_nonce;
-    }
+    untaxed.transcript.parent_statement.
+        shared_query_tax_nonce = cheap_nonce;
+    const bool cheap_nonce_satisfies_tax =
+        CheckSharedGrindNonceV12(
+        fixture.receipt.tax_sigma_core, cheap_nonce,
+        &untaxed.transcript.parent_statement.
+            shared_query_tax_sigma);
+    BOOST_CHECK(!cheap_nonce_satisfies_tax);
     BOOST_CHECK(!BuildHybridReceiptV12(
         fixture.manifest, untaxed, unused, &why));
 
-    // Paying for lane 0 does not permit a second lane-specific nonce.
+    // The nonce is a single post-terminal value. It cannot be injected into
+    // a pre-tax lane or changed in only the query request.
     HybridInputsV12 split_nonce = fixture.inputs;
-    ++split_nonce.transcript.proof_witness.
-        fri_lane[1].pow_grind_nonce;
+    ++split_nonce.transcript.parent_statement.
+        shared_query_tax_nonce;
     BOOST_CHECK(!BuildHybridReceiptV12(
         fixture.manifest, split_nonce, unused, &why));
 
@@ -497,6 +528,77 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(aliased.valid, aliased.note);
     BOOST_CHECK(aliased.canonicity_constrained);
     BOOST_CHECK_GT(aliased.violations, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    prover_order_is_acyclic_and_future_roots_change_taxed_queries)
+{
+    const FixtureV12& fixture = Fixture();
+    std::string why;
+
+    // Step 1 is pre-FRI. Future OOD/fold roots do not enter the parent seed.
+    HybridInputsV12 changed = fixture.inputs;
+    changed.transcript.proof_witness.
+        fri_lane[1].fold_roots.back()[0] = gf::Add(
+            changed.transcript.proof_witness.
+                fri_lane[1].fold_roots.back()[0],
+            1);
+    ah::Digest unchanged_parent{};
+    BOOST_REQUIRE(DeriveParentFsSeedV12(
+        fixture.manifest, changed.common,
+        changed.transcript.proof_witness,
+        aht::RoleV12::ApplicationStatementCommitment,
+        unchanged_parent, &why));
+    BOOST_CHECK(
+        unchanged_parent ==
+        fixture.inputs.transcript.parent_statement.parent_fs_seed);
+
+    // Step 2 executes the two sequential FRI transcripts without reading a
+    // grind nonce or query-tax sigma.
+    std::array<ah::Digest, kLaneCountV12> receipts{};
+    BOOST_REQUIRE(fsair::DeriveFriTerminalReceiptsV12(
+        fixture.manifest, changed.transcript, receipts, &why));
+    BOOST_CHECK(
+        receipts != fixture.receipt.fri_terminal_receipts);
+
+    // Step 3 binds both terminal receipts, pays one g20 tax, and only then
+    // executes the two independently typed query squeezes.
+    std::vector<gf::Fp> sigma_core;
+    BOOST_REQUIRE(BuildTaxSigmaCoreV12(
+        fixture.manifest, changed.common, unchanged_parent,
+        receipts, sigma_core, &why));
+    BOOST_CHECK(sigma_core != fixture.receipt.tax_sigma_core);
+    BOOST_REQUIRE(FindSharedGrindNonceV12(
+        sigma_core, changed.shared_grind_nonce, 0, &why));
+    changed.transcript.parent_statement.shared_query_tax_nonce =
+        changed.shared_grind_nonce;
+    BOOST_REQUIRE(CheckSharedGrindNonceV12(
+        sigma_core, changed.shared_grind_nonce,
+        &changed.transcript.parent_statement.
+            shared_query_tax_sigma));
+    HybridReceiptV12 changed_receipt;
+    BOOST_REQUIRE(BuildHybridReceiptV12(
+        fixture.manifest, changed, changed_receipt, &why));
+    BOOST_CHECK(
+        changed_receipt.query_indices !=
+        fixture.receipt.query_indices);
+
+    // Moving the nonce earlier cannot affect either FRI receipt; trying to
+    // reuse the old taxed sigma with a changed nonce is rejected instead of
+    // inducing a transcript fixed point.
+    HybridInputsV12 early_nonce = fixture.inputs;
+    ++early_nonce.transcript.parent_statement.
+        shared_query_tax_nonce;
+    std::array<ah::Digest, kLaneCountV12> same_receipts{};
+    BOOST_REQUIRE(fsair::DeriveFriTerminalReceiptsV12(
+        fixture.manifest, early_nonce.transcript,
+        same_receipts, &why));
+    BOOST_CHECK(
+        same_receipts ==
+        fixture.receipt.fri_terminal_receipts);
+    HybridReceiptV12 unused;
+    BOOST_CHECK(!BuildHybridReceiptV12(
+        fixture.manifest, early_nonce, unused, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
