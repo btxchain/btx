@@ -210,6 +210,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_safe_v12_tests.cpp
   matmul_v4_rc_stage3_safe_v12_domain_registry_tests.cpp
   matmul_v4_rc_stage3_safe_v12_nirop_reduction_tests.cpp
+  matmul_v4_rc_stage3_safe_v12_recursive_bridge_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_normalized_program_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_receipt_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_receipt_join_q96_tests.cpp
