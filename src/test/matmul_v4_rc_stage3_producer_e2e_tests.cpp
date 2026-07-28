@@ -449,31 +449,54 @@ BOOST_AUTO_TEST_CASE(real_prover_full_consensus_loop)
     BOOST_CHECK(status == rc::RCStage3ProduceStatus::ProverFailed);
 }
 
-BOOST_AUTO_TEST_CASE(planned_reservation_is_measured_and_currently_unusable)
+BOOST_AUTO_TEST_CASE(planned_reservation_is_codec_bounded_and_usable)
 {
-    // Runs unconditionally: it is arithmetic over a measured constant, not a
+    // Runs unconditionally: this is exact codec/framing arithmetic, not a
     // proving run.
     constexpr int32_t HEIGHT{102};
     const auto params = RcChainParams(HEIGHT);
     const auto r = rc::RCStage3PlannedReservation(params, HEIGHT);
 
-    BOOST_CHECK_EQUAL(r.envelope_bytes, rc::kRCStage3MeasuredEpisodeEnvelopeBytes);
-    BOOST_CHECK_EQUAL(r.envelope_bytes, 35'363'636U);
+    BOOST_CHECK_EQUAL(r.envelope_bytes, rc::kRCStage3MaxProofBytes);
     // Word packing: 2 envelope words + ceil(bytes/4).
-    BOOST_CHECK_EQUAL(r.payload_words, 2U + (35'363'636U + 3) / 4);
+    BOOST_CHECK_EQUAL(
+        r.payload_words,
+        2U + (rc::kRCStage3MaxProofBytes + 3) / 4);
+    BOOST_CHECK_EQUAL(
+        r.block_serialized_delta,
+        ::GetSizeOfCompactSize(r.payload_words) +
+            r.payload_words * sizeof(uint32_t));
     BOOST_CHECK(r.block_serialized_delta > r.envelope_bytes);
-
-    // The measured envelope is 2.1x the codec cap, so the reservation is NOT
-    // usable and CreateNewBlock is expected to refuse the template rather than
-    // mine a block it could never legally complete.
-    BOOST_CHECK(!r.fits_codec_cap);
-    BOOST_CHECK(!r.Usable());
+    BOOST_CHECK(r.fits_codec_cap);
+    BOOST_CHECK(r.fits_block_cap);
+    BOOST_CHECK(r.Usable());
+    BOOST_CHECK_EQUAL(std::string(r.basis), "codec-bounded-v3-maximum");
     BOOST_TEST_MESSAGE("reservation: envelope=" << r.envelope_bytes
                        << " B words=" << r.payload_words
                        << " block_delta=" << r.block_serialized_delta
                        << " B codec_ok=" << r.fits_codec_cap
                        << " block_ok=" << r.fits_block_cap
                        << " basis=" << r.basis);
+
+    // A network whose serialized-size cap cannot carry the complete reserved
+    // vector must fail closed. Equality is insufficient because a legal block
+    // also contains its header, coinbase, and other body framing.
+    auto undersized = params;
+    undersized.nMaxBlockSerializedSize =
+        static_cast<uint32_t>(r.block_serialized_delta);
+    const auto no_room = rc::RCStage3PlannedReservation(undersized, HEIGHT);
+    BOOST_CHECK(no_room.fits_codec_cap);
+    BOOST_CHECK(!no_room.fits_block_cap);
+    BOOST_CHECK(!no_room.Usable());
+
+    undersized = params;
+    undersized.nMaxBlockWeight =
+        static_cast<uint32_t>(r.block_serialized_delta);
+    const auto no_weight_room =
+        rc::RCStage3PlannedReservation(undersized, HEIGHT);
+    BOOST_CHECK(no_weight_room.fits_codec_cap);
+    BOOST_CHECK(!no_weight_room.fits_block_cap);
+    BOOST_CHECK(!no_weight_room.Usable());
 
     // Outside the RC family nothing is reserved at all.
     auto pre_rc = params;

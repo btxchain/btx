@@ -90,15 +90,15 @@ namespace matmul::v4::rc {
  * `batch` member does, and `next_openings` / `trace_commit` are size-estimated
  * on a path with no dual-lane estimator at all.
  *
- * CONSEQUENCE FOR THIS FORMAT. The wire format below therefore makes NO claim
- * that a real proof fits in a block; today's measurement says it does not. It
- * claims only that IF a payload is produced, its size is computed exactly,
- * surfaced to the caller, and checked against every ceiling before the block is
- * touched — see RCStage3AttachmentSizeReport and MeasureRCStage3Attachment. A
- * payload that does not fit produces ExceedsSizeBudget with the exact numbers
- * attached, rather than an oversized block or a silent truncation. New measured
- * figures drop straight into those fields and the verdict recomputes; nothing
- * has to be reverse engineered out of the encoder.
+ * CONSEQUENCE FOR THIS FORMAT. The old 35,363,636-byte flat six-section
+ * experiment is useful diagnostic evidence, but it is not a production proof
+ * shape and must not be used as the block assembler's reservation. The
+ * production reservation is instead the codec-enforced maximum: every proof
+ * SerializeRCStage3Proof can accept is at most kRCStage3MaxProofBytes, and its
+ * two-word envelope, word padding, and CompactSize prefix have exact bounded
+ * sizes. This gives the assembler a true upper bound before a proof exists,
+ * while MeasureRCStage3Attachment still reports the exact cost of the proof
+ * actually produced.
  *
  * The recursion shape is expected to change. Nothing in this seam depends on
  * the proof's internal structure — it moves an opaque, length-prefixed byte
@@ -183,35 +183,27 @@ struct RCStage3AttachmentSizeReport {
     const Consensus::Params& params);
 
 /**
- * MEASURED envelope size for a full six-section Episode statement, assembled by
- * the section-assembly lane from six REAL role-section proofs.
- *
- * Per section: builder 4.81 MB, gemm 11.08 MB, extract 10.97 MB, wiring
- * 7.39 MB, tiletree 0.55 MB, digest 0.55 MB. This is a measurement, not a
- * model. It is 2.1x the 16,777,216-byte codec cap, which is why assembly
- * currently fails closed as "stage3:relation_proofs_oversize".
- */
-inline constexpr size_t kRCStage3MeasuredEpisodeEnvelopeBytes = 35'363'636;
-
-/**
  * What the BLOCK ASSEMBLER must subtract from its size/weight budget before it
  * selects transactions, so the attachment step cannot push the miner's own
  * block over the consensus limits.
  *
  * This has to be a WORST-CASE bound rather than a per-block measurement, because
- * the assembler runs before the proof exists. It is derived from the measured
- * envelope above using the exact same word-packing and CompactSize arithmetic
- * MeasureRCStage3Attachment applies to real bytes, so the reservation and the
- * eventual attachment cannot disagree.
+ * the assembler runs before the proof exists. It is derived from
+ * kRCStage3MaxProofBytes using the exact same two-word envelope and word padding
+ * as PackRCStage3ProofWords, plus the exact CompactSize framing used by
+ * CBlock::matrix_c_data. SerializeRCStage3Proof enforces the byte ceiling, so
+ * every accepted attachment is bounded by this reservation.
  */
 struct RCStage3ReservationReport {
-    /** Proof bytes planned for (the measured envelope for this statement). */
+    /** Maximum serialized proof bytes planned for. */
     size_t envelope_bytes{0};
     /** uint32 words those bytes occupy in matrix_c_data. */
     size_t payload_words{0};
-    /** Exact bytes added to the serialized block, CompactSize prefix included. */
+    /** Exact serialized footprint of the reserved vector, CompactSize prefix
+     *  included. This is a conservative upper bound on the attachment delta:
+     *  an empty matrix_c_data already occupies its one-byte zero prefix. */
     size_t block_serialized_delta{0};
-    /** Whether the planned envelope is even encodable / carriable. */
+    /** Whether the codec maximum is encodable / carriable on this network. */
     bool fits_codec_cap{false};
     bool fits_block_cap{false};
     /** Provenance of envelope_bytes, so a log line is self-explaining. */
@@ -224,9 +216,9 @@ struct RCStage3ReservationReport {
  * Reservation for the statement consensus requires at `height`, or a report with
  * envelope_bytes == 0 and basis "not_required" outside the RC family.
  *
- * A report with Usable() == false means a winner at this height CANNOT carry its
- * proof — that is the current state at real widths, and the assembler is
- * expected to surface it rather than mine a block it could never complete.
+ * A report with Usable() == false means the network's block caps cannot carry
+ * even the codec-bounded proof reservation, and the assembler must surface that
+ * configuration error rather than mine a block it could never complete.
  */
 [[nodiscard]] RCStage3ReservationReport RCStage3PlannedReservation(
     const Consensus::Params& params, int32_t height);

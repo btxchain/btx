@@ -130,17 +130,13 @@ RCStage3ReservationReport RCStage3PlannedReservation(
         return out;
     }
 
-    // Both Episode and Composed are planned against the measured Episode
-    // envelope. For Composed that is an UNDER-estimate — it adds the coupled
-    // relations on top — but no Composed envelope has been assembled, so there
-    // is nothing measured to quote. Since the Episode figure alone already
-    // exceeds every ceiling, Usable() is false either way and the assembler
-    // stops for the right reason; this comment exists so that stops being true
-    // silently if the sizes ever come down.
-    out.envelope_bytes = kRCStage3MeasuredEpisodeEnvelopeBytes;
-    out.basis = *required == RCStage3StatementKind::Composed
-                    ? "measured-episode-envelope (LOWER BOUND for Composed)"
-                    : "measured-episode-envelope";
+    // Reserve the maximum proof the production codec can accept, independent
+    // of whether the required statement is Episode or Composed. The obsolete
+    // 35,363,636-byte flat-section experiment was larger than the codec and
+    // therefore could never describe an accepted attachment. By contrast,
+    // SerializeRCStage3Proof enforces this bound on every successful encoding.
+    out.envelope_bytes = kRCStage3MaxProofBytes;
+    out.basis = "codec-bounded-v3-maximum";
 
     // Identical arithmetic to PackRCStage3ProofWords: 2 envelope words plus
     // ceil(bytes/4).

@@ -1027,18 +1027,16 @@ std::shared_ptr<CBlockTemplate> BlockAssembler::CreateNewBlock()
     // assembler must subtract it BEFORE selecting transactions or the miner
     // packs a block that its own attachment step pushes over the limit.
     //
-    // The reservation is a MEASURED bound (RCStage3PlannedReservation), derived
-    // from the 35,363,636-byte envelope the section-assembly lane produced from
-    // six real role-section proofs, using the same word-packing and CompactSize
-    // arithmetic the attachment itself uses — so the reservation and the
-    // eventual attachment cannot disagree. It replaces an earlier placeholder
-    // that simply reserved the 16 MiB parse ceiling.
+    // RCStage3PlannedReservation reserves the maximum artifact the codec can
+    // accept, including the exact two-word envelope, word padding, and
+    // CompactSize framing. SerializeRCStage3Proof enforces the byte ceiling, so
+    // this is a true upper bound for every accepted attachment. The obsolete
+    // 35,363,636-byte flat-section experiment cannot pass the codec and is not a
+    // valid reservation basis for the normalized production proof.
     //
-    // If that bound does not fit (which is the case TODAY — the measured
-    // envelope is 2.1x the codec cap and larger than a whole block), the miner
-    // must refuse to build the template rather than mine a block it could never
-    // legally complete. Failing here is the earliest and cheapest place to
-    // surface the size wall.
+    // The 16 MiB codec maximum fits under the shipped 24 MB block caps. If a
+    // network config cannot carry it, the miner must refuse to build the
+    // template rather than mine a block it could never legally complete.
     if constexpr (matmul::v4::rc::kRCStage3SuccinctAuthorityReady) {
         const auto reservation = matmul::v4::rc::RCStage3PlannedReservation(
             chainparams.GetConsensus(), nHeight);

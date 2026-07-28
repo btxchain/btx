@@ -691,6 +691,18 @@ BOOST_AUTO_TEST_CASE(attachment_size_is_measured_exactly_not_estimated)
     BOOST_CHECK_EQUAL(report.consensus_serialized_cap,
                       params.nMaxBlockSerializedSize);
     BOOST_CHECK(report.Fits());
+
+    // The pre-prove assembler reservation is a true upper bound for every
+    // accepted attachment: serialization enforces the byte cap, and the
+    // reservation includes the exact maximum word envelope and CompactSize
+    // framing.
+    const auto reservation = rc::RCStage3PlannedReservation(params, HEIGHT);
+    BOOST_REQUIRE(reservation.Usable());
+    BOOST_CHECK(report.payload_bytes <= reservation.envelope_bytes);
+    BOOST_CHECK(report.payload_words <= reservation.payload_words);
+    BOOST_CHECK(report.block_serialized_delta <=
+                reservation.block_serialized_delta);
+
     // WITNESS_SCALE_FACTOR == 1 on BTX: weight and serialized size coincide, so
     // every proof byte competes 1:1 with transaction bytes.
     BOOST_CHECK_EQUAL(report.block_weight_total,
@@ -702,8 +714,8 @@ BOOST_AUTO_TEST_CASE(payload_over_the_block_budget_is_refused_with_numbers)
 {
     constexpr int32_t HEIGHT{102};
     // Shrink the block caps rather than grow the proof: this is about the BUDGET
-    // CHECK firing and reporting. A real over-budget proof (35,363,636 B
-    // measured) cannot be materialized in a unit test.
+    // CHECK firing and reporting. The obsolete 35,363,636-byte flat proof
+    // cannot pass the codec at all and is not a valid production reservation.
     auto params = RealChainLikeParams(false);
     params.nMaxBlockSerializedSize = 512;
     params.nMaxBlockWeight = 512;
