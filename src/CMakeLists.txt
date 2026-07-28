@@ -633,6 +633,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_episode_extract_product.cpp
   matmul/matmul_v4_rc_stage3_episode_gemm_product.cpp
   matmul/matmul_v4_rc_stage3_episode_semantic_source_alg.cpp
+  matmul/matmul_v4_rc_stage3_episode_external_producer_aggregate.cpp
+  matmul/matmul_v4_rc_stage3_streaming_episode_closure.cpp
   matmul/matmul_v4_rc_stage3_episode_gemm_openings_proof_owned.cpp
   matmul/matmul_v4_rc_stage3_gkr_wireless_receipt.cpp
   matmul/matmul_v4_rc_stage3_gkr_mle_adapter.cpp
@@ -646,6 +648,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_coupled_signed_range_binding.cpp
   matmul/matmul_v4_rc_stage3_consensus.cpp
   matmul/matmul_v4_rc_stage3_producer.cpp
+  matmul/matmul_v4_rc_stage3_production_vertical_canary.cpp
   matmul/matmul_v4_rc_stage3_air_quotient_codec.cpp
   matmul/matmul_v4_rc_stage3_composition.cpp
   matmul/matmul_v4_rc_stage3_coupled.cpp
@@ -656,6 +659,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_coupled_initial_state_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_winner_capture.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_composition.cpp
+  matmul/matmul_v4_rc_stage3_bounded_semantic_codec.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_binding.cpp
   matmul/matmul_v4_rc_stage3_coupled_chain_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_bank_product.cpp

@@ -127,6 +127,8 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_extract_product_tests.cpp
   matmul_v4_rc_stage3_episode_gemm_product_tests.cpp
   matmul_v4_rc_stage3_episode_semantic_source_alg_tests.cpp
+  matmul_v4_rc_stage3_episode_external_producer_aggregate_tests.cpp
+  matmul_v4_rc_stage3_streaming_episode_closure_tests.cpp
   matmul_v4_rc_stage3_episode_gemm_openings_proof_owned_tests.cpp
   matmul_v4_rc_stage3_gkr_wireless_receipt_tests.cpp
   matmul_v4_rc_stage3_gkr_mle_adapter_tests.cpp
@@ -137,6 +139,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_consensus_tests.cpp
   matmul_v4_rc_stage3_producer_tests.cpp
   matmul_v4_rc_stage3_producer_e2e_tests.cpp
+  matmul_v4_rc_stage3_production_vertical_canary_tests.cpp
   matmul_v4_rc_stage3_air_quotient_codec_tests.cpp
   matmul_v4_rc_stage3_composition_tests.cpp
   matmul_v4_rc_stage3_coupled_tests.cpp
@@ -146,6 +149,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_coupled_gemm_product_tests.cpp
   matmul_v4_rc_stage3_coupled_initial_state_product_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_composition_tests.cpp
+  matmul_v4_rc_stage3_bounded_semantic_codec_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_binding_tests.cpp
   matmul_v4_rc_stage3_coupled_chain_product_tests.cpp
   matmul_v4_rc_stage3_coupled_winner_capture_tests.cpp
