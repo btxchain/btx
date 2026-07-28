@@ -2621,6 +2621,788 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
     return out;
 }
 
+namespace {
+
+uint32_t Log2ExactPublic(uint32_t value)
+{
+    if (value == 0 ||
+        (value & (value - 1)) != 0) {
+        return UINT32_MAX;
+    }
+    return std::countr_zero(value);
+}
+
+Fri3AlgRowOpening PublicDummyRow(
+    uint32_t values, uint32_t depth)
+{
+    Fri3AlgRowOpening out;
+    out.values.resize(values, Fp3::Zero());
+    out.siblings.resize(depth);
+    return out;
+}
+
+abi::DecodedV1 StructuralDecoded(
+    const tape::PublicShapeV1& shape,
+    const tape::ScheduleV1& schedule)
+{
+    abi::DecodedV1 out;
+    out.envelope.trace_columns =
+        shape.trace_columns;
+    out.envelope.quotient_len =
+        shape.quotient_len;
+    auto& split = out.envelope.split;
+    split.version =
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2;
+    split.trace_rows = shape.trace_rows;
+    split.base_column_indices =
+        shape.base_column_indices;
+    auto& batch = split.batch;
+    batch.version =
+        kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13;
+    batch.blowup = kRCFriBlowup;
+    batch.n_coeffs = shape.n_coeffs;
+    const uint32_t n_lde =
+        shape.n_coeffs * kRCFriBlowup;
+    const uint32_t main =
+        static_cast<uint32_t>(
+            shape.base_column_indices.size());
+    const uint32_t auxiliary =
+        shape.trace_columns - main;
+    const uint32_t row_depth =
+        Log2ExactPublic(n_lde);
+    const uint32_t folds =
+        Log2ExactPublic(shape.n_coeffs);
+    if (row_depth == UINT32_MAX ||
+        folds == UINT32_MAX) {
+        return {};
+    }
+    batch.groups.resize(3);
+    batch.groups[0].role =
+        Fri3AlgMultiRowGroupRole::MainTrace;
+    batch.groups[0].first_column = 0;
+    batch.groups[0].column_count = main;
+    batch.groups[0].row_commit.n_leaves =
+        n_lde;
+    batch.groups[1].role =
+        Fri3AlgMultiRowGroupRole::AuxiliaryTrace;
+    batch.groups[1].first_column = main;
+    batch.groups[1].column_count =
+        auxiliary;
+    batch.groups[1].row_commit.n_leaves =
+        n_lde;
+    batch.groups[2].role =
+        Fri3AlgMultiRowGroupRole::Quotient;
+    batch.groups[2].first_column =
+        shape.trace_columns;
+    batch.groups[2].column_count = 1;
+    batch.groups[2].row_commit.n_leaves =
+        n_lde;
+    batch.column_len.assign(
+        shape.trace_columns,
+        shape.trace_rows);
+    batch.column_len.push_back(
+        shape.quotient_len);
+    batch.evals_z1.resize(
+        shape.trace_columns + 1);
+    batch.evals_z2.resize(
+        shape.trace_columns + 1);
+    batch.fold_layers.resize(folds + 1);
+    batch.fold_challenges.resize(folds);
+    for (uint32_t fold = 0;
+         fold <= folds; ++fold) {
+        batch.fold_layers[fold].n_leaves =
+            n_lde >> fold;
+    }
+    batch.queries.resize(
+        abi::kQueryCountV11);
+    split.next_trace_group_rows.resize(
+        abi::kQueryCountV11);
+    for (uint32_t query = 0;
+         query < abi::kQueryCountV11;
+         ++query) {
+        auto& item = batch.queries[query];
+        item.group_rows = {
+            PublicDummyRow(main, row_depth),
+            PublicDummyRow(auxiliary, row_depth),
+            PublicDummyRow(1, row_depth),
+        };
+        item.steps.resize(folds);
+        uint32_t index = 0;
+        for (uint32_t fold = 0;
+             fold < folds; ++fold) {
+            const uint32_t half =
+                (n_lde >> fold) / 2;
+            auto& step = item.steps[fold];
+            step.even_index = index % half;
+            step.odd_index =
+                step.even_index + half;
+            step.even_siblings.resize(
+                row_depth - fold);
+            step.odd_siblings.resize(
+                row_depth - fold);
+            index %= half;
+        }
+        split.next_trace_group_rows[query] = {
+            PublicDummyRow(main, row_depth),
+            PublicDummyRow(auxiliary, row_depth),
+        };
+    }
+    out.sources = schedule.semantic_sources;
+    out.canonical = true;
+    out.complete = true;
+    out.addresses_unique = true;
+    out.semantic_keys_unique = true;
+    return out;
+}
+
+bool AppendStructuralTaskSchedule(
+    const abi::DecodedV1& decoded,
+    const unified::MerkleFoldPublicPlanV1&
+        plan,
+    std::vector<mf::HashTaskV1>& tasks,
+    std::string* why)
+{
+    tasks.clear();
+    const auto add =
+        [&tasks](
+            mf::HashTaskKindV1 kind,
+            uint32_t query,
+            uint32_t group,
+            uint32_t fold,
+            uint32_t level,
+            std::vector<uint32_t> sources = {}) {
+            mf::HashTaskV1 task;
+            task.kind = kind;
+            task.query = query;
+            task.group = group;
+            task.fold = fold;
+            task.level = level;
+            task.source_addresses =
+                std::move(sources);
+            tasks.push_back(
+                std::move(task));
+        };
+    const auto field =
+        [&decoded](
+            abi::FieldKindV1 kind,
+            uint32_t a = 0,
+            uint32_t b = 0,
+            uint32_t c = 0,
+            uint32_t coordinates = 3) {
+            return FieldAddresses(
+                decoded,
+                Key(kind, a, b, c),
+                coordinates);
+        };
+    const auto u32 =
+        [&decoded](
+            abi::FieldKindV1 kind,
+            uint32_t a = 0,
+            uint32_t b = 0) {
+            return Address(
+                decoded,
+                Key(kind, a, b));
+        };
+    const uint32_t folds =
+        plan.shape.fold_count;
+    const uint32_t depth =
+        plan.shape.row_depth;
+    const uint32_t blowup =
+        plan.shape.blowup;
+    const auto final_value =
+        field(abi::FieldKindV1::FinalValue);
+    if (!final_value.has_value()) {
+        return Fail(
+            why, "public_final_value_schedule");
+    }
+    for (uint32_t index = 0;
+         index < blowup; ++index) {
+        add(
+            mf::HashTaskKindV1::FoldLeaf,
+            plan.range.first_query, 7,
+            folds, 0, *final_value);
+    }
+    uint32_t width = blowup;
+    for (uint32_t level = 0;
+         width > 1;
+         ++level, width >>= 1) {
+        for (uint32_t node = 0;
+             node < width / 2;
+             ++node) {
+            std::vector<uint32_t> sources;
+            if (width == 2) {
+                const auto root =
+                    field(
+                        abi::FieldKindV1::
+                            FoldRoot,
+                        folds, 0, 0, 4);
+                if (!root.has_value()) {
+                    return Fail(
+                        why,
+                        "public_terminal_root_schedule");
+                }
+                sources = *root;
+            }
+            add(
+                mf::HashTaskKindV1::
+                    MerkleNode,
+                plan.range.first_query,
+                7, folds, level,
+                std::move(sources));
+        }
+    }
+
+    const auto append_row_leaf =
+        [&](uint32_t query,
+            uint32_t group,
+            uint32_t values) {
+            const uint64_t words =
+                uint64_t{3} * values + 2;
+            const uint32_t blocks =
+                static_cast<uint32_t>(
+                    (words +
+                     alg_hash::kAlgHashRate -
+                     1) /
+                    alg_hash::kAlgHashRate);
+            for (uint32_t block = 0;
+                 block < blocks; ++block) {
+                add(
+                    mf::HashTaskKindV1::
+                        RowLeaf,
+                    query, group, 0, block);
+            }
+        };
+    const auto append_path =
+        [&](uint32_t query,
+            uint32_t group,
+            uint32_t fold,
+            uint32_t path_depth) {
+            for (uint32_t level = 0;
+                 level < path_depth;
+                 ++level) {
+                std::optional<
+                    std::vector<uint32_t>>
+                    sibling;
+                if (group <= 2) {
+                    sibling = field(
+                        abi::FieldKindV1::
+                            QueryRowSibling,
+                        query, group, level, 4);
+                } else if (group <= 4) {
+                    sibling = field(
+                        abi::FieldKindV1::
+                            NextRowSibling,
+                        query, group - 3,
+                        level, 4);
+                } else {
+                    sibling = field(
+                        group == 5
+                        ? abi::FieldKindV1::
+                              QueryStepEvenSibling
+                        : abi::FieldKindV1::
+                              QueryStepOddSibling,
+                        query, fold, level, 4);
+                }
+                if (!sibling.has_value()) {
+                    return false;
+                }
+                std::vector<uint32_t>
+                    sources = *sibling;
+                if (level + 1 ==
+                    path_depth) {
+                    const auto root =
+                        group <= 4
+                        ? field(
+                              abi::FieldKindV1::
+                                  GroupRoot,
+                              group <= 2
+                                  ? group
+                                  : group - 3,
+                              0, 0, 4)
+                        : field(
+                              abi::FieldKindV1::
+                                  FoldRoot,
+                              fold, 0, 0, 4);
+                    if (!root.has_value()) {
+                        return false;
+                    }
+                    sources.insert(
+                        sources.end(),
+                        root->begin(),
+                        root->end());
+                }
+                add(
+                    mf::HashTaskKindV1::
+                        MerkleNode,
+                    query, group, fold,
+                    level,
+                    std::move(sources));
+            }
+            return true;
+        };
+    for (uint32_t query =
+             plan.range.first_query;
+         query <
+             plan.range.first_query +
+                 plan.range.query_count;
+         ++query) {
+        for (uint32_t group = 0;
+             group < 3; ++group) {
+            append_row_leaf(
+                query, group,
+                plan.shape
+                    .group_columns[group]);
+            if (!append_path(
+                    query, group, 0,
+                    depth)) {
+                return Fail(
+                    why,
+                    "public_current_path_schedule");
+            }
+        }
+        for (uint32_t group = 0;
+             group < 2; ++group) {
+            append_row_leaf(
+                query, group + 3,
+                plan.shape
+                    .group_columns[group]);
+            if (!append_path(
+                    query, group + 3, 0,
+                    depth)) {
+                return Fail(
+                    why,
+                    "public_next_path_schedule");
+            }
+        }
+        for (uint32_t fold = 0;
+             fold < folds; ++fold) {
+            const auto even =
+                field(
+                    abi::FieldKindV1::
+                        QueryStepEven,
+                    query, fold);
+            const auto odd =
+                field(
+                    abi::FieldKindV1::
+                        QueryStepOdd,
+                    query, fold);
+            const auto even_index =
+                u32(
+                    abi::FieldKindV1::
+                        QueryStepEvenIndex,
+                    query, fold);
+            const auto odd_index =
+                u32(
+                    abi::FieldKindV1::
+                        QueryStepOddIndex,
+                    query, fold);
+            if (!even.has_value() ||
+                !odd.has_value() ||
+                !even_index.has_value() ||
+                !odd_index.has_value()) {
+                return Fail(
+                    why,
+                    "public_fold_leaf_schedule");
+            }
+            auto even_sources = *even;
+            even_sources.push_back(
+                *even_index);
+            add(
+                mf::HashTaskKindV1::
+                    FoldLeaf,
+                query, 0, fold, 0,
+                std::move(even_sources));
+            auto odd_sources = *odd;
+            odd_sources.push_back(
+                *odd_index);
+            add(
+                mf::HashTaskKindV1::
+                    FoldLeaf,
+                query, 1, fold, 0,
+                std::move(odd_sources));
+            const uint32_t path_depth =
+                depth - fold;
+            if (!append_path(
+                    query, 5, fold,
+                    path_depth) ||
+                !append_path(
+                    query, 6, fold,
+                    path_depth)) {
+                return Fail(
+                    why,
+                    "public_fold_path_schedule");
+            }
+        }
+    }
+    if (tasks.size() !=
+            plan.hash_real_rows) {
+        return Fail(
+            why,
+            "public_hash_row_count");
+    }
+    return true;
+}
+
+mf::ShardProductV1 StructuralShard(
+    const abi::DecodedV1& decoded,
+    const unified::MerkleFoldPublicPlanV1&
+        plan,
+    std::string* why)
+{
+    mf::ShardProductV1 out;
+    out.first_query =
+        plan.range.first_query;
+    out.query_count =
+        plan.range.query_count;
+    out.hash_real_rows =
+        plan.hash_real_rows;
+    out.hash_trace_rows =
+        plan.hash_trace_rows;
+    out.fold_real_rows =
+        plan.fold_real_rows;
+    out.fold_trace_rows =
+        plan.fold_trace_rows;
+    out.hash_layout =
+        plan.hash_layout;
+    out.fold_layout =
+        plan.fold_layout;
+    out.hash_cs = plan.hash_cs;
+    out.fold_cs = plan.fold_cs;
+    out.hash_columns.assign(
+        out.hash_cs.n_columns,
+        std::vector<Fp3>(
+            out.hash_cs.n_rows,
+            Fp3::Zero()));
+    out.fold_columns.assign(
+        out.fold_cs.n_columns,
+        std::vector<Fp3>(
+            out.fold_cs.n_rows,
+            Fp3::Zero()));
+    if (!AppendStructuralTaskSchedule(
+            decoded, plan,
+            out.hash_tasks, why)) {
+        return {};
+    }
+    for (uint32_t row = 0;
+         row < out.fold_real_rows;
+         ++row) {
+        const uint32_t fold =
+            row % plan.shape.fold_count;
+        out.fold_columns[
+            out.fold_layout.half][row] =
+            U(
+                (plan.shape.n_lde >>
+                 fold) /
+                2);
+        const bool terminal =
+            fold + 1 ==
+                plan.shape.fold_count;
+        out.fold_columns[
+            out.fold_layout.chain_next][row] =
+            terminal
+            ? Fp3::Zero()
+            : Fp3::One();
+        out.fold_columns[
+            out.fold_layout.terminal][row] =
+            terminal
+            ? Fp3::One()
+            : Fp3::Zero();
+    }
+    for (uint32_t column :
+         {out.fold_layout.chain_next,
+          out.fold_layout.terminal,
+          out.fold_layout.half}) {
+        out.fold_cs.preprocessed.push_back(
+            {column,
+             out.fold_columns[column]});
+    }
+    out.fold_cs.preprocessed_pin_ood = true;
+    out.canonical_abi = true;
+    out.valid = true;
+    return out;
+}
+
+bool SameFp3Vector(
+    const std::vector<Fp3>& left,
+    const std::vector<Fp3>& right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (uint32_t i = 0;
+         i < left.size(); ++i) {
+        if (!gf::Eq(left[i], right[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameConstraintSystemStructure(
+    const aq::AirConstraintSystem<Fp3>& left,
+    const aq::AirConstraintSystem<Fp3>& right)
+{
+    if (left.n_rows != right.n_rows ||
+        left.n_columns != right.n_columns ||
+        left.constraints.size() !=
+            right.constraints.size() ||
+        left.preprocessed.size() !=
+            right.preprocessed.size() ||
+        left.preprocessed_roots !=
+            right.preprocessed_roots ||
+        left.preprocessed_pin_ood !=
+            right.preprocessed_pin_ood ||
+        left.preprocessed_row_group_roots !=
+            right.preprocessed_row_group_roots) {
+        return false;
+    }
+    for (uint32_t i = 0;
+         i < left.constraints.size(); ++i) {
+        if (left.constraints[i].name !=
+                right.constraints[i].name ||
+            left.constraints[i].kind !=
+                right.constraints[i].kind ||
+            left.constraints[i].alg_degree !=
+                right.constraints[i].alg_degree) {
+            return false;
+        }
+    }
+    for (uint32_t i = 0;
+         i < left.preprocessed.size(); ++i) {
+        if (left.preprocessed[i].first !=
+                right.preprocessed[i].first ||
+            !SameFp3Vector(
+                left.preprocessed[i].second,
+                right.preprocessed[i].second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool BuildPublicConstraintSystemsV1(
+    const tape::PublicShapeV1& shape,
+    const tape::PublicBindingV1& binding,
+    const rv::QueryRangeV1& range,
+    PublicConstraintSystemsV1& out,
+    std::string* why)
+{
+    out = {};
+    const auto schedule =
+        tape::BuildScheduleV1(
+            shape, binding);
+    if (!schedule.valid) {
+        return Fail(
+            why,
+            "public_tape_schedule");
+    }
+    const auto decoded =
+        StructuralDecoded(
+            shape, schedule);
+    out.canonical_shape =
+        unified::
+            BuildMerkleFoldPublicShapeV1(
+                decoded);
+    out.canonical_plan =
+        unified::
+            BuildMerkleFoldPublicPlanV1(
+                out.canonical_shape,
+                range);
+    if (!out.canonical_shape.valid ||
+        !out.canonical_plan.valid) {
+        return Fail(
+            why,
+            "public_canonical_plan");
+    }
+    std::string local_why;
+    auto structural =
+        StructuralShard(
+            decoded,
+            out.canonical_plan,
+            &local_why);
+    if (!structural.valid) {
+        return Fail(
+            why,
+            "public_task_schedule:" +
+                local_why);
+    }
+    auto hash =
+        BuildOrdinaryHashProductV1(
+            decoded, structural);
+    auto fold =
+        BuildOrdinaryFoldProductV1(
+            decoded, structural);
+    out.hash_plan = hash.plan;
+    out.fold_plan = fold.plan;
+    out.hash_cs = std::move(hash.cs);
+    out.fold_cs = std::move(fold.cs);
+    out.hash_source_carriers =
+        std::move(hash.source_carriers);
+    out.fold_source_carriers =
+        std::move(fold.source_carriers);
+    out.hash_acceptance =
+        hash.acceptance;
+    out.fold_acceptance =
+        fold.acceptance;
+    out.tape_shape = shape;
+    out.tape_binding = binding;
+    out.range = range;
+    out.structural_hash_tasks =
+        static_cast<uint32_t>(
+            structural.hash_tasks.size());
+    out.structural_fold_rows =
+        structural.fold_real_rows;
+    out.source_schedule_regenerated =
+        schedule
+            .semantic_schedule_regenerated &&
+        schedule.stable_addresses;
+    out.task_schedule_regenerated =
+        out.hash_plan.valid &&
+        out.fold_plan.valid &&
+        out.structural_hash_tasks ==
+            out.canonical_plan
+                .hash_real_rows &&
+        out.structural_fold_rows ==
+            out.canonical_plan
+                .fold_real_rows &&
+        !out.hash_source_carriers.empty() &&
+        !out.fold_source_carriers.empty() &&
+        out.hash_acceptance.column <
+            out.hash_cs.n_columns &&
+        out.hash_acceptance.row <
+            out.hash_cs.n_rows &&
+        out.fold_acceptance.column <
+            out.fold_cs.n_columns &&
+        out.fold_acceptance.row <
+            out.fold_cs.n_rows;
+    out.transformed_systems_rebuilt =
+        out.hash_cs.n_rows ==
+            out.canonical_plan
+                .hash_trace_rows &&
+        out.hash_cs.n_columns >
+            out.canonical_plan
+                .hash_cs.n_columns &&
+        out.fold_cs.n_rows ==
+            out.canonical_plan
+                .fold_trace_rows &&
+        out.fold_cs.n_columns >
+            out.canonical_plan
+                .fold_cs.n_columns &&
+        !out.hash_cs.constraints.empty() &&
+        !out.fold_cs.constraints.empty();
+    out.proof_values_excluded =
+        out.canonical_shape
+            .proof_values_excluded &&
+        out.canonical_plan
+            .proof_independent;
+    out.valid =
+        out.source_schedule_regenerated &&
+        out.task_schedule_regenerated &&
+        out.transformed_systems_rebuilt &&
+        out.proof_values_excluded;
+    out.note = out.valid
+        ? "stage3:v13_merkle_fold_parent:"
+          "public_transformed_cs_rebuilt"
+        : "stage3:v13_merkle_fold_parent:"
+          "public_transformed_cs_invalid";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "public_transformed_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool BuildOrdinaryProductsFromPublicSystemsV1(
+    const PublicConstraintSystemsV1&
+        public_systems,
+    const abi::DecodedV1& decoded,
+    const mf::ShardProductV1& shard,
+    OrdinaryHashProductV1& hash,
+    OrdinaryFoldProductV1& fold,
+    std::string* why)
+{
+    hash = {};
+    fold = {};
+    if (!public_systems.valid ||
+        shard.first_query !=
+            public_systems.range.first_query ||
+        shard.query_count !=
+            public_systems.range.query_count) {
+        return Fail(
+            why,
+            "public_materialization_input");
+    }
+    const auto decoded_shape =
+        unified::
+            BuildMerkleFoldPublicShapeV1(
+                decoded);
+    if (!decoded_shape.valid ||
+        decoded_shape !=
+            public_systems
+                .canonical_shape) {
+        return Fail(
+            why,
+            "public_materialization_shape");
+    }
+    const auto canonical =
+        unified::
+            MaterializeMerkleFoldCanonicalPhasesV1(
+                public_systems
+                    .canonical_plan,
+                decoded, shard);
+    if (!canonical.valid) {
+        return Fail(
+            why,
+            "public_materialization_canonical");
+    }
+    mf::ShardProductV1 adapted =
+        shard;
+    adapted.hash_cs =
+        canonical.hash_cs;
+    adapted.fold_cs =
+        canonical.fold_cs;
+    adapted.hash_columns =
+        canonical.hash_columns;
+    adapted.fold_columns =
+        canonical.fold_columns;
+    adapted.hash_layout =
+        public_systems
+            .canonical_plan.hash_layout;
+    adapted.fold_layout =
+        public_systems
+            .canonical_plan.fold_layout;
+    hash =
+        BuildOrdinaryHashProductV1(
+            decoded, adapted);
+    fold =
+        BuildOrdinaryFoldProductV1(
+            decoded, adapted);
+    if (!hash.valid ||
+        !fold.valid ||
+        !SameConstraintSystemStructure(
+            hash.cs,
+            public_systems.hash_cs) ||
+        !SameConstraintSystemStructure(
+            fold.cs,
+            public_systems.fold_cs)) {
+        hash = {};
+        fold = {};
+        return Fail(
+            why,
+            "public_materialization_structure");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:v13_merkle_fold_parent:"
+            "public_cs_honest_witness_materialized";
+    }
+    return true;
+}
+
 bool AppendProofTapeAliasesV1(
     aq::AirConstraintSystem<Fp3>& parent_cs,
     std::vector<std::vector<Fp3>>& parent_columns,

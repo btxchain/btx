@@ -7,6 +7,8 @@
 
 #include <matmul/matmul_v4_rc_stage3_air_parent_composer.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_merkle_fold.h>
+#include <matmul/matmul_v4_rc_stage3_multirow_v11_recursive_verifier.h>
+#include <matmul/matmul_v4_rc_stage3_multirow_v11_unified_verifier_air.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v13_proof_tape_air.h>
 
 #include <array>
@@ -21,8 +23,11 @@ namespace aq = air_quotient;
 namespace composer = stage3_air_parent_composer;
 namespace gf = gkr_field;
 namespace mf = stage3_multirow_v11_merkle_fold;
+namespace rv = stage3_multirow_v11_recursive_verifier;
 namespace tape = stage3_multirow_v13_proof_tape_air;
 namespace transcript = stage3_multirow_p2_transcript;
+namespace unified =
+    stage3_multirow_v11_unified_verifier_air;
 
 inline constexpr uint16_t kVersionV1 = 1;
 
@@ -189,6 +194,63 @@ struct OrdinaryFoldProductV1 {
 [[nodiscard]] OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
     const abi::DecodedV1& decoded,
     const mf::ShardProductV1& shard);
+
+/**
+ * Proof-value-independent reconstruction of the exact transformed
+ * Merkle/hash/fold constraint systems used by the complete V13 child.
+ *
+ * The canonical task order, source addresses, row counts and immutable fold
+ * schedule are regenerated from PublicShape, PublicBinding and QueryRange.
+ * No child root, opening, query index, fold challenge or proof-owned witness
+ * is accepted as a constructor input.
+ */
+struct PublicConstraintSystemsV1 {
+    tape::PublicShapeV1 tape_shape{};
+    tape::PublicBindingV1 tape_binding{};
+    rv::QueryRangeV1 range{};
+    unified::MerkleFoldPublicShapeV1
+        canonical_shape{};
+    unified::MerkleFoldPublicPlanV1
+        canonical_plan{};
+    TypedHashPlanV1 hash_plan{};
+    TypedFoldPlanV1 fold_plan{};
+    aq::AirConstraintSystem<gf::Fp3> hash_cs;
+    aq::AirConstraintSystem<gf::Fp3> fold_cs;
+    std::vector<SourceCarrierV1>
+        hash_source_carriers;
+    std::vector<SourceCarrierV1>
+        fold_source_carriers;
+    CellRefV1 hash_acceptance{};
+    CellRefV1 fold_acceptance{};
+    uint32_t structural_hash_tasks{0};
+    uint32_t structural_fold_rows{0};
+    bool source_schedule_regenerated{false};
+    bool task_schedule_regenerated{false};
+    bool transformed_systems_rebuilt{false};
+    bool proof_values_excluded{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildPublicConstraintSystemsV1(
+    const tape::PublicShapeV1& shape,
+    const tape::PublicBindingV1& binding,
+    const rv::QueryRangeV1& range,
+    PublicConstraintSystemsV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Materialize honest proof-owned columns under the independently rebuilt
+ * public systems.  The native shard is used only as witness data and task
+ * metadata; its callbacks and preprocessed vectors are never adopted.
+ */
+[[nodiscard]] bool BuildOrdinaryProductsFromPublicSystemsV1(
+    const PublicConstraintSystemsV1& public_systems,
+    const abi::DecodedV1& decoded,
+    const mf::ShardProductV1& shard,
+    OrdinaryHashProductV1& hash,
+    OrdinaryFoldProductV1& fold,
+    std::string* why = nullptr);
 
 struct ParentAliasAttachmentV1 {
     uint32_t source_aliases{0};

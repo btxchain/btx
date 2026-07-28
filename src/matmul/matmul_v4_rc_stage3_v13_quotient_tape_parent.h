@@ -39,6 +39,9 @@ struct QuotientLimbAliasV1 {
     uint8_t limb{0};
     CellRefV1 tape_value{};
     CellRefV1 quotient_limb{};
+
+    bool operator==(
+        const QuotientLimbAliasV1&) const = default;
 };
 
 /**
@@ -75,11 +78,49 @@ struct ProductV1 {
     bool selectors_only_preprocessed{false};
     bool cross_row_transport_constrained{false};
     bool global_r0_pending{true};
+    bool verifier_constraint_system_rebuilt{false};
     bool recursively_consumed{false};
     bool recursive_authority_ready{false};
     bool valid{false};
     std::string note;
 };
+
+/**
+ * Verifier-only reconstruction of the quotient/tape parent.  The complete
+ * callback graph and immutable selector schedule are derived from the public
+ * V13 tape shape/binding, frozen child ProgramTable and QueryRange.  Proof
+ * cells are not accepted and no witness columns are retained.
+ */
+struct PublicConstraintSystemV1 {
+    uint16_t version{kVersionV1};
+    tape::PublicShapeV1 tape_shape{};
+    tape::PublicBindingV1 tape_binding{};
+    rv::QueryRangeV1 range{};
+    tape::LayoutV1 tape_layout{};
+    tape::ScheduleV1 tape_schedule{};
+    unified::DeepVmPublicPlanV1 deep_plan{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    composer::ChildAttachmentV1 tape_attachment{};
+    composer::ChildAttachmentV1 deep_attachment{};
+    std::vector<QuotientLimbAliasV1> aliases;
+    uint32_t quotient_rows{0};
+    uint32_t aliases_appended{0};
+    bool tape_cs_rebuilt{false};
+    bool deep_cs_rebuilt{false};
+    bool exact_alias_schedule_rebuilt{false};
+    bool proof_values_excluded{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildPublicConstraintSystemV1(
+    const tape::PublicShapeV1& tape_shape,
+    const tape::PublicBindingV1& tape_binding,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range,
+    PublicConstraintSystemV1& out,
+    std::string* why = nullptr);
 
 /**
  * Shared physical equality primitive.  Both endpoints must be ordinary

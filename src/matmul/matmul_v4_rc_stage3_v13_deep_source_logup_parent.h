@@ -161,6 +161,7 @@ struct ProductV1 {
     PlanV1 plan{};
     LayoutV1 layout{};
     ChallengesV1 challenges{};
+    tape::PublicBindingV1 tape_binding{};
     /** Metadata-only copy used to relocate the final LogUp relation into a
      * wider parent. Its heavy CS/witness vectors are cleared by builders. */
     qp::ProductV1 physical{};
@@ -204,15 +205,52 @@ struct ProductV1 {
 struct BaseProductV1 {
     PlanV1 plan{};
     LayoutV1 layout{};
+    tape::PublicBindingV1 tape_binding{};
     qp::ProductV1 physical{};
     aq::AirConstraintSystem<gf::Fp3> cs;
     std::vector<std::vector<gf::Fp3>> columns;
     uint64_t violations{UINT64_MAX};
     bool challenge_columns_absent{false};
     bool row_group_root_pending{false};
+    bool verifier_constraint_system_rebuilt{false};
     bool valid{false};
     std::string note;
 };
+
+/**
+ * Proof-value-independent deterministic (pre-R0) relation constructor.
+ *
+ * It rebuilds the V13 tape, canonical DeepVM bytecode, quotient aliases,
+ * exact source/consumer occurrence schedule and every immutable LogUp
+ * selector from public shape/binding, frozen ProgramTable and QueryRange.
+ * Ordinary witness values and a child-local commitment are not inputs.
+ */
+struct PublicBaseConstraintSystemV1 {
+    uint16_t version{kVersionV1};
+    tape::PublicShapeV1 tape_shape{};
+    tape::PublicBindingV1 tape_binding{};
+    rv::QueryRangeV1 range{};
+    qp::PublicConstraintSystemV1 physical{};
+    PlanV1 plan{};
+    LayoutV1 layout{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    uint32_t base_constraint_count{0};
+    bool quotient_parent_rebuilt{false};
+    bool occurrence_schedule_rebuilt{false};
+    bool deterministic_constraints_rebuilt{false};
+    bool proof_values_excluded{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildPublicBaseConstraintSystemV1(
+    const tape::PublicShapeV1& tape_shape,
+    const tape::PublicBindingV1& tape_binding,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range,
+    PublicBaseConstraintSystemV1& out,
+    std::string* why = nullptr);
 
 /**
  * Strip a validated standalone product back to its exact deterministic
@@ -232,11 +270,37 @@ struct ParentFinalizationV1 {
     uint32_t dependent_columns{0};
     uint32_t constraints_appended{0};
     bool exact_parent_r0_consumed{false};
+    /**
+     * Every deterministic column used by this relation is included in R0.
+     * Challenge-dependent columns belonging to an earlier sibling may
+     * already follow that prefix when several relations share one R0.
+     */
+    bool all_deterministic_parent_columns_prechallenge{false};
+    /** True only when this is the first dependent relation after R0. */
     bool all_prior_parent_columns_prechallenge{false};
     bool dual_fp3_terminal_cancelled{false};
     bool valid{false};
     std::string note;
 };
+
+/**
+ * Rebuild only the challenge-dependent verifier relation after the proof's
+ * R0 commitment is known.
+ *
+ * The callback graph is derived from the proof-independent public base
+ * system and challenges sampled from (public_seed, r0_row_root). No proof
+ * witness column is accepted or materialized. This is the verifier-side
+ * counterpart of AppendFinalRelationToParentV1.
+ */
+[[nodiscard]] bool AppendFinalConstraintSystemToParentV1(
+    const PublicBaseConstraintSystemV1& base,
+    const composer::ChildAttachmentV1& base_attachment,
+    const uint256& public_seed,
+    const uint256& r0_row_root,
+    const std::vector<uint32_t>& r0_base_column_indices,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    ParentFinalizationV1& out,
+    std::string* why = nullptr);
 
 /**
  * Append only the challenge-dependent LogUp columns/constraints after a base

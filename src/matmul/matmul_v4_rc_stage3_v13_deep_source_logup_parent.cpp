@@ -1352,7 +1352,415 @@ bool Applies(
     return false;
 }
 
+std::vector<std::vector<Fp3>>
+StructuralColumns(const AirCS& cs)
+{
+    std::vector<std::vector<Fp3>> out(
+        cs.n_columns,
+        std::vector<Fp3>(
+            cs.n_rows, Fp3::Zero()));
+    for (const auto& [column, values] :
+         cs.preprocessed) {
+        if (column < out.size() &&
+            values.size() == cs.n_rows) {
+            out[column] = values;
+        }
+    }
+    return out;
+}
+
+bool SameFp3Vector(
+    const std::vector<Fp3>& left,
+    const std::vector<Fp3>& right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (uint32_t i = 0;
+         i < left.size(); ++i) {
+        if (!gf::Eq(left[i], right[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameConstraintSystemStructure(
+    const AirCS& left,
+    const AirCS& right)
+{
+    if (left.n_rows != right.n_rows ||
+        left.n_columns != right.n_columns ||
+        left.constraints.size() !=
+            right.constraints.size() ||
+        left.preprocessed.size() !=
+            right.preprocessed.size() ||
+        left.preprocessed_roots !=
+            right.preprocessed_roots ||
+        left.preprocessed_pin_ood !=
+            right.preprocessed_pin_ood ||
+        left.preprocessed_row_group_roots !=
+            right.preprocessed_row_group_roots) {
+        return false;
+    }
+    for (uint32_t i = 0;
+         i < left.constraints.size(); ++i) {
+        if (left.constraints[i].name !=
+                right.constraints[i].name ||
+            left.constraints[i].kind !=
+                right.constraints[i].kind ||
+            left.constraints[i].alg_degree !=
+                right.constraints[i].alg_degree) {
+            return false;
+        }
+    }
+    for (uint32_t i = 0;
+         i < left.preprocessed.size(); ++i) {
+        if (left.preprocessed[i].first !=
+                right.preprocessed[i].first ||
+            !SameFp3Vector(
+                left.preprocessed[i].second,
+                right.preprocessed[i].second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
+
+bool BuildPublicBaseConstraintSystemV1(
+    const tape::PublicShapeV1& tape_shape,
+    const tape::PublicBindingV1& tape_binding,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range,
+    PublicBaseConstraintSystemV1& out,
+    std::string* why)
+{
+    out = {};
+    out.tape_shape = tape_shape;
+    out.tape_binding = tape_binding;
+    out.range = range;
+    std::string physical_why;
+    if (!qp::BuildPublicConstraintSystemV1(
+            tape_shape, tape_binding,
+            child_program,
+            expected_program_root,
+            range, out.physical,
+            &physical_why)) {
+        return Fail(
+            why,
+            "public_physical:" +
+                physical_why);
+    }
+
+    tape::ProductV1 structural_tape;
+    structural_tape.schedule =
+        out.physical.tape_schedule;
+    structural_tape.binding =
+        tape_binding;
+    structural_tape.valid = true;
+    structural_tape.source_cells.reserve(
+        structural_tape.schedule
+            .semantic_sources.size());
+    for (const auto& source :
+         structural_tape.schedule
+             .semantic_sources) {
+        const uint32_t record =
+            tape::kPublicPrefixRecordsV1 +
+            tape::kHeaderRecordsV1 +
+            source.address;
+        const uint32_t row =
+            record /
+            tape::kRecordsPerRowV1;
+        const uint32_t slot =
+            record %
+            tape::kRecordsPerRowV1;
+        structural_tape.source_cells
+            .push_back({
+                .key = source.key,
+                .ownership =
+                    source.ownership,
+                .address =
+                    source.address,
+                .row = row,
+                .slot = slot,
+                .address_column =
+                    out.physical
+                        .tape_layout
+                        .Address(slot),
+                .value_column =
+                    out.physical
+                        .tape_layout
+                        .Value(slot),
+            });
+    }
+
+    qp::ProductV1 physical;
+    physical.range = range;
+    physical.deep_plan =
+        out.physical.deep_plan;
+    physical.deep_phase.cs =
+        out.physical.deep_plan.cs;
+    physical.deep_phase.columns =
+        StructuralColumns(
+            out.physical.deep_plan.cs);
+    const auto& layout =
+        out.physical.deep_plan.layout;
+    const auto& base_indices =
+        tape_shape.base_column_indices;
+    std::vector<uint32_t> dependent;
+    for (uint32_t column = 0;
+         column < tape_shape.trace_columns;
+         ++column) {
+        if (std::find(
+                base_indices.begin(),
+                base_indices.end(),
+                column) ==
+            base_indices.end()) {
+            dependent.push_back(column);
+        }
+    }
+    if (child_program.current_width !=
+            tape_shape.trace_columns ||
+        base_indices.size() +
+                dependent.size() !=
+            tape_shape.trace_columns) {
+        return Fail(
+            why,
+            "public_source_shape");
+    }
+    const auto address_for_key =
+        [&](const abi::SourceKeyV1& key,
+            uint32_t row) {
+            const auto* source =
+                FindTapeSource(
+                    structural_tape, key);
+            if (source == nullptr ||
+                row >=
+                    physical.deep_phase
+                        .columns[
+                            layout
+                                .source_address]
+                        .size()) {
+                return false;
+            }
+            physical.deep_phase.columns[
+                layout.source_address][row] =
+                gf::FromU64_3(
+                    source->address);
+            return true;
+        };
+    uint32_t public_row = 0;
+    for (uint32_t query_offset = 0;
+         query_offset <
+            range.query_count;
+         ++query_offset) {
+        const uint32_t query =
+            range.first_query +
+            query_offset;
+        for (uint32_t item = 0;
+             item <
+                tape_shape.trace_columns +
+                    1;
+             ++item, ++public_row) {
+            abi::SourceKeyV1 key;
+            if (item <
+                    base_indices.size()) {
+                key = Key(
+                    abi::FieldKindV1::
+                        QueryRowValue,
+                    query, 0, item);
+            } else if (
+                item <
+                    tape_shape
+                        .trace_columns) {
+                key = Key(
+                    abi::FieldKindV1::
+                        QueryRowValue,
+                    query, 1,
+                    item -
+                        base_indices.size());
+            } else {
+                key = Key(
+                    abi::FieldKindV1::
+                        QueryRowValue,
+                    query, 2, 0);
+            }
+            if (!address_for_key(
+                    key, public_row)) {
+                return Fail(
+                    why,
+                    "public_deep_source_key");
+            }
+        }
+        // Deep-finalize consumes the first fold value but BuildPlan owns
+        // only z/weight occurrences on this row, so no source address is
+        // required for its equality inventory.
+        ++public_row;
+        for (const auto& program :
+             child_program.programs) {
+            for (const auto& instruction :
+                 program.instructions) {
+                if (instruction.opcode ==
+                        cb::Opcode::Current ||
+                    instruction.opcode ==
+                        cb::Opcode::Next) {
+                    const auto base_it =
+                        std::find(
+                            base_indices.begin(),
+                            base_indices.end(),
+                            instruction.lhs);
+                    uint32_t group = 0;
+                    uint32_t item = 0;
+                    if (base_it !=
+                            base_indices.end()) {
+                        item =
+                            static_cast<uint32_t>(
+                                base_it -
+                                base_indices.begin());
+                    } else {
+                        group = 1;
+                        const auto dep_it =
+                            std::find(
+                                dependent.begin(),
+                                dependent.end(),
+                                instruction.lhs);
+                        if (dep_it ==
+                                dependent.end()) {
+                            return Fail(
+                                why,
+                                "public_vm_column_map");
+                        }
+                        item =
+                            static_cast<uint32_t>(
+                                dep_it -
+                                dependent.begin());
+                    }
+                    if (!address_for_key(
+                            Key(
+                                instruction.opcode ==
+                                        cb::Opcode::
+                                            Current
+                                    ? abi::
+                                        FieldKindV1::
+                                            QueryRowValue
+                                    : abi::
+                                        FieldKindV1::
+                                            NextRowValue,
+                                query, group,
+                                item),
+                            public_row)) {
+                        return Fail(
+                            why,
+                            "public_vm_source_key");
+                    }
+                }
+                ++public_row;
+            }
+        }
+        if (!address_for_key(
+                Key(
+                    abi::FieldKindV1::
+                        QueryRowValue,
+                    query, 2, 0),
+                public_row)) {
+            return Fail(
+                why,
+                "public_quotient_source_key");
+        }
+        ++public_row;
+    }
+    if (public_row !=
+            out.physical.deep_plan
+                .real_rows) {
+        return Fail(
+            why,
+            "public_source_row_schedule");
+    }
+    physical.deep_phase.valid = true;
+    physical.cs = out.physical.cs;
+    physical.tape_attachment =
+        out.physical.tape_attachment;
+    physical.deep_attachment =
+        out.physical.deep_attachment;
+    physical.valid = true;
+    std::string plan_why;
+    if (!BuildPlan(
+            structural_tape,
+            physical, range,
+            out.plan, &plan_why)) {
+        out = {};
+        return Fail(
+            why,
+            "public_occurrence_plan:" +
+                plan_why);
+    }
+
+    out.layout =
+        CanonicalLayout(
+            physical.cs.n_columns);
+    out.cs = physical.cs;
+    auto columns =
+        StructuralColumns(out.cs);
+    columns.resize(
+        out.layout.dependent_base,
+        std::vector<Fp3>(
+            out.cs.n_rows,
+            Fp3::Zero()));
+    if (!MaterializeBase(
+            physical, out.plan,
+            TapeRefs(structural_tape),
+            out.layout, columns, why) ||
+        !AppendBaseConstraints(
+            physical, out.layout,
+            out.cs, why)) {
+        out = {};
+        return Fail(
+            why,
+            "public_base_constraints");
+    }
+    AddRelationPreprocessed(
+        out.layout,
+        out.cs, columns);
+    out.base_constraint_count =
+        static_cast<uint32_t>(
+            out.cs.constraints.size());
+    out.quotient_parent_rebuilt =
+        out.physical.valid &&
+        out.physical
+            .proof_values_excluded;
+    out.occurrence_schedule_rebuilt =
+        out.plan.valid &&
+        out.plan.proof_values_excluded &&
+        out.plan.exact_multiplicities;
+    out.deterministic_constraints_rebuilt =
+        out.cs.n_columns ==
+            out.layout.dependent_base &&
+        out.base_constraint_count != 0 &&
+        out.cs
+            .preprocessed_row_group_roots
+            .empty();
+    out.proof_values_excluded = true;
+    out.valid =
+        out.quotient_parent_rebuilt &&
+        out.occurrence_schedule_rebuilt &&
+        out.deterministic_constraints_rebuilt &&
+        out.proof_values_excluded;
+    out.note = out.valid
+        ? "stage3:v13_deep_source_logup_parent:"
+          "public_base_constraint_system_rebuilt"
+        : "stage3:v13_deep_source_logup_parent:"
+          "public_base_constraint_system_invalid";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "public_base_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
 
 bool BuildProductV1(
     const tape::ProductV1& tape_product,
@@ -1377,6 +1785,8 @@ bool BuildProductV1(
         out = {};
         return false;
     }
+    out.tape_binding =
+        tape_product.binding;
     out.physical = physical;
     out.physical.cs = {};
     out.physical.columns.clear();
@@ -1497,6 +1907,8 @@ bool ExtractBaseProductV1(
     }
     out.plan = product.plan;
     out.layout = product.layout;
+    out.tape_binding =
+        product.tape_binding;
     out.physical = product.physical;
     out.cs = product.cs;
     out.cs.n_columns =
@@ -1518,9 +1930,26 @@ bool ExtractBaseProductV1(
         out.cs
             .preprocessed_row_group_roots
             .empty();
+    PublicBaseConstraintSystemV1 verifier_cs;
+    std::string rebuild_why;
+    out.verifier_constraint_system_rebuilt =
+        BuildPublicBaseConstraintSystemV1(
+            product.plan.shape,
+            product.tape_binding,
+            product.physical
+                .deep_plan.child_program,
+            product.physical
+                .deep_plan.child_program_root,
+            product.plan.range,
+            verifier_cs, &rebuild_why) &&
+        SameConstraintSystemStructure(
+            out.cs, verifier_cs.cs) &&
+        out.plan.plan_root ==
+            verifier_cs.plan.plan_root;
     out.valid =
         out.challenge_columns_absent &&
-        out.row_group_root_pending;
+        out.row_group_root_pending &&
+        out.verifier_constraint_system_rebuilt;
     out.note = out.valid
         ? "stage3:v13_deep_source_logup_parent:"
           "deterministic_base_extracted;"
@@ -1529,6 +1958,238 @@ bool ExtractBaseProductV1(
           "deterministic_base_invalid";
     if (!out.valid) {
         return Fail(why, "extract_base_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendFinalConstraintSystemToParentV1(
+    const PublicBaseConstraintSystemV1& base,
+    const composer::ChildAttachmentV1&
+        base_attachment,
+    const uint256& public_seed,
+    const uint256& r0_row_root,
+    const std::vector<uint32_t>&
+        r0_base_column_indices,
+    AirCS& parent_cs,
+    ParentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!base.valid ||
+        !base.plan.valid ||
+        !base.physical.valid ||
+        !base_attachment.valid ||
+        base_attachment.row_lifted ||
+        base_attachment.semantic_child_columns !=
+            base.cs.n_columns ||
+        base.cs.n_columns >
+            parent_cs.n_columns ||
+        base_attachment.column_base >
+            parent_cs.n_columns -
+                base.cs.n_columns ||
+        parent_cs.n_rows !=
+            base.cs.n_rows ||
+        parent_cs.n_columns == 0 ||
+        parent_cs
+             .preprocessed_row_group_roots
+             .size() > 1 ||
+        public_seed.IsNull() ||
+        r0_row_root.IsNull() ||
+        r0_base_column_indices.empty()) {
+        return Fail(
+            why,
+            "public_parent_finalize_input");
+    }
+    std::vector<uint32_t> expected_base(
+        r0_base_column_indices.size());
+    std::iota(
+        expected_base.begin(),
+        expected_base.end(), 0U);
+    if (r0_base_column_indices !=
+            expected_base ||
+        expected_base.size() >
+            parent_cs.n_columns ||
+        base_attachment.column_base >
+            expected_base.size() ||
+        base.cs.n_columns >
+            expected_base.size() -
+                base_attachment.column_base) {
+        return Fail(
+            why,
+            "public_parent_r0_not_complete");
+    }
+    const bool row_group_already_installed =
+        !parent_cs
+             .preprocessed_row_group_roots
+             .empty();
+    if (row_group_already_installed) {
+        const auto& group =
+            parent_cs
+                .preprocessed_row_group_roots
+                .front();
+        if (group.version != 1 ||
+            group.role !=
+                aq::AirPreprocessedRowGroupRole::
+                    kR0 ||
+            group.ordered_columns !=
+                expected_base ||
+            group.root != r0_row_root) {
+            return Fail(
+                why,
+                "public_parent_r0_group_mismatch");
+        }
+    } else if (
+        expected_base.size() !=
+            parent_cs.n_columns) {
+        return Fail(
+            why,
+            "public_parent_r0_unaccounted_columns");
+    }
+
+    const uint32_t offset =
+        base_attachment.column_base;
+    const auto shifted =
+        [offset](uint32_t column) {
+            return offset + column;
+        };
+    LayoutV1 layout = base.layout;
+    layout.original_columns =
+        shifted(base.layout.original_columns);
+    layout.source_carry =
+        shifted(base.layout.source_carry);
+    layout.source_emit_value =
+        shifted(base.layout.source_emit_value);
+    layout.source_emit_active =
+        shifted(base.layout.source_emit_active);
+    layout.source_emit_address =
+        shifted(base.layout.source_emit_address);
+    layout.source_emit_multiplicity =
+        shifted(
+            base.layout
+                .source_emit_multiplicity);
+    layout.source_carry_weight_base =
+        shifted(
+            base.layout
+                .source_carry_weight_base);
+    layout.source_emit_weight_base =
+        shifted(
+            base.layout
+                .source_emit_weight_base);
+    layout.consumer_active_base =
+        shifted(
+            base.layout.consumer_active_base);
+    layout.consumer_address_base =
+        shifted(
+            base.layout.consumer_address_base);
+    layout.dependent_base =
+        parent_cs.n_columns;
+    uint32_t cursor =
+        layout.dependent_base;
+    layout.source_inverse_base = cursor;
+    cursor += kLookupLanesV1;
+    layout.consumer_inverse_base = cursor;
+    cursor +=
+        kLookupLanesV1 *
+        kConsumerSlotsV1;
+    layout.running_base = cursor;
+    cursor += kLookupLanesV1;
+    layout.end = cursor;
+
+    qp::ProductV1 physical;
+    physical.range = base.range;
+    physical.deep_plan =
+        base.physical.deep_plan;
+    physical.tape_attachment =
+        base.physical.tape_attachment;
+    physical.deep_attachment =
+        base.physical.deep_attachment;
+    physical.valid = true;
+    physical.tape_attachment.column_base =
+        shifted(
+            physical.tape_attachment
+                .column_base);
+    physical.deep_attachment.column_base =
+        shifted(
+            physical.deep_attachment
+                .column_base);
+    if (physical.tape_attachment
+            .column_base >=
+            layout.dependent_base ||
+        physical.deep_attachment
+            .column_base >=
+            layout.dependent_base) {
+        return Fail(
+            why,
+            "public_parent_child_relocation");
+    }
+
+    const uint32_t constraints_before =
+        static_cast<uint32_t>(
+            parent_cs.constraints.size());
+    if (!DeriveChallenges(
+            base.plan, public_seed,
+            r0_row_root,
+            out.challenges, why) ||
+        !AppendFinalConstraints(
+            physical, out.challenges,
+            layout, parent_cs, why)) {
+        return false;
+    }
+    if (!row_group_already_installed) {
+        parent_cs.preprocessed_row_group_roots
+            .push_back({
+            .version = 1,
+            .role =
+                aq::
+                    AirPreprocessedRowGroupRole::
+                        kR0,
+            .ordered_columns =
+                expected_base,
+            .root = r0_row_root,
+        });
+    }
+
+    out.parent_layout = layout;
+    out.r0_base_column_indices =
+        std::move(expected_base);
+    out.r0_row_root =
+        r0_row_root;
+    out.dependent_columns =
+        layout.end -
+        layout.dependent_base;
+    out.constraints_appended =
+        static_cast<uint32_t>(
+            parent_cs.constraints.size()) -
+        constraints_before;
+    out.exact_parent_r0_consumed = true;
+    out.all_deterministic_parent_columns_prechallenge =
+        base_attachment.column_base +
+            base.cs.n_columns <=
+        out.r0_base_column_indices.size();
+    out.all_prior_parent_columns_prechallenge =
+        out.r0_base_column_indices.size() ==
+            layout.dependent_base;
+    out.dual_fp3_terminal_cancelled = true;
+    out.valid =
+        out.dependent_columns ==
+            kAdditionalColumnsV1 -
+                (base.layout.dependent_base -
+                 base.layout.original_columns) &&
+        out.constraints_appended != 0 &&
+        out.exact_parent_r0_consumed &&
+        out
+            .all_deterministic_parent_columns_prechallenge &&
+        out.dual_fp3_terminal_cancelled;
+    out.note = out.valid
+        ? "stage3:v13_deep_source_logup_parent:"
+          "public_challenge_relation_rebuilt_after_r0"
+        : "stage3:v13_deep_source_logup_parent:"
+          "public_parent_finalization_invalid";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "public_parent_finalize_invariant");
     }
     if (why != nullptr) *why = out.note;
     return true;
@@ -1563,9 +2224,9 @@ bool AppendFinalRelationToParentV1(
         parent_cs.n_columns !=
             parent_columns.size() ||
         parent_cs.n_columns == 0 ||
-        !parent_cs
+        parent_cs
              .preprocessed_row_group_roots
-             .empty() ||
+             .size() > 1 ||
         public_seed.IsNull() ||
         !parent_r0_session.valid ||
         parent_r0_session.trace_rows !=
@@ -1583,15 +2244,51 @@ bool AppendFinalRelationToParentV1(
         }
     }
     std::vector<uint32_t> expected_base(
-        parent_cs.n_columns);
+        parent_r0_session
+            .base_column_indices.size());
     std::iota(
         expected_base.begin(),
         expected_base.end(), 0U);
     if (parent_r0_session
             .base_column_indices !=
-        expected_base) {
+            expected_base ||
+        expected_base.empty() ||
+        expected_base.size() >
+            parent_cs.n_columns ||
+        base_attachment.column_base >
+            expected_base.size() ||
+        base.cs.n_columns >
+            expected_base.size() -
+                base_attachment.column_base) {
         return Fail(
             why, "parent_r0_not_complete");
+    }
+    const bool row_group_already_installed =
+        !parent_cs
+             .preprocessed_row_group_roots
+             .empty();
+    if (row_group_already_installed) {
+        const auto& group =
+            parent_cs
+                .preprocessed_row_group_roots
+                .front();
+        if (group.version != 1 ||
+            group.role !=
+                aq::AirPreprocessedRowGroupRole::
+                    kR0 ||
+            group.ordered_columns !=
+                expected_base ||
+            group.root !=
+                parent_r0_session
+                    .base_row_commitment) {
+            return Fail(
+                why, "parent_r0_group_mismatch");
+        }
+    } else if (
+        expected_base.size() !=
+            parent_cs.n_columns) {
+        return Fail(
+            why, "parent_r0_unaccounted_columns");
     }
 
     const uint32_t offset =
@@ -1686,8 +2383,9 @@ bool AppendFinalRelationToParentV1(
             layout, parent_columns, why)) {
         return false;
     }
-    parent_cs.preprocessed_row_group_roots
-        .push_back({
+    if (!row_group_already_installed) {
+        parent_cs.preprocessed_row_group_roots
+            .push_back({
             .version = 1,
             .role =
                 aq::
@@ -1699,6 +2397,7 @@ bool AppendFinalRelationToParentV1(
                 parent_r0_session
                     .base_row_commitment,
         });
+    }
 
     out.parent_layout = layout;
     out.r0_base_column_indices =
@@ -1714,6 +2413,10 @@ bool AppendFinalRelationToParentV1(
             parent_cs.constraints.size()) -
         constraints_before;
     out.exact_parent_r0_consumed = true;
+    out.all_deterministic_parent_columns_prechallenge =
+        base_attachment.column_base +
+            base.cs.n_columns <=
+        out.r0_base_column_indices.size();
     out.all_prior_parent_columns_prechallenge =
         out.r0_base_column_indices.size() ==
             layout.dependent_base;
@@ -1725,7 +2428,8 @@ bool AppendFinalRelationToParentV1(
                  base.layout.original_columns) &&
         out.constraints_appended != 0 &&
         out.exact_parent_r0_consumed &&
-        out.all_prior_parent_columns_prechallenge &&
+        out
+            .all_deterministic_parent_columns_prechallenge &&
         out.dual_fp3_terminal_cancelled;
     out.note = out.valid
         ? "stage3:v13_deep_source_logup_parent:"
