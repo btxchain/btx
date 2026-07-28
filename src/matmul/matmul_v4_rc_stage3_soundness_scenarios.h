@@ -115,6 +115,24 @@ struct ProductionProofSiteEntry {
 };
 
 /**
+ * Executable proof-owned fixed-program capacities.
+ *
+ * These are intentionally distinct from both the maximum trace height and
+ * the public-boundary four-lane direct product.  The production semantic
+ * product uses private boundary cells: its SHA split-RAP child reserves
+ * auxiliary sink instances and therefore accepts at most 32 sources, while
+ * its ChaCha child currently proves exactly one source so the internal-SSA
+ * bus remains private and self-contained.
+ *
+ * A site inventory may charge no more than these capacities until an
+ * executable private packed proof replaces them.
+ */
+inline constexpr uint32_t
+    kProductionPrivateShaSourcesPerProofSiteV1 = 32;
+inline constexpr uint32_t
+    kProductionPrivateChaChaSourcesPerProofSiteV1 = 1;
+
+/**
  * Candidate Stage-3 sharding policy.  The current episode computation has
  * unbounded rejection loops, so `max_rejection_blocks_per_32_outputs=0`
  * faithfully represents the existing protocol and cannot produce a finite
@@ -156,6 +174,9 @@ struct ProductionProofSiteManifest {
     /** The selected lane count has an executable boundary-bound quotient
      * construction within the normalized recursive width cap. */
     bool executable_hash_parallel_packing{false};
+    /** Every hash-family units-per-site value is capped by the proof-owned
+     * private-boundary backend which production semantic closure consumes. */
+    bool executable_private_hash_site_capacity{false};
     /** MxExpand SHA, builder counter-XOF and Extract ChaCha witness
      * construction all stop at the selected V1 rejection cap. */
     bool executable_rejection_paths_enforce_policy{false};

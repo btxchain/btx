@@ -32,6 +32,13 @@ inline constexpr uint32_t kMaxBoundariesPerChildV1 =
  * canonical 64-instance schedule.  ChaCha uses the single-instance private
  * split-RAP construction below instead of this batching limit. */
 inline constexpr uint32_t kMaxWitnessSourcesPerChildV2 = 32;
+inline constexpr uint32_t kMaxPrivateChaChaSourcesPerChildV2 = 1;
+static_assert(
+    kMaxWitnessSourcesPerChildV2 ==
+    sites::kProductionPrivateShaSourcesPerProofSiteV1);
+static_assert(
+    kMaxPrivateChaChaSourcesPerChildV2 ==
+    sites::kProductionPrivateChaChaSourcesPerProofSiteV1);
 
 /**
  * These are exactly the eleven fixed SHA/XOF/ChaCha sites which remain

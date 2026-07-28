@@ -51,7 +51,7 @@ BOOST_AUTO_TEST_CASE(profile2_site_inventory_is_exact_but_not_a_global_cap)
         inventory.conditional_stage3_site_upper_bound,
         1ULL << inventory.conditional_stage3_site_log2);
     BOOST_CHECK_LE(
-        inventory.conditional_stage3_site_upper_bound, 1ULL << 28);
+        inventory.conditional_stage3_site_upper_bound, 1ULL << 37);
     BOOST_CHECK_EQUAL(
         inventory.conditional_rejection_blocks_per_32_outputs, 4U);
     BOOST_CHECK(
@@ -185,48 +185,71 @@ BOOST_AUTO_TEST_CASE(complete_site_manifest_requires_an_explicit_rejection_cap)
     BOOST_CHECK(selected.backend_shape_supported);
     BOOST_CHECK(selected.executable_hash_parallel_packing);
     BOOST_CHECK(
+        selected.executable_private_hash_site_capacity);
+    BOOST_CHECK(
         selected.executable_rejection_paths_enforce_policy);
     BOOST_CHECK(
         !selected.recursive_scheduler_consumes_manifest);
     BOOST_CHECK(
         selected.complete_global_upper_bound_manifest_derived);
     BOOST_CHECK(!selected.executable_backend_enforces_policy);
-    BOOST_CHECK_EQUAL(selected.relation_leaf_sites, 28'116'241ULL);
     BOOST_CHECK_EQUAL(
-        selected.below_root_aggregation_sites, 9'372'141ULL);
-    BOOST_CHECK_EQUAL(selected.total_proof_sites, 37'488'397ULL);
-    BOOST_CHECK_GE(selected.total_proof_sites, 1ULL << 25);
-    BOOST_CHECK_LE(selected.total_proof_sites, 1ULL << 28);
+        selected.relation_leaf_sites, 44'639'077'288ULL);
+    BOOST_CHECK_EQUAL(
+        selected.below_root_aggregation_sites,
+        14'879'692'506ULL);
+    BOOST_CHECK_EQUAL(
+        selected.total_proof_sites, 59'518'769'809ULL);
+    BOOST_CHECK_GE(selected.total_proof_sites, 1ULL << 35);
+    BOOST_CHECK_LE(selected.total_proof_sites, 1ULL << 36);
     BOOST_CHECK_GE(selected.union_bound_cap, selected.total_proof_sites);
     BOOST_CHECK_EQUAL(
         selected.union_bound_cap,
         1ULL << selected.union_bound_log2);
+    for (const auto& entry : selected.entries) {
+        if (entry.kind ==
+                ss::ProductionProofSiteKind::
+                    EpisodeExtractChaCha ||
+            entry.kind ==
+                ss::ProductionProofSiteKind::
+                    CoupledExtractChaCha) {
+            BOOST_CHECK_EQUAL(
+                entry.units_per_site,
+                ss::kProductionPrivateChaChaSourcesPerProofSiteV1);
+        }
+    }
+    BOOST_CHECK_EQUAL(
+        selected.entries[6].units_per_site,
+        ss::kProductionPrivateShaSourcesPerProofSiteV1);
 
     const auto exact_hybrid = nr::AssessFriDualQ128HybridBound(
         selected.total_proof_sites,
         nr::FriDualCommitmentTopology::SharedMaster);
     BOOST_REQUIRE(exact_hybrid.parameters_valid);
     BOOST_CHECK_CLOSE(
-        exact_hybrid.composed_union_bits, 102.0196358875, 1e-7);
-    BOOST_CHECK(exact_hybrid.numerical_target_met);
+        exact_hybrid.composed_union_bits, 92.1799054805, 1e-7);
+    BOOST_CHECK(!exact_hybrid.numerical_target_met);
     BOOST_CHECK(!exact_hybrid.exact_site_manifest_backend_enforced);
     BOOST_CHECK(!exact_hybrid.formal_reduction_complete);
     BOOST_CHECK(!exact_hybrid.authority_eligible);
 
-    // Preserve the pre-packing conditional inventory as an explicit
-    // comparison rather than silently rewriting its 100.4057-bit result.
+    // Public four-lane packing no longer changes the proof-owned private
+    // boundary capacity.  Keep it visible as a soundness/topology comparison,
+    // but never divide the all-instance inventory by an uncomposed backend.
     const auto unpacked = ss::BuildProductionProofSiteManifest(
         ss::UnpackedProductionProofSitePolicy());
     BOOST_REQUIRE(!unpacked.commitment.IsNull());
     BOOST_CHECK_EQUAL(
         unpacked.policy.hash_parallel_lanes, 1U);
-    BOOST_CHECK_GT(unpacked.total_proof_sites, selected.total_proof_sites);
+    BOOST_CHECK_GT(
+        unpacked.total_proof_sites, selected.total_proof_sites);
     const auto unpacked_hybrid = nr::AssessFriDualQ128HybridBound(
         unpacked.total_proof_sites,
         nr::FriDualCommitmentTopology::SharedMaster);
     BOOST_REQUIRE(unpacked_hybrid.parameters_valid);
     BOOST_CHECK_CLOSE(
-        unpacked_hybrid.composed_union_bits, 100.4056957335, 1e-7);
+        unpacked_hybrid.composed_union_bits, 92.1792095221, 1e-7);
+    BOOST_CHECK(!unpacked_hybrid.numerical_target_met);
     for (const auto& entry : selected.entries) {
         BOOST_TEST_MESSAGE(
             "stage3 site family kind="
@@ -278,6 +301,15 @@ BOOST_AUTO_TEST_CASE(site_manifest_rejects_omission_relabel_substitution_and_ove
     --undercharged.entries[7].proof_sites;
     BOOST_CHECK(!ss::ValidateProductionProofSiteManifest(
         undercharged, &why));
+
+    // The old inventory composed maximum trace height with an unrelated
+    // public four-lane proof and charged 4,096 private ChaCha boundaries to
+    // one site.  No such proof exists.  Capacity substitution must fail even
+    // when it claims the selected public lane count.
+    auto unexecutable_capacity = canonical;
+    unexecutable_capacity.entries[7].units_per_site = 4096;
+    BOOST_CHECK(!ss::ValidateProductionProofSiteManifest(
+        unexecutable_capacity, &why));
 
     auto substituted_lane_count = canonical;
     substituted_lane_count.policy.hash_parallel_lanes = 1;
@@ -357,10 +389,10 @@ BOOST_AUTO_TEST_CASE(site_scenarios_choose_supported_quaternary_aggregation)
     BOOST_CHECK(selected.recursive_arity_supported);
     BOOST_CHECK_LT(
         selected.total_proof_sites, unpacked.total_proof_sites);
-    BOOST_CHECK_LT(
+    BOOST_CHECK_EQUAL(
         packed6.total_proof_sites, selected.total_proof_sites);
-    BOOST_CHECK_LT(
-        packed7.total_proof_sites, packed6.total_proof_sites);
+    BOOST_CHECK_EQUAL(
+        packed7.total_proof_sites, selected.total_proof_sites);
     const auto packed4_hybrid =
         nr::AssessFriDualQ128HybridBound(
             selected.total_proof_sites,
@@ -375,13 +407,13 @@ BOOST_AUTO_TEST_CASE(site_scenarios_choose_supported_quaternary_aggregation)
             nr::FriDualCommitmentTopology::SharedMaster);
     BOOST_CHECK_CLOSE(
         packed4_hybrid.composed_union_bits,
-        102.0196358875, 1e-7);
+        92.1799054805, 1e-7);
     BOOST_CHECK_CLOSE(
         packed6_hybrid.composed_union_bits,
-        102.3199831560, 1e-7);
+        92.1799054805, 1e-7);
     BOOST_CHECK_CLOSE(
         packed7_hybrid.composed_union_bits,
-        102.4215489353, 1e-7);
+        92.1799054805, 1e-7);
     BOOST_CHECK_LT(
         selected.total_proof_sites, binary.total_proof_sites);
     BOOST_CHECK_GT(
@@ -418,29 +450,29 @@ BOOST_AUTO_TEST_CASE(
     const auto& packed7 = find(7);
 
     BOOST_CHECK_EQUAL(
-        packed4.global_sites, 66'480'699ULL);
+        packed4.global_sites, 59'547'762'111ULL);
     BOOST_CHECK_EQUAL(
-        packed6.global_sites, 57'648'003ULL);
+        packed6.global_sites, 59'547'762'111ULL);
     BOOST_CHECK_EQUAL(
-        packed7.global_sites, 55'124'366ULL);
+        packed7.global_sites, 59'547'762'111ULL);
     BOOST_CHECK_CLOSE(
-        packed4.fri_bits, 99.9470458309, 1e-7);
+        packed4.fri_bits, 90.1401498058, 1e-7);
     BOOST_CHECK_CLOSE(
-        packed6.fri_bits, 100.1527107501, 1e-7);
+        packed6.fri_bits, 90.1401498058, 1e-7);
     BOOST_CHECK_CLOSE(
-        packed7.fri_bits, 100.2172912241, 1e-7);
+        packed7.fri_bits, 90.1401498058, 1e-7);
     BOOST_CHECK_CLOSE(
         packed6.per_site_composed_bits,
-        99.8438439234, 1e-7);
+        89.8312829793, 1e-7);
     BOOST_CHECK_CLOSE(
         packed7.per_site_composed_bits,
-        99.9084243974, 1e-7);
+        89.8312829793, 1e-7);
     BOOST_CHECK_CLOSE(
         packed6.global_first_collision_composed_bits,
-        100.1527107442, 1e-7);
+        90.1401498058, 1e-7);
     BOOST_CHECK_CLOSE(
         packed7.global_first_collision_composed_bits,
-        100.2172912179, 1e-7);
+        90.1401498058, 1e-7);
 
     BOOST_CHECK_EQUAL(packed6.trace_width, 912U);
     BOOST_CHECK_EQUAL(
@@ -473,10 +505,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(assessment.parameters_valid);
     BOOST_CHECK_EQUAL(
         assessment.global_sites,
-        37'488'397ULL);
+        59'518'769'809ULL);
     BOOST_CHECK_CLOSE(
         assessment.global_site_log2,
-        25.1599408017, 1e-7);
+        35.7926256566, 1e-7);
     BOOST_CHECK_EQUAL(
         assessment.grinding_bits, 40U);
     BOOST_CHECK_EQUAL(
@@ -493,31 +525,31 @@ BOOST_AUTO_TEST_CASE(
 
     BOOST_CHECK_CLOSE(
         assessment.coarse_q192_fri_bits,
-        100.7735372436, 1e-7);
+        90.1408523887, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.exact_q192_fri_bits,
-        101.7735372173, 1e-7);
+        91.1408523887, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.dual_q136_fri_bits,
-        111.5250799950, 1e-7);
+        106.2087406815, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.trace_batching_bits,
-        109.8398830988, 1e-7);
+        99.2071982439, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.constraint_batching_bits,
-        109.8400591983, 1e-7);
+        99.2073743434, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.hash_binding_bits,
-        102.8400591983, 1e-7);
+        92.2073743434, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.coarse_q192_known_terms_bits,
-        100.4603322660, 1e-7);
+        89.8276474110, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.exact_q192_known_terms_bits,
-        101.2031426943, 1e-7);
+        90.5704578571, 1e-7);
     BOOST_CHECK_CLOSE(
         assessment.dual_q136_known_terms_bits,
-        102.8142428026, 1e-7);
+        92.1849185600, 1e-7);
 
     BOOST_CHECK(
         assessment.canonical_site_manifest_derived);
@@ -534,11 +566,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !assessment.dual_q136_split_rap_integrated);
     BOOST_CHECK(
-        assessment.coarse_q192_numeric_target_met);
+        !assessment.coarse_q192_numeric_target_met);
     BOOST_CHECK(
-        assessment.exact_q192_numeric_target_met);
+        !assessment.exact_q192_numeric_target_met);
     BOOST_CHECK(
-        assessment.dual_q136_numeric_target_met);
+        !assessment.dual_q136_numeric_target_met);
 
     BOOST_CHECK(
         !assessment.semantic_closure_complete);
@@ -580,9 +612,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(t12_three.parameters_valid);
     BOOST_CHECK_CLOSE(
         t12_three.hash_binding_bits,
-        101.2550966976, 1e-7);
+        90.6224118427, 1e-7);
     BOOST_CHECK(
-        t12_three.dual_q136_numeric_target_met);
+        !t12_three.dual_q136_numeric_target_met);
     BOOST_CHECK_EQUAL(t12_three.certified_bits, 0U);
 
     const auto t12_six =
@@ -593,9 +625,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(t12_six.parameters_valid);
     BOOST_CHECK_CLOSE(
         t12_six.hash_binding_bits,
-        100.2550966976, 1e-7);
+        89.6224118427, 1e-7);
     BOOST_CHECK(
-        t12_six.dual_q136_numeric_target_met);
+        !t12_six.dual_q136_numeric_target_met);
 
     const auto per_attempt =
         ss::AssessGlobalSoundnessV1(
@@ -605,7 +637,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(per_attempt.parameters_valid);
     BOOST_CHECK_CLOSE(
         per_attempt.hash_binding_bits,
-        62.8400591983, 1e-7);
+        52.2073743434, 1e-7);
     BOOST_CHECK(
         !per_attempt.dual_q136_numeric_target_met);
 
@@ -617,9 +649,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(t16.parameters_valid);
     BOOST_CHECK_CLOSE(
         t16.hash_binding_bits,
-        187.2550966976, 1e-7);
-    BOOST_CHECK(t16.exact_q192_numeric_target_met);
-    BOOST_CHECK(t16.dual_q136_numeric_target_met);
+        176.6224118427, 1e-7);
+    BOOST_CHECK(!t16.exact_q192_numeric_target_met);
+    BOOST_CHECK(!t16.dual_q136_numeric_target_met);
     BOOST_CHECK_EQUAL(t16.certified_bits, 0U);
     BOOST_CHECK(!t16.authority_eligible);
 
@@ -640,15 +672,15 @@ BOOST_AUTO_TEST_CASE(
         ss::AssessRecursiveBackendComparisonV1();
     BOOST_CHECK_EQUAL(
         comparison.current_global_sites,
-        37'488'397ULL);
+        59'518'769'809ULL);
     BOOST_CHECK_EQUAL(
         comparison.relation_local_instances, 326U);
     BOOST_CHECK_EQUAL(
         comparison.product_topology_sites,
-        12'221'217'422ULL);
+        19'403'118'957'734ULL);
     BOOST_CHECK_CLOSE(
         comparison.product_topology_log2,
-        33.5086689559, 1e-7);
+        44.1413538109, 1e-7);
     BOOST_CHECK(
         !comparison
              .relation_local_nodes_in_current_manifest);

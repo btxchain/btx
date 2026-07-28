@@ -421,17 +421,15 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
     // A zero cap exactly models the current computation's unbounded
     // rejection loops.  No finite proof-site upper bound follows.
     if (policy.max_rejection_blocks_per_32_outputs == 0) return out;
-    const uint64_t vertical_hash_instances_per_site =
-        policy.max_air_trace_rows /
-        policy.hash_program_rows_per_instance;
-    uint64_t hash_instances_per_site{0};
-    if (vertical_hash_instances_per_site == 0 ||
-        !CheckedMul(
-            vertical_hash_instances_per_site,
-            policy.hash_parallel_lanes,
-            hash_instances_per_site)) {
-        return out;
-    }
+    // Do not multiply maximum trace height by the public four-lane packing
+    // factor here.  No executable proof-owned construction composes those two
+    // capacities.  The complete semantic product currently proves private
+    // boundary cells in chunks of 32 for SHA and one for ChaCha; those are the
+    // only sound units-per-site values for the production inventory.
+    constexpr uint64_t sha_instances_per_site =
+        kProductionPrivateShaSourcesPerProofSiteV1;
+    constexpr uint64_t chacha_instances_per_site =
+        kProductionPrivateChaChaSourcesPerProofSiteV1;
 
     const RCEpisodeParams episode = MakeDatacenterRCEpisodeParams();
     const RCGkrLayout layout = RCGkrTraceLayout(episode);
@@ -498,7 +496,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::EpisodeBuilderCounterXof,
             RCStage3RelationRole::EpisodeDeterministicBuilder,
-            builder_hash_blocks, hash_instances_per_site)) {
+            builder_hash_blocks, sha_instances_per_site)) {
         return {};
     }
 
@@ -566,7 +564,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::EpisodeScaleSha,
             RCStage3RelationRole::EpisodeExtract,
-            2 * extract_tiles, hash_instances_per_site)) {
+            2 * extract_tiles, sha_instances_per_site)) {
         return {};
     }
     uint64_t extract_chacha_blocks{0};
@@ -577,7 +575,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::EpisodeExtractChaCha,
             RCStage3RelationRole::EpisodeExtract,
-            extract_chacha_blocks, hash_instances_per_site)) {
+            extract_chacha_blocks, chacha_instances_per_site)) {
         return {};
     }
     if (!AddSiteEntry(
@@ -646,11 +644,11 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::EpisodeTileTreeSha256d,
             RCStage3RelationRole::EpisodeTileTree,
-            tile_tree_compressions, hash_instances_per_site) ||
+            tile_tree_compressions, sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::EpisodeDigestSha256d,
             RCStage3RelationRole::EpisodeDigest,
-            episode_digest_compressions, hash_instances_per_site)) {
+            episode_digest_compressions, sha_instances_per_site)) {
         return {};
     }
 
@@ -707,12 +705,12 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledBankCounterXof,
             RCStage3RelationRole::CoupledBank,
-            coupled_bank_xof_compressions, hash_instances_per_site) ||
+            coupled_bank_xof_compressions, sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledBankCommitmentSha256d,
             RCStage3RelationRole::CoupledBank,
             coupled_bank_commitment_compressions,
-            hash_instances_per_site) ||
+            sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledBank,
             RCStage3RelationRole::CoupledBank,
@@ -736,12 +734,12 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledLobeInitCounterXof,
             RCStage3RelationRole::CoupledGemm,
-            coupled_lobe_xof_compressions, hash_instances_per_site) ||
+            coupled_lobe_xof_compressions, sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledPageScheduleXof,
             RCStage3RelationRole::CoupledGemm,
             coupled_page_schedule_xof_compressions,
-            hash_instances_per_site) ||
+            sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledGemm,
             RCStage3RelationRole::CoupledGemm,
@@ -776,7 +774,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
             out, ProductionProofSiteKind::CoupledExchangeXof,
             RCStage3RelationRole::CoupledExchange,
             coupled_exchange_xof_compressions,
-            hash_instances_per_site)) {
+            sha_instances_per_site)) {
         return {};
     }
 
@@ -800,7 +798,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
             out, ProductionProofSiteKind::CoupledPermutationXof,
             RCStage3RelationRole::CoupledPermutation,
             coupled_permutation_xof_compressions,
-            hash_instances_per_site)) {
+            sha_instances_per_site)) {
         return {};
     }
 
@@ -813,7 +811,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledMixXof,
             RCStage3RelationRole::CoupledMix,
-            coupled_mix_xof_compressions, hash_instances_per_site) ||
+            coupled_mix_xof_compressions, sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledExtractCore,
             RCStage3RelationRole::CoupledExtract,
@@ -838,11 +836,11 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledExtractScaleSha,
             RCStage3RelationRole::CoupledExtract,
-            coupled_scale_compressions, hash_instances_per_site) ||
+            coupled_scale_compressions, sha_instances_per_site) ||
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledExtractChaCha,
             RCStage3RelationRole::CoupledExtract,
-            coupled_chacha_blocks, hash_instances_per_site)) {
+            coupled_chacha_blocks, chacha_instances_per_site)) {
         return {};
     }
 
@@ -858,7 +856,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledBarrierSha256d,
             RCStage3RelationRole::CoupledBarrier,
-            barrier_compressions, hash_instances_per_site)) {
+            barrier_compressions, sha_instances_per_site)) {
         return {};
     }
     uint64_t coupled_digest_compressions{0};
@@ -869,7 +867,7 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         !AddSiteEntry(
             out, ProductionProofSiteKind::CoupledDigestSha256d,
             RCStage3RelationRole::CoupledDigest,
-            coupled_digest_compressions, hash_instances_per_site)) {
+            coupled_digest_compressions, sha_instances_per_site)) {
         return {};
     }
 
@@ -887,6 +885,11 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         (stage3_hash_air::kHashPackedBoundaryAirExecutable &&
          policy.hash_parallel_lanes ==
              stage3_hash_air::kFixedProgramPackedLanes);
+    out.executable_private_hash_site_capacity =
+        sha_instances_per_site ==
+            kProductionPrivateShaSourcesPerProofSiteV1 &&
+        chacha_instances_per_site ==
+            kProductionPrivateChaChaSourcesPerProofSiteV1;
     out.backend_shape_supported =
         policy.aggregation_arity <= kRCStage3RecursiveMaxChildren &&
         policy.max_air_trace_rows <= (1U << 20) &&
@@ -895,7 +898,8 @@ BuildProductionProofSiteManifest(const ProductionProofSitePolicy& policy)
         static_cast<uint32_t>(policy.hash_parallel_lanes) *
                 stage3_hash_air::kFixedProgramBoundaryColumns <=
             stage3_hash_air::kFixedProgramRecursiveWidthCap &&
-        out.executable_hash_parallel_packing;
+        out.executable_hash_parallel_packing &&
+        out.executable_private_hash_site_capacity;
     // All rejection-producing proof/witness builders consume the same V1 cap:
     //  * stage3_hash_air::BuildCounterXofManifest (builder SHA XOF);
     //  * gkr_air::VerifyMxExpandColumn (operand expansion);
@@ -1183,8 +1187,7 @@ AssessGlobalSoundnessV1(
     out.canonical_site_manifest_derived =
         ValidateProductionProofSiteManifest(
             manifest, &manifest_why) &&
-        manifest.complete_global_upper_bound_manifest_derived &&
-        manifest.total_proof_sites == 37'488'397ULL;
+        manifest.complete_global_upper_bound_manifest_derived;
     if (out.canonical_site_manifest_derived) {
         out.global_sites = manifest.total_proof_sites;
         out.global_site_log2 =
@@ -1456,7 +1459,8 @@ AssessRecursiveBackendComparisonV1()
             SelectedProductionProofSitePolicy());
     if (!manifest.arithmetic_exact ||
         !manifest.complete_global_upper_bound_manifest_derived ||
-        manifest.total_proof_sites != 37'488'397ULL) {
+        !ValidateProductionProofSiteManifest(
+            manifest, nullptr)) {
         out.note =
             "stage3:recursive_backend_v1:"
             "noncanonical_global_manifest";
