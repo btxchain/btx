@@ -965,6 +965,31 @@ bool ValidateHybridReceiptV12(
     return true;
 }
 
+bool ValidateProductionSiteManifestBindingV12(
+    const scenarios::ProductionProofSiteManifest& manifest,
+    std::string* why)
+{
+    const auto expected =
+        scenarios::BuildProductionProofSiteManifest(
+            scenarios::SelectedProductionProofSitePolicy());
+    if (!scenarios::ValidateProductionProofSiteManifest(
+            expected, why) ||
+        !scenarios::ValidateProductionProofSiteManifest(
+            manifest, why) ||
+        manifest != expected ||
+        manifest.commitment.IsNull() ||
+        !manifest.arithmetic_exact ||
+        !manifest.complete_global_upper_bound_manifest_derived ||
+        !manifest.executable_private_hash_site_capacity ||
+        manifest.total_proof_sites == 0 ||
+        manifest.union_bound_cap <
+            manifest.total_proof_sites) {
+        return Fail(
+            why, "production_site_manifest_binding");
+    }
+    return true;
+}
+
 ShippedSoundnessReductionV12
 AssessShippedSoundnessReductionV12(
     const fsair::ManifestV12& manifest,
@@ -972,14 +997,30 @@ AssessShippedSoundnessReductionV12(
     const HybridReceiptV12& receipt)
 {
     ShippedSoundnessReductionV12 out;
+    const auto site_manifest =
+        scenarios::BuildProductionProofSiteManifest(
+            scenarios::SelectedProductionProofSitePolicy());
+    const bool site_manifest_valid =
+        ValidateProductionSiteManifestBindingV12(
+            site_manifest, nullptr);
     out.lanes = kLaneCountV12;
     out.queries_per_lane = kQueriesPerLaneV12;
     out.total_queries =
         kLaneCountV12 * kQueriesPerLaneV12;
     out.grind_bits = kTaxedGrindBitsV12;
-    out.proof_sites = kProductionProofSitesV12;
+    out.proof_sites =
+        site_manifest_valid
+            ? site_manifest.total_proof_sites
+            : 0;
+    out.proof_site_manifest_commitment =
+        site_manifest_valid
+            ? site_manifest.commitment
+            : uint256{};
     out.site_union_bits =
-        std::log2(static_cast<double>(out.proof_sites));
+        out.proof_sites == 0
+            ? std::numeric_limits<double>::infinity()
+            : std::log2(
+                  static_cast<double>(out.proof_sites));
     out.proximity_ratio = 17.0 / 32.0;
     out.proximity_bits_per_query =
         std::log2(32.0 / 17.0);
@@ -1008,8 +1049,10 @@ AssessShippedSoundnessReductionV12(
         out.common_binding_failure_probability +
         out.conditional_safe_nirop_failure_probability;
     out.global_conditional_failure_probability =
-        static_cast<long double>(out.proof_sites) *
-        out.per_site_conditional_failure_probability;
+        out.proof_sites == 0
+            ? 1.0L
+            : static_cast<long double>(out.proof_sites) *
+                  out.per_site_conditional_failure_probability;
 
     out.lane_proximity_bits =
         -std::log2(
@@ -1071,15 +1114,11 @@ AssessShippedSoundnessReductionV12(
         receipt.fri_terminal_receipts_bound &&
         fsair::kQuerySamplerSoleProductionQuerySourceV12;
 
-    const auto site_manifest =
-        scenarios::BuildProductionProofSiteManifest(
-            scenarios::SelectedProductionProofSitePolicy());
     out.proof_site_arithmetic_manifest_valid =
-        site_manifest.arithmetic_exact &&
-        site_manifest.total_proof_sites ==
-            kProductionProofSitesV12 &&
-        scenarios::ValidateProductionProofSiteManifest(
-            site_manifest, nullptr);
+        site_manifest_valid;
+    out.executable_private_hash_site_capacity =
+        site_manifest_valid &&
+        site_manifest.executable_private_hash_site_capacity;
     out.proof_site_upper_bound_recursively_enforced =
         site_manifest.complete_global_upper_bound_manifest_derived &&
         site_manifest.recursive_scheduler_consumes_manifest &&
@@ -1093,7 +1132,10 @@ AssessShippedSoundnessReductionV12(
             kRCFri3AlgTaxedQGrindBits &&
         out.grind_bits == 20 &&
         out.proof_sites ==
-            gsl::kCanonicalProductionSites &&
+            site_manifest.total_proof_sites &&
+        out.proof_site_manifest_commitment ==
+            site_manifest.commitment &&
+        out.executable_private_hash_site_capacity &&
         manifest.shape.n_lde ==
             manifest.shape.n_coeffs *
                 fsair::kFriBlowupV12;
@@ -1125,8 +1167,10 @@ AssessShippedSoundnessReductionV12(
         std::ldexp(1.0L, -128) +
         std::ldexp(1.0L, -128);
     const long double expected_global =
-        static_cast<long double>(37'488'397ULL) *
-        expected_per_site;
+        out.proof_sites == 0
+            ? 1.0L
+            : static_cast<long double>(out.proof_sites) *
+                  expected_per_site;
     out.multiplicative_then_additive_expression_machine_checked =
         NearlyEqual(
             out.lane_failure_probability,
@@ -1166,7 +1210,9 @@ AssessShippedSoundnessReductionV12(
         out.multiplicative_then_additive_expression_machine_checked &&
         out.conditional_numeric_v1_target_met;
     out.exact_expression =
-        "eps_global <= 37488397 * "
+        "eps_global <= " +
+        std::to_string(out.proof_sites) +
+        " * "
         "(2^20 * ((17/32)^96 * (17/32)^96) "
         "+ 2^-128 + eps_SAFE_NIROP), "
         "conditioned on eps_SAFE_NIROP <= 2^-128";
@@ -1180,7 +1226,7 @@ AssessShippedSoundnessReductionV12(
         "Certify the concrete H(IO,D) and Poseidon SAFE reductions and pin "
         "the typed-domain registry root.",
         "Make the recursive scheduler consume and enforce the exact "
-        "37,488,397-site production manifest."};
+        "canonical production site manifest."};
     out.note =
         "stage3:safe_v12_nirop:"
         "common_join_and_g20_tax_executable;"

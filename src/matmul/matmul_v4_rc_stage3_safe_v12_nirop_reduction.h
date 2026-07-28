@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_stage3_global_soundness_ledger.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_fs_air.h>
+#include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 
 #include <array>
 #include <cstdint>
@@ -39,9 +40,11 @@
  *       + eps_SAFE/NIROP
  *   ),
  *
- * with shipped Q=96, g=20 and S=37,488,397.  The lane terms multiply only
- * under the separately recorded independence premise; common binding and
- * NIROP terms add; the regrind and site factors are each applied once.
+ * with shipped Q=96 and g=20.  S is rebuilt from the canonical production
+ * proof-site manifest rather than copied from a historical ledger constant.
+ * The lane terms multiply only under the separately recorded independence
+ * premise; common binding and NIROP terms add; the regrind and site factors
+ * are each applied once.
  *
  * This file deliberately does not turn the conditional expression into a
  * security certificate.  The root-to-trace equality AIR is executable, but
@@ -67,8 +70,6 @@ inline constexpr uint32_t kLaneCountV12 =
     fsair::kFriLaneCountV12;
 inline constexpr uint32_t kTaxedGrindBitsV12 =
     kRCFri3AlgTaxedQGrindBits;
-inline constexpr uint64_t kProductionProofSitesV12 =
-    gsl::kCanonicalProductionSites;
 inline constexpr uint32_t kCommonBindingBitsV12 = 128;
 inline constexpr uint32_t kConditionalSafeNiropBitsV12 = 128;
 inline constexpr uint32_t kV1TargetBitsV12 =
@@ -81,7 +82,6 @@ inline constexpr gf::Fp kTraceEqualityMagicV12 =
 static_assert(kQueriesPerLaneV12 == 96);
 static_assert(kLaneCountV12 == 2);
 static_assert(kTaxedGrindBitsV12 == 20);
-static_assert(kProductionProofSitesV12 == 37'488'397ULL);
 
 struct CommonCommitmentsV12 {
     ah::Digest statement{};
@@ -303,12 +303,24 @@ struct HybridReceiptV12 {
     const HybridReceiptV12& receipt,
     std::string* why = nullptr);
 
+/**
+ * Require an exact copy of the selected canonical production site manifest.
+ *
+ * This rejects omitted families, altered capacities and stale inventory
+ * counts before the manifest is used in a numeric security claim.  Recursive
+ * scheduler consumption remains a distinct fail-closed premise below.
+ */
+[[nodiscard]] bool ValidateProductionSiteManifestBindingV12(
+    const scenarios::ProductionProofSiteManifest& manifest,
+    std::string* why = nullptr);
+
 struct ShippedSoundnessReductionV12 {
     uint32_t lanes{0};
     uint32_t queries_per_lane{0};
     uint32_t total_queries{0};
     uint32_t grind_bits{0};
     uint64_t proof_sites{0};
+    uint256 proof_site_manifest_commitment{};
     double site_union_bits{0.0};
     double proximity_ratio{0.0};
     double proximity_bits_per_query{0.0};
@@ -331,6 +343,7 @@ struct ShippedSoundnessReductionV12 {
 
     bool parameters_read_from_shipped_construction{false};
     bool proof_site_arithmetic_manifest_valid{false};
+    bool executable_private_hash_site_capacity{false};
     bool proof_site_upper_bound_recursively_enforced{false};
     bool common_transcript_join_executable{false};
     bool common_trace_root_equality_air_executable{false};

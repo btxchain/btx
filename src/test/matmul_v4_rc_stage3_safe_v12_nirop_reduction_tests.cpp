@@ -236,13 +236,27 @@ BOOST_AUTO_TEST_CASE(
 
     const auto reduction = AssessShippedSoundnessReductionV12(
         fixture.manifest, fixture.inputs, fixture.receipt);
+    const auto site_manifest =
+        scenarios::BuildProductionProofSiteManifest(
+            scenarios::SelectedProductionProofSitePolicy());
+    BOOST_REQUIRE(
+        ValidateProductionSiteManifestBindingV12(
+            site_manifest));
     BOOST_TEST(reduction.lanes == 2U);
     BOOST_TEST(reduction.queries_per_lane == 96U);
     BOOST_TEST(reduction.total_queries == 192U);
     BOOST_TEST(reduction.grind_bits == 20U);
-    BOOST_TEST(reduction.proof_sites == 37'488'397ULL);
+    BOOST_TEST(
+        reduction.proof_sites ==
+        site_manifest.total_proof_sites);
+    BOOST_TEST(reduction.proof_sites > 37'488'397ULL);
+    BOOST_CHECK(
+        reduction.proof_site_manifest_commitment ==
+        site_manifest.commitment);
     BOOST_CHECK(reduction.parameters_read_from_shipped_construction);
     BOOST_CHECK(reduction.proof_site_arithmetic_manifest_valid);
+    BOOST_CHECK(
+        reduction.executable_private_hash_site_capacity);
     BOOST_CHECK(reduction.common_transcript_join_executable);
     BOOST_CHECK(
         reduction.
@@ -256,6 +270,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         reduction.
             multiplicative_then_additive_expression_machine_checked);
+    // The corrected inventory no longer supports the stale ~101.9-bit
+    // claim, but its ~91.2-bit conditional value still exceeds the explicit
+    // 64-bit V1 consensus class.
     BOOST_CHECK(reduction.conditional_numeric_v1_target_met);
     BOOST_CHECK_CLOSE(
         reduction.lane_proximity_bits,
@@ -267,9 +284,9 @@ BOOST_AUTO_TEST_CASE(
         reduction.pair_after_single_grind_bits,
         155.20713448, 1.0e-6);
     BOOST_CHECK(
-        reduction.global_conditional_bits > 101.8);
+        reduction.global_conditional_bits > 91.2);
     BOOST_CHECK(
-        reduction.global_conditional_bits < 101.9);
+        reduction.global_conditional_bits < 91.3);
 
     // Numeric margin is not a theorem. These are the exact premises that
     // still prevent certification and authority.
@@ -297,6 +314,24 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!kDualQ96NiropReductionCertifiedV12);
     BOOST_CHECK(!kDualQ96GlobalReductionCertifiedV12);
     BOOST_CHECK(!kDualQ96AuthorityReadyV12);
+
+    // The V12 reduction accepts only the exact selected site inventory.
+    // Removing a family and recomputing neither its arithmetic nor its
+    // commitment cannot lower the union term.
+    auto omitted_site = site_manifest;
+    omitted_site.entries.pop_back();
+    BOOST_CHECK(
+        !ValidateProductionSiteManifestBindingV12(
+            omitted_site));
+
+    // Likewise, changing the proof-owned private-boundary packing capacity
+    // is a real site-count substitution, not a free theorem parameter.
+    auto capacity_substitution = site_manifest;
+    BOOST_REQUIRE(!capacity_substitution.entries.empty());
+    capacity_substitution.entries[0].units_per_site = 4096;
+    BOOST_CHECK(
+        !ValidateProductionSiteManifestBindingV12(
+            capacity_substitution));
 }
 
 BOOST_AUTO_TEST_CASE(
