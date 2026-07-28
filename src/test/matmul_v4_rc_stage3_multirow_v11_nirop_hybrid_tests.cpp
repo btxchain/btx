@@ -454,6 +454,199 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!audit.production_theorem_complete);
 }
 
+BOOST_AUTO_TEST_CASE(
+    safe_q192_v13_computes_one_shared_oracle_composition)
+{
+    SafeQ192QueryBudgetV13 budget;
+    budget.honest_h_queries = 37'488'397;
+    budget.honest_poseidon_queries = 994'229ULL * 2048ULL;
+    budget.adversarial_h_queries_log2 = 64.0;
+    budget.adversarial_poseidon_queries_log2 = 64.0;
+    budget.exact_manifest_derived = true;
+
+    SafeQ192ReductionPremisesV13 premises;
+    premises.exact_typed_io_domain_program = true;
+    premises.domain_registry_root_rebuilt_and_pinned = true;
+    premises.native_safe_q192_transcript_executable = true;
+    premises.native_safe_q192_verifier_replays_transcript = true;
+    premises.recursive_safe_event_parent_proved = true;
+    premises.every_recursive_message_cell_authenticated = true;
+    premises.every_recursive_output_cell_consumed = true;
+    premises.canonical_query_seed_is_sole_query_source = true;
+    premises.exact_global_h_p_manifest_enforced = true;
+    premises.all_shared_poseidon_calls_counted_before_square = true;
+    premises.typed_commitment_encodings_injective = true;
+    premises.native_recursive_poseidon_parity = true;
+    premises.adaptive_statement_and_oracle_queries_accounted = true;
+    premises.sha256d_random_oracle_assumption_accepted = true;
+    premises.poseidon2_ideal_permutation_assumption_accepted = true;
+
+    const auto audit =
+        AssessSafeQ192ReductionV13(budget, premises);
+    BOOST_CHECK_EQUAL(audit.protocol_version, 13U);
+    BOOST_CHECK_EQUAL(audit.queries, 192U);
+    BOOST_CHECK_EQUAL(audit.ood_candidates, 2U);
+    BOOST_CHECK_EQUAL(audit.rate_lanes, 8U);
+    BOOST_CHECK_EQUAL(audit.capacity_lanes, 4U);
+    BOOST_CHECK_EQUAL(audit.width_lanes, 12U);
+    BOOST_CHECK_EQUAL(audit.typed_role_count, 20U);
+    BOOST_CHECK(audit.canonical_v13_parameters);
+    BOOST_CHECK(
+        audit.full_capacity_joint_rejection_tag_executable);
+    BOOST_CHECK_GE(audit.total_h_queries_log2, 64.0);
+    BOOST_CHECK_GE(audit.total_poseidon_queries_log2, 64.0);
+    BOOST_CHECK(audit.safecore_theorem2_bound_computed);
+    BOOST_CHECK(
+        audit.shared_permutation_first_collision_bound_computed);
+    BOOST_CHECK_GT(
+        audit.safecore_indifferentiability_bits, 120.0);
+    BOOST_CHECK_GT(
+        audit.commitment_first_collision_bits, 120.0);
+    BOOST_CHECK_GT(audit.composed_computational_bits, 120.0);
+    BOOST_CHECK_LT(audit.composed_computational_bits, 128.0);
+    BOOST_CHECK(audit.no_independent_domain_lane_claim);
+    BOOST_CHECK(audit.adversarial_classical_budgets_included);
+    BOOST_CHECK(audit.concrete_assumptions_explicit);
+    BOOST_CHECK(audit.numeric_v1_screen_met);
+    BOOST_CHECK(audit.oracle_separation_reduction_complete);
+    BOOST_CHECK(audit.commitment_binding_reduction_complete);
+    BOOST_CHECK(audit.production_composition_complete);
+    BOOST_CHECK(audit.missing_premises.empty());
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_q192_v13_every_production_premise_fails_closed)
+{
+    SafeQ192QueryBudgetV13 budget;
+    budget.honest_h_queries = 1;
+    budget.honest_poseidon_queries = 1;
+    budget.adversarial_h_queries_log2 = 64.0;
+    budget.adversarial_poseidon_queries_log2 = 64.0;
+    budget.exact_manifest_derived = true;
+
+    SafeQ192ReductionPremisesV13 all;
+    all.exact_typed_io_domain_program = true;
+    all.domain_registry_root_rebuilt_and_pinned = true;
+    all.native_safe_q192_transcript_executable = true;
+    all.native_safe_q192_verifier_replays_transcript = true;
+    all.recursive_safe_event_parent_proved = true;
+    all.every_recursive_message_cell_authenticated = true;
+    all.every_recursive_output_cell_consumed = true;
+    all.canonical_query_seed_is_sole_query_source = true;
+    all.exact_global_h_p_manifest_enforced = true;
+    all.all_shared_poseidon_calls_counted_before_square = true;
+    all.typed_commitment_encodings_injective = true;
+    all.native_recursive_poseidon_parity = true;
+    all.adaptive_statement_and_oracle_queries_accounted = true;
+    all.sha256d_random_oracle_assumption_accepted = true;
+    all.poseidon2_ideal_permutation_assumption_accepted = true;
+    BOOST_REQUIRE(
+        AssessSafeQ192ReductionV13(budget, all)
+            .production_composition_complete);
+
+    const auto rejects = [&](const auto& mutate) {
+        auto changed = all;
+        mutate(changed);
+        const auto audit =
+            AssessSafeQ192ReductionV13(budget, changed);
+        BOOST_CHECK(!audit.production_composition_complete);
+        BOOST_CHECK(!audit.missing_premises.empty());
+    };
+    rejects([](auto& p) {
+        p.exact_typed_io_domain_program = false;
+    });
+    rejects([](auto& p) {
+        p.domain_registry_root_rebuilt_and_pinned = false;
+    });
+    rejects([](auto& p) {
+        p.native_safe_q192_transcript_executable = false;
+    });
+    rejects([](auto& p) {
+        p.native_safe_q192_verifier_replays_transcript = false;
+    });
+    rejects([](auto& p) {
+        p.recursive_safe_event_parent_proved = false;
+    });
+    rejects([](auto& p) {
+        p.every_recursive_message_cell_authenticated = false;
+    });
+    rejects([](auto& p) {
+        p.every_recursive_output_cell_consumed = false;
+    });
+    rejects([](auto& p) {
+        p.canonical_query_seed_is_sole_query_source = false;
+    });
+    rejects([](auto& p) {
+        p.exact_global_h_p_manifest_enforced = false;
+    });
+    rejects([](auto& p) {
+        p.all_shared_poseidon_calls_counted_before_square = false;
+    });
+    rejects([](auto& p) {
+        p.typed_commitment_encodings_injective = false;
+    });
+    rejects([](auto& p) {
+        p.native_recursive_poseidon_parity = false;
+    });
+    rejects([](auto& p) {
+        p.adaptive_statement_and_oracle_queries_accounted = false;
+    });
+    rejects([](auto& p) {
+        p.sha256d_random_oracle_assumption_accepted = false;
+    });
+    rejects([](auto& p) {
+        p.poseidon2_ideal_permutation_assumption_accepted = false;
+    });
+
+    auto no_manifest = budget;
+    no_manifest.exact_manifest_derived = false;
+    const auto missing_manifest =
+        AssessSafeQ192ReductionV13(no_manifest, all);
+    BOOST_CHECK(
+        !missing_manifest.production_composition_complete);
+    BOOST_CHECK(!missing_manifest.missing_premises.empty());
+
+    auto underbudget = budget;
+    underbudget.adversarial_h_queries_log2 = 63.0;
+    const auto missing_attacker_budget =
+        AssessSafeQ192ReductionV13(underbudget, all);
+    BOOST_CHECK(
+        !missing_attacker_budget
+             .adversarial_classical_budgets_included);
+    BOOST_CHECK(
+        !missing_attacker_budget.production_composition_complete);
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_q192_v13_zero_queries_and_invalid_floors_reject)
+{
+    SafeQ192QueryBudgetV13 empty;
+    SafeQ192ReductionPremisesV13 none;
+    const auto no_queries =
+        AssessSafeQ192ReductionV13(empty, none);
+    BOOST_CHECK(!no_queries.safecore_theorem2_bound_computed);
+    BOOST_CHECK(
+        !no_queries.shared_permutation_first_collision_bound_computed);
+    BOOST_CHECK_EQUAL(no_queries.composed_computational_bits, 0.0);
+    BOOST_CHECK(!no_queries.production_composition_complete);
+
+    SafeQ192QueryBudgetV13 one;
+    one.honest_h_queries = 1;
+    one.honest_poseidon_queries = 1;
+    one.exact_manifest_derived = true;
+    auto assumptions = none;
+    assumptions.sha256d_random_oracle_assumption_accepted = true;
+    assumptions.poseidon2_ideal_permutation_assumption_accepted = true;
+    const auto zero_floor =
+        AssessSafeQ192ReductionV13(
+            one, assumptions, 0.0, 128.0);
+    BOOST_CHECK(
+        !zero_floor.adversarial_classical_budgets_included);
+    BOOST_CHECK(!zero_floor.concrete_assumptions_explicit);
+    BOOST_CHECK_EQUAL(zero_floor.composed_computational_bits, 0.0);
+    BOOST_CHECK(!zero_floor.production_composition_complete);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace matmul::v4::rc::stage3_multirow_v11_nirop_hybrid

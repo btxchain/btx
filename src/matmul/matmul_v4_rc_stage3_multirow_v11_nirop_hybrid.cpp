@@ -1293,6 +1293,286 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
     return out;
 }
 
+SafeQ192ReductionAssessmentV13 AssessSafeQ192ReductionV13(
+    const SafeQ192QueryBudgetV13& budget,
+    const SafeQ192ReductionPremisesV13& premises,
+    double sha256d_security_floor_bits,
+    double poseidon2_security_floor_bits)
+{
+    SafeQ192ReductionAssessmentV13 out;
+    out.protocol_version =
+        kRCFri3AlgSafeQ192K2ProofVersionV13;
+    out.queries = kRCFri3AlgNumQueries;
+    out.ood_candidates =
+        kRCFri3AlgSafeQ192K2OodCandidatesV13;
+    out.rate_lanes = safe_v12::kSafeRateV12;
+    out.capacity_lanes = safe_v12::kSafeCapacityV12;
+    out.width_lanes = safe_v12::kSafeWidthV12;
+    out.typed_role_count =
+        alg_hash_typed::kRoleCountV12;
+    out.budget = budget;
+    out.premises = premises;
+    out.sha256d_floor_bits =
+        sha256d_security_floor_bits;
+    out.poseidon2_floor_bits =
+        poseidon2_security_floor_bits;
+
+    out.canonical_v13_parameters =
+        out.protocol_version == 13 &&
+        out.queries == 192 &&
+        out.ood_candidates == 2 &&
+        out.rate_lanes == 8 &&
+        out.capacity_lanes == 4 &&
+        out.width_lanes == 12 &&
+        out.rate_lanes + out.capacity_lanes ==
+            out.width_lanes;
+    /*
+     * DeriveTagV12 parses one SHA256d result jointly as Fp^4 and rejects the
+     * entire vector if any limb is noncanonical.  This is exactly one
+     * vector-valued H(IO,D) query; it is not four independently reduced
+     * limbs and never aliases x with x+p.
+     */
+    out.full_capacity_joint_rejection_tag_executable =
+        safe_v12::kFullCapacityTagHashImplementedV12 &&
+        safe_v12::kCanonicalAggregatedIoImplementedV12 &&
+        safe_v12::kStatelessSafeCoreImplementedV12;
+    out.no_independent_domain_lane_claim = true;
+    out.adversarial_classical_budgets_included =
+        std::isfinite(
+            budget.adversarial_h_queries_log2) &&
+        std::isfinite(
+            budget.adversarial_poseidon_queries_log2) &&
+        budget.adversarial_h_queries_log2 >= 64.0 &&
+        budget.adversarial_poseidon_queries_log2 >= 64.0;
+    out.concrete_assumptions_explicit =
+        premises.sha256d_random_oracle_assumption_accepted &&
+        premises.poseidon2_ideal_permutation_assumption_accepted &&
+        std::isfinite(sha256d_security_floor_bits) &&
+        sha256d_security_floor_bits > 0.0 &&
+        std::isfinite(poseidon2_security_floor_bits) &&
+        poseidon2_security_floor_bits > 0.0;
+
+    const long double honest_h =
+        static_cast<long double>(budget.honest_h_queries);
+    const long double honest_p =
+        static_cast<long double>(budget.honest_poseidon_queries);
+    const long double adversarial_h =
+        budget.adversarial_h_queries_log2 > 0.0
+        ? std::exp2(
+              static_cast<long double>(
+                  budget.adversarial_h_queries_log2))
+        : 0.0L;
+    const long double adversarial_p =
+        budget.adversarial_poseidon_queries_log2 > 0.0
+        ? std::exp2(
+              static_cast<long double>(
+                  budget.adversarial_poseidon_queries_log2))
+        : 0.0L;
+    const long double q_h = honest_h + adversarial_h;
+    const long double q_p = honest_p + adversarial_p;
+    if (q_h > 0.0L && q_p > 0.0L &&
+        std::isfinite(q_h) && std::isfinite(q_p)) {
+        out.total_h_queries_log2 =
+            static_cast<double>(std::log2(q_h));
+        out.total_poseidon_queries_log2 =
+            static_cast<double>(std::log2(q_p));
+
+        const auto choose_two = [](long double q) {
+            return q > 1.0L
+                ? q * (q - 1.0L) / 2.0L
+                : 0.0L;
+        };
+        const long double p =
+            static_cast<long double>(gf::kP);
+
+        // SAFECore 2023/520, Theorem 2, without dropping any term.
+        const long double safe_capacity_numerator =
+            3.0L * choose_two(q_h) +
+            2.0L * choose_two(q_p) +
+            4.0L * q_h * q_p;
+        const long double safe_width_numerator =
+            3.0L * choose_two(q_p);
+        const long double safe_advantage =
+            safe_capacity_numerator /
+                std::pow(p, out.capacity_lanes) +
+            safe_width_numerator /
+                std::pow(p, out.width_lanes);
+        if (safe_advantage > 0.0L &&
+            std::isfinite(safe_advantage)) {
+            out.safecore_indifferentiability_bits =
+                std::max(
+                    0.0,
+                    static_cast<double>(
+                        -std::log2(safe_advantage)));
+            out.safecore_theorem2_bound_computed = true;
+        }
+
+        /*
+         * One shared-permutation first-collision hybrid.  T includes all
+         * honest and adversarial P queries before the square; R is the
+         * complete typed initial-state inventory.  This is the same
+         * conservative adaptive multi-block bound used by the V12 audit:
+         *
+         *     2*T*(T+2R)/p^c.
+         *
+         * It covers capacity-projection and four-lane digest collisions.
+         * No per-role independence multiplier or per-site reset is assumed.
+         */
+        const long double roles =
+            static_cast<long double>(out.typed_role_count);
+        const long double commitment_numerator =
+            2.0L * q_p * (q_p + 2.0L * roles);
+        const long double commitment_advantage =
+            commitment_numerator /
+            std::pow(p, out.capacity_lanes);
+        if (commitment_advantage > 0.0L &&
+            std::isfinite(commitment_advantage)) {
+            out.commitment_first_collision_bits =
+                std::max(
+                    0.0,
+                    static_cast<double>(
+                        -std::log2(commitment_advantage)));
+            out.shared_permutation_first_collision_bound_computed =
+                true;
+        }
+    }
+
+    if (out.safecore_theorem2_bound_computed &&
+        out.shared_permutation_first_collision_bound_computed &&
+        out.concrete_assumptions_explicit) {
+        const long double composed_advantage =
+            std::exp2(
+                -static_cast<long double>(
+                    out.safecore_indifferentiability_bits)) +
+            std::exp2(
+                -static_cast<long double>(
+                    out.commitment_first_collision_bits)) +
+            std::exp2(
+                -static_cast<long double>(
+                    out.sha256d_floor_bits)) +
+            std::exp2(
+                -static_cast<long double>(
+                    out.poseidon2_floor_bits));
+        if (composed_advantage > 0.0L &&
+            std::isfinite(composed_advantage)) {
+            out.composed_computational_bits =
+                std::max(
+                    0.0,
+                    static_cast<double>(
+                        -std::log2(composed_advantage)));
+        }
+    }
+    out.numeric_v1_screen_met =
+        out.composed_computational_bits >= 64.0;
+
+    out.oracle_separation_reduction_complete =
+        out.canonical_v13_parameters &&
+        out.full_capacity_joint_rejection_tag_executable &&
+        premises.exact_typed_io_domain_program &&
+        premises.domain_registry_root_rebuilt_and_pinned &&
+        premises.native_safe_q192_transcript_executable &&
+        premises.native_safe_q192_verifier_replays_transcript &&
+        premises.recursive_safe_event_parent_proved &&
+        premises.every_recursive_message_cell_authenticated &&
+        premises.every_recursive_output_cell_consumed &&
+        premises.canonical_query_seed_is_sole_query_source &&
+        premises.exact_global_h_p_manifest_enforced &&
+        budget.exact_manifest_derived &&
+        premises.all_shared_poseidon_calls_counted_before_square &&
+        premises.native_recursive_poseidon_parity &&
+        premises.adaptive_statement_and_oracle_queries_accounted &&
+        out.adversarial_classical_budgets_included &&
+        out.no_independent_domain_lane_claim &&
+        out.concrete_assumptions_explicit &&
+        out.safecore_theorem2_bound_computed;
+    out.commitment_binding_reduction_complete =
+        out.canonical_v13_parameters &&
+        premises.exact_global_h_p_manifest_enforced &&
+        budget.exact_manifest_derived &&
+        premises.all_shared_poseidon_calls_counted_before_square &&
+        premises.typed_commitment_encodings_injective &&
+        premises.native_recursive_poseidon_parity &&
+        premises.adaptive_statement_and_oracle_queries_accounted &&
+        out.adversarial_classical_budgets_included &&
+        premises.poseidon2_ideal_permutation_assumption_accepted &&
+        out.no_independent_domain_lane_claim &&
+        out.shared_permutation_first_collision_bound_computed;
+    out.production_composition_complete =
+        out.oracle_separation_reduction_complete &&
+        out.commitment_binding_reduction_complete &&
+        out.numeric_v1_screen_met;
+
+    const auto require = [&out](bool present, const char* name) {
+        if (!present) out.missing_premises.emplace_back(name);
+    };
+    require(
+        premises.exact_typed_io_domain_program,
+        "exact_typed_io_domain_program");
+    require(
+        premises.domain_registry_root_rebuilt_and_pinned,
+        "domain_registry_root_rebuilt_and_pinned");
+    require(
+        premises.native_safe_q192_transcript_executable,
+        "native_safe_q192_transcript_executable");
+    require(
+        premises.native_safe_q192_verifier_replays_transcript,
+        "native_safe_q192_verifier_replays_transcript");
+    require(
+        premises.recursive_safe_event_parent_proved,
+        "recursive_safe_event_parent_proved");
+    require(
+        premises.every_recursive_message_cell_authenticated,
+        "every_recursive_message_cell_authenticated");
+    require(
+        premises.every_recursive_output_cell_consumed,
+        "every_recursive_output_cell_consumed");
+    require(
+        premises.canonical_query_seed_is_sole_query_source,
+        "canonical_query_seed_is_sole_query_source");
+    require(
+        premises.exact_global_h_p_manifest_enforced &&
+            budget.exact_manifest_derived,
+        "exact_global_h_p_manifest_enforced");
+    require(
+        premises.all_shared_poseidon_calls_counted_before_square,
+        "all_shared_poseidon_calls_counted_before_square");
+    require(
+        premises.typed_commitment_encodings_injective,
+        "typed_commitment_encodings_injective");
+    require(
+        premises.native_recursive_poseidon_parity,
+        "native_recursive_poseidon_parity");
+    require(
+        premises.adaptive_statement_and_oracle_queries_accounted,
+        "adaptive_statement_and_oracle_queries_accounted");
+    require(
+        out.adversarial_classical_budgets_included,
+        "adversarial_classical_h_p_budgets_at_least_2^64");
+    require(
+        premises.sha256d_random_oracle_assumption_accepted,
+        "sha256d_random_oracle_assumption_accepted");
+    require(
+        premises.poseidon2_ideal_permutation_assumption_accepted,
+        "poseidon2_ideal_permutation_assumption_accepted");
+    out.note =
+        "stage3:v13_safe_q192_reduction:safecore_bits=" +
+        std::to_string(
+            out.safecore_indifferentiability_bits) +
+        ";shared_p_first_collision_bits=" +
+        std::to_string(
+            out.commitment_first_collision_bits) +
+        ";composed_bits=" +
+        std::to_string(out.composed_computational_bits) +
+        ";missing=" +
+        std::to_string(out.missing_premises.size()) +
+        ";authority=" +
+        std::string(
+            out.production_composition_complete
+                ? "conditional_complete"
+                : "false");
+    return out;
+}
+
 NiropPathComparisonV1 CompareNiropPathsV1(
     const p2::StatementV1& statement,
     const SharedPermutationBudgetV1& budget)

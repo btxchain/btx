@@ -401,6 +401,112 @@ struct SafeCoreMigrationAuditV1 {
     const p2::StatementV1& statement,
     const SharedPermutationBudgetV1& budget);
 
+// -------------------------------------------------------------------------
+// V13 SAFE/Q192 concrete-composition reduction.
+// -------------------------------------------------------------------------
+
+/**
+ * Evidence supplied by the executable V13 transcript, recursive parent and
+ * global topology.  The mathematical reduction below deliberately accepts
+ * these as premises so it can be unit-tested under premise removal; the
+ * production ledger must populate them from independently recomputed
+ * assessments, never from a readiness flag.
+ */
+struct SafeQ192ReductionPremisesV13 {
+    bool exact_typed_io_domain_program{false};
+    bool domain_registry_root_rebuilt_and_pinned{false};
+    bool native_safe_q192_transcript_executable{false};
+    bool native_safe_q192_verifier_replays_transcript{false};
+    bool recursive_safe_event_parent_proved{false};
+    bool every_recursive_message_cell_authenticated{false};
+    bool every_recursive_output_cell_consumed{false};
+    bool canonical_query_seed_is_sole_query_source{false};
+    bool exact_global_h_p_manifest_enforced{false};
+    bool all_shared_poseidon_calls_counted_before_square{false};
+    bool typed_commitment_encodings_injective{false};
+    bool native_recursive_poseidon_parity{false};
+    bool adaptive_statement_and_oracle_queries_accounted{false};
+
+    /**
+     * Standard computational-instantiation assumptions.  These are policy
+     * inputs, not facts inferred from domain strings:
+     *
+     *  - SHA256d instantiates SAFECore's vector-valued H(IO,D) random oracle;
+     *  - the frozen Poseidon2 permutation instantiates SAFECore's public
+     *    ideal permutation and the commitment permutation.
+     */
+    bool sha256d_random_oracle_assumption_accepted{false};
+    bool poseidon2_ideal_permutation_assumption_accepted{false};
+};
+
+/**
+ * One global query inventory.  Honest counts are exact manifest counts;
+ * adversarial budgets are added before applying either birthday bound.
+ */
+struct SafeQ192QueryBudgetV13 {
+    uint64_t honest_h_queries{0};
+    uint64_t honest_poseidon_queries{0};
+    double adversarial_h_queries_log2{0.0};
+    double adversarial_poseidon_queries_log2{0.0};
+    bool exact_manifest_derived{false};
+};
+
+/**
+ * Machine-checked computational reduction for the selected single-lane V13
+ * path.
+ *
+ * In the (H,P) model it applies SAFECore Theorem 2 exactly:
+ *
+ *   [3*C(QH,2)+2*C(QP,2)+4*QH*QP]/p^c
+ *       + 3*C(QP,2)/p^b.
+ *
+ * The commitment first-collision hybrid uses one shared P-query inventory
+ * (FS, Merkle, receipt, ProgramTable and adversarial direct calls) and the
+ * conservative bad-event bound 2*T*(T+2R)/p^c.  No domain is treated as an
+ * independent oracle.  The real-world bound is the union of those two ideal
+ * model terms plus the explicitly supplied concrete H/P security floors.
+ */
+struct SafeQ192ReductionAssessmentV13 {
+    uint32_t protocol_version{0};
+    uint32_t queries{0};
+    uint32_t ood_candidates{0};
+    uint32_t rate_lanes{0};
+    uint32_t capacity_lanes{0};
+    uint32_t width_lanes{0};
+    uint32_t typed_role_count{0};
+    SafeQ192QueryBudgetV13 budget{};
+    SafeQ192ReductionPremisesV13 premises{};
+
+    double total_h_queries_log2{0.0};
+    double total_poseidon_queries_log2{0.0};
+    double safecore_indifferentiability_bits{0.0};
+    double commitment_first_collision_bits{0.0};
+    double sha256d_floor_bits{0.0};
+    double poseidon2_floor_bits{0.0};
+    double composed_computational_bits{0.0};
+
+    bool canonical_v13_parameters{false};
+    bool full_capacity_joint_rejection_tag_executable{false};
+    bool safecore_theorem2_bound_computed{false};
+    bool shared_permutation_first_collision_bound_computed{false};
+    bool no_independent_domain_lane_claim{false};
+    bool adversarial_classical_budgets_included{false};
+    bool concrete_assumptions_explicit{false};
+    bool numeric_v1_screen_met{false};
+    bool oracle_separation_reduction_complete{false};
+    bool commitment_binding_reduction_complete{false};
+    bool production_composition_complete{false};
+    std::vector<std::string> missing_premises;
+    std::string note;
+};
+
+[[nodiscard]] SafeQ192ReductionAssessmentV13
+AssessSafeQ192ReductionV13(
+    const SafeQ192QueryBudgetV13& budget,
+    const SafeQ192ReductionPremisesV13& premises,
+    double sha256d_security_floor_bits = 128.0,
+    double poseidon2_security_floor_bits = 128.0);
+
 enum class RecommendedNiropPathV1 : uint8_t {
     None = 0,
     TypedAddAbsorbCustomReduction = 1,
