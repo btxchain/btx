@@ -271,6 +271,112 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    static_poseidon_cs_pins_only_schedule_and_rejects_io_forgeries)
+{
+    const auto inputs = PoseidonInputs();
+    const auto outputs =
+        PoseidonOutputs(inputs);
+    const auto product =
+        BuildStaticPoseidonRoundProductV1(
+            inputs, outputs);
+    BOOST_REQUIRE_MESSAGE(
+        product.valid_foundation,
+        product.note);
+    BOOST_CHECK(
+        product.input_claims_ordinary_witness);
+    BOOST_CHECK(
+        product.output_claims_ordinary_witness);
+    BOOST_CHECK(
+        product.static_schedule_root_pinned);
+    BOOST_CHECK(product.cs_independent_of_io);
+    BOOST_CHECK_EQUAL(
+        product.preprocessed_columns.size(),
+        316U);
+    BOOST_CHECK_EQUAL(
+        product.proof_dependent_preprocessed_columns,
+        0U);
+    BOOST_CHECK(product.executable);
+    BOOST_CHECK_EQUAL(product.violations, 0U);
+    BOOST_CHECK(!product.external_io_bus_complete);
+    BOOST_CHECK(
+        !product.recursive_authority_ready);
+
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT;
+         ++lane) {
+        BOOST_CHECK(
+            std::find(
+                product.preprocessed_columns.begin(),
+                product.preprocessed_columns.end(),
+                product.layout.input_claim[lane]) ==
+            product.preprocessed_columns.end());
+        BOOST_CHECK(
+            std::find(
+                product.preprocessed_columns.begin(),
+                product.preprocessed_columns.end(),
+                product.layout.output_claim[lane]) ==
+            product.preprocessed_columns.end());
+    }
+
+    auto different_inputs = inputs;
+    different_inputs[0][0] =
+        gf::Add(
+            different_inputs[0][0],
+            1);
+    const auto different_outputs =
+        PoseidonOutputs(different_inputs);
+    const auto different =
+        BuildStaticPoseidonRoundProductV1(
+            different_inputs,
+            different_outputs);
+    BOOST_REQUIRE_MESSAGE(
+        different.valid_foundation,
+        different.note);
+    BOOST_CHECK(
+        different.preprocessed_row_group_root ==
+        product.preprocessed_row_group_root);
+
+    auto forged = product.columns;
+    forged[product.layout.input_claim[0]][0] =
+        gf::Add(
+            forged[
+                product.layout.input_claim[0]][0],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(
+            product.cs, forged,
+            product.preprocessed_columns,
+            product.preprocessed_row_group_root),
+        0U);
+
+    forged = product.columns;
+    forged[product.layout.output_claim[3]][29] =
+        gf::Add(
+            forged[
+                product.layout.output_claim[3]][29],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(
+            product.cs, forged,
+            product.preprocessed_columns,
+            product.preprocessed_row_group_root),
+        0U);
+
+    forged = product.columns;
+    forged[product.layout.round_constant[0]][8] =
+        gf::Add(
+            forged[
+                product.layout.round_constant[0]][8],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(
+            product.cs, forged,
+            product.preprocessed_columns,
+            product.preprocessed_row_group_root),
+        0U);
+}
+
+BOOST_AUTO_TEST_CASE(
     poseidon_intermediate_output_and_schedule_forgeries_are_rejected)
 {
     const auto inputs = PoseidonInputs();

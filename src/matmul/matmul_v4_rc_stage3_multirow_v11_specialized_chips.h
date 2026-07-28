@@ -139,6 +139,48 @@ BuildPoseidonRoundProductV1(
         alg_hash::State,
         kVerifierQueriesV1>& claimed_outputs);
 
+/**
+ * Static-CS form of the same round-serial chip.
+ *
+ * Only the round schedule, matrices and constants enter R0.  `input_claim`
+ * and `output_claim` are ordinary witness columns and must be joined to a
+ * proof-tape, transcript or Merkle bus by the caller.  Consequently the
+ * preprocessed root is identical for every legal I/O vector.
+ */
+struct StaticPoseidonRoundProductV1 {
+    PoseidonRoundLayoutV1 layout{};
+    cb::ProgramTable program_table{};
+    aq::AirConstraintSystem<gf::Fp3> cs{};
+    std::vector<std::vector<gf::Fp3>> columns;
+    std::vector<uint32_t> preprocessed_columns;
+    uint256 preprocessed_row_group_root{};
+    uint32_t trace_rows{0};
+    uint32_t trace_columns{0};
+    uint32_t programs{0};
+    uint64_t instructions{0};
+    uint32_t max_degree{0};
+    uint64_t violations{0};
+    uint32_t proof_dependent_preprocessed_columns{0};
+    bool input_claims_ordinary_witness{false};
+    bool output_claims_ordinary_witness{false};
+    bool static_schedule_root_pinned{false};
+    bool cs_independent_of_io{false};
+    bool external_io_bus_complete{false};
+    bool executable{false};
+    bool recursive_authority_ready{false};
+    bool valid_foundation{false};
+    std::string note;
+};
+
+[[nodiscard]] StaticPoseidonRoundProductV1
+BuildStaticPoseidonRoundProductV1(
+    const std::array<
+        alg_hash::State,
+        kVerifierQueriesV1>& inputs,
+    const std::array<
+        alg_hash::State,
+        kVerifierQueriesV1>& claimed_outputs);
+
 struct CanonicalSplitInputV1 {
     uint64_t raw{0};
     uint64_t expected{0};

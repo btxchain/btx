@@ -1003,6 +1003,166 @@ BuildPoseidonRoundProductV1(
     return out;
 }
 
+StaticPoseidonRoundProductV1
+BuildStaticPoseidonRoundProductV1(
+    const std::array<
+        alg_hash::State,
+        kVerifierQueriesV1>& inputs,
+    const std::array<
+        alg_hash::State,
+        kVerifierQueriesV1>& claimed_outputs)
+{
+    StaticPoseidonRoundProductV1 out;
+    const auto witness =
+        BuildPoseidonRoundProductV1(
+            inputs, claimed_outputs);
+    out.layout = witness.layout;
+    out.program_table = witness.program_table;
+    out.columns = witness.columns;
+    out.trace_rows = witness.trace_rows;
+    out.trace_columns = witness.trace_columns;
+    out.programs = witness.programs;
+    out.instructions = witness.instructions;
+    out.max_degree = witness.max_degree;
+    if (out.program_table.programs.empty() ||
+        out.columns.size() !=
+            out.trace_columns) {
+        out.note =
+            "stage3:v11_specialized:"
+            "static_poseidon_witness_failure:" +
+            witness.note;
+        return out;
+    }
+
+    /*
+     * Rebuild the CS instead of retaining the product's CS: the product form
+     * intentionally pins its I/O claims for differential testing, whereas a
+     * recursive verifier must receive those claims from an authenticated
+     * proof/transcript bus.  Only immutable schedule data belongs in R0.
+     */
+    out.cs = ConstraintSystemFromTable(
+        out.program_table, out.trace_rows);
+    auto add_array =
+        [&out](const auto& columns) {
+            out.preprocessed_columns.insert(
+                out.preprocessed_columns.end(),
+                columns.begin(), columns.end());
+        };
+    out.preprocessed_columns.push_back(
+        out.layout.first);
+    out.preprocessed_columns.push_back(
+        out.layout.last);
+    out.preprocessed_columns.push_back(
+        out.layout.continue_round);
+    out.preprocessed_columns.push_back(
+        out.layout.active_round);
+    for (const auto& row :
+         out.layout.pre_matrix) {
+        add_array(row);
+    }
+    add_array(out.layout.round_constant);
+    add_array(out.layout.sbox_active);
+    for (const auto& row :
+         out.layout.post_matrix) {
+        add_array(row);
+    }
+
+    const auto is_preprocessed =
+        [&out](uint32_t column) {
+            return std::find(
+                out.preprocessed_columns.begin(),
+                out.preprocessed_columns.end(),
+                column) !=
+                out.preprocessed_columns.end();
+        };
+    out.input_claims_ordinary_witness = true;
+    out.output_claims_ordinary_witness = true;
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT;
+         ++lane) {
+        out.input_claims_ordinary_witness =
+            out.input_claims_ordinary_witness &&
+            !is_preprocessed(
+                out.layout.input_claim[lane]);
+        out.output_claims_ordinary_witness =
+            out.output_claims_ordinary_witness &&
+            !is_preprocessed(
+                out.layout.output_claim[lane]);
+    }
+    out.proof_dependent_preprocessed_columns =
+        (!out.input_claims_ordinary_witness
+            ? alg_hash::kAlgHashT
+            : 0) +
+        (!out.output_claims_ordinary_witness
+            ? alg_hash::kAlgHashT
+            : 0);
+
+    bool root_ok = false;
+    InstallPreprocessedRoot(
+        out.cs, out.columns,
+        out.preprocessed_columns,
+        out.preprocessed_row_group_root,
+        root_ok);
+    out.static_schedule_root_pinned = root_ok;
+    out.cs_independent_of_io =
+        out.preprocessed_columns.size() == 316 &&
+        out.proof_dependent_preprocessed_columns == 0;
+    out.violations =
+        root_ok
+        ? RecountViolationsV1(
+            out.cs, out.columns,
+            out.preprocessed_columns,
+            out.preprocessed_row_group_root)
+        : std::numeric_limits<uint64_t>::max();
+    out.external_io_bus_complete = false;
+    out.executable =
+        witness.exact_native_outputs &&
+        out.programs == 108 &&
+        out.instructions == 1668 &&
+        out.max_degree <= 3 &&
+        out.trace_columns == 424 &&
+        out.violations == 0;
+    out.recursive_authority_ready = false;
+    out.valid_foundation =
+        out.input_claims_ordinary_witness &&
+        out.output_claims_ordinary_witness &&
+        out.static_schedule_root_pinned &&
+        out.cs_independent_of_io &&
+        out.executable &&
+        !out.external_io_bus_complete &&
+        !out.recursive_authority_ready;
+    out.note = out.valid_foundation
+        ? "stage3:v11_specialized:"
+          "static_poseidon_round_cs_foundation:"
+          "external_io_bus_pending"
+        : "stage3:v11_specialized:"
+          "static_poseidon_round_cs_failure:"
+          "input_witness=" +
+          std::to_string(
+              out.input_claims_ordinary_witness
+              ? 1 : 0) +
+          ":output_witness=" +
+          std::to_string(
+              out.output_claims_ordinary_witness
+              ? 1 : 0) +
+          ":proof_r0=" +
+          std::to_string(
+              out.proof_dependent_preprocessed_columns) +
+          ":r0=" +
+          std::to_string(
+              out.static_schedule_root_pinned
+              ? 1 : 0) +
+          ":static=" +
+          std::to_string(
+              out.cs_independent_of_io ? 1 : 0) +
+          ":exec=" +
+          std::to_string(
+              out.executable ? 1 : 0) +
+          ":violations=" +
+          std::to_string(out.violations);
+    return out;
+}
+
 CanonicalSplitLayoutV1
 CanonicalSplitChipLayoutV1()
 {
