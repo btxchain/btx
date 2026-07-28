@@ -311,6 +311,66 @@ struct RCStage3BuilderProgramCtlDirectAliasLayoutV1 {
     bool all_four_same_trace{false};
 };
 
+inline constexpr uint16_t kRCStage3EpisodeGemmProgramBatchVersionV1 = 1;
+inline constexpr uint32_t kRCStage3EpisodeGemmProgramBatchLaneCountV1 = 4;
+inline constexpr uint32_t kRCStage3EpisodeGemmProgramBatchBusBaseV1 =
+    0x47200000U;
+
+/**
+ * Public roots for the exact EpisodeGemmSumcheck ProgramTable.  The signed
+ * range half of the product is pinned by RCStage3SignedRangePin; its 33
+ * parameter columns are verifier-recomputed from max_abs/logical_rows.
+ */
+struct RCStage3EpisodeGemmProgramAirPublicPinV1 {
+    uint16_t version{kRCStage3EpisodeGemmProgramBatchVersionV1};
+    uint256 statement_commitment{};
+    uint32_t n_rows{0};
+    uint32_t layer_ordinal{0};
+    uint256 gemm_program_external_sha256d{};
+    alg_hash::Digest gemm_program_recursive_alg_hash{};
+    uint256 range_program_external_sha256d{};
+    alg_hash::Digest range_program_recursive_alg_hash{};
+    /** Canonical GEMM order is GF/Y, A, B. */
+    std::array<uint256, 3> gemm_column_roots{};
+};
+
+/** Canonical two-participant CTL lane.  pins[0] is the EpisodeGemm producer
+ * proved in this product; pins[1] is the opposite CompositionLink BUS PORT.
+ * The latter accumulator is proof-owned here, but its source relation and
+ * recursive child remain outside this proof.  Consequently this type alone
+ * is not evidence of consumer arithmetic or recursive semantic closure. */
+struct RCStage3EpisodeGemmProgramCtlLaneV1 {
+    RCStage3RelationEndpoint endpoint{};
+    RCStage3CtlManifest manifest;
+    std::array<RCStage3CtlChildPin, 2> pins;
+};
+
+struct RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1 {
+    uint32_t gemm_columns{0};
+    uint32_t range_column_base{0};
+    uint32_t range_columns{0};
+    uint32_t relation_columns{0};
+    uint32_t total_columns{0};
+    std::array<RCStage3RelationCtlDirectAliasLayout,
+               kRCStage3EpisodeGemmProgramBatchLaneCountV1>
+        producer_lanes;
+    std::array<RCStage3RelationCtlDirectAliasLayout,
+               kRCStage3EpisodeGemmProgramBatchLaneCountV1>
+        consumer_lanes;
+    bool canonical_programs_selected{false};
+    /** Manifest/range-shard identity is in the proof seed.  Vector-root
+     * ownership remains the existing semantic-opening relation. */
+    bool manifest_context_bound{false};
+    bool all_four_dual_port_bus_relations{false};
+    /** These remain false until the canonical consumer relation programs and
+     * their recursive verifier children are composed into the same parent.
+     * A proof-owned receive accumulator is not a consumer relation proof. */
+    bool consumer_relation_programs_included{false};
+    bool consumer_arithmetic_owned{false};
+    bool recursive_children_consumed{false};
+    bool semantic_closure{false};
+};
+
 /** Exact-row variant using the degree-two CTL layout.  Unlike the generic
  * padded CTL, this product keeps n_coeffs == n_rows, so an existing
  * relation-owned VALUE root can be reused verbatim as the CTL VALUE root. */
@@ -452,6 +512,71 @@ VerifyRCStage3BuilderProgramCtlDirectAliasProofV1(
     const RCStage3BuilderProgramAirPublicPinV1& pin,
     const std::array<RCStage3BuilderProgramCtlLaneV1,
                      kRCStage3BuilderProgramAliasLaneCountV1>& lanes,
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    std::string* why = nullptr);
+
+/** Exact send/receive bus schedule for one of A, B, Y or SignedRange.
+ * This describes the CTL ports only; it does not attest that the receive
+ * port's source relation or recursive child is present. */
+[[nodiscard]] RCStage3CtlSchedule
+BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    RCStage3RelationEndpoint endpoint,
+    bool producer);
+
+/** Domain-separated prechallenge seed for a canonical GEMM batch lane. */
+[[nodiscard]] uint256
+ComputeRCStage3EpisodeGemmProgramCtlTranscriptSeedV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    RCStage3RelationEndpoint endpoint);
+
+[[nodiscard]] bool
+BuildRCStage3EpisodeGemmProgramCtlDirectAliasConstraintSystemV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>& lanes,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1* layout = nullptr,
+    std::string* why = nullptr);
+
+/** Materialize the exact four dual-port bus relations.  Both accumulator
+ * traces are proof-owned and directly alias the EpisodeGemm-side canonical
+ * program cells.  The consumer relation programs are deliberately absent;
+ * consult the fail-closed layout fields before any completeness accounting. */
+[[nodiscard]] bool
+BuildRCStage3EpisodeGemmProgramCtlDirectAliasWitnessV1(
+    const RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1& layout,
+    const std::vector<std::vector<gkr_field::Fp3>>& gemm_columns,
+    const std::vector<std::vector<gkr_field::Fp3>>&
+        signed_range_program_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        producer_ctl_witnesses,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        consumer_ctl_witnesses,
+    std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint256
+ComputeRCStage3EpisodeGemmProgramCtlDirectAliasSeedV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>& lanes);
+
+[[nodiscard]] bool
+VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>& lanes,
     const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
     std::string* why = nullptr);
 

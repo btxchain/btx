@@ -770,6 +770,422 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    canonical_gemm_and_range_programs_build_four_dual_port_bus_relations)
+{
+    namespace aq = air_quotient;
+    namespace cb = constraint_bytecode;
+    namespace gf = gkr_field;
+    namespace pf = universal_topology;
+    namespace sites = soundness_scenarios;
+
+    RCEpisodeParams params;
+    params.rounds = 1;
+    params.d_head = 32;
+    params.n_q = 32;
+    params.n_ctx = 32;
+    params.L_lyr = 1;
+    params.d_model = 32;
+    params.d_ff = 32;
+    params.b_seq = 32;
+    params.T_leaf = 32;
+    const auto trace_layout = RCGkrTraceLayout(params);
+    std::vector<RCStage3GemmExtractLayerBindings> bindings(
+        trace_layout.layers.size());
+    for (uint32_t layer = 0;
+         layer < bindings.size(); ++layer) {
+        auto& binding = bindings[layer];
+        binding.extract_prf = Filled(0x11 + layer);
+        binding.operand_a_root = Filled(0x21 + layer);
+        binding.operand_b_root = Filled(0x31 + layer);
+        binding.gemm_y_root = Filled(0x41 + layer);
+        binding.extract_input_root = Filled(0x51 + layer);
+        binding.extract_output_root = Filled(0x61 + layer);
+        binding.gemm_proof_root = Filled(0x71 + layer);
+        binding.extract_recursive_root = Filled(0x81 + layer);
+        binding.scale_schedule_root = Filled(0x91 + layer);
+        binding.ctl_terminal_root = Filled(0xa1 + layer);
+    }
+    std::string why;
+    const uint256 statement_commitment =
+        RCStage3EpisodeStatementCommitment(Statement());
+    const auto built_manifest =
+        BuildRCStage3GemmExtractManifest(
+            params, statement_commitment,
+            bindings, &why);
+    BOOST_REQUIRE_MESSAGE(
+        built_manifest.has_value(), why);
+    const auto& manifest = *built_manifest;
+    auto range_pin =
+        MakeRCStage3SignedRangePin(
+            manifest, 0, 0, &why);
+    BOOST_REQUIRE_MESSAGE(range_pin.has_value(), why);
+    const uint32_t N = range_pin->n_rows;
+    BOOST_REQUIRE_EQUAL(N, 1024U);
+
+    std::vector<int64_t> signed_values(
+        range_pin->logical_rows);
+    for (uint32_t row = 0;
+         row < signed_values.size(); ++row) {
+        const int64_t magnitude =
+            static_cast<int64_t>(
+                row % (range_pin->max_abs + 1));
+        signed_values[row] =
+            row % 3 == 0 ? -magnitude : magnitude;
+    }
+    std::vector<std::vector<gf::Fp3>> range_columns;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3SignedRangeColumns(
+            *range_pin, signed_values,
+            range_columns, &why),
+        why);
+    constexpr uint32_t RANGE_MAX_ABS =
+        kRCStage3SignedRangeColumns;
+    constexpr uint32_t RANGE_MAX_BITS =
+        RANGE_MAX_ABS + 1;
+    constexpr uint32_t RANGE_LOGICAL_ROWS =
+        RANGE_MAX_BITS + kRCStage3SignedRangeBits;
+    range_columns.resize(
+        RANGE_LOGICAL_ROWS + 1,
+        std::vector<gf::Fp3>(
+            N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        range_columns[RANGE_MAX_ABS][row] =
+            gf::FromU64_3(range_pin->max_abs);
+        range_columns[RANGE_LOGICAL_ROWS][row] =
+            gf::FromU64_3(range_pin->logical_rows);
+        for (uint32_t bit = 0;
+             bit < kRCStage3SignedRangeBits;
+             ++bit) {
+            range_columns[RANGE_MAX_BITS + bit][row] =
+                gf::FromU64_3(
+                    (range_pin->max_abs >> bit) & 1U);
+        }
+    }
+
+    std::vector<std::vector<gf::Fp3>> gemm_columns(
+        3, std::vector<gf::Fp3>(
+               N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        gemm_columns[1][row] = gf::FromU64_3(3);
+        gemm_columns[2][row] = gf::FromU64_3(5);
+        gemm_columns[0][row] = gf::FromU64_3(15);
+    }
+    const uint32_t n_coeffs =
+        FriNextPow2(3 * N - 3);
+    for (uint32_t column = 0;
+         column < kRCStage3SignedRangeColumns;
+         ++column) {
+        range_pin->column_roots[column].root =
+            aq::AirCommittedValuesRoot<gf::Fp3>(
+                range_columns[column], n_coeffs);
+    }
+
+    cb::ProgramTable gemm_table;
+    cb::ProgramTable range_table;
+    BOOST_REQUIRE_MESSAGE(
+        pf::BuildCanonicalProductionFamilyProgramTableV1(
+            sites::ProductionProofSiteKind::
+                EpisodeGemmSumcheck,
+            RCStage3RelationRole::EpisodeGemm,
+            gemm_table, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        pf::BuildCanonicalProductionFamilyProgramTableV1(
+            sites::ProductionProofSiteKind::
+                EpisodeSignedRange,
+            RCStage3RelationRole::EpisodeGemm,
+            range_table, &why),
+        why);
+    RCStage3EpisodeGemmProgramAirPublicPinV1 pin;
+    pin.statement_commitment = statement_commitment;
+    pin.n_rows = N;
+    pin.layer_ordinal = 0;
+    const auto gemm_keys =
+        cb::CommitProgramTableForExternalAndRecursiveUse(
+            gemm_table);
+    const auto range_keys =
+        cb::CommitProgramTableForExternalAndRecursiveUse(
+            range_table);
+    BOOST_REQUIRE(gemm_keys.same_canonical_serialization);
+    BOOST_REQUIRE(range_keys.same_canonical_serialization);
+    pin.gemm_program_external_sha256d =
+        gemm_keys.external_sha256d;
+    pin.gemm_program_recursive_alg_hash =
+        gemm_keys.recursive_alg_hash;
+    pin.range_program_external_sha256d =
+        range_keys.external_sha256d;
+    pin.range_program_recursive_alg_hash =
+        range_keys.recursive_alg_hash;
+    for (uint32_t column = 0; column < 3; ++column) {
+        pin.gemm_column_roots[column] =
+            aq::AirCommittedValuesRoot<gf::Fp3>(
+                gemm_columns[column], n_coeffs);
+    }
+
+    const std::array<RCStage3RelationEndpoint, 4> endpoints{
+        RCStage3RelationEndpoint::EpisodeGemmOperandA,
+        RCStage3RelationEndpoint::EpisodeGemmOperandB,
+        RCStage3RelationEndpoint::EpisodeGemmOutputY,
+        RCStage3RelationEndpoint::EpisodeGemmSignedRange,
+    };
+    const std::array<uint32_t, 4> source_columns{
+        1, 2, 0,
+        3 + kRCStage3RangeValue,
+    };
+    std::vector<std::vector<gf::Fp3>> relation_columns =
+        gemm_columns;
+    relation_columns.insert(
+        relation_columns.end(),
+        range_columns.begin(), range_columns.end());
+    std::array<RCStage3EpisodeGemmProgramCtlLaneV1, 4>
+        lanes;
+    std::array<RCStage3CtlWitness, 4> producer_witnesses;
+    std::array<RCStage3CtlWitness, 4> consumer_witnesses;
+    const uint32_t shard_ordinal =
+        RCStage3SignedRangeGlobalShardOrdinal(
+            manifest, *range_pin);
+    BOOST_REQUIRE_NE(
+        shard_ordinal,
+        std::numeric_limits<uint32_t>::max());
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        auto& lane = lanes[lane_index];
+        lane.endpoint = endpoints[lane_index];
+        const auto producer =
+            BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                manifest, *range_pin,
+                lane.endpoint, true);
+        const auto consumer =
+            BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                manifest, *range_pin,
+                lane.endpoint, false);
+        BOOST_REQUIRE(!producer.events.empty());
+        BOOST_REQUIRE_EQUAL(
+            producer.events.size(),
+            consumer.events.size());
+        lane.manifest.bus_id =
+            kRCStage3EpisodeGemmProgramBatchBusBaseV1 +
+            shard_ordinal * lanes.size() + lane_index;
+        lane.manifest.transcript_seed =
+            ComputeRCStage3EpisodeGemmProgramCtlTranscriptSeedV1(
+                manifest, *range_pin, lane.endpoint);
+        lane.manifest.participants = {
+            {RCStage3RelationRole::EpisodeGemm,
+             producer.events.size(),
+             producer.events.size(), 0,
+             CommitRCStage3CtlSchedule(producer)},
+            {RCStage3RelationRole::CompositionLink,
+             consumer.events.size(), 0,
+             consumer.events.size(),
+             CommitRCStage3CtlSchedule(consumer)},
+        };
+        const std::vector<gf::Fp3> values(
+            relation_columns[source_columns[lane_index]].begin(),
+            relation_columns[source_columns[lane_index]].begin() +
+                producer.events.size());
+        for (uint32_t participant_index = 0;
+             participant_index < 2;
+             ++participant_index) {
+            const auto& participant =
+                lane.manifest.participants[
+                    participant_index];
+            auto& child = lane.pins[participant_index];
+            child.role = participant.role;
+            child.bus_id = lane.manifest.bus_id;
+            child.event_count = participant.event_count;
+            child.send_count = participant.send_count;
+            child.receive_count =
+                participant.receive_count;
+            child.schedule_commitment =
+                participant.schedule_commitment;
+            child.trace_commitment =
+                ComputeRCStage3CtlPrechallengeTraceCommitment(
+                    participant_index == 0
+                        ? producer : consumer,
+                    values);
+            BOOST_REQUIRE(!child.trace_commitment.IsNull());
+        }
+        RCStage3CtlChallenges challenges;
+        BOOST_REQUIRE_MESSAGE(
+            DeriveRCStage3CtlChallenges(
+                lane.manifest,
+                {lane.pins[0], lane.pins[1]},
+                challenges, &why),
+            why);
+        producer_witnesses[lane_index] =
+            BuildRCStage3CtlWitness(
+                producer, values, challenges);
+        consumer_witnesses[lane_index] =
+            BuildRCStage3CtlWitness(
+                consumer, values, challenges);
+        BOOST_REQUIRE_MESSAGE(
+            producer_witnesses[lane_index].ok,
+            producer_witnesses[lane_index].note);
+        BOOST_REQUIRE_MESSAGE(
+            consumer_witnesses[lane_index].ok,
+            consumer_witnesses[lane_index].note);
+        lane.pins[0].terminal =
+            producer_witnesses[lane_index].terminal;
+        lane.pins[1].terminal =
+            consumer_witnesses[lane_index].terminal;
+        const uint256 challenge_commitment =
+            CommitRCStage3CtlChallenges(challenges);
+        lane.pins[0].challenge_commitment =
+            challenge_commitment;
+        lane.pins[1].challenge_commitment =
+            challenge_commitment;
+        lane.pins[0].auxiliary_commitment =
+            Filled(0xc0 + lane_index);
+        lane.pins[1].auxiliary_commitment =
+            Filled(0xd0 + lane_index);
+    }
+    // Commit-then-challenge ordering: both sides of one equality link absorb
+    // the same two prechallenge trace commitments and therefore share exactly
+    // one Fp3 challenge tuple.  The endpoint-tagged transcript seed differs
+    // across links, so no A/B/Y/range challenge tuple is reused.
+    for (uint32_t lane = 0; lane < lanes.size(); ++lane) {
+        BOOST_CHECK(
+            lanes[lane].pins[0].challenge_commitment ==
+            lanes[lane].pins[1].challenge_commitment);
+    }
+    for (uint32_t left = 0; left < lanes.size(); ++left) {
+        for (uint32_t right = left + 1;
+             right < lanes.size(); ++right) {
+            BOOST_CHECK(
+                lanes[left].pins[0].challenge_commitment !=
+                lanes[right].pins[0].challenge_commitment);
+        }
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1 layout;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeGemmProgramCtlDirectAliasConstraintSystemV1(
+            manifest, *range_pin, pin, lanes,
+            cs, &layout, &why),
+        why);
+    BOOST_CHECK(layout.canonical_programs_selected);
+    BOOST_CHECK(layout.manifest_context_bound);
+    BOOST_CHECK(layout.all_four_dual_port_bus_relations);
+    BOOST_CHECK(!layout.consumer_relation_programs_included);
+    BOOST_CHECK(!layout.consumer_arithmetic_owned);
+    BOOST_CHECK(!layout.recursive_children_consumed);
+    BOOST_CHECK(!layout.semantic_closure);
+    BOOST_CHECK_EQUAL(layout.relation_columns, 105U);
+    BOOST_CHECK_EQUAL(layout.total_columns, 177U);
+    BOOST_CHECK_EQUAL(cs.QuotientLen(), 3 * N - 3);
+    std::vector<std::vector<gf::Fp3>> columns;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeGemmProgramCtlDirectAliasWitnessV1(
+            layout, gemm_columns, range_columns,
+            producer_witnesses, consumer_witnesses,
+            columns, &why),
+        why);
+    const uint256 seed =
+        ComputeRCStage3EpisodeGemmProgramCtlDirectAliasSeedV1(
+            manifest, *range_pin, pin, lanes);
+    BOOST_REQUIRE(!seed.IsNull());
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3>(
+            cs, columns, seed);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE(proved.division_exact);
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        lanes[lane_index].pins[0].auxiliary_commitment =
+            ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proved.proof,
+                layout.producer_lanes[lane_index]);
+        BOOST_REQUIRE(
+            !lanes[lane_index]
+                 .pins[0]
+                 .auxiliary_commitment.IsNull());
+        lanes[lane_index].pins[1].auxiliary_commitment =
+            ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proved.proof,
+                layout.consumer_lanes[lane_index]);
+        BOOST_REQUIRE(
+            !lanes[lane_index]
+                 .pins[1]
+                 .auxiliary_commitment.IsNull());
+    }
+    BOOST_REQUIRE_MESSAGE(
+        VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
+            manifest, *range_pin, pin, lanes,
+            proved.proof, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL GEMM A/B/Y/range dual-port same-trace accept: rows="
+        << cs.n_rows << " cols=" << cs.n_columns
+        << " constraints=" << cs.constraints.size()
+        << " n_coeffs=" << proved.proof.batch.n_coeffs);
+
+    // RESIDUAL, exhibited rather than hidden: the opposite CTL accumulator is
+    // proof-owned, but an independent consumer relation is not an input to
+    // this product.  Changing such an unattached relation claim therefore
+    // cannot change verification.  This acceptance is intentional evidence
+    // that the construction is a dual-port bus relation only and MUST NOT
+    // increment consumer-semantic or recursive-closure accounting.
+    std::array<std::vector<gf::Fp3>, 4>
+        unattached_consumer_relation_values;
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& source =
+            relation_columns[source_columns[lane_index]];
+        unattached_consumer_relation_values[lane_index].assign(
+            source.begin(), source.end());
+    }
+    unattached_consumer_relation_values[2][17] =
+        gf::Add(
+            unattached_consumer_relation_values[2][17],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !gf::Eq(
+            unattached_consumer_relation_values[2][17],
+            relation_columns[source_columns[2]][17]));
+    BOOST_CHECK_MESSAGE(
+        VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
+            manifest, *range_pin, pin, lanes,
+            proved.proof, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "EVIDENCE-ONLY residual: unattached consumer arithmetic is outside "
+        "the dual-port bus proof; semantic_closure remains false");
+
+    auto detached_aux = lanes;
+    detached_aux[0].pins[1].auxiliary_commitment =
+        Filled(0xee);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
+            manifest, *range_pin, pin, detached_aux,
+            proved.proof, &why));
+    BOOST_CHECK(
+        why.find("ctl_auxiliary_commitment") !=
+        std::string::npos);
+
+    auto forged_columns = columns;
+    forged_columns[
+        layout.consumer_lanes[2].ctl_value_column][17] =
+        gf::Add(
+            forged_columns[
+                layout.consumer_lanes[2].ctl_value_column][17],
+            gf::Fp3::One());
+    aq::AirProveOptions adversarial;
+    adversarial.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProve<gf::Fp3>(
+            cs, forged_columns, seed, adversarial);
+    BOOST_REQUIRE_MESSAGE(forged.ok, forged.note);
+    BOOST_CHECK(!forged.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerify<gf::Fp3>(
+            cs, forged.proof, seed, &why));
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL forged GEMM-Y consumer CTL VALUE rejected: "
+        << why);
+}
+
+BOOST_AUTO_TEST_CASE(
     degree2_direct_alias_preserves_relation_root_and_rejects_detach)
 {
     namespace aq = air_quotient;

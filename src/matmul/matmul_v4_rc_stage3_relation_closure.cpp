@@ -33,6 +33,10 @@ constexpr char SIGNED_RANGE_DUAL_CTL_AUX_DOMAIN[] =
     "BTX_RC_STAGE3_SIGNED_RANGE_DUAL_CTL_AUX_V1";
 constexpr char BUILDER_PROGRAM_ALIAS_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_BUILDER_PROGRAM_CTL_ALIAS_V1";
+constexpr char EPISODE_GEMM_PROGRAM_BATCH_SEED_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_GEMM_PROGRAM_CTL_BATCH_V1";
+constexpr char EPISODE_GEMM_PROGRAM_CTL_TRANSCRIPT_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_GEMM_PROGRAM_CTL_TRANSCRIPT_V1";
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_COUPLED_ENDPOINT_AIR_V1";
 
@@ -55,6 +59,28 @@ constexpr std::array<uint32_t,
             EpisodeBuilderOperandXof,
         universal_topology::production_family_col_v1::
             EpisodeBuilderTrace,
+    };
+
+constexpr std::array<RCStage3RelationEndpoint,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>
+    EPISODE_GEMM_BATCH_ENDPOINTS{
+        RCStage3RelationEndpoint::EpisodeGemmOperandA,
+        RCStage3RelationEndpoint::EpisodeGemmOperandB,
+        RCStage3RelationEndpoint::EpisodeGemmOutputY,
+        RCStage3RelationEndpoint::EpisodeGemmSignedRange,
+    };
+constexpr uint32_t EPISODE_GEMM_PROGRAM_COLUMNS = 3;
+constexpr uint32_t EPISODE_GEMM_RANGE_PROGRAM_COLUMNS =
+    kRCStage3SignedRangeColumns + 2 +
+    kRCStage3SignedRangeBits;
+constexpr std::array<uint32_t,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>
+    EPISODE_GEMM_BATCH_SOURCE_COLUMNS{
+        1,
+        2,
+        0,
+        EPISODE_GEMM_PROGRAM_COLUMNS +
+            kRCStage3RangeValue,
     };
 
 const std::vector<RCStage3RelationEndpoint> EPISODE_BUILDER{
@@ -691,6 +717,228 @@ bool ResolveBuilderProgramAirV1(
         out.preprocessed_roots.emplace_back(
             column, pin.relation_column_roots[column]);
     }
+    return true;
+}
+
+uint256 ConstantProgramColumnRootV1(
+    const Fp3& value,
+    uint32_t n_rows,
+    uint32_t n_coeffs)
+{
+    if (n_rows == 0 || n_coeffs < n_rows) return {};
+    return air_quotient::AirCommittedValuesRoot<Fp3>(
+        std::vector<Fp3>(n_rows, value), n_coeffs);
+}
+
+std::vector<uint256> ExpectedSignedRangeProgramRootsV1(
+    const RCStage3SignedRangePin& pin,
+    uint32_t n_coeffs)
+{
+    constexpr uint32_t MAX_ABS =
+        kRCStage3SignedRangeColumns;
+    constexpr uint32_t MAX_ABS_BITS = MAX_ABS + 1;
+    constexpr uint32_t LOGICAL_ROWS =
+        MAX_ABS_BITS + kRCStage3SignedRangeBits;
+    static_assert(
+        LOGICAL_ROWS + 1 ==
+        EPISODE_GEMM_RANGE_PROGRAM_COLUMNS);
+    if (pin.column_roots.size() !=
+            kRCStage3SignedRangeColumns ||
+        n_coeffs < pin.n_rows) {
+        return {};
+    }
+    std::vector<uint256> roots(
+        EPISODE_GEMM_RANGE_PROGRAM_COLUMNS);
+    for (uint32_t column = 0;
+         column < kRCStage3SignedRangeColumns;
+         ++column) {
+        if (pin.column_roots[column].column != column ||
+            pin.column_roots[column].root.IsNull()) {
+            return {};
+        }
+        roots[column] = pin.column_roots[column].root;
+    }
+    roots[MAX_ABS] = ConstantProgramColumnRootV1(
+        gkr_field::FromU64_3(pin.max_abs),
+        pin.n_rows, n_coeffs);
+    for (uint32_t bit = 0;
+         bit < kRCStage3SignedRangeBits;
+         ++bit) {
+        roots[MAX_ABS_BITS + bit] =
+            ConstantProgramColumnRootV1(
+                gkr_field::FromU64_3(
+                    (pin.max_abs >> bit) & 1U),
+                pin.n_rows, n_coeffs);
+    }
+    roots[LOGICAL_ROWS] = ConstantProgramColumnRootV1(
+        gkr_field::FromU64_3(pin.logical_rows),
+        pin.n_rows, n_coeffs);
+    if (std::any_of(
+            roots.begin(), roots.end(),
+            [](const uint256& root) {
+                return root.IsNull();
+            })) {
+        return {};
+    }
+    return roots;
+}
+
+bool ResolveEpisodeGemmProgramBatchAirV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    AirCS& out,
+    std::vector<uint256>& relation_roots,
+    std::string* why)
+{
+    out = {};
+    relation_roots.clear();
+    if (pin.version !=
+            kRCStage3EpisodeGemmProgramBatchVersionV1 ||
+        pin.statement_commitment.IsNull() ||
+        pin.statement_commitment != manifest.statement_commitment ||
+        pin.statement_commitment != range_pin.statement_commitment ||
+        pin.n_rows != range_pin.n_rows ||
+        pin.layer_ordinal != range_pin.layer_ordinal ||
+        pin.layer_ordinal >= manifest.layers.size() ||
+        range_pin.manifest_commitment !=
+            ComputeRCStage3GemmExtractManifestCommitment(manifest) ||
+        !ValidateRCStage3GemmExtractManifest(manifest, why)) {
+        return Fail(why, "gemm_batch:public_pin_shape");
+    }
+    for (const auto& root : pin.gemm_column_roots) {
+        if (root.IsNull()) {
+            return Fail(why, "gemm_batch:null_gemm_root");
+        }
+    }
+
+    // Validate the fully populated range pin against the exact manifest before
+    // replacing the native callbacks by their canonical bytecode equivalent.
+    AirCS native_range;
+    if (!ResolveRCStage3SignedRangeCtlAlignedConstraintSystem(
+            manifest, range_pin, native_range, why)) {
+        return Fail(why, "gemm_batch:range_pin");
+    }
+
+    constraint_bytecode::ProgramTable gemm_table;
+    constraint_bytecode::ProgramTable range_table;
+    if (!universal_topology::
+            BuildCanonicalProductionFamilyProgramTableV1(
+                soundness_scenarios::ProductionProofSiteKind::
+                    EpisodeGemmSumcheck,
+                RCStage3RelationRole::EpisodeGemm,
+                gemm_table, why) ||
+        !universal_topology::
+            BuildCanonicalProductionFamilyProgramTableV1(
+                soundness_scenarios::ProductionProofSiteKind::
+                    EpisodeSignedRange,
+                RCStage3RelationRole::EpisodeGemm,
+                range_table, why)) {
+        return Fail(why, "gemm_batch:canonical_program");
+    }
+    const auto gemm_keys =
+        constraint_bytecode::
+            CommitProgramTableForExternalAndRecursiveUse(gemm_table);
+    const auto range_keys =
+        constraint_bytecode::
+            CommitProgramTableForExternalAndRecursiveUse(range_table);
+    if (!gemm_keys.same_canonical_serialization ||
+        !range_keys.same_canonical_serialization ||
+        gemm_keys.external_sha256d !=
+            pin.gemm_program_external_sha256d ||
+        gemm_keys.recursive_alg_hash !=
+            pin.gemm_program_recursive_alg_hash ||
+        range_keys.external_sha256d !=
+            pin.range_program_external_sha256d ||
+        range_keys.recursive_alg_hash !=
+            pin.range_program_recursive_alg_hash ||
+        gemm_table.current_width !=
+            EPISODE_GEMM_PROGRAM_COLUMNS ||
+        range_table.current_width !=
+            EPISODE_GEMM_RANGE_PROGRAM_COLUMNS ||
+        gemm_table.challenge_width != 0 ||
+        range_table.challenge_width != 0) {
+        return Fail(why, "gemm_batch:program_key_or_shape");
+    }
+
+    AirCS gemm_cs;
+    AirCS range_cs;
+    if (!constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                gemm_table, pin.n_rows, gemm_cs, why) ||
+        !constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                range_table, pin.n_rows, range_cs, why)) {
+        return Fail(why, "gemm_batch:program_air");
+    }
+
+    const uint64_t quotient =
+        3 * static_cast<uint64_t>(pin.n_rows) - 3;
+    if (quotient >
+        std::numeric_limits<uint32_t>::max()) {
+        return Fail(why, "gemm_batch:coefficient_overflow");
+    }
+    const uint32_t n_coeffs =
+        FriNextPow2(static_cast<uint32_t>(quotient));
+    const auto range_roots =
+        ExpectedSignedRangeProgramRootsV1(
+            range_pin, n_coeffs);
+    if (range_roots.size() !=
+        EPISODE_GEMM_RANGE_PROGRAM_COLUMNS) {
+        return Fail(why, "gemm_batch:range_parameter_roots");
+    }
+    for (uint32_t column = 0;
+         column < pin.gemm_column_roots.size();
+         ++column) {
+        gemm_cs.preprocessed_roots.emplace_back(
+            column, pin.gemm_column_roots[column]);
+    }
+    for (uint32_t column = 0;
+         column < range_roots.size();
+         ++column) {
+        range_cs.preprocessed_roots.emplace_back(
+            column, range_roots[column]);
+    }
+
+    out.n_rows = pin.n_rows;
+    out.n_columns =
+        gemm_cs.n_columns + range_cs.n_columns;
+    CopyConstraintFamily(gemm_cs, 0, out);
+    CopyConstraintFamily(
+        range_cs, gemm_cs.n_columns, out);
+
+    // Match the production range/CTL coefficient domain without changing the
+    // accepted relation: ACTIVE is already boolean in the canonical table.
+    AirConstraint alignment;
+    alignment.name =
+        "stage3.gemm_batch.range.active_boolean_square";
+    alignment.kind = air_quotient::AirKind::kEverywhere;
+    alignment.alg_degree = 4;
+    alignment.eval = [](
+                         const std::vector<Fp3>& row,
+                         const std::vector<Fp3>&) {
+        const Fp3 active =
+            row[EPISODE_GEMM_PROGRAM_COLUMNS +
+                kRCStage3RangeActive];
+        const Fp3 boolean_identity =
+            gkr_field::Mul(
+                active,
+                gkr_field::Sub(active, Fp3::One()));
+        return gkr_field::Mul(
+            boolean_identity, boolean_identity);
+    };
+    out.constraints.push_back(std::move(alignment));
+    if (out.QuotientLen() != quotient) {
+        out = {};
+        return Fail(why, "gemm_batch:degree_alignment");
+    }
+
+    relation_roots.assign(
+        pin.gemm_column_roots.begin(),
+        pin.gemm_column_roots.end());
+    relation_roots.insert(
+        relation_roots.end(),
+        range_roots.begin(), range_roots.end());
     return true;
 }
 
@@ -1415,6 +1663,531 @@ bool VerifyRCStage3BuilderProgramCtlDirectAliasProofV1(
             "stage3:relation_closure:"
             "builder_four_endpoint_program_cells_equal_same_trace_ctl_"
             "values_recursive_consumption_pending";
+    }
+    return true;
+}
+
+RCStage3CtlSchedule
+BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    RCStage3RelationEndpoint endpoint,
+    bool producer)
+{
+    RCStage3CtlSchedule out;
+    const auto found = std::find(
+        EPISODE_GEMM_BATCH_ENDPOINTS.begin(),
+        EPISODE_GEMM_BATCH_ENDPOINTS.end(),
+        endpoint);
+    if (found == EPISODE_GEMM_BATCH_ENDPOINTS.end() ||
+        !ValidateRCStage3GemmExtractManifest(
+            manifest, nullptr) ||
+        range_pin.layer_ordinal >= manifest.layers.size() ||
+        range_pin.statement_commitment !=
+            manifest.statement_commitment ||
+        range_pin.manifest_commitment !=
+            ComputeRCStage3GemmExtractManifestCommitment(manifest)) {
+        return out;
+    }
+    const uint32_t lane = static_cast<uint32_t>(
+        found - EPISODE_GEMM_BATCH_ENDPOINTS.begin());
+    const uint32_t rows =
+        endpoint ==
+            RCStage3RelationEndpoint::EpisodeGemmSignedRange
+        ? range_pin.logical_rows
+        : range_pin.n_rows;
+    if (rows == 0) return out;
+    out.events.reserve(rows);
+    for (uint32_t row = 0; row < rows; ++row) {
+        out.events.push_back(
+            {0x474d4100U + lane,
+             range_pin.layer_ordinal,
+             row,
+             static_cast<int8_t>(producer ? 1 : -1)});
+    }
+    return out;
+}
+
+uint256
+ComputeRCStage3EpisodeGemmProgramCtlTranscriptSeedV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    RCStage3RelationEndpoint endpoint)
+{
+    if (BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+            manifest, range_pin, endpoint, true)
+            .events.empty()) {
+        return {};
+    }
+    const uint256 range_commitment =
+        ComputeRCStage3SignedRangePinCommitment(range_pin);
+    const uint256 manifest_commitment =
+        ComputeRCStage3GemmExtractManifestCommitment(manifest);
+    if (range_commitment.IsNull() ||
+        manifest_commitment.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << EPISODE_GEMM_PROGRAM_CTL_TRANSCRIPT_DOMAIN;
+    hash << manifest.statement_commitment;
+    hash << manifest_commitment;
+    hash << range_commitment;
+    hash << static_cast<uint16_t>(endpoint);
+    return hash.GetHash();
+}
+
+bool
+BuildRCStage3EpisodeGemmProgramCtlDirectAliasConstraintSystemV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        lanes,
+    AirCS& out,
+    RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1* layout,
+    std::string* why)
+{
+    out = {};
+    RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1 local;
+    std::vector<uint256> relation_roots;
+    AirCS relation_cs;
+    if (!ResolveEpisodeGemmProgramBatchAirV1(
+            manifest, range_pin, pin,
+            relation_cs, relation_roots, why)) {
+        return false;
+    }
+    const uint32_t shard_ordinal =
+        RCStage3SignedRangeGlobalShardOrdinal(
+            manifest, range_pin);
+    if (shard_ordinal ==
+            std::numeric_limits<uint32_t>::max() ||
+        shard_ordinal >
+            (std::numeric_limits<uint32_t>::max() -
+             kRCStage3EpisodeGemmProgramBatchBusBaseV1 -
+             lanes.size()) /
+                lanes.size()) {
+        return Fail(why, "gemm_batch:shard_ordinal");
+    }
+
+    AirCS current = relation_cs;
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        const RCStage3CtlSchedule producer_schedule =
+            BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                manifest, range_pin,
+                EPISODE_GEMM_BATCH_ENDPOINTS[lane_index],
+                true);
+        const RCStage3CtlSchedule consumer_schedule =
+            BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                manifest, range_pin,
+                EPISODE_GEMM_BATCH_ENDPOINTS[lane_index],
+                false);
+        const uint32_t bus_id =
+            kRCStage3EpisodeGemmProgramBatchBusBaseV1 +
+            shard_ordinal * lanes.size() + lane_index;
+        RCStage3CtlManifest expected;
+        expected.bus_id = bus_id;
+        expected.transcript_seed =
+            ComputeRCStage3EpisodeGemmProgramCtlTranscriptSeedV1(
+                manifest, range_pin,
+                EPISODE_GEMM_BATCH_ENDPOINTS[lane_index]);
+        expected.participants = {
+            {RCStage3RelationRole::EpisodeGemm,
+             producer_schedule.events.size(),
+             producer_schedule.events.size(), 0,
+             CommitRCStage3CtlSchedule(producer_schedule)},
+            {RCStage3RelationRole::CompositionLink,
+             consumer_schedule.events.size(), 0,
+             consumer_schedule.events.size(),
+             CommitRCStage3CtlSchedule(consumer_schedule)},
+        };
+        if (lane.endpoint !=
+                EPISODE_GEMM_BATCH_ENDPOINTS[lane_index] ||
+            lane.manifest != expected ||
+            lane.pins.size() !=
+                expected.participants.size() ||
+            expected.transcript_seed.IsNull()) {
+            out = {};
+            return Fail(why, "gemm_batch:canonical_lane");
+        }
+        for (uint32_t participant_index = 0;
+             participant_index < lane.pins.size();
+             ++participant_index) {
+            const auto& participant =
+                expected.participants[participant_index];
+            const auto& child =
+                lane.pins[participant_index];
+            if (child.role != participant.role ||
+                child.bus_id != expected.bus_id ||
+                child.event_count !=
+                    participant.event_count ||
+                child.send_count != participant.send_count ||
+                child.receive_count !=
+                    participant.receive_count ||
+                child.schedule_commitment !=
+                    participant.schedule_commitment) {
+                out = {};
+                return Fail(
+                    why, "gemm_batch:participant_binding");
+            }
+        }
+        RCStage3CtlChallenges challenges;
+        if (!DeriveRCStage3CtlChallenges(
+                lane.manifest,
+                {lane.pins[0], lane.pins[1]},
+                challenges, why) ||
+            lane.pins[0].challenge_commitment !=
+                CommitRCStage3CtlChallenges(challenges) ||
+            lane.pins[1].challenge_commitment !=
+                lane.pins[0].challenge_commitment) {
+            out = {};
+            return Fail(
+                why, "gemm_batch:challenge_binding");
+        }
+        AirCS next;
+        if (!BuildRCStage3RelationCtlDirectAliasConstraintSystem(
+                current,
+                {producer_schedule, challenges,
+                 lane.pins[0].terminal},
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[lane_index],
+                next, &local.producer_lanes[lane_index], why)) {
+            out = {};
+            return false;
+        }
+        current = std::move(next);
+        if (!BuildRCStage3RelationCtlDirectAliasConstraintSystem(
+                current,
+                {consumer_schedule, challenges,
+                 lane.pins[1].terminal},
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[lane_index],
+                next, &local.consumer_lanes[lane_index], why)) {
+            out = {};
+            return false;
+        }
+        current = std::move(next);
+    }
+
+    out = std::move(current);
+    local.gemm_columns =
+        EPISODE_GEMM_PROGRAM_COLUMNS;
+    local.range_column_base =
+        EPISODE_GEMM_PROGRAM_COLUMNS;
+    local.range_columns =
+        EPISODE_GEMM_RANGE_PROGRAM_COLUMNS;
+    local.relation_columns = relation_cs.n_columns;
+    local.total_columns = out.n_columns;
+    local.canonical_programs_selected =
+        local.relation_columns ==
+            EPISODE_GEMM_PROGRAM_COLUMNS +
+                EPISODE_GEMM_RANGE_PROGRAM_COLUMNS;
+    local.manifest_context_bound =
+        relation_roots.size() ==
+            local.relation_columns &&
+        pin.layer_ordinal == range_pin.layer_ordinal &&
+        pin.statement_commitment ==
+            manifest.statement_commitment;
+    local.all_four_dual_port_bus_relations =
+        local.canonical_programs_selected &&
+        local.manifest_context_bound &&
+        local.total_columns ==
+            local.relation_columns +
+                2 * lanes.size() *
+                    stage3_ctl_col::NUM_COLUMNS;
+    for (uint32_t lane_index = 0;
+         lane_index < local.producer_lanes.size();
+         ++lane_index) {
+        const auto& producer =
+            local.producer_lanes[lane_index];
+        const auto& consumer =
+            local.consumer_lanes[lane_index];
+        const uint32_t producer_base =
+            local.relation_columns +
+            2 * lane_index * stage3_ctl_col::NUM_COLUMNS;
+        local.all_four_dual_port_bus_relations =
+            local.all_four_dual_port_bus_relations &&
+            producer.same_trace && producer.direct_alias &&
+            consumer.same_trace && consumer.direct_alias &&
+            producer.source_column ==
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[lane_index] &&
+            consumer.source_column ==
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[lane_index] &&
+            producer.ctl_column_base == producer_base &&
+            consumer.ctl_column_base ==
+                producer_base + stage3_ctl_col::NUM_COLUMNS;
+    }
+    if (!local.all_four_dual_port_bus_relations) {
+        out = {};
+        return Fail(why, "gemm_batch:internal_layout");
+    }
+    // This product owns both lookup accumulators, but both VALUE columns are
+    // aliases of the EpisodeGemm-side relation.  No CompositionLink relation
+    // ProgramTable and no recursive child verifier is present.  Keep those
+    // distinctions executable and fail-closed instead of promoting a bus
+    // equality milestone into semantic closure.
+    local.consumer_relation_programs_included = false;
+    local.consumer_arithmetic_owned = false;
+    local.recursive_children_consumed = false;
+    local.semantic_closure = false;
+    if (layout != nullptr) *layout = local;
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "canonical_gemm_range_four_dual_port_bus_relations_ok_"
+            "consumer_semantics_pending";
+    }
+    return true;
+}
+
+bool
+BuildRCStage3EpisodeGemmProgramCtlDirectAliasWitnessV1(
+    const RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1& layout,
+    const std::vector<std::vector<Fp3>>& gemm_columns,
+    const std::vector<std::vector<Fp3>>&
+        signed_range_program_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        producer_ctl_witnesses,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        consumer_ctl_witnesses,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.clear();
+    if (!layout.canonical_programs_selected ||
+        !layout.manifest_context_bound ||
+        !layout.all_four_dual_port_bus_relations ||
+        gemm_columns.size() != layout.gemm_columns ||
+        signed_range_program_columns.size() !=
+            layout.range_columns) {
+        return Fail(why, "gemm_batch:witness_shape");
+    }
+    out = gemm_columns;
+    out.insert(
+        out.end(),
+        signed_range_program_columns.begin(),
+        signed_range_program_columns.end());
+    if (out.size() != layout.relation_columns) {
+        out.clear();
+        return Fail(why, "gemm_batch:relation_width");
+    }
+    for (uint32_t lane_index = 0;
+         lane_index < layout.producer_lanes.size();
+         ++lane_index) {
+        std::vector<std::vector<Fp3>> next;
+        if (!BuildRCStage3RelationCtlDirectAliasWitness(
+                layout.producer_lanes[lane_index], out,
+                producer_ctl_witnesses[lane_index],
+                next, why)) {
+            out.clear();
+            return false;
+        }
+        out = std::move(next);
+        if (!BuildRCStage3RelationCtlDirectAliasWitness(
+                layout.consumer_lanes[lane_index], out,
+                consumer_ctl_witnesses[lane_index],
+                next, why)) {
+            out.clear();
+            return false;
+        }
+        out = std::move(next);
+    }
+    if (out.size() != layout.total_columns) {
+        out.clear();
+        return Fail(why, "gemm_batch:witness_width");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "gemm_a_b_y_range_dual_port_bus_values_"
+            "consumer_semantics_pending";
+    }
+    return true;
+}
+
+uint256
+ComputeRCStage3EpisodeGemmProgramCtlDirectAliasSeedV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        lanes)
+{
+    AirCS relation;
+    std::vector<uint256> roots;
+    if (!ResolveEpisodeGemmProgramBatchAirV1(
+            manifest, range_pin, pin,
+            relation, roots, nullptr)) {
+        return {};
+    }
+    HashWriter hash;
+    hash << EPISODE_GEMM_PROGRAM_BATCH_SEED_DOMAIN;
+    hash << pin.version;
+    hash << pin.statement_commitment;
+    hash << pin.n_rows;
+    hash << pin.layer_ordinal;
+    hash << ComputeRCStage3GemmExtractManifestCommitment(
+        manifest);
+    hash << ComputeRCStage3SignedRangePinCommitment(
+        range_pin);
+    hash << pin.gemm_program_external_sha256d;
+    for (const auto& limb :
+         pin.gemm_program_recursive_alg_hash) {
+        hash << limb;
+    }
+    hash << pin.range_program_external_sha256d;
+    for (const auto& limb :
+         pin.range_program_recursive_alg_hash) {
+        hash << limb;
+    }
+    for (const auto& root : roots) hash << root;
+    uint256 seed = hash.GetHash();
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        RCStage3CtlChallenges challenges;
+        if (lane.endpoint !=
+                EPISODE_GEMM_BATCH_ENDPOINTS[lane_index] ||
+            !DeriveRCStage3CtlChallenges(
+                lane.manifest,
+                {lane.pins[0], lane.pins[1]},
+                challenges, nullptr)) {
+            return {};
+        }
+        const auto producer_schedule =
+            BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                manifest, range_pin, lane.endpoint, true);
+        seed =
+            ComputeRCStage3RelationCtlDirectAliasSeed(
+                lane.endpoint, seed, producer_schedule, challenges,
+                lane.pins[0].terminal,
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[
+                    lane_index]);
+        if (seed.IsNull()) return {};
+        const auto consumer_schedule =
+            BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                manifest, range_pin, lane.endpoint, false);
+        seed =
+            ComputeRCStage3RelationCtlDirectAliasSeed(
+                lane.endpoint, seed, consumer_schedule, challenges,
+                lane.pins[1].terminal,
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[
+                    lane_index]);
+        if (seed.IsNull()) return {};
+    }
+    return seed;
+}
+
+bool
+VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& range_pin,
+    const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
+                     kRCStage3EpisodeGemmProgramBatchLaneCountV1>&
+        lanes,
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    std::string* why)
+{
+    AirCS combined;
+    RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1 layout;
+    if (!BuildRCStage3EpisodeGemmProgramCtlDirectAliasConstraintSystemV1(
+            manifest, range_pin, pin, lanes,
+            combined, &layout, why)) {
+        return false;
+    }
+    AirCS relation;
+    std::vector<uint256> roots;
+    if (!ResolveEpisodeGemmProgramBatchAirV1(
+            manifest, range_pin, pin,
+            relation, roots, why) ||
+        proof.batch.columns.size() !=
+            static_cast<size_t>(combined.n_columns) + 1 ||
+        proof.batch.column_len.size() !=
+            proof.batch.columns.size() ||
+        roots.size() != layout.relation_columns) {
+        return Fail(why, "gemm_batch:proof_shape");
+    }
+    for (uint32_t column = 0;
+         column < roots.size(); ++column) {
+        if (proof.batch.columns[column].root !=
+            roots[column]) {
+            return Fail(
+                why, "gemm_batch:relation_column_root");
+        }
+    }
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        const uint256& source_root =
+            proof.batch.columns[
+                EPISODE_GEMM_BATCH_SOURCE_COLUMNS[
+                    lane_index]].root;
+        for (uint32_t participant_index = 0;
+             participant_index < 2; ++participant_index) {
+            const auto& lane_layout =
+                participant_index == 0
+                ? layout.producer_lanes[lane_index]
+                : layout.consumer_lanes[lane_index];
+            if (proof.batch.columns[
+                    lane_layout.ctl_value_column].root !=
+                source_root) {
+                return Fail(
+                    why, "gemm_batch:source_value_root");
+            }
+            const auto schedule =
+                BuildRCStage3EpisodeGemmProgramCtlScheduleV1(
+                    manifest, range_pin, lane.endpoint,
+                    participant_index == 0);
+            std::array<uint256, 5> ctl_roots{};
+            for (uint32_t column =
+                     stage3_ctl_col::NAMESPACE;
+                 column <=
+                     stage3_ctl_col::MULTIPLICITY;
+                 ++column) {
+                ctl_roots[column] =
+                    proof.batch.columns[
+                        lane_layout.ctl_column_base +
+                        column].root;
+            }
+            if (ComputeRCStage3CtlPrechallengeTraceCommitmentFromRoots(
+                    schedule,
+                    proof.batch.column_len[
+                        lane_layout.ctl_column_base],
+                    proof.batch.n_coeffs,
+                    ctl_roots) !=
+                lane.pins[
+                    participant_index].trace_commitment) {
+                return Fail(
+                    why, "gemm_batch:ctl_trace_commitment");
+            }
+            if (ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                    proof, lane_layout) !=
+                lane.pins[
+                    participant_index].auxiliary_commitment) {
+                return Fail(
+                    why, "gemm_batch:ctl_auxiliary_commitment");
+            }
+        }
+    }
+    const uint256 seed =
+        ComputeRCStage3EpisodeGemmProgramCtlDirectAliasSeedV1(
+            manifest, range_pin, pin, lanes);
+    std::string air_why;
+    if (seed.IsNull() ||
+        !air_quotient::AirQuotientVerify<Fp3>(
+            combined, proof, seed, &air_why)) {
+        return Fail(
+            why, "gemm_batch:air:" + air_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "gemm_four_endpoint_dual_port_same_trace_batch_ok_"
+            "recursive_consumption_pending";
     }
     return true;
 }
