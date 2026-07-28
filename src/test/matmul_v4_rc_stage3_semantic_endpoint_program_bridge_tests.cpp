@@ -52,9 +52,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.registry_semantic_claim_endpoints, 14U);
     BOOST_CHECK_EQUAL(
-        manifest.selected_program_key_endpoints, 47U);
+        manifest.selected_program_key_endpoints, 52U);
     BOOST_CHECK_EQUAL(
-        manifest.canonical_output_metadata_endpoints, 47U);
+        manifest.canonical_output_metadata_endpoints, 52U);
     BOOST_CHECK_EQUAL(
         manifest.executed_relation_cell_endpoints, 22U);
     BOOST_CHECK_EQUAL(
@@ -66,21 +66,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!manifest.recursive_semantic_closure_complete);
     BOOST_CHECK(!manifest.production_authority);
 
-    const std::vector<RCStage3RelationEndpoint>
-        missing_output_recipes{
-            RCStage3RelationEndpoint::EpisodeBuilderParams,
-            RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
-            RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
-            RCStage3RelationEndpoint::EpisodeWiringResidual,
-            RCStage3RelationEndpoint::EpisodeWiringRoundOrder,
-        };
     std::vector<RCStage3RelationEndpoint> observed_missing;
     for (const auto& endpoint : manifest.endpoints) {
         if (!endpoint.canonical_output_metadata) {
             observed_missing.push_back(endpoint.endpoint);
         }
     }
-    BOOST_CHECK(observed_missing == missing_output_recipes);
+    BOOST_CHECK(observed_missing.empty());
 
     for (const auto endpoint : {
              RCStage3RelationEndpoint::EpisodeExtractChaCha,

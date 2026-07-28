@@ -155,8 +155,22 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
             sites::ProductionProofSiteKind::EpisodeBuilderCounterXof,
             RCStage3RelationRole::EpisodeDeterministicBuilder,
             {
+                {RCStage3RelationEndpoint::EpisodeBuilderParams,
+                 topo::production_family_col_v1::
+                     EpisodeBuilderParams,
+                 "episode_builder_params:VECTOR_EXPORT"},
+                {RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
+                 topo::production_family_col_v1::
+                     EpisodeBuilderSeedChain,
+                 "episode_builder_seed_chain:VECTOR_EXPORT"},
+                {RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
+                 topo::production_family_col_v1::
+                     EpisodeBuilderOperandXof,
+                 "episode_builder_operand_xof:VECTOR_EXPORT"},
                 {RCStage3RelationEndpoint::EpisodeBuilderTrace,
-                 5, "episode_builder:DEQUANT_OUTPUT"},
+                 topo::production_family_col_v1::
+                     EpisodeBuilderTrace,
+                 "episode_builder:DEQUANT_OUTPUT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeGemmSumcheck,
@@ -216,6 +230,14 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                  topo::production_family_col_v1::
                      EpisodeWiringTranspose,
                  "episode_wiring_transpose:DESTINATION_VALUE"},
+                {RCStage3RelationEndpoint::EpisodeWiringResidual,
+                 topo::production_family_col_v1::
+                     EpisodeWiringResidual,
+                 "episode_wiring_residual:EXTRACT_INPUT"},
+                {RCStage3RelationEndpoint::EpisodeWiringRoundOrder,
+                 topo::production_family_col_v1::
+                     EpisodeWiringRoundOrder,
+                 "episode_wiring_round_order:CONSUMER"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeTileTreeSha256d,

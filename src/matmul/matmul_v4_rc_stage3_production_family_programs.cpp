@@ -594,6 +594,8 @@ bool BuildEpisodeWiringDirectProduct(
 {
     cb::ProgramTable copy;
     cb::ProgramTable transpose;
+    cb::ProgramTable residual;
+    cb::ProgramTable round_order;
     if (!BuildRCStage3EpisodeLocalKernelProgramTable(
             RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
             copy, why) ||
@@ -601,12 +603,90 @@ bool BuildEpisodeWiringDirectProduct(
             transpose, why)) {
         return false;
     }
+    residual.role = RCStage3RelationRole::EpisodeWiring;
+    residual.current_width = 4;
+    residual.next_width = 4;
+    AppendFragment(
+        residual, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(
+                b.Current(2),
+                b.Add(b.Current(0), b.Current(1)));
+        });
+    AppendFragment(
+        residual, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(b.Current(3), b.Current(2));
+        });
+    if (!cb::ValidateProgramTable(residual, why)) return false;
+
+    round_order.role = RCStage3RelationRole::EpisodeWiring;
+    round_order.current_width = 2;
+    round_order.next_width = 2;
+    AppendFragment(
+        round_order, aq::AirKind::kEverywhere, 1,
+        [](FragmentProgramBuilder& b) {
+            b.Sub(b.Current(0), b.Current(1));
+        });
+    if (!cb::ValidateProgramTable(round_order, why)) return false;
+
     static_assert(
         production_family_col_v1::EpisodeWiringTranspose ==
         2U + 3U);
+    static_assert(
+        production_family_col_v1::EpisodeWiringResidual ==
+        2U + 8U + 3U);
+    static_assert(
+        production_family_col_v1::EpisodeWiringRoundOrder ==
+        2U + 8U + 4U + 1U);
     return BuildDirectProduct(
         RCStage3RelationRole::EpisodeWiring,
-        {copy, transpose}, out, why);
+        {copy, transpose, residual, round_order}, out, why);
+}
+
+bool BuildEpisodeBuilderDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable trace;
+    cb::ProgramTable params;
+    cb::ProgramTable seed_chain;
+    cb::ProgramTable operand_xof;
+    if (!BuildRCStage3EpisodeBuilderTraceProgramTable(trace, why) ||
+        !BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest, params, why) ||
+        !BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest, seed_chain, why) ||
+        !BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest, operand_xof, why) ||
+        !RetagProgramTable(
+            params,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            why) ||
+        !RetagProgramTable(
+            seed_chain,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            why) ||
+        !RetagProgramTable(
+            operand_xof,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeBuilderTrace == 5U);
+    static_assert(
+        production_family_col_v1::EpisodeBuilderParams ==
+        6U + 4U);
+    static_assert(
+        production_family_col_v1::EpisodeBuilderSeedChain ==
+        6U + 5U + 4U);
+    static_assert(
+        production_family_col_v1::EpisodeBuilderOperandXof ==
+        6U + 5U + 5U + 4U);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeDeterministicBuilder,
+        {trace, params, seed_chain, operand_xof}, out, why);
 }
 
 bool BuildEpisodeTileTreeDirectProduct(
@@ -795,7 +875,7 @@ bool RealFamilyFor(
         if (role != RCStage3RelationRole::EpisodeDeterministicBuilder) {
             return false;
         }
-        if (!BuildRCStage3EpisodeBuilderTraceProgramTable(program, why)) {
+        if (!BuildEpisodeBuilderDirectProduct(program, why)) {
             return false;
         }
         endpoint = RCStage3RelationEndpoint::EpisodeBuilderTrace;

@@ -128,8 +128,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         builder.role ==
         rc::RCStage3RelationRole::EpisodeDeterministicBuilder);
-    BOOST_CHECK_EQUAL(builder.program.current_width, 6U);
-    BOOST_CHECK_EQUAL(builder.program.programs.size(), 5U);
+    BOOST_CHECK_EQUAL(builder.program.current_width, 21U);
+    BOOST_CHECK_EQUAL(builder.program.programs.size(), 17U);
     BOOST_REQUIRE_EQUAL(builder.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         builder.semantic_endpoints[0],
@@ -180,9 +180,9 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::EpisodeWiring);
     const auto& wiring = sources[wiring_idx];
     BOOST_CHECK(wiring.role == rc::RCStage3RelationRole::EpisodeWiring);
-    BOOST_CHECK_EQUAL(wiring.program.current_width, 10U);
+    BOOST_CHECK_EQUAL(wiring.program.current_width, 16U);
     BOOST_CHECK_EQUAL(wiring.program.challenge_width, 4U);
-    BOOST_CHECK_EQUAL(wiring.program.programs.size(), 7U);
+    BOOST_CHECK_EQUAL(wiring.program.programs.size(), 10U);
     BOOST_REQUIRE_EQUAL(wiring.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         wiring.semantic_endpoints[0],
@@ -507,8 +507,8 @@ BOOST_AUTO_TEST_CASE(
     const size_t builder_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeBuilderCounterXof);
     const auto& builder_entry = registry.families[builder_idx];
-    BOOST_CHECK_EQUAL(builder_entry.maximum_columns, 6U);
-    BOOST_CHECK_EQUAL(builder_entry.constraint_count, 5U);
+    BOOST_CHECK_EQUAL(builder_entry.maximum_columns, 21U);
+    BOOST_CHECK_EQUAL(builder_entry.constraint_count, 17U);
     BOOST_CHECK_GE(builder_entry.maximum_constraint_degree, 2U);
     BOOST_CHECK(builder_entry.semantic_relation_complete);
 
@@ -522,8 +522,8 @@ BOOST_AUTO_TEST_CASE(
     const size_t wiring_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeWiring);
     const auto& wiring_entry = registry.families[wiring_idx];
-    BOOST_CHECK_EQUAL(wiring_entry.maximum_columns, 10U);
-    BOOST_CHECK_EQUAL(wiring_entry.constraint_count, 7U);
+    BOOST_CHECK_EQUAL(wiring_entry.maximum_columns, 16U);
+    BOOST_CHECK_EQUAL(wiring_entry.constraint_count, 10U);
     BOOST_CHECK(wiring_entry.semantic_relation_complete);
 
     const size_t extract_idx = FindFamilyIndex(
@@ -1187,11 +1187,11 @@ BOOST_AUTO_TEST_CASE(
         rc::BuildRCStage3EpisodeWiringTransposeProgramTable(
             transpose, &why),
         why);
-    BOOST_REQUIRE_EQUAL(product.current_width, 10U);
+    BOOST_REQUIRE_EQUAL(product.current_width, 16U);
     BOOST_REQUIRE_EQUAL(product.challenge_width, 4U);
     BOOST_REQUIRE_EQUAL(
         product.programs.size(),
-        copy.programs.size() + transpose.programs.size());
+        copy.programs.size() + transpose.programs.size() + 3U);
 
     uint64_t rng = 0x13198a2e03707344ULL;
     const auto next_field = [&rng]() {
@@ -1223,9 +1223,9 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(gf::Eq(expected, actual));
 
         const std::vector<Fp3> transpose_current(
-            current.begin() + 2, current.end());
+            current.begin() + 2, current.begin() + 10);
         const std::vector<Fp3> transpose_next(
-            next.begin() + 2, next.end());
+            next.begin() + 2, next.begin() + 10);
         for (uint32_t i = 0;
              i < transpose.programs.size(); ++i) {
             BOOST_REQUIRE(cb::EvaluateProgram(
@@ -1237,6 +1237,24 @@ BOOST_AUTO_TEST_CASE(
                 current, next, challenges, actual));
             BOOST_CHECK(gf::Eq(expected, actual));
         }
+
+        // The final components are exactly the live wiring product's
+        // residual-addition/Extract alias and round-order equality AIRs.
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            product.programs[7], current, next, challenges, actual));
+        BOOST_CHECK(gf::Eq(
+            actual,
+            gf::Sub(
+                current[12],
+                gf::Add(current[10], current[11]))));
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            product.programs[8], current, next, challenges, actual));
+        BOOST_CHECK(gf::Eq(
+            actual, gf::Sub(current[13], current[12])));
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            product.programs[9], current, next, challenges, actual));
+        BOOST_CHECK(gf::Eq(
+            actual, gf::Sub(current[14], current[15])));
     }
 
     auto omitted = product;
@@ -1262,15 +1280,20 @@ BOOST_AUTO_TEST_CASE(
             ss::SelectedProductionProofSitePolicy());
     const auto sources = ut::BuildProductionFamilyProgramSourcesV1(manifest);
 
-    // --- EpisodeDeterministicBuilder: mantissa/scale dequant, 6 columns. ---
+    // --- EpisodeDeterministicBuilder: mantissa/scale dequant plus three
+    // inactive expected-vector export components, 21 columns. ---
     {
         const size_t idx = FindFamilyIndex(
             manifest, ss::ProductionProofSiteKind::EpisodeBuilderCounterXof);
         const auto& table = sources[idx].program;
-        std::vector<Fp3> row{
-            gf::FromSigned3(-7), U(2), U(0), U(1), U(4),
-            gf::FromSigned3(-28)};
-        const std::vector<Fp3> next(6, Fp3::Zero());
+        std::vector<Fp3> row(21, Fp3::Zero());
+        row[0] = gf::FromSigned3(-7);
+        row[1] = U(2);
+        row[2] = U(0);
+        row[3] = U(1);
+        row[4] = U(4);
+        row[5] = gf::FromSigned3(-28);
+        const std::vector<Fp3> next(21, Fp3::Zero());
         BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
         auto tampered = row;
         tampered[5] = gf::FromSigned3(-27); // wrong output

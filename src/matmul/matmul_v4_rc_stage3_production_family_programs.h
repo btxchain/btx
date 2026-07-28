@@ -57,8 +57,14 @@ namespace matmul::v4::rc::universal_topology {
  * static-asserted against every component width in the builder.
  */
 namespace production_family_col_v1 {
+inline constexpr uint32_t EpisodeBuilderTrace = 5;
+inline constexpr uint32_t EpisodeBuilderParams = 10;
+inline constexpr uint32_t EpisodeBuilderSeedChain = 15;
+inline constexpr uint32_t EpisodeBuilderOperandXof = 20;
 inline constexpr uint32_t EpisodeWiringCopy = 0;
 inline constexpr uint32_t EpisodeWiringTranspose = 5;
+inline constexpr uint32_t EpisodeWiringResidual = 13;
+inline constexpr uint32_t EpisodeWiringRoundOrder = 15;
 inline constexpr uint32_t EpisodeTileTreeStream = 4;
 inline constexpr uint32_t EpisodeTileTreeHash = 159;
 inline constexpr uint32_t EpisodeDigestRoundRoots = 4;
@@ -118,10 +124,13 @@ inline constexpr uint32_t CoupledHashOutput = 149;
  * AssessProductionFamilyProgramMigrationV1.
  */
 enum class RealProductionFamilyProgramV1 : uint8_t {
-    /** BuildRCStage3EpisodeBuilderTraceProgramTable: the endpoint-4
-     * mantissa/scale dequantization relation (5 constraints, 6 columns).
-     * Closes RCStage3RelationEndpoint::EpisodeBuilderTrace only; Params,
-     * SeedChain and OperandXof remain unclosed by any family. */
+    /** Challenge-separated direct product of the endpoint-4 mantissa/scale
+     * dequantization relation and three expected-vector export relations for
+     * Params, SeedChain and OperandXof (21 columns, 17 constraints). The
+     * registry completeness claim remains scoped to BuilderTrace; the three
+     * vector exports retain verifier-owned expected-column root pins,
+     * fixed-program provenance, aggregation and recursive-consumption
+     * residuals. */
     EpisodeBuilderTraceDequant = 1,
     /** Challenge-separated direct product of root-vector, preimage-byte,
      * compact-target, digest<=target and fixed-program hash bytecode
@@ -143,11 +152,12 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::EpisodeGemmSumcheck only; OperandA,
      * OperandB, OutputY and SignedRange remain unclosed by any family. */
     EpisodeGemmSumcheckEndpoint = 4,
-    /** Challenge-separated direct product of the one-constraint row-copy
-     * equality and the six-constraint dual-LogUp transpose relation
-     * (10 columns, 4 challenge lanes). The registry completeness claim remains
-     * scoped to WiringCopy; Transpose now has a named local output while
-     * Residual and RoundOrder still lack canonical bytecode. */
+    /** Challenge-separated direct product of row-copy equality, dual-LogUp
+     * transpose, residual-addition/Extract alias, and round-order producer /
+     * consumer equality (16 columns, 4 challenge lanes, 10 constraints).
+     * The registry completeness claim remains scoped to WiringCopy; all four
+     * local outputs are named while immutable schedules, memory openings and
+     * recursive consumption remain explicit residuals. */
     EpisodeWiringCopyEquality = 5,
     /** BuildRCStage3EpisodeExtractLocalKernelProgramTable(scale_e=0): the
      * complete 47-constraint, 40-column RcSampler relation as bytecode
