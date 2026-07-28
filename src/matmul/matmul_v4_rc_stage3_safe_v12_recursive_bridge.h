@@ -7,6 +7,7 @@
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_p2_prefix_source_air.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_domain_registry.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_nirop_reduction.h>
 
@@ -44,6 +45,7 @@ namespace domains = stage3_safe_v12_domain_registry;
 namespace fsair = stage3_safe_v12_fs_air;
 namespace gf = gkr_field;
 namespace nirop = stage3_safe_v12_nirop_reduction;
+namespace p2source = stage3_p2_prefix_source_air;
 namespace qsampler = stage3_safe_v12_query_sampler;
 
 inline constexpr uint16_t kRecursiveBridgeVersionV12 = 1;
@@ -494,6 +496,52 @@ struct NativeFri3AlgTypedSafeScheduleV13 {
     const Fri3AlgBatchProof& proof,
     const uint256& child_fs_seed,
     NativeFri3AlgTypedSafeScheduleV13& out,
+    std::string* why = nullptr);
+
+/**
+ * Same-parent proof-source attachment for the three residual V13 prefix
+ * families found by NativeFri3AlgTypedSafeScheduleV13:
+ *
+ *  - the exact eight pow_grind_nonce bytes are direct aliases to the
+ *    canonical batch-proof decoder;
+ *  - ShapeCommit and OodEvalCommit are recomputed by the sparse Poseidon2
+ *    source AIR from decoder-owned proof fields; and
+ *  - each resulting digest byte is canonical and exported at a fixed cell.
+ *
+ * This closes those local source relations only. Row/fold roots, prior SAFE
+ * outputs and the outer airq event still require the final normalized join.
+ */
+struct NativeV13NormalizedPrefixAttachment {
+    p2source::AttachmentV1 hash_sources;
+    std::array<
+        stage3_p2_same_parent_join::CellRefV1, 8>
+        pow_grind_nonce_bytes{};
+    uint32_t nonce_source_occurrences{0};
+    uint32_t shape_hash_source_occurrences{0};
+    uint32_t ood_hash_source_occurrences{0};
+    bool exact_schedule_rebuilt{false};
+    bool nonce_from_canonical_proof_decoder{false};
+    bool shape_hash_from_proof_decoder_air{false};
+    bool ood_hash_from_proof_decoder_air{false};
+    bool source_values_preprocessed{true};
+    bool complete_child_verifier_same_parent{false};
+    bool recursively_consumed{false};
+    bool recursive_authority_ready{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool AttachNativeV13NormalizedPrefixSources(
+    recursive_fixedpoint::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& child_fs_seed,
+    const recursive_fixedpoint::
+        NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const recursive_fixedpoint::
+        NormalizedAlgAirCodecDecoderAttachmentV1& decoder,
+    const p2source::ReceiptSeedSourceRefsV1& seed_source,
+    const NativeFri3AlgTypedSafeScheduleV13& schedule,
+    NativeV13NormalizedPrefixAttachment& out,
     std::string* why = nullptr);
 
 struct TypedSafeEventOutputLocationV13 {

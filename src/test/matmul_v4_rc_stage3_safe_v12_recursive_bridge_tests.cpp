@@ -24,6 +24,10 @@ namespace nirop =
     matmul::v4::rc::stage3_safe_v12_nirop_reduction;
 namespace aq = matmul::v4::rc::air_quotient;
 namespace aht = matmul::v4::rc::alg_hash_typed;
+namespace fixedpoint =
+    matmul::v4::rc::recursive_fixedpoint;
+namespace p2source =
+    matmul::v4::rc::stage3_p2_prefix_source_air;
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_safe_v12_recursive_bridge_tests)
@@ -49,6 +53,19 @@ uint256 TestSeed(uint32_t value)
                 (value + 31U * index) & 0xffU);
     }
     if (out.IsNull()) out.begin()[0] = 1;
+    return out;
+}
+
+uint32_t TestSeedWord(
+    const uint256& seed, uint32_t word)
+{
+    uint32_t out = 0;
+    for (uint32_t byte = 0; byte < 4; ++byte) {
+        out |=
+            uint32_t{
+                seed.data()[4 * word + byte]}
+            << (8 * byte);
+    }
     return out;
 }
 
@@ -1100,6 +1117,256 @@ BOOST_AUTO_TEST_CASE(
                 proved.proof, TestSeed(0x732),
                 rejected, &why));
         BOOST_CHECK(!rejected.valid);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    v13_nonce_shape_and_ood_prefix_sources_are_same_parent_air_owned)
+{
+    namespace rc = matmul::v4::rc;
+    const uint256 seed = TestSeed(0x741);
+    const std::vector<std::vector<gf::Fp3>> columns{{
+        gf::FromSigned3(3),
+        gf::FromSigned3(5),
+    }};
+    const auto proved =
+        rc::Fri3AlgSafeQ192K2V13BatchCommit(
+            columns, seed, 23);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    bridge::NativeFri3AlgTypedSafeScheduleV13 schedule;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildNativeFri3AlgTypedSafeScheduleV13(
+            proved.proof, seed, schedule, &why),
+        why);
+
+    fixedpoint::NormalizedAlgAirBatchCodecMapV1 map;
+    BOOST_REQUIRE_MESSAGE(
+        fixedpoint::BuildNormalizedAlgAirBatchCodecMapV1(
+            proved.proof, map, &why),
+        why);
+    const uint32_t needed_rows =
+        std::max<uint32_t>(
+            64,
+            (5 + map.codec_words +
+             fixedpoint::
+                 kNormalizedAlgAirProofFieldBusRate -
+             1) /
+                fixedpoint::
+                    kNormalizedAlgAirProofFieldBusRate);
+    uint32_t rows = 2;
+    while (rows < needed_rows) rows <<= 1;
+
+    fixedpoint::FoldBusComposition parent;
+    fixedpoint::
+        NormalizedAlgAirProofFieldBusAttachmentV1
+            proof_bus;
+    proof_bus.layout =
+        fixedpoint::NormalizedAlgAirProofFieldBusLayout(
+            p2source::kSeedWordsV1);
+    proof_bus.parent_rows = rows;
+    proof_bus.batch_codec_bytes = map.codec_bytes;
+    proof_bus.batch_codec_words = map.codec_words;
+    proof_bus.active_sponge_rows =
+        (5 + map.codec_words +
+         fixedpoint::
+             kNormalizedAlgAirProofFieldBusRate -
+         1) /
+            fixedpoint::
+                kNormalizedAlgAirProofFieldBusRate;
+    proof_bus.proof_commitment = TestSeed(0x742);
+    proof_bus.valid = true;
+
+    fixedpoint::
+        NormalizedAlgAirCodecDecoderAttachmentV1
+            decoder;
+    decoder.layout =
+        fixedpoint::NormalizedAlgAirCodecDecoderLayout(
+            proof_bus.layout.End());
+    decoder.map = map;
+    decoder.parent_rows = rows;
+    decoder.active_word_slots = map.codec_words;
+    decoder.valid_byte_slots = map.codec_bytes;
+    decoder.canonical_fp_elements = map.fp_elements;
+    decoder.added_columns =
+        decoder.layout.End() - decoder.layout.base;
+    decoder.exact_length_constrained = true;
+    decoder.every_word_decomposed = true;
+    decoder.every_byte_range_checked = true;
+    decoder.little_endian_recomposition_constrained =
+        true;
+    decoder.final_word_padding_zero = true;
+    decoder.every_fp_encoding_canonical = true;
+    decoder.no_unconsumed_codec_bytes = true;
+    decoder.valid = true;
+
+    p2source::ReceiptSeedSourceRefsV1 seed_source;
+    for (uint32_t word = 0;
+         word < p2source::kSeedWordsV1;
+         ++word) {
+        seed_source.u32_word[word] = {word, 0};
+    }
+    seed_source.canonical_receipt_statement = true;
+    seed_source.verifier_recomputed_seed = true;
+    seed_source.cells_bound_before_first_commitment = true;
+    seed_source.complete_child_verifier_same_parent =
+        false;
+
+    parent.combined.n_rows = rows;
+    parent.combined.n_columns = decoder.layout.End();
+    parent.columns.assign(
+        parent.combined.n_columns,
+        std::vector<gf::Fp3>(
+            rows, gf::Fp3::Zero()));
+    for (uint32_t word = 0;
+         word < p2source::kSeedWordsV1;
+         ++word) {
+        parent.columns[word][0] =
+            gf::Fp3::FromFp(
+                gf::FromU64(
+                    TestSeedWord(seed, word)));
+    }
+    for (uint32_t word = 0;
+         word < map.codec_words; ++word) {
+        const uint32_t position = 5 + word;
+        const uint32_t row =
+            position /
+            fixedpoint::
+                kNormalizedAlgAirProofFieldBusRate;
+        const uint32_t lane =
+            position %
+            fixedpoint::
+                kNormalizedAlgAirProofFieldBusRate;
+        parent.columns[
+            proof_bus.layout.Field(lane)][row] =
+            gf::Fp3::FromFp(
+                gf::FromU64(
+                    map.entries[word].value));
+        for (uint32_t byte = 0;
+             byte < 4; ++byte) {
+            parent.columns[
+                decoder.layout.Byte(
+                    lane, byte)][row] =
+                gf::Fp3::FromFp(
+                    gf::FromU64(
+                        (map.entries[word].value >>
+                         (8 * byte)) &
+                        0xff));
+        }
+    }
+
+    bridge::NativeV13NormalizedPrefixAttachment
+        attachment;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::AttachNativeV13NormalizedPrefixSources(
+            parent, proved.proof, seed,
+            proof_bus, decoder, seed_source,
+            schedule, attachment, &why),
+        why);
+    BOOST_CHECK(attachment.valid);
+    BOOST_CHECK(attachment.exact_schedule_rebuilt);
+    BOOST_CHECK(
+        attachment.nonce_from_canonical_proof_decoder);
+    BOOST_CHECK(
+        attachment.shape_hash_from_proof_decoder_air);
+    BOOST_CHECK(
+        attachment.ood_hash_from_proof_decoder_air);
+    BOOST_CHECK_EQUAL(
+        attachment.nonce_source_occurrences,
+        schedule
+            .transcript_bytes_missing_normalized_source);
+    BOOST_CHECK_EQUAL(
+        attachment.shape_hash_source_occurrences +
+            attachment.ood_hash_source_occurrences,
+        schedule
+            .transcript_bytes_requiring_hash_relation);
+    BOOST_CHECK(!attachment.source_values_preprocessed);
+    BOOST_CHECK(
+        !attachment.complete_child_verifier_same_parent);
+    BOOST_CHECK(!attachment.recursively_consumed);
+    BOOST_CHECK(!attachment.recursive_authority_ready);
+    BOOST_CHECK_EQUAL(
+        p2source::CountViolations(parent), 0U);
+    BOOST_TEST_MESSAGE(
+        "SAFE_V13_PREFIX_SOURCE_AIR rows="
+        << rows
+        << " added_cols="
+        << attachment.hash_sources.added_columns
+        << " constraints="
+        << attachment.hash_sources.added_constraints
+        << " nonce_occurrences="
+        << attachment.nonce_source_occurrences
+        << " shape_hash_occurrences="
+        << attachment.shape_hash_source_occurrences
+        << " ood_hash_occurrences="
+        << attachment.ood_hash_source_occurrences);
+
+    // Version routing is explicit: neither wrapper accepts the other's lane.
+    {
+        p2source::AttachmentV1 rejected;
+        BOOST_CHECK(
+            !p2source::AttachV10PrefixSourceAirV1(
+                parent, proved.proof, seed,
+                proof_bus, decoder, seed_source,
+                rejected, &why));
+    }
+
+    // The nonce source is an alias to the canonical decoder, rather than a
+    // copied host value. Corrupting that decoder byte is rejected before a
+    // second source chip can be attached.
+    {
+        const auto cell =
+            attachment.pow_grind_nonce_bytes.front();
+        const gf::Fp3 saved =
+            parent.columns[cell.column][cell.row];
+        parent.columns[cell.column][cell.row] =
+            gf::Add(saved, gf::Fp3::One());
+        bridge::NativeV13NormalizedPrefixAttachment
+            rejected;
+        BOOST_CHECK(
+            !bridge::AttachNativeV13NormalizedPrefixSources(
+                parent, proved.proof, seed,
+                proof_bus, decoder, seed_source,
+                schedule, rejected, &why));
+        parent.columns[cell.column][cell.row] = saved;
+    }
+
+    // A caller cannot relabel the decoder metadata while leaving the witness
+    // cells unchanged. The source chip independently rebuilds and compares
+    // the complete canonical codec map.
+    {
+        const uint32_t saved =
+            decoder.map.entries.front().value;
+        decoder.map.entries.front().value ^= 1U;
+        BOOST_CHECK(
+            !p2source::ValidateV13PrefixSourceAirV1(
+                parent, proved.proof, seed,
+                proof_bus, decoder, seed_source,
+                attachment.hash_sources, &why));
+        decoder.map.entries.front().value = saved;
+    }
+
+    // Digest export bytes are constrained outputs of the Poseidon2 source
+    // AIR. A forged export is rejected by both the polynomial constraints
+    // and the structural validator.
+    {
+        const auto cell =
+            attachment.hash_sources.exports
+                .shape_commit.byte.front();
+        const gf::Fp3 saved =
+            parent.columns[cell.column][cell.row];
+        parent.columns[cell.column][cell.row] =
+            gf::Add(saved, gf::Fp3::One());
+        BOOST_CHECK_GT(
+            p2source::CountViolations(parent), 0U);
+        BOOST_CHECK(
+            !p2source::ValidateV13PrefixSourceAirV1(
+                parent, proved.proof, seed,
+                proof_bus, decoder, seed_source,
+                attachment.hash_sources, &why));
+        parent.columns[cell.column][cell.row] = saved;
+        BOOST_CHECK_EQUAL(
+            p2source::CountViolations(parent), 0U);
     }
 }
 

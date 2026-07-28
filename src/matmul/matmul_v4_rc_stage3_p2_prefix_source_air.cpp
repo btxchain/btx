@@ -546,7 +546,56 @@ uint32_t CountViolations(
         parent.combined, parent.columns);
 }
 
-bool AttachV10PrefixSourceAirV1(
+static bool SameCodecMap(
+    const fp::NormalizedAlgAirBatchCodecMapV1& a,
+    const fp::NormalizedAlgAirBatchCodecMapV1& b)
+{
+    if (!a.valid || !b.valid ||
+        a.version != b.version ||
+        a.codec_bytes != b.codec_bytes ||
+        a.codec_words != b.codec_words ||
+        a.fp_elements != b.fp_elements ||
+        a.chip_consumed_words != b.chip_consumed_words ||
+        a.exact_dense_coverage != b.exact_dense_coverage ||
+        a.exact_little_endian != b.exact_little_endian ||
+        a.canonical_roundtrip != b.canonical_roundtrip ||
+        a.no_trailing_bytes != b.no_trailing_bytes ||
+        a.entries.size() != b.entries.size() ||
+        a.semantic_tokens.size() !=
+            b.semantic_tokens.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.entries.size(); ++i) {
+        const auto& x = a.entries[i];
+        const auto& y = b.entries[i];
+        if (x.word_index != y.word_index ||
+            x.byte_offset != y.byte_offset ||
+            x.value != y.value ||
+            x.semantic_ordinal != y.semantic_ordinal ||
+            x.kind != y.kind ||
+            x.consumed_by_existing_verifier_chip !=
+                y.consumed_by_existing_verifier_chip) {
+            return false;
+        }
+    }
+    for (size_t i = 0;
+         i < a.semantic_tokens.size(); ++i) {
+        const auto& x = a.semantic_tokens[i];
+        const auto& y = b.semantic_tokens[i];
+        if (x.address != y.address ||
+            x.word_index != y.word_index ||
+            !gf::Eq(x.value, y.value) ||
+            x.kind != y.kind ||
+            x.owner != y.owner ||
+            x.consumed_by_existing_verifier_chip !=
+                y.consumed_by_existing_verifier_chip) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AttachPrefixSourceAirForVersionV1(
     fp::FoldBusComposition& parent,
     const Fri3AlgBatchProof& proof,
     const uint256& fs_seed,
@@ -555,6 +604,7 @@ bool AttachV10PrefixSourceAirV1(
     const fp::NormalizedAlgAirCodecDecoderAttachmentV1&
         decoder,
     const ReceiptSeedSourceRefsV1& seed_source,
+    uint32_t expected_proof_version,
     AttachmentV1& out,
     std::string* why)
 {
@@ -565,8 +615,15 @@ bool AttachV10PrefixSourceAirV1(
     out.constraint_base =
         static_cast<uint32_t>(
             parent.combined.constraints.size());
-    if (proof.version !=
-            kRCFri3AlgP2Q192K2ProofVersionV10 ||
+    fp::NormalizedAlgAirBatchCodecMapV1 exact_map;
+    if (proof.version != expected_proof_version ||
+        (expected_proof_version !=
+                kRCFri3AlgP2Q192K2ProofVersionV10 &&
+         expected_proof_version !=
+                kRCFri3AlgSafeQ192K2ProofVersionV13) ||
+        !fp::BuildNormalizedAlgAirBatchCodecMapV1(
+            proof, exact_map, why) ||
+        !SameCodecMap(exact_map, decoder.map) ||
         fs_seed.IsNull() ||
         parent.columns.size() !=
             parent.combined.n_columns ||
@@ -1817,7 +1874,45 @@ bool AttachV10PrefixSourceAirV1(
     return true;
 }
 
-bool ValidateV10PrefixSourceAirV1(
+bool AttachV10PrefixSourceAirV1(
+    fp::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const fp::NormalizedAlgAirProofFieldBusAttachmentV1&
+        proof_bus,
+    const fp::NormalizedAlgAirCodecDecoderAttachmentV1&
+        decoder,
+    const ReceiptSeedSourceRefsV1& seed_source,
+    AttachmentV1& out,
+    std::string* why)
+{
+    return AttachPrefixSourceAirForVersionV1(
+        parent, proof, fs_seed, proof_bus, decoder,
+        seed_source,
+        kRCFri3AlgP2Q192K2ProofVersionV10,
+        out, why);
+}
+
+bool AttachV13PrefixSourceAirV1(
+    fp::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const fp::NormalizedAlgAirProofFieldBusAttachmentV1&
+        proof_bus,
+    const fp::NormalizedAlgAirCodecDecoderAttachmentV1&
+        decoder,
+    const ReceiptSeedSourceRefsV1& seed_source,
+    AttachmentV1& out,
+    std::string* why)
+{
+    return AttachPrefixSourceAirForVersionV1(
+        parent, proof, fs_seed, proof_bus, decoder,
+        seed_source,
+        kRCFri3AlgSafeQ192K2ProofVersionV13,
+        out, why);
+}
+
+bool ValidatePrefixSourceAirForVersionV1(
     const fp::FoldBusComposition& parent,
     const Fri3AlgBatchProof& proof,
     const uint256& fs_seed,
@@ -1827,12 +1922,20 @@ bool ValidateV10PrefixSourceAirV1(
         decoder,
     const ReceiptSeedSourceRefsV1& seed_source,
     const AttachmentV1& attachment,
+    uint32_t expected_proof_version,
     std::string* why)
 {
+    fp::NormalizedAlgAirBatchCodecMapV1 exact_map;
     if (!attachment.valid ||
         attachment.version != kPrefixSourceAirVersionV1 ||
-        proof.version !=
-            kRCFri3AlgP2Q192K2ProofVersionV10 ||
+        proof.version != expected_proof_version ||
+        (expected_proof_version !=
+                kRCFri3AlgP2Q192K2ProofVersionV10 &&
+         expected_proof_version !=
+                kRCFri3AlgSafeQ192K2ProofVersionV13) ||
+        !fp::BuildNormalizedAlgAirBatchCodecMapV1(
+            proof, exact_map, why) ||
+        !SameCodecMap(exact_map, decoder.map) ||
         fs_seed.IsNull() ||
         !proof_bus.valid ||
         !decoder.valid ||
@@ -1967,6 +2070,44 @@ bool ValidateV10PrefixSourceAirV1(
             "stage3:p2_prefix_source_air:validate_ok";
     }
     return true;
+}
+
+bool ValidateV10PrefixSourceAirV1(
+    const fp::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const fp::NormalizedAlgAirProofFieldBusAttachmentV1&
+        proof_bus,
+    const fp::NormalizedAlgAirCodecDecoderAttachmentV1&
+        decoder,
+    const ReceiptSeedSourceRefsV1& seed_source,
+    const AttachmentV1& attachment,
+    std::string* why)
+{
+    return ValidatePrefixSourceAirForVersionV1(
+        parent, proof, fs_seed, proof_bus, decoder,
+        seed_source, attachment,
+        kRCFri3AlgP2Q192K2ProofVersionV10,
+        why);
+}
+
+bool ValidateV13PrefixSourceAirV1(
+    const fp::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const fp::NormalizedAlgAirProofFieldBusAttachmentV1&
+        proof_bus,
+    const fp::NormalizedAlgAirCodecDecoderAttachmentV1&
+        decoder,
+    const ReceiptSeedSourceRefsV1& seed_source,
+    const AttachmentV1& attachment,
+    std::string* why)
+{
+    return ValidatePrefixSourceAirForVersionV1(
+        parent, proof, fs_seed, proof_bus, decoder,
+        seed_source, attachment,
+        kRCFri3AlgSafeQ192K2ProofVersionV13,
+        why);
 }
 
 } // namespace matmul::v4::rc::stage3_p2_prefix_source_air

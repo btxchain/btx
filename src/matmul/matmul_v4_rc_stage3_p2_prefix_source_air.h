@@ -187,7 +187,34 @@ struct AttachmentV1 {
     AttachmentV1& out,
     std::string* why = nullptr);
 
+/**
+ * V13 wrapper over the same proof-codec source chip. ShapeCommit and
+ * OodEvalCommit have identical algebraic definitions in V10 and V13; only
+ * the surrounding challenge oracle/version changes. Keeping a named wrapper
+ * prevents either protocol from being accepted through an implicit
+ * "version-any" path.
+ */
+[[nodiscard]] bool AttachV13PrefixSourceAirV1(
+    fp::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const fp::NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const fp::NormalizedAlgAirCodecDecoderAttachmentV1& decoder,
+    const ReceiptSeedSourceRefsV1& seed_source,
+    AttachmentV1& out,
+    std::string* why = nullptr);
+
 [[nodiscard]] bool ValidateV10PrefixSourceAirV1(
+    const fp::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const fp::NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const fp::NormalizedAlgAirCodecDecoderAttachmentV1& decoder,
+    const ReceiptSeedSourceRefsV1& seed_source,
+    const AttachmentV1& attachment,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool ValidateV13PrefixSourceAirV1(
     const fp::FoldBusComposition& parent,
     const Fri3AlgBatchProof& proof,
     const uint256& fs_seed,

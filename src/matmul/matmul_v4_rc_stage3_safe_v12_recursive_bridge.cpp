@@ -3305,6 +3305,182 @@ bool BuildNativeFri3AlgTypedSafeScheduleV13(
     return true;
 }
 
+bool AttachNativeV13NormalizedPrefixSources(
+    recursive_fixedpoint::FoldBusComposition& parent,
+    const Fri3AlgBatchProof& proof,
+    const uint256& child_fs_seed,
+    const recursive_fixedpoint::
+        NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const recursive_fixedpoint::
+        NormalizedAlgAirCodecDecoderAttachmentV1& decoder,
+    const p2source::ReceiptSeedSourceRefsV1& seed_source,
+    const NativeFri3AlgTypedSafeScheduleV13& schedule,
+    NativeV13NormalizedPrefixAttachment& out,
+    std::string* why)
+{
+    namespace fixedpoint = recursive_fixedpoint;
+    namespace join = stage3_p2_same_parent_join;
+
+    out = {};
+    NativeFri3AlgTypedSafeScheduleV13 rebuilt;
+    if (!schedule.valid ||
+        !BuildNativeFri3AlgTypedSafeScheduleV13(
+            proof, child_fs_seed, rebuilt, why) ||
+        rebuilt.transcript_word_bindings !=
+            schedule.transcript_word_bindings ||
+        rebuilt.proof_owned_message_cells !=
+            schedule.proof_owned_message_cells ||
+        rebuilt.transcript_byte_occurrences !=
+            schedule.transcript_byte_occurrences ||
+        !proof_bus.valid || !decoder.valid ||
+        decoder.map.entries.size() <
+            4) {
+        return Fail(
+            why,
+            "v13_normalized_prefix_schedule");
+    }
+    out.exact_schedule_rebuilt = true;
+
+    // SerializeFri3AlgBatchProof begins magic:u32, version:u32,
+    // pow_grind_nonce:u64. The canonical decoder stores one LE32 word per
+    // slot, with five framing fields preceding word zero on the vertical
+    // proof bus. Alias the eight nonce bytes directly; no host copy column is
+    // introduced.
+    for (uint32_t byte = 0; byte < 8; ++byte) {
+        const uint32_t codec_byte = 8 + byte;
+        const uint32_t word = codec_byte / 4;
+        const uint32_t byte_in_word =
+            codec_byte % 4;
+        const uint32_t position = 5 + word;
+        const uint32_t row =
+            position /
+            fixedpoint::
+                kNormalizedAlgAirProofFieldBusRate;
+        const uint32_t lane =
+            position %
+            fixedpoint::
+                kNormalizedAlgAirProofFieldBusRate;
+        if (row >= parent.combined.n_rows ||
+            decoder.map.entries[word].word_index !=
+                word ||
+            decoder.map.entries[word].byte_offset !=
+                4 * word) {
+            return Fail(
+                why,
+                "v13_normalized_prefix_nonce_map");
+        }
+        const join::CellRefV1 cell{
+            decoder.layout.Byte(
+                lane, byte_in_word),
+            row};
+        const uint8_t expected =
+            static_cast<uint8_t>(
+                proof.pow_grind_nonce >>
+                (8 * byte));
+        if (cell.column >= parent.columns.size() ||
+            cell.row >= parent.columns[cell.column].size() ||
+            !gf::Eq(
+                parent.columns[cell.column][cell.row],
+                U32(expected))) {
+            return Fail(
+                why,
+                "v13_normalized_prefix_nonce_cell");
+        }
+        out.pow_grind_nonce_bytes[byte] = cell;
+    }
+
+    for (const auto& binding :
+         rebuilt.transcript_word_bindings) {
+        for (uint32_t byte = 0;
+             byte < binding.bytes_present;
+             ++byte) {
+            using Kind =
+                NativeFri3AlgTypedSafeScheduleV13::
+                    TranscriptSourceKind;
+            switch (binding.source_bytes[byte].kind) {
+            case Kind::ProofPowGrindNonce:
+                ++out.nonce_source_occurrences;
+                break;
+            case Kind::ShapeCommitDigest:
+                ++out.shape_hash_source_occurrences;
+                break;
+            case Kind::OodEvaluationCommitDigest:
+                ++out.ood_hash_source_occurrences;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+    if (out.nonce_source_occurrences !=
+            rebuilt
+                .transcript_bytes_missing_normalized_source ||
+        out.shape_hash_source_occurrences == 0 ||
+        out.ood_hash_source_occurrences == 0 ||
+        out.shape_hash_source_occurrences +
+                out.ood_hash_source_occurrences !=
+            rebuilt
+                .transcript_bytes_requiring_hash_relation) {
+        return Fail(
+            why,
+            "v13_normalized_prefix_occurrence_inventory");
+    }
+    out.nonce_from_canonical_proof_decoder = true;
+
+    if (!p2source::AttachV13PrefixSourceAirV1(
+            parent, proof, child_fs_seed,
+            proof_bus, decoder, seed_source,
+            out.hash_sources, why) ||
+        !p2source::ValidateV13PrefixSourceAirV1(
+            parent, proof, child_fs_seed,
+            proof_bus, decoder, seed_source,
+            out.hash_sources, why)) {
+        return false;
+    }
+    out.shape_hash_from_proof_decoder_air =
+        out.hash_sources
+            .shape_payload_direct_codec_aliases &&
+        out.hash_sources
+            .sparse_poseidon_permutations_constrained &&
+        out.hash_sources
+            .digest_outputs_canonical_bytes &&
+        out.hash_sources.exports
+            .shape_commit_derived_by_p2_air;
+    out.ood_hash_from_proof_decoder_air =
+        out.hash_sources
+            .ood_payload_direct_codec_aliases &&
+        out.hash_sources
+            .eval_counts_equality_constrained &&
+        out.hash_sources
+            .sparse_poseidon_permutations_constrained &&
+        out.hash_sources
+            .digest_outputs_canonical_bytes &&
+        out.hash_sources.exports
+            .ood_eval_commit_derived_by_p2_air;
+    out.source_values_preprocessed =
+        out.hash_sources.source_values_preprocessed;
+    out.complete_child_verifier_same_parent = false;
+    out.recursively_consumed = false;
+    out.recursive_authority_ready = false;
+    out.valid =
+        out.exact_schedule_rebuilt &&
+        out.nonce_from_canonical_proof_decoder &&
+        out.shape_hash_from_proof_decoder_air &&
+        out.ood_hash_from_proof_decoder_air &&
+        !out.source_values_preprocessed &&
+        p2source::CountViolations(parent) == 0;
+    out.note = out.valid
+        ? "V13 nonce and prefix hashes are proof-decoder-owned; "
+          "normalized child-verifier consumption remains"
+        : "V13 normalized prefix-source attachment invalid";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "v13_normalized_prefix_invalid");
+    }
+    return true;
+}
+
 alg_hash::Digest CommitTypedSafeEventProgramV13(
     const std::vector<TypedSafeEventProgramV13>& program)
 {
