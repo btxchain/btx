@@ -117,10 +117,20 @@ struct RCStage3EpisodeProveResult {
 [[nodiscard]] uint64_t RequiredRCStage3EpisodeCoverage(RCStage3RelationRole role);
 [[nodiscard]] const char* RCStage3EpisodeEngineName(RCStage3EpisodeEngine engine);
 
-/** Commitment to statement kind plus the pre-proof public inputs, using the
- * repository's existing SHA256d primitive and fixed little-endian framing.
- * transcript_commitment is intentionally excluded: it is computed from the
- * finished relation sections and including it here would create a fixed point. */
+/**
+ * V3 work-relation precommitment.
+ *
+ * This binds the immutable candidate context known before an episode starts:
+ * statement kind, height, difficulty, profiles, program registry, header
+ * projection, parameters, target and sigma.  It deliberately excludes the
+ * episode/coupled/final digests and transcript commitment.  Those are terminal
+ * outputs, unavailable while winner callbacks stream, and are bound later by
+ * the proof-owned root-chain relations plus VerifyRCStage3CompositionLink.
+ *
+ * Keeping the terminal outputs out of this seed is what permits a prover to
+ * prove and discard relation shards during the winning computation instead of
+ * retaining the full workload or replaying it after the digest is known.
+ */
 [[nodiscard]] uint256
 RCStage3EpisodeStatementCommitment(const RCStage3SuccinctProof& statement);
 

@@ -665,7 +665,7 @@ BOOST_AUTO_TEST_CASE(manifest_binds_the_exact_outer_statement)
             statement, *built, &why), why);
 
     auto changed = statement;
-    changed.public_inputs.final_digest = Filled(0x91);
+    changed.public_inputs.sigma = Filled(0x91);
     BOOST_CHECK(!rc::ValidateRCStage3GemmExtractManifestBinding(
         changed, *built, &why));
     BOOST_CHECK(

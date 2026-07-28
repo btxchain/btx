@@ -1152,15 +1152,13 @@ bool VerifyRCStage3RoleAirSectionsWithProvenance(
     return true;
 }
 
-bool BuildRCStage3StatementForHeader(
+bool BuildRCStage3RelationPrecommitForHeaderV3(
     const CBlockHeader& header,
     const Consensus::Params& params,
     int32_t height,
     RCStage3StatementKind kind,
     const ProductionProgramConsensusPinV1& program_pin,
-    const uint256& episode_digest,
-    const uint256& coupled_digest,
-    RCStage3SuccinctProof& out,
+    RCStage3RelationPrecommitV3& out,
     std::string* why)
 {
     out = {};
@@ -1201,24 +1199,96 @@ bool BuildRCStage3StatementForHeader(
 
     if (kind == RCStage3StatementKind::Episode ||
         kind == RCStage3StatementKind::Composed) {
-        if (episode_digest.IsNull()) return Fail(why, "null_episode_digest");
         p.episode_profile = params.nMatMulRCProfile;
-        p.episode_digest = episode_digest;
         if (p.episode_profile == 0) return Fail(why, "zero_episode_profile");
     }
     if (kind == RCStage3StatementKind::Coupled ||
         kind == RCStage3StatementKind::Composed) {
-        if (coupled_digest.IsNull()) return Fail(why, "null_coupled_digest");
         p.coupled_profile = params.nMatMulRCCoupledProfile;
-        p.coupled_digest = coupled_digest;
         if (p.coupled_profile == 0) return Fail(why, "zero_coupled_profile");
     }
 
-    p.final_digest = ComputeRCStage3FinalDigest(out);
-    if (p.final_digest.IsNull()) return Fail(why, "null_final_digest");
     if (p.header_commitment.IsNull() || p.params_commitment.IsNull() ||
         p.sigma.IsNull()) {
         return Fail(why, "null_public_input");
+    }
+    RCStage3SuccinctProof relation_statement;
+    relation_statement.statement = kind;
+    relation_statement.public_inputs = p;
+    if (kind == RCStage3StatementKind::Episode ||
+        kind == RCStage3StatementKind::Composed) {
+        out.episode_relation_precommit =
+            RCStage3EpisodeStatementCommitment(
+                relation_statement);
+        if (out.episode_relation_precommit.IsNull()) {
+            return Fail(
+                why, "null_episode_relation_precommit");
+        }
+    }
+    if (kind == RCStage3StatementKind::Coupled ||
+        kind == RCStage3StatementKind::Composed) {
+        out.coupled_relation_precommit =
+            CommitRCStage3CoupledStatement(p);
+        if (out.coupled_relation_precommit.IsNull()) {
+            return Fail(
+                why, "null_coupled_relation_precommit");
+        }
+    }
+    return true;
+}
+
+bool BuildRCStage3StatementForHeader(
+    const CBlockHeader& header,
+    const Consensus::Params& params,
+    int32_t height,
+    RCStage3StatementKind kind,
+    const ProductionProgramConsensusPinV1& program_pin,
+    const uint256& episode_digest,
+    const uint256& coupled_digest,
+    RCStage3SuccinctProof& out,
+    std::string* why)
+{
+    out = {};
+    RCStage3RelationPrecommitV3 precommit;
+    if (!BuildRCStage3RelationPrecommitForHeaderV3(
+            header, params, height, kind,
+            program_pin, precommit, why)) {
+        return false;
+    }
+    out.statement = kind;
+    out.public_inputs = precommit.public_inputs;
+    auto& p = out.public_inputs;
+    if (kind == RCStage3StatementKind::Episode ||
+        kind == RCStage3StatementKind::Composed) {
+        if (episode_digest.IsNull()) {
+            return Fail(why, "null_episode_digest");
+        }
+        p.episode_digest = episode_digest;
+    }
+    if (kind == RCStage3StatementKind::Coupled ||
+        kind == RCStage3StatementKind::Composed) {
+        if (coupled_digest.IsNull()) {
+            return Fail(why, "null_coupled_digest");
+        }
+        p.coupled_digest = coupled_digest;
+    }
+    p.final_digest = ComputeRCStage3FinalDigest(out);
+    if (p.final_digest.IsNull()) {
+        return Fail(why, "null_final_digest");
+    }
+    if ((kind == RCStage3StatementKind::Episode ||
+         kind == RCStage3StatementKind::Composed) &&
+        RCStage3EpisodeStatementCommitment(out) !=
+            precommit.episode_relation_precommit) {
+        return Fail(
+            why, "episode_relation_precommit_drift");
+    }
+    if ((kind == RCStage3StatementKind::Coupled ||
+         kind == RCStage3StatementKind::Composed) &&
+        CommitRCStage3CoupledStatement(p) !=
+            precommit.coupled_relation_precommit) {
+        return Fail(
+            why, "coupled_relation_precommit_drift");
     }
     return true;
 }

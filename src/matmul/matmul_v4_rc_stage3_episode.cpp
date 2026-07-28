@@ -358,7 +358,7 @@ uint256 RCStage3EpisodeStatementCommitment(const RCStage3SuccinctProof& statemen
 {
     static constexpr std::array<unsigned char, 30> DOMAIN_BYTES{
         'B', 'T', 'X', '_', 'R', 'C', '_', 'S', 'T', 'A', 'G', 'E', '3', '_', 'E',
-        'P', '_', 'S', 'T', 'A', 'T', 'E', 'M', 'E', 'N', 'T', '_', 'V', '2', 0,
+        'P', '_', 'S', 'T', 'A', 'T', 'E', 'M', 'E', 'N', 'T', '_', 'V', '3', 0,
     };
     std::vector<unsigned char> bytes(DOMAIN_BYTES.begin(), DOMAIN_BYTES.end());
     WriteU8(bytes, static_cast<uint8_t>(statement.statement));
@@ -376,9 +376,6 @@ uint256 RCStage3EpisodeStatementCommitment(const RCStage3SuccinctProof& statemen
     WriteUint256(bytes, p.params_commitment);
     WriteUint256(bytes, p.target);
     WriteUint256(bytes, p.sigma);
-    WriteUint256(bytes, p.episode_digest);
-    WriteUint256(bytes, p.coupled_digest);
-    WriteUint256(bytes, p.final_digest);
     return Sha256d(bytes);
 }
 

@@ -2879,7 +2879,7 @@ RCStage3CoupledShape MakeRCStage3CoupledShape(const RCCoupParams& params,
 uint256 CommitRCStage3CoupledStatement(const RCStage3PublicInputs& public_inputs)
 {
     std::vector<unsigned char> bytes;
-    WriteDomain(bytes, "BTX_RC_STAGE3_COUPLED_STATEMENT_V2");
+    WriteDomain(bytes, "BTX_RC_STAGE3_COUPLED_STATEMENT_V3");
     WriteU32(bytes, static_cast<uint32_t>(public_inputs.height));
     WriteU32(bytes, public_inputs.n_bits);
     WriteU32(bytes, public_inputs.episode_profile);
@@ -2899,9 +2899,6 @@ uint256 CommitRCStage3CoupledStatement(const RCStage3PublicInputs& public_inputs
     WriteUint256(bytes, public_inputs.params_commitment);
     WriteUint256(bytes, public_inputs.target);
     WriteUint256(bytes, public_inputs.sigma);
-    WriteUint256(bytes, public_inputs.episode_digest);
-    WriteUint256(bytes, public_inputs.coupled_digest);
-    WriteUint256(bytes, public_inputs.final_digest);
     return Sha256d(bytes);
 }
 

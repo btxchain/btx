@@ -303,6 +303,99 @@ BOOST_AUTO_TEST_CASE(composed_statement_uses_coupled_transcript_family)
             header, params, HEIGHT, episode_digest, coupled_digest));
 }
 
+BOOST_AUTO_TEST_CASE(
+    relation_precommit_is_available_before_terminal_digests)
+{
+    constexpr int32_t HEIGHT{101};
+    Consensus::Params params =
+        MakeChainParams(HEIGHT);
+    params.nMatMulRCCoupledHeight = HEIGHT;
+    params.nMatMulRCCoupledProfile = 3;
+    params.fMatMulRCCoupledUseToyDims = true;
+
+    CBlockHeader header;
+    header.nBits = 0x207fffff;
+    header.matmul_dim = 256;
+    header.nNonce64 = 9;
+    header.seed_a = uint256::ONE;
+    header.seed_b = uint256::ONE;
+
+    rc::RCStage3RelationPrecommitV3 precommit;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3RelationPrecommitForHeaderV3(
+            header, params, HEIGHT,
+            rc::RCStage3StatementKind::Composed,
+            PinFromParams(params), precommit, &why),
+        why);
+    BOOST_CHECK(
+        precommit.public_inputs.episode_digest.IsNull());
+    BOOST_CHECK(
+        precommit.public_inputs.coupled_digest.IsNull());
+    BOOST_CHECK(
+        precommit.public_inputs.final_digest.IsNull());
+    BOOST_CHECK(
+        precommit.public_inputs
+            .transcript_commitment.IsNull());
+    BOOST_CHECK(
+        !precommit.episode_relation_precommit.IsNull());
+    BOOST_CHECK(
+        !precommit.coupled_relation_precommit.IsNull());
+
+    uint256 episode_digest = uint256::ONE;
+    uint256 coupled_digest = uint256::ONE;
+    coupled_digest.data()[1] = 1;
+    rc::RCStage3SuccinctProof finalized;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3StatementForHeader(
+            header, params, HEIGHT,
+            rc::RCStage3StatementKind::Composed,
+            PinFromParams(params), episode_digest,
+            coupled_digest, finalized, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        rc::RCStage3EpisodeStatementCommitment(
+            finalized),
+        precommit.episode_relation_precommit);
+    BOOST_CHECK_EQUAL(
+        rc::CommitRCStage3CoupledStatement(
+            finalized.public_inputs),
+        precommit.coupled_relation_precommit);
+
+    auto alternate_terminals = finalized;
+    alternate_terminals.public_inputs
+        .episode_digest.data()[2] ^= 1;
+    alternate_terminals.public_inputs
+        .coupled_digest.data()[3] ^= 1;
+    alternate_terminals.public_inputs.final_digest =
+        rc::ComputeRCStage3FinalDigest(
+            alternate_terminals);
+    BOOST_CHECK_EQUAL(
+        rc::RCStage3EpisodeStatementCommitment(
+            alternate_terminals),
+        precommit.episode_relation_precommit);
+    BOOST_CHECK_EQUAL(
+        rc::CommitRCStage3CoupledStatement(
+            alternate_terminals.public_inputs),
+        precommit.coupled_relation_precommit);
+
+    auto changed_header = header;
+    ++changed_header.nNonce64;
+    rc::RCStage3RelationPrecommitV3 changed;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3RelationPrecommitForHeaderV3(
+            changed_header, params, HEIGHT,
+            rc::RCStage3StatementKind::Composed,
+            PinFromParams(params), changed, &why),
+        why);
+    BOOST_CHECK(
+        changed.episode_relation_precommit !=
+        precommit.episode_relation_precommit);
+    BOOST_CHECK(
+        changed.coupled_relation_precommit !=
+        precommit.coupled_relation_precommit);
+}
+
 // ===========================================================================
 // THE END-TO-END CASE: real mined block -> statement -> 6 real role FRI proofs
 // assembled into RCStage3SuccinctProof::sections -> witness-free section

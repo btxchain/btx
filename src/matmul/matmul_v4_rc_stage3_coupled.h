@@ -210,6 +210,16 @@ struct RCStage3CoupledRelationCounts {
 [[nodiscard]] RCStage3CoupledShape
 MakeRCStage3CoupledShape(const RCCoupParams& params, const RCCoupOptions& options);
 
+/**
+ * V3 coupled work-relation precommitment.
+ *
+ * Binds every immutable input known before the coupled winner computation,
+ * but not episode_digest, coupled_digest, final_digest or the outer transcript
+ * commitment.  The complete root-chain/final aggregate must equality-bind
+ * those terminal outputs to this relation inventory and the finalized block.
+ * This non-circular split permits callback-time prove-and-discard without an
+ * exact coupled-work replay.
+ */
 [[nodiscard]] uint256
 CommitRCStage3CoupledStatement(const RCStage3PublicInputs& public_inputs);
 [[nodiscard]] uint256

@@ -97,7 +97,8 @@ BOOST_AUTO_TEST_CASE(typed_episode_section_codec_is_canonical)
     BOOST_CHECK(encoded == bytes);
 }
 
-BOOST_AUTO_TEST_CASE(episode_statement_commitment_has_no_proof_hash_cycle)
+BOOST_AUTO_TEST_CASE(
+    episode_relation_precommit_is_stable_across_terminal_finalization)
 {
     const auto proof = MakeEpisodeProof();
     const uint256 commitment = rc::RCStage3EpisodeStatementCommitment(proof);
@@ -106,13 +107,26 @@ BOOST_AUTO_TEST_CASE(episode_statement_commitment_has_no_proof_hash_cycle)
     post_proof.public_inputs.transcript_commitment = Filled(0xee);
     BOOST_CHECK(rc::RCStage3EpisodeStatementCommitment(post_proof) == commitment);
 
-    auto changed_statement = proof;
-    changed_statement.public_inputs.final_digest = Filled(0xef);
-    BOOST_CHECK(rc::RCStage3EpisodeStatementCommitment(changed_statement) != commitment);
+    for (uint256 rc::RCStage3PublicInputs::*terminal : {
+             &rc::RCStage3PublicInputs::episode_digest,
+             &rc::RCStage3PublicInputs::coupled_digest,
+             &rc::RCStage3PublicInputs::final_digest}) {
+        auto finalized = proof;
+        finalized.public_inputs.*terminal = Filled(0xef);
+        BOOST_CHECK(
+            rc::RCStage3EpisodeStatementCommitment(finalized) ==
+            commitment);
+    }
 
-    changed_statement = proof;
+    auto changed_statement = proof;
     changed_statement.public_inputs.program_consensus_pin
         .registry_binding.data()[0] ^= 1;
+    BOOST_CHECK(
+        rc::RCStage3EpisodeStatementCommitment(
+            changed_statement) != commitment);
+
+    changed_statement = proof;
+    changed_statement.public_inputs.sigma.data()[0] ^= 1;
     BOOST_CHECK(
         rc::RCStage3EpisodeStatementCommitment(
             changed_statement) != commitment);

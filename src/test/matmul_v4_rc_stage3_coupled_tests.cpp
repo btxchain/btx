@@ -217,7 +217,8 @@ BOOST_AUTO_TEST_CASE(coupled_receipt_codec_is_canonical_and_bounded)
     }
 }
 
-BOOST_AUTO_TEST_CASE(coupled_statement_commitment_has_no_proof_hash_cycle)
+BOOST_AUTO_TEST_CASE(
+    coupled_relation_precommit_is_stable_across_terminal_finalization)
 {
     const auto proof = MakeCoupledProof();
     const uint256 commitment =
@@ -227,9 +228,22 @@ BOOST_AUTO_TEST_CASE(coupled_statement_commitment_has_no_proof_hash_cycle)
     post_proof.transcript_commitment = Filled(0xee);
     BOOST_CHECK(rc::CommitRCStage3CoupledStatement(post_proof) == commitment);
 
+    for (uint256 rc::RCStage3PublicInputs::*terminal : {
+             &rc::RCStage3PublicInputs::episode_digest,
+             &rc::RCStage3PublicInputs::coupled_digest,
+             &rc::RCStage3PublicInputs::final_digest}) {
+        auto finalized = proof.public_inputs;
+        finalized.*terminal = Filled(0xef);
+        BOOST_CHECK(
+            rc::CommitRCStage3CoupledStatement(finalized) ==
+            commitment);
+    }
+
     auto changed_statement = proof.public_inputs;
-    changed_statement.final_digest = Filled(0xef);
-    BOOST_CHECK(rc::CommitRCStage3CoupledStatement(changed_statement) != commitment);
+    changed_statement.sigma.data()[0] ^= 1;
+    BOOST_CHECK(
+        rc::CommitRCStage3CoupledStatement(changed_statement) !=
+        commitment);
 }
 
 BOOST_AUTO_TEST_CASE(coupled_verifier_rejects_stub_proof_after_engines_ready)

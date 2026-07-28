@@ -221,7 +221,42 @@ struct RCStage3RoleSectionProveResult {
     std::string* why = nullptr);
 
 /**
- * Production statement builder — the missing header -> statement step.
+ * Immutable work-relation context available before either workload leg emits
+ * its terminal digest.
+ *
+ * This is not a proof or an authority receipt. `public_inputs` has the
+ * episode/coupled/final/transcript terminal fields canonically zero. The two
+ * nonzero relation precommitments are exactly the V3 seeds used by the
+ * corresponding child provers. A statement kind that does not contain one of
+ * the legs has that leg's precommitment zero.
+ */
+struct RCStage3RelationPrecommitV3 {
+    RCStage3StatementKind statement{
+        RCStage3StatementKind::Composed};
+    RCStage3PublicInputs public_inputs{};
+    uint256 episode_relation_precommit{};
+    uint256 coupled_relation_precommit{};
+};
+
+/**
+ * Build the immutable relation precommit before executing the candidate.
+ *
+ * This makes callback-time prove-and-discard possible: every child proof can
+ * bind the finalized nonce/header projection, parameters, target, sigma and
+ * registry before the terminal digests exist. The final statement builder
+ * below reuses these exact inputs and adds the proof-owned terminal values.
+ */
+[[nodiscard]] bool BuildRCStage3RelationPrecommitForHeaderV3(
+    const CBlockHeader& header,
+    const Consensus::Params& params,
+    int32_t height,
+    RCStage3StatementKind kind,
+    const ProductionProgramConsensusPinV1& program_pin,
+    RCStage3RelationPrecommitV3& out,
+    std::string* why = nullptr);
+
+/**
+ * Production finalized-statement builder — header -> statement step.
  *
  * Fills every public input of an Episode (or Coupled) statement from a REAL
  * block header plus resolved consensus params, so the resulting object is the
@@ -231,6 +266,11 @@ struct RCStage3RoleSectionProveResult {
  * `program_pin` is supplied by the caller because the ProgramTable authority
  * lives in Consensus::Params (hashMatMulRCStage3ProgramRegistry*) and is
  * currently UNCONFIGURED on every network; this function does not invent one.
+ *
+ * The immutable portion is built by
+ * BuildRCStage3RelationPrecommitForHeaderV3. This function only adds the
+ * terminal digests and their composed final digest; it cannot silently select
+ * a different child relation seed after the workload completes.
  */
 [[nodiscard]] bool BuildRCStage3StatementForHeader(
     const CBlockHeader& header,

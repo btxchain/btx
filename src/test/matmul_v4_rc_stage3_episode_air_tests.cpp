@@ -269,7 +269,7 @@ BOOST_AUTO_TEST_CASE(gemm_endpoint_shard_verifies_without_native_witness)
     BOOST_CHECK(why.find("column_root_mismatch") != std::string::npos);
 
     auto statement_mutation = statement;
-    statement_mutation.public_inputs.final_digest = Filled(0xf0);
+    statement_mutation.public_inputs.sigma = Filled(0xf0);
     BOOST_CHECK(!rc::VerifyRCStage3EpisodeAirShard(
         statement_mutation, pin, proved.proof, &why));
     BOOST_CHECK(why.find("statement_commitment_mismatch") !=
