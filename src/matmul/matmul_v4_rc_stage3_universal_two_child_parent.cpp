@@ -30,21 +30,49 @@ bool IsPowerOfTwo(uint32_t value)
         (value & (value - 1U)) == 0;
 }
 
+uint32_t NextPowerOfTwo(uint32_t value)
+{
+    if (value == 0) return 0;
+    --value;
+    value |= value >> 1;
+    value |= value >> 2;
+    value |= value >> 4;
+    value |= value >> 8;
+    value |= value >> 16;
+    return value == std::numeric_limits<uint32_t>::max()
+        ? 0
+        : value + 1;
+}
+
 bool ValidateShape(
     const PublicShapeV1& shape,
     std::string* why)
 {
+    const uint32_t expected_coefficients =
+        NextPowerOfTwo(std::max(
+            shape.child_rows,
+            shape.child_quotient_len));
+    const uint64_t expected_lde =
+        uint64_t{expected_coefficients} *
+        kRCFriBlowup;
     if (shape.version !=
             kUniversalTwoChildParentVersionV1 ||
         !IsPowerOfTwo(shape.child_rows) ||
         shape.child_columns == 0 ||
+        shape.child_quotient_len == 0 ||
         !IsPowerOfTwo(shape.child_coefficients) ||
         !IsPowerOfTwo(shape.child_lde) ||
-        shape.child_lde < shape.child_coefficients ||
-        shape.child_quotient_len == 0 ||
+        expected_coefficients == 0 ||
+        shape.child_coefficients !=
+            expected_coefficients ||
+        expected_lde >
+            std::numeric_limits<uint32_t>::max() ||
+        shape.child_lde != expected_lde ||
         shape.merkle_depth == 0 ||
         shape.folds == 0 ||
-        shape.queries == 0 ||
+        shape.queries != kRCFri3AlgNumQueries ||
+        shape.independent_fri_batching !=
+            Fri3AlgQ192IndependentBatching() ||
         shape.column_lengths.size() !=
             uint64_t{shape.child_columns} + 1U) {
         return Fail(why, "shape");
@@ -62,15 +90,19 @@ bool ValidateShape(
         ++folds;
     }
     if (depth != shape.merkle_depth ||
-        folds != shape.folds ||
-        std::any_of(
-            shape.column_lengths.begin(),
-            shape.column_lengths.end(),
-            [&shape](uint32_t length) {
-                return length == 0 ||
-                    length > shape.child_coefficients;
-            })) {
+        folds != shape.folds) {
         return Fail(why, "shape_derived");
+    }
+    for (uint32_t column = 0;
+         column < shape.child_columns; ++column) {
+        if (shape.column_lengths[column] !=
+                shape.child_rows) {
+            return Fail(why, "trace_column_length");
+        }
+    }
+    if (shape.column_lengths.back() !=
+            shape.child_quotient_len) {
+        return Fail(why, "quotient_column_length");
     }
     return true;
 }
@@ -245,7 +277,9 @@ bool BuildVerifierConstraintSystemV1(
     if (!cb::BuildAirConstraintSystemFromProgramTable(
             registry.child_relation_program,
             shape.child_rows, child_cs, why) ||
-        child_cs.n_columns != shape.child_columns) {
+        child_cs.n_columns != shape.child_columns ||
+        child_cs.QuotientLen() !=
+            shape.child_quotient_len) {
         return Fail(why, "registry_child_cs");
     }
     const ar::ChildPublicInputs child =

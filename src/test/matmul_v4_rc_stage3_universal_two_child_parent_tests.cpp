@@ -50,13 +50,16 @@ u2::PublicShapeV1 Shape()
     u2::PublicShapeV1 out;
     out.child_rows = 2;
     out.child_columns = 2;
-    out.child_quotient_len = 2;
+    out.child_quotient_len = 1;
     out.child_coefficients = 2;
-    out.child_lde = 8;
-    out.merkle_depth = 3;
+    out.child_lde =
+        out.child_coefficients * rc::kRCFriBlowup;
+    out.merkle_depth = 5;
     out.folds = 1;
-    out.queries = 2;
-    out.column_lengths = {2, 2, 2};
+    out.queries = rc::kRCFri3AlgNumQueries;
+    out.independent_fri_batching =
+        rc::Fri3AlgQ192IndependentBatching();
+    out.column_lengths = {2, 2, 1};
     return out;
 }
 
@@ -119,6 +122,32 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !u2::BuildVerifierConstraintSystemV1(
             shape, substituted, rebuilt, &why));
+
+    auto downgraded = shape;
+    --downgraded.queries;
+    BOOST_CHECK(
+        !u2::BuildVerifierConstraintSystemV1(
+            downgraded, registry, rebuilt, &why));
+
+    downgraded = shape;
+    downgraded.child_lde /= 2;
+    --downgraded.merkle_depth;
+    BOOST_CHECK(
+        !u2::BuildVerifierConstraintSystemV1(
+            downgraded, registry, rebuilt, &why));
+
+    downgraded = shape;
+    downgraded.independent_fri_batching =
+        !shape.independent_fri_batching;
+    BOOST_CHECK(
+        !u2::BuildVerifierConstraintSystemV1(
+            downgraded, registry, rebuilt, &why));
+
+    downgraded = shape;
+    --downgraded.column_lengths[0];
+    BOOST_CHECK(
+        !u2::BuildVerifierConstraintSystemV1(
+            downgraded, registry, rebuilt, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
