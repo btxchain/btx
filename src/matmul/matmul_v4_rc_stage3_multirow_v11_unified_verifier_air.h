@@ -512,6 +512,39 @@ BuildDeepVmProgramTableV1(
         dvm::CanonicalLayoutV1());
 
 /**
+ * Verifier-owned DeepVM plan.  Every field is derived exclusively from the
+ * canonical child ProgramTable, its registry-selected root and QueryRange.
+ * In particular no child proof, transcript value, trace commitment or
+ * proof-derived R0 root is an input to this construction.
+ */
+struct DeepVmPublicPlanV1 {
+    uint16_t version{kVersionV1};
+    rv::QueryRangeV1 range{};
+    dvm::LayoutV1 layout{};
+    cb::ProgramTable child_program{};
+    alg_hash::Digest child_program_root{};
+    cb::ProgramTable program{};
+    aq::AirConstraintSystem<gf::Fp3> cs{};
+    std::vector<uint32_t> statement_manifest_columns;
+    std::vector<gf::Fp3> challenge;
+    uint256 statement_schedule_root{};
+    uint32_t real_rows{0};
+    uint32_t trace_rows{0};
+    bool child_program_root_recomputed{false};
+    bool statement_schedule_canonical{false};
+    bool constraint_system_canonical{false};
+    bool proof_independent{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] DeepVmPublicPlanV1
+BuildDeepVmPublicPlanV1(
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range);
+
+/**
  * Build the canonical DeepVM phase in isolation for recursive composition
  * and adversarial proof audits. The four verifier-owned Challenge cells
  * (gamma_0, gamma_1, alpha_0, alpha_1) are domain-separated from the child
@@ -538,6 +571,17 @@ BuildDeepVmCanonicalPhaseV1(
     const cb::ProgramTable& child_program,
     const alg_hash::Digest& expected_program_root,
     const rv::QueryRangeV1& range);
+
+/**
+ * Materialize only the ordinary proof-derived witness columns under an
+ * already-built public plan.  The function rebuilds the plan canonically and
+ * rejects any ProgramTable, schedule, root, range or shape substitution
+ * before copying proof cells.
+ */
+[[nodiscard]] DeepVmCanonicalPhaseV1
+MaterializeDeepVmCanonicalPhaseV1(
+    const DeepVmPublicPlanV1& plan,
+    const dvm::ProductV1& deep);
 
 /**
  * Canonical challenge-independent bytecode for the dual-Fp3 Decoder LogUp

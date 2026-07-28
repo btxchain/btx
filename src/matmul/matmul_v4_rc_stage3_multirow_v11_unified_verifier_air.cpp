@@ -1094,7 +1094,435 @@ bool BuildDecoderStaticPhaseV1(
     return true;
 }
 
-bool BuildDeepVmStaticPhaseV1(
+struct DeepVmPublicScheduleV1 {
+    uint32_t real_rows{0};
+    uint32_t trace_rows{0};
+    std::vector<uint32_t> ordered_columns;
+    std::vector<std::pair<uint32_t, std::vector<Fp3>>>
+        columns;
+    uint256 root{};
+};
+
+bool BuildDeepVmPublicScheduleV1(
+    const dvm::LayoutV1& l,
+    const cb::ProgramTable& child_program,
+    const rv::QueryRangeV1& range,
+    uint32_t phase_columns,
+    DeepVmPublicScheduleV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!cb::ValidateProgramTable(
+            child_program, why) ||
+        child_program.challenge_width != 0 ||
+        range.query_count == 0 ||
+        range.first_query >
+            abi::kQueryCountV11 ||
+        range.query_count >
+            abi::kQueryCountV11 -
+                range.first_query ||
+        child_program.current_width ==
+            std::numeric_limits<uint32_t>::max()) {
+        if (why != nullptr && why->empty()) {
+            *why =
+                "deep_vm_public_schedule_input";
+        }
+        return false;
+    }
+
+    uint64_t vm_rows64 = 0;
+    std::vector<std::vector<uint32_t>>
+        register_use;
+    register_use.reserve(
+        child_program.programs.size());
+    for (const auto& program :
+         child_program.programs) {
+        if (program.instructions.empty() ||
+            vm_rows64 >
+                std::numeric_limits<uint32_t>::max() -
+                    program.instructions.size()) {
+            if (why != nullptr) {
+                *why =
+                    "deep_vm_public_schedule_vm_rows";
+            }
+            return false;
+        }
+        vm_rows64 +=
+            program.instructions.size();
+        register_use.emplace_back(
+            program.instructions.size(), 0);
+        auto& multiplicity =
+            register_use.back();
+        for (uint32_t pc = 0;
+             pc < program.instructions.size();
+             ++pc) {
+            const auto& instruction =
+                program.instructions[pc];
+            const bool binary =
+                instruction.opcode ==
+                    cb::Opcode::Add ||
+                instruction.opcode ==
+                    cb::Opcode::Sub ||
+                instruction.opcode ==
+                    cb::Opcode::Mul;
+            if (instruction.opcode ==
+                    cb::Opcode::Challenge) {
+                if (why != nullptr) {
+                    *why =
+                        "deep_vm_public_schedule_"
+                        "challenge_opcode";
+                }
+                return false;
+            }
+            if (!binary) continue;
+            if (instruction.lhs >= pc ||
+                instruction.rhs >= pc ||
+                multiplicity[
+                    instruction.lhs] ==
+                    std::numeric_limits<
+                        uint32_t>::max() ||
+                multiplicity[
+                    instruction.rhs] ==
+                    std::numeric_limits<
+                        uint32_t>::max()) {
+                if (why != nullptr) {
+                    *why =
+                        "deep_vm_public_schedule_"
+                        "ssa_inventory";
+                }
+                return false;
+            }
+            ++multiplicity[
+                instruction.lhs];
+            ++multiplicity[
+                instruction.rhs];
+        }
+    }
+    const uint64_t deep_terms_per_query =
+        uint64_t{child_program.current_width} + 1;
+    const uint64_t rows_per_query =
+        deep_terms_per_query + 1 +
+        vm_rows64 + 1;
+    const uint64_t real_rows64 =
+        rows_per_query * range.query_count;
+    if (vm_rows64 == 0 ||
+        rows_per_query >
+            std::numeric_limits<uint32_t>::max() ||
+        real_rows64 >
+            std::numeric_limits<uint32_t>::max()) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_public_schedule_shape";
+        }
+        return false;
+    }
+    out.real_rows =
+        static_cast<uint32_t>(real_rows64);
+    out.trace_rows =
+        NextPowerOfTwo(real_rows64);
+    if (out.trace_rows == 0 ||
+        out.trace_rows >
+            kTraceRowsCapV1) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_public_schedule_trace_rows";
+        }
+        return false;
+    }
+
+    const auto ssa = DeepVmSsaLayout(l);
+    const auto add_manifest =
+        [&out](uint32_t column) {
+            out.columns.emplace_back(
+                column,
+                std::vector<Fp3>(
+                    out.trace_rows,
+                    Fp3::Zero()));
+            return out.columns.size() - 1;
+        };
+    const size_t active =
+        add_manifest(l.active);
+    const size_t deep_term =
+        add_manifest(l.deep_term);
+    const size_t deep_finalize =
+        add_manifest(l.deep_finalize);
+    const size_t vm_instruction =
+        add_manifest(l.vm_instruction);
+    const size_t quotient_identity =
+        add_manifest(l.quotient_identity);
+    const size_t query_index =
+        add_manifest(l.query);
+    const size_t item =
+        add_manifest(l.item);
+    const size_t deep_start =
+        add_manifest(l.deep_start);
+    const size_t deep_chain =
+        add_manifest(l.deep_chain);
+    const std::array<size_t, 6> opcode{{
+        add_manifest(l.op_current),
+        add_manifest(l.op_next),
+        add_manifest(l.op_constant),
+        add_manifest(l.op_add),
+        add_manifest(l.op_sub),
+        add_manifest(l.op_mul),
+    }};
+    const size_t program_end =
+        add_manifest(l.program_end);
+    const size_t vm_start =
+        add_manifest(l.vm_start);
+    const size_t vm_chain =
+        add_manifest(l.vm_chain);
+    const size_t vm_to_quotient =
+        add_manifest(l.vm_to_quotient);
+    const size_t quotient_consumer =
+        add_manifest(
+            l.quotient_tape_deep_consumer);
+    const size_t program_ordinal =
+        add_manifest(ssa.program_ordinal);
+    const size_t instruction_ordinal =
+        add_manifest(ssa.instruction_ordinal);
+    const size_t lhs_reference =
+        add_manifest(ssa.lhs_reference);
+    const size_t rhs_reference =
+        add_manifest(ssa.rhs_reference);
+    const size_t register_use_multiplicity =
+        add_manifest(
+            ssa.register_use_multiplicity);
+    const size_t constant_value =
+        add_manifest(ssa.constant_value);
+    if (out.columns.size() !=
+            kDeepVmStatementScheduleColumnsV1) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_public_schedule_column_count";
+        }
+        return false;
+    }
+
+    uint32_t row = 0;
+    for (uint32_t query_offset = 0;
+         query_offset < range.query_count;
+         ++query_offset) {
+        const uint32_t query =
+            range.first_query + query_offset;
+        for (uint32_t column = 0;
+             column < deep_terms_per_query;
+             ++column, ++row) {
+            out.columns[active].second[row] =
+                Fp3::One();
+            out.columns[deep_term].second[row] =
+                Fp3::One();
+            out.columns[query_index].second[row] =
+                gf::FromU64_3(query);
+            out.columns[item].second[row] =
+                gf::FromU64_3(column);
+            out.columns[deep_start].second[row] =
+                column == 0
+                ? Fp3::One()
+                : Fp3::Zero();
+            out.columns[deep_chain].second[row] =
+                Fp3::One();
+            out.columns[quotient_consumer]
+                .second[row] =
+                column + 1 ==
+                    deep_terms_per_query
+                ? Fp3::One()
+                : Fp3::Zero();
+        }
+        out.columns[active].second[row] =
+            Fp3::One();
+        out.columns[deep_finalize].second[row] =
+            Fp3::One();
+        out.columns[query_index].second[row] =
+            gf::FromU64_3(query);
+        ++row;
+
+        uint32_t vm_ordinal = 0;
+        for (uint32_t program_index = 0;
+             program_index <
+                 child_program.programs.size();
+             ++program_index) {
+            const auto& program =
+                child_program.programs[
+                    program_index];
+            for (uint32_t instruction_index = 0;
+                 instruction_index <
+                     program.instructions.size();
+                 ++instruction_index,
+                 ++vm_ordinal, ++row) {
+                const auto& instruction =
+                    program.instructions[
+                        instruction_index];
+                uint32_t op_index = 0;
+                switch (instruction.opcode) {
+                case cb::Opcode::Current:
+                    op_index = 0;
+                    break;
+                case cb::Opcode::Next:
+                    op_index = 1;
+                    break;
+                case cb::Opcode::Constant:
+                    op_index = 2;
+                    break;
+                case cb::Opcode::Add:
+                    op_index = 3;
+                    break;
+                case cb::Opcode::Sub:
+                    op_index = 4;
+                    break;
+                case cb::Opcode::Mul:
+                    op_index = 5;
+                    break;
+                case cb::Opcode::Challenge:
+                    if (why != nullptr) {
+                        *why =
+                            "deep_vm_public_schedule_"
+                            "challenge_opcode";
+                    }
+                    return false;
+                }
+                out.columns[active].second[row] =
+                    Fp3::One();
+                out.columns[vm_instruction]
+                    .second[row] =
+                    Fp3::One();
+                out.columns[query_index]
+                    .second[row] =
+                    gf::FromU64_3(query);
+                out.columns[item].second[row] =
+                    gf::FromU64_3(
+                        instruction_index);
+                out.columns[program_ordinal]
+                    .second[row] =
+                    gf::FromU64_3(
+                        program_index);
+                out.columns[instruction_ordinal]
+                    .second[row] =
+                    gf::FromU64_3(
+                        instruction_index);
+                out.columns[lhs_reference]
+                    .second[row] =
+                    gf::FromU64_3(
+                        instruction.lhs);
+                out.columns[rhs_reference]
+                    .second[row] =
+                    gf::FromU64_3(
+                        instruction.rhs);
+                out.columns[
+                    register_use_multiplicity]
+                    .second[row] =
+                    gf::FromU64_3(
+                        register_use[
+                            program_index][
+                            instruction_index]);
+                out.columns[constant_value]
+                    .second[row] =
+                    instruction.constant;
+                out.columns[opcode[op_index]]
+                    .second[row] =
+                    Fp3::One();
+                const bool last_instruction =
+                    instruction_index + 1 ==
+                        program.instructions.size();
+                out.columns[program_end]
+                    .second[row] =
+                    last_instruction
+                    ? Fp3::One()
+                    : Fp3::Zero();
+                out.columns[vm_start].second[row] =
+                    vm_ordinal == 0
+                    ? Fp3::One()
+                    : Fp3::Zero();
+                const bool last_vm =
+                    uint64_t{vm_ordinal} + 1 ==
+                        vm_rows64;
+                out.columns[vm_chain].second[row] =
+                    last_vm
+                    ? Fp3::Zero()
+                    : Fp3::One();
+                out.columns[vm_to_quotient]
+                    .second[row] =
+                    last_vm
+                    ? Fp3::One()
+                    : Fp3::Zero();
+            }
+        }
+        out.columns[active].second[row] =
+            Fp3::One();
+        out.columns[quotient_identity]
+            .second[row] =
+            Fp3::One();
+        out.columns[query_index].second[row] =
+            gf::FromU64_3(query);
+        ++row;
+    }
+    if (row != out.real_rows) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_public_schedule_rows";
+        }
+        return false;
+    }
+
+    aq::AirConstraintSystem<Fp3> schedule_cs;
+    schedule_cs.n_rows = out.trace_rows;
+    schedule_cs.n_columns = phase_columns;
+    std::vector<std::vector<Fp3>> schedule_columns(
+        phase_columns,
+        std::vector<Fp3>(
+            out.trace_rows,
+            Fp3::Zero()));
+    for (const auto& [column, values] :
+         out.columns) {
+        if (column >= phase_columns ||
+            values.size() != out.trace_rows) {
+            if (why != nullptr) {
+                *why =
+                    "deep_vm_public_schedule_column";
+            }
+            return false;
+        }
+        out.ordered_columns.push_back(column);
+        schedule_columns[column] = values;
+        schedule_cs.preprocessed.emplace_back(
+            column, values);
+    }
+    if (!std::is_sorted(
+            out.ordered_columns.begin(),
+            out.ordered_columns.end()) ||
+        std::adjacent_find(
+            out.ordered_columns.begin(),
+            out.ordered_columns.end()) !=
+            out.ordered_columns.end()) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_public_schedule_order";
+        }
+        return false;
+    }
+    schedule_cs.preprocessed_pin_ood = true;
+    const auto session =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            schedule_cs,
+            schedule_columns,
+            out.ordered_columns);
+    if (!session.valid ||
+        session.base_row_commitment.IsNull()) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_public_schedule_root:" +
+                session.note;
+        }
+        return false;
+    }
+    out.root = session.base_row_commitment;
+    return true;
+}
+
+// Retained only as a differential reference for the former proof-coupled
+// construction. Production callers use BuildDeepVmPublicPlanV1 followed by
+// MaterializeDeepVmCanonicalPhaseV1.
+[[maybe_unused]] bool BuildDeepVmStaticPhaseV1(
     const dvm::ProductV1& deep,
     const cb::ProgramTable& child_program,
     const alg_hash::Digest& expected_program_root,
@@ -3489,65 +3917,444 @@ cb::ProgramTable BuildDeepVmProgramTableV1(
     return table;
 }
 
-DeepVmCanonicalPhaseV1
-BuildDeepVmCanonicalPhaseV1(
-    const dvm::ProductV1& deep,
+DeepVmPublicPlanV1
+BuildDeepVmPublicPlanV1(
     const cb::ProgramTable& child_program,
     const alg_hash::Digest& expected_program_root,
     const rv::QueryRangeV1& range)
 {
-    DeepVmCanonicalPhaseV1 out;
+    DeepVmPublicPlanV1 out;
+    out.range = range;
+    out.layout = dvm::CanonicalLayoutV1();
+    out.child_program = child_program;
+    out.child_program_root =
+        expected_program_root;
     out.program =
         BuildDeepVmProgramTableV1(
-            deep.layout);
-    out.challenge =
-        DeriveDeepVmRegisterChallengesV1(
-            deep.preprocessed_row_group_root,
-            expected_program_root,
-            range);
+            out.layout);
     std::string why;
-    if (out.program.programs.size() !=
+    const auto computed_child_root =
+        cb::CommitProgramTableAlgHash(
+            child_program);
+    DeepVmPublicScheduleV1 schedule;
+    if (!cb::ValidateProgramTable(
+            child_program, &why) ||
+        child_program.challenge_width != 0 ||
+        !CanonicalDigest(
+            expected_program_root) ||
+        !DigestNonzero(
+            expected_program_root) ||
+        !SameDigest(
+            computed_child_root,
+            expected_program_root) ||
+        out.program.programs.size() !=
             kDeepVmCanonicalConstraintsV1 ||
-        !BuildDeepVmStaticPhaseV1(
-            deep,
+        out.program.current_width !=
+            out.layout.n_columns +
+                kDeepVmExtensionColumnsV1 ||
+        !cb::ValidateProgramTable(
+            out.program, &why) ||
+        !cb::ProgramTableIsChallengeIndependent(
+            out.program) ||
+        !BuildDeepVmPublicScheduleV1(
+            out.layout,
             child_program,
-            expected_program_root,
             range,
-            out.challenge,
-            out.cs,
-            out.columns,
-            out.statement_manifest_columns,
+            out.program.current_width,
+            schedule,
             &why)) {
         out.note =
-            "stage3:v11_unified_deep_vm:" +
+            "stage3:v11_unified_deep_vm_plan:" +
             why;
         return out;
     }
+    out.real_rows = schedule.real_rows;
+    out.trace_rows = schedule.trace_rows;
+    out.statement_manifest_columns =
+        schedule.ordered_columns;
+    out.statement_schedule_root =
+        schedule.root;
+    out.challenge =
+        DeriveDeepVmRegisterChallengesV1(
+            out.statement_schedule_root,
+            expected_program_root,
+            range);
+    if (!DeepVmChallengesValid(
+            out.challenge) ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            out.program,
+            out.trace_rows,
+            out.challenge,
+            out.cs,
+            &why)) {
+        out.note =
+            "stage3:v11_unified_deep_vm_plan:" +
+            why;
+        return out;
+    }
+    out.cs.preprocessed.clear();
+    out.cs.preprocessed_row_group_roots.clear();
+    for (const auto& entry :
+         schedule.columns) {
+        out.cs.preprocessed.push_back(entry);
+    }
+    out.cs.preprocessed_pin_ood = true;
+    out.cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns =
+            out.statement_manifest_columns,
+        .root =
+            out.statement_schedule_root,
+    });
+    out.child_program_root_recomputed =
+        SameDigest(
+            computed_child_root,
+            expected_program_root) &&
+        DigestNonzero(
+            out.child_program_root);
+    out.statement_schedule_canonical =
+        out.statement_manifest_columns.size() ==
+            kDeepVmStatementScheduleColumnsV1 &&
+        out.cs.preprocessed.size() ==
+            kDeepVmStatementScheduleColumnsV1 &&
+        out.cs.preprocessed_row_group_roots.size() ==
+            1 &&
+        out.cs.preprocessed_row_group_roots[0].root ==
+            out.statement_schedule_root &&
+        !out.statement_schedule_root.IsNull();
+    out.constraint_system_canonical =
+        out.cs.n_rows == out.trace_rows &&
+        out.cs.n_columns ==
+            out.program.current_width &&
+        out.cs.constraints.size() ==
+            out.program.programs.size() &&
+        out.program.challenge_width ==
+            kDeepVmChallengeColumnsV1 &&
+        DeepVmChallengesValid(
+            out.challenge);
+    out.proof_independent = true;
+    out.valid =
+        out.child_program_root_recomputed &&
+        out.statement_schedule_canonical &&
+        out.constraint_system_canonical &&
+        out.proof_independent;
+    out.note = out.valid
+        ? "stage3:v11_unified_deep_vm_plan:"
+          "canonical_public_cs"
+        : "stage3:v11_unified_deep_vm_plan:"
+          "invalid";
+    return out;
+}
+
+DeepVmCanonicalPhaseV1
+MaterializeDeepVmCanonicalPhaseV1(
+    const DeepVmPublicPlanV1& plan,
+    const dvm::ProductV1& deep)
+{
+    DeepVmCanonicalPhaseV1 out;
+    const auto fail =
+        [&out](const std::string& why) {
+            out.valid = false;
+            out.note =
+                "stage3:v11_unified_deep_vm_witness:" +
+                why;
+            return out;
+        };
+    const auto rebuilt =
+        BuildDeepVmPublicPlanV1(
+            plan.child_program,
+            plan.child_program_root,
+            plan.range);
+    const auto same_fp3 =
+        [](const std::vector<Fp3>& left,
+           const std::vector<Fp3>& right) {
+            if (left.size() != right.size()) {
+                return false;
+            }
+            for (uint32_t i = 0;
+                 i < left.size(); ++i) {
+                if (!gf::Eq(
+                        left[i], right[i])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    const auto same_preprocessed =
+        [&same_fp3](
+            const aq::AirConstraintSystem<Fp3>& left,
+            const aq::AirConstraintSystem<Fp3>& right) {
+            if (left.preprocessed.size() !=
+                right.preprocessed.size()) {
+                return false;
+            }
+            for (uint32_t i = 0;
+                 i < left.preprocessed.size(); ++i) {
+                if (left.preprocessed[i].first !=
+                        right.preprocessed[i].first ||
+                    !same_fp3(
+                        left.preprocessed[i].second,
+                        right.preprocessed[i].second)) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    const auto same_constraints =
+        [](const aq::AirConstraintSystem<Fp3>& left,
+           const aq::AirConstraintSystem<Fp3>& right) {
+            if (left.n_rows != right.n_rows ||
+                left.n_columns != right.n_columns ||
+                left.constraints.size() !=
+                    right.constraints.size()) {
+                return false;
+            }
+            for (uint32_t i = 0;
+                 i < left.constraints.size(); ++i) {
+                if (left.constraints[i].kind !=
+                        right.constraints[i].kind ||
+                    left.constraints[i].alg_degree !=
+                        right.constraints[i].alg_degree) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    if (!plan.valid ||
+        !rebuilt.valid ||
+        plan.version != kVersionV1 ||
+        plan.range != rebuilt.range ||
+        plan.child_program !=
+            rebuilt.child_program ||
+        !SameDigest(
+            plan.child_program_root,
+            rebuilt.child_program_root) ||
+        plan.program != rebuilt.program ||
+        plan.real_rows != rebuilt.real_rows ||
+        plan.trace_rows != rebuilt.trace_rows ||
+        plan.statement_manifest_columns !=
+            rebuilt.statement_manifest_columns ||
+        plan.statement_schedule_root !=
+            rebuilt.statement_schedule_root ||
+        !same_fp3(
+            plan.challenge,
+            rebuilt.challenge) ||
+        !same_constraints(
+            plan.cs, rebuilt.cs) ||
+        !same_preprocessed(
+            plan.cs, rebuilt.cs)) {
+        return fail(
+            "noncanonical_public_plan");
+    }
+
+    std::string why;
+    if (!deep.valid ||
+        dvm::RecountViolationsV1(
+            deep, deep.columns) != 0 ||
+        deep.columns.size() !=
+            deep.layout.n_columns ||
+        deep.cs.n_rows !=
+            plan.trace_rows ||
+        deep.real_rows !=
+            plan.real_rows ||
+        deep.first_query !=
+            plan.range.first_query ||
+        deep.query_count !=
+            plan.range.query_count ||
+        !SameDigest(
+            deep.program_root,
+            plan.child_program_root) ||
+        BuildDeepVmProgramTableV1(
+            deep.layout) !=
+            plan.program) {
+        return fail(
+            "proof_shape_or_root");
+    }
+
+    out.program = plan.program;
+    out.cs = plan.cs;
+    out.challenge = plan.challenge;
+    out.statement_manifest_columns =
+        plan.statement_manifest_columns;
+    out.columns.assign(
+        plan.program.current_width,
+        std::vector<Fp3>(
+            plan.trace_rows,
+            Fp3::Zero()));
+    for (uint32_t column = 0;
+         column < deep.layout.n_columns;
+         ++column) {
+        if (deep.columns[column].size() !=
+                plan.trace_rows) {
+            return fail(
+                "proof_column_rows");
+        }
+        out.columns[column] =
+            deep.columns[column];
+    }
+    for (const auto& [column, canonical] :
+         plan.cs.preprocessed) {
+        if (column >= out.columns.size() ||
+            canonical.size() !=
+                plan.trace_rows) {
+            return fail(
+                "schedule_column_shape");
+        }
+        if (column <
+                deep.layout.n_columns) {
+            if (!same_fp3(
+                    canonical,
+                    out.columns[column])) {
+                return fail(
+                    "proof_schedule_substitution");
+            }
+        } else {
+            out.columns[column] = canonical;
+        }
+    }
+
+    const auto& l = plan.layout;
+    const auto ssa = DeepVmSsaLayout(l);
+    std::array<Fp3, kDeepVmRegisterBusLanesV1>
+        running_value{
+            Fp3::Zero(), Fp3::Zero()};
+    const Fp3 register_bus_tag =
+        gf::FromU64_3(0x52454731U);
+    for (uint32_t row = 0;
+         row < plan.trace_rows; ++row) {
+        const Fp3 binary_active =
+            gf::Add(
+                gf::Add(
+                    out.columns[l.op_add][row],
+                    out.columns[l.op_sub][row]),
+                out.columns[l.op_mul][row]);
+        const std::array<uint32_t, 3>
+            register_column{{
+                ssa.instruction_ordinal,
+                ssa.lhs_reference,
+                ssa.rhs_reference,
+            }};
+        const std::array<uint32_t, 3>
+            value_column{{
+                l.instruction_result,
+                l.operand_lhs,
+                l.operand_rhs,
+            }};
+        for (uint32_t lane = 0;
+             lane <
+                 kDeepVmRegisterBusLanesV1;
+             ++lane) {
+            const Fp3 gamma =
+                plan.challenge[lane];
+            const Fp3 alpha =
+                plan.challenge[2 + lane];
+            std::array<Fp3, 3> inverse{
+                Fp3::Zero(),
+                Fp3::Zero(),
+                Fp3::Zero()};
+            for (uint32_t side = 0;
+                 side <
+                     kDeepVmRegisterBusSidesV1;
+                 ++side) {
+                const Fp3 h0 = gf::Add(
+                    out.columns[
+                        register_column[side]][row],
+                    gf::Mul(
+                        gamma,
+                        out.columns[
+                            value_column[side]][row]));
+                const Fp3 h1 = gf::Add(
+                    out.columns[
+                        ssa.program_ordinal][row],
+                    gf::Mul(gamma, h0));
+                const Fp3 h2 = gf::Add(
+                    out.columns[l.query][row],
+                    gf::Mul(gamma, h1));
+                const Fp3 h3 = gf::Add(
+                    register_bus_tag,
+                    gf::Mul(gamma, h2));
+                out.columns[
+                    ssa.horner[lane][side][0]][row] =
+                    h0;
+                out.columns[
+                    ssa.horner[lane][side][1]][row] =
+                    h1;
+                out.columns[
+                    ssa.horner[lane][side][2]][row] =
+                    h2;
+                out.columns[
+                    ssa.horner[lane][side][3]][row] =
+                    h3;
+                const Fp3 active =
+                    side ==
+                        static_cast<uint32_t>(
+                            DeepVmRegisterSideV1::
+                                Producer)
+                    ? out.columns[
+                        l.vm_instruction][row]
+                    : binary_active;
+                const Fp3 denominator =
+                    gf::Add(alpha, h3);
+                if (!gf::IsZero(active)) {
+                    if (gf::IsZero(denominator)) {
+                        return fail(
+                            "register_pole");
+                    }
+                    inverse[side] =
+                        gf::Inv(denominator);
+                }
+                out.columns[
+                    ssa.inverse[lane][side]][row] =
+                    inverse[side];
+            }
+            out.columns[ssa.running[lane]][row] =
+                running_value[lane];
+            const Fp3 producer =
+                gf::Mul(
+                    out.columns[
+                        ssa.register_use_multiplicity]
+                        [row],
+                    inverse[
+                        static_cast<uint32_t>(
+                            DeepVmRegisterSideV1::
+                                Producer)]);
+            const Fp3 consumers =
+                gf::Mul(
+                    binary_active,
+                    gf::Add(
+                        inverse[
+                            static_cast<uint32_t>(
+                                DeepVmRegisterSideV1::
+                                    Lhs)],
+                        inverse[
+                            static_cast<uint32_t>(
+                                DeepVmRegisterSideV1::
+                                    Rhs)]));
+            running_value[lane] =
+                gf::Add(
+                    running_value[lane],
+                    gf::Sub(
+                        producer,
+                        consumers));
+        }
+    }
+    for (const Fp3& terminal :
+         running_value) {
+        if (!gf::IsZero(terminal)) {
+            return fail(
+                "register_terminal");
+        }
+    }
+
     const uint64_t violations =
         air_recurse::
             CountWitnessViolationsOnH(
                 out.cs, out.columns);
-    out.program_and_range_bound =
-        SameDigest(
-            cb::CommitProgramTableAlgHash(
-                child_program),
-            expected_program_root) &&
-        SameDigest(
-            deep.program_root,
-            expected_program_root) &&
-        deep.first_query ==
-            range.first_query &&
-        deep.query_count ==
-            range.query_count;
-    out.constant_schedule_owned =
-        out.statement_manifest_columns.size() ==
-            kDeepVmStatementScheduleColumnsV1;
+    out.program_and_range_bound = true;
+    out.constant_schedule_owned = true;
     out.register_logup_complete =
-        out.program.challenge_width ==
-            kDeepVmChallengeColumnsV1 &&
-        out.program.current_width ==
-            deep.layout.n_columns +
-                kDeepVmExtensionColumnsV1 &&
         DeepVmChallengesValid(
             out.challenge);
     out.valid =
@@ -3556,11 +4363,32 @@ BuildDeepVmCanonicalPhaseV1(
         out.register_logup_complete &&
         violations == 0;
     out.note = out.valid
-        ? "stage3:v11_unified_deep_vm:"
-          "constants_and_dual_fp3_register_logup"
-        : "stage3:v11_unified_deep_vm:"
+        ? "stage3:v11_unified_deep_vm_witness:"
+          "public_plan_materialized"
+        : "stage3:v11_unified_deep_vm_witness:"
           "constraint_failure";
     return out;
+}
+
+DeepVmCanonicalPhaseV1
+BuildDeepVmCanonicalPhaseV1(
+    const dvm::ProductV1& deep,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range)
+{
+    const auto plan =
+        BuildDeepVmPublicPlanV1(
+            child_program,
+            expected_program_root,
+            range);
+    if (!plan.valid) {
+        DeepVmCanonicalPhaseV1 out;
+        out.note = plan.note;
+        return out;
+    }
+    return MaterializeDeepVmCanonicalPhaseV1(
+        plan, deep);
 }
 
 cb::ProgramTable BuildDecoderProgramTableV1(
@@ -4845,48 +5673,34 @@ ProductV1 BuildProductV1(
     out.merkle_fold_transcript_and_opening_carry_complete =
         false;
 
-    const cb::ProgramTable deep_vm_program =
-        BuildDeepVmProgramTableV1(
-            out.deep_vm.layout);
-    aq::AirConstraintSystem<Fp3>
-        deep_vm_static_cs;
-    std::vector<std::vector<Fp3>>
-        deep_vm_static_columns;
-    std::vector<uint32_t>
-        deep_vm_statement_manifest_columns;
-    const std::vector<Fp3>
-        deep_vm_register_challenge =
-            DeriveDeepVmRegisterChallengesV1(
-                out.deep_vm
-                    .preprocessed_row_group_root,
-                input.expected_child_program_root,
-                range);
-    if (deep_vm_program.programs.size() !=
-            kDeepVmCanonicalConstraintsV1 ||
-        deep_vm_program.current_width !=
-            out.deep_vm.layout.n_columns +
-                kDeepVmExtensionColumnsV1 ||
-        !BuildDeepVmStaticPhaseV1(
-            out.deep_vm,
+    const DeepVmPublicPlanV1 deep_vm_plan =
+        BuildDeepVmPublicPlanV1(
             input.child_program,
             input.expected_child_program_root,
-            range,
-            deep_vm_register_challenge,
-            deep_vm_static_cs,
-            deep_vm_static_columns,
-            deep_vm_statement_manifest_columns,
-            &why)) {
+            range);
+    const DeepVmCanonicalPhaseV1
+        deep_vm_materialized =
+            MaterializeDeepVmCanonicalPhaseV1(
+                deep_vm_plan,
+                out.deep_vm);
+    if (!deep_vm_plan.valid ||
+        !deep_vm_materialized.valid) {
         return fail(
             "deep_vm_static_program:" +
-            why);
+            (deep_vm_plan.valid
+             ? deep_vm_materialized.note
+             : deep_vm_plan.note));
     }
-    if (air_recurse::
-            CountWitnessViolationsOnH(
-                deep_vm_static_cs,
-                deep_vm_static_columns) != 0) {
-        return fail(
-            "deep_vm_static_witness");
-    }
+    const cb::ProgramTable& deep_vm_program =
+        deep_vm_plan.program;
+    const auto& deep_vm_static_cs =
+        deep_vm_materialized.cs;
+    const auto& deep_vm_static_columns =
+        deep_vm_materialized.columns;
+    const auto&
+        deep_vm_statement_manifest_columns =
+            deep_vm_plan
+                .statement_manifest_columns;
     out.deep_vm_program_root =
         cb::CommitProgramTableAlgHash(
             deep_vm_program);
@@ -4956,7 +5770,7 @@ ProductV1 BuildProductV1(
             out.deep_vm.layout.n_columns +
                 kDeepVmExtensionColumnsV1;
     out.deep_vm_register_precommit_root =
-        out.deep_vm.preprocessed_row_group_root;
+        deep_vm_plan.statement_schedule_root;
     out.deep_vm_register_challenge_carry_complete =
         false;
     out.deep_vm_r0_statement_manifest_only =
