@@ -2720,62 +2720,6 @@ ValidateNormalizedDeep64CtlChildVerifierInParentAirV1(
         attachment,
     std::string* why = nullptr);
 
-/**
- * Capability after ProofFieldBus + Deep64 CTL terminal + CTL child
- * verifier equations hosted in the parent FoldBus. Closes
- * CtlChildVerifierAndTerminalBus (ctl_child_verified_in_parent_air &&
- * terminal_bus_commitment_mapped). Payload / Split-RAP / endpoint
- * residuals and kCompleteRecursiveFixedPointExecutable stay open/false.
- */
-[[nodiscard]] NormalizedRecursiveChildCapabilityAuditV1
-AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
-    const FoldBusComposition& composition,
-    const BytecodeInterpreterAttachment& interpreter,
-    const NormalizedCoupledBankRowPin& row_pin,
-    const NormalizedCoupledBankTerminalExecution& execution,
-    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
-    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
-    const NormalizedDeep64CtlChildParentAirAttachmentV1&
-        ctl_parent_air);
-
-[[nodiscard]] bool
-ValidateNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
-    const FoldBusComposition& composition,
-    const BytecodeInterpreterAttachment& interpreter,
-    const NormalizedCoupledBankRowPin& row_pin,
-    const NormalizedCoupledBankTerminalExecution& execution,
-    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
-    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
-    const NormalizedDeep64CtlChildParentAirAttachmentV1&
-        ctl_parent_air,
-    const NormalizedRecursiveChildCapabilityAuditV1& audit,
-    std::string* why = nullptr);
-
-
-/**
- * Capability after ProofFieldBus + Deep64 CTL terminal (terminal lanes closed;
- * CTL child verifier still host-native until parent-air attach).
- */
-[[nodiscard]] NormalizedRecursiveChildCapabilityAuditV1
-AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
-    const FoldBusComposition& composition,
-    const BytecodeInterpreterAttachment& interpreter,
-    const NormalizedCoupledBankRowPin& row_pin,
-    const NormalizedCoupledBankTerminalExecution& execution,
-    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
-    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl);
-
-[[nodiscard]] bool
-ValidateNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
-    const FoldBusComposition& composition,
-    const BytecodeInterpreterAttachment& interpreter,
-    const NormalizedCoupledBankRowPin& row_pin,
-    const NormalizedCoupledBankTerminalExecution& execution,
-    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
-    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
-    const NormalizedRecursiveChildCapabilityAuditV1& audit,
-    std::string* why = nullptr);
-
 // -------------------------------------------------------------------------
 // Fail-closed recursive child-verifier capability audit.
 // -------------------------------------------------------------------------
@@ -2920,6 +2864,61 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
     std::string* why = nullptr,
     const NormalizedTerminalBusCommitmentBusAttachmentV1* terminal_bus =
         nullptr);
+
+/**
+ * Capability after ProofFieldBus + Deep64 CTL terminal (terminal lanes closed;
+ * CTL child verifier still host-native until parent-air attach).
+ */
+[[nodiscard]] NormalizedRecursiveChildCapabilityAuditV1
+AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl);
+
+[[nodiscard]] bool
+ValidateNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedRecursiveChildCapabilityAuditV1& audit,
+    std::string* why = nullptr);
+
+/**
+ * Capability after ProofFieldBus + Deep64 CTL terminal + CTL child
+ * verifier equations hosted in the parent FoldBus. Closes
+ * CtlChildVerifierAndTerminalBus (ctl_child_verified_in_parent_air &&
+ * terminal_bus_commitment_mapped). Payload / Split-RAP / endpoint
+ * residuals and kCompleteRecursiveFixedPointExecutable stay open/false.
+ */
+[[nodiscard]] NormalizedRecursiveChildCapabilityAuditV1
+AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedDeep64CtlChildParentAirAttachmentV1&
+        ctl_parent_air);
+
+[[nodiscard]] bool
+ValidateNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedDeep64CtlChildParentAirAttachmentV1&
+        ctl_parent_air,
+    const NormalizedRecursiveChildCapabilityAuditV1& audit,
+    std::string* why = nullptr);
 
 /**
  * Exact shape/capacity preflight for proving the normalized parent itself.
