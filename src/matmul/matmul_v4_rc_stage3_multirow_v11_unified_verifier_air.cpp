@@ -473,17 +473,6 @@ DecoderHornerLayoutV1 DecoderHornerLayout(
     return out;
 }
 
-std::vector<Fp3> DecoderChallenges(
-    const dj::ProductV1& decoder)
-{
-    return {
-        decoder.gamma[0],
-        decoder.gamma[1],
-        decoder.alpha[0],
-        decoder.alpha[1],
-    };
-}
-
 enum class DeepVmRegisterSideV1 : uint32_t {
     Producer = 0,
     Lhs = 1,
@@ -568,6 +557,120 @@ bool CanonicalDigest(
         [](gf::Fp limb) {
             return limb < gf::kP;
         });
+}
+
+uint32_t Uint256WordV1(
+    const uint256& root, uint32_t word)
+{
+    const uint64_t limb =
+        root.GetUint64(word / 2);
+    return word % 2 == 0
+        ? static_cast<uint32_t>(limb)
+        : static_cast<uint32_t>(limb >> 32);
+}
+
+std::array<uint256, kPhasesV1>
+PhasePrecommitRootsV1(const ProductV1& product)
+{
+    std::array<uint256, kPhasesV1> roots{};
+    roots[static_cast<uint32_t>(
+        PhaseV1::ParentJoin)] =
+        product.parent_join_statement_manifest_r0_root;
+    roots[static_cast<uint32_t>(
+        PhaseV1::DeepVm)] =
+        product.deep_vm_register_precommit_root;
+    roots[static_cast<uint32_t>(
+        PhaseV1::Decoder)] =
+        product.decoder.join_tuple_precommit_root;
+    for (const auto& pin :
+         product.decoder.child_roots) {
+        if (pin.index != 0) continue;
+        if (pin.kind == 2) {
+            roots[static_cast<uint32_t>(
+                PhaseV1::MerkleHash)] =
+                pin.root;
+        } else if (pin.kind == 3) {
+            roots[static_cast<uint32_t>(
+                PhaseV1::MerkleFold)] =
+                pin.root;
+        }
+    }
+    return roots;
+}
+
+bool VerifyPhasePrecommitRootOpeningsInternalV1(
+    const NormalizedOpeningReceiptV1& receipt,
+    std::string* why)
+{
+    const auto fail = [why](const char* detail) {
+        if (why != nullptr) {
+            *why =
+                std::string{
+                    "stage3:v11_unified_opening_receipt:"
+                    "phase_root:"} +
+                detail;
+        }
+        return false;
+    };
+    if (receipt.phase_precommit_root_words !=
+            kPhasePrecommitRootWordsV1 ||
+        receipt.phase_precommit_root_column_base >
+            std::numeric_limits<uint32_t>::max() -
+                kPhasePrecommitRootColumnsV1 ||
+        receipt.trace_openings.groups[0].role !=
+            Fri3AlgMultiRowGroupRole::MainTrace ||
+        receipt.trace_openings.groups[0].rows.empty()) {
+        return fail("shape");
+    }
+    const auto& base =
+        receipt.trace_openings.base_column_indices;
+    const auto& group =
+        receipt.trace_openings.groups[0];
+    if (base.size() != group.column_count) {
+        return fail("base_columns");
+    }
+    for (uint32_t phase = 0;
+         phase < kPhasesV1; ++phase) {
+        const auto& root =
+            receipt.phase_precommit_root[phase];
+        if (root.IsNull()) {
+            return fail("null");
+        }
+        for (uint32_t word = 0;
+             word < kPhasePrecommitRootWordsV1;
+             ++word) {
+            const uint32_t global_column =
+                receipt.phase_precommit_root_column_base +
+                phase * kPhasePrecommitRootWordsV1 +
+                word;
+            const auto position =
+                std::find(
+                    base.begin(), base.end(),
+                    global_column);
+            if (position == base.end()) {
+                return fail("column_omitted");
+            }
+            const size_t local =
+                static_cast<size_t>(
+                    position - base.begin());
+            const Fp3 expected =
+                Fp3::FromFp(
+                    Uint256WordV1(root, word));
+            for (const auto& row : group.rows) {
+                if (local >= row.values.size() ||
+                    local >= row.next_values.size() ||
+                    !gf::Eq(
+                        row.values[local],
+                        expected) ||
+                    !gf::Eq(
+                        row.next_values[local],
+                        expected)) {
+                    return fail("cell_mismatch");
+                }
+            }
+        }
+    }
+    return true;
 }
 
 bool DeepVmChallengesValid(
@@ -676,6 +779,9 @@ std::vector<Fp3> DeriveDeepVmRegisterChallengesV1(
 
 bool BuildDecoderStaticPhaseV1(
     const dj::ProductV1& decoder,
+    const std::array<
+        Fp3,
+        kDecoderChallengeColumnsV1>& rooted_challenge,
     aq::AirConstraintSystem<Fp3>& cs,
     std::vector<std::vector<Fp3>>& columns,
     std::vector<uint32_t>& statement_manifest_columns,
@@ -696,8 +802,23 @@ bool BuildDecoderStaticPhaseV1(
     const cb::ProgramTable table =
         BuildDecoderProgramTableV1(
             decoder.layout);
-    const auto challenge =
-        DecoderChallenges(decoder);
+    const std::vector<Fp3> challenge{
+        rooted_challenge.begin(),
+        rooted_challenge.end()};
+    if (std::any_of(
+            challenge.begin(),
+            challenge.end(),
+            [](const Fp3& value) {
+                return gf::IsZero(value);
+            }) ||
+        gf::Eq(challenge[0], challenge[1]) ||
+        gf::Eq(challenge[2], challenge[3])) {
+        if (why != nullptr) {
+            *why =
+                "decoder_rooted_challenge";
+        }
+        return false;
+    }
     if (table.programs.size() != 30 ||
         table.current_width !=
             decoder.layout.n_columns +
@@ -731,9 +852,32 @@ bool BuildDecoderStaticPhaseV1(
          lane < dj::kDecoderJoinBusLanesV1;
          ++lane) {
         const Fp3 gamma =
-            decoder.gamma[lane];
+            challenge[lane];
         const Fp3 alpha =
-            decoder.alpha[lane];
+            challenge[2 + lane];
+        std::fill(
+            columns[
+                decoder.layout
+                    .source_inverse[lane]].begin(),
+            columns[
+                decoder.layout
+                    .source_inverse[lane]].end(),
+            Fp3::Zero());
+        std::fill(
+            columns[
+                decoder.layout
+                    .consumer_inverse[lane]].begin(),
+            columns[
+                decoder.layout
+                    .consumer_inverse[lane]].end(),
+            Fp3::Zero());
+        std::fill(
+            columns[
+                decoder.layout.running[lane]].begin(),
+            columns[
+                decoder.layout.running[lane]].end(),
+            Fp3::Zero());
+        Fp3 running = Fp3::Zero();
         for (uint32_t side = 0;
              side < 2; ++side) {
             const uint32_t kind =
@@ -776,6 +920,33 @@ bool BuildDecoderStaticPhaseV1(
                     aux.column[lane][side][2]][row] = h3;
                 columns[
                     aux.column[lane][side][3]][row] = term;
+                if (row < decoder.real_rows) {
+                    columns[
+                        side == 0
+                        ? decoder.layout
+                            .source_inverse[lane]
+                        : decoder.layout
+                            .consumer_inverse[lane]][row] =
+                        gf::Inv(term);
+                }
+            }
+        }
+        for (uint32_t row = 0;
+             row < decoder.cs.n_rows;
+             ++row) {
+            columns[
+                decoder.layout.running[lane]][row] =
+                running;
+            if (row < decoder.real_rows) {
+                running = gf::Add(
+                    running,
+                    gf::Sub(
+                        columns[
+                            decoder.layout
+                                .source_inverse[lane]][row],
+                        columns[
+                            decoder.layout
+                                .consumer_inverse[lane]][row]));
             }
         }
     }
@@ -1853,6 +2024,15 @@ DeriveDecoderCarryChallengesInternalV1(
 }
 
 } // namespace
+
+bool VerifyPhasePrecommitRootOpeningsV1(
+    const NormalizedOpeningReceiptV1& receipt,
+    std::string* why)
+{
+    return
+        VerifyPhasePrecommitRootOpeningsInternalV1(
+            receipt, why);
+}
 
 uint256
 ComputeAuthenticatedTraceOpeningReceiptRootV1(
@@ -3590,6 +3770,78 @@ cb::ProgramTable BuildDecoderProgramTableV1(
     return table;
 }
 
+cb::ProgramTable
+BuildDecoderRootAliasProgramTableV1(
+    const LayoutV1& layout,
+    const dj::LayoutV1& decoder)
+{
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = layout.n_columns;
+    table.next_width = layout.n_columns;
+    if (layout.n_columns == 0 ||
+        layout.n_columns <
+            std::max(
+                kDecoderRootSelectorColumnsV1,
+                kPhasePrecommitRootColumnsV1) ||
+        decoder.root_value >=
+            layout.data_columns ||
+        layout.decoder_root_selector_columns !=
+            kDecoderRootSelectorColumnsV1 ||
+        layout.decoder_root_selector_base >
+            layout.n_columns -
+                kDecoderRootSelectorColumnsV1 ||
+        layout.phase_precommit_root_base >
+            layout.n_columns -
+                kPhasePrecommitRootColumnsV1) {
+        return table;
+    }
+    constexpr std::array<PhaseV1, 3>
+        owners{{
+            PhaseV1::ParentJoin,
+            PhaseV1::MerkleHash,
+            PhaseV1::MerkleFold,
+        }};
+    uint32_t selector_ordinal = 0;
+    for (const PhaseV1 owner : owners) {
+        for (uint32_t word = 0;
+             word < kPhasePrecommitRootWordsV1;
+             ++word, ++selector_ordinal) {
+            const uint32_t selector =
+                layout.decoder_root_selector_base +
+                selector_ordinal;
+            const uint32_t expected =
+                layout.PhasePrecommitRoot(
+                    owner, word);
+            AppendBytecodeProgramV1(
+                table,
+                [selector,
+                 claimed = decoder.root_value,
+                 expected](
+                    BytecodeExprV1& e) {
+                    e.Mul(
+                        e.Current(selector),
+                        e.Sub(
+                            e.Current(claimed),
+                            e.Current(expected)));
+                });
+        }
+    }
+    std::string why;
+    if (table.programs.size() !=
+            kDecoderRootSelectorColumnsV1 ||
+        !cb::ValidateProgramTable(
+            table, &why) ||
+        !cb::ProgramTableIsChallengeIndependent(
+            table)) {
+        return {};
+    }
+    return table;
+}
+
 cb::ProgramTable BuildAcceptanceProgramTableV1(
     const LayoutV1& layout)
 {
@@ -3838,6 +4090,12 @@ uint256 ComputeNormalizedOpeningReceiptRootV1(
         input,
         receipt.trace_openings
             .opening_receipt_root);
+    AppendU32V1(
+        input,
+        receipt.phase_precommit_root_column_base);
+    AppendU32V1(
+        input,
+        receipt.phase_precommit_root_words);
     const auto digest =
         alg_hash::SpongeHashFp(input);
     return Fri3AlgDigestToUint256({
@@ -3866,41 +4124,13 @@ BuildNormalizedOpeningReceiptV1(
         product.decoder_program_root,
     }};
     out.phases = product.phases;
+    out.phase_precommit_root_column_base =
+        product.layout.phase_precommit_root_base;
     out.trace_openings =
         BuildAuthenticatedTraceOpeningsV1(
             proof);
-    out.phase_precommit_root[
-        static_cast<uint32_t>(
-            PhaseV1::ParentJoin)] =
-        product
-            .parent_join_statement_manifest_r0_root;
-    out.phase_precommit_root[
-        static_cast<uint32_t>(
-            PhaseV1::DeepVm)] =
-        product
-            .deep_vm_register_precommit_root;
-    out.phase_precommit_root[
-        static_cast<uint32_t>(
-            PhaseV1::Decoder)] =
-        product.decoder
-            .join_tuple_precommit_root;
-    for (const auto& pin :
-         product.decoder.child_roots) {
-        if (pin.kind == 2 &&
-            pin.index == 0) {
-            out.phase_precommit_root[
-                static_cast<uint32_t>(
-                    PhaseV1::MerkleHash)] =
-                pin.root;
-        } else if (
-            pin.kind == 3 &&
-            pin.index == 0) {
-            out.phase_precommit_root[
-                static_cast<uint32_t>(
-                    PhaseV1::MerkleFold)] =
-                pin.root;
-        }
-    }
+    out.phase_precommit_root =
+        PhasePrecommitRootsV1(product);
     out.receipt_root =
         ComputeNormalizedOpeningReceiptRootV1(
             out);
@@ -3913,11 +4143,33 @@ BuildNormalizedOpeningReceiptV1(
         product.merkle_fold_program_root_recomputed &&
         product.deep_vm_program_root_recomputed &&
         product.decoder_program_root_recomputed;
-    // Binding a root in the receipt is not proof that the normalized trace
-    // owns that root. Keep both challenge carries false until root limbs are
-    // exported by their phases and opening-authenticated here.
-    out.deep_vm_challenge_replayed = false;
-    out.decoder_challenge_replayed = false;
+    std::string phase_root_why;
+    out.phase_precommit_roots_opening_authenticated =
+        out.trace_openings.valid &&
+        VerifyPhasePrecommitRootOpeningsInternalV1(
+            out, &phase_root_why);
+    out.deep_vm_challenge_replayed =
+        out.phase_precommit_roots_opening_authenticated &&
+        DeepVmChallengesValid(
+            DeriveDeepVmRegisterChallengesV1(
+                out.phase_precommit_root[
+                    static_cast<uint32_t>(
+                        PhaseV1::DeepVm)],
+                out.child_program_root,
+                out.range));
+    const auto decoder_challenge =
+        DeriveDecoderCarryChallengesV1(
+            out.phase_precommit_root[
+                static_cast<uint32_t>(
+                    PhaseV1::Decoder)]);
+    out.decoder_challenge_replayed =
+        out.phase_precommit_roots_opening_authenticated &&
+        std::all_of(
+            decoder_challenge.begin(),
+            decoder_challenge.end(),
+            [](const Fp3& value) {
+                return !gf::IsZero(value);
+            });
     out.verifier_input_excludes_child_proof =
         true;
     out.every_consumed_cell_opening_authenticated =
@@ -3944,6 +4196,9 @@ BuildNormalizedOpeningReceiptV1(
         out.canonical_programs_bound &&
         out.verifier_input_excludes_child_proof &&
         out.every_consumed_cell_opening_authenticated &&
+        out.phase_precommit_roots_opening_authenticated &&
+        out.deep_vm_challenge_replayed &&
+        out.decoder_challenge_replayed &&
         !out.complete_phase_verifier_consumption &&
         !out.complete_child_receipt_consumption;
     if (out.valid_foundation) {
@@ -3956,6 +4211,7 @@ BuildNormalizedOpeningReceiptV1(
     out.note = out.valid_foundation
         ? "stage3:v11_unified_opening_receipt:"
           "raw_child_excluded;current_next_paths_authenticated;"
+          "phase_roots_r0_authenticated;challenges_replayed;"
           "phase_verifier_consumption_open"
         : "stage3:v11_unified_opening_receipt:"
           "foundation_failure";
@@ -4081,6 +4337,12 @@ VerifyNormalizedOpeningReceiptV1(
     const uint64_t expected_trace_columns =
         uint64_t{data_columns} +
         4 * kPhasesV1 + 2 +
+        manifest_columns +
+        kPhasePrecommitRootColumnsV1 +
+        kDecoderRootSelectorColumnsV1;
+    const uint64_t expected_phase_root_base =
+        uint64_t{data_columns} +
+        4 * kPhasesV1 + 2 +
         manifest_columns;
     const uint64_t proof_trace_columns =
         uint64_t{
@@ -4124,6 +4386,10 @@ VerifyNormalizedOpeningReceiptV1(
         receipt.range.first_query != 0 ||
         receipt.range.query_count !=
             kQ96QueriesV1 ||
+        receipt.phase_precommit_root_words !=
+            kPhasePrecommitRootWordsV1 ||
+        receipt.phase_precommit_root_column_base !=
+            expected_phase_root_base ||
         expected_trace_columns !=
             proof_trace_columns ||
         expected_trace_columns >
@@ -4144,10 +4410,43 @@ VerifyNormalizedOpeningReceiptV1(
             return fail("phase_precommit_root");
         }
     }
-    // Do not derive verifier challenges from receipt-only roots. The next
-    // phase must expose each root as proof-owned cells and authenticate those
-    // cells in the trace opening receipt before replay becomes a claim.
-    out.challenge_replay_verified = false;
+    out.phase_precommit_roots_opening_authenticated =
+        VerifyPhasePrecommitRootOpeningsInternalV1(
+            receipt, &opening_why);
+    if (!out.phase_precommit_roots_opening_authenticated) {
+        return fail(opening_why);
+    }
+    const auto deep_challenge =
+        DeriveDeepVmRegisterChallengesV1(
+            receipt.phase_precommit_root[
+                static_cast<uint32_t>(
+                    PhaseV1::DeepVm)],
+            receipt.child_program_root,
+            receipt.range);
+    const auto decoder_challenge =
+        DeriveDecoderCarryChallengesV1(
+            receipt.phase_precommit_root[
+                static_cast<uint32_t>(
+                    PhaseV1::Decoder)]);
+    if (!DeepVmChallengesValid(
+            deep_challenge)) {
+        return fail("deep_vm_challenge");
+    }
+    out.deep_vm_challenge = {
+        deep_challenge[0],
+        deep_challenge[1],
+        deep_challenge[2],
+        deep_challenge[3],
+    };
+    out.decoder_challenge =
+        decoder_challenge;
+    out.challenge_replay_verified =
+        std::all_of(
+            decoder_challenge.begin(),
+            decoder_challenge.end(),
+            [](const Fp3& value) {
+                return !gf::IsZero(value);
+            });
     out.raw_child_proof_excluded = true;
     out.full_split_rap_transcript_verified =
         false;
@@ -4157,14 +4456,18 @@ VerifyNormalizedOpeningReceiptV1(
         false;
     out.accepted_foundation =
         out.opening_paths_verified &&
+        out.phase_precommit_roots_opening_authenticated &&
         out.canonical_programs_verified &&
+        out.challenge_replay_verified &&
         out.raw_child_proof_excluded &&
         !out.complete_phase_verifier_consumption &&
         !out.complete_child_receipt_consumption;
     out.note =
         "stage3:v11_unified_opening_receipt:"
         "verify:authenticated_foundation;"
-        "root_alias_and_phase_verifier_consumption_open";
+        "phase_roots_r0_authenticated;"
+        "challenge_replay_closed;"
+        "phase_verifier_consumption_open";
     return out;
 }
 
@@ -4679,12 +4982,17 @@ ProductV1 BuildProductV1(
         decoder_static_columns;
     std::vector<uint32_t>
         decoder_statement_manifest_columns;
+    const auto decoder_rooted_challenge =
+        DeriveDecoderCarryChallengesV1(
+            out.decoder
+                .join_tuple_precommit_root);
     if (decoder_program.programs.size() != 30 ||
         decoder_program.current_width !=
             out.decoder.layout.n_columns +
                 kDecoderHornerAuxColumnsV1 ||
         !BuildDecoderStaticPhaseV1(
             out.decoder,
+            decoder_rooted_challenge,
             decoder_static_cs,
             decoder_static_columns,
             decoder_statement_manifest_columns,
@@ -4862,6 +5170,16 @@ ProductV1 BuildProductV1(
         cursor;
     cursor +=
         out.expected_preprocessed_columns;
+    out.layout.phase_precommit_root_base =
+        cursor;
+    cursor +=
+        kPhasePrecommitRootColumnsV1;
+    out.layout.decoder_root_selector_base =
+        cursor;
+    out.layout.decoder_root_selector_columns =
+        kDecoderRootSelectorColumnsV1;
+    cursor +=
+        out.layout.decoder_root_selector_columns;
     out.layout.n_columns = cursor;
     out.trace_columns = cursor;
     out.materialized_trace_cells =
@@ -4891,6 +5209,36 @@ ProductV1 BuildProductV1(
     out.cs.preprocessed.emplace_back(
         out.layout.active,
         active_schedule);
+
+    const auto phase_precommit_roots =
+        PhasePrecommitRootsV1(out);
+    if (std::any_of(
+            phase_precommit_roots.begin(),
+            phase_precommit_roots.end(),
+            [](const uint256& root) {
+                return root.IsNull();
+            })) {
+        return fail("phase_precommit_root");
+    }
+    for (uint32_t phase = 0;
+         phase < kPhasesV1; ++phase) {
+        for (uint32_t word = 0;
+             word < kPhasePrecommitRootWordsV1;
+             ++word) {
+            const uint32_t column =
+                out.layout.PhasePrecommitRoot(
+                    static_cast<PhaseV1>(phase),
+                    word);
+            out.columns[column].assign(
+                out.trace_rows,
+                Fp3::FromFp(
+                    Uint256WordV1(
+                        phase_precommit_roots[phase],
+                        word)));
+            out.cs.preprocessed.emplace_back(
+                column, out.columns[column]);
+        }
+    }
 
     uint32_t expected_cursor =
         out.layout.expected_preprocessed_base;
@@ -4992,9 +5340,128 @@ ProductV1 BuildProductV1(
         }
     }
     if (expected_cursor !=
-        out.layout.n_columns) {
+        out.layout.phase_precommit_root_base) {
         return fail("expected_pin_inventory");
     }
+
+    const auto& decoder_shape =
+        out.phases[static_cast<uint32_t>(
+            PhaseV1::Decoder)];
+    cb::ProgramTable decoder_root_alias_program;
+    decoder_root_alias_program.role =
+        RCStage3RelationRole::CompositionLink;
+    decoder_root_alias_program.current_width =
+        out.layout.n_columns;
+    decoder_root_alias_program.next_width =
+        out.layout.n_columns;
+    uint32_t decoder_root_row = 0;
+    uint32_t decoder_selector = 0;
+    for (const auto& pin :
+         out.decoder.child_roots) {
+        PhaseV1 owner;
+        if (pin.index != 0) {
+            return fail(
+                "decoder_root_noncanonical_index");
+        }
+        if (pin.kind == 1) {
+            owner = PhaseV1::ParentJoin;
+        } else if (pin.kind == 2) {
+            owner = PhaseV1::MerkleHash;
+        } else if (pin.kind == 3) {
+            owner = PhaseV1::MerkleFold;
+        } else {
+            return fail(
+                "decoder_root_noncanonical_kind");
+        }
+        for (uint32_t word = 0;
+             word < kPhasePrecommitRootWordsV1;
+             ++word, ++decoder_root_row,
+             ++decoder_selector) {
+            if (decoder_selector >=
+                    out.layout
+                        .decoder_root_selector_columns ||
+                decoder_root_row >=
+                    decoder_shape.rows) {
+                return fail(
+                    "decoder_root_selector_overflow");
+            }
+            const uint32_t selector =
+                out.layout.decoder_root_selector_base +
+                decoder_selector;
+            const uint32_t global_row =
+                decoder_shape.first_row +
+                decoder_root_row;
+            out.columns[selector][global_row] =
+                Fp3::One();
+            out.cs.preprocessed.emplace_back(
+                selector,
+                out.columns[selector]);
+            AppendBytecodeProgramV1(
+                decoder_root_alias_program,
+                [selector,
+                 claimed =
+                     out.decoder.layout.root_value,
+                 expected =
+                     out.layout.PhasePrecommitRoot(
+                         owner, word)](
+                    BytecodeExprV1& e) {
+                    const uint32_t selector_value =
+                        e.Current(selector);
+                    const uint32_t claimed_value =
+                        e.Current(claimed);
+                    const uint32_t expected_value =
+                        e.Current(expected);
+                    e.Mul(
+                        selector_value,
+                        e.Sub(
+                            claimed_value,
+                            expected_value));
+                });
+        }
+    }
+    if (decoder_selector !=
+            out.layout
+                .decoder_root_selector_columns) {
+        return fail(
+            "decoder_root_selector_inventory");
+    }
+    aq::AirConstraintSystem<Fp3>
+        decoder_root_alias_adapter;
+    const cb::ProgramTable
+        canonical_decoder_root_alias_program =
+            BuildDecoderRootAliasProgramTableV1(
+                out.layout,
+                out.decoder.layout);
+    if (canonical_decoder_root_alias_program !=
+            decoder_root_alias_program ||
+        !cb::ValidateProgramTable(
+            decoder_root_alias_program,
+            &why) ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            decoder_root_alias_program,
+            out.trace_rows,
+            decoder_root_alias_adapter,
+            &why) ||
+        decoder_root_alias_adapter.constraints.size() !=
+            kDecoderRootSelectorColumnsV1) {
+        return fail(
+            "decoder_root_alias_bytecode:" +
+            why);
+    }
+    out.decoder_root_alias_program_root =
+        cb::CommitProgramTableAlgHash(
+            decoder_root_alias_program);
+    out.decoder_root_alias_constraints_canonical_bytecode =
+        DigestNonzero(
+            out.decoder_root_alias_program_root);
+    out.cs.constraints.insert(
+        out.cs.constraints.end(),
+        std::make_move_iterator(
+            decoder_root_alias_adapter
+                .constraints.begin()),
+        std::make_move_iterator(
+            decoder_root_alias_adapter
+                .constraints.end()));
     std::string scheduler_why;
     if (!AddSchedulerConstraints(
             out.layout, out.cs,
@@ -5136,6 +5603,28 @@ ProductV1 BuildProductV1(
                 .expected_preprocessed_base ==
             out.expected_preprocessed_columns &&
         !out.preprocessed_row_group_root.IsNull();
+    out.phase_precommit_roots_r0_exported =
+        std::all_of(
+            phase_precommit_roots.begin(),
+            phase_precommit_roots.end(),
+            [](const uint256& root) {
+                return !root.IsNull();
+            }) &&
+        out.layout.phase_precommit_root_base +
+                kPhasePrecommitRootColumnsV1 ==
+            out.layout.decoder_root_selector_base;
+    out.phase_precommit_roots_canonical_u32 =
+        out.phase_precommit_roots_r0_exported;
+    out.decoder_root_words_directly_aliased =
+        decoder_selector;
+    out.decoder_root_rows_directly_aliased =
+        decoder_selector ==
+            kDecoderRootSelectorColumnsV1;
+    out.decoder_child_root_carry_complete =
+        out.phase_precommit_roots_r0_exported &&
+        out.phase_precommit_roots_canonical_u32 &&
+        out.decoder_root_rows_directly_aliased &&
+        out.decoder_root_alias_constraints_canonical_bytecode;
     out.acceptance_ordinary_witness =
         std::find(
             out.preprocessed_columns.begin(),

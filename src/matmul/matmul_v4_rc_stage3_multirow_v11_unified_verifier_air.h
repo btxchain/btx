@@ -32,6 +32,7 @@ inline constexpr uint32_t kQ96QueriesV1 = 96;
 inline constexpr uint32_t kTraceRowsCapV1 = 1U << 20;
 inline constexpr uint32_t kLdeRowsCapV1 = 1U << 24;
 inline constexpr uint32_t kDecoderChallengeColumnsV1 = 4;
+inline constexpr uint32_t kPhasePrecommitRootWordsV1 = 8;
 inline constexpr uint32_t kDecoderHornerStagesV1 = 4;
 inline constexpr uint32_t kDecoderHornerAuxColumnsV1 =
     dj::kDecoderJoinBusLanesV1 * 2 *
@@ -80,6 +81,10 @@ enum class PhaseV1 : uint8_t {
 
 inline constexpr uint32_t kPhasesV1 =
     static_cast<uint32_t>(PhaseV1::Count);
+inline constexpr uint32_t kPhasePrecommitRootColumnsV1 =
+    kPhasesV1 * kPhasePrecommitRootWordsV1;
+inline constexpr uint32_t kDecoderRootSelectorColumnsV1 =
+    3 * kPhasePrecommitRootWordsV1;
 
 struct PhaseShapeV1 {
     PhaseV1 phase{PhaseV1::ParentJoin};
@@ -102,6 +107,20 @@ struct LayoutV1 {
     /** Ordinary one-cell output: one iff this entire unified relation holds. */
     uint32_t acceptance{0};
     uint32_t expected_preprocessed_base{0};
+    /**
+     * Five phase-precommit roots, each encoded as eight canonical u32
+     * words.  These are complete R0 columns, so every normalized FRI query
+     * authenticates the exact same roots before any dependent challenge is
+     * consumed.
+     */
+    uint32_t phase_precommit_root_base{0};
+    /**
+     * One immutable selector per Decoder child-root word.  A selector is one
+     * only on the exact Decoder row which consumes that word; its equality
+     * constraint directly aliases root_value to PhasePrecommitRoot(...).
+     */
+    uint32_t decoder_root_selector_base{0};
+    uint32_t decoder_root_selector_columns{0};
     uint32_t n_columns{0};
 
     [[nodiscard]] uint32_t PhaseTag(PhaseV1 phase) const
@@ -123,6 +142,14 @@ struct LayoutV1 {
     {
         return phase_transition_base +
             static_cast<uint32_t>(phase);
+    }
+    [[nodiscard]] uint32_t PhasePrecommitRoot(
+        PhaseV1 phase, uint32_t word) const
+    {
+        return phase_precommit_root_base +
+            static_cast<uint32_t>(phase) *
+                kPhasePrecommitRootWordsV1 +
+            word;
     }
 };
 
@@ -254,6 +281,12 @@ struct ProductV1 {
     bool decoder_challenge_carry_complete{false};
     /** False until child receipt/root values are equality-carried here. */
     bool decoder_child_root_carry_complete{false};
+    bool phase_precommit_roots_r0_exported{false};
+    bool phase_precommit_roots_canonical_u32{false};
+    bool decoder_root_rows_directly_aliased{false};
+    uint32_t decoder_root_words_directly_aliased{0};
+    alg_hash::Digest decoder_root_alias_program_root{};
+    bool decoder_root_alias_constraints_canonical_bytecode{false};
     uint32_t phase_constraint_systems_canonical_bytecode{0};
     uint32_t phase_r0_tables_statement_manifest_only{0};
     bool trace_cap_fits{false};
@@ -317,6 +350,8 @@ struct AuthenticatedTraceOpeningsV1 {
     std::string note;
 };
 
+struct NormalizedOpeningReceiptV1;
+
 [[nodiscard]] uint256
 ComputeAuthenticatedTraceOpeningReceiptRootV1(
     const AuthenticatedTraceOpeningsV1& receipt);
@@ -338,6 +373,15 @@ BuildAuthenticatedTraceOpeningsV1(
 [[nodiscard]] bool VerifyAuthenticatedTraceOpeningsV1(
     const AuthenticatedTraceOpeningsV1& receipt,
     const aq::AirQuotientSplitRapRowsProof& proof,
+    std::string* why = nullptr);
+
+/**
+ * Require every phase-precommit u32 word at both the current and next
+ * normalized R0 openings.  The opening paths themselves must first be
+ * checked with VerifyAuthenticatedTraceOpeningsV1.
+ */
+[[nodiscard]] bool VerifyPhasePrecommitRootOpeningsV1(
+    const NormalizedOpeningReceiptV1& receipt,
     std::string* why = nullptr);
 
 /**
@@ -372,12 +416,16 @@ struct NormalizedOpeningReceiptV1 {
         phase_precommit_root{};
     std::array<PhaseShapeV1, kPhasesV1> phases{};
     AuthenticatedTraceOpeningsV1 trace_openings{};
+    uint32_t phase_precommit_root_column_base{0};
+    uint32_t phase_precommit_root_words{
+        kPhasePrecommitRootWordsV1};
     uint256 receipt_root{};
     bool canonical_programs_bound{false};
     bool deep_vm_challenge_replayed{false};
     bool decoder_challenge_replayed{false};
     bool verifier_input_excludes_child_proof{false};
     bool every_consumed_cell_opening_authenticated{false};
+    bool phase_precommit_roots_opening_authenticated{false};
     /** False until all phase verifier chips consume the authenticated rows. */
     bool complete_phase_verifier_consumption{false};
     /** False until complete recursively verified child receipts are joined. */
@@ -402,6 +450,7 @@ struct NormalizedOpeningVerifyResultV1 {
     std::array<gf::Fp3, kDecoderChallengeColumnsV1>
         decoder_challenge{};
     bool opening_paths_verified{false};
+    bool phase_precommit_roots_opening_authenticated{false};
     bool canonical_programs_verified{false};
     bool challenge_replay_verified{false};
     bool raw_child_proof_excluded{false};
@@ -499,6 +548,16 @@ BuildDeepVmCanonicalPhaseV1(
 [[nodiscard]] cb::ProgramTable
 BuildDecoderProgramTableV1(
     const dj::LayoutV1& layout =
+        dj::CanonicalLayoutV1());
+
+/**
+ * Canonical 24-equation same-parent bridge from the Decoder root_value tape
+ * to the ParentJoin, MerkleHash and MerkleFold precommit-root R0 exports.
+ */
+[[nodiscard]] cb::ProgramTable
+BuildDecoderRootAliasProgramTableV1(
+    const LayoutV1& layout,
+    const dj::LayoutV1& decoder =
         dj::CanonicalLayoutV1());
 
 /**

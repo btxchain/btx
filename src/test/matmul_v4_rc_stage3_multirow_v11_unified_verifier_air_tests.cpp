@@ -10,6 +10,7 @@
 #include <hash.h>
 
 #include <algorithm>
+#include <tuple>
 #include <utility>
 
 namespace matmul::v4::rc::stage3_multirow_v11_unified_verifier_air {
@@ -935,6 +936,334 @@ BOOST_AUTO_TEST_CASE(
                 !gf::IsZero(lane));
         }
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    phase_precommit_roots_are_r0_opened_and_attacks_reject_at_proof_level)
+{
+    constexpr uint32_t kRows = 8;
+    constexpr uint32_t kDependent =
+        kPhasePrecommitRootColumnsV1;
+    std::array<uint256, kPhasesV1> roots{};
+    for (uint32_t phase = 0;
+         phase < kPhasesV1; ++phase) {
+        roots[phase] = H(9200 + phase);
+    }
+
+    const auto root_word =
+        [](const uint256& root,
+           uint32_t word) {
+            const uint64_t limb =
+                root.GetUint64(word / 2);
+            return word % 2 == 0
+                ? static_cast<uint32_t>(
+                      limb)
+                : static_cast<uint32_t>(
+                      limb >> 32);
+        };
+    const auto make_relation =
+        [&](const std::array<
+                uint256, kPhasesV1>& selected,
+            bool omit_last) {
+            aq::AirConstraintSystem<gf::Fp3> cs;
+            cs.n_rows = kRows;
+            cs.n_columns =
+                kPhasePrecommitRootColumnsV1 + 1;
+            cs.preprocessed_pin_ood = true;
+            std::vector<std::vector<gf::Fp3>>
+                columns(
+                    cs.n_columns,
+                    std::vector<gf::Fp3>(
+                        kRows,
+                        gf::Fp3::Zero()));
+            std::vector<uint32_t> base;
+            for (uint32_t phase = 0;
+                 phase < kPhasesV1;
+                 ++phase) {
+                for (uint32_t word = 0;
+                     word <
+                         kPhasePrecommitRootWordsV1;
+                     ++word) {
+                    const uint32_t column =
+                        phase *
+                            kPhasePrecommitRootWordsV1 +
+                        word;
+                    columns[column].assign(
+                        kRows,
+                        gf::Fp3::FromFp(
+                            root_word(
+                                selected[phase],
+                                word)));
+                    if (!omit_last ||
+                        column + 1 !=
+                            kPhasePrecommitRootColumnsV1) {
+                        cs.preprocessed.emplace_back(
+                            column,
+                            columns[column]);
+                        base.push_back(column);
+                    }
+                }
+            }
+            cs.constraints.push_back({
+                "phase_root_fixture_dependent_zero",
+                aq::AirKind::kEverywhere, 1,
+                [](const auto& current,
+                   const auto&) {
+                    return current[kDependent];
+                }});
+            return std::make_tuple(
+                std::move(cs),
+                std::move(columns),
+                std::move(base));
+        };
+
+    auto [cs, columns, base] =
+        make_relation(roots, false);
+    const uint256 seed = H(9250);
+    const auto honest =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, base, seed);
+    BOOST_REQUIRE_MESSAGE(
+        honest.ok, honest.note);
+    BOOST_REQUIRE(honest.division_exact);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            cs, honest.proof, base,
+            seed, &why),
+        why);
+
+    NormalizedOpeningReceiptV1 receipt;
+    receipt.phase_precommit_root = roots;
+    receipt.phase_precommit_root_column_base = 0;
+    receipt.trace_openings =
+        BuildAuthenticatedTraceOpeningsV1(
+            honest.proof);
+    BOOST_REQUIRE_MESSAGE(
+        receipt.trace_openings.valid,
+        receipt.trace_openings.note);
+    BOOST_REQUIRE_MESSAGE(
+        VerifyPhasePrecommitRootOpeningsV1(
+            receipt, &why),
+        why);
+
+    // Receipt transplant: changing even one externally expected root while
+    // retaining valid paths to the original R0 cells is rejected.
+    auto transplanted_receipt = receipt;
+    transplanted_receipt
+        .phase_precommit_root[2] =
+            H(9260);
+    BOOST_CHECK(
+        !VerifyPhasePrecommitRootOpeningsV1(
+            transplanted_receipt, &why));
+
+    // Opening omission: deleting a committed root column from the ordered R0
+    // manifest cannot be repaired by retaining the other valid paths.
+    auto omitted_receipt = receipt;
+    omitted_receipt.trace_openings
+        .base_column_indices.pop_back();
+    BOOST_CHECK(
+        !VerifyPhasePrecommitRootOpeningsV1(
+            omitted_receipt, &why));
+
+    const auto proof_level_rejected =
+        [&](const auto& forged_cs,
+            const auto& forged_columns,
+            const auto& forged_base) {
+            const auto forged =
+                aq::AirQuotientProveRowsSplitRap(
+                    forged_cs,
+                    forged_columns,
+                    forged_base, seed);
+            BOOST_REQUIRE_MESSAGE(
+                forged.ok, forged.note);
+            BOOST_REQUIRE(
+                forged.division_exact);
+            BOOST_CHECK(
+                !aq::AirQuotientVerifyRowsSplitRap(
+                    cs, forged.proof,
+                    base, seed, &why));
+        };
+
+    // Root repetition: a valid proof made under a table that repeats the
+    // ParentJoin root in the MerkleHash slot fails against the canonical
+    // phase-root table at the actual Split-RAP verifier.
+    auto repeated_roots = roots;
+    repeated_roots[
+        static_cast<uint32_t>(
+            PhaseV1::MerkleHash)] =
+        repeated_roots[
+            static_cast<uint32_t>(
+                PhaseV1::ParentJoin)];
+    auto [repeated_cs,
+          repeated_columns,
+          repeated_base] =
+        make_relation(
+            repeated_roots, false);
+    proof_level_rejected(
+        repeated_cs,
+        repeated_columns,
+        repeated_base);
+
+    // Whole-table transplant under a different valid root inventory also
+    // reaches the proof verifier and is rejected there.
+    auto alternate_roots = roots;
+    for (uint32_t phase = 0;
+         phase < kPhasesV1; ++phase) {
+        alternate_roots[phase] =
+            H(9270 + phase);
+    }
+    auto [alternate_cs,
+          alternate_columns,
+          alternate_base] =
+        make_relation(
+            alternate_roots, false);
+    proof_level_rejected(
+        alternate_cs,
+        alternate_columns,
+        alternate_base);
+
+    // A proof built with one root column moved out of R0 cannot be verified
+    // under the canonical ordered R0 manifest.
+    auto [omitted_cs,
+          omitted_columns,
+          omitted_base] =
+        make_relation(roots, true);
+    proof_level_rejected(
+        omitted_cs,
+        omitted_columns,
+        omitted_base);
+}
+
+BOOST_AUTO_TEST_CASE(
+    decoder_root_cells_directly_alias_phase_r0_exports_in_bytecode)
+{
+    const auto decoder =
+        dj::CanonicalLayoutV1();
+    LayoutV1 layout;
+    layout.data_columns =
+        decoder.n_columns;
+    layout.phase_precommit_root_base =
+        layout.data_columns;
+    layout.decoder_root_selector_base =
+        layout.phase_precommit_root_base +
+        kPhasePrecommitRootColumnsV1;
+    layout.decoder_root_selector_columns =
+        kDecoderRootSelectorColumnsV1;
+    layout.n_columns =
+        layout.decoder_root_selector_base +
+        layout.decoder_root_selector_columns;
+    const auto table =
+        BuildDecoderRootAliasProgramTableV1(
+            layout, decoder);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            table, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        table.programs.size(),
+        kDecoderRootSelectorColumnsV1);
+    BOOST_CHECK(
+        cb::ProgramTableIsChallengeIndependent(
+            table));
+
+    constexpr uint32_t kRows = 32;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, kRows, cs, &why),
+        why);
+    std::vector<std::vector<gf::Fp3>>
+        columns(
+            layout.n_columns,
+            std::vector<gf::Fp3>(
+                kRows,
+                gf::Fp3::Zero()));
+    std::vector<uint32_t> base;
+    for (uint32_t phase = 0;
+         phase < kPhasesV1; ++phase) {
+        for (uint32_t word = 0;
+             word < kPhasePrecommitRootWordsV1;
+             ++word) {
+            const uint32_t column =
+                layout.PhasePrecommitRoot(
+                    static_cast<PhaseV1>(phase),
+                    word);
+            columns[column].assign(
+                kRows,
+                gf::Fp3::FromFp(
+                    1000 + 100 * phase + word));
+            cs.preprocessed.emplace_back(
+                column, columns[column]);
+            base.push_back(column);
+        }
+    }
+    constexpr std::array<PhaseV1, 3>
+        owners{{
+            PhaseV1::ParentJoin,
+            PhaseV1::MerkleHash,
+            PhaseV1::MerkleFold,
+        }};
+    uint32_t ordinal = 0;
+    for (const auto owner : owners) {
+        for (uint32_t word = 0;
+             word < kPhasePrecommitRootWordsV1;
+             ++word, ++ordinal) {
+            const uint32_t selector =
+                layout.decoder_root_selector_base +
+                ordinal;
+            columns[selector][ordinal] =
+                gf::Fp3::One();
+            columns[decoder.root_value][ordinal] =
+                columns[
+                    layout.PhasePrecommitRoot(
+                        owner, word)][ordinal];
+            cs.preprocessed.emplace_back(
+                selector, columns[selector]);
+            base.push_back(selector);
+        }
+    }
+    cs.preprocessed_pin_ood = true;
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            cs, columns),
+        0U);
+    const uint256 seed = H(9290);
+    const auto honest =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, base, seed);
+    BOOST_REQUIRE_MESSAGE(
+        honest.ok, honest.note);
+    BOOST_REQUIRE(honest.division_exact);
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            cs, honest.proof, base,
+            seed, &why),
+        why);
+
+    auto wrong = columns;
+    wrong[decoder.root_value][9] =
+        gf::Add(
+            wrong[decoder.root_value][9],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            cs, wrong),
+        0U);
+    aq::AirProveOptions options;
+    options.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, wrong, base, seed,
+            options);
+    BOOST_REQUIRE_MESSAGE(
+        forged.ok, forged.note);
+    BOOST_CHECK(!forged.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, forged.proof, base,
+            seed, &why));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -2969,7 +3298,7 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    decoder_challenge_and_child_root_carries_stay_fail_closed)
+    standalone_decoder_carries_stay_open_until_unified_root_alias)
 {
     const auto layout =
         dj::CanonicalLayoutV1();
@@ -3327,10 +3656,35 @@ BOOST_AUTO_TEST_CASE(
         !product
              .decoder_challenge_carry_complete);
     BOOST_CHECK(
-        !product
-             .decoder_child_root_carry_complete);
+        product
+            .decoder_child_root_carry_complete);
+    BOOST_CHECK(
+        product
+            .phase_precommit_roots_r0_exported);
+    BOOST_CHECK(
+        product
+            .phase_precommit_roots_canonical_u32);
+    BOOST_CHECK(
+        product
+            .decoder_root_rows_directly_aliased);
+    BOOST_CHECK_EQUAL(
+        product
+            .decoder_root_words_directly_aliased,
+        kDecoderRootSelectorColumnsV1);
+    BOOST_CHECK(
+        product
+            .decoder_root_alias_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        std::any_of(
+            product
+                .decoder_root_alias_program_root.begin(),
+            product
+                .decoder_root_alias_program_root.end(),
+            [](gf::Fp value) {
+                return gf::Canonical(value) != 0;
+            }));
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 1443U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 1507U);
     BOOST_CHECK_EQUAL(
         product.max_constraint_degree, 3U);
     BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);
