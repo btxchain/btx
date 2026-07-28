@@ -8,7 +8,9 @@
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
+#include <numeric>
 #include <optional>
 
 namespace matmul::v4::rc {
@@ -31,6 +33,10 @@ constexpr char TRACE_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_BUILDER_TRACE_ROOT_V1";
 constexpr char AIR_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_BUILDER_TRACE_AIR_SEED_V1";
+constexpr char PRODUCER_RELATION_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_BUILDER_PRODUCER_RELATION_V1";
+constexpr char PRODUCER_FS_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_BUILDER_PRODUCER_FS_V1";
 constexpr uint32_t UNUSED_INDEX =
     std::numeric_limits<uint32_t>::max();
 constexpr uint64_t ROOT_MEMORY_ADDRESS =
@@ -44,6 +50,21 @@ enum TraceColumn : uint32_t {
     kColScaleFactor,
     kColOutput,
     kTraceColumns,
+};
+
+enum ProducerBusColumn : uint32_t {
+    kBusActive = kTraceColumns,
+    kBusEndpoint,
+    kBusRole,
+    kBusAddress,
+    kBusRemaining,
+    kBusInverse1,
+    kBusInverse2,
+    kBusTerm1,
+    kBusTerm2,
+    kBusRunning1,
+    kBusRunning2,
+    kProducerBusColumns,
 };
 
 bool Fail(std::string* why, const std::string& detail)
@@ -363,6 +384,282 @@ AirCS BuildDequantConstraintSystem(uint32_t n_rows)
         return {};
     }
     return cs;
+}
+
+Fp3 CompressProducerTuple(
+    const std::vector<Fp3>& row,
+    const RCStage3CtlChallenges& challenges,
+    bool second_lane)
+{
+    const Fp3& gamma = second_lane
+        ? challenges.gamma2
+        : challenges.gamma1;
+    const Fp3 gamma2 = gf::Mul(gamma, gamma);
+    const Fp3 gamma3 = gf::Mul(gamma2, gamma);
+    const Fp3 gamma4 = gf::Mul(gamma3, gamma);
+    return gf::Add(
+        row[kBusEndpoint],
+        gf::Add(
+            gf::Mul(gamma, row[kBusRole]),
+            gf::Add(
+                gf::Mul(gamma2, row[kBusAddress]),
+                gf::Add(
+                    gf::Mul(
+                        gamma3,
+                        row[kBusRemaining]),
+                    gf::Mul(
+                        gamma4,
+                        row[kColOutput])))));
+}
+
+AirCS BuildProducerBusConstraintSystem(
+    uint32_t n_rows,
+    const RCStage3ProducerBusScheduleV1& schedule,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal& terminal)
+{
+    AirCS out = BuildDequantConstraintSystem(n_rows);
+    if (out.n_rows != n_rows ||
+        out.n_columns != kTraceColumns ||
+        schedule.events.size() != n_rows ||
+        schedule.schedule_commitment !=
+            ComputeRCStage3ProducerBusScheduleCommitmentV1(
+                schedule)) {
+        return {};
+    }
+    out.n_columns = kProducerBusColumns;
+    out.preprocessed_pin_ood = true;
+    std::array<std::vector<Fp3>, 5> fixed;
+    for (auto& column : fixed) {
+        column.assign(n_rows, Fp3::Zero());
+    }
+    for (uint32_t row = 0; row < n_rows; ++row) {
+        const auto& event = schedule.events[row];
+        fixed[0][row] = gf::FromU64_3(event.active ? 1 : 0);
+        fixed[1][row] = gf::FromU64_3(
+            static_cast<uint16_t>(event.endpoint));
+        fixed[2][row] = gf::FromU64_3(
+            static_cast<uint16_t>(event.semantic_role));
+        fixed[3][row] = gf::FromU64_3(event.address);
+        fixed[4][row] = gf::FromU64_3(event.remaining);
+    }
+    for (uint32_t i = 0; i < fixed.size(); ++i) {
+        out.preprocessed.push_back(
+            {kBusActive + i, std::move(fixed[i])});
+    }
+    const auto add = [&out](
+        const char* name, aq::AirKind kind,
+        uint32_t degree,
+        std::function<Fp3(
+            const std::vector<Fp3>&,
+            const std::vector<Fp3>&)> evaluate) {
+        out.constraints.push_back(
+            {name, kind, degree,
+             std::move(evaluate)});
+    };
+    add(
+        "stage3.builder.producer.inverse1",
+        aq::AirKind::kEverywhere, 2,
+        [challenges](
+            const std::vector<Fp3>& row,
+            const std::vector<Fp3>&) {
+            return gf::Sub(
+                gf::Mul(
+                    row[kBusInverse1],
+                    gf::Sub(
+                        challenges.alpha1,
+                        CompressProducerTuple(
+                            row, challenges, false))),
+                Fp3::One());
+        });
+    add(
+        "stage3.builder.producer.inverse2",
+        aq::AirKind::kEverywhere, 2,
+        [challenges](
+            const std::vector<Fp3>& row,
+            const std::vector<Fp3>&) {
+            return gf::Sub(
+                gf::Mul(
+                    row[kBusInverse2],
+                    gf::Sub(
+                        challenges.alpha2,
+                        CompressProducerTuple(
+                            row, challenges, true))),
+                Fp3::One());
+        });
+    add(
+        "stage3.builder.producer.term1",
+        aq::AirKind::kEverywhere, 2,
+        [](const std::vector<Fp3>& row,
+           const std::vector<Fp3>&) {
+            return gf::Sub(
+                row[kBusTerm1],
+                gf::Mul(
+                    row[kBusActive],
+                    row[kBusInverse1]));
+        });
+    add(
+        "stage3.builder.producer.term2",
+        aq::AirKind::kEverywhere, 2,
+        [](const std::vector<Fp3>& row,
+           const std::vector<Fp3>&) {
+            return gf::Sub(
+                row[kBusTerm2],
+                gf::Mul(
+                    row[kBusActive],
+                    row[kBusInverse2]));
+        });
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t running =
+            lane == 0 ? kBusRunning1 : kBusRunning2;
+        const uint32_t term =
+            lane == 0 ? kBusTerm1 : kBusTerm2;
+        const Fp3 expected =
+            lane == 0
+                ? terminal.alpha1_sum
+                : terminal.alpha2_sum;
+        add(
+            "stage3.builder.producer.running.first",
+            aq::AirKind::kFirstRow, 1,
+            [running](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return row[running];
+            });
+        add(
+            "stage3.builder.producer.running.transition",
+            aq::AirKind::kTransition, 1,
+            [running, term](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>& next) {
+                return gf::Sub(
+                    next[running],
+                    gf::Add(
+                        row[running], row[term]));
+            });
+        add(
+            "stage3.builder.producer.running.last",
+            aq::AirKind::kLastRow, 1,
+            [running, term, expected](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    gf::Add(
+                        row[running], row[term]),
+                    expected);
+            });
+    }
+    if (out.QuotientLen() > n_rows) {
+        return {};
+    }
+    return out;
+}
+
+uint256 BuilderProducerRelationCommitment(
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeBuilderTraceColumn& trace,
+    const RCStage3EpisodeBuilderTraceExpansion& expansion,
+    const RCStage3EpisodeBuilderTraceAirShard& shard,
+    const RCStage3EpisodeWiringCopyScheduleEntry& edge)
+{
+    if (product.product_commitment.IsNull() ||
+        expansion.expansion_commitment.IsNull() ||
+        shard.output_root.IsNull() ||
+        trace.wiring_vector_root.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << PRODUCER_RELATION_DOMAIN
+         << kRCStage3ProducerBusReceiptVersionV1
+         << product.product_commitment
+         << expansion.expansion_commitment
+         << trace.trace_index
+         << trace.first_column << trace.n_chunks
+         << trace.wiring_vector_root
+         << shard.shard_index << shard.value_begin
+         << shard.logical_rows << shard.n_rows
+         << shard.output_root
+         << edge.schedule_index
+         << edge.address_begin
+         << edge.value_count;
+    return hash.GetHash();
+}
+
+uint256 BuilderProducerFsSeed(
+    const RCStage3ProducerBusReceiptV1& receipt)
+{
+    if (receipt.statement_commitment.IsNull() ||
+        receipt.relation_commitment.IsNull() ||
+        receipt.schedule.schedule_commitment.IsNull() ||
+        receipt.base_row_commitment.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << PRODUCER_FS_DOMAIN
+         << receipt.version
+         << receipt.statement_commitment
+         << receipt.relation_commitment
+         << receipt.schedule.schedule_commitment
+         << receipt.base_row_commitment
+         << CommitRCStage3CtlChallenges(
+                receipt.challenges);
+    return hash.GetHash();
+}
+
+std::optional<RCStage3ProducerBusScheduleV1>
+BuilderProducerSchedule(
+    const RCStage3EpisodeWiringCopyScheduleEntry& edge,
+    const RCStage3EpisodeBuilderTraceAirShard& shard)
+{
+    if (edge.value_count == 0 ||
+        shard.logical_rows == 0 ||
+        shard.logical_rows > shard.n_rows ||
+        edge.address_begin >
+            std::numeric_limits<uint64_t>::max() -
+                shard.value_begin ||
+        shard.value_begin >
+            edge.value_count ||
+        shard.logical_rows >
+            edge.value_count - shard.value_begin ||
+        edge.schedule_index >
+            (std::numeric_limits<uint32_t>::max() -
+             0x42540000U) / 4096U ||
+        shard.shard_index >= 4096U) {
+        return std::nullopt;
+    }
+    RCStage3ProducerBusScheduleV1 schedule;
+    schedule.bus_id =
+        0x42540000U +
+        edge.schedule_index * 4096U +
+        shard.shard_index;
+    schedule.logical_rows = shard.logical_rows;
+    schedule.events.resize(shard.n_rows);
+    for (uint32_t row = 0;
+         row < shard.n_rows; ++row) {
+        auto& event = schedule.events[row];
+        if (row >= shard.logical_rows) continue;
+        const uint64_t ordinal =
+            shard.value_begin + row;
+        event.active = true;
+        event.endpoint =
+            RCStage3RelationEndpoint::
+                EpisodeBuilderTrace;
+        event.semantic_role =
+            RCStage3RelationRole::
+                EpisodeDeterministicBuilder;
+        event.address =
+            edge.address_begin + ordinal;
+        event.remaining =
+            edge.value_count - ordinal;
+        event.multiplicity = 1;
+    }
+    schedule.schedule_commitment =
+        ComputeRCStage3ProducerBusScheduleCommitmentV1(
+            schedule);
+    if (schedule.schedule_commitment.IsNull()) {
+        return std::nullopt;
+    }
+    return schedule;
 }
 
 uint256 ComputeAirSeed(
@@ -709,6 +1006,449 @@ bool ValidateProductSkeleton(
 }
 
 } // namespace
+
+bool ProveRCStage3EpisodeBuilderProducerBusReceiptV1(
+    const RCStage3SuccinctProof& statement,
+    const RCEpisodeParams& params,
+    const RCStage3EpisodeBuilderParamsProduct& params_product,
+    const RCStage3EpisodeBuilderSeedChainProduct& seed_chain,
+    const RCStage3EpisodeBuilderOperandXofProduct& operand_xof,
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeWiringCopyScheduleEntry& expected_edge,
+    uint32_t shard_index,
+    const uint256& public_challenge_seed,
+    RCStage3ProducerBusReceiptV1& out,
+    std::string* why)
+{
+    out = {};
+    if (public_challenge_seed.IsNull() ||
+        !ValidateRCStage3EpisodeBuilderTraceSchedule(
+            statement, params, params_product, seed_chain,
+            operand_xof, product, why)) {
+        return Fail(why, "producer:public_input");
+    }
+    const auto trace_it = std::find_if(
+        product.trace_columns.begin(),
+        product.trace_columns.end(),
+        [&expected_edge](const auto& trace) {
+            return trace.first_column ==
+                       expected_edge.first_column &&
+                   trace.n_chunks ==
+                       expected_edge.n_chunks &&
+                   trace.wiring_vector_root ==
+                       expected_edge.registered_vector_root;
+        });
+    if (trace_it == product.trace_columns.end() ||
+        trace_it->expansion_index >=
+            product.expansions.size()) {
+        return Fail(why, "producer:trace_identity");
+    }
+    const auto& expansion =
+        product.expansions[
+            trace_it->expansion_index];
+    if (shard_index >= expansion.shards.size() ||
+        expected_edge.value_count !=
+            uint64_t{trace_it->rows} *
+                trace_it->cols) {
+        return Fail(why, "producer:shard");
+    }
+    const auto& shard = expansion.shards[shard_index];
+    std::vector<ExpansionSpec> specs;
+    if (!ExpectedExpansionSpecs(
+            params, operand_xof, specs, why) ||
+        trace_it->expansion_index >= specs.size()) {
+        return false;
+    }
+    std::vector<Fp3> mantissa;
+    std::vector<Fp3> scale;
+    std::vector<Fp3> bit0;
+    std::vector<Fp3> bit1;
+    std::vector<Fp3> factor;
+    std::vector<Fp3> output;
+    if (!ExpansionMaterial(
+            operand_xof,
+            specs[trace_it->expansion_index],
+            mantissa, scale, &bit0, &bit1,
+            &factor, &output, why)) {
+        return false;
+    }
+    if (shard.value_begin >
+            output.size() ||
+        shard.logical_rows >
+            output.size() - shard.value_begin ||
+        expected_edge.address_begin >
+            std::numeric_limits<uint64_t>::max() -
+                shard.value_begin ||
+        expected_edge.schedule_index >
+            (std::numeric_limits<uint32_t>::max() -
+             0x42540000U) / 4096U ||
+        shard_index >= 4096U) {
+        return Fail(why, "producer:bounds");
+    }
+
+    const auto canonical_schedule =
+        BuilderProducerSchedule(
+            expected_edge, shard);
+    if (!canonical_schedule.has_value()) {
+        return Fail(why, "producer:schedule");
+    }
+    const auto& schedule = *canonical_schedule;
+
+    std::vector<std::vector<Fp3>> columns(
+        kProducerBusColumns,
+        std::vector<Fp3>(
+            shard.n_rows, Fp3::Zero()));
+    const std::array<
+        const std::vector<Fp3>*,
+        kTraceColumns> material{{
+            &mantissa, &scale, &bit0, &bit1,
+            &factor, &output,
+        }};
+    for (uint32_t column = 0;
+         column < kTraceColumns; ++column) {
+        std::copy_n(
+            material[column]->begin() +
+                shard.value_begin,
+            shard.logical_rows,
+            columns[column].begin());
+    }
+    for (uint32_t row = 0;
+         row < shard.n_rows; ++row) {
+        const auto& event = schedule.events[row];
+        columns[kBusActive][row] =
+            gf::FromU64_3(event.active ? 1 : 0);
+        columns[kBusEndpoint][row] =
+            gf::FromU64_3(
+                static_cast<uint16_t>(
+                    event.endpoint));
+        columns[kBusRole][row] =
+            gf::FromU64_3(
+                static_cast<uint16_t>(
+                    event.semantic_role));
+        columns[kBusAddress][row] =
+            gf::FromU64_3(event.address);
+        columns[kBusRemaining][row] =
+            gf::FromU64_3(event.remaining);
+    }
+
+    out.relation_role =
+        RCStage3RelationRole::
+            EpisodeDeterministicBuilder;
+    out.statement_commitment =
+        product.statement_commitment;
+    out.relation_commitment =
+        BuilderProducerRelationCommitment(
+            product, *trace_it, expansion,
+            shard, expected_edge);
+    out.schedule = schedule;
+    out.logical_rows = shard.logical_rows;
+    out.n_rows = shard.n_rows;
+    out.relation_value_column = kColOutput;
+    out.base_column_indices.resize(
+        kBusRemaining + 1);
+    std::iota(
+        out.base_column_indices.begin(),
+        out.base_column_indices.end(), 0);
+    out.prechallenge_column_roots.reserve(
+        out.base_column_indices.size());
+    for (uint32_t column :
+         out.base_column_indices) {
+        out.prechallenge_column_roots.push_back(
+            aq::AirCommittedValuesRoot<Fp3>(
+                columns[column], shard.n_rows));
+    }
+    out.relation_value_column_root =
+        out.prechallenge_column_roots[
+            kColOutput];
+    if (out.relation_value_column_root !=
+            shard.output_root) {
+        out = {};
+        return Fail(
+            why, "producer:value_root_alias");
+    }
+    out.base_row_commitment =
+        ComputeRCStage3ProducerBusBaseCommitmentV1(
+            schedule, out.base_column_indices,
+            out.prechallenge_column_roots);
+    out.public_challenge_seed =
+        public_challenge_seed;
+    if (out.relation_commitment.IsNull() ||
+        out.base_row_commitment.IsNull() ||
+        !DeriveRCStage3ProducerBusChallengesV1(
+            public_challenge_seed, schedule,
+            out.base_row_commitment,
+            out.challenges, why)) {
+        out = {};
+        return false;
+    }
+
+    Fp3 running1 = Fp3::Zero();
+    Fp3 running2 = Fp3::Zero();
+    for (uint32_t row = 0;
+         row < shard.n_rows; ++row) {
+        const Fp3 denominator1 = gf::Sub(
+            out.challenges.alpha1,
+            CompressProducerTuple(
+                std::vector<Fp3>{
+                    columns[0][row],
+                    columns[1][row],
+                    columns[2][row],
+                    columns[3][row],
+                    columns[4][row],
+                    columns[5][row],
+                    columns[6][row],
+                    columns[7][row],
+                    columns[8][row],
+                    columns[9][row],
+                    columns[10][row]},
+                out.challenges, false));
+        const Fp3 denominator2 = gf::Sub(
+            out.challenges.alpha2,
+            CompressProducerTuple(
+                std::vector<Fp3>{
+                    columns[0][row],
+                    columns[1][row],
+                    columns[2][row],
+                    columns[3][row],
+                    columns[4][row],
+                    columns[5][row],
+                    columns[6][row],
+                    columns[7][row],
+                    columns[8][row],
+                    columns[9][row],
+                    columns[10][row]},
+                out.challenges, true));
+        if (gf::IsZero(denominator1) ||
+            gf::IsZero(denominator2)) {
+            out = {};
+            return Fail(
+                why, "producer:challenge_collision");
+        }
+        const Fp3 inverse1 =
+            gf::Inv(denominator1);
+        const Fp3 inverse2 =
+            gf::Inv(denominator2);
+        const Fp3 active =
+            columns[kBusActive][row];
+        const Fp3 term1 =
+            gf::Mul(active, inverse1);
+        const Fp3 term2 =
+            gf::Mul(active, inverse2);
+        columns[kBusInverse1][row] = inverse1;
+        columns[kBusInverse2][row] = inverse2;
+        columns[kBusTerm1][row] = term1;
+        columns[kBusTerm2][row] = term2;
+        columns[kBusRunning1][row] = running1;
+        columns[kBusRunning2][row] = running2;
+        running1 = gf::Add(running1, term1);
+        running2 = gf::Add(running2, term2);
+    }
+    out.terminal = {running1, running2};
+    out.terminal_running_columns = {
+        kBusRunning1, kBusRunning2};
+    out.terminal_term_columns = {
+        kBusTerm1, kBusTerm2};
+    out.public_fs_seed =
+        BuilderProducerFsSeed(out);
+    const AirCS cs =
+        BuildProducerBusConstraintSystem(
+            shard.n_rows, schedule,
+            out.challenges, out.terminal);
+    if (out.public_fs_seed.IsNull() ||
+        cs.n_columns != kProducerBusColumns ||
+        cs.QuotientLen() > shard.n_rows) {
+        out = {};
+        return Fail(why, "producer:constraint_system");
+    }
+    const auto proved =
+        aq::AirQuotientProve<Fp3>(
+            cs, columns, out.public_fs_seed, {});
+    if (!proved.ok ||
+        !proved.division_exact) {
+        out = {};
+        return Fail(
+            why, "producer:prove:" +
+                proved.note);
+    }
+    out.proof = proved.proof;
+    out.terminal_running_column_roots = {
+        out.proof.batch.columns[
+            kBusRunning1].root,
+        out.proof.batch.columns[
+            kBusRunning2].root};
+    out.terminal_term_column_roots = {
+        out.proof.batch.columns[
+            kBusTerm1].root,
+        out.proof.batch.columns[
+            kBusTerm2].root};
+    if (!SerializeRCStage3ProducerBusProofV1(
+            out.proof,
+            out.canonical_proof_bytes, why)) {
+        out = {};
+        return false;
+    }
+    out.proof_commitment =
+        ComputeRCStage3ProducerBusProofCommitmentV1(
+            out.canonical_proof_bytes);
+    out.receipt_commitment =
+        ComputeRCStage3ProducerBusReceiptCommitmentV1(
+            out);
+    if (out.receipt_commitment.IsNull() ||
+        !VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+            product, expected_edge,
+            shard_index, public_challenge_seed,
+            out, why)) {
+        out = {};
+        return false;
+    }
+    return true;
+}
+
+RCStage3ProducerBusVerificationInputV1
+BuildRCStage3EpisodeBuilderProducerBusVerificationInputV1(
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeWiringCopyScheduleEntry& expected_edge,
+    uint32_t shard_index,
+    const uint256& expected_public_challenge_seed,
+    const RCStage3ProducerBusReceiptV1& receipt)
+{
+    RCStage3ProducerBusVerificationInputV1 out;
+    const auto trace_it = std::find_if(
+        product.trace_columns.begin(),
+        product.trace_columns.end(),
+        [&expected_edge](const auto& trace) {
+            return trace.first_column ==
+                       expected_edge.first_column &&
+                   trace.n_chunks ==
+                       expected_edge.n_chunks &&
+                   trace.wiring_vector_root ==
+                       expected_edge.registered_vector_root;
+        });
+    if (trace_it == product.trace_columns.end() ||
+        trace_it->expansion_index >=
+            product.expansions.size() ||
+        shard_index >=
+            product.expansions[
+                trace_it->expansion_index]
+                .shards.size()) {
+        out.note =
+            "stage3:episode_builder_trace:"
+            "producer_input_identity";
+        return out;
+    }
+    const auto& expansion =
+        product.expansions[
+            trace_it->expansion_index];
+    const auto& shard =
+        expansion.shards[shard_index];
+    out.expected_relation_role =
+        RCStage3RelationRole::
+            EpisodeDeterministicBuilder;
+    out.expected_statement_commitment =
+        product.statement_commitment;
+    out.expected_relation_commitment =
+        BuilderProducerRelationCommitment(
+            product, *trace_it, expansion,
+            shard, expected_edge);
+    const auto canonical_schedule =
+        BuilderProducerSchedule(
+            expected_edge, shard);
+    if (!canonical_schedule.has_value()) {
+        out.note =
+            "stage3:episode_builder_trace:"
+            "producer_input_schedule";
+        return out;
+    }
+    out.expected_schedule =
+        *canonical_schedule;
+    out.expected_logical_rows =
+        shard.logical_rows;
+    out.expected_n_rows = shard.n_rows;
+    out.expected_relation_value_column =
+        kColOutput;
+    out.expected_terminal_running_columns = {
+        kBusRunning1, kBusRunning2};
+    out.expected_terminal_term_columns = {
+        kBusTerm1, kBusTerm2};
+    out.expected_cs =
+        BuildProducerBusConstraintSystem(
+            shard.n_rows, receipt.schedule,
+            receipt.challenges,
+            receipt.terminal);
+    out.expected_base_column_indices.resize(
+        kBusRemaining + 1);
+    std::iota(
+        out.expected_base_column_indices.begin(),
+        out.expected_base_column_indices.end(), 0);
+    out.expected_public_challenge_seed =
+        expected_public_challenge_seed;
+    out.expected_public_fs_seed =
+        BuilderProducerFsSeed(receipt);
+    out.valid =
+        !out.expected_relation_commitment.IsNull() &&
+        out.expected_schedule.schedule_commitment ==
+            ComputeRCStage3ProducerBusScheduleCommitmentV1(
+                out.expected_schedule) &&
+        out.expected_schedule.logical_rows ==
+            shard.logical_rows &&
+        out.expected_schedule.events.size() ==
+            shard.n_rows &&
+        out.expected_cs.n_columns ==
+            kProducerBusColumns &&
+        !out.expected_public_challenge_seed.IsNull() &&
+        !out.expected_public_fs_seed.IsNull();
+    out.note = out.valid
+        ? "stage3:episode_builder_trace:"
+          "producer_input_ok"
+        : "stage3:episode_builder_trace:"
+          "producer_input_invalid";
+    return out;
+}
+
+bool VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeWiringCopyScheduleEntry& expected_edge,
+    uint32_t shard_index,
+    const uint256& expected_public_challenge_seed,
+    const RCStage3ProducerBusReceiptV1& receipt,
+    std::string* why)
+{
+    const auto input =
+        BuildRCStage3EpisodeBuilderProducerBusVerificationInputV1(
+            product, expected_edge,
+            shard_index,
+            expected_public_challenge_seed,
+            receipt);
+    const auto trace_it = std::find_if(
+        product.trace_columns.begin(),
+        product.trace_columns.end(),
+        [&expected_edge](const auto& trace) {
+            return trace.first_column ==
+                       expected_edge.first_column &&
+                   trace.n_chunks ==
+                       expected_edge.n_chunks &&
+                   trace.wiring_vector_root ==
+                       expected_edge.registered_vector_root;
+        });
+    if (!input.valid ||
+        trace_it == product.trace_columns.end() ||
+        trace_it->expansion_index >=
+            product.expansions.size() ||
+        shard_index >=
+            product.expansions[
+                trace_it->expansion_index]
+                .shards.size() ||
+        receipt.relation_value_column_root !=
+            product.expansions[
+                trace_it->expansion_index]
+                .shards[shard_index]
+                .output_root) {
+        return Fail(
+            why, "producer:verify_binding");
+    }
+    return VerifyRCStage3ProducerBusReceiptV1(
+        receipt, input, why);
+}
 
 uint256 ComputeRCStage3EpisodeBuilderTraceProductCommitment(
     const RCStage3EpisodeBuilderTraceProduct& product)

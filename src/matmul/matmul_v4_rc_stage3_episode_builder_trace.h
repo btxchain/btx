@@ -112,6 +112,43 @@ struct RCStage3EpisodeBuilderTraceLeafOpening {
     std::vector<int8_t> values;
 };
 
+/**
+ * Build one proof-owned endpoint-4 producer terminal for the exact immutable
+ * A/B copy edge.  VALUE is the dequantization proof's literal output column;
+ * the public schedule covers exactly `logical_rows` and has canonical inert
+ * padding to the AIR domain.
+ */
+[[nodiscard]] bool
+ProveRCStage3EpisodeBuilderProducerBusReceiptV1(
+    const RCStage3SuccinctProof& statement,
+    const RCEpisodeParams& params,
+    const RCStage3EpisodeBuilderParamsProduct& params_product,
+    const RCStage3EpisodeBuilderSeedChainProduct& seed_chain,
+    const RCStage3EpisodeBuilderOperandXofProduct& operand_xof,
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeWiringCopyScheduleEntry& expected_edge,
+    uint32_t shard_index,
+    const uint256& public_challenge_seed,
+    RCStage3ProducerBusReceiptV1& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] RCStage3ProducerBusVerificationInputV1
+BuildRCStage3EpisodeBuilderProducerBusVerificationInputV1(
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeWiringCopyScheduleEntry& expected_edge,
+    uint32_t shard_index,
+    const uint256& expected_public_challenge_seed,
+    const RCStage3ProducerBusReceiptV1& receipt);
+
+[[nodiscard]] bool
+VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+    const RCStage3EpisodeBuilderTraceProduct& product,
+    const RCStage3EpisodeWiringCopyScheduleEntry& expected_edge,
+    uint32_t shard_index,
+    const uint256& expected_public_challenge_seed,
+    const RCStage3ProducerBusReceiptV1& receipt,
+    std::string* why = nullptr);
+
 [[nodiscard]] uint256
 ComputeRCStage3EpisodeBuilderTraceProductCommitment(
     const RCStage3EpisodeBuilderTraceProduct& product);

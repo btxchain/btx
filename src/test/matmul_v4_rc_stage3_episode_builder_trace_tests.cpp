@@ -580,6 +580,294 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    proof_owned_producer_bus_binds_value_terminal_challenges_and_padding)
+{
+    rc::RCStage3SuccinctProof statement;
+    rc::RCEpisodeParams params;
+    rc::RCStage3EpisodeBuilderParamsProduct params_product;
+    rc::RCStage3EpisodeBuilderSeedChainProduct seed_chain;
+    rc::RCStage3EpisodeBuilderOperandXofProduct operand_xof;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        Fixture(
+            statement, params, params_product, seed_chain,
+            operand_xof, &why),
+        why);
+    rc::RCStage3EpisodeBuilderTraceProduct builder;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3EpisodeBuilderTraceProduct(
+            statement, params, params_product, seed_chain,
+            operand_xof, builder, &why),
+        why);
+    const auto layout = rc::RCGkrTraceLayout(params);
+    const auto manifest =
+        rc::BuildRCStage3GemmExtractManifest(
+            params, builder.statement_commitment,
+            Bindings(layout, builder), &why);
+    BOOST_REQUIRE_MESSAGE(manifest.has_value(), why);
+    const auto edges =
+        rc::BuildRCStage3EpisodeWiringCopySchedule(
+            *manifest, &why);
+    BOOST_REQUIRE_MESSAGE(edges.has_value(), why);
+    const auto edge_it = std::find_if(
+        edges->begin(), edges->end(),
+        [&builder](const auto& edge) {
+            return std::any_of(
+                builder.trace_columns.begin(),
+                builder.trace_columns.end(),
+                [&edge](const auto& trace) {
+                    return trace.first_column ==
+                               edge.first_column &&
+                           trace.n_chunks ==
+                               edge.n_chunks &&
+                           trace.wiring_vector_root ==
+                               edge.registered_vector_root;
+                });
+        });
+    BOOST_REQUIRE(edge_it != edges->end());
+    const uint256 challenge_seed = H(0xe0);
+    rc::RCStage3ProducerBusReceiptV1 receipt;
+    BOOST_REQUIRE_MESSAGE(
+        rc::ProveRCStage3EpisodeBuilderProducerBusReceiptV1(
+            statement, params, params_product, seed_chain,
+            operand_xof, builder, *edge_it, 0,
+            challenge_seed, receipt, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+            builder, *edge_it, 0,
+            challenge_seed, receipt, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        receipt.schedule.logical_rows,
+        receipt.logical_rows);
+    BOOST_CHECK_EQUAL(
+        receipt.schedule.events.size(),
+        receipt.n_rows);
+    for (uint32_t row = 0;
+         row < receipt.n_rows; ++row) {
+        const bool active =
+            row < receipt.logical_rows;
+        BOOST_CHECK_EQUAL(
+            receipt.schedule.events[row].active,
+            active);
+        BOOST_CHECK_EQUAL(
+            receipt.schedule.events[row].multiplicity,
+            active ? 1 : 0);
+    }
+
+    auto terminal_attack = receipt;
+    terminal_attack.terminal.alpha1_sum =
+        rc::gkr_field::Add(
+            terminal_attack.terminal.alpha1_sum,
+            rc::gkr_field::Fp3::One());
+    terminal_attack.receipt_commitment =
+        rc::ComputeRCStage3ProducerBusReceiptCommitmentV1(
+            terminal_attack);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+            builder, *edge_it, 0,
+            challenge_seed,
+            terminal_attack, &why));
+
+    auto challenge_attack = receipt;
+    challenge_attack.challenges.gamma1 =
+        rc::gkr_field::Add(
+            challenge_attack.challenges.gamma1,
+            rc::gkr_field::Fp3::One());
+    challenge_attack.receipt_commitment =
+        rc::ComputeRCStage3ProducerBusReceiptCommitmentV1(
+            challenge_attack);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+            builder, *edge_it, 0,
+            challenge_seed,
+            challenge_attack, &why));
+
+    auto value_root_attack = receipt;
+    value_root_attack.relation_value_column_root = H(0xe1);
+    value_root_attack.receipt_commitment =
+        rc::ComputeRCStage3ProducerBusReceiptCommitmentV1(
+            value_root_attack);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+            builder, *edge_it, 0,
+            challenge_seed,
+            value_root_attack, &why));
+
+    auto reorder_attack = receipt;
+    BOOST_REQUIRE_GE(
+        reorder_attack.schedule.logical_rows, 2U);
+    std::swap(
+        reorder_attack.schedule.events[0],
+        reorder_attack.schedule.events[1]);
+    reorder_attack.schedule.schedule_commitment =
+        rc::ComputeRCStage3ProducerBusScheduleCommitmentV1(
+            reorder_attack.schedule);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3EpisodeBuilderProducerBusReceiptV1(
+            builder, *edge_it, 0,
+            challenge_seed,
+            reorder_attack, &why));
+
+    rc::RCStage3ProducerBusScheduleV1 non_power;
+    non_power.bus_id = 0x4254fffeU;
+    non_power.logical_rows = 3;
+    non_power.events.resize(4);
+    for (uint32_t row = 0; row < 3; ++row) {
+        auto& event = non_power.events[row];
+        event.active = true;
+        event.endpoint =
+            rc::RCStage3RelationEndpoint::
+                EpisodeBuilderTrace;
+        event.semantic_role =
+            rc::RCStage3RelationRole::
+                EpisodeDeterministicBuilder;
+        event.address = 100 + row;
+        event.remaining = 3 - row;
+        event.multiplicity = 1;
+    }
+    non_power.schedule_commitment =
+        rc::ComputeRCStage3ProducerBusScheduleCommitmentV1(
+            non_power);
+    BOOST_CHECK(!non_power.schedule_commitment.IsNull());
+    auto padding_attack = non_power;
+    padding_attack.events[3].active = true;
+    padding_attack.events[3].multiplicity = 1;
+    padding_attack.events[3].address = 103;
+    padding_attack.events[3].remaining = 1;
+    BOOST_CHECK(
+        rc::ComputeRCStage3ProducerBusScheduleCommitmentV1(
+            padding_attack)
+            .IsNull());
+
+    const auto source =
+        TraceValues(
+            edge_it->first_column,
+            builder, operand_xof);
+    BOOST_REQUIRE(source.has_value());
+    const auto source_field =
+        ToField(*source);
+    rc::RCStage3EpisodeWiringCopyEdgeProduct
+        copy_product;
+    BOOST_REQUIRE_MESSAGE(
+        rc::ProveRCStage3EpisodeWiringCopyEdgeProduct(
+            statement, *manifest, *edge_it,
+            source_field, source_field,
+            copy_product, &why),
+        why);
+    rc::RCStage3ProducerBusReceiptV1
+        provisional_receiver;
+    BOOST_REQUIRE_MESSAGE(
+        rc::ProveRCStage3EpisodeWiringCopyReceiverBusReceiptV1(
+            statement, *manifest, *edge_it,
+            copy_product, source_field, 0,
+            challenge_seed,
+            provisional_receiver, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyRCStage3EpisodeWiringCopyReceiverBusReceiptV1(
+            *edge_it, copy_product, 0,
+            challenge_seed,
+            provisional_receiver, &why),
+        why);
+
+    const uint256 paired_challenge_seed =
+        rc::ComputeRCStage3ProducerBusChallengeSeedV1(
+            builder.statement_commitment,
+            receipt.schedule.bus_id,
+            {
+                {receipt.relation_role,
+                 receipt.schedule.schedule_commitment,
+                 receipt.base_row_commitment},
+                {provisional_receiver.relation_role,
+                 provisional_receiver.schedule
+                     .schedule_commitment,
+                 provisional_receiver
+                     .base_row_commitment},
+            });
+    BOOST_REQUIRE(
+        !paired_challenge_seed.IsNull());
+    rc::RCStage3ProducerBusReceiptV1
+        paired_builder;
+    rc::RCStage3ProducerBusReceiptV1
+        paired_receiver;
+    BOOST_REQUIRE_MESSAGE(
+        rc::ProveRCStage3EpisodeBuilderProducerBusReceiptV1(
+            statement, params, params_product, seed_chain,
+            operand_xof, builder, *edge_it, 0,
+            paired_challenge_seed,
+            paired_builder, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        rc::ProveRCStage3EpisodeWiringCopyReceiverBusReceiptV1(
+            statement, *manifest, *edge_it,
+            copy_product, source_field, 0,
+            paired_challenge_seed,
+            paired_receiver, &why),
+        why);
+    const auto builder_input =
+        rc::BuildRCStage3EpisodeBuilderProducerBusVerificationInputV1(
+            builder, *edge_it, 0,
+            paired_challenge_seed,
+            paired_builder);
+    const auto receiver_input =
+        rc::BuildRCStage3EpisodeWiringCopyReceiverBusVerificationInputV1(
+            *edge_it, copy_product, 0,
+            paired_challenge_seed,
+            paired_receiver);
+    BOOST_REQUIRE(builder_input.valid);
+    BOOST_REQUIRE(receiver_input.valid);
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyRCStage3ProducerBusTerminalPairV1(
+            paired_builder, builder_input,
+            paired_receiver, receiver_input,
+            paired_challenge_seed, &why),
+        why);
+    BOOST_CHECK(
+        rc::gkr_field::IsZero(
+            rc::gkr_field::Add(
+                paired_builder.terminal.alpha1_sum,
+                paired_receiver.terminal.alpha1_sum)));
+    BOOST_CHECK(
+        rc::gkr_field::IsZero(
+            rc::gkr_field::Add(
+                paired_builder.terminal.alpha2_sum,
+                paired_receiver.terminal.alpha2_sum)));
+
+    auto receiver_root_attack = paired_receiver;
+    receiver_root_attack.relation_value_column_root =
+        H(0xe2);
+    receiver_root_attack.receipt_commitment =
+        rc::ComputeRCStage3ProducerBusReceiptCommitmentV1(
+            receiver_root_attack);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3ProducerBusTerminalPairV1(
+            paired_builder, builder_input,
+            receiver_root_attack, receiver_input,
+            paired_challenge_seed, &why));
+
+    auto receiver_schedule_attack =
+        paired_receiver;
+    BOOST_REQUIRE_GE(
+        receiver_schedule_attack.schedule.logical_rows,
+        2U);
+    std::swap(
+        receiver_schedule_attack.schedule.events[0],
+        receiver_schedule_attack.schedule.events[1]);
+    receiver_schedule_attack.schedule
+        .schedule_commitment =
+        rc::ComputeRCStage3ProducerBusScheduleCommitmentV1(
+            receiver_schedule_attack.schedule);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3ProducerBusTerminalPairV1(
+            paired_builder, builder_input,
+            receiver_schedule_attack,
+            receiver_input,
+            paired_challenge_seed, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
     audit_separates_bounded_transitive_streaming_and_recursion)
 {
     const auto open =
