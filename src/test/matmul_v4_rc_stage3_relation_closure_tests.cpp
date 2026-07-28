@@ -21,6 +21,7 @@
 #include <matmul/matmul_v4_rc_stage3_gemm_sumcheck_binding.h>
 #include <matmul/matmul_v4_rc_stage3_seed_chain_binding.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
+#include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
@@ -286,7 +287,7 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         proof_derived_ctl += audit[i].proof_derived_ctl_endpoints;
     }
     BOOST_CHECK_EQUAL(endpoints, 52U);
-    BOOST_CHECK_EQUAL(proof_derived_ctl, 22U);
+    BOOST_CHECK_EQUAL(proof_derived_ctl, 26U);
 
     const auto cells = CurrentRCStage3RelationEndpointCellAudit();
     BOOST_REQUIRE_EQUAL(cells.size(), 52U);
@@ -301,9 +302,10 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         recursively_consumed += cell.recursive_child_consumed;
         BOOST_CHECK(!cell.remaining.empty());
     }
-    BOOST_CHECK_EQUAL(relation_cells, 22U);
-    BOOST_CHECK_EQUAL(same_trace_aliases, 22U);
-    // Blocker A COMPLETE: 22 (21 scalar-cell openings + signed range) + 19
+    BOOST_CHECK_EQUAL(relation_cells, 26U);
+    BOOST_CHECK_EQUAL(same_trace_aliases, 26U);
+    // Blocker A COMPLETE: 26 (four builder-program exports + 21 scalar-cell
+    // openings + signed range) + 19
     // stream/digest §4 pins + 3 value-vector openings (BuilderParams,
     // ExtractInput, ExtractScale) + 8 wired sibling bindings (BuilderTrace,
     // GemmSumcheck, SeedChain, Wiring{Transpose,Residual,RoundOrder}, BankRoot,
@@ -315,7 +317,7 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK_EQUAL(RCStage3WiredBindingEndpointCount(), 8U);
     BOOST_CHECK_EQUAL(recursively_consumed, 0U);
     // Every one of the 52 endpoints now has an opening/binding.
-    BOOST_CHECK_EQUAL(21U + 19U + 3U + 8U + 1U, 52U); // +1 signed range in the 22
+    BOOST_CHECK_EQUAL(21U + 19U + 3U + 8U + 1U, 52U);
     BOOST_CHECK(kRCStage3RelationClosureSameTraceCtlAliasExecutable);
     // Recursive-child consumption remains a separate fail-closed gate.
     BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
@@ -528,6 +530,243 @@ BOOST_AUTO_TEST_CASE(
         episode_pin, manifest, trace_substitution, 0, send_schedule,
         proved.proof, &why));
     BOOST_CHECK(why.find("challenge") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_builder_program_exports_all_four_endpoints_to_same_trace_ctl)
+{
+    namespace aq = air_quotient;
+    namespace cb = constraint_bytecode;
+    namespace gf = gkr_field;
+    namespace pf = universal_topology;
+    namespace sites = soundness_scenarios;
+    constexpr uint32_t N = 8;
+
+    cb::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        pf::BuildCanonicalProductionFamilyProgramTableV1(
+            sites::ProductionProofSiteKind::
+                EpisodeBuilderCounterXof,
+            RCStage3RelationRole::EpisodeDeterministicBuilder,
+            table, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(table.current_width, 21U);
+    BOOST_REQUIRE_EQUAL(table.challenge_width, 0U);
+
+    std::vector<std::vector<gf::Fp3>> relation_columns(
+        table.current_width,
+        std::vector<gf::Fp3>(N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        relation_columns[0][row] = gf::FromSigned3(-7);
+        relation_columns[1][row] = gf::FromU64_3(2);
+        relation_columns[2][row] = gf::Fp3::Zero();
+        relation_columns[3][row] = gf::Fp3::One();
+        relation_columns[4][row] = gf::FromU64_3(4);
+        relation_columns[5][row] = gf::FromSigned3(-28);
+        for (const auto [base, value] : {
+                 std::pair{6U, 11U},
+                 std::pair{11U, 17U},
+                 std::pair{16U, 23U}}) {
+            relation_columns[base][row] = gf::Fp3::One();
+            relation_columns[base + 2][row] =
+                gf::FromU64_3(value);
+            relation_columns[base + 3][row] =
+                gf::FromU64_3(value);
+            relation_columns[base + 4][row] =
+                gf::FromU64_3(value);
+        }
+    }
+
+    RCStage3BuilderProgramAirPublicPinV1 pin;
+    pin.statement_commitment =
+        RCStage3EpisodeStatementCommitment(Statement());
+    pin.n_rows = N;
+    const auto keys =
+        cb::CommitProgramTableForExternalAndRecursiveUse(table);
+    BOOST_REQUIRE(keys.same_canonical_serialization);
+    pin.program_external_sha256d = keys.external_sha256d;
+    pin.program_recursive_alg_hash = keys.recursive_alg_hash;
+    pin.relation_column_roots.resize(table.current_width);
+    const uint32_t n_coeffs =
+        FriNextPow2(3 * N - 3);
+    for (uint32_t column = 0;
+         column < relation_columns.size(); ++column) {
+        pin.relation_column_roots[column] =
+            aq::AirCommittedValuesRoot<gf::Fp3>(
+                relation_columns[column], n_coeffs);
+    }
+
+    const std::array<RCStage3RelationEndpoint, 4> endpoints{
+        RCStage3RelationEndpoint::EpisodeBuilderParams,
+        RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
+        RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
+        RCStage3RelationEndpoint::EpisodeBuilderTrace,
+    };
+    const std::array<uint32_t, 4> source_columns{
+        pf::production_family_col_v1::EpisodeBuilderParams,
+        pf::production_family_col_v1::EpisodeBuilderSeedChain,
+        pf::production_family_col_v1::EpisodeBuilderOperandXof,
+        pf::production_family_col_v1::EpisodeBuilderTrace,
+    };
+    std::array<RCStage3BuilderProgramCtlLaneV1, 4> lanes;
+    std::array<RCStage3CtlWitness, 4> witnesses;
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        auto& lane = lanes[lane_index];
+        lane.endpoint = endpoints[lane_index];
+        RCStage3CtlSchedule receive_schedule;
+        const std::vector<gf::Fp3> values(
+            relation_columns[source_columns[lane_index]].begin(),
+            relation_columns[source_columns[lane_index]].end());
+        for (uint32_t row = 0; row < N; ++row) {
+            lane.schedule.events.push_back(
+                {2200U + lane_index, 17, row, 1});
+            receive_schedule.events.push_back(
+                {2200U + lane_index, 17, row, -1});
+        }
+        lane.manifest.bus_id = 2300U + lane_index;
+        lane.manifest.transcript_seed =
+            pin.statement_commitment;
+        lane.manifest.participants = {
+            {RCStage3RelationRole::EpisodeDeterministicBuilder,
+             N, N, 0,
+             CommitRCStage3CtlSchedule(lane.schedule)},
+            {RCStage3RelationRole::CompositionLink,
+             N, 0, N,
+             CommitRCStage3CtlSchedule(receive_schedule)},
+        };
+        lane.pins.resize(2);
+        for (uint32_t participant_index = 0;
+             participant_index < 2;
+             ++participant_index) {
+            auto& child = lane.pins[participant_index];
+            const auto& participant =
+                lane.manifest.participants[participant_index];
+            const auto& schedule =
+                participant_index == 0
+                ? lane.schedule
+                : receive_schedule;
+            child.role = participant.role;
+            child.bus_id = lane.manifest.bus_id;
+            child.event_count = participant.event_count;
+            child.send_count = participant.send_count;
+            child.receive_count = participant.receive_count;
+            child.schedule_commitment =
+                participant.schedule_commitment;
+            child.trace_commitment =
+                ComputeRCStage3CtlPrechallengeTraceCommitment(
+                    schedule, values);
+            BOOST_REQUIRE(!child.trace_commitment.IsNull());
+        }
+        RCStage3CtlChallenges challenges;
+        BOOST_REQUIRE_MESSAGE(
+            DeriveRCStage3CtlChallenges(
+                lane.manifest, lane.pins,
+                challenges, &why),
+            why);
+        witnesses[lane_index] =
+            BuildRCStage3CtlWitness(
+                lane.schedule, values, challenges);
+        const auto receive =
+            BuildRCStage3CtlWitness(
+                receive_schedule, values, challenges);
+        BOOST_REQUIRE_MESSAGE(
+            witnesses[lane_index].ok,
+            witnesses[lane_index].note);
+        BOOST_REQUIRE_MESSAGE(receive.ok, receive.note);
+        const uint256 challenge_commitment =
+            CommitRCStage3CtlChallenges(challenges);
+        lane.pins[0].terminal =
+            witnesses[lane_index].terminal;
+        lane.pins[1].terminal = receive.terminal;
+        lane.pins[0].challenge_commitment =
+            challenge_commitment;
+        lane.pins[1].challenge_commitment =
+            challenge_commitment;
+        lane.pins[0].auxiliary_commitment =
+            Filled(static_cast<unsigned char>(
+                0xc0 + lane_index));
+        lane.pins[1].auxiliary_commitment =
+            Filled(static_cast<unsigned char>(
+                0xd0 + lane_index));
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    RCStage3BuilderProgramCtlDirectAliasLayoutV1 layout;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3BuilderProgramCtlDirectAliasConstraintSystemV1(
+            pin, lanes, cs, &layout, &why),
+        why);
+    BOOST_CHECK(layout.canonical_program_selected);
+    BOOST_CHECK(layout.all_four_same_trace);
+    BOOST_CHECK_EQUAL(layout.relation_columns, 21U);
+    BOOST_CHECK_EQUAL(layout.total_columns, 57U);
+    std::vector<std::vector<gf::Fp3>> columns;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3BuilderProgramCtlDirectAliasWitnessV1(
+            layout, relation_columns, witnesses,
+            columns, &why),
+        why);
+    const uint256 seed =
+        ComputeRCStage3BuilderProgramCtlDirectAliasSeedV1(
+            pin, lanes);
+    BOOST_REQUIRE(!seed.IsNull());
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3>(
+            cs, columns, seed);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE(proved.division_exact);
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        lanes[lane_index].pins[0].auxiliary_commitment =
+            ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proved.proof, layout.lanes[lane_index]);
+        BOOST_REQUIRE(
+            !lanes[lane_index]
+                 .pins[0]
+                 .auxiliary_commitment.IsNull());
+    }
+    BOOST_REQUIRE_MESSAGE(
+        VerifyRCStage3BuilderProgramCtlDirectAliasProofV1(
+            pin, lanes, proved.proof, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL builder four-endpoint same-trace accept: rows="
+        << cs.n_rows << " cols=" << cs.n_columns
+        << " constraints=" << cs.constraints.size()
+        << " n_coeffs=" << proved.proof.batch.n_coeffs);
+
+    auto detached_aux = lanes;
+    detached_aux[2].pins[0].auxiliary_commitment =
+        Filled(0xe1);
+    BOOST_CHECK(
+        !VerifyRCStage3BuilderProgramCtlDirectAliasProofV1(
+            pin, detached_aux, proved.proof, &why));
+    BOOST_CHECK(
+        why.find("ctl_auxiliary_commitment") !=
+        std::string::npos);
+
+    auto forged_columns = columns;
+    forged_columns[
+        layout.lanes[1].ctl_value_column][3] =
+        gf::Add(
+            forged_columns[
+                layout.lanes[1].ctl_value_column][3],
+            gf::Fp3::One());
+    aq::AirProveOptions adversarial;
+    adversarial.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProve<gf::Fp3>(
+            cs, forged_columns, seed, adversarial);
+    BOOST_REQUIRE_MESSAGE(forged.ok, forged.note);
+    BOOST_CHECK(!forged.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerify<gf::Fp3>(
+            cs, forged.proof, seed, &why));
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL forged BuilderSeedChain CTL VALUE rejected: "
+        << why);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1226,14 +1465,20 @@ BOOST_AUTO_TEST_CASE(commitment_opening_proved_tamper_battery)
 // Blocker A (stream/digest facet): every stream endpoint's committed hash/
 // stream column is pinned to its §4 SHA256d manifest-binding stream_column_root
 // (the real Build/Verify*ManifestRecursiveBinding machinery), honest pins and
-// binding/root tampers are rejected.
+// binding/root tampers are rejected.  OperandXof additionally exports a scalar
+// cell from the canonical builder proof; the root pin and same-trace CTL are
+// complementary rather than mutually exclusive.
 BOOST_AUTO_TEST_CASE(stream_endpoints_pin_to_section4_manifest_binding_root)
 {
     std::vector<RCStage3RelationEndpoint> stream_eps;
     for (const auto& cell : CurrentRCStage3RelationEndpointCellAudit()) {
         if (RCStage3EndpointHasStreamOpening(cell.endpoint)) {
             BOOST_CHECK(cell.semantic_relation_complete);
-            BOOST_CHECK(!cell.relation_air_cell); // no scalar cell: a root pin
+            BOOST_CHECK(
+                cell.relation_air_cell ==
+                (cell.endpoint ==
+                 RCStage3RelationEndpoint::
+                     EpisodeBuilderOperandXof));
             stream_eps.push_back(cell.endpoint);
         }
     }

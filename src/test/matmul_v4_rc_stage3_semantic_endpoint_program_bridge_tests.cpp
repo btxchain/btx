@@ -56,15 +56,31 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.canonical_output_metadata_endpoints, 52U);
     BOOST_CHECK_EQUAL(
-        manifest.executed_relation_cell_endpoints, 22U);
+        manifest.executed_relation_cell_endpoints, 26U);
     BOOST_CHECK_EQUAL(
-        manifest.exact_relation_column_endpoints, 22U);
-    BOOST_CHECK_EQUAL(manifest.direct_alias_endpoints, 22U);
+        manifest.exact_relation_column_endpoints, 26U);
+    BOOST_CHECK_EQUAL(manifest.direct_alias_endpoints, 26U);
     BOOST_CHECK_EQUAL(
         manifest.recursive_child_accepted_endpoints, 0U);
     BOOST_CHECK_EQUAL(manifest.complete_roles, 0U);
     BOOST_CHECK(!manifest.recursive_semantic_closure_complete);
     BOOST_CHECK(!manifest.production_authority);
+
+    for (const auto endpoint : {
+             RCStage3RelationEndpoint::EpisodeBuilderParams,
+             RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
+             RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
+             RCStage3RelationEndpoint::EpisodeBuilderTrace}) {
+        const auto& builder = Endpoint(manifest, endpoint);
+        BOOST_CHECK(builder.selected_program_key);
+        BOOST_CHECK(builder.exact_program_table_match);
+        BOOST_CHECK(builder.canonical_output_metadata);
+        BOOST_CHECK(builder.executed_relation_cell);
+        BOOST_CHECK(builder.relation_column_exact);
+        BOOST_CHECK(builder.same_trace_ctl_alias);
+        BOOST_CHECK(builder.direct_alias_ready);
+        BOOST_CHECK(!builder.recursive_child_accepted);
+    }
 
     std::vector<RCStage3RelationEndpoint> observed_missing;
     for (const auto& endpoint : manifest.endpoints) {

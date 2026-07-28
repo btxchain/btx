@@ -11,6 +11,7 @@
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
+#include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <hash.h>
@@ -30,8 +31,31 @@ constexpr char DIRECT_ALIAS_AUX_DOMAIN[] =
     "BTX_RC_STAGE3_RELATION_CTL_DIRECT_ALIAS_AUX_V1";
 constexpr char SIGNED_RANGE_DUAL_CTL_AUX_DOMAIN[] =
     "BTX_RC_STAGE3_SIGNED_RANGE_DUAL_CTL_AUX_V1";
+constexpr char BUILDER_PROGRAM_ALIAS_SEED_DOMAIN[] =
+    "BTX_RC_STAGE3_BUILDER_PROGRAM_CTL_ALIAS_V1";
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_COUPLED_ENDPOINT_AIR_V1";
+
+constexpr std::array<RCStage3RelationEndpoint,
+                     kRCStage3BuilderProgramAliasLaneCountV1>
+    BUILDER_ALIAS_ENDPOINTS{
+        RCStage3RelationEndpoint::EpisodeBuilderParams,
+        RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
+        RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
+        RCStage3RelationEndpoint::EpisodeBuilderTrace,
+    };
+constexpr std::array<uint32_t,
+                     kRCStage3BuilderProgramAliasLaneCountV1>
+    BUILDER_ALIAS_COLUMNS{
+        universal_topology::production_family_col_v1::
+            EpisodeBuilderParams,
+        universal_topology::production_family_col_v1::
+            EpisodeBuilderSeedChain,
+        universal_topology::production_family_col_v1::
+            EpisodeBuilderOperandXof,
+        universal_topology::production_family_col_v1::
+            EpisodeBuilderTrace,
+    };
 
 const std::vector<RCStage3RelationEndpoint> EPISODE_BUILDER{
     RCStage3RelationEndpoint::EpisodeBuilderParams,
@@ -390,6 +414,42 @@ RCStage3RelationEndpointCellAudit CellAudit(
     };
 
     switch (endpoint) {
+    case RCStage3RelationEndpoint::EpisodeBuilderParams:
+        episode(
+            universal_topology::production_family_col_v1::
+                EpisodeBuilderParams,
+            "episode_air:builder_program:PARAMS",
+            "the canonical builder bytecode cell and its independently "
+            "challenged CTL VALUE lane execute in one shared quotient proof; "
+            "recursive-child consumption remains");
+        break;
+    case RCStage3RelationEndpoint::EpisodeBuilderSeedChain:
+        episode(
+            universal_topology::production_family_col_v1::
+                EpisodeBuilderSeedChain,
+            "episode_air:builder_program:SEED_CHAIN",
+            "the canonical builder bytecode cell and its independently "
+            "challenged CTL VALUE lane execute in one shared quotient proof; "
+            "recursive-child consumption remains");
+        break;
+    case RCStage3RelationEndpoint::EpisodeBuilderOperandXof:
+        episode(
+            universal_topology::production_family_col_v1::
+                EpisodeBuilderOperandXof,
+            "episode_air:builder_program:OPERAND_XOF",
+            "the canonical builder bytecode cell and its independently "
+            "challenged CTL VALUE lane execute in one shared quotient proof; "
+            "recursive-child consumption remains");
+        break;
+    case RCStage3RelationEndpoint::EpisodeBuilderTrace:
+        episode(
+            universal_topology::production_family_col_v1::
+                EpisodeBuilderTrace,
+            "episode_air:builder_program:TRACE",
+            "the canonical builder bytecode cell and its independently "
+            "challenged CTL VALUE lane execute in one shared quotient proof; "
+            "recursive-child consumption remains");
+        break;
     case RCStage3RelationEndpoint::EpisodeGemmOperandA:
         episode(1, "episode_air:gemm_endpoint:A",
                 "the cell is proved and CTL-aliasable, but its opening to the "
@@ -573,6 +633,65 @@ RCStage3RelationEndpointCellAudit CellAudit(
     }
 
     return out;
+}
+
+bool ResolveBuilderProgramAirV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    constraint_bytecode::ProgramTable& table,
+    AirCS& out,
+    std::string* why)
+{
+    table = {};
+    out = {};
+    if (pin.version != kRCStage3BuilderProgramAliasVersionV1 ||
+        pin.statement_commitment.IsNull() ||
+        pin.n_rows < 2 ||
+        (pin.n_rows & (pin.n_rows - 1U)) != 0) {
+        return Fail(why, "builder_alias:public_pin_shape");
+    }
+    if (!universal_topology::
+            BuildCanonicalProductionFamilyProgramTableV1(
+                soundness_scenarios::ProductionProofSiteKind::
+                    EpisodeBuilderCounterXof,
+                RCStage3RelationRole::EpisodeDeterministicBuilder,
+                table, why)) {
+        return Fail(why, "builder_alias:canonical_program");
+    }
+    const auto keys =
+        constraint_bytecode::
+            CommitProgramTableForExternalAndRecursiveUse(table);
+    if (!keys.same_canonical_serialization ||
+        keys.external_sha256d != pin.program_external_sha256d ||
+        keys.recursive_alg_hash !=
+            pin.program_recursive_alg_hash ||
+        pin.relation_column_roots.size() != table.current_width) {
+        table = {};
+        return Fail(why, "builder_alias:program_or_root_pin");
+    }
+    for (const auto& root : pin.relation_column_roots) {
+        if (root.IsNull()) {
+            table = {};
+            return Fail(why, "builder_alias:null_relation_root");
+        }
+    }
+    if (!constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                table, pin.n_rows, out, why) ||
+        out.n_columns != table.current_width ||
+        table.challenge_width != 0) {
+        table = {};
+        out = {};
+        return Fail(why, "builder_alias:program_air");
+    }
+    out.preprocessed_roots.reserve(
+        pin.relation_column_roots.size());
+    for (uint32_t column = 0;
+         column < pin.relation_column_roots.size();
+         ++column) {
+        out.preprocessed_roots.emplace_back(
+            column, pin.relation_column_roots[column]);
+    }
+    return true;
 }
 
 } // namespace
@@ -1029,6 +1148,277 @@ bool VerifyRCStage3SignedRangeDualCtlDirectAliasProof(
     return true;
 }
 
+bool BuildRCStage3BuilderProgramCtlDirectAliasConstraintSystemV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    const std::array<RCStage3BuilderProgramCtlLaneV1,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& lanes,
+    AirCS& out,
+    RCStage3BuilderProgramCtlDirectAliasLayoutV1* layout,
+    std::string* why)
+{
+    out = {};
+    RCStage3BuilderProgramCtlDirectAliasLayoutV1 local;
+    constraint_bytecode::ProgramTable table;
+    AirCS relation_cs;
+    if (!ResolveBuilderProgramAirV1(
+            pin, table, relation_cs, why)) {
+        return false;
+    }
+
+    AirCS current = relation_cs;
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        if (lane.endpoint != BUILDER_ALIAS_ENDPOINTS[lane_index] ||
+            lane.participant_index >= lane.pins.size() ||
+            lane.pins.size() != lane.manifest.participants.size()) {
+            out = {};
+            return Fail(why, "builder_alias:lane_shape");
+        }
+        const auto& participant =
+            lane.manifest.participants[lane.participant_index];
+        const auto& child = lane.pins[lane.participant_index];
+        const uint256 schedule_commitment =
+            CommitRCStage3CtlSchedule(lane.schedule);
+        if (participant.role !=
+                RCStage3RelationRole::EpisodeDeterministicBuilder ||
+            child.role != participant.role ||
+            child.bus_id != lane.manifest.bus_id ||
+            child.schedule_commitment != schedule_commitment ||
+            participant.schedule_commitment != schedule_commitment ||
+            participant.event_count != child.event_count ||
+            participant.send_count != child.send_count ||
+            participant.receive_count != child.receive_count) {
+            out = {};
+            return Fail(
+                why, "builder_alias:participant_binding");
+        }
+        RCStage3CtlChallenges challenges;
+        if (!DeriveRCStage3CtlChallenges(
+                lane.manifest, lane.pins, challenges, why) ||
+            child.challenge_commitment !=
+                CommitRCStage3CtlChallenges(challenges)) {
+            out = {};
+            return Fail(why, "builder_alias:challenge_binding");
+        }
+
+        AirCS next;
+        if (!BuildRCStage3RelationCtlDirectAliasConstraintSystem(
+                current,
+                {lane.schedule, challenges, child.terminal},
+                BUILDER_ALIAS_COLUMNS[lane_index],
+                next, &local.lanes[lane_index], why)) {
+            out = {};
+            return false;
+        }
+        current = std::move(next);
+    }
+    out = std::move(current);
+    local.relation_columns = relation_cs.n_columns;
+    local.total_columns = out.n_columns;
+    local.canonical_program_selected =
+        table.current_width == 21 &&
+        table.current_width == relation_cs.n_columns;
+    local.all_four_same_trace =
+        local.canonical_program_selected &&
+        local.total_columns ==
+            local.relation_columns +
+                lanes.size() * stage3_ctl_col::NUM_COLUMNS;
+    for (uint32_t lane_index = 0;
+         lane_index < local.lanes.size(); ++lane_index) {
+        const auto& lane = local.lanes[lane_index];
+        local.all_four_same_trace =
+            local.all_four_same_trace &&
+            lane.same_trace && lane.direct_alias &&
+            lane.source_column ==
+                BUILDER_ALIAS_COLUMNS[lane_index] &&
+            lane.ctl_column_base ==
+                local.relation_columns +
+                    lane_index * stage3_ctl_col::NUM_COLUMNS;
+    }
+    if (!local.all_four_same_trace) {
+        out = {};
+        return Fail(why, "builder_alias:internal_layout");
+    }
+    if (layout != nullptr) *layout = local;
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "canonical_builder_program_four_ctl_product_ok";
+    }
+    return true;
+}
+
+bool BuildRCStage3BuilderProgramCtlDirectAliasWitnessV1(
+    const RCStage3BuilderProgramCtlDirectAliasLayoutV1& layout,
+    const std::vector<std::vector<Fp3>>& relation_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3BuilderProgramAliasLaneCountV1>&
+        ctl_witnesses,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.clear();
+    if (!layout.canonical_program_selected ||
+        !layout.all_four_same_trace ||
+        relation_columns.size() != layout.relation_columns ||
+        layout.lanes.size() != ctl_witnesses.size()) {
+        return Fail(why, "builder_alias:witness_shape");
+    }
+    out = relation_columns;
+    for (uint32_t lane_index = 0;
+         lane_index < layout.lanes.size(); ++lane_index) {
+        std::vector<std::vector<Fp3>> next;
+        if (!BuildRCStage3RelationCtlDirectAliasWitness(
+                layout.lanes[lane_index], out,
+                ctl_witnesses[lane_index], next, why)) {
+            out.clear();
+            return false;
+        }
+        out = std::move(next);
+    }
+    if (out.size() != layout.total_columns) {
+        out.clear();
+        return Fail(why, "builder_alias:witness_width");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "builder_params_seed_xof_trace_are_same_trace_ctl_values";
+    }
+    return true;
+}
+
+uint256 ComputeRCStage3BuilderProgramCtlDirectAliasSeedV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    const std::array<RCStage3BuilderProgramCtlLaneV1,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& lanes)
+{
+    constraint_bytecode::ProgramTable table;
+    AirCS relation_cs;
+    if (!ResolveBuilderProgramAirV1(
+            pin, table, relation_cs, nullptr)) {
+        return {};
+    }
+    HashWriter hash;
+    hash << BUILDER_PROGRAM_ALIAS_SEED_DOMAIN;
+    hash << pin.version;
+    hash << pin.statement_commitment;
+    hash << pin.n_rows;
+    hash << pin.program_external_sha256d;
+    for (const auto& limb : pin.program_recursive_alg_hash) {
+        hash << limb;
+    }
+    hash << static_cast<uint32_t>(
+        pin.relation_column_roots.size());
+    for (const auto& root : pin.relation_column_roots) {
+        hash << root;
+    }
+    uint256 seed = hash.GetHash();
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        if (lane.endpoint != BUILDER_ALIAS_ENDPOINTS[lane_index] ||
+            lane.participant_index >= lane.pins.size() ||
+            lane.pins.size() != lane.manifest.participants.size()) {
+            return {};
+        }
+        const auto& child = lane.pins[lane.participant_index];
+        RCStage3CtlChallenges challenges;
+        if (!DeriveRCStage3CtlChallenges(
+                lane.manifest, lane.pins, challenges, nullptr)) {
+            return {};
+        }
+        seed = ComputeRCStage3RelationCtlDirectAliasSeed(
+            lane.endpoint, seed, lane.schedule, challenges,
+            child.terminal, BUILDER_ALIAS_COLUMNS[lane_index]);
+        if (seed.IsNull()) return {};
+    }
+    return seed;
+}
+
+bool VerifyRCStage3BuilderProgramCtlDirectAliasProofV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    const std::array<RCStage3BuilderProgramCtlLaneV1,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& lanes,
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    std::string* why)
+{
+    AirCS combined;
+    RCStage3BuilderProgramCtlDirectAliasLayoutV1 layout;
+    if (!BuildRCStage3BuilderProgramCtlDirectAliasConstraintSystemV1(
+            pin, lanes, combined, &layout, why)) {
+        return false;
+    }
+    if (proof.batch.columns.size() !=
+            static_cast<size_t>(combined.n_columns) + 1 ||
+        proof.batch.column_len.size() != proof.batch.columns.size() ||
+        pin.relation_column_roots.size() !=
+            layout.relation_columns) {
+        return Fail(why, "builder_alias:proof_shape");
+    }
+    for (uint32_t column = 0;
+         column < layout.relation_columns; ++column) {
+        if (proof.batch.columns[column].root !=
+            pin.relation_column_roots[column]) {
+            return Fail(why, "builder_alias:relation_column_root");
+        }
+    }
+
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        const auto& lane_layout = layout.lanes[lane_index];
+        const auto& child = lane.pins[lane.participant_index];
+        const uint256& source_root =
+            proof.batch.columns[
+                BUILDER_ALIAS_COLUMNS[lane_index]].root;
+        if (proof.batch.columns[
+                lane_layout.ctl_value_column].root != source_root) {
+            return Fail(why, "builder_alias:source_value_root");
+        }
+        std::array<uint256, 5> ctl_roots{};
+        for (uint32_t column = stage3_ctl_col::NAMESPACE;
+             column <= stage3_ctl_col::MULTIPLICITY; ++column) {
+            ctl_roots[column] =
+                proof.batch.columns[
+                    lane_layout.ctl_column_base + column].root;
+        }
+        if (ComputeRCStage3CtlPrechallengeTraceCommitmentFromRoots(
+                lane.schedule,
+                proof.batch.column_len[
+                    lane_layout.ctl_column_base],
+                proof.batch.n_coeffs, ctl_roots) !=
+                child.trace_commitment) {
+            return Fail(
+                why, "builder_alias:ctl_trace_commitment");
+        }
+        if (ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proof, lane_layout) !=
+                child.auxiliary_commitment) {
+            return Fail(
+                why, "builder_alias:ctl_auxiliary_commitment");
+        }
+    }
+
+    const uint256 seed =
+        ComputeRCStage3BuilderProgramCtlDirectAliasSeedV1(
+            pin, lanes);
+    std::string air_why;
+    if (seed.IsNull() ||
+        !air_quotient::AirQuotientVerify<Fp3>(
+            combined, proof, seed, &air_why)) {
+        return Fail(why, "builder_alias:air:" + air_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "builder_four_endpoint_program_cells_equal_same_trace_ctl_"
+            "values_recursive_consumption_pending";
+    }
+    return true;
+}
+
 bool BuildRCStage3RelationCtlDegree2DirectAliasConstraintSystem(
     const AirCS& relation_cs,
     const RCStage3CtlDegree2AirSpec& ctl_spec,
@@ -1396,10 +1786,14 @@ uint256 ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
     const air_quotient::AirQuotientProof<Fp3>& proof,
     const RCStage3RelationCtlDirectAliasLayout& layout)
 {
+    const uint32_t proof_total_columns =
+        proof.batch.columns.empty()
+        ? 0
+        : static_cast<uint32_t>(
+              proof.batch.columns.size() - 1);
     if (!layout.same_trace || !layout.direct_alias ||
         layout.total_columns == 0 ||
-        proof.batch.columns.size() !=
-            static_cast<size_t>(layout.total_columns) + 1 ||
+        proof_total_columns < layout.total_columns ||
         proof.batch.column_len.size() != proof.batch.columns.size() ||
         proof.batch.n_coeffs == 0 ||
         layout.ctl_column_base > layout.total_columns ||
@@ -1415,7 +1809,7 @@ uint256 ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
         }
     }
     const uint256& quotient_root =
-        proof.batch.columns[layout.total_columns].root;
+        proof.batch.columns[proof_total_columns].root;
     if (quotient_root.IsNull()) return {};
 
     HashWriter hash;
@@ -1424,6 +1818,7 @@ uint256 ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
     hash << layout.relation_columns;
     hash << layout.ctl_column_base;
     hash << layout.total_columns;
+    hash << proof_total_columns;
     hash << layout.source_column;
     hash << proof.batch.version;
     hash << proof.batch.blowup;
@@ -1900,16 +2295,18 @@ AssessRCStage3RelationClosureStrategies()
 std::vector<RCStage3RelationClosureRoleAudit>
 CurrentRCStage3RelationClosureRoleAudit()
 {
-    // Twenty-two endpoint families now expose concrete proof cells. Six
-    // immutable episode columns and fifteen coupled local-kernel columns can
-    // be put in the same proof as CTL::VALUE; the signed-range VALUE root
-    // already verifies against both executed CTL sides.
+    // Twenty-six endpoint families now expose concrete proof cells. The four
+    // canonical builder bytecode exports, six immutable episode columns and
+    // fifteen coupled local-kernel columns can be put in the same proof as
+    // CTL::VALUE; the signed-range VALUE root already verifies against both
+    // executed CTL sides.
     // This is still not semantic role closure: commitment openings, complete
     // manifests, missing hash relations and recursive execution remain open.
     return {
-        {RCStage3RelationRole::EpisodeDeterministicBuilder, 4, 0, false, false,
-         "header/params, seed chain and operand XOF are not connected to a "
-         "complete builder child"},
+        {RCStage3RelationRole::EpisodeDeterministicBuilder, 4, 4, false, false,
+         "params, seed-chain, operand-XOF and trace cells execute as four "
+         "independently challenged CTLs over the exact canonical builder "
+         "bytecode proof; recursive child consumption remains"},
         {RCStage3RelationRole::EpisodeGemm, 5, 4, false, false,
          "A/B/Y cells have executable same-trace CTL aliases and signed-range "
          "VALUE equality executes; operand/Y openings and sumcheck are not "

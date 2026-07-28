@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_stage3_unified_root.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -270,6 +271,46 @@ struct RCStage3SignedRangeDualCtlDirectAliasLayout {
     bool same_trace_dual_alias{false};
 };
 
+inline constexpr uint16_t kRCStage3BuilderProgramAliasVersionV1 = 1;
+inline constexpr uint32_t kRCStage3BuilderProgramAliasLaneCountV1 = 4;
+
+/**
+ * Verifier-owned pin for the canonical EpisodeBuilderCounterXof ProgramTable.
+ * Both program commitments are recomputed from the selected production table;
+ * every trace-column root is then compared to the shared proof.
+ */
+struct RCStage3BuilderProgramAirPublicPinV1 {
+    uint16_t version{kRCStage3BuilderProgramAliasVersionV1};
+    uint256 statement_commitment{};
+    uint32_t n_rows{0};
+    uint256 program_external_sha256d{};
+    alg_hash::Digest program_recursive_alg_hash{};
+    std::vector<uint256> relation_column_roots;
+
+    bool operator==(
+        const RCStage3BuilderProgramAirPublicPinV1&) const = default;
+};
+
+/** One independently domain-separated CTL participant carried by the builder
+ * product. The four lanes are fixed, in endpoint order Params, SeedChain,
+ * OperandXof, Trace. */
+struct RCStage3BuilderProgramCtlLaneV1 {
+    RCStage3RelationEndpoint endpoint{};
+    RCStage3CtlManifest manifest;
+    std::vector<RCStage3CtlChildPin> pins;
+    size_t participant_index{0};
+    RCStage3CtlSchedule schedule;
+};
+
+struct RCStage3BuilderProgramCtlDirectAliasLayoutV1 {
+    uint32_t relation_columns{0};
+    uint32_t total_columns{0};
+    std::array<RCStage3RelationCtlDirectAliasLayout,
+               kRCStage3BuilderProgramAliasLaneCountV1> lanes;
+    bool canonical_program_selected{false};
+    bool all_four_same_trace{false};
+};
+
 /** Exact-row variant using the degree-two CTL layout.  Unlike the generic
  * padded CTL, this product keeps n_coeffs == n_rows, so an existing
  * relation-owned VALUE root can be reused verbatim as the CTL VALUE root. */
@@ -370,6 +411,47 @@ ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
     const RCStage3GemmExtractManifest& manifest,
     const RCStage3SignedRangePin& pin,
     const RCStage3SignedRangeExecutedCtlBinding& binding,
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    std::string* why = nullptr);
+
+/**
+ * One proof for all four deterministic-builder endpoints:
+ *
+ *   [ canonical 21-column builder ProgramTable | four CTL traces ].
+ *
+ * The verifier rebuilds the production-selected table and the endpoint-column
+ * routing. No callback, output column, program key or challenge is accepted
+ * from the prover.
+ */
+[[nodiscard]] bool
+BuildRCStage3BuilderProgramCtlDirectAliasConstraintSystemV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    const std::array<RCStage3BuilderProgramCtlLaneV1,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& lanes,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    RCStage3BuilderProgramCtlDirectAliasLayoutV1* layout = nullptr,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool
+BuildRCStage3BuilderProgramCtlDirectAliasWitnessV1(
+    const RCStage3BuilderProgramCtlDirectAliasLayoutV1& layout,
+    const std::vector<std::vector<gkr_field::Fp3>>& relation_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& ctl_witnesses,
+    std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint256
+ComputeRCStage3BuilderProgramCtlDirectAliasSeedV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    const std::array<RCStage3BuilderProgramCtlLaneV1,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& lanes);
+
+[[nodiscard]] bool
+VerifyRCStage3BuilderProgramCtlDirectAliasProofV1(
+    const RCStage3BuilderProgramAirPublicPinV1& pin,
+    const std::array<RCStage3BuilderProgramCtlLaneV1,
+                     kRCStage3BuilderProgramAliasLaneCountV1>& lanes,
     const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
     std::string* why = nullptr);
 
