@@ -567,6 +567,81 @@ BuildVerifierAIR(uint32_t k, const ChildPublicInputs& shape,
 MeasureVerifierAIR(uint32_t k, const std::vector<ChildPublicInputs>& pis,
                    const VerifierAirFamilies& families = {});
 
+/**
+ * Proof-owned inputs consumed by one child-verifier arm of the universal
+ * parent. Every entry is a column address, never a value captured by an AIR
+ * callback. The complete ordered set is committed as the SAFE FixedTrace-V3
+ * R0 row group and its root is supplied by the parent public statement.
+ *
+ * The existing per-query columns (query index, Merkle directions, domain
+ * points and selector values) are also in that row group; their addresses are
+ * recorded by `per_query_columns`. The fields below are the proof-global
+ * inputs that the old pinned builder captured in std::function closures.
+ */
+struct VerifierAirFixedTraceChildLayoutV1 {
+    std::vector<uint32_t> per_query_columns;
+    std::array<uint32_t, alg_hash::kAlgHashDigestLen>
+        row_commit_root{};
+    std::array<uint32_t, alg_hash::kAlgHashDigestLen>
+        trace_commit_root{};
+    std::vector<std::array<
+        uint32_t, alg_hash::kAlgHashDigestLen>>
+        fold_roots;
+    std::vector<uint32_t> fold_challenges;
+    std::vector<uint32_t> fri_batch_weights;
+    std::vector<uint32_t> z1_batch_weights;
+    std::vector<uint32_t> z2_batch_weights;
+    std::vector<uint32_t> evals_z1;
+    std::vector<uint32_t> evals_z2;
+    uint32_t w1{0};
+    uint32_t w2{0};
+    uint32_t final_value{0};
+    /** One exact power per child constraint, beginning with lambda^0. */
+    std::vector<uint32_t> air_lambda_powers;
+};
+
+/**
+ * Deterministic column plan of the proof-independent V_CS.
+ * `ordered_columns` is the exact SAFE FixedTrace-V3 base-row group. It is
+ * derived entirely from public child shape and the canonical child
+ * constraint schedule.
+ */
+struct VerifierAirFixedTraceLayoutV1 {
+    uint16_t version{1};
+    uint32_t arity{0};
+    uint32_t n_rows{0};
+    uint32_t n_witness_columns{0};
+    uint32_t n_columns{0};
+    std::vector<VerifierAirFixedTraceChildLayoutV1> children;
+    std::vector<uint32_t> ordered_columns;
+};
+
+/**
+ * Build the universal V_CS. Unlike BuildVerifierAIRPinned, proof-specific
+ * roots, challenges, evaluations and query-derived columns are read only from
+ * the explicit FixedTrace layout returned in `fixed_trace`; no callback
+ * captures their values and `cs.preprocessed` is empty.
+ */
+[[nodiscard]] air_quotient::AirConstraintSystem<Fp3>
+BuildVerifierAIRFixedTraceV1(
+    uint32_t k,
+    const std::vector<ChildPublicInputs>& public_shapes,
+    VerifierAirFixedTraceLayoutV1& fixed_trace,
+    const VerifierAirFamilies& families = {});
+
+/**
+ * Materialize the proof-owned FixedTrace columns into an already allocated
+ * universal-parent witness. This is prover-only data movement; the verifier
+ * rebuilds the CS/layout without calling it and pins the resulting ordered
+ * row group by exact root equality.
+ */
+[[nodiscard]] bool MaterializeVerifierAIRFixedTraceV1(
+    const std::vector<ChildPublicInputs>& proof_inputs,
+    const VerifierAirFamilies& families,
+    const VerifierAirFixedTraceLayoutV1& fixed_trace,
+    std::vector<std::vector<Fp3>>& columns,
+    std::string* why = nullptr);
+
 /** The assembled V_CS + its honest witness (before the FRI prove). */
 struct AggregateWitness {
     using AlgB3 = air_quotient::AirFriBackendAlg<Fp3>;
@@ -587,6 +662,22 @@ BuildAggregateWitness(const air_quotient::AirConstraintSystem<Fp3>& child_cs,
                       const uint256& child_fs_seed, const VerifierAirFamilies& families = {});
 
 /**
+ * Prover-side universal-parent assembly.  This first materializes the native
+ * verifier witness, then replaces the proof-pinned callback graph with the
+ * proof-independent FixedTrace V1 graph and moves every proof-owned scalar,
+ * root and query value into its exact R0 column.
+ */
+[[nodiscard]] AggregateWitness
+BuildAggregateWitnessFixedTraceV1(
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<
+        air_quotient::AirQuotientProof<
+            Fp3, AggregateWitness::AlgB3>>& children,
+    const uint256& child_fs_seed,
+    VerifierAirFixedTraceLayoutV1& fixed_trace,
+    const VerifierAirFamilies& families = {});
+
+/**
  * Heterogeneous public-statement form used by binary recursion nodes.
  * Every child has its own pinned constraint system and independent FS seed;
  * the normalized parent still shares one verifier trace. Relation shapes
@@ -600,6 +691,24 @@ BuildAggregateWitnessHeterogeneous(
         air_quotient::AirQuotientProof<
             Fp3, AggregateWitness::AlgB3>>& children,
     const std::vector<uint256>& child_fs_seeds,
+    const VerifierAirFamilies& families = {});
+
+/**
+ * Heterogeneous leaf form of BuildAggregateWitnessFixedTraceV1.  Relation
+ * leaves may use distinct canonical ProgramTables, trace widths and public
+ * seeds; all proof-owned inputs are still lifted into one deterministic
+ * ordered R0 layout and the returned parent CS is reconstructed without any
+ * proof tape.
+ */
+[[nodiscard]] AggregateWitness
+BuildAggregateWitnessHeterogeneousFixedTraceV1(
+    const std::vector<
+        air_quotient::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<
+        air_quotient::AirQuotientProof<
+            Fp3, AggregateWitness::AlgB3>>& children,
+    const std::vector<uint256>& child_fs_seeds,
+    VerifierAirFixedTraceLayoutV1& fixed_trace,
     const VerifierAirFamilies& families = {});
 
 /** Count constraints that fail to vanish on their applicable rows of H (fast,

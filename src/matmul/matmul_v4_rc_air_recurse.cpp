@@ -1960,6 +1960,925 @@ aq::AirConstraintSystem<Fp3> BuildVerifierAIRPinned(uint32_t k,
     return cs;
 }
 
+namespace {
+
+VerifierAirFixedTraceLayoutV1 AllocateVerifierAirFixedTraceLayoutV1(
+    const VcsLayout& layout,
+    const std::vector<ChildPublicInputs>& shapes,
+    const VerifierAirFamilies& families)
+{
+    VerifierAirFixedTraceLayoutV1 fixed;
+    fixed.arity = layout.k;
+    fixed.n_rows =
+        FriNextPow2(std::max<uint32_t>(2, layout.queries));
+    fixed.n_witness_columns = layout.n_witness_cols;
+    fixed.children.resize(layout.k);
+
+    // The former preprocessed columns are the first, query-varying part of
+    // FixedTrace.  Preserve their exact original column order.
+    for (uint32_t child = 0; child < layout.k; ++child) {
+        const uint32_t begin =
+            layout.children[child].pre.idx_fp;
+        const uint32_t end =
+            child + 1 < layout.k
+                ? layout.children[child + 1].pre.idx_fp
+                : layout.n_cols;
+        auto& dst =
+            fixed.children[child].per_query_columns;
+        for (uint32_t column = begin; column < end;
+             ++column) {
+            dst.push_back(column);
+            fixed.ordered_columns.push_back(column);
+        }
+    }
+
+    uint32_t column = layout.n_cols;
+    auto allocate_one = [&]() {
+        const uint32_t out = column++;
+        fixed.ordered_columns.push_back(out);
+        return out;
+    };
+    auto allocate_digest =
+        [&](std::array<uint32_t, kAlgHashDigestLen>& out) {
+            for (uint32_t limb = 0;
+                 limb < kAlgHashDigestLen; ++limb) {
+                out[limb] = allocate_one();
+            }
+        };
+
+    for (uint32_t child = 0; child < layout.k; ++child) {
+        const ChildLayout& c = layout.children[child];
+        const ChildPublicInputs& shape = shapes[child];
+        auto& out = fixed.children[child];
+        if (families.row_merkle || families.next_row) {
+            allocate_digest(out.row_commit_root);
+        }
+        if (families.trace_binding) {
+            allocate_digest(out.trace_commit_root);
+        }
+        if (families.fold) {
+            out.fold_roots.resize(c.nf);
+            out.fold_challenges.resize(c.nf);
+            for (auto& root : out.fold_roots) {
+                allocate_digest(root);
+            }
+            for (uint32_t& beta :
+                 out.fold_challenges) {
+                beta = allocate_one();
+            }
+        }
+        if (families.deep) {
+            const uint32_t width = c.W + 1;
+            out.fri_batch_weights.resize(width);
+            out.z1_batch_weights.resize(width);
+            out.z2_batch_weights.resize(width);
+            out.evals_z1.resize(width);
+            out.evals_z2.resize(width);
+            for (uint32_t& value :
+                 out.fri_batch_weights) {
+                value = allocate_one();
+            }
+            for (uint32_t& value :
+                 out.z1_batch_weights) {
+                value = allocate_one();
+            }
+            for (uint32_t& value :
+                 out.z2_batch_weights) {
+                value = allocate_one();
+            }
+            for (uint32_t& value : out.evals_z1) {
+                value = allocate_one();
+            }
+            for (uint32_t& value : out.evals_z2) {
+                value = allocate_one();
+            }
+            out.w1 = allocate_one();
+            out.w2 = allocate_one();
+            out.final_value = allocate_one();
+        }
+        if (families.per_point) {
+            out.air_lambda_powers.resize(
+                shape.child_constraints.size());
+            for (uint32_t& value :
+                 out.air_lambda_powers) {
+                value = allocate_one();
+            }
+        }
+    }
+    fixed.n_columns = column;
+    return fixed;
+}
+
+void EmitRootColumnPin(
+    std::vector<AirConstraint<Fp3>>& constraints,
+    uint32_t terminal,
+    const std::array<uint32_t, kAlgHashDigestLen>& roots)
+{
+    const PermLayout last{terminal};
+    for (uint32_t limb = 0;
+         limb < kAlgHashDigestLen; ++limb) {
+        AirConstraint<Fp3> constraint;
+        constraint.name =
+            "vcs.fixed.merkle.root.pin";
+        constraint.kind = AirKind::kEverywhere;
+        constraint.alg_degree = 1;
+        const uint32_t root_column = roots[limb];
+        constraint.eval =
+            [last, limb, root_column](
+                const std::vector<Fp3>& current,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    PermOutputLane(last, current, limb),
+                    current[root_column]);
+            };
+        constraints.push_back(std::move(constraint));
+    }
+}
+
+void EmitAuthenticatedRowPathFixed(
+    std::vector<AirConstraint<Fp3>>& constraints,
+    const std::vector<uint32_t>& leaf_blocks,
+    const std::vector<uint32_t>& compressions,
+    const std::vector<uint32_t>& siblings,
+    const std::vector<uint32_t>& directions,
+    uint32_t index_column,
+    uint32_t values,
+    const std::array<uint32_t, kAlgHashDigestLen>& roots,
+    Fp3 node_domain)
+{
+    EmitRowLeafSponge(
+        constraints, leaf_blocks, index_column, values);
+    uint32_t previous = leaf_blocks.back();
+    for (uint32_t depth = 0;
+         depth < compressions.size(); ++depth) {
+        EmitPermSbox(constraints, compressions[depth]);
+        EmitCompressWiring(
+            constraints, compressions[depth], previous,
+            siblings[depth], directions[depth],
+            node_domain);
+        previous = compressions[depth];
+    }
+    EmitRootColumnPin(constraints, previous, roots);
+}
+
+bool FixedTraceShapeIsValid(
+    uint32_t k,
+    const std::vector<ChildPublicInputs>& shapes,
+    const VerifierAirFamilies& families)
+{
+    if (k == 0 || shapes.size() != k ||
+        shapes.front().query_index.empty()) {
+        return false;
+    }
+    const uint32_t queries =
+        static_cast<uint32_t>(
+            shapes.front().query_index.size());
+    for (const auto& shape : shapes) {
+        if (shape.child_w == 0 ||
+            shape.child_n_rows < 2 ||
+            shape.child_n_lde < 2 ||
+            shape.query_index.size() != queries ||
+            shape.n_folds > shape.merkle_depth) {
+            return false;
+        }
+        if (families.deep &&
+            shape.column_len.size() !=
+                shape.child_w + 1) {
+            return false;
+        }
+        if (families.per_point &&
+            shape.child_constraints.empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+aq::AirConstraintSystem<Fp3>
+BuildVerifierAIRFixedTraceV1(
+    uint32_t k,
+    const std::vector<ChildPublicInputs>& shapes,
+    VerifierAirFixedTraceLayoutV1& fixed_trace,
+    const VerifierAirFamilies& families)
+{
+    aq::AirConstraintSystem<Fp3> cs;
+    fixed_trace = {};
+    if (!FixedTraceShapeIsValid(k, shapes, families)) {
+        return cs;
+    }
+
+    const VcsLayout layout =
+        ComputeLayout(k, shapes, families);
+    fixed_trace =
+        AllocateVerifierAirFixedTraceLayoutV1(
+            layout, shapes, families);
+    cs.n_rows = fixed_trace.n_rows;
+    cs.n_columns = fixed_trace.n_columns;
+    // These columns are not canonical host tables.  Their exact ordered R0
+    // root is supplied to SAFE FixedTrace V3 by the application statement.
+    cs.preprocessed_pin_ood = false;
+
+    const Fp3 node_domain = Fp3::FromFp(
+        ah::GetAlgHashConstants().node_domain);
+    const Fp3 leaf_domain = Fp3::FromFp(
+        ah::GetAlgHashConstants().leaf_domain);
+
+    for (uint32_t child = 0; child < k; ++child) {
+        const ChildLayout& c = layout.children[child];
+        const ChildPublicInputs& shape = shapes[child];
+        const auto& fixed = fixed_trace.children[child];
+        auto& constraints = cs.constraints;
+
+        if (families.row_merkle) {
+            EmitRowLeafSponge(
+                constraints, c.row_leaf_blocks,
+                c.pre.idx_fp, c.W + 1);
+            uint32_t previous = c.row_leaf_blocks.back();
+            for (uint32_t depth = 0;
+                 depth < c.D; ++depth) {
+                EmitPermSbox(
+                    constraints, c.row_comp[depth]);
+                EmitCompressWiring(
+                    constraints, c.row_comp[depth],
+                    previous, c.row_sib[depth],
+                    c.pre.row_dir[depth],
+                    node_domain);
+                previous = c.row_comp[depth];
+            }
+            EmitRootColumnPin(
+                constraints, previous,
+                fixed.row_commit_root);
+        }
+
+        if (families.next_row) {
+            EmitAuthenticatedRowPathFixed(
+                constraints, c.next_leaf_blocks,
+                c.next_comp, c.next_sib,
+                c.pre.next_dir, c.pre.next_idx_fp,
+                c.W + 1, fixed.row_commit_root,
+                node_domain);
+        }
+
+        if (families.trace_binding) {
+            EmitAuthenticatedRowPathFixed(
+                constraints, c.trace_leaf_blocks,
+                c.trace_comp, c.trace_sib,
+                c.pre.trace_dir, c.pre.idx_fp, c.W,
+                fixed.trace_commit_root, node_domain);
+            if (families.row_merkle) {
+                EmitRowValueEquality(
+                    constraints, c.row_leaf_blocks,
+                    c.trace_leaf_blocks, c.W);
+            }
+        }
+
+        if (families.fold) {
+            for (uint32_t layer = 0;
+                 layer < c.nf; ++layer) {
+                const FoldCols& fold = c.folds[layer];
+                const auto& pre = c.pre.folds[layer];
+
+                EmitPermSbox(
+                    constraints, fold.even_leaf);
+                EmitInputEqCol(
+                    constraints, fold.even_leaf, 3,
+                    pre.even_leaf_idx);
+                EmitInputConst(
+                    constraints, fold.even_leaf, 4,
+                    leaf_domain);
+                for (uint32_t lane = 5;
+                     lane < kAlgHashT; ++lane) {
+                    EmitInputConst(
+                        constraints, fold.even_leaf,
+                        lane, Fp3::Zero());
+                }
+                uint32_t previous = fold.even_leaf;
+                for (uint32_t depth = 0;
+                     depth < fold.depth; ++depth) {
+                    EmitPermSbox(
+                        constraints,
+                        fold.even_comp[depth]);
+                    EmitCompressWiring(
+                        constraints,
+                        fold.even_comp[depth], previous,
+                        fold.even_sib[depth],
+                        pre.even_dir[depth],
+                        node_domain);
+                    previous = fold.even_comp[depth];
+                }
+                EmitRootColumnPin(
+                    constraints, previous,
+                    fixed.fold_roots[layer]);
+
+                EmitPermSbox(
+                    constraints, fold.odd_leaf);
+                EmitInputEqCol(
+                    constraints, fold.odd_leaf, 3,
+                    pre.odd_leaf_idx);
+                EmitInputConst(
+                    constraints, fold.odd_leaf, 4,
+                    leaf_domain);
+                for (uint32_t lane = 5;
+                     lane < kAlgHashT; ++lane) {
+                    EmitInputConst(
+                        constraints, fold.odd_leaf,
+                        lane, Fp3::Zero());
+                }
+                previous = fold.odd_leaf;
+                for (uint32_t depth = 0;
+                     depth < fold.depth; ++depth) {
+                    EmitPermSbox(
+                        constraints,
+                        fold.odd_comp[depth]);
+                    EmitCompressWiring(
+                        constraints,
+                        fold.odd_comp[depth], previous,
+                        fold.odd_sib[depth],
+                        pre.odd_dir[depth],
+                        node_domain);
+                    previous = fold.odd_comp[depth];
+                }
+                EmitRootColumnPin(
+                    constraints, previous,
+                    fixed.fold_roots[layer]);
+
+                const uint32_t even_leaf =
+                    fold.even_leaf;
+                const uint32_t odd_leaf =
+                    fold.odd_leaf;
+                const uint32_t x_column = pre.x;
+                const uint32_t folded_column =
+                    fold.folded_col;
+                const uint32_t beta_column =
+                    fixed.fold_challenges[layer];
+                AirConstraint<Fp3> relation;
+                relation.name =
+                    "vcs.fixed.fold.relation";
+                relation.kind = AirKind::kEverywhere;
+                relation.alg_degree = 2;
+                relation.eval =
+                    [even_leaf, odd_leaf, x_column,
+                     folded_column, beta_column](
+                        const std::vector<Fp3>& current,
+                        const std::vector<Fp3>&) {
+                        const Fp3 even = ReadTriple(
+                            current, even_leaf, 0);
+                        const Fp3 odd = ReadTriple(
+                            current, odd_leaf, 0);
+                        const Fp3 x = current[x_column];
+                        const Fp3 folded =
+                            current[folded_column];
+                        const Fp3 left = gf::Mul(
+                            gf::Mul(Fp3::FromFp(2), x),
+                            folded);
+                        const Fp3 right = gf::Add(
+                            gf::Mul(
+                                x, gf::Add(even, odd)),
+                            gf::Mul(
+                                current[beta_column],
+                                gf::Sub(even, odd)));
+                        return gf::Sub(left, right);
+                    };
+                constraints.push_back(
+                    std::move(relation));
+            }
+        }
+
+        if (families.deep || families.per_point) {
+            if (families.deep) {
+                for (uint32_t index = 0;
+                     index <= c.W; ++index) {
+                    for (uint32_t which = 0;
+                         which < 2; ++which) {
+                        const uint32_t witness_column =
+                            which == 0
+                                ? c.evals_z1[index]
+                                : c.evals_z2[index];
+                        const uint32_t fixed_column =
+                            which == 0
+                                ? fixed.evals_z1[index]
+                                : fixed.evals_z2[index];
+                        AirConstraint<Fp3> pin;
+                        pin.name =
+                            which == 0
+                                ? "vcs.fixed.deep.eval_z1.pin"
+                                : "vcs.fixed.deep.eval_z2.pin";
+                        pin.kind = AirKind::kEverywhere;
+                        pin.alg_degree = 1;
+                        pin.eval =
+                            [witness_column, fixed_column](
+                                const std::vector<Fp3>& current,
+                                const std::vector<Fp3>&) {
+                                return gf::Sub(
+                                    current[witness_column],
+                                    current[fixed_column]);
+                            };
+                        constraints.push_back(
+                            std::move(pin));
+                    }
+                }
+            }
+
+            const std::vector<uint32_t> row_blocks =
+                c.row_leaf_blocks;
+            const std::vector<uint32_t> x_powers =
+                c.pre.xpow;
+            const std::vector<uint32_t> batch_weights =
+                fixed.fri_batch_weights;
+            const uint32_t width = c.W;
+            auto evaluate_u =
+                [row_blocks, x_powers, batch_weights,
+                 width](const std::vector<Fp3>& current) {
+                    Fp3 value = Fp3::Zero();
+                    for (uint32_t index = 0;
+                         index <= width; ++index) {
+                        value = gf::Add(
+                            value,
+                            gf::Mul(
+                                current[
+                                    batch_weights[index]],
+                                gf::Mul(
+                                    current[
+                                        x_powers[index]],
+                                    ReadRowLeafValue(
+                                        current, row_blocks,
+                                        index))));
+                    }
+                    return value;
+                };
+            auto evaluate_claim =
+                [](const std::vector<Fp3>& current,
+                   const std::vector<uint32_t>& values,
+                   const std::vector<uint32_t>& weights) {
+                    Fp3 out = Fp3::Zero();
+                    for (uint32_t index = 0;
+                         index < values.size(); ++index) {
+                        out = gf::Add(
+                            out,
+                            gf::Mul(
+                                current[weights[index]],
+                                current[values[index]]));
+                    }
+                    return out;
+                };
+
+            if (families.deep && families.fold &&
+                c.nf > 0) {
+                const FoldCols& first_fold =
+                    c.folds.front();
+                const auto& first_pre =
+                    c.pre.folds.front();
+                const uint32_t inverse_z1 =
+                    c.pre.invd1;
+                const uint32_t inverse_z2 =
+                    c.pre.invd2;
+                const uint32_t even_leaf =
+                    first_fold.even_leaf;
+                const uint32_t odd_leaf =
+                    first_fold.odd_leaf;
+                const uint32_t leaf_selector =
+                    first_pre.leaf_sel;
+                const std::vector<uint32_t> evals_z1 =
+                    c.evals_z1;
+                const std::vector<uint32_t> evals_z2 =
+                    c.evals_z2;
+                const std::vector<uint32_t> z1_weights =
+                    fixed.z1_batch_weights;
+                const std::vector<uint32_t> z2_weights =
+                    fixed.z2_batch_weights;
+                const uint32_t w1 = fixed.w1;
+                const uint32_t w2 = fixed.w2;
+                AirConstraint<Fp3> deep;
+                deep.name = "vcs.fixed.deep.identity";
+                deep.kind = AirKind::kEverywhere;
+                // w * (batch*xpow*value - zweight*eval)
+                // * invd has total algebraic degree at most five.
+                deep.alg_degree = 5;
+                deep.eval =
+                    [evaluate_u, evaluate_claim, evals_z1,
+                     evals_z2, z1_weights, z2_weights,
+                     w1, w2, inverse_z1, inverse_z2,
+                     even_leaf, odd_leaf, leaf_selector](
+                        const std::vector<Fp3>& current,
+                        const std::vector<Fp3>&) {
+                        const Fp3 u =
+                            evaluate_u(current);
+                        const Fp3 v1 = evaluate_claim(
+                            current, evals_z1, z1_weights);
+                        const Fp3 v2 = evaluate_claim(
+                            current, evals_z2, z2_weights);
+                        const Fp3 expected = gf::Add(
+                            gf::Mul(
+                                current[w1],
+                                gf::Mul(
+                                    gf::Sub(u, v1),
+                                    current[inverse_z1])),
+                            gf::Mul(
+                                current[w2],
+                                gf::Mul(
+                                    gf::Sub(u, v2),
+                                    current[inverse_z2])));
+                        const Fp3 even = ReadTriple(
+                            current, even_leaf, 0);
+                        const Fp3 odd = ReadTriple(
+                            current, odd_leaf, 0);
+                        const Fp3 leaf = gf::Add(
+                            gf::Mul(
+                                current[leaf_selector],
+                                even),
+                            gf::Mul(
+                                gf::Sub(
+                                    Fp3::One(),
+                                    current[leaf_selector]),
+                                odd));
+                        return gf::Sub(leaf, expected);
+                    };
+                constraints.push_back(std::move(deep));
+
+                const uint32_t folded_column =
+                    c.folds.back().folded_col;
+                const uint32_t final_column =
+                    fixed.final_value;
+                AirConstraint<Fp3> final;
+                final.name = "vcs.fixed.deep.final";
+                final.kind = AirKind::kEverywhere;
+                final.alg_degree = 1;
+                final.eval =
+                    [folded_column, final_column](
+                        const std::vector<Fp3>& current,
+                        const std::vector<Fp3>&) {
+                        return gf::Sub(
+                            current[folded_column],
+                            current[final_column]);
+                    };
+                constraints.push_back(std::move(final));
+
+                for (uint32_t layer = 1;
+                     layer < c.nf; ++layer) {
+                    const uint32_t previous_fold =
+                        c.folds[layer - 1].folded_col;
+                    const uint32_t layer_even =
+                        c.folds[layer].even_leaf;
+                    const uint32_t layer_odd =
+                        c.folds[layer].odd_leaf;
+                    const uint32_t selector =
+                        c.pre.folds[layer].leaf_sel;
+                    AirConstraint<Fp3> chain;
+                    chain.name =
+                        "vcs.fixed.deep.chain";
+                    chain.kind = AirKind::kEverywhere;
+                    chain.alg_degree = 2;
+                    chain.eval =
+                        [previous_fold, layer_even,
+                         layer_odd, selector](
+                            const std::vector<Fp3>& current,
+                            const std::vector<Fp3>&) {
+                            const Fp3 even = ReadTriple(
+                                current, layer_even, 0);
+                            const Fp3 odd = ReadTriple(
+                                current, layer_odd, 0);
+                            const Fp3 leaf = gf::Add(
+                                gf::Mul(
+                                    current[selector], even),
+                                gf::Mul(
+                                    gf::Sub(
+                                        Fp3::One(),
+                                        current[selector]),
+                                    odd));
+                            return gf::Sub(
+                                current[previous_fold],
+                                leaf);
+                        };
+                    constraints.push_back(
+                        std::move(chain));
+                }
+            }
+
+            if (families.per_point) {
+                const std::vector<
+                    aq::AirConstraint<Fp3>>
+                    child_constraints =
+                        shape.child_constraints;
+                const std::vector<uint32_t>
+                    lambda_powers =
+                        fixed.air_lambda_powers;
+                const uint32_t zh = c.pre.zh;
+                const uint32_t transition_selector =
+                    c.pre.transition_selector;
+                const uint32_t first_selector =
+                    c.pre.first_selector;
+                const uint32_t last_selector =
+                    c.pre.last_selector;
+                const std::vector<uint32_t> next_blocks =
+                    families.next_row
+                        ? c.next_leaf_blocks
+                        : row_blocks;
+                if (!families.next_row) {
+                    AirConstraint<Fp3> required;
+                    required.name =
+                        "vcs.fixed.next_row.required";
+                    required.kind = AirKind::kEverywhere;
+                    required.alg_degree = 0;
+                    required.eval =
+                        [](const std::vector<Fp3>&,
+                           const std::vector<Fp3>&) {
+                            return Fp3::One();
+                        };
+                    constraints.push_back(
+                        std::move(required));
+                }
+                AirConstraint<Fp3> per_point;
+                per_point.name = "vcs.fixed.perpoint";
+                per_point.kind = AirKind::kEverywhere;
+                uint32_t maximum_degree = 2;
+                for (const auto& child_constraint :
+                     child_constraints) {
+                    maximum_degree = std::max(
+                        maximum_degree,
+                        child_constraint.alg_degree + 2);
+                }
+                per_point.alg_degree = maximum_degree;
+                per_point.eval =
+                    [row_blocks, next_blocks, width, zh,
+                     transition_selector, first_selector,
+                     last_selector, lambda_powers,
+                     child_constraints](
+                        const std::vector<Fp3>& current,
+                        const std::vector<Fp3>&) {
+                        std::vector<Fp3> child_current(width);
+                        std::vector<Fp3> child_next(width);
+                        for (uint32_t index = 0;
+                             index < width; ++index) {
+                            child_current[index] =
+                                ReadRowLeafValue(
+                                    current, row_blocks,
+                                    index);
+                            child_next[index] =
+                                ReadRowLeafValue(
+                                    current, next_blocks,
+                                    index);
+                        }
+                        const Fp3 quotient =
+                            ReadRowLeafValue(
+                                current, row_blocks, width);
+                        Fp3 composition = Fp3::Zero();
+                        for (uint32_t index = 0;
+                             index <
+                                 child_constraints.size();
+                             ++index) {
+                            const auto& child_constraint =
+                                child_constraints[index];
+                            Fp3 selector = Fp3::One();
+                            switch (child_constraint.kind) {
+                            case AirKind::kEverywhere:
+                                break;
+                            case AirKind::kTransition:
+                                selector = current[
+                                    transition_selector];
+                                break;
+                            case AirKind::kFirstRow:
+                                selector =
+                                    current[first_selector];
+                                break;
+                            case AirKind::kLastRow:
+                                selector =
+                                    current[last_selector];
+                                break;
+                            }
+                            composition = gf::Add(
+                                composition,
+                                gf::Mul(
+                                    current[
+                                        lambda_powers[index]],
+                                    gf::Mul(
+                                        selector,
+                                        child_constraint.eval(
+                                            child_current,
+                                            child_next))));
+                        }
+                        return gf::Sub(
+                            composition,
+                            gf::Mul(
+                                quotient, current[zh]));
+                    };
+                constraints.push_back(
+                    std::move(per_point));
+            }
+        }
+    }
+    return cs;
+}
+
+bool MaterializeVerifierAIRFixedTraceV1(
+    const std::vector<ChildPublicInputs>& proof_inputs,
+    const VerifierAirFamilies& families,
+    const VerifierAirFixedTraceLayoutV1& fixed_trace,
+    std::vector<std::vector<Fp3>>& columns,
+    std::string* why)
+{
+    auto fail = [&](const std::string& note) {
+        if (why) {
+            *why = "vcs:fixed_trace:" + note;
+        }
+        return false;
+    };
+    const uint32_t k =
+        static_cast<uint32_t>(proof_inputs.size());
+    if (!FixedTraceShapeIsValid(
+            k, proof_inputs, families)) {
+        return fail("shape");
+    }
+    const VcsLayout layout =
+        ComputeLayout(k, proof_inputs, families);
+    const auto expected =
+        AllocateVerifierAirFixedTraceLayoutV1(
+            layout, proof_inputs, families);
+    if (fixed_trace.arity != expected.arity ||
+        fixed_trace.n_rows != expected.n_rows ||
+        fixed_trace.n_witness_columns !=
+            expected.n_witness_columns ||
+        fixed_trace.n_columns != expected.n_columns ||
+        fixed_trace.ordered_columns !=
+            expected.ordered_columns ||
+        fixed_trace.children.size() != k) {
+        return fail("layout");
+    }
+    if (columns.size() < layout.n_cols) {
+        return fail("columns");
+    }
+    for (const auto& values : columns) {
+        if (values.size() != fixed_trace.n_rows) {
+            return fail("rows");
+        }
+    }
+    columns.resize(
+        fixed_trace.n_columns,
+        std::vector<Fp3>(
+            fixed_trace.n_rows, Fp3::Zero()));
+
+    // Reuse the old prover-only table computation.  Its callback graph is
+    // discarded; only the canonical per-query values are copied into R0.
+    const auto pinned =
+        BuildVerifierAIRPinned(k, proof_inputs, families);
+    for (const auto& [column, values] :
+         pinned.preprocessed) {
+        if (column >= columns.size() ||
+            values.size() != fixed_trace.n_rows) {
+            return fail("preprocessed");
+        }
+        columns[column] = values;
+    }
+
+    auto fill = [&](uint32_t column, const Fp3& value) {
+        if (column >= columns.size()) return false;
+        std::fill(
+            columns[column].begin(),
+            columns[column].end(), value);
+        return true;
+    };
+    auto fill_digest =
+        [&](const std::array<
+                uint32_t, kAlgHashDigestLen>& dst,
+            const Digest& digest) {
+            for (uint32_t limb = 0;
+                 limb < kAlgHashDigestLen; ++limb) {
+                if (!fill(
+                        dst[limb],
+                        Fp3::FromFp(
+                            gf::Canonical(
+                                digest[limb])))) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+    for (uint32_t child = 0; child < k; ++child) {
+        const auto& input = proof_inputs[child];
+        const auto& fixed = fixed_trace.children[child];
+        if ((families.row_merkle ||
+             families.next_row) &&
+            !fill_digest(
+                fixed.row_commit_root,
+                input.row_commit_root)) {
+            return fail("row_root");
+        }
+        if (families.trace_binding &&
+            !fill_digest(
+                fixed.trace_commit_root,
+                input.rt_root)) {
+            return fail("trace_root");
+        }
+        if (families.fold) {
+            if (input.fold_roots.size() !=
+                    input.n_folds ||
+                input.fold_challenges.size() !=
+                    input.n_folds) {
+                return fail("fold_shape");
+            }
+            for (uint32_t layer = 0;
+                 layer < input.n_folds; ++layer) {
+                if (!fill_digest(
+                        fixed.fold_roots[layer],
+                        input.fold_roots[layer]) ||
+                    !fill(
+                        fixed.fold_challenges[layer],
+                        input.fold_challenges[layer])) {
+                    return fail("fold");
+                }
+            }
+        }
+        if (families.deep) {
+            const uint32_t width = input.child_w + 1;
+            if (input.evals_z1.size() != width ||
+                input.evals_z2.size() != width ||
+                fixed.fri_batch_weights.size() !=
+                    width) {
+                return fail("deep_shape");
+            }
+            std::vector<Fp3> batch(width);
+            if (input.independent_fri_batching) {
+                if (input.fri_batch_coefficients.size() !=
+                    width) {
+                    return fail("batch_coefficients");
+                }
+                batch = input.fri_batch_coefficients;
+            } else {
+                batch.front() = Fp3::One();
+                for (uint32_t index = 1;
+                     index < width; ++index) {
+                    batch[index] = gf::Mul(
+                        batch[index - 1],
+                        input.fri_lambda);
+                }
+            }
+            for (uint32_t index = 0;
+                 index < width; ++index) {
+                if (input.column_len[index] >
+                    input.child_n_coeffs) {
+                    return fail("column_len");
+                }
+                const uint32_t shift =
+                    input.child_n_coeffs -
+                    input.column_len[index];
+                const Fp3 z1_weight = gf::Mul(
+                    batch[index],
+                    Pow3R(input.z1, shift));
+                const Fp3 z2_weight = gf::Mul(
+                    batch[index],
+                    Pow3R(input.z2, shift));
+                if (!fill(
+                        fixed.fri_batch_weights[index],
+                        batch[index]) ||
+                    !fill(
+                        fixed.z1_batch_weights[index],
+                        z1_weight) ||
+                    !fill(
+                        fixed.z2_batch_weights[index],
+                        z2_weight) ||
+                    !fill(
+                        fixed.evals_z1[index],
+                        input.evals_z1[index]) ||
+                    !fill(
+                        fixed.evals_z2[index],
+                        input.evals_z2[index])) {
+                    return fail("deep");
+                }
+            }
+            if (!fill(fixed.w1, input.w1) ||
+                !fill(fixed.w2, input.w2) ||
+                !fill(
+                    fixed.final_value,
+                    input.final_value)) {
+                return fail("deep_scalars");
+            }
+        }
+        if (families.per_point) {
+            if (fixed.air_lambda_powers.size() !=
+                input.child_constraints.size()) {
+                return fail("air_lambda_shape");
+            }
+            Fp3 power = Fp3::One();
+            for (uint32_t index = 0;
+                 index <
+                     fixed.air_lambda_powers.size();
+                 ++index) {
+                if (!fill(
+                        fixed.air_lambda_powers[index],
+                        power)) {
+                    return fail("air_lambda");
+                }
+                power = gf::Mul(
+                    power, input.air_lambda);
+            }
+        }
+    }
+    if (why) why->clear();
+    return true;
+}
+
 aq::AirConstraintSystem<Fp3> BuildVerifierAIR(uint32_t k, const ChildPublicInputs& shape,
                                               const VerifierAirFamilies& fam)
 {
@@ -2226,6 +3145,43 @@ AggregateWitness BuildAggregateWitness(const aq::AirConstraintSystem<Fp3>& child
     return out;
 }
 
+AggregateWitness BuildAggregateWitnessFixedTraceV1(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const std::vector<
+        aq::AirQuotientProof<Fp3, AggregateWitness::AlgB3>>&
+        children,
+    const uint256& child_fs_seed,
+    VerifierAirFixedTraceLayoutV1& fixed_trace,
+    const VerifierAirFamilies& families)
+{
+    AggregateWitness out = BuildAggregateWitness(
+        child_cs, children, child_fs_seed, families);
+    fixed_trace = {};
+    if (!out.ok) return out;
+
+    auto universal = BuildVerifierAIRFixedTraceV1(
+        static_cast<uint32_t>(out.pis.size()),
+        out.pis, fixed_trace, families);
+    if (universal.n_rows == 0 ||
+        universal.n_columns == 0) {
+        out.ok = false;
+        out.note = "fixed trace universal CS";
+        return out;
+    }
+    std::string materialize_why;
+    if (!MaterializeVerifierAIRFixedTraceV1(
+            out.pis, families, fixed_trace,
+            out.columns, &materialize_why)) {
+        out.ok = false;
+        out.note = materialize_why;
+        return out;
+    }
+    out.cs = std::move(universal);
+    out.n_witness_cols =
+        fixed_trace.n_witness_columns;
+    return out;
+}
+
 AggregateWitness BuildAggregateWitnessHeterogeneous(
     const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
     const std::vector<
@@ -2332,6 +3288,48 @@ AggregateWitness BuildAggregateWitnessHeterogeneous(
         }
     }
     out.ok = true;
+    return out;
+}
+
+AggregateWitness
+BuildAggregateWitnessHeterogeneousFixedTraceV1(
+    const std::vector<
+        aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<
+        aq::AirQuotientProof<
+            Fp3, AggregateWitness::AlgB3>>& children,
+    const std::vector<uint256>& child_fs_seeds,
+    VerifierAirFixedTraceLayoutV1& fixed_trace,
+    const VerifierAirFamilies& families)
+{
+    AggregateWitness out =
+        BuildAggregateWitnessHeterogeneous(
+            child_css, children, child_fs_seeds,
+            families);
+    fixed_trace = {};
+    if (!out.ok) return out;
+
+    auto universal = BuildVerifierAIRFixedTraceV1(
+        static_cast<uint32_t>(out.pis.size()),
+        out.pis, fixed_trace, families);
+    if (universal.n_rows == 0 ||
+        universal.n_columns == 0) {
+        out.ok = false;
+        out.note =
+            "heterogeneous fixed trace universal CS";
+        return out;
+    }
+    std::string materialize_why;
+    if (!MaterializeVerifierAIRFixedTraceV1(
+            out.pis, families, fixed_trace,
+            out.columns, &materialize_why)) {
+        out.ok = false;
+        out.note = materialize_why;
+        return out;
+    }
+    out.cs = std::move(universal);
+    out.n_witness_cols =
+        fixed_trace.n_witness_columns;
     return out;
 }
 

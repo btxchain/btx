@@ -287,13 +287,19 @@ bool BuildVerifierConstraintSystemV1(
     std::vector<ar::ChildPublicInputs> children(
         kUniversalTwoChildParentArityV1, child);
     const ar::VerifierAirFamilies families{};
+    ar::VerifierAirFixedTraceLayoutV1 fixed_trace;
     aq::AirConstraintSystem<gf::Fp3> parent =
-        ar::BuildVerifierAIRPinned(
+        ar::BuildVerifierAIRFixedTraceV1(
             kUniversalTwoChildParentArityV1,
-            children, families);
+            children, fixed_trace, families);
     if (parent.n_rows == 0 ||
         parent.n_columns == 0 ||
-        parent.constraints.empty()) {
+        parent.constraints.empty() ||
+        fixed_trace.arity !=
+            kUniversalTwoChildParentArityV1 ||
+        fixed_trace.n_rows != parent.n_rows ||
+        fixed_trace.n_columns != parent.n_columns ||
+        fixed_trace.ordered_columns.empty()) {
         return Fail(why, "parent_cs");
     }
 
@@ -310,20 +316,122 @@ bool BuildVerifierConstraintSystemV1(
         CommitConstraintScheduleV1(parent);
     out.child_cs = std::move(child_cs);
     out.parent_cs = std::move(parent);
+    out.fixed_trace = std::move(fixed_trace);
     out.registry_program_reconstructed = true;
     out.shape_only_parent_reconstructed = true;
     out.proof_tape_independent = true;
     out.proof_specific_constants_lifted_to_fixed_trace =
-        false;
+        true;
     out.full_child_acceptance_constrained = false;
     out.authority = false;
     out.note =
         "stage3:universal_two_child_parent:"
         "verifier_cs_rebuilt_from_shape_and_registry;"
-        "proof_constants_fixed_trace_lift_pending";
+        "proof_constants_lifted_to_fixed_trace;"
+        "same_parent_fs_replay_pending";
     if (out.shape_commitment.IsNull() ||
         out.callback_schedule_commitment.IsNull()) {
         return Fail(why, "commitment");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool BuildHeterogeneousVerifierConstraintSystemV1(
+    const std::array<PublicShapeV1, 2>& shapes,
+    const std::array<FrozenRegistryV1, 2>& registries,
+    HeterogeneousVerifierConstraintSystemV1& out,
+    std::string* why)
+{
+    out = {};
+    std::vector<ar::ChildPublicInputs> children;
+    children.reserve(kUniversalTwoChildParentArityV1);
+    for (uint32_t child = 0;
+         child < kUniversalTwoChildParentArityV1;
+         ++child) {
+        const auto& shape = shapes[child];
+        const auto& registry = registries[child];
+        if (!ValidateShape(shape, why) ||
+            registry.version !=
+                kUniversalTwoChildParentVersionV1 ||
+            !cb::ValidateProgramTable(
+                registry.child_relation_program, why) ||
+            registry.program_root.IsNull() ||
+            cb::CommitProgramTable(
+                registry.child_relation_program) !=
+                registry.program_root ||
+            registry.child_relation_program.current_width !=
+                shape.child_columns ||
+            registry.child_relation_program.next_width !=
+                shape.child_columns) {
+            return Fail(why, "heterogeneous_registry");
+        }
+        auto& child_cs = out.child_cs[child];
+        if (!cb::BuildAirConstraintSystemFromProgramTable(
+                registry.child_relation_program,
+                shape.child_rows, child_cs, why) ||
+            child_cs.n_columns !=
+                shape.child_columns ||
+            child_cs.QuotientLen() !=
+                shape.child_quotient_len) {
+            return Fail(
+                why, "heterogeneous_child_cs");
+        }
+        out.shape[child] = shape;
+        out.registry_program_root[child] =
+            registry.program_root;
+        out.shape_commitment[child] =
+            CommitPublicShapeV1(shape);
+        children.push_back(
+            ShapeOnlyChild(shape, child_cs));
+    }
+
+    const ar::VerifierAirFamilies families{};
+    out.parent_cs =
+        ar::BuildVerifierAIRFixedTraceV1(
+            kUniversalTwoChildParentArityV1,
+            children, out.fixed_trace, families);
+    if (out.parent_cs.n_rows == 0 ||
+        out.parent_cs.n_columns == 0 ||
+        out.parent_cs.constraints.empty() ||
+        out.fixed_trace.arity !=
+            kUniversalTwoChildParentArityV1 ||
+        out.fixed_trace.ordered_columns.empty()) {
+        return Fail(why, "heterogeneous_parent_cs");
+    }
+
+    HashWriter statement;
+    statement <<
+        "BTX_RC_STAGE3_UNIVERSAL_BINARY_STATEMENT_V1";
+    statement << kUniversalTwoChildParentVersionV1;
+    statement << kUniversalTwoChildParentArityV1;
+    for (uint32_t child = 0;
+         child < kUniversalTwoChildParentArityV1;
+         ++child) {
+        statement << child;
+        statement << out.shape_commitment[child];
+        statement << out.registry_program_root[child];
+    }
+    out.binary_statement_commitment =
+        statement.GetHash();
+    out.callback_schedule_commitment =
+        CommitConstraintScheduleV1(out.parent_cs);
+    out.both_registry_programs_reconstructed = true;
+    out.heterogeneous_children_supported = true;
+    out.proof_tape_independent = true;
+    out.proof_specific_constants_lifted_to_fixed_trace =
+        true;
+    out.full_child_acceptance_constrained = false;
+    out.authority = false;
+    out.note =
+        "stage3:universal_two_child_parent:"
+        "heterogeneous_binary_cs_rebuilt;"
+        "fixed_trace_lifted;"
+        "same_parent_fs_replay_pending";
+    if (out.binary_statement_commitment.IsNull() ||
+        out.callback_schedule_commitment.IsNull()) {
+        return Fail(
+            why, "heterogeneous_commitment");
     }
     if (why != nullptr) *why = out.note;
     return true;

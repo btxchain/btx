@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_air_recurse.h>
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -74,8 +75,36 @@ struct VerifierConstraintSystemV1 {
     uint256 callback_schedule_commitment{};
     aq::AirConstraintSystem<gf::Fp3> child_cs;
     aq::AirConstraintSystem<gf::Fp3> parent_cs;
+    ar::VerifierAirFixedTraceLayoutV1 fixed_trace;
     bool registry_program_reconstructed{false};
     bool shape_only_parent_reconstructed{false};
+    bool proof_tape_independent{false};
+    bool proof_specific_constants_lifted_to_fixed_trace{false};
+    bool full_child_acceptance_constrained{false};
+    bool authority{false};
+    std::string note;
+};
+
+/**
+ * Canonical binary node with independently selected relation programs on its
+ * left and right edges.  This is the leaf-normalization form required before
+ * self-similar parents become homogeneous: Builder/GEMM/etc. receipts need
+ * not share callbacks, widths, or public seeds.
+ */
+struct HeterogeneousVerifierConstraintSystemV1 {
+    uint16_t version{kUniversalTwoChildParentVersionV1};
+    uint32_t arity{kUniversalTwoChildParentArityV1};
+    std::array<PublicShapeV1, 2> shape;
+    std::array<uint256, 2> registry_program_root{};
+    std::array<uint256, 2> shape_commitment{};
+    uint256 binary_statement_commitment{};
+    uint256 callback_schedule_commitment{};
+    std::array<
+        aq::AirConstraintSystem<gf::Fp3>, 2> child_cs;
+    aq::AirConstraintSystem<gf::Fp3> parent_cs;
+    ar::VerifierAirFixedTraceLayoutV1 fixed_trace;
+    bool both_registry_programs_reconstructed{false};
+    bool heterogeneous_children_supported{false};
     bool proof_tape_independent{false};
     bool proof_specific_constants_lifted_to_fixed_trace{false};
     bool full_child_acceptance_constrained{false};
@@ -99,6 +128,12 @@ struct VerifierConstraintSystemV1 {
     VerifierConstraintSystemV1& out,
     std::string* why = nullptr);
 
+[[nodiscard]] bool BuildHeterogeneousVerifierConstraintSystemV1(
+    const std::array<PublicShapeV1, 2>& shape,
+    const std::array<FrozenRegistryV1, 2>& registry,
+    HeterogeneousVerifierConstraintSystemV1& out,
+    std::string* why = nullptr);
+
 /**
  * Mechanical noninterference test helper.  Requires two distinct byte tapes,
  * rebuilds twice through the tape-free constructor, and confirms identical
@@ -112,11 +147,11 @@ struct VerifierConstraintSystemV1 {
     std::string* why = nullptr);
 
 inline constexpr bool kUniversalTwoChildVerifierCsExecutableV1 = true;
-inline constexpr bool kUniversalTwoChildFixedTraceLiftCompleteV1 = false;
+inline constexpr bool kUniversalTwoChildFixedTraceLiftCompleteV1 = true;
 inline constexpr bool kUniversalTwoChildAuthorityReadyV1 = false;
 
 static_assert(kUniversalTwoChildVerifierCsExecutableV1);
-static_assert(!kUniversalTwoChildFixedTraceLiftCompleteV1);
+static_assert(kUniversalTwoChildFixedTraceLiftCompleteV1);
 static_assert(!kUniversalTwoChildAuthorityReadyV1);
 
 } // namespace matmul::v4::rc::universal_two_child_parent
