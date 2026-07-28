@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_safe_v12.h>
+#include <matmul/matmul_v4_rc_stage3_safe_v12_fs_air.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -15,6 +16,8 @@
 
 namespace matmul::v4::rc::safe_v12 {
 namespace {
+
+namespace fsair = stage3_safe_v12_fs_air;
 
 IoPatternV12 ExamplePattern()
 {
@@ -53,6 +56,51 @@ std::vector<gf::Fp> Sequence(uint32_t first, uint32_t count)
     std::vector<gf::Fp> out(count);
     for (uint32_t i = 0; i < count; ++i) {
         out[i] = gf::FromU64(first + i);
+    }
+    return out;
+}
+
+ah::Digest TestDigest(uint64_t first)
+{
+    return {
+        gf::FromU64(first),
+        gf::FromU64(first + 1),
+        gf::FromU64(first + 2),
+        gf::FromU64(first + 3),
+    };
+}
+
+fsair::ShapeV12 TestFsAirShape()
+{
+    return {
+        /*child_w=*/3,
+        /*child_n_rows=*/8,
+        /*child_quotient_len=*/16,
+        /*n_coeffs=*/4,
+        /*n_lde=*/64,
+        /*n_folds=*/2,
+    };
+}
+
+fsair::TranscriptInputsV12 TestFsAirInputs()
+{
+    fsair::TranscriptInputsV12 out;
+    out.parent_statement.parent_fs_seed = TestDigest(10);
+    out.proof_witness.trace_commit = TestDigest(20);
+    for (uint32_t lane = 0;
+         lane < fsair::kFriLaneCountV12; ++lane) {
+        auto& one = out.proof_witness.fri_lane[lane];
+        const uint64_t base = 100 + 100 * lane;
+        one.pow_grind_nonce =
+            UINT64_C(0x1234567800000000) + lane;
+        one.shape_commit = TestDigest(base + 10);
+        one.row_root = TestDigest(base + 20);
+        one.ood_evaluation_commit = TestDigest(base + 30);
+        one.fold_roots = {
+            TestDigest(base + 40),
+            TestDigest(base + 50),
+            TestDigest(base + 60),
+        };
     }
     return out;
 }
@@ -622,6 +670,234 @@ BOOST_AUTO_TEST_CASE(exact_manifest_reports_rows_calls_and_fail_closed_gates)
     BOOST_TEST(!kNativeRecursiveSafeParityCertifiedV12);
     BOOST_TEST(!kStatelessSafeCoreAuthorityReadyV12);
     BOOST_TEST(!kSafeV12ProductionAuthorityReady);
+}
+
+BOOST_AUTO_TEST_CASE(
+    pr95_v12_manifest_is_shape_fixed_typed_and_dual_q96)
+{
+    fsair::ManifestV12 manifest;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        fsair::BuildManifestV12(TestFsAirShape(), manifest, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        fsair::ValidateManifestV12(manifest, &why), why);
+    BOOST_CHECK(manifest.proof_independent);
+    BOOST_CHECK(manifest.exact_pr95_roles);
+    BOOST_CHECK(manifest.q96_lanes_domain_independent);
+    BOOST_CHECK(manifest.merkle_fs_capacity_classes_disjoint);
+    BOOST_CHECK(manifest.lane_seeds_derived_from_common_parent);
+    BOOST_CHECK(manifest.proof_witness_cells_not_preprocessed);
+    BOOST_TEST(
+        manifest.proof_dependent_preprocessed_columns == 0U);
+    BOOST_CHECK(manifest.fits_static_domain_headroom);
+    BOOST_CHECK(
+        manifest.fri_lane[0].typed_domain !=
+        manifest.fri_lane[1].typed_domain);
+    BOOST_CHECK(
+        manifest.fri_lane[0].safe_manifest.tag !=
+        manifest.fri_lane[1].safe_manifest.tag);
+
+    for (const auto& channel : manifest.fri_lane) {
+        uint32_t query_vectors = 0;
+        uint32_t coefficient_vectors = 0;
+        for (const fsair::CallSpecV12& call : channel.calls) {
+            BOOST_CHECK(fsair::IsFiatShamirRoleV12(call.typed_role));
+            BOOST_CHECK(!fsair::IsMerkleRoleV12(call.typed_role));
+            if (call.role ==
+                fsair::CallRoleV12::SqueezeQueryVector) {
+                ++query_vectors;
+                BOOST_TEST(call.items == 96U);
+                BOOST_TEST(call.elements == 3U * 96U);
+            }
+            if (call.role ==
+                fsair::CallRoleV12::
+                    SqueezeBatchCoefficientVector) {
+                ++coefficient_vectors;
+                BOOST_TEST(call.items == 4U);
+                BOOST_TEST(call.elements == 12U);
+            }
+        }
+        BOOST_TEST(query_vectors == 1U);
+        BOOST_TEST(coefficient_vectors == 1U);
+    }
+
+    BOOST_TEST(fsair::kProofIndependentManifestImplementedV12);
+    BOOST_TEST(fsair::kDualQ96TypedDomainsImplementedV12);
+    BOOST_TEST(fsair::kNativeAirDifferentialHarnessImplementedV12);
+    BOOST_TEST(fsair::kPoseidonPermutationRowsExecutableV12);
+    BOOST_TEST(!fsair::kProofPayloadMappingCompleteV12);
+    BOOST_TEST(
+        !fsair::kRecursiveIoWiringConstraintsExecutableV12);
+    BOOST_TEST(!fsair::kSafeFsRegistryPinnedV12);
+    BOOST_TEST(!fsair::kDualQ96NiropReductionCertifiedV12);
+    BOOST_TEST(
+        !fsair::kDualQ96CommonCommitmentHybridCertifiedV12);
+    BOOST_TEST(!fsair::kSafeFsGlobalReductionCertifiedV12);
+    BOOST_TEST(!fsair::kSafeFsAuthorityReadyV12);
+
+    const fsair::ShapeV12 production{
+        /*child_w=*/fsair::kProductionBatchColumnsV12 - 1,
+        /*child_n_rows=*/UINT32_C(1) << 20,
+        /*child_quotient_len=*/UINT32_C(1) << 23,
+        /*n_coeffs=*/UINT32_C(1) << 20,
+        /*n_lde=*/UINT32_C(1) << 24,
+        /*n_folds=*/fsair::kProductionFoldsV12,
+    };
+    fsair::ManifestV12 production_manifest;
+    BOOST_REQUIRE_MESSAGE(
+        fsair::BuildManifestV12(
+            production, production_manifest, &why),
+        why);
+    BOOST_CHECK(production_manifest.production_reference_shape);
+    BOOST_CHECK(
+        production_manifest.production_reference_cost_pinned);
+    BOOST_TEST(
+        production_manifest.total_poseidon_air_rows ==
+        fsair::kProductionExpectedSafeAirRowsV12);
+    BOOST_TEST(
+        production_manifest.total_poseidon_air_rows == 2807U);
+    BOOST_TEST(
+        production_manifest.static_domain_headroom_rows == 56480U);
+    BOOST_TEST(
+        production_manifest.static_domain_margin_rows == 53673U);
+    BOOST_CHECK(production_manifest.fits_static_domain_headroom);
+}
+
+BOOST_AUTO_TEST_CASE(
+    pr95_v12_native_and_recursive_air_witness_are_differential_equal)
+{
+    fsair::ManifestV12 manifest;
+    fsair::NativeExecutionV12 native;
+    fsair::AirWitnessV12 witness;
+    const fsair::TranscriptInputsV12 inputs = TestFsAirInputs();
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        fsair::BuildManifestV12(TestFsAirShape(), manifest, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        fsair::ExecuteNativeV12(manifest, inputs, native, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        fsair::BuildAirWitnessV12(manifest, inputs, witness, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        fsair::ValidateAirWitnessV12(
+            manifest, inputs, witness, &why),
+        why);
+    BOOST_CHECK(native.independent_lane_tags);
+    BOOST_CHECK(witness.native_differential_equal);
+    BOOST_CHECK(witness.lane_order_bound);
+    BOOST_CHECK(witness.valid);
+    BOOST_TEST(
+        native.fri_lane[0].query_indices.size() ==
+        fsair::kQueriesPerLaneV12);
+    BOOST_TEST(
+        native.fri_lane[1].query_indices.size() ==
+        fsair::kQueriesPerLaneV12);
+    BOOST_CHECK(
+        native.fri_lane[0].final_state !=
+        native.fri_lane[1].final_state);
+
+    const auto check_channel = [](const auto& channel) {
+        BOOST_CHECK(channel.poseidon_constraints_zero);
+        BOOST_CHECK(channel.io_wiring_checked);
+        BOOST_CHECK(!channel.permutation_rows.empty());
+        for (const auto& row : channel.permutation_rows) {
+            BOOST_CHECK(row.constraints_zero);
+            BOOST_TEST(
+                row.decomposed_row.size() ==
+                fsair::p2air::kFixedColumns);
+        }
+    };
+    check_channel(witness.air_quotient);
+    check_channel(witness.fri_lane[0]);
+    check_channel(witness.fri_lane[1]);
+}
+
+BOOST_AUTO_TEST_CASE(
+    pr95_v12_alias_order_domain_and_merged_lane_attacks_reject)
+{
+    fsair::ManifestV12 manifest;
+    fsair::TranscriptInputsV12 inputs = TestFsAirInputs();
+    fsair::AirWitnessV12 witness;
+    std::string why;
+    BOOST_REQUIRE(
+        fsair::BuildManifestV12(TestFsAirShape(), manifest, &why));
+    BOOST_REQUIRE(
+        fsair::BuildAirWitnessV12(manifest, inputs, witness, &why));
+
+    // Goldilocks alias B=x+p: never silently canonicalize proof-owned input.
+    fsair::TranscriptInputsV12 alias = inputs;
+    alias.proof_witness.trace_commit[0] = gf::kP + 5;
+    fsair::AirWitnessV12 unused_witness;
+    BOOST_CHECK(
+        !fsair::BuildAirWitnessV12(
+            manifest, alias, unused_witness, &why));
+
+    // A same-width Z1/Z2 call-order swap would retain the same aggregated IO
+    // tag. The canonical role/index manifest, not width alone, rejects it.
+    fsair::ManifestV12 reordered = manifest;
+    auto& calls = reordered.fri_lane[0].calls;
+    const auto z1_bind = std::find_if(
+        calls.begin(), calls.end(), [](const auto& call) {
+            return call.role ==
+                fsair::CallRoleV12::BindZ1Candidates;
+        });
+    const auto z2_bind = std::find_if(
+        calls.begin(), calls.end(), [](const auto& call) {
+            return call.role ==
+                fsair::CallRoleV12::BindZ2Candidates;
+        });
+    BOOST_REQUIRE(z1_bind != calls.end());
+    BOOST_REQUIRE(z2_bind != calls.end());
+    std::iter_swap(z1_bind, z2_bind);
+    BOOST_CHECK(!fsair::ValidateManifestV12(reordered, &why));
+
+    // Build a fully self-consistent SAFE tag under a Merkle capacity domain.
+    // It is still not an admissible FS manifest.
+    fsair::ManifestV12 domain_swap = manifest;
+    auto& swapped = domain_swap.fri_lane[0];
+    std::vector<uint8_t> merkle_domain;
+    BOOST_REQUIRE(TypedDomainV12(
+        aht::RoleV12::MerkleRowLeaf, swapped.application_domain,
+        merkle_domain, &why));
+    TranscriptPatternManifestBuilderV12 rebuilt;
+    for (const fsair::CallSpecV12& call : swapped.calls) {
+        const bool ok =
+            call.io_kind == IoKindV12::Absorb
+            ? rebuilt.Absorb(call.label, call.elements, &why)
+            : rebuilt.Squeeze(call.label, call.elements, &why);
+        BOOST_REQUIRE_MESSAGE(ok, why);
+    }
+    BOOST_REQUIRE(rebuilt.Build(
+        merkle_domain, swapped.safe_manifest, &why));
+    swapped.typed_domain = merkle_domain;
+    swapped.capacity_role = aht::RoleV12::MerkleRowLeaf;
+    BOOST_CHECK(!fsair::ValidateManifestV12(domain_swap, &why));
+
+    // Copying lane 0's complete valid witness into lane 1 cannot merge the
+    // two Q96 repetitions: channel id, typed tag and every state differ.
+    fsair::AirWitnessV12 merged = witness;
+    merged.fri_lane[1] = merged.fri_lane[0];
+    BOOST_CHECK(!fsair::ValidateAirWitnessV12(
+        manifest, inputs, merged, &why));
+
+    // A direct feedback-cell change is likewise rejected by reconstruction.
+    fsair::AirWitnessV12 feedback = witness;
+    auto& lane_calls =
+        feedback.fri_lane[0].projected_execution.calls;
+    const auto feedback_call = std::find_if(
+        lane_calls.begin(), lane_calls.end(), [](const auto& call) {
+            return call.spec.role ==
+                fsair::CallRoleV12::
+                    AbsorbBatchCoefficientVector;
+        });
+    BOOST_REQUIRE(feedback_call != lane_calls.end());
+    feedback_call->values.back() =
+        gf::Add(feedback_call->values.back(), 1);
+    BOOST_CHECK(!fsair::ValidateAirWitnessV12(
+        manifest, inputs, feedback, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
