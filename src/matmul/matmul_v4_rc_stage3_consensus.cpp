@@ -403,12 +403,13 @@ RCStage3AttachmentStatus InspectRCStage3ConsensusAttachment(
             Fail(why, "normalized_decode:" + decode_why);
             return RCStage3AttachmentStatus::Malformed;
         }
-        normalized_authority::RebuiltVerifierInputsV3 rebuilt;
+        normalized_consensus_binding::
+            DirectReceiptConsensusStatementV3 statement;
         std::string binding_why;
         if (!normalized_consensus_binding::
                 ValidateDirectReceiptConsensusBindingV3(
                     block, params, height, target,
-                    *receipt, rebuilt, &binding_why)) {
+                    *receipt, statement, &binding_why)) {
             Fail(
                 why,
                 "normalized_binding:" + binding_why);

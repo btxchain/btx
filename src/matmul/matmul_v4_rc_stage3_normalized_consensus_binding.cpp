@@ -45,45 +45,6 @@ nav3::ComposedPublicStatementV3 ToNormalized(
     };
 }
 
-nav3::RebuiltVerifierInputsV3 ToVerifierInputs(
-    const nav3::NormalizedAuthorityReceiptV3& receipt)
-{
-    nav3::RebuiltVerifierInputsV3 out;
-    out.outer_binding_kind = receipt.outer_binding_kind;
-    out.public_statement = receipt.public_statement;
-    out.outer_statement_root = receipt.outer_statement_root;
-    out.program_registry_root =
-        receipt.program_registry_root;
-    out.topology_manifest_root =
-        receipt.topology_manifest_root;
-    out.aggregation_schedule_root =
-        receipt.aggregation_schedule_root;
-    out.occurrence_manifest_root =
-        receipt.occurrence_manifest_root;
-    out.verifier_program_root =
-        receipt.verifier_program_root;
-    out.abi_plan_root = receipt.abi_plan_root;
-    out.selection_plan_root =
-        receipt.selection_plan_root;
-    out.derived_hash_plan_root =
-        receipt.derived_hash_plan_root;
-    out.fixed_trace_columns =
-        receipt.fixed_trace_columns;
-    out.fixed_trace_row_root =
-        receipt.fixed_trace_row_root;
-    out.roles = receipt.roles;
-    out.parent_shape = receipt.parent_shape;
-    out.parent_node_binding =
-        receipt.parent_node_binding;
-    out.parent_context_binding =
-        receipt.parent_context_binding;
-    out.parent_program_root =
-        receipt.parent_program_root;
-    out.parent_cs_commitment =
-        receipt.parent_cs_commitment;
-    return out;
-}
-
 } // namespace
 
 bool RebuildComposedPublicStatementV3(
@@ -147,10 +108,10 @@ bool ValidateDirectReceiptConsensusBindingV3(
     int32_t height,
     const uint256& target,
     const nav3::NormalizedAuthorityReceiptV3& receipt,
-    nav3::RebuiltVerifierInputsV3& public_inputs_out,
+    DirectReceiptConsensusStatementV3& statement_out,
     std::string* why)
 {
-    public_inputs_out = {};
+    statement_out = {};
     std::string receipt_why;
     if (!nav3::ValidateNormalizedAuthorityReceiptV3(
             receipt, &receipt_why)) {
@@ -185,11 +146,16 @@ bool ValidateDirectReceiptConsensusBindingV3(
         return Fail(why, "outer_statement_root");
     }
 
-    public_inputs_out = ToVerifierInputs(receipt);
+    statement_out.outer_binding_kind =
+        nav3::OuterBindingKindV3::DirectBlockReceipt;
+    statement_out.public_statement = expected;
+    statement_out.expected_program_registry_root =
+        expected.program_consensus_pin
+            .recursive_alg_hash_root;
     if (why != nullptr) {
         *why =
             "stage3:normalized_consensus_binding_v3:"
-            "direct_receipt_bound_parent_rebuild_required";
+            "direct_statement_bound_parent_rebuild_required";
     }
     return true;
 }
@@ -200,11 +166,11 @@ bool DecodeAndBindAttachedDirectReceiptV3(
     int32_t height,
     const uint256& target,
     nav3::NormalizedAuthorityReceiptV3& receipt_out,
-    nav3::RebuiltVerifierInputsV3& public_inputs_out,
+    DirectReceiptConsensusStatementV3& statement_out,
     std::string* why)
 {
     receipt_out = {};
-    public_inputs_out = {};
+    statement_out = {};
     std::string unpack_why;
     const auto bytes =
         normalized_block_transport::
@@ -224,7 +190,7 @@ bool DecodeAndBindAttachedDirectReceiptV3(
     }
     if (!ValidateDirectReceiptConsensusBindingV3(
             block, params, height, target,
-            *receipt, public_inputs_out, why)) {
+            *receipt, statement_out, why)) {
         return false;
     }
     receipt_out = *receipt;

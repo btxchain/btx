@@ -735,14 +735,23 @@ BOOST_AUTO_TEST_CASE(
             receipt, &why),
         why);
 
-    na::RebuiltVerifierInputsV3 consensus_inputs;
+    consensus_binding::
+        DirectReceiptConsensusStatementV3 consensus_statement;
     BOOST_REQUIRE_MESSAGE(
         consensus_binding::
             ValidateDirectReceiptConsensusBindingV3(
                 block, params, height, target_u256,
-                receipt, consensus_inputs, &why),
+                receipt, consensus_statement, &why),
         why);
-    BOOST_CHECK(consensus_inputs == RebuiltFrom(receipt));
+    BOOST_CHECK(
+        consensus_statement.outer_binding_kind ==
+        na::OuterBindingKindV3::DirectBlockReceipt);
+    BOOST_CHECK(
+        consensus_statement.public_statement == statement);
+    BOOST_CHECK(
+        consensus_statement.expected_program_registry_root ==
+        statement.program_consensus_pin
+            .recursive_alg_hash_root);
 
     std::vector<unsigned char> direct_bytes;
     BOOST_REQUIRE_GT(
@@ -754,15 +763,16 @@ BOOST_AUTO_TEST_CASE(
             block, direct_bytes, &why),
         why);
     na::NormalizedAuthorityReceiptV3 decoded_receipt;
-    na::RebuiltVerifierInputsV3 decoded_inputs;
+    consensus_binding::
+        DirectReceiptConsensusStatementV3 decoded_statement;
     BOOST_REQUIRE_MESSAGE(
         consensus_binding::
             DecodeAndBindAttachedDirectReceiptV3(
                 block, params, height, target_u256,
-                decoded_receipt, decoded_inputs, &why),
+                decoded_receipt, decoded_statement, &why),
         why);
     BOOST_CHECK(decoded_receipt == receipt);
-    BOOST_CHECK(decoded_inputs == consensus_inputs);
+    BOOST_CHECK(decoded_statement == consensus_statement);
     const rc::RCStage3ProofCacheKey cache_key =
         rc::RCStage3ProofKey(block);
     BOOST_CHECK(
@@ -789,7 +799,7 @@ BOOST_AUTO_TEST_CASE(
             ValidateDirectReceiptConsensusBindingV3(
                 changed_header, params, height,
                 target_u256, receipt,
-                consensus_inputs, &why));
+                consensus_statement, &why));
     BOOST_CHECK(
         rc::InspectRCStage3ConsensusAttachment(
             changed_header, params, height,
@@ -804,7 +814,7 @@ BOOST_AUTO_TEST_CASE(
             ValidateDirectReceiptConsensusBindingV3(
                 block, changed_params, height,
                 target_u256, receipt,
-                consensus_inputs, &why));
+                consensus_statement, &why));
 
     uint256 wrong_target = target_u256;
     wrong_target.begin()[0] ^= 1U;
@@ -813,7 +823,7 @@ BOOST_AUTO_TEST_CASE(
             ValidateDirectReceiptConsensusBindingV3(
                 block, params, height,
                 wrong_target, receipt,
-                consensus_inputs, &why));
+                consensus_statement, &why));
 
     CBlock noncanonical_padding = block;
     noncanonical_padding.matrix_c_data.back() |=
