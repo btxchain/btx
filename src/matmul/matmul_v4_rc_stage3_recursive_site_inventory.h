@@ -18,7 +18,19 @@ namespace sites = soundness_scenarios;
 
 inline constexpr uint16_t kRecursiveSiteInventoryVersion = 1;
 inline constexpr uint64_t kRecursiveSiteProtocolHardCap =
+    uint64_t{1} << 36;
+inline constexpr uint64_t kObsoleteRecursiveSiteHardCapV0 =
     uint64_t{1} << 28;
+
+static_assert(
+    sites::kSelectedProductionProofSitesV1 >
+    kObsoleteRecursiveSiteHardCapV0);
+static_assert(
+    sites::kSelectedProductionProofSitesV1 <=
+    kRecursiveSiteProtocolHardCap);
+static_assert(
+    sites::kSelectedProductionProofSitesV1 >
+    (kRecursiveSiteProtocolHardCap >> 1));
 
 /**
  * Mutually exclusive status of one immutable relation-family leaf range.
@@ -50,8 +62,9 @@ struct RecursiveFamilySiteStatus {
 };
 
 /**
- * Runtime-derived cap ledger over the canonical relation manifest and its
- * canonical recursive aggregation schedule.
+ * Runtime-derived cap ledger over the canonical selected relation manifest
+ * and its canonical recursive aggregation schedule.  The verifier rebuilds
+ * that manifest and accepts no caller-selected inventory or enlarged cap.
  *
  * Counts are disjoint:
  *   local-awaiting-recursion leaves
@@ -118,9 +131,11 @@ BuildProductionRecursiveSiteInventory(
     std::string* why = nullptr);
 
 /**
- * Runtime cap gate. It rejects invalid/omitted/overflowed manifests and an
- * otherwise canonical schedule whose exact total exceeds `hard_cap`.
- * Passing this gate does not imply global proof completeness.
+ * Runtime cap gate. It rejects any manifest other than the verifier-rebuilt
+ * selected production manifest, invalid/omitted/reordered schedules, a cap
+ * above that manifest's next-power-of-two union cap, and an exact total that
+ * exceeds `hard_cap`. Passing this gate does not imply global proof
+ * completeness.
  */
 [[nodiscard]] bool EnforceProductionRecursiveSiteHardCap(
     const sites::ProductionProofSiteManifest& manifest,

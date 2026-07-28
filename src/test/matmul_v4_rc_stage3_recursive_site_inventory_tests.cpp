@@ -8,6 +8,7 @@
 
 #include <limits>
 #include <string>
+#include <utility>
 
 namespace inv = matmul::v4::rc::recursive_site_inventory;
 namespace sched = matmul::v4::rc::aggregation_scheduler;
@@ -21,6 +22,14 @@ BOOST_AUTO_TEST_CASE(
     const auto manifest = sites::BuildProductionProofSiteManifest(
         sites::SelectedProductionProofSitePolicy());
     BOOST_REQUIRE(!manifest.commitment.IsNull());
+    BOOST_REQUIRE_EQUAL(
+        manifest.total_proof_sites,
+        sites::kSelectedProductionProofSitesV1);
+    BOOST_REQUIRE_EQUAL(
+        manifest.total_proof_sites, 59'518'769'809ULL);
+    BOOST_REQUIRE_EQUAL(
+        manifest.union_bound_cap,
+        inv::kRecursiveSiteProtocolHardCap);
     const auto schedule =
         sched::BuildProductionAggregationSchedule(manifest);
     BOOST_REQUIRE(!schedule.commitment.IsNull());
@@ -124,6 +133,18 @@ BOOST_AUTO_TEST_CASE(
             nullptr,
             &why));
 
+    auto reordered = schedule;
+    std::swap(
+        reordered.families[0],
+        reordered.families[1]);
+    BOOST_CHECK(
+        !inv::EnforceProductionRecursiveSiteHardCap(
+            manifest,
+            reordered,
+            inv::kRecursiveSiteProtocolHardCap,
+            nullptr,
+            &why));
+
     auto overflowed = manifest;
     overflowed.entries[0].logical_units =
         std::numeric_limits<uint64_t>::max();
@@ -132,6 +153,16 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !inv::EnforceProductionRecursiveSiteHardCap(
             overflowed,
+            schedule,
+            inv::kRecursiveSiteProtocolHardCap,
+            nullptr,
+            &why));
+
+    auto substituted_commitment = manifest;
+    substituted_commitment.commitment.data()[0] ^= 1;
+    BOOST_CHECK(
+        !inv::EnforceProductionRecursiveSiteHardCap(
+            substituted_commitment,
             schedule,
             inv::kRecursiveSiteProtocolHardCap,
             nullptr,
@@ -163,6 +194,20 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         why.find("over_hard_cap") != std::string::npos);
 
+    inv::ProductionRecursiveSiteInventory obsolete_cap;
+    BOOST_CHECK(
+        !inv::EnforceProductionRecursiveSiteHardCap(
+            manifest,
+            schedule,
+            inv::kObsoleteRecursiveSiteHardCapV0,
+            &obsolete_cap,
+            &why));
+    BOOST_CHECK(obsolete_cap.checked_arithmetic);
+    BOOST_CHECK(
+        !obsolete_cap.enumerated_schedule_within_hard_cap);
+    BOOST_CHECK(
+        !obsolete_cap.hard_cap_enforced_for_enumerated_schedule);
+
     inv::ProductionRecursiveSiteInventory exact_cap;
     BOOST_REQUIRE(
         inv::EnforceProductionRecursiveSiteHardCap(
@@ -174,6 +219,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         exact_cap.hard_cap_enforced_for_enumerated_schedule);
     BOOST_CHECK(!exact_cap.global_cap_enforced);
+
+    BOOST_CHECK(
+        !inv::EnforceProductionRecursiveSiteHardCap(
+            manifest,
+            schedule,
+            inv::kRecursiveSiteProtocolHardCap + 1,
+            nullptr,
+            &why));
 
     auto mutated_inventory = exact_cap;
     ++mutated_inventory.hard_cap;

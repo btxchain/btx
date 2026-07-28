@@ -110,9 +110,15 @@ BuildProductionRecursiveSiteInventory(
     out.aggregation_schedule_commitment = schedule.commitment;
 
     std::string why;
+    const auto canonical_manifest =
+        sites::BuildProductionProofSiteManifest(
+            sites::SelectedProductionProofSitePolicy());
     if (hard_cap == 0 ||
+        hard_cap > canonical_manifest.union_bound_cap ||
+        canonical_manifest.commitment.IsNull() ||
         !sites::ValidateProductionProofSiteManifest(
-            manifest, &why) ||
+            canonical_manifest, &why) ||
+        manifest != canonical_manifest ||
         !scheduler::ValidateProductionAggregationSchedule(
             manifest, schedule, &why)) {
         return out;
