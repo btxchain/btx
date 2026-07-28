@@ -67,7 +67,11 @@ struct MLinkCellV1 {
     uint64_t row_index{0};
     Fp3 value{};
 
-    bool operator==(const MLinkCellV1&) const = default;
+    bool operator==(const MLinkCellV1& other) const
+    {
+        return row_index == other.row_index &&
+            gkr_field::Eq(value, other.value);
+    }
 };
 
 /** One cross-shard equality obligation with its witnessed cells. anchor_cells

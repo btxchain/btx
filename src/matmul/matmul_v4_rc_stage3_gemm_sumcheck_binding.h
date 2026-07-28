@@ -60,7 +60,13 @@ struct RCStage3GemmSumcheckRound {
     gkr_field::Fp3 g2{}; // g_k(2)
     gkr_field::Fp3 r{};  // r_k (FS challenge)
 
-    bool operator==(const RCStage3GemmSumcheckRound&) const = default;
+    bool operator==(const RCStage3GemmSumcheckRound& other) const
+    {
+        return gkr_field::Eq(g0, other.g0) &&
+               gkr_field::Eq(g1, other.g1) &&
+               gkr_field::Eq(g2, other.g2) &&
+               gkr_field::Eq(r, other.r);
+    }
 };
 
 /** One GEMM layer's complete product-sumcheck transcript. */
