@@ -14,6 +14,7 @@
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <primitives/block.h>
+#include <hash.h>
 
 #include <algorithm>
 #include <array>
@@ -28,6 +29,8 @@ namespace {
 namespace composer = stage3_air_parent_composer;
 namespace gf = gkr_field;
 namespace hash_air = stage3_hash_air;
+namespace hierarchy = recursive_hierarchy;
+namespace semantic_source = episode_semantic_source_alg;
 
 using AirCS = air_quotient::AirConstraintSystem<gf::Fp3>;
 using AirConstraint = air_quotient::AirConstraint<gf::Fp3>;
@@ -142,6 +145,403 @@ bool ValidProduct(
     return true;
 }
 
+uint256 CapturedEpisodeLeafStatement(
+    const CBlock& block,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& episode_digest,
+    const std::vector<uint256>& round_roots)
+{
+    const uint256 header_commitment =
+        RCStage3HeaderCommitment(block);
+    const uint256 params_commitment =
+        RCStage3ParamsCommitment(
+            params, height,
+            RCStage3StatementKind::Episode);
+    if (header_commitment.IsNull() ||
+        params_commitment.IsNull() ||
+        episode_digest.IsNull() ||
+        round_roots.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_CAPTURED_EPISODE_LEAF_STATEMENT_V1"}
+         << header_commitment
+         << params_commitment
+         << episode_digest
+         << static_cast<uint64_t>(round_roots.size());
+    for (const uint256& root : round_roots) {
+        if (root.IsNull()) return {};
+        hash << root;
+    }
+    return hash.GetSHA256();
+}
+
+uint256 CapturedEpisodeLayerShapeRoot(
+    const uint256& statement_commitment,
+    const RCGkrLayerSpec& spec,
+    uint32_t ordinal)
+{
+    if (statement_commitment.IsNull() ||
+        spec.m == 0 || spec.n == 0 || spec.k == 0 ||
+        spec.n % kRCMxBlockLen != 0) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_CAPTURED_EPISODE_LAYER_SHAPE_V1"}
+         << statement_commitment
+         << ordinal
+         << static_cast<uint32_t>(spec.kind)
+         << spec.round
+         << spec.layer
+         << spec.m << spec.n << spec.k
+         << spec.a.first_column
+         << spec.a.n_chunks
+         << spec.a.transpose
+         << spec.b.first_column
+         << spec.b.n_chunks
+         << spec.b.transpose
+         << spec.y_first_column
+         << spec.y_chunks
+         << spec.out_first_column
+         << spec.out_chunks
+         << spec.residual_first_column;
+    return hash.GetSHA256();
+}
+
+bool BuildCapturedEpisodeLeafInventory(
+    const ProductionParentBuildInputV1& input,
+    const RCEpisodeParams& episode,
+    const uint256& episode_digest,
+    const std::vector<uint256>& round_roots,
+    hierarchy::ShardOrdinalManifestV1& hierarchy_manifest,
+    std::vector<semantic_source::LeafReceiptV1>& receipts,
+    std::vector<
+        hierarchy::RetainedSplitRapHierarchyNodeV2>& nodes,
+    uint32_t& layer_count,
+    uint64_t& tile_count,
+    std::string* why)
+{
+    hierarchy_manifest = {};
+    receipts.clear();
+    nodes.clear();
+    layer_count = 0;
+    tile_count = 0;
+
+    const auto layout = RCGkrTraceLayout(episode);
+    const auto& captured_layers =
+        input.episode_capture->LayerWitnesses();
+    const auto& captured_extract =
+        input.episode_capture->ExtractInputs();
+    if (layout.layers.empty() ||
+        captured_layers.size() != layout.layers.size()) {
+        Note(why, "captured_inventory_source_shape");
+        return false;
+    }
+
+    const uint256 statement_commitment =
+        CapturedEpisodeLeafStatement(
+            *input.solved_block, *input.params,
+            input.height, episode_digest, round_roots);
+    if (statement_commitment.IsNull()) {
+        Note(why, "captured_inventory_public_statement");
+        return false;
+    }
+
+    RCStage3EpisodeExtractProduct extract;
+    extract.expected_tiles = captured_extract.size();
+    extract.tiles.resize(captured_extract.size());
+    std::vector<hierarchy::ShardOrdinalEntryV1>
+        entries;
+    std::string leaf_why;
+    uint64_t gemm_cursor = 0;
+    uint64_t tile_cursor = 0;
+    for (uint32_t ordinal = 0;
+         ordinal < layout.layers.size();
+         ++ordinal) {
+        const auto& layer_spec =
+            layout.layers[ordinal];
+        const auto& captured_layer =
+            captured_layers[ordinal];
+        if (layer_spec.n == 0 ||
+            layer_spec.n % kRCMxBlockLen != 0) {
+            Note(
+                why,
+                "captured_inventory_layer_tile_shape_" +
+                    std::to_string(ordinal));
+            return false;
+        }
+        const uint64_t gemm_cells =
+            uint64_t{layer_spec.m} * layer_spec.n;
+        const uint64_t layer_tiles =
+            uint64_t{layer_spec.m} *
+            (layer_spec.n / kRCMxBlockLen);
+        if (layer_tiles == 0 ||
+            gemm_cells >
+                std::numeric_limits<uint64_t>::max() -
+                    gemm_cursor ||
+            layer_tiles >
+                std::numeric_limits<uint64_t>::max() -
+                    tile_cursor ||
+            captured_layer.operand_a.size() !=
+                uint64_t{layer_spec.m} * layer_spec.k ||
+            captured_layer.operand_b.size() !=
+                uint64_t{layer_spec.k} * layer_spec.n ||
+            captured_layer.gemm_y.size() != gemm_cells ||
+            (!captured_layer.residual.empty() &&
+             captured_layer.residual.size() !=
+                 gemm_cells) ||
+            tile_cursor + layer_tiles >
+                captured_extract.size()) {
+            Note(
+                why,
+                "captured_inventory_layer_shape_" +
+                    std::to_string(ordinal));
+            return false;
+        }
+
+        const uint256 shape_root =
+            CapturedEpisodeLayerShapeRoot(
+                statement_commitment,
+                layer_spec, ordinal);
+        if (shape_root.IsNull()) {
+            Note(
+                why,
+                "captured_inventory_shape_root_" +
+                    std::to_string(ordinal));
+            return false;
+        }
+
+        RCStage3GemmExtractLayerManifest spec;
+        spec.ordinal = ordinal;
+        spec.kind = layer_spec.kind;
+        spec.round = layer_spec.round;
+        spec.layer = layer_spec.layer;
+        spec.m = layer_spec.m;
+        spec.n = layer_spec.n;
+        spec.k = layer_spec.k;
+        spec.a = layer_spec.a;
+        spec.b = layer_spec.b;
+        spec.y_first_column =
+            layer_spec.y_first_column;
+        spec.y_chunks = layer_spec.y_chunks;
+        spec.out_first_column =
+            layer_spec.out_first_column;
+        spec.out_chunks = layer_spec.out_chunks;
+        spec.residual_first_column =
+            layer_spec.residual_first_column;
+        spec.gemm_cell_begin = gemm_cursor;
+        spec.gemm_cell_count = gemm_cells;
+        spec.extract_tile_begin = tile_cursor;
+        spec.extract_tile_count = layer_tiles;
+
+        semantic_source::LayerShapeV1 shape;
+        if (!semantic_source::BuildLayerShapeV1(
+                statement_commitment, shape_root,
+                spec, shape, &leaf_why)) {
+            Note(
+                why,
+                "captured_inventory_shape_" +
+                    std::to_string(ordinal) + ":" +
+                    leaf_why);
+            return false;
+        }
+
+        RCStage3EpisodeGemmLayerProduct layer;
+        layer.layer_ordinal = ordinal;
+        layer.operand_a =
+            captured_layer.operand_a;
+        layer.operand_b =
+            captured_layer.operand_b;
+        layer.gemm_y = captured_layer.gemm_y;
+        layer.residual =
+            captured_layer.residual;
+        for (uint64_t local_tile = 0;
+             local_tile < layer_tiles;
+             ++local_tile) {
+            const uint64_t global_tile =
+                tile_cursor + local_tile;
+            auto& tile = extract.tiles[global_tile];
+            tile.global_tile = global_tile;
+            tile.layer_ordinal = ordinal;
+            tile.layer_tile_index = local_tile;
+            tile.input =
+                captured_extract[global_tile];
+        }
+
+        semantic_source::LayerBundleV1 bundle;
+        if (!semantic_source::ProveLayerBundleV1(
+                shape, layer, extract,
+                tile_cursor, bundle, &leaf_why)) {
+            Note(
+                why,
+                "captured_inventory_prove_layer_" +
+                    std::to_string(ordinal) + ":" +
+                    leaf_why);
+            return false;
+        }
+        const auto audit =
+            semantic_source::VerifyLayerBundleV1(
+                shape, bundle);
+        if (!audit.accepted ||
+            !audit.source_terminal_proof_owned ||
+            !audit.exact_address_partition ||
+            audit.verified_tiles != layer_tiles) {
+            Note(
+                why,
+                "captured_inventory_audit_layer_" +
+                    std::to_string(ordinal) + ":" +
+                    audit.note);
+            return false;
+        }
+        for (auto& receipt : bundle.leaves) {
+            if (entries.size() >=
+                std::numeric_limits<uint32_t>::max()) {
+                Note(
+                    why,
+                    "captured_inventory_shard_count");
+                return false;
+            }
+            entries.push_back({
+                .shard_ordinal =
+                    static_cast<uint32_t>(
+                        entries.size()),
+                .first_ordinal =
+                    tile_cursor +
+                    receipt.manifest.tile_begin,
+                .ordinal_count =
+                    receipt.manifest.tile_count,
+                .statement_root =
+                    receipt.manifest
+                        .manifest_commitment,
+            });
+            receipts.push_back(std::move(receipt));
+        }
+        gemm_cursor += gemm_cells;
+        tile_cursor += layer_tiles;
+    }
+    if (tile_cursor == 0 ||
+        tile_cursor != captured_extract.size() ||
+        receipts.empty() ||
+        entries.size() != receipts.size()) {
+        Note(why, "captured_inventory_exact_coverage");
+        return false;
+    }
+
+    hierarchy_manifest =
+        hierarchy::BuildShardOrdinalManifestV1(
+            tile_cursor, entries);
+    if (!hierarchy::ValidateShardOrdinalManifestV1(
+            hierarchy_manifest, &leaf_why)) {
+        receipts.clear();
+        Note(
+            why,
+            "captured_inventory_hierarchy_manifest:" +
+                leaf_why);
+        return false;
+    }
+
+    nodes.reserve(receipts.size());
+    std::vector<AirCS> expected_css;
+    expected_css.reserve(receipts.size());
+    std::vector<std::vector<uint32_t>>
+        expected_base_column_indices;
+    expected_base_column_indices.reserve(
+        receipts.size());
+    std::vector<uint256> expected_fs_seeds;
+    expected_fs_seeds.reserve(receipts.size());
+    for (uint32_t shard = 0;
+         shard < receipts.size();
+         ++shard) {
+        const auto verification_input =
+            semantic_source::
+                BuildUnifiedSameParentCtlVerificationInputV2(
+                    receipts[shard].manifest,
+                    receipts[shard]
+                        .unified_same_parent_ctl_join);
+        if (!verification_input.valid ||
+            verification_input.proof == nullptr) {
+            receipts.clear();
+            nodes.clear();
+            Note(
+                why,
+                "captured_inventory_verification_input_" +
+                    std::to_string(shard) + ":" +
+                    verification_input.note);
+            return false;
+        }
+        const auto& input_cs =
+            verification_input.expected_cs;
+        const auto coverage =
+            hierarchy::BuildShardOrdinalCoverageV1(
+                hierarchy_manifest, shard, 1);
+        nodes.push_back(
+            hierarchy::
+                RetainVerifiedSplitRapHierarchyNodeV2(
+                hierarchy_manifest, coverage,
+                /*level=*/1,
+                /*node_ordinal=*/shard,
+                input_cs,
+                *verification_input.proof,
+                verification_input
+                    .expected_base_column_indices,
+                verification_input.public_fs_seed));
+        if (!nodes.back().valid ||
+            !hierarchy::
+                ValidateRetainedSplitRapHierarchyNodeV2(
+                hierarchy_manifest, input_cs,
+                verification_input
+                    .expected_base_column_indices,
+                verification_input.public_fs_seed,
+                nodes.back(), &leaf_why)) {
+            receipts.clear();
+            nodes.clear();
+            Note(
+                why,
+                "captured_inventory_retain_" +
+                    std::to_string(shard) + ":" +
+                    leaf_why);
+            return false;
+        }
+        expected_css.push_back(input_cs);
+        expected_base_column_indices.push_back(
+            verification_input
+                .expected_base_column_indices);
+        expected_fs_seeds.push_back(
+            verification_input.public_fs_seed);
+    }
+    if (!hierarchy::
+            ValidateRetainedSplitRapHierarchyLevelV2(
+            hierarchy_manifest, expected_css,
+            expected_base_column_indices,
+            expected_fs_seeds, nodes, &leaf_why)) {
+        receipts.clear();
+        nodes.clear();
+        Note(
+            why,
+            "captured_inventory_retained_level:" +
+                leaf_why);
+        return false;
+    }
+    if (!ValidateCapturedEpisodeLeafInventoryV2(
+            hierarchy_manifest, receipts,
+            nodes, &leaf_why)) {
+        receipts.clear();
+        nodes.clear();
+        Note(
+            why,
+            "captured_inventory_fresh_validation:" +
+                leaf_why);
+        return false;
+    }
+    layer_count =
+        static_cast<uint32_t>(layout.layers.size());
+    tile_count = tile_cursor;
+    return true;
+}
+
 bool BuildBlockRoleProducts(
     const ProductionParentBuildInputV1& input,
     std::vector<RCStage3RoleAirProduct>& products,
@@ -150,12 +550,26 @@ bool BuildBlockRoleProducts(
     uint256& episode_digest,
     uint256& coupled_digest,
     uint256& composed_digest,
+    hierarchy::ShardOrdinalManifestV1&
+        captured_leaf_manifest,
+    std::vector<semantic_source::LeafReceiptV1>&
+        captured_leaf_receipts,
+    std::vector<
+        hierarchy::RetainedSplitRapHierarchyNodeV2>&
+        captured_leaf_nodes,
+    uint32_t& captured_layer_count,
+    uint64_t& captured_tile_count,
     std::string* why)
 {
     products.clear();
     episode_digest.SetNull();
     coupled_digest.SetNull();
     composed_digest.SetNull();
+    captured_leaf_manifest = {};
+    captured_leaf_receipts.clear();
+    captured_leaf_nodes.clear();
+    captured_layer_count = 0;
+    captured_tile_count = 0;
 
     const CBlock& block = *input.solved_block;
     const Consensus::Params& params = *input.params;
@@ -236,6 +650,16 @@ bool BuildBlockRoleProducts(
         UintToArith256(composed_digest) >
             UintToArith256(input.target)) {
         Note(why, "composed_digest");
+        return false;
+    }
+
+    if (!BuildCapturedEpisodeLeafInventory(
+            input, episode, episode_digest,
+            round_roots, captured_leaf_manifest,
+            captured_leaf_receipts,
+            captured_leaf_nodes,
+            captured_layer_count,
+            captured_tile_count, why)) {
         return false;
     }
 
@@ -975,6 +1399,121 @@ const char* ProductionParentBuildStatusNameV1(
     return "unknown";
 }
 
+bool ValidateCapturedEpisodeLeafInventoryV2(
+    const hierarchy::ShardOrdinalManifestV1&
+        manifest,
+    const std::vector<
+        semantic_source::LeafReceiptV1>& receipts,
+    const std::vector<
+        hierarchy::RetainedSplitRapHierarchyNodeV2>&
+        nodes,
+    std::string* why)
+{
+    if (!hierarchy::ValidateShardOrdinalManifestV1(
+            manifest, why) ||
+        receipts.empty() ||
+        receipts.size() != nodes.size() ||
+        receipts.size() != manifest.entries.size()) {
+        Note(why, "captured_inventory_validate_shape");
+        return false;
+    }
+    std::vector<AirCS> expected_css;
+    std::vector<std::vector<uint32_t>>
+        expected_base_indices;
+    std::vector<uint256> expected_fs_seeds;
+    expected_css.reserve(receipts.size());
+    expected_base_indices.reserve(receipts.size());
+    expected_fs_seeds.reserve(receipts.size());
+    for (uint32_t shard = 0;
+         shard < receipts.size(); ++shard) {
+        const auto& receipt = receipts[shard];
+        const auto& entry = manifest.entries[shard];
+        if (entry.shard_ordinal != shard ||
+            entry.statement_root !=
+                receipt.manifest
+                    .manifest_commitment) {
+            Note(
+                why,
+                "captured_inventory_validate_entry_" +
+                    std::to_string(shard));
+            return false;
+        }
+        std::string detail;
+        if (!semantic_source::VerifyLeafV1(
+                receipt.manifest.shape,
+                receipt.manifest.tile_begin,
+                receipt.manifest.tile_count,
+                receipt, &detail)) {
+            Note(
+                why,
+                "captured_inventory_validate_leaf_" +
+                    std::to_string(shard) + ":" +
+                    detail);
+            return false;
+        }
+        const auto input =
+            semantic_source::
+                BuildUnifiedSameParentCtlVerificationInputV2(
+                    receipt.manifest,
+                    receipt
+                        .unified_same_parent_ctl_join);
+        if (!input.valid ||
+            input.proof == nullptr) {
+            Note(
+                why,
+                "captured_inventory_validate_input_" +
+                    std::to_string(shard) + ":" +
+                    input.note);
+            return false;
+        }
+        std::vector<unsigned char> receipt_proof_bytes;
+        if (air_quotient::
+                SerializeAirQuotientSplitRapRowsProof(
+                    *input.proof,
+                    receipt_proof_bytes) == 0 ||
+            receipt_proof_bytes.empty() ||
+            receipt_proof_bytes !=
+                nodes[shard].proof_bytes) {
+            Note(
+                why,
+                "captured_inventory_validate_proof_alias_" +
+                    std::to_string(shard));
+            return false;
+        }
+        const auto expected_coverage =
+            hierarchy::BuildShardOrdinalCoverageV1(
+                manifest, shard, 1);
+        if (nodes[shard].coverage !=
+                expected_coverage ||
+            !hierarchy::
+                ValidateRetainedSplitRapHierarchyNodeV2(
+                    manifest, input.expected_cs,
+                    input.expected_base_column_indices,
+                    input.public_fs_seed,
+                    nodes[shard], &detail)) {
+            Note(
+                why,
+                "captured_inventory_validate_node_" +
+                    std::to_string(shard) + ":" +
+                    detail);
+            return false;
+        }
+        expected_css.push_back(input.expected_cs);
+        expected_base_indices.push_back(
+            input.expected_base_column_indices);
+        expected_fs_seeds.push_back(
+            input.public_fs_seed);
+    }
+    if (!hierarchy::
+            ValidateRetainedSplitRapHierarchyLevelV2(
+                manifest, expected_css,
+                expected_base_indices,
+                expected_fs_seeds, nodes, why)) {
+        return false;
+    }
+    return true;
+}
+
 bool BuildDirectBuilderStreamParentCanaryV1(
     const std::array<
         RCStage3StreamEndpointManifest, 2>&
@@ -1170,11 +1709,35 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
             builder_stream_manifests,
             out.episode_digest,
             out.coupled_digest, out.composed_digest,
+            out.captured_episode_leaf_manifest,
+            out.captured_episode_leaf_receipts,
+            out.captured_episode_leaf_nodes,
+            out.captured_episode_layer_count,
+            out.captured_episode_tile_count,
             why)) {
         return false;
     }
     out.winner_episode_capture_bound = true;
     out.episode_witness_replay_avoided = true;
+    out.captured_episode_leaf_inventory_verified =
+        out.captured_episode_layer_count != 0 &&
+        out.captured_episode_tile_count != 0 &&
+        out.captured_episode_leaf_receipts.size() ==
+            out.captured_episode_leaf_nodes.size() &&
+        out.captured_episode_leaf_manifest
+            .total_ordinals ==
+            out.captured_episode_tile_count &&
+        out.captured_episode_leaf_manifest.entries.size() ==
+            out.captured_episode_leaf_nodes.size() &&
+        std::all_of(
+            out.captured_episode_leaf_nodes.begin(),
+            out.captured_episode_leaf_nodes.end(),
+            [](const auto& node) {
+                return node.valid &&
+                    node.proof_retained &&
+                    node.native_proof_verified &&
+                    node.cryptographic_child;
+            });
 
     out.direct_builder_public_fs_seed =
         input.solved_block->GetHash();
@@ -1382,6 +1945,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         out.all_endpoint_cells_literal &&
         out.winner_episode_capture_bound &&
         out.episode_witness_replay_avoided &&
+        out.captured_episode_leaf_inventory_verified &&
         out.builder_stream_relations_same_parent &&
         out.witness_violations == 0;
 
@@ -1401,6 +1965,15 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
                 ":" + audit.remaining);
         }
     }
+    // The leaf receipts prove local A/B/Y -> Extract-input ownership and
+    // execute their receiver-side equality CTLs.  They deliberately do not
+    // claim the upstream builder/previous-Extract producer terminals.  Until
+    // those six terminals are consumed by equality constraints in the same
+    // normalized parent, strict transitive episode provenance remains open.
+    out.recursive_semantic_closure_complete = false;
+    out.residuals.push_back(
+        "captured_episode_leaf:"
+        "external_producer_terminal_equality_pending");
     out.production_authority =
         out.local_parent_valid &&
         out.recursive_semantic_closure_complete;

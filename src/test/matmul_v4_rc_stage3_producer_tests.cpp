@@ -121,6 +121,61 @@ uint256 Filled(unsigned char byte)
     return out;
 }
 
+struct SemanticLeafFixture {
+    rc::episode_semantic_source_alg::LayerShapeV1 shape;
+    rc::episode_semantic_source_alg::LayerBundleV1 bundle;
+};
+
+bool BuildSemanticLeafFixture(
+    int8_t operand_a,
+    SemanticLeafFixture& out,
+    std::string* why)
+{
+    namespace source =
+        rc::episode_semantic_source_alg;
+    rc::RCStage3GemmExtractLayerManifest spec;
+    spec.ordinal = 7;
+    spec.m = 1;
+    spec.n = 64;
+    spec.k = 1;
+    spec.b.transpose = false;
+    spec.gemm_cell_count = 64;
+    spec.extract_tile_begin = 0;
+    spec.extract_tile_count = 2;
+    if (!source::BuildLayerShapeV1(
+            Filled(0x11), Filled(0x22),
+            spec, out.shape, why)) {
+        return false;
+    }
+    rc::RCStage3EpisodeGemmLayerProduct layer;
+    layer.layer_ordinal = spec.ordinal;
+    layer.operand_a = {operand_a};
+    layer.operand_b.resize(64);
+    layer.gemm_y.resize(64);
+    for (uint32_t i = 0; i < 64; ++i) {
+        const int8_t b =
+            static_cast<int8_t>(
+                static_cast<int32_t>(i % 7) - 3);
+        layer.operand_b[i] = b;
+        layer.gemm_y[i] =
+            static_cast<int64_t>(operand_a) * b;
+    }
+    rc::RCStage3EpisodeExtractProduct extract;
+    extract.tiles.resize(2);
+    for (uint32_t tile = 0; tile < 2; ++tile) {
+        for (uint32_t lane = 0;
+             lane < rc::kRCMxBlockLen; ++lane) {
+            extract.tiles[tile].input[lane] =
+                layer.gemm_y[
+                    tile * rc::kRCMxBlockLen +
+                    lane];
+        }
+    }
+    return source::ProveLayerBundleV1(
+        out.shape, layer, extract,
+        0, out.bundle, why);
+}
+
 //! Consensus params matching the RC chain the fixture came from: RC live well
 //! below the fixture height, CI toy dims, coupled far in the future so the
 //! required statement is Episode. `coupled` forces the Composed statement
@@ -900,6 +955,109 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    normalized_inventory_rejects_valid_cross_witness_unified_node)
+{
+    namespace hierarchy =
+        rc::recursive_hierarchy;
+    namespace source =
+        rc::episode_semantic_source_alg;
+    SemanticLeafFixture honest;
+    SemanticLeafFixture alternate;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        BuildSemanticLeafFixture(2, honest, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        BuildSemanticLeafFixture(-3, alternate, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(
+        honest.bundle.leaves.size(), 1U);
+    BOOST_REQUIRE_EQUAL(
+        alternate.bundle.leaves.size(), 1U);
+    const auto& honest_leaf =
+        honest.bundle.leaves.front();
+    const auto& alternate_leaf =
+        alternate.bundle.leaves.front();
+    BOOST_REQUIRE(
+        honest_leaf.manifest ==
+        alternate_leaf.manifest);
+
+    const auto manifest =
+        hierarchy::BuildShardOrdinalManifestV1(
+            honest.shape.tile_count,
+            {{
+                .shard_ordinal = 0,
+                .first_ordinal = 0,
+                .ordinal_count =
+                    honest.shape.tile_count,
+                .statement_root =
+                    honest_leaf.manifest
+                        .manifest_commitment,
+            }});
+    BOOST_REQUIRE(
+        hierarchy::ValidateShardOrdinalManifestV1(
+            manifest));
+    const auto coverage =
+        hierarchy::BuildShardOrdinalCoverageV1(
+            manifest, 0, 1);
+    const auto honest_input =
+        source::
+            BuildUnifiedSameParentCtlVerificationInputV2(
+                honest_leaf.manifest,
+                honest_leaf
+                    .unified_same_parent_ctl_join);
+    const auto alternate_input =
+        source::
+            BuildUnifiedSameParentCtlVerificationInputV2(
+                alternate_leaf.manifest,
+                alternate_leaf
+                    .unified_same_parent_ctl_join);
+    BOOST_REQUIRE(honest_input.valid);
+    BOOST_REQUIRE(alternate_input.valid);
+    const auto honest_node =
+        hierarchy::
+            RetainVerifiedSplitRapHierarchyNodeV2(
+                manifest, coverage, 1, 0,
+                honest_input.expected_cs,
+                *honest_input.proof,
+                honest_input
+                    .expected_base_column_indices,
+                honest_input.public_fs_seed);
+    const auto alternate_node =
+        hierarchy::
+            RetainVerifiedSplitRapHierarchyNodeV2(
+                manifest, coverage, 1, 0,
+                alternate_input.expected_cs,
+                *alternate_input.proof,
+                alternate_input
+                    .expected_base_column_indices,
+                alternate_input.public_fs_seed);
+    BOOST_REQUIRE_MESSAGE(
+        honest_node.valid, honest_node.note);
+    BOOST_REQUIRE_MESSAGE(
+        alternate_node.valid,
+        alternate_node.note);
+    BOOST_REQUIRE(
+        honest_node.proof_bytes !=
+        alternate_node.proof_bytes);
+
+    BOOST_CHECK_MESSAGE(
+        rc::normalized_production_parent_builder::
+            ValidateCapturedEpisodeLeafInventoryV2(
+            manifest, {honest_leaf},
+            {honest_node}, &why),
+        why);
+    // Both inputs are natively valid for the same public shape, but the
+    // normalized producer must consume the exact unified proof paired with
+    // this receipt.  A separately valid node cannot replace it.
+    BOOST_CHECK(
+        !rc::normalized_production_parent_builder::
+            ValidateCapturedEpisodeLeafInventoryV2(
+            manifest, {honest_leaf},
+            {alternate_node}, nullptr));
+}
+
+BOOST_AUTO_TEST_CASE(
     real_composed_work_builds_literal_14_role_52_endpoint_parent)
 {
     if (std::getenv(
@@ -976,6 +1134,83 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         candidate.composed_digest ==
         block.matmul_digest);
+    const auto captured_layout =
+        rc::RCGkrTraceLayout(episode_params);
+    uint64_t expected_captured_tiles = 0;
+    for (const auto& layer : captured_layout.layers) {
+        BOOST_REQUIRE_EQUAL(
+            layer.n % rc::kRCMxBlockLen, 0U);
+        expected_captured_tiles +=
+            uint64_t{layer.m} *
+            (layer.n / rc::kRCMxBlockLen);
+    }
+    BOOST_CHECK_EQUAL(
+        candidate.captured_episode_layer_count,
+        captured_layout.layers.size());
+    BOOST_CHECK_EQUAL(
+        candidate.captured_episode_tile_count,
+        expected_captured_tiles);
+    BOOST_CHECK_EQUAL(
+        candidate.captured_episode_leaf_manifest
+            .total_ordinals,
+        expected_captured_tiles);
+    BOOST_REQUIRE_EQUAL(
+        candidate.captured_episode_leaf_receipts.size(),
+        candidate.captured_episode_leaf_nodes.size());
+    BOOST_REQUIRE_EQUAL(
+        candidate.captured_episode_leaf_manifest
+            .entries.size(),
+        candidate.captured_episode_leaf_nodes.size());
+    BOOST_CHECK_GT(
+        candidate.captured_episode_leaf_receipts.size(),
+        1U);
+    BOOST_CHECK(
+        rc::recursive_hierarchy::
+            ValidateShardOrdinalManifestV1(
+                candidate
+                    .captured_episode_leaf_manifest,
+                &why));
+    for (const auto& receipt :
+         candidate.captured_episode_leaf_receipts) {
+        BOOST_CHECK(receipt.locally_verified);
+        BOOST_CHECK(!receipt.canonical_proof_bytes.empty());
+        BOOST_CHECK(!receipt.receipt_commitment.IsNull());
+        const auto& join =
+            receipt.unified_same_parent_ctl_join;
+        BOOST_CHECK(join.single_source_relation);
+        BOOST_CHECK(join.all_receivers_executed);
+        BOOST_CHECK(join.all_dual_alpha_terminals);
+        BOOST_CHECK(join.all_terminal_cancellations);
+        BOOST_CHECK(!join.proof_commitment.IsNull());
+        BOOST_CHECK(!join.join_commitment.IsNull());
+        BOOST_CHECK(
+            receipt.proof.trace_commit ==
+            join.source_trace_commitment);
+        std::string join_why;
+        BOOST_CHECK_MESSAGE(
+            rc::episode_semantic_source_alg::
+                VerifyUnifiedSameParentCtlJoinV2(
+                    receipt.manifest,
+                    join, &join_why),
+            join_why);
+    }
+    for (const auto& node :
+         candidate.captured_episode_leaf_nodes) {
+        BOOST_CHECK(node.valid);
+        BOOST_CHECK(node.proof_retained);
+        BOOST_CHECK(node.native_proof_verified);
+        BOOST_CHECK(node.cryptographic_child);
+        BOOST_CHECK(!node.proof_bytes.empty());
+    }
+    BOOST_CHECK(
+        candidate
+            .captured_episode_leaf_inventory_verified);
+    // Local source/receiver cancellation is not the missing transitive edge.
+    // Until the external producer terminal is equality-constrained in the
+    // normalized parent, this candidate must remain non-authoritative.
+    BOOST_CHECK(
+        !candidate.recursive_semantic_closure_complete);
+    BOOST_CHECK(!candidate.production_authority);
 
     // Endpoint 2 states the same proposition in the block-derived role and
     // its heavy SHA child: seed_a is the stream value; the endpoint root is

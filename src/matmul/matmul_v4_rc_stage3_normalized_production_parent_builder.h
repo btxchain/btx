@@ -7,7 +7,9 @@
 
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_stage3_air_parent_composer.h>
+#include <matmul/matmul_v4_rc_stage3_episode_semantic_source_alg.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <array>
@@ -127,6 +129,24 @@ struct ProductionRelationParentCandidateV1 {
     uint256 episode_digest{};
     uint256 coupled_digest{};
     uint256 composed_digest{};
+    /**
+     * Canonical all-layer/all-tile proof-owned episode leaf inventory.
+     * Complete LeafReceipts are retained so every SameParentCtlJoin terminal
+     * remains available to the eventual external producer equality CTLs;
+     * hierarchy node metadata alone is insufficient for transitive
+     * provenance. The manifest partitions the complete global Extract-tile
+     * ordinal interval and is the input inventory for universal arity-two
+     * recursion, not a host-side acceptance summary.
+     */
+    recursive_hierarchy::ShardOrdinalManifestV1
+        captured_episode_leaf_manifest;
+    std::vector<episode_semantic_source_alg::LeafReceiptV1>
+        captured_episode_leaf_receipts;
+    std::vector<
+        recursive_hierarchy::RetainedSplitRapHierarchyNodeV2>
+        captured_episode_leaf_nodes;
+    uint32_t captured_episode_layer_count{0};
+    uint64_t captured_episode_tile_count{0};
     uint32_t endpoint_count{0};
     uint64_t witness_violations{UINT64_MAX};
     bool exact_role_order{false};
@@ -135,6 +155,7 @@ struct ProductionRelationParentCandidateV1 {
     bool builder_stream_relations_same_parent{false};
     bool winner_episode_capture_bound{false};
     bool episode_witness_replay_avoided{false};
+    bool captured_episode_leaf_inventory_verified{false};
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};
     bool production_authority{false};
@@ -153,6 +174,25 @@ enum class ProductionParentBuildStatusV1 : uint8_t {
 
 [[nodiscard]] const char* ProductionParentBuildStatusNameV1(
     ProductionParentBuildStatusV1 status);
+
+/**
+ * Freshly validate the exact semantic-leaf inventory consumed by recursion.
+ *
+ * Every retained V2 node must be the canonical unified Split-RAP proof from
+ * the corresponding LeafReceipt (not merely another valid proof for the same
+ * shape), and is reverified against the receipt-derived CS/R0/FS statement.
+ */
+[[nodiscard]] bool
+ValidateCapturedEpisodeLeafInventoryV2(
+    const recursive_hierarchy::ShardOrdinalManifestV1&
+        manifest,
+    const std::vector<
+        episode_semantic_source_alg::LeafReceiptV1>&
+        receipts,
+    const std::vector<
+        recursive_hierarchy::RetainedSplitRapHierarchyNodeV2>&
+        nodes,
+    std::string* why = nullptr);
 
 /**
  * Build the canonical episode+coupled relation parent for one solved block.
