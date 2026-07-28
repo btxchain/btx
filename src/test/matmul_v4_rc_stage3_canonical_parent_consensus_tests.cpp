@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_canonical_parent_consensus.h>
 
+#include <crypto/common.h>
 #include <boost/test/unit_test.hpp>
 
 #include <array>
@@ -203,6 +204,23 @@ BOOST_AUTO_TEST_CASE(
                 "public_output_not_constant_in_child_air") !=
             std::string::npos);
     }
+    {
+        auto changed = honest.children;
+        changed.roles[0].program_root = H(0xbeef);
+        changed.roles[0].role_statement_root =
+            nav3::ComputeRoleStatementRootV3(
+                changed.roles[0]);
+        BOOST_CHECK(
+            !cpc::ValidateCanonicalChildPublicOutputAbiV1(
+                honest.frozen, changed, &why));
+    }
+    {
+        auto changed = honest.children;
+        std::swap(changed.roles[0], changed.roles[1]);
+        BOOST_CHECK(
+            !cpc::ValidateCanonicalChildPublicOutputAbiV1(
+                honest.frozen, changed, &why));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -283,6 +301,57 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         rebuilt.verifier.fixed_trace.n_columns,
         rebuilt.verifier.parent_cs.n_columns);
+
+    // A proof-owned statement-root substitution is allowed to form a new
+    // claim, but it changes both the child FS seed and the parent pin
+    // equation. Therefore an honest receipt for the original claim cannot
+    // be replayed under the coherently recomputed substituted role root.
+    auto substituted = fixture.children;
+    const uint256 honest_relation =
+        substituted.roles[0]
+            .relation_statement_root;
+    substituted.roles[0].relation_statement_root =
+        H(0x2001);
+    substituted.roles[0].role_statement_root =
+        nav3::ComputeRoleStatementRootV3(
+            substituted.roles[0]);
+    cpc::RebuiltCanonicalParentV1 changed;
+    BOOST_REQUIRE_MESSAGE(
+        cpc::RebuildCanonicalParentV1(
+            block, fixture.frozen,
+            substituted, H(0x100b),
+            changed, &why),
+        why);
+    BOOST_CHECK(
+        changed.child_fs_seed[0] !=
+        rebuilt.child_fs_seed[0]);
+    BOOST_CHECK_EQUAL(
+        changed.verifier.parent_cs.constraints.size(),
+        rebuilt.verifier.parent_cs.constraints.size());
+    const uint32_t total_cells =
+        static_cast<uint32_t>(cells);
+    const uint32_t fixed_base =
+        changed.verifier.parent_cs.n_columns -
+        total_cells;
+    const uint32_t relation_word_offset =
+        1U + 8U; // acceptance then program-root words
+    const uint32_t added_constraint_base =
+        static_cast<uint32_t>(
+            changed.verifier.parent_cs
+                .constraints.size()) -
+        2U * total_cells;
+    std::vector<gf::Fp3> row(
+        changed.verifier.parent_cs.n_columns,
+        gf::Fp3::Zero());
+    row[fixed_base + relation_word_offset] =
+        gf::Fp3::FromFp(gf::FromU64(
+            ReadLE32(honest_relation.data())));
+    const auto violation =
+        changed.verifier.parent_cs.constraints[
+            added_constraint_base +
+            2U * relation_word_offset]
+            .eval(row, row);
+    BOOST_CHECK(!gf::IsZero(violation));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
