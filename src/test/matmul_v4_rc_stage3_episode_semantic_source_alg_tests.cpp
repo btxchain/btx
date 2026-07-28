@@ -32,7 +32,7 @@ struct Fixture {
     source::LayerBundleV1 bundle;
 };
 
-Fixture BuildFixture()
+Fixture BuildFixture(int8_t operand_a = 2)
 {
     Fixture out;
     out.spec.ordinal = 7;
@@ -52,7 +52,7 @@ Fixture BuildFixture()
         why);
 
     out.layer.layer_ordinal = out.spec.ordinal;
-    out.layer.operand_a = {2};
+    out.layer.operand_a = {operand_a};
     out.layer.operand_b.resize(64);
     out.layer.gemm_y.resize(64);
     for (uint32_t i = 0; i < 64; ++i) {
@@ -61,7 +61,7 @@ Fixture BuildFixture()
                 static_cast<int32_t>(i % 7) - 3);
         out.layer.operand_b[i] = b;
         out.layer.gemm_y[i] =
-            static_cast<int64_t>(2) * b;
+            static_cast<int64_t>(operand_a) * b;
     }
     out.extract.tiles.resize(2);
     for (uint32_t tile = 0; tile < 2; ++tile) {
@@ -141,6 +141,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!input.canonical_proof_bytes.empty());
     BOOST_CHECK_EQUAL(input.active_rows, 64U);
     BOOST_CHECK_GT(input.n_lde, input.active_rows);
+    BOOST_CHECK(
+        leaf.proof.trace_commit ==
+        leaf.unified_same_parent_ctl_join
+            .source_trace_commitment);
 
     const auto audit =
         source::VerifyLayerBundleV1(
@@ -206,14 +210,10 @@ BOOST_AUTO_TEST_CASE(
     const Fixture& fixture = SharedFixture();
     const auto& leaf =
         fixture.bundle.leaves.front();
-    BOOST_REQUIRE_EQUAL(
-        leaf.same_parent_ctl_joins.size(),
-        source::kEndpointCountV1);
     const auto& join =
-        leaf.same_parent_ctl_joins[
-            source::kOperandASlotV1];
+        leaf.unified_same_parent_ctl_join;
     const auto input =
-        source::BuildSameParentCtlVerificationInputV1(
+        source::BuildUnifiedSameParentCtlVerificationInputV2(
             leaf.manifest, join);
     BOOST_REQUIRE_MESSAGE(input.valid, input.note);
     BOOST_REQUIRE(input.proof != nullptr);
@@ -224,9 +224,8 @@ BOOST_AUTO_TEST_CASE(
              .group_rows.empty());
     BOOST_REQUIRE_GT(
         input.proof->batch.queries[0]
-            .group_rows[0].values.size(),
-        source::kTotalColumnsV1 +
-            rc::kRCStage3EpisodeMemoryValue);
+            .group_rows[1].values.size(),
+        rc::kRCStage3EpisodeMemoryValue);
 
     const auto& projection =
         source::CanonicalSourceProjectionsV1()[
@@ -254,14 +253,13 @@ BOOST_AUTO_TEST_CASE(
     auto receiver_value_attack =
         *input.proof;
     const uint32_t receiver_value_column =
-        source::kTotalColumnsV1 +
         rc::kRCStage3EpisodeMemoryValue;
     receiver_value_attack.batch.queries[0]
-        .group_rows[0]
+        .group_rows[1]
         .values[receiver_value_column] =
         gf::Add(
             receiver_value_attack.batch.queries[0]
-                .group_rows[0]
+                .group_rows[1]
                 .values[receiver_value_column],
             gf::Fp3::One());
     BOOST_CHECK(
@@ -274,18 +272,114 @@ BOOST_AUTO_TEST_CASE(
     auto root_attack = join;
     root_attack.base_row_commitment.begin()[0] ^= 1U;
     BOOST_CHECK(
-        !source::VerifySameParentCtlJoinV1(
+        !source::VerifyUnifiedSameParentCtlJoinV2(
             leaf.manifest, root_attack, &why));
 
     auto terminal_attack = join;
-    terminal_attack.receiver_terminal.alpha1_sum =
+    terminal_attack
+        .receiver_terminals[
+            source::kOperandASlotV1]
+        .alpha1_sum =
         gf::Add(
-            terminal_attack.receiver_terminal
+            terminal_attack
+                .receiver_terminals[
+                    source::kOperandASlotV1]
                 .alpha1_sum,
             gf::Fp3::One());
     BOOST_CHECK(
-        !source::VerifySameParentCtlJoinV1(
+        !source::VerifyUnifiedSameParentCtlJoinV2(
             leaf.manifest, terminal_attack, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    distinct_valid_witness_terminal_splice_rejects_in_unified_proof)
+{
+    const Fixture& honest = SharedFixture();
+    const Fixture alternate = BuildFixture(-3);
+    const auto& honest_leaf =
+        honest.bundle.leaves.front();
+    const auto& alternate_leaf =
+        alternate.bundle.leaves.front();
+    BOOST_REQUIRE(
+        source::VerifyUnifiedSameParentCtlJoinV2(
+            honest_leaf.manifest,
+            honest_leaf.unified_same_parent_ctl_join));
+    BOOST_REQUIRE(
+        source::VerifyUnifiedSameParentCtlJoinV2(
+            alternate_leaf.manifest,
+            alternate_leaf
+                .unified_same_parent_ctl_join));
+
+    // This is the attack enabled by the former three-proof layout: keep A/Y
+    // from one valid relation but import the B terminal from another valid
+    // relation.  V2 has one proof and one R0, so changing either terminal
+    // makes the verifier-owned constraint system disagree with that proof.
+    auto spliced =
+        honest_leaf.unified_same_parent_ctl_join;
+    spliced.source_terminals[
+        source::kOperandBSlotV1] =
+        alternate_leaf
+            .unified_same_parent_ctl_join
+            .source_terminals[
+                source::kOperandBSlotV1];
+    spliced.receiver_terminals[
+        source::kOperandBSlotV1] =
+        alternate_leaf
+            .unified_same_parent_ctl_join
+            .receiver_terminals[
+                source::kOperandBSlotV1];
+    const auto input =
+        source::BuildUnifiedSameParentCtlVerificationInputV2(
+            honest_leaf.manifest, spliced);
+    BOOST_REQUIRE_MESSAGE(input.valid, input.note);
+    std::string why;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            input.expected_cs, *input.proof,
+            input.expected_base_column_indices,
+            input.public_fs_seed, &why));
+    BOOST_CHECK(
+        !source::VerifyUnifiedSameParentCtlJoinV2(
+            honest_leaf.manifest,
+            spliced, &why));
+
+    auto proof_transplant =
+        honest_leaf.unified_same_parent_ctl_join;
+    proof_transplant.proof =
+        alternate_leaf
+            .unified_same_parent_ctl_join.proof;
+    BOOST_CHECK(
+        !source::VerifyUnifiedSameParentCtlJoinV2(
+            honest_leaf.manifest,
+            proof_transplant, &why));
+
+    // Keep the complete unified proof from the honest witness but import the
+    // independently valid ordinary Alg proof consumed by recursion.  The
+    // unified R0 is exactly the ordinary proof's source-column trace tree,
+    // so rewriting every public receipt field still cannot splice witnesses.
+    auto main_proof_transplant = honest_leaf;
+    main_proof_transplant.proof =
+        alternate_leaf.proof;
+    main_proof_transplant.canonical_proof_bytes =
+        alternate_leaf.canonical_proof_bytes;
+    main_proof_transplant.node_root =
+        alternate_leaf.node_root;
+    main_proof_transplant.proof_commitment =
+        alternate_leaf.proof_commitment;
+    main_proof_transplant.n_lde =
+        alternate_leaf.n_lde;
+    main_proof_transplant.receipt_commitment =
+        source::ComputeLeafReceiptCommitmentV1(
+            main_proof_transplant);
+    BOOST_REQUIRE(
+        !main_proof_transplant
+             .receipt_commitment.IsNull());
+    BOOST_CHECK(
+        !source::VerifyLeafV1(
+            honest_leaf.manifest.shape,
+            honest_leaf.manifest.tile_begin,
+            honest_leaf.manifest.tile_count,
+            main_proof_transplant, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

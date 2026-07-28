@@ -44,6 +44,12 @@ constexpr char CTL_PROOF_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_SEMANTIC_SOURCE_CTL_PROOF_V1";
 constexpr char CTL_JOIN_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_SEMANTIC_SOURCE_CTL_JOIN_V1";
+constexpr char UNIFIED_CTL_FS_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_SEMANTIC_SOURCE_UNIFIED_CTL_FS_V2";
+constexpr char UNIFIED_CTL_PROOF_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_SEMANTIC_SOURCE_UNIFIED_CTL_PROOF_V2";
+constexpr char UNIFIED_CTL_JOIN_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_SEMANTIC_SOURCE_UNIFIED_CTL_JOIN_V2";
 constexpr char COVERAGE_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_SEMANTIC_SOURCE_COVERAGE_V1";
 constexpr char BUNDLE_DOMAIN[] =
@@ -58,6 +64,15 @@ constexpr uint32_t kCtlDependentColumnsPerSideV1 = 6;
 constexpr uint32_t kSameParentCtlColumnsV1 =
     kCtlDependentBaseV1 +
     2 * kCtlDependentColumnsPerSideV1;
+constexpr uint32_t kUnifiedReceiverColumnBaseV2 =
+    kTotalColumnsV1;
+constexpr uint32_t kUnifiedDependentBaseV2 =
+    kUnifiedReceiverColumnBaseV2 +
+    kEndpointCountV1 * kReceiverColumnsV1;
+constexpr uint32_t kUnifiedCtlColumnsV2 =
+    kUnifiedDependentBaseV2 +
+    kEndpointCountV1 * 2 *
+        kCtlDependentColumnsPerSideV1;
 
 enum CtlDependentOffsetV1 : uint32_t {
     kCtlInverse1V1 = 0,
@@ -1478,7 +1493,7 @@ uint256 SameParentJoinCommitment(
     return hash.GetHash();
 }
 
-bool ProveSameParentCtlJoin(
+[[maybe_unused]] bool ProveSameParentCtlJoin(
     const LeafManifestV1& manifest,
     const std::vector<std::vector<Fp3>>&
         source_columns,
@@ -1603,6 +1618,550 @@ bool ProveSameParentCtlJoin(
         return Fail(why, "join_prove_commitment");
     }
     return true;
+}
+
+uint32_t UnifiedReceiverBaseV2(uint32_t slot)
+{
+    return kUnifiedReceiverColumnBaseV2 +
+        slot * kReceiverColumnsV1;
+}
+
+uint32_t UnifiedDependentBaseV2(
+    uint32_t slot, bool receiver)
+{
+    return kUnifiedDependentBaseV2 +
+        (2 * slot + (receiver ? 1U : 0U)) *
+            kCtlDependentColumnsPerSideV1;
+}
+
+std::vector<uint32_t> UnifiedBaseIndicesV2()
+{
+    std::vector<uint32_t> out(
+        kTotalColumnsV1);
+    std::iota(out.begin(), out.end(), 0);
+    return out;
+}
+
+bool UnifiedChallengesValidV2(
+    const std::array<
+        RCStage3CtlChallenges, kEndpointCountV1>& challenges)
+{
+    return std::all_of(
+        challenges.begin(), challenges.end(),
+        [](const RCStage3CtlChallenges& challenge) {
+            return
+                CanonicalFp3(challenge.gamma1) &&
+                CanonicalFp3(challenge.gamma2) &&
+                CanonicalFp3(challenge.alpha1) &&
+                CanonicalFp3(challenge.alpha2) &&
+                !gf::IsZero(challenge.gamma1) &&
+                !gf::IsZero(challenge.gamma2) &&
+                !gf::Eq(
+                    challenge.gamma1,
+                    challenge.gamma2) &&
+                !gf::Eq(
+                    challenge.alpha1,
+                    challenge.alpha2);
+        });
+}
+
+bool BuildUnifiedBaseColumnsV2(
+    const LeafManifestV1& manifest,
+    const std::vector<std::vector<Fp3>>& source_columns,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.assign(
+        kUnifiedCtlColumnsV2,
+        std::vector<Fp3>(
+            manifest.n_rows, Fp3::Zero()));
+    if (source_columns.size() != kTotalColumnsV1 ||
+        !std::all_of(
+            source_columns.begin(),
+            source_columns.end(),
+            [&manifest](const auto& column) {
+                return column.size() ==
+                    manifest.n_rows;
+            })) {
+        out = {};
+        return Fail(why, "unified_base_shape");
+    }
+    std::copy(
+        source_columns.begin(),
+        source_columns.end(),
+        out.begin());
+    const auto& projections =
+        CanonicalSourceProjectionsV1();
+    for (uint32_t slot = 0;
+         slot < kEndpointCountV1; ++slot) {
+        const uint32_t receiver_base =
+            UnifiedReceiverBaseV2(slot);
+        const auto& projection =
+            projections[slot];
+        const std::array<
+            std::pair<uint32_t, uint32_t>, 5>
+            metadata{{
+                {
+                    kRCStage3EpisodeMemoryActive,
+                    projection.active_column,
+                },
+                {
+                    kRCStage3EpisodeMemoryAddress,
+                    projection.address_column,
+                },
+                {
+                    kRCStage3EpisodeMemoryRemaining,
+                    projection.remaining_column,
+                },
+                {
+                    kRCStage3EpisodeMemoryEndpoint,
+                    projection.endpoint_column,
+                },
+                {
+                    kRCStage3EpisodeMemoryRole,
+                    projection.role_column,
+                },
+            }};
+        for (const auto& [receiver, source] :
+             metadata) {
+            out[receiver_base + receiver] =
+                source_columns[source];
+        }
+        out[
+            receiver_base +
+            kRCStage3EpisodeMemoryValue] =
+            source_columns[
+                projection.semantic_value_column];
+        out[
+            receiver_base +
+            kRCStage3EpisodeMemoryExport] =
+            source_columns[
+                projection.semantic_value_column];
+    }
+    return true;
+}
+
+bool BuildUnifiedConstraintSystemV2(
+    const LeafManifestV1& manifest,
+    const std::array<
+        RCStage3CtlChallenges, kEndpointCountV1>& challenges,
+    const std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>& source_terminals,
+    const std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>& receiver_terminals,
+    AirCs& out,
+    std::string* why)
+{
+    out = {};
+    if (!ManifestValid(manifest, why) ||
+        !UnifiedChallengesValidV2(challenges)) {
+        return Fail(why, "unified_cs_shape");
+    }
+    AirCs source;
+    if (!BuildExpectedConstraintSystemV1(
+            manifest, source, why)) {
+        return false;
+    }
+    out.n_rows = manifest.n_rows;
+    out.n_columns = kUnifiedCtlColumnsV2;
+    out.preprocessed_pin_ood = true;
+    CopyConstraintFamily(source, 0, out);
+
+    const auto& projections =
+        CanonicalSourceProjectionsV1();
+    for (uint32_t slot = 0;
+         slot < kEndpointCountV1; ++slot) {
+        AirCs receiver;
+        if (!BuildReceiverConstraintSystem(
+                manifest, projections[slot],
+                receiver, why)) {
+            out = {};
+            return false;
+        }
+        const uint32_t receiver_base =
+            UnifiedReceiverBaseV2(slot);
+        CopyConstraintFamily(
+            receiver, receiver_base, out);
+        const TupleColumnsV1 source_tuple{
+            projections[slot].endpoint_column,
+            projections[slot].role_column,
+            projections[slot].address_column,
+            projections[slot].remaining_column,
+            projections[slot].semantic_value_column,
+        };
+        const TupleColumnsV1 receiver_tuple{
+            receiver_base +
+                kRCStage3EpisodeMemoryEndpoint,
+            receiver_base +
+                kRCStage3EpisodeMemoryRole,
+            receiver_base +
+                kRCStage3EpisodeMemoryAddress,
+            receiver_base +
+                kRCStage3EpisodeMemoryRemaining,
+            receiver_base +
+                kRCStage3EpisodeMemoryValue,
+        };
+        const uint32_t source_dependent =
+            UnifiedDependentBaseV2(
+                slot, false);
+        const uint32_t receiver_dependent =
+            UnifiedDependentBaseV2(
+                slot, true);
+        AddCtlSideConstraints(
+            out,
+            "stage3.episode_source_ctl.unified_source",
+            source_tuple, source_dependent, 1,
+            challenges[slot],
+            source_terminals[slot]);
+        AddCtlSideConstraints(
+            out,
+            "stage3.episode_source_ctl.unified_receiver",
+            receiver_tuple, receiver_dependent, -1,
+            challenges[slot],
+            receiver_terminals[slot]);
+        for (uint32_t lane = 0; lane < 2; ++lane) {
+            const uint32_t running_offset =
+                lane == 0
+                    ? kCtlRunning1V1
+                    : kCtlRunning2V1;
+            const uint32_t term_offset =
+                lane == 0
+                    ? kCtlTerm1V1
+                    : kCtlTerm2V1;
+            out.constraints.push_back({
+                "stage3.episode_source_ctl."
+                "unified_terminal_cancel",
+                aq::AirKind::kLastRow,
+                1,
+                [source_dependent,
+                 receiver_dependent,
+                 running_offset,
+                 term_offset](
+                    const std::vector<Fp3>& row,
+                    const std::vector<Fp3>&) {
+                    return gf::Add(
+                        gf::Add(
+                            row[
+                                source_dependent +
+                                running_offset],
+                            row[
+                                source_dependent +
+                                term_offset]),
+                        gf::Add(
+                            row[
+                                receiver_dependent +
+                                running_offset],
+                            row[
+                                receiver_dependent +
+                                term_offset]));
+                },
+            });
+        }
+    }
+    return out.QuotientLen() != 0 ||
+        Fail(why, "unified_cs_empty");
+}
+
+bool BuildUnifiedFinalColumnsV2(
+    const LeafManifestV1& manifest,
+    const std::vector<std::vector<Fp3>>& source_columns,
+    const std::array<
+        RCStage3CtlChallenges, kEndpointCountV1>& challenges,
+    std::vector<std::vector<Fp3>>& out,
+    std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>& source_terminals,
+    std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>& receiver_terminals,
+    std::string* why)
+{
+    if (!BuildUnifiedBaseColumnsV2(
+            manifest, source_columns, out, why)) {
+        return false;
+    }
+    const auto& projections =
+        CanonicalSourceProjectionsV1();
+    for (uint32_t slot = 0;
+         slot < kEndpointCountV1; ++slot) {
+        const uint32_t receiver_base =
+            UnifiedReceiverBaseV2(slot);
+        const TupleColumnsV1 source_tuple{
+            projections[slot].endpoint_column,
+            projections[slot].role_column,
+            projections[slot].address_column,
+            projections[slot].remaining_column,
+            projections[slot].semantic_value_column,
+        };
+        const TupleColumnsV1 receiver_tuple{
+            receiver_base +
+                kRCStage3EpisodeMemoryEndpoint,
+            receiver_base +
+                kRCStage3EpisodeMemoryRole,
+            receiver_base +
+                kRCStage3EpisodeMemoryAddress,
+            receiver_base +
+                kRCStage3EpisodeMemoryRemaining,
+            receiver_base +
+                kRCStage3EpisodeMemoryValue,
+        };
+        if (!PopulateCtlSideWitness(
+                source_tuple,
+                UnifiedDependentBaseV2(
+                    slot, false),
+                1, challenges[slot], out,
+                source_terminals[slot], why) ||
+            !PopulateCtlSideWitness(
+                receiver_tuple,
+                UnifiedDependentBaseV2(
+                    slot, true),
+                -1, challenges[slot], out,
+                receiver_terminals[slot], why) ||
+            !gf::IsZero(gf::Add(
+                source_terminals[slot].alpha1_sum,
+                receiver_terminals[slot].alpha1_sum)) ||
+            !gf::IsZero(gf::Add(
+                source_terminals[slot].alpha2_sum,
+                receiver_terminals[slot].alpha2_sum))) {
+            out = {};
+            return Fail(
+                why,
+                "unified_terminal_cancel_" +
+                    std::to_string(slot));
+        }
+    }
+    return true;
+}
+
+uint256 UnifiedFsSeedV2(
+    const LeafManifestV1& manifest,
+    const uint256& base_row_commitment,
+    const std::array<
+        RCStage3CtlChallenges, kEndpointCountV1>& challenges)
+{
+    if (!ManifestValid(manifest, nullptr) ||
+        base_row_commitment.IsNull() ||
+        !UnifiedChallengesValidV2(challenges)) {
+        return {};
+    }
+    HashWriter hash;
+    hash << UNIFIED_CTL_FS_DOMAIN;
+    hash << kUnifiedCtlVersionV2;
+    hash << manifest.manifest_commitment;
+    hash << base_row_commitment;
+    for (const auto& challenge : challenges) {
+        hash << CommitRCStage3CtlChallenges(
+            challenge);
+    }
+    return hash.GetHash();
+}
+
+uint256 UnifiedProofCommitmentV2(
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    std::vector<unsigned char> bytes;
+    if (aq::SerializeAirQuotientSplitRapRowsProof(
+            proof, bytes) == 0 ||
+        bytes.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << UNIFIED_CTL_PROOF_DOMAIN;
+    hash << kUnifiedCtlVersionV2;
+    hash << static_cast<uint64_t>(bytes.size());
+    hash << bytes;
+    return hash.GetHash();
+}
+
+uint256 UnifiedJoinCommitmentV2(
+    const LeafManifestV1& manifest,
+    const UnifiedSameParentCtlJoinV2& join)
+{
+    if (!ManifestValid(manifest, nullptr) ||
+        join.version != kUnifiedCtlVersionV2 ||
+        join.public_fs_seed.IsNull() ||
+        join.source_trace_commitment.IsNull() ||
+        join.base_row_commitment.IsNull() ||
+        join.proof_commitment.IsNull() ||
+        !join.single_source_relation ||
+        !join.all_receivers_executed ||
+        !join.all_dual_alpha_terminals ||
+        !join.all_terminal_cancellations) {
+        return {};
+    }
+    HashWriter hash;
+    hash << UNIFIED_CTL_JOIN_DOMAIN;
+    hash << join.version;
+    hash << manifest.manifest_commitment;
+    hash << join.source_trace_commitment;
+    hash << join.base_row_commitment;
+    hash << join.public_fs_seed;
+    for (uint32_t slot = 0;
+         slot < kEndpointCountV1; ++slot) {
+        hash << CommitRCStage3CtlChallenges(
+            join.challenges[slot]);
+        WriteFp3(
+            hash,
+            join.source_terminals[slot]
+                .alpha1_sum);
+        WriteFp3(
+            hash,
+            join.source_terminals[slot]
+                .alpha2_sum);
+        WriteFp3(
+            hash,
+            join.receiver_terminals[slot]
+                .alpha1_sum);
+        WriteFp3(
+            hash,
+            join.receiver_terminals[slot]
+                .alpha2_sum);
+    }
+    hash << static_cast<uint32_t>(
+        join.base_column_indices.size());
+    for (uint32_t column :
+         join.base_column_indices) {
+        hash << column;
+    }
+    hash << join.proof_commitment;
+    hash << join.single_source_relation;
+    hash << join.all_receivers_executed;
+    hash << join.all_dual_alpha_terminals;
+    hash << join.all_terminal_cancellations;
+    return hash.GetHash();
+}
+
+bool ProveUnifiedSameParentCtlJoinV2(
+    const LeafManifestV1& manifest,
+    const std::vector<std::vector<Fp3>>& source_columns,
+    const uint256& expected_source_trace_commitment,
+    UnifiedSameParentCtlJoinV2& out,
+    std::string* why)
+{
+    out = {};
+    if (expected_source_trace_commitment.IsNull()) {
+        return Fail(why, "unified_source_trace_null");
+    }
+    const RCStage3CtlChallenges placeholder{
+        U64(2), U64(3), U64(5), U64(7)};
+    std::array<
+        RCStage3CtlChallenges, kEndpointCountV1>
+        placeholder_challenges;
+    placeholder_challenges.fill(placeholder);
+    std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>
+        zero_terminals{};
+    AirCs placeholder_cs;
+    std::vector<std::vector<Fp3>> base_columns;
+    const auto base_indices =
+        UnifiedBaseIndicesV2();
+    if (!BuildUnifiedConstraintSystemV2(
+            manifest, placeholder_challenges,
+            zero_terminals, zero_terminals,
+            placeholder_cs, why) ||
+        !BuildUnifiedBaseColumnsV2(
+            manifest, source_columns,
+            base_columns, why)) {
+        return false;
+    }
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            placeholder_cs, base_columns,
+            base_indices);
+    if (!r0.valid ||
+        r0.base_row_commitment.IsNull() ||
+        r0.base_row_commitment !=
+            expected_source_trace_commitment) {
+        return Fail(
+            why, "unified_source_trace_root:" +
+                r0.note);
+    }
+    std::array<
+        RCStage3CtlChallenges, kEndpointCountV1>
+        challenges;
+    for (uint32_t slot = 0;
+         slot < kEndpointCountV1; ++slot) {
+        RCStage3CtlManifest ctl_manifest;
+        std::vector<RCStage3CtlChildPin> pins;
+        if (!BuildCtlChallengeMaterial(
+                manifest, slot,
+                r0.base_row_commitment,
+                ctl_manifest, pins,
+                challenges[slot], why)) {
+            return false;
+        }
+    }
+    std::vector<std::vector<Fp3>> final_columns;
+    std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>
+        source_terminals;
+    std::array<
+        RCStage3CtlTerminal, kEndpointCountV1>
+        receiver_terminals;
+    AirCs final_cs;
+    if (!BuildUnifiedFinalColumnsV2(
+            manifest, source_columns,
+            challenges, final_columns,
+            source_terminals,
+            receiver_terminals, why) ||
+        !BuildUnifiedConstraintSystemV2(
+            manifest, challenges,
+            source_terminals,
+            receiver_terminals,
+            final_cs, why)) {
+        return false;
+    }
+    const uint256 public_fs_seed =
+        UnifiedFsSeedV2(
+            manifest,
+            r0.base_row_commitment,
+            challenges);
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            final_cs, final_columns,
+            base_indices, public_fs_seed,
+            {}, &r0);
+    if (public_fs_seed.IsNull() ||
+        !proved.ok ||
+        !proved.division_exact) {
+        return Fail(
+            why, "unified_prove:" +
+                proved.note);
+    }
+    std::string verify_why;
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            final_cs, proved.proof,
+            base_indices, public_fs_seed,
+            &verify_why)) {
+        return Fail(
+            why, "unified_prove_verify:" +
+                verify_why);
+    }
+    out.version = kUnifiedCtlVersionV2;
+    out.challenges = challenges;
+    out.source_terminals = source_terminals;
+    out.receiver_terminals =
+        receiver_terminals;
+    out.public_fs_seed = public_fs_seed;
+    out.source_trace_commitment =
+        expected_source_trace_commitment;
+    out.base_row_commitment =
+        r0.base_row_commitment;
+    out.base_column_indices =
+        base_indices;
+    out.proof = proved.proof;
+    out.proof_commitment =
+        UnifiedProofCommitmentV2(
+            out.proof);
+    out.single_source_relation = true;
+    out.all_receivers_executed = true;
+    out.all_dual_alpha_terminals = true;
+    out.all_terminal_cancellations = true;
+    out.join_commitment =
+        UnifiedJoinCommitmentV2(
+            manifest, out);
+    return (
+        !out.proof_commitment.IsNull() &&
+        !out.join_commitment.IsNull()) ||
+        Fail(why, "unified_commitment");
 }
 
 uint256 ExactCoverageCommitment(
@@ -2271,18 +2830,14 @@ uint256 ComputeLeafReceiptCommitmentV1(
         !receipt.locally_verified) {
         return {};
     }
-    for (uint32_t slot = 0;
-         slot < receipt.same_parent_ctl_joins.size();
-         ++slot) {
-        const auto& join =
-            receipt.same_parent_ctl_joins[slot];
-        if (join.projection_slot != slot ||
-            join.join_commitment.IsNull() ||
-            join.join_commitment !=
-                SameParentJoinCommitment(
-                    receipt.manifest, join)) {
-            return {};
-        }
+    if (receipt.unified_same_parent_ctl_join
+                .join_commitment.IsNull() ||
+        receipt.unified_same_parent_ctl_join
+                .join_commitment !=
+            UnifiedJoinCommitmentV2(
+                receipt.manifest,
+                receipt.unified_same_parent_ctl_join)) {
+        return {};
     }
     HashWriter hash;
     hash << RECEIPT_DOMAIN << receipt.version;
@@ -2294,10 +2849,9 @@ uint256 ComputeLeafReceiptCommitmentV1(
     hash << receipt.proof_commitment;
     hash << receipt.active_rows;
     hash << receipt.n_lde;
-    for (const auto& join :
-         receipt.same_parent_ctl_joins) {
-        hash << join.join_commitment;
-    }
+    hash <<
+        receipt.unified_same_parent_ctl_join
+            .join_commitment;
     return hash.GetHash();
 }
 
@@ -2359,16 +2913,13 @@ bool ProveLeafV1(
     out.proof_commitment =
         ProofBytesCommitment(
             out.canonical_proof_bytes);
-    for (uint32_t slot = 0;
-         slot < out.same_parent_ctl_joins.size();
-         ++slot) {
-        if (!ProveSameParentCtlJoin(
-                manifest, columns, slot,
-                out.same_parent_ctl_joins[slot],
-                why)) {
-            out = {};
-            return false;
-        }
+    if (!ProveUnifiedSameParentCtlJoinV2(
+            manifest, columns,
+            out.proof.trace_commit,
+            out.unified_same_parent_ctl_join,
+            why)) {
+        out = {};
+        return false;
     }
     out.active_rows = manifest.logical_rows;
     const uint64_t n_lde =
@@ -2530,6 +3081,143 @@ bool VerifySameParentCtlJoinV1(
     return true;
 }
 
+UnifiedSameParentCtlVerificationInputV2
+BuildUnifiedSameParentCtlVerificationInputV2(
+    const LeafManifestV1& manifest,
+    const UnifiedSameParentCtlJoinV2& join)
+{
+    UnifiedSameParentCtlVerificationInputV2 out;
+    std::string why;
+    if (!ManifestValid(manifest, &why) ||
+        join.version != kUnifiedCtlVersionV2 ||
+        join.base_column_indices !=
+            UnifiedBaseIndicesV2() ||
+        !BuildUnifiedConstraintSystemV2(
+            manifest, join.challenges,
+            join.source_terminals,
+            join.receiver_terminals,
+            out.expected_cs, &why)) {
+        out.note = why.empty()
+            ? "stage3:episode_semantic_source_alg:"
+              "unified_input_shape"
+            : why;
+        return out;
+    }
+    out.proof = &join.proof;
+    out.expected_base_column_indices =
+        UnifiedBaseIndicesV2();
+    out.public_fs_seed =
+        UnifiedFsSeedV2(
+            manifest,
+            join.base_row_commitment,
+            join.challenges);
+    out.valid =
+        out.proof != nullptr &&
+        !out.public_fs_seed.IsNull() &&
+        out.expected_cs.n_rows ==
+            manifest.n_rows &&
+        out.expected_cs.n_columns ==
+            kUnifiedCtlColumnsV2;
+    out.note = out.valid
+        ? "stage3:episode_semantic_source_alg:"
+          "unified_input_ok"
+        : "stage3:episode_semantic_source_alg:"
+          "unified_input_invalid";
+    return out;
+}
+
+bool VerifyUnifiedSameParentCtlJoinV2(
+    const LeafManifestV1& manifest,
+    const UnifiedSameParentCtlJoinV2& join,
+    std::string* why)
+{
+    if (!ManifestValid(manifest, why) ||
+        join.version != kUnifiedCtlVersionV2 ||
+        join.base_column_indices !=
+            UnifiedBaseIndicesV2() ||
+        join.source_trace_commitment.IsNull() ||
+        join.proof.batch.groups.size() != 3 ||
+        Fri3AlgDigestToUint256(
+            join.proof.batch.groups[0]
+                .row_commit.root) !=
+            join.source_trace_commitment ||
+        join.base_row_commitment !=
+            join.source_trace_commitment ||
+        join.proof_commitment !=
+            UnifiedProofCommitmentV2(
+                join.proof) ||
+        !join.single_source_relation ||
+        !join.all_receivers_executed ||
+        !join.all_dual_alpha_terminals ||
+        !join.all_terminal_cancellations) {
+        return Fail(
+            why, "unified_verify_binding");
+    }
+    for (uint32_t slot = 0;
+         slot < kEndpointCountV1; ++slot) {
+        RCStage3CtlManifest ctl_manifest;
+        std::vector<RCStage3CtlChildPin> pins;
+        RCStage3CtlChallenges expected;
+        if (!BuildCtlChallengeMaterial(
+                manifest, slot,
+                join.base_row_commitment,
+                ctl_manifest, pins,
+                expected, why) ||
+            !(expected == join.challenges[slot]) ||
+            !gf::IsZero(gf::Add(
+                join.source_terminals[slot]
+                    .alpha1_sum,
+                join.receiver_terminals[slot]
+                    .alpha1_sum)) ||
+            !gf::IsZero(gf::Add(
+                join.source_terminals[slot]
+                    .alpha2_sum,
+                join.receiver_terminals[slot]
+                    .alpha2_sum))) {
+            return Fail(
+                why,
+                "unified_verify_terminal_" +
+                    std::to_string(slot));
+        }
+    }
+    if (join.public_fs_seed !=
+            UnifiedFsSeedV2(
+                manifest,
+                join.base_row_commitment,
+                join.challenges) ||
+        join.join_commitment !=
+            UnifiedJoinCommitmentV2(
+                manifest, join)) {
+        return Fail(
+            why, "unified_verify_transcript");
+    }
+    const auto input =
+        BuildUnifiedSameParentCtlVerificationInputV2(
+            manifest, join);
+    if (!input.valid ||
+        input.proof == nullptr) {
+        return Fail(
+            why, "unified_verify_input");
+    }
+    std::string proof_why;
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            input.expected_cs,
+            *input.proof,
+            input.expected_base_column_indices,
+            input.public_fs_seed,
+            &proof_why)) {
+        return Fail(
+            why, "unified_verify_air:" +
+                proof_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:episode_semantic_source_alg:"
+            "unified_A_B_Y_same_source_proof_ok";
+    }
+    return true;
+}
+
 bool VerifyLeafV1(
     const LayerShapeV1& expected_shape,
     uint64_t expected_tile_begin,
@@ -2550,6 +3238,9 @@ bool VerifyLeafV1(
         receipt.node_root.IsNull() ||
         receipt.node_root !=
             receipt.proof.trace_commit ||
+        receipt.proof.trace_commit !=
+            receipt.unified_same_parent_ctl_join
+                .source_trace_commitment ||
         receipt.program_root !=
             expected_manifest.program_table_alg ||
         receipt.proof_context_root !=
@@ -2566,19 +3257,12 @@ bool VerifyLeafV1(
         !receipt.locally_verified) {
         return Fail(why, "verify_receipt");
     }
-    for (uint32_t slot = 0;
-         slot < receipt.same_parent_ctl_joins.size();
-         ++slot) {
-        if (receipt.same_parent_ctl_joins[slot]
-                .projection_slot != slot ||
-            !VerifySameParentCtlJoinV1(
-                expected_manifest,
-                receipt.same_parent_ctl_joins[slot],
-                why)) {
-            return Fail(
-                why, "verify_ctl_join_" +
-                    std::to_string(slot));
-        }
+    if (!VerifyUnifiedSameParentCtlJoinV2(
+            expected_manifest,
+            receipt.unified_same_parent_ctl_join,
+            why)) {
+        return Fail(
+            why, "verify_unified_ctl_join");
     }
     const uint64_t n_lde =
         uint64_t{receipt.proof.batch.n_coeffs} *
@@ -2828,15 +3512,13 @@ BundleAuditV1 VerifyLayerBundleV1(
             out.terminal_join = false;
             break;
         }
-        for (const auto& join :
-             leaf.same_parent_ctl_joins) {
-            if (!VerifySameParentCtlJoinV1(
-                    leaf.manifest, join, &why)) {
-                out.receiver_owned = false;
-                out.dual_alpha_ctl_terminal = false;
-                out.terminal_join = false;
-                break;
-            }
+        if (!VerifyUnifiedSameParentCtlJoinV2(
+                leaf.manifest,
+                leaf.unified_same_parent_ctl_join,
+                &why)) {
+            out.receiver_owned = false;
+            out.dual_alpha_ctl_terminal = false;
+            out.terminal_join = false;
         }
         if (!out.terminal_join) break;
         const VerificationInputV1 input =
@@ -2887,15 +3569,15 @@ BundleAuditV1 VerifyLayerBundleV1(
             bundle.leaves.begin(),
             bundle.leaves.end(),
             [](const LeafReceiptV1& leaf) {
-                return std::all_of(
-                    leaf.same_parent_ctl_joins.begin(),
-                    leaf.same_parent_ctl_joins.end(),
-                    [](const SameParentCtlJoinV1& join) {
-                        return
-                            join.proof_owned_dual_alpha_terminal &&
-                            !join.proof_commitment.IsNull() &&
-                            !join.join_commitment.IsNull();
-                    });
+                const auto& join =
+                    leaf.unified_same_parent_ctl_join;
+                return
+                    join.single_source_relation &&
+                    join.all_receivers_executed &&
+                    join.all_dual_alpha_terminals &&
+                    join.all_terminal_cancellations &&
+                    !join.proof_commitment.IsNull() &&
+                    !join.join_commitment.IsNull();
             });
     // A local receiver mirrors the source tuple so that the source terminal
     // is proof-owned.  It does not authenticate the upstream producer.  That

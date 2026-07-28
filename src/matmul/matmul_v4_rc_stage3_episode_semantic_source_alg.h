@@ -27,6 +27,7 @@ using AlgAirProof =
     aq::AirQuotientProof<gf::Fp3, aq::AirFriBackendAlg<gf::Fp3>>;
 
 inline constexpr uint16_t kVersionV1 = 1;
+inline constexpr uint16_t kUnifiedCtlVersionV2 = 2;
 inline constexpr uint32_t kMagicV1 = 0x31425345U; // "ESB1"
 inline constexpr uint32_t kEndpointCountV1 = 3;
 inline constexpr uint32_t kMetadataColumnsPerEndpointV1 = 7;
@@ -126,6 +127,51 @@ struct SameParentCtlVerificationInputV1 {
 };
 
 /**
+ * Sound replacement for the three independent V1 CTL joins.
+ *
+ * One Split-RAP proof contains the GEMM source relation exactly once and all
+ * three A/B/Y semantic-memory receivers.  Consequently A, B and Y cannot be
+ * selected from different otherwise-valid GEMM witnesses.  All six CTL
+ * sides are committed in one R0 before any of the three dual-alpha challenge
+ * sets are derived.
+ */
+struct UnifiedSameParentCtlJoinV2 {
+    uint16_t version{kUnifiedCtlVersionV2};
+    std::array<RCStage3CtlChallenges, kEndpointCountV1>
+        challenges;
+    std::array<RCStage3CtlTerminal, kEndpointCountV1>
+        source_terminals;
+    std::array<RCStage3CtlTerminal, kEndpointCountV1>
+        receiver_terminals;
+    uint256 public_fs_seed{};
+    /**
+     * Exact row-tree commitment of the canonical source columns.  The
+     * unified Split-RAP places precisely those columns in R0, so this root
+     * must equal both proof.batch.groups[0].row_commit.root and the ordinary
+     * Alg proof's trace_commit retained by the recursive hierarchy.
+     */
+    uint256 source_trace_commitment{};
+    uint256 base_row_commitment{};
+    std::vector<uint32_t> base_column_indices;
+    aq::AirQuotientSplitRapRowsProof proof;
+    uint256 proof_commitment{};
+    uint256 join_commitment{};
+    bool single_source_relation{false};
+    bool all_receivers_executed{false};
+    bool all_dual_alpha_terminals{false};
+    bool all_terminal_cancellations{false};
+};
+
+struct UnifiedSameParentCtlVerificationInputV2 {
+    aq::AirConstraintSystem<gf::Fp3> expected_cs;
+    const aq::AirQuotientSplitRapRowsProof* proof{nullptr};
+    std::vector<uint32_t> expected_base_column_indices;
+    uint256 public_fs_seed{};
+    bool valid{false};
+    std::string note;
+};
+
+/**
  * Canonical ordinary AlgAir verifier leaf consumed by the retained recursive
  * parent.  `proof` owns the GEMM A/B/Y trace cells.  Each semantic VALUE is
  * the literal A, B or Y column in that same proof; only the public selector,
@@ -138,6 +184,7 @@ struct LeafReceiptV1 {
     AlgAirProof proof;
     std::array<SameParentCtlJoinV1, kEndpointCountV1>
         same_parent_ctl_joins;
+    UnifiedSameParentCtlJoinV2 unified_same_parent_ctl_join;
     std::vector<unsigned char> canonical_proof_bytes;
     uint256 node_root{};
     uint256 program_root{};
@@ -250,6 +297,16 @@ struct BundleAuditV1 {
     const LeafManifestV1& manifest,
     const SameParentCtlJoinV1& join,
     std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyUnifiedSameParentCtlJoinV2(
+    const LeafManifestV1& manifest,
+    const UnifiedSameParentCtlJoinV2& join,
+    std::string* why = nullptr);
+
+[[nodiscard]] UnifiedSameParentCtlVerificationInputV2
+BuildUnifiedSameParentCtlVerificationInputV2(
+    const LeafManifestV1& manifest,
+    const UnifiedSameParentCtlJoinV2& join);
 
 [[nodiscard]] SameParentCtlVerificationInputV1
 BuildSameParentCtlVerificationInputV1(
