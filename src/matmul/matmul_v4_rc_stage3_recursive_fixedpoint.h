@@ -2852,7 +2852,11 @@ struct NarrowBytecodeShardQuotientJoinAirMirrorV1 {
     bool valid{false};
     bool proved{false};
     bool verified{false};
+    /** Every parent/shard q operand, including padding, is verifier-owned. */
+    bool operands_preprocessed{false};
     bool forgery_rejected{false};
+    /** A +delta/-delta shard substitution is rejected under the same CS. */
+    bool compensated_forgery_rejected{false};
     bool absolute_parent_bound{false};
     uint32_t queries{0};
     uint32_t shard_count{0};
@@ -3113,6 +3117,10 @@ struct NarrowMultiChildL2FriConsumeV1 {
     bool proved{false};
     bool verified{false};
     bool forgery_rejected{false};
+    bool parent_proof_tamper_rejected{false};
+    bool parent_proof_retained{false};
+    bool canonical_whole_proof_codec{false};
+    bool parent_reentry_verified{false};
     uint32_t arity{0};
     uint32_t n_rows{0};
     uint32_t n_columns{0};
@@ -3125,6 +3133,12 @@ struct NarrowMultiChildL2FriConsumeV1 {
     uint64_t serialize_batch_bytes{0};
     /** Batch + trace_commit + next_openings estimate (wire-ish total). */
     uint64_t serialize_root_bytes{0};
+    uint256 parent_fs_seed{};
+    uint256 parent_proof_commitment{};
+    uint256 parent_statement_commitment{};
+    aq::AirConstraintSystem<Fp3> parent_constraint_system;
+    AlgAirProof parent_proof;
+    std::vector<unsigned char> parent_proof_bytes;
     bool verify_within_relay_budget{false};
     bool serialize_within_fri_budget{false};
     nr::NarrowNodeFriShape fri_shape;

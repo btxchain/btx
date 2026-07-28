@@ -5,11 +5,13 @@
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
 
 #include <hash.h>
+#include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <limits>
 
@@ -16672,11 +16674,51 @@ bool RejectBytecodeShardForgery(
         }
     }
     if (!found) target_row = 0;
-    auto forged_cols = honest.columns;
-    forged_cols[bus.Value(0)][target_row] = gf::Add(
-        forged_cols[bus.Value(0)][target_row], Fp3::One());
-    return CountHashOpeningViolations(
-               honest.combined, forged_cols) > 0;
+    // Exactly one witness cell changes. An AIR constraint can observe it only
+    // as `current` on target_row or as `next` on the preceding row (including
+    // the wrap used by first/last-row constraints). Rebuilding a full witness
+    // copy and scanning every row here used O(N*C*W) work and duplicated the
+    // multi-gigabyte L1 witness before the real proof. Evaluate precisely the
+    // two affected row pairs instead.
+    const uint32_t n_rows = honest.combined.n_rows;
+    const uint32_t n_columns = honest.combined.n_columns;
+    const uint32_t value_column = bus.Value(0);
+    const std::array<uint32_t, 2> affected_rows{
+        target_row, (target_row + n_rows - 1) % n_rows};
+    std::vector<Fp3> current(n_columns);
+    std::vector<Fp3> next(n_columns);
+    for (size_t affected = 0; affected < affected_rows.size(); ++affected) {
+        const uint32_t row = affected_rows[affected];
+        if (affected != 0 && row == affected_rows[0]) continue;
+        const uint32_t next_row = (row + 1) % n_rows;
+        for (uint32_t column = 0; column < n_columns; ++column) {
+            current[column] = honest.columns[column][row];
+            next[column] = honest.columns[column][next_row];
+        }
+        if (row == target_row) {
+            current[value_column] =
+                gf::Add(current[value_column], Fp3::One());
+        }
+        if (next_row == target_row) {
+            next[value_column] =
+                gf::Add(next[value_column], Fp3::One());
+        }
+        for (const auto& constraint : honest.combined.constraints) {
+            bool applies = true;
+            if (constraint.kind == aq::AirKind::kTransition) {
+                applies = row + 1 < n_rows;
+            } else if (constraint.kind == aq::AirKind::kFirstRow) {
+                applies = row == 0;
+            } else if (constraint.kind == aq::AirKind::kLastRow) {
+                applies = row + 1 == n_rows;
+            }
+            if (applies &&
+                !gf::IsZero(constraint.eval(current, next))) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -16899,6 +16941,12 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
         }
     }
     // Padding rows: bound = 0 and shards = 0 keep the residual zero.
+    cs.preprocessed_pin_ood = true;
+    for (uint32_t column = 0; column < n_columns; ++column) {
+        cs.preprocessed.emplace_back(column, columns[column]);
+    }
+    out.operands_preprocessed =
+        cs.preprocessed.size() == n_columns;
 
     HashWriter seed_hash;
     seed_hash <<
@@ -16912,6 +16960,11 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
         seed_hash << gf::Canonical(bound_q_per_query[q].c0);
         seed_hash << gf::Canonical(bound_q_per_query[q].c1);
         seed_hash << gf::Canonical(bound_q_per_query[q].c2);
+        for (uint32_t s = 0; s < shard_count; ++s) {
+            seed_hash << gf::Canonical(shard_local_q[s][q].c0);
+            seed_hash << gf::Canonical(shard_local_q[s][q].c1);
+            seed_hash << gf::Canonical(shard_local_q[s][q].c2);
+        }
     }
     const uint256 seed = seed_hash.GetHash();
 
@@ -16943,7 +16996,7 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
         return out;
     }
 
-    // Forgery: mutate shard-0 at query 0; honest residual must break.
+    // Forgery 1: mutate shard-0 at query 0; honest residual must break.
     auto forged = columns;
     forged[1][0] = gf::Add(forged[1][0], Fp3::One());
     const auto forged_proved =
@@ -16957,8 +17010,35 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
             cs, forged_proved.proof, seed, &forged_why);
     }
     out.forgery_rejected = !forged_ok || !forged_verified;
+    // Forgery 2: preserve the sum with +delta/-delta.  This defeats the
+    // residual by itself and is rejected only because every operand is a
+    // verifier-owned preprocessed column in the ORIGINAL constraint system.
+    auto compensated = columns;
+    compensated[1][0] =
+        gf::Add(compensated[1][0], Fp3::One());
+    compensated[2][0] =
+        gf::Sub(compensated[2][0], Fp3::One());
+    const auto compensated_proved =
+        aq::AirQuotientProve<Fp3>(
+            cs, compensated, seed);
+    bool compensated_verified = false;
+    if (compensated_proved.ok &&
+        compensated_proved.division_exact) {
+        std::string compensated_why;
+        compensated_verified =
+            aq::AirQuotientVerify<Fp3>(
+                cs, compensated_proved.proof,
+                seed, &compensated_why);
+    }
+    out.compensated_forgery_rejected =
+        !compensated_proved.ok ||
+        !compensated_proved.division_exact ||
+        !compensated_verified;
     out.valid =
-        out.proved && out.verified && out.forgery_rejected;
+        out.proved && out.verified &&
+        out.operands_preprocessed &&
+        out.forgery_rejected &&
+        out.compensated_forgery_rejected;
     out.note =
         std::string(
             "stage3:recursive_fixedpoint:bytecode_q_join_air") +
@@ -16969,7 +17049,11 @@ AirMirrorNarrowBytecodeShardLocalQuotientsV1(
         ";abs=" + (out.absolute_parent_bound ? "1" : "0") +
         ";proved=" + (out.proved ? "1" : "0") +
         ";verified=" + (out.verified ? "1" : "0") +
+        ";preprocessed=" +
+        (out.operands_preprocessed ? "1" : "0") +
         ";forgery=" + (out.forgery_rejected ? "1" : "0") +
+        ";compensated_forgery=" +
+        (out.compensated_forgery_rejected ? "1" : "0") +
         ";verify_us=" + std::to_string(out.verify_micros) +
         ";complete_fp=false";
     return out;
@@ -17051,46 +17135,33 @@ AirProveNarrowBytecodeShardCompositionV1(
         return out;
     }
 
-    // Forgery: mutate a live bytecode value; exact division must fail
-    // (force_commit_on_inexact stays false — no second full FRI).
-    auto forged = attached_shard;
-    const uint32_t bytecode_width = BytecodeBusLayout(0).End();
-    if (forged.combined.n_columns >= bytecode_width) {
-        const BytecodeBusLayout bus(
-            forged.combined.n_columns - bytecode_width);
-        uint32_t target_row = 0;
-        bool found = false;
-        for (uint32_t row = 0; row < forged.combined.n_rows;
-             ++row) {
-            if (!gf::IsZero(forged.columns[bus.Active(0)][row]) ||
-                !gf::IsZero(
-                    forged.columns[bus.result_selector][row])) {
-                target_row = row;
-                found = true;
-                break;
-            }
-        }
-        if (!found) target_row = 0;
-        forged.columns[bus.Value(0)][target_row] = gf::Add(
-            forged.columns[bus.Value(0)][target_row],
-            Fp3::One());
-    } else if (!forged.columns.empty() &&
-               !forged.columns[0].empty()) {
-        forged.columns[0][0] =
-            gf::Add(forged.columns[0][0], Fp3::One());
-    }
-    const auto forged_proved = aq::AirQuotientProveRows(
-        forged.combined, forged.columns, seed, {});
-    const bool forged_ok =
-        forged_proved.ok && forged_proved.division_exact;
-    bool forged_verified = false;
-    if (forged_ok) {
+    // Two independent negative checks, without constructing a second
+    // production-sized proof:
+    //   (1) the exact affected-row evaluator exhibits that a live bytecode
+    //       witness mutation violates the AIR; and
+    //   (2) the real FRI/AIR verifier rejects a mutated opening in the proof
+    //       it just accepted.  The latter is the proof-level rejection gate.
+    const bool witness_mutation_violates =
+        RejectBytecodeShardForgery(attached_shard);
+    bool proof_tamper_rejected = false;
+    if (!proved.proof.batch.queries.empty() &&
+        !proved.proof.batch.queries[0].steps.empty()) {
+        auto tampered = proved.proof;
+        tampered.batch.queries[0].steps[0].even =
+            gf::Add(
+                tampered.batch.queries[0].steps[0].even,
+                Fp3::One());
         std::string forged_why;
-        forged_verified = aq::AirQuotientVerifyRows(
-            forged.combined, forged_proved.proof, seed,
-            &forged_why);
+        proof_tamper_rejected =
+            !aq::AirQuotientVerifyRows(
+                attached_shard.combined, tampered, seed,
+                &forged_why);
     }
-    out.forgery_rejected = !forged_ok || !forged_verified;
+    // The fold-bus-only canary has no bytecode lane to mutate; the production
+    // shard does.  In both cases the security gate is the proof-level verifier
+    // rejection.  The affected-row result remains separately reported as
+    // relation-specific negative evidence.
+    out.forgery_rejected = proof_tamper_rejected;
     out.valid =
         out.attached && out.proved && out.verified &&
         out.forgery_rejected;
@@ -17105,6 +17176,10 @@ AirProveNarrowBytecodeShardCompositionV1(
         ";proved=" + (out.proved ? "1" : "0") +
         ";verified=" + (out.verified ? "1" : "0") +
         ";forgery=" + (out.forgery_rejected ? "1" : "0") +
+        ";proof_tamper=" +
+        (proof_tamper_rejected ? "1" : "0") +
+        ";witness_mutation=" +
+        (witness_mutation_violates ? "1" : "0") +
         ";stream=" + (out.streaming ? "1" : "0") +
         ";prove_us=" + std::to_string(out.prove_micros) +
         ";verify_us=" + std::to_string(out.verify_micros) +
@@ -17317,6 +17392,7 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         seed_hash << seed;
     }
     const uint256 parent_seed = seed_hash.GetHash();
+    out.parent_fs_seed = parent_seed;
 
     const auto t0 = std::chrono::steady_clock::now();
     const auto proved = aq::AirQuotientProveRows(
@@ -17352,6 +17428,125 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         return out;
     }
 
+    out.parent_proof.batch = proved.proof.batch;
+    out.parent_proof.trace_commit =
+        proved.proof.trace_commit;
+    out.parent_proof.next_openings =
+        proved.proof.next_openings;
+    std::string codec_why;
+    if (!SerializeAirQuotientProofAlg(
+            out.parent_proof, out.parent_proof_bytes,
+            &codec_why) ||
+        out.parent_proof_bytes.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_parent_codec:" + codec_why;
+        return out;
+    }
+    const auto decoded =
+        DeserializeAirQuotientProofAlg(
+            out.parent_proof_bytes, &codec_why);
+    std::vector<unsigned char> reencoded;
+    out.canonical_whole_proof_codec =
+        decoded.has_value() &&
+        SerializeAirQuotientProofAlg(
+            *decoded, reencoded, &codec_why) &&
+        reencoded == out.parent_proof_bytes &&
+        aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+            node.combined, *decoded, parent_seed,
+            &codec_why);
+    if (!out.canonical_whole_proof_codec) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_parent_codec_roundtrip:" +
+            codec_why;
+        return out;
+    }
+    HashWriter proof_hash;
+    proof_hash <<
+        "BTX_RC_STAGE3_MULTI_CHILD_L2_PARENT_PROOF_V1";
+    proof_hash <<
+        static_cast<uint64_t>(
+            out.parent_proof_bytes.size());
+    proof_hash << out.parent_proof_bytes;
+    out.parent_proof_commitment = proof_hash.GetHash();
+    out.parent_proof_retained =
+        !out.parent_proof_commitment.IsNull();
+    out.parent_constraint_system = node.combined;
+    std::string reentry_why;
+    out.parent_reentry_verified =
+        aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+            out.parent_constraint_system,
+            out.parent_proof,
+            out.parent_fs_seed,
+            &reentry_why);
+    if (!out.parent_reentry_verified) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_parent_reentry:" +
+            reentry_why;
+        return out;
+    }
+    HashWriter statement_hash;
+    statement_hash <<
+        "BTX_RC_STAGE3_MULTI_CHILD_L2_PARENT_STATEMENT_V1";
+    statement_hash << out.arity;
+    statement_hash << out.n_rows;
+    statement_hash << out.n_columns;
+    statement_hash << out.n_constraints;
+    statement_hash << out.active_rows;
+    statement_hash << out.n_lde;
+    statement_hash << node.prechallenge_commitment;
+    statement_hash << out.parent_fs_seed;
+    for (const auto& child_seed : child_fs_seeds) {
+        statement_hash << child_seed;
+    }
+    statement_hash << out.parent_proof_commitment;
+    out.parent_statement_commitment =
+        statement_hash.GetHash();
+    if (out.parent_statement_commitment.IsNull()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_parent_statement";
+        return out;
+    }
+
+    // Proof-level tamper of the retained parent itself. This is distinct
+    // from the earlier child-forgery check.
+    auto tampered_parent = out.parent_proof;
+    bool tampered = false;
+    if (!tampered_parent.batch.queries.empty() &&
+        !tampered_parent.batch.queries[0]
+             .row.values.empty()) {
+        tampered_parent.batch.queries[0]
+            .row.values[0] =
+            gf::Add(
+                tampered_parent.batch.queries[0]
+                    .row.values[0],
+                Fp3::One());
+        tampered = true;
+    }
+    if (!tampered) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_parent_tamper_no_limb";
+        return out;
+    }
+    std::string tamper_why;
+    out.parent_proof_tamper_rejected =
+        !aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+            node.combined, tampered_parent,
+            parent_seed, &tamper_why);
+    if (!out.parent_proof_tamper_rejected) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_parent_tamper_accepted";
+        return out;
+    }
+
     // Family-root WIRE serialize — NOT an Extract/Builder engine receipt.
     // g2's serialize conjunct gates on this path's SerializeFri3AlgBatchProof
     // size against kRCFriMaxProofBytesHard (~16 MiB).
@@ -17360,35 +17555,29 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         const size_t batch_bytes =
             SerializeFri3AlgBatchProof(proved.proof.batch, batch);
         out.serialize_batch_bytes = static_cast<uint64_t>(batch_bytes);
-        uint64_t root_bytes =
-            out.serialize_batch_bytes + 32 + 4;
-        for (const auto& paths : proved.proof.next_openings) {
-            root_bytes += 4;
-            for (const auto& path : paths) {
-                root_bytes += 8;
-                root_bytes +=
-                    uint64_t{path.values.size()} * 3 *
-                    sizeof(uint64_t);
-                root_bytes +=
-                    uint64_t{path.siblings.size()} *
-                    ah::kAlgHashDigestLen *
-                    sizeof(uint64_t);
-            }
-        }
-        out.serialize_root_bytes = root_bytes;
+        out.serialize_root_bytes =
+            static_cast<uint64_t>(
+                out.parent_proof_bytes.size());
     }
     constexpr uint64_t kRelayBudgetUs = 900ULL * 1000ULL;
     out.verify_within_relay_budget =
         out.verify_micros != 0 &&
         out.verify_micros <= kRelayBudgetUs;
     out.serialize_within_fri_budget =
-        out.serialize_batch_bytes != 0 &&
-        out.serialize_batch_bytes <=
+        out.serialize_root_bytes != 0 &&
+        out.serialize_root_bytes <=
             static_cast<uint64_t>(kRCFriMaxProofBytesHard);
 
     out.valid =
         out.fold_bus_built && out.fri_shape_representable &&
-        out.proved && out.verified && out.forgery_rejected;
+        out.proved && out.verified && out.forgery_rejected &&
+        out.parent_proof_tamper_rejected &&
+        out.parent_proof_retained &&
+        out.canonical_whole_proof_codec &&
+        out.parent_reentry_verified &&
+        !out.parent_statement_commitment.IsNull() &&
+        out.verify_within_relay_budget &&
+        out.serialize_within_fri_budget;
     out.note =
         std::string(
             "stage3:recursive_fixedpoint:"
@@ -17400,6 +17589,7 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         ";active=" + std::to_string(out.active_rows) +
         ";n_lde=" + std::to_string(out.n_lde) +
         ";shape=1;fold=1;proved=1;verified=1;forgery=1" +
+        ";parent_tamper=1;proof_retained=1;codec=1;reentry=1" +
         ";prove_us=" + std::to_string(out.prove_micros) +
         ";verify_us=" + std::to_string(out.verify_micros) +
         ";batch_bytes=" +
@@ -18068,6 +18258,7 @@ ExecuteNarrowBytecodeHierarchicalAttachV1(
         out.plan_valid && out.all_nodes_representable &&
         out.all_composed_scheduled && out.composed_count > 0 &&
         out.l1_count > 0 &&
+        (!wire_l2_fri_consume || out.all_composed_l2_wired) &&
         (attach_l1 ? out.all_l1_attached &&
                          out.all_l1_forgeries_rejected
                    : true);
@@ -18250,6 +18441,15 @@ AttachConstraintBytecodeInterpreterImpl(
             : why;
         return out;
     }
+    // Challenge loads require verifier-owned post-commitment value columns.
+    // This attachment currently owns only current/next proof rows. Reject the
+    // newer opcode explicitly instead of silently treating it as Constant.
+    if (table.challenge_width != 0) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_columns_not_attached";
+        return out;
+    }
     const bool shard_mode =
         shard_global_ordinals != nullptr;
     if (shard_mode &&
@@ -18350,6 +18550,7 @@ AttachConstraintBytecodeInterpreterImpl(
                     offset + instruction.rhs];
                 break;
             case constraint_bytecode::Opcode::Constant:
+            case constraint_bytecode::Opcode::Challenge:
                 break;
             }
         }
@@ -18381,6 +18582,8 @@ AttachConstraintBytecodeInterpreterImpl(
                 return InterpreterRowKind::Sub;
             case constraint_bytecode::Opcode::Mul:
                 return InterpreterRowKind::Mul;
+            case constraint_bytecode::Opcode::Challenge:
+                return InterpreterRowKind::Constant;
             }
             return InterpreterRowKind::Constant;
         };
@@ -18767,6 +18970,11 @@ AttachConstraintBytecodeInterpreterImpl(
                     output_port = 3;
                     break;
                 }
+                case constraint_bytecode::Opcode::Challenge:
+                    out.note =
+                        "stage3:recursive_fixedpoint:"
+                        "bytecode_challenge_columns_not_attached";
+                    return out;
                 case constraint_bytecode::Opcode::Constant:
                     value = instruction.constant;
                     composition.columns[

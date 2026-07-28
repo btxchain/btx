@@ -4616,7 +4616,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(mirror.valid, mirror.note);
     BOOST_CHECK(mirror.proved);
     BOOST_CHECK(mirror.verified);
+    BOOST_CHECK(mirror.operands_preprocessed);
     BOOST_CHECK(mirror.forgery_rejected);
+    BOOST_CHECK(mirror.compensated_forgery_rejected);
     BOOST_CHECK(mirror.absolute_parent_bound);
     BOOST_CHECK_EQUAL(mirror.queries, kQueries);
     BOOST_CHECK_EQUAL(mirror.shard_count, kShards);
@@ -4778,6 +4780,17 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(consumed.proved);
     BOOST_CHECK(consumed.verified);
     BOOST_CHECK(consumed.forgery_rejected);
+    BOOST_CHECK(consumed.parent_proof_tamper_rejected);
+    BOOST_CHECK(consumed.parent_proof_retained);
+    BOOST_CHECK(consumed.canonical_whole_proof_codec);
+    BOOST_CHECK(consumed.parent_reentry_verified);
+    BOOST_CHECK(!consumed.parent_fs_seed.IsNull());
+    BOOST_CHECK(!consumed.parent_proof_commitment.IsNull());
+    BOOST_CHECK(!consumed.parent_statement_commitment.IsNull());
+    BOOST_CHECK_EQUAL(
+        consumed.parent_constraint_system.n_columns,
+        consumed.n_columns);
+    BOOST_CHECK(!consumed.parent_proof_bytes.empty());
     BOOST_CHECK_EQUAL(consumed.arity, 2U);
     BOOST_CHECK_EQUAL(consumed.n_columns, 575U);
     BOOST_CHECK_EQUAL(consumed.n_rows, shape.n_rows);
@@ -4787,6 +4800,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GE(
         consumed.serialize_root_bytes,
         consumed.serialize_batch_bytes);
+    BOOST_CHECK_EQUAL(
+        consumed.serialize_root_bytes,
+        consumed.parent_proof_bytes.size());
     BOOST_CHECK_LE(
         consumed.serialize_batch_bytes,
         rc::kRCFriMaxProofBytesHard);
