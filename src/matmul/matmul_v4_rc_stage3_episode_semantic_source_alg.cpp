@@ -2210,6 +2210,673 @@ uint256 ExactCoverageCommitment(
     return hash.GetHash();
 }
 
+enum ExternalCtlDependentColumnV3 : uint32_t {
+    kExternalInverse1V3 = 0,
+    kExternalInverse2V3,
+    kExternalTerm1V3,
+    kExternalTerm2V3,
+    kExternalRunning1V3,
+    kExternalRunning2V3,
+    kExternalDependentColumnsV3,
+};
+
+struct ExternalTupleColumnsV3 {
+    uint32_t active{0};
+    uint32_t endpoint{0};
+    uint32_t role{0};
+    uint32_t address{0};
+    uint32_t value{0};
+};
+
+Fp3 CompressExternalTupleV3(
+    const std::vector<Fp3>& row,
+    const ExternalTupleColumnsV3& tuple,
+    const Fp3& gamma)
+{
+    const Fp3 gamma2 = gf::Mul(gamma, gamma);
+    const Fp3 gamma3 = gf::Mul(gamma2, gamma);
+    return gf::Add(
+        row[tuple.endpoint],
+        gf::Add(
+            gf::Mul(gamma, row[tuple.role]),
+            gf::Add(
+                gf::Mul(gamma2, row[tuple.address]),
+                gf::Mul(gamma3, row[tuple.value]))));
+}
+
+bool ValidExternalChallengesV3(
+    const RCStage3CtlChallenges& challenges)
+{
+    return CanonicalFp3(challenges.gamma1) &&
+        CanonicalFp3(challenges.gamma2) &&
+        CanonicalFp3(challenges.alpha1) &&
+        CanonicalFp3(challenges.alpha2) &&
+        !gf::IsZero(challenges.gamma1) &&
+        !gf::IsZero(challenges.gamma2) &&
+        !gf::Eq(
+            challenges.gamma1,
+            challenges.gamma2) &&
+        !gf::Eq(
+            challenges.alpha1,
+            challenges.alpha2);
+}
+
+void AddExternalCtlConstraintsV3(
+    AirCs& cs,
+    const ExternalTupleColumnsV3& tuple,
+    int8_t multiplicity,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal& terminal)
+{
+    const uint32_t base = cs.n_columns;
+    cs.n_columns += kExternalDependentColumnsV3;
+    const Fp3 sign = Signed(multiplicity);
+    const auto add =
+        [&cs](const char* name,
+              aq::AirKind kind,
+              uint32_t degree,
+              auto eval) {
+            cs.constraints.push_back({
+                name, kind, degree,
+                std::move(eval)});
+        };
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t inverse =
+            base + (lane == 0
+                ? kExternalInverse1V3
+                : kExternalInverse2V3);
+        const uint32_t term =
+            base + (lane == 0
+                ? kExternalTerm1V3
+                : kExternalTerm2V3);
+        const uint32_t running =
+            base + (lane == 0
+                ? kExternalRunning1V3
+                : kExternalRunning2V3);
+        const Fp3 gamma =
+            lane == 0
+                ? challenges.gamma1
+                : challenges.gamma2;
+        const Fp3 alpha =
+            lane == 0
+                ? challenges.alpha1
+                : challenges.alpha2;
+        const Fp3 expected =
+            lane == 0
+                ? terminal.alpha1_sum
+                : terminal.alpha2_sum;
+        add(
+            "stage3.episode_external_ctl.inverse",
+            aq::AirKind::kEverywhere, 2,
+            [tuple, inverse, gamma, alpha](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    gf::Mul(
+                        row[inverse],
+                        gf::Sub(
+                            alpha,
+                            CompressExternalTupleV3(
+                                row, tuple, gamma))),
+                    row[tuple.active]);
+            });
+        add(
+            "stage3.episode_external_ctl.padding_inverse",
+            aq::AirKind::kEverywhere, 2,
+            [tuple, inverse](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Mul(
+                    gf::Sub(
+                        Fp3::One(),
+                        row[tuple.active]),
+                    row[inverse]);
+            });
+        add(
+            "stage3.episode_external_ctl.term",
+            aq::AirKind::kEverywhere, 1,
+            [inverse, term, sign](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    row[term],
+                    gf::Mul(sign, row[inverse]));
+            });
+        add(
+            "stage3.episode_external_ctl.running_first",
+            aq::AirKind::kFirstRow, 1,
+            [running](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return row[running];
+            });
+        add(
+            "stage3.episode_external_ctl.running_transition",
+            aq::AirKind::kTransition, 1,
+            [running, term](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>& next) {
+                return gf::Sub(
+                    next[running],
+                    gf::Add(
+                        row[running],
+                        row[term]));
+            });
+        add(
+            "stage3.episode_external_ctl.running_last",
+            aq::AirKind::kLastRow, 1,
+            [running, term, expected](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    gf::Add(
+                        row[running],
+                        row[term]),
+                    expected);
+            });
+    }
+}
+
+bool BuildExternalCtlSystemV3(
+    const AirCs& relation,
+    const ExternalTupleColumnsV3& tuple,
+    int8_t multiplicity,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal& terminal,
+    AirCs& out,
+    std::string* why)
+{
+    if (relation.n_rows < 2 ||
+        relation.n_columns == 0 ||
+        tuple.active >= relation.n_columns ||
+        tuple.endpoint >= relation.n_columns ||
+        tuple.role >= relation.n_columns ||
+        tuple.address >= relation.n_columns ||
+        tuple.value >= relation.n_columns ||
+        (multiplicity != 1 &&
+         multiplicity != -1) ||
+        !ValidExternalChallengesV3(challenges) ||
+        !CanonicalFp3(terminal.alpha1_sum) ||
+        !CanonicalFp3(terminal.alpha2_sum)) {
+        return Fail(why, "external_ctl_system_shape");
+    }
+    out = relation;
+    AddExternalCtlConstraintsV3(
+        out, tuple, multiplicity,
+        challenges, terminal);
+    return out.QuotientLen() != 0 ||
+        Fail(why, "external_ctl_system_empty");
+}
+
+bool PopulateExternalCtlWitnessV3(
+    const ExternalTupleColumnsV3& tuple,
+    int8_t multiplicity,
+    const RCStage3CtlChallenges& challenges,
+    uint32_t relation_columns,
+    std::vector<std::vector<Fp3>>& columns,
+    RCStage3CtlTerminal& terminal,
+    uint64_t& active_rows,
+    std::string* why)
+{
+    terminal = {};
+    active_rows = 0;
+    if (columns.empty() ||
+        tuple.active >= columns.size() ||
+        tuple.endpoint >= columns.size() ||
+        tuple.role >= columns.size() ||
+        tuple.address >= columns.size() ||
+        tuple.value >= columns.size() ||
+        (multiplicity != 1 &&
+         multiplicity != -1) ||
+        !ValidExternalChallengesV3(challenges)) {
+        return Fail(why, "external_ctl_witness_shape");
+    }
+    const uint32_t n_rows =
+        static_cast<uint32_t>(
+            columns.front().size());
+    if (n_rows < 2 ||
+        relation_columns == 0 ||
+        columns.size() !=
+            relation_columns +
+                kExternalDependentColumnsV3 ||
+        !std::all_of(
+            columns.begin(), columns.end(),
+            [n_rows](const auto& column) {
+                return column.size() == n_rows;
+            })) {
+        return Fail(why, "external_ctl_witness_rows");
+    }
+    columns.resize(
+        relation_columns +
+            kExternalDependentColumnsV3,
+        std::vector<Fp3>(
+            n_rows, Fp3::Zero()));
+    const Fp3 sign = Signed(multiplicity);
+    Fp3 running1 = Fp3::Zero();
+    Fp3 running2 = Fp3::Zero();
+    for (uint32_t row_index = 0;
+         row_index < n_rows; ++row_index) {
+        const Fp3 active =
+            columns[tuple.active][row_index];
+        if (!gf::Eq(active, Fp3::Zero()) &&
+            !gf::Eq(active, Fp3::One())) {
+            return Fail(
+                why, "external_ctl_active_boolean");
+        }
+        const uint32_t base =
+            relation_columns;
+        columns[
+            base + kExternalRunning1V3]
+            [row_index] = running1;
+        columns[
+            base + kExternalRunning2V3]
+            [row_index] = running2;
+        if (gf::IsZero(active)) continue;
+        ++active_rows;
+        std::vector<Fp3> current(
+            relation_columns, Fp3::Zero());
+        for (uint32_t column :
+             {tuple.endpoint, tuple.role,
+              tuple.address, tuple.value}) {
+            current[column] =
+                columns[column][row_index];
+        }
+        const Fp3 denominator1 =
+            gf::Sub(
+                challenges.alpha1,
+                CompressExternalTupleV3(
+                    current, tuple,
+                    challenges.gamma1));
+        const Fp3 denominator2 =
+            gf::Sub(
+                challenges.alpha2,
+                CompressExternalTupleV3(
+                    current, tuple,
+                    challenges.gamma2));
+        if (gf::IsZero(denominator1) ||
+            gf::IsZero(denominator2)) {
+            return Fail(
+                why, "external_ctl_challenge_collision");
+        }
+        const Fp3 inverse1 =
+            gf::Inv(denominator1);
+        const Fp3 inverse2 =
+            gf::Inv(denominator2);
+        const Fp3 term1 =
+            gf::Mul(sign, inverse1);
+        const Fp3 term2 =
+            gf::Mul(sign, inverse2);
+        columns[
+            base + kExternalInverse1V3]
+            [row_index] = inverse1;
+        columns[
+            base + kExternalInverse2V3]
+            [row_index] = inverse2;
+        columns[
+            base + kExternalTerm1V3]
+            [row_index] = term1;
+        columns[
+            base + kExternalTerm2V3]
+            [row_index] = term2;
+        running1 = gf::Add(running1, term1);
+        running2 = gf::Add(running2, term2);
+    }
+    terminal = {running1, running2};
+    return active_rows != 0 ||
+        Fail(why, "external_ctl_no_active_rows");
+}
+
+uint64_t ExternalActiveRowsV3(
+    const LeafManifestV1& manifest,
+    uint32_t projection_slot)
+{
+    uint64_t active_rows = 0;
+    for (uint32_t row = 0;
+         row < manifest.n_rows; ++row) {
+        bool active = false;
+        uint64_t ordinal = 0;
+        if (!SemanticOccurrence(
+                manifest, projection_slot,
+                row, active, ordinal)) {
+            return 0;
+        }
+        active_rows += active ? 1 : 0;
+    }
+    return active_rows;
+}
+
+uint256 ExternalConsumerScheduleV3(
+    const LeafManifestV1& manifest,
+    uint32_t projection_slot)
+{
+    if (!ManifestValid(manifest, nullptr) ||
+        projection_slot >= kEndpointCountV1) {
+        return {};
+    }
+    const auto& projection =
+        CanonicalSourceProjectionsV1()[
+            projection_slot];
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_EXTERNAL_CONSUMER_SCHEDULE_V3"}
+         << manifest.manifest_commitment
+         << projection_slot
+         << static_cast<uint16_t>(
+                projection.endpoint)
+         << static_cast<int32_t>(-1)
+         << manifest.n_rows;
+    for (uint32_t row = 0;
+         row < manifest.n_rows; ++row) {
+        bool active = false;
+        uint64_t ordinal = 0;
+        if (!SemanticOccurrence(
+                manifest, projection_slot,
+                row, active, ordinal)) {
+            return {};
+        }
+        hash << active;
+        if (active) {
+            hash << episode_semantic_alg::
+                CanonicalAddressV2(
+                    projection.endpoint,
+                    manifest.shape.layer_ordinal,
+                    ordinal);
+        } else {
+            hash << uint64_t{0};
+        }
+    }
+    return hash.GetHash();
+}
+
+uint256 ExternalProducerScheduleV3(
+    const episode_semantic_alg::LeafManifestV2&
+        manifest)
+{
+    if (!episode_semantic_alg::
+            ValidateLeafManifestV2(
+                manifest, nullptr)) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_EXTERNAL_PRODUCER_SCHEDULE_V3"}
+         << manifest.manifest_commitment
+         << static_cast<uint16_t>(
+                manifest.endpoint)
+         << static_cast<int32_t>(1)
+         << manifest.n_rows;
+    for (uint32_t row = 0;
+         row < manifest.n_rows; ++row) {
+        const bool active =
+            row < manifest.logical_rows;
+        hash << active;
+        hash << (active
+            ? manifest.address_begin + row
+            : uint64_t{0});
+    }
+    return hash.GetHash();
+}
+
+uint256 ExternalAggregateV3(
+    const char* domain,
+    const std::vector<
+        ExternalProducerCtlChildV3>& children,
+    bool trace_roots)
+{
+    if (children.empty()) return {};
+    HashWriter hash;
+    hash << std::string{domain}
+         << kExternalProducerClosureVersionV3
+         << static_cast<uint32_t>(
+                children.size());
+    for (uint32_t i = 0;
+         i < children.size(); ++i) {
+        const auto& child = children[i];
+        if (child.child_ordinal != i ||
+            child.active_rows == 0 ||
+            child.schedule_commitment.IsNull() ||
+            child.owning_r0_root.IsNull()) {
+            return {};
+        }
+        hash << i << child.active_rows
+             << child.schedule_commitment
+             << (trace_roots
+                    ? child.owning_r0_root
+                    : uint256{});
+    }
+    return hash.GetHash();
+}
+
+uint256 ExternalTranscriptSeedV3(
+    const LayerShapeV1& shape,
+    RCStage3RelationEndpoint endpoint,
+    uint32_t projection_slot,
+    const uint256& producer_bundle_commitment,
+    const uint256& consumer_bundle_commitment)
+{
+    if (shape.shape_commitment.IsNull() ||
+        producer_bundle_commitment.IsNull() ||
+        consumer_bundle_commitment.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_EXTERNAL_PRODUCER_EPOCH_V3"}
+         << shape.shape_commitment
+         << static_cast<uint16_t>(endpoint)
+         << projection_slot
+         << producer_bundle_commitment
+         << consumer_bundle_commitment;
+    return hash.GetHash();
+}
+
+bool BuildExternalEpochV3(
+    const LayerShapeV1& shape,
+    RCStage3RelationEndpoint endpoint,
+    uint32_t projection_slot,
+    const uint256& producer_bundle_commitment,
+    const uint256& consumer_bundle_commitment,
+    const std::vector<
+        ExternalProducerCtlChildV3>& consumers,
+    const std::vector<
+        ExternalProducerCtlChildV3>& producers,
+    RCStage3CtlManifest& manifest,
+    std::vector<RCStage3CtlChildPin>& pins,
+    RCStage3CtlChallenges& challenges,
+    std::string* why)
+{
+    manifest = {};
+    pins.clear();
+    challenges = {};
+    uint64_t consumer_events = 0;
+    uint64_t producer_events = 0;
+    for (const auto& child : consumers) {
+        if (child.active_rows >
+            std::numeric_limits<uint64_t>::max() -
+                consumer_events) {
+            return Fail(
+                why, "external_epoch_consumer_count");
+        }
+        consumer_events += child.active_rows;
+    }
+    for (const auto& child : producers) {
+        if (child.active_rows >
+            std::numeric_limits<uint64_t>::max() -
+                producer_events) {
+            return Fail(
+                why, "external_epoch_producer_count");
+        }
+        producer_events += child.active_rows;
+    }
+    const uint256 consumer_schedule =
+        ExternalAggregateV3(
+            "BTX_RC_STAGE3_EXTERNAL_CONSUMER_SCHEDULE_AGG_V3",
+            consumers, false);
+    const uint256 producer_schedule =
+        ExternalAggregateV3(
+            "BTX_RC_STAGE3_EXTERNAL_PRODUCER_SCHEDULE_AGG_V3",
+            producers, false);
+    const uint256 consumer_trace =
+        ExternalAggregateV3(
+            "BTX_RC_STAGE3_EXTERNAL_CONSUMER_R0_AGG_V3",
+            consumers, true);
+    const uint256 producer_trace =
+        ExternalAggregateV3(
+            "BTX_RC_STAGE3_EXTERNAL_PRODUCER_R0_AGG_V3",
+            producers, true);
+    manifest.bus_id =
+        kExternalProducerClosureBusIdV3 +
+        projection_slot;
+    manifest.transcript_seed =
+        ExternalTranscriptSeedV3(
+            shape, endpoint, projection_slot,
+            producer_bundle_commitment,
+            consumer_bundle_commitment);
+    manifest.participants = {
+        {
+            RCStage3RelationRole::EpisodeGemm,
+            consumer_events, 0,
+            consumer_events,
+            consumer_schedule,
+        },
+        {
+            RCStage3RelationRole::EpisodeWiring,
+            producer_events,
+            producer_events, 0,
+            producer_schedule,
+        },
+    };
+    if (consumer_events == 0 ||
+        consumer_events != producer_events ||
+        consumer_schedule.IsNull() ||
+        producer_schedule.IsNull() ||
+        consumer_trace.IsNull() ||
+        producer_trace.IsNull() ||
+        manifest.transcript_seed.IsNull()) {
+        return Fail(why, "external_epoch_shape");
+    }
+    pins.resize(2);
+    for (uint32_t i = 0; i < pins.size(); ++i) {
+        const auto& participant =
+            manifest.participants[i];
+        pins[i].role = participant.role;
+        pins[i].bus_id = manifest.bus_id;
+        pins[i].event_count =
+            participant.event_count;
+        pins[i].send_count =
+            participant.send_count;
+        pins[i].receive_count =
+            participant.receive_count;
+        pins[i].schedule_commitment =
+            participant.schedule_commitment;
+        pins[i].trace_commitment =
+            i == 0
+                ? consumer_trace
+                : producer_trace;
+    }
+    return DeriveRCStage3CtlChallenges(
+        manifest, pins, challenges, why);
+}
+
+uint256 ExternalChildSeedV3(
+    const RCStage3CtlManifest& manifest,
+    const RCStage3CtlChallenges& challenges,
+    bool producer,
+    const ExternalProducerCtlChildV3& child)
+{
+    const uint256 challenge_commitment =
+        CommitRCStage3CtlChallenges(challenges);
+    if (manifest.transcript_seed.IsNull() ||
+        challenge_commitment.IsNull() ||
+        child.schedule_commitment.IsNull() ||
+        child.owning_r0_root.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_EXTERNAL_PRODUCER_CHILD_FS_V3"}
+         << manifest.transcript_seed
+         << manifest.bus_id
+         << producer
+         << child.child_ordinal
+         << child.active_rows
+         << child.schedule_commitment
+         << child.owning_r0_root
+         << challenge_commitment;
+    return hash.GetHash();
+}
+
+uint256 ExternalProofCommitmentV3(
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    std::vector<unsigned char> bytes;
+    if (aq::SerializeAirQuotientSplitRapRowsProof(
+            proof, bytes) == 0 ||
+        bytes.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_EXTERNAL_PRODUCER_CHILD_PROOF_V3"}
+         << static_cast<uint64_t>(bytes.size())
+         << bytes;
+    return hash.GetHash();
+}
+
+uint256 ExternalClosureCommitmentV3(
+    const ExternalProducerClosureV3& closure)
+{
+    if (closure.version !=
+            kExternalProducerClosureVersionV3 ||
+        closure.shape.shape_commitment.IsNull() ||
+        closure.producer_bundle
+            .bundle_commitment.IsNull() ||
+        closure.manifest.transcript_seed.IsNull() ||
+        !ValidExternalChallengesV3(
+            closure.challenges) ||
+        closure.consumer_children.empty() ||
+        closure.producer_children.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_EXTERNAL_PRODUCER_CLOSURE_V3"}
+         << closure.version
+         << static_cast<uint16_t>(
+                closure.endpoint)
+         << closure.projection_slot
+         << closure.shape.shape_commitment
+         << closure.producer_bundle
+                .bundle_commitment
+         << closure.manifest.transcript_seed
+         << CommitRCStage3CtlChallenges(
+                closure.challenges)
+         << closure.all_r0_before_challenge
+         << closure.exact_producer_coverage
+         << closure.exact_consumer_coverage
+         << closure.proof_owned_terminal_cancellation;
+    for (const auto& children :
+         {&closure.consumer_children,
+          &closure.producer_children}) {
+        hash << static_cast<uint32_t>(
+            children->size());
+        for (const auto& child : *children) {
+            hash << child.child_ordinal
+                 << child.active_rows
+                 << child.schedule_commitment
+                 << child.owning_r0_root;
+            WriteFp3(
+                hash,
+                child.terminal.alpha1_sum);
+            WriteFp3(
+                hash,
+                child.terminal.alpha2_sum);
+            hash << child.proof_commitment;
+        }
+    }
+    return hash.GetHash();
+}
+
 } // namespace
 
 const std::array<SourceProjectionV1, kEndpointCountV1>&
@@ -3606,6 +4273,705 @@ BundleAuditV1 VerifyLayerBundleV1(
         : "stage3:episode_semantic_source_alg:"
           "bundle_rejected:" + why;
     return out;
+}
+
+bool ProveExternalProducerClosureV3(
+    const LayerShapeV1& shape,
+    const RCStage3EpisodeGemmLayerProduct& layer,
+    const RCStage3EpisodeExtractProduct& extract,
+    uint64_t extract_tile_begin,
+    const LayerBundleV1& consumer_bundle,
+    uint32_t projection_slot,
+    const uint256& expected_producer_vector_root_alg,
+    ExternalProducerClosureV3& out,
+    std::string* why)
+{
+    out = {};
+    if (projection_slot != kOperandASlotV1 &&
+        projection_slot != kOperandBSlotV1) {
+        return Fail(
+            why, "external_prove_endpoint");
+    }
+    const auto consumer_audit =
+        VerifyLayerBundleV1(
+            shape, consumer_bundle);
+    if (!consumer_audit.accepted ||
+        !consumer_audit.source_terminal_proof_owned) {
+        return Fail(
+            why, "external_prove_consumer:" +
+                consumer_audit.note);
+    }
+    const auto& projection =
+        CanonicalSourceProjectionsV1()[
+            projection_slot];
+    std::vector<Fp3> producer_values;
+    if (projection_slot == kOperandASlotV1) {
+        producer_values.reserve(
+            layer.operand_a.size());
+        for (int8_t value : layer.operand_a) {
+            producer_values.push_back(
+                Signed(value));
+        }
+    } else {
+        producer_values.reserve(
+            layer.operand_b.size());
+        for (int8_t value : layer.operand_b) {
+            producer_values.push_back(
+                Signed(value));
+        }
+    }
+    if (producer_values.size() !=
+            EndpointTotal(shape, projection_slot) ||
+        layer.layer_ordinal !=
+            shape.layer_ordinal ||
+        expected_producer_vector_root_alg.IsNull()) {
+        return Fail(
+            why, "external_prove_producer_shape");
+    }
+
+    out.version =
+        kExternalProducerClosureVersionV3;
+    out.endpoint = projection.endpoint;
+    out.projection_slot = projection_slot;
+    out.shape = shape;
+    if (!episode_semantic_alg::
+            ProveBundleWithOwningValuesV2(
+                out.endpoint,
+                shape.layer_ordinal,
+                shape.statement_commitment,
+                expected_producer_vector_root_alg,
+                producer_values,
+                out.producer_bundle, why)) {
+        out = {};
+        return Fail(
+            why, "external_prove_producer_bundle");
+    }
+
+    const RCStage3CtlChallenges placeholder{
+        U64(2), U64(3), U64(5), U64(7)};
+    const RCStage3CtlTerminal zero_terminal{};
+    std::vector<
+        aq::AirQuotientTwoEpochBaseRowSession>
+        consumer_r0;
+    std::vector<
+        aq::AirQuotientTwoEpochBaseRowSession>
+        producer_r0;
+    std::vector<std::vector<
+        std::vector<Fp3>>>
+        consumer_columns;
+    std::vector<std::vector<
+        std::vector<Fp3>>>
+        producer_columns;
+    consumer_r0.reserve(
+        consumer_bundle.leaves.size());
+    consumer_columns.reserve(
+        consumer_bundle.leaves.size());
+    out.consumer_children.reserve(
+        consumer_bundle.leaves.size());
+    const ExternalTupleColumnsV3
+        consumer_tuple{
+            projection.active_column,
+            projection.endpoint_column,
+            projection.role_column,
+            projection.address_column,
+            projection.semantic_value_column,
+        };
+    for (uint32_t i = 0;
+         i < consumer_bundle.leaves.size();
+         ++i) {
+        const auto& leaf =
+            consumer_bundle.leaves[i];
+        std::vector<std::vector<Fp3>> columns;
+        AirCs relation;
+        AirCs phase0_cs;
+        if (!BuildLeafWitnessV1(
+                leaf.manifest, layer, extract,
+                extract_tile_begin, columns, why) ||
+            !BuildExpectedConstraintSystemV1(
+                leaf.manifest, relation, why) ||
+            !BuildExternalCtlSystemV3(
+                relation, consumer_tuple, -1,
+                placeholder, zero_terminal,
+                phase0_cs, why)) {
+            out = {};
+            return Fail(
+                why, "external_prove_consumer_r0");
+        }
+        const uint32_t relation_columns =
+            relation.n_columns;
+        columns.resize(
+            phase0_cs.n_columns,
+            std::vector<Fp3>(
+                phase0_cs.n_rows,
+                Fp3::Zero()));
+        std::vector<uint32_t> base_indices(
+            relation_columns);
+        std::iota(
+            base_indices.begin(),
+            base_indices.end(), 0);
+        const auto r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                phase0_cs, columns,
+                base_indices);
+        ExternalProducerCtlChildV3 child;
+        child.child_ordinal = i;
+        child.active_rows =
+            ExternalActiveRowsV3(
+                leaf.manifest,
+                projection_slot);
+        child.schedule_commitment =
+            ExternalConsumerScheduleV3(
+                leaf.manifest,
+                projection_slot);
+        child.owning_r0_root =
+            leaf.proof.trace_commit;
+        if (!r0.valid ||
+            r0.base_row_commitment !=
+                child.owning_r0_root ||
+            child.active_rows == 0 ||
+            child.schedule_commitment.IsNull()) {
+            out = {};
+            return Fail(
+                why, "external_prove_consumer_alias");
+        }
+        out.consumer_children.push_back(
+            child);
+        consumer_r0.push_back(r0);
+        consumer_columns.push_back(
+            std::move(columns));
+    }
+
+    producer_r0.reserve(
+        out.producer_bundle.leaves.size());
+    producer_columns.reserve(
+        out.producer_bundle.leaves.size());
+    out.producer_children.reserve(
+        out.producer_bundle.leaves.size());
+    const ExternalTupleColumnsV3
+        producer_tuple{
+            kRCStage3EpisodeMemoryActive,
+            kRCStage3EpisodeMemoryEndpoint,
+            kRCStage3EpisodeMemoryRole,
+            kRCStage3EpisodeMemoryAddress,
+            kRCStage3EpisodeMemoryValue,
+        };
+    for (uint32_t i = 0;
+         i < out.producer_bundle.leaves.size();
+         ++i) {
+        const auto& leaf =
+            out.producer_bundle.leaves[i];
+        const auto& manifest = leaf.manifest;
+        if (manifest.value_begin >
+                producer_values.size() ||
+            manifest.logical_rows >
+                producer_values.size() -
+                    manifest.value_begin) {
+            out = {};
+            return Fail(
+                why, "external_prove_producer_slice");
+        }
+        std::vector<Fp3> shard_values(
+            producer_values.begin() +
+                manifest.value_begin,
+            producer_values.begin() +
+                manifest.value_begin +
+                manifest.logical_rows);
+        std::vector<std::vector<Fp3>> columns;
+        AirCs relation;
+        AirCs phase0_cs;
+        if (!episode_semantic_alg::
+                BuildWitnessV2(
+                    manifest, shard_values,
+                    columns, why) ||
+            !episode_semantic_alg::
+                BuildExpectedConstraintSystemV2(
+                    manifest, relation, why) ||
+            !BuildExternalCtlSystemV3(
+                relation, producer_tuple, 1,
+                placeholder, zero_terminal,
+                phase0_cs, why)) {
+            out = {};
+            return Fail(
+                why, "external_prove_producer_r0");
+        }
+        columns.resize(
+            phase0_cs.n_columns,
+            std::vector<Fp3>(
+                phase0_cs.n_rows,
+                Fp3::Zero()));
+        const auto base_indices =
+            episode_semantic_alg::
+                CanonicalBaseColumnsV2();
+        const auto r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                phase0_cs, columns,
+                base_indices);
+        ExternalProducerCtlChildV3 child;
+        child.child_ordinal = i;
+        child.active_rows =
+            manifest.logical_rows;
+        child.schedule_commitment =
+            ExternalProducerScheduleV3(
+                manifest);
+        child.owning_r0_root =
+            manifest.authority_r0_root;
+        if (!r0.valid ||
+            r0.base_row_commitment !=
+                child.owning_r0_root ||
+            child.schedule_commitment.IsNull()) {
+            out = {};
+            return Fail(
+                why, "external_prove_producer_alias");
+        }
+        out.producer_children.push_back(
+            child);
+        producer_r0.push_back(r0);
+        producer_columns.push_back(
+            std::move(columns));
+    }
+
+    std::vector<RCStage3CtlChildPin>
+        aggregate_pins;
+    if (!BuildExternalEpochV3(
+            shape, out.endpoint,
+            projection_slot,
+            out.producer_bundle
+                .bundle_commitment,
+            consumer_bundle.bundle_commitment,
+            out.consumer_children,
+            out.producer_children,
+            out.manifest, aggregate_pins,
+            out.challenges, why)) {
+        out = {};
+        return Fail(
+            why, "external_prove_epoch");
+    }
+
+    for (uint32_t i = 0;
+         i < out.consumer_children.size();
+         ++i) {
+        auto& child =
+            out.consumer_children[i];
+        RCStage3CtlTerminal terminal;
+        uint64_t active_rows = 0;
+        AirCs relation;
+        AirCs final_cs;
+        if (!BuildExpectedConstraintSystemV1(
+                consumer_bundle.leaves[i]
+                    .manifest,
+                relation, why) ||
+            !PopulateExternalCtlWitnessV3(
+                consumer_tuple, -1,
+                out.challenges,
+                relation.n_columns,
+                consumer_columns[i],
+                terminal, active_rows, why) ||
+            active_rows !=
+                child.active_rows) {
+            out = {};
+            return Fail(
+                why, "external_prove_consumer_witness");
+        }
+        child.terminal = terminal;
+        if (!BuildExternalCtlSystemV3(
+                relation, consumer_tuple, -1,
+                out.challenges, terminal,
+                final_cs, why)) {
+            out = {};
+            return false;
+        }
+        std::vector<uint32_t> base_indices(
+            relation.n_columns);
+        std::iota(
+            base_indices.begin(),
+            base_indices.end(), 0);
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                out.manifest,
+                out.challenges, false,
+                child);
+        const auto proved =
+            aq::AirQuotientProveRowsSplitRapSafeV2(
+                final_cs,
+                consumer_columns[i],
+                base_indices, fs_seed,
+                {}, &consumer_r0[i]);
+        if (fs_seed.IsNull() ||
+            !proved.ok ||
+            !proved.division_exact) {
+            out = {};
+            return Fail(
+                why, "external_prove_consumer_air:" +
+                    proved.note);
+        }
+        child.proof = proved.proof;
+        child.proof_commitment =
+            ExternalProofCommitmentV3(
+                child.proof);
+        if (child.proof_commitment.IsNull()) {
+            out = {};
+            return Fail(
+                why, "external_prove_consumer_codec");
+        }
+    }
+    for (uint32_t i = 0;
+         i < out.producer_children.size();
+         ++i) {
+        auto& child =
+            out.producer_children[i];
+        RCStage3CtlTerminal terminal;
+        uint64_t active_rows = 0;
+        AirCs relation;
+        AirCs final_cs;
+        if (!episode_semantic_alg::
+                BuildExpectedConstraintSystemV2(
+                    out.producer_bundle
+                        .leaves[i].manifest,
+                    relation, why) ||
+            !PopulateExternalCtlWitnessV3(
+                producer_tuple, 1,
+                out.challenges,
+                relation.n_columns,
+                producer_columns[i],
+                terminal, active_rows, why) ||
+            active_rows !=
+                child.active_rows) {
+            out = {};
+            return Fail(
+                why, "external_prove_producer_witness");
+        }
+        child.terminal = terminal;
+        if (!BuildExternalCtlSystemV3(
+                relation, producer_tuple, 1,
+                out.challenges, terminal,
+                final_cs, why)) {
+            out = {};
+            return false;
+        }
+        const auto base_indices =
+            episode_semantic_alg::
+                CanonicalBaseColumnsV2();
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                out.manifest,
+                out.challenges, true,
+                child);
+        const auto proved =
+            aq::AirQuotientProveRowsSplitRapSafeV2(
+                final_cs,
+                producer_columns[i],
+                base_indices, fs_seed,
+                {}, &producer_r0[i]);
+        if (fs_seed.IsNull() ||
+            !proved.ok ||
+            !proved.division_exact) {
+            out = {};
+            return Fail(
+                why, "external_prove_producer_air:" +
+                    proved.note);
+        }
+        child.proof = proved.proof;
+        child.proof_commitment =
+            ExternalProofCommitmentV3(
+                child.proof);
+        if (child.proof_commitment.IsNull()) {
+            out = {};
+            return Fail(
+                why, "external_prove_producer_codec");
+        }
+    }
+
+    Fp3 sum1 = Fp3::Zero();
+    Fp3 sum2 = Fp3::Zero();
+    for (const auto& children :
+         {&out.consumer_children,
+          &out.producer_children}) {
+        for (const auto& child : *children) {
+            sum1 = gf::Add(
+                sum1,
+                child.terminal.alpha1_sum);
+            sum2 = gf::Add(
+                sum2,
+                child.terminal.alpha2_sum);
+        }
+    }
+    out.all_r0_before_challenge = true;
+    out.exact_producer_coverage =
+        out.producer_bundle
+            .total_instance_count ==
+        producer_values.size();
+    out.exact_consumer_coverage =
+        consumer_audit.exact_address_partition &&
+        consumer_audit.verified_tiles ==
+            shape.tile_count;
+    out.proof_owned_terminal_cancellation =
+        gf::IsZero(sum1) &&
+        gf::IsZero(sum2);
+    if (!out.proof_owned_terminal_cancellation) {
+        out = {};
+        return Fail(
+            why, "external_prove_terminal_mismatch");
+    }
+    out.closure_commitment =
+        ExternalClosureCommitmentV3(out);
+    if (out.closure_commitment.IsNull() ||
+        !VerifyExternalProducerClosureV3(
+            shape, consumer_bundle,
+            projection_slot,
+            expected_producer_vector_root_alg,
+            out, why)) {
+        out = {};
+        return Fail(
+            why, "external_prove_self_verify");
+    }
+    return true;
+}
+
+bool VerifyExternalProducerClosureV3(
+    const LayerShapeV1& expected_shape,
+    const LayerBundleV1& expected_consumer_bundle,
+    uint32_t expected_projection_slot,
+    const uint256& expected_producer_vector_root_alg,
+    const ExternalProducerClosureV3& closure,
+    std::string* why)
+{
+    if (expected_projection_slot !=
+            kOperandASlotV1 &&
+        expected_projection_slot !=
+            kOperandBSlotV1) {
+        return Fail(
+            why, "external_verify_endpoint");
+    }
+    const auto& projection =
+        CanonicalSourceProjectionsV1()[
+            expected_projection_slot];
+    const auto consumer_audit =
+        VerifyLayerBundleV1(
+            expected_shape,
+            expected_consumer_bundle);
+    const auto producer_audit =
+        episode_semantic_alg::VerifyBundleV2(
+            projection.endpoint,
+            expected_shape.layer_ordinal,
+            expected_shape.statement_commitment,
+            EndpointTotal(
+                expected_shape,
+                expected_projection_slot),
+            expected_producer_vector_root_alg,
+            closure.producer_bundle);
+    if (closure.version !=
+            kExternalProducerClosureVersionV3 ||
+        closure.endpoint !=
+            projection.endpoint ||
+        closure.projection_slot !=
+            expected_projection_slot ||
+        closure.shape != expected_shape ||
+        !consumer_audit.accepted ||
+        !producer_audit.accepted ||
+        closure.consumer_children.size() !=
+            expected_consumer_bundle
+                .leaves.size() ||
+        closure.producer_children.size() !=
+            closure.producer_bundle
+                .leaves.size()) {
+        return Fail(
+            why, "external_verify_public_shape");
+    }
+
+    std::vector<RCStage3CtlChildPin>
+        aggregate_pins;
+    RCStage3CtlManifest expected_manifest;
+    RCStage3CtlChallenges expected_challenges;
+    if (!BuildExternalEpochV3(
+            expected_shape,
+            projection.endpoint,
+            expected_projection_slot,
+            closure.producer_bundle
+                .bundle_commitment,
+            expected_consumer_bundle
+                .bundle_commitment,
+            closure.consumer_children,
+            closure.producer_children,
+            expected_manifest,
+            aggregate_pins,
+            expected_challenges, why) ||
+        !(expected_manifest ==
+          closure.manifest) ||
+        !(expected_challenges ==
+          closure.challenges)) {
+        return Fail(
+            why, "external_verify_epoch");
+    }
+
+    const ExternalTupleColumnsV3
+        consumer_tuple{
+            projection.active_column,
+            projection.endpoint_column,
+            projection.role_column,
+            projection.address_column,
+            projection.semantic_value_column,
+        };
+    for (uint32_t i = 0;
+         i < closure.consumer_children.size();
+         ++i) {
+        const auto& child =
+            closure.consumer_children[i];
+        const auto& leaf =
+            expected_consumer_bundle.leaves[i];
+        const uint64_t active_rows =
+            ExternalActiveRowsV3(
+                leaf.manifest,
+                expected_projection_slot);
+        AirCs relation;
+        AirCs cs;
+        if (child.child_ordinal != i ||
+            child.active_rows !=
+                active_rows ||
+            child.schedule_commitment !=
+                ExternalConsumerScheduleV3(
+                    leaf.manifest,
+                    expected_projection_slot) ||
+            child.owning_r0_root !=
+                leaf.proof.trace_commit ||
+            child.proof_commitment !=
+                ExternalProofCommitmentV3(
+                    child.proof) ||
+            child.proof.batch.groups.size() != 3 ||
+            Fri3AlgDigestToUint256(
+                child.proof.batch.groups[0]
+                    .row_commit.root) !=
+                child.owning_r0_root ||
+            !BuildExpectedConstraintSystemV1(
+                leaf.manifest, relation, why) ||
+            !BuildExternalCtlSystemV3(
+                relation, consumer_tuple, -1,
+                closure.challenges,
+                child.terminal, cs, why)) {
+            return Fail(
+                why, "external_verify_consumer_binding_" +
+                    std::to_string(i));
+        }
+        std::vector<uint32_t> base_indices(
+            relation.n_columns);
+        std::iota(
+            base_indices.begin(),
+            base_indices.end(), 0);
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                closure.manifest,
+                closure.challenges,
+                false, child);
+        std::string proof_why;
+        if (fs_seed.IsNull() ||
+            !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+                cs, child.proof,
+                base_indices, fs_seed,
+                &proof_why)) {
+            return Fail(
+                why, "external_verify_consumer_air_" +
+                    std::to_string(i) + ":" +
+                    proof_why);
+        }
+    }
+
+    const ExternalTupleColumnsV3
+        producer_tuple{
+            kRCStage3EpisodeMemoryActive,
+            kRCStage3EpisodeMemoryEndpoint,
+            kRCStage3EpisodeMemoryRole,
+            kRCStage3EpisodeMemoryAddress,
+            kRCStage3EpisodeMemoryValue,
+        };
+    for (uint32_t i = 0;
+         i < closure.producer_children.size();
+         ++i) {
+        const auto& child =
+            closure.producer_children[i];
+        const auto& leaf =
+            closure.producer_bundle.leaves[i];
+        AirCs relation;
+        AirCs cs;
+        if (child.child_ordinal != i ||
+            child.active_rows !=
+                leaf.manifest.logical_rows ||
+            child.schedule_commitment !=
+                ExternalProducerScheduleV3(
+                    leaf.manifest) ||
+            child.owning_r0_root !=
+                leaf.manifest.authority_r0_root ||
+            child.proof_commitment !=
+                ExternalProofCommitmentV3(
+                    child.proof) ||
+            child.proof.batch.groups.size() != 3 ||
+            Fri3AlgDigestToUint256(
+                child.proof.batch.groups[0]
+                    .row_commit.root) !=
+                child.owning_r0_root ||
+            !episode_semantic_alg::
+                BuildExpectedConstraintSystemV2(
+                    leaf.manifest,
+                    relation, why) ||
+            !BuildExternalCtlSystemV3(
+                relation, producer_tuple, 1,
+                closure.challenges,
+                child.terminal, cs, why)) {
+            return Fail(
+                why, "external_verify_producer_binding_" +
+                    std::to_string(i));
+        }
+        const auto base_indices =
+            episode_semantic_alg::
+                CanonicalBaseColumnsV2();
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                closure.manifest,
+                closure.challenges,
+                true, child);
+        std::string proof_why;
+        if (fs_seed.IsNull() ||
+            !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+                cs, child.proof,
+                base_indices, fs_seed,
+                &proof_why)) {
+            return Fail(
+                why, "external_verify_producer_air_" +
+                    std::to_string(i) + ":" +
+                    proof_why);
+        }
+    }
+
+    Fp3 sum1 = Fp3::Zero();
+    Fp3 sum2 = Fp3::Zero();
+    for (const auto& children :
+         {&closure.consumer_children,
+          &closure.producer_children}) {
+        for (const auto& child : *children) {
+            sum1 = gf::Add(
+                sum1,
+                child.terminal.alpha1_sum);
+            sum2 = gf::Add(
+                sum2,
+                child.terminal.alpha2_sum);
+        }
+    }
+    if (!closure.all_r0_before_challenge ||
+        !closure.exact_producer_coverage ||
+        !closure.exact_consumer_coverage ||
+        !closure.proof_owned_terminal_cancellation ||
+        !gf::IsZero(sum1) ||
+        !gf::IsZero(sum2) ||
+        closure.closure_commitment !=
+            ExternalClosureCommitmentV3(
+                closure)) {
+        return Fail(
+            why, "external_verify_terminal");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:episode_semantic_source_alg:"
+            "external_producer_shared_epoch_ok";
+    }
+    return true;
 }
 
 } // namespace matmul::v4::rc::episode_semantic_source_alg

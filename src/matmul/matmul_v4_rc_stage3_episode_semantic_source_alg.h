@@ -251,6 +251,83 @@ struct BundleAuditV1 {
     std::string note;
 };
 
+inline constexpr uint16_t kExternalProducerClosureVersionV3 = 3;
+inline constexpr uint32_t kExternalProducerClosureBusIdV3 =
+    0x45585033U; // "EXP3"
+
+/**
+ * One post-R0 CTL child in the external producer -> semantic leaf bridge.
+ *
+ * The base group is not a copied VALUE witness.  For producer children it is
+ * the exact R0 group of an episode_semantic_alg::LeafReceiptV2; for consumer
+ * children it is the exact row commitment of LeafReceiptV1::proof.  The
+ * challenge-dependent suffix contains only inverse/term/running columns.
+ */
+struct ExternalProducerCtlChildV3 {
+    uint32_t child_ordinal{0};
+    uint64_t active_rows{0};
+    uint256 schedule_commitment{};
+    uint256 owning_r0_root{};
+    RCStage3CtlTerminal terminal{};
+    aq::AirQuotientSplitRapRowsProof proof;
+    uint256 proof_commitment{};
+};
+
+/**
+ * Executable all-shard rational-identity bridge for one A or B endpoint.
+ *
+ * `producer_bundle` proves the complete canonical flat producer vector under
+ * its manifest-owned Poseidon VectorRootAlg. `consumer_children` extend the
+ * actual GEMM semantic leaf relations.  One challenge is derived only after
+ * the ordered aggregate of every producer and consumer R0 root is fixed.
+ * Exact address coverage plus dual-Fp3 terminal cancellation therefore proves
+ * that the two proof-owned multisets are equal without consulting host values
+ * during verification.
+ */
+struct ExternalProducerClosureV3 {
+    uint16_t version{kExternalProducerClosureVersionV3};
+    RCStage3RelationEndpoint endpoint{};
+    uint32_t projection_slot{0};
+    LayerShapeV1 shape;
+    episode_semantic_alg::BundleV2 producer_bundle;
+    RCStage3CtlManifest manifest;
+    RCStage3CtlChallenges challenges;
+    std::vector<ExternalProducerCtlChildV3> consumer_children;
+    std::vector<ExternalProducerCtlChildV3> producer_children;
+    uint256 closure_commitment{};
+    bool all_r0_before_challenge{false};
+    bool exact_producer_coverage{false};
+    bool exact_consumer_coverage{false};
+    bool proof_owned_terminal_cancellation{false};
+};
+
+/**
+ * Honest prover for the exact shared-epoch bridge. `layer` and `extract` are
+ * prover witnesses only; verification below consumes no native values.
+ */
+[[nodiscard]] bool ProveExternalProducerClosureV3(
+    const LayerShapeV1& shape,
+    const RCStage3EpisodeGemmLayerProduct& layer,
+    const RCStage3EpisodeExtractProduct& extract,
+    uint64_t extract_tile_begin,
+    const LayerBundleV1& consumer_bundle,
+    uint32_t projection_slot,
+    const uint256& expected_producer_vector_root_alg,
+    ExternalProducerClosureV3& out,
+    std::string* why = nullptr);
+
+/**
+ * Proof-only verifier.  The expected producer root is supplied by the
+ * verifier-owned production GEMM/wiring manifest; no host vector is accepted.
+ */
+[[nodiscard]] bool VerifyExternalProducerClosureV3(
+    const LayerShapeV1& expected_shape,
+    const LayerBundleV1& expected_consumer_bundle,
+    uint32_t expected_projection_slot,
+    const uint256& expected_producer_vector_root_alg,
+    const ExternalProducerClosureV3& closure,
+    std::string* why = nullptr);
+
 [[nodiscard]] bool BuildLayerShapeV1(
     const uint256& statement_commitment,
     const uint256& gemm_manifest_commitment,

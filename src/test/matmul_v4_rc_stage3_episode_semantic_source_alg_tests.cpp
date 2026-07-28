@@ -80,6 +80,18 @@ Fixture BuildFixture(int8_t operand_a = 2)
     return out;
 }
 
+std::vector<gf::Fp3> ToField(
+    const std::vector<int8_t>& values)
+{
+    std::vector<gf::Fp3> out;
+    out.reserve(values.size());
+    for (int8_t value : values) {
+        out.push_back(
+            gf::FromSigned3(value));
+    }
+    return out;
+}
+
 const Fixture& SharedFixture()
 {
     static const Fixture fixture =
@@ -162,6 +174,196 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!audit.external_producer_terminal_joined);
     BOOST_CHECK(!audit.strict_transitive_provenance);
     BOOST_CHECK(!audit.production_source_closed);
+}
+
+BOOST_AUTO_TEST_CASE(
+    external_producer_shared_epoch_closes_all_A_and_B_shards)
+{
+    const Fixture& fixture = SharedFixture();
+    for (uint32_t slot :
+         {source::kOperandASlotV1,
+          source::kOperandBSlotV1}) {
+        const auto values =
+            slot == source::kOperandASlotV1
+            ? ToField(fixture.layer.operand_a)
+            : ToField(fixture.layer.operand_b);
+        const uint256 producer_root =
+            rc::RCStage3VectorRootAlgCommitment(
+                values);
+        source::ExternalProducerClosureV3 closure;
+        std::string why;
+        BOOST_REQUIRE_MESSAGE(
+            source::ProveExternalProducerClosureV3(
+                fixture.shape, fixture.layer,
+                fixture.extract, 0,
+                fixture.bundle, slot,
+                producer_root, closure, &why),
+            why);
+        BOOST_CHECK_MESSAGE(
+            source::VerifyExternalProducerClosureV3(
+                fixture.shape, fixture.bundle,
+                slot, producer_root,
+                closure, &why),
+            why);
+        BOOST_CHECK(
+            closure.all_r0_before_challenge);
+        BOOST_CHECK(
+            closure.exact_producer_coverage);
+        BOOST_CHECK(
+            closure.exact_consumer_coverage);
+        BOOST_CHECK(
+            closure.proof_owned_terminal_cancellation);
+        BOOST_CHECK(
+            !closure.closure_commitment.IsNull());
+        BOOST_REQUIRE_EQUAL(
+            closure.manifest.participants.size(),
+            2U);
+        BOOST_CHECK_EQUAL(
+            closure.manifest.participants[0]
+                .receive_count,
+            values.size());
+        BOOST_CHECK_EQUAL(
+            closure.manifest.participants[1]
+                .send_count,
+            values.size());
+        for (const auto& child :
+             closure.consumer_children) {
+            BOOST_CHECK(
+                !child.owning_r0_root.IsNull());
+            BOOST_CHECK_EQUAL(
+                child.proof.batch.groups.size(),
+                3U);
+            BOOST_CHECK(
+                rc::Fri3AlgDigestToUint256(
+                    child.proof.batch.groups[0]
+                        .row_commit.root) ==
+                child.owning_r0_root);
+        }
+        for (const auto& child :
+             closure.producer_children) {
+            BOOST_CHECK(
+                !child.owning_r0_root.IsNull());
+            BOOST_CHECK_EQUAL(
+                child.proof.batch.groups.size(),
+                3U);
+            BOOST_CHECK(
+                rc::Fri3AlgDigestToUint256(
+                    child.proof.batch.groups[0]
+                        .row_commit.root) ==
+                child.owning_r0_root);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    external_producer_rejects_coherent_valid_cross_witness_transplant)
+{
+    const Fixture honest = BuildFixture(2);
+    const Fixture alternate = BuildFixture(-3);
+    const uint256 honest_root =
+        rc::RCStage3VectorRootAlgCommitment(
+            ToField(honest.layer.operand_a));
+    const uint256 alternate_root =
+        rc::RCStage3VectorRootAlgCommitment(
+            ToField(alternate.layer.operand_a));
+    BOOST_REQUIRE(honest_root != alternate_root);
+
+    source::ExternalProducerClosureV3 honest_closure;
+    source::ExternalProducerClosureV3 alternate_closure;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        source::ProveExternalProducerClosureV3(
+            honest.shape, honest.layer,
+            honest.extract, 0, honest.bundle,
+            source::kOperandASlotV1,
+            honest_root, honest_closure, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        source::ProveExternalProducerClosureV3(
+            alternate.shape, alternate.layer,
+            alternate.extract, 0,
+            alternate.bundle,
+            source::kOperandASlotV1,
+            alternate_root,
+            alternate_closure, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        source::VerifyExternalProducerClosureV3(
+            honest.shape, honest.bundle,
+            source::kOperandASlotV1,
+            honest_root, honest_closure, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        source::VerifyExternalProducerClosureV3(
+            alternate.shape, alternate.bundle,
+            source::kOperandASlotV1,
+            alternate_root,
+            alternate_closure, &why),
+        why);
+
+    // Both sides are independently valid under the same public shape.  A
+    // producer/CTL subtree from the alternate computation cannot be paired
+    // with the honest semantic leaf relation.
+    BOOST_CHECK(
+        !source::VerifyExternalProducerClosureV3(
+            honest.shape, honest.bundle,
+            source::kOperandASlotV1,
+            alternate_root,
+            alternate_closure, &why));
+
+    // Transplant only a separately valid producer proof subtree.  Preserve the
+    // honest outer transcript and claimed owning root so this is not rejected
+    // by a host witness comparison.  The verifier must reject the alternate
+    // proof's group-0 row commitment at the proof-owned R0 alias.
+    auto cross_witness_attack = honest_closure;
+    BOOST_REQUIRE(
+        !cross_witness_attack.producer_children.empty());
+    BOOST_REQUIRE(
+        !alternate_closure.producer_children.empty());
+    cross_witness_attack.producer_children[0].proof =
+        alternate_closure.producer_children[0].proof;
+    cross_witness_attack.producer_children[0].proof_commitment =
+        alternate_closure.producer_children[0]
+            .proof_commitment;
+    why.clear();
+    BOOST_CHECK(
+        !source::VerifyExternalProducerClosureV3(
+            honest.shape, honest.bundle,
+            source::kOperandASlotV1,
+            honest_root,
+            cross_witness_attack, &why));
+    BOOST_CHECK(
+        why.find(
+            "external_verify_producer_binding_0") !=
+        std::string::npos);
+
+    auto proof_attack = honest_closure;
+    BOOST_REQUIRE(
+        !proof_attack.producer_children.empty());
+    BOOST_REQUIRE(
+        !proof_attack.producer_children[0]
+             .proof.batch.queries.empty());
+    BOOST_REQUIRE(
+        !proof_attack.producer_children[0]
+             .proof.batch.queries[0]
+             .group_rows.empty());
+    BOOST_REQUIRE(
+        !proof_attack.producer_children[0]
+             .proof.batch.queries[0]
+             .group_rows[0].values.empty());
+    proof_attack.producer_children[0]
+        .proof.batch.queries[0]
+        .group_rows[0].values[0] =
+        gf::Add(
+            proof_attack.producer_children[0]
+                .proof.batch.queries[0]
+                .group_rows[0].values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !source::VerifyExternalProducerClosureV3(
+            honest.shape, honest.bundle,
+            source::kOperandASlotV1,
+            honest_root, proof_attack, &why));
 }
 
 BOOST_AUTO_TEST_CASE(
