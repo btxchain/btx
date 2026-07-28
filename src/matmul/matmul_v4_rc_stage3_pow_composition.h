@@ -102,6 +102,118 @@ struct AssessmentV1 {
 [[nodiscard]] AssessmentV1
 AssessPowCompositionV1(const PremisesV1& premises);
 
+inline constexpr uint16_t kPowCompositionVersionV2 = 2;
+inline constexpr uint32_t kPowCompositionV2Lanes = 2;
+inline constexpr uint32_t kPowCompositionV2QueriesPerLane = 96;
+inline constexpr uint32_t kPowCompositionV2TaxBits = 20;
+inline constexpr uint64_t kPowCompositionV2ProofSites =
+    37'488'397ULL;
+inline constexpr uint32_t kPowCompositionV2BindingBits = 128;
+inline constexpr uint32_t kPowCompositionV2SafeNiropBits = 128;
+inline constexpr uint32_t kPowCompositionV2SecurityTargetBits = 64;
+
+/**
+ * Versioned composition premises for the selected dual-Q96 SAFE path.
+ *
+ * V1 models the retired, untaxed single-lane Q192 construction. V2 instead
+ * models two domain-separated Q96 lanes over one common commitment and one
+ * shared field-native g=20 tax. The tax is proof-internal regrinding: it
+ * amplifies the conditional algebraic error once and is never credited as
+ * tensor mining work.
+ */
+struct PremisesV2 {
+    uint16_t version{kPowCompositionVersionV2};
+    uint32_t lanes{kPowCompositionV2Lanes};
+    uint32_t queries_per_lane{kPowCompositionV2QueriesPerLane};
+    uint32_t tax_bits{kPowCompositionV2TaxBits};
+    uint64_t proof_sites{kPowCompositionV2ProofSites};
+    uint32_t common_binding_bits{kPowCompositionV2BindingBits};
+    uint32_t safe_nirop_bits{kPowCompositionV2SafeNiropBits};
+    uint32_t security_target_bits{
+        kPowCompositionV2SecurityTargetBits};
+
+    // Consensus statement and complete tensor relation.
+    bool header_projection_and_final_digest_disjoint{false};
+    bool statement_bound_before_first_proof_commitment{false};
+    bool complete_proof_payload_transcript_bound{false};
+    bool complete_tensor_work_relation{false};
+    bool all_relation_children_recursively_verified{false};
+
+    // Common-prefix and lane reductions.
+    bool common_statement_program_trace_bound{false};
+    bool common_trace_root_equality_recursively_consumed{false};
+    bool lane_domains_and_oracles_disjoint{false};
+    bool lane_independence_conditioned_on_common_prefix{false};
+    bool common_commitment_binding_reduction_complete{false};
+    bool concrete_safe_nirop_reduction_complete{false};
+
+    // One shared post-commitment tax and its query scheduler.
+    bool shared_tax_predicate_recursively_consumed{false};
+    bool tax_nonce_absorbed_after_both_lane_commitments{false};
+    bool queries_derived_only_after_tax{false};
+    bool without_replacement_sampler_recursively_consumed{false};
+    bool shared_tax_is_sole_query_entropy_source{false};
+
+    // Global topology and adaptive-selection accounting.
+    bool proof_site_upper_bound_recursively_enforced{false};
+    bool adaptive_statement_selection_accounted{false};
+    bool site_union_and_tax_each_charged_once{false};
+
+    // Consensus authority exclusions.
+    bool sampled_carrier_excluded_from_authority{false};
+    bool exact_replay_excluded_from_authority{false};
+};
+
+struct AssessmentV2 {
+    uint16_t version{kPowCompositionVersionV2};
+    uint32_t lanes{0};
+    uint32_t queries_per_lane{0};
+    uint32_t tax_bits{0};
+    uint64_t proof_sites{0};
+    uint32_t security_target_bits{0};
+
+    long double lane_proximity_probability{0.0L};
+    long double independent_pair_probability{0.0L};
+    long double tax_amplified_pair_probability{0.0L};
+    long double common_binding_probability{0.0L};
+    long double safe_nirop_probability{0.0L};
+    long double per_site_failure_probability{0.0L};
+    long double global_failure_probability{0.0L};
+    double global_conditional_bits{0.0};
+
+    bool canonical_parameters{false};
+    bool consensus_statement_binding_complete{false};
+    bool complete_tensor_work_relation{false};
+    bool common_commitment_hybrid_complete{false};
+    bool independent_lane_product_justified{false};
+    bool shared_tax_and_sampler_complete{false};
+    bool internal_regrind_accounting_consistent{false};
+    bool proof_internal_and_mining_work_separated{false};
+    bool global_site_accounting_complete{false};
+    bool numeric_bound_machine_checked{false};
+    bool numeric_security_target_met{false};
+    bool authority_path_is_succinct_only{false};
+    bool false_acceptance_event_decomposition_complete{false};
+    bool pow_composition_theorem_complete{false};
+    std::string exact_expression;
+    std::string note;
+};
+
+/**
+ * Fail-closed dual-Q96 theorem:
+ *
+ *   eps <= S * (
+ *       2^g * ((17/32)^Q)^2
+ *       + 2^-binding
+ *       + 2^-SAFE
+ *   ).
+ *
+ * The squared proximity term is enabled only by the conditional lane-
+ * independence premise. The g and S factors occur exactly once.
+ */
+[[nodiscard]] AssessmentV2
+AssessPowCompositionV2(const PremisesV2& premises);
+
 } // namespace matmul::v4::rc::pow_composition
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_POW_COMPOSITION_H

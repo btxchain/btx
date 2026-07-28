@@ -47,6 +47,33 @@ pc::PremisesV1 CompletePremises()
     return p;
 }
 
+pc::PremisesV2 CompletePremisesV2()
+{
+    pc::PremisesV2 p;
+    p.header_projection_and_final_digest_disjoint = true;
+    p.statement_bound_before_first_proof_commitment = true;
+    p.complete_proof_payload_transcript_bound = true;
+    p.complete_tensor_work_relation = true;
+    p.all_relation_children_recursively_verified = true;
+    p.common_statement_program_trace_bound = true;
+    p.common_trace_root_equality_recursively_consumed = true;
+    p.lane_domains_and_oracles_disjoint = true;
+    p.lane_independence_conditioned_on_common_prefix = true;
+    p.common_commitment_binding_reduction_complete = true;
+    p.concrete_safe_nirop_reduction_complete = true;
+    p.shared_tax_predicate_recursively_consumed = true;
+    p.tax_nonce_absorbed_after_both_lane_commitments = true;
+    p.queries_derived_only_after_tax = true;
+    p.without_replacement_sampler_recursively_consumed = true;
+    p.shared_tax_is_sole_query_entropy_source = true;
+    p.proof_site_upper_bound_recursively_enforced = true;
+    p.adaptive_statement_selection_accounted = true;
+    p.site_union_and_tax_each_charged_once = true;
+    p.sampled_carrier_excluded_from_authority = true;
+    p.exact_replay_excluded_from_authority = true;
+    return p;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(complete_decomposition_separates_mining_from_internal_grind)
@@ -150,6 +177,112 @@ BOOST_AUTO_TEST_CASE(every_load_bearing_premise_fails_closed)
     REJECT_IF_DROPPED(sampled_carrier_excluded_from_authority);
     REJECT_IF_DROPPED(exact_replay_excluded_from_authority);
 #undef REJECT_IF_DROPPED
+}
+
+BOOST_AUTO_TEST_CASE(
+    dual_q96_v2_charges_shared_tax_and_site_union_once)
+{
+    const auto a =
+        pc::AssessPowCompositionV2(CompletePremisesV2());
+    BOOST_CHECK(a.canonical_parameters);
+    BOOST_CHECK_EQUAL(a.lanes, 2U);
+    BOOST_CHECK_EQUAL(a.queries_per_lane, 96U);
+    BOOST_CHECK_EQUAL(a.tax_bits, 20U);
+    BOOST_CHECK_EQUAL(a.proof_sites, 37'488'397ULL);
+    BOOST_CHECK(a.numeric_bound_machine_checked);
+    BOOST_CHECK_GT(a.global_conditional_bits, 100.0);
+    BOOST_CHECK(a.numeric_security_target_met);
+    BOOST_CHECK(a.consensus_statement_binding_complete);
+    BOOST_CHECK(a.complete_tensor_work_relation);
+    BOOST_CHECK(a.common_commitment_hybrid_complete);
+    BOOST_CHECK(a.independent_lane_product_justified);
+    BOOST_CHECK(a.shared_tax_and_sampler_complete);
+    BOOST_CHECK(a.internal_regrind_accounting_consistent);
+    BOOST_CHECK(a.proof_internal_and_mining_work_separated);
+    BOOST_CHECK(a.global_site_accounting_complete);
+    BOOST_CHECK(a.authority_path_is_succinct_only);
+    BOOST_CHECK(a.pow_composition_theorem_complete);
+    BOOST_CHECK_EQUAL(
+        a.exact_expression,
+        "eps <= 37488397 * "
+        "(2^20 * ((17/32)^96)^2 + 2^-128 + 2^-128)");
+}
+
+BOOST_AUTO_TEST_CASE(
+    dual_q96_v2_independence_tax_and_topology_fail_closed)
+{
+    const pc::PremisesV2 all = CompletePremisesV2();
+#define REJECT_V2_IF_DROPPED(field)                                        \
+    do {                                                                    \
+        auto p = all;                                                       \
+        p.field = false;                                                    \
+        BOOST_TEST_CONTEXT(#field) {                                        \
+            BOOST_CHECK(!pc::AssessPowCompositionV2(p)                      \
+                             .pow_composition_theorem_complete);            \
+        }                                                                   \
+    } while (false)
+
+    REJECT_V2_IF_DROPPED(
+        header_projection_and_final_digest_disjoint);
+    REJECT_V2_IF_DROPPED(
+        statement_bound_before_first_proof_commitment);
+    REJECT_V2_IF_DROPPED(
+        complete_proof_payload_transcript_bound);
+    REJECT_V2_IF_DROPPED(complete_tensor_work_relation);
+    REJECT_V2_IF_DROPPED(
+        all_relation_children_recursively_verified);
+    REJECT_V2_IF_DROPPED(
+        common_statement_program_trace_bound);
+    REJECT_V2_IF_DROPPED(
+        common_trace_root_equality_recursively_consumed);
+    REJECT_V2_IF_DROPPED(lane_domains_and_oracles_disjoint);
+    REJECT_V2_IF_DROPPED(
+        lane_independence_conditioned_on_common_prefix);
+    REJECT_V2_IF_DROPPED(
+        common_commitment_binding_reduction_complete);
+    REJECT_V2_IF_DROPPED(
+        concrete_safe_nirop_reduction_complete);
+    REJECT_V2_IF_DROPPED(
+        shared_tax_predicate_recursively_consumed);
+    REJECT_V2_IF_DROPPED(
+        tax_nonce_absorbed_after_both_lane_commitments);
+    REJECT_V2_IF_DROPPED(queries_derived_only_after_tax);
+    REJECT_V2_IF_DROPPED(
+        without_replacement_sampler_recursively_consumed);
+    REJECT_V2_IF_DROPPED(
+        shared_tax_is_sole_query_entropy_source);
+    REJECT_V2_IF_DROPPED(
+        proof_site_upper_bound_recursively_enforced);
+    REJECT_V2_IF_DROPPED(
+        adaptive_statement_selection_accounted);
+    REJECT_V2_IF_DROPPED(
+        site_union_and_tax_each_charged_once);
+    REJECT_V2_IF_DROPPED(
+        sampled_carrier_excluded_from_authority);
+    REJECT_V2_IF_DROPPED(
+        exact_replay_excluded_from_authority);
+#undef REJECT_V2_IF_DROPPED
+
+    auto wrong = all;
+    wrong.tax_bits = 40;
+    BOOST_CHECK(
+        !pc::AssessPowCompositionV2(wrong)
+             .canonical_parameters);
+    BOOST_CHECK(
+        !pc::AssessPowCompositionV2(wrong)
+             .pow_composition_theorem_complete);
+
+    wrong = all;
+    wrong.queries_per_lane = 95;
+    BOOST_CHECK(
+        !pc::AssessPowCompositionV2(wrong)
+             .pow_composition_theorem_complete);
+
+    wrong = all;
+    --wrong.proof_sites;
+    BOOST_CHECK(
+        !pc::AssessPowCompositionV2(wrong)
+             .pow_composition_theorem_complete);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

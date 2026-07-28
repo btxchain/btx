@@ -4,6 +4,9 @@
 
 #include <matmul/matmul_v4_rc_stage3_pow_composition.h>
 
+#include <cmath>
+#include <limits>
+
 namespace matmul::v4::rc::pow_composition {
 
 AssessmentV1 AssessPowCompositionV1(const PremisesV1& p)
@@ -94,6 +97,176 @@ AssessmentV1 AssessPowCompositionV1(const PremisesV1& p)
             "fresh_mining_statement_bound_before_commit;"
             "internal_regrind_charged_once;"
             "sampled_and_exact_replay_excluded";
+    }
+    return out;
+}
+
+AssessmentV2 AssessPowCompositionV2(const PremisesV2& p)
+{
+    AssessmentV2 out;
+    out.lanes = p.lanes;
+    out.queries_per_lane = p.queries_per_lane;
+    out.tax_bits = p.tax_bits;
+    out.proof_sites = p.proof_sites;
+    out.security_target_bits = p.security_target_bits;
+    out.exact_expression =
+        "eps <= 37488397 * "
+        "(2^20 * ((17/32)^96)^2 + 2^-128 + 2^-128)";
+
+    out.canonical_parameters =
+        p.version == kPowCompositionVersionV2 &&
+        p.lanes == kPowCompositionV2Lanes &&
+        p.queries_per_lane ==
+            kPowCompositionV2QueriesPerLane &&
+        p.tax_bits == kPowCompositionV2TaxBits &&
+        p.proof_sites == kPowCompositionV2ProofSites &&
+        p.common_binding_bits ==
+            kPowCompositionV2BindingBits &&
+        p.safe_nirop_bits == kPowCompositionV2SafeNiropBits &&
+        p.security_target_bits ==
+            kPowCompositionV2SecurityTargetBits;
+    if (!out.canonical_parameters) {
+        out.note = "stage3:pow_composition_v2:parameters";
+        return out;
+    }
+
+    out.lane_proximity_probability = std::pow(
+        17.0L / 32.0L,
+        static_cast<long double>(p.queries_per_lane));
+    out.independent_pair_probability =
+        out.lane_proximity_probability *
+        out.lane_proximity_probability;
+    out.tax_amplified_pair_probability = std::ldexp(
+        out.independent_pair_probability,
+        static_cast<int>(p.tax_bits));
+    out.common_binding_probability = std::ldexp(
+        1.0L, -static_cast<int>(p.common_binding_bits));
+    out.safe_nirop_probability = std::ldexp(
+        1.0L, -static_cast<int>(p.safe_nirop_bits));
+    out.per_site_failure_probability =
+        out.tax_amplified_pair_probability +
+        out.common_binding_probability +
+        out.safe_nirop_probability;
+    out.global_failure_probability =
+        static_cast<long double>(p.proof_sites) *
+        out.per_site_failure_probability;
+    if (out.global_failure_probability > 0.0L &&
+        std::isfinite(out.global_failure_probability)) {
+        out.global_conditional_bits = static_cast<double>(
+            -std::log2(out.global_failure_probability));
+    }
+
+    const long double reconstructed =
+        static_cast<long double>(p.proof_sites) *
+        (std::ldexp(
+             std::pow(
+                 17.0L / 32.0L,
+                 static_cast<long double>(
+                     p.lanes * p.queries_per_lane)),
+             static_cast<int>(p.tax_bits)) +
+         std::ldexp(
+             1.0L,
+             -static_cast<int>(p.common_binding_bits)) +
+         std::ldexp(
+             1.0L,
+             -static_cast<int>(p.safe_nirop_bits)));
+    const long double scale = std::fmax(
+        std::fabs(reconstructed),
+        std::numeric_limits<long double>::min());
+    out.numeric_bound_machine_checked =
+        std::isfinite(reconstructed) &&
+        std::fabs(
+            reconstructed -
+            out.global_failure_probability) <=
+            scale * 1.0e-15L;
+    out.numeric_security_target_met =
+        out.numeric_bound_machine_checked &&
+        out.global_conditional_bits >=
+            static_cast<double>(p.security_target_bits);
+
+    out.consensus_statement_binding_complete =
+        p.header_projection_and_final_digest_disjoint &&
+        p.statement_bound_before_first_proof_commitment &&
+        p.complete_proof_payload_transcript_bound;
+    out.complete_tensor_work_relation =
+        p.complete_tensor_work_relation &&
+        p.all_relation_children_recursively_verified;
+    out.common_commitment_hybrid_complete =
+        p.common_statement_program_trace_bound &&
+        p.common_trace_root_equality_recursively_consumed &&
+        p.common_commitment_binding_reduction_complete;
+    out.independent_lane_product_justified =
+        p.lane_domains_and_oracles_disjoint &&
+        p.lane_independence_conditioned_on_common_prefix &&
+        p.concrete_safe_nirop_reduction_complete;
+    out.shared_tax_and_sampler_complete =
+        p.shared_tax_predicate_recursively_consumed &&
+        p.tax_nonce_absorbed_after_both_lane_commitments &&
+        p.queries_derived_only_after_tax &&
+        p.without_replacement_sampler_recursively_consumed &&
+        p.shared_tax_is_sole_query_entropy_source;
+    out.internal_regrind_accounting_consistent =
+        out.shared_tax_and_sampler_complete &&
+        p.site_union_and_tax_each_charged_once;
+    out.proof_internal_and_mining_work_separated =
+        out.internal_regrind_accounting_consistent &&
+        p.statement_bound_before_first_proof_commitment &&
+        p.tax_nonce_absorbed_after_both_lane_commitments &&
+        p.adaptive_statement_selection_accounted;
+    out.global_site_accounting_complete =
+        p.proof_site_upper_bound_recursively_enforced &&
+        p.site_union_and_tax_each_charged_once;
+    out.authority_path_is_succinct_only =
+        p.sampled_carrier_excluded_from_authority &&
+        p.exact_replay_excluded_from_authority;
+
+    out.false_acceptance_event_decomposition_complete =
+        out.consensus_statement_binding_complete &&
+        out.complete_tensor_work_relation &&
+        out.common_commitment_hybrid_complete &&
+        out.independent_lane_product_justified &&
+        out.shared_tax_and_sampler_complete &&
+        out.proof_internal_and_mining_work_separated &&
+        out.global_site_accounting_complete &&
+        out.numeric_security_target_met &&
+        out.authority_path_is_succinct_only;
+    out.pow_composition_theorem_complete =
+        out.false_acceptance_event_decomposition_complete;
+
+    if (!out.consensus_statement_binding_complete) {
+        out.note =
+            "stage3:pow_composition_v2:statement_binding_open";
+    } else if (!out.complete_tensor_work_relation) {
+        out.note =
+            "stage3:pow_composition_v2:tensor_relation_open";
+    } else if (!out.common_commitment_hybrid_complete) {
+        out.note =
+            "stage3:pow_composition_v2:common_binding_open";
+    } else if (!out.independent_lane_product_justified) {
+        out.note =
+            "stage3:pow_composition_v2:lane_independence_open";
+    } else if (!out.shared_tax_and_sampler_complete) {
+        out.note =
+            "stage3:pow_composition_v2:tax_or_sampler_open";
+    } else if (!out.proof_internal_and_mining_work_separated) {
+        out.note =
+            "stage3:pow_composition_v2:regrind_accounting_open";
+    } else if (!out.global_site_accounting_complete) {
+        out.note =
+            "stage3:pow_composition_v2:site_bound_open";
+    } else if (!out.numeric_security_target_met) {
+        out.note =
+            "stage3:pow_composition_v2:numeric_target_open";
+    } else if (!out.authority_path_is_succinct_only) {
+        out.note =
+            "stage3:pow_composition_v2:authority_path_open";
+    } else {
+        out.note =
+            "stage3:pow_composition_v2:complete;"
+            "dual_q96_conditionally_independent;"
+            "shared_g20_charged_once;"
+            "site_union_charged_once;"
+            "mining_statement_distinct_from_proof_nonce";
     }
     return out;
 }
