@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_gkr_air.h>
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
+#include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
@@ -25,6 +26,8 @@ constexpr char ROLE_DOMAIN[] = "BTX_RC_STAGE3_RELATION_ROLE_CLOSURE_V1";
 constexpr char CLOSURE_DOMAIN[] = "BTX_RC_STAGE3_RELATION_CLOSURE_V1";
 constexpr char DIRECT_ALIAS_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_RELATION_CTL_DIRECT_ALIAS_V1";
+constexpr char SIGNED_RANGE_DUAL_CTL_AUX_DOMAIN[] =
+    "BTX_RC_STAGE3_SIGNED_RANGE_DUAL_CTL_AUX_V1";
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_COUPLED_ENDPOINT_AIR_V1";
 
@@ -402,11 +405,14 @@ RCStage3RelationEndpointCellAudit CellAudit(
         break;
     case RCStage3RelationEndpoint::EpisodeGemmSignedRange:
         out.relation_air_cell = true;
+        out.same_trace_ctl_alias = true;
         out.semantic_relation_complete = true;
+        out.relation_column = kRCStage3RangeValue;
         out.source = "gemm_extract:signed_range:VALUE";
         out.remaining =
-            "native relation-to-two-CTL root equality executes, but its "
-            "recursive verifier child is not consumed";
+            "the signed-range VALUE cell and both producer/Extract CTL VALUE "
+            "cells execute in one dual-alias quotient proof; its recursive "
+            "verifier child is not consumed";
         break;
     case RCStage3RelationEndpoint::EpisodeExtractSampler:
         episode(air_quotient::kColMixed,
@@ -678,6 +684,345 @@ bool BuildRCStage3RelationCtlDirectAliasWitness(
         out.end(), ctl_witness.columns.begin(), ctl_witness.columns.end());
     if (why != nullptr) {
         *why = "stage3:relation_closure:direct_alias_witness_ok";
+    }
+    return true;
+}
+
+bool BuildRCStage3SignedRangeDualCtlDirectAliasConstraintSystem(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& pin,
+    const RCStage3SignedRangeExecutedCtlBinding& binding,
+    AirCS& out,
+    RCStage3SignedRangeDualCtlDirectAliasLayout* layout,
+    std::string* why)
+{
+    out = {};
+    RCStage3SignedRangeDualCtlDirectAliasLayout local;
+
+    RCStage3SignedRangeCtlBinding manifest_binding;
+    manifest_binding.extract_input_shard_root =
+        binding.extract_input_shard_root;
+    manifest_binding.extract_input_opening_commitment =
+        binding.extract_input_opening_commitment;
+    const RCStage3CtlManifest ctl_manifest =
+        BuildRCStage3SignedRangeCtlManifest(
+            manifest, pin, manifest_binding);
+    const std::vector<RCStage3CtlChildPin> pins{
+        binding.range_child, binding.extract_child};
+    RCStage3CtlChallenges challenges;
+    if (ctl_manifest.participants.size() != 2 ||
+        !DeriveRCStage3CtlChallenges(
+            ctl_manifest, pins, challenges, why)) {
+        out = {};
+        return Fail(why, "dual_alias:ctl_challenges");
+    }
+
+    const RCStage3CtlSchedule producer_schedule =
+        BuildRCStage3SignedRangeCtlSchedule(manifest, pin, true);
+    const RCStage3CtlSchedule consumer_schedule =
+        BuildRCStage3SignedRangeCtlSchedule(manifest, pin, false);
+    if (CommitRCStage3CtlSchedule(producer_schedule) !=
+            binding.range_child.schedule_commitment ||
+        CommitRCStage3CtlSchedule(consumer_schedule) !=
+            binding.extract_child.schedule_commitment) {
+        return Fail(why, "dual_alias:schedule_binding");
+    }
+
+    AirCS range_cs;
+    if (!ResolveRCStage3SignedRangeCtlAlignedConstraintSystem(
+            manifest, pin, range_cs, why)) {
+        return Fail(why, "dual_alias:range_constraint_system");
+    }
+    AirCS producer_product;
+    if (!BuildRCStage3RelationCtlDirectAliasConstraintSystem(
+            range_cs,
+            {producer_schedule, challenges,
+             binding.range_child.terminal},
+            kRCStage3RangeValue, producer_product,
+            &local.producer, why)) {
+        return false;
+    }
+    if (!BuildRCStage3RelationCtlDirectAliasConstraintSystem(
+            producer_product,
+            {consumer_schedule, challenges,
+             binding.extract_child.terminal},
+            kRCStage3RangeValue, out,
+            &local.consumer, why)) {
+        return false;
+    }
+
+    local.range_columns = range_cs.n_columns;
+    local.producer_ctl_column_base =
+        local.producer.ctl_column_base;
+    local.consumer_ctl_column_base =
+        local.consumer.ctl_column_base;
+    local.total_columns = out.n_columns;
+    local.source_column = kRCStage3RangeValue;
+    local.same_trace_dual_alias =
+        local.producer.same_trace &&
+        local.producer.direct_alias &&
+        local.consumer.same_trace &&
+        local.consumer.direct_alias &&
+        local.producer.source_column == local.source_column &&
+        local.consumer.source_column == local.source_column &&
+        local.producer_ctl_column_base == local.range_columns &&
+        local.consumer_ctl_column_base ==
+            local.range_columns + stage3_ctl_col::NUM_COLUMNS &&
+        local.total_columns ==
+            local.range_columns +
+                2 * stage3_ctl_col::NUM_COLUMNS;
+    if (!local.same_trace_dual_alias) {
+        out = {};
+        return Fail(why, "dual_alias:internal_layout");
+    }
+    if (layout != nullptr) *layout = local;
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "signed_range_dual_ctl_constraint_system_ok";
+    }
+    return true;
+}
+
+bool BuildRCStage3SignedRangeDualCtlDirectAliasWitness(
+    const RCStage3SignedRangeDualCtlDirectAliasLayout& layout,
+    const std::vector<std::vector<Fp3>>& range_columns,
+    const RCStage3CtlWitness& producer,
+    const RCStage3CtlWitness& consumer,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.clear();
+    if (!layout.same_trace_dual_alias ||
+        layout.range_columns != range_columns.size() ||
+        layout.source_column != kRCStage3RangeValue ||
+        layout.producer.relation_columns != layout.range_columns ||
+        layout.consumer.relation_columns !=
+            layout.range_columns + stage3_ctl_col::NUM_COLUMNS ||
+        layout.total_columns !=
+            layout.range_columns +
+                2 * stage3_ctl_col::NUM_COLUMNS) {
+        return Fail(why, "dual_alias:witness_layout");
+    }
+
+    std::vector<std::vector<Fp3>> producer_product;
+    if (!BuildRCStage3RelationCtlDirectAliasWitness(
+            layout.producer, range_columns, producer,
+            producer_product, why)) {
+        return false;
+    }
+    if (!BuildRCStage3RelationCtlDirectAliasWitness(
+            layout.consumer, producer_product, consumer,
+            out, why)) {
+        return false;
+    }
+    if (out.size() != layout.total_columns) {
+        out.clear();
+        return Fail(why, "dual_alias:witness_width");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "signed_range_value_is_both_ctl_values_same_trace";
+    }
+    return true;
+}
+
+uint256 ComputeRCStage3SignedRangeDualCtlDirectAliasSeed(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& pin,
+    const RCStage3SignedRangeExecutedCtlBinding& binding)
+{
+    RCStage3SignedRangeCtlBinding manifest_binding;
+    manifest_binding.extract_input_shard_root =
+        binding.extract_input_shard_root;
+    manifest_binding.extract_input_opening_commitment =
+        binding.extract_input_opening_commitment;
+    const RCStage3CtlManifest ctl_manifest =
+        BuildRCStage3SignedRangeCtlManifest(
+            manifest, pin, manifest_binding);
+    const std::vector<RCStage3CtlChildPin> pins{
+        binding.range_child, binding.extract_child};
+    RCStage3CtlChallenges challenges;
+    if (ctl_manifest.participants.size() != 2 ||
+        !DeriveRCStage3CtlChallenges(
+            ctl_manifest, pins, challenges, nullptr)) {
+        return {};
+    }
+    const RCStage3CtlSchedule producer_schedule =
+        BuildRCStage3SignedRangeCtlSchedule(manifest, pin, true);
+    const RCStage3CtlSchedule consumer_schedule =
+        BuildRCStage3SignedRangeCtlSchedule(manifest, pin, false);
+    const uint256 producer_seed =
+        ComputeRCStage3RelationCtlDirectAliasSeed(
+            RCStage3RelationEndpoint::EpisodeGemmSignedRange,
+            ComputeRCStage3SignedRangeSeed(pin),
+            producer_schedule, challenges,
+            binding.range_child.terminal,
+            kRCStage3RangeValue);
+    if (producer_seed.IsNull()) return {};
+    return ComputeRCStage3RelationCtlDirectAliasSeed(
+        RCStage3RelationEndpoint::EpisodeGemmSignedRange,
+        producer_seed, consumer_schedule, challenges,
+        binding.extract_child.terminal,
+        kRCStage3RangeValue);
+}
+
+uint256 ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    const RCStage3SignedRangeDualCtlDirectAliasLayout& layout,
+    bool producer_lane)
+{
+    if (!layout.same_trace_dual_alias ||
+        layout.total_columns == 0 ||
+        proof.batch.columns.size() !=
+            static_cast<size_t>(layout.total_columns) + 1 ||
+        proof.batch.column_len.size() != proof.batch.columns.size() ||
+        proof.batch.n_coeffs == 0) {
+        return {};
+    }
+    const uint32_t ctl_base = producer_lane
+        ? layout.producer_ctl_column_base
+        : layout.consumer_ctl_column_base;
+    if (ctl_base > layout.total_columns ||
+        stage3_ctl_col::NUM_COLUMNS >
+            layout.total_columns - ctl_base) {
+        return {};
+    }
+    for (uint32_t column = stage3_ctl_col::INVERSE1;
+         column <= stage3_ctl_col::RUNNING2; ++column) {
+        if (proof.batch.columns[ctl_base + column].root.IsNull()) {
+            return {};
+        }
+    }
+    const uint256& quotient_root =
+        proof.batch.columns[layout.total_columns].root;
+    if (quotient_root.IsNull()) return {};
+
+    HashWriter hash;
+    hash << SIGNED_RANGE_DUAL_CTL_AUX_DOMAIN;
+    hash << kRCStage3RelationClosureVersion;
+    hash << static_cast<uint8_t>(producer_lane ? 1U : 2U);
+    hash << layout.range_columns;
+    hash << ctl_base;
+    hash << layout.total_columns;
+    hash << proof.batch.version;
+    hash << proof.batch.blowup;
+    hash << proof.batch.n_coeffs;
+    hash << static_cast<uint32_t>(proof.batch.column_len.size());
+    for (const uint32_t length : proof.batch.column_len) {
+        hash << length;
+    }
+    for (uint32_t column = stage3_ctl_col::INVERSE1;
+         column <= stage3_ctl_col::RUNNING2; ++column) {
+        hash << proof.batch.columns[ctl_base + column].root;
+    }
+    hash << quotient_root;
+    return hash.GetHash();
+}
+
+bool VerifyRCStage3SignedRangeDualCtlDirectAliasProof(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& pin,
+    const RCStage3SignedRangeExecutedCtlBinding& binding,
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    std::string* why)
+{
+    RCStage3SignedRangeCtlBinding manifest_binding;
+    manifest_binding.extract_input_shard_root =
+        binding.extract_input_shard_root;
+    manifest_binding.extract_input_opening_commitment =
+        binding.extract_input_opening_commitment;
+    const RCStage3CtlManifest ctl_manifest =
+        BuildRCStage3SignedRangeCtlManifest(
+            manifest, pin, manifest_binding);
+    const std::vector<RCStage3CtlChildPin> pins{
+        binding.range_child, binding.extract_child};
+    const RCStage3CtlSchedule producer_schedule =
+        BuildRCStage3SignedRangeCtlSchedule(manifest, pin, true);
+    const RCStage3CtlSchedule consumer_schedule =
+        BuildRCStage3SignedRangeCtlSchedule(manifest, pin, false);
+
+    AirCS combined;
+    RCStage3SignedRangeDualCtlDirectAliasLayout layout;
+    if (!BuildRCStage3SignedRangeDualCtlDirectAliasConstraintSystem(
+            manifest, pin, binding, combined, &layout, why)) {
+        return false;
+    }
+    if (proof.batch.columns.size() !=
+            static_cast<size_t>(combined.n_columns) + 1 ||
+        proof.batch.column_len.size() != proof.batch.columns.size() ||
+        pin.column_roots.size() != layout.range_columns) {
+        return Fail(why, "dual_alias:proof_shape");
+    }
+    for (uint32_t column = 0; column < layout.range_columns; ++column) {
+        if (pin.column_roots[column].column != column ||
+            pin.column_roots[column].root.IsNull() ||
+            proof.batch.columns[column].root !=
+                pin.column_roots[column].root) {
+            return Fail(why, "dual_alias:range_column_root");
+        }
+    }
+    const uint256& source_root =
+        proof.batch.columns[layout.source_column].root;
+    if (binding.extract_input_shard_root != source_root ||
+        proof.batch.columns[
+            layout.producer_ctl_column_base +
+            stage3_ctl_col::VALUE].root != source_root ||
+        proof.batch.columns[
+            layout.consumer_ctl_column_base +
+            stage3_ctl_col::VALUE].root != source_root) {
+        return Fail(why, "dual_alias:source_value_root");
+    }
+
+    const auto trace_commitment =
+        [&](const RCStage3CtlSchedule& schedule,
+            uint32_t ctl_base) {
+            std::array<uint256, 5> roots{};
+            for (uint32_t column = stage3_ctl_col::NAMESPACE;
+                 column <= stage3_ctl_col::MULTIPLICITY; ++column) {
+                roots[column] =
+                    proof.batch.columns[ctl_base + column].root;
+            }
+            return ComputeRCStage3CtlPrechallengeTraceCommitmentFromRoots(
+                schedule, proof.batch.column_len[ctl_base],
+                proof.batch.n_coeffs, roots);
+        };
+    if (trace_commitment(
+            producer_schedule, layout.producer_ctl_column_base) !=
+            binding.range_child.trace_commitment ||
+        trace_commitment(
+            consumer_schedule, layout.consumer_ctl_column_base) !=
+            binding.extract_child.trace_commitment) {
+        return Fail(why, "dual_alias:ctl_trace_commitment");
+    }
+    if (ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
+            proof, layout, true) !=
+            binding.range_child.auxiliary_commitment ||
+        ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
+            proof, layout, false) !=
+            binding.extract_child.auxiliary_commitment) {
+        return Fail(why, "dual_alias:ctl_auxiliary_commitment");
+    }
+    if (!VerifyRCStage3CtlPublicPinComposition(
+            ctl_manifest, pins, why)) {
+        return Fail(why, "dual_alias:ctl_composition");
+    }
+
+    const uint256 seed =
+        ComputeRCStage3SignedRangeDualCtlDirectAliasSeed(
+            manifest, pin, binding);
+    std::string air_why;
+    if (seed.IsNull() ||
+        !air_quotient::AirQuotientVerify<Fp3>(
+            combined, proof, seed, &air_why)) {
+        return Fail(why, "dual_alias:air:" + air_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "signed_range_value_equals_producer_and_extract_ctl_"
+            "same_trace_proof_recursive_consumption_pending";
     }
     return true;
 }

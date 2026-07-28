@@ -58,8 +58,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.executed_relation_cell_endpoints, 22U);
     BOOST_CHECK_EQUAL(
-        manifest.exact_relation_column_endpoints, 21U);
-    BOOST_CHECK_EQUAL(manifest.direct_alias_endpoints, 21U);
+        manifest.exact_relation_column_endpoints, 22U);
+    BOOST_CHECK_EQUAL(manifest.direct_alias_endpoints, 22U);
     BOOST_CHECK_EQUAL(
         manifest.recursive_child_accepted_endpoints, 0U);
     BOOST_CHECK_EQUAL(manifest.complete_roles, 0U);
@@ -121,7 +121,7 @@ BOOST_AUTO_TEST_CASE(
         manifest, RCStage3RelationEndpoint::EpisodeGemmSignedRange);
     BOOST_CHECK_EQUAL(signed_range.relation_column, 2U);
     BOOST_CHECK(signed_range.canonical_output_metadata);
-    BOOST_CHECK(!signed_range.direct_alias_ready);
+    BOOST_CHECK(signed_range.direct_alias_ready);
 
     const auto& barrier = Endpoint(
         manifest, RCStage3RelationEndpoint::CoupledBarrierHash);
@@ -157,8 +157,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(signed_range.selected_program_key);
     BOOST_CHECK(signed_range.canonical_output_metadata);
     BOOST_CHECK_EQUAL(signed_range.relation_column, 2U);
-    BOOST_CHECK(!signed_range.same_trace_ctl_alias);
-    BOOST_CHECK(!signed_range.direct_alias_ready);
+    BOOST_CHECK(signed_range.same_trace_ctl_alias);
+    BOOST_CHECK(signed_range.direct_alias_ready);
 }
 
 BOOST_AUTO_TEST_CASE(

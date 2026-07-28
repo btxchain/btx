@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
+#include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
 #include <test/util/setup_common.h>
 
@@ -314,6 +315,150 @@ rc::RCStage3SignedRangeExecutedCtlShardProof ExecutedCtlShard(
             rc::ComputeRCStage3CtlAuxiliaryCommitment(*proofs[i]);
         BOOST_REQUIRE(!child.auxiliary_commitment.IsNull());
     }
+    return out;
+}
+
+struct SignedRangeDualCtlDirectAliasShard {
+    rc::RCStage3SignedRangePin pin;
+    rc::RCStage3SignedRangeExecutedCtlBinding binding;
+    rc::RCStage3SignedRangeDualCtlDirectAliasLayout layout;
+    aq::AirConstraintSystem<gf::Fp3> constraint_system;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint256 seed{};
+    aq::AirQuotientProof<gf::Fp3> proof;
+};
+
+SignedRangeDualCtlDirectAliasShard DualCtlDirectAliasShard(
+    const rc::RCStage3GemmExtractManifest& manifest,
+    uint32_t layer)
+{
+    SignedRangeDualCtlDirectAliasShard out;
+    std::string why;
+    const auto bare_pin =
+        rc::MakeRCStage3SignedRangePin(manifest, layer, 0, &why);
+    BOOST_REQUIRE_MESSAGE(bare_pin.has_value(), why);
+    out.pin = *bare_pin;
+
+    std::vector<int64_t> signed_values(out.pin.logical_rows);
+    for (uint32_t row = 0; row < signed_values.size(); ++row) {
+        const int64_t magnitude =
+            static_cast<int64_t>(row % (out.pin.max_abs + 1));
+        signed_values[row] =
+            row % 3 == 0 ? -magnitude : magnitude;
+    }
+    std::vector<std::vector<gf::Fp3>> range_columns;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3SignedRangeColumns(
+            out.pin, signed_values, range_columns, &why),
+        why);
+    const uint32_t aligned_coeffs =
+        NextPowerOfTwo(
+            3 * static_cast<uint64_t>(out.pin.n_rows) - 3);
+    for (uint32_t column = 0;
+         column < range_columns.size(); ++column) {
+        out.pin.column_roots[column].root =
+            aq::AirCommittedValuesRoot<gf::Fp3>(
+                range_columns[column], aligned_coeffs);
+    }
+
+    out.binding.extract_input_shard_root =
+        out.pin.column_roots[rc::kRCStage3RangeValue].root;
+    out.binding.extract_input_opening_commitment =
+        Filled(static_cast<unsigned char>(0xd0 + layer));
+    rc::RCStage3SignedRangeCtlBinding manifest_binding;
+    manifest_binding.extract_input_shard_root =
+        out.binding.extract_input_shard_root;
+    manifest_binding.extract_input_opening_commitment =
+        out.binding.extract_input_opening_commitment;
+    const rc::RCStage3CtlManifest ctl_manifest =
+        rc::BuildRCStage3SignedRangeCtlManifest(
+            manifest, out.pin, manifest_binding);
+    BOOST_REQUIRE_EQUAL(ctl_manifest.participants.size(), 2U);
+    const std::array<rc::RCStage3CtlSchedule, 2> schedules{
+        rc::BuildRCStage3SignedRangeCtlSchedule(
+            manifest, out.pin, true),
+        rc::BuildRCStage3SignedRangeCtlSchedule(
+            manifest, out.pin, false),
+    };
+    std::vector<gf::Fp3> values(
+        range_columns[rc::kRCStage3RangeValue].begin(),
+        range_columns[rc::kRCStage3RangeValue].begin() +
+            out.pin.logical_rows);
+    std::array<rc::RCStage3CtlChildPin*, 2> children{
+        &out.binding.range_child,
+        &out.binding.extract_child,
+    };
+    for (size_t i = 0; i < children.size(); ++i) {
+        auto& child = *children[i];
+        const auto& participant = ctl_manifest.participants[i];
+        child.role = participant.role;
+        child.bus_id = ctl_manifest.bus_id;
+        child.event_count = participant.event_count;
+        child.send_count = participant.send_count;
+        child.receive_count = participant.receive_count;
+        child.schedule_commitment =
+            participant.schedule_commitment;
+        child.trace_commitment =
+            rc::ComputeRCStage3CtlPrechallengeTraceCommitment(
+                schedules[i], values);
+        BOOST_REQUIRE(!child.trace_commitment.IsNull());
+    }
+
+    rc::RCStage3CtlChallenges challenges;
+    BOOST_REQUIRE_MESSAGE(
+        rc::DeriveRCStage3CtlChallenges(
+            ctl_manifest,
+            {out.binding.range_child,
+             out.binding.extract_child},
+            challenges, &why),
+        why);
+    const uint256 challenge_commitment =
+        rc::CommitRCStage3CtlChallenges(challenges);
+    const rc::RCStage3CtlWitness producer =
+        rc::BuildRCStage3CtlWitness(
+            schedules[0], values, challenges);
+    const rc::RCStage3CtlWitness consumer =
+        rc::BuildRCStage3CtlWitness(
+            schedules[1], values, challenges);
+    BOOST_REQUIRE_MESSAGE(producer.ok, producer.note);
+    BOOST_REQUIRE_MESSAGE(consumer.ok, consumer.note);
+    out.binding.range_child.terminal = producer.terminal;
+    out.binding.extract_child.terminal = consumer.terminal;
+    out.binding.range_child.challenge_commitment =
+        challenge_commitment;
+    out.binding.extract_child.challenge_commitment =
+        challenge_commitment;
+
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3SignedRangeDualCtlDirectAliasConstraintSystem(
+            manifest, out.pin, out.binding,
+            out.constraint_system, &out.layout, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3SignedRangeDualCtlDirectAliasWitness(
+            out.layout, range_columns, producer, consumer,
+            out.columns, &why),
+        why);
+    out.seed =
+        rc::ComputeRCStage3SignedRangeDualCtlDirectAliasSeed(
+            manifest, out.pin, out.binding);
+    BOOST_REQUIRE(!out.seed.IsNull());
+    const auto result =
+        aq::AirQuotientProve<gf::Fp3>(
+            out.constraint_system, out.columns, out.seed);
+    BOOST_REQUIRE_MESSAGE(result.ok, result.note);
+    BOOST_REQUIRE(result.division_exact);
+    out.proof = result.proof;
+    out.binding.range_child.auxiliary_commitment =
+        rc::ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
+            out.proof, out.layout, true);
+    out.binding.extract_child.auxiliary_commitment =
+        rc::ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
+            out.proof, out.layout, false);
+    BOOST_REQUIRE(
+        !out.binding.range_child.auxiliary_commitment.IsNull());
+    BOOST_REQUIRE(
+        !out.binding.extract_child.auxiliary_commitment.IsNull());
     return out;
 }
 
@@ -1237,6 +1382,96 @@ BOOST_AUTO_TEST_CASE(
         manifest, swapped_proof, &why));
     BOOST_CHECK(
         why.find("executed_ctl_air") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(
+    signed_range_and_both_ctl_lanes_are_one_proved_trace)
+{
+    const auto manifest = Manifest();
+    const auto canonical = DualCtlDirectAliasShard(manifest, 0);
+    std::string why;
+    const auto verify_begin = std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        rc::VerifyRCStage3SignedRangeDualCtlDirectAliasProof(
+            manifest, canonical.pin, canonical.binding,
+            canonical.proof, &why),
+        why);
+    const double verify_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - verify_begin)
+            .count();
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL endpoint9 dual-CTL honest accept: rows="
+        << canonical.constraint_system.n_rows
+        << " columns=" << canonical.constraint_system.n_columns
+        << " constraints="
+        << canonical.constraint_system.constraints.size()
+        << " n_coeffs=" << canonical.proof.batch.n_coeffs
+        << " verify_ms=" << verify_ms);
+    BOOST_CHECK(canonical.layout.same_trace_dual_alias);
+    BOOST_CHECK_EQUAL(
+        canonical.layout.range_columns,
+        rc::kRCStage3SignedRangeColumns);
+    BOOST_CHECK_EQUAL(
+        canonical.layout.total_columns,
+        rc::kRCStage3SignedRangeColumns +
+            2 * rc::stage3_ctl_col::NUM_COLUMNS);
+    const uint256& source_root =
+        canonical.proof.batch
+            .columns[rc::kRCStage3RangeValue].root;
+    BOOST_CHECK(
+        source_root ==
+        canonical.proof.batch
+            .columns[
+                canonical.layout.producer_ctl_column_base +
+                rc::stage3_ctl_col::VALUE].root);
+    BOOST_CHECK(
+        source_root ==
+        canonical.proof.batch
+            .columns[
+                canonical.layout.consumer_ctl_column_base +
+                rc::stage3_ctl_col::VALUE].root);
+    BOOST_CHECK(
+        why.find("same_trace_proof_recursive_consumption_pending") !=
+        std::string::npos);
+
+    auto detached_aux = canonical.binding;
+    detached_aux.extract_child.auxiliary_commitment = Filled(0xe1);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3SignedRangeDualCtlDirectAliasProof(
+            manifest, canonical.pin, detached_aux,
+            canonical.proof, &why));
+    BOOST_CHECK(
+        why.find("ctl_auxiliary_commitment") !=
+        std::string::npos);
+
+    // Adversarial proof-level test: change the consumer CTL VALUE after the
+    // honest range/producer product is built.  Force the prover to commit the
+    // non-divisible quotient, then require the real FRI/AIR verifier—not a
+    // host witness counter—to reject the proof.
+    auto forged_columns = canonical.columns;
+    const uint32_t consumer_value =
+        canonical.layout.consumer_ctl_column_base +
+        rc::stage3_ctl_col::VALUE;
+    forged_columns[consumer_value][3] =
+        gf::Add(
+            forged_columns[consumer_value][3],
+            gf::Fp3::One());
+    aq::AirProveOptions adversarial;
+    adversarial.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProve<gf::Fp3>(
+            canonical.constraint_system, forged_columns,
+            canonical.seed, adversarial);
+    BOOST_REQUIRE_MESSAGE(forged.ok, forged.note);
+    BOOST_CHECK(!forged.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerify<gf::Fp3>(
+            canonical.constraint_system, forged.proof,
+            canonical.seed, &why));
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL endpoint9 forged consumer VALUE rejected by "
+        "AirQuotientVerify: " << why);
 }
 
 BOOST_AUTO_TEST_CASE(

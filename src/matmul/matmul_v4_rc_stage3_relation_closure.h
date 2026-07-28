@@ -18,6 +18,10 @@
 
 namespace matmul::v4::rc {
 
+struct RCStage3GemmExtractManifest;
+struct RCStage3SignedRangePin;
+struct RCStage3SignedRangeExecutedCtlBinding;
+
 // ============================================================================
 // Stage-3 V1 relation-root closure.
 //
@@ -244,6 +248,28 @@ struct RCStage3RelationCtlDirectAliasLayout {
     bool direct_alias{false};
 };
 
+/**
+ * Signed-range dual-port product:
+ *
+ *   [ signed-range relation | producer CTL | Extract-consumer CTL ]
+ *
+ * Both CTL VALUE columns are constrained to the one signed-range VALUE
+ * column in the same quotient proof.  This is the production endpoint-9
+ * topology: proving two detached VALUE-root equalities is insufficient
+ * because it does not constrain either lookup accumulator to the range
+ * witness cells.
+ */
+struct RCStage3SignedRangeDualCtlDirectAliasLayout {
+    RCStage3RelationCtlDirectAliasLayout producer;
+    RCStage3RelationCtlDirectAliasLayout consumer;
+    uint32_t range_columns{0};
+    uint32_t producer_ctl_column_base{0};
+    uint32_t consumer_ctl_column_base{0};
+    uint32_t total_columns{0};
+    uint32_t source_column{0};
+    bool same_trace_dual_alias{false};
+};
+
 /** Exact-row variant using the degree-two CTL layout.  Unlike the generic
  * padded CTL, this product keeps n_coeffs == n_rows, so an existing
  * relation-owned VALUE root can be reused verbatim as the CTL VALUE root. */
@@ -292,6 +318,59 @@ struct RCStage3RelationCtlMaskedAliasLayout {
     const std::vector<std::vector<gkr_field::Fp3>>& relation_columns,
     const RCStage3CtlWitness& ctl_witness,
     std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
+/**
+ * Resolve endpoint 9 from verifier-owned manifest/pin data and both executed
+ * child pins.  Challenges are derived from the two prechallenge commitments;
+ * the caller cannot supply a mutable relation callback or challenge.
+ */
+[[nodiscard]] bool
+BuildRCStage3SignedRangeDualCtlDirectAliasConstraintSystem(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& pin,
+    const RCStage3SignedRangeExecutedCtlBinding& binding,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    RCStage3SignedRangeDualCtlDirectAliasLayout* layout = nullptr,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool BuildRCStage3SignedRangeDualCtlDirectAliasWitness(
+    const RCStage3SignedRangeDualCtlDirectAliasLayout& layout,
+    const std::vector<std::vector<gkr_field::Fp3>>& range_columns,
+    const RCStage3CtlWitness& producer,
+    const RCStage3CtlWitness& consumer,
+    std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
+/** Proof-independent Fiat-Shamir seed for the complete dual-port product. */
+[[nodiscard]] uint256 ComputeRCStage3SignedRangeDualCtlDirectAliasSeed(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& pin,
+    const RCStage3SignedRangeExecutedCtlBinding& binding);
+
+/**
+ * Postchallenge commitment for one CTL lane inside the shared proof.
+ * `producer_lane` selects the producer or Extract-consumer accumulator.  The
+ * commitment binds the lane's inverse/running columns and the one shared
+ * quotient root, so a child receipt cannot be detached from this product.
+ */
+[[nodiscard]] uint256
+ComputeRCStage3SignedRangeDualCtlAuxiliaryCommitment(
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    const RCStage3SignedRangeDualCtlDirectAliasLayout& layout,
+    bool producer_lane);
+
+/**
+ * Verify one complete endpoint-9 proof.  The verifier reconstructs the
+ * signed-range AIR, both schedules, both CTL AIRs, challenges, direct aliases
+ * and public terminal composition.  Recursive consumption remains a separate
+ * fail-closed obligation.
+ */
+[[nodiscard]] bool VerifyRCStage3SignedRangeDualCtlDirectAliasProof(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3SignedRangePin& pin,
+    const RCStage3SignedRangeExecutedCtlBinding& binding,
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
     std::string* why = nullptr);
 
 [[nodiscard]] bool

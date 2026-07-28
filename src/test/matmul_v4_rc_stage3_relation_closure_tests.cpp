@@ -302,7 +302,7 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         BOOST_CHECK(!cell.remaining.empty());
     }
     BOOST_CHECK_EQUAL(relation_cells, 22U);
-    BOOST_CHECK_EQUAL(same_trace_aliases, 21U);
+    BOOST_CHECK_EQUAL(same_trace_aliases, 22U);
     // Blocker A COMPLETE: 22 (21 scalar-cell openings + signed range) + 19
     // stream/digest §4 pins + 3 value-vector openings (BuilderParams,
     // ExtractInput, ExtractScale) + 8 wired sibling bindings (BuilderTrace,
