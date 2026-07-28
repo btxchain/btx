@@ -287,6 +287,33 @@ struct ProofV1 {
     const aq::AirConstraintSystem<gf::Fp3>& cs,
     const std::vector<std::vector<gf::Fp3>>& columns);
 
+/**
+ * Fixed small-plan constructor for proof-level regression tests.  It uses the
+ * production physical tape/V14 column formulas and the production dual-Fp3
+ * LogUp implementation, but contains one ABI byte occurrence so an honest
+ * prove/verify and a substitution reject stay bounded.
+ *
+ * This is not a production statement or a recursive-consumption claim.
+ */
+struct BoundedPhysicalCanaryStatementV1 {
+    uint16_t version{kAbiLogUpJoinVersionV1};
+    uint32_t abi_address{0};
+    uint8_t byte_in_word{0};
+    uint32_t consumer_row{2};
+    uint8_t byte_in_message_word{0};
+
+    bool operator==(
+        const BoundedPhysicalCanaryStatementV1&) const = default;
+};
+
+[[nodiscard]] bool BuildBoundedPhysicalCanaryPlanV1(
+    const BoundedPhysicalCanaryStatementV1& statement,
+    uint32_t parent_rows,
+    uint32_t tape_column_offset,
+    uint32_t v14_column_offset,
+    PlanV1& out,
+    std::string* why = nullptr);
+
 inline constexpr bool kAbiLogUpJoinExecutableV1 = true;
 inline constexpr bool kAbiLogUpJoinRecursiveConsumptionV1 = false;
 inline constexpr bool kAbiLogUpJoinAuthorityReadyV1 = false;

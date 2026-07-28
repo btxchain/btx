@@ -1716,4 +1716,119 @@ uint64_t CountViolationsV1(
     return violations;
 }
 
+bool BuildBoundedPhysicalCanaryPlanV1(
+    const BoundedPhysicalCanaryStatementV1& statement,
+    uint32_t parent_rows,
+    uint32_t tape_column_offset,
+    uint32_t v14_column_offset,
+    PlanV1& out,
+    std::string* why)
+{
+    out = {};
+    if (statement.version != kAbiLogUpJoinVersionV1 ||
+        !PowerOfTwo(parent_rows) ||
+        statement.byte_in_word >= 4 ||
+        statement.byte_in_message_word >= 4 ||
+        statement.consumer_row >= parent_rows) {
+        return Fail(why, "bounded_canary_statement");
+    }
+
+    const uint64_t record64 =
+        uint64_t{tape::kPublicPrefixRecordsV1} +
+        uint64_t{tape::kHeaderRecordsV1} +
+        statement.abi_address;
+    if (record64 > UINT32_MAX) {
+        return Fail(why, "bounded_canary_record");
+    }
+    const uint32_t record =
+        static_cast<uint32_t>(record64);
+    const uint32_t source_row =
+        record / tape::kRecordsPerRowV1;
+    const uint32_t record_slot =
+        record % tape::kRecordsPerRowV1;
+    if (source_row >= parent_rows) {
+        return Fail(why, "bounded_canary_source_row");
+    }
+
+    out.version = kAbiLogUpJoinVersionV1;
+    out.shape.trace_rows = 2;
+    out.shape.trace_columns = 2;
+    out.shape.quotient_len = 2;
+    out.shape.n_coeffs = 2;
+    out.shape.base_column_indices = {0};
+    out.v14_program_root = {
+        gf::FromU64(1),
+        gf::FromU64(2),
+        gf::FromU64(3),
+        gf::FromU64(4),
+    };
+    out.parent_rows = parent_rows;
+    out.tape_column_offset = tape_column_offset;
+    out.v14_column_offset = v14_column_offset;
+
+    const tape::LayoutV1 tape_layout =
+        tape::CanonicalLayoutV1();
+    SourceByteV1 source;
+    source.abi_address = statement.abi_address;
+    source.byte_in_word = statement.byte_in_word;
+    source.multiplicity = 1;
+    source.lookup_slot =
+        4 * record_slot + statement.byte_in_word;
+    source.address = {
+        tape_column_offset +
+            tape_layout.Address(record_slot),
+        source_row,
+    };
+    source.value = {
+        tape_column_offset +
+            tape_layout.Value(record_slot),
+        source_row,
+    };
+    for (uint32_t bit = 0; bit < 8; ++bit) {
+        source.byte_bits[bit] = {
+            tape_column_offset +
+                tape_layout.Bit(
+                    record_slot,
+                    8 * statement.byte_in_word + bit),
+            source_row,
+        };
+    }
+    out.sources.push_back(source);
+
+    ConsumerByteV1 consumer;
+    consumer.abi_address = statement.abi_address;
+    consumer.byte_in_abi_word =
+        statement.byte_in_word;
+    consumer.byte_in_message_word =
+        statement.byte_in_message_word;
+    consumer.lookup_slot =
+        statement.byte_in_message_word;
+    consumer.message = {
+        v14_column_offset +
+            bridge::TypedSafeDirectParentLayoutV14{}
+                .Message(0),
+        statement.consumer_row,
+    };
+    out.consumers.push_back(consumer);
+
+    out.unique_source_bytes = 1;
+    out.consumer_occurrences = 1;
+    out.source_multiplicity_sum = 1;
+    out.exact_manifest_rebuild = true;
+    out.exact_physical_cell_map = true;
+    out.exact_multiplicity_accounting = true;
+    out.valid = true;
+    out.plan_root = CommitPlan(out);
+    out.note =
+        "bounded proof-level canary using production physical "
+        "tape/V14 cells and dual-Fp3 LogUp; not a production "
+        "statement or recursive-consumption claim";
+    if (!ValidPlan(out)) {
+        out.valid = false;
+        return Fail(why, "bounded_canary_plan");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
 } // namespace matmul::v4::rc::stage3_v13_v14_abi_logup_join
