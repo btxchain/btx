@@ -1370,4 +1370,119 @@ BOOST_AUTO_TEST_CASE(
     }
 }
 
+BOOST_AUTO_TEST_CASE(
+    native_multi_row_v13_replay_has_distinct_typed_parent_schedule)
+{
+    namespace rc = matmul::v4::rc;
+    const uint256 seed = TestSeed(0x751);
+    const auto fp3 =
+        [](uint64_t value) {
+            return gf::Fp3{
+                gf::FromU64(value),
+                gf::FromU64(value + 1),
+                gf::FromU64(value + 2)};
+        };
+    const std::vector<
+        std::vector<std::vector<gf::Fp3>>>
+        groups{
+            {{fp3(1), fp3(2), fp3(3), fp3(4)}},
+            {{fp3(5), fp3(6), fp3(7), fp3(8)}},
+            {{fp3(9), fp3(10), fp3(11), fp3(12)}},
+        };
+    const std::vector<
+        rc::Fri3AlgMultiRowGroupRole>
+        roles{
+            rc::Fri3AlgMultiRowGroupRole::MainTrace,
+            rc::Fri3AlgMultiRowGroupRole::
+                AuxiliaryTrace,
+            rc::Fri3AlgMultiRowGroupRole::Quotient,
+        };
+    const auto proved =
+        rc::Fri3AlgMultiRowSafeQ192K2V13BatchCommitStreaming(
+            groups, roles, seed, 29);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+
+    bridge::NativeFri3AlgMultiRowTypedSafeScheduleV13
+        schedule;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::
+            BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+                proved.proof, seed, schedule, &why),
+        why);
+    BOOST_CHECK(schedule.valid);
+    BOOST_CHECK(schedule.native_proof_verified);
+    BOOST_CHECK(
+        schedule.canonical_multi_row_event_order);
+    BOOST_CHECK(
+        schedule.every_snapshot_exactly_materialized);
+    BOOST_CHECK(
+        schedule.every_safe_output_matches_native_consumer);
+    BOOST_CHECK(
+        schedule.unique_query_seed_then_q192);
+    BOOST_CHECK_EQUAL(
+        schedule.query_candidate_events,
+        rc::kRCFri3AlgNumQueries);
+    BOOST_CHECK_EQUAL(
+        schedule.events_materialized,
+        schedule.replay.events.size());
+    BOOST_REQUIRE_GT(schedule.program.size(), 4U);
+    BOOST_CHECK(
+        schedule.program.front().kind ==
+        bridge::TypedSafeChallengeKindV13::OodZ1);
+    BOOST_CHECK(
+        schedule.program[4].kind ==
+        bridge::TypedSafeChallengeKindV13::
+            BatchCoefficient);
+    BOOST_CHECK_GT(
+        schedule.proof_owned_message_cells, 0U);
+    BOOST_CHECK(!schedule.normalized_child_cells_bound);
+    BOOST_CHECK(!schedule.outer_split_rap_events_bound);
+    BOOST_CHECK(!schedule.recursively_consumed);
+
+    // The adapter accepts only the output of a completely verified native
+    // multi-row proof. Proof mutation, seed transplant and V2 relabel all
+    // clear the schedule instead of exporting caller-supplied events.
+    {
+        auto bad = proved.proof;
+        bad.evals_z1.front() =
+            gf::Add(
+                bad.evals_z1.front(),
+                gf::Fp3::One());
+        bridge::
+            NativeFri3AlgMultiRowTypedSafeScheduleV13
+                rejected;
+        BOOST_CHECK(
+            !bridge::
+                BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+                    bad, seed, rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+        BOOST_CHECK(rejected.program.empty());
+    }
+    {
+        bridge::
+            NativeFri3AlgMultiRowTypedSafeScheduleV13
+                rejected;
+        BOOST_CHECK(
+            !bridge::
+                BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+                    proved.proof, TestSeed(0x752),
+                    rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+    {
+        auto bad = proved.proof;
+        bad.version =
+            rc::kRCFri3AlgMultiRowBatchProofVersion;
+        bridge::
+            NativeFri3AlgMultiRowTypedSafeScheduleV13
+                rejected;
+        BOOST_CHECK(
+            !bridge::
+                BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+                    bad, seed, rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -3305,6 +3305,298 @@ bool BuildNativeFri3AlgTypedSafeScheduleV13(
     return true;
 }
 
+bool BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+    const Fri3AlgMultiRowBatchProof& proof,
+    const uint256& child_fs_seed,
+    NativeFri3AlgMultiRowTypedSafeScheduleV13& out,
+    std::string* why)
+{
+    out = {};
+    if (!Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+            proof, child_fs_seed, out.replay, why) ||
+        !out.replay.native_verified ||
+        !out.replay.exact_event_order) {
+        out = {};
+        return Fail(
+            why,
+            "v13_multi_row_schedule_verifier_replay");
+    }
+    if (proof.version !=
+            kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13 ||
+        proof.n_coeffs == 0 ||
+        proof.n_coeffs >
+            std::numeric_limits<uint32_t>::max() /
+                kRCFriBlowup ||
+        proof.groups.size() != 3) {
+        out = {};
+        return Fail(
+            why,
+            "v13_multi_row_schedule_shape");
+    }
+
+    out.program.reserve(out.replay.events.size());
+    out.witness.reserve(out.replay.events.size());
+    std::array<
+        bool,
+        kTypedSafeEventAuxQuerySeedKindV13 + 1>
+        kind_seen{};
+    std::array<uint32_t, 9> consumer_ordinal{};
+    bool query_seed_seen = false;
+    bool exact = true;
+    bool consumers = true;
+    bool z1_selected = false;
+    bool z2_selected = false;
+    uint32_t query_seed_count = 0;
+    for (uint32_t ordinal = 0;
+         ordinal < out.replay.events.size();
+         ++ordinal) {
+        const auto& event =
+            out.replay.events[ordinal];
+        const uint32_t consumer =
+            static_cast<uint32_t>(
+                event.consumer);
+        if (consumer == 0 ||
+            consumer >= consumer_ordinal.size() ||
+            event.ordinal !=
+                consumer_ordinal[consumer]++) {
+            return Fail(
+                why,
+                "v13_multi_row_schedule_family_ordinal");
+        }
+
+        NativeTypedSafeEventAuditV13 audit;
+        bool built = false;
+        if (event.consumer ==
+            Fri3AlgSafeV13Consumer::QueryIndex) {
+            if (!query_seed_seen ||
+                !event.transcript_before_draw.empty()) {
+                return Fail(
+                    why,
+                    "v13_multi_row_schedule_query_order");
+            }
+            built =
+                BuildNativeFri3AlgSafeQueryCandidateEventV13(
+                    out.replay.query_seed,
+                    event.draw_index,
+                    audit, why);
+        } else {
+            if (event.consumer ==
+                Fri3AlgSafeV13Consumer::QuerySeed) {
+                if (query_seed_seen) {
+                    return Fail(
+                        why,
+                        "v13_multi_row_schedule_duplicate_seed");
+                }
+                query_seed_seen = true;
+                ++query_seed_count;
+            } else if (query_seed_seen) {
+                return Fail(
+                    why,
+                    "v13_multi_row_schedule_post_seed");
+            }
+            built = BuildNativeFri3AlgSafeEventV13(
+                event.transcript_before_draw,
+                event.label.c_str(),
+                event.draw_index,
+                audit, why);
+        }
+        if (!built) return false;
+
+        exact =
+            exact &&
+            audit.exact_message_materialized &&
+            audit.native_air_output_parity &&
+            audit.program.role == event.role &&
+            audit.safe_digest == event.safe_digest;
+        if (event.consumer ==
+            Fri3AlgSafeV13Consumer::QuerySeed) {
+            consumers =
+                consumers &&
+                event.safe_digest ==
+                    out.replay.query_seed &&
+                audit.query_seed_source;
+        } else {
+            consumers =
+                consumers &&
+                gf::Eq(
+                    audit.native_output,
+                    event.consumed_fp3);
+        }
+
+        if (event.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ1 ||
+            event.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ2) {
+            const bool ext =
+                gf::Canonical(
+                    event.consumed_fp3.c1) != 0 ||
+                gf::Canonical(
+                    event.consumed_fp3.c2) != 0;
+            const bool is_z2 =
+                event.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ2;
+            const bool acceptable =
+                ext &&
+                (!is_z2 ||
+                 !gf::Eq(
+                     event.consumed_fp3,
+                     proof.z1));
+            bool& already_selected =
+                is_z2 ? z2_selected : z1_selected;
+            const bool selected =
+                acceptable && !already_selected;
+            consumers =
+                consumers &&
+                event.acceptable == acceptable &&
+                event.selected == selected;
+            if (selected) {
+                already_selected = true;
+                consumers =
+                    consumers &&
+                    gf::Eq(
+                        event.consumed_fp3,
+                        is_z2
+                            ? proof.z2
+                            : proof.z1);
+            }
+        }
+        if (event.consumer ==
+            Fri3AlgSafeV13Consumer::FriLambda) {
+            consumers =
+                consumers &&
+                gf::Eq(
+                    event.consumed_fp3,
+                    proof.lambda);
+        }
+        if (event.consumer ==
+            Fri3AlgSafeV13Consumer::QueryIndex) {
+            const uint32_t n_lde =
+                proof.n_coeffs * kRCFriBlowup;
+            const unsigned __int128 wide =
+                (static_cast<unsigned __int128>(
+                     gf::Canonical(
+                         event.consumed_fp3.c1))
+                 << 64) |
+                gf::Canonical(
+                    event.consumed_fp3.c0);
+            consumers =
+                consumers &&
+                n_lde != 0 &&
+                (n_lde & (n_lde - 1)) == 0 &&
+                event.draw_index <
+                    proof.queries.size() &&
+                event.consumed_index ==
+                    static_cast<uint32_t>(
+                        wide % n_lde) &&
+                event.consumed_index ==
+                    proof.queries[
+                        event.draw_index].index &&
+                audit.query_candidate_consumes_seed;
+            ++out.query_candidate_events;
+        }
+
+        const uint32_t kind =
+            static_cast<uint32_t>(
+                audit.program.kind);
+        if (kind >= kind_seen.size()) {
+            return Fail(
+                why,
+                "v13_multi_row_schedule_kind");
+        }
+        kind_seen[kind] = true;
+        out.proof_owned_message_cells +=
+            static_cast<uint32_t>(
+                std::count_if(
+                    audit.program.message.begin(),
+                    audit.program.message.end(),
+                    [](const auto& cell) {
+                        return cell.binding ==
+                            TypedSafeMessageBindingV13::
+                                ProofOwned;
+                    }));
+        out.program.push_back(
+            std::move(audit.program));
+        out.witness.push_back(
+            std::move(audit.witness));
+    }
+
+    const std::array<
+        TypedSafeChallengeKindV13, 8>
+        required_fri_kinds{{
+            TypedSafeChallengeKindV13::
+                BatchCoefficient,
+            TypedSafeChallengeKindV13::OodZ1,
+            TypedSafeChallengeKindV13::OodZ2,
+            TypedSafeChallengeKindV13::DeepWeight1,
+            TypedSafeChallengeKindV13::DeepWeight2,
+            TypedSafeChallengeKindV13::FoldBeta,
+            TypedSafeChallengeKindV13::
+                QueryCandidate,
+            TypedSafeChallengeKindV13::QuerySeed,
+        }};
+    const bool all_fri_kinds =
+        std::all_of(
+            required_fri_kinds.begin(),
+            required_fri_kinds.end(),
+            [&](TypedSafeChallengeKindV13 kind) {
+                return kind_seen[
+                    static_cast<uint32_t>(kind)];
+            });
+    out.events_materialized =
+        static_cast<uint32_t>(
+            out.program.size());
+    out.native_proof_verified =
+        out.replay.native_verified;
+    out.canonical_multi_row_event_order =
+        out.replay.exact_event_order &&
+        out.replay.events.size() > 4 &&
+        out.replay.events.front().consumer ==
+            Fri3AlgSafeV13Consumer::OodZ1 &&
+        out.replay.events[4].consumer ==
+            Fri3AlgSafeV13Consumer::FriLambda;
+    out.every_snapshot_exactly_materialized =
+        exact;
+    out.every_safe_output_matches_native_consumer =
+        consumers;
+    out.unique_query_seed_then_q192 =
+        query_seed_seen &&
+        query_seed_count == 1 &&
+        out.query_candidate_events ==
+            kRCFri3AlgNumQueries &&
+        out.replay.query_seed_events == 1 &&
+        out.replay.query_candidate_events ==
+            kRCFri3AlgNumQueries &&
+        z1_selected && z2_selected;
+    out.normalized_child_cells_bound = false;
+    out.outer_split_rap_events_bound = false;
+    out.recursively_consumed = false;
+    out.valid =
+        out.native_proof_verified &&
+        out.canonical_multi_row_event_order &&
+        out.every_snapshot_exactly_materialized &&
+        out.every_safe_output_matches_native_consumer &&
+        out.unique_query_seed_then_q192 &&
+        all_fri_kinds &&
+        out.events_materialized ==
+            out.replay.events.size() &&
+        out.program.size() ==
+            out.witness.size() &&
+        out.proof_owned_message_cells > 0 &&
+        !out.normalized_child_cells_bound &&
+        !out.outer_split_rap_events_bound &&
+        !out.recursively_consumed;
+    out.note = out.valid
+        ? "native-verified multi-row V13 schedule materialized; "
+          "normalized aliases and outer Split-RAP events remain"
+        : "native multi-row V13 schedule materialization failed";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "v13_multi_row_schedule_incomplete");
+    }
+    return true;
+}
+
 bool AttachNativeV13NormalizedPrefixSources(
     recursive_fixedpoint::FoldBusComposition& parent,
     const Fri3AlgBatchProof& proof,

@@ -499,6 +499,42 @@ struct NativeFri3AlgTypedSafeScheduleV13 {
     std::string* why = nullptr);
 
 /**
+ * Typed parent adapter for the ordered three-oracle multi-row SAFE V13
+ * verifier. This is intentionally a distinct type from the single-batch
+ * schedule: multi-row V13 samples OOD before its post-claim batching
+ * challenge and has a different transcript initializer.
+ *
+ * The adapter materializes every native replay message as ordinary
+ * proof-owned cells, except the fixed query-seed feedback lanes. It does not
+ * yet claim normalized proof-codec aliases or recursive consumption.
+ */
+struct NativeFri3AlgMultiRowTypedSafeScheduleV13 {
+    Fri3AlgSafeV13Replay replay;
+    std::vector<TypedSafeEventProgramV13> program;
+    std::vector<TypedSafeEventWitnessV13> witness;
+    uint32_t events_materialized{0};
+    uint32_t proof_owned_message_cells{0};
+    uint32_t query_candidate_events{0};
+    bool native_proof_verified{false};
+    bool canonical_multi_row_event_order{false};
+    bool every_snapshot_exactly_materialized{false};
+    bool every_safe_output_matches_native_consumer{false};
+    bool unique_query_seed_then_q192{false};
+    bool normalized_child_cells_bound{false};
+    bool outer_split_rap_events_bound{false};
+    bool recursively_consumed{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool
+BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+    const Fri3AlgMultiRowBatchProof& proof,
+    const uint256& child_fs_seed,
+    NativeFri3AlgMultiRowTypedSafeScheduleV13& out,
+    std::string* why = nullptr);
+
+/**
  * Same-parent proof-source attachment for the three residual V13 prefix
  * families found by NativeFri3AlgTypedSafeScheduleV13:
  *
