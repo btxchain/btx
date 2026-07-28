@@ -1365,8 +1365,19 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
 
     const Fp omega_M = AirOmegaForSize(M);
     const Fp omega_N = AirOmegaForSize(N);
-    const F h_first = T::One();
-    const F h_last = T::FromBase(AirPowBase(omega_N, N - 1));
+    const Fp h_first_base = 1;
+    const Fp h_last_base =
+        AirPowBase(omega_N, N - 1);
+    std::vector<F> constraint_powers(
+        cs.constraints.size(), T::One());
+    for (size_t constraint = 1;
+         constraint < constraint_powers.size();
+         ++constraint) {
+        constraint_powers[constraint] =
+            T::Mul(
+                constraint_powers[constraint - 1],
+                lambda);
+    }
 
     // ONE copy of the per-row composition arithmetic, used by BOTH schedules,
     // so the coset route and its dense control cannot drift in operation
@@ -1375,17 +1386,52 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
     // byte-identical output.
     const auto compose_row =
         [&](const std::vector<F>& cur, const std::vector<F>& nxt,
-            const F& y) -> F {
+            Fp y_base) -> F {
+        const Fp zh_base = gkr_field::Sub(
+            AirPowBase(y_base, N), 1);
+        const auto zh_over =
+            [&](Fp h) {
+                const Fp denominator =
+                    gkr_field::Sub(y_base, h);
+                if (denominator != 0) {
+                    return gkr_field::Mul(
+                        zh_base,
+                        gkr_field::Inv(
+                            denominator));
+                }
+                return gkr_field::Mul(
+                    gkr_field::FromU64(N),
+                    AirPowBase(h, N - 1));
+            };
+        const std::array<F, 4> selectors{
+            T::One(),
+            T::FromBase(
+                gkr_field::Sub(
+                    y_base, h_last_base)),
+            T::FromBase(
+                zh_over(h_first_base)),
+            T::FromBase(
+                zh_over(h_last_base))};
         F acc = T::Zero();
-        F lp = T::One();
-        for (const auto& con : cs.constraints) {
+        for (size_t constraint = 0;
+             constraint < cs.constraints.size();
+             ++constraint) {
+            const auto& con =
+                cs.constraints[constraint];
             const F v = con.eval(cur, nxt);
             if (!T::IsZero(v)) {
-                const F sel =
-                    AirSelectorEval<F>(con.kind, N, y, h_first, h_last);
-                acc = T::Add(acc, T::Mul(lp, T::Mul(sel, v)));
+                const F& selector =
+                    selectors[
+                        static_cast<uint8_t>(
+                            con.kind)];
+                acc = T::Add(
+                    acc,
+                    T::Mul(
+                        constraint_powers[
+                            constraint],
+                        T::Mul(
+                            selector, v)));
             }
-            lp = T::Mul(lp, lambda);
         }
         return acc;
     };
@@ -1422,12 +1468,15 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
                 for (uint32_t t = 0; t < N; ++t) {
                     const uint32_t tn = (t + 1u == N) ? 0u : t + 1u;
                     const uint32_t j = s + stepM * t;
-                    const F y = T::FromBase(AirPowBase(omega_M, j));
+                    const Fp y_base =
+                        AirPowBase(omega_M, j);
                     for (uint32_t c = 0; c < W; ++c) {
                         cur[c] = slab[c][t];
                         nxt[c] = slab[c][tn];
                     }
-                    cvals[j] = compose_row(cur, nxt, y);
+                    cvals[j] =
+                        compose_row(
+                            cur, nxt, y_base);
                 }
             }
         }
@@ -1468,13 +1517,16 @@ AirQuotientProveResult<F, Backend> AirQuotientProve(const AirConstraintSystem<F>
 #pragma omp for schedule(static)
 #endif
             for (uint32_t j = 0; j < M; ++j) {
-                const F y = T::FromBase(AirPowBase(omega_M, j));
+                const Fp y_base =
+                    AirPowBase(omega_M, j);
                 const uint32_t jn = (j + stepM) % M;
                 for (uint32_t c = 0; c < W; ++c) {
                     cur[c] = ldeM[c][j];
                     nxt[c] = ldeM[c][jn];
                 }
-                cvals[j] = compose_row(cur, nxt, y);
+                cvals[j] =
+                    compose_row(
+                        cur, nxt, y_base);
             }
         }
         ldeM.clear();
