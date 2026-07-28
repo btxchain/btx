@@ -422,7 +422,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         audit.proposed_receipt_program_instances_have_separate_tags);
     BOOST_CHECK(audit.proposed_uses_full_capacity_tag);
-    BOOST_CHECK(!audit.proposed_tag_hash_to_fp4_is_canonical);
+    BOOST_CHECK(audit.proposed_tag_hash_to_fp4_is_canonical);
     BOOST_CHECK(!audit.proposed_tag_registry_root_pinned);
     BOOST_CHECK(!audit.exact_safe_io_pattern_manifest_enforced);
     BOOST_CHECK(!audit.native_safe_transcript_executable);

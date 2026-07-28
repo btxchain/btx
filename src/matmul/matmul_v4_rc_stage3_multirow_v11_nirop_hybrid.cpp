@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_alg_hash.h>
 #include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
+#include <matmul/matmul_v4_rc_stage3_safe_v12.h>
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 
 #include <algorithm>
@@ -1137,7 +1138,8 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
     out.proposed_merkle_instances_have_separate_tags = true;
     out.proposed_receipt_program_instances_have_separate_tags = true;
     out.proposed_uses_full_capacity_tag = true;
-    out.proposed_tag_hash_to_fp4_is_canonical = false;
+    out.proposed_tag_hash_to_fp4_is_canonical =
+        safe_v12::kFullCapacityTagHashImplementedV12;
     out.proposed_tag_registry_root_pinned = false;
     out.exact_safe_io_pattern_manifest_enforced = false;
     out.native_safe_transcript_executable = false;
@@ -1243,15 +1245,16 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
         "random-oracle H(IO,D) required by SAFECore Theorem 2.",
         "V11 uses injective 10* padding for independently nested hashes; "
         "SAFECore IO=(I,4) binds I and uses zero padding only.",
-        "No native or recursive implementation currently evaluates exact "
-        "Algorithm 3 with a canonical full-Fp4 H(IO,D) tag."};
+        "The standalone native V12 foundation evaluates exact Algorithm 3 "
+        "with a canonical full-Fp4 H(IO,D) tag, but no active transcript "
+        "call site or recursive AIR consumes it."};
     out.required_protocol_changes = {
         "Version-bump each V11 stateless digest to SAFECore "
         "C(IO=(I,4),D=typed role,M). Preserve existing seed/digest feedback "
         "inside M and derive I from the exact call-site manifest.",
-        "Define H(IO,D)->Fp^4 with rejection-sampled canonical Goldilocks "
-        "lanes; precompute and consensus-pin the tag registry root. Do not "
-        "reduce arbitrary u64 chunks modulo p.",
+        "Integrate the implemented rejection-sampled H(IO,D)->Fp^4 at every "
+        "native and recursive call site, then precompute and consensus-pin "
+        "the tag registry root. Do not reduce arbitrary u64 chunks modulo p.",
         "Assign distinct (IO,D) tags to FS, row leaf, fold leaf, Merkle "
         "node, receipt, ProgramTable and application-statement instances.",
         "Implement identical fixed-IO SAFECore zero padding, absorption and "
@@ -1283,7 +1286,8 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
         ";v11_nested_zero_capacity_mismatch;"
         "stateless_alg3_preserves_seed_feedback;"
         "safe_api_c_over_2_tag_profile_below_64;"
-        "require_full_c_tag;io_manifest_tag_registry_native_recursive_false;"
+        "full_c_tag_native_foundation_true;"
+        "io_manifest_tag_registry_native_recursive_false;"
         "concrete_h_p_reductions_false;"
         "authority_false";
     return out;

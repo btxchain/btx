@@ -139,15 +139,20 @@ void AbsorbPaddedPhase(
     }
 }
 
-void ApplyBlankSqueezeBlocks(
+void ApplySafeCoreBlankBlocks(
     ah::State& state, uint32_t squeeze_elements,
     uint64_t& permutation_calls)
 {
-    // The first squeeze block is the state after the preceding final absorb
-    // permutation. Only later squeeze blocks advance P. SAFECorePad therefore
-    // inserts ceil(O/r)-1 all-zero absorb blocks for every earlier phase.
+    // ePrint 2023/520 SAFECorePad Algorithm 2 line 5 appends exactly
+    // 0^(r*ceil(O_i/r)) for every completed earlier phase.  These are
+    // full zero absorb blocks and each causes one Algorithm-3 permutation.
+    //
+    // This is deliberately NOT the online SAFE duplex transition count:
+    // online output block one is already the state after the absorb->squeeze
+    // permutation and therefore only ceil(O_i/r)-1 further permutations are
+    // required to expose the remaining blocks.
     const uint64_t blocks = CeilDivRate(squeeze_elements);
-    for (uint64_t block = 1; block < blocks; ++block) {
+    for (uint64_t block = 0; block < blocks; ++block) {
         ah::Permute(state);
         ++permutation_calls;
     }
@@ -185,7 +190,7 @@ bool BuildSafeCoreAbsorbState(
             state, message, offset, input_elements, absorb_calls);
         offset += input_elements;
         if (phase < squeeze_phase) {
-            ApplyBlankSqueezeBlocks(
+            ApplySafeCoreBlankBlocks(
                 state, pattern.segments[2 * phase + 1].elements,
                 absorb_calls);
         }
@@ -212,6 +217,11 @@ bool IoPatternBuilderV12::Add(
         SetError(why, m_error);
         return false;
     }
+    if (m_exact_calls.size() >= kSafeMaxPatternSegments) {
+        m_error = "SAFE IO pattern exact-call cap";
+        SetError(why, m_error);
+        return false;
+    }
     if (!m_segments.empty() &&
         m_segments.back().kind == kind) {
         const uint64_t combined =
@@ -224,6 +234,7 @@ bool IoPatternBuilderV12::Add(
         }
         m_segments.back().elements =
             static_cast<uint32_t>(combined);
+        m_exact_calls.push_back({kind, elements});
         return true;
     }
     if (m_segments.size() >= kSafeMaxPatternSegments) {
@@ -232,6 +243,7 @@ bool IoPatternBuilderV12::Add(
         return false;
     }
     m_segments.push_back({kind, elements});
+    m_exact_calls.push_back({kind, elements});
     return true;
 }
 
@@ -256,6 +268,7 @@ bool IoPatternBuilderV12::Build(
         return false;
     }
     pattern.segments = m_segments;
+    pattern.exact_calls = m_exact_calls;
     if (!ValidateIoPatternV12(pattern, why)) {
         pattern = {};
         return false;
@@ -285,6 +298,44 @@ bool ValidateIoPatternV12(
         if (segment.elements == 0 ||
             segment.elements > kSafeMaxIoElementsPerPhase) {
             SetError(why, "SAFE IO pattern non-canonical length");
+            return false;
+        }
+    }
+    if (!pattern.exact_calls.empty()) {
+        if (pattern.exact_calls.size() > kSafeMaxPatternSegments) {
+            SetError(why, "SAFE IO pattern exact-call cap");
+            return false;
+        }
+        std::vector<IoSegmentV12> normalized;
+        normalized.reserve(pattern.exact_calls.size());
+        for (const IoSegmentV12& call : pattern.exact_calls) {
+            if (!KnownKind(call.kind) || call.elements == 0 ||
+                call.elements > kSafeMaxIoElementsPerPhase) {
+                SetError(why, "SAFE IO pattern exact call invalid");
+                return false;
+            }
+            if (!normalized.empty() &&
+                normalized.back().kind == call.kind) {
+                const uint64_t combined =
+                    static_cast<uint64_t>(
+                        normalized.back().elements) +
+                    call.elements;
+                if (combined > kSafeMaxIoElementsPerPhase) {
+                    SetError(
+                        why,
+                        "SAFE IO pattern exact-call aggregate overflow");
+                    return false;
+                }
+                normalized.back().elements =
+                    static_cast<uint32_t>(combined);
+            } else {
+                normalized.push_back(call);
+            }
+        }
+        if (normalized != pattern.segments) {
+            SetError(
+                why,
+                "SAFE exact calls do not normalize to canonical IO");
             return false;
         }
     }
@@ -459,8 +510,7 @@ void SafeTranscriptV12::Erase(LifecycleV12 terminal)
 {
     m_state = {};
     m_pattern = {};
-    m_segment_index = 0;
-    m_segment_used = 0;
+    m_call_index = 0;
     m_absorb_pos = 0;
     m_squeeze_pos = 0;
     m_permutation_calls = 0;
@@ -482,31 +532,26 @@ bool SafeTranscriptV12::CheckCall(
         return Fail(why, "SAFE transcript is not active");
     }
     if (elements == 0) return true; // SAFE Algorithm 2 no-op.
-    if (m_segment_index >= m_pattern.segments.size()) {
+    const std::vector<IoSegmentV12>& calls =
+        m_pattern.exact_calls.empty()
+        ? m_pattern.segments : m_pattern.exact_calls;
+    if (m_call_index >= calls.size()) {
         return Fail(why, "SAFE transcript has no remaining operation");
     }
-    const IoSegmentV12& segment =
-        m_pattern.segments[m_segment_index];
-    if (segment.kind != kind) {
+    const IoSegmentV12& call = calls[m_call_index];
+    if (call.kind != kind) {
         return Fail(why, "SAFE transcript operation order mismatch");
     }
-    const uint32_t remaining =
-        segment.elements - m_segment_used;
-    if (elements > remaining) {
-        return Fail(why, "SAFE transcript operation crosses phase");
+    if (call.elements != elements) {
+        return Fail(why, "SAFE transcript exact call length mismatch");
     }
     return true;
 }
 
-void SafeTranscriptV12::Consume(uint32_t elements)
+void SafeTranscriptV12::ConsumeCall(uint32_t elements)
 {
     if (elements == 0) return;
-    m_segment_used += elements;
-    if (m_segment_used ==
-        m_pattern.segments[m_segment_index].elements) {
-        ++m_segment_index;
-        m_segment_used = 0;
-    }
+    ++m_call_index;
 }
 
 bool SafeTranscriptV12::Start(
@@ -527,8 +572,7 @@ bool SafeTranscriptV12::Start(
     }
     m_pattern = pattern;
     InitializeSafeState(tag, m_state);
-    m_segment_index = 0;
-    m_segment_used = 0;
+    m_call_index = 0;
     m_absorb_pos = 0;
     m_squeeze_pos = 0;
     m_permutation_calls = 0;
@@ -565,7 +609,7 @@ bool SafeTranscriptV12::Absorb(
         // Force P before the next squeeze, as SAFE Algorithm 2 specifies.
         m_squeeze_pos = kSafeRateV12;
     }
-    Consume(elements);
+    ConsumeCall(elements);
     return true;
 }
 
@@ -587,7 +631,7 @@ bool SafeTranscriptV12::Squeeze(
         lanes.push_back(m_state[m_squeeze_pos]);
         ++m_squeeze_pos;
     }
-    Consume(elements);
+    ConsumeCall(elements);
     return true;
 }
 
@@ -596,8 +640,11 @@ bool SafeTranscriptV12::Finish(std::string* why)
     if (m_lifecycle != LifecycleV12::Active) {
         return Fail(why, "SAFE FINISH requires active transcript");
     }
-    if (m_segment_index != m_pattern.segments.size() ||
-        m_segment_used != 0) {
+    const size_t expected_calls =
+        m_pattern.exact_calls.empty()
+        ? m_pattern.segments.size()
+        : m_pattern.exact_calls.size();
+    if (m_call_index != expected_calls) {
         return Fail(why, "SAFE FINISH before IO pattern completion");
     }
     Erase(LifecycleV12::Finished);
@@ -609,8 +656,8 @@ SafeStateSnapshotV12 SafeTranscriptV12::Snapshot() const
     return {
         m_state,
         m_lifecycle,
-        m_segment_index,
-        m_segment_used,
+        m_call_index,
+        0,
         m_absorb_pos,
         m_squeeze_pos,
         m_permutation_calls,
@@ -743,11 +790,13 @@ bool EvaluateSafeCorePrefixV12(
                 output_elements - prefix.output.size()));
         prefix.output.insert(
             prefix.output.end(), state.begin(), state.begin() + take);
-        // Stop before the unobservable final post-output permutation. This is
-        // the online SAFE state at the same boundary.
+        // Stop before the unobservable final post-output permutation. For a
+        // single phase this is also the online SAFE state at that boundary;
+        // for later phases SAFECorePad's full blank-block convention makes
+        // the published SAFECore state intentionally different.
         if (block + 1 < output_blocks) ah::Permute(state);
     }
-    prefix.online_state_after_squeeze = state;
+    prefix.state_before_final_output_permutation = state;
     prefix.output_required_poseidon_calls =
         absorb_calls + output_blocks - 1;
     return true;

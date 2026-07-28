@@ -34,6 +34,20 @@ IoPatternV12 ExamplePattern()
     return pattern;
 }
 
+IoPatternV12 AggregateExamplePattern()
+{
+    IoPatternBuilderV12 builder;
+    IoPatternV12 pattern;
+    BOOST_REQUIRE(builder.Absorb(8));
+    BOOST_REQUIRE(builder.Squeeze(6));
+    BOOST_REQUIRE(builder.Absorb(5));
+    BOOST_REQUIRE(builder.Squeeze(3));
+    BOOST_REQUIRE(builder.Absorb(4));
+    BOOST_REQUIRE(builder.Squeeze(7));
+    BOOST_REQUIRE(builder.Build(pattern));
+    return pattern;
+}
+
 std::vector<gf::Fp> Sequence(uint32_t first, uint32_t count)
 {
     std::vector<gf::Fp> out(count);
@@ -100,6 +114,7 @@ BOOST_AUTO_TEST_CASE(canonical_pattern_aggregates_call_chunking)
         {IoKindV12::Squeeze, 7},
     }};
     BOOST_REQUIRE(pattern.segments == expected);
+    BOOST_REQUIRE_EQUAL(pattern.exact_calls.size(), 10U);
 
     std::vector<uint32_t> words;
     std::vector<uint8_t> bytes;
@@ -126,7 +141,8 @@ BOOST_AUTO_TEST_CASE(canonical_pattern_aggregates_call_chunking)
     BOOST_REQUIRE(direct.Absorb(4));
     BOOST_REQUIRE(direct.Squeeze(7));
     BOOST_REQUIRE(direct.Build(direct_pattern));
-    BOOST_CHECK(direct_pattern == pattern);
+    BOOST_CHECK(direct_pattern.segments == pattern.segments);
+    BOOST_CHECK(direct_pattern.exact_calls != pattern.exact_calls);
 
     std::array<gf::Fp, 4> a{};
     std::array<gf::Fp, 4> b{};
@@ -201,51 +217,64 @@ BOOST_AUTO_TEST_CASE(full_capacity_tag_is_canonical_framed_and_counted)
 }
 
 BOOST_AUTO_TEST_CASE(
-    online_safe_matches_independent_safecore_at_every_squeeze)
+    online_safe_alternating_transitions_match_algorithms_1_and_2)
 {
-    const IoPatternV12 pattern = ExamplePattern();
+    const IoPatternV12 pattern = AggregateExamplePattern();
     const std::vector<uint8_t> domain = Domain("BTX_SAFE_PREFIX");
     const std::vector<gf::Fp> message = Sequence(1, 17);
     SafeTranscriptV12 online;
     BOOST_REQUIRE(online.Start(pattern, domain));
 
+    std::array<gf::Fp, kSafeCapacityV12> tag{};
+    BOOST_REQUIRE(DeriveTagV12(pattern, domain, tag));
+    ah::State manual{};
+    std::copy(
+        tag.begin(), tag.end(), manual.begin() + kSafeRateV12);
+
     std::vector<gf::Fp> out0;
     BOOST_REQUIRE(online.Absorb(Slice(message, 0, 8)));
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        manual[lane] = gf::Add(manual[lane], message[lane]);
+    }
+    RequireStateEqual(manual, online.Snapshot().state);
+    BOOST_TEST(online.Snapshot().permutation_calls == 0U);
     BOOST_REQUIRE(online.Squeeze(6, out0));
-    SafeCorePrefixV12 prefix0;
-    BOOST_REQUIRE(EvaluateSafeCorePrefixV12(
-        pattern, domain, Slice(message, 0, 8), 0, prefix0));
-    RequireEqual(prefix0.output, out0);
-    RequireStateEqual(
-        prefix0.online_state_after_squeeze,
-        online.Snapshot().state);
-    BOOST_TEST(prefix0.output_required_poseidon_calls == 1U);
+    ah::Permute(manual); // ABSORB -> SQUEEZE always permutes.
+    RequireEqual(
+        std::vector<gf::Fp>(manual.begin(), manual.begin() + 6),
+        out0);
+    RequireStateEqual(manual, online.Snapshot().state);
     BOOST_TEST(online.Snapshot().permutation_calls == 1U);
 
     std::vector<gf::Fp> out1;
     BOOST_REQUIRE(online.Absorb(Slice(message, 8, 13)));
+    for (uint32_t lane = 0; lane < 5; ++lane) {
+        manual[lane] =
+            gf::Add(manual[lane], message[8 + lane]);
+    }
+    RequireStateEqual(manual, online.Snapshot().state);
+    BOOST_TEST(online.Snapshot().permutation_calls == 1U);
     BOOST_REQUIRE(online.Squeeze(3, out1));
-    SafeCorePrefixV12 prefix1;
-    BOOST_REQUIRE(EvaluateSafeCorePrefixV12(
-        pattern, domain, Slice(message, 0, 13), 1, prefix1));
-    RequireEqual(prefix1.output, out1);
-    RequireStateEqual(
-        prefix1.online_state_after_squeeze,
-        online.Snapshot().state);
-    BOOST_TEST(prefix1.output_required_poseidon_calls == 2U);
+    ah::Permute(manual);
+    RequireEqual(
+        std::vector<gf::Fp>(manual.begin(), manual.begin() + 3),
+        out1);
+    RequireStateEqual(manual, online.Snapshot().state);
     BOOST_TEST(online.Snapshot().permutation_calls == 2U);
 
     std::vector<gf::Fp> out2;
     BOOST_REQUIRE(online.Absorb(Slice(message, 13, 17)));
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        manual[lane] =
+            gf::Add(manual[lane], message[13 + lane]);
+    }
+    RequireStateEqual(manual, online.Snapshot().state);
     BOOST_REQUIRE(online.Squeeze(7, out2));
-    SafeCorePrefixV12 prefix2;
-    BOOST_REQUIRE(EvaluateSafeCorePrefixV12(
-        pattern, domain, message, 2, prefix2));
-    RequireEqual(prefix2.output, out2);
-    RequireStateEqual(
-        prefix2.online_state_after_squeeze,
-        online.Snapshot().state);
-    BOOST_TEST(prefix2.output_required_poseidon_calls == 3U);
+    ah::Permute(manual);
+    RequireEqual(
+        std::vector<gf::Fp>(manual.begin(), manual.begin() + 7),
+        out2);
+    RequireStateEqual(manual, online.Snapshot().state);
     BOOST_TEST(online.Snapshot().permutation_calls == 3U);
     BOOST_REQUIRE(online.Finish());
     BOOST_CHECK(
@@ -255,14 +284,21 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     online_safe_call_decomposition_is_output_equivalent)
 {
-    const IoPatternV12 pattern = ExamplePattern();
+    const IoPatternV12 aggregate_pattern = AggregateExamplePattern();
+    const IoPatternV12 split_pattern = ExamplePattern();
     const std::vector<uint8_t> domain = Domain("BTX_SAFE_CHUNKS");
     const std::vector<gf::Fp> message = Sequence(20, 17);
+    std::array<gf::Fp, kSafeCapacityV12> aggregate_tag{};
+    std::array<gf::Fp, kSafeCapacityV12> split_tag{};
+    BOOST_REQUIRE(DeriveTagV12(
+        aggregate_pattern, domain, aggregate_tag));
+    BOOST_REQUIRE(DeriveTagV12(split_pattern, domain, split_tag));
+    BOOST_CHECK(aggregate_tag == split_tag);
 
     SafeTranscriptV12 aggregate;
     SafeTranscriptV12 split;
-    BOOST_REQUIRE(aggregate.Start(pattern, domain));
-    BOOST_REQUIRE(split.Start(pattern, domain));
+    BOOST_REQUIRE(aggregate.Start(aggregate_pattern, domain));
+    BOOST_REQUIRE(split.Start(split_pattern, domain));
 
     std::vector<gf::Fp> agg0;
     std::vector<gf::Fp> agg1;
@@ -375,7 +411,7 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    multiblock_squeeze_blank_blocks_match_online_state)
+    published_safecore_blank_blocks_are_not_online_duplex_shortcut)
 {
     IoPatternBuilderV12 builder;
     IoPatternV12 pattern;
@@ -398,7 +434,7 @@ BOOST_AUTO_TEST_CASE(
         pattern, domain, Slice(message, 0, 9), 0, prefix0));
     RequireEqual(prefix0.output, first);
     RequireStateEqual(
-        prefix0.online_state_after_squeeze,
+        prefix0.state_before_final_output_permutation,
         online.Snapshot().state);
     BOOST_TEST(prefix0.output_required_poseidon_calls == 3U);
 
@@ -407,13 +443,39 @@ BOOST_AUTO_TEST_CASE(
     SafeCorePrefixV12 prefix1;
     BOOST_REQUIRE(EvaluateSafeCorePrefixV12(
         pattern, domain, message, 1, prefix1));
-    RequireEqual(prefix1.output, second);
-    RequireStateEqual(
-        prefix1.online_state_after_squeeze,
-        online.Snapshot().state);
-    // ceil(9/8) + (ceil(10/8)-1) + ceil(3/8) = 4.
-    BOOST_TEST(prefix1.output_required_poseidon_calls == 4U);
+    // Published SAFECorePad Algorithm 2 line 5 inserts
+    // ceil(10/8)=2 complete zero blocks between the absorb phases:
+    //
+    //   ceil(9/8) + ceil(10/8) + ceil(3/8) = 5 P calls.
+    //
+    // Online SAFE exposes the first output block directly and only needs one
+    // further P for the second block, so its running duplex state has 4 calls.
+    BOOST_TEST(prefix1.output_required_poseidon_calls == 5U);
     BOOST_TEST(online.Snapshot().permutation_calls == 4U);
+    BOOST_CHECK(prefix1.output != second);
+
+    std::array<gf::Fp, kSafeCapacityV12> tag{};
+    BOOST_REQUIRE(DeriveTagV12(pattern, domain, tag));
+    ah::State exact{};
+    std::copy(
+        tag.begin(), tag.end(), exact.begin() + kSafeRateV12);
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        exact[lane] = gf::Add(exact[lane], message[lane]);
+    }
+    ah::Permute(exact);
+    exact[0] = gf::Add(exact[0], message[8]);
+    ah::Permute(exact);
+    ah::Permute(exact); // first SAFECorePad zero block
+    ah::Permute(exact); // second SAFECorePad zero block
+    for (uint32_t lane = 0; lane < 3; ++lane) {
+        exact[lane] = gf::Add(exact[lane], message[9 + lane]);
+    }
+    ah::Permute(exact);
+    RequireEqual(
+        std::vector<gf::Fp>(exact.begin(), exact.begin() + 4),
+        prefix1.output);
+    RequireStateEqual(
+        exact, prefix1.state_before_final_output_permutation);
     BOOST_REQUIRE(online.Finish());
 }
 
@@ -466,6 +528,13 @@ BOOST_AUTO_TEST_CASE(schedule_misuse_and_noncanonical_lanes_fail_closed)
     BOOST_CHECK(
         double_start.Snapshot().lifecycle == LifecycleV12::Failed);
 
+    SafeTranscriptV12 wrong_chunking;
+    BOOST_REQUIRE(wrong_chunking.Start(pattern, domain));
+    BOOST_CHECK(!wrong_chunking.Absorb({1}, &why));
+    BOOST_CHECK(
+        wrong_chunking.Snapshot().lifecycle ==
+        LifecycleV12::Failed);
+
     SafeCoreResultV12 result;
     BOOST_CHECK(!EvaluateSafeCoreV12(
         pattern, domain, {1}, 0, result, &why));
@@ -479,7 +548,7 @@ BOOST_AUTO_TEST_CASE(pattern_and_manifest_malformed_inputs_reject)
     IoPatternV12 invalid{{
         {IoKindV12::Squeeze, 4},
         {IoKindV12::Absorb, 1},
-    }};
+    }, {}};
     BOOST_CHECK(!ValidateIoPatternV12(invalid, &why));
 
     IoPatternBuilderV12 zero;
@@ -490,6 +559,15 @@ BOOST_AUTO_TEST_CASE(pattern_and_manifest_malformed_inputs_reject)
     IoPatternBuilderV12 overflow;
     BOOST_REQUIRE(overflow.Absorb(kSafeMaxIoElementsPerPhase));
     BOOST_CHECK(!overflow.Absorb(1, &why));
+
+    IoPatternV12 mismatched_exact{{
+        {IoKindV12::Absorb, 2},
+        {IoKindV12::Squeeze, 4},
+    }, {
+        {IoKindV12::Absorb, 1},
+        {IoKindV12::Squeeze, 4},
+    }};
+    BOOST_CHECK(!ValidateIoPatternV12(mismatched_exact, &why));
 
     TranscriptPatternManifestBuilderV12 duplicate;
     BOOST_REQUIRE(duplicate.Absorb("commitment", 4));
@@ -516,6 +594,7 @@ BOOST_AUTO_TEST_CASE(exact_manifest_reports_rows_calls_and_fail_closed_gates)
     BOOST_REQUIRE(builder.Build(Domain("BTX_STAGE3_FS_V12"), manifest));
     BOOST_TEST(manifest.exact_calls.size() == 10U);
     BOOST_TEST(manifest.canonical_pattern.segments.size() == 6U);
+    BOOST_TEST(manifest.canonical_pattern.exact_calls.size() == 10U);
     BOOST_TEST(manifest.canonical_io_words.size() == 6U);
     BOOST_TEST(manifest.canonical_io_bytes.size() == 24U);
     BOOST_TEST(manifest.absorb_elements == 17U);
@@ -528,7 +607,10 @@ BOOST_AUTO_TEST_CASE(exact_manifest_reports_rows_calls_and_fail_closed_gates)
 
     BOOST_TEST(kFullCapacityTagHashImplementedV12);
     BOOST_TEST(kCanonicalAggregatedIoImplementedV12);
+    BOOST_TEST(kExactOnlineIoCallScheduleImplementedV12);
     BOOST_TEST(kStatefulSafeApiImplementedV12);
+    BOOST_TEST(kPublishedSafeCoreInterphasePadExactV12);
+    BOOST_TEST(kOnlineAndSafeCoreInterphaseSemanticsSeparatedV12);
     BOOST_TEST(kStatelessSafeCoreImplementedV12);
     BOOST_TEST(kStatelessSafeCoreSupportsSeedFeedbackV12);
     BOOST_TEST(!kConcreteTagHashReductionCertifiedV12);

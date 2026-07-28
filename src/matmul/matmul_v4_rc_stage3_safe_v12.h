@@ -83,7 +83,18 @@ struct IoSegmentV12 {
  * the first segment is ABSORB, kinds alternate, and the last is SQUEEZE.
  */
 struct IoPatternV12 {
+    /**
+     * Canonical tag pattern after aggregating adjacent calls of one kind.
+     * SAFECore consumes this alternating (I_1,O_1,...,I_k,O_k) form.
+     */
     std::vector<IoSegmentV12> segments;
+    /**
+     * Exact online SAFE call schedule checked by Algorithms 1/2.  An empty
+     * vector means that `segments` itself is the exact schedule; builders
+     * populate this field so split calls remain distinguishable at runtime
+     * even though their H(IO,D) tag is canonically identical.
+     */
+    std::vector<IoSegmentV12> exact_calls;
 
     friend bool operator==(const IoPatternV12&,
                            const IoPatternV12&) = default;
@@ -94,6 +105,7 @@ class IoPatternBuilderV12
 {
 private:
     std::vector<IoSegmentV12> m_segments;
+    std::vector<IoSegmentV12> m_exact_calls;
     std::string m_error;
 
     [[nodiscard]] bool Add(
@@ -191,7 +203,9 @@ enum class LifecycleV12 : uint8_t {
 struct SafeStateSnapshotV12 {
     ah::State state{};
     LifecycleV12 lifecycle{LifecycleV12::Created};
+    /** Index of the next exact online SAFE call. */
     uint32_t segment_index{0};
+    /** Retained for wire/debug compatibility; exact calls are atomic. */
     uint32_t segment_used{0};
     uint32_t absorb_pos{0};
     uint32_t squeeze_pos{0};
@@ -199,9 +213,9 @@ struct SafeStateSnapshotV12 {
 };
 
 /**
- * Stateful SAFE API. Calls may split one canonical segment into several calls,
- * but may not cross a segment boundary. Any misuse erases the state and makes
- * the object permanently Failed.
+ * Stateful SAFE API. H(IO,D) uses the canonically aggregated pattern, while
+ * each online ABSORB/SQUEEZE call must exactly match the schedule supplied to
+ * START. Any misuse erases the state and makes the object permanently Failed.
  */
 class SafeTranscriptV12
 {
@@ -209,8 +223,7 @@ private:
     IoPatternV12 m_pattern;
     ah::State m_state{};
     LifecycleV12 m_lifecycle{LifecycleV12::Created};
-    uint32_t m_segment_index{0};
-    uint32_t m_segment_used{0};
+    uint32_t m_call_index{0};
     uint32_t m_absorb_pos{0};
     uint32_t m_squeeze_pos{0};
     uint64_t m_permutation_calls{0};
@@ -220,7 +233,7 @@ private:
     [[nodiscard]] bool Fail(std::string* why, const char* text);
     [[nodiscard]] bool CheckCall(
         IoKindV12 kind, uint32_t elements, std::string* why);
-    void Consume(uint32_t elements);
+    void ConsumeCall(uint32_t elements);
 
 public:
     [[nodiscard]] bool Start(
@@ -282,16 +295,24 @@ struct SafeCoreResultV12 {
 struct SafeCorePrefixV12 {
     uint32_t squeeze_phase{0};
     std::vector<gf::Fp> output;
-    /** Online SAFE state immediately after the phase's last output lane. */
-    ah::State online_state_after_squeeze{};
+    /**
+     * Published SAFECore state immediately after the last output lane and
+     * before Algorithm 3's unobservable final post-output permutation.
+     */
+    ah::State state_before_final_output_permutation{};
     uint64_t output_required_poseidon_calls{0};
 };
 
 /**
- * Independent SAFECore prefix evaluator for the equivalence in
- * ePrint 2023/520 section 5.  Unlike EvaluateSafeCoreV12, this stops before
- * Algorithm 3's unobservable final post-output P so its state can be compared
- * exactly with the online SAFE object after that squeeze phase.
+ * Exact published SAFECore evaluator for an absorb prefix.  Unlike
+ * EvaluateSafeCoreV12, this stops before Algorithm 3's unobservable final
+ * post-output P.
+ *
+ * Do not treat this state as the online SAFE duplex state after an earlier
+ * squeeze.  SAFECorePad Algorithm 2 inserts ceil(O_i/r) blank blocks between
+ * phases, whereas online SAFE needs only the ceil(O_i/r)-1 permutations that
+ * advance between visible output blocks.  The single-phase fixed-length hash
+ * used by SafeCoreDigestV12 has no such intermediate phase.
  */
 [[nodiscard]] bool EvaluateSafeCorePrefixV12(
     const IoPatternV12& pattern, const std::vector<uint8_t>& domain,
@@ -352,7 +373,10 @@ public:
 // The native foundation is real; authority remains deliberately fail-closed.
 inline constexpr bool kFullCapacityTagHashImplementedV12 = true;
 inline constexpr bool kCanonicalAggregatedIoImplementedV12 = true;
+inline constexpr bool kExactOnlineIoCallScheduleImplementedV12 = true;
 inline constexpr bool kStatefulSafeApiImplementedV12 = true;
+inline constexpr bool kPublishedSafeCoreInterphasePadExactV12 = true;
+inline constexpr bool kOnlineAndSafeCoreInterphaseSemanticsSeparatedV12 = true;
 inline constexpr bool kStatelessSafeCoreImplementedV12 = true;
 inline constexpr bool kStatelessSafeCoreSupportsSeedFeedbackV12 = true;
 
@@ -367,6 +391,8 @@ inline constexpr bool kNativeRecursiveSafeParityCertifiedV12 = false;
 inline constexpr bool kStatelessSafeCoreAuthorityReadyV12 =
     kFullCapacityTagHashImplementedV12 &&
     kCanonicalAggregatedIoImplementedV12 &&
+    kPublishedSafeCoreInterphasePadExactV12 &&
+    kOnlineAndSafeCoreInterphaseSemanticsSeparatedV12 &&
     kStatelessSafeCoreImplementedV12 &&
     kStatelessSafeCoreSupportsSeedFeedbackV12 &&
     kConcreteTagHashReductionCertifiedV12 &&
