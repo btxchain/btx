@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_GLOBAL_SOUNDNESS_LEDGER_H
 
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
+#include <matmul/matmul_v4_rc_stage3_pow_composition.h>
 
 #include <cstdint>
 #include <matmul/matmul_v4_rc_fri.h>
@@ -472,7 +473,14 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     bool fiat_shamir_replay_complete{false};
     bool self_similar_fixed_point_closed{false};
     bool nirop_oracle_separation_complete{false};
+    /** Executable false-acceptance decomposition for tensor mining work,
+     * proof-internal regrinding, and the succinct-only authority path. */
+    pow_composition::AssessmentV1 pow_composition;
     bool pow_composition_theorem_complete{false};
+    /** Fail-closed conjunction of every production reduction required before
+     * the additive arithmetic may become gate 6. This deliberately excludes
+     * milestone/readiness constants: each member is independent evidence. */
+    bool production_reductions_complete{false};
     bool global_additive_theorem_complete{false};
 
     /** Composed threat-model floor F(q*) + explicit audit-input assumptions. */
@@ -510,6 +518,12 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     bool authority_eligible{false};
     std::string note;
 };
+
+/** Pure fail-closed production-boundary predicate. Exposed so tests can start
+ * from an all-true control and drop every premise one at a time; this prevents
+ * a summary/readiness flag from silently bypassing an open reduction. */
+[[nodiscard]] bool ProductionReductionsCompleteV1(
+    const ExecutableGlobalSoundnessLedgerV1& evidence);
 
 [[nodiscard]] ExecutableGlobalSoundnessLedgerV1
 AssessExecutableGlobalSoundnessLedgerV1(

@@ -51,6 +51,37 @@ BOOST_AUTO_TEST_CASE(
         !audit.sampled_terminal_round_fvt_executable);
     BOOST_CHECK(
         !audit.external_pow_work_composition_complete);
+    BOOST_CHECK_EQUAL(audit.pow_composition.version, 1U);
+    BOOST_CHECK_EQUAL(
+        audit.pow_composition.regrind_budget_bits, 40U);
+    BOOST_CHECK_EQUAL(
+        audit.pow_composition.algebraic_regrind_deduction_bits,
+        40U);
+    BOOST_CHECK(
+        !audit.pow_composition
+             .consensus_statement_binding_complete);
+    BOOST_CHECK(
+        !audit.pow_composition.complete_tensor_work_relation);
+    BOOST_CHECK(
+        !audit.pow_composition.proof_system_reduction_complete);
+    BOOST_CHECK(
+        audit.pow_composition
+            .internal_regrind_accounting_consistent);
+    BOOST_CHECK(
+        !audit.pow_composition
+             .proof_internal_and_mining_work_separated);
+    BOOST_CHECK(
+        audit.pow_composition.no_double_counting_of_oracle_work);
+    BOOST_CHECK(
+        audit.pow_composition.authority_path_is_succinct_only);
+    BOOST_CHECK_EQUAL(
+        audit.external_pow_work_composition_complete,
+        audit.pow_composition
+            .external_tensor_work_composition_complete);
+    BOOST_CHECK_EQUAL(
+        audit.pow_composition_theorem_complete,
+        audit.pow_composition
+            .pow_composition_theorem_complete);
 
     const auto& canonical = audit.canonical;
     BOOST_CHECK_EQUAL(
@@ -277,11 +308,12 @@ BOOST_AUTO_TEST_CASE(
             ctl_export_and_terminal_reduction_complete);
     BOOST_CHECK(
         !audit.hash_first_collision_hybrid_complete);
-    BOOST_CHECK(audit.fiat_shamir_replay_complete);
+    BOOST_CHECK(!audit.fiat_shamir_replay_complete);
     BOOST_CHECK(
         !audit.nirop_oracle_separation_complete);
     BOOST_CHECK(
         !audit.pow_composition_theorem_complete);
+    BOOST_CHECK(!audit.production_reductions_complete);
     BOOST_CHECK(
         !audit.global_additive_theorem_complete);
     BOOST_CHECK(!audit.theorem_complete);
@@ -377,16 +409,15 @@ BOOST_AUTO_TEST_CASE(
                     "unused_100bit_requirement_is_not_v1_consensus_target") !=
                 std::string::npos);
 
-    // Ordered readiness interlock: g0/g1/g3/g4/g5 closed; g2 recursive
-    // aggregation / two-level budget / authority still open → all_clear false
-    // and certified_bits stays a computed 0.
+    // Ordered readiness interlock: active-P2 transcript ownership (g4),
+    // recursive aggregation (g2), and therefore g5/g6 remain open.
     const auto& gate = audit.composition_gate;
     BOOST_CHECK(gate.mathematical_verifier_ready);
     BOOST_CHECK(gate.episode_relations_ready);
     BOOST_CHECK(!gate.recursive_aggregation_ready);
     BOOST_CHECK(gate.fri_alg_formal_soundness_ready);
-    BOOST_CHECK(gate.child_fiat_shamir_replay_closed);
-    BOOST_CHECK(gate.self_similar_fixed_point_closed);
+    BOOST_CHECK(!gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(!gate.self_similar_fixed_point_closed);
     BOOST_CHECK(!gate.global_soundness_composition_proved);
     BOOST_CHECK(!gate.all_clear);
 
@@ -469,6 +500,83 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    production_reduction_boundary_rejects_every_orphaned_premise)
+{
+    auto all =
+        ledger::AssessExecutableGlobalSoundnessLedgerV1();
+    all.single_fp3_backend_executable = true;
+    all.q192_multirow_v2_executable = true;
+    all.q192_split_rap_integrated = true;
+    all.ctl_dual_lane_arithmetic_executable = true;
+    all.recursive_child_transport_fp3_only = true;
+    all.legacy_fp2_transport_bound_inapplicable = true;
+    all.hash_primitives_executable = true;
+    all.grinding_parameter_executable = true;
+    all.internal_fri_grinding_charged = true;
+    all.external_pow_work_composition_complete = true;
+    all.semantic_relation_closure_complete = true;
+    all.normalized_recursive_verifier_executable = true;
+    all.exact_selected_topology_manifest_derived = true;
+    all.canonical_heterogeneous_site_topology_derived = true;
+    all.canonical.site_count_manifest_derived = true;
+    all.canonical.covers_selected_relation_local_topology = true;
+    all.canonical.production_theorem = true;
+    all.universal_program_registry_binding_defined = true;
+    all.universal_program_registry_consumed_in_recursion = true;
+    all.ali_degree_and_constraint_manifest_complete = true;
+    all.ctl_export_and_terminal_reduction_complete = true;
+    all.hash_first_collision_hybrid_complete = true;
+    all.nirop_oracle_separation_complete = true;
+    all.pow_composition_theorem_complete = true;
+    BOOST_REQUIRE_EQUAL(
+        all.canonical.terms.size(),
+        static_cast<size_t>(
+            ledger::ExecutableGlobalTermKindV1::PowGrinding));
+    for (auto& term : all.canonical.terms) {
+        term.quantitatively_accounted = true;
+        term.implementation_executable = true;
+        term.reduction_complete = true;
+    }
+    BOOST_REQUIRE(
+        ledger::ProductionReductionsCompleteV1(all));
+
+    const auto rejects =
+        [&](auto mutate) {
+            auto missing = all;
+            mutate(missing);
+            BOOST_CHECK(
+                !ledger::ProductionReductionsCompleteV1(missing));
+        };
+    rejects([](auto& e) { e.single_fp3_backend_executable = false; });
+    rejects([](auto& e) { e.q192_multirow_v2_executable = false; });
+    rejects([](auto& e) { e.q192_split_rap_integrated = false; });
+    rejects([](auto& e) { e.ctl_dual_lane_arithmetic_executable = false; });
+    rejects([](auto& e) { e.recursive_child_transport_fp3_only = false; });
+    rejects([](auto& e) { e.legacy_fp2_transport_bound_inapplicable = false; });
+    rejects([](auto& e) { e.hash_primitives_executable = false; });
+    rejects([](auto& e) { e.grinding_parameter_executable = false; });
+    rejects([](auto& e) { e.internal_fri_grinding_charged = false; });
+    rejects([](auto& e) { e.external_pow_work_composition_complete = false; });
+    rejects([](auto& e) { e.semantic_relation_closure_complete = false; });
+    rejects([](auto& e) { e.normalized_recursive_verifier_executable = false; });
+    rejects([](auto& e) { e.exact_selected_topology_manifest_derived = false; });
+    rejects([](auto& e) { e.canonical_heterogeneous_site_topology_derived = false; });
+    rejects([](auto& e) { e.canonical.site_count_manifest_derived = false; });
+    rejects([](auto& e) { e.canonical.covers_selected_relation_local_topology = false; });
+    rejects([](auto& e) { e.canonical.production_theorem = false; });
+    rejects([](auto& e) { e.universal_program_registry_binding_defined = false; });
+    rejects([](auto& e) { e.universal_program_registry_consumed_in_recursion = false; });
+    rejects([](auto& e) { e.ali_degree_and_constraint_manifest_complete = false; });
+    rejects([](auto& e) { e.ctl_export_and_terminal_reduction_complete = false; });
+    rejects([](auto& e) { e.hash_first_collision_hybrid_complete = false; });
+    rejects([](auto& e) { e.nirop_oracle_separation_complete = false; });
+    rejects([](auto& e) { e.pow_composition_theorem_complete = false; });
+    rejects([](auto& e) { e.canonical.terms[0].quantitatively_accounted = false; });
+    rejects([](auto& e) { e.canonical.terms[0].implementation_executable = false; });
+    rejects([](auto& e) { e.canonical.terms[0].reduction_complete = false; });
+}
+
+BOOST_AUTO_TEST_CASE(
     global_additive_theorem_gated_on_composition_and_gates_0_to_5)
 {
     const auto audit =
@@ -483,9 +591,8 @@ BOOST_AUTO_TEST_CASE(
         comp.global_certified_bits_target,
         audit.composed_certified_bits_target);
 
-    // Gate 6 completes ONLY when the composition machine-checks AND gates 0-5
-    // are true. Composition machine-checks; g0/g1/g3/g4 closed but g2/g5 open, so
-    // the theorem stays incomplete and gate 6 stays down. Honest flip.
+    // Gate 6 completes ONLY when the composition machine-checks, gates 0-5
+    // are true, AND every independent production reduction is complete.
     BOOST_CHECK(!audit.global_additive_theorem_complete);
     BOOST_CHECK(
         !audit.composition_gate.global_soundness_composition_proved);
@@ -493,7 +600,26 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!audit.theorem_complete);
     BOOST_CHECK_EQUAL(audit.certified_bits, 0U);
 
-    // The theorem-complete predicate is exactly composition AND gates 0-5.
+    // Pin the security-critical conjunction.  In particular, even a future
+    // flip of the aggregation readiness constant cannot bypass the explicit
+    // semantic/recursive/registry/ALI/CTL/hash/NIROP/PoW residuals.
+    const bool production_reductions =
+        audit.semantic_relation_closure_complete &&
+        audit.normalized_recursive_verifier_executable &&
+        audit.exact_selected_topology_manifest_derived &&
+        audit.universal_program_registry_consumed_in_recursion &&
+        audit.ali_degree_and_constraint_manifest_complete &&
+        audit.ctl_export_and_terminal_reduction_complete &&
+        audit.hash_first_collision_hybrid_complete &&
+        audit.nirop_oracle_separation_complete &&
+        audit.pow_composition_theorem_complete;
+    BOOST_CHECK_EQUAL(
+        audit.production_reductions_complete,
+        ledger::ProductionReductionsCompleteV1(audit));
+    BOOST_CHECK(!production_reductions);
+
+    // The theorem-complete predicate is exactly composition, gates 0-5, and
+    // the independent production reductions.
     const bool gates_0_to_5 =
         audit.composition_gate.mathematical_verifier_ready &&
         audit.composition_gate.episode_relations_ready &&
@@ -504,7 +630,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         audit.global_additive_theorem_complete,
         audit.global_additive_composition_machine_checked &&
-            gates_0_to_5);
+            gates_0_to_5 &&
+            audit.production_reductions_complete);
     // Concretely: composition true, gates 0-5 false -> theorem false.
     BOOST_CHECK(!gates_0_to_5);
 }
@@ -559,9 +686,9 @@ BOOST_AUTO_TEST_CASE(
     // --- g5 evidence: first conjunct (full-arity parent-own-FRI) closed in
     // the default gate via measured pin
     // kRCStage3ParentOwnFriFullArityRoundTripMeasured (live column_cap_admits
-    // AND measured prove+verify+tamper/wrong-seed reject). With g4 already
-    // closed on tip, self_similar_fixed_point_closed flips true. all_clear
-    // remains false on g2 (g0 closed by CoupledReady + MathVerifierReady).
+    // AND measured prove+verify+tamper/wrong-seed reject). This is necessary,
+    // but g5 stays open while the active-P2 transcript is not owned by that
+    // same recursion parent.
     const auto parent_own_fri =
         ledger::AssessParentOwnFriFullArityV1();
     BOOST_CHECK(!parent_own_fri.heavy_gate_enabled);
@@ -570,8 +697,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(ledger::kRCStage3ParentOwnFriFullArityRoundTripMeasured);
     BOOST_CHECK(parent_own_fri.measured_pin_accepted);
     BOOST_CHECK(parent_own_fri.full_arity_in_default_gate);
-    BOOST_CHECK(audit.composition_gate.child_fiat_shamir_replay_closed);
-    BOOST_CHECK(audit.composition_gate.self_similar_fixed_point_closed);
+    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(!audit.composition_gate.self_similar_fixed_point_closed);
 
     // --- Live certified_bits stays a computed zero (g2 still open).
     BOOST_CHECK(!audit.composition_gate.all_clear);

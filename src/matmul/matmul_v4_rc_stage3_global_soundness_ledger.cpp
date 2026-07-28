@@ -10,16 +10,20 @@
 #include <matmul/matmul_v4_rc_stage3_ctl.h>
 #include <matmul/matmul_v4_rc_stage3_episode.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
+#include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 #include <matmul/matmul_v4_rc_stage3_verify.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_mlink.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <matmul/matmul_v4_rc_stage3_episode_semantic.h>
+#include <matmul/matmul_v4_rc_stage3_semantic_status.h>
 #include <matmul/matmul_v4_rc_stage3_family_fold.h>
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 #include <matmul/matmul_v4_rc_stage3_unified_root.h>
+#include <matmul/matmul_v4_rc_stage3_receipt_public_statement.h>
 
 #include <algorithm>
 #include <array>
@@ -497,6 +501,54 @@ ParentOwnFriFullArityAssessmentV1 AssessParentOwnFriFullArityV1()
     return cached;
 }
 
+bool ProductionReductionsCompleteV1(
+    const ExecutableGlobalSoundnessLedgerV1& evidence)
+{
+    const bool all_selected_terms_reduced =
+        evidence.canonical.terms.size() ==
+            static_cast<size_t>(
+                ExecutableGlobalTermKindV1::PowGrinding) &&
+        std::all_of(
+            evidence.canonical.terms.begin(),
+            evidence.canonical.terms.end(),
+            [](const ExecutableGlobalTermV1& term) {
+                return term.quantitatively_accounted &&
+                    term.implementation_executable &&
+                    term.reduction_complete;
+            });
+    const bool selected_backend_evidence =
+        evidence.single_fp3_backend_executable &&
+        evidence.q192_multirow_v2_executable &&
+        evidence.q192_split_rap_integrated &&
+        evidence.ctl_dual_lane_arithmetic_executable &&
+        evidence.recursive_child_transport_fp3_only &&
+        evidence.legacy_fp2_transport_bound_inapplicable &&
+        evidence.hash_primitives_executable &&
+        evidence.grinding_parameter_executable &&
+        evidence.internal_fri_grinding_charged;
+    const bool selected_topology_evidence =
+        evidence.exact_selected_topology_manifest_derived &&
+        evidence.canonical_heterogeneous_site_topology_derived &&
+        evidence.canonical.site_count_manifest_derived &&
+        evidence.canonical.covers_selected_relation_local_topology &&
+        evidence.canonical.production_theorem &&
+        all_selected_terms_reduced;
+
+    return
+        selected_backend_evidence &&
+        evidence.external_pow_work_composition_complete &&
+        evidence.semantic_relation_closure_complete &&
+        evidence.normalized_recursive_verifier_executable &&
+        selected_topology_evidence &&
+        evidence.universal_program_registry_binding_defined &&
+        evidence.universal_program_registry_consumed_in_recursion &&
+        evidence.ali_degree_and_constraint_manifest_complete &&
+        evidence.ctl_export_and_terminal_reduction_complete &&
+        evidence.hash_first_collision_hybrid_complete &&
+        evidence.nirop_oracle_separation_complete &&
+        evidence.pow_composition_theorem_complete;
+}
+
 ExecutableGlobalAdditiveCompositionV1
 ComposeExecutableGlobalAdditiveBoundV1(
     const scenarios::ComposedThreatModelFloorV1& composed_floor,
@@ -799,9 +851,33 @@ AssessExecutableGlobalSoundnessLedgerV1(
     out.external_pow_work_composition_complete =
         false;
 
-    out.semantic_relation_closure_complete = false;
-    out.normalized_recursive_verifier_executable = false;
-    out.exact_selected_topology_manifest_derived = false;
+    const RCStage3CoupledShape semantic_shape =
+        MakeRCStage3CoupledShape(
+            MakeProductionV3RCCoupParams(),
+            MakeV3RCCoupOptions());
+    const auto semantic_status =
+        CurrentRCStage3SemanticStatus(
+            semantic_shape, gf::Fp3::FromFp(7),
+            gf::Fp3::FromFp(11), 1,
+            /*production_mode=*/true);
+    out.semantic_relation_closure_complete =
+        semantic_status.registry_exact &&
+        semantic_status.semantic_complete_endpoints ==
+            kRCStage3RelationClosureEndpointCount;
+    out.normalized_recursive_verifier_executable =
+        stage3_verifier_air::kVerifierFiatShamirAirExecutable &&
+        stage3_verifier_air::kVerifierProofRowsBoundInAir &&
+        stage3_verifier_air::kWholeVerifierWitnessExecutable &&
+        stage3_verifier_air::
+            kMultiRowV2SplitRapVerifierAirLocalExecutable &&
+        stage3_verifier_air::
+            kMultiRowV2SplitRapVerifierAirRecursiveAuthority &&
+        recursive_fixedpoint::
+            kCompleteRecursiveFixedPointExecutable;
+    out.exact_selected_topology_manifest_derived =
+        out.canonical.site_count_manifest_derived &&
+        out.canonical.covers_selected_relation_local_topology &&
+        out.canonical.production_theorem;
     out.canonical_heterogeneous_site_topology_derived =
         canonical_inventory;
     out.deprecated_width_product_rejected = true;
@@ -809,7 +885,19 @@ AssessExecutableGlobalSoundnessLedgerV1(
     out.universal_program_registry_consumed_in_recursion =
         false;
     out.ali_degree_and_constraint_manifest_complete = false;
-    out.ctl_export_and_terminal_reduction_complete = false;
+    const auto role_closure =
+        CurrentRCStage3RelationClosureRoleAudit();
+    out.ctl_export_and_terminal_reduction_complete =
+        role_closure.size() ==
+            kRCStage3RelationClosureRoleCount &&
+        std::all_of(
+            role_closure.begin(), role_closure.end(),
+            [](const RCStage3RelationClosureRoleAudit& role) {
+                return role.proof_derived_ctl_endpoints ==
+                           role.required_endpoints &&
+                    role.recursive_ctl_consumption &&
+                    role.role_complete;
+            });
     out.hash_first_collision_hybrid_complete = false;
     // g4 (child Fiat-Shamir replay).  COMPUTED from the single source of
     // truth, recursive_parent_air::AssessChildFsReplayClosureV1(), which is a
@@ -834,7 +922,84 @@ AssessExecutableGlobalSoundnessLedgerV1(
         parent_own_fri_full_arity.full_arity_in_default_gate &&
         out.fiat_shamir_replay_complete;
     out.nirop_oracle_separation_complete = false;
-    out.pow_composition_theorem_complete = false;
+    {
+        pow_composition::PremisesV1 premises;
+
+        // These three are mechanical properties of the consensus attachment:
+        // RCStage3HeaderCommitment removes only matmul_digest, the public
+        // statement binds the canonical params/height/target tuple, and
+        // ValidateRCStage3ConsensusBinding performs the uint256 comparison.
+        premises.header_projection_and_final_digest_disjoint = true;
+        premises.params_height_target_and_sigma_bound = true;
+        premises.digest_compared_to_target_as_integer = true;
+
+        // The payload is serialized and consensus-bound, but the complete
+        // normalized parent does not yet own every proof byte/transcript cell.
+        premises.complete_proof_payload_transcript_bound =
+            out.normalized_recursive_verifier_executable;
+        premises.statement_bound_before_first_proof_commitment =
+            receipt_public_statement::
+                kReceiptPublicStatementSameParentVerifierExecutableV1 &&
+            out.normalized_recursive_verifier_executable;
+
+        // A complete semantic registry is the conservative source for every
+        // tensor-work subrelation.  Do not reuse the engines-only g1/g0 pins.
+        premises.builder_params_and_seed_chain_proved =
+            out.semantic_relation_closure_complete;
+        premises.every_gemm_and_signed_range_proved =
+            out.semantic_relation_closure_complete;
+        premises.every_extract_and_wiring_step_proved =
+            out.semantic_relation_closure_complete;
+        premises.tile_tree_and_round_order_proved =
+            out.semantic_relation_closure_complete;
+        premises.final_digest_and_pow_predicate_proved =
+            out.semantic_relation_closure_complete;
+        premises.coupled_relation_additive_when_required =
+            out.semantic_relation_closure_complete;
+        premises.all_relation_children_recursively_verified =
+            out.normalized_recursive_verifier_executable &&
+            out.ctl_export_and_terminal_reduction_complete;
+
+        premises.one_canonical_transcript_dag =
+            out.fiat_shamir_replay_complete &&
+            out.normalized_recursive_verifier_executable;
+        premises.full_fiat_shamir_replay_owned_by_verifier =
+            out.fiat_shamir_replay_complete &&
+            out.normalized_recursive_verifier_executable;
+        premises.nirop_bcs_reduction_complete =
+            out.nirop_oracle_separation_complete;
+        premises.commitment_binding_reduction_complete =
+            out.hash_first_collision_hybrid_complete;
+        premises.adaptive_statement_selection_accounted =
+            out.nirop_oracle_separation_complete &&
+            out.hash_first_collision_hybrid_complete;
+
+        // Current Q192 is the untaxed single-lane construction.  The global
+        // 40-bit adversary-work budget is deducted once from algebraic terms;
+        // the BCS all-query work term is not charged again.
+        premises.regrind_budget_bits =
+            kConservativeGrindingBits;
+        premises.algebraic_regrind_deduction_bits =
+            kConservativeGrindingBits;
+        premises.selected_path_has_enforced_squeeze_predicate =
+            kRCFri3AlgSingleLaneEnforcesSqueezeGrind;
+        premises.bcs_term_is_all_query_work_bound = true;
+        premises.bcs_regrind_not_double_charged = true;
+
+        // The Stage-3 attachment calls only the complete succinct relation
+        // verifier. Profile-2 sampled carriers and exact replay are not an
+        // authority fallback in VerifyRCStage3ConsensusAttachment.
+        premises.sampled_carrier_excluded_from_authority = true;
+        premises.exact_replay_excluded_from_authority = true;
+
+        out.pow_composition =
+            pow_composition::AssessPowCompositionV1(premises);
+        out.external_pow_work_composition_complete =
+            out.pow_composition
+                .external_tensor_work_composition_complete;
+        out.pow_composition_theorem_complete =
+            out.pow_composition.pow_composition_theorem_complete;
+    }
     // global_additive_theorem_complete is COMPUTED below from the executable
     // composition (machine-checked) AND the gate-0..5 dependency conjunction;
     // it is no longer a hard-coded false.
@@ -989,9 +1154,17 @@ AssessExecutableGlobalSoundnessLedgerV1(
         gate3_fri_alg_formal_soundness &&
         out.fiat_shamir_replay_complete &&
         out.self_similar_fixed_point_closed;
+    // The additive union arithmetic is necessary but not sufficient.  Keep
+    // every production reduction in this independent conjunction so that a
+    // future readiness-constant flip cannot mint certified bits while the
+    // semantic, recursive, registry, ALI, CTL, hash/NIROP or PoW theorem is
+    // still explicitly open.
+    out.production_reductions_complete =
+        ProductionReductionsCompleteV1(out);
     out.global_additive_theorem_complete =
         out.global_additive_composition_machine_checked &&
-        dependency_gates_0_to_5;
+        dependency_gates_0_to_5 &&
+        out.production_reductions_complete;
 
     // Ordered readiness interlock. Every member is sourced from its honest
     // current flag value; NONE is fabricated here. `all_clear` is the single
