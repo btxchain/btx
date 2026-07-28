@@ -393,8 +393,8 @@ BOOST_AUTO_TEST_CASE(
         CommitRCStage3CtlChallenges(challenges);
     pins[0].challenge_commitment = challenge_commitment;
     pins[1].challenge_commitment = challenge_commitment;
-    // Derivation only consumes epoch-one roots. These non-null placeholders
-    // are not accepted as proof evidence by the direct-alias verifier.
+    // Derivation only consumes epoch-one roots. The participant placeholder
+    // is replaced by the shared proof's exact postchallenge commitment below.
     pins[0].auxiliary_commitment = Filled(0xd1);
     pins[1].auxiliary_commitment = Filled(0xd2);
     BOOST_CHECK(gf::IsZero(gf::Add(
@@ -471,6 +471,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(proved.division_exact);
     BOOST_CHECK_EQUAL(proved.proof.batch.n_coeffs, 32U);
     BOOST_CHECK_EQUAL(proved.proof.batch.columns.size(), 13U);
+    pins[0].auxiliary_commitment =
+        ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+            proved.proof, layout);
+    BOOST_REQUIRE(!pins[0].auxiliary_commitment.IsNull());
     BOOST_REQUIRE_MESSAGE(
         VerifyRCStage3EpisodeEndpointCtlDirectAliasProof(
             statement,
@@ -482,6 +486,17 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(static_cast<bool>(
         proved.proof.batch.columns[layout.source_column].root ==
         proved.proof.batch.columns[layout.ctl_value_column].root));
+
+    auto detached_auxiliary = pins;
+    detached_auxiliary[0].auxiliary_commitment = Filled(0xd1);
+    BOOST_CHECK(!VerifyRCStage3EpisodeEndpointCtlDirectAliasProof(
+        statement,
+        RCStage3RelationEndpoint::EpisodeGemmOutputY,
+        episode_pin, manifest, detached_auxiliary, 0,
+        send_schedule, proved.proof, &why));
+    BOOST_CHECK(
+        why.find("ctl_auxiliary_commitment") !=
+        std::string::npos);
 
     auto detached = relation_columns;
     detached[0][3] = gf::Add(detached[0][3], gf::Fp3::One());
@@ -924,6 +939,10 @@ BOOST_AUTO_TEST_CASE(
             combined, combined_columns, seed);
     BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
     BOOST_REQUIRE(proved.division_exact);
+    pins[0].auxiliary_commitment =
+        ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+            proved.proof, layout);
+    BOOST_REQUIRE(!pins[0].auxiliary_commitment.IsNull());
     BOOST_REQUIRE_MESSAGE(
         VerifyRCStage3CoupledEndpointCtlDirectAliasProof(
             statement, public_pin, manifest, pins, 0,
@@ -931,6 +950,16 @@ BOOST_AUTO_TEST_CASE(
         why);
     BOOST_CHECK(
         why.find("coupled_local_kernel_cell") !=
+        std::string::npos);
+
+    auto detached_auxiliary = pins;
+    detached_auxiliary[0].auxiliary_commitment = Filled(0xd5);
+    BOOST_CHECK(
+        !VerifyRCStage3CoupledEndpointCtlDirectAliasProof(
+            statement, public_pin, manifest, detached_auxiliary, 0,
+            send_schedule, proved.proof, &why));
+    BOOST_CHECK(
+        why.find("ctl_auxiliary_commitment") !=
         std::string::npos);
 
     auto relabelled = public_pin;

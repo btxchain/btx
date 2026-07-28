@@ -26,6 +26,8 @@ constexpr char ROLE_DOMAIN[] = "BTX_RC_STAGE3_RELATION_ROLE_CLOSURE_V1";
 constexpr char CLOSURE_DOMAIN[] = "BTX_RC_STAGE3_RELATION_CLOSURE_V1";
 constexpr char DIRECT_ALIAS_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_RELATION_CTL_DIRECT_ALIAS_V1";
+constexpr char DIRECT_ALIAS_AUX_DOMAIN[] =
+    "BTX_RC_STAGE3_RELATION_CTL_DIRECT_ALIAS_AUX_V1";
 constexpr char SIGNED_RANGE_DUAL_CTL_AUX_DOMAIN[] =
     "BTX_RC_STAGE3_SIGNED_RANGE_DUAL_CTL_AUX_V1";
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
@@ -1390,6 +1392,55 @@ uint256 ComputeRCStage3RelationCtlDirectAliasSeed(
     return hash.GetHash();
 }
 
+uint256 ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    const RCStage3RelationCtlDirectAliasLayout& layout)
+{
+    if (!layout.same_trace || !layout.direct_alias ||
+        layout.total_columns == 0 ||
+        proof.batch.columns.size() !=
+            static_cast<size_t>(layout.total_columns) + 1 ||
+        proof.batch.column_len.size() != proof.batch.columns.size() ||
+        proof.batch.n_coeffs == 0 ||
+        layout.ctl_column_base > layout.total_columns ||
+        stage3_ctl_col::NUM_COLUMNS >
+            layout.total_columns - layout.ctl_column_base) {
+        return {};
+    }
+    for (uint32_t column = stage3_ctl_col::INVERSE1;
+         column <= stage3_ctl_col::RUNNING2; ++column) {
+        if (proof.batch.columns[
+                layout.ctl_column_base + column].root.IsNull()) {
+            return {};
+        }
+    }
+    const uint256& quotient_root =
+        proof.batch.columns[layout.total_columns].root;
+    if (quotient_root.IsNull()) return {};
+
+    HashWriter hash;
+    hash << DIRECT_ALIAS_AUX_DOMAIN;
+    hash << kRCStage3RelationClosureVersion;
+    hash << layout.relation_columns;
+    hash << layout.ctl_column_base;
+    hash << layout.total_columns;
+    hash << layout.source_column;
+    hash << proof.batch.version;
+    hash << proof.batch.blowup;
+    hash << proof.batch.n_coeffs;
+    hash << static_cast<uint32_t>(proof.batch.column_len.size());
+    for (const uint32_t length : proof.batch.column_len) {
+        hash << length;
+    }
+    for (uint32_t column = stage3_ctl_col::INVERSE1;
+         column <= stage3_ctl_col::RUNNING2; ++column) {
+        hash << proof.batch.columns[
+            layout.ctl_column_base + column].root;
+    }
+    hash << quotient_root;
+    return hash.GetHash();
+}
+
 bool VerifyRCStage3EpisodeEndpointCtlDirectAliasProof(
     const RCStage3SuccinctProof& statement,
     RCStage3RelationEndpoint endpoint,
@@ -1478,6 +1529,10 @@ bool VerifyRCStage3EpisodeEndpointCtlDirectAliasProof(
             schedule, ctl_rows, proof.batch.n_coeffs, ctl_roots) !=
         ctl_pin.trace_commitment) {
         return Fail(why, "direct_alias:ctl_trace_commitment");
+    }
+    if (ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+            proof, layout) != ctl_pin.auxiliary_commitment) {
+        return Fail(why, "direct_alias:ctl_auxiliary_commitment");
     }
 
     const uint256 relation_seed =
@@ -1639,6 +1694,10 @@ bool VerifyRCStage3CoupledEndpointCtlDirectAliasProof(
             schedule, ctl_rows, proof.batch.n_coeffs, ctl_roots) !=
         ctl_pin.trace_commitment) {
         return Fail(why, "coupled_alias:ctl_trace_commitment");
+    }
+    if (ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+            proof, layout) != ctl_pin.auxiliary_commitment) {
+        return Fail(why, "coupled_alias:ctl_auxiliary_commitment");
     }
 
     const uint256 seed = ComputeRCStage3RelationCtlDirectAliasSeed(

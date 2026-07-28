@@ -430,6 +430,17 @@ BuildRCStage3RelationCtlDegree2DirectAliasConstraintSystem(
     uint32_t source_column);
 
 /**
+ * Bind one direct-alias participant's postchallenge CTL columns to the shared
+ * product proof.  The digest covers INVERSE1..RUNNING2 and the shared
+ * quotient root; verifiers reject a child receipt carrying any other
+ * auxiliary commitment.
+ */
+[[nodiscard]] uint256
+ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    const RCStage3RelationCtlDirectAliasLayout& layout);
+
+/**
  * Registered episode-shard verifier for the product construction. It resolves
  * the relation AIR locally from `episode_pin`; the endpoint-to-column mapping
  * is immutable. The proof must carry both the relation trace and CTL trace,
