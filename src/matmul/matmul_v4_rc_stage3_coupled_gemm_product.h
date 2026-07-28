@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,6 +17,8 @@
 namespace matmul::v4::rc {
 
 inline constexpr uint16_t kRCStage3CoupledGemmProductVersion = 1;
+inline constexpr uint16_t
+    kRCStage3CoupledGemmCompactProductVersionV2 = 2;
 
 enum RCStage3CoupledGemmDotColumn : uint32_t {
     kRCStage3CoupledGemmActive = 0,
@@ -142,6 +145,121 @@ struct RCStage3CoupledGemmProduct {
     const RCStage3CoupledShape& shape,
     const RCStage3CoupledGemmProduct& product,
     std::string* why = nullptr);
+
+/**
+ * Proof-only replacement for the V1 flat product.
+ *
+ * V1 retains A/B/Y for every scheduled GEMM so its verifier can recompute
+ * each committed trace root.  At production shape that is a datacenter-sized
+ * second copy of the workload.  V2 instead makes the exact tile trace roots
+ * carried by the verified AIR proofs the endpoint authority.  The public
+ * schedule fixes every tile, deterministic selector roots prevent a prover
+ * from disabling trace rows, and A-root equality across output blocks proves
+ * that every block in one output row used the same operand-A row.
+ *
+ * One instance can be proved while its callback pointers are live and then
+ * discarded.  Finalization accepts only the complete canonical schedule.
+ */
+struct RCStage3CoupledGemmCompactInstanceV2 {
+    uint16_t version{
+        kRCStage3CoupledGemmCompactProductVersionV2};
+    RCStage3CoupledGemmScheduleEntry schedule;
+    std::vector<RCStage3CoupledGemmTileProof> tiles;
+    uint256 operand_a_trace_root{};
+    uint256 operand_b_trace_root{};
+    uint256 output_y_trace_root{};
+    uint256 instance_commitment{};
+};
+
+struct RCStage3CoupledGemmCompactProductV2 {
+    uint16_t version{
+        kRCStage3CoupledGemmCompactProductVersionV2};
+    uint256 statement_commitment{};
+    uint256 shape_commitment{};
+    uint256 sigma{};
+    uint256 schedule_commitment{};
+    uint64_t expected_gemms{0};
+    uint64_t expected_output_tiles{0};
+    std::vector<RCStage3CoupledGemmCompactInstanceV2> gemms;
+    uint256 operand_a_endpoint_root{};
+    uint256 operand_b_endpoint_root{};
+    uint256 output_y_endpoint_root{};
+    uint256 product_commitment{};
+};
+
+[[nodiscard]] bool ProveRCStage3CoupledGemmCompactInstanceV2(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    uint64_t schedule_index,
+    const RCStage3CoupledGemmOpening& opening,
+    RCStage3CoupledGemmCompactInstanceV2& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool FinalizeRCStage3CoupledGemmCompactProductV2(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    std::vector<RCStage3CoupledGemmCompactInstanceV2> instances,
+    RCStage3CoupledGemmCompactProductV2& out,
+    std::string* why = nullptr);
+
+/** Verification consumes no native A/B/Y values and performs no GEMM. */
+[[nodiscard]] bool VerifyRCStage3CoupledGemmCompactProductV2(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledGemmCompactProductV2& product,
+    std::string* why = nullptr);
+
+/**
+ * Callback-time compact prover for the exact coupled GEMM schedule.
+ *
+ * `OnGemm` consumes the borrowed solver view synchronously, proves that one
+ * instance and drops its temporary native copy before returning.  The sink
+ * retains only CompactInstanceV2 proof objects. Missing, duplicated or
+ * reordered callbacks poison the sink and Finalize fails closed.
+ */
+class RCStage3CoupledGemmCompactStreamingV2 {
+public:
+    RCStage3CoupledGemmCompactStreamingV2(
+        const RCStage3SuccinctProof& statement,
+        const RCStage3CoupledShape& shape);
+
+    void OnGemm(const RCCoupGemmProofWitnessView& view);
+
+    [[nodiscard]] bool Complete(
+        std::string* why = nullptr) const;
+    [[nodiscard]] bool Finalize(
+        RCStage3CoupledGemmCompactProductV2& out,
+        std::string* why = nullptr) const;
+
+    [[nodiscard]] uint64_t RetainedNativeBytes() const
+    {
+        return 0;
+    }
+    [[nodiscard]] uint64_t PeakNativeBytes() const
+    {
+        return m_peak_native_bytes;
+    }
+    [[nodiscard]] const std::vector<
+        RCStage3CoupledGemmCompactInstanceV2>&
+    Instances() const
+    {
+        return m_instances;
+    }
+
+private:
+    void Reject(const std::string& detail);
+
+    RCStage3SuccinctProof m_statement;
+    RCStage3CoupledShape m_shape;
+    std::vector<RCStage3CoupledGemmScheduleEntry>
+        m_schedule;
+    std::vector<RCStage3CoupledGemmCompactInstanceV2>
+        m_instances;
+    uint256 m_schedule_commitment{};
+    uint64_t m_next_schedule_index{0};
+    uint64_t m_peak_native_bytes{0};
+    std::string m_error;
+};
 
 struct RCStage3CoupledGemmProductAudit {
     bool immutable_shape_derived_schedule{false};

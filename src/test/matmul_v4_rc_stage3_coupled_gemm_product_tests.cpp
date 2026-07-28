@@ -80,7 +80,7 @@ BOOST_AUTO_TEST_CASE(audit_is_exact_local_and_fail_closed_transitively)
     BOOST_CHECK(audit.endpoints_30_through_32_locally_complete);
     BOOST_CHECK(!audit.bank_page_producer_provenance_complete);
     BOOST_CHECK(!audit.prior_state_producer_provenance_complete);
-    BOOST_CHECK(!audit.production_streaming_complete);
+    BOOST_CHECK(audit.production_streaming_complete);
     BOOST_CHECK(!audit.recursively_consumed);
     BOOST_CHECK(!audit.transitively_complete);
 }
@@ -161,6 +161,146 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!rc::ProveRCStage3CoupledGemmProduct(
         statement, shape, Openings(schedule.size(), 31),
         bad_sum, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    compact_v2_proves_callback_instances_discards_native_vectors_and_rejects_proof_schedule_and_selector_attacks)
+{
+    const auto statement = Statement();
+    const auto shape = Shape();
+    std::vector<rc::RCStage3CoupledGemmScheduleEntry> schedule;
+    uint256 schedule_commitment;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledGemmSchedule(
+            statement, shape, schedule,
+            schedule_commitment, &why),
+        why);
+    const auto openings = Openings(schedule.size());
+    std::vector<
+        rc::RCStage3CoupledGemmCompactInstanceV2>
+        instances;
+    for (uint64_t i = 0; i < schedule.size(); ++i) {
+        rc::RCStage3CoupledGemmCompactInstanceV2 instance;
+        BOOST_REQUIRE_MESSAGE(
+            rc::ProveRCStage3CoupledGemmCompactInstanceV2(
+                statement, shape, i, openings[i],
+                instance, &why),
+            why);
+        BOOST_CHECK_EQUAL(
+            instance.schedule.schedule_index, i);
+        BOOST_CHECK(!instance.operand_a_trace_root.IsNull());
+        BOOST_CHECK(!instance.operand_b_trace_root.IsNull());
+        BOOST_CHECK(!instance.output_y_trace_root.IsNull());
+        BOOST_CHECK(!instance.instance_commitment.IsNull());
+        instances.push_back(std::move(instance));
+    }
+
+    rc::RCStage3CoupledGemmCompactProductV2 honest;
+    BOOST_REQUIRE_MESSAGE(
+        rc::FinalizeRCStage3CoupledGemmCompactProductV2(
+            statement, shape, instances, honest, &why),
+        why);
+    BOOST_CHECK_EQUAL(honest.gemms.size(), schedule.size());
+    BOOST_CHECK_EQUAL(
+        honest.expected_output_tiles, schedule.size());
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyRCStage3CoupledGemmCompactProductV2(
+            statement, shape, honest, &why),
+        why);
+
+    auto omitted = honest;
+    omitted.gemms.pop_back();
+    BOOST_CHECK(
+        !rc::VerifyRCStage3CoupledGemmCompactProductV2(
+            statement, shape, omitted, &why));
+
+    auto reordered = honest;
+    std::swap(reordered.gemms[0], reordered.gemms[1]);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3CoupledGemmCompactProductV2(
+            statement, shape, reordered, &why));
+
+    auto selector = honest;
+    selector.gemms[0].tiles[0]
+        .pin.column_roots[rc::kRCStage3CoupledGemmActive]
+        .root = H(0xa1);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3CoupledGemmCompactProductV2(
+            statement, shape, selector, &why));
+
+    auto proof = honest;
+    proof.gemms[0].tiles[0]
+        .proof.batch.columns[rc::kRCStage3CoupledGemmY]
+        .root = H(0xa2);
+    BOOST_CHECK(
+        !rc::VerifyRCStage3CoupledGemmCompactProductV2(
+            statement, shape, proof, &why));
+
+    auto wrong_sum = openings[0];
+    wrong_sum.output_y[0] = 31;
+    rc::RCStage3CoupledGemmCompactInstanceV2 bad_sum;
+    BOOST_CHECK(
+        !rc::ProveRCStage3CoupledGemmCompactInstanceV2(
+            statement, shape, 0, wrong_sum,
+            bad_sum, &why));
+
+    rc::RCStage3CoupledGemmCompactStreamingV2 stream{
+        statement, shape};
+    for (uint64_t i = 0; i < schedule.size(); ++i) {
+        stream.OnGemm({
+            .barrier = schedule[i].barrier,
+            .lobe = schedule[i].lobe,
+            .page_id = schedule[i].page_id,
+            .rows = shape.rows_per_lobe,
+            .width = shape.lobe_width,
+            .operand_a = openings[i].operand_a.data(),
+            .operand_b = openings[i].operand_b.data(),
+            .gemm_y = openings[i].output_y.data(),
+        });
+        BOOST_CHECK_EQUAL(
+            stream.RetainedNativeBytes(), 0U);
+    }
+    BOOST_CHECK_EQUAL(
+        stream.PeakNativeBytes(),
+        uint64_t{32} + uint64_t{32 * 32} +
+            uint64_t{32 * sizeof(int64_t)});
+    BOOST_REQUIRE_MESSAGE(stream.Complete(&why), why);
+    rc::RCStage3CoupledGemmCompactProductV2 streamed;
+    BOOST_REQUIRE_MESSAGE(
+        stream.Finalize(streamed, &why), why);
+    BOOST_CHECK_MESSAGE(
+        rc::VerifyRCStage3CoupledGemmCompactProductV2(
+            statement, shape, streamed, &why),
+        why);
+
+    rc::RCStage3CoupledGemmCompactStreamingV2 missing{
+        statement, shape};
+    missing.OnGemm({
+        .barrier = schedule[0].barrier,
+        .lobe = schedule[0].lobe,
+        .page_id = schedule[0].page_id,
+        .rows = shape.rows_per_lobe,
+        .width = shape.lobe_width,
+        .operand_a = openings[0].operand_a.data(),
+        .operand_b = openings[0].operand_b.data(),
+        .gemm_y = openings[0].output_y.data(),
+    });
+    BOOST_CHECK(!missing.Complete(&why));
+
+    rc::RCStage3CoupledGemmCompactStreamingV2 reordered_stream{
+        statement, shape};
+    reordered_stream.OnGemm({
+        .barrier = schedule[1].barrier,
+        .lobe = schedule[1].lobe,
+        .page_id = schedule[1].page_id,
+        .rows = shape.rows_per_lobe,
+        .width = shape.lobe_width,
+        .operand_a = openings[1].operand_a.data(),
+        .operand_b = openings[1].operand_b.data(),
+        .gemm_y = openings[1].output_y.data(),
+    });
+    BOOST_CHECK(!reordered_stream.Complete(&why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
