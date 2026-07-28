@@ -850,6 +850,47 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_MESSAGE(
         verified,
         why);
+    std::string parallel_why;
+    const bool parallel_verified =
+        aq::AirQuotientVerify<
+            gf::Fp3, StreamAudit>(
+            cs, streamed.proof, seed,
+            &parallel_why, /*verify_threads=*/8);
+    BOOST_CHECK_MESSAGE(
+        parallel_verified,
+        parallel_why);
+
+    // The portable non-OpenMP path is only a scheduling optimization: it
+    // must reject the same proof-level opening mutation as the sequential
+    // verifier.  Mutate a value covered by both the row Merkle path and the
+    // quotient identity so this is not merely a structural-shape failure.
+    auto tampered = streamed.proof;
+    BOOST_REQUIRE(
+        !tampered.batch.queries.empty());
+    BOOST_REQUIRE(
+        !tampered.batch.queries[0]
+             .row.values.empty());
+    tampered.batch.queries[0].row.values[0] =
+        gf::Add(
+            tampered.batch.queries[0]
+                .row.values[0],
+            gf::Fp3::One());
+    std::string sequential_tamper_why;
+    std::string parallel_tamper_why;
+    const bool sequential_tamper_accepted =
+        aq::AirQuotientVerify<
+            gf::Fp3, StreamAudit>(
+            cs, tampered, seed,
+            &sequential_tamper_why,
+            /*verify_threads=*/1);
+    const bool parallel_tamper_accepted =
+        aq::AirQuotientVerify<
+            gf::Fp3, StreamAudit>(
+            cs, tampered, seed,
+            &parallel_tamper_why,
+            /*verify_threads=*/8);
+    BOOST_CHECK(!sequential_tamper_accepted);
+    BOOST_CHECK(!parallel_tamper_accepted);
 }
 
 BOOST_AUTO_TEST_CASE(

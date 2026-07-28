@@ -711,12 +711,12 @@ template <typename F, typename Backend = AirFriBackend<F>>
  * with NO change to the accepted/rejected verdict — same field arithmetic,
  * same Merkle roots, same equality tests, just reordered. Default 1 keeps
  * every existing caller byte-for-byte sequential (the parameter is new and
- * additive). >1 only takes effect for ROW-WISE backends built with OpenMP;
- * other backends and non-OpenMP builds silently ignore it and stay
- * sequential — never a correctness fork, only a wall-clock one. When
- * multiple queries fail, `why` receives an arbitrary one of their messages
- * rather than deterministically the first (diagnostic text only; the
- * accept/reject boolean is unaffected).
+ * additive). >1 takes effect only for ROW-WISE backends: OpenMP builds use a
+ * static parallel loop, while non-OpenMP builds use deterministic contiguous
+ * std::async chunks. Other backends stay sequential. This is never a
+ * correctness fork, only a wall-clock choice. The portable path reports the
+ * lowest failing query; OpenMP may report any failing query (diagnostic text
+ * only; the accept/reject boolean is unaffected).
  */
 template <typename F, typename Backend = AirFriBackend<F>>
 [[nodiscard]] bool AirQuotientVerify(const AirConstraintSystem<F>& cs,

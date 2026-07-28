@@ -19,6 +19,7 @@
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <limits>
 #include <type_traits>
 
@@ -2099,6 +2100,71 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
                 }
             }
             if (first_error != nullptr) return fail(first_error);
+        }
+    }
+#endif
+#if !defined(_OPENMP)
+    if constexpr (AirBackendIsRowWise<Backend>) {
+        if (verify_threads > 1 && n_queries > 1) {
+            used_parallel = true;
+            using QueryChunkResult =
+                std::pair<size_t, const char*>;
+            const uint32_t workers =
+                std::min<uint32_t>(
+                    {verify_threads,
+                     static_cast<uint32_t>(
+                         n_queries),
+                     UINT32_C(16)});
+            const size_t chunk =
+                (n_queries + workers - 1) /
+                workers;
+            std::vector<
+                std::future<QueryChunkResult>>
+                jobs;
+            jobs.reserve(workers);
+            for (uint32_t worker = 0;
+                 worker < workers; ++worker) {
+                const size_t begin =
+                    worker * chunk;
+                const size_t end =
+                    std::min(
+                        n_queries,
+                        begin + chunk);
+                if (begin >= end) break;
+                jobs.push_back(
+                    std::async(
+                        std::launch::async,
+                        [&, begin, end]() {
+                            for (size_t qi = begin;
+                                 qi < end; ++qi) {
+                                if (const char* error =
+                                        verify_one_query(
+                                            qi)) {
+                                    return QueryChunkResult{
+                                        qi, error};
+                                }
+                            }
+                            return QueryChunkResult{
+                                std::numeric_limits<
+                                    size_t>::max(),
+                                nullptr};
+                        }));
+            }
+            QueryChunkResult first_error{
+                std::numeric_limits<
+                    size_t>::max(),
+                nullptr};
+            for (auto& job : jobs) {
+                const QueryChunkResult result =
+                    job.get();
+                if (result.first <
+                    first_error.first) {
+                    first_error = result;
+                }
+            }
+            if (first_error.second != nullptr) {
+                return fail(first_error.second);
+            }
         }
     }
 #endif
