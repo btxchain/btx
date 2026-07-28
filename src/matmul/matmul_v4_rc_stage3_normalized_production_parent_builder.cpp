@@ -620,11 +620,33 @@ bool BuildBlockRoleProducts(
         Note(why, "coupled_params");
         return false;
     }
-    RCCoupEpisodeTranscript coupled;
-    coupled_digest =
-        RecomputeCoupledPuzzleReference(
+    if (input.coupled_capture == nullptr ||
+        input.coupled_capture_header_hash !=
+            block.GetHash()) {
+        Note(why, "winner_coupled_capture_binding");
+        return false;
+    }
+    if (!input.coupled_capture->Complete(
+            &capture_why)) {
+        Note(
+            why,
+            "winner_coupled_capture_incomplete:" +
+                capture_why);
+        return false;
+    }
+    const auto& coupled =
+        input.coupled_capture->Receipt();
+    if (!VerifyRCStage3CoupledWinnerReceiptV2(
             block, input.height, coupled_params,
-            coupled_options, {}, nullptr, &coupled);
+            coupled_options, coupled,
+            &capture_why)) {
+        Note(
+            why,
+            "winner_coupled_capture_verify:" +
+                capture_why);
+        return false;
+    }
+    coupled_digest = coupled.coupled_digest;
     const uint256 assembled_coupled =
         AssembleCoupledEpisodeDigest(
             coupled.bank_root, coupled.barrier_roots,
@@ -633,11 +655,12 @@ bool BuildBlockRoleProducts(
         coupled_digest != assembled_coupled ||
         coupled.bank_root.IsNull() ||
         coupled.barrier_roots.empty() ||
-        coupled.gemms.empty() ||
-        coupled.gemms.front().A.empty() ||
-        coupled.gemms.front().B.empty() ||
-        coupled.extracts.empty()) {
-        Note(why, "coupled_recompute");
+        coupled.barriers.empty() ||
+        !coupled.representative_cells
+             .gemm_observed ||
+        !coupled.representative_cells
+             .extract_observed) {
+        Note(why, "coupled_capture_terminal");
         return false;
     }
 
@@ -685,16 +708,6 @@ bool BuildBlockRoleProducts(
         return false;
     }
 
-    const auto bank_pages =
-        DeriveCoupledBankPages(
-            block, input.height, coupled_params,
-            coupled_options.transcript_version);
-    if (bank_pages.empty() ||
-        bank_pages.front().empty()) {
-        Note(why, "coupled_bank_pages");
-        return false;
-    }
-
     const int64_t episode_a =
         static_cast<int64_t>(round0_signed[0]);
     const int64_t episode_b =
@@ -706,29 +719,27 @@ bool BuildBlockRoleProducts(
         gf::FromSigned3(episode_a);
     const int64_t coupled_a =
         static_cast<int64_t>(
-            coupled.gemms.front().A[0]);
+            coupled.representative_cells
+                .first_gemm_operand_a);
     const int64_t coupled_b =
         static_cast<int64_t>(
-            coupled.gemms.front().B[0]);
+            coupled.representative_cells
+                .first_gemm_operand_b);
     const gf::Fp3 coupled_cell =
         gf::FromSigned3(coupled_a);
-    const auto& extract = coupled.extracts.front();
     const uint64_t mix_a_value =
-        extract.extract_in.empty()
-            ? uint64_t{0}
-            : static_cast<uint64_t>(
-                  extract.extract_in[0]);
+        static_cast<uint64_t>(
+            coupled.representative_cells
+                .first_extract_input_a);
     const uint64_t mix_b_value =
-        extract.extract_in.size() > 1
-            ? static_cast<uint64_t>(
-                  extract.extract_in[1])
-            : uint64_t{0};
+        static_cast<uint64_t>(
+            coupled.representative_cells
+                .first_extract_input_b);
     const auto mix_a = Limbs4(mix_a_value);
     const auto mix_b = Limbs4(mix_b_value);
     const uint8_t bank_nibble =
-        static_cast<uint8_t>(
-            bank_pages.front().front()) &
-        0x0fU;
+        coupled.representative_cells
+            .first_bank_nibble;
 
     products.reserve(kRCStage3RelationClosureRoleCount);
 
@@ -860,28 +871,28 @@ bool BuildBlockRoleProducts(
             Role::CoupledMix, 0, 3, nullptr,
             &mix_a, &mix_b));
     {
-        const auto extract_input =
-            [&extract](size_t index) {
-                return gf::FromSigned3(
-                    index < extract.extract_in.size()
-                        ? extract.extract_in[index]
-                        : int64_t{0});
-            };
+        const auto& representative =
+            coupled.representative_cells;
         const gf::Fp3 extract_output =
             gf::FromSigned3(
-                extract.extract_out.empty()
-                    ? int64_t{0}
-                    : static_cast<int64_t>(
-                          extract.extract_out.front()));
+                static_cast<int64_t>(
+                    representative
+                        .first_extract_output));
         const std::vector<gf::Fp3> openings = {
-            extract_input(0),
-            extract_input(1),
+            gf::FromSigned3(
+                representative
+                    .first_extract_input_a),
+            gf::FromSigned3(
+                representative
+                    .first_extract_input_b),
             gf::FromU64_3(0),
             extract_output,
         };
         const std::vector<std::array<uint32_t, 8>>
             roots = {
-                Root8(extract.extract_prf),
+                Root8(
+                    coupled.barriers.front()
+                        .extract_prf),
             };
         products.push_back(
             BuildRCStage3NoKernelRoleAir(
@@ -1719,6 +1730,8 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
     }
     out.winner_episode_capture_bound = true;
     out.episode_witness_replay_avoided = true;
+    out.winner_coupled_capture_bound = true;
+    out.coupled_witness_replay_avoided = true;
     out.captured_episode_leaf_inventory_verified =
         out.captured_episode_layer_count != 0 &&
         out.captured_episode_tile_count != 0 &&
@@ -1945,6 +1958,8 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         out.all_endpoint_cells_literal &&
         out.winner_episode_capture_bound &&
         out.episode_witness_replay_avoided &&
+        out.winner_coupled_capture_bound &&
+        out.coupled_witness_replay_avoided &&
         out.captured_episode_leaf_inventory_verified &&
         out.builder_stream_relations_same_parent &&
         out.witness_violations == 0;

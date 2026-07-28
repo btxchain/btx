@@ -253,6 +253,9 @@ RCStage3NormalizedProviderStatus BuildRCStage3NormalizedAuthorityReceipt(
     const auto episode_capture =
         RCStage3EpisodeWitnessStoreGet(
             final_header_hash);
+    const auto coupled_capture =
+        RCStage3CoupledWinnerStoreGetV1(
+            final_header_hash);
     const parent_builder::ProductionParentBuildInputV1 input{
         .solved_block = &solved_block,
         .params = &params,
@@ -261,6 +264,9 @@ RCStage3NormalizedProviderStatus BuildRCStage3NormalizedAuthorityReceipt(
         .episode_rounds = hints.episode_rounds,
         .episode_capture = episode_capture,
         .episode_capture_header_hash =
+            final_header_hash,
+        .coupled_capture = coupled_capture,
+        .coupled_capture_header_hash =
             final_header_hash,
     };
     receipt_consumer::CanonicalRelationParentProductV1 parent_product;

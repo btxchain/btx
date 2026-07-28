@@ -99,6 +99,30 @@ struct RCStage3CoupledBarrierCaptureV1 {
 };
 
 /**
+ * Bounded callback-owned cells needed by the lightweight fourteen-role
+ * parent while the all-instance recursive children are being assembled.
+ *
+ * These values are observed synchronously during the primary coupled
+ * workload. They are covered by receipt_commitment and are later
+ * equality-checked against the proof-owned all-instance child openings.
+ * Keeping these six cells avoids replaying the coupled oracle merely to
+ * rebuild the local endpoint parent.
+ */
+struct RCStage3CoupledRepresentativeCellsV2 {
+    int8_t first_gemm_operand_a{0};
+    int8_t first_gemm_operand_b{0};
+    uint8_t first_bank_nibble{0};
+    int64_t first_extract_input_a{0};
+    int64_t first_extract_input_b{0};
+    int8_t first_extract_output{0};
+    bool gemm_observed{false};
+    bool extract_observed{false};
+
+    bool operator==(
+        const RCStage3CoupledRepresentativeCellsV2&) const = default;
+};
+
+/**
  * Bounded winner-only capture artifact.
  *
  * At production V3 shape it retains 1536 page records and eight barrier
@@ -138,6 +162,7 @@ struct RCStage3CoupledWinnerReceiptV1 {
     uint256 bank_root{};
     std::vector<uint256> barrier_roots;
     uint256 coupled_digest{};
+    RCStage3CoupledRepresentativeCellsV2 representative_cells;
     uint64_t gemm_callbacks{0};
     uint64_t captured_payload_bytes{0};
     uint64_t retained_receipt_bytes_upper_bound{0};

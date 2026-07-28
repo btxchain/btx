@@ -1083,9 +1083,15 @@ BOOST_AUTO_TEST_CASE(
         rc::ResolveRCCoupParams(params);
     const auto coupled_options =
         rc::ResolveRCCoupOptions(params);
+    auto coupled_capture =
+        std::make_shared<
+            rc::RCStage3CoupledWinnerCaptureV1>(
+                block, HEIGHT, coupled_params,
+                coupled_options);
     const uint256 coupled_digest =
-        rc::RecomputeCoupledPuzzleReference(
+        rc::MineCoupledPuzzleWithProofWitness(
             block, HEIGHT, coupled_params,
+            *coupled_capture, {},
             coupled_options);
     BOOST_REQUIRE(!episode_digest.IsNull());
     BOOST_REQUIRE(!coupled_digest.IsNull());
@@ -1094,6 +1100,15 @@ BOOST_AUTO_TEST_CASE(
             block, params, HEIGHT,
             episode_digest, coupled_digest);
     BOOST_REQUIRE(!block.matmul_digest.IsNull());
+    std::string capture_why;
+    BOOST_REQUIRE_MESSAGE(
+        coupled_capture->FinalizeHeaderBindingV2(
+            block, coupled_digest,
+            &capture_why),
+        capture_why);
+    BOOST_REQUIRE_MESSAGE(
+        coupled_capture->Complete(&capture_why),
+        capture_why);
 
     const uint256 target =
         uint256{
@@ -1108,6 +1123,9 @@ BOOST_AUTO_TEST_CASE(
         .target = target,
         .episode_capture = episode_capture,
         .episode_capture_header_hash =
+            block.GetHash(),
+        .coupled_capture = coupled_capture,
+        .coupled_capture_header_hash =
             block.GetHash(),
     };
     builder::ProductionRelationParentCandidateV1
@@ -1124,6 +1142,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(candidate.all_endpoint_cells_literal);
     BOOST_CHECK(candidate.winner_episode_capture_bound);
     BOOST_CHECK(candidate.episode_witness_replay_avoided);
+    BOOST_CHECK(candidate.winner_coupled_capture_bound);
+    BOOST_CHECK(candidate.coupled_witness_replay_avoided);
     BOOST_CHECK_EQUAL(candidate.roles.size(), 14U);
     BOOST_CHECK_EQUAL(candidate.endpoint_count, 52U);
     BOOST_CHECK_EQUAL(candidate.witness_violations, 0U);

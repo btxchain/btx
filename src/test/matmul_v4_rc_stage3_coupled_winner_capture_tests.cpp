@@ -256,6 +256,10 @@ BOOST_AUTO_TEST_CASE(
         receipt.no_flat_tile_proofs_materialized);
     BOOST_CHECK(
         !receipt.recursive_relation_proofs_bound);
+    BOOST_CHECK(
+        receipt.representative_cells.gemm_observed);
+    BOOST_CHECK(
+        receipt.representative_cells.extract_observed);
     BOOST_CHECK_MESSAGE(
         rc::VerifyRCStage3CoupledWinnerReceiptV2(
             header, kHeight, params, options,
@@ -269,6 +273,17 @@ BOOST_AUTO_TEST_CASE(
         !rc::VerifyRCStage3CoupledWinnerReceiptV2(
             other, kHeight, params, options,
             receipt, &why));
+
+    // The bounded cells used by the no-replay parent are part of the
+    // immutable receipt commitment. Their semantic equality to the complete
+    // child openings is checked later by the child-binding verifier.
+    auto changed_cell = receipt;
+    changed_cell.representative_cells
+        .first_extract_input_a ^= 1;
+    BOOST_CHECK(
+        !rc::VerifyRCStage3CoupledWinnerReceiptV2(
+            header, kHeight, params, options,
+            changed_cell, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -7,6 +7,7 @@
 
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_stage3_air_parent_composer.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_winner_capture.h>
 #include <matmul/matmul_v4_rc_stage3_episode_semantic_source_alg.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
@@ -38,10 +39,11 @@ inline constexpr uint16_t kProductionParentBuildInputVersionV1 = 1;
  * Typed, immutable production build request.
  *
  * There is deliberately no callback, readiness flag, host verification bit or
- * serialized proof in this request.  `episode_capture` is the immutable
- * winner-only witness retained by the solver's CPU reseal.  Its accompanying
- * key must be the finalized header hash; the builder never erases it and never
- * accepts a capture under a different header.
+ * serialized proof in this request. `episode_capture` and `coupled_capture`
+ * are immutable winner-only witnesses emitted by the primary proof-aware
+ * workload calls. Their accompanying keys must be the finalized header hash;
+ * the builder never erases them and never accepts a capture under a different
+ * header. Replaying either datacenter workload is forbidden.
  */
 struct ProductionParentBuildInputV1 {
     uint16_t version{kProductionParentBuildInputVersionV1};
@@ -53,6 +55,9 @@ struct ProductionParentBuildInputV1 {
     std::shared_ptr<const RCStage3EpisodeWitnessCapture>
         episode_capture{};
     uint256 episode_capture_header_hash{};
+    std::shared_ptr<const RCStage3CoupledWinnerCaptureV1>
+        coupled_capture{};
+    uint256 coupled_capture_header_hash{};
 };
 
 /**
@@ -155,6 +160,8 @@ struct ProductionRelationParentCandidateV1 {
     bool builder_stream_relations_same_parent{false};
     bool winner_episode_capture_bound{false};
     bool episode_witness_replay_avoided{false};
+    bool winner_coupled_capture_bound{false};
+    bool coupled_witness_replay_avoided{false};
     bool captured_episode_leaf_inventory_verified{false};
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};

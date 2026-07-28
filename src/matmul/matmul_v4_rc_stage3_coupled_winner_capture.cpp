@@ -638,6 +638,29 @@ uint256 CommitRCStage3CoupledWinnerReceiptV2(
         hash << root;
     }
     hash << receipt.coupled_digest
+         << static_cast<uint8_t>(
+                receipt.representative_cells
+                    .first_gemm_operand_a)
+         << static_cast<uint8_t>(
+                receipt.representative_cells
+                    .first_gemm_operand_b)
+         << receipt.representative_cells
+                .first_bank_nibble
+         << static_cast<uint64_t>(
+                receipt.representative_cells
+                    .first_extract_input_a)
+         << static_cast<uint64_t>(
+                receipt.representative_cells
+                    .first_extract_input_b)
+         << static_cast<uint8_t>(
+                receipt.representative_cells
+                    .first_extract_output)
+         << static_cast<uint8_t>(
+                receipt.representative_cells
+                    .gemm_observed ? 1 : 0)
+         << static_cast<uint8_t>(
+                receipt.representative_cells
+                    .extract_observed ? 1 : 0)
          << receipt.gemm_callbacks
          << receipt.captured_payload_bytes
          << receipt.retained_receipt_bytes_upper_bound
@@ -703,6 +726,9 @@ bool VerifyRCStage3CoupledWinnerReceiptV2(
         !receipt.no_bank_pages_retained ||
         !receipt.no_flat_tile_proofs_materialized ||
         receipt.recursive_relation_proofs_bound ||
+        !receipt.representative_cells.gemm_observed ||
+        !receipt.representative_cells.extract_observed ||
+        receipt.representative_cells.first_bank_nibble > 0x0fU ||
         receipt.initial_state_lobe_roots.size() !=
             params.lobes ||
         receipt.barriers.size() != params.barriers ||
@@ -1162,6 +1188,22 @@ void RCStage3CoupledWinnerCaptureV1::OnGemm(
         m_current_barrier.lobes.push_back(
             std::move(lobe));
     }
+    if (!m_receipt.representative_cells
+             .gemm_observed) {
+        m_receipt.representative_cells
+            .first_gemm_operand_a =
+                view.operand_a[0];
+        m_receipt.representative_cells
+            .first_gemm_operand_b =
+                view.operand_b[0];
+        m_receipt.representative_cells
+            .first_bank_nibble =
+                static_cast<uint8_t>(
+                    view.operand_b[0]) &
+                0x0fU;
+        m_receipt.representative_cells
+            .gemm_observed = true;
+    }
     auto& lobe =
         m_current_barrier.lobes.back();
     RCStage3CoupledPageCaptureV1 page;
@@ -1404,6 +1446,7 @@ void RCStage3CoupledWinnerCaptureV1::OnBarrier(
         !m_mix_seen ||
         m_next_exchange_round !=
             m_options.exchange_rounds ||
+        view.state_cells < 2 ||
         view.state_cells !=
             m_receipt.params.StateBytes() ||
         view.extract_input == nullptr ||
@@ -1411,6 +1454,20 @@ void RCStage3CoupledWinnerCaptureV1::OnBarrier(
         view.extract_prf.IsNull()) {
         if (m_error.empty()) Reject("barrier_shape");
         return;
+    }
+    if (!m_receipt.representative_cells
+             .extract_observed) {
+        m_receipt.representative_cells
+            .first_extract_input_a =
+                view.extract_input[0];
+        m_receipt.representative_cells
+            .first_extract_input_b =
+                view.extract_input[1];
+        m_receipt.representative_cells
+            .first_extract_output =
+                view.extract_output[0];
+        m_receipt.representative_cells
+            .extract_observed = true;
     }
     m_current_barrier.extract_input_root =
         BoundaryRoot(
