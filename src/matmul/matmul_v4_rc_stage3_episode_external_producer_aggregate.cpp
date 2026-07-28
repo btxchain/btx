@@ -24,13 +24,15 @@ bool Fail(std::string* why, const std::string& detail)
     return false;
 }
 
+template <typename T>
 std::vector<gf::Fp3> ToField(
-    const std::vector<int8_t>& values)
+    const std::vector<T>& values)
 {
     std::vector<gf::Fp3> out;
     out.reserve(values.size());
-    for (int8_t value : values) {
-        out.push_back(gf::FromSigned3(value));
+    for (T value : values) {
+        out.push_back(gf::FromSigned3(
+            static_cast<int64_t>(value)));
     }
     return out;
 }
@@ -42,9 +44,12 @@ uint256 CommitLayerClosureV1(
         closure.shape.shape_commitment.IsNull() ||
         closure.operand_a_vector_root_alg.IsNull() ||
         closure.operand_b_vector_root_alg.IsNull() ||
+        closure.output_y_vector_root_alg.IsNull() ||
         closure.operand_a_external
             .closure_commitment.IsNull() ||
         closure.operand_b_external
+            .closure_commitment.IsNull() ||
+        closure.output_y_external
             .closure_commitment.IsNull() ||
         closure.operand_a_gemm
             .closure_commitment.IsNull() ||
@@ -64,8 +69,10 @@ uint256 CommitLayerClosureV1(
          << closure.consumer_bundle_commitment
          << closure.operand_a_vector_root_alg
          << closure.operand_b_vector_root_alg
+         << closure.output_y_vector_root_alg
          << closure.operand_a_external.closure_commitment
          << closure.operand_b_external.closure_commitment
+         << closure.output_y_external.closure_commitment
          << closure.operand_a_gemm.closure_commitment
          << closure.operand_b_gemm.closure_commitment
          << closure.exact_projection_set
@@ -143,9 +150,13 @@ bool ProveLayerClosureV1(
     out.operand_b_vector_root_alg =
         RCStage3VectorRootAlgCommitment(
             ToField(layer.operand_b));
+    out.output_y_vector_root_alg =
+        RCStage3VectorRootAlgCommitment(
+            ToField(layer.gemm_y));
     std::string child_why;
     if (out.operand_a_vector_root_alg.IsNull() ||
         out.operand_b_vector_root_alg.IsNull() ||
+        out.output_y_vector_root_alg.IsNull() ||
         !source::ProveExternalProducerClosureV3(
             shape, layer, extract,
             extract_tile_begin, consumer_bundle,
@@ -164,6 +175,16 @@ bool ProveLayerClosureV1(
             out.operand_b_external, &child_why)) {
         return Fail(
             why, "prove_operand_b_external:" +
+                child_why);
+    }
+    if (!source::ProveExternalProducerClosureV3(
+            shape, layer, extract,
+            extract_tile_begin, consumer_bundle,
+            source::kOutputYSlotV1,
+            out.output_y_vector_root_alg,
+            out.output_y_external, &child_why)) {
+        return Fail(
+            why, "prove_output_y_external:" +
                 child_why);
     }
     if (!source::ProveGemmDotExternalClosureV4(
@@ -190,6 +211,8 @@ bool ProveLayerClosureV1(
             source::kOperandASlotV1 &&
         out.operand_b_external.projection_slot ==
             source::kOperandBSlotV1 &&
+        out.output_y_external.projection_slot ==
+            source::kOutputYSlotV1 &&
         out.operand_a_gemm.projection_slot ==
             source::kOperandASlotV1 &&
         out.operand_b_gemm.projection_slot ==
@@ -200,6 +223,8 @@ bool ProveLayerClosureV1(
             .all_r0_before_challenge &&
         out.operand_b_external
             .all_r0_before_challenge &&
+        out.output_y_external
+            .all_r0_before_challenge &&
         out.operand_a_gemm
             .all_r0_before_challenge &&
         out.operand_b_gemm
@@ -208,6 +233,8 @@ bool ProveLayerClosureV1(
         out.operand_a_external
             .exact_producer_coverage &&
         out.operand_b_external
+            .exact_producer_coverage &&
+        out.output_y_external
             .exact_producer_coverage &&
         out.operand_a_gemm
             .exact_producer_coverage &&
@@ -218,6 +245,8 @@ bool ProveLayerClosureV1(
             .exact_consumer_coverage &&
         out.operand_b_external
             .exact_consumer_coverage &&
+        out.output_y_external
+            .exact_consumer_coverage &&
         out.operand_a_gemm
             .exact_consumer_coverage &&
         out.operand_b_gemm
@@ -226,6 +255,8 @@ bool ProveLayerClosureV1(
         out.operand_a_external
             .proof_owned_terminal_cancellation &&
         out.operand_b_external
+            .proof_owned_terminal_cancellation &&
+        out.output_y_external
             .proof_owned_terminal_cancellation &&
         out.operand_a_gemm
             .proof_owned_terminal_cancellation &&
@@ -251,6 +282,7 @@ bool ProveLayerClosureV1(
             consumer_leaf_begin,
             out.operand_a_vector_root_alg,
             out.operand_b_vector_root_alg,
+            out.output_y_vector_root_alg,
             out, why)) {
         out = {};
         return false;
@@ -264,6 +296,7 @@ bool VerifyLayerClosureV1(
     uint32_t expected_consumer_leaf_begin,
     const uint256& expected_operand_a_vector_root_alg,
     const uint256& expected_operand_b_vector_root_alg,
+    const uint256& expected_output_y_vector_root_alg,
     const LayerClosureV1& closure,
     std::string* why)
 {
@@ -284,6 +317,8 @@ bool VerifyLayerClosureV1(
             expected_operand_a_vector_root_alg ||
         closure.operand_b_vector_root_alg !=
             expected_operand_b_vector_root_alg ||
+        closure.output_y_vector_root_alg !=
+            expected_output_y_vector_root_alg ||
         closure.role_export_equality_constrained ||
         closure.recursive_child_consumed ||
         closure.semantic_closure ||
@@ -300,6 +335,17 @@ bool VerifyLayerClosureV1(
             &child_why)) {
         return Fail(
             why, "verify_operand_a_external:" +
+                child_why);
+    }
+    if (!source::VerifyExternalProducerClosureV3(
+            expected_shape,
+            expected_consumer_bundle,
+            source::kOutputYSlotV1,
+            expected_output_y_vector_root_alg,
+            closure.output_y_external,
+            &child_why)) {
+        return Fail(
+            why, "verify_output_y_external:" +
                 child_why);
     }
     if (!source::VerifyExternalProducerClosureV3(
@@ -339,6 +385,8 @@ bool VerifyLayerClosureV1(
             source::kOperandASlotV1 &&
         closure.operand_b_external.projection_slot ==
             source::kOperandBSlotV1 &&
+        closure.output_y_external.projection_slot ==
+            source::kOutputYSlotV1 &&
         closure.operand_a_gemm.projection_slot ==
             source::kOperandASlotV1 &&
         closure.operand_b_gemm.projection_slot ==
@@ -348,6 +396,8 @@ bool VerifyLayerClosureV1(
             closure.operand_a_external) &&
         LocalClosureFlags(
             closure.operand_b_external) &&
+        LocalClosureFlags(
+            closure.output_y_external) &&
         LocalClosureFlags(
             closure.operand_a_gemm) &&
         LocalClosureFlags(
@@ -367,7 +417,7 @@ bool VerifyLayerClosureV1(
     if (why != nullptr) {
         *why =
             "stage3:episode_external_producer_aggregate:"
-            "all_four_layer_ingress_children_verified;"
+            "all_five_layer_ingress_children_verified;"
             "normalized_role_export_alias_open";
     }
     return true;

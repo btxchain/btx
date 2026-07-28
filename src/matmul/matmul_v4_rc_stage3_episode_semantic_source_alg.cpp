@@ -4287,8 +4287,7 @@ bool ProveExternalProducerClosureV3(
     std::string* why)
 {
     out = {};
-    if (projection_slot != kOperandASlotV1 &&
-        projection_slot != kOperandBSlotV1) {
+    if (projection_slot >= kEndpointCountV1) {
         return Fail(
             why, "external_prove_endpoint");
     }
@@ -4312,10 +4311,18 @@ bool ProveExternalProducerClosureV3(
             producer_values.push_back(
                 Signed(value));
         }
-    } else {
+    } else if (projection_slot ==
+                   kOperandBSlotV1) {
         producer_values.reserve(
             layer.operand_b.size());
         for (int8_t value : layer.operand_b) {
+            producer_values.push_back(
+                Signed(value));
+        }
+    } else {
+        producer_values.reserve(
+            layer.gemm_y.size());
+        for (int64_t value : layer.gemm_y) {
             producer_values.push_back(
                 Signed(value));
         }
@@ -4735,10 +4742,8 @@ bool VerifyExternalProducerClosureV3(
     const ExternalProducerClosureV3& closure,
     std::string* why)
 {
-    if (expected_projection_slot !=
-            kOperandASlotV1 &&
-        expected_projection_slot !=
-            kOperandBSlotV1) {
+    if (expected_projection_slot >=
+            kEndpointCountV1) {
         return Fail(
             why, "external_verify_endpoint");
     }

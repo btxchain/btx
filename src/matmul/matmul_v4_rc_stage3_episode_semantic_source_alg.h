@@ -274,7 +274,7 @@ struct ExternalProducerCtlChildV3 {
 };
 
 /**
- * Executable all-shard rational-identity bridge for one A or B endpoint.
+ * Executable all-shard rational-identity bridge for one A, B or Y endpoint.
  *
  * `producer_bundle` proves the complete canonical flat producer vector under
  * its manifest-owned Poseidon VectorRootAlg. `consumer_children` extend the

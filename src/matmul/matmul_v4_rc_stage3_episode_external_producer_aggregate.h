@@ -19,12 +19,13 @@ inline constexpr uint16_t kVersionV1 = 1;
 /**
  * Complete proof-owned A/B ingress for one episode GEMM layer.
  *
- * The two ExternalProducer closures prove equality between the canonical
- * producer vectors and every sharded semantic-leaf A/B cell.  The two
- * GemmDot closures independently execute the SAFE GEMM relation and cancel
- * its A/B terminals against those same leaf cells.  The expected vector
- * roots remain verifier inputs: a receipt-carried root is never allowed to
- * declare its own upstream authority.
+ * Three ExternalProducer closures prove equality between canonical producer
+ * vectors and every sharded semantic-leaf A/B/Y cell.  The Y closure makes
+ * the late-bound GEMM result root proof-owned instead of a host commitment.
+ * Two GemmDot closures independently execute the SAFE GEMM relation and
+ * cancel its A/B terminals against those same leaf cells.  The expected
+ * vector roots remain verifier inputs: a receipt-carried root is never
+ * allowed to declare its own upstream authority.
  *
  * This object deliberately stops before claiming that the expected roots are
  * equality-constrained to the corresponding builder/previous-Extract role
@@ -42,8 +43,10 @@ struct LayerClosureV1 {
     uint256 consumer_bundle_commitment{};
     uint256 operand_a_vector_root_alg{};
     uint256 operand_b_vector_root_alg{};
+    uint256 output_y_vector_root_alg{};
     source::ExternalProducerClosureV3 operand_a_external;
     source::ExternalProducerClosureV3 operand_b_external;
+    source::ExternalProducerClosureV3 output_y_external;
     source::GemmDotExternalClosureV4 operand_a_gemm;
     source::GemmDotExternalClosureV4 operand_b_gemm;
     uint256 closure_commitment{};
@@ -82,6 +85,7 @@ struct LayerClosureV1 {
     uint32_t expected_consumer_leaf_begin,
     const uint256& expected_operand_a_vector_root_alg,
     const uint256& expected_operand_b_vector_root_alg,
+    const uint256& expected_output_y_vector_root_alg,
     const LayerClosureV1& closure,
     std::string* why = nullptr);
 

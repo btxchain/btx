@@ -93,7 +93,7 @@ BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_episode_external_producer_aggregate_tests)
 
 BOOST_AUTO_TEST_CASE(
-    four_proof_owned_ingress_children_close_local_layer_only)
+    five_proof_owned_ingress_children_close_local_layer_only)
 {
     const Fixture fixture = BuildFixture(2);
     aggregate::LayerClosureV1 closure;
@@ -110,6 +110,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             closure, &why),
         why);
     BOOST_CHECK(closure.exact_projection_set);
@@ -134,6 +135,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             reordered_layer, &why));
 
     auto omitted = closure;
@@ -145,6 +147,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             omitted, &why));
 
     auto duplicated = closure;
@@ -158,6 +161,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             duplicated, &why));
 
     auto swapped = closure;
@@ -170,6 +174,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             swapped, &why));
 
     auto authority_claim = closure;
@@ -183,6 +188,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             authority_claim, &why));
 
     auto proof_attack = closure;
@@ -215,6 +221,7 @@ BOOST_AUTO_TEST_CASE(
             0,
             closure.operand_a_vector_root_alg,
             closure.operand_b_vector_root_alg,
+            closure.output_y_vector_root_alg,
             proof_attack, &why));
 }
 
@@ -256,7 +263,23 @@ BOOST_AUTO_TEST_CASE(
             0,
             honest_closure.operand_a_vector_root_alg,
             honest_closure.operand_b_vector_root_alg,
+            honest_closure.output_y_vector_root_alg,
             transplanted, &why));
+
+    BOOST_REQUIRE(
+        honest_closure.output_y_vector_root_alg !=
+        alternate_closure.output_y_vector_root_alg);
+    auto y_transplanted = honest_closure;
+    y_transplanted.output_y_external =
+        alternate_closure.output_y_external;
+    BOOST_CHECK(
+        !aggregate::VerifyLayerClosureV1(
+            honest.shape, honest.bundle,
+            0,
+            honest_closure.operand_a_vector_root_alg,
+            honest_closure.operand_b_vector_root_alg,
+            honest_closure.output_y_vector_root_alg,
+            y_transplanted, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
