@@ -4510,9 +4510,18 @@ bool FinalizeMatMulSolvedBlockForProduction(CBlock& block,
             block.matrix_c_data.clear();
             std::string produce_why;
             matmul::v4::rc::RCStage3AttachmentSizeReport size_report;
+            const uint256 witness_store_key =
+                block.GetHash();
             const auto status =
                 matmul::v4::rc::ProduceAndAttachRCStage3ConsensusProof(
                     block, params, height, &produce_why, &size_report);
+            // The proof attempt is the sole consumer of the winner-only
+            // capture. Release it on both success and failure so a failed
+            // parent/codec gate cannot pin a production-sized witness until
+            // the next winner.
+            matmul::v4::rc::
+                RCStage3EpisodeWitnessStoreErase(
+                    witness_store_key);
             if (status != matmul::v4::rc::RCStage3ProduceStatus::Attached) {
                 if (why != nullptr) {
                     *why = strprintf(
