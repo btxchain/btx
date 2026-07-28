@@ -164,6 +164,39 @@ struct DualFp3ProducerTerminalV2 {
     }
 };
 
+/**
+ * Canonical public-consumer side of one caller family.  The verifier
+ * regenerates every (typed family, boundary, external address, value) event
+ * from the caller's validated manifest and recomputes both the schedule root
+ * and dual-Fp3 terminal.  The matching producer terminal is constrained
+ * inside the private fixed-program child.
+ */
+struct CallerInputConsumerFragmentV3 {
+    uint32_t family_ordinal{0};
+    uint32_t family_boundary_begin{0};
+    uint32_t source_instance_begin{0};
+    uint32_t source_instance_count{0};
+    uint64_t event_count{0};
+    uint256 typed_schedule_root{};
+    DualFp3ProducerTerminalV2 terminal{};
+
+    bool operator==(const CallerInputConsumerFragmentV3&) const =
+        default;
+};
+
+struct CallerInputReceiptV3 {
+    uint16_t version{3};
+    uint64_t event_count{0};
+    uint256 producer_r0_root{};
+    uint256 exact_consumer_schedule_root{};
+    DualFp3ProducerTerminalV2 producer_terminal{};
+    DualFp3ProducerTerminalV2 consumer_terminal{};
+    std::vector<CallerInputConsumerFragmentV3> fragments;
+    uint256 receipt_commitment{};
+
+    bool operator==(const CallerInputReceiptV3&) const = default;
+};
+
 struct WitnessChildStatementV2 {
     ha::ProgramKind program_kind{};
     uint32_t child_ordinal{0};
@@ -174,6 +207,7 @@ struct WitnessChildStatementV2 {
     uint32_t output_event_count{0};
     uint256 public_boundary_statement{};
     uint256 base_row_commitment{};
+    CallerInputReceiptV3 caller_input_receipt{};
     DualFp3ProducerTerminalV2 output_producer_terminal{};
     uint256 typed_fragment_root{};
     std::vector<FamilyExportFragmentV2> fragments;
@@ -258,9 +292,12 @@ struct WitnessProductProofV2 {
  * producer accumulator exports the exact output-cell multiset for a later
  * real consumer.
  *
- * The caller's typed manifests determine only family/count/domain metadata.
- * Their values are not yet equality-linked to the private source cells; that
- * residual and recursive consumption remain explicitly false.
+ * The caller's validated typed manifests also regenerate a canonical public
+ * consumer terminal.  Equality with the child-constrained private input
+ * producer terminal proves the exact caller values enter each program.  The
+ * manifests are not yet derived from authenticated upstream role proofs, and
+ * neither the output consumer nor recursive parent is closed; those residuals
+ * remain explicitly false.
  */
 [[nodiscard]] bool ProveWitnessProductV2(
     const FamilyInputsV1& inputs,

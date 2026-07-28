@@ -666,10 +666,10 @@ uint64_t ExternalInputEventIdV2(
     uint32_t address)
 {
     return UINT64_C(0x4558430000000000) +
-        static_cast<uint64_t>(shape.child_ordinal) *
+        static_cast<uint64_t>(shape.family[source]) *
             UINT64_C(0x100000000) +
         static_cast<uint64_t>(
-            shape.global_source_begin + source) *
+            shape.family_boundary[source]) *
             UINT64_C(0x100000) +
         address;
 }
@@ -680,6 +680,8 @@ bool AppendExternalInputCopyCtlV2(
     const RCStage3CtlChallenges& challenges,
     air_quotient::AirConstraintSystem<Fp3>& cs,
     std::vector<std::vector<Fp3>>* columns,
+    const DualFp3ProducerTerminalV2* claimed_terminal,
+    DualFp3ProducerTerminalV2& terminal,
     std::string* why)
 {
     constexpr uint32_t SLOT_COUNT = 3;
@@ -724,6 +726,8 @@ bool AppendExternalInputCopyCtlV2(
     cs.n_columns += SLOT_COUNT;
     const uint32_t running1 = cs.n_columns++;
     const uint32_t running2 = cs.n_columns++;
+    const uint32_t export_running1 = cs.n_columns++;
+    const uint32_t export_running2 = cs.n_columns++;
 
     std::array<std::vector<Fp3>, SLOT_COUNT> p_mult;
     std::array<std::vector<Fp3>, SLOT_COUNT> c_id;
@@ -791,6 +795,8 @@ bool AppendExternalInputCopyCtlV2(
         consumer_inv1_base, consumer_inv2_base};
     const std::array<uint32_t, 2> running{
         running1, running2};
+    const std::array<uint32_t, 2> export_running{
+        export_running1, export_running2};
     // Weight every rational term by its nonzero, preprocessed event id.
     // Besides preserving multiset equality (the same id weights both sides),
     // this makes id=0 the padding selector.  The first occurrence is both a
@@ -810,10 +816,14 @@ bool AppendExternalInputCopyCtlV2(
         }
         std::array<Fp3, 2> sums{
             Fp3::Zero(), Fp3::Zero()};
+        std::array<Fp3, 2> export_sums{
+            Fp3::Zero(), Fp3::Zero()};
         for (uint32_t row = 0; row < cs.n_rows; ++row) {
             for (uint32_t lane = 0; lane < 2; ++lane) {
                 (*columns)[running[lane]][row] =
                     sums[lane];
+                (*columns)[export_running[lane]][row] =
+                    export_sums[lane];
                 for (uint32_t slot = 0;
                      slot < SLOT_COUNT; ++slot) {
                     if (!gf::IsZero(c_id[slot][row])) {
@@ -844,6 +854,11 @@ bool AppendExternalInputCopyCtlV2(
                             gf::Mul(
                                 p_mult[slot][row],
                                 weighted_inverse));
+                        export_sums[lane] = gf::Add(
+                            export_sums[lane],
+                            gf::Mul(
+                                p_mult[slot][row],
+                                weighted_inverse));
                         sums[lane] = gf::Sub(
                             sums[lane], weighted_inverse);
                     } else if (!gf::IsZero(
@@ -860,10 +875,21 @@ bool AppendExternalInputCopyCtlV2(
             return Fail(
                 why, "witness_external_copy_terminal");
         }
+        terminal.lane1 = export_sums[0];
+        terminal.lane2 = export_sums[1];
+    } else {
+        if (claimed_terminal == nullptr) {
+            return Fail(
+                why, "witness_external_export_terminal");
+        }
+        terminal = *claimed_terminal;
     }
+    const std::array<Fp3, 2> terminal_values{
+        terminal.lane1, terminal.lane2};
     for (uint32_t lane = 0; lane < 2; ++lane) {
         const uint32_t cinv = c_inv_base[lane];
         const uint32_t run = running[lane];
+        const uint32_t export_run = export_running[lane];
         for (uint32_t slot = 0;
              slot < SLOT_COUNT; ++slot) {
             cs.constraints.push_back({
@@ -931,6 +957,51 @@ bool AppendExternalInputCopyCtlV2(
                 const auto& cur, const auto&) {
                 return gf::Add(
                     cur[run], contribution(cur));
+            }});
+        auto producer_contribution =
+            [producer_mult_base, consumer_id_base,
+             cinv](const auto& cur) {
+                Fp3 value = Fp3::Zero();
+                for (uint32_t slot = 0;
+                     slot < SLOT_COUNT; ++slot) {
+                    value = gf::Add(
+                        value,
+                        gf::Mul(
+                            cur[producer_mult_base + slot],
+                            gf::Mul(
+                                cur[consumer_id_base + slot],
+                                cur[cinv + slot])));
+                }
+                return value;
+            };
+        cs.constraints.push_back({
+            "stage3.fixed_product_v3.input_export_first",
+            air_quotient::AirKind::kFirstRow, 1,
+            [export_run](const auto& cur, const auto&) {
+                return cur[export_run];
+            }});
+        cs.constraints.push_back({
+            "stage3.fixed_product_v3.input_export_transition",
+            air_quotient::AirKind::kTransition, 3,
+            [export_run, producer_contribution](
+                const auto& cur, const auto& next) {
+                return gf::Sub(
+                    next[export_run],
+                    gf::Add(
+                        cur[export_run],
+                        producer_contribution(cur)));
+            }});
+        cs.constraints.push_back({
+            "stage3.fixed_product_v3.input_export_last",
+            air_quotient::AirKind::kLastRow, 3,
+            [export_run, producer_contribution, lane,
+             terminal_values](
+                const auto& cur, const auto&) {
+                return gf::Sub(
+                    gf::Add(
+                        cur[export_run],
+                        producer_contribution(cur)),
+                    terminal_values[lane]);
             }});
     }
     return true;
@@ -1228,6 +1299,44 @@ uint256 CommitFragmentV2(const FamilyExportFragmentV2& fragment)
     return hash.GetHash();
 }
 
+uint256 CommitCallerInputFragmentV3(
+    const CallerInputConsumerFragmentV3& fragment)
+{
+    HashWriter hash;
+    hash << std::string{
+        "BTX_RC_STAGE3_FIXED_PRODUCT_CALLER_INPUT_FRAGMENT_V3"};
+    hash << fragment.family_ordinal;
+    hash << fragment.family_boundary_begin;
+    hash << fragment.source_instance_begin;
+    hash << fragment.source_instance_count;
+    hash << fragment.event_count;
+    hash << fragment.typed_schedule_root;
+    HashFp3(hash, fragment.terminal.lane1);
+    HashFp3(hash, fragment.terminal.lane2);
+    return hash.GetHash();
+}
+
+uint256 CommitCallerInputReceiptV3(
+    const CallerInputReceiptV3& receipt)
+{
+    HashWriter hash;
+    hash << std::string{
+        "BTX_RC_STAGE3_FIXED_PRODUCT_CALLER_INPUT_RECEIPT_V3"};
+    hash << receipt.version;
+    hash << receipt.event_count;
+    hash << receipt.producer_r0_root;
+    hash << receipt.exact_consumer_schedule_root;
+    HashFp3(hash, receipt.producer_terminal.lane1);
+    HashFp3(hash, receipt.producer_terminal.lane2);
+    HashFp3(hash, receipt.consumer_terminal.lane1);
+    HashFp3(hash, receipt.consumer_terminal.lane2);
+    hash << static_cast<uint32_t>(receipt.fragments.size());
+    for (const auto& fragment : receipt.fragments) {
+        hash << CommitCallerInputFragmentV3(fragment);
+    }
+    return hash.GetHash();
+}
+
 uint256 CommitChildStatementV2(
     const WitnessChildStatementV2& child)
 {
@@ -1243,6 +1352,8 @@ uint256 CommitChildStatementV2(
     hash << child.output_event_count;
     hash << child.public_boundary_statement;
     hash << child.base_row_commitment;
+    hash << CommitCallerInputReceiptV3(
+        child.caller_input_receipt);
     HashFp3(hash, child.output_producer_terminal.lane1);
     HashFp3(hash, child.output_producer_terminal.lane2);
     hash << child.typed_fragment_root;
@@ -1251,6 +1362,186 @@ uint256 CommitChildStatementV2(
         hash << CommitFragmentV2(fragment);
     }
     return hash.GetHash();
+}
+
+bool BuildCallerInputReceiptV3(
+    const ProductManifestV1& caller_manifest,
+    const std::vector<ha::FixedProgramBoundaryInstance>& batch,
+    const ha::FixedProgram& program,
+    const WitnessChunkShapeV2& shape,
+    const RCStage3CtlChallenges& challenges,
+    const uint256& producer_r0_root,
+    const DualFp3ProducerTerminalV2& producer_terminal,
+    CallerInputReceiptV3& out,
+    std::string* why)
+{
+    out = {};
+    if (shape.source_count == 0 ||
+        shape.family.size() != shape.source_count ||
+        shape.family_boundary.size() != shape.source_count ||
+        shape.global_source_begin > batch.size() ||
+        shape.source_count >
+            batch.size() - shape.global_source_begin ||
+        producer_r0_root.IsNull()) {
+        return Fail(why, "caller_input_receipt_shape");
+    }
+    std::vector<uint32_t> use_count(
+        program.external_address_count + 1U, 0);
+    for (const auto& row : program.rows) {
+        for (uint32_t slot = 0;
+             slot < row.input_count; ++slot) {
+            const uint32_t address =
+                row.input_address[slot];
+            if (address >= 1 &&
+                address <=
+                    program.external_address_count) {
+                ++use_count[address];
+            }
+        }
+    }
+    const std::array<Fp3, 2> alpha{
+        challenges.alpha1, challenges.alpha2};
+    const std::array<Fp3, 2> gamma{
+        challenges.gamma1, challenges.gamma2};
+    out.version = 3;
+    out.producer_r0_root = producer_r0_root;
+    out.producer_terminal = producer_terminal;
+    std::array<Fp3, 2> total{
+        Fp3::Zero(), Fp3::Zero()};
+    uint32_t source = 0;
+    while (source < shape.source_count) {
+        const uint32_t family = shape.family[source];
+        if (family >= kFamilyCountV1) {
+            return Fail(why, "caller_input_receipt_family");
+        }
+        uint32_t end = source + 1;
+        while (end < shape.source_count &&
+               shape.family[end] == family &&
+               shape.family_boundary[end] ==
+                   shape.family_boundary[end - 1] + 1U) {
+            ++end;
+        }
+        CallerInputConsumerFragmentV3 fragment;
+        fragment.family_ordinal = family;
+        fragment.family_boundary_begin =
+            shape.family_boundary[source];
+        fragment.source_instance_begin = source;
+        fragment.source_instance_count = end - source;
+        HashWriter schedule;
+        schedule << std::string{
+            "BTX_RC_STAGE3_FIXED_PRODUCT_CALLER_INPUT_SCHEDULE_V3"};
+        const auto& family_statement =
+            caller_manifest.families[family];
+        schedule << static_cast<uint8_t>(
+            family_statement.kind);
+        schedule << static_cast<uint8_t>(
+            family_statement.role);
+        schedule << static_cast<uint16_t>(
+            family_statement.endpoint);
+        schedule << family_statement.typed_domain;
+        schedule << family_statement.manifest_commitment;
+        schedule << producer_r0_root;
+        schedule << ha::CommitFixedProgram(program);
+        schedule << shape.child_ordinal;
+        schedule << fragment.family_boundary_begin;
+        schedule << fragment.source_instance_count;
+        std::array<Fp3, 2> fragment_sum{
+            Fp3::Zero(), Fp3::Zero()};
+        for (uint32_t instance = source;
+             instance < end; ++instance) {
+            const auto& boundary =
+                batch[shape.global_source_begin + instance];
+            if (boundary.external_values.size() !=
+                program.external_address_count) {
+                return Fail(
+                    why, "caller_input_receipt_boundary");
+            }
+            for (uint32_t address = 1;
+                 address <=
+                    program.external_address_count;
+                 ++address) {
+                if (use_count[address] == 0) {
+                    return Fail(
+                        why,
+                        "caller_input_receipt_unused_address");
+                }
+                const uint64_t id =
+                    ExternalInputEventIdV2(
+                        shape, instance, address);
+                const uint32_t native =
+                    boundary.external_values[address - 1U];
+                if (id == 0 || id >= gf::kP) {
+                    return Fail(
+                        why, "caller_input_receipt_id");
+                }
+                schedule << shape.family_boundary[instance];
+                schedule << address;
+                schedule << id;
+                schedule << native;
+                fragment.event_count +=
+                    use_count[address];
+                for (uint32_t lane = 0;
+                     lane < 2; ++lane) {
+                    const Fp3 denominator = gf::Sub(
+                        alpha[lane],
+                        gf::Add(
+                            U64(id),
+                            gf::Mul(
+                                gamma[lane],
+                                U64(native))));
+                    if (gf::IsZero(denominator)) {
+                        return Fail(
+                            why, "caller_input_receipt_pole");
+                    }
+                    fragment_sum[lane] = gf::Add(
+                        fragment_sum[lane],
+                        gf::Mul(
+                            gf::Mul(
+                                U64(use_count[address]),
+                                U64(id)),
+                            gf::Inv(denominator)));
+                }
+            }
+        }
+        fragment.typed_schedule_root = schedule.GetHash();
+        fragment.terminal.lane1 = fragment_sum[0];
+        fragment.terminal.lane2 = fragment_sum[1];
+        if (fragment.event_count == 0 ||
+            fragment.typed_schedule_root.IsNull()) {
+            return Fail(why, "caller_input_receipt_empty");
+        }
+        out.event_count += fragment.event_count;
+        total[0] = gf::Add(total[0], fragment_sum[0]);
+        total[1] = gf::Add(total[1], fragment_sum[1]);
+        out.fragments.push_back(std::move(fragment));
+        source = end;
+    }
+    out.consumer_terminal.lane1 = total[0];
+    out.consumer_terminal.lane2 = total[1];
+    if (!(out.producer_terminal ==
+          out.consumer_terminal)) {
+        return Fail(why, "caller_input_terminal_mismatch");
+    }
+    HashWriter schedule;
+    schedule << std::string{
+        "BTX_RC_STAGE3_FIXED_PRODUCT_CALLER_INPUT_EXACT_V3"};
+    schedule << out.event_count;
+    schedule << static_cast<uint32_t>(
+        out.fragments.size());
+    for (const auto& fragment : out.fragments) {
+        schedule << CommitCallerInputFragmentV3(fragment);
+    }
+    out.exact_consumer_schedule_root =
+        schedule.GetHash();
+    out.receipt_commitment =
+        CommitCallerInputReceiptV3(out);
+    if (out.event_count == 0 ||
+        out.fragments.empty() ||
+        out.exact_consumer_schedule_root.IsNull() ||
+        out.receipt_commitment.IsNull()) {
+        return Fail(why, "caller_input_receipt_root");
+    }
+    return true;
 }
 
 bool BuildFragmentsV2(
@@ -2052,11 +2343,13 @@ bool PrepareWitnessBatchV2(
                 why, "witness_instance:" +
                     instance.note);
         }
+        DualFp3ProducerTerminalV2 input_terminal;
         DualFp3ProducerTerminalV2 terminal;
         if (!AppendExternalInputCopyCtlV2(
                 program, prepared.shape,
                 instance.challenges,
-                instance.cs, &instance.columns, why) ||
+                instance.cs, &instance.columns, nullptr,
+                input_terminal, why) ||
             !AppendOutputProducerCtlV2(
                 program, prepared.shape,
                 instance.challenges,
@@ -2076,6 +2369,7 @@ bool PrepareWitnessBatchV2(
                 prepared.shape.public_masks,
                 prepared.shape.links, boundary_seed,
                 instance.base_row_commitment);
+        DualFp3ProducerTerminalV2 audit_input_terminal;
         DualFp3ProducerTerminalV2 audit_terminal;
         if (!verifier_audit.valid) {
             return Fail(
@@ -2085,13 +2379,16 @@ bool PrepareWitnessBatchV2(
         if (!AppendExternalInputCopyCtlV2(
                 program, prepared.shape,
                 verifier_audit.challenges,
-                verifier_audit.cs, nullptr, why) ||
+                verifier_audit.cs, nullptr,
+                &input_terminal, audit_input_terminal,
+                why) ||
             !AppendOutputProducerCtlV2(
                 program, prepared.shape,
                 verifier_audit.challenges,
                 verifier_audit.cs,
                 verifier_audit.final_output_rows,
                 nullptr, &terminal, audit_terminal, why) ||
+            !(audit_input_terminal == input_terminal) ||
             !(audit_terminal == terminal)) {
             return Fail(why, "witness_verifier_audit_terminal");
         }
@@ -2126,6 +2423,14 @@ bool PrepareWitnessBatchV2(
             instance.public_statement;
         statement.base_row_commitment =
             instance.base_row_commitment;
+        if (!BuildCallerInputReceiptV3(
+                caller_manifest, batch, program,
+                prepared.shape, instance.challenges,
+                statement.base_row_commitment,
+                input_terminal,
+                statement.caller_input_receipt, why)) {
+            return false;
+        }
         statement.output_producer_terminal = terminal;
         if (!BuildFragmentsV2(
                 caller_manifest, program, prepared.shape,
@@ -2210,13 +2515,15 @@ bool PreparePrivateChaChaBatchV2(
             .root = initial_r0.base_row_commitment,
         });
         RCStage3CtlChallenges challenges;
+        DualFp3ProducerTerminalV2 input_terminal;
         if (!DerivePrivateChaChaChallengesV2(
                 fs_seed, public_statement,
                 initial_r0.base_row_commitment,
                 challenges, why) ||
             !AppendExternalInputCopyCtlV2(
                 program, shape, challenges, prepared.cs,
-                &prepared.columns, why) ||
+                &prepared.columns, nullptr,
+                input_terminal, why) ||
             !AppendPrivateChaChaInternalSsaCtlV2(
                 program, challenges, prepared.cs,
                 &prepared.columns, why)) {
@@ -2258,6 +2565,13 @@ bool PreparePrivateChaChaBatchV2(
             public_statement;
         statement.base_row_commitment =
             prepared.r0.base_row_commitment;
+        if (!BuildCallerInputReceiptV3(
+                caller_manifest, batch, program, shape,
+                challenges, statement.base_row_commitment,
+                input_terminal,
+                statement.caller_input_receipt, why)) {
+            return false;
+        }
         statement.output_producer_terminal = terminal;
         if (!BuildFragmentsV2(
                 caller_manifest, program, shape,
@@ -2439,8 +2753,8 @@ bool ProveWitnessProductV2(
     out.valid = true;
     out.note =
         "stage3:fixed_program_semantic_product:"
-        "private_boundary_copy_and_output_producer_ctl_proved;"
-        "role_consumers_and_recursion_open";
+        "caller_input_consumer_and_private_boundary_ctl_proved;"
+        "upstream_role_proofs_output_consumers_and_recursion_open";
     return true;
 }
 
@@ -2542,10 +2856,15 @@ bool VerifyWitnessProductV2(
                         why, "witness_verifier_instance:" +
                             instance.note);
                 }
+                DualFp3ProducerTerminalV2 input_terminal;
                 DualFp3ProducerTerminalV2 terminal;
                 if (!AppendExternalInputCopyCtlV2(
                         program, shape, instance.challenges,
-                        instance.cs, nullptr, why) ||
+                        instance.cs, nullptr,
+                        &supplied.statement
+                             .caller_input_receipt
+                             .producer_terminal,
+                        input_terminal, why) ||
                     !AppendOutputProducerCtlV2(
                         program, shape, instance.challenges,
                         instance.cs,
@@ -2572,6 +2891,15 @@ bool VerifyWitnessProductV2(
                     instance.public_statement;
                 expected.base_row_commitment =
                     instance.base_row_commitment;
+                if (!BuildCallerInputReceiptV3(
+                        caller_manifest, batch, program,
+                        shape, instance.challenges,
+                        expected.base_row_commitment,
+                        input_terminal,
+                        expected.caller_input_receipt,
+                        why)) {
+                    return false;
+                }
                 expected.output_producer_terminal = terminal;
                 if (!BuildFragmentsV2(
                         caller_manifest, program, shape,
@@ -2660,6 +2988,7 @@ bool VerifyWitnessProductV2(
                     .base_row_commitment,
             });
             RCStage3CtlChallenges challenges;
+            DualFp3ProducerTerminalV2 input_terminal;
             if (!DerivePrivateChaChaChallengesV2(
                     fs_seed, public_statement,
                     supplied.statement
@@ -2667,7 +2996,11 @@ bool VerifyWitnessProductV2(
                     challenges, why) ||
                 !AppendExternalInputCopyCtlV2(
                     program, shape, challenges, cs,
-                    nullptr, why) ||
+                    nullptr,
+                    &supplied.statement
+                         .caller_input_receipt
+                         .producer_terminal,
+                    input_terminal, why) ||
                 !AppendPrivateChaChaInternalSsaCtlV2(
                     program, challenges, cs, nullptr,
                     why)) {
@@ -2696,6 +3029,14 @@ bool VerifyWitnessProductV2(
                 public_statement;
             expected.base_row_commitment =
                 supplied.statement.base_row_commitment;
+            if (!BuildCallerInputReceiptV3(
+                    caller_manifest, chacha, program,
+                    shape, challenges,
+                    expected.base_row_commitment,
+                    input_terminal,
+                    expected.caller_input_receipt, why)) {
+                return false;
+            }
             expected.output_producer_terminal = terminal;
             if (!BuildFragmentsV2(
                     caller_manifest, program, shape,
