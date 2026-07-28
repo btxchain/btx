@@ -47,12 +47,29 @@ std::vector<uint8_t> CommonBindingDomain()
             sizeof(kDomain) - 1);
 }
 
+std::vector<uint8_t> TraceShapeDomain()
+{
+    static constexpr char kDomain[] =
+        "BTX_STAGE3_V12_SHARED_TRACE_SHAPE";
+    return std::vector<uint8_t>(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+}
+
 bool CanonicalCommon(
     const CommonCommitmentsV12& common)
 {
     return CanonicalDigest(common.statement) &&
         CanonicalDigest(common.program) &&
         CanonicalDigest(common.trace);
+}
+
+bool CanonicalClaim(const LaneCommonClaimV12& claim)
+{
+    return CanonicalDigest(claim.statement) &&
+        CanonicalDigest(claim.program) &&
+        CanonicalDigest(claim.trace);
 }
 
 bool CanonicalProofBundle(
@@ -109,11 +126,18 @@ bool SameTaxAir(
         left.valid == right.valid;
 }
 
+bool SameTraceEqualityAir(
+    const TraceRootEqualityAirV12& left,
+    const TraceRootEqualityAirV12& right);
+
 bool SameHybridReceipt(
     const HybridReceiptV12& left,
     const HybridReceiptV12& right)
 {
     return left.common_binding == right.common_binding &&
+        SameTraceEqualityAir(
+            left.trace_root_equality_air,
+            right.trace_root_equality_air) &&
         left.tax_sigma_core == right.tax_sigma_core &&
         left.tax_sigma == right.tax_sigma &&
         SameTaxAir(
@@ -123,6 +147,8 @@ bool SameHybridReceipt(
         left.manifest_valid == right.manifest_valid &&
         left.common_binding_valid ==
             right.common_binding_valid &&
+        left.trace_root_equality_air_valid ==
+            right.trace_root_equality_air_valid &&
         left.native_air_transcript_valid ==
             right.native_air_transcript_valid &&
         left.typed_lane_domains_distinct ==
@@ -145,7 +171,410 @@ bool NearlyEqual(
         relative_tolerance * scale;
 }
 
+constexpr uint32_t kEqualityRows = 2;
+constexpr uint32_t kCommonTraceBase = 0;
+constexpr uint32_t kMetadataBase = 4;
+constexpr uint32_t kCanonicalShapeBase = 12;
+constexpr uint32_t kProofTraceBase = 16;
+constexpr uint32_t kLaneClaimTraceBase = 20;
+constexpr uint32_t kLaneMetadataBase = 28;
+constexpr uint32_t kLaneShapeBase = 44;
+constexpr uint32_t kLaneRowRootBase = 52;
+constexpr uint32_t kEqualityColumns = 60;
+constexpr uint32_t kVerifierOwnedColumns = 16;
+constexpr uint32_t kMetadataLanes = 8;
+
+std::array<gf::Fp, kMetadataLanes> MetadataLanes(
+    const TraceMetadataV12& metadata)
+{
+    return {{
+        gf::FromU64(metadata.protocol_version),
+        gf::FromU64(metadata.trace_rows),
+        gf::FromU64(metadata.trace_columns),
+        gf::FromU64(metadata.quotient_len),
+        gf::FromU64(metadata.n_coeffs),
+        gf::FromU64(metadata.n_lde),
+        gf::FromU64(metadata.blowup),
+        gf::FromU64(metadata.folds),
+    }};
+}
+
+void FillConstantColumn(
+    std::vector<std::vector<gf::Fp3>>& columns,
+    uint32_t column, gf::Fp value)
+{
+    columns[column].assign(
+        kEqualityRows, gf::Fp3::FromFp(value));
+}
+
+void FillDigestColumns(
+    std::vector<std::vector<gf::Fp3>>& columns,
+    uint32_t base, const ah::Digest& digest)
+{
+    for (uint32_t lane = 0; lane < digest.size(); ++lane) {
+        FillConstantColumn(columns, base + lane, digest[lane]);
+    }
+}
+
+void FillMetadataColumns(
+    std::vector<std::vector<gf::Fp3>>& columns,
+    uint32_t base, const TraceMetadataV12& metadata)
+{
+    const auto lanes = MetadataLanes(metadata);
+    for (uint32_t lane = 0; lane < lanes.size(); ++lane) {
+        FillConstantColumn(columns, base + lane, lanes[lane]);
+    }
+}
+
+void AddEquality(
+    aq::AirConstraintSystem<gf::Fp3>& cs,
+    uint32_t source, uint32_t sink)
+{
+    aq::AirConstraint<gf::Fp3> equality;
+    equality.name =
+        "stage3.safe_v12.shared_trace_root_equality";
+    equality.kind = aq::AirKind::kEverywhere;
+    equality.alg_degree = 1;
+    equality.eval = [source, sink](
+                        const std::vector<gf::Fp3>& cur,
+                        const std::vector<gf::Fp3>&) {
+        return gf::Sub(cur[source], cur[sink]);
+    };
+    cs.constraints.push_back(std::move(equality));
+}
+
+uint32_t CountEqualityViolations(
+    const aq::AirConstraintSystem<gf::Fp3>& cs,
+    const std::vector<std::vector<gf::Fp3>>& columns)
+{
+    if (columns.size() != cs.n_columns) {
+        return std::numeric_limits<uint32_t>::max();
+    }
+    uint32_t violations = 0;
+    std::vector<gf::Fp3> cur(cs.n_columns);
+    std::vector<gf::Fp3> next(cs.n_columns);
+    for (uint32_t row = 0; row < cs.n_rows; ++row) {
+        const uint32_t next_row = (row + 1) % cs.n_rows;
+        for (uint32_t column = 0;
+             column < cs.n_columns; ++column) {
+            if (columns[column].size() != cs.n_rows) {
+                return std::numeric_limits<uint32_t>::max();
+            }
+            cur[column] = columns[column][row];
+            next[column] = columns[column][next_row];
+        }
+        for (const auto& constraint : cs.constraints) {
+            if (!gf::IsZero(constraint.eval(cur, next))) {
+                ++violations;
+            }
+        }
+    }
+    return violations;
+}
+
+bool SameColumns(
+    const std::vector<std::vector<gf::Fp3>>& left,
+    const std::vector<std::vector<gf::Fp3>>& right)
+{
+    if (left.size() != right.size()) return false;
+    for (size_t column = 0; column < left.size(); ++column) {
+        if (left[column].size() != right[column].size()) {
+            return false;
+        }
+        for (size_t row = 0; row < left[column].size(); ++row) {
+            if (!gf::Eq(left[column][row], right[column][row])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool SamePreprocessed(
+    const std::vector<
+        std::pair<uint32_t, std::vector<gf::Fp3>>>& left,
+    const std::vector<
+        std::pair<uint32_t, std::vector<gf::Fp3>>>& right)
+{
+    if (left.size() != right.size()) return false;
+    for (size_t item = 0; item < left.size(); ++item) {
+        if (left[item].first != right[item].first ||
+            left[item].second.size() !=
+                right[item].second.size()) {
+            return false;
+        }
+        for (size_t row = 0;
+             row < left[item].second.size(); ++row) {
+            if (!gf::Eq(
+                    left[item].second[row],
+                    right[item].second[row])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool SameTraceEqualityAir(
+    const TraceRootEqualityAirV12& left,
+    const TraceRootEqualityAirV12& right)
+{
+    return SameColumns(left.columns, right.columns) &&
+        left.canonical_metadata == right.canonical_metadata &&
+        left.canonical_shape_commit ==
+            right.canonical_shape_commit &&
+        left.shared_row_root == right.shared_row_root &&
+        left.cs.n_rows == right.cs.n_rows &&
+        left.cs.n_columns == right.cs.n_columns &&
+        left.cs.constraints.size() ==
+            right.cs.constraints.size() &&
+        SamePreprocessed(
+            left.cs.preprocessed,
+            right.cs.preprocessed) &&
+        left.cs.preprocessed_pin_ood ==
+            right.cs.preprocessed_pin_ood &&
+        left.verifier_owned_preprocessed_columns ==
+            right.verifier_owned_preprocessed_columns &&
+        left.proof_owned_preprocessed_columns ==
+            right.proof_owned_preprocessed_columns &&
+        left.equality_constraints ==
+            right.equality_constraints &&
+        left.constraint_violations ==
+            right.constraint_violations &&
+        left.common_trace_aliases_constrained ==
+            right.common_trace_aliases_constrained &&
+        left.metadata_aliases_constrained ==
+            right.metadata_aliases_constrained &&
+        left.canonical_shape_aliases_constrained ==
+            right.canonical_shape_aliases_constrained &&
+        left.shared_row_root_constrained ==
+            right.shared_row_root_constrained &&
+        left.row_root_to_common_trace_constrained ==
+            right.row_root_to_common_trace_constrained &&
+        left.only_verifier_owned_values_preprocessed ==
+            right.only_verifier_owned_values_preprocessed &&
+        left.valid == right.valid;
+}
+
 } // namespace
+
+TraceMetadataV12 CanonicalTraceMetadataV12(
+    const fsair::ManifestV12& manifest)
+{
+    return {
+        kProtocolVersionV12,
+        manifest.shape.child_n_rows,
+        manifest.shape.child_w,
+        manifest.shape.child_quotient_len,
+        manifest.shape.n_coeffs,
+        manifest.shape.n_lde,
+        fsair::kFriBlowupV12,
+        manifest.shape.n_folds,
+    };
+}
+
+bool DeriveCanonicalShapeCommitV12(
+    const fsair::ManifestV12& manifest,
+    aht::RoleV12 role, ah::Digest& shape_commit,
+    std::string* why)
+{
+    shape_commit = {};
+    if (!fsair::ValidateManifestV12(manifest, why)) {
+        return Fail(why, "shape manifest invalid");
+    }
+    const TraceMetadataV12 metadata =
+        CanonicalTraceMetadataV12(manifest);
+    std::vector<gf::Fp> message;
+    message.reserve(2 + kMetadataLanes);
+    message.push_back(kTraceEqualityMagicV12);
+    const auto lanes = MetadataLanes(metadata);
+    message.insert(message.end(), lanes.begin(), lanes.end());
+    safe::SafeCoreResultV12 audit;
+    if (!safe::SafeCoreDigestV12(
+            role, TraceShapeDomain(), message,
+            shape_commit, &audit, why) ||
+        !CanonicalDigest(shape_commit) ||
+        audit.tag_stats.sha256d_calls == 0 ||
+        audit.cost.published_algorithm_poseidon_calls == 0) {
+        shape_commit = {};
+        return Fail(why, "canonical shape SAFE derivation");
+    }
+    return true;
+}
+
+bool BuildTraceRootEqualityAirV12(
+    const fsair::ManifestV12& manifest,
+    const CommonCommitmentsV12& common,
+    const std::array<LaneCommonClaimV12, kLaneCountV12>&
+        lane_claim,
+    const std::array<TraceMetadataV12, kLaneCountV12>&
+        lane_metadata,
+    const fsair::ProofWitnessInputsV12& proof_witness,
+    TraceRootEqualityAirV12& out,
+    std::string* why)
+{
+    out = {};
+    if (!fsair::ValidateManifestV12(manifest, why) ||
+        !CanonicalCommon(common) ||
+        !CanonicalProofBundle(proof_witness) ||
+        !std::all_of(
+            lane_claim.begin(), lane_claim.end(),
+            CanonicalClaim)) {
+        return Fail(why, "trace equality inputs invalid");
+    }
+
+    out.canonical_metadata =
+        CanonicalTraceMetadataV12(manifest);
+    if (!DeriveCanonicalShapeCommitV12(
+            manifest, aht::RoleV12::TranscriptShapeCommit,
+            out.canonical_shape_commit, why)) {
+        return false;
+    }
+    out.shared_row_root =
+        proof_witness.fri_lane[0].row_root;
+
+    out.cs.n_rows = kEqualityRows;
+    out.cs.n_columns = kEqualityColumns;
+    out.cs.preprocessed_pin_ood = true;
+    out.columns.assign(
+        kEqualityColumns,
+        std::vector<gf::Fp3>(
+            kEqualityRows, gf::Fp3::Zero()));
+
+    FillDigestColumns(
+        out.columns, kCommonTraceBase, common.trace);
+    FillMetadataColumns(
+        out.columns, kMetadataBase,
+        out.canonical_metadata);
+    FillDigestColumns(
+        out.columns, kCanonicalShapeBase,
+        out.canonical_shape_commit);
+    FillDigestColumns(
+        out.columns, kProofTraceBase,
+        proof_witness.trace_commit);
+    for (uint32_t lane = 0; lane < kLaneCountV12; ++lane) {
+        FillDigestColumns(
+            out.columns,
+            kLaneClaimTraceBase + 4 * lane,
+            lane_claim[lane].trace);
+        FillMetadataColumns(
+            out.columns,
+            kLaneMetadataBase + kMetadataLanes * lane,
+            lane_metadata[lane]);
+        FillDigestColumns(
+            out.columns,
+            kLaneShapeBase + 4 * lane,
+            proof_witness.fri_lane[lane].shape_commit);
+        FillDigestColumns(
+            out.columns,
+            kLaneRowRootBase + 4 * lane,
+            proof_witness.fri_lane[lane].row_root);
+    }
+
+    for (uint32_t column = 0;
+         column < kVerifierOwnedColumns; ++column) {
+        out.cs.preprocessed.emplace_back(
+            column, out.columns[column]);
+    }
+    out.verifier_owned_preprocessed_columns =
+        kVerifierOwnedColumns;
+    out.proof_owned_preprocessed_columns = 0;
+    out.only_verifier_owned_values_preprocessed =
+        out.cs.preprocessed.size() ==
+            kVerifierOwnedColumns;
+
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        AddEquality(
+            out.cs, kProofTraceBase + lane,
+            kCommonTraceBase + lane);
+        for (uint32_t proof_lane = 0;
+             proof_lane < kLaneCountV12; ++proof_lane) {
+            AddEquality(
+                out.cs,
+                kLaneClaimTraceBase +
+                    4 * proof_lane + lane,
+                kCommonTraceBase + lane);
+            AddEquality(
+                out.cs,
+                kLaneShapeBase +
+                    4 * proof_lane + lane,
+                kCanonicalShapeBase + lane);
+        }
+        AddEquality(
+            out.cs, kLaneRowRootBase + 4 + lane,
+            kLaneRowRootBase + lane);
+        for (uint32_t proof_lane = 0;
+             proof_lane < kLaneCountV12; ++proof_lane) {
+            AddEquality(
+                out.cs,
+                kLaneRowRootBase +
+                    4 * proof_lane + lane,
+                kCommonTraceBase + lane);
+        }
+    }
+    for (uint32_t proof_lane = 0;
+         proof_lane < kLaneCountV12; ++proof_lane) {
+        for (uint32_t lane = 0;
+             lane < kMetadataLanes; ++lane) {
+            AddEquality(
+                out.cs,
+                kLaneMetadataBase +
+                    kMetadataLanes * proof_lane + lane,
+                kMetadataBase + lane);
+        }
+    }
+    out.equality_constraints =
+        static_cast<uint32_t>(out.cs.constraints.size());
+    out.constraint_violations =
+        CountEqualityViolations(out.cs, out.columns);
+    out.common_trace_aliases_constrained = true;
+    out.metadata_aliases_constrained = true;
+    out.canonical_shape_aliases_constrained = true;
+    out.shared_row_root_constrained = true;
+    out.row_root_to_common_trace_constrained = true;
+    out.valid =
+        out.equality_constraints == 48 &&
+        out.constraint_violations == 0 &&
+        out.verifier_owned_preprocessed_columns == 16 &&
+        out.proof_owned_preprocessed_columns == 0 &&
+        out.only_verifier_owned_values_preprocessed;
+    out.note = out.valid
+        ? "stage3:safe_v12_nirop:"
+          "shared_trace_shape_and_bound_row_root_air_ok"
+        : "stage3:safe_v12_nirop:"
+          "shared_trace_shape_or_bound_row_root_mismatch";
+    if (!out.valid) {
+        return Fail(why, "trace equality AIR violations");
+    }
+    return true;
+}
+
+bool ValidateTraceRootEqualityAirV12(
+    const fsair::ManifestV12& manifest,
+    const CommonCommitmentsV12& common,
+    const std::array<LaneCommonClaimV12, kLaneCountV12>&
+        lane_claim,
+    const std::array<TraceMetadataV12, kLaneCountV12>&
+        lane_metadata,
+    const fsair::ProofWitnessInputsV12& proof_witness,
+    const TraceRootEqualityAirV12& air,
+    std::string* why)
+{
+    if (!air.valid ||
+        CountEqualityViolations(air.cs, air.columns) != 0) {
+        return Fail(why, "supplied trace equality AIR invalid");
+    }
+    TraceRootEqualityAirV12 expected;
+    if (!BuildTraceRootEqualityAirV12(
+            manifest, common, lane_claim, lane_metadata,
+            proof_witness, expected, why)) {
+        return false;
+    }
+    if (!SameTraceEqualityAir(air, expected)) {
+        return Fail(why, "trace equality AIR mismatch");
+    }
+    return true;
+}
 
 bool DeriveParentFsSeedV12(
     const fsair::ManifestV12& manifest,
@@ -349,6 +778,20 @@ bool BuildHybridReceiptV12(
     receipt.common_binding = binding;
     receipt.common_binding_valid = true;
 
+    if (!BuildTraceRootEqualityAirV12(
+            manifest, inputs.common, inputs.lane_claim,
+            inputs.lane_trace_metadata,
+            inputs.transcript.proof_witness,
+            receipt.trace_root_equality_air, why) ||
+        !ValidateTraceRootEqualityAirV12(
+            manifest, inputs.common, inputs.lane_claim,
+            inputs.lane_trace_metadata,
+            inputs.transcript.proof_witness,
+            receipt.trace_root_equality_air, why)) {
+        return false;
+    }
+    receipt.trace_root_equality_air_valid = true;
+
     if (!BuildTaxSigmaCoreV12(
             manifest, inputs.common, binding.parent_fs_seed,
             receipt.tax_sigma_core, why)) {
@@ -406,6 +849,7 @@ bool BuildHybridReceiptV12(
     receipt.valid =
         receipt.manifest_valid &&
         receipt.common_binding_valid &&
+        receipt.trace_root_equality_air_valid &&
         receipt.native_air_transcript_valid &&
         receipt.typed_lane_domains_distinct &&
         receipt.query_vectors_distinct &&
@@ -515,6 +959,17 @@ AssessShippedSoundnessReductionV12(
     out.common_transcript_join_executable =
         ValidateHybridReceiptV12(
             manifest, inputs, receipt, &verify_why);
+    out.common_trace_root_equality_air_executable =
+        receipt.trace_root_equality_air_valid &&
+        ValidateTraceRootEqualityAirV12(
+            manifest, inputs.common, inputs.lane_claim,
+            inputs.lane_trace_metadata,
+            inputs.transcript.proof_witness,
+            receipt.trace_root_equality_air, nullptr);
+    // The AIR is executable and mutation-tested, but is not yet appended to
+    // the normalized recursive parent proof. Keep reduction certification
+    // separate from host/witness execution.
+    out.common_trace_root_equality_recursively_consumed = false;
     out.lane_domains_and_tags_distinct =
         receipt.typed_lane_domains_distinct;
     out.lane_query_vectors_distinct =
@@ -561,8 +1016,8 @@ AssessShippedSoundnessReductionV12(
     // executable evidence, not a proof that two calls to one concrete
     // permutation instantiate independent random oracles.
     out.lane_independence_reduction_complete = false;
-    // The parent seed binds the root bundle, but the lane Merkle roots are not
-    // yet equality-constrained to a proof that they commit to common.trace.
+    // The exact equality AIR now exists, but the recursive parent does not
+    // consume it yet.
     out.common_commitment_binding_reduction_complete = false;
     out.concrete_safe_nirop_reduction_complete =
         safe::kConcreteTagHashReductionCertifiedV12 &&
@@ -613,6 +1068,8 @@ AssessShippedSoundnessReductionV12(
         out.proof_site_arithmetic_manifest_valid &&
         out.proof_site_upper_bound_recursively_enforced &&
         out.common_transcript_join_executable &&
+        out.common_trace_root_equality_air_executable &&
+        out.common_trace_root_equality_recursively_consumed &&
         out.lane_domains_and_tags_distinct &&
         out.lane_query_vectors_distinct &&
         out.shared_nonce_tax_executable &&
@@ -631,8 +1088,8 @@ AssessShippedSoundnessReductionV12(
         "Make the taxed sigma the sole source of all 192 query indices.",
         "Prove two typed SAFE lane domains instantiate the required "
         "independent-oracle hybrid under the shared concrete Poseidon2.",
-        "Equality-constrain each lane row root to the common trace "
-        "commitment inside the recursive verifier.",
+        "Append the executable shared trace/shape/row-root equality AIR "
+        "to the normalized recursive parent proof.",
         "Certify the concrete H(IO,D) and Poseidon SAFE reductions and pin "
         "the typed-domain registry root.",
         "Make the recursive scheduler consume and enforce the exact "

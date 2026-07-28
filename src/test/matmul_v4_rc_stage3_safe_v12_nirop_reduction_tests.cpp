@@ -53,20 +53,34 @@ FixtureV12 BuildFixture()
 
     out.inputs.common.statement = TestDigest(1'000);
     out.inputs.common.program = TestDigest(1'100);
-    out.inputs.common.trace = TestDigest(1'200);
+    const ah::Digest shared_row_root = TestDigest(2'020);
+    // V12 is a true shared-commitment construction: the AIR statement,
+    // both lane claims and both FRI row roots name this exact digest.
+    out.inputs.common.trace = shared_row_root;
     out.inputs.transcript.proof_witness.trace_commit =
         out.inputs.common.trace;
+    ah::Digest canonical_shape{};
+    if (!DeriveCanonicalShapeCommitV12(
+            out.manifest,
+            aht::RoleV12::TranscriptShapeCommit,
+            canonical_shape, &why)) {
+        throw std::runtime_error(why);
+    }
+    const TraceMetadataV12 canonical_metadata =
+        CanonicalTraceMetadataV12(out.manifest);
     for (uint32_t lane = 0; lane < kLaneCountV12; ++lane) {
         out.inputs.lane_claim[lane] = {
             out.inputs.common.statement,
             out.inputs.common.program,
             out.inputs.common.trace,
         };
+        out.inputs.lane_trace_metadata[lane] =
+            canonical_metadata;
         auto& proof =
             out.inputs.transcript.proof_witness.fri_lane[lane];
         const uint64_t base = 2'000 + 100 * lane;
-        proof.shape_commit = TestDigest(base + 10);
-        proof.row_root = TestDigest(base + 20);
+        proof.shape_commit = canonical_shape;
+        proof.row_root = shared_row_root;
         proof.ood_evaluation_commit = TestDigest(base + 30);
         proof.fold_roots = {
             TestDigest(base + 40),
@@ -93,14 +107,13 @@ FixtureV12 BuildFixture()
         throw std::runtime_error(why);
     }
     // Deterministic KAT produced by FindSharedGrindNonceV12 for this exact
-    // sigma core. Pinning it keeps the ordinary test suite fast while the
-    // verifier still recomputes the shipped g=20 predicate from first
-    // principles. The prover search remains an executable public helper.
-    out.inputs.shared_grind_nonce = UINT64_C(6'992'314);
+    // shared-commitment sigma core. The verifier recomputes the full g=20
+    // predicate; pinning the answer avoids a prover search in normal CI.
+    out.inputs.shared_grind_nonce = UINT64_C(181'070);
     if (!CheckSharedGrindNonceV12(
             sigma_core, out.inputs.shared_grind_nonce, nullptr)) {
         throw std::runtime_error(
-            "stage3:safe_v12_nirop:g20 KAT mismatch");
+            "stage3:safe_v12_nirop:shared g20 KAT mismatch");
     }
     for (auto& lane :
          out.inputs.transcript.proof_witness.fri_lane) {
@@ -143,6 +156,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(fixture.receipt.valid);
     BOOST_CHECK(fixture.receipt.manifest_valid);
     BOOST_CHECK(fixture.receipt.common_binding_valid);
+    BOOST_CHECK(
+        fixture.receipt.trace_root_equality_air_valid);
     BOOST_CHECK(fixture.receipt.native_air_transcript_valid);
     BOOST_CHECK(
         fixture.receipt.typed_lane_domains_distinct);
@@ -161,6 +176,50 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         fixture.receipt.common_binding.
             both_lanes_use_shared_nonce);
+    const auto& trace_air =
+        fixture.receipt.trace_root_equality_air;
+    BOOST_CHECK(trace_air.valid);
+    BOOST_TEST(trace_air.cs.n_rows == 2U);
+    BOOST_TEST(trace_air.cs.n_columns == 60U);
+    BOOST_TEST(trace_air.equality_constraints == 48U);
+    BOOST_TEST(trace_air.constraint_violations == 0U);
+    BOOST_TEST(
+        trace_air.verifier_owned_preprocessed_columns == 16U);
+    BOOST_TEST(
+        trace_air.proof_owned_preprocessed_columns == 0U);
+    BOOST_CHECK(trace_air.common_trace_aliases_constrained);
+    BOOST_CHECK(trace_air.metadata_aliases_constrained);
+    BOOST_CHECK(
+        trace_air.canonical_shape_aliases_constrained);
+    BOOST_CHECK(trace_air.shared_row_root_constrained);
+    BOOST_CHECK(
+        trace_air.row_root_to_common_trace_constrained);
+    BOOST_CHECK(
+        trace_air.only_verifier_owned_values_preprocessed);
+    BOOST_CHECK(
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[0].shape_commit ==
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[1].shape_commit);
+    BOOST_CHECK(
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[0].row_root ==
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[1].row_root);
+    BOOST_CHECK(
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[0].row_root ==
+        fixture.inputs.common.trace);
+    BOOST_CHECK(
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[0].ood_evaluation_commit !=
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[1].ood_evaluation_commit);
+    BOOST_CHECK(
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[0].fold_roots !=
+        fixture.inputs.transcript.proof_witness.
+            fri_lane[1].fold_roots);
 
     const auto reduction = AssessShippedSoundnessReductionV12(
         fixture.manifest, fixture.inputs, fixture.receipt);
@@ -172,6 +231,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(reduction.parameters_read_from_shipped_construction);
     BOOST_CHECK(reduction.proof_site_arithmetic_manifest_valid);
     BOOST_CHECK(reduction.common_transcript_join_executable);
+    BOOST_CHECK(
+        reduction.
+            common_trace_root_equality_air_executable);
+    BOOST_CHECK(
+        !reduction.
+            common_trace_root_equality_recursively_consumed);
     BOOST_CHECK(reduction.lane_domains_and_tags_distinct);
     BOOST_CHECK(reduction.lane_query_vectors_distinct);
     BOOST_CHECK(reduction.shared_nonce_tax_executable);
@@ -213,6 +278,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(kDualQ96CommonTranscriptJoinExecutableV12);
     BOOST_CHECK(kDualQ96SharedNonceTaxPredicateExecutableV12);
     BOOST_CHECK(
+        kDualQ96SharedTraceRootEqualityAirExecutableV12);
+    BOOST_CHECK(
         !kDualQ96CommonCommitmentHybridReductionCertifiedV12);
     BOOST_CHECK(!kDualQ96NiropReductionCertifiedV12);
     BOOST_CHECK(!kDualQ96GlobalReductionCertifiedV12);
@@ -232,13 +299,110 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!BuildHybridReceiptV12(
         fixture.manifest, changed_claim, unused, &why));
 
-    // Nor can it substitute only one committed row-root while retaining the
-    // old common parent seed.
+    // A two-root envelope is not the V12 construction. Both independently
+    // typed Q96 FS lanes must consume one exact shared commitment.
     HybridInputsV12 changed_root = fixture.inputs;
     changed_root.transcript.proof_witness.
         fri_lane[1].row_root = TestDigest(9'100);
     BOOST_CHECK(!BuildHybridReceiptV12(
         fixture.manifest, changed_root, unused, &why));
+
+    // Aggregate equality would miss +delta/-delta compensation. The direct
+    // per-coordinate shared-root constraints reject it.
+    HybridInputsV12 compensated = fixture.inputs;
+    compensated.transcript.proof_witness.
+        fri_lane[0].row_root[0] = gf::Add(
+            compensated.transcript.proof_witness.
+                fri_lane[0].row_root[0],
+            1);
+    compensated.transcript.proof_witness.
+        fri_lane[1].row_root[0] = gf::Sub(
+            compensated.transcript.proof_witness.
+                fri_lane[1].row_root[0],
+            1);
+    TraceRootEqualityAirV12 bad_trace_air;
+    BOOST_CHECK(!BuildTraceRootEqualityAirV12(
+        fixture.manifest, compensated.common,
+        compensated.lane_claim,
+        compensated.lane_trace_metadata,
+        compensated.transcript.proof_witness,
+        bad_trace_air, &why));
+
+    // Even changing both metadata copies together cannot move a
+    // verifier-derived shape field.
+    HybridInputsV12 metadata_swap = fixture.inputs;
+    ++metadata_swap.lane_trace_metadata[0].trace_columns;
+    ++metadata_swap.lane_trace_metadata[1].trace_columns;
+    BOOST_CHECK(!BuildTraceRootEqualityAirV12(
+        fixture.manifest, metadata_swap.common,
+        metadata_swap.lane_claim,
+        metadata_swap.lane_trace_metadata,
+        metadata_swap.transcript.proof_witness,
+        bad_trace_air, &why));
+
+    // A real digest under an unrelated typed oracle role is not a canonical
+    // V12 shape commitment, even when copied consistently into both lanes.
+    ah::Digest wrong_shape{};
+    BOOST_REQUIRE(DeriveCanonicalShapeCommitV12(
+        fixture.manifest, aht::RoleV12::MerkleRowLeaf,
+        wrong_shape, &why));
+    BOOST_CHECK(
+        wrong_shape !=
+        fixture.receipt.trace_root_equality_air.
+            canonical_shape_commit);
+    HybridInputsV12 shape_role_swap = fixture.inputs;
+    for (auto& lane :
+         shape_role_swap.transcript.proof_witness.fri_lane) {
+        lane.shape_commit = wrong_shape;
+    }
+    BOOST_CHECK(!BuildTraceRootEqualityAirV12(
+        fixture.manifest, shape_role_swap.common,
+        shape_role_swap.lane_claim,
+        shape_role_swap.lane_trace_metadata,
+        shape_role_swap.transcript.proof_witness,
+        bad_trace_air, &why));
+
+    // A simultaneous shared-root substitution cannot preserve the
+    // verifier-owned common trace commitment. Direct per-lane aliases make
+    // the local equality AIR reject without relying on the parent seed.
+    HybridInputsV12 shared_root_swap = fixture.inputs;
+    const ah::Digest substituted_root = TestDigest(9'200);
+    for (auto& lane :
+         shared_root_swap.transcript.proof_witness.fri_lane) {
+        lane.row_root = substituted_root;
+    }
+    BOOST_CHECK(!BuildTraceRootEqualityAirV12(
+        fixture.manifest, shared_root_swap.common,
+        shared_root_swap.lane_claim,
+        shared_root_swap.lane_trace_metadata,
+        shared_root_swap.transcript.proof_witness,
+        bad_trace_air, &why));
+    BOOST_CHECK(!BuildHybridReceiptV12(
+        fixture.manifest, shared_root_swap, unused, &why));
+
+    // Replacing the common trace, AIR trace, both lane claims and both row
+    // roots together satisfies only the local equality relation. The
+    // unchanged parent seed remains bound to the original public trace and
+    // causes the integrated join to reject.
+    HybridInputsV12 whole_trace_swap = fixture.inputs;
+    const ah::Digest substituted_trace = TestDigest(9'300);
+    whole_trace_swap.common.trace = substituted_trace;
+    whole_trace_swap.transcript.proof_witness.trace_commit =
+        substituted_trace;
+    for (uint32_t lane = 0; lane < kLaneCountV12; ++lane) {
+        whole_trace_swap.lane_claim[lane].trace =
+            substituted_trace;
+        whole_trace_swap.transcript.proof_witness.
+            fri_lane[lane].row_root = substituted_trace;
+    }
+    BOOST_REQUIRE(BuildTraceRootEqualityAirV12(
+        fixture.manifest, whole_trace_swap.common,
+        whole_trace_swap.lane_claim,
+        whole_trace_swap.lane_trace_metadata,
+        whole_trace_swap.transcript.proof_witness,
+        bad_trace_air, &why));
+    BOOST_CHECK(!BuildHybridReceiptV12(
+        fixture.manifest, whole_trace_swap, unused, &why));
 
     // A copied lane manifest has a valid-looking width but merges the typed
     // oracle domains. Canonical reconstruction rejects it.
@@ -262,6 +426,18 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!ValidateHybridReceiptV12(
         fixture.manifest, fixture.inputs,
         shared_queries, &why));
+
+    // Mutating a proof-owned equality carrier is detected by reconstruction
+    // and by the linear constraints, not trusted as a receipt boolean.
+    HybridReceiptV12 changed_equality_air = fixture.receipt;
+    changed_equality_air.trace_root_equality_air.
+        columns.back()[0] = gf::Add(
+            changed_equality_air.trace_root_equality_air.
+                columns.back()[0],
+            gf::Fp3::One());
+    BOOST_CHECK(!ValidateHybridReceiptV12(
+        fixture.manifest, fixture.inputs,
+        changed_equality_air, &why));
 
     // Re-tagging the common parent derivation with an unrelated oracle role
     // gives a real digest, but never the canonical parent FS seed.

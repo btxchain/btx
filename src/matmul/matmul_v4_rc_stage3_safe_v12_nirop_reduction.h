@@ -42,9 +42,10 @@
  * NIROP terms add; the regrind and site factors are each applied once.
  *
  * This file deliberately does not turn the conditional expression into a
- * security certificate.  The root-to-trace proof mapping, concrete SAFE
- * reductions, sole-query-source tax integration and recursively enforced
- * site manifest remain explicit false premises.
+ * security certificate.  The root-to-trace equality AIR is executable, but
+ * its normalized-recursive consumption, the concrete SAFE reductions,
+ * sole-query-source tax integration and recursively enforced site manifest
+ * remain explicit false premises.
  */
 namespace matmul::v4::rc::stage3_safe_v12_nirop_reduction {
 
@@ -55,6 +56,7 @@ namespace safe = safe_v12;
 namespace fsair = stage3_safe_v12_fs_air;
 namespace scenarios = soundness_scenarios;
 namespace gsl = global_soundness_ledger;
+namespace aq = air_quotient;
 
 inline constexpr uint32_t kProtocolVersionV12 = 12;
 inline constexpr uint32_t kQueriesPerLaneV12 =
@@ -71,6 +73,8 @@ inline constexpr uint32_t kV1TargetBitsV12 =
     gsl::kV1ConsensusSecurityClassBits;
 inline constexpr gf::Fp kCommonBindingMagicV12 =
     UINT64_C(0x4254585631324a4e); // "BTXV12JN"
+inline constexpr gf::Fp kTraceEqualityMagicV12 =
+    UINT64_C(0x4254585631325452); // "BTXV12TR"
 
 static_assert(kQueriesPerLaneV12 == 96);
 static_assert(kLaneCountV12 == 2);
@@ -102,11 +106,66 @@ struct LaneCommonClaimV12 {
         const LaneCommonClaimV12&) = default;
 };
 
+/**
+ * Shape fields copied out of each proof lane.  The canonical values are
+ * verifier-derived from ManifestV12; the two copies remain ordinary proof
+ * witness cells and are equality-constrained to those public values.
+ */
+struct TraceMetadataV12 {
+    uint32_t protocol_version{kProtocolVersionV12};
+    uint32_t trace_rows{0};
+    uint32_t trace_columns{0};
+    uint32_t quotient_len{0};
+    uint32_t n_coeffs{0};
+    uint32_t n_lde{0};
+    uint32_t blowup{fsair::kFriBlowupV12};
+    uint32_t folds{0};
+
+    friend bool operator==(
+        const TraceMetadataV12&,
+        const TraceMetadataV12&) = default;
+};
+
 struct HybridInputsV12 {
     CommonCommitmentsV12 common{};
     std::array<LaneCommonClaimV12, kLaneCountV12> lane_claim{};
+    std::array<TraceMetadataV12, kLaneCountV12>
+        lane_trace_metadata{};
     fsair::TranscriptInputsV12 transcript{};
     uint64_t shared_grind_nonce{0};
+};
+
+/**
+ * A small linear AIR that gives the shared-commitment hybrid concrete cells:
+ *
+ *  - proof trace and both lane trace aliases equal the one verifier-owned
+ *    common trace commitment;
+ *  - both proof-owned metadata copies equal the shape-derived public tuple;
+ *  - both shape commitments equal one canonical V12 SAFE digest; and
+ *  - both Q96 row/Merkle-root copies equal that same common trace
+ *    commitment (and therefore each other).
+ *
+ * Only the common trace, canonical shape digest and shape tuple are
+ * preprocessed.  Lane roots, lane metadata and trace aliases never are.
+ */
+struct TraceRootEqualityAirV12 {
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    TraceMetadataV12 canonical_metadata{};
+    ah::Digest canonical_shape_commit{};
+    ah::Digest shared_row_root{};
+    uint32_t verifier_owned_preprocessed_columns{0};
+    uint32_t proof_owned_preprocessed_columns{0};
+    uint32_t equality_constraints{0};
+    uint32_t constraint_violations{0};
+    bool common_trace_aliases_constrained{false};
+    bool metadata_aliases_constrained{false};
+    bool canonical_shape_aliases_constrained{false};
+    bool shared_row_root_constrained{false};
+    bool row_root_to_common_trace_constrained{false};
+    bool only_verifier_owned_values_preprocessed{false};
+    bool valid{false};
+    std::string note;
 };
 
 struct CommonBindingReceiptV12 {
@@ -133,6 +192,7 @@ struct CommonBindingReceiptV12 {
 
 struct HybridReceiptV12 {
     CommonBindingReceiptV12 common_binding{};
+    TraceRootEqualityAirV12 trace_root_equality_air{};
     fsair::AirWitnessV12 transcript_air{};
     std::vector<gf::Fp> tax_sigma_core;
     ah::Digest tax_sigma{};
@@ -141,6 +201,7 @@ struct HybridReceiptV12 {
         query_indices{};
     bool manifest_valid{false};
     bool common_binding_valid{false};
+    bool trace_root_equality_air_valid{false};
     bool native_air_transcript_valid{false};
     bool typed_lane_domains_distinct{false};
     bool query_vectors_distinct{false};
@@ -149,6 +210,42 @@ struct HybridReceiptV12 {
     bool valid{false};
     std::string note;
 };
+
+/** Verifier-derived V12 tuple. */
+[[nodiscard]] TraceMetadataV12 CanonicalTraceMetadataV12(
+    const fsair::ManifestV12& manifest);
+
+/**
+ * Derive the only canonical shape commitment. Supplying another typed role
+ * is exposed solely so the oracle-role substitution test can construct and
+ * reject a real alternate digest.
+ */
+[[nodiscard]] bool DeriveCanonicalShapeCommitV12(
+    const fsair::ManifestV12& manifest,
+    aht::RoleV12 role, ah::Digest& shape_commit,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool BuildTraceRootEqualityAirV12(
+    const fsair::ManifestV12& manifest,
+    const CommonCommitmentsV12& common,
+    const std::array<LaneCommonClaimV12, kLaneCountV12>&
+        lane_claim,
+    const std::array<TraceMetadataV12, kLaneCountV12>&
+        lane_metadata,
+    const fsair::ProofWitnessInputsV12& proof_witness,
+    TraceRootEqualityAirV12& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool ValidateTraceRootEqualityAirV12(
+    const fsair::ManifestV12& manifest,
+    const CommonCommitmentsV12& common,
+    const std::array<LaneCommonClaimV12, kLaneCountV12>&
+        lane_claim,
+    const std::array<TraceMetadataV12, kLaneCountV12>&
+        lane_metadata,
+    const fsair::ProofWitnessInputsV12& proof_witness,
+    const TraceRootEqualityAirV12& air,
+    std::string* why = nullptr);
 
 /**
  * Derive the only admissible parent seed.  Supplying another role is useful
@@ -226,6 +323,8 @@ struct ShippedSoundnessReductionV12 {
     bool proof_site_arithmetic_manifest_valid{false};
     bool proof_site_upper_bound_recursively_enforced{false};
     bool common_transcript_join_executable{false};
+    bool common_trace_root_equality_air_executable{false};
+    bool common_trace_root_equality_recursively_consumed{false};
     bool lane_domains_and_tags_distinct{false};
     bool lane_query_vectors_distinct{false};
     bool shared_nonce_tax_executable{false};
@@ -256,6 +355,8 @@ inline constexpr bool
     kDualQ96CommonTranscriptJoinExecutableV12 = true;
 inline constexpr bool
     kDualQ96SharedNonceTaxPredicateExecutableV12 = true;
+inline constexpr bool
+    kDualQ96SharedTraceRootEqualityAirExecutableV12 = true;
 inline constexpr bool
     kDualQ96CommonCommitmentHybridReductionCertifiedV12 = false;
 inline constexpr bool
