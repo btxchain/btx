@@ -73,6 +73,34 @@ bool CanonicalOuterPrefix(
     return true;
 }
 
+bool MatchesPublicStatement(
+    const ComposedPublicStatementV3& statement,
+    const RCStage3PublicInputs& inputs)
+{
+    return statement.height == inputs.height &&
+        statement.n_bits == inputs.n_bits &&
+        statement.episode_profile ==
+            inputs.episode_profile &&
+        statement.coupled_profile ==
+            inputs.coupled_profile &&
+        statement.transcript_version ==
+            inputs.transcript_version &&
+        statement.program_consensus_pin ==
+            inputs.program_consensus_pin &&
+        statement.header_commitment ==
+            inputs.header_commitment &&
+        statement.params_commitment ==
+            inputs.params_commitment &&
+        statement.target == inputs.target &&
+        statement.sigma == inputs.sigma &&
+        statement.episode_digest ==
+            inputs.episode_digest &&
+        statement.coupled_digest ==
+            inputs.coupled_digest &&
+        statement.final_digest ==
+            inputs.final_digest;
+}
+
 } // namespace
 
 uint256 ComputeOuterStatementRootV3(
@@ -158,6 +186,14 @@ bool DecodeAndBindCompositionLinkV3(
     if (proof.commitments[link_index].root !=
             receipt->receipt_root) {
         return Fail(why, "receipt_commitment");
+    }
+    if (receipt->outer_binding_kind !=
+            OuterBindingKindV3::
+                LegacyCompositionEnvelope ||
+        !MatchesPublicStatement(
+            receipt->public_statement,
+            proof.public_inputs)) {
+        return Fail(why, "outer_public_statement");
     }
     if (receipt->program_registry_root !=
         proof.public_inputs.program_consensus_pin

@@ -11,6 +11,7 @@
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_block_transport.h>
 #include <matmul/matmul_v4_rc_stage3_verify.h>
 #include <primitives/block.h>
 
@@ -207,6 +208,23 @@ RCStage3ProofCacheKey RCStage3ProofKey(const CBlock& block)
         out.program_registry_alg_root =
             proof->public_inputs.program_consensus_pin
                 .recursive_alg_hash_root;
+    } else if (normalized_block_transport::
+                   IsReceiptWordsV3(
+                       block.matrix_c_data)) {
+        const auto bytes =
+            normalized_block_transport::
+                UnpackReceiptWordsV3(
+                    block.matrix_c_data);
+        if (bytes.has_value()) {
+            const auto receipt =
+                normalized_authority::
+                    DeserializeNormalizedAuthorityReceiptV3(
+                        *bytes);
+            if (receipt.has_value()) {
+                out.program_registry_alg_root =
+                    receipt->program_registry_root;
+            }
+        }
     }
     return out;
 }

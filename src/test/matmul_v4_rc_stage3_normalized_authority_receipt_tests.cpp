@@ -5,7 +5,12 @@
 #include <matmul/matmul_v4_rc_stage3_normalized_authority_receipt.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_authority_composition.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_block_transport.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_consensus_binding.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <pow.h>
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <streams.h>
@@ -25,6 +30,8 @@ namespace gf = matmul::v4::rc::gkr_field;
 namespace rc = matmul::v4::rc;
 namespace transport =
     matmul::v4::rc::normalized_block_transport;
+namespace consensus_binding =
+    matmul::v4::rc::normalized_consensus_binding;
 
 BOOST_FIXTURE_TEST_SUITE(
     matmul_v4_rc_stage3_normalized_authority_receipt_tests,
@@ -44,6 +51,8 @@ na::RebuiltVerifierInputsV3 RebuiltFrom(
     const na::NormalizedAuthorityReceiptV3& receipt)
 {
     na::RebuiltVerifierInputsV3 out;
+    out.outer_binding_kind = receipt.outer_binding_kind;
+    out.public_statement = receipt.public_statement;
     out.outer_statement_root = receipt.outer_statement_root;
     out.program_registry_root = receipt.program_registry_root;
     out.topology_manifest_root = receipt.topology_manifest_root;
@@ -169,7 +178,6 @@ HonestFixture BuildHonestFixture()
     out.cs.constraints.push_back(std::move(transition));
 
     auto& receipt = out.receipt;
-    receipt.outer_statement_root = H(1);
     receipt.program_registry_root = H(2);
     receipt.topology_manifest_root = H(3);
     receipt.aggregation_schedule_root = H(4);
@@ -188,6 +196,61 @@ HonestFixture BuildHonestFixture()
     receipt.fixed_trace_row_root =
         retained.base_row_commitment;
     FillRoleInventory(receipt);
+    auto& statement = receipt.public_statement;
+    statement.height = 101;
+    statement.n_bits = 0x1f00ffffU;
+    statement.episode_profile = 2;
+    statement.coupled_profile = 1;
+    statement.transcript_version = 13;
+    statement.program_consensus_pin
+        .recursive_alg_hash_root =
+            receipt.program_registry_root;
+    statement.program_consensus_pin
+        .external_sha256d_audit_root = H(901);
+    statement.program_consensus_pin
+        .registry_binding = H(902);
+    statement.header_commitment = H(903);
+    statement.params_commitment = H(904);
+    statement.target = H(905);
+    statement.sigma = H(906);
+    statement.episode_digest = H(907);
+    statement.coupled_digest = H(908);
+    rc::RCStage3SuccinctProof statement_probe;
+    statement_probe.statement =
+        rc::RCStage3StatementKind::Composed;
+    statement_probe.public_inputs.height =
+        statement.height;
+    statement_probe.public_inputs.n_bits =
+        statement.n_bits;
+    statement_probe.public_inputs.episode_profile =
+        statement.episode_profile;
+    statement_probe.public_inputs.coupled_profile =
+        statement.coupled_profile;
+    statement_probe.public_inputs.transcript_version =
+        statement.transcript_version;
+    statement_probe.public_inputs.program_consensus_pin =
+        statement.program_consensus_pin;
+    statement_probe.public_inputs.header_commitment =
+        statement.header_commitment;
+    statement_probe.public_inputs.params_commitment =
+        statement.params_commitment;
+    statement_probe.public_inputs.target =
+        statement.target;
+    statement_probe.public_inputs.sigma =
+        statement.sigma;
+    statement_probe.public_inputs.episode_digest =
+        statement.episode_digest;
+    statement_probe.public_inputs.coupled_digest =
+        statement.coupled_digest;
+    statement.final_digest =
+        rc::ComputeRCStage3FinalDigest(
+            statement_probe);
+    BOOST_REQUIRE(!statement.final_digest.IsNull());
+    receipt.outer_statement_root =
+        na::ComputeDirectOuterStatementRootV3(
+            statement, receipt.roles);
+    BOOST_REQUIRE(
+        !receipt.outer_statement_root.IsNull());
     receipt.parent_node_binding = H(10);
     receipt.parent_context_binding = H(11);
     receipt.parent_program_root = H(12);
@@ -228,6 +291,13 @@ HonestFixture BuildHonestFixture()
             receipt.fixed_trace_row_root);
     receipt.role_manifest_root =
         na::ComputeRoleManifestRootV3(receipt.roles);
+    if (receipt.outer_binding_kind ==
+        na::OuterBindingKindV3::DirectBlockReceipt) {
+        receipt.outer_statement_root =
+            na::ComputeDirectOuterStatementRootV3(
+                receipt.public_statement,
+                receipt.roles);
+    }
     out.rebuilt = RebuiltFrom(receipt);
     receipt.parent_statement_root =
         na::ComputeParentStatementRootV3(out.rebuilt);
@@ -343,6 +413,33 @@ rc::RCStage3SuccinctProof BuildOuterProof(
         {1}});
 
     auto receipt = honest.receipt;
+    receipt.outer_binding_kind =
+        na::OuterBindingKindV3::
+            LegacyCompositionEnvelope;
+    receipt.public_statement = {
+        .height = public_inputs.height,
+        .n_bits = public_inputs.n_bits,
+        .episode_profile =
+            public_inputs.episode_profile,
+        .coupled_profile =
+            public_inputs.coupled_profile,
+        .transcript_version =
+            public_inputs.transcript_version,
+        .program_consensus_pin =
+            public_inputs.program_consensus_pin,
+        .header_commitment =
+            public_inputs.header_commitment,
+        .params_commitment =
+            public_inputs.params_commitment,
+        .target = public_inputs.target,
+        .sigma = public_inputs.sigma,
+        .episode_digest =
+            public_inputs.episode_digest,
+        .coupled_digest =
+            public_inputs.coupled_digest,
+        .final_digest =
+            public_inputs.final_digest,
+    };
     receipt.outer_statement_root =
         na::ComputeOuterStatementRootV3(proof);
     BOOST_REQUIRE(!receipt.outer_statement_root.IsNull());
@@ -536,6 +633,172 @@ BOOST_AUTO_TEST_CASE(
                 decoded, changed_cs, honest.rebuilt,
                 nullptr, &why));
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    direct_receipt_carries_and_rebuilds_complete_block_statement)
+{
+    constexpr int32_t height = 101;
+    const HonestFixture& honest = Honest();
+    CBlock block;
+    block.nVersion = 4;
+    block.nTime = 1;
+    block.nBits = 0x207fffffU;
+    block.nNonce64 = 7;
+    block.matmul_dim = 256;
+    block.seed_a = H(0xD101);
+    block.seed_b = H(0xD102);
+
+    Consensus::Params params;
+    params.fMatMulPOW = true;
+    params.nMatMulV4Height = 1;
+    params.nMatMulRCHeight = 1;
+    params.nMatMulRCProfile = 2;
+    params.fMatMulRCUseToyDims = true;
+    params.nMatMulV4Dimension = 256;
+    params.nMatMulRCCoupledHeight = 1;
+    params.nMatMulRCCoupledProfile = 3;
+    params.fMatMulRCCoupledUseToyDims = true;
+    params.powLimit = uint256{
+        "ffffffffffffffffffffffffffffffff"
+        "ffffffffffffffffffffffffffffffff"};
+    params.hashMatMulRCStage3ProgramRegistryAlgRoot =
+        honest.receipt.program_registry_root;
+    params.hashMatMulRCStage3ProgramRegistryShaAuditRoot =
+        H(0xD103);
+    params.hashMatMulRCStage3ProgramRegistryBinding =
+        H(0xD104);
+
+    const uint256 episode_digest = H(0xD105);
+    const uint256 coupled_digest = H(0xD106);
+    block.matmul_digest =
+        rc::ComputeRCStage3ComposedWorkDigest(
+            block, params, height,
+            episode_digest, coupled_digest);
+    BOOST_REQUIRE(!block.matmul_digest.IsNull());
+    const auto target =
+        DeriveTarget(block.nBits, params.powLimit);
+    BOOST_REQUIRE(target.has_value());
+    const uint256 target_u256 =
+        ArithToUint256(*target);
+
+    na::ComposedPublicStatementV3 statement;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        consensus_binding::
+            RebuildComposedPublicStatementV3(
+                block, params, height, target_u256,
+                episode_digest, coupled_digest,
+                statement, &why),
+        why);
+
+    auto receipt = honest.receipt;
+    receipt.outer_binding_kind =
+        na::OuterBindingKindV3::DirectBlockReceipt;
+    receipt.public_statement = statement;
+    receipt.program_registry_root =
+        statement.program_consensus_pin
+            .recursive_alg_hash_root;
+    receipt.outer_statement_root =
+        na::ComputeDirectOuterStatementRootV3(
+            receipt.public_statement,
+            receipt.roles);
+    auto rebuilt = RebuiltFrom(receipt);
+    receipt.parent_statement_root =
+        na::ComputeParentStatementRootV3(rebuilt);
+    receipt.parent_fs_seed =
+        na::DeriveParentFsSeedV3(
+            receipt.parent_statement_root);
+    const aq::AirQuotientFixedTracePinV3 fixed{
+        .version = 1,
+        .ordered_columns =
+            receipt.fixed_trace_columns,
+        .row_root = receipt.fixed_trace_row_root,
+    };
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeFixedV3(
+            honest.cs, honest.columns, fixed,
+            receipt.parent_fs_seed);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE_GT(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            proved.proof,
+            receipt.parent_proof_bytes),
+        0U);
+    receipt.parent_proof_root =
+        na::ComputeParentProofRootV3(
+            receipt.parent_proof_bytes);
+    receipt.receipt_root =
+        na::ComputeReceiptRootV3(receipt);
+    BOOST_REQUIRE_MESSAGE(
+        na::ValidateNormalizedAuthorityReceiptV3(
+            receipt, &why),
+        why);
+
+    na::RebuiltVerifierInputsV3 consensus_inputs;
+    BOOST_REQUIRE_MESSAGE(
+        consensus_binding::
+            ValidateDirectReceiptConsensusBindingV3(
+                block, params, height, target_u256,
+                receipt, consensus_inputs, &why),
+        why);
+    BOOST_CHECK(consensus_inputs == RebuiltFrom(receipt));
+
+    std::vector<unsigned char> direct_bytes;
+    BOOST_REQUIRE_GT(
+        na::SerializeNormalizedAuthorityReceiptV3(
+            receipt, direct_bytes),
+        0U);
+    BOOST_REQUIRE_MESSAGE(
+        transport::AttachReceiptV3(
+            block, direct_bytes, &why),
+        why);
+    na::NormalizedAuthorityReceiptV3 decoded_receipt;
+    na::RebuiltVerifierInputsV3 decoded_inputs;
+    BOOST_REQUIRE_MESSAGE(
+        consensus_binding::
+            DecodeAndBindAttachedDirectReceiptV3(
+                block, params, height, target_u256,
+                decoded_receipt, decoded_inputs, &why),
+        why);
+    BOOST_CHECK(decoded_receipt == receipt);
+    BOOST_CHECK(decoded_inputs == consensus_inputs);
+    const rc::RCStage3ProofCacheKey cache_key =
+        rc::RCStage3ProofKey(block);
+    BOOST_CHECK(
+        cache_key.block_hash == block.GetHash());
+    BOOST_CHECK(
+        cache_key.program_registry_alg_root ==
+        receipt.program_registry_root);
+    BOOST_CHECK(
+        !cache_key.proof_payload_digest.IsNull());
+
+    CBlock changed_header = block;
+    ++changed_header.nNonce64;
+    BOOST_CHECK(
+        !consensus_binding::
+            ValidateDirectReceiptConsensusBindingV3(
+                changed_header, params, height,
+                target_u256, receipt,
+                consensus_inputs, &why));
+
+    auto changed_params = params;
+    changed_params.nMatMulRCCoupledProfile = 2;
+    BOOST_CHECK(
+        !consensus_binding::
+            ValidateDirectReceiptConsensusBindingV3(
+                block, changed_params, height,
+                target_u256, receipt,
+                consensus_inputs, &why));
+
+    uint256 wrong_target = target_u256;
+    wrong_target.begin()[0] ^= 1U;
+    BOOST_CHECK(
+        !consensus_binding::
+            ValidateDirectReceiptConsensusBindingV3(
+                block, params, height,
+                wrong_target, receipt,
+                consensus_inputs, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

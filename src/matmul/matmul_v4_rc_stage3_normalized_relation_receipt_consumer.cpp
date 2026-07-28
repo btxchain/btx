@@ -98,6 +98,10 @@ void PopulateReceiptPublicInputs(
     const nav3::RebuiltVerifierInputsV3& inputs,
     nav3::NormalizedAuthorityReceiptV3& receipt)
 {
+    receipt.outer_binding_kind =
+        inputs.outer_binding_kind;
+    receipt.public_statement =
+        inputs.public_statement;
     receipt.outer_statement_root = inputs.outer_statement_root;
     receipt.program_registry_root = inputs.program_registry_root;
     receipt.topology_manifest_root = inputs.topology_manifest_root;

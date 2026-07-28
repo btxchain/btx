@@ -36,6 +36,40 @@ inline constexpr uint16_t kEndpointCountV3 =
     kRCStage3RelationClosureEndpointCount;
 
 /**
+ * Public composed-work statement carried by a direct BNV3 receipt.
+ *
+ * The legacy outer section envelope used to carry these values.  BNV3 carries
+ * only the normalized receipt, so omitting them would leave a fresh consensus
+ * verifier unable to reconstruct which episode and coupled digests the parent
+ * proves.  `transcript_commitment` is deliberately absent: the direct receipt
+ * has its own canonical root and must not create a self-reference.
+ */
+struct ComposedPublicStatementV3 {
+    int32_t height{0};
+    uint32_t n_bits{0};
+    uint32_t episode_profile{0};
+    uint32_t coupled_profile{0};
+    uint32_t transcript_version{0};
+    ProductionProgramConsensusPinV1 program_consensus_pin{};
+    uint256 header_commitment{};
+    uint256 params_commitment{};
+    uint256 target{};
+    uint256 sigma{};
+    uint256 episode_digest{};
+    uint256 coupled_digest{};
+    uint256 final_digest{};
+
+    bool operator==(const ComposedPublicStatementV3&) const = default;
+};
+
+enum class OuterBindingKindV3 : uint8_t {
+    /** Direct BNV3 body: statement plus canonical role pins. */
+    DirectBlockReceipt = 1,
+    /** Compatibility path for the legacy fifteen-section outer envelope. */
+    LegacyCompositionEnvelope = 2,
+};
+
+/**
  * One endpoint in the exact canonical 52-endpoint semantic inventory.
  *
  * Every root is proof/public-statement material.  No execution result,
@@ -99,6 +133,9 @@ struct NormalizedAuthorityReceiptV3 {
     uint16_t safe_backend_version{kSafeBackendVersionV3};
     uint16_t outer_proof_version{kOuterProofVersionV3};
 
+    OuterBindingKindV3 outer_binding_kind{
+        OuterBindingKindV3::DirectBlockReceipt};
+    ComposedPublicStatementV3 public_statement{};
     uint256 outer_statement_root{};
     uint256 program_registry_root{};
     uint256 topology_manifest_root{};
@@ -137,6 +174,9 @@ struct NormalizedAuthorityReceiptV3 {
  * these exact components and compares them to the receipt.
  */
 struct RebuiltVerifierInputsV3 {
+    OuterBindingKindV3 outer_binding_kind{
+        OuterBindingKindV3::DirectBlockReceipt};
+    ComposedPublicStatementV3 public_statement{};
     uint256 outer_statement_root{};
     uint256 program_registry_root{};
     uint256 topology_manifest_root{};
@@ -167,6 +207,9 @@ struct RebuiltVerifierInputsV3 {
 [[nodiscard]] uint256 ComputeRoleStatementRootV3(
     const RolePinV3& role);
 [[nodiscard]] uint256 ComputeRoleManifestRootV3(
+    const std::vector<RolePinV3>& roles);
+[[nodiscard]] uint256 ComputeDirectOuterStatementRootV3(
+    const ComposedPublicStatementV3& statement,
     const std::vector<RolePinV3>& roles);
 [[nodiscard]] uint256 ComputeFixedTraceManifestRootV3(
     const ParentShapeV3& shape,

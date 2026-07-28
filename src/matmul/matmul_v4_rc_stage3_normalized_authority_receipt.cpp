@@ -5,6 +5,7 @@
 #include <matmul/matmul_v4_rc_stage3_normalized_authority_receipt.h>
 
 #include <hash.h>
+#include <matmul/matmul_v4_rc_stage3_composition.h>
 
 #include <algorithm>
 #include <array>
@@ -21,6 +22,8 @@ constexpr char kRoleStatementDomainV3[] =
     "BTX_RC_STAGE3_NORMALIZED_AUTHORITY_ROLE_STATEMENT_V3";
 constexpr char kRoleManifestDomainV3[] =
     "BTX_RC_STAGE3_NORMALIZED_AUTHORITY_ROLE_MANIFEST_V3";
+constexpr char kDirectOuterStatementDomainV3[] =
+    "BTX_RC_STAGE3_NORMALIZED_AUTHORITY_DIRECT_OUTER_STATEMENT_V3";
 constexpr char kFixedTraceDomainV3[] =
     "BTX_RC_STAGE3_NORMALIZED_AUTHORITY_FIXED_TRACE_V3";
 constexpr char kParentStatementDomainV3[] =
@@ -48,6 +51,66 @@ bool IsPowerOfTwo(uint32_t value)
 bool NonNull(const uint256& value)
 {
     return !value.IsNull();
+}
+
+RCStage3PublicInputs ToLegacyPublicInputs(
+    const ComposedPublicStatementV3& statement)
+{
+    RCStage3PublicInputs out;
+    out.height = statement.height;
+    out.n_bits = statement.n_bits;
+    out.episode_profile = statement.episode_profile;
+    out.coupled_profile = statement.coupled_profile;
+    out.transcript_version = statement.transcript_version;
+    out.program_consensus_pin =
+        statement.program_consensus_pin;
+    out.header_commitment = statement.header_commitment;
+    out.params_commitment = statement.params_commitment;
+    out.target = statement.target;
+    out.sigma = statement.sigma;
+    out.episode_digest = statement.episode_digest;
+    out.coupled_digest = statement.coupled_digest;
+    out.final_digest = statement.final_digest;
+    return out;
+}
+
+bool CanonicalPublicStatement(
+    const ComposedPublicStatementV3& statement,
+    std::string* why)
+{
+    std::string pin_why;
+    if (statement.height < 0 ||
+        statement.n_bits == 0 ||
+        statement.episode_profile == 0 ||
+        statement.coupled_profile == 0 ||
+        statement.transcript_version == 0 ||
+        !ValidateProductionProgramConsensusPinV1(
+            statement.program_consensus_pin,
+            &pin_why) ||
+        !NonNull(statement.header_commitment) ||
+        !NonNull(statement.params_commitment) ||
+        !NonNull(statement.target) ||
+        !NonNull(statement.sigma) ||
+        !NonNull(statement.episode_digest) ||
+        !NonNull(statement.coupled_digest) ||
+        !NonNull(statement.final_digest)) {
+        return Fail(
+            why,
+            pin_why.empty()
+                ? "public_statement"
+                : "public_statement_program_pin:" +
+                      pin_why);
+    }
+    RCStage3SuccinctProof statement_probe;
+    statement_probe.statement =
+        RCStage3StatementKind::Composed;
+    statement_probe.public_inputs =
+        ToLegacyPublicInputs(statement);
+    if (ComputeRCStage3FinalDigest(statement_probe) !=
+        statement.final_digest) {
+        return Fail(why, "public_statement_final_digest");
+    }
+    return true;
 }
 
 bool CanonicalShape(const ParentShapeV3& shape)
@@ -152,6 +215,8 @@ RebuiltVerifierInputsV3 ToVerifierInputs(
     const NormalizedAuthorityReceiptV3& receipt)
 {
     RebuiltVerifierInputsV3 out;
+    out.outer_binding_kind = receipt.outer_binding_kind;
+    out.public_statement = receipt.public_statement;
     out.outer_statement_root = receipt.outer_statement_root;
     out.program_registry_root = receipt.program_registry_root;
     out.topology_manifest_root = receipt.topology_manifest_root;
@@ -262,6 +327,39 @@ void WriteShape(
     WriteU32(out, shape.lde_rows);
 }
 
+void WritePublicStatement(
+    std::vector<unsigned char>& out,
+    const ComposedPublicStatementV3& statement)
+{
+    WriteU32(
+        out, static_cast<uint32_t>(statement.height));
+    WriteU32(out, statement.n_bits);
+    WriteU32(out, statement.episode_profile);
+    WriteU32(out, statement.coupled_profile);
+    WriteU32(out, statement.transcript_version);
+    WriteU16(
+        out, statement.program_consensus_pin.version);
+    WriteHash(
+        out,
+        statement.program_consensus_pin
+            .recursive_alg_hash_root);
+    WriteHash(
+        out,
+        statement.program_consensus_pin
+            .external_sha256d_audit_root);
+    WriteHash(
+        out,
+        statement.program_consensus_pin
+            .registry_binding);
+    WriteHash(out, statement.header_commitment);
+    WriteHash(out, statement.params_commitment);
+    WriteHash(out, statement.target);
+    WriteHash(out, statement.sigma);
+    WriteHash(out, statement.episode_digest);
+    WriteHash(out, statement.coupled_digest);
+    WriteHash(out, statement.final_digest);
+}
+
 class Reader {
 public:
     explicit Reader(const std::vector<unsigned char>& bytes)
@@ -351,6 +449,43 @@ bool ReadShape(Reader& reader, ParentShapeV3& shape)
         reader.U32(shape.lde_rows);
 }
 
+bool ReadPublicStatement(
+    Reader& reader,
+    ComposedPublicStatementV3& statement)
+{
+    uint32_t height = 0;
+    if (!reader.U32(height) ||
+        height >
+            static_cast<uint32_t>(
+                std::numeric_limits<int32_t>::max()) ||
+        !reader.U32(statement.n_bits) ||
+        !reader.U32(statement.episode_profile) ||
+        !reader.U32(statement.coupled_profile) ||
+        !reader.U32(statement.transcript_version) ||
+        !reader.U16(
+            statement.program_consensus_pin.version) ||
+        !reader.Hash(
+            statement.program_consensus_pin
+                .recursive_alg_hash_root) ||
+        !reader.Hash(
+            statement.program_consensus_pin
+                .external_sha256d_audit_root) ||
+        !reader.Hash(
+            statement.program_consensus_pin
+                .registry_binding) ||
+        !reader.Hash(statement.header_commitment) ||
+        !reader.Hash(statement.params_commitment) ||
+        !reader.Hash(statement.target) ||
+        !reader.Hash(statement.sigma) ||
+        !reader.Hash(statement.episode_digest) ||
+        !reader.Hash(statement.coupled_digest) ||
+        !reader.Hash(statement.final_digest)) {
+        return false;
+    }
+    statement.height = static_cast<int32_t>(height);
+    return true;
+}
+
 } // namespace
 
 uint256 ComputeEndpointPinRootV3(
@@ -410,6 +545,36 @@ uint256 ComputeRoleManifestRootV3(
     return hash.GetHash();
 }
 
+uint256 ComputeDirectOuterStatementRootV3(
+    const ComposedPublicStatementV3& statement,
+    const std::vector<RolePinV3>& roles)
+{
+    HashWriter hash;
+    hash << kDirectOuterStatementDomainV3;
+    hash << kReceiptVersionV3;
+    hash << statement.height;
+    hash << statement.n_bits;
+    hash << statement.episode_profile;
+    hash << statement.coupled_profile;
+    hash << statement.transcript_version;
+    hash << statement.program_consensus_pin.version;
+    hash << statement.program_consensus_pin
+                .recursive_alg_hash_root;
+    hash << statement.program_consensus_pin
+                .external_sha256d_audit_root;
+    hash << statement.program_consensus_pin
+                .registry_binding;
+    hash << statement.header_commitment;
+    hash << statement.params_commitment;
+    hash << statement.target;
+    hash << statement.sigma;
+    hash << statement.episode_digest;
+    hash << statement.coupled_digest;
+    hash << statement.final_digest;
+    hash << ComputeRoleManifestRootV3(roles);
+    return hash.GetHash();
+}
+
 uint256 ComputeFixedTraceManifestRootV3(
     const ParentShapeV3& shape,
     const std::vector<uint32_t>& ordered_columns,
@@ -439,6 +604,10 @@ uint256 ComputeParentStatementRootV3(
     hash << kOodCandidatesV3;
     hash << kSafeBackendVersionV3;
     hash << kOuterProofVersionV3;
+    hash << static_cast<uint8_t>(
+        inputs.outer_binding_kind);
+    hash << ComputeDirectOuterStatementRootV3(
+        inputs.public_statement, inputs.roles);
     hash << inputs.outer_statement_root;
     hash << inputs.program_registry_root;
     hash << inputs.topology_manifest_root;
@@ -501,6 +670,10 @@ uint256 ComputeReceiptRootV3(
     hash << receipt.ood_candidates;
     hash << receipt.safe_backend_version;
     hash << receipt.outer_proof_version;
+    hash << static_cast<uint8_t>(
+        receipt.outer_binding_kind);
+    hash << ComputeDirectOuterStatementRootV3(
+        receipt.public_statement, receipt.roles);
     hash << receipt.parent_statement_root;
     hash << receipt.parent_fs_seed;
     hash << receipt.parent_proof_root;
@@ -524,6 +697,16 @@ bool ValidateNormalizedAuthorityReceiptV3(
         receipt.outer_proof_version !=
             kOuterProofVersionV3) {
         return Fail(why, "protocol_header");
+    }
+    if (receipt.outer_binding_kind !=
+            OuterBindingKindV3::DirectBlockReceipt &&
+        receipt.outer_binding_kind !=
+            OuterBindingKindV3::LegacyCompositionEnvelope) {
+        return Fail(why, "outer_binding_kind");
+    }
+    if (!CanonicalPublicStatement(
+            receipt.public_statement, why)) {
+        return false;
     }
     if (!NonNull(receipt.outer_statement_root) ||
         !NonNull(receipt.program_registry_root) ||
@@ -562,6 +745,19 @@ bool ValidateNormalizedAuthorityReceiptV3(
     if (receipt.role_manifest_root !=
         ComputeRoleManifestRootV3(receipt.roles)) {
         return Fail(why, "role_manifest_root");
+    }
+    if (receipt.program_registry_root !=
+        receipt.public_statement.program_consensus_pin
+            .recursive_alg_hash_root) {
+        return Fail(why, "program_registry_statement");
+    }
+    if (receipt.outer_binding_kind ==
+            OuterBindingKindV3::DirectBlockReceipt &&
+        receipt.outer_statement_root !=
+            ComputeDirectOuterStatementRootV3(
+                receipt.public_statement,
+                receipt.roles)) {
+        return Fail(why, "direct_outer_statement_root");
     }
     const RebuiltVerifierInputsV3 inputs =
         ToVerifierInputs(receipt);
@@ -672,6 +868,12 @@ size_t SerializeNormalizedAuthorityReceiptV3(
     WriteU16(out, receipt.safe_backend_version);
     WriteU16(out, receipt.outer_proof_version);
 
+    WriteU16(
+        out,
+        static_cast<uint16_t>(
+            receipt.outer_binding_kind));
+    WritePublicStatement(
+        out, receipt.public_statement);
     WriteHash(out, receipt.outer_statement_root);
     WriteHash(out, receipt.program_registry_root);
     WriteHash(out, receipt.topology_manifest_root);
@@ -763,6 +965,7 @@ DeserializeNormalizedAuthorityReceiptV3(
     }
     Reader reader(bytes);
     NormalizedAuthorityReceiptV3 out;
+    uint16_t outer_binding_kind = 0;
     if (!reader.U32(out.magic) ||
         !reader.U16(out.version) ||
         !reader.U16(out.fp_extension_degree) ||
@@ -782,7 +985,18 @@ DeserializeNormalizedAuthorityReceiptV3(
             kOuterProofVersionV3) {
         return fail("header");
     }
-    if (!reader.Hash(out.outer_statement_root) ||
+    if (!reader.U16(outer_binding_kind) ||
+        (outer_binding_kind !=
+             static_cast<uint16_t>(
+                 OuterBindingKindV3::
+                     DirectBlockReceipt) &&
+         outer_binding_kind !=
+             static_cast<uint16_t>(
+                 OuterBindingKindV3::
+                     LegacyCompositionEnvelope)) ||
+        !ReadPublicStatement(
+            reader, out.public_statement) ||
+        !reader.Hash(out.outer_statement_root) ||
         !reader.Hash(out.program_registry_root) ||
         !reader.Hash(out.topology_manifest_root) ||
         !reader.Hash(out.aggregation_schedule_root) ||
@@ -793,6 +1007,9 @@ DeserializeNormalizedAuthorityReceiptV3(
         !reader.Hash(out.derived_hash_plan_root)) {
         return fail("public_roots");
     }
+    out.outer_binding_kind =
+        static_cast<OuterBindingKindV3>(
+            outer_binding_kind);
     uint32_t fixed_count = 0;
     if (!reader.U32(fixed_count) ||
         fixed_count == 0 ||
