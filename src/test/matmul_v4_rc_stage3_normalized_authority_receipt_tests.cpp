@@ -3,6 +3,8 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_normalized_authority_receipt.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_authority_composition.h>
+#include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <test/util/setup_common.h>
 
 #include <boost/test/unit_test.hpp>
@@ -283,6 +285,104 @@ void ResealPublicStatement(
         na::ComputeReceiptRootV3(receipt);
 }
 
+rc::RCStage3SuccinctProof BuildOuterProof(
+    const HonestFixture& honest)
+{
+    rc::RCStage3SuccinctProof proof;
+    auto& public_inputs = proof.public_inputs;
+    public_inputs.height = 101;
+    public_inputs.n_bits = 0x1f00ffffU;
+    public_inputs.episode_profile = 2;
+    public_inputs.coupled_profile = 1;
+    public_inputs.transcript_version = 13;
+    public_inputs.program_consensus_pin
+        .recursive_alg_hash_root =
+            honest.receipt.program_registry_root;
+    public_inputs.program_consensus_pin
+        .external_sha256d_audit_root = H(9501);
+    public_inputs.program_consensus_pin
+        .registry_binding = H(9502);
+    public_inputs.header_commitment = H(9503);
+    public_inputs.params_commitment = H(9504);
+    public_inputs.target = H(9505);
+    public_inputs.sigma = H(9506);
+    public_inputs.episode_digest = H(9507);
+    public_inputs.coupled_digest = H(9508);
+    public_inputs.final_digest =
+        rc::ComputeRCStage3FinalDigest(proof);
+    BOOST_REQUIRE(!public_inputs.final_digest.IsNull());
+
+    proof.commitments.reserve(
+        na::kRoleCountV3 + 1);
+    proof.sections.reserve(
+        na::kRoleCountV3 + 1);
+    for (size_t index = 0;
+         index < honest.receipt.roles.size();
+         ++index) {
+        const auto& role = honest.receipt.roles[index];
+        proof.commitments.push_back({
+            role.role, role.relation_statement_root});
+        proof.sections.push_back({
+            role.role,
+            {
+                static_cast<unsigned char>(index + 1),
+                static_cast<unsigned char>(index + 17),
+            }});
+    }
+    proof.commitments.push_back({
+        rc::RCStage3RelationRole::CompositionLink,
+        H(9509)});
+    proof.sections.push_back({
+        rc::RCStage3RelationRole::CompositionLink,
+        {1}});
+
+    auto receipt = honest.receipt;
+    receipt.outer_statement_root =
+        na::ComputeOuterStatementRootV3(proof);
+    BOOST_REQUIRE(!receipt.outer_statement_root.IsNull());
+    receipt.parent_statement_root =
+        na::ComputeParentStatementRootV3(
+            RebuiltFrom(receipt));
+    receipt.parent_fs_seed =
+        na::DeriveParentFsSeedV3(
+            receipt.parent_statement_root);
+    const aq::AirQuotientFixedTracePinV3 fixed{
+        .version = 1,
+        .ordered_columns =
+            receipt.fixed_trace_columns,
+        .row_root = receipt.fixed_trace_row_root,
+    };
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeFixedV3(
+            honest.cs, honest.columns, fixed,
+            receipt.parent_fs_seed);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE_GT(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            proved.proof,
+            receipt.parent_proof_bytes),
+        0U);
+    receipt.parent_proof_root =
+        na::ComputeParentProofRootV3(
+            receipt.parent_proof_bytes);
+    receipt.receipt_root =
+        na::ComputeReceiptRootV3(receipt);
+    std::vector<unsigned char> receipt_wire;
+    BOOST_REQUIRE_GT(
+        na::SerializeNormalizedAuthorityReceiptV3(
+            receipt, receipt_wire),
+        0U);
+    proof.commitments.back().root =
+        receipt.receipt_root;
+    proof.sections.back().proof =
+        std::move(receipt_wire);
+    public_inputs.transcript_commitment =
+        rc::ComputeRCStage3TranscriptCommitment(proof);
+    BOOST_REQUIRE(
+        rc::ValidateRCStage3ProofStructure(proof));
+    return proof;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(
@@ -456,6 +556,67 @@ BOOST_AUTO_TEST_CASE(
         !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
             honest.cs, transplanted_proof, fixed,
             honest.receipt.parent_fs_seed, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    composition_link_binds_outer_roles_then_requires_parent_verify)
+{
+    const HonestFixture& honest = Honest();
+    const auto proof = BuildOuterProof(honest);
+    na::BoundCompositionLinkV3 bound;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        na::DecodeAndBindCompositionLinkV3(
+            proof, bound, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        why,
+        "stage3:normalized_authority_composition_v3:"
+        "outer_bound_parent_cs_verify_required");
+
+    const auto rebuilt = RebuiltFrom(bound.receipt);
+    aq::AirQuotientSplitRapRowsProof parent_proof;
+    aq::AirQuotientFixedTracePinV3 fixed;
+    BOOST_REQUIRE_MESSAGE(
+        na::ValidateAndDecodeVerifierInputsV3(
+            bound.receipt, rebuilt,
+            parent_proof, fixed, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            honest.cs, parent_proof, fixed,
+            bound.receipt.parent_fs_seed, &why),
+        why);
+
+    auto section_substitution = proof;
+    section_substitution.sections[0].proof[0] ^= 1;
+    section_substitution.public_inputs
+        .transcript_commitment =
+            rc::ComputeRCStage3TranscriptCommitment(
+                section_substitution);
+    BOOST_CHECK(
+        !na::DecodeAndBindCompositionLinkV3(
+            section_substitution, bound, &why));
+    BOOST_CHECK_EQUAL(
+        why,
+        "stage3:normalized_authority_composition_v3:"
+        "outer_statement_root");
+
+    auto receipt_root_substitution = proof;
+    receipt_root_substitution.commitments.back().root =
+        H(9601);
+    receipt_root_substitution.public_inputs
+        .transcript_commitment =
+            rc::ComputeRCStage3TranscriptCommitment(
+                receipt_root_substitution);
+    BOOST_CHECK(
+        !na::DecodeAndBindCompositionLinkV3(
+            receipt_root_substitution,
+            bound, &why));
+    BOOST_CHECK_EQUAL(
+        why,
+        "stage3:normalized_authority_composition_v3:"
+        "receipt_commitment");
 }
 
 BOOST_AUTO_TEST_SUITE_END()
