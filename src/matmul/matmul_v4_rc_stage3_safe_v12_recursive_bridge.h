@@ -426,17 +426,64 @@ struct NativeTypedSafeEventAuditV13 {
  * but is not by itself the eight-kind recursive parent or an authority gate.
  */
 struct NativeFri3AlgTypedSafeScheduleV13 {
+    enum class TranscriptSourceKind : uint8_t {
+        ProtocolConstant = 1,
+        PublicFsSeed = 2,
+        ProofPowGrindNonce = 3,
+        PublicShape = 4,
+        ShapeCommitDigest = 5,
+        RowRootDigest = 6,
+        ChallengeOutput = 7,
+        OodEvaluationCommitDigest = 8,
+        FoldRootDigest = 9,
+    };
+    struct TranscriptSourceByte {
+        TranscriptSourceKind kind{
+            TranscriptSourceKind::ProtocolConstant};
+        /** Fold/event/coordinate ordinal, depending on `kind`. */
+        uint32_t item_index{0};
+        /** Byte within the named scalar/digest/statement object. */
+        uint32_t byte_offset{0};
+        bool normalized_source_available{false};
+        bool hash_relation_required{false};
+
+        friend bool operator==(
+            const TranscriptSourceByte&,
+            const TranscriptSourceByte&) = default;
+    };
+    struct TranscriptWordBinding {
+        uint32_t event{0};
+        uint32_t message_ordinal{0};
+        uint32_t transcript_byte_offset{0};
+        gf::Fp packed_le32{0};
+        std::array<TranscriptSourceByte, 4> source_bytes{};
+        uint32_t bytes_present{0};
+        bool every_byte_typed{false};
+
+        friend bool operator==(
+            const TranscriptWordBinding&,
+            const TranscriptWordBinding&) = default;
+    };
+
     Fri3AlgSafeV13Replay replay;
     std::vector<TypedSafeEventProgramV13> program;
     std::vector<TypedSafeEventWitnessV13> witness;
+    std::vector<TranscriptWordBinding> transcript_word_bindings;
     uint32_t events_materialized{0};
     uint32_t proof_owned_message_cells{0};
+    uint64_t transcript_byte_occurrences{0};
+    uint64_t transcript_bytes_with_normalized_source{0};
+    uint64_t transcript_bytes_requiring_hash_relation{0};
+    uint64_t transcript_bytes_missing_normalized_source{0};
     uint32_t query_candidate_events{0};
     bool native_proof_verified{false};
     bool exact_event_order{false};
     bool every_snapshot_exactly_materialized{false};
     bool every_safe_output_matches_native_consumer{false};
     bool unique_query_seed_then_q192{false};
+    bool every_transcript_byte_typed{false};
+    bool pow_grind_nonce_exported_by_normalized_parent{false};
+    bool shape_and_ood_commit_hashes_bound_in_parent{false};
     bool outer_air_lambda_present{false};
     bool normalized_child_cells_bound{false};
     bool valid{false};

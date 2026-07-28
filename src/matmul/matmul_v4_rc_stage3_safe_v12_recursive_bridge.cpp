@@ -2906,6 +2906,329 @@ bool BuildNativeFri3AlgTypedSafeScheduleV13(
         out.witness.push_back(std::move(audit.witness));
     }
 
+    // Independently reconstruct the exact Fri3AlgFs prefix and assign every
+    // byte in every proof-owned LE32 message word to one canonical producer.
+    // This is intentionally separate from the native verifier replay above:
+    // if either the absorb order or a field encoding moves without updating
+    // this map, the adapter fails closed rather than silently reclassifying
+    // arbitrary transcript bytes as authenticated normalized cells.
+    using SourceKind =
+        NativeFri3AlgTypedSafeScheduleV13::
+            TranscriptSourceKind;
+    using SourceByte =
+        NativeFri3AlgTypedSafeScheduleV13::
+            TranscriptSourceByte;
+    std::vector<unsigned char> prefix;
+    std::vector<SourceByte> prefix_source;
+    const auto append_bytes =
+        [&](const unsigned char* bytes, size_t count,
+            SourceKind kind, uint32_t item,
+            bool normalized_available,
+            bool hash_required) {
+            for (size_t offset = 0;
+                 offset < count; ++offset) {
+                prefix.push_back(bytes[offset]);
+                prefix_source.push_back({
+                    kind, item,
+                    static_cast<uint32_t>(offset),
+                    normalized_available,
+                    hash_required});
+            }
+        };
+    const auto append_u32 =
+        [&](uint32_t value, SourceKind kind,
+            uint32_t item, bool available,
+            bool hash_required = false) {
+            std::array<unsigned char, 4> bytes{};
+            for (uint32_t byte = 0; byte < 4; ++byte) {
+                bytes[byte] =
+                    static_cast<unsigned char>(
+                        value >> (8 * byte));
+            }
+            append_bytes(
+                bytes.data(), bytes.size(), kind, item,
+                available, hash_required);
+        };
+    const auto append_u64 =
+        [&](uint64_t value, SourceKind kind,
+            uint32_t item, bool available,
+            bool hash_required = false) {
+            std::array<unsigned char, 8> bytes{};
+            for (uint32_t byte = 0; byte < 8; ++byte) {
+                bytes[byte] =
+                    static_cast<unsigned char>(
+                        value >> (8 * byte));
+            }
+            append_bytes(
+                bytes.data(), bytes.size(), kind, item,
+                available, hash_required);
+        };
+    const auto append_fp3 =
+        [&](const Fp3& value, SourceKind kind,
+            uint32_t item) {
+            append_u64(
+                gf::Canonical(value.c0), kind,
+                3 * item, true);
+            append_u64(
+                gf::Canonical(value.c1), kind,
+                3 * item + 1, true);
+            append_u64(
+                gf::Canonical(value.c2), kind,
+                3 * item + 2, true);
+        };
+    const auto append_digest =
+        [&](const alg_hash::Digest& digest,
+            SourceKind kind, uint32_t item,
+            bool hash_required) {
+            for (uint32_t limb_index = 0;
+                 limb_index < digest.size();
+                 ++limb_index) {
+                append_u64(
+                    gf::Canonical(
+                        digest[limb_index]),
+                    kind,
+                    4 * item + limb_index,
+                    true, hash_required);
+            }
+        };
+
+    static constexpr char kV13Domain[] =
+        "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13";
+    append_bytes(
+        reinterpret_cast<const unsigned char*>(
+            kV13Domain),
+        sizeof(kV13Domain) - 1,
+        SourceKind::ProtocolConstant, 0,
+        true, false);
+    append_bytes(
+        child_fs_seed.data(), child_fs_seed.size(),
+        SourceKind::PublicFsSeed, 0,
+        true, false);
+    append_u64(
+        proof.pow_grind_nonce,
+        SourceKind::ProofPowGrindNonce, 0,
+        false);
+    append_u32(
+        kRCFriBlowup,
+        SourceKind::PublicShape, 0, true);
+    append_u32(
+        proof.n_coeffs,
+        SourceKind::PublicShape, 1, true);
+    append_u32(
+        kRCFri3AlgSafeQ192K2ProofVersionV13,
+        SourceKind::ProtocolConstant, 1, true);
+    append_u32(
+        static_cast<uint32_t>(
+            proof.column_len.size()),
+        SourceKind::PublicShape, 2, true);
+    append_digest(
+        Fri3AlgShapeCommit(
+            proof.n_coeffs, proof.column_len),
+        SourceKind::ShapeCommitDigest, 0, true);
+    append_digest(
+        proof.row_commit.root,
+        SourceKind::RowRootDigest, 0, false);
+
+    const auto bind_prefix =
+        [&](uint32_t event) {
+            if (event >= out.replay.events.size() ||
+                out.replay.events[event]
+                        .transcript_before_draw != prefix ||
+                prefix_source.size() != prefix.size()) {
+                return false;
+            }
+            for (uint32_t offset = 0;
+                 offset < prefix.size(); offset += 4) {
+                NativeFri3AlgTypedSafeScheduleV13::
+                    TranscriptWordBinding binding;
+                binding.event = event;
+                binding.message_ordinal =
+                    4 + offset / 4;
+                binding.transcript_byte_offset =
+                    offset;
+                uint32_t packed = 0;
+                for (uint32_t byte = 0;
+                     byte < 4 &&
+                     offset + byte < prefix.size();
+                     ++byte) {
+                    packed |=
+                        static_cast<uint32_t>(
+                            prefix[offset + byte])
+                        << (8 * byte);
+                    binding.source_bytes[byte] =
+                        prefix_source[offset + byte];
+                    ++binding.bytes_present;
+                    ++out.transcript_byte_occurrences;
+                    if (prefix_source[offset + byte]
+                            .normalized_source_available) {
+                        ++out
+                            .transcript_bytes_with_normalized_source;
+                    } else {
+                        ++out
+                            .transcript_bytes_missing_normalized_source;
+                    }
+                    if (prefix_source[offset + byte]
+                            .hash_relation_required) {
+                        ++out
+                            .transcript_bytes_requiring_hash_relation;
+                    }
+                }
+                binding.packed_le32 =
+                    gf::FromU64(packed);
+                binding.every_byte_typed =
+                    binding.bytes_present > 0;
+                if (binding.message_ordinal >=
+                        out.program[event].message.size() ||
+                    out.program[event]
+                            .message[binding.message_ordinal]
+                            .binding !=
+                        TypedSafeMessageBindingV13::
+                            ProofOwned ||
+                    out.witness[event]
+                            .message[binding.message_ordinal] !=
+                        binding.packed_le32) {
+                    return false;
+                }
+                out.transcript_word_bindings.push_back(
+                    std::move(binding));
+            }
+            return true;
+        };
+
+    uint32_t selected_z1_event =
+        std::numeric_limits<uint32_t>::max();
+    uint32_t selected_z2_event =
+        std::numeric_limits<uint32_t>::max();
+    uint32_t lambda_event =
+        std::numeric_limits<uint32_t>::max();
+    uint32_t w1_event =
+        std::numeric_limits<uint32_t>::max();
+    uint32_t w2_event =
+        std::numeric_limits<uint32_t>::max();
+    bool terminal_fold_root_appended = false;
+    for (uint32_t event = 0;
+         event < out.replay.events.size(); ++event) {
+        const auto& draw = out.replay.events[event];
+        if (draw.consumer ==
+            Fri3AlgSafeV13Consumer::QueryIndex) {
+            if (!draw.transcript_before_draw.empty()) {
+                return Fail(
+                    why,
+                    "v13_native_schedule_query_has_prefix");
+            }
+            continue;
+        }
+        if (draw.consumer ==
+                Fri3AlgSafeV13Consumer::FoldBeta) {
+            if (draw.ordinal >=
+                proof.fold_layers.size()) {
+                return Fail(
+                    why,
+                    "v13_native_schedule_fold_source");
+            }
+            append_digest(
+                proof.fold_layers[draw.ordinal].root,
+                SourceKind::FoldRootDigest,
+                draw.ordinal, false);
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::QuerySeed &&
+            !terminal_fold_root_appended) {
+            if (proof.fold_layers.empty()) {
+                return Fail(
+                    why,
+                    "v13_native_schedule_terminal_fold_source");
+            }
+            append_digest(
+                proof.fold_layers.back().root,
+                SourceKind::FoldRootDigest,
+                static_cast<uint32_t>(
+                    proof.fold_layers.size() - 1),
+                false);
+            terminal_fold_root_appended = true;
+        }
+        if (!bind_prefix(event)) {
+            return Fail(
+                why,
+                "v13_native_schedule_prefix_provenance");
+        }
+
+        if (draw.consumer ==
+            Fri3AlgSafeV13Consumer::FriLambda) {
+            lambda_event = event;
+            append_fp3(
+                proof.lambda,
+                SourceKind::ChallengeOutput,
+                lambda_event);
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ1 &&
+            draw.selected) {
+            selected_z1_event = event;
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ2 &&
+            draw.selected) {
+            selected_z2_event = event;
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::DeepW1) {
+            w1_event = event;
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::DeepW2) {
+            w2_event = event;
+            if (w1_event ==
+                std::numeric_limits<uint32_t>::max()) {
+                return Fail(
+                    why,
+                    "v13_native_schedule_w_order");
+            }
+            append_fp3(
+                proof.w1,
+                SourceKind::ChallengeOutput,
+                w1_event);
+            append_fp3(
+                proof.w2,
+                SourceKind::ChallengeOutput,
+                w2_event);
+        }
+
+        // The four fixed-K2 OOD candidates share one prefix. Absorb only the
+        // two selected outputs after the final candidate has been checked.
+        if (draw.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ2 &&
+            draw.ordinal + 1 ==
+                kRCFri3AlgSafeQ192K2OodCandidatesV13) {
+            if (lambda_event ==
+                    std::numeric_limits<uint32_t>::max() ||
+                selected_z1_event ==
+                    std::numeric_limits<uint32_t>::max() ||
+                selected_z2_event ==
+                    std::numeric_limits<uint32_t>::max()) {
+                return Fail(
+                    why,
+                    "v13_native_schedule_z_selection_source");
+            }
+            append_fp3(
+                proof.z1,
+                SourceKind::ChallengeOutput,
+                selected_z1_event);
+            append_fp3(
+                proof.z2,
+                SourceKind::ChallengeOutput,
+                selected_z2_event);
+            append_digest(
+                Fri3AlgOodEvalCommit(
+                    proof.z1, proof.z2,
+                    proof.evals_z1,
+                    proof.evals_z2),
+                SourceKind::
+                    OodEvaluationCommitDigest,
+                0, true);
+        }
+    }
+
     const std::array<TypedSafeChallengeKindV13, 8>
         required_fri_kinds{{
             TypedSafeChallengeKindV13::BatchCoefficient,
@@ -2941,6 +3264,18 @@ bool BuildNativeFri3AlgTypedSafeScheduleV13(
         out.replay.query_candidate_events ==
             kRCFri3AlgNumQueries &&
         z1_selected && z2_selected;
+    out.every_transcript_byte_typed =
+        out.transcript_byte_occurrences > 0 &&
+        std::all_of(
+            out.transcript_word_bindings.begin(),
+            out.transcript_word_bindings.end(),
+            [](const auto& binding) {
+                return binding.every_byte_typed;
+            });
+    out.pow_grind_nonce_exported_by_normalized_parent =
+        false;
+    out.shape_and_ood_commit_hashes_bound_in_parent =
+        false;
     out.outer_air_lambda_present =
         kind_seen[static_cast<uint32_t>(
             TypedSafeChallengeKindV13::AirLambda)];
@@ -2951,12 +3286,15 @@ bool BuildNativeFri3AlgTypedSafeScheduleV13(
         out.every_snapshot_exactly_materialized &&
         out.every_safe_output_matches_native_consumer &&
         out.unique_query_seed_then_q192 &&
+        out.every_transcript_byte_typed &&
         all_fri_kinds &&
         !out.outer_air_lambda_present &&
         out.events_materialized ==
             out.replay.events.size() &&
         out.program.size() == out.witness.size() &&
-        out.proof_owned_message_cells > 0;
+        out.proof_owned_message_cells > 0 &&
+        out.transcript_word_bindings.size() ==
+            out.proof_owned_message_cells;
     out.note = out.valid
         ? "native-verified V13 FRI schedule materialized; outer "
           "airq_lambda and normalized same-trace aliases remain"

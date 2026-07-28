@@ -994,6 +994,70 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         schedule.every_safe_output_matches_native_consumer);
     BOOST_CHECK(schedule.unique_query_seed_then_q192);
+    BOOST_CHECK(schedule.every_transcript_byte_typed);
+    BOOST_CHECK(
+        !schedule.transcript_word_bindings.empty());
+    BOOST_CHECK_EQUAL(
+        schedule.transcript_word_bindings.size(),
+        schedule.proof_owned_message_cells);
+    BOOST_CHECK_GT(
+        schedule.transcript_byte_occurrences, 0U);
+    BOOST_CHECK_EQUAL(
+        schedule.transcript_byte_occurrences,
+        schedule.transcript_bytes_with_normalized_source +
+            schedule.transcript_bytes_missing_normalized_source);
+    BOOST_CHECK_GT(
+        schedule.transcript_bytes_requiring_hash_relation,
+        0U);
+    BOOST_CHECK_GT(
+        schedule.transcript_bytes_missing_normalized_source,
+        0U);
+    for (const auto& binding :
+         schedule.transcript_word_bindings) {
+        for (uint32_t byte = 0;
+             byte < binding.bytes_present; ++byte) {
+            const auto& source =
+                binding.source_bytes[byte];
+            if (!source.normalized_source_available) {
+                BOOST_CHECK(
+                    source.kind ==
+                    bridge::
+                        NativeFri3AlgTypedSafeScheduleV13::
+                            TranscriptSourceKind::
+                                ProofPowGrindNonce);
+            }
+            if (source.hash_relation_required) {
+                BOOST_CHECK(
+                    source.kind ==
+                        bridge::
+                            NativeFri3AlgTypedSafeScheduleV13::
+                                TranscriptSourceKind::
+                                    ShapeCommitDigest ||
+                    source.kind ==
+                        bridge::
+                            NativeFri3AlgTypedSafeScheduleV13::
+                                TranscriptSourceKind::
+                                    OodEvaluationCommitDigest);
+            }
+        }
+    }
+    BOOST_CHECK(
+        !schedule
+             .pow_grind_nonce_exported_by_normalized_parent);
+    BOOST_CHECK(
+        !schedule
+             .shape_and_ood_commit_hashes_bound_in_parent);
+    BOOST_TEST_MESSAGE(
+        "SAFE_V13_NATIVE_SOURCE_MAP events="
+        << schedule.events_materialized
+        << " words="
+        << schedule.transcript_word_bindings.size()
+        << " byte_occurrences="
+        << schedule.transcript_byte_occurrences
+        << " missing_normalized="
+        << schedule.transcript_bytes_missing_normalized_source
+        << " hash_relation="
+        << schedule.transcript_bytes_requiring_hash_relation);
     BOOST_CHECK_EQUAL(
         schedule.query_candidate_events,
         rc::kRCFri3AlgNumQueries);
