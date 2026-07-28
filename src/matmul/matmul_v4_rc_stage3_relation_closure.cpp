@@ -6559,6 +6559,99 @@ RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAirFromRoots(
     return out;
 }
 
+RCStage3RoleAirProduct
+BuildRCStage3PureStreamRoleAirFromManifests(
+    RCStage3RelationRole role,
+    const std::vector<RCStage3StreamEndpointManifest>&
+        endpoint_manifests,
+    std::string* why)
+{
+    RCStage3RoleAirProduct out;
+    out.role = role;
+    if (!RCStage3RoleIsPureStream(role)) {
+        out.note = "not_pure_stream";
+        if (why != nullptr) {
+            *why =
+                "stage3:stream_manifest:"
+                "not_pure_stream";
+        }
+        return out;
+    }
+    const auto& required =
+        RequiredRCStage3RelationEndpoints(role);
+    if (endpoint_manifests.size() !=
+        required.size()) {
+        out.note = "manifest_count";
+        if (why != nullptr) {
+            *why =
+                "stage3:stream_manifest:"
+                "manifest_count";
+        }
+        return out;
+    }
+
+    std::vector<ah::Digest> roots;
+    std::vector<
+        std::vector<std::vector<gf::Fp3>>>
+        frag_witnesses;
+    roots.reserve(required.size());
+    frag_witnesses.reserve(required.size());
+    for (uint32_t i = 0;
+         i < required.size(); ++i) {
+        const RCStage3StreamFamily family =
+            StreamFamilyForEndpoint(required[i]);
+        std::array<uint32_t, 8> root8{};
+        std::string rwhy;
+        if (!RCStage3StreamEndpointCommittedRoot(
+                family, endpoint_manifests[i],
+                root8, &rwhy)) {
+            out.note =
+                "committed_root:" + rwhy;
+            if (why != nullptr) *why = out.note;
+            return out;
+        }
+        frag_witnesses.push_back(
+            BuildRCStage3StreamEndpointWitness(
+                root8,
+                RCStage3StreamEndpointCtlValue(
+                    endpoint_manifests[i])));
+        roots.push_back(PackStreamRoot(root8));
+        out.endpoints.push_back(required[i]);
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> product;
+    std::string awhy;
+    if (!BuildRCStage3PureStreamRoleAirCS(
+            role, roots, product, &awhy)) {
+        out.note = "assemble:" + awhy;
+        if (why != nullptr) *why = awhy;
+        return out;
+    }
+    std::vector<std::vector<gf::Fp3>> witness;
+    uint32_t next_col = 0;
+    for (const auto& fw : frag_witnesses) {
+        out.endpoint_value_columns.push_back(
+            next_col +
+            kRCStage3StreamEndpointBindValueColumn);
+        for (const auto& col : fw) {
+            witness.push_back(col);
+        }
+        next_col +=
+            kRCStage3StreamEndpointBindWidth;
+    }
+    out.endpoint_committed_roots =
+        std::move(roots);
+    out.fragment_columns = 0;
+    out.opening_blocks =
+        static_cast<uint32_t>(
+            out.endpoints.size());
+    out.cs = std::move(product);
+    out.witness = std::move(witness);
+    out.ok = true;
+    out.note = "assembled_real_manifests";
+    return out;
+}
+
 // ===========================================================================
 // CompositionLink (role 32) — the fifteenth relation's in-CS closer.
 //
@@ -7054,7 +7147,9 @@ bool BuildRCStage3NoKernelRoleAirCS(
 RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(
     RCStage3RelationRole role, std::string* why,
     const std::vector<gf::Fp3>* real_open_cells,
-    const std::vector<std::array<uint32_t, 8>>* real_stream_roots)
+    const std::vector<std::array<uint32_t, 8>>* real_stream_roots,
+    const std::vector<RCStage3StreamEndpointManifest>*
+        real_stream_manifests)
 {
     RCStage3RoleAirProduct out;
     out.role = role;
@@ -7071,9 +7166,49 @@ RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(
         if (IsInCsStreamEndpoint(e)) {
             const RCStage3StreamFamily family = StreamFamilyForEndpoint(e);
             std::array<uint32_t, 8> root8{};
-            if (real_stream_roots != nullptr &&
-                stream_ix < real_stream_roots->size()) {
-                root8 = (*real_stream_roots)[stream_ix]; // REAL committed root
+            gf::Fp3 ctl_value =
+                gf::Fp3::FromFp(gf::FromU64(9));
+            if (real_stream_manifests != nullptr) {
+                if (stream_ix >=
+                    real_stream_manifests->size()) {
+                    out.note = "stream_manifest_count";
+                    if (why != nullptr) {
+                        *why =
+                            "stage3:nokernel:"
+                            "stream_manifest_count";
+                    }
+                    return out;
+                }
+                const auto& manifest =
+                    (*real_stream_manifests)[stream_ix];
+                std::string rwhy;
+                if (!RCStage3StreamEndpointCommittedRoot(
+                        family, manifest, root8, &rwhy)) {
+                    out.note =
+                        "committed_root:" + rwhy;
+                    return out;
+                }
+                if (real_stream_roots != nullptr &&
+                    (stream_ix >=
+                         real_stream_roots->size() ||
+                     (*real_stream_roots)[stream_ix] !=
+                         root8)) {
+                    out.note = "stream_root_manifest_mismatch";
+                    if (why != nullptr) {
+                        *why =
+                            "stage3:nokernel:"
+                            "stream_root_manifest_mismatch";
+                    }
+                    return out;
+                }
+                ctl_value =
+                    RCStage3StreamEndpointCtlValue(
+                        manifest);
+            } else if (real_stream_roots != nullptr &&
+                       stream_ix <
+                           real_stream_roots->size()) {
+                root8 =
+                    (*real_stream_roots)[stream_ix];
             } else {
                 std::array<uint32_t, 8> stream_value{};
                 for (uint32_t j = 0; j < 8; ++j)
@@ -7087,11 +7222,14 @@ RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(
                     out.note = "committed_root:" + rwhy;
                     return out;
                 }
+                ctl_value =
+                    RCStage3StreamEndpointCtlValue(
+                        manifest);
             }
             ++stream_ix;
             const std::vector<std::vector<gf::Fp3>> fw =
-                BuildRCStage3StreamEndpointWitness(root8,
-                                                   gf::Fp3::FromFp(gf::FromU64(9)));
+                BuildRCStage3StreamEndpointWitness(
+                    root8, ctl_value);
             std::vector<std::vector<gf::Fp3>> padded;
             for (const auto& col : fw)
                 padded.emplace_back(rows, col.empty() ? gf::Fp3::Zero() : col[0]);
@@ -7130,6 +7268,16 @@ RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(
             roots.push_back(m.committed_root);
         }
         out.endpoints.push_back(e);
+    }
+    if (real_stream_manifests != nullptr &&
+        stream_ix != real_stream_manifests->size()) {
+        out.note = "stream_manifest_count";
+        if (why != nullptr) {
+            *why =
+                "stage3:nokernel:"
+                "stream_manifest_count";
+        }
+        return out;
     }
 
     aq::AirConstraintSystem<gf::Fp3> product;

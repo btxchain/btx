@@ -277,6 +277,20 @@ RCStage3StreamEndpointManifest BuildRCStage3StreamEndpointCanonicalManifest(
     return m;
 }
 
+Fp3 RCStage3StreamEndpointCtlValue(
+    const RCStage3StreamEndpointManifest& manifest)
+{
+    return gf::Add(
+        U32(manifest.stream_value[0]),
+        gf::Add(
+            gf::Mul(
+                Fp3{0, 1, 0},
+                U32(manifest.stream_value[1])),
+            gf::Mul(
+                Fp3{0, 0, 1},
+                U32(manifest.stream_value[2]))));
+}
+
 RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     RCStage3StreamFamily family,
     const RCStage3StreamEndpointManifest& manifest, const uint256& fs_seed,
@@ -389,9 +403,7 @@ RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     // Light deg-1 binding fragment C_rho column-shifts.  The aliasable value is
     // the Fp3 recomposition of the first three stream-value words.
     const Fp3 ctl_value =
-        gf::Add(U32(manifest.stream_value[0]),
-                gf::Add(gf::Mul(Fp3{0, 1, 0}, U32(manifest.stream_value[1])),
-                        gf::Mul(Fp3{0, 0, 1}, U32(manifest.stream_value[2]))));
+        RCStage3StreamEndpointCtlValue(manifest);
     out.bind_cs = BuildRCStage3StreamEndpointConstraintSystem(
         family, manifest.leaf_index, out.committed_root, out.path_len);
     out.bind_witness =

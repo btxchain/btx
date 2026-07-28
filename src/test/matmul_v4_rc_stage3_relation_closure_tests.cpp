@@ -3841,4 +3841,100 @@ BOOST_AUTO_TEST_CASE(wired_closers_match_real_fold_roots)
     }
 }
 
+BOOST_AUTO_TEST_CASE(
+    no_kernel_real_stream_manifests_bind_root_and_ctl_value_together)
+{
+    namespace gf = gkr_field;
+    const std::array<uint32_t, 8> seed_a{
+        0x10U, 0x11U, 0x12U, 0x13U,
+        0x14U, 0x15U, 0x16U, 0x17U};
+    const std::array<uint32_t, 8> seed_b{
+        0x20U, 0x21U, 0x22U, 0x23U,
+        0x24U, 0x25U, 0x26U, 0x27U};
+    const std::vector<RCStage3StreamEndpointManifest>
+        manifests{
+            BuildRCStage3StreamEndpointCanonicalManifest(
+                RCStage3StreamFamilyForEndpoint(
+                    RCStage3RelationEndpoint::
+                        EpisodeBuilderSeedChain),
+                seed_a, 0, 3),
+            BuildRCStage3StreamEndpointCanonicalManifest(
+                RCStage3StreamFamilyForEndpoint(
+                    RCStage3RelationEndpoint::
+                        EpisodeBuilderOperandXof),
+                seed_b, 0, 3),
+        };
+    const std::vector<gf::Fp3> openings{
+        gf::FromU64_3(7)};
+    std::string why;
+    const auto role =
+        BuildRCStage3NoKernelRoleAir(
+            RCStage3RelationRole::
+                EpisodeDeterministicBuilder,
+            &why, &openings, nullptr, &manifests);
+    BOOST_REQUIRE_MESSAGE(role.ok, why);
+    BOOST_REQUIRE_EQUAL(role.endpoints.size(), 4U);
+    BOOST_REQUIRE_EQUAL(
+        role.endpoint_value_columns.size(), 4U);
+    BOOST_REQUIRE_EQUAL(
+        role.endpoint_committed_roots.size(), 4U);
+
+    for (uint32_t stream = 0; stream < 2; ++stream) {
+        const uint32_t endpoint_index = 1U + stream;
+        std::array<uint32_t, 8> root{};
+        BOOST_REQUIRE(
+            RCStage3StreamEndpointCommittedRoot(
+                RCStage3StreamFamilyForEndpoint(
+                    role.endpoints[endpoint_index]),
+                manifests[stream], root, &why));
+        for (uint32_t limb = 0; limb < 4; ++limb) {
+            const uint64_t packed =
+                uint64_t{root[2U * limb]} |
+                (uint64_t{root[2U * limb + 1U]}
+                 << 32);
+            BOOST_CHECK_EQUAL(
+                role.endpoint_committed_roots[
+                    endpoint_index][limb],
+                packed);
+        }
+        const uint32_t value_column =
+            role.endpoint_value_columns[
+                endpoint_index];
+        BOOST_REQUIRE_LT(
+            value_column, role.witness.size());
+        BOOST_CHECK(gf::Eq(
+            role.witness[value_column][0],
+            RCStage3StreamEndpointCtlValue(
+                manifests[stream])));
+    }
+
+    std::vector<std::array<uint32_t, 8>>
+        substituted_roots(2);
+    BOOST_REQUIRE(
+        RCStage3StreamEndpointCommittedRoot(
+            RCStage3StreamFamilyForEndpoint(
+                RCStage3RelationEndpoint::
+                    EpisodeBuilderSeedChain),
+            manifests[0], substituted_roots[0],
+            &why));
+    BOOST_REQUIRE(
+        RCStage3StreamEndpointCommittedRoot(
+            RCStage3StreamFamilyForEndpoint(
+                RCStage3RelationEndpoint::
+                    EpisodeBuilderOperandXof),
+            manifests[1], substituted_roots[1],
+            &why));
+    ++substituted_roots[0][0];
+    const auto rejected =
+        BuildRCStage3NoKernelRoleAir(
+            RCStage3RelationRole::
+                EpisodeDeterministicBuilder,
+            &why, &openings, &substituted_roots,
+            &manifests);
+    BOOST_CHECK(!rejected.ok);
+    BOOST_CHECK(
+        why.find("stream_root_manifest_mismatch") !=
+        std::string::npos);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

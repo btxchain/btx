@@ -293,15 +293,30 @@ bool BuildBlockRoleProducts(
         const std::vector<gf::Fp3> openings = {
             gf::Fp3::FromFp(
                 gf::FromU64(episode.rounds))};
-        const std::vector<std::array<uint32_t, 8>>
-            stream_roots = {
-                Root8(block.seed_a),
-                Root8(block.seed_b),
+        // seed_a/seed_b are stream VALUES, not SHA commitment roots.  The
+        // canonical heavy children authenticate these exact words under their
+        // endpoint-specific domains; derive the light role's root and CTL
+        // value from the same manifests so the parent and child state the
+        // same proposition.
+        const std::vector<
+            RCStage3StreamEndpointManifest>
+            stream_manifests = {
+                BuildRCStage3StreamEndpointCanonicalManifest(
+                    RCStage3StreamFamilyForEndpoint(
+                        RCStage3RelationEndpoint::
+                            EpisodeBuilderSeedChain),
+                    Root8(block.seed_a), 0, 3),
+                BuildRCStage3StreamEndpointCanonicalManifest(
+                    RCStage3StreamFamilyForEndpoint(
+                        RCStage3RelationEndpoint::
+                            EpisodeBuilderOperandXof),
+                    Root8(block.seed_b), 0, 3),
             };
         products.push_back(
             BuildRCStage3NoKernelRoleAir(
                 Role::EpisodeDeterministicBuilder,
-                nullptr, &openings, &stream_roots));
+                nullptr, &openings, nullptr,
+                &stream_manifests));
     }
     products.push_back(
         BuildRCStage3EpisodeGemmRoleAir(

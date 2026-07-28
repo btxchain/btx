@@ -967,6 +967,60 @@ BOOST_AUTO_TEST_CASE(
         candidate.composed_digest ==
         block.matmul_digest);
 
+    // Endpoint 2 states the same proposition in the block-derived role and
+    // its heavy SHA child: seed_a is the stream value; the endpoint root is
+    // the family-domain-separated manifest commitment; and the bank value is
+    // the Fp3 recomposition of seed words 0..2.  Raw seed bytes must never be
+    // mislabelled as the commitment root.
+    std::array<uint32_t, 8> seed_words{};
+    for (uint32_t word = 0;
+         word < seed_words.size(); ++word) {
+        const uint32_t offset = 4U * word;
+        seed_words[word] =
+            static_cast<uint32_t>(
+                block.seed_a.begin()[offset]) |
+            (static_cast<uint32_t>(
+                 block.seed_a.begin()[offset + 1])
+             << 8) |
+            (static_cast<uint32_t>(
+                 block.seed_a.begin()[offset + 2])
+             << 16) |
+            (static_cast<uint32_t>(
+                 block.seed_a.begin()[offset + 3])
+             << 24);
+    }
+    const auto seed_manifest =
+        rc::BuildRCStage3StreamEndpointCanonicalManifest(
+            rc::RCStage3StreamFamilyForEndpoint(
+                rc::RCStage3RelationEndpoint::
+                    EpisodeBuilderSeedChain),
+            seed_words, 0, 3);
+    std::array<uint32_t, 8> seed_root{};
+    BOOST_REQUIRE(
+        rc::RCStage3StreamEndpointCommittedRoot(
+            rc::RCStage3StreamFamilyForEndpoint(
+                rc::RCStage3RelationEndpoint::
+                    EpisodeBuilderSeedChain),
+            seed_manifest, seed_root, &why));
+    const auto& seed_pin =
+        candidate.roles.front().endpoints[1];
+    BOOST_CHECK(
+        seed_pin.endpoint ==
+        rc::RCStage3RelationEndpoint::
+            EpisodeBuilderSeedChain);
+    for (uint32_t limb = 0; limb < 4; ++limb) {
+        BOOST_CHECK_EQUAL(
+            seed_pin.committed_root[limb],
+            uint64_t{seed_root[2U * limb]} |
+                (uint64_t{seed_root[2U * limb + 1U]}
+                 << 32));
+    }
+    BOOST_CHECK(rc::gkr_field::Eq(
+        candidate.columns[
+            seed_pin.bank_value_column][0],
+        rc::RCStage3StreamEndpointCtlValue(
+            seed_manifest)));
+
     // This parent is executable, but the live audit still reports missing
     // recursive semantic children.  It must never be silently promoted into
     // production authority.

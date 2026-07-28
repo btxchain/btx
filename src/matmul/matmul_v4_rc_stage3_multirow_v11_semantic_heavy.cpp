@@ -165,6 +165,8 @@ bool CanonicalRole(
     if (!role.ok ||
         role.endpoints != expected ||
         role.endpoint_committed_roots.size() !=
+            expected.size() ||
+        role.endpoint_value_columns.size() !=
             expected.size()) {
         return Fail(why, "role_shape");
     }
@@ -203,6 +205,45 @@ bool RoleRoot(
     const size_t index =
         static_cast<size_t>(found - role.endpoints.begin());
     words = RootWords(role.endpoint_committed_roots[index]);
+    return true;
+}
+
+bool RoleValueMatchesManifest(
+    const RCStage3RoleAirProduct& role,
+    const HeavyRouteV1& route,
+    const RCStage3StreamEndpointManifest& manifest,
+    std::string* why)
+{
+    const auto found = std::find(
+        role.endpoints.begin(), role.endpoints.end(),
+        route.endpoint);
+    if (found == role.endpoints.end()) {
+        return Fail(why, "role_endpoint_absent");
+    }
+    const size_t index =
+        static_cast<size_t>(
+            found - role.endpoints.begin());
+    if (index >=
+            role.endpoint_value_columns.size() ||
+        role.endpoint_value_columns[index] >=
+            role.witness.size()) {
+        return Fail(why, "role_value_column");
+    }
+    const auto& values =
+        role.witness[
+            role.endpoint_value_columns[index]];
+    if (values.size() != role.cs.n_rows) {
+        return Fail(why, "role_value_rows");
+    }
+    const gf::Fp3 expected =
+        RCStage3StreamEndpointCtlValue(manifest);
+    for (const gf::Fp3& value : values) {
+        if (!gf::Eq(value, expected)) {
+            return Fail(
+                why,
+                "role_value_manifest_mismatch");
+        }
+    }
     return true;
 }
 
@@ -467,6 +508,11 @@ HeavyChildProofV1 ProveHeavyChildV1(
         out.residual = "role_root";
         return out;
     }
+    if (!RoleValueMatchesManifest(
+            role, out.route, manifest, why)) {
+        out.residual = "role_value_manifest";
+        return out;
+    }
     RCStage3StreamEndpointClosure closure;
     if (!RebuildClosure(
             out.route, out.manifest,
@@ -544,7 +590,9 @@ bool VerifyHeavyChildV1(
     }
     std::array<uint32_t, kRootWordsV1> role_root{};
     if (!RoleRoot(role, *route, role_root, why) ||
-        role_root != proof.committed_root) {
+        role_root != proof.committed_root ||
+        !RoleValueMatchesManifest(
+            role, *route, proof.manifest, why)) {
         return Fail(why, "role_root");
     }
     RCStage3StreamEndpointClosure closure;

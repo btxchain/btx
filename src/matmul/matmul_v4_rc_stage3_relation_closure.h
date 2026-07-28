@@ -1328,6 +1328,20 @@ BuildRCStage3PureStreamRoleAir(RCStage3RelationRole role,
     const std::vector<std::array<uint32_t, 8>>& endpoint_root8s,
     std::string* why = nullptr);
 
+/**
+ * Statement-complete real-data producer for a pure-stream role.
+ *
+ * This derives both the committed root and the aliasable CTL value from each
+ * exact manifest. It is the required constructor when a heavy stream child
+ * will be recursively consumed: parent and child then bind the same manifest,
+ * rather than a root paired with an unrelated placeholder value.
+ */
+[[nodiscard]] RCStage3RoleAirProduct
+BuildRCStage3PureStreamRoleAirFromManifests(
+    RCStage3RelationRole role,
+    const std::vector<RCStage3StreamEndpointManifest>& endpoint_manifests,
+    std::string* why = nullptr);
+
 /** Assemble a coupled scalar+stream mixed role's C_rho + witness on 8 shared
  * rows: the coupled kernel ⊕ per-endpoint scalar opening (kernel-aliased) or
  * light §4 stream fragment. CoupledExchange (Input/Output scalar + HashXof
@@ -1362,12 +1376,17 @@ BuildRCStage3CoupledMixedRoleAir(
 // real block-derived Fp3 cell per OPENING endpoint (e.g. EpisodeDeterministic-
 // Builder Params, Coupled/EpisodeExtract Input/Sampler/Scale/Output), in the
 // order opening endpoints appear; `real_stream_roots` — one real committed
-// SHA256d root8 per STREAM endpoint (SeedChain/OperandXof/ChaCha), in order.
+// SHA256d root8 per STREAM endpoint (SeedChain/OperandXof/ChaCha), in order;
+// `real_stream_manifests` — the exact manifest for each STREAM endpoint. When
+// supplied, the builder derives both the root and the canonical CTL value from
+// the manifest and rejects any simultaneously supplied root that differs.
 [[nodiscard]] RCStage3RoleAirProduct
 BuildRCStage3NoKernelRoleAir(
     RCStage3RelationRole role, std::string* why = nullptr,
     const std::vector<gkr_field::Fp3>* real_open_cells = nullptr,
-    const std::vector<std::array<uint32_t, 8>>* real_stream_roots = nullptr);
+    const std::vector<std::array<uint32_t, 8>>* real_stream_roots = nullptr,
+    const std::vector<RCStage3StreamEndpointManifest>*
+        real_stream_manifests = nullptr);
 
 /** Resolver-side no-kernel role C_rho CS from the endpoint authority roots. */
 [[nodiscard]] bool BuildRCStage3NoKernelRoleAirCS(

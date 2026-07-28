@@ -229,6 +229,47 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    root_only_role_with_placeholder_value_cannot_spawn_heavy_child)
+{
+    const auto route =
+        heavy::CanonicalHeavyRoutesV1()[3];
+    const uint256 seed = Seed();
+    const auto manifest =
+        rc::BuildRCStage3StreamEndpointCanonicalManifest(
+            route.family, StreamValue(7), 0, 0);
+    std::array<uint32_t, 8> root{};
+    std::string why;
+    BOOST_REQUIRE(
+        rc::RCStage3StreamEndpointCommittedRoot(
+            route.family, manifest, root, &why));
+    std::vector<std::array<uint32_t, 8>> roots(4);
+    roots[0] = root;
+    roots[1] = StreamValue(8);
+    roots[2] = StreamValue(9);
+    roots[3] = StreamValue(10);
+    const auto root_only_role =
+        rc::BuildRCStage3PureStreamRoleAirFromRoots(
+            route.role, roots, &why);
+    BOOST_REQUIRE_MESSAGE(root_only_role.ok, why);
+
+    // The legacy root-only constructor has no manifest from which to derive
+    // the CTL value.  It is safe for root transport only and must be rejected
+    // before the prover spends any work on a semantic child.
+    const auto rejected =
+        heavy::ProveHeavyChildV1(
+            root_only_role, route.endpoint,
+            manifest, seed, &why);
+    BOOST_CHECK(
+        !rejected.native_verifier_accepted);
+    BOOST_CHECK_EQUAL(
+        rejected.residual,
+        "role_value_manifest");
+    BOOST_CHECK(
+        why.find("role_value_manifest_mismatch") !=
+        std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(
     optional_real_sha_child_q192_proof_roundtrip_and_tampers)
 {
     if (std::getenv(
@@ -242,22 +283,30 @@ BOOST_AUTO_TEST_CASE(
     const auto route =
         heavy::CanonicalHeavyRoutesV1()[3];
     const uint256 seed = Seed();
-    const auto manifest =
-        rc::BuildRCStage3StreamEndpointCanonicalManifest(
-            route.family, StreamValue(11), 0, 0);
+    const auto& endpoints =
+        rc::RequiredRCStage3RelationEndpoints(
+            route.role);
+    std::vector<
+        rc::RCStage3StreamEndpointManifest>
+        manifests;
+    manifests.reserve(endpoints.size());
+    for (uint32_t i = 0;
+         i < endpoints.size(); ++i) {
+        manifests.push_back(
+            rc::BuildRCStage3StreamEndpointCanonicalManifest(
+                rc::RCStage3StreamFamilyForEndpoint(
+                    endpoints[i]),
+                StreamValue(11U + i), 0, 0));
+    }
+    const auto& manifest = manifests.front();
     std::string why;
     std::array<uint32_t, 8> root{};
     BOOST_REQUIRE(
         rc::RCStage3StreamEndpointCommittedRoot(
             route.family, manifest, root, &why));
-    std::vector<std::array<uint32_t, 8>> roots(4);
-    roots[0] = root;
-    roots[1] = StreamValue(12);
-    roots[2] = StreamValue(13);
-    roots[3] = StreamValue(14);
     const auto role =
-        rc::BuildRCStage3PureStreamRoleAirFromRoots(
-            route.role, roots, &why);
+        rc::BuildRCStage3PureStreamRoleAirFromManifests(
+            route.role, manifests, &why);
     BOOST_REQUIRE_MESSAGE(role.ok, why);
     const auto proof =
         heavy::ProveHeavyChildV1(

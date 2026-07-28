@@ -559,13 +559,21 @@ CanonicalExportRoutesV1()
             route.ordinal = ordinal;
             route.relation_column =
                 ExistingRelationColumn(endpoint);
-            if (route.relation_column != kNoColumnV1) {
+            // A literal relation cell does not execute a SHA/XOF/ChaCha
+            // stream relation. Stream-family membership is semantic and
+            // immutable: it must win over the progressively filled direct
+            // alias inventory, otherwise landing an alias silently removes a
+            // required heavy child from the canonical 21-proof set.
+            if (StreamLike(endpoint)) {
+                route.kind =
+                    ProducerKindV1::StreamChild;
+                route.requires_stream_child = true;
+            } else if (
+                route.relation_column !=
+                kNoColumnV1) {
                 route.kind =
                     ProducerKindV1::DirectRelationCell;
                 route.preexisting_literal = true;
-            } else if (StreamLike(endpoint)) {
-                route.kind = ProducerKindV1::StreamChild;
-                route.requires_stream_child = true;
             } else if (VectorOpening(endpoint)) {
                 route.kind = ProducerKindV1::VectorOpening;
             } else if (WiredLedger(endpoint)) {

@@ -124,6 +124,15 @@ BuildRCStage3StreamEndpointCanonicalManifest(
     RCStage3StreamFamily family, const std::array<uint32_t, 8>& stream_value,
     uint32_t leaf_index, uint32_t path_len);
 
+/** Canonical CTL value exported by the light role fragment and the heavy
+ * stream child: the Fp3 recomposition of stream_value words 0, 1 and 2.
+ *
+ * Keeping this in one public helper prevents a role builder from pinning the
+ * correct SHA root while silently exporting an unrelated placeholder value.
+ */
+[[nodiscard]] gkr_field::Fp3 RCStage3StreamEndpointCtlValue(
+    const RCStage3StreamEndpointManifest& manifest);
+
 /**
  * Fast scalar SHA256d Merkle fold: leaf(domain ‖ index ‖ stream_value) folded
  * up the authentication path to the committed root, byte-identical to the root
