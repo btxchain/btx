@@ -47,6 +47,76 @@ CBlockHeader MiningHeader(uint64_t nonce)
     return header;
 }
 
+struct CaptureTerminalProxy final
+    : rc::RCEpisodeProofWitnessSink {
+    explicit CaptureTerminalProxy(
+        rc::RCStage3EpisodeWitnessCapture& capture_in)
+        : capture(capture_in)
+    {
+    }
+
+    rc::RCStage3EpisodeWitnessCapture& capture;
+    bool omit_digest{false};
+    bool substitute_first_root{false};
+    bool reorder_first_root{false};
+
+    void OnPhase1Operands(
+        const rc::RCPhase1OperandsWitnessView& view) override
+    {
+        capture.OnPhase1Operands(view);
+    }
+    void OnPhase1QKtTile(
+        const rc::RCPhase1QKtTileWitnessView& view) override
+    {
+        capture.OnPhase1QKtTile(view);
+    }
+    void OnPhase1SVRow(
+        const rc::RCPhase1SVRowWitnessView& view) override
+    {
+        capture.OnPhase1SVRow(view);
+    }
+    void OnFfnGemm(
+        const rc::RCFfnGemmWitnessView& view) override
+    {
+        capture.OnFfnGemm(view);
+    }
+    void OnFfnExtract(
+        const rc::RCFfnExtractWitnessView& view) override
+    {
+        capture.OnFfnExtract(view);
+    }
+    void OnRoundRoot(
+        uint32_t round_ordinal,
+        const uint256& round_root) override
+    {
+        if (reorder_first_root &&
+            round_ordinal == 0) {
+            capture.OnRoundRoot(
+                round_ordinal + 1U,
+                round_root);
+            return;
+        }
+        if (!substitute_first_root ||
+            round_ordinal != 0) {
+            capture.OnRoundRoot(
+                round_ordinal, round_root);
+            return;
+        }
+        uint256 substituted = round_root;
+        substituted.begin()[0] ^= 1U;
+        capture.OnRoundRoot(
+            round_ordinal, substituted);
+    }
+    void OnEpisodeDigest(
+        const uint256& episode_digest) override
+    {
+        if (!omit_digest) {
+            capture.OnEpisodeDigest(
+                episode_digest);
+        }
+    }
+};
+
 struct HonestDot {
     rc::RCStage3EpisodeGemmDotPin pin;
     std::vector<std::vector<gf::Fp3>> columns;
@@ -343,6 +413,27 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(!digest.IsNull());
     std::string why;
     BOOST_REQUIRE_MESSAGE(capture.Complete(&why), why);
+    BOOST_CHECK(capture.EpisodeDigest() == digest);
+    BOOST_REQUIRE_EQUAL(
+        capture.RoundRoots().size(), rounds.size());
+    for (uint32_t round = 0;
+         round < rounds.size(); ++round) {
+        BOOST_CHECK(
+            capture.RoundRoots()[round] ==
+            rounds[round].round_root);
+        std::vector<int8_t> captured_stream;
+        BOOST_REQUIRE_MESSAGE(
+            capture.BuildRoundStream(
+                round, captured_stream, &why),
+            why);
+        BOOST_CHECK(captured_stream ==
+                    rounds[round].stream);
+        BOOST_CHECK(
+            rc::BuildTileTreeRoot(
+                captured_stream,
+                params.T_leaf) ==
+            capture.RoundRoots()[round]);
+    }
 
     const auto layout = rc::RCGkrTraceLayout(params);
     BOOST_REQUIRE_EQUAL(
@@ -438,6 +529,48 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         rc::RCStage3EpisodeWitnessStoreGet(
             winner_hash) == nullptr);
+
+    // Terminal events are part of the capture schedule, not optional host
+    // metadata. Omitting the final digest or substituting a solver-native
+    // round root leaves an otherwise complete A/B/Y/Extract capture unusable.
+    rc::RCStage3EpisodeWitnessCapture omitted(params);
+    CaptureTerminalProxy omit_proxy(omitted);
+    omit_proxy.omit_digest = true;
+    BOOST_REQUIRE(
+        !rc::MineRCEpisodeWithProofWitness(
+             header, params, 0, omit_proxy)
+             .IsNull());
+    BOOST_CHECK(!omitted.Complete(&why));
+    BOOST_CHECK(
+        why.find("capture_incomplete_episode_terminal") !=
+        std::string::npos);
+
+    rc::RCStage3EpisodeWitnessCapture substituted(params);
+    CaptureTerminalProxy substitute_proxy(substituted);
+    substitute_proxy.substitute_first_root = true;
+    BOOST_REQUIRE(
+        !rc::MineRCEpisodeWithProofWitness(
+             header, params, 0, substitute_proxy)
+             .IsNull());
+    BOOST_CHECK(!substituted.Complete(&why));
+    BOOST_CHECK(
+        why.find("capture_episode_digest_order") !=
+        std::string::npos);
+
+    rc::RCStage3EpisodeWitnessCapture reordered_terminal(
+        params);
+    CaptureTerminalProxy reorder_proxy(
+        reordered_terminal);
+    reorder_proxy.reorder_first_root = true;
+    BOOST_REQUIRE(
+        !rc::MineRCEpisodeWithProofWitness(
+             header, params, 0, reorder_proxy)
+             .IsNull());
+    BOOST_CHECK(
+        !reordered_terminal.Complete(&why));
+    BOOST_CHECK(
+        why.find("capture_round_root_order") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -362,6 +362,27 @@ public:
         const RCFfnGemmWitnessView& view) = 0;
     virtual void OnFfnExtract(
         const RCFfnExtractWitnessView& view) = 0;
+    /**
+     * Ordered solver-native round commitment.  The default keeps lightweight
+     * diagnostic sinks source-compatible; the production Stage-3 capture
+     * overrides it and rejects omission, duplication and reordering.
+     */
+    virtual void OnRoundRoot(
+        uint32_t round_ordinal,
+        const uint256& round_root)
+    {
+        (void)round_ordinal;
+        (void)round_root;
+    }
+    /**
+     * Final episode digest computed by the same execution that emitted the
+     * GEMM/Extract witness.  A proof capture treats this as the terminal event.
+     */
+    virtual void OnEpisodeDigest(
+        const uint256& episode_digest)
+    {
+        (void)episode_digest;
+    }
 };
 
 /** Merkle opening: siblings from leaf toward root (index parity selects side). */
@@ -432,6 +453,10 @@ struct RCMerkleProof {
     RCEpisodeProofWitnessSink& sink,
     std::vector<RCRoundTranscript>* out_rounds = nullptr,
     const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
+/** Canonical episode digest over the ordered round-root vector. */
+[[nodiscard]] uint256 ComputeRCEpisodeDigestFromRoundRoots(
+    const std::vector<uint256>& round_roots);
 
 /**
  * FVT (Fully-Verified Terminal round) primitive — anti-grinding fix, design

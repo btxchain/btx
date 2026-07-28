@@ -345,6 +345,9 @@ RCStage3EpisodeWitnessCapture::RCStage3EpisodeWitnessCapture(
 void RCStage3EpisodeWitnessCapture::Reject(
     const char* why)
 {
+    m_complete_checked = false;
+    m_complete_ok = false;
+    m_complete_error.clear();
     if (m_error.empty()) m_error = why;
 }
 
@@ -367,6 +370,7 @@ void RCStage3EpisodeWitnessCapture::AppendExtractTiles(
     const int8_t* output, uint64_t cells,
     const uint256& prf)
 {
+    m_complete_checked = false;
     if (!m_error.empty()) return;
     if (ordinal >= m_layout.layers.size() ||
         input == nullptr || output == nullptr ||
@@ -442,6 +446,7 @@ void RCStage3EpisodeWitnessCapture::FlattenExtractTiles() const
 void RCStage3EpisodeWitnessCapture::OnPhase1Operands(
     const RCPhase1OperandsWitnessView& view)
 {
+    m_complete_checked = false;
     if (!m_error.empty()) return;
     if (view.round_ordinal >= m_params.rounds ||
         view.n_q != m_params.n_q ||
@@ -580,6 +585,7 @@ void RCStage3EpisodeWitnessCapture::OnPhase1SVRow(
 void RCStage3EpisodeWitnessCapture::OnFfnGemm(
     const RCFfnGemmWitnessView& view)
 {
+    m_complete_checked = false;
     if (!m_error.empty()) return;
     if (view.round_ordinal >= m_params.rounds ||
         view.layer_ordinal >= m_params.L_lyr ||
@@ -662,15 +668,145 @@ void RCStage3EpisodeWitnessCapture::OnFfnExtract(
         view.output->data(), cells, view.prf_key);
 }
 
+void RCStage3EpisodeWitnessCapture::OnRoundRoot(
+    uint32_t round_ordinal,
+    const uint256& round_root)
+{
+    if (!m_error.empty()) return;
+    if (round_ordinal >= m_params.rounds ||
+        round_ordinal != m_round_roots.size() ||
+        round_root.IsNull()) {
+        Reject("capture_round_root_order");
+        return;
+    }
+    const uint32_t begin = RoundBase(round_ordinal);
+    const uint32_t end =
+        begin + 2 + 2 * m_params.L_lyr;
+    if (end > m_extract_seen.size() ||
+        !std::all_of(
+            m_extract_seen.begin() + begin,
+            m_extract_seen.begin() + end,
+            [](bool seen) { return seen; })) {
+        Reject("capture_round_root_before_outputs");
+        return;
+    }
+    m_round_roots.push_back(round_root);
+    m_complete_checked = false;
+}
+
+void RCStage3EpisodeWitnessCapture::OnEpisodeDigest(
+    const uint256& episode_digest)
+{
+    if (!m_error.empty()) return;
+    if (m_episode_digest_seen ||
+        episode_digest.IsNull() ||
+        m_round_roots.size() != m_params.rounds ||
+        ComputeRCEpisodeDigestFromRoundRoots(
+            m_round_roots) != episode_digest) {
+        Reject("capture_episode_digest_order");
+        return;
+    }
+    m_episode_digest = episode_digest;
+    m_episode_digest_seen = true;
+    m_complete_checked = false;
+}
+
+bool RCStage3EpisodeWitnessCapture::BuildRoundStream(
+    uint32_t round_ordinal,
+    std::vector<int8_t>& out,
+    std::string* why) const
+{
+    out.clear();
+    if (round_ordinal >= m_params.rounds) {
+        return Fail(why, "capture_round_stream_index");
+    }
+    if constexpr (kRCSegmentLeavesEnabled) {
+        return Fail(
+            why,
+            "capture_round_stream_segment_partials_unavailable");
+    }
+    const uint64_t z_cells =
+        uint64_t{m_params.n_q} * m_params.d_head;
+    const uint64_t x_cells =
+        uint64_t{m_params.L_lyr} *
+        m_params.b_seq * m_params.d_model;
+    if (z_cells >
+            std::numeric_limits<size_t>::max() ||
+        x_cells >
+            std::numeric_limits<size_t>::max() -
+                z_cells) {
+        return Fail(why, "capture_round_stream_overflow");
+    }
+    out.reserve(
+        static_cast<size_t>(z_cells + x_cells));
+    const auto append_layer =
+        [this, &out, why](uint32_t ordinal) {
+            if (ordinal >=
+                    m_layer_extract_outputs.size()) {
+                return Fail(
+                    why,
+                    "capture_round_stream_layer");
+            }
+            const auto& tiles =
+                m_layer_extract_outputs[ordinal];
+            for (const auto& tile : tiles) {
+                out.insert(
+                    out.end(),
+                    tile.begin(), tile.end());
+            }
+            return true;
+        };
+    const uint32_t base = RoundBase(round_ordinal);
+    if (!append_layer(base + 1)) {
+        out.clear();
+        return false;
+    }
+    for (uint32_t layer = 0;
+         layer < m_params.L_lyr; ++layer) {
+        if (!append_layer(
+                FfnOrdinal(
+                    round_ordinal, layer,
+                    RCFfnProjection::Down))) {
+            out.clear();
+            return false;
+        }
+    }
+    if (out.size() != z_cells + x_cells) {
+        out.clear();
+        return Fail(
+            why, "capture_round_stream_shape");
+    }
+    return true;
+}
+
 bool RCStage3EpisodeWitnessCapture::Complete(
     std::string* why) const
 {
+    if (m_complete_checked) {
+        if (!m_complete_ok && why != nullptr) {
+            *why = m_complete_error;
+        }
+        return m_complete_ok;
+    }
+    const auto finish =
+        [this, why](bool ok,
+                    const std::string& error = {}) {
+            m_complete_checked = true;
+            m_complete_ok = ok;
+            m_complete_error = error;
+            if (!ok && why != nullptr) *why = error;
+            return ok;
+        };
     if (!m_error.empty()) {
-        return Fail(why, m_error);
+        std::string error;
+        (void)Fail(&error, m_error);
+        return finish(false, error);
     }
     if (m_layout.layers.empty() ||
         m_layers.size() != m_layout.layers.size()) {
-        return Fail(why, "capture_incomplete_shape");
+        std::string error;
+        (void)Fail(&error, "capture_incomplete_shape");
+        return finish(false, error);
     }
     uint64_t total_tiles = 0;
     for (uint32_t ordinal = 0;
@@ -697,17 +833,81 @@ bool RCStage3EpisodeWitnessCapture::Complete(
             m_layer_extract_inputs[ordinal].size() != tiles ||
             m_layer_extract_outputs[ordinal].size() != tiles ||
             m_layer_tile_begin[ordinal] != total_tiles) {
-            return Fail(
-                why, "capture_incomplete_layer_" +
-                         std::to_string(ordinal));
+            std::string error;
+            (void)Fail(
+                &error, "capture_incomplete_layer_" +
+                            std::to_string(ordinal));
+            return finish(false, error);
         }
         total_tiles += tiles;
     }
     FlattenExtractTiles();
     if (m_extract_inputs.size() != total_tiles) {
-        return Fail(why, "capture_incomplete_tiles");
+        std::string error;
+        (void)Fail(&error, "capture_incomplete_tiles");
+        return finish(false, error);
     }
-    return true;
+    if (m_round_roots.size() != m_params.rounds ||
+        !m_episode_digest_seen ||
+        m_episode_digest.IsNull() ||
+        ComputeRCEpisodeDigestFromRoundRoots(
+            m_round_roots) != m_episode_digest) {
+        std::string error;
+        (void)Fail(
+            &error,
+            "capture_incomplete_episode_terminal");
+        return finish(false, error);
+    }
+    for (uint32_t round = 0;
+         round < m_params.rounds; ++round) {
+        RoundMerkleStream merkle(m_params.T_leaf);
+        const auto absorb_layer =
+            [this, &merkle](uint32_t ordinal) {
+                if (ordinal >=
+                        m_layer_extract_outputs.size()) {
+                    return false;
+                }
+                const auto& tiles =
+                    m_layer_extract_outputs[ordinal];
+                if (!tiles.empty()) {
+                    merkle.Absorb(
+                        tiles.front().data(),
+                        tiles.size() * kRCMxBlockLen);
+                }
+                return true;
+            };
+        const uint32_t base = RoundBase(round);
+        if (!absorb_layer(base + 1)) {
+            std::string error;
+            (void)Fail(
+                &error,
+                "capture_round_stream_layer");
+            return finish(false, error);
+        }
+        for (uint32_t layer = 0;
+             layer < m_params.L_lyr; ++layer) {
+            if (!absorb_layer(
+                    FfnOrdinal(
+                        round, layer,
+                        RCFfnProjection::Down))) {
+                std::string error;
+                (void)Fail(
+                    &error,
+                    "capture_round_stream_layer");
+                return finish(false, error);
+            }
+        }
+        if (merkle.FinalizeRoot() !=
+                m_round_roots[round]) {
+            std::string error;
+            (void)Fail(
+                &error,
+                "capture_round_root_substitution_" +
+                    std::to_string(round));
+            return finish(false, error);
+        }
+    }
+    return finish(true);
 }
 
 bool RCStage3EpisodeWitnessCapture::ValidateManifest(

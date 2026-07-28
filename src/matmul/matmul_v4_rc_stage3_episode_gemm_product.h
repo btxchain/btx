@@ -127,6 +127,11 @@ public:
         const RCFfnGemmWitnessView& view) override;
     void OnFfnExtract(
         const RCFfnExtractWitnessView& view) override;
+    void OnRoundRoot(
+        uint32_t round_ordinal,
+        const uint256& round_root) override;
+    void OnEpisodeDigest(
+        const uint256& episode_digest) override;
 
     [[nodiscard]] bool Complete(std::string* why = nullptr) const;
     [[nodiscard]] bool ValidateManifest(
@@ -154,6 +159,25 @@ public:
     {
         return m_extract_prfs;
     }
+    [[nodiscard]] const std::vector<uint256>&
+    RoundRoots() const
+    {
+        return m_round_roots;
+    }
+    [[nodiscard]] const uint256&
+    EpisodeDigest() const
+    {
+        return m_episode_digest;
+    }
+    /**
+     * Reconstruct the exact committed R.4.1 stream from outputs already
+     * retained for the all-instance Extract proof.  No second transcript copy
+     * is stored in the winner capture.
+     */
+    [[nodiscard]] bool BuildRoundStream(
+        uint32_t round_ordinal,
+        std::vector<int8_t>& out,
+        std::string* why = nullptr) const;
 
 private:
     void Reject(const char* why);
@@ -187,6 +211,12 @@ private:
     std::vector<bool> m_operands_seen;
     std::vector<bool> m_gemm_seen;
     std::vector<bool> m_extract_seen;
+    std::vector<uint256> m_round_roots;
+    uint256 m_episode_digest{};
+    bool m_episode_digest_seen{false};
+    mutable bool m_complete_checked{false};
+    mutable bool m_complete_ok{false};
+    mutable std::string m_complete_error;
     std::string m_error;
 };
 

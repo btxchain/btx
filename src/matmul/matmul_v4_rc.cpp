@@ -841,6 +841,10 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
         round_roots[r] =
             StreamRoundIntoMerkle(p1, p2, params, options.checkpoint, gemm, merkle, stream_out);
         const auto t4 = clock::now();
+        if (proof_sink != nullptr) {
+            proof_sink->OnRoundRoot(
+                r, round_roots[r]);
+        }
         if (out_rounds) {
             (*out_rounds)[r].round_root = round_roots[r];
         }
@@ -851,15 +855,11 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
         }
     }
 
-    // episode_digest = SHA256d("BTX_RC_EPISODE_V1" ‖ roots…)
-    std::vector<unsigned char> buf;
-    buf.reserve(sizeof(kRCEpisodeTag) - 1 + round_roots.size() * 32);
-    buf.insert(buf.end(), reinterpret_cast<const unsigned char*>(kRCEpisodeTag),
-               reinterpret_cast<const unsigned char*>(kRCEpisodeTag) + sizeof(kRCEpisodeTag) - 1);
-    for (const uint256& root : round_roots) {
-        buf.insert(buf.end(), root.begin(), root.end());
+    const uint256 digest =
+        ComputeRCEpisodeDigestFromRoundRoots(round_roots);
+    if (proof_sink != nullptr) {
+        proof_sink->OnEpisodeDigest(digest);
     }
-    const uint256 digest = Sha256dBytes(buf.data(), buf.size());
     if (out_timing) {
         out_timing->phase1_s = phase1_s;
         out_timing->phase2_s = phase2_s;
@@ -899,6 +899,35 @@ std::vector<uint32_t> DeriveFSChallenges(const uint256& sigma, const uint256& cl
 }
 
 } // namespace
+
+uint256 ComputeRCEpisodeDigestFromRoundRoots(
+    const std::vector<uint256>& round_roots)
+{
+    if (round_roots.empty() ||
+        std::any_of(
+            round_roots.begin(), round_roots.end(),
+            [](const uint256& root) {
+                return root.IsNull();
+            })) {
+        return {};
+    }
+    std::vector<unsigned char> buf;
+    buf.reserve(
+        sizeof(kRCEpisodeTag) - 1 +
+        round_roots.size() * 32);
+    buf.insert(
+        buf.end(),
+        reinterpret_cast<const unsigned char*>(
+            kRCEpisodeTag),
+        reinterpret_cast<const unsigned char*>(
+            kRCEpisodeTag) +
+            sizeof(kRCEpisodeTag) - 1);
+    for (const uint256& root : round_roots) {
+        buf.insert(
+            buf.end(), root.begin(), root.end());
+    }
+    return Sha256dBytes(buf.data(), buf.size());
+}
 
 bool ValidateRCEpisodeParams(const RCEpisodeParams& p)
 {
