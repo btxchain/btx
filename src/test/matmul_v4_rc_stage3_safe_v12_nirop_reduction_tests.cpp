@@ -30,9 +30,9 @@ fsair::ShapeV12 TestShape()
         /*child_w=*/3,
         /*child_n_rows=*/8,
         /*child_quotient_len=*/16,
-        /*n_coeffs=*/4,
-        /*n_lde=*/64,
-        /*n_folds=*/2,
+        /*n_coeffs=*/64,
+        /*n_lde=*/1024,
+        /*n_folds=*/6,
     };
 }
 
@@ -82,11 +82,10 @@ FixtureV12 BuildFixture()
         proof.shape_commit = canonical_shape;
         proof.row_root = shared_row_root;
         proof.ood_evaluation_commit = TestDigest(base + 30);
-        proof.fold_roots = {
-            TestDigest(base + 40),
-            TestDigest(base + 50),
-            TestDigest(base + 60),
-        };
+        for (uint32_t fold = 0; fold <= 6; ++fold) {
+            proof.fold_roots.push_back(
+                TestDigest(base + 40 + 10 * fold));
+        }
     }
 
     ah::Digest parent_seed{};
@@ -109,7 +108,7 @@ FixtureV12 BuildFixture()
     // Deterministic KAT produced by FindSharedGrindNonceV12 for this exact
     // shared-commitment sigma core. The verifier recomputes the full g=20
     // predicate; pinning the answer avoids a prover search in normal CI.
-    out.inputs.shared_grind_nonce = UINT64_C(181'070);
+    out.inputs.shared_grind_nonce = UINT64_C(68'939);
     if (!CheckSharedGrindNonceV12(
             sigma_core, out.inputs.shared_grind_nonce, nullptr)) {
         throw std::runtime_error(

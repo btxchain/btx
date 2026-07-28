@@ -7,6 +7,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12.h>
+#include <matmul/matmul_v4_rc_stage3_safe_v12_query_sampler.h>
 
 #include <array>
 #include <cstdint>
@@ -41,10 +42,13 @@ namespace ah = alg_hash;
 namespace aht = alg_hash_typed;
 namespace safe = safe_v12;
 namespace p2air = stage3_poseidon_air;
+namespace qsampler = stage3_safe_v12_query_sampler;
 
 inline constexpr uint32_t kProtocolVersionV12 = 12;
 inline constexpr uint32_t kFriLaneCountV12 = 2;
 inline constexpr uint32_t kQueriesPerLaneV12 = 96;
+inline constexpr uint32_t kQueryCandidatesPerLaneV12 =
+    qsampler::kCandidatesV12;
 inline constexpr uint32_t kOodCandidatesPerPointV12 = 2;
 inline constexpr uint32_t kFriBlowupV12 = 16;
 inline constexpr uint32_t kEventHeaderLanesV12 = 5;
@@ -53,7 +57,11 @@ inline constexpr gf::Fp kEventHeaderMagicV12 =
 inline constexpr uint32_t kProductionBatchColumnsV12 = 1750;
 inline constexpr uint32_t kProductionFoldsV12 = 20;
 inline constexpr uint32_t kProductionStaticDomainHeadroomRowsV12 = 56480;
-inline constexpr uint32_t kProductionExpectedSafeAirRowsV12 = 2807;
+inline constexpr uint32_t kProductionExpectedSafeAirRowsV12 = 2831;
+inline constexpr uint32_t
+    kProductionExpectedQuerySamplerAirRowsV12 = 512;
+inline constexpr uint32_t
+    kProductionExpectedTotalRecursiveAirRowsV12 = 3343;
 
 enum class ChannelV12 : uint8_t {
     AirQuotient = 0,
@@ -156,6 +164,14 @@ struct ManifestV12 {
     std::array<uint64_t, kFriLaneCountV12>
         fri_lane_poseidon_rows{};
     uint64_t total_poseidon_air_rows{0};
+    std::array<uint64_t, kFriLaneCountV12>
+        query_sampler_air_rows{};
+    uint64_t total_query_sampler_air_rows{0};
+    uint64_t total_recursive_air_rows{0};
+    uint32_t query_sampler_air_columns{
+        qsampler::kAirColumnsV12};
+    uint32_t production_query_exhaustion_bound_bits{
+        qsampler::kProductionExhaustionBoundBitsV12};
     uint64_t static_domain_headroom_rows{
         kProductionStaticDomainHeadroomRowsV12};
     uint64_t static_domain_margin_rows{0};
@@ -229,8 +245,11 @@ struct PermutationRowV12 {
 struct AirChannelWitnessV12 {
     ChannelExecutionV12 projected_execution;
     std::vector<PermutationRowV12> permutation_rows;
+    qsampler::QuerySamplerAirV12 query_sampler_air{};
     bool poseidon_constraints_zero{false};
     bool io_wiring_checked{false};
+    bool query_sampler_air_valid{false};
+    bool query_sampler_source_call_typed{false};
 };
 
 struct AirWitnessV12 {
@@ -277,9 +296,14 @@ inline constexpr bool kProofIndependentManifestImplementedV12 = true;
 inline constexpr bool kDualQ96TypedDomainsImplementedV12 = true;
 inline constexpr bool kNativeAirDifferentialHarnessImplementedV12 = true;
 inline constexpr bool kPoseidonPermutationRowsExecutableV12 = true;
+inline constexpr bool
+    kWithoutReplacementQuerySamplerAirExecutableV12 = true;
 
 inline constexpr bool kProofPayloadMappingCompleteV12 = false;
 inline constexpr bool kRecursiveIoWiringConstraintsExecutableV12 = false;
+inline constexpr bool
+    kQuerySamplerSafeSourceEqualityRecursivelyConsumedV12 = false;
+inline constexpr bool kQuerySamplerSoleProductionQuerySourceV12 = false;
 inline constexpr bool kSafeFsRegistryPinnedV12 = false;
 inline constexpr bool kDualQ96NiropReductionCertifiedV12 = false;
 inline constexpr bool kDualQ96CommonCommitmentHybridCertifiedV12 = false;
@@ -289,8 +313,11 @@ inline constexpr bool kSafeFsAuthorityReadyV12 =
     kDualQ96TypedDomainsImplementedV12 &&
     kNativeAirDifferentialHarnessImplementedV12 &&
     kPoseidonPermutationRowsExecutableV12 &&
+    kWithoutReplacementQuerySamplerAirExecutableV12 &&
     kProofPayloadMappingCompleteV12 &&
     kRecursiveIoWiringConstraintsExecutableV12 &&
+    kQuerySamplerSafeSourceEqualityRecursivelyConsumedV12 &&
+    kQuerySamplerSoleProductionQuerySourceV12 &&
     kSafeFsRegistryPinnedV12 &&
     kDualQ96NiropReductionCertifiedV12 &&
     kDualQ96CommonCommitmentHybridCertifiedV12 &&

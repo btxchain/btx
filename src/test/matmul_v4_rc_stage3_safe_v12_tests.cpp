@@ -18,6 +18,7 @@ namespace matmul::v4::rc::safe_v12 {
 namespace {
 
 namespace fsair = stage3_safe_v12_fs_air;
+namespace qsampler = stage3_safe_v12_query_sampler;
 
 IoPatternV12 ExamplePattern()
 {
@@ -76,9 +77,9 @@ fsair::ShapeV12 TestFsAirShape()
         /*child_w=*/3,
         /*child_n_rows=*/8,
         /*child_quotient_len=*/16,
-        /*n_coeffs=*/4,
-        /*n_lde=*/64,
-        /*n_folds=*/2,
+        /*n_coeffs=*/64,
+        /*n_lde=*/1024,
+        /*n_folds=*/6,
     };
 }
 
@@ -96,11 +97,10 @@ fsair::TranscriptInputsV12 TestFsAirInputs()
         one.shape_commit = TestDigest(base + 10);
         one.row_root = TestDigest(base + 20);
         one.ood_evaluation_commit = TestDigest(base + 30);
-        one.fold_roots = {
-            TestDigest(base + 40),
-            TestDigest(base + 50),
-            TestDigest(base + 60),
-        };
+        for (uint32_t fold = 0; fold <= 6; ++fold) {
+            one.fold_roots.push_back(
+                TestDigest(base + 40 + 10 * fold));
+        }
     }
     return out;
 }
@@ -707,8 +707,12 @@ BOOST_AUTO_TEST_CASE(
             if (call.role ==
                 fsair::CallRoleV12::SqueezeQueryVector) {
                 ++query_vectors;
-                BOOST_TEST(call.items == 96U);
-                BOOST_TEST(call.elements == 3U * 96U);
+                BOOST_TEST(
+                    call.items ==
+                    fsair::kQueryCandidatesPerLaneV12);
+                BOOST_TEST(
+                    call.elements ==
+                    3U * fsair::kQueryCandidatesPerLaneV12);
             }
             if (call.role ==
                 fsair::CallRoleV12::
@@ -756,11 +760,20 @@ BOOST_AUTO_TEST_CASE(
         production_manifest.total_poseidon_air_rows ==
         fsair::kProductionExpectedSafeAirRowsV12);
     BOOST_TEST(
-        production_manifest.total_poseidon_air_rows == 2807U);
+        production_manifest.total_poseidon_air_rows == 2831U);
+    BOOST_TEST(
+        production_manifest.total_query_sampler_air_rows == 512U);
+    BOOST_TEST(
+        production_manifest.total_recursive_air_rows == 3343U);
+    BOOST_TEST(
+        production_manifest.query_sampler_air_columns == 562U);
+    BOOST_TEST(
+        production_manifest.
+            production_query_exhaustion_bound_bits == 440U);
     BOOST_TEST(
         production_manifest.static_domain_headroom_rows == 56480U);
     BOOST_TEST(
-        production_manifest.static_domain_margin_rows == 53673U);
+        production_manifest.static_domain_margin_rows == 53137U);
     BOOST_CHECK(production_manifest.fits_static_domain_headroom);
 }
 
@@ -813,6 +826,49 @@ BOOST_AUTO_TEST_CASE(
     check_channel(witness.air_quotient);
     check_channel(witness.fri_lane[0]);
     check_channel(witness.fri_lane[1]);
+    for (uint32_t lane = 0;
+         lane < fsair::kFriLaneCountV12; ++lane) {
+        const auto& sampler =
+            witness.fri_lane[lane].query_sampler_air;
+        BOOST_CHECK(
+            witness.fri_lane[lane].query_sampler_air_valid);
+        BOOST_CHECK(
+            witness.fri_lane[lane].
+                query_sampler_source_call_typed);
+        BOOST_CHECK(sampler.valid);
+        BOOST_TEST(sampler.cs.n_rows == 256U);
+        BOOST_TEST(sampler.cs.n_columns == 562U);
+        BOOST_TEST(sampler.selected_count == 96U);
+        BOOST_TEST(sampler.selected_indices.size() == 96U);
+        BOOST_TEST(sampler.violations == 0U);
+        BOOST_TEST(sampler.max_alg_degree == 7U);
+        BOOST_TEST(
+            sampler.verifier_owned_preprocessed_columns == 1U);
+        BOOST_TEST(
+            sampler.proof_owned_preprocessed_columns == 0U);
+        BOOST_CHECK(
+            sampler.full_limb_canonicity_constrained);
+        BOOST_CHECK(
+            sampler.source_candidate_vector_shape_canonical);
+        BOOST_CHECK(sampler.index_range_constrained);
+        BOOST_CHECK(
+            sampler.first_distinct_order_constrained);
+        BOOST_CHECK(sampler.uniqueness_constrained);
+        BOOST_CHECK(
+            sampler.exact_q96_exhaustion_constrained);
+        BOOST_CHECK(sampler.selected_outputs_constrained);
+        BOOST_CHECK(
+            !sampler.
+                recursive_safe_source_equality_consumed);
+    }
+    BOOST_CHECK(
+        fsair::kWithoutReplacementQuerySamplerAirExecutableV12);
+    BOOST_CHECK(
+        !fsair::
+            kQuerySamplerSafeSourceEqualityRecursivelyConsumedV12);
+    BOOST_CHECK(
+        !fsair::kQuerySamplerSoleProductionQuerySourceV12);
+    BOOST_CHECK(!fsair::kSafeFsAuthorityReadyV12);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -883,6 +939,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!fsair::ValidateAirWitnessV12(
         manifest, inputs, merged, &why));
 
+    // Even copying only the locally valid Q96 sampler cannot merge lanes:
+    // its lane id and its ordered source candidates belong to the typed
+    // lane-0 SAFE transcript.
+    fsair::AirWitnessV12 shared_sampler = witness;
+    shared_sampler.fri_lane[1].query_sampler_air =
+        shared_sampler.fri_lane[0].query_sampler_air;
+    BOOST_CHECK(!fsair::ValidateAirWitnessV12(
+        manifest, inputs, shared_sampler, &why));
+
     // A direct feedback-cell change is likewise rejected by reconstruction.
     fsair::AirWitnessV12 feedback = witness;
     auto& lane_calls =
@@ -898,6 +963,121 @@ BOOST_AUTO_TEST_CASE(
         gf::Add(feedback_call->values.back(), 1);
     BOOST_CHECK(!fsair::ValidateAirWitnessV12(
         manifest, inputs, feedback, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    pr95_v12_without_replacement_sampler_rejects_exhaustion_duplicate_reorder_and_range_attacks)
+{
+    std::vector<gf::Fp> source(
+        3 * qsampler::kCandidatesV12, gf::FromU64(0));
+    for (uint32_t candidate = 0;
+         candidate < qsampler::kCandidatesV12; ++candidate) {
+        // Candidate 1 duplicates candidate 0. The canonical output must skip
+        // it and continue with candidate 2, without changing transcript order.
+        const uint32_t index =
+            candidate == 1 ? 0 : candidate - (candidate > 1 ? 1 : 0);
+        source[3 * candidate] = gf::FromU64(index);
+        source[3 * candidate + 1] =
+            gf::FromU64(10'000 + candidate);
+        source[3 * candidate + 2] =
+            gf::FromU64(20'000 + candidate);
+    }
+
+    std::vector<uint32_t> native;
+    std::vector<uint32_t> ordinals;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        qsampler::SelectFirstDistinctV12(
+            source, 1024, native, &ordinals, &why),
+        why);
+    BOOST_TEST(native.size() == 96U);
+    BOOST_TEST(ordinals.size() == 96U);
+    BOOST_TEST(native[0] == 0U);
+    BOOST_TEST(native[1] == 1U);
+    BOOST_TEST(ordinals[0] == 0U);
+    BOOST_TEST(ordinals[1] == 2U);
+
+    qsampler::QuerySamplerAirV12 honest;
+    BOOST_REQUIRE_MESSAGE(
+        qsampler::BuildQuerySamplerAirV12(
+            0, 1024, source, honest, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        qsampler::ValidateQuerySamplerAirV12(
+            0, 1024, source, honest, &why),
+        why);
+    BOOST_CHECK(honest.selected_indices == native);
+    BOOST_CHECK(honest.selected_candidate_ordinals == ordinals);
+
+    // Exhaustion is an AIR failure, not a host-side advisory boolean.
+    std::vector<gf::Fp> exhausted(
+        3 * qsampler::kCandidatesV12, gf::FromU64(0));
+    qsampler::QuerySamplerAirV12 exhausted_air;
+    BOOST_CHECK(!qsampler::BuildQuerySamplerAirV12(
+        0, 1024, exhausted, exhausted_air, &why));
+    BOOST_TEST(exhausted_air.selected_count == 1U);
+    BOOST_CHECK_GT(exhausted_air.violations, 0U);
+
+    // Force the repeated candidate to be selected. The polynomial zero test
+    // and first-distinct selector reject the changed witness.
+    auto duplicate_selected = honest;
+    duplicate_selected.columns[
+        duplicate_selected.layout.selected][1] =
+            gf::Fp3::One();
+    BOOST_CHECK_GT(
+        qsampler::CountQuerySamplerViolationsV12(
+            duplicate_selected.cs,
+            duplicate_selected.columns),
+        0U);
+
+    // A query output cannot duplicate or reorder another output while
+    // retaining the state-machine transitions.
+    auto duplicate_output = honest;
+    const uint32_t last = qsampler::kTraceRowsV12 - 1;
+    duplicate_output.columns[
+        duplicate_output.layout.Output(1)][last] =
+            duplicate_output.columns[
+                duplicate_output.layout.Output(0)][last];
+    BOOST_CHECK_GT(
+        qsampler::CountQuerySamplerViolationsV12(
+            duplicate_output.cs, duplicate_output.columns),
+        0U);
+
+    auto reordered_output = honest;
+    std::swap(
+        reordered_output.columns[
+            reordered_output.layout.Output(0)][last],
+        reordered_output.columns[
+            reordered_output.layout.Output(1)][last]);
+    BOOST_CHECK_GT(
+        qsampler::CountQuerySamplerViolationsV12(
+            reordered_output.cs, reordered_output.columns),
+        0U);
+
+    // An out-of-domain output violates the power-of-two mask relation.
+    auto out_of_range = honest;
+    out_of_range.columns[
+        out_of_range.layout.index][0] =
+            gf::Fp3::FromFp(gf::FromU64(1024));
+    BOOST_CHECK_GT(
+        qsampler::CountQuerySamplerViolationsV12(
+            out_of_range.cs, out_of_range.columns),
+        0U);
+
+    // Reordering the typed SAFE candidate stream while retaining the old AIR
+    // is rejected by exact source reconstruction.
+    std::vector<gf::Fp> reordered_source = source;
+    for (uint32_t lane = 0; lane < 3; ++lane) {
+        std::swap(
+            reordered_source[3 * 2 + lane],
+            reordered_source[3 * 3 + lane]);
+    }
+    BOOST_CHECK(!qsampler::ValidateQuerySamplerAirV12(
+        0, 1024, reordered_source, honest, &why));
+
+    // The same candidate vector cannot be relabelled as the other lane.
+    BOOST_CHECK(!qsampler::ValidateQuerySamplerAirV12(
+        1, 1024, source, honest, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

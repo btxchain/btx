@@ -131,6 +131,7 @@ inline std::vector<uint8_t> ApplicationDomain(
     AppendBE32(out, static_cast<uint32_t>(channel));
     AppendBE32(out, lane);
     AppendBE32(out, kQueriesPerLaneV12);
+    AppendBE32(out, kQueryCandidatesPerLaneV12);
     AppendBE32(out, kOodCandidatesPerPointV12);
     AppendBE32(out, shape.child_w);
     AppendBE32(out, shape.child_n_rows);
@@ -372,11 +373,12 @@ inline bool BuildFriChannel(
             out, builder, CallRoleV12::BindQueryVector,
             aht::RoleV12::TranscriptQuerySeed,
             PayloadSourceV12::DrawDescriptor, 0,
-            kQueriesPerLaneV12, 2, why) ||
+            kQueryCandidatesPerLaneV12, 2, why) ||
         !AddSqueeze(
             out, builder, CallRoleV12::SqueezeQueryVector,
             aht::RoleV12::TranscriptQueryCandidate, 0,
-            kQueriesPerLaneV12, 3 * kQueriesPerLaneV12, why) ||
+            kQueryCandidatesPerLaneV12,
+            3 * kQueryCandidatesPerLaneV12, why) ||
         !builder.Build(out.typed_domain, out.safe_manifest, why)) {
         out = {};
         return false;
@@ -401,6 +403,7 @@ inline bool ValidShape(const ShapeV12& shape, std::string* why)
     const uint64_t n_lde =
         static_cast<uint64_t>(shape.n_coeffs) * kFriBlowupV12;
     if (n_lde > std::numeric_limits<uint32_t>::max() ||
+        n_lde < 128 ||
         shape.n_lde != n_lde ||
         !IsPowerOfTwo(shape.n_lde)) {
         return Fail(why, "noncanonical LDE shape");
@@ -485,15 +488,8 @@ inline bool RecordSqueeze(
         derived.deep_weights = values;
         return true;
     case CallRoleV12::SqueezeQueryVector:
-        query_indices.clear();
-        query_indices.reserve(kQueriesPerLaneV12);
-        for (uint32_t i = 0; i < kQueriesPerLaneV12; ++i) {
-            const gf::Fp3 candidate = Fp3At(values, 3 * i);
-            query_indices.push_back(
-                static_cast<uint32_t>(
-                    candidate.c0 & (shape.n_lde - 1)));
-        }
-        return true;
+        return qsampler::SelectFirstDistinctV12(
+            values, shape.n_lde, query_indices, nullptr, why);
     default:
         return true;
     }
@@ -853,6 +849,23 @@ inline bool BuildAirChannel(
                     out.projected_execution.query_indices, why)) {
                 return false;
             }
+            if (spec.role == CallRoleV12::SqueezeQueryVector) {
+                if (!qsampler::BuildQuerySamplerAirV12(
+                        lane, manifest.shape.n_lde, trace.values,
+                        out.query_sampler_air, why) ||
+                    !qsampler::ValidateQuerySamplerAirV12(
+                        lane, manifest.shape.n_lde, trace.values,
+                        out.query_sampler_air, why) ||
+                    out.query_sampler_air.selected_indices !=
+                        out.projected_execution.query_indices) {
+                    return Fail(
+                        why, "without-replacement sampler AIR mismatch");
+                }
+                out.query_sampler_air_valid = true;
+                out.query_sampler_source_call_typed =
+                    spec.typed_role ==
+                    aht::RoleV12::TranscriptQueryCandidate;
+            }
         }
         trace.after = machine.Snapshot();
         out.projected_execution.calls.push_back(std::move(trace));
@@ -930,8 +943,18 @@ inline bool SameAirChannel(
         left.poseidon_constraints_zero !=
             right.poseidon_constraints_zero ||
         left.io_wiring_checked != right.io_wiring_checked ||
+        left.query_sampler_air_valid !=
+            right.query_sampler_air_valid ||
+        left.query_sampler_source_call_typed !=
+            right.query_sampler_source_call_typed ||
         left.permutation_rows.size() !=
             right.permutation_rows.size()) {
+        return false;
+    }
+    if (left.query_sampler_air_valid &&
+        !qsampler::SameQuerySamplerAirV12(
+            left.query_sampler_air,
+            right.query_sampler_air)) {
         return false;
     }
     for (size_t i = 0; i < left.permutation_rows.size(); ++i) {
@@ -1023,24 +1046,39 @@ bool BuildManifestV12(
                 safe_manifest.online_poseidon_air_rows;
         out.total_poseidon_air_rows +=
             out.fri_lane_poseidon_rows[lane];
+        out.query_sampler_air_rows[lane] =
+            qsampler::kTraceRowsV12;
+        out.total_query_sampler_air_rows +=
+            out.query_sampler_air_rows[lane];
     }
     out.total_poseidon_air_rows +=
         out.air_quotient_poseidon_rows;
+    out.total_recursive_air_rows =
+        out.total_poseidon_air_rows +
+        out.total_query_sampler_air_rows;
     out.fits_static_domain_headroom =
-        out.total_poseidon_air_rows <=
+        out.total_recursive_air_rows <=
         out.static_domain_headroom_rows;
     out.static_domain_margin_rows =
         out.fits_static_domain_headroom
         ? out.static_domain_headroom_rows -
-            out.total_poseidon_air_rows
+            out.total_recursive_air_rows
         : 0;
     out.production_reference_shape =
         shape.child_w + 1 == kProductionBatchColumnsV12 &&
         shape.n_folds == kProductionFoldsV12;
     out.production_reference_cost_pinned =
         !out.production_reference_shape ||
-        out.total_poseidon_air_rows ==
-            kProductionExpectedSafeAirRowsV12;
+        (out.total_poseidon_air_rows ==
+             kProductionExpectedSafeAirRowsV12 &&
+         out.total_query_sampler_air_rows ==
+             kProductionExpectedQuerySamplerAirRowsV12 &&
+         out.total_recursive_air_rows ==
+             kProductionExpectedTotalRecursiveAirRowsV12 &&
+         out.query_sampler_air_columns ==
+             qsampler::kAirColumnsV12 &&
+         out.production_query_exhaustion_bound_bits ==
+             qsampler::kProductionExhaustionBoundBitsV12);
     out.proof_independent = true;
     out.exact_pr95_roles = true;
     out.valid =
@@ -1097,6 +1135,16 @@ bool ValidateManifestV12(
             expected.fri_lane_poseidon_rows ||
         manifest.total_poseidon_air_rows !=
             expected.total_poseidon_air_rows ||
+        manifest.query_sampler_air_rows !=
+            expected.query_sampler_air_rows ||
+        manifest.total_query_sampler_air_rows !=
+            expected.total_query_sampler_air_rows ||
+        manifest.total_recursive_air_rows !=
+            expected.total_recursive_air_rows ||
+        manifest.query_sampler_air_columns !=
+            expected.query_sampler_air_columns ||
+        manifest.production_query_exhaustion_bound_bits !=
+            expected.production_query_exhaustion_bound_bits ||
         manifest.static_domain_headroom_rows !=
             expected.static_domain_headroom_rows ||
         manifest.static_domain_margin_rows !=
@@ -1188,6 +1236,10 @@ bool BuildAirWitnessV12(
         out.air_quotient.io_wiring_checked &&
         out.fri_lane[0].poseidon_constraints_zero &&
         out.fri_lane[1].poseidon_constraints_zero &&
+        out.fri_lane[0].query_sampler_air_valid &&
+        out.fri_lane[1].query_sampler_air_valid &&
+        out.fri_lane[0].query_sampler_source_call_typed &&
+        out.fri_lane[1].query_sampler_source_call_typed &&
         out.fri_lane[0].io_wiring_checked &&
         out.fri_lane[1].io_wiring_checked;
     out.note = out.valid
