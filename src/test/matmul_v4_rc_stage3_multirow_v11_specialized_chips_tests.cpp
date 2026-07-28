@@ -674,6 +674,111 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!rejected.valid);
 }
 
+BOOST_AUTO_TEST_CASE(
+    q96_fixed_offset_tape_rejects_monolithic_rehash_capacity)
+{
+    const auto audit =
+        AssessQ96FixedOffsetTapeDomainV1();
+    BOOST_REQUIRE_MESSAGE(
+        audit.valid_capacity_audit,
+        audit.note);
+    BOOST_CHECK_EQUAL(
+        audit.semantic_field_families, 60U);
+    BOOST_CHECK_EQUAL(audit.query_count, 96U);
+    BOOST_CHECK_EQUAL(audit.trace_columns, 1750U);
+    BOOST_CHECK_EQUAL(audit.base_columns, 330U);
+    BOOST_CHECK_EQUAL(audit.fold_layers, 20U);
+    BOOST_CHECK_EQUAL(audit.row_path_depth, 24U);
+    BOOST_CHECK_EQUAL(
+        audit.common_value_words, 23506U);
+    BOOST_CHECK_EQUAL(
+        audit.current_query_value_words, 16051U);
+    BOOST_CHECK_EQUAL(
+        audit.next_query_value_words, 10889U);
+    BOOST_CHECK_EQUAL(
+        audit.total_value_words, 2609746U);
+    BOOST_CHECK_EQUAL(
+        audit.value_tape_bytes, 10438984U);
+    BOOST_CHECK_EQUAL(
+        audit.diagnostic_address_value_words,
+        5219498U);
+    BOOST_CHECK_EQUAL(
+        audit.full_tape_sponge_permutations,
+        326219U);
+    BOOST_CHECK_EQUAL(
+        audit.full_tape_round_rows, 9786570U);
+    BOOST_CHECK_EQUAL(
+        audit.q96_verifier_real_rows, 467808U);
+    BOOST_CHECK_EQUAL(
+        audit.q96_trace_row_headroom, 56480U);
+    BOOST_CHECK_EQUAL(
+        audit.q96_headroom_sponge_permutations,
+        1882U);
+    BOOST_CHECK_EQUAL(
+        audit.full_hash_permutation_excess,
+        324337U);
+    BOOST_CHECK_EQUAL(
+        audit.full_hash_round_row_excess,
+        9730090U);
+    BOOST_CHECK_EQUAL(
+        audit.combined_real_rows, 10254378U);
+    BOOST_CHECK_EQUAL(
+        audit.combined_trace_rows, 1U << 24);
+    BOOST_CHECK_EQUAL(
+        audit.combined_max_degree, 3U);
+    BOOST_CHECK_EQUAL(
+        audit.combined_max_composed_degree,
+        50331645U);
+    BOOST_CHECK_EQUAL(
+        audit.combined_quotient_len, 33554430U);
+    BOOST_CHECK_EQUAL(
+        audit.combined_coefficient_rows,
+        1U << 25);
+    BOOST_CHECK_EQUAL(
+        audit.combined_lde_rows,
+        uint64_t{1} << 29);
+    BOOST_CHECK_EQUAL(
+        audit.combined_lde_excess,
+        520093696U);
+    BOOST_CHECK_EQUAL(
+        audit.combined_lde_over_cap_factor,
+        32U);
+    BOOST_CHECK(audit.exact_fixed_shape_inventory);
+    BOOST_CHECK(
+        audit.implicit_offsets_remove_address_words);
+    BOOST_CHECK(!audit.full_tape_hash_fits_q96);
+    BOOST_CHECK(audit.monolithic_full_hash_rejected);
+    BOOST_CHECK(!audit.full_child_tape_hash_required);
+    BOOST_CHECK(
+        audit.parent_trace_commitment_binding_model);
+    BOOST_CHECK(
+        audit.public_child_statement_binding_required);
+    BOOST_CHECK(
+        audit.in_parent_child_acceptance_required);
+    BOOST_CHECK(
+        audit.attachment_identity_uses_parent_proof_hash);
+    BOOST_CHECK(
+        audit.no_tape_hash_route_capacity_viable);
+    BOOST_CHECK(
+        audit.parent_witness_commitment_route_required);
+    BOOST_CHECK(
+        !audit.fixed_offset_equality_bus_executable);
+    BOOST_CHECK(!audit.child_acceptance_executable);
+    BOOST_CHECK(!audit.recursive_authority_ready);
+    BOOST_TEST_MESSAGE(
+        "V11_Q96_FIXED_TAPE values=2609746"
+        " bytes=10438984"
+        " common=23506"
+        " current_per_q=16051"
+        " next_per_q=10889"
+        " full_hash_perms=326219"
+        " headroom_perms=1882"
+        " combined_trace=2^24"
+        " combined_lde=2^29"
+        " route=parent_witness_fixed_offset_bus"
+        " bus=0 acceptance=0 authority=0");
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace matmul::v4::rc::stage3_multirow_v11_specialized_chips

@@ -337,6 +337,64 @@ struct StaticVerifierDomainAuditV1 {
 [[nodiscard]] StaticVerifierDomainAuditV1
 AssessStaticVerifierDomainV1();
 
+/**
+ * Exact value-only tape inventory for the proposed fixed-shape Q96 child.
+ *
+ * Source addresses are implicit in immutable offsets, so the tape carries one
+ * canonical u32 value per ABI source cell rather than the V11 diagnostic
+ * codec's [address,value] pair.  The audit also costs the tempting but wrong
+ * construction that re-hashes the entire tape inside the Q96 parent.
+ */
+struct FixedOffsetTapeDomainAuditV1 {
+    uint32_t semantic_field_families{0};
+    uint32_t query_count{0};
+    uint32_t trace_columns{0};
+    uint32_t base_columns{0};
+    uint32_t fold_layers{0};
+    uint32_t row_path_depth{0};
+    uint64_t common_value_words{0};
+    uint64_t current_query_value_words{0};
+    uint64_t next_query_value_words{0};
+    uint64_t total_value_words{0};
+    uint64_t value_tape_bytes{0};
+    uint64_t diagnostic_address_value_words{0};
+    uint64_t full_tape_sponge_permutations{0};
+    uint64_t full_tape_round_rows{0};
+    uint64_t q96_verifier_real_rows{0};
+    uint64_t q96_trace_row_headroom{0};
+    uint64_t q96_headroom_sponge_permutations{0};
+    uint64_t full_hash_permutation_excess{0};
+    uint64_t full_hash_round_row_excess{0};
+    uint64_t combined_real_rows{0};
+    uint32_t combined_trace_rows{0};
+    uint32_t combined_max_degree{0};
+    uint64_t combined_max_composed_degree{0};
+    uint64_t combined_quotient_len{0};
+    uint32_t combined_coefficient_rows{0};
+    uint64_t combined_lde_rows{0};
+    uint64_t combined_lde_excess{0};
+    uint32_t combined_lde_over_cap_factor{0};
+    bool exact_fixed_shape_inventory{false};
+    bool implicit_offsets_remove_address_words{false};
+    bool full_tape_hash_fits_q96{false};
+    bool monolithic_full_hash_rejected{false};
+    bool full_child_tape_hash_required{true};
+    bool parent_trace_commitment_binding_model{false};
+    bool public_child_statement_binding_required{false};
+    bool in_parent_child_acceptance_required{false};
+    bool attachment_identity_uses_parent_proof_hash{false};
+    bool no_tape_hash_route_capacity_viable{false};
+    bool parent_witness_commitment_route_required{false};
+    bool fixed_offset_equality_bus_executable{false};
+    bool child_acceptance_executable{false};
+    bool recursive_authority_ready{false};
+    bool valid_capacity_audit{false};
+    std::string note;
+};
+
+[[nodiscard]] FixedOffsetTapeDomainAuditV1
+AssessQ96FixedOffsetTapeDomainV1();
+
 inline constexpr bool kSpecializedVerifierChipsExecutableV1 = true;
 inline constexpr bool kSpecializedRecursiveReceiptConsumptionReadyV1 = false;
 inline constexpr bool kSpecializedRecursiveAuthorityReadyV1 = false;

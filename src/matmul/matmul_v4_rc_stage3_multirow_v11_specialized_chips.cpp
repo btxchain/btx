@@ -2124,4 +2124,233 @@ AssessStaticVerifierDomainV1()
     return out;
 }
 
+FixedOffsetTapeDomainAuditV1
+AssessQ96FixedOffsetTapeDomainV1()
+{
+    FixedOffsetTapeDomainAuditV1 out;
+
+    /*
+     * Proposed V12 fixed shape.  The 330 R0 columns are exactly the static
+     * round chip's 316 schedule/matrix columns plus the split chip's fourteen
+     * schedule columns.  Retained relation constants live in canonical
+     * bytecode and therefore do not consume proof tape cells.
+     */
+    constexpr uint64_t q = 96;
+    constexpr uint64_t width = 1750;
+    constexpr uint64_t base = 330;
+    constexpr uint64_t folds = 20;
+    constexpr uint64_t depth = 24;
+    constexpr uint64_t rate = alg_hash::kAlgHashRate;
+    constexpr uint64_t rounds = kPoseidonRoundsV1;
+    constexpr uint64_t header_words =
+        stage3_multirow_v11_proof_abi::
+            kFieldAbiHeaderWordsV1;
+
+    out.semantic_field_families =
+        static_cast<uint32_t>(
+            stage3_multirow_v11_proof_abi::
+                FieldKindV1::NextRowSibling);
+    out.query_count = static_cast<uint32_t>(q);
+    out.trace_columns =
+        static_cast<uint32_t>(width);
+    out.base_columns =
+        static_cast<uint32_t>(base);
+    out.fold_layers =
+        static_cast<uint32_t>(folds);
+    out.row_path_depth =
+        static_cast<uint32_t>(depth);
+
+    /*
+     * This is the closed form of proof_abi::Walk:
+     *
+     * common = 126 + 15F + B + 13W
+     * current/query =
+     *   15 + 6W + 24D + 16F + 16FD - 8F(F-1)
+     * next/query = 5 + 6W + 16D
+     *
+     * F=log2(n_coeffs), D=log2(n_coeffs*blowup).  Each Fp3 is
+     * six canonical u32 words and each digest is eight.
+     */
+    out.common_value_words =
+        126 + 15 * folds + base + 13 * width;
+    out.current_query_value_words =
+        15 + 6 * width + 24 * depth +
+        16 * folds + 16 * folds * depth -
+        8 * folds * (folds - 1);
+    out.next_query_value_words =
+        5 + 6 * width + 16 * depth;
+    out.total_value_words =
+        out.common_value_words +
+        q * (
+            out.current_query_value_words +
+            out.next_query_value_words);
+    out.value_tape_bytes =
+        out.total_value_words * sizeof(uint32_t);
+    out.diagnostic_address_value_words =
+        header_words + 2 * out.total_value_words;
+    out.full_tape_sponge_permutations =
+        (out.total_value_words + 1 + rate - 1) /
+        rate;
+    out.full_tape_round_rows =
+        out.full_tape_sponge_permutations *
+        rounds;
+
+    const auto verifier =
+        AssessStaticVerifierDomainV1();
+    out.q96_verifier_real_rows =
+        verifier.domain.real_rows;
+    out.q96_trace_row_headroom =
+        verifier.domain.trace_rows >
+            verifier.domain.real_rows
+        ? verifier.domain.trace_rows -
+            verifier.domain.real_rows
+        : 0;
+    out.q96_headroom_sponge_permutations =
+        out.q96_trace_row_headroom / rounds;
+    out.full_hash_permutation_excess =
+        out.full_tape_sponge_permutations >
+            out.q96_headroom_sponge_permutations
+        ? out.full_tape_sponge_permutations -
+            out.q96_headroom_sponge_permutations
+        : 0;
+    out.full_hash_round_row_excess =
+        out.full_tape_round_rows >
+            out.q96_trace_row_headroom
+        ? out.full_tape_round_rows -
+            out.q96_trace_row_headroom
+        : 0;
+    out.combined_real_rows =
+        out.q96_verifier_real_rows +
+        out.full_tape_round_rows;
+
+    uint64_t trace_rows = 1;
+    while (trace_rows <
+           out.combined_real_rows) {
+        trace_rows <<= 1;
+    }
+    out.combined_trace_rows =
+        trace_rows <=
+            std::numeric_limits<uint32_t>::max()
+        ? static_cast<uint32_t>(trace_rows)
+        : 0;
+    out.combined_max_degree = 3;
+    if (out.combined_trace_rows != 0) {
+        out.combined_max_composed_degree =
+            uint64_t{out.combined_max_degree} *
+            (out.combined_trace_rows - 1);
+        out.combined_quotient_len =
+            out.combined_max_composed_degree -
+            out.combined_trace_rows + 1;
+        uint64_t coefficient_rows = 1;
+        while (coefficient_rows <
+               std::max<uint64_t>(
+                   out.combined_trace_rows,
+                   out.combined_quotient_len)) {
+            coefficient_rows <<= 1;
+        }
+        if (coefficient_rows <=
+            std::numeric_limits<uint32_t>::max()) {
+            out.combined_coefficient_rows =
+                static_cast<uint32_t>(
+                    coefficient_rows);
+            out.combined_lde_rows =
+                coefficient_rows *
+                np::kFriBlowupV1;
+        }
+    }
+    out.combined_lde_excess =
+        out.combined_lde_rows >
+            np::kLdeRowsCapV1
+        ? out.combined_lde_rows -
+            np::kLdeRowsCapV1
+        : 0;
+    out.combined_lde_over_cap_factor =
+        out.combined_lde_rows != 0 &&
+            out.combined_lde_rows %
+                np::kLdeRowsCapV1 == 0
+        ? static_cast<uint32_t>(
+            out.combined_lde_rows /
+            np::kLdeRowsCapV1)
+        : 0;
+
+    out.exact_fixed_shape_inventory =
+        out.semantic_field_families == 60 &&
+        out.common_value_words == 23506 &&
+        out.current_query_value_words == 16051 &&
+        out.next_query_value_words == 10889 &&
+        out.total_value_words == 2609746;
+    out.implicit_offsets_remove_address_words =
+        out.diagnostic_address_value_words ==
+            header_words +
+            2 * out.total_value_words;
+    out.full_tape_hash_fits_q96 =
+        out.full_tape_sponge_permutations <=
+            out.q96_headroom_sponge_permutations &&
+        out.combined_lde_rows <=
+            np::kLdeRowsCapV1;
+    out.monolithic_full_hash_rejected =
+        !out.full_tape_hash_fits_q96 &&
+        out.full_tape_sponge_permutations >
+            out.q96_headroom_sponge_permutations &&
+        out.combined_lde_rows >
+            np::kLdeRowsCapV1;
+
+    /*
+     * No second hash is needed in the final construction: the parent STARK
+     * already commits every ordinary witness column.  What is still missing
+     * is the static offset schedule plus equality constraints from each
+     * consumer cell to its unique tape cell.  Keep that distinction
+     * fail-closed until the bus and proof-level re-entry exist.
+     */
+    out.full_child_tape_hash_required = false;
+    out.parent_trace_commitment_binding_model = true;
+    out.public_child_statement_binding_required = true;
+    out.in_parent_child_acceptance_required = true;
+    out.attachment_identity_uses_parent_proof_hash = true;
+    out.no_tape_hash_route_capacity_viable =
+        verifier.valid_capacity_foundation;
+    out.parent_witness_commitment_route_required = true;
+    out.fixed_offset_equality_bus_executable = false;
+    out.child_acceptance_executable = false;
+    out.recursive_authority_ready = false;
+    out.valid_capacity_audit =
+        verifier.valid_capacity_foundation &&
+        out.exact_fixed_shape_inventory &&
+        out.implicit_offsets_remove_address_words &&
+        out.monolithic_full_hash_rejected &&
+        !out.full_child_tape_hash_required &&
+        out.parent_trace_commitment_binding_model &&
+        out.public_child_statement_binding_required &&
+        out.in_parent_child_acceptance_required &&
+        out.attachment_identity_uses_parent_proof_hash &&
+        out.no_tape_hash_route_capacity_viable &&
+        out.parent_witness_commitment_route_required &&
+        !out.fixed_offset_equality_bus_executable &&
+        !out.child_acceptance_executable &&
+        !out.recursive_authority_ready;
+    out.note = out.valid_capacity_audit
+        ? "stage3:v11_specialized:"
+          "q96_fixed_tape_exact;"
+          "monolithic_hash_rejected;"
+          "parent_witness_equality_bus_pending"
+        : "stage3:v11_specialized:"
+          "q96_fixed_tape_audit_failure:"
+          "exact=" +
+          std::to_string(
+              out.exact_fixed_shape_inventory
+              ? 1 : 0) +
+          ":hash_fits=" +
+          std::to_string(
+              out.full_tape_hash_fits_q96
+              ? 1 : 0) +
+          ":hash_rejected=" +
+          std::to_string(
+              out.monolithic_full_hash_rejected
+              ? 1 : 0) +
+          ":combined_lde=" +
+          std::to_string(
+              out.combined_lde_rows);
+    return out;
+}
+
 } // namespace matmul::v4::rc::stage3_multirow_v11_specialized_chips
