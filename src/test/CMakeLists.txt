@@ -218,6 +218,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_multirow_v11_acceptance_bytecode_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_backend_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_parent_join_tests.cpp
+  matmul_v4_rc_stage3_air_parent_composer_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_decoder_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_tests.cpp
