@@ -144,11 +144,11 @@ BOOST_AUTO_TEST_CASE(required_statement_makes_coupled_additive)
     BOOST_CHECK(*rc::RequiredRCStage3Statement(params, HEIGHT) ==
                 rc::RCStage3StatementKind::Composed);
 
-    // Coupled-only activation still selects Composed, then binding fails
-    // closed because the episode leg is not active.
+    // A coupled-only configuration is not a consensus profile: the composed
+    // lottery requires the resident episode leg to be active too.
     params.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
-    BOOST_CHECK(*rc::RequiredRCStage3Statement(params, HEIGHT) ==
-                rc::RCStage3StatementKind::Composed);
+    BOOST_CHECK(
+        !rc::RequiredRCStage3Statement(params, HEIGHT).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(header_projection_avoids_final_digest_fixed_point)
