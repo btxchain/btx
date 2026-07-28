@@ -1503,6 +1503,220 @@ BOOST_AUTO_TEST_CASE(
             base_indices, seed, &why));
 }
 
+BOOST_AUTO_TEST_CASE(
+    split_rap_safe_fixed_v3_pins_complete_fixed_oracle)
+{
+    constexpr uint32_t N = 8;
+    const uint256 seed = MakeSeed(0xa7);
+    std::vector<std::vector<gf::Fp3>> columns(
+        3, std::vector<gf::Fp3>(
+               N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[0][row] =
+            gf::Fp3::FromFp(
+                gf::FromU64(11 + row));
+        columns[1][row] =
+            gf::Add(
+                columns[0][row],
+                columns[0][row]);
+        if (row + 1 < N) {
+            columns[2][row + 1] =
+                gf::Add(
+                    columns[2][row],
+                    columns[1][row]);
+        }
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    cs.n_rows = N;
+    cs.n_columns = 3;
+    aq::AirConstraint<gf::Fp3> relation;
+    relation.name =
+        "test.fixed_v3.derived_value";
+    relation.kind =
+        aq::AirKind::kEverywhere;
+    relation.alg_degree = 1;
+    relation.eval =
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>&) {
+            return gf::Sub(
+                cur[1],
+                gf::Add(cur[0], cur[0]));
+        };
+    cs.constraints.push_back(
+        std::move(relation));
+    aq::AirConstraint<gf::Fp3> first;
+    first.name =
+        "test.fixed_v3.accumulator_first";
+    first.kind =
+        aq::AirKind::kFirstRow;
+    first.alg_degree = 1;
+    first.eval =
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>&) {
+            return cur[2];
+        };
+    cs.constraints.push_back(std::move(first));
+    aq::AirConstraint<gf::Fp3> transition;
+    transition.name =
+        "test.fixed_v3.accumulator_transition";
+    transition.kind =
+        aq::AirKind::kTransition;
+    transition.alg_degree = 1;
+    transition.eval =
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>& next) {
+            return gf::Sub(
+                next[2],
+                gf::Add(cur[2], cur[1]));
+        };
+    cs.constraints.push_back(
+        std::move(transition));
+
+    const std::vector<uint32_t> fixed_columns{0};
+    const auto retained =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            cs, columns, fixed_columns);
+    BOOST_REQUIRE_MESSAGE(
+        retained.valid, retained.note);
+    const aq::AirQuotientFixedTracePinV3 fixed{
+        .version = 1,
+        .ordered_columns = fixed_columns,
+        .row_root = retained.base_row_commitment,
+    };
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeFixedV3(
+            cs, columns, fixed, seed, {},
+            &retained);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok, proved.note);
+    BOOST_CHECK(proved.division_exact);
+    BOOST_CHECK_EQUAL(
+        proved.proof.version,
+        aq::
+            kAirQuotientSplitRapRowsSafeFixedProofVersionV3);
+    BOOST_CHECK_EQUAL(
+        proved.proof.batch.version,
+        rc::
+            kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13);
+    BOOST_CHECK(
+        cs.preprocessed.empty());
+    BOOST_CHECK(
+        !cs.preprocessed_pin_ood);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, proved.proof, fixed, seed, &why),
+        why);
+    aq::AirQuotientSplitRapSafeFixedReplayV3 replay;
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeFixedV3Replay(
+            cs, proved.proof, fixed, seed,
+            replay, &why),
+        why);
+    BOOST_CHECK(replay.native_verified);
+    BOOST_CHECK(
+        gf::Eq(
+            replay.air_lambda,
+            proved.proof.air_constraint_lambda));
+    BOOST_CHECK(!replay.fri_seed.IsNull());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, proved.proof, fixed_columns,
+            seed, &why));
+    auto v2_relabel = proved.proof;
+    v2_relabel.version =
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, v2_relabel, fixed_columns,
+            seed, &why));
+    auto wrong_fixed_columns = columns;
+    wrong_fixed_columns[0][0] =
+        gf::Add(
+            wrong_fixed_columns[0][0],
+            gf::Fp3::One());
+    const auto rejected_producer =
+        aq::AirQuotientProveRowsSplitRapSafeFixedV3(
+            cs, wrong_fixed_columns, fixed,
+            seed);
+    BOOST_CHECK(!rejected_producer.ok);
+    BOOST_CHECK_EQUAL(
+        rejected_producer.note,
+        "split_rap_prove:fixed_trace_root");
+
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE_GT(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            proved.proof, encoded),
+        0U);
+    const auto decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(
+            encoded);
+    BOOST_REQUIRE(decoded.has_value());
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, *decoded, fixed, seed, &why),
+        why);
+
+    // Proof-level fixed-value transplant: this is an authenticated current
+    // row cell in the designated FixedTrace group.
+    auto fixed_value_transplant = proved.proof;
+    fixed_value_transplant.batch.queries[0]
+        .group_rows[0].values[0] =
+        gf::Add(
+            fixed_value_transplant.batch.queries[0]
+                .group_rows[0].values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, fixed_value_transplant,
+            fixed, seed, &why));
+
+    // Proof-level fixed-root transplant: the verifier pin is independent of
+    // the proof and rejects before the transplanted root can seed FRI.
+    auto fixed_root_transplant = proved.proof;
+    fixed_root_transplant.batch.groups[0]
+        .row_commit.root[0] =
+        gf::Add(
+            fixed_root_transplant.batch.groups[0]
+                .row_commit.root[0],
+            gf::FromU64(1));
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, fixed_root_transplant,
+            fixed, seed, &why));
+
+    // Proof-level OOD transplant: V13 binds both full OOD vectors after all
+    // ordered group commitments, including every FixedTrace column.
+    auto fixed_ood_transplant = proved.proof;
+    fixed_ood_transplant.batch.evals_z1[0] =
+        gf::Add(
+            fixed_ood_transplant.batch.evals_z1[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, fixed_ood_transplant,
+            fixed, seed, &why));
+
+    auto wrong_public_pin = fixed;
+    wrong_public_pin.row_root.begin()[0] ^= 1U;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, proved.proof,
+            wrong_public_pin, seed, &why));
+
+    auto legacy_preprocessed_cs = cs;
+    legacy_preprocessed_cs.preprocessed.emplace_back(
+        0, columns[0]);
+    legacy_preprocessed_cs.preprocessed_pin_ood = true;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            legacy_preprocessed_cs, proved.proof,
+            fixed, seed, &why));
+}
+
 // ===========================================================================
 // PR-89: Poseidon2 route for the AIR challenge digest (NOT ACTIVATED).
 // ===========================================================================

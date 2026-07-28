@@ -2926,6 +2926,58 @@ bool DeriveSplitRapSafeFp3V2(
     return true;
 }
 
+bool DeriveSplitRapSafeDigestFixedV3(
+    const uint256& public_fs_seed,
+    const char* label,
+    const std::vector<uint256>& ordered_roots,
+    const std::vector<uint32_t>& extra,
+    alg_hash_typed::RoleV12 role,
+    alg_hash::Digest& out)
+{
+    namespace safe = safe_v12;
+    if (public_fs_seed.IsNull() ||
+        label == nullptr ||
+        !alg_hash_typed::IsKnownRoleV12(role)) {
+        return false;
+    }
+    static constexpr char kDomain[] =
+        "BTX_RC_AIRQ_SPLIT_RAP_SAFE_FIXED_V3";
+    const std::vector<uint8_t> application_domain(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+    const std::vector<Fp> message =
+        AirChallengeP2Lanes(
+            public_fs_seed, label,
+            ordered_roots, extra);
+    return safe::SafeCoreDigestV12(
+        role, application_domain,
+        message, out, nullptr, nullptr);
+}
+
+bool DeriveSplitRapSafeFp3FixedV3(
+    const uint256& public_fs_seed,
+    const char* label,
+    const std::vector<uint256>& ordered_roots,
+    const std::vector<uint32_t>& extra,
+    Fp3& out)
+{
+    alg_hash::Digest digest{};
+    if (!DeriveSplitRapSafeDigestFixedV3(
+            public_fs_seed, label,
+            ordered_roots, extra,
+            alg_hash_typed::RoleV12::
+                TranscriptAirLambda,
+            digest)) {
+        return false;
+    }
+    out = Fp3{
+        gkr_field::Canonical(digest[0]),
+        gkr_field::Canonical(digest[1]),
+        gkr_field::Canonical(digest[2])};
+    return true;
+}
+
 uint256 SplitRapSafeDigestToUint256(
     const alg_hash::Digest& digest)
 {
@@ -2969,6 +3021,44 @@ uint256 SplitRapFinalFriSeedSafeV2(
     if (!DeriveSplitRapSafeDigestV2(
             public_fs_seed,
             "airq_split_rap_fri_seed_safe_v2",
+            ordered_roots, extra,
+            alg_hash_typed::RoleV12::
+                TranscriptFriSeed,
+            digest)) {
+        return {};
+    }
+    return SplitRapSafeDigestToUint256(
+        digest);
+}
+
+uint256 SplitRapFinalFriSeedSafeFixedV3(
+    const uint256& public_fs_seed,
+    const std::vector<uint256>& ordered_roots,
+    uint32_t trace_rows,
+    uint32_t trace_columns,
+    uint32_t quotient_len,
+    uint32_t n_coeffs,
+    const AirQuotientFixedTracePinV3& fixed_trace)
+{
+    std::vector<uint32_t> extra;
+    extra.reserve(
+        6 + fixed_trace.ordered_columns.size());
+    extra.push_back(trace_rows);
+    extra.push_back(trace_columns);
+    extra.push_back(quotient_len);
+    extra.push_back(n_coeffs);
+    extra.push_back(
+        static_cast<uint32_t>(
+            fixed_trace.ordered_columns.size()));
+    extra.insert(
+        extra.end(),
+        fixed_trace.ordered_columns.begin(),
+        fixed_trace.ordered_columns.end());
+    extra.push_back(fixed_trace.version);
+    alg_hash::Digest digest{};
+    if (!DeriveSplitRapSafeDigestFixedV3(
+            public_fs_seed,
+            "airq_split_rap_fixed_trace_fri_seed_safe_v3",
             ordered_roots, extra,
             alg_hash_typed::RoleV12::
                 TranscriptFriSeed,
@@ -3213,7 +3303,9 @@ AirQuotientProveRowsSplitRapConfigured(
     const AirProveOptions& opt,
     const AirQuotientTwoEpochBaseRowSession*
         retained_r0,
-    bool use_safe_v2)
+    bool use_safe,
+    const AirQuotientFixedTracePinV3*
+        fixed_trace)
 {
     using T = AirField<Fp3>;
     AirQuotientSplitRapRowsProveResult out;
@@ -3228,6 +3320,21 @@ AirQuotientProveRowsSplitRapConfigured(
     if (opt.quotient_len_override != 0) {
         return fail(
             "quotient_len_override_unsupported");
+    }
+    const bool use_fixed_v3 =
+        fixed_trace != nullptr;
+    if (use_fixed_v3 &&
+        (fixed_trace->version != 1 ||
+         fixed_trace->ordered_columns.empty() ||
+         fixed_trace->row_root.IsNull() ||
+         !Fri3AlgDigestFromUint256(
+              fixed_trace->row_root)
+              .has_value() ||
+         !cs.preprocessed.empty() ||
+         cs.preprocessed_pin_ood ||
+         !cs.preprocessed_roots.empty() ||
+         !cs.preprocessed_row_group_roots.empty())) {
+        return fail("fixed_trace_public_input");
     }
 
     std::vector<std::vector<Fp3>> r0;
@@ -3244,6 +3351,11 @@ AirQuotientProveRowsSplitRapConfigured(
     const uint32_t N = cs.n_rows;
     const uint32_t W = cs.n_columns;
     const uint32_t Lq = cs.QuotientLen();
+    if (use_fixed_v3 &&
+        fixed_trace->ordered_columns !=
+            base_column_indices) {
+        return fail("fixed_trace_columns");
+    }
 
     std::shared_ptr<Fri3AlgRowTreeCache>
         r0_cache;
@@ -3278,6 +3390,10 @@ AirQuotientProveRowsSplitRapConfigured(
         r0_root =
             Fri3AlgDigestToUint256(
                 r0_cache->root);
+    }
+    if (use_fixed_v3 &&
+        r0_root != fixed_trace->row_root) {
+        return fail("fixed_trace_root");
     }
 
     auto rdep_cache =
@@ -3332,9 +3448,19 @@ AirQuotientProveRowsSplitRapConfigured(
         lambda_extra.end(),
         base_column_indices.begin(),
         base_column_indices.end());
+    if (use_fixed_v3) {
+        lambda_extra.push_back(
+            fixed_trace->version);
+    }
     Fp3 air_lambda;
     const bool lambda_ok =
-        use_safe_v2
+        use_fixed_v3
+        ? DeriveSplitRapSafeFp3FixedV3(
+              public_fs_seed,
+              "airq_split_rap_fixed_trace_constraint_safe_v3",
+              {r0_root, rdep_root},
+              lambda_extra, air_lambda)
+        : use_safe
         ? DeriveSplitRapSafeFp3V2(
               public_fs_seed,
               "airq_split_rap_constraint_safe_v2",
@@ -3501,7 +3627,12 @@ AirQuotientProveRowsSplitRapConfigured(
         ordered_roots{
             r0_root, rdep_root, rq_root};
     const uint256 fri_seed =
-        use_safe_v2
+        use_fixed_v3
+        ? SplitRapFinalFriSeedSafeFixedV3(
+              public_fs_seed, ordered_roots,
+              N, W, Lq, n_coeffs,
+              *fixed_trace)
+        : use_safe
         ? SplitRapFinalFriSeedSafeV2(
               public_fs_seed, ordered_roots,
               N, W, Lq, n_coeffs,
@@ -3531,7 +3662,7 @@ AirQuotientProveRowsSplitRapConfigured(
                 r0_cache, rdep_cache,
                 rq_cache};
     auto committed =
-        use_safe_v2
+        use_safe
         ? Fri3AlgMultiRowSafeQ192K2V13BatchCommitStreaming(
               groups, roles, fri_seed, 0,
               caches)
@@ -3589,7 +3720,9 @@ AirQuotientProveRowsSplitRapConfigured(
     }
 
     out.proof.version =
-        use_safe_v2
+        use_fixed_v3
+        ? kAirQuotientSplitRapRowsSafeFixedProofVersionV3
+        : use_safe
         ? kAirQuotientSplitRapRowsSafeProofVersionV2
         : kAirQuotientSplitRapRowsProofVersionV1;
     out.proof.trace_rows = N;
@@ -3620,7 +3753,10 @@ AirQuotientProveRowsSplitRapConfigured(
                 .group_row_tree_caches);
     out.ok = true;
     out.note = out.division_exact
-        ? use_safe_v2
+        ? use_fixed_v3
+              ? "split_rap_prove:"
+                "exact_safe_fixed_trace_v3"
+          : use_safe
               ? "split_rap_prove:"
                 "exact_safe_multi_row_v13"
               : "split_rap_prove:"
@@ -3643,7 +3779,7 @@ AirQuotientProveRowsSplitRap(
     return AirQuotientProveRowsSplitRapConfigured(
         cs, columns, base_column_indices,
         public_fs_seed, opt, retained_r0,
-        false);
+        false, nullptr);
 }
 
 AirQuotientSplitRapRowsProveResult
@@ -3659,7 +3795,24 @@ AirQuotientProveRowsSplitRapSafeV2(
     return AirQuotientProveRowsSplitRapConfigured(
         cs, columns, base_column_indices,
         public_fs_seed, opt, retained_r0,
-        true);
+        true, nullptr);
+}
+
+AirQuotientSplitRapRowsProveResult
+AirQuotientProveRowsSplitRapSafeFixedV3(
+    const AirConstraintSystem<Fp3>& cs,
+    const std::vector<std::vector<Fp3>>& columns,
+    const AirQuotientFixedTracePinV3& fixed_trace,
+    const uint256& public_fs_seed,
+    const AirProveOptions& opt,
+    const AirQuotientTwoEpochBaseRowSession*
+        retained_fixed_trace)
+{
+    return AirQuotientProveRowsSplitRapConfigured(
+        cs, columns, fixed_trace.ordered_columns,
+        public_fs_seed, opt,
+        retained_fixed_trace, true,
+        &fixed_trace);
 }
 
 bool AirQuotientVerifyRowsSplitRapConfigured(
@@ -3667,7 +3820,9 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
     const AirQuotientSplitRapRowsProof& proof,
     const std::vector<uint32_t>& expected_base_column_indices,
     const uint256& public_fs_seed,
-    bool use_safe_v2,
+    bool use_safe,
+    const AirQuotientFixedTracePinV3*
+        fixed_trace,
     std::string* why)
 {
     using T = AirField<Fp3>;
@@ -3682,10 +3837,16 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
         };
     const uint32_t N = cs.n_rows;
     const uint32_t W = cs.n_columns;
+    const bool use_fixed_v3 =
+        fixed_trace != nullptr;
+    const uint16_t expected_version =
+        use_fixed_v3
+        ? kAirQuotientSplitRapRowsSafeFixedProofVersionV3
+        : use_safe
+        ? kAirQuotientSplitRapRowsSafeProofVersionV2
+        : kAirQuotientSplitRapRowsProofVersionV1;
     if (proof.version !=
-            (use_safe_v2
-                 ? kAirQuotientSplitRapRowsSafeProofVersionV2
-                 : kAirQuotientSplitRapRowsProofVersionV1) ||
+            expected_version ||
         public_fs_seed.IsNull() ||
         N < 2 ||
         (N & (N - 1)) != 0 ||
@@ -3697,6 +3858,20 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
         proof.base_column_indices.size() >=
             W) {
         return fail("shape");
+    }
+    if (use_fixed_v3 &&
+        (fixed_trace->version != 1 ||
+         fixed_trace->ordered_columns !=
+             expected_base_column_indices ||
+         fixed_trace->row_root.IsNull() ||
+         !Fri3AlgDigestFromUint256(
+              fixed_trace->row_root)
+              .has_value() ||
+         !cs.preprocessed.empty() ||
+         cs.preprocessed_pin_ood ||
+         !cs.preprocessed_roots.empty() ||
+         !cs.preprocessed_row_group_roots.empty())) {
+        return fail("fixed_trace_public_input");
     }
     std::vector<uint8_t> is_base(W, 0);
     uint32_t previous = 0;
@@ -3774,6 +3949,10 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
         Fri3AlgDigestToUint256(
             batch.groups[2]
                 .row_commit.root);
+    if (use_fixed_v3 &&
+        r0_root != fixed_trace->row_root) {
+        return fail("fixed_trace_root");
+    }
     std::vector<uint32_t> lambda_extra{
         N, W, Lq, n_coeffs,
         static_cast<uint32_t>(
@@ -3783,9 +3962,19 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
         lambda_extra.end(),
         proof.base_column_indices.begin(),
         proof.base_column_indices.end());
+    if (use_fixed_v3) {
+        lambda_extra.push_back(
+            fixed_trace->version);
+    }
     Fp3 air_lambda;
     const bool lambda_ok =
-        use_safe_v2
+        use_fixed_v3
+        ? DeriveSplitRapSafeFp3FixedV3(
+              public_fs_seed,
+              "airq_split_rap_fixed_trace_constraint_safe_v3",
+              {r0_root, rdep_root},
+              lambda_extra, air_lambda)
+        : use_safe
         ? DeriveSplitRapSafeFp3V2(
               public_fs_seed,
               "airq_split_rap_constraint_safe_v2",
@@ -3803,7 +3992,13 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
         return fail("air_lambda");
     }
     const uint256 fri_seed =
-        use_safe_v2
+        use_fixed_v3
+        ? SplitRapFinalFriSeedSafeFixedV3(
+              public_fs_seed,
+              {r0_root, rdep_root, rq_root},
+              N, W, Lq, n_coeffs,
+              *fixed_trace)
+        : use_safe
         ? SplitRapFinalFriSeedSafeV2(
               public_fs_seed,
               {r0_root, rdep_root, rq_root},
@@ -3817,7 +4012,7 @@ bool AirQuotientVerifyRowsSplitRapConfigured(
     std::string fri_why;
     const bool fri_ok =
         !fri_seed.IsNull() &&
-        (use_safe_v2
+        (use_safe
              ? Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
                    batch, fri_seed, &fri_why)
              : Fri3AlgMultiRowBatchVerify(
@@ -4097,7 +4292,7 @@ bool AirQuotientVerifyRowsSplitRap(
 {
     return AirQuotientVerifyRowsSplitRapConfigured(
         cs, proof, expected_base_column_indices,
-        public_fs_seed, false, why);
+        public_fs_seed, false, nullptr, why);
 }
 
 bool AirQuotientVerifyRowsSplitRapSafeV2(
@@ -4109,7 +4304,146 @@ bool AirQuotientVerifyRowsSplitRapSafeV2(
 {
     return AirQuotientVerifyRowsSplitRapConfigured(
         cs, proof, expected_base_column_indices,
-        public_fs_seed, true, why);
+        public_fs_seed, true, nullptr, why);
+}
+
+bool AirQuotientVerifyRowsSplitRapSafeFixedV3(
+    const AirConstraintSystem<Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const AirQuotientFixedTracePinV3& fixed_trace,
+    const uint256& public_fs_seed,
+    std::string* why)
+{
+    return AirQuotientVerifyRowsSplitRapConfigured(
+        cs, proof, fixed_trace.ordered_columns,
+        public_fs_seed, true, &fixed_trace,
+        why);
+}
+
+bool AirQuotientVerifyRowsSplitRapSafeFixedV3Replay(
+    const AirConstraintSystem<Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const AirQuotientFixedTracePinV3& fixed_trace,
+    const uint256& public_fs_seed,
+    AirQuotientSplitRapSafeFixedReplayV3& out,
+    std::string* why)
+{
+    out = {};
+    std::string verify_why;
+    if (!AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            cs, proof, fixed_trace,
+            public_fs_seed, &verify_why)) {
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_fixed_replay:"
+                "verify:" + verify_why;
+        }
+        return false;
+    }
+    const uint32_t N = cs.n_rows;
+    const uint32_t W = cs.n_columns;
+    const uint32_t Lq = cs.QuotientLen();
+    const uint32_t n_coeffs =
+        proof.batch.n_coeffs;
+    const uint256 r0_root =
+        Fri3AlgDigestToUint256(
+            proof.batch.groups[0]
+                .row_commit.root);
+    const uint256 rdep_root =
+        Fri3AlgDigestToUint256(
+            proof.batch.groups[1]
+                .row_commit.root);
+    const uint256 rq_root =
+        Fri3AlgDigestToUint256(
+            proof.batch.groups[2]
+                .row_commit.root);
+    std::vector<uint32_t> extra{
+        N, W, Lq, n_coeffs,
+        static_cast<uint32_t>(
+            fixed_trace.ordered_columns.size())};
+    extra.insert(
+        extra.end(),
+        fixed_trace.ordered_columns.begin(),
+        fixed_trace.ordered_columns.end());
+    extra.push_back(fixed_trace.version);
+    out.air_lambda_message =
+        AirChallengeP2Lanes(
+            public_fs_seed,
+            "airq_split_rap_fixed_trace_constraint_safe_v3",
+            {r0_root, rdep_root}, extra);
+    if (!DeriveSplitRapSafeDigestFixedV3(
+            public_fs_seed,
+            "airq_split_rap_fixed_trace_constraint_safe_v3",
+            {r0_root, rdep_root}, extra,
+            alg_hash_typed::RoleV12::
+                TranscriptAirLambda,
+            out.air_lambda_digest)) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_fixed_replay:"
+                "air_lambda";
+        }
+        return false;
+    }
+    out.air_lambda = Fp3{
+        gkr_field::Canonical(
+            out.air_lambda_digest[0]),
+        gkr_field::Canonical(
+            out.air_lambda_digest[1]),
+        gkr_field::Canonical(
+            out.air_lambda_digest[2])};
+    if (!gkr_field::Eq(
+            out.air_lambda,
+            proof.air_constraint_lambda)) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_fixed_replay:"
+                "air_lambda_mismatch";
+        }
+        return false;
+    }
+    out.fri_seed_message =
+        AirChallengeP2Lanes(
+            public_fs_seed,
+            "airq_split_rap_fixed_trace_fri_seed_safe_v3",
+            {r0_root, rdep_root, rq_root}, extra);
+    if (!DeriveSplitRapSafeDigestFixedV3(
+            public_fs_seed,
+            "airq_split_rap_fixed_trace_fri_seed_safe_v3",
+            {r0_root, rdep_root, rq_root},
+            extra,
+            alg_hash_typed::RoleV12::
+                TranscriptFriSeed,
+            out.fri_seed_digest)) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_fixed_replay:"
+                "fri_seed";
+        }
+        return false;
+    }
+    out.fri_seed =
+        SplitRapSafeDigestToUint256(
+            out.fri_seed_digest);
+    if (out.fri_seed.IsNull()) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_fixed_replay:"
+                "null_fri_seed";
+        }
+        return false;
+    }
+    out.native_verified = true;
+    if (why != nullptr) {
+        *why =
+            "split_rap_safe_fixed_replay:"
+            "verified";
+    }
+    return true;
 }
 
 bool AirQuotientVerifyRowsSplitRapSafeV2Replay(
@@ -4376,11 +4710,14 @@ bool SplitRapCodecShape(
     const bool safe_v2 =
         proof.version ==
         kAirQuotientSplitRapRowsSafeProofVersionV2;
-    if ((!v1 && !safe_v2) ||
+    const bool safe_fixed_v3 =
+        proof.version ==
+        kAirQuotientSplitRapRowsSafeFixedProofVersionV3;
+    if ((!v1 && !safe_v2 && !safe_fixed_v3) ||
         (v1 &&
          proof.batch.version !=
              kRCFri3AlgMultiRowBatchProofVersion) ||
-        (safe_v2 &&
+        ((safe_v2 || safe_fixed_v3) &&
          proof.batch.version !=
              kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13) ||
         proof.trace_rows < 2 ||
@@ -4604,7 +4941,9 @@ DeserializeAirQuotientSplitRapRowsProof(
         (version !=
              kAirQuotientSplitRapRowsProofVersionV1 &&
          version !=
-             kAirQuotientSplitRapRowsSafeProofVersionV2) ||
+             kAirQuotientSplitRapRowsSafeProofVersionV2 &&
+         version !=
+             kAirQuotientSplitRapRowsSafeFixedProofVersionV3) ||
         !ReadLE32vChecked(
             p, end, proof.trace_rows) ||
         proof.trace_rows < 2 ||

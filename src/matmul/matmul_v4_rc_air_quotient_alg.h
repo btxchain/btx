@@ -448,6 +448,21 @@ inline constexpr uint16_t
 /** Additive typed SAFE outer transcript plus SAFE multi-row V13 backend. */
 inline constexpr uint16_t
     kAirQuotientSplitRapRowsSafeProofVersionV2 = 2;
+/**
+ * Additive verifier-pinned fixed-trace route.  The first ordered row group
+ * is interpreted as FixedTrace, and the distinct outer version/transcript
+ * domain prevents V2 proofs from being reinterpreted under these rules.
+ */
+inline constexpr uint16_t
+    kAirQuotientSplitRapRowsSafeFixedProofVersionV3 = 3;
+
+struct AirQuotientFixedTracePinV3 {
+    uint16_t version{1};
+    std::vector<uint32_t> ordered_columns;
+    uint256 row_root{};
+
+    bool operator==(const AirQuotientFixedTracePinV3&) const = default;
+};
 
 inline constexpr uint32_t
     kAirQuotientSplitRapRowsProofMagic =
@@ -509,6 +524,55 @@ AirQuotientProveRowsSplitRapSafeV2(
     const uint256& public_fs_seed,
     std::string* why = nullptr);
 
+/**
+ * SAFE V3 fixed-trace producer/verifier.
+ *
+ * This route rejects every legacy `cs.preprocessed*` mode.  The complete
+ * first Split-RAP row group is selected by `fixed_trace.ordered_columns` and
+ * pinned by exact row-root equality.  Its current/next row openings and both
+ * OOD evaluation vectors are authenticated by the nested SAFE V13 proof, so
+ * the verifier never regenerates the fixed columns or their OOD values.
+ *
+ * The caller must source `fixed_trace.row_root` from authenticated public
+ * statement/program data; this API never copies that root from the proof.
+ */
+[[nodiscard]] AirQuotientSplitRapRowsProveResult
+AirQuotientProveRowsSplitRapSafeFixedV3(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const AirQuotientFixedTracePinV3& fixed_trace,
+    const uint256& public_fs_seed,
+    const AirProveOptions& opt = {},
+    const AirQuotientTwoEpochBaseRowSession*
+        retained_fixed_trace = nullptr);
+
+[[nodiscard]] bool AirQuotientVerifyRowsSplitRapSafeFixedV3(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const AirQuotientFixedTracePinV3& fixed_trace,
+    const uint256& public_fs_seed,
+    std::string* why = nullptr);
+
+struct AirQuotientSplitRapSafeFixedReplayV3 {
+    std::vector<gkr_field::Fp> air_lambda_message;
+    std::vector<gkr_field::Fp> fri_seed_message;
+    alg_hash::Digest air_lambda_digest{};
+    alg_hash::Digest fri_seed_digest{};
+    gkr_field::Fp3 air_lambda{};
+    uint256 fri_seed{};
+    /** Set only after the complete unmodified SAFE FixedTrace V3 verifier. */
+    bool native_verified{false};
+};
+
+[[nodiscard]] bool
+AirQuotientVerifyRowsSplitRapSafeFixedV3Replay(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const AirQuotientFixedTracePinV3& fixed_trace,
+    const uint256& public_fs_seed,
+    AirQuotientSplitRapSafeFixedReplayV3& out,
+    std::string* why = nullptr);
+
 struct AirQuotientSplitRapSafeReplayV2 {
     std::vector<gkr_field::Fp> air_lambda_message;
     std::vector<gkr_field::Fp> fri_seed_message;
@@ -534,7 +598,7 @@ AirQuotientVerifyRowsSplitRapSafeV2Replay(
     AirQuotientSplitRapSafeReplayV2& out,
     std::string* why = nullptr);
 
-/** Canonical durable V1/V2 envelope for the complete current/next split-RAP
+/** Canonical durable V1/V2/V3 envelope for the complete current/next split-RAP
  * proof. It nests the version-matched canonical multi-row codec and pins the
  * exact two next-row groups at every one of its Q=192 query sites. */
 [[nodiscard]] size_t
