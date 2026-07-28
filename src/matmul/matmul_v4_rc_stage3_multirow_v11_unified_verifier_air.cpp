@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <functional>
+#include <iterator>
 #include <limits>
 
 namespace matmul::v4::rc::stage3_multirow_v11_unified_verifier_air {
@@ -66,6 +67,101 @@ bool ShapeExact(const PhaseViewV1& phase)
     return true;
 }
 
+struct BytecodeExprV1 {
+    std::vector<cb::Instruction> instructions;
+    std::vector<uint32_t> degrees;
+
+    uint32_t Current(uint32_t column)
+    {
+        cb::Instruction instruction;
+        instruction.opcode = cb::Opcode::Current;
+        instruction.lhs = column;
+        instructions.push_back(instruction);
+        degrees.push_back(1);
+        return static_cast<uint32_t>(
+            instructions.size() - 1);
+    }
+
+    uint32_t Constant(const Fp3& value)
+    {
+        cb::Instruction instruction;
+        instruction.opcode = cb::Opcode::Constant;
+        instruction.constant = value;
+        instructions.push_back(instruction);
+        degrees.push_back(0);
+        return static_cast<uint32_t>(
+            instructions.size() - 1);
+    }
+
+    uint32_t Binary(
+        cb::Opcode opcode,
+        uint32_t left,
+        uint32_t right)
+    {
+        cb::Instruction instruction;
+        instruction.opcode = opcode;
+        instruction.lhs = left;
+        instruction.rhs = right;
+        instructions.push_back(instruction);
+        degrees.push_back(
+            opcode == cb::Opcode::Mul
+            ? degrees[left] + degrees[right]
+            : std::max(degrees[left], degrees[right]));
+        return static_cast<uint32_t>(
+            instructions.size() - 1);
+    }
+
+    uint32_t Sub(uint32_t left, uint32_t right)
+    {
+        return Binary(cb::Opcode::Sub, left, right);
+    }
+
+    uint32_t Mul(uint32_t left, uint32_t right)
+    {
+        return Binary(cb::Opcode::Mul, left, right);
+    }
+};
+
+template <typename Build>
+void AppendBytecodeProgramV1(
+    cb::ProgramTable& table,
+    Build&& build)
+{
+    BytecodeExprV1 expression;
+    build(expression);
+    cb::Program program;
+    program.version =
+        cb::kConstraintBytecodeVersion;
+    program.role =
+        RCStage3RelationRole::CompositionLink;
+    program.constraint_ordinal =
+        static_cast<uint32_t>(
+            table.programs.size());
+    program.kind = aq::AirKind::kEverywhere;
+    program.declared_degree =
+        expression.degrees.back();
+    program.current_width =
+        table.current_width;
+    program.next_width =
+        table.next_width;
+    program.challenge_width = 0;
+    program.instructions =
+        std::move(expression.instructions);
+    table.programs.push_back(
+        std::move(program));
+}
+
+bool DigestNonzero(
+    const alg_hash::Digest& digest)
+{
+    for (const auto& limb : digest) {
+        if (gf::Canonical(limb) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<uint32_t> PreprocessedColumns(
     const aq::AirConstraintSystem<Fp3>& cs)
 {
@@ -101,12 +197,17 @@ void AddConstraint(
         std::move(out));
 }
 
-void AddSchedulerConstraints(
+bool AddSchedulerConstraints(
     const LayoutV1& layout,
-    aq::AirConstraintSystem<Fp3>& cs)
+    aq::AirConstraintSystem<Fp3>& cs,
+    alg_hash::Digest& acceptance_program_root,
+    std::string* why)
 {
-    AppendAcceptanceOutputConstraintsV1(
-        layout, cs);
+    if (!AppendAcceptanceOutputConstraintsV1(
+            layout, cs,
+            &acceptance_program_root, why)) {
+        return false;
+    }
     AddConstraint(
         cs,
         "stage3.v11_unified.active_boolean",
@@ -180,6 +281,7 @@ void AddSchedulerConstraints(
                 });
         }
     }
+    return true;
 }
 
 void AddGatedPhaseConstraint(
@@ -227,35 +329,86 @@ void AddGatedPhaseConstraint(
 
 } // namespace
 
-void AppendAcceptanceOutputConstraintsV1(
-    const LayoutV1& layout,
-    aq::AirConstraintSystem<Fp3>& cs)
+cb::ProgramTable BuildAcceptanceProgramTableV1(
+    const LayoutV1& layout)
 {
-    AddConstraint(
-        cs,
-        "stage3.v11_unified.acceptance_boolean",
-        aq::AirKind::kEverywhere, 2,
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = layout.n_columns;
+    table.next_width = layout.n_columns;
+    table.challenge_width = 0;
+    if (layout.n_columns == 0 ||
+        layout.acceptance >= layout.n_columns ||
+        layout.PhaseFirst(
+            PhaseV1::ParentJoin) >=
+            layout.n_columns) {
+        return table;
+    }
+    AppendBytecodeProgramV1(
+        table,
         [acceptance = layout.acceptance](
-            const auto& cur,
-            const auto&) {
-            return gf::Mul(
-                cur[acceptance],
-                gf::Sub(
-                    cur[acceptance],
-                    Fp3::One()));
+            BytecodeExprV1& expression) {
+            const uint32_t value =
+                expression.Current(acceptance);
+            const uint32_t one =
+                expression.Constant(Fp3::One());
+            const uint32_t value_minus_one =
+                expression.Sub(value, one);
+            expression.Mul(
+                value, value_minus_one);
         });
-    AddConstraint(
-        cs,
-        "stage3.v11_unified.acceptance_output",
-        aq::AirKind::kEverywhere, 1,
-        [layout](
-            const auto& cur,
-            const auto&) {
-            return gf::Sub(
-                cur[layout.acceptance],
-                cur[layout.PhaseFirst(
-                    PhaseV1::ParentJoin)]);
+    AppendBytecodeProgramV1(
+        table,
+        [acceptance = layout.acceptance,
+         parent_first =
+             layout.PhaseFirst(
+                 PhaseV1::ParentJoin)](
+            BytecodeExprV1& expression) {
+            expression.Sub(
+                expression.Current(acceptance),
+                expression.Current(parent_first));
         });
+    return table;
+}
+
+bool AppendAcceptanceOutputConstraintsV1(
+    const LayoutV1& layout,
+    aq::AirConstraintSystem<Fp3>& cs,
+    alg_hash::Digest* program_root,
+    std::string* why)
+{
+    const cb::ProgramTable table =
+        BuildAcceptanceProgramTableV1(layout);
+    aq::AirConstraintSystem<Fp3> adapter;
+    if (cs.n_columns != layout.n_columns ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            table, cs.n_rows, adapter, why) ||
+        adapter.n_columns != cs.n_columns ||
+        adapter.constraints.size() != 2) {
+        return false;
+    }
+    const auto root =
+        cb::CommitProgramTableAlgHash(table);
+    if (!DigestNonzero(root)) {
+        if (why != nullptr) {
+            *why =
+                "v11_unified_acceptance_program_root";
+        }
+        return false;
+    }
+    if (program_root != nullptr) {
+        *program_root = root;
+    }
+    cs.constraints.insert(
+        cs.constraints.end(),
+        std::make_move_iterator(
+            adapter.constraints.begin()),
+        std::make_move_iterator(
+            adapter.constraints.end()));
+    return true;
 }
 
 ProductV1 BuildProductV1(
@@ -570,8 +723,21 @@ ProductV1 BuildProductV1(
         out.layout.n_columns) {
         return fail("expected_pin_inventory");
     }
-    AddSchedulerConstraints(
-        out.layout, out.cs);
+    std::string scheduler_why;
+    if (!AddSchedulerConstraints(
+            out.layout, out.cs,
+            out.acceptance_program_root,
+            &scheduler_why)) {
+        return fail(
+            "acceptance_bytecode:" +
+            scheduler_why);
+    }
+    out.acceptance_program_constraints = 2;
+    out.acceptance_constraints_canonical_bytecode =
+        true;
+    out.acceptance_program_root_recomputed =
+        DigestNonzero(
+            out.acceptance_program_root);
 
     out.preprocessed_columns =
         PreprocessedColumns(out.cs);
@@ -696,17 +862,20 @@ ProductV1 BuildProductV1(
         out.acceptance_ordinary_witness &&
         out.acceptance_unique &&
         out.whole_verifier_acceptance_constrained &&
+        out.acceptance_constraints_canonical_bytecode &&
+        out.acceptance_program_root_recomputed &&
         out.trace_cap_fits &&
         out.lde_cap_fits &&
         out.violations == 0 &&
         out.cs_independent_of_child_witness &&
         out.verifier_input_excludes_child_proof &&
-        !out.direct_cross_phase_cell_carries_complete &&
+        out.direct_cross_phase_cell_carries_complete &&
         !out.recursive_authority_ready;
     out.note = out.valid_foundation
         ? "stage3:v11_unified_verifier:"
           "five_phase_vertical_split_rap;"
-          "direct_cross_phase_carries_open"
+          "acceptance_static_bytecode;"
+          "direct_cross_phase_carries_closed"
         : "stage3:v11_unified_verifier:"
           "constraint_failure";
     return out;

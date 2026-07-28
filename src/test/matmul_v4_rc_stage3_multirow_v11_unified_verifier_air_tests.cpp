@@ -263,8 +263,28 @@ BOOST_AUTO_TEST_CASE(
             PhaseV1::ParentJoin),
         columns[layout.PhaseFirst(
             PhaseV1::ParentJoin)]);
-    AppendAcceptanceOutputConstraintsV1(
-        layout, cs);
+    alg_hash::Digest acceptance_program_root{};
+    std::string bytecode_why;
+    BOOST_REQUIRE_MESSAGE(
+        AppendAcceptanceOutputConstraintsV1(
+            layout, cs,
+            &acceptance_program_root,
+            &bytecode_why),
+        bytecode_why);
+    const auto canonical_table =
+        BuildAcceptanceProgramTableV1(layout);
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            canonical_table,
+            &bytecode_why),
+        bytecode_why);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        2U);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            canonical_table) ==
+        acceptance_program_root);
 
     const std::vector<uint32_t> preprocessed{
         layout.PhaseFirst(
@@ -328,6 +348,75 @@ BOOST_AUTO_TEST_CASE(
     relocated[layout.acceptance][1] =
         gf::Fp3::One();
     require_rejected(std::move(relocated));
+
+    // Bytecode substitution attack: prove under a validly encoded but
+    // malicious table whose second relation is a-a=0, then verify the proof
+    // under the verifier-reconstructed canonical table.  The canonical
+    // verifier must reject at proof level; comparing program roots alone is
+    // not accepted as evidence.
+    auto substituted_table = canonical_table;
+    auto& output =
+        substituted_table.programs[1];
+    cb::Instruction left;
+    left.opcode = cb::Opcode::Current;
+    left.lhs = layout.acceptance;
+    cb::Instruction right = left;
+    cb::Instruction subtract;
+    subtract.opcode = cb::Opcode::Sub;
+    subtract.lhs = 0;
+    subtract.rhs = 1;
+    output.instructions = {
+        left, right, subtract};
+    output.declared_degree = 1;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table,
+            &bytecode_why),
+        bytecode_why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        acceptance_program_root);
+
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table,
+            cs.n_rows,
+            substituted_cs,
+            &bytecode_why),
+        bytecode_why);
+    substituted_cs.preprocessed_pin_ood = true;
+    substituted_cs.preprocessed =
+        cs.preprocessed;
+    auto substituted_columns = columns;
+    substituted_columns[
+        layout.acceptance][0] =
+            gf::Fp3::Zero();
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs,
+            substituted_columns),
+        0U);
+    const auto substituted_proof =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs,
+            substituted_columns,
+            preprocessed,
+            uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        substituted_proof.ok,
+        substituted_proof.note);
+    BOOST_REQUIRE(
+        substituted_proof.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs,
+            substituted_proof.proof,
+            preprocessed,
+            uint256::ONE,
+            &why));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -353,6 +442,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(product.acceptance_unique);
     BOOST_CHECK(
         product.whole_verifier_acceptance_constrained);
+    BOOST_CHECK(
+        product
+            .acceptance_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .acceptance_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.acceptance_program_constraints,
+        2U);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
     BOOST_CHECK_EQUAL(product.trace_columns, 1490U);
     BOOST_CHECK_EQUAL(

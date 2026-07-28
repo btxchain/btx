@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V11_UNIFIED_VERIFIER_AIR_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V11_UNIFIED_VERIFIER_AIR_H
 
+#include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_recursive_verifier.h>
 
 #include <array>
@@ -16,6 +17,7 @@ namespace matmul::v4::rc::stage3_multirow_v11_unified_verifier_air {
 
 namespace abi = stage3_multirow_v11_proof_abi;
 namespace aq = air_quotient;
+namespace cb = constraint_bytecode;
 namespace dj = stage3_multirow_v11_decoder_join;
 namespace dvm = stage3_multirow_v11_deep_vm;
 namespace gf = gkr_field;
@@ -118,6 +120,10 @@ struct ProductV1 {
     bool acceptance_ordinary_witness{false};
     bool acceptance_unique{false};
     bool whole_verifier_acceptance_constrained{false};
+    alg_hash::Digest acceptance_program_root{};
+    uint32_t acceptance_program_constraints{0};
+    bool acceptance_constraints_canonical_bytecode{false};
+    bool acceptance_program_root_recomputed{false};
     bool trace_cap_fits{false};
     bool lde_cap_fits{false};
     /** False: phase R0 columns currently contain child-proof values. */
@@ -132,10 +138,24 @@ struct ProductV1 {
     std::string note;
 };
 
-/** Append the production acceptance-output constraints to any compatible CS. */
-void AppendAcceptanceOutputConstraintsV1(
+/**
+ * Reconstruct the two production acceptance constraints as canonical,
+ * consensus-serializable bytecode.  The table contains no witness-derived
+ * constants and has a deterministic AlgHash root for a fixed LayoutV1.
+ */
+[[nodiscard]] cb::ProgramTable
+BuildAcceptanceProgramTableV1(const LayoutV1& layout);
+
+/**
+ * Append the production acceptance-output constraints through the canonical
+ * bytecode interpreter adapter.  No native constraint callback is a source of
+ * truth on this path.
+ */
+[[nodiscard]] bool AppendAcceptanceOutputConstraintsV1(
     const LayoutV1& layout,
-    aq::AirConstraintSystem<gf::Fp3>& cs);
+    aq::AirConstraintSystem<gf::Fp3>& cs,
+    alg_hash::Digest* program_root = nullptr,
+    std::string* why = nullptr);
 
 /**
  * Vertically concatenate parent-join, Merkle hash, fold, DEEP/VM and decoder
