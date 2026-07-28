@@ -129,6 +129,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_semantic_source_alg_tests.cpp
   matmul_v4_rc_stage3_episode_external_producer_aggregate_tests.cpp
   matmul_v4_rc_stage3_streaming_episode_closure_tests.cpp
+  matmul_v4_rc_stage3_extract_chacha_sampler_child_tests.cpp
   matmul_v4_rc_stage3_episode_gemm_openings_proof_owned_tests.cpp
   matmul_v4_rc_stage3_gkr_wireless_receipt_tests.cpp
   matmul_v4_rc_stage3_gkr_mle_adapter_tests.cpp

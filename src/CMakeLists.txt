@@ -635,6 +635,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_episode_semantic_source_alg.cpp
   matmul/matmul_v4_rc_stage3_episode_external_producer_aggregate.cpp
   matmul/matmul_v4_rc_stage3_streaming_episode_closure.cpp
+  matmul/matmul_v4_rc_stage3_extract_chacha_sampler_child.cpp
   matmul/matmul_v4_rc_stage3_episode_gemm_openings_proof_owned.cpp
   matmul/matmul_v4_rc_stage3_gkr_wireless_receipt.cpp
   matmul/matmul_v4_rc_stage3_gkr_mle_adapter.cpp
