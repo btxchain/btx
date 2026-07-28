@@ -1242,6 +1242,70 @@ bool BuildRCStage3EpisodeGemmDotConstraintSystem(
     return true;
 }
 
+bool BuildRCStage3EpisodeGemmDotWitnessColumnsV2(
+    const RCStage3GemmExtractLayerManifest& spec,
+    const RCStage3EpisodeGemmLayerProduct& layer,
+    uint64_t layer_tile,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeGemmDotPin& shape_pin,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.clear();
+    if (!ExpectedTileColumns(
+            spec, layer, layer_tile, extract,
+            shape_pin, out, why)) {
+        return false;
+    }
+    const uint32_t blocks_per_row =
+        spec.n / kRCMxBlockLen;
+    const uint32_t output_row =
+        layer_tile / blocks_per_row;
+    const uint32_t output_block =
+        layer_tile % blocks_per_row;
+    for (uint32_t lane = 0;
+         lane < kRCMxBlockLen; ++lane) {
+        const uint32_t output_column =
+            output_block * kRCMxBlockLen + lane;
+        int64_t accumulator = 0;
+        for (uint32_t contraction = 0;
+             contraction < spec.k; ++contraction) {
+            const uint32_t trace_row =
+                lane * spec.k + contraction;
+            const int64_t a = layer.operand_a[
+                uint64_t{output_row} * spec.k +
+                contraction];
+            const int64_t b = spec.b.transpose
+                ? layer.operand_b[
+                      uint64_t{output_column} *
+                          spec.k +
+                      contraction]
+                : layer.operand_b[
+                      uint64_t{contraction} *
+                          spec.n +
+                      output_column];
+            const int64_t product = a * b;
+            out[kRCStage3GemmDotProduct]
+                [trace_row] = S(product);
+            out[kRCStage3GemmDotAccumulatorBefore]
+                [trace_row] = S(accumulator);
+            accumulator += product;
+            out[kRCStage3GemmDotAccumulatorAfter]
+                [trace_row] = S(accumulator);
+        }
+    }
+    const bool shape_ok =
+        out.size() == kRCStage3GemmDotColumns &&
+        std::all_of(
+            out.begin(), out.end(),
+            [&shape_pin](const auto& column) {
+                return column.size() ==
+                    shape_pin.n_rows;
+            });
+    return shape_ok ||
+        Fail(why, "dot_v2_witness_shape");
+}
+
 bool VerifyRCStage3EpisodeGemmDotProof(
     const RCStage3EpisodeGemmDotPin& pin,
     const aq::AirQuotientProof<Fp3>& proof,
@@ -1629,50 +1693,11 @@ bool ProveRCStage3EpisodeGemmProduct(
             pin.n_coeffs = pin.n_rows;
             std::vector<std::vector<Fp3>> columns;
             if (pin.n_rows == 0 ||
-                !ExpectedTileColumns(
+                !BuildRCStage3EpisodeGemmDotWitnessColumnsV2(
                     spec, layer, tile_index,
                     extract, pin, columns, why)) {
                 out = {};
                 return Fail(why, "prove_dot_columns");
-            }
-            const uint32_t blocks_per_row =
-                spec.n / kRCMxBlockLen;
-            const uint32_t output_row =
-                tile_index / blocks_per_row;
-            const uint32_t output_block =
-                tile_index % blocks_per_row;
-            for (uint32_t lane = 0;
-                 lane < kRCMxBlockLen; ++lane) {
-                const uint32_t output_column =
-                    output_block * kRCMxBlockLen + lane;
-                int64_t accumulator = 0;
-                for (uint32_t contraction = 0;
-                     contraction < spec.k; ++contraction) {
-                    const uint32_t trace_row =
-                        lane * spec.k + contraction;
-                    const int64_t a = layer.operand_a[
-                        uint64_t{output_row} * spec.k +
-                        contraction];
-                    const int64_t b = spec.b.transpose
-                        ? layer.operand_b[
-                              uint64_t{output_column} *
-                                  spec.k +
-                              contraction]
-                        : layer.operand_b[
-                              uint64_t{contraction} *
-                                  spec.n +
-                              output_column];
-                    const int64_t product = a * b;
-                    columns[kRCStage3GemmDotProduct]
-                        [trace_row] = S(product);
-                    columns[
-                        kRCStage3GemmDotAccumulatorBefore]
-                        [trace_row] = S(accumulator);
-                    accumulator += product;
-                    columns[
-                        kRCStage3GemmDotAccumulatorAfter]
-                        [trace_row] = S(accumulator);
-                }
             }
             pin.column_roots.resize(columns.size());
             for (uint32_t column = 0;

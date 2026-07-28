@@ -43,6 +43,7 @@ Fixture BuildFixture(int8_t operand_a = 2)
     out.spec.gemm_cell_count = 64;
     out.spec.extract_tile_begin = 0;
     out.spec.extract_tile_count = 2;
+    out.spec.signed_max_abs = 1U << 20;
 
     std::string why;
     BOOST_REQUIRE_MESSAGE(
@@ -364,6 +365,121 @@ BOOST_AUTO_TEST_CASE(
             honest.shape, honest.bundle,
             source::kOperandASlotV1,
             honest_root, proof_attack, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    gemm_dot_safe_alg_r0_closes_A_and_B_without_sha_authority)
+{
+    const Fixture& fixture = SharedFixture();
+    for (uint32_t slot :
+         {source::kOperandASlotV1,
+          source::kOperandBSlotV1}) {
+        source::GemmDotExternalClosureV4 closure;
+        std::string why;
+        BOOST_REQUIRE_MESSAGE(
+            source::ProveGemmDotExternalClosureV4(
+                fixture.shape, fixture.spec,
+                fixture.layer, fixture.extract,
+                fixture.bundle, slot,
+                closure, &why),
+            why);
+        BOOST_CHECK_MESSAGE(
+            source::VerifyGemmDotExternalClosureV4(
+                fixture.shape, fixture.bundle,
+                slot, closure, &why),
+            why);
+        BOOST_CHECK(
+            closure.all_r0_before_challenge);
+        BOOST_CHECK(
+            closure.exact_producer_coverage);
+        BOOST_CHECK(
+            closure.exact_consumer_coverage);
+        BOOST_CHECK(
+            closure.proof_owned_terminal_cancellation);
+        BOOST_CHECK(
+            !closure.producer_authority_commitment
+                 .IsNull());
+        BOOST_REQUIRE(
+            !closure.producer_children.empty());
+        for (const auto& child :
+             closure.producer_children) {
+            BOOST_REQUIRE_EQUAL(
+                child.proof.batch.groups.size(),
+                3U);
+            BOOST_CHECK_EQUAL(
+                child.proof.batch.groups[0]
+                    .column_count,
+                8U);
+            BOOST_CHECK(
+                rc::Fri3AlgDigestToUint256(
+                    child.proof.batch.groups[0]
+                        .row_commit.root) ==
+                child.owning_r0_root);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    gemm_dot_safe_alg_rejects_valid_alternate_r0_transplant)
+{
+    const Fixture honest = BuildFixture(2);
+    const Fixture alternate = BuildFixture(-3);
+    source::GemmDotExternalClosureV4 honest_closure;
+    source::GemmDotExternalClosureV4 alternate_closure;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        source::ProveGemmDotExternalClosureV4(
+            honest.shape, honest.spec,
+            honest.layer, honest.extract,
+            honest.bundle,
+            source::kOperandASlotV1,
+            honest_closure, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        source::ProveGemmDotExternalClosureV4(
+            alternate.shape, alternate.spec,
+            alternate.layer, alternate.extract,
+            alternate.bundle,
+            source::kOperandASlotV1,
+            alternate_closure, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        source::VerifyGemmDotExternalClosureV4(
+            honest.shape, honest.bundle,
+            source::kOperandASlotV1,
+            honest_closure, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        source::VerifyGemmDotExternalClosureV4(
+            alternate.shape, alternate.bundle,
+            source::kOperandASlotV1,
+            alternate_closure, &why),
+        why);
+
+    auto attack = honest_closure;
+    BOOST_REQUIRE(
+        !attack.producer_children.empty());
+    BOOST_REQUIRE(
+        !alternate_closure
+             .producer_children.empty());
+    attack.producer_children[0].proof =
+        alternate_closure
+            .producer_children[0].proof;
+    attack.producer_children[0]
+        .proof_commitment =
+        alternate_closure
+            .producer_children[0]
+            .proof_commitment;
+    why.clear();
+    BOOST_CHECK(
+        !source::VerifyGemmDotExternalClosureV4(
+            honest.shape, honest.bundle,
+            source::kOperandASlotV1,
+            attack, &why));
+    BOOST_CHECK(
+        why.find(
+            "gemm_dot_v4_verify_producer_binding_0") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(

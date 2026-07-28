@@ -328,6 +328,60 @@ struct ExternalProducerClosureV3 {
     const ExternalProducerClosureV3& closure,
     std::string* why = nullptr);
 
+inline constexpr uint16_t
+    kGemmDotExternalClosureVersionV4 = 4;
+
+/**
+ * SAFE Alg migration of the actual GEMM-dot relation into the semantic CTL
+ * epoch.  Each producer child keeps the canonical GEMM input group
+ * [ACTIVE,START,END,A,B,Y,RESIDUAL,EXTRACT_INPUT] as R0 and places only
+ * PRODUCT/ACCUMULATOR plus CTL columns in Rdep.  The legacy SHA column roots
+ * are neither asserted equal nor used as authority.
+ */
+struct GemmDotExternalClosureV4 {
+    uint16_t version{
+        kGemmDotExternalClosureVersionV4};
+    RCStage3RelationEndpoint endpoint{};
+    uint32_t projection_slot{0};
+    LayerShapeV1 shape;
+    uint256 producer_authority_commitment{};
+    RCStage3CtlManifest manifest;
+    RCStage3CtlChallenges challenges;
+    std::vector<ExternalProducerCtlChildV3>
+        consumer_children;
+    std::vector<ExternalProducerCtlChildV3>
+        producer_children;
+    uint256 closure_commitment{};
+    bool all_r0_before_challenge{false};
+    bool exact_producer_coverage{false};
+    bool exact_consumer_coverage{false};
+    bool proof_owned_terminal_cancellation{false};
+};
+
+/**
+ * Prover witness is reconstructed from the captured GEMM product, but the
+ * resulting verifier consumes only the migrated SAFE proof objects and the
+ * public layer shape. Legacy SHA roots are absent from both the V4 witness
+ * construction and its authority statement.
+ */
+[[nodiscard]] bool ProveGemmDotExternalClosureV4(
+    const LayerShapeV1& shape,
+    const RCStage3GemmExtractLayerManifest& spec,
+    const RCStage3EpisodeGemmLayerProduct& layer,
+    const RCStage3EpisodeExtractProduct& extract,
+    const LayerBundleV1& consumer_bundle,
+    uint32_t projection_slot,
+    GemmDotExternalClosureV4& out,
+    std::string* why = nullptr);
+
+/** Proof-only verifier for the migrated GEMM-input -> semantic-leaf edge. */
+[[nodiscard]] bool VerifyGemmDotExternalClosureV4(
+    const LayerShapeV1& expected_shape,
+    const LayerBundleV1& expected_consumer_bundle,
+    uint32_t expected_projection_slot,
+    const GemmDotExternalClosureV4& closure,
+    std::string* why = nullptr);
+
 [[nodiscard]] bool BuildLayerShapeV1(
     const uint256& statement_commitment,
     const uint256& gemm_manifest_commitment,

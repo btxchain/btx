@@ -288,6 +288,23 @@ void RCStage3EpisodeWitnessStoreClearForTest();
     const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
     std::string* why = nullptr);
 
+/**
+ * Reconstruct the exact eleven-column GEMM-dot witness used by the legacy
+ * proof, including PRODUCT/ACCUMULATOR_BEFORE/ACCUMULATOR_AFTER.
+ *
+ * This is a prover-only materialization seam for the SAFE Alg Split-RAP
+ * migration.  Verifiers reconstruct the constraint system and immutable row
+ * schedule from public shape; they never receive these vectors.
+ */
+[[nodiscard]] bool BuildRCStage3EpisodeGemmDotWitnessColumnsV2(
+    const RCStage3GemmExtractLayerManifest& spec,
+    const RCStage3EpisodeGemmLayerProduct& layer,
+    uint64_t layer_tile,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeGemmDotPin& shape_pin,
+    std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
 [[nodiscard]] uint256 ComputeRCStage3EpisodeGemmLayerReceiptCommitment(
     const RCStage3EpisodeGemmLayerProduct& layer);
 [[nodiscard]] uint256 ComputeRCStage3EpisodeGemmCollectionCommitment(

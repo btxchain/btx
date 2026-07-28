@@ -4974,4 +4974,1225 @@ bool VerifyExternalProducerClosureV3(
     return true;
 }
 
+namespace {
+
+enum GemmDotCtlMetadataColumnV4 : uint32_t {
+    kGemmDotCtlActiveV4 =
+        kRCStage3GemmDotColumns,
+    kGemmDotCtlEndpointV4,
+    kGemmDotCtlRoleV4,
+    kGemmDotCtlAddressV4,
+    kGemmDotRelationColumnsV4,
+};
+
+const std::vector<uint32_t>&
+GemmDotBaseColumnsV4()
+{
+    static const std::vector<uint32_t> columns{
+        kRCStage3GemmDotActive,
+        kRCStage3GemmDotStart,
+        kRCStage3GemmDotEnd,
+        kRCStage3GemmDotA,
+        kRCStage3GemmDotB,
+        kRCStage3GemmDotY,
+        kRCStage3GemmDotResidual,
+        kRCStage3GemmDotExtractInput,
+    };
+    return columns;
+}
+
+uint64_t GemmDotTileIndexV4(
+    const LayerShapeV1& shape,
+    uint32_t projection_slot,
+    uint32_t child_ordinal)
+{
+    const uint32_t blocks =
+        shape.n / kRCMxBlockLen;
+    if (blocks == 0) {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    if (projection_slot == kOperandASlotV1) {
+        return child_ordinal < shape.m
+            ? uint64_t{child_ordinal} * blocks
+            : std::numeric_limits<uint64_t>::max();
+    }
+    if (projection_slot == kOperandBSlotV1) {
+        return child_ordinal < blocks
+            ? child_ordinal
+            : std::numeric_limits<uint64_t>::max();
+    }
+    return std::numeric_limits<uint64_t>::max();
+}
+
+uint32_t GemmDotProducerChildCountV4(
+    const LayerShapeV1& shape,
+    uint32_t projection_slot)
+{
+    if (projection_slot == kOperandASlotV1) {
+        return shape.m;
+    }
+    if (projection_slot == kOperandBSlotV1) {
+        return shape.n / kRCMxBlockLen;
+    }
+    return 0;
+}
+
+uint64_t GemmDotProducerActiveRowsV4(
+    const LayerShapeV1& shape,
+    uint32_t projection_slot)
+{
+    if (projection_slot == kOperandASlotV1) {
+        return shape.k;
+    }
+    if (projection_slot == kOperandBSlotV1) {
+        return uint64_t{shape.k} *
+            kRCMxBlockLen;
+    }
+    return 0;
+}
+
+bool FillGemmDotFixedColumnsV4(
+    const LayerShapeV1& shape,
+    uint64_t tile_index,
+    uint32_t projection_slot,
+    std::vector<std::vector<Fp3>>& columns,
+    std::string* why)
+{
+    const uint32_t n_rows =
+        NextPowerOfTwo(
+            shape.k * kRCMxBlockLen);
+    const uint32_t blocks =
+        shape.n / kRCMxBlockLen;
+    if (projection_slot != kOperandASlotV1 &&
+        projection_slot != kOperandBSlotV1) {
+        return Fail(why, "gemm_dot_v4_endpoint");
+    }
+    if (n_rows == 0 || blocks == 0 ||
+        tile_index >= shape.tile_count ||
+        columns.size() <
+            kGemmDotRelationColumnsV4 ||
+        !std::all_of(
+            columns.begin(), columns.end(),
+            [n_rows](const auto& column) {
+                return column.size() == n_rows;
+            })) {
+        return Fail(why, "gemm_dot_v4_fixed_shape");
+    }
+    const auto& projection =
+        CanonicalSourceProjectionsV1()[
+            projection_slot];
+    const auto role =
+        RCStage3EpisodeEndpointRole(
+            projection.endpoint);
+    if (!role.has_value()) {
+        return Fail(why, "gemm_dot_v4_role");
+    }
+    const uint32_t output_row =
+        tile_index / blocks;
+    const uint32_t output_block =
+        tile_index % blocks;
+    for (uint32_t trace_row = 0;
+         trace_row < n_rows; ++trace_row) {
+        const bool relation_active =
+            trace_row <
+                shape.k * kRCMxBlockLen;
+        const uint32_t lane =
+            relation_active
+                ? trace_row / shape.k
+                : 0;
+        const uint32_t contraction =
+            relation_active
+                ? trace_row % shape.k
+                : 0;
+        if (relation_active) {
+            columns[
+                kRCStage3GemmDotActive]
+                [trace_row] = Fp3::One();
+            columns[
+                kRCStage3GemmDotStart]
+                [trace_row] =
+                U64(contraction == 0 ? 1 : 0);
+            columns[
+                kRCStage3GemmDotEnd]
+                [trace_row] =
+                U64(
+                    contraction + 1 ==
+                            shape.k
+                        ? 1
+                        : 0);
+        }
+        bool ctl_active = false;
+        uint64_t ordinal = 0;
+        if (projection_slot ==
+                kOperandASlotV1) {
+            ctl_active =
+                relation_active &&
+                output_block == 0 &&
+                lane == 0;
+            ordinal =
+                uint64_t{output_row} *
+                    shape.k +
+                contraction;
+        } else {
+            ctl_active =
+                relation_active &&
+                output_row == 0;
+            const uint32_t column =
+                output_block *
+                    kRCMxBlockLen +
+                lane;
+            ordinal = BOrdinal(
+                shape, column, contraction);
+        }
+        columns[kGemmDotCtlActiveV4]
+            [trace_row] =
+            U64(ctl_active ? 1 : 0);
+        columns[kGemmDotCtlEndpointV4]
+            [trace_row] =
+            U64(static_cast<uint16_t>(
+                projection.endpoint));
+        columns[kGemmDotCtlRoleV4]
+            [trace_row] =
+            U64(static_cast<uint16_t>(*role));
+        if (ctl_active) {
+            const uint64_t address =
+                episode_semantic_alg::
+                    CanonicalAddressV2(
+                        projection.endpoint,
+                        shape.layer_ordinal,
+                        ordinal);
+            if (address == 0) {
+                return Fail(
+                    why,
+                    "gemm_dot_v4_address");
+            }
+            columns[kGemmDotCtlAddressV4]
+                [trace_row] = U64(address);
+        }
+    }
+    return true;
+}
+
+AirCs BuildGemmDotRelationV4(
+    const LayerShapeV1& shape,
+    uint64_t tile_index,
+    uint32_t projection_slot)
+{
+    AirCs cs;
+    const uint32_t n_rows =
+        NextPowerOfTwo(
+            shape.k * kRCMxBlockLen);
+    if (n_rows == 0 ||
+        tile_index >= shape.tile_count ||
+        (projection_slot !=
+             kOperandASlotV1 &&
+         projection_slot !=
+             kOperandBSlotV1)) {
+        return cs;
+    }
+    cs.n_rows = n_rows;
+    cs.n_columns =
+        kGemmDotRelationColumnsV4;
+    cs.preprocessed_pin_ood = true;
+    std::vector<std::vector<Fp3>> fixed(
+        kGemmDotRelationColumnsV4,
+        std::vector<Fp3>(
+            n_rows, Fp3::Zero()));
+    if (!FillGemmDotFixedColumnsV4(
+            shape, tile_index,
+            projection_slot, fixed,
+            nullptr)) {
+        return {};
+    }
+    for (uint32_t column :
+         std::array<uint32_t, 7>{
+             kRCStage3GemmDotActive,
+             kRCStage3GemmDotStart,
+             kRCStage3GemmDotEnd,
+             kGemmDotCtlActiveV4,
+             kGemmDotCtlEndpointV4,
+             kGemmDotCtlRoleV4,
+             kGemmDotCtlAddressV4}) {
+        cs.preprocessed.push_back(
+            {column, fixed[column]});
+    }
+    const auto add =
+        [&cs](const char* name,
+              aq::AirKind kind,
+              uint32_t degree,
+              auto eval) {
+            cs.constraints.push_back(
+                {name, kind, degree,
+                 std::move(eval)});
+        };
+    for (uint32_t column : {
+             kRCStage3GemmDotActive,
+             kRCStage3GemmDotStart,
+             kRCStage3GemmDotEnd}) {
+        add(
+            "stage3.gemm_dot_v4.boolean",
+            aq::AirKind::kEverywhere, 2,
+            [column](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Mul(
+                    row[column],
+                    gf::Sub(
+                        row[column],
+                        Fp3::One()));
+            });
+    }
+    add(
+        "stage3.gemm_dot_v4.product",
+        aq::AirKind::kEverywhere, 2,
+        [](const auto& row, const auto&) {
+            return gf::Mul(
+                row[kRCStage3GemmDotActive],
+                gf::Sub(
+                    row[kRCStage3GemmDotProduct],
+                    gf::Mul(
+                        row[kRCStage3GemmDotA],
+                        row[kRCStage3GemmDotB])));
+        });
+    add(
+        "stage3.gemm_dot_v4.accumulate",
+        aq::AirKind::kEverywhere, 2,
+        [](const auto& row, const auto&) {
+            return gf::Mul(
+                row[kRCStage3GemmDotActive],
+                gf::Sub(
+                    row[
+                        kRCStage3GemmDotAccumulatorAfter],
+                    gf::Add(
+                        row[
+                            kRCStage3GemmDotAccumulatorBefore],
+                        row[
+                            kRCStage3GemmDotProduct])));
+        });
+    add(
+        "stage3.gemm_dot_v4.start_zero",
+        aq::AirKind::kEverywhere, 2,
+        [](const auto& row, const auto&) {
+            return gf::Mul(
+                row[kRCStage3GemmDotStart],
+                row[
+                    kRCStage3GemmDotAccumulatorBefore]);
+        });
+    add(
+        "stage3.gemm_dot_v4.end_y",
+        aq::AirKind::kEverywhere, 2,
+        [](const auto& row, const auto&) {
+            return gf::Mul(
+                row[kRCStage3GemmDotEnd],
+                gf::Sub(
+                    row[kRCStage3GemmDotY],
+                    row[
+                        kRCStage3GemmDotAccumulatorAfter]));
+        });
+    add(
+        "stage3.gemm_dot_v4.extract_input",
+        aq::AirKind::kEverywhere, 2,
+        [](const auto& row, const auto&) {
+            return gf::Mul(
+                row[kRCStage3GemmDotEnd],
+                gf::Sub(
+                    row[
+                        kRCStage3GemmDotExtractInput],
+                    gf::Add(
+                        row[kRCStage3GemmDotY],
+                        row[
+                            kRCStage3GemmDotResidual])));
+        });
+    add(
+        "stage3.gemm_dot_v4.chain",
+        aq::AirKind::kTransition, 2,
+        [](const auto& row, const auto& next) {
+            return gf::Mul(
+                gf::Mul(
+                    row[kRCStage3GemmDotActive],
+                    gf::Sub(
+                        Fp3::One(),
+                        row[kRCStage3GemmDotEnd])),
+                gf::Sub(
+                    next[
+                        kRCStage3GemmDotAccumulatorBefore],
+                    row[
+                        kRCStage3GemmDotAccumulatorAfter]));
+        });
+    for (uint32_t column : {
+             kRCStage3GemmDotProduct,
+             kRCStage3GemmDotAccumulatorBefore,
+             kRCStage3GemmDotAccumulatorAfter}) {
+        add(
+            "stage3.gemm_dot_v4.padding_zero",
+            aq::AirKind::kEverywhere, 2,
+            [column](
+                const auto& row,
+                const auto&) {
+                return gf::Mul(
+                    gf::Sub(
+                        Fp3::One(),
+                        row[
+                            kRCStage3GemmDotActive]),
+                    row[column]);
+            });
+    }
+    return cs;
+}
+
+bool BuildGemmDotCtlSystemV4(
+    const LayerShapeV1& shape,
+    uint64_t tile_index,
+    uint32_t projection_slot,
+    const RCStage3CtlChallenges& challenges,
+    const RCStage3CtlTerminal& terminal,
+    AirCs& relation,
+    AirCs& out,
+    std::string* why)
+{
+    relation = BuildGemmDotRelationV4(
+        shape, tile_index,
+        projection_slot);
+    const uint32_t value_column =
+        projection_slot ==
+                kOperandASlotV1
+            ? kRCStage3GemmDotA
+            : kRCStage3GemmDotB;
+    const ExternalTupleColumnsV3 tuple{
+        kGemmDotCtlActiveV4,
+        kGemmDotCtlEndpointV4,
+        kGemmDotCtlRoleV4,
+        kGemmDotCtlAddressV4,
+        value_column,
+    };
+    return relation.n_columns ==
+            kGemmDotRelationColumnsV4 &&
+        BuildExternalCtlSystemV3(
+            relation, tuple, 1,
+            challenges, terminal,
+            out, why);
+}
+
+uint256 GemmDotScheduleCommitmentV4(
+    const LayerShapeV1& shape,
+    uint64_t tile_index,
+    uint32_t projection_slot)
+{
+    std::vector<std::vector<Fp3>> fixed(
+        kGemmDotRelationColumnsV4,
+        std::vector<Fp3>(
+            NextPowerOfTwo(
+                shape.k *
+                    kRCMxBlockLen),
+            Fp3::Zero()));
+    if (!FillGemmDotFixedColumnsV4(
+            shape, tile_index,
+            projection_slot, fixed,
+            nullptr)) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_GEMM_DOT_ALG_SCHEDULE_V4"}
+         << shape.shape_commitment
+         << tile_index
+         << projection_slot
+         << static_cast<uint32_t>(
+                fixed.front().size());
+    for (uint32_t row = 0;
+         row < fixed.front().size();
+         ++row) {
+        hash << gf::Canonical(
+                    fixed[kGemmDotCtlActiveV4]
+                        [row].c0)
+             << gf::Canonical(
+                    fixed[kGemmDotCtlEndpointV4]
+                        [row].c0)
+             << gf::Canonical(
+                    fixed[kGemmDotCtlRoleV4]
+                        [row].c0)
+             << gf::Canonical(
+                    fixed[kGemmDotCtlAddressV4]
+                        [row].c0);
+    }
+    return hash.GetHash();
+}
+
+uint256 GemmDotAuthorityCommitmentV4(
+    const LayerShapeV1& shape,
+    uint32_t projection_slot,
+    const std::vector<
+        ExternalProducerCtlChildV3>& children)
+{
+    const uint256 roots = ExternalAggregateV3(
+        "BTX_RC_STAGE3_GEMM_DOT_ALG_R0_AGG_V4",
+        children, true);
+    const uint256 schedules = ExternalAggregateV3(
+        "BTX_RC_STAGE3_GEMM_DOT_ALG_SCHEDULE_AGG_V4",
+        children, false);
+    if (shape.shape_commitment.IsNull() ||
+        roots.IsNull() ||
+        schedules.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_GEMM_DOT_ALG_AUTHORITY_V4"}
+         << kGemmDotExternalClosureVersionV4
+         << shape.shape_commitment
+         << projection_slot
+         << roots << schedules;
+    return hash.GetHash();
+}
+
+uint256 GemmDotClosureCommitmentV4(
+    const GemmDotExternalClosureV4& closure)
+{
+    if (closure.version !=
+            kGemmDotExternalClosureVersionV4 ||
+        closure.shape.shape_commitment.IsNull() ||
+        closure.producer_authority_commitment.IsNull() ||
+        closure.manifest.transcript_seed.IsNull() ||
+        !ValidExternalChallengesV3(
+            closure.challenges) ||
+        closure.consumer_children.empty() ||
+        closure.producer_children.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << std::string{
+                "BTX_RC_STAGE3_GEMM_DOT_EXTERNAL_CLOSURE_V4"}
+         << closure.version
+         << static_cast<uint16_t>(
+                closure.endpoint)
+         << closure.projection_slot
+         << closure.shape.shape_commitment
+         << closure.producer_authority_commitment
+         << closure.manifest.transcript_seed
+         << CommitRCStage3CtlChallenges(
+                closure.challenges)
+         << closure.all_r0_before_challenge
+         << closure.exact_producer_coverage
+         << closure.exact_consumer_coverage
+         << closure.proof_owned_terminal_cancellation;
+    for (const auto& children :
+         {&closure.consumer_children,
+          &closure.producer_children}) {
+        hash << static_cast<uint32_t>(
+            children->size());
+        for (const auto& child : *children) {
+            hash << child.child_ordinal
+                 << child.active_rows
+                 << child.schedule_commitment
+                 << child.owning_r0_root;
+            WriteFp3(
+                hash,
+                child.terminal.alpha1_sum);
+            WriteFp3(
+                hash,
+                child.terminal.alpha2_sum);
+            hash << child.proof_commitment;
+        }
+    }
+    return hash.GetHash();
+}
+
+} // namespace
+
+bool ProveGemmDotExternalClosureV4(
+    const LayerShapeV1& shape,
+    const RCStage3GemmExtractLayerManifest& spec,
+    const RCStage3EpisodeGemmLayerProduct& layer,
+    const RCStage3EpisodeExtractProduct& extract,
+    const LayerBundleV1& consumer_bundle,
+    uint32_t projection_slot,
+    GemmDotExternalClosureV4& out,
+    std::string* why)
+{
+    out = {};
+    if (projection_slot != kOperandASlotV1 &&
+        projection_slot != kOperandBSlotV1) {
+        return Fail(why, "gemm_dot_v4_projection");
+    }
+    const auto consumer_audit =
+        VerifyLayerBundleV1(
+            shape, consumer_bundle);
+    if (!consumer_audit.accepted ||
+        !consumer_audit
+            .source_terminal_proof_owned ||
+        layer.layer_ordinal !=
+            shape.layer_ordinal ||
+        spec.ordinal !=
+            shape.layer_ordinal ||
+        spec.m != shape.m ||
+        spec.n != shape.n ||
+        spec.k != shape.k ||
+        spec.b.transpose !=
+            shape.b_transpose ||
+        spec.extract_tile_count !=
+            shape.tile_count) {
+        return Fail(why, "gemm_dot_v4_public_shape");
+    }
+    out.version =
+        kGemmDotExternalClosureVersionV4;
+    out.projection_slot = projection_slot;
+    out.endpoint =
+        CanonicalSourceProjectionsV1()[
+            projection_slot].endpoint;
+    out.shape = shape;
+
+    const RCStage3CtlChallenges placeholder{
+        U64(2), U64(3), U64(5), U64(7)};
+    const RCStage3CtlTerminal zero_terminal{};
+    std::vector<
+        aq::AirQuotientTwoEpochBaseRowSession>
+        consumer_r0;
+    std::vector<
+        aq::AirQuotientTwoEpochBaseRowSession>
+        producer_r0;
+    std::vector<std::vector<
+        std::vector<Fp3>>>
+        consumer_columns;
+    std::vector<std::vector<
+        std::vector<Fp3>>>
+        producer_columns;
+
+    const auto& projection =
+        CanonicalSourceProjectionsV1()[
+            projection_slot];
+    const ExternalTupleColumnsV3
+        consumer_tuple{
+            projection.active_column,
+            projection.endpoint_column,
+            projection.role_column,
+            projection.address_column,
+            projection.semantic_value_column,
+        };
+    consumer_r0.reserve(
+        consumer_bundle.leaves.size());
+    consumer_columns.reserve(
+        consumer_bundle.leaves.size());
+    out.consumer_children.reserve(
+        consumer_bundle.leaves.size());
+    for (uint32_t i = 0;
+         i < consumer_bundle.leaves.size();
+         ++i) {
+        const auto& leaf =
+            consumer_bundle.leaves[i];
+        std::vector<std::vector<Fp3>> columns;
+        AirCs relation;
+        AirCs phase0_cs;
+        if (!BuildLeafWitnessV1(
+                leaf.manifest, layer,
+                extract,
+                spec.extract_tile_begin,
+                columns, why) ||
+            !BuildExpectedConstraintSystemV1(
+                leaf.manifest,
+                relation, why) ||
+            !BuildExternalCtlSystemV3(
+                relation, consumer_tuple, -1,
+                placeholder, zero_terminal,
+                phase0_cs, why)) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_consumer_r0");
+        }
+        columns.resize(
+            phase0_cs.n_columns,
+            std::vector<Fp3>(
+                phase0_cs.n_rows,
+                Fp3::Zero()));
+        std::vector<uint32_t> base_indices(
+            relation.n_columns);
+        std::iota(
+            base_indices.begin(),
+            base_indices.end(), 0);
+        const auto r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                phase0_cs, columns,
+                base_indices);
+        ExternalProducerCtlChildV3 child;
+        child.child_ordinal = i;
+        child.active_rows =
+            ExternalActiveRowsV3(
+                leaf.manifest,
+                projection_slot);
+        child.schedule_commitment =
+            ExternalConsumerScheduleV3(
+                leaf.manifest,
+                projection_slot);
+        child.owning_r0_root =
+            leaf.proof.trace_commit;
+        if (!r0.valid ||
+            r0.base_row_commitment !=
+                child.owning_r0_root ||
+            child.active_rows == 0 ||
+            child.schedule_commitment.IsNull()) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_consumer_alias");
+        }
+        out.consumer_children.push_back(
+            child);
+        consumer_r0.push_back(r0);
+        consumer_columns.push_back(
+            std::move(columns));
+    }
+
+    const uint32_t producer_count =
+        GemmDotProducerChildCountV4(
+            shape, projection_slot);
+    const uint64_t active_per_child =
+        GemmDotProducerActiveRowsV4(
+            shape, projection_slot);
+    producer_r0.reserve(producer_count);
+    producer_columns.reserve(producer_count);
+    out.producer_children.reserve(
+        producer_count);
+    for (uint32_t i = 0;
+         i < producer_count; ++i) {
+        const uint64_t tile_index =
+            GemmDotTileIndexV4(
+                shape, projection_slot, i);
+        RCStage3EpisodeGemmDotPin shape_pin;
+        shape_pin.statement_commitment =
+            shape.statement_commitment;
+        shape_pin.manifest_commitment =
+            shape.gemm_manifest_commitment;
+        shape_pin.layer_ordinal =
+            shape.layer_ordinal;
+        shape_pin.layer_tile_index =
+            tile_index;
+        shape_pin.contraction_size =
+            shape.k;
+        shape_pin.logical_rows =
+            uint64_t{shape.k} *
+                kRCMxBlockLen;
+        shape_pin.n_rows =
+            NextPowerOfTwo(
+                shape.k *
+                    kRCMxBlockLen);
+        shape_pin.n_coeffs =
+            shape_pin.n_rows;
+        std::vector<std::vector<Fp3>> columns;
+        if (!BuildRCStage3EpisodeGemmDotWitnessColumnsV2(
+                spec, layer, tile_index,
+                extract, shape_pin,
+                columns, why)) {
+            out = {};
+            return false;
+        }
+        columns.resize(
+            kGemmDotRelationColumnsV4,
+            std::vector<Fp3>(
+                shape_pin.n_rows,
+                Fp3::Zero()));
+        if (!FillGemmDotFixedColumnsV4(
+                shape, tile_index,
+                projection_slot,
+                columns, why)) {
+            out = {};
+            return false;
+        }
+        AirCs relation;
+        AirCs phase0_cs;
+        if (!BuildGemmDotCtlSystemV4(
+                shape, tile_index,
+                projection_slot,
+                placeholder, zero_terminal,
+                relation, phase0_cs, why)) {
+            out = {};
+            return false;
+        }
+        columns.resize(
+            phase0_cs.n_columns,
+            std::vector<Fp3>(
+                phase0_cs.n_rows,
+                Fp3::Zero()));
+        const auto r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                phase0_cs, columns,
+                GemmDotBaseColumnsV4());
+        ExternalProducerCtlChildV3 child;
+        child.child_ordinal = i;
+        child.active_rows =
+            active_per_child;
+        child.schedule_commitment =
+            GemmDotScheduleCommitmentV4(
+                shape, tile_index,
+                projection_slot);
+        child.owning_r0_root =
+            r0.base_row_commitment;
+        if (!r0.valid ||
+            child.owning_r0_root.IsNull() ||
+            child.active_rows == 0 ||
+            child.schedule_commitment.IsNull()) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_producer_r0");
+        }
+        out.producer_children.push_back(
+            child);
+        producer_r0.push_back(r0);
+        producer_columns.push_back(
+            std::move(columns));
+    }
+
+    out.producer_authority_commitment =
+        GemmDotAuthorityCommitmentV4(
+            shape, projection_slot,
+            out.producer_children);
+    std::vector<RCStage3CtlChildPin>
+        aggregate_pins;
+    if (out.producer_authority_commitment.IsNull() ||
+        !BuildExternalEpochV3(
+            shape, out.endpoint,
+            projection_slot,
+            out.producer_authority_commitment,
+            consumer_bundle.bundle_commitment,
+            out.consumer_children,
+            out.producer_children,
+            out.manifest, aggregate_pins,
+            out.challenges, why)) {
+        out = {};
+        return Fail(
+            why, "gemm_dot_v4_epoch");
+    }
+
+    for (uint32_t i = 0;
+         i < out.consumer_children.size();
+         ++i) {
+        auto& child =
+            out.consumer_children[i];
+        AirCs relation;
+        if (!BuildExpectedConstraintSystemV1(
+                consumer_bundle.leaves[i]
+                    .manifest,
+                relation, why)) {
+            out = {};
+            return false;
+        }
+        RCStage3CtlTerminal terminal;
+        uint64_t active_rows = 0;
+        if (!PopulateExternalCtlWitnessV3(
+                consumer_tuple, -1,
+                out.challenges,
+                relation.n_columns,
+                consumer_columns[i],
+                terminal, active_rows, why) ||
+            active_rows !=
+                child.active_rows) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_consumer_witness");
+        }
+        child.terminal = terminal;
+        AirCs final_cs;
+        if (!BuildExternalCtlSystemV3(
+                relation, consumer_tuple, -1,
+                out.challenges,
+                terminal, final_cs, why)) {
+            out = {};
+            return false;
+        }
+        std::vector<uint32_t> base_indices(
+            relation.n_columns);
+        std::iota(
+            base_indices.begin(),
+            base_indices.end(), 0);
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                out.manifest,
+                out.challenges, false,
+                child);
+        const auto proved =
+            aq::AirQuotientProveRowsSplitRapSafeV2(
+                final_cs,
+                consumer_columns[i],
+                base_indices, fs_seed,
+                {}, &consumer_r0[i]);
+        if (fs_seed.IsNull() ||
+            !proved.ok ||
+            !proved.division_exact) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_consumer_air:" +
+                    proved.note);
+        }
+        child.proof = proved.proof;
+        child.proof_commitment =
+            ExternalProofCommitmentV3(
+                child.proof);
+    }
+
+    const ExternalTupleColumnsV3
+        producer_tuple{
+            kGemmDotCtlActiveV4,
+            kGemmDotCtlEndpointV4,
+            kGemmDotCtlRoleV4,
+            kGemmDotCtlAddressV4,
+            projection_slot ==
+                    kOperandASlotV1
+                ? kRCStage3GemmDotA
+                : kRCStage3GemmDotB,
+        };
+    for (uint32_t i = 0;
+         i < out.producer_children.size();
+         ++i) {
+        auto& child =
+            out.producer_children[i];
+        const uint64_t tile_index =
+            GemmDotTileIndexV4(
+                shape, projection_slot, i);
+        AirCs relation;
+        AirCs unused;
+        if (!BuildGemmDotCtlSystemV4(
+                shape, tile_index,
+                projection_slot,
+                placeholder, zero_terminal,
+                relation, unused, why)) {
+            out = {};
+            return false;
+        }
+        RCStage3CtlTerminal terminal;
+        uint64_t active_rows = 0;
+        if (!PopulateExternalCtlWitnessV3(
+                producer_tuple, 1,
+                out.challenges,
+                relation.n_columns,
+                producer_columns[i],
+                terminal, active_rows, why) ||
+            active_rows !=
+                child.active_rows) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_producer_witness");
+        }
+        child.terminal = terminal;
+        AirCs final_relation;
+        AirCs final_cs;
+        if (!BuildGemmDotCtlSystemV4(
+                shape, tile_index,
+                projection_slot,
+                out.challenges,
+                terminal,
+                final_relation, final_cs,
+                why)) {
+            out = {};
+            return false;
+        }
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                out.manifest,
+                out.challenges, true,
+                child);
+        const auto proved =
+            aq::AirQuotientProveRowsSplitRapSafeV2(
+                final_cs,
+                producer_columns[i],
+                GemmDotBaseColumnsV4(),
+                fs_seed, {},
+                &producer_r0[i]);
+        if (fs_seed.IsNull() ||
+            !proved.ok ||
+            !proved.division_exact) {
+            out = {};
+            return Fail(
+                why,
+                "gemm_dot_v4_producer_air:" +
+                    proved.note);
+        }
+        child.proof = proved.proof;
+        child.proof_commitment =
+            ExternalProofCommitmentV3(
+                child.proof);
+    }
+
+    Fp3 sum1 = Fp3::Zero();
+    Fp3 sum2 = Fp3::Zero();
+    for (const auto& children :
+         {&out.consumer_children,
+          &out.producer_children}) {
+        for (const auto& child : *children) {
+            sum1 = gf::Add(
+                sum1,
+                child.terminal.alpha1_sum);
+            sum2 = gf::Add(
+                sum2,
+                child.terminal.alpha2_sum);
+        }
+    }
+    out.all_r0_before_challenge = true;
+    out.exact_producer_coverage =
+        out.producer_children.size() ==
+            producer_count &&
+        uint64_t{producer_count} *
+                active_per_child ==
+            EndpointTotal(
+                shape, projection_slot);
+    out.exact_consumer_coverage =
+        consumer_audit
+            .exact_address_partition &&
+        consumer_audit.verified_tiles ==
+            shape.tile_count;
+    out.proof_owned_terminal_cancellation =
+        gf::IsZero(sum1) &&
+        gf::IsZero(sum2);
+    out.closure_commitment =
+        GemmDotClosureCommitmentV4(out);
+    if (!out.exact_producer_coverage ||
+        !out.exact_consumer_coverage ||
+        !out.proof_owned_terminal_cancellation ||
+        out.closure_commitment.IsNull() ||
+        !VerifyGemmDotExternalClosureV4(
+            shape, consumer_bundle,
+            projection_slot, out, why)) {
+        out = {};
+        return Fail(
+            why, "gemm_dot_v4_self_verify");
+    }
+    return true;
+}
+
+bool VerifyGemmDotExternalClosureV4(
+    const LayerShapeV1& expected_shape,
+    const LayerBundleV1& expected_consumer_bundle,
+    uint32_t expected_projection_slot,
+    const GemmDotExternalClosureV4& closure,
+    std::string* why)
+{
+    if (expected_projection_slot !=
+            kOperandASlotV1 &&
+        expected_projection_slot !=
+            kOperandBSlotV1) {
+        return Fail(
+            why, "gemm_dot_v4_verify_projection");
+    }
+    const auto& projection =
+        CanonicalSourceProjectionsV1()[
+            expected_projection_slot];
+    const auto consumer_audit =
+        VerifyLayerBundleV1(
+            expected_shape,
+            expected_consumer_bundle);
+    const uint32_t producer_count =
+        GemmDotProducerChildCountV4(
+            expected_shape,
+            expected_projection_slot);
+    const uint64_t active_per_child =
+        GemmDotProducerActiveRowsV4(
+            expected_shape,
+            expected_projection_slot);
+    if (closure.version !=
+            kGemmDotExternalClosureVersionV4 ||
+        closure.endpoint !=
+            projection.endpoint ||
+        closure.projection_slot !=
+            expected_projection_slot ||
+        closure.shape != expected_shape ||
+        !consumer_audit.accepted ||
+        closure.consumer_children.size() !=
+            expected_consumer_bundle
+                .leaves.size() ||
+        closure.producer_children.size() !=
+            producer_count ||
+        closure.producer_authority_commitment !=
+            GemmDotAuthorityCommitmentV4(
+                expected_shape,
+                expected_projection_slot,
+                closure.producer_children)) {
+        return Fail(
+            why, "gemm_dot_v4_verify_public_shape");
+    }
+    std::vector<RCStage3CtlChildPin>
+        aggregate_pins;
+    RCStage3CtlManifest expected_manifest;
+    RCStage3CtlChallenges expected_challenges;
+    if (!BuildExternalEpochV3(
+            expected_shape,
+            projection.endpoint,
+            expected_projection_slot,
+            closure.producer_authority_commitment,
+            expected_consumer_bundle
+                .bundle_commitment,
+            closure.consumer_children,
+            closure.producer_children,
+            expected_manifest,
+            aggregate_pins,
+            expected_challenges, why) ||
+        !(expected_manifest ==
+          closure.manifest) ||
+        !(expected_challenges ==
+          closure.challenges)) {
+        return Fail(
+            why, "gemm_dot_v4_verify_epoch");
+    }
+    const ExternalTupleColumnsV3
+        consumer_tuple{
+            projection.active_column,
+            projection.endpoint_column,
+            projection.role_column,
+            projection.address_column,
+            projection.semantic_value_column,
+        };
+    for (uint32_t i = 0;
+         i < closure.consumer_children.size();
+         ++i) {
+        const auto& child =
+            closure.consumer_children[i];
+        const auto& leaf =
+            expected_consumer_bundle.leaves[i];
+        AirCs relation;
+        AirCs cs;
+        if (child.child_ordinal != i ||
+            child.active_rows !=
+                ExternalActiveRowsV3(
+                    leaf.manifest,
+                    expected_projection_slot) ||
+            child.schedule_commitment !=
+                ExternalConsumerScheduleV3(
+                    leaf.manifest,
+                    expected_projection_slot) ||
+            child.owning_r0_root !=
+                leaf.proof.trace_commit ||
+            child.proof_commitment !=
+                ExternalProofCommitmentV3(
+                    child.proof) ||
+            child.proof.batch.groups.size() != 3 ||
+            Fri3AlgDigestToUint256(
+                child.proof.batch.groups[0]
+                    .row_commit.root) !=
+                child.owning_r0_root ||
+            !BuildExpectedConstraintSystemV1(
+                leaf.manifest,
+                relation, why) ||
+            !BuildExternalCtlSystemV3(
+                relation, consumer_tuple, -1,
+                closure.challenges,
+                child.terminal, cs, why)) {
+            return Fail(
+                why,
+                "gemm_dot_v4_verify_consumer_binding_" +
+                    std::to_string(i));
+        }
+        std::vector<uint32_t> base_indices(
+            relation.n_columns);
+        std::iota(
+            base_indices.begin(),
+            base_indices.end(), 0);
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                closure.manifest,
+                closure.challenges, false,
+                child);
+        std::string proof_why;
+        if (fs_seed.IsNull() ||
+            !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+                cs, child.proof,
+                base_indices, fs_seed,
+                &proof_why)) {
+            return Fail(
+                why,
+                "gemm_dot_v4_verify_consumer_air_" +
+                    std::to_string(i) + ":" +
+                    proof_why);
+        }
+    }
+    for (uint32_t i = 0;
+         i < closure.producer_children.size();
+         ++i) {
+        const auto& child =
+            closure.producer_children[i];
+        const uint64_t tile_index =
+            GemmDotTileIndexV4(
+                expected_shape,
+                expected_projection_slot, i);
+        AirCs relation;
+        AirCs cs;
+        if (child.child_ordinal != i ||
+            child.active_rows !=
+                active_per_child ||
+            child.schedule_commitment !=
+                GemmDotScheduleCommitmentV4(
+                    expected_shape,
+                    tile_index,
+                    expected_projection_slot) ||
+            child.proof_commitment !=
+                ExternalProofCommitmentV3(
+                    child.proof) ||
+            child.proof.batch.groups.size() != 3 ||
+            Fri3AlgDigestToUint256(
+                child.proof.batch.groups[0]
+                    .row_commit.root) !=
+                child.owning_r0_root ||
+            !BuildGemmDotCtlSystemV4(
+                expected_shape, tile_index,
+                expected_projection_slot,
+                closure.challenges,
+                child.terminal,
+                relation, cs, why)) {
+            return Fail(
+                why,
+                "gemm_dot_v4_verify_producer_binding_" +
+                    std::to_string(i));
+        }
+        const uint256 fs_seed =
+            ExternalChildSeedV3(
+                closure.manifest,
+                closure.challenges, true,
+                child);
+        std::string proof_why;
+        if (fs_seed.IsNull() ||
+            !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+                cs, child.proof,
+                GemmDotBaseColumnsV4(),
+                fs_seed, &proof_why)) {
+            return Fail(
+                why,
+                "gemm_dot_v4_verify_producer_air_" +
+                    std::to_string(i) + ":" +
+                    proof_why);
+        }
+    }
+    Fp3 sum1 = Fp3::Zero();
+    Fp3 sum2 = Fp3::Zero();
+    for (const auto& children :
+         {&closure.consumer_children,
+          &closure.producer_children}) {
+        for (const auto& child : *children) {
+            sum1 = gf::Add(
+                sum1,
+                child.terminal.alpha1_sum);
+            sum2 = gf::Add(
+                sum2,
+                child.terminal.alpha2_sum);
+        }
+    }
+    if (!closure.all_r0_before_challenge ||
+        !closure.exact_producer_coverage ||
+        !closure.exact_consumer_coverage ||
+        !closure.proof_owned_terminal_cancellation ||
+        !gf::IsZero(sum1) ||
+        !gf::IsZero(sum2) ||
+        closure.closure_commitment !=
+            GemmDotClosureCommitmentV4(
+                closure)) {
+        return Fail(
+            why, "gemm_dot_v4_verify_terminal");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:episode_semantic_source_alg:"
+            "gemm_dot_safe_alg_shared_epoch_ok";
+    }
+    return true;
+}
+
 } // namespace matmul::v4::rc::episode_semantic_source_alg
