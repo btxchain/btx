@@ -30,6 +30,23 @@ uint256 H(uint8_t value)
         Span<const unsigned char>{bytes.data(), bytes.size()}};
 }
 
+CBlockHeader MiningHeader(uint64_t nonce)
+{
+    CBlockHeader header;
+    header.nVersion = 0x20000004;
+    header.nTime = 1'770'000'000;
+    header.nBits = 0x207fffff;
+    header.nNonce64 = nonce;
+    header.nNonce = static_cast<uint32_t>(nonce);
+    for (int i = 0; i < 32; ++i) {
+        header.hashPrevBlock.data()[i] = 0x51;
+        header.hashMerkleRoot.data()[i] = 0xa3;
+        header.seed_a.data()[i] = 0x11;
+        header.seed_b.data()[i] = 0x22;
+    }
+    return header;
+}
+
 struct HonestDot {
     rc::RCStage3EpisodeGemmDotPin pin;
     std::vector<std::vector<gf::Fp3>> columns;
@@ -218,6 +235,8 @@ bool BuildConsistentWitnesses(
         }
         std::vector<int8_t> outputs(
             uint64_t{spec.m} * spec.n);
+        layer.gemm_y.assign(
+            uint64_t{spec.m} * spec.n, 0);
         const uint32_t blocks_per_row =
             spec.n / rc::kRCMxBlockLen;
         for (uint32_t row = 0; row < spec.m; ++row) {
@@ -245,6 +264,7 @@ bool BuildConsistentWitnesses(
                     }
                     const uint64_t cell =
                         uint64_t{row} * spec.n + column;
+                    layer.gemm_y[cell] = sum;
                     input[lane] = sum +
                         (layer.residual.empty()
                              ? 0
@@ -308,6 +328,91 @@ BOOST_AUTO_TEST_CASE(audit_is_local_and_fail_closed_transitively)
     BOOST_CHECK(!audit.production_streaming_complete);
     BOOST_CHECK(!audit.recursively_consumed);
     BOOST_CHECK(!audit.transitively_complete);
+}
+
+BOOST_AUTO_TEST_CASE(
+    real_miner_callbacks_materialize_complete_canonical_product_witness)
+{
+    const auto params = rc::MakeToyRCEpisodeParams();
+    const auto header = MiningHeader(42);
+    rc::RCStage3EpisodeWitnessCapture capture(params);
+    std::vector<rc::RCRoundTranscript> rounds;
+    const uint256 digest =
+        rc::MineRCEpisodeWithProofWitness(
+            header, params, 0, capture, &rounds);
+    BOOST_REQUIRE(!digest.IsNull());
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(capture.Complete(&why), why);
+
+    const auto layout = rc::RCGkrTraceLayout(params);
+    BOOST_REQUIRE_EQUAL(
+        capture.LayerWitnesses().size(),
+        layout.layers.size());
+    uint64_t expected_tiles = 0;
+    for (uint32_t ordinal = 0;
+         ordinal < layout.layers.size(); ++ordinal) {
+        const auto& spec = layout.layers[ordinal];
+        const auto& layer =
+            capture.LayerWitnesses()[ordinal];
+        BOOST_CHECK_EQUAL(
+            layer.operand_a.size(),
+            uint64_t{spec.m} * spec.k);
+        BOOST_CHECK_EQUAL(
+            layer.operand_b.size(),
+            uint64_t{spec.k} * spec.n);
+        BOOST_CHECK_EQUAL(
+            layer.gemm_y.size(),
+            uint64_t{spec.m} * spec.n);
+        expected_tiles +=
+            uint64_t{spec.m} *
+            (spec.n / rc::kRCMxBlockLen);
+    }
+    BOOST_CHECK_EQUAL(
+        capture.ExtractInputs().size(), expected_tiles);
+
+    auto bindings = Bindings(params);
+    BOOST_REQUIRE_EQUAL(
+        bindings.size(), capture.ExtractPrfs().size());
+    for (uint32_t ordinal = 0;
+         ordinal < bindings.size(); ++ordinal) {
+        bindings[ordinal].extract_prf =
+            capture.ExtractPrfs()[ordinal];
+    }
+    const auto statement = Statement();
+    const auto manifest =
+        rc::BuildRCStage3GemmExtractManifest(
+            params,
+            rc::RCStage3EpisodeStatementCommitment(statement),
+            bindings, &why);
+    BOOST_REQUIRE_MESSAGE(manifest.has_value(), why);
+    BOOST_CHECK_MESSAGE(
+        capture.ValidateManifest(*manifest, &why), why);
+
+    rc::RCStage3EpisodeWitnessCapture reordered(params);
+    std::array<int8_t, rc::kRCMxBlockLen> zeros8{};
+    std::array<int64_t, rc::kRCMxBlockLen> zeros64{};
+    reordered.OnPhase1QKtTile({
+        .round_ordinal = 0,
+        .query_row = 0,
+        .context_begin = 0,
+        .tile_len = rc::kRCMxBlockLen,
+        .contraction_size = params.d_head,
+        .operand_a = zeros8.data(),
+        .operand_b = zeros8.data(),
+        .gemm_y = zeros64.data(),
+        .extract_output = zeros8.data(),
+        .prf_key = H(0x91),
+    });
+    BOOST_CHECK(!reordered.Complete(&why));
+    auto rejected_manifest = *manifest;
+    rc::RCStage3EpisodeExtractProduct rejected_extract;
+    rc::RCStage3EpisodeTileStreamProduct rejected_stream;
+    rc::RCStage3EpisodeGemmProduct rejected_gemm;
+    BOOST_CHECK(
+        !rc::ProveRCStage3EpisodeProductsFromCapture(
+            statement, rejected_manifest, reordered,
+            rejected_extract, rejected_stream,
+            rejected_gemm, &why));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -526,6 +631,16 @@ BOOST_AUTO_TEST_CASE(
             statement, *manifest, extract_inputs,
             extract, stream, &why),
         why);
+    auto forged_witnesses = witnesses;
+    ++forged_witnesses.front().gemm_y.front();
+    rc::RCStage3EpisodeGemmProduct forged;
+    BOOST_CHECK(
+        !rc::ProveRCStage3EpisodeGemmProduct(
+            statement, *manifest, forged_witnesses,
+            extract, stream, forged, &why));
+    BOOST_CHECK_NE(
+        why.find("prove_extract_input_equality"),
+        std::string::npos);
     rc::RCStage3EpisodeGemmProduct gemm;
     BOOST_REQUIRE_MESSAGE(
         rc::ProveRCStage3EpisodeGemmProduct(

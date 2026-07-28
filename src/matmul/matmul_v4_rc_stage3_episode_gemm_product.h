@@ -5,9 +5,11 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_EPISODE_GEMM_PRODUCT_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_EPISODE_GEMM_PRODUCT_H
 
+#include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_stage3_episode_extract_product.h>
 #include <matmul/matmul_v4_rc_stage3_episode_relation_product.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -82,18 +84,138 @@ struct RCStage3EpisodeGemmProduct {
 struct RCStage3EpisodeGemmLayerWitness {
     std::vector<int8_t> operand_a;
     std::vector<int8_t> operand_b;
+    /**
+     * Optional pure A*B output captured from the mining computation.
+     *
+     * Production supplies this field through RCEpisodeProofWitnessSink so the
+     * prover does not replay a datacenter GEMM merely to reconstruct witness
+     * cells.  It is not trusted: every output is still constrained by the
+     * dot-product AIR and by the Extract-input equality.  Empty retains the
+     * legacy test/R&D path which computes Y locally.
+     */
+    std::vector<int64_t> gemm_y;
     /** Required only for Λ layers with residual_first_column >= 0. */
     std::vector<int8_t> residual;
 };
 
 /**
+ * Canonical all-instance witness collector attached to the real v4.6-3 miner.
+ *
+ * The collector accepts callbacks only in Λ(params) order and materializes the
+ * exact A/B/Y/residual vectors and Extract input tiles consumed by the Stage-3
+ * all-instance provers.  It never computes a GEMM.  Any missing, duplicate,
+ * reordered or shape-inconsistent callback leaves the collector fail-closed.
+ *
+ * This V1 collector is intentionally a flat correctness bridge.  Production
+ * recursion can replace its backing vectors with shard writers without
+ * changing the callback/order contract.
+ */
+class RCStage3EpisodeWitnessCapture final
+    : public RCEpisodeProofWitnessSink {
+public:
+    explicit RCStage3EpisodeWitnessCapture(
+        const RCEpisodeParams& params);
+
+    void OnPhase1Operands(
+        const RCPhase1OperandsWitnessView& view) override;
+    void OnPhase1QKtTile(
+        const RCPhase1QKtTileWitnessView& view) override;
+    void OnPhase1SVRow(
+        const RCPhase1SVRowWitnessView& view) override;
+    void OnFfnGemm(
+        const RCFfnGemmWitnessView& view) override;
+    void OnFfnExtract(
+        const RCFfnExtractWitnessView& view) override;
+
+    [[nodiscard]] bool Complete(std::string* why = nullptr) const;
+    [[nodiscard]] bool ValidateManifest(
+        const RCStage3GemmExtractManifest& manifest,
+        std::string* why = nullptr) const;
+    [[nodiscard]] bool ValidateExtractProductOutputs(
+        const RCStage3EpisodeExtractProduct& extract,
+        std::string* why = nullptr) const;
+
+    [[nodiscard]] const std::vector<
+        RCStage3EpisodeGemmLayerWitness>&
+    LayerWitnesses() const
+    {
+        return m_layers;
+    }
+    [[nodiscard]] const std::vector<
+        std::array<int64_t, kRCMxBlockLen>>&
+    ExtractInputs() const
+    {
+        FlattenExtractTiles();
+        return m_extract_inputs;
+    }
+    [[nodiscard]] const std::vector<uint256>&
+    ExtractPrfs() const
+    {
+        return m_extract_prfs;
+    }
+
+private:
+    void Reject(const char* why);
+    [[nodiscard]] uint32_t RoundBase(uint32_t round) const;
+    [[nodiscard]] uint32_t FfnOrdinal(
+        uint32_t round, uint32_t layer,
+        RCFfnProjection projection) const;
+    void AppendExtractTiles(
+        uint32_t ordinal, const int64_t* input,
+        const int8_t* output, uint64_t cells,
+        const uint256& prf);
+    void FlattenExtractTiles() const;
+
+    RCEpisodeParams m_params{};
+    RCGkrLayout m_layout{};
+    std::vector<RCStage3EpisodeGemmLayerWitness> m_layers;
+    std::vector<std::vector<
+        std::array<int64_t, kRCMxBlockLen>>>
+        m_layer_extract_inputs;
+    std::vector<std::vector<
+        std::array<int8_t, kRCMxBlockLen>>>
+        m_layer_extract_outputs;
+    mutable std::vector<std::array<int64_t, kRCMxBlockLen>>
+        m_extract_inputs;
+    mutable std::vector<std::array<int8_t, kRCMxBlockLen>>
+        m_extract_outputs;
+    mutable bool m_extract_flattened{false};
+    std::vector<uint64_t> m_layer_tile_begin;
+    std::vector<uint64_t> m_next_layer_tile;
+    std::vector<uint256> m_extract_prfs;
+    std::vector<bool> m_operands_seen;
+    std::vector<bool> m_gemm_seen;
+    std::vector<bool> m_extract_seen;
+    std::string m_error;
+};
+
+/**
+ * Consume one completed miner capture into the exact all-instance relation
+ * products.  This is the first direct solve -> proof bridge: no episode or
+ * GEMM is replayed here.  Extract is proved from the captured accumulator
+ * tiles, its proved output roots are checked against the bytes emitted by the
+ * solver, and every captured Y is then proved against captured A/B.
+ */
+[[nodiscard]] bool ProveRCStage3EpisodeProductsFromCapture(
+    const RCStage3SuccinctProof& statement,
+    RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeWitnessCapture& capture,
+    RCStage3EpisodeExtractProduct& extract,
+    RCStage3EpisodeTileStreamProduct& tile_stream,
+    RCStage3EpisodeGemmProduct& gemm,
+    std::string* why = nullptr);
+
+/**
  * Honest bounded all-layer/all-output-tile GEMM prover.
  *
- * The function computes every Y cell from A/B, requires Y+residual to equal
- * the already proved Extract input tiles, updates the three GEMM-owned
- * manifest roots, refreshes the dependent Extract/tile-stream manifest
- * commitments, proves every dot-product AIR, and proves the exact wiring-copy
- * closure. All three products are self-verified before return.
+ * Production callers provide every Y cell captured from the mining
+ * computation.  Legacy/R&D callers may leave Y empty and have it reconstructed
+ * locally.  In both cases the function requires Y+residual to equal the
+ * already proved Extract input tiles, updates the three GEMM-owned manifest
+ * roots, refreshes the dependent Extract/tile-stream manifest commitments,
+ * proves every dot-product AIR, and proves the exact wiring-copy closure.  A
+ * supplied Y is therefore a witness, never an assertion: the dot-product AIR
+ * still binds it to A*B. All three products are self-verified before return.
  */
 [[nodiscard]] bool ProveRCStage3EpisodeGemmProduct(
     const RCStage3SuccinctProof& statement,

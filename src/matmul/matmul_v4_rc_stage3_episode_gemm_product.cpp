@@ -294,6 +294,530 @@ bool ExpectedTileColumns(
 
 } // namespace
 
+RCStage3EpisodeWitnessCapture::RCStage3EpisodeWitnessCapture(
+    const RCEpisodeParams& params)
+    : m_params(params)
+{
+    if (!ValidateRCEpisodeParams(params)) {
+        Reject("capture_invalid_params");
+        return;
+    }
+    m_layout = RCGkrTraceLayout(params);
+    const size_t layers = m_layout.layers.size();
+    m_layers.resize(layers);
+    m_layer_extract_inputs.resize(layers);
+    m_layer_extract_outputs.resize(layers);
+    m_layer_tile_begin.resize(layers);
+    m_next_layer_tile.assign(layers, 0);
+    m_extract_prfs.resize(layers);
+    m_operands_seen.assign(layers, false);
+    m_gemm_seen.assign(layers, false);
+    m_extract_seen.assign(layers, false);
+    uint64_t tile_cursor = 0;
+    for (uint32_t ordinal = 0; ordinal < layers; ++ordinal) {
+        const auto& layer = m_layout.layers[ordinal];
+        if (layer.n == 0 ||
+            layer.n % kRCMxBlockLen != 0) {
+            Reject("capture_layout_tile_shape");
+            return;
+        }
+        m_layer_tile_begin[ordinal] = tile_cursor;
+        const uint64_t layer_tiles =
+            uint64_t{layer.m} *
+            (layer.n / kRCMxBlockLen);
+        if (layer_tiles >
+            std::numeric_limits<uint64_t>::max() -
+                tile_cursor) {
+            Reject("capture_tile_overflow");
+            return;
+        }
+        tile_cursor += layer_tiles;
+    }
+}
+
+void RCStage3EpisodeWitnessCapture::Reject(
+    const char* why)
+{
+    if (m_error.empty()) m_error = why;
+}
+
+uint32_t RCStage3EpisodeWitnessCapture::RoundBase(
+    uint32_t round) const
+{
+    return round * (2 + 2 * m_params.L_lyr);
+}
+
+uint32_t RCStage3EpisodeWitnessCapture::FfnOrdinal(
+    uint32_t round, uint32_t layer,
+    RCFfnProjection projection) const
+{
+    return RoundBase(round) + 2 + 2 * layer +
+        (projection == RCFfnProjection::Down ? 1 : 0);
+}
+
+void RCStage3EpisodeWitnessCapture::AppendExtractTiles(
+    uint32_t ordinal, const int64_t* input,
+    const int8_t* output, uint64_t cells,
+    const uint256& prf)
+{
+    if (!m_error.empty()) return;
+    if (ordinal >= m_layout.layers.size() ||
+        input == nullptr || output == nullptr ||
+        prf.IsNull() || cells == 0 ||
+        cells % kRCMxBlockLen != 0) {
+        Reject("capture_extract_arguments");
+        return;
+    }
+    const auto& spec = m_layout.layers[ordinal];
+    const uint64_t layer_tiles =
+        uint64_t{spec.m} *
+        (spec.n / kRCMxBlockLen);
+    const uint64_t incoming_tiles =
+        cells / kRCMxBlockLen;
+    if (m_next_layer_tile[ordinal] + incoming_tiles >
+            layer_tiles) {
+        Reject("capture_extract_order");
+        return;
+    }
+    if (m_extract_prfs[ordinal].IsNull()) {
+        m_extract_prfs[ordinal] = prf;
+    } else if (m_extract_prfs[ordinal] != prf) {
+        Reject("capture_extract_prf");
+        return;
+    }
+    for (uint64_t tile = 0;
+         tile < incoming_tiles; ++tile) {
+        std::array<int64_t, kRCMxBlockLen> in{};
+        std::array<int8_t, kRCMxBlockLen> out{};
+        std::copy_n(
+            input + tile * kRCMxBlockLen,
+            kRCMxBlockLen, in.begin());
+        std::copy_n(
+            output + tile * kRCMxBlockLen,
+            kRCMxBlockLen, out.begin());
+        m_layer_extract_inputs[ordinal].push_back(
+            std::move(in));
+        m_layer_extract_outputs[ordinal].push_back(
+            std::move(out));
+    }
+    m_extract_flattened = false;
+    m_next_layer_tile[ordinal] += incoming_tiles;
+    if (m_next_layer_tile[ordinal] == layer_tiles) {
+        m_extract_seen[ordinal] = true;
+    }
+}
+
+void RCStage3EpisodeWitnessCapture::FlattenExtractTiles() const
+{
+    if (m_extract_flattened) return;
+    m_extract_inputs.clear();
+    m_extract_outputs.clear();
+    uint64_t total_tiles = 0;
+    for (const auto& layer : m_layer_extract_inputs) {
+        total_tiles += layer.size();
+    }
+    m_extract_inputs.reserve(total_tiles);
+    m_extract_outputs.reserve(total_tiles);
+    for (uint32_t ordinal = 0;
+         ordinal < m_layer_extract_inputs.size(); ++ordinal) {
+        m_extract_inputs.insert(
+            m_extract_inputs.end(),
+            m_layer_extract_inputs[ordinal].begin(),
+            m_layer_extract_inputs[ordinal].end());
+        m_extract_outputs.insert(
+            m_extract_outputs.end(),
+            m_layer_extract_outputs[ordinal].begin(),
+            m_layer_extract_outputs[ordinal].end());
+    }
+    m_extract_flattened = true;
+}
+
+void RCStage3EpisodeWitnessCapture::OnPhase1Operands(
+    const RCPhase1OperandsWitnessView& view)
+{
+    if (!m_error.empty()) return;
+    if (view.round_ordinal >= m_params.rounds ||
+        view.n_q != m_params.n_q ||
+        view.n_ctx != m_params.n_ctx ||
+        view.d_head != m_params.d_head ||
+        view.q == nullptr || view.k == nullptr ||
+        view.v == nullptr) {
+        Reject("capture_phase1_operands_shape");
+        return;
+    }
+    const uint32_t qkt = RoundBase(view.round_ordinal);
+    const uint32_t sv = qkt + 1;
+    if (sv >= m_layers.size() ||
+        m_operands_seen[qkt] || m_operands_seen[sv] ||
+        view.q->size() !=
+            uint64_t{m_params.n_q} * m_params.d_head ||
+        view.k->size() !=
+            uint64_t{m_params.n_ctx} * m_params.d_head ||
+        view.v->size() !=
+            uint64_t{m_params.n_ctx} * m_params.d_head) {
+        Reject("capture_phase1_operands_order");
+        return;
+    }
+    m_layers[qkt].operand_a = *view.q;
+    m_layers[qkt].operand_b = *view.k;
+    m_layers[sv].operand_b = *view.v;
+    m_layers[sv].operand_a.reserve(
+        uint64_t{m_params.n_q} * m_params.n_ctx);
+    m_operands_seen[qkt] = true;
+    m_operands_seen[sv] = true;
+}
+
+void RCStage3EpisodeWitnessCapture::OnPhase1QKtTile(
+    const RCPhase1QKtTileWitnessView& view)
+{
+    if (!m_error.empty()) return;
+    if (view.round_ordinal >= m_params.rounds ||
+        view.query_row >= m_params.n_q ||
+        view.tile_len != kRCMxBlockLen ||
+        view.contraction_size != m_params.d_head ||
+        view.context_begin >= m_params.n_ctx ||
+        view.context_begin % kRCMxBlockLen != 0 ||
+        view.context_begin + kRCMxBlockLen >
+            m_params.n_ctx ||
+        view.operand_a == nullptr ||
+        view.operand_b == nullptr ||
+        view.gemm_y == nullptr ||
+        view.extract_output == nullptr) {
+        Reject("capture_qkt_shape");
+        return;
+    }
+    const uint32_t ordinal = RoundBase(view.round_ordinal);
+    const uint64_t tile =
+        uint64_t{view.query_row} *
+            (m_params.n_ctx / kRCMxBlockLen) +
+        view.context_begin / kRCMxBlockLen;
+    if (ordinal >= m_layers.size() ||
+        !m_operands_seen[ordinal] ||
+        m_next_layer_tile[ordinal] != tile) {
+        Reject("capture_qkt_order");
+        return;
+    }
+    auto& qkt = m_layers[ordinal];
+    auto& sv = m_layers[ordinal + 1];
+    qkt.gemm_y.insert(
+        qkt.gemm_y.end(), view.gemm_y,
+        view.gemm_y + kRCMxBlockLen);
+    sv.operand_a.insert(
+        sv.operand_a.end(), view.extract_output,
+        view.extract_output + kRCMxBlockLen);
+    AppendExtractTiles(
+        ordinal, view.gemm_y, view.extract_output,
+        kRCMxBlockLen, view.prf_key);
+    if (!m_error.empty()) return;
+    if (m_extract_seen[ordinal]) {
+        m_gemm_seen[ordinal] = true;
+    }
+}
+
+void RCStage3EpisodeWitnessCapture::OnPhase1SVRow(
+    const RCPhase1SVRowWitnessView& view)
+{
+    if (!m_error.empty()) return;
+    if (view.round_ordinal >= m_params.rounds ||
+        view.query_row >= m_params.n_q ||
+        view.n_ctx != m_params.n_ctx ||
+        view.d_head != m_params.d_head ||
+        view.operand_a == nullptr ||
+        view.operand_b == nullptr ||
+        view.gemm_y == nullptr ||
+        view.extract_output == nullptr) {
+        Reject("capture_sv_shape");
+        return;
+    }
+    const uint32_t ordinal =
+        RoundBase(view.round_ordinal) + 1;
+    const uint64_t expected_tile =
+        uint64_t{view.query_row} *
+        (m_params.d_head / kRCMxBlockLen);
+    const uint64_t qkt_tiles_through_row =
+        uint64_t{view.query_row + 1} *
+        (m_params.n_ctx / kRCMxBlockLen);
+    if (ordinal >= m_layers.size() ||
+        !m_operands_seen[ordinal] ||
+        m_next_layer_tile[ordinal - 1] !=
+            qkt_tiles_through_row ||
+        m_next_layer_tile[ordinal] != expected_tile) {
+        Reject("capture_sv_order");
+        return;
+    }
+    auto& sv = m_layers[ordinal];
+    const uint64_t row_begin =
+        uint64_t{view.query_row} * m_params.n_ctx;
+    if (sv.operand_a.size() <
+            row_begin + m_params.n_ctx ||
+        !std::equal(
+            sv.operand_a.begin() + row_begin,
+            sv.operand_a.begin() + row_begin +
+                m_params.n_ctx,
+            view.operand_a)) {
+        Reject("capture_sv_qkt_link");
+        return;
+    }
+    sv.gemm_y.insert(
+        sv.gemm_y.end(), view.gemm_y,
+        view.gemm_y + m_params.d_head);
+    AppendExtractTiles(
+        ordinal, view.gemm_y, view.extract_output,
+        m_params.d_head, view.prf_key);
+    if (!m_error.empty()) return;
+    if (m_extract_seen[ordinal]) {
+        m_gemm_seen[ordinal] = true;
+    }
+}
+
+void RCStage3EpisodeWitnessCapture::OnFfnGemm(
+    const RCFfnGemmWitnessView& view)
+{
+    if (!m_error.empty()) return;
+    if (view.round_ordinal >= m_params.rounds ||
+        view.layer_ordinal >= m_params.L_lyr ||
+        view.operand_a == nullptr ||
+        view.operand_b == nullptr ||
+        view.gemm_y == nullptr) {
+        Reject("capture_ffn_gemm_arguments");
+        return;
+    }
+    const uint32_t ordinal = FfnOrdinal(
+        view.round_ordinal, view.layer_ordinal,
+        view.projection);
+    if (ordinal >= m_layout.layers.size() ||
+        m_gemm_seen[ordinal]) {
+        Reject("capture_ffn_gemm_order");
+        return;
+    }
+    const auto& spec = m_layout.layers[ordinal];
+    if (view.m != spec.m || view.k != spec.k ||
+        view.n != spec.n ||
+        view.operand_a->size() !=
+            uint64_t{spec.m} * spec.k ||
+        view.operand_b->size() !=
+            uint64_t{spec.k} * spec.n ||
+        view.gemm_y->size() !=
+            uint64_t{spec.m} * spec.n ||
+        (spec.residual_first_column < 0
+             ? view.residual != nullptr
+             : view.residual == nullptr ||
+                   view.residual->size() !=
+                       uint64_t{spec.m} * spec.n)) {
+        Reject("capture_ffn_gemm_shape");
+        return;
+    }
+    auto& layer = m_layers[ordinal];
+    layer.operand_a = *view.operand_a;
+    layer.operand_b = *view.operand_b;
+    layer.gemm_y = *view.gemm_y;
+    if (view.residual != nullptr) {
+        layer.residual = *view.residual;
+    }
+    m_operands_seen[ordinal] = true;
+    m_gemm_seen[ordinal] = true;
+}
+
+void RCStage3EpisodeWitnessCapture::OnFfnExtract(
+    const RCFfnExtractWitnessView& view)
+{
+    if (!m_error.empty()) return;
+    if (view.round_ordinal >= m_params.rounds ||
+        view.layer_ordinal >= m_params.L_lyr ||
+        view.input == nullptr || view.output == nullptr) {
+        Reject("capture_ffn_extract_arguments");
+        return;
+    }
+    const uint32_t ordinal = FfnOrdinal(
+        view.round_ordinal, view.layer_ordinal,
+        view.projection);
+    if (ordinal >= m_layout.layers.size() ||
+        !m_gemm_seen[ordinal] ||
+        m_extract_seen[ordinal]) {
+        Reject("capture_ffn_extract_order");
+        return;
+    }
+    const auto& spec = m_layout.layers[ordinal];
+    const uint64_t cells = uint64_t{spec.m} * spec.n;
+    if (view.rows != spec.m ||
+        view.columns != spec.n ||
+        view.input->size() != cells ||
+        view.output->size() != cells ||
+        (spec.residual_first_column < 0
+             ? view.residual != nullptr
+             : view.residual == nullptr ||
+                   view.residual->size() != cells)) {
+        Reject("capture_ffn_extract_shape");
+        return;
+    }
+    AppendExtractTiles(
+        ordinal, view.input->data(),
+        view.output->data(), cells, view.prf_key);
+}
+
+bool RCStage3EpisodeWitnessCapture::Complete(
+    std::string* why) const
+{
+    if (!m_error.empty()) {
+        return Fail(why, m_error);
+    }
+    if (m_layout.layers.empty() ||
+        m_layers.size() != m_layout.layers.size()) {
+        return Fail(why, "capture_incomplete_shape");
+    }
+    uint64_t total_tiles = 0;
+    for (uint32_t ordinal = 0;
+         ordinal < m_layout.layers.size(); ++ordinal) {
+        const auto& spec = m_layout.layers[ordinal];
+        const auto& layer = m_layers[ordinal];
+        const uint64_t cells =
+            uint64_t{spec.m} * spec.n;
+        const uint64_t tiles =
+            cells / kRCMxBlockLen;
+        if (!m_operands_seen[ordinal] ||
+            !m_gemm_seen[ordinal] ||
+            !m_extract_seen[ordinal] ||
+            m_extract_prfs[ordinal].IsNull() ||
+            layer.operand_a.size() !=
+                uint64_t{spec.m} * spec.k ||
+            layer.operand_b.size() !=
+                uint64_t{spec.k} * spec.n ||
+            layer.gemm_y.size() != cells ||
+            (spec.residual_first_column < 0
+                 ? !layer.residual.empty()
+                 : layer.residual.size() != cells) ||
+            m_next_layer_tile[ordinal] != tiles ||
+            m_layer_extract_inputs[ordinal].size() != tiles ||
+            m_layer_extract_outputs[ordinal].size() != tiles ||
+            m_layer_tile_begin[ordinal] != total_tiles) {
+            return Fail(
+                why, "capture_incomplete_layer_" +
+                         std::to_string(ordinal));
+        }
+        total_tiles += tiles;
+    }
+    FlattenExtractTiles();
+    if (m_extract_inputs.size() != total_tiles) {
+        return Fail(why, "capture_incomplete_tiles");
+    }
+    return true;
+}
+
+bool RCStage3EpisodeWitnessCapture::ValidateManifest(
+    const RCStage3GemmExtractManifest& manifest,
+    std::string* why) const
+{
+    const bool same_params =
+        manifest.params.rounds == m_params.rounds &&
+        manifest.params.d_head == m_params.d_head &&
+        manifest.params.n_q == m_params.n_q &&
+        manifest.params.n_ctx == m_params.n_ctx &&
+        manifest.params.L_lyr == m_params.L_lyr &&
+        manifest.params.d_model == m_params.d_model &&
+        manifest.params.d_ff == m_params.d_ff &&
+        manifest.params.b_seq == m_params.b_seq &&
+        manifest.params.T_leaf == m_params.T_leaf;
+    if (!Complete(why) ||
+        !ValidateRCStage3GemmExtractManifest(
+            manifest, why) ||
+        !same_params ||
+        manifest.layers.size() != m_layers.size()) {
+        return Fail(why, "capture_manifest_shape");
+    }
+    for (uint32_t ordinal = 0;
+         ordinal < manifest.layers.size(); ++ordinal) {
+        if (manifest.layers[ordinal]
+                .bindings.extract_prf !=
+            m_extract_prfs[ordinal]) {
+            return Fail(
+                why, "capture_manifest_prf_" +
+                         std::to_string(ordinal));
+        }
+    }
+    return true;
+}
+
+bool RCStage3EpisodeWitnessCapture::
+ValidateExtractProductOutputs(
+    const RCStage3EpisodeExtractProduct& extract,
+    std::string* why) const
+{
+    if (!Complete(why) ||
+        extract.tiles.size() != m_extract_outputs.size()) {
+        return Fail(why, "capture_extract_product_shape");
+    }
+    for (uint64_t tile_index = 0;
+         tile_index < extract.tiles.size(); ++tile_index) {
+        const auto& tile = extract.tiles[tile_index];
+        const auto& pin = tile.sampler_pin;
+        if (tile.global_tile != tile_index ||
+            pin.n_rows < kRCMxBlockLen ||
+            pin.n_coeffs != pin.n_rows ||
+            pin.column_roots.size() <= aq::kColOut ||
+            pin.column_roots[aq::kColOut].column !=
+                aq::kColOut) {
+            return Fail(
+                why, "capture_extract_output_pin_" +
+                         std::to_string(tile_index));
+        }
+        std::vector<Fp3> expected(
+            pin.n_rows, Fp3::Zero());
+        for (uint32_t lane = 0;
+             lane < kRCMxBlockLen; ++lane) {
+            expected[lane] =
+                S(m_extract_outputs[tile_index][lane]);
+        }
+        if (aq::AirCommittedValuesRoot<Fp3>(
+                expected, pin.n_coeffs) !=
+            pin.column_roots[aq::kColOut].root) {
+            return Fail(
+                why, "capture_extract_output_root_" +
+                         std::to_string(tile_index));
+        }
+    }
+    return true;
+}
+
+bool ProveRCStage3EpisodeProductsFromCapture(
+    const RCStage3SuccinctProof& statement,
+    RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeWitnessCapture& capture,
+    RCStage3EpisodeExtractProduct& extract,
+    RCStage3EpisodeTileStreamProduct& tile_stream,
+    RCStage3EpisodeGemmProduct& gemm,
+    std::string* why)
+{
+    extract = {};
+    tile_stream = {};
+    gemm = {};
+    if (!capture.ValidateManifest(manifest, why) ||
+        !ValidateRCStage3GemmExtractManifestBinding(
+            statement, manifest, why)) {
+        return Fail(why, "capture_product_binding");
+    }
+    if (!ProveRCStage3EpisodeExtractAndTileStreamProductsVertical(
+            statement, manifest, capture.ExtractInputs(),
+            extract, tile_stream, why)) {
+        extract = {};
+        tile_stream = {};
+        return Fail(why, "capture_extract_proof");
+    }
+    if (!capture.ValidateExtractProductOutputs(extract, why)) {
+        extract = {};
+        tile_stream = {};
+        return Fail(why, "capture_extract_output_mismatch");
+    }
+    if (!ProveRCStage3EpisodeGemmProduct(
+            statement, manifest, capture.LayerWitnesses(),
+            extract, tile_stream, gemm, why)) {
+        extract = {};
+        tile_stream = {};
+        gemm = {};
+        return Fail(why, "capture_gemm_proof");
+    }
+    return true;
+}
+
 uint256 ComputeRCStage3EpisodeGemmDotPinCommitment(
     const RCStage3EpisodeGemmDotPin& pin)
 {
@@ -673,11 +1197,15 @@ bool ProveRCStage3EpisodeGemmProduct(
         layer.layer_ordinal = ordinal;
         layer.operand_a = witness.operand_a;
         layer.operand_b = witness.operand_b;
+        layer.gemm_y = witness.gemm_y;
         layer.residual = witness.residual;
         if (layer.operand_a.size() !=
                 uint64_t{spec.m} * spec.k ||
             layer.operand_b.size() !=
                 uint64_t{spec.k} * spec.n ||
+            (!layer.gemm_y.empty() &&
+             layer.gemm_y.size() !=
+                 uint64_t{spec.m} * spec.n) ||
             (spec.residual_first_column < 0
                  ? !layer.residual.empty()
                  : layer.residual.size() !=
@@ -687,42 +1215,54 @@ bool ProveRCStage3EpisodeGemmProduct(
                 why, "prove_layer_shape_" +
                          std::to_string(ordinal));
         }
-        layer.gemm_y.assign(
-            uint64_t{spec.m} * spec.n, 0);
-        for (uint32_t row = 0; row < spec.m; ++row) {
-            for (uint32_t column = 0;
-                 column < spec.n; ++column) {
-                int64_t sum = 0;
-                for (uint32_t contraction = 0;
-                     contraction < spec.k; ++contraction) {
-                    const int8_t a = layer.operand_a[
-                        uint64_t{row} * spec.k +
-                        contraction];
-                    const int8_t b = spec.b.transpose
-                        ? layer.operand_b[
-                              uint64_t{column} * spec.k +
-                              contraction]
-                        : layer.operand_b[
-                              uint64_t{contraction} * spec.n +
-                              column];
-                    if (a < -48 || a > 48 ||
-                        b < -48 || b > 48) {
-                        out = {};
-                        return Fail(
-                            why, "prove_operand_range");
+        for (int8_t value : layer.operand_a) {
+            if (value < -48 || value > 48) {
+                out = {};
+                return Fail(why, "prove_operand_range");
+            }
+        }
+        for (int8_t value : layer.operand_b) {
+            if (value < -48 || value > 48) {
+                out = {};
+                return Fail(why, "prove_operand_range");
+            }
+        }
+        if (layer.gemm_y.empty()) {
+            // Legacy/R&D fallback.  Production miners provide the exact Y
+            // emitted by the solver and therefore never enter this replay.
+            layer.gemm_y.assign(
+                uint64_t{spec.m} * spec.n, 0);
+            for (uint32_t row = 0; row < spec.m; ++row) {
+                for (uint32_t column = 0;
+                     column < spec.n; ++column) {
+                    int64_t sum = 0;
+                    for (uint32_t contraction = 0;
+                         contraction < spec.k; ++contraction) {
+                        const int8_t a = layer.operand_a[
+                            uint64_t{row} * spec.k +
+                            contraction];
+                        const int8_t b = spec.b.transpose
+                            ? layer.operand_b[
+                                  uint64_t{column} * spec.k +
+                                  contraction]
+                            : layer.operand_b[
+                                  uint64_t{contraction} * spec.n +
+                                  column];
+                        sum += static_cast<int64_t>(a) * b;
                     }
-                    sum += static_cast<int64_t>(a) * b;
+                    layer.gemm_y[
+                        uint64_t{row} * spec.n + column] =
+                        sum;
                 }
-                if (sum < -static_cast<int64_t>(
-                              spec.signed_max_abs) ||
-                    sum > static_cast<int64_t>(
-                              spec.signed_max_abs)) {
-                    out = {};
-                    return Fail(why, "prove_signed_bound");
-                }
-                layer.gemm_y[
-                    uint64_t{row} * spec.n + column] =
-                    sum;
+            }
+        }
+        for (int64_t value : layer.gemm_y) {
+            if (value < -static_cast<int64_t>(
+                            spec.signed_max_abs) ||
+                value > static_cast<int64_t>(
+                            spec.signed_max_abs)) {
+                out = {};
+                return Fail(why, "prove_signed_bound");
             }
         }
         for (uint64_t tile_index = 0;
