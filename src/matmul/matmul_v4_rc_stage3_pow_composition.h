@@ -214,6 +214,115 @@ struct AssessmentV2 {
 [[nodiscard]] AssessmentV2
 AssessPowCompositionV2(const PremisesV2& premises);
 
+inline constexpr uint16_t kPowCompositionVersionV3 = 3;
+inline constexpr uint32_t kPowCompositionV3Queries = 192;
+inline constexpr uint32_t kPowCompositionV3OodCandidates = 2;
+inline constexpr uint64_t kPowCompositionV3ProofSites =
+    37'488'397ULL;
+inline constexpr uint32_t kPowCompositionV3FriBits = 135;
+inline constexpr uint32_t kPowCompositionV3BindingBits = 128;
+inline constexpr uint32_t kPowCompositionV3SafeNiropBits = 128;
+inline constexpr uint32_t kPowCompositionV3SecurityTargetBits = 64;
+
+/**
+ * Versioned composition premises for the single-lane SAFE/Q192/K=2 path.
+ *
+ * Unlike V2, this construction has no lane-independence or common-commitment
+ * product premise.  All 192 query candidates are derived from one typed SAFE
+ * query seed bound to the complete post-terminal transcript.  The 135-bit FRI
+ * term already contains the conservative 40-bit deduction for the
+ * non-predicated internal regrind; no proof nonce is credited as tensor work.
+ */
+struct PremisesV3 {
+    uint16_t version{kPowCompositionVersionV3};
+    uint32_t queries{kPowCompositionV3Queries};
+    uint32_t ood_candidates{kPowCompositionV3OodCandidates};
+    uint64_t proof_sites{kPowCompositionV3ProofSites};
+    uint32_t fri_bits{kPowCompositionV3FriBits};
+    uint32_t binding_bits{kPowCompositionV3BindingBits};
+    uint32_t safe_nirop_bits{kPowCompositionV3SafeNiropBits};
+    uint32_t security_target_bits{
+        kPowCompositionV3SecurityTargetBits};
+
+    // Consensus statement and complete tensor relation.
+    bool safe_q192_backend_consensus_selected{false};
+    bool header_projection_and_final_digest_disjoint{false};
+    bool statement_bound_before_first_proof_commitment{false};
+    bool complete_proof_payload_transcript_bound{false};
+    bool complete_tensor_work_relation{false};
+    bool all_relation_children_recursively_verified{false};
+
+    // Exact typed SAFE transcript and sole query source.
+    bool versioned_domain_and_fixed_k2{false};
+    bool typed_safe_domain_registry_pinned{false};
+    bool safe_native_air_parity_complete{false};
+    bool full_typed_transcript_program_proof_owned{false};
+    bool full_typed_transcript_recursively_replayed{false};
+    bool query_seed_binds_complete_post_terminal_transcript{false};
+    bool canonical_query_seed_is_sole_query_source{false};
+    bool all_query_candidates_recursively_consumed{false};
+    bool fixed_k2_selector_recursively_enforced{false};
+
+    // Single-oracle reductions and global topology.
+    bool one_trace_and_commitment_statement_bound{false};
+    bool fri_bcs_reduction_complete{false};
+    bool concrete_safe_nirop_reduction_complete{false};
+    bool poseidon2_binding_reduction_complete{false};
+    bool proof_site_upper_bound_recursively_enforced{false};
+    bool adaptive_statement_selection_accounted{false};
+
+    // Regrind and authority-path accounting.
+    bool unenforced_regrind_deduction_in_fri_bits{false};
+    bool site_union_and_regrind_each_charged_once{false};
+    bool proof_nonce_not_credited_as_tensor_work{false};
+    bool sampled_carrier_excluded_from_authority{false};
+    bool exact_replay_excluded_from_authority{false};
+};
+
+struct AssessmentV3 {
+    uint16_t version{kPowCompositionVersionV3};
+    uint32_t queries{0};
+    uint32_t ood_candidates{0};
+    uint64_t proof_sites{0};
+    uint32_t security_target_bits{0};
+
+    long double fri_probability{0.0L};
+    long double binding_probability{0.0L};
+    long double safe_nirop_probability{0.0L};
+    long double per_site_failure_probability{0.0L};
+    long double global_failure_probability{0.0L};
+    double global_conditional_bits{0.0};
+
+    bool canonical_parameters{false};
+    bool consensus_statement_binding_complete{false};
+    bool complete_tensor_work_relation{false};
+    bool typed_safe_transcript_complete{false};
+    bool sole_query_source_recursively_enforced{false};
+    bool single_oracle_reductions_complete{false};
+    bool global_site_accounting_complete{false};
+    bool internal_regrind_accounting_consistent{false};
+    bool proof_internal_and_mining_work_separated{false};
+    bool numeric_bound_machine_checked{false};
+    bool numeric_security_target_met{false};
+    bool authority_path_is_succinct_only{false};
+    bool false_acceptance_event_decomposition_complete{false};
+    bool pow_composition_theorem_complete{false};
+    std::string exact_expression;
+    std::string note;
+};
+
+/**
+ * Fail-closed single-Q192 theorem:
+ *
+ *   eps <= S * (2^-135 + 2^-128 + 2^-128).
+ *
+ * The first term is the already regrind-adjusted single-lane FRI/BCS bound.
+ * The other terms are the Poseidon2 commitment-binding and concrete
+ * SAFE/NIROP reductions.  The site union occurs exactly once.
+ */
+[[nodiscard]] AssessmentV3
+AssessPowCompositionV3(const PremisesV3& premises);
+
 } // namespace matmul::v4::rc::pow_composition
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_POW_COMPOSITION_H
