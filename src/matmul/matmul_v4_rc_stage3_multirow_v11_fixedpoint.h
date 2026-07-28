@@ -49,11 +49,26 @@ enum class EvidenceClassV1 : uint8_t {
     Measured = 2,
 };
 
+/**
+ * Sufficient statistics for recomputing the exact composed-degree bound at
+ * any power-of-two trace size.  AirKind matters: transition constraints add
+ * one selector degree, while first/last-row constraints add N-1.
+ */
+struct ConstraintDegreeProfileV1 {
+    uint32_t max_everywhere_degree{0};
+    uint32_t max_transition_degree{0};
+    uint32_t max_boundary_degree{0};
+    bool exact{false};
+};
+
 struct WireMeasurementV1 {
     uint32_t trace_rows{0};
+    uint64_t lde_rows{0};
     uint32_t columns{0};
     size_t proof_bytes{0};
     uint64_t verify_micros{0};
+    ConstraintDegreeProfileV1 constraint_degrees{};
+    EvidenceClassV1 lde_rows_evidence{EvidenceClassV1::Missing};
     EvidenceClassV1 proof_bytes_evidence{EvidenceClassV1::Missing};
     EvidenceClassV1 verify_evidence{EvidenceClassV1::Missing};
 };
@@ -86,6 +101,7 @@ struct ExecutableInventoryV1 {
     size_t recursive_parent_proof_bytes{0};
     size_t recursive_parent_receipt_bytes{0};
     uint64_t recursive_parent_verify_micros{0};
+    ConstraintDegreeProfileV1 constraint_degrees{};
     bool every_product_valid{false};
     bool full_query_shards_materialized{false};
 };
@@ -103,10 +119,16 @@ struct CanonicalVmBudgetV1 {
     uint32_t exact_instruction_count{0};
     uint64_t exact_real_rows{0};
     uint32_t trace_rows{0};
+    uint32_t max_constraint_degree{0};
+    uint64_t max_composed_degree{0};
+    uint64_t quotient_len{0};
+    uint32_t coefficient_domain_rows{0};
     uint64_t lde_rows{0};
     uint32_t max_instructions_under_lde_cap{0};
+    ConstraintDegreeProfileV1 constraint_degrees{};
     bool canonical_table_present{false};
     bool exact_instruction_inventory{false};
+    bool exact_degree_accounting{false};
     bool trace_rows_fit{false};
     bool lde_rows_fit{false};
 };
@@ -131,6 +153,10 @@ struct LevelShapeV1 {
     uint32_t normalized_columns{0};
     uint64_t vertical_active_rows{0};
     uint32_t normalized_trace_rows{0};
+    uint32_t max_constraint_degree{0};
+    uint64_t max_composed_degree{0};
+    uint64_t quotient_len{0};
+    uint32_t coefficient_domain_rows{0};
     uint64_t lde_rows{0};
     size_t projected_max_proof_bytes{0};
     size_t measured_reference_proof_bytes{0};
@@ -139,6 +165,7 @@ struct LevelShapeV1 {
     uint64_t measured_reference_verify_micros{0};
     uint64_t measured_normalized_root_verify_micros{0};
     bool columns_fit{false};
+    bool exact_degree_accounting{false};
     bool lde_fit{false};
     bool projected_wire_fits{false};
     bool normalized_root_wire_measured{false};
@@ -154,8 +181,13 @@ struct QueryShardPlanV1 {
     uint32_t binary_receipt_levels{0};
     uint64_t active_rows_per_parent{0};
     uint32_t trace_rows_per_parent{0};
+    uint32_t max_constraint_degree{0};
+    uint64_t max_composed_degree{0};
+    uint64_t quotient_len{0};
+    uint32_t coefficient_domain_rows{0};
     uint64_t lde_rows_per_parent{0};
     bool exact_vm_inventory{false};
+    bool exact_degree_accounting{false};
     bool covers_q192_exactly{false};
     bool every_shard_lde_fits{false};
     bool receipt_aggregation_executable{false};
@@ -171,7 +203,8 @@ struct QueryShardPlanV1 {
     const CanonicalVmBudgetV1& vm,
     uint32_t arity,
     uint64_t fixed_rows_per_parent,
-    uint32_t per_query_non_vm_rows);
+    uint32_t per_query_non_vm_rows,
+    const ConstraintDegreeProfileV1* normalized_parent_profile = nullptr);
 
 struct FixedPointAssessmentV1 {
     LevelShapeV1 level1{};

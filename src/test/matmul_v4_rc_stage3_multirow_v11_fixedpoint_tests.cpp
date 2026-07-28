@@ -9,26 +9,49 @@
 namespace matmul::v4::rc::stage3_multirow_v11_fixedpoint {
 namespace {
 
-cb::ProgramTable ParentTable(uint32_t instructions)
+cb::ProgramTable ParentTable(
+    uint32_t instructions,
+    uint32_t degree = 1,
+    air_quotient::AirKind kind =
+        air_quotient::AirKind::kEverywhere)
 {
+    BOOST_REQUIRE_GE(degree, 1U);
+    BOOST_REQUIRE_GE(instructions, 2U * degree - 1U);
     cb::Program program;
     program.role = RCStage3RelationRole::CompositionLink;
-    program.kind = air_quotient::AirKind::kEverywhere;
-    program.declared_degree = 1;
+    program.kind = kind;
+    program.declared_degree = degree;
     program.current_width = 1298;
     program.next_width = 1298;
     program.instructions.reserve(instructions);
-    for (uint32_t i = 0; i < instructions; ++i) {
-        cb::Instruction instruction;
-        if (i == 0) {
-            instruction.opcode = cb::Opcode::Current;
-            instruction.lhs = 0;
-        } else {
-            instruction.opcode = cb::Opcode::Add;
-            instruction.lhs = i - 1;
-            instruction.rhs = 0;
-        }
-        program.instructions.push_back(instruction);
+    cb::Instruction first;
+    first.opcode = cb::Opcode::Current;
+    first.lhs = 0;
+    program.instructions.push_back(first);
+    uint32_t product = 0;
+    for (uint32_t column = 1; column < degree; ++column) {
+        cb::Instruction load;
+        load.opcode = cb::Opcode::Current;
+        load.lhs = column;
+        program.instructions.push_back(load);
+        const uint32_t loaded =
+            static_cast<uint32_t>(program.instructions.size()) - 1;
+        cb::Instruction multiply;
+        multiply.opcode = cb::Opcode::Mul;
+        multiply.lhs = product;
+        multiply.rhs = loaded;
+        program.instructions.push_back(multiply);
+        product =
+            static_cast<uint32_t>(program.instructions.size()) - 1;
+    }
+    while (program.instructions.size() < instructions) {
+        cb::Instruction add;
+        add.opcode = cb::Opcode::Add;
+        add.lhs = product;
+        add.rhs = 0;
+        program.instructions.push_back(add);
+        product =
+            static_cast<uint32_t>(program.instructions.size()) - 1;
     }
     cb::ProgramTable table;
     table.role = program.role;
@@ -61,6 +84,8 @@ ExecutableInventoryV1 Inventory(uint32_t child_width)
     out.recursive_parent_proof_bytes = 2207844;
     out.recursive_parent_receipt_bytes = 2208636;
     out.recursive_parent_verify_micros = 429611;
+    out.constraint_degrees.max_everywhere_degree = 2;
+    out.constraint_degrees.exact = true;
     out.every_product_valid = true;
     out.full_query_shards_materialized = false;
     return out;
@@ -70,6 +95,10 @@ WireMeasurementV1 ParentJoinWire()
 {
     WireMeasurementV1 out;
     out.trace_rows = 512;
+    out.lde_rows =
+        uint64_t{out.trace_rows} * kRCFriBlowup;
+    out.constraint_degrees.max_everywhere_degree = 2;
+    out.constraint_degrees.exact = true;
     out.columns = 1298;
     // The external full parent-join run reported 13.55 MiB. Round upward so
     // every subsequent headroom calculation is conservative.
@@ -77,6 +106,7 @@ WireMeasurementV1 ParentJoinWire()
         (1355ULL * (1ULL << 20) + 99) / 100;
     out.verify_micros = 700000;
     out.proof_bytes_evidence = EvidenceClassV1::Measured;
+    out.lde_rows_evidence = EvidenceClassV1::Measured;
     out.verify_evidence = EvidenceClassV1::Measured;
     return out;
 }
@@ -92,7 +122,7 @@ BOOST_AUTO_TEST_CASE(
     const auto opaque =
         AssessCanonicalVmBudgetV1(1298, nullptr);
     BOOST_CHECK_EQUAL(
-        opaque.max_instructions_under_lde_cap, 4160U);
+        opaque.max_instructions_under_lde_cap, 0U);
     BOOST_CHECK(!opaque.canonical_table_present);
     BOOST_CHECK(!opaque.exact_instruction_inventory);
     BOOST_CHECK(!opaque.lde_rows_fit);
@@ -109,7 +139,16 @@ BOOST_AUTO_TEST_CASE(
         narrow.exact_real_rows,
         uint64_t{192} * (1298 + 2600 + 3));
     BOOST_CHECK_EQUAL(narrow.trace_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(narrow.max_constraint_degree, 1U);
+    BOOST_CHECK_EQUAL(
+        narrow.max_composed_degree, (1U << 20) - 1U);
+    BOOST_CHECK_EQUAL(narrow.quotient_len, 1U);
+    BOOST_CHECK_EQUAL(
+        narrow.coefficient_domain_rows, 1U << 20);
     BOOST_CHECK_EQUAL(narrow.lde_rows, 1U << 24);
+    BOOST_CHECK_EQUAL(
+        narrow.max_instructions_under_lde_cap, 4160U);
+    BOOST_CHECK(narrow.exact_degree_accounting);
     BOOST_CHECK(narrow.lde_rows_fit);
 
     const auto too_wide_table = ParentTable(4161);
@@ -121,6 +160,162 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(too_wide.trace_rows, 1U << 21);
     BOOST_CHECK(!too_wide.trace_rows_fit);
     BOOST_CHECK(!too_wide.lde_rows_fit);
+}
+
+BOOST_AUTO_TEST_CASE(
+    quotient_degree_and_air_kind_set_the_real_vm_capacity)
+{
+    std::string why;
+    const auto cubic_fit_table = ParentTable(1429, 3);
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(cubic_fit_table, &why), why);
+    const auto cubic_fit =
+        AssessCanonicalVmBudgetV1(
+            1298, &cubic_fit_table);
+    BOOST_REQUIRE(cubic_fit.exact_degree_accounting);
+    BOOST_CHECK_EQUAL(cubic_fit.trace_rows, 1U << 19);
+    BOOST_CHECK_EQUAL(cubic_fit.max_constraint_degree, 3U);
+    BOOST_CHECK_EQUAL(
+        cubic_fit.max_composed_degree, 1572861U);
+    BOOST_CHECK_EQUAL(cubic_fit.quotient_len, 1048574U);
+    BOOST_CHECK_EQUAL(
+        cubic_fit.coefficient_domain_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(cubic_fit.lde_rows, 1U << 24);
+    BOOST_CHECK(cubic_fit.lde_rows_fit);
+    BOOST_CHECK_EQUAL(
+        cubic_fit.max_instructions_under_lde_cap, 1429U);
+    air_quotient::AirConstraintSystem<gkr_field::Fp3> cubic_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            cubic_fit_table, cubic_fit.trace_rows,
+            cubic_cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        cubic_fit.max_composed_degree,
+        cubic_cs.MaxComposedDegreeBound());
+    BOOST_CHECK_EQUAL(
+        cubic_fit.quotient_len,
+        cubic_cs.QuotientLen());
+
+    const auto cubic_over_table = ParentTable(1430, 3);
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(cubic_over_table, &why), why);
+    const auto cubic_over =
+        AssessCanonicalVmBudgetV1(
+            1298, &cubic_over_table);
+    BOOST_CHECK_EQUAL(cubic_over.trace_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(
+        cubic_over.coefficient_domain_rows, 1U << 21);
+    BOOST_CHECK_EQUAL(cubic_over.lde_rows, 1U << 25);
+    BOOST_CHECK(!cubic_over.lde_rows_fit);
+
+    const auto boundary_fit_table = ParentTable(
+        64, 3, air_quotient::AirKind::kFirstRow);
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(boundary_fit_table, &why), why);
+    const auto boundary_fit =
+        AssessCanonicalVmBudgetV1(
+            1298, &boundary_fit_table);
+    BOOST_CHECK_EQUAL(boundary_fit.trace_rows, 1U << 18);
+    BOOST_CHECK_EQUAL(
+        boundary_fit.max_composed_degree, 1048572U);
+    BOOST_CHECK_EQUAL(boundary_fit.quotient_len, 786429U);
+    BOOST_CHECK_EQUAL(
+        boundary_fit.coefficient_domain_rows, 1U << 20);
+    BOOST_CHECK_EQUAL(boundary_fit.lde_rows, 1U << 24);
+    BOOST_CHECK(boundary_fit.lde_rows_fit);
+    BOOST_CHECK_EQUAL(
+        boundary_fit.max_instructions_under_lde_cap, 64U);
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>
+        boundary_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            boundary_fit_table,
+            boundary_fit.trace_rows,
+            boundary_cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        boundary_fit.max_composed_degree,
+        boundary_cs.MaxComposedDegreeBound());
+    BOOST_CHECK_EQUAL(
+        boundary_fit.quotient_len,
+        boundary_cs.QuotientLen());
+
+    const auto boundary_over_table = ParentTable(
+        65, 3, air_quotient::AirKind::kLastRow);
+    const auto boundary_over =
+        AssessCanonicalVmBudgetV1(
+            1298, &boundary_over_table);
+    BOOST_CHECK_EQUAL(boundary_over.trace_rows, 1U << 19);
+    BOOST_CHECK_EQUAL(
+        boundary_over.coefficient_domain_rows, 1U << 21);
+    BOOST_CHECK_EQUAL(boundary_over.lde_rows, 1U << 25);
+    BOOST_CHECK(!boundary_over.lde_rows_fit);
+
+    const auto quartic_table = ParentTable(65, 4);
+    const auto quartic =
+        AssessCanonicalVmBudgetV1(
+            1298, &quartic_table);
+    BOOST_CHECK_EQUAL(
+        quartic.max_instructions_under_lde_cap, 64U);
+    BOOST_CHECK(!quartic.lde_rows_fit);
+
+    auto understated = cubic_fit_table;
+    understated.programs[0].declared_degree = 2;
+    BOOST_CHECK(!cb::ValidateProgramTable(understated));
+    const auto rejected =
+        AssessCanonicalVmBudgetV1(
+            1298, &understated);
+    BOOST_CHECK(!rejected.canonical_table_present);
+    BOOST_CHECK(!rejected.exact_degree_accounting);
+    BOOST_CHECK(!rejected.lde_rows_fit);
+}
+
+BOOST_AUTO_TEST_CASE(
+    query_shard_search_requires_and_uses_exact_degree_profile)
+{
+    const auto cubic_table = ParentTable(2600, 3);
+    const auto vm =
+        AssessCanonicalVmBudgetV1(
+            1298, &cubic_table);
+    BOOST_REQUIRE(vm.exact_degree_accounting);
+    BOOST_CHECK(!vm.lde_rows_fit);
+
+    const auto sharded = SearchQueryShardsV1(
+        vm, 1, 0, 0);
+    BOOST_REQUIRE(sharded.exact_degree_accounting);
+    BOOST_CHECK_GT(sharded.queries_per_shard, 0U);
+    BOOST_CHECK_LT(
+        sharded.queries_per_shard,
+        abi::kQueryCountV11);
+    BOOST_CHECK_EQUAL(
+        sharded.lde_rows_per_parent, 1U << 24);
+    BOOST_CHECK_LE(
+        sharded.quotient_len,
+        sharded.coefficient_domain_rows);
+    BOOST_CHECK(sharded.every_shard_lde_fits);
+
+    auto missing_degree = vm;
+    missing_degree.constraint_degrees = {};
+    missing_degree.exact_degree_accounting = false;
+    const auto rejected = SearchQueryShardsV1(
+        missing_degree, 1, 0, 0);
+    BOOST_CHECK_EQUAL(rejected.queries_per_shard, 0U);
+    BOOST_CHECK(!rejected.exact_degree_accounting);
+
+    ConstraintDegreeProfileV1 boundary;
+    boundary.max_boundary_degree = 3;
+    boundary.exact = true;
+    const auto boundary_sharded = SearchQueryShardsV1(
+        vm, 1, 0, 0, &boundary);
+    BOOST_REQUIRE(
+        boundary_sharded.exact_degree_accounting);
+    BOOST_CHECK_LT(
+        boundary_sharded.queries_per_shard,
+        sharded.queries_per_shard);
+    BOOST_CHECK_EQUAL(
+        boundary_sharded.lde_rows_per_parent,
+        1U << 24);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -211,6 +406,8 @@ BOOST_AUTO_TEST_CASE(
     const auto table = ParentTable(1276);
     WireMeasurementV1 missing;
     missing.trace_rows = 512;
+    missing.lde_rows =
+        uint64_t{missing.trace_rows} * kRCFriBlowup;
     missing.columns = 1298;
     const auto assessed = AssessFixedPointV1(
         inventory, inventory, missing, &table, 1, 32);
@@ -236,13 +433,18 @@ BOOST_AUTO_TEST_CASE(
         inventory, inventory, ParentJoinWire(), &table, 1, 32);
     WireMeasurementV1 exact_level1;
     exact_level1.trace_rows = shape.level1.normalized_trace_rows;
+    exact_level1.lde_rows = shape.level1.lde_rows;
+    exact_level1.constraint_degrees =
+        inventory.constraint_degrees;
     exact_level1.columns = shape.level1.normalized_columns;
     exact_level1.proof_bytes = kWireBudgetBytesV1 - 1;
     exact_level1.verify_micros = kRelayBudgetMicrosV1 - 1;
     exact_level1.proof_bytes_evidence = EvidenceClassV1::Measured;
+    exact_level1.lde_rows_evidence = EvidenceClassV1::Measured;
     exact_level1.verify_evidence = EvidenceClassV1::Measured;
     auto exact_level2 = exact_level1;
     exact_level2.trace_rows = shape.level2.normalized_trace_rows;
+    exact_level2.lde_rows = shape.level2.lde_rows;
     exact_level2.columns = shape.level2.normalized_columns;
     const auto assessed = AssessFixedPointV1(
         inventory, inventory, exact_level1, exact_level2,
@@ -264,6 +466,27 @@ BOOST_AUTO_TEST_CASE(
         assessed.residual_mask &
         kResidualChildVerifierNotInParentAir);
     BOOST_CHECK(!assessed.complete_fixed_point);
+
+    auto understated_lde1 = exact_level1;
+    auto understated_lde2 = exact_level2;
+    understated_lde1.lde_rows >>= 1;
+    understated_lde2.lde_rows >>= 1;
+    const auto rejected_measurement = AssessFixedPointV1(
+        inventory, inventory,
+        understated_lde1, understated_lde2,
+        &table, 1, 32);
+    BOOST_CHECK(
+        !rejected_measurement
+            .level1.normalized_root_wire_measured);
+    BOOST_CHECK(
+        !rejected_measurement
+            .level2.normalized_root_wire_measured);
+    BOOST_CHECK_EQUAL(
+        rejected_measurement.scheduler_columns_headroom,
+        0U);
+    BOOST_CHECK(
+        rejected_measurement.residual_mask &
+        kResidualWholeRootWireUnmeasured);
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -21,6 +21,186 @@ uint32_t NextPowerOfTwo(uint64_t value)
     return static_cast<uint32_t>(out);
 }
 
+bool IsPowerOfTwo(uint64_t value)
+{
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+bool CheckedAdd(uint64_t a, uint64_t b, uint64_t& out)
+{
+    if (a > std::numeric_limits<uint64_t>::max() - b) return false;
+    out = a + b;
+    return true;
+}
+
+bool CheckedMul(uint64_t a, uint64_t b, uint64_t& out)
+{
+    if (a != 0 &&
+        b > std::numeric_limits<uint64_t>::max() / a) {
+        return false;
+    }
+    out = a * b;
+    return true;
+}
+
+ConstraintDegreeProfileV1 DegreeProfile(
+    const air_quotient::AirConstraintSystem<gkr_field::Fp3>& cs)
+{
+    ConstraintDegreeProfileV1 out;
+    if (cs.n_rows < 2 || cs.constraints.empty()) return out;
+    for (const auto& constraint : cs.constraints) {
+        switch (constraint.kind) {
+        case air_quotient::AirKind::kEverywhere:
+            out.max_everywhere_degree = std::max(
+                out.max_everywhere_degree,
+                constraint.alg_degree);
+            break;
+        case air_quotient::AirKind::kTransition:
+            out.max_transition_degree = std::max(
+                out.max_transition_degree,
+                constraint.alg_degree);
+            break;
+        case air_quotient::AirKind::kFirstRow:
+        case air_quotient::AirKind::kLastRow:
+            out.max_boundary_degree = std::max(
+                out.max_boundary_degree,
+                constraint.alg_degree);
+            break;
+        }
+    }
+    out.exact =
+        out.max_everywhere_degree != 0 ||
+        out.max_transition_degree != 0 ||
+        out.max_boundary_degree != 0;
+    return out;
+}
+
+ConstraintDegreeProfileV1 DegreeProfile(
+    const cb::ProgramTable& table)
+{
+    ConstraintDegreeProfileV1 out;
+    if (!cb::ValidateProgramTable(table, nullptr)) return out;
+    for (const auto& program : table.programs) {
+        switch (program.kind) {
+        case air_quotient::AirKind::kEverywhere:
+            out.max_everywhere_degree = std::max(
+                out.max_everywhere_degree,
+                program.declared_degree);
+            break;
+        case air_quotient::AirKind::kTransition:
+            out.max_transition_degree = std::max(
+                out.max_transition_degree,
+                program.declared_degree);
+            break;
+        case air_quotient::AirKind::kFirstRow:
+        case air_quotient::AirKind::kLastRow:
+            out.max_boundary_degree = std::max(
+                out.max_boundary_degree,
+                program.declared_degree);
+            break;
+        }
+    }
+    out.exact =
+        out.max_everywhere_degree != 0 ||
+        out.max_transition_degree != 0 ||
+        out.max_boundary_degree != 0;
+    return out;
+}
+
+ConstraintDegreeProfileV1 MergeProfiles(
+    const ConstraintDegreeProfileV1& a,
+    const ConstraintDegreeProfileV1& b)
+{
+    ConstraintDegreeProfileV1 out;
+    out.max_everywhere_degree = std::max(
+        a.max_everywhere_degree, b.max_everywhere_degree);
+    out.max_transition_degree = std::max(
+        a.max_transition_degree, b.max_transition_degree);
+    out.max_boundary_degree = std::max(
+        a.max_boundary_degree, b.max_boundary_degree);
+    out.exact = a.exact && b.exact;
+    return out;
+}
+
+struct DomainShapeV1 {
+    uint32_t max_constraint_degree{0};
+    uint64_t max_composed_degree{0};
+    uint64_t quotient_len{0};
+    uint32_t coefficient_rows{0};
+    uint64_t lde_rows{0};
+    bool exact{false};
+};
+
+DomainShapeV1 DomainForTraceRows(
+    const ConstraintDegreeProfileV1& profile,
+    uint32_t trace_rows)
+{
+    DomainShapeV1 out;
+    if (!profile.exact || trace_rows < 2) return out;
+    const uint64_t n_minus_one =
+        static_cast<uint64_t>(trace_rows) - 1;
+    auto add_kind = [&out, n_minus_one](
+                        uint32_t degree,
+                        uint64_t selector_degree) {
+        if (degree == 0) return true;
+        uint64_t composed = 0;
+        if (!CheckedMul(degree, n_minus_one, composed) ||
+            !CheckedAdd(
+                composed, selector_degree, composed)) {
+            return false;
+        }
+        out.max_constraint_degree = std::max(
+            out.max_constraint_degree, degree);
+        out.max_composed_degree = std::max(
+            out.max_composed_degree, composed);
+        return true;
+    };
+    if (!add_kind(profile.max_everywhere_degree, 0) ||
+        !add_kind(profile.max_transition_degree, 1) ||
+        !add_kind(
+            profile.max_boundary_degree, n_minus_one)) {
+        return out;
+    }
+    out.quotient_len =
+        out.max_composed_degree < trace_rows
+        ? 1
+        : out.max_composed_degree - trace_rows + 1;
+    if (out.quotient_len >
+        std::numeric_limits<uint32_t>::max()) {
+        return out;
+    }
+    out.coefficient_rows = NextPowerOfTwo(
+        std::max<uint64_t>(
+            trace_rows, out.quotient_len));
+    if (out.coefficient_rows == 0 ||
+        !CheckedMul(
+            out.coefficient_rows,
+            kRCFriBlowup, out.lde_rows)) {
+        return out;
+    }
+    out.exact = true;
+    return out;
+}
+
+bool RowsForVm(
+    uint32_t child_columns,
+    uint32_t instructions,
+    uint32_t query_count,
+    uint64_t& real_rows,
+    uint32_t& trace_rows)
+{
+    uint64_t rows_per_query = 0;
+    if (!CheckedAdd(
+            child_columns, instructions, rows_per_query) ||
+        !CheckedAdd(rows_per_query, 3, rows_per_query) ||
+        !CheckedMul(
+            rows_per_query, query_count, real_rows)) {
+        return false;
+    }
+    trace_rows = NextPowerOfTwo(real_rows);
+    return trace_rows != 0;
+}
+
 uint32_t Log2Exact(uint32_t value)
 {
     uint32_t out = 0;
@@ -73,12 +253,16 @@ uint64_t PerChildRows(
 {
     const uint64_t merkle = MerkleRowsAllQueries(inventory);
     if (merkle == 0) return 0;
-    return uint64_t{inventory.parent_join_rows} +
-        merkle +
-        inventory.decoder_rows +
-        std::max(
-            inventory.deep_vm_rows,
-            exact_deep_vm_rows);
+    uint64_t out = inventory.parent_join_rows;
+    return CheckedAdd(out, merkle, out) &&
+        CheckedAdd(out, inventory.decoder_rows, out) &&
+        CheckedAdd(
+            out,
+            std::max(
+                inventory.deep_vm_rows,
+                exact_deep_vm_rows),
+            out)
+        ? out : 0;
 }
 
 size_t SaturatingMulDivCeil(
@@ -97,19 +281,33 @@ size_t SaturatingMulDivCeil(
 size_t ProjectWireBytes(
     const WireMeasurementV1& wire,
     uint32_t normalized_columns,
-    uint32_t normalized_trace_rows)
+    uint64_t normalized_lde_rows)
 {
     if (wire.proof_bytes_evidence != EvidenceClassV1::Measured ||
+        wire.lde_rows_evidence != EvidenceClassV1::Measured ||
         wire.proof_bytes == 0 || wire.columns == 0 ||
-        wire.trace_rows == 0 || normalized_trace_rows == 0) {
+        wire.trace_rows == 0 ||
+        !IsPowerOfTwo(wire.lde_rows) ||
+        !IsPowerOfTwo(normalized_lde_rows) ||
+        wire.lde_rows >
+            std::numeric_limits<uint32_t>::max() ||
+        normalized_lde_rows >
+            std::numeric_limits<uint32_t>::max()) {
+        return 0;
+    }
+    const auto wire_domain = DomainForTraceRows(
+        wire.constraint_degrees,
+        NextPowerOfTwo(wire.trace_rows));
+    if (!wire_domain.exact ||
+        wire.lde_rows != wire_domain.lde_rows) {
         return 0;
     }
     size_t out = SaturatingMulDivCeil(
         wire.proof_bytes, normalized_columns, wire.columns);
     const uint32_t base_depth =
-        Log2Exact(NextPowerOfTwo(wire.trace_rows) * kRCFriBlowup);
+        Log2Exact(static_cast<uint32_t>(wire.lde_rows));
     const uint32_t normalized_depth =
-        Log2Exact(normalized_trace_rows * kRCFriBlowup);
+        Log2Exact(static_cast<uint32_t>(normalized_lde_rows));
     if (normalized_depth > base_depth) {
         const uint64_t depth_delta = normalized_depth - base_depth;
         const uint64_t path_bytes =
@@ -127,10 +325,12 @@ size_t ProjectWireBytes(
 
 uint32_t SchedulerHeadroom(
     const WireMeasurementV1& wire,
-    uint32_t trace_rows)
+    uint64_t lde_rows)
 {
     if (wire.proof_bytes_evidence != EvidenceClassV1::Measured ||
-        wire.proof_bytes == 0 || wire.columns == 0) {
+        wire.lde_rows_evidence != EvidenceClassV1::Measured ||
+        wire.proof_bytes == 0 || wire.columns == 0 ||
+        wire.lde_rows == 0) {
         return 0;
     }
     uint32_t low = 0;
@@ -140,9 +340,10 @@ uint32_t SchedulerHeadroom(
         : 0;
     while (low < high) {
         const uint32_t mid = low + (high - low + 1) / 2;
-        if (ProjectWireBytes(
-                wire, wire.columns + mid, trace_rows) <=
-            kWireBudgetBytesV1) {
+        const size_t projected = ProjectWireBytes(
+            wire, wire.columns + mid, lde_rows);
+        if (projected != 0 &&
+            projected <= kWireBudgetBytesV1) {
             low = mid;
         } else {
             high = mid - 1;
@@ -156,7 +357,8 @@ LevelShapeV1 AssessLevel(
     const WireMeasurementV1& wire,
     uint32_t arity,
     uint32_t scheduler_columns,
-    uint32_t exact_deep_vm_rows)
+    uint32_t exact_deep_vm_rows,
+    const ConstraintDegreeProfileV1& degree_profile)
 {
     LevelShapeV1 out;
     out.arity = arity;
@@ -169,15 +371,30 @@ LevelShapeV1 AssessLevel(
         ? static_cast<uint32_t>(width) : 0;
     const uint64_t child_rows =
         PerChildRows(inventory, exact_deep_vm_rows);
-    out.vertical_active_rows =
-        child_rows == 0 ? 0 :
-        child_rows * arity + inventory.recursive_parent_rows;
+    uint64_t arity_rows = 0;
+    if (child_rows != 0 &&
+        CheckedMul(child_rows, arity, arity_rows) &&
+        CheckedAdd(
+            arity_rows,
+            inventory.recursive_parent_rows,
+            out.vertical_active_rows)) {
+        // Set by checked arithmetic above.
+    }
     out.normalized_trace_rows =
         NextPowerOfTwo(out.vertical_active_rows);
-    out.lde_rows =
-        uint64_t{out.normalized_trace_rows} * kRCFriBlowup;
+    const auto domain = DomainForTraceRows(
+        degree_profile, out.normalized_trace_rows);
+    out.max_constraint_degree =
+        domain.max_constraint_degree;
+    out.max_composed_degree =
+        domain.max_composed_degree;
+    out.quotient_len = domain.quotient_len;
+    out.coefficient_domain_rows =
+        domain.coefficient_rows;
+    out.lde_rows = domain.lde_rows;
+    out.exact_degree_accounting = domain.exact;
     out.projected_max_proof_bytes = ProjectWireBytes(
-        wire, out.normalized_columns, out.normalized_trace_rows);
+        wire, out.normalized_columns, out.lde_rows);
     out.measured_reference_proof_bytes =
         wire.proof_bytes_evidence == EvidenceClassV1::Measured
         ? wire.proof_bytes : 0;
@@ -186,7 +403,10 @@ LevelShapeV1 AssessLevel(
         ? wire.verify_micros : 0;
     const bool exact_normalized_shape =
         wire.columns == out.normalized_columns &&
-        wire.trace_rows == out.normalized_trace_rows;
+        wire.trace_rows == out.normalized_trace_rows &&
+        wire.lde_rows == out.lde_rows &&
+        wire.lde_rows_evidence ==
+            EvidenceClassV1::Measured;
     out.normalized_root_wire_measured =
         exact_normalized_shape &&
         wire.proof_bytes_evidence == EvidenceClassV1::Measured &&
@@ -207,6 +427,7 @@ LevelShapeV1 AssessLevel(
         out.normalized_columns != 0 &&
         out.normalized_columns <= kRCFri3AlgBatchMaxColumns;
     out.lde_fit =
+        out.exact_degree_accounting &&
         out.normalized_trace_rows != 0 &&
         out.lde_rows <=
             (uint64_t{1} << kRCFriMaxLdeLog2);
@@ -274,10 +495,27 @@ ExecutableInventoryV1 CaptureExecutableInventoryV1(
         recursive_parent.encoded_bytes;
     out.recursive_parent_verify_micros =
         recursive_parent.parent_verify_micros;
+    out.constraint_degrees = DegreeProfile(parent_join.cs);
+    out.constraint_degrees = MergeProfiles(
+        out.constraint_degrees,
+        DegreeProfile(merkle_fold.hash_cs));
+    out.constraint_degrees = MergeProfiles(
+        out.constraint_degrees,
+        DegreeProfile(merkle_fold.fold_cs));
+    out.constraint_degrees = MergeProfiles(
+        out.constraint_degrees,
+        DegreeProfile(decoder.cs));
+    out.constraint_degrees = MergeProfiles(
+        out.constraint_degrees,
+        DegreeProfile(deep_vm.cs));
+    out.constraint_degrees = MergeProfiles(
+        out.constraint_degrees,
+        DegreeProfile(recursive_parent.parent_proof_cs));
     out.every_product_valid =
         parent_join.valid && merkle_fold.valid &&
         decoder.valid && deep_vm.valid &&
-        recursive_parent.valid;
+        recursive_parent.valid &&
+        out.constraint_degrees.exact;
     out.full_query_shards_materialized =
         recursive_parent.fully_materialized_children ==
             rp::kRecursiveParentArityV1;
@@ -293,38 +531,80 @@ CanonicalVmBudgetV1 AssessCanonicalVmBudgetV1(
     out.child_proof_columns = child_trace_columns;
     out.query_count = query_count;
     if (child_trace_columns == 0 || query_count == 0) return out;
-    // At most floor(2^20/Q)-W-3 instructions: trace rows are bounded by
-    // 2^20 because the FRI blowup is 16 under a 2^24 LDE cap.
-    const uint32_t max_trace_rows =
-        uint32_t{1} << (kRCFriMaxLdeLog2 - 4);
-    const uint32_t per_query_cap = max_trace_rows / query_count;
-    out.max_instructions_under_lde_cap =
-        per_query_cap > child_trace_columns + 3
-        ? per_query_cap - child_trace_columns - 3
-        : 0;
     if (canonical_parent_table == nullptr) return out;
     std::string why;
     out.canonical_table_present =
         cb::ValidateProgramTable(*canonical_parent_table, &why);
     if (!out.canonical_table_present) return out;
+    out.constraint_degrees =
+        DegreeProfile(*canonical_parent_table);
+    if (!out.constraint_degrees.exact) return out;
     out.exact_instruction_count =
         ExactInstructionCount(*canonical_parent_table);
     out.exact_instruction_inventory =
         out.exact_instruction_count != 0;
     if (!out.exact_instruction_inventory) return out;
-    out.exact_real_rows =
-        uint64_t{query_count} *
-        (uint64_t{child_trace_columns} +
-         out.exact_instruction_count + 3);
-    out.trace_rows = NextPowerOfTwo(out.exact_real_rows);
-    out.lde_rows = uint64_t{out.trace_rows} * kRCFriBlowup;
+    if (!RowsForVm(
+            child_trace_columns,
+            out.exact_instruction_count,
+            query_count,
+            out.exact_real_rows,
+            out.trace_rows)) {
+        return out;
+    }
+    const auto domain = DomainForTraceRows(
+        out.constraint_degrees, out.trace_rows);
+    out.max_constraint_degree =
+        domain.max_constraint_degree;
+    out.max_composed_degree =
+        domain.max_composed_degree;
+    out.quotient_len = domain.quotient_len;
+    out.coefficient_domain_rows =
+        domain.coefficient_rows;
+    out.lde_rows = domain.lde_rows;
+    out.exact_degree_accounting = domain.exact;
+    const uint32_t max_trace_rows =
+        uint32_t{1} << (kRCFriMaxLdeLog2 - 4);
     out.trace_rows_fit =
-        out.trace_rows != 0 &&
+        out.exact_degree_accounting &&
         out.trace_rows <= max_trace_rows;
     out.lde_rows_fit =
+        out.exact_degree_accounting &&
         out.lde_rows != 0 &&
         out.lde_rows <=
             (uint64_t{1} << kRCFriMaxLdeLog2);
+
+    const uint32_t row_instruction_cap =
+        max_trace_rows / query_count >
+            child_trace_columns + 3
+        ? max_trace_rows / query_count -
+            child_trace_columns - 3
+        : 0;
+    uint32_t low = 0;
+    uint32_t high = row_instruction_cap;
+    while (low < high) {
+        const uint32_t mid =
+            low + (high - low + 1) / 2;
+        uint64_t real_rows = 0;
+        uint32_t trace_rows = 0;
+        bool fits = RowsForVm(
+            child_trace_columns, mid, query_count,
+            real_rows, trace_rows);
+        const auto candidate = fits
+            ? DomainForTraceRows(
+                out.constraint_degrees, trace_rows)
+            : DomainShapeV1{};
+        fits =
+            fits && candidate.exact &&
+            candidate.lde_rows <=
+                (uint64_t{1} << kRCFriMaxLdeLog2);
+        if (fits) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    out.max_instructions_under_lde_cap = low;
     return out;
 }
 
@@ -332,14 +612,21 @@ QueryShardPlanV1 SearchQueryShardsV1(
     const CanonicalVmBudgetV1& vm,
     uint32_t arity,
     uint64_t fixed_rows_per_parent,
-    uint32_t per_query_non_vm_rows)
+    uint32_t per_query_non_vm_rows,
+    const ConstraintDegreeProfileV1* normalized_parent_profile)
 {
     QueryShardPlanV1 out;
     out.arity = arity;
     out.exact_vm_inventory =
         vm.canonical_table_present &&
-        vm.exact_instruction_inventory;
+        vm.exact_instruction_inventory &&
+        vm.exact_degree_accounting;
+    const auto& degree_profile =
+        normalized_parent_profile != nullptr
+        ? *normalized_parent_profile
+        : vm.constraint_degrees;
     if (!out.exact_vm_inventory ||
+        !degree_profile.exact ||
         (arity != 1 && arity != 2)) {
         return out;
     }
@@ -348,20 +635,46 @@ QueryShardPlanV1 SearchQueryShardsV1(
         vm.exact_instruction_count + 3;
     for (uint32_t queries = 1;
          queries <= abi::kQueryCountV11; ++queries) {
-        const uint64_t rows =
-            fixed_rows_per_parent +
-            uint64_t{arity} * queries *
-                (vm_rows_per_query +
-                 per_query_non_vm_rows);
+        uint64_t rows_per_query = 0;
+        uint64_t variable_rows = 0;
+        uint64_t rows = 0;
+        if (!CheckedAdd(
+                vm_rows_per_query,
+                per_query_non_vm_rows,
+                rows_per_query) ||
+            !CheckedMul(
+                arity, queries, variable_rows) ||
+            !CheckedMul(
+                variable_rows,
+                rows_per_query,
+                variable_rows) ||
+            !CheckedAdd(
+                fixed_rows_per_parent,
+                variable_rows, rows)) {
+            break;
+        }
         const uint32_t trace = NextPowerOfTwo(rows);
-        if (trace != 0 &&
-            uint64_t{trace} * kRCFriBlowup <=
+        const auto domain =
+            DomainForTraceRows(
+                degree_profile, trace);
+        if (domain.exact &&
+            domain.lde_rows <=
                 (uint64_t{1} << kRCFriMaxLdeLog2)) {
             out.queries_per_shard = queries;
             out.active_rows_per_parent = rows;
             out.trace_rows_per_parent = trace;
+            out.max_constraint_degree =
+                domain.max_constraint_degree;
+            out.max_composed_degree =
+                domain.max_composed_degree;
+            out.quotient_len =
+                domain.quotient_len;
+            out.coefficient_domain_rows =
+                domain.coefficient_rows;
             out.lde_rows_per_parent =
-                uint64_t{trace} * kRCFriBlowup;
+                domain.lde_rows;
+            out.exact_degree_accounting =
+                true;
         }
     }
     if (out.queries_per_shard == 0) return out;
@@ -381,6 +694,7 @@ QueryShardPlanV1 SearchQueryShardsV1(
             out.queries_per_shard >=
             abi::kQueryCountV11;
     out.every_shard_lde_fits =
+        out.exact_degree_accounting &&
         out.lde_rows_per_parent <=
             (uint64_t{1} << kRCFriMaxLdeLog2);
     // The schedule is exact, but no executable in-parent receipt-tree chip
@@ -407,28 +721,52 @@ FixedPointAssessmentV1 AssessFixedPointV1(
         out.note = "stage3:v11_fixedpoint:invalid_inventory";
         return out;
     }
+    const uint64_t parent_vm_columns =
+        uint64_t{MaxChipColumns(level2)} +
+        scheduler_columns;
     out.parent_vm = AssessCanonicalVmBudgetV1(
-        MaxChipColumns(level2) + scheduler_columns,
+        parent_vm_columns <=
+            std::numeric_limits<uint32_t>::max()
+        ? static_cast<uint32_t>(parent_vm_columns)
+        : 0,
         canonical_parent_table);
+    const auto level2_degree_profile = MergeProfiles(
+        level2.constraint_degrees,
+        out.parent_vm.constraint_degrees);
     out.level1 = AssessLevel(
         level1, level1_wire, arity,
-        scheduler_columns, 0);
+        scheduler_columns, 0,
+        level1.constraint_degrees);
     out.level2 = AssessLevel(
         level2, level2_wire, arity,
-        scheduler_columns, out.parent_vm.trace_rows);
+        scheduler_columns, out.parent_vm.trace_rows,
+        level2_degree_profile);
     const uint64_t merkle_all =
         MerkleRowsAllQueries(level2);
-    const uint32_t merkle_per_query =
+    const uint64_t merkle_per_query_u64 =
         merkle_all == 0
         ? 0
-        : static_cast<uint32_t>(
-            merkle_all / abi::kQueryCountV11);
-    out.shard_plan = SearchQueryShardsV1(
-        out.parent_vm, arity,
-        uint64_t{level2.parent_join_rows} +
-            level2.decoder_rows +
+        : merkle_all / abi::kQueryCountV11;
+    uint64_t fixed_rows = level2.parent_join_rows;
+    const bool fixed_rows_valid =
+        CheckedAdd(
+            fixed_rows,
+            level2.decoder_rows,
+            fixed_rows) &&
+        CheckedAdd(
+            fixed_rows,
             level2.recursive_parent_rows,
-        merkle_per_query);
+            fixed_rows);
+    if (fixed_rows_valid &&
+        merkle_per_query_u64 <=
+            std::numeric_limits<uint32_t>::max()) {
+        out.shard_plan = SearchQueryShardsV1(
+            out.parent_vm, arity,
+            fixed_rows,
+            static_cast<uint32_t>(
+                merkle_per_query_u64),
+            &level2_degree_profile);
+    }
     out.vertical_chip_multiplexing = true;
     out.width_slope_per_child_proof_column =
         out.level2.normalized_columns ==
@@ -450,8 +788,8 @@ FixedPointAssessmentV1 AssessFixedPointV1(
     out.scheduler_columns_headroom = SchedulerHeadroom(
         level2_wire,
         std::max(
-            out.level1.normalized_trace_rows,
-            out.level2.normalized_trace_rows));
+            out.level1.lde_rows,
+            out.level2.lde_rows));
     out.level_one_fits =
         out.level1.columns_fit && out.level1.lde_fit &&
         out.level1.every_wire_proof_fits &&
@@ -462,7 +800,11 @@ FixedPointAssessmentV1 AssessFixedPointV1(
         out.level2.root_verify_within_budget;
     out.native_level_reentry_available = true;
     if (!out.parent_vm.canonical_table_present ||
-        !out.parent_vm.exact_instruction_inventory) {
+        !out.parent_vm.exact_instruction_inventory ||
+        !out.parent_vm.exact_degree_accounting ||
+        !out.level1.exact_degree_accounting ||
+        !out.level2.exact_degree_accounting ||
+        !out.shard_plan.exact_degree_accounting) {
         out.residual_mask |= kResidualCanonicalParentBytecode;
     }
     out.residual_mask |=
