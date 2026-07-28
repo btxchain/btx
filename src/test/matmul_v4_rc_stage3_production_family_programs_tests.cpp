@@ -141,8 +141,8 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::EpisodeDigestSha256d);
     const auto& digest = sources[digest_idx];
     BOOST_CHECK(digest.role == rc::RCStage3RelationRole::EpisodeDigest);
-    BOOST_CHECK_EQUAL(digest.program.current_width, 12U);
-    BOOST_CHECK_EQUAL(digest.program.programs.size(), 14U);
+    BOOST_CHECK_EQUAL(digest.program.current_width, 177U);
+    BOOST_CHECK_EQUAL(digest.program.programs.size(), 495U);
     BOOST_REQUIRE_EQUAL(digest.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         digest.semantic_endpoints[0],
@@ -154,8 +154,8 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::EpisodeTileTreeSha256d);
     const auto& tile = sources[tile_idx];
     BOOST_CHECK(tile.role == rc::RCStage3RelationRole::EpisodeTileTree);
-    BOOST_CHECK_EQUAL(tile.program.current_width, 15U);
-    BOOST_CHECK_EQUAL(tile.program.programs.size(), 16U);
+    BOOST_CHECK_EQUAL(tile.program.current_width, 160U);
+    BOOST_CHECK_EQUAL(tile.program.programs.size(), 479U);
     BOOST_REQUIRE_EQUAL(tile.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         tile.semantic_endpoints[0],
@@ -180,8 +180,9 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::EpisodeWiring);
     const auto& wiring = sources[wiring_idx];
     BOOST_CHECK(wiring.role == rc::RCStage3RelationRole::EpisodeWiring);
-    BOOST_CHECK_EQUAL(wiring.program.current_width, 2U);
-    BOOST_CHECK_EQUAL(wiring.program.programs.size(), 1U);
+    BOOST_CHECK_EQUAL(wiring.program.current_width, 10U);
+    BOOST_CHECK_EQUAL(wiring.program.challenge_width, 4U);
+    BOOST_CHECK_EQUAL(wiring.program.programs.size(), 7U);
     BOOST_REQUIRE_EQUAL(wiring.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         wiring.semantic_endpoints[0],
@@ -220,8 +221,8 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::CoupledGemm);
     const auto& coupled_gemm = sources[coupled_gemm_idx];
     BOOST_CHECK(coupled_gemm.role == rc::RCStage3RelationRole::CoupledGemm);
-    BOOST_CHECK_EQUAL(coupled_gemm.program.current_width, 5U);
-    BOOST_CHECK_EQUAL(coupled_gemm.program.programs.size(), 6U);
+    BOOST_CHECK_EQUAL(coupled_gemm.program.current_width, 107U);
+    BOOST_CHECK_EQUAL(coupled_gemm.program.programs.size(), 183U);
     BOOST_REQUIRE_EQUAL(coupled_gemm.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         coupled_gemm.semantic_endpoints[0],
@@ -250,8 +251,8 @@ BOOST_AUTO_TEST_CASE(
     const auto& coupled_barrier = sources[coupled_barrier_idx];
     BOOST_CHECK(
         coupled_barrier.role == rc::RCStage3RelationRole::CoupledBarrier);
-    BOOST_CHECK_EQUAL(coupled_barrier.program.current_width, 145U);
-    BOOST_CHECK_EQUAL(coupled_barrier.program.programs.size(), 463U);
+    BOOST_CHECK_EQUAL(coupled_barrier.program.current_width, 150U);
+    BOOST_CHECK_EQUAL(coupled_barrier.program.programs.size(), 467U);
     BOOST_REQUIRE_EQUAL(coupled_barrier.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         coupled_barrier.semantic_endpoints[0],
@@ -264,8 +265,8 @@ BOOST_AUTO_TEST_CASE(
     const auto& coupled_digest = sources[coupled_digest_idx];
     BOOST_CHECK(
         coupled_digest.role == rc::RCStage3RelationRole::CoupledDigest);
-    BOOST_CHECK_EQUAL(coupled_digest.program.current_width, 145U);
-    BOOST_CHECK_EQUAL(coupled_digest.program.programs.size(), 463U);
+    BOOST_CHECK_EQUAL(coupled_digest.program.current_width, 150U);
+    BOOST_CHECK_EQUAL(coupled_digest.program.programs.size(), 467U);
     BOOST_REQUIRE_EQUAL(coupled_digest.semantic_endpoints.size(), 1U);
     BOOST_CHECK_EQUAL(
         coupled_digest.semantic_endpoints[0],
@@ -521,8 +522,8 @@ BOOST_AUTO_TEST_CASE(
     const size_t wiring_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeWiring);
     const auto& wiring_entry = registry.families[wiring_idx];
-    BOOST_CHECK_EQUAL(wiring_entry.maximum_columns, 2U);
-    BOOST_CHECK_EQUAL(wiring_entry.constraint_count, 1U);
+    BOOST_CHECK_EQUAL(wiring_entry.maximum_columns, 10U);
+    BOOST_CHECK_EQUAL(wiring_entry.constraint_count, 7U);
     BOOST_CHECK(wiring_entry.semantic_relation_complete);
 
     const size_t extract_idx = FindFamilyIndex(
@@ -542,8 +543,8 @@ BOOST_AUTO_TEST_CASE(
     const size_t coupled_gemm_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::CoupledGemm);
     const auto& coupled_gemm_entry = registry.families[coupled_gemm_idx];
-    BOOST_CHECK_EQUAL(coupled_gemm_entry.maximum_columns, 5U);
-    BOOST_CHECK_EQUAL(coupled_gemm_entry.constraint_count, 6U);
+    BOOST_CHECK_EQUAL(coupled_gemm_entry.maximum_columns, 107U);
+    BOOST_CHECK_EQUAL(coupled_gemm_entry.constraint_count, 183U);
     BOOST_CHECK(coupled_gemm_entry.semantic_relation_complete);
 
     const size_t coupled_extract_idx = FindFamilyIndex(
@@ -559,16 +560,16 @@ BOOST_AUTO_TEST_CASE(
         manifest, ss::ProductionProofSiteKind::CoupledBarrierSha256d);
     const auto& coupled_barrier_entry =
         registry.families[coupled_barrier_idx];
-    BOOST_CHECK_EQUAL(coupled_barrier_entry.maximum_columns, 145U);
-    BOOST_CHECK_EQUAL(coupled_barrier_entry.constraint_count, 463U);
+    BOOST_CHECK_EQUAL(coupled_barrier_entry.maximum_columns, 150U);
+    BOOST_CHECK_EQUAL(coupled_barrier_entry.constraint_count, 467U);
     BOOST_CHECK(coupled_barrier_entry.semantic_relation_complete);
 
     const size_t coupled_digest_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::CoupledDigestSha256d);
     const auto& coupled_digest_entry =
         registry.families[coupled_digest_idx];
-    BOOST_CHECK_EQUAL(coupled_digest_entry.maximum_columns, 145U);
-    BOOST_CHECK_EQUAL(coupled_digest_entry.constraint_count, 463U);
+    BOOST_CHECK_EQUAL(coupled_digest_entry.maximum_columns, 150U);
+    BOOST_CHECK_EQUAL(coupled_digest_entry.constraint_count, 467U);
     BOOST_CHECK(coupled_digest_entry.semantic_relation_complete);
 
     const size_t exchange_idx = FindFamilyIndex(
@@ -1164,6 +1165,96 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    role_direct_product_preserves_each_component_program)
+{
+    const auto manifest =
+        ss::BuildProductionProofSiteManifest(
+            ss::SelectedProductionProofSitePolicy());
+    const auto sources =
+        ut::BuildProductionFamilyProgramSourcesV1(manifest);
+    const auto& product = sources[FindFamilyIndex(
+        manifest,
+        ss::ProductionProofSiteKind::EpisodeWiring)].program;
+    cb::ProgramTable copy;
+    cb::ProgramTable transpose;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3EpisodeLocalKernelProgramTable(
+            rc::RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
+            copy, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3EpisodeWiringTransposeProgramTable(
+            transpose, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(product.current_width, 10U);
+    BOOST_REQUIRE_EQUAL(product.challenge_width, 4U);
+    BOOST_REQUIRE_EQUAL(
+        product.programs.size(),
+        copy.programs.size() + transpose.programs.size());
+
+    uint64_t rng = 0x13198a2e03707344ULL;
+    const auto next_field = [&rng]() {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        return U(rng);
+    };
+    for (uint32_t trial = 0; trial < 32; ++trial) {
+        std::vector<Fp3> current(product.current_width);
+        std::vector<Fp3> next(product.next_width);
+        std::vector<Fp3> challenges(product.challenge_width);
+        for (auto& value : current) value = next_field();
+        for (auto& value : next) value = next_field();
+        for (auto& value : challenges) value = next_field();
+
+        const std::vector<Fp3> copy_current{
+            current[0], current[1]};
+        const std::vector<Fp3> copy_next{
+            next[0], next[1]};
+        Fp3 expected;
+        Fp3 actual;
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            copy.programs.front(),
+            copy_current, copy_next, expected));
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            product.programs.front(),
+            current, next, challenges, actual));
+        BOOST_CHECK(gf::Eq(expected, actual));
+
+        const std::vector<Fp3> transpose_current(
+            current.begin() + 2, current.end());
+        const std::vector<Fp3> transpose_next(
+            next.begin() + 2, next.end());
+        for (uint32_t i = 0;
+             i < transpose.programs.size(); ++i) {
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                transpose.programs[i],
+                transpose_current, transpose_next,
+                challenges, expected));
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                product.programs[1U + i],
+                current, next, challenges, actual));
+            BOOST_CHECK(gf::Eq(expected, actual));
+        }
+    }
+
+    auto omitted = product;
+    omitted.programs.pop_back();
+    for (uint32_t i = 0; i < omitted.programs.size(); ++i) {
+        omitted.programs[i].constraint_ordinal = i;
+    }
+    BOOST_REQUIRE(cb::ValidateProgramTable(omitted));
+    auto substituted = sources;
+    substituted[FindFamilyIndex(
+        manifest,
+        ss::ProductionProofSiteKind::EpisodeWiring)].program =
+            std::move(omitted);
+    BOOST_CHECK(!ut::ValidateProductionFamilyProgramSourcesV1(
+        manifest, substituted, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
     real_family_programs_have_satisfying_witnesses_and_reject_tampering)
 {
     const auto manifest =
@@ -1186,7 +1277,7 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
     }
 
-    // --- EpisodeDigest: PoW borrow-chain, 12 columns, single-row slice
+    // --- EpisodeDigest: PoW component of the direct product, single-row slice
     // (first row: borrow=0; not the last row: borrow_out=0). Chosen so
     // target - digest - borrow + 256*borrow_out == the 8-bit difference:
     // 9 - 5 - 0 + 0 == 4 == 0b0000_0100.
@@ -1194,25 +1285,42 @@ BOOST_AUTO_TEST_CASE(
         const size_t idx = FindFamilyIndex(
             manifest, ss::ProductionProofSiteKind::EpisodeDigestSha256d);
         const auto& table = sources[idx].program;
-        std::vector<Fp3> row(12, Fp3::Zero());
-        row[0] = U(5);  // digest byte
-        row[1] = U(9);  // target byte
-        row[2] = U(0);  // borrow (first row)
-        row[3] = U(0);  // borrow_out (not last row)
-        row[4 + 2] = Fp3::One(); // difference = 4 -> bit 2 set
-        const std::vector<Fp3> next(12, Fp3::Zero()); // next borrow == 0
-        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        std::vector<Fp3> row(table.current_width, Fp3::Zero());
+        constexpr uint32_t POW =
+            ut::production_family_col_v1::EpisodeDigestPow;
+        row[POW + 0] = U(5);  // digest byte
+        row[POW + 1] = U(9);  // target byte
+        row[POW + 2] = U(0);  // borrow (first row)
+        row[POW + 3] = U(0);  // borrow_out (not last row)
+        row[POW + 4 + 2] = Fp3::One();
+        const std::vector<Fp3> next(
+            table.next_width, Fp3::Zero());
+        std::vector<Fp3> residuals;
+        for (uint32_t i = 18; i < 32; ++i) {
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs[i], row, next, value));
+            residuals.push_back(value);
+        }
+        BOOST_CHECK(AllZero(residuals));
         auto tampered = row;
-        tampered[1] = U(10); // wrong target: difference no longer matches
-        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+        tampered[POW + 1] = U(10);
+        residuals.clear();
+        for (uint32_t i = 18; i < 32; ++i) {
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs[i], tampered, next, value));
+            residuals.push_back(value);
+        }
+        BOOST_CHECK(AnyNonzero(residuals));
     }
 
-    // --- EpisodeTileTree: signed-byte <-> octet bridge, 15 columns. ---
+    // --- EpisodeTileTree: signed-byte bridge component of the direct product. ---
     {
         const size_t idx = FindFamilyIndex(
             manifest, ss::ProductionProofSiteKind::EpisodeTileTreeSha256d);
         const auto& table = sources[idx].program;
-        std::vector<Fp3> row(15, Fp3::Zero());
+        std::vector<Fp3> row(table.current_width, Fp3::Zero());
         row[0] = Fp3::One();
         row[1] = U(9);
         row[2] = Fp3::FromFp(gf::FromSigned(-91));
@@ -1223,11 +1331,26 @@ BOOST_AUTO_TEST_CASE(
         for (uint32_t bit = 0; bit < 8; ++bit) {
             row[7 + bit] = U((0xa5U >> bit) & 1U);
         }
-        const std::vector<Fp3> next(15, Fp3::Zero());
-        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        const std::vector<Fp3> next(
+            table.next_width, Fp3::Zero());
+        std::vector<Fp3> residuals;
+        for (uint32_t i = 0; i < 16; ++i) {
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs[i], row, next, value));
+            residuals.push_back(value);
+        }
+        BOOST_CHECK(AllZero(residuals));
         auto tampered = row;
         tampered[6] = Fp3::Zero(); // wrong sign bit
-        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+        residuals.clear();
+        for (uint32_t i = 0; i < 16; ++i) {
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs[i], tampered, next, value));
+            residuals.push_back(value);
+        }
+        BOOST_CHECK(AnyNonzero(residuals));
     }
 
     // --- EpisodeGemm: terminal sumcheck identity gf = a*b, 3 columns. ---
@@ -1243,17 +1366,30 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
     }
 
-    // --- EpisodeWiring: direct row-copy equality u = v, 2 columns. ---
+    // --- EpisodeWiring: row-copy component of the direct product. ---
     {
         const size_t idx = FindFamilyIndex(
             manifest, ss::ProductionProofSiteKind::EpisodeWiring);
         const auto& table = sources[idx].program;
-        const std::vector<Fp3> row{U(41), U(41)};
-        const std::vector<Fp3> next(2, Fp3::Zero());
-        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        std::vector<Fp3> row(
+            table.current_width, Fp3::Zero());
+        row[0] = U(41);
+        row[1] = U(41);
+        const std::vector<Fp3> next(
+            table.next_width, Fp3::Zero());
+        const std::vector<Fp3> challenges(
+            table.challenge_width, Fp3::Zero());
+        Fp3 residual;
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            table.programs.front(), row, next,
+            challenges, residual));
+        BOOST_CHECK(gf::IsZero(residual));
         auto tampered = row;
         tampered[1] = U(42); // copy no longer matches its source
-        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+        BOOST_REQUIRE(cb::EvaluateProgram(
+            table.programs.front(), tampered, next,
+            challenges, residual));
+        BOOST_CHECK(!gf::IsZero(residual));
     }
 
     // --- EpisodeExtract: full RcSampler local kernel is differentially
@@ -1282,7 +1418,8 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
     }
 
-    // --- CoupledGemm: five-column running-accumulation identity. Columns
+    // --- CoupledGemm: running-accumulation component of the direct product.
+    // Its first five columns
     // are [A, B, ACC, OUT, ACTIVE]. current: a=3, b=4, acc=a*b=12 (first-row
     // identity), out=12, active=1. next: acc advances to
     // current_acc + next_active*next_a*next_b = 12 + 1*3*4 = 24, out stays
@@ -1292,17 +1429,38 @@ BOOST_AUTO_TEST_CASE(
         const size_t idx = FindFamilyIndex(
             manifest, ss::ProductionProofSiteKind::CoupledGemm);
         const auto& table = sources[idx].program;
-        const std::vector<Fp3> row{U(3), U(4), U(12), U(12), Fp3::One()};
-        const std::vector<Fp3> next{U(3), U(4), U(24), U(12), Fp3::One()};
-        BOOST_CHECK(AllZero(EvaluateAll(table, row, next)));
+        std::vector<Fp3> row(
+            table.current_width, Fp3::Zero());
+        std::vector<Fp3> next(
+            table.next_width, Fp3::Zero());
+        const std::array<Fp3, 5> core{
+            U(3), U(4), U(12), U(12), Fp3::One()};
+        const std::array<Fp3, 5> next_core{
+            U(3), U(4), U(24), U(12), Fp3::One()};
+        std::copy(core.begin(), core.end(), row.begin());
+        std::copy(next_core.begin(), next_core.end(), next.begin());
+        std::vector<Fp3> residuals;
+        for (uint32_t i = 0; i < 6; ++i) {
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs[i], row, next, value));
+            residuals.push_back(value);
+        }
+        BOOST_CHECK(AllZero(residuals));
         auto tampered = row;
         tampered[2] = U(13); // acc no longer equals a*b
-        BOOST_CHECK(AnyNonzero(EvaluateAll(table, tampered, next)));
+        residuals.clear();
+        for (uint32_t i = 0; i < 6; ++i) {
+            Fp3 value;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs[i], tampered, next, value));
+            residuals.push_back(value);
+        }
+        BOOST_CHECK(AnyNonzero(residuals));
     }
 
     // --- CoupledExtract and the two coupled hash kernels (CoupledBarrier /
-    // CoupledDigest, 145 columns / 463 constraints including the canonical
-    // opcode-output mux)
+    // CoupledDigest direct products)
     // are, like EpisodeExtract above, differentially tested against their
     // canonical constraint-system builders elsewhere
     // (matmul_v4_rc_stage3_role_bytecode_tests.cpp); non-vacuity for all
@@ -1313,15 +1471,13 @@ BOOST_AUTO_TEST_CASE(
     hash_family_output_mux_names_the_actual_opcode_result)
 {
     namespace ha = rc::stage3_hash_air;
-    const auto manifest =
-        ss::BuildProductionProofSiteManifest(
-            ss::SelectedProductionProofSitePolicy());
-    const auto sources =
-        ut::BuildProductionFamilyProgramSourcesV1(manifest);
-    const size_t index = FindFamilyIndex(
-        manifest,
-        ss::ProductionProofSiteKind::CoupledBarrierSha256d);
-    const auto& table = sources[index].program;
+    cb::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        ut::BuildProductionFixedProgramOutputLocalProgramTableV1(
+            rc::RCStage3RelationRole::CoupledBarrier,
+            table, &why),
+        why);
     BOOST_REQUIRE_EQUAL(
         table.current_width,
         rc::kRCStage3HashKernelOutputColumnV1 + 1U);

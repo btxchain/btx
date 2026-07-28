@@ -51,6 +51,28 @@
 namespace matmul::v4::rc::universal_topology {
 
 /**
+ * Stable output-column ABI for the role-local direct products below.  Each
+ * component occupies disjoint trace columns and disjoint challenge lanes.
+ * These constants are consumed by the endpoint/program bridge and are
+ * static-asserted against every component width in the builder.
+ */
+namespace production_family_col_v1 {
+inline constexpr uint32_t EpisodeWiringCopy = 0;
+inline constexpr uint32_t EpisodeWiringTranspose = 5;
+inline constexpr uint32_t EpisodeTileTreeStream = 4;
+inline constexpr uint32_t EpisodeTileTreeHash = 159;
+inline constexpr uint32_t EpisodeDigestRoundRoots = 4;
+inline constexpr uint32_t EpisodeDigestValue = 176;
+inline constexpr uint32_t EpisodeDigestHeaderTarget = 18;
+inline constexpr uint32_t EpisodeDigestPow = 20;
+inline constexpr uint32_t CoupledGemmOutput = 3;
+inline constexpr uint32_t CoupledGemmSignedRange = 7;
+inline constexpr uint32_t CoupledRootInput = 3;
+inline constexpr uint32_t CoupledRootOutput = 4;
+inline constexpr uint32_t CoupledHashOutput = 149;
+} // namespace production_family_col_v1
+
+/**
  * Canonical, pin-independent signed-range ProgramTable used by the production
  * EpisodeSignedRange family.  The table includes the complete local range
  * polynomial system and explicit MAX_ABS/LOGICAL_ROWS parameter columns.
@@ -76,6 +98,18 @@ namespace matmul::v4::rc::universal_topology {
     std::string* why = nullptr);
 
 /**
+ * Rebuild the exact ProgramTable selected for one production proof-site.
+ * This is the single canonical source used both by the registry builder and
+ * by endpoint output routing. It returns false rather than manufacturing the
+ * defensive one-column fallback.
+ */
+[[nodiscard]] bool BuildCanonicalProductionFamilyProgramTableV1(
+    soundness_scenarios::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    constraint_bytecode::ProgramTable& out,
+    std::string* why = nullptr);
+
+/**
  * Semantically complete family sources currently wired into the production
  * registry path, keyed by exact ProductionProofSiteKind. Extending this list
  * is the concrete, checkable unit of semantic registry migration: each entry
@@ -89,16 +123,18 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::EpisodeBuilderTrace only; Params,
      * SeedChain and OperandXof remain unclosed by any family. */
     EpisodeBuilderTraceDequant = 1,
-    /** BuildRCStage3EpisodePowProgramTable: the twelve-column digest<=target
-     * borrow-chain relation (14 constraints incl. booleanity), the same
-     * table BuildRCStage3EpisodePowConstraintSystem uses in production.
-     * Closes RCStage3RelationEndpoint::EpisodeDigestPow only; RoundRoots,
-     * Value and HeaderTarget remain unclosed by any family. */
+    /** Challenge-separated direct product of root-vector, preimage-byte,
+     * compact-target, digest<=target and fixed-program hash bytecode
+     * components (177 columns, 495 constraints). The registry completeness
+     * claim remains scoped to the already complete EpisodeDigestPow relation;
+     * the other component outputs are named but retain their provenance,
+     * schedule, aggregation and recursive-consumption residuals. */
     EpisodeDigestPowBorrowChain = 2,
-    /** BuildRCStage3EpisodeTileTreeByteBridgeProgramTable: the signed-byte
-     * <-> octet bridge for tile-stream values (16 constraints, 15 columns).
-     * Closes RCStage3RelationEndpoint::EpisodeTileTreeStream only; LeafHash,
-     * InternalHash and Root remain unclosed by any family. */
+    /** Direct product of the signed-byte tile-stream bridge and the
+     * selector-safe fixed-program hash kernel (160 columns, 479 constraints).
+     * The registry completeness claim remains scoped to TileTreeStream;
+     * leaf/internal/root hash outputs are named without overclaiming the
+     * still-missing schedule/provenance/aggregation/recursion links. */
     EpisodeTileTreeStreamByteBridge = 3,
     /** BuildRCStage3EpisodeLocalKernelProgramTable(GemmEndpointFp3V1): the
      * one-constraint gf=a*b identity that is the terminal check of the GKR
@@ -107,11 +143,11 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::EpisodeGemmSumcheck only; OperandA,
      * OperandB, OutputY and SignedRange remain unclosed by any family. */
     EpisodeGemmSumcheckEndpoint = 4,
-    /** BuildRCStage3EpisodeLocalKernelProgramTable(WiringEqualityFp3V1): the
-     * one-constraint direct row-copy equality u=v, already exercised in
-     * production by the same AIR-shard verifier as the Gemm endpoint above.
-     * Closes RCStage3RelationEndpoint::EpisodeWiringCopy only; Transpose,
-     * Residual and RoundOrder remain unclosed by any family. */
+    /** Challenge-separated direct product of the one-constraint row-copy
+     * equality and the six-constraint dual-LogUp transpose relation
+     * (10 columns, 4 challenge lanes). The registry completeness claim remains
+     * scoped to WiringCopy; Transpose now has a named local output while
+     * Residual and RoundOrder still lack canonical bytecode. */
     EpisodeWiringCopyEquality = 5,
     /** BuildRCStage3EpisodeExtractLocalKernelProgramTable(scale_e=0): the
      * complete 47-constraint, 40-column RcSampler relation as bytecode
@@ -130,12 +166,11 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::CoupledBankPages only; SeedXof and
      * Root remain unclosed by any family. */
     CoupledBankPagesDequant = 7,
-    /** BuildRCStage3CoupledLocalKernelProgramTable(CoupledGemm): the
-     * five-column running-accumulation identity (per-row a*b accumulate,
-     * terminal ACC==OUT), already exercised in production by
-     * matmul_v4_rc_stage3_relation_closure.cpp's coupled-gemm endpoint
-     * resolvers. Closes RCStage3RelationEndpoint::CoupledGemmOutputY only;
-     * OperandA, OperandB and SignedRange remain unclosed by any family. */
+    /** Direct product of the five-column running-accumulation identity and
+     * the canonical 102-column signed-range relation (107 columns,
+     * 183 constraints). The registry completeness claim remains scoped to
+     * CoupledGemmOutputY; SignedRange gets an exact output cell but retains
+     * public-pin, root, aggregation and recursion residuals. */
     CoupledGemmOutputIdentity = 8,
     /** BuildRCStage3CoupledExtractLocalKernelProgramTable(scale_e=0): the
      * coupled analogue of EpisodeExtractSamplerCore above -- the identical
@@ -144,19 +179,17 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
      * Closes RCStage3RelationEndpoint::CoupledExtractSampler only; Input,
      * ChaCha, Scale and Output remain unclosed by any family. */
     CoupledExtractSamplerCore = 9,
-    /** BuildRCStage3CoupledHashKernelProgramTable(CoupledBarrier): the
-     * selector-pinned SHA-256 compression AIR (462 constraints, 144
-     * columns), already exercised in production by the same hash-kernel
-     * builder shared with CoupledDigest below.
-     * Closes RCStage3RelationEndpoint::CoupledBarrierHash only; Input and
-     * Output remain unclosed by any family. */
+    /** Direct product of the five-column root-vector relation and the
+     * selector-safe fixed-program hash kernel (150 columns, 467 constraints).
+     * The registry completeness claim remains scoped to CoupledBarrierHash;
+     * Input/Output cells are now unambiguous but still require the actual
+     * cross-component provenance/schedule/recursive links. */
     CoupledBarrierHashKernel = 10,
-    /** BuildRCStage3CoupledHashKernelProgramTable(CoupledDigest): the same
-     * SHA-256 compression AIR as CoupledBarrierHashKernel above, committed
-     * under the CoupledDigest role instead (the committed table role
-     * prevents cross-role replay).
-     * Closes RCStage3RelationEndpoint::CoupledDigestHash only;
-     * BankAndBarriers and Value remain unclosed by any family. */
+    /** The corresponding 150-column/467-constraint CoupledDigest direct
+     * product, committed under the distinct CoupledDigest role. The registry
+     * completeness claim remains scoped to CoupledDigestHash; the named
+     * BankAndBarriers/Value cells keep their provenance and recursion
+     * residuals. */
     CoupledDigestHashKernel = 11,
     /** BuildRCStage3CoupledExchangeTransportProgramTable: the complete
      * dual-lane indexed-permutation transport relation over the 214-column

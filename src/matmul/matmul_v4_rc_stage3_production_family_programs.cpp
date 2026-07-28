@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <limits>
 #include <set>
 
 namespace matmul::v4::rc::universal_topology {
@@ -119,9 +120,20 @@ void AppendFragmentBoolean(cb::ProgramTable& table, uint32_t column)
  * parameter columns and the 69 relation columns to the canonical manifest.
  */
 bool BuildSignedRangeLocalFragment(
+    RCStage3RelationRole role,
     cb::ProgramTable& out,
     std::string* why)
 {
+    if (role != RCStage3RelationRole::EpisodeGemm &&
+        role != RCStage3RelationRole::CoupledGemm) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "signed_range_role";
+        }
+        return false;
+    }
     constexpr uint32_t MAX_ABS =
         kRCStage3SignedRangeColumns;
     constexpr uint32_t MAX_ABS_BITS = MAX_ABS + 1;
@@ -129,7 +141,7 @@ bool BuildSignedRangeLocalFragment(
         MAX_ABS_BITS + kRCStage3SignedRangeBits;
     constexpr uint32_t COLUMNS = LOGICAL_ROWS + 1;
     out = {};
-    out.role = RCStage3RelationRole::EpisodeGemm;
+    out.role = role;
     out.current_width = COLUMNS;
     out.next_width = COLUMNS;
     AppendFragmentBoolean(out, kRCStage3RangeActive);
@@ -507,6 +519,201 @@ bool RetagProgramTable(
     return cb::ValidateProgramTable(table, why);
 }
 
+bool BuildDirectProduct(
+    RCStage3RelationRole role,
+    const std::vector<cb::ProgramTable>& components,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    out = {};
+    out.role = role;
+    uint32_t column_offset = 0;
+    uint32_t challenge_offset = 0;
+    for (const auto& component : components) {
+        if (component.role != role ||
+            !cb::ValidateProgramTable(component, why) ||
+            component.current_width != component.next_width ||
+            column_offset >
+                std::numeric_limits<uint32_t>::max() -
+                    component.current_width ||
+            challenge_offset >
+                std::numeric_limits<uint32_t>::max() -
+                    component.challenge_width) {
+            out = {};
+            if (why != nullptr && why->empty()) {
+                *why =
+                    "stage3:production_family_programs:"
+                    "direct_product_component";
+            }
+            return false;
+        }
+        for (const auto& source : component.programs) {
+            cb::Program program = source;
+            program.constraint_ordinal =
+                static_cast<uint32_t>(out.programs.size());
+            for (auto& instruction : program.instructions) {
+                switch (instruction.opcode) {
+                case cb::Opcode::Current:
+                case cb::Opcode::Next:
+                    instruction.lhs += column_offset;
+                    break;
+                case cb::Opcode::Challenge:
+                    instruction.lhs += challenge_offset;
+                    break;
+                default:
+                    break;
+                }
+            }
+            out.programs.push_back(std::move(program));
+        }
+        column_offset += component.current_width;
+        challenge_offset += component.challenge_width;
+    }
+    if (components.empty()) {
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "direct_product_empty";
+        }
+        return false;
+    }
+    out.current_width = column_offset;
+    out.next_width = column_offset;
+    out.challenge_width = challenge_offset;
+    for (auto& program : out.programs) {
+        program.current_width = out.current_width;
+        program.next_width = out.next_width;
+        program.challenge_width = out.challenge_width;
+    }
+    return cb::ValidateProgramTable(out, why);
+}
+
+bool BuildEpisodeWiringDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable copy;
+    cb::ProgramTable transpose;
+    if (!BuildRCStage3EpisodeLocalKernelProgramTable(
+            RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
+            copy, why) ||
+        !BuildRCStage3EpisodeWiringTransposeProgramTable(
+            transpose, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeWiringTranspose ==
+        2U + 3U);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeWiring,
+        {copy, transpose}, out, why);
+}
+
+bool BuildEpisodeTileTreeDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable stream;
+    cb::ProgramTable hash;
+    if (!BuildRCStage3EpisodeTileTreeByteBridgeProgramTable(
+            stream, why) ||
+        !BuildRCStage3HashKernelOutputProgramTable(
+            RCStage3RelationRole::EpisodeTileTree,
+            hash, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeTileTreeHash ==
+        15U + kRCStage3HashKernelOutputColumnV1);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeTileTree,
+        {stream, hash}, out, why);
+}
+
+bool BuildEpisodeDigestDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable roots;
+    cb::ProgramTable preimage;
+    cb::ProgramTable target;
+    cb::ProgramTable pow;
+    cb::ProgramTable hash;
+    if (!BuildRCStage3RootChainVectorProgramTable(
+            RCStage3RelationRole::EpisodeDigest,
+            roots, why) ||
+        !BuildRCStage3EpisodeDigestPreimageByteBridgeProgramTable(
+            preimage, why) ||
+        !BuildRCStage3EpisodeHeaderTargetEqualityProgramTable(
+            target, why) ||
+        !BuildRCStage3EpisodePowProgramTable(pow, why) ||
+        !BuildRCStage3HashKernelOutputProgramTable(
+            RCStage3RelationRole::EpisodeDigest,
+            hash, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::EpisodeDigestRoundRoots == 4U);
+    static_assert(
+        production_family_col_v1::EpisodeDigestHeaderTarget ==
+        5U + 13U);
+    static_assert(
+        production_family_col_v1::EpisodeDigestPow ==
+        5U + 13U + 2U);
+    static_assert(
+        production_family_col_v1::EpisodeDigestValue ==
+        5U + 13U + 2U + 12U +
+            kRCStage3HashKernelOutputColumnV1);
+    return BuildDirectProduct(
+        RCStage3RelationRole::EpisodeDigest,
+        {roots, preimage, target, pow, hash}, out, why);
+}
+
+bool BuildCoupledGemmDirectProduct(
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    static_assert(
+        production_family_col_v1::CoupledGemmOutput ==
+        coupled_air_col::GEMM_OUT);
+    cb::ProgramTable gemm;
+    cb::ProgramTable range;
+    if (!BuildRCStage3CoupledLocalKernelProgramTable(
+            RCStage3RelationRole::CoupledGemm,
+            gemm, why) ||
+        !BuildSignedRangeLocalFragment(
+            RCStage3RelationRole::CoupledGemm,
+            range, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::CoupledGemmSignedRange ==
+        5U + kRCStage3RangeValue);
+    return BuildDirectProduct(
+        RCStage3RelationRole::CoupledGemm,
+        {gemm, range}, out, why);
+}
+
+bool BuildCoupledHashDirectProduct(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    cb::ProgramTable roots;
+    cb::ProgramTable hash;
+    if (!BuildRCStage3RootChainVectorProgramTable(
+            role, roots, why) ||
+        !BuildRCStage3HashKernelOutputProgramTable(
+            role, hash, why)) {
+        return false;
+    }
+    static_assert(
+        production_family_col_v1::CoupledHashOutput ==
+        5U + kRCStage3HashKernelOutputColumnV1);
+    return BuildDirectProduct(
+        role, {roots, hash}, out, why);
+}
+
 /**
  * The fixed SHA/ChaCha instruction AIR is one opcode kernel; immutable
  * preprocessed selector rows choose the canonical Sha256Compression or
@@ -595,13 +802,12 @@ bool RealFamilyFor(
         return true;
     case sites::ProductionProofSiteKind::EpisodeDigestSha256d:
         if (role != RCStage3RelationRole::EpisodeDigest) return false;
-        if (!BuildRCStage3EpisodePowProgramTable(program, why)) return false;
+        if (!BuildEpisodeDigestDirectProduct(program, why)) return false;
         endpoint = RCStage3RelationEndpoint::EpisodeDigestPow;
         return true;
     case sites::ProductionProofSiteKind::EpisodeTileTreeSha256d:
         if (role != RCStage3RelationRole::EpisodeTileTree) return false;
-        if (!BuildRCStage3EpisodeTileTreeByteBridgeProgramTable(
-                program, why)) {
+        if (!BuildEpisodeTileTreeDirectProduct(program, why)) {
             return false;
         }
         endpoint = RCStage3RelationEndpoint::EpisodeTileTreeStream;
@@ -617,9 +823,7 @@ bool RealFamilyFor(
         return true;
     case sites::ProductionProofSiteKind::EpisodeWiring:
         if (role != RCStage3RelationRole::EpisodeWiring) return false;
-        if (!BuildRCStage3EpisodeLocalKernelProgramTable(
-                RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
-                program, why)) {
+        if (!BuildEpisodeWiringDirectProduct(program, why)) {
             return false;
         }
         endpoint = RCStage3RelationEndpoint::EpisodeWiringCopy;
@@ -646,8 +850,7 @@ bool RealFamilyFor(
         return true;
     case sites::ProductionProofSiteKind::CoupledGemm:
         if (role != RCStage3RelationRole::CoupledGemm) return false;
-        if (!BuildRCStage3CoupledLocalKernelProgramTable(
-                RCStage3RelationRole::CoupledGemm, program, why)) {
+        if (!BuildCoupledGemmDirectProduct(program, why)) {
             return false;
         }
         endpoint = RCStage3RelationEndpoint::CoupledGemmOutputY;
@@ -664,16 +867,18 @@ bool RealFamilyFor(
         return true;
     case sites::ProductionProofSiteKind::CoupledBarrierSha256d:
         if (role != RCStage3RelationRole::CoupledBarrier) return false;
-        if (!BuildRCStage3HashKernelOutputProgramTable(
-                RCStage3RelationRole::CoupledBarrier, program, why)) {
+        if (!BuildCoupledHashDirectProduct(
+                RCStage3RelationRole::CoupledBarrier,
+                program, why)) {
             return false;
         }
         endpoint = RCStage3RelationEndpoint::CoupledBarrierHash;
         return true;
     case sites::ProductionProofSiteKind::CoupledDigestSha256d:
         if (role != RCStage3RelationRole::CoupledDigest) return false;
-        if (!BuildRCStage3HashKernelOutputProgramTable(
-                RCStage3RelationRole::CoupledDigest, program, why)) {
+        if (!BuildCoupledHashDirectProduct(
+                RCStage3RelationRole::CoupledDigest,
+                program, why)) {
             return false;
         }
         endpoint = RCStage3RelationEndpoint::CoupledDigestHash;
@@ -726,7 +931,7 @@ bool PartialFamilyFor(
                 role, program, why);
     case sites::ProductionProofSiteKind::EpisodeSignedRange:
         return role == RCStage3RelationRole::EpisodeGemm &&
-            BuildSignedRangeLocalFragment(program, why);
+            BuildSignedRangeLocalFragment(role, program, why);
     case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
         return role == RCStage3RelationRole::EpisodeExtract &&
             BuildRangeExtractCtlParametricFragment(program, why);
@@ -848,7 +1053,8 @@ bool BuildProductionSignedRangeLocalProgramTableV1(
     cb::ProgramTable& out,
     std::string* why)
 {
-    return BuildSignedRangeLocalFragment(out, why);
+    return BuildSignedRangeLocalFragment(
+        RCStage3RelationRole::EpisodeGemm, out, why);
 }
 
 bool BuildProductionFixedProgramOutputLocalProgramTableV1(
@@ -857,6 +1063,28 @@ bool BuildProductionFixedProgramOutputLocalProgramTableV1(
     std::string* why)
 {
     return BuildFixedProgramLocalFragment(role, out, why);
+}
+
+bool BuildCanonicalProductionFamilyProgramTableV1(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    RCStage3RelationEndpoint endpoint{};
+    if (RealFamilyFor(kind, role, out, endpoint, why)) {
+        return cb::ValidateProgramTable(out, why);
+    }
+    if (PartialFamilyFor(kind, role, out, why)) {
+        return cb::ValidateProgramTable(out, why);
+    }
+    out = {};
+    if (why != nullptr) {
+        *why =
+            "stage3:production_family_programs:"
+            "canonical_family_unavailable";
+    }
+    return false;
 }
 
 std::vector<ProductionFamilyProgramSourceV1>

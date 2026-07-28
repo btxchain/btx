@@ -52,9 +52,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.registry_semantic_claim_endpoints, 14U);
     BOOST_CHECK_EQUAL(
-        manifest.selected_program_key_endpoints, 35U);
+        manifest.selected_program_key_endpoints, 47U);
     BOOST_CHECK_EQUAL(
-        manifest.canonical_output_metadata_endpoints, 35U);
+        manifest.canonical_output_metadata_endpoints, 47U);
     BOOST_CHECK_EQUAL(
         manifest.executed_relation_cell_endpoints, 22U);
     BOOST_CHECK_EQUAL(
@@ -71,20 +71,8 @@ BOOST_AUTO_TEST_CASE(
             RCStage3RelationEndpoint::EpisodeBuilderParams,
             RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
             RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
-            RCStage3RelationEndpoint::EpisodeWiringTranspose,
             RCStage3RelationEndpoint::EpisodeWiringResidual,
             RCStage3RelationEndpoint::EpisodeWiringRoundOrder,
-            RCStage3RelationEndpoint::EpisodeTileTreeLeafHash,
-            RCStage3RelationEndpoint::EpisodeTileTreeInternalHash,
-            RCStage3RelationEndpoint::EpisodeTileTreeRoot,
-            RCStage3RelationEndpoint::EpisodeDigestRoundRoots,
-            RCStage3RelationEndpoint::EpisodeDigestValue,
-            RCStage3RelationEndpoint::EpisodeDigestHeaderTarget,
-            RCStage3RelationEndpoint::CoupledGemmSignedRange,
-            RCStage3RelationEndpoint::CoupledBarrierInput,
-            RCStage3RelationEndpoint::CoupledBarrierOutput,
-            RCStage3RelationEndpoint::CoupledDigestBankAndBarriers,
-            RCStage3RelationEndpoint::CoupledDigestValue,
         };
     std::vector<RCStage3RelationEndpoint> observed_missing;
     for (const auto& endpoint : manifest.endpoints) {
@@ -147,7 +135,8 @@ BOOST_AUTO_TEST_CASE(
         manifest, RCStage3RelationEndpoint::CoupledBarrierHash);
     BOOST_CHECK_EQUAL(
         barrier.relation_column,
-        matmul::v4::rc::kRCStage3HashKernelOutputColumnV1);
+        matmul::v4::rc::universal_topology::
+            production_family_col_v1::CoupledHashOutput);
     BOOST_CHECK(barrier.canonical_output_metadata);
     BOOST_CHECK(!barrier.direct_alias_ready);
 }

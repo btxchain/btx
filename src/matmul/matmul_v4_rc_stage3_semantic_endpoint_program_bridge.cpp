@@ -137,88 +137,9 @@ FamilyRecipe MakeRecipe(
 {
     FamilyRecipe out{kind, role, std::move(outputs), {}, false};
     std::string why;
-    switch (kind) {
-    case sites::ProductionProofSiteKind::EpisodeBuilderCounterXof:
-        out.canonical_built =
-            BuildRCStage3EpisodeBuilderTraceProgramTable(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeGemmSumcheck:
-        out.canonical_built =
-            BuildRCStage3EpisodeLocalKernelProgramTable(
-                RCStage3EpisodeAirFamily::GemmEndpointFp3V1,
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeSignedRange:
-        out.canonical_built =
-            topo::BuildProductionSignedRangeLocalProgramTableV1(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeExtractCore:
-        out.canonical_built =
-            BuildRCStage3EpisodeExtractLocalKernelProgramTable(
-                0, out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
-    case sites::ProductionProofSiteKind::CoupledBankCounterXof:
-    case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
-    case sites::ProductionProofSiteKind::CoupledExchangeXof:
-    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
-        out.canonical_built =
-            topo::BuildProductionFixedProgramOutputLocalProgramTableV1(
-                role, out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeWiring:
-        out.canonical_built =
-            BuildRCStage3EpisodeLocalKernelProgramTable(
-                RCStage3EpisodeAirFamily::WiringEqualityFp3V1,
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeTileTreeSha256d:
-        out.canonical_built =
-            BuildRCStage3EpisodeTileTreeByteBridgeProgramTable(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::EpisodeDigestSha256d:
-        out.canonical_built =
-            BuildRCStage3EpisodePowProgramTable(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::CoupledBank:
-        out.canonical_built =
-            BuildRCStage3CoupledBankDequantProgramTableCanonical(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::CoupledGemm:
-    case sites::ProductionProofSiteKind::CoupledMix:
-        out.canonical_built =
-            BuildRCStage3CoupledLocalKernelProgramTable(
-                role, out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::CoupledExchange:
-        out.canonical_built =
-            BuildRCStage3CoupledExchangeTransportProgramTable(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::CoupledPermutation:
-        out.canonical_built =
-            BuildRCStage3CoupledPermutationTransportProgramTable(
-                out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::CoupledExtractCore:
-        out.canonical_built =
-            BuildRCStage3CoupledExtractLocalKernelProgramTable(
-                0, out.canonical, &why);
-        break;
-    case sites::ProductionProofSiteKind::CoupledBarrierSha256d:
-    case sites::ProductionProofSiteKind::CoupledDigestSha256d:
-        out.canonical_built =
-            BuildRCStage3HashKernelOutputProgramTable(
-                role, out.canonical, &why);
-        break;
-    default:
-        break;
-    }
+    out.canonical_built =
+        topo::BuildCanonicalProductionFamilyProgramTableV1(
+            kind, role, out.canonical, &why);
     out.canonical_built =
         out.canonical_built &&
         out.canonical.role == role &&
@@ -288,21 +209,55 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
             RCStage3RelationRole::EpisodeWiring,
             {
                 {RCStage3RelationEndpoint::EpisodeWiringCopy,
-                 0, "episode_wiring:U"},
+                 topo::production_family_col_v1::
+                     EpisodeWiringCopy,
+                 "episode_wiring:U"},
+                {RCStage3RelationEndpoint::EpisodeWiringTranspose,
+                 topo::production_family_col_v1::
+                     EpisodeWiringTranspose,
+                 "episode_wiring_transpose:DESTINATION_VALUE"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeTileTreeSha256d,
             RCStage3RelationRole::EpisodeTileTree,
             {
                 {RCStage3RelationEndpoint::EpisodeTileTreeStream,
-                 4, "episode_tile_tree:BYTE_BRIDGE_EXPORT"},
+                 topo::production_family_col_v1::
+                     EpisodeTileTreeStream,
+                 "episode_tile_tree:BYTE_BRIDGE_EXPORT"},
+                {RCStage3RelationEndpoint::EpisodeTileTreeLeafHash,
+                 topo::production_family_col_v1::
+                     EpisodeTileTreeHash,
+                 "episode_tile_tree_leaf:FIXED_PROGRAM_OUTPUT"},
+                {RCStage3RelationEndpoint::EpisodeTileTreeInternalHash,
+                 topo::production_family_col_v1::
+                     EpisodeTileTreeHash,
+                 "episode_tile_tree_internal:FIXED_PROGRAM_OUTPUT"},
+                {RCStage3RelationEndpoint::EpisodeTileTreeRoot,
+                 topo::production_family_col_v1::
+                     EpisodeTileTreeHash,
+                 "episode_tile_tree_root:FIXED_PROGRAM_OUTPUT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeDigestSha256d,
             RCStage3RelationRole::EpisodeDigest,
             {
+                {RCStage3RelationEndpoint::EpisodeDigestRoundRoots,
+                 topo::production_family_col_v1::
+                     EpisodeDigestRoundRoots,
+                 "episode_digest_round_roots:ROOT_EXPORT"},
+                {RCStage3RelationEndpoint::EpisodeDigestValue,
+                 topo::production_family_col_v1::
+                     EpisodeDigestValue,
+                 "episode_digest_value:FIXED_PROGRAM_OUTPUT"},
+                {RCStage3RelationEndpoint::EpisodeDigestHeaderTarget,
+                 topo::production_family_col_v1::
+                     EpisodeDigestHeaderTarget,
+                 "episode_digest_target:TARGET_BYTE"},
                 {RCStage3RelationEndpoint::EpisodeDigestPow,
-                 0, "episode_digest_pow:DIGEST_BYTE"},
+                 topo::production_family_col_v1::
+                     EpisodeDigestPow,
+                 "episode_digest_pow:DIGEST_BYTE"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledBank,
@@ -337,6 +292,10 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                  GEMM_B, "coupled_gemm:B"},
                 {RCStage3RelationEndpoint::CoupledGemmOutputY,
                  GEMM_OUT, "coupled_gemm:OUT"},
+                {RCStage3RelationEndpoint::CoupledGemmSignedRange,
+                 topo::production_family_col_v1::
+                     CoupledGemmSignedRange,
+                 "coupled_gemm_signed_range:VALUE"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledExchange,
@@ -404,17 +363,35 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
             sites::ProductionProofSiteKind::CoupledBarrierSha256d,
             RCStage3RelationRole::CoupledBarrier,
             {
+                {RCStage3RelationEndpoint::CoupledBarrierInput,
+                 topo::production_family_col_v1::
+                     CoupledRootInput,
+                 "coupled_barrier:ROOT_VALUE"},
                 {RCStage3RelationEndpoint::CoupledBarrierHash,
-                 kRCStage3HashKernelOutputColumnV1,
+                 topo::production_family_col_v1::
+                     CoupledHashOutput,
                  "coupled_barrier:FIXED_PROGRAM_OUTPUT"},
+                {RCStage3RelationEndpoint::CoupledBarrierOutput,
+                 topo::production_family_col_v1::
+                     CoupledRootOutput,
+                 "coupled_barrier:ROOT_EXPORT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledDigestSha256d,
             RCStage3RelationRole::CoupledDigest,
             {
+                {RCStage3RelationEndpoint::CoupledDigestBankAndBarriers,
+                 topo::production_family_col_v1::
+                     CoupledRootInput,
+                 "coupled_digest:ROOT_VALUE"},
                 {RCStage3RelationEndpoint::CoupledDigestHash,
-                 kRCStage3HashKernelOutputColumnV1,
+                 topo::production_family_col_v1::
+                     CoupledHashOutput,
                  "coupled_digest:FIXED_PROGRAM_OUTPUT"},
+                {RCStage3RelationEndpoint::CoupledDigestValue,
+                 topo::production_family_col_v1::
+                     CoupledRootOutput,
+                 "coupled_digest:ROOT_EXPORT"},
             }),
     };
 }
