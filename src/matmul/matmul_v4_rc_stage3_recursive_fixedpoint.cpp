@@ -7,12 +7,14 @@
 #include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <limits>
 
 namespace matmul::v4::rc::recursive_fixedpoint {
@@ -20,6 +22,7 @@ namespace {
 
 namespace gf = gkr_field;
 namespace va = stage3_verifier_air;
+namespace rh = recursive_hierarchy;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -17288,10 +17291,12 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
     const std::vector<AlgAirProof>& children,
     const std::vector<uint256>& child_fs_seeds,
-    bool prove)
+    bool prove,
+    const uint256& parent_context_binding)
 {
     NarrowMultiChildL2FriConsumeV1 out;
     out.arity = static_cast<uint32_t>(children.size());
+    out.parent_context_binding = parent_context_binding;
     if (child_css.size() != children.size() ||
         child_fs_seeds.size() != children.size() ||
         children.size() < 2) {
@@ -17319,6 +17324,22 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     out.n_columns = node.combined.n_columns;
     out.n_constraints = static_cast<uint32_t>(
         node.combined.constraints.size());
+    for (const auto& constraint : node.combined.constraints) {
+        switch (constraint.kind) {
+        case aq::AirKind::kEverywhere:
+            ++out.everywhere_constraints;
+            break;
+        case aq::AirKind::kTransition:
+            ++out.transition_constraints;
+            break;
+        case aq::AirKind::kFirstRow:
+            ++out.first_row_constraints;
+            break;
+        case aq::AirKind::kLastRow:
+            ++out.last_row_constraints;
+            break;
+        }
+    }
     out.active_rows =
         node.hash.valid
             ? uint64_t{node.hash.program.active_rows}
@@ -17394,6 +17415,11 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     seed_hash << out.n_columns;
     seed_hash << out.n_constraints;
     seed_hash << node.prechallenge_commitment;
+    if (!parent_context_binding.IsNull()) {
+        seed_hash <<
+            "BTX_RC_STAGE3_MULTI_CHILD_L2_BOUND_CONTEXT_V1";
+        seed_hash << parent_context_binding;
+    }
     for (const auto& seed : child_fs_seeds) {
         seed_hash << seed;
     }
@@ -17419,8 +17445,14 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
 
     std::string verify_why;
     const auto t2 = std::chrono::steady_clock::now();
-    out.verified = aq::AirQuotientVerifyRows(
-        node.combined, proved.proof, parent_seed, &verify_why);
+    // Query checks are independent.  OpenMP builds use their native parallel
+    // loop; portable builds use the backend's deterministic thread fallback.
+    // Both paths preserve the exact ordered proof statement and bytes.
+    constexpr uint32_t kRootVerifyThreads = 16;
+    out.verified = aq::AirQuotientVerify<
+        Fp3, aq::AirFriBackendAlgStreamingRows>(
+        node.combined, proved.proof, parent_seed,
+        &verify_why, kRootVerifyThreads);
     const auto t3 = std::chrono::steady_clock::now();
     out.verify_micros = static_cast<uint64_t>(
         std::chrono::duration_cast<std::chrono::microseconds>(
@@ -17432,6 +17464,31 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
             "multi_child_l2_fri_consume_verify:" +
             verify_why;
         return out;
+    }
+    if (std::getenv(
+            "BTX_STAGE3_G2_VERIFY_PHASE_TIMING") != nullptr) {
+        std::string batch_why;
+        const auto batch_t0 =
+            std::chrono::steady_clock::now();
+        out.standalone_batch_verify_ok =
+            aq::AirFriBackendAlgStreamingRows::
+                BatchVerify(
+                    proved.proof.batch, parent_seed,
+                    &batch_why);
+        const auto batch_t1 =
+            std::chrono::steady_clock::now();
+        out.standalone_batch_verify_micros =
+            static_cast<uint64_t>(
+                std::chrono::duration_cast<
+                    std::chrono::microseconds>(
+                    batch_t1 - batch_t0).count());
+        if (!out.standalone_batch_verify_ok) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "standalone_batch_verify:" +
+                batch_why;
+            return out;
+        }
     }
 
     out.parent_proof.batch = proved.proof.batch;
@@ -17505,6 +17562,11 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     statement_hash << out.active_rows;
     statement_hash << out.n_lde;
     statement_hash << node.prechallenge_commitment;
+    if (!parent_context_binding.IsNull()) {
+        statement_hash <<
+            "BTX_RC_STAGE3_MULTI_CHILD_L2_BOUND_CONTEXT_V1";
+        statement_hash << parent_context_binding;
+    }
     statement_hash << out.parent_fs_seed;
     for (const auto& child_seed : child_fs_seeds) {
         statement_hash << child_seed;
@@ -17574,14 +17636,16 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         out.serialize_root_bytes <=
             static_cast<uint64_t>(kRCFriMaxProofBytesHard);
 
-    out.valid =
+    out.cryptographically_valid =
         out.fold_bus_built && out.fri_shape_representable &&
         out.proved && out.verified && out.forgery_rejected &&
         out.parent_proof_tamper_rejected &&
         out.parent_proof_retained &&
         out.canonical_whole_proof_codec &&
         out.parent_reentry_verified &&
-        !out.parent_statement_commitment.IsNull() &&
+        !out.parent_statement_commitment.IsNull();
+    out.valid =
+        out.cryptographically_valid &&
         out.verify_within_relay_budget &&
         out.serialize_within_fri_budget;
     out.note =
@@ -17608,6 +17672,377 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         (out.serialize_within_fri_budget
              ? ";serialize_within_fri"
              : ";serialize_OVER_FRI") +
+        ";complete_fp=false";
+    return out;
+}
+
+namespace {
+
+uint256 CommitNarrowProofBytesV1(
+    const std::vector<unsigned char>& proof_bytes)
+{
+    if (proof_bytes.empty()) return {};
+    HashWriter proof_hash;
+    proof_hash <<
+        "BTX_RC_STAGE3_MULTI_CHILD_L2_PARENT_PROOF_V1";
+    proof_hash <<
+        static_cast<uint64_t>(proof_bytes.size());
+    proof_hash << proof_bytes;
+    return proof_hash.GetHash();
+}
+
+uint256 DeriveRetainedParentContextV1(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const uint256& parent_node_binding)
+{
+    if (children.size() < 2 || parent_node_binding.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << "BTX_RC_STAGE3_NARROW_RETAINED_PARENT_CONTEXT_V1";
+    hash << parent_node_binding;
+    hash << static_cast<uint32_t>(children.size());
+    for (uint32_t slot = 0; slot < children.size(); ++slot) {
+        if (children[slot].receipt_commitment.IsNull() ||
+            children[slot].program_binding.IsNull()) {
+            return {};
+        }
+        hash << slot;
+        hash << children[slot].node_binding;
+        hash << children[slot].program_binding;
+        hash << children[slot].receipt_commitment;
+    }
+    return hash.GetHash();
+}
+
+} // namespace
+
+uint256 ComputeNarrowRetainedParentContextV1(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const uint256& parent_node_binding,
+    const uint256& parent_program_binding)
+{
+    if (parent_program_binding.IsNull()) return {};
+    const uint256 child_context =
+        DeriveRetainedParentContextV1(
+            children, parent_node_binding);
+    if (child_context.IsNull()) return {};
+    HashWriter program_hash;
+    program_hash <<
+        "BTX_RC_STAGE3_NARROW_RETAINED_PARENT_PROGRAM_V1";
+    program_hash << child_context;
+    program_hash << parent_program_binding;
+    return program_hash.GetHash();
+}
+
+uint256 CommitNarrowRecursiveProofReceiptV1(
+    const NarrowRecursiveProofReceiptV1& receipt)
+{
+    if (receipt.version !=
+            kNarrowRecursiveProofReceiptVersionV1 ||
+        receipt.node_binding.IsNull() ||
+        receipt.program_binding.IsNull() ||
+        receipt.proof_context_binding.IsNull() ||
+        receipt.n_rows < 2 || receipt.n_columns == 0 ||
+        receipt.n_constraints == 0 || receipt.active_rows == 0 ||
+        receipt.n_lde == 0 ||
+        receipt.constraint_system_commitment.IsNull() ||
+        receipt.fs_seed.IsNull() ||
+        receipt.proof_commitment.IsNull() ||
+        receipt.statement_commitment.IsNull() ||
+        receipt.proof_bytes.empty()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << "BTX_RC_STAGE3_NARROW_RECURSIVE_PROOF_RECEIPT_V1";
+    hash << receipt.version;
+    hash << receipt.node_binding;
+    hash << receipt.program_binding;
+    hash << receipt.proof_context_binding;
+    hash << receipt.n_rows;
+    hash << receipt.n_columns;
+    hash << receipt.n_constraints;
+    hash << receipt.active_rows;
+    hash << receipt.n_lde;
+    hash << receipt.constraint_system_commitment;
+    hash << receipt.fs_seed;
+    hash << receipt.proof_commitment;
+    hash << receipt.statement_commitment;
+    hash << static_cast<uint64_t>(receipt.proof_bytes.size());
+    return hash.GetHash();
+}
+
+NarrowRecursiveProofReceiptV1
+RetainNarrowRecursiveProofReceiptV1(
+    const NarrowMultiChildL2FriConsumeV1& consumed,
+    const uint256& node_binding,
+    const uint256& program_binding)
+{
+    NarrowRecursiveProofReceiptV1 out;
+    out.node_binding = node_binding;
+    out.program_binding = program_binding;
+    out.proof_context_binding =
+        consumed.parent_context_binding;
+    out.n_rows = consumed.n_rows;
+    out.n_columns = consumed.n_columns;
+    out.n_constraints = consumed.n_constraints;
+    out.active_rows = consumed.active_rows;
+    out.n_lde = consumed.n_lde;
+    out.constraint_system_commitment =
+        rh::ComputeHierarchyConstraintSystemCommitmentV1(
+            consumed.parent_constraint_system);
+    out.fs_seed = consumed.parent_fs_seed;
+    out.proof_commitment = consumed.parent_proof_commitment;
+    out.statement_commitment =
+        consumed.parent_statement_commitment;
+    out.constraint_system = consumed.parent_constraint_system;
+    out.proof = consumed.parent_proof;
+    out.proof_bytes = consumed.parent_proof_bytes;
+    out.verify_within_relay_budget =
+        consumed.verify_within_relay_budget;
+    out.serialize_within_fri_budget =
+        consumed.serialize_within_fri_budget;
+    if (!consumed.cryptographically_valid ||
+        !consumed.proved ||
+        !consumed.verified ||
+        !consumed.parent_proof_retained ||
+        !consumed.canonical_whole_proof_codec ||
+        !consumed.parent_reentry_verified ||
+        node_binding.IsNull() ||
+        program_binding.IsNull() ||
+        consumed.parent_context_binding.IsNull()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_receipt_source_not_admissible";
+        return out;
+    }
+    out.receipt_commitment =
+        CommitNarrowRecursiveProofReceiptV1(out);
+    std::string why;
+    out.valid =
+        !out.receipt_commitment.IsNull() &&
+        ValidateNarrowRecursiveProofReceiptV1(
+            out, consumed.parent_constraint_system,
+            node_binding, program_binding, &why);
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "narrow_recursive_receipt_valid"
+        : "stage3:recursive_fixedpoint:"
+          "narrow_recursive_receipt_invalid:" + why;
+    return out;
+}
+
+bool ValidateNarrowRecursiveProofReceiptV1(
+    const NarrowRecursiveProofReceiptV1& receipt,
+    const aq::AirConstraintSystem<Fp3>& expected_constraint_system,
+    const uint256& expected_node_binding,
+    const uint256& expected_program_binding,
+    std::string* why)
+{
+    if (receipt.version !=
+            kNarrowRecursiveProofReceiptVersionV1) {
+        return Fail(why, "narrow_receipt_version");
+    }
+    if (expected_node_binding.IsNull() ||
+        receipt.node_binding != expected_node_binding) {
+        return Fail(why, "narrow_receipt_node_binding");
+    }
+    if (expected_program_binding.IsNull() ||
+        receipt.program_binding != expected_program_binding) {
+        return Fail(why, "narrow_receipt_program_binding");
+    }
+    if (receipt.proof_context_binding.IsNull() ||
+        receipt.fs_seed.IsNull() ||
+        receipt.proof_commitment.IsNull() ||
+        receipt.statement_commitment.IsNull() ||
+        receipt.receipt_commitment.IsNull() ||
+        receipt.proof_bytes.empty()) {
+        return Fail(why, "narrow_receipt_null_binding");
+    }
+    if (receipt.constraint_system.n_rows != receipt.n_rows ||
+        receipt.constraint_system.n_columns != receipt.n_columns ||
+        receipt.constraint_system.constraints.size() !=
+            receipt.n_constraints ||
+        receipt.active_rows == 0 || receipt.n_lde == 0) {
+        return Fail(why, "narrow_receipt_shape");
+    }
+    const uint256 expected_cs_commitment =
+        rh::ComputeHierarchyConstraintSystemCommitmentV1(
+            expected_constraint_system);
+    if (expected_cs_commitment.IsNull() ||
+        receipt.constraint_system_commitment !=
+            expected_cs_commitment ||
+        expected_constraint_system.n_rows != receipt.n_rows ||
+        expected_constraint_system.n_columns !=
+            receipt.n_columns ||
+        expected_constraint_system.constraints.size() !=
+            receipt.n_constraints) {
+        return Fail(
+            why, "narrow_receipt_constraint_system");
+    }
+    const nr::NarrowNodeFriShape shape =
+        nr::AssessNarrowNodeFriShape(receipt.active_rows);
+    if (!shape.representable || shape.n_lde != receipt.n_lde) {
+        return Fail(why, "narrow_receipt_fri_shape");
+    }
+    std::string codec_why;
+    std::vector<unsigned char> canonical;
+    if (!SerializeAirQuotientProofAlg(
+            receipt.proof, canonical, &codec_why) ||
+        canonical != receipt.proof_bytes) {
+        return Fail(
+            why, "narrow_receipt_noncanonical_proof:" +
+                     codec_why);
+    }
+    if (CommitNarrowProofBytesV1(canonical) !=
+        receipt.proof_commitment) {
+        return Fail(why, "narrow_receipt_proof_commitment");
+    }
+    if (!aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+            expected_constraint_system, receipt.proof,
+            receipt.fs_seed, &codec_why)) {
+        return Fail(
+            why, "narrow_receipt_proof_verify:" +
+                     codec_why);
+    }
+    if (CommitNarrowRecursiveProofReceiptV1(receipt) !=
+        receipt.receipt_commitment) {
+        return Fail(why, "narrow_receipt_commitment");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "narrow_recursive_receipt_verified";
+    }
+    return true;
+}
+
+NarrowRetainedReceiptParentV1
+ExecuteNarrowRetainedReceiptParentV1(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        expected_child_constraint_systems,
+    const std::vector<uint256>& expected_child_node_bindings,
+    const std::vector<uint256>& expected_child_program_bindings,
+    const uint256& parent_node_binding,
+    const uint256& parent_program_binding,
+    bool prove)
+{
+    NarrowRetainedReceiptParentV1 out;
+    out.arity = static_cast<uint32_t>(children.size());
+    out.parent_node_binding = parent_node_binding;
+    out.parent_program_binding = parent_program_binding;
+    if (children.size() < 2 ||
+        expected_child_constraint_systems.size() !=
+            children.size() ||
+        expected_child_node_bindings.size() !=
+            children.size() ||
+        expected_child_program_bindings.size() !=
+            children.size() ||
+        parent_node_binding.IsNull() ||
+        parent_program_binding.IsNull()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_retained_parent_input";
+        return out;
+    }
+
+    std::vector<aq::AirConstraintSystem<Fp3>> child_css;
+    std::vector<AlgAirProof> child_proofs;
+    std::vector<uint256> child_seeds;
+    child_css.reserve(children.size());
+    child_proofs.reserve(children.size());
+    child_seeds.reserve(children.size());
+    for (uint32_t i = 0; i < children.size(); ++i) {
+        std::string why;
+        if (!ValidateNarrowRecursiveProofReceiptV1(
+                children[i], expected_child_constraint_systems[i],
+                expected_child_node_bindings[i],
+                expected_child_program_bindings[i], &why)) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "narrow_retained_child_invalid:" +
+                std::to_string(i) + ":" + why;
+            return out;
+        }
+        for (uint32_t j = 0; j < i; ++j) {
+            if (children[i].node_binding ==
+                    children[j].node_binding ||
+                children[i].receipt_commitment ==
+                    children[j].receipt_commitment ||
+                children[i].proof_commitment ==
+                    children[j].proof_commitment) {
+                out.duplicate_child_rejected = true;
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "narrow_retained_duplicate_child";
+                return out;
+            }
+        }
+        child_css.push_back(
+            expected_child_constraint_systems[i]);
+        child_proofs.push_back(children[i].proof);
+        child_seeds.push_back(children[i].fs_seed);
+    }
+    out.all_children_validated = true;
+    out.parent_context_binding =
+        ComputeNarrowRetainedParentContextV1(
+            children, parent_node_binding,
+            parent_program_binding);
+    if (out.parent_context_binding.IsNull()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_retained_parent_context";
+        return out;
+    }
+    out.ordered_child_context_bound = true;
+    out.consumed =
+        ExecuteNarrowMultiChildL2FriConsumeV1(
+            child_css, child_proofs, child_seeds, prove,
+            out.parent_context_binding);
+    if (!out.consumed.cryptographically_valid) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_retained_parent_consume:" +
+            out.consumed.note;
+        return out;
+    }
+    out.child_tamper_rejected =
+        out.consumed.forgery_rejected &&
+        out.consumed.parent_proof_tamper_rejected;
+    out.receipt =
+        RetainNarrowRecursiveProofReceiptV1(
+            out.consumed, parent_node_binding,
+            parent_program_binding);
+    out.cryptographically_valid =
+        out.all_children_validated &&
+        out.ordered_child_context_bound &&
+        out.child_tamper_rejected &&
+        out.receipt.valid;
+    out.production_budget_met =
+        out.consumed.verify_within_relay_budget &&
+        out.consumed.serialize_within_fri_budget;
+    out.valid =
+        out.cryptographically_valid &&
+        out.production_budget_met;
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:"
+            "narrow_retained_parent") +
+        ";arity=" + std::to_string(out.arity) +
+        ";children_valid=1;ordered_context=1;"
+        "child_forgery=1;parent_tamper=1" +
+        ";verify_us=" +
+        std::to_string(out.consumed.verify_micros) +
+        ";standalone_batch_verify_us=" +
+        std::to_string(
+            out.consumed.standalone_batch_verify_micros) +
+        ";root_bytes=" +
+        std::to_string(out.consumed.serialize_root_bytes) +
+        (out.production_budget_met
+             ? ";production_budget=1"
+             : ";production_budget=0") +
         ";complete_fp=false";
     return out;
 }

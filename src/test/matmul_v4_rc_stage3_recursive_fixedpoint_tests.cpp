@@ -4871,6 +4871,215 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
 
+// g2 fixed-point foundation: two independently produced narrow parents are
+// retained as proof-owned receipts and re-entered as the REAL children of a
+// next-level narrow parent.  This is the missing data-flow behind the former
+// hierarchical boolean stand-in.  The canary is opt-in because it produces
+// three FRI proofs; no readiness flag is changed.
+BOOST_AUTO_TEST_CASE(
+    retained_narrow_receipts_reenter_a_real_next_level_parent)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_RETAINED_RECEIPT_FIXEDPOINT");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_RETAINED_RECEIPT_FIXEDPOINT=1 "
+            "for retained L1 receipts -> real L2 parent");
+        return;
+    }
+
+    const HonestChild a = BuildHonestChild(0xD1);
+    const HonestChild b = BuildHonestChild(0xD2);
+    const HonestChild c = BuildHonestChild(0xD3);
+    const HonestChild d = BuildHonestChild(0xD4);
+    const uint256 left_node = Seed(0xE1);
+    const uint256 right_node = Seed(0xE2);
+    const uint256 root_node = Seed(0xE3);
+    const uint256 left_program = Seed(0xA1);
+    const uint256 right_program = Seed(0xA2);
+    const uint256 root_program = Seed(0xA3);
+
+    const fp::NarrowMultiChildL2FriConsumeV1 left =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            {a.cs, b.cs}, {a.proof, b.proof},
+            {a.seed, b.seed}, /*prove=*/true,
+            /*parent_context_binding=*/Seed(0xF1));
+    BOOST_REQUIRE_MESSAGE(left.valid, left.note);
+    const fp::NarrowMultiChildL2FriConsumeV1 right =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            {c.cs, d.cs}, {c.proof, d.proof},
+            {c.seed, d.seed}, /*prove=*/true,
+            /*parent_context_binding=*/Seed(0xF2));
+    BOOST_REQUIRE_MESSAGE(right.valid, right.note);
+
+    const fp::NarrowRecursiveProofReceiptV1 left_receipt =
+        fp::RetainNarrowRecursiveProofReceiptV1(
+            left, left_node, left_program);
+    const fp::NarrowRecursiveProofReceiptV1 right_receipt =
+        fp::RetainNarrowRecursiveProofReceiptV1(
+            right, right_node, right_program);
+    BOOST_REQUIRE_MESSAGE(
+        left_receipt.valid, left_receipt.note);
+    BOOST_REQUIRE_MESSAGE(
+        right_receipt.valid, right_receipt.note);
+    BOOST_CHECK(
+        left_receipt.receipt_commitment !=
+        right_receipt.receipt_commitment);
+
+    std::string why;
+    BOOST_CHECK(fp::ValidateNarrowRecursiveProofReceiptV1(
+        left_receipt, left.parent_constraint_system,
+        left_node, left_program, &why));
+    BOOST_CHECK(fp::ValidateNarrowRecursiveProofReceiptV1(
+        right_receipt, right.parent_constraint_system,
+        right_node, right_program, &why));
+    BOOST_CHECK(!fp::ValidateNarrowRecursiveProofReceiptV1(
+        left_receipt, left.parent_constraint_system,
+        right_node, left_program, &why));
+    BOOST_CHECK(!fp::ValidateNarrowRecursiveProofReceiptV1(
+        left_receipt, left.parent_constraint_system,
+        left_node, right_program, &why));
+
+    // A prover cannot make its retained callback-bearing AIR authoritative.
+    // Even an identically described AIR with altered semantics is rejected by
+    // native proof verification against the verifier's expected callbacks.
+    auto wrong_expected_cs = left.parent_constraint_system;
+    BOOST_REQUIRE(!wrong_expected_cs.constraints.empty());
+    wrong_expected_cs.constraints[0].eval =
+        [](const std::vector<gf::Fp3>&,
+           const std::vector<gf::Fp3>&) {
+            return gf::Fp3::One();
+        };
+    BOOST_CHECK(!fp::ValidateNarrowRecursiveProofReceiptV1(
+        left_receipt, wrong_expected_cs,
+        left_node, left_program, &why));
+
+    // Canonical-byte tamper is rejected before re-entry.
+    auto byte_tamper = left_receipt;
+    BOOST_REQUIRE(!byte_tamper.proof_bytes.empty());
+    byte_tamper.proof_bytes.back() ^= 0x01U;
+    BOOST_CHECK(!fp::ValidateNarrowRecursiveProofReceiptV1(
+        byte_tamper, left.parent_constraint_system,
+        left_node, left_program, &why));
+
+    // Proof-level tamper is checked by the unmodified AirQuotient verifier.
+    auto proof_tamper = left_receipt;
+    BOOST_REQUIRE(!proof_tamper.proof.batch.queries.empty());
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.queries[0].row.values.empty());
+    proof_tamper.proof.batch.queries[0].row.values[0] =
+        gf::Add(
+            proof_tamper.proof.batch.queries[0].row.values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(!fp::ValidateNarrowRecursiveProofReceiptV1(
+        proof_tamper, left.parent_constraint_system,
+        left_node, left_program, &why));
+
+    // Duplicate/replayed child receipts are never accepted as two slots.
+    const fp::NarrowRetainedReceiptParentV1 duplicate =
+        fp::ExecuteNarrowRetainedReceiptParentV1(
+            {left_receipt, left_receipt},
+            {left.parent_constraint_system,
+             left.parent_constraint_system},
+            {left_node, left_node},
+            {left_program, left_program},
+            root_node, root_program,
+            /*prove=*/false);
+    BOOST_CHECK(!duplicate.valid);
+    BOOST_CHECK(duplicate.duplicate_child_rejected);
+
+    const fp::NarrowRetainedReceiptParentV1 wrong_topology =
+        fp::ExecuteNarrowRetainedReceiptParentV1(
+            {left_receipt, right_receipt},
+            {left.parent_constraint_system,
+             right.parent_constraint_system},
+            {right_node, left_node},
+            {left_program, right_program},
+            root_node, root_program,
+            /*prove=*/false);
+    BOOST_CHECK(!wrong_topology.valid);
+    BOOST_CHECK(
+        wrong_topology.note.find("narrow_receipt_node_binding") !=
+        std::string::npos);
+
+    // Ordered receipt commitments are in the parent's transcript context:
+    // swapping slots changes the context even in the shape-only preflight.
+    const uint256 forward_context =
+        fp::ComputeNarrowRetainedParentContextV1(
+            {left_receipt, right_receipt},
+            root_node, root_program);
+    const uint256 reverse_context =
+        fp::ComputeNarrowRetainedParentContextV1(
+            {right_receipt, left_receipt},
+            root_node, root_program);
+    BOOST_CHECK(!forward_context.IsNull());
+    BOOST_CHECK(!reverse_context.IsNull());
+    BOOST_CHECK(
+        forward_context != reverse_context);
+
+    // The actual fixed-point step: retained parent proofs become real children
+    // and the resulting root proof is itself retained/re-enterable.
+    const fp::NarrowRetainedReceiptParentV1 root =
+        fp::ExecuteNarrowRetainedReceiptParentV1(
+            {left_receipt, right_receipt},
+            {left.parent_constraint_system,
+             right.parent_constraint_system},
+            {left_node, right_node},
+            {left_program, right_program},
+            root_node, root_program,
+            /*prove=*/true);
+    BOOST_REQUIRE_MESSAGE(
+        root.cryptographically_valid, root.note);
+    BOOST_CHECK(root.all_children_validated);
+    BOOST_CHECK(root.ordered_child_context_bound);
+    BOOST_CHECK(root.child_tamper_rejected);
+    BOOST_CHECK(root.consumed.parent_reentry_verified);
+    BOOST_CHECK(root.consumed.parent_proof_tamper_rejected);
+    BOOST_CHECK(root.consumed.serialize_within_fri_budget);
+    BOOST_CHECK(root.receipt.valid);
+    BOOST_CHECK_EQUAL(
+        root.valid, root.production_budget_met);
+    BOOST_CHECK_EQUAL(
+        root.production_budget_met,
+        root.consumed.verify_within_relay_budget &&
+            root.consumed.serialize_within_fri_budget);
+    BOOST_CHECK(fp::ValidateNarrowRecursiveProofReceiptV1(
+        root.receipt, root.consumed.parent_constraint_system,
+        root_node, root_program, &why));
+    BOOST_CHECK_EQUAL(root.receipt.n_columns, 575U);
+    BOOST_CHECK_EQUAL(root.receipt.n_columns,
+                      left_receipt.n_columns);
+    BOOST_CHECK_LE(root.consumed.serialize_root_bytes,
+                   rc::kRCFriMaxProofBytesHard);
+    BOOST_TEST_MESSAGE(
+        "RETAINED_RECEIPT_FIXEDPOINT L1_cols="
+        << left_receipt.n_columns
+        << " root_cols=" << root.receipt.n_columns
+        << " root_rows=" << root.receipt.n_rows
+        << " kinds_everywhere="
+        << root.consumed.everywhere_constraints
+        << " kinds_transition="
+        << root.consumed.transition_constraints
+        << " kinds_first="
+        << root.consumed.first_row_constraints
+        << " kinds_last="
+        << root.consumed.last_row_constraints
+        << " root_verify_us=" << root.consumed.verify_micros
+        << " standalone_batch_verify_us="
+        << root.consumed.standalone_batch_verify_micros
+        << " root_bytes=" << root.consumed.serialize_root_bytes
+        << " within_relay="
+        << root.consumed.verify_within_relay_budget
+        << " exact_replay=0 complete_fp=false");
+
+    static_assert(fp::kNarrowRetainedReceiptRecursionExecutable);
+    static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!nr::kNarrowHierarchicalAggregationReady);
+    static_assert(!rc::kRCStage3RecursiveAggregationReady);
+}
+
 BOOST_AUTO_TEST_CASE(
     normalized_batch_codec_is_safe_v13_version_separated)
 {
@@ -4906,16 +5115,68 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(map.no_trailing_bytes);
 
     std::vector<unsigned char> encoded;
-    BOOST_REQUIRE_EQUAL(
+    const size_t encoded_size =
         rc::SerializeFri3AlgBatchProof(
-            proved.proof, encoded),
-        encoded.size());
+            proved.proof, encoded);
+    BOOST_REQUIRE_EQUAL(encoded_size, encoded.size());
+    BOOST_CHECK(
+        fp::ValidateNormalizedAlgAirBatchCodecBytesV1(
+            proved.proof, encoded, &why));
+
+    // Dispatch is selected by the statement's exact proof version.  Neither
+    // relabelling the statement as V10 nor relabelling the bytes is accepted.
     auto v10_statement = proved.proof;
     v10_statement.version =
         rc::kRCFri3AlgP2Q192K2ProofVersionV10;
     BOOST_CHECK(
         !fp::ValidateNormalizedAlgAirBatchCodecBytesV1(
             v10_statement, encoded, &why));
+    auto v10_bytes = encoded;
+    BOOST_REQUIRE_GE(v10_bytes.size(), sizeof(uint32_t));
+    v10_bytes[0] =
+        static_cast<unsigned char>(
+            rc::kRCFri3AlgP2Q192K2ProofVersionV10);
+    v10_bytes[1] = 0;
+    v10_bytes[2] = 0;
+    v10_bytes[3] = 0;
+    BOOST_CHECK(
+        !fp::ValidateNormalizedAlgAirBatchCodecBytesV1(
+            proved.proof, v10_bytes, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    narrow_root_constraint_kind_inventory_is_exact)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_CONSTRAINT_KIND_INVENTORY");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_CONSTRAINT_KIND_INVENTORY=1 "
+            "for the real W=575 verifier constraint inventory");
+        return;
+    }
+    const HonestChild a = BuildHonestChild(0xC1);
+    const HonestChild b = BuildHonestChild(0xC2);
+    const auto shape =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            {a.cs, b.cs}, {a.proof, b.proof},
+            {a.seed, b.seed}, /*prove=*/false);
+    BOOST_REQUIRE_MESSAGE(shape.valid, shape.note);
+    BOOST_CHECK_EQUAL(shape.n_columns, 575U);
+    BOOST_CHECK_EQUAL(
+        shape.n_constraints,
+        shape.everywhere_constraints +
+            shape.transition_constraints +
+            shape.first_row_constraints +
+            shape.last_row_constraints);
+    BOOST_TEST_MESSAGE(
+        "G2_CONSTRAINT_KINDS columns=" << shape.n_columns
+        << " total=" << shape.n_constraints
+        << " everywhere=" << shape.everywhere_constraints
+        << " transition=" << shape.transition_constraints
+        << " first=" << shape.first_row_constraints
+        << " last=" << shape.last_row_constraints);
 }
 
 // g2 chip B wire: hierarchical composed nodes call

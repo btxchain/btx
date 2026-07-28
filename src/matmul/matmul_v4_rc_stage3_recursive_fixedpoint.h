@@ -3112,6 +3112,8 @@ inline constexpr bool kNarrowBytecodeShardCompositionAirProveReady = false;
  */
 struct NarrowMultiChildL2FriConsumeV1 {
     bool valid{false};
+    /** Proof/codec/re-entry soundness, independent of deployment budgets. */
+    bool cryptographically_valid{false};
     bool fri_shape_representable{false};
     bool fold_bus_built{false};
     bool proved{false};
@@ -3125,14 +3127,31 @@ struct NarrowMultiChildL2FriConsumeV1 {
     uint32_t n_rows{0};
     uint32_t n_columns{0};
     uint32_t n_constraints{0};
+    uint32_t everywhere_constraints{0};
+    uint32_t transition_constraints{0};
+    uint32_t first_row_constraints{0};
+    uint32_t last_row_constraints{0};
     uint64_t active_rows{0};
     uint32_t n_lde{0};
     uint64_t prove_micros{0};
     uint64_t verify_micros{0};
+    /**
+     * Opt-in diagnostic (`BTX_STAGE3_G2_VERIFY_PHASE_TIMING`): a separate
+     * native BatchVerify run, never part of acceptance.  This isolates the
+     * FRI/proximity component without changing the verifier path.
+     */
+    bool standalone_batch_verify_ok{false};
+    uint64_t standalone_batch_verify_micros{0};
     /** SerializeFri3AlgBatchProof size of the L2 family-root batch. */
     uint64_t serialize_batch_bytes{0};
     /** Batch + trace_commit + next_openings estimate (wire-ish total). */
     uint64_t serialize_root_bytes{0};
+    /**
+     * Optional verifier-owned context absorbed into the parent's Fiat-Shamir
+     * seed and statement commitment.  The unbound light canary leaves this
+     * null; retained recursive receipts require it to be non-null.
+     */
+    uint256 parent_context_binding{};
     uint256 parent_fs_seed{};
     uint256 parent_proof_commitment{};
     uint256 parent_statement_commitment{};
@@ -3155,11 +3174,123 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
     const std::vector<AlgAirProof>& children,
     const std::vector<uint256>& child_fs_seeds,
+    bool prove = true,
+    const uint256& parent_context_binding = {});
+
+inline constexpr uint16_t
+    kNarrowRecursiveProofReceiptVersionV1 = 1;
+
+/**
+ * Proof-owned recursive receipt for one narrow parent.
+ *
+ * This is deliberately an in-memory execution receipt, not a consensus wire
+ * format: AirConstraintSystem contains executable constraint callbacks.  The
+ * canonical proof bytes, exact constraint-system shape, Fiat-Shamir seed,
+ * semantic node position and proof-context binding are all committed.  A
+ * parent validates the receipt, then re-enters its retained proof as a real
+ * child of BuildFoldBusCompositionMulti.
+ */
+struct NarrowRecursiveProofReceiptV1 {
+    uint16_t version{kNarrowRecursiveProofReceiptVersionV1};
+    uint256 node_binding{};
+    /** Verifier-owned canonical program/constraint-system registry root. */
+    uint256 program_binding{};
+    uint256 proof_context_binding{};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t n_constraints{0};
+    uint64_t active_rows{0};
+    uint32_t n_lde{0};
+    /** Serializable structure/public-data commitment; callbacks remain verifier-owned. */
+    uint256 constraint_system_commitment{};
+    uint256 fs_seed{};
+    uint256 proof_commitment{};
+    uint256 statement_commitment{};
+    uint256 receipt_commitment{};
+    aq::AirConstraintSystem<Fp3> constraint_system;
+    AlgAirProof proof;
+    std::vector<unsigned char> proof_bytes;
+    bool verify_within_relay_budget{false};
+    bool serialize_within_fri_budget{false};
+    bool valid{false};
+    std::string note;
+};
+
+/** Commit every verifier-relevant receipt field in canonical order. */
+[[nodiscard]] uint256 CommitNarrowRecursiveProofReceiptV1(
+    const NarrowRecursiveProofReceiptV1& receipt);
+
+/**
+ * Convert a successfully proved narrow parent into a position-bound receipt.
+ * The consumed parent's context must already be bound to the ordered children
+ * and this node position.
+ */
+[[nodiscard]] NarrowRecursiveProofReceiptV1
+RetainNarrowRecursiveProofReceiptV1(
+    const NarrowMultiChildL2FriConsumeV1& consumed,
+    const uint256& node_binding,
+    const uint256& program_binding);
+
+/**
+ * Re-serialize and re-verify a retained receipt against an independently
+ * reconstructed verifier-owned AIR.  Shape, serializable AIR description,
+ * proof bytes, proof commitment, node position and receipt commitment all
+ * fail closed.  The receipt's callback-bearing constraint system is never
+ * accepted as its own authority.
+ */
+[[nodiscard]] bool ValidateNarrowRecursiveProofReceiptV1(
+    const NarrowRecursiveProofReceiptV1& receipt,
+    const aq::AirConstraintSystem<Fp3>& expected_constraint_system,
+    const uint256& expected_node_binding,
+    const uint256& expected_program_binding,
+    std::string* why = nullptr);
+
+/**
+ * One real recursive hierarchy step.  Every child receipt is independently
+ * validated and re-entered as an AlgAirProof.  The ordered child receipt
+ * commitments and parent node binding derive the proof-context binding that
+ * is absorbed into the parent's Fiat-Shamir transcript.  Duplicate child
+ * positions, receipts, or proofs are refused rather than padded/replayed.
+ */
+struct NarrowRetainedReceiptParentV1 {
+    bool valid{false};
+    bool cryptographically_valid{false};
+    bool production_budget_met{false};
+    bool all_children_validated{false};
+    bool ordered_child_context_bound{false};
+    bool duplicate_child_rejected{false};
+    bool child_tamper_rejected{false};
+    uint32_t arity{0};
+    uint256 parent_node_binding{};
+    uint256 parent_program_binding{};
+    uint256 parent_context_binding{};
+    NarrowMultiChildL2FriConsumeV1 consumed;
+    NarrowRecursiveProofReceiptV1 receipt;
+    std::string note;
+};
+
+/** Deterministic ordered child/program context absorbed by the parent FS. */
+[[nodiscard]] uint256 ComputeNarrowRetainedParentContextV1(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const uint256& parent_node_binding,
+    const uint256& parent_program_binding);
+
+[[nodiscard]] NarrowRetainedReceiptParentV1
+ExecuteNarrowRetainedReceiptParentV1(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        expected_child_constraint_systems,
+    const std::vector<uint256>& expected_child_node_bindings,
+    const std::vector<uint256>& expected_child_program_bindings,
+    const uint256& parent_node_binding,
+    const uint256& parent_program_binding,
     bool prove = true);
 
 /** Multi-child L2 FRI consume exists; Ready parked until hier wiring +
  *  SHA-FS + relay/serialize pins all measure green. */
 inline constexpr bool kNarrowMultiChildL2FriConsumeExecutable = true;
+/** Retained parent proofs can be re-entered as real children at the next level. */
+inline constexpr bool kNarrowRetainedReceiptRecursionExecutable = true;
 inline constexpr bool kNarrowMultiChildL2FriConsumeReady = false;
 
 /**
