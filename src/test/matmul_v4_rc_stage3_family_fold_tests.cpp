@@ -246,10 +246,10 @@ BOOST_AUTO_TEST_CASE(proof_section_codec_is_canonical_and_bounded)
             Metadata(), Shards());
     BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
     std::vector<unsigned char> bytes;
-    BOOST_REQUIRE_EQUAL(
+    const size_t encoded_size =
         ff::SerializeAuthenticatedLinearFamilyFoldProofV1(
-            proved.proof, bytes),
-        bytes.size());
+            proved.proof, bytes);
+    BOOST_REQUIRE_EQUAL(encoded_size, bytes.size());
     BOOST_CHECK(
         bytes.size() <
         ff::kAuthenticatedLinearFamilyFoldMaxProofBytes);
