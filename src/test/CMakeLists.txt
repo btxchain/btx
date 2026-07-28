@@ -148,6 +148,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_bounded_semantic_composition_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_binding_tests.cpp
   matmul_v4_rc_stage3_coupled_chain_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_winner_capture_tests.cpp
   matmul_v4_rc_stage3_coupled_bank_product_tests.cpp
   matmul_v4_rc_stage3_coupled_bank_hash_bridge_tests.cpp
   matmul_v4_rc_stage3_family_fold_tests.cpp
