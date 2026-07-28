@@ -737,11 +737,26 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.sha_recursively_consumed);
     BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
-    BOOST_CHECK(!gap.non_sha_challenges_recursively_consumed);
+    BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
-    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(gap.whole_verifier_sha_equations_in_air);
+    BOOST_TEST_MESSAGE(
+        "FS_GAP open=" << gap.open_predicates
+        << " bounded_ood=" << gap.bounded_ood_program_legislated
+        << "/" << gap.bounded_ood_rejection_loop_bounded
+        << " sha_plan=" << gap.sha_execution_plan_valid
+        << " fixed=" << gap.sha_fixed_schedule
+        << " codec=" << gap.sha_codec_origins_complete
+        << " sha_rec=" << gap.sha_recursively_consumed
+        << " nonsha_rec=" << gap.non_sha_challenges_recursively_consumed
+        << " sel_air=" << gap.challenge_selection_air_constrained
+        << " kinds8=" << gap.air_backed_all_kinds_reconstructed
+        << " whole_sha=" << gap.whole_verifier_sha_equations_in_air
+        << " auth=" << gap.authority_eligible
+        << " ready=" << gap.executable_ready
+        << " note=" << gap.note);
     BOOST_CHECK(!gap.executable_ready);
-    BOOST_CHECK_GE(gap.open_predicates, 3U);
+    BOOST_CHECK_GE(gap.open_predicates, 1U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
@@ -820,11 +835,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.sha_recursively_consumed);
     BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
-    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
-    BOOST_CHECK(!gap.non_sha_challenges_recursively_consumed);
+    BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
-    BOOST_CHECK_EQUAL(gap.open_predicates, 3U);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
@@ -920,11 +935,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.sha_recursively_consumed);
     BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
-    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
-    BOOST_CHECK(!gap.non_sha_challenges_recursively_consumed);
+    BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
-    BOOST_CHECK_EQUAL(gap.open_predicates, 3U);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 

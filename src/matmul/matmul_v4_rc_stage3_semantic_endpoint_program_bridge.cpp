@@ -941,7 +941,7 @@ bool ValidateSemanticEndpointProgramBridgeManifestV1(
     if (why != nullptr) {
         *why =
             "stage3:semantic_endpoint_program_bridge:"
-            "canonical_26_direct_aliases_recursive_child_acceptance_open";
+            "canonical_28_direct_aliases_recursive_child_acceptance_open";
     }
     return true;
 }

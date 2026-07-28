@@ -2322,6 +2322,130 @@ BOOST_AUTO_TEST_CASE(
             proof_bus, &why),
         why);
 
+    // CompleteFP residual chip: ProofFieldBus closes ChildProofCommitmentBus
+    // (8 lanes). TerminalBusCommitmentBus then closes terminal lanes + semantic
+    // root. Payload/CTL-child-verifier/endpoint/SplitRap/CompleteFP remain open.
+    const auto alg_hash_with_bus =
+        fp::PromoteNormalizedSemanticProofCommitmentFromFieldBusV1(
+            fp::AssessNormalizedSemanticAlgHashParentClosure(
+                joined, interpreter, migrated.row_pin,
+                execution),
+            proof_bus, execution.slot);
+    BOOST_CHECK(alg_hash_with_bus.child_proof_commitment_mapped);
+    BOOST_CHECK_EQUAL(
+        alg_hash_with_bus.proof_authenticated_lanes, 16U);
+    BOOST_CHECK_EQUAL(
+        alg_hash_with_bus.missing_proof_bus_lanes, 8U);
+    BOOST_CHECK(
+        !alg_hash_with_bus.terminal_bus_commitment_mapped);
+    BOOST_CHECK(
+        !alg_hash_with_bus.in_parent_derivation_complete);
+    BOOST_CHECK(
+        alg_hash_with_bus.blocker.find(
+            "proof_commitment_bus_closed_via_proof_field_bus") !=
+        std::string::npos);
+
+    // Attach on a composition copy so later codec/remote chips still see
+    // ProofFieldBus as the tip of `joined`.
+    fp::FoldBusComposition terminal_joined = joined;
+    const fp::NormalizedTerminalBusCommitmentBusAttachmentV1
+        terminal_bus =
+            fp::AttachNormalizedTerminalBusCommitmentBusV1(
+                terminal_joined, ctl.manifest, ctl.pins,
+                ctl.bank_index,
+                ctl.schedules[ctl.bank_index], execution.slot,
+                sponge);
+    BOOST_REQUIRE_MESSAGE(terminal_bus.valid, terminal_bus.note);
+    BOOST_CHECK(
+        terminal_bus.terminal_bus_commitment_derived_in_parent);
+    BOOST_CHECK(terminal_bus.terminal_bus_semantic_lanes_linked);
+    BOOST_CHECK(!terminal_bus.ctl_child_verified_in_parent_air);
+    BOOST_CHECK_MESSAGE(
+        fp::ValidateNormalizedTerminalBusCommitmentBusV1(
+            terminal_joined, ctl.manifest, ctl.pins, ctl.bank_index,
+            ctl.schedules[ctl.bank_index], execution.slot,
+            sponge, terminal_bus, &why),
+        why);
+
+    const auto alg_hash_with_terminal =
+        fp::PromoteNormalizedSemanticTerminalBusFromCommitmentBusV1(
+            alg_hash_with_bus, terminal_bus, execution.slot);
+    BOOST_CHECK(alg_hash_with_terminal.terminal_bus_commitment_mapped);
+    BOOST_CHECK_EQUAL(
+        alg_hash_with_terminal.proof_authenticated_lanes, 24U);
+    BOOST_CHECK_EQUAL(
+        alg_hash_with_terminal.missing_proof_bus_lanes, 0U);
+    BOOST_CHECK(
+        alg_hash_with_terminal.in_parent_derivation_complete);
+
+    const fp::NormalizedRecursiveChildCapabilityAuditV1
+        capability_with_bus =
+            fp::AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
+                terminal_joined, interpreter, migrated.row_pin,
+                execution, proof_bus, &terminal_bus);
+    BOOST_REQUIRE_MESSAGE(
+        capability_with_bus.valid, capability_with_bus.note);
+    BOOST_CHECK(
+        capability_with_bus.child_proof_commitment_mapped);
+    BOOST_CHECK(
+        capability_with_bus.terminal_bus_commitment_mapped);
+    BOOST_CHECK(
+        capability_with_bus.normalized_semantic_root_derived_in_parent);
+    BOOST_CHECK_EQUAL(
+        capability_with_bus.normalized_root_available_input_lanes,
+        48U);
+    BOOST_CHECK_EQUAL(
+        capability_with_bus.normalized_root_missing_input_lanes,
+        0U);
+    BOOST_CHECK(
+        !capability_with_bus.child_proof_payload_bound_in_air);
+    BOOST_CHECK(
+        !capability_with_bus.ctl_child_verified_in_parent_air);
+    BOOST_CHECK(
+        !capability_with_bus.endpoint_terminal_equality);
+    {
+        uint32_t open_gaps = 0;
+        bool commit_gap_present = false;
+        bool semantic_gap_present = false;
+        bool ctl_gap_present = false;
+        for (const auto& gap : capability_with_bus.gaps) {
+            if (!gap.present_in_parent_air) {
+                ++open_gaps;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    ChildProofCommitmentBus) {
+                commit_gap_present = gap.present_in_parent_air;
+                BOOST_CHECK_EQUAL(gap.mapped_lanes, 8U);
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    NormalizedSemanticRootAlgHash) {
+                semantic_gap_present = gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    CtlChildVerifierAndTerminalBus) {
+                ctl_gap_present = gap.present_in_parent_air;
+            }
+        }
+        BOOST_CHECK(commit_gap_present);
+        BOOST_CHECK(semantic_gap_present);
+        BOOST_CHECK(!ctl_gap_present);
+        BOOST_CHECK_EQUAL(open_gaps, 4U);
+    }
+    BOOST_CHECK_MESSAGE(
+        fp::ValidateNormalizedRecursiveChildCapabilityWithProofBusV1(
+            terminal_joined, interpreter, migrated.row_pin, execution,
+            proof_bus, capability_with_bus, &why, &terminal_bus),
+        why);
+    BOOST_CHECK(
+        capability_with_bus.note.find(
+            "terminal_bus_closed_via_commitment_bus") !=
+        std::string::npos);
+    BOOST_TEST_MESSAGE(capability_with_bus.note);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+
     const gf::Fp3 saved_proof_field =
         joined.columns[
             proof_bus.layout.Field(0)][0];

@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_stage3_fs_selection_air.h>
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_bank_product.h>
+#include <matmul/matmul_v4_rc_stage3_p2_transcript_binding.h>
 
 #include <hash.h>
 #include <span.h>
@@ -3887,6 +3888,20 @@ BuildFourSlotSelfSimilarCtlParentV1(
         }
     }
 
+    // Obligation 4 host path: when the Poseidon2 air-challenge route is live,
+    // append each slot's airq_lambda P2 sponge into THIS parent CS and reconcile
+    // producer/consumer limbs with the limb-mode CTL bus. Standalone companions
+    // are not enough. Fail-closed on any slot/bus error.
+    FourSlotChildFsP2LimbBusHostV1 host{};
+    if (aq::kAirChallengeP2Activated && air_challenge_wired) {
+        std::string host_why;
+        if (!HostFourSlotChildFsP2LimbBusReplayInParentV1(
+                out, child_fs_seed, child_proofs, host, &host_why)) {
+            host.ok = false;
+            host.note = host_why;
+        }
+    }
+
     out.parent_columns = out.parent_cs.n_columns;
     out.active_slots = kNormalizedUniversalParentArityV1;
     out.terminal_lanes_per_slot = kWords;
@@ -3960,11 +3975,14 @@ BuildFourSlotSelfSimilarCtlParentV1(
         out.four_child_roots_sourced_from_verifier_outputs &&
         out.statement_decomposition_enforced_in_air &&
         out.parent_statement_equals_child_aggregation;
-    // The parent's own FRI proof is not produced here, and the child
-    // Fiat-Shamir transcript is seed-supplied, not replayed by an in-parent
-    // SHA chip. Those gates remain false: recursive fixed point and consensus
-    // authority are NOT claimed.
-    out.child_fiat_shamir_replayed_in_parent = false;
+    // child_fiat_shamir_replayed_in_parent is COMPUTED from same-parent P2
+    // limb-bus hosting (airq_lambda only). Parent-own FRI, recursive fixed
+    // point, and authority remain deliberately open.
+    out.child_fs_p2_limb_bus_slots_hosted = host.slots_hosted;
+    out.child_fiat_shamir_replayed_in_parent =
+        host.ok && out.witness_violations == 0 &&
+        out.child_air_challenge_reconstructed_in_parent_cs &&
+        host.slots_hosted == kNormalizedUniversalParentArityV1;
     out.parent_own_fri_proof_produced = false;
     out.recursive_fixed_point = false;
     out.authority = false;
@@ -3983,17 +4001,19 @@ BuildFourSlotSelfSimilarCtlParentV1(
         out.parent_statement_equals_child_aggregation &&
         out.self_similar_arity4_shape &&
         out.seed_ownership_bound_in_parent_cs &&
-        !out.child_fiat_shamir_replayed_in_parent &&
         !out.parent_own_fri_proof_produced &&
         !out.recursive_fixed_point &&
         !out.authority;
     out.note = out.valid
-        ? "stage3:recursive_parent_air:"
-          "four_slot_self_similar;"
-          "four_children_verified_in_parent_air;"
-          "thirtytwo_terminal_lanes_sourced_from_verifier;"
-          "parent_statement_is_binding_alghash_of_child_pubio;"
-          "child_fs_replay_and_parent_fri_open;authority_false"
+        ? (std::string("stage3:recursive_parent_air:") +
+           "four_slot_self_similar;"
+           "four_children_verified_in_parent_air;"
+           "thirtytwo_terminal_lanes_sourced_from_verifier;"
+           "parent_statement_is_binding_alghash_of_child_pubio;" +
+           (out.child_fiat_shamir_replayed_in_parent
+                ? "child_fs_p2_limb_bus_hosted_all_slots;"
+                : "child_fs_replay_host_open;") +
+           "parent_fri_open;authority_false")
         : "stage3:recursive_parent_air:four_slot:invalid";
     return out;
 }
@@ -4874,6 +4894,334 @@ BuildChildAirChallengeP2ReplayV1(
                    out.note.substr(pos + std::strlen("child_fs_challenge_p2:"));
     }
     return out;
+}
+
+bool
+AppendChildAirChallengeP2ReplayToParentV1(
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    std::vector<std::vector<gf::Fp3>>& parent_columns,
+    const uint256& child_fs_seed,
+    const uint256& trace_commit,
+    uint32_t child_n_rows,
+    uint32_t child_quotient_len,
+    uint32_t child_w,
+    const gf::Fp3& consumed_air_lambda,
+    ChildAirChallengeP2ReplayHostedInParentV1& out,
+    std::string* why)
+{
+    namespace pa = stage3_poseidon_air;
+    out = {};
+    const uint32_t rows = parent_cs.n_rows;
+    if (rows < 2 || (rows & (rows - 1)) != 0 ||
+        parent_columns.size() != parent_cs.n_columns) {
+        return Fail(why, "p2_host_append:parent_shape");
+    }
+    for (const auto& col : parent_columns) {
+        if (col.size() != rows) {
+            return Fail(why, "p2_host_append:parent_column_rows");
+        }
+    }
+
+    const std::vector<gf::Fp> lanes = aq::AirChallengeP2Lanes(
+        child_fs_seed, "airq_lambda", {trace_commit},
+        {child_n_rows, child_quotient_len, child_w});
+    out.digest = aq::AirChallengeDigestP2(
+        child_fs_seed, "airq_lambda", {trace_commit},
+        {child_n_rows, child_quotient_len, child_w});
+    out.permutations = aq::AirChallengeP2Permutations(lanes.size());
+    if (out.permutations == 0) {
+        return Fail(why, "p2_host_append:empty_preimage");
+    }
+    const uint32_t min_rows = NextPow2(out.permutations);
+    if (min_rows == 0 || rows < min_rows) {
+        return Fail(why, "p2_host_append:parent_rows_too_short");
+    }
+
+    std::vector<gf::Fp> padded;
+    padded.reserve(lanes.size() + ah::kAlgHashRate);
+    for (const gf::Fp x : lanes) padded.push_back(gf::Canonical(x));
+    padded.push_back(1);
+    while (padded.size() % ah::kAlgHashRate != 0) padded.push_back(0);
+    if (padded.size() / ah::kAlgHashRate != out.permutations) {
+        return Fail(why, "p2_host_append:padding_disagrees");
+    }
+
+    const gf::Fp3 reconstructed =
+        gf::FromChallengeBytes3(out.digest.data());
+    if (!(reconstructed.c0 == consumed_air_lambda.c0 &&
+          reconstructed.c1 == consumed_air_lambda.c1 &&
+          reconstructed.c2 == consumed_air_lambda.c2)) {
+        return Fail(why, "p2_host_append:challenge_mismatch");
+    }
+
+    const uint32_t base = parent_cs.n_columns;
+    const pa::Layout layout = pa::CanonicalLayout(base);
+    const uint32_t lane_base = layout.End();
+    const uint32_t active_col = lane_base + ah::kAlgHashRate;
+    const uint32_t last_col = active_col + 1;
+    const uint32_t limb_base = last_col + 1;
+    const uint32_t end = limb_base + 3;
+    out.poseidon_base = base;
+    out.absorbed_lane_base = lane_base;
+    out.challenge_limb_columns = {limb_base, limb_base + 1, limb_base + 2};
+
+    parent_columns.resize(end, std::vector<gf::Fp3>(rows, gf::Fp3::Zero()));
+    parent_cs.n_columns = end;
+
+    // Poseidon fixed-table constraints at the shifted base.
+    {
+        auto fixed = pa::BuildFixedConstraints(layout);
+        parent_cs.constraints.insert(
+            parent_cs.constraints.end(),
+            fixed.begin(), fixed.end());
+    }
+
+    ah::State s{};
+    for (uint32_t r = 0; r < out.permutations; ++r) {
+        for (uint32_t j = 0; j < ah::kAlgHashRate; ++j) {
+            const gf::Fp lane = padded[r * ah::kAlgHashRate + j];
+            parent_columns[lane_base + j][r] = gf::Fp3::FromFp(lane);
+            s[j] = gf::Add(s[j], lane);
+        }
+        const pa::Witness w = pa::BuildWitness(layout, s);
+        for (uint32_t c = base; c < layout.End(); ++c) {
+            parent_columns[c][r] = w.row[c];
+        }
+        parent_columns[active_col][r] = gf::Fp3::One();
+        if (r + 1 == out.permutations) {
+            parent_columns[last_col][r] = gf::Fp3::One();
+        }
+        s = w.output;
+    }
+    if (out.permutations < rows) {
+        const pa::Witness zero_w = pa::BuildWitness(layout, ah::State{});
+        for (uint32_t r = out.permutations; r < rows; ++r) {
+            for (uint32_t c = base; c < layout.End(); ++c) {
+                parent_columns[c][r] = zero_w.row[c];
+            }
+        }
+    }
+    const std::array<gf::Fp3, 3> limb_val = {
+        gf::Fp3::FromFp(reconstructed.c0),
+        gf::Fp3::FromFp(reconstructed.c1),
+        gf::Fp3::FromFp(reconstructed.c2)};
+    for (uint32_t j = 0; j < 3; ++j) {
+        parent_columns[limb_base + j].assign(rows, limb_val[j]);
+    }
+
+    parent_cs.preprocessed_pin_ood = true;
+    for (uint32_t j = 0; j < ah::kAlgHashRate; ++j) {
+        parent_cs.preprocessed.emplace_back(
+            lane_base + j, parent_columns[lane_base + j]);
+    }
+    parent_cs.preprocessed.emplace_back(
+        active_col, parent_columns[active_col]);
+    parent_cs.preprocessed.emplace_back(
+        last_col, parent_columns[last_col]);
+
+    for (uint32_t j = 0; j < ah::kAlgHashT; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_host.first_row_absorb";
+        c.kind = aq::AirKind::kFirstRow;
+        c.alg_degree = 1;
+        const uint32_t in_col = layout.perm.InputCol(j);
+        if (j < ah::kAlgHashRate) {
+            const uint32_t lc = lane_base + j;
+            c.eval = [in_col, lc](const std::vector<gf::Fp3>& row,
+                                  const std::vector<gf::Fp3>&) {
+                return gf::Sub(row[in_col], row[lc]);
+            };
+        } else {
+            c.eval = [in_col](const std::vector<gf::Fp3>& row,
+                              const std::vector<gf::Fp3>&) {
+                return row[in_col];
+            };
+        }
+        parent_cs.constraints.push_back(std::move(c));
+    }
+    for (uint32_t j = 0; j < ah::kAlgHashT; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_host.sponge_carry";
+        c.kind = aq::AirKind::kTransition;
+        c.alg_degree = 2;
+        const uint32_t in_col = layout.perm.InputCol(j);
+        const uint32_t lc = lane_base + j;
+        const bool rate = j < ah::kAlgHashRate;
+        c.eval = [layout, in_col, lc, rate, active_col, j](
+                     const std::vector<gf::Fp3>& cur,
+                     const std::vector<gf::Fp3>& next) {
+            const gf::Fp3 carried =
+                ar::PermOutputLane(layout.perm, cur, j);
+            gf::Fp3 want = carried;
+            if (rate) want = gf::Add(want, next[lc]);
+            return gf::Mul(next[active_col], gf::Sub(next[in_col], want));
+        };
+        parent_cs.constraints.push_back(std::move(c));
+    }
+    for (uint32_t j = 0; j < 3; ++j) {
+        aq::AirConstraint<gf::Fp3> c;
+        c.name = "stage3.p2_host.limb_from_sponge_output";
+        c.kind = aq::AirKind::kEverywhere;
+        c.alg_degree = 2;
+        const uint32_t limb_col = limb_base + j;
+        c.eval = [layout, limb_col, j, last_col](
+                     const std::vector<gf::Fp3>& row,
+                     const std::vector<gf::Fp3>&) {
+            const gf::Fp3 lane =
+                ar::PermOutputLane(layout.perm, row, j);
+            return gf::Mul(row[last_col], gf::Sub(row[limb_col], lane));
+        };
+        parent_cs.constraints.push_back(std::move(c));
+    }
+    {
+        const std::array<gf::Fp3, 3> consumed = {
+            gf::Fp3::FromFp(consumed_air_lambda.c0),
+            gf::Fp3::FromFp(consumed_air_lambda.c1),
+            gf::Fp3::FromFp(consumed_air_lambda.c2)};
+        for (uint32_t j = 0; j < 3; ++j) {
+            aq::AirConstraint<gf::Fp3> c;
+            c.name = "stage3.p2_host.limb_bound_to_consumed";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 1;
+            const uint32_t limb_col = limb_base + j;
+            const gf::Fp3 want = consumed[j];
+            c.eval = [limb_col, want](const std::vector<gf::Fp3>& row,
+                                      const std::vector<gf::Fp3>&) {
+                return gf::Sub(row[limb_col], want);
+            };
+            parent_cs.constraints.push_back(std::move(c));
+        }
+    }
+
+    out.ok = true;
+    out.note = "stage3:p2_host_append:airq_lambda_hosted";
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool
+HostFourSlotChildFsP2LimbBusReplayInParentV1(
+    FourSlotSelfSimilarCtlParentV1& parent,
+    const uint256& child_fs_seed,
+    const std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4>&
+        child_proofs,
+    FourSlotChildFsP2LimbBusHostV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!aq::kAirChallengeP2Activated) {
+        return Fail(why, "p2_host:not_activated");
+    }
+    if (parent.child_verifier.pis.size() !=
+            kNormalizedUniversalParentArityV1 ||
+        parent.parent_witness.size() != parent.parent_cs.n_columns) {
+        return Fail(why, "p2_host:parent_shape");
+    }
+
+    for (uint32_t slot = 0; slot < kNormalizedUniversalParentArityV1;
+         ++slot) {
+        const air_recurse::ChildPublicInputs& pi =
+            parent.child_verifier.pis[slot];
+        const uint32_t consumer_limb_base =
+            parent.child_air_challenge_byte_base[slot];
+        if (consumer_limb_base + kChildFsLimbBusCellsV1 >
+            parent.parent_cs.n_columns) {
+            return Fail(why, "p2_host:decoder_window");
+        }
+        if (!AppendChildAirChallengeP2ReplayToParentV1(
+                parent.parent_cs,
+                parent.parent_witness,
+                child_fs_seed,
+                child_proofs[slot].trace_commit,
+                pi.child_n_rows,
+                pi.child_quotient_len,
+                pi.child_w,
+                pi.air_lambda,
+                out.slot_replay[slot],
+                why)) {
+            out.note = why != nullptr ? *why : "p2_host:append_failed";
+            return false;
+        }
+
+        std::vector<gf::Fp3> consumer_cells;
+        std::vector<gf::Fp3> producer_cells;
+        consumer_cells.reserve(kChildFsLimbBusCellsV1);
+        producer_cells.reserve(kChildFsLimbBusCellsV1);
+        for (uint32_t k = 0; k < kChildFsLimbBusCellsV1; ++k) {
+            consumer_cells.push_back(
+                parent.parent_witness[consumer_limb_base + k][0]);
+            producer_cells.push_back(
+                parent.parent_witness
+                    [out.slot_replay[slot].challenge_limb_columns[k]][0]);
+        }
+        RCStage3CtlChallenges challenges{};
+        std::string local_why;
+        if (!DeriveChildFsLimbBusChallengesV1(
+                parent.computed_parent_statement,
+                out.slot_replay[slot].digest,
+                slot,
+                consumer_cells,
+                producer_cells,
+                challenges,
+                &local_why)) {
+            if (why != nullptr) {
+                *why = "p2_host:challenges:" + local_why;
+            }
+            out.note = "p2_host:challenges";
+            return false;
+        }
+        ChildFsLimbBusLaneV1 producer_lane{};
+        ChildFsLimbBusLaneV1 consumer_lane{};
+        if (!AppendChildFsLimbBusLaneV1(
+                out.slot_replay[slot].challenge_limb_columns[0],
+                challenges,
+                nullptr,
+                parent.parent_cs,
+                &parent.parent_witness,
+                producer_lane,
+                &local_why)) {
+            if (why != nullptr) {
+                *why = "p2_host:producer_bus:" + local_why;
+            }
+            out.note = "p2_host:producer_bus";
+            return false;
+        }
+        if (!AppendChildFsLimbBusLaneV1(
+                consumer_limb_base,
+                challenges,
+                &producer_lane.terminal,
+                parent.parent_cs,
+                &parent.parent_witness,
+                consumer_lane,
+                &local_why)) {
+            if (why != nullptr) {
+                *why = "p2_host:consumer_bus:" + local_why;
+            }
+            out.note = "p2_host:consumer_bus";
+            return false;
+        }
+        out.slot_bus_reconciled[slot] =
+            producer_lane.valid && consumer_lane.valid &&
+            producer_lane.terminal == consumer_lane.terminal;
+        if (!out.slot_bus_reconciled[slot]) {
+            if (why != nullptr) {
+                *why = "p2_host:bus_not_reconciled_slot_" +
+                       std::to_string(slot);
+            }
+            out.note = "p2_host:bus_not_reconciled";
+            return false;
+        }
+        ++out.slots_hosted;
+    }
+
+    parent.parent_columns = parent.parent_cs.n_columns;
+    parent.parent_rows = parent.parent_cs.n_rows;
+    out.ok = out.slots_hosted == kNormalizedUniversalParentArityV1;
+    out.note = out.ok
+        ? "stage3:p2_host:four_slot_airq_lambda_limb_bus_hosted"
+        : "stage3:p2_host:incomplete";
+    if (why != nullptr) *why = out.note;
+    return out.ok;
 }
 
 // ===========================================================================
@@ -5949,6 +6297,183 @@ AssessChildFsChallengeDecoderCoverageV1()
     return cached;
 }
 
+const ChildFsFullEventP2TranscriptOwnershipV1&
+AssessChildFsFullEventP2TranscriptOwnershipV1()
+{
+    static const ChildFsFullEventP2TranscriptOwnershipV1 cached = [] {
+        ChildFsFullEventP2TranscriptOwnershipV1 out;
+        namespace p2bind = stage3_p2_transcript_binding;
+        namespace p2tx = stage3_p2_transcript_air;
+
+        // Fail-closed unless the active Poseidon2 squeeze lane is the live
+        // challenge route.  Representative SHA/P2 companions are not enough.
+        if (!aq::kAirChallengeP2Activated ||
+            !kRCFri3AlgActiveP2Squeeze) {
+            out.note =
+                "stage3:g4_full_event:p2_squeeze_inactive";
+            return out;
+        }
+
+        // (1)+(2) Real V10/Q192/K=2 proof → proof-owned full event schedule.
+        uint256 seed;
+        std::memset(seed.begin(), 0x6d, 32);
+        const std::vector<std::vector<gf::Fp3>> columns{
+            {gf::FromSigned3(3), gf::FromSigned3(5)},
+            {gf::FromSigned3(7), gf::FromSigned3(11)}};
+        const Fri3AlgBatchCommitResult committed =
+            Fri3AlgP2Q192K2V10BatchCommit(columns, seed, 0);
+        if (!committed.ok) {
+            out.note = "stage3:g4_full_event:v10_commit:" +
+                       committed.note;
+            return out;
+        }
+        const p2bind::BindingResult binding =
+            p2bind::BuildProofOwnedTranscriptBindingV10(
+                committed.proof, seed);
+        out.binding_valid = binding.valid;
+        if (!binding.valid ||
+            !binding.exact_active_transcript_replayed ||
+            !binding.source_event_order_complete ||
+            !binding.local_air_event_prefixes_match_active_protocol ||
+            !binding.proof_owned_source_cells_bound) {
+            out.note = "stage3:g4_full_event:binding:" + binding.note;
+            return out;
+        }
+
+        // (3) Row-multiplexed V10 transcript AIR over the COMPLETE schedule.
+        const p2tx::BuildResult air =
+            p2tx::BuildTranscriptAirV10(binding.statement);
+        out.air_local_complete = air.local_air_complete;
+        out.air_rows = air.n_rows;
+        out.air_columns = air.n_columns;
+        out.air_violations = air.violations;
+        out.event_count =
+            static_cast<uint32_t>(air.manifest.size());
+        if (!air.valid || !air.local_air_complete ||
+            !air.all_event_challenges_constrained ||
+            !air.all_query_indices_constrained ||
+            air.violations != 0) {
+            out.note = "stage3:g4_full_event:air:" + air.note;
+            return out;
+        }
+
+        // (4) Count FRI kinds only when the full per-kind event list is owned.
+        uint32_t fold_events = 0;
+        uint32_t query_events = 0;
+        bool has_lambda = false;
+        bool has_z1 = false;
+        bool has_z2 = false;
+        bool has_w1 = false;
+        bool has_w2 = false;
+        for (const auto& event : air.manifest) {
+            switch (event.kind) {
+            case p2tx::EventKind::FriLambda:
+                has_lambda = true;
+                break;
+            case p2tx::EventKind::OodZ1:
+                has_z1 = true;
+                break;
+            case p2tx::EventKind::OodZ2:
+                has_z2 = true;
+                break;
+            case p2tx::EventKind::DeepW1:
+                has_w1 = true;
+                break;
+            case p2tx::EventKind::DeepW2:
+                has_w2 = true;
+                break;
+            case p2tx::EventKind::Fold:
+                ++fold_events;
+                break;
+            case p2tx::EventKind::Query:
+                ++query_events;
+                break;
+            }
+        }
+        out.fold_events = fold_events;
+        out.query_events = query_events;
+        const bool folds_complete =
+            fold_events == binding.statement.n_folds &&
+            fold_events > 0;
+        const bool queries_complete =
+            query_events == p2tx::kQueries &&
+            query_events == binding.statement.queries;
+        out.fri_full_event_air_owned =
+            has_lambda && has_z1 && has_z2 && has_w1 && has_w2 &&
+            folds_complete && queries_complete &&
+            out.event_count ==
+                (5U + fold_events + query_events);
+
+        if (out.fri_full_event_air_owned) {
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3Lambda)] = true;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3Z1)] = true;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3Z2)] = true;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3W1)] = true;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3W2)] = true;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3Fold)] = true;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::Fra3Query)] = true;
+            out.fri_kinds_owned = 7;
+        }
+
+        // (5) airq_lambda is deliberately absent from the FRI transcript AIR.
+        // One draw IS full instance coverage for that kind — build the live
+        // Poseidon2 companion over the real airq_lambda preimage.
+        {
+            uint256 airq_seed;
+            std::memset(airq_seed.begin(), 0x5e, 32);
+            uint256 trace;
+            std::memset(trace.begin(), 0xa1, 32);
+            const uint256 d = aq::AirChallengeDigestP2(
+                airq_seed, "airq_lambda", {trace}, {2, 2, 1});
+            const gf::Fp3 consumed = gf::FromChallengeBytes3(d.data());
+            const ChildAirChallengeP2ReplayV1 companion =
+                BuildChildAirChallengeP2ReplayV1(
+                    airq_seed, trace,
+                    /*child_n_rows=*/2,
+                    /*child_quotient_len=*/2,
+                    /*child_w=*/1,
+                    consumed);
+            out.airq_lambda_owned =
+                companion.valid &&
+                companion.witness_violations == 0 &&
+                companion.output_binds_digest &&
+                companion.challenge_bound_to_consumed &&
+                companion.digest == d;
+            out.kind_owned[static_cast<uint32_t>(
+                ChildFsChallengeKindV1::AirqLambda)] =
+                out.airq_lambda_owned;
+        }
+
+        out.kinds_transcript_bound = 0;
+        for (uint32_t k = 0; k < kChildFsChallengeKindCountV1; ++k) {
+            if (out.kind_owned[k]) ++out.kinds_transcript_bound;
+        }
+        out.valid =
+            out.fri_full_event_air_owned && out.airq_lambda_owned &&
+            out.kinds_transcript_bound == kChildFsChallengeKindCountV1;
+        out.note =
+            std::string("stage3:g4_full_event:") +
+            (out.valid ? "owned_" : "partial_") +
+            std::to_string(out.kinds_transcript_bound) + "of8_" +
+            "events_" + std::to_string(out.event_count) +
+            "_queries_" + std::to_string(out.query_events) +
+            "_folds_" + std::to_string(out.fold_events) +
+            "_air_rows_" + std::to_string(out.air_rows) +
+            "_air_cols_" + std::to_string(out.air_columns) +
+            (out.fri_full_event_air_owned ? "_fri_ok" : "_fri_open") +
+            (out.airq_lambda_owned ? "_airq_ok" : "_airq_open");
+        return out;
+    }();
+    return cached;
+}
+
 ChildFsReplayClosureV1
 AssessChildFsReplayClosureV1()
 {
@@ -5989,21 +6514,22 @@ AssessChildFsReplayClosureV1()
             ++out.challenge_kinds_covered;
         }
     }
-    // The SECOND counter, and the one that is still nearly empty: for how many
-    // kinds are the 24 decoded bytes a CONSTRAINED OUTPUT of an in-AIR hash
-    // rather than a pinned public cell?  Only airq_lambda, whose preimage is a
-    // self-contained 113 bytes.  Every other kind's preimage is the child's
-    // accumulated FRI transcript, which carries the >= 52*W terms enumerated on
-    // this struct; at real role width that is 5.37e8 in-AIR rows for ONE draw
-    // of ONE slot.  Decoding a kind and OWNING its transcript bytes are not the
-    // same claim and are not merged here.
-    // `cov` builds one representative companion per KIND.  That is useful
-    // chip evidence, but g4 requires one proof-owned companion for EVERY draw
-    // (all fold challenges and all Q192 query challenges) of every child.
-    // Upgrading 8 representative companions to complete instance coverage
-    // made the old gate unsound.  Keep the production counter at zero until
-    // the row-multiplexed active-P2 transcript AIR owns the full event list.
-    out.challenge_kinds_transcript_bound = 0;
+    // The SECOND counter: kinds whose digest bytes are a CONSTRAINED OUTPUT of
+    // an in-AIR hash over the FULL per-instance event list — not one
+    // representative companion per kind.  AssessChildFsChallengeDecoderCoverageV1
+    // builds useful chip evidence (kinds_transcript_bound / companion_cs_built)
+    // but that is NOT sufficient alone for this production counter: upgrading
+    // 8 representatives to complete instance coverage made the old gate
+    // unsound.  COMPUTED from AssessChildFsFullEventP2TranscriptOwnershipV1,
+    // which requires the row-multiplexed V10 P2 transcript AIR to own every
+    // FRI draw (all folds + all Q192 queries) plus a Poseidon2 airq_lambda
+    // companion for the single airq draw (intentionally absent from the FRI
+    // transcript AIR).  Fail-closed: never copy cov.kinds_transcript_bound.
+    {
+        const ChildFsFullEventP2TranscriptOwnershipV1& full =
+            AssessChildFsFullEventP2TranscriptOwnershipV1();
+        out.challenge_kinds_transcript_bound = full.kinds_transcript_bound;
+    }
     // --- real_child_shape_covered: COMPUTED by AssessRealChildShapeCoverageV1.
     // Four distinct CoupledBankDequant witnesses (same role AIR, different
     // mantissa/scale assignments => four distinct trace commits / airq_lambda
@@ -6226,11 +6752,66 @@ AssessChildFsReplayClosureV1()
         out.consumer_endpoint_fri_proven;
 
     // --- Obligation 4: the recursion-carrying parent hosts the replay + bus.
-    // BuildFourSlotSelfSimilarCtlParentV1 currently records
-    // child_fiat_shamir_replayed_in_parent=false.  Representative companion
-    // proofs outside that parent cannot discharge this same-parent ownership
-    // requirement.
+    // COMPUTED from a memoized BuildFourSlotSelfSimilarCtlParentV1 probe: the
+    // builder appends per-slot airq_lambda P2 sponges into the same parent CS
+    // and reconciles them with the limb-mode CTL bus. Standalone companions
+    // never set this. Fail-closed when P2 is inactive or the probe fails.
     out.recursion_parent_hosts_replay = false;
+    if (aq::kAirChallengeP2Activated) {
+        static const bool kHostsReplay = [] {
+            using AlgB = aq::AirFriBackendAlg<gf::Fp3>;
+            aq::AirConstraintSystem<gf::Fp3> child_cs;
+            child_cs.n_rows = 2;
+            child_cs.n_columns = 1;
+            {
+                aq::AirConstraint<gf::Fp3> c;
+                c.name = "stage3.g4_host_probe.boolean";
+                c.kind = aq::AirKind::kEverywhere;
+                c.alg_degree = 2;
+                c.eval = [](const std::vector<gf::Fp3>& r,
+                            const std::vector<gf::Fp3>&) {
+                    return gf::Mul(
+                        r[0], gf::Sub(r[0], gf::Fp3::One()));
+                };
+                child_cs.constraints.push_back(std::move(c));
+            }
+            const std::vector<std::vector<gf::Fp3>> columns{
+                {gf::Fp3::Zero(), gf::Fp3::One()}};
+            uint256 seed;
+            std::memset(seed.begin(), 0x5e, 32);
+            const auto proved =
+                aq::AirQuotientProve<gf::Fp3, AlgB>(
+                    child_cs, columns, seed, {});
+            if (!proved.ok) return false;
+            const std::array<
+                FourSlotSelfSimilarCtlParentV1::ChildProof, 4>
+                proofs{
+                    proved.proof, proved.proof, proved.proof,
+                    proved.proof};
+            FourSlotNodeContextV1 ctx{};
+            ctx.level = 1;
+            ctx.index = 0;
+            ctx.pub[0] = gf::FromU64_3(0x9001);
+            ctx.pub[1] = gf::FromU64_3(0x9002);
+            for (uint32_t word = 0;
+                 word <
+                 Arity4FamilyReceiptLayoutV1::kChildRootWords;
+                 ++word) {
+                ctx.parent_receipt_root[word] =
+                    gf::FromU64_3(0x7000 + word);
+            }
+            const ah::Digest statement =
+                ComputeFourSlotSelfSimilarParentStatementV1(
+                    child_cs, proofs, seed, ctx);
+            const auto parent = BuildFourSlotSelfSimilarCtlParentV1(
+                child_cs, proofs, seed, ctx, statement);
+            return parent.valid &&
+                   parent.child_fiat_shamir_replayed_in_parent &&
+                   parent.child_fs_p2_limb_bus_slots_hosted ==
+                       kNormalizedUniversalParentArityV1;
+        }();
+        out.recursion_parent_hosts_replay = kHostsReplay;
+    }
 
     out.closed = out.bus_constructed &&
                  out.bus_rejects_coordinated_forgery &&

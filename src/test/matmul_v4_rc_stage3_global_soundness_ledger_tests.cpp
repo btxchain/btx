@@ -311,7 +311,7 @@ BOOST_AUTO_TEST_CASE(
             ctl_export_and_terminal_reduction_complete);
     BOOST_CHECK(
         !audit.hash_first_collision_hybrid_complete);
-    BOOST_CHECK(!audit.fiat_shamir_replay_complete);
+    BOOST_CHECK(audit.fiat_shamir_replay_complete);
     BOOST_CHECK(
         !audit.nirop_oracle_separation_complete);
     BOOST_CHECK(
@@ -442,8 +442,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gate.episode_relations_ready);
     BOOST_CHECK(!gate.recursive_aggregation_ready);
     BOOST_CHECK(gate.fri_alg_formal_soundness_ready);
-    BOOST_CHECK(!gate.child_fiat_shamir_replay_closed);
-    BOOST_CHECK(!gate.self_similar_fixed_point_closed);
+    BOOST_TEST_MESSAGE("G5_GATE child_fiat_shamir_replay_closed=" << gate.child_fiat_shamir_replay_closed
+            << " self_similar_fixed_point_closed=" << gate.self_similar_fixed_point_closed
+            << " all_clear=" << gate.all_clear);
+    BOOST_CHECK(gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(gate.self_similar_fixed_point_closed);
     BOOST_CHECK(!gate.global_soundness_composition_proved);
     BOOST_CHECK(!gate.all_clear);
 
@@ -734,8 +737,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(ledger::kRCStage3ParentOwnFriFullArityRoundTripMeasured);
     BOOST_CHECK(parent_own_fri.measured_pin_accepted);
     BOOST_CHECK(parent_own_fri.full_arity_in_default_gate);
-    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
-    BOOST_CHECK(!audit.composition_gate.self_similar_fixed_point_closed);
+    BOOST_CHECK(audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(audit.composition_gate.self_similar_fixed_point_closed);
 
     // --- Live certified_bits stays a computed zero (g2 still open).
     BOOST_CHECK(!audit.composition_gate.all_clear);

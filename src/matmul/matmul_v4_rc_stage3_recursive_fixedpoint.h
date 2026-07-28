@@ -1070,6 +1070,10 @@ struct NormalizedSemanticAlgHashParentAudit {
     std::string blocker;
 };
 
+/** Base audit without ProofFieldBus: child_proof_commitment_mapped stays
+ * false. Promote via PromoteNormalizedSemanticProofCommitmentFromFieldBusV1
+ * once AttachNormalizedAlgAirProofFieldBusV1 has derived+linked the commitment.
+ */
 [[nodiscard]] NormalizedSemanticAlgHashParentAudit
 AssessNormalizedSemanticAlgHashParentClosure(
     const FoldBusComposition& composition,
@@ -1304,6 +1308,89 @@ AttachNormalizedAlgAirProofFieldBusV1(
         semantic_sponge,
     const NormalizedAlgAirProofFieldBusAttachmentV1& attachment,
     std::string* why = nullptr);
+
+/**
+ * Promote semantic-root audit commitment lanes once ProofFieldBus has
+ * streamed the ordered proof transcript, derived the commitment in-parent,
+ * and equality-linked the eight u32 semantic sponge inputs.
+ *
+ * Does NOT claim proof_fields_sourced_from_verifier_chips, terminal-bus
+ * closure, or CompleteFP. Fail-closed unless attachment.valid and the
+ * derived commitment equals slot.child_proof_commitment.
+ */
+[[nodiscard]] NormalizedSemanticAlgHashParentAudit
+PromoteNormalizedSemanticProofCommitmentFromFieldBusV1(
+    const NormalizedSemanticAlgHashParentAudit& base,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedRoleChildSlot& slot);
+
+// -------------------------------------------------------------------------
+// Normalized CTL terminal-bus commitment bus (AlgHash, ProofFieldBus-shaped).
+// -------------------------------------------------------------------------
+
+inline constexpr uint16_t kNormalizedTerminalBusCommitmentBusVersion = 1;
+
+[[nodiscard]] bool BuildNormalizedTerminalBusFieldTranscriptV1(
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    std::vector<gkr_field::Fp>& out,
+    std::string* why = nullptr);
+
+struct NormalizedTerminalBusCommitmentBusAttachmentV1 {
+    uint16_t version{kNormalizedTerminalBusCommitmentBusVersion};
+    NormalizedAlgAirProofFieldBusLayout layout;
+    uint256 terminal_bus_commitment{};
+    uint32_t transcript_fields{0};
+    uint32_t active_sponge_rows{0};
+    uint32_t parent_rows{0};
+    uint32_t added_columns{0};
+    uint32_t constraint_base{0};
+    uint32_t added_constraints{0};
+    bool terminal_bus_commitment_derived_in_parent{false};
+    bool terminal_bus_semantic_lanes_linked{false};
+    bool ctl_child_verified_in_parent_air{false};
+    bool recursively_consumed{false};
+    uint32_t violations{0};
+    std::vector<std::string> residuals;
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Derive ComputeNormalizedTerminalBusCommitment inside the parent via AlgHash
+ * over CTL composition/child/schedule digest limbs, then equality-link the
+ * eight u32 semantic-root terminal lanes (inputs 40..47).
+ *
+ * Does NOT claim ctl_child_verified_in_parent_air or CompleteFP.
+ */
+[[nodiscard]] NormalizedTerminalBusCommitmentBusAttachmentV1
+AttachNormalizedTerminalBusCommitmentBusV1(
+    FoldBusComposition& composition,
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    const NormalizedRoleChildSlot& slot,
+    const NormalizedSemanticRootSpongeAttachmentV1& semantic_sponge);
+
+[[nodiscard]] bool ValidateNormalizedTerminalBusCommitmentBusV1(
+    const FoldBusComposition& composition,
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    const NormalizedRoleChildSlot& slot,
+    const NormalizedSemanticRootSpongeAttachmentV1& semantic_sponge,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1& attachment,
+    std::string* why = nullptr);
+
+[[nodiscard]] NormalizedSemanticAlgHashParentAudit
+PromoteNormalizedSemanticTerminalBusFromCommitmentBusV1(
+    const NormalizedSemanticAlgHashParentAudit& base,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1& terminal_bus,
+    const NormalizedRoleChildSlot& slot);
 
 // -------------------------------------------------------------------------
 // Canonical batch-codec byte/field map and executable range decoder.
@@ -2649,6 +2736,33 @@ AssessNormalizedRecursiveChildCapabilityV1(
     std::string* why = nullptr);
 
 /**
+ * Capability audit after ProofFieldBus (+ optional TerminalBusCommitmentBus).
+ * Closes ChildProofCommitmentBus always; when terminal_bus is valid also closes
+ * terminal_bus_commitment_mapped and NormalizedSemanticRootAlgHash. CTL child
+ * verifier / payload / endpoint / Split-RAP / CompleteFP stay open/false.
+ */
+[[nodiscard]] NormalizedRecursiveChildCapabilityAuditV1
+AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1* terminal_bus =
+        nullptr);
+
+[[nodiscard]] bool ValidateNormalizedRecursiveChildCapabilityWithProofBusV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedRecursiveChildCapabilityAuditV1& audit,
+    std::string* why = nullptr,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1* terminal_bus =
+        nullptr);
+
+/**
  * Exact shape/capacity preflight for proving the normalized parent itself.
  * `minimum_*_row_value_bytes` count canonical Fp3 values only; Merkle paths,
  * folds and framing are intentionally excluded and therefore cannot be used
@@ -3382,10 +3496,12 @@ AttachConstraintBytecodeInterpreterShard(
  * chain multiset identities close once, globally, over the whole node.
  *
  * SCOPE, unchanged by arity: this is the same partial verifier mirror the
- * single-child path is. kCompleteRecursiveFixedPointExecutable stays false —
- * arbitrary per-point child-constraint evaluation and the SHA256d Fiat-Shamir
- * transcript chip are still not joined — so an accepted node does NOT by itself
- * imply the children's native verifiers accept.
+ * single-child path is. kCompleteRecursiveFixedPointExecutable stays false --
+ * per-point evaluation joins only via AttachConstraintBytecodeInterpreter,
+ * ledger g4 P2 Fiat-Shamir may be closed separately
+ * (AssessChildFsReplayClosureV1), and ProofFieldBus/CTL-terminal/endpoint
+ * equality chips remain outside this fold-bus node -- so an accepted node
+ * does NOT by itself imply the children's native verifiers accept.
  */
 [[nodiscard]] FoldBusComposition BuildFoldBusCompositionMulti(
     const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,

@@ -902,16 +902,19 @@ uint256 ComputeNormalizedAlgAirProofCommitment(
         ah::SpongeHashFp(transcript));
 }
 
-uint256 ComputeNormalizedTerminalBusCommitment(
+bool BuildNormalizedTerminalBusFieldTranscriptV1(
     const RCStage3CtlManifest& manifest,
     const std::vector<RCStage3CtlChildPin>& pins,
     size_t child_index,
-    const RCStage3CtlSchedule& schedule)
+    const RCStage3CtlSchedule& schedule,
+    std::vector<gf::Fp>& out,
+    std::string* why)
 {
+    out.clear();
     if (child_index >= pins.size() ||
         child_index >= manifest.participants.size() ||
         pins.size() != manifest.participants.size()) {
-        return {};
+        return Fail(why, "normalized_terminal_bus_transcript_shape");
     }
     const uint256 composition =
         CommitRCStage3CtlComposition(manifest, pins);
@@ -925,20 +928,43 @@ uint256 ComputeNormalizedTerminalBusCommitment(
             pins[child_index].schedule_commitment ||
         pins[child_index].role !=
             manifest.participants[child_index].role) {
+        return Fail(why, "normalized_terminal_bus_transcript_pins");
+    }
+    out.push_back(gf::FromU64(0x54424d31ULL));
+    out.push_back(gf::FromU64(0x4e425553ULL));
+    out.push_back(gf::FromU64(kNormalizedSemanticRootV1Version));
+    out.push_back(gf::FromU64(manifest.bus_id));
+    out.push_back(gf::FromU64(static_cast<uint32_t>(child_index)));
+    out.push_back(gf::FromU64(
+        static_cast<uint16_t>(pins[child_index].role)));
+    const uint256* digests[3] = {
+        &composition, &child, &schedule_commitment};
+    for (const uint256* digest : digests) {
+        for (uint32_t limb = 0; limb < 8; ++limb) {
+            out.push_back(gf::FromU64(Uint256Limb32(*digest, limb)));
+        }
+    }
+    if (out.size() != 30) {
+        out.clear();
+        return Fail(why, "normalized_terminal_bus_transcript_count");
+    }
+    return true;
+}
+
+uint256 ComputeNormalizedTerminalBusCommitment(
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule)
+{
+    std::vector<gf::Fp> transcript;
+    if (!BuildNormalizedTerminalBusFieldTranscriptV1(
+            manifest, pins, child_index, schedule,
+            transcript, nullptr)) {
         return {};
     }
-    HashWriter hash;
-    hash <<
-        "BTX_RC_STAGE3_NORMALIZED_TERMINAL_BUS_V1";
-    hash << kNormalizedSemanticRootV1Version;
-    hash << manifest.bus_id;
-    hash << static_cast<uint32_t>(child_index);
-    hash << static_cast<uint16_t>(
-        pins[child_index].role);
-    hash << composition;
-    hash << child;
-    hash << schedule_commitment;
-    return hash.GetHash();
+    return aq::AirFriBackendAlg<Fp3>::PackDigest(
+        ah::SpongeHashFp(transcript));
 }
 
 bool BuildNormalizedSemanticRootInputsV1(
@@ -2354,17 +2380,18 @@ AssessNormalizedSemanticAlgHashParentClosure(
               "verifier-owned exact u32 decomposition"
             : "trace-root terminal is not linked to the slot");
 
-    // The current parent proves verification equations, but it does not
-    // expose an ordered stream containing every byte/field hashed by
-    // ComputeNormalizedAlgAirProofCommitment. A copied public hash would be
-    // a claim, not an authenticated proof commitment.
+    // Base path (no ProofFieldBus): commitment lanes stay MissingProofBus.
+    // AttachNormalizedAlgAirProofFieldBusV1 streams the ordered transcript
+    // and derives+links the commitment; call
+    // PromoteNormalizedSemanticProofCommitmentFromFieldBusV1 afterward.
+    // A copied public hash alone would remain a claim, not a binding.
     out.child_proof_commitment_mapped = false;
     add(
         "child_proof_commitment_u32",
         8,
         NormalizedAlgHashInputSource::MissingProofBus,
         false,
-        "missing ordered all-proof-cell export from the V_CS witness");
+        "missing ProofFieldBus-derived commitment export from the V_CS");
 
     // The selected CTL child is verified natively before this parent is
     // built. Its proof, global composition and terminal cells are not a
@@ -4012,6 +4039,493 @@ bool BuildNormalizedAlgAirBatchCodecMapV1(
     }
     return true;
 }
+
+NormalizedSemanticAlgHashParentAudit
+PromoteNormalizedSemanticProofCommitmentFromFieldBusV1(
+    const NormalizedSemanticAlgHashParentAudit& base,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedRoleChildSlot& slot)
+{
+    NormalizedSemanticAlgHashParentAudit out = base;
+    const bool closable =
+        proof_bus.valid &&
+        proof_bus.proof_commitment_derived_in_parent &&
+        proof_bus.proof_commitment_semantic_lanes_linked &&
+        !proof_bus.proof_commitment.IsNull() &&
+        proof_bus.proof_commitment ==
+            slot.child_proof_commitment &&
+        !out.child_proof_commitment_mapped;
+    if (!closable) {
+        return out;
+    }
+
+    out.child_proof_commitment_mapped = true;
+    out.proof_authenticated_lanes = 0;
+    out.missing_proof_bus_lanes = 0;
+    out.verifier_constant_lanes = 0;
+    for (auto& field : out.fields) {
+        if (field.field == "child_proof_commitment_u32") {
+            field.source =
+                NormalizedAlgHashInputSource::ProofAuthenticated;
+            field.all_lanes_bound = true;
+            field.detail =
+                "ProofFieldBus derives commitment from ordered transcript "
+                "and links eight u32 semantic sponge lanes";
+        }
+        if (field.source ==
+            NormalizedAlgHashInputSource::VerifierConstant) {
+            out.verifier_constant_lanes += field.input_lanes;
+        } else if (
+            field.source ==
+                NormalizedAlgHashInputSource::ProofAuthenticated &&
+            field.all_lanes_bound) {
+            out.proof_authenticated_lanes += field.input_lanes;
+        } else {
+            out.missing_proof_bus_lanes += field.input_lanes;
+        }
+    }
+    out.in_parent_derivation_complete =
+        out.canonical_alg_hash_available &&
+        out.slot_binding_valid &&
+        out.child_trace_root_mapped &&
+        out.child_proof_commitment_mapped &&
+        out.terminal_bus_commitment_mapped &&
+        out.missing_proof_bus_lanes == 0;
+    out.blocker =
+        out.in_parent_derivation_complete
+            ? "stage3:recursive_fixedpoint:"
+              "normalized_semantic_alg_hash_parent_complete"
+            : "stage3:recursive_fixedpoint:"
+              "normalized_semantic_alg_hash_blocked:"
+              "8_terminal_bus_commitment_lanes_have_no_"
+              "proof_authenticated_parent_source;"
+              "proof_commitment_bus_closed_via_proof_field_bus";
+    return out;
+}
+
+NormalizedTerminalBusCommitmentBusAttachmentV1
+AttachNormalizedTerminalBusCommitmentBusV1(
+    FoldBusComposition& composition,
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    const NormalizedRoleChildSlot& slot,
+    const NormalizedSemanticRootSpongeAttachmentV1&
+        semantic_sponge)
+{
+    NormalizedTerminalBusCommitmentBusAttachmentV1 out;
+    out.layout =
+        NormalizedAlgAirProofFieldBusLayout(
+            composition.combined.n_columns);
+    out.parent_rows = composition.combined.n_rows;
+    out.added_columns =
+        out.layout.End() - out.layout.field_base;
+    out.constraint_base = static_cast<uint32_t>(
+        composition.combined.constraints.size());
+
+    std::vector<gf::Fp> transcript;
+    if (!BuildNormalizedTerminalBusFieldTranscriptV1(
+            manifest, pins, child_index, schedule,
+            transcript, nullptr)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "normalized_terminal_bus_transcript";
+        return out;
+    }
+    out.transcript_fields =
+        static_cast<uint32_t>(transcript.size());
+    out.active_sponge_rows =
+        static_cast<uint32_t>(
+            transcript.size() /
+                kNormalizedAlgAirProofFieldBusRate +
+            1);
+    out.terminal_bus_commitment =
+        aq::AirFriBackendAlg<Fp3>::PackDigest(
+            ah::SpongeHashFp(transcript));
+    const auto expected_root =
+        aq::AirFriBackendAlg<Fp3>::UnpackDigest(
+            slot.terminal_bus_commitment);
+    if (!composition.valid ||
+        !semantic_sponge.valid ||
+        out.parent_rows < 2 ||
+        out.active_sponge_rows > out.parent_rows ||
+        out.terminal_bus_commitment.IsNull() ||
+        out.terminal_bus_commitment !=
+            slot.terminal_bus_commitment ||
+        out.terminal_bus_commitment !=
+            ComputeNormalizedTerminalBusCommitment(
+                manifest, pins, child_index, schedule) ||
+        !expected_root.has_value()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "normalized_terminal_bus_public_binding";
+        return out;
+    }
+
+    std::vector<gf::Fp> padded = transcript;
+    padded.push_back(gf::Fp{1});
+    while (padded.size() %
+               kNormalizedAlgAirProofFieldBusRate != 0) {
+        padded.push_back(gf::Fp{0});
+    }
+    if (padded.size() !=
+        uint64_t{out.active_sponge_rows} *
+            kNormalizedAlgAirProofFieldBusRate) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "normalized_terminal_bus_padding";
+        return out;
+    }
+
+    composition.columns.resize(
+        out.layout.End(),
+        std::vector<Fp3>(out.parent_rows, Fp3::Zero()));
+    composition.combined.n_columns = out.layout.End();
+    composition.combined.preprocessed_pin_ood = true;
+    for (uint32_t row = 0; row < out.active_sponge_rows; ++row) {
+        for (uint32_t lane = 0;
+             lane < kNormalizedAlgAirProofFieldBusRate; ++lane) {
+            composition.columns[out.layout.Field(lane)][row] =
+                Fp3::FromFp(padded[
+                    uint64_t{row} *
+                        kNormalizedAlgAirProofFieldBusRate +
+                    lane]);
+        }
+        composition.columns[out.layout.active][row] = Fp3::One();
+    }
+    composition.columns[out.layout.terminal]
+        [out.active_sponge_rows - 1] = Fp3::One();
+    for (uint32_t lane = 0;
+         lane < kNormalizedAlgAirProofFieldBusRate; ++lane) {
+        composition.combined.preprocessed.emplace_back(
+            out.layout.Field(lane),
+            composition.columns[out.layout.Field(lane)]);
+    }
+    composition.combined.preprocessed.emplace_back(
+        out.layout.active,
+        composition.columns[out.layout.active]);
+    composition.combined.preprocessed.emplace_back(
+        out.layout.terminal,
+        composition.columns[out.layout.terminal]);
+
+    ah::State state{};
+    for (uint32_t row = 0; row < out.parent_rows; ++row) {
+        ah::State input{};
+        if (row < out.active_sponge_rows) {
+            input = state;
+            for (uint32_t lane = 0;
+                 lane < kNormalizedAlgAirProofFieldBusRate; ++lane) {
+                input[lane] = gf::Add(
+                    input[lane],
+                    composition.columns[out.layout.Field(lane)][row].c0);
+            }
+        }
+        const ar::PermWitness witness = ar::BuildPermWitness(input);
+        for (uint32_t cell = 0; cell < ar::kPermCellsPerPerm; ++cell) {
+            composition.columns[
+                out.layout.permutation.base + cell][row] =
+                Fp3::FromFp(witness.cells[cell]);
+        }
+        if (row < out.active_sponge_rows) {
+            state = witness.output;
+        }
+    }
+
+    const auto append = [&](aq::AirConstraint<Fp3> constraint) {
+        composition.combined.constraints.push_back(std::move(constraint));
+    };
+    for (auto& constraint :
+         ar::BuildPermRoundConstraints(out.layout.permutation)) {
+        append(std::move(constraint));
+    }
+    for (const uint32_t selector :
+         std::array<uint32_t, 2>{out.layout.active, out.layout.terminal}) {
+        aq::AirConstraint<Fp3> boolean;
+        boolean.name =
+            "stage3.fixedpoint.normalized_terminal_bus.selector_boolean";
+        boolean.kind = aq::AirKind::kEverywhere;
+        boolean.alg_degree = 2;
+        boolean.eval = [selector](
+                           const std::vector<Fp3>& row,
+                           const std::vector<Fp3>&) {
+            return gf::Mul(
+                row[selector],
+                gf::Sub(row[selector], Fp3::One()));
+        };
+        append(std::move(boolean));
+    }
+    {
+        aq::AirConstraint<Fp3> terminal_active;
+        terminal_active.name =
+            "stage3.fixedpoint.normalized_terminal_bus.terminal_implies_active";
+        terminal_active.kind = aq::AirKind::kEverywhere;
+        terminal_active.alg_degree = 2;
+        const uint32_t active = out.layout.active;
+        const uint32_t terminal = out.layout.terminal;
+        terminal_active.eval = [active, terminal](
+                                   const std::vector<Fp3>& row,
+                                   const std::vector<Fp3>&) {
+            return gf::Mul(
+                row[terminal],
+                gf::Sub(Fp3::One(), row[active]));
+        };
+        append(std::move(terminal_active));
+    }
+    for (uint32_t lane = 0; lane < ah::kAlgHashT; ++lane) {
+        aq::AirConstraint<Fp3> first;
+        first.name =
+            "stage3.fixedpoint.normalized_terminal_bus.first_input";
+        first.kind = aq::AirKind::kFirstRow;
+        first.alg_degree = 1;
+        const uint32_t input_column =
+            out.layout.permutation.InputCol(lane);
+        if (lane < kNormalizedAlgAirProofFieldBusRate) {
+            const uint32_t field = out.layout.Field(lane);
+            first.eval = [input_column, field](
+                             const std::vector<Fp3>& row,
+                             const std::vector<Fp3>&) {
+                return gf::Sub(row[input_column], row[field]);
+            };
+        } else {
+            first.eval = [input_column](
+                             const std::vector<Fp3>& row,
+                             const std::vector<Fp3>&) {
+                return row[input_column];
+            };
+        }
+        append(std::move(first));
+    }
+    for (uint32_t lane = 0; lane < ah::kAlgHashT; ++lane) {
+        aq::AirConstraint<Fp3> transition;
+        transition.name =
+            "stage3.fixedpoint.normalized_terminal_bus.sponge_transition";
+        transition.kind = aq::AirKind::kTransition;
+        transition.alg_degree = 2;
+        const uint32_t input_column =
+            out.layout.permutation.InputCol(lane);
+        const uint32_t active = out.layout.active;
+        const ar::PermLayout permutation = out.layout.permutation;
+        if (lane < kNormalizedAlgAirProofFieldBusRate) {
+            const uint32_t field = out.layout.Field(lane);
+            transition.eval = [input_column, active, permutation, lane,
+                               field](
+                                  const std::vector<Fp3>& row,
+                                  const std::vector<Fp3>& next) {
+                return gf::Mul(
+                    next[active],
+                    gf::Sub(
+                        next[input_column],
+                        gf::Add(
+                            ar::PermOutputLane(permutation, row, lane),
+                            next[field])));
+            };
+        } else {
+            transition.eval = [input_column, active, permutation, lane](
+                                  const std::vector<Fp3>& row,
+                                  const std::vector<Fp3>& next) {
+                return gf::Mul(
+                    next[active],
+                    gf::Sub(
+                        next[input_column],
+                        ar::PermOutputLane(permutation, row, lane)));
+            };
+        }
+        append(std::move(transition));
+    }
+
+    constexpr gf::Fp TWO32 = UINT64_C(1) << 32;
+    for (uint32_t limb = 0; limb < ah::kAlgHashDigestLen; ++limb) {
+        aq::AirConstraint<Fp3> root;
+        root.name =
+            "stage3.fixedpoint.normalized_terminal_bus.output_root";
+        root.kind = aq::AirKind::kEverywhere;
+        root.alg_degree = 2;
+        const uint32_t terminal = out.layout.terminal;
+        const ar::PermLayout permutation = out.layout.permutation;
+        const Fp3 expected = Fp3::FromFp((*expected_root)[limb]);
+        root.eval = [terminal, permutation, limb, expected](
+                        const std::vector<Fp3>& row,
+                        const std::vector<Fp3>&) {
+            return gf::Mul(
+                row[terminal],
+                gf::Sub(
+                    ar::PermOutputLane(permutation, row, limb),
+                    expected));
+        };
+        append(std::move(root));
+
+        aq::AirConstraint<Fp3> semantic;
+        semantic.name =
+            "stage3.fixedpoint.normalized_terminal_bus.semantic_u32_link";
+        semantic.kind = aq::AirKind::kEverywhere;
+        semantic.alg_degree = 2;
+        const uint32_t low = semantic_sponge.layout.Input(40 + 2 * limb);
+        const uint32_t high = semantic_sponge.layout.Input(41 + 2 * limb);
+        semantic.eval = [terminal, permutation, limb, low, high](
+                            const std::vector<Fp3>& row,
+                            const std::vector<Fp3>&) {
+            return gf::Mul(
+                row[terminal],
+                gf::Sub(
+                    ar::PermOutputLane(permutation, row, limb),
+                    gf::Add(
+                        row[low],
+                        gf::Mul(Fp3::FromFp(TWO32), row[high]))));
+        };
+        append(std::move(semantic));
+    }
+
+    out.added_constraints = static_cast<uint32_t>(
+        composition.combined.constraints.size()) -
+        out.constraint_base;
+    out.terminal_bus_commitment_derived_in_parent = true;
+    out.terminal_bus_semantic_lanes_linked = true;
+    out.ctl_child_verified_in_parent_air = false;
+    out.recursively_consumed = false;
+    out.residuals = {
+        "normalized_ctl_child_verifier_in_parent_air",
+    };
+    composition.violations = CountHashOpeningViolations(
+        composition.combined, composition.columns);
+    out.violations = composition.violations;
+    out.valid =
+        out.added_columns ==
+            kNormalizedAlgAirProofFieldBusRate + 2 +
+                ar::kPermCellsPerPerm &&
+        out.added_constraints ==
+            ar::kPermSboxCells + 2 + 1 + ah::kAlgHashT +
+                ah::kAlgHashT + 4 + 4 &&
+        out.terminal_bus_commitment_derived_in_parent &&
+        out.terminal_bus_semantic_lanes_linked &&
+        !out.ctl_child_verified_in_parent_air &&
+        !out.recursively_consumed &&
+        out.residuals.size() == 1 &&
+        out.violations == 0;
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "normalized_terminal_bus_commitment_bus_ok;"
+          "semantic_terminal_lanes_linked;"
+          "ctl_child_verifier_residual_open;"
+          "recursive_counters_unchanged"
+        : "stage3:recursive_fixedpoint:"
+          "normalized_terminal_bus_commitment_bus_invalid";
+    return out;
+}
+
+bool ValidateNormalizedTerminalBusCommitmentBusV1(
+    const FoldBusComposition& composition,
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    const NormalizedRoleChildSlot& slot,
+    const NormalizedSemanticRootSpongeAttachmentV1&
+        semantic_sponge,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1&
+        attachment,
+    std::string* why)
+{
+    std::vector<gf::Fp> transcript;
+    if (!attachment.valid ||
+        attachment.version !=
+            kNormalizedTerminalBusCommitmentBusVersion ||
+        !semantic_sponge.valid ||
+        !BuildNormalizedTerminalBusFieldTranscriptV1(
+            manifest, pins, child_index, schedule,
+            transcript, why) ||
+        attachment.terminal_bus_commitment !=
+            ComputeNormalizedTerminalBusCommitment(
+                manifest, pins, child_index, schedule) ||
+        attachment.terminal_bus_commitment !=
+            slot.terminal_bus_commitment ||
+        attachment.transcript_fields != transcript.size() ||
+        attachment.active_sponge_rows !=
+            transcript.size() /
+                    kNormalizedAlgAirProofFieldBusRate +
+                1 ||
+        attachment.parent_rows != composition.combined.n_rows ||
+        attachment.added_columns != 140 ||
+        attachment.layout.End() !=
+            composition.combined.n_columns ||
+        attachment.constraint_base +
+                attachment.added_constraints !=
+            composition.combined.constraints.size() ||
+        attachment.added_constraints != 153 ||
+        !attachment.terminal_bus_commitment_derived_in_parent ||
+        !attachment.terminal_bus_semantic_lanes_linked ||
+        attachment.ctl_child_verified_in_parent_air ||
+        attachment.recursively_consumed ||
+        attachment.residuals.size() != 1) {
+        return Fail(why, "normalized_terminal_bus_shape");
+    }
+    return true;
+}
+
+NormalizedSemanticAlgHashParentAudit
+PromoteNormalizedSemanticTerminalBusFromCommitmentBusV1(
+    const NormalizedSemanticAlgHashParentAudit& base,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1&
+        terminal_bus,
+    const NormalizedRoleChildSlot& slot)
+{
+    NormalizedSemanticAlgHashParentAudit out = base;
+    const bool closable =
+        terminal_bus.valid &&
+        terminal_bus.terminal_bus_commitment_derived_in_parent &&
+        terminal_bus.terminal_bus_semantic_lanes_linked &&
+        !terminal_bus.terminal_bus_commitment.IsNull() &&
+        terminal_bus.terminal_bus_commitment ==
+            slot.terminal_bus_commitment &&
+        !out.terminal_bus_commitment_mapped;
+    if (!closable) {
+        return out;
+    }
+
+    out.terminal_bus_commitment_mapped = true;
+    out.proof_authenticated_lanes = 0;
+    out.missing_proof_bus_lanes = 0;
+    out.verifier_constant_lanes = 0;
+    for (auto& field : out.fields) {
+        if (field.field == "terminal_bus_commitment_u32") {
+            field.source =
+                NormalizedAlgHashInputSource::ProofAuthenticated;
+            field.all_lanes_bound = true;
+            field.detail =
+                "TerminalBusCommitmentBus derives commitment from CTL "
+                "composition/child/schedule limbs and links eight u32 "
+                "semantic sponge lanes";
+        }
+        if (field.source ==
+            NormalizedAlgHashInputSource::VerifierConstant) {
+            out.verifier_constant_lanes += field.input_lanes;
+        } else if (
+            field.source ==
+                NormalizedAlgHashInputSource::ProofAuthenticated &&
+            field.all_lanes_bound) {
+            out.proof_authenticated_lanes += field.input_lanes;
+        } else {
+            out.missing_proof_bus_lanes += field.input_lanes;
+        }
+    }
+    out.in_parent_derivation_complete =
+        out.canonical_alg_hash_available &&
+        out.slot_binding_valid &&
+        out.child_trace_root_mapped &&
+        out.child_proof_commitment_mapped &&
+        out.terminal_bus_commitment_mapped &&
+        out.missing_proof_bus_lanes == 0;
+    out.blocker =
+        out.in_parent_derivation_complete
+            ? "stage3:recursive_fixedpoint:"
+              "normalized_semantic_alg_hash_parent_complete;"
+              "terminal_bus_closed_via_commitment_bus;"
+              "ctl_child_verifier_still_host_only"
+            : "stage3:recursive_fixedpoint:"
+              "normalized_semantic_alg_hash_blocked_after_terminal_promote";
+    return out;
+}
+
 
 NormalizedAlgAirCodecDecoderAttachmentV1
 AttachNormalizedAlgAirCodecDecoderV1(
@@ -13840,6 +14354,218 @@ bool ValidateNormalizedRecursiveChildCapabilityV1(
     return true;
 }
 
+NormalizedRecursiveChildCapabilityAuditV1
+AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1* terminal_bus)
+{
+    NormalizedRecursiveChildCapabilityAuditV1 out =
+        AssessNormalizedRecursiveChildCapabilityV1(
+            composition, interpreter, row_pin, execution);
+    const NormalizedSemanticAlgHashParentAudit base_root =
+        AssessNormalizedSemanticAlgHashParentClosure(
+            composition, interpreter, row_pin, execution);
+    NormalizedSemanticAlgHashParentAudit root =
+        PromoteNormalizedSemanticProofCommitmentFromFieldBusV1(
+            base_root, proof_bus, execution.slot);
+    if (!root.child_proof_commitment_mapped) {
+        out.valid = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_with_proof_bus_commitment_not_promoted";
+        return out;
+    }
+    const bool close_terminal =
+        terminal_bus != nullptr && terminal_bus->valid;
+    if (close_terminal) {
+        root = PromoteNormalizedSemanticTerminalBusFromCommitmentBusV1(
+            root, *terminal_bus, execution.slot);
+        if (!root.terminal_bus_commitment_mapped) {
+            out.valid = false;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "capability_with_terminal_bus_not_promoted";
+            return out;
+        }
+    }
+
+    out.child_proof_commitment_mapped = true;
+    out.terminal_bus_commitment_mapped =
+        root.terminal_bus_commitment_mapped;
+    out.normalized_root_available_input_lanes =
+        root.verifier_constant_lanes +
+        root.proof_authenticated_lanes;
+    out.normalized_root_missing_input_lanes =
+        root.missing_proof_bus_lanes;
+    out.normalized_semantic_root_derived_in_parent =
+        root.in_parent_derivation_complete;
+
+    for (auto& gap : out.gaps) {
+        if (gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                ChildProofCommitmentBus) {
+            gap.mapped_lanes = 8;
+            gap.present_in_parent_air = true;
+            gap.detail =
+                "ProofFieldBus derives child proof commitment from the "
+                "ordered transcript and links eight u32 semantic lanes; "
+                "proof field cells remain verifier pins until decoder/"
+                "remote equality maps close";
+        }
+        if (close_terminal &&
+            gap.code ==
+                NormalizedRecursiveVerifierGapCode::
+                    CtlChildVerifierAndTerminalBus) {
+            gap.mapped_lanes = 8;
+            gap.present_in_parent_air =
+                out.ctl_child_verified_in_parent_air &&
+                out.terminal_bus_commitment_mapped;
+            gap.detail =
+                "TerminalBusCommitmentBus closed eight terminal "
+                "commitment lanes; CTL child verifier remains host-only "
+                "(ctl_child_verified_in_parent_air=false)";
+        }
+        if (close_terminal &&
+            gap.code ==
+                NormalizedRecursiveVerifierGapCode::
+                    NormalizedSemanticRootAlgHash) {
+            gap.mapped_lanes = 48;
+            gap.present_in_parent_air =
+                out.normalized_semantic_root_derived_in_parent;
+            gap.detail =
+                "all 48 semantic-root input lanes bound after "
+                "ProofFieldBus + TerminalBusCommitmentBus promotes";
+        }
+    }
+
+    const uint32_t expect_available = close_terminal ? 48U : 40U;
+    const uint32_t expect_missing = close_terminal ? 0U : 8U;
+
+    std::string failed;
+    const auto fail_pred = [&](bool ok, const char* tag) {
+        if (!ok) {
+            failed.push_back(';');
+            failed += tag;
+        }
+        return ok;
+    };
+    out.valid =
+        fail_pred(out.candidate_role_endpoint_count == 3,
+                  "role_endpoint_count") &&
+        fail_pred(out.child_relation_columns == 6,
+                  "child_relation_columns") &&
+        fail_pred(out.child_relation_constraints == 5,
+                  "child_relation_constraints") &&
+        fail_pred(out.parent_rows >= 2, "parent_rows") &&
+        fail_pred(out.parent_columns > 0, "parent_columns") &&
+        fail_pred(out.parent_constraints > 0, "parent_constraints") &&
+        fail_pred(out.native_child_host_verified,
+                  "native_child_host_verified") &&
+        fail_pred(out.authenticated_opening_air,
+                  "authenticated_opening_air") &&
+        fail_pred(out.fold_deep_air, "fold_deep_air") &&
+        fail_pred(out.relation_bytecode_air,
+                  "relation_bytecode_air") &&
+        fail_pred(out.child_trace_root_mapped,
+                  "child_trace_root_mapped") &&
+        fail_pred(out.normalized_root_required_input_lanes == 48,
+                  "root_required_lanes") &&
+        fail_pred(out.normalized_root_available_input_lanes ==
+                      expect_available,
+                  "root_available_lanes") &&
+        fail_pred(out.normalized_root_missing_input_lanes ==
+                      expect_missing,
+                  "root_missing_lanes") &&
+        fail_pred(
+            out.normalized_root_additional_permutation_columns == 910,
+            "root_perm_columns") &&
+        fail_pred(out.split_rap_native_verifier_executable,
+                  "split_rap_native") &&
+        fail_pred(out.gaps.size() == 7, "gaps_size") &&
+        fail_pred(!out.child_proof_payload_bound_in_air,
+                  "payload_bound_unexpected") &&
+        fail_pred(out.child_fiat_shamir_replayed_in_air,
+                  "fs_replay_required") &&
+        fail_pred(out.child_proof_commitment_mapped,
+                  "proof_commit_required") &&
+        fail_pred(!out.ctl_child_verified_in_parent_air,
+                  "ctl_verified_unexpected") &&
+        fail_pred(out.terminal_bus_commitment_mapped == close_terminal,
+                  "terminal_bus_state") &&
+        fail_pred(out.normalized_semantic_root_derived_in_parent ==
+                      close_terminal,
+                  "semantic_root_state") &&
+        fail_pred(!out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_unexpected") &&
+        fail_pred(!out.endpoint_terminal_equality,
+                  "endpoint_terminal_unexpected") &&
+        fail_pred(!kCompleteRecursiveFixedPointExecutable,
+                  "complete_fp_unexpected") &&
+        fail_pred(!kRecursiveFixedPointConsensusAuthority,
+                  "fp_authority_unexpected") &&
+        fail_pred(!va::kVerifierAirConsensusAuthority,
+                  "va_authority_unexpected") &&
+        fail_pred(!va::kVerifierFiatShamirAirExecutable,
+                  "va_fs_chip_unexpected");
+    if (out.valid) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_audit_ok;"
+            "proof_commitment_bus_closed_via_proof_field_bus;";
+        if (close_terminal) {
+            out.note +=
+                "terminal_bus_closed_via_commitment_bus;"
+                "semantic_root_derived_in_parent;"
+                "ctl_child_verifier_still_host_only;"
+                "proof_payload_and_endpoint_split_rap_open;";
+        } else {
+            out.note +=
+                "ledger_g4_fiat_shamir_replay_closed;"
+                "proof_payload_ctl_terminal_and_semantic_root_chips_open;";
+        }
+        out.note +=
+            "split_rap_multirow_adapter_open;"
+            "complete_fp=false;"
+            "recursive_counters_0_of_52_and_0_of_14";
+    } else {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_with_proof_bus_not_canonical" +
+            failed;
+    }
+    return out;
+}
+
+bool ValidateNormalizedRecursiveChildCapabilityWithProofBusV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedRecursiveChildCapabilityAuditV1& audit,
+    std::string* why,
+    const NormalizedTerminalBusCommitmentBusAttachmentV1* terminal_bus)
+{
+    const NormalizedRecursiveChildCapabilityAuditV1 expected =
+        AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
+            composition, interpreter, row_pin, execution,
+            proof_bus, terminal_bus);
+    if (!expected.valid || !(expected == audit)) {
+        if (why != nullptr) {
+            *why =
+                "normalized_recursive_child_capability_"
+                "with_proof_bus_mismatch";
+        }
+        return false;
+    }
+    return true;
+}
+
+
 NormalizedParentProofPreflight
 AssessNormalizedParentProofPreflight(
     const aq::AirConstraintSystem<Fp3>& parent_cs)
@@ -14053,7 +14779,9 @@ AssessCompleteFixedPointScenarios(
             scenario.note =
                 scenario.selected_v1_topology
                     ? "stage3:recursive_fixedpoint:selected_binary_"
-                      "four_lane_quadratic_memory_bus_open"
+                      "four_lane_quadratic_memory_bus_open;"
+                      "p2_fs_ledger_closed;"
+                      "proof_commitment_bus_promotable_via_field_bus"
                     : scenario.backend_shape_supported
                     ? "stage3:recursive_fixedpoint:shape_supported_"
                       "not_selected"

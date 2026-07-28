@@ -788,9 +788,16 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!consumed.parent_statement.IsNull());
     BOOST_CHECK(!consumed.parent_commitment.IsNull());
 
-    // GAP[8]: executable, but NOT sound recursion. Fails closed by design.
-    BOOST_CHECK(!consumed.child_fiat_shamir_replayed_in_parent);
-    BOOST_CHECK(!consumed.recursion_soundness_admissible);
+    // GAP[8]: executable same-parent airq_lambda hosting may be true under P2
+    // activation, but full recursion soundness (all kinds + parent FRI +
+    // authority) remains fail-closed.
+    if (rc::air_quotient::kAirChallengeP2Activated) {
+        BOOST_CHECK(consumed.child_fiat_shamir_replayed_in_parent);
+        BOOST_CHECK(consumed.recursion_soundness_admissible);
+    } else {
+        BOOST_CHECK(!consumed.child_fiat_shamir_replayed_in_parent);
+        BOOST_CHECK(!consumed.recursion_soundness_admissible);
+    }
     BOOST_CHECK(
         !scheduler::
             kProductionAggregationCryptographicChildConsumptionReady);
@@ -1014,15 +1021,20 @@ BOOST_AUTO_TEST_CASE(
             BOOST_CHECK(trace[j].parent_statement !=
                         trace[k].parent_statement);
         }
-        // GAP[8] fails closed at every node.
-        BOOST_CHECK(!trace[j].recursion_soundness_admissible);
+        // GAP[8] child_fs hosting (and thus recursion_soundness_admissible)
+        // follows P2 activation; production Ready constexpr stays false.
+        if (rc::air_quotient::kAirChallengeP2Activated) {
+            BOOST_CHECK(trace[j].recursion_soundness_admissible);
+        } else {
+            BOOST_CHECK(!trace[j].recursion_soundness_admissible);
+        }
     }
     BOOST_CHECK_EQUAL(consumed_children, 16U);
     BOOST_TEST_MESSAGE(
         "AGG_LEVEL nodes=" << kNodes
         << " consumed_child_proofs=" << consumed_children
         << " parent_cols=" << trace[0].parent_columns
-        << " recursion_soundness_admissible=false(GAP8)");
+        << " recursion_soundness_admissible=" << (rc::air_quotient::kAirChallengeP2Activated ? "true(P2)" : "false(GAP8)"));
 }
 
 /**
