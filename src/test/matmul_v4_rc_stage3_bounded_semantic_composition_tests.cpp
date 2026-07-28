@@ -4,6 +4,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_stage3_bounded_semantic_codec.h>
 #include <matmul/matmul_v4_rc_stage3_bounded_semantic_composition.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
@@ -1314,6 +1315,80 @@ BOOST_AUTO_TEST_CASE(
             finalize_start)
             .count();
 
+    // Cross the actual durable boundary before any family verification.
+    // Every verifier below therefore consumes a freshly decoded episode and
+    // coupled typed-proof inventory, not the prover's in-memory objects.
+    namespace direct_codec =
+        rc::bounded_semantic_codec;
+    direct_codec::EnvelopeV1 direct_envelope{
+        statement, composition};
+    direct_codec::SizeReportV1 direct_size;
+    std::vector<unsigned char> direct_bytes;
+    BOOST_REQUIRE_MESSAGE(
+        direct_codec::SerializeEnvelopeV1(
+            direct_envelope, direct_bytes,
+            &direct_size, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "STAGE3_COMPLETE_DIRECT_INVENTORY "
+        << direct_size.ToString());
+    const auto decoded_direct =
+        direct_codec::DeserializeEnvelopeV1(
+            direct_bytes, &why);
+    BOOST_REQUIRE_MESSAGE(
+        decoded_direct.has_value(), why);
+
+    // V3 relation precommits may deliberately exclude terminal digests so
+    // children can be proved and discarded online. The outer aggregate must
+    // still own those terminals. Rebind every ordinary outer digest after
+    // changing the coupled terminal while retaining the exact child proofs;
+    // fresh verification must reject rather than treating the codec as a
+    // readiness receipt.
+    auto terminal_forgery =
+        *decoded_direct;
+    terminal_forgery.statement.public_inputs
+        .coupled_digest = H(0xee);
+    terminal_forgery.statement.public_inputs
+        .final_digest =
+        rc::ComputeRCStage3FinalDigest(
+            terminal_forgery.statement);
+    terminal_forgery.statement.public_inputs
+        .transcript_commitment =
+        rc::ComputeRCStage3TranscriptCommitment(
+            terminal_forgery.statement);
+    std::vector<unsigned char> forged_bytes;
+    BOOST_REQUIRE_MESSAGE(
+        direct_codec::SerializeEnvelopeV1(
+            terminal_forgery, forged_bytes,
+            nullptr, &why),
+        why);
+    BOOST_CHECK(
+        !direct_codec::VerifyEnvelopeV1(
+             forged_bytes, header, params,
+             shape, nullptr, &why));
+
+    CBlock direct_block(header);
+    bool direct_attached = false;
+    if (direct_size.consensus_payload_fit) {
+        BOOST_REQUIRE_MESSAGE(
+            direct_codec::AttachEnvelopeV1(
+                direct_block, *decoded_direct,
+                nullptr, &why),
+            why);
+        direct_attached = true;
+    } else {
+        BOOST_CHECK(
+            !direct_codec::AttachEnvelopeV1(
+                 direct_block, *decoded_direct,
+                 nullptr, &why));
+        BOOST_CHECK(
+            direct_block.matrix_c_data.empty());
+    }
+
+    statement = decoded_direct->statement;
+    composition =
+        std::move(decoded_direct->composition);
+
     std::array<int64_t, kBuildFamilyCount> family_verify_us{};
     std::array<bool, kBuildFamilyCount> family_verify_recorded{};
     const auto timed_verify =
@@ -1577,10 +1652,15 @@ BOOST_AUTO_TEST_CASE(
             {BuildFamily::CrossProductJoins,
              BuildFamily::BoundedAggregateVerifier},
             [&] {
-                return
-                    rc::VerifyRCStage3BoundedSemanticComposition(
-                        statement, header, params, shape,
-                        composition, &why);
+                if (direct_attached) {
+                    return direct_codec::
+                        VerifyAttachedEnvelopeV1(
+                            direct_block, params, shape,
+                            nullptr, &why);
+                }
+                return direct_codec::VerifyEnvelopeV1(
+                    direct_bytes, header, params,
+                    shape, nullptr, &why);
             },
             "complete_aggregate_shared_cross_join_seams"),
         why);
@@ -1599,10 +1679,8 @@ BOOST_AUTO_TEST_CASE(
         graph.no_missing_out_of_range_self_or_duplicate_producer);
     BOOST_REQUIRE_EQUAL(
         why,
-        "stage3:bounded_semantic_composition:"
-        "52_bounded_endpoint_sidecars_executed;"
-        "81_guarded_immediate_edge_obligations_covered;"
-        "production_and_recursion_disabled");
+        "stage3:bounded_semantic_codec_v1:"
+        "fresh_complete_typed_inventory_verified");
     BOOST_REQUIRE_EQUAL(
         std::count(
             family_prove_recorded.begin(),
