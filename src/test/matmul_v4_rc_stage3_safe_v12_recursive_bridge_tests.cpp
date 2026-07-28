@@ -197,6 +197,114 @@ void InstallRawEncoding(
     }
 }
 
+std::vector<bridge::TypedSafeEventProgramV13>
+TypedEventProgramV13()
+{
+    using Binding = bridge::TypedSafeMessageBindingV13;
+    using Cell = bridge::TypedSafeMessageCellProgramV13;
+    using Kind = bridge::TypedSafeChallengeKindV13;
+    const auto proof = [] {
+        Cell cell;
+        cell.binding = Binding::ProofOwned;
+        return cell;
+    };
+    const auto constant = [](uint64_t value) {
+        Cell cell;
+        cell.binding = Binding::Constant;
+        cell.constant = gf::FromU64(value);
+        return cell;
+    };
+    const auto seed_lane = [](uint32_t lane) {
+        Cell cell;
+        cell.binding = Binding::QuerySeedLane;
+        cell.query_seed_lane = lane;
+        return cell;
+    };
+    const auto event = [&](Kind kind, aht::RoleV12 role,
+                           uint32_t ordinal) {
+        bridge::TypedSafeEventProgramV13 out;
+        out.kind = kind;
+        out.role = role;
+        const std::string domain =
+            "BTX_TEST_TYPED_SAFE_EVENT_V13_" +
+            std::to_string(ordinal);
+        out.application_domain.assign(
+            domain.begin(), domain.end());
+        out.message = {
+            constant(UINT32_C(0x53414645)),
+            constant(13),
+            constant(ordinal),
+            proof(),
+            proof(),
+        };
+        return out;
+    };
+
+    std::vector<bridge::TypedSafeEventProgramV13> out;
+    out.push_back(event(
+        Kind::AirLambda,
+        aht::RoleV12::TranscriptAirLambda, 0));
+    out.push_back(event(
+        Kind::BatchCoefficient,
+        aht::RoleV12::TranscriptBatchCoefficient, 1));
+    out.push_back(event(
+        Kind::OodZ1,
+        aht::RoleV12::TranscriptOodZ1, 2));
+    out.push_back(event(
+        Kind::OodZ2,
+        aht::RoleV12::TranscriptOodZ2, 3));
+    out.push_back(event(
+        Kind::DeepWeight1,
+        aht::RoleV12::TranscriptDeepWeight, 4));
+    out.push_back(event(
+        Kind::DeepWeight2,
+        aht::RoleV12::TranscriptDeepWeight, 5));
+    out.push_back(event(
+        Kind::FoldBeta,
+        aht::RoleV12::TranscriptFoldBeta, 6));
+    out.push_back(event(
+        Kind::QuerySeed,
+        aht::RoleV12::TranscriptQuerySeed, 7));
+
+    bridge::TypedSafeEventProgramV13 query;
+    query.kind = Kind::QueryCandidate;
+    query.role = aht::RoleV12::TranscriptQueryCandidate;
+    const std::string query_domain =
+        "BTX_TEST_TYPED_SAFE_EVENT_V13_QUERY";
+    query.application_domain.assign(
+        query_domain.begin(), query_domain.end());
+    query.message = {
+        constant(UINT32_C(0x53414645)),
+        constant(13),
+        seed_lane(0), seed_lane(1),
+        seed_lane(2), seed_lane(3),
+        constant(0),
+    };
+    out.push_back(std::move(query));
+    return out;
+}
+
+std::vector<bridge::TypedSafeEventWitnessV13>
+TypedEventWitnessV13(
+    const std::vector<bridge::TypedSafeEventProgramV13>& program)
+{
+    std::vector<bridge::TypedSafeEventWitnessV13> out(
+        program.size());
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        out[event].message.resize(program[event].message.size());
+        for (uint32_t ordinal = 0;
+             ordinal < program[event].message.size(); ++ordinal) {
+            if (program[event].message[ordinal].binding ==
+                bridge::TypedSafeMessageBindingV13::ProofOwned) {
+                out[event].message[ordinal] =
+                    gf::FromU64(
+                        1000 + 100 * event + ordinal);
+            }
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(
@@ -499,6 +607,182 @@ BOOST_AUTO_TEST_CASE(
                 fixture.manifest, changed, seed, &why),
             "proof-level x+p substitution accepted");
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    v13_typed_safe_parent_owns_all_challenge_kinds_and_query_seed)
+{
+    const auto program = TypedEventProgramV13();
+    const auto witness = TypedEventWitnessV13(program);
+    const uint256 seed = TestSeed(0x713);
+    bridge::TypedSafeEventParentProductV13 product;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildTypedSafeEventParentV13(
+            program, witness, seed, product, &why),
+        why);
+    BOOST_CHECK(product.valid);
+    BOOST_CHECK(product.unique_query_seed_event);
+    BOOST_CHECK(product.every_query_uses_seed_output);
+    BOOST_CHECK(product.complete_challenge_kind_coverage);
+    BOOST_CHECK_EQUAL(
+        product.challenge_kinds_covered,
+        bridge::kTypedSafeEventRequiredKindsV13);
+    BOOST_CHECK(product.poseidon_relations_executable);
+    BOOST_CHECK(product.dual_fp3_receipt_ctl_terminal);
+    BOOST_CHECK(product.proof_cells_are_ordinary_columns);
+    BOOST_CHECK(!product.parent_owns_real_fri_relation);
+    BOOST_CHECK(!product.normalized_child_cells_bound);
+    BOOST_CHECK(!product.recursive_authority_ready);
+    BOOST_CHECK_EQUAL(
+        product.proof_owned_preprocessed_columns, 0U);
+    BOOST_CHECK_EQUAL(
+        product.semantic_receipt_cells,
+        product.proof_owned_message_cells +
+            4U * program.size());
+    BOOST_CHECK_EQUAL(
+        bridge::CountViolationsV12(
+            product.cs, product.columns),
+        0U);
+    BOOST_CHECK(
+        product.program_root !=
+        matmul::v4::rc::alg_hash::Digest{});
+    BOOST_CHECK(
+        product.transcript_commitment !=
+        matmul::v4::rc::alg_hash::Digest{});
+    BOOST_CHECK_EQUAL(
+        product.output_locations.size(),
+        4U * program.size());
+
+    // A candidate cannot substitute its own "seed": all four query message
+    // lanes are constrained to the unique QuerySeed event output registers.
+    auto seed_substitution = product;
+    const auto query_it = std::find_if(
+        seed_substitution.output_locations.begin(),
+        seed_substitution.output_locations.end(),
+        [](const auto& location) {
+            return location.kind ==
+                bridge::TypedSafeChallengeKindV13::QueryCandidate;
+        });
+    BOOST_REQUIRE(
+        query_it != seed_substitution.output_locations.end());
+    const uint32_t query_first_row =
+        query_it->row;
+    seed_substitution.columns[
+        seed_substitution.layout.Message(2)][query_first_row] =
+            gf::Add(
+                seed_substitution.columns[
+                    seed_substitution.layout.Message(2)]
+                    [query_first_row],
+                gf::Fp3::One());
+    BOOST_CHECK_GT(
+        bridge::CountViolationsV12(
+            seed_substitution.cs,
+            seed_substitution.columns),
+        0U);
+
+    // Ordinary proof transcript cells are covered by both the Poseidon state
+    // relation and the dual-Fp3 receipt rational identity.
+    BOOST_REQUIRE(
+        !product.proof_owned_message_locations.empty());
+    auto transcript_tamper = product;
+    const auto location =
+        transcript_tamper.proof_owned_message_locations.front();
+    transcript_tamper.columns[location.column][location.row] =
+        gf::Add(
+            transcript_tamper.columns[location.column][location.row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        bridge::CountViolationsV12(
+            transcript_tamper.cs,
+            transcript_tamper.columns),
+        0U);
+
+    // Goldilocks x+p is not accepted as an alternate transcript encoding.
+    auto alias = product;
+    const auto alias_location =
+        alias.proof_owned_message_locations.front();
+    alias.columns[alias_location.column][alias_location.row] =
+        gf::Fp3{gf::kP + 5, 0, 0};
+    BOOST_CHECK_GT(
+        bridge::CountViolationsV12(alias.cs, alias.columns),
+        0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    v13_typed_safe_parent_real_fri_rejects_tamper_transplant_and_seed)
+{
+    const auto program = TypedEventProgramV13();
+    const auto witness = TypedEventWitnessV13(program);
+    const uint256 seed = TestSeed(0x714);
+    bridge::TypedSafeEventParentProductV13 product;
+    bridge::TypedSafeEventParentProofV13 proof;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildTypedSafeEventParentV13(
+            program, witness, seed, product, &why),
+        why);
+    const auto begin = std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        bridge::ProveTypedSafeEventParentV13(
+            product, seed, proof, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        bridge::VerifyTypedSafeEventParentProofV13(
+            program, proof, seed, &why),
+        why);
+    const auto end = std::chrono::steady_clock::now();
+    BOOST_TEST_MESSAGE(
+        "SAFE_EVENT_PARENT_V13 rows="
+        << product.trace_rows
+        << " cols=" << product.cs.n_columns
+        << " active=" << product.active_permutation_rows
+        << " semantic=" << product.semantic_receipt_cells
+        << " roundtrip_ms="
+        << std::chrono::duration_cast<
+               std::chrono::milliseconds>(end - begin).count());
+
+    BOOST_REQUIRE(!proof.proof.batch.queries.empty());
+    BOOST_REQUIRE(!proof.proof.batch.queries[0].row.values.empty());
+    {
+        auto tampered = proof;
+        tampered.proof.batch.queries[0].row.values[0] =
+            gf::Add(
+                tampered.proof.batch.queries[0].row.values[0],
+                gf::Fp3::One());
+        BOOST_CHECK(
+            !bridge::VerifyTypedSafeEventParentProofV13(
+                program, tampered, seed, &why));
+    }
+    {
+        auto transplanted_program = program;
+        transplanted_program[0].message[0].constant =
+            gf::Add(
+                transplanted_program[0].message[0].constant, 1);
+        BOOST_CHECK(
+            !bridge::VerifyTypedSafeEventParentProofV13(
+                transplanted_program, proof, seed, &why));
+    }
+    {
+        const uint256 wrong_seed = TestSeed(0x715);
+        BOOST_CHECK(
+            !bridge::VerifyTypedSafeEventParentProofV13(
+                program, proof, wrong_seed, &why));
+    }
+    {
+        auto commitment = proof;
+        commitment.transcript_commitment[0] =
+            gf::Add(commitment.transcript_commitment[0], 1);
+        BOOST_CHECK(
+            !bridge::VerifyTypedSafeEventParentProofV13(
+                program, commitment, seed, &why));
+    }
+    BOOST_CHECK(
+        bridge::kTypedSafeEventParentExecutableV13);
+    BOOST_CHECK(
+        !bridge::kTypedSafeEventNormalizedChildCellsBoundV13);
+    BOOST_CHECK(
+        !bridge::kTypedSafeEventRecursiveAuthorityReadyV13);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -269,6 +269,301 @@ static_assert(!kRecursiveBridgePublicSourceStatementBoundV12);
 static_assert(!kRecursiveBridgeNormalizedParentConsumedV12);
 static_assert(!kRecursiveBridgeAuthorityReadyV12);
 
+// -------------------------------------------------------------------------
+// V13 typed SAFE event parent.
+//
+// This is the generic recursive relation used by the additive single-lane
+// Q192/K=2 SAFE backend.  It deliberately lives beside the V12 dual-lane
+// bridge: V12 remains useful evidence, but V13 does not inherit its
+// common-commitment/independent-lane obligations.
+//
+// One row is one SAFECore absorb permutation.  The row owns eight message
+// cells and a fully decomposed Poseidon2 permutation.  A shape-derived
+// schedule fixes reset/final rows, typed tags, constants and the unique
+// query-seed feedback locations.  Ordinary proof columns carry every
+// attacker-controlled transcript cell.
+//
+// A final ReceiptCommitment SAFECore event absorbs:
+//
+//   program_root || semantic_count ||
+//   every proof-owned message cell || every event output digest.
+//
+// Two independently challenged Fp3 rational identities equality-bind that
+// semantic stream into the receipt event.  Thus the receipt digest is a
+// compact public binding to both the child transcript cells and every
+// challenge result.  The relation is proved directly by the parent's own
+// AirQuotient/FRI proof; no host boolean "child accepted" is admitted.
+//
+// The remaining authority seam is explicit: a normalized recursive verifier
+// must equality-bind ProofOwned message cells to authenticated child-proof
+// cells and bind event outputs to the verifier consumers.  Until that happens
+// this is an executable parent relation, not a consensus readiness flip.
+// -------------------------------------------------------------------------
+
+inline constexpr uint16_t kTypedSafeEventParentVersionV13 = 13;
+inline constexpr uint32_t kTypedSafeEventRateV13 =
+    safe_v12::kSafeRateV12;
+inline constexpr uint32_t kTypedSafeEventDigestLanesV13 =
+    alg_hash::kAlgHashDigestLen;
+inline constexpr uint32_t kTypedSafeEventSourceSlotsV13 =
+    kTypedSafeEventRateV13 + kTypedSafeEventDigestLanesV13;
+inline constexpr uint32_t kTypedSafeEventCtlLanesV13 = 2;
+inline constexpr uint32_t kTypedSafeEventHighAndStepsV13 = 6;
+inline constexpr uint32_t kTypedSafeEventRequiredKindsV13 = 8;
+inline constexpr uint32_t kTypedSafeEventAuxQuerySeedKindV13 = 8;
+
+enum class TypedSafeChallengeKindV13 : uint8_t {
+    AirLambda = 0,
+    BatchCoefficient = 1,
+    OodZ1 = 2,
+    OodZ2 = 3,
+    DeepWeight1 = 4,
+    DeepWeight2 = 5,
+    FoldBeta = 6,
+    QueryCandidate = 7,
+    QuerySeed = kTypedSafeEventAuxQuerySeedKindV13,
+};
+
+enum class TypedSafeMessageBindingV13 : uint8_t {
+    /** Ordinary proof column; included exactly once in the receipt CTL. */
+    ProofOwned = 0,
+    /** Verifier-rebuilt canonical field constant. */
+    Constant = 1,
+    /** One of the four outputs of the unique QuerySeed event. */
+    QuerySeedLane = 2,
+};
+
+struct TypedSafeMessageCellProgramV13 {
+    TypedSafeMessageBindingV13 binding{
+        TypedSafeMessageBindingV13::ProofOwned};
+    gf::Fp constant{0};
+    uint32_t query_seed_lane{0};
+
+    friend bool operator==(
+        const TypedSafeMessageCellProgramV13&,
+        const TypedSafeMessageCellProgramV13&) = default;
+};
+
+struct TypedSafeEventProgramV13 {
+    TypedSafeChallengeKindV13 kind{
+        TypedSafeChallengeKindV13::AirLambda};
+    alg_hash_typed::RoleV12 role{
+        alg_hash_typed::RoleV12::TranscriptAirLambda};
+    std::vector<uint8_t> application_domain;
+    std::vector<TypedSafeMessageCellProgramV13> message;
+
+    friend bool operator==(
+        const TypedSafeEventProgramV13&,
+        const TypedSafeEventProgramV13&) = default;
+};
+
+struct TypedSafeEventWitnessV13 {
+    /**
+     * One lane per program message cell.  Constant and QuerySeedLane entries
+     * are ignored and rebuilt; ProofOwned entries must be canonical.
+     */
+    std::vector<gf::Fp> message;
+};
+
+struct TypedSafeEventOutputLocationV13 {
+    uint32_t event{0};
+    TypedSafeChallengeKindV13 kind{
+        TypedSafeChallengeKindV13::AirLambda};
+    uint32_t row{0};
+    uint32_t column{0};
+    uint32_t lane{0};
+
+    friend bool operator==(
+        const TypedSafeEventOutputLocationV13&,
+        const TypedSafeEventOutputLocationV13&) = default;
+};
+
+struct TypedSafeEventMessageLocationV13 {
+    uint32_t event{0};
+    uint32_t ordinal{0};
+    uint32_t row{0};
+    uint32_t column{0};
+
+    friend bool operator==(
+        const TypedSafeEventMessageLocationV13&,
+        const TypedSafeEventMessageLocationV13&) = default;
+};
+
+struct TypedSafeEventParentLayoutV13 {
+    // Keep the layout a constant expression. CanonicalLayout() performs the
+    // same arithmetic but is intentionally a runtime validation helper.
+    stage3_poseidon_air::Layout poseidon{
+        air_recurse::PermLayout{0},
+        air_recurse::kPermCellsPerPerm,
+        air_recurse::kPermCellsPerPerm +
+            air_recurse::kPermSboxCells,
+        air_recurse::kPermCellsPerPerm +
+            2 * air_recurse::kPermSboxCells};
+    uint32_t message_base{
+        air_recurse::kPermCellsPerPerm +
+        3 * air_recurse::kPermSboxCells};
+    uint32_t output_base{message_base + kTypedSafeEventRateV13};
+    uint32_t bit_base{
+        output_base + kTypedSafeEventDigestLanesV13};
+    uint32_t high_and_base{
+        bit_base + kTypedSafeEventRateV13 * 64};
+    uint32_t query_seed_base{
+        high_and_base +
+        kTypedSafeEventRateV13 *
+            kTypedSafeEventHighAndStepsV13};
+    uint32_t ctl_acc_base{
+        query_seed_base + kTypedSafeEventDigestLanesV13};
+    uint32_t ctl_inverse_base{
+        ctl_acc_base + kTypedSafeEventCtlLanesV13};
+    uint32_t active{ctl_inverse_base + kTypedSafeEventCtlLanesV13};
+    uint32_t reset{active + 1};
+    uint32_t final{reset + 1};
+    uint32_t commitment_final{final + 1};
+    uint32_t query_seed_final{commitment_final + 1};
+    uint32_t message_mask_base{query_seed_final + 1};
+    uint32_t tag_base{
+        message_mask_base + kTypedSafeEventRateV13};
+    uint32_t constant_mask_base{
+        tag_base + safe_v12::kSafeCapacityV12};
+    uint32_t constant_value_base{
+        constant_mask_base + kTypedSafeEventRateV13};
+    uint32_t query_seed_mask_base{
+        constant_value_base + kTypedSafeEventRateV13};
+    uint32_t query_seed_lane_base{
+        query_seed_mask_base + kTypedSafeEventRateV13};
+    uint32_t source_mask_base{
+        query_seed_lane_base + kTypedSafeEventRateV13};
+    uint32_t source_id_base{
+        source_mask_base + kTypedSafeEventSourceSlotsV13};
+    uint32_t consumer_mask_base{
+        source_id_base + kTypedSafeEventSourceSlotsV13};
+    uint32_t consumer_id_base{
+        consumer_mask_base + kTypedSafeEventRateV13};
+    uint32_t expected_commitment_base{
+        consumer_id_base + kTypedSafeEventRateV13};
+    uint32_t end{
+        expected_commitment_base +
+        kTypedSafeEventDigestLanesV13};
+
+    [[nodiscard]] constexpr uint32_t Message(
+        uint32_t lane) const
+    {
+        return message_base + lane;
+    }
+    [[nodiscard]] constexpr uint32_t Output(
+        uint32_t lane) const
+    {
+        return output_base + lane;
+    }
+    [[nodiscard]] constexpr uint32_t Bit(
+        uint32_t lane, uint32_t bit) const
+    {
+        return bit_base + lane * 64 + bit;
+    }
+    [[nodiscard]] constexpr uint32_t HighAnd(
+        uint32_t lane, uint32_t step) const
+    {
+        return high_and_base +
+            lane * kTypedSafeEventHighAndStepsV13 + step;
+    }
+    [[nodiscard]] constexpr uint32_t QuerySeed(
+        uint32_t lane) const
+    {
+        return query_seed_base + lane;
+    }
+};
+
+inline constexpr uint32_t kTypedSafeEventParentColumnsV13 =
+    TypedSafeEventParentLayoutV13{}.end;
+
+struct TypedSafeEventParentProductV13 {
+    TypedSafeEventParentLayoutV13 layout{};
+    std::vector<TypedSafeEventProgramV13> program;
+    alg_hash::Digest program_root{};
+    alg_hash::Digest transcript_commitment{};
+    std::vector<alg_hash::Digest> event_output;
+    std::vector<TypedSafeEventMessageLocationV13>
+        proof_owned_message_locations;
+    std::vector<TypedSafeEventOutputLocationV13>
+        output_locations;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint32_t trace_rows{0};
+    uint32_t active_permutation_rows{0};
+    uint32_t proof_owned_message_cells{0};
+    uint32_t semantic_receipt_cells{0};
+    uint32_t challenge_kinds_covered{0};
+    uint32_t verifier_owned_preprocessed_columns{0};
+    uint32_t proof_owned_preprocessed_columns{0};
+    uint32_t max_algebraic_degree{0};
+    uint32_t violations{0};
+    bool unique_query_seed_event{false};
+    bool every_query_uses_seed_output{false};
+    bool complete_challenge_kind_coverage{false};
+    bool poseidon_relations_executable{false};
+    bool dual_fp3_receipt_ctl_terminal{false};
+    bool proof_cells_are_ordinary_columns{false};
+    bool parent_owns_real_fri_relation{false};
+    bool normalized_child_cells_bound{false};
+    bool recursive_authority_ready{false};
+    bool valid{false};
+    std::string note;
+};
+
+struct TypedSafeEventParentProofV13 {
+    uint16_t version{kTypedSafeEventParentVersionV13};
+    alg_hash::Digest program_root{};
+    alg_hash::Digest transcript_commitment{};
+    aq::AirQuotientRowsProof proof{};
+    uint32_t trace_rows{0};
+    uint32_t event_count{0};
+    bool canonical_proof_encoding{false};
+    bool verified{false};
+    bool normalized_child_cells_bound{false};
+    bool recursive_authority_ready{false};
+    std::string note;
+};
+
+/** Canonical program commitment; values of ProofOwned cells are excluded. */
+[[nodiscard]] alg_hash::Digest
+CommitTypedSafeEventProgramV13(
+    const std::vector<TypedSafeEventProgramV13>& program);
+
+/**
+ * Build the direct parent relation and witness.  The relation seed derives
+ * the two Fp3 LogUp challenges and is replayed by the verifier.
+ */
+[[nodiscard]] bool BuildTypedSafeEventParentV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const std::vector<TypedSafeEventWitnessV13>& witness,
+    const uint256& relation_seed,
+    TypedSafeEventParentProductV13& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool ProveTypedSafeEventParentV13(
+    const TypedSafeEventParentProductV13& product,
+    const uint256& relation_seed,
+    TypedSafeEventParentProofV13& out,
+    std::string* why = nullptr);
+
+/**
+ * Rebuilds the entire schedule, tags, program root and receipt-commitment
+ * boundary from public program metadata plus the claimed compact commitment.
+ */
+[[nodiscard]] bool VerifyTypedSafeEventParentProofV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const TypedSafeEventParentProofV13& proof,
+    const uint256& relation_seed,
+    std::string* why = nullptr);
+
+inline constexpr bool kTypedSafeEventParentExecutableV13 = true;
+inline constexpr bool
+    kTypedSafeEventNormalizedChildCellsBoundV13 = false;
+inline constexpr bool kTypedSafeEventRecursiveAuthorityReadyV13 = false;
+
+static_assert(!kTypedSafeEventNormalizedChildCellsBoundV13);
+static_assert(!kTypedSafeEventRecursiveAuthorityReadyV13);
+
 } // namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_SAFE_V12_RECURSIVE_BRIDGE_H

@@ -1241,4 +1241,1441 @@ bool VerifyRecursiveBridgeProofV12(
     return true;
 }
 
+namespace {
+
+namespace aht = alg_hash_typed;
+namespace ar = air_recurse;
+namespace p2air = stage3_poseidon_air;
+namespace safe = safe_v12;
+
+constexpr gf::Fp kTypedEventProgramMagicV13 =
+    UINT64_C(0x4254585346503133); // "BTXSFP13"
+constexpr gf::Fp kTypedEventReceiptMagicV13 =
+    UINT64_C(0x4254585346523133); // "BTXSFR13"
+constexpr char kTypedEventReceiptDomainV13[] =
+    "BTX_RC_STAGE3_TYPED_SAFE_EVENT_RECEIPT_V13";
+
+struct TypedEventRowPlanV13 {
+    bool active{false};
+    bool reset{false};
+    bool final{false};
+    bool commitment_final{false};
+    bool query_seed_final{false};
+    uint32_t event{0};
+    uint32_t block{0};
+    std::array<gf::Fp, safe::kSafeCapacityV12> tag{};
+    std::array<bool, kTypedSafeEventRateV13> message_mask{};
+    std::array<bool, kTypedSafeEventRateV13> constant_mask{};
+    std::array<gf::Fp, kTypedSafeEventRateV13> constant_value{};
+    std::array<bool, kTypedSafeEventRateV13> query_seed_mask{};
+    std::array<uint32_t, kTypedSafeEventRateV13> query_seed_lane{};
+    std::array<bool, kTypedSafeEventSourceSlotsV13> source_mask{};
+    std::array<uint32_t, kTypedSafeEventSourceSlotsV13> source_id{};
+    std::array<bool, kTypedSafeEventRateV13> consumer_mask{};
+    std::array<uint32_t, kTypedSafeEventRateV13> consumer_id{};
+};
+
+struct TypedEventPlanV13 {
+    std::vector<TypedEventRowPlanV13> rows;
+    std::vector<uint32_t> first_row;
+    std::vector<uint32_t> final_row;
+    std::vector<std::vector<uint32_t>> proof_semantic_id;
+    std::vector<std::array<uint32_t, 4>> output_semantic_id;
+    uint32_t query_seed_event{std::numeric_limits<uint32_t>::max()};
+    uint32_t semantic_count{0};
+    uint32_t active_rows{0};
+    uint32_t trace_rows{0};
+    uint32_t kinds_covered{0};
+    bool every_query_uses_seed{false};
+};
+
+bool KnownTypedEventKindV13(TypedSafeChallengeKindV13 kind)
+{
+    return static_cast<uint32_t>(kind) <=
+        kTypedSafeEventAuxQuerySeedKindV13;
+}
+
+aht::RoleV12 ExpectedTypedEventRoleV13(
+    TypedSafeChallengeKindV13 kind)
+{
+    switch (kind) {
+    case TypedSafeChallengeKindV13::AirLambda:
+        return aht::RoleV12::TranscriptAirLambda;
+    case TypedSafeChallengeKindV13::BatchCoefficient:
+        return aht::RoleV12::TranscriptBatchCoefficient;
+    case TypedSafeChallengeKindV13::OodZ1:
+        return aht::RoleV12::TranscriptOodZ1;
+    case TypedSafeChallengeKindV13::OodZ2:
+        return aht::RoleV12::TranscriptOodZ2;
+    case TypedSafeChallengeKindV13::DeepWeight1:
+    case TypedSafeChallengeKindV13::DeepWeight2:
+        return aht::RoleV12::TranscriptDeepWeight;
+    case TypedSafeChallengeKindV13::FoldBeta:
+        return aht::RoleV12::TranscriptFoldBeta;
+    case TypedSafeChallengeKindV13::QueryCandidate:
+        return aht::RoleV12::TranscriptQueryCandidate;
+    case TypedSafeChallengeKindV13::QuerySeed:
+        return aht::RoleV12::TranscriptQuerySeed;
+    }
+    return aht::RoleV12::TranscriptPadding;
+}
+
+uint32_t NextPowerOfTwoV13(uint64_t value)
+{
+    if (value < 2) return 2;
+    uint64_t result = 1;
+    while (result < value && result <= (UINT64_C(1) << 31)) {
+        result <<= 1;
+    }
+    return result > std::numeric_limits<uint32_t>::max()
+        ? 0
+        : static_cast<uint32_t>(result);
+}
+
+void AppendU32PackedV13(
+    std::vector<gf::Fp>& out,
+    const std::vector<uint8_t>& bytes)
+{
+    out.push_back(gf::FromU64(bytes.size()));
+    for (size_t offset = 0; offset < bytes.size(); offset += 4) {
+        uint32_t word = 0;
+        for (uint32_t byte = 0;
+             byte < 4 && offset + byte < bytes.size(); ++byte) {
+            word |= static_cast<uint32_t>(bytes[offset + byte])
+                << (8 * byte);
+        }
+        out.push_back(gf::FromU64(word));
+    }
+}
+
+bool TypedEventTagV13(
+    aht::RoleV12 role,
+    const std::vector<uint8_t>& application_domain,
+    uint32_t message_lanes,
+    std::array<gf::Fp, safe::kSafeCapacityV12>& tag,
+    std::string* why)
+{
+    std::vector<uint8_t> typed_domain;
+    safe::IoPatternBuilderV12 builder;
+    safe::IoPatternV12 pattern;
+    return safe::TypedDomainV12(
+               role, application_domain, typed_domain, why) &&
+        builder.Absorb(message_lanes, why) &&
+        builder.Squeeze(kTypedSafeEventDigestLanesV13, why) &&
+        builder.Build(pattern, why) &&
+        safe::DeriveTagV12(pattern, typed_domain, tag, nullptr, why);
+}
+
+bool ValidateTypedEventProgramV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    TypedEventPlanV13* audit,
+    std::string* why)
+{
+    if (program.empty() || program.size() > (UINT32_C(1) << 20)) {
+        return Fail(why, "v13_event_program_count");
+    }
+    std::array<bool, kTypedSafeEventRequiredKindsV13> covered{};
+    uint32_t query_seed = std::numeric_limits<uint32_t>::max();
+    bool every_query_uses_seed = true;
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        const auto& spec = program[event];
+        if (!KnownTypedEventKindV13(spec.kind) ||
+            spec.role != ExpectedTypedEventRoleV13(spec.kind) ||
+            spec.application_domain.empty() ||
+            spec.application_domain.size() > safe::kSafeMaxDomainBytes ||
+            spec.message.empty() ||
+            spec.message.size() >
+                safe::kSafeMaxIoElementsPerPhase) {
+            return Fail(why, "v13_event_program_shape");
+        }
+        const uint32_t kind = static_cast<uint32_t>(spec.kind);
+        if (kind < covered.size()) covered[kind] = true;
+        if (spec.kind == TypedSafeChallengeKindV13::QuerySeed) {
+            if (query_seed != std::numeric_limits<uint32_t>::max()) {
+                return Fail(why, "v13_multiple_query_seed_events");
+            }
+            query_seed = event;
+        }
+        std::array<uint32_t, 4> query_seed_uses{};
+        for (const auto& cell : spec.message) {
+            switch (cell.binding) {
+            case TypedSafeMessageBindingV13::ProofOwned:
+                if (cell.constant != 0 || cell.query_seed_lane != 0) {
+                    return Fail(why, "v13_proof_cell_metadata");
+                }
+                break;
+            case TypedSafeMessageBindingV13::Constant:
+                if (!Canonical(cell.constant) ||
+                    cell.query_seed_lane != 0) {
+                    return Fail(why, "v13_constant_cell_metadata");
+                }
+                break;
+            case TypedSafeMessageBindingV13::QuerySeedLane:
+                if (cell.constant != 0 ||
+                    cell.query_seed_lane >= 4) {
+                    return Fail(why, "v13_query_seed_cell_metadata");
+                }
+                ++query_seed_uses[cell.query_seed_lane];
+                break;
+            default:
+                return Fail(why, "v13_unknown_message_binding");
+            }
+        }
+        if (spec.kind == TypedSafeChallengeKindV13::QueryCandidate) {
+            if (query_seed == std::numeric_limits<uint32_t>::max() ||
+                query_seed >= event) {
+                return Fail(why, "v13_query_precedes_seed");
+            }
+            every_query_uses_seed &=
+                std::all_of(
+                    query_seed_uses.begin(), query_seed_uses.end(),
+                    [](uint32_t uses) { return uses == 1; });
+        } else if (std::any_of(
+                       query_seed_uses.begin(), query_seed_uses.end(),
+                       [](uint32_t uses) { return uses != 0; })) {
+            return Fail(why, "v13_seed_lane_outside_query_event");
+        }
+    }
+    if (query_seed == std::numeric_limits<uint32_t>::max() ||
+        !every_query_uses_seed ||
+        !std::all_of(
+            covered.begin(), covered.end(),
+            [](bool value) { return value; })) {
+        return Fail(why, "v13_event_coverage");
+    }
+    if (audit != nullptr) {
+        audit->query_seed_event = query_seed;
+        audit->every_query_uses_seed = every_query_uses_seed;
+        audit->kinds_covered = static_cast<uint32_t>(
+            std::count(covered.begin(), covered.end(), true));
+    }
+    return true;
+}
+
+std::array<Fp3, 4> TypedEventCtlChallengesV13(
+    const uint256& relation_seed)
+{
+    std::vector<gf::Fp> base{
+        kTypedEventReceiptMagicV13,
+        gf::FromU64(kTypedSafeEventParentVersionV13),
+    };
+    for (uint32_t word = 0; word < 8; ++word) {
+        uint32_t value = 0;
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            value |= static_cast<uint32_t>(
+                         relation_seed.data()[4 * word + byte])
+                << (8 * byte);
+        }
+        base.push_back(gf::FromU64(value));
+    }
+    std::array<Fp3, 4> out{};
+    for (uint32_t draw = 0; draw < out.size(); ++draw) {
+        auto lanes = base;
+        lanes.push_back(gf::FromU64(draw));
+        alg_hash::Digest digest{};
+        if (!aht::SpongeHashFpV12(
+                aht::RoleV12::ReceiptCommitment,
+                lanes, digest, nullptr)) {
+            return {};
+        }
+        out[draw] = Fp3{
+            digest[0], digest[1], digest[2]};
+    }
+    return out;
+}
+
+Fp3 TypedEventFactorV13(
+    const Fp3& alpha, const Fp3& gamma,
+    const Fp3& id, const Fp3& value)
+{
+    return gf::Add(
+        gamma,
+        gf::Add(gf::Mul(alpha, id), value));
+}
+
+Fp3 TypedEventSelectedFactorV13(
+    const Fp3& alpha, const Fp3& gamma,
+    const Fp3& mask, const Fp3& id,
+    const Fp3& value)
+{
+    // mask is a verifier-pinned selector which is Boolean on H.  Writing the
+    // selection as a polynomial is load-bearing: branching on IsZero(mask)
+    // would not define a polynomial on the quotient coset.
+    return gf::Add(
+        Fp3::One(),
+        gf::Mul(
+            mask,
+            gf::Sub(
+                TypedEventFactorV13(alpha, gamma, id, value),
+                Fp3::One())));
+}
+
+Fp3 TypedEventQuerySeedLaneV13(
+    const Fp3& lane,
+    const std::array<Fp3, kTypedSafeEventDigestLanesV13>& seed)
+{
+    // Lagrange interpolation over the verifier-pinned lane labels 0,1,2,3.
+    // This is a degree-three polynomial in `lane` and agrees with seed[lane]
+    // on every row of H.  It deliberately avoids inspecting lane.c0, which
+    // would be a non-algebraic branch at quotient-domain points.
+    Fp3 selected = Fp3::Zero();
+    for (uint32_t j = 0; j < seed.size(); ++j) {
+        Fp3 basis = Fp3::One();
+        Fp3 denominator = Fp3::One();
+        for (uint32_t k = 0; k < seed.size(); ++k) {
+            if (j == k) continue;
+            basis = gf::Mul(
+                basis, gf::Sub(lane, U32(k)));
+            denominator = gf::Mul(
+                denominator,
+                gf::Sub(U32(j), U32(k)));
+        }
+        selected = gf::Add(
+            selected,
+            gf::Mul(
+                seed[j],
+                gf::Mul(basis, gf::Inv(denominator))));
+    }
+    return selected;
+}
+
+bool BuildTypedEventPlanV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const alg_hash::Digest& program_root,
+    const alg_hash::Digest& expected_commitment,
+    TypedEventPlanV13& out,
+    std::string* why)
+{
+    out = {};
+    if (!Canonical(program_root) ||
+        program_root == alg_hash::Digest{} ||
+        !Canonical(expected_commitment) ||
+        expected_commitment == alg_hash::Digest{} ||
+        !ValidateTypedEventProgramV13(program, &out, why)) {
+        return false;
+    }
+
+    out.proof_semantic_id.resize(program.size());
+    out.output_semantic_id.resize(program.size());
+    uint32_t semantic_id = 1;
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        out.proof_semantic_id[event].assign(
+            program[event].message.size(), 0);
+        for (uint32_t ordinal = 0;
+             ordinal < program[event].message.size(); ++ordinal) {
+            if (program[event].message[ordinal].binding ==
+                TypedSafeMessageBindingV13::ProofOwned) {
+                out.proof_semantic_id[event][ordinal] =
+                    semantic_id++;
+            }
+        }
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            out.output_semantic_id[event][lane] =
+                semantic_id++;
+        }
+    }
+    out.semantic_count = semantic_id - 1;
+
+    uint64_t active_rows = 0;
+    for (const auto& spec : program) {
+        active_rows +=
+            (spec.message.size() + kTypedSafeEventRateV13 - 1) /
+            kTypedSafeEventRateV13;
+    }
+    constexpr uint32_t kCommitHeaderLanes = 7;
+    const uint64_t commitment_lanes =
+        kCommitHeaderLanes + out.semantic_count;
+    const uint64_t commitment_rows =
+        (commitment_lanes + kTypedSafeEventRateV13 - 1) /
+        kTypedSafeEventRateV13;
+    active_rows += commitment_rows;
+    out.trace_rows = NextPowerOfTwoV13(active_rows + 1);
+    if (out.trace_rows == 0) {
+        return Fail(why, "v13_event_trace_rows_overflow");
+    }
+    out.rows.resize(out.trace_rows);
+    out.first_row.resize(program.size());
+    out.final_row.resize(program.size());
+
+    uint32_t row = 0;
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        const auto& spec = program[event];
+        std::array<gf::Fp, safe::kSafeCapacityV12> tag{};
+        if (!TypedEventTagV13(
+                spec.role, spec.application_domain,
+                static_cast<uint32_t>(spec.message.size()),
+                tag, why)) {
+            return false;
+        }
+        const uint32_t blocks = static_cast<uint32_t>(
+            (spec.message.size() + 7) / 8);
+        out.first_row[event] = row;
+        out.final_row[event] = row + blocks - 1;
+        for (uint32_t block = 0; block < blocks; ++block, ++row) {
+            auto& r = out.rows[row];
+            r.active = true;
+            r.reset = block == 0;
+            r.final = block + 1 == blocks;
+            r.query_seed_final =
+                r.final && event == out.query_seed_event;
+            r.event = event;
+            r.block = block;
+            r.tag = tag;
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal = 8 * block + lane;
+                if (ordinal >= spec.message.size()) continue;
+                r.message_mask[lane] = true;
+                const auto& binding = spec.message[ordinal];
+                if (binding.binding ==
+                    TypedSafeMessageBindingV13::Constant) {
+                    r.constant_mask[lane] = true;
+                    r.constant_value[lane] = binding.constant;
+                } else if (binding.binding ==
+                           TypedSafeMessageBindingV13::QuerySeedLane) {
+                    r.query_seed_mask[lane] = true;
+                    r.query_seed_lane[lane] =
+                        binding.query_seed_lane;
+                } else {
+                    r.source_mask[lane] = true;
+                    r.source_id[lane] =
+                        out.proof_semantic_id[event][ordinal];
+                }
+            }
+            if (r.final) {
+                for (uint32_t lane = 0; lane < 4; ++lane) {
+                    r.source_mask[8 + lane] = true;
+                    r.source_id[8 + lane] =
+                        out.output_semantic_id[event][lane];
+                }
+            }
+        }
+    }
+
+    std::vector<gf::Fp> commit_constants{
+        kTypedEventReceiptMagicV13,
+        gf::FromU64(kTypedSafeEventParentVersionV13),
+        program_root[0], program_root[1],
+        program_root[2], program_root[3],
+        gf::FromU64(out.semantic_count),
+    };
+    std::array<gf::Fp, safe::kSafeCapacityV12> commit_tag{};
+    const std::vector<uint8_t> commit_domain(
+        reinterpret_cast<const uint8_t*>(
+            kTypedEventReceiptDomainV13),
+        reinterpret_cast<const uint8_t*>(
+            kTypedEventReceiptDomainV13) +
+            sizeof(kTypedEventReceiptDomainV13) - 1);
+    const uint32_t commitment_message_lanes =
+        static_cast<uint32_t>(
+            commit_constants.size() + out.semantic_count);
+    if (!TypedEventTagV13(
+            aht::RoleV12::ReceiptCommitment,
+            commit_domain, commitment_message_lanes,
+            commit_tag, why)) {
+        return false;
+    }
+    const uint32_t commitment_first = row;
+    uint32_t consumer_id = 1;
+    for (uint32_t ordinal = 0;
+         ordinal < commitment_message_lanes; ++ordinal) {
+        const uint32_t block = ordinal / 8;
+        const uint32_t lane = ordinal % 8;
+        auto& r = out.rows[commitment_first + block];
+        r.active = true;
+        r.reset = block == 0;
+        r.final =
+            ordinal / 8 + 1 ==
+            (commitment_message_lanes + 7) / 8;
+        r.commitment_final = r.final;
+        r.event = static_cast<uint32_t>(program.size());
+        r.block = block;
+        r.tag = commit_tag;
+        r.message_mask[lane] = true;
+        if (ordinal < commit_constants.size()) {
+            r.constant_mask[lane] = true;
+            r.constant_value[lane] =
+                commit_constants[ordinal];
+        } else {
+            r.consumer_mask[lane] = true;
+            r.consumer_id[lane] = consumer_id++;
+        }
+    }
+    row = commitment_first +
+        (commitment_message_lanes + 7) / 8;
+    out.active_rows = row;
+    if (row >= out.trace_rows ||
+        consumer_id != out.semantic_count + 1) {
+        return Fail(why, "v13_event_schedule_terminal");
+    }
+    return true;
+}
+
+void AddTypedEventPreprocessedV13(
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>* columns,
+    uint32_t column,
+    const std::vector<Fp3>& values)
+{
+    cs.preprocessed.push_back({column, values});
+    if (columns != nullptr) {
+        (*columns)[column] = values;
+    }
+}
+
+bool BuildTypedEventCsV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const alg_hash::Digest& program_root,
+    const alg_hash::Digest& expected_commitment,
+    const uint256& relation_seed,
+    TypedEventPlanV13& plan,
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>* columns,
+    std::string* why)
+{
+    if (!BuildTypedEventPlanV13(
+            program, program_root, expected_commitment,
+            plan, why)) {
+        return false;
+    }
+    const TypedSafeEventParentLayoutV13 layout;
+    cs = {};
+    cs.n_rows = plan.trace_rows;
+    cs.n_columns = layout.end;
+    if (columns != nullptr) {
+        columns->assign(
+            cs.n_columns,
+            std::vector<Fp3>(cs.n_rows, Fp3::Zero()));
+    }
+
+    std::vector<Fp3> active(cs.n_rows);
+    std::vector<Fp3> reset(cs.n_rows);
+    std::vector<Fp3> final(cs.n_rows);
+    std::vector<Fp3> commitment_final(cs.n_rows);
+    std::vector<Fp3> query_seed_final(cs.n_rows);
+    std::array<std::vector<Fp3>, 8> message_mask;
+    std::array<std::vector<Fp3>, 4> tag;
+    std::array<std::vector<Fp3>, 8> constant_mask;
+    std::array<std::vector<Fp3>, 8> constant_value;
+    std::array<std::vector<Fp3>, 8> query_seed_mask;
+    std::array<std::vector<Fp3>, 8> query_seed_lane;
+    std::array<std::vector<Fp3>, 12> source_mask;
+    std::array<std::vector<Fp3>, 12> source_id;
+    std::array<std::vector<Fp3>, 8> consumer_mask;
+    std::array<std::vector<Fp3>, 8> consumer_id;
+    std::array<std::vector<Fp3>, 4> expected;
+    for (auto* array : {
+             &message_mask, &constant_mask, &constant_value,
+             &query_seed_mask, &query_seed_lane,
+             &consumer_mask, &consumer_id}) {
+        for (auto& values : *array) values.resize(cs.n_rows);
+    }
+    for (auto& values : tag) values.resize(cs.n_rows);
+    for (auto& values : source_mask) values.resize(cs.n_rows);
+    for (auto& values : source_id) values.resize(cs.n_rows);
+    for (auto& values : expected) values.resize(cs.n_rows);
+
+    for (uint32_t row = 0; row < cs.n_rows; ++row) {
+        const auto& p = plan.rows[row];
+        active[row] = U(p.active);
+        reset[row] = U(p.reset);
+        final[row] = U(p.final);
+        commitment_final[row] = U(p.commitment_final);
+        query_seed_final[row] = U(p.query_seed_final);
+        for (uint32_t lane = 0; lane < 8; ++lane) {
+            message_mask[lane][row] = U(p.message_mask[lane]);
+            constant_mask[lane][row] = U(p.constant_mask[lane]);
+            constant_value[lane][row] = U(p.constant_value[lane]);
+            query_seed_mask[lane][row] =
+                U(p.query_seed_mask[lane]);
+            query_seed_lane[lane][row] =
+                U32(p.query_seed_lane[lane]);
+            consumer_mask[lane][row] =
+                U(p.consumer_mask[lane]);
+            consumer_id[lane][row] =
+                U32(p.consumer_id[lane]);
+        }
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            tag[lane][row] = U(p.tag[lane]);
+            expected[lane][row] =
+                U(expected_commitment[lane]);
+        }
+        for (uint32_t slot = 0; slot < 12; ++slot) {
+            source_mask[slot][row] = U(p.source_mask[slot]);
+            source_id[slot][row] = U32(p.source_id[slot]);
+        }
+    }
+    AddTypedEventPreprocessedV13(
+        cs, columns, layout.active, active);
+    AddTypedEventPreprocessedV13(
+        cs, columns, layout.reset, reset);
+    AddTypedEventPreprocessedV13(
+        cs, columns, layout.final, final);
+    AddTypedEventPreprocessedV13(
+        cs, columns, layout.commitment_final,
+        commitment_final);
+    AddTypedEventPreprocessedV13(
+        cs, columns, layout.query_seed_final,
+        query_seed_final);
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.message_mask_base + lane,
+            message_mask[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.constant_mask_base + lane,
+            constant_mask[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.constant_value_base + lane,
+            constant_value[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.query_seed_mask_base + lane,
+            query_seed_mask[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.query_seed_lane_base + lane,
+            query_seed_lane[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.consumer_mask_base + lane,
+            consumer_mask[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.consumer_id_base + lane,
+            consumer_id[lane]);
+    }
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.tag_base + lane, tag[lane]);
+        AddTypedEventPreprocessedV13(
+            cs, columns,
+            layout.expected_commitment_base + lane,
+            expected[lane]);
+    }
+    for (uint32_t slot = 0; slot < 12; ++slot) {
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.source_mask_base + slot,
+            source_mask[slot]);
+        AddTypedEventPreprocessedV13(
+            cs, columns, layout.source_id_base + slot,
+            source_id[slot]);
+    }
+    cs.preprocessed_pin_ood = true;
+
+    auto p2 = p2air::BuildSelectorGatedConstraints(
+        layout.poseidon, layout.active);
+    cs.constraints.insert(
+        cs.constraints.end(),
+        std::make_move_iterator(p2.begin()),
+        std::make_move_iterator(p2.end()));
+
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.message_padding";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    gf::Sub(
+                        Fp3::One(),
+                        cur[layout.message_mask_base + lane]),
+                    cur[layout.Message(lane)]);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        for (uint32_t bit = 0; bit < 64; ++bit) {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.message_bit";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            const uint32_t col = layout.Bit(lane, bit);
+            c.eval = [col](const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[col],
+                    gf::Sub(cur[col], Fp3::One()));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.message_recompose";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 1;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                Fp3 sum = Fp3::Zero();
+                for (uint32_t bit = 0; bit < 64; ++bit) {
+                    sum = gf::Add(
+                        sum,
+                        gf::Mul(
+                            U(gf::FromU64(uint64_t{1} << bit)),
+                            cur[layout.Bit(lane, bit)]));
+                }
+                return gf::Sub(cur[layout.Message(lane)], sum);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        for (uint32_t step = 0;
+             step < kTypedSafeEventHighAndStepsV13; ++step) {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.message_high_and";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 7;
+            c.eval = [layout, lane, step](
+                         const auto& cur, const auto&) {
+                Fp3 product = step == 0
+                    ? Fp3::One()
+                    : cur[layout.HighAnd(lane, step - 1)];
+                const uint32_t first = 32 + 6 * step;
+                const uint32_t last =
+                    std::min<uint32_t>(64, first + 6);
+                for (uint32_t bit = first; bit < last; ++bit) {
+                    product = gf::Mul(
+                        product, cur[layout.Bit(lane, bit)]);
+                }
+                return gf::Sub(
+                    cur[layout.HighAnd(lane, step)], product);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.message_canonical";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                Fp3 low = Fp3::Zero();
+                for (uint32_t bit = 0; bit < 32; ++bit) {
+                    low = gf::Add(
+                        low,
+                        gf::Mul(
+                            U(gf::FromU64(uint64_t{1} << bit)),
+                            cur[layout.Bit(lane, bit)]));
+                }
+                return gf::Mul(
+                    cur[layout.HighAnd(
+                        lane,
+                        kTypedSafeEventHighAndStepsV13 - 1)],
+                    low);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.constant_binding";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.constant_mask_base + lane],
+                    gf::Sub(
+                        cur[layout.Message(lane)],
+                        cur[layout.constant_value_base + lane]));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.query_seed_binding";
+            c.kind = aq::AirKind::kEverywhere;
+            // query_seed_mask * (message - Lagrange_3(lane, seed)).
+            c.alg_degree = 5;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                std::array<
+                    Fp3, kTypedSafeEventDigestLanesV13> seed{};
+                for (uint32_t seed_lane = 0;
+                     seed_lane < seed.size(); ++seed_lane) {
+                    seed[seed_lane] =
+                        cur[layout.QuerySeed(seed_lane)];
+                }
+                return gf::Mul(
+                    cur[layout.query_seed_mask_base + lane],
+                    gf::Sub(
+                        cur[layout.Message(lane)],
+                        TypedEventQuerySeedLaneV13(
+                            cur[layout.query_seed_lane_base + lane],
+                            seed)));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.reset_rate";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.reset],
+                    gf::Sub(
+                        cur[layout.poseidon.perm.InputCol(lane)],
+                        cur[layout.Message(lane)]));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.state_rate_transition";
+            c.kind = aq::AirKind::kTransition;
+            c.alg_degree = 3;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto& next) {
+                const Fp3 gate = gf::Mul(
+                    next[layout.active],
+                    gf::Sub(Fp3::One(), next[layout.reset]));
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.poseidon.perm.InputCol(lane)],
+                        gf::Add(
+                            ar::PermOutputLane(
+                                layout.poseidon.perm, cur, lane),
+                            next[layout.Message(lane)])));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+    }
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        const uint32_t state_lane =
+            safe::kSafeRateV12 + lane;
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.reset_capacity";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane, state_lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.reset],
+                    gf::Sub(
+                        cur[layout.poseidon.perm.InputCol(state_lane)],
+                        cur[layout.tag_base + lane]));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.state_capacity_transition";
+            c.kind = aq::AirKind::kTransition;
+            c.alg_degree = 3;
+            c.eval = [layout, state_lane](
+                         const auto& cur, const auto& next) {
+                const Fp3 gate = gf::Mul(
+                    next[layout.active],
+                    gf::Sub(Fp3::One(), next[layout.reset]));
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.poseidon.perm.InputCol(state_lane)],
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, state_lane)));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.output";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.final],
+                    gf::Sub(
+                        cur[layout.Output(lane)],
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, lane)));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.output_zero_elsewhere";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    gf::Sub(Fp3::One(), cur[layout.final]),
+                    cur[layout.Output(lane)]);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.query_seed_export";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.query_seed_final],
+                    gf::Sub(
+                        cur[layout.Output(lane)],
+                        cur[layout.QuerySeed(lane)]));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.query_seed_stable";
+            c.kind = aq::AirKind::kTransition;
+            c.alg_degree = 1;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto& next) {
+                return gf::Sub(
+                    next[layout.QuerySeed(lane)],
+                    cur[layout.QuerySeed(lane)]);
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.commitment_boundary";
+            c.kind = aq::AirKind::kEverywhere;
+            c.alg_degree = 2;
+            c.eval = [layout, lane](
+                         const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.commitment_final],
+                    gf::Sub(
+                        cur[layout.Output(lane)],
+                        cur[layout.expected_commitment_base + lane]));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+    }
+
+    const auto challenges =
+        TypedEventCtlChallengesV13(relation_seed);
+    if (std::any_of(
+            challenges.begin(), challenges.end(),
+            [](const Fp3& value) { return gf::IsZero(value); })) {
+        return Fail(why, "v13_ctl_challenge_zero");
+    }
+    for (uint32_t ctl = 0; ctl < 2; ++ctl) {
+        const Fp3 alpha = challenges[2 * ctl];
+        const Fp3 gamma = challenges[2 * ctl + 1];
+        const uint32_t acc = layout.ctl_acc_base + ctl;
+        const uint32_t inverse =
+            layout.ctl_inverse_base + ctl;
+        auto products =
+            [layout, alpha, gamma](const auto& cur) {
+                Fp3 numerator = Fp3::One();
+                Fp3 denominator = Fp3::One();
+                for (uint32_t slot = 0; slot < 12; ++slot) {
+                    const Fp3 value = slot < 8
+                        ? cur[layout.Message(slot)]
+                        : cur[layout.Output(slot - 8)];
+                    numerator = gf::Mul(
+                        numerator,
+                        TypedEventSelectedFactorV13(
+                            alpha, gamma,
+                            cur[layout.source_mask_base + slot],
+                            cur[layout.source_id_base + slot],
+                            value));
+                }
+                for (uint32_t slot = 0; slot < 8; ++slot) {
+                    denominator = gf::Mul(
+                        denominator,
+                        TypedEventSelectedFactorV13(
+                            alpha, gamma,
+                            cur[layout.consumer_mask_base + slot],
+                            cur[layout.consumer_id_base + slot],
+                            cur[layout.Message(slot)]));
+                }
+                return std::pair<Fp3, Fp3>{
+                    numerator, denominator};
+            };
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.ctl_inverse";
+            c.kind = aq::AirKind::kEverywhere;
+            // Eight selected factors of degree two, times the inverse.
+            c.alg_degree = 17;
+            c.eval = [products, inverse](
+                         const auto& cur, const auto&) {
+                return gf::Sub(
+                    gf::Mul(products(cur).second, cur[inverse]),
+                    Fp3::One());
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> c;
+            c.name = "stage3.safe_event.ctl_transition";
+            c.kind = aq::AirKind::kTransition;
+            // acc * twelve degree-two selected factors * denominator_inverse.
+            c.alg_degree = 26;
+            c.eval = [products, acc, inverse](
+                         const auto& cur, const auto& next) {
+                return gf::Sub(
+                    next[acc],
+                    gf::Mul(
+                        cur[acc],
+                        gf::Mul(
+                            products(cur).first,
+                            cur[inverse])));
+            };
+            cs.constraints.push_back(std::move(c));
+        }
+        {
+            aq::AirConstraint<Fp3> first;
+            first.name = "stage3.safe_event.ctl_first";
+            first.kind = aq::AirKind::kFirstRow;
+            first.alg_degree = 1;
+            first.eval = [acc](const auto& cur, const auto&) {
+                return gf::Sub(cur[acc], Fp3::One());
+            };
+            cs.constraints.push_back(std::move(first));
+        }
+        {
+            aq::AirConstraint<Fp3> last;
+            last.name = "stage3.safe_event.ctl_last";
+            last.kind = aq::AirKind::kLastRow;
+            last.alg_degree = 1;
+            last.eval = [acc](const auto& cur, const auto&) {
+                return gf::Sub(cur[acc], Fp3::One());
+            };
+            cs.constraints.push_back(std::move(last));
+        }
+    }
+    return true;
+}
+
+std::vector<gf::Fp> TypedEventReceiptMessageV13(
+    const alg_hash::Digest& program_root,
+    const std::vector<gf::Fp>& semantic)
+{
+    std::vector<gf::Fp> out{
+        kTypedEventReceiptMagicV13,
+        gf::FromU64(kTypedSafeEventParentVersionV13),
+        program_root[0], program_root[1],
+        program_root[2], program_root[3],
+        gf::FromU64(semantic.size()),
+    };
+    out.insert(out.end(), semantic.begin(), semantic.end());
+    return out;
+}
+
+bool PopulateTypedEventBitsV13(
+    const TypedSafeEventParentLayoutV13& layout,
+    std::vector<std::vector<Fp3>>& columns,
+    uint32_t row, uint32_t lane, gf::Fp raw)
+{
+    if (!Canonical(raw)) return false;
+    for (uint32_t bit = 0; bit < 64; ++bit) {
+        columns[layout.Bit(lane, bit)][row] =
+            U((raw >> bit) & 1U);
+    }
+    gf::Fp cumulative = 1;
+    for (uint32_t step = 0; step < 6; ++step) {
+        const uint32_t first = 32 + 6 * step;
+        const uint32_t last =
+            std::min<uint32_t>(64, first + 6);
+        for (uint32_t bit = first; bit < last; ++bit) {
+            cumulative = gf::Mul(
+                cumulative, (raw >> bit) & 1U);
+        }
+        columns[layout.HighAnd(lane, step)][row] =
+            U(cumulative);
+    }
+    return true;
+}
+
+std::pair<Fp3, Fp3> TypedEventWitnessProductsV13(
+    const TypedSafeEventParentLayoutV13& layout,
+    const std::vector<std::vector<Fp3>>& columns,
+    uint32_t row, const Fp3& alpha, const Fp3& gamma)
+{
+    Fp3 numerator = Fp3::One();
+    Fp3 denominator = Fp3::One();
+    for (uint32_t slot = 0; slot < 12; ++slot) {
+        if (!gf::IsZero(
+                columns[layout.source_mask_base + slot][row])) {
+            const Fp3 value = slot < 8
+                ? columns[layout.Message(slot)][row]
+                : columns[layout.Output(slot - 8)][row];
+            numerator = gf::Mul(
+                numerator,
+                TypedEventFactorV13(
+                    alpha, gamma,
+                    columns[layout.source_id_base + slot][row],
+                    value));
+        }
+    }
+    for (uint32_t slot = 0; slot < 8; ++slot) {
+        if (!gf::IsZero(
+                columns[layout.consumer_mask_base + slot][row])) {
+            denominator = gf::Mul(
+                denominator,
+                TypedEventFactorV13(
+                    alpha, gamma,
+                    columns[layout.consumer_id_base + slot][row],
+                    columns[layout.Message(slot)][row]));
+        }
+    }
+    return {numerator, denominator};
+}
+
+} // namespace
+
+alg_hash::Digest CommitTypedSafeEventProgramV13(
+    const std::vector<TypedSafeEventProgramV13>& program)
+{
+    if (!ValidateTypedEventProgramV13(
+            program, nullptr, nullptr)) {
+        return {};
+    }
+    std::vector<gf::Fp> lanes{
+        kTypedEventProgramMagicV13,
+        gf::FromU64(kTypedSafeEventParentVersionV13),
+        gf::FromU64(program.size()),
+    };
+    for (const auto& event : program) {
+        lanes.push_back(gf::FromU64(
+            static_cast<uint32_t>(event.kind)));
+        lanes.push_back(gf::FromU64(
+            static_cast<uint32_t>(event.role)));
+        AppendU32PackedV13(lanes, event.application_domain);
+        lanes.push_back(gf::FromU64(event.message.size()));
+        for (const auto& cell : event.message) {
+            lanes.push_back(gf::FromU64(
+                static_cast<uint32_t>(cell.binding)));
+            lanes.push_back(cell.constant);
+            lanes.push_back(gf::FromU64(cell.query_seed_lane));
+        }
+    }
+    alg_hash::Digest root{};
+    if (!aht::SpongeHashFpV12(
+            aht::RoleV12::ProgramTableCommitment,
+            lanes, root, nullptr)) {
+        return {};
+    }
+    return root;
+}
+
+bool BuildTypedSafeEventParentV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const std::vector<TypedSafeEventWitnessV13>& witness,
+    const uint256& relation_seed,
+    TypedSafeEventParentProductV13& out,
+    std::string* why)
+{
+    out = {};
+    if (program.size() != witness.size() ||
+        !ValidateTypedEventProgramV13(
+            program, nullptr, why)) {
+        return Fail(why, "v13_event_witness_count");
+    }
+    out.program = program;
+    out.program_root = CommitTypedSafeEventProgramV13(program);
+    if (out.program_root == alg_hash::Digest{}) {
+        return Fail(why, "v13_event_program_root");
+    }
+
+    std::vector<std::vector<gf::Fp>> resolved(program.size());
+    out.event_output.resize(program.size());
+    alg_hash::Digest query_seed{};
+    std::vector<gf::Fp> semantic;
+    std::vector<std::vector<uint32_t>> semantic_id(program.size());
+    uint32_t next_id = 1;
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        if (witness[event].message.size() !=
+            program[event].message.size()) {
+            return Fail(why, "v13_event_witness_shape");
+        }
+        resolved[event].resize(program[event].message.size());
+        semantic_id[event].resize(program[event].message.size());
+        for (uint32_t ordinal = 0;
+             ordinal < program[event].message.size(); ++ordinal) {
+            const auto& cell = program[event].message[ordinal];
+            gf::Fp value = 0;
+            if (cell.binding ==
+                TypedSafeMessageBindingV13::ProofOwned) {
+                value = witness[event].message[ordinal];
+                if (!Canonical(value)) {
+                    return Fail(why, "v13_noncanonical_proof_cell");
+                }
+                semantic.push_back(value);
+                semantic_id[event][ordinal] = next_id++;
+            } else if (cell.binding ==
+                       TypedSafeMessageBindingV13::Constant) {
+                if (witness[event].message[ordinal] != 0) {
+                    return Fail(why, "v13_constant_witness_smuggling");
+                }
+                value = cell.constant;
+            } else {
+                if (witness[event].message[ordinal] != 0 ||
+                    query_seed == alg_hash::Digest{}) {
+                    return Fail(why, "v13_query_seed_witness_smuggling");
+                }
+                value = query_seed[cell.query_seed_lane];
+            }
+            resolved[event][ordinal] = value;
+        }
+        safe::SafeCoreResultV12 audit;
+        if (!safe::SafeCoreDigestV12(
+                program[event].role,
+                program[event].application_domain,
+                resolved[event], out.event_output[event],
+                &audit, why)) {
+            return false;
+        }
+        if (program[event].kind ==
+            TypedSafeChallengeKindV13::QuerySeed) {
+            query_seed = out.event_output[event];
+        }
+        for (gf::Fp value : out.event_output[event]) {
+            semantic.push_back(value);
+            ++next_id;
+        }
+    }
+    const auto receipt_message =
+        TypedEventReceiptMessageV13(
+            out.program_root, semantic);
+    const std::vector<uint8_t> receipt_domain(
+        reinterpret_cast<const uint8_t*>(
+            kTypedEventReceiptDomainV13),
+        reinterpret_cast<const uint8_t*>(
+            kTypedEventReceiptDomainV13) +
+            sizeof(kTypedEventReceiptDomainV13) - 1);
+    if (!safe::SafeCoreDigestV12(
+            aht::RoleV12::ReceiptCommitment,
+            receipt_domain, receipt_message,
+            out.transcript_commitment, nullptr, why)) {
+        return false;
+    }
+
+    TypedEventPlanV13 plan;
+    if (!BuildTypedEventCsV13(
+            program, out.program_root,
+            out.transcript_commitment, relation_seed,
+            plan, out.cs, &out.columns, why)) {
+        return false;
+    }
+    const auto& layout = out.layout;
+    std::vector<std::vector<gf::Fp>> all_messages = resolved;
+    all_messages.push_back(receipt_message);
+    std::vector<alg_hash::Digest> all_outputs = out.event_output;
+    all_outputs.push_back(out.transcript_commitment);
+    std::vector<std::array<gf::Fp, 4>> tags;
+    for (uint32_t row = 0; row < plan.trace_rows;) {
+        if (!plan.rows[row].active) break;
+        const uint32_t event = plan.rows[row].event;
+        const auto& message = all_messages[event];
+        alg_hash::State state{};
+        std::copy(
+            plan.rows[row].tag.begin(),
+            plan.rows[row].tag.end(),
+            state.begin() + safe::kSafeRateV12);
+        while (row < plan.trace_rows &&
+               plan.rows[row].active &&
+               plan.rows[row].event == event) {
+            const auto& rp = plan.rows[row];
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal = 8 * rp.block + lane;
+                const gf::Fp value =
+                    ordinal < message.size() ? message[ordinal] : 0;
+                out.columns[layout.Message(lane)][row] = U(value);
+                if (!PopulateTypedEventBitsV13(
+                        layout, out.columns, row, lane, value)) {
+                    return Fail(why, "v13_message_bits");
+                }
+                state[lane] = gf::Add(state[lane], value);
+            }
+            const auto p2 =
+                p2air::BuildWitness(layout.poseidon, state);
+            if (p2.row.size() != layout.poseidon.End()) {
+                return Fail(why, "v13_poseidon_witness_width");
+            }
+            for (uint32_t column = 0;
+                 column < p2.row.size(); ++column) {
+                out.columns[column][row] = p2.row[column];
+            }
+            state = p2.output;
+            if (rp.final) {
+                for (uint32_t lane = 0; lane < 4; ++lane) {
+                    out.columns[layout.Output(lane)][row] =
+                        U(all_outputs[event][lane]);
+                }
+            }
+            ++row;
+        }
+    }
+    for (uint32_t row = 0; row < plan.trace_rows; ++row) {
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            out.columns[layout.QuerySeed(lane)][row] =
+                U(query_seed[lane]);
+        }
+    }
+
+    const auto challenges =
+        TypedEventCtlChallengesV13(relation_seed);
+    for (uint32_t ctl = 0; ctl < 2; ++ctl) {
+        const uint32_t acc = layout.ctl_acc_base + ctl;
+        const uint32_t inv = layout.ctl_inverse_base + ctl;
+        out.columns[acc][0] = Fp3::One();
+        for (uint32_t row = 0;
+             row + 1 < plan.trace_rows; ++row) {
+            const auto products =
+                TypedEventWitnessProductsV13(
+                    layout, out.columns, row,
+                    challenges[2 * ctl],
+                    challenges[2 * ctl + 1]);
+            if (gf::IsZero(products.second)) {
+                return Fail(why, "v13_ctl_denominator_zero");
+            }
+            out.columns[inv][row] =
+                gf::Inv(products.second);
+            out.columns[acc][row + 1] =
+                gf::Mul(
+                    out.columns[acc][row],
+                    gf::Mul(products.first,
+                            out.columns[inv][row]));
+        }
+        out.columns[inv][plan.trace_rows - 1] = Fp3::One();
+    }
+
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        for (uint32_t ordinal = 0;
+             ordinal < program[event].message.size(); ++ordinal) {
+            if (program[event].message[ordinal].binding !=
+                TypedSafeMessageBindingV13::ProofOwned) {
+                continue;
+            }
+            out.proof_owned_message_locations.push_back({
+                event, ordinal,
+                plan.first_row[event] + ordinal / 8,
+                layout.Message(ordinal % 8)});
+        }
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            out.output_locations.push_back({
+                event, program[event].kind,
+                plan.final_row[event],
+                layout.Output(lane), lane});
+        }
+    }
+    out.trace_rows = plan.trace_rows;
+    out.active_permutation_rows = plan.active_rows;
+    out.proof_owned_message_cells =
+        static_cast<uint32_t>(
+            out.proof_owned_message_locations.size());
+    out.semantic_receipt_cells = plan.semantic_count;
+    out.challenge_kinds_covered = plan.kinds_covered;
+    out.verifier_owned_preprocessed_columns =
+        static_cast<uint32_t>(out.cs.preprocessed.size());
+    out.proof_owned_preprocessed_columns = 0;
+    for (const auto& constraint : out.cs.constraints) {
+        out.max_algebraic_degree =
+            std::max(
+                out.max_algebraic_degree,
+                constraint.alg_degree);
+    }
+    out.violations =
+        CountViolationsV12(out.cs, out.columns);
+    out.unique_query_seed_event = true;
+    out.every_query_uses_seed_output =
+        plan.every_query_uses_seed;
+    out.complete_challenge_kind_coverage =
+        plan.kinds_covered ==
+        kTypedSafeEventRequiredKindsV13;
+    out.poseidon_relations_executable = true;
+    out.dual_fp3_receipt_ctl_terminal =
+        out.violations == 0;
+    out.proof_cells_are_ordinary_columns = true;
+    out.parent_owns_real_fri_relation = false;
+    out.normalized_child_cells_bound = false;
+    out.recursive_authority_ready = false;
+    out.valid =
+        out.violations == 0 &&
+        out.complete_challenge_kind_coverage &&
+        out.unique_query_seed_event &&
+        out.every_query_uses_seed_output &&
+        out.proof_owned_message_cells > 0 &&
+        out.semantic_receipt_cells ==
+            out.proof_owned_message_cells +
+            4 * program.size() &&
+        out.proof_owned_preprocessed_columns == 0;
+    out.note = out.valid
+        ? "typed SAFE event parent relation valid; normalized child-cell "
+          "copy-in remains open"
+        : "typed SAFE event parent relation invalid";
+    if (!out.valid) return Fail(why, "v13_event_constraints");
+    return true;
+}
+
+bool ProveTypedSafeEventParentV13(
+    const TypedSafeEventParentProductV13& product,
+    const uint256& relation_seed,
+    TypedSafeEventParentProofV13& out,
+    std::string* why)
+{
+    out = {};
+    if (!product.valid ||
+        product.normalized_child_cells_bound ||
+        product.recursive_authority_ready ||
+        product.violations != 0 ||
+        CountViolationsV12(product.cs, product.columns) != 0) {
+        return Fail(why, "v13_event_product_for_prove");
+    }
+    const auto proved =
+        aq::AirQuotientProveRows(
+            product.cs, product.columns, relation_seed);
+    if (!proved.ok || !proved.division_exact) {
+        return Fail(why, "v13_event_air_prove:" + proved.note);
+    }
+    out.program_root = product.program_root;
+    out.transcript_commitment =
+        product.transcript_commitment;
+    out.proof = proved.proof;
+    out.trace_rows = product.trace_rows;
+    out.event_count =
+        static_cast<uint32_t>(product.program.size());
+    out.canonical_proof_encoding =
+        CanonicalRowsProof(out.proof);
+    out.verified = false;
+    out.normalized_child_cells_bound = false;
+    out.recursive_authority_ready = false;
+    out.note =
+        "parent-owned FRI built; normalized child copy-in remains open";
+    if (!out.canonical_proof_encoding) {
+        out = {};
+        return Fail(why, "v13_event_noncanonical_proof");
+    }
+    return true;
+}
+
+bool VerifyTypedSafeEventParentProofV13(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const TypedSafeEventParentProofV13& proof,
+    const uint256& relation_seed,
+    std::string* why)
+{
+    const auto program_root =
+        CommitTypedSafeEventProgramV13(program);
+    if (proof.version != kTypedSafeEventParentVersionV13 ||
+        program_root == alg_hash::Digest{} ||
+        proof.program_root != program_root ||
+        !Canonical(proof.transcript_commitment) ||
+        proof.transcript_commitment == alg_hash::Digest{} ||
+        proof.event_count != program.size() ||
+        proof.normalized_child_cells_bound ||
+        proof.recursive_authority_ready ||
+        !CanonicalRowsProof(proof.proof)) {
+        return Fail(why, "v13_event_proof_envelope");
+    }
+    TypedEventPlanV13 plan;
+    aq::AirConstraintSystem<Fp3> cs;
+    if (!BuildTypedEventCsV13(
+            program, program_root,
+            proof.transcript_commitment, relation_seed,
+            plan, cs, nullptr, why) ||
+        proof.trace_rows != plan.trace_rows) {
+        return Fail(why, "v13_event_verifier_rebuild");
+    }
+    return aq::AirQuotientVerifyRows(
+        cs, proof.proof, relation_seed, why);
+}
+
 } // namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge
