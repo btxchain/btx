@@ -1338,7 +1338,7 @@ struct TypedEventPlanV13 {
 bool KnownTypedEventKindV13(TypedSafeChallengeKindV13 kind)
 {
     return static_cast<uint32_t>(kind) <=
-        kTypedSafeEventAuxQuerySeedKindV13;
+        kTypedSafeEventAuxFriSeedKindV13;
 }
 
 aht::RoleV12 ExpectedTypedEventRoleV13(
@@ -1362,6 +1362,8 @@ aht::RoleV12 ExpectedTypedEventRoleV13(
         return aht::RoleV12::TranscriptQueryCandidate;
     case TypedSafeChallengeKindV13::QuerySeed:
         return aht::RoleV12::TranscriptQuerySeed;
+    case TypedSafeChallengeKindV13::FriSeed:
+        return aht::RoleV12::TranscriptFriSeed;
     }
     return aht::RoleV12::TranscriptPadding;
 }
@@ -3593,6 +3595,242 @@ bool BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
         return Fail(
             why,
             "v13_multi_row_schedule_incomplete");
+    }
+    return true;
+}
+
+namespace {
+
+bool BuildNativeSplitRapSafeEventV2(
+    TypedSafeChallengeKindV13 kind,
+    aht::RoleV12 role,
+    const std::vector<gf::Fp>& message,
+    const alg_hash::Digest& expected_digest,
+    TypedSafeEventProgramV13& program,
+    TypedSafeEventWitnessV13& witness,
+    std::string* why)
+{
+    program = {};
+    witness = {};
+    if ((kind !=
+             TypedSafeChallengeKindV13::AirLambda &&
+         kind !=
+             TypedSafeChallengeKindV13::FriSeed) ||
+        role != ExpectedTypedEventRoleV13(kind) ||
+        message.empty() ||
+        !Canonical(expected_digest)) {
+        return Fail(
+            why,
+            "v13_split_rap_event_input");
+    }
+    static constexpr char kDomain[] =
+        "BTX_RC_AIRQ_SPLIT_RAP_SAFE_V2";
+    program.kind = kind;
+    program.role = role;
+    program.application_domain.assign(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+    program.message.reserve(message.size());
+    witness.message.reserve(message.size());
+    for (gf::Fp value : message) {
+        if (!Canonical(value)) {
+            return Fail(
+                why,
+                "v13_split_rap_event_noncanonical");
+        }
+        program.message.push_back(
+            TypedEventProofCellV13());
+        witness.message.push_back(value);
+    }
+    alg_hash::Digest digest{};
+    if (!NativeTypedEventDigestV13(
+            program, witness, nullptr,
+            digest, why) ||
+        digest != expected_digest) {
+        return Fail(
+            why,
+            "v13_split_rap_event_digest");
+    }
+    return true;
+}
+
+} // namespace
+
+bool BuildNativeSplitRapSafeEventsV2(
+    const aq::AirConstraintSystem<gf::Fp3>& cs,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    NativeSplitRapSafeEventsV2& out,
+    std::string* why)
+{
+    out = {};
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeV2Replay(
+            cs, proof,
+            expected_base_column_indices,
+            public_fs_seed, out.replay, why) ||
+        !out.replay.native_verified) {
+        out = {};
+        return Fail(
+            why,
+            "v13_split_rap_native_replay");
+    }
+    out.native_outer_verified = true;
+    out.air_lambda_exactly_materialized =
+        BuildNativeSplitRapSafeEventV2(
+            TypedSafeChallengeKindV13::AirLambda,
+            aht::RoleV12::TranscriptAirLambda,
+            out.replay.air_lambda_message,
+            out.replay.air_lambda_digest,
+            out.program[0], out.witness[0], why);
+    if (!out.air_lambda_exactly_materialized) {
+        out = {};
+        return false;
+    }
+    out.fri_seed_exactly_materialized =
+        BuildNativeSplitRapSafeEventV2(
+            TypedSafeChallengeKindV13::FriSeed,
+            aht::RoleV12::TranscriptFriSeed,
+            out.replay.fri_seed_message,
+            out.replay.fri_seed_digest,
+            out.program[1], out.witness[1], why);
+    if (!out.fri_seed_exactly_materialized) {
+        out = {};
+        return false;
+    }
+    out.outputs_match_native_consumers =
+        gf::Eq(
+            out.replay.air_lambda,
+            proof.air_constraint_lambda) &&
+        Fri3AlgDigestToUint256(
+            out.replay.fri_seed_digest) ==
+            out.replay.fri_seed &&
+        !out.replay.fri_seed.IsNull();
+    out.valid =
+        out.native_outer_verified &&
+        out.air_lambda_exactly_materialized &&
+        out.fri_seed_exactly_materialized &&
+        out.outputs_match_native_consumers;
+    out.note = out.valid
+        ? "native SAFE V2 outer events exactly materialized"
+        : "native SAFE V2 outer event materialization failed";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "v13_split_rap_event_incomplete");
+    }
+    return true;
+}
+
+bool BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
+    const aq::AirConstraintSystem<gf::Fp3>& cs,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    NativeSplitRapMultiRowTypedSafeScheduleV2& out,
+    std::string* why)
+{
+    out = {};
+    if (!BuildNativeSplitRapSafeEventsV2(
+            cs, proof,
+            expected_base_column_indices,
+            public_fs_seed, out.outer, why) ||
+        !BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
+            proof.batch,
+            out.outer.replay.fri_seed,
+            out.child, why)) {
+        out = {};
+        return Fail(
+            why,
+            "v13_split_rap_multi_row_replay");
+    }
+    out.child_seed_derived_from_outer_replay =
+        out.outer.replay.native_verified &&
+        !out.outer.replay.fri_seed.IsNull() &&
+        out.child.native_proof_verified;
+
+    out.program.reserve(
+        out.outer.program.size() +
+        out.child.program.size());
+    out.witness.reserve(
+        out.outer.witness.size() +
+        out.child.witness.size());
+    out.program.insert(
+        out.program.end(),
+        out.outer.program.begin(),
+        out.outer.program.end());
+    out.program.insert(
+        out.program.end(),
+        out.child.program.begin(),
+        out.child.program.end());
+    out.witness.insert(
+        out.witness.end(),
+        out.outer.witness.begin(),
+        out.outer.witness.end());
+    out.witness.insert(
+        out.witness.end(),
+        out.child.witness.begin(),
+        out.child.witness.end());
+
+    const std::array<
+        TypedSafeChallengeKindV13, 9>
+        required{{
+            TypedSafeChallengeKindV13::AirLambda,
+            TypedSafeChallengeKindV13::
+                BatchCoefficient,
+            TypedSafeChallengeKindV13::OodZ1,
+            TypedSafeChallengeKindV13::OodZ2,
+            TypedSafeChallengeKindV13::DeepWeight1,
+            TypedSafeChallengeKindV13::DeepWeight2,
+            TypedSafeChallengeKindV13::FoldBeta,
+            TypedSafeChallengeKindV13::
+                QueryCandidate,
+            TypedSafeChallengeKindV13::QuerySeed,
+        }};
+    out.complete_challenge_kind_coverage =
+        std::all_of(
+            required.begin(), required.end(),
+            [&](TypedSafeChallengeKindV13 kind) {
+                return std::any_of(
+                    out.program.begin(),
+                    out.program.end(),
+                    [&](const auto& event) {
+                        return event.kind == kind;
+                    });
+            }) &&
+        std::count_if(
+            out.program.begin(),
+            out.program.end(),
+            [](const auto& event) {
+                return event.kind ==
+                    TypedSafeChallengeKindV13::FriSeed;
+            }) == 1 &&
+        CommitTypedSafeEventProgramV13(
+            out.program) != alg_hash::Digest{};
+
+    out.normalized_child_cells_bound = false;
+    out.same_parent_child_seed_feedback = false;
+    out.recursively_consumed = false;
+    out.valid =
+        out.outer.valid &&
+        out.child.valid &&
+        out.child_seed_derived_from_outer_replay &&
+        out.complete_challenge_kind_coverage &&
+        out.program.size() == out.witness.size() &&
+        !out.normalized_child_cells_bound &&
+        !out.same_parent_child_seed_feedback &&
+        !out.recursively_consumed;
+    out.note = out.valid
+        ? "outer SAFE V2 and nested multi-row V13 schedules composed; "
+          "same-parent proof aliases and child-seed feedback remain"
+        : "outer/multi-row SAFE schedule composition failed";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "v13_split_rap_multi_row_incomplete");
     }
     return true;
 }

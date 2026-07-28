@@ -1485,4 +1485,211 @@ BOOST_AUTO_TEST_CASE(
     }
 }
 
+BOOST_AUTO_TEST_CASE(
+    outer_safe_v2_and_multi_row_v13_form_one_typed_parent_program)
+{
+    namespace rc = matmul::v4::rc;
+    constexpr uint32_t N = 8;
+    const uint256 seed = TestSeed(0x761);
+    std::vector<std::vector<gf::Fp3>> columns(
+        4, std::vector<gf::Fp3>(
+               N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[0][row] =
+            gf::Fp3::FromFp(
+                gf::FromU64(
+                    3 + 2 * row + row * row));
+        columns[1][row] =
+            gf::Fp3::FromFp(
+                gf::FromU64(7 + 5 * row));
+    }
+    const auto make_cs =
+        [](const gf::Fp3& relation_challenge) {
+            aq::AirConstraintSystem<gf::Fp3> cs;
+            cs.n_rows = N;
+            cs.n_columns = 4;
+            aq::AirConstraint<gf::Fp3> relation;
+            relation.name =
+                "test.safe_v2_parent_relation";
+            relation.kind =
+                aq::AirKind::kEverywhere;
+            relation.alg_degree = 1;
+            relation.eval =
+                [relation_challenge](
+                    const auto& cur,
+                    const auto&) {
+                    return gf::Sub(
+                        cur[2],
+                        gf::Add(
+                            cur[0],
+                            gf::Mul(
+                                relation_challenge,
+                                cur[1])));
+                };
+            cs.constraints.push_back(
+                std::move(relation));
+            aq::AirConstraint<gf::Fp3> transition;
+            transition.name =
+                "test.safe_v2_parent_next";
+            transition.kind =
+                aq::AirKind::kTransition;
+            transition.alg_degree = 1;
+            transition.eval =
+                [](const auto& cur,
+                   const auto& next) {
+                    return gf::Sub(
+                        next[3],
+                        gf::Add(cur[3], cur[2]));
+                };
+            cs.constraints.push_back(
+                std::move(transition));
+            return cs;
+        };
+    const std::vector<uint32_t> base_indices{0, 1};
+    const auto shape_cs =
+        make_cs(gf::Fp3::Zero());
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            shape_cs, columns, base_indices);
+    BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+    const uint256 relation_digest =
+        aq::AirChallengeDigest(
+            seed,
+            "test_safe_v2_parent_relation",
+            {r0.base_row_commitment},
+            {N, 4});
+    const gf::Fp3 relation_challenge =
+        gf::FromChallengeBytes3(
+            relation_digest.data());
+    auto cs = make_cs(relation_challenge);
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[2][row] =
+            gf::Add(
+                columns[0][row],
+                gf::Mul(
+                    relation_challenge,
+                    columns[1][row]));
+        if (row + 1 < N) {
+            columns[3][row + 1] =
+                gf::Add(
+                    columns[3][row],
+                    columns[2][row]);
+        }
+    }
+    cs.preprocessed.emplace_back(
+        1, columns[1]);
+    cs.preprocessed_pin_ood = true;
+    cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns = base_indices,
+        .root = r0.base_row_commitment,
+    });
+
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices,
+            seed, {}, &r0);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    bridge::
+        NativeSplitRapMultiRowTypedSafeScheduleV2
+            schedule;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::
+            BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
+                cs, proved.proof, base_indices,
+                seed, schedule, &why),
+        why);
+    BOOST_CHECK(schedule.valid);
+    BOOST_CHECK(schedule.outer.valid);
+    BOOST_CHECK(schedule.child.valid);
+    BOOST_CHECK(
+        schedule.child_seed_derived_from_outer_replay);
+    BOOST_CHECK(
+        schedule.complete_challenge_kind_coverage);
+    BOOST_REQUIRE_GT(schedule.program.size(), 2U);
+    BOOST_CHECK(
+        schedule.program[0].kind ==
+        bridge::TypedSafeChallengeKindV13::AirLambda);
+    BOOST_CHECK(
+        schedule.program[1].kind ==
+        bridge::TypedSafeChallengeKindV13::FriSeed);
+    BOOST_CHECK(
+        schedule.program[2].kind ==
+        bridge::TypedSafeChallengeKindV13::OodZ1);
+    BOOST_CHECK(!schedule.normalized_child_cells_bound);
+    BOOST_CHECK(!schedule.same_parent_child_seed_feedback);
+    BOOST_CHECK(!schedule.recursively_consumed);
+
+    bridge::TypedSafeEventParentProductV13 parent;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildTypedSafeEventParentV13(
+            schedule.program, schedule.witness,
+            TestSeed(0x762), parent, &why),
+        why);
+    BOOST_CHECK(parent.valid);
+    BOOST_CHECK(
+        parent.complete_challenge_kind_coverage);
+    BOOST_CHECK_EQUAL(
+        parent.challenge_kinds_covered,
+        bridge::kTypedSafeEventRequiredKindsV13);
+    BOOST_CHECK_EQUAL(parent.violations, 0U);
+    BOOST_CHECK(!parent.normalized_child_cells_bound);
+    BOOST_CHECK(!parent.recursive_authority_ready);
+    BOOST_TEST_MESSAGE(
+        "SAFE_V2_MULTI_ROW_TYPED_PARENT events="
+        << schedule.program.size()
+        << " rows=" << parent.trace_rows
+        << " cols=" << parent.cs.n_columns
+        << " constraints="
+        << parent.cs.constraints.size()
+        << " proof_cells="
+        << parent.proof_owned_message_cells
+        << " max_degree="
+        << parent.max_algebraic_degree);
+
+    {
+        auto bad = proved.proof;
+        bad.air_constraint_lambda =
+            gf::Add(
+                bad.air_constraint_lambda,
+                gf::Fp3::One());
+        bridge::
+            NativeSplitRapMultiRowTypedSafeScheduleV2
+                rejected;
+        BOOST_CHECK(
+            !bridge::
+                BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
+                    cs, bad, base_indices,
+                    seed, rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+    {
+        auto bad = proved.proof;
+        bad.batch.queries.front().index ^= 1U;
+        bridge::
+            NativeSplitRapMultiRowTypedSafeScheduleV2
+                rejected;
+        BOOST_CHECK(
+            !bridge::
+                BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
+                    cs, bad, base_indices,
+                    seed, rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+    {
+        bridge::
+            NativeSplitRapMultiRowTypedSafeScheduleV2
+                rejected;
+        BOOST_CHECK(
+            !bridge::
+                BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
+                    cs, proved.proof, base_indices,
+                    TestSeed(0x763), rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()

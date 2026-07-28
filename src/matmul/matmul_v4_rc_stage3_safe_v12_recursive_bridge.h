@@ -313,6 +313,7 @@ inline constexpr uint32_t kTypedSafeEventCtlLanesV13 = 2;
 inline constexpr uint32_t kTypedSafeEventHighAndStepsV13 = 6;
 inline constexpr uint32_t kTypedSafeEventRequiredKindsV13 = 8;
 inline constexpr uint32_t kTypedSafeEventAuxQuerySeedKindV13 = 8;
+inline constexpr uint32_t kTypedSafeEventAuxFriSeedKindV13 = 9;
 
 enum class TypedSafeChallengeKindV13 : uint8_t {
     AirLambda = 0,
@@ -324,6 +325,7 @@ enum class TypedSafeChallengeKindV13 : uint8_t {
     FoldBeta = 6,
     QueryCandidate = 7,
     QuerySeed = kTypedSafeEventAuxQuerySeedKindV13,
+    FriSeed = kTypedSafeEventAuxFriSeedKindV13,
 };
 
 enum class TypedSafeMessageBindingV13 : uint8_t {
@@ -532,6 +534,65 @@ BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
     const Fri3AlgMultiRowBatchProof& proof,
     const uint256& child_fs_seed,
     NativeFri3AlgMultiRowTypedSafeScheduleV13& out,
+    std::string* why = nullptr);
+
+/**
+ * Exact outer Split-RAP SAFE V2 replay adapter. Both `airq_lambda` and the
+ * final child-FRI seed are exported only after the complete native outer
+ * verifier (including its nested multi-row V13 proof) accepts.
+ */
+struct NativeSplitRapSafeEventsV2 {
+    aq::AirQuotientSplitRapSafeReplayV2 replay;
+    std::array<TypedSafeEventProgramV13, 2> program;
+    std::array<TypedSafeEventWitnessV13, 2> witness;
+    bool native_outer_verified{false};
+    bool air_lambda_exactly_materialized{false};
+    bool fri_seed_exactly_materialized{false};
+    bool outputs_match_native_consumers{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildNativeSplitRapSafeEventsV2(
+    const aq::AirConstraintSystem<gf::Fp3>& cs,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    NativeSplitRapSafeEventsV2& out,
+    std::string* why = nullptr);
+
+/**
+ * Honest composition audit for the outer SAFE V2 events and its exact
+ * nested multi-row SAFE V13 transcript. The child seed is derived from the
+ * native outer replay and passed directly into the child verifier adapter.
+ *
+ * This closes native event materialization, not the final in-parent copy
+ * relation: normalized proof-cell aliases and the outer-digest -> child-seed
+ * equality chip remain explicit false flags.
+ */
+struct NativeSplitRapMultiRowTypedSafeScheduleV2 {
+    NativeSplitRapSafeEventsV2 outer;
+    NativeFri3AlgMultiRowTypedSafeScheduleV13 child;
+    std::vector<TypedSafeEventProgramV13> program;
+    std::vector<TypedSafeEventWitnessV13> witness;
+    bool child_seed_derived_from_outer_replay{false};
+    bool complete_challenge_kind_coverage{false};
+    bool normalized_child_cells_bound{false};
+    bool same_parent_child_seed_feedback{false};
+    bool recursively_consumed{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool
+BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
+    const aq::AirConstraintSystem<gf::Fp3>& cs,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    NativeSplitRapMultiRowTypedSafeScheduleV2& out,
     std::string* why = nullptr);
 
 /**
