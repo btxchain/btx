@@ -19,12 +19,14 @@ namespace cb = constraint_bytecode;
 namespace cw = constant_width_bytecode_air;
 namespace rba = recursive_bytecode_air;
 namespace sites = soundness_scenarios;
+namespace topo = universal_topology;
 
 inline constexpr uint16_t kProductionAliManifestVersionV1 = 1;
 inline constexpr uint32_t kProductionAliFamilyCountV1 = 28;
 inline constexpr uint32_t kProductionAliQueriesV1 = 192;
 inline constexpr uint32_t kProductionAliPaddedQueryRowsV1 = 256;
 inline constexpr uint32_t kProductionAliCompiledColumnsV1 = 53;
+inline constexpr uint16_t kProductionAliAssessmentVersionV2 = 2;
 
 /**
  * Exact verifier-support inventory for one canonical production family.
@@ -149,6 +151,21 @@ struct ProductionAliManifestV1 {
 BuildProductionAliManifestV1();
 
 /**
+ * Hardened derivation entry point for the registered production sources.
+ *
+ * Unlike BuildProductionAliManifestV1, this accepts an explicit source vector
+ * so adversarial tests and registry callers can prove that malformed source
+ * sets fail before they become an ALI manifest.  It validates each bytecode
+ * table (including opcode/register/degree recomputation), rejects structural
+ * stubs, and then requires exact equality to the canonical family registry.
+ */
+[[nodiscard]] bool BuildProductionAliManifestFromSourcesV1(
+    const sites::ProductionProofSiteManifest& site_manifest,
+    const std::vector<topo::ProductionFamilyProgramSourceV1>& sources,
+    ProductionAliManifestV1& out,
+    std::string* why = nullptr);
+
+/**
  * Commitment to the exact ordered inventory.  Every uint64 and every
  * Goldilocks digest limb is encoded as (lo32, hi32); raw x+p field aliases
  * are rejected instead of canonicalized.
@@ -160,6 +177,97 @@ ComputeProductionAliManifestCommitmentV1(
 /** Fail-closed equality to a freshly derived canonical manifest. */
 [[nodiscard]] bool ValidateProductionAliManifestV1(
     const ProductionAliManifestV1& manifest,
+    std::string* why = nullptr);
+
+/** Per-role aggregation of the exact canonical family bytecode inventory. */
+struct ProductionAliRoleAssessmentV2 {
+    RCStage3RelationRole role{};
+    uint32_t family_count{0};
+    uint32_t semantic_complete_families{0};
+    uint32_t semantic_partial_families{0};
+    uint32_t required_semantic_endpoints{0};
+    uint32_t locally_complete_semantic_endpoints{0};
+    uint64_t source_constraints{0};
+    uint64_t source_instructions{0};
+    uint64_t compiled_constraints{0};
+    uint64_t compiled_instructions{0};
+    uint32_t maximum_source_degree{0};
+    uint64_t maximum_source_composed_degree{0};
+    uint32_t maximum_source_n_lde{0};
+    uint32_t maximum_compiled_degree{0};
+    uint64_t maximum_compiled_composed_degree{0};
+    uint32_t maximum_compiled_n_lde{0};
+    uint32_t residual_obligations_or{0};
+    bool every_table_non_stub{false};
+    bool every_degree_bound_derived{false};
+    /** Every registered family for this role is locally complete. This is
+     * weaker than complete endpoint coverage. */
+    bool every_family_locally_complete{false};
+    /** Every endpoint required by the role is named by a locally complete
+     * canonical family, with no partial-family residual. */
+    bool complete_endpoint_coverage{false};
+
+    bool operator==(
+        const ProductionAliRoleAssessmentV2&) const = default;
+};
+
+/**
+ * Role-complete view of the V1 family manifest.
+ *
+ * The existing 28-family ALI manifest proves local bytecode/degree/domain
+ * coverage.  V2 makes the semantic distinction impossible to miss: all 14
+ * roles have canonical non-stub ProgramTables, but 14 of 28 families remain
+ * partial and the locally complete families cover only 14 of 52 required
+ * endpoints.  No role therefore has complete semantic endpoint coverage.
+ */
+struct ProductionAliAssessmentV2 {
+    uint16_t version{kProductionAliAssessmentVersionV2};
+    ah::Digest family_manifest_commitment{};
+    std::vector<ProductionAliRoleAssessmentV2> roles;
+    std::vector<topo::ProductionPartialFamilyResidualV1>
+        partial_family_residuals;
+    uint32_t family_count{0};
+    uint32_t role_count{0};
+    uint32_t semantic_complete_families{0};
+    uint32_t semantic_partial_families{0};
+    uint32_t fully_semantic_roles{0};
+    uint32_t required_semantic_endpoints{0};
+    uint32_t locally_complete_semantic_endpoints{0};
+    uint64_t source_constraints{0};
+    uint64_t source_instructions{0};
+    uint64_t compiled_constraints{0};
+    uint64_t compiled_instructions{0};
+    bool exact_28_family_registry{false};
+    bool exact_14_role_order{false};
+    bool every_registered_role_has_program{false};
+    bool every_program_table_non_stub{false};
+    bool every_degree_bound_derived{false};
+    bool local_ali_assessment_complete{false};
+    bool semantic_relation_manifest_complete{false};
+    bool recursive_root_consumed{false};
+    bool production_authority{false};
+    std::string note;
+    ah::Digest commitment{};
+
+    bool operator==(
+        const ProductionAliAssessmentV2&) const = default;
+};
+
+[[nodiscard]] bool BuildProductionAliAssessmentFromSourcesV2(
+    const sites::ProductionProofSiteManifest& site_manifest,
+    const std::vector<topo::ProductionFamilyProgramSourceV1>& sources,
+    ProductionAliAssessmentV2& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] ProductionAliAssessmentV2
+BuildProductionAliAssessmentV2();
+
+[[nodiscard]] ah::Digest
+ComputeProductionAliAssessmentCommitmentV2(
+    const ProductionAliAssessmentV2& assessment);
+
+[[nodiscard]] bool ValidateProductionAliAssessmentV2(
+    const ProductionAliAssessmentV2& assessment,
     std::string* why = nullptr);
 
 inline constexpr bool kProductionAliManifestRecursiveRootConsumedV1 =

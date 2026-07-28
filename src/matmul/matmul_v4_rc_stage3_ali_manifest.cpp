@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <set>
 #include <string_view>
 
 namespace matmul::v4::rc::stage3_ali_manifest {
@@ -25,6 +26,8 @@ constexpr gf::Fp kOmega2_32 =
     UINT64_C(0x185629dcda58878c);
 constexpr std::string_view kCommitmentDomain =
     "BTX_RC_STAGE3_PRODUCTION_ALI_MANIFEST_V1";
+constexpr std::string_view kAssessmentCommitmentDomainV2 =
+    "BTX_RC_STAGE3_PRODUCTION_ALI_ASSESSMENT_V2";
 
 bool Fail(std::string* why, const char* reason)
 {
@@ -614,45 +617,86 @@ BuildProductionAliManifestV1()
         topo::BuildProductionFamilyProgramSourcesV1(
             site_manifest);
     std::string why;
-    if (site_manifest.entries.size() !=
-            kProductionAliFamilyCountV1 ||
-        sources.size() !=
-            kProductionAliFamilyCountV1 ||
-        !topo::ValidateProductionFamilyProgramSourcesV1(
-            site_manifest, sources, &why)) {
+    if (!BuildProductionAliManifestFromSourcesV1(
+            site_manifest, sources, out, &why)) {
         out.note =
             "stage3:ali_manifest:canonical_sources:" +
             why;
-        return out;
+    }
+    return out;
+}
+
+bool BuildProductionAliManifestFromSourcesV1(
+    const sites::ProductionProofSiteManifest& site_manifest,
+    const std::vector<topo::ProductionFamilyProgramSourceV1>& sources,
+    ProductionAliManifestV1& out,
+    std::string* why)
+{
+    out = {};
+    std::string local_why;
+    if (!sites::ValidateProductionProofSiteManifest(
+            site_manifest, &local_why) ||
+        site_manifest.entries.size() !=
+            kProductionAliFamilyCountV1 ||
+        sources.size() !=
+            kProductionAliFamilyCountV1) {
+        return Fail(why, "source_set_shape");
+    }
+
+    std::array<bool, kProductionAliFamilyCountV1> seen{};
+    for (uint32_t index = 0; index < sources.size(); ++index) {
+        const auto& source = sources[index];
+        const auto& site = site_manifest.entries[index];
+        if (source.family_index >= seen.size() ||
+            seen[source.family_index] ||
+            source.family_index != index ||
+            source.kind != site.kind ||
+            source.role != site.role ||
+            source.program.role != source.role ||
+            static_cast<uint32_t>(source.kind) != index + 1U) {
+            return Fail(why, "source_identity_or_duplicate");
+        }
+        seen[source.family_index] = true;
+        if (!cb::ValidateProgramTable(
+                source.program, &local_why)) {
+            if (why != nullptr) {
+                *why =
+                    "stage3:ali_manifest:source_program_" +
+                    std::to_string(index) + ":" + local_why;
+            }
+            return false;
+        }
+        if (StructuralStub(source)) {
+            return Fail(why, "source_structural_stub");
+        }
+    }
+    if (!topo::ValidateProductionFamilyProgramSourcesV1(
+            site_manifest, sources, &local_why)) {
+        if (why != nullptr) {
+            *why =
+                "stage3:ali_manifest:source_transplant:" +
+                local_why;
+        }
+        return false;
     }
 
     out.families.reserve(sources.size());
-    bool exact_order = true;
-    for (uint32_t index = 0;
-         index < sources.size();
-         ++index) {
-        const auto& source = sources[index];
-        const auto& site = site_manifest.entries[index];
-        exact_order =
-            exact_order &&
-            source.family_index == index &&
-            source.kind == site.kind &&
-            source.role == site.role &&
-            static_cast<uint32_t>(source.kind) ==
-                index + 1;
+    for (uint32_t index = 0; index < sources.size(); ++index) {
         ProductionAliFamilyV1 family;
-        if (!DeriveFamily(source, family, &why)) {
-            out.note =
-                "stage3:ali_manifest:family:" +
-                std::to_string(index) + ":" + why;
-            return out;
+        if (!DeriveFamily(sources[index], family, &local_why)) {
+            if (why != nullptr) {
+                *why =
+                    "stage3:ali_manifest:family:" +
+                    std::to_string(index) + ":" + local_why;
+            }
+            out = {};
+            return false;
         }
         AccumulateMaxima(out, family);
         out.families.push_back(std::move(family));
     }
 
     out.exact_28_family_order =
-        exact_order &&
         out.families.size() ==
             kProductionAliFamilyCountV1;
     out.every_source_key_derived =
@@ -725,7 +769,7 @@ BuildProductionAliManifestV1()
         kProductionAliManifestAuthorityV1;
     out.note = out.local_manifest_complete
         ? "stage3:ali_manifest:exact_28_family_local_inventory;"
-          "recursive_root_consumption_pending"
+          "14_partial_semantic_families_and_recursive_root_pending"
         : "stage3:ali_manifest:local_inventory_incomplete";
     out.commitment =
         ComputeProductionAliManifestCommitmentV1(out);
@@ -734,8 +778,16 @@ BuildProductionAliManifestV1()
         out.local_manifest_complete = false;
         out.note =
             "stage3:ali_manifest:commitment";
+        return Fail(why, "commitment");
     }
-    return out;
+    if (!out.local_manifest_complete) {
+        return Fail(why, "local_inventory");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:ali_manifest:canonical_non_stub_sources";
+    }
+    return true;
 }
 
 ah::Digest
@@ -951,6 +1003,429 @@ bool ValidateProductionAliManifestV1(
         ComputeProductionAliManifestCommitmentV1(
             manifest)) {
         return Fail(why, "commitment");
+    }
+    return true;
+}
+
+bool BuildProductionAliAssessmentFromSourcesV2(
+    const sites::ProductionProofSiteManifest& site_manifest,
+    const std::vector<topo::ProductionFamilyProgramSourceV1>& sources,
+    ProductionAliAssessmentV2& out,
+    std::string* why)
+{
+    out = {};
+    ProductionAliManifestV1 families;
+    std::string local_why;
+    if (!BuildProductionAliManifestFromSourcesV1(
+            site_manifest, sources, families, &local_why)) {
+        if (why != nullptr) {
+            *why =
+                "stage3:ali_assessment_v2:families:" +
+                local_why;
+        }
+        return false;
+    }
+    const auto migration =
+        topo::AssessProductionFamilyProgramMigrationV1(
+            sources);
+    out.family_manifest_commitment =
+        families.commitment;
+    out.family_count =
+        static_cast<uint32_t>(families.families.size());
+    out.semantic_complete_families =
+        families.semantic_complete_families;
+    out.semantic_partial_families =
+        families.semantic_partial_families;
+    out.source_constraints =
+        families.total_source_constraints;
+    out.source_instructions =
+        families.total_source_instructions;
+    out.compiled_constraints =
+        families.total_compiled_constraints;
+    out.compiled_instructions =
+        families.total_compiled_instructions;
+    out.partial_family_residuals =
+        migration.partial_residuals;
+
+    const auto& role_order = RCStage3UnifiedRoleOrder();
+    out.roles.reserve(role_order.size());
+    for (const RCStage3RelationRole role : role_order) {
+        ProductionAliRoleAssessmentV2 summary;
+        summary.role = role;
+        const auto& required =
+            RequiredRCStage3RelationEndpoints(role);
+        summary.required_semantic_endpoints =
+            static_cast<uint32_t>(required.size());
+        std::set<uint16_t> complete_endpoints;
+        summary.every_table_non_stub = true;
+        summary.every_degree_bound_derived = true;
+        for (const auto& family : families.families) {
+            if (family.role != role) continue;
+            ++summary.family_count;
+            summary.semantic_complete_families +=
+                family.semantic_relation_complete;
+            summary.semantic_partial_families +=
+                !family.semantic_relation_complete;
+            summary.source_constraints +=
+                family.source_constraint_count;
+            summary.source_instructions +=
+                family.source_instruction_count;
+            summary.compiled_constraints +=
+                family.compiled_constraint_count;
+            summary.compiled_instructions +=
+                family.compiled_instruction_count;
+            summary.maximum_source_degree =
+                std::max(
+                    summary.maximum_source_degree,
+                    family.source_max_degree);
+            summary.maximum_source_composed_degree =
+                std::max(
+                    summary.maximum_source_composed_degree,
+                    family.source_max_composed_degree);
+            summary.maximum_source_n_lde =
+                std::max(
+                    summary.maximum_source_n_lde,
+                    family.source_n_lde);
+            summary.maximum_compiled_degree =
+                std::max(
+                    summary.maximum_compiled_degree,
+                    family.compiled_max_degree);
+            summary.maximum_compiled_composed_degree =
+                std::max(
+                    summary.maximum_compiled_composed_degree,
+                    family.compiled_max_composed_degree);
+            summary.maximum_compiled_n_lde =
+                std::max(
+                    summary.maximum_compiled_n_lde,
+                    family.compiled_n_lde);
+            summary.every_table_non_stub =
+                summary.every_table_non_stub &&
+                family.source_table_non_stub &&
+                family.source_table_canonical &&
+                family.compiled_table_canonical;
+            summary.every_degree_bound_derived =
+                summary.every_degree_bound_derived &&
+                family.challenge_class_degree_checked &&
+                family.quotient_and_lde_bounds_derived;
+            if (family.semantic_relation_complete) {
+                for (const uint16_t endpoint :
+                     family.semantic_endpoints) {
+                    const bool registered =
+                        std::any_of(
+                            required.begin(), required.end(),
+                            [endpoint](const auto candidate) {
+                                return
+                                    static_cast<uint16_t>(
+                                        candidate) ==
+                                    endpoint;
+                            });
+                    if (!registered ||
+                        !complete_endpoints.insert(
+                            endpoint).second) {
+                        return Fail(
+                            why,
+                            "v2_endpoint_coverage_registry");
+                    }
+                }
+            }
+            if (!family.semantic_relation_complete) {
+                const auto residual = std::find_if(
+                    migration.partial_residuals.begin(),
+                    migration.partial_residuals.end(),
+                    [&family](const auto& item) {
+                        return item.kind == family.kind;
+                    });
+                if (residual ==
+                    migration.partial_residuals.end()) {
+                    return Fail(
+                        why,
+                        "v2_partial_family_without_residual");
+                }
+                summary.residual_obligations_or |=
+                    residual->missing_obligations;
+            }
+        }
+        if (summary.family_count == 0) {
+            summary.every_table_non_stub = false;
+            summary.every_degree_bound_derived = false;
+        }
+        summary.locally_complete_semantic_endpoints =
+            static_cast<uint32_t>(
+                complete_endpoints.size());
+        summary.every_family_locally_complete =
+            summary.family_count != 0 &&
+            summary.semantic_partial_families == 0 &&
+            summary.residual_obligations_or == 0;
+        summary.complete_endpoint_coverage =
+            summary.every_family_locally_complete &&
+            summary.locally_complete_semantic_endpoints ==
+                summary.required_semantic_endpoints;
+        out.fully_semantic_roles +=
+            summary.complete_endpoint_coverage;
+        out.required_semantic_endpoints +=
+            summary.required_semantic_endpoints;
+        out.locally_complete_semantic_endpoints +=
+            summary.locally_complete_semantic_endpoints;
+        out.roles.push_back(std::move(summary));
+    }
+
+    out.role_count =
+        static_cast<uint32_t>(out.roles.size());
+    out.exact_28_family_registry =
+        families.exact_28_family_order &&
+        out.family_count ==
+            kProductionAliFamilyCountV1;
+    out.exact_14_role_order =
+        out.roles.size() ==
+            kRCStage3UnifiedRoleCount;
+    if (out.exact_14_role_order) {
+        for (uint32_t index = 0;
+             index < out.roles.size(); ++index) {
+            if (out.roles[index].role != role_order[index]) {
+                out.exact_14_role_order = false;
+                break;
+            }
+        }
+    }
+    out.every_registered_role_has_program =
+        out.exact_14_role_order &&
+        std::all_of(
+            out.roles.begin(), out.roles.end(),
+            [](const auto& role) {
+                return role.family_count != 0;
+            });
+    out.every_program_table_non_stub =
+        families.every_source_non_stub &&
+        std::all_of(
+            out.roles.begin(), out.roles.end(),
+            [](const auto& role) {
+                return role.every_table_non_stub;
+            });
+    out.every_degree_bound_derived =
+        families.every_challenge_degree_checked &&
+        families.every_quotient_lde_bound_derived &&
+        std::all_of(
+            out.roles.begin(), out.roles.end(),
+            [](const auto& role) {
+                return role.every_degree_bound_derived;
+            });
+    out.local_ali_assessment_complete =
+        families.local_manifest_complete &&
+        out.exact_28_family_registry &&
+        out.exact_14_role_order &&
+        out.every_registered_role_has_program &&
+        out.every_program_table_non_stub &&
+        out.every_degree_bound_derived;
+    out.semantic_relation_manifest_complete =
+        out.local_ali_assessment_complete &&
+        out.semantic_complete_families ==
+            kProductionAliFamilyCountV1 &&
+        out.semantic_partial_families == 0 &&
+        out.partial_family_residuals.empty() &&
+        out.fully_semantic_roles ==
+            kRCStage3UnifiedRoleCount &&
+        out.required_semantic_endpoints ==
+            kRCStage3RelationClosureEndpointCount &&
+        out.locally_complete_semantic_endpoints ==
+            out.required_semantic_endpoints;
+    out.recursive_root_consumed = false;
+    out.production_authority = false;
+    out.note =
+        out.semantic_relation_manifest_complete
+        ? "stage3:ali_assessment_v2:semantic_manifest_complete;"
+          "recursive_root_pending"
+        : "stage3:ali_assessment_v2:local_bytecode_and_degree_manifest_"
+          "complete;14_of_28_families_partial;14_of_52_semantic_"
+          "endpoints_locally_covered;0_of_14_roles_endpoint_complete;"
+          "recursive_root_pending";
+    out.commitment =
+        ComputeProductionAliAssessmentCommitmentV2(out);
+    if (DigestZero(out.commitment)) {
+        out.local_ali_assessment_complete = false;
+        return Fail(why, "v2_commitment");
+    }
+    if (!out.local_ali_assessment_complete) {
+        return Fail(why, "v2_local_assessment");
+    }
+    if (why != nullptr) {
+        *why = out.note;
+    }
+    return true;
+}
+
+ProductionAliAssessmentV2
+BuildProductionAliAssessmentV2()
+{
+    ProductionAliAssessmentV2 out;
+    const auto site_manifest =
+        sites::BuildProductionProofSiteManifest(
+            sites::SelectedProductionProofSitePolicy());
+    const auto sources =
+        topo::BuildProductionFamilyProgramSourcesV1(
+            site_manifest);
+    std::string why;
+    if (!BuildProductionAliAssessmentFromSourcesV2(
+            site_manifest, sources, out, &why)) {
+        out.note =
+            "stage3:ali_assessment_v2:canonical_build:" +
+            why;
+    }
+    return out;
+}
+
+ah::Digest ComputeProductionAliAssessmentCommitmentV2(
+    const ProductionAliAssessmentV2& assessment)
+{
+    if (assessment.version !=
+            kProductionAliAssessmentVersionV2 ||
+        assessment.roles.size() !=
+            kRCStage3UnifiedRoleCount ||
+        assessment.partial_family_residuals.size() >
+            kProductionAliFamilyCountV1 ||
+        !DigestCanonical(
+            assessment.family_manifest_commitment) ||
+        DigestZero(
+            assessment.family_manifest_commitment)) {
+        return {};
+    }
+    std::vector<gf::Fp> preimage;
+    preimage.reserve(
+        64 + assessment.roles.size() * 32 +
+        assessment.partial_family_residuals.size() * 2);
+    AppendBytes(preimage, kAssessmentCommitmentDomainV2);
+    AppendU32(preimage, assessment.version);
+    if (!AppendDigest(
+            preimage,
+            assessment.family_manifest_commitment)) {
+        return {};
+    }
+    AppendU32(
+        preimage,
+        static_cast<uint32_t>(assessment.roles.size()));
+    for (const auto& role : assessment.roles) {
+        AppendU32(
+            preimage,
+            static_cast<uint32_t>(role.role));
+        AppendU32(preimage, role.family_count);
+        AppendU32(
+            preimage,
+            role.semantic_complete_families);
+        AppendU32(
+            preimage,
+            role.semantic_partial_families);
+        AppendU32(
+            preimage,
+            role.required_semantic_endpoints);
+        AppendU32(
+            preimage,
+            role.locally_complete_semantic_endpoints);
+        AppendU64(preimage, role.source_constraints);
+        AppendU64(preimage, role.source_instructions);
+        AppendU64(preimage, role.compiled_constraints);
+        AppendU64(preimage, role.compiled_instructions);
+        AppendU32(preimage, role.maximum_source_degree);
+        AppendU64(
+            preimage,
+            role.maximum_source_composed_degree);
+        AppendU32(preimage, role.maximum_source_n_lde);
+        AppendU32(preimage, role.maximum_compiled_degree);
+        AppendU64(
+            preimage,
+            role.maximum_compiled_composed_degree);
+        AppendU32(preimage, role.maximum_compiled_n_lde);
+        AppendU32(
+            preimage,
+            role.residual_obligations_or);
+        AppendBool(preimage, role.every_table_non_stub);
+        AppendBool(
+            preimage,
+            role.every_degree_bound_derived);
+        AppendBool(
+            preimage,
+            role.every_family_locally_complete);
+        AppendBool(
+            preimage,
+            role.complete_endpoint_coverage);
+    }
+    AppendU32(
+        preimage,
+        static_cast<uint32_t>(
+            assessment.partial_family_residuals.size()));
+    for (const auto& residual :
+         assessment.partial_family_residuals) {
+        AppendU32(
+            preimage,
+            static_cast<uint32_t>(residual.kind));
+        AppendU32(
+            preimage,
+            residual.missing_obligations);
+    }
+    AppendU32(preimage, assessment.family_count);
+    AppendU32(preimage, assessment.role_count);
+    AppendU32(
+        preimage,
+        assessment.semantic_complete_families);
+    AppendU32(
+        preimage,
+        assessment.semantic_partial_families);
+    AppendU32(preimage, assessment.fully_semantic_roles);
+    AppendU32(
+        preimage,
+        assessment.required_semantic_endpoints);
+    AppendU32(
+        preimage,
+        assessment.locally_complete_semantic_endpoints);
+    AppendU64(preimage, assessment.source_constraints);
+    AppendU64(preimage, assessment.source_instructions);
+    AppendU64(preimage, assessment.compiled_constraints);
+    AppendU64(preimage, assessment.compiled_instructions);
+    AppendBool(
+        preimage,
+        assessment.exact_28_family_registry);
+    AppendBool(preimage, assessment.exact_14_role_order);
+    AppendBool(
+        preimage,
+        assessment.every_registered_role_has_program);
+    AppendBool(
+        preimage,
+        assessment.every_program_table_non_stub);
+    AppendBool(
+        preimage,
+        assessment.every_degree_bound_derived);
+    AppendBool(
+        preimage,
+        assessment.local_ali_assessment_complete);
+    AppendBool(
+        preimage,
+        assessment.semantic_relation_manifest_complete);
+    AppendBool(
+        preimage,
+        assessment.recursive_root_consumed);
+    AppendBool(preimage, assessment.production_authority);
+    AppendBytes(preimage, assessment.note);
+    return ah::SpongeHashFp(preimage);
+}
+
+bool ValidateProductionAliAssessmentV2(
+    const ProductionAliAssessmentV2& assessment,
+    std::string* why)
+{
+    const ProductionAliAssessmentV2 expected =
+        BuildProductionAliAssessmentV2();
+    if (!expected.local_ali_assessment_complete ||
+        expected.semantic_relation_manifest_complete ||
+        expected.recursive_root_consumed ||
+        expected.production_authority ||
+        DigestZero(expected.commitment)) {
+        return Fail(why, "v2_canonical_build");
+    }
+    if (!(assessment == expected)) {
+        return Fail(why, "v2_canonical_equality");
+    }
+    if (assessment.commitment !=
+        ComputeProductionAliAssessmentCommitmentV2(
+            assessment)) {
+        return Fail(why, "v2_commitment");
     }
     return true;
 }

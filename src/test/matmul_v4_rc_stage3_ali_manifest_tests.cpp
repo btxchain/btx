@@ -7,10 +7,17 @@
 #include <matmul/matmul_v4_rc_stage3_ali_manifest.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace ali =
     matmul::v4::rc::stage3_ali_manifest;
+namespace cb =
+    matmul::v4::rc::constraint_bytecode;
 namespace gf = matmul::v4::rc::gkr_field;
+namespace sites =
+    matmul::v4::rc::soundness_scenarios;
+namespace topo =
+    matmul::v4::rc::universal_topology;
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_ali_manifest_tests)
@@ -31,6 +38,30 @@ void Recommit(ali::ProductionAliManifestV1& manifest)
     manifest.commitment =
         ali::ComputeProductionAliManifestCommitmentV1(
             manifest);
+}
+
+cb::ProgramTable OneColumnStub(
+    matmul::v4::rc::RCStage3RelationRole role)
+{
+    cb::ProgramTable table;
+    table.role = role;
+    table.current_width = 1;
+    table.next_width = 1;
+    cb::Program program;
+    program.role = role;
+    program.current_width = 1;
+    program.next_width = 1;
+    program.instructions.push_back({
+        cb::Opcode::Current, 0, 0, gf::Fp3::Zero()});
+    table.programs.push_back(std::move(program));
+    return table;
+}
+
+void Recommit(ali::ProductionAliAssessmentV2& assessment)
+{
+    assessment.commitment =
+        ali::ComputeProductionAliAssessmentCommitmentV2(
+            assessment);
 }
 
 } // namespace
@@ -289,6 +320,259 @@ BOOST_AUTO_TEST_CASE(
                 domain.coset_shift,
                 gf::Fp3::FromFp(7)));
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    role_complete_v2_assessment_reports_exact_current_semantic_gap)
+{
+    const auto assessment =
+        ali::BuildProductionAliAssessmentV2();
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        ali::ValidateProductionAliAssessmentV2(
+            assessment, &why),
+        why);
+    BOOST_REQUIRE(
+        assessment.local_ali_assessment_complete);
+    BOOST_CHECK(assessment.exact_28_family_registry);
+    BOOST_CHECK(assessment.exact_14_role_order);
+    BOOST_CHECK(
+        assessment.every_registered_role_has_program);
+    BOOST_CHECK(
+        assessment.every_program_table_non_stub);
+    BOOST_CHECK(
+        assessment.every_degree_bound_derived);
+    BOOST_CHECK_EQUAL(assessment.family_count, 28U);
+    BOOST_CHECK_EQUAL(assessment.role_count, 14U);
+    BOOST_CHECK_EQUAL(
+        assessment.semantic_complete_families, 14U);
+    BOOST_CHECK_EQUAL(
+        assessment.semantic_partial_families, 14U);
+    BOOST_CHECK_EQUAL(
+        assessment.partial_family_residuals.size(), 14U);
+    BOOST_CHECK_EQUAL(assessment.fully_semantic_roles, 0U);
+    BOOST_CHECK_EQUAL(
+        assessment.required_semantic_endpoints, 52U);
+    BOOST_CHECK_EQUAL(
+        assessment.locally_complete_semantic_endpoints, 14U);
+    BOOST_CHECK(
+        !assessment.semantic_relation_manifest_complete);
+    BOOST_CHECK(!assessment.recursive_root_consumed);
+    BOOST_CHECK(!assessment.production_authority);
+    BOOST_CHECK(!DigestZero(assessment.commitment));
+
+    uint32_t families = 0;
+    uint64_t source_constraints = 0;
+    uint64_t source_instructions = 0;
+    uint64_t compiled_constraints = 0;
+    uint64_t compiled_instructions = 0;
+    uint32_t required_endpoints = 0;
+    uint32_t complete_endpoints = 0;
+    for (const auto& role : assessment.roles) {
+        BOOST_CHECK_GT(role.family_count, 0U);
+        BOOST_CHECK(role.every_table_non_stub);
+        BOOST_CHECK(role.every_degree_bound_derived);
+        BOOST_CHECK_GT(role.required_semantic_endpoints, 0U);
+        BOOST_CHECK_LT(
+            role.locally_complete_semantic_endpoints,
+            role.required_semantic_endpoints);
+        if (role.semantic_partial_families == 0) {
+            BOOST_CHECK(role.every_family_locally_complete);
+            BOOST_CHECK_EQUAL(
+                role.residual_obligations_or, 0U);
+        } else {
+            BOOST_CHECK(
+                !role.every_family_locally_complete);
+            BOOST_CHECK_NE(
+                role.residual_obligations_or, 0U);
+        }
+        BOOST_CHECK(!role.complete_endpoint_coverage);
+        families += role.family_count;
+        required_endpoints +=
+            role.required_semantic_endpoints;
+        complete_endpoints +=
+            role.locally_complete_semantic_endpoints;
+        source_constraints += role.source_constraints;
+        source_instructions += role.source_instructions;
+        compiled_constraints += role.compiled_constraints;
+        compiled_instructions += role.compiled_instructions;
+    }
+    BOOST_CHECK_EQUAL(families, assessment.family_count);
+    BOOST_CHECK_EQUAL(
+        required_endpoints,
+        assessment.required_semantic_endpoints);
+    BOOST_CHECK_EQUAL(
+        complete_endpoints,
+        assessment.locally_complete_semantic_endpoints);
+    BOOST_CHECK_EQUAL(
+        source_constraints, assessment.source_constraints);
+    BOOST_CHECK_EQUAL(
+        source_instructions, assessment.source_instructions);
+    BOOST_CHECK_EQUAL(
+        compiled_constraints,
+        assessment.compiled_constraints);
+    BOOST_CHECK_EQUAL(
+        compiled_instructions,
+        assessment.compiled_instructions);
+
+    BOOST_TEST_MESSAGE(
+        "ALI role assessment: families="
+        << assessment.family_count
+        << " roles=" << assessment.role_count
+        << " complete_families="
+        << assessment.semantic_complete_families
+        << " partial_families="
+        << assessment.semantic_partial_families
+        << " fully_semantic_roles="
+        << assessment.fully_semantic_roles
+        << " complete_endpoints="
+        << assessment.locally_complete_semantic_endpoints
+        << "/" << assessment.required_semantic_endpoints
+        << " source_constraints="
+        << assessment.source_constraints
+        << " source_instructions="
+        << assessment.source_instructions
+        << " compiled_constraints="
+        << assessment.compiled_constraints
+        << " compiled_instructions="
+        << assessment.compiled_instructions);
+}
+
+BOOST_AUTO_TEST_CASE(
+    source_assessment_rejects_missing_duplicate_stub_unknown_opcode_degree_overflow_and_transplant)
+{
+    const auto site_manifest =
+        sites::BuildProductionProofSiteManifest(
+            sites::SelectedProductionProofSitePolicy());
+    const auto canonical =
+        topo::BuildProductionFamilyProgramSourcesV1(
+            site_manifest);
+    BOOST_REQUIRE_EQUAL(canonical.size(), 28U);
+
+    const auto rejected = [&](const auto& sources,
+                              const std::string& tag) {
+        ali::ProductionAliAssessmentV2 assessment;
+        std::string why;
+        BOOST_CHECK_MESSAGE(
+            !ali::BuildProductionAliAssessmentFromSourcesV2(
+                site_manifest, sources, assessment, &why),
+            tag);
+        BOOST_CHECK_MESSAGE(!why.empty(), tag);
+    };
+
+    auto missing = canonical;
+    missing.erase(missing.begin() + 7);
+    rejected(missing, "missing");
+
+    auto duplicate = canonical;
+    duplicate[7] = duplicate[6];
+    rejected(duplicate, "duplicate");
+
+    auto partial = std::find_if(
+        canonical.begin(), canonical.end(),
+        [](const auto& source) {
+            return !source.semantic_relation_complete;
+        });
+    BOOST_REQUIRE(partial != canonical.end());
+    auto stub = canonical;
+    const size_t partial_index =
+        static_cast<size_t>(partial - canonical.begin());
+    stub[partial_index].program =
+        OneColumnStub(stub[partial_index].role);
+    rejected(stub, "stub");
+
+    auto unknown_opcode = canonical;
+    BOOST_REQUIRE(
+        !unknown_opcode[0].program.programs.empty());
+    BOOST_REQUIRE(
+        !unknown_opcode[0].program.programs[0]
+             .instructions.empty());
+    unknown_opcode[0].program.programs[0]
+        .instructions[0].opcode =
+        static_cast<cb::Opcode>(255);
+    rejected(unknown_opcode, "unknown_opcode");
+
+    auto degree_overflow = canonical;
+    auto& overflow_program =
+        degree_overflow[0].program.programs[0];
+    overflow_program.instructions.clear();
+    overflow_program.instructions.push_back({
+        cb::Opcode::Current, 0, 0, gf::Fp3::Zero()});
+    uint32_t previous = 0;
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        overflow_program.instructions.push_back({
+            cb::Opcode::Mul,
+            previous,
+            previous,
+            gf::Fp3::Zero()});
+        previous = static_cast<uint32_t>(
+            overflow_program.instructions.size() - 1);
+    }
+    overflow_program.declared_degree =
+        std::numeric_limits<uint32_t>::max();
+    rejected(degree_overflow, "degree_overflow");
+
+    size_t transplant_from = canonical.size();
+    size_t transplant_to = canonical.size();
+    for (size_t i = 0; i < canonical.size(); ++i) {
+        for (size_t j = i + 1; j < canonical.size(); ++j) {
+            if (canonical[i].role == canonical[j].role) {
+                transplant_from = i;
+                transplant_to = j;
+                break;
+            }
+        }
+        if (transplant_from != canonical.size()) break;
+    }
+    BOOST_REQUIRE(transplant_from != canonical.size());
+    auto transplant = canonical;
+    std::swap(
+        transplant[transplant_from].program,
+        transplant[transplant_to].program);
+    rejected(transplant, "same_role_program_transplant");
+}
+
+BOOST_AUTO_TEST_CASE(
+    v2_summary_omission_duplicate_transplant_and_false_completion_reject)
+{
+    const auto honest =
+        ali::BuildProductionAliAssessmentV2();
+    BOOST_REQUIRE(honest.local_ali_assessment_complete);
+
+    auto omitted = honest;
+    omitted.roles.erase(omitted.roles.begin() + 3);
+    Recommit(omitted);
+    BOOST_CHECK(DigestZero(omitted.commitment));
+    BOOST_CHECK(
+        !ali::ValidateProductionAliAssessmentV2(omitted));
+
+    auto duplicate = honest;
+    duplicate.roles[3] = duplicate.roles[2];
+    Recommit(duplicate);
+    BOOST_REQUIRE(!DigestZero(duplicate.commitment));
+    BOOST_CHECK(
+        !ali::ValidateProductionAliAssessmentV2(duplicate));
+
+    auto transplanted_degree = honest;
+    ++transplanted_degree.roles[2].maximum_source_degree;
+    Recommit(transplanted_degree);
+    BOOST_REQUIRE(
+        !DigestZero(transplanted_degree.commitment));
+    BOOST_CHECK(
+        !ali::ValidateProductionAliAssessmentV2(
+            transplanted_degree));
+
+    auto false_complete = honest;
+    false_complete.semantic_partial_families = 0;
+    false_complete.fully_semantic_roles = 14;
+    false_complete.partial_family_residuals.clear();
+    false_complete.semantic_relation_manifest_complete = true;
+    false_complete.production_authority = true;
+    Recommit(false_complete);
+    BOOST_REQUIRE(!DigestZero(false_complete.commitment));
+    BOOST_CHECK(
+        !ali::ValidateProductionAliAssessmentV2(
+            false_complete));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
