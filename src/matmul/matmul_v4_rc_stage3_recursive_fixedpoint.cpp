@@ -3479,6 +3479,12 @@ DeserializeNormalizedAlgAirBatchCodecV1(
     const std::vector<unsigned char>& encoded)
 {
     if (proof.version ==
+            kRCFri3AlgSafeQ192K2ProofVersionV13) {
+        return
+            DeserializeFri3AlgSafeQ192K2V13BatchProof(
+                encoded);
+    }
+    if (proof.version ==
             kRCFri3AlgP2Q192K2ProofVersionV10) {
         return
             DeserializeFri3AlgP2Q192K2V10BatchProof(

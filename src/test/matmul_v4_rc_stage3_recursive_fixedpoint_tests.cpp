@@ -4871,6 +4871,53 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
 
+BOOST_AUTO_TEST_CASE(
+    normalized_batch_codec_is_safe_v13_version_separated)
+{
+    std::vector<std::vector<gf::Fp3>> columns(
+        2, std::vector<gf::Fp3>(8, gf::Fp3::Zero()));
+    for (uint32_t column = 0; column < columns.size();
+         ++column) {
+        for (uint32_t row = 0; row < columns[column].size();
+             ++row) {
+            columns[column][row] = gf::Fp3{
+                gf::FromU64(1 + 19 * column + 7 * row),
+                gf::FromU64(3 + 11 * column + 5 * row),
+                gf::FromU64(9 + 13 * column + 17 * row)};
+        }
+    }
+    const uint256 seed = Seed(0xB7);
+    const auto proved =
+        rc::Fri3AlgSafeQ192K2V13BatchCommit(
+            columns, seed, 7);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE_EQUAL(
+        proved.proof.version,
+        rc::kRCFri3AlgSafeQ192K2ProofVersionV13);
+
+    std::string why;
+    fp::NormalizedAlgAirBatchCodecMapV1 map;
+    BOOST_REQUIRE_MESSAGE(
+        fp::BuildNormalizedAlgAirBatchCodecMapV1(
+            proved.proof, map, &why),
+        why);
+    BOOST_CHECK(map.valid);
+    BOOST_CHECK(map.canonical_roundtrip);
+    BOOST_CHECK(map.no_trailing_bytes);
+
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE_EQUAL(
+        rc::SerializeFri3AlgBatchProof(
+            proved.proof, encoded),
+        encoded.size());
+    auto v10_statement = proved.proof;
+    v10_statement.version =
+        rc::kRCFri3AlgP2Q192K2ProofVersionV10;
+    BOOST_CHECK(
+        !fp::ValidateNormalizedAlgAirBatchCodecBytesV1(
+            v10_statement, encoded, &why));
+}
+
 // g2 chip B wire: hierarchical composed nodes call
 // ExecuteNarrowMultiChildL2FriConsumeV1 (shape-only prove=false stand-in
 // boolean children). Replaces crypto_join_pending. Opt-in via
