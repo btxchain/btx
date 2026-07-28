@@ -100,6 +100,23 @@ uint64_t EncodedChildBytes(
     return total;
 }
 
+uint64_t EncodedWitnessBytes(
+    const product::WitnessProductProofV2& proof)
+{
+    uint64_t total = 0;
+    for (const auto& child : proof.children) {
+        std::vector<unsigned char> bytes;
+        const size_t encoded =
+            matmul::v4::rc::air_quotient::
+                SerializeAirQuotientSplitRapRowsProof(
+                    child.quotient, bytes);
+        BOOST_REQUIRE_EQUAL(encoded, bytes.size());
+        BOOST_REQUIRE_NE(encoded, 0U);
+        total += encoded;
+    }
+    return total;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -275,6 +292,150 @@ BOOST_AUTO_TEST_CASE(
                prove_end - prove_begin).count()
         << " verify_ms="
         << std::chrono::duration_cast<std::chrono::milliseconds>(
+               verify_end - verify_begin).count());
+}
+
+BOOST_AUTO_TEST_CASE(
+    all_11_private_boundary_exports_and_split_rap_attacks_reject)
+{
+    const auto inputs = Inputs();
+    const uint256 seed = Seed(0xe0);
+    product::WitnessProductProofV2 proof;
+    std::string why;
+    const auto prove_begin =
+        std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        product::ProveWitnessProductV2(
+            inputs, seed, proof, &why),
+        why);
+    const auto prove_end =
+        std::chrono::steady_clock::now();
+    const auto verify_begin =
+        std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        product::VerifyWitnessProductV2(
+            inputs, seed, proof, &why),
+        why);
+    const auto verify_end =
+        std::chrono::steady_clock::now();
+    BOOST_REQUIRE_EQUAL(proof.children.size(), 3U);
+    BOOST_CHECK_EQUAL(
+        proof.children[0].statement.source_instance_count, 9U);
+    BOOST_CHECK_EQUAL(
+        proof.children[0].statement.sink_instance_count, 7U);
+    BOOST_CHECK_EQUAL(
+        proof.children[0].statement.scheduled_instances, 16U);
+    BOOST_CHECK_EQUAL(
+        proof.children[1].statement.source_instance_count, 1U);
+    BOOST_CHECK_EQUAL(
+        proof.children[1].statement.sink_instance_count, 0U);
+    BOOST_CHECK_EQUAL(
+        proof.children[1].statement.scheduled_instances, 1U);
+    BOOST_CHECK_EQUAL(
+        proof.children[2].statement.source_instance_count, 1U);
+    BOOST_CHECK_EQUAL(
+        proof.children[2].statement.sink_instance_count, 0U);
+    BOOST_CHECK_EQUAL(
+        proof.children[2].statement.scheduled_instances, 1U);
+    BOOST_CHECK(proof.manifest.canonical_family_order);
+    BOOST_CHECK(proof.manifest.private_boundary_inputs);
+    BOOST_CHECK(proof.manifest.private_boundary_outputs);
+    BOOST_CHECK(proof.manifest.proof_owned_input_exports);
+    BOOST_CHECK(proof.manifest.proof_owned_output_exports);
+    BOOST_CHECK(proof.manifest.dual_fp3_output_producer_ctl);
+    BOOST_CHECK(
+        proof.manifest.auxiliary_sinks_equality_constrained);
+    BOOST_CHECK(proof.manifest.private_chacha_internal_ssa_ctl);
+    BOOST_CHECK(
+        !proof.manifest.caller_manifests_bound_to_role_proofs);
+    BOOST_CHECK(!proof.manifest.consumer_ctl_linked);
+    BOOST_CHECK(!proof.manifest.recursive_child_consumed);
+    BOOST_CHECK(!proof.manifest.semantic_closure);
+    BOOST_CHECK(!proof.manifest.production_authority);
+    for (const auto& family : proof.manifest.families) {
+        BOOST_CHECK_NE(family.fragment_count, 0U);
+        BOOST_CHECK(!family.proof_owned_input_root.IsNull());
+        BOOST_CHECK(
+            !family.proof_owned_output_producer_root.IsNull());
+    }
+
+    // A free-output attempt mutates a genuinely authenticated R0 query
+    // opening.  Outer metadata is unchanged, so the Split-RAP/FRI child
+    // verifier must reject it.
+    auto free_output = proof;
+    BOOST_REQUIRE(
+        !free_output.children[0]
+             .quotient.batch.queries.empty());
+    BOOST_REQUIRE(
+        !free_output.children[0]
+             .quotient.batch.queries[0]
+             .group_rows.empty());
+    BOOST_REQUIRE(
+        !free_output.children[0]
+             .quotient.batch.queries[0]
+             .group_rows[0].values.empty());
+    free_output.children[0]
+        .quotient.batch.queries[0]
+        .group_rows[0].values[0] =
+        gf::Add(
+            free_output.children[0]
+                .quotient.batch.queries[0]
+                .group_rows[0].values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, free_output, &why));
+    BOOST_CHECK_NE(
+        why.find("witness_verify_child"), std::string::npos);
+
+    // A different valid caller manifest cannot reuse the stale children.
+    auto alternate_inputs = inputs;
+    alternate_inputs[0].payload = Sha(61);
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        alternate_inputs, seed, proof, &why));
+
+    // The R0 source root is statement-bound and group-0-root-bound.
+    auto source_root = proof;
+    source_root.children[0]
+        .statement.base_row_commitment.begin()[0] ^= 1U;
+    source_root.manifest.children[0]
+        .base_row_commitment =
+        source_root.children[0]
+            .statement.base_row_commitment;
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, source_root, &why));
+
+    auto omitted = proof;
+    omitted.children[0]
+        .statement.source_instance_count -= 1U;
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, omitted, &why));
+    auto duplicated = proof;
+    duplicated.children.push_back(duplicated.children.back());
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, duplicated, &why));
+
+    uint32_t decoded = 0;
+    BOOST_CHECK(!product::DecodeCanonicalU32V1(
+        gf::Fp3{gf::kP + 7U, 0, 0},
+        decoded, &why));
+
+    // Child proof from a distinct FS statement is stale.
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, Seed(0xe1), proof, &why));
+
+    const uint64_t proof_bytes =
+        EncodedWitnessBytes(proof);
+    BOOST_TEST_MESSAGE(
+        "FIXED_PROGRAM_WITNESS_PRODUCT all11 children="
+        << proof.children.size()
+        << " proof_bytes=" << proof_bytes
+        << " prove_ms="
+        << std::chrono::duration_cast<
+               std::chrono::milliseconds>(
+               prove_end - prove_begin).count()
+        << " verify_ms="
+        << std::chrono::duration_cast<
+               std::chrono::milliseconds>(
                verify_end - verify_begin).count());
 }
 
