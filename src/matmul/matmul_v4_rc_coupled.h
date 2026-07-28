@@ -414,6 +414,37 @@ struct RCCoupGemmProofWitnessView {
     const int64_t* gemm_y{nullptr};
 };
 
+/** Borrowed view of the nonce-derived initial state before barrier zero. */
+struct RCCoupInitialStateProofWitnessView {
+    uint32_t state_cells{0};
+    const int8_t* state{nullptr};
+};
+
+/** Borrowed input/output view of the public balanced permutation. */
+struct RCCoupPermutationProofWitnessView {
+    uint32_t barrier{0};
+    uint32_t state_cells{0};
+    const int64_t* input{nullptr};
+    const int64_t* output{nullptr};
+};
+
+/** Borrowed input/output view of the complete all-to-all mix. */
+struct RCCoupMixProofWitnessView {
+    uint32_t barrier{0};
+    uint32_t state_cells{0};
+    const int64_t* input{nullptr};
+    const int64_t* output{nullptr};
+};
+
+/** Borrowed input/output view of one dependency-linked material round. */
+struct RCCoupMaterialExchangeProofWitnessView {
+    uint32_t barrier{0};
+    uint32_t round{0};
+    uint32_t state_cells{0};
+    const int64_t* input{nullptr};
+    const int64_t* output{nullptr};
+};
+
 /** Borrowed view of one completed coupled Extract/barrier transition. */
 struct RCCoupBarrierProofWitnessView {
     uint32_t barrier{0};
@@ -442,8 +473,16 @@ struct RCCoupEpisodeProofWitnessView {
 class RCCoupProofWitnessSink {
 public:
     virtual ~RCCoupProofWitnessSink() = default;
+    virtual void OnInitialState(
+        const RCCoupInitialStateProofWitnessView& view) = 0;
     virtual void OnGemm(
         const RCCoupGemmProofWitnessView& view) = 0;
+    virtual void OnPermutation(
+        const RCCoupPermutationProofWitnessView& view) = 0;
+    virtual void OnMix(
+        const RCCoupMixProofWitnessView& view) = 0;
+    virtual void OnMaterialExchange(
+        const RCCoupMaterialExchangeProofWitnessView& view) = 0;
     virtual void OnBarrier(
         const RCCoupBarrierProofWitnessView& view) = 0;
     virtual void OnEpisode(

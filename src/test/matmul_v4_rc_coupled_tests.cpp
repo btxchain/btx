@@ -87,9 +87,26 @@ struct CapturedCoupledBarrier {
     uint256 barrier_root{};
 };
 
+struct CapturedCoupledStage {
+    uint32_t barrier{0};
+    uint32_t ordinal{0};
+    std::vector<int64_t> input;
+    std::vector<int64_t> output;
+};
+
 class CapturingCoupledProofSink final
     : public rc::RCCoupProofWitnessSink {
 public:
+    void OnInitialState(
+        const rc::RCCoupInitialStateProofWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.state_cells != 0);
+        BOOST_REQUIRE(view.state != nullptr);
+        initial_state.assign(
+            view.state, view.state + view.state_cells);
+        ++initial_state_events;
+    }
+
     void OnGemm(
         const rc::RCCoupGemmProofWitnessView& view) override
     {
@@ -118,6 +135,30 @@ public:
             view.gemm_y,
             view.gemm_y + output_cells);
         gemms.push_back(std::move(captured));
+    }
+
+    void OnPermutation(
+        const rc::RCCoupPermutationProofWitnessView& view) override
+    {
+        CaptureStage(
+            view.barrier, 0, view.state_cells,
+            view.input, view.output, permutations);
+    }
+
+    void OnMix(
+        const rc::RCCoupMixProofWitnessView& view) override
+    {
+        CaptureStage(
+            view.barrier, 0, view.state_cells,
+            view.input, view.output, mixes);
+    }
+
+    void OnMaterialExchange(
+        const rc::RCCoupMaterialExchangeProofWitnessView& view) override
+    {
+        CaptureStage(
+            view.barrier, view.round, view.state_cells,
+            view.input, view.output, material_rounds);
     }
 
     void OnBarrier(
@@ -150,7 +191,29 @@ public:
         digest = view.coupled_digest;
     }
 
+    static void CaptureStage(
+        uint32_t barrier, uint32_t ordinal,
+        uint32_t state_cells, const int64_t* input,
+        const int64_t* output,
+        std::vector<CapturedCoupledStage>& destination)
+    {
+        BOOST_REQUIRE(state_cells != 0);
+        BOOST_REQUIRE(input != nullptr);
+        BOOST_REQUIRE(output != nullptr);
+        CapturedCoupledStage captured;
+        captured.barrier = barrier;
+        captured.ordinal = ordinal;
+        captured.input.assign(input, input + state_cells);
+        captured.output.assign(output, output + state_cells);
+        destination.push_back(std::move(captured));
+    }
+
+    uint32_t initial_state_events{0};
+    std::vector<int8_t> initial_state;
     std::vector<CapturedCoupledGemm> gemms;
+    std::vector<CapturedCoupledStage> permutations;
+    std::vector<CapturedCoupledStage> mixes;
+    std::vector<CapturedCoupledStage> material_rounds;
     std::vector<CapturedCoupledBarrier> barriers;
     uint32_t episode_events{0};
     uint256 bank_root{};
@@ -245,6 +308,14 @@ BOOST_AUTO_TEST_CASE(
         sink.barriers.size(), params.barriers);
     BOOST_REQUIRE_EQUAL(
         transcript.extracts.size(), params.barriers);
+    BOOST_CHECK_EQUAL(sink.initial_state_events, 1U);
+    BOOST_REQUIRE_EQUAL(sink.initial_state.size(), params.StateBytes());
+    BOOST_REQUIRE_EQUAL(sink.permutations.size(), params.barriers);
+    BOOST_REQUIRE_EQUAL(sink.mixes.size(), params.barriers);
+    BOOST_REQUIRE_EQUAL(
+        sink.material_rounds.size(),
+        static_cast<uint64_t>(params.barriers) *
+            options.exchange_rounds);
     BOOST_CHECK_EQUAL(sink.episode_events, 1U);
     BOOST_CHECK_EQUAL(sink.bank_root, transcript.bank_root);
     BOOST_CHECK(
@@ -286,6 +357,56 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK_EQUAL(
             captured.barrier_root,
             expected.barrier_root);
+
+        const auto& permutation = sink.permutations[i];
+        const auto& mix = sink.mixes[i];
+        BOOST_CHECK_EQUAL(permutation.barrier, i);
+        BOOST_CHECK_EQUAL(mix.barrier, i);
+        BOOST_CHECK(
+            permutation.output == mix.input);
+
+        std::vector<int64_t> summed(
+            params.StateBytes(), 0);
+        for (const auto& gemm : sink.gemms) {
+            if (gemm.barrier != i) continue;
+            const size_t lobe_begin =
+                static_cast<size_t>(gemm.lobe) *
+                params.rows_per_lobe *
+                params.lobe_width;
+            for (size_t cell = 0;
+                 cell < gemm.y.size(); ++cell) {
+                summed[lobe_begin + cell] += gemm.y[cell];
+            }
+        }
+        BOOST_CHECK(summed == permutation.input);
+
+        if (options.exchange_rounds == 0) {
+            BOOST_CHECK(
+                mix.output == captured.extract_input);
+        } else {
+            const size_t first =
+                i * options.exchange_rounds;
+            BOOST_CHECK(
+                mix.output ==
+                sink.material_rounds[first].input);
+            for (uint32_t round = 0;
+                 round < options.exchange_rounds; ++round) {
+                const auto& stage =
+                    sink.material_rounds[first + round];
+                BOOST_CHECK_EQUAL(stage.barrier, i);
+                BOOST_CHECK_EQUAL(stage.ordinal, round);
+                if (round != 0) {
+                    BOOST_CHECK(
+                        sink.material_rounds[
+                            first + round - 1].output ==
+                        stage.input);
+                }
+            }
+            BOOST_CHECK(
+                sink.material_rounds[
+                    first + options.exchange_rounds - 1]
+                    .output == captured.extract_input);
+        }
     }
 }
 
@@ -521,13 +642,14 @@ BOOST_AUTO_TEST_CASE(rc_coup_unified_height_switch_activates_family_together)
     BOOST_CHECK_EQUAL(refined.nMatMulRCHeight, 150);
     BOOST_CHECK_EQUAL(refined.nMatMulRCCoupledHeight, 160);
 
-    // Default (no switch) keeps the whole family OFF on regtest and mainnet.
+    // Regtest intentionally exercises the RC/coupled workload from height
+    // 101, while public networks remain fail-closed. Succinct authority is a
+    // separate compile-time gate and is not implied by these finite toy
+    // workload heights.
     const auto reg_default =
         CreateChainParams(ArgsManager{}, ChainType::REGTEST)->GetConsensus();
-    BOOST_CHECK_EQUAL(reg_default.nMatMulRCHeight,
-                      std::numeric_limits<int32_t>::max());
-    BOOST_CHECK_EQUAL(reg_default.nMatMulRCCoupledHeight,
-                      std::numeric_limits<int32_t>::max());
+    BOOST_CHECK_EQUAL(reg_default.nMatMulRCHeight, 101);
+    BOOST_CHECK_EQUAL(reg_default.nMatMulRCCoupledHeight, 101);
     const auto main_default =
         CreateChainParams(ArgsManager{}, ChainType::MAIN)->GetConsensus();
     BOOST_CHECK_EQUAL(main_default.nMatMulRCHeight,

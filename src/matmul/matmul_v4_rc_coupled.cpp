@@ -360,12 +360,15 @@ void ApplyBalancedPermutationFromSeed(std::vector<int64_t>& s, const uint256& se
  * many dependency-linked XOR+permute rounds (V3). No-op when rounds==0.
  */
 void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma,
-                                 uint32_t barrier, const RCCoupOptions& options)
+                                 uint32_t barrier, const RCCoupOptions& options,
+                                 RCCoupProofWitnessSink* proof_sink = nullptr)
 {
     if (!options.material_exchange || options.exchange_rounds == 0) return;
     if (s.empty()) return;
     const auto& tags = RCCoupDomainTagsForVersion(options.transcript_version);
     for (uint32_t r = 0; r < options.exchange_rounds; ++r) {
+        std::vector<int64_t> input;
+        if (proof_sink != nullptr) input = s;
         const uint64_t fold = AccXorFold(s);
         const uint256 seed = ExchangeRoundSeed(sigma, barrier, r, fold, tags);
         {
@@ -375,6 +378,15 @@ void ApplyMaterialExchangeRounds(std::vector<int64_t>& s, const uint256& sigma,
         // Fresh XOF from the same seed for the balanced permutation (independent
         // of keystream consumption above).
         ApplyBalancedPermutationFromSeed(s, seed);
+        if (proof_sink != nullptr) {
+            proof_sink->OnMaterialExchange({
+                .barrier = barrier,
+                .round = r,
+                .state_cells = static_cast<uint32_t>(s.size()),
+                .input = input.data(),
+                .output = s.data(),
+            });
+        }
     }
 }
 
@@ -1244,6 +1256,12 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0, tile.data(),
                     lobe_stride0);
     }
+    if (proof_sink != nullptr) {
+        proof_sink->OnInitialState({
+            .state_cells = n,
+            .state = state.data(),
+        });
+    }
 
     std::vector<uint256> barrier_roots(params.barriers);
     // Checkpoint buffer: only Extracted active state survives barrier boundaries.
@@ -1362,14 +1380,34 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         // C3.b — nonce-derived balanced permutation over full active state.
         const auto pi = DeriveCoupledBalancedPermutation(sigma, b, params, tv);
         if (!IsBalancedPermutation(pi, n)) return uint256{};
+        std::vector<int64_t> permutation_input;
+        if (proof_sink != nullptr) permutation_input = acc;
         ApplyBalancedPermutation(acc, pi);
+        if (proof_sink != nullptr) {
+            proof_sink->OnPermutation({
+                .barrier = b,
+                .state_cells = n,
+                .input = permutation_input.data(),
+                .output = acc.data(),
+            });
+        }
 
         // C3.c — exact integer all-to-all mix (≥2 nonce-relabeled patterns).
         // Material exchange (default ON) absorbs exchange_rows into the mix domain.
+        std::vector<int64_t> mix_input;
+        if (proof_sink != nullptr) mix_input = acc;
         ApplyAllToAllMix(acc, sigma, b, n, options.material_exchange, options.exchange_rows,
                          RCCoupUseMixU64Wrap(params, options.force_signed_mix), &tags);
+        if (proof_sink != nullptr) {
+            proof_sink->OnMix({
+                .barrier = b,
+                .state_cells = n,
+                .input = mix_input.data(),
+                .output = acc.data(),
+            });
+        }
         // V3: digest-affecting XOR+permute rounds (no-op when exchange_rounds==0).
-        ApplyMaterialExchangeRounds(acc, sigma, b, options);
+        ApplyMaterialExchangeRounds(acc, sigma, b, options, proof_sink);
 
         // C3.d — non-affine Extract (lookup-argument-shaped for Stage E).
         const uint256 extract_seed =
