@@ -300,8 +300,11 @@ BOOST_AUTO_TEST_CASE(
             universal_program_registry_consumed_in_recursion);
     BOOST_CHECK(
         !audit.exact_selected_topology_manifest_derived);
+    // The exact canonical 28-family / 14-role bytecode and ALI-degree
+    // inventory is independently complete. Semantic endpoint closure and
+    // recursive registry consumption remain separate open reductions.
     BOOST_CHECK(
-        !audit.
+        audit.
             ali_degree_and_constraint_manifest_complete);
     BOOST_CHECK(
         !audit.

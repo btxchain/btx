@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
+#include <matmul/matmul_v4_rc_stage3_ali_manifest.h>
 #include <matmul/matmul_v4_rc_stage3_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_ctl.h>
 #include <matmul/matmul_v4_rc_stage3_episode.h>
@@ -889,7 +890,48 @@ AssessExecutableGlobalSoundnessLedgerV1(
     out.universal_program_registry_binding_defined = true;
     out.universal_program_registry_consumed_in_recursion =
         false;
-    out.ali_degree_and_constraint_manifest_complete = false;
+    // The ALI/degree inventory is a local reduction and is deliberately
+    // independent of both semantic relation closure and recursive registry
+    // consumption (those are separate fail-closed predicates below/above).
+    // Rebuild and validate both views from the canonical production sources:
+    //
+    //  * V1 derives every source/compiled constraint count, challenge class,
+    //    algebraic degree, quotient/LDE domain and coefficient cap for the
+    //    exact ordered 28-family Q192 inventory.
+    //  * V2 proves the same inventory covers all 14 registered roles with
+    //    canonical non-stub ProgramTables and derived degree bounds.
+    //
+    // This does not claim that the currently partial family programs close
+    // all 52 semantic endpoints; `semantic_relation_closure_complete` remains
+    // the independent predicate for exactly that obligation.
+    static const bool ali_degree_and_constraint_manifest_complete = [] {
+        const auto manifest =
+            stage3_ali_manifest::BuildProductionAliManifestV1();
+        const auto assessment =
+            stage3_ali_manifest::BuildProductionAliAssessmentV2();
+        return
+            stage3_ali_manifest::ValidateProductionAliManifestV1(
+                manifest, nullptr) &&
+            stage3_ali_manifest::ValidateProductionAliAssessmentV2(
+                assessment, nullptr) &&
+            manifest.local_manifest_complete &&
+            manifest.exact_28_family_order &&
+            manifest.every_source_non_stub &&
+            manifest.every_challenge_degree_checked &&
+            manifest.every_q192_row_bound_exact &&
+            manifest.every_quotient_lde_bound_derived &&
+            manifest.every_compiled_program_53_columns &&
+            manifest.every_family_within_cap &&
+            manifest.canonical_u32_injective_commitment &&
+            assessment.local_ali_assessment_complete &&
+            assessment.exact_28_family_registry &&
+            assessment.exact_14_role_order &&
+            assessment.every_registered_role_has_program &&
+            assessment.every_program_table_non_stub &&
+            assessment.every_degree_bound_derived;
+    }();
+    out.ali_degree_and_constraint_manifest_complete =
+        ali_degree_and_constraint_manifest_complete;
     const auto role_closure =
         CurrentRCStage3RelationClosureRoleAudit();
     out.ctl_export_and_terminal_reduction_complete =
@@ -1311,6 +1353,7 @@ AssessExecutableGlobalSoundnessLedgerV1(
         "sampled_terminal_fvt_not_implemented;"
         "canonical_heterogeneous_topology_exact;"
         "deprecated_width_product_rejected;"
+        "canonical_28_family_14_role_ali_degree_manifest_complete;"
         "canonical_known_union_above_100;"
         "authenticated_family_residual_fold_executable;"
         "family_residual_vm_binding_open;"
