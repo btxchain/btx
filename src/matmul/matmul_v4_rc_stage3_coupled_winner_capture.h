@@ -18,6 +18,8 @@ namespace matmul::v4::rc {
 
 inline constexpr uint16_t
     kRCStage3CoupledWinnerCaptureVersionV1 = 1;
+inline constexpr uint16_t
+    kRCStage3CoupledWinnerCaptureVersionV2 = 2;
 
 /**
  * One exact page occurrence in the immutable full-bank schedule.
@@ -111,7 +113,13 @@ struct RCStage3CoupledBarrierCaptureV1 {
  */
 struct RCStage3CoupledWinnerReceiptV1 {
     uint16_t version{
-        kRCStage3CoupledWinnerCaptureVersionV1};
+        kRCStage3CoupledWinnerCaptureVersionV2};
+    /**
+     * Immutable winner-header projection committed before the workload starts.
+     * It includes every header field except the terminal matmul_digest, which
+     * is not known until both work legs complete.
+     */
+    uint256 winner_header_precommit{};
     uint256 finalized_header_hash{};
     uint256 sigma{};
     int32_t height{-1};
@@ -142,14 +150,18 @@ struct RCStage3CoupledWinnerReceiptV1 {
 };
 
 [[nodiscard]] uint256
-CommitRCStage3CoupledWinnerContextV1(
-    const CBlockHeader& finalized_header,
+CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+    const CBlockHeader& header);
+
+[[nodiscard]] uint256
+CommitRCStage3CoupledWinnerContextV2(
+    const CBlockHeader& header,
     int32_t height,
     const RCCoupParams& params,
     const RCCoupOptions& options);
 
 [[nodiscard]] uint256
-CommitRCStage3CoupledWinnerReceiptV1(
+CommitRCStage3CoupledWinnerReceiptV2(
     const RCStage3CoupledWinnerReceiptV1& receipt);
 
 [[nodiscard]] uint256
@@ -171,6 +183,25 @@ CommitRCStage3CoupledBarrierCaptureV1(
  * deliberately refuses to report recursive proof closure.
  */
 [[nodiscard]] bool
+VerifyRCStage3CoupledWinnerReceiptV2(
+    const CBlockHeader& finalized_header,
+    int32_t height,
+    const RCCoupParams& params,
+    const RCCoupOptions& options,
+    const RCStage3CoupledWinnerReceiptV1& receipt,
+    std::string* why = nullptr);
+
+/**
+ * Temporary source-ABI aliases for the in-flight child-binding lane.
+ *
+ * Despite their historical names these accept version=2 receipts only. They
+ * provide no V1 wire compatibility and may be removed after all call sites
+ * migrate to the V2 names.
+ */
+[[nodiscard]] uint256
+CommitRCStage3CoupledWinnerReceiptV1(
+    const RCStage3CoupledWinnerReceiptV1& receipt);
+[[nodiscard]] bool
 VerifyRCStage3CoupledWinnerReceiptV1(
     const CBlockHeader& finalized_header,
     int32_t height,
@@ -180,11 +211,11 @@ VerifyRCStage3CoupledWinnerReceiptV1(
     std::string* why = nullptr);
 
 /**
- * Streaming sink attached to the winner's already-required CPU reseal.
+ * Streaming proof sink attached to the primary winner computation.
  *
  * Every callback is accepted only in the canonical oracle order.  Borrowed
  * arrays are hashed and, for one lobe at a time, accumulated synchronously.
- * The capture never invokes RecomputeCoupledPuzzleReference.
+ * The capture never replays or invokes RecomputeCoupledPuzzleReference.
  */
 class RCStage3CoupledWinnerCaptureV1 final
     : public RCCoupProofWitnessSink {
@@ -213,6 +244,21 @@ public:
 
     [[nodiscard]] bool Complete(
         std::string* why = nullptr) const;
+
+    /**
+     * One-shot terminal binding for callback-time single-pass mining.
+     *
+     * The capture may be constructed before matmul_digest exists. All
+     * callback roots are bound to winner_header_precommit. After the sole
+     * coupled computation returns, the caller installs the final composed
+     * digest in `finalized_header` and calls this method exactly once. It
+     * rejects a changed immutable header, an unexpected coupled terminal,
+     * a repeated finalization, or an incomplete callback inventory.
+     */
+    [[nodiscard]] bool FinalizeHeaderBindingV2(
+        const CBlockHeader& finalized_header,
+        const uint256& expected_coupled_digest,
+        std::string* why = nullptr);
     [[nodiscard]] const RCStage3CoupledWinnerReceiptV1&
     Receipt() const
     {
@@ -223,12 +269,14 @@ private:
     class BoundaryHasher;
 
     void Reject(const std::string& why);
+    [[nodiscard]] bool SealReceipt(std::string* why);
     [[nodiscard]] bool ReadyForBarrierStage(
         uint32_t barrier,
         const char* stage);
     void StartBarrier(uint32_t barrier);
 
     std::unique_ptr<const CBlockHeader> m_header;
+    uint256 m_work_header_precommit{};
     RCCoupOptions m_options{};
     RCStage3CoupledWinnerReceiptV1 m_receipt{};
     RCStage3CoupledBarrierCaptureV1 m_current_barrier{};
@@ -246,6 +294,8 @@ private:
     bool m_permutation_seen{false};
     bool m_mix_seen{false};
     bool m_episode_seen{false};
+    bool m_header_binding_finalized{false};
+    bool m_sealed{false};
     mutable bool m_complete_checked{false};
     mutable bool m_complete_ok{false};
     mutable std::string m_complete_error;

@@ -35,8 +35,65 @@ CBlockHeader Header(uint64_t nonce)
     out.nNonce64 = nonce;
     out.seed_a = H(0x13);
     out.seed_b = H(0x24);
+    out.matmul_digest = H(0x35);
     return out;
 }
+
+class CountingForwardSink final
+    : public rc::RCCoupProofWitnessSink {
+public:
+    explicit CountingForwardSink(
+        rc::RCStage3CoupledWinnerCaptureV1& capture)
+        : m_capture(capture)
+    {
+    }
+
+    void OnInitialState(
+        const rc::RCCoupInitialStateProofWitnessView& view) override
+    {
+        ++initial_calls;
+        m_capture.OnInitialState(view);
+    }
+    void OnGemm(
+        const rc::RCCoupGemmProofWitnessView& view) override
+    {
+        ++gemm_calls;
+        m_capture.OnGemm(view);
+    }
+    void OnPermutation(
+        const rc::RCCoupPermutationProofWitnessView& view) override
+    {
+        m_capture.OnPermutation(view);
+    }
+    void OnMix(
+        const rc::RCCoupMixProofWitnessView& view) override
+    {
+        m_capture.OnMix(view);
+    }
+    void OnMaterialExchange(
+        const rc::RCCoupMaterialExchangeProofWitnessView& view) override
+    {
+        m_capture.OnMaterialExchange(view);
+    }
+    void OnBarrier(
+        const rc::RCCoupBarrierProofWitnessView& view) override
+    {
+        m_capture.OnBarrier(view);
+    }
+    void OnEpisode(
+        const rc::RCCoupEpisodeProofWitnessView& view) override
+    {
+        ++terminal_calls;
+        m_capture.OnEpisode(view);
+    }
+
+    uint32_t initial_calls{0};
+    uint64_t gemm_calls{0};
+    uint32_t terminal_calls{0};
+
+private:
+    rc::RCStage3CoupledWinnerCaptureV1& m_capture;
+};
 
 class DropFirstGemm final : public rc::RCCoupProofWitnessSink {
 public:
@@ -116,7 +173,7 @@ void Recommit(
         rc::CommitRCStage3CoupledBarrierCaptureV1(
             barrier_item);
     receipt.receipt_commitment =
-        rc::CommitRCStage3CoupledWinnerReceiptV1(
+        rc::CommitRCStage3CoupledWinnerReceiptV2(
             receipt);
 }
 
@@ -172,7 +229,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !receipt.recursive_relation_proofs_bound);
     BOOST_CHECK_MESSAGE(
-        rc::VerifyRCStage3CoupledWinnerReceiptV1(
+        rc::VerifyRCStage3CoupledWinnerReceiptV2(
             header, kHeight, params, options,
             receipt, &why),
         why);
@@ -181,9 +238,106 @@ BOOST_AUTO_TEST_CASE(
     ++other.nNonce64;
     ++other.nNonce;
     BOOST_CHECK(
-        !rc::VerifyRCStage3CoupledWinnerReceiptV1(
+        !rc::VerifyRCStage3CoupledWinnerReceiptV2(
             other, kHeight, params, options,
             receipt, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    precommit_single_pass_finalizes_once_without_replay)
+{
+    constexpr int32_t kHeight = 711;
+    CBlockHeader prefinal = Header(23);
+    prefinal.matmul_digest.SetNull();
+    const rc::RCCoupParams params =
+        rc::MakeToyRCCoupParams();
+    rc::RCCoupOptions options;
+    options.mode = rc::RCCoupExecMode::Streamed;
+    options.full_bank_schedule = true;
+
+    rc::RCStage3CoupledWinnerCaptureV1 capture(
+        prefinal, kHeight, params, options);
+    CountingForwardSink counted(capture);
+    const uint256 coupled_digest =
+        rc::MineCoupledPuzzleWithProofWitness(
+            prefinal, kHeight, params,
+            counted, {}, options);
+    BOOST_REQUIRE(!coupled_digest.IsNull());
+    BOOST_CHECK_EQUAL(counted.initial_calls, 1U);
+    BOOST_CHECK_EQUAL(counted.terminal_calls, 1U);
+    BOOST_CHECK_EQUAL(
+        counted.gemm_calls,
+        uint64_t{params.barriers} *
+            params.lobes *
+            params.pages_per_barrier_lobe);
+
+    std::string why;
+    BOOST_CHECK(!capture.Complete(&why));
+    BOOST_CHECK(
+        why.find("incomplete") !=
+        std::string::npos);
+    CBlockHeader finalized = prefinal;
+    finalized.matmul_digest = H(0x81);
+    BOOST_REQUIRE_MESSAGE(
+        capture.FinalizeHeaderBindingV2(
+            finalized, coupled_digest, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        capture.Complete(&why), why);
+    BOOST_CHECK(
+        capture.Receipt().winner_header_precommit ==
+        rc::CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+            finalized));
+    BOOST_CHECK(
+        capture.Receipt().finalized_header_hash ==
+        finalized.GetHash());
+
+    // The terminal binding is one-shot, and neither a wrong workload terminal
+    // nor a changed immutable header can be finalized.
+    BOOST_CHECK(
+        !capture.FinalizeHeaderBindingV2(
+            finalized, coupled_digest, &why));
+    BOOST_CHECK(
+        why.find("header_binding_repeated") !=
+        std::string::npos);
+
+    {
+        CBlockHeader base = prefinal;
+        rc::RCStage3CoupledWinnerCaptureV1 wrong_terminal(
+            base, kHeight, params, options);
+        const uint256 digest =
+            rc::MineCoupledPuzzleWithProofWitness(
+                base, kHeight, params,
+                wrong_terminal, {}, options);
+        CBlockHeader final = base;
+        final.matmul_digest = H(0x82);
+        BOOST_CHECK(
+            !wrong_terminal.FinalizeHeaderBindingV2(
+                final, H(0x99), &why));
+        BOOST_CHECK(
+            why.find("header_binding_terminal") !=
+            std::string::npos);
+        BOOST_CHECK(!digest.IsNull());
+    }
+    {
+        CBlockHeader base = prefinal;
+        rc::RCStage3CoupledWinnerCaptureV1 changed_context(
+            base, kHeight, params, options);
+        const uint256 digest =
+            rc::MineCoupledPuzzleWithProofWitness(
+                base, kHeight, params,
+                changed_context, {}, options);
+        CBlockHeader final = base;
+        ++final.nNonce64;
+        ++final.nNonce;
+        final.matmul_digest = H(0x83);
+        BOOST_CHECK(
+            !changed_context.FinalizeHeaderBindingV2(
+                final, digest, &why));
+        BOOST_CHECK(
+            why.find("header_binding_context") !=
+            std::string::npos);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -218,10 +372,10 @@ BOOST_AUTO_TEST_CASE(
             rc::CommitRCStage3CoupledBarrierCaptureV1(
                 omitted.barriers[0]);
         omitted.receipt_commitment =
-            rc::CommitRCStage3CoupledWinnerReceiptV1(
+            rc::CommitRCStage3CoupledWinnerReceiptV2(
                 omitted);
         BOOST_CHECK(
-            !rc::VerifyRCStage3CoupledWinnerReceiptV1(
+            !rc::VerifyRCStage3CoupledWinnerReceiptV2(
                 header, kHeight, params,
                 options, omitted, &why));
     }
@@ -245,10 +399,10 @@ BOOST_AUTO_TEST_CASE(
             rc::CommitRCStage3CoupledBarrierCaptureV1(
                 reordered.barriers[0]);
         reordered.receipt_commitment =
-            rc::CommitRCStage3CoupledWinnerReceiptV1(
+            rc::CommitRCStage3CoupledWinnerReceiptV2(
                 reordered);
         BOOST_CHECK(
-            !rc::VerifyRCStage3CoupledWinnerReceiptV1(
+            !rc::VerifyRCStage3CoupledWinnerReceiptV2(
                 header, kHeight, params,
                 options, reordered, &why));
     }
@@ -261,7 +415,7 @@ BOOST_AUTO_TEST_CASE(
         pages[1].accumulation_before_root = H(0xa5);
         Recommit(broken_chain, 0, 0, 1);
         BOOST_CHECK(
-            !rc::VerifyRCStage3CoupledWinnerReceiptV1(
+            !rc::VerifyRCStage3CoupledWinnerReceiptV2(
                 header, kHeight, params,
                 options, broken_chain, &why));
     }
@@ -269,10 +423,10 @@ BOOST_AUTO_TEST_CASE(
         auto digest_substitution = capture.Receipt();
         digest_substitution.coupled_digest = H(0x5a);
         digest_substitution.receipt_commitment =
-            rc::CommitRCStage3CoupledWinnerReceiptV1(
+            rc::CommitRCStage3CoupledWinnerReceiptV2(
                 digest_substitution);
         BOOST_CHECK(
-            !rc::VerifyRCStage3CoupledWinnerReceiptV1(
+            !rc::VerifyRCStage3CoupledWinnerReceiptV2(
                 header, kHeight, params,
                 options, digest_substitution,
                 &why));

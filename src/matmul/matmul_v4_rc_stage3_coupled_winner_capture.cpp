@@ -21,32 +21,34 @@
 namespace matmul::v4::rc {
 namespace {
 
-constexpr char kContextDomain[] =
-    "BTX_RC_STAGE3_COUPLED_WINNER_CONTEXT_V1";
+constexpr char kContextDomainV2[] =
+    "BTX_RC_STAGE3_COUPLED_WINNER_CONTEXT_V2";
+constexpr char kHeaderPrecommitDomain[] =
+    "BTX_RC_STAGE3_COUPLED_WINNER_HEADER_PRECOMMIT_V2";
 constexpr char kInitialDomain[] =
-    "BTX_RC_STAGE3_COUPLED_INITIAL_STATE_V1";
+    "BTX_RC_STAGE3_COUPLED_INITIAL_STATE_V2";
 constexpr char kLobeStateDomain[] =
-    "BTX_RC_STAGE3_COUPLED_LOBE_STATE_V1";
+    "BTX_RC_STAGE3_COUPLED_LOBE_STATE_V2";
 constexpr char kPageDomain[] =
-    "BTX_RC_STAGE3_COUPLED_BANK_PAGE_V1";
+    "BTX_RC_STAGE3_COUPLED_BANK_PAGE_V2";
 constexpr char kPartialDomain[] =
-    "BTX_RC_STAGE3_COUPLED_GEMM_PARTIAL_V1";
+    "BTX_RC_STAGE3_COUPLED_GEMM_PARTIAL_V2";
 constexpr char kAccumulatorDomain[] =
-    "BTX_RC_STAGE3_COUPLED_ACCUMULATION_V1";
+    "BTX_RC_STAGE3_COUPLED_ACCUMULATION_V2";
 constexpr char kBoundaryDomain[] =
-    "BTX_RC_STAGE3_COUPLED_STAGE_BOUNDARY_V1";
+    "BTX_RC_STAGE3_COUPLED_STAGE_BOUNDARY_V2";
 constexpr char kExtractOutputDomain[] =
-    "BTX_RC_STAGE3_COUPLED_EXTRACT_OUTPUT_V1";
+    "BTX_RC_STAGE3_COUPLED_EXTRACT_OUTPUT_V2";
 constexpr char kPageEventDomain[] =
-    "BTX_RC_STAGE3_COUPLED_PAGE_EVENT_V1";
+    "BTX_RC_STAGE3_COUPLED_PAGE_EVENT_V2";
 constexpr char kLobeDomain[] =
-    "BTX_RC_STAGE3_COUPLED_LOBE_RECEIPT_V1";
+    "BTX_RC_STAGE3_COUPLED_LOBE_RECEIPT_V2";
 constexpr char kBarrierDomain[] =
-    "BTX_RC_STAGE3_COUPLED_BARRIER_RECEIPT_V1";
+    "BTX_RC_STAGE3_COUPLED_BARRIER_RECEIPT_V2";
 constexpr char kBankScheduleDomain[] =
-    "BTX_RC_STAGE3_COUPLED_BANK_SCHEDULE_V1";
-constexpr char kReceiptDomain[] =
-    "BTX_RC_STAGE3_COUPLED_WINNER_RECEIPT_V1";
+    "BTX_RC_STAGE3_COUPLED_BANK_SCHEDULE_V2";
+constexpr char kReceiptDomainV2[] =
+    "BTX_RC_STAGE3_COUPLED_WINNER_RECEIPT_V2";
 
 std::mutex g_coupled_winner_store_mutex;
 uint256 g_coupled_winner_store_header;
@@ -97,12 +99,15 @@ bool SameConsensusOptions(
 
 class RootWriter {
 public:
-    explicit RootWriter(const char* domain)
+    explicit RootWriter(
+        const char* domain,
+        uint16_t version =
+            kRCStage3CoupledWinnerCaptureVersionV2)
     {
         Bytes(
             reinterpret_cast<const unsigned char*>(domain),
             std::strlen(domain));
-        U32(kRCStage3CoupledWinnerCaptureVersionV1);
+        U32(version);
     }
 
     void U8(uint8_t value)
@@ -359,7 +364,7 @@ uint256 PageCommitmentInternal(
 {
     HashWriter hash;
     hash << kPageEventDomain
-         << kRCStage3CoupledWinnerCaptureVersionV1
+         << kRCStage3CoupledWinnerCaptureVersionV2
          << page.barrier << page.lobe
          << page.page_ordinal << page.page_id
          << page.operand_a_root
@@ -375,7 +380,7 @@ uint256 LobeCommitmentInternal(
 {
     HashWriter hash;
     hash << kLobeDomain
-         << kRCStage3CoupledWinnerCaptureVersionV1
+         << kRCStage3CoupledWinnerCaptureVersionV2
          << lobe.barrier << lobe.lobe
          << lobe.input_state_lobe_root
          << static_cast<uint32_t>(lobe.pages.size());
@@ -391,7 +396,7 @@ uint256 BarrierCommitmentInternal(
 {
     HashWriter hash;
     hash << kBarrierDomain
-         << kRCStage3CoupledWinnerCaptureVersionV1
+         << kRCStage3CoupledWinnerCaptureVersionV2
          << barrier.barrier
          << static_cast<uint32_t>(
                 barrier.input_state_lobe_roots.size());
@@ -436,7 +441,7 @@ uint256 BankScheduleCommitment(
     if (roots.size() != seen.size()) return {};
     HashWriter hash;
     hash << kBankScheduleDomain
-         << kRCStage3CoupledWinnerCaptureVersionV1
+         << kRCStage3CoupledWinnerCaptureVersionV2
          << static_cast<uint32_t>(roots.size());
     for (uint32_t page = 0;
          page < roots.size(); ++page) {
@@ -545,8 +550,19 @@ private:
     uint64_t m_written{0};
 };
 
-uint256 CommitRCStage3CoupledWinnerContextV1(
-    const CBlockHeader& finalized_header,
+uint256 CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+    const CBlockHeader& header)
+{
+    CBlockHeader projected = header;
+    projected.matmul_digest.SetNull();
+    RootWriter hash(kHeaderPrecommitDomain);
+    hash.Hash(projected.GetHash());
+    hash.Hash(matmul::v4::DeriveSigma(projected));
+    return hash.Finish();
+}
+
+uint256 CommitRCStage3CoupledWinnerContextV2(
+    const CBlockHeader& header,
     int32_t height,
     const RCCoupParams& params,
     const RCCoupOptions& options)
@@ -556,20 +572,23 @@ uint256 CommitRCStage3CoupledWinnerContextV1(
         options.skip_bank_page) {
         return {};
     }
-    RootWriter hash(kContextDomain);
-    hash.Hash(finalized_header.GetHash());
-    hash.Hash(matmul::v4::DeriveSigma(finalized_header));
+    RootWriter hash(kContextDomainV2);
+    hash.Hash(
+        CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+            header));
+    hash.Hash(matmul::v4::DeriveSigma(header));
     hash.I32(height);
     WriteParams(hash, params);
     WriteOptions(hash, options);
     return hash.Finish();
 }
 
-uint256 CommitRCStage3CoupledWinnerReceiptV1(
+uint256 CommitRCStage3CoupledWinnerReceiptV2(
     const RCStage3CoupledWinnerReceiptV1& receipt)
 {
     if (receipt.version !=
-            kRCStage3CoupledWinnerCaptureVersionV1 ||
+            kRCStage3CoupledWinnerCaptureVersionV2 ||
+        !NonNull(receipt.winner_header_precommit) ||
         !NonNull(receipt.finalized_header_hash) ||
         !NonNull(receipt.context_commitment) ||
         !NonNull(receipt.initial_state_root) ||
@@ -579,7 +598,8 @@ uint256 CommitRCStage3CoupledWinnerReceiptV1(
         return {};
     }
     HashWriter hash;
-    hash << kReceiptDomain << receipt.version
+    hash << kReceiptDomainV2 << receipt.version
+         << receipt.winner_header_precommit
          << receipt.finalized_header_hash
          << receipt.sigma << receipt.height
          << receipt.params.barriers
@@ -635,7 +655,7 @@ uint256 CommitRCStage3CoupledWinnerReceiptV1(
     return hash.GetHash();
 }
 
-bool VerifyRCStage3CoupledWinnerReceiptV1(
+bool VerifyRCStage3CoupledWinnerReceiptV2(
     const CBlockHeader& finalized_header,
     int32_t height,
     const RCCoupParams& params,
@@ -644,10 +664,13 @@ bool VerifyRCStage3CoupledWinnerReceiptV1(
     std::string* why)
 {
     if (receipt.version !=
-            kRCStage3CoupledWinnerCaptureVersionV1 ||
+            kRCStage3CoupledWinnerCaptureVersionV2 ||
         !ValidateRCCoupParams(params) ||
         options.skip_barrier ||
         options.skip_bank_page ||
+        receipt.winner_header_precommit !=
+            CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+                finalized_header) ||
         receipt.finalized_header_hash !=
             finalized_header.GetHash() ||
         receipt.sigma !=
@@ -669,11 +692,13 @@ bool VerifyRCStage3CoupledWinnerReceiptV1(
         receipt.exchange_rounds;
     encoded.force_signed_mix =
         receipt.force_signed_mix;
+    const uint256 expected_context =
+        CommitRCStage3CoupledWinnerContextV2(
+            finalized_header, height,
+            params, options);
     if (!SameConsensusOptions(encoded, options) ||
         receipt.context_commitment !=
-            CommitRCStage3CoupledWinnerContextV1(
-                finalized_header, height,
-                params, options) ||
+            expected_context ||
         !receipt.capture_complete ||
         !receipt.no_bank_pages_retained ||
         !receipt.no_flat_tile_proofs_materialized ||
@@ -845,11 +870,40 @@ bool VerifyRCStage3CoupledWinnerReceiptV1(
                 params.lobe_width *
                 sizeof(int64_t) ||
         receipt.receipt_commitment !=
-            CommitRCStage3CoupledWinnerReceiptV1(
+            CommitRCStage3CoupledWinnerReceiptV2(
                 receipt)) {
         return Fail(why, "terminal");
     }
     return true;
+}
+
+uint256 CommitRCStage3CoupledWinnerReceiptV1(
+    const RCStage3CoupledWinnerReceiptV1& receipt)
+{
+    if (receipt.version !=
+            kRCStage3CoupledWinnerCaptureVersionV2) {
+        return {};
+    }
+    return CommitRCStage3CoupledWinnerReceiptV2(
+        receipt);
+}
+
+bool VerifyRCStage3CoupledWinnerReceiptV1(
+    const CBlockHeader& finalized_header,
+    int32_t height,
+    const RCCoupParams& params,
+    const RCCoupOptions& options,
+    const RCStage3CoupledWinnerReceiptV1& receipt,
+    std::string* why)
+{
+    if (receipt.version !=
+            kRCStage3CoupledWinnerCaptureVersionV2) {
+        return Fail(
+            why, "v1_source_alias_requires_v2");
+    }
+    return VerifyRCStage3CoupledWinnerReceiptV2(
+        finalized_header, height, params,
+        options, receipt, why);
 }
 
 RCStage3CoupledWinnerCaptureV1::
@@ -858,13 +912,21 @@ RCStage3CoupledWinnerCaptureV1(
     int32_t height,
     const RCCoupParams& params,
     const RCCoupOptions& options)
-    : m_header(
-          std::make_unique<const CBlockHeader>(
-              finalized_header)),
-      m_options(options)
+    : m_options(options)
 {
-    m_receipt.finalized_header_hash =
-        finalized_header.GetHash();
+    m_work_header_precommit =
+        CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+            finalized_header);
+    m_receipt.winner_header_precommit =
+        m_work_header_precommit;
+    if (!finalized_header.matmul_digest.IsNull()) {
+        m_header =
+            std::make_unique<const CBlockHeader>(
+                finalized_header);
+        m_receipt.finalized_header_hash =
+            finalized_header.GetHash();
+        m_header_binding_finalized = true;
+    }
     m_receipt.sigma =
         matmul::v4::DeriveSigma(finalized_header);
     m_receipt.height = height;
@@ -887,12 +949,12 @@ RCStage3CoupledWinnerCaptureV1(
     if (!ValidateRCCoupParams(params) ||
         options.skip_barrier ||
         options.skip_bank_page ||
-        m_receipt.finalized_header_hash.IsNull()) {
+        m_work_header_precommit.IsNull()) {
         Reject("constructor");
         return;
     }
     m_receipt.context_commitment =
-        CommitRCStage3CoupledWinnerContextV1(
+        CommitRCStage3CoupledWinnerContextV2(
             finalized_header, height,
             params, options);
     m_expected_lobe_roots.resize(params.lobes);
@@ -931,6 +993,39 @@ void RCStage3CoupledWinnerCaptureV1::Reject(
     m_complete_error.clear();
 }
 
+bool RCStage3CoupledWinnerCaptureV1::SealReceipt(
+    std::string* why)
+{
+    if (m_sealed ||
+        !m_header_binding_finalized ||
+        m_header == nullptr ||
+        !m_episode_seen ||
+        !m_receipt.capture_complete ||
+        m_receipt.finalized_header_hash !=
+            m_header->GetHash()) {
+        Reject("header_binding_not_finalizable");
+        return Fail(
+            why, "header_binding_not_finalizable");
+    }
+    m_receipt.receipt_commitment =
+        CommitRCStage3CoupledWinnerReceiptV2(
+            m_receipt);
+    if (m_receipt.receipt_commitment.IsNull()) {
+        Reject("receipt_commitment");
+        return Fail(why, "receipt_commitment");
+    }
+    m_lobe_accumulator.clear();
+    m_lobe_accumulator.shrink_to_fit();
+    m_expected_lobe_roots.clear();
+    m_bank_page_roots.clear();
+    m_bank_page_seen.clear();
+    m_current_barrier = {};
+    m_gemm_boundary.reset();
+    m_sealed = true;
+    m_complete_checked = false;
+    return true;
+}
+
 void RCStage3CoupledWinnerCaptureV1::StartBarrier(
     uint32_t barrier)
 {
@@ -940,7 +1035,7 @@ void RCStage3CoupledWinnerCaptureV1::StartBarrier(
         m_expected_lobe_roots;
     m_gemm_boundary =
         std::make_unique<BoundaryHasher>(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             barrier, 0,
             m_receipt.params.StateBytes());
     m_next_lobe = 0;
@@ -987,14 +1082,14 @@ void RCStage3CoupledWinnerCaptureV1::OnInitialState(
     }
     m_receipt.initial_state_root =
         InitialStateRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             view.state_cells, view.state);
     m_receipt.initial_state_lobe_roots.resize(
         params.lobes);
     for (uint32_t lobe = 0;
          lobe < params.lobes; ++lobe) {
         const auto root = LobeStateRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             0, lobe, rows,
             params.lobe_width,
             view.state + uint64_t{lobe} *
@@ -1075,7 +1170,7 @@ void RCStage3CoupledWinnerCaptureV1::OnGemm(
     page.page_ordinal = m_next_page;
     page.page_id = view.page_id;
     page.operand_a_root = LobeStateRoot(
-        m_receipt.finalized_header_hash,
+        m_work_header_precommit,
         m_next_barrier, m_next_lobe,
         rows, params.lobe_width,
         view.operand_a);
@@ -1085,7 +1180,7 @@ void RCStage3CoupledWinnerCaptureV1::OnGemm(
         return;
     }
     page.operand_b_root = BankPageRoot(
-        m_receipt.finalized_header_hash,
+        m_work_header_precommit,
         view.page_id, params.lobe_width,
         view.operand_b);
     if (m_bank_page_seen[view.page_id] &&
@@ -1098,13 +1193,13 @@ void RCStage3CoupledWinnerCaptureV1::OnGemm(
     m_bank_page_roots[view.page_id] =
         page.operand_b_root;
     page.gemm_y_root = PartialRoot(
-        m_receipt.finalized_header_hash,
+        m_work_header_precommit,
         m_next_barrier, m_next_lobe,
         m_next_page, rows, params.lobe_width,
         view.gemm_y);
     page.accumulation_before_root =
         AccumulatorRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, m_next_lobe,
             m_next_page, rows,
             params.lobe_width,
@@ -1136,7 +1231,7 @@ void RCStage3CoupledWinnerCaptureV1::OnGemm(
     }
     page.accumulation_after_root =
         AccumulatorRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, m_next_lobe,
             m_next_page + 1, rows,
             params.lobe_width,
@@ -1188,7 +1283,7 @@ void RCStage3CoupledWinnerCaptureV1::OnPermutation(
         m_gemm_boundary->Finish();
     m_current_barrier.permutation_input_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, 0,
             view.state_cells, view.input);
     if (m_current_barrier.permutation_input_root !=
@@ -1199,7 +1294,7 @@ void RCStage3CoupledWinnerCaptureV1::OnPermutation(
     }
     m_current_barrier.permutation_output_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, 1,
             view.state_cells, view.output);
     m_post_stage_root =
@@ -1230,7 +1325,7 @@ void RCStage3CoupledWinnerCaptureV1::OnMix(
     }
     m_current_barrier.mix_input_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, 1,
             view.state_cells, view.input);
     if (m_current_barrier.mix_input_root !=
@@ -1240,7 +1335,7 @@ void RCStage3CoupledWinnerCaptureV1::OnMix(
     }
     m_current_barrier.mix_output_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, 2,
             view.state_cells, view.output);
     m_post_stage_root =
@@ -1275,7 +1370,7 @@ OnMaterialExchange(
     exchange.round = view.round;
     exchange.input_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, 2 + view.round,
             view.state_cells, view.input);
     if (exchange.input_root !=
@@ -1285,7 +1380,7 @@ OnMaterialExchange(
     }
     exchange.output_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier, 3 + view.round,
             view.state_cells, view.output);
     m_post_stage_root = exchange.output_root;
@@ -1319,7 +1414,7 @@ void RCStage3CoupledWinnerCaptureV1::OnBarrier(
     }
     m_current_barrier.extract_input_root =
         BoundaryRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier,
             2 + m_options.exchange_rounds,
             view.state_cells,
@@ -1333,7 +1428,7 @@ void RCStage3CoupledWinnerCaptureV1::OnBarrier(
         view.extract_prf;
     m_current_barrier.extract_output_root =
         ExtractOutputRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier,
             view.state_cells,
             view.extract_output);
@@ -1367,7 +1462,7 @@ void RCStage3CoupledWinnerCaptureV1::OnBarrier(
     for (uint32_t lobe = 0;
          lobe < params.lobes; ++lobe) {
         const auto root = LobeStateRoot(
-            m_receipt.finalized_header_hash,
+            m_work_header_precommit,
             m_next_barrier + 1,
             lobe, rows, params.lobe_width,
             view.extract_output +
@@ -1433,15 +1528,52 @@ void RCStage3CoupledWinnerCaptureV1::OnEpisode(
     m_receipt.capture_complete = true;
     m_receipt.retained_receipt_bytes_upper_bound =
         ReceiptBytesUpperBound(m_receipt);
-    m_receipt.receipt_commitment =
-        CommitRCStage3CoupledWinnerReceiptV1(
-            m_receipt);
-    if (m_receipt.receipt_commitment.IsNull()) {
-        Reject("receipt_commitment");
-        return;
-    }
     m_episode_seen = true;
     m_complete_checked = false;
+    if (m_header_binding_finalized) {
+        (void)SealReceipt(nullptr);
+    }
+}
+
+bool RCStage3CoupledWinnerCaptureV1::
+FinalizeHeaderBindingV2(
+    const CBlockHeader& finalized_header,
+    const uint256& expected_coupled_digest,
+    std::string* why)
+{
+    if (m_header_binding_finalized ||
+        m_sealed) {
+        return Fail(why, "header_binding_repeated");
+    }
+    if (!m_error.empty() ||
+        !m_episode_seen ||
+        !m_receipt.capture_complete) {
+        Reject("header_binding_before_terminal");
+        return Fail(
+            why, "header_binding_before_terminal");
+    }
+    if (finalized_header.matmul_digest.IsNull() ||
+        expected_coupled_digest.IsNull() ||
+        expected_coupled_digest !=
+            m_receipt.coupled_digest) {
+        Reject("header_binding_terminal");
+        return Fail(why, "header_binding_terminal");
+    }
+    if (CommitRCStage3CoupledWinnerHeaderPrecommitV2(
+            finalized_header) !=
+            m_work_header_precommit ||
+        matmul::v4::DeriveSigma(finalized_header) !=
+            m_receipt.sigma) {
+        Reject("header_binding_context");
+        return Fail(why, "header_binding_context");
+    }
+    m_header =
+        std::make_unique<const CBlockHeader>(
+            finalized_header);
+    m_receipt.finalized_header_hash =
+        finalized_header.GetHash();
+    m_header_binding_finalized = true;
+    return SealReceipt(why);
 }
 
 bool RCStage3CoupledWinnerCaptureV1::Complete(
@@ -1472,13 +1604,15 @@ bool RCStage3CoupledWinnerCaptureV1::Complete(
     }
     if (!m_initial_seen ||
         !m_episode_seen ||
+        !m_header_binding_finalized ||
+        !m_sealed ||
         m_header == nullptr) {
         std::string error;
         (void)Fail(&error, "incomplete");
         return finish(false, error);
     }
     std::string error;
-    if (!VerifyRCStage3CoupledWinnerReceiptV1(
+    if (!VerifyRCStage3CoupledWinnerReceiptV2(
             *m_header,
             m_receipt.height,
             m_receipt.params,
