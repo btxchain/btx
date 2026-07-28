@@ -101,7 +101,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(audit.exact_endpoint_order);
     BOOST_CHECK(audit.exact_shard_partition);
     BOOST_CHECK(audit.every_memory_child_proof_verified);
-    BOOST_CHECK(audit.source_roots_proof_owned);
+    BOOST_CHECK(audit.memory_roots_proof_owned);
+    BOOST_CHECK(!audit.owning_producer_roots_bound);
+    BOOST_CHECK_NE(
+        audit.note.find("owning_producer_root"),
+        std::string::npos);
     BOOST_CHECK(audit.exact_all_instance_aggregation);
     BOOST_CHECK(!audit.production_all_instance_aggregation);
     BOOST_CHECK(audit.proof_level_tamper_rejected);
@@ -110,6 +114,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!audit.recursively_consumed);
     BOOST_CHECK_EQUAL(
         audit.residual_obligations,
+        topo::ProductionResidualSourceRootProvenance |
         topo::ProductionResidualExactAllInstanceAggregation |
         topo::ProductionResidualRecursiveConsumption);
     BOOST_CHECK(

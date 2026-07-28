@@ -82,7 +82,11 @@ struct AuditV1 {
     bool exact_endpoint_order{false};
     bool exact_shard_partition{false};
     bool every_memory_child_proof_verified{false};
-    bool source_roots_proof_owned{false};
+    /** The memory children own the complete A/B/Y vectors. */
+    bool memory_roots_proof_owned{false};
+    /** False until those memory roots equal authenticated columns exported
+     * by the owning GEMM/builder relation proofs. */
+    bool owning_producer_roots_bound{false};
     bool exact_all_instance_aggregation{false};
     bool production_all_instance_aggregation{false};
     bool proof_level_tamper_rejected{false};

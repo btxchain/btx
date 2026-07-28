@@ -384,6 +384,7 @@ BOOST_AUTO_TEST_CASE(
         openings_residual != status.partial_residuals.end());
     BOOST_CHECK_EQUAL(
         openings_residual->missing_obligations,
+        ut::ProductionResidualSourceRootProvenance |
         ut::ProductionResidualExactAllInstanceAggregation |
         ut::ProductionResidualRecursiveConsumption);
     const auto signed_residual = std::find_if(

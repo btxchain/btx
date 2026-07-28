@@ -546,7 +546,13 @@ AuditV1 AssessV1(
     out.exact_endpoint_order = true;
     out.exact_shard_partition = true;
     out.every_memory_child_proof_verified = true;
-    out.source_roots_proof_owned = true;
+    out.memory_roots_proof_owned = true;
+    // The statement currently receives canonical_value_roots directly.  It
+    // does not receive or verify RCStage3GemmExtractLayerBindings, and the
+    // repository's *_root_alg fields are not yet consumed by an owning
+    // relation proof.  Proof ownership of this memory vector therefore does
+    // not establish source-root provenance.
+    out.owning_producer_roots_bound = false;
     out.exact_all_instance_aggregation = true;
     out.production_all_instance_aggregation =
         expected_statement
@@ -581,6 +587,7 @@ AuditV1 AssessV1(
     out.cross_hash_value_equality_proved = false;
     out.recursively_consumed = false;
     out.residual_obligations =
+        topo::ProductionResidualSourceRootProvenance |
         topo::ProductionResidualRecursiveConsumption |
         (out.production_all_instance_aggregation
              ? 0U
@@ -591,7 +598,8 @@ AuditV1 AssessV1(
         out.exact_endpoint_order &&
         out.exact_shard_partition &&
         out.every_memory_child_proof_verified &&
-        out.source_roots_proof_owned &&
+        out.memory_roots_proof_owned &&
+        !out.owning_producer_roots_bound &&
         out.exact_all_instance_aggregation &&
         out.proof_level_tamper_rejected &&
         !out.normalized_parent_accepts_sha_children &&
@@ -600,8 +608,8 @@ AuditV1 AssessV1(
     out.note =
         out.valid
         ? "stage3:episode_gemm_openings_proof_owned:"
-          "source_roots_and_statement_instances_closed;"
-          "recursive_sha_child_to_alg_parent_bridge_pending"
+          "memory_roots_and_statement_instances_closed;"
+          "owning_producer_root_and_recursive_bridge_pending"
         : "stage3:episode_gemm_openings_proof_owned:"
           "assessment_incomplete";
     return out;

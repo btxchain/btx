@@ -1092,10 +1092,11 @@ uint32_t PartialResidualMask(
     switch (kind) {
     case sites::ProductionProofSiteKind::EpisodeGemmOpenings:
         // episode_gemm_openings_proof_owned executes canonical-root A/B/Y
-        // memory bundles and closes the source-root seam. Exact production
+        // memory bundles. The owning GEMM/builder proofs do not yet export
+        // equality-constrained roots into those bundles. Exact production
         // counts are manifest-derived there, but the production-size streamed
-        // proof and recursive SHA-child -> AlgHash-parent bridge remain.
-        return ALL | RECURSE;
+        // proof and recursive SHA-child -> AlgHash-parent bridge also remain.
+        return SOURCE | ALL | RECURSE;
     case sites::ProductionProofSiteKind::EpisodeSignedRange:
         return PARAM | SOURCE | ALL | RECURSE;
     case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
