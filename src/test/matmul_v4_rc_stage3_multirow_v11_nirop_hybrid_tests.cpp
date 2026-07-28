@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_nirop_hybrid.h>
 
 #include <algorithm>
+#include <limits>
 #include <set>
 
 namespace matmul::v4::rc::stage3_multirow_v11_nirop_hybrid {
@@ -332,6 +333,8 @@ BOOST_AUTO_TEST_CASE(
     budget.receipt_program_calls_per_site = 128;
     budget.adversary_permutation_queries_per_site = 1U << 20;
     budget.safe_tag_hash_queries = 64;
+    budget.adversarial_h_query_budget_log2 = 64.0;
+    budget.adversarial_permutation_query_budget_log2 = 64.0;
     budget.exact_manifest_derived = true;
     const auto comparison =
         CompareNiropPathsV1(Statement(), budget);
@@ -365,6 +368,8 @@ BOOST_AUTO_TEST_CASE(
     budget.receipt_program_calls_per_site = 128;
     budget.adversary_permutation_queries_per_site = 1U << 20;
     budget.safe_tag_hash_queries = 64;
+    budget.adversarial_h_query_budget_log2 = 64.0;
+    budget.adversarial_permutation_query_budget_log2 = 64.0;
     budget.exact_manifest_derived = false;
     const auto audit =
         AssessSafeCoreMigrationV1(Statement(), budget);
@@ -380,12 +385,20 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(audit.v11_transcript_hash_events, 424U);
     BOOST_CHECK_EQUAL(
         audit.proposed_safe_io_absorb_squeeze_events, 424U);
-    BOOST_CHECK_EQUAL(audit.theorem_unique_h_queries, 64U);
+    BOOST_CHECK_EQUAL(audit.honest_tag_hash_queries, 64U);
+    BOOST_CHECK_EQUAL(
+        audit.theorem_unique_h_queries,
+        std::numeric_limits<uint64_t>::max());
+    BOOST_CHECK_GE(audit.theorem_h_queries_log2, 64.0);
+    BOOST_CHECK_GE(
+        audit.theorem_unique_permutation_queries_log2, 64.0);
+    BOOST_CHECK(audit.adversarial_classical_query_budgets_included);
     BOOST_CHECK(audit.theorem2_bound_computed);
     BOOST_CHECK_GT(audit.theorem_indifferentiability_bits, 64.0);
     BOOST_CHECK_EQUAL(
         audit.conditional_poseidon_algebraic_floor_bits, 128.0);
-    BOOST_CHECK_EQUAL(audit.conditional_effective_bits, 128.0);
+    BOOST_CHECK_GT(audit.conditional_effective_bits, 120.0);
+    BOOST_CHECK_LT(audit.conditional_effective_bits, 128.0);
     BOOST_CHECK(audit.theorem2_numeric_v1_screen_met);
 
     BOOST_CHECK(audit.current_v11_resets_state_per_hash_event);
@@ -397,8 +410,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !audit.typed_v12_static_iv_is_full_h_io_domain_tag);
 
+    BOOST_CHECK(audit.proposed_stateless_safecore_per_hash_event);
     BOOST_CHECK(
-        audit.proposed_fs_is_one_continuous_absorb_squeeze_state);
+        audit.proposed_seed_feedback_is_ordinary_message_data);
+    BOOST_CHECK(audit.proposed_safecore_zero_padding_fixed_by_io);
+    BOOST_CHECK(
+        !audit.proposed_fs_is_one_continuous_absorb_squeeze_state);
     BOOST_CHECK(audit.proposed_fs_has_fixed_io_pattern);
     BOOST_CHECK(!audit.proposed_native_seed_feedback_removed);
     BOOST_CHECK(audit.proposed_merkle_instances_have_separate_tags);

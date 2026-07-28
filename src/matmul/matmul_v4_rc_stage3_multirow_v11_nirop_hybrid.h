@@ -48,7 +48,10 @@ struct TranscriptDomainV1 {
     const char* label{nullptr};
 };
 
-/** One exact event in the proposed continuous SAFE absorb/squeeze pattern. */
+/**
+ * One exact V11 hash-DAG event re-expressed as the low-delta stateless
+ * SAFECore call C(IO=(absorb_lanes,squeeze_lanes), D=typed role, M).
+ */
 struct SafeIoEventV1 {
     TranscriptRoleV1 role{};
     uint32_t ordinal{0};
@@ -257,8 +260,14 @@ struct SharedPermutationBudgetV1 {
     uint64_t merkle_permutation_calls_per_site{0};
     uint64_t receipt_program_calls_per_site{0};
     uint64_t adversary_permutation_queries_per_site{0};
-    /** Unique H(IO,D) queries in the SAFECore theorem, including adversary. */
+    /** Exact honest H(IO,D) calls from the protocol manifest. */
     uint64_t safe_tag_hash_queries{0};
+    /**
+     * Separately declared adversarial budgets. A 64-bit classical security
+     * screen sets both to 64.0, i.e. permits up to 2^64 H and P queries.
+     */
+    double adversarial_h_query_budget_log2{0.0};
+    double adversarial_permutation_query_budget_log2{0.0};
     bool exact_manifest_derived{false};
 };
 
@@ -340,12 +349,15 @@ struct SafeCoreMigrationAuditV1 {
     uint32_t v11_transcript_hash_events{0};
     uint32_t proposed_safe_io_absorb_squeeze_events{0};
     uint64_t theorem_unique_h_queries{0};
+    uint64_t honest_tag_hash_queries{0};
+    double theorem_h_queries_log2{0.0};
     double theorem_unique_permutation_queries_log2{0.0};
     double theorem_indifferentiability_bits{0.0};
     double conditional_poseidon_algebraic_floor_bits{0.0};
     double conditional_effective_bits{0.0};
 
     bool theorem2_bound_computed{false};
+    bool adversarial_classical_query_budgets_included{false};
     bool theorem2_numeric_v1_screen_met{false};
     bool safe_api_two_lane_profile_meets_v1_screen{false};
     bool current_v11_resets_state_per_hash_event{false};
@@ -355,6 +367,9 @@ struct SafeCoreMigrationAuditV1 {
     bool current_v11_padding_matches_safecore_pad{false};
     bool typed_v12_static_iv_is_full_h_io_domain_tag{false};
 
+    bool proposed_stateless_safecore_per_hash_event{false};
+    bool proposed_seed_feedback_is_ordinary_message_data{false};
+    bool proposed_safecore_zero_padding_fixed_by_io{false};
     bool proposed_fs_is_one_continuous_absorb_squeeze_state{false};
     bool proposed_fs_has_fixed_io_pattern{false};
     bool proposed_native_seed_feedback_removed{false};

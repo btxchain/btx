@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <set>
 #include <utility>
 
@@ -166,14 +167,15 @@ Fri3AlgDigest Hash(
             });
         if (item != kDomains.end()) {
             /*
-             * The continuous V12 SAFE message prepends the semantic role
-             * and exact event ordinal. The old two-u32 rate-domain prefix
-             * is replaced by this canonical pair.
+             * Low-delta V12 route: the old rate-domain prefix moves into
+             * SAFECore's typed D, while M remains the existing logical
+             * `lanes` vector (including any challenge ordinal/seed already
+             * present at this call site). IO binds its exact length.
              */
             safe_io_events->push_back({
                 item->role,
                 ordinal,
-                static_cast<uint32_t>(lanes.size() + 2),
+                static_cast<uint32_t>(lanes.size()),
                 alg_hash::kAlgHashDigestLen});
         }
     }
@@ -1085,21 +1087,26 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
     out.typed_v12_static_iv_is_full_h_io_domain_tag = false;
 
     /*
-     * Migration target:
-     *  - one continuous online SAFE API state for the FS transcript;
-     *  - one fixed absorb/squeeze pair per replayed V11 hash event, with
-     *    phase role and ordinal included in the absorbed fields;
-     *  - separately tagged fixed-pattern SAFE instances for row leaf,
-     *    fold leaf, internal node, receipt, ProgramTable and application
-     *    statements;
-     *  - full four-field H(IO,D) tag, not the two-field 2023/522 profile.
+     * Low-delta migration target:
+     *  - each replayed V11 hash-DAG event becomes an independent exact
+     *    SAFECore Algorithm-3 call C(IO=(I,4), D=typed role, M);
+     *  - I is the exact logical message length, so SAFECorePad uses zero
+     *    padding to the rate boundary and needs no 10* delimiter;
+     *  - the previous digest/seed may remain in M. Theorem 2 covers
+     *    multiple SAFECore invocations and arbitrary IO,D; §5.3's one
+     *    continuous online SAFE transcript is a sufficient application,
+     *    not a requirement imposed on every SAFECore use;
+     *  - row leaf, fold leaf, internal node, receipt, ProgramTable and
+     *    application statements receive distinct typed D values;
+     *  - H(IO,D) fills all four capacity lanes.
      *
-     * These are requirements recorded by this audit, not executable code.
-     * Algorithm 3 SAFECore is not itself the online state machine: §5.3
-     * proves the online SAFE API transcript by mapping each challenge
-     * prefix to a SAFECore evaluation under the same fixed IO pattern.
+     * A continuous online SAFE transcript remains a valid alternative, but
+     * is not the recommended prerequisite for migrating this hash DAG.
      */
-    out.proposed_fs_is_one_continuous_absorb_squeeze_state = true;
+    out.proposed_stateless_safecore_per_hash_event = true;
+    out.proposed_seed_feedback_is_ordinary_message_data = true;
+    out.proposed_safecore_zero_padding_fixed_by_io = true;
+    out.proposed_fs_is_one_continuous_absorb_squeeze_state = false;
     bool safe_events_well_formed =
         v11.proposed_safe_io_events.size() ==
             v11.expected_hash_events;
@@ -1108,7 +1115,7 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
         const auto& item = v11.proposed_safe_io_events[event];
         safe_events_well_formed &=
             item.ordinal == event &&
-            item.absorb_lanes >= 2 &&
+            item.absorb_lanes != 0 &&
             item.squeeze_lanes == alg_hash::kAlgHashDigestLen &&
             static_cast<uint32_t>(item.role) >=
                 static_cast<uint32_t>(TranscriptRoleV1::ShapeCommit) &&
@@ -1121,11 +1128,10 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
             v11.independently_replayed_hash_events &&
         safe_events_well_formed;
     /*
-     * The executable event inventory still measures the old messages,
-     * several of which re-absorb a previous digest/seed.  SAFE should
-     * absorb newly received protocol data and squeeze from the persistent
-     * state instead of emulating nested hash calls.  The normalized
-     * seed-free payload manifest is therefore still open.
+     * No removal is implemented because none is required for the stateless
+     * route: feedback is part of M and IO binds |M|. This legacy field stays
+     * false to record that the message DAG is unchanged; it is deliberately
+     * not a theorem-premise conjunct below.
      */
     out.proposed_native_seed_feedback_removed = false;
     out.proposed_merkle_instances_have_separate_tags = true;
@@ -1152,13 +1158,37 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
             budget.receipt_program_calls_per_site) +
         static_cast<long double>(
             budget.adversary_permutation_queries_per_site);
-    const long double q_h =
+    const long double honest_q_h =
         static_cast<long double>(budget.safe_tag_hash_queries);
-    const long double q_p =
+    const long double honest_q_p =
         static_cast<long double>(budget.proof_sites) *
         calls_per_site;
-    out.theorem_unique_h_queries = budget.safe_tag_hash_queries;
+    const long double adversarial_q_h =
+        budget.adversarial_h_query_budget_log2 > 0.0
+        ? std::exp2(
+              static_cast<long double>(
+                  budget.adversarial_h_query_budget_log2))
+        : 0.0L;
+    const long double adversarial_q_p =
+        budget.adversarial_permutation_query_budget_log2 > 0.0
+        ? std::exp2(
+              static_cast<long double>(
+                  budget.adversarial_permutation_query_budget_log2))
+        : 0.0L;
+    const long double q_h = honest_q_h + adversarial_q_h;
+    const long double q_p = honest_q_p + adversarial_q_p;
+    out.honest_tag_hash_queries = budget.safe_tag_hash_queries;
+    out.theorem_unique_h_queries =
+        q_h >= static_cast<long double>(
+                   std::numeric_limits<uint64_t>::max())
+        ? std::numeric_limits<uint64_t>::max()
+        : static_cast<uint64_t>(q_h);
+    out.adversarial_classical_query_budgets_included =
+        budget.adversarial_h_query_budget_log2 >= 64.0 &&
+        budget.adversarial_permutation_query_budget_log2 >= 64.0;
     if (q_h > 0.0L && q_p > 0.0L) {
+        out.theorem_h_queries_log2 =
+            static_cast<double>(std::log2(q_h));
         out.theorem_unique_permutation_queries_log2 =
             static_cast<double>(std::log2(q_p));
         const auto choose_two = [](long double q) {
@@ -1170,9 +1200,11 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
          *  [3*C(QH,2) + 2*C(QP,2) + 4*QP*QH] / p^c
          *      + 3*C(QP,2) / p^b.
          *
-         * QP contains every shared native, recursive, Merkle and
-         * adversarial query.  We deliberately use total calls as an upper
-         * bound on unique calls.
+         * Honest manifest calls and separately declared adversarial H/P
+         * budgets are summed before this expression. For the V1
+         * unconditional classical screen both adversarial budgets are 2^64;
+         * an honest tag inventory alone is never treated as attacker cost.
+         * Total P calls upper-bound unique P queries.
          */
         const long double capacity_numerator =
             3.0L * choose_two(q_h) +
@@ -1203,42 +1235,43 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
 
     out.premise_mismatches = {
         "V11 creates a fresh zero-capacity SpongeHashFp for each event; "
-        "SAFE Fiat-Shamir uses one START followed by a continuous fixed "
-        "ABSORB/SQUEEZE schedule.",
+        "the stateless SAFECore replacement must instead initialize all four "
+        "capacity lanes with H(IO,D) for every event.",
         "V11 places a role domain in the outer/rate message. SAFECore "
         "initializes the full inner capacity with H(IO,D).",
         "The additive V12 typed IV is a fixed tuple, not an output of the "
         "random-oracle H(IO,D) required by SAFECore Theorem 2.",
         "V11 uses injective 10* padding for independently nested hashes; "
-        "SAFECore uses its fixed-pattern round padding and blank squeeze "
-        "blocks.",
-        "No native or recursive implementation currently enforces START, "
-        "the exact IO pattern, FINISH, or a canonical full-Fp4 tag."};
+        "SAFECore IO=(I,4) binds I and uses zero padding only.",
+        "No native or recursive implementation currently evaluates exact "
+        "Algorithm 3 with a canonical full-Fp4 H(IO,D) tag."};
     out.required_protocol_changes = {
-        "Version-bump to a continuous V12 SAFE FS transcript. Encode every "
-        "phase role and ordinal in the absorbed fields and pin the complete "
-        "fixed IO pattern derived from the transcript manifest. Remove "
-        "re-absorption of prior digest/seed outputs; squeeze subsequent "
-        "challenges from the persistent state.",
+        "Version-bump each V11 stateless digest to SAFECore "
+        "C(IO=(I,4),D=typed role,M). Preserve existing seed/digest feedback "
+        "inside M and derive I from the exact call-site manifest.",
         "Define H(IO,D)->Fp^4 with rejection-sampled canonical Goldilocks "
         "lanes; precompute and consensus-pin the tag registry root. Do not "
         "reduce arbitrary u64 chunks modulo p.",
         "Assign distinct (IO,D) tags to FS, row leaf, fold leaf, Merkle "
         "node, receipt, ProgramTable and application-statement instances.",
-        "Implement identical START/ABSORB/SQUEEZE/FINISH semantics in the "
-        "native prover/verifier and recursive AIR, with proof-level rejects "
-        "for IO length, role, ordinal, tag and unfinished patterns.",
-        "Derive and enforce exact global QH/QP manifests before consuming "
-        "the published advantage bound."};
+        "Implement identical fixed-IO SAFECore zero padding, absorption and "
+        "squeeze timing in the native prover/verifier and recursive AIR, "
+        "with proof-level rejects for IO length, role, tag and message.",
+        "Derive and enforce exact honest global QH/QP manifests, then add "
+        "separate adversarial H/P budgets (at least 2^64 each for the V1 "
+        "classical screen) before consuming the published advantage bound."};
     out.published_safecore_premises_instantiated =
         out.proposed_tag_hash_to_fp4_is_canonical &&
         out.proposed_tag_registry_root_pinned &&
-        out.proposed_native_seed_feedback_removed &&
+        out.proposed_stateless_safecore_per_hash_event &&
+        out.proposed_seed_feedback_is_ordinary_message_data &&
+        out.proposed_safecore_zero_padding_fixed_by_io &&
         out.exact_safe_io_pattern_manifest_enforced &&
         out.native_safe_transcript_executable &&
         out.recursive_safe_transcript_executable &&
         out.concrete_tag_hash_reduction_complete &&
         out.concrete_poseidon_reduction_complete &&
+        out.adversarial_classical_query_budgets_included &&
         budget.exact_manifest_derived &&
         out.theorem2_bound_computed &&
         out.theorem2_numeric_v1_screen_met;
@@ -1248,6 +1281,7 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
         "stage3:v12_safecore:published_theorem2_bound=" +
         std::to_string(out.theorem_indifferentiability_bits) +
         ";v11_nested_zero_capacity_mismatch;"
+        "stateless_alg3_preserves_seed_feedback;"
         "safe_api_c_over_2_tag_profile_below_64;"
         "require_full_c_tag;io_manifest_tag_registry_native_recursive_false;"
         "concrete_h_p_reductions_false;"
@@ -1266,11 +1300,11 @@ NiropPathComparisonV1 CompareNiropPathsV1(
     out.safe_core =
         AssessSafeCoreMigrationV1(statement, budget);
     /*
-     * The SAFE API with the SAFECore §5.3 reduction is the V12 engineering
-     * recommendation because it preserves Poseidon2 while replacing the
-     * bespoke security reduction with a published theorem that explicitly
-     * covers multiple sponge invocations and multi-round Fiat-Shamir. This
-     * is not a readiness selection.
+     * Stateless SAFECore Algorithm 3 is the V12 engineering recommendation:
+     * it preserves the current hash DAG and Poseidon2 backend while replacing
+     * the bespoke zero-capacity mode with the published theorem. Theorem 2
+     * covers multiple invocations; §5.3's continuous transcript is an
+     * application of SAFECore, not a mandatory shape. This is not readiness.
      */
     out.recommended =
         RecommendedNiropPathV1::PublishedSafeCore;
@@ -1278,15 +1312,15 @@ NiropPathComparisonV1 CompareNiropPathsV1(
     out.recommendation_is_production_selectable =
         out.safe_core.production_theorem_complete;
     out.rationale =
-        "Prefer a full-capacity online SAFE API V12 transcript, reduced "
-        "prefix-by-prefix to SAFECore as in ePrint 2023/520 section 5.3. "
-        "That work proves cross-oracle and multi-round Fiat-Shamir security "
-        "for multiple invocations under random-H/random-P assumptions, "
-        "while retaining the existing Poseidon2 permutation and GPU path. "
+        "Prefer one full-capacity stateless SAFECore Algorithm-3 call per "
+        "V11 hash-DAG event: IO=(exact absorb length,4), D=typed role, and "
+        "the existing message M including seed/digest feedback. Theorem 2 "
+        "covers multiple invocations and arbitrary IO,D under random-H/"
+        "random-P assumptions, while retaining the Poseidon2 GPU path. "
         "The c/2-lane tag profile in the 2023/522 API is insufficient for "
         "Goldilocks c=4; use SAFECore's full c=4 H(IO,D) tag. This remains "
-        "unselectable until the fixed IO/tag registry, exact QH/QP manifest, "
-        "native transcript and recursive replay are executable. Typed "
+        "unselectable until the exact IO/tag registry and QH/QP manifest, "
+        "native Algorithm 3 and recursive replay are executable. Typed "
         "bespoke add-absorb requires a new proof; independent overwrite "
         "duplex requires a larger transcript/oracle redesign.";
     return out;
