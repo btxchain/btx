@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V11_NIROP_HYBRID_H
 
 #include <matmul/matmul_v4_rc_stage3_multirow_p2_transcript.h>
+#include <matmul/matmul_v4_rc_stage3_safe_v12.h>
 
 #include <array>
 #include <cstdint>
@@ -450,6 +451,166 @@ struct SafeQ192QueryBudgetV13 {
     double adversarial_poseidon_queries_log2{0.0};
     bool exact_manifest_derived{false};
 };
+
+// -------------------------------------------------------------------------
+// Exact per-accepted-proof V13 H/P/query inventory.
+// -------------------------------------------------------------------------
+
+/**
+ * One H(IO,D,counter) call made by the V13 SAFE tag rejection sampler.
+ *
+ * `canonical_io_words`, `typed_domain` and `rejection_counter` uniquely
+ * determine the SHA256d counter-XOF preimage together with the frozen V12
+ * SAFE parameter tuple.  Every rejection attempt is retained as a distinct
+ * occurrence.  In particular, two byte-identical calls at different
+ * verifier sites are not deduplicated.
+ */
+struct V13HOracleCallV1 {
+    uint64_t occurrence{0};
+    uint32_t safe_event{0};
+    alg_hash_typed::RoleV12 role{
+        alg_hash_typed::RoleV12::TranscriptBatchCoefficient};
+    std::vector<uint32_t> canonical_io_words;
+    std::vector<uint8_t> typed_domain;
+    uint64_t rejection_counter{0};
+    bool accepted{false};
+
+    friend bool operator==(
+        const V13HOracleCallV1&,
+        const V13HOracleCallV1&) = default;
+};
+
+enum class V13POracleFamilyV1 : uint8_t {
+    SafeCore = 1,
+    ShapeCommit = 2,
+    OodEvaluationCommit = 3,
+    RowLeaf = 4,
+    RowMerklePath = 5,
+    FoldLeaf = 6,
+    FoldMerklePath = 7,
+    TerminalLeaf = 8,
+    TerminalNode = 9,
+};
+
+/**
+ * One concrete call to the single shared frozen Poseidon2 permutation.
+ * `input` and `output` are canonical full-width states.  The occurrence
+ * number is part of the manifest identity; equal states at distinct call
+ * sites remain two queries and are charged twice before any birthday square.
+ */
+struct V13POracleCallV1 {
+    uint64_t occurrence{0};
+    V13POracleFamilyV1 family{V13POracleFamilyV1::SafeCore};
+    uint32_t protocol_event{0};
+    uint32_t local_call{0};
+    alg_hash::State input{};
+    alg_hash::State output{};
+
+    friend bool operator==(
+        const V13POracleCallV1&,
+        const V13POracleCallV1&) = default;
+};
+
+/**
+ * The verifier-visible query draw schedule.  Full SAFE outputs are retained,
+ * not only the modulo-reduced index, so recursive replay cannot substitute an
+ * arbitrary index with the same residue.
+ */
+struct V13CanonicalQueryEventV1 {
+    uint32_t occurrence{0};
+    Fri3AlgSafeV13Consumer consumer{
+        Fri3AlgSafeV13Consumer::FriLambda};
+    uint32_t family_ordinal{0};
+    alg_hash_typed::RoleV12 role{
+        alg_hash_typed::RoleV12::TranscriptBatchCoefficient};
+    alg_hash::Digest safe_digest{};
+    Fp3 consumed_fp3{};
+    uint32_t consumed_index{0};
+    bool acceptable{false};
+    bool selected{false};
+
+    friend bool operator==(
+        const V13CanonicalQueryEventV1& left,
+        const V13CanonicalQueryEventV1& right)
+    {
+        return left.occurrence == right.occurrence &&
+            left.consumer == right.consumer &&
+            left.family_ordinal == right.family_ordinal &&
+            left.role == right.role &&
+            left.safe_digest == right.safe_digest &&
+            gf::Eq(left.consumed_fp3, right.consumed_fp3) &&
+            left.consumed_index == right.consumed_index &&
+            left.acceptable == right.acceptable &&
+            left.selected == right.selected;
+    }
+};
+
+/**
+ * Explicit cells that a recursive verifier must export.  This type is
+ * intentionally data-only: equality with the native manifest is a complete
+ * parity check, but it is not evidence that a recursive AIR authenticated the
+ * cells.  The latter remains a separate fail-closed production premise.
+ */
+struct V13RecursiveOracleParityInputsV1 {
+    std::vector<V13HOracleCallV1> h_calls;
+    std::vector<V13POracleCallV1> p_calls;
+    std::vector<V13CanonicalQueryEventV1> query_events;
+};
+
+struct V13PerProofOracleInventoryV1 {
+    uint32_t protocol_version{0};
+    uint32_t width{0};
+    uint32_t n_coeffs{0};
+    uint32_t n_lde{0};
+    uint32_t folds{0};
+    uint32_t queries{0};
+    std::vector<V13HOracleCallV1> h_calls;
+    std::vector<V13POracleCallV1> p_calls;
+    std::vector<V13CanonicalQueryEventV1> query_events;
+    uint64_t rejected_h_candidates{0};
+    uint64_t accepted_h_candidates{0};
+    uint64_t safe_p_calls{0};
+    uint64_t commitment_p_calls{0};
+    uint64_t merkle_p_calls{0};
+    bool native_proof_accepted{false};
+    bool exact_event_order{false};
+    bool every_h_rejection_attempt_counted{false};
+    bool every_shared_p_occurrence_counted{false};
+    bool ordered_h_domains_bound{false};
+    bool p_states_canonical_and_executable{false};
+    bool canonical_query_seed_is_sole_query_source{false};
+    bool native_recursive_inputs_equal{false};
+    bool recursive_air_authenticates_parity_inputs{false};
+    bool exact_per_proof_inventory{false};
+    bool exact_global_topology_inventory{false};
+    bool production_nirop_complete{false};
+    std::vector<std::string> residual_premises;
+    std::string note;
+};
+
+/**
+ * Re-run the unmodified V13 verifier/replay and enumerate every SAFE H call,
+ * every shared-Poseidon call made by SAFE, shape/OOD commitments and all
+ * Merkle verification work, plus the exact query-event order.
+ */
+[[nodiscard]] bool BuildV13PerProofOracleInventoryV1(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    V13PerProofOracleInventoryV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Rebuild the native inventory and equality-check the explicit recursive
+ * cells.  Omission, duplication, reorder, cross-proof transplant and
+ * non-canonical x+p lanes all fail.  This closes per-proof parity only;
+ * recursive AIR authentication and the global 14-role topology remain false.
+ */
+[[nodiscard]] bool ValidateV13NativeRecursiveOracleParityV1(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const V13RecursiveOracleParityInputsV1& recursive,
+    V13PerProofOracleInventoryV1& out,
+    std::string* why = nullptr);
 
 /**
  * Machine-checked computational reduction for the selected single-lane V13

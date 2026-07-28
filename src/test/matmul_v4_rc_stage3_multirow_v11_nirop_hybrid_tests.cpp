@@ -70,6 +70,32 @@ bool DigestDifferent(
     return false;
 }
 
+uint256 V13Seed(uint8_t first)
+{
+    uint256 seed;
+    seed.begin()[0] = first;
+    seed.begin()[7] = static_cast<uint8_t>(first + 1);
+    seed.begin()[19] = static_cast<uint8_t>(first + 2);
+    seed.begin()[31] = static_cast<uint8_t>(first + 3);
+    return seed;
+}
+
+std::vector<std::vector<gf::Fp3>> V13Columns(uint64_t delta = 0)
+{
+    std::vector<std::vector<gf::Fp3>> columns(2);
+    for (uint32_t column = 0; column < columns.size(); ++column) {
+        columns[column].resize(8);
+        for (uint32_t row = 0; row < columns[column].size(); ++row) {
+            columns[column][row] = {
+                gf::FromU64(delta + 1 + 19 * column + 7 * row),
+                gf::FromU64(delta + 3 + 11 * column + 5 * row),
+                gf::FromU64(delta + 9 + 13 * column + 17 * row),
+            };
+        }
+    }
+    return columns;
+}
+
 void CheckIdenticalInput(
     const CrossRoleIdenticalInputV1& witness)
 {
@@ -512,6 +538,201 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(audit.commitment_binding_reduction_complete);
     BOOST_CHECK(audit.production_composition_complete);
     BOOST_CHECK(audit.missing_premises.empty());
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_q192_v13_exact_per_proof_h_p_and_query_inventory)
+{
+    const uint256 seed = V13Seed(0x91);
+    const auto proved = Fri3AlgSafeQ192K2V13BatchCommit(
+        V13Columns(), seed, 13);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+
+    V13PerProofOracleInventoryV1 native;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        BuildV13PerProofOracleInventoryV1(
+            proved.proof, seed, native, &why),
+        why);
+    BOOST_CHECK(native.native_proof_accepted);
+    BOOST_CHECK(native.exact_event_order);
+    BOOST_CHECK(native.every_h_rejection_attempt_counted);
+    BOOST_CHECK(native.every_shared_p_occurrence_counted);
+    BOOST_CHECK(native.ordered_h_domains_bound);
+    BOOST_CHECK(native.p_states_canonical_and_executable);
+    BOOST_CHECK(
+        native.canonical_query_seed_is_sole_query_source);
+    BOOST_CHECK(native.exact_per_proof_inventory);
+    BOOST_CHECK(!native.native_recursive_inputs_equal);
+    BOOST_CHECK(
+        !native.recursive_air_authenticates_parity_inputs);
+    BOOST_CHECK(!native.exact_global_topology_inventory);
+    BOOST_CHECK(!native.production_nirop_complete);
+    BOOST_CHECK_GE(native.residual_premises.size(), 4U);
+    BOOST_CHECK_EQUAL(native.protocol_version, 13U);
+    BOOST_CHECK_EQUAL(native.width, 2U);
+    BOOST_CHECK_EQUAL(native.n_coeffs, 8U);
+    BOOST_CHECK_EQUAL(native.n_lde, 128U);
+    BOOST_CHECK_EQUAL(native.folds, 3U);
+    BOOST_CHECK_EQUAL(native.queries, kRCFri3AlgNumQueries);
+    BOOST_CHECK_EQUAL(
+        native.accepted_h_candidates,
+        native.query_events.size());
+    BOOST_CHECK_EQUAL(
+        native.h_calls.size(),
+        native.accepted_h_candidates +
+            native.rejected_h_candidates);
+    BOOST_CHECK_EQUAL(
+        native.p_calls.size(),
+        native.safe_p_calls +
+            native.commitment_p_calls +
+            native.merkle_p_calls);
+    BOOST_CHECK_GT(native.safe_p_calls, 0U);
+    BOOST_CHECK_GT(native.commitment_p_calls, 0U);
+    BOOST_CHECK_GT(native.merkle_p_calls, 0U);
+    BOOST_TEST_MESSAGE(
+        "V13_EXACT_ORACLE_INVENTORY h="
+        << native.h_calls.size()
+        << " h_rejected=" << native.rejected_h_candidates
+        << " p=" << native.p_calls.size()
+        << " p_safe=" << native.safe_p_calls
+        << " p_commitment=" << native.commitment_p_calls
+        << " p_merkle=" << native.merkle_p_calls
+        << " transcript_events=" << native.query_events.size());
+
+    for (uint64_t i = 0; i < native.h_calls.size(); ++i) {
+        BOOST_CHECK_EQUAL(native.h_calls[i].occurrence, i);
+    }
+    for (uint64_t i = 0; i < native.p_calls.size(); ++i) {
+        BOOST_CHECK_EQUAL(native.p_calls[i].occurrence, i);
+    }
+    for (uint32_t i = 0; i < native.query_events.size(); ++i) {
+        BOOST_CHECK_EQUAL(native.query_events[i].occurrence, i);
+    }
+
+    V13RecursiveOracleParityInputsV1 recursive{
+        native.h_calls, native.p_calls, native.query_events};
+    V13PerProofOracleInventoryV1 parity;
+    BOOST_REQUIRE_MESSAGE(
+        ValidateV13NativeRecursiveOracleParityV1(
+            proved.proof, seed, recursive, parity, &why),
+        why);
+    BOOST_CHECK(parity.native_recursive_inputs_equal);
+    BOOST_CHECK(parity.exact_per_proof_inventory);
+    BOOST_CHECK(
+        !parity.recursive_air_authenticates_parity_inputs);
+    BOOST_CHECK(!parity.exact_global_topology_inventory);
+    BOOST_CHECK(!parity.production_nirop_complete);
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_q192_v13_inventory_rejects_all_manifest_mutations)
+{
+    const uint256 seed = V13Seed(0xa1);
+    const auto proved = Fri3AlgSafeQ192K2V13BatchCommit(
+        V13Columns(), seed, 17);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    V13PerProofOracleInventoryV1 native;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        BuildV13PerProofOracleInventoryV1(
+            proved.proof, seed, native, &why),
+        why);
+    const V13RecursiveOracleParityInputsV1 exact{
+        native.h_calls, native.p_calls, native.query_events};
+    const auto rejects =
+        [&](V13RecursiveOracleParityInputsV1 changed) {
+            V13PerProofOracleInventoryV1 rejected;
+            BOOST_CHECK(
+                !ValidateV13NativeRecursiveOracleParityV1(
+                    proved.proof, seed, changed,
+                    rejected, &why));
+            BOOST_CHECK(!rejected.native_recursive_inputs_equal);
+            BOOST_CHECK(!rejected.production_nirop_complete);
+        };
+
+    {
+        auto changed = exact;
+        changed.h_calls.erase(changed.h_calls.begin() + 1);
+        for (uint64_t i = 0; i < changed.h_calls.size(); ++i) {
+            changed.h_calls[i].occurrence = i;
+        }
+        rejects(std::move(changed));
+    }
+    {
+        auto changed = exact;
+        auto duplicate = changed.p_calls.back();
+        duplicate.occurrence = changed.p_calls.size();
+        changed.p_calls.push_back(std::move(duplicate));
+        rejects(std::move(changed));
+    }
+    {
+        auto changed = exact;
+        BOOST_REQUIRE_GE(changed.query_events.size(), 2U);
+        std::swap(
+            changed.query_events[0],
+            changed.query_events[1]);
+        changed.query_events[0].occurrence = 0;
+        changed.query_events[1].occurrence = 1;
+        rejects(std::move(changed));
+    }
+    {
+        auto changed = exact;
+        const auto item = std::find_if(
+            changed.p_calls.begin(), changed.p_calls.end(),
+            [](const V13POracleCallV1& call) {
+                return call.family ==
+                    V13POracleFamilyV1::TerminalLeaf;
+            });
+        BOOST_REQUIRE(item != changed.p_calls.end());
+        changed.p_calls.erase(item);
+        for (uint64_t i = 0; i < changed.p_calls.size(); ++i) {
+            changed.p_calls[i].occurrence = i;
+        }
+        rejects(std::move(changed));
+    }
+    {
+        auto changed = exact;
+        BOOST_REQUIRE(!changed.h_calls.front().typed_domain.empty());
+        changed.h_calls.front().typed_domain.back() ^= 1U;
+        rejects(std::move(changed));
+    }
+    {
+        auto changed = exact;
+        bool changed_zero = false;
+        for (auto& call : changed.p_calls) {
+            const auto zero =
+                std::find(call.input.begin(), call.input.end(), 0);
+            if (zero == call.input.end()) continue;
+            *zero = gf::kP;
+            changed_zero = true;
+            break;
+        }
+        BOOST_REQUIRE(changed_zero);
+        rejects(std::move(changed));
+    }
+    {
+        auto changed = exact;
+        ++changed.h_calls.front().rejection_counter;
+        rejects(std::move(changed));
+    }
+
+    {
+        const uint256 other_seed = V13Seed(0xb1);
+        const auto other = Fri3AlgSafeQ192K2V13BatchCommit(
+            V13Columns(1000), other_seed, 19);
+        BOOST_REQUIRE_MESSAGE(other.ok, other.note);
+        V13PerProofOracleInventoryV1 other_native;
+        BOOST_REQUIRE_MESSAGE(
+            BuildV13PerProofOracleInventoryV1(
+                other.proof, other_seed,
+                other_native, &why),
+            why);
+        rejects({
+            other_native.h_calls,
+            other_native.p_calls,
+            other_native.query_events});
+    }
 }
 
 BOOST_AUTO_TEST_CASE(

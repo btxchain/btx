@@ -1293,6 +1293,711 @@ SafeCoreMigrationAuditV1 AssessSafeCoreMigrationV1(
     return out;
 }
 
+namespace {
+
+constexpr char kV13ChallengeDomainV1[] =
+    "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13_CHALLENGE";
+constexpr char kV13QueryCandidateDomainV1[] =
+    "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13_QUERY_CANDIDATE";
+
+bool InventoryFail(std::string* why, const std::string& detail)
+{
+    if (why != nullptr) {
+        *why = "stage3:v13_nirop_inventory:" + detail;
+    }
+    return false;
+}
+
+bool CanonicalState(const alg_hash::State& state)
+{
+    return std::all_of(
+        state.begin(), state.end(),
+        [](Fp lane) { return lane < gf::kP; });
+}
+
+bool CanonicalDigestV13(const alg_hash::Digest& digest)
+{
+    return std::all_of(
+        digest.begin(), digest.end(),
+        [](Fp lane) { return lane < gf::kP; });
+}
+
+void AppendLe32Words(
+    std::vector<Fp>& out, const unsigned char* bytes, size_t size)
+{
+    for (size_t offset = 0; offset < size; offset += 4) {
+        uint32_t word = 0;
+        for (size_t byte = 0;
+             byte < 4 && offset + byte < size; ++byte) {
+            word |= static_cast<uint32_t>(bytes[offset + byte])
+                    << (8 * byte);
+        }
+        out.push_back(gf::FromU64(word));
+    }
+}
+
+bool BuildV13SafeMaterial(
+    const Fri3AlgSafeV13Replay& replay,
+    const Fri3AlgSafeV13ReplayEvent& event,
+    std::vector<uint8_t>& application_domain,
+    std::vector<Fp>& message,
+    std::string* why)
+{
+    application_domain.clear();
+    message.clear();
+    if (!alg_hash_typed::IsKnownRoleV12(event.role) ||
+        event.label.empty()) {
+        return InventoryFail(why, "safe_event_role_or_label");
+    }
+    if (event.consumer == Fri3AlgSafeV13Consumer::QueryIndex) {
+        if (!event.transcript_before_draw.empty() ||
+            event.role != alg_hash_typed::RoleV12::
+                              TranscriptQueryCandidate ||
+            !CanonicalDigestV13(replay.query_seed)) {
+            return InventoryFail(why, "query_candidate_source");
+        }
+        application_domain.assign(
+            reinterpret_cast<const uint8_t*>(
+                kV13QueryCandidateDomainV1),
+            reinterpret_cast<const uint8_t*>(
+                kV13QueryCandidateDomainV1) +
+                sizeof(kV13QueryCandidateDomainV1) - 1);
+        message = {
+            gf::FromU64(UINT32_C(0x53414645)),
+            gf::FromU64(kRCFri3AlgSafeQ192K2ProofVersionV13),
+            gf::FromU64(static_cast<uint32_t>(event.role)),
+            gf::FromU64(replay.query_seed.size()),
+        };
+        message.insert(
+            message.end(),
+            replay.query_seed.begin(), replay.query_seed.end());
+        message.push_back(gf::FromU64(event.draw_index));
+        return true;
+    }
+
+    const size_t label_size = event.label.size();
+    if (event.transcript_before_draw.size() >
+            std::numeric_limits<uint32_t>::max() ||
+        label_size > std::numeric_limits<uint32_t>::max()) {
+        return InventoryFail(why, "safe_event_length");
+    }
+    application_domain.assign(
+        reinterpret_cast<const uint8_t*>(kV13ChallengeDomainV1),
+        reinterpret_cast<const uint8_t*>(kV13ChallengeDomainV1) +
+            sizeof(kV13ChallengeDomainV1) - 1);
+    application_domain.push_back(0);
+    application_domain.insert(
+        application_domain.end(),
+        event.label.begin(), event.label.end());
+
+    message.reserve(
+        7 + (event.transcript_before_draw.size() + 3) / 4 +
+        (label_size + 3) / 4);
+    message.push_back(gf::FromU64(UINT32_C(0x53414645)));
+    message.push_back(
+        gf::FromU64(kRCFri3AlgSafeQ192K2ProofVersionV13));
+    message.push_back(gf::FromU64(
+        static_cast<uint32_t>(event.role)));
+    message.push_back(gf::FromU64(
+        static_cast<uint32_t>(
+            event.transcript_before_draw.size())));
+    AppendLe32Words(
+        message, event.transcript_before_draw.data(),
+        event.transcript_before_draw.size());
+    message.push_back(
+        gf::FromU64(static_cast<uint32_t>(label_size)));
+    AppendLe32Words(
+        message,
+        reinterpret_cast<const unsigned char*>(
+            event.label.data()),
+        label_size);
+    message.push_back(gf::FromU64(event.draw_index));
+    return true;
+}
+
+void AppendPCall(
+    V13PerProofOracleInventoryV1& out,
+    V13POracleFamilyV1 family,
+    uint32_t protocol_event,
+    uint32_t local_call,
+    alg_hash::State& state)
+{
+    V13POracleCallV1 call;
+    call.occurrence = out.p_calls.size();
+    call.family = family;
+    call.protocol_event = protocol_event;
+    call.local_call = local_call;
+    call.input = state;
+    alg_hash::Permute(state);
+    call.output = state;
+    out.p_calls.push_back(std::move(call));
+}
+
+bool AppendSafeEventCalls(
+    const Fri3AlgSafeV13Replay& replay,
+    const Fri3AlgSafeV13ReplayEvent& event,
+    uint32_t event_ordinal,
+    V13PerProofOracleInventoryV1& out,
+    std::string* why)
+{
+    std::vector<uint8_t> application_domain;
+    std::vector<Fp> message;
+    if (!BuildV13SafeMaterial(
+            replay, event, application_domain, message, why)) {
+        return false;
+    }
+    if (message.empty() ||
+        std::any_of(
+            message.begin(), message.end(),
+            [](Fp lane) { return lane >= gf::kP; })) {
+        return InventoryFail(why, "noncanonical_safe_message");
+    }
+
+    safe_v12::IoPatternBuilderV12 pattern_builder;
+    safe_v12::IoPatternV12 pattern;
+    if (!pattern_builder.Absorb(
+            static_cast<uint32_t>(message.size()), why) ||
+        !pattern_builder.Squeeze(
+            alg_hash::kAlgHashDigestLen, why) ||
+        !pattern_builder.Build(pattern, why)) {
+        return InventoryFail(why, "safe_io_pattern");
+    }
+    std::vector<uint8_t> typed_domain;
+    if (!safe_v12::TypedDomainV12(
+            event.role, application_domain,
+            typed_domain, why)) {
+        return InventoryFail(why, "safe_typed_domain");
+    }
+    std::vector<uint32_t> io_words;
+    if (!safe_v12::CanonicalIoWordsV12(
+            pattern, io_words, why)) {
+        return InventoryFail(why, "safe_io_words");
+    }
+    std::array<Fp, safe_v12::kSafeCapacityV12> tag{};
+    safe_v12::TagHashStatsV12 tag_stats;
+    if (!safe_v12::DeriveTagV12(
+            pattern, typed_domain, tag, &tag_stats, why) ||
+        tag_stats.vector_attempts == 0 ||
+        tag_stats.rejected_vectors + 1 !=
+            tag_stats.vector_attempts) {
+        return InventoryFail(why, "safe_tag_rejection_schedule");
+    }
+    for (uint64_t counter = 0;
+         counter < tag_stats.vector_attempts; ++counter) {
+        V13HOracleCallV1 call;
+        call.occurrence = out.h_calls.size();
+        call.safe_event = event_ordinal;
+        call.role = event.role;
+        call.canonical_io_words = io_words;
+        call.typed_domain = typed_domain;
+        call.rejection_counter = counter;
+        call.accepted =
+            counter + 1 == tag_stats.vector_attempts;
+        out.h_calls.push_back(std::move(call));
+    }
+    out.rejected_h_candidates += tag_stats.rejected_vectors;
+    ++out.accepted_h_candidates;
+
+    alg_hash::State state{};
+    std::copy(
+        tag.begin(), tag.end(),
+        state.begin() + safe_v12::kSafeRateV12);
+    uint32_t local_call = 0;
+    for (size_t offset = 0;
+         offset < message.size();
+         offset += safe_v12::kSafeRateV12) {
+        for (uint32_t lane = 0;
+             lane < safe_v12::kSafeRateV12; ++lane) {
+            const size_t index = offset + lane;
+            state[lane] = gf::Add(
+                state[lane],
+                index < message.size() ? message[index] : 0);
+        }
+        AppendPCall(
+            out, V13POracleFamilyV1::SafeCore,
+            event_ordinal, local_call++, state);
+        ++out.safe_p_calls;
+    }
+    const alg_hash::Digest digest{
+        state[0], state[1], state[2], state[3]};
+    if (digest != event.safe_digest) {
+        return InventoryFail(why, "safe_output_mismatch");
+    }
+    // SAFECore Algorithm 3 makes the post-output P call even though the
+    // digest is already fixed. It is still a shared-oracle query.
+    AppendPCall(
+        out, V13POracleFamilyV1::SafeCore,
+        event_ordinal, local_call, state);
+    ++out.safe_p_calls;
+    return true;
+}
+
+alg_hash::Digest AppendSpongeCalls(
+    const std::vector<Fp>& input,
+    V13POracleFamilyV1 family,
+    uint32_t protocol_event,
+    V13PerProofOracleInventoryV1& out)
+{
+    std::vector<Fp> padded = input;
+    padded.push_back(gf::FromU64(1));
+    while (padded.size() % alg_hash::kAlgHashRate != 0) {
+        padded.push_back(0);
+    }
+    alg_hash::State state{};
+    uint32_t local_call = 0;
+    for (size_t offset = 0;
+         offset < padded.size();
+         offset += alg_hash::kAlgHashRate) {
+        for (uint32_t lane = 0;
+             lane < alg_hash::kAlgHashRate; ++lane) {
+            state[lane] = gf::Add(
+                state[lane], padded[offset + lane]);
+        }
+        AppendPCall(
+            out, family, protocol_event,
+            local_call++, state);
+    }
+    return {state[0], state[1], state[2], state[3]};
+}
+
+alg_hash::Digest AppendLeafCall(
+    const Fp3& value, uint32_t index,
+    V13POracleFamilyV1 family,
+    uint32_t protocol_event,
+    uint32_t local_call,
+    V13PerProofOracleInventoryV1& out)
+{
+    alg_hash::State state{};
+    state[0] = gf::Canonical(value.c0);
+    state[1] = gf::Canonical(value.c1);
+    state[2] = gf::Canonical(value.c2);
+    state[3] = gf::FromU64(index);
+    state[4] = alg_hash::GetAlgHashConstants().leaf_domain;
+    AppendPCall(
+        out, family, protocol_event, local_call, state);
+    return {state[0], state[1], state[2], state[3]};
+}
+
+alg_hash::Digest AppendCompressCall(
+    const alg_hash::Digest& left,
+    const alg_hash::Digest& right,
+    V13POracleFamilyV1 family,
+    uint32_t protocol_event,
+    uint32_t local_call,
+    V13PerProofOracleInventoryV1& out)
+{
+    alg_hash::State state{};
+    std::copy(left.begin(), left.end(), state.begin());
+    std::copy(
+        right.begin(), right.end(),
+        state.begin() + alg_hash::kAlgHashDigestLen);
+    state[8] = alg_hash::GetAlgHashConstants().node_domain;
+    AppendPCall(
+        out, family, protocol_event, local_call, state);
+    return {state[0], state[1], state[2], state[3]};
+}
+
+bool AppendPathCalls(
+    alg_hash::Digest current,
+    uint32_t index,
+    uint32_t n_leaves,
+    const std::vector<alg_hash::Digest>& siblings,
+    const alg_hash::Digest& expected_root,
+    V13POracleFamilyV1 family,
+    uint32_t protocol_event,
+    V13PerProofOracleInventoryV1& out,
+    std::string* why)
+{
+    if (n_leaves == 0 || index >= n_leaves) {
+        return InventoryFail(why, "merkle_path_shape");
+    }
+    uint32_t width = n_leaves;
+    uint32_t local_call = 0;
+    size_t sibling = 0;
+    while (width > 1) {
+        if (width & 1u) ++width;
+        if (sibling >= siblings.size()) {
+            return InventoryFail(why, "merkle_path_short");
+        }
+        const auto& other = siblings[sibling++];
+        current = (index & 1u) == 0
+            ? AppendCompressCall(
+                  current, other, family, protocol_event,
+                  local_call++, out)
+            : AppendCompressCall(
+                  other, current, family, protocol_event,
+                  local_call++, out);
+        index >>= 1;
+        width >>= 1;
+    }
+    if (sibling != siblings.size() ||
+        current != expected_root) {
+        return InventoryFail(why, "merkle_path_root");
+    }
+    return true;
+}
+
+bool CanonicalInventoryInputs(
+    const V13RecursiveOracleParityInputsV1& recursive)
+{
+    for (size_t i = 0; i < recursive.h_calls.size(); ++i) {
+        const auto& call = recursive.h_calls[i];
+        if (call.occurrence != i ||
+            !alg_hash_typed::IsKnownRoleV12(call.role) ||
+            call.canonical_io_words.empty() ||
+            call.typed_domain.empty()) {
+            return false;
+        }
+    }
+    for (size_t i = 0; i < recursive.p_calls.size(); ++i) {
+        const auto& call = recursive.p_calls[i];
+        if (call.occurrence != i ||
+            !CanonicalState(call.input) ||
+            !CanonicalState(call.output)) {
+            return false;
+        }
+        alg_hash::State expected = call.input;
+        alg_hash::Permute(expected);
+        if (expected != call.output) return false;
+    }
+    for (size_t i = 0; i < recursive.query_events.size(); ++i) {
+        const auto& event = recursive.query_events[i];
+        if (event.occurrence != i ||
+            !CanonicalDigestV13(event.safe_digest) ||
+            event.consumed_fp3.c0 >= gf::kP ||
+            event.consumed_fp3.c1 >= gf::kP ||
+            event.consumed_fp3.c2 >= gf::kP) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool BuildV13PerProofOracleInventoryV1(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    V13PerProofOracleInventoryV1& out,
+    std::string* why)
+{
+    out = {};
+    Fri3AlgSafeV13Replay replay;
+    if (!Fri3AlgSafeQ192K2V13BatchVerifyReplay(
+            proof, fs_seed, replay, why) ||
+        !replay.native_verified ||
+        !replay.exact_event_order) {
+        out = {};
+        return InventoryFail(why, "native_verifier_replay");
+    }
+    if (proof.n_coeffs == 0 ||
+        proof.n_coeffs >
+            std::numeric_limits<uint32_t>::max() /
+                proof.blowup) {
+        return InventoryFail(why, "proof_shape");
+    }
+    out.protocol_version = proof.version;
+    out.width = static_cast<uint32_t>(proof.column_len.size());
+    out.n_coeffs = proof.n_coeffs;
+    out.n_lde = proof.n_coeffs * proof.blowup;
+    out.folds = static_cast<uint32_t>(
+        proof.fold_challenges.size());
+    out.queries = static_cast<uint32_t>(proof.queries.size());
+    out.native_proof_accepted = true;
+    out.exact_event_order = true;
+
+    for (uint32_t ordinal = 0;
+         ordinal < replay.events.size(); ++ordinal) {
+        const auto& event = replay.events[ordinal];
+        V13CanonicalQueryEventV1 query_event;
+        query_event.occurrence = ordinal;
+        query_event.consumer = event.consumer;
+        query_event.family_ordinal = event.ordinal;
+        query_event.role = event.role;
+        query_event.safe_digest = event.safe_digest;
+        query_event.consumed_fp3 = event.consumed_fp3;
+        query_event.consumed_index = event.consumed_index;
+        query_event.acceptable = event.acceptable;
+        query_event.selected = event.selected;
+        out.query_events.push_back(std::move(query_event));
+        if (!AppendSafeEventCalls(
+                replay, event, ordinal, out, why)) {
+            out = {};
+            return false;
+        }
+    }
+
+    // The two short transcript commitments are verifier recomputations and
+    // therefore shared-P queries, not free public constants.
+    std::vector<Fp> shape_lanes{
+        gf::FromU64(
+            kRCFri3AlgShapeCommitDomain & UINT64_C(0xffffffff)),
+        gf::FromU64(kRCFri3AlgShapeCommitDomain >> 32),
+        gf::FromU64(proof.column_len.size()),
+        gf::FromU64(proof.n_coeffs),
+    };
+    for (uint32_t length : proof.column_len) {
+        shape_lanes.push_back(gf::FromU64(length));
+    }
+    const alg_hash::Digest shape_digest =
+        AppendSpongeCalls(
+            shape_lanes, V13POracleFamilyV1::ShapeCommit,
+            0, out);
+    if (shape_digest !=
+        Fri3AlgShapeCommit(
+            proof.n_coeffs, proof.column_len)) {
+        return InventoryFail(why, "shape_commit_calls");
+    }
+
+    std::vector<Fp> ood_lanes{
+        gf::FromU64(
+            kRCFri3AlgOodEvalCommitDomain & UINT64_C(0xffffffff)),
+        gf::FromU64(kRCFri3AlgOodEvalCommitDomain >> 32),
+        gf::FromU64(proof.evals_z1.size()),
+        gf::FromU64(proof.evals_z2.size()),
+    };
+    AppendFp3(ood_lanes, proof.z1);
+    AppendFp3(ood_lanes, proof.z2);
+    for (const Fp3& value : proof.evals_z1) {
+        AppendFp3(ood_lanes, value);
+    }
+    for (const Fp3& value : proof.evals_z2) {
+        AppendFp3(ood_lanes, value);
+    }
+    const alg_hash::Digest ood_digest =
+        AppendSpongeCalls(
+            ood_lanes,
+            V13POracleFamilyV1::OodEvaluationCommit,
+            0, out);
+    if (ood_digest != Fri3AlgOodEvalCommit(
+            proof.z1, proof.z2,
+            proof.evals_z1, proof.evals_z2)) {
+        return InventoryFail(why, "ood_commit_calls");
+    }
+    // Include every sponge block, not one logical digest.
+    out.commitment_p_calls =
+        std::count_if(
+            out.p_calls.begin(), out.p_calls.end(),
+            [](const V13POracleCallV1& call) {
+                return call.family ==
+                           V13POracleFamilyV1::ShapeCommit ||
+                    call.family ==
+                           V13POracleFamilyV1::
+                               OodEvaluationCommit;
+            });
+
+    uint32_t merkle_event = 0;
+    for (uint32_t query = 0;
+         query < proof.queries.size(); ++query) {
+        const auto& opening = proof.queries[query];
+        std::vector<Fp> row_lanes;
+        row_lanes.reserve(3 * opening.row.values.size() + 1);
+        for (const Fp3& value : opening.row.values) {
+            AppendFp3(row_lanes, value);
+        }
+        row_lanes.push_back(gf::FromU64(opening.index));
+        const uint64_t before_row = out.p_calls.size();
+        const alg_hash::Digest row_leaf =
+            AppendSpongeCalls(
+                row_lanes, V13POracleFamilyV1::RowLeaf,
+                merkle_event, out);
+        if (!AppendPathCalls(
+                row_leaf, opening.index, out.n_lde,
+                opening.row.siblings, proof.row_commit.root,
+                V13POracleFamilyV1::RowMerklePath,
+                merkle_event++, out, why)) {
+            return false;
+        }
+        out.merkle_p_calls +=
+            out.p_calls.size() - before_row;
+
+        if (opening.steps.size() != proof.fold_challenges.size()) {
+            return InventoryFail(why, "fold_step_count");
+        }
+        for (uint32_t fold = 0;
+             fold < opening.steps.size(); ++fold) {
+            const auto& step = opening.steps[fold];
+            const auto& layer = proof.fold_layers[fold];
+            const uint64_t before_fold = out.p_calls.size();
+            const alg_hash::Digest even =
+                AppendLeafCall(
+                    step.even, step.even_index,
+                    V13POracleFamilyV1::FoldLeaf,
+                    merkle_event, 0, out);
+            if (!AppendPathCalls(
+                    even, step.even_index, layer.n_leaves,
+                    step.even_siblings, layer.root,
+                    V13POracleFamilyV1::FoldMerklePath,
+                    merkle_event++, out, why)) {
+                return false;
+            }
+            const alg_hash::Digest odd =
+                AppendLeafCall(
+                    step.odd, step.odd_index,
+                    V13POracleFamilyV1::FoldLeaf,
+                    merkle_event, 0, out);
+            if (!AppendPathCalls(
+                    odd, step.odd_index, layer.n_leaves,
+                    step.odd_siblings, layer.root,
+                    V13POracleFamilyV1::FoldMerklePath,
+                    merkle_event++, out, why)) {
+                return false;
+            }
+            out.merkle_p_calls +=
+                out.p_calls.size() - before_fold;
+        }
+    }
+
+    // The native verifier independently reconstructs the complete terminal
+    // constant layer, so all leaves and internal nodes belong in Q_P.
+    std::vector<alg_hash::Digest> level;
+    level.reserve(proof.blowup);
+    const uint64_t before_terminal = out.p_calls.size();
+    for (uint32_t leaf = 0; leaf < proof.blowup; ++leaf) {
+        level.push_back(AppendLeafCall(
+            proof.final_value, leaf,
+            V13POracleFamilyV1::TerminalLeaf,
+            0, leaf, out));
+    }
+    uint32_t tree_level = 0;
+    while (level.size() > 1) {
+        if (level.size() & 1u) level.push_back(level.back());
+        std::vector<alg_hash::Digest> next(level.size() / 2);
+        for (uint32_t parent = 0;
+             parent < next.size(); ++parent) {
+            next[parent] = AppendCompressCall(
+                level[2 * parent], level[2 * parent + 1],
+                V13POracleFamilyV1::TerminalNode,
+                tree_level, parent, out);
+        }
+        level = std::move(next);
+        ++tree_level;
+    }
+    if (level.size() != 1 ||
+        level[0] != proof.fold_layers.back().root) {
+        return InventoryFail(why, "terminal_root_calls");
+    }
+    out.merkle_p_calls +=
+        out.p_calls.size() - before_terminal;
+
+    out.every_h_rejection_attempt_counted =
+        out.h_calls.size() ==
+            out.rejected_h_candidates +
+                out.accepted_h_candidates &&
+        out.accepted_h_candidates == replay.events.size();
+    out.every_shared_p_occurrence_counted =
+        out.p_calls.size() ==
+            out.safe_p_calls +
+                out.commitment_p_calls +
+                out.merkle_p_calls;
+    out.ordered_h_domains_bound =
+        std::all_of(
+            out.h_calls.begin(), out.h_calls.end(),
+            [](const V13HOracleCallV1& call) {
+                return !call.canonical_io_words.empty() &&
+                    !call.typed_domain.empty();
+            });
+    out.p_states_canonical_and_executable =
+        std::all_of(
+            out.p_calls.begin(), out.p_calls.end(),
+            [](const V13POracleCallV1& call) {
+                if (!CanonicalState(call.input) ||
+                    !CanonicalState(call.output)) {
+                    return false;
+                }
+                alg_hash::State expected = call.input;
+                alg_hash::Permute(expected);
+                return expected == call.output;
+            });
+    out.canonical_query_seed_is_sole_query_source =
+        replay.query_seed_events == 1 &&
+        replay.query_candidate_events ==
+            kRCFri3AlgNumQueries &&
+        std::count_if(
+            replay.events.begin(), replay.events.end(),
+            [](const Fri3AlgSafeV13ReplayEvent& event) {
+                return event.consumer ==
+                    Fri3AlgSafeV13Consumer::QueryIndex;
+            }) == kRCFri3AlgNumQueries &&
+        std::equal(
+            proof.queries.begin(), proof.queries.end(),
+            replay.events.end() - kRCFri3AlgNumQueries,
+            [](const Fri3AlgBatchQuery& query,
+               const Fri3AlgSafeV13ReplayEvent& event) {
+                return event.consumer ==
+                           Fri3AlgSafeV13Consumer::QueryIndex &&
+                    query.index == event.consumed_index;
+            });
+    out.exact_per_proof_inventory =
+        out.native_proof_accepted &&
+        out.exact_event_order &&
+        out.every_h_rejection_attempt_counted &&
+        out.every_shared_p_occurrence_counted &&
+        out.ordered_h_domains_bound &&
+        out.p_states_canonical_and_executable &&
+        out.canonical_query_seed_is_sole_query_source;
+    out.native_recursive_inputs_equal = false;
+    out.recursive_air_authenticates_parity_inputs = false;
+    out.exact_global_topology_inventory = false;
+    out.production_nirop_complete = false;
+    out.residual_premises = {
+        "recursive AIR must authenticate the explicit H/P/query parity cells",
+        "each of 14 canonical static ProgramTable descriptors must export "
+        "its verifier shape and exact H/P call profile",
+        "the committed production site topology must consume those 14 "
+        "profiles with checked multiplicity",
+        "adversarial external H/P query budgets and concrete H/P assumptions "
+        "remain reduction inputs"};
+    out.note =
+        "stage3:v13_nirop_inventory:per_accepted_proof_exact;"
+        "native_recursive_parity_pending;"
+        "global_14_role_profiles_pending;"
+        "production_nirop_false";
+    if (!out.exact_per_proof_inventory) {
+        return InventoryFail(why, "internal_inventory_incomplete");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool ValidateV13NativeRecursiveOracleParityV1(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    const V13RecursiveOracleParityInputsV1& recursive,
+    V13PerProofOracleInventoryV1& out,
+    std::string* why)
+{
+    if (!BuildV13PerProofOracleInventoryV1(
+            proof, fs_seed, out, why)) {
+        return false;
+    }
+    if (!CanonicalInventoryInputs(recursive)) {
+        out.native_recursive_inputs_equal = false;
+        return InventoryFail(
+            why, "recursive_inputs_noncanonical_or_malformed");
+    }
+    out.native_recursive_inputs_equal =
+        recursive.h_calls == out.h_calls &&
+        recursive.p_calls == out.p_calls &&
+        recursive.query_events == out.query_events;
+    if (!out.native_recursive_inputs_equal) {
+        return InventoryFail(why, "native_recursive_input_mismatch");
+    }
+    // Equality of explicit inputs is complete. Whether a recursive proof
+    // authenticates those inputs is deliberately not inferred from a vector
+    // comparison performed by the host.
+    out.recursive_air_authenticates_parity_inputs = false;
+    out.exact_global_topology_inventory = false;
+    out.production_nirop_complete = false;
+    out.note =
+        "stage3:v13_nirop_inventory:native_recursive_inputs_equal;"
+        "recursive_air_authentication_pending;"
+        "global_14_role_profiles_pending;"
+        "production_nirop_false";
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
 SafeQ192ReductionAssessmentV13 AssessSafeQ192ReductionV13(
     const SafeQ192QueryBudgetV13& budget,
     const SafeQ192ReductionPremisesV13& premises,
