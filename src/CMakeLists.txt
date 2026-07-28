@@ -646,6 +646,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_gemm_sumcheck_binding.cpp
   matmul/matmul_v4_rc_stage3_coupled_bank_root_binding.cpp
   matmul/matmul_v4_rc_stage3_coupled_signed_range_binding.cpp
+  matmul/matmul_v4_rc_stage3_coupled_signed_range_stream.cpp
   matmul/matmul_v4_rc_stage3_consensus.cpp
   matmul/matmul_v4_rc_stage3_producer.cpp
   matmul/matmul_v4_rc_stage3_production_vertical_canary.cpp
