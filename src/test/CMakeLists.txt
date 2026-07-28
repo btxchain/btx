@@ -229,6 +229,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_v6_fs_tests.cpp
   matmul_v4_rc_stage3_hash_air_tests.cpp
   matmul_v4_rc_stage3_hash_semantic_tests.cpp
+  matmul_v4_rc_stage3_fixed_program_semantic_product_tests.cpp
   matmul_v4_rc_stage3_root_chain_tests.cpp
   matmul_v4_rc_stage3_real_episode_harness_tests.cpp
   matmul_v4_rc_stage3_role_sections_tests.cpp
