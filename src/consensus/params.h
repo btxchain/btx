@@ -969,20 +969,22 @@ struct Params {
             && nMatMulRCHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCHeight;
     }
-    /** True at and above the coupled-puzzle (ENC_RC_COUPLED) height. Requires
-     *  MatMul v4. Self-guards INT32_MAX. Public nets keep
+    /** True at and above the additive episode+coupled
+     *  (ENC_RC_COUPLED) height. Requires the resident episode to be active:
+     *  the composed lottery proves both work legs and a coupled-only regime
+     *  is not a valid consensus state. Self-guards INT32_MAX. Public nets keep
      *  nMatMulRCCoupledHeight = INT32_MAX (AssertBMX4CConstructionInvariants).
      *  Regtest enables via an explicit finite height (optionally with
      *  fMatMulRCCoupledUseToyDims for CI-scale dims). */
     bool IsMatMulRCCoupledActive(int32_t height) const
     {
-        return IsMatMulV4Active(height)
+        return IsMatMulRCActive(height)
             && nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()
             && height >= nMatMulRCCoupledHeight;
     }
     /** True when tip-verify must use the RC admission pool (pending / peer /
      *  global RC budgets) rather than EncDr/v4/LT: either ENC_RC or
-     *  ENC_RC_COUPLED is live. Coupled does not require IsMatMulRCActive. */
+     *  the additive ENC_RC_COUPLED successor is live. */
     bool IsMatMulRCFamilyActive(int32_t height) const
     {
         return IsMatMulRCCoupledActive(height) || IsMatMulRCActive(height);

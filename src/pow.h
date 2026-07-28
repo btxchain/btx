@@ -292,10 +292,11 @@ bool CheckMatMulProofOfWork_RC(const CBlockHeader& header, const Consensus::Para
                                int32_t block_height,
                                bool* carrier_missing = nullptr);
 
-/** ENC_RC_COUPLED DIGEST_RECOMPUTE checker. Requires
- *  IsMatMulRCCoupledActive(block_height). Recomputes via
- *  RecomputeCoupledPuzzleReference (ResolveRCCoupParams dims; CPU ExactGemm)
- *  and checks digest == header.matmul_digest and digest ≤ nBits target.
+/** ENC_RC_COUPLED additive DIGEST_RECOMPUTE checker. Requires both RC and
+ *  coupled activation. Before succinct authority it recomputes the resident
+ *  episode and coupled puzzle with the CPU references, composes their digests
+ *  with the canonical Stage-3 link hash, and checks the result equals
+ *  header.matmul_digest and is ≤ the nBits target.
  *  Public nets keep nMatMulRCCoupledHeight = INT32_MAX (unreachable). */
 bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensus::Params& params,
                                       int32_t block_height);

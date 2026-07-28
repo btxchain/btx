@@ -416,14 +416,11 @@ static void AssertBMX4CConstructionInvariants(const Consensus::Params& consensus
     }
     if (consensus.nMatMulRCCoupledHeight != std::numeric_limits<int32_t>::max()) {
         assert(consensus.nMatMulV4Height != std::numeric_limits<int32_t>::max());
+        assert(consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max());
         assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulV4Height);
-        // Coupled supersedes ENC_RC in GetMatMulEncodingProfile. When both are
-        // configured live, coupled must not precede RC (otherwise RC never
-        // surfaces and any RC ASERT rescale at a later height would fire while
-        // the coupled workload is already active). Fail-closed at construction.
-        if (consensus.nMatMulRCHeight != std::numeric_limits<int32_t>::max()) {
-            assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulRCHeight);
-        }
+        // The coupled successor is additive, not a standalone workload: its
+        // lottery and Stage-3 statement bind a genuine episode leg too.
+        assert(consensus.nMatMulRCCoupledHeight >= consensus.nMatMulRCHeight);
         assert(is_regtest || Consensus::BTX_MATMUL_NO_INVERSION_GATE_RATIFIED);
     }
     // §R.7 scheduled-scaling tables must be non-zero once filled by constructors.

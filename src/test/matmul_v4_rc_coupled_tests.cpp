@@ -218,10 +218,16 @@ BOOST_AUTO_TEST_CASE(rc_coup_admission_priced_per_activation_shape)
     // EncDr/LT pool stays on its own knobs.
     BOOST_CHECK_EQUAL(EffectiveMatMulMaxPendingVerifications(p, kH), 2U);
 
-    // --- Coupled-only (RC still INT32_MAX) ---
+    // --- Coupled configured without RC: fail closed ---
     p.nMatMulRCHeight = std::numeric_limits<int32_t>::max();
     p.nMatMulRCCoupledHeight = 50;
     BOOST_REQUIRE(!p.IsMatMulRCActive(kH));
+    BOOST_REQUIRE(!p.IsMatMulRCCoupledActive(kH));
+    BOOST_REQUIRE(!p.IsMatMulRCFamilyActive(kH));
+
+    // --- Additive coupled profile: both resident episode and coupled live ---
+    p.nMatMulRCHeight = 40;
+    BOOST_REQUIRE(p.IsMatMulRCActive(kH));
     BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kH));
     BOOST_REQUIRE(p.IsMatMulRCFamilyActive(kH));
     const auto toy = rc::MakeToyRCCoupParams();
@@ -554,6 +560,7 @@ BOOST_AUTO_TEST_CASE(rc_coup_public_activation_resolves_v3_production_profile)
     Consensus::Params p;
     p.fMatMulPOW = true;
     p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
     p.nMatMulRCCoupledHeight = 1;
     p.fMatMulRCCoupledUseToyDims = false;
     // F8 fold: V3 production is the profile-3 family AND the default (mainnet

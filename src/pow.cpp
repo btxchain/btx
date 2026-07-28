@@ -3571,7 +3571,7 @@ bool ShouldIncludeMatMulFreivaldsPayloadForMining(int32_t block_height, const Co
     // makes GenerateBlock reject its own valid Phase-B winner as "missing".
     if (params.IsMatMulLTSealAsPoWActive(block_height)) return false;
     // ENC_RC / ENC_RC_COUPLED are DIGEST_RECOMPUTE with NO Freivalds sketch at
-    // all (episode / coupled-puzzle digest only). Unlike ENC-DR Phase A, the
+    // all (episode digest / composed two-leg digest only). Unlike ENC-DR Phase A, the
     // RC solvers never write matrix_c_data — requiring a payload here makes
     // GenerateBlock reject its own valid RC/coupled winner (F6 regtest path).
     if (params.IsMatMulRCCoupledActive(block_height) || params.IsMatMulRCActive(block_height)) {
