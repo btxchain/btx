@@ -4,7 +4,10 @@
 
 #include <matmul/matmul_v4_rc_stage3_safe_v12_recursive_bridge.h>
 
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
+
 #include <algorithm>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <utility>
@@ -1539,6 +1542,157 @@ Fp3 TypedEventQuerySeedLaneV13(
     return selected;
 }
 
+TypedSafeMessageCellProgramV13 TypedEventConstantCellV13(
+    gf::Fp value)
+{
+    TypedSafeMessageCellProgramV13 out;
+    out.binding = TypedSafeMessageBindingV13::Constant;
+    out.constant = value;
+    return out;
+}
+
+TypedSafeMessageCellProgramV13 TypedEventProofCellV13()
+{
+    TypedSafeMessageCellProgramV13 out;
+    out.binding = TypedSafeMessageBindingV13::ProofOwned;
+    return out;
+}
+
+TypedSafeMessageCellProgramV13 TypedEventSeedCellV13(
+    uint32_t lane)
+{
+    TypedSafeMessageCellProgramV13 out;
+    out.binding = TypedSafeMessageBindingV13::QuerySeedLane;
+    out.query_seed_lane = lane;
+    return out;
+}
+
+gf::Fp PackU32ChunkV13(
+    const unsigned char* bytes, size_t size, size_t offset)
+{
+    uint32_t word = 0;
+    for (uint32_t byte = 0;
+         byte < 4 && offset + byte < size; ++byte) {
+        word |= static_cast<uint32_t>(bytes[offset + byte])
+            << (8 * byte);
+    }
+    return gf::FromU64(word);
+}
+
+void AppendConstantBytesV13(
+    const unsigned char* bytes, size_t size,
+    std::vector<TypedSafeMessageCellProgramV13>& program,
+    std::vector<gf::Fp>& witness)
+{
+    for (size_t offset = 0; offset < size; offset += 4) {
+        program.push_back(
+            TypedEventConstantCellV13(
+                PackU32ChunkV13(bytes, size, offset)));
+        witness.push_back(0);
+    }
+}
+
+void AppendProofBytesV13(
+    const unsigned char* bytes, size_t size,
+    std::vector<TypedSafeMessageCellProgramV13>& program,
+    std::vector<gf::Fp>& witness)
+{
+    for (size_t offset = 0; offset < size; offset += 4) {
+        program.push_back(TypedEventProofCellV13());
+        witness.push_back(
+            PackU32ChunkV13(bytes, size, offset));
+    }
+}
+
+bool NativeTypedEventKindV13(
+    const char* label, uint32_t index,
+    TypedSafeChallengeKindV13& kind,
+    aht::RoleV12& role,
+    std::string* why)
+{
+    if (label == nullptr) {
+        return Fail(why, "v13_native_event_null_label");
+    }
+    if (std::strcmp(label, "fra3_lambda") == 0) {
+        if (index != 0) {
+            return Fail(why, "v13_native_lambda_index");
+        }
+        kind = TypedSafeChallengeKindV13::BatchCoefficient;
+        role = aht::RoleV12::TranscriptBatchCoefficient;
+        return true;
+    }
+    if (std::strcmp(label, "fra3_z") == 0) {
+        kind = index <
+                kRCFri3AlgSafeQ192K2OodCandidatesV13
+            ? TypedSafeChallengeKindV13::OodZ1
+            : TypedSafeChallengeKindV13::OodZ2;
+        role = kind == TypedSafeChallengeKindV13::OodZ1
+            ? aht::RoleV12::TranscriptOodZ1
+            : aht::RoleV12::TranscriptOodZ2;
+        return true;
+    }
+    if (std::strcmp(label, "fra3_w") == 0) {
+        if (index > 1) {
+            return Fail(why, "v13_native_deep_index");
+        }
+        kind = index == 0
+            ? TypedSafeChallengeKindV13::DeepWeight1
+            : TypedSafeChallengeKindV13::DeepWeight2;
+        role = aht::RoleV12::TranscriptDeepWeight;
+        return true;
+    }
+    if (std::strcmp(label, "fra3_fold") == 0) {
+        kind = TypedSafeChallengeKindV13::FoldBeta;
+        role = aht::RoleV12::TranscriptFoldBeta;
+        return true;
+    }
+    if (std::strcmp(label, "fra3_query") == 0) {
+        if (index != 0) {
+            return Fail(why, "v13_native_query_seed_index");
+        }
+        kind = TypedSafeChallengeKindV13::QuerySeed;
+        role = aht::RoleV12::TranscriptQuerySeed;
+        return true;
+    }
+    return Fail(why, "v13_native_event_unknown_label");
+}
+
+bool NativeTypedEventDigestV13(
+    const TypedSafeEventProgramV13& program,
+    const TypedSafeEventWitnessV13& witness,
+    const alg_hash::Digest* query_seed,
+    alg_hash::Digest& digest,
+    std::string* why)
+{
+    if (program.message.size() != witness.message.size()) {
+        return Fail(why, "v13_native_event_witness_shape");
+    }
+    std::vector<gf::Fp> message(program.message.size());
+    for (uint32_t ordinal = 0;
+         ordinal < program.message.size(); ++ordinal) {
+        const auto& cell = program.message[ordinal];
+        switch (cell.binding) {
+        case TypedSafeMessageBindingV13::ProofOwned:
+            message[ordinal] = witness.message[ordinal];
+            break;
+        case TypedSafeMessageBindingV13::Constant:
+            message[ordinal] = cell.constant;
+            break;
+        case TypedSafeMessageBindingV13::QuerySeedLane:
+            if (query_seed == nullptr ||
+                cell.query_seed_lane >= query_seed->size()) {
+                return Fail(why, "v13_native_event_query_seed");
+            }
+            message[ordinal] =
+                (*query_seed)[cell.query_seed_lane];
+            break;
+        }
+    }
+    return safe::SafeCoreDigestV12(
+        program.role, program.application_domain,
+        message, digest, nullptr, why);
+}
+
 bool BuildTypedEventPlanV13(
     const std::vector<TypedSafeEventProgramV13>& program,
     const alg_hash::Digest& program_root,
@@ -2319,6 +2473,198 @@ std::pair<Fp3, Fp3> TypedEventWitnessProductsV13(
 }
 
 } // namespace
+
+bool BuildNativeFri3AlgSafeEventV13(
+    const std::vector<unsigned char>& transcript,
+    const char* label,
+    uint32_t index,
+    NativeTypedSafeEventAuditV13& out,
+    std::string* why)
+{
+    out = {};
+    if (transcript.size() >
+        std::numeric_limits<uint32_t>::max()) {
+        return Fail(why, "v13_native_event_transcript_length");
+    }
+    if (!NativeTypedEventKindV13(
+            label, index, out.program.kind,
+            out.program.role, why)) {
+        return false;
+    }
+    const size_t label_size = std::strlen(label);
+    if (label_size > std::numeric_limits<uint32_t>::max()) {
+        return Fail(why, "v13_native_event_label_length");
+    }
+
+    static constexpr char kDomain[] =
+        "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13_CHALLENGE";
+    out.program.application_domain.assign(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+    out.program.application_domain.push_back(0);
+    out.program.application_domain.insert(
+        out.program.application_domain.end(),
+        reinterpret_cast<const uint8_t*>(label),
+        reinterpret_cast<const uint8_t*>(label) + label_size);
+
+    auto& cells = out.program.message;
+    auto& values = out.witness.message;
+    const auto append_constant =
+        [&](gf::Fp value) {
+            cells.push_back(TypedEventConstantCellV13(value));
+            values.push_back(0);
+        };
+    append_constant(gf::FromU64(UINT32_C(0x53414645)));
+    append_constant(gf::FromU64(
+        kRCFri3AlgSafeQ192K2ProofVersionV13));
+    append_constant(gf::FromU64(
+        static_cast<uint32_t>(out.program.role)));
+    append_constant(gf::FromU64(transcript.size()));
+    AppendProofBytesV13(
+        transcript.data(), transcript.size(),
+        cells, values);
+    append_constant(gf::FromU64(label_size));
+    AppendConstantBytesV13(
+        reinterpret_cast<const unsigned char*>(label),
+        label_size, cells, values);
+    append_constant(gf::FromU64(index));
+
+    if (!NativeTypedEventDigestV13(
+            out.program, out.witness, nullptr,
+            out.safe_digest, why)) {
+        return false;
+    }
+    if (out.program.kind ==
+        TypedSafeChallengeKindV13::QuerySeed) {
+        alg_hash::Digest native_seed{};
+        if (!Fri3AlgSafeQ192K2QuerySeedV13(
+                transcript, native_seed, why)) {
+            return false;
+        }
+        out.native_output = {
+            native_seed[0], native_seed[1], native_seed[2]};
+        out.native_air_output_parity =
+            native_seed == out.safe_digest;
+        out.query_seed_source = true;
+    } else {
+        if (!Fri3AlgSafeQ192K2ChallengeFp3V13(
+                transcript, label, index,
+                out.native_output, why)) {
+            return false;
+        }
+        out.native_air_output_parity =
+            gf::Eq(
+                out.native_output,
+                Fp3{
+                    out.safe_digest[0],
+                    out.safe_digest[1],
+                    out.safe_digest[2]});
+    }
+    out.exact_message_materialized =
+        out.program.message.size() ==
+            out.witness.message.size() &&
+        std::count_if(
+            out.program.message.begin(),
+            out.program.message.end(),
+            [](const auto& cell) {
+                return cell.binding ==
+                    TypedSafeMessageBindingV13::ProofOwned;
+            }) ==
+            static_cast<std::ptrdiff_t>(
+                (transcript.size() + 3) / 4);
+    out.note =
+        out.exact_message_materialized &&
+                out.native_air_output_parity
+        ? "native Fri3Alg SAFE event exactly materialized"
+        : "native Fri3Alg SAFE event parity failed";
+    if (!out.exact_message_materialized ||
+        !out.native_air_output_parity) {
+        return Fail(why, "v13_native_event_parity");
+    }
+    return true;
+}
+
+bool BuildNativeFri3AlgSafeQueryCandidateEventV13(
+    const alg_hash::Digest& query_seed,
+    uint32_t index,
+    NativeTypedSafeEventAuditV13& out,
+    std::string* why)
+{
+    out = {};
+    if (!Canonical(query_seed)) {
+        return Fail(why, "v13_native_query_seed_noncanonical");
+    }
+    out.program.kind =
+        TypedSafeChallengeKindV13::QueryCandidate;
+    out.program.role =
+        aht::RoleV12::TranscriptQueryCandidate;
+    static constexpr char kDomain[] =
+        "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13_QUERY_CANDIDATE";
+    out.program.application_domain.assign(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+
+    auto& cells = out.program.message;
+    auto& values = out.witness.message;
+    const auto append_constant =
+        [&](gf::Fp value) {
+            cells.push_back(TypedEventConstantCellV13(value));
+            values.push_back(0);
+        };
+    append_constant(gf::FromU64(UINT32_C(0x53414645)));
+    append_constant(gf::FromU64(
+        kRCFri3AlgSafeQ192K2ProofVersionV13));
+    append_constant(gf::FromU64(
+        static_cast<uint32_t>(
+            aht::RoleV12::TranscriptQueryCandidate)));
+    append_constant(gf::FromU64(query_seed.size()));
+    for (uint32_t lane = 0;
+         lane < query_seed.size(); ++lane) {
+        cells.push_back(TypedEventSeedCellV13(lane));
+        values.push_back(0);
+    }
+    append_constant(gf::FromU64(index));
+
+    if (!NativeTypedEventDigestV13(
+            out.program, out.witness, &query_seed,
+            out.safe_digest, why) ||
+        !Fri3AlgSafeQ192K2QueryCandidateV13(
+            query_seed, index, out.native_output, why)) {
+        return false;
+    }
+    out.native_air_output_parity =
+        gf::Eq(
+            out.native_output,
+            Fp3{
+                out.safe_digest[0],
+                out.safe_digest[1],
+                out.safe_digest[2]});
+    out.exact_message_materialized =
+        out.program.message.size() == 9 &&
+        out.witness.message.size() == 9;
+    out.query_candidate_consumes_seed =
+        std::count_if(
+            out.program.message.begin(),
+            out.program.message.end(),
+            [](const auto& cell) {
+                return cell.binding ==
+                    TypedSafeMessageBindingV13::QuerySeedLane;
+            }) == 4;
+    out.note =
+        out.exact_message_materialized &&
+                out.native_air_output_parity &&
+                out.query_candidate_consumes_seed
+        ? "native Fri3Alg SAFE query candidate exactly materialized"
+        : "native Fri3Alg SAFE query candidate parity failed";
+    if (!out.exact_message_materialized ||
+        !out.native_air_output_parity ||
+        !out.query_candidate_consumes_seed) {
+        return Fail(why, "v13_native_query_candidate_parity");
+    }
+    return true;
+}
 
 alg_hash::Digest CommitTypedSafeEventProgramV13(
     const std::vector<TypedSafeEventProgramV13>& program)

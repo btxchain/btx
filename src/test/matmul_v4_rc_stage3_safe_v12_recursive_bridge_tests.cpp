@@ -4,6 +4,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_recursive_bridge.h>
 
@@ -707,6 +708,122 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(
         bridge::CountViolationsV12(alias.cs, alias.columns),
         0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    v13_native_fri_schedule_materializes_exact_typed_messages)
+{
+    const std::vector<unsigned char> transcript{
+        0x00, 0x01, 0x7f, 0x80, 0xfe, 0xff, 0x42,
+    };
+    struct Draw {
+        const char* label;
+        uint32_t index;
+        bridge::TypedSafeChallengeKindV13 kind;
+    };
+    const std::array<Draw, 9> draws{{
+        {"fra3_lambda", 0,
+         bridge::TypedSafeChallengeKindV13::BatchCoefficient},
+        {"fra3_z", 0,
+         bridge::TypedSafeChallengeKindV13::OodZ1},
+        {"fra3_z", 1,
+         bridge::TypedSafeChallengeKindV13::OodZ1},
+        {"fra3_z", 2,
+         bridge::TypedSafeChallengeKindV13::OodZ2},
+        {"fra3_z", 3,
+         bridge::TypedSafeChallengeKindV13::OodZ2},
+        {"fra3_w", 0,
+         bridge::TypedSafeChallengeKindV13::DeepWeight1},
+        {"fra3_w", 1,
+         bridge::TypedSafeChallengeKindV13::DeepWeight2},
+        {"fra3_fold", 0,
+         bridge::TypedSafeChallengeKindV13::FoldBeta},
+        {"fra3_query", 0,
+         bridge::TypedSafeChallengeKindV13::QuerySeed},
+    }};
+
+    std::vector<bridge::TypedSafeEventProgramV13> native_program;
+    std::vector<bridge::TypedSafeEventWitnessV13> native_witness;
+    matmul::v4::rc::alg_hash::Digest query_seed{};
+    std::string why;
+    for (const auto& draw : draws) {
+        bridge::NativeTypedSafeEventAuditV13 audit;
+        BOOST_REQUIRE_MESSAGE(
+            bridge::BuildNativeFri3AlgSafeEventV13(
+                transcript, draw.label, draw.index,
+                audit, &why),
+            why);
+        BOOST_CHECK(audit.exact_message_materialized);
+        BOOST_CHECK(audit.native_air_output_parity);
+        BOOST_CHECK(audit.program.kind == draw.kind);
+        BOOST_CHECK_EQUAL(
+            std::count_if(
+                audit.program.message.begin(),
+                audit.program.message.end(),
+                [](const auto& cell) {
+                    return cell.binding ==
+                        bridge::TypedSafeMessageBindingV13::
+                            ProofOwned;
+                }),
+            (transcript.size() + 3) / 4);
+        if (draw.kind ==
+            bridge::TypedSafeChallengeKindV13::QuerySeed) {
+            BOOST_CHECK(audit.query_seed_source);
+            query_seed = audit.safe_digest;
+        }
+        native_program.push_back(std::move(audit.program));
+        native_witness.push_back(std::move(audit.witness));
+    }
+    BOOST_REQUIRE(
+        query_seed != matmul::v4::rc::alg_hash::Digest{});
+
+    bridge::NativeTypedSafeEventAuditV13 query0;
+    bridge::NativeTypedSafeEventAuditV13 query191;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildNativeFri3AlgSafeQueryCandidateEventV13(
+            query_seed, 0, query0, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildNativeFri3AlgSafeQueryCandidateEventV13(
+            query_seed,
+            matmul::v4::rc::kRCFri3AlgNumQueries - 1,
+            query191, &why),
+        why);
+    BOOST_CHECK(query0.query_candidate_consumes_seed);
+    BOOST_CHECK(query0.native_air_output_parity);
+    BOOST_CHECK(query191.native_air_output_parity);
+    BOOST_CHECK(
+        !gf::Eq(query0.native_output, query191.native_output));
+    native_program.push_back(std::move(query0.program));
+    native_witness.push_back(std::move(query0.witness));
+
+    // The eighth verifier challenge kind is the outer AirQuotient lambda.
+    // Its V13 native SAFE producer is intentionally not invented here: the
+    // shipping outer backend still has a separate P2/SHA selector. The exact
+    // FRI schedule above therefore cannot be promoted into a complete parent
+    // until that producer exposes its own typed event.
+    BOOST_CHECK_EQUAL(native_program.size(), 10U);
+    BOOST_CHECK_EQUAL(native_witness.size(), native_program.size());
+
+    auto changed = transcript;
+    changed.back() ^= 1;
+    bridge::NativeTypedSafeEventAuditV13 changed_seed;
+    BOOST_REQUIRE(
+        bridge::BuildNativeFri3AlgSafeEventV13(
+            changed, "fra3_query", 0,
+            changed_seed, &why));
+    BOOST_CHECK(
+        changed_seed.safe_digest != query_seed);
+
+    auto noncanonical_seed = query_seed;
+    noncanonical_seed[0] = gf::kP;
+    bridge::NativeTypedSafeEventAuditV13 rejected;
+    BOOST_CHECK(
+        !bridge::BuildNativeFri3AlgSafeQueryCandidateEventV13(
+            noncanonical_seed, 0, rejected, &why));
+    BOOST_CHECK(
+        !bridge::BuildNativeFri3AlgSafeEventV13(
+            transcript, "unknown", 0, rejected, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -365,6 +365,51 @@ struct TypedSafeEventWitnessV13 {
     std::vector<gf::Fp> message;
 };
 
+/**
+ * Exact native-V13 event materialization audit.
+ *
+ * `program` and `witness` are suitable for direct insertion into the typed
+ * parent above. `safe_digest` is computed from those exact cells, while
+ * `native_output` is obtained from the shipping V13 native helper.  Parity
+ * means all three Fp3 output coordinates agree; the fourth SAFE receipt lane
+ * remains available to the parent relation.
+ */
+struct NativeTypedSafeEventAuditV13 {
+    TypedSafeEventProgramV13 program;
+    TypedSafeEventWitnessV13 witness;
+    alg_hash::Digest safe_digest{};
+    gf::Fp3 native_output{};
+    bool exact_message_materialized{false};
+    bool native_air_output_parity{false};
+    bool query_seed_source{false};
+    bool query_candidate_consumes_seed{false};
+    std::string note;
+};
+
+/**
+ * Materialize one native Fri3Alg V13 full-transcript SAFE call. Supported
+ * labels are fra3_lambda, fra3_z, fra3_w, fra3_fold and fra3_query. The query
+ * label materializes the unique QuerySeed event; query candidates use the
+ * separate function below.
+ */
+[[nodiscard]] bool BuildNativeFri3AlgSafeEventV13(
+    const std::vector<unsigned char>& transcript,
+    const char* label,
+    uint32_t index,
+    NativeTypedSafeEventAuditV13& out,
+    std::string* why = nullptr);
+
+/**
+ * Materialize a native Fri3Alg V13 query-candidate call. The four seed lanes
+ * are represented as QuerySeedLane bindings, never caller-owned witness
+ * values. `query_seed` is used only to execute the native/AIR parity audit.
+ */
+[[nodiscard]] bool BuildNativeFri3AlgSafeQueryCandidateEventV13(
+    const alg_hash::Digest& query_seed,
+    uint32_t index,
+    NativeTypedSafeEventAuditV13& out,
+    std::string* why = nullptr);
+
 struct TypedSafeEventOutputLocationV13 {
     uint32_t event{0};
     TypedSafeChallengeKindV13 kind{
