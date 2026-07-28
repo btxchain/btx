@@ -19,6 +19,7 @@ namespace backend = stage3_multirow_v11_backend;
 namespace cb = constraint_bytecode;
 namespace consumer = stage3_multirow_p2_consumer_bridge;
 namespace tp = stage3_multirow_p2_transcript;
+inline constexpr uint32_t kFixtureTraceRows = 1024;
 
 uint256 H(uint32_t tag)
 {
@@ -31,7 +32,7 @@ uint256 H(uint32_t tag)
 aq::AirConstraintSystem<gf::Fp3> TransitionAir()
 {
     aq::AirConstraintSystem<gf::Fp3> cs;
-    cs.n_rows = 256;
+    cs.n_rows = kFixtureTraceRows;
     cs.n_columns = 2;
     cs.constraints.push_back({
         "counter_step", aq::AirKind::kTransition, 1,
@@ -53,8 +54,10 @@ aq::AirConstraintSystem<gf::Fp3> TransitionAir()
 std::vector<std::vector<gf::Fp3>> TransitionTrace()
 {
     std::vector<std::vector<gf::Fp3>> out(
-        2, std::vector<gf::Fp3>(256));
-    for (uint32_t row = 0; row < 256; ++row) {
+        2, std::vector<gf::Fp3>(
+            kFixtureTraceRows));
+    for (uint32_t row = 0;
+         row < kFixtureTraceRows; ++row) {
         out[0][row] = gf::Fp3::FromFp(row + 11);
         out[1][row] =
             gf::Mul(out[0][row], gf::Fp3::FromFp(2));
@@ -192,7 +195,6 @@ rv::InputV1 ActualInput()
     out.expected_child_program_root =
         cb::CommitProgramTableAlgHash(
             out.child_program);
-    out.expected_child_statement_root = H(101);
 
     std::vector<uint32_t> words;
     BOOST_REQUIRE_MESSAGE(
@@ -229,6 +231,12 @@ rv::InputV1 ActualInput()
     BOOST_REQUIRE_MESSAGE(
         out.parent_join.valid,
         out.parent_join.note);
+    out.expected_child_statement_root =
+        ComputeParentJoinStatementManifestR0RootV1(
+            out.parent_join, nullptr, &why);
+    BOOST_REQUIRE_MESSAGE(
+        !out.expected_child_statement_root.IsNull(),
+        why);
     return out;
 }
 
@@ -562,6 +570,249 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    parent_join_statement_manifest_r0_excludes_tape_and_rejects_substitution)
+{
+    const auto input = ActualInput();
+    std::string why;
+    uint32_t static_columns = 0;
+    const uint256 honest_root =
+        ComputeParentJoinStatementManifestR0RootV1(
+            input.parent_join,
+            &static_columns, &why);
+    BOOST_REQUIRE_MESSAGE(
+        !honest_root.IsNull(), why);
+    BOOST_CHECK(
+        honest_root ==
+        input.expected_child_statement_root);
+    BOOST_REQUIRE_GE(
+        input.parent_join.preprocessed_columns.size(),
+        alg_hash::kAlgHashRate +
+            alg_hash::kAlgHashDigestLen);
+    BOOST_CHECK_EQUAL(
+        static_columns,
+        input.parent_join.preprocessed_columns.size() -
+            alg_hash::kAlgHashRate -
+            alg_hash::kAlgHashDigestLen);
+
+    // Values are now ordinary proof tape. Moving a replay value and its
+    // local claim together does not alter R0, but the immutable ParentJoin
+    // equations still reject the substitution against the public statement.
+    auto value_attack = input.parent_join;
+    uint32_t public_row = value_attack.cs.n_rows;
+    uint32_t public_lane = alg_hash::kAlgHashRate;
+    for (uint32_t row = 0;
+         row < value_attack.cs.n_rows &&
+         public_row == value_attack.cs.n_rows;
+         ++row) {
+        for (uint32_t lane = 0;
+             lane < alg_hash::kAlgHashRate; ++lane) {
+            if (gf::Eq(
+                    value_attack.columns[
+                        value_attack.layout
+                            .public_absorb[lane]
+                            .active][row],
+                    gf::Fp3::One())) {
+                public_row = row;
+                public_lane = lane;
+                break;
+            }
+        }
+    }
+    BOOST_REQUIRE_LT(
+        public_row, value_attack.cs.n_rows);
+    BOOST_REQUIRE_LT(
+        public_lane, alg_hash::kAlgHashRate);
+    const auto public_slot =
+        value_attack.layout.public_absorb[public_lane];
+    value_attack.columns[
+        value_attack.layout.replay.Absorb(
+            public_lane)][public_row] =
+        gf::Add(
+            value_attack.columns[
+                value_attack.layout.replay.Absorb(
+                    public_lane)][public_row],
+            gf::Fp3::One());
+    value_attack.columns[
+        public_slot.claim][public_row] =
+        gf::Add(
+            value_attack.columns[
+                public_slot.claim][public_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        pj::RecountViolationsV1(
+            value_attack,
+            value_attack.columns),
+        0U);
+    BOOST_CHECK(
+        ComputeParentJoinStatementManifestR0RootV1(
+            value_attack) == honest_root);
+
+    // Source offsets are immutable manifest data. Relabelling one changes
+    // the exact ordered R0 commitment even if the value tape is untouched.
+    auto offset_attack = input.parent_join;
+    offset_attack.columns[
+        public_slot.source_address][public_row] =
+        gf::Add(
+            offset_attack.columns[
+                public_slot.source_address][public_row],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        ComputeParentJoinStatementManifestR0RootV1(
+            offset_attack) != honest_root);
+
+    // An externally substituted statement root fails before any large
+    // Merkle/DEEP/unified witness is allocated.
+    auto statement_attack = input;
+    statement_attack.expected_child_statement_root =
+        H(0xfeedU);
+    const auto rejected =
+        BuildProductV1(
+            statement_attack,
+            {0, 0, kQ96QueriesV1});
+    BOOST_CHECK(!rejected.valid_foundation);
+    BOOST_CHECK_EQUAL(
+        rejected.note,
+        "stage3:v11_unified_verifier:"
+        "parent_join_statement_root_mismatch");
+}
+
+BOOST_AUTO_TEST_CASE(
+    parent_join_phase_bytecode_substitution_rejects_at_proof_level)
+{
+    const auto input = ActualInput();
+    cb::ProgramTable canonical_table;
+    np::ManifestV1 manifest;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        np::BuildCanonicalProgramTableV1(
+            canonical_table,
+            &manifest, &why),
+        why);
+    BOOST_REQUIRE(
+        manifest.no_opaque_callbacks);
+    BOOST_REQUIRE_EQUAL(
+        canonical_table.programs.size(),
+        input.parent_join.cs.constraints.size());
+    aq::AirConstraintSystem<gf::Fp3>
+        canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            canonical_table,
+            input.parent_join.cs.n_rows,
+            canonical_cs, &why),
+        why);
+
+    // The last native ParentJoin equation is the coefficient-active Boolean
+    // check.  Leave that one column ordinary in this focused canary so a
+    // substituted equation, rather than an R0 mismatch, is the only possible
+    // reason the malicious proof can pass its own relation.
+    const uint32_t target_column =
+        input.parent_join.layout
+            .coefficient_active;
+    const auto is_proof_tape =
+        [&input](uint32_t column) {
+            for (uint32_t lane = 0;
+                 lane < alg_hash::kAlgHashRate; ++lane) {
+                if (column ==
+                    input.parent_join.layout.replay.Absorb(
+                        lane)) {
+                    return true;
+                }
+            }
+            for (uint32_t limb = 0;
+                 limb < alg_hash::kAlgHashDigestLen; ++limb) {
+                if (column ==
+                    input.parent_join.layout.replay.DigestClaim(
+                        limb)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+    std::vector<uint32_t> preprocessed;
+    for (const auto& [column, values] :
+         input.parent_join.cs.preprocessed) {
+        if (column == target_column ||
+            is_proof_tape(column)) {
+            continue;
+        }
+        canonical_cs.preprocessed.emplace_back(
+            column, values);
+        preprocessed.push_back(column);
+    }
+    canonical_cs.preprocessed_pin_ood = true;
+    BOOST_REQUIRE_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs,
+            input.parent_join.columns),
+        0U);
+
+    auto substituted_table = canonical_table;
+    auto& substituted =
+        substituted_table.programs.back();
+    cb::Instruction left;
+    left.opcode = cb::Opcode::Current;
+    left.lhs = target_column;
+    cb::Instruction right = left;
+    cb::Instruction subtract;
+    subtract.opcode = cb::Opcode::Sub;
+    subtract.lhs = 0;
+    subtract.rhs = 1;
+    substituted.instructions = {
+        left, right, subtract};
+    substituted.declared_degree = 1;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        manifest.program_root);
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table,
+            input.parent_join.cs.n_rows,
+            substituted_cs, &why),
+        why);
+    substituted_cs.preprocessed =
+        canonical_cs.preprocessed;
+    substituted_cs.preprocessed_pin_ood = true;
+    auto forged =
+        input.parent_join.columns;
+    const uint32_t attack_row =
+        input.parent_join.cs.n_rows - 1;
+    BOOST_REQUIRE(
+        gf::IsZero(
+            forged[target_column][attack_row]));
+    forged[target_column][attack_row] =
+        gf::Fp3::FromFp(2);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs, forged),
+        0U);
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs, forged),
+        0U);
+    const auto malicious =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, forged,
+            preprocessed, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        malicious.ok, malicious.note);
+    BOOST_REQUIRE(
+        malicious.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            canonical_cs, malicious.proof,
+            preprocessed, uint256::ONE,
+            &why));
+}
+
+BOOST_AUTO_TEST_CASE(
     exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
@@ -602,8 +853,42 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.scheduler_program_constraints,
         2 + 4 * kPhasesV1);
+    BOOST_CHECK(
+        product
+            .parent_join_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .parent_join_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.parent_join_program_constraints,
+        np::kExpectedProgramsV1);
+    BOOST_CHECK_EQUAL(
+        product
+            .phase_constraint_systems_canonical_bytecode,
+        1U);
+    BOOST_CHECK_EQUAL(
+        product
+            .phase_r0_tables_statement_manifest_only,
+        1U);
+    BOOST_CHECK(
+        product
+            .parent_join_r0_statement_manifest_only);
+    BOOST_CHECK(
+        product
+            .parent_join_cs_independent_of_child_witness);
+    BOOST_CHECK(
+        product.parent_join_proof_tape_cells_ordinary);
+    BOOST_CHECK(
+        product.parent_join_proof_tape_fixed_offsets);
+    BOOST_CHECK(
+        product.parent_join_digest_claims_poseidon_bound);
+    BOOST_CHECK(
+        product.parent_join_statement_root_r0_bound);
+    BOOST_CHECK(
+        product.parent_join_statement_manifest_r0_root ==
+        input.expected_child_statement_root);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 1490U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 1478U);
     BOOST_CHECK_EQUAL(
         product.max_constraint_degree, 3U);
     BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);

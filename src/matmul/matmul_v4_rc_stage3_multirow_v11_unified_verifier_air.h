@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V11_UNIFIED_VERIFIER_AIR_H
 
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_multirow_v11_normalized_program.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_recursive_verifier.h>
 
 #include <array>
@@ -22,6 +23,7 @@ namespace dj = stage3_multirow_v11_decoder_join;
 namespace dvm = stage3_multirow_v11_deep_vm;
 namespace gf = gkr_field;
 namespace mf = stage3_multirow_v11_merkle_fold;
+namespace np = stage3_multirow_v11_normalized_program;
 namespace pj = stage3_multirow_v11_parent_join;
 namespace rv = stage3_multirow_v11_recursive_verifier;
 
@@ -128,6 +130,21 @@ struct ProductV1 {
     uint32_t scheduler_program_constraints{0};
     bool scheduler_constraints_canonical_bytecode{false};
     bool scheduler_program_root_recomputed{false};
+    alg_hash::Digest parent_join_program_root{};
+    uint32_t parent_join_program_constraints{0};
+    bool parent_join_constraints_canonical_bytecode{false};
+    bool parent_join_program_root_recomputed{false};
+    uint256 parent_join_statement_manifest_r0_root{};
+    uint32_t parent_join_statement_manifest_r0_columns{0};
+    bool parent_join_proof_tape_cells_ordinary{false};
+    bool parent_join_proof_tape_fixed_offsets{false};
+    bool parent_join_digest_claims_poseidon_bound{false};
+    bool parent_join_statement_root_r0_bound{false};
+    /** True only when all per-proof transcript/value cells have left R0. */
+    bool parent_join_r0_statement_manifest_only{false};
+    bool parent_join_cs_independent_of_child_witness{false};
+    uint32_t phase_constraint_systems_canonical_bytecode{0};
+    uint32_t phase_r0_tables_statement_manifest_only{0};
     bool trace_cap_fits{false};
     bool lde_cap_fits{false};
     /** False: phase R0 columns currently contain child-proof values. */
@@ -163,6 +180,18 @@ BuildSchedulerProgramTableV1(const LayoutV1& layout);
     const LayoutV1& layout,
     aq::AirConstraintSystem<gf::Fp3>& cs,
     alg_hash::Digest* program_root = nullptr,
+    std::string* why = nullptr);
+
+/**
+ * Rebuild the ParentJoin R0 commitment after removing the twelve
+ * proof-derived transcript cells (eight absorb lanes and four digest
+ * claims). The remaining table is immutable schedule/address metadata plus
+ * verifier-selected public statement values.
+ */
+[[nodiscard]] uint256
+ComputeParentJoinStatementManifestR0RootV1(
+    const pj::ProductV1& parent_join,
+    uint32_t* ordered_columns = nullptr,
     std::string* why = nullptr);
 
 /**

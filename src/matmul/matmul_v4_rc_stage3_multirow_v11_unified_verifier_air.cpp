@@ -35,6 +35,107 @@ uint32_t MaxDegree(
     return out;
 }
 
+bool IsParentJoinProofTapeColumn(
+    const pj::LayoutV1& layout,
+    uint32_t column)
+{
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashRate; ++lane) {
+        if (column == layout.replay.Absorb(lane)) {
+            return true;
+        }
+    }
+    for (uint32_t limb = 0;
+         limb < alg_hash::kAlgHashDigestLen; ++limb) {
+        if (column == layout.replay.DigestClaim(limb)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool BuildParentJoinStatementManifestR0V1(
+    const pj::ProductV1& parent_join,
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<uint32_t>& ordered_columns,
+    uint256& root,
+    std::string* why)
+{
+    ordered_columns.clear();
+    root.SetNull();
+    if (!parent_join.valid ||
+        parent_join.columns.size() !=
+            parent_join.cs.n_columns ||
+        cs.n_rows != parent_join.cs.n_rows ||
+        cs.n_columns != parent_join.cs.n_columns) {
+        if (why != nullptr) {
+            *why =
+                "parent_join_statement_manifest_shape";
+        }
+        return false;
+    }
+    cs.preprocessed.clear();
+    cs.preprocessed_row_group_roots.clear();
+    for (uint32_t column :
+         parent_join.preprocessed_columns) {
+        if (column >= cs.n_columns) {
+            if (why != nullptr) {
+                *why =
+                    "parent_join_statement_manifest_column";
+            }
+            return false;
+        }
+        if (IsParentJoinProofTapeColumn(
+                parent_join.layout, column)) {
+            continue;
+        }
+        ordered_columns.push_back(column);
+        cs.preprocessed.emplace_back(
+            column, parent_join.columns[column]);
+    }
+    if (ordered_columns.empty() ||
+        !std::is_sorted(
+            ordered_columns.begin(),
+            ordered_columns.end()) ||
+        std::adjacent_find(
+            ordered_columns.begin(),
+            ordered_columns.end()) !=
+            ordered_columns.end()) {
+        if (why != nullptr) {
+            *why =
+                "parent_join_statement_manifest_order";
+        }
+        return false;
+    }
+    cs.preprocessed_pin_ood = true;
+    const auto session =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            cs, parent_join.columns,
+            ordered_columns);
+    if (!session.valid ||
+        session.base_row_commitment.IsNull()) {
+        if (why != nullptr) {
+            *why =
+                "parent_join_statement_manifest_root:" +
+                session.note;
+        }
+        return false;
+    }
+    root = session.base_row_commitment;
+    cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns = ordered_columns,
+        .root = root,
+    });
+    if (why != nullptr) {
+        *why =
+            "parent_join_statement_manifest_r0";
+    }
+    return true;
+}
+
 struct PhaseViewV1 {
     PhaseV1 phase{PhaseV1::ParentJoin};
     const aq::AirConstraintSystem<Fp3>* cs{nullptr};
@@ -288,6 +389,27 @@ void AddGatedPhaseConstraint(
 
 } // namespace
 
+uint256 ComputeParentJoinStatementManifestR0RootV1(
+    const pj::ProductV1& parent_join,
+    uint32_t* ordered_columns,
+    std::string* why)
+{
+    aq::AirConstraintSystem<Fp3> cs =
+        parent_join.cs;
+    std::vector<uint32_t> columns;
+    uint256 root;
+    if (!BuildParentJoinStatementManifestR0V1(
+            parent_join, cs, columns, root, why)) {
+        return {};
+    }
+    if (ordered_columns != nullptr) {
+        *ordered_columns =
+            static_cast<uint32_t>(
+                columns.size());
+    }
+    return root;
+}
+
 cb::ProgramTable BuildAcceptanceProgramTableV1(
     const LayoutV1& layout)
 {
@@ -499,9 +621,8 @@ ProductV1 BuildProductV1(
     if (!out.exact_q96_range ||
         input.expected_child_statement_root.IsNull() ||
         !input.parent_join.valid ||
-        pj::RecountViolationsV1(
-            input.parent_join,
-            input.parent_join.columns) != 0) {
+        input.parent_join
+            .preprocessed_row_group_root.IsNull()) {
         return fail("range_statement_or_parent");
     }
 
@@ -521,6 +642,18 @@ ProductV1 BuildProductV1(
     }
 
     out.parent_join = input.parent_join;
+    uint32_t early_parent_r0_columns = 0;
+    const uint256 early_parent_r0_root =
+        ComputeParentJoinStatementManifestR0RootV1(
+            out.parent_join,
+            &early_parent_r0_columns, &why);
+    if (early_parent_r0_root.IsNull() ||
+        early_parent_r0_columns == 0 ||
+        early_parent_r0_root !=
+            input.expected_child_statement_root) {
+        return fail(
+            "parent_join_statement_root_mismatch");
+    }
     out.merkle_fold =
         mf::BuildShardV1(
             *decoded, input.transcript,
@@ -557,10 +690,130 @@ ProductV1 BuildProductV1(
             out.decoder.note);
     }
 
+    cb::ProgramTable parent_join_program;
+    np::ManifestV1 parent_join_manifest;
+    if (!np::BuildCanonicalProgramTableV1(
+            parent_join_program,
+            &parent_join_manifest, &why) ||
+        !parent_join_manifest
+            .canonical_program_table ||
+        !parent_join_manifest
+            .exact_native_constraint_order ||
+        !parent_join_manifest
+            .no_opaque_callbacks ||
+        parent_join_program.current_width !=
+            out.parent_join.cs.n_columns ||
+        parent_join_program.next_width !=
+            out.parent_join.cs.n_columns ||
+        parent_join_program.programs.size() !=
+            out.parent_join.cs.constraints.size()) {
+        return fail(
+            "parent_join_static_program:" +
+            why);
+    }
+    aq::AirConstraintSystem<Fp3>
+        parent_join_static_cs;
+    if (!cb::BuildAirConstraintSystemFromProgramTable(
+            parent_join_program,
+            out.parent_join.cs.n_rows,
+            parent_join_static_cs,
+            &why)) {
+        return fail(
+            "parent_join_static_adapter:" +
+            why);
+    }
+    std::vector<uint32_t>
+        parent_join_statement_manifest_columns;
+    if (!BuildParentJoinStatementManifestR0V1(
+            out.parent_join,
+            parent_join_static_cs,
+            parent_join_statement_manifest_columns,
+            out.parent_join_statement_manifest_r0_root,
+            &why)) {
+        return fail(
+            "parent_join_statement_manifest_r0:" +
+            why);
+    }
+    out.parent_join_statement_manifest_r0_columns =
+        static_cast<uint32_t>(
+            parent_join_statement_manifest_columns.size());
+    out.parent_join_statement_root_r0_bound =
+        out.parent_join_statement_manifest_r0_root ==
+            input.expected_child_statement_root;
+    if (!out.parent_join_statement_root_r0_bound) {
+        return fail(
+            "parent_join_statement_root_mismatch");
+    }
+    if (air_recurse::
+            CountWitnessViolationsOnH(
+                parent_join_static_cs,
+                out.parent_join.columns) != 0) {
+        return fail(
+            "parent_join_static_witness");
+    }
+    out.parent_join_program_root =
+        cb::CommitProgramTableAlgHash(
+            parent_join_program);
+    out.parent_join_program_constraints =
+        static_cast<uint32_t>(
+            parent_join_program.programs.size());
+    out.parent_join_constraints_canonical_bytecode =
+        out.parent_join_program_constraints ==
+            np::kExpectedProgramsV1;
+    out.parent_join_program_root_recomputed =
+        DigestNonzero(
+            out.parent_join_program_root) &&
+        out.parent_join_program_root ==
+            parent_join_manifest.program_root;
+    const auto is_static_r0 =
+        [&parent_join_statement_manifest_columns](
+            uint32_t column) {
+            return std::binary_search(
+                parent_join_statement_manifest_columns.begin(),
+                parent_join_statement_manifest_columns.end(),
+                column);
+        };
+    out.parent_join_proof_tape_cells_ordinary =
+        true;
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashRate; ++lane) {
+        out.parent_join_proof_tape_cells_ordinary =
+            out.parent_join_proof_tape_cells_ordinary &&
+            !is_static_r0(
+                out.parent_join.layout.replay.Absorb(lane));
+    }
+    for (uint32_t limb = 0;
+         limb < alg_hash::kAlgHashDigestLen; ++limb) {
+        out.parent_join_proof_tape_cells_ordinary =
+            out.parent_join_proof_tape_cells_ordinary &&
+            !is_static_r0(
+                out.parent_join.layout.replay.DigestClaim(limb));
+    }
+    // The canonical layout fixes every proof-tape cell at the physical
+    // (row, Absorb(lane)) or (row, DigestClaim(limb)) location.  No
+    // prover-selected offset participates in this map.
+    out.parent_join_proof_tape_fixed_offsets =
+        out.parent_join.layout.replay.n_columns != 0 &&
+        out.parent_join.cs.n_rows >= 2;
+    // The canonical replay program contains an event-digest capture relation
+    // for each of the four Poseidon2 output limbs.
+    out.parent_join_digest_claims_poseidon_bound =
+        out.parent_join_constraints_canonical_bytecode &&
+        out.parent_join_program_root_recomputed;
+    out.parent_join_r0_statement_manifest_only =
+        out.parent_join_proof_tape_cells_ordinary &&
+        out.parent_join_proof_tape_fixed_offsets &&
+        out.parent_join_digest_claims_poseidon_bound &&
+        out.parent_join_statement_root_r0_bound;
+    out.parent_join_cs_independent_of_child_witness =
+        out.parent_join_constraints_canonical_bytecode &&
+        out.parent_join_program_root_recomputed &&
+        out.parent_join_r0_statement_manifest_only;
+
     const std::array<PhaseViewV1, kPhasesV1>
         views{{
             {PhaseV1::ParentJoin,
-             &out.parent_join.cs,
+             &parent_join_static_cs,
              &out.parent_join.columns},
             {PhaseV1::MerkleHash,
              &out.merkle_fold.hash_cs,
@@ -833,8 +1086,17 @@ ProductV1 BuildProductV1(
         kRCFriBlowup;
     out.quotient_cap_audit_complete =
         commitment_coeffs != 0;
+    out.phase_constraint_systems_canonical_bytecode =
+        out.parent_join_constraints_canonical_bytecode
+        ? 1U : 0U;
+    out.phase_r0_tables_statement_manifest_only =
+        out.parent_join_r0_statement_manifest_only
+        ? 1U : 0U;
     out.cs_independent_of_child_witness =
-        false;
+        out.phase_constraint_systems_canonical_bytecode ==
+            kPhasesV1 &&
+        out.phase_r0_tables_statement_manifest_only ==
+            kPhasesV1;
     out.verifier_input_excludes_child_proof =
         false;
     out.lde_cap_fits =
