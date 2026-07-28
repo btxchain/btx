@@ -186,7 +186,7 @@ BOOST_AUTO_TEST_CASE(exact_row_lift_preserves_boundaries_and_rejects_padding)
     BOOST_CHECK(attachment.row_lifted);
     BOOST_CHECK(attachment.padding_zero_constrained);
     BOOST_CHECK_EQUAL(attachment.semantic_child_columns, 2U);
-    BOOST_CHECK_EQUAL(attachment.column_count, 7U);
+    BOOST_CHECK_EQUAL(attachment.column_count, 9U);
     BOOST_CHECK_EQUAL(parent.n_rows, 16U);
 
     const auto honest =
@@ -210,6 +210,43 @@ BOOST_AUTO_TEST_CASE(exact_row_lift_preserves_boundaries_and_rejects_padding)
     BOOST_CHECK(
         !aq::AirQuotientVerify<gf::Fp3>(
             parent, forged_proof.proof, Seed(), &why));
+}
+
+BOOST_AUTO_TEST_CASE(row_lift_preserves_cyclic_next_on_child_last_row)
+{
+    Cs child;
+    child.n_rows = 4;
+    child.n_columns = 1;
+    Columns child_columns(
+        1, std::vector<gf::Fp3>(4, U(5)));
+    aq::AirConstraint<gf::Fp3> cyclic;
+    cyclic.name = "cyclic.next";
+    cyclic.kind = aq::AirKind::kEverywhere;
+    cyclic.alg_degree = 1;
+    cyclic.eval =
+        [](const auto& current, const auto& next) {
+            return gf::Sub(next[0], current[0]);
+        };
+    child.constraints.push_back(std::move(cyclic));
+
+    Cs parent;
+    Columns columns;
+    composer::ChildAttachmentV1 attachment;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        composer::AppendChildLiftedV1(
+            parent, columns, child, child_columns,
+            16, 0, attachment, &why),
+        why);
+    const auto proof =
+        aq::AirQuotientProve<gf::Fp3>(
+            parent, columns, Seed());
+    BOOST_REQUIRE_MESSAGE(proof.ok, proof.note);
+    BOOST_REQUIRE(proof.division_exact);
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerify<gf::Fp3>(
+            parent, proof.proof, Seed(), &why),
+        why);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

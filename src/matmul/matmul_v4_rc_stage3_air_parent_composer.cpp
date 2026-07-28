@@ -170,7 +170,7 @@ bool AppendChildLiftedV1(
         return Fail(why, "lift_commitment_requires_global_rebuild");
     }
     if (child_cs.n_columns >
-        std::numeric_limits<uint32_t>::max() - 5U) {
+        (std::numeric_limits<uint32_t>::max() - 5U) / 2U) {
         return Fail(why, "lift_column_count_overflow");
     }
     for (const auto& constraint : child_cs.constraints) {
@@ -190,7 +190,10 @@ bool AppendChildLiftedV1(
 
     aq::AirConstraintSystem<gf::Fp3> lifted;
     lifted.n_rows = parent_rows;
-    lifted.n_columns = child_cs.n_columns + kSelectors;
+    const uint32_t wrap_base = child_cs.n_columns;
+    const uint32_t selector_base =
+        child_cs.n_columns * 2U;
+    lifted.n_columns = selector_base + kSelectors;
     lifted.preprocessed_pin_ood = child_cs.preprocessed_pin_ood;
     std::vector<std::vector<gf::Fp3>> lifted_columns(
         lifted.n_columns,
@@ -201,8 +204,11 @@ bool AppendChildLiftedV1(
             child_columns[column].begin(),
             child_columns[column].end(),
             lifted_columns[column].begin());
+        std::fill(
+            lifted_columns[wrap_base + column].begin(),
+            lifted_columns[wrap_base + column].end(),
+            child_columns[column][0]);
     }
-    const uint32_t selector_base = child_cs.n_columns;
     for (uint32_t row = 0; row < parent_rows; ++row) {
         if (row < child_cs.n_rows) {
             lifted_columns[selector_base + kActive][row] =
@@ -239,41 +245,84 @@ bool AppendChildLiftedV1(
             lifted_columns[selector_base + selector]);
     }
 
-    for (const auto& constraint : child_cs.constraints) {
-        aq::AirConstraint<gf::Fp3> gated;
-        gated.name = constraint.name;
-        gated.kind = aq::AirKind::kEverywhere;
-        gated.alg_degree = constraint.alg_degree + 1;
-        const auto eval = constraint.eval;
-        const uint32_t width = child_cs.n_columns;
-        uint32_t selector{kActive};
-        switch (constraint.kind) {
-        case aq::AirKind::kEverywhere:
-            selector = kActive;
-            break;
-        case aq::AirKind::kTransition:
-            selector = kTransition;
-            break;
-        case aq::AirKind::kFirstRow:
-            selector = kFirst;
-            break;
-        case aq::AirKind::kLastRow:
-            selector = kLast;
-            break;
-        }
-        gated.eval =
-            [eval, width, selector_base, selector](
+    for (uint32_t column = 0;
+         column < child_cs.n_columns; ++column) {
+        aq::AirConstraint<gf::Fp3> first;
+        first.name = "lift.wrap.first";
+        first.kind = aq::AirKind::kFirstRow;
+        first.alg_degree = 1;
+        first.eval =
+            [column, wrap_base](
+                const std::vector<gf::Fp3>& current,
+                const std::vector<gf::Fp3>&) {
+                return gf::Sub(
+                    current[wrap_base + column],
+                    current[column]);
+            };
+        lifted.constraints.push_back(std::move(first));
+
+        aq::AirConstraint<gf::Fp3> constant;
+        constant.name = "lift.wrap.constant";
+        constant.kind = aq::AirKind::kTransition;
+        constant.alg_degree = 1;
+        constant.eval =
+            [column, wrap_base](
                 const std::vector<gf::Fp3>& current,
                 const std::vector<gf::Fp3>& next) {
-                std::vector<gf::Fp3> child_current(
-                    current.begin(), current.begin() + width);
-                std::vector<gf::Fp3> child_next(
-                    next.begin(), next.begin() + width);
-                return gf::Mul(
-                    current[selector_base + selector],
-                    eval(child_current, child_next));
+                return gf::Sub(
+                    next[wrap_base + column],
+                    current[wrap_base + column]);
             };
-        lifted.constraints.push_back(std::move(gated));
+        lifted.constraints.push_back(std::move(constant));
+    }
+
+    const auto append_gated =
+        [&](const aq::AirConstraint<gf::Fp3>& source,
+            uint32_t selector, bool wrap_next) {
+            aq::AirConstraint<gf::Fp3> gated;
+            gated.name = source.name;
+            gated.kind = aq::AirKind::kEverywhere;
+            gated.alg_degree = source.alg_degree + 1;
+            const auto eval = source.eval;
+            const uint32_t width = child_cs.n_columns;
+            gated.eval =
+                [eval, width, wrap_base, selector_base,
+                 selector, wrap_next](
+                    const std::vector<gf::Fp3>& current,
+                    const std::vector<gf::Fp3>& next) {
+                    std::vector<gf::Fp3> child_current(
+                        current.begin(), current.begin() + width);
+                    std::vector<gf::Fp3> child_next;
+                    if (wrap_next) {
+                        child_next.assign(
+                            current.begin() + wrap_base,
+                            current.begin() + wrap_base + width);
+                    } else {
+                        child_next.assign(
+                            next.begin(), next.begin() + width);
+                    }
+                    return gf::Mul(
+                        current[selector_base + selector],
+                        eval(child_current, child_next));
+                };
+            lifted.constraints.push_back(std::move(gated));
+        };
+    for (const auto& constraint : child_cs.constraints) {
+        switch (constraint.kind) {
+        case aq::AirKind::kEverywhere:
+            append_gated(constraint, kTransition, false);
+            append_gated(constraint, kLast, true);
+            break;
+        case aq::AirKind::kTransition:
+            append_gated(constraint, kTransition, false);
+            break;
+        case aq::AirKind::kFirstRow:
+            append_gated(constraint, kFirst, false);
+            break;
+        case aq::AirKind::kLastRow:
+            append_gated(constraint, kLast, true);
+            break;
+        }
     }
     for (uint32_t column = 0;
          column < child_cs.n_columns; ++column) {

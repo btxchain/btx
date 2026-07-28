@@ -75,8 +75,12 @@ struct ChildAttachmentV1 {
  * A child over H_n is embedded in the first n rows of H_N. Five canonical
  * preprocessed selectors gate Everywhere/Transition/First/Last constraints
  * to precisely their original row sets and force every ordinary child column
- * to zero on rows [n,N). This is not repetition or unconstrained padding.
- * The selector multiplication raises each original algebraic degree by one.
+ * to zero on rows [n,N). One ordinary wrap-broadcast column per child column
+ * is constrained to the child's row-zero value; Everywhere and LastRow
+ * relations at row n-1 consume this wrap bank as `next`, preserving the
+ * original cyclic H_n semantics instead of reading padding row n. This is not
+ * repetition or unconstrained padding. Selector multiplication raises each
+ * original algebraic degree by one.
  *
  * Per-column and row-group root pins are rejected because changing the row
  * domain changes their commitment. The enclosing parent must install its one
