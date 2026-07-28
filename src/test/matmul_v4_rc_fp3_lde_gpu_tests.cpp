@@ -78,7 +78,7 @@ RootTables MakeRootTables(uint32_t n)
 }
 
 struct ContextDeleter {
-    void operator()(void* ptr) const { BtxMetalFp3LdeRelease(ptr); }
+    void operator()(void* ptr) const { BtxGpuFp3LdeRelease(ptr); }
 };
 using Context = std::unique_ptr<void, ContextDeleter>;
 
@@ -86,11 +86,12 @@ Context MakeContext(uint32_t n, const RootTables& roots)
 {
     void* raw = nullptr;
     BOOST_REQUIRE_EQUAL(
-        BtxMetalFp3LdeBegin(
+        BtxGpuFp3LdeBegin(
             n, roots.forward.empty() ? nullptr : roots.forward.data(),
-            roots.forward.size(),
+            static_cast<uint32_t>(roots.forward.size()),
             roots.inverse.empty() ? nullptr : roots.inverse.data(),
-            roots.inverse.size(), roots.inverse_n, &raw),
+            static_cast<uint32_t>(roots.inverse.size()), roots.inverse_n,
+            &raw),
         0);
     BOOST_REQUIRE(raw != nullptr);
     return Context(raw);
@@ -222,8 +223,8 @@ gf::Fp3 EvaluateAt(const std::vector<gf::Fp3>& coefficients,
 
 BOOST_AUTO_TEST_CASE(forward_lde_matches_cpu_on_raw_limb_edges)
 {
-    if (BtxMetalFp3LdeAvailable() == 0) {
-        BOOST_TEST_MESSAGE("No Metal Fp3 LDE provider; parity test skipped");
+    if (BtxGpuFp3LdeAvailable() == 0) {
+        BOOST_TEST_MESSAGE("No GPU Fp3 LDE provider; parity test skipped");
         return;
     }
     for (const uint32_t n : {1U, 2U, 4U, 8U, 32U, 256U}) {
@@ -244,7 +245,7 @@ BOOST_AUTO_TEST_CASE(forward_lde_matches_cpu_on_raw_limb_edges)
         const std::vector<uint64_t> packed = Pack(raw);
         std::vector<uint64_t> actual(static_cast<size_t>(n) * 3);
         BOOST_REQUIRE_EQUAL(
-            BtxMetalFp3LdeForward(
+            BtxGpuFp3LdeForward(
                 context.get(), packed.data(), n, actual.data()),
             0);
         RequireEqualCanonical(expected, actual);
@@ -252,7 +253,7 @@ BOOST_AUTO_TEST_CASE(forward_lde_matches_cpu_on_raw_limb_edges)
         const std::vector<gf::Fp3> inverse_expected =
             CpuNtt(raw, roots.inverse, /*inverse=*/true, roots.inverse_n);
         BOOST_REQUIRE_EQUAL(
-            BtxMetalFp3LdeInverse(
+            BtxGpuFp3LdeInverse(
                 context.get(), packed.data(), actual.data()),
             0);
         RequireEqualCanonical(inverse_expected, actual);
@@ -261,7 +262,7 @@ BOOST_AUTO_TEST_CASE(forward_lde_matches_cpu_on_raw_limb_edges)
 
 BOOST_AUTO_TEST_CASE(forward_lde_is_natural_subgroup_evaluation_order)
 {
-    if (BtxMetalFp3LdeAvailable() == 0) return;
+    if (BtxGpuFp3LdeAvailable() == 0) return;
     constexpr uint32_t n = 16;
     const RootTables roots = MakeRootTables(n);
     Context context = MakeContext(n, roots);
@@ -274,7 +275,7 @@ BOOST_AUTO_TEST_CASE(forward_lde_is_natural_subgroup_evaluation_order)
     const std::vector<uint64_t> packed = Pack(coefficients);
     std::vector<uint64_t> actual(static_cast<size_t>(n) * 3);
     BOOST_REQUIRE_EQUAL(
-        BtxMetalFp3LdeForward(
+        BtxGpuFp3LdeForward(
             context.get(), packed.data(), coefficients.size(), actual.data()),
         0);
 
@@ -290,7 +291,7 @@ BOOST_AUTO_TEST_CASE(forward_lde_is_natural_subgroup_evaluation_order)
 
 BOOST_AUTO_TEST_CASE(forward_inverse_roundtrip_reuses_context_without_state)
 {
-    if (BtxMetalFp3LdeAvailable() == 0) return;
+    if (BtxGpuFp3LdeAvailable() == 0) return;
     constexpr uint32_t n = 1024;
     const RootTables roots = MakeRootTables(n);
     Context context = MakeContext(n, roots);
@@ -299,11 +300,11 @@ BOOST_AUTO_TEST_CASE(forward_inverse_roundtrip_reuses_context_without_state)
     std::vector<uint64_t> evaluations(static_cast<size_t>(n) * 3);
     std::vector<uint64_t> roundtrip(static_cast<size_t>(n) * 3);
     BOOST_REQUIRE_EQUAL(
-        BtxMetalFp3LdeForward(
+        BtxGpuFp3LdeForward(
             context.get(), packed.data(), n, evaluations.data()),
         0);
     BOOST_REQUIRE_EQUAL(
-        BtxMetalFp3LdeInverse(
+        BtxGpuFp3LdeInverse(
             context.get(), evaluations.data(), roundtrip.data()),
         0);
 
@@ -320,7 +321,7 @@ BOOST_AUTO_TEST_CASE(forward_inverse_roundtrip_reuses_context_without_state)
     const std::vector<gf::Fp3> short_polynomial{{41, 43, 47}, {53, 59, 61}};
     const std::vector<uint64_t> short_packed = Pack(short_polynomial);
     BOOST_REQUIRE_EQUAL(
-        BtxMetalFp3LdeForward(
+        BtxGpuFp3LdeForward(
             context.get(), short_packed.data(), short_polynomial.size(),
             evaluations.data()),
         0);
@@ -332,17 +333,21 @@ BOOST_AUTO_TEST_CASE(forward_inverse_roundtrip_reuses_context_without_state)
 
 BOOST_AUTO_TEST_CASE(provider_rejects_malformed_shape_and_count)
 {
-    if (BtxMetalFp3LdeAvailable() == 0) return;
+    if (BtxGpuFp3LdeAvailable() == 0) return;
     const RootTables roots = MakeRootTables(8);
     void* malformed = nullptr;
-    BOOST_TEST(BtxMetalFp3LdeBegin(
-                   7, roots.forward.data(), roots.forward.size(),
-                   roots.inverse.data(), roots.inverse.size(),
+    BOOST_TEST(BtxGpuFp3LdeBegin(
+                   7, roots.forward.data(),
+                   static_cast<uint32_t>(roots.forward.size()),
+                   roots.inverse.data(),
+                   static_cast<uint32_t>(roots.inverse.size()),
                    roots.inverse_n, &malformed) != 0);
     BOOST_TEST(malformed == nullptr);
-    BOOST_TEST(BtxMetalFp3LdeBegin(
-                   8, roots.forward.data(), roots.forward.size() - 1,
-                   roots.inverse.data(), roots.inverse.size(),
+    BOOST_TEST(BtxGpuFp3LdeBegin(
+                   8, roots.forward.data(),
+                   static_cast<uint32_t>(roots.forward.size() - 1),
+                   roots.inverse.data(),
+                   static_cast<uint32_t>(roots.inverse.size()),
                    roots.inverse_n, &malformed) != 0);
     BOOST_TEST(malformed == nullptr);
 
@@ -350,12 +355,31 @@ BOOST_AUTO_TEST_CASE(provider_rejects_malformed_shape_and_count)
     const std::vector<gf::Fp3> values = StructuredRawValues(9);
     const std::vector<uint64_t> packed = Pack(values);
     std::vector<uint64_t> output(8 * 3);
-    BOOST_TEST(BtxMetalFp3LdeForward(
+    BOOST_TEST(BtxGpuFp3LdeForward(
                    context.get(), packed.data(), 9, output.data()) != 0);
-    BOOST_TEST(BtxMetalFp3LdeForward(
+    BOOST_TEST(BtxGpuFp3LdeForward(
                    context.get(), nullptr, 1, output.data()) != 0);
-    BOOST_TEST(BtxMetalFp3LdeInverse(
+    BOOST_TEST(BtxGpuFp3LdeInverse(
                    context.get(), nullptr, output.data()) != 0);
+}
+
+BOOST_AUTO_TEST_CASE(gpu_provider_available_when_cuda_or_metal_linked)
+{
+    if (BtxGpuFp3LdeAvailable() == 0) {
+        BOOST_TEST_MESSAGE("GPU Fp3 LDE provider not linked; Available==0");
+        return;
+    }
+    BOOST_TEST(BtxGpuFp3LdeAvailable() == 1);
+    const RootTables roots = MakeRootTables(8);
+    Context context = MakeContext(8, roots);
+    const std::vector<gf::Fp3> coefficients{{1, 0, 0}, {2, 0, 0}};
+    const std::vector<uint64_t> packed = Pack(coefficients);
+    std::vector<uint64_t> actual(24);
+    BOOST_REQUIRE_EQUAL(
+        BtxGpuFp3LdeForward(
+            context.get(), packed.data(),
+            static_cast<uint32_t>(coefficients.size()), actual.data()),
+        0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

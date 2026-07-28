@@ -1182,7 +1182,12 @@ if(BTX_ENABLE_CUDA_EXPERIMENTAL)
     # PR-89 GPU splice #1: Poseidon2 row-leaf sponge for the recursion prover
     # (BTX_GPU_ROWLEAF env gate in matmul_v4_rc_fri_ext3_alg.cpp).
     cuda/matmul_v4_rc_rowleaf_gpu.cu
+    # Stage-3 Fp3 NTT/LDE (BTX_GPU_LDE); provider-neutral BtxGpuFp3Lde* ABI.
+    cuda/matmul_v4_rc_fp3_lde_gpu.cu
   )
+  # PUBLIC so bitcoin_common consumers of BtxGpuFp3Lde* can see the CUDA
+  # provider is the linked implementation (Metal mm guards on the same define).
+  target_compile_definitions(btx_matmul_backend PUBLIC BTX_CUDA_FP3_LDE_PROVIDER=1)
   if(BTX_BMX4C_CUTLASS_MXFP4 OR BTX_BUILD_LT_CUTLASS_MXFP4)
     set(_btx_cutlass_inc "")
     if(BTX_CUTLASS_INCLUDE_DIR AND EXISTS "${BTX_CUTLASS_INCLUDE_DIR}/cutlass/cutlass.h")
@@ -1281,6 +1286,7 @@ else()
   if(NOT (APPLE AND BTX_ENABLE_METAL))
     target_sources(btx_matmul_backend PRIVATE
       cuda/matmul_v4_rc_rowleaf_gpu_stub.cpp
+      cuda/matmul_v4_rc_fp3_lde_gpu_stub.cpp
     )
   endif()
 endif()
