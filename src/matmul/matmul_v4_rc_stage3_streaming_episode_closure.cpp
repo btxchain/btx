@@ -824,6 +824,14 @@ void StreamingEpisodeClosureSink::OnPhase1SVRow(
     const uint64_t qkt_through_row =
         uint64_t{view.query_row + 1} *
         (params.n_ctx / kRCMxBlockLen);
+    // Finalizing QK^T deliberately releases its native tile buffers.  Once
+    // m_next_finalized_layer has advanced to SV, the cleared predecessor's
+    // next_tile counter is no longer an availability signal: successful
+    // ordered finalization already proves complete QK^T coverage.  While QK^T
+    // is still live, retain the row-prefix check so SV cannot consume an
+    // unproduced row.
+    const bool qkt_finalized =
+        m_next_finalized_layer == ordinal;
     if (view.round_ordinal >= params.rounds ||
         (m_next_finalized_layer != ordinal &&
          m_next_finalized_layer + 1 != ordinal) ||
@@ -835,8 +843,9 @@ void StreamingEpisodeClosureSink::OnPhase1SVRow(
         view.gemm_y == nullptr ||
         view.extract_output == nullptr ||
         !m_pending[ordinal].operands_seen ||
-        m_pending[ordinal - 1].next_tile <
-            qkt_through_row ||
+        (!qkt_finalized &&
+         m_pending[ordinal - 1].next_tile <
+             qkt_through_row) ||
         m_pending[ordinal].next_tile !=
             expected_tile) {
         Reject("sv_order");

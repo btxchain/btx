@@ -212,6 +212,29 @@ BOOST_AUTO_TEST_CASE(
         why.find("phase1_operands_order") !=
         std::string::npos);
 
+    // Advancing to SV is permitted only after the corresponding QK^T row
+    // prefix exists.  This guards the live-prefix side of the state machine
+    // while the completed-QK^T path below is free to discard predecessor
+    // buffers after proof construction.
+    streaming::StreamingEpisodeClosureSink early_sv(
+        statement, params);
+    early_sv.OnPhase1Operands(operands);
+    early_sv.OnPhase1SVRow({
+        .round_ordinal = 0,
+        .query_row = 0,
+        .n_ctx = params.n_ctx,
+        .d_head = params.d_head,
+        .operand_a = operand8.data(),
+        .operand_b = v.data(),
+        .gemm_y = output64.data(),
+        .extract_output = operand8.data(),
+        .prf_key = H(0x40),
+    });
+    BOOST_CHECK(!early_sv.Complete(&why));
+    BOOST_CHECK(
+        why.find("sv_order") !=
+        std::string::npos);
+
     streaming::StreamingEpisodeClosureSink prf_change(
         statement, params);
     prf_change.OnPhase1Operands(operands);
