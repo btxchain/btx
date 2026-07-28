@@ -388,7 +388,10 @@ BOOST_AUTO_TEST_CASE(alg_hash_sponge_padding_and_fp3_embedding)
 BOOST_AUTO_TEST_CASE(alg_hash_column_streaming_row_leaf_is_exact)
 {
     constexpr uint32_t ROWS = 32;
-    for (const uint32_t width : {1U, 2U, 7U, 26U}) {
+    // W=5 makes 3W+1 (the row lanes plus index) exactly rate-aligned, so it
+    // pins the mandatory full extra 10* padding block as well as the ordinary
+    // partial-block cases.
+    for (const uint32_t width : {1U, 2U, 5U, 7U, 26U}) {
         std::vector<std::vector<gf::Fp3>> columns(
             width, std::vector<gf::Fp3>(ROWS));
         std::vector<std::vector<gf::Fp3>> rows(
