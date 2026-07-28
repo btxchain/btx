@@ -815,6 +815,14 @@ struct Fri3AlgBatchProof {
 
 inline constexpr uint32_t
     kRCFri3AlgMultiRowBatchProofVersion = 2;
+/**
+ * Additive SAFE/Q192/K=2 multi-row version.  It keeps the V2 ordered
+ * post-claim batching statement and wire envelope, but uses a short
+ * commitment transcript and the typed SAFE challenge source used by the
+ * single-row V13 verifier.  Version 2 remains byte-for-byte frozen.
+ */
+inline constexpr uint32_t
+    kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13 = 13;
 inline constexpr uint32_t
     kRCFri3AlgMultiRowBatchProofMagic =
         0x32524d46u; // 'FMR2'
@@ -1152,9 +1160,32 @@ Fri3AlgMultiRowBatchCommitStreaming(
     const uint256& fs_seed,
     std::string* why = nullptr);
 
-/** Canonical, byte-unique V2 multi-row RAP proof envelope. Serialization
- * fails closed (returns zero and clears `out`) for every noncanonical
- * role/range/domain/query/path/fold shape or proof exceeding the hard cap. */
+/**
+ * Additive SAFE multi-row producer/verifier.  The batching challenge is
+ * sampled after all individual OOD claims and uses a single geometric Fp3
+ * challenge, so recursive replay is width-independent; for a fixed nonzero
+ * W-cell claim delta the residual root probability is at most (W-1)/|Fp3|.
+ */
+[[nodiscard]] Fri3AlgMultiRowBatchCommitResult
+Fri3AlgMultiRowSafeQ192K2V13BatchCommitStreaming(
+    const std::vector<std::vector<std::vector<Fp3>>>& groups,
+    const std::vector<Fri3AlgMultiRowGroupRole>& roles,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0,
+    const std::vector<
+        std::shared_ptr<Fri3AlgRowTreeCache>>&
+        retained_group_caches = {});
+
+[[nodiscard]] bool
+Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+    const Fri3AlgMultiRowBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why = nullptr);
+
+/** Canonical, byte-unique V2/V13 multi-row RAP proof envelope. Serialization
+ * fails closed (returns zero and clears `out`) for every unknown version or
+ * noncanonical role/range/domain/query/path/fold shape, or a proof exceeding
+ * the hard cap.  Call the verifier matching the decoded proof version. */
 [[nodiscard]] size_t SerializeFri3AlgMultiRowBatchProof(
     const Fri3AlgMultiRowBatchProof& proof,
     std::vector<unsigned char>& out);

@@ -3626,6 +3626,41 @@ constexpr Fri3AlgProtocolConfig
         true,
     };
 
+constexpr char kFri3AlgMultiRowSafeQ192K2DomainTagV13[] =
+    "BTX_RC_FRI3ALG_MULTI_ROW_RAP_SAFE_Q192_K2_V13";
+
+constexpr Fri3AlgProtocolConfig
+    kFri3AlgMultiRowSafeQ192K2V13Config{
+        kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13,
+        kFri3AlgMultiRowSafeQ192K2DomainTagV13,
+        kRCFri3AlgDualUniformDrawDomainTag,
+        kRCFri3AlgDualIndexDrawDomainTag,
+        kRCFri3AlgNumQueries,
+        kRCFri3AlgSafeQ192K2OodCandidatesV13,
+        false, // SAFE output lanes are already uniform field elements
+        false, // one post-claim geometric challenge keeps replay O(1) in W
+        -1,    // shared untagged row commitments
+        true,  // retain the Q192 proximity guard
+        true,  // commit the width-proportional shape and OOD vectors
+        false, // never route V13 through the untyped P2 squeeze
+        false,
+        nullptr,
+        0,
+        true,  // typed full-capacity SAFECore challenges
+    };
+static_assert(
+    kFri3AlgMultiRowSafeQ192K2V13Config.query_count ==
+            kRCFri3AlgNumQueries &&
+        kFri3AlgMultiRowSafeQ192K2V13Config.ood_candidates == 2 &&
+        kFri3AlgMultiRowSafeQ192K2V13Config
+            .require_q192_proximity_guard &&
+        kFri3AlgMultiRowSafeQ192K2V13Config
+            .short_transcript_commitments &&
+        !kFri3AlgMultiRowSafeQ192K2V13Config
+             .independent_batching_coefficients &&
+        kFri3AlgMultiRowSafeQ192K2V13Config.safe_core_challenges,
+    "multi-row V13 must remain SAFE/Q192/K2 with O(1) batching replay");
+
 bool CanonicalMultiRowRoles(
     const std::vector<Fri3AlgMultiRowGroupRole>& roles)
 {
@@ -3641,13 +3676,14 @@ Fri3AlgFs Fri3AlgMultiRowFsInit(
     uint64_t pow_grind_nonce,
     uint32_t n_coeffs,
     const std::vector<Fri3AlgMultiRowGroupCommit>& groups,
-    const std::vector<uint32_t>& column_len)
+    const std::vector<uint32_t>& column_len,
+    const Fri3AlgProtocolConfig& config)
 {
     Fri3AlgFs fs(
         fs_seed, pow_grind_nonce, kRCFriBlowup,
-        n_coeffs, kFri3AlgMultiRowDomainTag);
+        n_coeffs, config.domain_tag);
     AppendLE32(
-        fs.buf, kRCFri3AlgMultiRowBatchProofVersion);
+        fs.buf, config.proof_version);
     AppendLE32(
         fs.buf, static_cast<uint32_t>(groups.size()));
     for (const auto& group : groups) {
@@ -3663,8 +3699,13 @@ Fri3AlgFs Fri3AlgMultiRowFsInit(
     AppendLE32(
         fs.buf,
         static_cast<uint32_t>(column_len.size()));
-    for (uint32_t length : column_len) {
-        AppendLE32(fs.buf, length);
+    if (config.short_transcript_commitments) {
+        fs.AbsorbAlgRoot(
+            Fri3AlgShapeCommit(n_coeffs, column_len));
+    } else {
+        for (uint32_t length : column_len) {
+            AppendLE32(fs.buf, length);
+        }
     }
     return fs;
 }
@@ -3672,13 +3713,14 @@ Fri3AlgFs Fri3AlgMultiRowFsInit(
 } // namespace
 
 Fri3AlgMultiRowBatchCommitResult
-Fri3AlgMultiRowBatchCommitStreaming(
+Fri3AlgMultiRowBatchCommitStreamingConfigured(
     const std::vector<std::vector<std::vector<Fp3>>>& groups,
     const std::vector<Fri3AlgMultiRowGroupRole>& roles,
     const uint256& fs_seed,
     uint64_t pow_grind_nonce,
     const std::vector<
-        std::shared_ptr<Fri3AlgRowTreeCache>>& retained)
+        std::shared_ptr<Fri3AlgRowTreeCache>>& retained,
+    const Fri3AlgProtocolConfig& config)
 {
     Fri3AlgMultiRowBatchCommitResult out;
     const auto fail = [&](const std::string& detail) {
@@ -3724,6 +3766,7 @@ Fri3AlgMultiRowBatchCommitStreaming(
     const uint32_t n_lde =
         n * kRCFriBlowup;
     auto& proof = out.proof;
+    proof.version = config.proof_version;
     proof.pow_grind_nonce = pow_grind_nonce;
     proof.n_coeffs = n;
     proof.groups.resize(groups.size());
@@ -3781,15 +3824,16 @@ Fri3AlgMultiRowBatchCommitStreaming(
     Fri3AlgFs fs =
         Fri3AlgMultiRowFsInit(
             fs_seed, pow_grind_nonce, n,
-            proof.groups, proof.column_len);
+            proof.groups, proof.column_len,
+            config);
     uint32_t z_counter = 0;
     if (!Fri3AlgBatchSampleZ(
             fs, z_counter, nullptr,
-            kFri3AlgMultiRowQ192Config,
+            config,
             proof.z1) ||
         !Fri3AlgBatchSampleZ(
             fs, z_counter, &proof.z1,
-            kFri3AlgMultiRowQ192Config,
+            config,
             proof.z2)) {
         return fail("ood");
     }
@@ -3804,29 +3848,39 @@ Fri3AlgMultiRowBatchCommitStreaming(
                 EvalPolyCoeffs(column, proof.z1);
             proof.evals_z2[flattened] =
                 EvalPolyCoeffs(column, proof.z2);
-            fs.AbsorbFp3(
-                proof.evals_z1[flattened]);
-            fs.AbsorbFp3(
-                proof.evals_z2[flattened]);
+            if (!config.short_transcript_commitments) {
+                fs.AbsorbFp3(
+                    proof.evals_z1[flattened]);
+                fs.AbsorbFp3(
+                    proof.evals_z2[flattened]);
+            }
             ++flattened;
         }
     }
-    // V2: all per-column claims are fixed before the random batching vector.
+    if (config.short_transcript_commitments) {
+        fs.AbsorbAlgRoot(
+            Fri3AlgOodEvalCommit(
+                proof.z1, proof.z2,
+                proof.evals_z1,
+                proof.evals_z2));
+    }
+    // All per-column claims are fixed before the random batching challenge.
     // With the reverse order only aggregate v(z1),v(z2) was bound: after
     // seeing the coefficients, a prover could add a nonzero kernel vector to
-    // individual claims while preserving both aggregates. The post-claim
-    // vector reduces any such fixed nonzero delta to a field-size event.
+    // individual claims while preserving both aggregates. V2 uses independent
+    // coordinates (a 1/|Fp3| event); SAFE V13 uses one geometric challenge so
+    // recursive replay stays O(1) in W (at most (W-1)/|Fp3| by root counting).
     std::vector<Fp3> coefficients;
     if (!ProtocolBatchCoefficients(
-            fs, kFri3AlgMultiRowQ192Config,
+            fs, config,
             width, coefficients, proof.lambda)) {
         return fail("batch_coefficients");
     }
     if (!ProtocolChallengeFp3(
-            fs, kFri3AlgMultiRowQ192Config,
+            fs, config,
             "fra3_w", 0, proof.w1) ||
         !ProtocolChallengeFp3(
-            fs, kFri3AlgMultiRowQ192Config,
+            fs, config,
             "fra3_w", 1, proof.w2)) {
         return fail("deep_weights");
     }
@@ -3924,7 +3978,7 @@ Fri3AlgMultiRowBatchCommitStreaming(
         }
         Fp3 beta;
         if (!ProtocolChallengeFp3(
-                fs, kFri3AlgMultiRowQ192Config,
+                fs, config,
                 "fra3_fold", fold, beta)) {
             return fail("fold_challenge");
         }
@@ -3938,14 +3992,14 @@ Fri3AlgMultiRowBatchCommitStreaming(
     }
 
     proof.queries.resize(
-        kFri3AlgMultiRowQ192Config.query_count);
+        config.query_count);
     std::vector<uint32_t> query_indices(
         proof.queries.size());
     for (uint32_t query = 0;
          query < proof.queries.size(); ++query) {
         auto& opened = proof.queries[query];
         if (!ProtocolChallengeIndex(
-                fs, kFri3AlgMultiRowQ192Config,
+                fs, config,
                 "fra3_query", query, n_lde,
                 opened.index)) {
             return fail("query_index");
@@ -3986,13 +4040,45 @@ Fri3AlgMultiRowBatchCommitStreaming(
     }
     out.ok = true;
     out.note =
-        "multi_row_commit:ordered_roots_one_rlc_deep_fri";
+        config.safe_core_challenges
+        ? "multi_row_commit:ordered_roots_safe_q192_k2_deep_fri"
+        : "multi_row_commit:ordered_roots_one_rlc_deep_fri";
     return out;
 }
 
-bool Fri3AlgMultiRowBatchVerify(
+Fri3AlgMultiRowBatchCommitResult
+Fri3AlgMultiRowBatchCommitStreaming(
+    const std::vector<std::vector<std::vector<Fp3>>>& groups,
+    const std::vector<Fri3AlgMultiRowGroupRole>& roles,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce,
+    const std::vector<
+        std::shared_ptr<Fri3AlgRowTreeCache>>& retained)
+{
+    return Fri3AlgMultiRowBatchCommitStreamingConfigured(
+        groups, roles, fs_seed, pow_grind_nonce,
+        retained, kFri3AlgMultiRowQ192Config);
+}
+
+Fri3AlgMultiRowBatchCommitResult
+Fri3AlgMultiRowSafeQ192K2V13BatchCommitStreaming(
+    const std::vector<std::vector<std::vector<Fp3>>>& groups,
+    const std::vector<Fri3AlgMultiRowGroupRole>& roles,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce,
+    const std::vector<
+        std::shared_ptr<Fri3AlgRowTreeCache>>& retained)
+{
+    return Fri3AlgMultiRowBatchCommitStreamingConfigured(
+        groups, roles, fs_seed, pow_grind_nonce,
+        retained,
+        kFri3AlgMultiRowSafeQ192K2V13Config);
+}
+
+bool Fri3AlgMultiRowBatchVerifyConfigured(
     const Fri3AlgMultiRowBatchProof& proof,
     const uint256& fs_seed,
+    const Fri3AlgProtocolConfig& config,
     std::string* why)
 {
     const auto fail = [&](const std::string& detail) {
@@ -4003,7 +4089,7 @@ bool Fri3AlgMultiRowBatchVerify(
         return false;
     };
     if (proof.version !=
-            kRCFri3AlgMultiRowBatchProofVersion ||
+            config.proof_version ||
         proof.blowup != kRCFriBlowup ||
         proof.n_coeffs < 2 ||
         (proof.n_coeffs &
@@ -4063,7 +4149,7 @@ bool Fri3AlgMultiRowBatchVerify(
         proof.fold_layers.size() !=
             proof.fold_challenges.size() + 1 ||
         proof.queries.size() !=
-            kFri3AlgMultiRowQ192Config.query_count ||
+            config.query_count ||
         !Fri3AlgClaimedBitsMeetTarget()) {
         return fail("fri_shape");
     }
@@ -4071,16 +4157,16 @@ bool Fri3AlgMultiRowBatchVerify(
         Fri3AlgMultiRowFsInit(
             fs_seed, proof.pow_grind_nonce,
             proof.n_coeffs, proof.groups,
-            proof.column_len);
+            proof.column_len, config);
     uint32_t z_counter = 0;
     Fp3 z1;
     Fp3 z2;
     if (!Fri3AlgBatchSampleZ(
             fs, z_counter, nullptr,
-            kFri3AlgMultiRowQ192Config, z1) ||
+            config, z1) ||
         !Fri3AlgBatchSampleZ(
             fs, z_counter, &z1,
-            kFri3AlgMultiRowQ192Config, z2) ||
+            config, z2) ||
         !Eq(z1, proof.z1) ||
         !Eq(z2, proof.z2) ||
         !Fri3AlgHasExtCoord(z1) ||
@@ -4095,13 +4181,22 @@ bool Fri3AlgMultiRowBatchVerify(
     for (uint32_t column = 0;
          column < proof.column_len.size();
          ++column) {
-        fs.AbsorbFp3(proof.evals_z1[column]);
-        fs.AbsorbFp3(proof.evals_z2[column]);
+        if (!config.short_transcript_commitments) {
+            fs.AbsorbFp3(proof.evals_z1[column]);
+            fs.AbsorbFp3(proof.evals_z2[column]);
+        }
+    }
+    if (config.short_transcript_commitments) {
+        fs.AbsorbAlgRoot(
+            Fri3AlgOodEvalCommit(
+                proof.z1, proof.z2,
+                proof.evals_z1,
+                proof.evals_z2));
     }
     std::vector<Fp3> coefficients;
     Fp3 encoded;
     if (!ProtocolBatchCoefficients(
-            fs, kFri3AlgMultiRowQ192Config,
+            fs, config,
             static_cast<uint32_t>(
                 proof.column_len.size()),
             coefficients, encoded) ||
@@ -4111,10 +4206,10 @@ bool Fri3AlgMultiRowBatchVerify(
     Fp3 w1;
     Fp3 w2;
     if (!ProtocolChallengeFp3(
-            fs, kFri3AlgMultiRowQ192Config,
+            fs, config,
             "fra3_w", 0, w1) ||
         !ProtocolChallengeFp3(
-            fs, kFri3AlgMultiRowQ192Config,
+            fs, config,
             "fra3_w", 1, w2) ||
         !Eq(w1, proof.w1) ||
         !Eq(w2, proof.w2)) {
@@ -4138,7 +4233,7 @@ bool Fri3AlgMultiRowBatchVerify(
             Fp3 beta;
             if (!ProtocolChallengeFp3(
                     fs,
-                    kFri3AlgMultiRowQ192Config,
+                    config,
                     "fra3_fold", fold, beta) ||
                 !Eq(
                     beta,
@@ -4184,7 +4279,7 @@ bool Fri3AlgMultiRowBatchVerify(
          query < proof.queries.size(); ++query) {
         uint32_t expected_index = 0;
         if (!ProtocolChallengeIndex(
-                fs, kFri3AlgMultiRowQ192Config,
+                fs, config,
                 "fra3_query", query, n_lde,
                 expected_index)) {
             return fail("query_sampling");
@@ -4296,20 +4391,52 @@ bool Fri3AlgMultiRowBatchVerify(
     }
     if (why != nullptr) {
         *why =
-            "multi_row_verify:"
-            "ordered_roots_one_rlc_deep_fri";
+            config.safe_core_challenges
+            ? "multi_row_verify:"
+              "ordered_roots_safe_q192_k2_deep_fri"
+            : "multi_row_verify:"
+              "ordered_roots_one_rlc_deep_fri";
     }
     return true;
 }
 
+bool Fri3AlgMultiRowBatchVerify(
+    const Fri3AlgMultiRowBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why)
+{
+    return Fri3AlgMultiRowBatchVerifyConfigured(
+        proof, fs_seed,
+        kFri3AlgMultiRowQ192Config, why);
+}
+
+bool Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+    const Fri3AlgMultiRowBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why)
+{
+    return Fri3AlgMultiRowBatchVerifyConfigured(
+        proof, fs_seed,
+        kFri3AlgMultiRowSafeQ192K2V13Config,
+        why);
+}
+
 namespace {
+
+bool KnownMultiRowProofVersion(uint32_t version)
+{
+    return version ==
+               kRCFri3AlgMultiRowBatchProofVersion ||
+           version ==
+               kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13;
+}
 
 bool MultiRowCodecShape(
     const Fri3AlgMultiRowBatchProof& proof,
     size_t* encoded_size)
 {
-    if (proof.version !=
-            kRCFri3AlgMultiRowBatchProofVersion ||
+    if (!KnownMultiRowProofVersion(
+            proof.version) ||
         proof.blowup != kRCFriBlowup ||
         proof.n_coeffs < 2 ||
         (proof.n_coeffs &
@@ -4708,8 +4835,7 @@ DeserializeFri3AlgMultiRowBatchProof(
         magic !=
             kRCFri3AlgMultiRowBatchProofMagic ||
         !ReadLE32Checked(p, end, version) ||
-        version !=
-            kRCFri3AlgMultiRowBatchProofVersion) {
+        !KnownMultiRowProofVersion(version)) {
         return std::nullopt;
     }
     proof.version = version;
@@ -5102,7 +5228,8 @@ AuditFri3AlgMultiRowPostClaimBinding(
         Fri3AlgMultiRowFsInit(
             fs_seed, pow_grind_nonce,
             proof.n_coeffs, proof.groups,
-            proof.column_len);
+            proof.column_len,
+            kFri3AlgMultiRowQ192Config);
     std::vector<Fp3> legacy_coefficients;
     Fp3 legacy_encoded;
     if (!ProtocolBatchCoefficients(
@@ -5266,7 +5393,8 @@ AuditFri3AlgMultiRowPostClaimBinding(
         Fri3AlgMultiRowFsInit(
             fs_seed, pow_grind_nonce,
             forged.n_coeffs, forged.groups,
-            forged.column_len);
+            forged.column_len,
+            kFri3AlgMultiRowQ192Config);
     uint32_t fixed_z_counter = 0;
     Fp3 fixed_z1;
     Fp3 fixed_z2;

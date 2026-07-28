@@ -614,6 +614,83 @@ BOOST_AUTO_TEST_CASE(
             .fixed_verifier_rejected);
 }
 
+BOOST_AUTO_TEST_CASE(
+    fra3_multi_row_safe_q192_k2_v13_is_version_separated)
+{
+    const auto groups = MakeMultiRowGroups();
+    const auto roles = MultiRowRoles();
+    const uint256 seed = MakeSeed(0x4a);
+    const auto committed =
+        rc::Fri3AlgMultiRowSafeQ192K2V13BatchCommitStreaming(
+            groups, roles, seed, 17);
+    BOOST_REQUIRE_MESSAGE(
+        committed.ok, committed.note);
+    BOOST_CHECK_EQUAL(
+        committed.proof.version,
+        rc::kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13);
+    BOOST_CHECK_EQUAL(
+        committed.proof.queries.size(),
+        rc::kRCFri3AlgNumQueries);
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+            committed.proof, seed, &why),
+        why);
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowBatchVerify(
+            committed.proof, seed, &why));
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+            committed.proof, MakeSeed(0x4b), &why));
+
+    std::vector<unsigned char> encoded;
+    BOOST_REQUIRE_GT(
+        rc::SerializeFri3AlgMultiRowBatchProof(
+            committed.proof, encoded),
+        0U);
+    const auto decoded =
+        rc::DeserializeFri3AlgMultiRowBatchProof(
+            encoded);
+    BOOST_REQUIRE(decoded.has_value());
+    BOOST_CHECK_EQUAL(
+        decoded->version,
+        rc::kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13);
+    BOOST_CHECK_MESSAGE(
+        rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+            *decoded, seed, &why),
+        why);
+    std::vector<unsigned char> encoded_again;
+    BOOST_CHECK_EQUAL(
+        rc::SerializeFri3AlgMultiRowBatchProof(
+            *decoded, encoded_again),
+        encoded.size());
+    BOOST_CHECK(encoded == encoded_again);
+
+    auto bad_eval = committed.proof;
+    bad_eval.evals_z1[1] =
+        gf::Add(
+            bad_eval.evals_z1[1],
+            rc::Fp3::One());
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+            bad_eval, seed, &why));
+
+    auto bad_query = committed.proof;
+    bad_query.queries[0].index ^=
+        UINT32_C(1);
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+            bad_query, seed, &why));
+
+    auto downgraded = committed.proof;
+    downgraded.version =
+        rc::kRCFri3AlgMultiRowBatchProofVersion;
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowBatchVerify(
+            downgraded, seed, &why));
+}
+
 // Gate (b): single-eval tamper rejects — both the forge probe (flip one LDE
 // eval, recompute only the row root, keep openings) and a direct opened-value
 // tamper in one query.
