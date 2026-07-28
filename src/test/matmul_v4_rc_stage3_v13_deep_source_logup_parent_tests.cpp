@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,8 @@ namespace aq = matmul::v4::rc::air_quotient;
 namespace backend =
     matmul::v4::rc::stage3_multirow_v11_backend;
 namespace cb = matmul::v4::rc::constraint_bytecode;
+namespace composer =
+    matmul::v4::rc::stage3_air_parent_composer;
 namespace dvm =
     matmul::v4::rc::stage3_multirow_v11_deep_vm;
 namespace gf = matmul::v4::rc::gkr_field;
@@ -372,6 +375,163 @@ BOOST_AUTO_TEST_CASE(
                 forged.r0_base_column_indices,
                 seed, &why));
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    wider_parent_r0_precedes_deep_quotient_logup_challenges)
+{
+    const uint256 seed = Seed(0x72);
+    std::string why;
+    const auto standalone =
+        parent::BuildBoundedCanaryV1(
+            parent::CanaryMutationV1::Honest,
+            seed, &why);
+    BOOST_REQUIRE_MESSAGE(
+        standalone.valid, standalone.note);
+
+    parent::BaseProductV1 base;
+    BOOST_REQUIRE_MESSAGE(
+        parent::ExtractBaseProductV1(
+            standalone, base, &why),
+        why);
+    BOOST_REQUIRE(base.valid);
+    BOOST_CHECK(
+        base.challenge_columns_absent);
+    BOOST_CHECK(
+        base.row_group_root_pending);
+
+    aq::AirConstraintSystem<gf::Fp3>
+        sibling_cs;
+    sibling_cs.n_rows = base.cs.n_rows;
+    sibling_cs.n_columns = 1;
+    sibling_cs.constraints.push_back({
+        "test.v13.deep_stream.sibling",
+        aq::AirKind::kEverywhere, 1,
+        [](const auto& current,
+           const auto&) {
+            return gf::Sub(
+                current[0],
+                gf::FromU64_3(7));
+        }});
+    std::vector<std::vector<gf::Fp3>>
+        sibling_columns(
+            1,
+            std::vector<gf::Fp3>(
+                sibling_cs.n_rows,
+                gf::FromU64_3(7)));
+
+    aq::AirConstraintSystem<gf::Fp3>
+        combined_cs;
+    std::vector<std::vector<gf::Fp3>>
+        combined_columns;
+    composer::ChildAttachmentV1
+        sibling_attachment;
+    composer::ChildAttachmentV1
+        base_attachment;
+    BOOST_REQUIRE_MESSAGE(
+        composer::AppendChildV1(
+            combined_cs, combined_columns,
+            sibling_cs, sibling_columns,
+            0, sibling_attachment, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        composer::AppendChildV1(
+            combined_cs, combined_columns,
+            base.cs, base.columns,
+            1, base_attachment, &why),
+        why);
+
+    std::vector<uint32_t> parent_base_columns(
+        combined_cs.n_columns);
+    std::iota(
+        parent_base_columns.begin(),
+        parent_base_columns.end(), 0U);
+    const auto parent_r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            combined_cs, combined_columns,
+            parent_base_columns);
+    BOOST_REQUIRE_MESSAGE(
+        parent_r0.valid, parent_r0.note);
+    BOOST_CHECK(
+        parent_r0.base_row_commitment !=
+        standalone.r0_session
+            .base_row_commitment);
+
+    // A child-local R0 does not cover the sibling and must be rejected before
+    // any challenge-dependent columns enter the wider parent.
+    auto stale_cs = combined_cs;
+    auto stale_columns = combined_columns;
+    parent::ParentFinalizationV1 stale;
+    BOOST_CHECK(
+        !parent::AppendFinalRelationToParentV1(
+            base, base_attachment, seed,
+            standalone.r0_session,
+            stale_cs, stale_columns,
+            stale, &why));
+
+    parent::ParentFinalizationV1 final;
+    BOOST_REQUIRE_MESSAGE(
+        parent::AppendFinalRelationToParentV1(
+            base, base_attachment, seed,
+            parent_r0,
+            combined_cs, combined_columns,
+            final, &why),
+        why);
+    BOOST_REQUIRE(final.valid);
+    BOOST_CHECK(
+        final.exact_parent_r0_consumed);
+    BOOST_CHECK(
+        final
+            .all_prior_parent_columns_prechallenge);
+    BOOST_CHECK(
+        final.dual_fp3_terminal_cancelled);
+    BOOST_CHECK_EQUAL(
+        final.r0_base_column_indices.size(),
+        final.parent_layout.dependent_base);
+    BOOST_CHECK(
+        !gf::Eq(
+            final.challenges.gamma[0],
+            standalone.challenges.gamma[0]) ||
+        !gf::Eq(
+            final.challenges.alpha[0],
+            standalone.challenges.alpha[0]));
+    BOOST_REQUIRE_EQUAL(
+        parent::CountViolationsV1(
+            combined_cs, combined_columns),
+        0U);
+
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            combined_cs, combined_columns,
+            final.r0_base_column_indices,
+            seed, {}, &parent_r0);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok, proved.note);
+    BOOST_REQUIRE(proved.division_exact);
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            combined_cs, proved.proof,
+            final.r0_base_column_indices,
+            seed, &why),
+        why);
+
+    BOOST_REQUIRE(
+        !proved.proof.batch.queries.empty());
+    BOOST_REQUIRE(
+        !proved.proof.batch
+             .queries[0].steps.empty());
+    auto tampered = proved.proof;
+    tampered.batch.queries[0]
+        .steps[0].even =
+        gf::Add(
+            tampered.batch.queries[0]
+                .steps[0].even,
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            combined_cs, tampered,
+            final.r0_base_column_indices,
+            seed, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

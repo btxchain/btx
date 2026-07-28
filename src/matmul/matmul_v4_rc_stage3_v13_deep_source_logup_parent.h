@@ -17,6 +17,7 @@ namespace matmul::v4::rc::stage3_v13_deep_source_logup_parent {
 namespace abi = stage3_multirow_v11_proof_abi;
 namespace aq = air_quotient;
 namespace cb = constraint_bytecode;
+namespace composer = stage3_air_parent_composer;
 namespace gf = gkr_field;
 namespace qp = stage3_v13_quotient_tape_parent;
 namespace rv = stage3_multirow_v11_recursive_verifier;
@@ -160,10 +161,14 @@ struct ProductV1 {
     PlanV1 plan{};
     LayoutV1 layout{};
     ChallengesV1 challenges{};
+    /** Metadata-only copy used to relocate the final LogUp relation into a
+     * wider parent. Its heavy CS/witness vectors are cleared by builders. */
+    qp::ProductV1 physical{};
     aq::AirConstraintSystem<gf::Fp3> cs;
     std::vector<std::vector<gf::Fp3>> columns;
     std::vector<uint32_t> r0_base_column_indices;
     aq::AirQuotientTwoEpochBaseRowSession r0_session;
+    uint32_t base_constraint_count{0};
     uint64_t violations{UINT64_MAX};
     bool every_occurrence_materialized{false};
     bool fp3_limb_reconstruction_constrained{false};
@@ -187,6 +192,68 @@ struct ProductV1 {
     const rv::QueryRangeV1& range,
     const uint256& public_seed,
     ProductV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Pre-challenge portion of ProductV1. It contains the complete physical
+ * tape/quotient/DeepVM relation and all deterministic LogUp source/consumer
+ * columns, but no inverse/running columns and no challenge-dependent
+ * constraints. This is the form that can safely enter a wider parent before
+ * that parent's single R0 commitment is sampled.
+ */
+struct BaseProductV1 {
+    PlanV1 plan{};
+    LayoutV1 layout{};
+    qp::ProductV1 physical{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint64_t violations{UINT64_MAX};
+    bool challenge_columns_absent{false};
+    bool row_group_root_pending{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Strip a validated standalone product back to its exact deterministic
+ * pre-challenge relation. The discarded local challenge columns are never
+ * reused in a parent.
+ */
+[[nodiscard]] bool ExtractBaseProductV1(
+    const ProductV1& product,
+    BaseProductV1& out,
+    std::string* why = nullptr);
+
+struct ParentFinalizationV1 {
+    ChallengesV1 challenges{};
+    LayoutV1 parent_layout{};
+    std::vector<uint32_t> r0_base_column_indices;
+    uint256 r0_row_root{};
+    uint32_t dependent_columns{0};
+    uint32_t constraints_appended{0};
+    bool exact_parent_r0_consumed{false};
+    bool all_prior_parent_columns_prechallenge{false};
+    bool dual_fp3_terminal_cancelled{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Append only the challenge-dependent LogUp columns/constraints after a base
+ * product and any sibling relations already inhabit the same parent.
+ *
+ * The supplied session must commit every existing parent column, in order.
+ * This prevents a prover from choosing a sibling witness after learning the
+ * DEEP/quotient LogUp challenges. No child-local R0 root is accepted.
+ */
+[[nodiscard]] bool AppendFinalRelationToParentV1(
+    const BaseProductV1& base,
+    const composer::ChildAttachmentV1& base_attachment,
+    const uint256& public_seed,
+    const aq::AirQuotientTwoEpochBaseRowSession& parent_r0_session,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    std::vector<std::vector<gf::Fp3>>& parent_columns,
+    ParentFinalizationV1& out,
     std::string* why = nullptr);
 
 [[nodiscard]] uint64_t CountViolationsV1(

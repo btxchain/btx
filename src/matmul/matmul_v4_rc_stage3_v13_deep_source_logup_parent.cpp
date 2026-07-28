@@ -1291,6 +1291,9 @@ bool FinalizeParent(
     }
     AddRelationPreprocessed(
         out.layout, out.cs, out.columns);
+    out.base_constraint_count =
+        static_cast<uint32_t>(
+            out.cs.constraints.size());
     out.r0_base_column_indices.resize(
         out.layout.dependent_base);
     std::iota(
@@ -1374,6 +1377,11 @@ bool BuildProductV1(
         out = {};
         return false;
     }
+    out.physical = physical;
+    out.physical.cs = {};
+    out.physical.columns.clear();
+    out.physical.deep_phase = {};
+    out.physical.aliases.clear();
     out.layout =
         CanonicalLayout(physical.cs.n_columns);
     out.cs = physical.cs;
@@ -1462,6 +1470,271 @@ bool BuildProductV1(
           "stream_relation_invalid";
     if (!out.valid) {
         return Fail(why, "invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool ExtractBaseProductV1(
+    const ProductV1& product,
+    BaseProductV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!product.valid ||
+        !product.plan.valid ||
+        product.layout.dependent_base == 0 ||
+        product.layout.dependent_base >
+            product.cs.n_columns ||
+        product.layout.dependent_base >
+            product.columns.size() ||
+        product.base_constraint_count == 0 ||
+        product.base_constraint_count >
+            product.cs.constraints.size() ||
+        !product.physical.tape_attachment.valid ||
+        !product.physical.deep_attachment.valid) {
+        return Fail(why, "extract_base_input");
+    }
+    out.plan = product.plan;
+    out.layout = product.layout;
+    out.physical = product.physical;
+    out.cs = product.cs;
+    out.cs.n_columns =
+        out.layout.dependent_base;
+    out.cs.constraints.resize(
+        product.base_constraint_count);
+    out.cs.preprocessed_row_group_roots.clear();
+    out.columns.assign(
+        product.columns.begin(),
+        product.columns.begin() +
+            out.layout.dependent_base);
+    out.violations = 0;
+    out.challenge_columns_absent =
+        out.columns.size() ==
+            out.layout.dependent_base &&
+        out.cs.n_columns ==
+            out.layout.dependent_base;
+    out.row_group_root_pending =
+        out.cs
+            .preprocessed_row_group_roots
+            .empty();
+    out.valid =
+        out.challenge_columns_absent &&
+        out.row_group_root_pending;
+    out.note = out.valid
+        ? "stage3:v13_deep_source_logup_parent:"
+          "deterministic_base_extracted;"
+          "parent_r0_pending"
+        : "stage3:v13_deep_source_logup_parent:"
+          "deterministic_base_invalid";
+    if (!out.valid) {
+        return Fail(why, "extract_base_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendFinalRelationToParentV1(
+    const BaseProductV1& base,
+    const composer::ChildAttachmentV1&
+        base_attachment,
+    const uint256& public_seed,
+    const aq::AirQuotientTwoEpochBaseRowSession&
+        parent_r0_session,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>&
+        parent_columns,
+    ParentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!base.valid ||
+        !base.plan.valid ||
+        !base_attachment.valid ||
+        base_attachment.row_lifted ||
+        base_attachment.semantic_child_columns !=
+            base.cs.n_columns ||
+        base.cs.n_columns >
+            parent_cs.n_columns ||
+        base_attachment.column_base >
+            parent_cs.n_columns -
+                base.cs.n_columns ||
+        parent_cs.n_rows != base.cs.n_rows ||
+        parent_cs.n_columns !=
+            parent_columns.size() ||
+        parent_cs.n_columns == 0 ||
+        !parent_cs
+             .preprocessed_row_group_roots
+             .empty() ||
+        public_seed.IsNull() ||
+        !parent_r0_session.valid ||
+        parent_r0_session.trace_rows !=
+            parent_cs.n_rows ||
+        parent_r0_session
+            .base_row_commitment.IsNull()) {
+        return Fail(why, "parent_finalize_input");
+    }
+    for (const auto& column :
+         parent_columns) {
+        if (column.size() !=
+            parent_cs.n_rows) {
+            return Fail(
+                why, "parent_finalize_shape");
+        }
+    }
+    std::vector<uint32_t> expected_base(
+        parent_cs.n_columns);
+    std::iota(
+        expected_base.begin(),
+        expected_base.end(), 0U);
+    if (parent_r0_session
+            .base_column_indices !=
+        expected_base) {
+        return Fail(
+            why, "parent_r0_not_complete");
+    }
+
+    const uint32_t offset =
+        base_attachment.column_base;
+    const auto shifted =
+        [offset](uint32_t column) {
+            return offset + column;
+        };
+    LayoutV1 layout = base.layout;
+    layout.original_columns =
+        shifted(base.layout.original_columns);
+    layout.source_carry =
+        shifted(base.layout.source_carry);
+    layout.source_emit_value =
+        shifted(base.layout.source_emit_value);
+    layout.source_emit_active =
+        shifted(base.layout.source_emit_active);
+    layout.source_emit_address =
+        shifted(base.layout.source_emit_address);
+    layout.source_emit_multiplicity =
+        shifted(
+            base.layout
+                .source_emit_multiplicity);
+    layout.source_carry_weight_base =
+        shifted(
+            base.layout
+                .source_carry_weight_base);
+    layout.source_emit_weight_base =
+        shifted(
+            base.layout
+                .source_emit_weight_base);
+    layout.consumer_active_base =
+        shifted(
+            base.layout.consumer_active_base);
+    layout.consumer_address_base =
+        shifted(
+            base.layout.consumer_address_base);
+    layout.dependent_base =
+        parent_cs.n_columns;
+    uint32_t cursor =
+        layout.dependent_base;
+    layout.source_inverse_base = cursor;
+    cursor += kLookupLanesV1;
+    layout.consumer_inverse_base = cursor;
+    cursor +=
+        kLookupLanesV1 *
+        kConsumerSlotsV1;
+    layout.running_base = cursor;
+    cursor += kLookupLanesV1;
+    layout.end = cursor;
+
+    qp::ProductV1 physical =
+        base.physical;
+    physical.tape_attachment.column_base =
+        shifted(
+            base.physical
+                .tape_attachment.column_base);
+    physical.deep_attachment.column_base =
+        shifted(
+            base.physical
+                .deep_attachment.column_base);
+    if (physical.tape_attachment
+            .column_base >=
+            layout.dependent_base ||
+        physical.deep_attachment
+            .column_base >=
+            layout.dependent_base) {
+        return Fail(
+            why, "parent_child_relocation");
+    }
+
+    const uint32_t constraints_before =
+        static_cast<uint32_t>(
+            parent_cs.constraints.size());
+    if (!DeriveChallenges(
+            base.plan, public_seed,
+            parent_r0_session
+                .base_row_commitment,
+            out.challenges, why) ||
+        !AppendFinalConstraints(
+            physical, out.challenges,
+            layout, parent_cs, why)) {
+        return false;
+    }
+    parent_columns.resize(
+        layout.end,
+        std::vector<Fp3>(
+            parent_cs.n_rows,
+            Fp3::Zero()));
+    if (!FillFinalWitness(
+            physical, out.challenges,
+            layout, parent_columns, why)) {
+        return false;
+    }
+    parent_cs.preprocessed_row_group_roots
+        .push_back({
+            .version = 1,
+            .role =
+                aq::
+                    AirPreprocessedRowGroupRole::
+                        kR0,
+            .ordered_columns =
+                expected_base,
+            .root =
+                parent_r0_session
+                    .base_row_commitment,
+        });
+
+    out.parent_layout = layout;
+    out.r0_base_column_indices =
+        std::move(expected_base);
+    out.r0_row_root =
+        parent_r0_session
+            .base_row_commitment;
+    out.dependent_columns =
+        layout.end -
+        layout.dependent_base;
+    out.constraints_appended =
+        static_cast<uint32_t>(
+            parent_cs.constraints.size()) -
+        constraints_before;
+    out.exact_parent_r0_consumed = true;
+    out.all_prior_parent_columns_prechallenge =
+        out.r0_base_column_indices.size() ==
+            layout.dependent_base;
+    out.dual_fp3_terminal_cancelled = true;
+    out.valid =
+        out.dependent_columns ==
+            kAdditionalColumnsV1 -
+                (base.layout.dependent_base -
+                 base.layout.original_columns) &&
+        out.constraints_appended != 0 &&
+        out.exact_parent_r0_consumed &&
+        out.all_prior_parent_columns_prechallenge &&
+        out.dual_fp3_terminal_cancelled;
+    out.note = out.valid
+        ? "stage3:v13_deep_source_logup_parent:"
+          "challenge_relation_appended_after_complete_parent_r0"
+        : "stage3:v13_deep_source_logup_parent:"
+          "parent_finalization_invalid";
+    if (!out.valid) {
+        return Fail(
+            why, "parent_finalize_invariant");
     }
     if (why != nullptr) *why = out.note;
     return true;
@@ -1807,6 +2080,11 @@ ProductV1 BuildBoundedCanaryV1(
             U(first_address);
     }
 
+    out.physical = physical;
+    out.physical.cs = {};
+    out.physical.columns.clear();
+    out.physical.deep_phase = {};
+    out.physical.aliases.clear();
     if (!FinalizeParent(
             physical, public_seed, out, why)) {
         out.note = "bounded_finalize_failed";
