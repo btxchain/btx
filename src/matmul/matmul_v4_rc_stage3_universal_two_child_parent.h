@@ -112,6 +112,39 @@ struct HeterogeneousVerifierConstraintSystemV1 {
     std::string note;
 };
 
+/**
+ * Canonical public statement for one normalized binary parent proof.  The
+ * verifier reconstructs the complete parent CS and ordered FixedTrace column
+ * schedule from the two frozen registries and shapes; none of those objects
+ * are decoded from `proof`.
+ *
+ * `fixed_trace_root` is an application-statement input, analogous to a trace
+ * commitment.  It binds the explicit child-verifier inputs but does not by
+ * itself prove their Fiat-Shamir provenance.  Consequently this envelope is
+ * executable and recursively consumable while `authority` remains false.
+ */
+struct CanonicalBinaryStatementV1 {
+    uint16_t version{kUniversalTwoChildParentVersionV1};
+    uint32_t arity{kUniversalTwoChildParentArityV1};
+    std::array<uint256, 2> shape_commitment{};
+    std::array<uint256, 2> registry_program_root{};
+    uint256 binary_schedule_root{};
+    uint256 fixed_trace_root{};
+
+    bool operator==(const CanonicalBinaryStatementV1&) const = default;
+};
+
+struct CanonicalBinaryParentProofV1 {
+    uint16_t version{kUniversalTwoChildParentVersionV1};
+    CanonicalBinaryStatementV1 statement;
+    aq::AirQuotientSplitRapRowsProof proof;
+    bool verifier_cs_rebuilt_without_proof_tape{false};
+    bool fixed_trace_root_bound{false};
+    bool same_parent_fiat_shamir_bound{false};
+    bool authority{false};
+    std::string note;
+};
+
 [[nodiscard]] uint256 CommitPublicShapeV1(
     const PublicShapeV1& shape);
 
@@ -132,6 +165,39 @@ struct HeterogeneousVerifierConstraintSystemV1 {
     const std::array<PublicShapeV1, 2>& shape,
     const std::array<FrozenRegistryV1, 2>& registry,
     HeterogeneousVerifierConstraintSystemV1& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint256 CommitCanonicalBinaryStatementV1(
+    const CanonicalBinaryStatementV1& statement);
+
+/**
+ * Prove two heterogeneous native child receipts under the one canonical
+ * binary parent schedule.  This is the executable leaf-normalization step;
+ * callers must not interpret the result as consensus authority until its
+ * same-parent Fiat-Shamir flag is closed.
+ */
+[[nodiscard]] bool ProveCanonicalBinaryParentV1(
+    const std::array<PublicShapeV1, 2>& shape,
+    const std::array<FrozenRegistryV1, 2>& registry,
+    const std::array<
+        aq::AirQuotientProof<
+            gf::Fp3,
+            ar::AggregateWitness::AlgB3>, 2>& child_proof,
+    const std::array<uint256, 2>& child_fs_seed,
+    const uint256& parent_fs_seed,
+    CanonicalBinaryParentProofV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Consensus-side tape-free verification.  The constraint graph, callback
+ * schedule, FixedTrace column order and binary schedule root are rebuilt only
+ * from `shape` and `registry`.  A receipt cannot substitute its own CS.
+ */
+[[nodiscard]] bool VerifyCanonicalBinaryParentV1(
+    const std::array<PublicShapeV1, 2>& shape,
+    const std::array<FrozenRegistryV1, 2>& registry,
+    const CanonicalBinaryParentProofV1& proof,
+    const uint256& parent_fs_seed,
     std::string* why = nullptr);
 
 /**

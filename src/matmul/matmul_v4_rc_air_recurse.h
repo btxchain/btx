@@ -593,9 +593,15 @@ struct VerifierAirFixedTraceChildLayoutV1 {
     std::vector<uint32_t> z2_batch_weights;
     std::vector<uint32_t> evals_z1;
     std::vector<uint32_t> evals_z2;
+    /** Raw transcript challenges.  These are the same Fp3 cells from which
+     * every derived consumer below is constrained. */
+    uint32_t fri_lambda{0};
+    uint32_t z1{0};
+    uint32_t z2{0};
     uint32_t w1{0};
     uint32_t w2{0};
     uint32_t final_value{0};
+    uint32_t air_lambda{0};
     /** One exact power per child constraint, beginning with lambda^0. */
     std::vector<uint32_t> air_lambda_powers;
 };

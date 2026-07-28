@@ -2052,11 +2052,15 @@ VerifierAirFixedTraceLayoutV1 AllocateVerifierAirFixedTraceLayoutV1(
             for (uint32_t& value : out.evals_z2) {
                 value = allocate_one();
             }
+            out.fri_lambda = allocate_one();
+            out.z1 = allocate_one();
+            out.z2 = allocate_one();
             out.w1 = allocate_one();
             out.w2 = allocate_one();
             out.final_value = allocate_one();
         }
         if (families.per_point) {
+            out.air_lambda = allocate_one();
             out.air_lambda_powers.resize(
                 shape.child_constraints.size());
             for (uint32_t& value :
@@ -2379,6 +2383,58 @@ BuildVerifierAIRFixedTraceV1(
                             std::move(pin));
                     }
                 }
+
+                // The challenge consumers are explicit trace cells.  In the
+                // geometric-batching compatibility mode the full coefficient
+                // vector is derived here from the one transcript lambda.  In
+                // the production independent-batching mode each coefficient
+                // is instead equality-bound to its own transcript event by
+                // the same-parent join.
+                if (!shape.independent_fri_batching) {
+                    AirConstraint<Fp3> first;
+                    first.name =
+                        "vcs.fixed.fri_batch.first";
+                    first.kind = AirKind::kEverywhere;
+                    first.alg_degree = 1;
+                    first.eval =
+                        [column =
+                             fixed.fri_batch_weights.front()](
+                            const std::vector<Fp3>& current,
+                            const std::vector<Fp3>&) {
+                            return gf::Sub(
+                                current[column],
+                                Fp3::One());
+                        };
+                    constraints.push_back(std::move(first));
+                    for (uint32_t index = 1;
+                         index <
+                             fixed.fri_batch_weights.size();
+                         ++index) {
+                        AirConstraint<Fp3> recurrence;
+                        recurrence.name =
+                            "vcs.fixed.fri_batch.recurrence";
+                        recurrence.kind =
+                            AirKind::kEverywhere;
+                        recurrence.alg_degree = 2;
+                        recurrence.eval =
+                            [previous =
+                                 fixed.fri_batch_weights[
+                                     index - 1],
+                             current_weight =
+                                 fixed.fri_batch_weights[index],
+                             lambda = fixed.fri_lambda](
+                                const std::vector<Fp3>& current,
+                                const std::vector<Fp3>&) {
+                                return gf::Sub(
+                                    current[current_weight],
+                                    gf::Mul(
+                                        current[previous],
+                                        current[lambda]));
+                            };
+                        constraints.push_back(
+                            std::move(recurrence));
+                    }
+                }
             }
 
             const std::vector<uint32_t> row_blocks =
@@ -2564,6 +2620,49 @@ BuildVerifierAIRFixedTraceV1(
                 const std::vector<uint32_t>
                     lambda_powers =
                         fixed.air_lambda_powers;
+                if (!lambda_powers.empty()) {
+                    AirConstraint<Fp3> first_power;
+                    first_power.name =
+                        "vcs.fixed.air_lambda.first_power";
+                    first_power.kind =
+                        AirKind::kEverywhere;
+                    first_power.alg_degree = 1;
+                    first_power.eval =
+                        [column = lambda_powers.front()](
+                            const std::vector<Fp3>& current,
+                            const std::vector<Fp3>&) {
+                            return gf::Sub(
+                                current[column],
+                                Fp3::One());
+                        };
+                    constraints.push_back(
+                        std::move(first_power));
+                    for (uint32_t index = 1;
+                         index < lambda_powers.size();
+                         ++index) {
+                        AirConstraint<Fp3> recurrence;
+                        recurrence.name =
+                            "vcs.fixed.air_lambda.recurrence";
+                        recurrence.kind =
+                            AirKind::kEverywhere;
+                        recurrence.alg_degree = 2;
+                        recurrence.eval =
+                            [previous =
+                                 lambda_powers[index - 1],
+                             power = lambda_powers[index],
+                             lambda = fixed.air_lambda](
+                                const std::vector<Fp3>& current,
+                                const std::vector<Fp3>&) {
+                                return gf::Sub(
+                                    current[power],
+                                    gf::Mul(
+                                        current[previous],
+                                        current[lambda]));
+                            };
+                        constraints.push_back(
+                            std::move(recurrence));
+                    }
+                }
                 const uint32_t zh = c.pre.zh;
                 const uint32_t transition_selector =
                     c.pre.transition_selector;
@@ -2848,6 +2947,11 @@ bool MaterializeVerifierAIRFixedTraceV1(
                 }
             }
             if (!fill(fixed.w1, input.w1) ||
+                !fill(
+                    fixed.fri_lambda,
+                    input.fri_lambda) ||
+                !fill(fixed.z1, input.z1) ||
+                !fill(fixed.z2, input.z2) ||
                 !fill(fixed.w2, input.w2) ||
                 !fill(
                     fixed.final_value,
@@ -2861,6 +2965,11 @@ bool MaterializeVerifierAIRFixedTraceV1(
                 return fail("air_lambda_shape");
             }
             Fp3 power = Fp3::One();
+            if (!fill(
+                    fixed.air_lambda,
+                    input.air_lambda)) {
+                return fail("air_lambda_raw");
+            }
             for (uint32_t index = 0;
                  index <
                      fixed.air_lambda_powers.size();

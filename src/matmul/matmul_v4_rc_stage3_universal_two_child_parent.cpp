@@ -174,6 +174,40 @@ bool SameConstraintDescriptors(
     return true;
 }
 
+uint256 CommitBinarySchedule(
+    const HeterogeneousVerifierConstraintSystemV1& rebuilt)
+{
+    HashWriter hash;
+    hash <<
+        "BTX_RC_STAGE3_UNIVERSAL_BINARY_SCHEDULE_V1";
+    hash << kUniversalTwoChildParentVersionV1;
+    hash << rebuilt.binary_statement_commitment;
+    hash << rebuilt.callback_schedule_commitment;
+    hash << rebuilt.fixed_trace.version;
+    hash << rebuilt.fixed_trace.arity;
+    hash << rebuilt.fixed_trace.n_rows;
+    hash << rebuilt.fixed_trace.n_columns;
+    hash << static_cast<uint64_t>(
+        rebuilt.fixed_trace.ordered_columns.size());
+    for (uint32_t column :
+         rebuilt.fixed_trace.ordered_columns) {
+        hash << column;
+    }
+    return hash.GetHash();
+}
+
+uint256 BindParentSeed(
+    const uint256& public_seed,
+    const CanonicalBinaryStatementV1& statement)
+{
+    HashWriter hash;
+    hash <<
+        "BTX_RC_STAGE3_UNIVERSAL_BINARY_PARENT_FS_V1";
+    hash << public_seed;
+    hash << CommitCanonicalBinaryStatementV1(statement);
+    return hash.GetHash();
+}
+
 } // namespace
 
 uint256 CommitPublicShapeV1(
@@ -434,6 +468,179 @@ bool BuildHeterogeneousVerifierConstraintSystemV1(
             why, "heterogeneous_commitment");
     }
     if (why != nullptr) *why = out.note;
+    return true;
+}
+
+uint256 CommitCanonicalBinaryStatementV1(
+    const CanonicalBinaryStatementV1& statement)
+{
+    HashWriter hash;
+    hash <<
+        "BTX_RC_STAGE3_UNIVERSAL_BINARY_PUBLIC_STATEMENT_V1";
+    hash << statement.version;
+    hash << statement.arity;
+    for (uint32_t child = 0;
+         child < statement.shape_commitment.size();
+         ++child) {
+        hash << child;
+        hash << statement.shape_commitment[child];
+        hash << statement.registry_program_root[child];
+    }
+    hash << statement.binary_schedule_root;
+    hash << statement.fixed_trace_root;
+    return hash.GetHash();
+}
+
+bool ProveCanonicalBinaryParentV1(
+    const std::array<PublicShapeV1, 2>& shape,
+    const std::array<FrozenRegistryV1, 2>& registry,
+    const std::array<
+        aq::AirQuotientProof<
+            gf::Fp3,
+            ar::AggregateWitness::AlgB3>, 2>& child_proof,
+    const std::array<uint256, 2>& child_fs_seed,
+    const uint256& parent_fs_seed,
+    CanonicalBinaryParentProofV1& out,
+    std::string* why)
+{
+    out = {};
+    if (parent_fs_seed.IsNull()) {
+        return Fail(why, "binary_parent_seed");
+    }
+    HeterogeneousVerifierConstraintSystemV1 rebuilt;
+    if (!BuildHeterogeneousVerifierConstraintSystemV1(
+            shape, registry, rebuilt, why)) {
+        return false;
+    }
+    ar::VerifierAirFixedTraceLayoutV1 materialized_layout;
+    const auto witness =
+        ar::BuildAggregateWitnessHeterogeneousFixedTraceV1(
+            {rebuilt.child_cs[0], rebuilt.child_cs[1]},
+            {child_proof[0], child_proof[1]},
+            {child_fs_seed[0], child_fs_seed[1]},
+            materialized_layout, {});
+    if (!witness.ok ||
+        !SameConstraintDescriptors(
+            rebuilt.parent_cs, witness.cs) ||
+        materialized_layout.ordered_columns !=
+            rebuilt.fixed_trace.ordered_columns ||
+        ar::CountWitnessViolationsOnH(
+            witness.cs, witness.columns) != 0) {
+        return Fail(why, "binary_parent_witness");
+    }
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            witness.cs, witness.columns,
+            materialized_layout.ordered_columns);
+    if (!r0.valid ||
+        r0.base_row_commitment.IsNull()) {
+        return Fail(why, "binary_parent_r0");
+    }
+
+    out.version =
+        kUniversalTwoChildParentVersionV1;
+    out.statement.version =
+        kUniversalTwoChildParentVersionV1;
+    out.statement.arity =
+        kUniversalTwoChildParentArityV1;
+    out.statement.shape_commitment =
+        rebuilt.shape_commitment;
+    out.statement.registry_program_root =
+        rebuilt.registry_program_root;
+    out.statement.binary_schedule_root =
+        CommitBinarySchedule(rebuilt);
+    out.statement.fixed_trace_root =
+        r0.base_row_commitment;
+    if (out.statement.binary_schedule_root.IsNull() ||
+        CommitCanonicalBinaryStatementV1(
+            out.statement).IsNull()) {
+        out = {};
+        return Fail(why, "binary_parent_statement");
+    }
+    const aq::AirQuotientFixedTracePinV3 fixed_pin{
+        .version = 1,
+        .ordered_columns =
+            materialized_layout.ordered_columns,
+        .row_root = r0.base_row_commitment,
+    };
+    const uint256 bound_seed =
+        BindParentSeed(parent_fs_seed, out.statement);
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeFixedV3(
+            witness.cs, witness.columns, fixed_pin,
+            bound_seed, {}, &r0);
+    if (!proved.ok || !proved.division_exact) {
+        out = {};
+        return Fail(why, "binary_parent_prove");
+    }
+    out.proof = proved.proof;
+    out.verifier_cs_rebuilt_without_proof_tape = true;
+    out.fixed_trace_root_bound = true;
+    out.same_parent_fiat_shamir_bound = false;
+    out.authority = false;
+    out.note =
+        "canonical binary parent proved with tape-free verifier rebuild;"
+        " same-parent child Fiat-Shamir provenance pending";
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool VerifyCanonicalBinaryParentV1(
+    const std::array<PublicShapeV1, 2>& shape,
+    const std::array<FrozenRegistryV1, 2>& registry,
+    const CanonicalBinaryParentProofV1& proof,
+    const uint256& parent_fs_seed,
+    std::string* why)
+{
+    if (proof.version !=
+            kUniversalTwoChildParentVersionV1 ||
+        proof.statement.version !=
+            kUniversalTwoChildParentVersionV1 ||
+        proof.statement.arity !=
+            kUniversalTwoChildParentArityV1 ||
+        parent_fs_seed.IsNull() ||
+        proof.statement.fixed_trace_root.IsNull() ||
+        !proof.verifier_cs_rebuilt_without_proof_tape ||
+        !proof.fixed_trace_root_bound ||
+        proof.same_parent_fiat_shamir_bound ||
+        proof.authority) {
+        return Fail(why, "binary_parent_envelope");
+    }
+    HeterogeneousVerifierConstraintSystemV1 rebuilt;
+    if (!BuildHeterogeneousVerifierConstraintSystemV1(
+            shape, registry, rebuilt, why)) {
+        return false;
+    }
+    CanonicalBinaryStatementV1 expected;
+    expected.shape_commitment =
+        rebuilt.shape_commitment;
+    expected.registry_program_root =
+        rebuilt.registry_program_root;
+    expected.binary_schedule_root =
+        CommitBinarySchedule(rebuilt);
+    expected.fixed_trace_root =
+        proof.statement.fixed_trace_root;
+    if (proof.statement != expected) {
+        return Fail(why, "binary_parent_statement_mismatch");
+    }
+    const aq::AirQuotientFixedTracePinV3 fixed_pin{
+        .version = 1,
+        .ordered_columns =
+            rebuilt.fixed_trace.ordered_columns,
+        .row_root = expected.fixed_trace_root,
+    };
+    const uint256 bound_seed =
+        BindParentSeed(parent_fs_seed, expected);
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            rebuilt.parent_cs, proof.proof,
+            fixed_pin, bound_seed, why)) {
+        return false;
+    }
+    if (why != nullptr) {
+        *why =
+            "canonical binary parent verified from frozen public inputs;"
+            " not authority until same-parent child FS closure";
+    }
     return true;
 }
 

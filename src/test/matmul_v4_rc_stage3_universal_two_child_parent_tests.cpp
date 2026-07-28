@@ -46,6 +46,20 @@ cb::ProgramTable ChildProgram()
     table.current_width = 2;
     table.next_width = 2;
     table.programs.push_back(std::move(program));
+    cb::Program second;
+    second.role =
+        rc::RCStage3RelationRole::CompositionLink;
+    second.constraint_ordinal = 1;
+    second.kind = aq::AirKind::kEverywhere;
+    second.declared_degree = 1;
+    second.current_width = 2;
+    second.next_width = 2;
+    second.instructions = {
+        {cb::Opcode::Current, 1, 0, gf::Fp3::Zero()},
+        {cb::Opcode::Current, 1, 0, gf::Fp3::Zero()},
+        {cb::Opcode::Sub, 0, 1, gf::Fp3::Zero()},
+    };
+    table.programs.push_back(std::move(second));
     return table;
 }
 
@@ -70,6 +84,20 @@ cb::ProgramTable SecondChildProgram()
     table.current_width = 2;
     table.next_width = 2;
     table.programs.push_back(std::move(program));
+    cb::Program second;
+    second.role =
+        rc::RCStage3RelationRole::CompositionLink;
+    second.constraint_ordinal = 1;
+    second.kind = aq::AirKind::kEverywhere;
+    second.declared_degree = 1;
+    second.current_width = 2;
+    second.next_width = 2;
+    second.instructions = {
+        {cb::Opcode::Current, 0, 0, gf::Fp3::Zero()},
+        {cb::Opcode::Current, 0, 0, gf::Fp3::Zero()},
+        {cb::Opcode::Sub, 0, 1, gf::Fp3::Zero()},
+    };
+    table.programs.push_back(std::move(second));
     return table;
 }
 
@@ -293,6 +321,30 @@ BOOST_AUTO_TEST_CASE(
         bad_constraint.find("root.pin") !=
         std::string::npos);
 
+    // The AIR batching challenge is no longer represented only by a vector
+    // of prover-selected powers.  One raw challenge cell deterministically
+    // generates the complete consumer vector.
+    auto wrong_lambda = first.columns;
+    const auto& fixed_child =
+        first_layout.children[0];
+    BOOST_REQUIRE_GE(
+        fixed_child.air_lambda_powers.size(), 2U);
+    for (gf::Fp3& value :
+         wrong_lambda[
+             fixed_child.air_lambda_powers[1]]) {
+        value = gf::Add(value, gf::Fp3::One());
+    }
+    bad_constraint.clear();
+    BOOST_CHECK_GT(
+        ar::CountWitnessViolationsOnH(
+            first.cs, wrong_lambda,
+            &bad_row, &bad_constraint),
+        0U);
+    BOOST_CHECK(
+        bad_constraint.find(
+            "air_lambda.recurrence") !=
+        std::string::npos);
+
     // Native proof-level closure: SAFE V3 authenticates the complete ordered
     // FixedTrace group, and the verifier rebuilds `first.cs` without either
     // child proof.  Both a public R0-root transplant and a selected-query
@@ -405,6 +457,59 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         u2::CommitConstraintScheduleV1(parent.cs) ==
         rebuilt.callback_schedule_commitment);
+
+    // The attached final-root proof carries no callback graph.  Consensus
+    // rebuilds it from both frozen registries and shapes, binds that schedule
+    // into the parent Fiat-Shamir seed, and verifies the FixedTrace root.
+    u2::CanonicalBinaryParentProofV1 attached;
+    const uint256 parent_seed = Seed(213);
+    BOOST_REQUIRE_MESSAGE(
+        u2::ProveCanonicalBinaryParentV1(
+            shapes, registries,
+            {left.proof, right.proof},
+            seeds, parent_seed, attached, &why),
+        why);
+    BOOST_CHECK(
+        attached.verifier_cs_rebuilt_without_proof_tape);
+    BOOST_CHECK(attached.fixed_trace_root_bound);
+    BOOST_CHECK(
+        !attached.same_parent_fiat_shamir_bound);
+    BOOST_CHECK(!attached.authority);
+    BOOST_CHECK_MESSAGE(
+        u2::VerifyCanonicalBinaryParentV1(
+            shapes, registries, attached,
+            parent_seed, &why),
+        why);
+
+    auto wrong_root = attached;
+    wrong_root.statement.fixed_trace_root.begin()[0] ^= 1U;
+    BOOST_CHECK(
+        !u2::VerifyCanonicalBinaryParentV1(
+            shapes, registries, wrong_root,
+            parent_seed, &why));
+
+    auto wrong_query = attached;
+    BOOST_REQUIRE(
+        !wrong_query.proof.batch.queries.empty());
+    wrong_query.proof.batch.queries.front().index ^= 1U;
+    BOOST_CHECK(
+        !u2::VerifyCanonicalBinaryParentV1(
+            shapes, registries, wrong_query,
+            parent_seed, &why));
+
+    auto substituted_registries = registries;
+    substituted_registries[1] = Registry();
+    BOOST_CHECK(
+        !u2::VerifyCanonicalBinaryParentV1(
+            shapes, substituted_registries,
+            attached, parent_seed, &why));
+
+    auto substituted_shapes = shapes;
+    --substituted_shapes[1].column_lengths[0];
+    BOOST_CHECK(
+        !u2::VerifyCanonicalBinaryParentV1(
+            substituted_shapes, registries,
+            attached, parent_seed, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
