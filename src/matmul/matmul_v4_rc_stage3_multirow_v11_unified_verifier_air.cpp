@@ -12,6 +12,7 @@
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <utility>
 
 namespace matmul::v4::rc::stage3_multirow_v11_unified_verifier_air {
 namespace {
@@ -304,6 +305,17 @@ struct BytecodeExprV1 {
             instructions.size() - 1);
     }
 
+    uint32_t Next(uint32_t column)
+    {
+        cb::Instruction instruction;
+        instruction.opcode = cb::Opcode::Next;
+        instruction.lhs = column;
+        instructions.push_back(instruction);
+        degrees.push_back(1);
+        return static_cast<uint32_t>(
+            instructions.size() - 1);
+    }
+
     uint32_t Constant(const Fp3& value)
     {
         cb::Instruction instruction;
@@ -350,8 +362,9 @@ struct BytecodeExprV1 {
 };
 
 template <typename Build>
-void AppendBytecodeProgramV1(
+void AppendBytecodeProgramKindV1(
     cb::ProgramTable& table,
+    aq::AirKind kind,
     Build&& build)
 {
     BytecodeExprV1 expression;
@@ -364,7 +377,7 @@ void AppendBytecodeProgramV1(
     program.constraint_ordinal =
         static_cast<uint32_t>(
             table.programs.size());
-    program.kind = aq::AirKind::kEverywhere;
+    program.kind = kind;
     program.declared_degree =
         expression.degrees.back();
     program.current_width =
@@ -376,6 +389,16 @@ void AppendBytecodeProgramV1(
         std::move(expression.instructions);
     table.programs.push_back(
         std::move(program));
+}
+
+template <typename Build>
+void AppendBytecodeProgramV1(
+    cb::ProgramTable& table,
+    Build&& build)
+{
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kEverywhere,
+        std::forward<Build>(build));
 }
 
 bool DigestNonzero(
@@ -631,6 +654,152 @@ cb::ProgramTable BuildMerkleHashProgramTableV1(
             pa::kFixedConstraints +
                 alg_hash::kAlgHashT +
                 alg_hash::kAlgHashDigestLen ||
+        !cb::ValidateProgramTable(
+            table, &why)) {
+        return {};
+    }
+    return table;
+}
+
+cb::ProgramTable BuildMerkleFoldProgramTableV1(
+    const mf::FoldLayoutV1& layout)
+{
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = layout.n_columns;
+    table.next_width = layout.n_columns;
+    table.challenge_width = 0;
+    if (layout.n_columns != 16 ||
+        layout.even != 0 ||
+        layout.terminal + 1 !=
+            layout.n_columns) {
+        return table;
+    }
+    const Fp3 one = Fp3::One();
+    const Fp3 inv2 = Fp3::FromFp(
+        gf::Inv(gf::FromU64(2)));
+
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            const uint32_t sum = e.Add(
+                e.Current(layout.even),
+                e.Current(layout.odd));
+            e.Sub(
+                e.Current(layout.even_part),
+                e.Mul(sum, e.Constant(inv2)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            const uint32_t left = e.Mul(
+                e.Current(layout.odd_part),
+                e.Current(layout.x));
+            const uint32_t difference = e.Sub(
+                e.Current(layout.even),
+                e.Current(layout.odd));
+            e.Sub(
+                left,
+                e.Mul(
+                    difference,
+                    e.Constant(inv2)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            const uint32_t rhs = e.Add(
+                e.Current(layout.even_part),
+                e.Mul(
+                    e.Current(layout.beta),
+                    e.Current(layout.odd_part)));
+            e.Sub(
+                e.Current(layout.folded),
+                rhs);
+        });
+    for (uint32_t column :
+         {layout.side,
+          layout.chain_next,
+          layout.terminal}) {
+        AppendBytecodeProgramV1(
+            table, [=](BytecodeExprV1& e) {
+                const uint32_t value =
+                    e.Current(column);
+                e.Mul(
+                    value,
+                    e.Sub(
+                        value,
+                        e.Constant(one)));
+            });
+    }
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Add(
+                    e.Current(layout.chain_next),
+                    e.Current(layout.terminal)),
+                e.Constant(one));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            const uint32_t selected = e.Add(
+                e.Mul(
+                    e.Sub(
+                        e.Constant(one),
+                        e.Current(layout.side)),
+                    e.Current(layout.even)),
+                e.Mul(
+                    e.Current(layout.side),
+                    e.Current(layout.odd)));
+            e.Sub(
+                e.Current(layout.here),
+                selected);
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Current(layout.odd_index),
+                e.Add(
+                    e.Current(layout.even_index),
+                    e.Current(layout.half)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Current(layout.index),
+                e.Add(
+                    e.Current(layout.even_index),
+                    e.Mul(
+                        e.Current(layout.side),
+                        e.Current(layout.half))));
+        });
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kTransition,
+        [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(layout.chain_next),
+                e.Sub(
+                    e.Next(layout.here),
+                    e.Current(layout.folded)));
+        });
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kTransition,
+        [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(layout.chain_next),
+                e.Sub(
+                    e.Next(layout.index),
+                    e.Current(layout.even_index)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(layout.terminal),
+                e.Sub(
+                    e.Current(layout.folded),
+                    e.Current(layout.final_value)));
+        });
+    std::string why;
+    if (table.programs.size() != 13 ||
         !cb::ValidateProgramTable(
             table, &why)) {
         return {};
@@ -1129,6 +1298,78 @@ ProductV1 BuildProductV1(
     out.merkle_hash_row_semantic_carry_complete =
         false;
 
+    const cb::ProgramTable merkle_fold_program =
+        BuildMerkleFoldProgramTableV1(
+            out.merkle_fold.fold_layout);
+    aq::AirConstraintSystem<Fp3>
+        merkle_fold_static_cs;
+    if (merkle_fold_program.programs.size() != 13 ||
+        merkle_fold_program.current_width !=
+            out.merkle_fold.fold_cs.n_columns ||
+        merkle_fold_program.next_width !=
+            out.merkle_fold.fold_cs.n_columns ||
+        merkle_fold_program.programs.size() !=
+            out.merkle_fold.fold_cs.constraints.size() ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            merkle_fold_program,
+            out.merkle_fold.fold_cs.n_rows,
+            merkle_fold_static_cs, &why)) {
+        return fail(
+            "merkle_fold_static_program:" +
+            why);
+    }
+    if (air_recurse::
+            CountWitnessViolationsOnH(
+                merkle_fold_static_cs,
+                out.merkle_fold.fold_columns) != 0) {
+        return fail(
+            "merkle_fold_static_witness");
+    }
+    out.merkle_fold_program_root =
+        cb::CommitProgramTableAlgHash(
+            merkle_fold_program);
+    const cb::ProgramTable
+        merkle_fold_program_recomputed =
+            BuildMerkleFoldProgramTableV1(
+                out.merkle_fold.fold_layout);
+    out.merkle_fold_program_constraints =
+        static_cast<uint32_t>(
+            merkle_fold_program.programs.size());
+    out.merkle_fold_constraints_canonical_bytecode =
+        out.merkle_fold_program_constraints == 13;
+    out.merkle_fold_program_root_recomputed =
+        DigestNonzero(
+            out.merkle_fold_program_root) &&
+        merkle_fold_program_recomputed ==
+            merkle_fold_program &&
+        cb::CommitProgramTableAlgHash(
+            merkle_fold_program_recomputed) ==
+            out.merkle_fold_program_root;
+    out.merkle_fold_statement_manifest_r0_columns =
+        static_cast<uint32_t>(
+            merkle_fold_static_cs.preprocessed.size());
+    out.merkle_fold_proof_tape_cells =
+        out.merkle_fold.fold_layout.n_columns;
+    out.merkle_fold_proof_tape_cells_ordinary =
+        merkle_fold_static_cs.preprocessed.empty() &&
+        out.merkle_fold_proof_tape_cells == 16;
+    out.merkle_fold_proof_tape_fixed_offsets =
+        out.merkle_fold.fold_layout.even == 0 &&
+        out.merkle_fold.fold_layout.terminal + 1 ==
+            out.merkle_fold.fold_layout.n_columns;
+    out.merkle_fold_equations_bound =
+        out.merkle_fold_constraints_canonical_bytecode &&
+        out.merkle_fold_program_root_recomputed;
+    out.merkle_fold_r0_statement_manifest_only =
+        out.merkle_fold_statement_manifest_r0_columns == 0 &&
+        out.merkle_fold_proof_tape_cells_ordinary &&
+        out.merkle_fold_proof_tape_fixed_offsets &&
+        out.merkle_fold_equations_bound;
+    out.merkle_fold_cs_independent_of_child_witness =
+        out.merkle_fold_r0_statement_manifest_only;
+    out.merkle_fold_transcript_and_opening_carry_complete =
+        false;
+
     const std::array<PhaseViewV1, kPhasesV1>
         views{{
             {PhaseV1::ParentJoin,
@@ -1138,7 +1379,7 @@ ProductV1 BuildProductV1(
              &merkle_hash_static_cs,
              &out.merkle_fold.hash_columns},
             {PhaseV1::MerkleFold,
-             &out.merkle_fold.fold_cs,
+             &merkle_fold_static_cs,
              &out.merkle_fold.fold_columns},
             {PhaseV1::DeepVm,
              &out.deep_vm.cs,
@@ -1409,11 +1650,15 @@ ProductV1 BuildProductV1(
         (out.parent_join_constraints_canonical_bytecode
             ? 1U : 0U) +
         (out.merkle_hash_constraints_canonical_bytecode
+            ? 1U : 0U) +
+        (out.merkle_fold_constraints_canonical_bytecode
             ? 1U : 0U);
     out.phase_r0_tables_statement_manifest_only =
         (out.parent_join_r0_statement_manifest_only
             ? 1U : 0U) +
         (out.merkle_hash_r0_statement_manifest_only
+            ? 1U : 0U) +
+        (out.merkle_fold_r0_statement_manifest_only
             ? 1U : 0U);
     out.cs_independent_of_child_witness =
         out.phase_constraint_systems_canonical_bytecode ==

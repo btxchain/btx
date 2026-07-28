@@ -1065,6 +1065,281 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    merkle_fold_static_bytecode_excludes_tape_and_rejects_offset_substitution)
+{
+    const auto input = ActualInput();
+    const auto shard =
+        OneQueryMerkleShard(input);
+    const auto canonical_table =
+        BuildMerkleFoldProgramTableV1(
+            shard.fold_layout);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            canonical_table, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        13U);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        shard.fold_cs.constraints.size());
+    aq::AirConstraintSystem<gf::Fp3>
+        canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            canonical_table,
+            shard.fold_cs.n_rows,
+            canonical_cs, &why),
+        why);
+    BOOST_CHECK(
+        canonical_cs.preprocessed.empty());
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs,
+            shard.fold_columns),
+        0U);
+
+    for (uint32_t probe = 0;
+         probe < 3; ++probe) {
+        std::vector<gf::Fp3> current(
+            shard.fold_cs.n_columns);
+        std::vector<gf::Fp3> next(
+            shard.fold_cs.n_columns);
+        for (uint32_t column = 0;
+             column < shard.fold_cs.n_columns;
+             ++column) {
+            current[column] = {
+                gf::FromU64(
+                    3 + probe * 17 + column),
+                gf::FromU64(
+                    5 + probe * 19 + 2 * column),
+                gf::FromU64(
+                    7 + probe * 23 + 3 * column)};
+            next[column] = {
+                gf::FromU64(
+                    11 + probe * 29 + column),
+                gf::FromU64(
+                    13 + probe * 31 + 2 * column),
+                gf::FromU64(
+                    17 + probe * 37 + 3 * column)};
+        }
+        for (uint32_t ordinal = 0;
+             ordinal <
+                 canonical_table.programs.size();
+             ++ordinal) {
+            gf::Fp3 interpreted;
+            BOOST_REQUIRE_MESSAGE(
+                cb::EvaluateProgram(
+                    canonical_table.programs[
+                        ordinal],
+                    current, next,
+                    interpreted, &why),
+                why);
+            const auto native =
+                shard.fold_cs.constraints[
+                    ordinal].eval(
+                        current, next);
+            BOOST_CHECK_MESSAGE(
+                gf::Eq(interpreted, native),
+                "MerkleFold differential mismatch"
+                    << " probe=" << probe
+                    << " ordinal=" << ordinal);
+        }
+    }
+
+    uint32_t terminal_row =
+        shard.fold_cs.n_rows;
+    for (uint32_t row = 0;
+         row < shard.fold_cs.n_rows;
+         ++row) {
+        if (gf::Eq(
+                shard.fold_columns[
+                    shard.fold_layout.terminal][row],
+                gf::Fp3::One())) {
+            terminal_row = row;
+            break;
+        }
+    }
+    BOOST_REQUIRE_LT(
+        terminal_row,
+        shard.fold_cs.n_rows);
+    auto forged = shard.fold_columns;
+    forged[
+        shard.fold_layout.final_value][terminal_row] =
+        gf::Add(
+            forged[
+                shard.fold_layout.final_value][
+                    terminal_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs, forged),
+        0U);
+
+    // Substitute the terminal claim's fixed source offset with the folded
+    // cell itself. The resulting equation terminal*(folded-folded)=0 accepts
+    // the forged value, but its different ProgramTable root cannot verify
+    // under the canonical fixed-offset relation.
+    auto substituted_table =
+        canonical_table;
+    auto& terminal =
+        substituted_table.programs.back();
+    cb::Instruction terminal_load;
+    terminal_load.opcode =
+        cb::Opcode::Current;
+    terminal_load.lhs =
+        shard.fold_layout.terminal;
+    cb::Instruction folded_load;
+    folded_load.opcode =
+        cb::Opcode::Current;
+    folded_load.lhs =
+        shard.fold_layout.folded;
+    cb::Instruction subtract;
+    subtract.opcode = cb::Opcode::Sub;
+    subtract.lhs = 1;
+    subtract.rhs = 2;
+    cb::Instruction multiply;
+    multiply.opcode = cb::Opcode::Mul;
+    multiply.lhs = 0;
+    multiply.rhs = 3;
+    terminal.instructions = {
+        terminal_load,
+        folded_load,
+        folded_load,
+        subtract,
+        multiply,
+    };
+    terminal.declared_degree = 2;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        cb::CommitProgramTableAlgHash(
+            canonical_table));
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table,
+            shard.fold_cs.n_rows,
+            substituted_cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs, forged),
+        0U);
+    const uint32_t harness_schedule_column =
+        shard.fold_layout.x;
+    canonical_cs.preprocessed_pin_ood = true;
+    canonical_cs.preprocessed.emplace_back(
+        harness_schedule_column,
+        forged[harness_schedule_column]);
+    substituted_cs.preprocessed_pin_ood = true;
+    substituted_cs.preprocessed =
+        canonical_cs.preprocessed;
+    const std::vector<uint32_t> preprocessed{
+        harness_schedule_column};
+    const auto malicious =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, forged,
+            preprocessed, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        malicious.ok, malicious.note);
+    BOOST_REQUIRE(
+        malicious.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            canonical_cs, malicious.proof,
+            preprocessed, uint256::ONE,
+            &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    merkle_fold_disconnected_transcript_and_x_plus_p_stay_fail_closed)
+{
+    const auto input = ActualInput();
+    const auto shard =
+        OneQueryMerkleShard(input);
+    const auto table =
+        BuildMerkleFoldProgramTableV1(
+            shard.fold_layout);
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, shard.fold_cs.n_rows,
+            cs, &why),
+        why);
+
+    // A self-consistent all-terminal fold table with arbitrary betas proves
+    // the local equations while carrying no openings, transcript challenge,
+    // or final value. This is the concrete attack the later Decoder/FS carry
+    // must rule out.
+    std::vector<std::vector<gf::Fp3>> disconnected(
+        shard.fold_cs.n_columns,
+        std::vector<gf::Fp3>(
+            shard.fold_cs.n_rows,
+            gf::Fp3::Zero()));
+    for (uint32_t row = 0;
+         row < shard.fold_cs.n_rows;
+         ++row) {
+        disconnected[
+            shard.fold_layout.beta][row] =
+            gf::Fp3::FromFp(100 + row);
+        disconnected[
+            shard.fold_layout.x][row] =
+            gf::Fp3::One();
+        disconnected[
+            shard.fold_layout.odd_index][row] =
+            gf::Fp3::One();
+        disconnected[
+            shard.fold_layout.half][row] =
+            gf::Fp3::One();
+        disconnected[
+            shard.fold_layout.terminal][row] =
+            gf::Fp3::One();
+    }
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            cs, disconnected),
+        0U);
+    bool differs_from_honest = false;
+    for (uint32_t column = 0;
+         column < shard.fold_cs.n_columns &&
+         !differs_from_honest;
+         ++column) {
+        for (uint32_t row = 0;
+             row < shard.fold_cs.n_rows;
+             ++row) {
+            if (!gf::Eq(
+                    disconnected[column][row],
+                    shard.fold_columns[column][row])) {
+                differs_from_honest = true;
+                break;
+            }
+        }
+    }
+    BOOST_CHECK(
+        differs_from_honest);
+
+    // A field cell cannot distinguish x from x+p. The production remedy is
+    // the canonical u32 decoder carry, not an invalid low-bit predicate over
+    // Fp3. Keep the carry flag false until that exact join executes.
+    const uint64_t small = 7;
+    BOOST_CHECK(
+        gf::Eq(
+            gf::Fp3::FromFp(
+                gf::FromU64(small)),
+            gf::Fp3::FromFp(
+                gf::FromU64(
+                    gf::kP + small))));
+}
+
+BOOST_AUTO_TEST_CASE(
     exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
@@ -1117,11 +1392,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product
             .phase_constraint_systems_canonical_bytecode,
-        2U);
+        3U);
     BOOST_CHECK_EQUAL(
         product
             .phase_r0_tables_statement_manifest_only,
-        2U);
+        3U);
     BOOST_CHECK(
         product
             .parent_join_r0_statement_manifest_only);
@@ -1175,8 +1450,41 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !product
              .merkle_hash_row_semantic_carry_complete);
+    BOOST_CHECK(
+        product
+            .merkle_fold_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .merkle_fold_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.merkle_fold_program_constraints,
+        13U);
+    BOOST_CHECK_EQUAL(
+        product
+            .merkle_fold_statement_manifest_r0_columns,
+        0U);
+    BOOST_CHECK_EQUAL(
+        product.merkle_fold_proof_tape_cells,
+        16U);
+    BOOST_CHECK(
+        product
+            .merkle_fold_proof_tape_cells_ordinary);
+    BOOST_CHECK(
+        product
+            .merkle_fold_proof_tape_fixed_offsets);
+    BOOST_CHECK(
+        product.merkle_fold_equations_bound);
+    BOOST_CHECK(
+        product
+            .merkle_fold_r0_statement_manifest_only);
+    BOOST_CHECK(
+        product
+            .merkle_fold_cs_independent_of_child_witness);
+    BOOST_CHECK(
+        !product
+             .merkle_fold_transcript_and_opening_carry_complete);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 1462U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 1446U);
     BOOST_CHECK_EQUAL(
         product.max_constraint_degree, 3U);
     BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);

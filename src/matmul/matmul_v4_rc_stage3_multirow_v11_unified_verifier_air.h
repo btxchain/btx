@@ -162,6 +162,19 @@ struct ProductV1 {
      * Merkle path ordering.
      */
     bool merkle_hash_row_semantic_carry_complete{false};
+    alg_hash::Digest merkle_fold_program_root{};
+    uint32_t merkle_fold_program_constraints{0};
+    bool merkle_fold_constraints_canonical_bytecode{false};
+    bool merkle_fold_program_root_recomputed{false};
+    uint32_t merkle_fold_statement_manifest_r0_columns{0};
+    uint32_t merkle_fold_proof_tape_cells{0};
+    bool merkle_fold_proof_tape_cells_ordinary{false};
+    bool merkle_fold_proof_tape_fixed_offsets{false};
+    bool merkle_fold_equations_bound{false};
+    bool merkle_fold_r0_statement_manifest_only{false};
+    bool merkle_fold_cs_independent_of_child_witness{false};
+    /** Open until beta/x/openings/final-value are carried from their owners. */
+    bool merkle_fold_transcript_and_opening_carry_complete{false};
     uint32_t phase_constraint_systems_canonical_bytecode{0};
     uint32_t phase_r0_tables_statement_manifest_only{0};
     bool trace_cap_fits{false};
@@ -199,6 +212,16 @@ BuildSchedulerProgramTableV1(const LayoutV1& layout);
 BuildMerkleHashProgramTableV1(
     const mf::HashLayoutV1& layout =
         mf::CanonicalHashLayoutV1());
+
+/**
+ * Canonical bytecode for all thirteen Fp3 binary-fold, index, chain and
+ * terminal equations. No beta, opening, index or final-value witness enters
+ * the program bytes or R0.
+ */
+[[nodiscard]] cb::ProgramTable
+BuildMerkleFoldProgramTableV1(
+    const mf::FoldLayoutV1& layout =
+        mf::CanonicalFoldLayoutV1());
 
 /**
  * Append the production acceptance-output constraints through the canonical
