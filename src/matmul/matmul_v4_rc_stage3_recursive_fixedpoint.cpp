@@ -18807,6 +18807,62 @@ AirProveNarrowBytecodeShardCompositionV1(
         return out;
     }
 
+    // Retain the exact L1 artifact needed by the next recursive level.
+    // A boolean "proved" label is not a child proof: canonical bytes are
+    // decoded and re-entered into the unmodified verifier before this result
+    // can be consumed by an L2 parent.
+    out.constraint_system = attached_shard.combined;
+    out.fs_seed = seed;
+    // AirQuotientProveRows uses the streaming-row backend.  Its wire proof
+    // has the same canonical fields as AlgAirProof, but the C++ template
+    // specializations are intentionally distinct types.  Copy the wire
+    // fields explicitly, as the L2 path below already does, so the retained
+    // artifact is verifier/backend independent.
+    out.proof.batch = proved.proof.batch;
+    out.proof.trace_commit = proved.proof.trace_commit;
+    out.proof.next_openings = proved.proof.next_openings;
+    std::string codec_why;
+    if (!SerializeAirQuotientProofAlg(
+            out.proof, out.proof_bytes, &codec_why) ||
+        out.proof_bytes.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_codec:" + codec_why;
+        return out;
+    }
+    const auto decoded =
+        DeserializeAirQuotientProofAlg(
+            out.proof_bytes, &codec_why);
+    std::vector<unsigned char> canonical;
+    if (!decoded.has_value() ||
+        !SerializeAirQuotientProofAlg(
+            *decoded, canonical, &codec_why) ||
+        canonical != out.proof_bytes) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_roundtrip:" + codec_why;
+        return out;
+    }
+    out.canonical_whole_proof_codec = true;
+    out.proof_commitment =
+        ComputeNormalizedAlgAirProofCommitment(*decoded);
+    out.proof_retained =
+        !out.proof_commitment.IsNull();
+    std::string retained_why;
+    out.retained_proof_reverified =
+        out.proof_retained &&
+        aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+            out.constraint_system, *decoded, out.fs_seed,
+            &retained_why);
+    if (!out.retained_proof_reverified) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_retained_verify:" +
+            retained_why;
+        return out;
+    }
+
     // Two independent negative checks, without constructing a second
     // production-sized proof:
     //   (1) the exact affected-row evaluator exhibits that a live bytecode
@@ -18836,7 +18892,9 @@ AirProveNarrowBytecodeShardCompositionV1(
     out.forgery_rejected = proof_tamper_rejected;
     out.valid =
         out.attached && out.proved && out.verified &&
-        out.forgery_rejected;
+        out.forgery_rejected && out.proof_retained &&
+        out.canonical_whole_proof_codec &&
+        out.retained_proof_reverified;
     out.note =
         std::string(
             "stage3:recursive_fixedpoint:bytecode_shard_air") +
@@ -18850,6 +18908,7 @@ AirProveNarrowBytecodeShardCompositionV1(
         ";forgery=" + (out.forgery_rejected ? "1" : "0") +
         ";proof_tamper=" +
         (proof_tamper_rejected ? "1" : "0") +
+        ";retained=1;roundtrip=1;reverified=1" +
         ";witness_mutation=" +
         (witness_mutation_violates ? "1" : "0") +
         ";stream=" + (out.streaming ? "1" : "0") +
@@ -18891,6 +18950,13 @@ ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
             std::to_string(free_rows);
         return out;
     }
+    if (shard_index != UINT32_MAX &&
+        shard_index >= shard_groups.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_shard_air_exec_shard_index";
+        return out;
+    }
 
     // UINT32_MAX (default): smallest free-row shard by program count.
     // In-range index selects that pack bin explicitly.
@@ -18900,8 +18966,7 @@ ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
             pick = i;
         }
     }
-    if (shard_index != UINT32_MAX &&
-        shard_index < shard_groups.size()) {
+    if (shard_index != UINT32_MAX) {
         pick = shard_index;
     }
     out.shard_index = pick;
@@ -19329,6 +19394,119 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
              ? ";serialize_within_fri"
              : ";serialize_OVER_FRI") +
         ";complete_fp=false";
+    return out;
+}
+
+NarrowBytecodeRealL1L2ConsumeV1
+ExecuteNarrowBytecodeRealL1L2ConsumeV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>& shard_indices,
+    bool prove_l2,
+    const uint256& parent_context_binding)
+{
+    NarrowBytecodeRealL1L2ConsumeV1 out;
+    out.shard_indices = shard_indices;
+    out.l1_count =
+        static_cast<uint32_t>(shard_indices.size());
+    if (!base.valid ||
+        !constraint_bytecode::ValidateProgramTable(
+            table, nullptr) ||
+        shard_indices.size() < 2) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_real_l1_l2_input";
+        return out;
+    }
+
+    // Reusing a shard in two child slots would make the hierarchy look
+    // complete while omitting a distinct portion of the program table.
+    // Reject duplicates before performing any expensive proving work.
+    std::vector<uint32_t> sorted_indices = shard_indices;
+    std::sort(sorted_indices.begin(), sorted_indices.end());
+    if (std::adjacent_find(
+            sorted_indices.begin(), sorted_indices.end()) !=
+        sorted_indices.end()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_real_l1_l2_duplicate_shard";
+        return out;
+    }
+
+    out.l1_proofs.reserve(shard_indices.size());
+    std::vector<aq::AirConstraintSystem<Fp3>> child_css;
+    std::vector<AlgAirProof> child_proofs;
+    std::vector<uint256> child_seeds;
+    child_css.reserve(shard_indices.size());
+    child_proofs.reserve(shard_indices.size());
+    child_seeds.reserve(shard_indices.size());
+    for (const uint32_t shard_index : shard_indices) {
+        NarrowBytecodeShardCompositionAirProveV1 l1 =
+            ExecuteNarrowBytecodeOneFreeRowShardCompositionAirProveV1(
+                base, table, shard_index);
+        if (!l1.valid || !l1.proof_retained ||
+            !l1.canonical_whole_proof_codec ||
+            !l1.retained_proof_reverified ||
+            l1.fs_seed.IsNull() ||
+            l1.proof_commitment.IsNull() ||
+            l1.proof_bytes.empty()) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_real_l1_l2_l1:" + l1.note;
+            return out;
+        }
+        child_css.push_back(l1.constraint_system);
+        child_proofs.push_back(l1.proof);
+        child_seeds.push_back(l1.fs_seed);
+        out.l1_proofs.push_back(std::move(l1));
+    }
+    out.every_l1_proof_retained =
+        out.l1_proofs.size() == shard_indices.size();
+    out.every_l1_proof_reverified =
+        std::all_of(
+            out.l1_proofs.begin(), out.l1_proofs.end(),
+            [](const auto& l1) {
+                return l1.retained_proof_reverified;
+            });
+    // This path has no BooleanChildProof or synthetic "accepted" witness:
+    // the vectors passed below came only from retained, canonical proofs
+    // produced by the bytecode-shard composition prover above.
+    out.no_boolean_standins =
+        out.every_l1_proof_retained &&
+        out.every_l1_proof_reverified;
+
+    out.l2 = ExecuteNarrowMultiChildL2FriConsumeV1(
+        child_css, child_proofs, child_seeds, prove_l2,
+        parent_context_binding);
+    out.l2_consumed_exact_l1_proofs =
+        out.no_boolean_standins &&
+        out.l2.fold_bus_built &&
+        (!prove_l2 || out.l2.cryptographically_valid);
+    // A shape-only invocation is useful for sizing, but it is never a
+    // completed recursive proof construction.
+    out.valid =
+        prove_l2 &&
+        out.every_l1_proof_retained &&
+        out.every_l1_proof_reverified &&
+        out.no_boolean_standins &&
+        out.l2_consumed_exact_l1_proofs &&
+        out.l2.cryptographically_valid;
+    out.note =
+        std::string(
+            "stage3:recursive_fixedpoint:"
+            "bytecode_real_l1_l2") +
+        ";l1=" + std::to_string(out.l1_count) +
+        ";retained=" +
+        (out.every_l1_proof_retained ? "1" : "0") +
+        ";reverified=" +
+        (out.every_l1_proof_reverified ? "1" : "0") +
+        ";standins=0" +
+        ";l2_exact=" +
+        (out.l2_consumed_exact_l1_proofs ? "1" : "0") +
+        ";l2_crypto=" +
+        (out.l2.cryptographically_valid ? "1" : "0") +
+        ";prove_l2=" + (prove_l2 ? "1" : "0") +
+        ";universal_root_only_open=1";
     return out;
 }
 

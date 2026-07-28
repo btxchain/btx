@@ -3267,6 +3267,9 @@ struct NarrowBytecodeShardCompositionAirProveV1 {
     bool proved{false};
     bool verified{false};
     bool forgery_rejected{false};
+    bool proof_retained{false};
+    bool canonical_whole_proof_codec{false};
+    bool retained_proof_reverified{false};
     bool streaming{true};
     uint32_t n_rows{0};
     uint32_t n_columns{0};
@@ -3275,6 +3278,11 @@ struct NarrowBytecodeShardCompositionAirProveV1 {
     uint32_t shard_index{0};
     uint64_t prove_micros{0};
     uint64_t verify_micros{0};
+    uint256 fs_seed{};
+    uint256 proof_commitment{};
+    aq::AirConstraintSystem<Fp3> constraint_system;
+    AlgAirProof proof;
+    std::vector<unsigned char> proof_bytes;
     std::string note;
 };
 
@@ -3443,6 +3451,38 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     const std::vector<AlgAirProof>& children,
     const std::vector<uint256>& child_fs_seeds,
     bool prove = true,
+    const uint256& parent_context_binding = {});
+
+/**
+ * Replace the former boolean L1 stand-ins by genuine attached bytecode-shard
+ * proofs and consume those exact retained proofs in one real L2 parent.
+ *
+ * Each requested shard is independently assembled, AIR-proved, canonically
+ * encoded, decoded and reverified before its proof can enter
+ * ExecuteNarrowMultiChildL2FriConsumeV1.  Duplicate or out-of-range shard
+ * ordinals fail closed.  This closes the concrete L1-proof transport seam;
+ * it does not claim the still-open universal/root-only verifier fixed point.
+ */
+struct NarrowBytecodeRealL1L2ConsumeV1 {
+    bool valid{false};
+    bool every_l1_proof_retained{false};
+    bool every_l1_proof_reverified{false};
+    bool no_boolean_standins{false};
+    bool l2_consumed_exact_l1_proofs{false};
+    uint32_t l1_count{0};
+    std::vector<uint32_t> shard_indices;
+    std::vector<NarrowBytecodeShardCompositionAirProveV1>
+        l1_proofs;
+    NarrowMultiChildL2FriConsumeV1 l2;
+    std::string note;
+};
+
+[[nodiscard]] NarrowBytecodeRealL1L2ConsumeV1
+ExecuteNarrowBytecodeRealL1L2ConsumeV1(
+    const FoldBusComposition& base,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<uint32_t>& shard_indices,
+    bool prove_l2 = true,
     const uint256& parent_context_binding = {});
 
 /**

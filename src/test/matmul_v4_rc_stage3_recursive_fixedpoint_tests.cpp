@@ -4832,6 +4832,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(proved.proved);
     BOOST_CHECK(proved.verified);
     BOOST_CHECK(proved.forgery_rejected);
+    BOOST_CHECK(proved.proof_retained);
+    BOOST_CHECK(proved.canonical_whole_proof_codec);
+    BOOST_CHECK(proved.retained_proof_reverified);
+    BOOST_CHECK(!proved.fs_seed.IsNull());
+    BOOST_CHECK(!proved.proof_commitment.IsNull());
+    BOOST_CHECK(!proved.proof_bytes.empty());
     BOOST_CHECK(proved.streaming);
     BOOST_CHECK_EQUAL(proved.n_rows, 131072U);
     BOOST_CHECK_EQUAL(proved.n_columns, 640U);
@@ -4876,8 +4882,32 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(proved.proved);
     BOOST_CHECK(proved.verified);
     BOOST_CHECK(proved.forgery_rejected);
+    BOOST_CHECK(proved.proof_retained);
+    BOOST_CHECK(proved.canonical_whole_proof_codec);
+    BOOST_CHECK(proved.retained_proof_reverified);
+    BOOST_CHECK(!proved.fs_seed.IsNull());
+    BOOST_CHECK(!proved.proof_commitment.IsNull());
+    BOOST_CHECK(!proved.proof_bytes.empty());
     BOOST_CHECK_EQUAL(proved.n_rows, 8192U);
     BOOST_CHECK_EQUAL(proved.n_columns, 575U);
+
+    // Coverage is a set, not a multiset: the new real-L1 executor must reject
+    // a duplicated shard before it spends time producing either child proof.
+    rc::constraint_bytecode::ProgramTable duplicate_table;
+    std::string duplicate_why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            duplicate_table, &duplicate_why),
+        duplicate_why);
+    const auto duplicate =
+        fp::ExecuteNarrowBytecodeRealL1L2ConsumeV1(
+            joined, duplicate_table, {0, 0},
+            /*prove_l2=*/false);
+    BOOST_CHECK(!duplicate.valid);
+    BOOST_CHECK(
+        duplicate.note.find("duplicate_shard") !=
+        std::string::npos);
     BOOST_TEST_MESSAGE(proved.note);
     BOOST_TEST_MESSAGE(
         "FOLD_BUS_COMPOSITION_AIR rows="
@@ -4890,6 +4920,71 @@ BOOST_AUTO_TEST_CASE(
     static_assert(
         !fp::kNarrowBytecodeShardCompositionAirProveReady);
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+}
+
+// Concrete L1->L2 recursion seam: unlike the older hierarchy executor this
+// consumes the exact retained bytecode-shard proofs, not boolean stand-ins.
+// This is deliberately opt-in: each of two hash-kernel shards is a real
+// production-shaped streaming AIR prove, followed by a real L2 prove.
+BOOST_AUTO_TEST_CASE(
+    real_bytecode_l1_proofs_enter_exact_l2_parent)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_REAL_BYTECODE_L1_L2");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_REAL_BYTECODE_L1_L2=1 for "
+            "two retained bytecode L1 proofs -> exact L2 parent");
+        return;
+    }
+
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs, hash_child.proof, hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+
+    // A repeated shard cannot masquerade as two independently covered
+    // children. This rejection occurs before either expensive L1 prove.
+    const auto duplicate =
+        fp::ExecuteNarrowBytecodeRealL1L2ConsumeV1(
+            base, table, {0, 0}, /*prove_l2=*/false);
+    BOOST_CHECK(!duplicate.valid);
+    BOOST_CHECK(
+        duplicate.note.find("duplicate_shard") !=
+        std::string::npos);
+
+    const uint256 parent_context = Seed(0xB7);
+    const fp::NarrowBytecodeRealL1L2ConsumeV1 consumed =
+        fp::ExecuteNarrowBytecodeRealL1L2ConsumeV1(
+            base, table, {0, 1}, /*prove_l2=*/true,
+            parent_context);
+    BOOST_REQUIRE_MESSAGE(consumed.valid, consumed.note);
+    BOOST_CHECK_EQUAL(consumed.l1_count, 2U);
+    BOOST_CHECK_EQUAL(consumed.l1_proofs.size(), 2U);
+    BOOST_CHECK(consumed.every_l1_proof_retained);
+    BOOST_CHECK(consumed.every_l1_proof_reverified);
+    BOOST_CHECK(consumed.no_boolean_standins);
+    BOOST_CHECK(consumed.l2_consumed_exact_l1_proofs);
+    BOOST_CHECK(consumed.l2.cryptographically_valid);
+    BOOST_CHECK(consumed.l2.proved);
+    BOOST_CHECK(consumed.l2.verified);
+    BOOST_CHECK(consumed.l2.parent_proof_tamper_rejected);
+    BOOST_CHECK(
+        consumed.l2.parent_context_binding ==
+        parent_context);
+    BOOST_TEST_MESSAGE(consumed.note);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
 
 // g2 chip B: multi-child L2 FRI consume of ≥2 L1 proofs under FRI shape
