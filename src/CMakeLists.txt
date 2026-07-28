@@ -654,6 +654,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_coupled_missing_relations.cpp
   matmul/matmul_v4_rc_stage3_coupled_gemm_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_initial_state_product.cpp
+  matmul/matmul_v4_rc_stage3_coupled_winner_capture.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_composition.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_binding.cpp
   matmul/matmul_v4_rc_stage3_coupled_chain_product.cpp
@@ -728,6 +729,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_air_parent_composer.cpp
   matmul/matmul_v4_rc_stage3_v13_terminal_fold_parent.cpp
   matmul/matmul_v4_rc_stage3_v13_quotient_tape_parent.cpp
+  matmul/matmul_v4_rc_stage3_v13_deep_source_logup_parent.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_acceptance_bytecode.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_backend.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_parent_join.cpp
@@ -751,6 +753,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_normalized_authority_composition.cpp
   matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.cpp
   matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.cpp
+  matmul/matmul_v4_rc_stage3_normalized_block_transport.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join_q96.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_relation_shards.cpp
