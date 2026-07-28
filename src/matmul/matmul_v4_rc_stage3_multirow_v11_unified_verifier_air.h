@@ -124,6 +124,10 @@ struct ProductV1 {
     uint32_t acceptance_program_constraints{0};
     bool acceptance_constraints_canonical_bytecode{false};
     bool acceptance_program_root_recomputed{false};
+    alg_hash::Digest scheduler_program_root{};
+    uint32_t scheduler_program_constraints{0};
+    bool scheduler_constraints_canonical_bytecode{false};
+    bool scheduler_program_root_recomputed{false};
     bool trace_cap_fits{false};
     bool lde_cap_fits{false};
     /** False: phase R0 columns currently contain child-proof values. */
@@ -145,6 +149,10 @@ struct ProductV1 {
  */
 [[nodiscard]] cb::ProgramTable
 BuildAcceptanceProgramTableV1(const LayoutV1& layout);
+
+/** Canonical bytecode for active/one-hot/phase-boundary scheduling. */
+[[nodiscard]] cb::ProgramTable
+BuildSchedulerProgramTableV1(const LayoutV1& layout);
 
 /**
  * Append the production acceptance-output constraints through the canonical

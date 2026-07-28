@@ -116,6 +116,11 @@ struct BytecodeExprV1 {
         return Binary(cb::Opcode::Sub, left, right);
     }
 
+    uint32_t Add(uint32_t left, uint32_t right)
+    {
+        return Binary(cb::Opcode::Add, left, right);
+    }
+
     uint32_t Mul(uint32_t left, uint32_t right)
     {
         return Binary(cb::Opcode::Mul, left, right);
@@ -201,6 +206,7 @@ bool AddSchedulerConstraints(
     const LayoutV1& layout,
     aq::AirConstraintSystem<Fp3>& cs,
     alg_hash::Digest& acceptance_program_root,
+    alg_hash::Digest& scheduler_program_root,
     std::string* why)
 {
     if (!AppendAcceptanceOutputConstraintsV1(
@@ -208,79 +214,32 @@ bool AddSchedulerConstraints(
             &acceptance_program_root, why)) {
         return false;
     }
-    AddConstraint(
-        cs,
-        "stage3.v11_unified.active_boolean",
-        aq::AirKind::kEverywhere, 2,
-        [active = layout.active](
-            const auto& cur,
-            const auto&) {
-            return gf::Mul(
-                cur[active],
-                gf::Sub(
-                    cur[active],
-                    Fp3::One()));
-        });
-    AddConstraint(
-        cs,
-        "stage3.v11_unified.one_hot_sum",
-        aq::AirKind::kEverywhere, 1,
-        [layout](
-            const auto& cur,
-            const auto&) {
-            Fp3 sum = Fp3::Zero();
-            for (uint32_t phase = 0;
-                 phase < kPhasesV1;
-                 ++phase) {
-                sum = gf::Add(
-                    sum,
-                    cur[layout.PhaseTag(
-                        static_cast<PhaseV1>(
-                            phase))]);
-            }
-            return gf::Sub(
-                sum, cur[layout.active]);
-        });
-    for (uint32_t index = 0;
-         index < kPhasesV1;
-         ++index) {
-        const auto phase =
-            static_cast<PhaseV1>(index);
-        const uint32_t tag =
-            layout.PhaseTag(phase);
-        AddConstraint(
-            cs,
-            "stage3.v11_unified.phase_boolean",
-            aq::AirKind::kEverywhere, 2,
-            [tag](
-                const auto& cur,
-                const auto&) {
-                return gf::Mul(
-                    cur[tag],
-                    gf::Sub(
-                        cur[tag],
-                        Fp3::One()));
-            });
-        for (uint32_t selector : {
-                 layout.PhaseFirst(phase),
-                 layout.PhaseLast(phase),
-                 layout.PhaseTransition(phase)}) {
-            AddConstraint(
-                cs,
-                "stage3.v11_unified."
-                "phase_selector_subset",
-                aq::AirKind::kEverywhere, 2,
-                [tag, selector](
-                    const auto& cur,
-                    const auto&) {
-                    return gf::Mul(
-                        cur[selector],
-                        gf::Sub(
-                            Fp3::One(),
-                            cur[tag]));
-                });
-        }
+    const cb::ProgramTable table =
+        BuildSchedulerProgramTableV1(layout);
+    aq::AirConstraintSystem<Fp3> adapter;
+    if (!cb::BuildAirConstraintSystemFromProgramTable(
+            table, cs.n_rows, adapter, why) ||
+        adapter.n_columns != cs.n_columns ||
+        adapter.constraints.size() !=
+            2 + 4 * kPhasesV1) {
+        return false;
     }
+    scheduler_program_root =
+        cb::CommitProgramTableAlgHash(table);
+    if (!DigestNonzero(
+            scheduler_program_root)) {
+        if (why != nullptr) {
+            *why =
+                "v11_unified_scheduler_program_root";
+        }
+        return false;
+    }
+    cs.constraints.insert(
+        cs.constraints.end(),
+        std::make_move_iterator(
+            adapter.constraints.begin()),
+        std::make_move_iterator(
+            adapter.constraints.end()));
     return true;
 }
 
@@ -371,6 +330,113 @@ cb::ProgramTable BuildAcceptanceProgramTableV1(
                 expression.Current(acceptance),
                 expression.Current(parent_first));
         });
+    return table;
+}
+
+cb::ProgramTable BuildSchedulerProgramTableV1(
+    const LayoutV1& layout)
+{
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = layout.n_columns;
+    table.next_width = layout.n_columns;
+    table.challenge_width = 0;
+    bool layout_valid =
+        layout.n_columns != 0 &&
+        layout.active < layout.n_columns;
+    for (uint32_t index = 0;
+         index < kPhasesV1;
+         ++index) {
+        const auto phase =
+            static_cast<PhaseV1>(index);
+        layout_valid =
+            layout_valid &&
+            layout.PhaseTag(phase) <
+                layout.n_columns &&
+            layout.PhaseFirst(phase) <
+                layout.n_columns &&
+            layout.PhaseLast(phase) <
+                layout.n_columns &&
+            layout.PhaseTransition(phase) <
+                layout.n_columns;
+    }
+    if (!layout_valid) return table;
+
+    const auto append_boolean =
+        [&table](uint32_t column) {
+            AppendBytecodeProgramV1(
+                table,
+                [column](
+                    BytecodeExprV1& expression) {
+                    const uint32_t value =
+                        expression.Current(column);
+                    const uint32_t one =
+                        expression.Constant(
+                            Fp3::One());
+                    expression.Mul(
+                        value,
+                        expression.Sub(
+                            value, one));
+                });
+        };
+    append_boolean(layout.active);
+    AppendBytecodeProgramV1(
+        table,
+        [layout](
+            BytecodeExprV1& expression) {
+            uint32_t sum =
+                expression.Current(
+                    layout.PhaseTag(
+                        PhaseV1::ParentJoin));
+            for (uint32_t index = 1;
+                 index < kPhasesV1;
+                 ++index) {
+                sum = expression.Add(
+                    sum,
+                    expression.Current(
+                        layout.PhaseTag(
+                            static_cast<PhaseV1>(
+                                index))));
+            }
+            expression.Sub(
+                sum,
+                expression.Current(
+                    layout.active));
+        });
+    for (uint32_t index = 0;
+         index < kPhasesV1;
+         ++index) {
+        const auto phase =
+            static_cast<PhaseV1>(index);
+        const uint32_t tag =
+            layout.PhaseTag(phase);
+        append_boolean(tag);
+        for (uint32_t selector : {
+                 layout.PhaseFirst(phase),
+                 layout.PhaseLast(phase),
+                 layout.PhaseTransition(phase)}) {
+            AppendBytecodeProgramV1(
+                table,
+                [tag, selector](
+                    BytecodeExprV1& expression) {
+                    const uint32_t one =
+                        expression.Constant(
+                            Fp3::One());
+                    const uint32_t tag_value =
+                        expression.Current(tag);
+                    const uint32_t outside_tag =
+                        expression.Sub(
+                            one, tag_value);
+                    expression.Mul(
+                        expression.Current(
+                            selector),
+                        outside_tag);
+                });
+        }
+    }
     return table;
 }
 
@@ -727,6 +793,7 @@ ProductV1 BuildProductV1(
     if (!AddSchedulerConstraints(
             out.layout, out.cs,
             out.acceptance_program_root,
+            out.scheduler_program_root,
             &scheduler_why)) {
         return fail(
             "acceptance_bytecode:" +
@@ -738,6 +805,13 @@ ProductV1 BuildProductV1(
     out.acceptance_program_root_recomputed =
         DigestNonzero(
             out.acceptance_program_root);
+    out.scheduler_program_constraints =
+        2 + 4 * kPhasesV1;
+    out.scheduler_constraints_canonical_bytecode =
+        true;
+    out.scheduler_program_root_recomputed =
+        DigestNonzero(
+            out.scheduler_program_root);
 
     out.preprocessed_columns =
         PreprocessedColumns(out.cs);
@@ -864,6 +938,8 @@ ProductV1 BuildProductV1(
         out.whole_verifier_acceptance_constrained &&
         out.acceptance_constraints_canonical_bytecode &&
         out.acceptance_program_root_recomputed &&
+        out.scheduler_constraints_canonical_bytecode &&
+        out.scheduler_program_root_recomputed &&
         out.trace_cap_fits &&
         out.lde_cap_fits &&
         out.violations == 0 &&
@@ -875,6 +951,7 @@ ProductV1 BuildProductV1(
         ? "stage3:v11_unified_verifier:"
           "five_phase_vertical_split_rap;"
           "acceptance_static_bytecode;"
+          "scheduler_static_bytecode;"
           "direct_cross_phase_carries_closed"
         : "stage3:v11_unified_verifier:"
           "constraint_failure";

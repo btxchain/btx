@@ -420,6 +420,148 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    scheduler_bytecode_substitution_rejects_at_proof_level)
+{
+    LayoutV1 layout;
+    layout.phase_tag_base = 0;
+    layout.phase_first_base =
+        layout.phase_tag_base + kPhasesV1;
+    layout.phase_last_base =
+        layout.phase_first_base + kPhasesV1;
+    layout.phase_transition_base =
+        layout.phase_last_base + kPhasesV1;
+    layout.active =
+        layout.phase_transition_base + kPhasesV1;
+    layout.acceptance = layout.active + 1;
+    layout.n_columns = layout.acceptance + 1;
+
+    const auto canonical_table =
+        BuildSchedulerProgramTableV1(layout);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            canonical_table, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        2 + 4 * kPhasesV1);
+    aq::AirConstraintSystem<gf::Fp3> canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            canonical_table, 8,
+            canonical_cs, &why),
+        why);
+
+    std::vector<std::vector<gf::Fp3>> columns(
+        layout.n_columns,
+        std::vector<gf::Fp3>(
+            canonical_cs.n_rows,
+            gf::Fp3::Zero()));
+    columns[layout.active][0] =
+        gf::Fp3::One();
+    columns[layout.PhaseTag(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::One();
+    columns[layout.PhaseFirst(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::One();
+    columns[layout.PhaseLast(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::One();
+
+    // Keep a common, unrelated R0 column so the rejection below is caused by
+    // the canonical scheduler equation rather than a changed R0 schedule.
+    const std::vector<uint32_t> preprocessed{
+        layout.acceptance};
+    canonical_cs.preprocessed.emplace_back(
+        layout.acceptance,
+        columns[layout.acceptance]);
+    canonical_cs.preprocessed_pin_ood = true;
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs, columns),
+        0U);
+    const auto honest =
+        aq::AirQuotientProveRowsSplitRap(
+            canonical_cs, columns,
+            preprocessed, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        honest.ok, honest.note);
+    BOOST_REQUIRE(honest.division_exact);
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            canonical_cs, honest.proof,
+            preprocessed, uint256::ONE,
+            &why),
+        why);
+
+    // Replace the one-hot equation with active-active=0.  This remains valid
+    // canonical bytecode, but its root differs and its proof must not verify
+    // against the locally reconstructed scheduler.
+    auto substituted_table = canonical_table;
+    auto& one_hot =
+        substituted_table.programs[1];
+    cb::Instruction left;
+    left.opcode = cb::Opcode::Current;
+    left.lhs = layout.active;
+    cb::Instruction right = left;
+    cb::Instruction subtract;
+    subtract.opcode = cb::Opcode::Sub;
+    subtract.lhs = 0;
+    subtract.rhs = 1;
+    one_hot.instructions = {
+        left, right, subtract};
+    one_hot.declared_degree = 1;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        cb::CommitProgramTableAlgHash(
+            canonical_table));
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table, 8,
+            substituted_cs, &why),
+        why);
+    auto forged = columns;
+    forged[layout.PhaseTag(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::Zero();
+    forged[layout.PhaseFirst(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::Zero();
+    forged[layout.PhaseLast(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::Zero();
+    substituted_cs.preprocessed_pin_ood = true;
+    substituted_cs.preprocessed.emplace_back(
+        layout.acceptance,
+        forged[layout.acceptance]);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs, forged),
+        0U);
+    const auto malicious =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, forged,
+            preprocessed, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        malicious.ok, malicious.note);
+    BOOST_REQUIRE(
+        malicious.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            canonical_cs, malicious.proof,
+            preprocessed, uint256::ONE,
+            &why));
+}
+
+BOOST_AUTO_TEST_CASE(
     exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
@@ -451,6 +593,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.acceptance_program_constraints,
         2U);
+    BOOST_CHECK(
+        product
+            .scheduler_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .scheduler_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.scheduler_program_constraints,
+        2 + 4 * kPhasesV1);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
     BOOST_CHECK_EQUAL(product.trace_columns, 1490U);
     BOOST_CHECK_EQUAL(
