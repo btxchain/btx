@@ -410,6 +410,45 @@ struct NativeTypedSafeEventAuditV13 {
     NativeTypedSafeEventAuditV13& out,
     std::string* why = nullptr);
 
+/**
+ * Canonical typed-event schedule extracted from one genuinely accepted V13
+ * child FRI proof.
+ *
+ * This constructor does not accept a caller-authored replay table. It invokes
+ * Fri3AlgSafeQ192K2V13BatchVerifyReplay itself, then materializes every SAFE
+ * event from the exact verifier-owned transcript snapshot. Consequently a
+ * forged challenge/output pair cannot enter the parent schedule merely by
+ * setting a host boolean.
+ *
+ * The outer AirQuotient `airq_lambda` event is intentionally absent: it has a
+ * different transcript and is supplied by the outer Split-RAP layer. The
+ * returned seven-kind FRI schedule therefore is a complete child-FRI adapter,
+ * but is not by itself the eight-kind recursive parent or an authority gate.
+ */
+struct NativeFri3AlgTypedSafeScheduleV13 {
+    Fri3AlgSafeV13Replay replay;
+    std::vector<TypedSafeEventProgramV13> program;
+    std::vector<TypedSafeEventWitnessV13> witness;
+    uint32_t events_materialized{0};
+    uint32_t proof_owned_message_cells{0};
+    uint32_t query_candidate_events{0};
+    bool native_proof_verified{false};
+    bool exact_event_order{false};
+    bool every_snapshot_exactly_materialized{false};
+    bool every_safe_output_matches_native_consumer{false};
+    bool unique_query_seed_then_q192{false};
+    bool outer_air_lambda_present{false};
+    bool normalized_child_cells_bound{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildNativeFri3AlgTypedSafeScheduleV13(
+    const Fri3AlgBatchProof& proof,
+    const uint256& child_fs_seed,
+    NativeFri3AlgTypedSafeScheduleV13& out,
+    std::string* why = nullptr);
+
 struct TypedSafeEventOutputLocationV13 {
     uint32_t event{0};
     TypedSafeChallengeKindV13 kind{

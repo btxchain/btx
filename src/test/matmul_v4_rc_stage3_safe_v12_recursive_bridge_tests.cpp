@@ -959,4 +959,84 @@ BOOST_AUTO_TEST_CASE(
         !bridge::kTypedSafeEventRecursiveAuthorityReadyV13);
 }
 
+BOOST_AUTO_TEST_CASE(
+    v13_native_verified_child_proof_drives_exact_typed_event_schedule)
+{
+    namespace rc = matmul::v4::rc;
+    std::vector<std::vector<gf::Fp3>> columns(2);
+    for (uint32_t column = 0; column < columns.size(); ++column) {
+        columns[column].resize(8);
+        for (uint32_t row = 0;
+             row < columns[column].size(); ++row) {
+            columns[column][row] = {
+                gf::FromU64(1 + 19 * column + 7 * row),
+                gf::FromU64(3 + 11 * column + 5 * row),
+                gf::FromU64(9 + 13 * column + 17 * row),
+            };
+        }
+    }
+    const uint256 child_seed = TestSeed(0x731);
+    const auto proved =
+        rc::Fri3AlgSafeQ192K2V13BatchCommit(
+            columns, child_seed, 17);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+
+    bridge::NativeFri3AlgTypedSafeScheduleV13 schedule;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildNativeFri3AlgTypedSafeScheduleV13(
+            proved.proof, child_seed, schedule, &why),
+        why);
+    BOOST_CHECK(schedule.valid);
+    BOOST_CHECK(schedule.native_proof_verified);
+    BOOST_CHECK(schedule.exact_event_order);
+    BOOST_CHECK(schedule.every_snapshot_exactly_materialized);
+    BOOST_CHECK(
+        schedule.every_safe_output_matches_native_consumer);
+    BOOST_CHECK(schedule.unique_query_seed_then_q192);
+    BOOST_CHECK_EQUAL(
+        schedule.query_candidate_events,
+        rc::kRCFri3AlgNumQueries);
+    BOOST_CHECK_EQUAL(
+        schedule.events_materialized,
+        1U + 4U + 2U +
+            proved.proof.fold_challenges.size() +
+            1U + rc::kRCFri3AlgNumQueries);
+    BOOST_CHECK_EQUAL(
+        schedule.program.size(),
+        schedule.witness.size());
+    BOOST_CHECK(!schedule.outer_air_lambda_present);
+    BOOST_CHECK(!schedule.normalized_child_cells_bound);
+
+    // Proof-derived schedules cannot be forged by changing a shipped
+    // challenge, query consumer, or parent-owned seed.
+    {
+        auto bad = proved.proof;
+        bad.w1.c0 = gf::Add(bad.w1.c0, 1);
+        bridge::NativeFri3AlgTypedSafeScheduleV13 rejected;
+        BOOST_CHECK(
+            !bridge::BuildNativeFri3AlgTypedSafeScheduleV13(
+                bad, child_seed, rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+    {
+        auto bad = proved.proof;
+        BOOST_REQUIRE(!bad.queries.empty());
+        bad.queries.front().index ^= 1U;
+        bridge::NativeFri3AlgTypedSafeScheduleV13 rejected;
+        BOOST_CHECK(
+            !bridge::BuildNativeFri3AlgTypedSafeScheduleV13(
+                bad, child_seed, rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+    {
+        bridge::NativeFri3AlgTypedSafeScheduleV13 rejected;
+        BOOST_CHECK(
+            !bridge::BuildNativeFri3AlgTypedSafeScheduleV13(
+                proved.proof, TestSeed(0x732),
+                rejected, &why));
+        BOOST_CHECK(!rejected.valid);
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
