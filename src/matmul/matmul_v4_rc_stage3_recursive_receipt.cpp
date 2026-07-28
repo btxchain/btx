@@ -336,6 +336,10 @@ bool BuildBooleanCompanionChild(
 
 struct RetainedQuotientJoinAir {
     bool valid{false};
+    bool operands_preprocessed{false};
+    bool compensated_forgery_rejected{false};
+    bool verified{false};
+    bool ownership_context_bound{false};
     aq::AirConstraintSystem<gf::Fp3> cs;
     fp::AlgAirProof proof;
     uint256 seed{};
@@ -347,7 +351,8 @@ struct RetainedQuotientJoinAir {
 RetainedQuotientJoinAir ProveRetainedQuotientJoinAir(
     const std::vector<gf::Fp3>& bound_q_per_query,
     const std::vector<std::vector<gf::Fp3>>& shard_local_q,
-    bool absolute_parent_bound)
+    bool absolute_parent_bound,
+    const uint256& ownership_context = {})
 {
     RetainedQuotientJoinAir out;
     if (bound_q_per_query.empty() ||
@@ -409,6 +414,19 @@ RetainedQuotientJoinAir ProveRetainedQuotientJoinAir(
             columns[1U + s][q] = shard_local_q[s][q];
         }
     }
+    // These cells are not merely a satisfying assignment to
+    // sum(shard_q)=parent_q.  They are verifier-reconstructed statement
+    // columns sourced from the authenticated parent opening and verified
+    // receipt terminals.  Pin every value (including canonical zero padding)
+    // through the row-wise backend's dual-OOD preprocessed-column argument.
+    // Otherwise +delta/-delta in two shard columns is an undetectable
+    // free-witness substitution.
+    out.cs.preprocessed_pin_ood = true;
+    for (uint32_t column = 0; column < n_columns; ++column) {
+        out.cs.preprocessed.emplace_back(column, columns[column]);
+    }
+    out.operands_preprocessed =
+        out.cs.preprocessed.size() == n_columns;
     HashWriter seed_hash;
     seed_hash <<
         "BTX_RC_STAGE3_RECEIPT_RETAINED_Q_JOIN_AIR_V1";
@@ -417,6 +435,9 @@ RetainedQuotientJoinAir ProveRetainedQuotientJoinAir(
     seed_hash << n_rows;
     seed_hash << static_cast<uint8_t>(
         absolute_parent_bound ? 1 : 0);
+    seed_hash << ownership_context;
+    out.ownership_context_bound =
+        !ownership_context.IsNull();
     for (uint32_t q = 0; q < queries; ++q) {
         seed_hash << gf::Canonical(
             bound_q_per_query[q].c0);
@@ -424,6 +445,11 @@ RetainedQuotientJoinAir ProveRetainedQuotientJoinAir(
             bound_q_per_query[q].c1);
         seed_hash << gf::Canonical(
             bound_q_per_query[q].c2);
+        for (uint32_t s = 0; s < shard_count; ++s) {
+            seed_hash << gf::Canonical(shard_local_q[s][q].c0);
+            seed_hash << gf::Canonical(shard_local_q[s][q].c1);
+            seed_hash << gf::Canonical(shard_local_q[s][q].c2);
+        }
     }
     out.seed = seed_hash.GetHash();
     const auto proved =
@@ -435,7 +461,50 @@ RetainedQuotientJoinAir ProveRetainedQuotientJoinAir(
         return out;
     }
     out.proof = proved.proof;
-    out.valid = true;
+    std::string verify_why;
+    out.verified =
+        aq::AirQuotientVerify<
+            gf::Fp3,
+            aq::AirFriBackendAlg<gf::Fp3>>(
+            out.cs, out.proof, out.seed,
+            &verify_why);
+    if (!out.verified) {
+        out.note =
+            "retained_q_join_verify:" +
+            verify_why;
+        return out;
+    }
+    // The sum identity alone does not reject compensated substitutions.
+    // Re-prove a +delta/-delta witness under the ORIGINAL verifier-owned CS;
+    // native verification must reject its preprocessed OOD evaluations.
+    auto compensated = columns;
+    compensated[1][0] =
+        gf::Add(compensated[1][0], gf::Fp3::One());
+    compensated[2][0] =
+        gf::Sub(compensated[2][0], gf::Fp3::One());
+    const auto compensated_proved =
+        aq::AirQuotientProve<
+            gf::Fp3, aq::AirFriBackendAlg<gf::Fp3>>(
+            out.cs, compensated, out.seed, {});
+    bool compensated_verified = false;
+    if (compensated_proved.ok &&
+        compensated_proved.division_exact) {
+        std::string why;
+        compensated_verified =
+            aq::AirQuotientVerify<
+                gf::Fp3,
+                aq::AirFriBackendAlg<gf::Fp3>>(
+                out.cs, compensated_proved.proof,
+                out.seed, &why);
+    }
+    out.compensated_forgery_rejected =
+        !compensated_proved.ok ||
+        !compensated_proved.division_exact ||
+        !compensated_verified;
+    out.valid =
+        out.operands_preprocessed &&
+        out.verified &&
+        out.compensated_forgery_rejected;
     out.note = "retained_q_join_ok";
     return out;
 }
@@ -1155,6 +1224,10 @@ ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
             bound_q_per_query, shard_local_q,
             absolute_parent_bound);
     out.join_air_proof_retained = retained.valid;
+    out.join_operands_preprocessed =
+        retained.operands_preprocessed;
+    out.compensated_forgery_rejected =
+        retained.compensated_forgery_rejected;
     out.join_n_rows = retained.n_rows;
     out.join_n_columns = retained.n_columns;
     if (!retained.valid) {
@@ -1187,15 +1260,21 @@ ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
     out.parent_fold_bus_built = out.parent.fold_bus_built;
     out.forgery_rejected = out.parent.forgery_rejected;
     out.cryptographically_consumed =
+        prove &&
         out.parent.valid && out.parent.fold_bus_built &&
         out.parent.forgery_rejected &&
-        (!prove || (out.parent.proved && out.parent.verified));
+        out.parent.proved && out.parent.verified;
     out.valid =
         out.join_air_proof_retained &&
+        out.join_operands_preprocessed &&
+        out.compensated_forgery_rejected &&
         out.companion_child_built &&
         out.cryptographically_consumed;
     out.note =
-        out.valid
+        !prove
+            ? "stage3:recursive_receipt:"
+              "q_join_parent_proof_not_executed"
+        : out.valid
             ? (std::string(
                    "stage3:recursive_receipt:"
                    "q_join_normalized_parent_child") +
@@ -1206,10 +1285,362 @@ ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
                ";parent_arity=" +
                std::to_string(out.parent.arity) +
                ";fold=1;forgery=1" +
-               (prove ? ";prove=1" : ";prove=0"))
+               ";prove=1")
             : ("stage3:recursive_receipt:"
                "q_join_parent_consume_failed:" +
                out.parent.note);
+    return out;
+}
+
+UnifiedShardReceiptL2ParentV1
+ConsumeUnifiedShardReceiptL2ParentV1(
+    const aq::AirConstraintSystem<gf::Fp3>& source_child_cs,
+    const fp::AlgAirProof& source_child_proof,
+    const uint256& source_child_fs_seed,
+    uint32_t source_parent_current_width,
+    const rh::ShardOrdinalManifestV2& exact_set_manifest,
+    const std::vector<
+        aq::AirConstraintSystem<gf::Fp3>>& child_css,
+    const std::vector<ShardTerminalBindingV1>& bindings,
+    const std::vector<ShardReceiptV1>& receipts,
+    bool prove)
+{
+    UnifiedShardReceiptL2ParentV1 out;
+    out.receipt_count =
+        static_cast<uint32_t>(receipts.size());
+    if (receipts.size() < 2 ||
+        child_css.size() != receipts.size() ||
+        bindings.size() != receipts.size() ||
+        source_parent_current_width == 0 ||
+        source_child_fs_seed.IsNull()) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_input";
+        return out;
+    }
+
+    std::string why;
+    const fp::FoldBusComposition source_parent =
+        fp::BuildFoldBusComposition(
+            source_child_cs, source_child_proof,
+            source_child_fs_seed);
+    out.source_child_verified = source_parent.valid;
+    if (!out.source_child_verified) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_source:" +
+            source_parent.note;
+        return out;
+    }
+    std::vector<gf::Fp3> authenticated_parent_q;
+    if (!fp::ExtractAuthenticatedParentQuotientOpenings(
+            source_parent,
+            source_parent_current_width,
+            authenticated_parent_q, &why) ||
+        authenticated_parent_q.empty()) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_source_q:" + why;
+        return out;
+    }
+    out.queries =
+        static_cast<uint32_t>(
+            authenticated_parent_q.size());
+    out.source_proof_commitment =
+        fp::ComputeNormalizedAlgAirProofCommitment(
+            source_child_proof);
+    if (out.source_proof_commitment.IsNull()) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_source_commitment";
+        return out;
+    }
+
+    out.exact_set_manifest_commitment =
+        exact_set_manifest.commitment;
+    out.exact_set_manifest_verified =
+        rh::ValidateShardOrdinalManifestV2(
+            exact_set_manifest, &why) &&
+        exact_set_manifest.entries.size() ==
+            receipts.size();
+    if (!out.exact_set_manifest_verified) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_manifest:" + why;
+        return out;
+    }
+
+    out.ordered_receipt_set_root =
+        ComputeOrderedShardReceiptSetRootV1(
+            receipts);
+    if (out.ordered_receipt_set_root.IsNull()) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_receipt_order";
+        return out;
+    }
+
+    const auto& source_queries =
+        source_parent.hash.program.public_inputs
+            .query_index;
+    if (source_queries.size() != out.queries) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_source_query_shape";
+        return out;
+    }
+    HashWriter query_hash;
+    query_hash <<
+        "BTX_RC_STAGE3_UNIFIED_L2_QUERY_SCHEDULE_V1";
+    query_hash << out.queries;
+    for (uint32_t query : source_queries) {
+        query_hash << query;
+    }
+    out.query_schedule_commitment =
+        query_hash.GetHash();
+
+    std::vector<std::vector<gf::Fp3>>
+        receipt_local_q;
+    receipt_local_q.reserve(receipts.size());
+    std::vector<fp::AlgAirProof> child_proofs;
+    std::vector<
+        aq::AirConstraintSystem<gf::Fp3>>
+        unified_css;
+    std::vector<uint256> child_seeds;
+    child_proofs.reserve(receipts.size() + 2);
+    unified_css.reserve(receipts.size() + 2);
+    child_seeds.reserve(receipts.size() + 2);
+    // The proof from which q_parent was extracted is itself child zero.
+    unified_css.push_back(source_child_cs);
+    child_proofs.push_back(source_child_proof);
+    child_seeds.push_back(source_child_fs_seed);
+
+    out.manifest_statement_roots_match = true;
+    out.common_query_schedule = true;
+    for (size_t index = 0;
+         index < receipts.size(); ++index) {
+        if (!VerifyShardReceiptV1(
+                child_css[index], bindings[index],
+                receipts[index], &why)) {
+            out.note =
+                "stage3:recursive_receipt:"
+                "unified_l2_receipt[" +
+                std::to_string(index) + "]:" + why;
+            return out;
+        }
+        const auto& entry =
+            exact_set_manifest.entries[index];
+        if (entry.shard_ordinal != index ||
+            receipts[index].shard_index != index ||
+            bindings[index].shard_index != index ||
+            entry.program_ordinals.size() !=
+                receipts[index].program_count ||
+            entry.statement_root !=
+                bindings[index].statement_commitment ||
+            entry.statement_root !=
+                receipts[index].statement_commitment) {
+            out.manifest_statement_roots_match = false;
+            out.note =
+                "stage3:recursive_receipt:"
+                "unified_l2_manifest_statement[" +
+                std::to_string(index) + "]";
+            return out;
+        }
+        if (receipts[index].queries != out.queries ||
+            receipts[index].query_indices !=
+                source_queries ||
+            (index > 0 &&
+             receipts[index].query_indices !=
+                 receipts[0].query_indices)) {
+            out.common_query_schedule = false;
+            out.note =
+                "stage3:recursive_receipt:"
+                "unified_l2_query_schedule";
+            return out;
+        }
+        const auto proof =
+            DeserializeAirQuotientProofAlg(
+                receipts[index].proof_bytes,
+                &why);
+        if (!proof.has_value()) {
+            out.note =
+                "stage3:recursive_receipt:"
+                "unified_l2_receipt_codec[" +
+                std::to_string(index) + "]:" + why;
+            return out;
+        }
+        unified_css.push_back(child_css[index]);
+        child_proofs.push_back(*proof);
+        child_seeds.push_back(receipts[index].fs_seed);
+        receipt_local_q.push_back(
+            receipts[index].local_q_per_query);
+    }
+    out.receipts_verified = true;
+
+    HashWriter context_hash;
+    context_hash <<
+        "BTX_RC_STAGE3_UNIFIED_SHARD_RECEIPT_L2_CONTEXT_V1";
+    context_hash << out.source_proof_commitment;
+    context_hash << source_child_fs_seed;
+    context_hash << source_parent_current_width;
+    context_hash << out.exact_set_manifest_commitment;
+    context_hash << out.ordered_receipt_set_root;
+    context_hash << out.query_schedule_commitment;
+    context_hash << out.receipt_count;
+    context_hash << out.queries;
+    for (const auto& receipt : receipts) {
+        context_hash << receipt.shard_index;
+        context_hash << receipt.statement_commitment;
+        context_hash << receipt.fs_seed;
+        context_hash << receipt.proof_commitment;
+        context_hash << receipt.receipt_root;
+    }
+    out.ownership_context =
+        context_hash.GetHash();
+    if (out.ownership_context.IsNull()) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_context";
+        return out;
+    }
+
+    const RetainedQuotientJoinAir retained =
+        ProveRetainedQuotientJoinAir(
+            authenticated_parent_q,
+            receipt_local_q,
+            /*absolute_parent_bound=*/true,
+            out.ownership_context);
+    out.q_join_operands_preprocessed =
+        retained.operands_preprocessed;
+    out.compensated_q_forgery_rejected =
+        retained.compensated_forgery_rejected;
+    out.ownership_context_bound_to_q_join_seed =
+        retained.valid &&
+        retained.ownership_context_bound;
+    if (!retained.valid ||
+        !out.ownership_context_bound_to_q_join_seed) {
+        out.note =
+            "stage3:recursive_receipt:"
+            "unified_l2_q_join:" +
+            retained.note;
+        return out;
+    }
+
+    unified_css.push_back(retained.cs);
+    child_proofs.push_back(retained.proof);
+    child_seeds.push_back(retained.seed);
+    out.parent_arity =
+        static_cast<uint32_t>(
+            child_proofs.size());
+
+    // The q-join child is independently load-bearing in the shared vertical
+    // fold-bus, not merely present in an ordered host vector.
+    {
+        auto forged_children = child_proofs;
+        bool mutated = false;
+        auto& q_child = forged_children.back();
+        if (!q_child.batch.queries.empty() &&
+            !q_child.batch.queries[0]
+                 .row.values.empty()) {
+            q_child.batch.queries[0]
+                .row.values[0] =
+                gf::Add(
+                    q_child.batch.queries[0]
+                        .row.values[0],
+                    gf::Fp3::One());
+            mutated = true;
+        }
+        out.q_join_child_tamper_rejected =
+            mutated &&
+            !fp::BuildFoldBusCompositionMulti(
+                 unified_css, forged_children,
+                 child_seeds)
+                 .valid;
+        if (!out.q_join_child_tamper_rejected) {
+            out.note =
+                "stage3:recursive_receipt:"
+                "unified_l2_q_join_child_forgery";
+            return out;
+        }
+    }
+
+    out.parent =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            unified_css, child_proofs,
+            child_seeds, prove);
+    out.one_parent_consumes_source_receipts_and_q_join =
+        prove &&
+        out.parent.valid &&
+        out.parent.arity == out.parent_arity &&
+        out.parent.proved &&
+        out.parent.verified;
+    out.parent_proof_retained =
+        out.parent.parent_proof_retained;
+    out.parent_proof_reentry_verified =
+        out.parent.parent_reentry_verified;
+    out.parent_proof_tamper_rejected =
+        out.parent.parent_proof_tamper_rejected;
+    out.canonical_whole_parent_codec =
+        out.parent.canonical_whole_proof_codec;
+    out.within_relay_budget =
+        out.parent.verify_within_relay_budget;
+    out.within_wire_budget =
+        out.parent.serialize_within_fri_budget;
+    out.parent_proof_bytes =
+        out.parent.serialize_root_bytes;
+
+    // These are named residuals, not hidden readiness constants.
+    out.active_p2_transcript_owned_in_same_parent = false;
+    out.verifier_reconstructed_constraint_systems = false;
+    out.residuals.push_back(
+        "active_p2_full_event_transcript_and_consumer_ctl_"
+        "not_owned_in_same_parent");
+    out.residuals.push_back(
+        "child_constraint_systems_not_yet_reconstructed_"
+        "from_consensus_registry");
+    out.production_complete = false;
+    out.valid =
+        out.source_child_verified &&
+        out.receipts_verified &&
+        out.exact_set_manifest_verified &&
+        out.manifest_statement_roots_match &&
+        out.common_query_schedule &&
+        out.q_join_operands_preprocessed &&
+        out.compensated_q_forgery_rejected &&
+        out.ownership_context_bound_to_q_join_seed &&
+        out.q_join_child_tamper_rejected &&
+        out.one_parent_consumes_source_receipts_and_q_join &&
+        out.parent_proof_retained &&
+        out.parent_proof_reentry_verified &&
+        out.parent_proof_tamper_rejected &&
+        out.canonical_whole_parent_codec &&
+        out.within_relay_budget &&
+        out.within_wire_budget &&
+        !out.production_complete;
+    out.note =
+        out.valid
+            ? (std::string(
+                   "stage3:recursive_receipt:"
+                   "unified_l2_parent_foundation") +
+               ";receipts=" +
+               std::to_string(out.receipt_count) +
+               ";arity=" +
+               std::to_string(out.parent_arity) +
+               ";queries=" +
+               std::to_string(out.queries) +
+               ";proof_bytes=" +
+               std::to_string(
+                   out.parent_proof_bytes) +
+               ";verify_us=" +
+               std::to_string(
+                   out.parent.verify_micros) +
+               ";complete_fp=false")
+            : (!prove
+                   ? "stage3:recursive_receipt:"
+                     "unified_l2_parent_proof_not_executed"
+                   : "stage3:recursive_receipt:"
+                     "unified_l2_parent_failed:" +
+                         out.parent.note);
     return out;
 }
 
@@ -1317,9 +1748,10 @@ ConsumeShardReceiptsL2V1(
     out.l2 = fp::ExecuteNarrowMultiChildL2FriConsumeV1(
         child_css, child_proofs, child_seeds, prove);
     out.child_proofs_cryptographically_consumed =
+        prove &&
         out.l2.valid && out.l2.fold_bus_built &&
         out.l2.forgery_rejected &&
-        (!prove || (out.l2.proved && out.l2.verified));
+        out.l2.proved && out.l2.verified;
 
     std::vector<ShardReceiptV1> reordered = receipts;
     std::reverse(reordered.begin(), reordered.end());
@@ -1362,7 +1794,10 @@ ConsumeShardReceiptsL2V1(
         out.ordered_receipt_root_parent_air_bound &&
         !out.full_parent_q_join_recursively_consumed;
     out.note =
-        out.valid
+        !prove
+            ? "stage3:recursive_receipt:"
+              "l2_parent_proof_not_executed"
+        : out.valid
             ? (std::string(
                    "stage3:recursive_receipt:"
                    "l1_receipts_consumed_by_l2") +
@@ -1370,9 +1805,7 @@ ConsumeShardReceiptsL2V1(
                ";child_bytes=" +
                std::to_string(out.encoded_child_bytes) +
                ";fold=1;forgery=1" +
-               (prove
-                    ? ";parent_proved=1;parent_verified=1"
-                    : ";parent_prove=0") +
+               ";parent_proved=1;parent_verified=1" +
                ";parent_receipt_root_pin=1")
             : "stage3:recursive_receipt:"
               "l2_consume_failed:" +

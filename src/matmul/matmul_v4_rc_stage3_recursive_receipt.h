@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_RECURSIVE_RECEIPT_H
 
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,7 @@ namespace matmul::v4::rc::recursive_receipt {
 namespace aq = air_quotient;
 namespace fp = recursive_fixedpoint;
 namespace gf = gkr_field;
+namespace rh = recursive_hierarchy;
 
 inline constexpr uint16_t kShardReceiptVersionV1 = 1;
 /** "RQR1" in little-endian wire order. */
@@ -195,6 +197,8 @@ struct ShardReceiptL2ConsumeV1 {
 struct ReceiptOwnedQuotientJoinParentConsumeV1 {
     bool valid{false};
     bool join_air_proof_retained{false};
+    bool join_operands_preprocessed{false};
+    bool compensated_forgery_rejected{false};
     bool companion_child_built{false};
     bool parent_fold_bus_built{false};
     bool cryptographically_consumed{false};
@@ -231,6 +235,59 @@ struct ShardReceiptQuotientJoinV1 {
     uint256 ordered_receipt_set_root{};
     fp::NarrowBytecodeShardQuotientJoinAirMirrorV1 air_join;
     ReceiptOwnedQuotientJoinParentConsumeV1 parent_consume;
+    std::vector<std::string> residuals;
+    std::string note;
+};
+
+/**
+ * One proof-owning L2 parent over:
+ *
+ *   source parent proof || ordered shard receipts || receipt-owned q join.
+ *
+ * The exact-set V2 ordinal manifest supports the production FFD shard packer:
+ * every global program ordinal is named exactly once, and each entry is tied
+ * to the verifier-reconstructed shard statement commitment.  The q-join seed
+ * commits the manifest, source proof, ordered receipt set, query schedule and
+ * every q operand before the unified parent is proved.
+ *
+ * This closes the previous "three independent proofs" construction gap. It
+ * deliberately does not claim production authority until the active-P2
+ * transcript is consumed inside the same parent and every child constraint
+ * system is reconstructed from the canonical registry.
+ */
+struct UnifiedShardReceiptL2ParentV1 {
+    bool valid{false};
+    bool source_child_verified{false};
+    bool receipts_verified{false};
+    bool exact_set_manifest_verified{false};
+    bool manifest_statement_roots_match{false};
+    bool common_query_schedule{false};
+    bool q_join_operands_preprocessed{false};
+    bool compensated_q_forgery_rejected{false};
+    bool ownership_context_bound_to_q_join_seed{false};
+    bool q_join_child_tamper_rejected{false};
+    bool one_parent_consumes_source_receipts_and_q_join{false};
+    bool parent_proof_retained{false};
+    bool parent_proof_reentry_verified{false};
+    bool parent_proof_tamper_rejected{false};
+    bool canonical_whole_parent_codec{false};
+    bool within_relay_budget{false};
+    bool within_wire_budget{false};
+    /** Still false until the active P2 transcript/consumer CTLs are in-parent. */
+    bool active_p2_transcript_owned_in_same_parent{false};
+    /** Still false until all CSs are rebuilt from the consensus registry. */
+    bool verifier_reconstructed_constraint_systems{false};
+    bool production_complete{false};
+    uint32_t receipt_count{0};
+    uint32_t parent_arity{0};
+    uint32_t queries{0};
+    uint64_t parent_proof_bytes{0};
+    uint256 exact_set_manifest_commitment{};
+    uint256 ordered_receipt_set_root{};
+    uint256 query_schedule_commitment{};
+    uint256 source_proof_commitment{};
+    uint256 ownership_context{};
+    fp::NarrowMultiChildL2FriConsumeV1 parent;
     std::vector<std::string> residuals;
     std::string note;
 };
@@ -344,6 +401,23 @@ ConsumeReceiptOwnedQuotientJoinAsNormalizedParentChildV1(
     const std::vector<std::vector<gf::Fp3>>& shard_local_q,
     bool absolute_parent_bound,
     bool prove = false);
+
+/**
+ * Execute the unified proof-owned L2 parent described above. `source_child_*`
+ * identify the proof from which the authenticated full-parent q openings are
+ * reconstructed; it is included as the first child of the resulting parent.
+ */
+[[nodiscard]] UnifiedShardReceiptL2ParentV1
+ConsumeUnifiedShardReceiptL2ParentV1(
+    const aq::AirConstraintSystem<gf::Fp3>& source_child_cs,
+    const fp::AlgAirProof& source_child_proof,
+    const uint256& source_child_fs_seed,
+    uint32_t source_parent_current_width,
+    const rh::ShardOrdinalManifestV2& exact_set_manifest,
+    const std::vector<aq::AirConstraintSystem<gf::Fp3>>& child_css,
+    const std::vector<ShardTerminalBindingV1>& bindings,
+    const std::vector<ShardReceiptV1>& receipts,
+    bool prove = true);
 
 [[nodiscard]] bool SerializeShardReceiptV1(
     const ShardReceiptV1& receipt,

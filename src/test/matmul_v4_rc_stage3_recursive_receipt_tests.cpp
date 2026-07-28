@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_stage3_recursive_receipt.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace aq = matmul::v4::rc::air_quotient;
 namespace fp =
@@ -90,6 +91,9 @@ SyntheticAttachedShard BuildSyntheticAttachedShard()
 }
 
 struct AuthenticatedParent {
+    aq::AirConstraintSystem<gf::Fp3> constraint_system;
+    fp::AlgAirProof proof;
+    uint256 fs_seed{};
     fp::FoldBusComposition composition;
     uint32_t current_width{1};
     std::vector<gf::Fp3> quotient;
@@ -116,17 +120,20 @@ AuthenticatedParent BuildAuthenticatedParent()
     cs.constraints.push_back(std::move(boolean));
     std::vector<std::vector<gf::Fp3>> columns{
         {gf::Fp3::Zero(), gf::Fp3::One()}};
-    const uint256 seed = Seed(0x67);
+    out.fs_seed = Seed(0x67);
     const auto proved =
         aq::AirQuotientProve<
             gf::Fp3, aq::AirFriBackendAlg<gf::Fp3>>(
-            cs, columns, seed, {});
+            cs, columns, out.fs_seed, {});
     BOOST_REQUIRE_MESSAGE(
         proved.ok && proved.division_exact,
         proved.note);
+    out.constraint_system = cs;
+    out.proof = proved.proof;
     out.composition =
         fp::BuildFoldBusComposition(
-            cs, proved.proof, seed);
+            out.constraint_system, out.proof,
+            out.fs_seed);
     BOOST_REQUIRE_MESSAGE(
         out.composition.valid,
         out.composition.note);
@@ -270,7 +277,7 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    raw_sum_mirror_accepts_compensated_values_but_receipts_do_not)
+    q_sum_mirror_pins_operands_and_receipts_reject_substitution)
 {
     constexpr uint32_t kQueries = 4;
     std::vector<std::vector<gf::Fp3>> shards(
@@ -292,9 +299,13 @@ BOOST_AUTO_TEST_CASE(
         fp::AirMirrorNarrowBytecodeShardLocalQuotientsV1(
             parent, shards, true);
     BOOST_REQUIRE_MESSAGE(honest.valid, honest.note);
+    BOOST_CHECK(honest.operands_preprocessed);
+    BOOST_CHECK(honest.compensated_forgery_rejected);
 
-    // The current raw mirror has no child-receipt ownership boundary:
-    // +delta/-delta preserves its only residual and therefore still proves.
+    // A separately reconstructed statement may legitimately describe
+    // different operands that preserve the sum. The mirror's internal
+    // compensated-forgery check above proves those values cannot be used
+    // under the ORIGINAL verifier-owned preprocessed columns.
     const gf::Fp3 delta{7, 11, 13};
     shards[0][0] = gf::Add(shards[0][0], delta);
     shards[1][0] = gf::Sub(shards[1][0], delta);
@@ -303,6 +314,8 @@ BOOST_AUTO_TEST_CASE(
             parent, shards, true);
     BOOST_REQUIRE_MESSAGE(
         compensated.valid, compensated.note);
+    BOOST_CHECK(compensated.operands_preprocessed);
+    BOOST_CHECK(compensated.compensated_forgery_rejected);
 
     // A proof-owned receipt does not permit the same substitution without
     // changing its public statement and re-proving the L1 shard.
@@ -329,7 +342,8 @@ BOOST_AUTO_TEST_CASE(
         binding, compensated_receipt, nullptr));
 
     BOOST_TEST_MESSAGE(
-        "raw_sum_compensated_accept=1;"
+        "q_join_operands_preprocessed=1;"
+        "same_statement_compensated_reject=1;"
         "proof_owned_receipt_substitution_reject=1;"
         "l2_recursive_consumption_open=1");
     static_assert(
@@ -396,7 +410,9 @@ BOOST_AUTO_TEST_CASE(
         rr::ConsumeShardReceiptsL2V1(
             child_css, bindings, receipts,
             /*prove=*/false);
-    BOOST_REQUIRE_MESSAGE(consumed.valid, consumed.note);
+    // Shape-only construction is useful evidence, but is not cryptographic
+    // recursive consumption until the parent proof is produced and verified.
+    BOOST_CHECK(!consumed.valid);
     BOOST_CHECK(consumed.receipts_verified);
     BOOST_CHECK(consumed.canonical_shard_order);
     BOOST_CHECK(consumed.unique_receipt_roots);
@@ -404,7 +420,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(consumed.child_prechallenges_bound);
     BOOST_CHECK(consumed.child_proofs_decoded);
     BOOST_CHECK(
-        consumed.child_proofs_cryptographically_consumed);
+        !consumed.child_proofs_cryptographically_consumed);
     BOOST_CHECK(
         consumed.local_q_cells_child_air_bound);
     BOOST_CHECK(consumed.reordered_receipts_rejected);
@@ -557,7 +573,10 @@ BOOST_AUTO_TEST_CASE(
             parent.composition, parent.current_width,
             kProgramsTotal, child_css, bindings,
             receipts);
-    BOOST_REQUIRE_MESSAGE(joined.valid, joined.note);
+    // This bounded path retains and verifies the local join proof, but its
+    // normalized parent is deliberately shape-only (prove=false). It must not
+    // claim recursive cryptographic consumption.
+    BOOST_CHECK(!joined.valid);
     BOOST_CHECK(joined.receipts_verified);
     BOOST_CHECK(joined.canonical_shard_order);
     BOOST_CHECK(joined.common_query_schedule);
@@ -569,18 +588,17 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(joined.air_join_verified);
     BOOST_CHECK(joined.air_join_forgery_rejected);
     BOOST_CHECK(
-        joined.recursively_consumed_by_parent);
-    BOOST_CHECK(joined.parent_consume.valid);
+        !joined.recursively_consumed_by_parent);
+    BOOST_CHECK(!joined.parent_consume.valid);
     BOOST_CHECK(
         joined.parent_consume.join_air_proof_retained);
     BOOST_CHECK(
         joined.parent_consume.companion_child_built);
     BOOST_CHECK(
-        joined.parent_consume.cryptographically_consumed);
+        !joined.parent_consume.cryptographically_consumed);
     BOOST_CHECK(
         joined.parent_consume.forgery_rejected);
-    BOOST_CHECK(
-        joined.residuals.empty());
+    BOOST_REQUIRE_EQUAL(joined.residuals.size(), 1U);
 
     // Coverage is semantic data, not a caller-controlled readiness flag.
     BOOST_CHECK(
@@ -717,11 +735,13 @@ BOOST_AUTO_TEST_CASE(
             {first_q, second_q},
             /*absolute_parent_bound=*/true,
             /*prove=*/false);
-    BOOST_REQUIRE_MESSAGE(consumed.valid, consumed.note);
+    BOOST_CHECK(!consumed.valid);
     BOOST_CHECK(consumed.join_air_proof_retained);
+    BOOST_CHECK(consumed.join_operands_preprocessed);
+    BOOST_CHECK(consumed.compensated_forgery_rejected);
     BOOST_CHECK(consumed.companion_child_built);
     BOOST_CHECK(consumed.parent_fold_bus_built);
-    BOOST_CHECK(consumed.cryptographically_consumed);
+    BOOST_CHECK(!consumed.cryptographically_consumed);
     BOOST_CHECK(consumed.forgery_rejected);
     BOOST_CHECK(consumed.parent.fri_shape_representable);
     BOOST_CHECK(!consumed.parent.proved);
@@ -736,6 +756,201 @@ BOOST_AUTO_TEST_CASE(
     BOOST_TEST_MESSAGE(consumed.note);
     static_assert(
         !rr::kShardReceiptRecursiveOwnershipReadyV1);
+}
+
+BOOST_AUTO_TEST_CASE(
+    unified_source_receipts_manifest_and_q_join_share_one_l2_parent)
+{
+    const AuthenticatedParent source =
+        BuildAuthenticatedParent();
+    const auto& query_indices =
+        source.composition.hash.program.public_inputs
+            .query_index;
+    BOOST_REQUIRE_EQUAL(
+        source.quotient.size(), query_indices.size());
+
+    std::vector<gf::Fp3> first_q(
+        source.quotient.size(), gf::Fp3::One());
+    std::vector<gf::Fp3> second_q(
+        source.quotient.size(), gf::Fp3::Zero());
+    for (size_t query = 0;
+         query < source.quotient.size(); ++query) {
+        second_q[query] =
+            gf::Sub(source.quotient[query],
+                    first_q[query]);
+    }
+
+    auto first =
+        BuildSyntheticAttachedShardWithTerminals(
+            query_indices, first_q);
+    auto second =
+        BuildSyntheticAttachedShardWithTerminals(
+            query_indices, second_q);
+    second.interpreter.program_commitment = Seed(0x71);
+    second.interpreter.prechallenge_commitment =
+        Seed(0x72);
+    const auto first_binding =
+        rr::BindShardLocalQuotientTerminalsV1(
+            first.composition, first.interpreter,
+            /*shard_index=*/0);
+    const auto second_binding =
+        rr::BindShardLocalQuotientTerminalsV1(
+            second.composition, second.interpreter,
+            /*shard_index=*/1);
+    BOOST_REQUIRE_MESSAGE(
+        first_binding.valid, first_binding.note);
+    BOOST_REQUIRE_MESSAGE(
+        second_binding.valid, second_binding.note);
+    const auto first_proved =
+        rr::ProveShardReceiptV1(
+            first.composition, first_binding);
+    const auto second_proved =
+        rr::ProveShardReceiptV1(
+            second.composition, second_binding);
+    BOOST_REQUIRE_MESSAGE(
+        first_proved.valid, first_proved.note);
+    BOOST_REQUIRE_MESSAGE(
+        second_proved.valid, second_proved.note);
+
+    const std::vector<
+        aq::AirConstraintSystem<gf::Fp3>> child_css{
+        first.composition.combined,
+        second.composition.combined};
+    const std::vector<rr::ShardTerminalBindingV1>
+        bindings{first_binding, second_binding};
+    const std::vector<rr::ShardReceiptV1> receipts{
+        first_proved.receipt, second_proved.receipt};
+    const auto manifest =
+        matmul::v4::rc::recursive_hierarchy::
+            BuildShardOrdinalManifestV2(
+                /*total_ordinals=*/4,
+                {{0, {0, 2},
+                  first_binding.statement_commitment},
+                 {1, {1, 3},
+                  second_binding.statement_commitment}});
+    BOOST_REQUIRE_MESSAGE(
+        matmul::v4::rc::recursive_hierarchy::
+            ValidateShardOrdinalManifestV2(
+                manifest, nullptr),
+        "exact-set manifest must be canonical");
+
+    const auto shape =
+        rr::ConsumeUnifiedShardReceiptL2ParentV1(
+            source.constraint_system,
+            source.proof,
+            source.fs_seed,
+            source.current_width,
+            manifest,
+            child_css,
+            bindings,
+            receipts,
+            /*prove=*/false);
+    BOOST_CHECK(!shape.valid);
+    BOOST_CHECK(shape.source_child_verified);
+    BOOST_CHECK(shape.receipts_verified);
+    BOOST_CHECK(shape.exact_set_manifest_verified);
+    BOOST_CHECK(shape.manifest_statement_roots_match);
+    BOOST_CHECK(shape.common_query_schedule);
+    BOOST_CHECK(shape.q_join_operands_preprocessed);
+    BOOST_CHECK(shape.compensated_q_forgery_rejected);
+    BOOST_CHECK(
+        shape.ownership_context_bound_to_q_join_seed);
+    BOOST_CHECK(shape.q_join_child_tamper_rejected);
+    BOOST_CHECK(!shape.production_complete);
+    BOOST_CHECK(
+        !shape.active_p2_transcript_owned_in_same_parent);
+    BOOST_CHECK(
+        !shape.verifier_reconstructed_constraint_systems);
+    BOOST_REQUIRE_EQUAL(shape.residuals.size(), 2U);
+    BOOST_TEST_MESSAGE(shape.note);
+
+    // The exact-set root is not an envelope decoration: omission, overlap,
+    // statement substitution and receipt reorder all refuse before a parent
+    // proof can be accepted.
+    auto omitted = manifest;
+    omitted.entries[0].program_ordinals.pop_back();
+    omitted.commitment =
+        matmul::v4::rc::recursive_hierarchy::
+            CommitShardOrdinalManifestV2(omitted);
+    BOOST_CHECK(
+        !rr::ConsumeUnifiedShardReceiptL2ParentV1(
+             source.constraint_system, source.proof,
+             source.fs_seed, source.current_width,
+             omitted, child_css, bindings, receipts,
+             /*prove=*/false)
+             .valid);
+
+    auto substituted = manifest;
+    substituted.entries[1].statement_root =
+        first_binding.statement_commitment;
+    substituted.commitment =
+        matmul::v4::rc::recursive_hierarchy::
+            CommitShardOrdinalManifestV2(substituted);
+    BOOST_CHECK(
+        !rr::ConsumeUnifiedShardReceiptL2ParentV1(
+             source.constraint_system, source.proof,
+             source.fs_seed, source.current_width,
+             substituted, child_css, bindings, receipts,
+             /*prove=*/false)
+             .valid);
+
+    auto reordered = receipts;
+    std::reverse(reordered.begin(), reordered.end());
+    BOOST_CHECK(
+        !rr::ConsumeUnifiedShardReceiptL2ParentV1(
+             source.constraint_system, source.proof,
+             source.fs_seed, source.current_width,
+             manifest, child_css, bindings, reordered,
+             /*prove=*/false)
+             .valid);
+
+    auto forged_source = source.proof;
+    BOOST_REQUIRE(!forged_source.batch.queries.empty());
+    BOOST_REQUIRE(
+        !forged_source.batch.queries[0]
+             .row.values.empty());
+    forged_source.batch.queries[0].row.values[0] =
+        gf::Add(
+            forged_source.batch.queries[0]
+                .row.values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !rr::ConsumeUnifiedShardReceiptL2ParentV1(
+             source.constraint_system, forged_source,
+             source.fs_seed, source.current_width,
+             manifest, child_css, bindings, receipts,
+             /*prove=*/false)
+             .valid);
+
+    if (std::getenv(
+            "BTX_RUN_G2_UNIFIED_RECEIPT_L2") != nullptr) {
+        const auto proved =
+            rr::ConsumeUnifiedShardReceiptL2ParentV1(
+                source.constraint_system,
+                source.proof,
+                source.fs_seed,
+                source.current_width,
+                manifest,
+                child_css,
+                bindings,
+                receipts,
+                /*prove=*/true);
+        BOOST_REQUIRE_MESSAGE(proved.valid, proved.note);
+        BOOST_CHECK(
+            proved
+                .one_parent_consumes_source_receipts_and_q_join);
+        BOOST_CHECK(proved.parent_proof_retained);
+        BOOST_CHECK(proved.parent_proof_reentry_verified);
+        BOOST_CHECK(proved.parent_proof_tamper_rejected);
+        BOOST_CHECK(proved.canonical_whole_parent_codec);
+        BOOST_CHECK(proved.within_relay_budget);
+        BOOST_CHECK(proved.within_wire_budget);
+        BOOST_CHECK_LE(
+            proved.parent_proof_bytes,
+            uint64_t{rc::kRCStage3MaxProofBytes});
+        BOOST_CHECK(!proved.production_complete);
+        BOOST_TEST_MESSAGE(proved.note);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
