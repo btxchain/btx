@@ -38,10 +38,12 @@
 #include <consensus/validation.h>
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
+#include <matmul/matmul_v4_rc_air_recurse.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <serialize.h>
@@ -52,6 +54,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -870,7 +873,7 @@ BOOST_AUTO_TEST_CASE(
             std::string::npos);
     BOOST_CHECK(
         build_why.find(
-            "complete_episode_coupled_relation_parent_assembler_open") !=
+            "block_to_14_role_52_endpoint_assembler_available") !=
                 std::string::npos);
 
     std::string why;
@@ -890,10 +893,106 @@ BOOST_AUTO_TEST_CASE(
             std::string::npos);
     BOOST_CHECK(
         why.find(
-            "complete_episode_coupled_relation_parent_assembler_open") !=
+            "block_to_14_role_52_endpoint_assembler_available") !=
                 std::string::npos);
     BOOST_CHECK(why.find("normalized_consensus_consumer_unavailable") !=
                 std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(
+    real_composed_work_builds_literal_14_role_52_endpoint_parent)
+{
+    if (std::getenv(
+            "BTX_RUN_STAGE3_PARENT_CANDIDATE") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_PARENT_CANDIDATE=1");
+        return;
+    }
+    constexpr int32_t HEIGHT{102};
+    const auto params = RealChainLikeParams(true);
+    CBlock block = RealRcBlock102();
+    const auto episode_params =
+        rc::ResolveRCEpisodeParams(params, HEIGHT);
+    const uint256 episode_digest =
+        rc::RecomputeResidentCurriculumReference(
+            block, episode_params, HEIGHT);
+    const auto coupled_params =
+        rc::ResolveRCCoupParams(params);
+    const auto coupled_options =
+        rc::ResolveRCCoupOptions(params);
+    const uint256 coupled_digest =
+        rc::RecomputeCoupledPuzzleReference(
+            block, HEIGHT, coupled_params,
+            coupled_options);
+    BOOST_REQUIRE(!episode_digest.IsNull());
+    BOOST_REQUIRE(!coupled_digest.IsNull());
+    block.matmul_digest =
+        rc::ComputeRCStage3ComposedWorkDigest(
+            block, params, HEIGHT,
+            episode_digest, coupled_digest);
+    BOOST_REQUIRE(!block.matmul_digest.IsNull());
+
+    const uint256 target =
+        uint256{
+            "ffffffffffffffffffffffffffffffff"
+            "ffffffffffffffffffffffffffffffff"};
+    namespace builder =
+        rc::normalized_production_parent_builder;
+    const builder::ProductionParentBuildInputV1 input{
+        .solved_block = &block,
+        .params = &params,
+        .height = HEIGHT,
+        .target = target,
+    };
+    builder::ProductionRelationParentCandidateV1
+        candidate;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        builder::
+            BuildRelationParentCandidateForSolvedBlockV1(
+                input, candidate, &why),
+        why);
+    BOOST_CHECK(candidate.local_parent_valid);
+    BOOST_CHECK(candidate.exact_role_order);
+    BOOST_CHECK(candidate.exact_endpoint_order);
+    BOOST_CHECK(candidate.all_endpoint_cells_literal);
+    BOOST_CHECK_EQUAL(candidate.roles.size(), 14U);
+    BOOST_CHECK_EQUAL(candidate.endpoint_count, 52U);
+    BOOST_CHECK_EQUAL(candidate.witness_violations, 0U);
+    BOOST_CHECK(
+        candidate.episode_digest == episode_digest);
+    BOOST_CHECK(
+        candidate.coupled_digest == coupled_digest);
+    BOOST_CHECK(
+        candidate.composed_digest ==
+        block.matmul_digest);
+
+    // This parent is executable, but the live audit still reports missing
+    // recursive semantic children.  It must never be silently promoted into
+    // production authority.
+    BOOST_CHECK(
+        !candidate
+             .recursive_semantic_closure_complete);
+    BOOST_CHECK(!candidate.production_authority);
+    BOOST_CHECK(!candidate.residuals.empty());
+
+    // A forged canonical-bank cell is rejected by the actual composed
+    // constraints.  This attacks the literal role->bank equality rather than
+    // a host-side status flag.
+    auto forged = candidate.columns;
+    const uint32_t value_column =
+        candidate.roles.front()
+            .endpoints.front()
+            .bank_value_column;
+    forged[value_column][0] =
+        rc::gkr_field::Add(
+            forged[value_column][0],
+            rc::gkr_field::Fp3::One());
+    BOOST_CHECK_GT(
+        rc::air_recurse::
+            CountWitnessViolationsOnH(
+                candidate.cs, forged),
+        0U);
 }
 
 BOOST_AUTO_TEST_CASE(non_rc_height_requires_no_attachment)
