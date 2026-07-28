@@ -262,6 +262,247 @@ mf::ShardProductV1 OneQueryMerkleShard(
     return shard;
 }
 
+dj::ProductV1 OneQueryDecoder(
+    const rv::InputV1& input,
+    const mf::ShardProductV1& shard)
+{
+    std::vector<uint32_t> words;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        abi::EncodeCanonicalV1(
+            input.proof.envelope,
+            words, nullptr, &why),
+        why);
+    const auto decoded =
+        abi::DecodeCanonicalV1(
+            words, &why);
+    BOOST_REQUIRE_MESSAGE(
+        decoded.has_value(), why);
+    auto decoder = dj::BuildProductV1(
+        *decoded, input.parent_join,
+        {shard});
+    BOOST_REQUIRE_MESSAGE(
+        decoder.valid, decoder.note);
+    return decoder;
+}
+
+std::vector<gf::Fp3> DecoderChallengeVector(
+    const dj::ProductV1& decoder)
+{
+    return {
+        decoder.gamma[0],
+        decoder.gamma[1],
+        decoder.alpha[0],
+        decoder.alpha[1],
+    };
+}
+
+uint32_t DecoderAuxColumn(
+    const dj::LayoutV1& layout,
+    uint32_t lane,
+    uint32_t side,
+    uint32_t stage)
+{
+    return layout.n_columns +
+        ((lane * 2 + side) *
+             kDecoderHornerStagesV1 +
+         stage);
+}
+
+void FillDecoderHornerRow(
+    const dj::LayoutV1& layout,
+    const std::vector<gf::Fp3>& challenge,
+    std::vector<gf::Fp3>& row)
+{
+    BOOST_REQUIRE_EQUAL(
+        challenge.size(),
+        kDecoderChallengeColumnsV1);
+    BOOST_REQUIRE_EQUAL(
+        row.size(),
+        layout.n_columns +
+            kDecoderHornerAuxColumnsV1);
+    for (uint32_t lane = 0;
+         lane < dj::kDecoderJoinBusLanesV1;
+         ++lane) {
+        const auto gamma =
+            challenge[lane];
+        const auto alpha =
+            challenge[2 + lane];
+        for (uint32_t side = 0;
+             side < 2; ++side) {
+            const uint32_t kind =
+                side == 0
+                ? layout.source_kind
+                : layout.consumer_kind;
+            const uint32_t occurrence =
+                side == 0
+                ? layout.source_occurrence
+                : layout.consumer_occurrence;
+            const uint32_t address =
+                side == 0
+                ? layout.source_address
+                : layout.consumer_address;
+            const uint32_t value =
+                side == 0
+                ? layout.source_value
+                : layout.consumer_claim;
+            const auto h1 = gf::Add(
+                row[address],
+                gf::Mul(gamma, row[value]));
+            const auto h2 = gf::Add(
+                row[occurrence],
+                gf::Mul(gamma, h1));
+            const auto h3 = gf::Add(
+                row[kind],
+                gf::Mul(gamma, h2));
+            const auto term = gf::Add(
+                alpha,
+                gf::Mul(gamma, h3));
+            row[DecoderAuxColumn(
+                layout, lane, side, 0)] = h1;
+            row[DecoderAuxColumn(
+                layout, lane, side, 1)] = h2;
+            row[DecoderAuxColumn(
+                layout, lane, side, 2)] = h3;
+            row[DecoderAuxColumn(
+                layout, lane, side, 3)] = term;
+        }
+    }
+}
+
+std::vector<uint32_t> DecoderManifestColumns(
+    const dj::LayoutV1& layout)
+{
+    return {
+        layout.active,
+        layout.source_kind,
+        layout.source_occurrence,
+        layout.source_address,
+        layout.consumer_kind,
+        layout.consumer_occurrence,
+        layout.consumer_address,
+        layout.root_active,
+        layout.root_kind,
+        layout.root_index,
+        layout.root_word,
+    };
+}
+
+std::vector<std::vector<gf::Fp3>>
+BuildSyntheticDecoderTrace(
+    const dj::LayoutV1& layout,
+    const std::vector<gf::Fp3>& challenge,
+    uint32_t rows = 8)
+{
+    const uint32_t width =
+        layout.n_columns +
+        kDecoderHornerAuxColumnsV1;
+    std::vector<std::vector<gf::Fp3>> columns(
+        width,
+        std::vector<gf::Fp3>(
+            rows, gf::Fp3::Zero()));
+    for (uint32_t row = 0;
+         row < 2; ++row) {
+        columns[layout.active][row] =
+            gf::Fp3::One();
+        columns[layout.source_kind][row] =
+            gf::Fp3::FromFp(3 + row);
+        columns[layout.source_occurrence][row] =
+            gf::Fp3::FromFp(row);
+        columns[layout.source_address][row] =
+            gf::Fp3::FromFp(40 + row);
+        columns[layout.source_value][row] =
+            gf::Fp3::FromFp(70 + row);
+        columns[layout.consumer_kind][row] =
+            columns[layout.source_kind][row];
+        columns[layout.consumer_occurrence][row] =
+            columns[layout.source_occurrence][row];
+        columns[layout.consumer_address][row] =
+            columns[layout.source_address][row];
+        columns[layout.consumer_pin][row] =
+            columns[layout.source_value][row];
+        columns[layout.consumer_claim][row] =
+            columns[layout.source_value][row];
+    }
+    for (uint32_t row = 0;
+         row < rows; ++row) {
+        std::vector<gf::Fp3> values(width);
+        for (uint32_t column = 0;
+             column < width; ++column) {
+            values[column] =
+                columns[column][row];
+        }
+        FillDecoderHornerRow(
+            layout, challenge, values);
+        for (uint32_t column = 0;
+             column < width; ++column) {
+            columns[column][row] =
+                values[column];
+        }
+        for (uint32_t lane = 0;
+             lane <
+                 dj::kDecoderJoinBusLanesV1;
+             ++lane) {
+            if (gf::Eq(
+                    columns[
+                        layout.active][row],
+                    gf::Fp3::One())) {
+                columns[
+                    layout.source_inverse[
+                        lane]][row] =
+                    gf::Inv(
+                        columns[
+                            DecoderAuxColumn(
+                                layout, lane,
+                                0, 3)][row]);
+                columns[
+                    layout.consumer_inverse[
+                        lane]][row] =
+                    gf::Inv(
+                        columns[
+                            DecoderAuxColumn(
+                                layout, lane,
+                                1, 3)][row]);
+            }
+        }
+    }
+    for (uint32_t lane = 0;
+         lane < dj::kDecoderJoinBusLanesV1;
+         ++lane) {
+        gf::Fp3 running =
+            gf::Fp3::Zero();
+        for (uint32_t row = 0;
+             row < rows; ++row) {
+            columns[
+                layout.running[lane]][row] =
+                running;
+            running = gf::Add(
+                running,
+                gf::Sub(
+                    columns[
+                        layout.source_inverse[
+                            lane]][row],
+                    columns[
+                        layout.consumer_inverse[
+                            lane]][row]));
+        }
+    }
+    return columns;
+}
+
+void InstallDecoderManifest(
+    const dj::LayoutV1& layout,
+    const std::vector<std::vector<gf::Fp3>>& columns,
+    aq::AirConstraintSystem<gf::Fp3>& cs)
+{
+    for (uint32_t column :
+         DecoderManifestColumns(layout)) {
+        cs.preprocessed.emplace_back(
+            column, columns[column]);
+    }
+    cs.preprocessed_pin_ood = true;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -1340,6 +1581,459 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    decoder_horner_bytecode_matches_native_and_rejects_offset_substitution)
+{
+    const auto input = ActualInput();
+    const auto shard =
+        OneQueryMerkleShard(input);
+    const auto decoder =
+        OneQueryDecoder(input, shard);
+    const auto challenge =
+        DecoderChallengeVector(decoder);
+    const auto canonical_table =
+        BuildDecoderProgramTableV1(
+            decoder.layout);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            canonical_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::ProgramTableIsChallengeIndependent(
+            canonical_table));
+    BOOST_CHECK_EQUAL(
+        canonical_table.challenge_width,
+        kDecoderChallengeColumnsV1);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        30U);
+    BOOST_CHECK_EQUAL(
+        canonical_table.current_width,
+        decoder.layout.n_columns +
+            kDecoderHornerAuxColumnsV1);
+    for (const auto& program :
+         canonical_table.programs) {
+        BOOST_CHECK_LE(
+            program.declared_degree, 2U);
+    }
+
+    aq::AirConstraintSystem<gf::Fp3>
+        canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            canonical_table,
+            decoder.cs.n_rows,
+            challenge,
+            canonical_cs, &why),
+        why);
+    std::vector<std::vector<gf::Fp3>>
+        static_columns(
+            canonical_table.current_width,
+            std::vector<gf::Fp3>(
+                decoder.cs.n_rows,
+                gf::Fp3::Zero()));
+    for (uint32_t column = 0;
+         column < decoder.layout.n_columns;
+         ++column) {
+        static_columns[column] =
+            decoder.columns[column];
+    }
+    for (uint32_t row = 0;
+         row < decoder.cs.n_rows;
+         ++row) {
+        std::vector<gf::Fp3> values(
+            canonical_table.current_width);
+        for (uint32_t column = 0;
+             column <
+                 canonical_table.current_width;
+             ++column) {
+            values[column] =
+                static_columns[column][row];
+        }
+        FillDecoderHornerRow(
+            decoder.layout,
+            challenge, values);
+        for (uint32_t column =
+                 decoder.layout.n_columns;
+             column <
+                 canonical_table.current_width;
+             ++column) {
+            static_columns[column][row] =
+                values[column];
+        }
+    }
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs,
+            static_columns),
+        0U);
+
+    // Differentially compare the ten original semantic equations per lane
+    // against the degree-reduced table on arbitrary Fp3 rows. The added
+    // Horner equations are checked independently to vanish after their
+    // deterministic auxiliary construction.
+    for (uint32_t probe = 0;
+         probe < 3; ++probe) {
+        std::vector<gf::Fp3> current(
+            canonical_table.current_width);
+        std::vector<gf::Fp3> next(
+            canonical_table.current_width);
+        for (uint32_t column = 0;
+             column <
+                 decoder.layout.n_columns;
+             ++column) {
+            current[column] = {
+                gf::FromU64(
+                    3 + probe * 17 + column),
+                gf::FromU64(
+                    5 + probe * 19 +
+                        2 * column),
+                gf::FromU64(
+                    7 + probe * 23 +
+                        3 * column)};
+            next[column] = {
+                gf::FromU64(
+                    11 + probe * 29 + column),
+                gf::FromU64(
+                    13 + probe * 31 +
+                        2 * column),
+                gf::FromU64(
+                    17 + probe * 37 +
+                        3 * column)};
+        }
+        FillDecoderHornerRow(
+            decoder.layout,
+            challenge, current);
+        FillDecoderHornerRow(
+            decoder.layout,
+            challenge, next);
+        for (uint32_t ordinal = 0;
+             ordinal < 4; ++ordinal) {
+            gf::Fp3 interpreted;
+            BOOST_REQUIRE_MESSAGE(
+                cb::EvaluateProgram(
+                    canonical_table.programs[
+                        ordinal],
+                    current, next,
+                    challenge,
+                    interpreted, &why),
+                why);
+            BOOST_CHECK(
+                gf::Eq(
+                    interpreted,
+                    decoder.cs.constraints[
+                        ordinal].eval(
+                            current, next)));
+        }
+        for (uint32_t lane = 0;
+             lane <
+                 dj::kDecoderJoinBusLanesV1;
+             ++lane) {
+            const uint32_t canonical_base =
+                4 + 13 * lane;
+            const uint32_t native_base =
+                4 + 5 * lane;
+            for (uint32_t horner = 0;
+                 horner < 4; ++horner) {
+                gf::Fp3 interpreted;
+                BOOST_REQUIRE_MESSAGE(
+                    cb::EvaluateProgram(
+                        canonical_table.programs[
+                            canonical_base +
+                                horner],
+                        current, next,
+                        challenge,
+                        interpreted, &why),
+                    why);
+                BOOST_CHECK(
+                    gf::IsZero(interpreted));
+                BOOST_REQUIRE_MESSAGE(
+                    cb::EvaluateProgram(
+                        canonical_table.programs[
+                            canonical_base + 5 +
+                                horner],
+                        current, next,
+                        challenge,
+                        interpreted, &why),
+                    why);
+                BOOST_CHECK(
+                    gf::IsZero(interpreted));
+            }
+            const std::array<
+                std::pair<uint32_t, uint32_t>,
+                5>
+                parity{{
+                    {canonical_base + 4,
+                     native_base},
+                    {canonical_base + 9,
+                     native_base + 1},
+                    {canonical_base + 10,
+                     native_base + 2},
+                    {canonical_base + 11,
+                     native_base + 3},
+                    {canonical_base + 12,
+                     native_base + 4},
+                }};
+            for (const auto& [
+                     bytecode_ordinal,
+                     native_ordinal] :
+                 parity) {
+                gf::Fp3 interpreted;
+                BOOST_REQUIRE_MESSAGE(
+                    cb::EvaluateProgram(
+                        canonical_table.programs[
+                            bytecode_ordinal],
+                        current, next,
+                        challenge,
+                        interpreted, &why),
+                    why);
+                BOOST_CHECK_MESSAGE(
+                    gf::Eq(
+                        interpreted,
+                        decoder.cs.constraints[
+                            native_ordinal].eval(
+                                current, next)),
+                    "Decoder differential mismatch"
+                        << " probe=" << probe
+                        << " bytecode="
+                        << bytecode_ordinal
+                        << " native="
+                        << native_ordinal);
+            }
+        }
+    }
+
+    // Fixed-offset proof attack: changing source_value can be made valid only
+    // by substituting both source h1 programs to read consumer_claim. A proof
+    // for that different table must be rejected by the canonical verifier.
+    const auto layout =
+        dj::CanonicalLayoutV1();
+    const std::vector<gf::Fp3>
+        synthetic_challenge{
+            gf::Fp3::FromFp(11),
+            gf::Fp3::FromFp(13),
+            gf::Fp3::FromFp(17),
+            gf::Fp3::FromFp(19),
+        };
+    const auto small_table =
+        BuildDecoderProgramTableV1(layout);
+    aq::AirConstraintSystem<gf::Fp3>
+        small_canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            small_table, 8,
+            synthetic_challenge,
+            small_canonical_cs, &why),
+        why);
+    auto forged =
+        BuildSyntheticDecoderTrace(
+            layout, synthetic_challenge);
+    InstallDecoderManifest(
+        layout, forged,
+        small_canonical_cs);
+    forged[layout.source_value][0] =
+        gf::Add(
+            forged[layout.source_value][0],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            small_canonical_cs, forged),
+        0U);
+
+    auto substituted_table =
+        small_table;
+    for (uint32_t lane = 0;
+         lane < dj::kDecoderJoinBusLanesV1;
+         ++lane) {
+        auto& program =
+            substituted_table.programs[
+                4 + 13 * lane];
+        program.instructions = {
+            Load(
+                cb::Opcode::Current,
+                DecoderAuxColumn(
+                    layout, lane, 0, 0)),
+            Load(
+                cb::Opcode::Current,
+                layout.source_address),
+            Load(
+                cb::Opcode::Challenge,
+                lane),
+            Load(
+                cb::Opcode::Current,
+                layout.consumer_claim),
+            Binary(cb::Opcode::Mul, 2, 3),
+            Binary(cb::Opcode::Add, 1, 4),
+            Binary(cb::Opcode::Sub, 0, 5),
+        };
+        program.declared_degree = 2;
+    }
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        cb::CommitProgramTableAlgHash(
+            small_table));
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table, 8,
+            synthetic_challenge,
+            substituted_cs, &why),
+        why);
+    InstallDecoderManifest(
+        layout, forged,
+        substituted_cs);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs, forged),
+        0U);
+    const auto manifest =
+        DecoderManifestColumns(layout);
+    const auto malicious =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, forged,
+            manifest, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        malicious.ok, malicious.note);
+    BOOST_REQUIRE(
+        malicious.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            small_canonical_cs,
+            malicious.proof,
+            manifest, uint256::ONE,
+            &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    decoder_challenge_and_child_root_carries_stay_fail_closed)
+{
+    const auto layout =
+        dj::CanonicalLayoutV1();
+    const auto table =
+        BuildDecoderProgramTableV1(layout);
+    const std::vector<gf::Fp3> challenge{
+        gf::Fp3::FromFp(11),
+        gf::Fp3::FromFp(13),
+        gf::Fp3::FromFp(17),
+        gf::Fp3::FromFp(19),
+    };
+    auto columns =
+        BuildSyntheticDecoderTrace(
+            layout, challenge);
+    columns[layout.root_active][0] =
+        gf::Fp3::One();
+    columns[layout.root_kind][0] =
+        gf::Fp3::FromFp(2);
+    columns[layout.root_index][0] =
+        gf::Fp3::FromFp(3);
+    columns[layout.root_word][0] =
+        gf::Fp3::FromFp(4);
+    columns[layout.root_value][0] =
+        gf::Fp3::FromFp(0x1234);
+
+    aq::AirConstraintSystem<gf::Fp3>
+        canonical_cs;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, 8, challenge,
+            canonical_cs, &why),
+        why);
+    InstallDecoderManifest(
+        layout, columns, canonical_cs);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs, columns),
+        0U);
+
+    // Child root values are now ordinary rather than disguised R0, but no
+    // local Decoder equation consumes them. This concrete attack keeps the
+    // child-root carry and recursive authority false.
+    auto wrong_root = columns;
+    wrong_root[layout.root_value][0] =
+        gf::Add(
+            wrong_root[layout.root_value][0],
+            gf::Fp3::One());
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs, wrong_root),
+        0U);
+
+    // The ProgramTable is independent of the challenge value. A fixed tape
+    // fails under a different verifier challenge, and a freshly recomputed
+    // alternate tape can prove only under that alternate challenge. Once the
+    // later transcript carry supplies the canonical challenge, transplanting
+    // the proof is rejected at proof level.
+    auto alternate_challenge =
+        challenge;
+    alternate_challenge[0] =
+        gf::Add(
+            alternate_challenge[0],
+            gf::Fp3::One());
+    aq::AirConstraintSystem<gf::Fp3>
+        alternate_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, 8,
+            alternate_challenge,
+            alternate_cs, &why),
+        why);
+    InstallDecoderManifest(
+        layout, columns, alternate_cs);
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            alternate_cs, columns),
+        0U);
+
+    auto alternate_columns =
+        BuildSyntheticDecoderTrace(
+            layout, alternate_challenge);
+    alternate_columns[layout.root_active][0] =
+        columns[layout.root_active][0];
+    alternate_columns[layout.root_kind][0] =
+        columns[layout.root_kind][0];
+    alternate_columns[layout.root_index][0] =
+        columns[layout.root_index][0];
+    alternate_columns[layout.root_word][0] =
+        columns[layout.root_word][0];
+    alternate_columns[layout.root_value][0] =
+        columns[layout.root_value][0];
+    alternate_cs.preprocessed.clear();
+    InstallDecoderManifest(
+        layout, alternate_columns,
+        alternate_cs);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            alternate_cs,
+            alternate_columns),
+        0U);
+    const auto manifest =
+        DecoderManifestColumns(layout);
+    const auto alternate_proof =
+        aq::AirQuotientProveRowsSplitRap(
+            alternate_cs,
+            alternate_columns,
+            manifest, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        alternate_proof.ok,
+        alternate_proof.note);
+    BOOST_REQUIRE(
+        alternate_proof.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            canonical_cs,
+            alternate_proof.proof,
+            manifest, uint256::ONE,
+            &why));
+}
+
+BOOST_AUTO_TEST_CASE(
     exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
@@ -1392,11 +2086,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product
             .phase_constraint_systems_canonical_bytecode,
-        3U);
+        4U);
     BOOST_CHECK_EQUAL(
         product
             .phase_r0_tables_statement_manifest_only,
-        3U);
+        4U);
     BOOST_CHECK(
         product
             .parent_join_r0_statement_manifest_only);
@@ -1483,8 +2177,53 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !product
              .merkle_fold_transcript_and_opening_carry_complete);
+    BOOST_CHECK(
+        product
+            .decoder_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .decoder_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.decoder_program_constraints,
+        30U);
+    BOOST_CHECK_EQUAL(
+        product
+            .decoder_statement_manifest_r0_columns,
+        11U);
+    BOOST_CHECK_EQUAL(
+        product.decoder_proof_tape_cells,
+        product.decoder.layout.n_columns +
+            kDecoderHornerAuxColumnsV1 -
+            11U);
+    BOOST_CHECK(
+        product
+            .decoder_proof_tape_cells_ordinary);
+    BOOST_CHECK(
+        product
+            .decoder_proof_tape_fixed_offsets);
+    BOOST_CHECK(
+        product
+            .decoder_degree_reduced_horner_chain);
+    BOOST_CHECK(
+        product
+            .decoder_r0_statement_manifest_only);
+    BOOST_CHECK(
+        !product
+             .decoder_cs_independent_of_child_witness);
+    BOOST_CHECK(
+        product
+            .decoder_challenge_columns_post_commit);
+    BOOST_CHECK(
+        product
+            .decoder_program_challenge_independent);
+    BOOST_CHECK(
+        !product
+             .decoder_challenge_carry_complete);
+    BOOST_CHECK(
+        !product
+             .decoder_child_root_carry_complete);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 1446U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 1443U);
     BOOST_CHECK_EQUAL(
         product.max_constraint_degree, 3U);
     BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);

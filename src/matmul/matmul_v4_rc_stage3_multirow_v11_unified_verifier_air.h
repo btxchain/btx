@@ -31,6 +31,11 @@ inline constexpr uint16_t kVersionV1 = 1;
 inline constexpr uint32_t kQ96QueriesV1 = 96;
 inline constexpr uint32_t kTraceRowsCapV1 = 1U << 20;
 inline constexpr uint32_t kLdeRowsCapV1 = 1U << 24;
+inline constexpr uint32_t kDecoderChallengeColumnsV1 = 4;
+inline constexpr uint32_t kDecoderHornerStagesV1 = 4;
+inline constexpr uint32_t kDecoderHornerAuxColumnsV1 =
+    dj::kDecoderJoinBusLanesV1 * 2 *
+    kDecoderHornerStagesV1;
 
 enum class PhaseV1 : uint8_t {
     ParentJoin = 0,
@@ -175,6 +180,29 @@ struct ProductV1 {
     bool merkle_fold_cs_independent_of_child_witness{false};
     /** Open until beta/x/openings/final-value are carried from their owners. */
     bool merkle_fold_transcript_and_opening_carry_complete{false};
+    alg_hash::Digest decoder_program_root{};
+    uint32_t decoder_program_constraints{0};
+    bool decoder_constraints_canonical_bytecode{false};
+    bool decoder_program_root_recomputed{false};
+    uint32_t decoder_statement_manifest_r0_columns{0};
+    uint32_t decoder_proof_tape_cells{0};
+    bool decoder_proof_tape_cells_ordinary{false};
+    bool decoder_proof_tape_fixed_offsets{false};
+    /**
+     * Four Horner auxiliaries per source/consumer tuple and LogUp lane keep
+     * the challenge-independent Decoder relation at degree two.  Expanding
+     * gamma^4 inline would be degree six (seven after phase gating) and exceed
+     * the production LDE cap.
+     */
+    bool decoder_degree_reduced_horner_chain{false};
+    bool decoder_r0_statement_manifest_only{false};
+    bool decoder_cs_independent_of_child_witness{false};
+    bool decoder_challenge_columns_post_commit{false};
+    bool decoder_program_challenge_independent{false};
+    /** False until the parent transcript supplies gamma/alpha in this proof. */
+    bool decoder_challenge_carry_complete{false};
+    /** False until child receipt/root values are equality-carried here. */
+    bool decoder_child_root_carry_complete{false};
     uint32_t phase_constraint_systems_canonical_bytecode{0};
     uint32_t phase_r0_tables_statement_manifest_only{0};
     bool trace_cap_fits{false};
@@ -222,6 +250,17 @@ BuildMerkleHashProgramTableV1(
 BuildMerkleFoldProgramTableV1(
     const mf::FoldLayoutV1& layout =
         mf::CanonicalFoldLayoutV1());
+
+/**
+ * Canonical challenge-independent bytecode for the dual-Fp3 Decoder LogUp
+ * relation.  The table extends the 24-column Decoder layout with sixteen
+ * ordinary Horner auxiliaries and reads (gamma_0, gamma_1, alpha_0, alpha_1)
+ * exclusively through the verifier-owned post-commit Challenge class.
+ */
+[[nodiscard]] cb::ProgramTable
+BuildDecoderProgramTableV1(
+    const dj::LayoutV1& layout =
+        dj::CanonicalLayoutV1());
 
 /**
  * Append the production acceptance-output constraints through the canonical

@@ -316,6 +316,19 @@ struct BytecodeExprV1 {
             instructions.size() - 1);
     }
 
+    uint32_t Challenge(uint32_t column)
+    {
+        cb::Instruction instruction;
+        instruction.opcode = cb::Opcode::Challenge;
+        instruction.lhs = column;
+        instructions.push_back(instruction);
+        // Constraint-bytecode intentionally accounts verifier-owned
+        // post-commit challenge columns at algebraic degree one.
+        degrees.push_back(1);
+        return static_cast<uint32_t>(
+            instructions.size() - 1);
+    }
+
     uint32_t Constant(const Fp3& value)
     {
         cb::Instruction instruction;
@@ -384,7 +397,8 @@ void AppendBytecodeProgramKindV1(
         table.current_width;
     program.next_width =
         table.next_width;
-    program.challenge_width = 0;
+    program.challenge_width =
+        table.challenge_width;
     program.instructions =
         std::move(expression.instructions);
     table.programs.push_back(
@@ -427,6 +441,296 @@ std::vector<uint32_t> PreprocessedColumns(
         std::unique(out.begin(), out.end()),
         out.end());
     return out;
+}
+
+struct DecoderHornerLayoutV1 {
+    // [lane][0 = source, 1 = consumer][stage]:
+    // address+gamma*value, occurrence+gamma*h1,
+    // kind+gamma*h2, alpha+gamma*h3.
+    std::array<
+        std::array<
+            std::array<
+                uint32_t,
+                kDecoderHornerStagesV1>,
+            2>,
+        dj::kDecoderJoinBusLanesV1> column{};
+    uint32_t n_columns{0};
+};
+
+DecoderHornerLayoutV1 DecoderHornerLayout(
+    const dj::LayoutV1& decoder)
+{
+    DecoderHornerLayoutV1 out;
+    uint32_t column = decoder.n_columns;
+    for (auto& lane : out.column) {
+        for (auto& side : lane) {
+            for (auto& stage : side) {
+                stage = column++;
+            }
+        }
+    }
+    out.n_columns = column;
+    return out;
+}
+
+std::vector<Fp3> DecoderChallenges(
+    const dj::ProductV1& decoder)
+{
+    return {
+        decoder.gamma[0],
+        decoder.gamma[1],
+        decoder.alpha[0],
+        decoder.alpha[1],
+    };
+}
+
+bool BuildDecoderStaticPhaseV1(
+    const dj::ProductV1& decoder,
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>& columns,
+    std::vector<uint32_t>& statement_manifest_columns,
+    std::string* why)
+{
+    cs = {};
+    columns.clear();
+    statement_manifest_columns.clear();
+    if (!decoder.valid ||
+        decoder.layout.n_columns == 0 ||
+        decoder.columns.size() !=
+            decoder.layout.n_columns) {
+        if (why != nullptr) {
+            *why = "decoder_static_input_shape";
+        }
+        return false;
+    }
+    const cb::ProgramTable table =
+        BuildDecoderProgramTableV1(
+            decoder.layout);
+    const auto challenge =
+        DecoderChallenges(decoder);
+    if (table.programs.size() != 30 ||
+        table.current_width !=
+            decoder.layout.n_columns +
+                kDecoderHornerAuxColumnsV1 ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            table, decoder.cs.n_rows,
+            challenge, cs, why)) {
+        return false;
+    }
+    columns.assign(
+        cs.n_columns,
+        std::vector<Fp3>(
+            cs.n_rows, Fp3::Zero()));
+    for (uint32_t column = 0;
+         column < decoder.layout.n_columns;
+         ++column) {
+        if (decoder.columns[column].size() !=
+            cs.n_rows) {
+            if (why != nullptr) {
+                *why =
+                    "decoder_static_column_rows";
+            }
+            return false;
+        }
+        columns[column] =
+            decoder.columns[column];
+    }
+    const auto aux =
+        DecoderHornerLayout(decoder.layout);
+    for (uint32_t lane = 0;
+         lane < dj::kDecoderJoinBusLanesV1;
+         ++lane) {
+        const Fp3 gamma =
+            decoder.gamma[lane];
+        const Fp3 alpha =
+            decoder.alpha[lane];
+        for (uint32_t side = 0;
+             side < 2; ++side) {
+            const uint32_t kind =
+                side == 0
+                ? decoder.layout.source_kind
+                : decoder.layout.consumer_kind;
+            const uint32_t occurrence =
+                side == 0
+                ? decoder.layout.source_occurrence
+                : decoder.layout.consumer_occurrence;
+            const uint32_t address =
+                side == 0
+                ? decoder.layout.source_address
+                : decoder.layout.consumer_address;
+            const uint32_t value =
+                side == 0
+                ? decoder.layout.source_value
+                : decoder.layout.consumer_claim;
+            for (uint32_t row = 0;
+                 row < cs.n_rows; ++row) {
+                const Fp3 h1 = gf::Add(
+                    columns[address][row],
+                    gf::Mul(
+                        gamma,
+                        columns[value][row]));
+                const Fp3 h2 = gf::Add(
+                    columns[occurrence][row],
+                    gf::Mul(gamma, h1));
+                const Fp3 h3 = gf::Add(
+                    columns[kind][row],
+                    gf::Mul(gamma, h2));
+                const Fp3 term = gf::Add(
+                    alpha,
+                    gf::Mul(gamma, h3));
+                columns[
+                    aux.column[lane][side][0]][row] = h1;
+                columns[
+                    aux.column[lane][side][1]][row] = h2;
+                columns[
+                    aux.column[lane][side][2]][row] = h3;
+                columns[
+                    aux.column[lane][side][3]][row] = term;
+            }
+        }
+    }
+
+    // Independently regenerate the immutable ABI/role/address schedule from
+    // typed inventories. Merely copying these cells from decoder.columns and
+    // calling them "manifest" would leave a prover-owned R0 surface.
+    using ColumnValues =
+        std::pair<uint32_t, std::vector<Fp3>>;
+    std::vector<ColumnValues> manifest;
+    const auto add_manifest =
+        [&manifest, &cs](uint32_t column) {
+            manifest.emplace_back(
+                column,
+                std::vector<Fp3>(
+                    cs.n_rows,
+                    Fp3::Zero()));
+            return manifest.size() - 1;
+        };
+    const size_t active_index =
+        add_manifest(decoder.layout.active);
+    const size_t source_kind_index =
+        add_manifest(decoder.layout.source_kind);
+    const size_t source_occurrence_index =
+        add_manifest(
+            decoder.layout.source_occurrence);
+    const size_t source_address_index =
+        add_manifest(decoder.layout.source_address);
+    const size_t consumer_kind_index =
+        add_manifest(decoder.layout.consumer_kind);
+    const size_t consumer_occurrence_index =
+        add_manifest(
+            decoder.layout.consumer_occurrence);
+    const size_t consumer_address_index =
+        add_manifest(decoder.layout.consumer_address);
+    const size_t root_active_index =
+        add_manifest(decoder.layout.root_active);
+    const size_t root_kind_index =
+        add_manifest(decoder.layout.root_kind);
+    const size_t root_index_index =
+        add_manifest(decoder.layout.root_index);
+    const size_t root_word_index =
+        add_manifest(decoder.layout.root_word);
+    if (decoder.source_occurrences.size() !=
+            decoder.consumer_occurrences.size() ||
+        decoder.source_occurrences.size() !=
+            decoder.real_rows ||
+        uint64_t{decoder.child_roots.size()} *
+                dj::kDecoderJoinRootWordsV1 >
+            cs.n_rows) {
+        if (why != nullptr) {
+            *why =
+                "decoder_static_manifest_inventory";
+        }
+        return false;
+    }
+    for (uint32_t row = 0;
+         row < decoder.real_rows; ++row) {
+        const auto& source =
+            decoder.source_occurrences[row];
+        const auto& consumer =
+            decoder.consumer_occurrences[row];
+        manifest[active_index].second[row] =
+            Fp3::One();
+        manifest[source_kind_index].second[row] =
+            gf::FromU64_3(
+                static_cast<uint8_t>(
+                    source.kind));
+        manifest[source_occurrence_index]
+            .second[row] =
+            gf::FromU64_3(
+                source.occurrence_id);
+        manifest[source_address_index]
+            .second[row] =
+            gf::FromU64_3(
+                source.source_address);
+        manifest[consumer_kind_index].second[row] =
+            gf::FromU64_3(
+                static_cast<uint8_t>(
+                    consumer.kind));
+        manifest[consumer_occurrence_index]
+            .second[row] =
+            gf::FromU64_3(
+                consumer.occurrence_id);
+        manifest[consumer_address_index]
+            .second[row] =
+            gf::FromU64_3(
+                consumer.source_address);
+    }
+    uint32_t root_row = 0;
+    for (const auto& pin :
+         decoder.child_roots) {
+        for (uint32_t word = 0;
+             word <
+                 dj::kDecoderJoinRootWordsV1;
+             ++word, ++root_row) {
+            manifest[root_active_index]
+                .second[root_row] =
+                Fp3::One();
+            manifest[root_kind_index]
+                .second[root_row] =
+                gf::FromU64_3(pin.kind);
+            manifest[root_index_index]
+                .second[root_row] =
+                gf::FromU64_3(pin.index);
+            manifest[root_word_index]
+                .second[root_row] =
+                gf::FromU64_3(word);
+        }
+    }
+    for (const auto& [column, canonical] :
+         manifest) {
+        if (column >= columns.size() ||
+            canonical.size() !=
+                columns[column].size()) {
+            if (why != nullptr) {
+                *why =
+                    "decoder_static_manifest_shape";
+            }
+            return false;
+        }
+        for (uint32_t row = 0;
+             row < cs.n_rows; ++row) {
+            if (!gf::Eq(
+                    canonical[row],
+                    columns[column][row])) {
+                if (why != nullptr) {
+                    *why =
+                        "decoder_static_manifest_mismatch";
+                }
+                return false;
+            }
+        }
+        statement_manifest_columns.push_back(
+            column);
+    }
+    cs.preprocessed.clear();
+    cs.preprocessed_row_group_roots.clear();
+    for (auto& [column, canonical] :
+         manifest) {
+        cs.preprocessed.emplace_back(
+            column, std::move(canonical));
+    }
+    cs.preprocessed_pin_ood = true;
+    return true;
 }
 
 void AddConstraint(
@@ -802,6 +1106,213 @@ cb::ProgramTable BuildMerkleFoldProgramTableV1(
     if (table.programs.size() != 13 ||
         !cb::ValidateProgramTable(
             table, &why)) {
+        return {};
+    }
+    return table;
+}
+
+cb::ProgramTable BuildDecoderProgramTableV1(
+    const dj::LayoutV1& layout)
+{
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    const auto aux =
+        DecoderHornerLayout(layout);
+    table.current_width =
+        aux.n_columns;
+    table.next_width =
+        aux.n_columns;
+    table.challenge_width =
+        kDecoderChallengeColumnsV1;
+    if (layout.n_columns == 0 ||
+        layout.root_value + 1 !=
+            layout.n_columns ||
+        aux.n_columns !=
+            layout.n_columns +
+                kDecoderHornerAuxColumnsV1) {
+        return table;
+    }
+    const Fp3 one = Fp3::One();
+    const auto append_boolean =
+        [&table, one](uint32_t column) {
+            AppendBytecodeProgramV1(
+                table,
+                [column, one](
+                    BytecodeExprV1& e) {
+                    const uint32_t value =
+                        e.Current(column);
+                    e.Mul(
+                        value,
+                        e.Sub(
+                            value,
+                            e.Constant(one)));
+                });
+        };
+    append_boolean(layout.active);
+    append_boolean(layout.root_active);
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(layout.active),
+                e.Sub(
+                    e.Current(
+                        layout.consumer_claim),
+                    e.Current(
+                        layout.consumer_pin)));
+        });
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kTransition,
+        [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Sub(
+                    e.Constant(one),
+                    e.Current(layout.active)),
+                e.Next(layout.active));
+        });
+
+    for (uint32_t lane = 0;
+         lane < dj::kDecoderJoinBusLanesV1;
+         ++lane) {
+        const uint32_t gamma_column = lane;
+        const uint32_t alpha_column = 2 + lane;
+        const auto append_tuple =
+            [&](uint32_t side,
+                uint32_t kind,
+                uint32_t occurrence,
+                uint32_t address,
+                uint32_t value,
+                uint32_t inverse) {
+                const auto h =
+                    aux.column[lane][side];
+                // Reverse Horner:
+                // h1 = address + gamma * value
+                // h2 = occurrence + gamma * h1
+                // h3 = kind + gamma * h2
+                // h4 = alpha + gamma * h3.
+                // Every relation is degree two under the explicit
+                // post-challenge column accounting.
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[0]),
+                            e.Add(
+                                e.Current(address),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(value))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[1]),
+                            e.Add(
+                                e.Current(occurrence),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[0]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[2]),
+                            e.Add(
+                                e.Current(kind),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[1]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[3]),
+                            e.Add(
+                                e.Challenge(
+                                    alpha_column),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[2]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Mul(
+                                e.Current(inverse),
+                                e.Current(h[3])),
+                            e.Current(layout.active));
+                    });
+            };
+        append_tuple(
+            0,
+            layout.source_kind,
+            layout.source_occurrence,
+            layout.source_address,
+            layout.source_value,
+            layout.source_inverse[lane]);
+        append_tuple(
+            1,
+            layout.consumer_kind,
+            layout.consumer_occurrence,
+            layout.consumer_address,
+            layout.consumer_claim,
+            layout.consumer_inverse[lane]);
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kFirstRow,
+            [=](BytecodeExprV1& e) {
+                e.Current(
+                    layout.running[lane]);
+            });
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kTransition,
+            [=](BytecodeExprV1& e) {
+                const uint32_t increment =
+                    e.Sub(
+                        e.Current(
+                            layout.source_inverse[
+                                lane]),
+                        e.Current(
+                            layout.consumer_inverse[
+                                lane]));
+                e.Sub(
+                    e.Next(
+                        layout.running[lane]),
+                    e.Add(
+                        e.Current(
+                            layout.running[lane]),
+                        increment));
+            });
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kLastRow,
+            [=](BytecodeExprV1& e) {
+                e.Add(
+                    e.Current(
+                        layout.running[lane]),
+                    e.Sub(
+                        e.Current(
+                            layout.source_inverse[
+                                lane]),
+                        e.Current(
+                            layout.consumer_inverse[
+                                lane])));
+            });
+    }
+    std::string why;
+    if (table.programs.size() != 30 ||
+        !cb::ValidateProgramTable(
+            table, &why) ||
+        !cb::ProgramTableIsChallengeIndependent(
+            table)) {
         return {};
     }
     return table;
@@ -1370,6 +1881,99 @@ ProductV1 BuildProductV1(
     out.merkle_fold_transcript_and_opening_carry_complete =
         false;
 
+    const cb::ProgramTable decoder_program =
+        BuildDecoderProgramTableV1(
+            out.decoder.layout);
+    aq::AirConstraintSystem<Fp3>
+        decoder_static_cs;
+    std::vector<std::vector<Fp3>>
+        decoder_static_columns;
+    std::vector<uint32_t>
+        decoder_statement_manifest_columns;
+    if (decoder_program.programs.size() != 30 ||
+        decoder_program.current_width !=
+            out.decoder.layout.n_columns +
+                kDecoderHornerAuxColumnsV1 ||
+        !BuildDecoderStaticPhaseV1(
+            out.decoder,
+            decoder_static_cs,
+            decoder_static_columns,
+            decoder_statement_manifest_columns,
+            &why)) {
+        return fail(
+            "decoder_static_program:" +
+            why);
+    }
+    if (air_recurse::
+            CountWitnessViolationsOnH(
+                decoder_static_cs,
+                decoder_static_columns) != 0) {
+        return fail(
+            "decoder_static_witness");
+    }
+    out.decoder_program_root =
+        cb::CommitProgramTableAlgHash(
+            decoder_program);
+    const cb::ProgramTable
+        decoder_program_recomputed =
+            BuildDecoderProgramTableV1(
+                out.decoder.layout);
+    out.decoder_program_constraints =
+        static_cast<uint32_t>(
+            decoder_program.programs.size());
+    out.decoder_constraints_canonical_bytecode =
+        out.decoder_program_constraints == 30;
+    out.decoder_program_root_recomputed =
+        DigestNonzero(
+            out.decoder_program_root) &&
+        decoder_program_recomputed ==
+            decoder_program &&
+        cb::CommitProgramTableAlgHash(
+            decoder_program_recomputed) ==
+            out.decoder_program_root;
+    out.decoder_statement_manifest_r0_columns =
+        static_cast<uint32_t>(
+            decoder_statement_manifest_columns.size());
+    out.decoder_proof_tape_cells =
+        decoder_program.current_width -
+            out.decoder_statement_manifest_r0_columns;
+    out.decoder_proof_tape_cells_ordinary =
+        out.decoder_statement_manifest_r0_columns == 11 &&
+        out.decoder_proof_tape_cells ==
+            out.decoder.layout.n_columns +
+                kDecoderHornerAuxColumnsV1 -
+                11;
+    out.decoder_proof_tape_fixed_offsets =
+        out.decoder.layout.active == 0 &&
+        out.decoder.layout.root_value + 1 ==
+            out.decoder.layout.n_columns &&
+        decoder_program.current_width ==
+            out.decoder.layout.n_columns +
+                kDecoderHornerAuxColumnsV1;
+    out.decoder_degree_reduced_horner_chain =
+        out.decoder_constraints_canonical_bytecode &&
+        MaxDegree(decoder_static_cs) <= 2;
+    out.decoder_challenge_columns_post_commit =
+        decoder_program.challenge_width ==
+            kDecoderChallengeColumnsV1;
+    out.decoder_program_challenge_independent =
+        cb::ProgramTableIsChallengeIndependent(
+            decoder_program);
+    out.decoder_r0_statement_manifest_only =
+        out.decoder_proof_tape_cells_ordinary &&
+        out.decoder_proof_tape_fixed_offsets &&
+        out.decoder_degree_reduced_horner_chain &&
+        out.decoder_program_root_recomputed;
+    // The static relation no longer captures proof values or challenges in
+    // program/R0 bytes. Ownership still needs two separate same-proof links:
+    // transcript -> (gamma,alpha), and child receipts -> root_value.
+    out.decoder_challenge_carry_complete =
+        false;
+    out.decoder_child_root_carry_complete =
+        false;
+    out.decoder_cs_independent_of_child_witness =
+        false;
+
     const std::array<PhaseViewV1, kPhasesV1>
         views{{
             {PhaseV1::ParentJoin,
@@ -1385,8 +1989,8 @@ ProductV1 BuildProductV1(
              &out.deep_vm.cs,
              &out.deep_vm.columns},
             {PhaseV1::Decoder,
-             &out.decoder.cs,
-             &out.decoder.columns},
+             &decoder_static_cs,
+             &decoder_static_columns},
         }};
     for (const auto& view : views) {
         if (!ShapeExact(view)) {
@@ -1652,6 +2256,8 @@ ProductV1 BuildProductV1(
         (out.merkle_hash_constraints_canonical_bytecode
             ? 1U : 0U) +
         (out.merkle_fold_constraints_canonical_bytecode
+            ? 1U : 0U) +
+        (out.decoder_constraints_canonical_bytecode
             ? 1U : 0U);
     out.phase_r0_tables_statement_manifest_only =
         (out.parent_join_r0_statement_manifest_only
@@ -1659,6 +2265,8 @@ ProductV1 BuildProductV1(
         (out.merkle_hash_r0_statement_manifest_only
             ? 1U : 0U) +
         (out.merkle_fold_r0_statement_manifest_only
+            ? 1U : 0U) +
+        (out.decoder_r0_statement_manifest_only
             ? 1U : 0U);
     out.cs_independent_of_child_witness =
         out.phase_constraint_systems_canonical_bytecode ==
@@ -1719,7 +2327,7 @@ ProductV1 BuildProductV1(
                 out.merkle_fold.hash_cs.n_columns,
                 out.merkle_fold.fold_cs.n_columns,
                 out.deep_vm.cs.n_columns,
-                out.decoder.cs.n_columns});
+                decoder_static_cs.n_columns});
     out.one_hot_row_scheduler_constrained =
         true;
     out.local_boundary_kinds_preserved =
