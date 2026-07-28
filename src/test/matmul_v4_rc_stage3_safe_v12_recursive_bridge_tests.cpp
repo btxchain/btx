@@ -1705,6 +1705,75 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!direct.normalized_child_cells_bound);
     BOOST_CHECK(!direct.recursive_authority_ready);
     BOOST_REQUIRE(!direct.proof_cell_aliases.empty());
+    bridge::TypedSafeDirectVerifierCsV14 verifier_cs;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildTypedSafeDirectVerifierCsV14(
+            schedule.program,
+            direct.transcript_commitment,
+            verifier_cs, &why),
+        why);
+    BOOST_CHECK(verifier_cs.valid);
+    BOOST_CHECK(verifier_cs.public_program_rebuilt);
+    BOOST_CHECK(verifier_cs.witness_free);
+    BOOST_CHECK(
+        verifier_cs.no_proof_value_preprocessing);
+    BOOST_CHECK(
+        verifier_cs.physical_alias_inventory_complete);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.trace_rows, direct.trace_rows);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.active_rows, direct.active_rows);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.event_rows, direct.event_rows);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.receipt_rows, direct.receipt_rows);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.cs.n_rows, direct.cs.n_rows);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.cs.n_columns, direct.cs.n_columns);
+    BOOST_CHECK_EQUAL(
+        verifier_cs.cs.constraints.size(),
+        direct.cs.constraints.size());
+    BOOST_CHECK_EQUAL(
+        verifier_cs.cs.preprocessed.size(),
+        direct.cs.preprocessed.size());
+    BOOST_CHECK(
+        verifier_cs.proof_cell_aliases ==
+        direct.proof_cell_aliases);
+    for (size_t index = 0;
+         index < direct.cs.preprocessed.size();
+         ++index) {
+        BOOST_CHECK_EQUAL(
+            verifier_cs.cs.preprocessed[index].first,
+            direct.cs.preprocessed[index].first);
+        BOOST_REQUIRE_EQUAL(
+            verifier_cs.cs.preprocessed[index].second.size(),
+            direct.cs.preprocessed[index].second.size());
+        for (size_t row = 0;
+             row <
+                 direct.cs.preprocessed[index].second.size();
+             ++row) {
+            BOOST_CHECK(
+                gf::Eq(
+                    verifier_cs.cs
+                        .preprocessed[index].second[row],
+                    direct.cs
+                        .preprocessed[index].second[row]));
+        }
+    }
+    for (size_t index = 0;
+         index < direct.cs.constraints.size();
+         ++index) {
+        BOOST_CHECK_EQUAL(
+            verifier_cs.cs.constraints[index].name,
+            direct.cs.constraints[index].name);
+        BOOST_CHECK(
+            verifier_cs.cs.constraints[index].kind ==
+            direct.cs.constraints[index].kind);
+        BOOST_CHECK_EQUAL(
+            verifier_cs.cs.constraints[index].alg_degree,
+            direct.cs.constraints[index].alg_degree);
+    }
     uint64_t child_snapshot_aliases = 0;
     for (const auto& binding :
          schedule.child.transcript_word_bindings) {

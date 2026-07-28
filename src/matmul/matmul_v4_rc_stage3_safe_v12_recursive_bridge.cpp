@@ -5865,7 +5865,115 @@ bool BuildTypedDirectCsV14(
     return true;
 }
 
+std::vector<TypedSafeDirectAliasV14>
+BuildTypedDirectAliasInventoryV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const TypedDirectPlanV14& plan)
+{
+    const TypedSafeDirectParentLayoutV14 layout;
+    std::vector<TypedSafeDirectAliasV14> out;
+    out.reserve(plan.proof_owned_count);
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        const auto& spec = program[event];
+        const uint32_t blocks = static_cast<uint32_t>(
+            (spec.message.size() + 7) / 8);
+        for (uint32_t block = 0; block < blocks; ++block) {
+            const uint32_t receipt_row =
+                plan.receipt_message_row[event][block];
+            if (receipt_row ==
+                std::numeric_limits<uint32_t>::max()) {
+                continue;
+            }
+            uint32_t target = 0;
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal = 8 * block + lane;
+                if (ordinal >= spec.message.size() ||
+                    spec.message[ordinal].binding !=
+                        TypedSafeMessageBindingV13::ProofOwned) {
+                    continue;
+                }
+                out.push_back({
+                    event,
+                    ordinal,
+                    plan.event_block_row[event][block],
+                    layout.Message(lane),
+                    receipt_row,
+                    layout.Message(target),
+                });
+                ++target;
+            }
+        }
+    }
+    return out;
+}
+
 } // namespace
+
+bool BuildTypedSafeDirectVerifierCsV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const alg_hash::Digest& expected_transcript_commitment,
+    TypedSafeDirectVerifierCsV14& out,
+    std::string* why)
+{
+    out = {};
+    out.program_root =
+        CommitTypedSafeEventProgramV13(program);
+    out.expected_transcript_commitment =
+        expected_transcript_commitment;
+    TypedDirectPlanV14 plan;
+    if (out.program_root == alg_hash::Digest{} ||
+        !BuildTypedDirectCsV14(
+            program, out.program_root,
+            expected_transcript_commitment,
+            plan, out.cs, nullptr, why)) {
+        out = {};
+        return Fail(why, "v14_verifier_cs");
+    }
+    out.proof_cell_aliases =
+        BuildTypedDirectAliasInventoryV14(program, plan);
+    out.trace_rows = plan.trace_rows;
+    out.active_rows = plan.active_rows;
+    out.event_rows = plan.event_rows;
+    out.receipt_rows = plan.receipt_rows;
+    out.proof_owned_message_cells =
+        plan.proof_owned_count;
+    out.challenge_kinds_covered =
+        plan.kinds_covered;
+    out.public_program_rebuilt = true;
+    out.witness_free = true;
+    // BuildTypedDirectCsV14 installs only row-kind selectors, public program
+    // constants/tags and the caller's public receipt boundary.  ProofOwned
+    // Event/ReceiptMessage values remain ordinary trace columns.
+    out.no_proof_value_preprocessing =
+        std::all_of(
+            out.cs.preprocessed.begin(),
+            out.cs.preprocessed.end(),
+            [&](const auto& item) {
+                return item.first >= out.layout.active;
+            });
+    out.physical_alias_inventory_complete =
+        out.proof_cell_aliases.size() ==
+            out.proof_owned_message_cells;
+    out.valid =
+        out.cs.n_rows == out.trace_rows &&
+        out.cs.n_columns ==
+            kTypedSafeDirectParentColumnsV14 &&
+        out.public_program_rebuilt &&
+        out.witness_free &&
+        out.no_proof_value_preprocessing &&
+        out.physical_alias_inventory_complete &&
+        out.challenge_kinds_covered ==
+            kTypedSafeEventRequiredKindsV13;
+    out.note = out.valid
+        ? "witness-free V14 verifier CS and exact alias inventory rebuilt"
+        : "V14 witness-free verifier CS invalid";
+    if (!out.valid) {
+        out = {};
+        return Fail(why, "v14_verifier_cs_incomplete");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
 
 bool BuildTypedSafeDirectParentV14(
     const std::vector<TypedSafeEventProgramV13>& program,
@@ -5988,13 +6096,30 @@ bool BuildTypedSafeDirectParentV14(
         return false;
     }
 
-    TypedDirectPlanV14 plan;
-    if (!BuildTypedDirectCsV14(
-            program, out.program_root,
-            out.transcript_commitment,
-            plan, out.cs, &out.columns, why)) {
+    TypedSafeDirectVerifierCsV14 verifier_cs;
+    if (!BuildTypedSafeDirectVerifierCsV14(
+            program, out.transcript_commitment,
+            verifier_cs, why)) {
         return false;
     }
+    TypedDirectPlanV14 plan;
+    if (!BuildTypedDirectPlanV14(
+            program, out.program_root,
+            out.transcript_commitment,
+            plan, why)) {
+        return false;
+    }
+    out.cs = verifier_cs.cs;
+    out.columns.assign(
+        out.cs.n_columns,
+        std::vector<Fp3>(
+            out.cs.n_rows, Fp3::Zero()));
+    for (const auto& [column, values] :
+         out.cs.preprocessed) {
+        out.columns[column] = values;
+    }
+    out.proof_cell_aliases =
+        verifier_cs.proof_cell_aliases;
     const auto& layout = out.layout;
     std::array<gf::Fp, 4> receipt_tag{};
     if (!TypedEventTagV13(
@@ -6077,13 +6202,6 @@ bool BuildTypedSafeDirectParentV14(
                     input[target] = gf::Add(
                         receipt_state[target],
                         event_message[ordinal]);
-                    out.proof_cell_aliases.push_back({
-                        p.event, ordinal,
-                        p.paired_event_row,
-                        layout.Message(lane),
-                        row,
-                        layout.Message(target),
-                    });
                     ++target;
                 }
             }
@@ -6351,19 +6469,17 @@ bool VerifyTypedSafeDirectParentProofV14(
         !CanonicalRowsProof(proof.proof)) {
         return Fail(why, "v14_proof_envelope");
     }
-    TypedDirectPlanV14 plan;
-    aq::AirConstraintSystem<Fp3> cs;
-    if (!BuildTypedDirectCsV14(
-            program, program_root,
-            expected_transcript_commitment,
-            plan, cs, nullptr, why) ||
-        proof.trace_rows != plan.trace_rows ||
-        cs.n_columns !=
+    TypedSafeDirectVerifierCsV14 verifier_cs;
+    if (!BuildTypedSafeDirectVerifierCsV14(
+            program, expected_transcript_commitment,
+            verifier_cs, why) ||
+        proof.trace_rows != verifier_cs.trace_rows ||
+        verifier_cs.cs.n_columns !=
             kTypedSafeDirectParentColumnsV14) {
         return Fail(why, "v14_verifier_rebuild");
     }
     return aq::AirQuotientVerifyRows(
-        cs, proof.proof, relation_seed, why);
+        verifier_cs.cs, proof.proof, relation_seed, why);
 }
 
 } // namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge

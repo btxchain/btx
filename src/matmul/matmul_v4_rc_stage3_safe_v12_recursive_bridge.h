@@ -994,6 +994,45 @@ struct TypedSafeDirectAliasV14 {
         const TypedSafeDirectAliasV14&) = default;
 };
 
+/**
+ * Witness-free verifier reconstruction for the V14 ordinary-AIR leaf.
+ *
+ * The complete constraint system, every preprocessed selector/constant and
+ * the physical ProofOwned Event -> ReceiptMessage alias inventory are derived
+ * only from the typed public program and the public expected receipt.  No
+ * proof message value, event output or prover-supplied row enters this API.
+ *
+ * This is the construction a normalized parent can splice before it has a
+ * child witness.  It deliberately does not claim that the canonical child
+ * proof decoder has been joined to these exported locations.
+ */
+struct TypedSafeDirectVerifierCsV14 {
+    TypedSafeDirectParentLayoutV14 layout{};
+    alg_hash::Digest program_root{};
+    alg_hash::Digest expected_transcript_commitment{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<TypedSafeDirectAliasV14>
+        proof_cell_aliases;
+    uint32_t trace_rows{0};
+    uint32_t active_rows{0};
+    uint32_t event_rows{0};
+    uint32_t receipt_rows{0};
+    uint32_t proof_owned_message_cells{0};
+    uint32_t challenge_kinds_covered{0};
+    bool public_program_rebuilt{false};
+    bool witness_free{false};
+    bool no_proof_value_preprocessing{false};
+    bool physical_alias_inventory_complete{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildTypedSafeDirectVerifierCsV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const alg_hash::Digest& expected_transcript_commitment,
+    TypedSafeDirectVerifierCsV14& out,
+    std::string* why = nullptr);
+
 struct TypedSafeDirectParentProductV14 {
     TypedSafeDirectParentLayoutV14 layout{};
     std::vector<TypedSafeEventProgramV13> program;
