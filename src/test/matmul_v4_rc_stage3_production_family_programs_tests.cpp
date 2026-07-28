@@ -653,6 +653,8 @@ BOOST_AUTO_TEST_CASE(
     // Every SHA/XOF/ChaCha site executes the same selector-pinned fixed-opcode
     // AIR.  SHA and ChaCha have different immutable selector schedules, but
     // the 462 local polynomial constraints must match at every field point.
+    // Production appends one role-local selector-muxed OUTPUT relation so an
+    // endpoint can name one result column across all eleven opcode layouts.
     rc::air_quotient::AirConstraintSystem<Fp3> native_sha;
     rc::air_quotient::AirConstraintSystem<Fp3> native_chacha;
     BOOST_REQUIRE_MESSAGE(
@@ -690,19 +692,50 @@ BOOST_AUTO_TEST_CASE(
         rng ^= rng << 17;
         return U(rng);
     };
+    const auto opcode_output =
+        [](const std::vector<Fp3>& row) {
+            Fp3 selected = Fp3::Zero();
+            for (uint32_t opcode = 0; opcode <= 4; ++opcode) {
+                selected = gf::Add(
+                    selected,
+                    gf::Mul(
+                        row[ha::kFixedProgramSelectorBase + opcode],
+                        row[ha::ValueColumn(2)]));
+            }
+            for (uint32_t opcode = 5; opcode <= 6; ++opcode) {
+                selected = gf::Add(
+                    selected,
+                    gf::Mul(
+                        row[ha::kFixedProgramSelectorBase + opcode],
+                        row[ha::ValueColumn(3)]));
+            }
+            for (uint32_t opcode = 7; opcode <= 10; ++opcode) {
+                selected = gf::Add(
+                    selected,
+                    gf::Mul(
+                        row[ha::kFixedProgramSelectorBase + opcode],
+                        row[ha::ValueColumn(1)]));
+            }
+            return selected;
+        };
     for (const auto kind : fixed_sites) {
         const auto& table =
             sources[FindFamilyIndex(manifest, kind)].program;
-        BOOST_CHECK_GT(table.current_width, 1U);
+        BOOST_CHECK_EQUAL(
+            table.current_width,
+            rc::kRCStage3HashKernelOutputColumnV1 + 1U);
         BOOST_REQUIRE_EQUAL(
             table.programs.size(),
-            native_sha.constraints.size());
+            native_sha.constraints.size() + 1U);
         for (uint32_t trial = 0; trial < 4; ++trial) {
             std::vector<Fp3> current(table.current_width);
             std::vector<Fp3> next(table.next_width);
             for (auto& value : current) value = next_field();
             for (auto& value : next) value = next_field();
-            for (uint32_t i = 0; i < table.programs.size(); ++i) {
+            current[rc::kRCStage3HashKernelOutputColumnV1] =
+                opcode_output(current);
+            for (uint32_t i = 0;
+                 i < native_sha.constraints.size(); ++i) {
                 Fp3 interpreted;
                 BOOST_REQUIRE(cb::EvaluateProgram(
                     table.programs[i], current, next, interpreted));
@@ -713,6 +746,20 @@ BOOST_AUTO_TEST_CASE(
                     interpreted,
                     native_chacha.constraints[i].eval(current, next)));
             }
+            Fp3 output_residual;
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs.back(), current, next,
+                output_residual));
+            BOOST_CHECK(gf::IsZero(output_residual));
+            current[rc::kRCStage3HashKernelOutputColumnV1] =
+                gf::Add(
+                    current[
+                        rc::kRCStage3HashKernelOutputColumnV1],
+                    Fp3::One());
+            BOOST_REQUIRE(cb::EvaluateProgram(
+                table.programs.back(), current, next,
+                output_residual));
+            BOOST_CHECK(!gf::IsZero(output_residual));
         }
     }
     for (const auto [program_kind, site_kind] : {
@@ -739,13 +786,23 @@ BOOST_AUTO_TEST_CASE(
             ha::BuildFixedProgramAirWitness(
                 program, witness, columns, &why),
             why);
+        const uint32_t rows =
+            static_cast<uint32_t>(columns.front().size());
+        columns.emplace_back(rows, Fp3::Zero());
+        for (uint32_t row = 0; row < rows; ++row) {
+            std::vector<Fp3> current(
+                rc::kRCStage3HashKernelOutputColumnV1,
+                Fp3::Zero());
+            for (uint32_t col = 0; col < current.size(); ++col) {
+                current[col] = columns[col][row];
+            }
+            columns.back()[row] = opcode_output(current);
+        }
         const auto& table =
             sources[FindFamilyIndex(
                 manifest, site_kind)].program;
         BOOST_REQUIRE_EQUAL(
             columns.size(), table.current_width);
-        const uint32_t rows =
-            static_cast<uint32_t>(columns.front().size());
         for (uint32_t row = 0; row < rows; ++row) {
             std::vector<Fp3> current(table.current_width);
             std::vector<Fp3> next(table.next_width);

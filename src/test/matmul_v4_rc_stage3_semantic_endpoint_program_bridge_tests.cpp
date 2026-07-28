@@ -52,9 +52,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.registry_semantic_claim_endpoints, 14U);
     BOOST_CHECK_EQUAL(
-        manifest.selected_program_key_endpoints, 28U);
+        manifest.selected_program_key_endpoints, 35U);
     BOOST_CHECK_EQUAL(
-        manifest.canonical_output_metadata_endpoints, 28U);
+        manifest.canonical_output_metadata_endpoints, 35U);
     BOOST_CHECK_EQUAL(
         manifest.executed_relation_cell_endpoints, 22U);
     BOOST_CHECK_EQUAL(
@@ -71,9 +71,6 @@ BOOST_AUTO_TEST_CASE(
             RCStage3RelationEndpoint::EpisodeBuilderParams,
             RCStage3RelationEndpoint::EpisodeBuilderSeedChain,
             RCStage3RelationEndpoint::EpisodeBuilderOperandXof,
-            RCStage3RelationEndpoint::EpisodeExtractInput,
-            RCStage3RelationEndpoint::EpisodeExtractChaCha,
-            RCStage3RelationEndpoint::EpisodeExtractScale,
             RCStage3RelationEndpoint::EpisodeWiringTranspose,
             RCStage3RelationEndpoint::EpisodeWiringResidual,
             RCStage3RelationEndpoint::EpisodeWiringRoundOrder,
@@ -83,11 +80,7 @@ BOOST_AUTO_TEST_CASE(
             RCStage3RelationEndpoint::EpisodeDigestRoundRoots,
             RCStage3RelationEndpoint::EpisodeDigestValue,
             RCStage3RelationEndpoint::EpisodeDigestHeaderTarget,
-            RCStage3RelationEndpoint::CoupledBankSeedXof,
-            RCStage3RelationEndpoint::CoupledBankRoot,
             RCStage3RelationEndpoint::CoupledGemmSignedRange,
-            RCStage3RelationEndpoint::CoupledExchangeHashXof,
-            RCStage3RelationEndpoint::CoupledExtractChaCha,
             RCStage3RelationEndpoint::CoupledBarrierInput,
             RCStage3RelationEndpoint::CoupledBarrierOutput,
             RCStage3RelationEndpoint::CoupledDigestBankAndBarriers,
@@ -100,6 +93,23 @@ BOOST_AUTO_TEST_CASE(
         }
     }
     BOOST_CHECK(observed_missing == missing_output_recipes);
+
+    for (const auto endpoint : {
+             RCStage3RelationEndpoint::EpisodeExtractChaCha,
+             RCStage3RelationEndpoint::CoupledBankSeedXof,
+             RCStage3RelationEndpoint::CoupledBankRoot,
+             RCStage3RelationEndpoint::CoupledExchangeHashXof,
+             RCStage3RelationEndpoint::CoupledExtractChaCha}) {
+        const auto& fixed = Endpoint(manifest, endpoint);
+        BOOST_CHECK(fixed.selected_program_key);
+        BOOST_CHECK(fixed.exact_program_table_match);
+        BOOST_CHECK(fixed.canonical_output_metadata);
+        BOOST_CHECK_EQUAL(
+            fixed.relation_column,
+            matmul::v4::rc::kRCStage3HashKernelOutputColumnV1);
+        BOOST_CHECK(!fixed.registry_semantic_claim);
+        BOOST_CHECK(!fixed.direct_alias_ready);
+    }
 
     // A single exact family genuinely owns three endpoint cells.  This is the
     // one-to-many expansion the old single semantic_endpoints claim omitted.

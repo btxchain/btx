@@ -62,6 +62,20 @@ namespace matmul::v4::rc::universal_topology {
     std::string* why = nullptr);
 
 /**
+ * Canonical role-tagged fixed-program opcode kernel used by every partial
+ * SHA/XOF/ChaCha production family.  In addition to the shared 144-column
+ * opcode AIR, column kRCStage3HashKernelOutputColumnV1 is constrained to the
+ * opcode-selected result slot.  Schedule, boundary, internal-copy,
+ * all-instance, and recursive-consumption obligations remain explicit
+ * residuals; this function only gives those partial families an unambiguous
+ * local output cell.
+ */
+[[nodiscard]] bool BuildProductionFixedProgramOutputLocalProgramTableV1(
+    RCStage3RelationRole role,
+    constraint_bytecode::ProgramTable& out,
+    std::string* why = nullptr);
+
+/**
  * Semantically complete family sources currently wired into the production
  * registry path, keyed by exact ProductionProofSiteKind. Extending this list
  * is the concrete, checkable unit of semantic registry migration: each entry

@@ -513,16 +513,18 @@ bool RetagProgramTable(
  * ChaCha20Block schedule. BuildRCStage3CoupledHashKernelProgramTable emits
  * that exact 462-constraint opcode table. Retagging only its committed role is
  * therefore the canonical partial kernel for every registered fixed-program
- * site. It does NOT bind the selected schedule, public boundary, SSA-copy
- * provenance, or multi-instance manifest, so callers must keep the site's
- * semantic_relation_complete bit false.
+ * site.  The output-cell wrapper adds one selector-muxed column so consumers
+ * cannot accidentally name a value slot which is an output for only a subset
+ * of opcodes. It does NOT bind the selected schedule, public boundary,
+ * SSA-copy provenance, or multi-instance manifest, so callers must keep the
+ * site's semantic_relation_complete bit false.
  */
 bool BuildFixedProgramLocalFragment(
     RCStage3RelationRole role,
     cb::ProgramTable& out,
     std::string* why)
 {
-    if (!BuildRCStage3CoupledHashKernelProgramTable(
+    if (!BuildRCStage3HashKernelOutputProgramTable(
             RCStage3RelationRole::EpisodeDigest, out, why)) {
         return false;
     }
@@ -847,6 +849,14 @@ bool BuildProductionSignedRangeLocalProgramTableV1(
     std::string* why)
 {
     return BuildSignedRangeLocalFragment(out, why);
+}
+
+bool BuildProductionFixedProgramOutputLocalProgramTableV1(
+    RCStage3RelationRole role,
+    cb::ProgramTable& out,
+    std::string* why)
+{
+    return BuildFixedProgramLocalFragment(role, out, why);
 }
 
 std::vector<ProductionFamilyProgramSourceV1>

@@ -159,6 +159,15 @@ FamilyRecipe MakeRecipe(
             BuildRCStage3EpisodeExtractLocalKernelProgramTable(
                 0, out.canonical, &why);
         break;
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
+    case sites::ProductionProofSiteKind::CoupledBankCounterXof:
+    case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
+    case sites::ProductionProofSiteKind::CoupledExchangeXof:
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        out.canonical_built =
+            topo::BuildProductionFixedProgramOutputLocalProgramTableV1(
+                role, out.canonical, &why);
+        break;
     case sites::ProductionProofSiteKind::EpisodeWiring:
         out.canonical_built =
             BuildRCStage3EpisodeLocalKernelProgramTable(
@@ -253,12 +262,26 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
             sites::ProductionProofSiteKind::EpisodeExtractCore,
             RCStage3RelationRole::EpisodeExtract,
             {
+                {RCStage3RelationEndpoint::EpisodeExtractInput,
+                 air_quotient::kColUMix,
+                 "episode_extract:U_MIX"},
                 {RCStage3RelationEndpoint::EpisodeExtractSampler,
                  air_quotient::kColMixed,
                  "episode_extract:MIXED"},
+                {RCStage3RelationEndpoint::EpisodeExtractScale,
+                 air_quotient::kColE0,
+                 "episode_extract:E0"},
                 {RCStage3RelationEndpoint::EpisodeExtractOutput,
                  air_quotient::kColOut,
                  "episode_extract:OUT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::EpisodeExtractChaCha,
+            RCStage3RelationRole::EpisodeExtract,
+            {
+                {RCStage3RelationEndpoint::EpisodeExtractChaCha,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "episode_extract_chacha:FIXED_PROGRAM_OUTPUT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::EpisodeWiring,
@@ -289,6 +312,22 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                  BANK_NIB, "coupled_bank:NIB"},
             }),
         MakeRecipe(
+            sites::ProductionProofSiteKind::CoupledBankCounterXof,
+            RCStage3RelationRole::CoupledBank,
+            {
+                {RCStage3RelationEndpoint::CoupledBankSeedXof,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "coupled_bank_seed_xof:FIXED_PROGRAM_OUTPUT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d,
+            RCStage3RelationRole::CoupledBank,
+            {
+                {RCStage3RelationEndpoint::CoupledBankRoot,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "coupled_bank_root:FIXED_PROGRAM_OUTPUT"},
+            }),
+        MakeRecipe(
             sites::ProductionProofSiteKind::CoupledGemm,
             RCStage3RelationRole::CoupledGemm,
             {
@@ -307,6 +346,14 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                  COPY_INPUT, "coupled_exchange:INPUT"},
                 {RCStage3RelationEndpoint::CoupledExchangeOutput,
                  COPY_OUTPUT, "coupled_exchange:OUTPUT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::CoupledExchangeXof,
+            RCStage3RelationRole::CoupledExchange,
+            {
+                {RCStage3RelationEndpoint::CoupledExchangeHashXof,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "coupled_exchange_xof:FIXED_PROGRAM_OUTPUT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledPermutation,
@@ -344,6 +391,14 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
                 {RCStage3RelationEndpoint::CoupledExtractOutput,
                  air_quotient::kColOut,
                  "coupled_extract:OUT"},
+            }),
+        MakeRecipe(
+            sites::ProductionProofSiteKind::CoupledExtractChaCha,
+            RCStage3RelationRole::CoupledExtract,
+            {
+                {RCStage3RelationEndpoint::CoupledExtractChaCha,
+                 kRCStage3HashKernelOutputColumnV1,
+                 "coupled_extract_chacha:FIXED_PROGRAM_OUTPUT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledBarrierSha256d,
