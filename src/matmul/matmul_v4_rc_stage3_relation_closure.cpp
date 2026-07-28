@@ -6100,16 +6100,24 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeGemmRoleAir(
     // Assemble the witness in the same fragment order the CS composes.
     std::vector<std::vector<gf::Fp3>> witness = std::move(kernel_cols);
     uint32_t scalar_i = 0;
+    uint32_t next_col = kernel_w;
     for (const RCStage3RelationEndpoint e : required) {
         if (e == RCStage3RelationEndpoint::EpisodeGemmSumcheck) {
+            out.endpoint_value_columns.push_back(next_col);
             for (const auto& col : sumcheck.witness) witness.push_back(col);
+            next_col += sumcheck.cs.n_columns;
         } else if (e == RCStage3RelationEndpoint::EpisodeGemmSignedRange) {
+            out.endpoint_value_columns.push_back(next_col);
             for (const auto& col : signed_range.witness) witness.push_back(col);
+            next_col += signed_range.cs.n_columns;
         } else {
+            out.endpoint_value_columns.push_back(
+                next_col + kRCStage3OpeningValueColumn);
             const std::vector<std::vector<gf::Fp3>> ow = BuildOpeningWitness(
                 scalar_cells[scalar_i], scalar_cells[scalar_i],
                 scalar_manifests[scalar_i]);
             for (const auto& col : ow) witness.push_back(col);
+            next_col += kRCStage3OpeningWidth;
             ++scalar_i;
         }
         out.endpoints.push_back(e);
@@ -6295,13 +6303,17 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeWiringRoleAir(
     }
 
     std::vector<std::vector<gf::Fp3>> witness = std::move(kernel_cols);
+    uint32_t next_col = kernel_w;
     for (const RCStage3RelationEndpoint e : required) {
         const RCStage3SpongeProduct* sp = nullptr;
         switch (e) {
         case RCStage3RelationEndpoint::EpisodeWiringCopy: {
+            out.endpoint_value_columns.push_back(
+                next_col + kRCStage3OpeningValueColumn);
             const std::vector<std::vector<gf::Fp3>> ow =
                 BuildOpeningWitness(copy, copy, copy_manifest);
             for (const auto& col : ow) witness.push_back(col);
+            next_col += kRCStage3OpeningWidth;
             break;
         }
         case RCStage3RelationEndpoint::EpisodeWiringTranspose: sp = &transpose; break;
@@ -6310,7 +6322,9 @@ RCStage3RoleAirProduct BuildRCStage3EpisodeWiringRoleAir(
         default: break;
         }
         if (sp != nullptr) {
+            out.endpoint_value_columns.push_back(next_col);
             for (const auto& col : sp->witness) witness.push_back(col);
+            next_col += sp->cs.n_columns;
         }
         out.endpoints.push_back(e);
     }
@@ -6467,8 +6481,12 @@ RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAir(RCStage3RelationRole role,
     }
 
     std::vector<std::vector<gf::Fp3>> witness;
+    uint32_t next_col = 0;
     for (const auto& fw : frag_witnesses) {
+        out.endpoint_value_columns.push_back(
+            next_col + kRCStage3StreamEndpointBindValueColumn);
         for (const auto& col : fw) witness.push_back(col);
+        next_col += kRCStage3StreamEndpointBindWidth;
     }
 
     out.endpoint_committed_roots = std::move(roots);
@@ -6523,8 +6541,13 @@ RCStage3RoleAirProduct BuildRCStage3PureStreamRoleAirFromRoots(
     }
 
     std::vector<std::vector<gf::Fp3>> witness;
-    for (const auto& fw : frag_witnesses)
+    uint32_t next_col = 0;
+    for (const auto& fw : frag_witnesses) {
+        out.endpoint_value_columns.push_back(
+            next_col + kRCStage3StreamEndpointBindValueColumn);
         for (const auto& col : fw) witness.push_back(col);
+        next_col += kRCStage3StreamEndpointBindWidth;
+    }
 
     out.endpoint_committed_roots = std::move(roots);
     out.fragment_columns = 0;
@@ -6959,8 +6982,18 @@ RCStage3RoleAirProduct BuildRCStage3CoupledMixedRoleAir(
     }
 
     std::vector<std::vector<gf::Fp3>> witness = std::move(kernel_cols);
-    for (const auto& piece : pieces)
+    uint32_t next_col = kernel_w;
+    for (uint32_t i = 0; i < pieces.size(); ++i) {
+        const RCStage3RelationEndpoint endpoint = required[i];
+        const auto& piece = pieces[i];
+        out.endpoint_value_columns.push_back(
+            next_col +
+            (IsInCsStreamEndpoint(endpoint)
+                 ? kRCStage3StreamEndpointBindValueColumn
+                 : kRCStage3OpeningValueColumn));
         for (const auto& col : piece) witness.push_back(col);
+        next_col += static_cast<uint32_t>(piece.size());
+    }
 
     out.endpoint_committed_roots = std::move(roots);
     out.fragment_columns = kernel_w;
@@ -7108,8 +7141,20 @@ RCStage3RoleAirProduct BuildRCStage3NoKernelRoleAir(
     }
 
     std::vector<std::vector<gf::Fp3>> witness;
-    for (const auto& piece : pieces)
+    uint32_t next_col = 0;
+    for (uint32_t i = 0; i < pieces.size(); ++i) {
+        const RCStage3RelationEndpoint endpoint = required[i];
+        const auto& piece = pieces[i];
+        out.endpoint_value_columns.push_back(
+            next_col +
+            (IsInCsStreamEndpoint(endpoint)
+                 ? kRCStage3StreamEndpointBindValueColumn
+                 : (WiredEndpointLeafLanes(endpoint) != 0
+                        ? 0U
+                        : kRCStage3OpeningValueColumn)));
         for (const auto& col : piece) witness.push_back(col);
+        next_col += static_cast<uint32_t>(piece.size());
+    }
 
     out.endpoint_committed_roots = std::move(roots);
     out.fragment_columns = 0;
