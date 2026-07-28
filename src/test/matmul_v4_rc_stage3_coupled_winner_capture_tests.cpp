@@ -4,6 +4,10 @@
 
 #include <matmul/matmul_v4_rc_stage3_coupled_winner_capture.h>
 
+#include <arith_uint256.h>
+#include <consensus/params.h>
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
+#include <pow.h>
 #include <primitives/block.h>
 
 #include <boost/test/unit_test.hpp>
@@ -36,6 +40,30 @@ CBlockHeader Header(uint64_t nonce)
     out.seed_a = H(0x13);
     out.seed_b = H(0x24);
     out.matmul_digest = H(0x35);
+    return out;
+}
+
+Consensus::Params AuthorityParams()
+{
+    Consensus::Params out;
+    out.fMatMulPOW = true;
+    out.nMatMulV4Height = 1;
+    out.nMatMulRCHeight = 1;
+    out.nMatMulRCCoupledHeight = 1;
+    out.fMatMulRCUseToyDims = true;
+    out.fMatMulRCCoupledUseToyDims = true;
+    out.nMatMulRCProfile = 1;
+    out.nMatMulRCCoupledProfile = 2;
+    out.nMatMulV4Dimension = 256;
+    out.powLimit = H(0xff);
+    return out;
+}
+
+CBlockHeader AuthorityHeader(uint64_t nonce)
+{
+    CBlockHeader out = Header(nonce);
+    out.matmul_dim = 256;
+    out.matmul_digest.SetNull();
     return out;
 }
 
@@ -338,6 +366,75 @@ BOOST_AUTO_TEST_CASE(
             why.find("header_binding_context") !=
             std::string::npos);
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    authority_candidate_runs_each_workload_once_and_stores_only_winner)
+{
+    constexpr int32_t kHeight = 10;
+    const Consensus::Params params =
+        AuthorityParams();
+    CBlockHeader winner = AuthorityHeader(31);
+    uint64_t winner_tries = 1;
+    RCStage3AuthorityCandidateAudit winner_audit;
+    rc::RCStage3EpisodeWitnessStoreClearForTest();
+    rc::RCStage3CoupledWinnerStoreClearForTestV1();
+
+    BOOST_REQUIRE(
+        TestRCStage3SuccinctAuthorityCoupledCandidate(
+            winner, params, winner_tries, kHeight,
+            static_cast<int64_t>(winner.nTime) - 1,
+            UintToArith256(params.powLimit),
+            winner_audit));
+    BOOST_CHECK_EQUAL(
+        winner_audit.episode_primary_calls, 1U);
+    BOOST_CHECK_EQUAL(
+        winner_audit.coupled_primary_calls, 1U);
+    BOOST_CHECK_EQUAL(
+        winner_audit.header_finalizations, 1U);
+    BOOST_CHECK_EQUAL(
+        winner_audit.winner_receipt_stores, 1U);
+    BOOST_CHECK_EQUAL(
+        winner_audit.loser_receipts_discarded, 0U);
+    BOOST_CHECK(!winner.matmul_digest.IsNull());
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            winner.GetHash()) != nullptr);
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(
+            winner.GetHash()) != nullptr);
+
+    rc::RCStage3EpisodeWitnessStoreClearForTest();
+    rc::RCStage3CoupledWinnerStoreClearForTestV1();
+
+    CBlockHeader loser = AuthorityHeader(32);
+    const uint256 losing_key_before =
+        loser.GetHash();
+    uint64_t loser_tries = 1;
+    RCStage3AuthorityCandidateAudit loser_audit;
+    BOOST_CHECK(
+        !TestRCStage3SuccinctAuthorityCoupledCandidate(
+            loser, params, loser_tries, kHeight,
+            static_cast<int64_t>(loser.nTime) - 1,
+            arith_uint256{}, loser_audit));
+    BOOST_CHECK_EQUAL(
+        loser_audit.episode_primary_calls, 1U);
+    BOOST_CHECK_EQUAL(
+        loser_audit.coupled_primary_calls, 1U);
+    BOOST_CHECK_EQUAL(
+        loser_audit.header_finalizations, 0U);
+    BOOST_CHECK_EQUAL(
+        loser_audit.winner_receipt_stores, 0U);
+    BOOST_CHECK_EQUAL(
+        loser_audit.loser_receipts_discarded, 1U);
+    BOOST_CHECK(loser.matmul_digest.IsNull());
+    BOOST_CHECK_EQUAL(loser_tries, 0U);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            losing_key_before) == nullptr);
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(
+            losing_key_before) == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(

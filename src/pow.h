@@ -100,6 +100,20 @@ struct MatMulSolveRuntimeStats {
     uint64_t max_elapsed_us{0};
 };
 
+/**
+ * Test-visible accounting for the authority-only RC coupled candidate state
+ * machine. The counters are incremented at the actual primary-work and
+ * final-binding call sites; they are not readiness evidence and never alter
+ * consensus behavior.
+ */
+struct RCStage3AuthorityCandidateAudit {
+    uint32_t episode_primary_calls{0};
+    uint32_t coupled_primary_calls{0};
+    uint32_t header_finalizations{0};
+    uint32_t winner_receipt_stores{0};
+    uint32_t loser_receipts_discarded{0};
+};
+
 struct MatMulValidationRuntimeStats {
     uint64_t phase2_checks{0};
     uint64_t freivalds_checks{0};
@@ -580,6 +594,20 @@ bool SolveMatMul(CBlockHeader& block, const Consensus::Params& params, uint64_t&
                  //! is rejected (returns false).
                  const uint256* share_target_override = nullptr,
                  std::optional<int64_t> parent_median_time_past = std::nullopt);
+/**
+ * Executes the same authority-only coupled candidate state machine selected by
+ * SolveMatMul after the Stage-3 readiness gate closes. This is an integration
+ * canary only: production mining reaches it solely through the compile-time
+ * gate, while tests use it to prove one-call and loser-discard invariants.
+ */
+bool TestRCStage3SuccinctAuthorityCoupledCandidate(
+    CBlockHeader& block,
+    const Consensus::Params& params,
+    uint64_t& max_tries,
+    int32_t block_height,
+    std::optional<int64_t> parent_median_time_past,
+    const arith_uint256& effective_target,
+    RCStage3AuthorityCandidateAudit& audit);
 bool CheckKAWPOWProofOfWork(const CBlockHeader& block, uint32_t block_height, const Consensus::Params&);
 bool SolveKAWPOW(CBlockHeader& block, uint32_t block_height, const Consensus::Params& params, uint64_t& max_tries);
 

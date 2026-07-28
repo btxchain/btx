@@ -6232,15 +6232,18 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
  * Stage-3 composition digest. This keeps the work actually performed by the
  * miner identical to the complete Composed statement validators will verify.
  */
-static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
-                                   const Consensus::Params& params,
-                                   uint64_t& max_tries,
-                                   int32_t block_height,
-                                   const std::atomic<bool>* abort_flag,
-                                   std::vector<uint32_t>* freivalds_payload_out,
-                                   std::optional<int64_t> parent_median_time_past,
-                                   const arith_uint256& effective_target,
-                                   std::chrono::steady_clock::time_point start)
+template <bool SuccinctAuthority>
+static bool SolveMatMulV4RCCoupled(
+    CBlockHeader& block,
+    const Consensus::Params& params,
+    uint64_t& max_tries,
+    int32_t block_height,
+    const std::atomic<bool>* abort_flag,
+    std::vector<uint32_t>* freivalds_payload_out,
+    std::optional<int64_t> parent_median_time_past,
+    const arith_uint256& effective_target,
+    std::chrono::steady_clock::time_point start,
+    RCStage3AuthorityCandidateAudit* authority_audit = nullptr)
 {
     if (!parent_median_time_past.has_value()) {
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
@@ -6280,6 +6283,178 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
         if (!SetDeterministicMatMulSeeds(block, params, block_height, parent_median_time_past)) {
             RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
             return false;
+        }
+
+        // Succinct-authority mode must make the proof-aware work oracles the
+        // primary computation.  A post-winner "reseal" would be an exact
+        // replay of both datacenter-scale legs and defeats the reason Stage 3
+        // exists.  The V2 coupled capture binds every callback to the immutable
+        // header precommit (all header fields except the terminal
+        // matmul_digest); after the two primary calls determine the composed
+        // digest, the winner seals that terminal exactly once.
+        //
+        // This branch is compile-time discarded until authority is genuinely
+        // ready.  The legacy batched miner below therefore remains unchanged
+        // while the gate is false.
+        if constexpr (SuccinctAuthority) {
+            block.matmul_digest.SetNull();
+
+            auto episode_capture = std::make_shared<
+                matmul::v4::rc::
+                    RCStage3EpisodeWitnessCapture>(
+                        params_rc);
+            const uint256 episode_mined =
+                matmul::v4::rc::
+                    MineRCEpisodeWithProofWitness(
+                        block, params_rc, block_height,
+                        *episode_capture);
+            if (authority_audit != nullptr) {
+                ++authority_audit->
+                    episode_primary_calls;
+            }
+            std::string capture_why;
+            if (episode_mined.IsNull() ||
+                !episode_capture->Complete(
+                    &capture_why)) {
+                LogWarning(
+                    "SolveMatMulV4RCCoupled: primary episode proof "
+                    "capture failed at nonce=%llu (%s)\n",
+                    static_cast<unsigned long long>(
+                        block.nNonce64),
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+
+            auto coupled_capture = std::make_shared<
+                matmul::v4::rc::
+                    RCStage3CoupledWinnerCaptureV1>(
+                        block, block_height,
+                        params_coup, options_coup);
+            const uint256 coupled_mined =
+                matmul::v4::rc::
+                    MineCoupledPuzzleWithProofWitness(
+                        block, block_height, params_coup,
+                        *coupled_capture, {},
+                        options_coup);
+            if (authority_audit != nullptr) {
+                ++authority_audit->
+                    coupled_primary_calls;
+            }
+            const uint256 composed_mined =
+                matmul::v4::rc::
+                    ComputeRCStage3ComposedWorkDigest(
+                        block, params, block_height,
+                        episode_mined, coupled_mined);
+            if (coupled_mined.IsNull() ||
+                composed_mined.IsNull()) {
+                LogWarning(
+                    "SolveMatMulV4RCCoupled: primary coupled/composed "
+                    "work failed at nonce=%llu\n",
+                    static_cast<unsigned long long>(
+                        block.nNonce64));
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+
+            if (UintToArith256(composed_mined) >
+                    effective_target) {
+                if (authority_audit != nullptr) {
+                    ++authority_audit->
+                        loser_receipts_discarded;
+                }
+                --max_tries;
+                if (block.nNonce64 ==
+                        std::numeric_limits<uint64_t>::max()) {
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                }
+                ++block.nNonce64;
+                block.nNonce =
+                    static_cast<uint32_t>(
+                        block.nNonce64);
+                continue;
+            }
+
+            block.matmul_digest = composed_mined;
+            if (!coupled_capture->
+                    FinalizeHeaderBindingV2(
+                        block, coupled_mined,
+                        &capture_why)) {
+                LogWarning(
+                    "SolveMatMulV4RCCoupled: winner header binding "
+                    "failed at nonce=%llu (%s)\n",
+                    static_cast<unsigned long long>(
+                        block.nNonce64),
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+            if (authority_audit != nullptr) {
+                ++authority_audit->
+                    header_finalizations;
+            }
+            if (!coupled_capture->Complete(
+                    &capture_why)) {
+                LogWarning(
+                    "SolveMatMulV4RCCoupled: finalized winner "
+                    "capture incomplete at nonce=%llu (%s)\n",
+                    static_cast<unsigned long long>(
+                        block.nNonce64),
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+
+            const uint256 winner_key = block.GetHash();
+            if (!matmul::v4::rc::
+                    RCStage3CoupledWinnerStorePutV1(
+                        winner_key, coupled_capture,
+                        &capture_why) ||
+                !matmul::v4::rc::
+                    RCStage3EpisodeWitnessStorePut(
+                        winner_key, episode_capture,
+                        &capture_why)) {
+                matmul::v4::rc::
+                    RCStage3CoupledWinnerStoreEraseV1(
+                        winner_key);
+                matmul::v4::rc::
+                    RCStage3EpisodeWitnessStoreErase(
+                        winner_key);
+                LogWarning(
+                    "SolveMatMulV4RCCoupled: primary winner "
+                    "capture store failed (%s)\n",
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+            if (authority_audit != nullptr) {
+                ++authority_audit->
+                    winner_receipt_stores;
+            }
+            RegisterMatMulSolveRuntimeSample(
+                true,
+                std::chrono::steady_clock::now() -
+                    start);
+            return true;
         }
 
         // Q-batch: stack nonces that share the bank template into one
@@ -6537,6 +6712,24 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
     return false;
 }
 
+bool TestRCStage3SuccinctAuthorityCoupledCandidate(
+    CBlockHeader& block,
+    const Consensus::Params& params,
+    uint64_t& max_tries,
+    int32_t block_height,
+    std::optional<int64_t> parent_median_time_past,
+    const arith_uint256& effective_target,
+    RCStage3AuthorityCandidateAudit& audit)
+{
+    audit = {};
+    return SolveMatMulV4RCCoupled<true>(
+        block, params, max_tries, block_height,
+        nullptr, nullptr, parent_median_time_past,
+        effective_target,
+        std::chrono::steady_clock::now(),
+        &audit);
+}
+
 /** ENC_RC / Resident Curriculum miner: grind nonces through MineRCEpisode.
  *  P0.2: CPU-reseal WINNERS only (losers must not pay a second full episode). */
 static bool SolveMatMulV4RC(CBlockHeader& block,
@@ -6579,10 +6772,52 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             return false;
         }
 
-        // P1.2: Phase-2 ExactGemm may run on CUDA/HIP LaunchGemmS8S8 when
-        // ProbeRCSelfQual admits the backend; losers skip CPU reseal (P0.2).
-        const uint256 mined =
-            matmul::v4::rc::MineRCEpisode(block, params_rc, block_height, nullptr, gemm_rc);
+        // In succinct-authority mode this proof sink is attached to the
+        // primary computation for every nonce.  Retaining only a winning
+        // capture avoids both a post-winner exact replay and losing-nonce
+        // witness persistence.  Before authority activates, the existing
+        // accelerated mining call remains byte-for-byte the selected branch.
+        std::shared_ptr<
+            matmul::v4::rc::
+                RCStage3EpisodeWitnessCapture>
+            primary_capture;
+        uint256 mined;
+        if constexpr (
+            matmul::v4::rc::
+                kRCStage3SuccinctAuthorityReady) {
+            primary_capture = std::make_shared<
+                matmul::v4::rc::
+                    RCStage3EpisodeWitnessCapture>(
+                        params_rc);
+            mined =
+                matmul::v4::rc::
+                    MineRCEpisodeWithProofWitness(
+                        block, params_rc,
+                        block_height, *primary_capture);
+            std::string capture_why;
+            if (!primary_capture->Complete(
+                    &capture_why)) {
+                LogWarning(
+                    "SolveMatMulV4RC: primary proof capture "
+                    "incomplete at nonce=%llu (%s)\n",
+                    static_cast<unsigned long long>(
+                        block.nNonce64),
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+        } else {
+            // P1.2: Phase-2 ExactGemm may run on CUDA/HIP
+            // LaunchGemmS8S8 when ProbeRCSelfQual admits the backend;
+            // losers skip CPU reseal (P0.2).
+            mined =
+                matmul::v4::rc::MineRCEpisode(
+                    block, params_rc, block_height,
+                    nullptr, gemm_rc);
+        }
         if (mined.IsNull()) {
             LogWarning("SolveMatMulV4RC: MineRCEpisode returned null at nonce=%llu; aborting\n",
                        static_cast<unsigned long long>(block.nNonce64));
@@ -6599,6 +6834,33 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
             ++block.nNonce64;
             block.nNonce = static_cast<uint32_t>(block.nNonce64);
             continue;
+        }
+
+        if constexpr (
+            matmul::v4::rc::
+                kRCStage3SuccinctAuthorityReady) {
+            block.matmul_digest = mined;
+            std::string capture_why;
+            if (!matmul::v4::rc::
+                    RCStage3EpisodeWitnessStorePut(
+                        block.GetHash(),
+                        std::move(primary_capture),
+                        &capture_why)) {
+                LogWarning(
+                    "SolveMatMulV4RC: primary winner proof "
+                    "witness store failed (%s)\n",
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+            RegisterMatMulSolveRuntimeSample(
+                true,
+                std::chrono::steady_clock::now() -
+                    start);
+            return true;
         }
 
         // Winner / share: CPU-reseal for consensus (empty ExactGemm — never
@@ -6795,9 +7057,14 @@ static bool SolveMatMulV4(CBlockHeader& block,
     // ENC-BMX4C loop; the ENC-S8 path below is unchanged.
     const Consensus::MatMulEncodingProfile solve_profile = params.GetMatMulEncodingProfile(block_height);
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_RC_COUPLED) {
-        return SolveMatMulV4RCCoupled(block, params, max_tries, block_height, abort_flag,
-                                      freivalds_payload_out, parent_median_time_past,
-                                      effective_target, start);
+        return SolveMatMulV4RCCoupled<
+            matmul::v4::rc::
+                kRCStage3SuccinctAuthorityReady>(
+                    block, params, max_tries,
+                    block_height, abort_flag,
+                    freivalds_payload_out,
+                    parent_median_time_past,
+                    effective_target, start);
     }
     if (solve_profile == Consensus::MatMulEncodingProfile::ENC_RC) {
         // R-05: thread the consensus BLOCK target (*bnTarget) alongside
