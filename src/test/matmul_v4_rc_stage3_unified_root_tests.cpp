@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_stage3_unified_root.h>
 
 #include <algorithm>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -277,6 +278,10 @@ BOOST_AUTO_TEST_CASE(canonical_parameters_cover_exact_registry_and_soundness)
                    kRCFri3AlgTargetSoundnessBits);
     BOOST_CHECK_EQUAL(parameters.soundness_union_bound_instances,
                       kRCStage3UnifiedMaxTotalProofSites);
+    BOOST_CHECK_GT(
+        parameters.soundness_union_bound_instances,
+        static_cast<uint64_t>(
+            std::numeric_limits<uint32_t>::max()));
     const auto selected_manifest =
         soundness_scenarios::BuildProductionProofSiteManifest(
             soundness_scenarios::
@@ -286,7 +291,7 @@ BOOST_AUTO_TEST_CASE(canonical_parameters_cover_exact_registry_and_soundness)
         parameters.soundness_union_bound_instances,
         selected_manifest.union_bound_cap);
     BOOST_CHECK_EQUAL(parameters.max_recursive_air_columns, 16'384U);
-    BOOST_CHECK_EQUAL(RCStage3UnifiedRootSoundnessBits(parameters), 109U);
+    BOOST_CHECK_EQUAL(RCStage3UnifiedRootSoundnessBits(parameters), 135U);
     BOOST_CHECK_GE(RCStage3UnifiedRootSoundnessBits(parameters),
                    parameters.target_soundness_bits);
 
@@ -344,6 +349,11 @@ BOOST_AUTO_TEST_CASE(canonical_bounded_codec_roundtrip)
         DeserializeRCStage3UnifiedRootPublicPin(encoded, &why);
     BOOST_REQUIRE_MESSAGE(decoded.has_value(), why);
     BOOST_CHECK(*decoded == pin);
+    BOOST_CHECK_EQUAL(decoded->version, 4U);
+    BOOST_CHECK_GT(
+        decoded->parameters.soundness_union_bound_instances,
+        static_cast<uint64_t>(
+            std::numeric_limits<uint32_t>::max()));
 
     std::vector<unsigned char> reencoded;
     BOOST_REQUIRE(SerializeRCStage3UnifiedRootPublicPin(
@@ -645,7 +655,7 @@ BOOST_AUTO_TEST_CASE(global_soundness_ledger_never_certifies_unaccounted_terms)
     const auto ledger =
         AssessRCStage3UnifiedGlobalSoundness(canonical);
     BOOST_REQUIRE_EQUAL(ledger.terms.size(), 10U);
-    BOOST_CHECK_EQUAL(ledger.provisional_known_term_bits, 102U);
+    BOOST_CHECK_EQUAL(ledger.provisional_known_term_bits, 115U);
     BOOST_CHECK_EQUAL(ledger.certified_bits, 0U);
     BOOST_CHECK(!ledger.theorem_complete);
     BOOST_CHECK(!ledger.authority_eligible);
@@ -667,14 +677,14 @@ BOOST_AUTO_TEST_CASE(global_soundness_ledger_never_certifies_unaccounted_terms)
     BOOST_REQUIRE(fri != nullptr);
     BOOST_CHECK_EQUAL(fri->charged_instances,
                       kRCStage3UnifiedMaxTotalProofSites);
-    BOOST_CHECK_EQUAL(fri->conservative_bits, 109U);
+    BOOST_CHECK_EQUAL(fri->conservative_bits, 135U);
     BOOST_CHECK(fri->quantitatively_accounted);
     BOOST_CHECK(fri->reduction_complete);
 
     const auto* fri_field = find(
         RCStage3UnifiedSoundnessTermKind::FriFieldDomain);
     BOOST_REQUIRE(fri_field != nullptr);
-    BOOST_CHECK_EQUAL(fri_field->conservative_bits, 102U);
+    BOOST_CHECK_EQUAL(fri_field->conservative_bits, 115U);
     BOOST_CHECK(fri_field->quantitatively_accounted);
     BOOST_CHECK(!fri_field->reduction_complete);
     BOOST_CHECK(
@@ -692,7 +702,7 @@ BOOST_AUTO_TEST_CASE(global_soundness_ledger_never_certifies_unaccounted_terms)
     const auto* hash = find(
         RCStage3UnifiedSoundnessTermKind::HashCollision);
     BOOST_REQUIRE(hash != nullptr);
-    BOOST_CHECK_EQUAL(hash->conservative_bits, 102U);
+    BOOST_CHECK_EQUAL(hash->conservative_bits, 128U);
     BOOST_CHECK(!hash->quantitatively_accounted);
     BOOST_CHECK(!hash->reduction_complete);
     const auto* pow = find(

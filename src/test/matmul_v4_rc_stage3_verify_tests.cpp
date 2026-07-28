@@ -64,11 +64,11 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
         semantic_complete += endpoint.semantic_relation_complete;
         recursively_consumed += endpoint.recursive_child_consumed;
     }
-    BOOST_CHECK_EQUAL(relation_cells, 22U);
-    BOOST_CHECK_EQUAL(same_trace_aliases, 21U);
-    // Blocker A COMPLETE: 22 (21 scalar openings + signed range) + 19
-    // stream/digest §4 pins + 3 value-vector openings + 8 wired sibling
-    // bindings = 52/52 (every relation endpoint opened).
+    BOOST_CHECK_EQUAL(relation_cells, 28U);
+    BOOST_CHECK_EQUAL(same_trace_aliases, 28U);
+    // Every endpoint has a local semantic proof path, but only 28 currently
+    // expose proof-owned relation cells/same-trace aliases. Recursive child
+    // consumption remains the authority-critical zero below.
     BOOST_CHECK_EQUAL(semantic_complete, 52U);
     BOOST_CHECK_EQUAL(recursively_consumed, 0U);
 
@@ -110,11 +110,14 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
         ss::SelectedProductionProofSitePolicy());
     BOOST_REQUIRE(!manifest.commitment.IsNull());
     BOOST_CHECK_EQUAL(manifest.entries.size(), 28U);
-    BOOST_CHECK_EQUAL(manifest.relation_leaf_sites, 28'116'241ULL);
     BOOST_CHECK_EQUAL(
-        manifest.below_root_aggregation_sites, 9'372'141ULL);
-    BOOST_CHECK_EQUAL(manifest.total_proof_sites, 37'488'397ULL);
-    BOOST_CHECK_EQUAL(manifest.union_bound_cap, 1ULL << 26);
+        manifest.relation_leaf_sites, 44'639'077'288ULL);
+    BOOST_CHECK_EQUAL(
+        manifest.below_root_aggregation_sites, 14'879'692'506ULL);
+    BOOST_CHECK_EQUAL(
+        manifest.total_proof_sites,
+        ss::kSelectedProductionProofSitesV1);
+    BOOST_CHECK_EQUAL(manifest.union_bound_cap, 1ULL << 36);
     BOOST_CHECK(manifest.complete_global_upper_bound_manifest_derived);
     BOOST_CHECK(!manifest.recursive_scheduler_consumes_manifest);
     BOOST_CHECK(!manifest.executable_backend_enforces_policy);

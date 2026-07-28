@@ -339,7 +339,7 @@ void WriteParameters(Writer& writer,
     writer.U16(parameters.grinding_bits);
     writer.U16(parameters.target_soundness_bits);
     writer.U16(parameters.fri_queries_per_lane);
-    writer.U32(parameters.soundness_union_bound_instances);
+    writer.U64(parameters.soundness_union_bound_instances);
     writer.U32(parameters.max_recursive_air_columns);
 }
 
@@ -357,7 +357,7 @@ bool ReadParameters(Reader& reader,
         !reader.U16(parameters.grinding_bits) ||
         !reader.U16(parameters.target_soundness_bits) ||
         !reader.U16(parameters.fri_queries_per_lane) ||
-        !reader.U32(parameters.soundness_union_bound_instances) ||
+        !reader.U64(parameters.soundness_union_bound_instances) ||
         !reader.U32(parameters.max_recursive_air_columns)) {
         return false;
     }
@@ -1152,8 +1152,6 @@ bool ValidateRCStage3UnifiedRootStructure(
             soundness_scenarios::
                 SelectedProductionProofSitePolicy());
     if (selected_production_manifest.commitment.IsNull() ||
-        selected_production_manifest.union_bound_cap >
-            std::numeric_limits<uint32_t>::max() ||
         pin.parameters.soundness_union_bound_instances !=
             selected_production_manifest.union_bound_cap) {
         return Fail(why, "production_site_union_cap_mismatch");

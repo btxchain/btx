@@ -155,21 +155,23 @@ BOOST_AUTO_TEST_CASE(
         ut::AssessUniversalProductionTopologyV1(
             manifest, schedule, registry);
     BOOST_CHECK_EQUAL(
-        topology.relation_leaf_sites, 28'116'241ULL);
+        topology.relation_leaf_sites, 44'639'077'288ULL);
     BOOST_CHECK_EQUAL(
-        topology.arity_four_parent_sites, 9'372'141ULL);
+        topology.arity_four_parent_sites, 14'879'692'506ULL);
     BOOST_CHECK_EQUAL(
         topology.final_tree_parent_sites, 15ULL);
     BOOST_CHECK_EQUAL(
-        topology.exact_total_sites, 37'488'397ULL);
+        topology.exact_total_sites,
+        ss::kSelectedProductionProofSitesV1);
     BOOST_CHECK_EQUAL(
         topology.rejected_product_site_diagnostic,
-        12'221'217'422ULL);
+        19'403'118'957'734ULL);
     BOOST_CHECK_EQUAL(
-        topology.shard_proof_instances, 37'488'397ULL);
+        topology.shard_proof_instances,
+        ss::kSelectedProductionProofSitesV1);
     BOOST_CHECK_EQUAL(
         topology.shard_coverage_and_recursion_events,
-        37'488'397ULL);
+        ss::kSelectedProductionProofSitesV1);
     BOOST_CHECK_EQUAL(
         topology.family_batched_leaf_proof_instances, 28ULL);
     BOOST_CHECK_EQUAL(
