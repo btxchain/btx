@@ -2262,6 +2262,20 @@ BuildOneSlotNormalizedFriParentV1(
                         .fiat_shamir_preimage_codec_alias_bytes;
                     break;
                 }
+                case va::
+                    FiatShamirShaByteOriginKindV1::
+                        ParentBindingDigest:
+                case va::
+                    FiatShamirShaByteOriginKindV1::
+                        AlgebraicShapeCommitment:
+                case va::
+                    FiatShamirShaByteOriginKindV1::
+                        AlgebraicOodEvalCommitment:
+                    // These values are not bytes owned by this child-proof
+                    // codec. A one-slot parent must not silently treat them as
+                    // constants or claim a codec alias it cannot discharge.
+                    aliases_ok = false;
+                    break;
                 }
             }
         }
@@ -3473,8 +3487,8 @@ BuildFourSlotSelfSimilarCtlParentV1(
     // the terminal row to be a pure pad block). enc stays fixed-length per node
     // type, hence injective.
     const auto pad_to_rate =
-        [rate](std::vector<gf::Fp>& v, std::vector<Bind>& b) {
-            while (v.size() % rate != 0) {
+        [](std::vector<gf::Fp>& v, std::vector<Bind>& b) {
+            while (v.size() % ah::kAlgHashRate != 0) {
                 v.push_back(gf::Fp{0});
                 b.push_back({false, 0, gf::Fp3::Zero()});
             }
@@ -5983,7 +5997,13 @@ AssessChildFsReplayClosureV1()
     // this struct; at real role width that is 5.37e8 in-AIR rows for ONE draw
     // of ONE slot.  Decoding a kind and OWNING its transcript bytes are not the
     // same claim and are not merged here.
-    out.challenge_kinds_transcript_bound = cov.kinds_transcript_bound;
+    // `cov` builds one representative companion per KIND.  That is useful
+    // chip evidence, but g4 requires one proof-owned companion for EVERY draw
+    // (all fold challenges and all Q192 query challenges) of every child.
+    // Upgrading 8 representative companions to complete instance coverage
+    // made the old gate unsound.  Keep the production counter at zero until
+    // the row-multiplexed active-P2 transcript AIR owns the full event list.
+    out.challenge_kinds_transcript_bound = 0;
     // --- real_child_shape_covered: COMPUTED by AssessRealChildShapeCoverageV1.
     // Four distinct CoupledBankDequant witnesses (same role AIR, different
     // mantissa/scale assignments => four distinct trace commits / airq_lambda
@@ -6206,10 +6226,11 @@ AssessChildFsReplayClosureV1()
         out.consumer_endpoint_fri_proven;
 
     // --- Obligation 4: the recursion-carrying parent hosts the replay + bus.
-    // TRUE for the covered kind: BuildFourSlotSelfSimilarCtlParentV1 owns the
-    // decoder cells and VerifyChildFsShaBoundV1 binds them to the companion SHA
-    // CS.  It becomes unconditionally true when obligation 2 closes.
-    out.recursion_parent_hosts_replay = true;
+    // BuildFourSlotSelfSimilarCtlParentV1 currently records
+    // child_fiat_shamir_replayed_in_parent=false.  Representative companion
+    // proofs outside that parent cannot discharge this same-parent ownership
+    // requirement.
+    out.recursion_parent_hosts_replay = false;
 
     out.closed = out.bus_constructed &&
                  out.bus_rejects_coordinated_forgery &&

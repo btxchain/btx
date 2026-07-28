@@ -148,6 +148,15 @@ uint256 CommitFiatShamirProgram(const FiatShamirProgram& program)
     hash << child.queries;
     hash << child.child_constraints;
     hash << child.arity;
+    hash << program.child_proof_version;
+    hash << program.child_domain_tag;
+    hash << program.child_domain_tag_bytes;
+    hash << static_cast<uint8_t>(
+        program.child_short_transcript_commitments ? 1 : 0);
+    hash << static_cast<uint8_t>(
+        program.child_sha256d_challenges ? 1 : 0);
+    hash << static_cast<uint8_t>(program.canary_only ? 1 : 0);
+    hash << static_cast<uint8_t>(program.authority_eligible ? 1 : 0);
     hash << program.scheduled_rows;
     hash << program.absorbed_bytes;
     hash << program.minimum_sha256_compression_blocks;
@@ -709,6 +718,37 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
     FiatShamirProgram out;
     out.child_shape = child;
     out.ood_candidates = ood_candidates;
+    const bool bounded_sha_canary = ood_candidates != 0;
+    out.child_proof_version =
+        bounded_sha_canary
+            ? kRCFri3AlgShaFsCanaryProofVersion
+            : kRCFri3AlgActiveBatchProofVersion;
+    out.child_domain_tag =
+        bounded_sha_canary
+            ? kRCFri3AlgShaFsCanaryDomainTag
+            : kRCFri3AlgActiveBatchDomainTag;
+    out.child_domain_tag_bytes =
+        static_cast<uint32_t>(out.child_domain_tag.size());
+    out.child_short_transcript_commitments =
+        bounded_sha_canary
+            ? true
+            : kRCFri3AlgActiveShortTranscript;
+    out.child_sha256d_challenges =
+        bounded_sha_canary
+            ? true
+            : !kRCFri3AlgActiveP2Squeeze;
+    out.canary_only = bounded_sha_canary;
+    out.authority_eligible =
+        !bounded_sha_canary &&
+        child.queries == kRCFri3AlgNumQueries;
+    if (bounded_sha_canary &&
+        (ood_candidates != kRCFiatShamirOodCandidateSchedule ||
+         child.queries != 2)) {
+        out.note =
+            "stage3:verifier_air:"
+            "sha_canary_requires_q2_k2";
+        return out;
+    }
     nr::NarrowVcsConfig config;
     config.poseidon_strategy =
         nr::PoseidonLaneStrategy::DecomposedX2X4X6;
@@ -727,9 +767,11 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
     // `4 +` before it), because the verifier must size its vectors before it
     // can hash anything -- and the commitment re-binds W anyway.
     const uint64_t shape_bytes =
-        kRCFri3AlgActiveShortTranscript ? uint64_t{32} : 4 * columns;
+        out.child_short_transcript_commitments
+            ? uint64_t{32}
+            : 4 * columns;
     const uint64_t preamble_bytes =
-        kRCFri3AlgActiveBatchDomainTagLen + 32 + 8 + 4 + 4 +
+        out.child_domain_tag_bytes + 32 + 8 + 4 + 4 +
         4 + 4 + shape_bytes + 32;
     if (preamble_bytes > std::numeric_limits<uint32_t>::max()) {
         out.note = "stage3:verifier_air:fs_preamble_overflow";
@@ -805,7 +847,7 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
         }
     }
     add(FiatShamirEventKind::AbsorbZ1Z2, 0, 48);
-    if (kRCFri3AlgActiveShortTranscript) {
+    if (out.child_short_transcript_commitments) {
         // Term (ii): 48*W bytes -> 32.  ONE event, and deliberately a
         // DIFFERENT kind, so a program built for one layout can never
         // validate against the other.
@@ -874,6 +916,16 @@ bool ValidateCanonicalFiatShamirProgram(
             program.child_shape, program.ood_candidates);
     if (!expected.valid ||
         program.ood_candidates != expected.ood_candidates ||
+        program.child_proof_version != expected.child_proof_version ||
+        program.child_domain_tag != expected.child_domain_tag ||
+        program.child_domain_tag_bytes !=
+            expected.child_domain_tag_bytes ||
+        program.child_short_transcript_commitments !=
+            expected.child_short_transcript_commitments ||
+        program.child_sha256d_challenges !=
+            expected.child_sha256d_challenges ||
+        program.canary_only != expected.canary_only ||
+        program.authority_eligible != expected.authority_eligible ||
         program.scheduled_rows != expected.scheduled_rows ||
         program.absorbed_bytes != expected.absorbed_bytes ||
         program.minimum_sha256_compression_blocks !=
@@ -904,7 +956,7 @@ FiatShamirWitness BuildFiatShamirWitness(
     }
     const auto& batch = child_proof.batch;
     const uint32_t columns = program.child_shape.child_w + 1;
-    if (batch.version != kRCFri3AlgActiveBatchProofVersion ||
+    if (batch.version != program.child_proof_version ||
         batch.blowup != kRCFriBlowup ||
         batch.n_coeffs != program.child_shape.child_n_coeffs ||
         static_cast<uint64_t>(batch.n_coeffs) * batch.blowup !=
@@ -970,7 +1022,9 @@ FiatShamirWitness BuildFiatShamirWitness(
         event.event_index = event_index;
         switch (spec.kind) {
         case FiatShamirEventKind::ChallengeAirQuotientLambda: {
-            const uint256 digest = aq::AirChallengeDigest(
+            const uint256 digest =
+                aq::AirChallengeDigestForBackend<
+                    aq::AirFriBackendAlg<Fp3>>(
                 child_fs_seed, "airq_lambda",
                 {child_proof.trace_commit},
                 {program.child_shape.child_n_rows,
@@ -984,17 +1038,19 @@ FiatShamirWitness BuildFiatShamirWitness(
         case FiatShamirEventKind::AbsorbPreamble: {
             const auto* domain =
                 reinterpret_cast<const unsigned char*>(
-                    kRCFri3AlgActiveBatchDomainTag);
+                    program.child_domain_tag.data());
+            const size_t domain_len =
+                program.child_domain_tag_bytes;
             event.absorbed_payload.insert(
                 event.absorbed_payload.end(), domain,
-                domain + kRCFri3AlgActiveBatchDomainTagLen);
+                domain + domain_len);
             AppendHash(event.absorbed_payload, child_fs_seed);
             AppendU64(event.absorbed_payload, batch.pow_grind_nonce);
             AppendU32(event.absorbed_payload, batch.blowup);
             AppendU32(event.absorbed_payload, batch.n_coeffs);
             AppendU32(event.absorbed_payload, batch.version);
             AppendU32(event.absorbed_payload, columns);
-            if (kRCFri3AlgActiveShortTranscript) {
+            if (program.child_short_transcript_commitments) {
                 // Byte-for-byte what Fri3AlgBatchFsInit absorbs on this lane.
                 AppendHash(
                     event.absorbed_payload,
@@ -1230,9 +1286,11 @@ FiatShamirAirBackedWitnessV1 BuildFiatShamirAirBackedWitnessV1(
     out.covers_all_challenge_types =
         all_ok &&
         out.reconstructed_challenge_types >= out.total_challenge_types;
-    // The SHA compression equations AND the challenge-to-output map are in the
-    // AIR for every challenge kind iff all eight reconstruct here.
-    out.sha256_equations_checked = out.covers_all_challenge_types;
+    out.challenge_decoders_checked =
+        out.covers_all_challenge_types;
+    // These rows constrain only digest-to-challenge decoding. They do not own
+    // the upstream SHA/Poseidon permutation output cells.
+    out.sha256_equations_checked = false;
     out.valid = all_ok;
     if (out.note.empty()) {
         out.note =
@@ -1289,7 +1347,9 @@ FiatShamirReplayResult ReplayFiatShamirWitness(
                    event.has_fp3_challenge;
         });
     if (air_event != witness.events.end()) {
-        const uint256 digest = aq::AirChallengeDigest(
+        const uint256 digest =
+            aq::AirChallengeDigestForBackend<
+                aq::AirFriBackendAlg<Fp3>>(
             child_fs_seed, "airq_lambda",
             {child_proof.trace_commit},
             {program.child_shape.child_n_rows,
@@ -1310,8 +1370,11 @@ FiatShamirReplayResult ReplayFiatShamirWitness(
     // fold challenge and every query index before checking the proof.
     std::string fri_why;
     out.fri_transcript_replayed =
-        Fri3AlgBatchVerify(
-            child_proof.batch, child_fs_seed, &fri_why);
+        program.canary_only
+            ? Fri3AlgShaFsBoundedOodCanaryBatchVerify(
+                  child_proof.batch, child_fs_seed, &fri_why)
+            : Fri3AlgP2SqueezeBatchVerify(
+                  child_proof.batch, child_fs_seed, &fri_why);
     if (!out.fri_transcript_replayed) {
         out.note =
             "stage3:verifier_air:fri_replay:" + fri_why;
@@ -1340,6 +1403,13 @@ BuildFiatShamirShaExecutionPlanV1(
         out.note = why;
         return out;
     }
+    if (!program.canary_only ||
+        !program.child_sha256d_challenges) {
+        out.note =
+            "stage3:verifier_air:"
+            "fs_sha_plan_not_sha_canary_protocol";
+        return out;
+    }
     const FiatShamirWitness witness =
         BuildFiatShamirWitness(
             program, child_fs_seed,
@@ -1349,7 +1419,8 @@ BuildFiatShamirShaExecutionPlanV1(
             program.events.size()) {
         out.note =
             "stage3:verifier_air:"
-            "fs_sha_witness";
+            "fs_sha_witness:" +
+            witness.note;
         return out;
     }
 
@@ -1465,19 +1536,6 @@ BuildFiatShamirShaExecutionPlanV1(
             }
             return origins;
         };
-    const auto trace_origins =
-        [](uint32_t size) {
-            std::vector<Origin> origins;
-            origins.reserve(size);
-            for (uint32_t byte = 0;
-                 byte < size; ++byte) {
-                origins.push_back({
-                    OriginKind::
-                        SupplementalTraceCommit,
-                    byte});
-            }
-            return origins;
-        };
     const auto append_origins =
         [](std::vector<Origin>& target,
            const std::vector<Origin>& source) {
@@ -1556,7 +1614,7 @@ BuildFiatShamirShaExecutionPlanV1(
                 append_origins(
                     origins,
                     constant_origins(
-                        kRCFri3AlgActiveBatchDomainTagLen));
+                        program.child_domain_tag_bytes));
                 append_origins(
                     origins,
                     public_seed_origins(32));
@@ -1575,7 +1633,7 @@ BuildFiatShamirShaExecutionPlanV1(
                 append_origins(
                     origins,
                     batch_origins(60, 4));
-                if (kRCFri3AlgActiveShortTranscript) {
+                if (program.child_short_transcript_commitments) {
                     // PR-89 g4 ACTIVATION.  These 32 bytes are NOT bytes the
                     // child shipped -- they are Poseidon2 lanes over the
                     // column_len region.  Claiming batch_origins(64, 4*width)
@@ -1687,93 +1745,26 @@ BuildFiatShamirShaExecutionPlanV1(
         }
 
         if (spec.kind ==
-            FiatShamirEventKind::
-                ChallengeAirQuotientLambda) {
-            std::vector<unsigned char> preimage;
-            std::vector<Origin> origins;
-            static constexpr char tag[] =
-                "BTX_RC_AIRQ_V1";
-            preimage.insert(
-                preimage.end(),
-                reinterpret_cast<
-                    const unsigned char*>(tag),
-                reinterpret_cast<
-                    const unsigned char*>(tag) +
-                    sizeof(tag) - 1);
-            append_origins(
-                origins,
-                constant_origins(
-                    sizeof(tag) - 1));
-            AppendHash(preimage, child_fs_seed);
-            append_origins(
-                origins,
-                public_seed_origins(32));
-            static constexpr char label[] =
-                "airq_lambda";
-            AppendU32(
-                preimage, sizeof(label) - 1);
-            append_origins(
-                origins,
-                constant_origins(4));
-            preimage.insert(
-                preimage.end(),
-                reinterpret_cast<
-                    const unsigned char*>(label),
-                reinterpret_cast<
-                    const unsigned char*>(label) +
-                    sizeof(label) - 1);
-            append_origins(
-                origins,
-                constant_origins(
-                    sizeof(label) - 1));
-            AppendU32(preimage, 1);
-            append_origins(
-                origins,
-                constant_origins(4));
-            AppendHash(
-                preimage,
-                child_proof.trace_commit);
-            append_origins(
-                origins,
-                trace_origins(32));
-            AppendU32(preimage, 3);
-            append_origins(
-                origins,
-                constant_origins(4));
-            AppendU32(
-                preimage,
-                program.child_shape.child_n_rows);
-            append_origins(
-                origins,
-                constant_origins(4));
-            AppendU32(
-                preimage,
-                child_proof.batch
-                    .column_len.back());
-            append_origins(
-                origins,
-                batch_origins(
-                    64 + 4 * (width - 1),
-                    4));
-            AppendU32(
-                preimage,
-                program.child_shape.child_w);
-            append_origins(
-                origins,
-                constant_origins(4));
+                FiatShamirEventKind::
+                    ChallengeAirQuotientLambda) {
+            // Row-wise AIR quotient challenges are on the live Poseidon2
+            // route, even when the inner FRI batch is the SHA-only v9
+            // canary. Keep this out of the SHA manifest and verify it with
+            // the same backend selector used by AirQuotientProve/Verify.
             const uint256 digest =
-                Sha256dBytes(
-                    preimage.data(),
-                    preimage.size());
-            append_call(
-                event_index, 0,
-                std::move(preimage),
-                std::move(origins),
+                aq::AirChallengeDigestForBackend<
+                    aq::AirFriBackendAlg<Fp3>>(
+                    child_fs_seed, "airq_lambda",
+                    {child_proof.trace_commit},
+                    {program.child_shape.child_n_rows,
+                     child_proof.batch.column_len.back(),
+                     program.child_shape.child_w});
+            out.non_sha_challenge_calls += 1;
+            out.non_sha_challenges_match_claims =
                 event.has_fp3_challenge &&
-                    gf::Eq(
-                        event.claimed_challenge,
-                        gf::FromChallengeBytes3(
-                            digest.data())));
+                gf::Eq(
+                    event.claimed_challenge,
+                    gf::FromChallengeBytes3(digest.data()));
             continue;
         }
 
@@ -1978,9 +1969,15 @@ BuildFiatShamirShaExecutionPlanV1(
             semantic_match);
     }
 
-    out.exact_domain_tags_and_order = true;
+    out.exact_domain_tags_and_order =
+        program.canary_only &&
+        program.child_sha256d_challenges &&
+        program.child_domain_tag ==
+            kRCFri3AlgShaFsCanaryDomainTag;
     out.every_digest_matches_claim =
         !out.call.empty() &&
+        out.non_sha_challenge_calls == 1 &&
+        out.non_sha_challenges_match_claims &&
         std::all_of(
             out.call.begin(), out.call.end(),
             [](const auto& call) {
@@ -2103,7 +2100,7 @@ BuildFiatShamirShaExecutionPlanV1(
         out.note =
             out.fixed_schedule
                 ? "stage3:verifier_air:"
-                  "bounded_fs_exact_sha_execution;"
+                  "bounded_fs_exact_hybrid_execution;"
                   "fixed_ood_schedule;"
                   "codec_origins_complete;"
                   "sha_air_and_recursive_consumption_open"
@@ -2112,9 +2109,21 @@ BuildFiatShamirShaExecutionPlanV1(
                   "codec_origins_complete;"
                   "unbounded_z_and_recursive_consumption_open";
     } else {
+        const auto mismatch = std::find_if(
+            out.call.begin(), out.call.end(),
+            [](const FiatShamirShaCallV1& call) {
+                return !call.output_matches_claim;
+            });
         out.note =
             "stage3:verifier_air:"
             "fs_sha_execution_invalid";
+        if (mismatch != out.call.end()) {
+            out.note +=
+                ":first_claim_mismatch_event=" +
+                std::to_string(mismatch->event_index) +
+                ":draw=" +
+                std::to_string(mismatch->draw_index);
+        }
     }
     return out;
 }
@@ -2398,7 +2407,9 @@ MeasureFiatShamirChallengeSelectionAirJoinV1(
             witness.events[event_index];
         if (spec.kind ==
             FiatShamirEventKind::ChallengeAirQuotientLambda) {
-            const uint256 digest = aq::AirChallengeDigest(
+            const uint256 digest =
+                aq::AirChallengeDigestForBackend<
+                    aq::AirFriBackendAlg<Fp3>>(
                 child_fs_seed, "airq_lambda",
                 {child_proof.trace_commit},
                 {program.child_shape.child_n_rows,
@@ -2762,7 +2773,9 @@ MeasureFiatShamirAirBackedAllKindsV1(
             witness.events[event_index];
         if (spec.kind ==
             FiatShamirEventKind::ChallengeAirQuotientLambda) {
-            const uint256 digest = aq::AirChallengeDigest(
+            const uint256 digest =
+                aq::AirChallengeDigestForBackend<
+                    aq::AirFriBackendAlg<Fp3>>(
                 child_fs_seed, "airq_lambda",
                 {child_proof.trace_commit},
                 {program.child_shape.child_n_rows,
@@ -3110,6 +3123,9 @@ AssessVerifierFiatShamirAirChipGapV1(
                   program, child_fs_seed, aligned)
             : FiatShamirShaRecursivelyConsumedV1{};
     out.sha_recursively_consumed = recursive.consumed;
+    // The v9 fixture's outer AIRQ challenge is Poseidon2, not one of the SHA
+    // shards above. Its proof-owned recursive consumer is a separate gate.
+    out.non_sha_challenges_recursively_consumed = false;
     // fs_selection_air ChallengeTable join (measured when digests match).
     const FiatShamirChallengeSelectionAirJoinV1 selection =
         aligned_ok
@@ -3128,6 +3144,8 @@ AssessVerifierFiatShamirAirChipGapV1(
         air_kinds.reconstructed;
     // Whole-verifier SHA equations remain open.
     out.whole_verifier_sha_equations_in_air = false;
+    out.authority_eligible =
+        program.authority_eligible && !program.canary_only;
 
     const auto bump = [&](bool ok) {
         if (!ok) ++out.open_predicates;
@@ -3138,9 +3156,11 @@ AssessVerifierFiatShamirAirChipGapV1(
     bump(out.sha_fixed_schedule);
     bump(out.sha_codec_origins_complete);
     bump(out.sha_recursively_consumed);
+    bump(out.non_sha_challenges_recursively_consumed);
     bump(out.challenge_selection_air_constrained);
     bump(out.air_backed_all_kinds_reconstructed);
     bump(out.whole_verifier_sha_equations_in_air);
+    bump(out.authority_eligible);
     // Fail-closed: never claim executable while the constexpr is false.
     out.executable_ready =
         out.open_predicates == 0 &&

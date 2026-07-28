@@ -613,7 +613,8 @@ BOOST_AUTO_TEST_CASE(first_acceptable_ood_index_selector)
 
 BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
 {
-    const nr::NarrowChildShape shape = ToyShape();
+    nr::NarrowChildShape shape = ToyShape();
+    shape.queries = 2;
     const va::FiatShamirProgram v3 =
         va::BuildCanonicalFiatShamirProgram(shape);
     BOOST_REQUIRE(v3.valid);
@@ -621,7 +622,7 @@ BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
     BOOST_CHECK(!v3.rejection_loop_bounded);
     // See fiat_shamir_manifest_is_exact_...: one commitment event replaces the
     // (child_w + 1) per-column absorbs after activation.
-    BOOST_CHECK_EQUAL(v3.events.size(), 16U - shape.child_w);
+    BOOST_CHECK_EQUAL(v3.events.size(), 14U + shape.queries);
 
     const va::FiatShamirProgram bounded =
         va::BuildBoundedFiatShamirProgram(shape, 2);
@@ -636,6 +637,18 @@ BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
     std::string why;
     BOOST_CHECK_MESSAGE(
         va::ValidateCanonicalFiatShamirProgram(bounded, &why), why);
+    auto wrong_domain = bounded;
+    wrong_domain.child_domain_tag[0] ^= 1;
+    BOOST_CHECK(
+        !va::ValidateCanonicalFiatShamirProgram(wrong_domain, &why));
+    auto wrong_squeeze = bounded;
+    wrong_squeeze.child_sha256d_challenges = false;
+    BOOST_CHECK(
+        !va::ValidateCanonicalFiatShamirProgram(wrong_squeeze, &why));
+    auto wrong_authority = bounded;
+    wrong_authority.authority_eligible = true;
+    BOOST_CHECK(
+        !va::ValidateCanonicalFiatShamirProgram(wrong_authority, &why));
 
     // A hand-flipped bound flag (no fixed schedule) is rejected as noncanonical.
     auto forged = v3;
@@ -643,13 +656,13 @@ BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
     BOOST_CHECK(
         !va::ValidateCanonicalFiatShamirProgram(forged, &why));
 
-    // K=1 fixed schedule does NOT clear the 128-bit target: honest false.
+    // K=1 does NOT clear the 128-bit target and is not a registered v9
+    // protocol. Probability analysis remains available without manufacturing
+    // a noncanonical proof program.
     const va::FiatShamirProgram k1 =
         va::BuildBoundedFiatShamirProgram(shape, 1);
-    BOOST_REQUIRE(k1.valid);
-    BOOST_CHECK_EQUAL(k1.ood_candidates, 1U);
-    BOOST_CHECK(!k1.rejection_loop_bounded);
-    BOOST_CHECK_EQUAL(k1.events.size(), v3.events.size());
+    BOOST_CHECK(!k1.valid);
+    BOOST_CHECK(!va::ComputeFixedOodScheduleBound(1).bounded);
 }
 
 // g2 SHA-FS chip: bounded K-window SHA execution sets fixed_schedule when
@@ -681,18 +694,17 @@ BOOST_AUTO_TEST_CASE(
         }
     }
 
-    // Bounded K=2: align post-z claims to the fixed K-window selection, then
-    // the SHA plan must report fixed_schedule without claiming Executable.
+    // Bounded v9 is an exact Q=2/K=2 SHA inner-FRI canary. It must never be
+    // inferred from, or aligned onto, the live P2/Q192 proof.
+    proof = HonestBoundedShaFsCanaryProof(seed);
+    const nr::NarrowChildShape canary_shape = ShapeForProof(proof);
     const va::FiatShamirProgram bounded =
         va::BuildBoundedFiatShamirProgram(
-            shape, va::kRCFiatShamirOodCandidateSchedule);
+            canary_shape, va::kRCFiatShamirOodCandidateSchedule);
     BOOST_REQUIRE(bounded.valid);
+    BOOST_CHECK(bounded.canary_only);
+    BOOST_CHECK(!bounded.authority_eligible);
     BOOST_CHECK(bounded.rejection_loop_bounded);
-    std::string align_why;
-    BOOST_REQUIRE_MESSAGE(
-        va::AlignAlgAirProofOodToBoundedShaScheduleV1(
-            bounded, seed, proof, &align_why),
-        align_why);
     const va::FiatShamirShaExecutionPlanV1 b_plan =
         va::BuildFiatShamirShaExecutionPlanV1(
             bounded, seed, proof);
@@ -722,9 +734,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.bounded_ood_rejection_loop_bounded);
     BOOST_CHECK(gap.sha_fixed_schedule);
     BOOST_CHECK(gap.sha_codec_origins_complete);
-    BOOST_CHECK(!gap.sha_recursively_consumed);
-    BOOST_CHECK(!gap.challenge_selection_air_constrained);
-    BOOST_CHECK(!gap.air_backed_all_kinds_reconstructed);
+    BOOST_CHECK(gap.sha_recursively_consumed);
+    BOOST_CHECK(gap.challenge_selection_air_constrained);
+    BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
+    BOOST_CHECK(!gap.non_sha_challenges_recursively_consumed);
+    BOOST_CHECK(!gap.authority_eligible);
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK_GE(gap.open_predicates, 3U);
@@ -740,6 +754,28 @@ BOOST_AUTO_TEST_CASE(
     const va::AlgAirProof proof = HonestBoundedShaFsCanaryProof(seed);
     const nr::NarrowChildShape shape = ShapeForProof(proof);
     BOOST_CHECK_EQUAL(shape.queries, 2U);
+    BOOST_CHECK_EQUAL(
+        proof.batch.version,
+        rc::kRCFri3AlgShaFsCanaryProofVersion);
+    BOOST_CHECK_NE(
+        proof.batch.version,
+        rc::kRCFri3AlgActiveBatchProofVersion);
+    std::string native_why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::Fri3AlgShaFsBoundedOodCanaryBatchVerify(
+            proof.batch, seed, &native_why),
+        native_why);
+    auto wrong_version = proof.batch;
+    wrong_version.version =
+        rc::kRCFri3AlgActiveBatchProofVersion;
+    BOOST_CHECK(
+        !rc::Fri3AlgShaFsBoundedOodCanaryBatchVerify(
+            wrong_version, seed, &native_why));
+    auto missing_query = proof.batch;
+    missing_query.queries.pop_back();
+    BOOST_CHECK(
+        !rc::Fri3AlgShaFsBoundedOodCanaryBatchVerify(
+            missing_query, seed, &native_why));
 
     const va::FiatShamirProgram bounded =
         va::BuildBoundedFiatShamirProgram(
@@ -748,6 +784,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(bounded.rejection_loop_bounded);
     BOOST_CHECK_EQUAL(
         bounded.ood_candidates, va::kRCFiatShamirOodCandidateSchedule);
+    const va::FiatShamirProgram active_for_same_shape =
+        va::BuildCanonicalFiatShamirProgram(shape);
+    BOOST_REQUIRE(active_for_same_shape.valid);
+    BOOST_CHECK(
+        !va::BuildFiatShamirWitness(
+             active_for_same_shape, seed, proof)
+             .valid);
 
     // No Align: z/w/lambda come from the honest canary prover.
     const va::FiatShamirShaExecutionPlanV1 plan =
@@ -779,8 +822,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
-    // whole-verifier SHA equations remain the sole Executable blocker.
-    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
+    BOOST_CHECK(!gap.non_sha_challenges_recursively_consumed);
+    BOOST_CHECK(!gap.authority_eligible);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 3U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
@@ -878,7 +922,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
-    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
+    BOOST_CHECK(!gap.non_sha_challenges_recursively_consumed);
+    BOOST_CHECK(!gap.authority_eligible);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 3U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
@@ -1060,8 +1106,8 @@ BOOST_AUTO_TEST_CASE(
     // Full-KIND coverage at reduced shape: every one of the eight challenge
     // kinds is reconstructed IN-AIR via its decoder -- z1/z2 (OOD selection),
     // query-index (query decoder), and airq-lambda/lambda/w1/w2/fold-beta (the
-    // direct byte->Fp3 decoder).  covers_all_challenge_types => the AIR-backed
-    // sha256_equations_checked flips true.
+    // direct byte->Fp3 decoder). Decoder coverage alone must not claim that
+    // upstream SHA/Poseidon equations are equality-linked.
     const std::array<uint64_t, 8> z_words{
         7, 11, 13, 17, 19, 23, 29, 31};
     const std::vector<va::FiatShamirChallengeReconstructionInputV1>
@@ -1083,7 +1129,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(w.reconstructed_challenge_types, 8U);
     BOOST_CHECK_EQUAL(w.total_challenge_types, 8U);
     BOOST_CHECK(w.covers_all_challenge_types);
-    BOOST_CHECK(w.sha256_equations_checked);
+    BOOST_CHECK(w.challenge_decoders_checked);
+    BOOST_CHECK(!w.sha256_equations_checked);
     BOOST_CHECK(w.all_covered_reconstructions_constrained);
 
     // The direct-decoded challenges equal FromChallengeBytes3 of their bytes

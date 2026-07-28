@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_fri_ext3_alg.h>
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
+#include <matmul/matmul_v4_rc_stage3_global_soundness_ledger.h>
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
@@ -302,9 +303,17 @@ BOOST_AUTO_TEST_CASE(readiness_is_exact_and_authority_stays_fail_closed)
     BOOST_CHECK_EQUAL(
         has(RCStage3RecursiveGapCode::SoundnessTargetNotMet),
         report.soundness_bits < kRCStage3RecursiveTargetSoundnessBits);
-    BOOST_CHECK(has(RCStage3RecursiveGapCode::ChildFiatShamirReplayNotClosed));
-    BOOST_CHECK(has(RCStage3RecursiveGapCode::SelfSimilarFixedPointNotClosed));
-    BOOST_CHECK(has(RCStage3RecursiveGapCode::ProductionPerformanceUnmeasured));
+    const auto global_ledger =
+        global_soundness_ledger::AssessExecutableGlobalSoundnessLedgerV1();
+    BOOST_CHECK_EQUAL(
+        has(RCStage3RecursiveGapCode::ChildFiatShamirReplayNotClosed),
+        !global_ledger.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK_EQUAL(
+        has(RCStage3RecursiveGapCode::SelfSimilarFixedPointNotClosed),
+        !global_ledger.composition_gate.self_similar_fixed_point_closed);
+    BOOST_CHECK_EQUAL(
+        has(RCStage3RecursiveGapCode::ProductionPerformanceUnmeasured),
+        !CurrentRCStage3TwoLevelRootVerifyBudgetV1().within_relay_budget);
     BOOST_CHECK(has(RCStage3RecursiveGapCode::AuthorityDisabled));
 
     std::string why;

@@ -308,6 +308,16 @@ struct FixedOodScheduleBound {
  */
 struct FiatShamirProgram {
     NarrowChildShape child_shape{};
+    // Exact child protocol identity. These fields are committed and
+    // canonicalized so a bounded SHA canary program cannot be replayed
+    // against the live Poseidon2 lane (or vice versa).
+    uint32_t child_proof_version{0};
+    std::string child_domain_tag;
+    uint32_t child_domain_tag_bytes{0};
+    bool child_short_transcript_commitments{false};
+    bool child_sha256d_challenges{false};
+    bool canary_only{false};
+    bool authority_eligible{false};
     uint64_t scheduled_rows{0};
     uint64_t absorbed_bytes{0};
     /** Cost of independently rehashing the complete prefix per challenge. */
@@ -421,6 +431,7 @@ struct FiatShamirAirBackedWitnessV1 {
     uint32_t total_challenge_types{0};
     bool all_covered_reconstructions_constrained{false};
     bool covers_all_challenge_types{false};
+    bool challenge_decoders_checked{false};
     // True iff covers_all_challenge_types: EVERY challenge kind's
     // challenge-to-output map is reconstructed in-AIR here (each decoder's
     // constraint system has zero violations).  The other half of the property
@@ -432,6 +443,9 @@ struct FiatShamirAirBackedWitnessV1 {
     // the GPU-run scale-up).  This is the AIR-backed analog of the consensus
     // FiatShamirWitness::sha256_equations_checked; the host-copy
     // BuildFiatShamirWitness keeps ITS sha256_equations_checked false.
+    // Decoder constraints do not prove the upstream SHA/Poseidon
+    // permutation. This remains false until those proof-owned output cells
+    // are equality-linked to the decoder inputs in the same recursive proof.
     bool sha256_equations_checked{false};
     bool valid{false};
     std::string note;
@@ -570,6 +584,7 @@ BuildFiatShamirSeedOwnershipBusV1(
  */
 struct FiatShamirShaExecutionPlanV1 {
     uint32_t calls{0};
+    uint32_t non_sha_challenge_calls{0};
     uint64_t compression_instances{0};
     std::vector<FiatShamirShaCallV1> call;
     std::vector<stage3_hash_air::ShaManifest> manifest;
@@ -579,6 +594,7 @@ struct FiatShamirShaExecutionPlanV1 {
     bool exact_domain_tags_and_order{false};
     bool every_digest_matches_claim{false};
     bool exact_sha256d_padding_and_chaining{false};
+    bool non_sha_challenges_match_claims{false};
     bool fixed_schedule{false};
     bool proof_codec_byte_origins_complete{false};
     bool recursively_consumed{false};
@@ -606,9 +622,11 @@ struct VerifierFiatShamirAirChipGapV1 {
     bool sha_fixed_schedule{false};
     bool sha_codec_origins_complete{false};
     bool sha_recursively_consumed{false};
+    bool non_sha_challenges_recursively_consumed{false};
     bool challenge_selection_air_constrained{false};
     bool air_backed_all_kinds_reconstructed{false};
     bool whole_verifier_sha_equations_in_air{false};
+    bool authority_eligible{false};
     /** Conjunction; must stay false until every field above is true. */
     bool executable_ready{false};
     uint32_t open_predicates{0};

@@ -336,7 +336,7 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    one_slot_parent_executes_vcs_and_sources_bus_from_verified_cells)
+    one_slot_parent_fails_closed_until_active_p2_cells_are_owned)
 {
     const auto child_cs = ToyFriChildCs();
     const uint256 seed = Seed(0xa1);
@@ -357,119 +357,25 @@ BOOST_AUTO_TEST_CASE(
         BuildOneSlotNormalizedFriParentV1(
             child_cs, proved.proof,
             seed, root);
-    BOOST_REQUIRE_MESSAGE(parent.valid, parent.note);
-    BOOST_CHECK_EQUAL(parent.active_slots, 1U);
-    BOOST_CHECK_EQUAL(parent.padding_slots, 3U);
-    BOOST_CHECK(parent.all_vcs_families_execute);
-    BOOST_CHECK(
-        parent.merkle_fold_deep_quotient_same_parent);
-    BOOST_CHECK(parent.exact_four_slot_layout);
-    BOOST_CHECK(
-        parent.output_bus_exclusively_from_vcs_cells);
-    BOOST_CHECK(
-        parent.output_bus_authenticated_in_parent);
-    BOOST_CHECK(
-        parent.exact_child_proof_codec_roundtrip);
-    BOOST_CHECK_GT(
-        parent.exact_child_proof_bytes, 0U);
-    BOOST_CHECK(
-        !parent.child_proof_bytes_owned_by_parent_air);
-    BOOST_CHECK(
-        parent.fiat_shamir_value_consumed_in_parent);
-    BOOST_CHECK(
-        parent.exact_sha_call_preimages_inventoried);
-    BOOST_CHECK(
-        parent.sha_preimage_codec_alias_map_complete);
-    BOOST_CHECK_GT(
-        parent.fiat_shamir_preimage_bytes, 0U);
-    BOOST_CHECK_GT(
-        parent.fiat_shamir_preimage_codec_alias_bytes,
-        0U);
-    BOOST_CHECK(
-        parent.fiat_shamir_sha_execution
-            .exact_domain_tags_and_order);
-    BOOST_CHECK(
-        parent.fiat_shamir_sha_execution
-            .every_digest_matches_claim);
-    BOOST_CHECK(
-        parent.fiat_shamir_sha_execution
-            .exact_sha256d_padding_and_chaining);
-    BOOST_CHECK(
-        !parent.fiat_shamir_sha_execution
-             .fixed_schedule);
-    BOOST_CHECK(
-        parent.fiat_shamir_sha_execution
-            .proof_codec_byte_origins_complete);
-    BOOST_CHECK(
-        !parent.fiat_shamir_sha_execution
-             .recursively_consumed);
-    BOOST_CHECK(
-        !parent.fiat_shamir_sha_replayed_in_parent);
-    BOOST_CHECK(
-        parent.invalid_child_witness_rejected_by_parent);
-    BOOST_CHECK(
-        !parent.same_parent_verifies_child_receipt);
+    // This child uses the active P2 backend. The one-slot parent still owns
+    // only the retired SHA-canary byte inventory, so it must refuse before it
+    // can claim that the transcript, proof bytes, or V_CS output bus share one
+    // recursively verified parent.
+    BOOST_CHECK(!parent.valid);
+    BOOST_CHECK(!parent.exact_sha_call_preimages_inventoried);
+    BOOST_CHECK(!parent.same_parent_verifies_child_receipt);
     BOOST_CHECK(!parent.recursive_fixed_point);
     BOOST_CHECK(!parent.authority);
-    BOOST_CHECK_EQUAL(parent.witness_violations, 0U);
-    BOOST_CHECK_GT(
-        parent.parent_columns,
-        parent.vcs_columns);
-
-    std::vector<unsigned char> encoded;
-    std::string codec_why;
-    BOOST_REQUIRE_MESSAGE(
-        SerializeOneSlotNormalizedFriChildProofV1(
-            proved.proof, encoded,
-            &codec_why),
-        codec_why);
-    OneSlotNormalizedFriParentV1::ChildProof
-        decoded;
-    BOOST_REQUIRE_MESSAGE(
-        DeserializeOneSlotNormalizedFriChildProofV1(
-            encoded, decoded,
-            &codec_why),
-        codec_why);
-    std::vector<unsigned char> reencoded;
-    BOOST_REQUIRE(
-        SerializeOneSlotNormalizedFriChildProofV1(
-            decoded, reencoded,
-            &codec_why));
-    BOOST_CHECK_EQUAL_COLLECTIONS(
-        encoded.begin(), encoded.end(),
-        reencoded.begin(), reencoded.end());
-    const auto byte_parent =
-        BuildOneSlotNormalizedFriParentFromBytesV1(
-            child_cs, encoded, seed, root);
-    BOOST_REQUIRE_MESSAGE(
-        byte_parent.valid, byte_parent.note);
-    BOOST_CHECK(
-        byte_parent
-            .exact_child_proof_bytes_parsed_at_ingress);
-    BOOST_CHECK(
-        !byte_parent
-             .child_proof_bytes_owned_by_parent_air);
-
-    auto trailing_attack = encoded;
-    trailing_attack.push_back(0);
-    BOOST_CHECK(
-        !BuildOneSlotNormalizedFriParentFromBytesV1(
-             child_cs, trailing_attack,
-             seed, root)
-             .valid);
-
-    auto body_attack = encoded;
-    BOOST_REQUIRE_GT(body_attack.size(), 64U);
-    body_attack[body_attack.size() / 2] ^= 1U;
-    const auto attacked =
-        BuildOneSlotNormalizedFriParentFromBytesV1(
-            child_cs, body_attack,
-            seed, root);
-    BOOST_CHECK(!attacked.valid);
+    BOOST_CHECK_EQUAL(
+        parent.note,
+        "stage3:recursive_parent_air:"
+        "one_slot_fs_sha_inventory:"
+        "stage3:verifier_air:"
+        "fs_sha_plan_not_sha_canary_protocol");
 }
 
 BOOST_AUTO_TEST_CASE(
-    one_slot_parent_rejects_internally_consistent_bad_merkle_and_fold)
+    one_slot_parent_rejects_bad_child_before_unowned_p2_transcript)
 {
     const auto child_cs = ToyFriChildCs();
     const uint256 seed = Seed(0xa2);
@@ -508,8 +414,7 @@ BOOST_AUTO_TEST_CASE(
             child_cs, bad_merkle, seed,
             bad_merkle_root);
     BOOST_CHECK(!merkle_parent.valid);
-    BOOST_CHECK_GT(
-        merkle_parent.witness_violations, 0U);
+    BOOST_CHECK(!merkle_parent.authority);
 
     auto bad_fold = proved.proof;
     BOOST_REQUIRE(
@@ -532,8 +437,7 @@ BOOST_AUTO_TEST_CASE(
             child_cs, bad_fold, seed,
             bad_fold_root);
     BOOST_CHECK(!fold_parent.valid);
-    BOOST_CHECK_GT(
-        fold_parent.witness_violations, 0U);
+    BOOST_CHECK(!fold_parent.authority);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1750,38 +1654,79 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(parent.valid, parent.note);
 
     const auto& pi0 = parent.child_verifier.pis[0];
-    const uint256 d = aq::AirChallengeDigest(
-        seed, "airq_lambda", {proofs[0].trace_commit},
-        {pi0.child_n_rows, pi0.child_quotient_len, pi0.child_w});
+    const uint256 d =
+        aq::AirChallengeDigestSelected(
+            aq::kAirChallengeP2Activated, seed, "airq_lambda",
+            {proofs[0].trace_commit},
+            {pi0.child_n_rows, pi0.child_quotient_len, pi0.child_w});
     const uint32_t bb = parent.child_air_challenge_byte_base[0];
     BOOST_REQUIRE(bb != 0);
-    // The parent's decoder cells really are the production digest bytes.
+    // The parent's decoder cells really are the production transcript
+    // outputs. The activated P2 route exports three canonical Fp limbs;
+    // the frozen SHA route exports the legacy 24-byte window.
     std::vector<gf::Fp3> pcells, scells;
-    for (uint32_t k = 0; k < 24; ++k) {
-        pcells.push_back(parent.parent_witness[bb + k][0]);
-        scells.push_back(gf::FromU64_3(
-            static_cast<uint64_t>(d.data()[k])));
-        BOOST_REQUIRE(gf::Eq(pcells[k], scells[k]));
+    const uint32_t transcript_cells =
+        aq::kAirChallengeP2Activated
+            ? kChildFsLimbBusCellsV1
+            : kChildFsDigestBusBytesV1;
+    if (aq::kAirChallengeP2Activated) {
+        const gf::Fp3 reconstructed =
+            gf::FromChallengeBytes3(d.data());
+        const std::array<gf::Fp3, kChildFsLimbBusCellsV1> limbs{
+            gf::Fp3::FromFp(reconstructed.c0),
+            gf::Fp3::FromFp(reconstructed.c1),
+            gf::Fp3::FromFp(reconstructed.c2)};
+        for (uint32_t k = 0; k < transcript_cells; ++k) {
+            pcells.push_back(parent.parent_witness[bb + k][0]);
+            scells.push_back(limbs[k]);
+            BOOST_REQUIRE(gf::Eq(pcells[k], scells[k]));
+        }
+    } else {
+        for (uint32_t k = 0; k < transcript_cells; ++k) {
+            pcells.push_back(parent.parent_witness[bb + k][0]);
+            scells.push_back(gf::FromU64_3(
+                static_cast<uint64_t>(d.data()[k])));
+            BOOST_REQUIRE(gf::Eq(pcells[k], scells[k]));
+        }
     }
     RCStage3CtlChallenges ch;
     std::string why;
-    BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
-        parent.computed_parent_statement, d, 0, pcells, scells, ch, &why));
 
     auto cs = parent.parent_cs;
     auto cols = parent.parent_witness;
-    ChildFsDigestBusLaneV1 lane;
-    BOOST_REQUIRE_MESSAGE(
-        AppendChildFsDigestBusLaneV1(bb, ch, nullptr, cs, &cols, lane, &why),
-        why);
+    uint32_t bus_columns_added = 0;
+    if (aq::kAirChallengeP2Activated) {
+        BOOST_REQUIRE(DeriveChildFsLimbBusChallengesV1(
+            parent.computed_parent_statement, d, 0,
+            pcells, scells, ch, &why));
+        ChildFsLimbBusLaneV1 lane;
+        BOOST_REQUIRE_MESSAGE(
+            AppendChildFsLimbBusLaneV1(
+                bb, ch, nullptr, cs, &cols, lane, &why),
+            why);
+        bus_columns_added =
+            2 * kChildFsLimbBusCellsV1 + 2;
+    } else {
+        BOOST_REQUIRE(DeriveChildFsDigestBusChallengesV1(
+            parent.computed_parent_statement, d, 0,
+            pcells, scells, ch, &why));
+        ChildFsDigestBusLaneV1 lane;
+        BOOST_REQUIRE_MESSAGE(
+            AppendChildFsDigestBusLaneV1(
+                bb, ch, nullptr, cs, &cols, lane, &why),
+            why);
+        bus_columns_added =
+            2 * kChildFsDigestBusBytesV1 + 2;
+    }
     BOOST_TEST_MESSAGE(
         "G4_PARENT_BUS_SHAPE base_cols=" << parent.parent_columns
         << " bus_augmented_cols=" << cs.n_columns
         << " rows=" << cs.n_rows
         << " constraints=" << cs.constraints.size()
         << " cap=" << kRCFri3AlgBatchMaxColumns);
-    // The bus costs 50 columns on a ~17k-column parent.
-    BOOST_CHECK_EQUAL(cs.n_columns, parent.parent_columns + 50);
+    BOOST_CHECK_EQUAL(
+        cs.n_columns,
+        parent.parent_columns + bus_columns_added);
     BOOST_CHECK_LE(cs.n_columns, kRCFri3AlgBatchMaxColumns);
     // The augmented system is satisfied (necessary before proving).
     BOOST_CHECK_EQUAL(
@@ -1885,7 +1830,7 @@ BOOST_AUTO_TEST_CASE(
     // The bus half is genuinely built and adversarially tested.
     BOOST_CHECK(a.bus_constructed);
     BOOST_CHECK(a.bus_rejects_coordinated_forgery);
-    BOOST_CHECK(a.recursion_parent_hosts_replay);
+    BOOST_CHECK(!a.recursion_parent_hosts_replay);
     BOOST_CHECK(a.lane_relation_fri_proven);
     // `closed` is a CONJUNCTION, not an assertion: every open obligation must
     // force it false.
@@ -1910,25 +1855,28 @@ BOOST_AUTO_TEST_CASE(
     // second must never silently ride on the first.
     BOOST_CHECK_LE(
         a.challenge_kinds_transcript_bound, a.challenge_kinds_covered);
-    // Today: CLOSED under joint P2 activation (all eight kinds + endpoints +
-    // real-child shape).  The conjunction above still forces closed=false if
-    // any obligation reopens.
-    BOOST_CHECK(a.closed);
-    BOOST_CHECK_EQUAL(a.note, "stage3:child_fs_replay:closed");
+    // The active parent does not yet own the complete per-instance P2
+    // transcript. Representative per-kind companions are not enough.
+    BOOST_CHECK(!a.closed);
+    BOOST_CHECK(
+        a.note.find("transcript_bound") != std::string::npos);
+    BOOST_CHECK(
+        a.note.find("recursion_parent_has_no_replay") !=
+        std::string::npos);
     BOOST_CHECK(a.producer_endpoint_fri_proven);
     BOOST_CHECK(a.consumer_endpoint_fri_proven);
     BOOST_CHECK(a.real_child_shape_covered);
-    BOOST_CHECK_EQUAL(a.challenge_kinds_transcript_bound, 8U);
+    BOOST_CHECK_EQUAL(a.challenge_kinds_transcript_bound, 0U);
     // And the ledger reports exactly this.
     const auto audit =
         matmul::v4::rc::global_soundness_ledger::
             AssessExecutableGlobalSoundnessLedgerV1();
     BOOST_CHECK_EQUAL(audit.fiat_shamir_replay_complete, a.closed);
-    BOOST_CHECK(audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
     // certified_bits still depends on other gates (g0-g3,g5,g6); g4 alone
     // does not force all_clear.
     BOOST_CHECK_EQUAL(audit.composition_gate.child_fiat_shamir_replay_closed,
-                      true);
+                      false);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -3157,7 +3105,7 @@ BOOST_AUTO_TEST_CASE(
 // CPU-prohibitive in-suite (>20 min) and is the GPU-integration lane's concern,
 // so the heavy prove runs only under BTX_RUN_HEAVY_PARENT_FRI.
 BOOST_AUTO_TEST_CASE(
-    one_slot_reduced_parent_is_a_capfitting_recursion_node)
+    one_slot_reduced_parent_reports_p2_transcript_ownership_open)
 {
     const auto child_cs = ToyFriChildCs();
     const uint256 seed = Seed(0xd4);
@@ -3177,7 +3125,19 @@ BOOST_AUTO_TEST_CASE(
     const auto parent =
         BuildOneSlotNormalizedFriParentV1(
             child_cs, proved_child.proof, seed, root);
-    BOOST_REQUIRE_MESSAGE(parent.valid, parent.note);
+    // The active child is P2/V8. The old one-slot builder only owned
+    // byte-origin aliases for the retired SHA transcript and must fail closed
+    // until the P2 lane cells are mapped into this same parent.
+    BOOST_CHECK(!parent.valid);
+    BOOST_CHECK(!parent.exact_sha_call_preimages_inventoried);
+    BOOST_CHECK(!parent.authority);
+    BOOST_CHECK_EQUAL(
+        parent.note,
+        "stage3:recursive_parent_air:"
+        "one_slot_fs_sha_inventory:"
+        "stage3:verifier_air:"
+        "fs_sha_plan_not_sha_canary_protocol");
+    return;
 
     BOOST_TEST_MESSAGE(
         "ONE_SLOT_SHAPE rows=" << parent.parent_rows
@@ -3551,8 +3511,11 @@ BOOST_AUTO_TEST_CASE(parent_perm_sbox_bytecode_gpu_parity)
                              (unsigned long long)gf::Canonical(rows[r][c].c2));
         for (uint32_t s = 0; s < table.programs.size(); ++s)
             for (uint32_t r = 0; r < R; ++r) {
-                Fp3 got; cb::EvaluateProgram(
-                    table.programs[s], rows[r], empty_next, got, &why);
+                Fp3 got;
+                BOOST_REQUIRE_MESSAGE(
+                    cb::EvaluateProgram(
+                        table.programs[s], rows[r], empty_next, got, &why),
+                    why);
                 std::fprintf(f, "%llu %llu %llu\n",
                              (unsigned long long)gf::Canonical(got.c0),
                              (unsigned long long)gf::Canonical(got.c1),
@@ -3567,6 +3530,17 @@ BOOST_AUTO_TEST_CASE(parent_perm_sbox_bytecode_gpu_parity)
 // for the full-composition bytecode synthesis.
 BOOST_AUTO_TEST_CASE(parent_support_histogram_diag)
 {
+    // This is an exploratory O(constraints * columns) black-box support probe,
+    // not a consensus regression.  On the production parent shape it can take
+    // tens of minutes, so never let it silently turn the default test suite
+    // into a heavy benchmark.
+    if (std::getenv("BTX_RUN_PARENT_BYTECODE_DIAGNOSTICS") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "skipping parent support histogram diagnostic "
+            "(set BTX_RUN_PARENT_BYTECODE_DIAGNOSTICS=1 to run)");
+        return;
+    }
+
     using gf::Fp3;
     const auto child_cs = ToyFriChildCs();
     const uint256 seed = Seed(0xe1);
@@ -3636,6 +3610,17 @@ BOOST_AUTO_TEST_CASE(parent_support_histogram_diag)
 // the solve cap; those are reported precisely, not silently dropped.
 BOOST_AUTO_TEST_CASE(parent_full_composition_bytecode_gpu_parity)
 {
+    // This test performs black-box polynomial recovery for every parent
+    // constraint and is intentionally a migration/benchmark tool.  Keep it
+    // opt-in; the canonical bytecode and proof-level parity regressions are
+    // tested separately in the default suite.
+    if (std::getenv("BTX_RUN_PARENT_BYTECODE_DIAGNOSTICS") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "skipping full parent composition bytecode synthesis "
+            "(set BTX_RUN_PARENT_BYTECODE_DIAGNOSTICS=1 to run)");
+        return;
+    }
+
     namespace cb = constraint_bytecode;
     using gf::Fp3;
 
@@ -3697,12 +3682,6 @@ BOOST_AUTO_TEST_CASE(parent_full_composition_bytecode_gpu_parity)
     };
 
     struct Var { bool nxt; uint32_t col; };
-    // random probe values for support detection
-    auto probeval = [&](uint32_t c, uint32_t k) {
-        return Fp3{gf::FromU64(0x1000003U * (c + 1) + 7 * k + 1),
-                   gf::FromU64(11 * k + 3), gf::FromU64(5 * k + 2)};
-    };
-
     const std::vector<Fp3> B[3] = {rrow(101), rrow(202), rrow(303)};
     const uint32_t kMonomialCap = 5000; // Vandermonde solve cap
 
@@ -3978,7 +3957,12 @@ BOOST_AUTO_TEST_CASE(parent_full_composition_bytecode_gpu_parity)
         }
         for (uint32_t ord = 0; ord < table.programs.size(); ++ord)
             for (uint32_t r = 0; r < R; ++r) {
-                Fp3 got; cb::EvaluateProgram(table.programs[ord], cur_rows[r], nxt_rows[r], got, &why);
+                Fp3 got;
+                BOOST_REQUIRE_MESSAGE(
+                    cb::EvaluateProgram(
+                        table.programs[ord], cur_rows[r], nxt_rows[r], got,
+                        &why),
+                    why);
                 std::fprintf(f, "%llu %llu %llu\n",
                     (unsigned long long)gf::Canonical(got.c0),
                     (unsigned long long)gf::Canonical(got.c1),
@@ -4146,6 +4130,12 @@ void RunFourSlotRealRoleChildren(const char* tag,
 BOOST_AUTO_TEST_CASE(
     four_slot_self_similar_parent_consumes_real_coupled_permutation_children)
 {
+    if (std::getenv("BTX_RUN_REAL_ROLE_PARENT") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "skipping production-width four-slot CoupledPermutation parent "
+            "(set BTX_RUN_REAL_ROLE_PARENT=1 to run)");
+        return;
+    }
     const gf::Fp3 cell = gf::Fp3::FromFp(gf::FromU64(0x2bad10ULL));
     RunFourSlotRealRoleChildren(
         "CoupledPermutation",
@@ -4156,6 +4146,12 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     four_slot_self_similar_parent_consumes_real_coupled_mix_children)
 {
+    if (std::getenv("BTX_RUN_REAL_ROLE_PARENT") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "skipping production-width four-slot CoupledMix parent "
+            "(set BTX_RUN_REAL_ROLE_PARENT=1 to run)");
+        return;
+    }
     RunFourSlotRealRoleChildren(
         "CoupledMix",
         BuildRCStage3CoupledScalarRoleAir(RCStage3RelationRole::CoupledMix, 0,

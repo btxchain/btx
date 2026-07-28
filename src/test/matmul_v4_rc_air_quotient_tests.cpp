@@ -1507,13 +1507,12 @@ BOOST_AUTO_TEST_CASE(airq_p2_route_is_domain_separated_and_canonical)
         BOOST_CHECK_LT(limb, kGoldilocksP);
     }
 
-    // The route is NOT activated: nothing selects it yet.
+    // The route is active only for row-wise backends.  The legacy per-column
+    // backend remains on SHA, while the algebraic row-wise backend selects P2.
     BOOST_CHECK(aq::kAirChallengeP2Activated);
     BOOST_CHECK(!aq::AirBackendUsesP2Challenge<aq::AirFriBackend<gf::Fp3>>);
-    // Row-wise trait is true for the alg backend, but the activation gate
-    // keeps the selected digest on the SHA route until the flag flips.
     BOOST_CHECK(aq::AirBackendIsRowWise<aq::AirFriBackendAlg<gf::Fp3>>);
-    BOOST_CHECK(!aq::AirBackendUsesP2Challenge<aq::AirFriBackendAlg<gf::Fp3>>);
+    BOOST_CHECK(aq::AirBackendUsesP2Challenge<aq::AirFriBackendAlg<gf::Fp3>>);
     BOOST_CHECK(aq::AirChallengeDigestSelected(
                     /*use_p2=*/false, seed, "airq_lambda", {root}, {64, 8, 3}) ==
                 sha);
@@ -1521,7 +1520,7 @@ BOOST_AUTO_TEST_CASE(airq_p2_route_is_domain_separated_and_canonical)
                     /*use_p2=*/true, seed, "airq_lambda", {root}, {64, 8, 3}) ==
                 p2);
     BOOST_CHECK(aq::AirChallengeDigestForBackend<aq::AirFriBackendAlg<gf::Fp3>>(
-                    seed, "airq_lambda", {root}, {64, 8, 3}) == sha);
+                    seed, "airq_lambda", {root}, {64, 8, 3}) == p2);
     BOOST_CHECK(aq::AirChallengeDigestForBackend<aq::AirFriBackend<gf::Fp3>>(
                     seed, "airq_lambda", {root}, {64, 8, 3}) == sha);
 }
