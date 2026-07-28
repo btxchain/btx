@@ -484,6 +484,196 @@ std::vector<Fp3> DecoderChallenges(
     };
 }
 
+enum class DeepVmRegisterSideV1 : uint32_t {
+    Producer = 0,
+    Lhs = 1,
+    Rhs = 2,
+};
+
+struct DeepVmSsaLayoutV1 {
+    uint32_t program_ordinal{0};
+    uint32_t instruction_ordinal{0};
+    uint32_t lhs_reference{0};
+    uint32_t rhs_reference{0};
+    uint32_t register_use_multiplicity{0};
+    uint32_t constant_value{0};
+    std::array<
+        std::array<
+            std::array<
+                uint32_t,
+                kDeepVmRegisterHornerStagesV1>,
+            kDeepVmRegisterBusSidesV1>,
+        kDeepVmRegisterBusLanesV1> horner{};
+    std::array<
+        std::array<
+            uint32_t,
+            kDeepVmRegisterBusSidesV1>,
+        kDeepVmRegisterBusLanesV1> inverse{};
+    std::array<
+        uint32_t,
+        kDeepVmRegisterBusLanesV1> running{};
+    uint32_t n_columns{0};
+};
+
+DeepVmSsaLayoutV1 DeepVmSsaLayout(
+    const dvm::LayoutV1& deep)
+{
+    DeepVmSsaLayoutV1 out;
+    uint32_t column = deep.n_columns;
+    out.program_ordinal = column++;
+    out.instruction_ordinal = column++;
+    out.lhs_reference = column++;
+    out.rhs_reference = column++;
+    out.register_use_multiplicity = column++;
+    out.constant_value = column++;
+    for (auto& lane : out.horner) {
+        for (auto& side : lane) {
+            for (auto& stage : side) {
+                stage = column++;
+            }
+        }
+    }
+    for (auto& lane : out.inverse) {
+        for (auto& side : lane) {
+            side = column++;
+        }
+    }
+    for (auto& running : out.running) {
+        running = column++;
+    }
+    out.n_columns = column;
+    return out;
+}
+
+bool SameDigest(
+    const alg_hash::Digest& left,
+    const alg_hash::Digest& right)
+{
+    for (uint32_t limb = 0;
+         limb < left.size(); ++limb) {
+        if (gf::Canonical(left[limb]) !=
+            gf::Canonical(right[limb])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CanonicalDigest(
+    const alg_hash::Digest& digest)
+{
+    return std::all_of(
+        digest.begin(),
+        digest.end(),
+        [](gf::Fp limb) {
+            return limb < gf::kP;
+        });
+}
+
+bool DeepVmChallengesValid(
+    const std::vector<Fp3>& challenge)
+{
+    const auto canonical =
+        [](const Fp3& value) {
+            return value.c0 < gf::kP &&
+                value.c1 < gf::kP &&
+                value.c2 < gf::kP;
+        };
+    return
+        challenge.size() ==
+            kDeepVmChallengeColumnsV1 &&
+        std::all_of(
+            challenge.begin(),
+            challenge.end(),
+            canonical) &&
+        !gf::IsZero(challenge[0]) &&
+        !gf::IsZero(challenge[1]) &&
+        !gf::IsZero(challenge[2]) &&
+        !gf::IsZero(challenge[3]) &&
+        !gf::Eq(challenge[0], challenge[1]) &&
+        !gf::Eq(challenge[2], challenge[3]);
+}
+
+std::vector<Fp3> DeriveDeepVmRegisterChallengesV1(
+    const uint256& operand_precommit_root,
+    const alg_hash::Digest& program_root,
+    const rv::QueryRangeV1& range)
+{
+    if (operand_precommit_root.IsNull() ||
+        !CanonicalDigest(program_root) ||
+        !DigestNonzero(program_root) ||
+        range.query_count == 0) {
+        return {};
+    }
+    std::vector<gf::Fp> prefix;
+    prefix.reserve(8 + program_root.size() + 7);
+    // Arbitrary uint256 words are split into u32 lanes. Absorbing u64
+    // directly would admit the Goldilocks x <-> x+p alias.
+    for (uint32_t word = 0;
+         word < 4; ++word) {
+        const uint64_t value =
+            operand_precommit_root.GetUint64(
+                word);
+        prefix.push_back(
+            gf::FromU64(
+                static_cast<uint32_t>(
+                    value)));
+        prefix.push_back(
+            gf::FromU64(
+                static_cast<uint32_t>(
+                    value >> 32)));
+    }
+    prefix.insert(
+        prefix.end(),
+        program_root.begin(),
+        program_root.end());
+    prefix.push_back(
+        gf::FromU64(0x44565231U)); // 'DVR1'
+    prefix.push_back(
+        gf::FromU64(range.ordinal));
+    prefix.push_back(
+        gf::FromU64(range.first_query));
+    prefix.push_back(
+        gf::FromU64(range.query_count));
+
+    std::vector<Fp3> out;
+    out.reserve(kDeepVmChallengeColumnsV1);
+    for (uint32_t lane = 0;
+         lane < kDeepVmChallengeColumnsV1;
+         ++lane) {
+        bool selected = false;
+        for (uint32_t attempt = 0;
+             attempt < 32; ++attempt) {
+            auto input = prefix;
+            input.push_back(
+                gf::FromU64(lane));
+            input.push_back(
+                gf::FromU64(attempt));
+            const auto digest =
+                alg_hash::SpongeHashFp(input);
+            const Fp3 candidate{
+                digest[0],
+                digest[1],
+                digest[2]};
+            const bool pair_collision =
+                (lane == 1 &&
+                 gf::Eq(candidate, out[0])) ||
+                (lane == 3 &&
+                 gf::Eq(candidate, out[2]));
+            if (!gf::IsZero(candidate) &&
+                !pair_collision) {
+                out.push_back(candidate);
+                selected = true;
+                break;
+            }
+        }
+        if (!selected) return {};
+    }
+    return DeepVmChallengesValid(out)
+        ? out
+        : std::vector<Fp3>{};
+}
+
 bool BuildDecoderStaticPhaseV1(
     const dj::ProductV1& decoder,
     aq::AirConstraintSystem<Fp3>& cs,
@@ -721,6 +911,563 @@ bool BuildDecoderStaticPhaseV1(
         }
         statement_manifest_columns.push_back(
             column);
+    }
+    cs.preprocessed.clear();
+    cs.preprocessed_row_group_roots.clear();
+    for (auto& [column, canonical] :
+         manifest) {
+        cs.preprocessed.emplace_back(
+            column, std::move(canonical));
+    }
+    cs.preprocessed_pin_ood = true;
+    return true;
+}
+
+bool BuildDeepVmStaticPhaseV1(
+    const dvm::ProductV1& deep,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range,
+    const std::vector<Fp3>& challenge,
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>& columns,
+    std::vector<uint32_t>& statement_manifest_columns,
+    std::string* why)
+{
+    cs = {};
+    columns.clear();
+    statement_manifest_columns.clear();
+    const cb::ProgramTable table =
+        BuildDeepVmProgramTableV1(
+            deep.layout);
+    const auto computed_child_root =
+        cb::CommitProgramTableAlgHash(
+            child_program);
+    if (!deep.valid ||
+        dvm::RecountViolationsV1(
+            deep, deep.columns) != 0 ||
+        table.programs.size() !=
+            kDeepVmCanonicalConstraintsV1 ||
+        table.current_width !=
+            deep.layout.n_columns +
+                kDeepVmExtensionColumnsV1 ||
+        deep.columns.size() !=
+            deep.layout.n_columns ||
+        !cb::ValidateProgramTable(
+            child_program, why) ||
+        child_program.challenge_width != 0 ||
+        !CanonicalDigest(
+            expected_program_root) ||
+        !CanonicalDigest(deep.program_root) ||
+        !CanonicalDigest(computed_child_root) ||
+        !DigestNonzero(expected_program_root) ||
+        !SameDigest(
+            computed_child_root,
+            expected_program_root) ||
+        !SameDigest(
+            deep.program_root,
+            expected_program_root) ||
+        deep.first_query !=
+            range.first_query ||
+        deep.query_count !=
+            range.query_count ||
+        !DeepVmChallengesValid(challenge) ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            table, deep.cs.n_rows,
+            challenge, cs, why)) {
+        return false;
+    }
+    columns.assign(
+        table.current_width,
+        std::vector<Fp3>(
+            cs.n_rows, Fp3::Zero()));
+    for (uint32_t column = 0;
+         column < deep.layout.n_columns;
+         ++column) {
+        if (deep.columns[column].size() !=
+            cs.n_rows) {
+            if (why != nullptr) {
+                *why =
+                    "deep_vm_static_column_rows";
+            }
+            return false;
+        }
+        columns[column] = deep.columns[column];
+    }
+    using ColumnValues =
+        std::pair<uint32_t, std::vector<Fp3>>;
+    std::vector<ColumnValues> manifest;
+    const auto add_manifest =
+        [&manifest, &cs](uint32_t column) {
+            manifest.emplace_back(
+                column,
+                std::vector<Fp3>(
+                    cs.n_rows,
+                    Fp3::Zero()));
+            return manifest.size() - 1;
+        };
+    const auto& l = deep.layout;
+    const size_t active =
+        add_manifest(l.active);
+    const size_t deep_term =
+        add_manifest(l.deep_term);
+    const size_t deep_finalize =
+        add_manifest(l.deep_finalize);
+    const size_t vm_instruction =
+        add_manifest(l.vm_instruction);
+    const size_t quotient_identity =
+        add_manifest(l.quotient_identity);
+    const size_t query_index =
+        add_manifest(l.query);
+    const size_t item =
+        add_manifest(l.item);
+    const size_t deep_start =
+        add_manifest(l.deep_start);
+    const size_t deep_chain =
+        add_manifest(l.deep_chain);
+    const std::array<size_t, 6> opcode{{
+        add_manifest(l.op_current),
+        add_manifest(l.op_next),
+        add_manifest(l.op_constant),
+        add_manifest(l.op_add),
+        add_manifest(l.op_sub),
+        add_manifest(l.op_mul),
+    }};
+    const size_t program_end =
+        add_manifest(l.program_end);
+    const size_t vm_start =
+        add_manifest(l.vm_start);
+    const size_t vm_chain =
+        add_manifest(l.vm_chain);
+    const size_t vm_to_quotient =
+        add_manifest(l.vm_to_quotient);
+    const size_t quotient_consumer =
+        add_manifest(
+            l.quotient_tape_deep_consumer);
+    const auto ssa = DeepVmSsaLayout(l);
+    const size_t program_ordinal =
+        add_manifest(ssa.program_ordinal);
+    const size_t instruction_ordinal =
+        add_manifest(ssa.instruction_ordinal);
+    const size_t lhs_reference =
+        add_manifest(ssa.lhs_reference);
+    const size_t rhs_reference =
+        add_manifest(ssa.rhs_reference);
+    const size_t register_use_multiplicity =
+        add_manifest(
+            ssa.register_use_multiplicity);
+    const size_t constant_value =
+        add_manifest(ssa.constant_value);
+    if (manifest.size() !=
+            kDeepVmStatementScheduleColumnsV1 ||
+        deep.query_count == 0 ||
+        child_program.current_width ==
+            std::numeric_limits<uint32_t>::max()) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_static_manifest_shape";
+        }
+        return false;
+    }
+    const uint32_t deep_terms_per_query =
+        child_program.current_width + 1;
+    uint64_t vm_rows64 = 0;
+    std::vector<std::vector<uint32_t>>
+        register_use;
+    register_use.reserve(
+        child_program.programs.size());
+    for (const auto& program :
+         child_program.programs) {
+        vm_rows64 +=
+            program.instructions.size();
+        register_use.emplace_back(
+            program.instructions.size(), 0);
+        auto& multiplicity =
+            register_use.back();
+        for (uint32_t pc = 0;
+             pc < program.instructions.size();
+             ++pc) {
+            const auto& instruction =
+                program.instructions[pc];
+            const bool binary =
+                instruction.opcode ==
+                    cb::Opcode::Add ||
+                instruction.opcode ==
+                    cb::Opcode::Sub ||
+                instruction.opcode ==
+                    cb::Opcode::Mul;
+            if (!binary) continue;
+            if (instruction.lhs >= pc ||
+                instruction.rhs >= pc ||
+                multiplicity[
+                    instruction.lhs] ==
+                    std::numeric_limits<
+                        uint32_t>::max() ||
+                multiplicity[
+                    instruction.rhs] ==
+                    std::numeric_limits<
+                        uint32_t>::max()) {
+                if (why != nullptr) {
+                    *why =
+                        "deep_vm_static_ssa_inventory";
+                }
+                return false;
+            }
+            ++multiplicity[
+                instruction.lhs];
+            ++multiplicity[
+                instruction.rhs];
+        }
+    }
+    const uint64_t rows_per_query =
+        uint64_t{deep_terms_per_query} +
+        1 + vm_rows64 + 1;
+    if (vm_rows64 == 0 ||
+        rows_per_query >
+            std::numeric_limits<uint32_t>::max() ||
+        rows_per_query * deep.query_count !=
+            deep.real_rows ||
+        deep.real_rows > cs.n_rows) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_static_manifest_inventory";
+        }
+        return false;
+    }
+    uint32_t row = 0;
+    for (uint32_t query_offset = 0;
+         query_offset < deep.query_count;
+         ++query_offset) {
+        const uint32_t query =
+            deep.first_query + query_offset;
+        for (uint32_t column = 0;
+             column <
+                 deep_terms_per_query;
+             ++column, ++row) {
+            manifest[active].second[row] =
+                Fp3::One();
+            manifest[deep_term].second[row] =
+                Fp3::One();
+            manifest[query_index].second[row] =
+                gf::FromU64_3(query);
+            manifest[item].second[row] =
+                gf::FromU64_3(column);
+            manifest[deep_start].second[row] =
+                column == 0
+                ? Fp3::One()
+                : Fp3::Zero();
+            manifest[deep_chain].second[row] =
+                Fp3::One();
+            manifest[quotient_consumer]
+                .second[row] =
+                column + 1 ==
+                    deep_terms_per_query
+                ? Fp3::One()
+                : Fp3::Zero();
+        }
+        manifest[active].second[row] =
+            Fp3::One();
+        manifest[deep_finalize].second[row] =
+            Fp3::One();
+        manifest[query_index].second[row] =
+            gf::FromU64_3(query);
+        ++row;
+
+        uint32_t vm_ordinal = 0;
+        for (uint32_t program_index = 0;
+             program_index <
+                 child_program.programs.size();
+             ++program_index) {
+            const auto& program =
+                child_program.programs[
+                    program_index];
+            for (uint32_t instruction_index = 0;
+                 instruction_index <
+                     program.instructions.size();
+                 ++instruction_index,
+                 ++vm_ordinal, ++row) {
+                const auto& instruction =
+                    program.instructions[
+                        instruction_index];
+                const auto op =
+                    instruction.opcode;
+                uint32_t op_index = 0;
+                switch (op) {
+                case cb::Opcode::Current:
+                    op_index = 0;
+                    break;
+                case cb::Opcode::Next:
+                    op_index = 1;
+                    break;
+                case cb::Opcode::Constant:
+                    op_index = 2;
+                    break;
+                case cb::Opcode::Add:
+                    op_index = 3;
+                    break;
+                case cb::Opcode::Sub:
+                    op_index = 4;
+                    break;
+                case cb::Opcode::Mul:
+                    op_index = 5;
+                    break;
+                case cb::Opcode::Challenge:
+                    if (why != nullptr) {
+                        *why =
+                            "deep_vm_static_challenge_opcode";
+                    }
+                    return false;
+                }
+                manifest[active].second[row] =
+                    Fp3::One();
+                manifest[vm_instruction]
+                    .second[row] =
+                    Fp3::One();
+                manifest[query_index]
+                    .second[row] =
+                    gf::FromU64_3(query);
+                manifest[item].second[row] =
+                    gf::FromU64_3(
+                        instruction_index);
+                manifest[program_ordinal]
+                    .second[row] =
+                    gf::FromU64_3(
+                        program_index);
+                manifest[instruction_ordinal]
+                    .second[row] =
+                    gf::FromU64_3(
+                        instruction_index);
+                manifest[lhs_reference]
+                    .second[row] =
+                    gf::FromU64_3(
+                        instruction.lhs);
+                manifest[rhs_reference]
+                    .second[row] =
+                    gf::FromU64_3(
+                        instruction.rhs);
+                manifest[
+                    register_use_multiplicity]
+                    .second[row] =
+                    gf::FromU64_3(
+                        register_use[
+                            program_index][
+                            instruction_index]);
+                manifest[constant_value]
+                    .second[row] =
+                    instruction.constant;
+                manifest[opcode[op_index]]
+                    .second[row] =
+                    Fp3::One();
+                const bool last_instruction =
+                    instruction_index + 1 ==
+                        program.instructions.size();
+                manifest[program_end]
+                    .second[row] =
+                    last_instruction
+                    ? Fp3::One()
+                    : Fp3::Zero();
+                manifest[vm_start].second[row] =
+                    vm_ordinal == 0
+                    ? Fp3::One()
+                    : Fp3::Zero();
+                const bool last_vm =
+                    uint64_t{vm_ordinal} + 1 ==
+                        vm_rows64;
+                manifest[vm_chain].second[row] =
+                    last_vm
+                    ? Fp3::Zero()
+                    : Fp3::One();
+                manifest[vm_to_quotient]
+                    .second[row] =
+                    last_vm
+                    ? Fp3::One()
+                    : Fp3::Zero();
+            }
+        }
+        manifest[active].second[row] =
+            Fp3::One();
+        manifest[quotient_identity]
+            .second[row] =
+            Fp3::One();
+        manifest[query_index].second[row] =
+            gf::FromU64_3(query);
+        ++row;
+    }
+    if (row != deep.real_rows) {
+        if (why != nullptr) {
+            *why =
+                "deep_vm_static_manifest_rows";
+        }
+        return false;
+    }
+    for (const auto& [column, canonical] :
+         manifest) {
+        if (column >= columns.size() ||
+            canonical.size() !=
+                columns[column].size()) {
+            if (why != nullptr) {
+                *why =
+                    "deep_vm_static_manifest_column";
+            }
+            return false;
+        }
+        if (column <
+                deep.layout.n_columns) {
+            for (uint32_t r = 0;
+                 r < cs.n_rows; ++r) {
+                if (!gf::Eq(
+                        canonical[r],
+                        columns[column][r])) {
+                    if (why != nullptr) {
+                        *why =
+                            "deep_vm_static_manifest_mismatch";
+                    }
+                    return false;
+                }
+            }
+        } else {
+            columns[column] = canonical;
+        }
+        statement_manifest_columns.push_back(
+            column);
+    }
+
+    // Fill only ordinary post-R0 lookup witness columns. Challenges are the
+    // verifier-owned Challenge class supplied to the bytecode adapter.
+    std::array<Fp3, kDeepVmRegisterBusLanesV1>
+        running_value{
+            Fp3::Zero(), Fp3::Zero()};
+    const Fp3 register_bus_tag =
+        gf::FromU64_3(0x52454731U); // 'REG1'
+    for (uint32_t r = 0;
+         r < cs.n_rows; ++r) {
+        const Fp3 binary_active =
+            gf::Add(
+                gf::Add(
+                    columns[l.op_add][r],
+                    columns[l.op_sub][r]),
+                columns[l.op_mul][r]);
+        const std::array<uint32_t, 3>
+            register_column{{
+                ssa.instruction_ordinal,
+                ssa.lhs_reference,
+                ssa.rhs_reference,
+            }};
+        const std::array<uint32_t, 3>
+            value_column{{
+                l.instruction_result,
+                l.operand_lhs,
+                l.operand_rhs,
+            }};
+        for (uint32_t lane = 0;
+             lane <
+                 kDeepVmRegisterBusLanesV1;
+             ++lane) {
+            const Fp3 gamma =
+                challenge[lane];
+            const Fp3 alpha =
+                challenge[2 + lane];
+            std::array<Fp3, 3> inverse{
+                Fp3::Zero(),
+                Fp3::Zero(),
+                Fp3::Zero()};
+            for (uint32_t side = 0;
+                 side <
+                     kDeepVmRegisterBusSidesV1;
+                 ++side) {
+                const Fp3 h0 = gf::Add(
+                    columns[
+                        register_column[side]][r],
+                    gf::Mul(
+                        gamma,
+                        columns[
+                            value_column[side]][r]));
+                const Fp3 h1 = gf::Add(
+                    columns[
+                        ssa.program_ordinal][r],
+                    gf::Mul(gamma, h0));
+                const Fp3 h2 = gf::Add(
+                    columns[l.query][r],
+                    gf::Mul(gamma, h1));
+                const Fp3 h3 = gf::Add(
+                    register_bus_tag,
+                    gf::Mul(gamma, h2));
+                columns[
+                    ssa.horner[lane][side][0]][r] =
+                    h0;
+                columns[
+                    ssa.horner[lane][side][1]][r] =
+                    h1;
+                columns[
+                    ssa.horner[lane][side][2]][r] =
+                    h2;
+                columns[
+                    ssa.horner[lane][side][3]][r] =
+                    h3;
+                const Fp3 active =
+                    side ==
+                        static_cast<uint32_t>(
+                            DeepVmRegisterSideV1::
+                                Producer)
+                    ? columns[l.vm_instruction][r]
+                    : binary_active;
+                const Fp3 denominator =
+                    gf::Add(alpha, h3);
+                if (!gf::IsZero(active)) {
+                    if (gf::IsZero(denominator)) {
+                        if (why != nullptr) {
+                            *why =
+                                "deep_vm_static_register_pole";
+                        }
+                        return false;
+                    }
+                    inverse[side] =
+                        gf::Inv(denominator);
+                }
+                columns[
+                    ssa.inverse[lane][side]][r] =
+                    inverse[side];
+            }
+            columns[ssa.running[lane]][r] =
+                running_value[lane];
+            const Fp3 producer =
+                gf::Mul(
+                    columns[
+                        ssa.register_use_multiplicity]
+                        [r],
+                    inverse[
+                        static_cast<uint32_t>(
+                            DeepVmRegisterSideV1::
+                                Producer)]);
+            const Fp3 consumers =
+                gf::Mul(
+                    binary_active,
+                    gf::Add(
+                        inverse[
+                            static_cast<uint32_t>(
+                                DeepVmRegisterSideV1::
+                                    Lhs)],
+                        inverse[
+                            static_cast<uint32_t>(
+                                DeepVmRegisterSideV1::
+                                    Rhs)]));
+            running_value[lane] =
+                gf::Add(
+                    running_value[lane],
+                    gf::Sub(
+                        producer,
+                        consumers));
+        }
+    }
+    for (const Fp3& terminal :
+         running_value) {
+        if (!gf::IsZero(terminal)) {
+            if (why != nullptr) {
+                *why =
+                    "deep_vm_static_register_terminal";
+            }
+            return false;
+        }
     }
     cs.preprocessed.clear();
     cs.preprocessed_row_group_roots.clear();
@@ -1109,6 +1856,971 @@ cb::ProgramTable BuildMerkleFoldProgramTableV1(
         return {};
     }
     return table;
+}
+
+cb::ProgramTable BuildDeepVmProgramTableV1(
+    const dvm::LayoutV1& l)
+{
+    const auto ssa = DeepVmSsaLayout(l);
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = ssa.n_columns;
+    table.next_width = ssa.n_columns;
+    table.challenge_width =
+        kDeepVmChallengeColumnsV1;
+    if (l.n_columns == 0 ||
+        l.quotient_tape_accept + 1 !=
+            l.n_columns ||
+        ssa.n_columns !=
+            l.n_columns +
+                kDeepVmExtensionColumnsV1) {
+        return table;
+    }
+    const Fp3 one = Fp3::One();
+    const auto append_boolean =
+        [&table, one](uint32_t column) {
+            AppendBytecodeProgramV1(
+                table, [=](
+                    BytecodeExprV1& e) {
+                    const uint32_t value =
+                        e.Current(column);
+                    e.Mul(
+                        value,
+                        e.Sub(
+                            value,
+                            e.Constant(one)));
+                });
+        };
+    const std::array<uint32_t, 18>
+        boolean_columns{{
+            l.active,
+            l.deep_term,
+            l.deep_finalize,
+            l.vm_instruction,
+            l.quotient_identity,
+            l.deep_start,
+            l.deep_chain,
+            l.op_current,
+            l.op_next,
+            l.op_constant,
+            l.op_add,
+            l.op_sub,
+            l.op_mul,
+            l.program_end,
+            l.vm_start,
+            l.vm_chain,
+            l.vm_to_quotient,
+            l.quotient_tape_deep_consumer,
+        }};
+    for (uint32_t column :
+         boolean_columns) {
+        append_boolean(column);
+    }
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            const uint32_t deep = e.Add(
+                e.Current(l.deep_term),
+                e.Current(l.deep_finalize));
+            const uint32_t vm = e.Add(
+                e.Current(l.vm_instruction),
+                e.Current(l.quotient_identity));
+            e.Sub(
+                e.Current(l.active),
+                e.Add(deep, vm));
+        });
+    const auto append_product =
+        [&table](
+            uint32_t output,
+            uint32_t left,
+            uint32_t right) {
+            AppendBytecodeProgramV1(
+                table, [=](
+                    BytecodeExprV1& e) {
+                    e.Sub(
+                        e.Current(output),
+                        e.Mul(
+                            e.Current(left),
+                            e.Current(right)));
+                });
+        };
+    const auto append_gated_sum =
+        [&table](
+            uint32_t gate,
+            uint32_t after,
+            uint32_t before,
+            uint32_t contribution) {
+            AppendBytecodeProgramV1(
+                table, [=](
+                    BytecodeExprV1& e) {
+                    e.Mul(
+                        e.Current(gate),
+                        e.Sub(
+                            e.Current(after),
+                            e.Add(
+                                e.Current(before),
+                                e.Current(
+                                    contribution))));
+                });
+        };
+    append_product(
+        l.u_weight,
+        l.coefficient,
+        l.x_power);
+    append_product(
+        l.u_contribution,
+        l.u_weight,
+        l.current_value);
+    append_gated_sum(
+        l.deep_term,
+        l.u_after,
+        l.u_before,
+        l.u_contribution);
+    append_product(
+        l.v1_weight,
+        l.coefficient,
+        l.z1_power);
+    append_product(
+        l.v1_contribution,
+        l.v1_weight,
+        l.eval_z1);
+    append_gated_sum(
+        l.deep_term,
+        l.v1_after,
+        l.v1_before,
+        l.v1_contribution);
+    append_product(
+        l.v2_weight,
+        l.coefficient,
+        l.z2_power);
+    append_product(
+        l.v2_contribution,
+        l.v2_weight,
+        l.eval_z2);
+    append_gated_sum(
+        l.deep_term,
+        l.v2_after,
+        l.v2_before,
+        l.v2_contribution);
+    for (uint32_t accumulator :
+         {l.u_before,
+          l.v1_before,
+          l.v2_before}) {
+        AppendBytecodeProgramV1(
+            table, [=](
+                BytecodeExprV1& e) {
+                e.Mul(
+                    e.Current(l.deep_start),
+                    e.Current(accumulator));
+            });
+    }
+    for (const auto [after, before] :
+         {std::pair{l.u_after, l.u_before},
+          std::pair{l.v1_after, l.v1_before},
+          std::pair{l.v2_after, l.v2_before}}) {
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kTransition,
+            [=](BytecodeExprV1& e) {
+                e.Mul(
+                    e.Current(l.deep_chain),
+                    e.Sub(
+                        e.Next(before),
+                        e.Current(after)));
+            });
+    }
+    const auto append_inverse_product =
+        [&table](
+            uint32_t output,
+            uint32_t x,
+            uint32_t z,
+            uint32_t inverse) {
+            AppendBytecodeProgramV1(
+                table, [=](
+                    BytecodeExprV1& e) {
+                    e.Sub(
+                        e.Current(output),
+                        e.Mul(
+                            e.Sub(
+                                e.Current(x),
+                                e.Current(z)),
+                            e.Current(inverse)));
+                });
+        };
+    append_inverse_product(
+        l.inv_product1,
+        l.x, l.z1,
+        l.inv_x_minus_z1);
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.deep_finalize),
+                e.Sub(
+                    e.Current(l.inv_product1),
+                    e.Constant(one)));
+        });
+    append_inverse_product(
+        l.inv_product2,
+        l.x, l.z2,
+        l.inv_x_minus_z2);
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.deep_finalize),
+                e.Sub(
+                    e.Current(l.inv_product2),
+                    e.Constant(one)));
+        });
+    const auto append_difference_product =
+        [&table](
+            uint32_t output,
+            uint32_t left,
+            uint32_t right,
+            uint32_t factor) {
+            AppendBytecodeProgramV1(
+                table, [=](
+                    BytecodeExprV1& e) {
+                    e.Sub(
+                        e.Current(output),
+                        e.Mul(
+                            e.Sub(
+                                e.Current(left),
+                                e.Current(right)),
+                            e.Current(factor)));
+                });
+        };
+    append_difference_product(
+        l.deep_diff_inv1,
+        l.u_before,
+        l.v1_before,
+        l.inv_x_minus_z1);
+    append_product(
+        l.deep_rhs_term1,
+        l.w1,
+        l.deep_diff_inv1);
+    append_difference_product(
+        l.deep_diff_inv2,
+        l.u_before,
+        l.v2_before,
+        l.inv_x_minus_z2);
+    append_product(
+        l.deep_rhs_term2,
+        l.w2,
+        l.deep_diff_inv2);
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Current(l.deep_rhs),
+                e.Add(
+                    e.Current(l.deep_rhs_term1),
+                    e.Current(l.deep_rhs_term2)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.deep_finalize),
+                e.Sub(
+                    e.Current(l.expected_deep),
+                    e.Current(l.deep_rhs)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.deep_finalize),
+                e.Sub(
+                    e.Current(l.first_fold_value),
+                    e.Current(l.expected_deep)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            uint32_t sum =
+                e.Constant(Fp3::Zero());
+            for (uint32_t column :
+                 {l.op_current,
+                  l.op_next,
+                  l.op_constant,
+                  l.op_add,
+                  l.op_sub,
+                  l.op_mul}) {
+                sum = e.Add(
+                    sum,
+                    e.Current(column));
+            }
+            e.Sub(
+                sum,
+                e.Current(l.vm_instruction));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            const uint32_t load = e.Add(
+                e.Add(
+                    e.Current(l.op_current),
+                    e.Current(l.op_next)),
+                e.Current(l.op_constant));
+            e.Mul(
+                load,
+                e.Sub(
+                    e.Current(
+                        l.instruction_result),
+                    e.Current(l.operand_lhs)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.op_add),
+                e.Sub(
+                    e.Current(
+                        l.instruction_result),
+                    e.Add(
+                        e.Current(l.operand_lhs),
+                        e.Current(l.operand_rhs))));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.op_sub),
+                e.Sub(
+                    e.Current(
+                        l.instruction_result),
+                    e.Sub(
+                        e.Current(l.operand_lhs),
+                        e.Current(l.operand_rhs))));
+        });
+    append_product(
+        l.mul_product,
+        l.operand_lhs,
+        l.operand_rhs);
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.op_mul),
+                e.Sub(
+                    e.Current(
+                        l.instruction_result),
+                    e.Current(l.mul_product)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.vm_start),
+                e.Current(l.composition_before));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.vm_start),
+                e.Sub(
+                    e.Current(l.lambda_power),
+                    e.Constant(one)));
+        });
+    append_product(
+        l.selected_result,
+        l.selector,
+        l.instruction_result);
+    append_product(
+        l.lambda_selected,
+        l.lambda_power,
+        l.selected_result);
+    append_product(
+        l.program_contribution,
+        l.program_end,
+        l.lambda_selected);
+    append_gated_sum(
+        l.vm_instruction,
+        l.composition_after,
+        l.composition_before,
+        l.program_contribution);
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kTransition,
+        [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.vm_chain),
+                e.Sub(
+                    e.Next(
+                        l.composition_before),
+                    e.Current(
+                        l.composition_after)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Current(l.lambda_delta),
+                e.Mul(
+                    e.Current(l.program_end),
+                    e.Sub(
+                        e.Current(l.air_lambda),
+                        e.Constant(one))));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Current(l.lambda_after),
+                e.Mul(
+                    e.Current(l.lambda_power),
+                    e.Add(
+                        e.Constant(one),
+                        e.Current(l.lambda_delta))));
+        });
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kTransition,
+        [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.vm_chain),
+                e.Sub(
+                    e.Next(l.lambda_power),
+                    e.Current(l.lambda_after)));
+        });
+    AppendBytecodeProgramKindV1(
+        table, aq::AirKind::kTransition,
+        [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.vm_to_quotient),
+                e.Sub(
+                    e.Next(
+                        l.composition_before),
+                    e.Current(
+                        l.composition_after)));
+        });
+    append_product(
+        l.quotient_product,
+        l.zh,
+        l.quotient_value);
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.quotient_identity),
+                e.Sub(
+                    e.Current(
+                        l.composition_before),
+                    e.Current(
+                        l.quotient_product)));
+        });
+
+    for (uint32_t limb = 0;
+         limb < dvm::kFp3TapeLimbsV1;
+         ++limb) {
+        for (uint32_t bit = 0;
+             bit < dvm::kU32TapeBitsV1;
+             ++bit) {
+            append_boolean(
+                l.quotient_tape_bit[
+                    limb][bit]);
+        }
+        AppendBytecodeProgramV1(
+            table, [=](
+                BytecodeExprV1& e) {
+                uint32_t reconstructed =
+                    e.Constant(Fp3::Zero());
+                for (uint32_t bit = 0;
+                     bit <
+                         dvm::kU32TapeBitsV1;
+                     ++bit) {
+                    reconstructed = e.Add(
+                        reconstructed,
+                        e.Mul(
+                            e.Current(
+                                l.quotient_tape_bit[
+                                    limb][bit]),
+                            e.Constant(
+                                Fp3::FromFp(
+                                    uint64_t{1}
+                                    << bit))));
+                }
+                e.Sub(
+                    e.Current(
+                        l.quotient_tape_limb[
+                            limb]),
+                    reconstructed);
+            });
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kTransition,
+            [=](BytecodeExprV1& e) {
+                e.Mul(
+                    e.Sub(
+                        e.Constant(one),
+                        e.Current(
+                            l.quotient_identity)),
+                    e.Sub(
+                        e.Next(
+                            l.quotient_tape_limb[
+                                limb]),
+                        e.Current(
+                            l.quotient_tape_limb[
+                                limb])));
+            });
+    }
+    const Fp3 max_u32 =
+        Fp3::FromFp(
+            std::numeric_limits<
+                uint32_t>::max());
+    for (uint32_t coordinate = 0;
+         coordinate <
+             dvm::kFp3CoordinatesV1;
+         ++coordinate) {
+        const uint32_t high_is_max =
+            l.quotient_high_is_max[
+                coordinate];
+        const uint32_t high_inverse =
+            l.quotient_high_delta_inverse[
+                coordinate];
+        const uint32_t low =
+            l.quotient_tape_limb[
+                2 * coordinate];
+        const uint32_t high =
+            l.quotient_tape_limb[
+                2 * coordinate + 1];
+        append_boolean(high_is_max);
+        AppendBytecodeProgramV1(
+            table, [=](
+                BytecodeExprV1& e) {
+                e.Mul(
+                    e.Sub(
+                        e.Current(high),
+                        e.Constant(max_u32)),
+                    e.Current(high_is_max));
+            });
+        AppendBytecodeProgramV1(
+            table, [=](
+                BytecodeExprV1& e) {
+                e.Sub(
+                    e.Mul(
+                        e.Sub(
+                            e.Current(high),
+                            e.Constant(max_u32)),
+                        e.Current(
+                            high_inverse)),
+                    e.Sub(
+                        e.Constant(one),
+                        e.Current(
+                            high_is_max)));
+            });
+        AppendBytecodeProgramV1(
+            table, [=](
+                BytecodeExprV1& e) {
+                e.Mul(
+                    e.Current(high_is_max),
+                    e.Current(low));
+            });
+    }
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            constexpr uint64_t two32 =
+                uint64_t{1} << 32;
+            const std::array<Fp3, 3>
+                basis{{
+                    Fp3{1, 0, 0},
+                    Fp3{0, 1, 0},
+                    Fp3{0, 0, 1},
+                }};
+            uint32_t reconstructed =
+                e.Constant(Fp3::Zero());
+            for (uint32_t coordinate = 0;
+                 coordinate <
+                     dvm::kFp3CoordinatesV1;
+                 ++coordinate) {
+                const uint32_t value =
+                    e.Add(
+                        e.Current(
+                            l.quotient_tape_limb[
+                                2 * coordinate]),
+                        e.Mul(
+                            e.Current(
+                                l.quotient_tape_limb[
+                                    2 * coordinate +
+                                    1]),
+                            e.Constant(
+                                Fp3::FromFp(
+                                    two32))));
+                reconstructed = e.Add(
+                    reconstructed,
+                    e.Mul(
+                        value,
+                        e.Constant(
+                            basis[coordinate])));
+            }
+            e.Sub(
+                e.Current(
+                    l.quotient_tape_value),
+                reconstructed);
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(
+                    l.quotient_tape_deep_consumer),
+                e.Sub(
+                    e.Current(l.current_value),
+                    e.Current(
+                        l.quotient_tape_value)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.quotient_identity),
+                e.Sub(
+                    e.Current(l.quotient_value),
+                    e.Current(
+                        l.quotient_tape_value)));
+        });
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Sub(
+                e.Current(
+                    l.quotient_tape_accept),
+                e.Current(
+                    l.quotient_identity));
+        });
+
+    // Constant operands are selected by verifier-regenerated ProgramTable
+    // metadata, never accepted as free witness values.
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.op_constant),
+                e.Sub(
+                    e.Current(l.operand_lhs),
+                    e.Current(
+                        ssa.constant_value)));
+        });
+
+    // Dual-Fp3 indexed register LogUp. Each tuple uses the reverse-Horner
+    // denominator
+    //
+    //   alpha + tag + gamma*(query + gamma*(program +
+    //       gamma*(register + gamma*value))).
+    //
+    // Definitions are weighted by the exact number of references derived
+    // from the canonical child ProgramTable; every binary operand consumes
+    // one copy. Query/program/register labels prevent cross-instance swaps.
+    for (uint32_t lane = 0;
+         lane < kDeepVmRegisterBusLanesV1;
+         ++lane) {
+        const uint32_t gamma_column = lane;
+        const uint32_t alpha_column = 2 + lane;
+        const Fp3 register_bus_tag =
+            gf::FromU64_3(0x52454731U); // 'REG1'
+        const auto append_tuple =
+            [&](DeepVmRegisterSideV1 side,
+                uint32_t register_column,
+                uint32_t value_column,
+                uint32_t active_column) {
+                const uint32_t side_index =
+                    static_cast<uint32_t>(side);
+                const auto& h =
+                    ssa.horner[lane][side_index];
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[0]),
+                            e.Add(
+                                e.Current(
+                                    register_column),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(
+                                        value_column))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[1]),
+                            e.Add(
+                                e.Current(
+                                    ssa.program_ordinal),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[0]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[2]),
+                            e.Add(
+                                e.Current(l.query),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[1]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[3]),
+                            e.Add(
+                                e.Constant(
+                                    register_bus_tag),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[2]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Mul(
+                                e.Current(
+                                    ssa.inverse[
+                                        lane][side_index]),
+                                e.Add(
+                                    e.Challenge(
+                                        alpha_column),
+                                    e.Current(h[3]))),
+                            e.Current(active_column));
+                    });
+            };
+        append_tuple(
+            DeepVmRegisterSideV1::Producer,
+            ssa.instruction_ordinal,
+            l.instruction_result,
+            l.vm_instruction);
+        // The opcode schedule is one-hot and R0-bound, so this sum is exactly
+        // the binary-consumer selector for both operands.
+        const uint32_t binary_active =
+            l.op_add;
+        const auto append_consumer_tuple =
+            [&](DeepVmRegisterSideV1 side,
+                uint32_t register_column,
+                uint32_t value_column) {
+                const uint32_t side_index =
+                    static_cast<uint32_t>(side);
+                const auto& h =
+                    ssa.horner[lane][side_index];
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[0]),
+                            e.Add(
+                                e.Current(
+                                    register_column),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(
+                                        value_column))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[1]),
+                            e.Add(
+                                e.Current(
+                                    ssa.program_ordinal),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[0]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[2]),
+                            e.Add(
+                                e.Current(l.query),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[1]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        e.Sub(
+                            e.Current(h[3]),
+                            e.Add(
+                                e.Constant(
+                                    register_bus_tag),
+                                e.Mul(
+                                    e.Challenge(
+                                        gamma_column),
+                                    e.Current(h[2]))));
+                    });
+                AppendBytecodeProgramV1(
+                    table, [=](
+                        BytecodeExprV1& e) {
+                        const uint32_t active =
+                            e.Add(
+                                e.Add(
+                                    e.Current(
+                                        binary_active),
+                                    e.Current(
+                                        l.op_sub)),
+                                e.Current(
+                                    l.op_mul));
+                        e.Sub(
+                            e.Mul(
+                                e.Current(
+                                    ssa.inverse[
+                                        lane][side_index]),
+                                e.Add(
+                                    e.Challenge(
+                                        alpha_column),
+                                    e.Current(h[3]))),
+                            active);
+                    });
+            };
+        append_consumer_tuple(
+            DeepVmRegisterSideV1::Lhs,
+            ssa.lhs_reference,
+            l.operand_lhs);
+        append_consumer_tuple(
+            DeepVmRegisterSideV1::Rhs,
+            ssa.rhs_reference,
+            l.operand_rhs);
+
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kFirstRow,
+            [=](BytecodeExprV1& e) {
+                e.Current(ssa.running[lane]);
+            });
+        const auto emit_increment =
+            [=](BytecodeExprV1& e) {
+                const uint32_t producer =
+                    e.Mul(
+                        e.Current(
+                            ssa.register_use_multiplicity),
+                        e.Current(
+                            ssa.inverse[lane][
+                                static_cast<uint32_t>(
+                                    DeepVmRegisterSideV1::
+                                        Producer)]));
+                const uint32_t binary =
+                    e.Add(
+                        e.Add(
+                            e.Current(l.op_add),
+                            e.Current(l.op_sub)),
+                        e.Current(l.op_mul));
+                const uint32_t consumers =
+                    e.Mul(
+                        binary,
+                        e.Add(
+                            e.Current(
+                                ssa.inverse[lane][
+                                    static_cast<uint32_t>(
+                                        DeepVmRegisterSideV1::
+                                            Lhs)]),
+                            e.Current(
+                                ssa.inverse[lane][
+                                    static_cast<uint32_t>(
+                                        DeepVmRegisterSideV1::
+                                            Rhs)])));
+                return e.Sub(
+                    producer, consumers);
+            };
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kTransition,
+            [=](BytecodeExprV1& e) {
+                const uint32_t increment =
+                    emit_increment(e);
+                e.Sub(
+                    e.Next(ssa.running[lane]),
+                    e.Add(
+                        e.Current(
+                            ssa.running[lane]),
+                        increment));
+            });
+        AppendBytecodeProgramKindV1(
+            table, aq::AirKind::kLastRow,
+            [=](BytecodeExprV1& e) {
+                e.Add(
+                    e.Current(ssa.running[lane]),
+                    emit_increment(e));
+            });
+    }
+    std::string why;
+    if (table.programs.size() !=
+            kDeepVmCanonicalConstraintsV1 ||
+        !cb::ValidateProgramTable(
+            table, &why) ||
+        !cb::ProgramTableIsChallengeIndependent(
+            table)) {
+        return {};
+    }
+    return table;
+}
+
+DeepVmCanonicalPhaseV1
+BuildDeepVmCanonicalPhaseV1(
+    const dvm::ProductV1& deep,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range)
+{
+    DeepVmCanonicalPhaseV1 out;
+    out.program =
+        BuildDeepVmProgramTableV1(
+            deep.layout);
+    out.challenge =
+        DeriveDeepVmRegisterChallengesV1(
+            deep.preprocessed_row_group_root,
+            expected_program_root,
+            range);
+    std::string why;
+    if (out.program.programs.size() !=
+            kDeepVmCanonicalConstraintsV1 ||
+        !BuildDeepVmStaticPhaseV1(
+            deep,
+            child_program,
+            expected_program_root,
+            range,
+            out.challenge,
+            out.cs,
+            out.columns,
+            out.statement_manifest_columns,
+            &why)) {
+        out.note =
+            "stage3:v11_unified_deep_vm:" +
+            why;
+        return out;
+    }
+    const uint64_t violations =
+        air_recurse::
+            CountWitnessViolationsOnH(
+                out.cs, out.columns);
+    out.program_and_range_bound =
+        SameDigest(
+            cb::CommitProgramTableAlgHash(
+                child_program),
+            expected_program_root) &&
+        SameDigest(
+            deep.program_root,
+            expected_program_root) &&
+        deep.first_query ==
+            range.first_query &&
+        deep.query_count ==
+            range.query_count;
+    out.constant_schedule_owned =
+        out.statement_manifest_columns.size() ==
+            kDeepVmStatementScheduleColumnsV1;
+    out.register_logup_complete =
+        out.program.challenge_width ==
+            kDeepVmChallengeColumnsV1 &&
+        out.program.current_width ==
+            deep.layout.n_columns +
+                kDeepVmExtensionColumnsV1 &&
+        DeepVmChallengesValid(
+            out.challenge);
+    out.valid =
+        out.program_and_range_bound &&
+        out.constant_schedule_owned &&
+        out.register_logup_complete &&
+        violations == 0;
+    out.note = out.valid
+        ? "stage3:v11_unified_deep_vm:"
+          "constants_and_dual_fp3_register_logup"
+        : "stage3:v11_unified_deep_vm:"
+          "constraint_failure";
+    return out;
 }
 
 cb::ProgramTable BuildDecoderProgramTableV1(
@@ -1881,6 +3593,134 @@ ProductV1 BuildProductV1(
     out.merkle_fold_transcript_and_opening_carry_complete =
         false;
 
+    const cb::ProgramTable deep_vm_program =
+        BuildDeepVmProgramTableV1(
+            out.deep_vm.layout);
+    aq::AirConstraintSystem<Fp3>
+        deep_vm_static_cs;
+    std::vector<std::vector<Fp3>>
+        deep_vm_static_columns;
+    std::vector<uint32_t>
+        deep_vm_statement_manifest_columns;
+    const std::vector<Fp3>
+        deep_vm_register_challenge =
+            DeriveDeepVmRegisterChallengesV1(
+                out.deep_vm
+                    .preprocessed_row_group_root,
+                input.expected_child_program_root,
+                range);
+    if (deep_vm_program.programs.size() !=
+            kDeepVmCanonicalConstraintsV1 ||
+        deep_vm_program.current_width !=
+            out.deep_vm.layout.n_columns +
+                kDeepVmExtensionColumnsV1 ||
+        !BuildDeepVmStaticPhaseV1(
+            out.deep_vm,
+            input.child_program,
+            input.expected_child_program_root,
+            range,
+            deep_vm_register_challenge,
+            deep_vm_static_cs,
+            deep_vm_static_columns,
+            deep_vm_statement_manifest_columns,
+            &why)) {
+        return fail(
+            "deep_vm_static_program:" +
+            why);
+    }
+    if (air_recurse::
+            CountWitnessViolationsOnH(
+                deep_vm_static_cs,
+                deep_vm_static_columns) != 0) {
+        return fail(
+            "deep_vm_static_witness");
+    }
+    out.deep_vm_program_root =
+        cb::CommitProgramTableAlgHash(
+            deep_vm_program);
+    const cb::ProgramTable
+        deep_vm_program_recomputed =
+            BuildDeepVmProgramTableV1(
+                out.deep_vm.layout);
+    out.deep_vm_program_constraints =
+        static_cast<uint32_t>(
+            deep_vm_program.programs.size());
+    out.deep_vm_constraints_canonical_bytecode =
+        out.deep_vm_program_constraints ==
+            kDeepVmCanonicalConstraintsV1;
+    out.deep_vm_program_root_recomputed =
+        DigestNonzero(
+            out.deep_vm_program_root) &&
+        deep_vm_program_recomputed ==
+            deep_vm_program &&
+        cb::CommitProgramTableAlgHash(
+            deep_vm_program_recomputed) ==
+            out.deep_vm_program_root;
+    out.deep_vm_statement_manifest_r0_columns =
+        static_cast<uint32_t>(
+            deep_vm_statement_manifest_columns.size());
+    out.deep_vm_proof_tape_cells =
+        deep_vm_program.current_width -
+            out.deep_vm_statement_manifest_r0_columns;
+    out.deep_vm_proof_tape_cells_ordinary =
+        out.deep_vm_statement_manifest_r0_columns ==
+            kDeepVmStatementScheduleColumnsV1 &&
+        out.deep_vm_proof_tape_cells ==
+            out.deep_vm.layout.n_columns +
+                kDeepVmExtensionColumnsV1 -
+                kDeepVmStatementScheduleColumnsV1;
+    out.deep_vm_proof_tape_fixed_offsets =
+        out.deep_vm.layout.active == 0 &&
+        out.deep_vm.layout
+                .quotient_tape_accept +
+                1 ==
+            out.deep_vm.layout.n_columns &&
+        DeepVmSsaLayout(
+            out.deep_vm.layout).n_columns ==
+            deep_vm_program.current_width;
+    out.deep_vm_schedule_independently_regenerated =
+        out.deep_vm_statement_manifest_r0_columns ==
+            kDeepVmStatementScheduleColumnsV1;
+    out.deep_vm_program_and_range_bound =
+        SameDigest(
+            cb::CommitProgramTableAlgHash(
+                input.child_program),
+            input.expected_child_program_root) &&
+        SameDigest(
+            out.deep_vm.program_root,
+            input.expected_child_program_root) &&
+        out.deep_vm.first_query ==
+            range.first_query &&
+        out.deep_vm.query_count ==
+            range.query_count;
+    out.deep_vm_program_constants_owned =
+        out.deep_vm_schedule_independently_regenerated &&
+        out.deep_vm_constraints_canonical_bytecode;
+    out.deep_vm_internal_ssa_copy_provenance =
+        out.deep_vm_program_constants_owned &&
+        deep_vm_program.challenge_width ==
+            kDeepVmChallengeColumnsV1 &&
+        deep_vm_program.current_width ==
+            out.deep_vm.layout.n_columns +
+                kDeepVmExtensionColumnsV1;
+    out.deep_vm_register_precommit_root =
+        out.deep_vm.preprocessed_row_group_root;
+    out.deep_vm_register_challenge_carry_complete =
+        false;
+    out.deep_vm_r0_statement_manifest_only =
+        out.deep_vm_proof_tape_cells_ordinary &&
+        out.deep_vm_proof_tape_fixed_offsets &&
+        out.deep_vm_schedule_independently_regenerated &&
+        out.deep_vm_program_root_recomputed &&
+        out.deep_vm_program_and_range_bound;
+    out.deep_vm_cs_independent_of_child_witness =
+        out.deep_vm_constraints_canonical_bytecode &&
+        out.deep_vm_r0_statement_manifest_only &&
+        out.deep_vm_program_constants_owned &&
+        out.deep_vm_internal_ssa_copy_provenance;
+    out.deep_vm_value_and_source_carry_complete =
+        false;
+
     const cb::ProgramTable decoder_program =
         BuildDecoderProgramTableV1(
             out.decoder.layout);
@@ -1986,8 +3826,8 @@ ProductV1 BuildProductV1(
              &merkle_fold_static_cs,
              &out.merkle_fold.fold_columns},
             {PhaseV1::DeepVm,
-             &out.deep_vm.cs,
-             &out.deep_vm.columns},
+             &deep_vm_static_cs,
+             &deep_vm_static_columns},
             {PhaseV1::Decoder,
              &decoder_static_cs,
              &decoder_static_columns},
@@ -2257,6 +4097,8 @@ ProductV1 BuildProductV1(
             ? 1U : 0U) +
         (out.merkle_fold_constraints_canonical_bytecode
             ? 1U : 0U) +
+        (out.deep_vm_constraints_canonical_bytecode
+            ? 1U : 0U) +
         (out.decoder_constraints_canonical_bytecode
             ? 1U : 0U);
     out.phase_r0_tables_statement_manifest_only =
@@ -2266,13 +4108,20 @@ ProductV1 BuildProductV1(
             ? 1U : 0U) +
         (out.merkle_fold_r0_statement_manifest_only
             ? 1U : 0U) +
+        (out.deep_vm_r0_statement_manifest_only
+            ? 1U : 0U) +
         (out.decoder_r0_statement_manifest_only
             ? 1U : 0U);
     out.cs_independent_of_child_witness =
         out.phase_constraint_systems_canonical_bytecode ==
             kPhasesV1 &&
         out.phase_r0_tables_statement_manifest_only ==
-            kPhasesV1;
+            kPhasesV1 &&
+        out.parent_join_cs_independent_of_child_witness &&
+        out.merkle_hash_cs_independent_of_child_witness &&
+        out.merkle_fold_cs_independent_of_child_witness &&
+        out.deep_vm_cs_independent_of_child_witness &&
+        out.decoder_cs_independent_of_child_witness;
     out.verifier_input_excludes_child_proof =
         false;
     out.lde_cap_fits =
@@ -2326,7 +4175,7 @@ ProductV1 BuildProductV1(
                 out.parent_join.cs.n_columns,
                 out.merkle_fold.hash_cs.n_columns,
                 out.merkle_fold.fold_cs.n_columns,
-                out.deep_vm.cs.n_columns,
+                deep_vm_static_cs.n_columns,
                 decoder_static_cs.n_columns});
     out.one_hot_row_scheduler_constrained =
         true;

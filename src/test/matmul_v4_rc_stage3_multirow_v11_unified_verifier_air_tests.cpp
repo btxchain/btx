@@ -286,6 +286,20 @@ dj::ProductV1 OneQueryDecoder(
     return decoder;
 }
 
+dvm::ProductV1 OneQueryDeepVm(
+    const rv::InputV1& input)
+{
+    auto product = dvm::BuildProductV1(
+        input.proof,
+        input.transcript,
+        input.child_program,
+        input.expected_child_program_root,
+        0, 1);
+    BOOST_REQUIRE_MESSAGE(
+        product.valid, product.note);
+    return product;
+}
+
 std::vector<gf::Fp3> DecoderChallengeVector(
     const dj::ProductV1& decoder)
 {
@@ -368,6 +382,228 @@ void FillDecoderHornerRow(
                 layout, lane, side, 3)] = term;
         }
     }
+}
+
+uint32_t DeepVmSsaHornerColumn(
+    const dvm::LayoutV1& layout,
+    uint32_t lane,
+    uint32_t side,
+    uint32_t stage)
+{
+    BOOST_REQUIRE_LT(
+        lane, kDeepVmRegisterBusLanesV1);
+    BOOST_REQUIRE_LT(
+        side, kDeepVmRegisterBusSidesV1);
+    BOOST_REQUIRE_LT(
+        stage, kDeepVmRegisterHornerStagesV1);
+    return
+        layout.n_columns +
+        kDeepVmSsaScheduleColumnsV1 +
+        ((lane *
+              kDeepVmRegisterBusSidesV1 +
+          side) *
+             kDeepVmRegisterHornerStagesV1 +
+         stage);
+}
+
+uint32_t DeepVmSsaInverseColumn(
+    const dvm::LayoutV1& layout,
+    uint32_t lane,
+    uint32_t side)
+{
+    BOOST_REQUIRE_LT(
+        lane, kDeepVmRegisterBusLanesV1);
+    BOOST_REQUIRE_LT(
+        side, kDeepVmRegisterBusSidesV1);
+    return
+        layout.n_columns +
+        kDeepVmSsaScheduleColumnsV1 +
+        kDeepVmRegisterBusLanesV1 *
+            kDeepVmRegisterBusSidesV1 *
+            kDeepVmRegisterHornerStagesV1 +
+        lane * kDeepVmRegisterBusSidesV1 +
+        side;
+}
+
+uint32_t DeepVmSsaRunningColumn(
+    const dvm::LayoutV1& layout,
+    uint32_t lane)
+{
+    BOOST_REQUIRE_LT(
+        lane, kDeepVmRegisterBusLanesV1);
+    return
+        layout.n_columns +
+        kDeepVmSsaScheduleColumnsV1 +
+        kDeepVmRegisterBusLanesV1 *
+            kDeepVmRegisterBusSidesV1 *
+            (kDeepVmRegisterHornerStagesV1 + 1) +
+        lane;
+}
+
+void FillDeepVmPaddingSsaV1(
+    const dvm::LayoutV1& layout,
+    std::vector<std::vector<gf::Fp3>>& columns)
+{
+    const auto tag =
+        gf::FromU64_3(0x52454731U);
+    for (uint32_t row = 0;
+         row < columns[0].size(); ++row) {
+        for (uint32_t lane = 0;
+             lane <
+                 kDeepVmRegisterBusLanesV1;
+             ++lane) {
+            for (uint32_t side = 0;
+                 side <
+                     kDeepVmRegisterBusSidesV1;
+                 ++side) {
+                columns[
+                    DeepVmSsaHornerColumn(
+                        layout, lane, side, 3)]
+                    [row] = tag;
+                columns[
+                    DeepVmSsaInverseColumn(
+                        layout, lane, side)]
+                    [row] = gf::Fp3::Zero();
+            }
+            columns[
+                DeepVmSsaRunningColumn(
+                    layout, lane)][row] =
+                gf::Fp3::Zero();
+        }
+    }
+}
+
+bool FillDeepVmSsaAuxV1(
+    const dvm::LayoutV1& layout,
+    const std::vector<gf::Fp3>& challenge,
+    std::vector<std::vector<gf::Fp3>>& columns)
+{
+    if (challenge.size() !=
+            kDeepVmChallengeColumnsV1 ||
+        columns.size() !=
+            layout.n_columns +
+                kDeepVmExtensionColumnsV1) {
+        return false;
+    }
+    const uint32_t program =
+        layout.n_columns;
+    const uint32_t instruction =
+        layout.n_columns + 1;
+    const uint32_t lhs_reference =
+        layout.n_columns + 2;
+    const uint32_t rhs_reference =
+        layout.n_columns + 3;
+    const uint32_t multiplicity =
+        layout.n_columns + 4;
+    const auto tag =
+        gf::FromU64_3(0x52454731U);
+    std::array<gf::Fp3, 2> running{
+        gf::Fp3::Zero(),
+        gf::Fp3::Zero()};
+    for (uint32_t row = 0;
+         row < columns[0].size(); ++row) {
+        const auto binary =
+            gf::Add(
+                gf::Add(
+                    columns[layout.op_add][row],
+                    columns[layout.op_sub][row]),
+                columns[layout.op_mul][row]);
+        const std::array<uint32_t, 3> reg{{
+            instruction,
+            lhs_reference,
+            rhs_reference,
+        }};
+        const std::array<uint32_t, 3> value{{
+            layout.instruction_result,
+            layout.operand_lhs,
+            layout.operand_rhs,
+        }};
+        for (uint32_t lane = 0;
+             lane < 2; ++lane) {
+            std::array<gf::Fp3, 3> inverse{
+                gf::Fp3::Zero(),
+                gf::Fp3::Zero(),
+                gf::Fp3::Zero()};
+            for (uint32_t side = 0;
+                 side < 3; ++side) {
+                const auto h0 = gf::Add(
+                    columns[reg[side]][row],
+                    gf::Mul(
+                        challenge[lane],
+                        columns[value[side]][row]));
+                const auto h1 = gf::Add(
+                    columns[program][row],
+                    gf::Mul(
+                        challenge[lane], h0));
+                const auto h2 = gf::Add(
+                    columns[layout.query][row],
+                    gf::Mul(
+                        challenge[lane], h1));
+                const auto h3 = gf::Add(
+                    tag,
+                    gf::Mul(
+                        challenge[lane], h2));
+                columns[
+                    DeepVmSsaHornerColumn(
+                        layout, lane, side, 0)]
+                    [row] = h0;
+                columns[
+                    DeepVmSsaHornerColumn(
+                        layout, lane, side, 1)]
+                    [row] = h1;
+                columns[
+                    DeepVmSsaHornerColumn(
+                        layout, lane, side, 2)]
+                    [row] = h2;
+                columns[
+                    DeepVmSsaHornerColumn(
+                        layout, lane, side, 3)]
+                    [row] = h3;
+                const auto active =
+                    side == 0
+                    ? columns[
+                          layout.vm_instruction][row]
+                    : binary;
+                const auto denominator =
+                    gf::Add(
+                        challenge[2 + lane],
+                        h3);
+                if (!gf::IsZero(active)) {
+                    if (gf::IsZero(denominator)) {
+                        return false;
+                    }
+                    inverse[side] =
+                        gf::Inv(denominator);
+                }
+                columns[
+                    DeepVmSsaInverseColumn(
+                        layout, lane, side)]
+                    [row] = inverse[side];
+            }
+            columns[
+                DeepVmSsaRunningColumn(
+                    layout, lane)][row] =
+                running[lane];
+            const auto producer =
+                gf::Mul(
+                    columns[multiplicity][row],
+                    inverse[0]);
+            const auto consumers =
+                gf::Mul(
+                    binary,
+                    gf::Add(
+                        inverse[1],
+                        inverse[2]));
+            running[lane] =
+                gf::Add(
+                    running[lane],
+                    gf::Sub(
+                        producer,
+                        consumers));
+        }
+    }
+    return gf::IsZero(running[0]) &&
+        gf::IsZero(running[1]);
 }
 
 std::vector<uint32_t> DecoderManifestColumns(
@@ -1581,6 +1817,635 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    deep_vm_bytecode_matches_all_native_constraints_and_rejects_substitution)
+{
+    const auto input = ActualInput();
+    const auto native =
+        OneQueryDeepVm(input);
+    const auto table =
+        BuildDeepVmProgramTableV1(
+            native.layout);
+    const auto phase =
+        BuildDeepVmCanonicalPhaseV1(
+            native,
+            input.child_program,
+            input.expected_child_program_root,
+            {0, 0, 1});
+    const auto challenge =
+        phase.challenge;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        phase.valid, phase.note);
+    BOOST_CHECK(
+        phase.program_and_range_bound);
+    BOOST_CHECK(
+        phase.constant_schedule_owned);
+    BOOST_CHECK(
+        phase.register_logup_complete);
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            table, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        table.programs.size(),
+        kDeepVmCanonicalConstraintsV1);
+    BOOST_CHECK_EQUAL(
+        kDeepVmNativeConstraintsV1,
+        native.cs.constraints.size());
+    BOOST_CHECK_EQUAL(
+        table.current_width,
+        native.layout.n_columns +
+            kDeepVmExtensionColumnsV1);
+    BOOST_CHECK_EQUAL(
+        table.challenge_width,
+        kDeepVmChallengeColumnsV1);
+    BOOST_CHECK(
+        cb::ProgramTableIsChallengeIndependent(
+            table));
+    for (const auto& program :
+         table.programs) {
+        BOOST_CHECK_LE(
+            program.declared_degree, 2U);
+    }
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            phase.cs,
+            phase.columns),
+        0U);
+    for (uint32_t probe = 0;
+         probe < 3; ++probe) {
+        std::vector<gf::Fp3> current(
+            table.current_width);
+        std::vector<gf::Fp3> next(
+            table.current_width);
+        for (uint32_t column = 0;
+             column <
+                 table.current_width;
+             ++column) {
+            current[column] = {
+                gf::FromU64(
+                    3 + probe * 17 + column),
+                gf::FromU64(
+                    5 + probe * 19 +
+                        2 * column),
+                gf::FromU64(
+                    7 + probe * 23 +
+                        3 * column)};
+            next[column] = {
+                gf::FromU64(
+                    11 + probe * 29 + column),
+                gf::FromU64(
+                    13 + probe * 31 +
+                        2 * column),
+                gf::FromU64(
+                    17 + probe * 37 +
+                        3 * column)};
+        }
+        for (uint32_t ordinal = 0;
+             ordinal <
+                 kDeepVmNativeConstraintsV1;
+             ++ordinal) {
+            gf::Fp3 interpreted;
+            BOOST_REQUIRE_MESSAGE(
+                cb::EvaluateProgram(
+                    table.programs[ordinal],
+                    current, next,
+                    challenge,
+                    interpreted, &why),
+                why);
+            const auto expected =
+                native.cs.constraints[
+                    ordinal].eval(
+                        current, next);
+            BOOST_CHECK_MESSAGE(
+                gf::Eq(
+                    interpreted, expected),
+                "DeepVM differential mismatch"
+                    << " probe=" << probe
+                    << " ordinal=" << ordinal);
+        }
+    }
+
+    // The old 284 equations accepted a self-consistent relabel of a constant
+    // operand/result because neither cell was tied to ProgramTable bytes.
+    // The canonical phase rejects exactly that witness through the new
+    // verifier-owned constant schedule.
+    uint32_t constant_row =
+        std::numeric_limits<uint32_t>::max();
+    for (uint32_t row = 0;
+         row < native.real_rows; ++row) {
+        if (gf::Eq(
+                native.columns[
+                    native.layout.op_constant][row],
+                gf::Fp3::One()) &&
+            gf::IsZero(
+                native.columns[
+                    native.layout.program_end][row])) {
+            constant_row = row;
+            break;
+        }
+    }
+    BOOST_REQUIRE_NE(
+        constant_row,
+        std::numeric_limits<uint32_t>::max());
+    auto constant_native_attack =
+        native.columns;
+    const auto delta = gf::Fp3::One();
+    const auto refresh_vm_row =
+        [&native](
+            std::vector<std::vector<gf::Fp3>>&
+                columns,
+            uint32_t row) {
+            const auto& l = native.layout;
+            columns[l.mul_product][row] =
+                gf::Mul(
+                    columns[l.operand_lhs][row],
+                    columns[l.operand_rhs][row]);
+            columns[l.selected_result][row] =
+                gf::Mul(
+                    columns[l.selector][row],
+                    columns[
+                        l.instruction_result][row]);
+            columns[l.lambda_selected][row] =
+                gf::Mul(
+                    columns[l.lambda_power][row],
+                    columns[l.selected_result][row]);
+            columns[l.program_contribution][row] =
+                gf::Mul(
+                    columns[l.program_end][row],
+                    columns[l.lambda_selected][row]);
+            columns[l.composition_after][row] =
+                gf::Add(
+                    columns[
+                        l.composition_before][row],
+                    columns[
+                        l.program_contribution][row]);
+        };
+    constant_native_attack[
+        native.layout.operand_lhs][constant_row] =
+        gf::Add(
+            constant_native_attack[
+                native.layout.operand_lhs][
+                constant_row],
+            delta);
+    constant_native_attack[
+        native.layout.instruction_result][
+        constant_row] =
+        gf::Add(
+            constant_native_attack[
+                native.layout.instruction_result][
+                constant_row],
+            delta);
+    refresh_vm_row(
+        constant_native_attack,
+        constant_row);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            native.cs,
+            constant_native_attack),
+        0U);
+    auto constant_canonical_attack =
+        phase.columns;
+    constant_canonical_attack[
+        native.layout.operand_lhs][constant_row] =
+        constant_native_attack[
+            native.layout.operand_lhs][
+                constant_row];
+    constant_canonical_attack[
+        native.layout.instruction_result][
+        constant_row] =
+        constant_native_attack[
+            native.layout.instruction_result][
+                constant_row];
+    for (uint32_t column :
+         {native.layout.mul_product,
+          native.layout.selected_result,
+          native.layout.lambda_selected,
+          native.layout.program_contribution,
+          native.layout.composition_after}) {
+        constant_canonical_attack[column][
+            constant_row] =
+            constant_native_attack[column][
+                constant_row];
+    }
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            phase.cs,
+            constant_canonical_attack),
+        0U);
+
+    // Likewise, an internal binary operand and its row-local result could be
+    // changed together under the native VM callbacks. Because later reads
+    // were free witnesses, this was a genuine SSA-copy attack. The indexed
+    // register multiset now rejects it.
+    uint32_t binary_row =
+        std::numeric_limits<uint32_t>::max();
+    for (uint32_t row = 0;
+         row < native.real_rows; ++row) {
+        const bool binary =
+            gf::Eq(
+                native.columns[
+                    native.layout.op_add][row],
+                gf::Fp3::One()) ||
+            gf::Eq(
+                native.columns[
+                    native.layout.op_sub][row],
+                gf::Fp3::One());
+        if (binary &&
+            gf::IsZero(
+                native.columns[
+                    native.layout.program_end][row])) {
+            binary_row = row;
+            break;
+        }
+    }
+    BOOST_REQUIRE_NE(
+        binary_row,
+        std::numeric_limits<uint32_t>::max());
+    auto register_native_attack =
+        native.columns;
+    register_native_attack[
+        native.layout.operand_lhs][binary_row] =
+        gf::Add(
+            register_native_attack[
+                native.layout.operand_lhs][
+                binary_row],
+            delta);
+    const bool is_add =
+        gf::Eq(
+            register_native_attack[
+                native.layout.op_add][binary_row],
+            gf::Fp3::One());
+    register_native_attack[
+        native.layout.instruction_result][
+        binary_row] =
+        is_add
+        ? gf::Add(
+              register_native_attack[
+                  native.layout.operand_lhs][
+                  binary_row],
+              register_native_attack[
+                  native.layout.operand_rhs][
+                  binary_row])
+        : gf::Sub(
+              register_native_attack[
+                  native.layout.operand_lhs][
+                  binary_row],
+              register_native_attack[
+                  native.layout.operand_rhs][
+                  binary_row]);
+    refresh_vm_row(
+        register_native_attack,
+        binary_row);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            native.cs,
+            register_native_attack),
+        0U);
+    auto register_canonical_attack =
+        phase.columns;
+    register_canonical_attack[
+        native.layout.operand_lhs][binary_row] =
+        register_native_attack[
+            native.layout.operand_lhs][
+                binary_row];
+    register_canonical_attack[
+        native.layout.instruction_result][
+        binary_row] =
+        register_native_attack[
+            native.layout.instruction_result][
+                binary_row];
+    register_canonical_attack[
+        native.layout.mul_product][binary_row] =
+        register_native_attack[
+            native.layout.mul_product][
+                binary_row];
+    register_canonical_attack[
+        native.layout.selected_result][
+        binary_row] =
+        register_native_attack[
+            native.layout.selected_result][
+                binary_row];
+    register_canonical_attack[
+        native.layout.lambda_selected][
+        binary_row] =
+        register_native_attack[
+            native.layout.lambda_selected][
+                binary_row];
+    register_canonical_attack[
+        native.layout.program_contribution][
+        binary_row] =
+        register_native_attack[
+            native.layout.program_contribution][
+                binary_row];
+    register_canonical_attack[
+        native.layout.composition_after][
+        binary_row] =
+        register_native_attack[
+            native.layout.composition_after][
+                binary_row];
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            phase.cs,
+            register_canonical_attack),
+        0U);
+    auto stale_dvr1_attack =
+        register_canonical_attack;
+    BOOST_CHECK(
+        !FillDeepVmSsaAuxV1(
+            native.layout,
+            challenge,
+            stale_dvr1_attack));
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            phase.cs,
+            stale_dvr1_attack),
+        0U);
+
+    auto wrong_root =
+        input.expected_child_program_root;
+    wrong_root[0] ^= 1U;
+    BOOST_CHECK(
+        !BuildDeepVmCanonicalPhaseV1(
+             native,
+             input.child_program,
+             wrong_root,
+             {0, 0, 1}).valid);
+    BOOST_CHECK(
+        !BuildDeepVmCanonicalPhaseV1(
+             native,
+             input.child_program,
+             input.expected_child_program_root,
+             {0, 1, 1}).valid);
+    auto substituted_operand_root = native;
+    substituted_operand_root
+        .preprocessed_row_group_root.data()[0] ^=
+        1U;
+    BOOST_CHECK(
+        !BuildDeepVmCanonicalPhaseV1(
+             substituted_operand_root,
+             input.child_program,
+             input.expected_child_program_root,
+             {0, 0, 1}).valid);
+
+    // Proof-level version of the SSA attack: a malicious ProgramTable that
+    // replaces all 37 ownership/LogUp constraints with tautologies can prove
+    // the forged old-native witness, but the canonical verifier rejects that
+    // proof under the committed 321-program relation.
+    auto weakened_table = table;
+    for (uint32_t ordinal =
+             kDeepVmNativeConstraintsV1;
+         ordinal <
+             weakened_table.programs.size();
+         ++ordinal) {
+        auto& program =
+            weakened_table.programs[ordinal];
+        program.instructions = {
+            Load(
+                cb::Opcode::Current,
+                native.layout.active),
+            Load(
+                cb::Opcode::Current,
+                native.layout.active),
+            Binary(cb::Opcode::Sub, 0, 1),
+        };
+        program.declared_degree = 1;
+    }
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            weakened_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            weakened_table) !=
+        cb::CommitProgramTableAlgHash(table));
+    aq::AirConstraintSystem<gf::Fp3>
+        weakened_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            weakened_table,
+            phase.cs.n_rows,
+            challenge,
+            weakened_cs, &why),
+        why);
+    weakened_cs.preprocessed =
+        phase.cs.preprocessed;
+    weakened_cs.preprocessed_pin_ood = true;
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            weakened_cs,
+            register_canonical_attack),
+        0U);
+    const auto register_attack_proof =
+        aq::AirQuotientProveRowsSplitRap(
+            weakened_cs,
+            register_canonical_attack,
+            phase.statement_manifest_columns,
+            uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        register_attack_proof.ok,
+        register_attack_proof.note);
+    BOOST_REQUIRE(
+        register_attack_proof.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            phase.cs,
+            register_attack_proof.proof,
+            phase.statement_manifest_columns,
+            uint256::ONE, &why));
+
+    // A small all-padding trace satisfies every fixed DeepVM relation. The
+    // non-max high-limb inverse is the only nonzero canonicality witness.
+    const auto layout =
+        dvm::CanonicalLayoutV1();
+    const auto small_table =
+        BuildDeepVmProgramTableV1(layout);
+    aq::AirConstraintSystem<gf::Fp3>
+        small_canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            small_table, 8,
+            challenge,
+            small_canonical_cs, &why),
+        why);
+    std::vector<std::vector<gf::Fp3>>
+        columns(
+            small_table.current_width,
+            std::vector<gf::Fp3>(
+                8, gf::Fp3::Zero()));
+    const auto max_u32 =
+        gf::Fp3::FromFp(
+            std::numeric_limits<
+                uint32_t>::max());
+    const auto zero_delta_inverse =
+        gf::Inv(gf::Sub(
+            gf::Fp3::Zero(),
+            max_u32));
+    for (uint32_t coordinate = 0;
+         coordinate <
+             dvm::kFp3CoordinatesV1;
+         ++coordinate) {
+        for (uint32_t row = 0;
+             row < 8; ++row) {
+            columns[
+                layout
+                    .quotient_high_delta_inverse[
+                        coordinate]][row] =
+                zero_delta_inverse;
+        }
+    }
+    FillDeepVmPaddingSsaV1(
+        layout, columns);
+    small_canonical_cs.preprocessed_pin_ood =
+        true;
+    small_canonical_cs.preprocessed.emplace_back(
+        layout.active,
+        columns[layout.active]);
+    const std::vector<uint32_t> preprocessed{
+        layout.active};
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            small_canonical_cs, columns),
+        0U);
+
+    auto forged = columns;
+    forged[layout.quotient_tape_accept][0] =
+        gf::Fp3::One();
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            small_canonical_cs, forged),
+        0U);
+    auto substituted_table =
+        small_table;
+    auto& acceptance =
+        substituted_table.programs[
+            kDeepVmNativeConstraintsV1 - 1];
+    acceptance.instructions = {
+        Load(
+            cb::Opcode::Current,
+            layout.quotient_tape_accept),
+        Load(
+            cb::Opcode::Current,
+            layout.quotient_tape_accept),
+        Binary(cb::Opcode::Sub, 0, 1),
+    };
+    acceptance.declared_degree = 1;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        cb::CommitProgramTableAlgHash(
+            small_table));
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table, 8,
+            challenge,
+            substituted_cs, &why),
+        why);
+    substituted_cs.preprocessed_pin_ood =
+        true;
+    substituted_cs.preprocessed =
+        small_canonical_cs.preprocessed;
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs, forged),
+        0U);
+    const auto malicious =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, forged,
+            preprocessed, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        malicious.ok, malicious.note);
+    BOOST_REQUIRE(
+        malicious.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            small_canonical_cs,
+            malicious.proof,
+            preprocessed,
+            uint256::ONE, &why));
+
+    // Challenges are verifier-owned post-R0 values. A proof generated for a
+    // distinct valid lane vector cannot be transplanted under the canonical
+    // Fiat-Shamir replay, while both executions retain the same statement
+    // manifest.
+    auto alternate_challenge = challenge;
+    alternate_challenge[0] =
+        gf::Add(
+            alternate_challenge[0],
+            gf::Fp3::One());
+    if (gf::Eq(
+            alternate_challenge[0],
+            alternate_challenge[1]) ||
+        gf::IsZero(
+            alternate_challenge[0])) {
+        alternate_challenge[0] =
+            gf::Add(
+                alternate_challenge[0],
+                gf::FromU64_3(2));
+    }
+    auto alternate_columns =
+        phase.columns;
+    BOOST_REQUIRE(
+        FillDeepVmSsaAuxV1(
+            native.layout,
+            alternate_challenge,
+            alternate_columns));
+    aq::AirConstraintSystem<gf::Fp3>
+        alternate_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table,
+            phase.cs.n_rows,
+            alternate_challenge,
+            alternate_cs, &why),
+        why);
+    alternate_cs.preprocessed =
+        phase.cs.preprocessed;
+    alternate_cs.preprocessed_pin_ood =
+        true;
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            alternate_cs,
+            alternate_columns),
+        0U);
+    const auto alternate_proof =
+        aq::AirQuotientProveRowsSplitRap(
+            alternate_cs,
+            alternate_columns,
+            phase.statement_manifest_columns,
+            uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        alternate_proof.ok,
+        alternate_proof.note);
+    BOOST_REQUIRE(
+        alternate_proof.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            phase.cs,
+            alternate_proof.proof,
+            phase.statement_manifest_columns,
+            uint256::ONE, &why));
+
+    // source_address is ordinary and intentionally not consumed by any local
+    // DeepVM relation. Its equality to Decoder/ABI cells is a later CTL
+    // obligation, so the global carry/authority flags must remain false.
+    auto relabelled = columns;
+    relabelled[layout.source_address][0] =
+        gf::Fp3::One();
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            small_canonical_cs,
+            relabelled),
+        0U);
+}
+
+BOOST_AUTO_TEST_CASE(
     decoder_horner_bytecode_matches_native_and_rejects_offset_substitution)
 {
     const auto input = ActualInput();
@@ -2086,11 +2951,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product
             .phase_constraint_systems_canonical_bytecode,
-        4U);
+        5U);
     BOOST_CHECK_EQUAL(
         product
             .phase_r0_tables_statement_manifest_only,
-        4U);
+        5U);
     BOOST_CHECK(
         product
             .parent_join_r0_statement_manifest_only);
@@ -2177,6 +3042,55 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !product
              .merkle_fold_transcript_and_opening_carry_complete);
+    BOOST_CHECK(
+        product
+            .deep_vm_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .deep_vm_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.deep_vm_program_constraints,
+        kDeepVmCanonicalConstraintsV1);
+    BOOST_CHECK_EQUAL(
+        product
+            .deep_vm_statement_manifest_r0_columns,
+        kDeepVmStatementScheduleColumnsV1);
+    BOOST_CHECK_EQUAL(
+        product.deep_vm_proof_tape_cells,
+        product.deep_vm.layout.n_columns +
+            kDeepVmExtensionColumnsV1 -
+            kDeepVmStatementScheduleColumnsV1);
+    BOOST_CHECK(
+        product.deep_vm_proof_tape_cells_ordinary);
+    BOOST_CHECK(
+        product.deep_vm_proof_tape_fixed_offsets);
+    BOOST_CHECK(
+        product
+            .deep_vm_schedule_independently_regenerated);
+    BOOST_CHECK(
+        product.deep_vm_program_and_range_bound);
+    BOOST_CHECK(
+        product.deep_vm_program_constants_owned);
+    BOOST_CHECK(
+        product.deep_vm_internal_ssa_copy_provenance);
+    BOOST_CHECK(
+        !product
+             .deep_vm_register_precommit_root.IsNull());
+    BOOST_CHECK(
+        product.deep_vm_register_precommit_root ==
+        product.deep_vm.preprocessed_row_group_root);
+    BOOST_CHECK(
+        product
+            .deep_vm_r0_statement_manifest_only);
+    BOOST_CHECK(
+        product
+            .deep_vm_cs_independent_of_child_witness);
+    BOOST_CHECK(
+        !product
+             .deep_vm_register_challenge_carry_complete);
+    BOOST_CHECK(
+        !product
+             .deep_vm_value_and_source_carry_complete);
     BOOST_CHECK(
         product
             .decoder_constraints_canonical_bytecode);

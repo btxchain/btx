@@ -36,6 +36,28 @@ inline constexpr uint32_t kDecoderHornerStagesV1 = 4;
 inline constexpr uint32_t kDecoderHornerAuxColumnsV1 =
     dj::kDecoderJoinBusLanesV1 * 2 *
     kDecoderHornerStagesV1;
+inline constexpr uint32_t kDeepVmNativeConstraintsV1 = 284;
+inline constexpr uint32_t kDeepVmRegisterBusLanesV1 = 2;
+inline constexpr uint32_t kDeepVmRegisterBusSidesV1 = 3;
+inline constexpr uint32_t kDeepVmRegisterHornerStagesV1 = 4;
+inline constexpr uint32_t kDeepVmChallengeColumnsV1 = 4;
+inline constexpr uint32_t kDeepVmSsaScheduleColumnsV1 = 6;
+inline constexpr uint32_t kDeepVmRegisterAuxColumnsV1 =
+    kDeepVmRegisterBusLanesV1 *
+    (kDeepVmRegisterBusSidesV1 *
+         (kDeepVmRegisterHornerStagesV1 + 1) +
+     1);
+inline constexpr uint32_t kDeepVmExtensionColumnsV1 =
+    kDeepVmSsaScheduleColumnsV1 +
+    kDeepVmRegisterAuxColumnsV1;
+inline constexpr uint32_t kDeepVmCanonicalConstraintsV1 =
+    kDeepVmNativeConstraintsV1 + 1 +
+    kDeepVmRegisterBusLanesV1 *
+        (kDeepVmRegisterBusSidesV1 *
+             (kDeepVmRegisterHornerStagesV1 + 1) +
+         3);
+inline constexpr uint32_t kDeepVmStatementScheduleColumnsV1 =
+    20 + kDeepVmSsaScheduleColumnsV1;
 
 enum class PhaseV1 : uint8_t {
     ParentJoin = 0,
@@ -180,6 +202,25 @@ struct ProductV1 {
     bool merkle_fold_cs_independent_of_child_witness{false};
     /** Open until beta/x/openings/final-value are carried from their owners. */
     bool merkle_fold_transcript_and_opening_carry_complete{false};
+    alg_hash::Digest deep_vm_program_root{};
+    uint32_t deep_vm_program_constraints{0};
+    bool deep_vm_constraints_canonical_bytecode{false};
+    bool deep_vm_program_root_recomputed{false};
+    uint32_t deep_vm_statement_manifest_r0_columns{0};
+    uint32_t deep_vm_proof_tape_cells{0};
+    bool deep_vm_proof_tape_cells_ordinary{false};
+    bool deep_vm_proof_tape_fixed_offsets{false};
+    bool deep_vm_schedule_independently_regenerated{false};
+    bool deep_vm_r0_statement_manifest_only{false};
+    bool deep_vm_cs_independent_of_child_witness{false};
+    bool deep_vm_program_and_range_bound{false};
+    bool deep_vm_program_constants_owned{false};
+    bool deep_vm_internal_ssa_copy_provenance{false};
+    uint256 deep_vm_register_precommit_root{};
+    /** Open until the parent transcript supplies both dual-Fp3 lanes. */
+    bool deep_vm_register_challenge_carry_complete{false};
+    /** Open until transcript, opening and source-address owners are carried. */
+    bool deep_vm_value_and_source_carry_complete{false};
     alg_hash::Digest decoder_program_root{};
     uint32_t decoder_program_constraints{0};
     bool decoder_constraints_canonical_bytecode{false};
@@ -250,6 +291,47 @@ BuildMerkleHashProgramTableV1(
 BuildMerkleFoldProgramTableV1(
     const mf::FoldLayoutV1& layout =
         mf::CanonicalFoldLayoutV1());
+
+/**
+ * Canonical bytecode for all 284 Deep/VM/quotient-tape equations plus
+ * verifier-owned constant equality and a dual-Fp3 register LogUp.  The LogUp
+ * binds every Add/Sub/Mul operand to the referenced prior SSA result under
+ * (query, program, register, value), with exact use multiplicities derived
+ * from the canonical child ProgramTable. Current/Next source values remain
+ * ordinary tape for the later ABI carry.
+ */
+[[nodiscard]] cb::ProgramTable
+BuildDeepVmProgramTableV1(
+    const dvm::LayoutV1& layout =
+        dvm::CanonicalLayoutV1());
+
+/**
+ * Build the canonical DeepVM phase in isolation for recursive composition
+ * and adversarial proof audits. The four verifier-owned Challenge cells
+ * (gamma_0, gamma_1, alpha_0, alpha_1) are domain-separated from the child
+ * DeepVM operand/opcode precommit root, canonical child-program root and
+ * exact query range. They are consumed through Challenge opcodes and never
+ * committed as ordinary/R0 witness data in this normalized parent.
+ */
+struct DeepVmCanonicalPhaseV1 {
+    cb::ProgramTable program{};
+    aq::AirConstraintSystem<gf::Fp3> cs{};
+    std::vector<std::vector<gf::Fp3>> columns;
+    std::vector<uint32_t> statement_manifest_columns;
+    std::vector<gf::Fp3> challenge;
+    bool program_and_range_bound{false};
+    bool constant_schedule_owned{false};
+    bool register_logup_complete{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] DeepVmCanonicalPhaseV1
+BuildDeepVmCanonicalPhaseV1(
+    const dvm::ProductV1& deep,
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range);
 
 /**
  * Canonical challenge-independent bytecode for the dual-Fp3 Decoder LogUp
