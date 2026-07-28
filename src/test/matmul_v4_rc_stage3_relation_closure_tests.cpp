@@ -23,6 +23,7 @@
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
+#include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <hash.h>
@@ -287,7 +288,7 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         proof_derived_ctl += audit[i].proof_derived_ctl_endpoints;
     }
     BOOST_CHECK_EQUAL(endpoints, 52U);
-    BOOST_CHECK_EQUAL(proof_derived_ctl, 26U);
+    BOOST_CHECK_EQUAL(proof_derived_ctl, 28U);
 
     const auto cells = CurrentRCStage3RelationEndpointCellAudit();
     BOOST_REQUIRE_EQUAL(cells.size(), 52U);
@@ -302,10 +303,11 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         recursively_consumed += cell.recursive_child_consumed;
         BOOST_CHECK(!cell.remaining.empty());
     }
-    BOOST_CHECK_EQUAL(relation_cells, 26U);
-    BOOST_CHECK_EQUAL(same_trace_aliases, 26U);
-    // Blocker A COMPLETE: 26 (four builder-program exports + 21 scalar-cell
-    // openings + signed range) + 19
+    BOOST_CHECK_EQUAL(relation_cells, 28U);
+    BOOST_CHECK_EQUAL(same_trace_aliases, 28U);
+    // Blocker A COMPLETE: 28 (four builder-program exports + 23 scalar-cell
+    // exports, including all four canonical ExtractCore producer lanes, plus
+    // signed range) + 19
     // stream/digest §4 pins + 3 value-vector openings (BuilderParams,
     // ExtractInput, ExtractScale) + 8 wired sibling bindings (BuilderTrace,
     // GemmSumcheck, SeedChain, Wiring{Transpose,Residual,RoundOrder}, BankRoot,
@@ -1183,6 +1185,448 @@ BOOST_AUTO_TEST_CASE(
     BOOST_TEST_MESSAGE(
         "PROOF-LEVEL forged GEMM-Y consumer CTL VALUE rejected: "
         << why);
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_extract_program_proves_four_producer_bus_relations)
+{
+    namespace aq = air_quotient;
+    namespace air = gkr_air;
+    namespace cb = constraint_bytecode;
+    namespace gf = gkr_field;
+
+    const auto statement = Statement();
+    air::TilePublic tile_public;
+    std::array<uint8_t, 32> prf_bytes{};
+    for (uint32_t i = 0; i < prf_bytes.size(); ++i) {
+        prf_bytes[i] =
+            static_cast<uint8_t>(17U * 7U + i * 31U + 1U);
+    }
+    tile_public.prf_key = uint256{
+        Span<const unsigned char>{
+            prf_bytes.data(), prf_bytes.size()}};
+    tile_public.i = 3;
+    tile_public.bj = 7;
+    std::array<int64_t, kRCMxBlockLen> input{};
+    for (uint32_t i = 0; i < input.size(); ++i) {
+        const int64_t value =
+            1000 + static_cast<int64_t>(i) * 977;
+        input[i] = i % 3 == 0 ? -value : value;
+    }
+    input[5] = int64_t{1} << 40;
+    input[9] = -(int64_t{1} << 45);
+    const air::TileWitness tile =
+        air::TraceTile(tile_public, input);
+    const auto next_power_of_two = [](uint32_t value) {
+        uint32_t out = 1;
+        while (out < value) out <<= 1;
+        return out;
+    };
+    const uint32_t N = next_power_of_two(
+        std::max<uint32_t>(
+            static_cast<uint32_t>(tile.cands.size()),
+            kRCMxBlockLen + 1));
+
+    RCStage3EpisodeExtractProgramAirPublicPinV1 pin;
+    auto& episode = pin.episode_air;
+    episode.role = RCStage3RelationRole::EpisodeExtract;
+    episode.family =
+        RCStage3EpisodeAirFamily::ExtractSamplerCoreFp3V1;
+    episode.statement_commitment =
+        RCStage3EpisodeStatementCommitment(statement);
+    episode.shard_index = 0;
+    episode.shard_count = 1;
+    episode.logical_rows =
+        static_cast<uint32_t>(tile.cands.size());
+    episode.n_rows = N;
+    episode.n_coeffs =
+        next_power_of_two(3 * N - 3);
+    episode.extract_scale_e = tile.scale_e;
+    for (uint32_t column = 0;
+         column < aq::kRcSamplerNumCols;
+         ++column) {
+        episode.column_roots.push_back(
+            {column,
+             Filled(static_cast<unsigned char>(
+                 0x20U + column))});
+    }
+    const uint256 episode_seed =
+        ComputeRCStage3EpisodeAirSeed(
+            statement, episode);
+    BOOST_REQUIRE(!episode_seed.IsNull());
+    const air::TableTM tm;
+    const auto instance =
+        aq::BuildRcSamplerInstance<gf::Fp3>(
+            tile, tm, episode_seed);
+    BOOST_REQUIRE_MESSAGE(instance.ok, instance.note);
+    BOOST_REQUIRE_EQUAL(instance.n_rows, N);
+    BOOST_REQUIRE_EQUAL(
+        instance.columns.size(),
+        aq::kRcSamplerNumCols);
+    BOOST_REQUIRE_EQUAL(
+        instance.cs.QuotientLen(), 3 * N - 3);
+    for (uint32_t column = 0;
+         column < aq::kRcSamplerNumCols;
+         ++column) {
+        episode.column_roots[column].root =
+            aq::AirCommittedValuesRoot<gf::Fp3>(
+                instance.columns[column],
+                episode.n_coeffs);
+    }
+    BOOST_REQUIRE(
+        ComputeRCStage3EpisodeAirSeed(
+            statement, episode) == episode_seed);
+
+    cb::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeExtractLocalKernelProgramTable(
+            episode.extract_scale_e, table, &why),
+        why);
+    const auto keys =
+        cb::CommitProgramTableForExternalAndRecursiveUse(
+            table);
+    BOOST_REQUIRE(keys.same_canonical_serialization);
+    pin.program_external_sha256d =
+        keys.external_sha256d;
+    pin.program_recursive_alg_hash =
+        keys.recursive_alg_hash;
+
+    const std::array<RCStage3RelationEndpoint, 4>
+        endpoints{
+            RCStage3RelationEndpoint::EpisodeExtractInput,
+            RCStage3RelationEndpoint::EpisodeExtractSampler,
+            RCStage3RelationEndpoint::EpisodeExtractScale,
+            RCStage3RelationEndpoint::EpisodeExtractOutput,
+        };
+    const std::array<uint32_t, 4> source_columns{
+        aq::kColUMix,
+        aq::kColMixed,
+        aq::kColE0,
+        aq::kColOut,
+    };
+    std::array<RCStage3EpisodeExtractProgramCtlLaneV1, 4>
+        lanes;
+    std::array<RCStage3CtlWitness, 4>
+        producer_witnesses;
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        auto& lane = lanes[lane_index];
+        lane.endpoint = endpoints[lane_index];
+        const auto producer =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin, lane.endpoint, true);
+        const auto counterparty =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin, lane.endpoint, false);
+        BOOST_REQUIRE_EQUAL(producer.events.size(), N);
+        BOOST_REQUIRE_EQUAL(
+            counterparty.events.size(), N);
+        lane.manifest.bus_id =
+            kRCStage3EpisodeExtractProgramBatchBusBaseV1 +
+            episode.shard_index * lanes.size() +
+            lane_index;
+        lane.manifest.transcript_seed =
+            ComputeRCStage3EpisodeExtractProgramCtlTranscriptSeedV1(
+                pin, lane.endpoint);
+        lane.manifest.participants = {
+            {RCStage3RelationRole::EpisodeExtract,
+             producer.events.size(),
+             producer.events.size(), 0,
+             CommitRCStage3CtlSchedule(producer)},
+            {RCStage3RelationRole::CompositionLink,
+             counterparty.events.size(), 0,
+             counterparty.events.size(),
+             CommitRCStage3CtlSchedule(counterparty)},
+        };
+        const auto& values =
+            instance.columns[source_columns[lane_index]];
+        for (uint32_t participant_index = 0;
+             participant_index < lane.pins.size();
+             ++participant_index) {
+            const auto& participant =
+                lane.manifest.participants[
+                    participant_index];
+            auto& child =
+                lane.pins[participant_index];
+            child.role = participant.role;
+            child.bus_id = lane.manifest.bus_id;
+            child.event_count = participant.event_count;
+            child.send_count = participant.send_count;
+            child.receive_count =
+                participant.receive_count;
+            child.schedule_commitment =
+                participant.schedule_commitment;
+            child.trace_commitment =
+                ComputeRCStage3CtlPrechallengeTraceCommitment(
+                    participant_index == 0
+                        ? producer : counterparty,
+                    values);
+            BOOST_REQUIRE(!child.trace_commitment.IsNull());
+        }
+        RCStage3CtlChallenges challenges;
+        BOOST_REQUIRE_MESSAGE(
+            DeriveRCStage3CtlChallenges(
+                lane.manifest,
+                {lane.pins[0], lane.pins[1]},
+                challenges, &why),
+            why);
+        producer_witnesses[lane_index] =
+            BuildRCStage3CtlWitness(
+                producer, values, challenges);
+        const auto counterparty_witness =
+            BuildRCStage3CtlWitness(
+                counterparty, values, challenges);
+        BOOST_REQUIRE_MESSAGE(
+            producer_witnesses[lane_index].ok,
+            producer_witnesses[lane_index].note);
+        BOOST_REQUIRE_MESSAGE(
+            counterparty_witness.ok,
+            counterparty_witness.note);
+        lane.pins[0].terminal =
+            producer_witnesses[lane_index].terminal;
+        lane.pins[1].terminal =
+            counterparty_witness.terminal;
+        const uint256 challenge_commitment =
+            CommitRCStage3CtlChallenges(challenges);
+        lane.pins[0].challenge_commitment =
+            challenge_commitment;
+        lane.pins[1].challenge_commitment =
+            challenge_commitment;
+        lane.pins[0].auxiliary_commitment =
+            Filled(static_cast<unsigned char>(
+                0xc0U + lane_index));
+        // Counterparty postchallenge columns are intentionally outside this
+        // producer proof. This is a prechallenge pin, not a fake consumer
+        // accumulator or a semantic-closure claim.
+        lane.pins[1].auxiliary_commitment =
+            Filled(static_cast<unsigned char>(
+                0xd0U + lane_index));
+    }
+    for (uint32_t left = 0;
+         left < lanes.size(); ++left) {
+        BOOST_CHECK(
+            lanes[left].pins[0].challenge_commitment ==
+            lanes[left].pins[1].challenge_commitment);
+        for (uint32_t right = left + 1;
+             right < lanes.size(); ++right) {
+            BOOST_CHECK(
+                lanes[left].pins[0].challenge_commitment !=
+                lanes[right].pins[0].challenge_commitment);
+        }
+    }
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1
+        layout;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, lanes, cs, &layout, &why),
+        why);
+    BOOST_CHECK(layout.canonical_program_selected);
+    BOOST_CHECK(layout.verifier_scale_bound);
+    BOOST_CHECK(layout.all_four_producer_same_trace);
+    BOOST_CHECK(!layout.chacha_provenance_included);
+    BOOST_CHECK(!layout.recursive_children_consumed);
+    BOOST_CHECK(!layout.role_complete);
+    BOOST_CHECK_EQUAL(
+        layout.relation_columns,
+        aq::kRcSamplerNumCols);
+    BOOST_CHECK_EQUAL(
+        layout.total_columns,
+        aq::kRcSamplerNumCols +
+            4 * stage3_ctl_col::NUM_COLUMNS);
+    BOOST_CHECK_EQUAL(
+        cs.QuotientLen(), 3 * N - 3);
+    std::vector<std::vector<gf::Fp3>> columns;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeExtractProgramCtlDirectAliasWitnessV1(
+            layout, instance.columns,
+            producer_witnesses, columns, &why),
+        why);
+    const uint256 seed =
+        ComputeRCStage3EpisodeExtractProgramCtlDirectAliasSeedV1(
+            statement, pin, lanes);
+    BOOST_REQUIRE(!seed.IsNull());
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3>(
+            cs, columns, seed);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE(proved.division_exact);
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        lanes[lane_index]
+            .pins[0]
+            .auxiliary_commitment =
+            ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proved.proof,
+                layout.producer_lanes[lane_index]);
+        BOOST_REQUIRE(
+            !lanes[lane_index]
+                 .pins[0]
+                 .auxiliary_commitment.IsNull());
+    }
+    BOOST_REQUIRE_MESSAGE(
+        VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
+            statement, pin, lanes,
+            proved.proof, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL Extract Input/Sampler/Scale/Output producer accept: "
+        "rows=" << cs.n_rows
+        << " cols=" << cs.n_columns
+        << " constraints=" << cs.constraints.size()
+        << " n_coeffs=" << proved.proof.batch.n_coeffs);
+
+    // The opposite side contributes only its prechallenge trace commitment.
+    // Its postchallenge auxiliary receipt is deliberately not claimed by
+    // this producer product, so changing that detached field must not be
+    // misreported as consumer execution or role closure.
+    auto unattached_counterparty_aux = lanes;
+    unattached_counterparty_aux[0]
+        .pins[1]
+        .auxiliary_commitment = Filled(0xec);
+    BOOST_CHECK_MESSAGE(
+        VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
+            statement, pin, unattached_counterparty_aux,
+            proved.proof, &why),
+        why);
+    BOOST_TEST_MESSAGE(
+        "EVIDENCE-ONLY residual: counterparty postchallenge receipt is "
+        "outside the Extract producer proof; role_complete remains false");
+
+    auto detached_aux = lanes;
+    detached_aux[0].pins[0].auxiliary_commitment =
+        Filled(0xee);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
+            statement, pin, detached_aux,
+            proved.proof, &why));
+    BOOST_CHECK(
+        why.find("ctl_auxiliary_commitment") !=
+        std::string::npos);
+
+    auto forged_columns = columns;
+    forged_columns[
+        layout.producer_lanes[2].ctl_value_column][17] =
+        gf::Add(
+            forged_columns[
+                layout.producer_lanes[2]
+                    .ctl_value_column][17],
+            gf::Fp3::One());
+    aq::AirProveOptions adversarial;
+    adversarial.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProve<gf::Fp3>(
+            cs, forged_columns, seed, adversarial);
+    BOOST_REQUIRE_MESSAGE(forged.ok, forged.note);
+    BOOST_CHECK(!forged.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerify<gf::Fp3>(
+            cs, forged.proof, seed, &why));
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL forged Extract Scale CTL VALUE rejected: "
+        << why);
+
+    auto wrong_scale = pin;
+    wrong_scale.episode_air.extract_scale_e =
+        static_cast<uint8_t>(
+            (episode.extract_scale_e + 1U) & 3U);
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, wrong_scale, lanes,
+            cs, nullptr, &why));
+    BOOST_CHECK(
+        why.find("program_key_scale_or_shape") !=
+        std::string::npos);
+    cb::ProgramTable wrong_scale_table;
+    BOOST_REQUIRE(
+        BuildRCStage3EpisodeExtractLocalKernelProgramTable(
+            wrong_scale.episode_air.extract_scale_e,
+            wrong_scale_table, &why));
+    const auto wrong_scale_keys =
+        cb::CommitProgramTableForExternalAndRecursiveUse(
+            wrong_scale_table);
+    wrong_scale.program_external_sha256d =
+        wrong_scale_keys.external_sha256d;
+    wrong_scale.program_recursive_alg_hash =
+        wrong_scale_keys.recursive_alg_hash;
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, wrong_scale, lanes,
+            cs, nullptr, &why));
+    BOOST_CHECK(
+        why.find("canonical_lane") !=
+        std::string::npos);
+
+    auto wrong_domain = lanes;
+    wrong_domain[1].manifest.transcript_seed =
+        Filled(0xed);
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, wrong_domain,
+            cs, nullptr, &why));
+    BOOST_CHECK(
+        why.find("canonical_lane") !=
+        std::string::npos);
+    auto wrong_endpoint = lanes;
+    wrong_endpoint[1].endpoint =
+        RCStage3RelationEndpoint::EpisodeExtractInput;
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, wrong_endpoint,
+            cs, nullptr, &why));
+    BOOST_CHECK(
+        why.find("canonical_lane") !=
+        std::string::npos);
+    auto omitted = lanes;
+    omitted[3] = {};
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, omitted,
+            cs, nullptr, &why));
+    BOOST_CHECK(
+        why.find("canonical_lane") !=
+        std::string::npos);
+    auto reordered = lanes;
+    std::swap(reordered[0], reordered[1]);
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, reordered,
+            cs, nullptr, &why));
+    BOOST_CHECK(
+        why.find("canonical_lane") !=
+        std::string::npos);
+
+    auto aliased_relation = instance.columns;
+    BOOST_REQUIRE_LE(
+        aliased_relation[aq::kColE0][0].c0,
+        std::numeric_limits<uint32_t>::max());
+    aliased_relation[aq::kColE0][0].c0 +=
+        gf::kP;
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasWitnessV1(
+            layout, aliased_relation,
+            producer_witnesses, columns, &why));
+    BOOST_CHECK(
+        why.find("noncanonical_relation_cell") !=
+        std::string::npos);
+    auto aliased_ctl = producer_witnesses;
+    BOOST_REQUIRE_LT(
+        aliased_ctl[0]
+            .columns[stage3_ctl_col::NAMESPACE][0]
+            .c0,
+        gf::kP);
+    aliased_ctl[0]
+        .columns[stage3_ctl_col::NAMESPACE][0]
+        .c0 += gf::kP;
+    BOOST_CHECK(
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasWitnessV1(
+            layout, instance.columns,
+            aliased_ctl, columns, &why));
+    BOOST_CHECK(
+        why.find("noncanonical_ctl_cell") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
+#include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <hash.h>
@@ -37,6 +38,10 @@ constexpr char EPISODE_GEMM_PROGRAM_BATCH_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_GEMM_PROGRAM_CTL_BATCH_V1";
 constexpr char EPISODE_GEMM_PROGRAM_CTL_TRANSCRIPT_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_GEMM_PROGRAM_CTL_TRANSCRIPT_V1";
+constexpr char EPISODE_EXTRACT_PROGRAM_BATCH_SEED_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_EXTRACT_PROGRAM_CTL_BATCH_V1";
+constexpr char EPISODE_EXTRACT_PROGRAM_CTL_TRANSCRIPT_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_EXTRACT_PROGRAM_CTL_TRANSCRIPT_V1";
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_COUPLED_ENDPOINT_AIR_V1";
 
@@ -81,6 +86,22 @@ constexpr std::array<uint32_t,
         0,
         EPISODE_GEMM_PROGRAM_COLUMNS +
             kRCStage3RangeValue,
+    };
+constexpr std::array<RCStage3RelationEndpoint,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>
+    EPISODE_EXTRACT_BATCH_ENDPOINTS{
+        RCStage3RelationEndpoint::EpisodeExtractInput,
+        RCStage3RelationEndpoint::EpisodeExtractSampler,
+        RCStage3RelationEndpoint::EpisodeExtractScale,
+        RCStage3RelationEndpoint::EpisodeExtractOutput,
+    };
+constexpr std::array<uint32_t,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>
+    EPISODE_EXTRACT_BATCH_SOURCE_COLUMNS{
+        air_quotient::kColUMix,
+        air_quotient::kColMixed,
+        air_quotient::kColE0,
+        air_quotient::kColOut,
     };
 
 const std::vector<RCStage3RelationEndpoint> EPISODE_BUILDER{
@@ -275,8 +296,12 @@ std::optional<uint32_t> EpisodeEndpointColumn(
     if (role == RCStage3RelationRole::EpisodeExtract &&
         family == Family::ExtractSamplerCoreFp3V1) {
         switch (endpoint) {
+        case Endpoint::EpisodeExtractInput:
+            return air_quotient::kColUMix;
         case Endpoint::EpisodeExtractSampler:
             return air_quotient::kColMixed;
+        case Endpoint::EpisodeExtractScale:
+            return air_quotient::kColE0;
         case Endpoint::EpisodeExtractOutput:
             return air_quotient::kColOut;
         default: return std::nullopt;
@@ -502,17 +527,33 @@ RCStage3RelationEndpointCellAudit CellAudit(
             "cells execute in one dual-alias quotient proof; its recursive "
             "verifier child is not consumed";
         break;
+    case RCStage3RelationEndpoint::EpisodeExtractInput:
+        episode(air_quotient::kColUMix,
+                "episode_air:extract_program:U_MIX",
+                "the canonical scale-bound ExtractCore input cell and its "
+                "producer CTL VALUE execute in one quotient proof; ChaCha "
+                "input provenance and recursive consumption remain");
+        break;
     case RCStage3RelationEndpoint::EpisodeExtractSampler:
         episode(air_quotient::kColMixed,
-                "episode_air:extract_sampler:MIXED",
-                "the sampler core cell is proved and CTL-aliasable, but "
-                "ChaCha input provenance and every-tile closure are absent");
+                "episode_air:extract_program:MIXED",
+                "the canonical scale-bound ExtractCore sampler cell and its "
+                "producer CTL VALUE execute in one quotient proof; ChaCha "
+                "input provenance and recursive consumption remain");
+        break;
+    case RCStage3RelationEndpoint::EpisodeExtractScale:
+        episode(air_quotient::kColE0,
+                "episode_air:extract_program:E0",
+                "the verifier-scale-bound ExtractCore E0 cell and its "
+                "producer CTL VALUE execute in one quotient proof; SHA/XOF "
+                "scale provenance and recursive consumption remain");
         break;
     case RCStage3RelationEndpoint::EpisodeExtractOutput:
         episode(air_quotient::kColOut,
-                "episode_air:extract_sampler:OUT",
-                "the dequant output cell is proved and CTL-aliasable, but "
-                "the output-root opening and every-tile closure are absent");
+                "episode_air:extract_program:OUT",
+                "the canonical scale-bound ExtractCore output cell and its "
+                "producer CTL VALUE execute in one quotient proof; complete "
+                "output provenance and recursive consumption remain");
         break;
     case RCStage3RelationEndpoint::EpisodeWiringCopy:
         episode(0, "episode_air:wiring_equality:U",
@@ -939,6 +980,148 @@ bool ResolveEpisodeGemmProgramBatchAirV1(
     relation_roots.insert(
         relation_roots.end(),
         range_roots.begin(), range_roots.end());
+    return true;
+}
+
+Fp3 EpisodeExtractProgramChallengeV1(
+    const uint256& seed,
+    const char* label,
+    const std::vector<uint256>& base_roots,
+    uint32_t n_rows,
+    uint32_t n_coeffs)
+{
+    const uint256 digest =
+        air_quotient::AirChallengeDigest(
+            seed, label, base_roots,
+            {n_rows, n_coeffs});
+    return gkr_field::FromChallengeBytes3(
+        digest.data());
+}
+
+bool ResolveEpisodeExtractProgramBatchAirV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    constraint_bytecode::ProgramTable& table,
+    AirCS& out,
+    std::vector<uint256>& relation_roots,
+    std::string* why)
+{
+    table = {};
+    out = {};
+    relation_roots.clear();
+    const auto& episode = pin.episode_air;
+    if (pin.version !=
+            kRCStage3EpisodeExtractProgramBatchVersionV1 ||
+        episode.role != RCStage3RelationRole::EpisodeExtract ||
+        episode.family !=
+            RCStage3EpisodeAirFamily::ExtractSamplerCoreFp3V1 ||
+        episode.column_roots.size() !=
+            air_quotient::kRcSamplerNumCols ||
+        episode.n_rows == 0 ||
+        episode.n_coeffs == 0) {
+        return Fail(why, "extract_batch:public_pin_shape");
+    }
+
+    // Resolve the legacy/native adapter only as an independent public-pin and
+    // transcript validator.  The returned relation below is built from the
+    // canonical ProgramTable, not from the native callbacks.
+    AirCS native;
+    if (!ResolveRCStage3EpisodeAirConstraintSystem(
+            statement, episode, native, why)) {
+        return Fail(why, "extract_batch:episode_pin");
+    }
+    if (!BuildRCStage3EpisodeExtractLocalKernelProgramTable(
+            episode.extract_scale_e, table, why)) {
+        return Fail(why, "extract_batch:canonical_program");
+    }
+    const auto keys =
+        constraint_bytecode::
+            CommitProgramTableForExternalAndRecursiveUse(table);
+    if (!keys.same_canonical_serialization ||
+        keys.external_sha256d !=
+            pin.program_external_sha256d ||
+        keys.recursive_alg_hash !=
+            pin.program_recursive_alg_hash ||
+        table.role != RCStage3RelationRole::EpisodeExtract ||
+        table.current_width !=
+            air_quotient::kRcSamplerNumCols ||
+        table.challenge_width != 2) {
+        table = {};
+        return Fail(
+            why, "extract_batch:program_key_scale_or_shape");
+    }
+
+    relation_roots.reserve(
+        episode.column_roots.size());
+    for (uint32_t column = 0;
+         column < episode.column_roots.size();
+         ++column) {
+        if (episode.column_roots[column].column !=
+                column ||
+            episode.column_roots[column].root.IsNull()) {
+            table = {};
+            relation_roots.clear();
+            return Fail(
+                why, "extract_batch:relation_root_order");
+        }
+        relation_roots.push_back(
+            episode.column_roots[column].root);
+    }
+    const std::vector<uint256> base_roots(
+        relation_roots.begin(),
+        relation_roots.begin() +
+            air_quotient::kRcSamplerBaseCols);
+    const uint256 episode_seed =
+        ComputeRCStage3EpisodeAirSeed(
+            statement, episode);
+    if (episode_seed.IsNull()) {
+        table = {};
+        relation_roots.clear();
+        return Fail(why, "extract_batch:episode_seed");
+    }
+    const std::vector<Fp3> challenge{
+        EpisodeExtractProgramChallengeV1(
+            episode_seed, "airq_gamma",
+            base_roots, episode.n_rows,
+            episode.n_coeffs),
+        EpisodeExtractProgramChallengeV1(
+            episode_seed, "airq_alpha",
+            base_roots, episode.n_rows,
+            episode.n_coeffs),
+    };
+    if (!constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                table, episode.n_rows, challenge,
+                out, why)) {
+        table = {};
+        relation_roots.clear();
+        return Fail(why, "extract_batch:program_air");
+    }
+    if (out.n_rows != native.n_rows ||
+        out.n_columns != native.n_columns ||
+        out.constraints.size() !=
+            native.constraints.size() ||
+        out.QuotientLen() != native.QuotientLen() ||
+        out.QuotientLen() >
+            episode.n_coeffs) {
+        table = {};
+        out = {};
+        relation_roots.clear();
+        return Fail(
+            why, "extract_batch:canonical_native_shape");
+    }
+    // T_M is verifier-regenerated.  Preserve the native preprocessed values
+    // while pinning every proof root to the public shard pin.
+    out.preprocessed = native.preprocessed;
+    out.preprocessed_pin_ood =
+        native.preprocessed_pin_ood;
+    out.preprocessed_roots.clear();
+    for (uint32_t column = 0;
+         column < relation_roots.size();
+         ++column) {
+        out.preprocessed_roots.emplace_back(
+            column, relation_roots[column]);
+    }
     return true;
 }
 
@@ -2192,6 +2375,544 @@ VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
     return true;
 }
 
+RCStage3CtlSchedule
+BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    RCStage3RelationEndpoint endpoint,
+    bool producer)
+{
+    RCStage3CtlSchedule out;
+    const auto found = std::find(
+        EPISODE_EXTRACT_BATCH_ENDPOINTS.begin(),
+        EPISODE_EXTRACT_BATCH_ENDPOINTS.end(),
+        endpoint);
+    const uint256 pin_commitment =
+        ComputeRCStage3EpisodeAirPinCommitment(
+            pin.episode_air);
+    if (found ==
+            EPISODE_EXTRACT_BATCH_ENDPOINTS.end() ||
+        pin.version !=
+            kRCStage3EpisodeExtractProgramBatchVersionV1 ||
+        pin.episode_air.role !=
+            RCStage3RelationRole::EpisodeExtract ||
+        pin.episode_air.family !=
+            RCStage3EpisodeAirFamily::
+                ExtractSamplerCoreFp3V1 ||
+        pin.episode_air.n_rows < 2 ||
+        pin_commitment.IsNull()) {
+        return out;
+    }
+    const uint32_t lane = static_cast<uint32_t>(
+        found - EPISODE_EXTRACT_BATCH_ENDPOINTS.begin());
+    out.events.reserve(pin.episode_air.n_rows);
+    for (uint32_t row = 0;
+         row < pin.episode_air.n_rows; ++row) {
+        out.events.push_back(
+            {0x45584300U + lane,
+             pin.episode_air.shard_index,
+             row,
+             static_cast<int8_t>(
+                 producer ? 1 : -1)});
+    }
+    return out;
+}
+
+uint256
+ComputeRCStage3EpisodeExtractProgramCtlTranscriptSeedV1(
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    RCStage3RelationEndpoint endpoint)
+{
+    if (BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+            pin, endpoint, true).events.empty()) {
+        return {};
+    }
+    constraint_bytecode::ProgramTable table;
+    if (!BuildRCStage3EpisodeExtractLocalKernelProgramTable(
+            pin.episode_air.extract_scale_e,
+            table, nullptr)) {
+        return {};
+    }
+    const auto keys =
+        constraint_bytecode::
+            CommitProgramTableForExternalAndRecursiveUse(table);
+    if (!keys.same_canonical_serialization ||
+        keys.external_sha256d !=
+            pin.program_external_sha256d ||
+        keys.recursive_alg_hash !=
+            pin.program_recursive_alg_hash) {
+        return {};
+    }
+    const uint256 pin_commitment =
+        ComputeRCStage3EpisodeAirPinCommitment(
+            pin.episode_air);
+    if (pin_commitment.IsNull()) return {};
+    HashWriter hash;
+    hash << EPISODE_EXTRACT_PROGRAM_CTL_TRANSCRIPT_DOMAIN;
+    hash << pin.version;
+    hash << pin_commitment;
+    hash << pin.program_external_sha256d;
+    for (const auto& limb :
+         pin.program_recursive_alg_hash) {
+        hash << limb;
+    }
+    hash << static_cast<uint16_t>(endpoint);
+    return hash.GetHash();
+}
+
+bool
+BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        lanes,
+    AirCS& out,
+    RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1* layout,
+    std::string* why)
+{
+    out = {};
+    RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1 local;
+    constraint_bytecode::ProgramTable table;
+    AirCS relation;
+    std::vector<uint256> roots;
+    if (!ResolveEpisodeExtractProgramBatchAirV1(
+            statement, pin, table,
+            relation, roots, why)) {
+        return false;
+    }
+    const uint32_t shard = pin.episode_air.shard_index;
+    if (shard >
+        (std::numeric_limits<uint32_t>::max() -
+         kRCStage3EpisodeExtractProgramBatchBusBaseV1 -
+         lanes.size()) /
+            lanes.size()) {
+        return Fail(why, "extract_batch:shard_ordinal");
+    }
+
+    AirCS current = relation;
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        const auto producer_schedule =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin,
+                EPISODE_EXTRACT_BATCH_ENDPOINTS[
+                    lane_index],
+                true);
+        const auto counterparty_schedule =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin,
+                EPISODE_EXTRACT_BATCH_ENDPOINTS[
+                    lane_index],
+                false);
+        const uint32_t bus_id =
+            kRCStage3EpisodeExtractProgramBatchBusBaseV1 +
+            shard * lanes.size() + lane_index;
+        RCStage3CtlManifest expected;
+        expected.bus_id = bus_id;
+        expected.transcript_seed =
+            ComputeRCStage3EpisodeExtractProgramCtlTranscriptSeedV1(
+                pin,
+                EPISODE_EXTRACT_BATCH_ENDPOINTS[
+                    lane_index]);
+        expected.participants = {
+            {RCStage3RelationRole::EpisodeExtract,
+             producer_schedule.events.size(),
+             producer_schedule.events.size(), 0,
+             CommitRCStage3CtlSchedule(
+                 producer_schedule)},
+            {RCStage3RelationRole::CompositionLink,
+             counterparty_schedule.events.size(), 0,
+             counterparty_schedule.events.size(),
+             CommitRCStage3CtlSchedule(
+                 counterparty_schedule)},
+        };
+        if (lane.endpoint !=
+                EPISODE_EXTRACT_BATCH_ENDPOINTS[
+                    lane_index] ||
+            lane.manifest != expected ||
+            expected.transcript_seed.IsNull()) {
+            out = {};
+            return Fail(
+                why, "extract_batch:canonical_lane");
+        }
+        for (uint32_t participant_index = 0;
+             participant_index < 2;
+             ++participant_index) {
+            const auto& participant =
+                expected.participants[
+                    participant_index];
+            const auto& child =
+                lane.pins[participant_index];
+            if (child.role != participant.role ||
+                child.bus_id != expected.bus_id ||
+                child.event_count !=
+                    participant.event_count ||
+                child.send_count !=
+                    participant.send_count ||
+                child.receive_count !=
+                    participant.receive_count ||
+                child.schedule_commitment !=
+                    participant.schedule_commitment) {
+                out = {};
+                return Fail(
+                    why,
+                    "extract_batch:participant_binding");
+            }
+        }
+        RCStage3CtlChallenges challenges;
+        if (!DeriveRCStage3CtlChallenges(
+                lane.manifest,
+                {lane.pins[0], lane.pins[1]},
+                challenges, why) ||
+            lane.pins[0].challenge_commitment !=
+                CommitRCStage3CtlChallenges(challenges) ||
+            lane.pins[1].challenge_commitment !=
+                lane.pins[0].challenge_commitment) {
+            out = {};
+            return Fail(
+                why, "extract_batch:challenge_binding");
+        }
+        AirCS next;
+        if (!BuildRCStage3RelationCtlDirectAliasConstraintSystem(
+                current,
+                {producer_schedule, challenges,
+                 lane.pins[0].terminal},
+                EPISODE_EXTRACT_BATCH_SOURCE_COLUMNS[
+                    lane_index],
+                next, &local.producer_lanes[lane_index],
+                why)) {
+            out = {};
+            return false;
+        }
+        current = std::move(next);
+    }
+
+    out = std::move(current);
+    local.relation_columns = relation.n_columns;
+    local.total_columns = out.n_columns;
+    local.canonical_program_selected =
+        table.role == RCStage3RelationRole::EpisodeExtract &&
+        table.current_width ==
+            air_quotient::kRcSamplerNumCols &&
+        table.challenge_width == 2 &&
+        local.relation_columns ==
+            table.current_width;
+    local.verifier_scale_bound =
+        pin.episode_air.extract_scale_e <= 3 &&
+        !pin.program_external_sha256d.IsNull() &&
+        pin.program_recursive_alg_hash !=
+            alg_hash::Digest{};
+    local.all_four_producer_same_trace =
+        local.canonical_program_selected &&
+        local.verifier_scale_bound &&
+        local.total_columns ==
+            local.relation_columns +
+                lanes.size() *
+                    stage3_ctl_col::NUM_COLUMNS;
+    for (uint32_t lane_index = 0;
+         lane_index < local.producer_lanes.size();
+         ++lane_index) {
+        const auto& lane =
+            local.producer_lanes[lane_index];
+        local.all_four_producer_same_trace =
+            local.all_four_producer_same_trace &&
+            lane.same_trace && lane.direct_alias &&
+            lane.source_column ==
+                EPISODE_EXTRACT_BATCH_SOURCE_COLUMNS[
+                    lane_index] &&
+            lane.ctl_column_base ==
+                local.relation_columns +
+                    lane_index *
+                        stage3_ctl_col::NUM_COLUMNS;
+    }
+    local.chacha_provenance_included = false;
+    local.recursive_children_consumed = false;
+    local.role_complete = false;
+    if (!local.all_four_producer_same_trace) {
+        out = {};
+        return Fail(
+            why, "extract_batch:internal_layout");
+    }
+    if (layout != nullptr) *layout = local;
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "canonical_extract_core_four_producer_ctl_"
+            "product_ok_chacha_and_recursion_pending";
+    }
+    return true;
+}
+
+bool
+BuildRCStage3EpisodeExtractProgramCtlDirectAliasWitnessV1(
+    const RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1&
+        layout,
+    const std::vector<std::vector<Fp3>>& relation_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        producer_ctl_witnesses,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.clear();
+    if (!layout.canonical_program_selected ||
+        !layout.verifier_scale_bound ||
+        !layout.all_four_producer_same_trace ||
+        layout.chacha_provenance_included ||
+        layout.recursive_children_consumed ||
+        layout.role_complete ||
+        relation_columns.size() !=
+            layout.relation_columns ||
+        relation_columns.empty()) {
+        return Fail(
+            why, "extract_batch:witness_shape");
+    }
+    const size_t rows =
+        relation_columns.front().size();
+    if (rows < 2) {
+        return Fail(
+            why, "extract_batch:witness_rows");
+    }
+    for (const auto& column : relation_columns) {
+        if (column.size() != rows) {
+            return Fail(
+                why,
+                "extract_batch:relation_column_rows");
+        }
+        if (!std::all_of(
+                column.begin(), column.end(),
+                Canonical)) {
+            return Fail(
+                why,
+                "extract_batch:"
+                "noncanonical_relation_cell");
+        }
+    }
+    for (const auto& witness :
+         producer_ctl_witnesses) {
+        if (!witness.ok ||
+            witness.columns.size() !=
+                stage3_ctl_col::NUM_COLUMNS) {
+            return Fail(
+                why, "extract_batch:ctl_witness_shape");
+        }
+        for (const auto& column : witness.columns) {
+            if (column.size() != rows ||
+                !std::all_of(
+                    column.begin(), column.end(),
+                    Canonical)) {
+                return Fail(
+                    why,
+                    "extract_batch:"
+                    "noncanonical_ctl_cell");
+            }
+        }
+    }
+    out = relation_columns;
+    for (uint32_t lane_index = 0;
+         lane_index < layout.producer_lanes.size();
+         ++lane_index) {
+        std::vector<std::vector<Fp3>> next;
+        if (!BuildRCStage3RelationCtlDirectAliasWitness(
+                layout.producer_lanes[lane_index],
+                out,
+                producer_ctl_witnesses[lane_index],
+                next, why)) {
+            out.clear();
+            return false;
+        }
+        out = std::move(next);
+    }
+    if (out.size() != layout.total_columns) {
+        out.clear();
+        return Fail(
+            why, "extract_batch:witness_width");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "extract_input_sampler_scale_output_are_"
+            "canonical_same_trace_producer_ctl_values";
+    }
+    return true;
+}
+
+uint256
+ComputeRCStage3EpisodeExtractProgramCtlDirectAliasSeedV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        lanes)
+{
+    constraint_bytecode::ProgramTable table;
+    AirCS relation;
+    std::vector<uint256> roots;
+    if (!ResolveEpisodeExtractProgramBatchAirV1(
+            statement, pin, table,
+            relation, roots, nullptr)) {
+        return {};
+    }
+    const uint256 pin_commitment =
+        ComputeRCStage3EpisodeAirPinCommitment(
+            pin.episode_air);
+    if (pin_commitment.IsNull()) return {};
+    HashWriter hash;
+    hash << EPISODE_EXTRACT_PROGRAM_BATCH_SEED_DOMAIN;
+    hash << pin.version;
+    hash << pin_commitment;
+    hash << pin.program_external_sha256d;
+    for (const auto& limb :
+         pin.program_recursive_alg_hash) {
+        hash << limb;
+    }
+    hash << static_cast<uint32_t>(roots.size());
+    for (const auto& root : roots) hash << root;
+    uint256 seed = hash.GetHash();
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        if (lane.endpoint !=
+            EPISODE_EXTRACT_BATCH_ENDPOINTS[
+                lane_index]) {
+            return {};
+        }
+        RCStage3CtlChallenges challenges;
+        if (!DeriveRCStage3CtlChallenges(
+                lane.manifest,
+                {lane.pins[0], lane.pins[1]},
+                challenges, nullptr)) {
+            return {};
+        }
+        const auto schedule =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin, lane.endpoint, true);
+        seed =
+            ComputeRCStage3RelationCtlDirectAliasSeed(
+                lane.endpoint, seed, schedule,
+                challenges, lane.pins[0].terminal,
+                EPISODE_EXTRACT_BATCH_SOURCE_COLUMNS[
+                    lane_index]);
+        if (seed.IsNull()) return {};
+    }
+    return seed;
+}
+
+bool
+VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        lanes,
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    std::string* why)
+{
+    AirCS combined;
+    RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1
+        layout;
+    if (!BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, lanes,
+            combined, &layout, why)) {
+        return false;
+    }
+    constraint_bytecode::ProgramTable table;
+    AirCS relation;
+    std::vector<uint256> roots;
+    if (!ResolveEpisodeExtractProgramBatchAirV1(
+            statement, pin, table,
+            relation, roots, why) ||
+        proof.batch.columns.size() !=
+            static_cast<size_t>(
+                combined.n_columns) + 1 ||
+        proof.batch.column_len.size() !=
+            proof.batch.columns.size() ||
+        proof.batch.n_coeffs !=
+            pin.episode_air.n_coeffs ||
+        roots.size() !=
+            layout.relation_columns) {
+        return Fail(
+            why, "extract_batch:proof_shape");
+    }
+    for (uint32_t column = 0;
+         column < roots.size(); ++column) {
+        if (proof.batch.columns[column].root !=
+            roots[column]) {
+            return Fail(
+                why,
+                "extract_batch:relation_column_root");
+        }
+    }
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        const auto& lane_layout =
+            layout.producer_lanes[lane_index];
+        const uint256& source_root =
+            proof.batch.columns[
+                EPISODE_EXTRACT_BATCH_SOURCE_COLUMNS[
+                    lane_index]].root;
+        if (proof.batch.columns[
+                lane_layout.ctl_value_column].root !=
+            source_root) {
+            return Fail(
+                why, "extract_batch:source_value_root");
+        }
+        const auto schedule =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin, lane.endpoint, true);
+        std::array<uint256, 5> ctl_roots{};
+        for (uint32_t column =
+                 stage3_ctl_col::NAMESPACE;
+             column <=
+                 stage3_ctl_col::MULTIPLICITY;
+             ++column) {
+            ctl_roots[column] =
+                proof.batch.columns[
+                    lane_layout.ctl_column_base +
+                    column].root;
+        }
+        if (ComputeRCStage3CtlPrechallengeTraceCommitmentFromRoots(
+                schedule,
+                proof.batch.column_len[
+                    lane_layout.ctl_column_base],
+                proof.batch.n_coeffs,
+                ctl_roots) !=
+            lane.pins[0].trace_commitment) {
+            return Fail(
+                why,
+                "extract_batch:ctl_trace_commitment");
+        }
+        if (ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proof, lane_layout) !=
+            lane.pins[0].auxiliary_commitment) {
+            return Fail(
+                why,
+                "extract_batch:"
+                "ctl_auxiliary_commitment");
+        }
+    }
+    const uint256 seed =
+        ComputeRCStage3EpisodeExtractProgramCtlDirectAliasSeedV1(
+            statement, pin, lanes);
+    std::string air_why;
+    if (seed.IsNull() ||
+        !air_quotient::AirQuotientVerify<Fp3>(
+            combined, proof, seed, &air_why)) {
+        return Fail(
+            why, "extract_batch:air:" + air_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "extract_core_four_producer_cells_equal_"
+            "same_trace_ctl_values_chacha_and_"
+            "recursive_consumption_pending";
+    }
+    return true;
+}
+
 bool BuildRCStage3RelationCtlDegree2DirectAliasConstraintSystem(
     const AirCS& relation_cs,
     const RCStage3CtlDegree2AirSpec& ctl_spec,
@@ -3068,8 +3789,8 @@ AssessRCStage3RelationClosureStrategies()
 std::vector<RCStage3RelationClosureRoleAudit>
 CurrentRCStage3RelationClosureRoleAudit()
 {
-    // Twenty-six endpoint families now expose concrete proof cells. The four
-    // canonical builder bytecode exports, six immutable episode columns and
+    // Twenty-eight endpoint families now expose concrete proof cells. The four
+    // canonical builder bytecode exports, eight immutable episode columns and
     // fifteen coupled local-kernel columns can be put in the same proof as
     // CTL::VALUE; the signed-range VALUE root already verifies against both
     // executed CTL sides.
@@ -3084,9 +3805,10 @@ CurrentRCStage3RelationClosureRoleAudit()
          "A/B/Y cells have executable same-trace CTL aliases and signed-range "
          "VALUE equality executes; operand/Y openings and sumcheck are not "
          "recursively joined"},
-        {RCStage3RelationRole::EpisodeExtract, 5, 2, false, false,
-         "sampler MIXED and dequant OUT have executable same-trace CTL "
-         "aliases; input opening, all-tile closure, scale and ChaCha remain"},
+        {RCStage3RelationRole::EpisodeExtract, 5, 4, false, false,
+         "canonical scale-bound U_MIX/MIXED/E0/OUT cells execute as four "
+         "independently challenged producer CTLs; ChaCha provenance, the "
+         "counterpart relations and recursive consumption remain"},
         {RCStage3RelationRole::EpisodeWiring, 4, 1, false, false,
          "copy equality has an executable same-trace CTL alias; transpose, "
          "residual and round-order proof-root closure remain"},

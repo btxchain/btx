@@ -371,6 +371,53 @@ struct RCStage3EpisodeGemmProgramCtlDirectAliasLayoutV1 {
     bool semantic_closure{false};
 };
 
+inline constexpr uint16_t
+    kRCStage3EpisodeExtractProgramBatchVersionV1 = 1;
+inline constexpr uint32_t
+    kRCStage3EpisodeExtractProgramBatchLaneCountV1 = 4;
+inline constexpr uint32_t
+    kRCStage3EpisodeExtractProgramBatchBusBaseV1 = 0x45800000U;
+
+/**
+ * Verifier-owned selection of the exact EpisodeExtractCore ProgramTable.
+ * `episode_air.extract_scale_e` is part of the public shard pin and selects
+ * the bytecode table; both commitments are recomputed for that exact scale.
+ */
+struct RCStage3EpisodeExtractProgramAirPublicPinV1 {
+    uint16_t version{kRCStage3EpisodeExtractProgramBatchVersionV1};
+    RCStage3EpisodeAirPublicPin episode_air;
+    uint256 program_external_sha256d{};
+    alg_hash::Digest program_recursive_alg_hash{};
+};
+
+/**
+ * One immutable producer-side ExtractCore CTL lane.  pins[0] is the
+ * EpisodeExtract producer proved in the shared product.  pins[1] is only the
+ * external counterparty prechallenge pin needed to derive the link challenge;
+ * its accumulator/relation is not appended or claimed here.
+ */
+struct RCStage3EpisodeExtractProgramCtlLaneV1 {
+    RCStage3RelationEndpoint endpoint{};
+    RCStage3CtlManifest manifest;
+    std::array<RCStage3CtlChildPin, 2> pins;
+};
+
+struct RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1 {
+    uint32_t relation_columns{0};
+    uint32_t total_columns{0};
+    std::array<RCStage3RelationCtlDirectAliasLayout,
+               kRCStage3EpisodeExtractProgramBatchLaneCountV1>
+        producer_lanes;
+    bool canonical_program_selected{false};
+    bool verifier_scale_bound{false};
+    bool all_four_producer_same_trace{false};
+    /** Explicit residuals: the core relation does not prove the ChaCha byte
+     * source, consume its counterpart relations, or close the role. */
+    bool chacha_provenance_included{false};
+    bool recursive_children_consumed{false};
+    bool role_complete{false};
+};
+
 /** Exact-row variant using the degree-two CTL layout.  Unlike the generic
  * padded CTL, this product keeps n_coeffs == n_rows, so an existing
  * relation-owned VALUE root can be reused verbatim as the CTL VALUE root. */
@@ -577,6 +624,59 @@ VerifyRCStage3EpisodeGemmProgramCtlDirectAliasProofV1(
     const RCStage3EpisodeGemmProgramAirPublicPinV1& pin,
     const std::array<RCStage3EpisodeGemmProgramCtlLaneV1,
                      kRCStage3EpisodeGemmProgramBatchLaneCountV1>& lanes,
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    std::string* why = nullptr);
+
+/** Immutable all-row send/receive schedule for Input, Sampler, Scale or
+ * Output. Namespace, shard, occurrence address and multiplicity are derived
+ * solely from the verifier-owned pin and endpoint. */
+[[nodiscard]] RCStage3CtlSchedule
+BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    RCStage3RelationEndpoint endpoint,
+    bool producer);
+
+[[nodiscard]] uint256
+ComputeRCStage3EpisodeExtractProgramCtlTranscriptSeedV1(
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    RCStage3RelationEndpoint endpoint);
+
+[[nodiscard]] bool
+BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1* layout = nullptr,
+    std::string* why = nullptr);
+
+/** Rejects raw non-canonical Goldilocks representatives before materializing
+ * the four producer CTLs; x and x+p must never be interchangeable at this
+ * witness-ingress boundary. */
+[[nodiscard]] bool
+BuildRCStage3EpisodeExtractProgramCtlDirectAliasWitnessV1(
+    const RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1& layout,
+    const std::vector<std::vector<gkr_field::Fp3>>& relation_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        producer_ctl_witnesses,
+    std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint256
+ComputeRCStage3EpisodeExtractProgramCtlDirectAliasSeedV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes);
+
+[[nodiscard]] bool
+VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes,
     const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
     std::string* why = nullptr);
 
