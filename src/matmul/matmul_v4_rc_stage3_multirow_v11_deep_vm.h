@@ -26,6 +26,9 @@ namespace tp = stage3_multirow_p2_transcript;
 
 inline constexpr uint16_t kDeepVmVersionV1 = 1;
 inline constexpr uint32_t kMaxOperationRowsV1 = 1U << 24;
+inline constexpr uint32_t kFp3TapeLimbsV1 = 6;
+inline constexpr uint32_t kU32TapeBitsV1 = 32;
+inline constexpr uint32_t kFp3CoordinatesV1 = 3;
 
 enum class RowKindV1 : uint8_t {
     Padding = 0,
@@ -128,6 +131,23 @@ struct LayoutV1 {
     uint32_t zh{0};
     uint32_t quotient_value{0};
     uint32_t quotient_product{0};
+    /**
+     * First executable value-only proof-tape slice.  The quotient Fp3 is
+     * transported as six ordinary u32 limbs, with ordinary bit witnesses and
+     * an immutable source_address schedule.  None of these value columns is
+     * preprocessed.
+     */
+    uint32_t quotient_tape_value{0};
+    uint32_t quotient_tape_deep_consumer{0};
+    std::array<uint32_t, kFp3TapeLimbsV1> quotient_tape_limb{};
+    std::array<
+        std::array<uint32_t, kU32TapeBitsV1>,
+        kFp3TapeLimbsV1> quotient_tape_bit{};
+    std::array<uint32_t, kFp3CoordinatesV1>
+        quotient_high_is_max{};
+    std::array<uint32_t, kFp3CoordinatesV1>
+        quotient_high_delta_inverse{};
+    uint32_t quotient_tape_accept{0};
     uint32_t n_columns{0};
 };
 
@@ -165,6 +185,12 @@ struct ProductV1 {
     bool lambda_accumulation_air_constrained{false};
     bool exact_program_root_checked{false};
     bool ordered_preprocessed_root_pinned{false};
+    bool quotient_tape_cells_ordinary{false};
+    bool quotient_tape_u32_canonical{false};
+    bool quotient_tape_value_reconstructed{false};
+    bool quotient_tape_fixed_offsets_r0_bound{false};
+    bool quotient_tape_all_consumers_joined{false};
+    bool quotient_tape_acceptance_constrained{false};
     bool same_parent_decoder_aliases{false};
     bool recursive_authority_ready{false};
     bool valid{false};

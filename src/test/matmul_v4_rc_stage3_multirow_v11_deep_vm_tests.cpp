@@ -6,6 +6,9 @@
 
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_deep_vm.h>
 
+#include <cstdlib>
+#include <limits>
+
 namespace matmul::v4::rc::stage3_multirow_v11_deep_vm {
 namespace {
 
@@ -157,6 +160,85 @@ uint32_t FindRow(
     return 0;
 }
 
+std::vector<uint32_t> FindRows(
+    const ProductV1& product, uint32_t flag)
+{
+    std::vector<uint32_t> out;
+    for (uint32_t row = 0;
+         row < product.real_rows;
+         ++row) {
+        if (gf::Eq(
+                product.columns[flag][row],
+                gf::Fp3::One())) {
+            out.push_back(row);
+        }
+    }
+    return out;
+}
+
+void RequireInexactProofRejected(
+    const ProductV1& product,
+    const std::vector<std::vector<gf::Fp3>>& columns,
+    bool expect_preprocessed_reject = false)
+{
+    BOOST_REQUIRE_GT(
+        RecountViolationsV1(product, columns), 0U);
+    aq::AirProveOptions options;
+    options.force_commit_on_inexact = true;
+    const auto forced =
+        aq::AirQuotientProveRowsSplitRap(
+            product.cs, columns,
+            product.preprocessed_columns,
+            uint256::ONE, options);
+    if (!forced.ok) {
+        BOOST_CHECK(expect_preprocessed_reject);
+        BOOST_CHECK(
+            forced.note.find(
+                "preprocessed_row_group_pin_mismatch") !=
+            std::string::npos);
+        return;
+    }
+    BOOST_REQUIRE_MESSAGE(forced.ok, forced.note);
+    BOOST_CHECK(!forced.division_exact);
+    std::string why;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            product.cs, forced.proof,
+            product.preprocessed_columns,
+            uint256::ONE, &why));
+}
+
+uint32_t NamedViolationsAtRow(
+    const ProductV1& product,
+    const std::vector<std::vector<gf::Fp3>>& columns,
+    uint32_t row,
+    const std::string& name)
+{
+    std::vector<gf::Fp3> current(
+        product.cs.n_columns);
+    std::vector<gf::Fp3> next(
+        product.cs.n_columns);
+    const uint32_t next_row =
+        (row + 1) % product.cs.n_rows;
+    for (uint32_t column = 0;
+         column < product.cs.n_columns;
+         ++column) {
+        current[column] = columns[column][row];
+        next[column] = columns[column][next_row];
+    }
+    uint32_t out = 0;
+    for (const auto& constraint :
+         product.cs.constraints) {
+        if (constraint.name != nullptr &&
+            name == constraint.name &&
+            !gf::IsZero(
+                constraint.eval(current, next))) {
+            ++out;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -175,7 +257,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.layout.n_columns,
         CanonicalLayoutV1().n_columns);
-    BOOST_CHECK_EQUAL(product.layout.n_columns, 73U);
+    BOOST_CHECK_EQUAL(product.layout.n_columns, 280U);
     BOOST_CHECK_LE(product.max_constraint_degree, 2U);
     BOOST_CHECK_EQUAL(product.query_count, 4U);
     BOOST_CHECK_EQUAL(product.quotient_rows, 4U);
@@ -194,6 +276,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(product.lambda_accumulation_air_constrained);
     BOOST_CHECK(product.exact_program_root_checked);
     BOOST_CHECK(product.ordered_preprocessed_root_pinned);
+    BOOST_CHECK(product.quotient_tape_cells_ordinary);
+    BOOST_CHECK(product.quotient_tape_u32_canonical);
+    BOOST_CHECK(product.quotient_tape_value_reconstructed);
+    BOOST_CHECK(product.quotient_tape_fixed_offsets_r0_bound);
+    BOOST_CHECK(product.quotient_tape_all_consumers_joined);
+    BOOST_CHECK(product.quotient_tape_acceptance_constrained);
     BOOST_CHECK(!product.same_parent_decoder_aliases);
     BOOST_CHECK(!product.recursive_authority_ready);
 
@@ -281,6 +369,121 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(
         RecountViolationsV1(product, quotient_aux), 0U);
 
+    const auto quotient_rows = FindRows(
+        product, product.layout.quotient_identity);
+    BOOST_REQUIRE_EQUAL(quotient_rows.size(), 2U);
+
+    auto tape_value = product.columns;
+    tape_value[
+        product.layout.quotient_tape_limb[0]]
+        [quotient_rows[0]] =
+            gf::Add(
+                tape_value[
+                    product.layout.quotient_tape_limb[0]]
+                    [quotient_rows[0]],
+                gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, tape_value), 0U);
+
+    auto tape_swap = product.columns;
+    BOOST_REQUIRE(
+        !gf::Eq(
+            tape_swap[
+                product.layout.quotient_tape_limb[0]]
+                [quotient_rows[0]],
+            tape_swap[
+                product.layout.quotient_tape_limb[1]]
+                [quotient_rows[0]]));
+    std::swap(
+        tape_swap[
+            product.layout.quotient_tape_limb[0]]
+            [quotient_rows[0]],
+        tape_swap[
+            product.layout.quotient_tape_limb[1]]
+            [quotient_rows[0]]);
+    for (uint32_t bit = 0;
+         bit < kU32TapeBitsV1;
+         ++bit) {
+        std::swap(
+            tape_swap[
+                product.layout.quotient_tape_bit[0][bit]]
+                [quotient_rows[0]],
+            tape_swap[
+                product.layout.quotient_tape_bit[1][bit]]
+                [quotient_rows[0]]);
+    }
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, tape_swap), 0U);
+
+    auto tape_offset = product.columns;
+    tape_offset[product.layout.source_address]
+               [quotient_rows[0]] =
+        gf::Add(
+            tape_offset[product.layout.source_address]
+                       [quotient_rows[0]],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, tape_offset), 0U);
+
+    auto tape_accept = product.columns;
+    tape_accept[
+        product.layout.quotient_tape_accept]
+        [quotient_rows[0]] = gf::Fp3::Zero();
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, tape_accept), 0U);
+
+    // The non-canonical limbs (lo=1, hi=0xffffffff) reconstruct the
+    // Goldilocks modulus and therefore alias field zero.  The value
+    // reconstruction alone accepts that equality; the explicit canonicality
+    // relation must reject it.
+    auto modulus_alias = product.columns;
+    for (uint32_t limb = 0;
+         limb < kFp3TapeLimbsV1;
+         ++limb) {
+        const uint32_t value =
+            limb == 0 ? 1U :
+            limb == 1
+                ? std::numeric_limits<uint32_t>::max()
+                : 0U;
+        modulus_alias[
+            product.layout.quotient_tape_limb[limb]]
+            [quotient_rows[0]] =
+                gf::Fp3::FromFp(value);
+        for (uint32_t bit = 0;
+             bit < kU32TapeBitsV1;
+             ++bit) {
+            modulus_alias[
+                product.layout.quotient_tape_bit[
+                    limb][bit]]
+                [quotient_rows[0]] =
+                    gf::Fp3::FromFp(
+                        (value >> bit) & 1U);
+        }
+    }
+    modulus_alias[product.layout.quotient_tape_value]
+                 [quotient_rows[0]] =
+        gf::Fp3::Zero();
+    modulus_alias[
+        product.layout.quotient_high_is_max[0]]
+        [quotient_rows[0]] = gf::Fp3::One();
+    modulus_alias[
+        product.layout.quotient_high_delta_inverse[0]]
+        [quotient_rows[0]] = gf::Fp3::Zero();
+    BOOST_CHECK_EQUAL(
+        NamedViolationsAtRow(
+            product, modulus_alias,
+            quotient_rows[0],
+            "stage3.v11.deep_vm."
+            "quotient_tape_fp3_reconstruct"),
+        0U);
+    BOOST_CHECK_GT(
+        NamedViolationsAtRow(
+            product, modulus_alias,
+            quotient_rows[0],
+            "stage3.v11.deep_vm."
+            "quotient_tape_goldilocks_canonical"),
+        0U);
+
     // Changing a proof-owned input and its local arithmetic together still
     // cannot evade the fixed ordered preprocessed row commitment.
     auto both = product.columns;
@@ -295,6 +498,83 @@ BOOST_AUTO_TEST_CASE(
                     both[product.layout.current_value][term_row])));
     BOOST_CHECK_GT(
         RecountViolationsV1(product, both), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    optional_proof_level_quotient_tape_attacks_reject)
+{
+    if (std::getenv(
+            "BTX_RUN_STAGE3_V11_DEEP_TAPE_PROOF") == nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_V11_DEEP_TAPE_PROOF=1 for "
+            "proof-level fixed-offset tape attacks");
+        return;
+    }
+    const auto& fixture = Honest();
+    const auto product = BuildProductV1(
+        fixture.proved.proximity.proof,
+        fixture.transcript,
+        fixture.table, fixture.program_root, 0, 1);
+    BOOST_REQUIRE_MESSAGE(product.valid, product.note);
+    const auto quotient_rows = FindRows(
+        product, product.layout.quotient_identity);
+    BOOST_REQUIRE_EQUAL(quotient_rows.size(), 1U);
+    const uint32_t row = quotient_rows.front();
+
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRap(
+            product.cs, product.columns,
+            product.preprocessed_columns,
+            uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE(proved.division_exact);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            product.cs, proved.proof,
+            product.preprocessed_columns,
+            uint256::ONE, &why),
+        why);
+
+    auto value_attack = product.columns;
+    value_attack[
+        product.layout.quotient_tape_limb[0]][row] =
+        gf::Add(
+            value_attack[
+                product.layout.quotient_tape_limb[0]][row],
+            gf::Fp3::One());
+    RequireInexactProofRejected(product, value_attack);
+
+    auto cell_swap = product.columns;
+    BOOST_REQUIRE(
+        !gf::Eq(
+            cell_swap[
+                product.layout.quotient_tape_limb[0]][row],
+            cell_swap[
+                product.layout.quotient_tape_limb[1]][row]));
+    std::swap(
+        cell_swap[
+            product.layout.quotient_tape_limb[0]][row],
+        cell_swap[
+            product.layout.quotient_tape_limb[1]][row]);
+    for (uint32_t bit = 0;
+         bit < kU32TapeBitsV1;
+         ++bit) {
+        std::swap(
+            cell_swap[
+                product.layout.quotient_tape_bit[0][bit]][row],
+            cell_swap[
+                product.layout.quotient_tape_bit[1][bit]][row]);
+    }
+    RequireInexactProofRejected(product, cell_swap);
+
+    auto offset_attack = product.columns;
+    offset_attack[product.layout.source_address][row] =
+        gf::Add(
+            offset_attack[product.layout.source_address][row],
+            gf::Fp3::One());
+    RequireInexactProofRejected(
+        product, offset_attack, true);
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -171,6 +171,8 @@ struct Row {
     Fp3 y{};
     Fp3 zh{};
     Fp3 quotient{};
+    Fp3 quotient_tape_value{};
+    bool quotient_tape_deep_consumer{false};
 };
 
 void AddConstraint(
@@ -409,6 +411,24 @@ LayoutV1 CanonicalLayoutV1()
     BTX_V11_DEEP_VM_COL(zh);
     BTX_V11_DEEP_VM_COL(quotient_value);
     BTX_V11_DEEP_VM_COL(quotient_product);
+    BTX_V11_DEEP_VM_COL(quotient_tape_value);
+    BTX_V11_DEEP_VM_COL(quotient_tape_deep_consumer);
+    for (auto& limb : out.quotient_tape_limb) {
+        limb = column++;
+    }
+    for (auto& limb_bits : out.quotient_tape_bit) {
+        for (auto& bit : limb_bits) {
+            bit = column++;
+        }
+    }
+    for (auto& flag : out.quotient_high_is_max) {
+        flag = column++;
+    }
+    for (auto& inverse :
+         out.quotient_high_delta_inverse) {
+        inverse = column++;
+    }
+    BTX_V11_DEEP_VM_COL(quotient_tape_accept);
 #undef BTX_V11_DEEP_VM_COL
     out.n_columns = column;
     return out;
@@ -598,6 +618,8 @@ ProductV1 BuildProductV1(
 
     for (uint32_t q = first_query;
          q < first_query + query_count; ++q) {
+        const size_t query_first_row =
+            rows.size();
         const auto& query = batch.queries[q];
         if (!seen_queries.insert(query.index).second) {
             ++duplicate_queries;
@@ -650,6 +672,14 @@ ProductV1 BuildProductV1(
             Key(abi::FieldKindV1::QueryRowValue, q, 2, 0),
             quotient, out.scalar_origins);
         if (!quotient_origin) return fail("quotient_source");
+        for (uint32_t limb = 1;
+             limb < kFp3TapeLimbsV1;
+             ++limb) {
+            if (quotient_origin->source_addresses[limb] !=
+                quotient_origin->source_addresses[0] + limb) {
+                return fail("quotient_tape_offsets");
+            }
+        }
 
         std::vector<Fp3> entire_row;
         entire_row.reserve(batch.column_len.size());
@@ -934,6 +964,17 @@ ProductV1 BuildProductV1(
         quotient_row.quotient = quotient;
         rows.push_back(quotient_row);
         ++out.quotient_rows;
+        for (size_t row = query_first_row;
+             row < rows.size();
+            ++row) {
+            rows[row].quotient_tape_value =
+                quotient;
+            rows[row].quotient_tape_deep_consumer =
+                rows[row].kind ==
+                    RowKindV1::DeepTerm &&
+                rows[row].source_address ==
+                    quotient_origin->source_addresses[0];
+        }
         if (!gf::Eq(
                 composition, gf::Mul(zh, quotient))) {
             return fail("native_quotient_identity");
@@ -1112,6 +1153,71 @@ ProductV1 BuildProductV1(
         Set(
             out.columns, l.quotient_product, row,
             gf::Mul(r.zh, r.quotient));
+        Set(
+            out.columns, l.quotient_tape_value,
+            row, r.quotient_tape_value);
+        Set(
+            out.columns,
+            l.quotient_tape_deep_consumer, row,
+            r.quotient_tape_deep_consumer
+                ? Fp3::One() : Fp3::Zero());
+        const std::array<uint64_t, kFp3CoordinatesV1>
+            quotient_coordinates{{
+                gf::Canonical(
+                    r.quotient_tape_value.c0),
+                gf::Canonical(
+                    r.quotient_tape_value.c1),
+                gf::Canonical(
+                    r.quotient_tape_value.c2),
+            }};
+        for (uint32_t coordinate = 0;
+             coordinate < kFp3CoordinatesV1;
+             ++coordinate) {
+            const uint32_t low =
+                static_cast<uint32_t>(
+                    quotient_coordinates[coordinate]);
+            const uint32_t high =
+                static_cast<uint32_t>(
+                    quotient_coordinates[coordinate] >> 32);
+            const std::array<uint32_t, 2> limbs{{low, high}};
+            for (uint32_t half = 0; half < 2; ++half) {
+                const uint32_t limb =
+                    2 * coordinate + half;
+                SetU32(
+                    out.columns,
+                    l.quotient_tape_limb[limb],
+                    row, limbs[half]);
+                for (uint32_t bit = 0;
+                     bit < kU32TapeBitsV1;
+                     ++bit) {
+                    SetU32(
+                        out.columns,
+                        l.quotient_tape_bit[limb][bit],
+                        row,
+                        (limbs[half] >> bit) & 1U);
+                }
+            }
+            const bool high_is_max =
+                high == std::numeric_limits<uint32_t>::max();
+            SetU32(
+                out.columns,
+                l.quotient_high_is_max[coordinate],
+                row, high_is_max ? 1U : 0U);
+            if (!high_is_max) {
+                const Fp3 high_delta = gf::Sub(
+                    Fp3::FromFp(high),
+                    Fp3::FromFp(
+                        std::numeric_limits<uint32_t>::max()));
+                Set(
+                    out.columns,
+                    l.quotient_high_delta_inverse[coordinate],
+                    row, gf::Inv(high_delta));
+            }
+        }
+        Set(
+            out.columns, l.quotient_tape_accept, row,
+            r.kind == RowKindV1::QuotientIdentity
+                ? Fp3::One() : Fp3::Zero());
 #undef BTX_SET
         Set(
             out.columns, l.deep_start, row,
@@ -1147,6 +1253,25 @@ ProductV1 BuildProductV1(
                     ? Fp3::One() : Fp3::Zero());
         }
     }
+    const Fp3 zero_high_delta = gf::Sub(
+        Fp3::Zero(),
+        Fp3::FromFp(
+            std::numeric_limits<uint32_t>::max()));
+    const Fp3 zero_high_delta_inverse =
+        gf::Inv(zero_high_delta);
+    for (uint32_t row = out.real_rows;
+         row < out.trace_rows;
+         ++row) {
+        for (uint32_t coordinate = 0;
+             coordinate < kFp3CoordinatesV1;
+             ++coordinate) {
+            Set(
+                out.columns,
+                l.quotient_high_delta_inverse[
+                    coordinate],
+                row, zero_high_delta_inverse);
+        }
+    }
 
     const auto binary = [&](uint32_t column) {
         AddConstraint(
@@ -1158,7 +1283,7 @@ ProductV1 BuildProductV1(
                     gf::Sub(cur[column], Fp3::One()));
             });
     };
-    const std::array<uint32_t, 17> boolean_columns{{
+    const std::array<uint32_t, 18> boolean_columns{{
         l.active, l.deep_term, l.deep_finalize,
         l.vm_instruction, l.quotient_identity,
         l.deep_start, l.deep_chain,
@@ -1166,6 +1291,7 @@ ProductV1 BuildProductV1(
         l.op_add, l.op_sub, l.op_mul,
         l.program_end, l.vm_start, l.vm_chain,
         l.vm_to_quotient,
+        l.quotient_tape_deep_consumer,
     }};
     for (uint32_t column : boolean_columns) binary(column);
     AddConstraint(
@@ -1619,6 +1745,229 @@ ProductV1 BuildProductV1(
                     cur[l.composition_before],
                     cur[l.quotient_product]));
         });
+    for (uint32_t limb = 0;
+         limb < kFp3TapeLimbsV1;
+         ++limb) {
+        for (uint32_t bit = 0;
+             bit < kU32TapeBitsV1;
+             ++bit) {
+            const uint32_t bit_column =
+                l.quotient_tape_bit[limb][bit];
+            AddConstraint(
+                out.cs,
+                "stage3.v11.deep_vm."
+                "quotient_tape_bit_boolean",
+                aq::AirKind::kEverywhere, 2,
+                [bit_column](
+                    const auto& cur,
+                    const auto&) {
+                    return gf::Mul(
+                        cur[bit_column],
+                        gf::Sub(
+                            cur[bit_column],
+                            Fp3::One()));
+                });
+        }
+        AddConstraint(
+            out.cs,
+            "stage3.v11.deep_vm."
+            "quotient_tape_limb_reconstruct",
+            aq::AirKind::kEverywhere, 1,
+            [l, limb](
+                const auto& cur,
+                const auto&) {
+                Fp3 reconstructed =
+                    Fp3::Zero();
+                for (uint32_t bit = 0;
+                     bit < kU32TapeBitsV1;
+                     ++bit) {
+                    reconstructed = gf::Add(
+                        reconstructed,
+                        gf::Mul(
+                            cur[
+                                l.quotient_tape_bit[
+                                    limb][bit]],
+                            Fp3::FromFp(
+                                uint64_t{1} << bit)));
+                }
+                return gf::Sub(
+                    cur[
+                        l.quotient_tape_limb[limb]],
+                    reconstructed);
+            });
+        AddConstraint(
+            out.cs,
+            "stage3.v11.deep_vm."
+            "quotient_tape_limb_chain",
+            aq::AirKind::kTransition, 2,
+            [l, limb](
+                const auto& cur,
+                const auto& next) {
+                return gf::Mul(
+                    gf::Sub(
+                        Fp3::One(),
+                        cur[l.quotient_identity]),
+                    gf::Sub(
+                        next[
+                            l.quotient_tape_limb[limb]],
+                        cur[
+                            l.quotient_tape_limb[limb]]));
+            });
+    }
+    for (uint32_t coordinate = 0;
+         coordinate < kFp3CoordinatesV1;
+         ++coordinate) {
+        const uint32_t high_is_max =
+            l.quotient_high_is_max[coordinate];
+        const uint32_t high_inverse =
+            l.quotient_high_delta_inverse[coordinate];
+        const uint32_t low =
+            l.quotient_tape_limb[2 * coordinate];
+        const uint32_t high =
+            l.quotient_tape_limb[
+                2 * coordinate + 1];
+        AddConstraint(
+            out.cs,
+            "stage3.v11.deep_vm."
+            "quotient_tape_high_is_max_boolean",
+            aq::AirKind::kEverywhere, 2,
+            [high_is_max](
+                const auto& cur,
+                const auto&) {
+                return gf::Mul(
+                    cur[high_is_max],
+                    gf::Sub(
+                        cur[high_is_max],
+                        Fp3::One()));
+            });
+        AddConstraint(
+            out.cs,
+            "stage3.v11.deep_vm."
+            "quotient_tape_high_max_zero_test",
+            aq::AirKind::kEverywhere, 2,
+            [high, high_is_max](
+                const auto& cur,
+                const auto&) {
+                const Fp3 delta = gf::Sub(
+                    cur[high],
+                    Fp3::FromFp(
+                        std::numeric_limits<
+                            uint32_t>::max()));
+                return gf::Mul(
+                    delta, cur[high_is_max]);
+            });
+        AddConstraint(
+            out.cs,
+            "stage3.v11.deep_vm."
+            "quotient_tape_high_nonmax_inverse",
+            aq::AirKind::kEverywhere, 2,
+            [high, high_is_max, high_inverse](
+                const auto& cur,
+                const auto&) {
+                const Fp3 delta = gf::Sub(
+                    cur[high],
+                    Fp3::FromFp(
+                        std::numeric_limits<
+                            uint32_t>::max()));
+                return gf::Sub(
+                    gf::Mul(
+                        delta, cur[high_inverse]),
+                    gf::Sub(
+                        Fp3::One(),
+                        cur[high_is_max]));
+            });
+        AddConstraint(
+            out.cs,
+            "stage3.v11.deep_vm."
+            "quotient_tape_goldilocks_canonical",
+            aq::AirKind::kEverywhere, 2,
+            [low, high_is_max](
+                const auto& cur,
+                const auto&) {
+                return gf::Mul(
+                    cur[high_is_max],
+                    cur[low]);
+            });
+    }
+    AddConstraint(
+        out.cs,
+        "stage3.v11.deep_vm."
+        "quotient_tape_fp3_reconstruct",
+        aq::AirKind::kEverywhere, 1,
+        [l](
+            const auto& cur,
+            const auto&) {
+            constexpr uint64_t two32 =
+                uint64_t{1} << 32;
+            const std::array<Fp3, 3> basis{{
+                Fp3{1, 0, 0},
+                Fp3{0, 1, 0},
+                Fp3{0, 0, 1},
+            }};
+            Fp3 reconstructed = Fp3::Zero();
+            for (uint32_t coordinate = 0;
+                 coordinate < kFp3CoordinatesV1;
+                 ++coordinate) {
+                const Fp3 coordinate_value =
+                    gf::Add(
+                        cur[
+                            l.quotient_tape_limb[
+                                2 * coordinate]],
+                        gf::Mul(
+                            cur[
+                                l.quotient_tape_limb[
+                                    2 * coordinate + 1]],
+                            Fp3::FromFp(two32)));
+                reconstructed = gf::Add(
+                    reconstructed,
+                    gf::Mul(
+                        coordinate_value,
+                        basis[coordinate]));
+            }
+            return gf::Sub(
+                cur[l.quotient_tape_value],
+                reconstructed);
+        });
+    AddConstraint(
+        out.cs,
+        "stage3.v11.deep_vm."
+        "quotient_tape_deep_value_join",
+        aq::AirKind::kEverywhere, 2,
+        [l](
+            const auto& cur,
+            const auto&) {
+            return gf::Mul(
+                cur[l.quotient_tape_deep_consumer],
+                gf::Sub(
+                    cur[l.current_value],
+                    cur[l.quotient_tape_value]));
+        });
+    AddConstraint(
+        out.cs,
+        "stage3.v11.deep_vm."
+        "quotient_tape_final_value_join",
+        aq::AirKind::kEverywhere, 2,
+        [l](
+            const auto& cur,
+            const auto&) {
+            return gf::Mul(
+                cur[l.quotient_identity],
+                gf::Sub(
+                    cur[l.quotient_value],
+                    cur[l.quotient_tape_value]));
+        });
+    AddConstraint(
+        out.cs,
+        "stage3.v11.deep_vm."
+        "quotient_tape_acceptance",
+        aq::AirKind::kEverywhere, 1,
+        [l](
+            const auto& cur,
+            const auto&) {
+            return gf::Sub(
+                cur[l.quotient_tape_accept],
+                cur[l.quotient_identity]);
+        });
 
     out.preprocessed_columns = {
         l.active, l.deep_term, l.deep_finalize,
@@ -1634,7 +1983,8 @@ ProductV1 BuildProductV1(
         l.operand_lhs, l.operand_rhs,
         l.program_end, l.vm_start, l.vm_chain,
         l.vm_to_quotient, l.air_lambda, l.selector,
-        l.y, l.zh, l.quotient_value,
+        l.y, l.zh,
+        l.quotient_tape_deep_consumer,
     };
     std::sort(
         out.preprocessed_columns.begin(),
@@ -1686,6 +2036,44 @@ ProductV1 BuildProductV1(
     out.lambda_accumulation_air_constrained = true;
     out.ordered_preprocessed_root_pinned =
         RootMatches(out, out.columns);
+    const auto is_preprocessed =
+        [&out](uint32_t column) {
+            return std::find(
+                       out.preprocessed_columns.begin(),
+                       out.preprocessed_columns.end(),
+                       column) !=
+                out.preprocessed_columns.end();
+        };
+    out.quotient_tape_cells_ordinary =
+        !is_preprocessed(l.quotient_value) &&
+        !is_preprocessed(l.quotient_tape_value) &&
+        !is_preprocessed(l.quotient_tape_accept);
+    for (uint32_t limb = 0;
+         limb < kFp3TapeLimbsV1;
+         ++limb) {
+        out.quotient_tape_cells_ordinary =
+            out.quotient_tape_cells_ordinary &&
+            !is_preprocessed(
+                l.quotient_tape_limb[limb]);
+        for (uint32_t bit = 0;
+             bit < kU32TapeBitsV1;
+             ++bit) {
+            out.quotient_tape_cells_ordinary =
+                out.quotient_tape_cells_ordinary &&
+                !is_preprocessed(
+                    l.quotient_tape_bit[limb][bit]);
+        }
+    }
+    out.quotient_tape_u32_canonical = true;
+    out.quotient_tape_value_reconstructed = true;
+    out.quotient_tape_fixed_offsets_r0_bound =
+        is_preprocessed(l.source_address) &&
+        is_preprocessed(
+            l.quotient_tape_deep_consumer) &&
+        out.ordered_preprocessed_root_pinned;
+    out.quotient_tape_all_consumers_joined =
+        true;
+    out.quotient_tape_acceptance_constrained = true;
     out.same_parent_decoder_aliases = false;
     out.recursive_authority_ready = false;
     out.valid =
@@ -1703,10 +2091,17 @@ ProductV1 BuildProductV1(
         out.lambda_accumulation_air_constrained &&
         out.exact_program_root_checked &&
         out.ordered_preprocessed_root_pinned &&
+        out.quotient_tape_cells_ordinary &&
+        out.quotient_tape_u32_canonical &&
+        out.quotient_tape_value_reconstructed &&
+        out.quotient_tape_fixed_offsets_r0_bound &&
+        out.quotient_tape_all_consumers_joined &&
+        out.quotient_tape_acceptance_constrained &&
         !out.same_parent_decoder_aliases &&
         !out.recursive_authority_ready;
     out.note = out.valid
         ? "stage3:v11_deep_vm:bounded_air_complete;"
+          "quotient_tape_value_bus_complete;"
           "same_parent_decoder_alias_pending"
         : "stage3:v11_deep_vm:invalid:violations=" +
             std::to_string(out.violations) +
