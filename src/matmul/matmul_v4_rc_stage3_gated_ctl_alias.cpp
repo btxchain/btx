@@ -242,16 +242,28 @@ bool BuildConstraintSystemV1(
         spec.challenges.alpha2);
 
     for (const auto& lane :
-         {std::tuple<uint32_t, uint32_t, uint32_t, const char*>{
+         {std::tuple<
+              uint32_t, uint32_t, uint32_t,
+              const char*, const char*, const char*, const char*>{
               col::INVERSE1, col::TERM1, col::RUNNING1,
-              "gated_ctl.lane1"},
-          std::tuple<uint32_t, uint32_t, uint32_t, const char*>{
+              "gated_ctl.lane1.term",
+              "gated_ctl.lane1.first",
+              "gated_ctl.lane1.transition",
+              "gated_ctl.lane1.last"},
+          std::tuple<
+              uint32_t, uint32_t, uint32_t,
+              const char*, const char*, const char*, const char*>{
               col::INVERSE2, col::TERM2, col::RUNNING2,
-              "gated_ctl.lane2"}}) {
-        const auto [inverse, term, running, prefix] = lane;
+              "gated_ctl.lane2.term",
+              "gated_ctl.lane2.first",
+              "gated_ctl.lane2.transition",
+              "gated_ctl.lane2.last"}}) {
+        const auto [
+            inverse, term, running, term_name, first_name,
+            transition_name, last_name] = lane;
         Add(
             out,
-            (std::string(prefix) + ".term").c_str(),
+            term_name,
             aq::AirKind::kEverywhere, 2,
             [base, inverse, term](
                 const std::vector<Fp3>& row,
@@ -264,7 +276,7 @@ bool BuildConstraintSystemV1(
             });
         Add(
             out,
-            (std::string(prefix) + ".first").c_str(),
+            first_name,
             aq::AirKind::kFirstRow, 1,
             [base, running](
                 const std::vector<Fp3>& row,
@@ -273,7 +285,7 @@ bool BuildConstraintSystemV1(
             });
         Add(
             out,
-            (std::string(prefix) + ".transition").c_str(),
+            transition_name,
             aq::AirKind::kTransition, 1,
             [base, term, running](
                 const std::vector<Fp3>& row,
@@ -290,7 +302,7 @@ bool BuildConstraintSystemV1(
             : spec.expected_terminal.alpha2_sum;
         Add(
             out,
-            (std::string(prefix) + ".last").c_str(),
+            last_name,
             aq::AirKind::kLastRow, 1,
             [base, term, running, expected](
                 const std::vector<Fp3>& row,

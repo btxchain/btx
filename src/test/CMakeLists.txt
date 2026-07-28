@@ -148,6 +148,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_coupled_missing_relations_tests.cpp
   matmul_v4_rc_stage3_coupled_signed_range_stream_tests.cpp
   matmul_v4_rc_stage3_gated_ctl_alias_tests.cpp
+  matmul_v4_rc_stage3_coupled_gemm_range_ctl_v3_tests.cpp
   matmul_v4_rc_stage3_coupled_gemm_product_tests.cpp
   matmul_v4_rc_stage3_coupled_initial_state_product_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_composition_tests.cpp

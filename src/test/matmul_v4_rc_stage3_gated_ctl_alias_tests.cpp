@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_gated_ctl_alias.h>
 #include <matmul/matmul_v4_rc_air_recurse.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -185,6 +186,48 @@ BOOST_AUTO_TEST_CASE(rejects_selector_address_terminal_and_challenge_attacks)
         matmul::v4::rc::air_recurse::
             CountWitnessViolationsOnH(cs, witness.columns),
         0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    constraint_system_commitment_is_stable_across_allocator_churn)
+{
+    const auto relation = Relation();
+    const auto spec = Spec(1);
+    gated::LayoutV1 first_layout;
+    aq::AirConstraintSystem<Fp3> first;
+    std::string why;
+    BOOST_REQUIRE(gated::BuildConstraintSystemV1(
+        relation, spec, first, first_layout, &why));
+    const uint256 expected =
+        rc::recursive_hierarchy::
+            ComputeHierarchyConstraintSystemCommitmentV1(first);
+    BOOST_REQUIRE(!expected.IsNull());
+
+    for (uint32_t round = 0; round < 64; ++round) {
+        std::vector<std::string> churn;
+        churn.reserve(1024);
+        for (uint32_t i = 0; i < 1024; ++i) {
+            churn.push_back(
+                "allocator-churn-" +
+                std::to_string(round) + "-" +
+                std::to_string(i) +
+                std::string(64, 'x'));
+        }
+
+        gated::LayoutV1 rebuilt_layout;
+        aq::AirConstraintSystem<Fp3> rebuilt;
+        BOOST_REQUIRE(gated::BuildConstraintSystemV1(
+            relation, spec, rebuilt,
+            rebuilt_layout, &why));
+        BOOST_CHECK(
+            rc::recursive_hierarchy::
+                ComputeHierarchyConstraintSystemCommitmentV1(
+                    rebuilt) == expected);
+        BOOST_CHECK(
+            rc::recursive_hierarchy::
+                ComputeHierarchyConstraintSystemCommitmentV1(
+                    first) == expected);
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()
