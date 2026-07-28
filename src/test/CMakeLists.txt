@@ -207,7 +207,10 @@ add_executable(test_btx
   matmul_v4_rc_stage3_v13_occurrence_manifest_tests.cpp
   matmul_v4_rc_stage3_v13_derived_hash_air_tests.cpp
   matmul_v4_rc_stage3_v13_selection_query_air_tests.cpp
+  matmul_v4_rc_stage3_v13_v14_abi_logup_join_tests.cpp
   matmul_v4_rc_stage3_v14_event_output_export_air_tests.cpp
+  matmul_v4_rc_stage3_v14_selection_fused_join_tests.cpp
+  matmul_v4_rc_stage3_multirow_v11_acceptance_bytecode_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_backend_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_parent_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
