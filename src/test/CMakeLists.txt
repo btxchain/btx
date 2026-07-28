@@ -155,6 +155,8 @@ add_executable(test_btx
   matmul_v4_rc_stage3_global_soundness_ledger_tests.cpp
   matmul_v4_rc_stage3_universal_topology_tests.cpp
   matmul_v4_rc_stage3_universal_two_child_parent_tests.cpp
+  matmul_v4_rc_stage3_canonical_parent_consensus_tests.cpp
+  matmul_v4_rc_stage3_canonical_parent_production_verifier_tests.cpp
   matmul_v4_rc_stage3_coupled_exchange_permutation_product_tests.cpp
   matmul_v4_rc_stage3_coupled_extract_product_tests.cpp
   matmul_v4_rc_stage3_coupled_mix_product_tests.cpp
