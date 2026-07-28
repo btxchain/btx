@@ -1582,7 +1582,567 @@ void AddGatedPhaseConstraint(
         });
 }
 
+bool CanonicalFp3V1(const Fp3& value)
+{
+    return value.c0 < gf::kP &&
+        value.c1 < gf::kP &&
+        value.c2 < gf::kP;
+}
+
+bool FitsU32V1(size_t value)
+{
+    return value <=
+        std::numeric_limits<uint32_t>::max();
+}
+
+bool CanonicalFriDigestV1(
+    const Fri3AlgDigest& digest)
+{
+    return std::all_of(
+        digest.begin(), digest.end(),
+        [](gf::Fp value) {
+            return value < gf::kP;
+        });
+}
+
+bool SameFp3VectorV1(
+    const std::vector<Fp3>& left,
+    const std::vector<Fp3>& right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (uint32_t index = 0;
+         index < left.size(); ++index) {
+        if (!CanonicalFp3V1(left[index]) ||
+            !CanonicalFp3V1(right[index]) ||
+            !gf::Eq(left[index], right[index])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameDigestVectorV1(
+    const std::vector<Fri3AlgDigest>& left,
+    const std::vector<Fri3AlgDigest>& right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (uint32_t index = 0;
+         index < left.size(); ++index) {
+        if (!CanonicalFriDigestV1(left[index]) ||
+            !CanonicalFriDigestV1(right[index]) ||
+            left[index] != right[index]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void AppendU32V1(
+    std::vector<gf::Fp>& input,
+    uint32_t value)
+{
+    input.push_back(gf::FromU64(value));
+}
+
+void AppendU64SplitV1(
+    std::vector<gf::Fp>& input,
+    uint64_t value)
+{
+    AppendU32V1(
+        input,
+        static_cast<uint32_t>(value));
+    AppendU32V1(
+        input,
+        static_cast<uint32_t>(value >> 32));
+}
+
+void AppendUint256U32V1(
+    std::vector<gf::Fp>& input,
+    const uint256& value)
+{
+    for (uint32_t word = 0; word < 4;
+         ++word) {
+        AppendU64SplitV1(
+            input, value.GetUint64(word));
+    }
+}
+
+bool AppendFp3V1(
+    std::vector<gf::Fp>& input,
+    const Fp3& value)
+{
+    if (!CanonicalFp3V1(value)) {
+        return false;
+    }
+    input.push_back(value.c0);
+    input.push_back(value.c1);
+    input.push_back(value.c2);
+    return true;
+}
+
+bool AppendFriDigestV1(
+    std::vector<gf::Fp>& input,
+    const Fri3AlgDigest& digest)
+{
+    if (!CanonicalFriDigestV1(digest)) {
+        return false;
+    }
+    input.insert(
+        input.end(),
+        digest.begin(), digest.end());
+    return true;
+}
+
+uint256 CommitTraceOpeningsV1(
+    const AuthenticatedTraceOpeningsV1& receipt)
+{
+    if (!FitsU32V1(
+            receipt.base_column_indices.size())) {
+        return {};
+    }
+    std::vector<gf::Fp> input;
+    input.reserve(64);
+    AppendU32V1(input, 0x55544f31U); // 'UTO1'
+    AppendU32V1(input, receipt.version);
+    AppendU32V1(input, receipt.trace_rows);
+    AppendU32V1(
+        input,
+        static_cast<uint32_t>(
+            receipt.base_column_indices.size()));
+    for (uint32_t column :
+         receipt.base_column_indices) {
+        AppendU32V1(input, column);
+    }
+    AppendU32V1(
+        input,
+        static_cast<uint32_t>(
+            receipt.groups.size()));
+    for (const auto& group : receipt.groups) {
+        if (!FitsU32V1(group.rows.size())) {
+            return {};
+        }
+        AppendU32V1(
+            input,
+            static_cast<uint8_t>(
+                group.role));
+        AppendU32V1(input, group.first_column);
+        AppendU32V1(input, group.column_count);
+        AppendU32V1(input, group.n_leaves);
+        AppendUint256U32V1(input, group.root);
+        AppendU32V1(
+            input,
+            static_cast<uint32_t>(
+                group.rows.size()));
+        for (const auto& row : group.rows) {
+            if (!FitsU32V1(
+                    row.values.size()) ||
+                !FitsU32V1(
+                    row.siblings.size()) ||
+                !FitsU32V1(
+                    row.next_values.size()) ||
+                !FitsU32V1(
+                    row.next_siblings.size())) {
+                return {};
+            }
+            AppendU32V1(
+                input, row.query_ordinal);
+            AppendU32V1(
+                input, row.query_index);
+            AppendU32V1(
+                input,
+                static_cast<uint32_t>(
+                    row.values.size()));
+            for (const auto& value :
+                 row.values) {
+                if (!AppendFp3V1(
+                        input, value)) {
+                    return {};
+                }
+            }
+            AppendU32V1(
+                input,
+                static_cast<uint32_t>(
+                    row.siblings.size()));
+            for (const auto& digest :
+                 row.siblings) {
+                if (!AppendFriDigestV1(
+                        input, digest)) {
+                    return {};
+                }
+            }
+            AppendU32V1(
+                input, row.next_query_index);
+            AppendU32V1(
+                input,
+                static_cast<uint32_t>(
+                    row.next_values.size()));
+            for (const auto& value :
+                 row.next_values) {
+                if (!AppendFp3V1(
+                        input, value)) {
+                    return {};
+                }
+            }
+            AppendU32V1(
+                input,
+                static_cast<uint32_t>(
+                    row.next_siblings.size()));
+            for (const auto& digest :
+                 row.next_siblings) {
+                if (!AppendFriDigestV1(
+                        input, digest)) {
+                    return {};
+                }
+            }
+        }
+    }
+    const auto digest =
+        alg_hash::SpongeHashFp(input);
+    return Fri3AlgDigestToUint256({
+        digest[0], digest[1],
+        digest[2], digest[3]});
+}
+
+std::array<Fp3, kDecoderChallengeColumnsV1>
+DeriveDecoderCarryChallengesInternalV1(
+    const uint256& tuple_precommit_root)
+{
+    std::array<
+        Fp3,
+        kDecoderChallengeColumnsV1> out{};
+    if (tuple_precommit_root.IsNull()) {
+        return out;
+    }
+    std::vector<gf::Fp> prefix;
+    prefix.reserve(13);
+    AppendUint256U32V1(
+        prefix, tuple_precommit_root);
+    AppendU32V1(prefix, 0x55444a32U); // 'UDJ2'
+    for (uint32_t lane = 0;
+         lane < out.size(); ++lane) {
+        bool selected = false;
+        for (uint32_t attempt = 0;
+             attempt < 32; ++attempt) {
+            auto input = prefix;
+            AppendU32V1(input, lane);
+            AppendU32V1(input, attempt);
+            const auto digest =
+                alg_hash::SpongeHashFp(input);
+            const Fp3 candidate{
+                digest[0], digest[1],
+                digest[2]};
+            const bool pair_collision =
+                (lane == 1 &&
+                 gf::Eq(candidate, out[0])) ||
+                (lane == 3 &&
+                 gf::Eq(candidate, out[2]));
+            if (!gf::IsZero(candidate) &&
+                !pair_collision) {
+                out[lane] = candidate;
+                selected = true;
+                break;
+            }
+        }
+        if (!selected) return {};
+    }
+    return out;
+}
+
 } // namespace
+
+uint256
+ComputeAuthenticatedTraceOpeningReceiptRootV1(
+    const AuthenticatedTraceOpeningsV1& receipt)
+{
+    return CommitTraceOpeningsV1(receipt);
+}
+
+AuthenticatedTraceOpeningsV1
+BuildAuthenticatedTraceOpeningsV1(
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    AuthenticatedTraceOpeningsV1 out;
+    out.trace_rows = proof.trace_rows;
+    out.base_column_indices =
+        proof.base_column_indices;
+    if (proof.version != 1 ||
+        proof.trace_rows < 2 ||
+        proof.batch.groups.size() != 3 ||
+        proof.batch.queries.empty() ||
+        proof.next_trace_group_rows.size() !=
+            proof.batch.queries.size()) {
+        out.note =
+            "stage3:v11_unified_openings:"
+            "proof_shape";
+        return out;
+    }
+    for (uint32_t group_index = 0;
+         group_index < out.groups.size();
+         ++group_index) {
+        const auto& source =
+            proof.batch.groups[group_index];
+        auto& group =
+            out.groups[group_index];
+        group.role = source.role;
+        group.first_column =
+            source.first_column;
+        group.column_count =
+            source.column_count;
+        group.n_leaves =
+            source.row_commit.n_leaves;
+        group.root =
+            Fri3AlgDigestToUint256(
+                source.row_commit.root);
+        group.rows.reserve(
+            proof.batch.queries.size());
+        for (uint32_t query_ordinal = 0;
+             query_ordinal <
+                 proof.batch.queries.size();
+             ++query_ordinal) {
+            const auto& query =
+                proof.batch.queries[
+                    query_ordinal];
+            if (query.group_rows.size() != 3 ||
+                proof.next_trace_group_rows[
+                    query_ordinal].size() != 2 ||
+                group.n_leaves == 0 ||
+                proof.trace_rows == 0 ||
+                group.n_leaves %
+                    proof.trace_rows != 0) {
+                out.note =
+                    "stage3:v11_unified_openings:"
+                    "query_shape";
+                return out;
+            }
+            const auto& current =
+                query.group_rows[group_index];
+            const auto& next =
+                proof.next_trace_group_rows[
+                    query_ordinal][
+                        group_index];
+            const uint32_t step =
+                group.n_leaves /
+                proof.trace_rows;
+            AuthenticatedTraceRowV1 row;
+            row.query_ordinal =
+                query_ordinal;
+            row.query_index = query.index;
+            row.values = current.values;
+            row.siblings = current.siblings;
+            row.next_query_index =
+                (query.index + step) %
+                group.n_leaves;
+            row.next_values = next.values;
+            row.next_siblings =
+                next.siblings;
+            group.rows.push_back(
+                std::move(row));
+        }
+    }
+    out.opening_receipt_root =
+        CommitTraceOpeningsV1(out);
+    std::string why;
+    out.valid =
+        !out.opening_receipt_root.IsNull() &&
+        VerifyAuthenticatedTraceOpeningsV1(
+            out, proof, &why);
+    out.every_consumed_cell_merkle_authenticated =
+        out.valid;
+    out.exact_query_occurrence_order =
+        out.valid;
+    out.canonical_fp3_and_digest_cells =
+        out.valid;
+    out.query_schedule_fiat_shamir_verified =
+        false;
+    out.note = out.valid
+        ? "stage3:v11_unified_openings:"
+          "r0_rdep_current_next_authenticated"
+        : "stage3:v11_unified_openings:" +
+          why;
+    return out;
+}
+
+bool VerifyAuthenticatedTraceOpeningsV1(
+    const AuthenticatedTraceOpeningsV1& receipt,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    std::string* why)
+{
+    const auto fail = [why](
+                          const std::string& detail) {
+        if (why != nullptr) {
+            *why =
+                "stage3:v11_unified_openings:" +
+                detail;
+        }
+        return false;
+    };
+    if (receipt.version != kVersionV1 ||
+        receipt.trace_rows !=
+            proof.trace_rows ||
+        receipt.trace_rows < 2 ||
+        receipt.base_column_indices !=
+            proof.base_column_indices ||
+        proof.version != 1 ||
+        proof.batch.groups.size() != 3 ||
+        proof.batch.queries.empty() ||
+        proof.next_trace_group_rows.size() !=
+            proof.batch.queries.size() ||
+        receipt.opening_receipt_root.IsNull() ||
+        CommitTraceOpeningsV1(receipt) !=
+            receipt.opening_receipt_root) {
+        return fail("receipt_shape_or_root");
+    }
+    const std::array<
+        Fri3AlgMultiRowGroupRole, 2>
+        expected_roles{{
+            Fri3AlgMultiRowGroupRole::
+                MainTrace,
+            Fri3AlgMultiRowGroupRole::
+                AuxiliaryTrace,
+        }};
+    for (uint32_t group_index = 0;
+         group_index < receipt.groups.size();
+         ++group_index) {
+        const auto& group =
+            receipt.groups[group_index];
+        const auto& proof_group =
+            proof.batch.groups[group_index];
+        const auto root =
+            Fri3AlgDigestFromUint256(
+                group.root);
+        if (group.role !=
+                expected_roles[group_index] ||
+            group.role != proof_group.role ||
+            group.first_column !=
+                proof_group.first_column ||
+            group.column_count !=
+                proof_group.column_count ||
+            group.column_count == 0 ||
+            group.n_leaves !=
+                proof_group.row_commit.n_leaves ||
+            group.root !=
+                Fri3AlgDigestToUint256(
+                    proof_group
+                        .row_commit.root) ||
+            !root.has_value() ||
+            !CanonicalFriDigestV1(*root) ||
+            group.rows.size() !=
+                proof.batch.queries.size() ||
+            group.n_leaves < 2 ||
+            (group.n_leaves &
+             (group.n_leaves - 1)) != 0 ||
+            group.n_leaves %
+                receipt.trace_rows != 0) {
+            return fail("group_shape_or_root");
+        }
+        uint32_t path_len = 0;
+        for (uint32_t leaves =
+                 group.n_leaves;
+             leaves > 1; leaves >>= 1) {
+            ++path_len;
+        }
+        const uint32_t step =
+            group.n_leaves /
+            receipt.trace_rows;
+        for (uint32_t query_ordinal = 0;
+             query_ordinal <
+                 group.rows.size();
+             ++query_ordinal) {
+            const auto& row =
+                group.rows[query_ordinal];
+            const auto& query =
+                proof.batch.queries[
+                    query_ordinal];
+            if (query.group_rows.size() != 3 ||
+                proof.next_trace_group_rows[
+                    query_ordinal].size() != 2) {
+                return fail("proof_query_shape");
+            }
+            const auto& current =
+                query.group_rows[
+                    group_index];
+            const auto& next =
+                proof.next_trace_group_rows[
+                    query_ordinal][
+                        group_index];
+            const uint32_t expected_next =
+                (query.index + step) %
+                group.n_leaves;
+            if (row.query_ordinal !=
+                    query_ordinal ||
+                row.query_index !=
+                    query.index ||
+                row.query_index >=
+                    group.n_leaves ||
+                row.next_query_index !=
+                    expected_next ||
+                row.values.size() !=
+                    group.column_count ||
+                row.next_values.size() !=
+                    group.column_count ||
+                row.siblings.size() !=
+                    path_len ||
+                row.next_siblings.size() !=
+                    path_len ||
+                !SameFp3VectorV1(
+                    row.values,
+                    current.values) ||
+                !SameFp3VectorV1(
+                    row.next_values,
+                    next.values) ||
+                !SameDigestVectorV1(
+                    row.siblings,
+                    current.siblings) ||
+                !SameDigestVectorV1(
+                    row.next_siblings,
+                    next.siblings)) {
+                return fail(
+                    "query_occurrence_or_cells");
+            }
+            const auto current_leaf =
+                alg_hash::LeafHashRow(
+                    row.values,
+                    row.query_index);
+            const auto next_leaf =
+                alg_hash::LeafHashRow(
+                    row.next_values,
+                    row.next_query_index);
+            if (!Fri3AlgVerifyPath(
+                    current_leaf,
+                    row.query_index,
+                    row.siblings,
+                    *root,
+                    group.n_leaves) ||
+                !Fri3AlgVerifyPath(
+                    next_leaf,
+                    row.next_query_index,
+                    row.next_siblings,
+                    *root,
+                    group.n_leaves)) {
+                return fail("merkle_path");
+            }
+        }
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:v11_unified_openings:"
+            "authenticated";
+    }
+    return true;
+}
+
+std::array<Fp3, kDecoderChallengeColumnsV1>
+DeriveDecoderCarryChallengesV1(
+    const uint256& tuple_precommit_root)
+{
+    return
+        DeriveDecoderCarryChallengesInternalV1(
+            tuple_precommit_root);
+}
 
 uint256 ComputeParentJoinStatementManifestR0RootV1(
     const pj::ProductV1& parent_join,
@@ -3217,6 +3777,395 @@ bool AppendAcceptanceOutputConstraintsV1(
         std::make_move_iterator(
             adapter.constraints.end()));
     return true;
+}
+
+uint256 ComputeNormalizedOpeningReceiptRootV1(
+    const NormalizedOpeningReceiptV1& receipt)
+{
+    std::vector<gf::Fp> input;
+    input.reserve(256);
+    AppendU32V1(input, 0x554f5231U); // 'UOR1'
+    AppendU32V1(input, receipt.version);
+    AppendU32V1(input, receipt.range.ordinal);
+    AppendU32V1(
+        input, receipt.range.first_query);
+    AppendU32V1(
+        input, receipt.range.query_count);
+    AppendUint256U32V1(
+        input, receipt.child_statement_root);
+    if (!CanonicalDigest(
+            receipt.child_program_root)) {
+        return {};
+    }
+    input.insert(
+        input.end(),
+        receipt.child_program_root.begin(),
+        receipt.child_program_root.end());
+    for (uint32_t index = 0;
+         index < kPhasesV1; ++index) {
+        if (!CanonicalDigest(
+                receipt.phase_program_root[
+                    index])) {
+            return {};
+        }
+        input.insert(
+            input.end(),
+            receipt.phase_program_root[
+                index].begin(),
+            receipt.phase_program_root[
+                index].end());
+        AppendUint256U32V1(
+            input,
+            receipt.phase_precommit_root[
+                index]);
+        const auto& shape =
+            receipt.phases[index];
+        AppendU32V1(
+            input,
+            static_cast<uint8_t>(
+                shape.phase));
+        AppendU32V1(input, shape.first_row);
+        AppendU32V1(input, shape.rows);
+        AppendU32V1(input, shape.columns);
+        AppendU32V1(input, shape.constraints);
+        AppendU32V1(
+            input,
+            shape.preprocessed_columns);
+        AppendU32V1(
+            input, shape.max_degree);
+    }
+    AppendUint256U32V1(
+        input,
+        receipt.trace_openings
+            .opening_receipt_root);
+    const auto digest =
+        alg_hash::SpongeHashFp(input);
+    return Fri3AlgDigestToUint256({
+        digest[0], digest[1],
+        digest[2], digest[3]});
+}
+
+NormalizedOpeningReceiptV1
+BuildNormalizedOpeningReceiptV1(
+    const ProductV1& product,
+    const alg_hash::Digest& child_program_root,
+    const uint256& child_statement_root,
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    NormalizedOpeningReceiptV1 out;
+    out.range = product.range;
+    out.child_statement_root =
+        child_statement_root;
+    out.child_program_root =
+        child_program_root;
+    out.phase_program_root = {{
+        product.parent_join_program_root,
+        product.merkle_hash_program_root,
+        product.merkle_fold_program_root,
+        product.deep_vm_program_root,
+        product.decoder_program_root,
+    }};
+    out.phases = product.phases;
+    out.trace_openings =
+        BuildAuthenticatedTraceOpeningsV1(
+            proof);
+    out.phase_precommit_root[
+        static_cast<uint32_t>(
+            PhaseV1::ParentJoin)] =
+        product
+            .parent_join_statement_manifest_r0_root;
+    out.phase_precommit_root[
+        static_cast<uint32_t>(
+            PhaseV1::DeepVm)] =
+        product
+            .deep_vm_register_precommit_root;
+    out.phase_precommit_root[
+        static_cast<uint32_t>(
+            PhaseV1::Decoder)] =
+        product.decoder
+            .join_tuple_precommit_root;
+    for (const auto& pin :
+         product.decoder.child_roots) {
+        if (pin.kind == 2 &&
+            pin.index == 0) {
+            out.phase_precommit_root[
+                static_cast<uint32_t>(
+                    PhaseV1::MerkleHash)] =
+                pin.root;
+        } else if (
+            pin.kind == 3 &&
+            pin.index == 0) {
+            out.phase_precommit_root[
+                static_cast<uint32_t>(
+                    PhaseV1::MerkleFold)] =
+                pin.root;
+        }
+    }
+    out.receipt_root =
+        ComputeNormalizedOpeningReceiptRootV1(
+            out);
+    out.canonical_programs_bound =
+        product
+            .phase_constraint_systems_canonical_bytecode ==
+                kPhasesV1 &&
+        product.parent_join_program_root_recomputed &&
+        product.merkle_hash_program_root_recomputed &&
+        product.merkle_fold_program_root_recomputed &&
+        product.deep_vm_program_root_recomputed &&
+        product.decoder_program_root_recomputed;
+    // Binding a root in the receipt is not proof that the normalized trace
+    // owns that root. Keep both challenge carries false until root limbs are
+    // exported by their phases and opening-authenticated here.
+    out.deep_vm_challenge_replayed = false;
+    out.decoder_challenge_replayed = false;
+    out.verifier_input_excludes_child_proof =
+        true;
+    out.every_consumed_cell_opening_authenticated =
+        out.trace_openings.valid;
+    out.complete_phase_verifier_consumption =
+        false;
+    out.complete_child_receipt_consumption =
+        false;
+    const bool all_phase_roots =
+        std::all_of(
+            out.phase_precommit_root.begin(),
+            out.phase_precommit_root.end(),
+            [](const uint256& root) {
+                return !root.IsNull();
+            });
+    out.valid_foundation =
+        !out.receipt_root.IsNull() &&
+        !out.child_statement_root.IsNull() &&
+        CanonicalDigest(
+            out.child_program_root) &&
+        DigestNonzero(
+            out.child_program_root) &&
+        all_phase_roots &&
+        out.canonical_programs_bound &&
+        out.verifier_input_excludes_child_proof &&
+        out.every_consumed_cell_opening_authenticated &&
+        !out.complete_phase_verifier_consumption &&
+        !out.complete_child_receipt_consumption;
+    if (out.valid_foundation) {
+        const auto verified =
+            VerifyNormalizedOpeningReceiptV1(
+                out, proof);
+        out.valid_foundation =
+            verified.accepted_foundation;
+    }
+    out.note = out.valid_foundation
+        ? "stage3:v11_unified_opening_receipt:"
+          "raw_child_excluded;current_next_paths_authenticated;"
+          "phase_verifier_consumption_open"
+        : "stage3:v11_unified_opening_receipt:"
+          "foundation_failure";
+    return out;
+}
+
+NormalizedOpeningVerifyResultV1
+VerifyNormalizedOpeningReceiptV1(
+    const NormalizedOpeningReceiptV1& receipt,
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    NormalizedOpeningVerifyResultV1 out;
+    auto fail = [&out](
+                    const std::string& detail) {
+        out.accepted_foundation = false;
+        out.note =
+            "stage3:v11_unified_opening_receipt:"
+            "verify:" + detail;
+        return out;
+    };
+    if (receipt.version != kVersionV1 ||
+        receipt.child_statement_root.IsNull() ||
+        !CanonicalDigest(
+            receipt.child_program_root) ||
+        !DigestNonzero(
+            receipt.child_program_root) ||
+        receipt.receipt_root.IsNull() ||
+        ComputeNormalizedOpeningReceiptRootV1(
+            receipt) !=
+                receipt.receipt_root) {
+        return fail("receipt_root_or_statement");
+    }
+    std::string opening_why;
+    out.opening_paths_verified =
+        VerifyAuthenticatedTraceOpeningsV1(
+            receipt.trace_openings,
+            proof, &opening_why);
+    if (!out.opening_paths_verified) {
+        return fail(opening_why);
+    }
+
+    cb::ProgramTable parent_program;
+    np::ManifestV1 parent_manifest;
+    std::string program_why;
+    if (!np::BuildCanonicalProgramTableV1(
+            parent_program,
+            &parent_manifest,
+            &program_why)) {
+        return fail(
+            "parent_program:" +
+            program_why);
+    }
+    const std::array<cb::ProgramTable, kPhasesV1>
+        programs{{
+            parent_program,
+            BuildMerkleHashProgramTableV1(),
+            BuildMerkleFoldProgramTableV1(),
+            BuildDeepVmProgramTableV1(),
+            BuildDecoderProgramTableV1(),
+        }};
+    const std::array<uint32_t, kPhasesV1>
+        expected_manifest_columns{{
+            kParentJoinStatementScheduleColumnsV1,
+            0,
+            0,
+            kDeepVmStatementScheduleColumnsV1,
+            11,
+        }};
+    uint64_t active_rows = 0;
+    uint32_t data_columns = 0;
+    uint64_t manifest_columns = 0;
+    out.canonical_programs_verified = true;
+    for (uint32_t index = 0;
+         index < kPhasesV1; ++index) {
+        const auto root =
+            cb::CommitProgramTableAlgHash(
+                programs[index]);
+        const auto& shape =
+            receipt.phases[index];
+        uint32_t program_max_degree = 0;
+        for (const auto& program :
+             programs[index].programs) {
+            program_max_degree =
+                std::max(
+                    program_max_degree,
+                    program.declared_degree);
+        }
+        const bool power_of_two =
+            shape.rows >= 2 &&
+            (shape.rows &
+             (shape.rows - 1)) == 0;
+        out.canonical_programs_verified =
+            out.canonical_programs_verified &&
+            cb::ValidateProgramTable(
+                programs[index],
+                &program_why) &&
+            cb::ProgramTableIsChallengeIndependent(
+                programs[index]) &&
+            SameDigest(
+                root,
+                receipt.phase_program_root[
+                    index]) &&
+            static_cast<uint32_t>(
+                shape.phase) == index &&
+            shape.first_row == active_rows &&
+            power_of_two &&
+            shape.columns ==
+                programs[index].current_width &&
+            shape.constraints ==
+                programs[index].programs.size() &&
+            shape.preprocessed_columns ==
+                expected_manifest_columns[index] &&
+            shape.max_degree ==
+                program_max_degree;
+        active_rows += shape.rows;
+        data_columns =
+            std::max(
+                data_columns,
+                shape.columns);
+        manifest_columns +=
+            shape.preprocessed_columns;
+    }
+    const uint64_t expected_trace_columns =
+        uint64_t{data_columns} +
+        4 * kPhasesV1 + 2 +
+        manifest_columns;
+    const uint64_t proof_trace_columns =
+        uint64_t{
+        proof.batch.groups[0]
+                .column_count} +
+        proof.batch.groups[1]
+            .column_count;
+    std::vector<uint32_t>
+        expected_base_columns;
+    expected_base_columns.reserve(
+        4 * kPhasesV1 + 1 +
+        manifest_columns);
+    const uint32_t active_column =
+        data_columns + 4 * kPhasesV1;
+    const uint32_t acceptance_column =
+        active_column + 1;
+    for (uint32_t column = data_columns;
+         column <= active_column; ++column) {
+        expected_base_columns.push_back(
+            column);
+    }
+    for (uint32_t column =
+             acceptance_column + 1;
+         column < expected_trace_columns;
+         ++column) {
+        expected_base_columns.push_back(
+            column);
+    }
+    const bool trace_power_of_two =
+        receipt.trace_openings.trace_rows >= 2 &&
+        (receipt.trace_openings.trace_rows &
+         (receipt.trace_openings.trace_rows - 1)) ==
+            0;
+    if (!out.canonical_programs_verified ||
+        active_rows >
+            receipt.trace_openings.trace_rows ||
+        !trace_power_of_two ||
+        receipt.trace_openings.trace_rows >
+            kTraceRowsCapV1 ||
+        receipt.range.ordinal != 0 ||
+        receipt.range.first_query != 0 ||
+        receipt.range.query_count !=
+            kQ96QueriesV1 ||
+        expected_trace_columns !=
+            proof_trace_columns ||
+        expected_trace_columns >
+            std::numeric_limits<
+                uint32_t>::max() ||
+        receipt.trace_openings
+                .base_column_indices !=
+            expected_base_columns ||
+        proof.batch.groups[0].column_count !=
+            proof.base_column_indices.size() ||
+        proof.batch.groups[1].first_column !=
+            proof.batch.groups[0].column_count) {
+        return fail("canonical_program_or_phase_shape");
+    }
+    for (const auto& root :
+         receipt.phase_precommit_root) {
+        if (root.IsNull()) {
+            return fail("phase_precommit_root");
+        }
+    }
+    // Do not derive verifier challenges from receipt-only roots. The next
+    // phase must expose each root as proof-owned cells and authenticate those
+    // cells in the trace opening receipt before replay becomes a claim.
+    out.challenge_replay_verified = false;
+    out.raw_child_proof_excluded = true;
+    out.full_split_rap_transcript_verified =
+        false;
+    out.complete_phase_verifier_consumption =
+        false;
+    out.complete_child_receipt_consumption =
+        false;
+    out.accepted_foundation =
+        out.opening_paths_verified &&
+        out.canonical_programs_verified &&
+        out.raw_child_proof_excluded &&
+        !out.complete_phase_verifier_consumption &&
+        !out.complete_child_receipt_consumption;
+    out.note =
+        "stage3:v11_unified_opening_receipt:"
+        "verify:authenticated_foundation;"
+        "root_alias_and_phase_verifier_consumption_open";
+    return out;
 }
 
 ProductV1 BuildProductV1(

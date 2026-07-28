@@ -58,6 +58,16 @@ inline constexpr uint32_t kDeepVmCanonicalConstraintsV1 =
          3);
 inline constexpr uint32_t kDeepVmStatementScheduleColumnsV1 =
     20 + kDeepVmSsaScheduleColumnsV1;
+inline constexpr uint32_t
+    kParentJoinStatementScheduleColumnsV1 =
+        3 +
+        pj::kPublicAbsorbSlotsV1 * 4 +
+        pj::kPublicFieldSlotsV1 * 7 +
+        pj::kCandidateDigestLimbsV1 * 3 +
+        2 + 2;
+static_assert(
+    kParentJoinStatementScheduleColumnsV1 ==
+    72);
 
 enum class PhaseV1 : uint8_t {
     ParentJoin = 0,
@@ -259,6 +269,153 @@ struct ProductV1 {
     bool valid_foundation{false};
     std::string note;
 };
+
+/**
+ * One trace-group opening copied from the normalized Split-RAP proof.
+ *
+ * These are coefficient-LDE rows, not host copies of H-domain witness rows.
+ * `VerifyAuthenticatedTraceOpeningsV1` recomputes every row leaf and Merkle
+ * path against `root`; consumers must use only cells in these authenticated
+ * rows.  Keeping the query occurrence ordinal prevents a with-replacement
+ * schedule from being silently deduplicated or reordered.
+ */
+struct AuthenticatedTraceRowV1 {
+    uint32_t query_ordinal{0};
+    uint32_t query_index{0};
+    std::vector<gf::Fp3> values;
+    std::vector<Fri3AlgDigest> siblings;
+    uint32_t next_query_index{0};
+    std::vector<gf::Fp3> next_values;
+    std::vector<Fri3AlgDigest> next_siblings;
+};
+
+struct AuthenticatedTraceGroupV1 {
+    Fri3AlgMultiRowGroupRole role{
+        Fri3AlgMultiRowGroupRole::MainTrace};
+    uint32_t first_column{0};
+    uint32_t column_count{0};
+    uint32_t n_leaves{0};
+    uint256 root{};
+    std::vector<AuthenticatedTraceRowV1> rows;
+};
+
+struct AuthenticatedTraceOpeningsV1 {
+    uint16_t version{kVersionV1};
+    uint32_t trace_rows{0};
+    std::vector<uint32_t> base_column_indices;
+    std::array<AuthenticatedTraceGroupV1, 2> groups{};
+    uint256 opening_receipt_root{};
+    bool every_consumed_cell_merkle_authenticated{false};
+    bool exact_query_occurrence_order{false};
+    bool canonical_fp3_and_digest_cells{false};
+    /**
+     * False here: only the complete Split-RAP/FRI verifier proves that these
+     * ordered indices are the Fiat-Shamir-selected query schedule.
+     */
+    bool query_schedule_fiat_shamir_verified{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] uint256
+ComputeAuthenticatedTraceOpeningReceiptRootV1(
+    const AuthenticatedTraceOpeningsV1& receipt);
+
+/**
+ * Extract and independently authenticate the R0 and Rdep query rows of a
+ * normalized proof.  The quotient group is deliberately excluded: it is
+ * checked by the full Split-RAP verifier and is not a source of phase input
+ * cells.
+ */
+[[nodiscard]] AuthenticatedTraceOpeningsV1
+BuildAuthenticatedTraceOpeningsV1(
+    const aq::AirQuotientSplitRapRowsProof& proof);
+
+/**
+ * Verify an opening receipt against the exact normalized proof that owns it.
+ * This performs no host callback and receives no backend child proof.
+ */
+[[nodiscard]] bool VerifyAuthenticatedTraceOpeningsV1(
+    const AuthenticatedTraceOpeningsV1& receipt,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    std::string* why = nullptr);
+
+/**
+ * Canonical Decoder carry challenges.  Arbitrary uint256 roots are absorbed
+ * as eight u32 limbs, never four reduced u64 field elements, closing the
+ * Goldilocks x <-> x+p transcript alias in the older Decoder helper.
+ */
+[[nodiscard]] std::array<gf::Fp3, kDecoderChallengeColumnsV1>
+DeriveDecoderCarryChallengesV1(
+    const uint256& tuple_precommit_root);
+
+/**
+ * Raw-child-proof-free descriptor for the normalized parent verifier.
+ *
+ * This receipt binds the exact authenticated trace openings, all five
+ * canonical phase programs, phase-local precommit-root metadata, the child
+ * statement and child ProgramTable root/range. The precommit roots remain
+ * binding-only metadata until proof-owned root cells are exported and
+ * authenticated by `trace_openings`; challenge-replay flags therefore stay
+ * false. It is intentionally not a recursive authority receipt yet: the
+ * remaining phase verifier chips must consume the authenticated cells and
+ * complete child receipts in the same parent proof.
+ */
+struct NormalizedOpeningReceiptV1 {
+    uint16_t version{kVersionV1};
+    rv::QueryRangeV1 range{};
+    uint256 child_statement_root{};
+    alg_hash::Digest child_program_root{};
+    std::array<alg_hash::Digest, kPhasesV1>
+        phase_program_root{};
+    std::array<uint256, kPhasesV1>
+        phase_precommit_root{};
+    std::array<PhaseShapeV1, kPhasesV1> phases{};
+    AuthenticatedTraceOpeningsV1 trace_openings{};
+    uint256 receipt_root{};
+    bool canonical_programs_bound{false};
+    bool deep_vm_challenge_replayed{false};
+    bool decoder_challenge_replayed{false};
+    bool verifier_input_excludes_child_proof{false};
+    bool every_consumed_cell_opening_authenticated{false};
+    /** False until all phase verifier chips consume the authenticated rows. */
+    bool complete_phase_verifier_consumption{false};
+    /** False until complete recursively verified child receipts are joined. */
+    bool complete_child_receipt_consumption{false};
+    bool valid_foundation{false};
+    std::string note;
+};
+
+[[nodiscard]] uint256 ComputeNormalizedOpeningReceiptRootV1(
+    const NormalizedOpeningReceiptV1& receipt);
+
+[[nodiscard]] NormalizedOpeningReceiptV1
+BuildNormalizedOpeningReceiptV1(
+    const ProductV1& product,
+    const alg_hash::Digest& child_program_root,
+    const uint256& child_statement_root,
+    const aq::AirQuotientSplitRapRowsProof& proof);
+
+struct NormalizedOpeningVerifyResultV1 {
+    std::array<gf::Fp3, kDeepVmChallengeColumnsV1>
+        deep_vm_challenge{};
+    std::array<gf::Fp3, kDecoderChallengeColumnsV1>
+        decoder_challenge{};
+    bool opening_paths_verified{false};
+    bool canonical_programs_verified{false};
+    bool challenge_replay_verified{false};
+    bool raw_child_proof_excluded{false};
+    bool full_split_rap_transcript_verified{false};
+    bool complete_phase_verifier_consumption{false};
+    bool complete_child_receipt_consumption{false};
+    bool accepted_foundation{false};
+    std::string note;
+};
+
+[[nodiscard]] NormalizedOpeningVerifyResultV1
+VerifyNormalizedOpeningReceiptV1(
+    const NormalizedOpeningReceiptV1& receipt,
+    const aq::AirQuotientSplitRapRowsProof& proof);
 
 /**
  * Reconstruct the two production acceptance constraints as canonical,

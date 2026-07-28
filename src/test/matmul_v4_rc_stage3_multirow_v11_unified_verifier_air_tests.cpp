@@ -29,6 +29,20 @@ uint256 H(uint32_t tag)
     return hash.GetHash();
 }
 
+uint256 RootWithLow64(uint64_t value)
+{
+    uint256 out;
+    for (uint32_t byte = 0;
+         byte < 8; ++byte) {
+        out.begin()[byte] =
+            static_cast<unsigned char>(
+                value >> (8 * byte));
+    }
+    // Keep the root non-null even for a zero low word.
+    out.begin()[8] = 1;
+    return out;
+}
+
 aq::AirConstraintSystem<gf::Fp3> TransitionAir()
 {
     aq::AirConstraintSystem<gf::Fp3> cs;
@@ -743,6 +757,185 @@ void InstallDecoderManifest(
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_multirow_v11_unified_verifier_air_tests)
+
+BOOST_AUTO_TEST_CASE(
+    normalized_trace_receipt_authenticates_every_consumed_current_and_next_cell)
+{
+    auto cs = TransitionAir();
+    auto columns = TransitionTrace();
+    // The counter is the proof-owned first epoch. The doubled counter and
+    // every auxiliary value remain in the dependent epoch.
+    const std::vector<uint32_t> base{0};
+    const auto honest =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, base,
+            uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        honest.ok, honest.note);
+    BOOST_REQUIRE(honest.division_exact);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            cs, honest.proof, base,
+            uint256::ONE, &why),
+        why);
+
+    const auto receipt =
+        BuildAuthenticatedTraceOpeningsV1(
+            honest.proof);
+    BOOST_REQUIRE_MESSAGE(
+        receipt.valid, receipt.note);
+    BOOST_CHECK(
+        receipt
+            .every_consumed_cell_merkle_authenticated);
+    BOOST_CHECK(
+        receipt.exact_query_occurrence_order);
+    BOOST_CHECK(
+        receipt
+            .canonical_fp3_and_digest_cells);
+    BOOST_CHECK(
+        !receipt
+             .query_schedule_fiat_shamir_verified);
+    BOOST_REQUIRE_MESSAGE(
+        VerifyAuthenticatedTraceOpeningsV1(
+            receipt, honest.proof, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(
+        receipt.groups.size(), 2U);
+    BOOST_REQUIRE_EQUAL(
+        receipt.groups[0].rows.size(),
+        honest.proof.batch.queries.size());
+    BOOST_REQUIRE_GT(
+        receipt.groups[0].rows.size(), 1U);
+
+    // Detached phase/group root: even a structurally valid field-native root
+    // from the sibling group cannot authenticate this group's openings.
+    auto detached = receipt;
+    detached.groups[0].root =
+        receipt.groups[1].root;
+    detached.opening_receipt_root =
+        ComputeAuthenticatedTraceOpeningReceiptRootV1(
+            detached);
+    BOOST_REQUIRE(
+        !detached.opening_receipt_root.IsNull());
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            detached, honest.proof, &why));
+
+    // A stale receipt root cannot be retained after substituting a committed
+    // group root or any opened cell.
+    auto stale = receipt;
+    stale.opening_receipt_root = H(9101);
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            stale, honest.proof, &why));
+
+    // Query occurrences are ordered and multiplicity-bearing. Reordering or
+    // omitting one is rejected even when all individual paths remain valid.
+    auto reordered = receipt;
+    std::swap(
+        reordered.groups[0].rows[0],
+        reordered.groups[0].rows[1]);
+    reordered.opening_receipt_root =
+        ComputeAuthenticatedTraceOpeningReceiptRootV1(
+            reordered);
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            reordered, honest.proof, &why));
+    auto omitted = receipt;
+    omitted.groups[0].rows.pop_back();
+    omitted.opening_receipt_root =
+        ComputeAuthenticatedTraceOpeningReceiptRootV1(
+            omitted);
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            omitted, honest.proof, &why));
+    auto omitted_next = receipt;
+    omitted_next.groups[0]
+        .rows[0].next_values.clear();
+    omitted_next.opening_receipt_root =
+        ComputeAuthenticatedTraceOpeningReceiptRootV1(
+            omitted_next);
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            omitted_next, honest.proof, &why));
+
+    // Goldilocks alias canary. LeafHashRow canonicalizes field lanes, so
+    // x+p would retain the same Merkle leaf absent the explicit canonical
+    // wire check in the receipt verifier.
+    const std::vector<gf::Fp3> canonical_zero{
+        gf::Fp3::Zero()};
+    auto noncanonical_zero = canonical_zero;
+    noncanonical_zero[0].c0 = gf::kP;
+    BOOST_CHECK(
+        alg_hash::LeafHashRow(
+            canonical_zero, 0) ==
+        alg_hash::LeafHashRow(
+            noncanonical_zero, 0));
+    auto aliased = receipt;
+    BOOST_REQUIRE(
+        !aliased.groups[0]
+             .rows[0].values.empty());
+    aliased.groups[0].rows[0]
+        .values[0].c0 = gf::kP;
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            aliased, honest.proof, &why));
+
+    // A receipt from one normalized proof cannot be transplanted onto a
+    // proof whose Fiat-Shamir query schedule was drawn under another seed.
+    const auto alternate =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, base, H(9102));
+    BOOST_REQUIRE_MESSAGE(
+        alternate.ok, alternate.note);
+    BOOST_REQUIRE(
+        alternate.division_exact);
+    BOOST_CHECK(
+        !VerifyAuthenticatedTraceOpeningsV1(
+            receipt, alternate.proof,
+            &why));
+
+    // The replacement Decoder transcript absorbs arbitrary roots as eight
+    // u32 lanes. Roots differing by exactly p in one u64 word therefore no
+    // longer collapse through FromU64 reduction.
+    const uint64_t x = 7;
+    const auto root_x =
+        RootWithLow64(x);
+    const auto root_x_plus_p =
+        RootWithLow64(x + gf::kP);
+    const auto challenge_x =
+        DeriveDecoderCarryChallengesV1(
+            root_x);
+    const auto challenge_x_plus_p =
+        DeriveDecoderCarryChallengesV1(
+            root_x_plus_p);
+    bool challenge_differs = false;
+    for (uint32_t lane = 0;
+         lane < challenge_x.size(); ++lane) {
+        challenge_differs =
+            challenge_differs ||
+            !gf::Eq(
+                challenge_x[lane],
+                challenge_x_plus_p[lane]);
+    }
+    BOOST_CHECK(challenge_differs);
+    for (const auto& challenge :
+         {challenge_x,
+          challenge_x_plus_p}) {
+        for (const auto& lane :
+             challenge) {
+            BOOST_CHECK(
+                lane.c0 < gf::kP);
+            BOOST_CHECK(
+                lane.c1 < gf::kP);
+            BOOST_CHECK(
+                lane.c2 < gf::kP);
+            BOOST_CHECK(
+                !gf::IsZero(lane));
+        }
+    }
+}
 
 BOOST_AUTO_TEST_CASE(
     acceptance_output_is_ordinary_and_proof_bound)
