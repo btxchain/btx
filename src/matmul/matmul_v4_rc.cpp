@@ -265,7 +265,9 @@ struct Phase1Result {
 };
 
 Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma,
-                                     const RCEpisodeParams& p, uint32_t tile_delta)
+                                     const RCEpisodeParams& p, uint32_t tile_delta,
+                                     uint32_t round_ordinal = 0,
+                                     RCEpisodeProofWitnessSink* proof_sink = nullptr)
 {
     // Q is per-round (freshness source that keeps each round's attention distinct).
     // K, V: DATACENTER shares them EPISODE-WIDE (sigma-derived) so the sublinear
@@ -284,6 +286,17 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
     const auto Q = ExpandMxDequantInt8(seed_Q, p.n_q, p.d_head);
     const auto K = ExpandMxDequantInt8(seed_K, p.n_ctx, p.d_head);
     const auto V = ExpandMxDequantInt8(seed_V, p.n_ctx, p.d_head);
+    if (proof_sink != nullptr) {
+        proof_sink->OnPhase1Operands({
+            .round_ordinal = round_ordinal,
+            .n_q = p.n_q,
+            .n_ctx = p.n_ctx,
+            .d_head = p.d_head,
+            .q = &Q,
+            .k = &K,
+            .v = &V,
+        });
+    }
 
     // Any positive ΔT partitioning [0,n_ctx) is allowed (§R.2.2). Incomplete
     // MX 32-blocks are held in a pending buffer across tile windows so Extract
@@ -309,6 +322,11 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
         uint32_t pending_fill = 0;
         uint32_t pending_bj = 0;
         uint32_t block_t0 = 0; // first t of the MX block being filled
+        // The proof sink needs the literal S row as the A operand of S*V.
+        // Consensus execution still avoids this allocation when no prover is
+        // attached.
+        std::vector<int8_t> proof_s_row(
+            proof_sink == nullptr ? 0 : p.n_ctx);
         uint32_t cur_seg = 0;
         std::vector<int64_t> seg_row(p.d_head, 0);
         // Running sum of segment rows for the single Extract (H1) when segs
@@ -319,6 +337,25 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
             assert(pending_fill == kRCMxBlockLen);
             int8_t S_tile[kRCMxBlockLen];
             ExtractMXTileInt64(prf_S, i, pending_bj, pending_raw, S_tile);
+            if (proof_sink != nullptr) {
+                proof_sink->OnPhase1QKtTile({
+                    .round_ordinal = round_ordinal,
+                    .query_row = i,
+                    .context_begin = block_t0,
+                    .tile_len = kRCMxBlockLen,
+                    .contraction_size = p.d_head,
+                    .operand_a =
+                        Q.data() +
+                        static_cast<size_t>(i) * p.d_head,
+                    .operand_b =
+                        K.data() +
+                        static_cast<size_t>(block_t0) *
+                            p.d_head,
+                    .gemm_y = pending_raw,
+                    .extract_output = S_tile,
+                    .prf_key = prf_S,
+                });
+            }
             for (uint32_t t_off = 0; t_off < kRCMxBlockLen; ++t_off) {
                 const uint32_t t = block_t0 + t_off;
                 const uint32_t seg = t / kRCSegLen;
@@ -336,6 +373,9 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
                     cur_seg = seg;
                 }
                 const int8_t s = S_tile[t_off];
+                if (proof_sink != nullptr) {
+                    proof_s_row[t] = s;
+                }
                 for (uint32_t d = 0; d < p.d_head; ++d) {
                     seg_row[d] += static_cast<int64_t>(s) *
                                   static_cast<int64_t>(V[static_cast<size_t>(t) * p.d_head + d]);
@@ -379,6 +419,21 @@ Phase1Result Phase1AssociativeRecall(const uint256& seed_r, const uint256& sigma
             ExtractMXTileInt64(prf_Z, i, bj, acc_Z.data() + bj * kRCMxBlockLen,
                                out.Z.data() + static_cast<size_t>(i) * p.d_head +
                                    bj * kRCMxBlockLen);
+        }
+        if (proof_sink != nullptr) {
+            proof_sink->OnPhase1SVRow({
+                .round_ordinal = round_ordinal,
+                .query_row = i,
+                .n_ctx = p.n_ctx,
+                .d_head = p.d_head,
+                .operand_a = proof_s_row.data(),
+                .operand_b = V.data(),
+                .gemm_y = acc_Z.data(),
+                .extract_output =
+                    out.Z.data() +
+                    static_cast<size_t>(i) * p.d_head,
+                .prf_key = prf_Z,
+            });
         }
     }
     return out;
@@ -441,29 +496,87 @@ std::vector<int64_t> FusedExactGemmInt64(const std::vector<int8_t>& A, uint32_t 
 std::vector<int8_t> FusedFfnLayer(const std::vector<int8_t>& X, const std::vector<int8_t>& W_up,
                                   const std::vector<int8_t>& W_down, const uint256& prf_up,
                                   const uint256& prf_dn, uint32_t b_seq, uint32_t d_model,
-                                  uint32_t d_ff, const lt::ExactGemmBackend& gemm)
+                                  uint32_t d_ff, const lt::ExactGemmBackend& gemm,
+                                  uint32_t round_ordinal, uint32_t layer_ordinal,
+                                  RCEpisodeProofWitnessSink* proof_sink)
 {
     // Up projection: H = Extract(X·W_up), contraction over d_model.
     std::vector<int64_t> h64 = FusedExactGemmInt64(X, b_seq, d_model, W_up, d_ff, gemm);
+    if (proof_sink != nullptr) {
+        proof_sink->OnFfnGemm({
+            .round_ordinal = round_ordinal,
+            .layer_ordinal = layer_ordinal,
+            .projection = RCFfnProjection::Up,
+            .m = b_seq,
+            .k = d_model,
+            .n = d_ff,
+            .operand_a = &X,
+            .operand_b = &W_up,
+            .gemm_y = &h64,
+            .residual = nullptr,
+        });
+    }
     std::vector<int8_t> H(h64.size());
     ExtractMXMatrixInt64(prf_up, h64.data(), b_seq, d_ff, H.data());
+    if (proof_sink != nullptr) {
+        proof_sink->OnFfnExtract({
+            .round_ordinal = round_ordinal,
+            .layer_ordinal = layer_ordinal,
+            .projection = RCFfnProjection::Up,
+            .rows = b_seq,
+            .columns = d_ff,
+            .input = &h64,
+            .output = &H,
+            .residual = nullptr,
+            .prf_key = prf_up,
+        });
+    }
     std::vector<int64_t>().swap(h64);
     // Down projection: X_out = Extract(H·W_down + X), contraction over d_ff, residual
     // +X folded INSIDE the single Extract accumulator (H5).
     std::vector<int64_t> y64 = FusedExactGemmInt64(H, b_seq, d_ff, W_down, d_model, gemm);
+    if (proof_sink != nullptr) {
+        proof_sink->OnFfnGemm({
+            .round_ordinal = round_ordinal,
+            .layer_ordinal = layer_ordinal,
+            .projection = RCFfnProjection::Down,
+            .m = b_seq,
+            .k = d_ff,
+            .n = d_model,
+            .operand_a = &H,
+            .operand_b = &W_down,
+            .gemm_y = &y64,
+            .residual = &X,
+        });
+    }
     for (uint32_t i = 0; i < b_seq; ++i)
         for (uint32_t j = 0; j < d_model; ++j)
             y64[static_cast<size_t>(i) * d_model + j] +=
                 static_cast<int64_t>(X[static_cast<size_t>(i) * d_model + j]);
     std::vector<int8_t> out(y64.size());
     ExtractMXMatrixInt64(prf_dn, y64.data(), b_seq, d_model, out.data());
+    if (proof_sink != nullptr) {
+        proof_sink->OnFfnExtract({
+            .round_ordinal = round_ordinal,
+            .layer_ordinal = layer_ordinal,
+            .projection = RCFfnProjection::Down,
+            .rows = b_seq,
+            .columns = d_model,
+            .input = &y64,
+            .output = &out,
+            .residual = &X,
+            .prf_key = prf_dn,
+        });
+    }
     return out;
 }
 
 Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
                                   const RCEpisodeParams& p,
                                   RCEpisodeOptions::Checkpoint ckpt,
-                                  const lt::ExactGemmBackend& gemm)
+                                  const lt::ExactGemmBackend& gemm,
+                                  uint32_t round_ordinal = 0,
+                                  RCEpisodeProofWitnessSink* proof_sink = nullptr)
 {
     Phase2Tensors out;
     out.X.resize(p.L_lyr + 1);
@@ -529,7 +642,7 @@ Phase2Tensors Phase2MicroTraining(const uint256& seed_r, const uint256& sigma,
             out.ffn_weights_shared ? out.W_down_shared : out.W_down_layers[l];
         out.X[l + 1] = FusedFfnLayer(out.X[l], W_up, W_down,
                                      out.prf_up[l], out.prf_dn[l], p.b_seq, p.d_model,
-                                     p.d_ff, gemm);
+                                     p.d_ff, gemm, round_ordinal, l, proof_sink);
     }
     if (ckpt != RCEpisodeOptions::Checkpoint::StoreAll) {
         for (uint32_t l = 1; l <= p.L_lyr; ++l) {
@@ -606,7 +719,7 @@ void EnsurePhase2X(Phase2Tensors& p2, uint32_t layer, const RCEpisodeParams& p,
             p2.ffn_weights_shared ? p2.W_down_shared : p2.W_down_layers[m];
         p2.X[m + 1] = FusedFfnLayer(p2.X[m], W_up, W_down,
                                     p2.prf_up[m], p2.prf_dn[m], p.b_seq, p.d_model,
-                                    p.d_ff, gemm);
+                                    p.d_ff, gemm, 0, m, nullptr);
     }
     for (uint32_t m = src + 1; m < layer; ++m) {
         if (!need_store(m)) {
@@ -686,7 +799,8 @@ uint256 StreamRoundIntoMerkle(Phase1Result& p1, Phase2Tensors& p2, const RCEpiso
 
 uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
                    const RCEpisodeOptions& options, std::vector<RCRoundTranscript>* out_rounds,
-                   RCEpisodeTiming* out_timing, const lt::ExactGemmBackend& gemm)
+                   RCEpisodeTiming* out_timing, const lt::ExactGemmBackend& gemm,
+                   RCEpisodeProofWitnessSink* proof_sink = nullptr)
 {
     // Consensus-reachable: malformed dims → REJECT (null digest), never assert/crash.
     if (!ValidateRCEpisodeParams(params)) {
@@ -710,9 +824,11 @@ uint256 RunEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
             seed_r = Sha256TaggedU32(kRCRoundTag, sizeof(kRCRoundTag) - 1, round_roots[r - 1], r);
         }
         const auto t1 = clock::now();
-        auto p1 = Phase1AssociativeRecall(seed_r, sigma, params, options.phase1_tile_delta);
+        auto p1 = Phase1AssociativeRecall(
+            seed_r, sigma, params, options.phase1_tile_delta, r, proof_sink);
         const auto t2 = clock::now();
-        auto p2 = Phase2MicroTraining(seed_r, sigma, params, options.checkpoint, gemm);
+        auto p2 = Phase2MicroTraining(
+            seed_r, sigma, params, options.checkpoint, gemm, r, proof_sink);
         const auto t3 = clock::now();
 
         // P1.1: stream leaf hashing — no full-round stream buffer on the
@@ -1235,6 +1351,19 @@ uint256 MineRCEpisode(const CBlockHeader& header, const RCEpisodeParams& params,
     // (after RC self-qual) must still match CPU when verified per-GEMM.
     return RecomputeResidentCurriculumReference(header, params, height, {}, out_rounds,
                                                 /*out_timing=*/nullptr, gemm);
+}
+
+uint256 MineRCEpisodeWithProofWitness(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t /*height*/,
+    RCEpisodeProofWitnessSink& sink,
+    std::vector<RCRoundTranscript>* out_rounds,
+    const lt::ExactGemmBackend& gemm)
+{
+    return RunEpisode(
+        header, params, {}, out_rounds,
+        /*out_timing=*/nullptr, gemm, &sink);
 }
 
 uint256 RecomputeRCRoundRoot(const uint256& seed_r, const uint256& sigma,

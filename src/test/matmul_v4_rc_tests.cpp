@@ -79,6 +79,200 @@ bool WrongGemmS32S8(const std::vector<int32_t>& /*L*/, const std::vector<int8_t>
     return true;
 }
 
+struct ProofWitnessCapture final : rc::RCEpisodeProofWitnessSink {
+    struct Projection {
+        uint32_t round{0};
+        uint32_t layer{0};
+        rc::RCFfnProjection projection{rc::RCFfnProjection::Up};
+        uint32_t m{0};
+        uint32_t k{0};
+        uint32_t n{0};
+        int8_t a0{0};
+        int8_t b0{0};
+        int64_t y0{0};
+        int8_t residual0{0};
+        bool has_residual{false};
+    };
+
+    std::vector<Projection> gemms;
+    std::vector<Projection> extracts;
+    uint32_t phase1_operand_events{0};
+    uint64_t phase1_qkt_tiles{0};
+    uint64_t phase1_sv_rows{0};
+    uint32_t phase1_n_ctx{0};
+    uint32_t phase1_d_head{0};
+    int8_t last_up_output0{0};
+
+    void OnPhase1Operands(
+        const rc::RCPhase1OperandsWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.q != nullptr);
+        BOOST_REQUIRE(view.k != nullptr);
+        BOOST_REQUIRE(view.v != nullptr);
+        BOOST_REQUIRE_EQUAL(
+            view.q->size(),
+            static_cast<size_t>(view.n_q) * view.d_head);
+        BOOST_REQUIRE_EQUAL(
+            view.k->size(),
+            static_cast<size_t>(view.n_ctx) * view.d_head);
+        BOOST_REQUIRE_EQUAL(
+            view.v->size(),
+            static_cast<size_t>(view.n_ctx) * view.d_head);
+        ++phase1_operand_events;
+        phase1_n_ctx = view.n_ctx;
+        phase1_d_head = view.d_head;
+    }
+
+    void OnPhase1QKtTile(
+        const rc::RCPhase1QKtTileWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.operand_a != nullptr);
+        BOOST_REQUIRE(view.operand_b != nullptr);
+        BOOST_REQUIRE(view.gemm_y != nullptr);
+        BOOST_REQUIRE(view.extract_output != nullptr);
+        BOOST_REQUIRE_EQUAL(
+            view.tile_len, rc::kRCMxBlockLen);
+        BOOST_REQUIRE_EQUAL(
+            view.contraction_size,
+            phase1_d_head);
+        for (uint32_t lane = 0;
+             lane < view.tile_len; ++lane) {
+            int64_t dot = 0;
+            for (uint32_t d = 0;
+                 d < phase1_d_head; ++d) {
+                dot +=
+                    static_cast<int64_t>(
+                        view.operand_a[d]) *
+                    static_cast<int64_t>(
+                        view.operand_b[
+                            static_cast<size_t>(lane) *
+                                phase1_d_head +
+                            d]);
+            }
+            BOOST_CHECK_EQUAL(
+                dot, view.gemm_y[lane]);
+        }
+        ++phase1_qkt_tiles;
+    }
+
+    void OnPhase1SVRow(
+        const rc::RCPhase1SVRowWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.operand_a != nullptr);
+        BOOST_REQUIRE(view.operand_b != nullptr);
+        BOOST_REQUIRE(view.gemm_y != nullptr);
+        BOOST_REQUIRE(view.extract_output != nullptr);
+        BOOST_REQUIRE_EQUAL(
+            view.n_ctx, phase1_n_ctx);
+        BOOST_REQUIRE_EQUAL(
+            view.d_head, phase1_d_head);
+        for (uint32_t d = 0;
+             d < view.d_head; ++d) {
+            int64_t dot = 0;
+            for (uint32_t t = 0;
+                 t < view.n_ctx; ++t) {
+                dot +=
+                    static_cast<int64_t>(
+                        view.operand_a[t]) *
+                    static_cast<int64_t>(
+                        view.operand_b[
+                            static_cast<size_t>(t) *
+                                view.d_head +
+                            d]);
+            }
+            BOOST_CHECK_EQUAL(
+                dot, view.gemm_y[d]);
+        }
+        ++phase1_sv_rows;
+    }
+
+    void OnFfnGemm(
+        const rc::RCFfnGemmWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.operand_a != nullptr);
+        BOOST_REQUIRE(view.operand_b != nullptr);
+        BOOST_REQUIRE(view.gemm_y != nullptr);
+        BOOST_REQUIRE_EQUAL(
+            view.operand_a->size(),
+            static_cast<size_t>(view.m) * view.k);
+        BOOST_REQUIRE_EQUAL(
+            view.operand_b->size(),
+            static_cast<size_t>(view.k) * view.n);
+        BOOST_REQUIRE_EQUAL(
+            view.gemm_y->size(),
+            static_cast<size_t>(view.m) * view.n);
+        if (view.projection == rc::RCFfnProjection::Down) {
+            BOOST_REQUIRE(view.residual != nullptr);
+            BOOST_REQUIRE_EQUAL(
+                view.residual->size(),
+                static_cast<size_t>(view.m) * view.n);
+            BOOST_CHECK_EQUAL(
+                view.operand_a->front(),
+                last_up_output0);
+        } else {
+            BOOST_CHECK(view.residual == nullptr);
+        }
+        int64_t first_dot = 0;
+        for (uint32_t t = 0; t < view.k; ++t) {
+            first_dot +=
+                static_cast<int64_t>(
+                    (*view.operand_a)[t]) *
+                static_cast<int64_t>(
+                    (*view.operand_b)[
+                        static_cast<size_t>(t) * view.n]);
+        }
+        BOOST_CHECK_EQUAL(
+            first_dot, view.gemm_y->front());
+        gemms.push_back({
+            view.round_ordinal,
+            view.layer_ordinal,
+            view.projection,
+            view.m,
+            view.k,
+            view.n,
+            view.operand_a->front(),
+            view.operand_b->front(),
+            view.gemm_y->front(),
+            view.residual == nullptr
+                ? int8_t{0}
+                : view.residual->front(),
+            view.residual != nullptr,
+        });
+    }
+
+    void OnFfnExtract(
+        const rc::RCFfnExtractWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.input != nullptr);
+        BOOST_REQUIRE(view.output != nullptr);
+        BOOST_REQUIRE(!view.prf_key.IsNull());
+        BOOST_REQUIRE_EQUAL(
+            view.input->size(),
+            static_cast<size_t>(view.rows) * view.columns);
+        BOOST_REQUIRE_EQUAL(
+            view.output->size(),
+            static_cast<size_t>(view.rows) * view.columns);
+        const Projection& gemm = gemms.back();
+        BOOST_CHECK_EQUAL(
+            gemm.round, view.round_ordinal);
+        BOOST_CHECK_EQUAL(
+            gemm.layer, view.layer_ordinal);
+        BOOST_CHECK(gemm.projection == view.projection);
+        if (view.projection == rc::RCFfnProjection::Down) {
+            BOOST_REQUIRE(view.residual != nullptr);
+            BOOST_CHECK_EQUAL(
+                view.input->front(),
+                gemm.y0 + view.residual->front());
+        } else {
+            BOOST_CHECK(view.residual == nullptr);
+            BOOST_CHECK_EQUAL(
+                view.input->front(), gemm.y0);
+            last_up_output0 = view.output->front();
+        }
+        extracts.push_back(gemm);
+    }
+};
+
 } // namespace
 
 BOOST_AUTO_TEST_CASE(rc_smoke_default_params_and_inactive)
@@ -115,6 +309,84 @@ BOOST_AUTO_TEST_CASE(rc_t1_golden_episode_digest_stable)
     BOOST_CHECK(d1 == d2);
     BOOST_CHECK_EQUAL(d1.GetHex(),
                       "5b1bff3c835b1c8e7816a2cccb181eb2fc30a99d97a971d73108c52a8238acd4");
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_stage3_proof_witness_sink_exports_real_fused_ffn_boundaries)
+{
+    const auto header = MakeRCHeader(42);
+    const auto params = rc::MakeToyRCEpisodeParams();
+    BOOST_REQUIRE(rc::ValidateRCEpisodeParams(params));
+    const uint256 expected =
+        rc::MineRCEpisode(
+            header, params, /*height=*/0);
+    ProofWitnessCapture capture;
+    std::vector<rc::RCRoundTranscript> rounds;
+    const uint256 with_sink =
+        rc::MineRCEpisodeWithProofWitness(
+            header, params, /*height=*/0,
+            capture, &rounds);
+    BOOST_REQUIRE_EQUAL(with_sink, expected);
+    BOOST_REQUIRE_EQUAL(
+        capture.gemms.size(),
+        static_cast<size_t>(params.rounds) *
+            params.L_lyr * 2);
+    BOOST_REQUIRE_EQUAL(
+        capture.extracts.size(),
+        capture.gemms.size());
+    BOOST_REQUIRE_EQUAL(
+        capture.phase1_operand_events,
+        params.rounds);
+    BOOST_REQUIRE_EQUAL(
+        capture.phase1_qkt_tiles,
+        static_cast<uint64_t>(params.rounds) *
+            params.n_q *
+            (params.n_ctx / rc::kRCMxBlockLen));
+    BOOST_REQUIRE_EQUAL(
+        capture.phase1_sv_rows,
+        static_cast<uint64_t>(params.rounds) *
+            params.n_q);
+    BOOST_REQUIRE_EQUAL(
+        rounds.size(), params.rounds);
+    for (uint32_t round = 0;
+         round < params.rounds; ++round) {
+        BOOST_REQUIRE(!rounds[round].round_root.IsNull());
+        for (uint32_t layer = 0;
+             layer < params.L_lyr; ++layer) {
+            const size_t up =
+                2 * (static_cast<size_t>(round) *
+                         params.L_lyr +
+                     layer);
+            const auto& up_event =
+                capture.gemms[up];
+            const auto& down_event =
+                capture.gemms[up + 1];
+            BOOST_CHECK_EQUAL(up_event.round, round);
+            BOOST_CHECK_EQUAL(up_event.layer, layer);
+            BOOST_CHECK(
+                up_event.projection ==
+                rc::RCFfnProjection::Up);
+            BOOST_CHECK_EQUAL(
+                up_event.m, params.b_seq);
+            BOOST_CHECK_EQUAL(
+                up_event.k, params.d_model);
+            BOOST_CHECK_EQUAL(
+                up_event.n, params.d_ff);
+            BOOST_CHECK(!up_event.has_residual);
+            BOOST_CHECK_EQUAL(down_event.round, round);
+            BOOST_CHECK_EQUAL(down_event.layer, layer);
+            BOOST_CHECK(
+                down_event.projection ==
+                rc::RCFfnProjection::Down);
+            BOOST_CHECK_EQUAL(
+                down_event.m, params.b_seq);
+            BOOST_CHECK_EQUAL(
+                down_event.k, params.d_ff);
+            BOOST_CHECK_EQUAL(
+                down_event.n, params.d_model);
+            BOOST_CHECK(down_event.has_residual);
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rc_t2_phase1_tile_size_invariance)

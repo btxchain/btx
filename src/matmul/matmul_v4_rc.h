@@ -257,6 +257,113 @@ struct RCRoundTranscript {
     std::vector<int8_t> stream{};
 };
 
+/**
+ * Read-only, synchronous proof-witness export from the exact v4.6-3 fused-FFN
+ * computation.
+ *
+ * The solver previously retained only the committed X[l+1] byte stream.  That
+ * is sufficient to recompute the PoW digest, but it is not sufficient for a
+ * complete Stage-3 prover: the all-instance GEMM/Extract relations also need
+ * the exact A/B/Y, residual and Extract-boundary values which existed inside
+ * the solver and were then discarded.
+ *
+ * These views are valid only for the duration of the callback.  They contain
+ * const pointers, so a proof builder can commit or stream the real computation
+ * without being able to alter consensus execution.  Supplying a sink never
+ * changes the digest or the transcript.
+ */
+enum class RCFfnProjection : uint8_t {
+    Up = 0,
+    Down = 1,
+};
+
+struct RCFfnGemmWitnessView {
+    uint32_t round_ordinal{0};
+    uint32_t layer_ordinal{0};
+    RCFfnProjection projection{RCFfnProjection::Up};
+    uint32_t m{0};
+    uint32_t k{0};
+    uint32_t n{0};
+    const std::vector<int8_t>* operand_a{nullptr};
+    const std::vector<int8_t>* operand_b{nullptr};
+    /** Pure A*B output, before the DOWN residual is added. */
+    const std::vector<int64_t>* gemm_y{nullptr};
+    /** Null for UP; X[l] for DOWN. */
+    const std::vector<int8_t>* residual{nullptr};
+};
+
+struct RCFfnExtractWitnessView {
+    uint32_t round_ordinal{0};
+    uint32_t layer_ordinal{0};
+    RCFfnProjection projection{RCFfnProjection::Up};
+    uint32_t rows{0};
+    uint32_t columns{0};
+    /** Exact Extract input; includes the residual for DOWN. */
+    const std::vector<int64_t>* input{nullptr};
+    const std::vector<int8_t>* output{nullptr};
+    /** Null for UP; X[l] for DOWN. */
+    const std::vector<int8_t>* residual{nullptr};
+    uint256 prf_key{};
+};
+
+struct RCPhase1OperandsWitnessView {
+    uint32_t round_ordinal{0};
+    uint32_t n_q{0};
+    uint32_t n_ctx{0};
+    uint32_t d_head{0};
+    const std::vector<int8_t>* q{nullptr};
+    const std::vector<int8_t>* k{nullptr};
+    const std::vector<int8_t>* v{nullptr};
+};
+
+struct RCPhase1QKtTileWitnessView {
+    uint32_t round_ordinal{0};
+    uint32_t query_row{0};
+    uint32_t context_begin{0};
+    uint32_t tile_len{0};
+    uint32_t contraction_size{0};
+    /** Q[query_row,:], exactly contraction_size signed bytes. */
+    const int8_t* operand_a{nullptr};
+    /**
+     * K[context_begin:context_begin+tile_len,:], row-major, exactly
+     * tile_len*contraction_size signed bytes.
+     */
+    const int8_t* operand_b{nullptr};
+    const int64_t* gemm_y{nullptr};
+    const int8_t* extract_output{nullptr};
+    uint256 prf_key{};
+};
+
+struct RCPhase1SVRowWitnessView {
+    uint32_t round_ordinal{0};
+    uint32_t query_row{0};
+    uint32_t n_ctx{0};
+    uint32_t d_head{0};
+    /** The complete extracted S[query_row,:] row, exactly n_ctx bytes. */
+    const int8_t* operand_a{nullptr};
+    /** The complete V matrix, row-major n_ctx*d_head bytes. */
+    const int8_t* operand_b{nullptr};
+    /** Pure S*V output for this row, before Extract. */
+    const int64_t* gemm_y{nullptr};
+    const int8_t* extract_output{nullptr};
+    uint256 prf_key{};
+};
+
+class RCEpisodeProofWitnessSink {
+public:
+    virtual ~RCEpisodeProofWitnessSink() = default;
+    virtual void OnPhase1Operands(
+        const RCPhase1OperandsWitnessView& view) = 0;
+    virtual void OnPhase1QKtTile(
+        const RCPhase1QKtTileWitnessView& view) = 0;
+    virtual void OnPhase1SVRow(
+        const RCPhase1SVRowWitnessView& view) = 0;
+    virtual void OnFfnGemm(
+        const RCFfnGemmWitnessView& view) = 0;
+    virtual void OnFfnExtract(
+        const RCFfnExtractWitnessView& view) = 0;
+};
+
 /** Merkle opening: siblings from leaf toward root (index parity selects side). */
 struct RCMerkleProof {
     std::vector<uint256> siblings{};
@@ -309,6 +416,22 @@ struct RCMerkleProof {
                                     int32_t height,
                                     std::vector<RCRoundTranscript>* out_rounds = nullptr,
                                     const matmul::v4::lt::ExactGemmBackend& gemm = {});
+
+/**
+ * Miner/prover entry which emits every real fused-FFN GEMM and Extract witness
+ * while executing the same oracle as MineRCEpisode.
+ *
+ * This is not exact replay in validation.  It is a prover-side witness tap on
+ * the computation the miner already performs.  A succinct verifier consumes
+ * commitments/proofs derived from these events and never invokes this sink.
+ */
+[[nodiscard]] uint256 MineRCEpisodeWithProofWitness(
+    const CBlockHeader& header,
+    const RCEpisodeParams& params,
+    int32_t height,
+    RCEpisodeProofWitnessSink& sink,
+    std::vector<RCRoundTranscript>* out_rounds = nullptr,
+    const matmul::v4::lt::ExactGemmBackend& gemm = {});
 
 /**
  * FVT (Fully-Verified Terminal round) primitive — anti-grinding fix, design
