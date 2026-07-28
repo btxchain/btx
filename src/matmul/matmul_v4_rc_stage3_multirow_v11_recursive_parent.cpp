@@ -31,6 +31,14 @@ constexpr uint64_t kMerkleDomainV1 =
     0x31564c49'4b52454dULL; // "MERKILV1"
 constexpr uint64_t kParentProgramDomainV1 =
     0x31564c49'474f5250ULL; // "PROGILV1"
+constexpr uint64_t kFixedManifestDomainV2 =
+    0x32564c49'4e414d46ULL; // "FMANILV2"
+constexpr uint64_t kParentStatementDomainV2 =
+    0x32564c49'54415453ULL; // "STATILV2"
+constexpr uint64_t kParentSeedDomainV2 =
+    0x32564c49'44454553ULL; // "SEEDILV2"
+constexpr uint64_t kParentReceiptDomainV2 =
+    0x32564c49'50434552ULL; // "RECPILV2"
 
 Fp3 U(uint64_t value)
 {
@@ -496,6 +504,16 @@ uint256 ParentSeed(
     return hash.GetHash();
 }
 
+uint256 ParentSeedV2(const uint256& statement_root)
+{
+    if (statement_root.IsNull()) return {};
+    HashWriter hash;
+    hash << kParentSeedDomainV2;
+    hash << kRecursiveParentVersionV2;
+    hash << statement_root;
+    return hash.GetHash();
+}
+
 void PopulateAcceptance(
     ProductV1& out,
     const std::array<ChildReceiptV1, kRecursiveParentArityV1>& children)
@@ -713,10 +731,76 @@ bool FinalizeAcceptanceRoot(ProductV1& out)
     return !out.parent_base_column_indices.empty();
 }
 
+struct AcceptanceBuildV2 {
+    LayoutV1 layout{};
+    aq::AirConstraintSystem<Fp3> cs{};
+    std::vector<std::vector<Fp3>> columns;
+    std::vector<uint32_t> fixed_columns;
+    aq::AirQuotientTwoEpochBaseRowSession fixed_session{};
+    bool valid{false};
+};
+
+AcceptanceBuildV2 BuildAcceptanceV2(
+    const std::array<ChildReceiptV1, kRecursiveParentArityV1>& children)
+{
+    AcceptanceBuildV2 out;
+    ProductV1 mirror;
+    PopulateAcceptance(mirror, children);
+    out.layout = mirror.layout;
+    out.cs = std::move(mirror.acceptance_cs);
+    out.columns = std::move(mirror.acceptance_columns);
+
+    // V3 receives fixed-trace provenance only through its explicit public pin.
+    // Legacy preprocessed modes are deliberately removed and rejected by the
+    // V3 producer/verifier.
+    out.cs.preprocessed.clear();
+    out.cs.preprocessed_roots.clear();
+    out.cs.preprocessed_row_group_roots.clear();
+    out.cs.preprocessed_pin_ood = false;
+
+    const uint32_t dependent_column = out.cs.n_columns;
+    ++out.cs.n_columns;
+    out.columns.emplace_back(
+        out.cs.n_rows, Fp3::Zero());
+    AddConstraint(
+        out.cs,
+        "stage3.v11_recursive_parent.v2.dependent_zero",
+        aq::AirKind::kEverywhere, 1,
+        [dependent_column](const auto& cur, const auto&) {
+            return cur[dependent_column];
+        });
+    out.fixed_columns = CanonicalFixedTraceColumnsV2();
+    if (out.fixed_columns.size() != out.layout.n_columns ||
+        out.cs.n_columns !=
+            out.layout.n_columns +
+                kRecursiveParentDependentColumnsV2 ||
+        CountViolations(out.cs, out.columns) != 0) {
+        return out;
+    }
+    out.fixed_session =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            out.cs, out.columns, out.fixed_columns);
+    out.valid =
+        out.fixed_session.valid &&
+        !out.fixed_session.base_row_commitment.IsNull();
+    return out;
+}
+
 uint256 ProofRoot(const backend::ProofV1& proof)
 {
     std::vector<unsigned char> wire;
     if (backend::SerializeV1(proof, wire) == 0) return {};
+    return HashWire(wire);
+}
+
+uint256 ProofRoot(
+    const aq::AirQuotientSplitRapRowsProof& proof)
+{
+    std::vector<unsigned char> wire;
+    if (aq::SerializeAirQuotientSplitRapRowsProof(
+            proof, wire) == 0) {
+        return {};
+    }
     return HashWire(wire);
 }
 
@@ -889,6 +973,79 @@ uint256 ComputeParentReceiptRootV1(
     hash << receipt.parent_application_statement_root;
     hash << receipt.parent_fs_seed;
     hash << receipt.acceptance_row_root;
+    hash << receipt.parent_proof_root;
+    for (const auto& child : receipt.children) {
+        HashChild(hash, child);
+    }
+    return hash.GetHash();
+}
+
+std::vector<uint32_t> CanonicalFixedTraceColumnsV2()
+{
+    std::vector<uint32_t> out(
+        CanonicalLayoutV1().n_columns);
+    for (uint32_t column = 0;
+         column < out.size(); ++column) {
+        out[column] = column;
+    }
+    return out;
+}
+
+uint256 ComputeFixedTraceManifestRootV2(
+    const std::vector<uint32_t>& ordered_columns)
+{
+    HashWriter hash;
+    hash << kFixedManifestDomainV2;
+    hash << kRecursiveParentVersionV2;
+    hash << kRecursiveParentTraceRowsV1;
+    hash << CanonicalLayoutV1().n_columns;
+    hash << static_cast<uint32_t>(
+        CanonicalLayoutV1().n_columns +
+        kRecursiveParentDependentColumnsV2);
+    hash << static_cast<uint32_t>(
+        ordered_columns.size());
+    for (uint32_t column : ordered_columns) {
+        hash << column;
+    }
+    return hash.GetHash();
+}
+
+uint256 ComputeParentPublicStatementRootV2(
+    const ParentPublicStatementV2& statement)
+{
+    HashWriter hash;
+    hash << kParentStatementDomainV2;
+    hash << statement.version;
+    hash << statement.arity;
+    hash << statement.trace_rows;
+    hash << statement.semantic_columns;
+    hash << statement.proof_columns;
+    hash << statement.parent_program_protocol_root;
+    hash << statement.parent_program_registry_root;
+    hash << static_cast<uint32_t>(
+        statement.fixed_trace_columns.size());
+    for (uint32_t column :
+         statement.fixed_trace_columns) {
+        hash << column;
+    }
+    hash << statement.fixed_trace_manifest_root;
+    for (const auto& child_root :
+         statement.ordered_child_statement_roots) {
+        hash << child_root;
+    }
+    hash << statement.parent_application_statement_root;
+    hash << statement.acceptance_row_root;
+    return hash.GetHash();
+}
+
+uint256 ComputeParentReceiptRootV2(
+    const ParentReceiptV2& receipt)
+{
+    HashWriter hash;
+    hash << kParentReceiptDomainV2;
+    hash << receipt.version;
+    hash << receipt.statement.statement_root;
+    hash << receipt.parent_fs_seed;
     hash << receipt.parent_proof_root;
     for (const auto& child : receipt.children) {
         HashChild(hash, child);
@@ -1114,6 +1271,305 @@ bool VerifyReceiptV1(
     return true;
 }
 
+namespace {
+
+ParentPublicStatementV2 BuildParentPublicStatementV2(
+    const std::array<ChildReceiptV1, kRecursiveParentArityV1>& children,
+    const uint256& acceptance_row_root)
+{
+    ParentPublicStatementV2 out;
+    out.semantic_columns = CanonicalLayoutV1().n_columns;
+    out.proof_columns =
+        out.semantic_columns +
+        kRecursiveParentDependentColumnsV2;
+    out.parent_program_protocol_root =
+        CanonicalParentProgramRootV1();
+    // Fail-closed: no canonical bytecode/registry membership root exists yet.
+    out.parent_program_registry_root.SetNull();
+    out.fixed_trace_columns =
+        CanonicalFixedTraceColumnsV2();
+    out.fixed_trace_manifest_root =
+        ComputeFixedTraceManifestRootV2(
+            out.fixed_trace_columns);
+    for (uint32_t child = 0;
+         child < children.size(); ++child) {
+        out.ordered_child_statement_roots[child] =
+            children[child].child_statement_root;
+    }
+    out.parent_application_statement_root =
+        ParentApplicationRoot(children);
+    out.acceptance_row_root = acceptance_row_root;
+    out.statement_root =
+        ComputeParentPublicStatementRootV2(out);
+    return out;
+}
+
+bool CanonicalParentPublicStatementV2(
+    const ParentPublicStatementV2& statement)
+{
+    const auto canonical_columns =
+        CanonicalFixedTraceColumnsV2();
+    return
+        statement.version ==
+            kRecursiveParentVersionV2 &&
+        statement.arity ==
+            kRecursiveParentArityV1 &&
+        statement.trace_rows ==
+            kRecursiveParentTraceRowsV1 &&
+        statement.semantic_columns ==
+            CanonicalLayoutV1().n_columns &&
+        statement.proof_columns ==
+            statement.semantic_columns +
+                kRecursiveParentDependentColumnsV2 &&
+        statement.parent_program_protocol_root ==
+            CanonicalParentProgramRootV1() &&
+        // A non-null value here would falsely imply a registry proof.
+        statement.parent_program_registry_root.IsNull() &&
+        statement.fixed_trace_columns ==
+            canonical_columns &&
+        statement.fixed_trace_manifest_root ==
+            ComputeFixedTraceManifestRootV2(
+                canonical_columns) &&
+        !statement.ordered_child_statement_roots[0].IsNull() &&
+        !statement.ordered_child_statement_roots[1].IsNull() &&
+        !statement.parent_application_statement_root.IsNull() &&
+        !statement.acceptance_row_root.IsNull() &&
+        statement.statement_root ==
+            ComputeParentPublicStatementRootV2(statement);
+}
+
+} // namespace
+
+ProductV2 BuildProductV2(
+    const std::array<ChildInputV1, kRecursiveParentArityV1>& children)
+{
+    ProductV2 out;
+    const auto fail = [&](const std::string& detail) {
+        out.note =
+            "stage3:v11_recursive_parent_v2:" +
+            detail;
+        return out;
+    };
+    std::array<ChildReceiptV1, kRecursiveParentArityV1>
+        child_receipts{};
+    for (uint32_t child = 0;
+         child < children.size(); ++child) {
+        const auto built =
+            BuildChild(children[child], child);
+        if (!built.valid) {
+            return fail(built.note);
+        }
+        child_receipts[child] = built.receipt;
+        ++out.native_children_verified;
+    }
+    const auto acceptance =
+        BuildAcceptanceV2(child_receipts);
+    if (!acceptance.valid) {
+        return fail("acceptance");
+    }
+    out.layout = acceptance.layout;
+    out.parent_proof_cs = acceptance.cs;
+    out.acceptance_columns = acceptance.columns;
+    out.fixed_trace_columns =
+        acceptance.fixed_columns;
+    out.receipt.children = child_receipts;
+    out.receipt.statement =
+        BuildParentPublicStatementV2(
+            child_receipts,
+            acceptance.fixed_session
+                .base_row_commitment);
+    if (!CanonicalParentPublicStatementV2(
+            out.receipt.statement)) {
+        return fail("statement");
+    }
+    out.receipt.parent_fs_seed =
+        ParentSeedV2(
+            out.receipt.statement.statement_root);
+    const aq::AirQuotientFixedTracePinV3 fixed_pin{
+        .version = 1,
+        .ordered_columns =
+            out.receipt.statement.fixed_trace_columns,
+        .row_root =
+            out.receipt.statement.acceptance_row_root,
+    };
+    const auto prove_start =
+        std::chrono::steady_clock::now();
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeFixedV3(
+            out.parent_proof_cs,
+            out.acceptance_columns,
+            fixed_pin,
+            out.receipt.parent_fs_seed,
+            {}, &acceptance.fixed_session);
+    out.parent_prove_micros =
+        std::chrono::duration_cast<
+            std::chrono::microseconds>(
+                std::chrono::steady_clock::now() -
+                prove_start)
+            .count();
+    if (!proved.ok || !proved.division_exact) {
+        return fail("prove:" + proved.note);
+    }
+    out.receipt.parent_proof =
+        proved.proof;
+    std::vector<unsigned char> proof_wire;
+    out.parent_proof_bytes =
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            out.receipt.parent_proof,
+            proof_wire);
+    out.receipt.parent_proof_root =
+        HashWire(proof_wire);
+    if (out.parent_proof_bytes == 0 ||
+        out.parent_proof_bytes != proof_wire.size() ||
+        out.receipt.parent_proof_root.IsNull()) {
+        return fail("proof_codec");
+    }
+    std::string why;
+    const auto verify_start =
+        std::chrono::steady_clock::now();
+    out.fixed_trace_v3_verified =
+        aq::AirQuotientVerifyRowsSplitRapSafeFixedV3Replay(
+            out.parent_proof_cs,
+            out.receipt.parent_proof,
+            fixed_pin,
+            out.receipt.parent_fs_seed,
+            out.parent_replay,
+            &why);
+    out.parent_verify_micros =
+        std::chrono::duration_cast<
+            std::chrono::microseconds>(
+                std::chrono::steady_clock::now() -
+                verify_start)
+            .count();
+    if (!out.fixed_trace_v3_verified ||
+        !out.parent_replay.native_verified) {
+        return fail("verify:" + why);
+    }
+    out.receipt.receipt_root =
+        ComputeParentReceiptRootV2(out.receipt);
+    std::vector<unsigned char> receipt_wire;
+    out.encoded_bytes =
+        SerializeReceiptV2(
+            out.receipt, receipt_wire);
+    if (out.encoded_bytes == 0 ||
+        out.encoded_bytes != receipt_wire.size()) {
+        return fail("receipt_codec");
+    }
+    out.residual_mask =
+        kResidualV2CanonicalConstraintBytecode |
+        kResidualV2ProgramRegistryMembership |
+        kResidualV2SameParentRecursiveVerifier;
+    out.acceptance_root_rebuilt_independently = true;
+    out.exact_fixed_trace_manifest =
+        out.fixed_trace_columns ==
+            CanonicalFixedTraceColumnsV2();
+    out.fixed_trace_v3_proved = true;
+    out.dependent_zero_column_constrained = true;
+    out.canonical_program_registry_bound = false;
+    out.recursive_authority_ready = false;
+    out.valid =
+        out.native_children_verified ==
+            kRecursiveParentArityV1 &&
+        out.acceptance_root_rebuilt_independently &&
+        out.exact_fixed_trace_manifest &&
+        out.fixed_trace_v3_proved &&
+        out.fixed_trace_v3_verified &&
+        out.dependent_zero_column_constrained &&
+        out.residual_mask != 0;
+    out.note = out.valid
+        ? "stage3:v11_recursive_parent_v2:"
+          "safe_fixed_v3_foundation;"
+          "bytecode_registry_recursive_verifier_pending"
+        : "stage3:v11_recursive_parent_v2:invalid";
+    return out;
+}
+
+bool VerifyReceiptV2(
+    const std::array<ChildInputV1, kRecursiveParentArityV1>& expected_children,
+    const ParentReceiptV2& receipt,
+    std::string* why)
+{
+    const auto fail = [&](const std::string& detail) {
+        if (why != nullptr) {
+            *why =
+                "stage3:v11_recursive_parent_v2_verify:" +
+                detail;
+        }
+        return false;
+    };
+    if (receipt.version != kRecursiveParentVersionV2 ||
+        !CanonicalParentPublicStatementV2(
+            receipt.statement)) {
+        return fail("header_or_statement");
+    }
+    std::array<ChildReceiptV1, kRecursiveParentArityV1>
+        expected_receipts{};
+    for (uint32_t child = 0;
+         child < expected_children.size(); ++child) {
+        const auto built =
+            BuildChild(expected_children[child], child);
+        if (!built.valid) {
+            return fail(built.note);
+        }
+        expected_receipts[child] = built.receipt;
+        if (!EqualChild(
+                expected_receipts[child],
+                receipt.children[child])) {
+            return fail("child_order_or_identity");
+        }
+    }
+    const auto acceptance =
+        BuildAcceptanceV2(expected_receipts);
+    if (!acceptance.valid) {
+        return fail("acceptance");
+    }
+    // This is the load-bearing direction: expected children -> fixed columns
+    // -> expected root -> statement -> V3 pin.  No value is copied from proof.
+    const auto expected_statement =
+        BuildParentPublicStatementV2(
+            expected_receipts,
+            acceptance.fixed_session
+                .base_row_commitment);
+    if (!(receipt.statement ==
+            expected_statement)) {
+        return fail("independent_statement");
+    }
+    const uint256 expected_seed =
+        ParentSeedV2(expected_statement.statement_root);
+    if (expected_seed.IsNull() ||
+        receipt.parent_fs_seed != expected_seed) {
+        return fail("parent_seed");
+    }
+    const aq::AirQuotientFixedTracePinV3 fixed_pin{
+        .version = 1,
+        .ordered_columns =
+            expected_statement.fixed_trace_columns,
+        .row_root =
+            expected_statement.acceptance_row_root,
+    };
+    std::string proof_why;
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            acceptance.cs,
+            receipt.parent_proof,
+            fixed_pin,
+            expected_seed,
+            &proof_why)) {
+        return fail("parent_proof:" + proof_why);
+    }
+    if (ProofRoot(receipt.parent_proof) !=
+            receipt.parent_proof_root ||
+        receipt.receipt_root !=
+            ComputeParentReceiptRootV2(receipt)) {
+        return fail("proof_or_receipt_root");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:v11_recursive_parent_v2_verify:"
+            "safe_fixed_v3_independent_statement";
+    }
+    return true;
+}
+
 size_t SerializeReceiptV1(
     const ParentReceiptV1& receipt,
     std::vector<unsigned char>& out)
@@ -1238,6 +1694,200 @@ std::optional<ParentReceiptV1> DeserializeReceiptV1(
     if (why) {
         *why =
             "stage3:v11_recursive_parent_decode:canonical";
+    }
+    return out;
+}
+
+size_t SerializeReceiptV2(
+    const ParentReceiptV2& receipt,
+    std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (receipt.version != kRecursiveParentVersionV2 ||
+        !CanonicalParentPublicStatementV2(
+            receipt.statement) ||
+        receipt.receipt_root !=
+            ComputeParentReceiptRootV2(receipt)) {
+        return 0;
+    }
+    std::vector<unsigned char> proof;
+    if (aq::SerializeAirQuotientSplitRapRowsProof(
+            receipt.parent_proof, proof) == 0 ||
+        proof.size() >
+            std::numeric_limits<uint32_t>::max()) {
+        return 0;
+    }
+    Write32(out, kRecursiveParentWireMagicV2);
+    Write16(out, receipt.version);
+    Write16(out, 0);
+    const auto& statement = receipt.statement;
+    Write16(out, statement.version);
+    Write16(out, 0);
+    Write32(out, statement.arity);
+    Write32(out, statement.trace_rows);
+    Write32(out, statement.semantic_columns);
+    Write32(out, statement.proof_columns);
+    WriteHash(
+        out, statement.parent_program_protocol_root);
+    WriteHash(
+        out, statement.parent_program_registry_root);
+    Write32(
+        out,
+        static_cast<uint32_t>(
+            statement.fixed_trace_columns.size()));
+    for (uint32_t column :
+         statement.fixed_trace_columns) {
+        Write32(out, column);
+    }
+    WriteHash(out, statement.fixed_trace_manifest_root);
+    for (const auto& child_root :
+         statement.ordered_child_statement_roots) {
+        WriteHash(out, child_root);
+    }
+    WriteHash(
+        out,
+        statement.parent_application_statement_root);
+    WriteHash(out, statement.acceptance_row_root);
+    WriteHash(out, statement.statement_root);
+    WriteHash(out, receipt.parent_fs_seed);
+    WriteHash(out, receipt.parent_proof_root);
+    for (const auto& child : receipt.children) {
+        WriteChild(out, child);
+    }
+    Write32(
+        out, static_cast<uint32_t>(proof.size()));
+    out.insert(out.end(), proof.begin(), proof.end());
+    WriteHash(out, receipt.receipt_root);
+    if (out.size() > kMaxReceiptBytesV1) {
+        out.clear();
+        return 0;
+    }
+    return out.size();
+}
+
+std::optional<ParentReceiptV2> DeserializeReceiptV2(
+    const std::vector<unsigned char>& bytes,
+    std::string* why)
+{
+    const auto fail =
+        [&](const std::string& detail)
+            -> std::optional<ParentReceiptV2> {
+        if (why != nullptr) {
+            *why =
+                "stage3:v11_recursive_parent_v2_decode:" +
+                detail;
+        }
+        return std::nullopt;
+    };
+    if (bytes.empty() ||
+        bytes.size() > kMaxReceiptBytesV1) {
+        return fail("size");
+    }
+    Reader reader(bytes);
+    ParentReceiptV2 out;
+    uint32_t magic = 0;
+    uint16_t reserved = 0;
+    uint16_t statement_reserved = 0;
+    auto& statement = out.statement;
+    if (!reader.U32(magic) ||
+        !reader.U16(out.version) ||
+        !reader.U16(reserved) ||
+        !reader.U16(statement.version) ||
+        !reader.U16(statement_reserved) ||
+        !reader.U32(statement.arity) ||
+        !reader.U32(statement.trace_rows) ||
+        !reader.U32(statement.semantic_columns) ||
+        !reader.U32(statement.proof_columns) ||
+        magic != kRecursiveParentWireMagicV2 ||
+        out.version != kRecursiveParentVersionV2 ||
+        statement.version !=
+            kRecursiveParentVersionV2 ||
+        reserved != 0 ||
+        statement_reserved != 0 ||
+        !reader.Hash(
+            statement.parent_program_protocol_root) ||
+        !reader.Hash(
+            statement.parent_program_registry_root)) {
+        return fail("header");
+    }
+    uint32_t fixed_count = 0;
+    if (!reader.U32(fixed_count) ||
+        fixed_count !=
+            CanonicalLayoutV1().n_columns) {
+        return fail("fixed_count");
+    }
+    statement.fixed_trace_columns.resize(
+        fixed_count);
+    for (uint32_t& column :
+         statement.fixed_trace_columns) {
+        if (!reader.U32(column)) {
+            return fail("fixed_columns");
+        }
+    }
+    if (!reader.Hash(
+            statement.fixed_trace_manifest_root)) {
+        return fail("fixed_manifest");
+    }
+    for (auto& child_root :
+         statement.ordered_child_statement_roots) {
+        if (!reader.Hash(child_root)) {
+            return fail("child_statement_roots");
+        }
+    }
+    if (!reader.Hash(
+            statement.parent_application_statement_root) ||
+        !reader.Hash(statement.acceptance_row_root) ||
+        !reader.Hash(statement.statement_root) ||
+        !reader.Hash(out.parent_fs_seed) ||
+        !reader.Hash(out.parent_proof_root) ||
+        !CanonicalParentPublicStatementV2(statement)) {
+        return fail("statement");
+    }
+    for (uint32_t child = 0;
+         child < out.children.size(); ++child) {
+        if (!ReadChild(
+                reader, out.children[child]) ||
+            out.children[child].ordinal != child ||
+            out.children[child].child_statement_root !=
+                ComputeChildStatementRootV1(
+                    out.children[child])) {
+            return fail("child");
+        }
+    }
+    uint32_t proof_size = 0;
+    std::vector<unsigned char> proof;
+    if (!reader.U32(proof_size) ||
+        proof_size == 0 ||
+        proof_size >
+            aq::kAirQuotientSplitRapRowsMaxProofBytesHard ||
+        !reader.Bytes(proof_size, proof) ||
+        !reader.Hash(out.receipt_root) ||
+        reader.Remaining() != 0) {
+        return fail("payload");
+    }
+    const auto decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(
+            proof);
+    if (!decoded.has_value()) {
+        return fail("parent_proof");
+    }
+    out.parent_proof = *decoded;
+    if (ProofRoot(out.parent_proof) !=
+            out.parent_proof_root ||
+        out.receipt_root !=
+            ComputeParentReceiptRootV2(out)) {
+        return fail("root");
+    }
+    std::vector<unsigned char> canonical;
+    if (SerializeReceiptV2(out, canonical) !=
+            bytes.size() ||
+        canonical != bytes) {
+        return fail("noncanonical");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:v11_recursive_parent_v2_decode:"
+            "canonical";
     }
     return out;
 }

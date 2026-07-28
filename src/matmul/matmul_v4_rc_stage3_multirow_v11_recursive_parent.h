@@ -34,6 +34,16 @@ inline constexpr uint32_t kRecursiveParentWireMagicV1 =
 inline constexpr uint32_t kRootWordsV1 = 8;
 inline constexpr uint32_t kMaxReceiptBytesV1 = 16U << 20;
 
+/**
+ * Additive fixed-trace parent statement.  V1 remains frozen as the native
+ * foundation; V2 uses the SAFE FixedTrace V3 proof route and never infers the
+ * expected fixed root or column manifest from the proof.
+ */
+inline constexpr uint16_t kRecursiveParentVersionV2 = 2;
+inline constexpr uint32_t kRecursiveParentWireMagicV2 =
+    0x32505256U; // "VRP2"
+inline constexpr uint32_t kRecursiveParentDependentColumnsV2 = 1;
+
 enum ResidualV1 : uint32_t {
     kResidualSameParentDecoderJoin = 1U << 0,
     kResidualDeepQuotientChip = 1U << 1,
@@ -41,6 +51,15 @@ enum ResidualV1 : uint32_t {
     kResidualRecursiveV11Verifier = 1U << 3,
     kResidualFullShardMaterialization = 1U << 4,
     kResidualCanonicalParentProgram = 1U << 5,
+};
+
+enum ResidualV2 : uint32_t {
+    /** Existing callbacks are not yet canonical constraint bytecode. */
+    kResidualV2CanonicalConstraintBytecode = 1U << 0,
+    /** No consensus registry membership proof exists for the parent program. */
+    kResidualV2ProgramRegistryMembership = 1U << 1,
+    /** Child verification and statement hashing remain host-side. */
+    kResidualV2SameParentRecursiveVerifier = 1U << 2,
 };
 
 /**
@@ -142,6 +161,67 @@ struct ParentReceiptV1 {
     uint256 receipt_root{};
 };
 
+/**
+ * Exact public statement which owns the V2 FixedTrace pin.
+ *
+ * `parent_program_protocol_root` is the strongest program provenance present
+ * in V1 today.  `parent_program_registry_root` remains null until canonical
+ * constraint bytecode and registry membership are available; that absence is
+ * carried as an explicit residual and can never close recursive authority.
+ */
+struct ParentPublicStatementV2 {
+    uint16_t version{kRecursiveParentVersionV2};
+    uint32_t arity{kRecursiveParentArityV1};
+    uint32_t trace_rows{kRecursiveParentTraceRowsV1};
+    uint32_t semantic_columns{0};
+    uint32_t proof_columns{0};
+    uint256 parent_program_protocol_root{};
+    uint256 parent_program_registry_root{};
+    std::vector<uint32_t> fixed_trace_columns;
+    uint256 fixed_trace_manifest_root{};
+    std::array<uint256, kRecursiveParentArityV1>
+        ordered_child_statement_roots{};
+    uint256 parent_application_statement_root{};
+    uint256 acceptance_row_root{};
+    uint256 statement_root{};
+
+    bool operator==(const ParentPublicStatementV2&) const = default;
+};
+
+struct ParentReceiptV2 {
+    uint16_t version{kRecursiveParentVersionV2};
+    ParentPublicStatementV2 statement{};
+    uint256 parent_fs_seed{};
+    uint256 parent_proof_root{};
+    std::array<ChildReceiptV1, kRecursiveParentArityV1> children{};
+    aq::AirQuotientSplitRapRowsProof parent_proof{};
+    uint256 receipt_root{};
+};
+
+struct ProductV2 {
+    LayoutV1 layout{};
+    aq::AirConstraintSystem<gf::Fp3> parent_proof_cs{};
+    std::vector<std::vector<gf::Fp3>> acceptance_columns;
+    std::vector<uint32_t> fixed_trace_columns;
+    ParentReceiptV2 receipt{};
+    aq::AirQuotientSplitRapSafeFixedReplayV3 parent_replay{};
+    uint32_t residual_mask{0};
+    uint32_t native_children_verified{0};
+    uint64_t parent_prove_micros{0};
+    uint64_t parent_verify_micros{0};
+    size_t parent_proof_bytes{0};
+    size_t encoded_bytes{0};
+    bool acceptance_root_rebuilt_independently{false};
+    bool exact_fixed_trace_manifest{false};
+    bool fixed_trace_v3_proved{false};
+    bool fixed_trace_v3_verified{false};
+    bool dependent_zero_column_constrained{false};
+    bool canonical_program_registry_bound{false};
+    bool recursive_authority_ready{false};
+    bool valid{false};
+    std::string note;
+};
+
 struct ProductV1 {
     LayoutV1 layout{};
     aq::AirConstraintSystem<gf::Fp3> acceptance_cs{};
@@ -187,6 +267,15 @@ struct ProductV1 {
 [[nodiscard]] uint256 ComputeParentReceiptRootV1(
     const ParentReceiptV1& receipt);
 
+[[nodiscard]] std::vector<uint32_t>
+CanonicalFixedTraceColumnsV2();
+[[nodiscard]] uint256 ComputeFixedTraceManifestRootV2(
+    const std::vector<uint32_t>& ordered_columns);
+[[nodiscard]] uint256 ComputeParentPublicStatementRootV2(
+    const ParentPublicStatementV2& statement);
+[[nodiscard]] uint256 ComputeParentReceiptRootV2(
+    const ParentReceiptV2& receipt);
+
 /**
  * Verify both real V11 children, consume their proof-aware products, build the
  * root-pinned arity-two acceptance table and prove its mirror AIR with V11.
@@ -205,10 +294,30 @@ struct ProductV1 {
     const ParentReceiptV1& receipt,
     std::string* why = nullptr);
 
+/**
+ * Build the additive V2 fixed-trace parent.  All 74 semantic acceptance
+ * columns are the verifier-pinned FixedTrace group; one appended column is
+ * constrained to zero and forms the non-empty dependent group required by
+ * Split-RAP.  Program bytecode/registry and same-parent recursion remain
+ * explicit residuals.
+ */
+[[nodiscard]] ProductV2 BuildProductV2(
+    const std::array<ChildInputV1, kRecursiveParentArityV1>& children);
+[[nodiscard]] bool VerifyReceiptV2(
+    const std::array<ChildInputV1, kRecursiveParentArityV1>& expected_children,
+    const ParentReceiptV2& receipt,
+    std::string* why = nullptr);
+
 [[nodiscard]] size_t SerializeReceiptV1(
     const ParentReceiptV1& receipt,
     std::vector<unsigned char>& out);
 [[nodiscard]] std::optional<ParentReceiptV1> DeserializeReceiptV1(
+    const std::vector<unsigned char>& bytes,
+    std::string* why = nullptr);
+[[nodiscard]] size_t SerializeReceiptV2(
+    const ParentReceiptV2& receipt,
+    std::vector<unsigned char>& out);
+[[nodiscard]] std::optional<ParentReceiptV2> DeserializeReceiptV2(
     const std::vector<unsigned char>& bytes,
     std::string* why = nullptr);
 

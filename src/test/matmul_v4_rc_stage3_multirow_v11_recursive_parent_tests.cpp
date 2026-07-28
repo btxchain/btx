@@ -158,6 +158,7 @@ Material MaterialFromProof(
 struct Fixture {
     std::array<ChildInputV1, kRecursiveParentArityV1> children;
     ProductV1 product;
+    ProductV2 product_v2;
 };
 
 Fixture BuildFixture()
@@ -176,6 +177,7 @@ Fixture BuildFixture()
     out.children[0] = std::move(first.child);
     out.children[1] = std::move(second.child);
     out.product = BuildProductV1(out.children);
+    out.product_v2 = BuildProductV2(out.children);
     return out;
 }
 
@@ -400,6 +402,268 @@ BOOST_AUTO_TEST_CASE(
             level_two_children, level_two.receipt, &why),
         why);
     BOOST_CHECK(!level_two.recursive_authority_ready);
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_fixed_v2_parent_uses_independently_rebuilt_statement_pin)
+{
+    const auto& fixture = Honest();
+    const auto& product = fixture.product_v2;
+    BOOST_REQUIRE_MESSAGE(product.valid, product.note);
+    BOOST_CHECK_EQUAL(
+        product.layout.n_columns, 74U);
+    BOOST_CHECK_EQUAL(
+        product.parent_proof_cs.n_columns, 75U);
+    BOOST_CHECK_EQUAL(
+        product.acceptance_columns.size(), 75U);
+    BOOST_REQUIRE_EQUAL(
+        product.fixed_trace_columns.size(), 74U);
+    for (uint32_t column = 0;
+         column < product.fixed_trace_columns.size();
+         ++column) {
+        BOOST_CHECK_EQUAL(
+            product.fixed_trace_columns[column],
+            column);
+    }
+    BOOST_CHECK(product.acceptance_root_rebuilt_independently);
+    BOOST_CHECK(product.exact_fixed_trace_manifest);
+    BOOST_CHECK(product.fixed_trace_v3_proved);
+    BOOST_CHECK(product.fixed_trace_v3_verified);
+    BOOST_CHECK(product.parent_replay.native_verified);
+    BOOST_CHECK(product.dependent_zero_column_constrained);
+    BOOST_CHECK(!product.canonical_program_registry_bound);
+    BOOST_CHECK(
+        product.receipt.statement
+            .parent_program_registry_root.IsNull());
+    BOOST_CHECK(!product.recursive_authority_ready);
+    BOOST_CHECK_EQUAL(
+        product.residual_mask,
+        kResidualV2CanonicalConstraintBytecode |
+            kResidualV2ProgramRegistryMembership |
+            kResidualV2SameParentRecursiveVerifier);
+    BOOST_CHECK_EQUAL(
+        product.receipt.parent_proof.version,
+        aq::kAirQuotientSplitRapRowsSafeFixedProofVersionV3);
+    BOOST_CHECK(
+        product.receipt.statement.statement_root ==
+        ComputeParentPublicStatementRootV2(
+            product.receipt.statement));
+
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        VerifyReceiptV2(
+            fixture.children,
+            product.receipt, &why),
+        why);
+    std::vector<unsigned char> wire;
+    const size_t bytes =
+        SerializeReceiptV2(
+            product.receipt, wire);
+    BOOST_REQUIRE_EQUAL(bytes, wire.size());
+    BOOST_CHECK_LE(bytes, kMaxReceiptBytesV1);
+    const auto decoded =
+        DeserializeReceiptV2(wire, &why);
+    BOOST_REQUIRE_MESSAGE(
+        decoded.has_value(), why);
+    BOOST_CHECK(
+        decoded->receipt_root ==
+        product.receipt.receipt_root);
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_fixed_v2_manifest_statement_and_joint_root_attacks_reject)
+{
+    const auto& fixture = Honest();
+    const auto& product = fixture.product_v2;
+    BOOST_REQUIRE_MESSAGE(product.valid, product.note);
+    const auto reseal_statement =
+        [](ParentReceiptV2& receipt) {
+            receipt.statement.fixed_trace_manifest_root =
+                ComputeFixedTraceManifestRootV2(
+                    receipt.statement.fixed_trace_columns);
+            receipt.statement.statement_root =
+                ComputeParentPublicStatementRootV2(
+                    receipt.statement);
+            receipt.receipt_root =
+                ComputeParentReceiptRootV2(receipt);
+        };
+    std::string why;
+
+    auto reordered = product.receipt;
+    std::swap(
+        reordered.statement.fixed_trace_columns[0],
+        reordered.statement.fixed_trace_columns[1]);
+    reseal_statement(reordered);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, reordered, &why));
+
+    auto omitted = product.receipt;
+    omitted.statement.fixed_trace_columns.pop_back();
+    reseal_statement(omitted);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, omitted, &why));
+
+    auto duplicated = product.receipt;
+    duplicated.statement.fixed_trace_columns.back() =
+        duplicated.statement.fixed_trace_columns[
+            duplicated.statement.fixed_trace_columns.size() - 2];
+    reseal_statement(duplicated);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, duplicated, &why));
+
+    auto statement_order = product.receipt;
+    std::swap(
+        statement_order.statement
+            .ordered_child_statement_roots[0],
+        statement_order.statement
+            .ordered_child_statement_roots[1]);
+    reseal_statement(statement_order);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, statement_order, &why));
+
+    // A host-chosen callback digest or invented registry root cannot upgrade
+    // the explicit protocol descriptor into canonical program provenance.
+    auto invented_registry = product.receipt;
+    invented_registry.statement.parent_program_registry_root =
+        H(904);
+    reseal_statement(invented_registry);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, invented_registry, &why));
+
+    auto child_order = product.receipt;
+    std::swap(
+        child_order.children[0],
+        child_order.children[1]);
+    child_order.receipt_root =
+        ComputeParentReceiptRootV2(child_order);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, child_order, &why));
+
+    // Joint proof/receipt-root substitution: even a self-consistent receipt
+    // hash cannot turn a proof-owned FixedTrace root into the expected root.
+    auto joint = product.receipt;
+    joint.parent_proof.batch.groups[0]
+        .row_commit.root[0] ^= 1U;
+    joint.statement.acceptance_row_root =
+        Fri3AlgDigestToUint256(
+            joint.parent_proof.batch.groups[0]
+                .row_commit.root);
+    joint.statement.statement_root =
+        ComputeParentPublicStatementRootV2(
+            joint.statement);
+    joint.receipt_root =
+        ComputeParentReceiptRootV2(joint);
+    BOOST_CHECK(!VerifyReceiptV2(
+        fixture.children, joint, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_fixed_v2_semantic_dependent_pin_codec_and_relabel_attacks_reject)
+{
+    const auto& fixture = Honest();
+    const auto& product = fixture.product_v2;
+    BOOST_REQUIRE_MESSAGE(product.valid, product.note);
+    const aq::AirQuotientFixedTracePinV3 correct_pin{
+        .version = 1,
+        .ordered_columns =
+            product.receipt.statement.fixed_trace_columns,
+        .row_root =
+            product.receipt.statement.acceptance_row_root,
+    };
+    std::string why;
+
+    auto semantic_73 = product.receipt.parent_proof;
+    BOOST_REQUIRE(
+        !semantic_73.batch.queries.empty());
+    BOOST_REQUIRE_GE(
+        semantic_73.batch.queries[0]
+            .group_rows.size(),
+        2U);
+    BOOST_REQUIRE_GT(
+        semantic_73.batch.queries[0]
+            .group_rows[0].values.size(),
+        73U);
+    semantic_73.batch.queries[0]
+        .group_rows[0].values[73] =
+        gf::Add(
+            semantic_73.batch.queries[0]
+                .group_rows[0].values[73],
+            gf::Fp3::One());
+    // PROOF-LEVEL: column 73 belongs to the authenticated FixedTrace group.
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            product.parent_proof_cs,
+            semantic_73, correct_pin,
+            product.receipt.parent_fs_seed,
+            &why));
+
+    auto dependent = product.receipt.parent_proof;
+    BOOST_REQUIRE(
+        !dependent.batch.queries[0]
+            .group_rows[1].values.empty());
+    dependent.batch.queries[0]
+        .group_rows[1].values[0] =
+        gf::Add(
+            dependent.batch.queries[0]
+                .group_rows[1].values[0],
+            gf::Fp3::One());
+    // PROOF-LEVEL: the sole Rdep column is constrained to zero everywhere.
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            product.parent_proof_cs,
+            dependent, correct_pin,
+            product.receipt.parent_fs_seed,
+            &why));
+
+    auto relabelled = product.receipt.parent_proof;
+    relabelled.version =
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2;
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            product.parent_proof_cs,
+            relabelled, correct_pin,
+            product.receipt.parent_fs_seed,
+            &why));
+
+    auto wrong_digest =
+        product.receipt.parent_proof.batch.groups[0]
+            .row_commit.root;
+    wrong_digest[0] ^= 1U;
+    auto wrong_pin = correct_pin;
+    wrong_pin.row_root =
+        Fri3AlgDigestToUint256(wrong_digest);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeFixedV3(
+            product.parent_proof_cs,
+            product.receipt.parent_proof,
+            wrong_pin,
+            product.receipt.parent_fs_seed,
+            &why));
+
+    std::vector<unsigned char> wire;
+    BOOST_REQUIRE(
+        SerializeReceiptV2(
+            product.receipt, wire) != 0);
+    auto cross_version = wire;
+    BOOST_REQUIRE_GT(cross_version.size(), 5U);
+    cross_version[4] =
+        static_cast<unsigned char>(
+            kRecursiveParentVersionV1);
+    cross_version[5] = 0;
+    BOOST_CHECK(
+        !DeserializeReceiptV2(
+            cross_version, &why).has_value());
+    auto codec_tamper = wire;
+    codec_tamper[
+        codec_tamper.size() / 2] ^= 1U;
+    BOOST_CHECK(
+        !DeserializeReceiptV2(
+            codec_tamper, &why).has_value());
+    auto trailing = wire;
+    trailing.push_back(0);
+    BOOST_CHECK(
+        !DeserializeReceiptV2(
+            trailing, &why).has_value());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
