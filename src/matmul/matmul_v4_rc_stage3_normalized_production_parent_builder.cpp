@@ -7,6 +7,7 @@
 #include <arith_uint256.h>
 #include <consensus/params.h>
 #include <matmul/matmul_v4_rc_air_recurse.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
@@ -143,6 +144,8 @@ bool ValidProduct(
 bool BuildBlockRoleProducts(
     const ProductionParentBuildInputV1& input,
     std::vector<RCStage3RoleAirProduct>& products,
+    std::array<RCStage3StreamEndpointManifest, 2>&
+        builder_stream_manifests,
     uint256& episode_digest,
     uint256& coupled_digest,
     uint256& composed_digest,
@@ -298,9 +301,7 @@ bool BuildBlockRoleProducts(
         // endpoint-specific domains; derive the light role's root and CTL
         // value from the same manifests so the parent and child state the
         // same proposition.
-        const std::vector<
-            RCStage3StreamEndpointManifest>
-            stream_manifests = {
+        builder_stream_manifests = {
                 BuildRCStage3StreamEndpointCanonicalManifest(
                     RCStage3StreamFamilyForEndpoint(
                         RCStage3RelationEndpoint::
@@ -312,6 +313,11 @@ bool BuildBlockRoleProducts(
                             EpisodeBuilderOperandXof),
                     Root8(block.seed_b), 0, 3),
             };
+        const std::vector<
+            RCStage3StreamEndpointManifest>
+            stream_manifests{
+                builder_stream_manifests.begin(),
+                builder_stream_manifests.end()};
         products.push_back(
             BuildRCStage3NoKernelRoleAir(
                 Role::EpisodeDeterministicBuilder,
@@ -550,11 +556,33 @@ void AddEndpointValueAlias(
         });
 }
 
+void AddSameParentFirstRowAlias(
+    AirCS& cs,
+    uint32_t left,
+    uint32_t right,
+    const char* name)
+{
+    cs.constraints.push_back(
+        {
+            name,
+            air_quotient::AirKind::kFirstRow,
+            1,
+            [left, right](
+                const std::vector<gf::Fp3>& current,
+                const std::vector<gf::Fp3>&) {
+                return gf::Sub(
+                    current[left],
+                    current[right]);
+            },
+        });
+}
+
 bool AppendCanonicalEndpointBank(
     const std::vector<RCStage3RoleAirProduct>& products,
     AirCS& parent_cs,
     std::vector<std::vector<gf::Fp3>>& parent_columns,
     std::vector<ProductionRolePlacementV1>& placements,
+    uint32_t expected_endpoint_count,
     std::string* why)
 {
     if (placements.size() != products.size() ||
@@ -626,11 +654,288 @@ bool AppendCanonicalEndpointBank(
         }
     }
     if (endpoint_count !=
-        kRCStage3RelationClosureEndpointCount) {
+        expected_endpoint_count) {
         Note(why, "endpoint_bank_count");
         return false;
     }
     return true;
+}
+
+bool AppendDirectBuilderStreamChildren(
+    const std::array<
+        RCStage3StreamEndpointManifest, 2>&
+        manifests,
+    const std::array<
+        RCStage3StreamEndpointClosure, 2>&
+        closures,
+    uint32_t parent_rows,
+    AirCS& parent_cs,
+    std::vector<std::vector<gf::Fp3>>&
+        parent_columns,
+    std::vector<ProductionRolePlacementV1>&
+        placements,
+    std::vector<
+        ProductionDirectStreamChildPlacementV1>&
+        out,
+    std::string* why)
+{
+    if (placements.empty() ||
+        placements.front().role !=
+            Role::EpisodeDeterministicBuilder ||
+        placements.front().endpoints.size() != 4 ||
+        parent_rows < 2) {
+        Note(why, "builder_direct_parent_shape");
+        return false;
+    }
+    constexpr std::array<
+        RCStage3RelationEndpoint, 2>
+        endpoints{
+            RCStage3RelationEndpoint::
+                EpisodeBuilderSeedChain,
+            RCStage3RelationEndpoint::
+                EpisodeBuilderOperandXof,
+        };
+    out.clear();
+    out.reserve(endpoints.size());
+    for (uint32_t child = 0;
+         child < endpoints.size(); ++child) {
+        const auto& closure = closures[child];
+        const auto& role_pin =
+            placements.front().endpoints[
+                child + 1U];
+        if (!closure.ok ||
+            role_pin.endpoint != endpoints[child] ||
+            closure.family !=
+                RCStage3StreamFamilyForEndpoint(
+                    endpoints[child]) ||
+            closure.child_value_export_column >=
+                closure.child_cs.n_columns ||
+            closure.child_output_export_base + 8U >
+                closure.child_cs.n_columns) {
+            Note(why, "builder_direct_child_shape");
+            return false;
+        }
+
+        // The standalone child pins its own R0 commitment so a Split-RAP
+        // receipt can be verified.  Horizontal composition commits one
+        // different global row, so those commitment pins are intentionally
+        // removed; every preprocessed value and every semantic constraint is
+        // still appended and the final parent proof rebuilds one global root.
+        AirCS child_cs = closure.child_cs;
+        child_cs.preprocessed_roots.clear();
+        child_cs.preprocessed_row_group_roots.clear();
+
+        ProductionDirectStreamChildPlacementV1
+            placed;
+        placed.endpoint = endpoints[child];
+        placed.manifest = manifests[child];
+        placed.child_rows =
+            closure.child_cs.n_rows;
+        std::string compose_why;
+        if (!composer::AppendChildLiftedV1(
+                parent_cs, parent_columns,
+                child_cs, closure.child_witness,
+                parent_rows,
+                static_cast<uint32_t>(
+                    placements.size()) +
+                    child,
+                placed.attachment,
+                &compose_why)) {
+            Note(
+                why,
+                "builder_direct_child_append:" +
+                    compose_why);
+            return false;
+        }
+
+        placed.child_value_parent_column =
+            placed.attachment.ParentColumn(
+                closure
+                    .child_value_export_column);
+        placed.role_bank_value_column =
+            role_pin.bank_value_column;
+        AddSameParentFirstRowAlias(
+            parent_cs,
+            placed.child_value_parent_column,
+            placed.role_bank_value_column,
+            "stage3.production_builder_child."
+            "value_same_parent_alias");
+        placed.value_same_parent_aliased = true;
+        for (uint32_t word = 0; word < 8;
+             ++word) {
+            placed.child_root_parent_columns[word] =
+                placed.attachment.ParentColumn(
+                    closure
+                        .child_output_export_base +
+                    word);
+            placed.role_root_word_columns[word] =
+                role_pin.root_word_columns[word];
+            AddSameParentFirstRowAlias(
+                parent_cs,
+                placed
+                    .child_root_parent_columns[
+                        word],
+                placed.role_root_word_columns[word],
+                "stage3.production_builder_child."
+                "root_same_parent_alias");
+        }
+        placed.root_same_parent_aliased = true;
+        placed.complete_relation_same_parent =
+            placed.attachment.valid &&
+            placed.value_same_parent_aliased &&
+            placed.root_same_parent_aliased;
+        out.push_back(std::move(placed));
+    }
+    return out.size() == endpoints.size() &&
+        std::all_of(
+            out.begin(), out.end(),
+            [](const auto& child) {
+                return child
+                    .complete_relation_same_parent;
+            });
+}
+
+bool AssembleDirectBuilderParent(
+    const std::vector<RCStage3RoleAirProduct>&
+        products,
+    const std::array<
+        RCStage3StreamEndpointManifest, 2>&
+        manifests,
+    const std::array<
+        RCStage3StreamEndpointClosure, 2>&
+        closures,
+    uint32_t common_rows,
+    uint32_t expected_endpoint_count,
+    ProductionRelationParentCandidateV1& out,
+    std::string* why)
+{
+    out.cs = {};
+    out.columns.clear();
+    out.roles.clear();
+    out.direct_builder_stream_children.clear();
+
+    out.roles.reserve(products.size());
+    for (uint32_t ordinal = 0;
+         ordinal < products.size(); ++ordinal) {
+        std::string compose_why;
+        ProductionRolePlacementV1 placement;
+        placement.role = products[ordinal].role;
+        if (!composer::AppendChildLiftedV1(
+                out.cs, out.columns,
+                products[ordinal].cs,
+                products[ordinal].witness,
+                common_rows, ordinal,
+                placement.attachment,
+                &compose_why)) {
+            Note(
+                why,
+                "role_append:" + compose_why);
+            return false;
+        }
+        out.roles.push_back(std::move(placement));
+    }
+    if (!AppendCanonicalEndpointBank(
+            products, out.cs, out.columns,
+            out.roles, expected_endpoint_count,
+            why) ||
+        !AppendDirectBuilderStreamChildren(
+            manifests, closures, common_rows,
+            out.cs, out.columns, out.roles,
+            out.direct_builder_stream_children,
+            why)) {
+        return false;
+    }
+    return true;
+}
+
+std::vector<uint32_t>
+DirectParentBaseColumns(
+    const ProductionRelationParentCandidateV1& parent,
+    const std::array<
+        RCStage3StreamEndpointClosure, 2>&
+        closures)
+{
+    std::vector<uint32_t> out;
+    if (parent.direct_builder_stream_children.size() !=
+        closures.size()) {
+        return out;
+    }
+    const uint32_t ordinary_parent_columns =
+        parent.direct_builder_stream_children.front()
+            .attachment.column_base;
+    out.reserve(
+        ordinary_parent_columns + 4096U);
+    for (uint32_t column = 0;
+         column < ordinary_parent_columns;
+         ++column) {
+        out.push_back(column);
+    }
+    for (uint32_t child = 0;
+         child < closures.size(); ++child) {
+        const auto& attachment =
+            parent.direct_builder_stream_children[
+                child].attachment;
+        const auto& closure = closures[child];
+        const uint32_t semantic_columns =
+            closure.child_cs.n_columns;
+        std::vector<uint32_t> local_base;
+        for (const auto& pin :
+             closure.child_cs
+                 .preprocessed_row_group_roots) {
+            if (pin.version == 1 &&
+                pin.role ==
+                    air_quotient::
+                        AirPreprocessedRowGroupRole::
+                            kR0) {
+                local_base = pin.ordered_columns;
+                break;
+            }
+        }
+        // The three stream-word address selectors are appended after the
+        // standalone R0 was committed.  They are fixed schedule columns and
+        // belong to the global parent's pre-challenge group.
+        if (semantic_columns < 7U) {
+            return {};
+        }
+        const uint32_t value_selector_base =
+            semantic_columns - 3U;
+        for (uint32_t selector = 0;
+             selector < 3; ++selector) {
+            local_base.push_back(
+                value_selector_base + selector);
+        }
+        std::sort(
+            local_base.begin(), local_base.end());
+        local_base.erase(
+            std::unique(
+                local_base.begin(),
+                local_base.end()),
+            local_base.end());
+        for (uint32_t local : local_base) {
+            if (local >= semantic_columns) {
+                return {};
+            }
+            out.push_back(
+                attachment.ParentColumn(local));
+            out.push_back(
+                attachment.ParentColumn(
+                    semantic_columns + local));
+        }
+        // AppendChildLiftedV1 owns five fixed selectors after ordinary and
+        // wrap columns.
+        for (uint32_t selector = 0;
+             selector < 5; ++selector) {
+            out.push_back(
+                attachment.ParentColumn(
+                    2U * semantic_columns +
+                    selector));
+        }
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(
+        std::unique(out.begin(), out.end()),
+        out.end());
+    return out;
 }
 
 } // namespace
@@ -653,6 +958,168 @@ const char* ProductionParentBuildStatusNameV1(
         return "built";
     }
     return "unknown";
+}
+
+bool BuildDirectBuilderStreamParentCanaryV1(
+    const std::array<
+        RCStage3StreamEndpointManifest, 2>&
+        manifests,
+    const uint256& public_fs_seed,
+    ProductionRelationParentCandidateV1& out,
+    std::string* why)
+{
+    out = {};
+    if (public_fs_seed.IsNull()) {
+        Note(why, "builder_canary_seed");
+        return false;
+    }
+    const std::vector<gf::Fp3> openings{
+        gf::Fp3::FromFp(gf::FromU64(1))};
+    const std::vector<
+        RCStage3StreamEndpointManifest>
+        stream_manifests{
+            manifests.begin(), manifests.end()};
+    std::vector<RCStage3RoleAirProduct>
+        products;
+    products.push_back(
+        BuildRCStage3NoKernelRoleAir(
+            Role::EpisodeDeterministicBuilder,
+            why, &openings, nullptr,
+            &stream_manifests));
+    if (!products.front().ok) {
+        Note(why, "builder_canary_role");
+        return false;
+    }
+
+    constexpr std::array<
+        RCStage3RelationEndpoint, 2>
+        endpoints{
+            RCStage3RelationEndpoint::
+                EpisodeBuilderSeedChain,
+            RCStage3RelationEndpoint::
+                EpisodeBuilderOperandXof,
+        };
+    std::array<
+        RCStage3StreamEndpointClosure, 2>
+        closures;
+    uint32_t common_rows =
+        products.front().cs.n_rows;
+    for (uint32_t child = 0;
+         child < closures.size(); ++child) {
+        closures[child] =
+            RCStage3StreamEndpointClose(
+                RCStage3StreamFamilyForEndpoint(
+                    endpoints[child]),
+                manifests[child], public_fs_seed,
+                nullptr, false);
+        if (!closures[child].ok) {
+            Note(
+                why,
+                "builder_canary_child:" +
+                    closures[child].note);
+            return false;
+        }
+        common_rows =
+            std::max(
+                common_rows,
+                closures[child].child_cs.n_rows);
+    }
+    if (!PowerOfTwo(common_rows) ||
+        !AssembleDirectBuilderParent(
+            products, manifests, closures,
+            common_rows, 4U, out, why)) {
+        return false;
+    }
+    const std::vector<uint32_t> base_columns =
+        DirectParentBaseColumns(out, closures);
+    std::string base_why;
+    const uint256 base_root =
+        air_quotient::
+            AirQuotientTwoEpochBaseRowCommitment(
+                out.cs, out.columns,
+                base_columns, &base_why);
+    if (base_columns.empty() ||
+        base_root.IsNull()) {
+        Note(
+            why,
+            "builder_canary_base:" + base_why);
+        return false;
+    }
+    for (uint32_t child = 0;
+         child < closures.size(); ++child) {
+        closures[child] =
+            RCStage3StreamEndpointClose(
+                RCStage3StreamFamilyForEndpoint(
+                    endpoints[child]),
+                manifests[child], public_fs_seed,
+                nullptr, false, base_root);
+        if (!closures[child].ok) {
+            Note(
+                why,
+                "builder_canary_child_rebuild:" +
+                    closures[child].note);
+            return false;
+        }
+    }
+    if (!AssembleDirectBuilderParent(
+            products, manifests, closures,
+            common_rows, 4U, out, why)) {
+        return false;
+    }
+    out.direct_parent_base_column_indices =
+        DirectParentBaseColumns(out, closures);
+    if (out.direct_parent_base_column_indices !=
+        base_columns) {
+        Note(why, "builder_canary_base_columns_drift");
+        return false;
+    }
+    out.direct_parent_base_row_root = base_root;
+    out.direct_builder_public_fs_seed =
+        public_fs_seed;
+    out.cs.preprocessed_row_group_roots.push_back(
+        {
+            .version = 1,
+            .role =
+                air_quotient::
+                    AirPreprocessedRowGroupRole::kR0,
+            .ordered_columns =
+                out.direct_parent_base_column_indices,
+            .root =
+                out.direct_parent_base_row_root,
+        });
+    out.endpoint_count = 4;
+    out.all_endpoint_cells_literal = true;
+    out.builder_stream_relations_same_parent =
+        out.direct_builder_stream_children.size() ==
+            2U &&
+        std::all_of(
+            out.direct_builder_stream_children.begin(),
+            out.direct_builder_stream_children.end(),
+            [](const auto& child) {
+                return child
+                    .complete_relation_same_parent;
+            });
+    out.witness_violations =
+        air_recurse::CountWitnessViolationsOnH(
+            out.cs, out.columns);
+    out.local_parent_valid =
+        out.builder_stream_relations_same_parent &&
+        out.witness_violations == 0;
+    out.recursive_semantic_closure_complete =
+        false;
+    out.production_authority = false;
+    out.note =
+        out.local_parent_valid
+        ? "stage3:normalized_production_parent_builder:"
+          "bounded_direct_builder_parent_valid"
+        : "stage3:normalized_production_parent_builder:"
+          "bounded_direct_builder_parent_invalid";
+    if (!out.local_parent_valid) {
+        Note(why, "builder_canary_invalid");
+        return false;
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
 }
 
 bool BuildRelationParentCandidateForSolvedBlockV1(
@@ -680,11 +1147,54 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
     }
 
     std::vector<RCStage3RoleAirProduct> products;
+    std::array<
+        RCStage3StreamEndpointManifest, 2>
+        builder_stream_manifests;
     if (!BuildBlockRoleProducts(
-            input, products, out.episode_digest,
+            input, products,
+            builder_stream_manifests,
+            out.episode_digest,
             out.coupled_digest, out.composed_digest,
             why)) {
         return false;
+    }
+
+    out.direct_builder_public_fs_seed =
+        input.solved_block->GetHash();
+    if (out.direct_builder_public_fs_seed.IsNull()) {
+        Note(why, "builder_direct_public_seed");
+        return false;
+    }
+    std::array<
+        RCStage3StreamEndpointClosure, 2>
+        builder_stream_closures;
+    constexpr std::array<
+        RCStage3RelationEndpoint, 2>
+        builder_stream_endpoints{
+            RCStage3RelationEndpoint::
+                EpisodeBuilderSeedChain,
+            RCStage3RelationEndpoint::
+                EpisodeBuilderOperandXof,
+        };
+    for (uint32_t child = 0;
+         child < builder_stream_closures.size();
+         ++child) {
+        builder_stream_closures[child] =
+            RCStage3StreamEndpointClose(
+                RCStage3StreamFamilyForEndpoint(
+                    builder_stream_endpoints[child]),
+                builder_stream_manifests[child],
+                out.direct_builder_public_fs_seed,
+                nullptr,
+                /*run_cs_checks=*/false);
+        if (!builder_stream_closures[child].ok) {
+            Note(
+                why,
+                "builder_direct_child:" +
+                    builder_stream_closures[child]
+                        .note);
+            return false;
+        }
     }
 
     uint32_t common_rows = 0;
@@ -692,39 +1202,118 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         common_rows =
             std::max(common_rows, product.cs.n_rows);
     }
+    for (const auto& closure :
+         builder_stream_closures) {
+        common_rows =
+            std::max(
+                common_rows,
+                closure.child_cs.n_rows);
+    }
     if (!PowerOfTwo(common_rows)) {
         Note(why, "common_rows");
         return false;
     }
 
-    // AppendChildLiftedV1 preserves each role's original boundary/transition
-    // semantics under verifier-owned selectors and constrains every padding
-    // cell to zero.
-    out.roles.reserve(products.size());
-    for (uint32_t ordinal = 0;
-         ordinal < products.size(); ++ordinal) {
-        std::string compose_why;
-        ProductionRolePlacementV1 placement;
-        placement.role = products[ordinal].role;
-        if (!composer::AppendChildLiftedV1(
-                out.cs, out.columns,
-                products[ordinal].cs,
-                products[ordinal].witness,
-                common_rows, ordinal,
-                placement.attachment,
-                &compose_why)) {
-            Note(
-                why,
-                "role_append:" + compose_why);
-            return false;
-        }
-        out.roles.push_back(std::move(placement));
-    }
-    if (!AppendCanonicalEndpointBank(
-            products, out.cs, out.columns,
-            out.roles, why)) {
+    // Assemble once to retain the exact global pre-challenge group. Rebuild
+    // both SHA children from that parent-owned R0 root, then assemble the
+    // final parent with those derived CTL challenges. This prevents a prover
+    // from choosing the heavy-child witness after seeing its LogUp challenge.
+    if (!AssembleDirectBuilderParent(
+            products,
+            builder_stream_manifests,
+            builder_stream_closures,
+            common_rows,
+            kRCStage3RelationClosureEndpointCount,
+            out,
+            why)) {
         return false;
     }
+    const std::vector<uint32_t>
+        parent_base_columns =
+            DirectParentBaseColumns(
+                out, builder_stream_closures);
+    if (parent_base_columns.empty()) {
+        Note(why, "builder_direct_parent_base_columns");
+        return false;
+    }
+    std::string base_why;
+    const uint256 parent_base_root =
+        air_quotient::
+            AirQuotientTwoEpochBaseRowCommitment(
+                out.cs, out.columns,
+                parent_base_columns, &base_why);
+    if (parent_base_root.IsNull()) {
+        Note(
+            why,
+            "builder_direct_parent_base_root:" +
+                base_why);
+        return false;
+    }
+    for (uint32_t child = 0;
+         child < builder_stream_closures.size();
+         ++child) {
+        builder_stream_closures[child] =
+            RCStage3StreamEndpointClose(
+                RCStage3StreamFamilyForEndpoint(
+                    builder_stream_endpoints[child]),
+                builder_stream_manifests[child],
+                out.direct_builder_public_fs_seed,
+                nullptr,
+                /*run_cs_checks=*/false,
+                parent_base_root);
+        if (!builder_stream_closures[child].ok) {
+            Note(
+                why,
+                "builder_direct_child_rebuild:" +
+                    builder_stream_closures[child]
+                        .note);
+            return false;
+        }
+    }
+    if (!AssembleDirectBuilderParent(
+            products, builder_stream_manifests,
+            builder_stream_closures,
+            common_rows,
+            kRCStage3RelationClosureEndpointCount,
+            out, why)) {
+        return false;
+    }
+    out.direct_parent_base_column_indices =
+        DirectParentBaseColumns(
+            out, builder_stream_closures);
+    if (out.direct_parent_base_column_indices !=
+            parent_base_columns ||
+        air_quotient::
+            AirQuotientTwoEpochBaseRowCommitment(
+                out.cs, out.columns,
+                out.direct_parent_base_column_indices,
+                &base_why) != parent_base_root) {
+        Note(why, "builder_direct_parent_base_drift");
+        return false;
+    }
+    out.direct_parent_base_row_root =
+        parent_base_root;
+    out.cs.preprocessed_row_group_roots.push_back(
+        {
+            .version = 1,
+            .role =
+                air_quotient::
+                    AirPreprocessedRowGroupRole::kR0,
+            .ordered_columns =
+                out.direct_parent_base_column_indices,
+            .root =
+                out.direct_parent_base_row_root,
+        });
+    out.builder_stream_relations_same_parent =
+        out.direct_builder_stream_children.size() ==
+            2U &&
+        std::all_of(
+            out.direct_builder_stream_children.begin(),
+            out.direct_builder_stream_children.end(),
+            [](const auto& child) {
+                return child
+                    .complete_relation_same_parent;
+            });
 
     out.endpoint_count = 0;
     out.exact_role_order =
@@ -774,6 +1363,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         out.endpoint_count ==
             kRCStage3RelationClosureEndpointCount &&
         out.all_endpoint_cells_literal &&
+        out.builder_stream_relations_same_parent &&
         out.witness_violations == 0;
 
     out.recursive_semantic_closure_complete = true;

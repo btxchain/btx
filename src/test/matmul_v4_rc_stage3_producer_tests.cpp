@@ -39,6 +39,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_air_recurse.h>
+#include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
@@ -1020,6 +1021,48 @@ BOOST_AUTO_TEST_CASE(
             seed_pin.bank_value_column][0],
         rc::RCStage3StreamEndpointCtlValue(
             seed_manifest)));
+    BOOST_REQUIRE_EQUAL(
+        candidate
+            .direct_builder_stream_children
+            .size(),
+        2U);
+    BOOST_CHECK(
+        candidate
+            .builder_stream_relations_same_parent);
+    BOOST_CHECK(
+        !candidate
+             .direct_parent_base_row_root
+             .IsNull());
+    BOOST_CHECK(
+        candidate.direct_parent_base_column_indices
+            .size() <
+        candidate.cs.n_columns);
+    for (const auto& child :
+         candidate.direct_builder_stream_children) {
+        BOOST_CHECK(
+            child.complete_relation_same_parent);
+        BOOST_CHECK(
+            child.value_same_parent_aliased);
+        BOOST_CHECK(
+            child.root_same_parent_aliased);
+        for (uint32_t root_column :
+             child.child_root_parent_columns) {
+            BOOST_REQUIRE_LT(
+                root_column,
+                candidate.cs.n_columns);
+            // These are the hash AIR's ordinary final-word exports.  They
+            // must not be metadata or a preprocessed root pin masquerading
+            // as a child output.
+            BOOST_CHECK(
+                std::none_of(
+                    candidate.cs.preprocessed.begin(),
+                    candidate.cs.preprocessed.end(),
+                    [root_column](const auto& fixed) {
+                        return fixed.first ==
+                            root_column;
+                    }));
+        }
+    }
 
     // This parent is executable, but the live audit still reports missing
     // recursive semantic children.  It must never be silently promoted into
@@ -1047,6 +1090,276 @@ BOOST_AUTO_TEST_CASE(
             CountWitnessViolationsOnH(
                 candidate.cs, forged),
         0U);
+
+    // Expensive proof-level gate: prove the actual two-child parent once,
+    // then coherently substitute both the SHA child output and the linked
+    // role root cell.  The equality remains satisfied, but the SHA/root
+    // relation does not; even a forced inexact proof is rejected by the
+    // unmodified Split-RAP verifier.
+    if (std::getenv(
+            "BTX_RUN_STAGE3_BUILDER_DIRECT_PARENT_PROOF") !=
+        nullptr) {
+        namespace aq = rc::air_quotient;
+        const auto proved =
+            aq::AirQuotientProveRowsSplitRap(
+                candidate.cs, candidate.columns,
+                candidate
+                    .direct_parent_base_column_indices,
+                candidate
+                    .direct_builder_public_fs_seed);
+        BOOST_REQUIRE_MESSAGE(
+            proved.ok, proved.note);
+        BOOST_REQUIRE(proved.division_exact);
+        BOOST_CHECK_MESSAGE(
+            aq::AirQuotientVerifyRowsSplitRap(
+                candidate.cs, proved.proof,
+                candidate
+                    .direct_parent_base_column_indices,
+                candidate
+                    .direct_builder_public_fs_seed,
+                &why),
+            why);
+
+        auto substituted = candidate.columns;
+        const auto& direct =
+            candidate
+                .direct_builder_stream_children
+                .front();
+        const uint32_t child_root =
+            direct.child_root_parent_columns[0];
+        const uint32_t role_root =
+            direct.role_root_word_columns[0];
+        const uint32_t child_value =
+            direct.child_value_parent_column;
+        const uint32_t role_value =
+            direct.role_bank_value_column;
+        for (uint32_t row = 0;
+             row < candidate.cs.n_rows; ++row) {
+            // Lifted child exports are zero on padding; mutate only its
+            // original active rows while changing the role's broadcast root
+            // everywhere.  Row zero remains a coherent alias substitution.
+            if (row <
+                direct.child_rows) {
+                substituted[child_root][row] =
+                    rc::gkr_field::Add(
+                        substituted[child_root][row],
+                        rc::gkr_field::Fp3::One());
+                substituted[child_value][row] =
+                    rc::gkr_field::Add(
+                        substituted[child_value][row],
+                        rc::gkr_field::Fp3::One());
+            }
+            substituted[role_root][row] =
+                rc::gkr_field::Add(
+                    substituted[role_root][row],
+                    rc::gkr_field::Fp3::One());
+            substituted[role_value][row] =
+                rc::gkr_field::Add(
+                    substituted[role_value][row],
+                    rc::gkr_field::Fp3::One());
+        }
+        BOOST_CHECK_GT(
+            rc::air_recurse::
+                CountWitnessViolationsOnH(
+                    candidate.cs, substituted),
+            0U);
+        aq::AirProveOptions force;
+        force.force_commit_on_inexact = true;
+        auto substituted_cs = candidate.cs;
+        const uint256 substituted_r0 =
+            aq::AirQuotientTwoEpochBaseRowCommitment(
+                substituted_cs, substituted,
+                candidate
+                    .direct_parent_base_column_indices,
+                &why);
+        BOOST_REQUIRE_MESSAGE(
+            !substituted_r0.IsNull(), why);
+        BOOST_REQUIRE_EQUAL(
+            substituted_cs
+                .preprocessed_row_group_roots
+                .size(),
+            1U);
+        substituted_cs
+            .preprocessed_row_group_roots[0]
+            .root = substituted_r0;
+        const auto substituted_proof =
+            aq::AirQuotientProveRowsSplitRap(
+                substituted_cs, substituted,
+                candidate
+                    .direct_parent_base_column_indices,
+                candidate
+                    .direct_builder_public_fs_seed,
+                force);
+        BOOST_REQUIRE_MESSAGE(
+            substituted_proof.ok,
+            substituted_proof.note);
+        BOOST_CHECK(
+            !substituted_proof.division_exact);
+        BOOST_CHECK(
+            !aq::AirQuotientVerifyRowsSplitRap(
+                candidate.cs,
+                substituted_proof.proof,
+                candidate
+                    .direct_parent_base_column_indices,
+                candidate
+                    .direct_builder_public_fs_seed,
+                &why));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(
+    bounded_direct_builder_parent_proves_and_rejects_coherent_substitution)
+{
+    if (std::getenv(
+            "BTX_RUN_STAGE3_BUILDER_DIRECT_PARENT_CANARY") ==
+        nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_BUILDER_DIRECT_PARENT_CANARY=1");
+        return;
+    }
+    namespace builder =
+        rc::normalized_production_parent_builder;
+    namespace aq = rc::air_quotient;
+    const std::array<uint32_t, 8> seed_words{
+        0x01020304U, 0x11121314U,
+        0x21222324U, 0x31323334U,
+        0x41424344U, 0x51525354U,
+        0x61626364U, 0x71727374U};
+    const std::array<uint32_t, 8> xof_words{
+        0x81828384U, 0x91929394U,
+        0xa1a2a3a4U, 0xb1b2b3b4U,
+        0xc1c2c3c4U, 0xd1d2d3d4U,
+        0xe1e2e3e4U, 0xf1f2f3f4U};
+    const std::array<
+        rc::RCStage3StreamEndpointManifest, 2>
+        manifests{
+            rc::BuildRCStage3StreamEndpointCanonicalManifest(
+                rc::RCStage3StreamFamilyForEndpoint(
+                    rc::RCStage3RelationEndpoint::
+                        EpisodeBuilderSeedChain),
+                seed_words, 0, 0),
+            rc::BuildRCStage3StreamEndpointCanonicalManifest(
+                rc::RCStage3StreamFamilyForEndpoint(
+                    rc::RCStage3RelationEndpoint::
+                        EpisodeBuilderOperandXof),
+                xof_words, 0, 0),
+        };
+    uint256 public_seed;
+    std::fill(
+        public_seed.begin(), public_seed.end(),
+        static_cast<unsigned char>(0x6d));
+    builder::ProductionRelationParentCandidateV1
+        parent;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        builder::
+            BuildDirectBuilderStreamParentCanaryV1(
+                manifests, public_seed,
+                parent, &why),
+        why);
+    BOOST_REQUIRE(parent.local_parent_valid);
+    BOOST_REQUIRE(
+        parent.builder_stream_relations_same_parent);
+    BOOST_REQUIRE_EQUAL(
+        parent.direct_builder_stream_children.size(),
+        2U);
+    for (const auto& child :
+         parent.direct_builder_stream_children) {
+        BOOST_REQUIRE(
+            child.complete_relation_same_parent);
+        for (uint32_t root_column :
+             child.child_root_parent_columns) {
+            BOOST_CHECK(
+                std::none_of(
+                    parent.cs.preprocessed.begin(),
+                    parent.cs.preprocessed.end(),
+                    [root_column](const auto& fixed) {
+                        return fixed.first ==
+                            root_column;
+                    }));
+        }
+    }
+
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRap(
+            parent.cs, parent.columns,
+            parent.direct_parent_base_column_indices,
+            public_seed);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    BOOST_REQUIRE(proved.division_exact);
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            parent.cs, proved.proof,
+            parent.direct_parent_base_column_indices,
+            public_seed, &why),
+        why);
+
+    auto substituted = parent.columns;
+    const auto& child =
+        parent.direct_builder_stream_children.front();
+    for (uint32_t row = 0;
+         row < parent.cs.n_rows; ++row) {
+        if (row < child.child_rows) {
+            substituted[
+                child.child_value_parent_column][row] =
+                rc::gkr_field::Add(
+                    substituted[
+                        child
+                            .child_value_parent_column][row],
+                    rc::gkr_field::Fp3::One());
+            substituted[
+                child.child_root_parent_columns[0]][row] =
+                rc::gkr_field::Add(
+                    substituted[
+                        child
+                            .child_root_parent_columns[0]][row],
+                    rc::gkr_field::Fp3::One());
+        }
+        substituted[
+            child.role_bank_value_column][row] =
+            rc::gkr_field::Add(
+                substituted[
+                    child.role_bank_value_column][row],
+                rc::gkr_field::Fp3::One());
+        substituted[
+            child.role_root_word_columns[0]][row] =
+            rc::gkr_field::Add(
+                substituted[
+                    child.role_root_word_columns[0]][row],
+                rc::gkr_field::Fp3::One());
+    }
+    BOOST_REQUIRE_GT(
+        rc::air_recurse::CountWitnessViolationsOnH(
+            parent.cs, substituted),
+        0U);
+    auto substituted_cs = parent.cs;
+    const uint256 substituted_r0 =
+        aq::AirQuotientTwoEpochBaseRowCommitment(
+            substituted_cs, substituted,
+            parent.direct_parent_base_column_indices,
+            &why);
+    BOOST_REQUIRE_MESSAGE(
+        !substituted_r0.IsNull(), why);
+    BOOST_REQUIRE_EQUAL(
+        substituted_cs
+            .preprocessed_row_group_roots.size(),
+        1U);
+    substituted_cs.preprocessed_row_group_roots[0]
+        .root = substituted_r0;
+    aq::AirProveOptions force;
+    force.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, substituted,
+            parent.direct_parent_base_column_indices,
+            public_seed, force);
+    BOOST_REQUIRE_MESSAGE(forged.ok, forged.note);
+    BOOST_REQUIRE(!forged.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            parent.cs, forged.proof,
+            parent.direct_parent_base_column_indices,
+            public_seed, &why));
 }
 
 BOOST_AUTO_TEST_CASE(non_rc_height_requires_no_attachment)

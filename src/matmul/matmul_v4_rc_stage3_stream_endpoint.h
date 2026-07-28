@@ -102,6 +102,15 @@ struct RCStage3StreamEndpointClosure {
     air_quotient::AirConstraintSystem<gkr_field::Fp3> child_cs;
     std::vector<std::vector<gkr_field::Fp3>> child_witness;
     uint32_t child_output_export_base{0};
+    /**
+     * Broadcast Fp3 recomposition of the first three leaf stream words.
+     *
+     * This is not a host-side manifest copy: three broadcast word columns are
+     * equality-selected from the canonical first-pass SHA message-word export,
+     * and this column is constrained to their Fp3 recomposition.  A horizontal
+     * parent can therefore alias the role CTL cell directly to the SHA child.
+     */
+    uint32_t child_value_export_column{0};
     uint32_t child_violations{0};
 
     air_quotient::AirConstraintSystem<gkr_field::Fp3> bind_cs;
@@ -154,7 +163,8 @@ BuildRCStage3StreamEndpointCanonicalManifest(
 [[nodiscard]] RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     RCStage3StreamFamily family,
     const RCStage3StreamEndpointManifest& manifest, const uint256& fs_seed,
-    std::string* why = nullptr, bool run_cs_checks = true);
+    std::string* why = nullptr, bool run_cs_checks = true,
+    const uint256& precommitted_base_row = {});
 
 /**
  * (Column-shiftable CS the registry direct-products into C_rho.)  The light

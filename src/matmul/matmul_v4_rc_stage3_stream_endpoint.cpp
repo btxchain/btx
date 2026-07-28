@@ -294,7 +294,8 @@ Fp3 RCStage3StreamEndpointCtlValue(
 RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     RCStage3StreamFamily family,
     const RCStage3StreamEndpointManifest& manifest, const uint256& fs_seed,
-    std::string* why, bool run_cs_checks)
+    std::string* why, bool run_cs_checks,
+    const uint256& precommitted_base_row)
 {
     RCStage3StreamEndpointClosure out;
     out.family = family;
@@ -365,7 +366,8 @@ RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     const auto program =
         ha::BuildCanonicalProgram(ha::ProgramKind::Sha256Compression);
     auto inst = ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
-        program, boundaries, masks, links, fs_seed);
+        program, boundaries, masks, links, fs_seed,
+        precommitted_base_row);
     if (!inst.valid) {
         out.note = "stream_endpoint:vertical:" + inst.note;
         return out;
@@ -375,6 +377,136 @@ RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     out.child_output_export_base = inst.output_export_base;
     out.child_semantic_compressions =
         static_cast<uint32_t>(boundaries.size());
+
+    // Export the first three stream words as one broadcast Fp3 cell owned by
+    // the SHA child.  The vertical witness already exports every first-pass
+    // message word at its unique (active,address) row.  Three fixed selectors
+    // pick leaf block-0 addresses 2,3,4 (domain and leaf index occupy 0,1);
+    // the selected words are broadcast and recomposed inside the AIR.  This
+    // gives a direct parent a literal child column to alias to the role CTL
+    // cell instead of trusting a duplicated host manifest value.
+    const uint32_t word_export_base =
+        out.child_cs.n_columns;
+    out.child_value_export_column =
+        word_export_base + 3U;
+    const uint32_t selector_base =
+        word_export_base + 4U;
+    out.child_cs.n_columns += 7U;
+    out.child_witness.resize(
+        out.child_cs.n_columns,
+        std::vector<Fp3>(
+            out.child_cs.n_rows, Fp3::Zero()));
+    for (uint32_t word = 0; word < 3; ++word) {
+        const uint32_t export_column =
+            word_export_base + word;
+        std::fill(
+            out.child_witness[export_column].begin(),
+            out.child_witness[export_column].end(),
+            U32(manifest.stream_value[word]));
+        std::vector<Fp3> selector(
+            out.child_cs.n_rows, Fp3::Zero());
+        uint32_t selected_rows = 0;
+        for (uint32_t row = 0;
+             row < out.child_cs.n_rows; ++row) {
+            if (gf::Eq(
+                    out.child_witness[
+                        inst.input_active_column][row],
+                    Fp3::One()) &&
+                gf::Canonical(
+                    out.child_witness[
+                        inst.input_address_column][row].c0) ==
+                    2U + word &&
+                out.child_witness[
+                    inst.input_address_column][row].c1 ==
+                    0 &&
+                out.child_witness[
+                    inst.input_address_column][row].c2 ==
+                    0) {
+                selector[row] = Fp3::One();
+                ++selected_rows;
+            }
+        }
+        if (selected_rows != 1) {
+            out.note =
+                "stream_endpoint:value_export_schedule";
+            return out;
+        }
+        out.child_witness[selector_base + word] =
+            selector;
+        out.child_cs.preprocessed.emplace_back(
+            selector_base + word,
+            std::move(selector));
+        out.child_cs.constraints.push_back(
+            {
+                "stream_endpoint:value_word_constant",
+                aq::AirKind::kTransition, 1,
+                [export_column](
+                    const std::vector<Fp3>& cur,
+                    const std::vector<Fp3>& next) {
+                    return gf::Sub(
+                        next[export_column],
+                        cur[export_column]);
+                },
+            });
+        out.child_cs.constraints.push_back(
+            {
+                "stream_endpoint:value_word_from_sha_input",
+                aq::AirKind::kEverywhere, 2,
+                [export_column, selector_column =
+                                    selector_base + word,
+                 input_word = inst.input_word_base](
+                    const std::vector<Fp3>& cur,
+                    const std::vector<Fp3>&) {
+                    return gf::Mul(
+                        cur[selector_column],
+                        gf::Sub(
+                            cur[export_column],
+                            cur[input_word]));
+                },
+            });
+    }
+    const Fp3 ctl_value =
+        RCStage3StreamEndpointCtlValue(manifest);
+    std::fill(
+        out.child_witness[
+            out.child_value_export_column].begin(),
+        out.child_witness[
+            out.child_value_export_column].end(),
+        ctl_value);
+    out.child_cs.constraints.push_back(
+        {
+            "stream_endpoint:value_export_constant",
+            aq::AirKind::kTransition, 1,
+            [column =
+                 out.child_value_export_column](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>& next) {
+                return gf::Sub(
+                    next[column], cur[column]);
+            },
+        });
+    out.child_cs.constraints.push_back(
+        {
+            "stream_endpoint:value_export_recompose",
+            aq::AirKind::kEverywhere, 1,
+            [column = out.child_value_export_column,
+             word_export_base](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                const Fp3 recomposed =
+                    gf::Add(
+                        cur[word_export_base],
+                        gf::Add(
+                            gf::Mul(
+                                Fp3{0, 1, 0},
+                                cur[word_export_base + 1]),
+                            gf::Mul(
+                                Fp3{0, 0, 1},
+                                cur[word_export_base + 2])));
+                return gf::Sub(
+                    cur[column], recomposed);
+            },
+        });
 
     // Terminal root pin: the broadcast final-output export words (constrained in
     // the vertical AIR to equal boundaries.back().final_words) are pinned to the
@@ -402,8 +534,6 @@ RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
 
     // Light deg-1 binding fragment C_rho column-shifts.  The aliasable value is
     // the Fp3 recomposition of the first three stream-value words.
-    const Fp3 ctl_value =
-        RCStage3StreamEndpointCtlValue(manifest);
     out.bind_cs = BuildRCStage3StreamEndpointConstraintSystem(
         family, manifest.leaf_index, out.committed_root, out.path_len);
     out.bind_witness =

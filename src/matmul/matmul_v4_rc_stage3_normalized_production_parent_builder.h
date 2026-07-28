@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_stage3_air_parent_composer.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
+#include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <array>
 #include <cstdint>
@@ -72,6 +73,29 @@ struct ProductionRolePlacementV1 {
 };
 
 /**
+ * One full SHA/XOF stream relation appended directly to the same parent as
+ * its role endpoint.  The child output words and child-owned CTL value are
+ * equality-constrained to the literal endpoint bank; no serialized receipt
+ * or host verifier bit intervenes.
+ */
+struct ProductionDirectStreamChildPlacementV1 {
+    RCStage3RelationEndpoint endpoint{};
+    RCStage3StreamEndpointManifest manifest;
+    stage3_air_parent_composer::ChildAttachmentV1
+        attachment;
+    uint32_t child_rows{0};
+    uint32_t child_value_parent_column{0};
+    std::array<uint32_t, 8>
+        child_root_parent_columns{};
+    uint32_t role_bank_value_column{0};
+    std::array<uint32_t, 8>
+        role_root_word_columns{};
+    bool value_same_parent_aliased{false};
+    bool root_same_parent_aliased{false};
+    bool complete_relation_same_parent{false};
+};
+
+/**
  * Executable local-relation candidate built from the solved block.
  *
  * `local_parent_valid` means the exact fourteen role AIRs, their real
@@ -85,6 +109,12 @@ struct ProductionRelationParentCandidateV1 {
     air_quotient::AirConstraintSystem<gkr_field::Fp3> cs;
     std::vector<std::vector<gkr_field::Fp3>> columns;
     std::vector<ProductionRolePlacementV1> roles;
+    std::vector<ProductionDirectStreamChildPlacementV1>
+        direct_builder_stream_children;
+    uint256 direct_builder_public_fs_seed{};
+    std::vector<uint32_t>
+        direct_parent_base_column_indices;
+    uint256 direct_parent_base_row_root{};
     uint256 episode_digest{};
     uint256 coupled_digest{};
     uint256 composed_digest{};
@@ -93,6 +123,7 @@ struct ProductionRelationParentCandidateV1 {
     bool exact_role_order{false};
     bool exact_endpoint_order{false};
     bool all_endpoint_cells_literal{false};
+    bool builder_stream_relations_same_parent{false};
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};
     bool production_authority{false};
@@ -139,6 +170,20 @@ BuildForSolvedBlockV1(
  */
 [[nodiscard]] bool BuildRelationParentCandidateForSolvedBlockV1(
     const ProductionParentBuildInputV1& input,
+    ProductionRelationParentCandidateV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Bounded executable canary for the exact direct-builder composition used by
+ * the full production parent.  It contains the real four-endpoint builder
+ * role plus both complete SHA/XOF children, shares one global R0 precommit,
+ * and exposes the same ordinary-cell value/root aliases.  The caller supplies
+ * path-bounded manifests so this relation can be proved in routine tests.
+ */
+[[nodiscard]] bool BuildDirectBuilderStreamParentCanaryV1(
+    const std::array<
+        RCStage3StreamEndpointManifest, 2>& manifests,
+    const uint256& public_fs_seed,
     ProductionRelationParentCandidateV1& out,
     std::string* why = nullptr);
 
