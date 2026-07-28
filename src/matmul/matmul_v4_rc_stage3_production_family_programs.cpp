@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 
+#include <crypto/common.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
 #include <matmul/matmul_v4_rc_stage3_episode_air.h>
 #include <matmul/matmul_v4_rc_stage3_extract_stream_ctl.h>
@@ -24,7 +25,98 @@ namespace aq = air_quotient;
 namespace cb = constraint_bytecode;
 namespace gf = gkr_field;
 namespace sites = soundness_scenarios;
+namespace fpb = fixed_program_provenance_bytecode;
 using gf::Fp3;
+
+void SchemaU16(
+    std::vector<unsigned char>& out,
+    uint16_t value)
+{
+    unsigned char encoded[2];
+    WriteLE16(encoded, value);
+    out.insert(out.end(), encoded, encoded + sizeof(encoded));
+}
+
+void SchemaU32(
+    std::vector<unsigned char>& out,
+    uint32_t value)
+{
+    unsigned char encoded[4];
+    WriteLE32(encoded, value);
+    out.insert(out.end(), encoded, encoded + sizeof(encoded));
+}
+
+void SchemaRoot(
+    std::vector<unsigned char>& out,
+    const uint256& value)
+{
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+std::vector<unsigned char>
+CoupledExtractChaChaSchemaSuffix(
+    const fpb::ManifestV1& manifest)
+{
+    std::vector<unsigned char> out;
+    static constexpr char domain[] =
+        "BTX_RC_STAGE3_PRODUCTION_FIXED_PROGRAM_ABI_V1";
+    out.insert(
+        out.end(), domain, domain + sizeof(domain) - 1);
+    SchemaU16(out, fixed_program_abi_v1::Version);
+    out.push_back(static_cast<unsigned char>(
+        sites::ProductionProofSiteKind::
+            CoupledExtractChaCha));
+    out.push_back(static_cast<unsigned char>(
+        RCStage3RelationRole::CoupledExtract));
+    SchemaU16(
+        out, static_cast<uint16_t>(
+                 RCStage3RelationEndpoint::
+                     CoupledExtractChaCha));
+    out.push_back(static_cast<unsigned char>(
+        stage3_hash_air::ProgramKind::
+            ChaCha20Block));
+    SchemaU32(out, manifest.rows);
+    SchemaU32(out, manifest.columns);
+    SchemaU32(out, manifest.programs);
+    SchemaU32(out, manifest.challenge_width);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::
+            BoundaryExpectedBase);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::
+            BoundaryExpectedCount);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::BoundaryMaskBase);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::BoundaryMaskCount);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::InputAddressBase);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::InputMaskBase);
+    SchemaU32(out, fixed_program_abi_v1::InputSlots);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::OutputAddress);
+    SchemaU32(
+        out,
+        fixed_program_abi_v1::OutputValue);
+    SchemaRoot(out, manifest.fixed_program_commitment);
+    SchemaRoot(out, manifest.immutable_schedule_root);
+    SchemaU32(
+        out, static_cast<uint32_t>(
+                 manifest.immutable_schedule_columns.size()));
+    for (uint32_t column :
+         manifest.immutable_schedule_columns) {
+        SchemaU32(out, column);
+    }
+    return out;
+}
 
 class FragmentProgramBuilder {
 public:
@@ -993,7 +1085,7 @@ bool RealFamilyFor(
 }
 
 /**
- * Canonical but deliberately incomplete fragments for the fourteen sites
+ * Canonical but deliberately incomplete fragments for the remaining sites
  * which previously had a structural one-column placeholder. A successful
  * return replaces that placeholder with executable relation bytecode, but it
  * never grants a semantic endpoint or completeness claim.
@@ -1015,6 +1107,10 @@ bool PartialFamilyFor(
     case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
         return role == RCStage3RelationRole::EpisodeExtract &&
             BuildRangeExtractCtlParametricFragment(program, why);
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        return role == RCStage3RelationRole::CoupledExtract &&
+            BuildProductionCoupledExtractChaChaProgramTableV1(
+                program, nullptr, nullptr, why);
     case sites::ProductionProofSiteKind::EpisodeScaleSha:
     case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
     case sites::ProductionProofSiteKind::CoupledBankCounterXof:
@@ -1025,7 +1121,6 @@ bool PartialFamilyFor(
     case sites::ProductionProofSiteKind::CoupledPermutationXof:
     case sites::ProductionProofSiteKind::CoupledMixXof:
     case sites::ProductionProofSiteKind::CoupledExtractScaleSha:
-    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
         return BuildFixedProgramLocalFragment(role, program, why);
     default:
         return false;
@@ -1111,8 +1206,13 @@ uint32_t PartialResidualMask(
     case sites::ProductionProofSiteKind::CoupledPermutationXof:
     case sites::ProductionProofSiteKind::CoupledMixXof:
     case sites::ProductionProofSiteKind::CoupledExtractScaleSha:
-    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
         return PARAM | SOURCE | SCHEDULE | COPY | ALL | RECURSE;
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        // The table now contains the complete local opcode, boundary, output
+        // mux and internal SSA relation.  The caller-owned source root,
+        // parent-consumed immutable schedule root, exact production instance
+        // set and recursive child receipt remain outside that table.
+        return SOURCE | SCHEDULE | ALL | RECURSE;
     default:
         return 0;
     }
@@ -1148,6 +1248,55 @@ bool BuildProductionFixedProgramOutputLocalProgramTableV1(
     std::string* why)
 {
     return BuildFixedProgramLocalFragment(role, out, why);
+}
+
+bool BuildProductionCoupledExtractChaChaProgramTableV1(
+    cb::ProgramTable& out,
+    fpb::ManifestV1* manifest,
+    std::vector<unsigned char>* schema_suffix,
+    std::string* why)
+{
+    out = {};
+    fpb::ManifestV1 local;
+    if (!fpb::BuildCanonicalProgramTableV1(
+            RCStage3RelationRole::CoupledExtract,
+            stage3_hash_air::ProgramKind::ChaCha20Block,
+            out, &local, why) ||
+        !local.exact_native_constraint_order ||
+        !local.canonical_program_table ||
+        !local.immutable_schedule_reconstructed ||
+        !local.internal_ssa_provenance_complete ||
+        local.fixed_program_commitment.IsNull() ||
+        local.immutable_schedule_root.IsNull() ||
+        local.rows != 1024 ||
+        local.columns != fpb::kColumnsV1 ||
+        local.programs != fpb::kProgramsV1 ||
+        local.challenge_width !=
+            fpb::kChallengeWidthV1) {
+        out = {};
+        if (why != nullptr && why->empty()) {
+            *why =
+                "stage3:production_family_programs:"
+                "coupled_extract_chacha_program";
+        }
+        return false;
+    }
+    const auto suffix =
+        CoupledExtractChaChaSchemaSuffix(local);
+    if (suffix.empty()) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "coupled_extract_chacha_schema";
+        }
+        return false;
+    }
+    if (manifest != nullptr) *manifest = local;
+    if (schema_suffix != nullptr) {
+        *schema_suffix = suffix;
+    }
+    return true;
 }
 
 bool BuildCanonicalProductionFamilyProgramTableV1(
@@ -1197,8 +1346,21 @@ BuildProductionFamilyProgramSourcesV1(
                 site.kind, site.role, real, &why) &&
             cb::ValidateProgramTable(real, &why)) {
             source.program = std::move(real);
-            const auto suffix =
-                PartialFamilySchemaSuffix(site.kind);
+            std::vector<unsigned char> suffix;
+            if (site.kind ==
+                sites::ProductionProofSiteKind::
+                    CoupledExtractChaCha) {
+                cb::ProgramTable canonical;
+                if (!BuildProductionCoupledExtractChaChaProgramTableV1(
+                        canonical, nullptr, &suffix, &why) ||
+                    canonical != source.program) {
+                    out.push_back(std::move(source));
+                    continue;
+                }
+            } else {
+                suffix =
+                    PartialFamilySchemaSuffix(site.kind);
+            }
             source.public_input_schema.insert(
                 source.public_input_schema.end(),
                 suffix.begin(), suffix.end());

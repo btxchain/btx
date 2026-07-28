@@ -94,8 +94,7 @@ BOOST_AUTO_TEST_CASE(
              RCStage3RelationEndpoint::EpisodeExtractChaCha,
              RCStage3RelationEndpoint::CoupledBankSeedXof,
              RCStage3RelationEndpoint::CoupledBankRoot,
-             RCStage3RelationEndpoint::CoupledExchangeHashXof,
-             RCStage3RelationEndpoint::CoupledExtractChaCha}) {
+             RCStage3RelationEndpoint::CoupledExchangeHashXof}) {
         const auto& fixed = Endpoint(manifest, endpoint);
         BOOST_CHECK(fixed.selected_program_key);
         BOOST_CHECK(fixed.exact_program_table_match);
@@ -106,6 +105,26 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!fixed.registry_semantic_claim);
         BOOST_CHECK(!fixed.direct_alias_ready);
     }
+
+    // This site owns a complete canonical fixed-program provenance table.
+    // The legacy live relation-cell audit still points at the old local
+    // hash-kernel output column, so the bridge must expose the new exact ABI
+    // without falsely granting a same-cell direct alias.
+    const auto& coupled_extract_chacha = Endpoint(
+        manifest,
+        RCStage3RelationEndpoint::CoupledExtractChaCha);
+    BOOST_CHECK(coupled_extract_chacha.selected_program_key);
+    BOOST_CHECK(coupled_extract_chacha.exact_program_table_match);
+    BOOST_CHECK(!coupled_extract_chacha.registry_semantic_claim);
+    BOOST_CHECK(coupled_extract_chacha.canonical_output_metadata);
+    BOOST_CHECK_EQUAL(
+        coupled_extract_chacha.relation_column,
+        matmul::v4::rc::universal_topology::
+            fixed_program_abi_v1::OutputValue);
+    BOOST_CHECK(!coupled_extract_chacha.executed_relation_cell);
+    BOOST_CHECK(!coupled_extract_chacha.same_trace_ctl_alias);
+    BOOST_CHECK(!coupled_extract_chacha.relation_column_exact);
+    BOOST_CHECK(!coupled_extract_chacha.direct_alias_ready);
 
     // A single exact family genuinely owns three endpoint cells.  This is the
     // one-to-many expansion the old single semantic_endpoints claim omitted.

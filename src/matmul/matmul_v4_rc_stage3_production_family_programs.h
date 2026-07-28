@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_PRODUCTION_FAMILY_PROGRAMS_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_PRODUCTION_FAMILY_PROGRAMS_H
 
+#include <matmul/matmul_v4_rc_stage3_fixed_program_provenance_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_universal_topology.h>
 
 #include <cstdint>
@@ -49,6 +50,46 @@
 // ============================================================================
 
 namespace matmul::v4::rc::universal_topology {
+
+namespace fixed_program_abi_v1 {
+inline constexpr uint16_t Version = 1;
+inline constexpr uint32_t BoundaryExpectedBase =
+    stage3_hash_air::kFixedProgramBoundaryExpectedBase;
+inline constexpr uint32_t BoundaryExpectedCount = 4;
+inline constexpr uint32_t BoundaryMaskBase =
+    stage3_hash_air::kFixedProgramBoundaryMaskBase;
+inline constexpr uint32_t BoundaryMaskCount = 4;
+inline constexpr uint32_t InputAddressBase =
+    stage3_hash_air::kFixedProgramProvenanceInputAddressBase;
+inline constexpr uint32_t InputMaskBase =
+    stage3_hash_air::kFixedProgramProvenanceInputMaskBase;
+inline constexpr uint32_t InputSlots = 3;
+inline constexpr uint32_t OutputAddress =
+    stage3_hash_air::kFixedProgramProvenanceOutputAddress;
+inline constexpr uint32_t OutputValue =
+    fixed_program_provenance_bytecode::kOutputColumnV1;
+} // namespace fixed_program_abi_v1
+
+/**
+ * Complete canonical bytecode for one CoupledExtract ChaCha block.
+ *
+ * The returned table contains the opcode constraints, public-boundary
+ * equality constraints, selector-muxed output, dual-Fp3 challenge products
+ * and the complete internal SSA producer/consumer relation.  `schema_suffix`
+ * commits the exact ChaCha schedule and the trace-column ABI above; it is
+ * appended to the production registry's family schema.
+ *
+ * This closes only the local CoupledExtractChaCha relation. Equality from the
+ * caller's CoupledExtract input/output roots, exact all-instance aggregation
+ * and recursive receipt consumption remain separate parent obligations.
+ */
+[[nodiscard]] bool
+BuildProductionCoupledExtractChaChaProgramTableV1(
+    constraint_bytecode::ProgramTable& out,
+    fixed_program_provenance_bytecode::ManifestV1*
+        manifest = nullptr,
+    std::vector<unsigned char>* schema_suffix = nullptr,
+    std::string* why = nullptr);
 
 /**
  * Stable output-column ABI for the role-local direct products below.  Each
@@ -96,7 +137,8 @@ inline constexpr uint32_t CoupledHashOutput = 149;
  * opcode-selected result slot.  Schedule, boundary, internal-copy,
  * all-instance, and recursive-consumption obligations remain explicit
  * residuals; this function only gives those partial families an unambiguous
- * local output cell.
+ * local output cell. CoupledExtractChaCha now uses the complete provenance
+ * table above instead of this fragment.
  */
 [[nodiscard]] bool BuildProductionFixedProgramOutputLocalProgramTableV1(
     RCStage3RelationRole role,
@@ -227,7 +269,10 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
  * with honestly incomplete canonical fragments for sites whose whole
  * schedule/provenance relation is not yet closed. The current builder has no
  * residual one-column structural stubs; that is deliberately distinct from
- * whole-site semantic completeness, which remains 14/28.
+ * whole-site semantic completeness, which remains 14/28. In particular, the
+ * CoupledExtractChaCha table now closes its local provenance relation but
+ * remains a partial site until source-root, all-instance and recursive
+ * obligations are consumed.
  */
 [[nodiscard]] std::vector<ProductionFamilyProgramSourceV1>
 BuildProductionFamilyProgramSourcesV1(

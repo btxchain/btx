@@ -378,8 +378,9 @@ std::vector<FamilyRecipe> CanonicalOutputRecipes()
             RCStage3RelationRole::CoupledExtract,
             {
                 {RCStage3RelationEndpoint::CoupledExtractChaCha,
-                 kRCStage3HashKernelOutputColumnV1,
-                 "coupled_extract_chacha:FIXED_PROGRAM_OUTPUT"},
+                 topo::fixed_program_abi_v1::OutputValue,
+                 "coupled_extract_chacha:"
+                 "FIXED_PROGRAM_PROVENANCE_OUTPUT"},
             }),
         MakeRecipe(
             sites::ProductionProofSiteKind::CoupledBarrierSha256d,

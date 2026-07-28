@@ -22,6 +22,7 @@ namespace sch = rc::aggregation_scheduler;
 namespace cb = rc::constraint_bytecode;
 namespace aq = rc::air_quotient;
 namespace gf = rc::gkr_field;
+namespace fpb = rc::fixed_program_provenance_bytecode;
 using gf::Fp3;
 
 BOOST_AUTO_TEST_SUITE(matmul_v4_rc_stage3_production_family_programs_tests)
@@ -343,6 +344,55 @@ BOOST_AUTO_TEST_CASE(
         cb::CommitProgramTable(mix.program) ==
         cb::CommitProgramTable(canonical_mix));
 
+    // CoupledExtractChaCha is no longer an opcode-only partial fragment. Its
+    // immutable registry table contains the complete internal SSA relation,
+    // while the schema independently pins the ChaCha (not SHA) schedule and
+    // the exact public-boundary/source/output column ABI.
+    const size_t chacha_idx = FindFamilyIndex(
+        manifest,
+        ss::ProductionProofSiteKind::CoupledExtractChaCha);
+    const auto& chacha = sources[chacha_idx];
+    BOOST_CHECK(
+        chacha.role ==
+        rc::RCStage3RelationRole::CoupledExtract);
+    BOOST_CHECK_EQUAL(
+        chacha.program.current_width, fpb::kColumnsV1);
+    BOOST_CHECK_EQUAL(
+        chacha.program.challenge_width,
+        fpb::kChallengeWidthV1);
+    BOOST_CHECK_EQUAL(
+        chacha.program.programs.size(),
+        fpb::kProgramsV1);
+    BOOST_REQUIRE_EQUAL(
+        chacha.semantic_endpoints.size(), 0U);
+    BOOST_CHECK(!chacha.semantic_relation_complete);
+    cb::ProgramTable canonical_chacha;
+    fpb::ManifestV1 chacha_manifest;
+    std::vector<unsigned char> chacha_suffix;
+    BOOST_REQUIRE(
+        ut::BuildProductionCoupledExtractChaChaProgramTableV1(
+            canonical_chacha, &chacha_manifest,
+            &chacha_suffix));
+    BOOST_CHECK(chacha.program == canonical_chacha);
+    BOOST_CHECK(chacha_manifest.internal_ssa_provenance_complete);
+    BOOST_CHECK(
+        !chacha_manifest.immutable_schedule_root.IsNull());
+    BOOST_REQUIRE_GE(
+        chacha.public_input_schema.size(),
+        chacha_suffix.size());
+    BOOST_CHECK(std::equal(
+        chacha_suffix.begin(), chacha_suffix.end(),
+        chacha.public_input_schema.end() -
+            chacha_suffix.size()));
+    const auto chacha_differential =
+        fpb::AuditAgainstNativeV1(
+            rc::RCStage3RelationRole::CoupledExtract,
+            rc::stage3_hash_air::ProgramKind::ChaCha20Block,
+            8);
+    BOOST_REQUIRE_MESSAGE(
+        chacha_differential.valid,
+        chacha_differential.note);
+
     // A site whose whole provenance relation is not closed now carries a real
     // canonical local kernel, but remains honestly INCOMPLETE: no endpoint
     // claim and no completeness bit.
@@ -373,6 +423,23 @@ BOOST_AUTO_TEST_CASE(
             (residual.missing_obligations &
              ut::ProductionResidualExactAllInstanceAggregation) != 0);
     }
+    const auto chacha_residual = std::find_if(
+        status.partial_residuals.begin(),
+        status.partial_residuals.end(),
+        [](const auto& residual) {
+            return residual.kind ==
+                ss::ProductionProofSiteKind::
+                    CoupledExtractChaCha;
+        });
+    BOOST_REQUIRE(
+        chacha_residual !=
+        status.partial_residuals.end());
+    BOOST_CHECK_EQUAL(
+        chacha_residual->missing_obligations,
+        ut::ProductionResidualSourceRootProvenance |
+            ut::ProductionResidualImmutableScheduleBinding |
+            ut::ProductionResidualExactAllInstanceAggregation |
+            ut::ProductionResidualRecursiveConsumption);
     const auto openings_residual = std::find_if(
         status.partial_residuals.begin(),
         status.partial_residuals.end(),
@@ -491,6 +558,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !ut::ValidateProductionFamilyProgramSourcesV1(
             manifest, role_program_substitution, &why));
+
+    // The bytecode table is deliberately program-kind independent; replacing
+    // the registry ABI's ChaCha schedule root is therefore the relevant
+    // schedule-substitution attack and must fail canonical-source validation.
+    auto schedule_substitution = sources;
+    BOOST_REQUIRE(
+        schedule_substitution[chacha_idx]
+            .public_input_schema.size() > 40);
+    schedule_substitution[chacha_idx]
+        .public_input_schema.back() ^= 1U;
+    BOOST_CHECK(
+        !ut::ValidateProductionFamilyProgramSourcesV1(
+            manifest, schedule_substitution, &why));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -508,7 +588,7 @@ BOOST_AUTO_TEST_CASE(
     const auto registry = ut::BuildProductionProgramRegistryV1(
         manifest, schedule, sources, verifier, verifier);
     BOOST_REQUIRE(!registry.external_registry_commitment.IsNull());
-    // Honest: only 14 of 28 families are real, so the registry-wide
+    // Honest: only 14 of 28 families are site-complete, so the registry-wide
     // completeness flag must stay false. A registry that flips this true
     // from stub-only or partially-real families would be exactly the
     // structural-only theatre this module exists to avoid.
@@ -608,6 +688,21 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(mix_entry.constraint_count, 288U);
     BOOST_CHECK(mix_entry.semantic_relation_complete);
 
+    const size_t chacha_idx = FindFamilyIndex(
+        manifest,
+        ss::ProductionProofSiteKind::CoupledExtractChaCha);
+    const auto& chacha_entry =
+        registry.families[chacha_idx];
+    BOOST_CHECK_EQUAL(
+        chacha_entry.maximum_columns,
+        fpb::kColumnsV1);
+    BOOST_CHECK_EQUAL(
+        chacha_entry.constraint_count,
+        fpb::kProgramsV1);
+    BOOST_CHECK_EQUAL(
+        chacha_entry.maximum_constraint_degree, 4U);
+    BOOST_CHECK(!chacha_entry.semantic_relation_complete);
+
     const size_t partial_idx = FindFamilyIndex(
         manifest, ss::ProductionProofSiteKind::EpisodeGemmOpenings);
     const auto& partial_entry = registry.families[partial_idx];
@@ -698,8 +793,7 @@ BOOST_AUTO_TEST_CASE(
         ss::ProductionProofSiteKind::CoupledExchangeXof,
         ss::ProductionProofSiteKind::CoupledPermutationXof,
         ss::ProductionProofSiteKind::CoupledMixXof,
-        ss::ProductionProofSiteKind::CoupledExtractScaleSha,
-        ss::ProductionProofSiteKind::CoupledExtractChaCha};
+        ss::ProductionProofSiteKind::CoupledExtractScaleSha};
     uint64_t rng = 0x243f6a8885a308d3ULL;
     const auto next_field = [&rng]() {
         rng ^= rng << 13;
