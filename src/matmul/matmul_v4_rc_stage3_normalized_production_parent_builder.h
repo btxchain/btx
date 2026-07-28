@@ -134,6 +134,7 @@ struct ProductionRelationParentCandidateV1 {
     bool all_endpoint_cells_literal{false};
     bool builder_stream_relations_same_parent{false};
     bool winner_episode_capture_bound{false};
+    bool episode_witness_replay_avoided{false};
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};
     bool production_authority{false};

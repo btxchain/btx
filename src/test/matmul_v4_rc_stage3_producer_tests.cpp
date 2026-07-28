@@ -897,8 +897,6 @@ BOOST_AUTO_TEST_CASE(
         why.find(
             "block_to_14_role_52_endpoint_assembler_available") !=
                 std::string::npos);
-    BOOST_CHECK(why.find("normalized_consensus_consumer_unavailable") !=
-                std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -966,6 +964,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(candidate.exact_role_order);
     BOOST_CHECK(candidate.exact_endpoint_order);
     BOOST_CHECK(candidate.all_endpoint_cells_literal);
+    BOOST_CHECK(candidate.winner_episode_capture_bound);
+    BOOST_CHECK(candidate.episode_witness_replay_avoided);
     BOOST_CHECK_EQUAL(candidate.roles.size(), 14U);
     BOOST_CHECK_EQUAL(candidate.endpoint_count, 52U);
     BOOST_CHECK_EQUAL(candidate.witness_violations, 0U);

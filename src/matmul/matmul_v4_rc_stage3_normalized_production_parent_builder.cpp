@@ -181,31 +181,22 @@ bool BuildBlockRoleProducts(
         return false;
     }
 
-    // Recompute from the finalized header even when the solver supplied a
-    // transcript hint.  A future optimization may consume the hint after
-    // independently checking every round root; the production construction
-    // must not make a pointer supplied by the miner an authority input.
-    std::vector<RCRoundTranscript> rounds;
+    // Consume the winner reseal's exact terminal outputs. Complete() has
+    // already rebuilt each R.4.1 stream from the captured Extract outputs,
+    // folded it through RoundMerkleStream, and checked the ordered root chain
+    // and terminal digest. Re-entering the episode oracle here would be exact
+    // replay and is forbidden for the production succinct path.
     episode_digest =
-        RecomputeResidentCurriculumReference(
-            block, episode, input.height, {}, &rounds);
+        input.episode_capture->EpisodeDigest();
+    const std::vector<uint256>& round_roots =
+        input.episode_capture->RoundRoots();
     if (episode_digest.IsNull() ||
-        rounds.size() != episode.rounds ||
-        rounds.empty() ||
-        rounds.front().stream.empty()) {
-        Note(why, "episode_recompute");
+        round_roots.size() != episode.rounds ||
+        round_roots.empty()) {
+        Note(why, "episode_capture_terminal");
         return false;
     }
     (void)input.episode_rounds;
-    std::vector<uint256> round_roots;
-    round_roots.reserve(rounds.size());
-    for (const auto& round : rounds) {
-        if (round.round_root.IsNull()) {
-            Note(why, "episode_round_root");
-            return false;
-        }
-        round_roots.push_back(round.round_root);
-    }
 
     const RCCoupParams coupled_params =
         ResolveRCCoupParams(params);
@@ -248,9 +239,18 @@ bool BuildBlockRoleProducts(
         return false;
     }
 
+    std::vector<int8_t> round0_signed;
+    if (!input.episode_capture->BuildRoundStream(
+            0, round0_signed, &capture_why)) {
+        Note(
+            why,
+            "episode_capture_round_stream:" +
+                capture_why);
+        return false;
+    }
     std::vector<uint8_t> round0(
-        rounds.front().stream.begin(),
-        rounds.front().stream.end());
+        round0_signed.begin(),
+        round0_signed.end());
     hash_air::TileTreeManifest tile_tree;
     std::string tile_why;
     if (!hash_air::BuildTileTreeManifest(
@@ -272,12 +272,12 @@ bool BuildBlockRoleProducts(
     }
 
     const int64_t episode_a =
-        static_cast<int64_t>(rounds.front().stream[0]);
+        static_cast<int64_t>(round0_signed[0]);
     const int64_t episode_b =
         static_cast<int64_t>(
-            rounds.front().stream.size() > 1
-                ? rounds.front().stream[1]
-                : rounds.front().stream[0]);
+            round0_signed.size() > 1
+                ? round0_signed[1]
+                : round0_signed[0]);
     const gf::Fp3 episode_cell =
         gf::FromSigned3(episode_a);
     const int64_t coupled_a =
@@ -346,9 +346,8 @@ bool BuildBlockRoleProducts(
             &round_roots.front()));
     {
         const auto stream_cell =
-            [&rounds](size_t index) {
-                const auto& stream =
-                    rounds.front().stream;
+            [&round0_signed](size_t index) {
+                const auto& stream = round0_signed;
                 return gf::FromSigned3(
                     static_cast<int64_t>(
                         stream[index % stream.size()]));
@@ -1175,6 +1174,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         return false;
     }
     out.winner_episode_capture_bound = true;
+    out.episode_witness_replay_avoided = true;
 
     out.direct_builder_public_fs_seed =
         input.solved_block->GetHash();
@@ -1381,6 +1381,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
             kRCStage3RelationClosureEndpointCount &&
         out.all_endpoint_cells_literal &&
         out.winner_episode_capture_bound &&
+        out.episode_witness_replay_avoided &&
         out.builder_stream_relations_same_parent &&
         out.witness_violations == 0;
 
