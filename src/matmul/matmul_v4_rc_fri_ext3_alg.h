@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_FRI_EXT3_ALG_H
 
 #include <matmul/matmul_v4_rc_alg_hash.h>
+#include <matmul/matmul_v4_rc_alg_hash_typed.h>
 #include <matmul/matmul_v4_rc_fri.h> // FriNextPow2 / shared numeric caps
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <uint256.h>
@@ -1712,6 +1713,78 @@ inline constexpr uint64_t kRCFri3AlgP2SqueezeDrawDomain =
     const Fri3AlgDigest& seed,
     uint32_t idx,
     Fp3& out,
+    std::string* why = nullptr);
+
+enum class Fri3AlgSafeV13Consumer : uint8_t {
+    FriLambda = 1,
+    OodZ1 = 2,
+    OodZ2 = 3,
+    DeepW1 = 4,
+    DeepW2 = 5,
+    FoldBeta = 6,
+    QuerySeed = 7,
+    QueryIndex = 8,
+};
+
+/**
+ * One exact V13 verifier draw.  `transcript_before_draw` is the canonical
+ * Fri3AlgFs byte buffer for transcript-derived draws. Query candidates are
+ * instead derived from `Fri3AlgSafeV13Replay::query_seed`, so their buffer is
+ * empty by construction. `safe_digest` retains all four SAFECore lanes even
+ * where the native verifier consumes only the first three as Fp3.
+ */
+struct Fri3AlgSafeV13ReplayEvent {
+    Fri3AlgSafeV13Consumer consumer{
+        Fri3AlgSafeV13Consumer::FriLambda};
+    uint32_t ordinal{0};
+    std::string label;
+    uint32_t draw_index{0};
+    std::vector<unsigned char> transcript_before_draw;
+    alg_hash_typed::RoleV12 role{
+        alg_hash_typed::RoleV12::TranscriptBatchCoefficient};
+    Fri3AlgDigest safe_digest{};
+    Fp3 consumed_fp3{};
+    uint32_t consumed_index{0};
+    /** OOD-only fixed-K2 selector evidence; false for all other consumers. */
+    bool acceptable{false};
+    bool selected{false};
+};
+
+struct Fri3AlgSafeV13Replay {
+    std::vector<Fri3AlgSafeV13ReplayEvent> events;
+    Fri3AlgDigest query_seed{};
+    uint32_t lambda_events{0};
+    uint32_t ood_candidate_events{0};
+    uint32_t deep_weight_events{0};
+    uint32_t fold_events{0};
+    uint32_t query_seed_events{0};
+    uint32_t query_candidate_events{0};
+    bool exact_event_order{false};
+    /** Set only after the unmodified V13 verifier accepts the whole proof. */
+    bool native_verified{false};
+};
+
+/**
+ * Canonical fixed-K2 selector shared by the V13 sampler and recursive replay.
+ * A candidate is acceptable iff it has a nonzero extension coordinate and,
+ * for z2, differs from z1. The first acceptable candidate is selected.
+ */
+[[nodiscard]] bool Fri3AlgSafeSelectOodK2V13(
+    const std::array<Fp3, kRCFri3AlgSafeQ192K2OodCandidatesV13>&
+        candidates,
+    const Fp3* distinct_from,
+    uint32_t& selected_ordinal,
+    Fp3& selected);
+
+/**
+ * Verify the complete V13 proof, then emit the exact canonical draw trace
+ * using the same FS initializer and challenge primitives as the verifier.
+ * Any replay/proof mismatch clears `out` and returns false.
+ */
+[[nodiscard]] bool Fri3AlgSafeQ192K2V13BatchVerifyReplay(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    Fri3AlgSafeV13Replay& out,
     std::string* why = nullptr);
 
 /** Full sponge absorb lane vector for Fri3AlgP2SqueezeChallengeFp3 — domain

@@ -168,6 +168,167 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    safe_q192_replay_exports_every_native_consumer)
+{
+    const uint256 seed = Seed(0x53);
+    const auto proved =
+        rc::Fri3AlgSafeQ192K2V13BatchCommit(
+            Columns(), seed, 11);
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+
+    rc::Fri3AlgSafeV13Replay replay;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::Fri3AlgSafeQ192K2V13BatchVerifyReplay(
+            proved.proof, seed, replay, &why),
+        why);
+    BOOST_CHECK(replay.native_verified);
+    BOOST_CHECK(replay.exact_event_order);
+    BOOST_CHECK_EQUAL(replay.lambda_events, 1U);
+    BOOST_CHECK_EQUAL(replay.ood_candidate_events, 4U);
+    BOOST_CHECK_EQUAL(replay.deep_weight_events, 2U);
+    BOOST_CHECK_EQUAL(
+        replay.fold_events,
+        proved.proof.fold_challenges.size());
+    BOOST_CHECK_EQUAL(replay.query_seed_events, 1U);
+    BOOST_CHECK_EQUAL(
+        replay.query_candidate_events,
+        rc::kRCFri3AlgNumQueries);
+    BOOST_CHECK_EQUAL(
+        replay.events.size(),
+        size_t{1 + 4 + 2 + 3 + 1 +
+               rc::kRCFri3AlgNumQueries});
+
+    BOOST_REQUIRE(!replay.events.empty());
+    BOOST_CHECK(
+        replay.events.front().consumer ==
+        rc::Fri3AlgSafeV13Consumer::FriLambda);
+    BOOST_CHECK_EQUAL(
+        replay.events.front().label,
+        "fra3_lambda");
+    BOOST_CHECK(
+        !replay.events.front()
+             .transcript_before_draw.empty());
+    BOOST_CHECK(
+        replay.events.front().safe_digest[3] <
+        gf::kP);
+
+    uint32_t selected_z1 = 0;
+    uint32_t selected_z2 = 0;
+    for (const auto& event : replay.events) {
+        if (event.consumer ==
+                rc::Fri3AlgSafeV13Consumer::OodZ1 &&
+            event.selected) {
+            ++selected_z1;
+            BOOST_CHECK(event.acceptable);
+            BOOST_CHECK(
+                Same(
+                    event.consumed_fp3,
+                    proved.proof.z1));
+        }
+        if (event.consumer ==
+                rc::Fri3AlgSafeV13Consumer::OodZ2 &&
+            event.selected) {
+            ++selected_z2;
+            BOOST_CHECK(event.acceptable);
+            BOOST_CHECK(
+                Same(
+                    event.consumed_fp3,
+                    proved.proof.z2));
+        }
+    }
+    BOOST_CHECK_EQUAL(selected_z1, 1U);
+    BOOST_CHECK_EQUAL(selected_z2, 1U);
+
+    const auto query_seed =
+        std::find_if(
+            replay.events.begin(),
+            replay.events.end(),
+            [](const auto& event) {
+                return event.consumer ==
+                    rc::Fri3AlgSafeV13Consumer::
+                        QuerySeed;
+            });
+    BOOST_REQUIRE(query_seed != replay.events.end());
+    BOOST_CHECK(
+        query_seed->safe_digest ==
+        replay.query_seed);
+    const auto first_query =
+        std::find_if(
+            replay.events.begin(),
+            replay.events.end(),
+            [](const auto& event) {
+                return event.consumer ==
+                    rc::Fri3AlgSafeV13Consumer::
+                        QueryIndex;
+            });
+    BOOST_REQUIRE(first_query != replay.events.end());
+    BOOST_CHECK(
+        first_query->transcript_before_draw.empty());
+    BOOST_CHECK_EQUAL(
+        first_query->consumed_index,
+        proved.proof.queries.front().index);
+
+    auto bad = proved.proof;
+    bad.w1.c0 =
+        gf::Add(bad.w1.c0, gf::FromU64(1));
+    replay.native_verified = true;
+    BOOST_CHECK(
+        !rc::Fri3AlgSafeQ192K2V13BatchVerifyReplay(
+            bad, seed, replay, &why));
+    BOOST_CHECK(!replay.native_verified);
+    BOOST_CHECK(replay.events.empty());
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_q192_fixed_k2_selector_is_first_acceptable)
+{
+    const gf::Fp3 invalid =
+        gf::Fp3::FromFp(gf::FromU64(7));
+    const gf::Fp3 valid_a{
+        gf::FromU64(1),
+        gf::FromU64(2),
+        gf::FromU64(0)};
+    const gf::Fp3 valid_b{
+        gf::FromU64(3),
+        gf::FromU64(0),
+        gf::FromU64(4)};
+    uint32_t ordinal = 99;
+    gf::Fp3 selected{};
+
+    std::array<gf::Fp3, 2> candidates{
+        invalid, valid_a};
+    BOOST_REQUIRE(
+        rc::Fri3AlgSafeSelectOodK2V13(
+            candidates, nullptr,
+            ordinal, selected));
+    BOOST_CHECK_EQUAL(ordinal, 1U);
+    BOOST_CHECK(Same(selected, valid_a));
+
+    candidates = {valid_a, valid_b};
+    BOOST_REQUIRE(
+        rc::Fri3AlgSafeSelectOodK2V13(
+            candidates, nullptr,
+            ordinal, selected));
+    BOOST_CHECK_EQUAL(ordinal, 0U);
+    BOOST_CHECK(Same(selected, valid_a));
+
+    candidates = {valid_a, valid_b};
+    BOOST_REQUIRE(
+        rc::Fri3AlgSafeSelectOodK2V13(
+            candidates, &valid_a,
+            ordinal, selected));
+    BOOST_CHECK_EQUAL(ordinal, 1U);
+    BOOST_CHECK(Same(selected, valid_b));
+
+    candidates = {invalid, invalid};
+    BOOST_CHECK(
+        !rc::Fri3AlgSafeSelectOodK2V13(
+            candidates, nullptr,
+            ordinal, selected));
+}
+
+BOOST_AUTO_TEST_CASE(
     safe_q192_k2_proof_transcript_and_opening_tamper_reject)
 {
     const uint256 seed = Seed(0x61);

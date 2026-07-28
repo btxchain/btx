@@ -1945,6 +1945,25 @@ bool Fri3AlgBatchSampleZ(Fri3AlgFs& fs, uint32_t& ctr, const Fp3* distinct_from,
     // Fixed K-candidate schedule: materialize every reserved draw, then select
     // the first acceptable OOD point. Encoding follows ProtocolChallengeFp3
     // (SHA ChallengeFp3, ChallengeFp3Uniform, or P2 squeeze).
+    if (config.safe_core_challenges &&
+        config.ood_candidates ==
+            kRCFri3AlgSafeQ192K2OodCandidatesV13) {
+        std::array<
+            Fp3,
+            kRCFri3AlgSafeQ192K2OodCandidatesV13>
+            candidate{};
+        for (Fp3& z : candidate) {
+            if (!ProtocolChallengeFp3(
+                    fs, config, "fra3_z",
+                    ctr++, z)) {
+                return false;
+            }
+        }
+        uint32_t selected_ordinal = 0;
+        return Fri3AlgSafeSelectOodK2V13(
+            candidate, distinct_from,
+            selected_ordinal, out);
+    }
     std::vector<Fp3> candidate(config.ood_candidates);
     for (Fp3& z : candidate) {
         if (!ProtocolChallengeFp3(fs, config, "fra3_z", ctr++, z)) return false;
@@ -2916,6 +2935,34 @@ bool ValidateRowTreeCache(
 }
 
 } // namespace
+
+bool Fri3AlgSafeSelectOodK2V13(
+    const std::array<
+        Fp3,
+        kRCFri3AlgSafeQ192K2OodCandidatesV13>&
+        candidates,
+    const Fp3* distinct_from,
+    uint32_t& selected_ordinal,
+    Fp3& selected)
+{
+    selected_ordinal = 0;
+    selected = Fp3::Zero();
+    for (uint32_t ordinal = 0;
+         ordinal < candidates.size();
+         ++ordinal) {
+        const Fp3& candidate =
+            candidates[ordinal];
+        if (!Fri3AlgHasExtCoord(candidate) ||
+            (distinct_from != nullptr &&
+             Eq(candidate, *distinct_from))) {
+            continue;
+        }
+        selected_ordinal = ordinal;
+        selected = candidate;
+        return true;
+    }
+    return false;
+}
 
 Fri3AlgBatchCommitResult
 Fri3AlgBatchCommitStreamingSharedCached(
@@ -7887,16 +7934,18 @@ bool Fri3AlgSafeQ192K2QuerySeedV13(
         seed, why);
 }
 
-bool Fri3AlgSafeQ192K2QueryCandidateV13(
+namespace {
+
+bool Fri3AlgSafeQ192K2QueryCandidateDigestV13(
     const Fri3AlgDigest& seed,
     uint32_t idx,
-    Fp3& out,
+    Fri3AlgDigest& digest,
     std::string* why)
 {
     namespace aht = alg_hash_typed;
     namespace safe = safe_v12;
 
-    out = Fp3::Zero();
+    digest = {};
     if (std::any_of(
             seed.begin(), seed.end(),
             [](Fp lane) { return lane >= gf::kP; })) {
@@ -7922,7 +7971,6 @@ bool Fri3AlgSafeQ192K2QueryCandidateV13(
     message.insert(message.end(), seed.begin(), seed.end());
     message.push_back(gf::FromU64(idx));
 
-    Fri3AlgDigest digest{};
     std::string safe_why;
     if (!safe::SafeCoreDigestV12(
             aht::RoleV12::TranscriptQueryCandidate,
@@ -7931,6 +7979,23 @@ bool Fri3AlgSafeQ192K2QueryCandidateV13(
         if (why != nullptr) {
             *why = "fri3_alg_safe_v13:" + safe_why;
         }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool Fri3AlgSafeQ192K2QueryCandidateV13(
+    const Fri3AlgDigest& seed,
+    uint32_t idx,
+    Fp3& out,
+    std::string* why)
+{
+    out = Fp3::Zero();
+    Fri3AlgDigest digest{};
+    if (!Fri3AlgSafeQ192K2QueryCandidateDigestV13(
+            seed, idx, digest, why)) {
         return false;
     }
     out = Fp3{
@@ -7991,6 +8056,381 @@ bool Fri3AlgSafeQ192K2ChallengeFp3V13(
         gf::Canonical(digest[0]),
         gf::Canonical(digest[1]),
         gf::Canonical(digest[2])};
+    return true;
+}
+
+bool Fri3AlgSafeQ192K2V13BatchVerifyReplay(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    Fri3AlgSafeV13Replay& out,
+    std::string* why)
+{
+    namespace aht = alg_hash_typed;
+
+    out = {};
+    std::string verify_why;
+    if (!Fri3AlgBatchVerifyConfigured(
+            proof, fs_seed,
+            kFri3AlgSafeQ192K2V13Config,
+            &verify_why)) {
+        if (why != nullptr) {
+            *why =
+                "fri3_alg_safe_v13_replay:verify:" +
+                verify_why;
+        }
+        return false;
+    }
+
+    const uint32_t n = proof.n_coeffs;
+    const uint32_t n_lde =
+        n * kRCFriBlowup;
+    const uint32_t width =
+        static_cast<uint32_t>(
+            proof.column_len.size());
+    Fri3AlgFs fs =
+        Fri3AlgBatchFsInit(
+            fs_seed, proof.pow_grind_nonce,
+            n, proof.row_commit,
+            proof.column_len,
+            kFri3AlgSafeQ192K2V13Config);
+
+    const auto fail =
+        [&](const std::string& detail) {
+            out = {};
+            if (why != nullptr) {
+                *why =
+                    "fri3_alg_safe_v13_replay:" +
+                    detail;
+            }
+            return false;
+        };
+    const auto append_transcript_draw =
+        [&](Fri3AlgSafeV13Consumer consumer,
+            uint32_t ordinal,
+            const char* label,
+            uint32_t draw_index,
+            aht::RoleV12 role,
+            const Fp3& expected) {
+            Fri3AlgSafeV13ReplayEvent event;
+            event.consumer = consumer;
+            event.ordinal = ordinal;
+            event.label = label;
+            event.draw_index = draw_index;
+            event.transcript_before_draw = fs.buf;
+            event.role = role;
+            if (!Fri3AlgSafeFullTranscriptDigestV13(
+                    fs.buf, label, draw_index,
+                    role, event.safe_digest,
+                    nullptr)) {
+                return false;
+            }
+            event.consumed_fp3 = Fp3{
+                gf::Canonical(
+                    event.safe_digest[0]),
+                gf::Canonical(
+                    event.safe_digest[1]),
+                gf::Canonical(
+                    event.safe_digest[2])};
+            if (!Eq(event.consumed_fp3, expected)) {
+                return false;
+            }
+            out.events.push_back(
+                std::move(event));
+            return true;
+        };
+
+    // Geometric batching has exactly one fra3_lambda draw.
+    Fp3 lambda{};
+    if (!Fri3AlgSafeQ192K2ChallengeFp3V13(
+            fs.buf, "fra3_lambda", 0,
+            lambda, nullptr) ||
+        !append_transcript_draw(
+            Fri3AlgSafeV13Consumer::FriLambda,
+            0, "fra3_lambda", 0,
+            aht::RoleV12::
+                TranscriptBatchCoefficient,
+            lambda) ||
+        !Eq(lambda, proof.lambda)) {
+        return fail("lambda");
+    }
+    std::vector<Fp3> coefficients;
+    Fp3 encoded_lambda{};
+    if (!ProtocolBatchCoefficients(
+            fs, kFri3AlgSafeQ192K2V13Config,
+            width, coefficients,
+            encoded_lambda) ||
+        !Eq(encoded_lambda, lambda)) {
+        return fail("lambda_state");
+    }
+    out.lambda_events = 1;
+
+    // K=2 is fixed for each OOD point. Every reserved candidate is part of
+    // the canonical replay, including a rejected candidate.
+    const size_t ood_event_base =
+        out.events.size();
+    std::array<
+        std::array<
+            Fp3,
+            kRCFri3AlgSafeQ192K2OodCandidatesV13>,
+        2>
+        ood_candidate{};
+    for (uint32_t draw = 0;
+         draw <
+             2 *
+                 kRCFri3AlgSafeQ192K2OodCandidatesV13;
+         ++draw) {
+        Fp3 candidate{};
+        if (!Fri3AlgSafeQ192K2ChallengeFp3V13(
+                fs.buf, "fra3_z", draw,
+                candidate, nullptr) ||
+            !append_transcript_draw(
+                draw <
+                        kRCFri3AlgSafeQ192K2OodCandidatesV13
+                    ? Fri3AlgSafeV13Consumer::OodZ1
+                    : Fri3AlgSafeV13Consumer::OodZ2,
+                draw %
+                    kRCFri3AlgSafeQ192K2OodCandidatesV13,
+                "fra3_z", draw,
+                draw <
+                        kRCFri3AlgSafeQ192K2OodCandidatesV13
+                    ? aht::RoleV12::TranscriptOodZ1
+                    : aht::RoleV12::TranscriptOodZ2,
+                candidate)) {
+            return fail("ood_candidate");
+        }
+        ood_candidate[
+            draw /
+            kRCFri3AlgSafeQ192K2OodCandidatesV13]
+            [draw %
+             kRCFri3AlgSafeQ192K2OodCandidatesV13] =
+                candidate;
+    }
+    uint32_t z1_selected_ordinal = 0;
+    uint32_t z2_selected_ordinal = 0;
+    Fp3 selected_z1{};
+    Fp3 selected_z2{};
+    if (!Fri3AlgSafeSelectOodK2V13(
+            ood_candidate[0], nullptr,
+            z1_selected_ordinal,
+            selected_z1) ||
+        !Fri3AlgSafeSelectOodK2V13(
+            ood_candidate[1],
+            &selected_z1,
+            z2_selected_ordinal,
+            selected_z2)) {
+        return fail("ood_fixed_k2_selection");
+    }
+    for (uint32_t ordinal = 0;
+         ordinal <
+             kRCFri3AlgSafeQ192K2OodCandidatesV13;
+         ++ordinal) {
+        auto& z1_event =
+            out.events[
+                ood_event_base + ordinal];
+        z1_event.acceptable =
+            Fri3AlgHasExtCoord(
+                ood_candidate[0][ordinal]);
+        z1_event.selected =
+            ordinal == z1_selected_ordinal;
+        auto& z2_event =
+            out.events[
+                ood_event_base +
+                kRCFri3AlgSafeQ192K2OodCandidatesV13 +
+                ordinal];
+        z2_event.acceptable =
+            Fri3AlgHasExtCoord(
+                ood_candidate[1][ordinal]) &&
+            !Eq(
+                ood_candidate[1][ordinal],
+                selected_z1);
+        z2_event.selected =
+            ordinal == z2_selected_ordinal;
+    }
+    uint32_t z_counter = 0;
+    Fp3 z1{};
+    Fp3 z2{};
+    if (!Fri3AlgBatchSampleZ(
+            fs, z_counter, nullptr,
+            kFri3AlgSafeQ192K2V13Config,
+            z1) ||
+        !Fri3AlgBatchSampleZ(
+            fs, z_counter, &z1,
+            kFri3AlgSafeQ192K2V13Config,
+            z2) ||
+        z_counter !=
+            2 *
+                kRCFri3AlgSafeQ192K2OodCandidatesV13 ||
+        !Eq(z1, selected_z1) ||
+        !Eq(z2, selected_z2) ||
+        !Eq(z1, proof.z1) ||
+        !Eq(z2, proof.z2)) {
+        return fail("ood_selection");
+    }
+    out.ood_candidate_events =
+        2 *
+        kRCFri3AlgSafeQ192K2OodCandidatesV13;
+    fs.AbsorbFp3(z1);
+    fs.AbsorbFp3(z2);
+    fs.AbsorbAlgRoot(
+        Fri3AlgOodEvalCommit(
+            proof.z1, proof.z2,
+            proof.evals_z1,
+            proof.evals_z2));
+
+    Fp3 w1{};
+    Fp3 w2{};
+    if (!Fri3AlgSafeQ192K2ChallengeFp3V13(
+            fs.buf, "fra3_w", 0,
+            w1, nullptr) ||
+        !append_transcript_draw(
+            Fri3AlgSafeV13Consumer::DeepW1,
+            0, "fra3_w", 0,
+            aht::RoleV12::
+                TranscriptDeepWeight,
+            w1) ||
+        !Fri3AlgSafeQ192K2ChallengeFp3V13(
+            fs.buf, "fra3_w", 1,
+            w2, nullptr) ||
+        !append_transcript_draw(
+            Fri3AlgSafeV13Consumer::DeepW2,
+            0, "fra3_w", 1,
+            aht::RoleV12::
+                TranscriptDeepWeight,
+            w2) ||
+        !Eq(w1, proof.w1) ||
+        !Eq(w2, proof.w2)) {
+        return fail("deep_weights");
+    }
+    out.deep_weight_events = 2;
+    fs.AbsorbFp3(w1);
+    fs.AbsorbFp3(w2);
+
+    for (uint32_t fold = 0;
+         fold < proof.fold_layers.size();
+         ++fold) {
+        fs.AbsorbAlgRoot(
+            proof.fold_layers[fold].root);
+        if (fold <
+            proof.fold_challenges.size()) {
+            Fp3 beta{};
+            if (!Fri3AlgSafeQ192K2ChallengeFp3V13(
+                    fs.buf, "fra3_fold",
+                    fold, beta, nullptr) ||
+                !append_transcript_draw(
+                    Fri3AlgSafeV13Consumer::
+                        FoldBeta,
+                    fold, "fra3_fold", fold,
+                    aht::RoleV12::
+                        TranscriptFoldBeta,
+                    beta) ||
+                !Eq(
+                    beta,
+                    proof.fold_challenges[
+                        fold])) {
+                return fail("fold");
+            }
+            ++out.fold_events;
+        }
+    }
+
+    Fri3AlgDigest query_seed{};
+    if (!Fri3AlgSafeQ192K2QuerySeedV13(
+            fs.buf, query_seed, nullptr)) {
+        return fail("query_seed");
+    }
+    {
+        Fri3AlgSafeV13ReplayEvent event;
+        event.consumer =
+            Fri3AlgSafeV13Consumer::QuerySeed;
+        event.ordinal = 0;
+        event.label = "fra3_query";
+        event.draw_index = 0;
+        event.transcript_before_draw = fs.buf;
+        event.role =
+            aht::RoleV12::TranscriptQuerySeed;
+        event.safe_digest = query_seed;
+        event.consumed_fp3 = Fp3{
+            gf::Canonical(query_seed[0]),
+            gf::Canonical(query_seed[1]),
+            gf::Canonical(query_seed[2])};
+        out.events.push_back(
+            std::move(event));
+    }
+    out.query_seed = query_seed;
+    out.query_seed_events = 1;
+
+    for (uint32_t query = 0;
+         query <
+             kFri3AlgSafeQ192K2V13Config
+                 .query_count;
+         ++query) {
+        Fri3AlgSafeV13ReplayEvent event;
+        event.consumer =
+            Fri3AlgSafeV13Consumer::QueryIndex;
+        event.ordinal = query;
+        event.label = "fra3_query";
+        event.draw_index = query;
+        event.role =
+            aht::RoleV12::
+                TranscriptQueryCandidate;
+        if (!Fri3AlgSafeQ192K2QueryCandidateDigestV13(
+                query_seed, query,
+                event.safe_digest, nullptr)) {
+            return fail("query_candidate_digest");
+        }
+        event.consumed_fp3 = Fp3{
+            gf::Canonical(
+                event.safe_digest[0]),
+            gf::Canonical(
+                event.safe_digest[1]),
+            gf::Canonical(
+                event.safe_digest[2])};
+        const unsigned __int128 wide =
+            (static_cast<unsigned __int128>(
+                 Canonical(
+                     event.consumed_fp3.c1))
+             << 64) |
+            Canonical(event.consumed_fp3.c0);
+        event.consumed_index =
+            static_cast<uint32_t>(
+                wide % n_lde);
+        if (event.consumed_index !=
+            proof.queries[query].index) {
+            return fail("query_index");
+        }
+        out.events.push_back(
+            std::move(event));
+    }
+    out.query_candidate_events =
+        kFri3AlgSafeQ192K2V13Config
+            .query_count;
+    out.exact_event_order =
+        out.events.size() ==
+            uint64_t{1} +
+                2 *
+                    kRCFri3AlgSafeQ192K2OodCandidatesV13 +
+                2 +
+                proof.fold_challenges.size() +
+                1 +
+                kFri3AlgSafeQ192K2V13Config
+                    .query_count &&
+        out.lambda_events == 1 &&
+        out.ood_candidate_events == 4 &&
+        out.deep_weight_events == 2 &&
+        out.fold_events ==
+            proof.fold_challenges.size() &&
+        out.query_seed_events == 1 &&
+        out.query_candidate_events ==
+            kFri3AlgSafeQ192K2V13Config
+                .query_count;
+    if (!out.exact_event_order) {
+        return fail("event_order");
+    }
+    out.native_verified = true;
+    if (why != nullptr) {
+        *why =
+            "fri3_alg_safe_v13_replay:verified";
+    }
     return true;
 }
 
