@@ -96,6 +96,383 @@ bool Fail(std::string* why, const std::string& detail)
     return false;
 }
 
+constexpr uint32_t WITNESS_CODEC_MAX_CHILDREN = 4096;
+constexpr uint32_t WITNESS_CODEC_MAX_FRAGMENTS = 64;
+
+void AppendU16(
+    std::vector<unsigned char>& out, uint16_t value)
+{
+    out.push_back(static_cast<unsigned char>(value));
+    out.push_back(
+        static_cast<unsigned char>(value >> 8));
+}
+
+void AppendU32(
+    std::vector<unsigned char>& out, uint32_t value)
+{
+    for (uint32_t byte = 0; byte < 4; ++byte) {
+        out.push_back(
+            static_cast<unsigned char>(
+                value >> (8U * byte)));
+    }
+}
+
+void AppendU64(
+    std::vector<unsigned char>& out, uint64_t value)
+{
+    for (uint32_t byte = 0; byte < 8; ++byte) {
+        out.push_back(
+            static_cast<unsigned char>(
+                value >> (8U * byte)));
+    }
+}
+
+void AppendHash(
+    std::vector<unsigned char>& out,
+    const uint256& value)
+{
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+void AppendFp3(
+    std::vector<unsigned char>& out,
+    const Fp3& value)
+{
+    AppendU64(out, value.c0);
+    AppendU64(out, value.c1);
+    AppendU64(out, value.c2);
+}
+
+bool ReadBytes(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    size_t count)
+{
+    return count <= static_cast<size_t>(end - cursor);
+}
+
+bool ReadU16(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    uint16_t& out)
+{
+    if (!ReadBytes(cursor, end, 2)) return false;
+    out = static_cast<uint16_t>(cursor[0]) |
+        static_cast<uint16_t>(cursor[1]) << 8;
+    cursor += 2;
+    return true;
+}
+
+bool ReadU32(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    uint32_t& out)
+{
+    if (!ReadBytes(cursor, end, 4)) return false;
+    out = 0;
+    for (uint32_t byte = 0; byte < 4; ++byte) {
+        out |= static_cast<uint32_t>(
+                   cursor[byte])
+            << (8U * byte);
+    }
+    cursor += 4;
+    return true;
+}
+
+bool ReadU64(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    uint64_t& out)
+{
+    if (!ReadBytes(cursor, end, 8)) return false;
+    out = 0;
+    for (uint32_t byte = 0; byte < 8; ++byte) {
+        out |= static_cast<uint64_t>(
+                   cursor[byte])
+            << (8U * byte);
+    }
+    cursor += 8;
+    return true;
+}
+
+bool ReadHash(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    uint256& out)
+{
+    if (!ReadBytes(cursor, end, out.size())) {
+        return false;
+    }
+    std::copy_n(cursor, out.size(), out.begin());
+    cursor += out.size();
+    return true;
+}
+
+bool ReadFp3(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    Fp3& out)
+{
+    if (!ReadU64(cursor, end, out.c0) ||
+        !ReadU64(cursor, end, out.c1) ||
+        !ReadU64(cursor, end, out.c2) ||
+        out.c0 >= gf::kP ||
+        out.c1 >= gf::kP ||
+        out.c2 >= gf::kP) {
+        return false;
+    }
+    return true;
+}
+
+void AppendTerminal(
+    std::vector<unsigned char>& out,
+    const DualFp3ProducerTerminalV2& terminal)
+{
+    AppendFp3(out, terminal.lane1);
+    AppendFp3(out, terminal.lane2);
+}
+
+bool ReadTerminal(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    DualFp3ProducerTerminalV2& terminal)
+{
+    return ReadFp3(cursor, end, terminal.lane1) &&
+        ReadFp3(cursor, end, terminal.lane2);
+}
+
+void AppendFamilyFragment(
+    std::vector<unsigned char>& out,
+    const FamilyExportFragmentV2& fragment)
+{
+    AppendU32(out, fragment.child_ordinal);
+    AppendU32(out, fragment.family_ordinal);
+    AppendU32(out, fragment.family_boundary_begin);
+    AppendU32(out, fragment.source_instance_begin);
+    AppendU32(out, fragment.source_instance_count);
+    AppendU64(out, fragment.input_cell_count);
+    AppendU64(out, fragment.output_cell_count);
+    AppendHash(out, fragment.typed_input_cell_handle_root);
+    AppendHash(out, fragment.typed_output_producer_root);
+}
+
+bool ReadFamilyFragment(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    FamilyExportFragmentV2& fragment)
+{
+    return
+        ReadU32(cursor, end, fragment.child_ordinal) &&
+        ReadU32(cursor, end, fragment.family_ordinal) &&
+        ReadU32(
+            cursor, end,
+            fragment.family_boundary_begin) &&
+        ReadU32(
+            cursor, end,
+            fragment.source_instance_begin) &&
+        ReadU32(
+            cursor, end,
+            fragment.source_instance_count) &&
+        ReadU64(
+            cursor, end,
+            fragment.input_cell_count) &&
+        ReadU64(
+            cursor, end,
+            fragment.output_cell_count) &&
+        ReadHash(
+            cursor, end,
+            fragment.typed_input_cell_handle_root) &&
+        ReadHash(
+            cursor, end,
+            fragment.typed_output_producer_root);
+}
+
+void AppendCallerFragment(
+    std::vector<unsigned char>& out,
+    const CallerInputConsumerFragmentV3& fragment)
+{
+    AppendU32(out, fragment.family_ordinal);
+    AppendU32(out, fragment.family_boundary_begin);
+    AppendU32(out, fragment.source_instance_begin);
+    AppendU32(out, fragment.source_instance_count);
+    AppendU64(out, fragment.event_count);
+    AppendHash(out, fragment.typed_schedule_root);
+    AppendTerminal(out, fragment.terminal);
+}
+
+bool ReadCallerFragment(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    CallerInputConsumerFragmentV3& fragment)
+{
+    return
+        ReadU32(cursor, end, fragment.family_ordinal) &&
+        ReadU32(
+            cursor, end,
+            fragment.family_boundary_begin) &&
+        ReadU32(
+            cursor, end,
+            fragment.source_instance_begin) &&
+        ReadU32(
+            cursor, end,
+            fragment.source_instance_count) &&
+        ReadU64(cursor, end, fragment.event_count) &&
+        ReadHash(
+            cursor, end,
+            fragment.typed_schedule_root) &&
+        ReadTerminal(cursor, end, fragment.terminal);
+}
+
+void AppendCallerReceipt(
+    std::vector<unsigned char>& out,
+    const CallerInputReceiptV3& receipt)
+{
+    AppendU16(out, receipt.version);
+    AppendU64(out, receipt.event_count);
+    AppendHash(out, receipt.producer_r0_root);
+    AppendHash(out, receipt.exact_consumer_schedule_root);
+    AppendTerminal(out, receipt.producer_terminal);
+    AppendTerminal(out, receipt.consumer_terminal);
+    AppendU32(
+        out,
+        static_cast<uint32_t>(
+            receipt.fragments.size()));
+    for (const auto& fragment : receipt.fragments) {
+        AppendCallerFragment(out, fragment);
+    }
+    AppendHash(out, receipt.receipt_commitment);
+}
+
+bool ReadCallerReceipt(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    CallerInputReceiptV3& receipt)
+{
+    uint32_t count = 0;
+    if (!ReadU16(cursor, end, receipt.version) ||
+        receipt.version != 3 ||
+        !ReadU64(cursor, end, receipt.event_count) ||
+        !ReadHash(
+            cursor, end,
+            receipt.producer_r0_root) ||
+        !ReadHash(
+            cursor, end,
+            receipt.exact_consumer_schedule_root) ||
+        !ReadTerminal(
+            cursor, end,
+            receipt.producer_terminal) ||
+        !ReadTerminal(
+            cursor, end,
+            receipt.consumer_terminal) ||
+        !ReadU32(cursor, end, count) ||
+        count == 0 ||
+        count > WITNESS_CODEC_MAX_FRAGMENTS) {
+        return false;
+    }
+    receipt.fragments.resize(count);
+    for (auto& fragment : receipt.fragments) {
+        if (!ReadCallerFragment(
+                cursor, end, fragment)) {
+            return false;
+        }
+    }
+    return ReadHash(
+        cursor, end,
+        receipt.receipt_commitment);
+}
+
+void AppendChildStatement(
+    std::vector<unsigned char>& out,
+    const WitnessChildStatementV2& statement)
+{
+    out.push_back(
+        static_cast<unsigned char>(
+            statement.program_kind));
+    AppendU32(out, statement.child_ordinal);
+    AppendU32(out, statement.global_source_begin);
+    AppendU32(out, statement.source_instance_count);
+    AppendU32(out, statement.sink_instance_count);
+    AppendU32(out, statement.scheduled_instances);
+    AppendU32(out, statement.output_event_count);
+    AppendHash(
+        out, statement.public_boundary_statement);
+    AppendHash(out, statement.base_row_commitment);
+    AppendCallerReceipt(
+        out, statement.caller_input_receipt);
+    AppendTerminal(
+        out, statement.output_producer_terminal);
+    AppendHash(out, statement.typed_fragment_root);
+    AppendU32(
+        out,
+        static_cast<uint32_t>(
+            statement.fragments.size()));
+    for (const auto& fragment : statement.fragments) {
+        AppendFamilyFragment(out, fragment);
+    }
+}
+
+bool ReadChildStatement(
+    const unsigned char*& cursor,
+    const unsigned char* end,
+    WitnessChildStatementV2& statement)
+{
+    if (!ReadBytes(cursor, end, 1)) return false;
+    statement.program_kind =
+        static_cast<ha::ProgramKind>(*cursor++);
+    uint32_t count = 0;
+    if ((statement.program_kind !=
+             ha::ProgramKind::Sha256Compression &&
+         statement.program_kind !=
+             ha::ProgramKind::ChaCha20Block) ||
+        !ReadU32(
+            cursor, end,
+            statement.child_ordinal) ||
+        !ReadU32(
+            cursor, end,
+            statement.global_source_begin) ||
+        !ReadU32(
+            cursor, end,
+            statement.source_instance_count) ||
+        statement.source_instance_count == 0 ||
+        !ReadU32(
+            cursor, end,
+            statement.sink_instance_count) ||
+        !ReadU32(
+            cursor, end,
+            statement.scheduled_instances) ||
+        !ReadU32(
+            cursor, end,
+            statement.output_event_count) ||
+        !ReadHash(
+            cursor, end,
+            statement.public_boundary_statement) ||
+        !ReadHash(
+            cursor, end,
+            statement.base_row_commitment) ||
+        !ReadCallerReceipt(
+            cursor, end,
+            statement.caller_input_receipt) ||
+        !ReadTerminal(
+            cursor, end,
+            statement.output_producer_terminal) ||
+        !ReadHash(
+            cursor, end,
+            statement.typed_fragment_root) ||
+        !ReadU32(cursor, end, count) ||
+        count == 0 ||
+        count > WITNESS_CODEC_MAX_FRAGMENTS) {
+        return false;
+    }
+    statement.fragments.resize(count);
+    for (auto& fragment : statement.fragments) {
+        if (!ReadFamilyFragment(
+                cursor, end, fragment)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 uint256 TypedDomain(const Recipe& recipe)
 {
     HashWriter hash;
@@ -2466,87 +2843,105 @@ bool PreparePrivateChaChaBatchV2(
 {
     const auto program = ha::BuildCanonicalProgram(
         ha::ProgramKind::ChaCha20Block);
-    for (uint32_t begin = 0; begin < batch.size(); ++begin) {
+    for (uint32_t begin = 0; begin < batch.size();
+         begin += kMaxPrivateChaChaSourcesPerChildV3) {
+        const uint32_t count = std::min<uint32_t>(
+            kMaxPrivateChaChaSourcesPerChildV3,
+            static_cast<uint32_t>(batch.size()) - begin);
         PreparedWitnessChildV2 prepared;
         auto& shape = prepared.shape;
         shape.child_ordinal = child_ordinal;
         shape.global_source_begin = begin;
-        shape.source_count = 1;
+        shape.source_count = count;
         shape.sink_count = 0;
-        shape.honest_boundaries = {batch[begin]};
-        shape.public_templates.resize(1);
-        shape.public_templates[0].external_values.assign(
-            program.external_address_count, 0);
-        shape.public_templates[0].final_words.assign(
-            program.final_addresses.size(), 0);
+        shape.honest_boundaries.assign(
+            batch.begin() + begin,
+            batch.begin() + begin + count);
+        shape.public_templates.resize(count);
+        for (auto& boundary : shape.public_templates) {
+            boundary.external_values.assign(
+                program.external_address_count, 0);
+            boundary.final_words.assign(
+                program.final_addresses.size(), 0);
+        }
         shape.public_masks.assign(
-            1, std::vector<uint8_t>(
-                   program.external_address_count, 0));
-        shape.family = {map.family[begin]};
-        shape.family_boundary = {
-            map.family_boundary[begin]};
-        std::vector<uint32_t> final_rows;
-        if (!BuildPrivateChaChaBaseV2(
-                program, &batch[begin], prepared.cs,
-                &prepared.columns, prepared.base_columns,
-                final_rows, why)) {
-            return false;
-        }
-        const uint256 public_statement =
-            PrivateChaChaStatementV2(
-                caller_manifest, shape);
-        auto initial_r0 =
-            air_quotient::AirQuotientBuildTwoEpochBaseRowSession(
-                prepared.cs, prepared.columns,
-                prepared.base_columns);
-        if (!initial_r0.valid ||
-            initial_r0.base_row_commitment.IsNull() ||
-            public_statement.IsNull()) {
+            count, std::vector<uint8_t>(
+                       program.external_address_count, 0));
+        shape.family.assign(
+            map.family.begin() + begin,
+            map.family.begin() + begin + count);
+        shape.family_boundary.assign(
+            map.family_boundary.begin() + begin,
+            map.family_boundary.begin() + begin + count);
+        const uint256 boundary_seed = BoundarySeedV2(
+            fs_seed, caller_manifest.statement_commitment,
+            ha::ProgramKind::ChaCha20Block, child_ordinal,
+            begin, count);
+        auto instance =
+            ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+                program, shape.honest_boundaries,
+                shape.public_masks, shape.links,
+                boundary_seed);
+        if (!instance.valid ||
+            instance.base_row_commitment.IsNull() ||
+            !instance.base_row_tree_cache) {
             return Fail(
-                why, "private_chacha_initial_r0:" +
-                    initial_r0.note);
+                why, "private_chacha_vertical:" +
+                    instance.note);
         }
-        prepared.cs.preprocessed_row_group_roots.push_back({
-            .version = 1,
-            .role =
-                air_quotient::
-                    AirPreprocessedRowGroupRole::kR0,
-            .ordered_columns = prepared.base_columns,
-            .root = initial_r0.base_row_commitment,
-        });
-        RCStage3CtlChallenges challenges;
         DualFp3ProducerTerminalV2 input_terminal;
-        if (!DerivePrivateChaChaChallengesV2(
-                fs_seed, public_statement,
-                initial_r0.base_row_commitment,
-                challenges, why) ||
-            !AppendExternalInputCopyCtlV2(
-                program, shape, challenges, prepared.cs,
-                &prepared.columns, nullptr,
-                input_terminal, why) ||
-            !AppendPrivateChaChaInternalSsaCtlV2(
-                program, challenges, prepared.cs,
-                &prepared.columns, why)) {
+        if (!AppendExternalInputCopyCtlV2(
+                program, shape, instance.challenges,
+                instance.cs, &instance.columns, nullptr,
+                input_terminal, why)) {
             return false;
         }
         DualFp3ProducerTerminalV2 terminal;
         if (!AppendOutputProducerCtlV2(
-                program, shape, challenges, prepared.cs,
-                final_rows, &prepared.columns, nullptr,
+                program, shape, instance.challenges,
+                instance.cs, instance.final_output_rows,
+                &instance.columns, nullptr,
                 terminal, why)) {
             return false;
         }
         if (!CheckPreprocessedWitnessV2(
-                prepared.cs, prepared.columns, why)) {
+                instance.cs, instance.columns, why)) {
+            return false;
+        }
+        auto verifier_audit =
+            ha::BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
+                program, shape.public_templates,
+                shape.public_masks, shape.links,
+                boundary_seed, instance.base_row_commitment);
+        DualFp3ProducerTerminalV2 audit_input_terminal;
+        DualFp3ProducerTerminalV2 audit_terminal;
+        if (!verifier_audit.valid ||
+            !AppendExternalInputCopyCtlV2(
+                program, shape, verifier_audit.challenges,
+                verifier_audit.cs, nullptr, &input_terminal,
+                audit_input_terminal, why) ||
+            !AppendOutputProducerCtlV2(
+                program, shape, verifier_audit.challenges,
+                verifier_audit.cs,
+                verifier_audit.final_output_rows, nullptr,
+                &terminal, audit_terminal, why) ||
+            !(audit_input_terminal == input_terminal) ||
+            !(audit_terminal == terminal)) {
+            return Fail(
+                why, "private_chacha_verifier_audit:" +
+                    verifier_audit.note);
+        }
+        if (!CheckPreprocessedSystemsV2(
+                instance.cs, verifier_audit.cs, why)) {
             return false;
         }
         prepared.r0 =
             air_quotient::AirQuotientBuildTwoEpochBaseRowSession(
-                prepared.cs, prepared.columns,
-                prepared.base_columns);
+                instance.cs, instance.columns,
+                instance.base_column_indices);
         if (!prepared.r0.valid ||
             prepared.r0.base_row_commitment !=
-                initial_r0.base_row_commitment) {
+                instance.base_row_commitment) {
             return Fail(
                 why, "private_chacha_r0_reuse:" +
                     prepared.r0.note);
@@ -2556,18 +2951,20 @@ bool PreparePrivateChaChaBatchV2(
             ha::ProgramKind::ChaCha20Block;
         statement.child_ordinal = child_ordinal;
         statement.global_source_begin = begin;
-        statement.source_instance_count = 1;
+        statement.source_instance_count = count;
         statement.sink_instance_count = 0;
-        statement.scheduled_instances = 1;
+        statement.scheduled_instances =
+            instance.scheduled_instances;
         statement.output_event_count =
-            program.final_addresses.size();
+            count * program.final_addresses.size();
         statement.public_boundary_statement =
-            public_statement;
+            instance.public_statement;
         statement.base_row_commitment =
             prepared.r0.base_row_commitment;
         if (!BuildCallerInputReceiptV3(
                 caller_manifest, batch, program, shape,
-                challenges, statement.base_row_commitment,
+                instance.challenges,
+                statement.base_row_commitment,
                 input_terminal,
                 statement.caller_input_receipt, why)) {
             return false;
@@ -2575,7 +2972,7 @@ bool PreparePrivateChaChaBatchV2(
         statement.output_producer_terminal = terminal;
         if (!BuildFragmentsV2(
                 caller_manifest, program, shape,
-                final_rows,
+                instance.final_output_rows,
                 statement.public_boundary_statement,
                 statement.base_row_commitment,
                 statement.fragments, why)) {
@@ -2587,6 +2984,10 @@ bool PreparePrivateChaChaBatchV2(
             return Fail(
                 why, "private_chacha_fragment_root");
         }
+        prepared.cs = std::move(instance.cs);
+        prepared.columns = std::move(instance.columns);
+        prepared.base_columns =
+            std::move(instance.base_column_indices);
         out.push_back(std::move(prepared));
         ++child_ordinal;
     }
@@ -2765,7 +3166,7 @@ bool VerifyWitnessProductV2(
     std::string* why)
 {
     if (fs_seed.IsNull() ||
-        proof.version != kWitnessVersionV2 ||
+        proof.version != kWitnessVersionV3 ||
         !proof.valid || proof.children.empty()) {
         return Fail(why, "witness_proof_shape");
     }
@@ -2932,26 +3333,38 @@ bool VerifyWitnessProductV2(
         const auto program = ha::BuildCanonicalProgram(
             ha::ProgramKind::ChaCha20Block);
         for (uint32_t begin = 0;
-             begin < chacha.size(); ++begin) {
+             begin < chacha.size();
+             begin += kMaxPrivateChaChaSourcesPerChildV3) {
             if (child_ordinal >= proof.children.size()) {
                 return Fail(
                     why, "private_chacha_child_omitted");
             }
+            const uint32_t count = std::min<uint32_t>(
+                kMaxPrivateChaChaSourcesPerChildV3,
+                static_cast<uint32_t>(chacha.size()) - begin);
             WitnessChunkShapeV2 shape;
             shape.child_ordinal = child_ordinal;
             shape.global_source_begin = begin;
-            shape.source_count = 1;
+            shape.source_count = count;
             shape.sink_count = 0;
-            shape.honest_boundaries.resize(1);
-            shape.honest_boundaries[0]
-                .external_values.assign(
+            shape.honest_boundaries.resize(count);
+            for (auto& boundary : shape.honest_boundaries) {
+                boundary.external_values.assign(
                     program.external_address_count, 0);
-            shape.honest_boundaries[0]
-                .final_words.assign(
+                boundary.final_words.assign(
                     program.final_addresses.size(), 0);
-            shape.family = {chacha_map.family[begin]};
-            shape.family_boundary = {
-                chacha_map.family_boundary[begin]};
+            }
+            shape.public_templates =
+                shape.honest_boundaries;
+            shape.public_masks.assign(
+                count, std::vector<uint8_t>(
+                           program.external_address_count, 0));
+            shape.family.assign(
+                chacha_map.family.begin() + begin,
+                chacha_map.family.begin() + begin + count);
+            shape.family_boundary.assign(
+                chacha_map.family_boundary.begin() + begin,
+                chacha_map.family_boundary.begin() + begin + count);
             const auto& supplied =
                 proof.children[child_ordinal];
             if (supplied.statement.program_kind !=
@@ -2960,56 +3373,46 @@ bool VerifyWitnessProductV2(
                     child_ordinal ||
                 supplied.statement.global_source_begin !=
                     begin ||
-                supplied.statement.source_instance_count != 1 ||
+                supplied.statement.source_instance_count !=
+                    count ||
                 supplied.statement.sink_instance_count != 0 ||
-                supplied.statement.scheduled_instances != 1 ||
                 supplied.statement.base_row_commitment.IsNull()) {
                 return Fail(
                     why, "private_chacha_child_static_shape");
             }
-            air_quotient::AirConstraintSystem<Fp3> cs;
-            std::vector<uint32_t> base_columns;
-            std::vector<uint32_t> final_rows;
-            if (!BuildPrivateChaChaBaseV2(
-                    program, nullptr, cs, nullptr,
-                    base_columns, final_rows, why)) {
-                return false;
+            const uint256 boundary_seed = BoundarySeedV2(
+                fs_seed, caller_manifest.statement_commitment,
+                ha::ProgramKind::ChaCha20Block,
+                child_ordinal, begin, count);
+            auto instance =
+                ha::BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
+                    program, shape.public_templates,
+                    shape.public_masks, shape.links,
+                    boundary_seed,
+                    supplied.statement.base_row_commitment);
+            if (!instance.valid ||
+                supplied.statement.scheduled_instances !=
+                    instance.scheduled_instances) {
+                return Fail(
+                    why, "private_chacha_verifier_instance:" +
+                        instance.note);
             }
-            const uint256 public_statement =
-                PrivateChaChaStatementV2(
-                    caller_manifest, shape);
-            cs.preprocessed_row_group_roots.push_back({
-                .version = 1,
-                .role =
-                    air_quotient::
-                        AirPreprocessedRowGroupRole::kR0,
-                .ordered_columns = base_columns,
-                .root = supplied.statement
-                    .base_row_commitment,
-            });
-            RCStage3CtlChallenges challenges;
             DualFp3ProducerTerminalV2 input_terminal;
-            if (!DerivePrivateChaChaChallengesV2(
-                    fs_seed, public_statement,
-                    supplied.statement
-                        .base_row_commitment,
-                    challenges, why) ||
-                !AppendExternalInputCopyCtlV2(
-                    program, shape, challenges, cs,
+            if (!AppendExternalInputCopyCtlV2(
+                    program, shape, instance.challenges,
+                    instance.cs,
                     nullptr,
                     &supplied.statement
                          .caller_input_receipt
                          .producer_terminal,
-                    input_terminal, why) ||
-                !AppendPrivateChaChaInternalSsaCtlV2(
-                    program, challenges, cs, nullptr,
-                    why)) {
+                    input_terminal, why)) {
                 return false;
             }
             DualFp3ProducerTerminalV2 terminal;
             if (!AppendOutputProducerCtlV2(
-                    program, shape, challenges, cs,
-                    final_rows, nullptr,
+                    program, shape, instance.challenges,
+                    instance.cs,
+                    instance.final_output_rows, nullptr,
                     &supplied.statement
                          .output_producer_terminal,
                     terminal, why)) {
@@ -3020,18 +3423,19 @@ bool VerifyWitnessProductV2(
                 ha::ProgramKind::ChaCha20Block;
             expected.child_ordinal = child_ordinal;
             expected.global_source_begin = begin;
-            expected.source_instance_count = 1;
             expected.sink_instance_count = 0;
-            expected.scheduled_instances = 1;
+            expected.source_instance_count = count;
+            expected.scheduled_instances =
+                instance.scheduled_instances;
             expected.output_event_count =
-                program.final_addresses.size();
+                count * program.final_addresses.size();
             expected.public_boundary_statement =
-                public_statement;
+                instance.public_statement;
             expected.base_row_commitment =
                 supplied.statement.base_row_commitment;
             if (!BuildCallerInputReceiptV3(
                     caller_manifest, chacha, program,
-                    shape, challenges,
+                    shape, instance.challenges,
                     expected.base_row_commitment,
                     input_terminal,
                     expected.caller_input_receipt, why)) {
@@ -3040,7 +3444,7 @@ bool VerifyWitnessProductV2(
             expected.output_producer_terminal = terminal;
             if (!BuildFragmentsV2(
                     caller_manifest, program, shape,
-                    final_rows,
+                    instance.final_output_rows,
                     expected.public_boundary_statement,
                     expected.base_row_commitment,
                     expected.fragments, why)) {
@@ -3054,9 +3458,9 @@ bool VerifyWitnessProductV2(
                     why, "private_chacha_child_statement");
             }
             VerifierChild verified;
-            verified.cs = std::move(cs);
+            verified.cs = std::move(instance.cs);
             verified.base_columns =
-                std::move(base_columns);
+                std::move(instance.base_column_indices);
             verified.statement = expected;
             verified_shapes.push_back(
                 std::move(verified));
@@ -3121,6 +3525,202 @@ bool VerifyWitnessProductV2(
             "role_consumers_and_recursion_open";
     }
     return true;
+}
+
+size_t SerializeWitnessProductProofV3(
+    const WitnessProductProofV2& proof,
+    std::vector<unsigned char>& out)
+{
+    out.clear();
+    if (proof.version != kWitnessVersionV3 ||
+        proof.manifest.version != kWitnessVersionV3 ||
+        !proof.valid ||
+        proof.children.empty() ||
+        proof.children.size() >
+            WITNESS_CODEC_MAX_CHILDREN ||
+        proof.children.size() !=
+            proof.manifest.children.size()) {
+        return 0;
+    }
+    for (uint32_t child = 0;
+         child < proof.children.size(); ++child) {
+        const auto& statement =
+            proof.children[child].statement;
+        if (!(statement ==
+              proof.manifest.children[child]) ||
+            statement.child_ordinal != child ||
+            statement.source_instance_count == 0 ||
+            statement.fragments.empty() ||
+            statement.fragments.size() >
+                WITNESS_CODEC_MAX_FRAGMENTS ||
+            statement.caller_input_receipt
+                .fragments.empty() ||
+            statement.caller_input_receipt
+                    .fragments.size() >
+                WITNESS_CODEC_MAX_FRAGMENTS) {
+            return 0;
+        }
+    }
+
+    AppendU32(out, kWitnessProductCodecMagicV3);
+    AppendU16(out, kWitnessProductCodecVersionV3);
+    AppendU16(out, 0);
+    AppendU32(
+        out,
+        static_cast<uint32_t>(proof.children.size()));
+    for (const auto& child : proof.children) {
+        AppendChildStatement(out, child.statement);
+        if (out.size() >
+            kRCStage3MaxProofBytes - 4U) {
+            out.clear();
+            return 0;
+        }
+        std::vector<unsigned char> quotient;
+        const size_t quotient_size =
+            air_quotient::
+                SerializeAirQuotientSplitRapRowsProof(
+                    child.quotient, quotient);
+        if (quotient_size == 0 ||
+            quotient_size != quotient.size() ||
+            quotient_size >
+                std::numeric_limits<uint32_t>::max() ||
+            out.size() >
+                kRCStage3MaxProofBytes - 4U ||
+            quotient_size >
+                kRCStage3MaxProofBytes -
+                    out.size() - 4U) {
+            out.clear();
+            return 0;
+        }
+        AppendU32(
+            out,
+            static_cast<uint32_t>(quotient_size));
+        out.insert(
+            out.end(), quotient.begin(), quotient.end());
+    }
+    if (out.size() > kRCStage3MaxProofBytes) {
+        out.clear();
+        return 0;
+    }
+    return out.size();
+}
+
+std::optional<WitnessProductProofV2>
+DeserializeWitnessProductProofV3(
+    const FamilyInputsV1& inputs,
+    const std::vector<unsigned char>& in,
+    std::string* why)
+{
+    const auto fail =
+        [&](const std::string& detail)
+            -> std::optional<WitnessProductProofV2> {
+        Fail(why, "witness_codec_" + detail);
+        return std::nullopt;
+    };
+    constexpr size_t HEADER_BYTES =
+        4U + 2U + 2U + 4U;
+    if (in.size() <= HEADER_BYTES ||
+        in.size() > kRCStage3MaxProofBytes) {
+        return fail("size");
+    }
+    const unsigned char* cursor = in.data();
+    const unsigned char* const end =
+        in.data() + in.size();
+    uint32_t magic = 0;
+    uint16_t version = 0;
+    uint16_t reserved = 0;
+    uint32_t child_count = 0;
+    if (!ReadU32(cursor, end, magic) ||
+        !ReadU16(cursor, end, version) ||
+        !ReadU16(cursor, end, reserved) ||
+        !ReadU32(cursor, end, child_count) ||
+        magic != kWitnessProductCodecMagicV3 ||
+        version != kWitnessProductCodecVersionV3 ||
+        reserved != 0 ||
+        child_count == 0 ||
+        child_count > WITNESS_CODEC_MAX_CHILDREN) {
+        return fail("header");
+    }
+
+    WitnessProductProofV2 out;
+    out.version = kWitnessVersionV3;
+    out.children.resize(child_count);
+    std::vector<WitnessChildStatementV2> statements;
+    statements.reserve(child_count);
+    for (uint32_t child = 0;
+         child < child_count; ++child) {
+        auto& decoded = out.children[child];
+        uint32_t quotient_size = 0;
+        if (!ReadChildStatement(
+                cursor, end, decoded.statement) ||
+            decoded.statement.child_ordinal != child ||
+            !ReadU32(
+                cursor, end, quotient_size) ||
+            quotient_size == 0 ||
+            quotient_size >
+                static_cast<size_t>(end - cursor)) {
+            return fail(
+                "child_statement_" +
+                std::to_string(child));
+        }
+        std::vector<unsigned char> quotient_bytes(
+            cursor, cursor + quotient_size);
+        cursor += quotient_size;
+        const auto quotient =
+            air_quotient::
+                DeserializeAirQuotientSplitRapRowsProof(
+                    quotient_bytes);
+        if (!quotient.has_value()) {
+            return fail(
+                "child_proof_" +
+                std::to_string(child));
+        }
+        std::vector<unsigned char> canonical_quotient;
+        if (air_quotient::
+                SerializeAirQuotientSplitRapRowsProof(
+                    *quotient,
+                    canonical_quotient) !=
+                quotient_size ||
+            canonical_quotient != quotient_bytes) {
+            return fail(
+                "child_noncanonical_" +
+                std::to_string(child));
+        }
+        decoded.quotient = *quotient;
+        statements.push_back(decoded.statement);
+    }
+    if (cursor != end) {
+        return fail("trailing_bytes");
+    }
+
+    ProductManifestV1 caller_manifest;
+    std::vector<ha::FixedProgramBoundaryInstance> sha;
+    std::vector<ha::FixedProgramBoundaryInstance> chacha;
+    if (!Derive(
+            inputs, caller_manifest, sha, chacha, why) ||
+        !BuildWitnessManifestV2(
+            caller_manifest, statements,
+            out.manifest, why)) {
+        return std::nullopt;
+    }
+    out.valid = true;
+    out.note =
+        "stage3:fixed_program_semantic_product:"
+        "canonical_v3_codec_decoded;"
+        "proof_verification_required";
+    std::vector<unsigned char> canonical;
+    if (SerializeWitnessProductProofV3(
+            out, canonical) != in.size() ||
+        canonical != in) {
+        return fail("noncanonical");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:fixed_program_semantic_product:"
+            "canonical_v3_codec_decoded;"
+            "proof_verification_required";
+    }
+    return out;
 }
 
 namespace {

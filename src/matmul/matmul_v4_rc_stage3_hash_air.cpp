@@ -2737,8 +2737,7 @@ uint256 CommitFixedProgramVerticalWitnessBoundaryStatement(
     const std::vector<FixedProgramWitnessBoundaryLink>& links)
 {
     if (boundaries.empty() || boundaries.size() > 64 ||
-        boundaries.size() != public_masks.size() ||
-        links.empty()) return {};
+        boundaries.size() != public_masks.size()) return {};
     uint32_t scheduled = 1;
     while (scheduled < boundaries.size()) scheduled <<= 1;
     if (scheduled < 2) scheduled = 2;
@@ -3005,6 +3004,9 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
     const uint32_t final_word_count =
         static_cast<uint32_t>(
             program.final_addresses.size());
+    const bool sha_byte_exports =
+        program.kind ==
+        ProgramKind::Sha256Compression;
     const uint32_t export_base = dummy.n_columns;
     const uint32_t export_selector_base =
         export_base + final_word_count;
@@ -3012,9 +3014,6 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
         export_selector_base + final_word_count;
     const uint32_t output_byte_base =
         output_bit_base + 32U * final_word_count;
-    out.output_export_base = export_base;
-    out.output_bit_base = output_bit_base;
-    out.output_byte_base = output_byte_base;
     const uint32_t input_word_base =
         output_byte_base + 4U * final_word_count;
     const uint32_t input_byte_base =
@@ -3027,21 +3026,27 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
         input_active_column + 1;
     const uint32_t input_slot_base =
         input_address_column + 1;
-    out.input_word_base = input_word_base;
-    out.input_byte_base = input_byte_base;
-    out.input_bit_base = input_bit_base;
-    out.input_active_column =
-        input_active_column;
-    out.input_address_column =
-        input_address_column;
-    dummy.n_columns = input_slot_base + 3;
-    columns.resize(
-        dummy.n_columns,
-        std::vector<Fp3>(dummy.n_rows, Fp3::Zero()));
-    const uint32_t final_instance =
-        static_cast<uint32_t>(boundaries.size() - 1);
-    for (uint32_t word = 0;
-         word < final_word_count; ++word) {
+    if (sha_byte_exports) {
+        out.output_export_base = export_base;
+        out.output_bit_base = output_bit_base;
+        out.output_byte_base = output_byte_base;
+        out.input_word_base = input_word_base;
+        out.input_byte_base = input_byte_base;
+        out.input_bit_base = input_bit_base;
+        out.input_active_column =
+            input_active_column;
+        out.input_address_column =
+            input_address_column;
+        dummy.n_columns = input_slot_base + 3;
+        columns.resize(
+            dummy.n_columns,
+            std::vector<Fp3>(
+                dummy.n_rows, Fp3::Zero()));
+        const uint32_t final_instance =
+            static_cast<uint32_t>(
+                boundaries.size() - 1);
+        for (uint32_t word = 0;
+             word < final_word_count; ++word) {
         const uint32_t native_word =
             boundaries.back().final_words[word];
         std::fill(
@@ -3084,9 +3089,9 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
                     4U * word + lane].end(),
                 U((native_word >> shift) & 0xffU));
         }
-    }
+        }
 
-    std::array<uint32_t, 16> first_message_row;
+        std::array<uint32_t, 16> first_message_row;
     std::array<uint32_t, 16> first_message_slot;
     first_message_row.fill(UINT32_MAX);
     first_message_slot.fill(UINT32_MAX);
@@ -3138,50 +3143,56 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
         slot.assign(
             dummy.n_rows, Fp3::Zero());
     }
-    for (uint32_t instance = 0;
-         instance < boundaries.size(); ++instance) {
-        if (is_second_pass[instance]) {
-            continue;
-        }
-        for (uint32_t word = 0; word < 16;
-             ++word) {
-            const uint32_t row =
-                instance * LANE_ROWS +
-                first_message_row[word];
-            const uint32_t slot =
-                first_message_slot[word];
-            if (!gf::IsZero(input_active[row]) ||
-                slot >= input_slot.size()) {
-                out.note =
-                    "stage3:hash_air:"
-                    "witness_vertical_message_collision";
-                return out;
+    // This byte-oriented R0 export is the SHA message bridge.  ChaCha can
+    // consume two or more external words in one instruction row, so the
+    // single-active-word SHA schedule is inapplicable.  Its complete external
+    // input multiset is exported by AppendExternalInputCopyCtlV2 instead.
+    if (program.kind == ProgramKind::Sha256Compression) {
+        for (uint32_t instance = 0;
+             instance < boundaries.size(); ++instance) {
+            if (is_second_pass[instance]) {
+                continue;
             }
-            const uint32_t native_word =
-                boundaries[instance]
-                    .external_values[word];
-            input_active[row] = Fp3::One();
-            input_address[row] =
-                U(static_cast<uint64_t>(instance) *
-                      16U +
-                  word);
-            input_slot[slot][row] = Fp3::One();
-            columns[input_word_base][row] =
-                U(native_word);
-            for (uint32_t lane = 0; lane < 4;
-                 ++lane) {
-                const uint32_t shift =
-                    8U * (3U - lane);
-                columns[
-                    input_byte_base + lane][row] =
-                    U((native_word >> shift) &
-                      0xffU);
-            }
-            for (uint32_t bit = 0; bit < 32;
-                 ++bit) {
-                columns[
-                    input_bit_base + bit][row] =
-                    U((native_word >> bit) & 1U);
+            for (uint32_t word = 0; word < 16;
+                 ++word) {
+                const uint32_t row =
+                    instance * LANE_ROWS +
+                    first_message_row[word];
+                const uint32_t slot =
+                    first_message_slot[word];
+                if (!gf::IsZero(input_active[row]) ||
+                    slot >= input_slot.size()) {
+                    out.note =
+                        "stage3:hash_air:"
+                        "witness_vertical_message_collision";
+                    return out;
+                }
+                const uint32_t native_word =
+                    boundaries[instance]
+                        .external_values[word];
+                input_active[row] = Fp3::One();
+                input_address[row] =
+                    U(static_cast<uint64_t>(instance) *
+                          16U +
+                      word);
+                input_slot[slot][row] = Fp3::One();
+                columns[input_word_base][row] =
+                    U(native_word);
+                for (uint32_t lane = 0; lane < 4;
+                     ++lane) {
+                    const uint32_t shift =
+                        8U * (3U - lane);
+                    columns[
+                        input_byte_base + lane][row] =
+                        U((native_word >> shift) &
+                          0xffU);
+                }
+                for (uint32_t bit = 0; bit < 32;
+                     ++bit) {
+                    columns[
+                        input_bit_base + bit][row] =
+                        U((native_word >> bit) & 1U);
+                }
             }
         }
     }
@@ -3203,6 +3214,7 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
          ++slot) {
         columns[input_slot_base + slot] =
             std::move(input_slot[slot]);
+    }
     }
 
     for (uint32_t column = 0;
@@ -3283,18 +3295,20 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
         out.cs.preprocessed.emplace_back(
             chain_base + offset, metadata[offset]);
     }
-    for (uint32_t word = 0;
-         word < final_word_count; ++word) {
-        out.cs.preprocessed.emplace_back(
-            export_selector_base + word,
-            columns[export_selector_base + word]);
-    }
-    for (uint32_t column =
-             input_active_column;
-         column < input_slot_base + 3;
-         ++column) {
-        out.cs.preprocessed.emplace_back(
-            column, columns[column]);
+    if (sha_byte_exports) {
+        for (uint32_t word = 0;
+             word < final_word_count; ++word) {
+            out.cs.preprocessed.emplace_back(
+                export_selector_base + word,
+                columns[export_selector_base + word]);
+        }
+        for (uint32_t column =
+                 input_active_column;
+             column < input_slot_base + 3;
+             ++column) {
+            out.cs.preprocessed.emplace_back(
+                column, columns[column]);
+        }
     }
     out.cs.preprocessed_pin_ood = true;
     out.cs.preprocessed_row_group_roots.push_back({
@@ -3398,8 +3412,9 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
             });
     }
 
-    for (uint32_t word = 0;
-         word < final_word_count; ++word) {
+    if (sha_byte_exports) {
+      for (uint32_t word = 0;
+           word < final_word_count; ++word) {
         Add(out.cs, "stage3.hash.witness_chain.export_final",
             2, [export_base, export_selector_base, word](
                 const auto& cur, const auto&) {
@@ -3482,8 +3497,8 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
                         reconstructed);
                 });
         }
-    }
-    Add(out.cs,
+      }
+      Add(out.cs,
         "stage3.hash.witness_chain.first_pass_word_source",
         2,
         [input_word_base, input_slot_base](
@@ -3534,8 +3549,8 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
                 cur[input_word_base],
                 reconstructed);
         });
-    for (uint32_t lane = 0; lane < 4;
-         ++lane) {
+      for (uint32_t lane = 0; lane < 4;
+           ++lane) {
         const uint32_t byte_column =
             input_byte_base + lane;
         Add(out.cs,
@@ -3560,6 +3575,7 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
                     cur[byte_column],
                     reconstructed);
             });
+      }
     }
 
     // Fill the ordinary namespaced internal-SSA LogUp columns under the new

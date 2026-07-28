@@ -120,23 +120,6 @@ uint64_t EncodedChildBytes(
     return total;
 }
 
-uint64_t EncodedWitnessBytes(
-    const product::WitnessProductProofV2& proof)
-{
-    uint64_t total = 0;
-    for (const auto& child : proof.children) {
-        std::vector<unsigned char> bytes;
-        const size_t encoded =
-            matmul::v4::rc::air_quotient::
-                SerializeAirQuotientSplitRapRowsProof(
-                    child.quotient, bytes);
-        BOOST_REQUIRE_EQUAL(encoded, bytes.size());
-        BOOST_REQUIRE_NE(encoded, 0U);
-        total += encoded;
-    }
-    return total;
-}
-
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -338,7 +321,56 @@ BOOST_AUTO_TEST_CASE(
         why);
     const auto verify_end =
         std::chrono::steady_clock::now();
-    BOOST_REQUIRE_EQUAL(proof.children.size(), 3U);
+    std::vector<unsigned char> wire;
+    const size_t wire_bytes =
+        product::SerializeWitnessProductProofV3(
+            proof, wire);
+    BOOST_REQUIRE_EQUAL(wire_bytes, wire.size());
+    BOOST_REQUIRE_NE(wire_bytes, 0U);
+    BOOST_CHECK_LT(
+        wire_bytes,
+        size_t{matmul::v4::rc::
+                   kRCStage3MaxProofBytes});
+    const auto decoded =
+        product::DeserializeWitnessProductProofV3(
+            inputs, wire, &why);
+    BOOST_REQUIRE_MESSAGE(
+        decoded.has_value(), why);
+    BOOST_REQUIRE_MESSAGE(
+        product::VerifyWitnessProductV2(
+            inputs, seed, *decoded, &why),
+        why);
+    std::vector<unsigned char> canonical_wire;
+    const size_t canonical_bytes =
+        product::SerializeWitnessProductProofV3(
+            *decoded, canonical_wire);
+    BOOST_REQUIRE_EQUAL(
+        canonical_bytes, wire_bytes);
+    BOOST_CHECK(canonical_wire == wire);
+
+    auto reserved_wire = wire;
+    reserved_wire[6] = 1;
+    BOOST_CHECK(
+        !product::DeserializeWitnessProductProofV3(
+             inputs, reserved_wire, &why)
+             .has_value());
+    auto trailing_wire = wire;
+    trailing_wire.push_back(0);
+    BOOST_CHECK(
+        !product::DeserializeWitnessProductProofV3(
+             inputs, trailing_wire, &why)
+             .has_value());
+    auto proof_tamper_wire = wire;
+    proof_tamper_wire.back() ^= 1U;
+    const auto proof_tamper =
+        product::DeserializeWitnessProductProofV3(
+            inputs, proof_tamper_wire, &why);
+    BOOST_CHECK(
+        !proof_tamper.has_value() ||
+        !product::VerifyWitnessProductV2(
+            inputs, seed, *proof_tamper, &why));
+
+    BOOST_REQUIRE_EQUAL(proof.children.size(), 2U);
     BOOST_CHECK_EQUAL(
         proof.children[0].statement.source_instance_count, 9U);
     BOOST_CHECK_EQUAL(
@@ -346,17 +378,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         proof.children[0].statement.scheduled_instances, 16U);
     BOOST_CHECK_EQUAL(
-        proof.children[1].statement.source_instance_count, 1U);
+        proof.children[1].statement.source_instance_count, 2U);
     BOOST_CHECK_EQUAL(
         proof.children[1].statement.sink_instance_count, 0U);
     BOOST_CHECK_EQUAL(
-        proof.children[1].statement.scheduled_instances, 1U);
-    BOOST_CHECK_EQUAL(
-        proof.children[2].statement.source_instance_count, 1U);
-    BOOST_CHECK_EQUAL(
-        proof.children[2].statement.sink_instance_count, 0U);
-    BOOST_CHECK_EQUAL(
-        proof.children[2].statement.scheduled_instances, 1U);
+        proof.children[1].statement.scheduled_instances, 2U);
     BOOST_CHECK(proof.manifest.canonical_family_order);
     BOOST_CHECK(proof.manifest.private_boundary_inputs);
     BOOST_CHECK(proof.manifest.private_boundary_outputs);
@@ -435,6 +461,26 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK_GT(
             shard_set.production_boundary_counts[family],
             shard_set.caller_boundary_counts[family]);
+    }
+    const auto production_sites =
+        sites::BuildProductionProofSiteManifest(
+            sites::SelectedProductionProofSitePolicy());
+    for (const auto& entry : production_sites.entries) {
+        if (entry.kind ==
+                sites::ProductionProofSiteKind::
+                    EpisodeExtractChaCha ||
+            entry.kind ==
+                sites::ProductionProofSiteKind::
+                    CoupledExtractChaCha) {
+            BOOST_TEST_MESSAGE(
+                "FIXED_PROGRAM_CHACHA_V3 kind="
+                << static_cast<uint32_t>(entry.kind)
+                << " logical_instances=" << entry.logical_units
+                << " conservative_sites=" << entry.proof_sites
+                << " executable_sources_per_child="
+                << product::
+                       kMaxPrivateChaChaSourcesPerChildV3);
+        }
     }
 
     auto shard_omitted = shard_set;
@@ -541,6 +587,34 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!product::VerifyWitnessProductV2(
         inputs, seed, duplicated, &why));
 
+    auto legacy_singleton_version = proof;
+    legacy_singleton_version.version =
+        product::kWitnessVersionV2;
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, legacy_singleton_version, &why));
+
+    // Child order is canonical (SHA shard followed by the vertically batched
+    // ChaCha shard), not prover-selected.
+    auto reordered_children = proof;
+    std::swap(
+        reordered_children.children[0],
+        reordered_children.children[1]);
+    std::swap(
+        reordered_children.manifest.children[0],
+        reordered_children.manifest.children[1]);
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, reordered_children, &why));
+
+    // A valid proof child cannot be transplanted into another typed family
+    // interval, even if the outer child list is changed to match it.
+    auto transplanted_child = proof;
+    transplanted_child.children[1] =
+        transplanted_child.children[0];
+    transplanted_child.manifest.children[1] =
+        transplanted_child.children[1].statement;
+    BOOST_CHECK(!product::VerifyWitnessProductV2(
+        inputs, seed, transplanted_child, &why));
+
     // The caller-role consumer schedule is exact, not a host-side Ready
     // boolean: roots, typed role/endpoint placement and every fragment are
     // regenerated by the verifier.
@@ -594,27 +668,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!product::VerifyWitnessProductV2(
         inputs, seed, receipt_transplant, &why));
 
-    uint32_t decoded = 0;
+    uint32_t decoded_word = 0;
     BOOST_CHECK(!product::DecodeCanonicalU32V1(
         gf::Fp3{gf::kP + 7U, 0, 0},
-        decoded, &why));
+        decoded_word, &why));
 
     // Child proof from a distinct FS statement is stale.
     BOOST_CHECK(!product::VerifyWitnessProductV2(
         inputs, Seed(0xe1), proof, &why));
 
-    const uint64_t proof_bytes =
-        EncodedWitnessBytes(proof);
-    // This is the exact sum of the three child quotient encodings.  The V2
-    // wrapper has no production codec yet, so this is a child-payload budget
-    // check rather than a claim that the final block envelope already fits.
-    BOOST_CHECK_LT(
-        proof_bytes,
-        uint64_t{matmul::v4::rc::kRCStage3MaxProofBytes});
     BOOST_TEST_MESSAGE(
         "FIXED_PROGRAM_WITNESS_PRODUCT all11 children="
         << proof.children.size()
-        << " proof_bytes=" << proof_bytes
+        << " proof_bytes=" << wire_bytes
         << " prove_ms="
         << std::chrono::duration_cast<
                std::chrono::milliseconds>(

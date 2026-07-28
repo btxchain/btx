@@ -11,7 +11,9 @@
 #include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <variant>
 #include <vector>
@@ -24,21 +26,35 @@ using gkr_field::Fp3;
 
 inline constexpr uint16_t kVersionV1 = 1;
 inline constexpr uint16_t kWitnessVersionV2 = 2;
+inline constexpr uint16_t kWitnessVersionV3 = 3;
 inline constexpr uint32_t kFamilyCountV1 = 11;
 inline constexpr uint32_t kMaxBoundariesPerChildV1 =
     ha::kFixedProgramVerticalSemanticInstances;
 /** SHA witness-boundary children use linked auxiliary sinks; thirty-two
  * sources plus linked and explicit power-of-two padding sinks fit the
- * canonical 64-instance schedule.  ChaCha uses the single-instance private
- * split-RAP construction below instead of this batching limit. */
+ * canonical 64-instance schedule.  Independent ChaCha blocks require no
+ * auxiliary sinks and use the same complete vertical internal-SSA AIR. */
 inline constexpr uint32_t kMaxWitnessSourcesPerChildV2 = 32;
+/**
+ * ChaCha uses the complete vertical fixed-program AIR as well.  Unlike the
+ * SHA chain it needs no auxiliary sink rows: each independent block retains
+ * its own instance-tagged internal-SSA bus, external-input export and output
+ * terminal.  The underlying vertical builder has an exact 64-instance cap.
+ */
 inline constexpr uint32_t kMaxPrivateChaChaSourcesPerChildV2 = 1;
+inline constexpr uint32_t kMaxPrivateChaChaSourcesPerChildV3 = 64;
 static_assert(
     kMaxWitnessSourcesPerChildV2 ==
     sites::kProductionPrivateShaSourcesPerProofSiteV1);
+// The currently selected inventory still names the singleton V2 capacity.
+// It may move to V3 only after this batched proof is consumed by the recursive
+// scheduler; until then the one-source accounting remains conservative.
 static_assert(
     kMaxPrivateChaChaSourcesPerChildV2 ==
     sites::kProductionPrivateChaChaSourcesPerProofSiteV1);
+static_assert(
+    kMaxPrivateChaChaSourcesPerChildV3 >
+    kMaxPrivateChaChaSourcesPerChildV2);
 
 /**
  * These are exactly the eleven fixed SHA/XOF/ChaCha sites which remain
@@ -223,7 +239,9 @@ struct WitnessChildStatementV2 {
 };
 
 struct WitnessProductManifestV2 {
-    uint16_t version{kWitnessVersionV2};
+    /** V3 selects vertically batched private ChaCha children.  The retained
+     * type name reflects the stable field layout, not the protocol version. */
+    uint16_t version{kWitnessVersionV3};
     uint256 caller_input_statement_commitment{};
     std::array<FamilyWitnessStatementV2, kFamilyCountV1> families{};
     std::vector<WitnessChildStatementV2> children;
@@ -254,12 +272,32 @@ struct WitnessChildProofV2 {
 };
 
 struct WitnessProductProofV2 {
-    uint16_t version{kWitnessVersionV2};
+    uint16_t version{kWitnessVersionV3};
     WitnessProductManifestV2 manifest;
     std::vector<WitnessChildProofV2> children;
     bool valid{false};
     std::string note;
 };
+
+inline constexpr uint32_t
+    kWitnessProductCodecMagicV3 = 0x33575046U; // "FWP3"
+inline constexpr uint16_t
+    kWitnessProductCodecVersionV3 = 3;
+
+/**
+ * Canonical durable V3 envelope for the complete proof-owned fixed-program
+ * product.  Derived manifest fields are omitted from the wire and rebuilt
+ * from `inputs`; every proof-owned statement, terminal, fragment and complete
+ * split-RAP child proof is encoded exactly once.
+ */
+[[nodiscard]] size_t SerializeWitnessProductProofV3(
+    const WitnessProductProofV2& proof,
+    std::vector<unsigned char>& out);
+[[nodiscard]] std::optional<WitnessProductProofV2>
+DeserializeWitnessProductProofV3(
+    const FamilyInputsV1& inputs,
+    const std::vector<unsigned char>& in,
+    std::string* why = nullptr);
 
 inline constexpr uint16_t kShardSetVersionV4 = 4;
 
