@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_stage3_production_canonical_registry.h>
 #include <matmul/matmul_v4_rc_stage3_semantic_endpoint_program_bridge.h>
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -42,6 +43,7 @@ enum FrozenSpecResidualV1 : uint32_t {
     kResidualRoleHalfShapes = 1U << 7,
     kResidualPublicOutputAbi = 1U << 8,
     kResidualConsensusRegistryPin = 1U << 9,
+    kResidualRoleHalfR0Schedule = 1U << 10,
 };
 
 /**
@@ -69,6 +71,14 @@ struct FrozenSpecAssessmentV1 {
      * after every independent production residual is closed.
      */
     cpc::FrozenBinaryParentSpecV1 diagnostic_frozen_spec;
+    /** Exact SAFE Split-RAP R0 column schedules, assembled by offsetting the
+     * canonical per-family producer phase manifests.  Never proof-derived. */
+    std::array<std::vector<uint32_t>, 2>
+        diagnostic_child_r0_base_columns;
+    /** Binds ordered family phase descriptors, child ProgramTable identity,
+     * shape and combined R0 schedule. */
+    std::array<uint256, 2>
+        diagnostic_child_phase_commitment{};
     uint256 block_dimension_commitment{};
     uint32_t derived_endpoint_occurrences{0};
     uint32_t derived_role_programs{0};
@@ -84,6 +94,9 @@ struct FrozenSpecAssessmentV1 {
     bool role_half_programs_available{false};
     bool role_half_shapes_available{false};
     bool public_output_abi_available{false};
+    bool role_half_r0_schedules_available{false};
+    std::vector<uint32_t>
+        missing_r0_phase_family_indices;
     bool spec_derivable{false};
     bool authority{false};
     std::string role_half_adapter_note;

@@ -56,6 +56,22 @@ Sources(const ss::ProductionProofSiteManifest& manifest)
             static_cast<unsigned char>(i),
             static_cast<unsigned char>(
                 static_cast<uint16_t>(site.role))};
+        // These generic topology fixtures are challenge-free.  Model their
+        // producer-owned phase manifest explicitly instead of relying on a
+        // default descriptor: the sole witness column is committed in R0.
+        source.phase.family_index =
+            static_cast<uint32_t>(i);
+        source.phase.kind = site.kind;
+        source.phase.role = site.role;
+        source.phase.program_root =
+            cb::CommitProgramTable(source.program);
+        source.phase.current_width =
+            source.program.current_width;
+        source.phase.challenge_width = 0;
+        source.phase.challenge_epoch =
+            ut::ProductionChallengeEpochV1::None;
+        source.phase.r0_base_columns = {0};
+        source.phase.producer_manifest_exported = true;
         if (!assigned[site.role]) {
             for (const auto endpoint :
                  rc::RequiredRCStage3RelationEndpoints(

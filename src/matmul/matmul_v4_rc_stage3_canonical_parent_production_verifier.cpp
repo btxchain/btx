@@ -462,11 +462,20 @@ bool BuildCanonicalRoleHalfAdapter(
     const pcr::AssessmentV1& registry,
     const std::vector<cpc::FrozenRoleScheduleV1>& roles,
     cpc::FrozenBinaryParentSpecV1& out,
+    std::array<std::vector<uint32_t>, 2>&
+        child_r0_base_columns,
+    std::array<uint256, 2>&
+        child_phase_commitment,
+    std::vector<uint32_t>&
+        missing_phase_family_indices,
     std::string* why)
 {
     namespace cb = constraint_bytecode;
     namespace utp = universal_topology;
     out = {};
+    child_r0_base_columns = {};
+    child_phase_commitment = {};
+    missing_phase_family_indices.clear();
     out.role_schedule = roles;
     if (roles.size() != nav3::kRoleCountV3 ||
         !registry.canonical_family_sources ||
@@ -488,6 +497,9 @@ bool BuildCanonicalRoleHalfAdapter(
             RCStage3RelationRole::CompositionLink;
         uint32_t column_offset = 0;
         uint32_t challenge_offset = 0;
+        bool phase_complete = true;
+        std::vector<std::vector<unsigned char>>
+            ordered_phase_bytes;
         std::array<bool, cpc::kCanonicalRoleSplitV1>
             role_present{};
         const uint32_t begin =
@@ -509,6 +521,36 @@ bool BuildCanonicalRoleHalfAdapter(
                 static_cast<size_t>(
                     found - (order.begin() + begin))] =
                 true;
+            std::vector<unsigned char> phase_bytes;
+            if (!utp::
+                    ValidateProductionFamilyPhaseDescriptorV1(
+                        source.program, source.phase,
+                        /*require_producer_export=*/false,
+                        why) ||
+                !utp::
+                    SerializeProductionFamilyPhaseDescriptorV1(
+                        source.phase, phase_bytes, why)) {
+                out = {};
+                child_r0_base_columns = {};
+                child_phase_commitment = {};
+                missing_phase_family_indices.clear();
+                return false;
+            }
+            if (!source.phase.producer_manifest_exported) {
+                phase_complete = false;
+                missing_phase_family_indices.push_back(
+                    source.family_index);
+            } else {
+                for (const uint32_t local_column :
+                     source.phase.r0_base_columns) {
+                    child_r0_base_columns[child]
+                        .push_back(
+                            column_offset +
+                            local_column);
+                }
+            }
+            ordered_phase_bytes.push_back(
+                std::move(phase_bytes));
             if (!AppendProgramComponent(
                     source.program, aggregate,
                     column_offset, challenge_offset,
@@ -539,6 +581,13 @@ bool BuildCanonicalRoleHalfAdapter(
             out = {};
             return false;
         }
+        // Public output columns are deterministic pre-challenge statement
+        // cells.  They are appended after all family components and therefore
+        // join R0 directly without any family-local offset ambiguity.
+        for (uint32_t cell = 0; cell < cells; ++cell) {
+            child_r0_base_columns[child]
+                .push_back(column_offset + cell);
+        }
         auto& frozen = out.child_registry[child];
         frozen.child_relation_program =
             std::move(aggregate);
@@ -553,7 +602,70 @@ bool BuildCanonicalRoleHalfAdapter(
             out = {};
             return false;
         }
+        if (phase_complete) {
+            const auto& base =
+                child_r0_base_columns[child];
+            if (base.empty() ||
+                base.size() >=
+                    frozen.child_relation_program
+                        .current_width ||
+                !std::is_sorted(
+                    base.begin(), base.end()) ||
+                std::adjacent_find(
+                    base.begin(), base.end()) !=
+                    base.end()) {
+                out = {};
+                child_r0_base_columns = {};
+                child_phase_commitment = {};
+                missing_phase_family_indices.clear();
+                return Fail(
+                    why, "role_half_phase_schedule");
+            }
+            HashWriter hash;
+            hash <<
+                "BTX_RC_STAGE3_ROLE_HALF_R0_PHASE_V1";
+            hash << uint16_t{1};
+            hash << child;
+            hash << registry.diagnostic_registry
+                        .external_registry_commitment;
+            hash << frozen.program_root;
+            hash << universal_two_child_parent::
+                CommitPublicShapeV1(
+                out.child_shape[child]);
+            hash << static_cast<uint32_t>(
+                ordered_phase_bytes.size());
+            for (const auto& bytes :
+                 ordered_phase_bytes) {
+                hash << bytes;
+            }
+            hash << static_cast<uint32_t>(base.size());
+            for (const uint32_t column : base) {
+                hash << column;
+            }
+            child_phase_commitment[child] =
+                hash.GetHash();
+            if (child_phase_commitment[child]
+                    .IsNull()) {
+                out = {};
+                child_r0_base_columns = {};
+                child_phase_commitment = {};
+                missing_phase_family_indices.clear();
+                return Fail(
+                    why, "role_half_phase_commitment");
+            }
+        } else {
+            child_r0_base_columns[child].clear();
+            child_phase_commitment[child].SetNull();
+        }
     }
+    std::sort(
+        missing_phase_family_indices.begin(),
+        missing_phase_family_indices.end());
+    missing_phase_family_indices.erase(
+        std::unique(
+            missing_phase_family_indices.begin(),
+            missing_phase_family_indices.end()),
+        missing_phase_family_indices.end());
     return ValidateRoleHalfAdapter(out, out, why);
 }
 
@@ -751,6 +863,9 @@ AssessFrozenBinaryParentSpecV1(
             out.site_manifest, out.registry,
             out.diagnostic_role_schedule,
             out.diagnostic_frozen_spec,
+            out.diagnostic_child_r0_base_columns,
+            out.diagnostic_child_phase_commitment,
+            out.missing_r0_phase_family_indices,
             &adapter_why);
     out.role_half_adapter_note = adapter_why;
     out.role_half_programs_available =
@@ -771,6 +886,17 @@ AssessFrozenBinaryParentSpecV1(
             out.diagnostic_frozen_spec, 0) != 0 &&
         cpc::CanonicalChildPublicOutputCellCountV1(
             out.diagnostic_frozen_spec, 1) != 0;
+    out.role_half_r0_schedules_available =
+        adapter &&
+        out.missing_r0_phase_family_indices.empty() &&
+        !out.diagnostic_child_r0_base_columns[0]
+             .empty() &&
+        !out.diagnostic_child_r0_base_columns[1]
+             .empty() &&
+        !out.diagnostic_child_phase_commitment[0]
+             .IsNull() &&
+        !out.diagnostic_child_phase_commitment[1]
+             .IsNull();
     if (!out.role_half_programs_available) {
         Missing(
             out, kResidualRoleHalfPrograms,
@@ -786,6 +912,17 @@ AssessFrozenBinaryParentSpecV1(
             out, kResidualPublicOutputAbi,
             "registry_pinned_child_public_output_column_bases");
     }
+    if (!out.role_half_r0_schedules_available) {
+        Missing(
+            out, kResidualRoleHalfR0Schedule,
+            "producer_exported_safe_split_rap_r0_phase_schedules");
+        for (const uint32_t family :
+             out.missing_r0_phase_family_indices) {
+            out.missing_inputs.push_back(
+                "r0_phase_family_" +
+                std::to_string(family));
+        }
+    }
 
     out.spec_derivable =
         out.residual_mask == 0 &&
@@ -800,7 +937,8 @@ AssessFrozenBinaryParentSpecV1(
         out.exact_role_program_schedule &&
         out.role_half_programs_available &&
         out.role_half_shapes_available &&
-        out.public_output_abi_available;
+        out.public_output_abi_available &&
+        out.role_half_r0_schedules_available;
     out.authority = false;
     out.note = out.spec_derivable
         ? "stage3:canonical_parent_production_verifier:"

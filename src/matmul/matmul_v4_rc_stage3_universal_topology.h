@@ -59,6 +59,57 @@ BuildProductionProgramRegistryAlgHashPreimageV1(
     const ProductionProgramRegistryV1& registry);
 
 /**
+ * Witness-phase ownership for one canonical family ProgramTable.
+ *
+ * SAFE Split-RAP commits the columns in `r0_base_columns` before deriving
+ * every ProgramTable Challenge lane.  The strict complement is constructed
+ * only after that challenge epoch.  This direction cannot be inferred from
+ * polynomial identities: a LogUp identity mentions both pre-challenge tuple
+ * columns and post-challenge inverse/accumulator columns in one equation.
+ * Consequently challenge-bearing family builders must export this descriptor
+ * from their witness manifest.  Empty claims and caller-selected schedules
+ * are never accepted as production phase metadata.
+ */
+enum class ProductionChallengeEpochV1 : uint8_t {
+    None = 0,
+    BytecodeP2AfterSafeR0 = 1,
+};
+
+struct ProductionFamilyPhaseDescriptorV1 {
+    uint16_t version{1};
+    uint32_t family_index{0};
+    sites::ProductionProofSiteKind kind{};
+    RCStage3RelationRole role{};
+    uint256 program_root{};
+    uint32_t current_width{0};
+    uint32_t challenge_width{0};
+    ProductionChallengeEpochV1 challenge_epoch{
+        ProductionChallengeEpochV1::None};
+    std::vector<uint32_t> r0_base_columns;
+    /** True only when the executable family witness builder/manifest exports
+     * the exact split above. Challenge-free programs earn this mechanically. */
+    bool producer_manifest_exported{false};
+
+    bool operator==(
+        const ProductionFamilyPhaseDescriptorV1&) const = default;
+};
+
+[[nodiscard]] bool
+ValidateProductionFamilyPhaseDescriptorV1(
+    const cb::ProgramTable& program,
+    const ProductionFamilyPhaseDescriptorV1& phase,
+    bool require_producer_export,
+    std::string* why = nullptr);
+
+/** Consensus-canonical phase bytes appended to the family's public-input ABI
+ * before the production registry commits it. */
+[[nodiscard]] bool
+SerializeProductionFamilyPhaseDescriptorV1(
+    const ProductionFamilyPhaseDescriptorV1& phase,
+    std::vector<unsigned char>& out,
+    std::string* why = nullptr);
+
+/**
  * Build-time source for one immutable production family. The ProgramTable is
  * the actual verifying key: no callback or host-selected table is accepted.
  * `public_input_schema` is a canonical byte ABI (not a public-input value).
@@ -69,6 +120,7 @@ struct ProductionFamilyProgramSourceV1 {
     RCStage3RelationRole role{};
     cb::ProgramTable program;
     std::vector<unsigned char> public_input_schema;
+    ProductionFamilyPhaseDescriptorV1 phase;
     std::vector<uint16_t> semantic_endpoints;
     bool semantic_relation_complete{false};
 };

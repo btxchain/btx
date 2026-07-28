@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <set>
 
 namespace matmul::v4::rc::universal_topology {
@@ -1219,6 +1220,182 @@ uint32_t PartialResidualMask(
     }
 }
 
+bool BuildCanonicalR0BaseColumns(
+    sites::ProductionProofSiteKind kind,
+    const cb::ProgramTable& program,
+    std::vector<uint32_t>& out)
+{
+    out.clear();
+    const auto append_range =
+        [&](uint32_t begin, uint32_t end) {
+            for (uint32_t column = begin;
+                 column < end; ++column) {
+                out.push_back(column);
+            }
+        };
+    switch (kind) {
+    case sites::ProductionProofSiteKind::
+        EpisodeRangeExtractCtl:
+        // [source,mask,address] and [tile,multiplicity,tile bits] are
+        // pre-challenge. [inverse1,inverse2,running1,running2] are Rdep.
+        if (program.current_width != 41 ||
+            program.challenge_width != 6) {
+            return false;
+        }
+        append_range(0, 3);
+        append_range(7, 41);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeExtractCore:
+    case sites::ProductionProofSiteKind::CoupledExtractCore:
+        // RcSampler witness generation writes phi, challenge-derived table
+        // fingerprint, psi and running sum only after gamma/alpha.  The core
+        // 32 columns, multiplicity and challenge-independent table tuple are
+        // committed in R0.
+        if (program.current_width !=
+                aq::kRcSamplerNumCols ||
+            program.challenge_width != 2) {
+            return false;
+        }
+        append_range(0, aq::kRcSamplerBaseCols);
+        out.push_back(aq::kColM);
+        out.push_back(aq::kColTblA);
+        out.push_back(aq::kColTblB);
+        out.push_back(aq::kColTblC);
+        break;
+    case sites::ProductionProofSiteKind::EpisodeWiring:
+        // Direct product offsets are:
+        // copy[0,2), transpose[2,10), residual[10,14), order[14,16).
+        // The transpose's inverse/product quartet occupies aggregate 6..9.
+        if (program.current_width != 16 ||
+            program.challenge_width != 4) {
+            return false;
+        }
+        append_range(0, 6);
+        append_range(10, 16);
+        break;
+    case sites::ProductionProofSiteKind::CoupledExchange:
+        // Material transport ends with two (inverse, product) lane pairs.
+        if (program.current_width != 214 ||
+            program.challenge_width != 12) {
+            return false;
+        }
+        append_range(0, 210);
+        break;
+    case sites::ProductionProofSiteKind::CoupledPermutation:
+        // Pure permutation transport has the same four-lane suffix.
+        if (program.current_width != 14 ||
+            program.challenge_width != 12) {
+            return false;
+        }
+        append_range(0, 10);
+        break;
+    case sites::ProductionProofSiteKind::CoupledExtractChaCha:
+        // The fixed-program provenance manifest explicitly places all
+        // producer/consumer inverses and running sums after BaseColumns.
+        // Its selector-muxed output is pre-challenge; the following weighted
+        // output/input products are challenge-dependent.
+        if (program.current_width != fpb::kColumnsV1 ||
+            program.challenge_width !=
+                fpb::kChallengeWidthV1 ||
+            fpb::kOutputColumnV1 >=
+                program.current_width) {
+            return false;
+        }
+        append_range(
+            0,
+            stage3_hash_air::
+                kFixedProgramProvenanceBaseColumns);
+        out.push_back(fpb::kOutputColumnV1);
+        break;
+    default:
+        return false;
+    }
+    return
+        !out.empty() &&
+        out.size() < program.current_width &&
+        std::is_sorted(out.begin(), out.end()) &&
+        std::adjacent_find(
+            out.begin(), out.end()) == out.end();
+}
+
+bool BindCanonicalPhaseDescriptor(
+    ProductionFamilyProgramSourceV1& source,
+    std::string* why)
+{
+    source.phase = {};
+    source.phase.family_index = source.family_index;
+    source.phase.kind = source.kind;
+    source.phase.role = source.role;
+    source.phase.program_root =
+        cb::CommitProgramTable(source.program);
+    source.phase.current_width =
+        source.program.current_width;
+    source.phase.challenge_width =
+        source.program.challenge_width;
+    if (source.program.challenge_width == 0) {
+        source.phase.challenge_epoch =
+            ProductionChallengeEpochV1::None;
+        source.phase.producer_manifest_exported = true;
+        source.phase.r0_base_columns.resize(
+            source.program.current_width);
+        std::iota(
+            source.phase.r0_base_columns.begin(),
+            source.phase.r0_base_columns.end(), 0U);
+    } else {
+        source.phase.challenge_epoch =
+            ProductionChallengeEpochV1::
+                BytecodeP2AfterSafeR0;
+        source.phase.producer_manifest_exported =
+            BuildCanonicalR0BaseColumns(
+                source.kind, source.program,
+                source.phase.r0_base_columns);
+        if (!source.phase.producer_manifest_exported) {
+            // Do not infer unknown splits from equations: their LogUp
+            // identities contain both the source tuple (R0) and
+            // inverse/running-product lanes (Rdep).
+            source.phase.r0_base_columns.clear();
+        }
+    }
+    if (!ValidateProductionFamilyPhaseDescriptorV1(
+            source.program, source.phase,
+            /*require_producer_export=*/false, why)) {
+        return false;
+    }
+    std::vector<unsigned char> phase_bytes;
+    if (!SerializeProductionFamilyPhaseDescriptorV1(
+            source.phase, phase_bytes, why) ||
+        phase_bytes.size() >
+            std::numeric_limits<uint32_t>::max()) {
+        return false;
+    }
+    // The production registry already commits this ABI byte vector through
+    // both SHA256d and AlgHash.  Length-prefixing the phase descriptor makes
+    // omission and suffix re-interpretation impossible without changing both
+    // registry roots.
+    static constexpr char marker[] = "R0PH";
+    std::vector<unsigned char> framed;
+    framed.insert(
+        framed.end(),
+        marker, marker + sizeof(marker) - 1);
+    SchemaU32(
+        framed,
+        static_cast<uint32_t>(phase_bytes.size()));
+    framed.insert(
+        framed.end(),
+        phase_bytes.begin(), phase_bytes.end());
+    // Preserve every family-specific schema suffix at the end of the ABI:
+    // insert phase ownership immediately after the canonical
+    // (family_index, role) prefix emitted by StubSource.
+    const size_t phase_offset =
+        std::min<size_t>(
+            2, source.public_input_schema.size());
+    source.public_input_schema.insert(
+        source.public_input_schema.begin() +
+            phase_offset,
+        framed.begin(), framed.end());
+    return true;
+}
+
 bool SameSource(
     const ProductionFamilyProgramSourceV1& lhs,
     const ProductionFamilyProgramSourceV1& rhs)
@@ -1228,6 +1405,7 @@ bool SameSource(
         lhs.role == rhs.role &&
         lhs.program == rhs.program &&
         lhs.public_input_schema == rhs.public_input_schema &&
+        lhs.phase == rhs.phase &&
         lhs.semantic_endpoints == rhs.semantic_endpoints &&
         lhs.semantic_relation_complete ==
             rhs.semantic_relation_complete;
@@ -1355,6 +1533,8 @@ BuildProductionFamilyProgramSourcesV1(
                 if (!BuildProductionCoupledExtractChaChaProgramTableV1(
                         canonical, nullptr, &suffix, &why) ||
                     canonical != source.program) {
+                    BindCanonicalPhaseDescriptor(
+                        source, nullptr);
                     out.push_back(std::move(source));
                     continue;
                 }
@@ -1370,6 +1550,13 @@ BuildProductionFamilyProgramSourcesV1(
             // completeness claim.
             source.semantic_endpoints.clear();
             source.semantic_relation_complete = false;
+        }
+        if (!BindCanonicalPhaseDescriptor(
+                source, &why)) {
+            // Preserve the exact family slot as a fail-closed structural
+            // source. Validation against a fresh canonical rebuild will still
+            // expose the missing/invalid phase descriptor.
+            source.phase = {};
         }
         out.push_back(std::move(source));
     }

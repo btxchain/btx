@@ -727,10 +727,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!partial_entry.semantic_relation_complete);
 
     // Non-vacuity of the wiring itself: tampering a real program's bytes
-    // (not merely a stub) must change BOTH root commitments the registry is
-    // pinned by, proving the ProgramTable content actually flows into
-    // consensus-facing commitments rather than being decorative. Checked for
-    // every real family this session wired, not just the first one.
+    // (not merely a stub) while retaining its producer-owned phase descriptor
+    // must fail before a registry can be committed.  The descriptor binds the
+    // exact ProgramTable root, so accepting such a mixed pair would allow the
+    // witness phase split to be transplanted onto a different relation.
     for (size_t real_idx = 0; real_idx < sources.size(); ++real_idx) {
         BOOST_REQUIRE_GT(
             sources[real_idx].program.current_width, 1U);
@@ -749,14 +749,11 @@ BOOST_AUTO_TEST_CASE(
             tampered_sources[real_idx].program.current_width;
         const auto tampered_registry = ut::BuildProductionProgramRegistryV1(
             manifest, schedule, tampered_sources, verifier, verifier);
-        BOOST_REQUIRE(
-            !tampered_registry.external_registry_commitment.IsNull());
         BOOST_CHECK(
-            tampered_registry.external_registry_commitment !=
-            registry.external_registry_commitment);
+            tampered_registry.external_registry_commitment.IsNull());
         BOOST_CHECK(
-            tampered_registry.recursive_registry_commitment !=
-            registry.recursive_registry_commitment);
+            tampered_registry.recursive_registry_commitment ==
+                rc::alg_hash::Digest{});
         BOOST_CHECK(!ut::ValidateProductionProgramRegistryV1(
             manifest, schedule, tampered_registry,
             registry.external_registry_commitment,

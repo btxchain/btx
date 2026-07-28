@@ -319,6 +319,123 @@ ByteCommitmentPairV1 CommitCanonicalBytesV1(
     return out;
 }
 
+bool ValidateProductionFamilyPhaseDescriptorV1(
+    const cb::ProgramTable& program,
+    const ProductionFamilyPhaseDescriptorV1& phase,
+    bool require_producer_export,
+    std::string* why)
+{
+    const uint256 program_root =
+        cb::CommitProgramTable(program);
+    if (!cb::ValidateProgramTable(program, why) ||
+        phase.version != 1 ||
+        phase.program_root.IsNull() ||
+        phase.program_root != program_root ||
+        phase.role != program.role ||
+        phase.current_width != program.current_width ||
+        phase.challenge_width != program.challenge_width ||
+        program.current_width == 0) {
+        return Fail(why, "family_phase_identity");
+    }
+    if (program.challenge_width == 0) {
+        if (!phase.producer_manifest_exported ||
+            phase.challenge_epoch !=
+                ProductionChallengeEpochV1::None ||
+            phase.r0_base_columns.size() !=
+                program.current_width) {
+            return Fail(
+                why, "family_phase_challenge_free");
+        }
+        for (uint32_t column = 0;
+             column < program.current_width; ++column) {
+            if (phase.r0_base_columns[column] != column) {
+                return Fail(
+                    why,
+                    "family_phase_challenge_free_order");
+            }
+        }
+        return true;
+    }
+    if (phase.challenge_epoch !=
+            ProductionChallengeEpochV1::
+                BytecodeP2AfterSafeR0) {
+        return Fail(why, "family_phase_epoch");
+    }
+    if (!phase.producer_manifest_exported) {
+        if (require_producer_export ||
+            !phase.r0_base_columns.empty()) {
+            return Fail(why, "family_phase_not_exported");
+        }
+        // Canonical fail-closed inventory record: the family exists and its
+        // exact missing phase declaration is registry-bound, but it cannot be
+        // used to construct a child Split-RAP statement.
+        return true;
+    }
+    if (phase.r0_base_columns.empty() ||
+        phase.r0_base_columns.size() >=
+            program.current_width) {
+        return Fail(why, "family_phase_split_shape");
+    }
+    uint32_t previous = 0;
+    for (size_t i = 0;
+         i < phase.r0_base_columns.size(); ++i) {
+        const uint32_t column =
+            phase.r0_base_columns[i];
+        if (column >= program.current_width ||
+            (i != 0 && column <= previous)) {
+            return Fail(why, "family_phase_split_order");
+        }
+        previous = column;
+    }
+    return true;
+}
+
+bool SerializeProductionFamilyPhaseDescriptorV1(
+    const ProductionFamilyPhaseDescriptorV1& phase,
+    std::vector<unsigned char>& out,
+    std::string* why)
+{
+    out.clear();
+    if (phase.version != 1 ||
+        phase.program_root.IsNull() ||
+        phase.current_width == 0 ||
+        phase.r0_base_columns.size() >
+            phase.current_width ||
+        (phase.challenge_width == 0 &&
+         phase.challenge_epoch !=
+             ProductionChallengeEpochV1::None) ||
+        (phase.challenge_width != 0 &&
+         phase.challenge_epoch !=
+             ProductionChallengeEpochV1::
+                 BytecodeP2AfterSafeR0)) {
+        return Fail(why, "family_phase_serialize");
+    }
+    static constexpr char domain[] =
+        "BTX_RC_STAGE3_FAMILY_PHASE_DESCRIPTOR_V1";
+    out.insert(
+        out.end(), domain, domain + sizeof(domain) - 1);
+    PutU16(out, phase.version);
+    PutU32(out, phase.family_index);
+    PutU16(out, static_cast<uint16_t>(phase.kind));
+    PutU16(out, static_cast<uint16_t>(phase.role));
+    PutUint256(out, phase.program_root);
+    PutU32(out, phase.current_width);
+    PutU32(out, phase.challenge_width);
+    out.push_back(
+        static_cast<unsigned char>(
+            phase.challenge_epoch));
+    PutBool(out, phase.producer_manifest_exported);
+    PutU32(
+        out,
+        static_cast<uint32_t>(
+            phase.r0_base_columns.size()));
+    for (const uint32_t column :
+         phase.r0_base_columns) {
+        PutU32(out, column);
+    }
+    return true;
+}
+
 std::vector<alg_hash::Fp>
 BuildProductionProgramRegistryAlgHashPreimageV1(
     const ProductionProgramRegistryV1& registry)
@@ -387,6 +504,9 @@ ProductionProgramRegistryV1 BuildProductionProgramRegistryV1(
             source.role != site.role ||
             source.program.role != site.role ||
             !cb::ValidateProgramTable(source.program, &why) ||
+            !ValidateProductionFamilyPhaseDescriptorV1(
+                source.program, source.phase,
+                /*require_producer_export=*/false, &why) ||
             !std::is_sorted(
                 source.semantic_endpoints.begin(),
                 source.semantic_endpoints.end()) ||
