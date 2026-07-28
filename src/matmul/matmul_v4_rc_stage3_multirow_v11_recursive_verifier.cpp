@@ -226,28 +226,27 @@ CapAuditV1 AuditDirectAndQ64RowsV1(
         return out;
     }
     out.q64_trace_rows = NextPowerOfTwo(out.q64_vm_rows);
-    uint64_t lde = 0;
-    if (out.q64_trace_rows != 0 &&
-        CheckedMul(
-            out.q64_trace_rows, kRCFriBlowup, lde) &&
-        lde <= std::numeric_limits<uint32_t>::max()) {
-        out.q64_lde_rows = static_cast<uint32_t>(lde);
-    }
     out.direct_exceeds_trace_cap =
         out.direct_q192_vm_rows > kTraceRowsCapV1;
     out.q64_fits_trace_cap =
         out.q64_trace_rows != 0 &&
         out.q64_trace_rows <= kTraceRowsCapV1;
-    out.q64_fits_lde_cap =
-        out.q64_lde_rows != 0 &&
-        out.q64_lde_rows <= kLdeRowsCapV1;
-    out.valid =
+    /*
+     * N*blowup is not an AIR LDE bound: quotient degree can require a larger
+     * coefficient domain before the blowup is applied.  This legacy overload
+     * has no CS from which to derive QuotientLen, so it must remain a
+     * rejection-only trace audit.
+     */
+    out.q64_lde_rows = 0;
+    out.q64_fits_lde_cap = false;
+    out.valid = false;
+    out.note =
         out.direct_exceeds_trace_cap &&
-        out.q64_fits_trace_cap &&
-        out.q64_fits_lde_cap;
-    out.note = out.valid
-        ? "stage3:v11_recursive_verifier:cap:q64_required_and_fits"
-        : "stage3:v11_recursive_verifier:cap:shape_not_closed";
+        out.q64_fits_trace_cap
+        ? "stage3:v11_recursive_verifier:cap:"
+          "trace_only_quotient_degree_required"
+        : "stage3:v11_recursive_verifier:cap:"
+          "shape_not_closed";
     return out;
 }
 

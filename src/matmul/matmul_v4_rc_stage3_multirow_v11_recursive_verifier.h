@@ -92,10 +92,13 @@ struct CapAuditV1 {
 };
 
 /**
- * Checked row-budget arithmetic.  The instruction multiplier is an explicit
+ * Checked trace-row lower bound.  The instruction multiplier is an explicit
  * input because opaque callbacks have no canonical instruction inventory.
- * A caller may use this only as a lower-bound/cap audit, never as evidence
- * that a callback relation has been migrated.
+ *
+ * This overload has no constraint system and therefore cannot derive the
+ * quotient polynomial length or coefficient/LDE domains.  It always leaves
+ * the LDE conclusion and `valid` false.  A caller may use its trace counts
+ * only to reject an oversized construction, never to certify one.
  */
 [[nodiscard]] CapAuditV1 AuditDirectAndQ64RowsV1(
     uint32_t child_columns,

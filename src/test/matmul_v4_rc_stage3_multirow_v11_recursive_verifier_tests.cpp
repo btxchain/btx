@@ -249,22 +249,27 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    direct_parent_vm_exceeds_cap_while_q64_shard_fits)
+    direct_parent_vm_trace_audit_fails_closed_without_quotient_degree)
 {
     // Measured published parent-join shape. Five instructions/constraint is
     // deliberately optimistic: if even this lower estimate fails, the wide
-    // direct route cannot be rescued by interpreter tuning.
+    // direct route cannot be rescued by interpreter tuning.  This overload
+    // has no CS, so it may not certify the Q64 LDE.
     const auto audit =
         AuditDirectAndQ64RowsV1(1298, 1276, 5);
-    BOOST_REQUIRE_MESSAGE(audit.valid, audit.note);
+    BOOST_CHECK(!audit.valid);
     BOOST_CHECK_EQUAL(
         audit.direct_q192_vm_rows, 1474560U);
     BOOST_CHECK_EQUAL(audit.q64_vm_rows, 491520U);
     BOOST_CHECK_EQUAL(audit.q64_trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(audit.q64_lde_rows, 8388608U);
+    BOOST_CHECK_EQUAL(audit.q64_lde_rows, 0U);
     BOOST_CHECK(audit.direct_exceeds_trace_cap);
     BOOST_CHECK(audit.q64_fits_trace_cap);
-    BOOST_CHECK(audit.q64_fits_lde_cap);
+    BOOST_CHECK(!audit.q64_fits_lde_cap);
+    BOOST_CHECK_EQUAL(
+        audit.note,
+        "stage3:v11_recursive_verifier:cap:"
+        "trace_only_quotient_degree_required");
 }
 
 BOOST_AUTO_TEST_CASE(cap_audit_fails_closed_on_invalid_or_overflow_shape)
