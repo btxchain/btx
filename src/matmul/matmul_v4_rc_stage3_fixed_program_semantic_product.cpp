@@ -660,6 +660,282 @@ uint64_t OutputEventIdV2(
         word + 1U;
 }
 
+uint64_t ExternalInputEventIdV2(
+    const WitnessChunkShapeV2& shape,
+    uint32_t source,
+    uint32_t address)
+{
+    return UINT64_C(0x4558430000000000) +
+        static_cast<uint64_t>(shape.child_ordinal) *
+            UINT64_C(0x100000000) +
+        static_cast<uint64_t>(
+            shape.global_source_begin + source) *
+            UINT64_C(0x100000) +
+        address;
+}
+
+bool AppendExternalInputCopyCtlV2(
+    const ha::FixedProgram& program,
+    const WitnessChunkShapeV2& shape,
+    const RCStage3CtlChallenges& challenges,
+    air_quotient::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>* columns,
+    std::string* why)
+{
+    constexpr uint32_t SLOT_COUNT = 3;
+    if (shape.source_count == 0 ||
+        shape.honest_boundaries.size() < shape.source_count ||
+        (columns != nullptr &&
+         (columns->size() != cs.n_columns ||
+          (!columns->empty() &&
+           columns->front().size() != cs.n_rows)))) {
+        return Fail(why, "witness_external_copy_shape");
+    }
+    std::vector<uint32_t> use_count(
+        program.external_address_count + 1U, 0);
+    for (const auto& row : program.rows) {
+        for (uint32_t slot = 0;
+             slot < row.input_count; ++slot) {
+            const uint32_t address =
+                row.input_address[slot];
+            if (address >= 1 &&
+                address <=
+                    program.external_address_count) {
+                ++use_count[address];
+            }
+        }
+    }
+    for (uint32_t address = 1;
+         address <= program.external_address_count;
+         ++address) {
+        if (use_count[address] == 0) {
+            return Fail(
+                why, "witness_external_copy_unused_address");
+        }
+    }
+
+    const uint32_t producer_mult_base = cs.n_columns;
+    cs.n_columns += SLOT_COUNT;
+    const uint32_t consumer_id_base = cs.n_columns;
+    cs.n_columns += SLOT_COUNT;
+    const uint32_t consumer_inv1_base = cs.n_columns;
+    cs.n_columns += SLOT_COUNT;
+    const uint32_t consumer_inv2_base = cs.n_columns;
+    cs.n_columns += SLOT_COUNT;
+    const uint32_t running1 = cs.n_columns++;
+    const uint32_t running2 = cs.n_columns++;
+
+    std::array<std::vector<Fp3>, SLOT_COUNT> p_mult;
+    std::array<std::vector<Fp3>, SLOT_COUNT> c_id;
+    for (uint32_t slot = 0; slot < SLOT_COUNT; ++slot) {
+        p_mult[slot].assign(cs.n_rows, Fp3::Zero());
+        c_id[slot].assign(cs.n_rows, Fp3::Zero());
+    }
+    uint64_t event_count = 0;
+    for (uint32_t source = 0;
+         source < shape.source_count; ++source) {
+        std::vector<uint8_t> seen(
+            program.external_address_count + 1U, 0);
+        for (uint32_t phase = 0;
+             phase < program.rows.size(); ++phase) {
+            const auto& row = program.rows[phase];
+            const uint32_t trace_row =
+                source * 1024U + phase;
+            if (trace_row >= cs.n_rows ||
+                row.input_count > SLOT_COUNT) {
+                return Fail(
+                    why, "witness_external_copy_row");
+            }
+            for (uint32_t slot = 0;
+                 slot < row.input_count; ++slot) {
+                const uint32_t address =
+                    row.input_address[slot];
+                if (address == 0 ||
+                    address >
+                        program.external_address_count) {
+                    continue;
+                }
+                const uint64_t id =
+                    ExternalInputEventIdV2(
+                        shape, source, address);
+                if (id >= gf::kP ||
+                    use_count[address] == 0) {
+                    return Fail(
+                        why, "witness_external_copy_id");
+                }
+                c_id[slot][trace_row] = U64(id);
+                ++event_count;
+                if (!seen[address]) {
+                    p_mult[slot][trace_row] =
+                        U64(use_count[address]);
+                    seen[address] = 1;
+                }
+            }
+        }
+    }
+    if (event_count == 0) {
+        return Fail(why, "witness_external_copy_empty");
+    }
+    for (uint32_t slot = 0; slot < SLOT_COUNT; ++slot) {
+        cs.preprocessed.emplace_back(
+            producer_mult_base + slot, p_mult[slot]);
+        cs.preprocessed.emplace_back(
+            consumer_id_base + slot, c_id[slot]);
+    }
+    cs.preprocessed_pin_ood = true;
+    const std::array<Fp3, 2> alpha{
+        challenges.alpha1, challenges.alpha2};
+    const std::array<Fp3, 2> gamma{
+        challenges.gamma1, challenges.gamma2};
+    const std::array<uint32_t, 2> c_inv_base{
+        consumer_inv1_base, consumer_inv2_base};
+    const std::array<uint32_t, 2> running{
+        running1, running2};
+    // Weight every rational term by its nonzero, preprocessed event id.
+    // Besides preserving multiset equality (the same id weights both sides),
+    // this makes id=0 the padding selector.  The first occurrence is both a
+    // producer and consumer, so its consumer id and inverse also serve the
+    // producer; fifteen redundant mask/producer-id/inverse columns stay off
+    // the wire.
+    if (columns != nullptr) {
+        columns->resize(
+            cs.n_columns,
+            std::vector<Fp3>(cs.n_rows, Fp3::Zero()));
+        for (uint32_t slot = 0;
+             slot < SLOT_COUNT; ++slot) {
+            (*columns)[producer_mult_base + slot] =
+                p_mult[slot];
+            (*columns)[consumer_id_base + slot] =
+                c_id[slot];
+        }
+        std::array<Fp3, 2> sums{
+            Fp3::Zero(), Fp3::Zero()};
+        for (uint32_t row = 0; row < cs.n_rows; ++row) {
+            for (uint32_t lane = 0; lane < 2; ++lane) {
+                (*columns)[running[lane]][row] =
+                    sums[lane];
+                for (uint32_t slot = 0;
+                     slot < SLOT_COUNT; ++slot) {
+                    if (!gf::IsZero(c_id[slot][row])) {
+                        const Fp3 denominator = gf::Sub(
+                            alpha[lane],
+                            gf::Add(
+                                c_id[slot][row],
+                                gf::Mul(
+                                    gamma[lane],
+                                    (*columns)[
+                                        ha::ValueColumn(slot)]
+                                                  [row])));
+                        if (gf::IsZero(denominator)) {
+                            return Fail(
+                                why,
+                                "witness_external_copy_pole");
+                        }
+                        const uint32_t inverse =
+                            c_inv_base[lane] + slot;
+                        (*columns)[inverse][row] =
+                            gf::Inv(denominator);
+                        const Fp3 weighted_inverse =
+                            gf::Mul(
+                                c_id[slot][row],
+                                (*columns)[inverse][row]);
+                        sums[lane] = gf::Add(
+                            sums[lane],
+                            gf::Mul(
+                                p_mult[slot][row],
+                                weighted_inverse));
+                        sums[lane] = gf::Sub(
+                            sums[lane], weighted_inverse);
+                    } else if (!gf::IsZero(
+                                   p_mult[slot][row])) {
+                        return Fail(
+                            why,
+                            "witness_external_copy_producer");
+                    }
+                }
+            }
+        }
+        if (!gf::IsZero(sums[0]) ||
+            !gf::IsZero(sums[1])) {
+            return Fail(
+                why, "witness_external_copy_terminal");
+        }
+    }
+    for (uint32_t lane = 0; lane < 2; ++lane) {
+        const uint32_t cinv = c_inv_base[lane];
+        const uint32_t run = running[lane];
+        for (uint32_t slot = 0;
+             slot < SLOT_COUNT; ++slot) {
+            cs.constraints.push_back({
+                "stage3.fixed_product_v2.external_consumer_inverse",
+                air_quotient::AirKind::kEverywhere, 3,
+                [consumer_id_base,
+                 cinv, slot, lane, alpha, gamma](
+                    const auto& cur, const auto&) {
+                    const Fp3 denominator = gf::Sub(
+                        alpha[lane],
+                        gf::Add(
+                            cur[consumer_id_base + slot],
+                            gf::Mul(
+                                gamma[lane],
+                                cur[ha::ValueColumn(slot)])));
+                    return gf::Mul(
+                        cur[consumer_id_base + slot],
+                        gf::Sub(
+                            gf::Mul(
+                                denominator,
+                                cur[cinv + slot]),
+                            Fp3::One()));
+                }});
+        }
+        cs.constraints.push_back({
+            "stage3.fixed_product_v2.external_running_first",
+            air_quotient::AirKind::kFirstRow, 1,
+            [run](const auto& cur, const auto&) {
+                return cur[run];
+            }});
+        auto contribution =
+            [producer_mult_base, consumer_id_base,
+             cinv](
+                const auto& cur) {
+                Fp3 value = Fp3::Zero();
+                for (uint32_t slot = 0;
+                     slot < SLOT_COUNT; ++slot) {
+                    const Fp3 weighted_inverse =
+                        gf::Mul(
+                            cur[consumer_id_base + slot],
+                            cur[cinv + slot]);
+                    value = gf::Add(
+                        value,
+                        gf::Mul(
+                            cur[producer_mult_base + slot],
+                            weighted_inverse));
+                    value = gf::Sub(
+                        value, weighted_inverse);
+                }
+                return value;
+            };
+        cs.constraints.push_back({
+            "stage3.fixed_product_v2.external_running_transition",
+            air_quotient::AirKind::kTransition, 3,
+            [run, contribution](
+                const auto& cur, const auto& next) {
+                return gf::Sub(
+                    next[run],
+                    gf::Add(cur[run], contribution(cur)));
+            }});
+        cs.constraints.push_back({
+            "stage3.fixed_product_v2.external_running_last",
+            air_quotient::AirKind::kLastRow, 3,
+            [run, contribution](
+                const auto& cur, const auto&) {
+                return gf::Add(
+                    cur[run], contribution(cur));
+            }});
+    }
+    return true;
+}
+
 bool AppendOutputProducerCtlV2(
     const ha::FixedProgram& program,
     const WitnessChunkShapeV2& shape,
@@ -981,9 +1257,6 @@ bool BuildFragmentsV2(
     const ProductManifestV1& caller_manifest,
     const ha::FixedProgram& program,
     const WitnessChunkShapeV2& shape,
-    uint32_t input_word_base,
-    uint32_t input_active_column,
-    uint32_t input_address_column,
     const std::vector<uint32_t>& final_output_rows,
     const uint256& public_statement,
     const uint256& r0_root,
@@ -1058,18 +1331,7 @@ bool BuildFragmentsV2(
                     const uint32_t trace_row =
                         instance * 1024U + phase;
                     input_hash << trace_row;
-                    if (input_word_base ==
-                        std::numeric_limits<uint32_t>::max()) {
-                        input_hash << ha::ValueColumn(slot);
-                        input_hash <<
-                            std::numeric_limits<uint32_t>::max();
-                        input_hash <<
-                            std::numeric_limits<uint32_t>::max();
-                    } else {
-                        input_hash << input_word_base;
-                        input_hash << input_active_column;
-                        input_hash << input_address_column;
-                    }
+                    input_hash << ha::ValueColumn(slot);
                     input_hash << address;
                     ++fragment.input_cell_count;
                 }
@@ -1180,6 +1442,7 @@ uint256 CommitWitnessManifestV2(
     hash << manifest.private_boundary_outputs;
     hash << manifest.proof_owned_input_exports;
     hash << manifest.proof_owned_output_exports;
+    hash << manifest.dual_fp3_external_input_copy_ctl;
     hash << manifest.dual_fp3_output_producer_ctl;
     hash << manifest.auxiliary_sinks_equality_constrained;
     hash << manifest.private_chacha_internal_ssa_ctl;
@@ -1249,6 +1512,7 @@ bool BuildWitnessManifestV2(
     out.private_boundary_outputs = true;
     out.proof_owned_input_exports = true;
     out.proof_owned_output_exports = true;
+    out.dual_fp3_external_input_copy_ctl = true;
     out.dual_fp3_output_producer_ctl = true;
     out.auxiliary_sinks_equality_constrained = true;
     out.private_chacha_internal_ssa_ctl = true;
@@ -1789,7 +2053,11 @@ bool PrepareWitnessBatchV2(
                     instance.note);
         }
         DualFp3ProducerTerminalV2 terminal;
-        if (!AppendOutputProducerCtlV2(
+        if (!AppendExternalInputCopyCtlV2(
+                program, prepared.shape,
+                instance.challenges,
+                instance.cs, &instance.columns, why) ||
+            !AppendOutputProducerCtlV2(
                 program, prepared.shape,
                 instance.challenges,
                 instance.cs,
@@ -1814,7 +2082,11 @@ bool PrepareWitnessBatchV2(
                 why, "witness_verifier_audit:" +
                     verifier_audit.note);
         }
-        if (!AppendOutputProducerCtlV2(
+        if (!AppendExternalInputCopyCtlV2(
+                program, prepared.shape,
+                verifier_audit.challenges,
+                verifier_audit.cs, nullptr, why) ||
+            !AppendOutputProducerCtlV2(
                 program, prepared.shape,
                 verifier_audit.challenges,
                 verifier_audit.cs,
@@ -1857,9 +2129,6 @@ bool PrepareWitnessBatchV2(
         statement.output_producer_terminal = terminal;
         if (!BuildFragmentsV2(
                 caller_manifest, program, prepared.shape,
-                instance.input_word_base,
-                instance.input_active_column,
-                instance.input_address_column,
                 instance.final_output_rows,
                 statement.public_boundary_statement,
                 statement.base_row_commitment,
@@ -1945,6 +2214,9 @@ bool PreparePrivateChaChaBatchV2(
                 fs_seed, public_statement,
                 initial_r0.base_row_commitment,
                 challenges, why) ||
+            !AppendExternalInputCopyCtlV2(
+                program, shape, challenges, prepared.cs,
+                &prepared.columns, why) ||
             !AppendPrivateChaChaInternalSsaCtlV2(
                 program, challenges, prepared.cs,
                 &prepared.columns, why)) {
@@ -1989,9 +2261,6 @@ bool PreparePrivateChaChaBatchV2(
         statement.output_producer_terminal = terminal;
         if (!BuildFragmentsV2(
                 caller_manifest, program, shape,
-                std::numeric_limits<uint32_t>::max(),
-                std::numeric_limits<uint32_t>::max(),
-                std::numeric_limits<uint32_t>::max(),
                 final_rows,
                 statement.public_boundary_statement,
                 statement.base_row_commitment,
@@ -2170,7 +2439,7 @@ bool ProveWitnessProductV2(
     out.valid = true;
     out.note =
         "stage3:fixed_program_semantic_product:"
-        "private_boundaries_and_output_producer_ctl_proved;"
+        "private_boundary_copy_and_output_producer_ctl_proved;"
         "role_consumers_and_recursion_open";
     return true;
 }
@@ -2274,7 +2543,10 @@ bool VerifyWitnessProductV2(
                             instance.note);
                 }
                 DualFp3ProducerTerminalV2 terminal;
-                if (!AppendOutputProducerCtlV2(
+                if (!AppendExternalInputCopyCtlV2(
+                        program, shape, instance.challenges,
+                        instance.cs, nullptr, why) ||
+                    !AppendOutputProducerCtlV2(
                         program, shape, instance.challenges,
                         instance.cs,
                         instance.final_output_rows, nullptr,
@@ -2303,9 +2575,6 @@ bool VerifyWitnessProductV2(
                 expected.output_producer_terminal = terminal;
                 if (!BuildFragmentsV2(
                         caller_manifest, program, shape,
-                        instance.input_word_base,
-                        instance.input_active_column,
-                        instance.input_address_column,
                         instance.final_output_rows,
                         expected.public_boundary_statement,
                         expected.base_row_commitment,
@@ -2396,6 +2665,9 @@ bool VerifyWitnessProductV2(
                     supplied.statement
                         .base_row_commitment,
                     challenges, why) ||
+                !AppendExternalInputCopyCtlV2(
+                    program, shape, challenges, cs,
+                    nullptr, why) ||
                 !AppendPrivateChaChaInternalSsaCtlV2(
                     program, challenges, cs, nullptr,
                     why)) {
@@ -2427,9 +2699,6 @@ bool VerifyWitnessProductV2(
             expected.output_producer_terminal = terminal;
             if (!BuildFragmentsV2(
                     caller_manifest, program, shape,
-                    std::numeric_limits<uint32_t>::max(),
-                    std::numeric_limits<uint32_t>::max(),
-                    std::numeric_limits<uint32_t>::max(),
                     final_rows,
                     expected.public_boundary_statement,
                     expected.base_row_commitment,

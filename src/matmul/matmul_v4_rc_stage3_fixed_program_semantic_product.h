@@ -194,6 +194,7 @@ struct WitnessProductManifestV2 {
     bool private_boundary_outputs{false};
     bool proof_owned_input_exports{false};
     bool proof_owned_output_exports{false};
+    bool dual_fp3_external_input_copy_ctl{false};
     bool dual_fp3_output_producer_ctl{false};
     bool auxiliary_sinks_equality_constrained{false};
     bool private_chacha_internal_ssa_ctl{false};
@@ -250,10 +251,12 @@ struct WitnessProductProofV2 {
 /**
  * V2 replaces V1's public final-word pins with the existing split-RAP
  * witness-boundary AIR.  Source externals and finals are ordinary R0-bound
- * proof cells.  Canonical auxiliary sink instances consume every source
- * final word through the witness-boundary dual-Fp3 equality bus, while an
- * additional domain-separated dual-Fp3 producer accumulator exports the
- * exact output-cell multiset for a later real consumer.
+ * proof cells.  A dual-Fp3 external-address copy relation makes every use of
+ * one canonical private boundary word equal.  Canonical auxiliary sink
+ * instances consume every source final word through the witness-boundary
+ * dual-Fp3 equality bus, while an additional domain-separated dual-Fp3
+ * producer accumulator exports the exact output-cell multiset for a later
+ * real consumer.
  *
  * The caller's typed manifests determine only family/count/domain metadata.
  * Their values are not yet equality-linked to the private source cells; that

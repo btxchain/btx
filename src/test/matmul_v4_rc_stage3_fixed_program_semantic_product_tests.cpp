@@ -4,6 +4,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_fixed_program_semantic_product.h>
 
 #include <chrono>
@@ -80,6 +81,25 @@ product::FamilyInputsV1 Inputs()
         {K::CoupledExtractScaleSha, Sha(10)},
         {K::CoupledExtractChaCha, ChaCha(11)},
     }};
+}
+
+uint64_t ExternalUseCount(ha::ProgramKind kind)
+{
+    const auto program = ha::BuildCanonicalProgram(kind);
+    uint64_t count = 0;
+    for (const auto& row : program.rows) {
+        for (uint32_t slot = 0;
+             slot < row.input_count; ++slot) {
+            const uint32_t address =
+                row.input_address[slot];
+            if (address >= 1 &&
+                address <=
+                    program.external_address_count) {
+                ++count;
+            }
+        }
+    }
+    return count;
 }
 
 uint64_t EncodedChildBytes(
@@ -342,6 +362,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(proof.manifest.private_boundary_outputs);
     BOOST_CHECK(proof.manifest.proof_owned_input_exports);
     BOOST_CHECK(proof.manifest.proof_owned_output_exports);
+    BOOST_CHECK(
+        proof.manifest.dual_fp3_external_input_copy_ctl);
     BOOST_CHECK(proof.manifest.dual_fp3_output_producer_ctl);
     BOOST_CHECK(
         proof.manifest.auxiliary_sinks_equality_constrained);
@@ -357,6 +379,18 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!family.proof_owned_input_root.IsNull());
         BOOST_CHECK(
             !family.proof_owned_output_producer_root.IsNull());
+    }
+    for (const auto& child : proof.children) {
+        uint64_t input_cells = 0;
+        for (const auto& fragment :
+             child.statement.fragments) {
+            input_cells += fragment.input_cell_count;
+        }
+        BOOST_CHECK_EQUAL(
+            input_cells,
+            ExternalUseCount(
+                child.statement.program_kind) *
+                child.statement.source_instance_count);
     }
 
     // A free-output attempt mutates a genuinely authenticated R0 query
@@ -425,6 +459,12 @@ BOOST_AUTO_TEST_CASE(
 
     const uint64_t proof_bytes =
         EncodedWitnessBytes(proof);
+    // This is the exact sum of the three child quotient encodings.  The V2
+    // wrapper has no production codec yet, so this is a child-payload budget
+    // check rather than a claim that the final block envelope already fits.
+    BOOST_CHECK_LT(
+        proof_bytes,
+        uint64_t{matmul::v4::rc::kRCStage3MaxProofBytes});
     BOOST_TEST_MESSAGE(
         "FIXED_PROGRAM_WITNESS_PRODUCT all11 children="
         << proof.children.size()
