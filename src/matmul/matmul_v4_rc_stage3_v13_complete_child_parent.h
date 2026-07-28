@@ -214,6 +214,54 @@ struct VerifierConstraintSystemV1 {
     std::string note;
 };
 
+/**
+ * Proof-value-independent portion of one complete V13 child verifier.
+ *
+ * This is the public counterpart of DeterministicComponentV1.  It stops
+ * immediately before the row-group commitment so several children can be
+ * embedded under one parent-owned R0 and finalized from that same root.
+ */
+struct PublicDeterministicComponentV1 {
+    uint16_t version{kVersionV1};
+    PublicStatementV1 statement{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    merkle::PublicConstraintSystemsV1
+        merkle_systems{};
+    deep::PublicBaseConstraintSystemV1
+        deep_base{};
+    composer::ChildAttachmentV1
+        deep_base_attachment{};
+    uint32_t shared_tape_aliases{0};
+    uint32_t terminal_acceptance_column{
+        UINT32_MAX};
+    bool deterministic_system_rebuilt{false};
+    bool proof_values_excluded{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildDeterministicConstraintSystemV1(
+    const PublicStatementV1& statement,
+    PublicDeterministicComponentV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Finalize an embedded public component from a parent-owned R0 root.
+ *
+ * component_attachment locates the complete deterministic child inside the
+ * wider parent.  The DEEP/LogUp attachment is relocated through it before
+ * challenge-dependent columns are appended.
+ */
+[[nodiscard]] bool AppendFinalConstraintSystemToParentV1(
+    const PublicDeterministicComponentV1& component,
+    const composer::ChildAttachmentV1& component_attachment,
+    const uint256& domain_separated_public_seed,
+    const uint256& r0_row_root,
+    const std::vector<uint32_t>& r0_base_column_indices,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    ComponentFinalizationV1& out,
+    std::string* why = nullptr);
+
 [[nodiscard]] bool BuildConstraintSystemV1(
     const PublicStatementV1& statement,
     const uint256& r0_row_root,

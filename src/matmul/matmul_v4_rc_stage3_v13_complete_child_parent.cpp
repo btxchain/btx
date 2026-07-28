@@ -1217,18 +1217,16 @@ bool AdoptComponentAsParent(
 
 } // namespace
 
-bool BuildConstraintSystemV1(
+bool BuildDeterministicConstraintSystemV1(
     const PublicStatementV1& statement,
-    const uint256& r0_row_root,
-    VerifierConstraintSystemV1& out,
+    PublicDeterministicComponentV1& out,
     std::string* why)
 {
     out = {};
     out.statement = statement;
     if (statement.version != kVersionV1 ||
         statement.range.query_count == 0 ||
-        statement.public_seed.IsNull() ||
-        r0_row_root.IsNull()) {
+        statement.public_seed.IsNull()) {
         return Fail(
             why,
             "public_statement");
@@ -1350,42 +1348,207 @@ bool BuildConstraintSystemV1(
         merkle_parent_attachment
             .ParentColumn(
                 merkle_acceptance);
-    out.r0_base_column_indices.resize(
-        out.cs.n_columns);
-    std::iota(
-        out.r0_base_column_indices.begin(),
-        out.r0_base_column_indices.end(),
-        0U);
-    if (!deep::
-            AppendFinalConstraintSystemToParentV1(
-                out.deep_base,
-                deep_base_attachment,
-                statement.public_seed,
-                r0_row_root,
-                out.r0_base_column_indices,
-                out.cs,
-                out.deep_finalization,
-                why)) {
-        return false;
-    }
+    out.deep_base_attachment =
+        deep_base_attachment;
     out.deterministic_system_rebuilt =
         merkle_aliases.valid &&
         out.deep_base.valid &&
         out.shared_tape_aliases ==
             tape_cs.n_columns &&
         out.terminal_acceptance_column <
-            out.r0_base_column_indices
-                .size();
-    out.challenge_system_rebuilt =
-        out.deep_finalization.valid &&
-        out.deep_finalization
-            .r0_row_root ==
-                r0_row_root;
+            out.cs.n_columns;
     out.proof_values_excluded =
         out.merkle_systems
             .proof_values_excluded &&
         out.deep_base
             .proof_values_excluded;
+    out.valid =
+        out.deterministic_system_rebuilt &&
+        out.proof_values_excluded &&
+        out.cs.n_columns <
+            kRCFri3AlgBatchMaxColumns &&
+        out.cs
+            .preprocessed_row_group_roots
+            .empty();
+    out.note = out.valid
+        ? "stage3:v13_complete_child_parent:"
+          "public_deterministic_component_rebuilt"
+        : "stage3:v13_complete_child_parent:"
+          "public_deterministic_component_invalid";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "public_deterministic_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendFinalConstraintSystemToParentV1(
+    const PublicDeterministicComponentV1&
+        component,
+    const composer::ChildAttachmentV1&
+        component_attachment,
+    const uint256&
+        domain_separated_public_seed,
+    const uint256& r0_row_root,
+    const std::vector<uint32_t>&
+        r0_base_column_indices,
+    AirCS& parent_cs,
+    ComponentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!component.valid ||
+        !component.deep_base_attachment.valid ||
+        !component_attachment.valid ||
+        component_attachment.row_lifted ||
+        component_attachment
+                .semantic_child_columns !=
+            component.cs.n_columns ||
+        component.deep_base_attachment
+                .column_base >=
+            component.cs.n_columns ||
+        component_attachment.column_base >
+            parent_cs.n_columns ||
+        component.cs.n_columns >
+            parent_cs.n_columns -
+                component_attachment
+                    .column_base ||
+        domain_separated_public_seed
+            .IsNull()) {
+        return Fail(
+            why,
+            "public_component_finalize_input");
+    }
+    out.relocated_deep_base_attachment =
+        component.deep_base_attachment;
+    out.relocated_deep_base_attachment
+        .column_base =
+            component_attachment.ParentColumn(
+                component
+                    .deep_base_attachment
+                    .column_base);
+    if (!deep::
+            AppendFinalConstraintSystemToParentV1(
+                component.deep_base,
+                out.relocated_deep_base_attachment,
+                domain_separated_public_seed,
+                r0_row_root,
+                r0_base_column_indices,
+                parent_cs,
+                out.deep,
+                why)) {
+        return false;
+    }
+    out.terminal_acceptance_column =
+        component_attachment.ParentColumn(
+            component
+                .terminal_acceptance_column);
+    out.deterministic_component_inside_r0 =
+        component_attachment.column_base +
+                component.cs.n_columns <=
+            r0_base_column_indices.size();
+    out.terminal_acceptance_relocated =
+        out.terminal_acceptance_column <
+            r0_base_column_indices.size();
+    out.valid =
+        out.deep.valid &&
+        out.deterministic_component_inside_r0 &&
+        out.terminal_acceptance_relocated;
+    out.note = out.valid
+        ? "stage3:v13_complete_child_parent:"
+          "public_component_finalized_from_global_r0"
+        : "stage3:v13_complete_child_parent:"
+          "public_component_finalization_invalid";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "public_component_finalize_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool BuildConstraintSystemV1(
+    const PublicStatementV1& statement,
+    const uint256& r0_row_root,
+    VerifierConstraintSystemV1& out,
+    std::string* why)
+{
+    out = {};
+    if (r0_row_root.IsNull()) {
+        return Fail(
+            why, "public_r0_root");
+    }
+    PublicDeterministicComponentV1
+        deterministic;
+    if (!BuildDeterministicConstraintSystemV1(
+            statement, deterministic, why)) {
+        return false;
+    }
+    out.statement = statement;
+    out.cs = deterministic.cs;
+    out.merkle_systems =
+        deterministic.merkle_systems;
+    out.deep_base =
+        deterministic.deep_base;
+    out.shared_tape_aliases =
+        deterministic.shared_tape_aliases;
+    out.terminal_acceptance_column =
+        deterministic
+            .terminal_acceptance_column;
+    composer::ChildAttachmentV1
+        component_attachment;
+    component_attachment.child_ordinal = 0;
+    component_attachment.column_base = 0;
+    component_attachment
+        .semantic_child_columns =
+            deterministic.cs.n_columns;
+    component_attachment.column_count =
+        deterministic.cs.n_columns;
+    component_attachment.constraint_begin = 0;
+    component_attachment.constraint_count =
+        static_cast<uint32_t>(
+            deterministic.cs
+                .constraints.size());
+    component_attachment.preprocessed_count =
+        static_cast<uint32_t>(
+            deterministic.cs
+                .preprocessed.size());
+    component_attachment
+        .literal_column_mapping = true;
+    component_attachment
+        .constraints_shifted = true;
+    component_attachment.valid = true;
+    out.r0_base_column_indices.resize(
+        out.cs.n_columns);
+    std::iota(
+        out.r0_base_column_indices.begin(),
+        out.r0_base_column_indices.end(),
+        0U);
+    ComponentFinalizationV1 finalization;
+    if (!AppendFinalConstraintSystemToParentV1(
+            deterministic,
+            component_attachment,
+            statement.public_seed,
+            r0_row_root,
+            out.r0_base_column_indices,
+            out.cs,
+            finalization,
+            why)) {
+        return false;
+    }
+    out.deep_finalization =
+        finalization.deep;
+    out.deterministic_system_rebuilt =
+        deterministic.valid;
+    out.challenge_system_rebuilt =
+        finalization.valid &&
+        out.deep_finalization.r0_row_root ==
+            r0_row_root;
+    out.proof_values_excluded =
+        deterministic.proof_values_excluded;
     out.valid =
         out.deterministic_system_rebuilt &&
         out.challenge_system_rebuilt &&
