@@ -233,6 +233,7 @@ bool ProgramResult(
     const cb::Program& program,
     const std::vector<Fp3>& current,
     const std::vector<Fp3>& next,
+    const std::vector<Fp3>& challenge,
     std::vector<Fp3>& registers,
     std::string* why)
 {
@@ -281,8 +282,12 @@ bool ProgramResult(
             }
             break;
         case cb::Opcode::Challenge:
-            if (why) *why = "challenge_program_requires_join";
-            return false;
+            if (instruction.lhs >= challenge.size()) {
+                if (why) *why = "challenge_load";
+                return false;
+            }
+            value = challenge[instruction.lhs];
+            break;
         }
         registers.push_back(value);
     }
@@ -294,11 +299,50 @@ std::optional<abi::DecodedV1> DecodeProof(
     std::string* why)
 {
     std::vector<uint32_t> words;
-    if (!abi::EncodeCanonicalV1(
-            proof.envelope, words, nullptr, why)) {
+    const bool safe_v13 =
+        proof.envelope.split.version ==
+            aq::kAirQuotientSplitRapRowsSafeProofVersionV2 &&
+        proof.envelope.split.batch.version ==
+            kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13;
+    const bool encoded = safe_v13
+        ? abi::EncodeCanonicalSafeV13(
+              proof.envelope, words, nullptr, why)
+        : abi::EncodeCanonicalV1(
+              proof.envelope, words, nullptr, why);
+    if (!encoded) {
         return std::nullopt;
     }
-    return abi::DecodeCanonicalV1(words, why);
+    return safe_v13
+        ? abi::DecodeCanonicalSafeV13(words, why)
+        : abi::DecodeCanonicalV1(words, why);
+}
+
+uint256 SeedFromWords(
+    const std::array<uint32_t, 8>& words)
+{
+    uint256 out;
+    for (uint32_t word = 0; word < words.size(); ++word) {
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            out.begin()[4 * word + byte] =
+                static_cast<uint8_t>(
+                    words[word] >> (8 * byte));
+        }
+    }
+    return out;
+}
+
+std::array<uint32_t, 8> SeedToWords(
+    const uint256& seed)
+{
+    std::array<uint32_t, 8> out{};
+    for (uint32_t word = 0; word < out.size(); ++word) {
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            out[word] |=
+                uint32_t{seed.begin()[4 * word + byte]}
+                << (8 * byte);
+        }
+    }
+    return out;
 }
 
 void Set(
@@ -386,6 +430,7 @@ LayoutV1 CanonicalLayoutV1()
     BTX_V11_DEEP_VM_COL(op_current);
     BTX_V11_DEEP_VM_COL(op_next);
     BTX_V11_DEEP_VM_COL(op_constant);
+    BTX_V11_DEEP_VM_COL(op_challenge);
     BTX_V11_DEEP_VM_COL(op_add);
     BTX_V11_DEEP_VM_COL(op_sub);
     BTX_V11_DEEP_VM_COL(op_mul);
@@ -442,11 +487,72 @@ ProductV1 BuildProductV1(
     uint32_t first_query,
     uint32_t query_count)
 {
+    static const std::vector<Fp3> kNoChallenge;
+    return BuildProductV1(
+        proof, transcript, table,
+        expected_program_root, kNoChallenge,
+        first_query, query_count);
+}
+
+ProductV1 BuildProductSafeV13(
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const uint256& public_fs_seed,
+    const cb::ProgramTable& table,
+    const alg_hash::Digest& expected_program_root,
+    const std::vector<Fp3>& program_challenge,
+    uint32_t first_query,
+    uint32_t query_count)
+{
+    backend::ProofV1 wrapped;
+    wrapped.envelope.public_fs_seed =
+        SeedToWords(public_fs_seed);
+    wrapped.envelope.trace_columns =
+        table.current_width;
+    aq::AirConstraintSystem<Fp3> cs;
+    std::string why;
+    if (!cb::BuildAirConstraintSystemFromProgramTable(
+            table, proof.trace_rows,
+            program_challenge, cs, &why)) {
+        ProductV1 out;
+        out.layout = CanonicalLayoutV1();
+        out.program_root =
+            cb::CommitProgramTableAlgHash(table);
+        out.program_challenge =
+            program_challenge;
+        out.first_query = first_query;
+        out.query_count = query_count;
+        out.note =
+            "stage3:v11_deep_vm:"
+            "safe_v13_program_cs:" + why;
+        return out;
+    }
+    wrapped.envelope.quotient_len =
+        cs.QuotientLen();
+    wrapped.envelope.split = proof;
+    static const tp::ReceiptV1
+        kNoCallerSuppliedTranscript;
+    return BuildProductV1(
+        wrapped, kNoCallerSuppliedTranscript,
+        table, expected_program_root,
+        program_challenge,
+        first_query, query_count);
+}
+
+ProductV1 BuildProductV1(
+    const backend::ProofV1& proof,
+    const tp::ReceiptV1& transcript,
+    const cb::ProgramTable& table,
+    const alg_hash::Digest& expected_program_root,
+    const std::vector<Fp3>& program_challenge,
+    uint32_t first_query,
+    uint32_t query_count)
+{
     ProductV1 out;
     out.layout = CanonicalLayoutV1();
     out.first_query = first_query;
     out.query_count = query_count;
     out.program_root = cb::CommitProgramTableAlgHash(table);
+    out.program_challenge = program_challenge;
     const auto fail = [&](const std::string& reason) {
         out.note = "stage3:v11_deep_vm:" + reason;
         out.valid = false;
@@ -462,64 +568,10 @@ ProductV1 BuildProductV1(
         decoded->semantic_keys_unique;
     if (!out.canonical_abi) return fail("canonical_abi");
 
-    tp::ReceiptV1 backend_receipt;
-    out.backend_proof_verified =
-        backend::VerifyV1(proof, &backend_receipt, &why);
-    if (!out.backend_proof_verified) {
-        return fail("backend:" + why);
-    }
-    // VerifyV1 already replays the exact statement and returns its receipt.
-    // Equality below prevents a caller from supplying a different valid
-    // transcript for another statement.
-    const auto receipt_equal =
-        backend_receipt.shape_commit == transcript.shape_commit &&
-        gf::Eq(backend_receipt.air_lambda, transcript.air_lambda) &&
-        backend_receipt.fri_seed == transcript.fri_seed &&
-        backend_receipt.ood_eval_commit == transcript.ood_eval_commit &&
-        backend_receipt.batch_seed == transcript.batch_seed &&
-        backend_receipt.query_seed == transcript.query_seed &&
-        gf::Eq(backend_receipt.z1, transcript.z1) &&
-        gf::Eq(backend_receipt.z2, transcript.z2) &&
-        gf::Eq(backend_receipt.w1, transcript.w1) &&
-        gf::Eq(backend_receipt.w2, transcript.w2) &&
-        backend_receipt.z1_selected == transcript.z1_selected &&
-        backend_receipt.z2_selected == transcript.z2_selected &&
-        backend_receipt.batching_coefficients.size() ==
-            transcript.batching_coefficients.size() &&
-        backend_receipt.fold_challenges.size() ==
-            transcript.fold_challenges.size();
-    if (!receipt_equal) return fail("transcript_receipt_mismatch");
-    for (uint32_t q = 0; q < abi::kQueryCountV11; ++q) {
-        const auto& a = backend_receipt.queries[q];
-        const auto& b = transcript.queries[q];
-        if (a.selected_ordinal != b.selected_ordinal ||
-            a.index != b.index ||
-            a.candidate_digest != b.candidate_digest) {
-            return fail("query_receipt_mismatch");
-        }
-    }
-    for (uint32_t i = 0;
-         i < backend_receipt.batching_coefficients.size(); ++i) {
-        if (!gf::Eq(
-                backend_receipt.batching_coefficients[i],
-                transcript.batching_coefficients[i])) {
-            return fail("batch_coefficient_mismatch");
-        }
-    }
-    for (uint32_t i = 0;
-         i < backend_receipt.fold_challenges.size(); ++i) {
-        if (!gf::Eq(
-                backend_receipt.fold_challenges[i],
-                transcript.fold_challenges[i])) {
-            return fail("fold_challenge_mismatch");
-        }
-    }
-    out.transcript_receipt_verified = true;
-
     if (!cb::ValidateProgramTable(table, &why) ||
         table.current_width != decoded->envelope.trace_columns ||
         table.next_width != decoded->envelope.trace_columns ||
-        table.challenge_width != 0 ||
+        table.challenge_width != program_challenge.size() ||
         !DigestEq(out.program_root, expected_program_root)) {
         return fail("program_table_or_root:" + why);
     }
@@ -527,6 +579,165 @@ ProductV1 BuildProductV1(
 
     const auto& split = decoded->envelope.split;
     const auto& batch = split.batch;
+    const bool safe_v13 =
+        split.version ==
+            aq::kAirQuotientSplitRapRowsSafeProofVersionV2 &&
+        batch.version ==
+            kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13;
+    tp::ReceiptV1 safe_transcript;
+    const tp::ReceiptV1* active_transcript =
+        &transcript;
+    if (safe_v13) {
+        aq::AirConstraintSystem<Fp3> native_cs;
+        if (!cb::BuildAirConstraintSystemFromProgramTable(
+                table, split.trace_rows,
+                program_challenge, native_cs, &why)) {
+            return fail("safe_v13_program_cs:" + why);
+        }
+        aq::AirQuotientSplitRapSafeReplayV2
+            outer_replay;
+        const uint256 public_fs_seed =
+            SeedFromWords(
+                decoded->envelope.public_fs_seed);
+        if (!aq::AirQuotientVerifyRowsSplitRapSafeV2Replay(
+                native_cs, split,
+                split.base_column_indices,
+                public_fs_seed,
+                outer_replay, &why) ||
+            !outer_replay.native_verified) {
+            return fail("safe_v13_outer:" + why);
+        }
+        Fri3AlgSafeV13Replay child_replay;
+        if (!Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+                batch, outer_replay.fri_seed,
+                child_replay, &why) ||
+            !child_replay.native_verified ||
+            !child_replay.exact_event_order) {
+            return fail("safe_v13_child:" + why);
+        }
+        safe_transcript.air_lambda =
+            split.air_constraint_lambda;
+        safe_transcript.fri_seed =
+            outer_replay.fri_seed_digest;
+        safe_transcript.z1 = batch.z1;
+        safe_transcript.z2 = batch.z2;
+        safe_transcript.w1 = batch.w1;
+        safe_transcript.w2 = batch.w2;
+        safe_transcript.fold_challenges =
+            batch.fold_challenges;
+        safe_transcript.query_seed =
+            child_replay.query_seed;
+        safe_transcript.batching_coefficients.resize(
+            batch.column_len.size());
+        Fp3 coefficient = Fp3::One();
+        for (auto& value :
+             safe_transcript.batching_coefficients) {
+            value = coefficient;
+            coefficient =
+                gf::Mul(coefficient, batch.lambda);
+        }
+        if (batch.queries.size() !=
+                safe_transcript.queries.size()) {
+            return fail("safe_v13_query_count");
+        }
+        for (uint32_t q = 0;
+             q < batch.queries.size(); ++q) {
+            safe_transcript.queries[q].index =
+                batch.queries[q].index;
+        }
+        safe_transcript.q192_with_replacement = true;
+        safe_transcript.valid = true;
+        safe_transcript.note =
+            "native SAFE V13 verifier replay";
+        active_transcript =
+            &safe_transcript;
+        out.backend_proof_verified = true;
+        out.transcript_receipt_verified = true;
+        out.safe_v13_native_verified = true;
+    } else {
+        tp::ReceiptV1 backend_receipt;
+        out.backend_proof_verified =
+            backend::VerifyV1(
+                proof, &backend_receipt, &why);
+        if (!out.backend_proof_verified) {
+            return fail("backend:" + why);
+        }
+        // VerifyV1 already replays the exact statement and returns its
+        // receipt. Equality prevents supplying another valid statement's
+        // transcript.
+        const auto receipt_equal =
+            backend_receipt.shape_commit ==
+                transcript.shape_commit &&
+            gf::Eq(
+                backend_receipt.air_lambda,
+                transcript.air_lambda) &&
+            backend_receipt.fri_seed ==
+                transcript.fri_seed &&
+            backend_receipt.ood_eval_commit ==
+                transcript.ood_eval_commit &&
+            backend_receipt.batch_seed ==
+                transcript.batch_seed &&
+            backend_receipt.query_seed ==
+                transcript.query_seed &&
+            gf::Eq(backend_receipt.z1, transcript.z1) &&
+            gf::Eq(backend_receipt.z2, transcript.z2) &&
+            gf::Eq(backend_receipt.w1, transcript.w1) &&
+            gf::Eq(backend_receipt.w2, transcript.w2) &&
+            backend_receipt.z1_selected ==
+                transcript.z1_selected &&
+            backend_receipt.z2_selected ==
+                transcript.z2_selected &&
+            backend_receipt.batching_coefficients.size() ==
+                transcript.batching_coefficients.size() &&
+            backend_receipt.fold_challenges.size() ==
+                transcript.fold_challenges.size();
+        if (!receipt_equal) {
+            return fail(
+                "transcript_receipt_mismatch");
+        }
+        for (uint32_t q = 0;
+             q < abi::kQueryCountV11; ++q) {
+            const auto& a =
+                backend_receipt.queries[q];
+            const auto& b = transcript.queries[q];
+            if (a.selected_ordinal !=
+                    b.selected_ordinal ||
+                a.index != b.index ||
+                a.candidate_digest !=
+                    b.candidate_digest) {
+                return fail(
+                    "query_receipt_mismatch");
+            }
+        }
+        for (uint32_t i = 0;
+             i <
+             backend_receipt
+                 .batching_coefficients.size();
+             ++i) {
+            if (!gf::Eq(
+                    backend_receipt
+                        .batching_coefficients[i],
+                    transcript
+                        .batching_coefficients[i])) {
+                return fail(
+                    "batch_coefficient_mismatch");
+            }
+        }
+        for (uint32_t i = 0;
+             i <
+             backend_receipt
+                 .fold_challenges.size();
+             ++i) {
+            if (!gf::Eq(
+                    backend_receipt
+                        .fold_challenges[i],
+                    transcript.fold_challenges[i])) {
+                return fail(
+                    "fold_challenge_mismatch");
+            }
+        }
+        out.transcript_receipt_verified = true;
+    }
     if (first_query > batch.queries.size() ||
         query_count == 0 ||
         query_count > batch.queries.size() - first_query ||
@@ -535,7 +746,8 @@ ProductV1 BuildProductV1(
         batch.groups.size() != 3 ||
         batch.column_len.size() !=
             decoded->envelope.trace_columns + 1 ||
-        transcript.batching_coefficients.size() !=
+        active_transcript
+                ->batching_coefficients.size() !=
             batch.column_len.size()) {
         return fail("query_or_batch_shape");
     }
@@ -629,7 +841,8 @@ ProductV1 BuildProductV1(
                 Key(abi::FieldKindV1::QueryIndex, q),
                 query.index);
         if (!query_address.has_value() ||
-            query.index != transcript.queries[q].index) {
+            query.index !=
+                active_transcript->queries[q].index) {
             return fail("query_index_source");
         }
 
@@ -717,7 +930,8 @@ ProductV1 BuildProductV1(
             row.eval1 = batch.evals_z1[column];
             row.eval2 = batch.evals_z2[column];
             row.coefficient =
-                transcript.batching_coefficients[column];
+                active_transcript
+                    ->batching_coefficients[column];
             row.x_power = PowFp3(x, shift);
             row.z1_power = PowFp3(batch.z1, shift);
             row.z2_power = PowFp3(batch.z2, shift);
@@ -832,6 +1046,7 @@ ProductV1 BuildProductV1(
             std::vector<Fp3> registers;
             if (!ProgramResult(
                     program, current, next,
+                    program_challenge,
                     registers, &why)) {
                 return fail("program:" + why);
             }
@@ -924,6 +1139,18 @@ ProductV1 BuildProductV1(
                     instruction.opcode ==
                     cb::Opcode::Constant) {
                     vm.lhs = instruction.constant;
+                } else if (
+                    instruction.opcode ==
+                    cb::Opcode::Challenge) {
+                    vm.lhs =
+                        program_challenge[
+                            instruction.lhs];
+                    ScalarOriginV1 derived;
+                    derived.value = vm.lhs;
+                    derived.program_derived_root_pin =
+                        true;
+                    out.scalar_origins.push_back(
+                        derived);
                 } else {
                     vm.lhs = registers[instruction.lhs];
                     vm.rhs = registers[instruction.rhs];
@@ -1237,10 +1464,11 @@ ProductV1 BuildProductV1(
         Set(
             out.columns, l.vm_to_quotient, row,
             r.vm_to_quotient ? Fp3::One() : Fp3::Zero());
-        const std::array<std::pair<cb::Opcode, uint32_t>, 6> ops{{
+        const std::array<std::pair<cb::Opcode, uint32_t>, 7> ops{{
             {cb::Opcode::Current, l.op_current},
             {cb::Opcode::Next, l.op_next},
             {cb::Opcode::Constant, l.op_constant},
+            {cb::Opcode::Challenge, l.op_challenge},
             {cb::Opcode::Add, l.op_add},
             {cb::Opcode::Sub, l.op_sub},
             {cb::Opcode::Mul, l.op_mul},
@@ -1283,11 +1511,12 @@ ProductV1 BuildProductV1(
                     gf::Sub(cur[column], Fp3::One()));
             });
     };
-    const std::array<uint32_t, 18> boolean_columns{{
+    const std::array<uint32_t, 19> boolean_columns{{
         l.active, l.deep_term, l.deep_finalize,
         l.vm_instruction, l.quotient_identity,
         l.deep_start, l.deep_chain,
         l.op_current, l.op_next, l.op_constant,
+        l.op_challenge,
         l.op_add, l.op_sub, l.op_mul,
         l.program_end, l.vm_start, l.vm_chain,
         l.vm_to_quotient,
@@ -1549,6 +1778,7 @@ ProductV1 BuildProductV1(
             Fp3 sum = Fp3::Zero();
             for (uint32_t column :
                  {l.op_current, l.op_next, l.op_constant,
+                  l.op_challenge,
                   l.op_add, l.op_sub, l.op_mul}) {
                 sum = gf::Add(sum, cur[column]);
             }
@@ -1560,8 +1790,11 @@ ProductV1 BuildProductV1(
         [l](const auto& cur, const auto&) {
             const Fp3 load = gf::Add(
                 gf::Add(
-                    cur[l.op_current], cur[l.op_next]),
-                cur[l.op_constant]);
+                    cur[l.op_current],
+                    cur[l.op_next]),
+                gf::Add(
+                    cur[l.op_constant],
+                    cur[l.op_challenge]));
             return gf::Mul(
                 load,
                 gf::Sub(
@@ -1979,6 +2212,7 @@ ProductV1 BuildProductV1(
         l.x, l.z1, l.z2, l.w1, l.w2,
         l.first_fold_value,
         l.op_current, l.op_next, l.op_constant,
+        l.op_challenge,
         l.op_add, l.op_sub, l.op_mul,
         l.operand_lhs, l.operand_rhs,
         l.program_end, l.vm_start, l.vm_chain,
@@ -2044,6 +2278,12 @@ ProductV1 BuildProductV1(
                        column) !=
                 out.preprocessed_columns.end();
         };
+    out.verifier_owned_challenge_bound =
+        table.challenge_width ==
+            program_challenge.size() &&
+        is_preprocessed(l.op_challenge) &&
+        is_preprocessed(l.operand_lhs) &&
+        out.ordered_preprocessed_root_pinned;
     out.quotient_tape_cells_ordinary =
         !is_preprocessed(l.quotient_value) &&
         !is_preprocessed(l.quotient_tape_value) &&
@@ -2088,6 +2328,7 @@ ProductV1 BuildProductV1(
         out.first_fold_equality_air_constrained &&
         out.quotient_identity_air_constrained &&
         out.canonical_bytecode_vm_air_constrained &&
+        out.verifier_owned_challenge_bound &&
         out.lambda_accumulation_air_constrained &&
         out.exact_program_root_checked &&
         out.ordered_preprocessed_root_pinned &&

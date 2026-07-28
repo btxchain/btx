@@ -105,6 +105,7 @@ struct LayoutV1 {
     uint32_t op_current{0};
     uint32_t op_next{0};
     uint32_t op_constant{0};
+    uint32_t op_challenge{0};
     uint32_t op_add{0};
     uint32_t op_sub{0};
     uint32_t op_mul{0};
@@ -160,6 +161,7 @@ struct ProductV1 {
     std::vector<uint32_t> preprocessed_columns;
     uint256 preprocessed_row_group_root{};
     alg_hash::Digest program_root{};
+    std::vector<gf::Fp3> program_challenge;
     std::vector<ScalarOriginV1> scalar_origins;
     std::vector<mf::ParentConsumerCellRefV1> parent_consumer_refs;
     uint32_t first_query{0};
@@ -175,6 +177,9 @@ struct ProductV1 {
     bool canonical_abi{false};
     bool transcript_receipt_verified{false};
     bool backend_proof_verified{false};
+    /** True only when the complete native outer SAFE V2 verifier and its
+     * nested Q192/K2 V13 replay accepted the exact proof consumed here. */
+    bool safe_v13_native_verified{false};
     bool literal_current_next_refs{false};
     bool duplicate_queries_preserved{false};
     bool deep_rlc_air_constrained{false};
@@ -182,6 +187,7 @@ struct ProductV1 {
     bool first_fold_equality_air_constrained{false};
     bool quotient_identity_air_constrained{false};
     bool canonical_bytecode_vm_air_constrained{false};
+    bool verifier_owned_challenge_bound{false};
     bool lambda_accumulation_air_constrained{false};
     bool exact_program_root_checked{false};
     bool ordered_preprocessed_root_pinned{false};
@@ -211,6 +217,42 @@ struct ProductV1 {
     const tp::ReceiptV1& transcript,
     const cb::ProgramTable& table,
     const alg_hash::Digest& expected_program_root,
+    uint32_t first_query,
+    uint32_t query_count);
+
+/**
+ * Consume a genuine SAFE Split-RAP V2 / multi-row Q192-K2 V13 child proof.
+ *
+ * The callback-shaped relation is reconstructed from the canonical program
+ * table and the verifier-owned challenge vector, then passed to the complete
+ * native SAFE verifier.  The DeepVM coefficients and query indices are
+ * derived from that verifier's exact replay; no V11 wrapper or synthetic
+ * transcript receipt is accepted at this boundary.
+ */
+[[nodiscard]] ProductV1 BuildProductSafeV13(
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const uint256& public_fs_seed,
+    const cb::ProgramTable& table,
+    const alg_hash::Digest& expected_program_root,
+    const std::vector<gf::Fp3>& program_challenge,
+    uint32_t first_query,
+    uint32_t query_count);
+
+/**
+ * Challenge-bearing child-program overload.
+ *
+ * `program_challenge` is verifier-owned public input, never decoded from the
+ * child proof. Challenge instructions load exclusively from this vector.
+ * Their values are copied into the immutable DeepVM statement schedule and
+ * therefore committed by `preprocessed_row_group_root`; a prover cannot
+ * substitute them by changing ordinary witness columns.
+ */
+[[nodiscard]] ProductV1 BuildProductV1(
+    const backend::ProofV1& proof,
+    const tp::ReceiptV1& transcript,
+    const cb::ProgramTable& table,
+    const alg_hash::Digest& expected_program_root,
+    const std::vector<gf::Fp3>& program_challenge,
     uint32_t first_query,
     uint32_t query_count);
 

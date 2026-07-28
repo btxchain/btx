@@ -667,7 +667,7 @@ bool BuildRCStage3CoupledGemmDotConstraintSystem(
     }
     AddConstraint(
         out, "coupled.gemm.product",
-        aq::AirKind::kEverywhere, 2,
+        aq::AirKind::kEverywhere, 3,
         [](const std::vector<Fp3>& row,
            const std::vector<Fp3>&) {
             return gf::Mul(
@@ -739,7 +739,7 @@ bool BuildRCStage3CoupledGemmDotConstraintSystem(
         });
     AddConstraint(
         out, "coupled.gemm.chain",
-        aq::AirKind::kTransition, 2,
+        aq::AirKind::kTransition, 3,
         [](const std::vector<Fp3>& row,
            const std::vector<Fp3>& next) {
             return gf::Mul(

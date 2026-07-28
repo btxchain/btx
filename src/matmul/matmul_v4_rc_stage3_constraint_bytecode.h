@@ -22,6 +22,15 @@ using gkr_field::Fp3;
 // opcode. Older (challenge-free) tables re-serialize under v2 with
 // challenge_width == 0; no persisted golden bytes exist in-tree.
 inline constexpr uint16_t kConstraintBytecodeVersion = 2;
+/**
+ * Additive scalar-challenge degree semantics.  V2 remains frozen with a
+ * Challenge load counted as degree one.  V3 counts a verifier-owned
+ * post-commitment Challenge as degree zero, matching its actual role in the
+ * trace polynomial and allowing proof-visible quotient degree metadata to
+ * match the native callback relation exactly.
+ */
+inline constexpr uint16_t
+    kConstraintBytecodeScalarChallengeVersion = 3;
 inline constexpr uint32_t kConstraintBytecodeMaxInstructions =
     1U << 20;
 

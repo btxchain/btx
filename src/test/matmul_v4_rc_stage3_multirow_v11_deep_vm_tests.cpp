@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_deep_vm.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <limits>
 
@@ -110,6 +111,50 @@ cb::ProgramTable TransitionPrograms()
     out.role = RCStage3RelationRole::EpisodeGemm;
     out.current_width = 2;
     out.next_width = 2;
+    out.programs = {transition, everywhere};
+    return out;
+}
+
+cb::ProgramTable TransitionChallengePrograms()
+{
+    cb::Program transition;
+    transition.role = RCStage3RelationRole::EpisodeGemm;
+    transition.constraint_ordinal = 0;
+    transition.kind = aq::AirKind::kTransition;
+    transition.declared_degree = 1;
+    transition.current_width = 2;
+    transition.next_width = 2;
+    transition.challenge_width = 2;
+    transition.instructions = {
+        Load(cb::Opcode::Next, 0),
+        Load(cb::Opcode::Current, 0),
+        Binary(cb::Opcode::Sub, 0, 1),
+        Load(cb::Opcode::Challenge, 0),
+        Binary(cb::Opcode::Sub, 2, 3),
+    };
+
+    cb::Program everywhere;
+    everywhere.role = RCStage3RelationRole::EpisodeGemm;
+    everywhere.constraint_ordinal = 1;
+    everywhere.kind = aq::AirKind::kEverywhere;
+    // Challenge is conservatively degree one in canonical bytecode.
+    everywhere.declared_degree = 2;
+    everywhere.current_width = 2;
+    everywhere.next_width = 2;
+    everywhere.challenge_width = 2;
+    everywhere.instructions = {
+        Load(cb::Opcode::Current, 1),
+        Load(cb::Opcode::Current, 0),
+        Load(cb::Opcode::Challenge, 1),
+        Binary(cb::Opcode::Mul, 1, 2),
+        Binary(cb::Opcode::Sub, 0, 3),
+    };
+
+    cb::ProgramTable out;
+    out.role = RCStage3RelationRole::EpisodeGemm;
+    out.current_width = 2;
+    out.next_width = 2;
+    out.challenge_width = 2;
     out.programs = {transition, everywhere};
     return out;
 }
@@ -257,7 +302,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.layout.n_columns,
         CanonicalLayoutV1().n_columns);
-    BOOST_CHECK_EQUAL(product.layout.n_columns, 280U);
+    BOOST_CHECK_EQUAL(product.layout.n_columns, 281U);
     BOOST_CHECK_LE(product.max_constraint_degree, 2U);
     BOOST_CHECK_EQUAL(product.query_count, 4U);
     BOOST_CHECK_EQUAL(product.quotient_rows, 4U);
@@ -293,6 +338,82 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         one.layout.n_columns, product.layout.n_columns);
     BOOST_CHECK_LT(one.trace_rows, product.trace_rows);
+}
+
+BOOST_AUTO_TEST_CASE(
+    verifier_owned_child_challenges_execute_and_substitutions_reject)
+{
+    const auto& fixture = Honest();
+    const cb::ProgramTable table =
+        TransitionChallengePrograms();
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(table, &why), why);
+    const auto root =
+        cb::CommitProgramTableAlgHash(table);
+    const std::vector<gf::Fp3> public_challenge{
+        gf::Fp3::One(),
+        gf::Fp3::FromFp(2),
+    };
+    const auto product = BuildProductV1(
+        fixture.proved.proximity.proof,
+        fixture.transcript,
+        table, root, public_challenge, 0, 2);
+    BOOST_REQUIRE_MESSAGE(product.valid, product.note);
+    BOOST_CHECK_EQUAL(product.violations, 0U);
+    BOOST_CHECK(product.verifier_owned_challenge_bound);
+    BOOST_CHECK_EQUAL(
+        product.program_challenge.size(), 2U);
+    BOOST_CHECK(
+        std::find(
+            product.preprocessed_columns.begin(),
+            product.preprocessed_columns.end(),
+            product.layout.op_challenge) !=
+        product.preprocessed_columns.end());
+    BOOST_CHECK(
+        std::find(
+            product.preprocessed_columns.begin(),
+            product.preprocessed_columns.end(),
+            product.layout.operand_lhs) !=
+        product.preprocessed_columns.end());
+
+    auto substituted = public_challenge;
+    substituted[0] = gf::Fp3::FromFp(2);
+    const auto substitution_rejected =
+        BuildProductV1(
+            fixture.proved.proximity.proof,
+            fixture.transcript,
+            table, root, substituted, 0, 2);
+    BOOST_CHECK(!substitution_rejected.valid);
+
+    const auto missing_rejected =
+        BuildProductV1(
+            fixture.proved.proximity.proof,
+            fixture.transcript,
+            table, root,
+            std::vector<gf::Fp3>{gf::Fp3::One()},
+            0, 2);
+    BOOST_CHECK(!missing_rejected.valid);
+
+    auto witness_attack = product.columns;
+    const uint32_t challenge_row =
+        FindRow(product, product.layout.op_challenge);
+    witness_attack[product.layout.operand_lhs]
+                  [challenge_row] =
+        gf::Add(
+            witness_attack[product.layout.operand_lhs]
+                          [challenge_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, witness_attack), 0U);
+    const auto attacked_session =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            product.cs, witness_attack,
+            product.preprocessed_columns);
+    BOOST_REQUIRE(attacked_session.valid);
+    BOOST_CHECK(
+        attacked_session.base_row_commitment !=
+        product.preprocessed_row_group_root);
 }
 
 BOOST_AUTO_TEST_CASE(

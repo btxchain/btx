@@ -165,7 +165,9 @@ bool IsRoleValue(uint16_t value)
 
 bool ValidateProgram(const Program& program, std::string* why)
 {
-    if (program.version != kConstraintBytecodeVersion) {
+    if (program.version != kConstraintBytecodeVersion &&
+        program.version !=
+            kConstraintBytecodeScalarChallengeVersion) {
         return Fail(why, "version");
     }
     if (!IsRoleValue(static_cast<uint16_t>(program.role))) {
@@ -213,16 +215,19 @@ bool ValidateProgram(const Program& program, std::string* why)
             degrees.push_back(1);
             break;
         case Opcode::Challenge:
-            // Verifier-owned post-challenge column load. It carries no baked
-            // value (constant is zero) so the committed table is
-            // challenge-independent, and it counts as algebraic degree 1 so a
-            // LogUp lane written over it is honestly degree 3, never 2.
+            // V2's degree-one treatment is frozen. V3 corrects the degree
+            // model: this is a verifier-owned scalar fixed before quotient
+            // evaluation, not a trace polynomial.
             if (instruction.lhs >= program.challenge_width ||
                 instruction.rhs != 0 ||
                 !IsCanonicalZero(instruction.constant)) {
                 return Fail(why, "challenge");
             }
-            degrees.push_back(1);
+            degrees.push_back(
+                program.version ==
+                        kConstraintBytecodeScalarChallengeVersion
+                    ? 0U
+                    : 1U);
             break;
         case Opcode::Constant:
             if (instruction.lhs != 0 ||
@@ -361,7 +366,9 @@ uint256 CommitProgram(const Program& program)
 bool ValidateProgramTable(const ProgramTable& table,
                           std::string* why)
 {
-    if (table.version != kConstraintBytecodeVersion ||
+    if ((table.version != kConstraintBytecodeVersion &&
+         table.version !=
+             kConstraintBytecodeScalarChallengeVersion) ||
         table.programs.empty() ||
         table.programs.size() >
             kConstraintBytecodeMaxInstructions ||
@@ -373,6 +380,7 @@ bool ValidateProgramTable(const ProgramTable& table,
          ordinal < table.programs.size(); ++ordinal) {
         const Program& program = table.programs[ordinal];
         if (!ValidateProgram(program, why) ||
+            program.version != table.version ||
             program.role != table.role ||
             program.constraint_ordinal != ordinal ||
             program.current_width != table.current_width ||
