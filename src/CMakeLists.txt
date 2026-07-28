@@ -712,6 +712,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_multirow_v11_recursive_parent.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_fixedpoint.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_nirop_hybrid.cpp
+  matmul/matmul_v4_rc_stage3_safe_v12.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_normalized_program.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join_q96.cpp
