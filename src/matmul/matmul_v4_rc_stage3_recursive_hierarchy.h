@@ -20,6 +20,8 @@ namespace gf = gkr_field;
 inline constexpr uint16_t kShardOrdinalManifestVersionV1 = 1;
 inline constexpr uint16_t kShardOrdinalManifestVersionV2 = 2;
 inline constexpr uint16_t kRetainedHierarchyNodeVersionV1 = 1;
+inline constexpr uint16_t
+    kRetainedSplitRapHierarchyNodeVersionV2 = 2;
 
 /**
  * One verifier-owned shard in the global semantic-constraint ordinal space.
@@ -257,6 +259,88 @@ struct RetainedHierarchyNodeV1 {
     const ShardOrdinalManifestV1& manifest,
     const std::vector<aq::AirConstraintSystem<gf::Fp3>>& expected_css,
     const std::vector<RetainedHierarchyNodeV1>& nodes,
+    std::string* why = nullptr);
+
+/**
+ * Canonical retained child for a SAFE Split-RAP relation.
+ *
+ * Unlike RetainedHierarchyNodeV1, this node retains the one proof that owns
+ * all base, dependent and quotient groups.  The verifier supplies the
+ * independently reconstructed constraint system, exact R0 column list and
+ * public Fiat-Shamir seed.  The artifact cannot select any of those values.
+ */
+struct RetainedSplitRapHierarchyNodeV2 {
+    uint16_t version{
+        kRetainedSplitRapHierarchyNodeVersionV2};
+    uint32_t level{0};
+    uint32_t node_ordinal{0};
+    ShardOrdinalCoverageV1 coverage;
+    uint256 manifest_commitment{};
+    uint256 covered_statement_root{};
+    uint256 constraint_system_commitment{};
+    std::vector<uint32_t> base_column_indices;
+    uint256 fs_seed{};
+    uint256 proof_commitment{};
+    uint256 node_root{};
+    std::vector<gf::Fp3> quotient_terminals;
+    aq::AirConstraintSystem<gf::Fp3> constraint_system;
+    aq::AirQuotientSplitRapRowsProof proof;
+    std::vector<unsigned char> proof_bytes;
+    uint64_t full_byte_count{0};
+    bool proof_retained{false};
+    bool native_proof_verified{false};
+    bool cryptographic_child{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] bool ExtractSplitRapProofQuotientTerminalsV2(
+    const aq::AirConstraintSystem<gf::Fp3>& constraint_system,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    std::vector<gf::Fp3>& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint64_t
+ComputeRetainedSplitRapHierarchyNodeFullBytesV2(
+    const RetainedSplitRapHierarchyNodeV2& node);
+
+[[nodiscard]] uint256
+ComputeRetainedSplitRapHierarchyNodeRootV2(
+    const RetainedSplitRapHierarchyNodeV2& node);
+
+[[nodiscard]] bool
+SerializeRetainedSplitRapHierarchyNodeEnvelopeV2(
+    const RetainedSplitRapHierarchyNodeV2& node,
+    std::vector<unsigned char>& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] RetainedSplitRapHierarchyNodeV2
+RetainVerifiedSplitRapHierarchyNodeV2(
+    const ShardOrdinalManifestV1& manifest,
+    const ShardOrdinalCoverageV1& coverage,
+    uint32_t level,
+    uint32_t node_ordinal,
+    const aq::AirConstraintSystem<gf::Fp3>& constraint_system,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& fs_seed);
+
+[[nodiscard]] bool ValidateRetainedSplitRapHierarchyNodeV2(
+    const ShardOrdinalManifestV1& manifest,
+    const aq::AirConstraintSystem<gf::Fp3>& expected_cs,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& expected_fs_seed,
+    const RetainedSplitRapHierarchyNodeV2& node,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool ValidateRetainedSplitRapHierarchyLevelV2(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<aq::AirConstraintSystem<gf::Fp3>>&
+        expected_css,
+    const std::vector<std::vector<uint32_t>>&
+        expected_base_column_indices,
+    const std::vector<uint256>& expected_fs_seeds,
+    const std::vector<RetainedSplitRapHierarchyNodeV2>& nodes,
     std::string* why = nullptr);
 
 /**

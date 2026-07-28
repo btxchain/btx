@@ -28,7 +28,13 @@ constexpr char PROOF_BYTES_DOMAIN[] =
     "BTX_RC_STAGE3_HIERARCHY_PROOF_BYTES_V1";
 constexpr char NODE_ROOT_DOMAIN[] =
     "BTX_RC_STAGE3_RETAINED_HIERARCHY_NODE_V1";
+constexpr char SPLIT_RAP_PROOF_BYTES_DOMAIN_V2[] =
+    "BTX_RC_STAGE3_HIERARCHY_SPLIT_RAP_PROOF_BYTES_V2";
+constexpr char SPLIT_RAP_NODE_ROOT_DOMAIN_V2[] =
+    "BTX_RC_STAGE3_RETAINED_SPLIT_RAP_HIERARCHY_NODE_V2";
 constexpr uint32_t kNodeEnvelopeMagicV1 = 0x31485252U; // "RRH1" LE
+constexpr uint32_t kSplitRapNodeEnvelopeMagicV2 =
+    0x32524852U; // "RHR2" LE
 
 constexpr uint64_t kNodeEnvelopeFixedBytes =
     4 + // magic
@@ -37,6 +43,18 @@ constexpr uint64_t kNodeEnvelopeFixedBytes =
     4 + // node ordinal
     4 + 4 + 8 + 8 + // exact coverage coordinates
     32 * 7 + // manifest, coverage, statement, CS, seed, proof, node roots
+    4 + // q terminal count
+    8 + // proof byte count
+    8; // full byte count
+
+constexpr uint64_t kSplitRapNodeEnvelopeFixedBytesV2 =
+    4 + // magic
+    2 + // version
+    4 + // level
+    4 + // node ordinal
+    4 + 4 + 8 + 8 + // exact coverage coordinates
+    32 * 7 + // manifest, coverage, statement, CS, seed, proof, node roots
+    4 + // R0 column count
     4 + // q terminal count
     8 + // proof byte count
     8; // full byte count
@@ -112,6 +130,38 @@ uint256 ProofBytesCommitment(
     hash << static_cast<uint64_t>(bytes.size());
     hash << bytes;
     return hash.GetHash();
+}
+
+uint256 SplitRapProofBytesCommitmentV2(
+    const std::vector<unsigned char>& bytes)
+{
+    if (bytes.empty()) return {};
+    HashWriter hash;
+    hash << SPLIT_RAP_PROOF_BYTES_DOMAIN_V2;
+    hash << static_cast<uint64_t>(bytes.size());
+    hash << bytes;
+    return hash.GetHash();
+}
+
+bool CanonicalBaseIndices(
+    const std::vector<uint32_t>& indices,
+    uint32_t n_columns)
+{
+    if (indices.empty() ||
+        indices.size() >= n_columns) {
+        return false;
+    }
+    uint32_t previous = 0;
+    bool first = true;
+    for (uint32_t column : indices) {
+        if (column >= n_columns ||
+            (!first && column <= previous)) {
+            return false;
+        }
+        previous = column;
+        first = false;
+    }
+    return true;
 }
 
 bool ConstraintSystemShapeValid(
@@ -955,6 +1005,467 @@ bool ValidateRetainedHierarchyLevelV1(
                 expected_css[i],
                 nodes[i],
                 why)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ExtractSplitRapProofQuotientTerminalsV2(
+    const aq::AirConstraintSystem<gf::Fp3>&
+        constraint_system,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    std::vector<gf::Fp3>& out,
+    std::string* why)
+{
+    out.clear();
+    if (constraint_system.n_columns == 0 ||
+        proof.batch.groups.size() != 3 ||
+        proof.batch.groups[2].role !=
+            Fri3AlgMultiRowGroupRole::Quotient ||
+        proof.batch.groups[2].column_count != 1 ||
+        proof.batch.queries.empty()) {
+        return Fail(why, "split_rap_q_shape");
+    }
+    out.reserve(proof.batch.queries.size());
+    for (const auto& query : proof.batch.queries) {
+        if (query.group_rows.size() != 3 ||
+            query.group_rows[2].values.size() != 1 ||
+            !CanonicalFp3(
+                query.group_rows[2].values[0])) {
+            out.clear();
+            return Fail(
+                why, "split_rap_q_opening");
+        }
+        out.push_back(
+            query.group_rows[2].values[0]);
+    }
+    return !out.empty();
+}
+
+uint64_t ComputeRetainedSplitRapHierarchyNodeFullBytesV2(
+    const RetainedSplitRapHierarchyNodeV2& node)
+{
+    if (node.base_column_indices.size() >
+            std::numeric_limits<uint64_t>::max() / 4 ||
+        node.quotient_terminals.size() >
+            std::numeric_limits<uint64_t>::max() / 24) {
+        return 0;
+    }
+    const uint64_t base_bytes =
+        static_cast<uint64_t>(
+            node.base_column_indices.size()) * 4;
+    const uint64_t q_bytes =
+        static_cast<uint64_t>(
+            node.quotient_terminals.size()) * 24;
+    uint64_t total = 0;
+    if (!CheckedAdd(
+            kSplitRapNodeEnvelopeFixedBytesV2,
+            base_bytes, total) ||
+        !CheckedAdd(total, q_bytes, total) ||
+        !CheckedAdd(
+            total,
+            static_cast<uint64_t>(
+                node.proof_bytes.size()),
+            total)) {
+        return 0;
+    }
+    return total;
+}
+
+bool SerializeRetainedSplitRapHierarchyNodeEnvelopeV2(
+    const RetainedSplitRapHierarchyNodeV2& node,
+    std::vector<unsigned char>& out,
+    std::string* why)
+{
+    out.clear();
+    const uint64_t expected =
+        ComputeRetainedSplitRapHierarchyNodeFullBytesV2(
+            node);
+    if (expected == 0 ||
+        expected >
+            std::numeric_limits<size_t>::max() ||
+        node.base_column_indices.size() >
+            std::numeric_limits<uint32_t>::max() ||
+        node.quotient_terminals.size() >
+            std::numeric_limits<uint32_t>::max()) {
+        return Fail(
+            why, "split_rap_node_envelope_size");
+    }
+    out.reserve(static_cast<size_t>(expected));
+    WriteU32(out, kSplitRapNodeEnvelopeMagicV2);
+    WriteU16(out, node.version);
+    WriteU32(out, node.level);
+    WriteU32(out, node.node_ordinal);
+    WriteU32(
+        out, node.coverage.first_shard_ordinal);
+    WriteU32(out, node.coverage.shard_count);
+    WriteU64(out, node.coverage.first_ordinal);
+    WriteU64(out, node.coverage.ordinal_count);
+    WriteHash(out, node.manifest_commitment);
+    WriteHash(out, node.coverage.commitment);
+    WriteHash(out, node.covered_statement_root);
+    WriteHash(out, node.constraint_system_commitment);
+    WriteHash(out, node.fs_seed);
+    WriteHash(out, node.proof_commitment);
+    WriteHash(out, node.node_root);
+    WriteU32(
+        out,
+        static_cast<uint32_t>(
+            node.base_column_indices.size()));
+    for (uint32_t column :
+         node.base_column_indices) {
+        WriteU32(out, column);
+    }
+    WriteU32(
+        out,
+        static_cast<uint32_t>(
+            node.quotient_terminals.size()));
+    for (const auto& value :
+         node.quotient_terminals) {
+        WriteU64(out, gf::Canonical(value.c0));
+        WriteU64(out, gf::Canonical(value.c1));
+        WriteU64(out, gf::Canonical(value.c2));
+    }
+    WriteU64(
+        out,
+        static_cast<uint64_t>(
+            node.proof_bytes.size()));
+    WriteU64(out, node.full_byte_count);
+    out.insert(
+        out.end(),
+        node.proof_bytes.begin(),
+        node.proof_bytes.end());
+    if (out.size() != expected ||
+        node.full_byte_count != expected) {
+        out.clear();
+        return Fail(
+            why, "split_rap_node_envelope_count");
+    }
+    return true;
+}
+
+uint256 ComputeRetainedSplitRapHierarchyNodeRootV2(
+    const RetainedSplitRapHierarchyNodeV2& node)
+{
+    if (node.version !=
+            kRetainedSplitRapHierarchyNodeVersionV2 ||
+        node.manifest_commitment.IsNull() ||
+        node.coverage.commitment.IsNull() ||
+        node.covered_statement_root.IsNull() ||
+        node.constraint_system_commitment.IsNull() ||
+        node.fs_seed.IsNull() ||
+        node.proof_commitment.IsNull() ||
+        node.proof_bytes.empty() ||
+        node.quotient_terminals.empty() ||
+        node.full_byte_count == 0 ||
+        !CanonicalBaseIndices(
+            node.base_column_indices,
+            node.constraint_system.n_columns) ||
+        !std::all_of(
+            node.quotient_terminals.begin(),
+            node.quotient_terminals.end(),
+            CanonicalFp3)) {
+        return {};
+    }
+    const uint256 proof_bytes_root =
+        SplitRapProofBytesCommitmentV2(
+            node.proof_bytes);
+    if (proof_bytes_root.IsNull()) return {};
+
+    HashWriter hash;
+    hash << SPLIT_RAP_NODE_ROOT_DOMAIN_V2;
+    hash << node.version;
+    hash << node.level;
+    hash << node.node_ordinal;
+    hash << node.manifest_commitment;
+    hash << node.coverage.commitment;
+    hash << node.coverage.first_shard_ordinal;
+    hash << node.coverage.shard_count;
+    hash << node.coverage.first_ordinal;
+    hash << node.coverage.ordinal_count;
+    hash << node.covered_statement_root;
+    hash << node.constraint_system_commitment;
+    hash << static_cast<uint64_t>(
+        node.base_column_indices.size());
+    for (uint32_t column :
+         node.base_column_indices) {
+        hash << column;
+    }
+    hash << node.fs_seed;
+    hash << node.proof_commitment;
+    hash << proof_bytes_root;
+    hash << static_cast<uint64_t>(
+        node.quotient_terminals.size());
+    for (const auto& value :
+         node.quotient_terminals) {
+        HashFp3(hash, value);
+    }
+    hash << node.full_byte_count;
+    return hash.GetHash();
+}
+
+RetainedSplitRapHierarchyNodeV2
+RetainVerifiedSplitRapHierarchyNodeV2(
+    const ShardOrdinalManifestV1& manifest,
+    const ShardOrdinalCoverageV1& coverage,
+    uint32_t level,
+    uint32_t node_ordinal,
+    const aq::AirConstraintSystem<gf::Fp3>&
+        constraint_system,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& fs_seed)
+{
+    RetainedSplitRapHierarchyNodeV2 out;
+    out.level = level;
+    out.node_ordinal = node_ordinal;
+    out.coverage = coverage;
+    out.manifest_commitment = manifest.commitment;
+    out.constraint_system = constraint_system;
+    out.base_column_indices = base_column_indices;
+    out.proof = proof;
+    out.fs_seed = fs_seed;
+
+    std::string why;
+    if (!ValidateShardOrdinalCoverageV1(
+            manifest, coverage, &why) ||
+        !ConstraintSystemShapeValid(
+            constraint_system) ||
+        !CanonicalBaseIndices(
+            base_column_indices,
+            constraint_system.n_columns) ||
+        proof.base_column_indices !=
+            base_column_indices ||
+        fs_seed.IsNull()) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "split_rap_retain_input:" + why;
+        return out;
+    }
+    if (!ExtractSplitRapProofQuotientTerminalsV2(
+            constraint_system, proof,
+            out.quotient_terminals, &why)) {
+        out.note = why;
+        return out;
+    }
+    out.covered_statement_root =
+        ComputeCoveredShardStatementRootV1(
+            manifest, coverage);
+    out.constraint_system_commitment =
+        ComputeHierarchyConstraintSystemCommitmentV1(
+            constraint_system);
+    if (aq::SerializeAirQuotientSplitRapRowsProof(
+            proof, out.proof_bytes) == 0 ||
+        out.proof_bytes.empty()) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "split_rap_codec";
+        return out;
+    }
+    const auto decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(
+            out.proof_bytes);
+    std::vector<unsigned char> roundtrip;
+    if (!decoded.has_value() ||
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            *decoded, roundtrip) == 0 ||
+        roundtrip != out.proof_bytes) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "split_rap_codec_roundtrip";
+        return out;
+    }
+    out.proof_commitment =
+        SplitRapProofBytesCommitmentV2(
+            out.proof_bytes);
+    if (out.covered_statement_root.IsNull() ||
+        out.constraint_system_commitment.IsNull() ||
+        out.proof_commitment.IsNull()) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "split_rap_commitment";
+        return out;
+    }
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            constraint_system, *decoded,
+            base_column_indices, fs_seed, &why)) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "split_rap_native_verify:" + why;
+        return out;
+    }
+    out.proof_retained = true;
+    out.native_proof_verified = true;
+    out.cryptographic_child = true;
+    out.full_byte_count =
+        ComputeRetainedSplitRapHierarchyNodeFullBytesV2(
+            out);
+    out.node_root =
+        ComputeRetainedSplitRapHierarchyNodeRootV2(out);
+    if (out.full_byte_count == 0 ||
+        out.node_root.IsNull()) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "split_rap_node_commitment";
+        return out;
+    }
+    out.valid = true;
+    out.note =
+        "stage3:recursive_hierarchy:"
+        "retained_split_rap_verified";
+    return out;
+}
+
+bool ValidateRetainedSplitRapHierarchyNodeV2(
+    const ShardOrdinalManifestV1& manifest,
+    const aq::AirConstraintSystem<gf::Fp3>& expected_cs,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& expected_fs_seed,
+    const RetainedSplitRapHierarchyNodeV2& node,
+    std::string* why)
+{
+    if (node.version !=
+            kRetainedSplitRapHierarchyNodeVersionV2 ||
+        !node.valid ||
+        !node.proof_retained ||
+        !node.native_proof_verified ||
+        !node.cryptographic_child) {
+        return Fail(
+            why, "split_rap_node_evidence_labels");
+    }
+    if (!ValidateShardOrdinalCoverageV1(
+            manifest, node.coverage, why)) {
+        return false;
+    }
+    if (node.manifest_commitment !=
+            manifest.commitment ||
+        node.covered_statement_root !=
+            ComputeCoveredShardStatementRootV1(
+                manifest, node.coverage)) {
+        return Fail(
+            why, "split_rap_node_manifest_binding");
+    }
+    const uint256 expected_cs_commitment =
+        ComputeHierarchyConstraintSystemCommitmentV1(
+            expected_cs);
+    if (expected_cs_commitment.IsNull() ||
+        node.constraint_system_commitment !=
+            expected_cs_commitment ||
+        !SameConstraintSystemDescription(
+            node.constraint_system,
+            expected_cs) ||
+        node.base_column_indices !=
+            expected_base_column_indices ||
+        !CanonicalBaseIndices(
+            expected_base_column_indices,
+            expected_cs.n_columns) ||
+        expected_fs_seed.IsNull() ||
+        node.fs_seed != expected_fs_seed) {
+        return Fail(
+            why, "split_rap_node_public_statement");
+    }
+    std::vector<unsigned char> encoded;
+    if (aq::SerializeAirQuotientSplitRapRowsProof(
+            node.proof, encoded) == 0 ||
+        encoded.empty() ||
+        encoded != node.proof_bytes) {
+        return Fail(
+            why, "split_rap_node_proof_codec");
+    }
+    const auto decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(
+            node.proof_bytes);
+    if (!decoded.has_value() ||
+        decoded->base_column_indices !=
+            expected_base_column_indices ||
+        node.proof_commitment !=
+            SplitRapProofBytesCommitmentV2(
+                node.proof_bytes)) {
+        return Fail(
+            why, "split_rap_node_proof_commitment");
+    }
+    std::vector<gf::Fp3> proof_q;
+    std::string detail;
+    if (!ExtractSplitRapProofQuotientTerminalsV2(
+            expected_cs, *decoded, proof_q, &detail) ||
+        !SameFp3Vector(
+            node.quotient_terminals, proof_q)) {
+        return Fail(
+            why, "split_rap_node_q:" + detail);
+    }
+    if (node.full_byte_count !=
+            ComputeRetainedSplitRapHierarchyNodeFullBytesV2(
+                node) ||
+        node.node_root.IsNull() ||
+        node.node_root !=
+            ComputeRetainedSplitRapHierarchyNodeRootV2(
+                node)) {
+        return Fail(
+            why, "split_rap_node_root_or_bytes");
+    }
+    std::vector<unsigned char> envelope;
+    if (!SerializeRetainedSplitRapHierarchyNodeEnvelopeV2(
+            node, envelope, &detail) ||
+        envelope.size() != node.full_byte_count) {
+        return Fail(
+            why, "split_rap_node_envelope:" + detail);
+    }
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            expected_cs, *decoded,
+            expected_base_column_indices,
+            expected_fs_seed, &detail)) {
+        return Fail(
+            why, "split_rap_node_native_verify:" +
+                detail);
+    }
+    return true;
+}
+
+bool ValidateRetainedSplitRapHierarchyLevelV2(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<
+        aq::AirConstraintSystem<gf::Fp3>>&
+        expected_css,
+    const std::vector<std::vector<uint32_t>>&
+        expected_base_column_indices,
+    const std::vector<uint256>& expected_fs_seeds,
+    const std::vector<
+        RetainedSplitRapHierarchyNodeV2>& nodes,
+    std::string* why)
+{
+    if (nodes.empty() ||
+        nodes.size() != expected_css.size() ||
+        nodes.size() !=
+            expected_base_column_indices.size() ||
+        nodes.size() != expected_fs_seeds.size() ||
+        nodes.size() >
+            std::numeric_limits<uint32_t>::max()) {
+        return Fail(
+            why, "split_rap_level_shape");
+    }
+    const uint32_t level = nodes.front().level;
+    std::vector<ShardOrdinalCoverageV1> coverage;
+    coverage.reserve(nodes.size());
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (nodes[i].level != level ||
+            nodes[i].node_ordinal != i) {
+            return Fail(
+                why, "split_rap_level_order");
+        }
+        coverage.push_back(nodes[i].coverage);
+    }
+    if (!ValidateExactHierarchyLevelCoverageV1(
+            manifest, coverage, why)) {
+        return false;
+    }
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (!ValidateRetainedSplitRapHierarchyNodeV2(
+                manifest, expected_css[i],
+                expected_base_column_indices[i],
+                expected_fs_seeds[i],
+                nodes[i], why)) {
             return false;
         }
     }

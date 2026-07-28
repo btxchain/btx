@@ -52,6 +52,35 @@ aq::AirConstraintSystem<gf::Fp3> BooleanCs()
     return cs;
 }
 
+aq::AirConstraintSystem<gf::Fp3> SplitRapCs()
+{
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    cs.n_rows = 2;
+    cs.n_columns = 2;
+    cs.constraints.push_back({
+        "stage3.hierarchy.test.split_rap.boolean",
+        aq::AirKind::kEverywhere,
+        2,
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>&) {
+            return gf::Mul(
+                cur[0],
+                gf::Sub(
+                    cur[0], gf::Fp3::One()));
+        },
+    });
+    cs.constraints.push_back({
+        "stage3.hierarchy.test.split_rap.copy",
+        aq::AirKind::kEverywhere,
+        1,
+        [](const std::vector<gf::Fp3>& cur,
+           const std::vector<gf::Fp3>&) {
+            return gf::Sub(cur[1], cur[0]);
+        },
+    });
+    return cs;
+}
+
 rh::ShardOrdinalManifestV1 Manifest()
 {
     return rh::BuildShardOrdinalManifestV1(
@@ -63,6 +92,179 @@ rh::ShardOrdinalManifestV1 Manifest()
 }
 
 } // namespace
+
+BOOST_AUTO_TEST_CASE(
+    retained_split_rap_node_is_canonical_and_statement_owned)
+{
+    const auto manifest = Manifest();
+    const auto coverage =
+        rh::BuildShardOrdinalCoverageV1(
+            manifest, 0, 4);
+    const auto cs = SplitRapCs();
+    const std::vector<uint32_t> base_indices{0};
+    const uint256 fs_seed = Seed(0x81);
+    const std::vector<std::vector<gf::Fp3>>
+        columns{
+            {gf::Fp3::Zero(), gf::Fp3::One()},
+            {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices, fs_seed);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact,
+        proved.note);
+
+    const auto retained =
+        rh::RetainVerifiedSplitRapHierarchyNodeV2(
+            manifest, coverage,
+            /*level=*/1, /*node_ordinal=*/0,
+            cs, proved.proof, base_indices,
+            fs_seed);
+    BOOST_REQUIRE_MESSAGE(
+        retained.valid, retained.note);
+    BOOST_CHECK(retained.proof_retained);
+    BOOST_CHECK(retained.native_proof_verified);
+    BOOST_CHECK(retained.cryptographic_child);
+    BOOST_CHECK(!retained.proof_bytes.empty());
+    BOOST_CHECK_GT(
+        retained.full_byte_count,
+        retained.proof_bytes.size());
+
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        rh::ValidateRetainedSplitRapHierarchyNodeV2(
+            manifest, cs, base_indices, fs_seed,
+            retained, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        rh::ValidateRetainedSplitRapHierarchyLevelV2(
+            manifest, {cs}, {base_indices},
+            {fs_seed}, {retained}, &why),
+        why);
+    std::vector<unsigned char> envelope;
+    BOOST_REQUIRE_MESSAGE(
+        rh::SerializeRetainedSplitRapHierarchyNodeEnvelopeV2(
+            retained, envelope, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        envelope.size(), retained.full_byte_count);
+
+    auto wrong_indices = retained;
+    wrong_indices.base_column_indices = {1};
+    wrong_indices.node_root =
+        rh::ComputeRetainedSplitRapHierarchyNodeRootV2(
+            wrong_indices);
+    BOOST_CHECK(
+        !rh::ValidateRetainedSplitRapHierarchyNodeV2(
+            manifest, cs, base_indices, fs_seed,
+            wrong_indices, nullptr));
+
+    auto proof_tamper = retained;
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.queries.empty());
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.queries[0]
+             .group_rows.empty());
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.queries[0]
+             .group_rows[0].values.empty());
+    proof_tamper.proof.batch.queries[0]
+        .group_rows[0].values[0] =
+        gf::Add(
+            proof_tamper.proof.batch.queries[0]
+                .group_rows[0].values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !rh::ValidateRetainedSplitRapHierarchyNodeV2(
+            manifest, cs, base_indices, fs_seed,
+            proof_tamper, nullptr));
+
+    // A complete proof made under a different public transcript is not a
+    // swappable child, even after all artifact-owned hashes are rebuilt.
+    const uint256 alternate_seed = Seed(0x82);
+    const auto alternate =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices,
+            alternate_seed);
+    BOOST_REQUIRE(alternate.ok);
+    const auto alternate_retained =
+        rh::RetainVerifiedSplitRapHierarchyNodeV2(
+            manifest, coverage, 1, 0, cs,
+            alternate.proof, base_indices,
+            alternate_seed);
+    BOOST_REQUIRE(alternate_retained.valid);
+    BOOST_CHECK(
+        !rh::ValidateRetainedSplitRapHierarchyNodeV2(
+            manifest, cs, base_indices, fs_seed,
+            alternate_retained, nullptr));
+
+    auto labels_only = retained;
+    labels_only.proof = {};
+    labels_only.proof_bytes.clear();
+    labels_only.proof_commitment = {};
+    labels_only.node_root = {};
+    labels_only.full_byte_count = 0;
+    labels_only.valid = true;
+    labels_only.proof_retained = true;
+    labels_only.native_proof_verified = true;
+    labels_only.cryptographic_child = true;
+    BOOST_CHECK(
+        !rh::ValidateRetainedSplitRapHierarchyNodeV2(
+            manifest, cs, base_indices, fs_seed,
+            labels_only, nullptr));
+}
+
+BOOST_AUTO_TEST_CASE(
+    split_rap_retained_level_rejects_reorder)
+{
+    const auto manifest = Manifest();
+    const auto cs = SplitRapCs();
+    const std::vector<uint32_t> base_indices{0};
+    const std::vector<std::vector<gf::Fp3>>
+        columns{
+            {gf::Fp3::Zero(), gf::Fp3::One()},
+            {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const uint256 left_seed = Seed(0x83);
+    const uint256 right_seed = Seed(0x84);
+    const auto left_proof =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices, left_seed);
+    const auto right_proof =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices, right_seed);
+    BOOST_REQUIRE(left_proof.ok);
+    BOOST_REQUIRE(right_proof.ok);
+    const auto left =
+        rh::RetainVerifiedSplitRapHierarchyNodeV2(
+            manifest,
+            rh::BuildShardOrdinalCoverageV1(
+                manifest, 0, 2),
+            1, 0, cs, left_proof.proof,
+            base_indices, left_seed);
+    const auto right =
+        rh::RetainVerifiedSplitRapHierarchyNodeV2(
+            manifest,
+            rh::BuildShardOrdinalCoverageV1(
+                manifest, 2, 2),
+            1, 1, cs, right_proof.proof,
+            base_indices, right_seed);
+    BOOST_REQUIRE(left.valid);
+    BOOST_REQUIRE(right.valid);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rh::ValidateRetainedSplitRapHierarchyLevelV2(
+            manifest, {cs, cs},
+            {base_indices, base_indices},
+            {left_seed, right_seed},
+            {left, right}, &why),
+        why);
+    BOOST_CHECK(
+        !rh::ValidateRetainedSplitRapHierarchyLevelV2(
+            manifest, {cs, cs},
+            {base_indices, base_indices},
+            {left_seed, right_seed},
+            {right, left}, nullptr));
+}
 
 BOOST_AUTO_TEST_CASE(
     manifest_and_level_coverage_are_exact_and_ordered)
