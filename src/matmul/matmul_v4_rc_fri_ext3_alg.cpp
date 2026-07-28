@@ -289,39 +289,43 @@ std::vector<Fp3> LdeFromCoeffs(const std::vector<Fp3>& coeffs, uint32_t blowup)
     return padded;
 }
 
-bool MetalFp3LdeEnabled()
+// ---------------------------------------------------------------------------
+// PR-89 GPU splice: Fp3 column LDE (BTX_GPU_LDE=1).
+//
+// Policy (no silent CPU fallback) — mirrors BTX_GPU_ROWLEAF:
+//  * env unset / 0          -> CPU LdeFromCoeffs (default consensus build).
+//  * BTX_GPU_LDE=1          -> BtxGpuFp3Lde* (CUDA or Metal provider). ANY
+//                              missing provider or device failure aborts.
+//  * BTX_GPU_LDE_AUDIT=1    -> GPU then CPU parity; abort on mismatch.
+enum class GpuFp3LdeMode { kOff, kOn, kAudit };
+
+GpuFp3LdeMode GpuFp3LdeModeActive()
 {
-    static const bool enabled = [] {
+    static const GpuFp3LdeMode mode = [] {
         const char* env = std::getenv("BTX_GPU_LDE");
-        return env != nullptr && env[0] == '1';
+        if (env == nullptr || env[0] == '\0' || std::strcmp(env, "0") == 0) {
+            return GpuFp3LdeMode::kOff;
+        }
+        if (std::getenv("BTX_GPU_LDE_AUDIT") != nullptr) {
+            return GpuFp3LdeMode::kAudit;
+        }
+        return GpuFp3LdeMode::kOn;
     }();
-    return enabled;
+    return mode;
 }
 
-bool MetalFp3LdeAuditEnabled()
-{
-    static const bool enabled = [] {
-        const char* env = std::getenv("BTX_GPU_LDE_AUDIT");
-        return env != nullptr && env[0] == '1';
-    }();
-    return enabled;
-}
-
-struct MetalFp3LdeThreadContext {
+struct GpuFp3LdeThreadContext {
     uint32_t domain_size{0};
     void* handle{nullptr};
 
-    ~MetalFp3LdeThreadContext()
-    {
-        BtxMetalFp3LdeRelease(handle);
-    }
+    ~GpuFp3LdeThreadContext() { BtxGpuFp3LdeRelease(handle); }
 
     bool Ensure(uint32_t requested_domain)
     {
         if (handle != nullptr && domain_size == requested_domain) {
             return true;
         }
-        BtxMetalFp3LdeRelease(handle);
+        BtxGpuFp3LdeRelease(handle);
         handle = nullptr;
         domain_size = 0;
         if (requested_domain == 0 ||
@@ -342,13 +346,13 @@ struct MetalFp3LdeThreadContext {
                 inverse[i] = Mul(inverse[i - 1], omega_inverse);
             }
         }
-        const int status = BtxMetalFp3LdeBegin(
+        const int status = BtxGpuFp3LdeBegin(
             requested_domain,
             forward.empty() ? nullptr : forward.data(), root_count,
             inverse.empty() ? nullptr : inverse.data(), root_count,
             Inv(static_cast<Fp>(requested_domain)), &handle);
         if (status != 0 || handle == nullptr) {
-            BtxMetalFp3LdeRelease(handle);
+            BtxGpuFp3LdeRelease(handle);
             handle = nullptr;
             return false;
         }
@@ -357,11 +361,10 @@ struct MetalFp3LdeThreadContext {
     }
 };
 
-thread_local MetalFp3LdeThreadContext g_metal_fp3_lde_context;
+thread_local GpuFp3LdeThreadContext g_gpu_fp3_lde_context;
 
-bool BuildColumnLdeMetal(
-    const std::vector<Fp3>& source, uint32_t n_coeffs,
-    std::vector<Fp3>& output)
+bool BuildColumnLdeGpu(const std::vector<Fp3>& source, uint32_t n_coeffs,
+                       std::vector<Fp3>& output)
 {
     static_assert(sizeof(Fp3) == 3 * sizeof(uint64_t));
     static_assert(std::is_trivially_copyable_v<Fp3>);
@@ -370,13 +373,13 @@ bool BuildColumnLdeMetal(
         return false;
     }
     const uint32_t n_lde = n_coeffs * kRCFriBlowup;
-    if (BtxMetalFp3LdeAvailable() != 1 ||
-        !g_metal_fp3_lde_context.Ensure(n_lde)) {
+    if (BtxGpuFp3LdeAvailable() != 1 ||
+        !g_gpu_fp3_lde_context.Ensure(n_lde)) {
         return false;
     }
     output.resize(n_lde);
-    return BtxMetalFp3LdeForward(
-               g_metal_fp3_lde_context.handle,
+    return BtxGpuFp3LdeForward(
+               g_gpu_fp3_lde_context.handle,
                source.empty()
                    ? nullptr
                    : reinterpret_cast<const uint64_t*>(source.data()),
@@ -476,24 +479,48 @@ void BuildColumnLdeBlock(
 {
     if (block.size() < kc) block.resize(kc);
     const int64_t count = static_cast<int64_t>(kc);
+    const GpuFp3LdeMode lde_mode = GpuFp3LdeModeActive();
 #if defined(_OPENMP)
 #pragma omp parallel for schedule(static) num_threads(BtxProveThreads())
 #endif
     for (int64_t t = 0; t < count; ++t) {
         const std::vector<Fp3>& src =
             columns[c0 + static_cast<uint32_t>(t)];
-        if (MetalFp3LdeEnabled()) {
+        if (lde_mode != GpuFp3LdeMode::kOff) {
             auto& out = block[static_cast<size_t>(t)];
-            if (!BuildColumnLdeMetal(src, n_coeffs, out)) {
+            if (BtxGpuFp3LdeAvailable() != 1) {
                 std::fprintf(
                     stderr,
-                    "[BTX_GPU_LDE] selected Metal Fp3 LDE failed "
+                    "[BTX_GPU_LDE] selected but no CUDA/Metal Fp3 LDE "
+                    "provider (column=%u n_coeffs=%u); refusing silent "
+                    "CPU fallback\n",
+                    c0 + static_cast<uint32_t>(t), n_coeffs);
+                std::fflush(stderr);
+                std::abort();
+            }
+            if (!BuildColumnLdeGpu(src, n_coeffs, out)) {
+                std::fprintf(
+                    stderr,
+                    "[BTX_GPU_LDE] selected GPU Fp3 LDE failed "
                     "(column=%u n_coeffs=%u)\n",
                     c0 + static_cast<uint32_t>(t), n_coeffs);
                 std::fflush(stderr);
                 std::abort();
             }
-            if (MetalFp3LdeAuditEnabled()) {
+            // One-shot marker for E2E evidence (provider identity is in the
+            // linked BtxGpuFp3Lde* TU — CUDA logs "[BTX_GPU_LDE] CUDA ...").
+            {
+                static bool logged = false;
+                if (!logged) {
+                    logged = true;
+                    std::fprintf(stderr,
+                                 "[BTX_GPU_LDE] GPU Fp3 LDE engaged "
+                                 "(n_coeffs=%u blowup=%u)\n",
+                                 n_coeffs, kRCFriBlowup);
+                    std::fflush(stderr);
+                }
+            }
+            if (lde_mode == GpuFp3LdeMode::kAudit) {
                 std::vector<Fp3> padded(n_coeffs, Fp3::Zero());
                 std::copy(src.begin(), src.end(), padded.begin());
                 const std::vector<Fp3> expected =
@@ -506,7 +533,7 @@ void BuildColumnLdeBlock(
                         })) {
                     std::fprintf(
                         stderr,
-                        "[BTX_GPU_LDE] CPU/Metal parity mismatch "
+                        "[BTX_GPU_LDE] CPU/GPU parity mismatch "
                         "(column=%u n_coeffs=%u)\n",
                         c0 + static_cast<uint32_t>(t), n_coeffs);
                     std::fflush(stderr);

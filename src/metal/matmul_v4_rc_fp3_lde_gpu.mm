@@ -404,3 +404,42 @@ extern "C" void BtxMetalFp3LdeRelease(void* opaque)
 {
     delete static_cast<Fp3LdeCtx*>(opaque);
 }
+
+// Provider-neutral ABI used by BTX_GPU_LDE. Only compiled into Apple Metal
+// builds that do not also link the CUDA provider (CMake excludes this TU's
+// BtxGpu* symbols when CUDA ON by compiling the CUDA .cu instead and not
+// defining these on CUDA hosts). On Metal-only builds these wrap Metal.
+#if !defined(BTX_CUDA_FP3_LDE_PROVIDER)
+extern "C" int BtxGpuFp3LdeAvailable(void)
+{
+    return BtxMetalFp3LdeAvailable();
+}
+
+extern "C" int BtxGpuFp3LdeBegin(u32 domain_size, const u64* forward_roots,
+                                 u32 forward_root_count,
+                                 const u64* inverse_roots,
+                                 u32 inverse_root_count, u64 inverse_n,
+                                 void** ctx_out)
+{
+    return BtxMetalFp3LdeBegin(domain_size, forward_roots, forward_root_count,
+                               inverse_roots, inverse_root_count, inverse_n,
+                               ctx_out);
+}
+
+extern "C" int BtxGpuFp3LdeForward(void* ctx, const u64* coeffs_aos,
+                                   u32 coeff_count, u64* out_evals_aos)
+{
+    return BtxMetalFp3LdeForward(ctx, coeffs_aos, coeff_count, out_evals_aos);
+}
+
+extern "C" int BtxGpuFp3LdeInverse(void* ctx, const u64* evals_aos,
+                                   u64* out_coeffs_aos)
+{
+    return BtxMetalFp3LdeInverse(ctx, evals_aos, out_coeffs_aos);
+}
+
+extern "C" void BtxGpuFp3LdeRelease(void* ctx)
+{
+    BtxMetalFp3LdeRelease(ctx);
+}
+#endif // !BTX_CUDA_FP3_LDE_PROVIDER
