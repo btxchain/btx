@@ -11,6 +11,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -188,6 +189,24 @@ private:
     std::vector<bool> m_extract_seen;
     std::string m_error;
 };
+
+/**
+ * Winner-only handoff from the solver's existing CPU reseal to the normalized
+ * proof producer. The store is process-local and retains at most one completed
+ * capture, so losing nonce traces are never persisted and a stale winner
+ * cannot be selected for a different header.
+ */
+[[nodiscard]] bool RCStage3EpisodeWitnessStorePut(
+    const uint256& final_header_hash,
+    std::shared_ptr<const RCStage3EpisodeWitnessCapture> capture,
+    std::string* why = nullptr);
+[[nodiscard]] std::shared_ptr<
+    const RCStage3EpisodeWitnessCapture>
+RCStage3EpisodeWitnessStoreGet(
+    const uint256& final_header_hash);
+void RCStage3EpisodeWitnessStoreErase(
+    const uint256& final_header_hash);
+void RCStage3EpisodeWitnessStoreClearForTest();
 
 /**
  * Consume one completed miner capture into the exact all-instance relation

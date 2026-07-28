@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <mutex>
 #include <optional>
 
 namespace matmul::v4::rc {
@@ -26,6 +27,12 @@ constexpr char LAYER_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_GEMM_LAYER_PRODUCT_V1";
 constexpr char COLLECTION_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_GEMM_PRODUCT_V1";
+
+std::mutex g_episode_witness_store_mutex;
+uint256 g_episode_witness_store_header{};
+std::shared_ptr<
+    const RCStage3EpisodeWitnessCapture>
+    g_episode_witness_store_capture;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -776,6 +783,61 @@ ValidateExtractProductOutputs(
         }
     }
     return true;
+}
+
+bool RCStage3EpisodeWitnessStorePut(
+    const uint256& final_header_hash,
+    std::shared_ptr<
+        const RCStage3EpisodeWitnessCapture> capture,
+    std::string* why)
+{
+    if (final_header_hash.IsNull() ||
+        capture == nullptr ||
+        !capture->Complete(why)) {
+        return Fail(why, "witness_store_incomplete");
+    }
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    g_episode_witness_store_header =
+        final_header_hash;
+    g_episode_witness_store_capture =
+        std::move(capture);
+    return true;
+}
+
+std::shared_ptr<const RCStage3EpisodeWitnessCapture>
+RCStage3EpisodeWitnessStoreGet(
+    const uint256& final_header_hash)
+{
+    if (final_header_hash.IsNull()) return {};
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    if (g_episode_witness_store_capture == nullptr ||
+        g_episode_witness_store_header !=
+            final_header_hash) {
+        return {};
+    }
+    return g_episode_witness_store_capture;
+}
+
+void RCStage3EpisodeWitnessStoreErase(
+    const uint256& final_header_hash)
+{
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    if (g_episode_witness_store_header ==
+            final_header_hash) {
+        g_episode_witness_store_header.SetNull();
+        g_episode_witness_store_capture.reset();
+    }
+}
+
+void RCStage3EpisodeWitnessStoreClearForTest()
+{
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    g_episode_witness_store_header.SetNull();
+    g_episode_witness_store_capture.reset();
 }
 
 bool ProveRCStage3EpisodeProductsFromCapture(

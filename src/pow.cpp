@@ -34,6 +34,7 @@
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
@@ -6350,9 +6351,49 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
-            const uint256 episode_resealed =
-                matmul::v4::rc::RecomputeResidentCurriculumReference(
-                    cand, params_rc, block_height);
+            std::shared_ptr<
+                matmul::v4::rc::
+                    RCStage3EpisodeWitnessCapture>
+                episode_capture;
+            uint256 episode_resealed;
+            if constexpr (
+                matmul::v4::rc::
+                    kRCStage3SuccinctAuthorityReady) {
+                // Authority mode reuses the winner-only CPU reseal as the
+                // proof-witness pass. No validator replay is introduced and
+                // no losing nonce witness is retained.
+                episode_capture = std::make_shared<
+                    matmul::v4::rc::
+                        RCStage3EpisodeWitnessCapture>(
+                            params_rc);
+                episode_resealed =
+                    matmul::v4::rc::
+                        MineRCEpisodeWithProofWitness(
+                            cand, params_rc, block_height,
+                            *episode_capture);
+                std::string capture_why;
+                if (!episode_capture->Complete(
+                        &capture_why)) {
+                    LogWarning(
+                        "SolveMatMulV4RCCoupled: winner proof "
+                        "witness capture incomplete at nonce=%llu "
+                        "(%s); aborting solve\n",
+                        static_cast<unsigned long long>(
+                            cand.nNonce64),
+                        capture_why.c_str());
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                }
+            } else {
+                episode_resealed =
+                    matmul::v4::rc::
+                        RecomputeResidentCurriculumReference(
+                            cand, params_rc,
+                            block_height);
+            }
             if (episode_resealed != episode_mined) {
                 LogWarning("SolveMatMulV4RCCoupled: MineRCEpisode diverged from "
                            "RecomputeResidentCurriculumReference at nonce=%llu; "
@@ -6377,6 +6418,27 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
             if (UintToArith256(composed_resealed) <= effective_target) {
                 block = cand;
                 block.matmul_digest = composed_resealed;
+                if constexpr (
+                    matmul::v4::rc::
+                        kRCStage3SuccinctAuthorityReady) {
+                    std::string capture_why;
+                    if (!matmul::v4::rc::
+                            RCStage3EpisodeWitnessStorePut(
+                                block.GetHash(),
+                                std::move(
+                                    episode_capture),
+                                &capture_why)) {
+                        LogWarning(
+                            "SolveMatMulV4RCCoupled: winner proof "
+                            "witness store failed (%s)\n",
+                            capture_why.c_str());
+                        RegisterMatMulSolveRuntimeSample(
+                            false,
+                            std::chrono::steady_clock::now() -
+                                start);
+                        return false;
+                    }
+                }
                 RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
                 return true;
             }
@@ -6461,8 +6523,49 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
 
         // Winner / share: CPU-reseal for consensus (empty ExactGemm — never
         // accelerate REJECT / reseal); abort on miner/oracle mismatch.
-        const uint256 resealed =
-            matmul::v4::rc::RecomputeResidentCurriculumReference(block, params_rc, block_height);
+        std::shared_ptr<
+            matmul::v4::rc::
+                RCStage3EpisodeWitnessCapture>
+            episode_capture;
+        uint256 resealed;
+        if constexpr (
+            matmul::v4::rc::
+                kRCStage3SuccinctAuthorityReady) {
+            // Reuse the winner-only deterministic CPU reseal to collect the
+            // complete proof witness. Losing nonces above never allocate or
+            // persist a Stage-3 trace.
+            episode_capture = std::make_shared<
+                matmul::v4::rc::
+                    RCStage3EpisodeWitnessCapture>(
+                        params_rc);
+            resealed =
+                matmul::v4::rc::
+                    MineRCEpisodeWithProofWitness(
+                        block, params_rc,
+                        block_height, *episode_capture);
+            std::string capture_why;
+            if (!episode_capture->Complete(
+                    &capture_why)) {
+                LogWarning(
+                    "SolveMatMulV4RC: winner proof witness "
+                    "capture incomplete at nonce=%llu (%s); "
+                    "aborting solve\n",
+                    static_cast<unsigned long long>(
+                        block.nNonce64),
+                    capture_why.c_str());
+                RegisterMatMulSolveRuntimeSample(
+                    false,
+                    std::chrono::steady_clock::now() -
+                        start);
+                return false;
+            }
+        } else {
+            resealed =
+                matmul::v4::rc::
+                    RecomputeResidentCurriculumReference(
+                        block, params_rc,
+                        block_height);
+        }
         if (resealed != mined) {
             LogWarning("SolveMatMulV4RC: MineRCEpisode diverged from "
                        "RecomputeResidentCurriculumReference at nonce=%llu; aborting solve\n",
@@ -6472,6 +6575,27 @@ static bool SolveMatMulV4RC(CBlockHeader& block,
         }
         if (UintToArith256(resealed) <= effective_target) {
             block.matmul_digest = resealed;
+            if constexpr (
+                matmul::v4::rc::
+                    kRCStage3SuccinctAuthorityReady) {
+                std::string capture_why;
+                if (!matmul::v4::rc::
+                        RCStage3EpisodeWitnessStorePut(
+                            block.GetHash(),
+                            std::move(
+                                episode_capture),
+                            &capture_why)) {
+                    LogWarning(
+                        "SolveMatMulV4RC: winner proof witness "
+                        "store failed (%s)\n",
+                        capture_why.c_str());
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                }
+            }
             // DATACENTER PROFILE (nMatMulRCProfile==2): emit the Freivalds
             // sampled carrier as a relay/DoS prefilter. It is not complete
             // consensus authority. Build the v7 episode proof, distil the

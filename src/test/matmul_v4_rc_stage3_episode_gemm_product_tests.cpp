@@ -413,6 +413,31 @@ BOOST_AUTO_TEST_CASE(
             statement, rejected_manifest, reordered,
             rejected_extract, rejected_stream,
             rejected_gemm, &why));
+
+    rc::RCStage3EpisodeWitnessStoreClearForTest();
+    const uint256 winner_hash = H(0xd1);
+    auto stored = std::make_shared<
+        const rc::RCStage3EpisodeWitnessCapture>(
+            capture);
+    BOOST_REQUIRE_MESSAGE(
+        rc::RCStage3EpisodeWitnessStorePut(
+            winner_hash, stored, &why),
+        why);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            winner_hash) == stored);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            H(0xd2)) == nullptr);
+    rc::RCStage3EpisodeWitnessStoreErase(H(0xd2));
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            winner_hash) == stored);
+    rc::RCStage3EpisodeWitnessStoreErase(
+        winner_hash);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            winner_hash) == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(
