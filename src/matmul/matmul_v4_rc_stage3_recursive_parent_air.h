@@ -524,18 +524,20 @@ struct FourSlotSelfSimilarCtlParentV1 {
     // bytes violates a parent constraint (tamper-tested).
     // `child_air_challenge_value_column[s]` is slot s's reconstructed-challenge
     // column (the tamper-test handle).
-    // NOTE: this is the DECODER half only.  The digest-bytes ← SHA256d(seed)
-    // compression is NOT yet a parent constraint (it is the documented
-    // "sha256d_fiat_shamir_compression_shards scheduled but not attached"
-    // residual / GPU scale-up lane), so `child_fiat_shamir_replayed_in_parent`
-    // below stays false: the full seed→challenge transcript is not replayed.
+    // Decoder half is always wired when the parent builds. Full seed→challenge
+    // ownership additionally requires the in-parent P2 sponge replay + limb
+    // bus (see child_fiat_shamir_replayed_in_parent).
     bool child_air_challenge_reconstructed_in_parent_cs{false};
     std::array<uint32_t, 4> child_air_challenge_value_column{};
     // First of the 24 digest-byte columns per slot (the free preprocessed bytes
     // the cross-domain CTL boundary reconciles against the SHA output).
     std::array<uint32_t, 4> child_air_challenge_byte_base{};
-    // Deliberately-open gates. Kept false; see the struct documentation.
+    // COMPUTED: true only when BuildFourSlotSelfSimilarCtlParentV1 hosts an
+    // in-parent Poseidon2 airq_lambda replay plus limb-mode CTL bus for every
+    // active slot (same CS as the recursion-carrying parent). Fail-closed
+    // otherwise — standalone companion proofs do not set this.
     bool child_fiat_shamir_replayed_in_parent{false};
+    uint32_t child_fs_p2_limb_bus_slots_hosted{0};
     bool parent_own_fri_proof_produced{false};
     bool recursive_fixed_point{false};
     bool authority{false};
@@ -973,6 +975,56 @@ BuildChildAirChallengeP2ReplayV1(
     const gf::Fp3* forced_limb = nullptr);
 
 /**
+ * Same Poseidon2 airq_lambda sponge as BuildChildAirChallengeP2ReplayV1, but
+ * appended into an EXISTING same-row-domain parent CS (column-shifted layout).
+ * Fail-closed when parent rows are not a power of two large enough for the
+ * sponge schedule. This is the same-parent ownership primitive for g4
+ * obligation 4 — standalone companions do not satisfy it.
+ */
+struct ChildAirChallengeP2ReplayHostedInParentV1 {
+    bool ok{false};
+    uint32_t poseidon_base{0};
+    uint32_t absorbed_lane_base{0};
+    std::array<uint32_t, 3> challenge_limb_columns{};
+    uint32_t permutations{0};
+    uint256 digest{};
+    std::string note;
+};
+
+[[nodiscard]] bool AppendChildAirChallengeP2ReplayToParentV1(
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    std::vector<std::vector<gf::Fp3>>& parent_columns,
+    const uint256& child_fs_seed,
+    const uint256& trace_commit,
+    uint32_t child_n_rows,
+    uint32_t child_quotient_len,
+    uint32_t child_w,
+    const gf::Fp3& consumed_air_lambda,
+    ChildAirChallengeP2ReplayHostedInParentV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Host airq_lambda Poseidon2 replay + limb-mode CTL bus for all four slots
+ * inside an already-built four-slot parent whose P2 decoder limbs are present
+ * (`child_air_challenge_byte_base`). Mutates parent_cs / parent_witness.
+ */
+struct FourSlotChildFsP2LimbBusHostV1 {
+    bool ok{false};
+    uint32_t slots_hosted{0};
+    std::array<ChildAirChallengeP2ReplayHostedInParentV1, 4> slot_replay{};
+    std::array<bool, 4> slot_bus_reconciled{};
+    std::string note;
+};
+
+[[nodiscard]] bool HostFourSlotChildFsP2LimbBusReplayInParentV1(
+    FourSlotSelfSimilarCtlParentV1& parent,
+    const uint256& child_fs_seed,
+    const std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4>&
+        child_proofs,
+    FourSlotChildFsP2LimbBusHostV1& out,
+    std::string* why = nullptr);
+
+/**
  * Generic Poseidon2 sponge companion over an arbitrary Fp-lane preimage.
  * Used by the coverage assessor for the seven FRI challenge kinds under
  * kRCFri3AlgP2SqueezeActivatedV1 (lanes = Fri3AlgP2SqueezeAbsorbLanes).
@@ -1366,6 +1418,51 @@ struct ChildFsChallengeDecoderCoverageV1 {
 [[nodiscard]] const ChildFsChallengeDecoderCoverageV1&
 AssessChildFsChallengeDecoderCoverageV1();
 
+/**
+ * Production evidence for `challenge_kinds_transcript_bound`.
+ *
+ * Distinct from AssessChildFsChallengeDecoderCoverageV1's per-kind
+ * `kinds_transcript_bound`, which builds ONE representative companion per
+ * kind.  g4 requires ownership of EVERY draw (all folds and all Q192 query
+ * challenges).  This assessor therefore:
+ *
+ *   (1) commits a real V10/Q192/K=2 Fri3Alg toy proof;
+ *   (2) rebuilds the proof-owned full event-prefix schedule via
+ *       BuildProofOwnedTranscriptBindingV10;
+ *   (3) builds the row-multiplexed stage3_p2_transcript_air over that
+ *       complete schedule and requires local_air_complete (every event
+ *       challenge + every query index constrained, zero violations);
+ *   (4) counts the seven FRI challenge kinds only when the full event list
+ *       for that kind is present in the canonical manifest; and
+ *   (5) counts airq_lambda separately (intentionally absent from the FRI
+ *       transcript AIR) when a Poseidon2 airq_lambda companion binds the
+ *       real single draw — one draw IS full instance coverage for that kind.
+ *
+ * Fail-closed unless aq::kAirChallengeP2Activated && active P2 squeeze.
+ * Cached; do not copy cov.kinds_transcript_bound into the production
+ * counter.
+ */
+struct ChildFsFullEventP2TranscriptOwnershipV1 {
+    bool fri_full_event_air_owned{false};
+    bool airq_lambda_owned{false};
+    bool binding_valid{false};
+    bool air_local_complete{false};
+    uint32_t event_count{0};
+    uint32_t query_events{0};
+    uint32_t fold_events{0};
+    uint32_t fri_kinds_owned{0};
+    uint32_t kinds_transcript_bound{0};
+    uint32_t air_rows{0};
+    uint32_t air_columns{0};
+    uint32_t air_violations{1};
+    std::array<bool, kChildFsChallengeKindCountV1> kind_owned{};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] const ChildFsFullEventP2TranscriptOwnershipV1&
+AssessChildFsFullEventP2TranscriptOwnershipV1();
+
 struct ChildFsReplayClosureV1 {
     // --- Obligation 1: the cross-domain bus exists and is adversarially sound.
     bool bus_constructed{false};
@@ -1458,8 +1555,11 @@ struct ChildFsReplayClosureV1 {
     // `challenge_kinds_covered` counts kinds with a parent DECODER bound to the
     // consumed scalar and a cross-checked transcript re-derivation;
     // `challenge_kinds_transcript_bound` counts kinds whose digest bytes are a
-    // constrained output of an in-AIR hash.  Coverage requires BOTH at 8, so
-    // adding the second counter can only ever remove a `true`.
+    // constrained output of an in-AIR hash over the FULL per-instance event
+    // list (AssessChildFsFullEventP2TranscriptOwnershipV1) — not the
+    // representative-per-kind companion affordability counter in
+    // AssessChildFsChallengeDecoderCoverageV1.  Coverage requires BOTH at 8,
+    // so adding the second counter can only ever remove a `true`.
     uint32_t slots_required{kNormalizedUniversalParentArityV1};
     uint32_t challenge_kinds_required{8};
     uint32_t slots_covered{0};

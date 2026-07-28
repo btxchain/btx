@@ -748,6 +748,53 @@ MeasureFiatShamirShaRecursivelyConsumedV1(
     const AlgAirProof& child_proof);
 
 /**
+ * Proof-owned recursive consumer for the non-SHA Fiat-Shamir challenges
+ * (live Poseidon2 airq_lambda route). Fail-closed: requires the SHA plan's
+ * non-SHA claim match, a query-sound P2 companion with zero violations, a
+ * forced-limb tamper that goes red, and ProveConsumerEndpointFriP2V1 ok.
+ * Does NOT flip kVerifierFiatShamirAirExecutable.
+ */
+struct FiatShamirNonShaChallengesRecursivelyConsumedV1 {
+    uint32_t non_sha_calls{0};
+    bool digest_plan_ready{false};
+    bool non_sha_claims_match{false};
+    bool p2_companion_valid{false};
+    bool p2_query_sound{false};
+    bool p2_tamper_rejects{false};
+    bool consumer_fri_ok{false};
+    bool consumed{false};
+    std::string note;
+};
+
+[[nodiscard]] FiatShamirNonShaChallengesRecursivelyConsumedV1
+MeasureFiatShamirNonShaChallengesRecursivelyConsumedV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof);
+
+/**
+ * Whole-verifier SHA equations: every Fiat-Shamir SHA256d call builds a
+ * vertical boundary AIR that satisfies, and a final-word tamper diverges.
+ * Stronger than the recursive-consume canary (which AIR-checks the first call
+ * only). Does NOT flip kVerifierFiatShamirAirExecutable.
+ */
+struct FiatShamirWholeVerifierShaEquationsInAirV1 {
+    uint32_t sha_calls{0};
+    uint32_t calls_air_green{0};
+    bool digest_plan_ready{false};
+    bool every_call_boundary_air_satisfies{false};
+    bool boundary_tamper_rejects{false};
+    bool in_air{false};
+    std::string note;
+};
+
+[[nodiscard]] FiatShamirWholeVerifierShaEquationsInAirV1
+MeasureFiatShamirWholeVerifierShaEquationsInAirV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof);
+
+/**
  * Rewrite batch.lambda/z1/z2/w/fold/query draws to the SHA256d transcript
  * selection for `program` (ood_candidates>=1 for the OOD window).  Leaves a
  * P2-squeezed production proof's FRI openings inconsistent with the new z —

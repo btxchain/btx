@@ -56,10 +56,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         manifest.canonical_output_metadata_endpoints, 52U);
     BOOST_CHECK_EQUAL(
-        manifest.executed_relation_cell_endpoints, 26U);
+        manifest.executed_relation_cell_endpoints, 28U);
     BOOST_CHECK_EQUAL(
-        manifest.exact_relation_column_endpoints, 26U);
-    BOOST_CHECK_EQUAL(manifest.direct_alias_endpoints, 26U);
+        manifest.exact_relation_column_endpoints, 28U);
+    BOOST_CHECK_EQUAL(manifest.direct_alias_endpoints, 28U);
     BOOST_CHECK_EQUAL(
         manifest.recursive_child_accepted_endpoints, 0U);
     BOOST_CHECK_EQUAL(manifest.complete_roles, 0U);

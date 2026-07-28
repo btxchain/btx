@@ -801,15 +801,21 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(
         parent.child_pubio_lanes_absorbed, 0U);
     BOOST_CHECK(parent.self_similar_arity4_shape);
-    // Deliberately-open gates: the parent's own FRI proof is not produced and
-    // the child Fiat-Shamir transcript is not replayed in-parent, so the
-    // recursive fixed point and consensus authority are NOT claimed.
-    BOOST_CHECK(
-        !parent.child_fiat_shamir_replayed_in_parent);
+    // Deliberately-open residual: parent-own FRI / fixed point / authority.
+    // Under Poseidon2 activation the four-slot builder hosts airq_lambda P2
+    // replay + limb bus in-parent, so the FS-replay gate is COMPUTED true.
     BOOST_CHECK(
         !parent.parent_own_fri_proof_produced);
     BOOST_CHECK(!parent.recursive_fixed_point);
     BOOST_CHECK(!parent.authority);
+    if (aq::kAirChallengeP2Activated) {
+        BOOST_CHECK(parent.child_fiat_shamir_replayed_in_parent);
+        BOOST_CHECK_EQUAL(
+            parent.child_fs_p2_limb_bus_slots_hosted, 4U);
+    } else {
+        BOOST_CHECK(
+            !parent.child_fiat_shamir_replayed_in_parent);
+    }
     BOOST_CHECK_GT(
         parent.parent_columns, parent.vcs_columns);
 
@@ -892,10 +898,16 @@ BOOST_AUTO_TEST_CASE(
             parent.child_air_challenge_value_column[slot],
             parent.vcs_columns);
     }
-    // This is the DECODER half only; the SHA256d seed->digest compression is
-    // NOT yet a parent constraint, so the full-replay gate stays false.
-    BOOST_CHECK(
-        !parent.child_fiat_shamir_replayed_in_parent);
+    // Decoder half is always present; under P2 activation the builder also
+    // hosts the Poseidon2 sponge + limb bus in the same parent CS.
+    if (aq::kAirChallengeP2Activated) {
+        BOOST_CHECK(parent.child_fiat_shamir_replayed_in_parent);
+        BOOST_CHECK_EQUAL(
+            parent.child_fs_p2_limb_bus_slots_hosted, 4U);
+    } else {
+        BOOST_CHECK(
+            !parent.child_fiat_shamir_replayed_in_parent);
+    }
 
     // Forgery: tamper slot 2's reconstructed-challenge cell to a value that is
     // NOT the recompose of the pinned digest bytes (and not the consumed
@@ -1830,7 +1842,12 @@ BOOST_AUTO_TEST_CASE(
     // The bus half is genuinely built and adversarially tested.
     BOOST_CHECK(a.bus_constructed);
     BOOST_CHECK(a.bus_rejects_coordinated_forgery);
-    BOOST_CHECK(!a.recursion_parent_hosts_replay);
+    // Obligation 4 is COMPUTED from same-parent P2 limb-bus hosting.
+    if (aq::kAirChallengeP2Activated) {
+        BOOST_CHECK(a.recursion_parent_hosts_replay);
+    } else {
+        BOOST_CHECK(!a.recursion_parent_hosts_replay);
+    }
     BOOST_CHECK(a.lane_relation_fri_proven);
     // `closed` is a CONJUNCTION, not an assertion: every open obligation must
     // force it false.
@@ -1855,28 +1872,43 @@ BOOST_AUTO_TEST_CASE(
     // second must never silently ride on the first.
     BOOST_CHECK_LE(
         a.challenge_kinds_transcript_bound, a.challenge_kinds_covered);
-    // The active parent does not yet own the complete per-instance P2
-    // transcript. Representative per-kind companions are not enough.
-    BOOST_CHECK(!a.closed);
-    BOOST_CHECK(
-        a.note.find("transcript_bound") != std::string::npos);
-    BOOST_CHECK(
-        a.note.find("recursion_parent_has_no_replay") !=
-        std::string::npos);
+    // Production transcript_bound is COMPUTED from the full-event V10 P2
+    // transcript AIR (all FRI draws) plus airq_lambda P2 companion — not from
+    // the representative-per-kind coverage counter.
+    BOOST_CHECK_EQUAL(
+        a.challenge_kinds_transcript_bound, a.challenge_kinds_required);
+    if (aq::kAirChallengeP2Activated && a.recursion_parent_hosts_replay &&
+        a.discharged_by_fri_proof && a.covers_all_slots_and_kinds) {
+        BOOST_CHECK(a.closed);
+        BOOST_CHECK_EQUAL(a.note, "stage3:child_fs_replay:closed");
+    } else {
+        BOOST_CHECK(!a.closed);
+        if (a.challenge_kinds_transcript_bound < a.challenge_kinds_required) {
+            BOOST_CHECK(
+                a.note.find("transcript_bound") != std::string::npos);
+        }
+        if (!a.recursion_parent_hosts_replay) {
+            BOOST_CHECK(
+                a.note.find("recursion_parent_has_no_replay") !=
+                std::string::npos);
+        }
+    }
     BOOST_CHECK(a.producer_endpoint_fri_proven);
     BOOST_CHECK(a.consumer_endpoint_fri_proven);
     BOOST_CHECK(a.real_child_shape_covered);
-    BOOST_CHECK_EQUAL(a.challenge_kinds_transcript_bound, 0U);
     // And the ledger reports exactly this.
     const auto audit =
         matmul::v4::rc::global_soundness_ledger::
             AssessExecutableGlobalSoundnessLedgerV1();
     BOOST_CHECK_EQUAL(audit.fiat_shamir_replay_complete, a.closed);
-    BOOST_CHECK(!audit.composition_gate.child_fiat_shamir_replay_closed);
+    BOOST_CHECK_EQUAL(
+        audit.composition_gate.child_fiat_shamir_replay_closed, a.closed);
     // certified_bits still depends on other gates (g0-g3,g5,g6); g4 alone
     // does not force all_clear.
-    BOOST_CHECK_EQUAL(audit.composition_gate.child_fiat_shamir_replay_closed,
-                      false);
+    if (!a.closed) {
+        BOOST_CHECK_EQUAL(
+            audit.composition_gate.child_fiat_shamir_replay_closed, false);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -2202,9 +2234,54 @@ BOOST_AUTO_TEST_CASE(
         "G4_CLOSURE producer_fri=" << a.producer_endpoint_fri_proven
         << " consumer_fri=" << a.consumer_endpoint_fri_proven
         << " real_child=" << a.real_child_shape_covered
+        << " recursion_parent=" << a.recursion_parent_hosts_replay
         << " closed=" << a.closed
         << " note=\"" << a.note << "\"");
     BOOST_CHECK(a.producer_endpoint_fri_proven);
+}
+
+BOOST_AUTO_TEST_CASE(
+    g4_four_slot_parent_hosts_p2_limb_bus_replay_for_all_slots)
+{
+    // Obligation 4: the recursion-carrying parent hosts airq_lambda Poseidon2
+    // replay + limb-mode CTL bus inside the SAME parent CS (not standalone
+    // companions). Fail-closed unless all four slots reconcile.
+    BOOST_REQUIRE(aq::kAirChallengeP2Activated);
+    const auto child_cs = ToyFriChildCs();
+    const uint256 seed = Seed(0x5e);
+    const std::vector<std::vector<gf::Fp3>> cols{
+        {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const auto proved =
+        aq::AirQuotientProve<gf::Fp3, AlgB3>(child_cs, cols, seed, {});
+    BOOST_REQUIRE_MESSAGE(proved.ok, proved.note);
+    const std::array<FourSlotSelfSimilarCtlParentV1::ChildProof, 4> proofs{
+        proved.proof, proved.proof, proved.proof, proved.proof};
+    const auto ctx = NodeContext();
+    const auto statement =
+        ComputeFourSlotSelfSimilarParentStatementV1(
+            child_cs, proofs, seed, ctx);
+    const auto parent =
+        BuildFourSlotSelfSimilarCtlParentV1(
+            child_cs, proofs, seed, ctx, statement);
+    BOOST_REQUIRE_MESSAGE(parent.valid, parent.note);
+    BOOST_TEST_MESSAGE(
+        "G4_HOST rows=" << parent.parent_rows
+        << " cols=" << parent.parent_columns
+        << " hosted_slots=" << parent.child_fs_p2_limb_bus_slots_hosted
+        << " fs_replayed=" << parent.child_fiat_shamir_replayed_in_parent
+        << " note=\"" << parent.note << "\"");
+    BOOST_CHECK(parent.child_air_challenge_reconstructed_in_parent_cs);
+    BOOST_CHECK_EQUAL(parent.child_fs_p2_limb_bus_slots_hosted, 4U);
+    BOOST_CHECK(parent.child_fiat_shamir_replayed_in_parent);
+    BOOST_CHECK_EQUAL(parent.witness_violations, 0U);
+    // Closure assessor mirrors the hosted flag; transcript_bound is COMPUTED
+    // from the full-event V10 P2 transcript AIR ownership assessor.
+    const auto a = AssessChildFsReplayClosureV1();
+    BOOST_CHECK(a.recursion_parent_hosts_replay);
+    BOOST_CHECK_EQUAL(
+        a.challenge_kinds_transcript_bound, a.challenge_kinds_required);
+    BOOST_CHECK(a.closed);
+    BOOST_CHECK_EQUAL(a.note, "stage3:child_fs_replay:closed");
 }
 
 BOOST_AUTO_TEST_CASE(

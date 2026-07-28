@@ -7,6 +7,7 @@
 #include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_fs_selection_air.h>
 #include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 
 #include <algorithm>
 #include <chrono>
@@ -3084,6 +3085,103 @@ MeasureFiatShamirAirBackedAllKindsV1(
     return out;
 }
 
+FiatShamirNonShaChallengesRecursivelyConsumedV1
+MeasureFiatShamirNonShaChallengesRecursivelyConsumedV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof)
+{
+    namespace pa = recursive_parent_air;
+    FiatShamirNonShaChallengesRecursivelyConsumedV1 out;
+    if (!aq::kAirChallengeP2Activated) {
+        out.note =
+            "stage3:verifier_air:fs_nonsha_recursive:p2_inactive";
+        return out;
+    }
+    const FiatShamirShaExecutionPlanV1 plan =
+        BuildFiatShamirShaExecutionPlanV1(
+            program, child_fs_seed, child_proof);
+    out.digest_plan_ready =
+        plan.valid && plan.every_digest_matches_claim;
+    out.non_sha_calls = plan.non_sha_challenge_calls;
+    out.non_sha_claims_match =
+        plan.non_sha_challenges_match_claims &&
+        plan.non_sha_challenge_calls >= 1;
+    if (!out.digest_plan_ready || !out.non_sha_claims_match) {
+        out.note =
+            "stage3:verifier_air:fs_nonsha_recursive:plan_open:" +
+            plan.note;
+        return out;
+    }
+    if (child_proof.batch.column_len.empty()) {
+        out.note =
+            "stage3:verifier_air:fs_nonsha_recursive:empty_batch";
+        return out;
+    }
+    const uint32_t quot_len =
+        child_proof.batch.column_len.back();
+    const uint256 digest =
+        aq::AirChallengeDigestForBackend<
+            aq::AirFriBackendAlg<Fp3>>(
+            child_fs_seed, "airq_lambda",
+            {child_proof.trace_commit},
+            {program.child_shape.child_n_rows, quot_len,
+             program.child_shape.child_w});
+    const Fp3 consumed =
+        gf::FromChallengeBytes3(digest.data());
+    const auto companion = pa::BuildChildAirChallengeP2ReplayV1(
+        child_fs_seed, child_proof.trace_commit,
+        program.child_shape.child_n_rows, quot_len,
+        program.child_shape.child_w, consumed);
+    out.p2_companion_valid =
+        companion.valid && companion.sponge_chained_in_cs &&
+        companion.output_binds_digest &&
+        companion.challenge_bound_to_consumed &&
+        companion.witness_violations == 0;
+    out.p2_query_sound = companion.query_sound_shape;
+    if (!out.p2_companion_valid || !out.p2_query_sound) {
+        out.note =
+            "stage3:verifier_air:fs_nonsha_recursive:companion:" +
+            companion.note;
+        return out;
+    }
+    // Forced-limb tamper must go red (forgery cannot satisfy CS).
+    const Fp3 forged = gf::Add(consumed, gf::Fp3::One());
+    const auto tampered = pa::BuildChildAirChallengeP2ReplayV1(
+        child_fs_seed, child_proof.trace_commit,
+        program.child_shape.child_n_rows, quot_len,
+        program.child_shape.child_w, consumed,
+        /*n_rows_floor=*/0, &forged);
+    out.p2_tamper_rejects =
+        !tampered.valid || tampered.witness_violations > 0 ||
+        !tampered.challenge_bound_to_consumed;
+    if (!out.p2_tamper_rejects) {
+        out.note =
+            "stage3:verifier_air:fs_nonsha_recursive:"
+            "tamper_accepted";
+        return out;
+    }
+    const auto consumer =
+        pa::ProveConsumerEndpointFriP2V1(digest, consumed);
+    out.consumer_fri_ok = consumer.ok && consumer.verify_ok &&
+                         consumer.query_sound_shape;
+    if (!out.consumer_fri_ok) {
+        out.note =
+            "stage3:verifier_air:fs_nonsha_recursive:consumer:" +
+            consumer.note;
+        return out;
+    }
+    out.consumed =
+        out.digest_plan_ready && out.non_sha_claims_match &&
+        out.p2_companion_valid && out.p2_query_sound &&
+        out.p2_tamper_rejects && out.consumer_fri_ok;
+    out.note = out.consumed
+                   ? "stage3:verifier_air:fs_nonsha_recursive:ok"
+                   : "stage3:verifier_air:fs_nonsha_recursive:open";
+    return out;
+}
+
+
 VerifierFiatShamirAirChipGapV1
 AssessVerifierFiatShamirAirChipGapV1(
     const FiatShamirProgram& program,
@@ -3123,9 +3221,13 @@ AssessVerifierFiatShamirAirChipGapV1(
                   program, child_fs_seed, aligned)
             : FiatShamirShaRecursivelyConsumedV1{};
     out.sha_recursively_consumed = recursive.consumed;
-    // The v9 fixture's outer AIRQ challenge is Poseidon2, not one of the SHA
-    // shards above. Its proof-owned recursive consumer is a separate gate.
-    out.non_sha_challenges_recursively_consumed = false;
+    // Poseidon2 airq_lambda recursive consumer (independent of SHA shards).
+    const FiatShamirNonShaChallengesRecursivelyConsumedV1 nonsha =
+        aligned_ok
+            ? MeasureFiatShamirNonShaChallengesRecursivelyConsumedV1(
+                  program, child_fs_seed, aligned)
+            : FiatShamirNonShaChallengesRecursivelyConsumedV1{};
+    out.non_sha_challenges_recursively_consumed = nonsha.consumed;
     // fs_selection_air ChallengeTable join (measured when digests match).
     const FiatShamirChallengeSelectionAirJoinV1 selection =
         aligned_ok
@@ -3142,8 +3244,13 @@ AssessVerifierFiatShamirAirChipGapV1(
             : FiatShamirAirBackedAllKindsV1{};
     out.air_backed_all_kinds_reconstructed =
         air_kinds.reconstructed;
-    // Whole-verifier SHA equations remain open.
-    out.whole_verifier_sha_equations_in_air = false;
+    // Every FS SHA call has a satisfying vertical boundary AIR (+ tamper).
+    const FiatShamirWholeVerifierShaEquationsInAirV1 whole_sha =
+        aligned_ok
+            ? MeasureFiatShamirWholeVerifierShaEquationsInAirV1(
+                  program, child_fs_seed, aligned)
+            : FiatShamirWholeVerifierShaEquationsInAirV1{};
+    out.whole_verifier_sha_equations_in_air = whole_sha.in_air;
     out.authority_eligible =
         program.authority_eligible && !program.canary_only;
 
@@ -5926,6 +6033,157 @@ MeasureFiatShamirShaRecursivelyConsumedV1(
                    out.boundary_tamper_rejects ? 1 : 0));
     return out;
 }
+
+
+FiatShamirWholeVerifierShaEquationsInAirV1
+MeasureFiatShamirWholeVerifierShaEquationsInAirV1(
+    const FiatShamirProgram& program,
+    const uint256& child_fs_seed,
+    const AlgAirProof& child_proof)
+{
+    namespace ha = stage3_hash_air;
+    FiatShamirWholeVerifierShaEquationsInAirV1 out;
+    const FiatShamirShaExecutionPlanV1 plan =
+        BuildFiatShamirShaExecutionPlanV1(
+            program, child_fs_seed, child_proof);
+    out.digest_plan_ready =
+        plan.valid && plan.every_digest_matches_claim &&
+        plan.proof_codec_byte_origins_complete &&
+        plan.fixed_schedule;
+    if (!out.digest_plan_ready || plan.call.empty()) {
+        out.note =
+            "stage3:verifier_air:fs_whole_sha:plan_open:" +
+            plan.note;
+        return out;
+    }
+    out.sha_calls = plan.calls;
+
+    HashWriter seed_hash;
+    seed_hash << "BTX_RC_STAGE3_FS_WHOLE_SHA_AIR_V1";
+    seed_hash << child_fs_seed;
+    seed_hash << static_cast<uint32_t>(plan.calls);
+    const uint256 air_seed = seed_hash.GetHash();
+
+    ha::FixedProgramVerticalWitnessBoundaryInstance first_instance;
+    std::vector<ha::FixedProgramBoundaryInstance> first_boundaries;
+    bool have_first = false;
+    const auto program_sha =
+        ha::BuildCanonicalProgram(
+            ha::ProgramKind::Sha256Compression);
+
+    for (uint32_t i = 0; i < plan.call.size(); ++i) {
+        const auto& call = plan.call[i];
+        if (call.preimage.empty()) {
+            out.note =
+                "stage3:verifier_air:fs_whole_sha:empty_preimage";
+            return out;
+        }
+        HashWriter call_seed;
+        call_seed << air_seed;
+        call_seed << i;
+        uint32_t compressions = 0;
+        ha::FixedProgramVerticalWitnessBoundaryInstance instance;
+        std::string why;
+        if (!BuildAndCheckShaCallVerticalBoundaryAir(
+                call.preimage, call.digest,
+                call_seed.GetHash(), &compressions,
+                &instance, &why)) {
+            out.note =
+                "stage3:verifier_air:fs_whole_sha:call_air:" +
+                why;
+            return out;
+        }
+        ++out.calls_air_green;
+        if (!have_first) {
+            ha::ShaManifest manifest;
+            if (!ha::BuildShaManifest(
+                    call.preimage, ha::ShaMode::Double,
+                    manifest, &why) ||
+                !ha::BuildShaManifestBoundaryInstances(
+                    manifest, first_boundaries, &why)) {
+                out.note =
+                    "stage3:verifier_air:fs_whole_sha:first_bounds:" +
+                    why;
+                return out;
+            }
+            first_instance = std::move(instance);
+            have_first = true;
+        }
+    }
+    out.every_call_boundary_air_satisfies =
+        out.calls_air_green == plan.calls && plan.calls > 0 &&
+        have_first && first_instance.valid;
+    if (!out.every_call_boundary_air_satisfies) {
+        out.note =
+            "stage3:verifier_air:fs_whole_sha:incomplete_air";
+        return out;
+    }
+
+    out.boundary_tamper_rejects = false;
+    if (!first_boundaries.empty()) {
+        auto forged = first_boundaries;
+        forged.back().final_words[0] ^= 1U;
+        std::vector<std::vector<uint8_t>> public_masks(
+            forged.size(),
+            std::vector<uint8_t>(
+                program_sha.external_address_count, 1));
+        std::vector<ha::FixedProgramWitnessBoundaryLink> links;
+        const uint32_t first_blocks =
+            static_cast<uint32_t>(forged.size() - 1);
+        for (uint32_t block = 0; block < first_blocks; ++block) {
+            const uint32_t target =
+                block + 1 < first_blocks ? block + 1
+                                         : first_blocks;
+            const uint32_t target_address =
+                block + 1 < first_blocks ? 17 : 1;
+            for (uint32_t word = 0; word < 8; ++word) {
+                links.push_back({
+                    .source_instance = block,
+                    .source_final_word = word,
+                    .target_instance = target,
+                    .target_external_address =
+                        target_address + word,
+                });
+                public_masks[target]
+                    [target_address + word - 1] = 0;
+            }
+        }
+        HashWriter call_seed;
+        call_seed << air_seed;
+        call_seed << uint32_t{0};
+        const auto bad_instance =
+            ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+                program_sha, forged, public_masks, links,
+                call_seed.GetHash());
+        out.boundary_tamper_rejects =
+            !bad_instance.valid ||
+            bad_instance.public_statement !=
+                first_instance.public_statement;
+    }
+    if (!out.boundary_tamper_rejects) {
+        out.note =
+            "stage3:verifier_air:fs_whole_sha:tamper_accepted";
+        return out;
+    }
+
+    out.in_air =
+        out.digest_plan_ready &&
+        out.every_call_boundary_air_satisfies &&
+        out.boundary_tamper_rejects;
+    out.note =
+        out.in_air
+            ? ("stage3:verifier_air:fs_whole_sha:ok;calls=" +
+               std::to_string(out.sha_calls) +
+               ";air=" +
+               std::to_string(out.calls_air_green) +
+               ";tamper=1")
+            : "stage3:verifier_air:fs_whole_sha:open";
+    return out;
+}
+
+
+
+
 
 MultiRowV2SplitRapVerifierWitnessV1
 BuildMultiRowV2SplitRapVerifierWitnessV1(
