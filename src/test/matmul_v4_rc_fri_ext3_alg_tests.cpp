@@ -637,12 +637,75 @@ BOOST_AUTO_TEST_CASE(
         rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
             committed.proof, seed, &why),
         why);
+    rc::Fri3AlgSafeV13Replay replay;
+    BOOST_REQUIRE_MESSAGE(
+        rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+            committed.proof, seed, replay, &why),
+        why);
+    BOOST_CHECK(replay.native_verified);
+    BOOST_CHECK(replay.exact_event_order);
+    BOOST_CHECK_EQUAL(replay.lambda_events, 1U);
+    BOOST_CHECK_EQUAL(replay.ood_candidate_events, 4U);
+    BOOST_CHECK_EQUAL(replay.deep_weight_events, 2U);
+    BOOST_CHECK_EQUAL(
+        replay.fold_events,
+        committed.proof.fold_challenges.size());
+    BOOST_CHECK_EQUAL(replay.query_seed_events, 1U);
+    BOOST_CHECK_EQUAL(
+        replay.query_candidate_events,
+        rc::kRCFri3AlgNumQueries);
+    BOOST_REQUIRE_GT(replay.events.size(), 4U);
+    BOOST_CHECK(
+        replay.events.front().consumer ==
+        rc::Fri3AlgSafeV13Consumer::OodZ1);
+    BOOST_CHECK(
+        replay.events[4].consumer ==
+        rc::Fri3AlgSafeV13Consumer::FriLambda);
+    BOOST_CHECK(
+        gf::Eq(
+            replay.events[4].consumed_fp3,
+            committed.proof.lambda));
+    static constexpr char kMultiRowSafeDomain[] =
+        "BTX_RC_FRI3ALG_MULTI_ROW_RAP_SAFE_Q192_K2_V13";
+    const auto& first_transcript =
+        replay.events.front().transcript_before_draw;
+    BOOST_CHECK(
+        std::search(
+            first_transcript.begin(),
+            first_transcript.end(),
+            std::begin(kMultiRowSafeDomain),
+            std::end(kMultiRowSafeDomain) - 1) ==
+        first_transcript.begin());
+    uint32_t selected_z1 = 0;
+    uint32_t selected_z2 = 0;
+    for (uint32_t event = 0; event < 4; ++event) {
+        selected_z1 +=
+            replay.events[event].consumer ==
+                    rc::Fri3AlgSafeV13Consumer::OodZ1 &&
+                replay.events[event].selected
+            ? 1
+            : 0;
+        selected_z2 +=
+            replay.events[event].consumer ==
+                    rc::Fri3AlgSafeV13Consumer::OodZ2 &&
+                replay.events[event].selected
+            ? 1
+            : 0;
+    }
+    BOOST_CHECK_EQUAL(selected_z1, 1U);
+    BOOST_CHECK_EQUAL(selected_z2, 1U);
     BOOST_CHECK(
         !rc::Fri3AlgMultiRowBatchVerify(
             committed.proof, seed, &why));
     BOOST_CHECK(
         !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
             committed.proof, MakeSeed(0x4b), &why));
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+            committed.proof, MakeSeed(0x4b),
+            replay, &why));
+    BOOST_CHECK(!replay.native_verified);
+    BOOST_CHECK(replay.events.empty());
 
     std::vector<unsigned char> encoded;
     BOOST_REQUIRE_GT(
@@ -675,6 +738,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
             bad_eval, seed, &why));
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+            bad_eval, seed, replay, &why));
+    BOOST_CHECK(!replay.native_verified);
+    BOOST_CHECK(replay.events.empty());
 
     auto bad_query = committed.proof;
     bad_query.queries[0].index ^=
@@ -689,6 +757,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !rc::Fri3AlgMultiRowBatchVerify(
             downgraded, seed, &why));
+    BOOST_CHECK(
+        !rc::Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+            downgraded, seed, replay, &why));
+    BOOST_CHECK(!replay.native_verified);
+    BOOST_CHECK(replay.events.empty());
 }
 
 // Gate (b): single-eval tamper rejects — both the forge probe (flip one LDE

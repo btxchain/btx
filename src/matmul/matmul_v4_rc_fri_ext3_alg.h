@@ -1818,6 +1818,23 @@ struct Fri3AlgSafeV13Replay {
     Fri3AlgSafeV13Replay& out,
     std::string* why = nullptr);
 
+/**
+ * Canonical replay for the ordered three-group multi-row SAFE V13 verifier.
+ *
+ * Multi-row V13 intentionally has a different transcript and event order
+ * from the single-batch lane: its two OOD points are sampled before the
+ * post-claim geometric batching challenge. This API first invokes the full
+ * unmodified multi-row verifier, then exports that exact event sequence.
+ * Reusing the single-batch replay for a multi-row receipt is therefore
+ * impossible by construction.
+ */
+[[nodiscard]] bool
+Fri3AlgMultiRowSafeQ192K2V13BatchVerifyReplay(
+    const Fri3AlgMultiRowBatchProof& proof,
+    const uint256& fs_seed,
+    Fri3AlgSafeV13Replay& out,
+    std::string* why = nullptr);
+
 /** Full sponge absorb lane vector for Fri3AlgP2SqueezeChallengeFp3 — domain
  *  separator (two 32-bit lanes) then length-prefixed buf / label / idx. An
  *  in-AIR companion must absorb EXACTLY these lanes. */
