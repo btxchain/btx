@@ -9,6 +9,9 @@
 
 #include <hash.h>
 
+#include <algorithm>
+#include <utility>
+
 namespace matmul::v4::rc::stage3_multirow_v11_unified_verifier_air {
 namespace {
 
@@ -235,6 +238,99 @@ BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_multirow_v11_unified_verifier_air_tests)
 
 BOOST_AUTO_TEST_CASE(
+    acceptance_output_is_ordinary_and_proof_bound)
+{
+    LayoutV1 layout;
+    layout.acceptance = 0;
+    layout.phase_first_base = 1;
+    layout.n_columns = 2;
+
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    cs.n_rows = 8;
+    cs.n_columns = layout.n_columns;
+    cs.preprocessed_pin_ood = true;
+    std::vector<std::vector<gf::Fp3>> columns(
+        cs.n_columns,
+        std::vector<gf::Fp3>(
+            cs.n_rows, gf::Fp3::Zero()));
+    columns[layout.acceptance][0] =
+        gf::Fp3::One();
+    columns[layout.PhaseFirst(
+        PhaseV1::ParentJoin)][0] =
+            gf::Fp3::One();
+    cs.preprocessed.emplace_back(
+        layout.PhaseFirst(
+            PhaseV1::ParentJoin),
+        columns[layout.PhaseFirst(
+            PhaseV1::ParentJoin)]);
+    AppendAcceptanceOutputConstraintsV1(
+        layout, cs);
+
+    const std::vector<uint32_t> preprocessed{
+        layout.PhaseFirst(
+            PhaseV1::ParentJoin)};
+    BOOST_CHECK(
+        std::find(
+            preprocessed.begin(),
+            preprocessed.end(),
+            layout.acceptance) ==
+        preprocessed.end());
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            cs, columns),
+        0U);
+
+    const auto honest =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, preprocessed,
+            uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(honest.ok, honest.note);
+    BOOST_REQUIRE(honest.division_exact);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRap(
+            cs, honest.proof, preprocessed,
+            uint256::ONE, &why),
+        why);
+
+    const auto require_rejected =
+        [&](std::vector<std::vector<gf::Fp3>>
+                forged) {
+            BOOST_REQUIRE_GT(
+                air_recurse::
+                    CountWitnessViolationsOnH(
+                        cs, forged),
+                0U);
+            aq::AirProveOptions options;
+            options.force_commit_on_inexact = true;
+            const auto forced =
+                aq::AirQuotientProveRowsSplitRap(
+                    cs, forged, preprocessed,
+                    uint256::ONE, options);
+            BOOST_REQUIRE_MESSAGE(
+                forced.ok, forced.note);
+            BOOST_CHECK(!forced.division_exact);
+            BOOST_CHECK(
+                !aq::AirQuotientVerifyRowsSplitRap(
+                    cs, forced.proof,
+                    preprocessed,
+                    uint256::ONE, &why));
+        };
+
+    auto zero = columns;
+    zero[layout.acceptance][0] =
+        gf::Fp3::Zero();
+    require_rejected(std::move(zero));
+
+    auto relocated = columns;
+    relocated[layout.acceptance][0] =
+        gf::Fp3::Zero();
+    relocated[layout.acceptance][1] =
+        gf::Fp3::One();
+    require_rejected(std::move(relocated));
+}
+
+BOOST_AUTO_TEST_CASE(
     exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
@@ -253,8 +349,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !product.direct_cross_phase_cell_carries_complete);
     BOOST_CHECK(!product.recursive_authority_ready);
+    BOOST_CHECK(product.acceptance_ordinary_witness);
+    BOOST_CHECK(product.acceptance_unique);
+    BOOST_CHECK(
+        product.whole_verifier_acceptance_constrained);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 1489U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 1490U);
     BOOST_CHECK_EQUAL(
         product.max_constraint_degree, 3U);
     BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);

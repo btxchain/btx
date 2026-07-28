@@ -105,6 +105,8 @@ void AddSchedulerConstraints(
     const LayoutV1& layout,
     aq::AirConstraintSystem<Fp3>& cs)
 {
+    AppendAcceptanceOutputConstraintsV1(
+        layout, cs);
     AddConstraint(
         cs,
         "stage3.v11_unified.active_boolean",
@@ -224,6 +226,37 @@ void AddGatedPhaseConstraint(
 }
 
 } // namespace
+
+void AppendAcceptanceOutputConstraintsV1(
+    const LayoutV1& layout,
+    aq::AirConstraintSystem<Fp3>& cs)
+{
+    AddConstraint(
+        cs,
+        "stage3.v11_unified.acceptance_boolean",
+        aq::AirKind::kEverywhere, 2,
+        [acceptance = layout.acceptance](
+            const auto& cur,
+            const auto&) {
+            return gf::Mul(
+                cur[acceptance],
+                gf::Sub(
+                    cur[acceptance],
+                    Fp3::One()));
+        });
+    AddConstraint(
+        cs,
+        "stage3.v11_unified.acceptance_output",
+        aq::AirKind::kEverywhere, 1,
+        [layout](
+            const auto& cur,
+            const auto&) {
+            return gf::Sub(
+                cur[layout.acceptance],
+                cur[layout.PhaseFirst(
+                    PhaseV1::ParentJoin)]);
+        });
+}
 
 ProductV1 BuildProductV1(
     const rv::InputV1& input,
@@ -399,6 +432,7 @@ ProductV1 BuildProductV1(
     out.layout.phase_transition_base = cursor;
     cursor += kPhasesV1;
     out.layout.active = cursor++;
+    out.layout.acceptance = cursor++;
     out.layout.expected_preprocessed_base =
         cursor;
     cursor +=
@@ -427,6 +461,8 @@ ProductV1 BuildProductV1(
         out.columns[out.layout.active][row] =
             Fp3::One();
     }
+    out.columns[out.layout.acceptance][0] =
+        Fp3::One();
     out.cs.preprocessed.emplace_back(
         out.layout.active,
         active_schedule);
@@ -624,6 +660,29 @@ ProductV1 BuildProductV1(
                 .expected_preprocessed_base ==
             out.expected_preprocessed_columns &&
         !out.preprocessed_row_group_root.IsNull();
+    out.acceptance_ordinary_witness =
+        std::find(
+            out.preprocessed_columns.begin(),
+            out.preprocessed_columns.end(),
+            out.layout.acceptance) ==
+        out.preprocessed_columns.end();
+    out.acceptance_unique =
+        std::count_if(
+            out.columns[
+                out.layout.acceptance].begin(),
+            out.columns[
+                out.layout.acceptance].end(),
+            [](const Fp3& value) {
+                return gf::Eq(
+                    value, Fp3::One());
+            }) == 1 &&
+        gf::Eq(
+            out.columns[
+                out.layout.acceptance][0],
+            Fp3::One());
+    out.whole_verifier_acceptance_constrained =
+        out.acceptance_ordinary_witness &&
+        out.acceptance_unique;
     out.direct_cross_phase_cell_carries_complete =
         false;
     out.recursive_authority_ready = false;
@@ -634,6 +693,9 @@ ProductV1 BuildProductV1(
         out.one_hot_row_scheduler_constrained &&
         out.local_boundary_kinds_preserved &&
         out.every_phase_preprocessed_pin_r0_bound &&
+        out.acceptance_ordinary_witness &&
+        out.acceptance_unique &&
+        out.whole_verifier_acceptance_constrained &&
         out.trace_cap_fits &&
         out.lde_cap_fits &&
         out.violations == 0 &&

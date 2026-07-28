@@ -58,6 +58,8 @@ struct LayoutV1 {
     uint32_t phase_last_base{0};
     uint32_t phase_transition_base{0};
     uint32_t active{0};
+    /** Ordinary one-cell output: one iff this entire unified relation holds. */
+    uint32_t acceptance{0};
     uint32_t expected_preprocessed_base{0};
     uint32_t n_columns{0};
 
@@ -113,6 +115,9 @@ struct ProductV1 {
     bool one_hot_row_scheduler_constrained{false};
     bool local_boundary_kinds_preserved{false};
     bool every_phase_preprocessed_pin_r0_bound{false};
+    bool acceptance_ordinary_witness{false};
+    bool acceptance_unique{false};
+    bool whole_verifier_acceptance_constrained{false};
     bool trace_cap_fits{false};
     bool lde_cap_fits{false};
     /** False: phase R0 columns currently contain child-proof values. */
@@ -126,6 +131,11 @@ struct ProductV1 {
     bool valid_foundation{false};
     std::string note;
 };
+
+/** Append the production acceptance-output constraints to any compatible CS. */
+void AppendAcceptanceOutputConstraintsV1(
+    const LayoutV1& layout,
+    aq::AirConstraintSystem<gf::Fp3>& cs);
 
 /**
  * Vertically concatenate parent-join, Merkle hash, fold, DEEP/VM and decoder
