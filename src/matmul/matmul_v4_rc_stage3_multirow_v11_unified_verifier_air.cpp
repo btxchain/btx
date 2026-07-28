@@ -3026,6 +3026,438 @@ cb::ProgramTable BuildMerkleFoldProgramTableV1(
     return table;
 }
 
+MerkleFoldPublicShapeV1
+BuildMerkleFoldPublicShapeV1(
+    const abi::DecodedV1& decoded)
+{
+    MerkleFoldPublicShapeV1 out;
+    const auto fail =
+        [&out](const std::string& why) {
+            out.valid = false;
+            out.note =
+                "stage3:v11_unified_merkle_fold_shape:" +
+                why;
+            return out;
+        };
+    if (!decoded.canonical ||
+        !decoded.complete ||
+        !decoded.addresses_unique ||
+        !decoded.semantic_keys_unique) {
+        return fail("noncanonical_abi");
+    }
+    const auto& split =
+        decoded.envelope.split;
+    const auto& batch =
+        split.batch;
+    if (batch.groups.size() !=
+            out.group_columns.size() ||
+        batch.queries.size() !=
+            abi::kQueryCountV11 ||
+        split.next_trace_group_rows.size() !=
+            abi::kQueryCountV11 ||
+        batch.fold_challenges.empty() ||
+        batch.fold_layers.size() !=
+            batch.fold_challenges.size() + 1 ||
+        batch.n_coeffs < 2 ||
+        batch.blowup == 0) {
+        return fail("abi_shape");
+    }
+    const uint64_t n_lde64 =
+        uint64_t{batch.n_coeffs} *
+        batch.blowup;
+    if (n_lde64 >
+            std::numeric_limits<uint32_t>::max()) {
+        return fail("lde_overflow");
+    }
+    out.trace_rows = split.trace_rows;
+    out.n_coeffs = batch.n_coeffs;
+    out.blowup = batch.blowup;
+    out.n_lde =
+        static_cast<uint32_t>(n_lde64);
+    uint32_t cursor = out.n_lde;
+    while (cursor > 1 &&
+           (cursor & 1U) == 0) {
+        ++out.row_depth;
+        cursor >>= 1;
+    }
+    if (cursor != 1 ||
+        out.row_depth == 0 ||
+        out.trace_rows == 0 ||
+        out.n_lde % out.trace_rows != 0) {
+        return fail("lde_shape");
+    }
+    for (uint32_t group = 0;
+         group <
+             out.group_columns.size();
+         ++group) {
+        out.group_columns[group] =
+            batch.groups[group].column_count;
+        if (out.group_columns[group] == 0 ||
+            batch.groups[group]
+                .row_commit.n_leaves !=
+                out.n_lde) {
+            return fail("group_shape");
+        }
+    }
+    out.fold_count =
+        static_cast<uint32_t>(
+            batch.fold_challenges.size());
+    out.proof_query_count =
+        static_cast<uint32_t>(
+            batch.queries.size());
+    uint32_t n_coeffs_depth = 0;
+    for (cursor = out.n_coeffs;
+         cursor > 1 &&
+             (cursor & 1U) == 0;
+         cursor >>= 1) {
+        ++n_coeffs_depth;
+    }
+    if (cursor != 1 ||
+        out.fold_count !=
+            n_coeffs_depth) {
+        return fail("fold_shape");
+    }
+    out.canonical_projection = true;
+    // This typed projection has no field for a root, opening, query index,
+    // challenge, terminal value, public seed or proof source address.
+    out.proof_values_excluded = true;
+    out.valid = true;
+    out.note =
+        "stage3:v11_unified_merkle_fold_shape:"
+        "canonical_public_projection";
+    return out;
+}
+
+MerkleFoldPublicPlanV1
+BuildMerkleFoldPublicPlanV1(
+    const MerkleFoldPublicShapeV1& shape,
+    const rv::QueryRangeV1& range)
+{
+    MerkleFoldPublicPlanV1 out;
+    out.shape = shape;
+    out.range = range;
+    const auto fail =
+        [&out](const std::string& why) {
+            out.valid = false;
+            out.note =
+                "stage3:v11_unified_merkle_fold_plan:" +
+                why;
+            return out;
+        };
+    if (!shape.valid ||
+        !shape.canonical_projection ||
+        !shape.proof_values_excluded ||
+        range.query_count == 0 ||
+        range.first_query >
+            shape.proof_query_count ||
+        range.query_count >
+            shape.proof_query_count -
+                range.first_query) {
+        return fail("shape_or_range");
+    }
+
+    const auto row_leaf_permutations =
+        [](uint32_t values) -> uint64_t {
+            const uint64_t absorbed =
+                uint64_t{3} * values + 2;
+            return
+                (absorbed +
+                 alg_hash::kAlgHashRate - 1) /
+                alg_hash::kAlgHashRate;
+        };
+    uint64_t hash_rows_per_query = 0;
+    for (uint32_t group = 0;
+         group < 3; ++group) {
+        hash_rows_per_query +=
+            row_leaf_permutations(
+                shape.group_columns[group]) +
+            shape.row_depth;
+    }
+    for (uint32_t group = 0;
+         group < 2; ++group) {
+        hash_rows_per_query +=
+            row_leaf_permutations(
+                shape.group_columns[group]) +
+            shape.row_depth;
+    }
+    for (uint32_t fold = 0;
+         fold < shape.fold_count;
+         ++fold) {
+        if (fold >= shape.row_depth) {
+            return fail("fold_depth");
+        }
+        hash_rows_per_query +=
+            uint64_t{2} *
+            (1 + shape.row_depth - fold);
+    }
+    const uint64_t hash_real_rows64 =
+        hash_rows_per_query *
+        range.query_count;
+    const uint64_t fold_real_rows64 =
+        uint64_t{shape.fold_count} *
+        range.query_count;
+    if (hash_real_rows64 >
+            std::numeric_limits<uint32_t>::max() ||
+        fold_real_rows64 >
+            std::numeric_limits<uint32_t>::max()) {
+        return fail("row_overflow");
+    }
+    out.hash_real_rows =
+        static_cast<uint32_t>(
+            hash_real_rows64);
+    out.fold_real_rows =
+        static_cast<uint32_t>(
+            fold_real_rows64);
+    out.hash_trace_rows =
+        NextPowerOfTwo(
+            out.hash_real_rows);
+    out.fold_trace_rows =
+        NextPowerOfTwo(
+            out.fold_real_rows);
+    if (out.hash_trace_rows == 0 ||
+        out.fold_trace_rows == 0) {
+        return fail("trace_rows");
+    }
+
+    out.hash_layout =
+        mf::CanonicalHashLayoutV1();
+    out.fold_layout =
+        mf::CanonicalFoldLayoutV1();
+    out.hash_program =
+        BuildMerkleHashProgramTableV1(
+            out.hash_layout);
+    out.fold_program =
+        BuildMerkleFoldProgramTableV1(
+            out.fold_layout);
+    std::string why;
+    if (out.hash_program.programs.size() !=
+            pa::kFixedConstraints +
+                alg_hash::kAlgHashT +
+                alg_hash::kAlgHashDigestLen ||
+        out.fold_program.programs.size() !=
+            13 ||
+        !cb::ValidateProgramTable(
+            out.hash_program, &why) ||
+        !cb::ValidateProgramTable(
+            out.fold_program, &why) ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            out.hash_program,
+            out.hash_trace_rows,
+            out.hash_cs, &why) ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            out.fold_program,
+            out.fold_trace_rows,
+            out.fold_cs, &why)) {
+        return fail(
+            "canonical_program:" + why);
+    }
+    out.hash_cs.preprocessed.clear();
+    out.hash_cs.preprocessed_row_group_roots.clear();
+    out.fold_cs.preprocessed.clear();
+    out.fold_cs.preprocessed_row_group_roots.clear();
+    out.hash_program_root =
+        cb::CommitProgramTableAlgHash(
+            out.hash_program);
+    out.fold_program_root =
+        cb::CommitProgramTableAlgHash(
+            out.fold_program);
+    out.row_schedule_canonical =
+        out.hash_real_rows != 0 &&
+        out.fold_real_rows != 0 &&
+        out.hash_trace_rows >=
+            out.hash_real_rows &&
+        out.fold_trace_rows >=
+            out.fold_real_rows;
+    out.constraint_systems_canonical =
+        out.hash_cs.n_rows ==
+            out.hash_trace_rows &&
+        out.hash_cs.n_columns ==
+            out.hash_layout.n_columns &&
+        out.hash_cs.constraints.size() ==
+            out.hash_program.programs.size() &&
+        out.hash_cs.preprocessed.empty() &&
+        out.fold_cs.n_rows ==
+            out.fold_trace_rows &&
+        out.fold_cs.n_columns ==
+            out.fold_layout.n_columns &&
+        out.fold_cs.constraints.size() ==
+            out.fold_program.programs.size() &&
+        out.fold_cs.preprocessed.empty();
+    out.proof_independent = true;
+    out.valid =
+        out.row_schedule_canonical &&
+        out.constraint_systems_canonical &&
+        out.proof_independent &&
+        DigestNonzero(
+            out.hash_program_root) &&
+        DigestNonzero(
+            out.fold_program_root);
+    out.note = out.valid
+        ? "stage3:v11_unified_merkle_fold_plan:"
+          "canonical_public_cs"
+        : "stage3:v11_unified_merkle_fold_plan:"
+          "invalid";
+    return out;
+}
+
+MerkleFoldCanonicalPhasesV1
+MaterializeMerkleFoldCanonicalPhasesV1(
+    const MerkleFoldPublicPlanV1& plan,
+    const abi::DecodedV1& decoded,
+    const mf::ShardProductV1& shard)
+{
+    MerkleFoldCanonicalPhasesV1 out;
+    const auto fail =
+        [&out](const std::string& why) {
+            out.valid = false;
+            out.note =
+                "stage3:v11_unified_merkle_fold_witness:" +
+                why;
+            return out;
+        };
+    const auto rebuilt =
+        BuildMerkleFoldPublicPlanV1(
+            plan.shape,
+            plan.range);
+    const auto decoded_shape =
+        BuildMerkleFoldPublicShapeV1(
+            decoded);
+    const auto same_constraints =
+        [](const aq::AirConstraintSystem<Fp3>& left,
+           const aq::AirConstraintSystem<Fp3>& right) {
+            if (left.n_rows != right.n_rows ||
+                left.n_columns !=
+                    right.n_columns ||
+                left.constraints.size() !=
+                    right.constraints.size() ||
+                left.preprocessed.size() !=
+                    right.preprocessed.size()) {
+                return false;
+            }
+            for (uint32_t ordinal = 0;
+                 ordinal <
+                     left.constraints.size();
+                 ++ordinal) {
+                if (left.constraints[ordinal].kind !=
+                        right.constraints[ordinal].kind ||
+                    left.constraints[ordinal].alg_degree !=
+                        right.constraints[ordinal].alg_degree) {
+                    return false;
+                }
+            }
+            return true;
+        };
+    if (!plan.valid ||
+        !rebuilt.valid ||
+        !decoded_shape.valid ||
+        plan.version != kVersionV1 ||
+        plan.shape != decoded_shape ||
+        plan.shape != rebuilt.shape ||
+        plan.range != rebuilt.range ||
+        plan.hash_program !=
+            rebuilt.hash_program ||
+        plan.fold_program !=
+            rebuilt.fold_program ||
+        !SameDigest(
+            plan.hash_program_root,
+            rebuilt.hash_program_root) ||
+        !SameDigest(
+            plan.fold_program_root,
+            rebuilt.fold_program_root) ||
+        plan.hash_real_rows !=
+            rebuilt.hash_real_rows ||
+        plan.hash_trace_rows !=
+            rebuilt.hash_trace_rows ||
+        plan.fold_real_rows !=
+            rebuilt.fold_real_rows ||
+        plan.fold_trace_rows !=
+            rebuilt.fold_trace_rows ||
+        !same_constraints(
+            plan.hash_cs,
+            rebuilt.hash_cs) ||
+        !same_constraints(
+            plan.fold_cs,
+            rebuilt.fold_cs)) {
+        return fail("noncanonical_public_plan");
+    }
+    if (!shard.valid ||
+        shard.first_query !=
+            plan.range.first_query ||
+        shard.query_count !=
+            plan.range.query_count ||
+        shard.hash_real_rows !=
+            plan.hash_real_rows ||
+        shard.hash_trace_rows !=
+            plan.hash_trace_rows ||
+        shard.fold_real_rows !=
+            plan.fold_real_rows ||
+        shard.fold_trace_rows !=
+            plan.fold_trace_rows ||
+        shard.hash_layout.n_columns !=
+            plan.hash_layout.n_columns ||
+        shard.fold_layout.n_columns !=
+            plan.fold_layout.n_columns ||
+        BuildMerkleHashProgramTableV1(
+            shard.hash_layout) !=
+            plan.hash_program ||
+        BuildMerkleFoldProgramTableV1(
+            shard.fold_layout) !=
+            plan.fold_program ||
+        shard.hash_columns.size() !=
+            plan.hash_cs.n_columns ||
+        shard.fold_columns.size() !=
+            plan.fold_cs.n_columns) {
+        return fail("proof_shape");
+    }
+    for (const auto& column :
+         shard.hash_columns) {
+        if (column.size() !=
+            plan.hash_trace_rows) {
+            return fail("hash_column_rows");
+        }
+    }
+    for (const auto& column :
+         shard.fold_columns) {
+        if (column.size() !=
+            plan.fold_trace_rows) {
+            return fail("fold_column_rows");
+        }
+    }
+    out.hash_program =
+        plan.hash_program;
+    out.fold_program =
+        plan.fold_program;
+    out.hash_cs = plan.hash_cs;
+    out.fold_cs = plan.fold_cs;
+    out.hash_columns =
+        shard.hash_columns;
+    out.fold_columns =
+        shard.fold_columns;
+    if (air_recurse::
+            CountWitnessViolationsOnH(
+                out.hash_cs,
+                out.hash_columns) != 0 ||
+        air_recurse::
+            CountWitnessViolationsOnH(
+                out.fold_cs,
+                out.fold_columns) != 0) {
+        return fail("constraint_failure");
+    }
+    out.public_plan_recomputed = true;
+    out.proof_tape_ordinary =
+        out.hash_cs.preprocessed.empty() &&
+        out.fold_cs.preprocessed.empty();
+    out.valid =
+        out.public_plan_recomputed &&
+        out.proof_tape_ordinary;
+    out.note = out.valid
+        ? "stage3:v11_unified_merkle_fold_witness:"
+          "public_plan_materialized"
+        : "stage3:v11_unified_merkle_fold_witness:"
+          "invalid";
+    return out;
+}
+
 cb::ProgramTable BuildDeepVmProgramTableV1(
     const dvm::LayoutV1& l)
 {
@@ -5510,11 +5942,40 @@ ProductV1 BuildProductV1(
         out.parent_join_program_root_recomputed &&
         out.parent_join_r0_statement_manifest_only;
 
-    const cb::ProgramTable merkle_hash_program =
-        BuildMerkleHashProgramTableV1(
-            out.merkle_fold.hash_layout);
-    aq::AirConstraintSystem<Fp3>
-        merkle_hash_static_cs;
+    const MerkleFoldPublicShapeV1
+        merkle_fold_public_shape =
+            BuildMerkleFoldPublicShapeV1(
+                *decoded);
+    const MerkleFoldPublicPlanV1
+        merkle_fold_public_plan =
+            BuildMerkleFoldPublicPlanV1(
+                merkle_fold_public_shape,
+                range);
+    const MerkleFoldCanonicalPhasesV1
+        merkle_fold_materialized =
+            MaterializeMerkleFoldCanonicalPhasesV1(
+                merkle_fold_public_plan,
+                *decoded,
+                out.merkle_fold);
+    if (!merkle_fold_public_shape.valid ||
+        !merkle_fold_public_plan.valid ||
+        !merkle_fold_materialized.valid) {
+        return fail(
+            "merkle_fold_public_plan:" +
+            (merkle_fold_public_shape.valid
+                 ? (merkle_fold_public_plan.valid
+                        ? merkle_fold_materialized.note
+                        : merkle_fold_public_plan.note)
+                 : merkle_fold_public_shape.note));
+    }
+    const cb::ProgramTable&
+        merkle_hash_program =
+            merkle_fold_materialized
+                .hash_program;
+    const auto& merkle_hash_static_cs =
+        merkle_fold_materialized.hash_cs;
+    const auto& merkle_hash_static_columns =
+        merkle_fold_materialized.hash_columns;
     if (merkle_hash_program.programs.size() !=
             pa::kFixedConstraints +
                 alg_hash::kAlgHashT +
@@ -5524,19 +5985,14 @@ ProductV1 BuildProductV1(
         merkle_hash_program.next_width !=
             out.merkle_fold.hash_cs.n_columns ||
         merkle_hash_program.programs.size() !=
-            out.merkle_fold.hash_cs.constraints.size() ||
-        !cb::BuildAirConstraintSystemFromProgramTable(
-            merkle_hash_program,
-            out.merkle_fold.hash_cs.n_rows,
-            merkle_hash_static_cs, &why)) {
+            out.merkle_fold.hash_cs.constraints.size()) {
         return fail(
-            "merkle_hash_static_program:" +
-            why);
+            "merkle_hash_static_program");
     }
     if (air_recurse::
             CountWitnessViolationsOnH(
                 merkle_hash_static_cs,
-                out.merkle_fold.hash_columns) != 0) {
+                merkle_hash_static_columns) != 0) {
         return fail(
             "merkle_hash_static_witness");
     }
@@ -5601,30 +6057,28 @@ ProductV1 BuildProductV1(
     out.merkle_hash_row_semantic_carry_complete =
         false;
 
-    const cb::ProgramTable merkle_fold_program =
-        BuildMerkleFoldProgramTableV1(
-            out.merkle_fold.fold_layout);
-    aq::AirConstraintSystem<Fp3>
-        merkle_fold_static_cs;
+    const cb::ProgramTable&
+        merkle_fold_program =
+            merkle_fold_materialized
+                .fold_program;
+    const auto& merkle_fold_static_cs =
+        merkle_fold_materialized.fold_cs;
+    const auto& merkle_fold_static_columns =
+        merkle_fold_materialized.fold_columns;
     if (merkle_fold_program.programs.size() != 13 ||
         merkle_fold_program.current_width !=
             out.merkle_fold.fold_cs.n_columns ||
         merkle_fold_program.next_width !=
             out.merkle_fold.fold_cs.n_columns ||
         merkle_fold_program.programs.size() !=
-            out.merkle_fold.fold_cs.constraints.size() ||
-        !cb::BuildAirConstraintSystemFromProgramTable(
-            merkle_fold_program,
-            out.merkle_fold.fold_cs.n_rows,
-            merkle_fold_static_cs, &why)) {
+            out.merkle_fold.fold_cs.constraints.size()) {
         return fail(
-            "merkle_fold_static_program:" +
-            why);
+            "merkle_fold_static_program");
     }
     if (air_recurse::
             CountWitnessViolationsOnH(
                 merkle_fold_static_cs,
-                out.merkle_fold.fold_columns) != 0) {
+                merkle_fold_static_columns) != 0) {
         return fail(
             "merkle_fold_static_witness");
     }
@@ -5892,10 +6346,10 @@ ProductV1 BuildProductV1(
              &out.parent_join.columns},
             {PhaseV1::MerkleHash,
              &merkle_hash_static_cs,
-             &out.merkle_fold.hash_columns},
+             &merkle_hash_static_columns},
             {PhaseV1::MerkleFold,
              &merkle_fold_static_cs,
-             &out.merkle_fold.fold_columns},
+             &merkle_fold_static_columns},
             {PhaseV1::DeepVm,
              &deep_vm_static_cs,
              &deep_vm_static_columns},

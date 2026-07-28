@@ -499,6 +499,93 @@ BuildMerkleFoldProgramTableV1(
         mf::CanonicalFoldLayoutV1());
 
 /**
+ * Proof-value-free structural projection of the canonical child ABI.
+ *
+ * Roots, openings, query indices, fold challenges and terminal values are
+ * deliberately absent.  Only dimensions that determine the verifier's
+ * Merkle/fold row schedule survive this projection.
+ */
+struct MerkleFoldPublicShapeV1 {
+    uint16_t version{kVersionV1};
+    uint32_t trace_rows{0};
+    uint32_t n_coeffs{0};
+    uint32_t blowup{0};
+    uint32_t n_lde{0};
+    uint32_t row_depth{0};
+    std::array<uint32_t, 3> group_columns{};
+    uint32_t fold_count{0};
+    uint32_t proof_query_count{0};
+    bool canonical_projection{false};
+    bool proof_values_excluded{false};
+    bool valid{false};
+    std::string note;
+
+    bool operator==(const MerkleFoldPublicShapeV1&) const = default;
+};
+
+[[nodiscard]] MerkleFoldPublicShapeV1
+BuildMerkleFoldPublicShapeV1(
+    const abi::DecodedV1& decoded);
+
+/**
+ * Canonical Merkle-hash and binary-fold verifier plan derived exclusively
+ * from the public structural projection and the verifier-selected range.
+ * Neither child roots nor any proof-owned opening cell can affect a program,
+ * row count or constraint system.
+ */
+struct MerkleFoldPublicPlanV1 {
+    uint16_t version{kVersionV1};
+    MerkleFoldPublicShapeV1 shape{};
+    rv::QueryRangeV1 range{};
+    mf::HashLayoutV1 hash_layout{};
+    mf::FoldLayoutV1 fold_layout{};
+    cb::ProgramTable hash_program{};
+    cb::ProgramTable fold_program{};
+    alg_hash::Digest hash_program_root{};
+    alg_hash::Digest fold_program_root{};
+    aq::AirConstraintSystem<gf::Fp3> hash_cs{};
+    aq::AirConstraintSystem<gf::Fp3> fold_cs{};
+    uint32_t hash_real_rows{0};
+    uint32_t hash_trace_rows{0};
+    uint32_t fold_real_rows{0};
+    uint32_t fold_trace_rows{0};
+    bool row_schedule_canonical{false};
+    bool constraint_systems_canonical{false};
+    bool proof_independent{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] MerkleFoldPublicPlanV1
+BuildMerkleFoldPublicPlanV1(
+    const MerkleFoldPublicShapeV1& shape,
+    const rv::QueryRangeV1& range);
+
+struct MerkleFoldCanonicalPhasesV1 {
+    cb::ProgramTable hash_program{};
+    cb::ProgramTable fold_program{};
+    aq::AirConstraintSystem<gf::Fp3> hash_cs{};
+    aq::AirConstraintSystem<gf::Fp3> fold_cs{};
+    std::vector<std::vector<gf::Fp3>> hash_columns;
+    std::vector<std::vector<gf::Fp3>> fold_columns;
+    bool public_plan_recomputed{false};
+    bool proof_tape_ordinary{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Copy only ordinary child-proof witness cells under a canonical public plan.
+ * Any substituted shape, row schedule, ProgramTable, root or constraint
+ * system is rejected before witness evaluation.
+ */
+[[nodiscard]] MerkleFoldCanonicalPhasesV1
+MaterializeMerkleFoldCanonicalPhasesV1(
+    const MerkleFoldPublicPlanV1& plan,
+    const abi::DecodedV1& decoded,
+    const mf::ShardProductV1& shard);
+
+/**
  * Canonical bytecode for all 284 Deep/VM/quotient-tape equations plus
  * verifier-owned constant equality and a dual-Fp3 register LogUp.  The LogUp
  * binds every Add/Sub/Mul operand to the referenced prior SSA result under
