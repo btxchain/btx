@@ -744,6 +744,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_v13_quotient_tape_parent.cpp
   matmul/matmul_v4_rc_stage3_v13_deep_source_logup_parent.cpp
   matmul/matmul_v4_rc_stage3_v13_complete_child_parent.cpp
+  matmul/matmul_v4_rc_stage3_v13_two_child_parent.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_acceptance_bytecode.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_backend.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_parent_join.cpp
