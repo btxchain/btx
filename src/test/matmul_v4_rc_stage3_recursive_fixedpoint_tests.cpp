@@ -2077,6 +2077,42 @@ BOOST_AUTO_TEST_CASE(
             &why),
         why);
 
+    // Packed CTL-in-parent attach: codec limbs use a fixed-rate row bus
+    // (not one parent-height column per limb — that path OOM'd ~62GiB).
+    {
+        fp::FoldBusComposition ctl_air_joined = joined;
+        const auto ctl_parent_air =
+            fp::AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
+                ctl_air_joined, migrated.source_pin, ctl_terminal,
+                ctl.manifest, ctl.pins, ctl.bank_index,
+                ctl.schedules[ctl.bank_index],
+                ctl.bank_proof);
+        BOOST_REQUIRE_MESSAGE(
+            ctl_parent_air.valid, ctl_parent_air.note);
+        BOOST_CHECK_EQUAL(
+            ctl_parent_air.layout.proof_field_lanes,
+            fp::kNormalizedAlgAirProofFieldBusRate);
+        BOOST_CHECK_EQUAL(
+            ctl_parent_air.layout.End(),
+            ctl_parent_air.layout.ctl_column_base +
+                rc::stage3_ctl_col::NUM_COLUMNS +
+                ctl_parent_air.layout.proof_field_lanes + 1);
+        BOOST_CHECK_LT(
+            ctl_parent_air.added_columns,
+            ctl_terminal.proof_field_count);
+        BOOST_CHECK(ctl_parent_air.ctl_equations_hosted);
+        BOOST_CHECK(ctl_parent_air.proof_fields_equality_wired);
+        BOOST_CHECK(ctl_parent_air.forgery_rejected);
+        BOOST_CHECK_EQUAL(ctl_parent_air.violations, 0U);
+        BOOST_CHECK_MESSAGE(
+            fp::ValidateNormalizedDeep64CtlChildVerifierInParentAirV1(
+                ctl_air_joined, migrated.source_pin, ctl_terminal,
+                ctl.manifest, ctl.pins, ctl.bank_index,
+                ctl.schedules[ctl.bank_index],
+                ctl.bank_proof, ctl_parent_air, &why),
+            why);
+    }
+
     auto cloned_ctl_schedule =
         ctl.schedules[ctl.bank_index];
     cloned_ctl_schedule.events.push_back(

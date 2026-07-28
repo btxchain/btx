@@ -14065,6 +14065,941 @@ bool ValidateNormalizedDeep64CtlTerminalV1(
     return true;
 }
 
+
+namespace {
+
+std::vector<Fp3> SliceParentRowForCtl(
+    const std::vector<Fp3>& row,
+    uint32_t column_offset,
+    uint32_t columns)
+{
+    if (column_offset > row.size() ||
+        columns > row.size() - column_offset) {
+        return {};
+    }
+    return std::vector<Fp3>(
+        row.begin() + column_offset,
+        row.begin() + column_offset + columns);
+}
+
+void AppendRelocatedCtlConstraints(
+    const aq::AirConstraintSystem<Fp3>& source,
+    uint32_t column_offset,
+    aq::AirConstraintSystem<Fp3>& destination)
+{
+    for (const auto& constraint : source.constraints) {
+        aq::AirConstraint<Fp3> shifted;
+        shifted.name = constraint.name;
+        shifted.kind = constraint.kind;
+        shifted.alg_degree = constraint.alg_degree;
+        shifted.eval =
+            [eval = constraint.eval,
+             column_offset,
+             columns = source.n_columns](
+                const std::vector<Fp3>& current,
+                const std::vector<Fp3>& next) {
+                return eval(
+                    SliceParentRowForCtl(
+                        current, column_offset, columns),
+                    SliceParentRowForCtl(
+                        next, column_offset, columns));
+            };
+        destination.constraints.push_back(std::move(shifted));
+    }
+    for (const auto& [column, values] : source.preprocessed) {
+        destination.preprocessed.emplace_back(
+            column_offset + column, values);
+    }
+    for (const auto& [column, root] :
+         source.preprocessed_roots) {
+        destination.preprocessed_roots.emplace_back(
+            column_offset + column, root);
+    }
+    destination.preprocessed_pin_ood =
+        destination.preprocessed_pin_ood ||
+        source.preprocessed_pin_ood;
+}
+
+} // namespace
+
+NormalizedSemanticAlgHashParentAudit
+PromoteNormalizedSemanticTerminalFromDeep64CtlV1(
+    const NormalizedSemanticAlgHashParentAudit& base,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedRoleChildSlot& slot)
+{
+    NormalizedSemanticAlgHashParentAudit out = base;
+    const bool closable =
+        deep64_ctl.valid &&
+        deep64_ctl.terminal_semantic_lanes_linked &&
+        deep64_ctl.proof_field_transport_bound &&
+        deep64_ctl.child_proof_verified_natively &&
+        deep64_ctl.public_pin_terminal_equality_verified &&
+        !deep64_ctl.terminal_bus_commitment.IsNull() &&
+        deep64_ctl.terminal_bus_commitment ==
+            slot.terminal_bus_commitment &&
+        !out.terminal_bus_commitment_mapped;
+    if (!closable) {
+        return out;
+    }
+
+    out.terminal_bus_commitment_mapped = true;
+    out.proof_authenticated_lanes = 0;
+    out.missing_proof_bus_lanes = 0;
+    out.verifier_constant_lanes = 0;
+    for (auto& field : out.fields) {
+        if (field.field == "terminal_bus_commitment_u32") {
+            field.source =
+                NormalizedAlgHashInputSource::ProofAuthenticated;
+            field.all_lanes_bound = true;
+            field.detail =
+                "Deep64CtlTerminal natively verifies CoupledBank CTL child, "
+                "binds proof-field transport, and links eight u32 semantic "
+                "sponge terminal lanes to terminal_bus_commitment";
+        }
+        if (field.source ==
+            NormalizedAlgHashInputSource::VerifierConstant) {
+            out.verifier_constant_lanes += field.input_lanes;
+        } else if (
+            field.source ==
+                NormalizedAlgHashInputSource::ProofAuthenticated &&
+            field.all_lanes_bound) {
+            out.proof_authenticated_lanes += field.input_lanes;
+        } else {
+            out.missing_proof_bus_lanes += field.input_lanes;
+        }
+    }
+    out.in_parent_derivation_complete =
+        out.canonical_alg_hash_available &&
+        out.slot_binding_valid &&
+        out.child_trace_root_mapped &&
+        out.child_proof_commitment_mapped &&
+        out.terminal_bus_commitment_mapped &&
+        out.missing_proof_bus_lanes == 0;
+    out.blocker =
+        out.in_parent_derivation_complete
+            ? "stage3:recursive_fixedpoint:"
+              "normalized_semantic_alg_hash_parent_complete;"
+              "terminal_bus_closed_via_deep64_ctl;"
+              "ctl_child_verifier_equations_not_in_parent_air"
+            : "stage3:recursive_fixedpoint:"
+              "normalized_semantic_alg_hash_blocked:"
+              "terminal_bus_closed_via_deep64_ctl_but_"
+              "other_semantic_inputs_still_missing";
+    return out;
+}
+NormalizedDeep64CtlChildParentAirAttachmentV1
+AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
+    FoldBusComposition& composition,
+    const RCStage3CoupledBankDequantPin& source_pin,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    const RCStage3CtlAirProof& proof)
+{
+    using namespace stage3_ctl_col;
+    NormalizedDeep64CtlChildParentAirAttachmentV1 out;
+    out.parent_rows = composition.combined.n_rows;
+    out.layout.ctl_column_base =
+        composition.combined.n_columns;
+    if (!composition.valid ||
+        !deep64_ctl.valid ||
+        !deep64_ctl.child_proof_verified_natively ||
+        !deep64_ctl.proof_field_transport_bound ||
+        !deep64_ctl.terminal_semantic_lanes_linked ||
+        out.parent_rows < 2 ||
+        child_index >= pins.size() ||
+        child_index != deep64_ctl.child_index) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_shape";
+        return out;
+    }
+
+    RCStage3CtlSchedule expected_schedule;
+    std::vector<Fp3> expected_values;
+    if (!BuildNormalizedCoupledBankCtlRootScheduleV1(
+            source_pin, expected_schedule,
+            expected_values, nullptr) ||
+        schedule != expected_schedule ||
+        expected_values.size() !=
+            schedule.events.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_schedule";
+        return out;
+    }
+
+    std::string ctl_why;
+    if (!VerifyRCStage3CtlChildAirProof(
+            manifest, pins, child_index, schedule,
+            proof, &ctl_why)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_native:" +
+            ctl_why;
+        return out;
+    }
+
+    RCStage3CtlChallenges challenges;
+    if (!DeriveRCStage3CtlChallenges(
+            manifest, pins, challenges, &ctl_why)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_challenges:" +
+            ctl_why;
+        return out;
+    }
+
+    const RCStage3CtlAirSpec spec{
+        schedule, challenges, pins[child_index].terminal};
+    aq::AirConstraintSystem<Fp3> ctl_cs =
+        BuildRCStage3CtlConstraintSystem(spec);
+    const RCStage3CtlWitness witness =
+        BuildRCStage3CtlWitness(
+            schedule, expected_values, challenges);
+    out.ctl_rows = ctl_cs.n_rows;
+    if (ctl_cs.n_columns != NUM_COLUMNS ||
+        ctl_cs.n_rows < 2 ||
+        ctl_cs.n_rows > out.parent_rows ||
+        !witness.ok ||
+        witness.columns.size() != NUM_COLUMNS ||
+        witness.columns[0].size() != out.ctl_rows ||
+        ctl_cs.constraints.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_witness";
+        return out;
+    }
+
+    // Prechallenge binding: schedule+values commitment matches the pin
+    // (same predicate VerifyRCStage3CtlChildAirProof already checked against
+    // the native proof). Per-column AirCommittedValuesRoot is not required —
+    // the hosted witness is rebuilt from that schedule and checked by the
+    // relocated CTL equations below.
+    out.prechallenge_roots_bound =
+        !pins[child_index].trace_commitment.IsNull() &&
+        ComputeRCStage3CtlPrechallengeTraceCommitment(
+            schedule, expected_values) ==
+            pins[child_index].trace_commitment;
+    if (!out.prechallenge_roots_bound) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_prechallenge_trace";
+        return out;
+    }
+    if (!gf::IsZero(witness.terminal.alpha1_sum) ||
+        !gf::IsZero(witness.terminal.alpha2_sum)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_terminal_nonzero";
+        return out;
+    }
+    if (!gf::Eq(
+            witness.terminal.alpha1_sum,
+            pins[child_index].terminal.alpha1_sum) ||
+        !gf::Eq(
+            witness.terminal.alpha2_sum,
+            pins[child_index].terminal.alpha2_sum)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_terminal_mismatch";
+        return out;
+    }
+    out.terminal_zero_in_parent = true;
+
+    // Pad CTL witness/preprocessed to parent height (M=0 tail keeps
+    // LastRow terminal identity under FoldBus n_rows).
+    std::vector<std::vector<Fp3>> padded = witness.columns;
+    for (auto& column : padded) {
+        column.resize(out.parent_rows, Fp3::Zero());
+    }
+    for (uint32_t row = out.ctl_rows;
+         row < out.parent_rows; ++row) {
+        padded[RUNNING1][row] =
+            witness.terminal.alpha1_sum;
+        padded[RUNNING2][row] =
+            witness.terminal.alpha2_sum;
+    }
+    for (auto& [column, values] : ctl_cs.preprocessed) {
+        values.resize(out.parent_rows, Fp3::Zero());
+        if (column >= padded.size()) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ctl_child_parent_air_preprocessed";
+            return out;
+        }
+        // Keep public schedule columns identical to the hosted witness.
+        values = padded[column];
+    }
+    ctl_cs.n_rows = out.parent_rows;
+
+    out.proof_field_count =
+        deep64_ctl.proof_field_count;
+    out.proof_transport_commitment =
+        deep64_ctl.proof_transport_commitment;
+    // Pack codec limbs into a fixed-rate row bus. One parent-height
+    // column per limb OOMs: a ~1.2 MiB CTL FRI codec is ~318k limbs →
+    // ~62 GiB at parent_rows=8192 (measured 2026-07-28).
+    constexpr uint32_t kProofFieldLanes =
+        kNormalizedAlgAirProofFieldBusRate;
+    out.layout.proof_field_base =
+        out.layout.ctl_column_base + NUM_COLUMNS;
+    out.layout.proof_field_count =
+        out.proof_field_count;
+    out.layout.proof_field_lanes = kProofFieldLanes;
+    out.layout.proof_field_rows =
+        static_cast<uint32_t>(
+            (uint64_t{out.proof_field_count} +
+             kProofFieldLanes - 1) /
+            kProofFieldLanes);
+    out.layout.proof_field_active =
+        out.layout.proof_field_base + kProofFieldLanes;
+    out.proof_field_rows = out.layout.proof_field_rows;
+    if (out.proof_field_count == 0 ||
+        deep64_ctl.proof_fields.size() !=
+            out.proof_field_count ||
+        out.proof_transport_commitment.IsNull() ||
+        out.layout.proof_field_rows == 0 ||
+        out.layout.proof_field_rows > out.parent_rows) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_proof_fields";
+        return out;
+    }
+    {
+        // Belt-and-suspenders: refuse unsurvivable residency even if a
+        // future layout change reintroduces width∝field_count.
+        const uint64_t packed_bytes =
+            uint64_t{kProofFieldLanes + 1} *
+            out.parent_rows * sizeof(Fp3);
+        constexpr uint64_t kCtlParentAirFieldBudget =
+            uint64_t{256} << 20; // 256 MiB
+        if (packed_bytes > kCtlParentAirFieldBudget) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ctl_child_parent_air_proof_field_residency";
+            return out;
+        }
+    }
+
+    out.added_columns =
+        out.layout.End() - out.layout.ctl_column_base;
+    out.constraint_base = static_cast<uint32_t>(
+        composition.combined.constraints.size());
+
+    composition.columns.resize(
+        out.layout.End(),
+        std::vector<Fp3>(
+            out.parent_rows, Fp3::Zero()));
+    composition.combined.n_columns = out.layout.End();
+    composition.combined.preprocessed_pin_ood = true;
+
+    for (uint32_t column = 0;
+         column < NUM_COLUMNS; ++column) {
+        composition.columns[
+            out.layout.CtlColumn(column)] =
+            padded[column];
+    }
+    for (uint32_t index = 0;
+         index < out.proof_field_count; ++index) {
+        const uint32_t row =
+            index / kProofFieldLanes;
+        const uint32_t lane =
+            index % kProofFieldLanes;
+        const uint32_t column =
+            out.layout.ProofFieldLane(lane);
+        composition.columns[column][row] =
+            deep64_ctl.proof_fields[index];
+    }
+    for (uint32_t lane = 0;
+         lane < kProofFieldLanes; ++lane) {
+        const uint32_t column =
+            out.layout.ProofFieldLane(lane);
+        composition.combined.preprocessed.emplace_back(
+            column, composition.columns[column]);
+    }
+    for (uint32_t row = 0;
+         row < out.layout.proof_field_rows; ++row) {
+        composition.columns[
+            out.layout.proof_field_active][row] =
+            Fp3::One();
+    }
+    composition.combined.preprocessed.emplace_back(
+        out.layout.proof_field_active,
+        composition.columns[
+            out.layout.proof_field_active]);
+
+    AppendRelocatedCtlConstraints(
+        ctl_cs, out.layout.ctl_column_base,
+        composition.combined);
+    // Active selector is boolean on packed field rows (1) and idle
+    // tail (0); field cells are preprocessed pins, so no extra
+    // equality chip beyond the transport commitment check below.
+    {
+        aq::AirConstraint<Fp3> boolean;
+        boolean.name =
+            "stage3.fixedpoint.ctl_child_parent_air."
+            "proof_field_active_boolean";
+        boolean.kind = aq::AirKind::kEverywhere;
+        boolean.alg_degree = 2;
+        const uint32_t selector =
+            out.layout.proof_field_active;
+        boolean.eval =
+            [selector](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Mul(
+                    row[selector],
+                    gf::Sub(
+                        row[selector],
+                        Fp3::One()));
+            };
+        composition.combined.constraints.push_back(
+            std::move(boolean));
+    }
+    // Equality-wire: recomputed transport commitment from pinned fields.
+    {
+        std::vector<gf::Fp> base_fields;
+        base_fields.reserve(out.proof_field_count);
+        for (const Fp3& field : deep64_ctl.proof_fields) {
+            if (field.c1 != 0 || field.c2 != 0 ||
+                field.c0 >= gf::kP) {
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "ctl_child_parent_air_field_limb";
+                return out;
+            }
+            base_fields.push_back(field.c0);
+        }
+        const uint256 recomputed =
+            aq::AirFriBackendAlg<Fp3>::PackDigest(
+                ah::SpongeHashFp(base_fields));
+        if (recomputed.IsNull() ||
+            recomputed !=
+                out.proof_transport_commitment) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ctl_child_parent_air_transport";
+            return out;
+        }
+        out.proof_fields_equality_wired = true;
+    }
+
+    out.added_constraints = static_cast<uint32_t>(
+        composition.combined.constraints.size() -
+        out.constraint_base);
+    out.ctl_equations_hosted =
+        out.added_constraints > 0;
+
+    // Validate CTL equations on the padded CTL-width witness (not a full
+    // FoldBus H-scan — relocated evals allocate per call).
+    out.violations =
+        CountHashOpeningViolations(ctl_cs, padded);
+    if (out.violations != 0) {
+        composition.valid = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_violations";
+        return out;
+    }
+
+    // Diff-test: tamper hosted VALUE on an active event row.
+    {
+        const gf::Fp3 saved = padded[VALUE][0];
+        padded[VALUE][0] = gf::Add(saved, Fp3::One());
+        const uint32_t forged =
+            CountHashOpeningViolations(ctl_cs, padded);
+        padded[VALUE][0] = saved;
+        // Keep the live parent column consistent with the restored witness.
+        composition.columns[out.layout.CtlColumn(VALUE)][0] =
+            saved;
+        out.forgery_rejected = forged > 0;
+    }
+    if (!out.forgery_rejected) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "ctl_child_parent_air_forgery_not_rejected";
+        return out;
+    }
+
+    out.complete_sha_fiat_shamir_replay_in_parent =
+        false;
+    out.recursively_consumed = false;
+    out.valid =
+        out.ctl_equations_hosted &&
+        out.prechallenge_roots_bound &&
+        out.proof_fields_equality_wired &&
+        out.terminal_zero_in_parent &&
+        out.forgery_rejected &&
+        out.violations == 0 &&
+        !out.complete_sha_fiat_shamir_replay_in_parent &&
+        !out.recursively_consumed;
+    composition.valid =
+        composition.valid && out.valid;
+    out.note =
+        out.valid
+            ? "stage3:recursive_fixedpoint:"
+              "ctl_child_verifier_equations_hosted_in_"
+              "parent_air;"
+              "proof_fields_equality_wired;"
+              "sha_fs_replay_and_recursive_consumption_open;"
+              "complete_fp=false"
+            : "stage3:recursive_fixedpoint:"
+              "ctl_child_parent_air_invalid";
+    return out;
+}
+bool ValidateNormalizedDeep64CtlChildVerifierInParentAirV1(
+    const FoldBusComposition& composition,
+    const RCStage3CoupledBankDequantPin& source_pin,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const RCStage3CtlManifest& manifest,
+    const std::vector<RCStage3CtlChildPin>& pins,
+    size_t child_index,
+    const RCStage3CtlSchedule& schedule,
+    const RCStage3CtlAirProof& proof,
+    const NormalizedDeep64CtlChildParentAirAttachmentV1&
+        attachment,
+    std::string* why)
+{
+    const auto fail =
+        [&](const char* reason) {
+            if (why != nullptr) {
+                *why = reason;
+            }
+            return false;
+        };
+    if (!attachment.valid ||
+        attachment.complete_sha_fiat_shamir_replay_in_parent ||
+        attachment.recursively_consumed ||
+        !attachment.ctl_equations_hosted ||
+        !attachment.proof_fields_equality_wired ||
+        !attachment.forgery_rejected ||
+        attachment.violations != 0) {
+        return fail("ctl_child_parent_air_flags");
+    }
+    // Re-attach on a copy is too expensive; check structural binding
+    // against the live composition and Deep64 attachment instead.
+    if (attachment.parent_rows !=
+            composition.combined.n_rows ||
+        attachment.layout.End() !=
+            composition.combined.n_columns ||
+        attachment.proof_field_count !=
+            deep64_ctl.proof_field_count ||
+        attachment.proof_transport_commitment !=
+            deep64_ctl.proof_transport_commitment ||
+        attachment.layout.proof_field_lanes !=
+            kNormalizedAlgAirProofFieldBusRate ||
+        attachment.layout.proof_field_rows == 0 ||
+        attachment.layout.proof_field_rows >
+            attachment.parent_rows ||
+        attachment.proof_field_rows !=
+            attachment.layout.proof_field_rows ||
+        attachment.layout.ctl_column_base +
+                stage3_ctl_col::NUM_COLUMNS +
+                attachment.layout.proof_field_lanes + 1 !=
+            attachment.layout.End()) {
+        return fail("ctl_child_parent_air_layout");
+    }
+    for (uint32_t index = 0;
+         index < attachment.proof_field_count;
+         ++index) {
+        const uint32_t row =
+            index / attachment.layout.proof_field_lanes;
+        const uint32_t lane =
+            index % attachment.layout.proof_field_lanes;
+        const uint32_t column =
+            attachment.layout.ProofFieldLane(lane);
+        if (column >= composition.columns.size() ||
+            composition.columns[column].size() !=
+                attachment.parent_rows ||
+            row >= attachment.parent_rows ||
+            !gf::Eq(
+                composition.columns[column][row],
+                deep64_ctl.proof_fields[index])) {
+            return fail(
+                "ctl_child_parent_air_proof_field_pin");
+        }
+    }
+    // Touch schedule/native binding so callers cannot swap proofs.
+    std::string ctl_why;
+    if (!VerifyRCStage3CtlChildAirProof(
+            manifest, pins, child_index, schedule,
+            proof, &ctl_why)) {
+        return fail("ctl_child_parent_air_native_binding");
+    }
+    RCStage3CtlSchedule expected_schedule;
+    std::vector<Fp3> expected_values;
+    if (!BuildNormalizedCoupledBankCtlRootScheduleV1(
+            source_pin, expected_schedule,
+            expected_values, nullptr) ||
+        schedule != expected_schedule) {
+        return fail("ctl_child_parent_air_schedule_binding");
+    }
+    (void)deep64_ctl;
+    return true;
+}
+NormalizedRecursiveChildCapabilityAuditV1
+AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl)
+{
+    NormalizedRecursiveChildCapabilityAuditV1 out =
+        AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
+            composition, interpreter, row_pin, execution,
+            proof_bus);
+    if (!out.valid || !out.child_proof_commitment_mapped) {
+        out.valid = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_with_proof_bus_and_deep_ctl_"
+            "commitment_not_promoted";
+        return out;
+    }
+
+    const NormalizedSemanticAlgHashParentAudit base_root =
+        AssessNormalizedSemanticAlgHashParentClosure(
+            composition, interpreter, row_pin, execution);
+    const NormalizedSemanticAlgHashParentAudit committed =
+        PromoteNormalizedSemanticProofCommitmentFromFieldBusV1(
+            base_root, proof_bus, execution.slot);
+    const NormalizedSemanticAlgHashParentAudit root =
+        PromoteNormalizedSemanticTerminalFromDeep64CtlV1(
+            committed, deep64_ctl, execution.slot);
+    if (!root.terminal_bus_commitment_mapped) {
+        out.valid = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_with_proof_bus_and_deep_ctl_"
+            "terminal_not_promoted";
+        return out;
+    }
+
+    out.terminal_bus_commitment_mapped = true;
+    // Still native-only: Deep64 verifies the CTL child off-parent.
+    out.ctl_child_verified_in_parent_air = false;
+    out.normalized_root_available_input_lanes =
+        root.verifier_constant_lanes +
+        root.proof_authenticated_lanes;
+    out.normalized_root_missing_input_lanes =
+        root.missing_proof_bus_lanes;
+    out.normalized_semantic_root_derived_in_parent =
+        root.in_parent_derivation_complete;
+
+    for (auto& gap : out.gaps) {
+        if (gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                CtlChildVerifierAndTerminalBus) {
+            gap.mapped_lanes = 8;
+            gap.present_in_parent_air =
+                out.ctl_child_verified_in_parent_air &&
+                out.terminal_bus_commitment_mapped;
+            gap.detail =
+                "Deep64CtlTerminal binds eight terminal_bus_commitment "
+                "u32 lanes into the parent semantic sponge after native "
+                "CTL child verify + codec transport; "
+                "ctl_child_verified_in_parent_air remains false until "
+                "CTL verifier equations execute inside this parent AIR";
+        } else if (
+            gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                NormalizedSemanticRootAlgHash) {
+            gap.mapped_lanes =
+                out.normalized_root_available_input_lanes;
+            gap.present_in_parent_air =
+                out.normalized_semantic_root_derived_in_parent;
+            gap.detail =
+                out.normalized_semantic_root_derived_in_parent
+                    ? "all 48 semantic-root input lanes are bound "
+                      "(ProofFieldBus commitment + Deep64 CTL terminal); "
+                      "910 permutation columns already execute in the "
+                      "parent sponge attachment"
+                    : "semantic-root inputs still incomplete after "
+                      "terminal promote";
+        }
+    }
+
+    std::string failed;
+    const auto fail_pred = [&](bool ok, const char* tag) {
+        if (!ok) {
+            failed.push_back(';');
+            failed += tag;
+        }
+        return ok;
+    };
+    out.valid =
+        fail_pred(out.candidate_role_endpoint_count == 3,
+                  "role_endpoint_count") &&
+        fail_pred(out.child_relation_columns == 6,
+                  "child_relation_columns") &&
+        fail_pred(out.child_relation_constraints == 5,
+                  "child_relation_constraints") &&
+        fail_pred(out.parent_rows >= 2, "parent_rows") &&
+        fail_pred(out.parent_columns > 0, "parent_columns") &&
+        fail_pred(out.parent_constraints > 0, "parent_constraints") &&
+        fail_pred(out.native_child_host_verified,
+                  "native_child_host_verified") &&
+        fail_pred(out.authenticated_opening_air,
+                  "authenticated_opening_air") &&
+        fail_pred(out.fold_deep_air, "fold_deep_air") &&
+        fail_pred(out.relation_bytecode_air,
+                  "relation_bytecode_air") &&
+        fail_pred(out.child_trace_root_mapped,
+                  "child_trace_root_mapped") &&
+        fail_pred(out.normalized_root_required_input_lanes == 48,
+                  "root_required_lanes") &&
+        fail_pred(out.normalized_root_available_input_lanes == 48,
+                  "root_available_lanes") &&
+        fail_pred(out.normalized_root_missing_input_lanes == 0,
+                  "root_missing_lanes") &&
+        fail_pred(
+            out.normalized_root_additional_permutation_columns == 910,
+            "root_perm_columns") &&
+        fail_pred(out.split_rap_native_verifier_executable,
+                  "split_rap_native") &&
+        fail_pred(out.gaps.size() == 7, "gaps_size") &&
+        fail_pred(!out.child_proof_payload_bound_in_air,
+                  "payload_bound_unexpected") &&
+        fail_pred(out.child_fiat_shamir_replayed_in_air,
+                  "fs_replay_required") &&
+        fail_pred(out.child_proof_commitment_mapped,
+                  "proof_commit_required") &&
+        fail_pred(!out.ctl_child_verified_in_parent_air,
+                  "ctl_verified_unexpected") &&
+        fail_pred(out.terminal_bus_commitment_mapped,
+                  "terminal_bus_required") &&
+        fail_pred(out.normalized_semantic_root_derived_in_parent,
+                  "semantic_root_required") &&
+        fail_pred(!out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_unexpected") &&
+        fail_pred(!out.endpoint_terminal_equality,
+                  "endpoint_terminal_unexpected") &&
+        fail_pred(!kCompleteRecursiveFixedPointExecutable,
+                  "complete_fp_unexpected") &&
+        fail_pred(!kRecursiveFixedPointConsensusAuthority,
+                  "fp_authority_unexpected") &&
+        fail_pred(!va::kVerifierAirConsensusAuthority,
+                  "va_authority_unexpected") &&
+        fail_pred(!va::kVerifierFiatShamirAirExecutable,
+                  "va_fs_chip_unexpected");
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "capability_audit_ok;"
+          "proof_commitment_bus_closed_via_proof_field_bus;"
+          "terminal_bus_closed_via_deep64_ctl;"
+          "semantic_root_input_lanes_complete;"
+          "ctl_child_verifier_in_parent_air_open;"
+          "ledger_g4_fiat_shamir_replay_closed;"
+          "proof_payload_and_split_rap_multirow_adapter_open;"
+          "complete_fp=false;"
+          "recursive_counters_0_of_52_and_0_of_14"
+        : ("stage3:recursive_fixedpoint:"
+           "capability_with_proof_bus_and_deep_ctl_not_canonical" +
+           failed);
+    return out;
+}
+bool ValidateNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedRecursiveChildCapabilityAuditV1& audit,
+    std::string* why)
+{
+    const NormalizedRecursiveChildCapabilityAuditV1 expected =
+        AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
+            composition, interpreter, row_pin, execution,
+            proof_bus, deep64_ctl);
+    if (!expected.valid || !(expected == audit)) {
+        if (why != nullptr) {
+            *why =
+                "normalized_recursive_child_capability_"
+                "with_proof_bus_and_deep_ctl_mismatch";
+        }
+        return false;
+    }
+    return true;
+}
+NormalizedRecursiveChildCapabilityAuditV1
+AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedDeep64CtlChildParentAirAttachmentV1&
+        ctl_parent_air)
+{
+    NormalizedRecursiveChildCapabilityAuditV1 out =
+        AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
+            composition, interpreter, row_pin, execution,
+            proof_bus, deep64_ctl);
+    if (!out.valid ||
+        !out.terminal_bus_commitment_mapped ||
+        !out.normalized_semantic_root_derived_in_parent) {
+        out.valid = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_with_ctl_parent_air_"
+            "deep_ctl_not_ready";
+        return out;
+    }
+    if (!ctl_parent_air.valid ||
+        !ctl_parent_air.ctl_equations_hosted ||
+        !ctl_parent_air.proof_fields_equality_wired ||
+        !ctl_parent_air.forgery_rejected ||
+        ctl_parent_air.violations != 0 ||
+        ctl_parent_air.parent_rows !=
+            composition.combined.n_rows ||
+        ctl_parent_air.layout.End() !=
+            composition.combined.n_columns) {
+        out.valid = false;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "capability_with_ctl_parent_air_attach_invalid";
+        return out;
+    }
+
+    out.ctl_child_verified_in_parent_air = true;
+    out.parent_columns =
+        composition.combined.n_columns;
+    out.parent_constraints = static_cast<uint32_t>(
+        composition.combined.constraints.size());
+
+    for (auto& gap : out.gaps) {
+        if (gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                CtlChildVerifierAndTerminalBus) {
+            gap.mapped_lanes = 8;
+            gap.present_in_parent_air =
+                out.ctl_child_verified_in_parent_air &&
+                out.terminal_bus_commitment_mapped;
+            gap.detail =
+                "Deep64CtlTerminal binds eight terminal lanes; "
+                "AttachNormalizedDeep64CtlChildVerifierInParentAirV1 "
+                "hosts CTL AirQuotient equations in the FoldBus "
+                "parent, equality-wires proof-field transport, and "
+                "rejects VALUE forgery; SHA CTL FS replay and "
+                "recursive consumption remain open";
+        }
+    }
+
+    std::string failed;
+    const auto fail_pred = [&](bool ok, const char* tag) {
+        if (!ok) {
+            failed.push_back(';');
+            failed += tag;
+        }
+        return ok;
+    };
+    out.valid =
+        fail_pred(out.candidate_role_endpoint_count == 3,
+                  "role_endpoint_count") &&
+        fail_pred(out.child_relation_columns == 6,
+                  "child_relation_columns") &&
+        fail_pred(out.child_relation_constraints == 5,
+                  "child_relation_constraints") &&
+        fail_pred(out.parent_rows >= 2, "parent_rows") &&
+        fail_pred(out.parent_columns > 0, "parent_columns") &&
+        fail_pred(out.parent_constraints > 0,
+                  "parent_constraints") &&
+        fail_pred(out.native_child_host_verified,
+                  "native_child_host_verified") &&
+        fail_pred(out.authenticated_opening_air,
+                  "authenticated_opening_air") &&
+        fail_pred(out.fold_deep_air, "fold_deep_air") &&
+        fail_pred(out.relation_bytecode_air,
+                  "relation_bytecode_air") &&
+        fail_pred(out.child_trace_root_mapped,
+                  "child_trace_root_mapped") &&
+        fail_pred(out.normalized_root_required_input_lanes == 48,
+                  "root_required_lanes") &&
+        fail_pred(out.normalized_root_available_input_lanes == 48,
+                  "root_available_lanes") &&
+        fail_pred(out.normalized_root_missing_input_lanes == 0,
+                  "root_missing_lanes") &&
+        fail_pred(
+            out.normalized_root_additional_permutation_columns == 910,
+            "root_perm_columns") &&
+        fail_pred(out.split_rap_native_verifier_executable,
+                  "split_rap_native") &&
+        fail_pred(out.gaps.size() == 7, "gaps_size") &&
+        fail_pred(!out.child_proof_payload_bound_in_air,
+                  "payload_bound_unexpected") &&
+        fail_pred(out.child_fiat_shamir_replayed_in_air,
+                  "fs_replay_required") &&
+        fail_pred(out.child_proof_commitment_mapped,
+                  "proof_commit_required") &&
+        fail_pred(out.ctl_child_verified_in_parent_air,
+                  "ctl_verified_required") &&
+        fail_pred(out.terminal_bus_commitment_mapped,
+                  "terminal_bus_required") &&
+        fail_pred(out.normalized_semantic_root_derived_in_parent,
+                  "semantic_root_required") &&
+        fail_pred(!out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_unexpected") &&
+        fail_pred(!out.endpoint_terminal_equality,
+                  "endpoint_terminal_unexpected") &&
+        fail_pred(!kCompleteRecursiveFixedPointExecutable,
+                  "complete_fp_unexpected") &&
+        fail_pred(!kRecursiveFixedPointConsensusAuthority,
+                  "fp_authority_unexpected") &&
+        fail_pred(!va::kVerifierAirConsensusAuthority,
+                  "va_authority_unexpected") &&
+        fail_pred(!va::kVerifierFiatShamirAirExecutable,
+                  "va_fs_chip_unexpected");
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "capability_audit_ok;"
+          "proof_commitment_bus_closed_via_proof_field_bus;"
+          "terminal_bus_closed_via_deep64_ctl;"
+          "semantic_root_input_lanes_complete;"
+          "ctl_child_verifier_in_parent_air_closed;"
+          "ledger_g4_fiat_shamir_replay_closed;"
+          "proof_payload_and_split_rap_multirow_adapter_open;"
+          "complete_fp=false;"
+          "recursive_counters_0_of_52_and_0_of_14"
+        : ("stage3:recursive_fixedpoint:"
+           "capability_with_ctl_parent_air_not_canonical" +
+           failed);
+    return out;
+}
+bool ValidateNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedAlgAirProofFieldBusAttachmentV1& proof_bus,
+    const NormalizedDeep64CtlTerminalAttachmentV1& deep64_ctl,
+    const NormalizedDeep64CtlChildParentAirAttachmentV1&
+        ctl_parent_air,
+    const NormalizedRecursiveChildCapabilityAuditV1& audit,
+    std::string* why)
+{
+    const NormalizedRecursiveChildCapabilityAuditV1 expected =
+        AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+            composition, interpreter, row_pin, execution,
+            proof_bus, deep64_ctl, ctl_parent_air);
+    if (!expected.valid || !(expected == audit)) {
+        if (why != nullptr) {
+            *why =
+                "normalized_recursive_child_capability_"
+                "with_ctl_parent_air_mismatch";
+        }
+        return false;
+    }
+    return true;
+}
+
 NormalizedRecursiveChildCapabilityAuditV1
 AssessNormalizedRecursiveChildCapabilityV1(
     const FoldBusComposition& composition,
