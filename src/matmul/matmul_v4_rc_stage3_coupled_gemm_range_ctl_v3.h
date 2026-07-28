@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -137,6 +138,44 @@ struct ParentReceiptBundleV3 {
     const std::vector<RCStage3CoupledGemmOpening>& openings,
     ProductV3& out,
     std::string* why = nullptr);
+
+/**
+ * Single-execution all-cell V3 prover.
+ *
+ * Each canonical GEMM callback is consumed synchronously.  The prover commits
+ * every dot-product tile and the matching signed-range shard before releasing
+ * the borrowed A/B/Y buffers.  Until both role R0 roots for a shard exist it
+ * retains only authenticated polynomial sessions; the dual-Fp3 CTL challenge
+ * is then derived and the SAFE-V13 child proofs are completed from those
+ * committed coefficients.  No native application witness is retained and no
+ * GEMM or episode is replayed.
+ */
+class StreamingProverV3 final {
+public:
+    StreamingProverV3(
+        const RCStage3SuccinctProof& statement,
+        const RCStage3CoupledShape& shape);
+    ~StreamingProverV3();
+    StreamingProverV3(StreamingProverV3&&) noexcept;
+    StreamingProverV3& operator=(StreamingProverV3&&) noexcept;
+    StreamingProverV3(const StreamingProverV3&) = delete;
+    StreamingProverV3& operator=(const StreamingProverV3&) = delete;
+
+    void OnGemm(const RCCoupGemmProofWitnessView& view);
+    [[nodiscard]] bool Complete(std::string* why = nullptr) const;
+    [[nodiscard]] bool Finalize(
+        ProductV3& out,
+        std::string* why = nullptr);
+    [[nodiscard]] uint64_t RetainedNativeBytes() const;
+    [[nodiscard]] uint64_t PeakRetainedNativeBytes() const;
+    /** Exact vector payload retained for R0 polynomials/trees/traces. */
+    [[nodiscard]] uint64_t RetainedProverBytes() const;
+    [[nodiscard]] uint64_t PeakRetainedProverBytes() const;
+
+private:
+    class Impl;
+    std::unique_ptr<Impl> impl_;
+};
 
 /** Proof-only verification; no opening/native-Y parameter exists. */
 [[nodiscard]] bool VerifyV3(

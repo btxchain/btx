@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_COUPLED_WINNER_CAPTURE_H
 
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_gemm_range_ctl_v3.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_gemm_product.h>
 
 #include <cstdint>
@@ -346,6 +347,10 @@ public:
         const RCCoupParams& params,
         const RCCoupOptions& options);
 
+    void OnBankPage(
+        const RCCoupBankPageProofWitnessView& view) override;
+    void OnInitialLobe(
+        const RCCoupInitialLobeProofWitnessView& view) override;
     void OnInitialState(
         const RCCoupInitialStateProofWitnessView& view) override;
     void OnGemm(
@@ -370,6 +375,9 @@ public:
     [[nodiscard]] bool BuildCompactGemmProductV2(
         RCStage3CoupledGemmCompactProductV2& out,
         std::string* why = nullptr) const;
+    [[nodiscard]] bool BuildAllCellGemmRangeProductV3(
+        coupled_gemm_range_ctl_v3::ProductV3& out,
+        std::string* why = nullptr);
     [[nodiscard]] std::shared_ptr<
         RCStage3CoupledWinnerCaptureV1>
     WinnerCapture() const
@@ -389,6 +397,8 @@ private:
     std::shared_ptr<RCStage3CoupledWinnerCaptureV1>
         m_capture;
     RCStage3CoupledGemmCompactStreamingV2 m_gemm;
+    coupled_gemm_range_ctl_v3::StreamingProverV3
+        m_gemm_range_v3;
     std::string m_error;
 };
 
@@ -414,11 +424,15 @@ void RCStage3CoupledWinnerStoreClearForTestV1();
 /** Atomically publish the bounded winner receipt and proof-only GEMM child. */
 [[nodiscard]] bool RCStage3CoupledWinnerBundleStorePutV2(
     const uint256& finalized_header_hash,
-    const RCStage3CoupledWinnerProofBundleV2& bundle,
+    RCStage3CoupledWinnerProofBundleV2& bundle,
     std::string* why = nullptr);
 [[nodiscard]] std::shared_ptr<
     const RCStage3CoupledGemmCompactProductV2>
 RCStage3CoupledGemmCompactStoreGetV2(
+    const uint256& finalized_header_hash);
+[[nodiscard]] std::shared_ptr<
+    const coupled_gemm_range_ctl_v3::ProductV3>
+RCStage3CoupledGemmRangeStoreGetV3(
     const uint256& finalized_header_hash);
 
 } // namespace matmul::v4::rc

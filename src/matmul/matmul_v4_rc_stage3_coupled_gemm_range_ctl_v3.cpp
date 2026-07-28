@@ -265,7 +265,9 @@ bool SameRangeShape(
 
 bool BuildTileColumns(
     const RCStage3CoupledShape& shape,
-    const RCStage3CoupledGemmOpening& opening,
+    const int8_t* operand_a,
+    const int8_t* operand_b,
+    const int64_t* output_y,
     uint64_t tile_index,
     uint32_t n_rows,
     std::vector<std::vector<Fp3>>& columns,
@@ -275,9 +277,8 @@ bool BuildTileColumns(
     const uint32_t rows = shape.rows_per_lobe;
     const uint32_t blocks = width / kRCMxBlockLen;
     if (width == 0 || width % kRCMxBlockLen != 0 ||
-        opening.operand_a.size() != uint64_t{rows} * width ||
-        opening.operand_b.size() != uint64_t{width} * width ||
-        opening.output_y.size() != uint64_t{rows} * width ||
+        operand_a == nullptr || operand_b == nullptr ||
+        output_y == nullptr ||
         tile_index >= uint64_t{rows} * blocks ||
         n_rows < uint64_t{width} * kRCMxBlockLen) {
         return Fail(why, "tile_witness_shape");
@@ -296,9 +297,9 @@ bool BuildTileColumns(
              ++contraction) {
             const uint32_t trace_row =
                 lane * width + contraction;
-            const int8_t a = opening.operand_a[
+            const int8_t a = operand_a[
                 uint64_t{output_row} * width + contraction];
-            const int8_t b = opening.operand_b[
+            const int8_t b = operand_b[
                 uint64_t{contraction} * width + output_column];
             if (a < -48 || a > 48 || b < -48 || b > 48) {
                 return Fail(why, "tile_operand_range");
@@ -322,13 +323,36 @@ bool BuildTileColumns(
                 [trace_row] = S(accumulator);
             if (contraction + 1 == width) {
                 columns[kRCStage3CoupledGemmY][trace_row] =
-                    S(opening.output_y[
+                    S(output_y[
                         uint64_t{output_row} * width +
                         output_column]);
             }
         }
     }
     return true;
+}
+
+bool BuildTileColumns(
+    const RCStage3CoupledShape& shape,
+    const RCStage3CoupledGemmOpening& opening,
+    uint64_t tile_index,
+    uint32_t n_rows,
+    std::vector<std::vector<Fp3>>& columns,
+    std::string* why)
+{
+    const uint64_t rows = shape.rows_per_lobe;
+    const uint64_t width = shape.lobe_width;
+    if (opening.operand_a.size() != rows * width ||
+        opening.operand_b.size() != width * width ||
+        opening.output_y.size() != rows * width) {
+        return Fail(why, "tile_opening_shape");
+    }
+    return BuildTileColumns(
+        shape,
+        opening.operand_a.data(),
+        opening.operand_b.data(),
+        opening.output_y.data(),
+        tile_index, n_rows, columns, why);
 }
 
 RCStage3CoupledGemmDotPin BuildDotPin(
@@ -349,7 +373,8 @@ RCStage3CoupledGemmDotPin BuildDotPin(
     pin.contraction_size = width;
     pin.logical_rows = uint64_t{width} * kRCMxBlockLen;
     pin.n_rows = static_cast<uint32_t>(columns.front().size());
-    pin.n_coeffs = pin.n_rows;
+    // Degree-three GEMM constraints require a 2*N FRI coefficient domain.
+    pin.n_coeffs = 2 * pin.n_rows;
     pin.column_roots.resize(columns.size());
     for (uint32_t column = 0; column < columns.size(); ++column) {
         pin.column_roots[column] = {
@@ -633,6 +658,1011 @@ uint256 CommitProductV3(const ProductV3& proof)
     hash << proof.normalized_parent_consumed
          << proof.production_authority;
     return hash.GetHash();
+}
+
+class StreamingProverV3::Impl {
+public:
+    Impl(
+        const RCStage3SuccinctProof& statement,
+        const RCStage3CoupledShape& shape)
+        : statement_(statement), shape_(shape)
+    {
+        Initialize();
+    }
+
+    void OnGemm(const RCCoupGemmProofWitnessView& view);
+    [[nodiscard]] bool Complete(std::string* why) const;
+    [[nodiscard]] bool Finalize(ProductV3& out, std::string* why);
+    [[nodiscard]] uint64_t RetainedNativeBytes() const { return 0; }
+    [[nodiscard]] uint64_t PeakRetainedNativeBytes() const { return 0; }
+    [[nodiscard]] uint64_t RetainedProverBytes() const;
+    [[nodiscard]] uint64_t PeakRetainedProverBytes() const
+    {
+        return peak_retained_prover_bytes_;
+    }
+
+private:
+    struct PendingTile {
+        aq::AirQuotientTwoEpochBaseRowSession session;
+    };
+
+    void Initialize();
+    void Poison(const std::string& detail);
+    [[nodiscard]] bool StartShard();
+    [[nodiscard]] bool PrecommitTile(
+        const RCCoupGemmProofWitnessView& view,
+        uint64_t local_tile);
+    [[nodiscard]] bool AppendRangeTile(
+        const RCCoupGemmProofWitnessView& view,
+        uint64_t local_tile);
+    [[nodiscard]] bool FinalizeShard();
+    [[nodiscard]] bool RecoverRelationColumns(
+        const aq::AirQuotientTwoEpochBaseRowSession& session,
+        const gated::LayoutV1& layout,
+        std::vector<std::vector<Fp3>>& relation_columns,
+        std::string* why) const;
+    void UpdatePeakRetainedProverBytes();
+
+    RCStage3SuccinctProof statement_;
+    RCStage3CoupledShape shape_;
+    std::vector<RCStage3CoupledGemmScheduleEntry> schedule_;
+    RCStage3CoupledSignedRangeManifest range_manifest_;
+    ProductV3 product_;
+    std::vector<PendingTile> pending_tiles_;
+    std::vector<std::vector<Fp3>> range_columns_;
+    uint64_t callback_cursor_{0};
+    uint64_t global_tile_cursor_{0};
+    uint32_t shard_cursor_{0};
+    uint32_t range_rows_filled_{0};
+    uint64_t tiles_per_gemm_{0};
+    uint64_t peak_retained_prover_bytes_{0};
+    bool initialized_{false};
+    bool finalized_{false};
+    std::string error_;
+};
+
+namespace {
+
+uint64_t SessionPayloadBytes(
+    const aq::AirQuotientTwoEpochBaseRowSession& session)
+{
+    uint64_t bytes =
+        uint64_t{session.base_column_indices.size()} *
+        sizeof(uint32_t);
+    for (const auto& column :
+         session.base_trace_coefficients) {
+        bytes +=
+            uint64_t{column.size()} *
+            sizeof(Fp3);
+    }
+    if (session.row_tree_cache) {
+        bytes +=
+            uint64_t{
+                session.row_tree_cache
+                    ->column_len.size()} *
+            sizeof(uint32_t);
+        for (const auto& level :
+             session.row_tree_cache->levels) {
+            bytes +=
+                uint64_t{level.size()} *
+                sizeof(Fri3AlgDigest);
+        }
+    }
+    return bytes;
+}
+
+} // namespace
+
+uint64_t StreamingProverV3::Impl::
+RetainedProverBytes() const
+{
+    uint64_t bytes = 0;
+    for (const auto& pending :
+         pending_tiles_) {
+        bytes += SessionPayloadBytes(
+            pending.session);
+    }
+    for (const auto& column :
+         range_columns_) {
+        bytes +=
+            uint64_t{column.size()} *
+            sizeof(Fp3);
+    }
+    return bytes;
+}
+
+void StreamingProverV3::Impl::
+UpdatePeakRetainedProverBytes()
+{
+    peak_retained_prover_bytes_ =
+        std::max(
+            peak_retained_prover_bytes_,
+            RetainedProverBytes());
+}
+
+void StreamingProverV3::Impl::Poison(
+    const std::string& detail)
+{
+    if (error_.empty()) error_ = detail;
+}
+
+void StreamingProverV3::Impl::Initialize()
+{
+    const uint256 statement_commitment =
+        CommitRCStage3CoupledStatement(
+            statement_.public_inputs);
+    const uint256 shape_commitment =
+        CommitRCStage3CoupledShape(shape_);
+    uint256 schedule_commitment;
+    std::string why;
+    if (statement_commitment.IsNull() ||
+        shape_commitment.IsNull() ||
+        !BuildRCStage3CoupledGemmSchedule(
+            statement_, shape_, schedule_,
+            schedule_commitment, &why) ||
+        !BuildRCStage3CoupledSignedRangeManifest(
+            statement_, shape_,
+            range_manifest_, &why)) {
+        Poison("initialize:" + why);
+        return;
+    }
+    const uint64_t cells_per_gemm =
+        uint64_t{shape_.rows_per_lobe} *
+        shape_.lobe_width;
+    if (shape_.lobe_width == 0 ||
+        shape_.lobe_width % kRCMxBlockLen != 0 ||
+        cells_per_gemm == 0 ||
+        cells_per_gemm % kRCMxBlockLen != 0 ||
+        range_manifest_.total_output_cells !=
+            cells_per_gemm * schedule_.size()) {
+        Poison("initialize:canonical_counts");
+        return;
+    }
+    tiles_per_gemm_ =
+        cells_per_gemm / kRCMxBlockLen;
+    product_.version = kVersionV3;
+    product_.statement_commitment =
+        statement_commitment;
+    product_.shape_commitment =
+        shape_commitment;
+    product_.gemm_schedule_commitment =
+        schedule_commitment;
+    product_.range_manifest_commitment =
+        range_manifest_.commitment;
+    product_.expected_gemms =
+        schedule_.size();
+    product_.expected_output_tiles =
+        tiles_per_gemm_ * schedule_.size();
+    product_.expected_output_cells =
+        range_manifest_.total_output_cells;
+    product_.shards.resize(
+        range_manifest_.shard_count);
+    initialized_ = StartShard();
+}
+
+bool StreamingProverV3::Impl::StartShard()
+{
+    if (shard_cursor_ >=
+            range_manifest_.shard_count) {
+        return false;
+    }
+    RCStage3SignedRangePin range_pin;
+    std::string why;
+    if (!MakeRCStage3CoupledSignedRangePin(
+            range_manifest_, shard_cursor_,
+            range_pin, &why) ||
+        range_pin.cell_begin !=
+            global_tile_cursor_ *
+                kRCMxBlockLen ||
+        range_pin.cell_begin %
+                kRCMxBlockLen != 0 ||
+        range_pin.logical_rows <
+                kRCMxBlockLen ||
+        range_pin.logical_rows %
+                kRCMxBlockLen != 0) {
+        Poison("start_shard:" + why);
+        return false;
+    }
+    auto& shard =
+        product_.shards[shard_cursor_];
+    shard.shard_index = shard_cursor_;
+    shard.cell_begin = range_pin.cell_begin;
+    shard.logical_rows =
+        range_pin.logical_rows;
+    shard.range_child.pin = range_pin;
+    shard.gemm_children.clear();
+    shard.gemm_children.reserve(
+        range_pin.logical_rows /
+        kRCMxBlockLen);
+    pending_tiles_.clear();
+    pending_tiles_.reserve(
+        range_pin.logical_rows /
+        kRCMxBlockLen);
+    range_columns_.assign(
+        kRCStage3SignedRangeColumns,
+        std::vector<Fp3>(
+            range_pin.n_rows,
+            Fp3::Zero()));
+    for (uint32_t row = 0;
+         row < range_pin.n_rows; ++row) {
+        const bool active =
+            row < range_pin.logical_rows;
+        range_columns_[
+            kRCStage3RangeActive][row] =
+            active ? Fp3::One() : Fp3::Zero();
+        range_columns_[
+            kRCStage3RangeRemaining][row] =
+            U(active
+                  ? range_pin.logical_rows - row
+                  : 0);
+        if (!active) {
+            range_columns_[
+                kRCStage3RangeZero][row] =
+                Fp3::One();
+            for (uint32_t bit = 0;
+                 bit < kRCStage3SignedRangeBits;
+                 ++bit) {
+                range_columns_[
+                    kRCStage3RangeDifferenceBits +
+                    bit][row] =
+                    U((range_pin.max_abs >> bit) &
+                      1U);
+            }
+        }
+    }
+    range_rows_filled_ = 0;
+    UpdatePeakRetainedProverBytes();
+    return true;
+}
+
+bool StreamingProverV3::Impl::PrecommitTile(
+    const RCCoupGemmProofWitnessView& view,
+    uint64_t local_tile)
+{
+    auto& shard =
+        product_.shards[shard_cursor_];
+    if (global_tile_cursor_ <
+            shard.cell_begin / kRCMxBlockLen ||
+        global_tile_cursor_ >=
+            (shard.cell_begin +
+             shard.logical_rows) /
+                kRCMxBlockLen) {
+        return false;
+    }
+    const uint32_t trace_rows =
+        NextPowerOfTwo(
+            uint64_t{shape_.lobe_width} *
+            kRCMxBlockLen);
+    std::vector<std::vector<Fp3>>
+        relation_columns;
+    std::string why;
+    if (trace_rows == 0 ||
+        !BuildTileColumns(
+            shape_,
+            view.operand_a,
+            view.operand_b,
+            view.gemm_y,
+            local_tile,
+            trace_rows,
+            relation_columns, &why)) {
+        Poison("tile_columns:" + why);
+        return false;
+    }
+    GemmChildV3 child;
+    child.global_tile_ordinal =
+        global_tile_cursor_;
+    child.schedule_index =
+        callback_cursor_;
+    child.output_tile_index =
+        local_tile;
+    child.dot_pin =
+        BuildDotPin(
+            product_.statement_commitment,
+            product_.shape_commitment,
+            product_.gemm_schedule_commitment,
+            callback_cursor_, local_tile,
+            shape_.lobe_width,
+            relation_columns);
+    CS relation;
+    if (child.dot_pin.pin_commitment.IsNull() ||
+        !ResolveDotRelation(
+            child.dot_pin, relation, &why)) {
+        Poison("tile_relation:" + why);
+        return false;
+    }
+    gated::SpecV1 spec;
+    spec.namespace_id = kNamespaceV3;
+    spec.stage = kStageV3;
+    spec.sign = 1;
+    spec.source_column =
+        kRCStage3CoupledGemmY;
+    spec.selector_column =
+        kRCStage3CoupledGemmEnd;
+    spec.addresses =
+        GemmAddresses(
+            shape_,
+            global_tile_cursor_,
+            trace_rows);
+    spec.challenges = {
+        U(2), U(3), U(5), U(7)};
+    gated::LayoutV1 layout;
+    CS combined;
+    std::vector<std::vector<Fp3>>
+        prechallenge;
+    if (!gated::BuildConstraintSystemV1(
+            relation, spec, combined,
+            layout, &why) ||
+        !gated::BuildPrechallengeColumnsV1(
+            relation_columns, spec, layout,
+            prechallenge, &why)) {
+        Poison("tile_prechallenge:" + why);
+        return false;
+    }
+    auto session =
+        aq::AirQuotientBuildTwoEpochBaseRowSessionRetainedTrace(
+            combined, prechallenge,
+            layout.base_column_indices);
+    if (!session.valid ||
+        session.base_trace_coefficients.empty()) {
+        Poison(
+            "tile_r0:" + session.note);
+        return false;
+    }
+    child.base_row_commitment =
+        session.base_row_commitment;
+    shard.gemm_children.push_back(
+        std::move(child));
+    pending_tiles_.push_back(
+        {std::move(session)});
+    UpdatePeakRetainedProverBytes();
+    return true;
+}
+
+bool StreamingProverV3::Impl::AppendRangeTile(
+    const RCCoupGemmProofWitnessView& view,
+    uint64_t local_tile)
+{
+    const auto& pin =
+        product_.shards[shard_cursor_]
+            .range_child.pin;
+    const uint32_t blocks =
+        shape_.lobe_width /
+        kRCMxBlockLen;
+    const uint32_t output_row =
+        local_tile / blocks;
+    const uint32_t output_block =
+        local_tile % blocks;
+    if (output_row >= shape_.rows_per_lobe ||
+        range_rows_filled_ >
+            pin.logical_rows -
+                kRCMxBlockLen) {
+        return false;
+    }
+    for (uint32_t lane = 0;
+         lane < kRCMxBlockLen; ++lane) {
+        const uint32_t output_column =
+            output_block *
+                kRCMxBlockLen +
+            lane;
+        const int64_t value =
+            view.gemm_y[
+                uint64_t{output_row} *
+                    shape_.lobe_width +
+                output_column];
+        const bool negative = value < 0;
+        const uint64_t magnitude =
+            negative
+            ? -static_cast<uint64_t>(value)
+            : static_cast<uint64_t>(value);
+        if (magnitude > pin.max_abs) {
+            Poison("range_value");
+            return false;
+        }
+        const uint32_t row =
+            range_rows_filled_++;
+        const uint64_t difference =
+            pin.max_abs - magnitude;
+        range_columns_[
+            kRCStage3RangeValue][row] =
+            S(value);
+        range_columns_[
+            kRCStage3RangeSign][row] =
+            U(negative && magnitude != 0);
+        range_columns_[
+            kRCStage3RangeZero][row] =
+            U(magnitude == 0);
+        range_columns_[
+            kRCStage3RangeMagnitudeInverse]
+            [row] =
+            magnitude == 0
+            ? Fp3::Zero()
+            : gf::Inv(U(magnitude));
+        range_columns_[
+            kRCStage3RangeMagnitude][row] =
+            U(magnitude);
+        for (uint32_t bit = 0;
+             bit < kRCStage3SignedRangeBits;
+             ++bit) {
+            range_columns_[
+                kRCStage3RangeMagnitudeBits +
+                bit][row] =
+                U((magnitude >> bit) & 1U);
+            range_columns_[
+                kRCStage3RangeDifferenceBits +
+                bit][row] =
+                U((difference >> bit) & 1U);
+        }
+    }
+    return true;
+}
+
+bool StreamingProverV3::Impl::
+RecoverRelationColumns(
+    const aq::AirQuotientTwoEpochBaseRowSession& session,
+    const gated::LayoutV1& layout,
+    std::vector<std::vector<Fp3>>& relation_columns,
+    std::string* why) const
+{
+    std::vector<std::vector<Fp3>> recovered;
+    if (!aq::AirQuotientRecoverTwoEpochBaseRows(
+            session, recovered, why) ||
+        recovered.size() !=
+            layout.base_column_indices.size() ||
+        layout.relation_columns >
+            recovered.size()) {
+        return false;
+    }
+    relation_columns.clear();
+    relation_columns.reserve(
+        layout.relation_columns);
+    for (uint32_t column = 0;
+         column < layout.relation_columns;
+         ++column) {
+        if (layout.base_column_indices[column] !=
+                column) {
+            return Fail(
+                why,
+                "recover_relation_schedule");
+        }
+        relation_columns.push_back(
+            std::move(recovered[column]));
+    }
+    return true;
+}
+
+bool StreamingProverV3::Impl::FinalizeShard()
+{
+    auto& shard =
+        product_.shards[shard_cursor_];
+    auto& range_child =
+        shard.range_child;
+    std::string why;
+    if (range_rows_filled_ !=
+            range_child.pin.logical_rows ||
+        shard.gemm_children.size() !=
+            range_child.pin.logical_rows /
+                kRCMxBlockLen ||
+        pending_tiles_.size() !=
+            shard.gemm_children.size() ||
+        range_columns_.size() !=
+            kRCStage3SignedRangeColumns) {
+        Poison("finalize_shard:coverage");
+        return false;
+    }
+    range_child.pin.column_roots.resize(
+        kRCStage3SignedRangeColumns);
+    for (uint32_t column = 0;
+         column < range_columns_.size();
+         ++column) {
+        range_child.pin.column_roots[column] = {
+            column,
+            aq::AirCommittedValuesRoot<Fp3>(
+                range_columns_[column],
+                range_child.pin.n_rows)};
+        if (range_child.pin
+                .column_roots[column]
+                .root.IsNull()) {
+            Poison("range_column_root");
+            return false;
+        }
+    }
+    CS range_relation;
+    if (!BuildRangeRelation(
+            range_child.pin,
+            range_relation, &why)) {
+        Poison("range_relation:" + why);
+        return false;
+    }
+    gated::SpecV1 range_spec;
+    range_spec.namespace_id = kNamespaceV3;
+    range_spec.stage = kStageV3;
+    range_spec.sign = -1;
+    range_spec.source_column =
+        kRCStage3RangeValue;
+    range_spec.selector_column =
+        kRCStage3RangeActive;
+    range_spec.addresses =
+        RangeAddresses(range_child.pin);
+    range_spec.challenges = {
+        U(2), U(3), U(5), U(7)};
+    gated::LayoutV1 range_layout;
+    CS range_combined;
+    std::vector<std::vector<Fp3>>
+        range_prechallenge;
+    if (!gated::BuildConstraintSystemV1(
+            range_relation, range_spec,
+            range_combined,
+            range_layout, &why) ||
+        !gated::BuildPrechallengeColumnsV1(
+            range_columns_, range_spec,
+            range_layout,
+            range_prechallenge, &why)) {
+        Poison("range_prechallenge:" + why);
+        return false;
+    }
+    auto range_session =
+        aq::AirQuotientBuildTwoEpochBaseRowSessionRetainedTrace(
+            range_combined,
+            range_prechallenge,
+            range_layout.base_column_indices);
+    if (!range_session.valid ||
+        range_session
+            .base_trace_coefficients.empty()) {
+        Poison("range_r0:" +
+               range_session.note);
+        return false;
+    }
+    range_child.base_row_commitment =
+        range_session.base_row_commitment;
+    // From this point the range trace is recovered only from the polynomial
+    // session whose shifted commitment fixed the transcript.
+    std::vector<std::vector<Fp3>>()
+        .swap(range_columns_);
+    std::vector<std::vector<Fp3>>()
+        .swap(range_prechallenge);
+
+    std::vector<uint256> gemm_roots;
+    gemm_roots.reserve(
+        shard.gemm_children.size());
+    for (const auto& child :
+         shard.gemm_children) {
+        gemm_roots.push_back(
+            child.base_row_commitment);
+    }
+    const uint256 gemm_schedule =
+        ScheduleCommitment(
+            product_.statement_commitment,
+            product_.shape_commitment,
+            shard_cursor_,
+            range_child.pin.cell_begin,
+            range_child.pin.logical_rows,
+            RCStage3RelationRole::CoupledGemm,
+            1);
+    const uint256 receiver_schedule =
+        ScheduleCommitment(
+            product_.statement_commitment,
+            product_.shape_commitment,
+            shard_cursor_,
+            range_child.pin.cell_begin,
+            range_child.pin.logical_rows,
+            RCStage3RelationRole::CompositionLink,
+            -1);
+    shard.manifest.bus_id = kBusIdV3;
+    shard.manifest.transcript_seed =
+        TranscriptSeed(
+            product_.statement_commitment,
+            product_.shape_commitment,
+            product_.gemm_schedule_commitment,
+            product_.range_manifest_commitment,
+            shard_cursor_);
+    shard.manifest.participants = {
+        Participant(
+            RCStage3RelationRole::CoupledGemm,
+            range_child.pin.logical_rows,
+            gemm_schedule, true),
+        Participant(
+            RCStage3RelationRole::CompositionLink,
+            range_child.pin.logical_rows,
+            receiver_schedule, false)};
+    shard.gemm_role =
+        RolePin(
+            shard.manifest.participants[0],
+            kBusIdV3,
+            AggregateRoots(
+                shard_cursor_,
+                RCStage3RelationRole::CoupledGemm,
+                gemm_roots));
+    shard.range_role =
+        RolePin(
+            shard.manifest.participants[1],
+            kBusIdV3,
+            AggregateRoots(
+                shard_cursor_,
+                RCStage3RelationRole::CompositionLink,
+                {range_child
+                     .base_row_commitment}));
+    const std::vector<RCStage3CtlChildPin>
+        prechallenge_pins{
+            shard.gemm_role,
+            shard.range_role};
+    if (shard.gemm_role
+            .trace_commitment.IsNull() ||
+        shard.range_role
+            .trace_commitment.IsNull() ||
+        !DeriveRCStage3CtlChallenges(
+            shard.manifest,
+            prechallenge_pins,
+            shard.challenges, &why)) {
+        Poison("derive_challenges:" + why);
+        return false;
+    }
+
+    RCStage3CtlTerminal gemm_terminal;
+    for (uint64_t local = 0;
+         local < shard.gemm_children.size();
+         ++local) {
+        auto& child =
+            shard.gemm_children[local];
+        CS relation;
+        if (!ResolveDotRelation(
+                child.dot_pin,
+                relation, &why)) {
+            Poison("recover_gemm_relation:" +
+                   why);
+            return false;
+        }
+        gated::SpecV1 spec;
+        spec.namespace_id = kNamespaceV3;
+        spec.stage = kStageV3;
+        spec.sign = 1;
+        spec.source_column =
+            kRCStage3CoupledGemmY;
+        spec.selector_column =
+            kRCStage3CoupledGemmEnd;
+        spec.addresses =
+            GemmAddresses(
+                shape_,
+                child.global_tile_ordinal,
+                child.dot_pin.n_rows);
+        spec.challenges =
+            shard.challenges;
+        gated::LayoutV1 layout;
+        CS placeholder_combined;
+        if (!gated::BuildConstraintSystemV1(
+                relation, spec,
+                placeholder_combined,
+                layout, &why)) {
+            Poison("recover_gemm_cs:" + why);
+            return false;
+        }
+        std::vector<std::vector<Fp3>>
+            relation_columns;
+        if (!RecoverRelationColumns(
+                pending_tiles_[local].session,
+                layout, relation_columns,
+                &why)) {
+            Poison("recover_gemm_rows:" + why);
+            return false;
+        }
+        const auto witness =
+            gated::BuildWitnessV1(
+                relation_columns,
+                spec, layout);
+        if (!witness.valid) {
+            Poison("gemm_witness:" +
+                   witness.note);
+            return false;
+        }
+        child.terminal = witness.terminal;
+        spec.expected_terminal =
+            child.terminal;
+        CS combined;
+        if (!gated::BuildConstraintSystemV1(
+                relation, spec, combined,
+                layout, &why) ||
+            layout.base_column_indices !=
+                pending_tiles_[local]
+                    .session
+                    .base_column_indices) {
+            Poison("gemm_final_cs:" + why);
+            return false;
+        }
+        const uint256 seed =
+            ChildSeed(
+                shard,
+                RCStage3RelationRole::CoupledGemm,
+                local,
+                child.base_row_commitment,
+                child.dot_pin.pin_commitment);
+        const auto proved =
+            aq::AirQuotientProveRowsSplitRapSafeV2(
+                combined,
+                witness.columns,
+                layout.base_column_indices,
+                seed, {},
+                &pending_tiles_[local]
+                     .session);
+        if (!proved.ok ||
+            !proved.division_exact) {
+            Poison("gemm_prove:" +
+                   proved.note);
+            return false;
+        }
+        child.proof = proved.proof;
+        child.proof_commitment =
+            CommitProof(child.proof);
+        gemm_terminal =
+            AddTerminal(
+                gemm_terminal,
+                child.terminal);
+    }
+    shard.gemm_role.terminal =
+        gemm_terminal;
+    shard.gemm_role.auxiliary_commitment =
+        CommitChildren(
+            RCStage3RelationRole::CoupledGemm,
+            shard.gemm_children);
+
+    range_spec.challenges =
+        shard.challenges;
+    if (!gated::BuildConstraintSystemV1(
+            range_relation, range_spec,
+            range_combined,
+            range_layout, &why)) {
+        Poison("range_final_cs:" + why);
+        return false;
+    }
+    std::vector<std::vector<Fp3>>
+        recovered_range_columns;
+    if (!RecoverRelationColumns(
+            range_session, range_layout,
+            recovered_range_columns,
+            &why)) {
+        Poison("recover_range_rows:" + why);
+        return false;
+    }
+    const auto range_witness =
+        gated::BuildWitnessV1(
+            recovered_range_columns,
+            range_spec, range_layout);
+    if (!range_witness.valid) {
+        Poison("range_witness:" +
+               range_witness.note);
+        return false;
+    }
+    range_child.terminal =
+        range_witness.terminal;
+    range_spec.expected_terminal =
+        range_child.terminal;
+    if (!gated::BuildConstraintSystemV1(
+            range_relation, range_spec,
+            range_combined,
+            range_layout, &why) ||
+        range_layout.base_column_indices !=
+            range_session
+                .base_column_indices) {
+        Poison("range_terminal_cs:" + why);
+        return false;
+    }
+    const uint256 range_seed =
+        ChildSeed(
+            shard,
+            RCStage3RelationRole::CompositionLink,
+            0,
+            range_child.base_row_commitment,
+            ComputeRCStage3SignedRangePinCommitment(
+                range_child.pin));
+    const auto range_proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            range_combined,
+            range_witness.columns,
+            range_layout.base_column_indices,
+            range_seed, {},
+            &range_session);
+    if (!range_proved.ok ||
+        !range_proved.division_exact) {
+        Poison("range_prove:" +
+               range_proved.note);
+        return false;
+    }
+    range_child.proof =
+        range_proved.proof;
+    range_child.proof_commitment =
+        CommitProof(range_child.proof);
+    shard.range_role.terminal =
+        range_child.terminal;
+    shard.range_role.auxiliary_commitment =
+        CommitRangeChild(range_child);
+    const uint256 challenge_commitment =
+        CommitRCStage3CtlChallenges(
+            shard.challenges);
+    shard.gemm_role.challenge_commitment =
+        challenge_commitment;
+    shard.range_role.challenge_commitment =
+        challenge_commitment;
+    shard.terminal_sum_zero =
+        Zero(AddTerminal(
+            shard.gemm_role.terminal,
+            shard.range_role.terminal));
+    if (!shard.terminal_sum_zero ||
+        !VerifyRCStage3CtlPublicPinComposition(
+            shard.manifest,
+            {shard.gemm_role,
+             shard.range_role},
+            &why)) {
+        Poison("terminal_composition:" + why);
+        return false;
+    }
+    shard.shard_commitment =
+        CommitShard(shard);
+    if (shard.shard_commitment.IsNull()) {
+        Poison("shard_commitment");
+        return false;
+    }
+    // Polynomial sessions are prover-local and are destroyed immediately
+    // after their shard proofs have been emitted.
+    std::vector<PendingTile>()
+        .swap(pending_tiles_);
+    ++shard_cursor_;
+    range_rows_filled_ = 0;
+    if (shard_cursor_ <
+            range_manifest_.shard_count) {
+        return StartShard();
+    }
+    return true;
+}
+
+void StreamingProverV3::Impl::OnGemm(
+    const RCCoupGemmProofWitnessView& view)
+{
+    if (!initialized_ || finalized_ ||
+        !error_.empty() ||
+        callback_cursor_ >=
+            schedule_.size()) {
+        Poison("callback_state");
+        return;
+    }
+    const auto& expected =
+        schedule_[callback_cursor_];
+    if (view.barrier != expected.barrier ||
+        view.lobe != expected.lobe ||
+        view.page_id != expected.page_id ||
+        view.rows != shape_.rows_per_lobe ||
+        view.width != shape_.lobe_width ||
+        view.operand_a == nullptr ||
+        view.operand_b == nullptr ||
+        view.gemm_y == nullptr) {
+        Poison("callback_schedule");
+        return;
+    }
+    for (uint64_t local_tile = 0;
+         local_tile < tiles_per_gemm_;
+         ++local_tile) {
+        if (shard_cursor_ >=
+                range_manifest_.shard_count ||
+            !PrecommitTile(view, local_tile) ||
+            !AppendRangeTile(view, local_tile)) {
+            if (error_.empty()) {
+                Poison("callback_tile");
+            }
+            return;
+        }
+        ++global_tile_cursor_;
+        if (range_rows_filled_ ==
+                product_.shards[shard_cursor_]
+                    .logical_rows &&
+            !FinalizeShard()) {
+            return;
+        }
+    }
+    ++callback_cursor_;
+}
+
+bool StreamingProverV3::Impl::Complete(
+    std::string* why) const
+{
+    if (!error_.empty()) {
+        return Fail(why, "stream:" + error_);
+    }
+    if (!initialized_ ||
+        callback_cursor_ != schedule_.size() ||
+        global_tile_cursor_ !=
+            product_.expected_output_tiles ||
+        shard_cursor_ !=
+            range_manifest_.shard_count ||
+        range_rows_filled_ != 0 ||
+        !pending_tiles_.empty() ||
+        !range_columns_.empty()) {
+        return Fail(why, "stream:incomplete");
+    }
+    return true;
+}
+
+bool StreamingProverV3::Impl::Finalize(
+    ProductV3& out,
+    std::string* why)
+{
+    out = {};
+    if (finalized_ ||
+        !Complete(why)) {
+        return false;
+    }
+    product_.every_cell_partitioned = true;
+    product_.every_child_proof_verified = true;
+    product_.every_terminal_sum_zero = true;
+    product_.normalized_parent_consumed = false;
+    product_.production_authority = false;
+    product_.product_commitment =
+        CommitProductV3(product_);
+    if (product_.product_commitment.IsNull() ||
+        !VerifyV3(
+            statement_, shape_,
+            product_, why)) {
+        Poison("self_verify");
+        return false;
+    }
+    finalized_ = true;
+    out = std::move(product_);
+    return true;
+}
+
+StreamingProverV3::StreamingProverV3(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3CoupledShape& shape)
+    : impl_(
+          std::make_unique<Impl>(
+              statement, shape))
+{
+}
+
+StreamingProverV3::~StreamingProverV3() = default;
+StreamingProverV3::StreamingProverV3(
+    StreamingProverV3&&) noexcept = default;
+StreamingProverV3&
+StreamingProverV3::operator=(
+    StreamingProverV3&&) noexcept = default;
+
+void StreamingProverV3::OnGemm(
+    const RCCoupGemmProofWitnessView& view)
+{
+    impl_->OnGemm(view);
+}
+
+bool StreamingProverV3::Complete(
+    std::string* why) const
+{
+    return impl_->Complete(why);
+}
+
+bool StreamingProverV3::Finalize(
+    ProductV3& out,
+    std::string* why)
+{
+    return impl_->Finalize(out, why);
+}
+
+uint64_t StreamingProverV3::
+RetainedNativeBytes() const
+{
+    return impl_->RetainedNativeBytes();
+}
+
+uint64_t StreamingProverV3::
+PeakRetainedNativeBytes() const
+{
+    return impl_->PeakRetainedNativeBytes();
+}
+
+uint64_t StreamingProverV3::
+RetainedProverBytes() const
+{
+    return impl_->RetainedProverBytes();
+}
+
+uint64_t StreamingProverV3::
+PeakRetainedProverBytes() const
+{
+    return impl_->PeakRetainedProverBytes();
 }
 
 bool ProveV3(

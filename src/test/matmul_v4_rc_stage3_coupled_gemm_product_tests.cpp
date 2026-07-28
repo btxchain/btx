@@ -193,6 +193,18 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!instance.operand_b_trace_root.IsNull());
         BOOST_CHECK(!instance.output_y_trace_root.IsNull());
         BOOST_CHECK(!instance.instance_commitment.IsNull());
+        for (const auto& tile : instance.tiles) {
+            // Degree-three product/chain constraints have quotient length
+            // 2*N-1, so both the public pin and proof must enforce the 2*N
+            // coefficient domain. This is consensus shape, not a prover
+            // tuning parameter.
+            BOOST_CHECK_EQUAL(
+                tile.pin.n_coeffs,
+                2u * tile.pin.n_rows);
+            BOOST_CHECK_EQUAL(
+                tile.proof.batch.n_coeffs,
+                tile.pin.n_coeffs);
+        }
         instances.push_back(std::move(instance));
     }
 

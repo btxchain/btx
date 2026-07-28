@@ -2690,6 +2690,19 @@ using AlgDualB3 = AirFriBackendAlgDual<Fp3>;
 using AlgDualStreamingAuditB3 =
     AirFriBackendAlgDualStreamingAudit;
 
+static bool SameFp3Vector(
+    const std::vector<Fp3>& a,
+    const std::vector<Fp3>& b)
+{
+    if (a.size() != b.size()) return false;
+    for (uint32_t i = 0; i < a.size(); ++i) {
+        if (!gkr_field::Eq(a[i], b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 AirQuotientRowsProveResult AirQuotientProveRows(
     const AirConstraintSystem<Fp3>& cs,
     const std::vector<std::vector<Fp3>>& columns,
@@ -3116,11 +3129,12 @@ uint256 AirQuotientTwoEpochBaseRowCommitment(
         : uint256{};
 }
 
-AirQuotientTwoEpochBaseRowSession
-AirQuotientBuildTwoEpochBaseRowSession(
+static AirQuotientTwoEpochBaseRowSession
+BuildTwoEpochBaseRowSessionImpl(
     const AirConstraintSystem<Fp3>& cs,
     const std::vector<std::vector<Fp3>>& columns,
-    const std::vector<uint32_t>& base_column_indices)
+    const std::vector<uint32_t>& base_column_indices,
+    bool retain_trace_coefficients)
 {
     AirQuotientTwoEpochBaseRowSession out;
     std::vector<std::vector<Fp3>> shifted;
@@ -3130,6 +3144,36 @@ AirQuotientBuildTwoEpochBaseRowSession(
             shifted, out.n_coeffs, &why)) {
         out.note = why;
         return out;
+    }
+    if (retain_trace_coefficients) {
+        out.base_trace_coefficients.reserve(
+            base_column_indices.size());
+        for (uint32_t column :
+             base_column_indices) {
+            out.base_trace_coefficients.push_back(
+                AirInterpolate(columns[column]));
+        }
+        if (out.base_trace_coefficients.size() !=
+                shifted.size()) {
+            out.note =
+                "two_epoch_base_session:coefficient_shape";
+            return out;
+        }
+        // Both paths must name exactly the same R0 polynomials.  Check this
+        // before committing so transform drift cannot split the transcript.
+        for (uint32_t i = 0;
+             i < shifted.size(); ++i) {
+            auto committed =
+                out.base_trace_coefficients[i];
+            AirCosetShiftCoeffs(committed);
+            if (!SameFp3Vector(
+                    committed, shifted[i])) {
+                out.note =
+                    "two_epoch_base_session:coefficient_drift";
+                out.base_trace_coefficients.clear();
+                return out;
+            }
+        }
     }
     auto cache =
         std::make_shared<Fri3AlgRowTreeCache>();
@@ -3153,6 +3197,96 @@ AirQuotientBuildTwoEpochBaseRowSession(
         ? "two_epoch_base_session:retained"
         : "two_epoch_base_session:null_root";
     return out;
+}
+
+AirQuotientTwoEpochBaseRowSession
+AirQuotientBuildTwoEpochBaseRowSession(
+    const AirConstraintSystem<Fp3>& cs,
+    const std::vector<std::vector<Fp3>>& columns,
+    const std::vector<uint32_t>& base_column_indices)
+{
+    return BuildTwoEpochBaseRowSessionImpl(
+        cs, columns, base_column_indices,
+        false);
+}
+
+AirQuotientTwoEpochBaseRowSession
+AirQuotientBuildTwoEpochBaseRowSessionRetainedTrace(
+    const AirConstraintSystem<Fp3>& cs,
+    const std::vector<std::vector<Fp3>>& columns,
+    const std::vector<uint32_t>& base_column_indices)
+{
+    return BuildTwoEpochBaseRowSessionImpl(
+        cs, columns, base_column_indices,
+        true);
+}
+
+bool AirQuotientRecoverTwoEpochBaseRows(
+    const AirQuotientTwoEpochBaseRowSession& session,
+    std::vector<std::vector<Fp3>>& ordered_columns,
+    std::string* why)
+{
+    ordered_columns.clear();
+    const auto fail = [&](const char* detail) {
+        ordered_columns.clear();
+        if (why != nullptr) {
+            *why =
+                std::string{
+                    "two_epoch_base_recover:"} +
+                detail;
+        }
+        return false;
+    };
+    if (!session.valid ||
+        session.trace_rows < 2 ||
+        (session.trace_rows &
+             (session.trace_rows - 1)) != 0 ||
+        session.n_coeffs < session.trace_rows ||
+        session.base_column_indices.empty() ||
+        session.base_trace_coefficients.size() !=
+            session.base_column_indices.size() ||
+        session.base_row_commitment.IsNull() ||
+        !session.row_tree_cache ||
+        !session.row_tree_cache->valid ||
+        Fri3AlgDigestToUint256(
+            session.row_tree_cache->root) !=
+            session.base_row_commitment) {
+        return fail("session");
+    }
+    std::vector<std::vector<Fp3>> shifted;
+    shifted.reserve(
+        session.base_trace_coefficients.size());
+    for (const auto& coefficients :
+         session.base_trace_coefficients) {
+        if (coefficients.size() !=
+                session.trace_rows) {
+            return fail("coefficient_length");
+        }
+        shifted.push_back(coefficients);
+        AirCosetShiftCoeffs(shifted.back());
+    }
+    Fri3AlgRowTreeCache rebuilt;
+    std::string tree_why;
+    if (!Fri3AlgBuildRowTreeCacheStreaming(
+            shifted, session.n_coeffs,
+            rebuilt, &tree_why) ||
+        !rebuilt.valid ||
+        rebuilt.root !=
+            session.row_tree_cache->root ||
+        Fri3AlgDigestToUint256(rebuilt.root) !=
+            session.base_row_commitment) {
+        return fail("commitment_mismatch");
+    }
+    ordered_columns.reserve(
+        session.base_trace_coefficients.size());
+    for (const auto& coefficients :
+         session.base_trace_coefficients) {
+        ordered_columns.push_back(
+            AirEvalOnSubgroup(
+                coefficients,
+                session.trace_rows));
+    }
+    return true;
 }
 
 AirQuotientTwoEpochRowsProveResult
@@ -3366,6 +3500,9 @@ AirQuotientProveRowsSplitRapConfigured(
             retained_r0->n_coeffs != n_coeffs ||
             retained_r0->base_column_indices !=
                 base_column_indices ||
+            (!retained_r0->base_trace_coefficients.empty() &&
+             retained_r0->base_trace_coefficients.size() !=
+                 base_column_indices.size()) ||
             retained_r0->base_row_commitment.IsNull() ||
             !retained_r0->row_tree_cache ||
             !retained_r0->row_tree_cache->valid ||
@@ -3374,6 +3511,34 @@ AirQuotientProveRowsSplitRapConfigured(
                 retained_r0
                     ->base_row_commitment) {
             return fail("retained_r0");
+        }
+        if (!retained_r0
+                 ->base_trace_coefficients.empty()) {
+            for (uint32_t position = 0;
+                 position < r0.size();
+                 ++position) {
+                const auto& coefficients =
+                    retained_r0
+                        ->base_trace_coefficients[
+                            position];
+                if (coefficients.size() != N) {
+                    return fail(
+                        "retained_r0_coefficients");
+                }
+                auto shifted = coefficients;
+                AirCosetShiftCoeffs(shifted);
+                if (!SameFp3Vector(
+                        shifted, r0[position]) ||
+                    !SameFp3Vector(
+                        AirEvalOnSubgroup(
+                            coefficients, N),
+                        columns[
+                            base_column_indices[
+                                position]])) {
+                    return fail(
+                        "retained_r0_trace_substitution");
+                }
+            }
         }
         r0_cache = retained_r0->row_tree_cache;
         r0_root =

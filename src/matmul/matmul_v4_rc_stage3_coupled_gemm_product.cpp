@@ -460,7 +460,8 @@ bool ExpectedCompactSelectorRootsV2(
 {
     if (pin.n_rows <
             uint64_t{shape.lobe_width} * kRCMxBlockLen ||
-        pin.n_coeffs != pin.n_rows) {
+        uint64_t{pin.n_coeffs} !=
+            2ull * pin.n_rows) {
         return Fail(why, "compact_selector_shape");
     }
     std::array<std::vector<Fp3>, 3> columns;
@@ -578,12 +579,15 @@ bool ValidateCompactInstanceV2(
                 .pin.column_roots[kRCStage3CoupledGemmB].root) {
             return Fail(why, "compact_operand_b_cross_row");
         }
-        if (verify_proofs &&
-            !VerifyRCStage3CoupledGemmDotProof(
-                pin, tile.proof, why)) {
-            return Fail(
-                why, "compact_tile_proof_" +
-                         std::to_string(tile_index));
+        if (verify_proofs) {
+            std::string proof_why;
+            if (!VerifyRCStage3CoupledGemmDotProof(
+                    pin, tile.proof, &proof_why)) {
+                return Fail(
+                    why, "compact_tile_proof_" +
+                             std::to_string(tile_index) +
+                             ":" + proof_why);
+            }
         }
     }
     return true;
@@ -605,7 +609,8 @@ uint256 ComputeRCStage3CoupledGemmDotPinCommitment(
                 kRCMxBlockLen ||
         !IsPowerOfTwo(pin.n_rows) ||
         pin.n_rows < pin.logical_rows ||
-        pin.n_coeffs != pin.n_rows ||
+        uint64_t{pin.n_coeffs} !=
+            2ull * pin.n_rows ||
         pin.column_roots.size() !=
             kRCStage3CoupledGemmColumns) {
         return {};
@@ -937,7 +942,10 @@ bool BuildRCStage3CoupledGemmProduct(
             pin.logical_rows =
                 shape.lobe_width * kRCMxBlockLen;
             pin.n_rows = NextPowerOfTwo(pin.logical_rows);
-            pin.n_coeffs = pin.n_rows;
+            // The product and chain constraints have algebraic degree three.
+            // Their quotient has length 2*N-1, hence the committed FRI
+            // coefficient domain is the next power of two, exactly 2*N.
+            pin.n_coeffs = 2 * pin.n_rows;
             std::vector<std::vector<Fp3>> columns;
             if (pin.n_rows == 0 ||
                 !BuildTileColumns(
@@ -1223,7 +1231,8 @@ bool ProveRCStage3CoupledGemmCompactInstanceV2(
         pin.logical_rows =
             shape.lobe_width * kRCMxBlockLen;
         pin.n_rows = NextPowerOfTwo(pin.logical_rows);
-        pin.n_coeffs = pin.n_rows;
+        // Keep the public pin equal to the degree-enforced quotient shape.
+        pin.n_coeffs = 2 * pin.n_rows;
         std::vector<std::vector<Fp3>> columns;
         if (pin.n_rows == 0 ||
             !BuildTileColumns(

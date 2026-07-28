@@ -356,6 +356,9 @@ struct AirQuotientTwoEpochBaseRowSession {
     uint32_t n_coeffs{0};
     std::vector<uint32_t> base_column_indices;
     uint256 base_row_commitment{};
+    /** Optional delayed-RAP state; empty for the default bounded session. */
+    std::vector<std::vector<gkr_field::Fp3>>
+        base_trace_coefficients;
     std::shared_ptr<Fri3AlgRowTreeCache> row_tree_cache;
     bool valid{false};
     std::string note;
@@ -395,6 +398,33 @@ AirQuotientBuildTwoEpochBaseRowSession(
     const AirConstraintSystem<gkr_field::Fp3>& cs,
     const std::vector<std::vector<gkr_field::Fp3>>& columns,
     const std::vector<uint32_t>& base_column_indices);
+
+/**
+ * Explicit delayed-RAP variant.
+ *
+ * Unlike the default session, this retains the unshifted coefficients of the
+ * exact R0 columns.  Use only when the application witness must be released
+ * before a challenge-dependent auxiliary trace can be built.
+ */
+[[nodiscard]] AirQuotientTwoEpochBaseRowSession
+AirQuotientBuildTwoEpochBaseRowSessionRetainedTrace(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const std::vector<uint32_t>& base_column_indices);
+
+/**
+ * Recover the exact R0 trace rows from a retained prover session.
+ *
+ * The returned columns are in base_column_indices order.  Before returning,
+ * the routine rebuilds the coset-shifted row commitment from the retained
+ * coefficients and requires equality with both the retained tree root and
+ * base_row_commitment.  Consequently callers cannot substitute coefficients
+ * between precommit and challenge-dependent completion.
+ */
+[[nodiscard]] bool AirQuotientRecoverTwoEpochBaseRows(
+    const AirQuotientTwoEpochBaseRowSession& session,
+    std::vector<std::vector<gkr_field::Fp3>>& ordered_columns,
+    std::string* why = nullptr);
 
 [[nodiscard]] AirQuotientTwoEpochRowsProveResult
 AirQuotientProveRowsTwoEpoch(

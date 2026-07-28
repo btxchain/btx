@@ -59,6 +59,9 @@ std::shared_ptr<
 std::shared_ptr<
     const RCStage3CoupledGemmCompactProductV2>
     g_coupled_gemm_compact_store_product;
+std::shared_ptr<
+    const coupled_gemm_range_ctl_v3::ProductV3>
+    g_coupled_gemm_range_store_product;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -1697,6 +1700,9 @@ RCStage3CoupledWinnerProofBundleV2(
           header, height, params, options)),
       m_gemm(
           statement_precommit,
+          MakeRCStage3CoupledShape(params, options)),
+      m_gemm_range_v3(
+          statement_precommit,
           MakeRCStage3CoupledShape(params, options))
 {
     if ((statement_precommit.statement !=
@@ -1714,6 +1720,18 @@ RCStage3CoupledWinnerProofBundleV2(
     }
 }
 
+void RCStage3CoupledWinnerProofBundleV2::OnBankPage(
+    const RCCoupBankPageProofWitnessView& view)
+{
+    m_capture->OnBankPage(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnInitialLobe(
+    const RCCoupInitialLobeProofWitnessView& view)
+{
+    m_capture->OnInitialLobe(view);
+}
+
 void RCStage3CoupledWinnerProofBundleV2::OnInitialState(
     const RCCoupInitialStateProofWitnessView& view)
 {
@@ -1725,6 +1743,7 @@ void RCStage3CoupledWinnerProofBundleV2::OnGemm(
 {
     m_capture->OnGemm(view);
     m_gemm.OnGemm(view);
+    m_gemm_range_v3.OnGemm(view);
 }
 
 void RCStage3CoupledWinnerProofBundleV2::OnPermutation(
@@ -1781,7 +1800,8 @@ bool RCStage3CoupledWinnerProofBundleV2::Complete(
             why, "bundle:" + m_error);
     }
     if (!m_capture->Complete(why) ||
-        !m_gemm.Complete(why)) {
+        !m_gemm.Complete(why) ||
+        !m_gemm_range_v3.Complete(why)) {
         return false;
     }
     return true;
@@ -1794,6 +1814,19 @@ BuildCompactGemmProductV2(
 {
     if (!Complete(why) ||
         !m_gemm.Finalize(out, why)) {
+        out = {};
+        return false;
+    }
+    return true;
+}
+
+bool RCStage3CoupledWinnerProofBundleV2::
+BuildAllCellGemmRangeProductV3(
+    coupled_gemm_range_ctl_v3::ProductV3& out,
+    std::string* why)
+{
+    if (!Complete(why) ||
+        !m_gemm_range_v3.Finalize(out, why)) {
         out = {};
         return false;
     }
@@ -1820,20 +1853,25 @@ bool RCStage3CoupledWinnerStorePutV1(
     g_coupled_winner_store_capture =
         std::move(capture);
     g_coupled_gemm_compact_store_product.reset();
+    g_coupled_gemm_range_store_product.reset();
     return true;
 }
 
 bool RCStage3CoupledWinnerBundleStorePutV2(
     const uint256& finalized_header_hash,
-    const RCStage3CoupledWinnerProofBundleV2& bundle,
+    RCStage3CoupledWinnerProofBundleV2& bundle,
     std::string* why)
 {
     RCStage3CoupledGemmCompactProductV2 product;
+    coupled_gemm_range_ctl_v3::ProductV3
+        all_cell_product;
     const auto capture = bundle.WinnerCapture();
     if (finalized_header_hash.IsNull() ||
         capture == nullptr ||
         !bundle.BuildCompactGemmProductV2(
             product, why) ||
+        !bundle.BuildAllCellGemmRangeProductV3(
+            all_cell_product, why) ||
         capture->Receipt().finalized_header_hash !=
             finalized_header_hash) {
         return Fail(why, "winner_bundle_store_incomplete");
@@ -1847,6 +1885,10 @@ bool RCStage3CoupledWinnerBundleStorePutV2(
         std::make_shared<
             const RCStage3CoupledGemmCompactProductV2>(
                 std::move(product));
+    g_coupled_gemm_range_store_product =
+        std::make_shared<
+            const coupled_gemm_range_ctl_v3::ProductV3>(
+                std::move(all_cell_product));
     return true;
 }
 
@@ -1883,6 +1925,23 @@ RCStage3CoupledGemmCompactStoreGetV2(
     return g_coupled_gemm_compact_store_product;
 }
 
+std::shared_ptr<
+    const coupled_gemm_range_ctl_v3::ProductV3>
+RCStage3CoupledGemmRangeStoreGetV3(
+    const uint256& finalized_header_hash)
+{
+    if (finalized_header_hash.IsNull()) return {};
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    if (g_coupled_winner_store_header !=
+            finalized_header_hash ||
+        g_coupled_gemm_range_store_product ==
+            nullptr) {
+        return {};
+    }
+    return g_coupled_gemm_range_store_product;
+}
+
 void RCStage3CoupledWinnerStoreEraseV1(
     const uint256& finalized_header_hash)
 {
@@ -1893,6 +1952,7 @@ void RCStage3CoupledWinnerStoreEraseV1(
         g_coupled_winner_store_header.SetNull();
         g_coupled_winner_store_capture.reset();
         g_coupled_gemm_compact_store_product.reset();
+        g_coupled_gemm_range_store_product.reset();
     }
 }
 
@@ -1903,6 +1963,7 @@ void RCStage3CoupledWinnerStoreClearForTestV1()
     g_coupled_winner_store_header.SetNull();
     g_coupled_winner_store_capture.reset();
     g_coupled_gemm_compact_store_product.reset();
+    g_coupled_gemm_range_store_product.reset();
 }
 
 } // namespace matmul::v4::rc
