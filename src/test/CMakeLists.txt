@@ -168,6 +168,9 @@ add_executable(test_btx
   matmul_v4_rc_stage3_recursive_consumption_tests.cpp
   matmul_v4_rc_stage3_recursive_fixedpoint_tests.cpp
   matmul_v4_rc_stage3_recursive_receipt_tests.cpp
+  matmul_v4_rc_stage3_recursive_receipt_v2_tests.cpp
+  matmul_v4_rc_stage3_receipt_public_statement_tests.cpp
+  matmul_v4_rc_stage3_recursive_hierarchy_tests.cpp
   matmul_v4_rc_stage3_direct_parent_spine_tests.cpp
   matmul_v4_rc_stage3_p2_transcript_air_tests.cpp
   matmul_v4_rc_stage3_p2_transcript_binding_tests.cpp
