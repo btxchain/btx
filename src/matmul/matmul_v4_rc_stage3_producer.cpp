@@ -8,6 +8,7 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
 #include <pow.h>
@@ -246,12 +247,20 @@ RCStage3NormalizedProviderStatus BuildRCStage3NormalizedAuthorityReceipt(
     namespace receipt_consumer =
         normalized_relation_receipt_consumer;
 
+    const uint256 final_header_hash =
+        solved_block.GetHash();
+    const auto episode_capture =
+        RCStage3EpisodeWitnessStoreGet(
+            final_header_hash);
     const parent_builder::ProductionParentBuildInputV1 input{
         .solved_block = &solved_block,
         .params = &params,
         .height = height,
         .target = target,
         .episode_rounds = hints.episode_rounds,
+        .episode_capture = episode_capture,
+        .episode_capture_header_hash =
+            final_header_hash,
     };
     receipt_consumer::CanonicalRelationParentProductV1 parent_product;
     std::string parent_why;

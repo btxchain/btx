@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <primitives/block.h>
@@ -162,6 +163,21 @@ bool BuildBlockRoleProducts(
         ResolveRCEpisodeParams(params, input.height);
     if (!ValidateRCEpisodeParams(episode)) {
         Note(why, "episode_params");
+        return false;
+    }
+    if (input.episode_capture == nullptr ||
+        input.episode_capture_header_hash !=
+            block.GetHash()) {
+        Note(why, "winner_episode_capture_binding");
+        return false;
+    }
+    std::string capture_why;
+    if (!input.episode_capture->Complete(
+            &capture_why)) {
+        Note(
+            why,
+            "winner_episode_capture_incomplete:" +
+                capture_why);
         return false;
     }
 
@@ -1158,6 +1174,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
             why)) {
         return false;
     }
+    out.winner_episode_capture_bound = true;
 
     out.direct_builder_public_fs_seed =
         input.solved_block->GetHash();
@@ -1363,6 +1380,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         out.endpoint_count ==
             kRCStage3RelationClosureEndpointCount &&
         out.all_endpoint_cells_literal &&
+        out.winner_episode_capture_bound &&
         out.builder_stream_relations_same_parent &&
         out.witness_violations == 0;
 

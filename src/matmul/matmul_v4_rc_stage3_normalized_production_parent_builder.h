@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,10 @@ class CBlock;
 
 namespace Consensus {
 struct Params;
+}
+
+namespace matmul::v4::rc {
+class RCStage3EpisodeWitnessCapture;
 }
 
 namespace matmul::v4::rc::normalized_production_parent_builder {
@@ -31,9 +36,10 @@ inline constexpr uint16_t kProductionParentBuildInputVersionV1 = 1;
  * Typed, immutable production build request.
  *
  * There is deliberately no callback, readiness flag, host verification bit or
- * serialized proof in this request.  The only optional value is the exact
- * episode transcript already computed by the solver; omitting it asks the
- * eventual builder to recompute that witness from the finalized header.
+ * serialized proof in this request.  `episode_capture` is the immutable
+ * winner-only witness retained by the solver's CPU reseal.  Its accompanying
+ * key must be the finalized header hash; the builder never erases it and never
+ * accepts a capture under a different header.
  */
 struct ProductionParentBuildInputV1 {
     uint16_t version{kProductionParentBuildInputVersionV1};
@@ -42,6 +48,9 @@ struct ProductionParentBuildInputV1 {
     int32_t height{-1};
     uint256 target{};
     const std::vector<RCRoundTranscript>* episode_rounds{nullptr};
+    std::shared_ptr<const RCStage3EpisodeWitnessCapture>
+        episode_capture{};
+    uint256 episode_capture_header_hash{};
 };
 
 /**
@@ -124,6 +133,7 @@ struct ProductionRelationParentCandidateV1 {
     bool exact_endpoint_order{false};
     bool all_endpoint_cells_literal{false};
     bool builder_stream_relations_same_parent{false};
+    bool winner_episode_capture_bound{false};
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};
     bool production_authority{false};

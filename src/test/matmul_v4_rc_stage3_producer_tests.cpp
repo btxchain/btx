@@ -44,6 +44,7 @@
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.h>
 #include <pow.h>
 #include <primitives/block.h>
@@ -914,9 +915,14 @@ BOOST_AUTO_TEST_CASE(
     CBlock block = RealRcBlock102();
     const auto episode_params =
         rc::ResolveRCEpisodeParams(params, HEIGHT);
+    auto episode_capture =
+        std::make_shared<
+            rc::RCStage3EpisodeWitnessCapture>(
+                episode_params);
     const uint256 episode_digest =
-        rc::RecomputeResidentCurriculumReference(
-            block, episode_params, HEIGHT);
+        rc::MineRCEpisodeWithProofWitness(
+            block, episode_params, HEIGHT,
+            *episode_capture);
     const auto coupled_params =
         rc::ResolveRCCoupParams(params);
     const auto coupled_options =
@@ -944,6 +950,9 @@ BOOST_AUTO_TEST_CASE(
         .params = &params,
         .height = HEIGHT,
         .target = target,
+        .episode_capture = episode_capture,
+        .episode_capture_header_hash =
+            block.GetHash(),
     };
     builder::ProductionRelationParentCandidateV1
         candidate;
