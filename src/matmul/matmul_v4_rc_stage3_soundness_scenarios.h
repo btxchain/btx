@@ -18,6 +18,18 @@ inline constexpr uint32_t
     kSelectedProductionRelationRowsPerSiteV1 = 1U << 18;
 inline constexpr uint8_t
     kSelectedProductionHashParallelLanesV1 = 4;
+/**
+ * Canonical executable production-site total for the selected V1 policy.
+ *
+ * BuildProductionProofSiteManifest() remains the derivation and
+ * ValidateProductionProofSiteManifest() remains the executable validator.
+ * This named value lets every downstream composition theorem charge the same
+ * manifest-derived inventory instead of retaining an obsolete hand-written
+ * site count.  It includes the executable per-site capacities of the private
+ * SHA256d and ChaCha proof engines.
+ */
+inline constexpr uint64_t kSelectedProductionProofSitesV1 =
+    59'518'769'809ULL;
 
 enum class BatchChallengeShape : uint8_t {
     IndependentCoefficients = 1,

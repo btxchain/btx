@@ -38,8 +38,8 @@ BOOST_AUTO_TEST_CASE(profile2_site_inventory_is_exact_but_not_a_global_cap)
         inventory.known_sites_including_final_tree, 994'229ULL);
     BOOST_CHECK_EQUAL(inventory.known_sites_log2_ceiling, 20U);
     BOOST_CHECK_EQUAL(
-        inventory.declared_candidate_site_budget, 1ULL << 26);
-    BOOST_CHECK_EQUAL(inventory.declared_candidate_site_log2, 26U);
+        inventory.declared_candidate_site_budget, 1ULL << 36);
+    BOOST_CHECK_EQUAL(inventory.declared_candidate_site_log2, 36U);
     BOOST_CHECK(inventory.known_sites_fit_declared_budget);
 
     // The current solver's rejection loops are unbounded, so it has no finite
@@ -92,34 +92,34 @@ BOOST_AUTO_TEST_CASE(all_q_comparison_identifies_only_conditional_candidates)
 
     const auto& single24 =
         find("single_fp3_q192_lde24_independent");
-    BOOST_CHECK_CLOSE(single24.all_query_work_bits, 100.93347803, 1e-6);
-    BOOST_CHECK(single24.numeric_target_met);
+    BOOST_CHECK_CLOSE(single24.all_query_work_bits, 90.93347805, 1e-6);
+    BOOST_CHECK(!single24.numeric_target_met);
 
     const auto& single23 =
         find("single_fp3_q192_lde23_independent");
-    BOOST_CHECK_CLOSE(single23.all_query_work_bits, 102.93347781, 1e-6);
-    BOOST_CHECK(single23.numeric_target_met);
+    BOOST_CHECK_CLOSE(single23.all_query_work_bits, 92.93347805, 1e-6);
+    BOOST_CHECK(!single23.numeric_target_met);
 
     const auto& dual128 =
         find("dual_fp3_q128_lde24_independent");
-    BOOST_CHECK_CLOSE(dual128.all_query_work_bits, 103.80475632, 1e-6);
-    BOOST_CHECK(dual128.numeric_target_met);
+    BOOST_CHECK_CLOSE(dual128.all_query_work_bits, 98.80475632, 1e-6);
+    BOOST_CHECK(!dual128.numeric_target_met);
 
     const auto& dual136 =
         find("dual_fp3_q136_lde24_independent");
-    BOOST_CHECK_GT(dual136.all_query_work_bits, 111.1);
-    BOOST_CHECK_LT(dual136.all_query_work_bits, 111.2);
+    BOOST_CHECK_GT(dual136.all_query_work_bits, 106.1);
+    BOOST_CHECK_LT(dual136.all_query_work_bits, 106.2);
     BOOST_CHECK(dual136.numeric_target_met);
 
     const auto& dual148 =
         find("dual_fp3_q148_lde24_independent");
-    BOOST_CHECK_GT(dual148.all_query_work_bits, 113.9);
-    BOOST_CHECK_LT(dual148.all_query_work_bits, 114.0);
+    BOOST_CHECK_GT(dual148.all_query_work_bits, 108.9);
+    BOOST_CHECK_LT(dual148.all_query_work_bits, 109.0);
     BOOST_CHECK(dual148.numeric_target_met);
 
     const auto& fp4 = find("single_fp4_q192_lde24_power");
-    BOOST_CHECK_GT(fp4.all_query_work_bits, 114.2);
-    BOOST_CHECK_LT(fp4.all_query_work_bits, 114.3);
+    BOOST_CHECK_GT(fp4.all_query_work_bits, 109.2);
+    BOOST_CHECK_LT(fp4.all_query_work_bits, 109.3);
     BOOST_CHECK(fp4.numeric_target_met);
     BOOST_CHECK(!fp4.field_backend_present);
 
@@ -819,9 +819,10 @@ BOOST_AUTO_TEST_CASE(pr89_honest_dual_floor_replaces_fiction)
 BOOST_AUTO_TEST_CASE(
     composed_threat_model_floor_binds_on_shared_collision_at_qstar)
 {
-    // q* = 76 over the canonical 37,488,397-site ledger count.
+    // q* = 76 over the canonical executable production-site ledger count.
     const auto f = ss::AssessComposedThreatModelFloorV1(
-        ss::kThreatModelDefensibleMinQStar, 37'488'397ULL);
+        ss::kThreatModelDefensibleMinQStar,
+        ss::kSelectedProductionProofSitesV1);
     BOOST_CHECK_EQUAL(f.qstar, 76U);
     BOOST_CHECK_CLOSE(f.field_pair_bits, 156.0, 1e-9);
     BOOST_CHECK_CLOSE(f.taxed_query_pair_bits, 212.0, 1e-9);
@@ -830,7 +831,7 @@ BOOST_AUTO_TEST_CASE(
         f.binding_term ==
         ss::ComposedFloorBindingTerm::SharedCollision);
     BOOST_CHECK_CLOSE(f.per_site_composed_floor_bits, 104.0, 1e-9);
-    BOOST_CHECK_CLOSE(f.global_composed_floor_bits, 79.0, 1e-9);
+    BOOST_CHECK_CLOSE(f.global_composed_floor_bits, 68.0, 1e-9);
     BOOST_CHECK(f.per_site_meets_100);
     BOOST_CHECK(!f.global_meets_100);
     BOOST_CHECK(f.global_meets_64);

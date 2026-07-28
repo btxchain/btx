@@ -626,8 +626,8 @@ ComposeExecutableGlobalAdditiveBoundV1(
         out.mlink_p2_epsilon_bits,
     });
 
-    // (d) Site-union charge over the canonical production site count. The 25-bit
-    // charge over 37.5M sites subsumes and dominates the 8.41-bit 341-node
+    // (d) Site-union charge over the canonical production site count. The 36-bit
+    // charge over 59.5B sites subsumes and dominates the 8.41-bit 341-node
     // recursion union, so the binding global value is the shared-collision floor
     // minus the site union.
     out.global_sites = composed_floor.global_sites;
@@ -649,8 +649,8 @@ ComposeExecutableGlobalAdditiveBoundV1(
                   std::llround(out.global_composed_bits))
             : 0;
 
-    // Machine-check: reproduce the shipped composed-floor global (79) and the
-    // published union arithmetic (341 = 256 + 85; site union = 25 bits).
+    // Machine-check: reproduce the shipped composed-floor global (68) and the
+    // published union arithmetic (341 = 256 + 85; site union = 36 bits).
     out.global_matches_shipped_composed_floor =
         out.global_certified_bits_target ==
         static_cast<uint32_t>(std::llround(
@@ -662,7 +662,10 @@ ComposeExecutableGlobalAdditiveBoundV1(
         out.recursion_leaf_nodes == kBridgeRecursionLeafNodes &&
         out.recursion_internal_nodes ==
             kBridgeRecursionInternalNodes &&
-        std::abs(out.site_union_charge_bits - 25.0) < 0.5 &&
+        std::abs(
+            out.site_union_charge_bits -
+            std::round(std::log2(
+                static_cast<double>(kCanonicalProductionSites)))) < 0.5 &&
         std::isfinite(out.bridge_additive_union_bits) &&
         std::isfinite(out.per_proof_bridge_bound_bits);
 
@@ -684,8 +687,8 @@ ComposeExecutableGlobalAdditiveBoundV1(
         "additive_extractor_union_not_depth_multiplicative;"
         "kappa_per_node_Fqstar_104;"
         "flat_terms_hashcoll_128_crosshash_88_mlink_p2_94;"
-        "site_union_25b_over_37p5M;"
-        "global_min_composed_79;"
+        "site_union_36b_over_59p5B;"
+        "global_min_composed_68;"
         "M2_poseidon2_binding_inherent_explicit_assumption";
     return out;
 }
@@ -1135,7 +1138,7 @@ AssessExecutableGlobalSoundnessLedgerV1(
 
     // Composed threat-model floor F(q*) at q* = 76 over the canonical site
     // count. Computed UNCONDITIONALLY so the ledger is correct today: per-site
-    // 104 (binding shared-collision term), global ~79 after the site union.
+    // 104 (binding shared-collision term), global ~68 after the site union.
     out.composed_floor =
         scenarios::AssessComposedThreatModelFloorV1(
             scenarios::kThreatModelDefensibleMinQStar,
@@ -1148,14 +1151,14 @@ AssessExecutableGlobalSoundnessLedgerV1(
             out.composed_floor.global_composed_floor_bits));
 
     // V1 consensus/security-target decision (recommendation #6). Intended
-    // target is the 64-bit class with the computed ~79-bit global composed
+    // target is the 64-bit class with the computed ~68-bit global composed
     // floor — NOT an unused 100-bit requirement. Encoding only; does not flip
     // certified_bits or readiness gates.
     out.v1_security_target_is_64bit_class =
         out.composed_floor.global_meets_64 &&
         out.composed_certified_bits_target >=
             kV1ConsensusSecurityClassBits;
-    out.v1_global_floor_matches_shipped_79 =
+    out.v1_global_floor_matches_shipped_value =
         out.composed_certified_bits_target ==
             kV1ShippedGlobalComposedFloorBits &&
         out.composed_floor.global_meets_64 &&
@@ -1169,10 +1172,10 @@ AssessExecutableGlobalSoundnessLedgerV1(
             kV1ShippedGlobalComposedFloorBits;
     out.v1_security_target_decision_encoded =
         out.v1_security_target_is_64bit_class &&
-        out.v1_global_floor_matches_shipped_79 &&
+        out.v1_global_floor_matches_shipped_value &&
         out.v1_unused_100bit_requirement_is_not_target;
 
-    // Machine-check the legacy 79-bit release-target arithmetic, then require
+    // Machine-check the 68-bit release-target arithmetic, then require
     // the selected single-Q192 SAFE V3 numeric theorem to dominate that
     // target. The V3 theorem is independently required by the production
     // reductions below, so dual-lane A2 is retained as an audit comparison,
@@ -1354,12 +1357,12 @@ AssessExecutableGlobalSoundnessLedgerV1(
         "canonical_heterogeneous_topology_exact;"
         "deprecated_width_product_rejected;"
         "canonical_28_family_14_role_ali_degree_manifest_complete;"
-        "canonical_known_union_above_100;"
+        "canonical_known_union_above_v1_64_below_100;"
         "authenticated_family_residual_fold_executable;"
         "family_residual_vm_binding_open;"
         "product_diagnostic_fri_saturates_below_100;"
-        "composed_floor_Fqstar_per_site_104_global_79_computed;"
-        "v1_security_target_64bit_class_with_shipped_global_floor_79;"
+        "composed_floor_Fqstar_per_site_104_global_68_computed;"
+        "v1_security_target_64bit_class_with_shipped_global_floor_68;"
         "unused_100bit_requirement_is_not_v1_consensus_target;"
         "single_q192_safe_v3_numeric_floor_dominates_shipped_target;"
         "dual_lane_independence_not_selected_authority_premise;"

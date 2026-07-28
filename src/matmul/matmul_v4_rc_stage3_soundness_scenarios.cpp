@@ -1851,7 +1851,7 @@ ComposedThreatModelFloorV1 AssessComposedThreatModelFloorV1(
 
     // Within-proof site union: error multiplied by the site count, i.e. the
     // composed exponent loses log2(sites) bits. The doc reports the whole-bit
-    // charge round(log2(37.5M)) = 25 -> F_g(76) ~ 79.
+    // charge round(log2(59.5B)) = 36 -> F_g(76) ~ 68.
     if (global_sites > 0) {
         out.site_union_charge_exact_bits =
             std::log2(static_cast<double>(global_sites));

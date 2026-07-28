@@ -220,9 +220,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(a.lanes, 2U);
     BOOST_CHECK_EQUAL(a.queries_per_lane, 96U);
     BOOST_CHECK_EQUAL(a.tax_bits, 20U);
-    BOOST_CHECK_EQUAL(a.proof_sites, 37'488'397ULL);
+    BOOST_CHECK_EQUAL(
+        a.proof_sites,
+        pc::kPowCompositionV2ProofSites);
     BOOST_CHECK(a.numeric_bound_machine_checked);
-    BOOST_CHECK_GT(a.global_conditional_bits, 100.0);
+    BOOST_CHECK_GT(a.global_conditional_bits, 64.0);
     BOOST_CHECK(a.numeric_security_target_met);
     BOOST_CHECK(a.consensus_statement_binding_complete);
     BOOST_CHECK(a.complete_tensor_work_relation);
@@ -236,7 +238,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(a.pow_composition_theorem_complete);
     BOOST_CHECK_EQUAL(
         a.exact_expression,
-        "eps <= 37488397 * "
+        "eps <= 59518769809 * "
         "(2^20 * ((17/32)^96)^2 + 2^-128 + 2^-128)");
 }
 
@@ -325,9 +327,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(a.canonical_parameters);
     BOOST_CHECK_EQUAL(a.queries, 192U);
     BOOST_CHECK_EQUAL(a.ood_candidates, 2U);
-    BOOST_CHECK_EQUAL(a.proof_sites, 37'488'397ULL);
+    BOOST_CHECK_EQUAL(
+        a.proof_sites,
+        pc::kPowCompositionV3ProofSites);
     BOOST_CHECK(a.numeric_bound_machine_checked);
-    BOOST_CHECK_GT(a.global_conditional_bits, 100.0);
+    BOOST_CHECK_GT(a.global_conditional_bits, 64.0);
     BOOST_CHECK(a.numeric_security_target_met);
     BOOST_CHECK(a.consensus_statement_binding_complete);
     BOOST_CHECK(a.complete_tensor_work_relation);
@@ -341,7 +345,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(a.pow_composition_theorem_complete);
     BOOST_CHECK_EQUAL(
         a.exact_expression,
-        "eps <= 37488397 * (2^-135 + 2^-128 + 2^-128)");
+        "eps <= 59518769809 * (2^-135 + 2^-128 + 2^-128)");
 
     BOOST_CHECK_EQUAL(
         pc::kPowCompositionV3Queries,

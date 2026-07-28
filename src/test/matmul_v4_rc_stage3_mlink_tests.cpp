@@ -157,8 +157,8 @@ BOOST_AUTO_TEST_CASE(mlink_soundness_floor_clears_bars)
     const auto sound = ml::AssessMLinkSoundnessV1();
     BOOST_CHECK(sound.one_global_epsilon);
     BOOST_CHECK(sound.dual_independent_lanes);
-    // 189 - log2(37,488,397) - log2(52*2^24) - 40 ~= 94.14.
-    BOOST_CHECK_CLOSE(sound.epsilon_mlink_bits, 94.1396, 1e-2);
+    // 189 - log2(59,518,769,809) - log2(52*2^24) - 40 ~= 83.51.
+    BOOST_CHECK_CLOSE(sound.epsilon_mlink_bits, 83.5069, 1e-2);
     BOOST_CHECK(sound.clears_minimum_acceptance_bar);   // >= 64
     BOOST_CHECK(sound.clears_qstar_76_threat_bar);      // >= 76
     BOOST_CHECK_GE(sound.epsilon_mlink_bits, 64.0);

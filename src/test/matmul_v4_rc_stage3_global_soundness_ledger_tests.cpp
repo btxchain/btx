@@ -17,6 +17,8 @@
 
 namespace ledger =
     matmul::v4::rc::global_soundness_ledger;
+namespace scen =
+    matmul::v4::rc::soundness_scenarios;
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_global_soundness_ledger_tests)
@@ -85,10 +87,11 @@ BOOST_AUTO_TEST_CASE(
 
     const auto& canonical = audit.canonical;
     BOOST_CHECK_EQUAL(
-        canonical.sites, 37'488'397ULL);
+        canonical.sites,
+        scen::kSelectedProductionProofSitesV1);
     BOOST_CHECK_CLOSE(
         canonical.site_log2,
-        25.1599408017, 1e-7);
+        35.7926256566, 1e-7);
     BOOST_CHECK(
         canonical.site_count_manifest_derived);
     BOOST_CHECK(
@@ -97,51 +100,52 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!canonical.production_theorem);
     BOOST_CHECK_CLOSE(
         canonical.q192_fri_bcs_bits,
-        101.7735372173, 1e-7);
+        91.1408523887, 1e-7);
     BOOST_CHECK_CLOSE(
         canonical.maximum_single_lane_fri_bcs_bits,
-        101.7735372173, 1e-7);
+        91.1408523887, 1e-7);
     BOOST_CHECK_EQUAL(
         canonical.fri_saturation_queries, 140U);
     BOOST_CHECK_EQUAL(
         canonical.minimum_numeric_q_for_fri_100,
-        138U);
+        0U);
     BOOST_CHECK(
-        canonical.
+        !canonical.
             fri_100_reachable_by_any_single_lane_q);
     BOOST_CHECK_EQUAL(
         canonical.
             minimum_currently_executable_q_for_fri_100,
-        192U);
+        0U);
     BOOST_CHECK_CLOSE(
         canonical.trace_batching_bits,
-        109.8398830988, 1e-7);
+        99.2071982439, 1e-7);
     BOOST_CHECK_CLOSE(
         canonical.constraint_batching_bits,
-        109.8400591983, 1e-7);
+        99.2073743434, 1e-7);
     BOOST_CHECK_CLOSE(
         canonical.ctl_rational_identity_bits,
-        255.1396196522, 1e-7);
+        244.5069347972, 1e-7);
     BOOST_CHECK_CLOSE(
         canonical.hash_binding_bits,
-        102.8400591983, 1e-7);
+        92.2073743434, 1e-7);
     BOOST_CHECK_CLOSE(
         canonical.fs_sampler_liveness_bits,
-        111.4957632904, 1e-7);
+        100.8630784355, 1e-7);
     BOOST_CHECK_CLOSE(
         canonical.known_false_accept_union_bits,
-        101.2031426943, 1e-7);
+        90.5704578571, 1e-7);
     BOOST_CHECK(
-        canonical.known_union_numeric_target_met);
+        !canonical.known_union_numeric_target_met);
     BOOST_REQUIRE_EQUAL(canonical.terms.size(), 8U);
 
     const auto& product =
         audit.conservative_product;
     BOOST_CHECK_EQUAL(
-        product.sites, 12'221'217'422ULL);
+        product.sites,
+        ledger::kConservativeProductSites);
     BOOST_CHECK_CLOSE(
         product.site_log2,
-        33.5086689559, 1e-7);
+        44.1413538109, 1e-7);
     BOOST_CHECK(!product.site_count_manifest_derived);
     BOOST_CHECK(
         !product.
@@ -149,10 +153,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!product.production_theorem);
     BOOST_CHECK_CLOSE(
         product.q192_fri_bcs_bits,
-        93.4248090893, 1e-7);
+        82.7921242345, 1e-7);
     BOOST_CHECK_CLOSE(
         product.maximum_single_lane_fri_bcs_bits,
-        93.4248090893, 1e-7);
+        82.7921242345, 1e-7);
     BOOST_CHECK_EQUAL(
         product.fri_saturation_queries, 140U);
     BOOST_CHECK_EQUAL(
@@ -167,22 +171,22 @@ BOOST_AUTO_TEST_CASE(
         0U);
     BOOST_CHECK_CLOSE(
         product.trace_batching_bits,
-        101.4911549446, 1e-7);
+        90.8584700897, 1e-7);
     BOOST_CHECK_CLOSE(
         product.constraint_batching_bits,
-        101.4913310441, 1e-7);
+        90.8586461891, 1e-7);
     BOOST_CHECK_CLOSE(
         product.ctl_rational_identity_bits,
-        246.7908914979, 1e-7);
+        236.1582066430, 1e-7);
     BOOST_CHECK_CLOSE(
         product.hash_binding_bits,
-        94.4913310441, 1e-7);
+        83.8586461891, 1e-7);
     BOOST_CHECK_CLOSE(
         product.fs_sampler_liveness_bits,
-        103.1470351362, 1e-7);
+        92.5143502812, 1e-7);
     BOOST_CHECK_CLOSE(
         product.known_false_accept_union_bits,
-        92.8544145578, 1e-7);
+        82.2217297028, 1e-7);
     BOOST_CHECK(
         !product.known_union_numeric_target_met);
 
@@ -239,23 +243,23 @@ BOOST_AUTO_TEST_CASE(
     };
     for (const ExpectedPolicy expected : {
              ExpectedPolicy{
-                 4, 1U << 16, 66'480'699ULL,
-                 100.9470458151, 100.3766512883},
+                 4, 1U << 16, 59'547'762'111ULL,
+                 91.1401498058, 90.5697552742},
              ExpectedPolicy{
-                 4, 1U << 18, 37'488'397ULL,
-                 101.7735372288, 101.2031427020},
+                 4, 1U << 18, 59'518'769'809ULL,
+                 91.1408523887, 90.5704578571},
              ExpectedPolicy{
-                 4, 1U << 20, 30'240'318ULL,
-                 102.0835080556, 101.5131135288},
+                 4, 1U << 20, 59'511'521'732ULL,
+                 91.1410280879, 90.5706335563},
              ExpectedPolicy{
-                 7, 1U << 16, 55'124'366ULL,
-                 101.2172912083, 100.6468966815},
+                 7, 1U << 16, 59'547'762'111ULL,
+                 91.1401498058, 90.5697552742},
              ExpectedPolicy{
-                 7, 1U << 18, 26'132'068ULL,
-                 102.2941600672, 101.7237655405},
+                 7, 1U << 18, 59'518'769'809ULL,
+                 91.1408523887, 90.5704578571},
              ExpectedPolicy{
-                 7, 1U << 20, 18'883'992ULL,
-                 102.7628175894, 102.1924230626},
+                 7, 1U << 20, 59'511'521'732ULL,
+                 91.1410280879, 90.5706335563},
          }) {
         const auto& item =
             policy(expected.lanes, expected.rows);
@@ -322,7 +326,7 @@ BOOST_AUTO_TEST_CASE(
         audit.safe_q192_pow_composition.numeric_bound_machine_checked);
     BOOST_CHECK_GT(
         audit.safe_q192_pow_composition.global_conditional_bits,
-        100.0);
+        64.0);
     BOOST_CHECK(
         audit.safe_q192_v3_dominates_shipped_target);
     BOOST_CHECK(
@@ -356,15 +360,17 @@ BOOST_AUTO_TEST_CASE(
         floor.binding_term ==
         scen::ComposedFloorBindingTerm::SharedCollision);
 
-    // Per-site 104; global 79 after the round(log2(37.5M)) = 25 site union.
+    // Per-site 104; global 68 after the round(log2(59.5B)) = 36 site union.
     BOOST_CHECK_CLOSE(
         floor.per_site_composed_floor_bits, 104.0, 1e-9);
-    BOOST_CHECK_EQUAL(floor.global_sites, 37'488'397ULL);
+    BOOST_CHECK_EQUAL(
+        floor.global_sites,
+        scen::kSelectedProductionProofSitesV1);
     BOOST_CHECK_CLOSE(
-        floor.site_union_charge_exact_bits, 25.1599408017, 1e-7);
-    BOOST_CHECK_CLOSE(floor.site_union_charge_bits, 25.0, 1e-9);
+        floor.site_union_charge_exact_bits, 35.7926256566, 1e-7);
+    BOOST_CHECK_CLOSE(floor.site_union_charge_bits, 36.0, 1e-9);
     BOOST_CHECK_CLOSE(
-        floor.global_composed_floor_bits, 79.0, 1e-9);
+        floor.global_composed_floor_bits, 68.0, 1e-9);
 
     // Transport dual-alpha screen (183.57) is non-binding above the floor.
     BOOST_CHECK_CLOSE(
@@ -402,19 +408,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         audit.per_site_composed_floor_bits, 104U);
     BOOST_CHECK_EQUAL(
-        audit.composed_certified_bits_target, 79U);
+        audit.composed_certified_bits_target, 68U);
     BOOST_CHECK_EQUAL(
         audit.composed_certified_bits_target,
         ledger::kV1ShippedGlobalComposedFloorBits);
 
     // Recommendation #6: V1 consensus/security target is the 64-bit class with
-    // the computed ~79-bit global composed floor — not an unused 100-bit
+    // the computed ~68-bit global composed floor — not an unused 100-bit
     // requirement. Encoding only; certified_bits stays gated at 0.
     BOOST_CHECK_EQUAL(ledger::kV1ConsensusSecurityClassBits, 64U);
-    BOOST_CHECK_EQUAL(ledger::kV1ShippedGlobalComposedFloorBits, 79U);
+    BOOST_CHECK_EQUAL(ledger::kV1ShippedGlobalComposedFloorBits, 68U);
     BOOST_CHECK_EQUAL(ledger::kUnusedHundredBitRequirementBits, 100U);
     BOOST_CHECK(audit.v1_security_target_is_64bit_class);
-    BOOST_CHECK(audit.v1_global_floor_matches_shipped_79);
+    BOOST_CHECK(audit.v1_global_floor_matches_shipped_value);
     BOOST_CHECK(audit.v1_unused_100bit_requirement_is_not_target);
     BOOST_CHECK(audit.v1_security_target_decision_encoded);
     BOOST_CHECK(audit.safe_q192_v3_dominates_shipped_target);
@@ -429,7 +435,7 @@ BOOST_AUTO_TEST_CASE(
         !audit.safe_q192_pow_composition
              .pow_composition_theorem_complete);
     BOOST_CHECK(audit.note.find(
-                    "v1_security_target_64bit_class_with_shipped_global_floor_79") !=
+                    "v1_security_target_64bit_class_with_shipped_global_floor_68") !=
                 std::string::npos);
     BOOST_CHECK(audit.note.find(
                     "unused_100bit_requirement_is_not_v1_consensus_target") !=
@@ -459,7 +465,7 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    global_additive_composition_machine_computes_79_additively)
+    global_additive_composition_machine_computes_68_additively)
 {
     namespace scen = matmul::v4::rc::soundness_scenarios;
 
@@ -469,7 +475,8 @@ BOOST_AUTO_TEST_CASE(
     const auto floor = scen::AssessComposedThreatModelFloorV1(
         scen::kThreatModelDefensibleMinQStar,
         ledger::kCanonicalProductionSites);
-    const double mlink_eps = 94.13961948019406;  // 189-25.16-log2(52*2^24)-40
+    const double mlink_eps =
+        83.50693462523552;  // 189-log2(59.5B)-log2(52*2^24)-40
     const auto comp =
         ledger::ComposeExecutableGlobalAdditiveBoundV1(floor, mlink_eps);
 
@@ -502,26 +509,28 @@ BOOST_AUTO_TEST_CASE(
         comp.depth_multiplicative_comparison_bits);
 
     // (c) flat M-LINK/P2 + cross-hash (2^-88) + hash-collision (2^-128) terms.
-    BOOST_CHECK_CLOSE(comp.mlink_p2_epsilon_bits, 94.13961948019406, 1e-9);
+    BOOST_CHECK_CLOSE(comp.mlink_p2_epsilon_bits, 83.50693462523552, 1e-9);
     BOOST_CHECK_CLOSE(comp.cross_hash_sha_bits, 88.0, 1e-9);
     BOOST_CHECK_CLOSE(comp.hash_collision_bits, 128.0, 1e-9);
     BOOST_CHECK_CLOSE(
-        comp.flat_hash_link_lse_bits, 87.97968096843323, 1e-9);
+        comp.flat_hash_link_lse_bits, 83.4442504354578, 1e-9);
     // Per-proof bridge bound = 341*kappa + 2^-128 + 2^-88 + eps_P2 (lse).
     BOOST_CHECK_CLOSE(
-        comp.per_proof_bridge_bound_bits, 87.97229817606706, 1e-9);
+        comp.per_proof_bridge_bound_bits, 83.44393129366591, 1e-9);
 
-    // (d) site-union charge: round(log2(37.5M)) = 25 bits.
-    BOOST_CHECK_EQUAL(comp.global_sites, 37'488'397ULL);
+    // (d) site-union charge: round(log2(59.5B)) = 36 bits.
+    BOOST_CHECK_EQUAL(
+        comp.global_sites,
+        scen::kSelectedProductionProofSitesV1);
     BOOST_CHECK_CLOSE(
-        comp.site_union_charge_exact_bits, 25.159940801664856, 1e-9);
-    BOOST_CHECK_CLOSE(comp.site_union_charge_bits, 25.0, 1e-9);
-    BOOST_CHECK_CLOSE(comp.site_union_charged_floor_bits, 79.0, 1e-9);
+        comp.site_union_charge_exact_bits, 35.79262565662339, 1e-9);
+    BOOST_CHECK_CLOSE(comp.site_union_charge_bits, 36.0, 1e-9);
+    BOOST_CHECK_CLOSE(comp.site_union_charged_floor_bits, 68.0, 1e-9);
 
-    // Composed global value = min(site-union-charged floor, bridge bound) = 79,
+    // Composed global value = min(site-union-charged floor, bridge bound) = 68,
     // reproducing the shipped composed-floor global.
-    BOOST_CHECK_CLOSE(comp.global_composed_bits, 79.0, 1e-9);
-    BOOST_CHECK_EQUAL(comp.global_certified_bits_target, 79U);
+    BOOST_CHECK_CLOSE(comp.global_composed_bits, 68.0, 1e-9);
+    BOOST_CHECK_EQUAL(comp.global_certified_bits_target, 68U);
     BOOST_CHECK(comp.global_matches_shipped_composed_floor);
     BOOST_CHECK(comp.union_arithmetic_consistent);
     BOOST_CHECK(comp.poseidon2_binding_is_explicit_assumption);
@@ -622,11 +631,11 @@ BOOST_AUTO_TEST_CASE(
         ledger::AssessExecutableGlobalSoundnessLedgerV1();
     const auto& comp = audit.global_additive_composition;
 
-    // The ledger wires the same composition and it machine-checks to 79.
+    // The ledger wires the same composition and it machine-checks to 68.
     BOOST_CHECK(comp.machine_checked);
     BOOST_CHECK(audit.global_additive_composition_machine_checked);
     BOOST_CHECK(audit.safe_q192_v3_dominates_shipped_target);
-    BOOST_CHECK_EQUAL(comp.global_certified_bits_target, 79U);
+    BOOST_CHECK_EQUAL(comp.global_certified_bits_target, 68U);
     BOOST_CHECK_EQUAL(
         comp.global_certified_bits_target,
         audit.composed_certified_bits_target);

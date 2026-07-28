@@ -110,7 +110,7 @@ AssessmentV2 AssessPowCompositionV2(const PremisesV2& p)
     out.proof_sites = p.proof_sites;
     out.security_target_bits = p.security_target_bits;
     out.exact_expression =
-        "eps <= 37488397 * "
+        "eps <= " + std::to_string(p.proof_sites) + " * "
         "(2^20 * ((17/32)^96)^2 + 2^-128 + 2^-128)";
 
     out.canonical_parameters =
@@ -279,7 +279,8 @@ AssessmentV3 AssessPowCompositionV3(const PremisesV3& p)
     out.proof_sites = p.proof_sites;
     out.security_target_bits = p.security_target_bits;
     out.exact_expression =
-        "eps <= 37488397 * (2^-135 + 2^-128 + 2^-128)";
+        "eps <= " + std::to_string(p.proof_sites) +
+        " * (2^-135 + 2^-128 + 2^-128)";
 
     out.canonical_parameters =
         p.version == kPowCompositionVersionV3 &&

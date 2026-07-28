@@ -5,6 +5,8 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_POW_COMPOSITION_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_POW_COMPOSITION_H
 
+#include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
+
 #include <cstdint>
 #include <string>
 
@@ -107,7 +109,7 @@ inline constexpr uint32_t kPowCompositionV2Lanes = 2;
 inline constexpr uint32_t kPowCompositionV2QueriesPerLane = 96;
 inline constexpr uint32_t kPowCompositionV2TaxBits = 20;
 inline constexpr uint64_t kPowCompositionV2ProofSites =
-    37'488'397ULL;
+    soundness_scenarios::kSelectedProductionProofSitesV1;
 inline constexpr uint32_t kPowCompositionV2BindingBits = 128;
 inline constexpr uint32_t kPowCompositionV2SafeNiropBits = 128;
 inline constexpr uint32_t kPowCompositionV2SecurityTargetBits = 64;
@@ -218,7 +220,7 @@ inline constexpr uint16_t kPowCompositionVersionV3 = 3;
 inline constexpr uint32_t kPowCompositionV3Queries = 192;
 inline constexpr uint32_t kPowCompositionV3OodCandidates = 2;
 inline constexpr uint64_t kPowCompositionV3ProofSites =
-    37'488'397ULL;
+    soundness_scenarios::kSelectedProductionProofSitesV1;
 inline constexpr uint32_t kPowCompositionV3FriBits = 135;
 inline constexpr uint32_t kPowCompositionV3BindingBits = 128;
 inline constexpr uint32_t kPowCompositionV3SafeNiropBits = 128;

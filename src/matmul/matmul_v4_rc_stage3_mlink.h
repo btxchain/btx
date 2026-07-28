@@ -28,6 +28,7 @@
 
 #include <matmul/matmul_v4_rc_gkr_field_ext3.h>
 #include <matmul/matmul_v4_rc_stage3_relation_local_sharding.h>
+#include <matmul/matmul_v4_rc_stage3_soundness_scenarios.h>
 #include <uint256.h>
 
 #include <cstdint>
@@ -50,7 +51,8 @@ inline constexpr double kMLinkConservativeFp3Bits = 189.0;
  *  the M-LINK floor composes on the same basis as the composition ledger. */
 inline constexpr double kMLinkGrindingBits = 40.0;
 /** Canonical production site count (matches kCanonicalProductionSites). */
-inline constexpr uint64_t kMLinkCanonicalProductionSites = 37'488'397ULL;
+inline constexpr uint64_t kMLinkCanonicalProductionSites =
+    soundness_scenarios::kSelectedProductionProofSitesV1;
 /** Registered CTL buses charged as independent per site. */
 inline constexpr uint32_t kMLinkCtlBusesPerSite = 52;
 /** Enforced per-bus event cap (matches kRCStage3CtlMaxEvents = 2^24). */

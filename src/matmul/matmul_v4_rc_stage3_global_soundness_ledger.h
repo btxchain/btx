@@ -17,10 +17,10 @@ namespace matmul::v4::rc::global_soundness_ledger {
 
 inline constexpr uint16_t kExecutableGlobalLedgerVersion = 1;
 inline constexpr uint64_t kCanonicalProductionSites =
-    37'488'397ULL;
+    soundness_scenarios::kSelectedProductionProofSitesV1;
 inline constexpr uint32_t kRelationLocalProofInstances = 326;
 inline constexpr uint64_t kConservativeProductSites =
-    12'221'217'422ULL;
+    kCanonicalProductionSites * kRelationLocalProofInstances;
 inline constexpr uint32_t kSelectedSingleLaneQueries = 192;
 inline constexpr uint32_t kSelectedExtensionDegree = 3;
 inline constexpr uint32_t kSelectedLdeLog2 = 24;
@@ -34,15 +34,15 @@ inline constexpr uint32_t kFsSamplerDrawsPerCtlBus = 25;
 
 // --- V1 consensus / security target (recommendation #6) -------------------
 // Explicit Stage-3 V1 decision: the intended security class is 64 bits, with
-// the shipped machine-computed global composed floor ~79 (= F(q*=76) per-site
-// 104 minus the 25-bit site-union charge). This is NOT an unused 100-bit
+// the shipped machine-computed global composed floor ~68 (= F(q*=76) per-site
+// 104 minus the 36-bit site-union charge). This is NOT an unused 100-bit
 // requirement. Diagnostic FRI screens that still report "reach 100 bits" remain
 // inventory only; they do not redefine the V1 consensus target, and they do not
 // flip certified_bits or readiness gates.
 /** V1 consensus security class (bits). */
 inline constexpr uint32_t kV1ConsensusSecurityClassBits = 64;
 /** Shipped integer global composed floor the ledger certifies on gate-clear. */
-inline constexpr uint32_t kV1ShippedGlobalComposedFloorBits = 79;
+inline constexpr uint32_t kV1ShippedGlobalComposedFloorBits = 68;
 /** Explicit non-target: a 100-bit requirement is NOT the V1 consensus decision. */
 inline constexpr uint32_t kUnusedHundredBitRequirementBits = 100;
 
@@ -342,7 +342,7 @@ struct CompositionReadinessGateV1 {
 /**
  * Executable, machine-checked encoding of the global additive composition
  * theorem (gate 6 / global_soundness_composition_proved). It MACHINE-COMPUTES
- * the legacy 79-bit release target from four audit-input components:
+ * the 68-bit release target from four audit-input components:
  *
  *   (a) the per-node extractor bridge: 341*kappa additive union over the
  *       relation-local recursion tree (straight-line ROM extraction; the loss
@@ -354,7 +354,7 @@ struct CompositionReadinessGateV1 {
  *   (d) the site-union charge over the canonical production site count.
  *
  * Composition uses the same log-sum-exp union / min-floor arithmetic as the
- * rest of the ledger and reproduces the shipped composed-floor global (79).
+ * rest of the ledger and reproduces the shipped composed-floor global (68).
  * This struct is a machine-checked target computation; it does not by itself
  * mint certified bits. The authority gate additionally requires the selected
  * single-Q192 SAFE V3 theorem to dominate this target, so the dual-lane A2
@@ -482,7 +482,7 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     /** Selected single-lane SAFE/Q192/K=2 false-acceptance decomposition. */
     pow_composition::AssessmentV3 safe_q192_pow_composition;
     /** The selected V3 numeric floor independently dominates the shipped
-     * V1 79-bit target, so the legacy dual-lane arithmetic is not a security
+     * V1 68-bit target, so the legacy dual-lane arithmetic is not a security
      * premise of the authority gate. */
     bool safe_q192_v3_dominates_shipped_target{false};
     bool pow_composition_theorem_complete{false};
@@ -505,7 +505,7 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     CompositionReadinessGateV1 composition_gate;
     /** Per-site composed floor F(q*) = 104 at q* = 76 (binding: 256-2q). */
     uint32_t per_site_composed_floor_bits{0};
-    /** Global (site-union charged) composed floor ~79; the value certified_bits
+    /** Global (site-union charged) composed floor ~68; the value certified_bits
      * yields the moment `composition_gate.all_clear` becomes true. Computed
      * unconditionally so the ledger is correct now; not itself certified.
      * This is the V1 shipped floor (kV1ShippedGlobalComposedFloorBits), above
@@ -514,11 +514,11 @@ struct ExecutableGlobalSoundnessLedgerV1 {
 
     /**
      * Explicit V1 consensus/security-target decision encoding. Documents that
-     * the intended target is the 64-bit class with the computed ~79-bit global
+     * the intended target is the 64-bit class with the computed ~68-bit global
      * composed floor. Does not flip certified_bits or readiness gates.
      */
     bool v1_security_target_is_64bit_class{false};
-    bool v1_global_floor_matches_shipped_79{false};
+    bool v1_global_floor_matches_shipped_value{false};
     bool v1_unused_100bit_requirement_is_not_target{false};
     bool v1_security_target_decision_encoded{false};
 
