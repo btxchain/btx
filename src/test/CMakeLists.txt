@@ -116,6 +116,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_tests.cpp
   matmul_v4_rc_stage3_episode_air_tests.cpp
   matmul_v4_rc_stage3_episode_semantic_tests.cpp
+  matmul_v4_rc_stage3_episode_semantic_alg_tests.cpp
   matmul_v4_rc_stage3_episode_relation_product_tests.cpp
   matmul_v4_rc_stage3_episode_builder_params_tests.cpp
   matmul_v4_rc_stage3_episode_builder_seed_chain_tests.cpp

@@ -619,6 +619,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_episode.cpp
   matmul/matmul_v4_rc_stage3_episode_air.cpp
   matmul/matmul_v4_rc_stage3_episode_semantic.cpp
+  matmul/matmul_v4_rc_stage3_episode_semantic_alg.cpp
   matmul/matmul_v4_rc_stage3_episode_relation_product.cpp
   matmul/matmul_v4_rc_stage3_episode_builder_params.cpp
   matmul/matmul_v4_rc_stage3_episode_builder_seed_chain.cpp
