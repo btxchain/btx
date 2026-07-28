@@ -16272,25 +16272,36 @@ AssessNarrowBytecodePerPointJoinBudgetV1(
             : (out.rows_needed - out.free_rows);
     const uint64_t min_rows =
         uint64_t{out.fold_bus_rows} + deficit;
-    out.projected_trace_rows = NextPow2(min_rows);
-    if (out.projected_trace_rows == 0) {
+    // Use the same quotient-degree-derived FRI shape as the executable
+    // narrow backend.  `trace_rows * blowup` is only exact for a degree-2
+    // Everywhere relation; this parent has the measured degree-3 V_CS.
+    const nr::NarrowNodeFriShape fri_shape =
+        nr::AssessNarrowNodeFriShape(
+            min_rows, out.projected_columns);
+    out.projected_trace_rows = fri_shape.trace_rows;
+    out.projected_max_algebraic_degree =
+        fri_shape.max_algebraic_degree;
+    out.projected_quotient_len = fri_shape.quotient_len;
+    out.projected_coefficient_rows = fri_shape.n_coeffs;
+    out.projected_lde = fri_shape.n_lde;
+    out.exact_quotient_degree_accounting =
+        fri_shape.trace_rows != 0 &&
+        fri_shape.max_algebraic_degree != 0 &&
+        fri_shape.quotient_len != 0 &&
+        fri_shape.n_coeffs != 0 &&
+        fri_shape.n_lde != 0;
+    if (!out.exact_quotient_degree_accounting) {
         out.note =
             "stage3:recursive_fixedpoint:"
-            "narrow_bytecode_join_budget_row_overflow";
+            "narrow_bytecode_join_budget_domain_overflow";
         return out;
     }
-    out.projected_lde =
-        out.projected_trace_rows * kRCFriBlowup;
     out.projected_lde_supported =
-        out.projected_lde <=
-        (uint64_t{1} << kRCFriMaxLdeLog2);
+        fri_shape.fits_lde_cap;
     out.capacity_closed =
         !out.rows_fit_without_pad &&
         !out.projected_lde_supported;
 
-    // Degree-aware single-node FRI shape (stricter than blowup-only).
-    const nr::NarrowNodeFriShape fri_shape =
-        nr::AssessNarrowNodeFriShape(min_rows);
     out.single_node_fri_representable = fri_shape.representable;
 
     // Hierarchical attach: reuse blk planner so one 575-col node is not
@@ -16311,7 +16322,8 @@ AssessNarrowBytecodePerPointJoinBudgetV1(
         out.projected_columns_narrow &&
         out.queries > 0 &&
         out.instructions > 0 &&
-        out.rows_needed > 0;
+        out.rows_needed > 0 &&
+        out.exact_quotient_degree_accounting;
     out.note =
         out.valid
             ? (std::string(
@@ -16333,6 +16345,14 @@ AssessNarrowBytecodePerPointJoinBudgetV1(
                std::to_string(out.rows_needed) +
                ";projected_rows=" +
                std::to_string(out.projected_trace_rows) +
+               ";max_degree=" +
+               std::to_string(
+                   out.projected_max_algebraic_degree) +
+               ";quotient_len=" +
+               std::to_string(out.projected_quotient_len) +
+               ";coefficient_rows=" +
+               std::to_string(
+                   out.projected_coefficient_rows) +
                ";projected_lde=" +
                std::to_string(out.projected_lde) +
                (out.rows_fit_without_pad

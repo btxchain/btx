@@ -2719,7 +2719,11 @@ struct NarrowBytecodePerPointJoinBudgetV1 {
     uint64_t instructions{0};
     uint64_t rows_needed{0};
     uint64_t projected_trace_rows{0};
+    uint32_t projected_max_algebraic_degree{0};
+    uint64_t projected_quotient_len{0};
+    uint64_t projected_coefficient_rows{0};
     uint64_t projected_lde{0};
+    bool exact_quotient_degree_accounting{false};
     bool rows_fit_without_pad{false};
     bool projected_lde_supported{false};
     bool projected_columns_narrow{false};

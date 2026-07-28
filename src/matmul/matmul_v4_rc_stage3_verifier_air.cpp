@@ -45,6 +45,17 @@ uint64_t CeilDiv(uint64_t n, uint64_t d)
     return n / d + (n % d != 0 ? 1 : 0);
 }
 
+bool CheckedMulU64(uint64_t lhs, uint64_t rhs, uint64_t& out)
+{
+    if (lhs != 0 &&
+        rhs > std::numeric_limits<uint64_t>::max() / lhs) {
+        out = 0;
+        return false;
+    }
+    out = lhs * rhs;
+    return true;
+}
+
 void AppendU32(std::vector<unsigned char>& out, uint32_t value)
 {
     for (uint32_t i = 0; i < 4; ++i) {
@@ -7473,6 +7484,48 @@ uint256 CommitChunkRlcAggregateNodeV1(
     return hash.GetHash();
 }
 
+aq::AirConstraintSystem<Fp3>
+BuildChunkRlcLocalRelationV1(
+    uint32_t trace_rows,
+    uint32_t column_count,
+    const std::vector<Fp3>& coefficients)
+{
+    aq::AirConstraintSystem<Fp3> out;
+    if (trace_rows < 2 ||
+        (trace_rows & (trace_rows - 1)) != 0 ||
+        column_count == 0 ||
+        coefficients.size() != column_count ||
+        column_count ==
+            std::numeric_limits<uint32_t>::max()) {
+        return out;
+    }
+    out.n_rows = trace_rows;
+    out.n_columns = column_count + 1;
+    aq::AirConstraint<Fp3> relation;
+    relation.name =
+        "stage3.chunk_rlc.linear_combination";
+    relation.kind = aq::AirKind::kEverywhere;
+    relation.alg_degree = 1;
+    relation.eval =
+        [coefficients, column_count](
+            const std::vector<Fp3>& row,
+            const std::vector<Fp3>&) {
+            Fp3 sum = Fp3::Zero();
+            for (uint32_t local = 0;
+                 local < column_count; ++local) {
+                sum = gf::Add(
+                    sum,
+                    gf::Mul(
+                        coefficients[local],
+                        row[local]));
+            }
+            return gf::Sub(
+                row[column_count], sum);
+        };
+    out.constraints.push_back(std::move(relation));
+    return out;
+}
+
 uint32_t NextPowerOfTwoV1(uint64_t value)
 {
     if (value < 2) return 2;
@@ -7488,6 +7541,113 @@ uint32_t NextPowerOfTwoV1(uint64_t value)
 }
 
 } // namespace
+
+ChunkRlcLeafDomainAuditV1
+AssessChunkRlcLeafDomainV1(
+    const aq::AirConstraintSystem<Fp3>& leaf_cs)
+{
+    ChunkRlcLeafDomainAuditV1 out;
+    out.trace_rows = leaf_cs.n_rows;
+    if (leaf_cs.n_rows < 2 ||
+        (leaf_cs.n_rows &
+         (leaf_cs.n_rows - 1)) != 0 ||
+        leaf_cs.n_columns < 2 ||
+        leaf_cs.constraints.empty()) {
+        out.note =
+            "stage3:verifier_air:chunk_rlc_leaf_domain:"
+            "shape";
+        return out;
+    }
+
+    const uint64_t trace_degree =
+        uint64_t{leaf_cs.n_rows} - 1;
+    for (const auto& constraint :
+         leaf_cs.constraints) {
+        if (constraint.alg_degree == 0) {
+            out.note =
+                "stage3:verifier_air:"
+                "chunk_rlc_leaf_domain:zero_degree";
+            return out;
+        }
+        uint64_t composed = 0;
+        if (!CheckedMulU64(
+                constraint.alg_degree,
+                trace_degree, composed)) {
+            out.note =
+                "stage3:verifier_air:"
+                "chunk_rlc_leaf_domain:degree_overflow";
+            return out;
+        }
+        uint64_t selector_degree = 0;
+        switch (constraint.kind) {
+        case aq::AirKind::kEverywhere:
+            break;
+        case aq::AirKind::kTransition:
+            selector_degree = 1;
+            break;
+        default:
+            selector_degree = trace_degree;
+            break;
+        }
+        if (composed >
+            std::numeric_limits<uint64_t>::max() -
+                selector_degree) {
+            out.note =
+                "stage3:verifier_air:"
+                "chunk_rlc_leaf_domain:selector_overflow";
+            return out;
+        }
+        composed += selector_degree;
+        out.max_composed_degree =
+            std::max(
+                out.max_composed_degree,
+                composed);
+    }
+
+    const uint64_t quotient_len =
+        out.max_composed_degree < leaf_cs.n_rows
+        ? 1
+        : out.max_composed_degree -
+              leaf_cs.n_rows + 1;
+    if (quotient_len >
+        std::numeric_limits<uint32_t>::max()) {
+        out.note =
+            "stage3:verifier_air:chunk_rlc_leaf_domain:"
+            "quotient_overflow";
+        return out;
+    }
+    out.quotient_len =
+        static_cast<uint32_t>(quotient_len);
+    out.n_coeffs = NextPowerOfTwoV1(
+        std::max<uint64_t>(
+            leaf_cs.n_rows, quotient_len));
+    uint64_t n_lde = 0;
+    if (out.n_coeffs == 0 ||
+        !CheckedMulU64(
+            out.n_coeffs,
+            kRCFriBlowup,
+            n_lde) ||
+        n_lde >
+            std::numeric_limits<uint32_t>::max()) {
+        out.note =
+            "stage3:verifier_air:chunk_rlc_leaf_domain:"
+            "fri_domain_overflow";
+        return out;
+    }
+    out.n_lde = static_cast<uint32_t>(n_lde);
+    out.exact_quotient_degree_accounting = true;
+    out.backend_lde_cap_met =
+        n_lde <=
+        (uint64_t{1} << kRCFriMaxLdeLog2);
+    out.valid = true;
+    out.note =
+        out.backend_lde_cap_met
+        ? "stage3:verifier_air:chunk_rlc_leaf_domain:"
+          "exact_fit"
+        : "stage3:verifier_air:chunk_rlc_leaf_domain:"
+          "exact_over_cap";
+    return out;
+}
 
 ChunkRlcPcsStatementV1 BuildChunkRlcPcsStatementV1(
     const std::vector<std::vector<Fp3>>& columns,
@@ -7626,34 +7786,17 @@ ChunkRlcPcsStatementV1 BuildChunkRlcPcsStatementV1(
                 "coefficient_statement";
             return out;
         }
-        receipt.local_relation.n_rows =
-            out.trace_rows;
-        receipt.local_relation.n_columns =
-            receipt.column_count + 1;
-        aq::AirConstraint<Fp3> relation;
-        relation.name =
-            "stage3.chunk_rlc.linear_combination";
-        relation.kind = aq::AirKind::kEverywhere;
-        relation.alg_degree = 1;
-        relation.eval =
-            [coefficients =
-                 receipt.independent_coefficients,
-             count = receipt.column_count](
-                const std::vector<Fp3>& row,
-                const std::vector<Fp3>&) {
-                Fp3 sum = Fp3::Zero();
-                for (uint32_t local = 0;
-                     local < count; ++local) {
-                    sum = gf::Add(
-                        sum,
-                        gf::Mul(
-                            coefficients[local],
-                            row[local]));
-                }
-                return gf::Sub(row[count], sum);
-            };
-        receipt.local_relation.constraints.push_back(
-            std::move(relation));
+        receipt.local_relation =
+            BuildChunkRlcLocalRelationV1(
+                out.trace_rows,
+                receipt.column_count,
+                receipt.independent_coefficients);
+        if (receipt.local_relation.constraints.empty()) {
+            out.note =
+                "stage3:verifier_air:chunk_rlc:"
+                "local_relation_shape";
+            return out;
+        }
         receipt.local_relation_columns.assign(
             receipt.column_count + 1,
             std::vector<Fp3>(
@@ -7982,25 +8125,56 @@ AssessChunkRlcCostSelectionV1(
             uint64_t{trace_rows} *
             (uint64_t{total_columns} +
              plan.chunk_count);
-        plan.leaf_n_coeffs = trace_rows;
+        // Construct the same canonical degree-1 AIR used by every actual
+        // chunk receipt, then derive the quotient and FRI domains from it.
+        // This must not silently regress to trace_rows * blowup if the leaf
+        // relation gains a higher-degree or boundary constraint.
+        const uint32_t leaf_input_columns =
+            plan.maximum_leaf_relation_width - 1;
+        const aq::AirConstraintSystem<Fp3>
+            leaf_relation =
+                BuildChunkRlcLocalRelationV1(
+                    trace_rows,
+                    leaf_input_columns,
+                    std::vector<Fp3>(
+                        leaf_input_columns,
+                        Fp3::Zero()));
+        const ChunkRlcLeafDomainAuditV1 leaf_domain =
+            AssessChunkRlcLeafDomainV1(leaf_relation);
+        plan.leaf_max_composed_degree =
+            leaf_domain.max_composed_degree;
+        plan.leaf_quotient_len =
+            leaf_domain.quotient_len;
+        plan.leaf_n_coeffs =
+            leaf_domain.n_coeffs;
         plan.leaf_n_lde =
-            trace_rows <=
-                    std::numeric_limits<uint32_t>::max() /
-                        kRCFriBlowup
-            ? trace_rows * kRCFriBlowup
-            : 0;
+            leaf_domain.n_lde;
+        plan.leaf_domain_exact =
+            leaf_domain.valid &&
+            leaf_domain.exact_quotient_degree_accounting;
         const uint64_t total_relation_columns =
             uint64_t{total_columns} +
             plan.chunk_count;
         const uint64_t total_proof_columns =
             uint64_t{total_columns} +
             2 * uint64_t{plan.chunk_count};
-        plan.all_leaf_base_witness_bytes =
-            total_relation_columns *
-            trace_rows * 24;
-        plan.all_leaf_lde_column_bytes =
-            total_proof_columns *
-            plan.leaf_n_lde * 24;
+        uint64_t base_cells = 0;
+        uint64_t lde_cells = 0;
+        plan.cost_arithmetic_exact =
+            CheckedMulU64(
+                total_relation_columns,
+                trace_rows,
+                base_cells) &&
+            CheckedMulU64(
+                base_cells, 24,
+                plan.all_leaf_base_witness_bytes) &&
+            CheckedMulU64(
+                total_proof_columns,
+                plan.leaf_n_lde,
+                lde_cells) &&
+            CheckedMulU64(
+                lde_cells, 24,
+                plan.all_leaf_lde_column_bytes);
         const uint32_t fold_count =
             merkle_depth > 4
             ? merkle_depth - 4
@@ -8041,7 +8215,9 @@ AssessChunkRlcCostSelectionV1(
             plan.normalized_root_width <
                 kChunkRlcRecursiveColumnCapV1 &&
             plan.normalized_root_trace_rows != 0 &&
-            plan.leaf_n_lde != 0 &&
+            plan.leaf_domain_exact &&
+            leaf_domain.backend_lde_cap_met &&
+            plan.cost_arithmetic_exact &&
             plan.normalized_root_trace_rows <=
                 (uint32_t{1} <<
                  kRCFriMaxColumnLog2);

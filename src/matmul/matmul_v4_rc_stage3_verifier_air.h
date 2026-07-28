@@ -1404,6 +1404,23 @@ BuildChunkRlcPcsStatementV1(
     const ChunkRlcPcsStatementV1& statement,
     std::string* why = nullptr);
 
+/** Exact quotient/FRI domain of a chunk-RLC leaf constraint system. */
+struct ChunkRlcLeafDomainAuditV1 {
+    uint32_t trace_rows{0};
+    uint64_t max_composed_degree{0};
+    uint32_t quotient_len{0};
+    uint32_t n_coeffs{0};
+    uint32_t n_lde{0};
+    bool exact_quotient_degree_accounting{false};
+    bool backend_lde_cap_met{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] ChunkRlcLeafDomainAuditV1
+AssessChunkRlcLeafDomainV1(
+    const air_quotient::AirConstraintSystem<Fp3>& leaf_cs);
+
 struct ChunkRlcCostPlanV1 {
     uint32_t chunk_columns{0};
     uint32_t total_columns{0};
@@ -1418,6 +1435,8 @@ struct ChunkRlcCostPlanV1 {
     uint64_t normalized_root_active_rows{0};
     uint32_t normalized_root_trace_rows{0};
     uint64_t local_relation_cells{0};
+    uint64_t leaf_max_composed_degree{0};
+    uint32_t leaf_quotient_len{0};
     uint32_t leaf_n_coeffs{0};
     uint32_t leaf_n_lde{0};
     uint64_t all_leaf_base_witness_bytes{0};
@@ -1426,6 +1445,8 @@ struct ChunkRlcCostPlanV1 {
     uint64_t estimated_root_opening_bytes{0};
     uint64_t root_verifier_target_micros{900000};
     uint64_t measured_root_verifier_micros{0};
+    bool leaf_domain_exact{false};
+    bool cost_arithmetic_exact{false};
     bool backend_caps_met{false};
     bool original_constraint_relation_bound{false};
     bool cross_chunk_constraint_manifest_complete{false};

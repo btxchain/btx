@@ -4090,6 +4090,24 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(budget.projected_columns_narrow);
         BOOST_CHECK_EQUAL(budget.rows_needed, rows_needed);
         BOOST_CHECK(!budget.rows_fit_without_pad);
+        BOOST_CHECK(
+            budget.exact_quotient_degree_accounting);
+        BOOST_CHECK_EQUAL(
+            budget.projected_max_algebraic_degree,
+            nr::kMeasuredNarrowMaxAlgebraicDegree);
+        BOOST_CHECK_EQUAL(
+            budget.projected_quotient_len,
+            uint64_t{
+                nr::kMeasuredNarrowMaxAlgebraicDegree -
+                1} *
+                (budget.projected_trace_rows - 1));
+        BOOST_CHECK_GT(
+            budget.projected_coefficient_rows,
+            budget.projected_trace_rows);
+        BOOST_CHECK_EQUAL(
+            budget.projected_lde,
+            budget.projected_coefficient_rows *
+                rc::kRCFriBlowup);
         BOOST_CHECK(budget.capacity_closed);
         BOOST_CHECK(!budget.projected_lde_supported);
         BOOST_CHECK(!budget.single_node_fri_representable);
@@ -4210,7 +4228,24 @@ BOOST_AUTO_TEST_CASE(
             return out;
         }();
     BOOST_REQUIRE_GT(projected, 0U);
-    const uint64_t projected_lde = projected * 16U;
+    const nr::NarrowNodeFriShape projected_domain =
+        nr::AssessNarrowNodeFriShape(
+            rows_needed,
+            kNarrowCols +
+                (fp::BytecodeBusLayout(kNarrowCols).End() -
+                 kNarrowCols));
+    BOOST_REQUIRE_EQUAL(
+        projected_domain.trace_rows, projected);
+    BOOST_CHECK_EQUAL(
+        projected_domain.max_algebraic_degree,
+        nr::kMeasuredNarrowMaxAlgebraicDegree);
+    BOOST_CHECK_EQUAL(
+        projected_domain.quotient_len,
+        uint64_t{
+            nr::kMeasuredNarrowMaxAlgebraicDegree - 1} *
+            (projected - 1));
+    BOOST_CHECK_GT(projected_domain.n_coeffs, projected);
+    const uint64_t projected_lde = projected_domain.n_lde;
     BOOST_CHECK_GT(
         projected_lde, uint64_t{1} << 24);
     const uint32_t bytecode_cols =
@@ -4243,6 +4278,8 @@ BOOST_AUTO_TEST_CASE(
         "NARROW_575_JOIN instructions=" << instructions
         << " needed=" << rows_needed
         << " projected_rows=" << projected
+        << " quotient_len=" << projected_domain.quotient_len
+        << " n_coeffs=" << projected_domain.n_coeffs
         << " projected_lde=" << projected_lde
         << " bytecode_cols=" << bytecode_cols
         << " capacity_closed=true"
@@ -4253,6 +4290,54 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(
         !nr::kNarrowHierarchicalAggregationReady);
+}
+
+BOOST_AUTO_TEST_CASE(
+    narrow_bytecode_join_report_uses_exact_quotient_domain)
+{
+    const HonestChild hash_child = BuildHashKernelChild();
+    const fp::FoldBusComposition base =
+        fp::BuildFoldBusComposition(
+            hash_child.cs,
+            hash_child.proof,
+            hash_child.seed);
+    BOOST_REQUIRE_MESSAGE(base.valid, base.note);
+    rc::constraint_bytecode::ProgramTable table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledHashKernelProgramTable(
+            rc::RCStage3RelationRole::EpisodeTileTree,
+            table, &why),
+        why);
+    const fp::NarrowBytecodePerPointJoinBudgetV1 budget =
+        fp::AssessNarrowBytecodePerPointJoinBudgetV1(
+            base, table);
+    BOOST_REQUIRE_MESSAGE(budget.valid, budget.note);
+    BOOST_CHECK(
+        budget.exact_quotient_degree_accounting);
+    BOOST_CHECK_EQUAL(
+        budget.projected_max_algebraic_degree,
+        nr::kMeasuredNarrowMaxAlgebraicDegree);
+    BOOST_CHECK_EQUAL(
+        budget.projected_quotient_len,
+        uint64_t{
+            nr::kMeasuredNarrowMaxAlgebraicDegree - 1} *
+            (budget.projected_trace_rows - 1));
+    BOOST_CHECK_EQUAL(
+        budget.projected_coefficient_rows,
+        uint64_t{1} << 22);
+    BOOST_CHECK_EQUAL(
+        budget.projected_lde,
+        uint64_t{1} << 26);
+    BOOST_CHECK_GT(
+        budget.projected_lde,
+        budget.projected_trace_rows *
+            rc::kRCFriBlowup);
+    BOOST_CHECK(!budget.projected_lde_supported);
+    BOOST_CHECK(budget.capacity_closed);
+    BOOST_CHECK(
+        !budget.single_node_fri_representable);
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 // g2: actually EXECUTE hierarchical bytecode shard attach — not just plan.

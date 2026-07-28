@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdlib>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -1795,6 +1796,17 @@ BOOST_AUTO_TEST_CASE(
         selection.candidates[1]
             .aggregation_nodes,
         82U);
+    BOOST_CHECK(
+        selection.candidates[1].leaf_domain_exact);
+    BOOST_CHECK(
+        selection.candidates[1].cost_arithmetic_exact);
+    BOOST_CHECK_EQUAL(
+        selection.candidates[1]
+            .leaf_max_composed_degree,
+        65535U);
+    BOOST_CHECK_EQUAL(
+        selection.candidates[1].leaf_quotient_len,
+        1U);
     BOOST_CHECK_EQUAL(
         selection.candidates[1].leaf_n_coeffs,
         65536U);
@@ -1837,6 +1849,86 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !selection.candidates[1].timing_target_met);
     static_assert(!va::kChunkRlcPcsV1ProductionAuthority);
+}
+
+BOOST_AUTO_TEST_CASE(
+    chunk_rlc_leaf_domain_is_quotient_degree_derived_and_fails_closed)
+{
+    const auto make_relation =
+        [](uint32_t degree) {
+            aq::AirConstraintSystem<gf::Fp3> cs;
+            cs.n_rows = uint32_t{1} << 19;
+            cs.n_columns = 2;
+            aq::AirConstraint<gf::Fp3> constraint;
+            constraint.name =
+                "test.chunk_rlc.degree_boundary";
+            constraint.kind = aq::AirKind::kEverywhere;
+            constraint.alg_degree = degree;
+            constraint.eval =
+                [](const std::vector<gf::Fp3>&,
+                   const std::vector<gf::Fp3>&) {
+                    return gf::Fp3::Zero();
+                };
+            cs.constraints.push_back(
+                std::move(constraint));
+            return cs;
+        };
+
+    const auto degree_three =
+        va::AssessChunkRlcLeafDomainV1(
+            make_relation(3));
+    BOOST_REQUIRE_MESSAGE(
+        degree_three.valid,
+        degree_three.note);
+    BOOST_CHECK(
+        degree_three.exact_quotient_degree_accounting);
+    BOOST_CHECK(
+        degree_three.backend_lde_cap_met);
+    BOOST_CHECK_EQUAL(
+        degree_three.max_composed_degree,
+        uint64_t{3} *
+            ((uint64_t{1} << 19) - 1));
+    BOOST_CHECK_EQUAL(
+        degree_three.quotient_len,
+        (uint32_t{1} << 20) - 2);
+    BOOST_CHECK_EQUAL(
+        degree_three.n_coeffs,
+        uint32_t{1} << 20);
+    BOOST_CHECK_EQUAL(
+        degree_three.n_lde,
+        uint32_t{1} << 24);
+
+    // Raising the same canonical relation family to degree five crosses
+    // the 2^24 LDE cap.  A trace-only estimate would still claim 2^23.
+    const auto degree_five =
+        va::AssessChunkRlcLeafDomainV1(
+            make_relation(5));
+    BOOST_REQUIRE_MESSAGE(
+        degree_five.valid,
+        degree_five.note);
+    BOOST_CHECK(
+        degree_five.exact_quotient_degree_accounting);
+    BOOST_CHECK(
+        !degree_five.backend_lde_cap_met);
+    BOOST_CHECK_EQUAL(
+        degree_five.quotient_len,
+        (uint32_t{1} << 21) - 4);
+    BOOST_CHECK_EQUAL(
+        degree_five.n_coeffs,
+        uint32_t{1} << 21);
+    BOOST_CHECK_EQUAL(
+        degree_five.n_lde,
+        uint32_t{1} << 25);
+
+    const auto unrepresentable =
+        va::AssessChunkRlcLeafDomainV1(
+            make_relation(
+                std::numeric_limits<uint32_t>::max()));
+    BOOST_CHECK(!unrepresentable.valid);
+    BOOST_CHECK(
+        !unrepresentable.exact_quotient_degree_accounting);
+    BOOST_CHECK_EQUAL(unrepresentable.n_coeffs, 0U);
+    BOOST_CHECK_EQUAL(unrepresentable.n_lde, 0U);
 }
 
 BOOST_AUTO_TEST_CASE(
