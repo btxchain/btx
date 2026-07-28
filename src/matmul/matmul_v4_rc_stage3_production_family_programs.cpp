@@ -1091,7 +1091,11 @@ uint32_t PartialResidualMask(
         ProductionResidualRecursiveConsumption;
     switch (kind) {
     case sites::ProductionProofSiteKind::EpisodeGemmOpenings:
-        return SOURCE | ALL | RECURSE;
+        // episode_gemm_openings_proof_owned executes canonical-root A/B/Y
+        // memory bundles and closes the source-root seam. Exact production
+        // counts are manifest-derived there, but the production-size streamed
+        // proof and recursive SHA-child -> AlgHash-parent bridge remain.
+        return ALL | RECURSE;
     case sites::ProductionProofSiteKind::EpisodeSignedRange:
         return PARAM | SOURCE | ALL | RECURSE;
     case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:

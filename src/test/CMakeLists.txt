@@ -125,6 +125,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_round_roots_tests.cpp
   matmul_v4_rc_stage3_episode_extract_product_tests.cpp
   matmul_v4_rc_stage3_episode_gemm_product_tests.cpp
+  matmul_v4_rc_stage3_episode_gemm_openings_proof_owned_tests.cpp
   matmul_v4_rc_stage3_episode_wiring_product_tests.cpp
   matmul_v4_rc_stage3_episode_tile_stream_tests.cpp
   matmul_v4_rc_stage3_episode_recursion_prototype_tests.cpp

@@ -373,6 +373,19 @@ BOOST_AUTO_TEST_CASE(
             (residual.missing_obligations &
              ut::ProductionResidualExactAllInstanceAggregation) != 0);
     }
+    const auto openings_residual = std::find_if(
+        status.partial_residuals.begin(),
+        status.partial_residuals.end(),
+        [](const ut::ProductionPartialFamilyResidualV1& residual) {
+            return residual.kind ==
+                ss::ProductionProofSiteKind::EpisodeGemmOpenings;
+        });
+    BOOST_REQUIRE(
+        openings_residual != status.partial_residuals.end());
+    BOOST_CHECK_EQUAL(
+        openings_residual->missing_obligations,
+        ut::ProductionResidualExactAllInstanceAggregation |
+        ut::ProductionResidualRecursiveConsumption);
     const auto signed_residual = std::find_if(
         status.partial_residuals.begin(),
         status.partial_residuals.end(),
