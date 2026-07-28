@@ -20,6 +20,9 @@
 namespace matmul::v4::rc {
 
 struct RCStage3GemmExtractManifest;
+struct RCStage3EpisodeExtractProduct;
+struct RCStage3EpisodeTileStreamProduct;
+struct RCStage3ExtractStreamCtlTileProof;
 struct RCStage3SignedRangePin;
 struct RCStage3SignedRangeExecutedCtlBinding;
 
@@ -418,6 +421,55 @@ struct RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1 {
     bool role_complete{false};
 };
 
+/**
+ * Exact endpoint-14 -> endpoint-19 extension of the canonical ExtractCore
+ * product.  The first four layouts retain the independently challenged
+ * producer aliases above.  `receiver_*` is an additional selected-row CTL
+ * over the SAME kColOut source column, using the exact challenge and terminal
+ * of an executed RCStage3ExtractStreamCtlTileProof.  Thus the output lane is
+ * not closed by an unattached counterparty pin: the producer alias and the
+ * proof-owned semantic-memory EXPORT receiver execute under one dual-Fp3
+ * rational identity.
+ */
+struct RCStage3EpisodeExtractOutputReceiverLayoutV1 {
+    RCStage3EpisodeExtractProgramCtlDirectAliasLayoutV1 producer;
+    uint32_t receiver_mask_column{0};
+    uint32_t receiver_address_column{0};
+    uint32_t receiver_inverse1_column{0};
+    uint32_t receiver_inverse2_column{0};
+    uint32_t receiver_running1_column{0};
+    uint32_t receiver_running2_column{0};
+    uint32_t total_columns{0};
+    bool receiver_proof_executed{false};
+    bool exact_selected_schedule{false};
+    bool output_source_same_trace{false};
+    bool shared_dual_fp3_challenges{false};
+    bool opposing_terminals{false};
+};
+
+/** Fail-closed accounting for the consolidated proof.  Exactly one endpoint
+ * family becomes strictly transitive in V1: EpisodeExtractOutput (14) to
+ * EpisodeTileTreeStream (19).  The ChaCha/scale counterpart ownership and
+ * recursive role consumption deliberately remain residual. */
+struct RCStage3EpisodeExtractOutputReceiverAuditV1 {
+    uint16_t producer_endpoint_families{0};
+    uint16_t strictly_transitive_endpoint_families{0};
+    RCStage3RelationEndpoint producer_endpoint{};
+    RCStage3RelationEndpoint receiver_endpoint{};
+    bool producer_alias_product_verified{false};
+    bool authoritative_receiver_product_verified{false};
+    bool sampler_output_root_equal{false};
+    bool semantic_value_root_bound{false};
+    bool semantic_export_root_bound{false};
+    bool exact_selected_schedule{false};
+    bool shared_dual_fp3_challenges{false};
+    bool opposing_terminals{false};
+    bool chacha_output_proof_owned{false};
+    bool scale_output_proof_owned{false};
+    bool recursive_children_consumed{false};
+    bool role_complete{false};
+};
+
 /** Exact-row variant using the degree-two CTL layout.  Unlike the generic
  * padded CTL, this product keeps n_coeffs == n_rows, so an existing
  * relation-owned VALUE root can be reused verbatim as the CTL VALUE root. */
@@ -678,6 +730,61 @@ VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
     const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
                      kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes,
     const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    std::string* why = nullptr);
+
+/**
+ * Build/prove/verify seam for the authoritative endpoint-14 -> endpoint-19
+ * receiver.  The receiver proof is executed before its exact 32-row schedule,
+ * proof-owned roots, challenge commitment and opposing terminal are admitted
+ * into the augmented producer product.
+ */
+[[nodiscard]] bool
+BuildRCStage3EpisodeExtractOutputReceiverConstraintSystemV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeTileStreamProduct& tile_stream,
+    uint32_t global_stream_tile,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    RCStage3EpisodeExtractOutputReceiverLayoutV1* layout = nullptr,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool
+BuildRCStage3EpisodeExtractOutputReceiverWitnessV1(
+    const RCStage3EpisodeExtractOutputReceiverLayoutV1& layout,
+    const std::vector<std::vector<gkr_field::Fp3>>& relation_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        producer_ctl_witnesses,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    std::vector<std::vector<gkr_field::Fp3>>& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint256
+ComputeRCStage3EpisodeExtractOutputReceiverSeedV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes,
+    const RCStage3ExtractStreamCtlTileProof& receiver);
+
+[[nodiscard]] bool
+VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>& lanes,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeTileStreamProduct& tile_stream,
+    uint32_t global_stream_tile,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    const air_quotient::AirQuotientProof<gkr_field::Fp3>& proof,
+    RCStage3EpisodeExtractOutputReceiverAuditV1* audit = nullptr,
     std::string* why = nullptr);
 
 [[nodiscard]] bool

@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_gkr_air.h>
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_air.h>
+#include <matmul/matmul_v4_rc_stage3_extract_stream_ctl.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
@@ -42,6 +43,8 @@ constexpr char EPISODE_EXTRACT_PROGRAM_BATCH_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_EXTRACT_PROGRAM_CTL_BATCH_V1";
 constexpr char EPISODE_EXTRACT_PROGRAM_CTL_TRANSCRIPT_DOMAIN[] =
     "BTX_RC_STAGE3_EPISODE_EXTRACT_PROGRAM_CTL_TRANSCRIPT_V1";
+constexpr char EPISODE_EXTRACT_OUTPUT_RECEIVER_SEED_DOMAIN[] =
+    "BTX_RC_STAGE3_EPISODE_EXTRACT_OUTPUT_RECEIVER_V1";
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_COUPLED_ENDPOINT_AIR_V1";
 
@@ -2909,6 +2912,536 @@ VerifyRCStage3EpisodeExtractProgramCtlDirectAliasProofV1(
             "extract_core_four_producer_cells_equal_"
             "same_trace_ctl_values_chacha_and_"
             "recursive_consumption_pending";
+    }
+    return true;
+}
+
+namespace {
+
+RCStage3CtlSchedule ExtractOutputReceiverSchedule(
+    uint32_t global_stream_tile,
+    int8_t multiplicity)
+{
+    RCStage3CtlSchedule out;
+    out.events.reserve(kRCMxBlockLen);
+    for (uint32_t row = 0; row < kRCMxBlockLen; ++row) {
+        out.events.push_back(
+            {kRCStage3ExtractStreamCtlBusId,
+             global_stream_tile, row, multiplicity});
+    }
+    return out;
+}
+
+bool ResolveExtractOutputReceiverV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeTileStreamProduct& tile_stream,
+    uint32_t global_stream_tile,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    RCStage3CtlChallenges& challenges,
+    std::string* why)
+{
+    challenges = {};
+    std::string receiver_why;
+    if (!VerifyRCStage3ExtractStreamCtlTile(
+            statement, manifest, extract, tile_stream,
+            global_stream_tile, receiver,
+            &receiver_why)) {
+        return Fail(
+            why, "extract_output_receiver:receiver:" +
+                receiver_why);
+    }
+    if (receiver.extract_tile_ordinal >=
+            extract.tiles.size() ||
+        receiver.global_stream_tile !=
+            global_stream_tile ||
+        pin.episode_air !=
+            extract.tiles[receiver.extract_tile_ordinal]
+                .sampler_pin ||
+        pin.episode_air.shard_index !=
+            receiver.extract_tile_ordinal ||
+        pin.episode_air.column_roots.size() <=
+            air_quotient::kColOut ||
+        receiver.pins.size() != 2) {
+        return Fail(
+            why,
+            "extract_output_receiver:producer_identity");
+    }
+    const auto send = ExtractOutputReceiverSchedule(
+        global_stream_tile, 1);
+    const auto receive = ExtractOutputReceiverSchedule(
+        global_stream_tile, -1);
+    if (receiver.manifest.bus_id !=
+            kRCStage3ExtractStreamCtlBusId ||
+        receiver.manifest.participants.size() != 2 ||
+        receiver.manifest.participants[0].role !=
+            RCStage3RelationRole::EpisodeExtract ||
+        receiver.manifest.participants[1].role !=
+            RCStage3RelationRole::EpisodeTileTree ||
+        receiver.manifest.participants[0].event_count !=
+            kRCMxBlockLen ||
+        receiver.manifest.participants[0].send_count !=
+            kRCMxBlockLen ||
+        receiver.manifest.participants[0].receive_count != 0 ||
+        receiver.manifest.participants[1].event_count !=
+            kRCMxBlockLen ||
+        receiver.manifest.participants[1].send_count != 0 ||
+        receiver.manifest.participants[1].receive_count !=
+            kRCMxBlockLen ||
+        receiver.manifest.participants[0].schedule_commitment !=
+            CommitRCStage3CtlSchedule(send) ||
+        receiver.manifest.participants[1].schedule_commitment !=
+            CommitRCStage3CtlSchedule(receive)) {
+        return Fail(
+            why,
+            "extract_output_receiver:selected_schedule");
+    }
+    if (!DeriveRCStage3CtlChallenges(
+            receiver.manifest, receiver.pins,
+            challenges, why)) {
+        return false;
+    }
+    const uint256 challenge_commitment =
+        CommitRCStage3CtlChallenges(challenges);
+    const auto& producer_pin = receiver.pins[0];
+    const auto& consumer_pin = receiver.pins[1];
+    if (producer_pin.challenge_commitment !=
+            challenge_commitment ||
+        consumer_pin.challenge_commitment !=
+            challenge_commitment ||
+        producer_pin.trace_commitment !=
+            receiver.sampler_output_root ||
+        consumer_pin.trace_commitment !=
+            receiver.memory_value_root ||
+        !Canonical(producer_pin.terminal.alpha1_sum) ||
+        !Canonical(producer_pin.terminal.alpha2_sum) ||
+        !Canonical(consumer_pin.terminal.alpha1_sum) ||
+        !Canonical(consumer_pin.terminal.alpha2_sum) ||
+        !gkr_field::IsZero(gkr_field::Add(
+            producer_pin.terminal.alpha1_sum,
+            consumer_pin.terminal.alpha1_sum)) ||
+        !gkr_field::IsZero(gkr_field::Add(
+            producer_pin.terminal.alpha2_sum,
+            consumer_pin.terminal.alpha2_sum))) {
+        return Fail(
+            why,
+            "extract_output_receiver:challenge_terminal");
+    }
+    const uint256& output_root =
+        pin.episode_air
+            .column_roots[air_quotient::kColOut]
+            .root;
+    if (output_root.IsNull() ||
+        output_root != receiver.sampler_output_root ||
+        receiver.producer_product.batch.columns.size() <=
+            air_quotient::kColOut ||
+        receiver.producer_product.batch
+                .columns[air_quotient::kColOut]
+                .root != output_root ||
+        receiver.consumer_product.batch.columns.size() <=
+            kRCStage3EpisodeMemoryExport ||
+        receiver.consumer_product.batch
+                .columns[kRCStage3EpisodeMemoryExport]
+                .root.IsNull() ||
+        receiver.memory_value_root.IsNull() ||
+        receiver.producer_product_commitment.IsNull() ||
+        receiver.consumer_product_commitment.IsNull() ||
+        producer_pin.auxiliary_commitment !=
+            receiver.producer_product_commitment ||
+        consumer_pin.auxiliary_commitment !=
+            receiver.consumer_product_commitment) {
+        return Fail(
+            why,
+            "extract_output_receiver:proof_owned_roots");
+    }
+    return true;
+}
+
+} // namespace
+
+bool
+BuildRCStage3EpisodeExtractOutputReceiverConstraintSystemV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        lanes,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeTileStreamProduct& tile_stream,
+    uint32_t global_stream_tile,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    AirCS& out,
+    RCStage3EpisodeExtractOutputReceiverLayoutV1* layout,
+    std::string* why)
+{
+    out = {};
+    RCStage3EpisodeExtractOutputReceiverLayoutV1 local;
+    RCStage3CtlChallenges challenges;
+    if (!ResolveExtractOutputReceiverV1(
+            statement, pin, manifest, extract,
+            tile_stream, global_stream_tile,
+            receiver, challenges, why) ||
+        !BuildRCStage3EpisodeExtractProgramCtlDirectAliasConstraintSystemV1(
+            statement, pin, lanes, out,
+            &local.producer, why)) {
+        out = {};
+        return false;
+    }
+    const uint32_t base = out.n_columns;
+    AirCS selected =
+        BuildRCStage3ExtractStreamSelectedCtlConstraintSystem(
+            base, out.n_rows,
+            air_quotient::kColOut,
+            global_stream_tile, 1,
+            challenges, receiver.pins[0].terminal);
+    if (selected.n_rows != out.n_rows ||
+        selected.n_columns != base + 6 ||
+        selected.constraints.size() != 12 ||
+        selected.preprocessed.size() != 2) {
+        out = {};
+        return Fail(
+            why,
+            "extract_output_receiver:selected_air_shape");
+    }
+    out.n_columns = selected.n_columns;
+    out.constraints.insert(
+        out.constraints.end(),
+        selected.constraints.begin(),
+        selected.constraints.end());
+    out.preprocessed.insert(
+        out.preprocessed.end(),
+        selected.preprocessed.begin(),
+        selected.preprocessed.end());
+    local.receiver_mask_column = base;
+    local.receiver_address_column = base + 1;
+    local.receiver_inverse1_column = base + 2;
+    local.receiver_inverse2_column = base + 3;
+    local.receiver_running1_column = base + 4;
+    local.receiver_running2_column = base + 5;
+    local.total_columns = out.n_columns;
+    local.receiver_proof_executed = true;
+    local.exact_selected_schedule = true;
+    local.output_source_same_trace =
+        air_quotient::kColOut <
+        local.producer.relation_columns;
+    local.shared_dual_fp3_challenges =
+        receiver.pins[0].challenge_commitment ==
+        receiver.pins[1].challenge_commitment;
+    local.opposing_terminals =
+        gkr_field::IsZero(gkr_field::Add(
+            receiver.pins[0].terminal.alpha1_sum,
+            receiver.pins[1].terminal.alpha1_sum)) &&
+        gkr_field::IsZero(gkr_field::Add(
+            receiver.pins[0].terminal.alpha2_sum,
+            receiver.pins[1].terminal.alpha2_sum));
+    if (!local.output_source_same_trace ||
+        !local.shared_dual_fp3_challenges ||
+        !local.opposing_terminals) {
+        out = {};
+        return Fail(
+            why,
+            "extract_output_receiver:closure_layout");
+    }
+    if (layout != nullptr) *layout = local;
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "extract_output_14_to_tile_stream_19_"
+            "same_trace_two_sided_ctl_ok_"
+            "fixed_program_and_recursion_pending";
+    }
+    return true;
+}
+
+bool
+BuildRCStage3EpisodeExtractOutputReceiverWitnessV1(
+    const RCStage3EpisodeExtractOutputReceiverLayoutV1& layout,
+    const std::vector<std::vector<Fp3>>& relation_columns,
+    const std::array<RCStage3CtlWitness,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        producer_ctl_witnesses,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    std::vector<std::vector<Fp3>>& out,
+    std::string* why)
+{
+    out.clear();
+    if (!layout.receiver_proof_executed ||
+        !layout.exact_selected_schedule ||
+        !layout.output_source_same_trace ||
+        !layout.shared_dual_fp3_challenges ||
+        !layout.opposing_terminals ||
+        layout.total_columns !=
+            layout.producer.total_columns + 6 ||
+        relation_columns.size() <=
+            air_quotient::kColOut ||
+        receiver.pins.size() != 2 ||
+        relation_columns[air_quotient::kColOut].size() <
+            kRCMxBlockLen) {
+        return Fail(
+            why,
+            "extract_output_receiver:witness_shape");
+    }
+    if (!BuildRCStage3EpisodeExtractProgramCtlDirectAliasWitnessV1(
+            layout.producer, relation_columns,
+            producer_ctl_witnesses, out, why)) {
+        return false;
+    }
+    RCStage3CtlChallenges challenges;
+    if (!DeriveRCStage3CtlChallenges(
+            receiver.manifest, receiver.pins,
+            challenges, why)) {
+        out.clear();
+        return false;
+    }
+    const auto schedule =
+        ExtractOutputReceiverSchedule(
+            receiver.global_stream_tile, 1);
+    std::vector<Fp3> values(
+        relation_columns[air_quotient::kColOut].begin(),
+        relation_columns[air_quotient::kColOut].begin() +
+            kRCMxBlockLen);
+    const RCStage3CtlWitness selected =
+        BuildRCStage3CtlWitness(
+            schedule, values, challenges);
+    if (!selected.ok ||
+        selected.columns.size() !=
+            stage3_ctl_col::NUM_COLUMNS ||
+        selected.columns[stage3_ctl_col::INVERSE1].size() !=
+            kRCMxBlockLen ||
+        !(selected.terminal ==
+          receiver.pins[0].terminal)) {
+        out.clear();
+        return Fail(
+            why,
+            "extract_output_receiver:selected_witness");
+    }
+    const size_t rows =
+        relation_columns[air_quotient::kColOut].size();
+    std::array<std::vector<Fp3>, 6> columns;
+    for (auto& column : columns) {
+        column.assign(rows, Fp3::Zero());
+    }
+    for (uint32_t row = 0; row < kRCMxBlockLen; ++row) {
+        columns[0][row] = Fp3::One();
+        columns[1][row] =
+            Fp3::FromFp(gkr_field::FromU64(row));
+        columns[2][row] =
+            selected.columns[stage3_ctl_col::INVERSE1][row];
+        columns[3][row] =
+            selected.columns[stage3_ctl_col::INVERSE2][row];
+        columns[4][row] =
+            selected.columns[stage3_ctl_col::RUNNING1][row];
+        columns[5][row] =
+            selected.columns[stage3_ctl_col::RUNNING2][row];
+    }
+    for (uint32_t row = kRCMxBlockLen;
+         row < rows; ++row) {
+        columns[4][row] =
+            receiver.pins[0].terminal.alpha1_sum;
+        columns[5][row] =
+            receiver.pins[0].terminal.alpha2_sum;
+    }
+    for (auto& column : columns) {
+        out.push_back(std::move(column));
+    }
+    if (out.size() != layout.total_columns) {
+        out.clear();
+        return Fail(
+            why,
+            "extract_output_receiver:witness_width");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "extract_output_selected_receiver_witness_ok";
+    }
+    return true;
+}
+
+uint256
+ComputeRCStage3EpisodeExtractOutputReceiverSeedV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        lanes,
+    const RCStage3ExtractStreamCtlTileProof& receiver)
+{
+    const uint256 base =
+        ComputeRCStage3EpisodeExtractProgramCtlDirectAliasSeedV1(
+            statement, pin, lanes);
+    if (base.IsNull() ||
+        receiver.proof_commitment.IsNull() ||
+        receiver.producer_product_commitment.IsNull() ||
+        receiver.consumer_product_commitment.IsNull() ||
+        receiver.pins.size() != 2) {
+        return {};
+    }
+    HashWriter hash;
+    hash << EPISODE_EXTRACT_OUTPUT_RECEIVER_SEED_DOMAIN;
+    hash << base;
+    hash << receiver.global_stream_tile;
+    hash << receiver.extract_tile_ordinal;
+    hash << receiver.memory_row_begin;
+    hash << receiver.sampler_output_root;
+    hash << receiver.memory_value_root;
+    hash << receiver.manifest.transcript_seed;
+    hash << receiver.pins[0].challenge_commitment;
+    HashFp3(hash, receiver.pins[0].terminal.alpha1_sum);
+    HashFp3(hash, receiver.pins[0].terminal.alpha2_sum);
+    HashFp3(hash, receiver.pins[1].terminal.alpha1_sum);
+    HashFp3(hash, receiver.pins[1].terminal.alpha2_sum);
+    hash << receiver.producer_product_commitment;
+    hash << receiver.consumer_product_commitment;
+    hash << receiver.proof_commitment;
+    return hash.GetHash();
+}
+
+bool
+VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+    const RCStage3SuccinctProof& statement,
+    const RCStage3EpisodeExtractProgramAirPublicPinV1& pin,
+    const std::array<RCStage3EpisodeExtractProgramCtlLaneV1,
+                     kRCStage3EpisodeExtractProgramBatchLaneCountV1>&
+        lanes,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeExtractProduct& extract,
+    const RCStage3EpisodeTileStreamProduct& tile_stream,
+    uint32_t global_stream_tile,
+    const RCStage3ExtractStreamCtlTileProof& receiver,
+    const air_quotient::AirQuotientProof<Fp3>& proof,
+    RCStage3EpisodeExtractOutputReceiverAuditV1* audit,
+    std::string* why)
+{
+    if (audit != nullptr) *audit = {};
+    AirCS combined;
+    RCStage3EpisodeExtractOutputReceiverLayoutV1 layout;
+    if (!BuildRCStage3EpisodeExtractOutputReceiverConstraintSystemV1(
+            statement, pin, lanes, manifest,
+            extract, tile_stream, global_stream_tile,
+            receiver, combined, &layout, why)) {
+        return false;
+    }
+    constraint_bytecode::ProgramTable table;
+    AirCS relation;
+    std::vector<uint256> roots;
+    if (!ResolveEpisodeExtractProgramBatchAirV1(
+            statement, pin, table,
+            relation, roots, why) ||
+        proof.batch.columns.size() !=
+            static_cast<size_t>(combined.n_columns) + 1 ||
+        proof.batch.column_len.size() !=
+            proof.batch.columns.size() ||
+        proof.batch.n_coeffs !=
+            pin.episode_air.n_coeffs ||
+        roots.size() !=
+            layout.producer.relation_columns) {
+        return Fail(
+            why,
+            "extract_output_receiver:proof_shape");
+    }
+    for (uint32_t column = 0;
+         column < roots.size(); ++column) {
+        if (proof.batch.columns[column].root !=
+            roots[column]) {
+            return Fail(
+                why,
+                "extract_output_receiver:"
+                "relation_column_root");
+        }
+    }
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        const auto& lane = lanes[lane_index];
+        const auto& lane_layout =
+            layout.producer.producer_lanes[lane_index];
+        const uint256& source_root =
+            proof.batch.columns[
+                EPISODE_EXTRACT_BATCH_SOURCE_COLUMNS[
+                    lane_index]].root;
+        if (proof.batch.columns[
+                lane_layout.ctl_value_column].root !=
+                source_root) {
+            return Fail(
+                why,
+                "extract_output_receiver:"
+                "source_value_root");
+        }
+        const auto schedule =
+            BuildRCStage3EpisodeExtractProgramCtlScheduleV1(
+                pin, lane.endpoint, true);
+        std::array<uint256, 5> ctl_roots{};
+        for (uint32_t column =
+                 stage3_ctl_col::NAMESPACE;
+             column <=
+                 stage3_ctl_col::MULTIPLICITY;
+             ++column) {
+            ctl_roots[column] =
+                proof.batch.columns[
+                    lane_layout.ctl_column_base +
+                    column].root;
+        }
+        if (ComputeRCStage3CtlPrechallengeTraceCommitmentFromRoots(
+                schedule,
+                proof.batch.column_len[
+                    lane_layout.ctl_column_base],
+                proof.batch.n_coeffs,
+                ctl_roots) !=
+                lane.pins[0].trace_commitment ||
+            ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                proof, lane_layout) !=
+                lane.pins[0].auxiliary_commitment) {
+            return Fail(
+                why,
+                "extract_output_receiver:"
+                "producer_alias_binding");
+        }
+    }
+    const uint256 seed =
+        ComputeRCStage3EpisodeExtractOutputReceiverSeedV1(
+            statement, pin, lanes, receiver);
+    std::string air_why;
+    if (seed.IsNull() ||
+        !air_quotient::AirQuotientVerify<Fp3>(
+            combined, proof, seed, &air_why)) {
+        return Fail(
+            why,
+            "extract_output_receiver:air:" +
+                air_why);
+    }
+    if (audit != nullptr) {
+        audit->producer_endpoint_families =
+            kRCStage3EpisodeExtractProgramBatchLaneCountV1;
+        audit->strictly_transitive_endpoint_families = 1;
+        audit->producer_endpoint =
+            RCStage3RelationEndpoint::EpisodeExtractOutput;
+        audit->receiver_endpoint =
+            RCStage3RelationEndpoint::EpisodeTileTreeStream;
+        audit->producer_alias_product_verified = true;
+        audit->authoritative_receiver_product_verified =
+            layout.receiver_proof_executed;
+        audit->sampler_output_root_equal = true;
+        audit->semantic_value_root_bound = true;
+        audit->semantic_export_root_bound = true;
+        audit->exact_selected_schedule =
+            layout.exact_selected_schedule;
+        audit->shared_dual_fp3_challenges =
+            layout.shared_dual_fp3_challenges;
+        audit->opposing_terminals =
+            layout.opposing_terminals;
+        audit->chacha_output_proof_owned = false;
+        audit->scale_output_proof_owned = false;
+        audit->recursive_children_consumed = false;
+        audit->role_complete = false;
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "strict_transitive_endpoint_14_to_19_ok_"
+            "endpoints_10_11_13_and_recursion_residual";
     }
     return true;
 }

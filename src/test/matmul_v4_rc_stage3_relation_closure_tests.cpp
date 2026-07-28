@@ -15,10 +15,12 @@
 #include <matmul/matmul_v4_rc_stage3_coupled_signed_range_binding.h>
 #include <matmul/matmul_v4_rc_stage3_episode_builder_trace.h>
 #include <matmul/matmul_v4_rc_stage3_episode_builder_trace_binding.h>
+#include <matmul/matmul_v4_rc_stage3_episode_extract_product.h>
 #include <matmul/matmul_v4_rc_stage3_episode_relation_product.h>
 #include <matmul/matmul_v4_rc_stage3_episode_wiring_binding.h>
 #include <matmul/matmul_v4_rc_stage3_episode_wiring_product.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_sumcheck_binding.h>
+#include <matmul/matmul_v4_rc_stage3_extract_stream_ctl.h>
 #include <matmul/matmul_v4_rc_stage3_seed_chain_binding.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
@@ -1205,8 +1207,8 @@ BOOST_AUTO_TEST_CASE(
     tile_public.prf_key = uint256{
         Span<const unsigned char>{
             prf_bytes.data(), prf_bytes.size()}};
-    tile_public.i = 3;
-    tile_public.bj = 7;
+    tile_public.i = 0;
+    tile_public.bj = 0;
     std::array<int64_t, kRCMxBlockLen> input{};
     for (uint32_t i = 0; i < input.size(); ++i) {
         const int64_t value =
@@ -1627,6 +1629,381 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         why.find("noncanonical_ctl_cell") !=
         std::string::npos);
+
+    // Upgrade endpoint 14 only: append the exact selected-row producer CTL
+    // under the challenge of an EXECUTED endpoint-19 semantic-memory receiver.
+    // The other three producer lanes remain explicit residuals.
+    RCEpisodeParams params;
+    params.rounds = 1;
+    params.d_head = 32;
+    params.n_q = 32;
+    params.n_ctx = 32;
+    params.L_lyr = 1;
+    params.d_model = 32;
+    params.d_ff = 32;
+    params.b_seq = 32;
+    params.T_leaf = 64;
+    const auto trace_layout = RCGkrTraceLayout(params);
+    std::vector<RCStage3GemmExtractLayerBindings> bindings(
+        trace_layout.layers.size());
+    for (uint32_t layer_index = 0;
+         layer_index < bindings.size(); ++layer_index) {
+        auto& binding = bindings[layer_index];
+        binding.extract_prf = tile_public.prf_key;
+        binding.operand_a_root =
+            Filled(0x20 + layer_index);
+        binding.operand_b_root =
+            Filled(0x30 + layer_index);
+        binding.gemm_y_root =
+            Filled(0x40 + layer_index);
+        binding.extract_input_root =
+            Filled(0x50 + layer_index);
+        binding.extract_output_root =
+            Filled(0x60 + layer_index);
+        binding.gemm_proof_root =
+            Filled(0x70 + layer_index);
+        binding.extract_recursive_root =
+            Filled(0x80 + layer_index);
+        binding.scale_schedule_root =
+            Filled(0x90 + layer_index);
+        binding.ctl_terminal_root =
+            Filled(0xa0 + layer_index);
+    }
+    const auto built_manifest =
+        BuildRCStage3GemmExtractManifest(
+            params,
+            RCStage3EpisodeStatementCommitment(statement),
+            bindings, &why);
+    BOOST_REQUIRE_MESSAGE(
+        built_manifest.has_value(), why);
+    const auto streamed = std::find_if(
+        built_manifest->layers.begin(),
+        built_manifest->layers.end(),
+        [](const auto& layer) {
+            return RCStage3EpisodeLayerIsStreamed(
+                layer.kind);
+        });
+    BOOST_REQUIRE(streamed !=
+        built_manifest->layers.end());
+    const uint32_t streamed_layer =
+        static_cast<uint32_t>(
+            streamed - built_manifest->layers.begin());
+
+    RCStage3EpisodeExtractTileProduct extract_tile;
+    extract_tile.global_tile = 0;
+    extract_tile.layer_ordinal = streamed_layer;
+    extract_tile.layer_tile_index = 0;
+    extract_tile.input = input;
+    extract_tile.sampler_pin = episode;
+    RCStage3EpisodeExtractProduct extract_product;
+    extract_product.collection_commitment =
+        Filled(0xa1);
+    extract_product.tiles.push_back(extract_tile);
+
+    RCStage3EpisodeTileStreamProduct stream_product;
+    stream_product.collection_commitment =
+        Filled(0xa2);
+    RCStage3EpisodeTileStreamShard stream_tile;
+    stream_tile.global_stream_tile = 0;
+    stream_tile.layer_ordinal = streamed_layer;
+    stream_tile.layer_tile_index = 0;
+    stream_tile.stream_byte_begin = 0;
+    stream_tile.pin = episode;
+    stream_product.tiles.push_back(stream_tile);
+    stream_product.rounds.resize(1);
+    stream_product.rounds[0].round_index = 0;
+    auto& stream_bytes =
+        stream_product.rounds[0]
+            .tree.tree_manifest.stream;
+    std::vector<gf::Fp3> memory_values;
+    for (int8_t value : tile.out) {
+        stream_bytes.push_back(
+            static_cast<uint8_t>(value));
+        memory_values.push_back(
+            gf::Fp3::FromFp(
+                gf::FromSigned(value)));
+    }
+    const auto memory_root =
+        ComputeRCStage3EpisodeSemanticValueRoot(
+            memory_values, kRCMxBlockLen,
+            kRCMxBlockLen, &why);
+    BOOST_REQUIRE_MESSAGE(
+        memory_root.has_value(), why);
+    const auto memory_manifest =
+        BuildRCStage3EpisodeSemanticMemoryManifest(
+            RCStage3RelationEndpoint::
+                EpisodeTileTreeStream,
+            episode.statement_commitment,
+            kRCMxBlockLen, kRCMxBlockLen,
+            UINT64_C(0x4553000000000000), 1,
+            *memory_root, &why);
+    BOOST_REQUIRE_MESSAGE(
+        memory_manifest.has_value(), why);
+    RCStage3EpisodeSemanticMemoryShard memory_shard;
+    memory_shard.manifest = *memory_manifest;
+    stream_product.rounds[0]
+        .stream_memory.shards.push_back(
+            memory_shard);
+
+    RCStage3ExtractStreamCtlTileProof receiver;
+    BOOST_REQUIRE_MESSAGE(
+        ProveRCStage3ExtractStreamCtlTile(
+            statement, *built_manifest,
+            extract_product, stream_product,
+            0, receiver, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        VerifyRCStage3ExtractStreamCtlTile(
+            statement, *built_manifest,
+            extract_product, stream_product,
+            0, receiver, &why),
+        why);
+
+    aq::AirConstraintSystem<gf::Fp3> receiver_cs;
+    RCStage3EpisodeExtractOutputReceiverLayoutV1
+        receiver_layout;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeExtractOutputReceiverConstraintSystemV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0, receiver,
+            receiver_cs, &receiver_layout, &why),
+        why);
+    BOOST_CHECK(
+        receiver_layout.receiver_proof_executed);
+    BOOST_CHECK(
+        receiver_layout.exact_selected_schedule);
+    BOOST_CHECK(
+        receiver_layout.output_source_same_trace);
+    BOOST_CHECK(
+        receiver_layout.shared_dual_fp3_challenges);
+    BOOST_CHECK(
+        receiver_layout.opposing_terminals);
+    BOOST_CHECK_EQUAL(
+        receiver_layout.total_columns,
+        layout.total_columns + 6);
+    std::vector<std::vector<gf::Fp3>>
+        receiver_columns;
+    BOOST_REQUIRE_MESSAGE(
+        BuildRCStage3EpisodeExtractOutputReceiverWitnessV1(
+            receiver_layout, instance.columns,
+            producer_witnesses, receiver,
+            receiver_columns, &why),
+        why);
+    const uint256 receiver_seed =
+        ComputeRCStage3EpisodeExtractOutputReceiverSeedV1(
+            statement, pin, lanes, receiver);
+    BOOST_REQUIRE(!receiver_seed.IsNull());
+    const auto receiver_proved =
+        aq::AirQuotientProve<gf::Fp3>(
+            receiver_cs, receiver_columns,
+            receiver_seed);
+    BOOST_REQUIRE_MESSAGE(
+        receiver_proved.ok,
+        receiver_proved.note);
+    BOOST_REQUIRE(receiver_proved.division_exact);
+    for (uint32_t lane_index = 0;
+         lane_index < lanes.size(); ++lane_index) {
+        lanes[lane_index]
+            .pins[0]
+            .auxiliary_commitment =
+            ComputeRCStage3RelationCtlDirectAliasAuxiliaryCommitment(
+                receiver_proved.proof,
+                receiver_layout.producer
+                    .producer_lanes[lane_index]);
+    }
+    RCStage3EpisodeExtractOutputReceiverAuditV1
+        receiver_audit;
+    BOOST_REQUIRE_MESSAGE(
+        VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0, receiver,
+            receiver_proved.proof,
+            &receiver_audit, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        receiver_audit.producer_endpoint_families,
+        4U);
+    BOOST_CHECK_EQUAL(
+        receiver_audit.strictly_transitive_endpoint_families,
+        1U);
+    BOOST_CHECK(
+        receiver_audit.producer_endpoint ==
+        RCStage3RelationEndpoint::EpisodeExtractOutput);
+    BOOST_CHECK(
+        receiver_audit.receiver_endpoint ==
+        RCStage3RelationEndpoint::EpisodeTileTreeStream);
+    BOOST_CHECK(
+        receiver_audit.producer_alias_product_verified);
+    BOOST_CHECK(
+        receiver_audit.authoritative_receiver_product_verified);
+    BOOST_CHECK(
+        receiver_audit.sampler_output_root_equal);
+    BOOST_CHECK(
+        receiver_audit.semantic_value_root_bound);
+    BOOST_CHECK(
+        receiver_audit.semantic_export_root_bound);
+    BOOST_CHECK(
+        receiver_audit.exact_selected_schedule);
+    BOOST_CHECK(
+        receiver_audit.shared_dual_fp3_challenges);
+    BOOST_CHECK(
+        receiver_audit.opposing_terminals);
+    BOOST_CHECK(
+        !receiver_audit.chacha_output_proof_owned);
+    BOOST_CHECK(
+        !receiver_audit.scale_output_proof_owned);
+    BOOST_CHECK(
+        !receiver_audit.recursive_children_consumed);
+    BOOST_CHECK(!receiver_audit.role_complete);
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL strict transitive Extract endpoint 14 -> "
+        "TileTreeStream endpoint 19 accept: rows="
+        << receiver_cs.n_rows
+        << " cols=" << receiver_cs.n_columns
+        << " constraints="
+        << receiver_cs.constraints.size());
+
+    // A receiver proof that is valid for the original source cannot be
+    // detached and paired with a substituted producer root.
+    auto detached_pin = pin;
+    detached_pin.episode_air
+        .column_roots[aq::kColOut].root =
+        Filled(0xe1);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, detached_pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0, receiver,
+            receiver_proved.proof, nullptr,
+            &why));
+
+    auto detached_receiver_aux = receiver;
+    detached_receiver_aux.pins[1]
+        .auxiliary_commitment = Filled(0xe2);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            detached_receiver_aux,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto wrong_interval = receiver;
+    ++wrong_interval.memory_row_begin;
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0, wrong_interval,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto wrong_cardinality = receiver;
+    --wrong_cardinality.manifest
+        .participants[1].event_count;
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            wrong_cardinality,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto root_substitution = receiver;
+    root_substitution.memory_value_root =
+        Filled(0xe3);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            root_substitution,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto challenge_mismatch = receiver;
+    challenge_mismatch.pins[1]
+        .challenge_commitment = Filled(0xe4);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            challenge_mismatch,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto omitted_receiver = receiver;
+    omitted_receiver.pins.pop_back();
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            omitted_receiver,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto omitted_schedule = receiver;
+    omitted_schedule.manifest.participants.pop_back();
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            omitted_schedule,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto duplicated_schedule = receiver;
+    duplicated_schedule.manifest
+        .participants[1].schedule_commitment =
+        duplicated_schedule.manifest
+            .participants[0].schedule_commitment;
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            duplicated_schedule,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto reordered_schedule = receiver;
+    std::swap(
+        reordered_schedule.manifest.participants[0],
+        reordered_schedule.manifest.participants[1]);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            reordered_schedule,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto reordered_receiver = receiver;
+    std::swap(
+        reordered_receiver.pins[0],
+        reordered_receiver.pins[1]);
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            reordered_receiver,
+            receiver_proved.proof, nullptr,
+            &why));
+    auto noncanonical_receiver = receiver;
+    noncanonical_receiver.pins[0]
+        .terminal.alpha1_sum.c0 = gf::kP;
+    BOOST_CHECK(
+        !VerifyRCStage3EpisodeExtractOutputReceiverProofV1(
+            statement, pin, lanes,
+            *built_manifest, extract_product,
+            stream_product, 0,
+            noncanonical_receiver,
+            receiver_proved.proof, nullptr,
+            &why));
+    BOOST_TEST_MESSAGE(
+        "PROOF-LEVEL receiver attacks rejected: detached/rebuilt "
+        "pairing, aux, interval/cardinality, root/challenge, "
+        "schedule omission/duplication/reorder, raw x+p representative");
 }
 
 BOOST_AUTO_TEST_CASE(
