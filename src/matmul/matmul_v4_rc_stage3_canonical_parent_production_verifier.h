@@ -107,6 +107,14 @@ enum class MechanismVerifyStatusV1 : uint8_t {
     FrozenSpecUnavailable = 1,
     NativeParentRejected = 2,
     MechanismVerifiedNotAuthority = 3,
+    /**
+     * The native parent proof verified after a receipt-independent rebuild,
+     * and that rebuilt parent constrains complete child acceptance in the
+     * same proof.  Current production construction cannot return this value:
+     * its authority flags remain false until the complete V13 child
+     * fixed-point and semantic inventory are both executable.
+     */
+    AuthorityVerified = 4,
 };
 
 /**
@@ -119,7 +127,9 @@ enum class MechanismVerifyStatusV1 : uint8_t {
  * output columns.
  *
  * Success remains non-authoritative while the canonical child verifier reports
- * `full_child_acceptance_constrained == false`.
+ * `full_child_acceptance_constrained == false`. `AuthorityVerified` is returned
+ * only when both that independently rebuilt property and the canonical
+ * parent's authority predicate are true; a mismatch is rejected.
  */
 [[nodiscard]] MechanismVerifyStatusV1
 VerifyAttachedCanonicalParentMechanismV1(

@@ -498,9 +498,13 @@ VerifyAttachedCanonicalParentMechanismV1(
             MechanismVerifyStatusV1::
                 NativeParentRejected;
     }
-    if (local_rebuilt.authority ||
+    const bool complete_child_acceptance =
         local_rebuilt.verifier
-            .full_child_acceptance_constrained) {
+            .full_child_acceptance_constrained;
+    const bool authority =
+        local_rebuilt.authority;
+    if (authority !=
+        complete_child_acceptance) {
         Fail(why, "unexpected_authority_state");
         return
             MechanismVerifyStatusV1::
@@ -508,6 +512,16 @@ VerifyAttachedCanonicalParentMechanismV1(
     }
     if (rebuilt != nullptr) {
         *rebuilt = std::move(local_rebuilt);
+    }
+    if (authority) {
+        if (why != nullptr) {
+            *why =
+                "stage3:canonical_parent_production_verifier:"
+                "native_parent_authority_verified";
+        }
+        return
+            MechanismVerifyStatusV1::
+                AuthorityVerified;
     }
     if (why != nullptr) {
         *why =

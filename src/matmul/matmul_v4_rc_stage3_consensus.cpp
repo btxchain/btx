@@ -10,6 +10,7 @@
 #include <matmul/matmul_v4.h>
 #include <matmul/matmul_v4_rc.h>
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_stage3_canonical_parent_production_verifier.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_block_transport.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_consensus_binding.h>
@@ -32,6 +33,11 @@ static_assert(!kRCStage3SuccinctAuthorityReady ||
 static_assert(!kRCStage3SuccinctAuthorityReady ||
                   kRCStage3ProductionProgramRegistryReady,
               "Stage-3 authority cannot precede a frozen production ProgramTable registry");
+static_assert(
+    !kRCStage3SuccinctAuthorityReady ||
+        canonical_parent_production_verifier::
+            kAuthorityReadyV1,
+    "Stage-3 authority cannot precede receipt-independent canonical parent verification");
 
 constexpr size_t MAX_VALID_PROOF_CACHE_ENTRIES{64};
 
@@ -494,14 +500,27 @@ RCStage3AttachmentStatus VerifyRCStage3ConsensusAttachment(
         bool valid{false};
         if (normalized_block_transport::IsReceiptWordsV3(
                 block.matrix_c_data)) {
-            // The normalized carrier is the production format.  Inspection
-            // above has already rebuilt and checked its complete block/public
-            // statement.  Authority must nevertheless remain fail-closed
-            // until this branch can reconstruct the exact parent CS from the
-            // frozen registry and execute VerifyAttachedReceiptV3.  Never
-            // route a BNV3 body through the legacy section verifier.
-            verify_why =
-                "normalized_parent_rebuild_unavailable";
+            // The normalized carrier is the production format. Rebuild its
+            // complete parent from block/consensus state and the frozen
+            // registry, then execute the native SAFE verifier.  The mechanism
+            // has a distinct non-authority success result while same-parent
+            // child acceptance is incomplete; consensus accepts only the
+            // independently derived authority result.
+            namespace canonical =
+                canonical_parent_production_verifier;
+            const auto mechanism =
+                canonical::
+                    VerifyAttachedCanonicalParentMechanismV1(
+                        block, params, height, target,
+                        nullptr, nullptr, &verify_why);
+            valid =
+                mechanism ==
+                canonical::MechanismVerifyStatusV1::
+                    AuthorityVerified;
+            if (!valid && verify_why.empty()) {
+                verify_why =
+                    "normalized_parent_not_authority";
+            }
         } else {
             valid = VerifyRCStage3MathematicalProof(
                 proof, block, params, height,
