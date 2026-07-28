@@ -15,6 +15,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <utility>
 
 namespace matmul::v4::rc {
@@ -46,6 +47,12 @@ constexpr char kBankScheduleDomain[] =
     "BTX_RC_STAGE3_COUPLED_BANK_SCHEDULE_V1";
 constexpr char kReceiptDomain[] =
     "BTX_RC_STAGE3_COUPLED_WINNER_RECEIPT_V1";
+
+std::mutex g_coupled_winner_store_mutex;
+uint256 g_coupled_winner_store_header;
+std::shared_ptr<
+    const RCStage3CoupledWinnerCaptureV1>
+    g_coupled_winner_store_capture;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -1481,6 +1488,64 @@ bool RCStage3CoupledWinnerCaptureV1::Complete(
         return finish(false, error);
     }
     return finish(true);
+}
+
+bool RCStage3CoupledWinnerStorePutV1(
+    const uint256& finalized_header_hash,
+    std::shared_ptr<
+        const RCStage3CoupledWinnerCaptureV1> capture,
+    std::string* why)
+{
+    if (finalized_header_hash.IsNull() ||
+        capture == nullptr ||
+        !capture->Complete(why) ||
+        capture->Receipt().finalized_header_hash !=
+            finalized_header_hash) {
+        return Fail(why, "winner_store_incomplete");
+    }
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    g_coupled_winner_store_header =
+        finalized_header_hash;
+    g_coupled_winner_store_capture =
+        std::move(capture);
+    return true;
+}
+
+std::shared_ptr<
+    const RCStage3CoupledWinnerCaptureV1>
+RCStage3CoupledWinnerStoreGetV1(
+    const uint256& finalized_header_hash)
+{
+    if (finalized_header_hash.IsNull()) return {};
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    if (g_coupled_winner_store_capture == nullptr ||
+        g_coupled_winner_store_header !=
+            finalized_header_hash) {
+        return {};
+    }
+    return g_coupled_winner_store_capture;
+}
+
+void RCStage3CoupledWinnerStoreEraseV1(
+    const uint256& finalized_header_hash)
+{
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    if (g_coupled_winner_store_header ==
+            finalized_header_hash) {
+        g_coupled_winner_store_header.SetNull();
+        g_coupled_winner_store_capture.reset();
+    }
+}
+
+void RCStage3CoupledWinnerStoreClearForTestV1()
+{
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    g_coupled_winner_store_header.SetNull();
+    g_coupled_winner_store_capture.reset();
 }
 
 } // namespace matmul::v4::rc

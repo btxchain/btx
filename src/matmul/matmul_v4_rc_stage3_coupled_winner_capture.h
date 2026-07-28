@@ -252,6 +252,25 @@ private:
     std::string m_error;
 };
 
+/**
+ * Winner-only process-local handoff to the normalized proof producer.
+ *
+ * The finalized header hash is the key and the store retains at most one
+ * completed capture. A stale capture therefore cannot be selected for a
+ * different winner, and losing-nonce witnesses are never retained.
+ */
+[[nodiscard]] bool RCStage3CoupledWinnerStorePutV1(
+    const uint256& finalized_header_hash,
+    std::shared_ptr<const RCStage3CoupledWinnerCaptureV1> capture,
+    std::string* why = nullptr);
+[[nodiscard]] std::shared_ptr<
+    const RCStage3CoupledWinnerCaptureV1>
+RCStage3CoupledWinnerStoreGetV1(
+    const uint256& finalized_header_hash);
+void RCStage3CoupledWinnerStoreEraseV1(
+    const uint256& finalized_header_hash);
+void RCStage3CoupledWinnerStoreClearForTestV1();
+
 } // namespace matmul::v4::rc
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_COUPLED_WINNER_CAPTURE_H

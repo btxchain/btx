@@ -34,6 +34,7 @@
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_winner_capture.h>
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <matmul/noise.h>
@@ -4522,6 +4523,9 @@ bool FinalizeMatMulSolvedBlockForProduction(CBlock& block,
             matmul::v4::rc::
                 RCStage3EpisodeWitnessStoreErase(
                     witness_store_key);
+            matmul::v4::rc::
+                RCStage3CoupledWinnerStoreEraseV1(
+                    witness_store_key);
             if (status != matmul::v4::rc::RCStage3ProduceStatus::Attached) {
                 if (why != nullptr) {
                     *why = strprintf(
@@ -6350,9 +6354,55 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
             // Winner candidate: CPU reseal BOTH work legs (empty ExactGemm),
             // then rebuild the same composition digest.
             CBlockHeader cand = window[i];
-            const uint256 coupled_resealed =
-                matmul::v4::rc::RecomputeCoupledPuzzleReference(
-                    cand, block_height, params_coup, options_coup);
+            // The winning composed digest is already known from the mining
+            // pass. Install it before constructing either winner capture so
+            // their finalized-header hash is the same key the producer and
+            // validator will later use. Neither work oracle reads
+            // matmul_digest when deriving sigma or its tensor relations.
+            cand.matmul_digest = composed_mined;
+            std::shared_ptr<
+                matmul::v4::rc::
+                    RCStage3CoupledWinnerCaptureV1>
+                coupled_capture;
+            uint256 coupled_resealed;
+            if constexpr (
+                matmul::v4::rc::
+                    kRCStage3SuccinctAuthorityReady) {
+                coupled_capture = std::make_shared<
+                    matmul::v4::rc::
+                        RCStage3CoupledWinnerCaptureV1>(
+                            cand, block_height,
+                            params_coup, options_coup);
+                coupled_resealed =
+                    matmul::v4::rc::
+                        MineCoupledPuzzleWithProofWitness(
+                            cand, block_height,
+                            params_coup,
+                            *coupled_capture, {},
+                            options_coup);
+                std::string capture_why;
+                if (!coupled_capture->Complete(
+                        &capture_why)) {
+                    LogWarning(
+                        "SolveMatMulV4RCCoupled: coupled winner proof "
+                        "witness capture incomplete at nonce=%llu "
+                        "(%s); aborting solve\n",
+                        static_cast<unsigned long long>(
+                            cand.nNonce64),
+                        capture_why.c_str());
+                    RegisterMatMulSolveRuntimeSample(
+                        false,
+                        std::chrono::steady_clock::now() -
+                            start);
+                    return false;
+                }
+            } else {
+                coupled_resealed =
+                    matmul::v4::rc::
+                        RecomputeCoupledPuzzleReference(
+                            cand, block_height,
+                            params_coup, options_coup);
+            }
             if (coupled_resealed != coupled_mined) {
                 LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
                            "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",
@@ -6431,12 +6481,33 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
                     matmul::v4::rc::
                         kRCStage3SuccinctAuthorityReady) {
                     std::string capture_why;
+                    const uint256 winner_key =
+                        block.GetHash();
+                    if (!matmul::v4::rc::
+                            RCStage3CoupledWinnerStorePutV1(
+                                winner_key,
+                                std::move(
+                                    coupled_capture),
+                                &capture_why)) {
+                        LogWarning(
+                            "SolveMatMulV4RCCoupled: coupled winner proof "
+                            "witness store failed (%s)\n",
+                            capture_why.c_str());
+                        RegisterMatMulSolveRuntimeSample(
+                            false,
+                            std::chrono::steady_clock::now() -
+                                start);
+                        return false;
+                    }
                     if (!matmul::v4::rc::
                             RCStage3EpisodeWitnessStorePut(
-                                block.GetHash(),
+                                winner_key,
                                 std::move(
                                     episode_capture),
                                 &capture_why)) {
+                        matmul::v4::rc::
+                            RCStage3CoupledWinnerStoreEraseV1(
+                                winner_key);
                         LogWarning(
                             "SolveMatMulV4RCCoupled: winner proof "
                             "witness store failed (%s)\n",

@@ -302,4 +302,68 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!why.empty());
 }
 
+BOOST_AUTO_TEST_CASE(
+    winner_store_is_header_keyed_single_slot_and_rejects_incomplete)
+{
+    constexpr int32_t kHeight = 710;
+    const CBlockHeader header = Header(22);
+    const rc::RCCoupParams params =
+        rc::MakeToyRCCoupParams();
+    rc::RCCoupOptions options;
+    options.mode = rc::RCCoupExecMode::Streamed;
+    options.full_bank_schedule = true;
+
+    rc::RCStage3CoupledWinnerStoreClearForTestV1();
+    auto capture = std::make_shared<
+        rc::RCStage3CoupledWinnerCaptureV1>(
+            header, kHeight, params, options);
+    BOOST_REQUIRE(
+        !rc::MineCoupledPuzzleWithProofWitness(
+             header, kHeight, params,
+             *capture, {}, options)
+             .IsNull());
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(capture->Complete(&why), why);
+    const uint256 key = header.GetHash();
+    BOOST_REQUIRE_MESSAGE(
+        rc::RCStage3CoupledWinnerStorePutV1(
+            key, capture, &why),
+        why);
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(key) ==
+        capture);
+
+    CBlockHeader other = header;
+    ++other.nNonce64;
+    ++other.nNonce;
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(
+            other.GetHash()) == nullptr);
+    BOOST_CHECK(
+        !rc::RCStage3CoupledWinnerStorePutV1(
+            other.GetHash(), capture, &why));
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(key) ==
+        capture);
+    rc::RCStage3CoupledWinnerStoreEraseV1(
+        other.GetHash());
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(key) ==
+        capture);
+    rc::RCStage3CoupledWinnerStoreEraseV1(key);
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(key) ==
+        nullptr);
+
+    auto incomplete = std::make_shared<
+        rc::RCStage3CoupledWinnerCaptureV1>(
+            header, kHeight, params, options);
+    BOOST_CHECK(
+        !rc::RCStage3CoupledWinnerStorePutV1(
+            key, incomplete, &why));
+    BOOST_CHECK(
+        rc::RCStage3CoupledWinnerStoreGetV1(key) ==
+        nullptr);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
