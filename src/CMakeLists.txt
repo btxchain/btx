@@ -663,6 +663,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_universal_topology.cpp
   matmul/matmul_v4_rc_stage3_production_family_programs.cpp
   matmul/matmul_v4_rc_stage3_production_canonical_registry.cpp
+  matmul/matmul_v4_rc_stage3_fixed_program_provenance_bytecode.cpp
   matmul/matmul_v4_rc_stage3_coupled_exchange_permutation_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_extract_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_mix_product.cpp
