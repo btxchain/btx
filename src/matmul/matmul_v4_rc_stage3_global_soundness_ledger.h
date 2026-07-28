@@ -342,7 +342,7 @@ struct CompositionReadinessGateV1 {
 /**
  * Executable, machine-checked encoding of the global additive composition
  * theorem (gate 6 / global_soundness_composition_proved). It MACHINE-COMPUTES
- * the global certified_bits from the four proven audit-input components:
+ * the legacy 79-bit release target from four audit-input components:
  *
  *   (a) the per-node extractor bridge: 341*kappa additive union over the
  *       relation-local recursion tree (straight-line ROM extraction; the loss
@@ -355,8 +355,10 @@ struct CompositionReadinessGateV1 {
  *
  * Composition uses the same log-sum-exp union / min-floor arithmetic as the
  * rest of the ledger and reproduces the shipped composed-floor global (79).
- * This struct is a machine-checked COMPUTATION; it does not by itself mint
- * certified bits (that is gated on the readiness interlock).
+ * This struct is a machine-checked target computation; it does not by itself
+ * mint certified bits. The authority gate additionally requires the selected
+ * single-Q192 SAFE V3 theorem to dominate this target, so the dual-lane A2
+ * assumptions above are not selected authority premises.
  */
 struct ExecutableGlobalAdditiveCompositionV1 {
     // (a) #1 statement-decomposition bridge.
@@ -473,9 +475,16 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     bool fiat_shamir_replay_complete{false};
     bool self_similar_fixed_point_closed{false};
     bool nirop_oracle_separation_complete{false};
-    /** Executable false-acceptance decomposition for tensor mining work,
-     * proof-internal regrinding, and the succinct-only authority path. */
+    /** Legacy V1 false-acceptance decomposition retained for audit
+     * comparison. Production selection is the typed SAFE/Q192 V3 theorem
+     * below, which does not require dual-lane independence. */
     pow_composition::AssessmentV1 pow_composition;
+    /** Selected single-lane SAFE/Q192/K=2 false-acceptance decomposition. */
+    pow_composition::AssessmentV3 safe_q192_pow_composition;
+    /** The selected V3 numeric floor independently dominates the shipped
+     * V1 79-bit target, so the legacy dual-lane arithmetic is not a security
+     * premise of the authority gate. */
+    bool safe_q192_v3_dominates_shipped_target{false};
     bool pow_composition_theorem_complete{false};
     /** Fail-closed conjunction of every production reduction required before
      * the additive arithmetic may become gate 6. This deliberately excludes
@@ -487,8 +496,10 @@ struct ExecutableGlobalSoundnessLedgerV1 {
     soundness_scenarios::ComposedThreatModelFloorV1 composed_floor;
     /** Executable, machine-checked global additive composition (gate 6). */
     ExecutableGlobalAdditiveCompositionV1 global_additive_composition;
-    /** True iff `global_additive_composition` genuinely composes + self-checks;
-     * this is the composition half of gate 6 (the other half is gates 0-5). */
+    /** True iff the legacy release-target arithmetic self-checks AND the
+     * selected single-Q192 SAFE V3 numeric theorem dominates that target.
+     * This is the arithmetic half of gate 6; reductions and gates 0-5 remain
+     * independently required. */
     bool global_additive_composition_machine_checked{false};
     /** Ordered readiness interlock; `all_clear` gates the live value. */
     CompositionReadinessGateV1 composition_gate;

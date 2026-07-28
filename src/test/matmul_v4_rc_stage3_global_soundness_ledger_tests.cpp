@@ -313,6 +313,18 @@ BOOST_AUTO_TEST_CASE(
         !audit.nirop_oracle_separation_complete);
     BOOST_CHECK(
         !audit.pow_composition_theorem_complete);
+    BOOST_CHECK(
+        audit.safe_q192_pow_composition.canonical_parameters);
+    BOOST_CHECK(
+        audit.safe_q192_pow_composition.numeric_bound_machine_checked);
+    BOOST_CHECK_GT(
+        audit.safe_q192_pow_composition.global_conditional_bits,
+        100.0);
+    BOOST_CHECK(
+        audit.safe_q192_v3_dominates_shipped_target);
+    BOOST_CHECK(
+        !audit.safe_q192_pow_composition
+             .pow_composition_theorem_complete);
     BOOST_CHECK(!audit.production_reductions_complete);
     BOOST_CHECK(
         !audit.global_additive_theorem_complete);
@@ -402,6 +414,17 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(audit.v1_global_floor_matches_shipped_79);
     BOOST_CHECK(audit.v1_unused_100bit_requirement_is_not_target);
     BOOST_CHECK(audit.v1_security_target_decision_encoded);
+    BOOST_CHECK(audit.safe_q192_v3_dominates_shipped_target);
+    BOOST_CHECK_GT(
+        audit.safe_q192_pow_composition.global_conditional_bits,
+        static_cast<double>(
+            audit.composed_certified_bits_target));
+    BOOST_CHECK(
+        !audit.safe_q192_pow_composition
+             .consensus_statement_binding_complete);
+    BOOST_CHECK(
+        !audit.safe_q192_pow_composition
+             .pow_composition_theorem_complete);
     BOOST_CHECK(audit.note.find(
                     "v1_security_target_64bit_class_with_shipped_global_floor_79") !=
                 std::string::npos);
@@ -527,6 +550,9 @@ BOOST_AUTO_TEST_CASE(
     all.ctl_export_and_terminal_reduction_complete = true;
     all.hash_first_collision_hybrid_complete = true;
     all.nirop_oracle_separation_complete = true;
+    all.safe_q192_v3_dominates_shipped_target = true;
+    all.safe_q192_pow_composition.numeric_bound_machine_checked = true;
+    all.safe_q192_pow_composition.pow_composition_theorem_complete = true;
     all.pow_composition_theorem_complete = true;
     BOOST_REQUIRE_EQUAL(
         all.canonical.terms.size(),
@@ -570,6 +596,13 @@ BOOST_AUTO_TEST_CASE(
     rejects([](auto& e) { e.ctl_export_and_terminal_reduction_complete = false; });
     rejects([](auto& e) { e.hash_first_collision_hybrid_complete = false; });
     rejects([](auto& e) { e.nirop_oracle_separation_complete = false; });
+    rejects([](auto& e) { e.safe_q192_v3_dominates_shipped_target = false; });
+    rejects([](auto& e) {
+        e.safe_q192_pow_composition.numeric_bound_machine_checked = false;
+    });
+    rejects([](auto& e) {
+        e.safe_q192_pow_composition.pow_composition_theorem_complete = false;
+    });
     rejects([](auto& e) { e.pow_composition_theorem_complete = false; });
     rejects([](auto& e) { e.canonical.terms[0].quantitatively_accounted = false; });
     rejects([](auto& e) { e.canonical.terms[0].implementation_executable = false; });
@@ -586,6 +619,7 @@ BOOST_AUTO_TEST_CASE(
     // The ledger wires the same composition and it machine-checks to 79.
     BOOST_CHECK(comp.machine_checked);
     BOOST_CHECK(audit.global_additive_composition_machine_checked);
+    BOOST_CHECK(audit.safe_q192_v3_dominates_shipped_target);
     BOOST_CHECK_EQUAL(comp.global_certified_bits_target, 79U);
     BOOST_CHECK_EQUAL(
         comp.global_certified_bits_target,

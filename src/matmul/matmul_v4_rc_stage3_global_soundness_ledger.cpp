@@ -546,6 +546,11 @@ bool ProductionReductionsCompleteV1(
         evidence.ctl_export_and_terminal_reduction_complete &&
         evidence.hash_first_collision_hybrid_complete &&
         evidence.nirop_oracle_separation_complete &&
+        evidence.safe_q192_v3_dominates_shipped_target &&
+        evidence.safe_q192_pow_composition
+            .numeric_bound_machine_checked &&
+        evidence.safe_q192_pow_composition
+            .pow_composition_theorem_complete &&
         evidence.pow_composition_theorem_complete;
 }
 
@@ -998,7 +1003,89 @@ AssessExecutableGlobalSoundnessLedgerV1(
             out.pow_composition
                 .external_tensor_work_composition_complete;
         out.pow_composition_theorem_complete =
-            out.pow_composition.pow_composition_theorem_complete;
+            false;
+    }
+    {
+        pow_composition::PremisesV3 premises;
+
+        // V13 is additive until its normalized parent and consensus selector
+        // close. Keeping this sourced from the actual activation constant
+        // prevents the arithmetic theorem from selecting its own backend.
+        premises.safe_q192_backend_consensus_selected =
+            kRCFri3AlgSafeQ192K2ActivatedV13;
+
+        premises.header_projection_and_final_digest_disjoint = true;
+        premises.statement_bound_before_first_proof_commitment =
+            receipt_public_statement::
+                kReceiptPublicStatementSameParentVerifierExecutableV1 &&
+            out.normalized_recursive_verifier_executable;
+        premises.complete_proof_payload_transcript_bound =
+            out.normalized_recursive_verifier_executable;
+        premises.complete_tensor_work_relation =
+            out.semantic_relation_closure_complete;
+        premises.all_relation_children_recursively_verified =
+            out.normalized_recursive_verifier_executable &&
+            out.ctl_export_and_terminal_reduction_complete;
+
+        premises.versioned_domain_and_fixed_k2 =
+            kRCFri3AlgSafeQ192K2ProofVersionV13 == 13 &&
+            kRCFri3AlgSafeQ192K2OodCandidatesV13 ==
+                pow_composition::kPowCompositionV3OodCandidates;
+        premises.typed_safe_domain_registry_pinned =
+            out.universal_program_registry_binding_defined;
+        premises.safe_native_air_parity_complete =
+            out.fiat_shamir_replay_complete;
+        premises.full_typed_transcript_program_proof_owned =
+            out.fiat_shamir_replay_complete;
+        premises.full_typed_transcript_recursively_replayed =
+            out.fiat_shamir_replay_complete &&
+            out.normalized_recursive_verifier_executable;
+        premises.query_seed_binds_complete_post_terminal_transcript =
+            out.fiat_shamir_replay_complete;
+        premises.canonical_query_seed_is_sole_query_source =
+            out.fiat_shamir_replay_complete;
+        premises.all_query_candidates_recursively_consumed =
+            out.fiat_shamir_replay_complete &&
+            out.normalized_recursive_verifier_executable;
+        premises.fixed_k2_selector_recursively_enforced =
+            out.fiat_shamir_replay_complete &&
+            out.normalized_recursive_verifier_executable;
+
+        premises.one_trace_and_commitment_statement_bound =
+            out.normalized_recursive_verifier_executable &&
+            out.universal_program_registry_consumed_in_recursion;
+        premises.fri_bcs_reduction_complete =
+            kRCFri3AlgFormalSoundnessReady;
+        premises.concrete_safe_nirop_reduction_complete =
+            out.nirop_oracle_separation_complete;
+        premises.poseidon2_binding_reduction_complete =
+            out.hash_first_collision_hybrid_complete;
+        premises.proof_site_upper_bound_recursively_enforced =
+            out.exact_selected_topology_manifest_derived;
+        premises.adaptive_statement_selection_accounted =
+            out.nirop_oracle_separation_complete &&
+            out.hash_first_collision_hybrid_complete;
+
+        premises.unenforced_regrind_deduction_in_fri_bits =
+            !kRCFri3AlgSingleLaneEnforcesSqueezeGrind &&
+            Fri3AlgSoundnessBoundBits() ==
+                static_cast<int>(
+                    pow_composition::kPowCompositionV3FriBits);
+        premises.site_union_and_regrind_each_charged_once =
+            out.exact_selected_topology_manifest_derived &&
+            out.internal_fri_grinding_charged;
+        premises.proof_nonce_not_credited_as_tensor_work = true;
+        premises.sampled_carrier_excluded_from_authority = true;
+        premises.exact_replay_excluded_from_authority = true;
+
+        out.safe_q192_pow_composition =
+            pow_composition::AssessPowCompositionV3(premises);
+        out.external_pow_work_composition_complete =
+            out.safe_q192_pow_composition
+                .pow_composition_theorem_complete;
+        out.pow_composition_theorem_complete =
+            out.safe_q192_pow_composition
+                .pow_composition_theorem_complete;
     }
     // global_additive_theorem_complete is COMPUTED below from the executable
     // composition (machine-checked) AND the gate-0..5 dependency conjunction;
@@ -1043,19 +1130,27 @@ AssessExecutableGlobalSoundnessLedgerV1(
         out.v1_global_floor_matches_shipped_79 &&
         out.v1_unused_100bit_requirement_is_not_target;
 
-    // Executable, machine-checked global additive composition (gate 6). It
-    // recomposes the global bound from the #1 statement-decomposition bridge
-    // (341*kappa additive union), the dual-lane A2 terms, the flat M-LINK/P2 +
-    // cross-hash + hash-collision terms and the site-union charge, and self-
-    // checks that it reproduces the shipped composed-floor global (79). eps_P2
-    // is sourced from the executable M-LINK single-global-epsilon floor.
+    // Machine-check the legacy 79-bit release-target arithmetic, then require
+    // the selected single-Q192 SAFE V3 numeric theorem to dominate that
+    // target. The V3 theorem is independently required by the production
+    // reductions below, so dual-lane A2 is retained as an audit comparison,
+    // not selected as an authority premise. eps_P2 is sourced from the
+    // executable M-LINK single-global-epsilon floor.
     const double mlink_p2_epsilon_bits =
         stage3_mlink::AssessMLinkSoundnessV1().epsilon_mlink_bits;
     out.global_additive_composition =
         ComposeExecutableGlobalAdditiveBoundV1(
             out.composed_floor, mlink_p2_epsilon_bits);
+    out.safe_q192_v3_dominates_shipped_target =
+        out.safe_q192_pow_composition
+            .numeric_bound_machine_checked &&
+        out.safe_q192_pow_composition
+            .global_conditional_bits >=
+            static_cast<double>(
+                out.composed_certified_bits_target);
     out.global_additive_composition_machine_checked =
-        out.global_additive_composition.machine_checked;
+        out.global_additive_composition.machine_checked &&
+        out.safe_q192_v3_dominates_shipped_target;
 
     // Gate 6 completes ONLY when (a) the executable composition genuinely
     // machine-checks AND (b) the constructions it composes are executable, i.e.
@@ -1223,6 +1318,8 @@ AssessExecutableGlobalSoundnessLedgerV1(
         "composed_floor_Fqstar_per_site_104_global_79_computed;"
         "v1_security_target_64bit_class_with_shipped_global_floor_79;"
         "unused_100bit_requirement_is_not_v1_consensus_target;"
+        "single_q192_safe_v3_numeric_floor_dominates_shipped_target;"
+        "dual_lane_independence_not_selected_authority_premise;"
         "certified_bits_gated_on_readiness_interlock_currently_zero;"
         "assumptions_M2_A2_field_bounds_hash_model_recorded_audit_input;"
         "global_reductions_open";
