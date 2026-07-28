@@ -8,6 +8,7 @@
 #include <crypto/sha256.h>
 #include <hash.h>
 #include <matmul/matmul_v4.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <primitives/block.h>
 
 #include <algorithm>
@@ -55,6 +56,9 @@ uint256 g_coupled_winner_store_header;
 std::shared_ptr<
     const RCStage3CoupledWinnerCaptureV1>
     g_coupled_winner_store_capture;
+std::shared_ptr<
+    const RCStage3CoupledGemmCompactProductV2>
+    g_coupled_gemm_compact_store_product;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -1681,6 +1685,121 @@ bool RCStage3CoupledWinnerCaptureV1::Complete(
     return finish(true);
 }
 
+RCStage3CoupledWinnerProofBundleV2::
+RCStage3CoupledWinnerProofBundleV2(
+    const RCStage3SuccinctProof& statement_precommit,
+    const CBlockHeader& header,
+    int32_t height,
+    const RCCoupParams& params,
+    const RCCoupOptions& options)
+    : m_capture(std::make_shared<
+          RCStage3CoupledWinnerCaptureV1>(
+          header, height, params, options)),
+      m_gemm(
+          statement_precommit,
+          MakeRCStage3CoupledShape(params, options))
+{
+    if ((statement_precommit.statement !=
+             RCStage3StatementKind::Coupled &&
+         statement_precommit.statement !=
+             RCStage3StatementKind::Composed) ||
+        statement_precommit.public_inputs.height != height ||
+        statement_precommit.public_inputs.header_commitment !=
+            RCStage3HeaderCommitment(header) ||
+        statement_precommit.public_inputs.sigma !=
+            matmul::v4::DeriveSigma(header) ||
+        CommitRCStage3CoupledStatement(
+            statement_precommit.public_inputs).IsNull()) {
+        m_error = "statement_precommit";
+    }
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnInitialState(
+    const RCCoupInitialStateProofWitnessView& view)
+{
+    m_capture->OnInitialState(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnGemm(
+    const RCCoupGemmProofWitnessView& view)
+{
+    m_capture->OnGemm(view);
+    m_gemm.OnGemm(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnPermutation(
+    const RCCoupPermutationProofWitnessView& view)
+{
+    m_capture->OnPermutation(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnMix(
+    const RCCoupMixProofWitnessView& view)
+{
+    m_capture->OnMix(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::
+OnMaterialExchange(
+    const RCCoupMaterialExchangeProofWitnessView& view)
+{
+    m_capture->OnMaterialExchange(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnBarrier(
+    const RCCoupBarrierProofWitnessView& view)
+{
+    m_capture->OnBarrier(view);
+}
+
+void RCStage3CoupledWinnerProofBundleV2::OnEpisode(
+    const RCCoupEpisodeProofWitnessView& view)
+{
+    m_capture->OnEpisode(view);
+}
+
+bool RCStage3CoupledWinnerProofBundleV2::
+FinalizeHeaderBindingV2(
+    const CBlockHeader& finalized_header,
+    const uint256& expected_coupled_digest,
+    std::string* why)
+{
+    if (!m_error.empty()) {
+        return Fail(
+            why, "bundle:" + m_error);
+    }
+    return m_capture->FinalizeHeaderBindingV2(
+        finalized_header,
+        expected_coupled_digest, why);
+}
+
+bool RCStage3CoupledWinnerProofBundleV2::Complete(
+    std::string* why) const
+{
+    if (!m_error.empty()) {
+        return Fail(
+            why, "bundle:" + m_error);
+    }
+    if (!m_capture->Complete(why) ||
+        !m_gemm.Complete(why)) {
+        return false;
+    }
+    return true;
+}
+
+bool RCStage3CoupledWinnerProofBundleV2::
+BuildCompactGemmProductV2(
+    RCStage3CoupledGemmCompactProductV2& out,
+    std::string* why) const
+{
+    if (!Complete(why) ||
+        !m_gemm.Finalize(out, why)) {
+        out = {};
+        return false;
+    }
+    return true;
+}
+
 bool RCStage3CoupledWinnerStorePutV1(
     const uint256& finalized_header_hash,
     std::shared_ptr<
@@ -1700,6 +1819,34 @@ bool RCStage3CoupledWinnerStorePutV1(
         finalized_header_hash;
     g_coupled_winner_store_capture =
         std::move(capture);
+    g_coupled_gemm_compact_store_product.reset();
+    return true;
+}
+
+bool RCStage3CoupledWinnerBundleStorePutV2(
+    const uint256& finalized_header_hash,
+    const RCStage3CoupledWinnerProofBundleV2& bundle,
+    std::string* why)
+{
+    RCStage3CoupledGemmCompactProductV2 product;
+    const auto capture = bundle.WinnerCapture();
+    if (finalized_header_hash.IsNull() ||
+        capture == nullptr ||
+        !bundle.BuildCompactGemmProductV2(
+            product, why) ||
+        capture->Receipt().finalized_header_hash !=
+            finalized_header_hash) {
+        return Fail(why, "winner_bundle_store_incomplete");
+    }
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    g_coupled_winner_store_header =
+        finalized_header_hash;
+    g_coupled_winner_store_capture = capture;
+    g_coupled_gemm_compact_store_product =
+        std::make_shared<
+            const RCStage3CoupledGemmCompactProductV2>(
+                std::move(product));
     return true;
 }
 
@@ -1719,6 +1866,23 @@ RCStage3CoupledWinnerStoreGetV1(
     return g_coupled_winner_store_capture;
 }
 
+std::shared_ptr<
+    const RCStage3CoupledGemmCompactProductV2>
+RCStage3CoupledGemmCompactStoreGetV2(
+    const uint256& finalized_header_hash)
+{
+    if (finalized_header_hash.IsNull()) return {};
+    std::lock_guard<std::mutex> lock(
+        g_coupled_winner_store_mutex);
+    if (g_coupled_winner_store_header !=
+            finalized_header_hash ||
+        g_coupled_gemm_compact_store_product ==
+            nullptr) {
+        return {};
+    }
+    return g_coupled_gemm_compact_store_product;
+}
+
 void RCStage3CoupledWinnerStoreEraseV1(
     const uint256& finalized_header_hash)
 {
@@ -1728,6 +1892,7 @@ void RCStage3CoupledWinnerStoreEraseV1(
             finalized_header_hash) {
         g_coupled_winner_store_header.SetNull();
         g_coupled_winner_store_capture.reset();
+        g_coupled_gemm_compact_store_product.reset();
     }
 }
 
@@ -1737,6 +1902,7 @@ void RCStage3CoupledWinnerStoreClearForTestV1()
         g_coupled_winner_store_mutex);
     g_coupled_winner_store_header.SetNull();
     g_coupled_winner_store_capture.reset();
+    g_coupled_gemm_compact_store_product.reset();
 }
 
 } // namespace matmul::v4::rc

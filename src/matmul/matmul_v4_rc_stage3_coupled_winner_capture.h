@@ -6,6 +6,7 @@
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_COUPLED_WINNER_CAPTURE_H
 
 #include <matmul/matmul_v4_rc_coupled.h>
+#include <matmul/matmul_v4_rc_stage3_coupled_gemm_product.h>
 
 #include <cstdint>
 #include <memory>
@@ -328,6 +329,70 @@ private:
 };
 
 /**
+ * Sole coupled winner callback target for compact Stage-3 production.
+ *
+ * The boundary receipt and proof-owned compact GEMM child observe the same
+ * borrowed callback exactly once.  The GEMM child proves each page before the
+ * callback returns and retains no A/B/Y vector; the boundary capture retains
+ * only its bounded roots and accumulation scratch.
+ */
+class RCStage3CoupledWinnerProofBundleV2 final
+    : public RCCoupProofWitnessSink {
+public:
+    RCStage3CoupledWinnerProofBundleV2(
+        const RCStage3SuccinctProof& statement_precommit,
+        const CBlockHeader& header,
+        int32_t height,
+        const RCCoupParams& params,
+        const RCCoupOptions& options);
+
+    void OnInitialState(
+        const RCCoupInitialStateProofWitnessView& view) override;
+    void OnGemm(
+        const RCCoupGemmProofWitnessView& view) override;
+    void OnPermutation(
+        const RCCoupPermutationProofWitnessView& view) override;
+    void OnMix(
+        const RCCoupMixProofWitnessView& view) override;
+    void OnMaterialExchange(
+        const RCCoupMaterialExchangeProofWitnessView& view) override;
+    void OnBarrier(
+        const RCCoupBarrierProofWitnessView& view) override;
+    void OnEpisode(
+        const RCCoupEpisodeProofWitnessView& view) override;
+
+    [[nodiscard]] bool FinalizeHeaderBindingV2(
+        const CBlockHeader& finalized_header,
+        const uint256& expected_coupled_digest,
+        std::string* why = nullptr);
+    [[nodiscard]] bool Complete(
+        std::string* why = nullptr) const;
+    [[nodiscard]] bool BuildCompactGemmProductV2(
+        RCStage3CoupledGemmCompactProductV2& out,
+        std::string* why = nullptr) const;
+    [[nodiscard]] std::shared_ptr<
+        RCStage3CoupledWinnerCaptureV1>
+    WinnerCapture() const
+    {
+        return m_capture;
+    }
+    [[nodiscard]] uint64_t GemmRetainedNativeBytes() const
+    {
+        return m_gemm.RetainedNativeBytes();
+    }
+    [[nodiscard]] uint64_t GemmPeakNativeBytes() const
+    {
+        return m_gemm.PeakNativeBytes();
+    }
+
+private:
+    std::shared_ptr<RCStage3CoupledWinnerCaptureV1>
+        m_capture;
+    RCStage3CoupledGemmCompactStreamingV2 m_gemm;
+    std::string m_error;
+};
+
+/**
  * Winner-only process-local handoff to the normalized proof producer.
  *
  * The finalized header hash is the key and the store retains at most one
@@ -345,6 +410,16 @@ RCStage3CoupledWinnerStoreGetV1(
 void RCStage3CoupledWinnerStoreEraseV1(
     const uint256& finalized_header_hash);
 void RCStage3CoupledWinnerStoreClearForTestV1();
+
+/** Atomically publish the bounded winner receipt and proof-only GEMM child. */
+[[nodiscard]] bool RCStage3CoupledWinnerBundleStorePutV2(
+    const uint256& finalized_header_hash,
+    const RCStage3CoupledWinnerProofBundleV2& bundle,
+    std::string* why = nullptr);
+[[nodiscard]] std::shared_ptr<
+    const RCStage3CoupledGemmCompactProductV2>
+RCStage3CoupledGemmCompactStoreGetV2(
+    const uint256& finalized_header_hash);
 
 } // namespace matmul::v4::rc
 
