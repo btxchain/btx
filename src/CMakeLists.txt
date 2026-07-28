@@ -662,6 +662,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_global_soundness_ledger.cpp
   matmul/matmul_v4_rc_stage3_universal_topology.cpp
   matmul/matmul_v4_rc_stage3_production_family_programs.cpp
+  matmul/matmul_v4_rc_stage3_production_canonical_registry.cpp
   matmul/matmul_v4_rc_stage3_coupled_exchange_permutation_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_extract_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_mix_product.cpp
@@ -738,6 +739,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_safe_v12_recursive_bridge.cpp
   matmul/matmul_v4_rc_stage3_safe_v15_superprogram.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_normalized_program.cpp
+  matmul/matmul_v4_rc_stage3_normalized_authority_receipt.cpp
+  matmul/matmul_v4_rc_stage3_normalized_authority_composition.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join_q96.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_relation_shards.cpp

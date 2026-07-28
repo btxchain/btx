@@ -192,6 +192,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_family_vm_tests.cpp
   matmul_v4_rc_stage3_role_bytecode_tests.cpp
   matmul_v4_rc_stage3_production_family_programs_tests.cpp
+  matmul_v4_rc_stage3_production_canonical_registry_tests.cpp
   matmul_v4_rc_stage3_splitrap_ctl_coordinator_tests.cpp
   matmul_v4_rc_stage3_recursive_parent_air_tests.cpp
   matmul_v4_rc_stage3_fs_selection_air_tests.cpp
@@ -226,6 +227,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_safe_v15_superprogram_tests.cpp
   matmul_v4_rc_stage3_safe_q192_v13_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_normalized_program_tests.cpp
+  matmul_v4_rc_stage3_normalized_authority_receipt_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_receipt_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_receipt_join_q96_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_q96_child_verifier_bridge_tests.cpp
