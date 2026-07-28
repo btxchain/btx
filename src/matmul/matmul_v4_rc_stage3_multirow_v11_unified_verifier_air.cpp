@@ -4,6 +4,9 @@
 
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_unified_verifier_air.h>
 
+#include <matmul/matmul_v4_rc_air_recurse.h>
+#include <matmul/matmul_v4_rc_stage3_poseidon_bytecode.h>
+
 #include <algorithm>
 #include <chrono>
 #include <functional>
@@ -14,6 +17,7 @@ namespace matmul::v4::rc::stage3_multirow_v11_unified_verifier_air {
 namespace {
 
 using gf::Fp3;
+namespace pa = stage3_poseidon_air;
 
 uint32_t NextPowerOfTwo(uint64_t value)
 {
@@ -52,6 +56,123 @@ bool IsParentJoinProofTapeColumn(
         }
     }
     return false;
+}
+
+cb::Instruction CurrentInstruction(uint32_t column)
+{
+    cb::Instruction out;
+    out.opcode = cb::Opcode::Current;
+    out.lhs = column;
+    return out;
+}
+
+cb::Instruction ConstantInstruction(const Fp3& value)
+{
+    cb::Instruction out;
+    out.opcode = cb::Opcode::Constant;
+    out.constant = value;
+    return out;
+}
+
+cb::Instruction BinaryInstruction(
+    cb::Opcode opcode,
+    uint32_t lhs,
+    uint32_t rhs)
+{
+    cb::Instruction out;
+    out.opcode = opcode;
+    out.lhs = lhs;
+    out.rhs = rhs;
+    return out;
+}
+
+struct AffineFormV1 {
+    Fp3 constant{};
+    std::vector<std::pair<uint32_t, Fp3>> terms;
+};
+
+AffineFormV1 RecoverPermutationOutputAffineV1(
+    const pa::Layout& layout,
+    uint32_t lane)
+{
+    std::vector<Fp3> row(
+        layout.End(), Fp3::Zero());
+    AffineFormV1 out;
+    out.constant =
+        air_recurse::PermOutputLane(
+            layout.perm, row, lane);
+    for (uint32_t column = 0;
+         column < layout.End();
+         ++column) {
+        row[column] = Fp3::One();
+        const Fp3 coefficient = gf::Sub(
+            air_recurse::PermOutputLane(
+                layout.perm, row, lane),
+            out.constant);
+        row[column] = Fp3::Zero();
+        if (!gf::IsZero(coefficient)) {
+            out.terms.emplace_back(
+                column, coefficient);
+        }
+    }
+    return out;
+}
+
+uint32_t EmitAffineV1(
+    std::vector<cb::Instruction>& instructions,
+    const AffineFormV1& affine)
+{
+    instructions.push_back(
+        ConstantInstruction(affine.constant));
+    uint32_t accumulator =
+        static_cast<uint32_t>(
+            instructions.size() - 1);
+    for (const auto& [column, coefficient] :
+         affine.terms) {
+        instructions.push_back(
+            ConstantInstruction(coefficient));
+        const uint32_t scalar =
+            static_cast<uint32_t>(
+                instructions.size() - 1);
+        instructions.push_back(
+            CurrentInstruction(column));
+        const uint32_t value =
+            static_cast<uint32_t>(
+                instructions.size() - 1);
+        instructions.push_back(
+            BinaryInstruction(
+                cb::Opcode::Mul,
+                scalar, value));
+        const uint32_t term =
+            static_cast<uint32_t>(
+                instructions.size() - 1);
+        instructions.push_back(
+            BinaryInstruction(
+                cb::Opcode::Add,
+                accumulator, term));
+        accumulator =
+            static_cast<uint32_t>(
+                instructions.size() - 1);
+    }
+    return accumulator;
+}
+
+cb::Program NewMerkleHashPinProgramV1(
+    uint32_t ordinal,
+    uint32_t width)
+{
+    cb::Program out;
+    out.version =
+        cb::kConstraintBytecodeVersion;
+    out.role =
+        RCStage3RelationRole::CompositionLink;
+    out.constraint_ordinal = ordinal;
+    out.kind = aq::AirKind::kEverywhere;
+    out.declared_degree = 1;
+    out.current_width = width;
+    out.next_width = width;
+    out.challenge_width = 0;
+    return out;
 }
 
 bool BuildParentJoinStatementManifestR0V1(
@@ -408,6 +529,113 @@ uint256 ComputeParentJoinStatementManifestR0RootV1(
                 columns.size());
     }
     return root;
+}
+
+cb::ProgramTable BuildMerkleHashProgramTableV1(
+    const mf::HashLayoutV1& layout)
+{
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = layout.n_columns;
+    table.next_width = layout.n_columns;
+    table.challenge_width = 0;
+    if (layout.poseidon.perm.base != 0 ||
+        layout.poseidon.End() !=
+            pa::kFixedColumns ||
+        layout.input_pin_base !=
+            layout.poseidon.End() ||
+        layout.output_pin_base !=
+            layout.input_pin_base +
+                alg_hash::kAlgHashT ||
+        layout.n_columns !=
+            layout.output_pin_base +
+                alg_hash::kAlgHashDigestLen) {
+        return table;
+    }
+
+    cb::ProgramTable poseidon;
+    std::string why;
+    if (!pa::BuildFixedProgramTable(
+            poseidon, &why) ||
+        poseidon.programs.size() !=
+            pa::kFixedConstraints) {
+        return {};
+    }
+    table.programs.reserve(
+        pa::kFixedConstraints +
+        alg_hash::kAlgHashT +
+        alg_hash::kAlgHashDigestLen);
+    for (auto program :
+         poseidon.programs) {
+        program.constraint_ordinal =
+            static_cast<uint32_t>(
+                table.programs.size());
+        program.current_width =
+            table.current_width;
+        program.next_width =
+            table.next_width;
+        table.programs.push_back(
+            std::move(program));
+    }
+
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT;
+         ++lane) {
+        cb::Program program =
+            NewMerkleHashPinProgramV1(
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                table.current_width);
+        program.instructions = {
+            CurrentInstruction(
+                layout.poseidon.perm
+                    .InputCol(lane)),
+            CurrentInstruction(
+                layout.InputPin(lane)),
+            BinaryInstruction(
+                cb::Opcode::Sub, 0, 1),
+        };
+        table.programs.push_back(
+            std::move(program));
+    }
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashDigestLen;
+         ++lane) {
+        cb::Program program =
+            NewMerkleHashPinProgramV1(
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                table.current_width);
+        const uint32_t output =
+            EmitAffineV1(
+                program.instructions,
+                RecoverPermutationOutputAffineV1(
+                    layout.poseidon, lane));
+        program.instructions.push_back(
+            CurrentInstruction(
+                layout.OutputPin(lane)));
+        const uint32_t claim =
+            static_cast<uint32_t>(
+                program.instructions.size() - 1);
+        program.instructions.push_back(
+            BinaryInstruction(
+                cb::Opcode::Sub,
+                output, claim));
+        table.programs.push_back(
+            std::move(program));
+    }
+    if (table.programs.size() !=
+            pa::kFixedConstraints +
+                alg_hash::kAlgHashT +
+                alg_hash::kAlgHashDigestLen ||
+        !cb::ValidateProgramTable(
+            table, &why)) {
+        return {};
+    }
+    return table;
 }
 
 cb::ProgramTable BuildAcceptanceProgramTableV1(
@@ -810,13 +1038,104 @@ ProductV1 BuildProductV1(
         out.parent_join_program_root_recomputed &&
         out.parent_join_r0_statement_manifest_only;
 
+    const cb::ProgramTable merkle_hash_program =
+        BuildMerkleHashProgramTableV1(
+            out.merkle_fold.hash_layout);
+    aq::AirConstraintSystem<Fp3>
+        merkle_hash_static_cs;
+    if (merkle_hash_program.programs.size() !=
+            pa::kFixedConstraints +
+                alg_hash::kAlgHashT +
+                alg_hash::kAlgHashDigestLen ||
+        merkle_hash_program.current_width !=
+            out.merkle_fold.hash_cs.n_columns ||
+        merkle_hash_program.next_width !=
+            out.merkle_fold.hash_cs.n_columns ||
+        merkle_hash_program.programs.size() !=
+            out.merkle_fold.hash_cs.constraints.size() ||
+        !cb::BuildAirConstraintSystemFromProgramTable(
+            merkle_hash_program,
+            out.merkle_fold.hash_cs.n_rows,
+            merkle_hash_static_cs, &why)) {
+        return fail(
+            "merkle_hash_static_program:" +
+            why);
+    }
+    if (air_recurse::
+            CountWitnessViolationsOnH(
+                merkle_hash_static_cs,
+                out.merkle_fold.hash_columns) != 0) {
+        return fail(
+            "merkle_hash_static_witness");
+    }
+    out.merkle_hash_program_root =
+        cb::CommitProgramTableAlgHash(
+            merkle_hash_program);
+    const cb::ProgramTable
+        merkle_hash_program_recomputed =
+            BuildMerkleHashProgramTableV1(
+                out.merkle_fold.hash_layout);
+    out.merkle_hash_program_constraints =
+        static_cast<uint32_t>(
+            merkle_hash_program.programs.size());
+    out.merkle_hash_constraints_canonical_bytecode =
+        out.merkle_hash_program_constraints ==
+            pa::kFixedConstraints +
+                alg_hash::kAlgHashT +
+                alg_hash::kAlgHashDigestLen;
+    out.merkle_hash_program_root_recomputed =
+        DigestNonzero(
+            out.merkle_hash_program_root) &&
+        merkle_hash_program_recomputed ==
+            merkle_hash_program &&
+        cb::CommitProgramTableAlgHash(
+            merkle_hash_program_recomputed) ==
+            out.merkle_hash_program_root;
+    // The canonical fixed Merkle chip has no immutable per-row values:
+    // all 12 inputs and four digest claims are ordinary committed tape.
+    out.merkle_hash_statement_manifest_r0_columns =
+        static_cast<uint32_t>(
+            merkle_hash_static_cs.preprocessed.size());
+    out.merkle_hash_proof_tape_cells =
+        alg_hash::kAlgHashT +
+        alg_hash::kAlgHashDigestLen;
+    out.merkle_hash_proof_tape_cells_ordinary =
+        merkle_hash_static_cs.preprocessed.empty();
+    out.merkle_hash_proof_tape_fixed_lane_offsets =
+        out.merkle_fold.hash_layout.input_pin_base ==
+            out.merkle_fold.hash_layout
+                .poseidon.End() &&
+        out.merkle_fold.hash_layout.output_pin_base ==
+            out.merkle_fold.hash_layout
+                .input_pin_base +
+                alg_hash::kAlgHashT &&
+        out.merkle_fold.hash_layout.n_columns ==
+            out.merkle_fold.hash_layout
+                .output_pin_base +
+                alg_hash::kAlgHashDigestLen;
+    out.merkle_hash_io_poseidon_bound =
+        out.merkle_hash_constraints_canonical_bytecode &&
+        out.merkle_hash_program_root_recomputed;
+    out.merkle_hash_r0_statement_manifest_only =
+        out.merkle_hash_statement_manifest_r0_columns == 0 &&
+        out.merkle_hash_proof_tape_cells_ordinary &&
+        out.merkle_hash_proof_tape_fixed_lane_offsets &&
+        out.merkle_hash_io_poseidon_bound;
+    out.merkle_hash_cs_independent_of_child_witness =
+        out.merkle_hash_r0_statement_manifest_only;
+    // The source-address/path-order bus is owned by a later Decoder static
+    // migration. Do not confuse a complete Poseidon row relation with a
+    // complete Merkle-path relation.
+    out.merkle_hash_row_semantic_carry_complete =
+        false;
+
     const std::array<PhaseViewV1, kPhasesV1>
         views{{
             {PhaseV1::ParentJoin,
              &parent_join_static_cs,
              &out.parent_join.columns},
             {PhaseV1::MerkleHash,
-             &out.merkle_fold.hash_cs,
+             &merkle_hash_static_cs,
              &out.merkle_fold.hash_columns},
             {PhaseV1::MerkleFold,
              &out.merkle_fold.fold_cs,
@@ -1087,11 +1406,15 @@ ProductV1 BuildProductV1(
     out.quotient_cap_audit_complete =
         commitment_coeffs != 0;
     out.phase_constraint_systems_canonical_bytecode =
-        out.parent_join_constraints_canonical_bytecode
-        ? 1U : 0U;
+        (out.parent_join_constraints_canonical_bytecode
+            ? 1U : 0U) +
+        (out.merkle_hash_constraints_canonical_bytecode
+            ? 1U : 0U);
     out.phase_r0_tables_statement_manifest_only =
-        out.parent_join_r0_statement_manifest_only
-        ? 1U : 0U;
+        (out.parent_join_r0_statement_manifest_only
+            ? 1U : 0U) +
+        (out.merkle_hash_r0_statement_manifest_only
+            ? 1U : 0U);
     out.cs_independent_of_child_witness =
         out.phase_constraint_systems_canonical_bytecode ==
             kPhasesV1 &&

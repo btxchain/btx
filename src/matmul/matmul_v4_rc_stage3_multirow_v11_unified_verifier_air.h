@@ -143,6 +143,25 @@ struct ProductV1 {
     /** True only when all per-proof transcript/value cells have left R0. */
     bool parent_join_r0_statement_manifest_only{false};
     bool parent_join_cs_independent_of_child_witness{false};
+    alg_hash::Digest merkle_hash_program_root{};
+    uint32_t merkle_hash_program_constraints{0};
+    bool merkle_hash_constraints_canonical_bytecode{false};
+    bool merkle_hash_program_root_recomputed{false};
+    uint32_t merkle_hash_statement_manifest_r0_columns{0};
+    uint32_t merkle_hash_proof_tape_cells{0};
+    bool merkle_hash_proof_tape_cells_ordinary{false};
+    /** Input/output lane offsets are fixed by HashLayoutV1, never witnessed. */
+    bool merkle_hash_proof_tape_fixed_lane_offsets{false};
+    bool merkle_hash_io_poseidon_bound{false};
+    bool merkle_hash_r0_statement_manifest_only{false};
+    bool merkle_hash_cs_independent_of_child_witness{false};
+    /**
+     * Deliberately false until the Decoder phase consumes every hash-task
+     * source address and every predecessor/root digest through an executable
+     * same-proof carry relation. Static hash equations alone do not prove
+     * Merkle path ordering.
+     */
+    bool merkle_hash_row_semantic_carry_complete{false};
     uint32_t phase_constraint_systems_canonical_bytecode{0};
     uint32_t phase_r0_tables_statement_manifest_only{0};
     bool trace_cap_fits{false};
@@ -170,6 +189,16 @@ BuildAcceptanceProgramTableV1(const LayoutV1& layout);
 /** Canonical bytecode for active/one-hot/phase-boundary scheduling. */
 [[nodiscard]] cb::ProgramTable
 BuildSchedulerProgramTableV1(const LayoutV1& layout);
+
+/**
+ * Canonical bytecode for one row of the fixed-width Merkle Poseidon2 table:
+ * all 472 decomposed permutation identities followed by the 12 input-pin and
+ * four digest-output-pin equalities. The table contains no proof values.
+ */
+[[nodiscard]] cb::ProgramTable
+BuildMerkleHashProgramTableV1(
+    const mf::HashLayoutV1& layout =
+        mf::CanonicalHashLayoutV1());
 
 /**
  * Append the production acceptance-output constraints through the canonical

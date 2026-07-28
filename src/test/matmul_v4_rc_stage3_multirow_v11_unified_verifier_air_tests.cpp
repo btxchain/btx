@@ -240,6 +240,28 @@ rv::InputV1 ActualInput()
     return out;
 }
 
+mf::ShardProductV1 OneQueryMerkleShard(
+    const rv::InputV1& input)
+{
+    std::vector<uint32_t> words;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        abi::EncodeCanonicalV1(
+            input.proof.envelope,
+            words, nullptr, &why),
+        why);
+    const auto decoded =
+        abi::DecodeCanonicalV1(
+            words, &why);
+    BOOST_REQUIRE_MESSAGE(
+        decoded.has_value(), why);
+    auto shard = mf::BuildShardV1(
+        *decoded, input.transcript, 0, 1);
+    BOOST_REQUIRE_MESSAGE(
+        shard.valid, shard.note);
+    return shard;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -813,6 +835,236 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    merkle_hash_static_bytecode_excludes_io_and_rejects_substitution)
+{
+    const auto input = ActualInput();
+    const auto shard =
+        OneQueryMerkleShard(input);
+    const auto canonical_table =
+        BuildMerkleHashProgramTableV1(
+            shard.hash_layout);
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            canonical_table, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        stage3_poseidon_air::kFixedConstraints +
+            alg_hash::kAlgHashT +
+            alg_hash::kAlgHashDigestLen);
+    BOOST_CHECK_EQUAL(
+        canonical_table.programs.size(),
+        shard.hash_cs.constraints.size());
+    BOOST_CHECK(
+        !std::all_of(
+            canonical_table.programs.begin(),
+            canonical_table.programs.end(),
+            [](const cb::Program& program) {
+                return program.instructions.empty();
+            }));
+
+    aq::AirConstraintSystem<gf::Fp3>
+        canonical_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            canonical_table,
+            shard.hash_cs.n_rows,
+            canonical_cs, &why),
+        why);
+    BOOST_CHECK(
+        canonical_cs.preprocessed.empty());
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs,
+            shard.hash_columns),
+        0U);
+    // Differentially audit every migrated callback on arbitrary full-Fp3
+    // rows, not just the honest Poseidon witness where two wrong equations
+    // could accidentally vanish together.
+    for (uint32_t probe = 0;
+         probe < 3; ++probe) {
+        std::vector<gf::Fp3> current(
+            shard.hash_cs.n_columns);
+        std::vector<gf::Fp3> next(
+            shard.hash_cs.n_columns);
+        for (uint32_t column = 0;
+             column < shard.hash_cs.n_columns;
+             ++column) {
+            current[column] = {
+                gf::FromU64(
+                    3 + probe * 17 + column),
+                gf::FromU64(
+                    5 + probe * 19 + 2 * column),
+                gf::FromU64(
+                    7 + probe * 23 + 3 * column)};
+            next[column] = {
+                gf::FromU64(
+                    11 + probe * 29 + column),
+                gf::FromU64(
+                    13 + probe * 31 + 2 * column),
+                gf::FromU64(
+                    17 + probe * 37 + 3 * column)};
+        }
+        for (uint32_t ordinal = 0;
+             ordinal <
+                 canonical_table.programs.size();
+             ++ordinal) {
+            gf::Fp3 interpreted;
+            BOOST_REQUIRE_MESSAGE(
+                cb::EvaluateProgram(
+                    canonical_table.programs[
+                        ordinal],
+                    current, next,
+                    interpreted, &why),
+                why);
+            const auto native =
+                shard.hash_cs.constraints[
+                    ordinal].eval(
+                        current, next);
+            BOOST_CHECK_MESSAGE(
+                gf::Eq(interpreted, native),
+                "MerkleHash differential mismatch"
+                    << " probe=" << probe
+                    << " ordinal=" << ordinal);
+        }
+    }
+
+    // The sixteen hash I/O lanes are ordinary trace cells. Mutating one does
+    // not require (or permit) an R0 rewrite; the canonical equality program
+    // detects it.
+    auto forged = shard.hash_columns;
+    const uint32_t input_pin =
+        shard.hash_layout.InputPin(0);
+    forged[input_pin][0] =
+        gf::Add(
+            forged[input_pin][0],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        air_recurse::CountWitnessViolationsOnH(
+            canonical_cs, forged),
+        0U);
+
+    // A malicious prover can make that same forged tape valid only by
+    // substituting the fixed-offset input relation with a tautology. A proof
+    // valid for that different ProgramTable must fail under the canonical
+    // MerkleHash equations.
+    auto substituted_table =
+        canonical_table;
+    auto& substituted =
+        substituted_table.programs[
+            stage3_poseidon_air::kFixedConstraints];
+    cb::Instruction load;
+    load.opcode = cb::Opcode::Current;
+    load.lhs = input_pin;
+    cb::Instruction subtract;
+    subtract.opcode = cb::Opcode::Sub;
+    subtract.lhs = 0;
+    subtract.rhs = 1;
+    substituted.instructions = {
+        load, load, subtract};
+    substituted.declared_degree = 1;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(
+            substituted_table, &why),
+        why);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(
+            substituted_table) !=
+        cb::CommitProgramTableAlgHash(
+            canonical_table));
+    aq::AirConstraintSystem<gf::Fp3>
+        substituted_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            substituted_table,
+            shard.hash_cs.n_rows,
+            substituted_cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            substituted_cs, forged),
+        0U);
+
+    // Split-RAP requires an explicit R0 group. Pin one unchanged internal
+    // Poseidon auxiliary solely for this adversarial proof harness; no hash
+    // input/output pin is included.
+    const uint32_t harness_schedule_column =
+        shard.hash_layout.poseidon.X2Col(0);
+    canonical_cs.preprocessed_pin_ood = true;
+    substituted_cs.preprocessed_pin_ood = true;
+    canonical_cs.preprocessed.emplace_back(
+        harness_schedule_column,
+        forged[harness_schedule_column]);
+    substituted_cs.preprocessed =
+        canonical_cs.preprocessed;
+    const std::vector<uint32_t> preprocessed{
+        harness_schedule_column};
+    const auto malicious =
+        aq::AirQuotientProveRowsSplitRap(
+            substituted_cs, forged,
+            preprocessed, uint256::ONE);
+    BOOST_REQUIRE_MESSAGE(
+        malicious.ok, malicious.note);
+    BOOST_REQUIRE(
+        malicious.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            canonical_cs, malicious.proof,
+            preprocessed, uint256::ONE,
+            &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    merkle_hash_source_address_carry_residual_stays_fail_closed)
+{
+    const auto input = ActualInput();
+    const auto honest =
+        OneQueryMerkleShard(input);
+    BOOST_REQUIRE(
+        !honest.hash_tasks.empty());
+    BOOST_REQUIRE(
+        !honest.hash_tasks.front()
+             .source_addresses.empty());
+    auto relabelled = honest;
+    ++relabelled.hash_tasks.front()
+          .source_addresses.front();
+
+    const auto table =
+        BuildMerkleHashProgramTableV1(
+            honest.hash_layout);
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, honest.hash_cs.n_rows,
+            cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            cs, honest.hash_columns),
+        0U);
+    BOOST_CHECK_EQUAL(
+        air_recurse::CountWitnessViolationsOnH(
+            cs, relabelled.hash_columns),
+        0U);
+    // HashTask source addresses are not trace columns yet. This canary
+    // intentionally demonstrates why the global row-semantic carry and
+    // authority flags must remain false until Decoder is staticized and
+    // equality-constrained to these fixed hash rows.
+    BOOST_CHECK(
+        honest.hash_tasks.front()
+            .source_addresses !=
+        relabelled.hash_tasks.front()
+            .source_addresses);
+    BOOST_CHECK(
+        cb::CommitProgramTableAlgHash(table) ==
+        cb::CommitProgramTableAlgHash(
+            BuildMerkleHashProgramTableV1(
+                relabelled.hash_layout)));
+}
+
+BOOST_AUTO_TEST_CASE(
     exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
@@ -865,11 +1117,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product
             .phase_constraint_systems_canonical_bytecode,
-        1U);
+        2U);
     BOOST_CHECK_EQUAL(
         product
             .phase_r0_tables_statement_manifest_only,
-        1U);
+        2U);
     BOOST_CHECK(
         product
             .parent_join_r0_statement_manifest_only);
@@ -887,8 +1139,44 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         product.parent_join_statement_manifest_r0_root ==
         input.expected_child_statement_root);
+    BOOST_CHECK(
+        product
+            .merkle_hash_constraints_canonical_bytecode);
+    BOOST_CHECK(
+        product
+            .merkle_hash_program_root_recomputed);
+    BOOST_CHECK_EQUAL(
+        product.merkle_hash_program_constraints,
+        stage3_poseidon_air::kFixedConstraints +
+            alg_hash::kAlgHashT +
+            alg_hash::kAlgHashDigestLen);
+    BOOST_CHECK_EQUAL(
+        product
+            .merkle_hash_statement_manifest_r0_columns,
+        0U);
+    BOOST_CHECK_EQUAL(
+        product.merkle_hash_proof_tape_cells,
+        alg_hash::kAlgHashT +
+            alg_hash::kAlgHashDigestLen);
+    BOOST_CHECK(
+        product
+            .merkle_hash_proof_tape_cells_ordinary);
+    BOOST_CHECK(
+        product
+            .merkle_hash_proof_tape_fixed_lane_offsets);
+    BOOST_CHECK(
+        product.merkle_hash_io_poseidon_bound);
+    BOOST_CHECK(
+        product
+            .merkle_hash_r0_statement_manifest_only);
+    BOOST_CHECK(
+        product
+            .merkle_hash_cs_independent_of_child_witness);
+    BOOST_CHECK(
+        !product
+             .merkle_hash_row_semantic_carry_complete);
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
-    BOOST_CHECK_EQUAL(product.trace_columns, 1478U);
+    BOOST_CHECK_EQUAL(product.trace_columns, 1462U);
     BOOST_CHECK_EQUAL(
         product.max_constraint_degree, 3U);
     BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);
