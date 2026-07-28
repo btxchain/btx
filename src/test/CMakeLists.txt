@@ -222,6 +222,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_air_parent_composer_tests.cpp
   matmul_v4_rc_stage3_v13_terminal_fold_parent_tests.cpp
   matmul_v4_rc_stage3_v13_quotient_tape_parent_tests.cpp
+  matmul_v4_rc_stage3_v13_deep_source_logup_parent_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_decoder_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_tests.cpp
