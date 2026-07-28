@@ -23,12 +23,49 @@
 #include <matmul/matmul_v4_rc_stage3_episode_tile_stream.h>
 #include <matmul/matmul_v4_rc_stage3_episode_wiring_product.h>
 #include <matmul/matmul_v4_rc_stage3_extract_barrier_link.h>
+#include <matmul/matmul_v4_rc_stage3_provenance_graph.h>
 #include <matmul/matmul_v4_rc_stage3_root_chain.h>
+
+#include <hash.h>
 
 #include <algorithm>
 #include <array>
+#include <set>
 
 namespace matmul::v4::rc {
+
+namespace {
+
+constexpr char SEMANTIC_CLOSURE_INVENTORY_DOMAIN_V1[] =
+    "BTX_RC_STAGE3_SEMANTIC_CLOSURE_INVENTORY_V1";
+
+bool FailInventory(std::string* why, const std::string& detail)
+{
+    if (why != nullptr) {
+        *why = "stage3:semantic_closure_inventory:" + detail;
+    }
+    return false;
+}
+
+void HashEndpointStatus(
+    HashWriter& hash,
+    const RCStage3SemanticEndpointStatus& endpoint)
+{
+    hash << static_cast<uint16_t>(endpoint.endpoint);
+    hash << static_cast<uint16_t>(endpoint.role);
+    hash << endpoint.canonical_memory;
+    hash << endpoint.local_relation_engine;
+    hash << endpoint.exact_instance_aggregation;
+    hash << endpoint.canonical_root_chain;
+    hash << endpoint.local_relation_complete;
+    hash << endpoint.producer_provenance_complete;
+    hash << endpoint.semantic_complete;
+    hash << endpoint.recursively_consumed;
+    hash << endpoint.source;
+    hash << endpoint.remaining;
+}
+
+} // namespace
 
 RCStage3SemanticStatus CurrentRCStage3SemanticStatus(
     const RCStage3CoupledShape& shape,
@@ -878,6 +915,208 @@ RCStage3SemanticStatus CurrentRCStage3SemanticStatus(
         out.complete_roles += all;
     }
     return out;
+}
+
+uint256 ComputeRCStage3SemanticClosureInventoryCommitmentV1(
+    const RCStage3SemanticClosureInventoryV1& inventory)
+{
+    HashWriter hash;
+    hash << SEMANTIC_CLOSURE_INVENTORY_DOMAIN_V1;
+    hash << inventory.version;
+    hash << inventory.production_mode;
+    hash << inventory.exact_registry;
+    hash << inventory.registered_endpoints;
+    hash << inventory.local_relation_complete_endpoints;
+    hash << inventory.strict_transitive_complete_endpoints;
+    hash << inventory.recursively_consumed_endpoints;
+    hash << inventory.complete_roles;
+    hash << inventory.registered_edges;
+    hash << inventory.value_equality_edges;
+    hash << inventory.bounded_composition_edges;
+    hash << inventory.production_composition_edges;
+    hash << inventory.normalized_row_tagged_equality_edges;
+    hash << static_cast<uint32_t>(inventory.endpoints.size());
+    for (const auto& endpoint : inventory.endpoints) {
+        HashEndpointStatus(hash, endpoint);
+    }
+    hash << static_cast<uint32_t>(inventory.edges.size());
+    for (const auto& edge : inventory.edges) {
+        hash << static_cast<uint16_t>(edge.producer);
+        hash << static_cast<uint16_t>(edge.producer_role);
+        hash << static_cast<uint16_t>(edge.consumer);
+        hash << static_cast<uint16_t>(edge.consumer_role);
+        hash << edge.value_equality_executable;
+        hash << edge.bounded_composition_executable;
+        hash << edge.production_composition_executable;
+        hash << edge.normalized_row_tagged_equality;
+        hash << edge.producer_strictly_complete;
+        hash << edge.consumer_local_relation_complete;
+        hash << edge.blocker_mask;
+        hash << edge.construction;
+        hash << edge.remaining;
+    }
+    hash << inventory.authority_ready;
+    return hash.GetHash();
+}
+
+RCStage3SemanticClosureInventoryV1
+BuildRCStage3SemanticClosureInventoryV1(
+    const RCStage3CoupledShape& shape,
+    const gkr_field::Fp3& gamma,
+    const gkr_field::Fp3& alpha,
+    uint8_t extract_scale_e,
+    bool production_mode)
+{
+    RCStage3SemanticClosureInventoryV1 out;
+    out.production_mode = production_mode;
+
+    const auto semantic = CurrentRCStage3SemanticStatus(
+        shape, gamma, alpha, extract_scale_e, production_mode);
+    const auto graph = CurrentRCStage3ProvenanceGraphAudit();
+    out.exact_registry =
+        semantic.registry_exact &&
+        graph.exact_52_order &&
+        graph.exact_public_roots_1_and_25 &&
+        graph.every_non_public_node_has_a_producer &&
+        graph.no_missing_out_of_range_self_or_duplicate_producer &&
+        graph.nodes.size() == kRCStage3RelationClosureEndpointCount;
+    out.registered_endpoints = semantic.registered_endpoints;
+    out.local_relation_complete_endpoints =
+        semantic.local_relation_complete_endpoints;
+    out.strict_transitive_complete_endpoints =
+        semantic.semantic_complete_endpoints;
+    out.recursively_consumed_endpoints =
+        semantic.recursively_consumed_endpoints;
+    out.complete_roles = semantic.complete_roles;
+    out.endpoints = semantic.endpoints;
+    out.registered_edges = graph.edges;
+
+    std::set<uint32_t> ordered_edges;
+    out.edges.reserve(graph.edges);
+    for (const auto& node : graph.nodes) {
+        const uint16_t consumer_id =
+            static_cast<uint16_t>(node.endpoint);
+        if (consumer_id == 0 ||
+            consumer_id > semantic.endpoints.size()) {
+            out.exact_registry = false;
+            continue;
+        }
+        const auto& consumer =
+            semantic.endpoints[consumer_id - 1U];
+        for (const auto& declared : node.producers) {
+            const uint16_t producer_id =
+                static_cast<uint16_t>(declared.producer);
+            if (producer_id == 0 ||
+                producer_id > semantic.endpoints.size()) {
+                out.exact_registry = false;
+                continue;
+            }
+            const auto& producer =
+                semantic.endpoints[producer_id - 1U];
+            const uint32_t edge_id =
+                static_cast<uint32_t>(producer_id) * 64U +
+                consumer_id;
+            if (!ordered_edges.insert(edge_id).second) {
+                out.exact_registry = false;
+            }
+
+            RCStage3SemanticClosureEdgeStatusV1 edge;
+            edge.producer = declared.producer;
+            edge.producer_role = producer.role;
+            edge.consumer = node.endpoint;
+            edge.consumer_role = consumer.role;
+            edge.value_equality_executable =
+                declared.value_equality_executable;
+            edge.bounded_composition_executable =
+                declared.bounded_composition_executable;
+            edge.production_composition_executable =
+                declared.production_composition_executable;
+            edge.normalized_row_tagged_equality =
+                declared.normalized_recursive_executable;
+            edge.producer_strictly_complete =
+                producer.semantic_complete;
+            edge.consumer_local_relation_complete =
+                consumer.local_relation_complete;
+            edge.construction = declared.construction;
+            edge.remaining = declared.remaining;
+            if (!consumer.local_relation_complete) {
+                edge.blocker_mask |=
+                    kRCStage3SemanticClosureMissingLocalRelationV1;
+            }
+            if (!producer.semantic_complete) {
+                edge.blocker_mask |=
+                    kRCStage3SemanticClosureMissingProducerProvenanceV1;
+            }
+            if (!declared.production_composition_executable) {
+                edge.blocker_mask |=
+                    kRCStage3SemanticClosureMissingProductionEqualityV1;
+            }
+            if (!declared.normalized_recursive_executable) {
+                edge.blocker_mask |=
+                    kRCStage3SemanticClosureMissingNormalizedEqualityV1;
+            }
+            if (!consumer.recursively_consumed) {
+                edge.blocker_mask |=
+                    kRCStage3SemanticClosureMissingRecursiveConsumptionV1;
+            }
+            out.value_equality_edges +=
+                edge.value_equality_executable;
+            out.bounded_composition_edges +=
+                edge.bounded_composition_executable;
+            out.production_composition_edges +=
+                edge.production_composition_executable;
+            out.normalized_row_tagged_equality_edges +=
+                edge.normalized_row_tagged_equality;
+            out.edges.push_back(std::move(edge));
+        }
+    }
+    if (out.edges.size() != graph.edges) {
+        out.exact_registry = false;
+    }
+    out.authority_ready =
+        out.exact_registry &&
+        out.registered_endpoints ==
+            kRCStage3RelationClosureEndpointCount &&
+        out.strict_transitive_complete_endpoints ==
+            kRCStage3RelationClosureEndpointCount &&
+        out.recursively_consumed_endpoints ==
+            kRCStage3RelationClosureEndpointCount &&
+        out.complete_roles == kRCStage3RelationClosureRoleCount &&
+        out.production_composition_edges == out.registered_edges &&
+        out.normalized_row_tagged_equality_edges ==
+            out.registered_edges;
+    out.inventory_commitment =
+        ComputeRCStage3SemanticClosureInventoryCommitmentV1(out);
+    return out;
+}
+
+bool ValidateRCStage3SemanticClosureInventoryV1(
+    const RCStage3SemanticClosureInventoryV1& inventory,
+    const RCStage3CoupledShape& shape,
+    const gkr_field::Fp3& gamma,
+    const gkr_field::Fp3& alpha,
+    uint8_t extract_scale_e,
+    bool production_mode,
+    std::string* why)
+{
+    if (inventory.version !=
+            kRCStage3SemanticClosureInventoryVersionV1 ||
+        inventory.production_mode != production_mode) {
+        return FailInventory(why, "version_or_mode");
+    }
+    if (inventory.inventory_commitment.IsNull() ||
+        inventory.inventory_commitment !=
+            ComputeRCStage3SemanticClosureInventoryCommitmentV1(
+                inventory)) {
+        return FailInventory(why, "commitment");
+    }
+    const auto expected = BuildRCStage3SemanticClosureInventoryV1(
+        shape, gamma, alpha, extract_scale_e, production_mode);
+    if (!(inventory == expected)) {
+        return FailInventory(
+            why, "not_verifier_rebuilt_exact_inventory");
+    }
+    return true;
 }
 
 } // namespace matmul::v4::rc

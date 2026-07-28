@@ -211,8 +211,13 @@ struct RCStage3RelationClosureRoleAudit {
  *
  * `semantic_relation_complete` is deliberately separate: a locally proved
  * GEMM A cell, for example, is not a commitment opening against the episode
- * operand root. `recursive_child_consumed` is true only after a recursive
- * verifier executes the composed proof; it is false for all current entries.
+ * operand root.  It remains a local-relation fact and must not be reported as
+ * strict transitive semantic closure. `producer_provenance_complete` is true
+ * only for a consensus/public anchor or after every immediate producer edge
+ * is equality-constrained to an executed proof. `strict_transitive_complete`
+ * is their conjunction. `recursive_child_consumed` is true only after a
+ * recursive verifier executes the composed proof; it is false for all current
+ * entries.
  */
 struct RCStage3RelationEndpointCellAudit {
     RCStage3RelationEndpoint endpoint{};
@@ -220,6 +225,8 @@ struct RCStage3RelationEndpointCellAudit {
     bool relation_air_cell{false};
     bool same_trace_ctl_alias{false};
     bool semantic_relation_complete{false};
+    bool producer_provenance_complete{false};
+    bool strict_transitive_complete{false};
     bool recursive_child_consumed{false};
     uint32_t relation_column{0};
     std::string source;

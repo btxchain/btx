@@ -702,6 +702,21 @@ RCStage3RelationEndpointCellAudit CellAudit(
             "tamper-reject); recursive-child consumption remains";
     }
 
+    // The cell audit has no caller-supplied proof bundle from which it could
+    // infer transitive producer closure.  Only the two verifier-regenerated
+    // public anchors terminate without another semantic endpoint.  Keeping
+    // these facts separate prevents the 52/52 local-opening inventory from
+    // being misreported as 52/52 episode/coupled computation closure.
+    out.producer_provenance_complete =
+        out.semantic_relation_complete &&
+        (endpoint ==
+             RCStage3RelationEndpoint::EpisodeBuilderParams ||
+         endpoint ==
+             RCStage3RelationEndpoint::EpisodeDigestHeaderTarget);
+    out.strict_transitive_complete =
+        out.semantic_relation_complete &&
+        out.producer_provenance_complete;
+
     return out;
 }
 

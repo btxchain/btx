@@ -297,11 +297,16 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     uint16_t relation_cells = 0;
     uint16_t same_trace_aliases = 0;
     uint16_t semantic_complete = 0;
+    uint16_t producer_complete = 0;
+    uint16_t strict_transitive_complete = 0;
     uint16_t recursively_consumed = 0;
     for (const auto& cell : cells) {
         relation_cells += cell.relation_air_cell;
         same_trace_aliases += cell.same_trace_ctl_alias;
         semantic_complete += cell.semantic_relation_complete;
+        producer_complete += cell.producer_provenance_complete;
+        strict_transitive_complete +=
+            cell.strict_transitive_complete;
         recursively_consumed += cell.recursive_child_consumed;
         BOOST_CHECK(!cell.remaining.empty());
     }
@@ -319,6 +324,11 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK_EQUAL(RCStage3StreamOpeningEndpointCount(), 19U);
     BOOST_CHECK_EQUAL(RCStage3VectorOpeningEndpointCount(), 3U);
     BOOST_CHECK_EQUAL(RCStage3WiredBindingEndpointCount(), 8U);
+    // 52/52 is local relation/opening coverage, not transitive episode
+    // computation closure.  Only the two verifier-regenerated public anchors
+    // terminate without another producer relation.
+    BOOST_CHECK_EQUAL(producer_complete, 2U);
+    BOOST_CHECK_EQUAL(strict_transitive_complete, 2U);
     BOOST_CHECK_EQUAL(recursively_consumed, 0U);
     // Every one of the 52 endpoints now has an opening/binding.
     BOOST_CHECK_EQUAL(21U + 19U + 3U + 8U + 1U, 52U);
