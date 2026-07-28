@@ -30,6 +30,7 @@
 #include <index/coinstatsindex.h>
 #include <index/txindex.h>
 #include <matmul/matmul_sketch_cache.h>
+#include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <init/common.h>
 #include <interfaces/chain.h>
 #include <interfaces/init.h>
@@ -1841,6 +1842,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // Detailed error printed inside StartLogging().
         return false;
     }
+
+    // Install the process-owned Stage-3 normalized proof provider before any
+    // mining interface can create a block template. This is intentionally not
+    // SetRCStage3ProofSource: that mutable callback is a legacy test/R&D seam
+    // and must never become production consensus authority by initialization
+    // accident. The normalized provider remains fail-closed until its complete
+    // builder and matching consensus consumer are executable.
+    matmul::v4::rc::InitializeRCStage3ProductionProofProvider();
+    assert(matmul::v4::rc::HasRCStage3ProductionProofProvider());
 
     LogPrintf("Using at most %i automatic connections (%i file descriptors available)\n", nMaxConnections, available_fds);
 

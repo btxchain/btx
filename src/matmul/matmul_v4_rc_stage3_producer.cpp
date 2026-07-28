@@ -22,6 +22,7 @@ namespace {
 
 std::mutex g_proof_source_mutex;
 RCStage3ProofSource g_proof_source;
+bool g_production_provider_initialized{false};
 
 RCStage3ProofSource SnapshotProofSource()
 {
@@ -189,6 +190,119 @@ bool HasRCStage3ProofSource()
     return static_cast<bool>(g_proof_source);
 }
 
+void InitializeRCStage3ProductionProofProvider()
+{
+    std::lock_guard<std::mutex> lock(g_proof_source_mutex);
+    g_production_provider_initialized = true;
+}
+
+bool HasRCStage3ProductionProofProvider()
+{
+    std::lock_guard<std::mutex> lock(g_proof_source_mutex);
+    return g_production_provider_initialized;
+}
+
+const char* RCStage3NormalizedProviderStatusName(
+    RCStage3NormalizedProviderStatus status)
+{
+    switch (status) {
+    case RCStage3NormalizedProviderStatus::NotInitialized:
+        return "not_initialized";
+    case RCStage3NormalizedProviderStatus::NotRequired:
+        return "not_required";
+    case RCStage3NormalizedProviderStatus::BuilderUnavailable:
+        return "builder_unavailable";
+    case RCStage3NormalizedProviderStatus::BuildFailed:
+        return "build_failed";
+    case RCStage3NormalizedProviderStatus::Produced:
+        return "produced";
+    }
+    return "unknown";
+}
+
+RCStage3NormalizedProviderStatus BuildRCStage3NormalizedAuthorityReceipt(
+    const CBlock& solved_block,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& target,
+    std::vector<unsigned char>& receipt_bytes,
+    std::string* why,
+    const RCStage3ProducerHints& hints)
+{
+    receipt_bytes.clear();
+    if (!RequiredRCStage3Statement(params, height).has_value()) {
+        Note(why, "not_rc_height");
+        return RCStage3NormalizedProviderStatus::NotRequired;
+    }
+    if (!HasRCStage3ProductionProofProvider()) {
+        Note(why, "production_provider_not_initialized");
+        return RCStage3NormalizedProviderStatus::NotInitialized;
+    }
+
+    (void)solved_block;
+    (void)target;
+    (void)hints;
+    Note(why, "normalized_receipt_builder_unavailable");
+    return RCStage3NormalizedProviderStatus::BuilderUnavailable;
+}
+
+RCStage3ProduceStatus AttachRCStage3ProofFromProductionProvider(
+    CBlock& block,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& target,
+    std::string* why,
+    RCStage3AttachmentSizeReport* size_out,
+    const RCStage3ProducerHints& hints)
+{
+    if (size_out != nullptr) *size_out = {};
+    // This is deliberately not adapted through RCStage3ProofSource. That
+    // callback emits the legacy section envelope, while production authority
+    // is the normalized root receipt. The only sound completion of this seam
+    // is:
+    //
+    //  1. independently construct every RebuiltVerifierInputsV3 component
+    //     (registry/topology/schedule/V13/V14/ABI/selection/hash roots, the
+    //     canonical 14-role/52-endpoint pins, fixed trace, and parent CS);
+    //  2. prove that parent and serialize NormalizedAuthorityReceiptV3;
+    //  3. attach it through a consensus envelope whose verifier parses the same
+    //     bytes, rebuilds the same inputs/CS, calls
+    //     ValidateAndDecodeVerifierInputsV3, and finally executes
+    //     AirQuotientVerifyRowsSplitRapSafeFixedV3.
+    //
+    // The strict receipt codec/verifier prerequisite now exists, but neither
+    // the block-to-parent builder nor the outer consensus consumer does.
+    // Returning a legacy REP3/OAS3 object, or accepting hash validation without
+    // executing the decoded proof, would recreate the exact authority gap this
+    // path is meant to close.
+    std::vector<unsigned char> receipt_bytes;
+    std::string provider_why;
+    const auto provider_status = BuildRCStage3NormalizedAuthorityReceipt(
+        block, params, height, target, receipt_bytes, &provider_why, hints);
+    if (provider_status == RCStage3NormalizedProviderStatus::NotRequired) {
+        Note(why, "not_rc_height");
+        return RCStage3ProduceStatus::NotRequired;
+    }
+    if (provider_status == RCStage3NormalizedProviderStatus::NotInitialized) {
+        Note(why, "production_provider_not_initialized");
+        return RCStage3ProduceStatus::NoProver;
+    }
+    if (provider_status != RCStage3NormalizedProviderStatus::Produced) {
+        Note(
+            why,
+            std::string{"production_provider:"} +
+                RCStage3NormalizedProviderStatusName(provider_status) + ":" +
+                provider_why + ";normalized_consensus_consumer_unavailable");
+        return RCStage3ProduceStatus::ProverFailed;
+    }
+
+    // Reaching Produced before the matching outer consumer is implemented is
+    // still not authority. Keep the block untouched and fail closed.
+    (void)receipt_bytes;
+    Note(why, "normalized_consensus_consumer_unavailable");
+    return RCStage3ProduceStatus::ProverFailed;
+}
+
 RCStage3ProduceStatus AttachRCStage3ProofFromSource(
     CBlock& block,
     const Consensus::Params& params,
@@ -287,9 +401,9 @@ RCStage3ProduceStatus ProduceAndAttachRCStage3ConsensusProof(
             Note(why, "noncanonical_nbits");
             return RCStage3ProduceStatus::ProverFailed;
         }
-        return AttachRCStage3ProofFromSource(block, params, height,
-                                             ArithToUint256(*target), why,
-                                             size_out, hints);
+        return AttachRCStage3ProofFromProductionProvider(
+            block, params, height, ArithToUint256(*target), why,
+            size_out, hints);
     }
 }
 

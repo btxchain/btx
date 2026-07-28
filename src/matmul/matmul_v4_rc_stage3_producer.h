@@ -37,9 +37,10 @@ namespace matmul::v4::rc {
  * prover: assembling RCStage3SuccinctProof::sections from real role AIR
  * proofs is owned by matmul_v4_rc_stage3_role_sections.{h,cpp}
  * (ProveRCStage3RoleAirSection + AssembleRCStage3SuccinctProofSections). The
- * producer consumes that work through the RCStage3ProofSource indirection so
- * the consensus/miner wiring can be built, reviewed, and tested independently
- * of the prover's readiness.
+ * Legacy section-envelope tests consume that work through the
+ * RCStage3ProofSource indirection. The production miner does not: it owns a
+ * separate normalized-receipt provider lifecycle declared below, so a test
+ * callback can never silently become consensus authority.
  *
  * FAIL-CLOSED CONTRACT. Production is gated on exactly the same compile-time
  * constant as verification (kRCStage3SuccinctAuthorityReady, currently false).
@@ -113,9 +114,9 @@ enum class RCStage3ProduceStatus : uint8_t {
     /** kRCStage3SuccinctAuthorityReady is false. The block was left untouched.
      *  Not an error — this is the current, expected state on every network. */
     AuthorityDisabled = 1,
-    /** Authority is on and the height requires a proof, but no prover has been
-     *  registered with SetRCStage3ProofSource. FATAL for an RC-family winner:
-     *  the produced block would be rejected as missing-matmul-stage3-proof. */
+    /** Authority is on and the height requires a proof, but the production
+     *  normalized-receipt provider was not initialized. FATAL for an RC-family
+     *  winner: the block would be rejected as missing-matmul-stage3-proof. */
     NoProver = 2,
     /** The registered prover declined or failed. FATAL for an RC-family winner. */
     ProverFailed = 3,
@@ -262,7 +263,84 @@ RCStage3ConsensusVerdictFor(RCStage3AttachmentStatus status);
 [[nodiscard]] bool RCStage3ProduceIsFatal(RCStage3ProduceStatus status);
 
 /**
- * Prover seam. An implementation must return a COMPLETE proof object — every
+ * Optional solver inputs shared by the production normalized provider and the
+ * legacy section-envelope test seam.
+ */
+struct RCStage3ProducerHints {
+    /** The episode transcript the solver already computed for THIS header, or
+     *  null. Cost optimization only. */
+    const std::vector<RCRoundTranscript>* episode_rounds{nullptr};
+};
+
+/**
+ * Production-owned normalized receipt provider lifecycle.
+ *
+ * InitializeRCStage3ProductionProofProvider is called once from node startup.
+ * It does not install a mutable callback. The implementation is process-owned
+ * and must eventually build the exact byte string produced by
+ * normalized_authority::SerializeNormalizedAuthorityReceiptV3. Consensus must
+ * parse those same bytes, independently rebuild RebuiltVerifierInputsV3 and
+ * the parent CS, call ValidateAndDecodeVerifierInputsV3, and execute
+ * AirQuotientVerifyRowsSplitRapSafeFixedV3.
+ *
+ * Those builder and consumer steps do not exist yet. Therefore the provider
+ * currently reports a precise fail-closed error and emits no bytes. In
+ * particular, validation of a receipt's hashes/codec must never be substituted
+ * for execution of its decoded parent proof.
+ */
+void InitializeRCStage3ProductionProofProvider();
+[[nodiscard]] bool HasRCStage3ProductionProofProvider();
+
+enum class RCStage3NormalizedProviderStatus : uint8_t {
+    NotInitialized = 0,
+    NotRequired = 1,
+    BuilderUnavailable = 2,
+    BuildFailed = 3,
+    Produced = 4,
+};
+
+[[nodiscard]] const char* RCStage3NormalizedProviderStatusName(
+    RCStage3NormalizedProviderStatus status);
+
+/**
+ * Build the strict canonical NAV3 receipt bytes for a finalized winner.
+ *
+ * On Produced, `receipt_bytes` must be exactly the output of
+ * SerializeNormalizedAuthorityReceiptV3 and must round-trip through the strict
+ * decoder. On every other status it is empty. This split makes the outstanding
+ * boundary explicit: producing a canonical receipt is separate from attaching
+ * it, because attachment is forbidden until consensus consumes and executes
+ * that same normalized proof.
+ */
+[[nodiscard]] RCStage3NormalizedProviderStatus
+BuildRCStage3NormalizedAuthorityReceipt(
+    const CBlock& solved_block,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& target,
+    std::vector<unsigned char>& receipt_bytes,
+    std::string* why = nullptr,
+    const RCStage3ProducerHints& hints = {});
+
+/**
+ * MECHANISM layer for the production provider, intentionally callable in tests
+ * while authority is disabled. Atomic: until both the normalized builder and
+ * the matching consensus consumer exist, it returns ProverFailed and leaves
+ * the block byte-identical.
+ */
+[[nodiscard]] RCStage3ProduceStatus
+AttachRCStage3ProofFromProductionProvider(
+    CBlock& block,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& target,
+    std::string* why = nullptr,
+    RCStage3AttachmentSizeReport* size_out = nullptr,
+    const RCStage3ProducerHints& hints = {});
+
+/**
+ * LEGACY TEST/R&D prover seam. An implementation must return a COMPLETE proof
+ * object — every
  * public input filled (see BuildRCStage3StatementForHeader) and every required
  * relation section assembled (see AssembleRCStage3SuccinctProofSections). It
  * must not mutate the block.
@@ -275,30 +353,11 @@ RCStage3ConsensusVerdictFor(RCStage3AttachmentStatus status);
  * before it touches the block, so a buggy source cannot corrupt a winner — it
  * can only fail to produce one.
  *
- * EXPECTED IMPLEMENTATION SHAPE, for the lane that owns section assembly. This
- * seam was written against the matmul_v4_rc_stage3_role_sections.h interface,
- * NOT against its current (incomplete) behaviour, so it should drop in:
+ * This callback exists so the old REP3/OAS3 codecs and binding layer remain
+ * testable. It is NOT consulted by ProduceAndAttachRCStage3ConsensusProof and
+ * must not be registered from node initialization.
  *
- *     SetRCStage3ProofSource([](const CBlock& b, const Consensus::Params& p,
- *                               int32_t h, const uint256& t,
- *                               RCStage3SuccinctProof& out, std::string* why) {
- *         ProductionProgramConsensusPinV1 pin;
- *         pin.recursive_alg_hash_root =
- *             p.hashMatMulRCStage3ProgramRegistryAlgRoot;
- *         pin.external_sha256d_audit_root =
- *             p.hashMatMulRCStage3ProgramRegistryShaAuditRoot;
- *         pin.registry_binding = p.hashMatMulRCStage3ProgramRegistryBinding;
- *         const auto kind = *RequiredRCStage3Statement(p, h);
- *         if (!BuildRCStage3StatementForHeader(b, p, h, kind, pin,
- *                                              episode_digest, coupled_digest,
- *                                              out, why)) return false;
- *         std::vector<RCStage3RoleAirSection> sections;   // one per required
- *         // ... ProveRCStage3RoleAirSection(out, product) per role ...
- *         return AssembleRCStage3SuccinctProofSections(out, sections, why);
- *     });
- *
- * ASSUMPTIONS this seam makes about that interface, all of which are checked
- * downstream rather than trusted:
+ * Assumptions this seam makes, all checked downstream rather than trusted:
  *   - the source produces a COMPLETE object; a partially filled proof is
  *     rejected by ValidateRCStage3ProofStructure inside the binding check;
  *   - the source does not need the solvers 8*m^2 product sketch. The miner
@@ -308,28 +367,6 @@ RCStage3ConsensusVerdictFor(RCStage3AttachmentStatus status);
  *     FinalizeMatMulSolvedBlockForProduction;
  *   - `target` is authoritative; the source must not re-derive it.
  */
-/**
- * OPTIONAL prover inputs. Every field may be null; a prover MUST work with an
- * empty hint set, deriving whatever it needs from the finalized header.
- *
- * This exists for one measured reason. Assembling the sections needs the real
- * episode trace, which the prover otherwise obtains by re-running
- * RecomputeResidentCurriculumReference on the header — a FULL episode recompute
- * that the miner has already paid for once while solving. Handing the solver's
- * transcript across saves that second pass.
- *
- * It is deliberately a HINT and never a requirement: making it mandatory would
- * couple the prover to the solver, and the whole point of the Stage-3 statement
- * is that it is header-derivable by anyone. A prover that trusted this blindly
- * would also be trusting unvalidated data, so an implementation that uses it
- * should still be prepared to fall back.
- */
-struct RCStage3ProducerHints {
-    /** The episode transcript the solver already computed for THIS header, or
-     *  null. Cost optimization only. */
-    const std::vector<RCRoundTranscript>* episode_rounds{nullptr};
-};
-
 using RCStage3ProofSource =
     std::function<bool(const CBlock& solved_block,
                        const Consensus::Params& params,
@@ -339,16 +376,15 @@ using RCStage3ProofSource =
                        RCStage3SuccinctProof& out,
                        std::string* why)>;
 
-/** Install (or, with a default-constructed source, clear) the process-wide
- *  prover. Intended to be called once during node init by whichever component
- *  owns proof generation, and by tests. Thread-safe. */
+/** Install (or, with a default-constructed source, clear) the legacy
+ *  process-wide test/R&D prover. Never called by node init. Thread-safe. */
 void SetRCStage3ProofSource(RCStage3ProofSource source);
 [[nodiscard]] bool HasRCStage3ProofSource();
 
 /**
  * MECHANISM layer — NOT gated on kRCStage3SuccinctAuthorityReady.
  *
- * Runs the registered prover and, if its proof binds, packs it into
+ * Runs the registered legacy test/R&D prover and, if its proof binds, packs it into
  * block.matrix_c_data. Exists as a separate entry point so the producer wiring
  * is exercisable by tests while the authority gate is (correctly) still off;
  * no consensus or miner path calls it directly. Still refuses at non-RC
@@ -368,7 +404,8 @@ void SetRCStage3ProofSource(RCStage3ProofSource source);
  *
  * Returns AuthorityDisabled (block untouched) while
  * kRCStage3SuccinctAuthorityReady is false. Otherwise derives the target from
- * the block's own nBits and delegates to AttachRCStage3ProofFromSource.
+ * the block's own nBits and delegates exclusively to
+ * AttachRCStage3ProofFromProductionProvider. Test callbacks are never consulted.
  *
  * Call ONLY after the solver has finalized the header: the proof binds
  * header.matmul_digest, nNonce64 and the seeds, so any later header edit

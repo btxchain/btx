@@ -826,6 +826,59 @@ BOOST_AUTO_TEST_CASE(no_registered_prover_is_fatal_not_silent)
     BOOST_CHECK(block.matrix_c_data.empty());
 }
 
+BOOST_AUTO_TEST_CASE(
+    production_provider_is_owned_and_fails_closed_before_normalized_builder)
+{
+    constexpr int32_t HEIGHT{102};
+    const auto params = RealChainLikeParams(false);
+    CBlock block = RealRcBlock102();
+    const CBlock before = block;
+    const uint256 target = TargetFor(block, params);
+
+    // Install a legacy source that would produce an attachable section
+    // envelope. The production path must not call it: normalized root authority
+    // cannot be substituted with the old REP3/OAS3 test wire.
+    bool legacy_called{false};
+    ScopedProofSource legacy{
+        [&](const CBlock& solved, const Consensus::Params& p, int32_t h,
+            const uint256& t, const rc::RCStage3ProducerHints&,
+            rc::RCStage3SuccinctProof& out, std::string*) {
+            legacy_called = true;
+            out = StatementBoundTo(solved, p, h, t);
+            return true;
+        }};
+
+    rc::InitializeRCStage3ProductionProofProvider();
+    rc::InitializeRCStage3ProductionProofProvider(); // idempotent node lifetime
+    BOOST_REQUIRE(rc::HasRCStage3ProductionProofProvider());
+
+    std::vector<unsigned char> receipt_bytes{0xaa, 0xbb};
+    std::string build_why;
+    const auto build_status = rc::BuildRCStage3NormalizedAuthorityReceipt(
+        block, params, HEIGHT, target, receipt_bytes, &build_why);
+    BOOST_CHECK(
+        build_status ==
+        rc::RCStage3NormalizedProviderStatus::BuilderUnavailable);
+    BOOST_CHECK(receipt_bytes.empty());
+    BOOST_CHECK(build_why.find("normalized_receipt_builder_unavailable") !=
+                std::string::npos);
+
+    std::string why;
+    rc::RCStage3AttachmentSizeReport size;
+    const auto produced = rc::AttachRCStage3ProofFromProductionProvider(
+        block, params, HEIGHT, target, &why, &size);
+
+    BOOST_CHECK(produced == rc::RCStage3ProduceStatus::ProverFailed);
+    BOOST_CHECK(rc::RCStage3ProduceIsFatal(produced));
+    BOOST_CHECK(!legacy_called);
+    BOOST_CHECK(block.matrix_c_data == before.matrix_c_data);
+    BOOST_CHECK_EQUAL(size.payload_bytes, 0U);
+    BOOST_CHECK(why.find("normalized_receipt_builder_unavailable") !=
+                std::string::npos);
+    BOOST_CHECK(why.find("normalized_consensus_consumer_unavailable") !=
+                std::string::npos);
+}
+
 BOOST_AUTO_TEST_CASE(non_rc_height_requires_no_attachment)
 {
     const auto params = RealChainLikeParams(false);
