@@ -94,9 +94,68 @@ struct CapturedCoupledStage {
     std::vector<int64_t> output;
 };
 
+struct CapturedCoupledBankPage {
+    uint32_t page_id{0};
+    uint32_t width{0};
+    uint256 page_seed{};
+    std::vector<int8_t> page;
+};
+
+struct CapturedCoupledInitialLobe {
+    uint32_t lobe{0};
+    uint32_t rows{0};
+    uint32_t width{0};
+    uint256 lobe_seed{};
+    std::vector<int8_t> expanded_tile;
+    std::vector<int8_t> active_state;
+};
+
 class CapturingCoupledProofSink final
     : public rc::RCCoupProofWitnessSink {
 public:
+    void OnBankPage(
+        const rc::RCCoupBankPageProofWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.width != 0);
+        BOOST_REQUIRE(!view.page_seed.IsNull());
+        BOOST_REQUIRE(view.page != nullptr);
+        CapturedCoupledBankPage captured;
+        captured.page_id = view.page_id;
+        captured.width = view.width;
+        captured.page_seed = view.page_seed;
+        const size_t cells =
+            static_cast<size_t>(view.width) * view.width;
+        captured.page.assign(
+            view.page, view.page + cells);
+        bank_pages.push_back(std::move(captured));
+    }
+
+    void OnInitialLobe(
+        const rc::RCCoupInitialLobeProofWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.rows != 0);
+        BOOST_REQUIRE(view.width != 0);
+        BOOST_REQUIRE(!view.lobe_seed.IsNull());
+        BOOST_REQUIRE(view.expanded_tile != nullptr);
+        BOOST_REQUIRE(view.active_state != nullptr);
+        CapturedCoupledInitialLobe captured;
+        captured.lobe = view.lobe;
+        captured.rows = view.rows;
+        captured.width = view.width;
+        captured.lobe_seed = view.lobe_seed;
+        const size_t tile_cells =
+            static_cast<size_t>(view.width) * view.width;
+        const size_t active_cells =
+            static_cast<size_t>(view.rows) * view.width;
+        captured.expanded_tile.assign(
+            view.expanded_tile,
+            view.expanded_tile + tile_cells);
+        captured.active_state.assign(
+            view.active_state,
+            view.active_state + active_cells);
+        initial_lobes.push_back(std::move(captured));
+    }
+
     void OnInitialState(
         const rc::RCCoupInitialStateProofWitnessView& view) override
     {
@@ -210,6 +269,8 @@ public:
 
     uint32_t initial_state_events{0};
     std::vector<int8_t> initial_state;
+    std::vector<CapturedCoupledBankPage> bank_pages;
+    std::vector<CapturedCoupledInitialLobe> initial_lobes;
     std::vector<CapturedCoupledGemm> gemms;
     std::vector<CapturedCoupledStage> permutations;
     std::vector<CapturedCoupledStage> mixes;
@@ -310,6 +371,8 @@ BOOST_AUTO_TEST_CASE(
         transcript.extracts.size(), params.barriers);
     BOOST_CHECK_EQUAL(sink.initial_state_events, 1U);
     BOOST_REQUIRE_EQUAL(sink.initial_state.size(), params.StateBytes());
+    BOOST_REQUIRE_EQUAL(sink.bank_pages.size(), params.bank_pages);
+    BOOST_REQUIRE_EQUAL(sink.initial_lobes.size(), params.lobes);
     BOOST_REQUIRE_EQUAL(sink.permutations.size(), params.barriers);
     BOOST_REQUIRE_EQUAL(sink.mixes.size(), params.barriers);
     BOOST_REQUIRE_EQUAL(
@@ -321,6 +384,56 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         sink.barrier_roots == transcript.barrier_roots);
     BOOST_CHECK_EQUAL(sink.digest, reference);
+
+    for (uint32_t page_id = 0;
+         page_id < params.bank_pages;
+         ++page_id) {
+        const auto& captured = sink.bank_pages[page_id];
+        BOOST_CHECK_EQUAL(captured.page_id, page_id);
+        BOOST_CHECK_EQUAL(captured.width, params.lobe_width);
+        BOOST_CHECK_EQUAL(
+            captured.page_seed,
+            rc::DeriveCoupledBankPageSeed(
+                header, 0, page_id, params,
+                options.transcript_version));
+        BOOST_CHECK(
+            captured.page ==
+            rc::DeriveCoupledBankPage(
+                header, 0, page_id, params,
+                options.transcript_version));
+    }
+    const auto lobe_seeds =
+        rc::DeriveCoupledLobeSeeds(
+            matmul::v4::DeriveSigma(header),
+            params, options.transcript_version);
+    size_t active_offset = 0;
+    for (uint32_t lobe = 0;
+         lobe < params.lobes;
+         ++lobe) {
+        const auto& captured = sink.initial_lobes[lobe];
+        BOOST_CHECK_EQUAL(captured.lobe, lobe);
+        BOOST_CHECK_EQUAL(captured.rows, params.rows_per_lobe);
+        BOOST_CHECK_EQUAL(captured.width, params.lobe_width);
+        BOOST_CHECK_EQUAL(captured.lobe_seed, lobe_seeds[lobe]);
+        BOOST_REQUIRE_EQUAL(
+            captured.expanded_tile.size(),
+            static_cast<size_t>(params.lobe_width) *
+                params.lobe_width);
+        BOOST_REQUIRE_EQUAL(
+            captured.active_state.size(),
+            static_cast<size_t>(params.rows_per_lobe) *
+                params.lobe_width);
+        BOOST_CHECK(std::equal(
+            captured.active_state.begin(),
+            captured.active_state.end(),
+            captured.expanded_tile.begin()));
+        BOOST_CHECK(std::equal(
+            captured.active_state.begin(),
+            captured.active_state.end(),
+            sink.initial_state.begin() + active_offset));
+        active_offset += captured.active_state.size();
+    }
+    BOOST_CHECK_EQUAL(active_offset, sink.initial_state.size());
 
     for (size_t i = 0; i < sink.gemms.size(); ++i) {
         const auto& captured = sink.gemms[i];

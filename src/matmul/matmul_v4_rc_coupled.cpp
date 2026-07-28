@@ -179,7 +179,8 @@ uint256 BankCommitment(const std::vector<std::vector<int8_t>>& pages, uint32_t b
 
 /** Stream pages into the hasher without retaining the full bank (Streamed). */
 uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
-                                const RCCoupParams& params, uint32_t transcript_version)
+                                const RCCoupParams& params, uint32_t transcript_version,
+                                RCCoupProofWitnessSink* proof_sink)
 {
     const auto& tags = RCCoupDomainTagsForVersion(transcript_version);
     CSHA256 outer;
@@ -188,6 +189,15 @@ uint256 BankCommitmentStreaming(const CBlockHeader& header, int32_t height,
     for (uint32_t p = 0; p < params.bank_pages; ++p) {
         const auto page = DeriveCoupledBankPage(header, height, p, params, transcript_version);
         if (page.size() != page_bytes) return uint256{};
+        if (proof_sink != nullptr) {
+            proof_sink->OnBankPage({
+                .page_id = p,
+                .width = params.lobe_width,
+                .page_seed = DeriveCoupledBankPageSeed(
+                    header, height, p, params, transcript_version),
+                .page = page.data(),
+            });
+        }
         outer.Write(reinterpret_cast<const unsigned char*>(page.data()), page.size());
     }
     uint8_t d1[CSHA256::OUTPUT_SIZE];
@@ -1219,9 +1229,28 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
     {
         const auto t_bank0 = std::chrono::steady_clock::now();
         if (streamed) {
-            bank_root = BankCommitmentStreaming(header, height, params, tv);
+            bank_root = BankCommitmentStreaming(
+                header, height, params, tv, proof_sink);
         } else {
             const auto pages_commit = DeriveCoupledBankPages(header, height, params, tv);
+            if (proof_sink != nullptr) {
+                for (uint32_t page_id = 0;
+                     page_id < params.bank_pages;
+                     ++page_id) {
+                    if (pages_commit[page_id].size() !=
+                        static_cast<size_t>(params.lobe_width) *
+                            params.lobe_width) {
+                        return uint256{};
+                    }
+                    proof_sink->OnBankPage({
+                        .page_id = page_id,
+                        .width = params.lobe_width,
+                        .page_seed = DeriveCoupledBankPageSeed(
+                            header, height, page_id, params, tv),
+                        .page = pages_commit[page_id].data(),
+                    });
+                }
+            }
             bank_root = BankCommitment(pages_commit, params.bank_pages, params.lobe_width, tags);
             if (retain_bank) {
                 pages = pages_commit;
@@ -1253,6 +1282,16 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             return uint256{};
         }
         if (lobe_stride0 > tile.size()) return uint256{};
+        if (proof_sink != nullptr) {
+            proof_sink->OnInitialLobe({
+                .lobe = ell,
+                .rows = M0,
+                .width = W0,
+                .lobe_seed = lobe_seeds[ell],
+                .expanded_tile = tile.data(),
+                .active_state = tile.data(),
+            });
+        }
         std::memcpy(state.data() + static_cast<size_t>(ell) * lobe_stride0, tile.data(),
                     lobe_stride0);
     }

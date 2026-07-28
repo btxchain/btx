@@ -414,6 +414,41 @@ struct RCCoupGemmProofWitnessView {
     const int64_t* gemm_y{nullptr};
 };
 
+/**
+ * Borrowed view of one unique bank page while the streamed bank commitment is
+ * being built.
+ *
+ * The page is emitted exactly once in ascending page-id order, before any
+ * barrier consumes it.  This is the only bounded production seam at which a
+ * proof sink can arithmetize the page seed/XOF/dequantization and feed the
+ * same bytes into the bank-root hash without retaining or reconstructing the
+ * complete bank.
+ */
+struct RCCoupBankPageProofWitnessView {
+    uint32_t page_id{0};
+    uint32_t width{0};
+    uint256 page_seed{};
+    const int8_t* page{nullptr};
+};
+
+/**
+ * Borrowed view of one nonce-derived lobe expansion before its inactive rows
+ * are discarded.
+ *
+ * `expanded_tile` contains width*width bytes. `active_state` aliases its first
+ * rows*width bytes, which are copied verbatim into the active state after the
+ * callback.  A proof sink can therefore close lobe-seed/XOF/dequantization
+ * provenance without replaying ExpandMxDequantInt8.
+ */
+struct RCCoupInitialLobeProofWitnessView {
+    uint32_t lobe{0};
+    uint32_t rows{0};
+    uint32_t width{0};
+    uint256 lobe_seed{};
+    const int8_t* expanded_tile{nullptr};
+    const int8_t* active_state{nullptr};
+};
+
 /** Borrowed view of the nonce-derived initial state before barrier zero. */
 struct RCCoupInitialStateProofWitnessView {
     uint32_t state_cells{0};
@@ -473,6 +508,15 @@ struct RCCoupEpisodeProofWitnessView {
 class RCCoupProofWitnessSink {
 public:
     virtual ~RCCoupProofWitnessSink() = default;
+    /**
+     * Additive proof-only callbacks. Default no-ops preserve existing
+     * observers, while production-complete sinks override both and reject
+     * completion unless every canonical occurrence was consumed.
+     */
+    virtual void OnBankPage(
+        const RCCoupBankPageProofWitnessView&) {}
+    virtual void OnInitialLobe(
+        const RCCoupInitialLobeProofWitnessView&) {}
     virtual void OnInitialState(
         const RCCoupInitialStateProofWitnessView& view) = 0;
     virtual void OnGemm(
