@@ -1996,6 +1996,20 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
     }
     const F lambda = DeriveChallengeForBackend<F, Backend>(
         fs_seed, "airq_lambda", trace_roots, {N, Lq, W});
+    // The batching powers depend only on the committed trace, never on the
+    // query point.  Computing them inside every Q-site loop repeated one Fp3
+    // multiplication per constraint per query (over 100k redundant
+    // multiplications at the measured recursive-root shape).
+    std::vector<F> constraint_powers(
+        cs.constraints.size(), T::One());
+    for (size_t constraint = 1;
+         constraint < constraint_powers.size();
+         ++constraint) {
+        constraint_powers[constraint] =
+            T::Mul(
+                constraint_powers[constraint - 1],
+                lambda);
+    }
 
     const uint32_t n_lde = batch.n_coeffs * kRCFriBlowup;
     const uint32_t step = n_lde / N;
@@ -2083,16 +2097,22 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
                 T::Inv(T::Sub(y, h_last)))};
 
         F csum = T::Zero();
-        F lp = T::One();
-        for (const auto& con : cs.constraints) {
+        for (size_t constraint = 0;
+             constraint < cs.constraints.size();
+             ++constraint) {
+            const auto& con =
+                cs.constraints[constraint];
             const F v = con.eval(cur, nxt);
             if (!T::IsZero(v)) {
                 const F& sel = selectors[
                     static_cast<uint8_t>(
                         con.kind)];
-                csum = T::Add(csum, T::Mul(lp, T::Mul(sel, v)));
+                csum = T::Add(
+                    csum,
+                    T::Mul(
+                        constraint_powers[constraint],
+                        T::Mul(sel, v)));
             }
-            lp = T::Mul(lp, lambda);
         }
         if (!T::Eq(csum, T::Mul(qv, zh))) return "quotient identity C(y) != Q(y)*Z_H(y)";
         return nullptr;
