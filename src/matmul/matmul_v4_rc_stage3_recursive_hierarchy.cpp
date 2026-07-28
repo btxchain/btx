@@ -961,4 +961,293 @@ bool ValidateRetainedHierarchyLevelV1(
     return true;
 }
 
+uint256 ComputeRetainedHierarchyRootContextV1(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<RetainedHierarchyNodeV1>& children,
+    uint32_t parent_level)
+{
+    if (!ValidateShardOrdinalManifestV1(manifest) ||
+        children.size() < 2 || parent_level == 0) {
+        return {};
+    }
+    const uint32_t child_level = children.front().level;
+    if (child_level + 1 != parent_level) return {};
+    HashWriter hash;
+    hash << "BTX_RC_STAGE3_RETAINED_HIERARCHY_ROOT_CONTEXT_V1";
+    hash << manifest.commitment;
+    hash << parent_level;
+    hash << static_cast<uint32_t>(children.size());
+    for (uint32_t slot = 0; slot < children.size(); ++slot) {
+        const auto& child = children[slot];
+        if (!child.valid || child.level != child_level ||
+            child.node_ordinal != slot ||
+            child.node_root.IsNull() ||
+            child.coverage.commitment.IsNull() ||
+            child.proof_commitment.IsNull() ||
+            child.fs_seed.IsNull()) {
+            return {};
+        }
+        hash << slot;
+        hash << child.node_root;
+        hash << child.coverage.commitment;
+        hash << child.proof_commitment;
+        hash << child.fs_seed;
+    }
+    return hash.GetHash();
+}
+
+bool ValidateRetainedHierarchyRootV1(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<aq::AirConstraintSystem<gf::Fp3>>&
+        expected_child_css,
+    const std::vector<RetainedHierarchyNodeV1>& children,
+    const RetainedHierarchyRootV1& root,
+    std::string* why)
+{
+    if (root.version != 1 || children.size() < 2 ||
+        expected_child_css.size() != children.size() ||
+        root.child_count != children.size() ||
+        root.manifest_commitment != manifest.commitment) {
+        return Fail(why, "root_input_shape");
+    }
+    if (!ValidateRetainedHierarchyLevelV1(
+            manifest, expected_child_css, children, why)) {
+        return false;
+    }
+    const uint32_t child_level = children.front().level;
+    const uint32_t parent_level = child_level + 1;
+    if (root.child_level != child_level ||
+        root.parent_level != parent_level ||
+        root.root.level != parent_level ||
+        root.root.node_ordinal != 0) {
+        return Fail(why, "root_level");
+    }
+    const uint256 expected_context =
+        ComputeRetainedHierarchyRootContextV1(
+            manifest, children, parent_level);
+    if (expected_context.IsNull() ||
+        root.parent_context_binding != expected_context) {
+        return Fail(why, "root_context");
+    }
+    if (root.ordered_child_node_roots.size() !=
+            children.size()) {
+        return Fail(why, "root_child_roots_size");
+    }
+
+    std::vector<fp::AlgAirProof> decoded_children;
+    std::vector<uint256> child_seeds;
+    decoded_children.reserve(children.size());
+    child_seeds.reserve(children.size());
+    for (size_t i = 0; i < children.size(); ++i) {
+        if (root.ordered_child_node_roots[i] !=
+                children[i].node_root) {
+            return Fail(why, "root_child_root_order");
+        }
+        std::string codec_why;
+        const auto decoded =
+            DeserializeAirQuotientProofAlg(
+                children[i].proof_bytes, &codec_why);
+        if (!decoded.has_value()) {
+            return Fail(
+                why, "root_child_decode:" + codec_why);
+        }
+        decoded_children.push_back(*decoded);
+        child_seeds.push_back(children[i].fs_seed);
+    }
+
+    // Rebuild the exact parent statement from verifier-owned child AIRs and
+    // canonical decoded child proof bytes.  Neither the retained parent AIR
+    // nor its stored seed is accepted as authority.
+    const fp::FoldBusComposition expected_parent =
+        fp::BuildFoldBusCompositionMulti(
+            expected_child_css, decoded_children, child_seeds);
+    if (!expected_parent.valid) {
+        return Fail(
+            why, "root_parent_rebuild:" +
+                     expected_parent.note);
+    }
+    const uint256 expected_seed =
+        fp::ComputeNarrowMultiChildParentFsSeedV1(
+            expected_parent, child_seeds, expected_context);
+    if (expected_seed.IsNull() ||
+        root.root.fs_seed != expected_seed) {
+        return Fail(why, "root_parent_seed");
+    }
+
+    const ShardOrdinalCoverageV1 full_coverage =
+        BuildShardOrdinalCoverageV1(
+            manifest, 0,
+            static_cast<uint32_t>(manifest.entries.size()));
+    if (!ValidateShardOrdinalCoverageV1(
+            manifest, full_coverage) ||
+        root.root.coverage.commitment !=
+            full_coverage.commitment ||
+        root.root.coverage.first_shard_ordinal != 0 ||
+        root.root.coverage.shard_count !=
+            manifest.entries.size()) {
+        return Fail(why, "root_full_coverage");
+    }
+    if (!ValidateRetainedHierarchyNodeV1(
+            manifest, expected_parent.combined,
+            root.root, why)) {
+        return false;
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_hierarchy:"
+            "retained_root_fresh_verified";
+    }
+    return true;
+}
+
+RetainedHierarchyRootV1 ExecuteRetainedHierarchyRootV1(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<aq::AirConstraintSystem<gf::Fp3>>&
+        expected_child_css,
+    const std::vector<RetainedHierarchyNodeV1>& children,
+    bool prove)
+{
+    RetainedHierarchyRootV1 out;
+    out.child_count =
+        static_cast<uint32_t>(children.size());
+    out.manifest_commitment = manifest.commitment;
+    if (!prove || children.size() < 2 ||
+        expected_child_css.size() != children.size()) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_input_or_shape_only";
+        return out;
+    }
+    std::string why;
+    out.all_children_independently_verified =
+        ValidateRetainedHierarchyLevelV1(
+            manifest, expected_child_css, children, &why);
+    out.exact_level_coverage =
+        out.all_children_independently_verified;
+    if (!out.all_children_independently_verified) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_children:" + why;
+        return out;
+    }
+    out.child_level = children.front().level;
+    out.parent_level = out.child_level + 1;
+    out.parent_context_binding =
+        ComputeRetainedHierarchyRootContextV1(
+            manifest, children, out.parent_level);
+    if (out.parent_context_binding.IsNull()) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_context";
+        return out;
+    }
+
+    std::vector<fp::AlgAirProof> child_proofs;
+    std::vector<uint256> child_seeds;
+    child_proofs.reserve(children.size());
+    child_seeds.reserve(children.size());
+    out.ordered_child_node_roots.reserve(children.size());
+    for (const auto& child : children) {
+        const auto decoded =
+            DeserializeAirQuotientProofAlg(
+                child.proof_bytes, &why);
+        if (!decoded.has_value()) {
+            out.note =
+                "stage3:recursive_hierarchy:"
+                "retained_root_child_decode:" + why;
+            return out;
+        }
+        child_proofs.push_back(*decoded);
+        child_seeds.push_back(child.fs_seed);
+        out.ordered_child_node_roots.push_back(
+            child.node_root);
+    }
+    out.consumed =
+        fp::ExecuteNarrowMultiChildL2FriConsumeV1(
+            expected_child_css, child_proofs, child_seeds,
+            /*prove=*/true, out.parent_context_binding);
+    if (!out.consumed.cryptographically_valid) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_consume:" +
+            out.consumed.note;
+        return out;
+    }
+    out.parent_statement_reconstructed = true;
+
+    std::vector<gf::Fp3> root_q;
+    if (!ExtractProofQuotientTerminalsV1(
+            out.consumed.parent_constraint_system,
+            out.consumed.parent_proof, root_q, &why)) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_q:" + why;
+        return out;
+    }
+    const ShardOrdinalCoverageV1 full_coverage =
+        BuildShardOrdinalCoverageV1(
+            manifest, 0,
+            static_cast<uint32_t>(manifest.entries.size()));
+    out.root =
+        RetainVerifiedHierarchyNodeV1(
+            manifest, full_coverage, out.parent_level,
+            /*node_ordinal=*/0,
+            out.consumed.parent_constraint_system,
+            out.consumed.parent_proof,
+            out.consumed.parent_fs_seed, root_q);
+    if (!out.root.valid) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_retain:" + out.root.note;
+        return out;
+    }
+
+    out.parent_proof_independently_verified =
+        ValidateRetainedHierarchyRootV1(
+            manifest, expected_child_css, children,
+            out, &why);
+    if (!out.parent_proof_independently_verified) {
+        out.note =
+            "stage3:recursive_hierarchy:"
+            "retained_root_fresh_verify:" + why;
+        return out;
+    }
+
+    // A slot swap is a real statement substitution: exact level order and
+    // the ordered FS context both change.  It must not validate the same root.
+    auto swapped = children;
+    std::swap(swapped[0], swapped[1]);
+    out.child_substitution_rejected =
+        !ValidateRetainedHierarchyRootV1(
+            manifest, expected_child_css, swapped,
+            out, nullptr);
+    out.cryptographically_valid =
+        out.all_children_independently_verified &&
+        out.exact_level_coverage &&
+        out.parent_statement_reconstructed &&
+        out.parent_proof_independently_verified &&
+        out.child_substitution_rejected;
+    out.production_budget_met =
+        out.consumed.verify_within_relay_budget &&
+        out.consumed.serialize_within_fri_budget;
+    out.note =
+        std::string(
+            "stage3:recursive_hierarchy:"
+            "retained_root") +
+        ";children=" + std::to_string(out.child_count) +
+        ";child_level=" + std::to_string(out.child_level) +
+        ";parent_level=" + std::to_string(out.parent_level) +
+        ";exact_coverage=1;fresh_parent=1;"
+        "child_substitution=1" +
+        ";root_bytes=" +
+        std::to_string(out.root.full_byte_count) +
+        ";verify_us=" +
+        std::to_string(out.consumed.verify_micros) +
+        (out.production_budget_met
+             ? ";production_budget=1"
+             : ";production_budget=0") +
+        ";aggregation_ready=false";
+    return out;
+}
+
 } // namespace matmul::v4::rc::recursive_hierarchy

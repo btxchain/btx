@@ -2633,10 +2633,17 @@ PromoteNormalizedSemanticTerminalFromDeep64CtlV1(
 /**
  * CTL child equations occupy [ctl_column_base, proof_field_base).
  * Proof-field codec limbs are PACKED into a fixed-rate row bus
- * (kNormalizedAlgAirProofFieldBusRate lanes), never one parent-height
+ * (kNormalizedDeep64CtlProofFieldBusRate lanes), never one parent-height
  * column per limb — a ~1.2 MiB FRI codec is ~318k limbs and the
  * one-column-per-limb layout OOMs (~62 GiB at parent_rows=8192).
+ *
+ * This is a residency bus, not a Poseidon sponge row.  Reusing the
+ * eight-lane AlgHash rate cannot hold the measured CTL codec at the minimum
+ * 8192-row parent (318k / 8 > 8192), so it has its own fixed width.
  */
+inline constexpr uint32_t
+    kNormalizedDeep64CtlProofFieldBusRate = 64;
+
 struct NormalizedDeep64CtlChildParentAirLayout {
     uint32_t ctl_column_base{0};
     uint32_t proof_field_base{0};
@@ -2683,6 +2690,10 @@ struct NormalizedDeep64CtlChildParentAirAttachmentV1 {
     bool valid{false};
     std::string note;
 };
+
+// Defined below with the complete recursive-child capability inventory.
+// The Deep64 promotion declarations return/reference it before that definition.
+struct NormalizedRecursiveChildCapabilityAuditV1;
 
 [[nodiscard]] NormalizedDeep64CtlChildParentAirAttachmentV1
 AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
@@ -3437,6 +3448,21 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     const std::vector<AlgAirProof>& children,
     const std::vector<uint256>& child_fs_seeds,
     bool prove = true,
+    const uint256& parent_context_binding = {});
+
+/**
+ * Recompute the exact Fiat-Shamir seed used by
+ * ExecuteNarrowMultiChildL2FriConsumeV1 from a verifier-reconstructed
+ * multi-child fold-bus statement.
+ *
+ * This is the independent-verifier seam for retained hierarchy nodes.  The
+ * caller must rebuild `node` with BuildFoldBusCompositionMulti from the
+ * expected child constraint systems and decoded child proofs.  A receipt's
+ * stored seed is never authoritative.
+ */
+[[nodiscard]] uint256 ComputeNarrowMultiChildParentFsSeedV1(
+    const FoldBusComposition& node,
+    const std::vector<uint256>& child_fs_seeds,
     const uint256& parent_context_binding = {});
 
 inline constexpr uint16_t

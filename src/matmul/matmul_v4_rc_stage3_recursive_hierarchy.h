@@ -259,6 +259,71 @@ struct RetainedHierarchyNodeV1 {
     const std::vector<RetainedHierarchyNodeV1>& nodes,
     std::string* why = nullptr);
 
+/**
+ * One exact, cryptographic hierarchy reduction.
+ *
+ * The input nodes must form a complete canonical level over `manifest`.
+ * Their canonical proof bytes are decoded, verified against independently
+ * reconstructed child constraint systems, and consumed by the real narrow
+ * multi-child FoldBus/FRI parent.  The ordered child node roots and exact
+ * manifest derive the parent transcript context.  The resulting proof is
+ * retained as a new full-coverage node and is independently reconstructed
+ * and verified before `cryptographically_valid` can become true.
+ *
+ * Budget labels remain separate.  This object is evidence for the former
+ * boolean-child hierarchy seam; it does not flip AggregationReady.
+ */
+struct RetainedHierarchyRootV1 {
+    uint16_t version{1};
+    uint32_t child_level{0};
+    uint32_t parent_level{0};
+    uint32_t child_count{0};
+    uint256 manifest_commitment{};
+    uint256 parent_context_binding{};
+    std::vector<uint256> ordered_child_node_roots;
+    fp::NarrowMultiChildL2FriConsumeV1 consumed;
+    RetainedHierarchyNodeV1 root;
+    bool all_children_independently_verified{false};
+    bool exact_level_coverage{false};
+    bool parent_statement_reconstructed{false};
+    bool parent_proof_independently_verified{false};
+    bool child_substitution_rejected{false};
+    bool cryptographically_valid{false};
+    bool production_budget_met{false};
+    std::string note;
+};
+
+/** Domain-separated ordered context committed by the parent FS transcript. */
+[[nodiscard]] uint256 ComputeRetainedHierarchyRootContextV1(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<RetainedHierarchyNodeV1>& children,
+    uint32_t parent_level);
+
+/**
+ * Consume a complete retained level into one real proof-owned root.
+ * `prove=false` is not accepted as cryptographic evidence.
+ */
+[[nodiscard]] RetainedHierarchyRootV1
+ExecuteRetainedHierarchyRootV1(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<aq::AirConstraintSystem<gf::Fp3>>&
+        expected_child_css,
+    const std::vector<RetainedHierarchyNodeV1>& children,
+    bool prove = true);
+
+/**
+ * Fresh-verifier validation.  The verifier decodes child bytes, rebuilds the
+ * FoldBus parent, recomputes the parent seed, and verifies the root proof
+ * against that reconstructed parent AIR.
+ */
+[[nodiscard]] bool ValidateRetainedHierarchyRootV1(
+    const ShardOrdinalManifestV1& manifest,
+    const std::vector<aq::AirConstraintSystem<gf::Fp3>>&
+        expected_child_css,
+    const std::vector<RetainedHierarchyNodeV1>& children,
+    const RetainedHierarchyRootV1& root,
+    std::string* why = nullptr);
+
 } // namespace matmul::v4::rc::recursive_hierarchy
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_RECURSIVE_HIERARCHY_H

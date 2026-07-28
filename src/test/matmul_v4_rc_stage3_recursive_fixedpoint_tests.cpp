@@ -2091,7 +2091,7 @@ BOOST_AUTO_TEST_CASE(
             ctl_parent_air.valid, ctl_parent_air.note);
         BOOST_CHECK_EQUAL(
             ctl_parent_air.layout.proof_field_lanes,
-            fp::kNormalizedAlgAirProofFieldBusRate);
+            fp::kNormalizedDeep64CtlProofFieldBusRate);
         BOOST_CHECK_EQUAL(
             ctl_parent_air.layout.End(),
             ctl_parent_air.layout.ctl_column_base +

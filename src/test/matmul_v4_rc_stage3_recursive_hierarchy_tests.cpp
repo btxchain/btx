@@ -4,14 +4,19 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace aq = matmul::v4::rc::air_quotient;
 namespace gf = matmul::v4::rc::gkr_field;
+namespace rc = matmul::v4::rc;
 namespace rh =
     matmul::v4::rc::recursive_hierarchy;
+namespace fp =
+    matmul::v4::rc::recursive_fixedpoint;
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_recursive_hierarchy_tests)
@@ -425,6 +430,148 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !rh::ValidateRetainedHierarchyNodeV1(
             manifest, cs, forged_proof, nullptr));
+}
+
+BOOST_AUTO_TEST_CASE(
+    exact_retained_level_is_consumed_by_real_fri_parent)
+{
+    const char* run_env =
+        std::getenv("BTX_RUN_G2_RETAINED_HIERARCHY_ROOT");
+    if (run_env == nullptr || run_env[0] == '\0' ||
+        run_env[0] == '0') {
+        BOOST_TEST_MESSAGE(
+            "skip: set BTX_RUN_G2_RETAINED_HIERARCHY_ROOT=1 "
+            "for real retained children -> reconstructed FRI parent");
+        return;
+    }
+
+    const auto manifest = Manifest();
+    const auto cs_left = BooleanCs();
+    const auto cs_right = BooleanCs();
+    const std::vector<std::vector<gf::Fp3>> columns{
+        {gf::Fp3::Zero(), gf::Fp3::One()}};
+    const uint256 seed_left = Seed(0x71);
+    const uint256 seed_right = Seed(0x72);
+    const auto proof_left =
+        aq::AirQuotientProve<
+            gf::Fp3, aq::AirFriBackendAlg<gf::Fp3>>(
+            cs_left, columns, seed_left, {});
+    const auto proof_right =
+        aq::AirQuotientProve<
+            gf::Fp3, aq::AirFriBackendAlg<gf::Fp3>>(
+            cs_right, columns, seed_right, {});
+    BOOST_REQUIRE(proof_left.ok && proof_left.division_exact);
+    BOOST_REQUIRE(proof_right.ok && proof_right.division_exact);
+
+    std::vector<gf::Fp3> q_left;
+    std::vector<gf::Fp3> q_right;
+    std::string why;
+    BOOST_REQUIRE(rh::ExtractProofQuotientTerminalsV1(
+        cs_left, proof_left.proof, q_left, &why));
+    BOOST_REQUIRE(rh::ExtractProofQuotientTerminalsV1(
+        cs_right, proof_right.proof, q_right, &why));
+    const auto left = rh::RetainVerifiedHierarchyNodeV1(
+        manifest,
+        rh::BuildShardOrdinalCoverageV1(manifest, 0, 2),
+        /*level=*/1, /*node_ordinal=*/0,
+        cs_left, proof_left.proof, seed_left, q_left);
+    const auto right = rh::RetainVerifiedHierarchyNodeV1(
+        manifest,
+        rh::BuildShardOrdinalCoverageV1(manifest, 2, 2),
+        /*level=*/1, /*node_ordinal=*/1,
+        cs_right, proof_right.proof, seed_right, q_right);
+    BOOST_REQUIRE_MESSAGE(left.valid, left.note);
+    BOOST_REQUIRE_MESSAGE(right.valid, right.note);
+    BOOST_REQUIRE_MESSAGE(
+        rh::ValidateRetainedHierarchyLevelV1(
+            manifest, {cs_left, cs_right},
+            {left, right}, &why),
+        why);
+
+    const auto root = rh::ExecuteRetainedHierarchyRootV1(
+        manifest, {cs_left, cs_right}, {left, right},
+        /*prove=*/true);
+    BOOST_REQUIRE_MESSAGE(
+        root.cryptographically_valid, root.note);
+    BOOST_CHECK(root.all_children_independently_verified);
+    BOOST_CHECK(root.exact_level_coverage);
+    BOOST_CHECK(root.parent_statement_reconstructed);
+    BOOST_CHECK(root.parent_proof_independently_verified);
+    BOOST_CHECK(root.child_substitution_rejected);
+    BOOST_CHECK(root.root.valid);
+    BOOST_CHECK_EQUAL(root.child_level, 1U);
+    BOOST_CHECK_EQUAL(root.parent_level, 2U);
+    BOOST_CHECK_EQUAL(root.child_count, 2U);
+    BOOST_CHECK_EQUAL(
+        root.root.coverage.shard_count,
+        manifest.entries.size());
+    BOOST_CHECK(!root.parent_context_binding.IsNull());
+    BOOST_CHECK_MESSAGE(
+        rh::ValidateRetainedHierarchyRootV1(
+            manifest, {cs_left, cs_right},
+            {left, right}, root, &why),
+        why);
+
+    // Exact ordering is semantic: the same two valid children in the wrong
+    // slots cannot validate the already-produced root.
+    BOOST_CHECK(!rh::ValidateRetainedHierarchyRootV1(
+        manifest, {cs_left, cs_right},
+        {right, left}, root, nullptr));
+
+    // Recomputing outward receipt hashes cannot save a proof-level mutation.
+    auto proof_tamper = root;
+    BOOST_REQUIRE(
+        !proof_tamper.root.proof.batch.queries.empty());
+    BOOST_REQUIRE(
+        !proof_tamper.root.proof.batch.queries[0]
+             .row.values.empty());
+    proof_tamper.root.proof.batch.queries[0]
+        .row.values[0] =
+        gf::Add(
+            proof_tamper.root.proof.batch.queries[0]
+                .row.values[0],
+            gf::Fp3::One());
+    BOOST_REQUIRE(rc::SerializeAirQuotientProofAlg(
+        proof_tamper.root.proof,
+        proof_tamper.root.proof_bytes, &why));
+    proof_tamper.root.proof_commitment =
+        fp::ComputeNormalizedAlgAirProofCommitment(
+            proof_tamper.root.proof);
+    proof_tamper.root.full_byte_count =
+        rh::ComputeRetainedHierarchyNodeFullBytesV1(
+            proof_tamper.root);
+    proof_tamper.root.node_root =
+        rh::ComputeRetainedHierarchyNodeRootV1(
+            proof_tamper.root);
+    BOOST_CHECK(!rh::ValidateRetainedHierarchyRootV1(
+        manifest, {cs_left, cs_right},
+        {left, right}, proof_tamper, nullptr));
+
+    // A different but internally valid manifest changes the FS context.  Even
+    // after the attacker relabels all outward fields, the original root seed
+    // cannot verify as the substituted statement.
+    auto substituted_manifest = manifest;
+    substituted_manifest.entries[0].statement_root =
+        Seed(0x99);
+    substituted_manifest.commitment =
+        rh::CommitShardOrdinalManifestV1(
+            substituted_manifest);
+    BOOST_REQUIRE(rh::ValidateShardOrdinalManifestV1(
+        substituted_manifest));
+    BOOST_CHECK(!rh::ValidateRetainedHierarchyRootV1(
+        substituted_manifest, {cs_left, cs_right},
+        {left, right}, root, nullptr));
+
+    BOOST_TEST_MESSAGE(
+        "RETAINED_HIERARCHY_ROOT children="
+        << root.child_count
+        << " root_rows=" << root.root.constraint_system.n_rows
+        << " root_cols="
+        << root.root.constraint_system.n_columns
+        << " verify_us=" << root.consumed.verify_micros
+        << " root_bytes=" << root.root.full_byte_count
+        << " within_budget=" << root.production_budget_met
+        << " exact_replay=0 aggregation_ready=false");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

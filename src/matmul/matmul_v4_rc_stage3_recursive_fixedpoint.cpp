@@ -14344,7 +14344,7 @@ AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
     // column per limb OOMs: a ~1.2 MiB CTL FRI codec is ~318k limbs →
     // ~62 GiB at parent_rows=8192 (measured 2026-07-28).
     constexpr uint32_t kProofFieldLanes =
-        kNormalizedAlgAirProofFieldBusRate;
+        kNormalizedDeep64CtlProofFieldBusRate;
     out.layout.proof_field_base =
         out.layout.ctl_column_base + NUM_COLUMNS;
     out.layout.proof_field_count =
@@ -14591,7 +14591,7 @@ bool ValidateNormalizedDeep64CtlChildVerifierInParentAirV1(
         attachment.proof_transport_commitment !=
             deep64_ctl.proof_transport_commitment ||
         attachment.layout.proof_field_lanes !=
-            kNormalizedAlgAirProofFieldBusRate ||
+            kNormalizedDeep64CtlProofFieldBusRate ||
         attachment.layout.proof_field_rows == 0 ||
         attachment.layout.proof_field_rows >
             attachment.parent_rows ||
@@ -19071,22 +19071,15 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
         return out;
     }
 
-    HashWriter seed_hash;
-    seed_hash << "BTX_RC_STAGE3_MULTI_CHILD_L2_FRI_CONSUME_V1";
-    seed_hash << out.arity;
-    seed_hash << out.n_rows;
-    seed_hash << out.n_columns;
-    seed_hash << out.n_constraints;
-    seed_hash << node.prechallenge_commitment;
-    if (!parent_context_binding.IsNull()) {
-        seed_hash <<
-            "BTX_RC_STAGE3_MULTI_CHILD_L2_BOUND_CONTEXT_V1";
-        seed_hash << parent_context_binding;
+    const uint256 parent_seed =
+        ComputeNarrowMultiChildParentFsSeedV1(
+            node, child_fs_seeds, parent_context_binding);
+    if (parent_seed.IsNull()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "multi_child_l2_fri_consume_seed";
+        return out;
     }
-    for (const auto& seed : child_fs_seeds) {
-        seed_hash << seed;
-    }
-    const uint256 parent_seed = seed_hash.GetHash();
     out.parent_fs_seed = parent_seed;
 
     const auto t0 = std::chrono::steady_clock::now();
@@ -19337,6 +19330,40 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
              : ";serialize_OVER_FRI") +
         ";complete_fp=false";
     return out;
+}
+
+uint256 ComputeNarrowMultiChildParentFsSeedV1(
+    const FoldBusComposition& node,
+    const std::vector<uint256>& child_fs_seeds,
+    const uint256& parent_context_binding)
+{
+    if (!node.valid || child_fs_seeds.size() < 2 ||
+        node.combined.n_rows < 2 ||
+        node.combined.n_columns == 0 ||
+        node.combined.constraints.empty() ||
+        node.prechallenge_commitment.IsNull()) {
+        return {};
+    }
+    for (const uint256& seed : child_fs_seeds) {
+        if (seed.IsNull()) return {};
+    }
+    HashWriter seed_hash;
+    seed_hash << "BTX_RC_STAGE3_MULTI_CHILD_L2_FRI_CONSUME_V1";
+    seed_hash << static_cast<uint32_t>(child_fs_seeds.size());
+    seed_hash << node.combined.n_rows;
+    seed_hash << node.combined.n_columns;
+    seed_hash <<
+        static_cast<uint32_t>(node.combined.constraints.size());
+    seed_hash << node.prechallenge_commitment;
+    if (!parent_context_binding.IsNull()) {
+        seed_hash <<
+            "BTX_RC_STAGE3_MULTI_CHILD_L2_BOUND_CONTEXT_V1";
+        seed_hash << parent_context_binding;
+    }
+    for (const auto& seed : child_fs_seeds) {
+        seed_hash << seed;
+    }
+    return seed_hash.GetHash();
 }
 
 namespace {
