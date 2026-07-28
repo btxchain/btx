@@ -772,6 +772,15 @@ BOOST_AUTO_TEST_CASE(
         receipt.program_registry_root);
     BOOST_CHECK(
         !cache_key.proof_payload_digest.IsNull());
+    rc::RCStage3ProofCacheKey inspected_key;
+    rc::RCStage3SuccinctProof no_legacy_proof;
+    BOOST_CHECK(
+        rc::InspectRCStage3ConsensusAttachment(
+            block, params, height, target_u256,
+            &no_legacy_proof, &inspected_key, &why) ==
+        rc::RCStage3AttachmentStatus::
+            AuthorityUnavailable);
+    BOOST_CHECK(inspected_key == cache_key);
 
     CBlock changed_header = block;
     ++changed_header.nNonce64;
@@ -781,6 +790,12 @@ BOOST_AUTO_TEST_CASE(
                 changed_header, params, height,
                 target_u256, receipt,
                 consensus_inputs, &why));
+    BOOST_CHECK(
+        rc::InspectRCStage3ConsensusAttachment(
+            changed_header, params, height,
+            target_u256, nullptr, nullptr, &why) ==
+        rc::RCStage3AttachmentStatus::
+            BindingMismatch);
 
     auto changed_params = params;
     changed_params.nMatMulRCCoupledProfile = 2;
@@ -799,6 +814,15 @@ BOOST_AUTO_TEST_CASE(
                 block, params, height,
                 wrong_target, receipt,
                 consensus_inputs, &why));
+
+    CBlock noncanonical_padding = block;
+    noncanonical_padding.matrix_c_data.back() |=
+        0xff000000U;
+    BOOST_CHECK(
+        rc::InspectRCStage3ConsensusAttachment(
+            noncanonical_padding, params, height,
+            target_u256, nullptr, nullptr, &why) ==
+        rc::RCStage3AttachmentStatus::Malformed);
 }
 
 BOOST_AUTO_TEST_CASE(

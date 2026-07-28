@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_stage3_composition.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_block_transport.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_consensus_binding.h>
 #include <matmul/matmul_v4_rc_stage3_verify.h>
 #include <primitives/block.h>
 
@@ -382,6 +383,48 @@ RCStage3AttachmentStatus InspectRCStage3ConsensusAttachment(
         Fail(why, "missing");
         return RCStage3AttachmentStatus::Missing;
     }
+
+    if (normalized_block_transport::IsReceiptWordsV3(
+            block.matrix_c_data)) {
+        std::string unpack_why;
+        const auto bytes =
+            normalized_block_transport::UnpackReceiptWordsV3(
+                block.matrix_c_data, &unpack_why);
+        if (!bytes.has_value()) {
+            Fail(why, "normalized_unpack:" + unpack_why);
+            return RCStage3AttachmentStatus::Malformed;
+        }
+        std::string decode_why;
+        const auto receipt =
+            normalized_authority::
+                DeserializeNormalizedAuthorityReceiptV3(
+                    *bytes, &decode_why);
+        if (!receipt.has_value()) {
+            Fail(why, "normalized_decode:" + decode_why);
+            return RCStage3AttachmentStatus::Malformed;
+        }
+        normalized_authority::RebuiltVerifierInputsV3 rebuilt;
+        std::string binding_why;
+        if (!normalized_consensus_binding::
+                ValidateDirectReceiptConsensusBindingV3(
+                    block, params, height, target,
+                    *receipt, rebuilt, &binding_why)) {
+            Fail(
+                why,
+                "normalized_binding:" + binding_why);
+            return RCStage3AttachmentStatus::BindingMismatch;
+        }
+        if (cache_key_out != nullptr) {
+            *cache_key_out = RCStage3ProofKey(block);
+        }
+        if (!kRCStage3SuccinctAuthorityReady) {
+            Fail(why, "authority_unavailable");
+            return RCStage3AttachmentStatus::AuthorityUnavailable;
+        }
+        return RCStage3AttachmentStatus::
+            ReadyForMathematicalVerification;
+    }
+
     if (!IsRCStage3ProofWords(block.matrix_c_data)) {
         Fail(why, "bad_payload_magic");
         return RCStage3AttachmentStatus::Malformed;
@@ -447,8 +490,22 @@ RCStage3AttachmentStatus VerifyRCStage3ConsensusAttachment(
         }
 
         std::string verify_why;
-        const bool valid = VerifyRCStage3MathematicalProof(
-            proof, block, params, height, UintToArith256(target), &verify_why);
+        bool valid{false};
+        if (normalized_block_transport::IsReceiptWordsV3(
+                block.matrix_c_data)) {
+            // The normalized carrier is the production format.  Inspection
+            // above has already rebuilt and checked its complete block/public
+            // statement.  Authority must nevertheless remain fail-closed
+            // until this branch can reconstruct the exact parent CS from the
+            // frozen registry and execute VerifyAttachedReceiptV3.  Never
+            // route a BNV3 body through the legacy section verifier.
+            verify_why =
+                "normalized_parent_rebuild_unavailable";
+        } else {
+            valid = VerifyRCStage3MathematicalProof(
+                proof, block, params, height,
+                UintToArith256(target), &verify_why);
+        }
         if (valid) CacheMathematicallyVerifiedProof(key);
         {
             std::lock_guard<std::mutex> lock(g_stage3_singleflight_mutex);
