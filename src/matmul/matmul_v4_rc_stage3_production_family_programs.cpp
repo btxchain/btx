@@ -1209,9 +1209,10 @@ uint32_t PartialResidualMask(
         return PARAM | SOURCE | SCHEDULE | COPY | ALL | RECURSE;
     case sites::ProductionProofSiteKind::CoupledExtractChaCha:
         // The table now contains the complete local opcode, boundary, output
-        // mux and internal SSA relation.  The caller-owned source root,
-        // parent-consumed immutable schedule root, exact production instance
-        // set and recursive child receipt remain outside that table.
+        // mux and internal SSA relation.  The caller-owned source root, exact
+        // production instance schedule/set and recursive child receipt remain
+        // outside that table. V3's caller-local schedule is not the complete
+        // manifest-derived production instance schedule.
         return SOURCE | SCHEDULE | ALL | RECURSE;
     default:
         return 0;

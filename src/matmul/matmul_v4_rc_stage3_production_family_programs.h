@@ -271,8 +271,8 @@ enum class RealProductionFamilyProgramV1 : uint8_t {
  * residual one-column structural stubs; that is deliberately distinct from
  * whole-site semantic completeness, which remains 14/28. In particular, the
  * CoupledExtractChaCha table now closes its local provenance relation but
- * remains a partial site until source-root, all-instance and recursive
- * obligations are consumed.
+ * remains a partial site until source-root, exact production schedule,
+ * all-instance and recursive obligations are consumed.
  */
 [[nodiscard]] std::vector<ProductionFamilyProgramSourceV1>
 BuildProductionFamilyProgramSourcesV1(

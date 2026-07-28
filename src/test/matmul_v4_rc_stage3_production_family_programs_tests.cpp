@@ -537,6 +537,21 @@ BOOST_AUTO_TEST_CASE(
             manifest, sources, &why),
         why);
 
+    auto omitted_source = sources;
+    omitted_source.erase(
+        omitted_source.begin() + exchange_idx);
+    BOOST_CHECK(
+        !ut::ValidateProductionFamilyProgramSourcesV1(
+            manifest, omitted_source, &why));
+
+    auto duplicated_source = sources;
+    duplicated_source.insert(
+        duplicated_source.begin() + exchange_idx,
+        duplicated_source[exchange_idx]);
+    BOOST_CHECK(
+        !ut::ValidateProductionFamilyProgramSourcesV1(
+            manifest, duplicated_source, &why));
+
     // The generic registry validator is structural; this production-source
     // validator is the fail-closed seam that prevents a valid but vacuous
     // one-column table from replacing a canonical relation program.
