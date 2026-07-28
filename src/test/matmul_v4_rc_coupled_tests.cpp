@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rc = matmul::v4::rc;
@@ -66,6 +67,96 @@ bool WrongGemmS32S8(const std::vector<int32_t>& /*L*/, const std::vector<int8_t>
     out.assign(static_cast<size_t>(rows) * cols, -999);
     return true;
 }
+
+struct CapturedCoupledGemm {
+    uint32_t barrier{0};
+    uint32_t lobe{0};
+    uint32_t page_id{0};
+    uint32_t rows{0};
+    uint32_t width{0};
+    std::vector<int8_t> a;
+    std::vector<int8_t> b;
+    std::vector<int64_t> y;
+};
+
+struct CapturedCoupledBarrier {
+    uint32_t barrier{0};
+    uint256 extract_prf{};
+    std::vector<int64_t> extract_input;
+    std::vector<int8_t> extract_output;
+    uint256 barrier_root{};
+};
+
+class CapturingCoupledProofSink final
+    : public rc::RCCoupProofWitnessSink {
+public:
+    void OnGemm(
+        const rc::RCCoupGemmProofWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.rows != 0);
+        BOOST_REQUIRE(view.width != 0);
+        BOOST_REQUIRE(view.operand_a != nullptr);
+        BOOST_REQUIRE(view.operand_b != nullptr);
+        BOOST_REQUIRE(view.gemm_y != nullptr);
+        const size_t output_cells =
+            static_cast<size_t>(view.rows) * view.width;
+        const size_t page_cells =
+            static_cast<size_t>(view.width) * view.width;
+        CapturedCoupledGemm captured;
+        captured.barrier = view.barrier;
+        captured.lobe = view.lobe;
+        captured.page_id = view.page_id;
+        captured.rows = view.rows;
+        captured.width = view.width;
+        captured.a.assign(
+            view.operand_a,
+            view.operand_a + output_cells);
+        captured.b.assign(
+            view.operand_b,
+            view.operand_b + page_cells);
+        captured.y.assign(
+            view.gemm_y,
+            view.gemm_y + output_cells);
+        gemms.push_back(std::move(captured));
+    }
+
+    void OnBarrier(
+        const rc::RCCoupBarrierProofWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.state_cells != 0);
+        BOOST_REQUIRE(view.extract_output != nullptr);
+        CapturedCoupledBarrier captured;
+        captured.barrier = view.barrier;
+        captured.extract_prf = view.extract_prf;
+        if (view.extract_input != nullptr) {
+            captured.extract_input.assign(
+                view.extract_input,
+                view.extract_input + view.state_cells);
+        }
+        captured.extract_output.assign(
+            view.extract_output,
+            view.extract_output + view.state_cells);
+        captured.barrier_root = view.barrier_root;
+        barriers.push_back(std::move(captured));
+    }
+
+    void OnEpisode(
+        const rc::RCCoupEpisodeProofWitnessView& view) override
+    {
+        BOOST_REQUIRE(view.barrier_roots != nullptr);
+        ++episode_events;
+        bank_root = view.bank_root;
+        barrier_roots = *view.barrier_roots;
+        digest = view.coupled_digest;
+    }
+
+    std::vector<CapturedCoupledGemm> gemms;
+    std::vector<CapturedCoupledBarrier> barriers;
+    uint32_t episode_events{0};
+    uint256 bank_root{};
+    std::vector<uint256> barrier_roots;
+    uint256 digest{};
+};
 
 } // namespace
 
@@ -118,6 +209,84 @@ BOOST_AUTO_TEST_CASE(rc_coup_inactive_and_constants)
     BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
     bad.barriers = 9;
     BOOST_CHECK(!rc::ValidateRCCoupParams(bad));
+}
+
+BOOST_AUTO_TEST_CASE(
+    rc_coup_winner_witness_sink_observes_exact_streamed_execution)
+{
+    const CBlockHeader header = MakeCoupHeader(73);
+    const rc::RCCoupParams params =
+        rc::MakeToyRCCoupParams();
+    rc::RCCoupOptions options;
+    options.mode = rc::RCCoupExecMode::Streamed;
+    options.full_bank_schedule = true;
+
+    CapturingCoupledProofSink sink;
+    rc::RCCoupEpisodeTranscript transcript;
+    const uint256 reference =
+        rc::RecomputeCoupledPuzzleReference(
+            header, 0, params, options, {},
+            nullptr, &transcript);
+    BOOST_REQUIRE(!reference.IsNull());
+    const uint256 with_sink =
+        rc::MineCoupledPuzzleWithProofWitness(
+            header, 0, params, sink, {}, options);
+    BOOST_CHECK_EQUAL(with_sink, reference);
+
+    const uint64_t expected_gemms =
+        static_cast<uint64_t>(params.barriers) *
+        params.lobes *
+        params.pages_per_barrier_lobe;
+    BOOST_REQUIRE_EQUAL(
+        sink.gemms.size(), expected_gemms);
+    BOOST_REQUIRE_EQUAL(
+        transcript.gemms.size(), expected_gemms);
+    BOOST_REQUIRE_EQUAL(
+        sink.barriers.size(), params.barriers);
+    BOOST_REQUIRE_EQUAL(
+        transcript.extracts.size(), params.barriers);
+    BOOST_CHECK_EQUAL(sink.episode_events, 1U);
+    BOOST_CHECK_EQUAL(sink.bank_root, transcript.bank_root);
+    BOOST_CHECK(
+        sink.barrier_roots == transcript.barrier_roots);
+    BOOST_CHECK_EQUAL(sink.digest, reference);
+
+    for (size_t i = 0; i < sink.gemms.size(); ++i) {
+        const auto& captured = sink.gemms[i];
+        const auto& expected = transcript.gemms[i];
+        BOOST_CHECK_EQUAL(captured.barrier, expected.barrier);
+        BOOST_CHECK_EQUAL(captured.lobe, expected.lobe);
+        BOOST_CHECK_EQUAL(captured.page_id, expected.page_id);
+        BOOST_CHECK_EQUAL_COLLECTIONS(
+            captured.a.begin(), captured.a.end(),
+            expected.A.begin(), expected.A.end());
+        BOOST_CHECK_EQUAL_COLLECTIONS(
+            captured.b.begin(), captured.b.end(),
+            expected.B.begin(), expected.B.end());
+        BOOST_CHECK_EQUAL_COLLECTIONS(
+            captured.y.begin(), captured.y.end(),
+            expected.Y.begin(), expected.Y.end());
+    }
+    for (size_t i = 0; i < sink.barriers.size(); ++i) {
+        const auto& captured = sink.barriers[i];
+        const auto& expected = transcript.extracts[i];
+        BOOST_CHECK_EQUAL(captured.barrier, expected.barrier);
+        BOOST_CHECK_EQUAL(
+            captured.extract_prf, expected.extract_prf);
+        BOOST_CHECK_EQUAL_COLLECTIONS(
+            captured.extract_input.begin(),
+            captured.extract_input.end(),
+            expected.extract_in.begin(),
+            expected.extract_in.end());
+        BOOST_CHECK_EQUAL_COLLECTIONS(
+            captured.extract_output.begin(),
+            captured.extract_output.end(),
+            expected.extract_out.begin(),
+            expected.extract_out.end());
+        BOOST_CHECK_EQUAL(
+            captured.barrier_root,
+            expected.barrier_root);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_resolve_profile_toydims_matrix)

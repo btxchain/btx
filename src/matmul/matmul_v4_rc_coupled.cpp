@@ -1156,12 +1156,27 @@ uint256 MineCoupledPuzzle(const CBlockHeader& header, int32_t height,
                                            nullptr);
 }
 
+uint256 MineCoupledPuzzleWithProofWitness(
+    const CBlockHeader& header,
+    int32_t height,
+    const RCCoupParams& params,
+    RCCoupProofWitnessSink& sink,
+    const lt::ExactGemmBackend& gemm,
+    const RCCoupOptions& options,
+    RCCoupTiming* out_timing)
+{
+    return RecomputeCoupledPuzzleReference(
+        header, height, params, options, gemm,
+        out_timing, nullptr, &sink);
+}
+
 uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t height,
                                         const RCCoupParams& params,
                                         const RCCoupOptions& options,
                                         const lt::ExactGemmBackend& gemm,
                                         RCCoupTiming* out_timing,
-                                        RCCoupEpisodeTranscript* out_tx)
+                                        RCCoupEpisodeTranscript* out_tx,
+                                        RCCoupProofWitnessSink* proof_sink)
 {
     // Consensus-reachable: malformed dims → REJECT (null digest), never assert/crash.
     if (!ValidateRCCoupParams(params)) {
@@ -1249,6 +1264,16 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
         if (options.skip_barrier && options.skip_barrier_index == b) {
             // Identity pass — shortcut detection must change the digest.
             barrier_roots[b] = BarrierRoot(b, state, tags);
+            if (proof_sink != nullptr) {
+                proof_sink->OnBarrier({
+                    .barrier = b,
+                    .state_cells = n,
+                    .extract_prf = {},
+                    .extract_input = nullptr,
+                    .extract_output = state.data(),
+                    .barrier_root = barrier_roots[b],
+                });
+            }
             checkpoint = state;
             if (checkpointed) {
                 pages.clear();
@@ -1281,10 +1306,40 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
                     if (out_tx) page_for_tx = page;
                     LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride, page, M,
                                   W, partial.data(), gemm);
+                    if (proof_sink != nullptr) {
+                        proof_sink->OnGemm({
+                            .barrier = b,
+                            .lobe = ell,
+                            .page_id = page_id,
+                            .rows = M,
+                            .width = W,
+                            .operand_a =
+                                state.data() +
+                                static_cast<size_t>(ell) *
+                                    lobe_stride,
+                            .operand_b = page.data(),
+                            .gemm_y = partial.data(),
+                        });
+                    }
                 } else {
                     if (out_tx) page_for_tx = pages[page_id];
                     LobeLocalGemm(state.data() + static_cast<size_t>(ell) * lobe_stride,
                                   pages[page_id], M, W, partial.data(), gemm);
+                    if (proof_sink != nullptr) {
+                        proof_sink->OnGemm({
+                            .barrier = b,
+                            .lobe = ell,
+                            .page_id = page_id,
+                            .rows = M,
+                            .width = W,
+                            .operand_a =
+                                state.data() +
+                                static_cast<size_t>(ell) *
+                                    lobe_stride,
+                            .operand_b = pages[page_id].data(),
+                            .gemm_y = partial.data(),
+                        });
+                    }
                 }
                 if (out_tx) {
                     RCCoupGemmTranscript gt;
@@ -1334,6 +1389,16 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
             et.barrier_root = barrier_roots[b];
             out_tx->extracts.push_back(std::move(et));
         }
+        if (proof_sink != nullptr) {
+            proof_sink->OnBarrier({
+                .barrier = b,
+                .state_cells = n,
+                .extract_prf = prf_key,
+                .extract_input = acc.data(),
+                .extract_output = state.data(),
+                .barrier_root = barrier_roots[b],
+            });
+        }
         checkpoint = state;
 
         if (checkpointed) {
@@ -1364,6 +1429,13 @@ uint256 RecomputeCoupledPuzzleReference(const CBlockHeader& header, int32_t heig
     if (out_tx) {
         out_tx->barrier_roots = barrier_roots;
         out_tx->bank_root = bank_root;
+    }
+    if (proof_sink != nullptr) {
+        proof_sink->OnEpisode({
+            .bank_root = bank_root,
+            .barrier_roots = &barrier_roots,
+            .coupled_digest = digest,
+        });
     }
     if (out_timing) {
         out_timing->total_s =

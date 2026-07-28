@@ -396,6 +396,61 @@ struct RCCoupEpisodeTranscript {
 };
 
 /**
+ * Borrowed view of one exact coupled GEMM executed by the winner reseal.
+ *
+ * The callback is synchronous: every pointer is valid only for the duration
+ * of OnGemm.  A production proof sink can therefore commit/prove the page and
+ * partial immediately without retaining another copy of the (potentially
+ * datacenter-sized) bank.
+ */
+struct RCCoupGemmProofWitnessView {
+    uint32_t barrier{0};
+    uint32_t lobe{0};
+    uint32_t page_id{0};
+    uint32_t rows{0};
+    uint32_t width{0};
+    const int8_t* operand_a{nullptr};
+    const int8_t* operand_b{nullptr};
+    const int64_t* gemm_y{nullptr};
+};
+
+/** Borrowed view of one completed coupled Extract/barrier transition. */
+struct RCCoupBarrierProofWitnessView {
+    uint32_t barrier{0};
+    uint32_t state_cells{0};
+    uint256 extract_prf{};
+    const int64_t* extract_input{nullptr};
+    const int8_t* extract_output{nullptr};
+    uint256 barrier_root{};
+};
+
+/** Final public roots emitted only after every coupled barrier completes. */
+struct RCCoupEpisodeProofWitnessView {
+    uint256 bank_root{};
+    const std::vector<uint256>* barrier_roots{nullptr};
+    uint256 coupled_digest{};
+};
+
+/**
+ * Prover-side observation seam for the exact coupled winner reseal.
+ *
+ * This is never called by validation.  It exists so the normalized Stage-3
+ * prover can build all-instance child proofs from the computation which found
+ * the block, rather than invoking RecomputeCoupledPuzzleReference a second
+ * time.  Implementations must copy or consume borrowed views synchronously.
+ */
+class RCCoupProofWitnessSink {
+public:
+    virtual ~RCCoupProofWitnessSink() = default;
+    virtual void OnGemm(
+        const RCCoupGemmProofWitnessView& view) = 0;
+    virtual void OnBarrier(
+        const RCCoupBarrierProofWitnessView& view) = 0;
+    virtual void OnEpisode(
+        const RCCoupEpisodeProofWitnessView& view) = 0;
+};
+
+/**
  * Sole consensus ground truth for the coupled puzzle (toy params).
  * sigma = DeriveSigma(header) (SHA256d header path, consistent with RC).
  * Fixed work per barrier — no early exit, no nonce-dependent dimensions (C4).
@@ -417,7 +472,8 @@ struct RCCoupEpisodeTranscript {
     const RCCoupOptions& options = {},
     const matmul::v4::lt::ExactGemmBackend& gemm = {},
     RCCoupTiming* out_timing = nullptr,
-    RCCoupEpisodeTranscript* out_tx = nullptr);
+    RCCoupEpisodeTranscript* out_tx = nullptr,
+    RCCoupProofWitnessSink* proof_sink = nullptr);
 
 /** Miner entry: same digest as the CPU reference; may inject ExactGemm.
  *  Optional out_timing measures this mining path (not the CPU-oracle-only
@@ -427,6 +483,20 @@ struct RCCoupEpisodeTranscript {
                                         const matmul::v4::lt::ExactGemmBackend& gemm = {},
                                         const RCCoupOptions& options = {},
                                         RCCoupTiming* out_timing = nullptr);
+
+/**
+ * Winner/prover entry which observes every real coupled GEMM and barrier while
+ * executing the same oracle as MineCoupledPuzzle.  No validator calls this
+ * function, and attaching a sink does not alter the digest.
+ */
+[[nodiscard]] uint256 MineCoupledPuzzleWithProofWitness(
+    const CBlockHeader& header,
+    int32_t height,
+    const RCCoupParams& params,
+    RCCoupProofWitnessSink& sink,
+    const matmul::v4::lt::ExactGemmBackend& gemm = {},
+    const RCCoupOptions& options = {},
+    RCCoupTiming* out_timing = nullptr);
 
 /**
  * Canonical RC bank-template projection — mirrors ComputeTemplateHash.
