@@ -351,22 +351,26 @@ struct AliasCanary {
 
 AliasCanary BuildAliasCanary(
     const gf::Fp3& source,
-    const gf::Fp3& sink)
+    const gf::Fp3& sink,
+    uint32_t rows = 2,
+    uint32_t source_row = 0,
+    uint32_t sink_row = 1)
 {
     AliasCanary out;
-    out.cs.n_rows = 2;
+    out.cs.n_rows = rows;
     out.cs.n_columns = 2;
     out.columns.assign(
         2,
         std::vector<gf::Fp3>(
-            2, gf::Fp3::Zero()));
-    out.columns[0][0] = source;
-    out.columns[1][1] = sink;
+            rows, gf::Fp3::Zero()));
+    out.columns[0][source_row] = source;
+    out.columns[1][sink_row] = sink;
     std::string why;
     out.appended =
         terminal::AppendLiteralAliasesV1(
             out.cs, out.columns,
-            {{{0, 0}, {1, 1}}},
+            {{{0, source_row},
+              {1, sink_row}}},
             out.attachment, &why);
     // The bounded canary uses the row-wise Alg backend directly. Its two
     // source/sink selector columns are verifier-owned and dual-OOD pinned;
@@ -621,6 +625,80 @@ BOOST_AUTO_TEST_CASE(
             swapped.cs,
             swapped_proof.proof,
             Seed(), &why)));
+}
+
+BOOST_AUTO_TEST_CASE(
+    literal_alias_linear_validator_rejects_each_edge_class)
+{
+    const gf::Fp3 value =
+        gf::FromU64_3(0x12345678U);
+    constexpr uint32_t kRows = 4;
+    constexpr uint32_t kSourceRow = 0;
+    constexpr uint32_t kSinkRow = 3;
+    const std::vector<std::pair<
+        terminal::CellRefV1,
+        terminal::CellRefV1>> aliases{
+            {{0, kSourceRow},
+             {1, kSinkRow}}};
+    const AliasCanary honest =
+        BuildAliasCanary(
+            value, value, kRows,
+            kSourceRow, kSinkRow);
+    BOOST_REQUIRE(honest.appended);
+    BOOST_REQUIRE_EQUAL(
+        terminal::CountLiteralAliasViolationsV1(
+            honest.cs, honest.columns,
+            aliases, honest.attachment),
+        0U);
+
+    auto source_forgery = honest;
+    source_forgery.columns[0][kSourceRow] =
+        gf::Add(value, gf::Fp3::One());
+    BOOST_CHECK(
+        terminal::CountLiteralAliasViolationsV1(
+            source_forgery.cs,
+            source_forgery.columns,
+            aliases,
+            source_forgery.attachment) > 0);
+
+    auto sink_forgery = honest;
+    sink_forgery.columns[1][kSinkRow] =
+        gf::Add(value, gf::Fp3::One());
+    BOOST_CHECK(
+        terminal::CountLiteralAliasViolationsV1(
+            sink_forgery.cs,
+            sink_forgery.columns,
+            aliases,
+            sink_forgery.attachment) > 0);
+
+    auto carry_forgery = honest;
+    const uint32_t carrier =
+        carry_forgery.attachment
+            .original_columns;
+    carry_forgery.columns[carrier][1] =
+        gf::Add(value, gf::Fp3::One());
+    BOOST_CHECK(
+        terminal::CountLiteralAliasViolationsV1(
+            carry_forgery.cs,
+            carry_forgery.columns,
+            aliases,
+            carry_forgery.attachment) > 0);
+
+    auto selector_forgery = honest;
+    const uint32_t source_selector =
+        selector_forgery.attachment
+            .original_columns +
+        selector_forgery.attachment
+            .literal_aliases;
+    selector_forgery.columns[
+        source_selector][kSourceRow] =
+            gf::Fp3::Zero();
+    BOOST_CHECK(
+        terminal::CountLiteralAliasViolationsV1(
+            selector_forgery.cs,
+            selector_forgery.columns,
+            aliases,
+            selector_forgery.attachment) > 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

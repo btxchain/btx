@@ -194,6 +194,7 @@ struct ParentAliasAttachmentV1 {
 
 struct LiteralAliasAttachmentV1 {
     uint32_t original_columns{0};
+    uint32_t original_constraints{0};
     uint32_t literal_aliases{0};
     uint32_t appended_carriers{0};
     uint32_t constraints{0};
@@ -219,6 +220,19 @@ struct LiteralAliasAttachmentV1 {
     const std::vector<std::pair<CellRefV1, CellRefV1>>& aliases,
     LiteralAliasAttachmentV1& out,
     std::string* why = nullptr);
+
+/**
+ * Evaluate exactly the source, transition-carry, sink, and canonical selector
+ * obligations introduced by AppendLiteralAliasesV1. Existing child
+ * constraints are deliberately outside this linear check: each child was
+ * already validated before composition, while the final AIR proof enforces
+ * the complete composed system.
+ */
+[[nodiscard]] uint64_t CountLiteralAliasViolationsV1(
+    const aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    const std::vector<std::vector<gf::Fp3>>& parent_columns,
+    const std::vector<std::pair<CellRefV1, CellRefV1>>& aliases,
+    const LiteralAliasAttachmentV1& attachment);
 
 /**
  * Append exact cross-row equality carriers between an already-resident V13

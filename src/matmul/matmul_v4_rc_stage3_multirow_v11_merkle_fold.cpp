@@ -263,6 +263,31 @@ Digest FoldLeaf(
     return {output[0], output[1], output[2], output[3]};
 }
 
+Digest TerminalFoldLeaf(
+    const Fp3& value, uint32_t index,
+    uint32_t query, uint32_t fold,
+    const std::vector<uint32_t>& addresses,
+    Recorder& recorder)
+{
+    State input{};
+    input[0] = gf::Canonical(value.c0);
+    input[1] = gf::Canonical(value.c1);
+    input[2] = gf::Canonical(value.c2);
+    input[3] = gf::FromU64(index);
+    input[4] =
+        alg_hash::GetAlgHashConstants()
+            .leaf_domain;
+    const State output =
+        recorder.Permutation(
+            input,
+            HashTaskKindV1::FoldLeaf,
+            query, 7, fold, 0,
+            addresses);
+    return {
+        output[0], output[1],
+        output[2], output[3]};
+}
+
 Digest Compress(
     const Digest& left, const Digest& right,
     uint32_t query, uint32_t group,
@@ -401,6 +426,76 @@ RangeAudit AuditRange(
     out.audit.fold_paths_verified = true;
     out.audit.fold_equations_verified = true;
     out.audit.terminal_value_verified = true;
+    out.audit.terminal_fold_tree_root_verified = true;
+
+    // VerifyV1 commits the constant terminal layer as `blowup` independent
+    // leaves.  The prior shard stopped after proving the last algebraic fold
+    // equals final_value and therefore never constrained the terminal root.
+    // Record the complete leaf/node tree so the same bounded Poseidon table
+    // proves this last FRI commitment too.
+    if (!PowerOfTwo(batch.blowup)) {
+        out.audit.terminal_fold_tree_root_verified = false;
+        return fail("terminal_blowup_shape");
+    }
+    std::vector<Digest> terminal_level;
+    terminal_level.reserve(batch.blowup);
+    const auto terminal_value_addresses =
+        addresses.Field3(
+            Key(abi::FieldKindV1::FinalValue));
+    for (uint32_t index = 0;
+         index < batch.blowup;
+         ++index) {
+        terminal_level.push_back(
+            TerminalFoldLeaf(
+                batch.final_value, index,
+                first_query,
+                static_cast<uint32_t>(
+                    batch.fold_challenges.size()),
+                terminal_value_addresses,
+                recorder));
+    }
+    uint32_t terminal_tree_level = 0;
+    while (terminal_level.size() > 1) {
+        std::vector<Digest> parent;
+        parent.reserve(
+            terminal_level.size() / 2);
+        for (uint32_t node = 0;
+             node < terminal_level.size();
+             node += 2) {
+            std::vector<uint32_t>
+                root_addresses;
+            if (terminal_level.size() == 2) {
+                root_addresses =
+                    addresses.Digest4(
+                        Key(
+                            abi::FieldKindV1::
+                                FoldRoot,
+                            static_cast<uint32_t>(
+                                batch.fold_challenges
+                                    .size())));
+            }
+            parent.push_back(
+                Compress(
+                    terminal_level[node],
+                    terminal_level[node + 1],
+                    first_query, 7,
+                    static_cast<uint32_t>(
+                        batch.fold_challenges
+                            .size()),
+                    terminal_tree_level,
+                    root_addresses,
+                    recorder));
+        }
+        terminal_level = std::move(parent);
+        ++terminal_tree_level;
+    }
+    if (terminal_level.size() != 1 ||
+        !DigestEq(
+            terminal_level[0],
+            batch.fold_layers.back().root)) {
+        out.audit.terminal_fold_tree_root_verified = false;
+        return fail("terminal_root");
+    }
 
     for (uint32_t q = first_query; q < first_query + query_count; ++q) {
         const auto& query = batch.queries[q];
@@ -603,6 +698,7 @@ RangeAudit AuditRange(
         out.audit.fold_paths_verified &&
         out.audit.fold_equations_verified &&
         out.audit.terminal_value_verified &&
+        out.audit.terminal_fold_tree_root_verified &&
         out.audit.exact_source_addresses;
     out.audit.note = out.audit.valid
         ? "stage3:multirow_v11_merkle_fold:exact_paths_and_folds"
@@ -1104,6 +1200,9 @@ ShardProductV1 BuildShardV1(
         RecountViolationsV1(out.fold_cs, out.fold_columns);
     out.fold_equations_air_constrained = out.fold_violations == 0;
     out.terminal_value_air_constrained = out.fold_violations == 0;
+    out.terminal_fold_tree_root_air_constrained =
+        audit.terminal_fold_tree_root_verified &&
+        out.hash_violations == 0;
     out.proof_owned_pins_ood_bound = true;
     // The row-wise backend cannot regenerate a per-column root. Exact root
     // equality arrives only when these columns are placed in a Split-RAP
@@ -1129,6 +1228,7 @@ ShardProductV1 BuildShardV1(
     out.valid =
         out.hash_violations == 0 &&
         out.fold_violations == 0 &&
+        out.terminal_fold_tree_root_air_constrained &&
         out.constant_width_schedule &&
         out.proof_owned_pins_ood_bound &&
         out.duplicate_queries_preserved &&

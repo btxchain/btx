@@ -3190,9 +3190,15 @@ BuildMerkleFoldPublicPlanV1(
             uint64_t{2} *
             (1 + shape.row_depth - fold);
     }
+    // The final constant FRI layer is a complete binary tree with `blowup`
+    // leaves. It is statement-wide, so one exact copy belongs to each shard,
+    // independently of that shard's query count.
+    const uint64_t terminal_tree_rows =
+        uint64_t{2} * shape.blowup - 1;
     const uint64_t hash_real_rows64 =
         hash_rows_per_query *
-        range.query_count;
+            range.query_count +
+        terminal_tree_rows;
     const uint64_t fold_real_rows64 =
         uint64_t{shape.fold_count} *
         range.query_count;

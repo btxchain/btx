@@ -1062,6 +1062,9 @@ bool AppendLiteralAliasesV1(
     }
     out.original_columns =
         parent_cs.n_columns;
+    out.original_constraints =
+        static_cast<uint32_t>(
+            parent_cs.constraints.size());
     const uint32_t carrier_base =
         parent_cs.n_columns;
     const uint32_t selector_base =
@@ -1181,8 +1184,9 @@ bool AppendLiteralAliasesV1(
     out.constraints =
         3 * out.literal_aliases;
     out.violations =
-        CountViolationsV1(
-            parent_cs, parent_columns);
+        CountLiteralAliasViolationsV1(
+            parent_cs, parent_columns,
+            aliases, out);
     out.endpoints_ordinary = true;
     out.selectors_only_preprocessed =
         true;
@@ -1213,6 +1217,175 @@ bool AppendLiteralAliasesV1(
         *why = out.note;
     }
     return true;
+}
+
+uint64_t CountLiteralAliasViolationsV1(
+    const aq::AirConstraintSystem<Fp3>& parent_cs,
+    const std::vector<std::vector<Fp3>>& parent_columns,
+    const std::vector<
+        std::pair<CellRefV1, CellRefV1>>& aliases,
+    const LiteralAliasAttachmentV1& attachment)
+{
+    if (parent_cs.n_rows < 2 ||
+        parent_columns.size() !=
+            parent_cs.n_columns ||
+        aliases.empty() ||
+        attachment.original_columns >
+            parent_cs.n_columns ||
+        attachment.literal_aliases !=
+            aliases.size() ||
+        attachment.appended_carriers !=
+            attachment.literal_aliases ||
+        attachment.constraints !=
+            3 * attachment.literal_aliases ||
+        parent_cs.constraints.size() <
+            uint64_t{
+                attachment.original_constraints} +
+                attachment.constraints) {
+        return UINT64_MAX;
+    }
+    for (const auto& column :
+         parent_columns) {
+        if (column.size() !=
+            parent_cs.n_rows) {
+            return UINT64_MAX;
+        }
+    }
+
+    const uint32_t carrier_base =
+        attachment.original_columns;
+    const uint32_t selector_base =
+        carrier_base +
+        attachment.literal_aliases;
+    const uint64_t required_columns =
+        uint64_t{selector_base} +
+        2 * uint64_t{
+                attachment.literal_aliases};
+    if (required_columns >
+            parent_cs.n_columns) {
+        return UINT64_MAX;
+    }
+
+    std::vector<const std::vector<Fp3>*>
+        preprocessed(
+            parent_cs.n_columns, nullptr);
+    uint64_t violations = 0;
+    for (const auto& [column, values] :
+         parent_cs.preprocessed) {
+        if (column >= parent_cs.n_columns ||
+            values.size() !=
+                parent_cs.n_rows) {
+            return UINT64_MAX;
+        }
+        if (preprocessed[column] !=
+                nullptr) {
+            ++violations;
+        }
+        preprocessed[column] = &values;
+    }
+
+    for (uint32_t ordinal = 0;
+         ordinal < aliases.size();
+         ++ordinal) {
+        const auto [source, sink] =
+            aliases[ordinal];
+        if (source.column >=
+                attachment.original_columns ||
+            sink.column >=
+                attachment.original_columns ||
+            source.row >= parent_cs.n_rows ||
+            sink.row >= parent_cs.n_rows ||
+            preprocessed[source.column] !=
+                nullptr ||
+            preprocessed[sink.column] !=
+                nullptr) {
+            return UINT64_MAX;
+        }
+        const uint32_t carrier =
+            carrier_base + ordinal;
+        const uint32_t source_selector =
+            selector_base +
+            2 * ordinal;
+        const uint32_t sink_selector =
+            source_selector + 1;
+        if (preprocessed[carrier] !=
+                nullptr ||
+            preprocessed[source_selector] ==
+                nullptr ||
+            preprocessed[sink_selector] ==
+                nullptr) {
+            ++violations;
+        }
+
+        for (uint32_t row = 0;
+             row < parent_cs.n_rows;
+             ++row) {
+            const Fp3 expected_source =
+                row == source.row
+                    ? Fp3::One()
+                    : Fp3::Zero();
+            const Fp3 expected_sink =
+                row == sink.row
+                    ? Fp3::One()
+                    : Fp3::Zero();
+            if (!gf::Eq(
+                    parent_columns[
+                        source_selector][row],
+                    expected_source) ||
+                preprocessed[
+                    source_selector] == nullptr ||
+                !gf::Eq(
+                    (*preprocessed[
+                        source_selector])[row],
+                    expected_source)) {
+                ++violations;
+            }
+            if (!gf::Eq(
+                    parent_columns[
+                        sink_selector][row],
+                    expected_sink) ||
+                preprocessed[
+                    sink_selector] == nullptr ||
+                !gf::Eq(
+                    (*preprocessed[
+                        sink_selector])[row],
+                    expected_sink)) {
+                ++violations;
+            }
+            if (row + 1 <
+                    parent_cs.n_rows &&
+                !gf::Eq(
+                    parent_columns[
+                        carrier][row],
+                    parent_columns[
+                        carrier][row + 1])) {
+                ++violations;
+            }
+            if (!gf::IsZero(
+                    gf::Mul(
+                        parent_columns[
+                            source_selector][row],
+                        gf::Sub(
+                            parent_columns[
+                                carrier][row],
+                            parent_columns[
+                                source.column][row])))) {
+                ++violations;
+            }
+            if (!gf::IsZero(
+                    gf::Mul(
+                        parent_columns[
+                            sink_selector][row],
+                        gf::Sub(
+                            parent_columns[
+                                carrier][row],
+                            parent_columns[
+                                sink.column][row])))) {
+                ++violations;
+            }
+        }
+    }
+    return violations;
 }
 
 bool AppendProofTapeAliasesV1(

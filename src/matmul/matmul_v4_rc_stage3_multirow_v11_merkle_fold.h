@@ -135,6 +135,7 @@ struct NativeAuditV1 {
     bool fold_paths_verified{false};
     bool fold_equations_verified{false};
     bool terminal_value_verified{false};
+    bool terminal_fold_tree_root_verified{false};
     bool exact_source_addresses{false};
     bool duplicate_queries_preserved{false};
     bool literal_parent_consumer_refs{false};
@@ -186,6 +187,7 @@ struct ShardProductV1 {
     bool fold_paths_verified{false};
     bool fold_equations_air_constrained{false};
     bool terminal_value_air_constrained{false};
+    bool terminal_fold_tree_root_air_constrained{false};
     bool proof_owned_pins_ood_bound{false};
     bool proof_owned_pins_root_pinned{false};
     bool constant_width_schedule{false};

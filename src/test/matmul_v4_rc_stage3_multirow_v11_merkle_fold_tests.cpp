@@ -6,9 +6,13 @@
 
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_merkle_fold.h>
+#include <matmul/matmul_v4_rc_stage3_v13_merkle_fold_parent.h>
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
+#include <set>
+#include <tuple>
 
 namespace matmul::v4::rc::stage3_multirow_v11_merkle_fold {
 namespace {
@@ -224,6 +228,218 @@ std::optional<abi::DecodedV1> Recode(const abi::EnvelopeV1& envelope)
     return abi::DecodeCanonicalV1(words, &why);
 }
 
+uint256 FixedRoot(uint8_t value)
+{
+    uint256 out;
+    std::fill(out.begin(), out.end(), value);
+    return out;
+}
+
+struct TapeFixtureV1 {
+    stage3_multirow_v13_proof_tape_air::PublicShapeV1 shape;
+    stage3_multirow_v13_proof_tape_air::PublicBindingV1 binding;
+    std::vector<uint32_t> words;
+    abi::DecodedV1 decoded;
+    stage3_multirow_v13_proof_tape_air::ProductV1 product;
+};
+
+TapeFixtureV1 BuildTapeFixtureV1(const Fixture& fixture)
+{
+    namespace tape =
+        stage3_multirow_v13_proof_tape_air;
+    TapeFixtureV1 out;
+    const auto& split = fixture.envelope.split;
+    out.shape.trace_rows = split.trace_rows;
+    out.shape.trace_columns =
+        fixture.envelope.trace_columns;
+    out.shape.quotient_len =
+        fixture.envelope.quotient_len;
+    out.shape.n_coeffs =
+        split.batch.n_coeffs;
+    out.shape.base_column_indices =
+        split.base_column_indices;
+    out.binding.program_root = FixedRoot(0x11);
+    out.binding.statement_root = FixedRoot(0x22);
+    out.binding.proof_wire_root = FixedRoot(0x44);
+    for (uint32_t word = 0;
+         word < 8; ++word) {
+        for (uint32_t byte = 0;
+             byte < 4; ++byte) {
+            out.binding.public_fs_seed
+                .data()[4 * word + byte] =
+                static_cast<unsigned char>(
+                    fixture.envelope
+                        .public_fs_seed[word] >>
+                    (8 * byte));
+        }
+    }
+
+    const auto schedule =
+        tape::BuildScheduleV1(
+            out.shape, out.binding);
+    BOOST_REQUIRE_MESSAGE(
+        schedule.valid, schedule.note);
+    out.words.resize(
+        tape::kHeaderRecordsV1 +
+        size_t{schedule.source_records} * 2);
+    for (uint32_t header = 0;
+         header < tape::kHeaderRecordsV1;
+         ++header) {
+        out.words[header] =
+            schedule.records[
+                tape::kPublicPrefixRecordsV1 +
+                header].expected_value;
+    }
+    for (uint32_t address = 0;
+         address < schedule.source_records;
+         ++address) {
+        const auto& record =
+            schedule.records[
+                tape::kPublicPrefixRecordsV1 +
+                tape::kHeaderRecordsV1 +
+                address];
+        const size_t offset =
+            tape::kHeaderRecordsV1 +
+            size_t{address} * 2;
+        out.words[offset] =
+            record.expected_address;
+        if (record.fixed_value) {
+            out.words[offset + 1] =
+                record.expected_value;
+            continue;
+        }
+        const auto fixture_address =
+            abi::FindSourceAddressV1(
+                fixture.decoded.sources,
+                record.key);
+        BOOST_REQUIRE_MESSAGE(
+            fixture_address.has_value(),
+            "SAFE-V13 source missing from canonical fixture");
+        out.words[offset + 1] =
+            fixture.decoded
+                .sources[*fixture_address]
+                .value;
+    }
+    std::string why;
+    const auto decoded =
+        abi::DecodeCanonicalSafeV13(
+            out.words, &why);
+    BOOST_REQUIRE_MESSAGE(
+        decoded.has_value(), why);
+    out.decoded = *decoded;
+    out.binding.tape_root =
+        tape::ComputeTapeRootV1(
+            out.shape, out.binding,
+            out.words, &why);
+    BOOST_REQUIRE_MESSAGE(
+        out.binding.tape_root !=
+            alg_hash::Digest{},
+        why);
+    out.product =
+        tape::BuildProductV1(
+            out.shape, out.binding,
+            out.words);
+    BOOST_REQUIRE_MESSAGE(
+        out.product.valid,
+        out.product.note);
+    return out;
+}
+
+struct TypedSourceCanaryV1 {
+    aq::AirConstraintSystem<Fp3> cs;
+    std::vector<std::vector<Fp3>>
+        columns;
+};
+
+TypedSourceCanaryV1 BuildTypedSourceCanaryV1(
+    uint32_t low,
+    uint32_t high,
+    Fp3 target)
+{
+    TypedSourceCanaryV1 out;
+    out.cs.n_rows = 2;
+    out.cs.n_columns = 4;
+    out.columns.assign(
+        out.cs.n_columns,
+        std::vector<Fp3>(
+            out.cs.n_rows,
+            Fp3::Zero()));
+    for (uint32_t row = 0;
+         row < out.cs.n_rows;
+         ++row) {
+        out.columns[0][row] =
+            gf::FromU64_3(low);
+        out.columns[1][row] =
+            gf::FromU64_3(high);
+        out.columns[2][row] =
+            target;
+        out.columns[3][row] =
+            Fp3::One();
+    }
+    const auto add =
+        [&out](
+            const char* name,
+            aq::AirKind kind,
+            uint32_t degree,
+            std::function<Fp3(
+                const std::vector<Fp3>&,
+                const std::vector<Fp3>&)>
+                eval) {
+            aq::AirConstraint<Fp3>
+                constraint;
+            constraint.name = name;
+            constraint.kind = kind;
+            constraint.alg_degree =
+                degree;
+            constraint.eval =
+                std::move(eval);
+            out.cs.constraints.push_back(
+                std::move(constraint));
+        };
+    for (uint32_t column = 0;
+         column < 3; ++column) {
+        add(
+            "stage3.v13_merkle_fold.canary_carry",
+            aq::AirKind::kTransition,
+            1,
+            [column](
+                const auto& current,
+                const auto& next) {
+                return gf::Sub(
+                    next[column],
+                    current[column]);
+            });
+    }
+    add(
+        "stage3.v13_merkle_fold.canary_recompose",
+        aq::AirKind::kEverywhere,
+        1,
+        [](const auto& current,
+           const auto&) {
+            const Fp3 expected =
+                gf::Add(
+                    current[0],
+                    gf::Mul(
+                        gf::FromU64_3(
+                            uint64_t{1}
+                            << 32),
+                        current[1]));
+            return gf::Sub(
+                current[2], expected);
+        });
+    add(
+        "stage3.v13_merkle_fold.canary_accept",
+        aq::AirKind::kFirstRow,
+        1,
+        [](const auto& current,
+           const auto&) {
+            return gf::Sub(
+                current[3],
+                Fp3::One());
+        });
+    return out;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -417,6 +633,489 @@ BOOST_AUTO_TEST_CASE(
         Fp3::One(), forged_side[shard.fold_layout.side][0]);
     BOOST_CHECK_GT(
         RecountViolationsV1(shard.fold_cs, forged_side), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    v13_parent_exports_every_hash_and_fold_source_as_ordinary)
+{
+    namespace parent =
+        stage3_v13_merkle_fold_parent;
+    namespace composer =
+        stage3_air_parent_composer;
+    const auto& fixture = Honest();
+    const auto tape = BuildTapeFixtureV1(
+        fixture);
+    const auto shard = BuildShardV1(
+        tape.decoded,
+        fixture.transcript, 0, 1);
+    BOOST_REQUIRE_MESSAGE(shard.valid, shard.note);
+
+    const auto hash =
+        parent::BuildOrdinaryHashProductV1(
+            tape.decoded, shard);
+    BOOST_REQUIRE_MESSAGE(hash.valid, hash.note);
+    BOOST_CHECK(hash.plan.every_input_lane_resolved);
+    BOOST_CHECK(hash.plan.every_prior_precedes_consumer);
+    BOOST_CHECK(hash.plan.every_source_address_canonical);
+    BOOST_CHECK(hash.plan.lane_ownership_unique);
+    BOOST_CHECK(
+        hash.plan.output_inventory_complete);
+    BOOST_CHECK_EQUAL(
+        hash.plan.output_aliases,
+        hash.plan.expected_output_aliases);
+    BOOST_CHECK(hash.proof_pins_ordinary);
+    BOOST_CHECK(hash.selectors_and_constants_only_preprocessed);
+    BOOST_CHECK(hash.all_abi_words_exported);
+    BOOST_CHECK(hash.all_prior_edges_constrained);
+    BOOST_CHECK(hash.all_output_roots_constrained);
+    BOOST_CHECK_EQUAL(hash.violations, 0U);
+    BOOST_CHECK(!hash.source_carriers.empty());
+
+    std::set<std::tuple<
+        uint32_t, uint32_t, uint32_t,
+        uint32_t>>
+        canonical_fold_leaf_edges;
+    for (const auto& expression :
+         hash.plan.inputs) {
+        if (expression.kind !=
+                parent::
+                    HashLaneExpressionKindV1::
+                        SelectPriorOrSiblingLeft ||
+            expression.lane != 0) {
+            continue;
+        }
+        const auto& consumer =
+            shard.hash_tasks[
+                expression.task_row];
+        if ((consumer.group != 5 &&
+             consumer.group != 6) ||
+            consumer.level != 0) {
+            continue;
+        }
+        BOOST_REQUIRE_LT(
+            expression.prior_task_row,
+            shard.hash_tasks.size());
+        const auto& leaf =
+            shard.hash_tasks[
+                expression.prior_task_row];
+        BOOST_CHECK(
+            leaf.kind ==
+            HashTaskKindV1::FoldLeaf);
+        BOOST_CHECK_EQUAL(
+            leaf.query, consumer.query);
+        BOOST_CHECK_EQUAL(
+            leaf.fold, consumer.fold);
+        BOOST_CHECK_EQUAL(
+            leaf.group,
+            consumer.group - 5);
+        canonical_fold_leaf_edges.emplace(
+            consumer.query,
+            consumer.fold,
+            leaf.group,
+            consumer.group);
+    }
+    BOOST_CHECK_EQUAL(
+        canonical_fold_leaf_edges.size(),
+        size_t{
+            2 *
+            fixture.envelope.split.batch
+                .fold_challenges.size()});
+
+    uint64_t q192_task_rows =
+        hash.plan.task_rows;
+    uint64_t q192_input_lanes =
+        hash.plan.expected_input_lanes;
+    uint64_t q192_output_aliases =
+        hash.plan.output_aliases;
+    for (uint32_t query = 1;
+         query <
+             kProductionQueriesV1;
+         ++query) {
+        const auto query_shard =
+            BuildShardV1(
+                tape.decoded,
+                fixture.transcript,
+                query, 1);
+        BOOST_REQUIRE_MESSAGE(
+            query_shard.valid,
+            query_shard.note);
+        const auto query_plan =
+            parent::BuildTypedHashPlanV1(
+                tape.decoded,
+                query_shard);
+        BOOST_REQUIRE_MESSAGE(
+            query_plan.valid,
+            query_plan.note);
+        BOOST_CHECK(
+            query_plan
+                .output_inventory_complete);
+        q192_task_rows +=
+            query_plan.task_rows;
+        q192_input_lanes +=
+            query_plan
+                .expected_input_lanes;
+        q192_output_aliases +=
+            query_plan.output_aliases;
+    }
+    BOOST_CHECK_EQUAL(
+        q192_input_lanes,
+        q192_task_rows *
+            alg_hash::kAlgHashT);
+    BOOST_CHECK_EQUAL(
+        q192_output_aliases,
+        uint64_t{
+            kProductionQueriesV1} *
+            hash.plan
+                .expected_output_aliases);
+    BOOST_TEST_MESSAGE(
+        "V13 exact Q192 Merkle inventory:"
+        " task_rows="
+        << q192_task_rows
+        << " input_lanes="
+        << q192_input_lanes
+        << " root_aliases="
+        << q192_output_aliases);
+
+    // The old 0/1-vs-5/6 namespace mismatch left no physical leaf edge.
+    // Mutating an even leaf into the odd namespace (the test values are
+    // deliberately equal) must still fail before a proof can be built.
+    auto missing_canonical_edge = shard;
+    const auto even_leaf =
+        std::find_if(
+            missing_canonical_edge
+                .hash_tasks.begin(),
+            missing_canonical_edge
+                .hash_tasks.end(),
+            [](const auto& task) {
+                return task.kind ==
+                        HashTaskKindV1::
+                            FoldLeaf &&
+                    task.group == 0;
+            });
+    BOOST_REQUIRE(
+        even_leaf !=
+        missing_canonical_edge
+            .hash_tasks.end());
+    even_leaf->group = 1;
+    const auto detached_plan =
+        parent::BuildTypedHashPlanV1(
+            tape.decoded,
+            missing_canonical_edge);
+    BOOST_CHECK(!detached_plan.valid);
+    BOOST_CHECK(
+        detached_plan.note.find(
+            "fold_leaf_source_schema") !=
+        std::string::npos);
+
+    const auto fold =
+        parent::BuildOrdinaryFoldProductV1(
+            tape.decoded, shard);
+    BOOST_REQUIRE_MESSAGE(fold.valid, fold.note);
+    BOOST_CHECK(fold.plan.every_source_address_canonical);
+    BOOST_CHECK(fold.plan.exact_query_fold_schedule);
+    BOOST_CHECK(fold.proof_pins_ordinary);
+    BOOST_CHECK(fold.schedule_only_preprocessed);
+    BOOST_CHECK(fold.all_abi_words_exported);
+    BOOST_CHECK(fold.index_bits_constrained);
+    BOOST_CHECK(fold.domain_point_exponentiation_constrained);
+    BOOST_CHECK(fold.fold_chain_constrained);
+    BOOST_CHECK_EQUAL(fold.violations, 0U);
+    BOOST_CHECK(!fold.source_carriers.empty());
+
+    aq::AirConstraintSystem<Fp3> parent_cs;
+    std::vector<std::vector<Fp3>>
+        parent_columns;
+    composer::ChildAttachmentV1
+        tape_attachment;
+    composer::ChildAttachmentV1
+        hash_attachment;
+    composer::ChildAttachmentV1
+        fold_attachment;
+    const uint32_t parent_rows =
+        std::max({
+            tape.product.cs.n_rows,
+            hash.cs.n_rows,
+            fold.cs.n_rows});
+    std::string why;
+    const auto append =
+        [&](const auto& child,
+            uint32_t ordinal,
+            composer::ChildAttachmentV1&
+                attachment) {
+            return child.cs.n_rows ==
+                    parent_rows
+                ? composer::AppendChildV1(
+                      parent_cs,
+                      parent_columns,
+                      child.cs,
+                      child.columns,
+                      ordinal,
+                      attachment,
+                      &why)
+                : composer::AppendChildLiftedV1(
+                      parent_cs,
+                      parent_columns,
+                      child.cs,
+                      child.columns,
+                      parent_rows,
+                      ordinal,
+                      attachment,
+                      &why);
+        };
+    BOOST_REQUIRE_MESSAGE(
+        append(tape.product, 0,
+               tape_attachment),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        append(hash, 1,
+               hash_attachment),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        append(fold, 2,
+               fold_attachment),
+        why);
+    parent::ParentAliasAttachmentV1
+        aliases;
+    BOOST_REQUIRE_MESSAGE(
+        parent::AppendProofTapeAliasesV1(
+            parent_cs,
+            parent_columns,
+            tape.product,
+            tape_attachment,
+            hash,
+            hash_attachment,
+            fold,
+            fold_attachment,
+            aliases,
+            &why),
+        why);
+    BOOST_CHECK(aliases.valid);
+    BOOST_CHECK_EQUAL(
+        aliases.source_aliases,
+        hash.source_carriers.size() +
+            fold.source_carriers.size());
+    BOOST_CHECK(aliases.tape_cells_literal);
+    BOOST_CHECK(
+        aliases.child_carriers_ordinary);
+    BOOST_CHECK(
+        aliases.cross_row_transport_constrained);
+    BOOST_CHECK(
+        aliases.global_r0_pending);
+    BOOST_CHECK_EQUAL(
+        aliases.violations, 0U);
+
+    // Metadata is part of physical provenance even when values coincide.
+    // Repoint an even source carrier at the equal-valued odd source address
+    // while retaining its exact semantic key.  The same-parent tape join
+    // must reject the cross-group transplant.
+    auto transplanted_hash = hash;
+    auto even_carrier =
+        std::find_if(
+            transplanted_hash
+                .source_carriers.begin(),
+            transplanted_hash
+                .source_carriers.end(),
+            [](const auto& carrier) {
+                return carrier.source_key.kind ==
+                        abi::FieldKindV1::
+                            QueryStepEven &&
+                    carrier.source_key.limb == 0;
+            });
+    BOOST_REQUIRE(
+        even_carrier !=
+        transplanted_hash
+            .source_carriers.end());
+    auto odd_key =
+        even_carrier->source_key;
+    odd_key.kind =
+        abi::FieldKindV1::QueryStepOdd;
+    const auto odd_address =
+        abi::FindSourceAddressV1(
+            tape.decoded.sources,
+            odd_key);
+    BOOST_REQUIRE(
+        odd_address.has_value());
+    BOOST_REQUIRE_EQUAL(
+        tape.decoded.sources[
+            even_carrier->source_address]
+            .value,
+        tape.decoded.sources[
+            *odd_address].value);
+    even_carrier->source_address =
+        *odd_address;
+    auto attacked_cs = parent_cs;
+    auto attacked_columns =
+        parent_columns;
+    parent::ParentAliasAttachmentV1
+        attacked_aliases;
+    BOOST_CHECK(
+        !parent::AppendProofTapeAliasesV1(
+            attacked_cs,
+            attacked_columns,
+            tape.product,
+            tape_attachment,
+            transplanted_hash,
+            hash_attachment,
+            fold,
+            fold_attachment,
+            attacked_aliases,
+            &why));
+
+    const parent::SourceCarrierV1*
+        canary_low = nullptr;
+    const parent::SourceCarrierV1*
+        canary_high = nullptr;
+    for (const auto& candidate :
+         hash.source_carriers) {
+        if (candidate.source_key.limb !=
+            0) {
+            continue;
+        }
+        auto high_key =
+            candidate.source_key;
+        high_key.limb = 1;
+        const auto high =
+            std::find_if(
+                hash.source_carriers.begin(),
+                hash.source_carriers.end(),
+                [&high_key](
+                    const auto& carrier) {
+                    return carrier.source_key ==
+                        high_key;
+                });
+        if (high ==
+            hash.source_carriers.end()) {
+            continue;
+        }
+        const uint32_t low_value =
+            tape.decoded.sources[
+                candidate.source_address]
+                .value;
+        const uint32_t high_value =
+            tape.decoded.sources[
+                high->source_address]
+                .value;
+        if (low_value != high_value) {
+            canary_low = &candidate;
+            canary_high = &*high;
+            break;
+        }
+    }
+    BOOST_REQUIRE(canary_low != nullptr);
+    BOOST_REQUIRE(canary_high != nullptr);
+    const uint32_t low_value =
+        tape.decoded.sources[
+            canary_low->source_address]
+            .value;
+    const uint32_t high_value =
+        tape.decoded.sources[
+            canary_high->source_address]
+            .value;
+    const Fp3 recomposed =
+        gf::Add(
+            gf::FromU64_3(low_value),
+            gf::Mul(
+                gf::FromU64_3(
+                    uint64_t{1} << 32),
+                gf::FromU64_3(
+                    high_value)));
+    const Fp3 swapped_recomposition =
+        gf::Add(
+            gf::FromU64_3(high_value),
+            gf::Mul(
+                gf::FromU64_3(
+                    uint64_t{1} << 32),
+                gf::FromU64_3(
+                    low_value)));
+    BOOST_REQUIRE(
+        !gf::Eq(
+            recomposed,
+            swapped_recomposition));
+    using CanaryBackend =
+        aq::AirFriBackendAlg<Fp3>;
+    const uint256 canary_seed =
+        uint256::ONE;
+    auto honest_canary =
+        BuildTypedSourceCanaryV1(
+            low_value,
+            high_value,
+            recomposed);
+    const auto honest_canary_proof =
+        aq::AirQuotientProve<
+            Fp3, CanaryBackend>(
+            honest_canary.cs,
+            honest_canary.columns,
+            canary_seed);
+    BOOST_REQUIRE_MESSAGE(
+        honest_canary_proof.ok,
+        honest_canary_proof.note);
+    BOOST_REQUIRE(
+        honest_canary_proof
+            .division_exact);
+    BOOST_REQUIRE_MESSAGE(
+        (aq::AirQuotientVerify<
+            Fp3, CanaryBackend>(
+            honest_canary.cs,
+            honest_canary_proof.proof,
+            canary_seed,
+            &why)),
+        why);
+
+    aq::AirProveOptions force;
+    force.force_commit_on_inexact =
+        true;
+    auto mismatch_canary =
+        BuildTypedSourceCanaryV1(
+            low_value,
+            high_value,
+            gf::Add(
+                recomposed,
+                Fp3::One()));
+    const auto mismatch_proof =
+        aq::AirQuotientProve<
+            Fp3, CanaryBackend>(
+            mismatch_canary.cs,
+            mismatch_canary.columns,
+            canary_seed,
+            force);
+    BOOST_REQUIRE_MESSAGE(
+        mismatch_proof.ok,
+        mismatch_proof.note);
+    BOOST_REQUIRE(
+        !mismatch_proof.division_exact);
+    BOOST_CHECK(
+        (!aq::AirQuotientVerify<
+            Fp3, CanaryBackend>(
+            mismatch_canary.cs,
+            mismatch_proof.proof,
+            canary_seed,
+            &why)));
+
+    auto swapped_canary =
+        BuildTypedSourceCanaryV1(
+            high_value,
+            low_value,
+            recomposed);
+    const auto swapped_proof =
+        aq::AirQuotientProve<
+            Fp3, CanaryBackend>(
+            swapped_canary.cs,
+            swapped_canary.columns,
+            canary_seed,
+            force);
+    BOOST_REQUIRE_MESSAGE(
+        swapped_proof.ok,
+        swapped_proof.note);
+    BOOST_REQUIRE(
+        !swapped_proof.division_exact);
+    BOOST_CHECK(
+        (!aq::AirQuotientVerify<
+            Fp3, CanaryBackend>(
+            swapped_canary.cs,
+            swapped_proof.proof,
+            canary_seed,
+            &why)));
+
 }
 
 BOOST_AUTO_TEST_CASE(
