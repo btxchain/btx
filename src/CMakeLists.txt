@@ -632,6 +632,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_episode_round_roots.cpp
   matmul/matmul_v4_rc_stage3_episode_extract_product.cpp
   matmul/matmul_v4_rc_stage3_episode_gemm_product.cpp
+  matmul/matmul_v4_rc_stage3_episode_semantic_source_alg.cpp
   matmul/matmul_v4_rc_stage3_episode_gemm_openings_proof_owned.cpp
   matmul/matmul_v4_rc_stage3_gkr_wireless_receipt.cpp
   matmul/matmul_v4_rc_stage3_gkr_mle_adapter.cpp
@@ -725,6 +726,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_v14_transcript_provenance_join.cpp
   matmul/matmul_v4_rc_stage3_v14_protocol_prefix_join.cpp
   matmul/matmul_v4_rc_stage3_air_parent_composer.cpp
+  matmul/matmul_v4_rc_stage3_v13_terminal_fold_parent.cpp
+  matmul/matmul_v4_rc_stage3_v13_quotient_tape_parent.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_acceptance_bytecode.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_backend.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_parent_join.cpp

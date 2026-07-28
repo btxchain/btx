@@ -126,6 +126,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_round_roots_tests.cpp
   matmul_v4_rc_stage3_episode_extract_product_tests.cpp
   matmul_v4_rc_stage3_episode_gemm_product_tests.cpp
+  matmul_v4_rc_stage3_episode_semantic_source_alg_tests.cpp
   matmul_v4_rc_stage3_episode_gemm_openings_proof_owned_tests.cpp
   matmul_v4_rc_stage3_gkr_wireless_receipt_tests.cpp
   matmul_v4_rc_stage3_gkr_mle_adapter_tests.cpp
@@ -219,6 +220,8 @@ add_executable(test_btx
   matmul_v4_rc_stage3_multirow_v11_backend_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_parent_join_tests.cpp
   matmul_v4_rc_stage3_air_parent_composer_tests.cpp
+  matmul_v4_rc_stage3_v13_terminal_fold_parent_tests.cpp
+  matmul_v4_rc_stage3_v13_quotient_tape_parent_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_decoder_join_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_deep_vm_tests.cpp
