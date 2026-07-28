@@ -180,6 +180,37 @@ static_assert(
     "V10 is additive evidence, not the active consensus protocol");
 
 // ===========================================================================
+// Additive single-lane SAFE protocol: Q192 / fixed OOD K=2 (V13).
+//
+// V13 deliberately keeps the executable single-Fp3/Q192 FRI statement and
+// V10's bounded OOD schedule.  It changes only the challenge oracle: every
+// lambda/z/DEEP/fold/query draw is a full-capacity SAFECore instance whose
+// typed capacity role is disjoint from every Merkle role.  Consequently this
+// lane does not need the dual-Q96 lane-independence or common-commitment
+// hybrid.  It remains additive until the normalized parent replays the exact
+// SAFE calls and consumes the registry root.
+// ===========================================================================
+inline constexpr uint32_t kRCFri3AlgSafeQ192K2ProofVersionV13 = 13;
+inline constexpr char kRCFri3AlgSafeQ192K2DomainTagV13[] =
+    "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13";
+inline constexpr uint32_t kRCFri3AlgSafeQ192K2OodCandidatesV13 = 2;
+inline constexpr bool kRCFri3AlgSafeQ192K2ActivatedV13 = false;
+static_assert(
+    kRCFri3AlgSafeQ192K2ProofVersionV13 !=
+            kRCFri3AlgP2Q192K2ProofVersionV10 &&
+        kRCFri3AlgSafeQ192K2ProofVersionV13 !=
+            kRCFri3AlgP2SqueezeLaneProofVersion &&
+        kRCFri3AlgSafeQ192K2ProofVersionV13 !=
+            kRCFri3AlgShaFsCanaryProofVersion &&
+        kRCFri3AlgSafeQ192K2ProofVersionV13 !=
+            kRCFri3AlgShortFsLaneProofVersion &&
+        kRCFri3AlgSafeQ192K2ProofVersionV13 !=
+            kRCFri3AlgBatchProofVersion,
+    "SAFE Q192/K2 must have a unique proof version");
+static_assert(!kRCFri3AlgSafeQ192K2ActivatedV13,
+              "V13 is additive until native/AIR/recursive parity closes");
+
+// ===========================================================================
 // PR-89 g4 ACTIVATION.  The short-transcript lane is the lane the Q192
 // recursion now PRODUCES and CONSUMES.  Everything the flip changes is derived
 // from this ONE constant, so the protocol and every in-AIR / shadow replay of
@@ -1647,6 +1678,42 @@ inline constexpr uint64_t kRCFri3AlgP2SqueezeDrawDomain =
 [[nodiscard]] Fp3 Fri3AlgP2SqueezeChallengeFp3(
     const std::vector<unsigned char>& buf, const char* label, uint32_t idx);
 
+/**
+ * V13 full-capacity SAFECore challenge.
+ *
+ * For non-query draws the byte transcript, label and index are injectively
+ * encoded as canonical u32 field lanes. Query draws use the seed/candidate
+ * functions below. The exact message length is part of SAFE's IO-pattern tag;
+ * the semantic challenge kind selects a typed capacity role disjoint from all
+ * Merkle roles. No modular reduction or x/x+p alias is used.
+ */
+[[nodiscard]] bool Fri3AlgSafeQ192K2ChallengeFp3V13(
+    const std::vector<unsigned char>& buf,
+    const char* label,
+    uint32_t idx,
+    Fp3& out,
+    std::string* why = nullptr);
+
+/**
+ * Canonical V13 query source.
+ *
+ * The seed absorbs the complete post-terminal-fold transcript exactly once
+ * under TranscriptQuerySeed.  Every Q192 query draw then absorbs only the
+ * four canonical seed lanes and its u32 ordinal under
+ * TranscriptQueryCandidate.  This is the sole V13 query derivation used by
+ * both prover and verifier; a recursive parent can therefore prove one
+ * transcript seed plus 192 small, fixed-shape candidate calls.
+ */
+[[nodiscard]] bool Fri3AlgSafeQ192K2QuerySeedV13(
+    const std::vector<unsigned char>& buf,
+    Fri3AlgDigest& seed,
+    std::string* why = nullptr);
+[[nodiscard]] bool Fri3AlgSafeQ192K2QueryCandidateV13(
+    const Fri3AlgDigest& seed,
+    uint32_t idx,
+    Fp3& out,
+    std::string* why = nullptr);
+
 /** Full sponge absorb lane vector for Fri3AlgP2SqueezeChallengeFp3 — domain
  *  separator (two 32-bit lanes) then length-prefixed buf / label / idx. An
  *  in-AIR companion must absorb EXACTLY these lanes. */
@@ -1836,6 +1903,27 @@ Fri3AlgP2Q192K2V10BatchCommit(
     std::string* why = nullptr);
 [[nodiscard]] std::optional<Fri3AlgBatchProof>
 DeserializeFri3AlgP2Q192K2V10BatchProof(
+    const std::vector<unsigned char>& in);
+
+/**
+ * Additive V13 SAFE/Q192/fixed-K=2 producer and verifier.
+ *
+ * The proof statement, query count and FRI arithmetic equal the single-lane
+ * Q192 construction.  V13 replaces the stateless untyped P2 draw with typed
+ * full-capacity SAFECore draws and fixes the OOD candidate schedule at two.
+ * It is intentionally not selected by Fri3AlgBatchCommit.
+ */
+[[nodiscard]] Fri3AlgBatchCommitResult
+Fri3AlgSafeQ192K2V13BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce = 0);
+[[nodiscard]] bool Fri3AlgSafeQ192K2V13BatchVerify(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why = nullptr);
+[[nodiscard]] std::optional<Fri3AlgBatchProof>
+DeserializeFri3AlgSafeQ192K2V13BatchProof(
     const std::vector<unsigned char>& in);
 
 /**

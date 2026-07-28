@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_fp3_lde_gpu.h>
 #include <matmul/matmul_v4_rc_rowleaf_gpu.h> // PR-89 GPU splice #1 (row-leaf sponge)
 #include <matmul/matmul_v4_rc_air_quotient.h> // PR-89 Construction 2 predicate AIR
+#include <matmul/matmul_v4_rc_stage3_safe_v12.h>
 #include <crypto/sha256.h>
 
 #include <algorithm>
@@ -672,6 +673,8 @@ struct Fri3AlgFs {
     std::vector<unsigned char> buf;
     CSHA256 prefix_sha256;
     size_t prefix_bytes{0};
+    Fri3AlgDigest safe_query_seed{};
+    bool safe_query_seed_cached{false};
 
     Fri3AlgFs(const uint256& fs_seed, uint64_t pow_grind_nonce, uint32_t blowup,
               uint32_t n_coeffs, const char* domain_tag)
@@ -686,10 +689,15 @@ struct Fri3AlgFs {
 
     void AbsorbAlgRoot(const Fri3AlgDigest& root)
     {
+        safe_query_seed_cached = false;
         const uint256 packed = Fri3AlgDigestToUint256(root);
         AppendBytes(buf, packed.data(), 32);
     }
-    void AbsorbFp3(const Fp3& v) { AppendFp3(buf, v); }
+    void AbsorbFp3(const Fp3& v)
+    {
+        safe_query_seed_cached = false;
+        AppendFp3(buf, v);
+    }
 
     uint256 ChallengeDigest(
         const unsigned char* suffix, size_t suffix_len)
@@ -845,6 +853,10 @@ struct Fri3AlgProtocolConfig {
     bool joint_query{false};
     const uint256* joint_query_sigma{nullptr};
     uint32_t joint_query_lane{0};
+    // V13: use typed full-capacity SAFECore challenge instances. Kept last
+    // with a default so every older positional protocol config remains
+    // byte-for-byte unchanged.
+    bool safe_core_challenges{false};
 };
 
 constexpr Fri3AlgProtocolConfig kFri3AlgQ192V3Config{
@@ -942,6 +954,36 @@ static_assert(
             .short_transcript_commitments &&
         kFri3AlgP2Q192K2V10Config.p2_squeeze_challenges,
     "V10 must remain P2/Q192 with a fixed K=2 OOD schedule");
+
+constexpr Fri3AlgProtocolConfig kFri3AlgSafeQ192K2V13Config{
+    kRCFri3AlgSafeQ192K2ProofVersionV13,
+    kRCFri3AlgSafeQ192K2DomainTagV13,
+    kRCFri3AlgDualUniformDrawDomainTag,
+    kRCFri3AlgDualIndexDrawDomainTag,
+    kRCFri3AlgNumQueries,
+    kRCFri3AlgSafeQ192K2OodCandidatesV13,
+    false, // SAFE output lanes are already uniform field elements
+    false, // preserve the selected geometric batching statement
+    -1,    // shared commitment tree; SAFE separates the FS oracle
+    true,
+    true,  // short transcript commitments
+    false, // never route V13 through the untyped P2 squeeze
+    false,
+    nullptr,
+    0,
+    true,  // typed full-capacity SAFECore challenges
+};
+static_assert(
+    kFri3AlgSafeQ192K2V13Config.query_count ==
+            kRCFri3AlgNumQueries &&
+        kFri3AlgSafeQ192K2V13Config.ood_candidates == 2 &&
+        kFri3AlgSafeQ192K2V13Config
+            .require_q192_proximity_guard &&
+        kFri3AlgSafeQ192K2V13Config
+            .short_transcript_commitments &&
+        !kFri3AlgSafeQ192K2V13Config.p2_squeeze_challenges &&
+        kFri3AlgSafeQ192K2V13Config.safe_core_challenges,
+    "V13 must remain single-lane SAFE/Q192 with fixed K=2 OOD");
 
 // PR-89 g4 ACTIVATION.  The ONE selector every Q192 producer and consumer in
 // this file reads.  Held as a constexpr object rather than a reference so the
@@ -1116,6 +1158,10 @@ Fri3AlgProtocolConfig DualLaneConfigForScenario(
 bool ProtocolChallengeFp3(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
                           const char* label, uint32_t idx, Fp3& out)
 {
+    if (config.safe_core_challenges) {
+        return Fri3AlgSafeQ192K2ChallengeFp3V13(
+            fs.buf, label, idx, out, nullptr);
+    }
     if (config.p2_squeeze_challenges) {
         out = Fri3AlgP2SqueezeChallengeFp3(fs.buf, label, idx);
         return true;
@@ -1159,6 +1205,31 @@ bool ProtocolChallengeIndex(Fri3AlgFs& fs, const Fri3AlgProtocolConfig& config,
         // squeeze already bound both lanes' terminal states.
         out = Fri3AlgJointQIndexInternal(
             *config.joint_query_sigma, config.joint_query_lane, idx, modulus);
+        return true;
+    }
+    if (config.safe_core_challenges) {
+        if (modulus == 0) return false;
+        Fp3 ch{};
+        if (std::strcmp(label, "fra3_query") == 0) {
+            if (!fs.safe_query_seed_cached) {
+                if (!Fri3AlgSafeQ192K2QuerySeedV13(
+                        fs.buf, fs.safe_query_seed, nullptr)) {
+                    return false;
+                }
+                fs.safe_query_seed_cached = true;
+            }
+            if (!Fri3AlgSafeQ192K2QueryCandidateV13(
+                    fs.safe_query_seed, idx, ch, nullptr)) {
+                return false;
+            }
+        } else if (!Fri3AlgSafeQ192K2ChallengeFp3V13(
+                       fs.buf, label, idx, ch, nullptr)) {
+            return false;
+        }
+        const unsigned __int128 wide =
+            (static_cast<unsigned __int128>(Canonical(ch.c1)) << 64) |
+            Canonical(ch.c0);
+        out = static_cast<uint32_t>(wide % modulus);
         return true;
     }
     if (config.p2_squeeze_challenges) {
@@ -3380,6 +3451,26 @@ bool Fri3AlgP2Q192K2V10BatchVerify(
         kFri3AlgP2Q192K2V10Config, why);
 }
 
+Fri3AlgBatchCommitResult Fri3AlgSafeQ192K2V13BatchCommit(
+    const std::vector<std::vector<Fp3>>& columns,
+    const uint256& fs_seed,
+    uint64_t pow_grind_nonce)
+{
+    return Fri3AlgBatchCommitConfigured(
+        columns, fs_seed, pow_grind_nonce,
+        kFri3AlgSafeQ192K2V13Config);
+}
+
+bool Fri3AlgSafeQ192K2V13BatchVerify(
+    const Fri3AlgBatchProof& proof,
+    const uint256& fs_seed,
+    std::string* why)
+{
+    return Fri3AlgBatchVerifyConfigured(
+        proof, fs_seed,
+        kFri3AlgSafeQ192K2V13Config, why);
+}
+
 Fri3AlgProtocolConfig Fri3AlgShaFsBoundedOodCanaryConfig()
 {
     // Active short-FS commitment-lane encoding with SHA256d challenge
@@ -5382,6 +5473,16 @@ DeserializeFri3AlgP2Q192K2V10BatchProof(
 {
     return DeserializeFri3AlgBatchProofConfigured(
         in, kRCFri3AlgP2Q192K2ProofVersionV10,
+        kRCFri3AlgNumQueries,
+        /*require_canonical_fp3=*/false);
+}
+
+std::optional<Fri3AlgBatchProof>
+DeserializeFri3AlgSafeQ192K2V13BatchProof(
+    const std::vector<unsigned char>& in)
+{
+    return DeserializeFri3AlgBatchProofConfigured(
+        in, kRCFri3AlgSafeQ192K2ProofVersionV13,
         kRCFri3AlgNumQueries,
         /*require_canonical_fp3=*/false);
 }
@@ -7685,6 +7786,212 @@ Fp3 Fri3AlgP2SqueezeChallengeFp3(const std::vector<unsigned char>& buf,
     const Fri3AlgDigest d =
         alg_hash::SpongeHashFp(Fri3AlgP2SqueezeAbsorbLanes(buf, label, idx));
     return Fp3{gf::Canonical(d[0]), gf::Canonical(d[1]), gf::Canonical(d[2])};
+}
+
+namespace {
+
+bool Fri3AlgSafeFullTranscriptDigestV13(
+    const std::vector<unsigned char>& buf,
+    const char* label,
+    uint32_t idx,
+    alg_hash_typed::RoleV12 role,
+    Fri3AlgDigest& digest,
+    std::string* why)
+{
+    namespace safe = safe_v12;
+
+    digest = {};
+    if (label == nullptr) {
+        if (why != nullptr) *why = "fri3_alg_safe_v13:null_label";
+        return false;
+    }
+    const size_t label_size = std::strlen(label);
+    if (buf.size() > std::numeric_limits<uint32_t>::max() ||
+        label_size > std::numeric_limits<uint32_t>::max()) {
+        if (why != nullptr) *why = "fri3_alg_safe_v13:input_length";
+        return false;
+    }
+
+    // The application domain is fixed for one challenge family. SAFE's tag
+    // also binds the exact IO pattern, hence the exact message length. The
+    // transcript bytes and label are nevertheless included in the message so
+    // the encoding remains independently injective and easy to mirror in AIR.
+    static constexpr char kDomain[] =
+        "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13_CHALLENGE";
+    std::vector<uint8_t> application_domain(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+    application_domain.push_back(0);
+    application_domain.insert(
+        application_domain.end(),
+        reinterpret_cast<const uint8_t*>(label),
+        reinterpret_cast<const uint8_t*>(label) + label_size);
+
+    // Inject bytes as (length, LE32 chunks). Every lane is <= 2^32-1, so
+    // Goldilocks reduction is injective and the x / x+p alias is impossible.
+    std::vector<Fp> message;
+    message.reserve(
+        10 + (buf.size() + 3) / 4 +
+        (label_size + 3) / 4);
+    message.push_back(gf::FromU64(UINT32_C(0x53414645))); // "SAFE"
+    message.push_back(gf::FromU64(kRCFri3AlgSafeQ192K2ProofVersionV13));
+    message.push_back(gf::FromU64(static_cast<uint32_t>(role)));
+    message.push_back(gf::FromU64(static_cast<uint32_t>(buf.size())));
+    for (size_t offset = 0; offset < buf.size(); offset += 4) {
+        uint32_t word = 0;
+        for (size_t byte = 0;
+             byte < 4 && offset + byte < buf.size(); ++byte) {
+            word |= static_cast<uint32_t>(buf[offset + byte])
+                    << (8 * byte);
+        }
+        message.push_back(gf::FromU64(word));
+    }
+    message.push_back(gf::FromU64(static_cast<uint32_t>(label_size)));
+    for (size_t offset = 0; offset < label_size; offset += 4) {
+        uint32_t word = 0;
+        for (size_t byte = 0;
+             byte < 4 && offset + byte < label_size; ++byte) {
+            word |=
+                static_cast<uint32_t>(
+                    static_cast<unsigned char>(
+                        label[offset + byte]))
+                << (8 * byte);
+        }
+        message.push_back(gf::FromU64(word));
+    }
+    message.push_back(gf::FromU64(idx));
+
+    std::string safe_why;
+    if (!safe::SafeCoreDigestV12(
+            role, application_domain, message, digest,
+            nullptr, &safe_why)) {
+        if (why != nullptr) {
+            *why = "fri3_alg_safe_v13:" + safe_why;
+        }
+        return false;
+    }
+    return true;
+}
+
+} // namespace
+
+bool Fri3AlgSafeQ192K2QuerySeedV13(
+    const std::vector<unsigned char>& buf,
+    Fri3AlgDigest& seed,
+    std::string* why)
+{
+    return Fri3AlgSafeFullTranscriptDigestV13(
+        buf, "fra3_query", 0,
+        alg_hash_typed::RoleV12::TranscriptQuerySeed,
+        seed, why);
+}
+
+bool Fri3AlgSafeQ192K2QueryCandidateV13(
+    const Fri3AlgDigest& seed,
+    uint32_t idx,
+    Fp3& out,
+    std::string* why)
+{
+    namespace aht = alg_hash_typed;
+    namespace safe = safe_v12;
+
+    out = Fp3::Zero();
+    if (std::any_of(
+            seed.begin(), seed.end(),
+            [](Fp lane) { return lane >= gf::kP; })) {
+        if (why != nullptr) {
+            *why = "fri3_alg_safe_v13:noncanonical_query_seed";
+        }
+        return false;
+    }
+    static constexpr char kDomain[] =
+        "BTX_RC_FRIB3ALG_Q192_SAFE_K2_V13_QUERY_CANDIDATE";
+    const std::vector<uint8_t> application_domain(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+    std::vector<Fp> message;
+    message.reserve(9);
+    message.push_back(gf::FromU64(UINT32_C(0x53414645))); // "SAFE"
+    message.push_back(gf::FromU64(kRCFri3AlgSafeQ192K2ProofVersionV13));
+    message.push_back(gf::FromU64(
+        static_cast<uint32_t>(
+            aht::RoleV12::TranscriptQueryCandidate)));
+    message.push_back(gf::FromU64(seed.size()));
+    message.insert(message.end(), seed.begin(), seed.end());
+    message.push_back(gf::FromU64(idx));
+
+    Fri3AlgDigest digest{};
+    std::string safe_why;
+    if (!safe::SafeCoreDigestV12(
+            aht::RoleV12::TranscriptQueryCandidate,
+            application_domain, message, digest,
+            nullptr, &safe_why)) {
+        if (why != nullptr) {
+            *why = "fri3_alg_safe_v13:" + safe_why;
+        }
+        return false;
+    }
+    out = Fp3{
+        gf::Canonical(digest[0]),
+        gf::Canonical(digest[1]),
+        gf::Canonical(digest[2])};
+    return true;
+}
+
+bool Fri3AlgSafeQ192K2ChallengeFp3V13(
+    const std::vector<unsigned char>& buf,
+    const char* label,
+    uint32_t idx,
+    Fp3& out,
+    std::string* why)
+{
+    namespace aht = alg_hash_typed;
+
+    out = Fp3::Zero();
+    if (label == nullptr) {
+        if (why != nullptr) *why = "fri3_alg_safe_v13:null_label";
+        return false;
+    }
+    if (std::strcmp(label, "fra3_query") == 0) {
+        Fri3AlgDigest seed{};
+        return Fri3AlgSafeQ192K2QuerySeedV13(
+                   buf, seed, why) &&
+            Fri3AlgSafeQ192K2QueryCandidateV13(
+                seed, idx, out, why);
+    }
+
+    // Each interactive verifier challenge family is a distinct SAFE oracle.
+    // Repeated draws stay in one oracle and are separated by a canonical u32
+    // ordinal. Query candidates use the two-stage source above so the complete
+    // post-terminal transcript is replayed once rather than 192 times.
+    aht::RoleV12 role{};
+    if (std::strcmp(label, "fra3_lambda") == 0) {
+        role = aht::RoleV12::TranscriptBatchCoefficient;
+    } else if (std::strcmp(label, "fra3_z") == 0) {
+        role = idx < kRCFri3AlgSafeQ192K2OodCandidatesV13
+            ? aht::RoleV12::TranscriptOodZ1
+            : aht::RoleV12::TranscriptOodZ2;
+    } else if (std::strcmp(label, "fra3_w") == 0) {
+        role = aht::RoleV12::TranscriptDeepWeight;
+    } else if (std::strcmp(label, "fra3_fold") == 0) {
+        role = aht::RoleV12::TranscriptFoldBeta;
+    } else {
+        if (why != nullptr) *why = "fri3_alg_safe_v13:unknown_label";
+        return false;
+    }
+
+    Fri3AlgDigest digest{};
+    if (!Fri3AlgSafeFullTranscriptDigestV13(
+            buf, label, idx, role, digest, why)) {
+        return false;
+    }
+    out = Fp3{
+        gf::Canonical(digest[0]),
+        gf::Canonical(digest[1]),
+        gf::Canonical(digest[2])};
+    return true;
 }
 
 Fri3AlgTranscriptReplayCostV1 MeasureFri3AlgTranscriptReplayCostV1(
