@@ -31,6 +31,21 @@ inline constexpr uint16_t kRCStage3UnifiedSoundnessSiteCount = 29;
  * bounded-rejection production manifest. Root validation also recomputes it
  * from that manifest, so this format pin cannot silently become stale. */
 inline constexpr uint32_t kRCStage3UnifiedMaxTotalProofSites = 1U << 26;
+/**
+ * Consensus security class for the site-unioned V1 authority.
+ *
+ * This is intentionally distinct from kRCFri3AlgTargetSoundnessBits: that
+ * constant is the 100-bit per-proof FRI/backend screen, while the executable
+ * global composition ledger certifies a 79-bit floor after charging the full
+ * production site union. V1 selects the 64-bit class for that composed
+ * result. Keeping the thresholds separate prevents a correctly composed
+ * 79-bit proof from being permanently ineligible because a per-proof
+ * diagnostic was reused as the global consensus threshold.
+ */
+inline constexpr uint16_t kRCStage3UnifiedV1SecurityClassBits = 64;
+static_assert(
+    kRCStage3UnifiedV1SecurityClassBits <
+    kRCFri3AlgTargetSoundnessBits);
 inline constexpr uint32_t kRCStage3UnifiedCtlBundleMagic = 0x42544355U; // "UCTB"
 inline constexpr uint16_t kRCStage3UnifiedCtlBundleVersion = 2;
 inline constexpr size_t kRCStage3UnifiedCtlBundleMaxBytes =
@@ -86,7 +101,7 @@ struct RCStage3UnifiedRootParameters {
     uint16_t grinding_bits{
         static_cast<uint16_t>(kRCFriGrindingBits)};
     uint16_t target_soundness_bits{
-        static_cast<uint16_t>(kRCFri3AlgTargetSoundnessBits)};
+        kRCStage3UnifiedV1SecurityClassBits};
     uint32_t soundness_union_bound_instances{
         kRCStage3UnifiedMaxTotalProofSites};
     uint32_t max_recursive_air_columns{16'384};

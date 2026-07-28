@@ -35,6 +35,12 @@ RCStage3SuccinctProof ComposedStatement()
     p.transcript_version = 7;
     p.header_commitment = Filled(1);
     p.params_commitment = Filled(2);
+    // The proof envelope requires a canonical program-consensus pin.  Keep
+    // this fixture self-contained while making the AlgHash limb encoding
+    // canonical in Goldilocks (each repeated-byte u64 is strictly below p).
+    p.program_consensus_pin.recursive_alg_hash_root = Filled(8);
+    p.program_consensus_pin.external_sha256d_audit_root = Filled(9);
+    p.program_consensus_pin.registry_binding = Filled(10);
     p.target = Filled(3);
     p.sigma = Filled(4);
     p.episode_digest = Filled(5);
@@ -265,7 +271,10 @@ BOOST_AUTO_TEST_CASE(canonical_parameters_cover_exact_registry_and_soundness)
                       kRCFri3AlgDualQueriesPerLane);
     BOOST_CHECK_EQUAL(parameters.grinding_bits, kRCFriGrindingBits);
     BOOST_CHECK_EQUAL(parameters.target_soundness_bits,
-                      kRCFri3AlgTargetSoundnessBits);
+                      kRCStage3UnifiedV1SecurityClassBits);
+    BOOST_CHECK_EQUAL(parameters.target_soundness_bits, 64U);
+    BOOST_CHECK_LT(parameters.target_soundness_bits,
+                   kRCFri3AlgTargetSoundnessBits);
     BOOST_CHECK_EQUAL(parameters.soundness_union_bound_instances,
                       kRCStage3UnifiedMaxTotalProofSites);
     const auto selected_manifest =
@@ -278,6 +287,8 @@ BOOST_AUTO_TEST_CASE(canonical_parameters_cover_exact_registry_and_soundness)
         selected_manifest.union_bound_cap);
     BOOST_CHECK_EQUAL(parameters.max_recursive_air_columns, 16'384U);
     BOOST_CHECK_EQUAL(RCStage3UnifiedRootSoundnessBits(parameters), 109U);
+    BOOST_CHECK_GE(RCStage3UnifiedRootSoundnessBits(parameters),
+                   parameters.target_soundness_bits);
 
     const auto& roles = RCStage3UnifiedRoleOrder();
     BOOST_REQUIRE_EQUAL(roles.size(), 14U);
