@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_openings_proof_owned.h>
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
+#include <matmul/matmul_v4_rc_stage3_streaming_episode_closure.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
 
@@ -21,6 +22,8 @@ namespace gf = rc::gkr_field;
 namespace ga = rc::gkr_air;
 namespace owned =
     rc::episode_gemm_openings_proof_owned;
+namespace streaming =
+    rc::streaming_episode_closure;
 
 uint256 H(uint8_t value)
 {
@@ -241,6 +244,23 @@ rc::RCStage3SuccinctProof Statement()
     out.public_inputs.target = H(0xff);
     out.public_inputs.episode_digest = H(0x44);
     out.public_inputs.final_digest = H(0x44);
+    return out;
+}
+
+rc::RCStage3SuccinctProof StreamingStatement()
+{
+    auto out = Statement();
+    out.public_inputs.transcript_version =
+        rc::ENC_RC_V3;
+    out.public_inputs.coupled_profile = 3;
+    out.public_inputs.program_consensus_pin.version =
+        1;
+    out.public_inputs.program_consensus_pin
+        .recursive_alg_hash_root = H(0xb1);
+    out.public_inputs.program_consensus_pin
+        .external_sha256d_audit_root = H(0xb2);
+    out.public_inputs.program_consensus_pin
+        .registry_binding = H(0xb3);
     return out;
 }
 
@@ -571,6 +591,146 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         why.find("capture_round_root_order") !=
         std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(
+    winner_bundle_forwards_one_schedule_and_fails_closed_before_proving)
+{
+    const auto params = TinyParams();
+    rc::RCStage3EpisodeWinnerBundleCapture bundle(
+        StreamingStatement(), params);
+    std::array<int8_t, rc::kRCMxBlockLen> zeros8{};
+    std::array<int64_t, rc::kRCMxBlockLen> zeros64{};
+
+    // A QK^T tile before its operand callback poisons both consumers.  The
+    // adapter must not manufacture a receipt or publish a partial winner.
+    bundle.OnPhase1QKtTile({
+        .round_ordinal = 0,
+        .query_row = 0,
+        .context_begin = 0,
+        .tile_len = rc::kRCMxBlockLen,
+        .contraction_size = params.d_head,
+        .operand_a = zeros8.data(),
+        .operand_b = zeros8.data(),
+        .gemm_y = zeros64.data(),
+        .extract_output = zeros8.data(),
+        .prf_key = H(0x91),
+    });
+    std::string why;
+    BOOST_CHECK(!bundle.Complete(&why));
+    streaming::StreamingEpisodeClosureReceiptV1
+        receipt;
+    BOOST_CHECK(
+        !bundle.BuildStreamingReceipt(
+            receipt, &why));
+    BOOST_CHECK(receipt.layers.empty());
+    BOOST_CHECK(
+        !rc::RCStage3EpisodeWinnerBundleStorePut(
+            H(0xd4), bundle, &why));
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            H(0xd4)) == nullptr);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeStreamingReceiptStoreGet(
+            H(0xd4)) == nullptr);
+}
+
+BOOST_AUTO_TEST_CASE(
+    primary_miner_call_publishes_proof_only_streaming_winner_receipt)
+{
+    if (std::getenv(
+            "BTX_RUN_STAGE3_WINNER_BUNDLE_CAPTURE") ==
+        nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_STAGE3_WINNER_BUNDLE_CAPTURE=1 "
+            "for one mine->online-prove->durable-receipt run");
+        return;
+    }
+    const auto params = TinyParams();
+    const auto header = MiningHeader(84);
+    rc::RCStage3EpisodeWinnerBundleCapture bundle(
+        StreamingStatement(), params);
+
+    // This is the primary mining entry point, with one callback target.  The
+    // winner bundle fans the callbacks out internally; the episode is never
+    // replayed to construct either retained artifact.
+    const uint256 digest =
+        rc::MineRCEpisodeWithProofWitness(
+            header, params, 151, bundle);
+    BOOST_REQUIRE(!digest.IsNull());
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        bundle.Complete(&why), why);
+    BOOST_CHECK_EQUAL(
+        bundle.StreamingRetainedNativeBytes(), 0U);
+    BOOST_REQUIRE(
+        bundle.StreamingPeakRetainedNativeBytes() >
+        0U);
+    BOOST_REQUIRE(bundle.LegacyCapture() != nullptr);
+    BOOST_CHECK(
+        bundle.LegacyCapture()->EpisodeDigest() ==
+        digest);
+
+    streaming::StreamingEpisodeClosureReceiptV1
+        receipt;
+    BOOST_REQUIRE_MESSAGE(
+        bundle.BuildStreamingReceipt(
+            receipt, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        streaming::
+            VerifyStreamingEpisodeClosureReceiptV1(
+                receipt, &why),
+        why);
+
+    rc::RCStage3EpisodeWinnerBundleStoreClearForTest();
+    const uint256 winner_hash = H(0xd5);
+    BOOST_REQUIRE_MESSAGE(
+        rc::RCStage3EpisodeWinnerBundleStorePut(
+            winner_hash, bundle, &why),
+        why);
+    const auto stored_legacy =
+        rc::RCStage3EpisodeWitnessStoreGet(
+            winner_hash);
+    const auto stored_receipt =
+        rc::RCStage3EpisodeStreamingReceiptStoreGet(
+            winner_hash);
+    BOOST_REQUIRE(stored_legacy != nullptr);
+    BOOST_REQUIRE(stored_receipt != nullptr);
+    BOOST_CHECK(
+        stored_legacy->EpisodeDigest() ==
+        stored_receipt->episode_digest);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeStreamingReceiptStoreGet(
+            H(0xd6)) == nullptr);
+
+    // Recomputing the outer receipt commitment cannot conceal a mutated
+    // proof-owned Y root: the child equality proof remains authoritative.
+    auto root_attack = *stored_receipt;
+    BOOST_REQUIRE(!root_attack.layers.empty());
+    root_attack.layers[0].gemm_y_vector_root_alg =
+        H(0xe1);
+    root_attack.layers[0].retained_commitment =
+        streaming::
+            ComputeStreamedLayerClosureCommitmentV1(
+                root_attack.layers[0]);
+    root_attack.receipt_commitment =
+        streaming::
+            ComputeStreamingEpisodeClosureReceiptCommitmentV1(
+                root_attack);
+    BOOST_CHECK(
+        !streaming::
+            VerifyStreamingEpisodeClosureReceiptV1(
+                root_attack, &why));
+
+    rc::RCStage3EpisodeWinnerBundleStoreErase(
+        winner_hash);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeWitnessStoreGet(
+            winner_hash) == nullptr);
+    BOOST_CHECK(
+        rc::RCStage3EpisodeStreamingReceiptStoreGet(
+            winner_hash) == nullptr);
 }
 
 BOOST_AUTO_TEST_CASE(

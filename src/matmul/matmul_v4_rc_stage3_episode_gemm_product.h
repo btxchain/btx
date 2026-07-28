@@ -19,6 +19,11 @@ namespace matmul::v4::rc {
 
 inline constexpr uint16_t kRCStage3EpisodeGemmProductVersion = 1;
 
+namespace streaming_episode_closure {
+class StreamingEpisodeClosureSink;
+struct StreamingEpisodeClosureReceiptV1;
+} // namespace streaming_episode_closure
+
 enum RCStage3EpisodeGemmDotColumn : uint32_t {
     kRCStage3GemmDotActive = 0,
     kRCStage3GemmDotStart,
@@ -221,6 +226,72 @@ private:
 };
 
 /**
+ * Sole callback target for a winning episode while Stage-3 migrates from the
+ * flat capture to online proof production.
+ *
+ * Every callback is delivered once to both the legacy all-instance capture
+ * and the proof-owned streaming closure.  The former remains available to the
+ * current normalized producer; the latter proves each completed layer and
+ * erases its native A/B/Y/residual/Extract vectors before mining advances.
+ * This adapter therefore changes neither the miner's callback schedule nor
+ * the legacy consumer while making a durable proof-only receipt available.
+ */
+class RCStage3EpisodeWinnerBundleCapture final
+    : public RCEpisodeProofWitnessSink {
+public:
+    RCStage3EpisodeWinnerBundleCapture(
+        const RCStage3SuccinctProof& statement,
+        const RCEpisodeParams& params);
+    ~RCStage3EpisodeWinnerBundleCapture() override;
+
+    RCStage3EpisodeWinnerBundleCapture(
+        const RCStage3EpisodeWinnerBundleCapture&) = delete;
+    RCStage3EpisodeWinnerBundleCapture& operator=(
+        const RCStage3EpisodeWinnerBundleCapture&) = delete;
+
+    void OnPhase1Operands(
+        const RCPhase1OperandsWitnessView& view) override;
+    void OnPhase1QKtTile(
+        const RCPhase1QKtTileWitnessView& view) override;
+    void OnPhase1SVRow(
+        const RCPhase1SVRowWitnessView& view) override;
+    void OnFfnGemm(
+        const RCFfnGemmWitnessView& view) override;
+    void OnFfnExtract(
+        const RCFfnExtractWitnessView& view) override;
+    void OnRoundRoot(
+        uint32_t round_ordinal,
+        const uint256& round_root) override;
+    void OnEpisodeDigest(
+        const uint256& episode_digest) override;
+
+    [[nodiscard]] bool Complete(
+        std::string* why = nullptr) const;
+    [[nodiscard]] bool BuildStreamingReceipt(
+        streaming_episode_closure::
+            StreamingEpisodeClosureReceiptV1& out,
+        std::string* why = nullptr) const;
+    [[nodiscard]] uint64_t
+    StreamingRetainedNativeBytes() const;
+    [[nodiscard]] uint64_t
+    StreamingPeakRetainedNativeBytes() const;
+    [[nodiscard]] std::shared_ptr<
+        const RCStage3EpisodeWitnessCapture>
+    LegacyCapture() const
+    {
+        return m_legacy;
+    }
+
+private:
+    std::shared_ptr<RCStage3EpisodeWitnessCapture>
+        m_legacy;
+    std::unique_ptr<
+        streaming_episode_closure::
+            StreamingEpisodeClosureSink>
+        m_streaming;
+};
+
+/**
  * Winner-only handoff from the solver's existing CPU reseal to the normalized
  * proof producer. The store is process-local and retains at most one completed
  * capture, so losing nonce traces are never persisted and a stale winner
@@ -237,6 +308,25 @@ RCStage3EpisodeWitnessStoreGet(
 void RCStage3EpisodeWitnessStoreErase(
     const uint256& final_header_hash);
 void RCStage3EpisodeWitnessStoreClearForTest();
+
+/**
+ * Atomically publish the legacy winner capture and its proof-only streaming
+ * receipt under the finalized header.  The receipt is fully replayed before
+ * either object becomes selectable.  The stores remain process-local and
+ * single-winner, matching the existing reseal handoff.
+ */
+[[nodiscard]] bool RCStage3EpisodeWinnerBundleStorePut(
+    const uint256& final_header_hash,
+    const RCStage3EpisodeWinnerBundleCapture& bundle,
+    std::string* why = nullptr);
+[[nodiscard]] std::shared_ptr<
+    const streaming_episode_closure::
+        StreamingEpisodeClosureReceiptV1>
+RCStage3EpisodeStreamingReceiptStoreGet(
+    const uint256& final_header_hash);
+void RCStage3EpisodeWinnerBundleStoreErase(
+    const uint256& final_header_hash);
+void RCStage3EpisodeWinnerBundleStoreClearForTest();
 
 /**
  * Consume one completed miner capture into the exact all-instance relation

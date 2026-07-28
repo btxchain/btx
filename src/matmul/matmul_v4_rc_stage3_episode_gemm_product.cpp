@@ -4,6 +4,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
+#include <matmul/matmul_v4_rc_stage3_streaming_episode_closure.h>
 
 #include <hash.h>
 
@@ -33,6 +34,10 @@ uint256 g_episode_witness_store_header{};
 std::shared_ptr<
     const RCStage3EpisodeWitnessCapture>
     g_episode_witness_store_capture;
+uint256 g_episode_streaming_receipt_store_header{};
+std::shared_ptr<const streaming_episode_closure::
+    StreamingEpisodeClosureReceiptV1>
+    g_episode_streaming_receipt_store_receipt;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -985,6 +990,140 @@ ValidateExtractProductOutputs(
     return true;
 }
 
+RCStage3EpisodeWinnerBundleCapture::
+RCStage3EpisodeWinnerBundleCapture(
+    const RCStage3SuccinctProof& statement,
+    const RCEpisodeParams& params)
+    : m_legacy(
+          std::make_shared<
+              RCStage3EpisodeWitnessCapture>(params)),
+      m_streaming(std::make_unique<
+          streaming_episode_closure::
+              StreamingEpisodeClosureSink>(
+          statement, params))
+{
+}
+
+RCStage3EpisodeWinnerBundleCapture::
+~RCStage3EpisodeWinnerBundleCapture() = default;
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnPhase1Operands(
+    const RCPhase1OperandsWitnessView& view)
+{
+    m_legacy->OnPhase1Operands(view);
+    m_streaming->OnPhase1Operands(view);
+}
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnPhase1QKtTile(
+    const RCPhase1QKtTileWitnessView& view)
+{
+    m_legacy->OnPhase1QKtTile(view);
+    m_streaming->OnPhase1QKtTile(view);
+}
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnPhase1SVRow(
+    const RCPhase1SVRowWitnessView& view)
+{
+    m_legacy->OnPhase1SVRow(view);
+    m_streaming->OnPhase1SVRow(view);
+}
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnFfnGemm(
+    const RCFfnGemmWitnessView& view)
+{
+    m_legacy->OnFfnGemm(view);
+    m_streaming->OnFfnGemm(view);
+}
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnFfnExtract(
+    const RCFfnExtractWitnessView& view)
+{
+    m_legacy->OnFfnExtract(view);
+    m_streaming->OnFfnExtract(view);
+}
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnRoundRoot(
+    uint32_t round_ordinal,
+    const uint256& round_root)
+{
+    m_legacy->OnRoundRoot(
+        round_ordinal, round_root);
+    m_streaming->OnRoundRoot(
+        round_ordinal, round_root);
+}
+
+void RCStage3EpisodeWinnerBundleCapture::
+OnEpisodeDigest(
+    const uint256& episode_digest)
+{
+    m_legacy->OnEpisodeDigest(episode_digest);
+    m_streaming->OnEpisodeDigest(episode_digest);
+}
+
+bool RCStage3EpisodeWinnerBundleCapture::Complete(
+    std::string* why) const
+{
+    std::string legacy_why;
+    if (m_legacy == nullptr ||
+        !m_legacy->Complete(&legacy_why)) {
+        return Fail(
+            why, "winner_bundle_legacy_" +
+                     legacy_why);
+    }
+    std::string streaming_why;
+    if (m_streaming == nullptr ||
+        !m_streaming->Complete(&streaming_why)) {
+        return Fail(
+            why, "winner_bundle_streaming_" +
+                     streaming_why);
+    }
+    if (m_legacy->EpisodeDigest() !=
+            m_streaming->EpisodeDigest() ||
+        m_legacy->RoundRoots() !=
+            m_streaming->RoundRoots()) {
+        return Fail(
+            why, "winner_bundle_terminal_mismatch");
+    }
+    return true;
+}
+
+bool RCStage3EpisodeWinnerBundleCapture::
+BuildStreamingReceipt(
+    streaming_episode_closure::
+        StreamingEpisodeClosureReceiptV1& out,
+    std::string* why) const
+{
+    out = {};
+    if (!Complete(why) ||
+        !m_streaming->BuildReceipt(out, why)) {
+        out = {};
+        return false;
+    }
+    return true;
+}
+
+uint64_t RCStage3EpisodeWinnerBundleCapture::
+StreamingRetainedNativeBytes() const
+{
+    return m_streaming == nullptr
+        ? 0
+        : m_streaming->RetainedNativeBytes();
+}
+
+uint64_t RCStage3EpisodeWinnerBundleCapture::
+StreamingPeakRetainedNativeBytes() const
+{
+    return m_streaming == nullptr
+        ? 0
+        : m_streaming->PeakRetainedNativeBytes();
+}
+
 bool RCStage3EpisodeWitnessStorePut(
     const uint256& final_header_hash,
     std::shared_ptr<
@@ -1002,6 +1141,8 @@ bool RCStage3EpisodeWitnessStorePut(
         final_header_hash;
     g_episode_witness_store_capture =
         std::move(capture);
+    g_episode_streaming_receipt_store_header.SetNull();
+    g_episode_streaming_receipt_store_receipt.reset();
     return true;
 }
 
@@ -1029,6 +1170,13 @@ void RCStage3EpisodeWitnessStoreErase(
             final_header_hash) {
         g_episode_witness_store_header.SetNull();
         g_episode_witness_store_capture.reset();
+        if (g_episode_streaming_receipt_store_header ==
+                final_header_hash) {
+            g_episode_streaming_receipt_store_header
+                .SetNull();
+            g_episode_streaming_receipt_store_receipt
+                .reset();
+        }
     }
 }
 
@@ -1038,6 +1186,97 @@ void RCStage3EpisodeWitnessStoreClearForTest()
         g_episode_witness_store_mutex);
     g_episode_witness_store_header.SetNull();
     g_episode_witness_store_capture.reset();
+    g_episode_streaming_receipt_store_header.SetNull();
+    g_episode_streaming_receipt_store_receipt.reset();
+}
+
+bool RCStage3EpisodeWinnerBundleStorePut(
+    const uint256& final_header_hash,
+    const RCStage3EpisodeWinnerBundleCapture& bundle,
+    std::string* why)
+{
+    if (final_header_hash.IsNull()) {
+        return Fail(
+            why, "winner_bundle_store_null_header");
+    }
+    if (!bundle.Complete(why)) return false;
+    streaming_episode_closure::
+        StreamingEpisodeClosureReceiptV1 receipt;
+    if (!bundle.BuildStreamingReceipt(
+            receipt, why) ||
+        !streaming_episode_closure::
+            VerifyStreamingEpisodeClosureReceiptV1(
+                receipt, why)) {
+        return false;
+    }
+    auto legacy = bundle.LegacyCapture();
+    if (legacy == nullptr ||
+        !legacy->Complete(why)) {
+        return Fail(
+            why, "winner_bundle_store_legacy");
+    }
+    auto retained_receipt = std::make_shared<
+        const streaming_episode_closure::
+            StreamingEpisodeClosureReceiptV1>(
+        std::move(receipt));
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    g_episode_witness_store_header =
+        final_header_hash;
+    g_episode_witness_store_capture =
+        std::move(legacy);
+    g_episode_streaming_receipt_store_header =
+        final_header_hash;
+    g_episode_streaming_receipt_store_receipt =
+        std::move(retained_receipt);
+    return true;
+}
+
+std::shared_ptr<const streaming_episode_closure::
+    StreamingEpisodeClosureReceiptV1>
+RCStage3EpisodeStreamingReceiptStoreGet(
+    const uint256& final_header_hash)
+{
+    if (final_header_hash.IsNull()) return {};
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    if (g_episode_streaming_receipt_store_receipt ==
+            nullptr ||
+        g_episode_streaming_receipt_store_header !=
+            final_header_hash ||
+        g_episode_witness_store_capture == nullptr ||
+        g_episode_witness_store_header !=
+            final_header_hash) {
+        return {};
+    }
+    return g_episode_streaming_receipt_store_receipt;
+}
+
+void RCStage3EpisodeWinnerBundleStoreErase(
+    const uint256& final_header_hash)
+{
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    if (g_episode_witness_store_header ==
+            final_header_hash) {
+        g_episode_witness_store_header.SetNull();
+        g_episode_witness_store_capture.reset();
+    }
+    if (g_episode_streaming_receipt_store_header ==
+            final_header_hash) {
+        g_episode_streaming_receipt_store_header.SetNull();
+        g_episode_streaming_receipt_store_receipt.reset();
+    }
+}
+
+void RCStage3EpisodeWinnerBundleStoreClearForTest()
+{
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    g_episode_witness_store_header.SetNull();
+    g_episode_witness_store_capture.reset();
+    g_episode_streaming_receipt_store_header.SetNull();
+    g_episode_streaming_receipt_store_receipt.reset();
 }
 
 bool ProveRCStage3EpisodeProductsFromCapture(
