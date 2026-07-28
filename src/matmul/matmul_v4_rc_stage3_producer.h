@@ -283,10 +283,13 @@ struct RCStage3ProducerHints {
  * the parent CS, call ValidateAndDecodeVerifierInputsV3, and execute
  * AirQuotientVerifyRowsSplitRapSafeFixedV3.
  *
- * Those builder and consumer steps do not exist yet. Therefore the provider
- * currently reports a precise fail-closed error and emits no bytes. In
- * particular, validation of a receipt's hashes/codec must never be substituted
- * for execution of its decoded parent proof.
+ * The typed canonical-parent consumer now exists and proves, serializes,
+ * decodes and executes the supplied parent before emitting bytes. The
+ * remaining producer dependency is the block-to-complete-parent assembler:
+ * it must materialize the fourteen-role CS/witness and verifier-rebuilt public
+ * inventory through normalized_production_parent_builder's typed, callback-
+ * free input. Until that assembler is complete the provider reports BuildFailed
+ * with the precise parent-build status and emits no bytes.
  */
 void InitializeRCStage3ProductionProofProvider();
 [[nodiscard]] bool HasRCStage3ProductionProofProvider();
@@ -294,6 +297,9 @@ void InitializeRCStage3ProductionProofProvider();
 enum class RCStage3NormalizedProviderStatus : uint8_t {
     NotInitialized = 0,
     NotRequired = 1,
+    /** Retained as a stable diagnostic value for older callers. The production
+     * provider now reaches the typed canonical-parent builder and reports its
+     * concrete failure as BuildFailed instead. */
     BuilderUnavailable = 2,
     BuildFailed = 3,
     Produced = 4,

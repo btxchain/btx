@@ -827,10 +827,13 @@ BOOST_AUTO_TEST_CASE(no_registered_prover_is_fatal_not_silent)
 }
 
 BOOST_AUTO_TEST_CASE(
-    production_provider_is_owned_and_fails_closed_before_normalized_builder)
+    production_provider_reaches_typed_canonical_parent_builder)
 {
     constexpr int32_t HEIGHT{102};
-    const auto params = RealChainLikeParams(false);
+    // The normalized parent is the additive fourteen-role statement, so use
+    // coupled-active params and require the provider to reach the concrete
+    // solved-block -> complete relation-parent dependency.
+    const auto params = RealChainLikeParams(true);
     CBlock block = RealRcBlock102();
     const CBlock before = block;
     const uint256 target = TargetFor(block, params);
@@ -858,9 +861,16 @@ BOOST_AUTO_TEST_CASE(
         block, params, HEIGHT, target, receipt_bytes, &build_why);
     BOOST_CHECK(
         build_status ==
-        rc::RCStage3NormalizedProviderStatus::BuilderUnavailable);
+        rc::RCStage3NormalizedProviderStatus::BuildFailed);
     BOOST_CHECK(receipt_bytes.empty());
-    BOOST_CHECK(build_why.find("normalized_receipt_builder_unavailable") !=
+    BOOST_CHECK(build_why.find("canonical_parent_product:") !=
+                std::string::npos);
+    BOOST_CHECK(
+        build_why.find("complete_relation_parent_unavailable") !=
+            std::string::npos);
+    BOOST_CHECK(
+        build_why.find(
+            "complete_episode_coupled_relation_parent_assembler_open") !=
                 std::string::npos);
 
     std::string why;
@@ -873,7 +883,14 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!legacy_called);
     BOOST_CHECK(block.matrix_c_data == before.matrix_c_data);
     BOOST_CHECK_EQUAL(size.payload_bytes, 0U);
-    BOOST_CHECK(why.find("normalized_receipt_builder_unavailable") !=
+    BOOST_CHECK(why.find("canonical_parent_product:") !=
+                std::string::npos);
+    BOOST_CHECK(
+        why.find("complete_relation_parent_unavailable") !=
+            std::string::npos);
+    BOOST_CHECK(
+        why.find(
+            "complete_episode_coupled_relation_parent_assembler_open") !=
                 std::string::npos);
     BOOST_CHECK(why.find("normalized_consensus_consumer_unavailable") !=
                 std::string::npos);

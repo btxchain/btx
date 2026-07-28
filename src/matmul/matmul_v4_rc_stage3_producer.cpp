@@ -8,6 +8,8 @@
 #include <consensus/params.h>
 #include <consensus/validation.h>
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
 #include <pow.h>
 #include <primitives/block.h>
 #include <serialize.h>
@@ -239,11 +241,54 @@ RCStage3NormalizedProviderStatus BuildRCStage3NormalizedAuthorityReceipt(
         return RCStage3NormalizedProviderStatus::NotInitialized;
     }
 
-    (void)solved_block;
-    (void)target;
-    (void)hints;
-    Note(why, "normalized_receipt_builder_unavailable");
-    return RCStage3NormalizedProviderStatus::BuilderUnavailable;
+    namespace parent_builder =
+        normalized_production_parent_builder;
+    namespace receipt_consumer =
+        normalized_relation_receipt_consumer;
+
+    const parent_builder::ProductionParentBuildInputV1 input{
+        .solved_block = &solved_block,
+        .params = &params,
+        .height = height,
+        .target = target,
+        .episode_rounds = hints.episode_rounds,
+    };
+    receipt_consumer::CanonicalRelationParentProductV1 parent_product;
+    std::string parent_why;
+    const auto parent_status =
+        parent_builder::BuildForSolvedBlockV1(
+            input, parent_product, &parent_why);
+    if (parent_status ==
+        parent_builder::ProductionParentBuildStatusV1::NotRequired) {
+        Note(why, "not_rc_height");
+        return RCStage3NormalizedProviderStatus::NotRequired;
+    }
+    if (parent_status !=
+        parent_builder::ProductionParentBuildStatusV1::Built) {
+        Note(
+            why,
+            std::string{"canonical_parent_product:"} +
+                parent_builder::ProductionParentBuildStatusNameV1(
+                    parent_status) +
+                ":" + parent_why);
+        return RCStage3NormalizedProviderStatus::BuildFailed;
+    }
+
+    receipt_consumer::ReceiptBuildV1 built_receipt;
+    std::string receipt_why;
+    if (!receipt_consumer::BuildReceiptV1(
+            parent_product, built_receipt, {}, &receipt_why) ||
+        !built_receipt.valid ||
+        !built_receipt.unmodified_parent_verifier_accepted ||
+        built_receipt.receipt_bytes.empty()) {
+        Note(
+            why,
+            "canonical_parent_receipt:" + receipt_why);
+        return RCStage3NormalizedProviderStatus::BuildFailed;
+    }
+    receipt_bytes = std::move(built_receipt.receipt_bytes);
+    Note(why, "normalized_parent_receipt_produced");
+    return RCStage3NormalizedProviderStatus::Produced;
 }
 
 RCStage3ProduceStatus AttachRCStage3ProofFromProductionProvider(
