@@ -53,9 +53,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.exact_consumer_endpoints, 52U);
     BOOST_CHECK_EQUAL(
-        product.selected_program_endpoints, 27U);
+        product.selected_program_endpoints, 52U);
     BOOST_CHECK_EQUAL(
-        product.proof_owned_export_endpoints, 21U);
+        product.proof_owned_export_endpoints, 28U);
     BOOST_CHECK_EQUAL(
         product.dual_logup_endpoint_pairs, 52U);
     BOOST_CHECK_EQUAL(
@@ -80,21 +80,39 @@ BOOST_AUTO_TEST_CASE(
 
     uint32_t residuals = 0;
     uint32_t exact_aliases = 0;
+    constexpr uint32_t kLocalAliasResiduals =
+        ctl::ResidualNoCanonicalOutputV1 |
+        ctl::ResidualNoRelationAirCellV1 |
+        ctl::ResidualNoSameTraceCtlAliasV1;
     for (const auto& endpoint : product.endpoints) {
         BOOST_CHECK(endpoint.represented);
         BOOST_CHECK(endpoint.exact_consumer);
+        BOOST_CHECK(endpoint.selected_program);
         BOOST_CHECK(endpoint.dual_logup_constrained);
         BOOST_CHECK(!endpoint.recursively_consumed);
         BOOST_CHECK(
             endpoint.residual_mask &
             ctl::ResidualNoRecursiveCtlConsumptionV1);
         BOOST_CHECK(!endpoint.residual.empty());
+        if (endpoint.literal_proof_owned_export) {
+            BOOST_CHECK_EQUAL(
+                endpoint.residual_mask &
+                    kLocalAliasResiduals,
+                0U);
+        } else {
+            // A non-alias must retain a concrete local ownership blocker;
+            // recursive-consumption absence alone cannot explain it.
+            BOOST_CHECK_NE(
+                endpoint.residual_mask &
+                    kLocalAliasResiduals,
+                0U);
+        }
         residuals += !endpoint.literal_proof_owned_export;
         exact_aliases +=
             endpoint.literal_proof_owned_export;
     }
-    BOOST_CHECK_EQUAL(residuals, 31U);
-    BOOST_CHECK_EQUAL(exact_aliases, 21U);
+    BOOST_CHECK_EQUAL(residuals, 24U);
+    BOOST_CHECK_EQUAL(exact_aliases, 28U);
 }
 
 BOOST_AUTO_TEST_CASE(
