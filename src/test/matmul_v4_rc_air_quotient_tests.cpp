@@ -1128,6 +1128,117 @@ BOOST_AUTO_TEST_CASE(
             cs, proved.proof, base_indices,
             seed, &why),
         why);
+
+    // The additive V2 outer proof uses typed SAFECore for both the AIR
+    // constraint challenge and final FRI seed, then requires the nested
+    // SAFE/Q192/K=2 multi-row V13 proof. Neither verifier accepts the other
+    // version and the shared codec pins the outer/inner version pair.
+    const auto safe_proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices,
+            seed, {}, &r0);
+    BOOST_REQUIRE_MESSAGE(
+        safe_proved.ok, safe_proved.note);
+    BOOST_CHECK(safe_proved.division_exact);
+    BOOST_CHECK_EQUAL(
+        safe_proved.proof.version,
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2);
+    BOOST_CHECK_EQUAL(
+        safe_proved.proof.batch.version,
+        rc::kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13);
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, safe_proved.proof,
+            base_indices, seed, &why),
+        why);
+    aq::AirQuotientSplitRapSafeReplayV2
+        safe_replay;
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeV2Replay(
+            cs, safe_proved.proof,
+            base_indices, seed,
+            safe_replay, &why),
+        why);
+    BOOST_CHECK(safe_replay.native_verified);
+    BOOST_CHECK(
+        !safe_replay.air_lambda_message.empty());
+    BOOST_CHECK(
+        !safe_replay.fri_seed_message.empty());
+    BOOST_CHECK(
+        gf::Eq(
+            safe_replay.air_lambda,
+            safe_proved.proof
+                .air_constraint_lambda));
+    BOOST_CHECK(!safe_replay.fri_seed.IsNull());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRap(
+            cs, safe_proved.proof,
+            base_indices, seed, &why));
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, proved.proof,
+            base_indices, seed, &why));
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, safe_proved.proof,
+            base_indices, MakeSeed(0xa4),
+            &why));
+
+    std::vector<unsigned char> safe_encoded;
+    BOOST_REQUIRE_GT(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            safe_proved.proof,
+            safe_encoded),
+        0U);
+    const auto safe_decoded =
+        aq::DeserializeAirQuotientSplitRapRowsProof(
+            safe_encoded);
+    BOOST_REQUIRE(safe_decoded.has_value());
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, *safe_decoded,
+            base_indices, seed, &why),
+        why);
+    auto mismatched_pair = safe_proved.proof;
+    mismatched_pair.version =
+        aq::kAirQuotientSplitRapRowsProofVersionV1;
+    std::vector<unsigned char> rejected_wire;
+    BOOST_CHECK_EQUAL(
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            mismatched_pair,
+            rejected_wire),
+        0U);
+    auto bad_safe_lambda = safe_proved.proof;
+    bad_safe_lambda.air_constraint_lambda =
+        gf::Add(
+            bad_safe_lambda.air_constraint_lambda,
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, bad_safe_lambda,
+            base_indices, seed, &why));
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2Replay(
+            cs, bad_safe_lambda,
+            base_indices, seed,
+            safe_replay, &why));
+    BOOST_CHECK(!safe_replay.native_verified);
+    BOOST_CHECK(
+        safe_replay.air_lambda_message.empty());
+    auto bad_safe_next = safe_proved.proof;
+    bad_safe_next
+        .next_trace_group_rows[0][0]
+        .values[0] =
+        gf::Add(
+            bad_safe_next
+                .next_trace_group_rows[0][0]
+                .values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, bad_safe_next,
+            base_indices, seed, &why));
+
     auto wrong_group_root_cs = cs;
     wrong_group_root_cs
         .preprocessed_row_group_roots[0]

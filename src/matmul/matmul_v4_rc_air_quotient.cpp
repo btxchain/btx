@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_alg_hash.h>
+#include <matmul/matmul_v4_rc_stage3_safe_v12.h>
 
 #include <crypto/common.h>
 #include <crypto/sha256.h>
@@ -2694,6 +2695,115 @@ bool DeriveSplitRapUniformFp3(
     return true;
 }
 
+bool DeriveSplitRapSafeDigestV2(
+    const uint256& public_fs_seed,
+    const char* label,
+    const std::vector<uint256>& ordered_roots,
+    const std::vector<uint32_t>& extra,
+    alg_hash_typed::RoleV12 role,
+    alg_hash::Digest& out)
+{
+    namespace safe =
+        safe_v12;
+    if (public_fs_seed.IsNull() ||
+        label == nullptr ||
+        !alg_hash_typed::IsKnownRoleV12(role)) {
+        return false;
+    }
+    static constexpr char kDomain[] =
+        "BTX_RC_AIRQ_SPLIT_RAP_SAFE_V2";
+    const std::vector<uint8_t> application_domain(
+        reinterpret_cast<const uint8_t*>(kDomain),
+        reinterpret_cast<const uint8_t*>(kDomain) +
+            sizeof(kDomain) - 1);
+    // AirChallengeP2Lanes is used only as an injective field-lane encoder
+    // here. SAFECore supplies the typed capacity, IO-pattern tag and security
+    // reduction; no untyped P2 digest is evaluated or consumed.
+    const std::vector<Fp> message =
+        AirChallengeP2Lanes(
+            public_fs_seed, label,
+            ordered_roots, extra);
+    return safe::SafeCoreDigestV12(
+        role, application_domain,
+        message, out, nullptr, nullptr);
+}
+
+bool DeriveSplitRapSafeFp3V2(
+    const uint256& public_fs_seed,
+    const char* label,
+    const std::vector<uint256>& ordered_roots,
+    const std::vector<uint32_t>& extra,
+    Fp3& out)
+{
+    alg_hash::Digest digest{};
+    if (!DeriveSplitRapSafeDigestV2(
+            public_fs_seed, label,
+            ordered_roots, extra,
+            alg_hash_typed::RoleV12::
+                TranscriptAirLambda,
+            digest)) {
+        return false;
+    }
+    out = Fp3{
+        gkr_field::Canonical(digest[0]),
+        gkr_field::Canonical(digest[1]),
+        gkr_field::Canonical(digest[2])};
+    return true;
+}
+
+uint256 SplitRapSafeDigestToUint256(
+    const alg_hash::Digest& digest)
+{
+    unsigned char encoded[32];
+    for (uint32_t lane = 0; lane < 4;
+         ++lane) {
+        WriteLE64(
+            encoded + 8 * lane,
+            static_cast<uint64_t>(
+                gkr_field::Canonical(
+                    digest[lane])));
+    }
+    return uint256{
+        Span<const unsigned char>{
+            encoded, sizeof(encoded)}};
+}
+
+uint256 SplitRapFinalFriSeedSafeV2(
+    const uint256& public_fs_seed,
+    const std::vector<uint256>& ordered_roots,
+    uint32_t trace_rows,
+    uint32_t trace_columns,
+    uint32_t quotient_len,
+    uint32_t n_coeffs,
+    const std::vector<uint32_t>& base_indices)
+{
+    std::vector<uint32_t> extra;
+    extra.reserve(5 + base_indices.size());
+    extra.push_back(trace_rows);
+    extra.push_back(trace_columns);
+    extra.push_back(quotient_len);
+    extra.push_back(n_coeffs);
+    extra.push_back(
+        static_cast<uint32_t>(
+            base_indices.size()));
+    extra.insert(
+        extra.end(),
+        base_indices.begin(),
+        base_indices.end());
+    alg_hash::Digest digest{};
+    if (!DeriveSplitRapSafeDigestV2(
+            public_fs_seed,
+            "airq_split_rap_fri_seed_safe_v2",
+            ordered_roots, extra,
+            alg_hash_typed::RoleV12::
+                TranscriptFriSeed,
+            digest)) {
+        return {};
+    }
+    return SplitRapSafeDigestToUint256(
+        digest);
+}
+
 uint256 SplitRapFinalFriSeed(
     const uint256& public_fs_seed,
     const std::vector<uint256>& ordered_roots,
@@ -2920,14 +3030,15 @@ bool AirQuotientVerifyRowsTwoEpoch(
 }
 
 AirQuotientSplitRapRowsProveResult
-AirQuotientProveRowsSplitRap(
+AirQuotientProveRowsSplitRapConfigured(
     const AirConstraintSystem<Fp3>& cs,
     const std::vector<std::vector<Fp3>>& columns,
     const std::vector<uint32_t>& base_column_indices,
     const uint256& public_fs_seed,
     const AirProveOptions& opt,
     const AirQuotientTwoEpochBaseRowSession*
-        retained_r0)
+        retained_r0,
+    bool use_safe_v2)
 {
     using T = AirField<Fp3>;
     AirQuotientSplitRapRowsProveResult out;
@@ -3047,11 +3158,19 @@ AirQuotientProveRowsSplitRap(
         base_column_indices.begin(),
         base_column_indices.end());
     Fp3 air_lambda;
-    if (!DeriveSplitRapUniformFp3(
-            public_fs_seed,
-            "airq_split_rap_constraint_v1",
-            {r0_root, rdep_root},
-            lambda_extra, air_lambda)) {
+    const bool lambda_ok =
+        use_safe_v2
+        ? DeriveSplitRapSafeFp3V2(
+              public_fs_seed,
+              "airq_split_rap_constraint_safe_v2",
+              {r0_root, rdep_root},
+              lambda_extra, air_lambda)
+        : DeriveSplitRapUniformFp3(
+              public_fs_seed,
+              "airq_split_rap_constraint_v1",
+              {r0_root, rdep_root},
+              lambda_extra, air_lambda);
+    if (!lambda_ok) {
         return fail("air_lambda");
     }
 
@@ -3207,10 +3326,15 @@ AirQuotientProveRowsSplitRap(
         ordered_roots{
             r0_root, rdep_root, rq_root};
     const uint256 fri_seed =
-        SplitRapFinalFriSeed(
-            public_fs_seed, ordered_roots,
-            N, W, Lq, n_coeffs,
-            base_column_indices);
+        use_safe_v2
+        ? SplitRapFinalFriSeedSafeV2(
+              public_fs_seed, ordered_roots,
+              N, W, Lq, n_coeffs,
+              base_column_indices)
+        : SplitRapFinalFriSeed(
+              public_fs_seed, ordered_roots,
+              N, W, Lq, n_coeffs,
+              base_column_indices);
     if (fri_seed.IsNull()) {
         return fail("fri_seed");
     }
@@ -3232,9 +3356,13 @@ AirQuotientProveRowsSplitRap(
                 r0_cache, rdep_cache,
                 rq_cache};
     auto committed =
-        Fri3AlgMultiRowBatchCommitStreaming(
-            groups, roles, fri_seed, 0,
-            caches);
+        use_safe_v2
+        ? Fri3AlgMultiRowSafeQ192K2V13BatchCommitStreaming(
+              groups, roles, fri_seed, 0,
+              caches)
+        : Fri3AlgMultiRowBatchCommitStreaming(
+              groups, roles, fri_seed, 0,
+              caches);
     if (!committed.ok ||
         committed.proof.n_coeffs !=
             n_coeffs ||
@@ -3285,6 +3413,10 @@ AirQuotientProveRowsSplitRap(
             "next_rows:" + why);
     }
 
+    out.proof.version =
+        use_safe_v2
+        ? kAirQuotientSplitRapRowsSafeProofVersionV2
+        : kAirQuotientSplitRapRowsProofVersionV1;
     out.proof.trace_rows = N;
     out.proof.base_column_indices =
         base_column_indices;
@@ -3313,18 +3445,54 @@ AirQuotientProveRowsSplitRap(
                 .group_row_tree_caches);
     out.ok = true;
     out.note = out.division_exact
-        ? "split_rap_prove:"
-          "exact_multi_row_v2"
+        ? use_safe_v2
+              ? "split_rap_prove:"
+                "exact_safe_multi_row_v13"
+              : "split_rap_prove:"
+                "exact_multi_row_v2"
         : "split_rap_prove:"
           "forced_inexact";
     return out;
 }
 
-bool AirQuotientVerifyRowsSplitRap(
+AirQuotientSplitRapRowsProveResult
+AirQuotientProveRowsSplitRap(
+    const AirConstraintSystem<Fp3>& cs,
+    const std::vector<std::vector<Fp3>>& columns,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& public_fs_seed,
+    const AirProveOptions& opt,
+    const AirQuotientTwoEpochBaseRowSession*
+        retained_r0)
+{
+    return AirQuotientProveRowsSplitRapConfigured(
+        cs, columns, base_column_indices,
+        public_fs_seed, opt, retained_r0,
+        false);
+}
+
+AirQuotientSplitRapRowsProveResult
+AirQuotientProveRowsSplitRapSafeV2(
+    const AirConstraintSystem<Fp3>& cs,
+    const std::vector<std::vector<Fp3>>& columns,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& public_fs_seed,
+    const AirProveOptions& opt,
+    const AirQuotientTwoEpochBaseRowSession*
+        retained_r0)
+{
+    return AirQuotientProveRowsSplitRapConfigured(
+        cs, columns, base_column_indices,
+        public_fs_seed, opt, retained_r0,
+        true);
+}
+
+bool AirQuotientVerifyRowsSplitRapConfigured(
     const AirConstraintSystem<Fp3>& cs,
     const AirQuotientSplitRapRowsProof& proof,
     const std::vector<uint32_t>& expected_base_column_indices,
     const uint256& public_fs_seed,
+    bool use_safe_v2,
     std::string* why)
 {
     using T = AirField<Fp3>;
@@ -3339,7 +3507,10 @@ bool AirQuotientVerifyRowsSplitRap(
         };
     const uint32_t N = cs.n_rows;
     const uint32_t W = cs.n_columns;
-    if (proof.version != 1 ||
+    if (proof.version !=
+            (use_safe_v2
+                 ? kAirQuotientSplitRapRowsSafeProofVersionV2
+                 : kAirQuotientSplitRapRowsProofVersionV1) ||
         public_fs_seed.IsNull() ||
         N < 2 ||
         (N & (N - 1)) != 0 ||
@@ -3438,26 +3609,45 @@ bool AirQuotientVerifyRowsSplitRap(
         proof.base_column_indices.begin(),
         proof.base_column_indices.end());
     Fp3 air_lambda;
-    if (!DeriveSplitRapUniformFp3(
-            public_fs_seed,
-            "airq_split_rap_constraint_v1",
-            {r0_root, rdep_root},
-            lambda_extra, air_lambda) ||
+    const bool lambda_ok =
+        use_safe_v2
+        ? DeriveSplitRapSafeFp3V2(
+              public_fs_seed,
+              "airq_split_rap_constraint_safe_v2",
+              {r0_root, rdep_root},
+              lambda_extra, air_lambda)
+        : DeriveSplitRapUniformFp3(
+              public_fs_seed,
+              "airq_split_rap_constraint_v1",
+              {r0_root, rdep_root},
+              lambda_extra, air_lambda);
+    if (!lambda_ok ||
         !T::Eq(
             air_lambda,
             proof.air_constraint_lambda)) {
         return fail("air_lambda");
     }
     const uint256 fri_seed =
-        SplitRapFinalFriSeed(
-            public_fs_seed,
-            {r0_root, rdep_root, rq_root},
-            N, W, Lq, n_coeffs,
-            proof.base_column_indices);
+        use_safe_v2
+        ? SplitRapFinalFriSeedSafeV2(
+              public_fs_seed,
+              {r0_root, rdep_root, rq_root},
+              N, W, Lq, n_coeffs,
+              proof.base_column_indices)
+        : SplitRapFinalFriSeed(
+              public_fs_seed,
+              {r0_root, rdep_root, rq_root},
+              N, W, Lq, n_coeffs,
+              proof.base_column_indices);
     std::string fri_why;
-    if (fri_seed.IsNull() ||
-        !Fri3AlgMultiRowBatchVerify(
-            batch, fri_seed, &fri_why)) {
+    const bool fri_ok =
+        !fri_seed.IsNull() &&
+        (use_safe_v2
+             ? Fri3AlgMultiRowSafeQ192K2V13BatchVerify(
+                   batch, fri_seed, &fri_why)
+             : Fri3AlgMultiRowBatchVerify(
+                   batch, fri_seed, &fri_why));
+    if (!fri_ok) {
         return fail(
             "multi_row:" + fri_why);
     }
@@ -3723,6 +3913,165 @@ bool AirQuotientVerifyRowsSplitRap(
     return true;
 }
 
+bool AirQuotientVerifyRowsSplitRap(
+    const AirConstraintSystem<Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    std::string* why)
+{
+    return AirQuotientVerifyRowsSplitRapConfigured(
+        cs, proof, expected_base_column_indices,
+        public_fs_seed, false, why);
+}
+
+bool AirQuotientVerifyRowsSplitRapSafeV2(
+    const AirConstraintSystem<Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    std::string* why)
+{
+    return AirQuotientVerifyRowsSplitRapConfigured(
+        cs, proof, expected_base_column_indices,
+        public_fs_seed, true, why);
+}
+
+bool AirQuotientVerifyRowsSplitRapSafeV2Replay(
+    const AirConstraintSystem<Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    AirQuotientSplitRapSafeReplayV2& out,
+    std::string* why)
+{
+    out = {};
+    std::string verify_why;
+    if (!AirQuotientVerifyRowsSplitRapSafeV2(
+            cs, proof,
+            expected_base_column_indices,
+            public_fs_seed, &verify_why)) {
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_replay:verify:" +
+                verify_why;
+        }
+        return false;
+    }
+    const uint32_t N = cs.n_rows;
+    const uint32_t W = cs.n_columns;
+    const uint32_t Lq = cs.QuotientLen();
+    const uint32_t n_coeffs =
+        proof.batch.n_coeffs;
+    const uint256 r0_root =
+        Fri3AlgDigestToUint256(
+            proof.batch.groups[0]
+                .row_commit.root);
+    const uint256 rdep_root =
+        Fri3AlgDigestToUint256(
+            proof.batch.groups[1]
+                .row_commit.root);
+    const uint256 rq_root =
+        Fri3AlgDigestToUint256(
+            proof.batch.groups[2]
+                .row_commit.root);
+    std::vector<uint32_t> lambda_extra{
+        N, W, Lq, n_coeffs,
+        static_cast<uint32_t>(
+            proof.base_column_indices
+                .size())};
+    lambda_extra.insert(
+        lambda_extra.end(),
+        proof.base_column_indices.begin(),
+        proof.base_column_indices.end());
+    out.air_lambda_message =
+        AirChallengeP2Lanes(
+            public_fs_seed,
+            "airq_split_rap_constraint_safe_v2",
+            {r0_root, rdep_root},
+            lambda_extra);
+    if (!DeriveSplitRapSafeDigestV2(
+            public_fs_seed,
+            "airq_split_rap_constraint_safe_v2",
+            {r0_root, rdep_root},
+            lambda_extra,
+            alg_hash_typed::RoleV12::
+                TranscriptAirLambda,
+            out.air_lambda_digest)) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_replay:air_lambda";
+        }
+        return false;
+    }
+    out.air_lambda = Fp3{
+        gkr_field::Canonical(
+            out.air_lambda_digest[0]),
+        gkr_field::Canonical(
+            out.air_lambda_digest[1]),
+        gkr_field::Canonical(
+            out.air_lambda_digest[2])};
+    if (!gkr_field::Eq(
+            out.air_lambda,
+            proof.air_constraint_lambda)) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_replay:air_lambda_mismatch";
+        }
+        return false;
+    }
+
+    std::vector<uint32_t> fri_extra{
+        N, W, Lq, n_coeffs,
+        static_cast<uint32_t>(
+            proof.base_column_indices
+                .size())};
+    fri_extra.insert(
+        fri_extra.end(),
+        proof.base_column_indices.begin(),
+        proof.base_column_indices.end());
+    out.fri_seed_message =
+        AirChallengeP2Lanes(
+            public_fs_seed,
+            "airq_split_rap_fri_seed_safe_v2",
+            {r0_root, rdep_root, rq_root},
+            fri_extra);
+    if (!DeriveSplitRapSafeDigestV2(
+            public_fs_seed,
+            "airq_split_rap_fri_seed_safe_v2",
+            {r0_root, rdep_root, rq_root},
+            fri_extra,
+            alg_hash_typed::RoleV12::
+                TranscriptFriSeed,
+            out.fri_seed_digest)) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_replay:fri_seed";
+        }
+        return false;
+    }
+    out.fri_seed =
+        SplitRapSafeDigestToUint256(
+            out.fri_seed_digest);
+    if (out.fri_seed.IsNull()) {
+        out = {};
+        if (why != nullptr) {
+            *why =
+                "split_rap_safe_replay:null_fri_seed";
+        }
+        return false;
+    }
+    out.native_verified = true;
+    if (why != nullptr) {
+        *why =
+            "split_rap_safe_replay:verified";
+    }
+    return true;
+}
+
 namespace {
 
 void AppendLE64v(
@@ -3846,7 +4195,19 @@ bool SplitRapCodecShape(
     size_t batch_bytes,
     size_t* encoded_size)
 {
-    if (proof.version != 1 ||
+    const bool v1 =
+        proof.version ==
+        kAirQuotientSplitRapRowsProofVersionV1;
+    const bool safe_v2 =
+        proof.version ==
+        kAirQuotientSplitRapRowsSafeProofVersionV2;
+    if ((!v1 && !safe_v2) ||
+        (v1 &&
+         proof.batch.version !=
+             kRCFri3AlgMultiRowBatchProofVersion) ||
+        (safe_v2 &&
+         proof.batch.version !=
+             kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13) ||
         proof.trace_rows < 2 ||
         (proof.trace_rows &
          (proof.trace_rows - 1)) != 0 ||
@@ -4065,7 +4426,10 @@ DeserializeAirQuotientSplitRapRowsProof(
         magic !=
             kAirQuotientSplitRapRowsProofMagic ||
         !ReadLE32vChecked(p, end, version) ||
-        version != 1 ||
+        (version !=
+             kAirQuotientSplitRapRowsProofVersionV1 &&
+         version !=
+             kAirQuotientSplitRapRowsSafeProofVersionV2) ||
         !ReadLE32vChecked(
             p, end, proof.trace_rows) ||
         proof.trace_rows < 2 ||

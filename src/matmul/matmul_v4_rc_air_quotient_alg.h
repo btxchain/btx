@@ -443,6 +443,12 @@ struct AirQuotientSplitRapRowsProof {
         next_trace_group_rows;
 };
 
+inline constexpr uint16_t
+    kAirQuotientSplitRapRowsProofVersionV1 = 1;
+/** Additive typed SAFE outer transcript plus SAFE multi-row V13 backend. */
+inline constexpr uint16_t
+    kAirQuotientSplitRapRowsSafeProofVersionV2 = 2;
+
 inline constexpr uint32_t
     kAirQuotientSplitRapRowsProofMagic =
         0x31525341u; // 'ASR1'
@@ -480,9 +486,57 @@ AirQuotientProveRowsSplitRap(
     const uint256& public_fs_seed,
     std::string* why = nullptr);
 
-/** Canonical durable envelope for the complete current/next split-RAP proof.
- * It nests the canonical MultiRow-V2 codec and pins the exact two next-row
- * groups at every one of its Q=192 query sites. */
+/**
+ * Additive SAFE Split-RAP producer/verifier.  Both outer challenges
+ * (constraint lambda and final FRI seed) use typed SAFECore instances, and the
+ * nested proof must be the SAFE/Q192/K=2 multi-row V13 backend.  V1 remains
+ * byte-for-byte frozen and is rejected by these wrappers.
+ */
+[[nodiscard]] AirQuotientSplitRapRowsProveResult
+AirQuotientProveRowsSplitRapSafeV2(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const std::vector<std::vector<gkr_field::Fp3>>& columns,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& public_fs_seed,
+    const AirProveOptions& opt = {},
+    const AirQuotientTwoEpochBaseRowSession*
+        retained_r0 = nullptr);
+
+[[nodiscard]] bool AirQuotientVerifyRowsSplitRapSafeV2(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    std::string* why = nullptr);
+
+struct AirQuotientSplitRapSafeReplayV2 {
+    std::vector<gkr_field::Fp> air_lambda_message;
+    std::vector<gkr_field::Fp> fri_seed_message;
+    alg_hash::Digest air_lambda_digest{};
+    alg_hash::Digest fri_seed_digest{};
+    gkr_field::Fp3 air_lambda{};
+    uint256 fri_seed{};
+    /** Set only after the complete unmodified SAFE V2 verifier accepts. */
+    bool native_verified{false};
+};
+
+/**
+ * Verify the whole SAFE V2 Split-RAP proof, then export the two exact typed
+ * SAFECore messages/digests consumed by the native verifier.  Caller-supplied
+ * replay values are never accepted as inputs.
+ */
+[[nodiscard]] bool
+AirQuotientVerifyRowsSplitRapSafeV2Replay(
+    const AirConstraintSystem<gkr_field::Fp3>& cs,
+    const AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    AirQuotientSplitRapSafeReplayV2& out,
+    std::string* why = nullptr);
+
+/** Canonical durable V1/V2 envelope for the complete current/next split-RAP
+ * proof. It nests the version-matched canonical multi-row codec and pins the
+ * exact two next-row groups at every one of its Q=192 query sites. */
 [[nodiscard]] size_t
 SerializeAirQuotientSplitRapRowsProof(
     const AirQuotientSplitRapRowsProof& proof,
