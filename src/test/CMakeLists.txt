@@ -174,6 +174,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_p2_same_parent_join_tests.cpp
   matmul_v4_rc_stage3_p2_normalized_exports_tests.cpp
   matmul_v4_rc_stage3_p2_prefix_source_air_tests.cpp
+  matmul_v4_rc_stage3_recursive_provenance_join_tests.cpp
   matmul_v4_rc_stage3_ali_manifest_tests.cpp
   matmul_v4_rc_stage3_ali_same_parent_bridge_tests.cpp
   matmul_v4_rc_stage3_pow_composition_tests.cpp
