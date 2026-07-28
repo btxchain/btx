@@ -580,6 +580,8 @@ MeasureVerifierAIR(uint32_t k, const std::vector<ChildPublicInputs>& pis,
  */
 struct VerifierAirFixedTraceChildLayoutV1 {
     std::vector<uint32_t> per_query_columns;
+    /** Exact proof-consumer address used by row/fold/query verification. */
+    uint32_t query_index{0};
     std::array<uint32_t, alg_hash::kAlgHashDigestLen>
         row_commit_root{};
     std::array<uint32_t, alg_hash::kAlgHashDigestLen>
@@ -604,6 +606,14 @@ struct VerifierAirFixedTraceChildLayoutV1 {
     uint32_t air_lambda{0};
     /** One exact power per child constraint, beginning with lambda^0. */
     std::vector<uint32_t> air_lambda_powers;
+    /**
+     * Dependent helper columns.  They are not members of `ordered_columns`
+     * and therefore are never accepted as fixed public inputs: degree-two
+     * recurrences derive them from the raw z/y consumer cells.
+     */
+    std::vector<uint32_t> z1_square_powers;
+    std::vector<uint32_t> z2_square_powers;
+    std::vector<uint32_t> y_square_powers;
 };
 
 /**

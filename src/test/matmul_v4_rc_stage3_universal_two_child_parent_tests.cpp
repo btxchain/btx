@@ -271,6 +271,71 @@ BOOST_AUTO_TEST_CASE(
             first.cs, first.columns),
         0U);
 
+    // Canonical query/domain helpers are derived constraints, not merely
+    // values hidden under the FixedTrace commitment.
+    auto wrong_index = first.columns;
+    const auto& canonical_child =
+        first_layout.children[0];
+    wrong_index[canonical_child.query_index][0] =
+        gf::Add(
+            wrong_index[
+                canonical_child.query_index][0],
+            gf::Fp3::One());
+    uint32_t canonical_bad_row = 0;
+    std::string canonical_bad_constraint;
+    BOOST_CHECK_GT(
+        ar::CountWitnessViolationsOnH(
+            first.cs, wrong_index,
+            &canonical_bad_row,
+            &canonical_bad_constraint),
+        0U);
+    BOOST_CHECK(
+        canonical_bad_constraint.find(
+            "query.index.from_bits") !=
+        std::string::npos);
+
+    BOOST_REQUIRE(
+        !canonical_child.z1_square_powers.empty());
+    auto wrong_z_power = first.columns;
+    wrong_z_power[
+        canonical_child.z1_square_powers.front()][0] =
+        gf::Add(
+            wrong_z_power[
+                canonical_child.z1_square_powers.front()][0],
+            gf::Fp3::One());
+    canonical_bad_constraint.clear();
+    BOOST_CHECK_GT(
+        ar::CountWitnessViolationsOnH(
+            first.cs, wrong_z_power,
+            &canonical_bad_row,
+            &canonical_bad_constraint),
+        0U);
+    BOOST_CHECK(
+        canonical_bad_constraint.find(
+            "z1_power") !=
+        std::string::npos);
+
+    BOOST_REQUIRE(
+        canonical_child.y_square_powers.size() >= 2U);
+    auto wrong_y_power = first.columns;
+    wrong_y_power[
+        canonical_child.y_square_powers.back()][0] =
+        gf::Add(
+            wrong_y_power[
+                canonical_child.y_square_powers.back()][0],
+            gf::Fp3::One());
+    canonical_bad_constraint.clear();
+    BOOST_CHECK_GT(
+        ar::CountWitnessViolationsOnH(
+            first.cs, wrong_y_power,
+            &canonical_bad_row,
+            &canonical_bad_constraint),
+        0U);
+    BOOST_CHECK(
+        canonical_bad_constraint.find(
+            "y_power") !=
+        std::string::npos);
+
     // A second transcript changes proof-owned challenges and query cells but
     // cannot change the registry/shape-selected callback schedule.
     const uint256 second_seed = Seed(77);
