@@ -590,6 +590,18 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(native.safe_p_calls, 0U);
     BOOST_CHECK_GT(native.commitment_p_calls, 0U);
     BOOST_CHECK_GT(native.merkle_p_calls, 0U);
+    // Independent fixture arithmetic:
+    //   Merkle = Q*(row(1+7) + 2*((1+7)+(1+6)+(1+5)))
+    //            + terminal(16 leaves + 15 nodes) = 9,631.
+    //   Commitments = shape(1 block) + OOD(3 blocks) = 4.
+    // SAFE/H counts are deterministic KATs for the frozen V13 transcript.
+    BOOST_CHECK_EQUAL(native.h_calls.size(), 203U);
+    BOOST_CHECK_EQUAL(native.rejected_h_candidates, 0U);
+    BOOST_CHECK_EQUAL(native.safe_p_calls, 693U);
+    BOOST_CHECK_EQUAL(native.commitment_p_calls, 4U);
+    BOOST_CHECK_EQUAL(native.merkle_p_calls, 9'631U);
+    BOOST_CHECK_EQUAL(native.p_calls.size(), 10'328U);
+    BOOST_CHECK_EQUAL(native.query_events.size(), 203U);
     BOOST_TEST_MESSAGE(
         "V13_EXACT_ORACLE_INVENTORY h="
         << native.h_calls.size()
