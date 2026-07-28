@@ -33,6 +33,9 @@ inline constexpr uint32_t kFieldAbiVersionV1 = 1;
 inline constexpr uint32_t kMultiRowProtocolVersionV11 = 11;
 inline constexpr uint64_t kMultiRowProtocolDomainV11 =
     0x4d525032'51313932ULL; // "MRP2Q192"
+inline constexpr uint32_t kMultiRowProtocolVersionV13 = 13;
+inline constexpr uint64_t kMultiRowProtocolDomainV13 =
+    0x4d525331'33513139ULL; // "MRS13Q19"
 inline constexpr uint32_t kQueryCountV11 = 192;
 inline constexpr uint32_t kQueryCandidatesV11 = 2;
 inline constexpr uint32_t kFieldAbiHeaderWordsV1 = 6;
@@ -101,6 +104,10 @@ enum class FieldKindV1 : uint16_t {
     NextRowSiblingCount = 59,
     NextRowSibling = 60,
 };
+static_assert(
+    static_cast<uint16_t>(
+        FieldKindV1::NextRowSibling) == 60,
+    "canonical proof ABI must retain all 60 semantic field families");
 
 /** A semantic coordinate independent of its physical parent column. */
 struct SourceKeyV1 {
@@ -126,6 +133,10 @@ struct SourceCellV1 {
     SourceKeyV1 key{};
     uint32_t value{0};
     OwnershipClassV1 ownership{OwnershipClassV1::ChildProofEnvelope};
+
+    friend bool operator==(
+        const SourceCellV1&,
+        const SourceCellV1&) = default;
 };
 
 struct QueryCandidatesV1 {
@@ -171,6 +182,22 @@ struct DecodedV1 {
     std::string* why = nullptr);
 
 [[nodiscard]] std::optional<DecodedV1> DecodeCanonicalV1(
+    const std::vector<uint32_t>& words,
+    std::string* why = nullptr);
+
+/**
+ * SAFE/Q192/K=2 V13 uses the same complete 60-family semantic inventory and
+ * canonical u32/Fp decomposition, but has a distinct ABI header and accepts
+ * only the V13 multi-row batch version.  These functions are additive: the
+ * frozen V11 encoding remains byte-for-byte unchanged.
+ */
+[[nodiscard]] bool EncodeCanonicalSafeV13(
+    const EnvelopeV1& envelope,
+    std::vector<uint32_t>& words,
+    std::vector<SourceCellV1>* sources = nullptr,
+    std::string* why = nullptr);
+
+[[nodiscard]] std::optional<DecodedV1> DecodeCanonicalSafeV13(
     const std::vector<uint32_t>& words,
     std::string* why = nullptr);
 

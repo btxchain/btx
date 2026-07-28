@@ -81,15 +81,29 @@ OwnershipClassV1 OwnershipFor(FieldKindV1 kind)
 
 class Cursor {
 public:
-    explicit Cursor(std::vector<uint32_t>& words)
-        : m_out(&words)
+    explicit Cursor(
+        std::vector<uint32_t>& words,
+        uint32_t protocol_version =
+            kMultiRowProtocolVersionV11,
+        uint64_t protocol_domain =
+            kMultiRowProtocolDomainV11)
+        : m_out(&words),
+          m_protocol_version(protocol_version),
+          m_protocol_domain(protocol_domain)
     {
         words.clear();
         words.resize(kFieldAbiHeaderWordsV1);
     }
 
-    explicit Cursor(const std::vector<uint32_t>& words)
-        : m_in(&words)
+    explicit Cursor(
+        const std::vector<uint32_t>& words,
+        uint32_t protocol_version =
+            kMultiRowProtocolVersionV11,
+        uint64_t protocol_domain =
+            kMultiRowProtocolDomainV11)
+        : m_in(&words),
+          m_protocol_version(protocol_version),
+          m_protocol_domain(protocol_domain)
     {
         if (words.size() >= kFieldAbiHeaderWordsV1) {
             m_expected_cells = words[5];
@@ -179,11 +193,11 @@ public:
         } else {
             (*m_out)[0] = kFieldAbiMagicV1;
             (*m_out)[1] = kFieldAbiVersionV1;
-            (*m_out)[2] = kMultiRowProtocolVersionV11;
+            (*m_out)[2] = m_protocol_version;
             (*m_out)[3] =
-                static_cast<uint32_t>(kMultiRowProtocolDomainV11);
+                static_cast<uint32_t>(m_protocol_domain);
             (*m_out)[4] =
-                static_cast<uint32_t>(kMultiRowProtocolDomainV11 >> 32);
+                static_cast<uint32_t>(m_protocol_domain >> 32);
             (*m_out)[5] = m_address;
         }
         return true;
@@ -216,18 +230,26 @@ private:
     bool m_good{true};
     std::string m_why;
     std::vector<SourceCellV1> m_sources;
+    uint32_t m_protocol_version{
+        kMultiRowProtocolVersionV11};
+    uint64_t m_protocol_domain{
+        kMultiRowProtocolDomainV11};
 };
 
-bool HeaderValid(const std::vector<uint32_t>& words, std::string* why)
+bool HeaderValid(
+    const std::vector<uint32_t>& words,
+    uint32_t protocol_version,
+    uint64_t protocol_domain,
+    std::string* why)
 {
     const uint32_t domain_lo =
-        static_cast<uint32_t>(kMultiRowProtocolDomainV11);
+        static_cast<uint32_t>(protocol_domain);
     const uint32_t domain_hi =
-        static_cast<uint32_t>(kMultiRowProtocolDomainV11 >> 32);
+        static_cast<uint32_t>(protocol_domain >> 32);
     if (words.size() < kFieldAbiHeaderWordsV1 ||
         words[0] != kFieldAbiMagicV1 ||
         words[1] != kFieldAbiVersionV1 ||
-        words[2] != kMultiRowProtocolVersionV11 ||
+        words[2] != protocol_version ||
         words[3] != domain_lo ||
         words[4] != domain_hi ||
         words[5] > kFieldAbiMaxSourceCellsV1 ||
@@ -239,7 +261,11 @@ bool HeaderValid(const std::vector<uint32_t>& words, std::string* why)
     return true;
 }
 
-bool ValidateShape(const EnvelopeV1& envelope, std::string* why)
+bool ValidateShape(
+    const EnvelopeV1& envelope,
+    uint32_t expected_batch_version,
+    uint16_t expected_split_version,
+    std::string* why)
 {
     const auto fail = [&](const char* detail) {
         if (why) {
@@ -249,10 +275,10 @@ bool ValidateShape(const EnvelopeV1& envelope, std::string* why)
     };
     const auto& split = envelope.split;
     const auto& batch = split.batch;
-    if (split.version != 1 ||
+    if (split.version != expected_split_version ||
         split.trace_rows < 2 ||
         !PowerOfTwo(split.trace_rows) ||
-        batch.version != kRCFri3AlgMultiRowBatchProofVersion ||
+        batch.version != expected_batch_version ||
         batch.blowup != kRCFriBlowup ||
         batch.n_coeffs < 2 ||
         !PowerOfTwo(batch.n_coeffs) ||
@@ -769,6 +795,11 @@ DerivedTranscriptExportsV1 BuildDerivedQueryCandidateExportsV1(
     out.k2_first_valid = true;
     out.selected_indices_match_proof = true;
     for (uint32_t q = 0; q < kQueryCountV11; ++q) {
+        out.sources.push_back({
+            address++,
+            K(FieldKindV1::QueryCandidateCount, q),
+            kQueryCandidatesV11,
+            OwnershipClassV1::DerivedTranscript});
         bool prior_valid = false;
         uint32_t expected_selected = kQueryCandidatesV11;
         uint32_t expected_index = 0;
@@ -894,24 +925,35 @@ PublicStatementJoinV1 BuildPublicStatementJoinV1(
     return out;
 }
 
-bool EncodeCanonicalV1(
+namespace {
+
+bool EncodeCanonicalProtocol(
     const EnvelopeV1& envelope,
     std::vector<uint32_t>& words,
     std::vector<SourceCellV1>* sources,
+    uint32_t protocol_version,
+    uint64_t protocol_domain,
+    uint32_t batch_version,
+    uint16_t split_version,
+    const char* label,
     std::string* why)
 {
-    if (!ValidateShape(envelope, why)) {
+    if (!ValidateShape(
+            envelope, batch_version,
+            split_version, why)) {
         words.clear();
         if (sources) sources->clear();
         return false;
     }
     EnvelopeV1 copy = envelope;
-    Cursor cursor(words);
+    Cursor cursor(
+        words, protocol_version, protocol_domain);
     if (!Walk(cursor, copy)) {
         words.clear();
         if (sources) sources->clear();
         if (why) {
-            *why = "stage3:multirow_v11_abi:encode:" + cursor.Why();
+            *why = std::string{label} +
+                ":encode:" + cursor.Why();
         }
         return false;
     }
@@ -923,25 +965,38 @@ bool EncodeCanonicalV1(
         return false;
     }
     if (sources) *sources = cursor.Sources();
-    if (why) *why = "stage3:multirow_v11_abi:encoded";
+    if (why) *why = std::string{label} + ":encoded";
     return true;
 }
 
-std::optional<DecodedV1> DecodeCanonicalV1(
+std::optional<DecodedV1> DecodeCanonicalProtocol(
     const std::vector<uint32_t>& words,
+    uint32_t protocol_version,
+    uint64_t protocol_domain,
+    uint32_t batch_version,
+    uint16_t split_version,
+    const char* label,
     std::string* why)
 {
-    if (!HeaderValid(words, why)) return std::nullopt;
+    if (!HeaderValid(
+            words, protocol_version,
+            protocol_domain, why)) {
+        return std::nullopt;
+    }
     DecodedV1 out;
-    Cursor cursor(words);
+    Cursor cursor(
+        words, protocol_version, protocol_domain);
     if (!Walk(cursor, out.envelope)) {
         if (why) {
-            *why = "stage3:multirow_v11_abi:decode:" + cursor.Why();
+            *why = std::string{label} +
+                ":decode:" + cursor.Why();
         }
         return std::nullopt;
     }
     std::string shape_why;
-    if (!ValidateShape(out.envelope, &shape_why)) {
+    if (!ValidateShape(
+            out.envelope, batch_version,
+            split_version, &shape_why)) {
         if (why) *why = shape_why;
         return std::nullopt;
     }
@@ -951,10 +1006,16 @@ std::optional<DecodedV1> DecodeCanonicalV1(
         return std::nullopt;
     }
     std::vector<uint32_t> canonical;
-    if (!EncodeCanonicalV1(
-            out.envelope, canonical, nullptr, nullptr) ||
+    if (!EncodeCanonicalProtocol(
+            out.envelope, canonical, nullptr,
+            protocol_version, protocol_domain,
+            batch_version, split_version,
+            label, nullptr) ||
         canonical != words) {
-        if (why) *why = "stage3:multirow_v11_abi:noncanonical_reencode";
+        if (why) {
+            *why = std::string{label} +
+                ":noncanonical_reencode";
+        }
         return std::nullopt;
     }
     out.sources = cursor.Sources();
@@ -976,10 +1037,68 @@ std::optional<DecodedV1> DecodeCanonicalV1(
     out.addresses_unique = true;
     out.semantic_keys_unique = true;
     out.note =
-        "stage3:multirow_v11_abi:canonical_complete;"
-        "backend_and_authority_pending";
+        std::string{label} +
+        ":canonical_complete;backend_and_authority_pending";
     if (why) *why = out.note;
     return out;
+}
+
+} // namespace
+
+bool EncodeCanonicalV1(
+    const EnvelopeV1& envelope,
+    std::vector<uint32_t>& words,
+    std::vector<SourceCellV1>* sources,
+    std::string* why)
+{
+    return EncodeCanonicalProtocol(
+        envelope, words, sources,
+        kMultiRowProtocolVersionV11,
+        kMultiRowProtocolDomainV11,
+        kRCFri3AlgMultiRowBatchProofVersion,
+        aq::kAirQuotientSplitRapRowsProofVersionV1,
+        "stage3:multirow_v11_abi", why);
+}
+
+std::optional<DecodedV1> DecodeCanonicalV1(
+    const std::vector<uint32_t>& words,
+    std::string* why)
+{
+    return DecodeCanonicalProtocol(
+        words,
+        kMultiRowProtocolVersionV11,
+        kMultiRowProtocolDomainV11,
+        kRCFri3AlgMultiRowBatchProofVersion,
+        aq::kAirQuotientSplitRapRowsProofVersionV1,
+        "stage3:multirow_v11_abi", why);
+}
+
+bool EncodeCanonicalSafeV13(
+    const EnvelopeV1& envelope,
+    std::vector<uint32_t>& words,
+    std::vector<SourceCellV1>* sources,
+    std::string* why)
+{
+    return EncodeCanonicalProtocol(
+        envelope, words, sources,
+        kMultiRowProtocolVersionV13,
+        kMultiRowProtocolDomainV13,
+        kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13,
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2,
+        "stage3:multirow_safe_v13_abi", why);
+}
+
+std::optional<DecodedV1> DecodeCanonicalSafeV13(
+    const std::vector<uint32_t>& words,
+    std::string* why)
+{
+    return DecodeCanonicalProtocol(
+        words,
+        kMultiRowProtocolVersionV13,
+        kMultiRowProtocolDomainV13,
+        kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13,
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2,
+        "stage3:multirow_safe_v13_abi", why);
 }
 
 } // namespace matmul::v4::rc::stage3_multirow_v11_proof_abi

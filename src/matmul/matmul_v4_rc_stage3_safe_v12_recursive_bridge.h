@@ -7,12 +7,14 @@
 
 #include <matmul/matmul_v4_rc_air_quotient_alg.h>
 #include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_multirow_v11_proof_abi.h>
 #include <matmul/matmul_v4_rc_stage3_p2_prefix_source_air.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_domain_registry.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_nirop_reduction.h>
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -40,6 +42,7 @@
 namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge {
 
 namespace aq = air_quotient;
+namespace abi = stage3_multirow_v11_proof_abi;
 namespace cb = constraint_bytecode;
 namespace domains = stage3_safe_v12_domain_registry;
 namespace fsair = stage3_safe_v12_fs_air;
@@ -450,6 +453,16 @@ struct NativeFri3AlgTypedSafeScheduleV13 {
         uint32_t byte_offset{0};
         bool normalized_source_available{false};
         bool hash_relation_required{false};
+        /** Exact canonical V13 proof-ABI cell when this is a raw source. */
+        abi::SourceKeyV1 abi_key{};
+        uint32_t abi_source_address{
+            std::numeric_limits<uint32_t>::max()};
+        uint8_t byte_in_abi_word{0};
+        uint32_t producer_event{
+            std::numeric_limits<uint32_t>::max()};
+        uint8_t producer_output_lane{0};
+        bool canonical_abi_source{false};
+        bool prior_event_output_source{false};
 
         friend bool operator==(
             const TranscriptSourceByte&,
@@ -511,17 +524,35 @@ struct NativeFri3AlgTypedSafeScheduleV13 {
  * yet claim normalized proof-codec aliases or recursive consumption.
  */
 struct NativeFri3AlgMultiRowTypedSafeScheduleV13 {
+    using TranscriptSourceKind =
+        NativeFri3AlgTypedSafeScheduleV13::
+            TranscriptSourceKind;
+    using TranscriptSourceByte =
+        NativeFri3AlgTypedSafeScheduleV13::
+            TranscriptSourceByte;
+    using TranscriptWordBinding =
+        NativeFri3AlgTypedSafeScheduleV13::
+            TranscriptWordBinding;
+
     Fri3AlgSafeV13Replay replay;
     std::vector<TypedSafeEventProgramV13> program;
     std::vector<TypedSafeEventWitnessV13> witness;
+    std::vector<TranscriptWordBinding> transcript_word_bindings;
     uint32_t events_materialized{0};
     uint32_t proof_owned_message_cells{0};
+    uint64_t transcript_byte_occurrences{0};
+    uint64_t canonical_abi_byte_occurrences{0};
+    uint64_t prior_event_output_byte_occurrences{0};
+    uint64_t derived_hash_byte_occurrences{0};
+    uint64_t protocol_constant_byte_occurrences{0};
     uint32_t query_candidate_events{0};
     bool native_proof_verified{false};
     bool canonical_multi_row_event_order{false};
     bool every_snapshot_exactly_materialized{false};
     bool every_safe_output_matches_native_consumer{false};
     bool unique_query_seed_then_q192{false};
+    bool every_transcript_byte_typed{false};
+    bool canonical_v13_source_keys_complete{false};
     bool normalized_child_cells_bound{false};
     bool outer_split_rap_events_bound{false};
     bool recursively_consumed{false};
@@ -576,8 +607,14 @@ struct NativeSplitRapMultiRowTypedSafeScheduleV2 {
     NativeFri3AlgMultiRowTypedSafeScheduleV13 child;
     std::vector<TypedSafeEventProgramV13> program;
     std::vector<TypedSafeEventWitnessV13> witness;
+    std::vector<uint32_t> canonical_v13_abi_words;
+    std::vector<abi::SourceCellV1> canonical_v13_sources;
+    uint64_t canonical_v13_source_byte_occurrences{0};
+    uint64_t canonical_v13_source_byte_occurrences_resolved{0};
     bool child_seed_derived_from_outer_replay{false};
     bool complete_challenge_kind_coverage{false};
+    bool canonical_v13_proof_decoded{false};
+    bool every_child_transcript_abi_source_resolved{false};
     bool normalized_child_cells_bound{false};
     bool same_parent_child_seed_feedback{false};
     bool recursively_consumed{false};
@@ -849,6 +886,186 @@ inline constexpr bool kTypedSafeEventRecursiveAuthorityReadyV13 = false;
 
 static_assert(!kTypedSafeEventNormalizedChildCellsBoundV13);
 static_assert(!kTypedSafeEventRecursiveAuthorityReadyV13);
+
+// -------------------------------------------------------------------------
+// V14 ordinary-AIR typed SAFE transcript leaf.
+//
+// V13 proves the ordered semantic receipt with a post-R0 LogUp and therefore
+// necessarily emits a Split-RAP proof.  V14 removes that recursion type seam:
+// one Poseidon2 chip is time-multiplexed between the native SAFE event rows
+// and the receipt sponge.  Each event row is followed by a receipt-message
+// row whose message cells are adjacent-row direct aliases of the event's
+// ProofOwned cells; a final receipt-output row aliases the event digest.  A
+// twelve-lane alternating carry preserves the inactive sponge state.  No
+// random permutation/lookup challenge exists in this construction.
+//
+// The layout is intentionally the normalized fixed-point width (575).  It is
+// an ordinary AirQuotientRowsProof and can therefore be retained by the
+// existing narrow receipt machinery.  Canonical child-proof decoder copy-in
+// is still a separate, fail-closed obligation and no authority flag is
+// promoted here.
+// -------------------------------------------------------------------------
+
+inline constexpr uint16_t kTypedSafeDirectParentVersionV14 = 14;
+inline constexpr uint32_t kTypedSafeDirectParentColumnsV14 = 575;
+
+enum class TypedSafeDirectRowKindV14 : uint8_t {
+    Padding = 0,
+    ReceiptHeader = 1,
+    Event = 2,
+    ReceiptMessage = 3,
+    ReceiptOutput = 4,
+};
+
+struct TypedSafeDirectParentLayoutV14 {
+    stage3_poseidon_air::Layout poseidon{
+        air_recurse::PermLayout{0},
+        air_recurse::kPermCellsPerPerm,
+        air_recurse::kPermCellsPerPerm +
+            air_recurse::kPermSboxCells,
+        air_recurse::kPermCellsPerPerm +
+            2 * air_recurse::kPermSboxCells};
+    uint32_t message_base{
+        air_recurse::kPermCellsPerPerm +
+        3 * air_recurse::kPermSboxCells};
+    uint32_t output_base{message_base + kTypedSafeEventRateV13};
+    uint32_t query_seed_base{
+        output_base + kTypedSafeEventDigestLanesV13};
+    uint32_t carry_base{
+        query_seed_base + kTypedSafeEventDigestLanesV13};
+    uint32_t active{carry_base + alg_hash::kAlgHashT};
+    uint32_t row_kind{active + 1};
+    uint32_t event_reset{row_kind + 1};
+    uint32_t event_final{event_reset + 1};
+    uint32_t query_seed_final{event_final + 1};
+    uint32_t receipt_final{query_seed_final + 1};
+    uint32_t message_mask_base{receipt_final + 1};
+    uint32_t tag_base{
+        message_mask_base + kTypedSafeEventRateV13};
+    uint32_t constant_mask_base{
+        tag_base + safe_v12::kSafeCapacityV12};
+    uint32_t constant_value_base{
+        constant_mask_base + kTypedSafeEventRateV13};
+    uint32_t query_seed_mask_base{
+        constant_value_base + kTypedSafeEventRateV13};
+    uint32_t query_seed_lane_base{
+        query_seed_mask_base + kTypedSafeEventRateV13};
+    uint32_t receipt_source_mask_base{
+        query_seed_lane_base + kTypedSafeEventRateV13};
+    uint32_t receipt_source_start{
+        receipt_source_mask_base + kTypedSafeEventRateV13};
+    uint32_t expected_commitment_base{receipt_source_start + 1};
+    uint32_t end{
+        expected_commitment_base +
+        kTypedSafeEventDigestLanesV13};
+
+    [[nodiscard]] constexpr uint32_t Message(uint32_t lane) const
+    {
+        return message_base + lane;
+    }
+    [[nodiscard]] constexpr uint32_t Output(uint32_t lane) const
+    {
+        return output_base + lane;
+    }
+    [[nodiscard]] constexpr uint32_t QuerySeed(uint32_t lane) const
+    {
+        return query_seed_base + lane;
+    }
+    [[nodiscard]] constexpr uint32_t Carry(uint32_t lane) const
+    {
+        return carry_base + lane;
+    }
+};
+
+static_assert(
+    TypedSafeDirectParentLayoutV14{}.end ==
+    kTypedSafeDirectParentColumnsV14);
+
+struct TypedSafeDirectAliasV14 {
+    uint32_t event{0};
+    uint32_t message_ordinal{0};
+    uint32_t event_row{0};
+    uint32_t event_column{0};
+    uint32_t receipt_row{0};
+    uint32_t receipt_column{0};
+
+    friend bool operator==(
+        const TypedSafeDirectAliasV14&,
+        const TypedSafeDirectAliasV14&) = default;
+};
+
+struct TypedSafeDirectParentProductV14 {
+    TypedSafeDirectParentLayoutV14 layout{};
+    std::vector<TypedSafeEventProgramV13> program;
+    alg_hash::Digest program_root{};
+    alg_hash::Digest transcript_commitment{};
+    std::vector<alg_hash::Digest> event_output;
+    std::vector<TypedSafeDirectAliasV14> proof_cell_aliases;
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    uint32_t trace_rows{0};
+    uint32_t active_rows{0};
+    uint32_t event_rows{0};
+    uint32_t receipt_rows{0};
+    uint32_t proof_owned_message_cells{0};
+    uint32_t aliased_proof_owned_message_cells{0};
+    uint32_t aliased_event_output_cells{0};
+    uint32_t challenge_kinds_covered{0};
+    uint32_t max_algebraic_degree{0};
+    uint32_t violations{0};
+    bool ordinary_air{false};
+    bool no_post_commit_challenges{false};
+    bool physical_alias_inventory_complete{false};
+    bool ordered_receipt_hash_in_trace{false};
+    bool query_seed_feedback_exact{false};
+    bool proof_cells_are_ordinary_columns{false};
+    bool canonical_child_proof_decoder_bound{false};
+    bool normalized_child_cells_bound{false};
+    bool recursive_authority_ready{false};
+    bool valid{false};
+    std::string note;
+};
+
+struct TypedSafeDirectParentProofV14 {
+    uint16_t version{kTypedSafeDirectParentVersionV14};
+    alg_hash::Digest program_root{};
+    alg_hash::Digest transcript_commitment{};
+    aq::AirQuotientRowsProof proof{};
+    uint32_t trace_rows{0};
+    uint32_t event_count{0};
+    bool canonical_proof_encoding{false};
+    bool decoder_copy_in_bound{false};
+    bool normalized_child_cells_bound{false};
+    bool recursive_authority_ready{false};
+    std::string note;
+};
+
+[[nodiscard]] bool BuildTypedSafeDirectParentV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const std::vector<TypedSafeEventWitnessV13>& witness,
+    TypedSafeDirectParentProductV14& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool ProveTypedSafeDirectParentV14(
+    const TypedSafeDirectParentProductV14& product,
+    const uint256& relation_seed,
+    TypedSafeDirectParentProofV14& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyTypedSafeDirectParentProofV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const TypedSafeDirectParentProofV14& proof,
+    const uint256& relation_seed,
+    const alg_hash::Digest& expected_transcript_commitment,
+    std::string* why = nullptr);
+
+inline constexpr bool kTypedSafeDirectParentExecutableV14 = true;
+inline constexpr bool
+    kTypedSafeDirectCanonicalDecoderBoundV14 = false;
+inline constexpr bool kTypedSafeDirectRecursiveAuthorityReadyV14 = false;
+
+static_assert(!kTypedSafeDirectCanonicalDecoderBoundV14);
+static_assert(!kTypedSafeDirectRecursiveAuthorityReadyV14);
 
 } // namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge
 

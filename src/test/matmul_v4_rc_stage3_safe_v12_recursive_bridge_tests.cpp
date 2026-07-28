@@ -8,6 +8,7 @@
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_safe_v12_recursive_bridge.h>
 
+#include <algorithm>
 #include <chrono>
 #include <stdexcept>
 
@@ -1609,6 +1610,36 @@ BOOST_AUTO_TEST_CASE(
         schedule.child_seed_derived_from_outer_replay);
     BOOST_CHECK(
         schedule.complete_challenge_kind_coverage);
+    BOOST_CHECK(
+        schedule.child.every_transcript_byte_typed);
+    BOOST_CHECK(
+        schedule.child.canonical_v13_source_keys_complete);
+    BOOST_CHECK(
+        schedule.canonical_v13_proof_decoded);
+    BOOST_CHECK(
+        schedule.every_child_transcript_abi_source_resolved);
+    BOOST_CHECK_GT(
+        schedule.canonical_v13_sources.size(), 0U);
+    BOOST_CHECK_EQUAL(
+        schedule.canonical_v13_abi_words.size(),
+        matmul::v4::rc::
+            stage3_multirow_v11_proof_abi::
+                kFieldAbiHeaderWordsV1 +
+            2 *
+                schedule.canonical_v13_sources.size());
+    BOOST_CHECK_EQUAL(
+        schedule
+            .canonical_v13_source_byte_occurrences,
+        schedule
+            .canonical_v13_source_byte_occurrences_resolved);
+    BOOST_CHECK_GT(
+        schedule.child
+            .prior_event_output_byte_occurrences,
+        0U);
+    BOOST_CHECK_GT(
+        schedule.child
+            .derived_hash_byte_occurrences,
+        0U);
     BOOST_REQUIRE_GT(schedule.program.size(), 2U);
     BOOST_CHECK(
         schedule.program[0].kind ==
@@ -1649,6 +1680,236 @@ BOOST_AUTO_TEST_CASE(
         << parent.proof_owned_message_cells
         << " max_degree="
         << parent.max_algebraic_degree);
+
+    bridge::TypedSafeDirectParentProductV14 direct;
+    BOOST_REQUIRE_MESSAGE(
+        bridge::BuildTypedSafeDirectParentV14(
+            schedule.program, schedule.witness,
+            direct, &why),
+        why);
+    BOOST_CHECK(direct.valid);
+    BOOST_CHECK(direct.ordinary_air);
+    BOOST_CHECK(direct.no_post_commit_challenges);
+    BOOST_CHECK(direct.physical_alias_inventory_complete);
+    BOOST_CHECK(direct.ordered_receipt_hash_in_trace);
+    BOOST_CHECK(direct.query_seed_feedback_exact);
+    BOOST_CHECK(direct.proof_cells_are_ordinary_columns);
+    BOOST_CHECK_EQUAL(
+        direct.cs.n_columns,
+        bridge::kTypedSafeDirectParentColumnsV14);
+    BOOST_CHECK_EQUAL(direct.violations, 0U);
+    BOOST_CHECK_EQUAL(
+        direct.aliased_proof_owned_message_cells,
+        direct.proof_owned_message_cells);
+    BOOST_CHECK(!direct.canonical_child_proof_decoder_bound);
+    BOOST_CHECK(!direct.normalized_child_cells_bound);
+    BOOST_CHECK(!direct.recursive_authority_ready);
+    BOOST_REQUIRE(!direct.proof_cell_aliases.empty());
+    uint64_t child_snapshot_aliases = 0;
+    for (const auto& binding :
+         schedule.child.transcript_word_bindings) {
+        const auto found = std::find_if(
+            direct.proof_cell_aliases.begin(),
+            direct.proof_cell_aliases.end(),
+            [&](const auto& alias) {
+                return alias.event ==
+                        binding.event +
+                            schedule.outer.program.size() &&
+                    alias.message_ordinal ==
+                        binding.message_ordinal;
+            });
+        BOOST_REQUIRE_MESSAGE(
+            found != direct.proof_cell_aliases.end(),
+            "canonical V13 transcript word has no physical "
+            "V14 Event.message -> receipt alias");
+        ++child_snapshot_aliases;
+        for (uint32_t byte = 0;
+             byte < binding.bytes_present; ++byte) {
+            const auto& source =
+                binding.source_bytes[byte];
+            if (!source.canonical_abi_source) continue;
+            BOOST_REQUIRE_LT(
+                source.abi_source_address,
+                schedule.canonical_v13_sources.size());
+            const auto& canonical =
+                schedule.canonical_v13_sources[
+                    source.abi_source_address];
+            BOOST_CHECK(
+                canonical.key == source.abi_key);
+        }
+    }
+    BOOST_CHECK_EQUAL(
+        child_snapshot_aliases,
+        schedule.child
+            .transcript_word_bindings.size());
+    BOOST_TEST_MESSAGE(
+        "SAFE_V14_DIRECT_PARENT events="
+        << schedule.program.size()
+        << " rows=" << direct.trace_rows
+        << " cols=" << direct.cs.n_columns
+        << " constraints="
+        << direct.cs.constraints.size()
+        << " direct_aliases="
+        << direct.proof_cell_aliases.size()
+        << " child_snapshot_aliases="
+        << child_snapshot_aliases
+        << " canonical_abi_cells="
+        << schedule.canonical_v13_sources.size()
+        << " max_degree="
+        << direct.max_algebraic_degree);
+
+    {
+        auto bad = direct.columns;
+        const auto& alias =
+            direct.proof_cell_aliases.front();
+        bad[alias.receipt_column][alias.receipt_row] =
+            gf::Add(
+                bad[alias.receipt_column][alias.receipt_row],
+                gf::Fp3::One());
+        BOOST_CHECK_GT(
+            bridge::CountViolationsV12(
+                direct.cs, bad),
+            0U);
+    }
+    {
+        auto bad = direct.columns;
+        const auto& alias =
+            direct.proof_cell_aliases.front();
+        bad[alias.event_column][alias.event_row] =
+            gf::Add(
+                bad[alias.event_column][alias.event_row],
+                gf::Fp3::One());
+        bad[alias.receipt_column][alias.receipt_row] =
+            bad[alias.event_column][alias.event_row];
+        BOOST_CHECK_GT(
+            bridge::CountViolationsV12(
+                direct.cs, bad),
+            0U);
+    }
+    {
+        auto bad = direct.columns;
+        const auto& layout = direct.layout;
+        bad[layout.Carry(0)][1] =
+            gf::Add(
+                bad[layout.Carry(0)][1],
+                gf::Fp3::One());
+        BOOST_CHECK_GT(
+            bridge::CountViolationsV12(
+                direct.cs, bad),
+            0U);
+    }
+
+    bridge::TypedSafeDirectParentProofV14 direct_proof;
+    const uint256 direct_seed = TestSeed(0x764);
+    const auto direct_begin =
+        std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        bridge::ProveTypedSafeDirectParentV14(
+            direct, direct_seed,
+            direct_proof, &why),
+        why);
+    const auto direct_prove_end =
+        std::chrono::steady_clock::now();
+    BOOST_REQUIRE_MESSAGE(
+        bridge::VerifyTypedSafeDirectParentProofV14(
+            schedule.program, direct_proof,
+            direct_seed,
+            direct.transcript_commitment,
+            &why),
+        why);
+    const auto direct_verify_end =
+        std::chrono::steady_clock::now();
+    BOOST_TEST_MESSAGE(
+        "SAFE_V14_DIRECT_PROOF rows="
+        << direct.trace_rows
+        << " cols=" << direct.cs.n_columns
+        << " prove_ms="
+        << std::chrono::duration_cast<
+               std::chrono::milliseconds>(
+               direct_prove_end -
+               direct_begin).count()
+        << " verify_ms="
+        << std::chrono::duration_cast<
+               std::chrono::milliseconds>(
+               direct_verify_end -
+               direct_prove_end).count());
+
+    BOOST_REQUIRE(
+        !direct_proof.proof.batch.queries.empty());
+    BOOST_REQUIRE_GT(
+        direct_proof.proof.batch.queries[0]
+            .row.values.size(),
+        direct.proof_cell_aliases.front()
+            .event_column);
+    {
+        // Proof-owned SAFE message cell: the opening no longer matches its
+        // committed row and the real FRI/AIR verifier rejects.
+        auto bad = direct_proof;
+        const uint32_t column =
+            direct.proof_cell_aliases.front()
+                .event_column;
+        bad.proof.batch.queries[0]
+            .row.values[column] =
+            gf::Add(
+                bad.proof.batch.queries[0]
+                    .row.values[column],
+                gf::Fp3::One());
+        BOOST_CHECK_MESSAGE(
+            !bridge::VerifyTypedSafeDirectParentProofV14(
+                schedule.program, bad,
+                direct_seed,
+                direct.transcript_commitment,
+                &why),
+            "proof-cell opening substitution accepted");
+    }
+    {
+        // Ordered-event binding: a proof cannot be transplanted to a
+        // different canonical event schedule.
+        auto reordered = schedule.program;
+        std::swap(reordered[0], reordered[1]);
+        BOOST_CHECK_MESSAGE(
+            !bridge::VerifyTypedSafeDirectParentProofV14(
+                reordered, direct_proof,
+                direct_seed,
+                direct.transcript_commitment,
+                &why),
+            "ordered-event program transplant accepted");
+    }
+    {
+        // The receipt boundary is public input to the rebuilt AIR.
+        auto wrong_receipt =
+            direct.transcript_commitment;
+        wrong_receipt[0] =
+            gf::Add(wrong_receipt[0], 1);
+        BOOST_CHECK_MESSAGE(
+            !bridge::VerifyTypedSafeDirectParentProofV14(
+                schedule.program, direct_proof,
+                direct_seed, wrong_receipt,
+                &why),
+            "wrong receipt boundary accepted");
+    }
+    {
+        BOOST_CHECK_MESSAGE(
+            !bridge::VerifyTypedSafeDirectParentProofV14(
+                schedule.program, direct_proof,
+                TestSeed(0x765),
+                direct.transcript_commitment,
+                &why),
+            "proof accepted under a different external seed");
+    }
+    {
+        // Query/opening integrity is enforced by the native FRI proof, not a
+        // host witness-violation count.
+        auto bad = direct_proof;
+        bad.proof.batch.queries[0].index ^= 1U;
+        BOOST_CHECK_MESSAGE(
+            !bridge::VerifyTypedSafeDirectParentProofV14(
+                schedule.program, bad,
+                direct_seed,
+                direct.transcript_commitment,
+                &why),
+            "query-index opening substitution accepted");
+    }
 
     {
         auto bad = proved.proof;

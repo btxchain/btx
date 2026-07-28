@@ -3522,6 +3522,421 @@ bool BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
             std::move(audit.witness));
     }
 
+    // Reconstruct the complete native multi-row prefix independently from
+    // the verifier replay and type every byte. Raw proof/public bytes carry
+    // their exact canonical V13 ABI key. Values absorbed from an earlier
+    // challenge carry the exact producing event/lane. Shape and OOD vector
+    // commitments are identified as derived-hash sources and therefore
+    // remain fail-closed until their hash AIR is joined in the same parent.
+    using SourceKind =
+        NativeFri3AlgMultiRowTypedSafeScheduleV13::
+            TranscriptSourceKind;
+    using SourceByte =
+        NativeFri3AlgMultiRowTypedSafeScheduleV13::
+            TranscriptSourceByte;
+    namespace proof_abi =
+        stage3_multirow_v11_proof_abi;
+    std::vector<unsigned char> prefix;
+    std::vector<SourceByte> prefix_source;
+    const auto append_source_byte =
+        [&](unsigned char byte, SourceKind kind,
+            uint32_t item, uint32_t byte_offset,
+            const proof_abi::SourceKeyV1* abi_key,
+            uint8_t byte_in_abi_word,
+            uint32_t producer_event,
+            uint8_t producer_lane,
+            bool hash_required) {
+            SourceByte source;
+            source.kind = kind;
+            source.item_index = item;
+            source.byte_offset = byte_offset;
+            source.normalized_source_available =
+                abi_key != nullptr ||
+                producer_event !=
+                    std::numeric_limits<uint32_t>::max();
+            source.hash_relation_required =
+                hash_required;
+            if (abi_key != nullptr) {
+                source.abi_key = *abi_key;
+                source.byte_in_abi_word =
+                    byte_in_abi_word;
+                source.canonical_abi_source = true;
+            }
+            if (producer_event !=
+                std::numeric_limits<uint32_t>::max()) {
+                source.producer_event = producer_event;
+                source.producer_output_lane =
+                    producer_lane;
+                source.prior_event_output_source = true;
+            }
+            prefix.push_back(byte);
+            prefix_source.push_back(source);
+        };
+    const auto append_constant =
+        [&](const unsigned char* bytes, size_t count,
+            SourceKind kind, uint32_t item) {
+            for (uint32_t offset = 0;
+                 offset < count; ++offset) {
+                append_source_byte(
+                    bytes[offset], kind, item, offset,
+                    nullptr, 0,
+                    std::numeric_limits<uint32_t>::max(),
+                    0, false);
+            }
+        };
+    const auto append_abi_u32 =
+        [&](uint32_t value,
+            proof_abi::SourceKeyV1 key,
+            SourceKind kind, uint32_t item) {
+            for (uint32_t byte = 0; byte < 4; ++byte) {
+                append_source_byte(
+                    static_cast<unsigned char>(
+                        value >> (8 * byte)),
+                    kind, item, byte, &key,
+                    static_cast<uint8_t>(byte),
+                    std::numeric_limits<uint32_t>::max(),
+                    0, false);
+            }
+        };
+    const auto append_abi_u64 =
+        [&](uint64_t value,
+            proof_abi::SourceKeyV1 key,
+            SourceKind kind, uint32_t item) {
+            for (uint32_t limb = 0; limb < 2; ++limb) {
+                auto limb_key = key;
+                limb_key.limb =
+                    static_cast<uint8_t>(limb);
+                append_abi_u32(
+                    static_cast<uint32_t>(
+                        value >> (32 * limb)),
+                    limb_key, kind, item);
+            }
+        };
+    const auto append_abi_fp =
+        [&](gf::Fp value,
+            proof_abi::SourceKeyV1 key,
+            SourceKind kind, uint32_t item) {
+            append_abi_u64(
+                gf::Canonical(value), key,
+                kind, item);
+        };
+    const auto append_abi_digest =
+        [&](const Fri3AlgDigest& digest,
+            proof_abi::FieldKindV1 field_kind,
+            uint32_t item, SourceKind kind) {
+            for (uint32_t lane = 0;
+                 lane < digest.size(); ++lane) {
+                proof_abi::SourceKeyV1 key{
+                    field_kind, item, 0, 0, lane, 0};
+                append_abi_fp(
+                    digest[lane], key, kind, item);
+            }
+        };
+    const auto append_derived_digest =
+        [&](const Fri3AlgDigest& digest,
+            SourceKind kind, uint32_t item) {
+            for (uint32_t lane = 0;
+                 lane < digest.size(); ++lane) {
+                const uint64_t value =
+                    gf::Canonical(digest[lane]);
+                for (uint32_t byte = 0;
+                     byte < 8; ++byte) {
+                    append_source_byte(
+                        static_cast<unsigned char>(
+                            value >> (8 * byte)),
+                        kind, item, 8 * lane + byte,
+                        nullptr, 0,
+                        std::numeric_limits<uint32_t>::max(),
+                        0, true);
+                }
+            }
+        };
+    const auto append_event_fp3 =
+        [&](const Fp3& value, uint32_t producer) {
+            const std::array<gf::Fp, 3> lanes{
+                value.c0, value.c1, value.c2};
+            for (uint32_t lane = 0;
+                 lane < lanes.size(); ++lane) {
+                const uint64_t raw =
+                    gf::Canonical(lanes[lane]);
+                for (uint32_t byte = 0;
+                     byte < 8; ++byte) {
+                    append_source_byte(
+                        static_cast<unsigned char>(
+                            raw >> (8 * byte)),
+                        SourceKind::ChallengeOutput,
+                        producer, 8 * lane + byte,
+                        nullptr, 0, producer,
+                        static_cast<uint8_t>(lane),
+                        false);
+                }
+            }
+        };
+    const auto bind_prefix =
+        [&](uint32_t event) {
+            const auto& snapshot =
+                out.replay.events[event]
+                    .transcript_before_draw;
+            if (snapshot != prefix ||
+                prefix_source.size() != prefix.size()) {
+                return false;
+            }
+            for (uint32_t offset = 0;
+                 offset < prefix.size();
+                 offset += 4) {
+                NativeFri3AlgMultiRowTypedSafeScheduleV13::
+                    TranscriptWordBinding binding;
+                binding.event = event;
+                binding.message_ordinal =
+                    4 + offset / 4;
+                binding.transcript_byte_offset =
+                    offset;
+                uint32_t packed = 0;
+                for (uint32_t byte = 0;
+                     byte < 4 &&
+                     offset + byte < prefix.size();
+                     ++byte) {
+                    packed |=
+                        uint32_t{
+                            prefix[offset + byte]}
+                        << (8 * byte);
+                    binding.source_bytes[byte] =
+                        prefix_source[offset + byte];
+                    ++binding.bytes_present;
+                    ++out.transcript_byte_occurrences;
+                    const auto& source =
+                        prefix_source[offset + byte];
+                    if (source.canonical_abi_source) {
+                        ++out
+                            .canonical_abi_byte_occurrences;
+                    } else if (
+                        source.prior_event_output_source) {
+                        ++out
+                            .prior_event_output_byte_occurrences;
+                    } else if (
+                        source.hash_relation_required) {
+                        ++out
+                            .derived_hash_byte_occurrences;
+                    } else {
+                        ++out
+                            .protocol_constant_byte_occurrences;
+                    }
+                }
+                binding.packed_le32 =
+                    gf::FromU64(packed);
+                binding.every_byte_typed =
+                    binding.bytes_present != 0;
+                if (binding.message_ordinal >=
+                        out.program[event].message.size() ||
+                    out.program[event]
+                            .message[binding.message_ordinal]
+                            .binding !=
+                        TypedSafeMessageBindingV13::
+                            ProofOwned ||
+                    out.witness[event]
+                            .message[binding.message_ordinal] !=
+                        binding.packed_le32) {
+                    return false;
+                }
+                out.transcript_word_bindings.push_back(
+                    std::move(binding));
+            }
+            return true;
+        };
+
+    static constexpr char kMultiRowDomain[] =
+        "BTX_RC_FRI3ALG_MULTI_ROW_RAP_SAFE_Q192_K2_V13";
+    append_constant(
+        reinterpret_cast<const unsigned char*>(
+            kMultiRowDomain),
+        sizeof(kMultiRowDomain) - 1,
+        SourceKind::ProtocolConstant, 0);
+    for (uint32_t word = 0; word < 8; ++word) {
+        uint32_t value = 0;
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            value |=
+                uint32_t{
+                    child_fs_seed.data()[
+                        4 * word + byte]}
+                << (8 * byte);
+        }
+        append_abi_u32(
+            value,
+            {proof_abi::FieldKindV1::PublicFsSeed,
+             word, 0, 0, 0, 0},
+            SourceKind::PublicFsSeed, word);
+    }
+    append_abi_u64(
+        proof.pow_grind_nonce,
+        {proof_abi::FieldKindV1::PowGrindNonce},
+        SourceKind::ProofPowGrindNonce, 0);
+    append_abi_u32(
+        kRCFriBlowup,
+        {proof_abi::FieldKindV1::Blowup},
+        SourceKind::ProtocolConstant, 0);
+    append_abi_u32(
+        proof.n_coeffs,
+        {proof_abi::FieldKindV1::NCoeffs},
+        SourceKind::PublicShape, 0);
+    append_abi_u32(
+        proof.version,
+        {proof_abi::FieldKindV1::BatchVersion},
+        SourceKind::ProtocolConstant, 0);
+    append_abi_u32(
+        static_cast<uint32_t>(proof.groups.size()),
+        {proof_abi::FieldKindV1::GroupCount},
+        SourceKind::PublicShape, 0);
+    for (uint32_t group = 0;
+         group < proof.groups.size(); ++group) {
+        const auto& item = proof.groups[group];
+        append_abi_u32(
+            static_cast<uint32_t>(item.role),
+            {proof_abi::FieldKindV1::GroupRole,
+             group, 0, 0, 0, 0},
+            SourceKind::PublicShape, group);
+        append_abi_u32(
+            item.first_column,
+            {proof_abi::FieldKindV1::GroupFirstColumn,
+             group, 0, 0, 0, 0},
+            SourceKind::PublicShape, group);
+        append_abi_u32(
+            item.column_count,
+            {proof_abi::FieldKindV1::GroupColumnCount,
+             group, 0, 0, 0, 0},
+            SourceKind::PublicShape, group);
+        append_abi_u32(
+            item.row_commit.n_leaves,
+            {proof_abi::FieldKindV1::GroupLeaves,
+             group, 0, 0, 0, 0},
+            SourceKind::PublicShape, group);
+        append_abi_digest(
+            item.row_commit.root,
+            proof_abi::FieldKindV1::GroupRoot,
+            group, SourceKind::RowRootDigest);
+    }
+    append_abi_u32(
+        static_cast<uint32_t>(
+            proof.column_len.size()),
+        {proof_abi::FieldKindV1::ColumnCount},
+        SourceKind::PublicShape, 0);
+    append_derived_digest(
+        Fri3AlgShapeCommit(
+            proof.n_coeffs, proof.column_len),
+        SourceKind::ShapeCommitDigest, 0);
+
+    uint32_t selected_z1_event =
+        std::numeric_limits<uint32_t>::max();
+    uint32_t selected_z2_event =
+        std::numeric_limits<uint32_t>::max();
+    uint32_t w1_event =
+        std::numeric_limits<uint32_t>::max();
+    bool selected_points_absorbed = false;
+    bool deep_weights_absorbed = false;
+    uint32_t last_fold_appended =
+        std::numeric_limits<uint32_t>::max();
+    for (uint32_t event = 0;
+         event < out.replay.events.size(); ++event) {
+        const auto& draw = out.replay.events[event];
+        if (draw.consumer ==
+            Fri3AlgSafeV13Consumer::QueryIndex) {
+            if (!draw.transcript_before_draw.empty()) {
+                return Fail(
+                    why,
+                    "v13_multi_row_query_prefix");
+            }
+            continue;
+        }
+        if (draw.consumer ==
+                Fri3AlgSafeV13Consumer::FoldBeta ||
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::QuerySeed) {
+            uint32_t fold =
+                draw.consumer ==
+                    Fri3AlgSafeV13Consumer::FoldBeta
+                ? draw.ordinal
+                : static_cast<uint32_t>(
+                      proof.fold_layers.size() - 1);
+            if (fold >= proof.fold_layers.size()) {
+                return Fail(
+                    why,
+                    "v13_multi_row_fold_source");
+            }
+            if (last_fold_appended != fold) {
+                append_abi_digest(
+                    proof.fold_layers[fold].root,
+                    proof_abi::FieldKindV1::FoldRoot,
+                    fold, SourceKind::FoldRootDigest);
+                last_fold_appended = fold;
+            }
+        }
+        if (!bind_prefix(event)) {
+            return Fail(
+                why,
+                "v13_multi_row_prefix_provenance");
+        }
+        if (draw.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ1 &&
+            draw.selected) {
+            selected_z1_event = event;
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ2 &&
+            draw.selected) {
+            selected_z2_event = event;
+        }
+        if (draw.consumer ==
+                Fri3AlgSafeV13Consumer::OodZ2 &&
+            draw.ordinal + 1 ==
+                kRCFri3AlgSafeQ192K2OodCandidatesV13 &&
+            !selected_points_absorbed) {
+            if (selected_z1_event ==
+                    std::numeric_limits<uint32_t>::max() ||
+                selected_z2_event ==
+                    std::numeric_limits<uint32_t>::max()) {
+                return Fail(
+                    why,
+                    "v13_multi_row_selected_z_source");
+            }
+            append_event_fp3(
+                proof.z1, selected_z1_event);
+            append_event_fp3(
+                proof.z2, selected_z2_event);
+            append_derived_digest(
+                Fri3AlgOodEvalCommit(
+                    proof.z1, proof.z2,
+                    proof.evals_z1,
+                    proof.evals_z2),
+                SourceKind::
+                    OodEvaluationCommitDigest,
+                0);
+            selected_points_absorbed = true;
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::FriLambda) {
+            append_event_fp3(
+                proof.lambda, event);
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::DeepW1) {
+            w1_event = event;
+        } else if (
+            draw.consumer ==
+                Fri3AlgSafeV13Consumer::DeepW2 &&
+            !deep_weights_absorbed) {
+            if (w1_event ==
+                std::numeric_limits<uint32_t>::max()) {
+                return Fail(
+                    why,
+                    "v13_multi_row_deep_source");
+            }
+            append_event_fp3(
+                proof.w1, w1_event);
+            append_event_fp3(
+                proof.w2, event);
+            deep_weights_absorbed = true;
+        }
+    }
+
     const std::array<
         TypedSafeChallengeKindV13, 8>
         required_fri_kinds{{
@@ -3569,6 +3984,21 @@ bool BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
         out.replay.query_candidate_events ==
             kRCFri3AlgNumQueries &&
         z1_selected && z2_selected;
+    out.every_transcript_byte_typed =
+        out.transcript_byte_occurrences > 0 &&
+        std::all_of(
+            out.transcript_word_bindings.begin(),
+            out.transcript_word_bindings.end(),
+            [](const auto& binding) {
+                return binding.every_byte_typed;
+            });
+    out.canonical_v13_source_keys_complete =
+        out.canonical_abi_byte_occurrences > 0 &&
+        out.prior_event_output_byte_occurrences > 0 &&
+        out.derived_hash_byte_occurrences > 0 &&
+        out.protocol_constant_byte_occurrences > 0 &&
+        out.transcript_word_bindings.size() ==
+            out.proof_owned_message_cells;
     out.normalized_child_cells_bound = false;
     out.outer_split_rap_events_bound = false;
     out.recursively_consumed = false;
@@ -3578,6 +4008,8 @@ bool BuildNativeFri3AlgMultiRowTypedSafeScheduleV13(
         out.every_snapshot_exactly_materialized &&
         out.every_safe_output_matches_native_consumer &&
         out.unique_query_seed_then_q192 &&
+        out.every_transcript_byte_typed &&
+        out.canonical_v13_source_keys_complete &&
         all_fri_kinds &&
         out.events_materialized ==
             out.replay.events.size() &&
@@ -3752,6 +4184,118 @@ bool BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
         !out.outer.replay.fri_seed.IsNull() &&
         out.child.native_proof_verified;
 
+    abi::EnvelopeV1 envelope;
+    for (uint32_t word = 0;
+         word < envelope.public_fs_seed.size(); ++word) {
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            envelope.public_fs_seed[word] |=
+                uint32_t{
+                    out.outer.replay.fri_seed.data()[
+                        4 * word + byte]}
+                << (8 * byte);
+        }
+    }
+    envelope.trace_columns = cs.n_columns;
+    if (proof.batch.column_len.empty()) {
+        return Fail(
+            why,
+            "v13_split_rap_empty_column_lengths");
+    }
+    envelope.quotient_len =
+        proof.batch.column_len.back();
+    envelope.split = proof;
+    std::vector<abi::SourceCellV1> encoded_sources;
+    std::string abi_why;
+    if (!abi::EncodeCanonicalSafeV13(
+            envelope, out.canonical_v13_abi_words,
+            &encoded_sources, &abi_why)) {
+        return Fail(
+            why,
+            "v13_split_rap_canonical_abi_encode:" +
+                abi_why);
+    }
+    const auto decoded =
+        abi::DecodeCanonicalSafeV13(
+            out.canonical_v13_abi_words, &abi_why);
+    if (!decoded.has_value() ||
+        !decoded->canonical ||
+        !decoded->complete ||
+        decoded->sources.size() !=
+            encoded_sources.size()) {
+        return Fail(
+            why,
+            "v13_split_rap_canonical_abi_decode");
+    }
+    out.canonical_v13_sources =
+        decoded->sources;
+    for (uint32_t address = 0;
+         address < encoded_sources.size(); ++address) {
+        if (encoded_sources[address].address != address ||
+            out.canonical_v13_sources[address].address != address ||
+            !(encoded_sources[address].key ==
+              out.canonical_v13_sources[address].key) ||
+            encoded_sources[address].value !=
+                out.canonical_v13_sources[address].value ||
+            encoded_sources[address].ownership !=
+                out.canonical_v13_sources[address].ownership) {
+            return Fail(
+                why,
+                "v13_split_rap_canonical_source_inventory");
+        }
+    }
+    for (auto& binding :
+         out.child.transcript_word_bindings) {
+        const uint32_t packed =
+            static_cast<uint32_t>(
+                gf::Canonical(binding.packed_le32));
+        for (uint32_t byte = 0;
+             byte < binding.bytes_present; ++byte) {
+            auto& source =
+                binding.source_bytes[byte];
+            if (!source.canonical_abi_source) continue;
+            ++out.canonical_v13_source_byte_occurrences;
+            const auto address =
+                abi::FindSourceAddressV1(
+                    out.canonical_v13_sources,
+                    source.abi_key);
+            if (!address.has_value() ||
+                *address >=
+                    out.canonical_v13_sources.size()) {
+                return Fail(
+                    why,
+                    "v13_split_rap_abi_source_address");
+            }
+            const auto& cell =
+                out.canonical_v13_sources[*address];
+            const uint8_t source_byte =
+                static_cast<uint8_t>(
+                    cell.value >>
+                    (8 * source.byte_in_abi_word));
+            const uint8_t event_byte =
+                static_cast<uint8_t>(
+                    packed >> (8 * byte));
+            if (source_byte != event_byte) {
+                return Fail(
+                    why,
+                    "v13_split_rap_abi_source_value");
+            }
+            source.abi_source_address = *address;
+            ++out
+                .canonical_v13_source_byte_occurrences_resolved;
+        }
+    }
+    out.canonical_v13_proof_decoded =
+        !out.canonical_v13_sources.empty() &&
+        out.canonical_v13_abi_words.size() ==
+            abi::kFieldAbiHeaderWordsV1 +
+                2 *
+                out.canonical_v13_sources.size();
+    out.every_child_transcript_abi_source_resolved =
+        out.canonical_v13_source_byte_occurrences > 0 &&
+        out.canonical_v13_source_byte_occurrences ==
+            out
+                .canonical_v13_source_byte_occurrences_resolved;
+
     out.program.reserve(
         out.outer.program.size() +
         out.child.program.size());
@@ -3819,6 +4363,8 @@ bool BuildNativeSplitRapMultiRowTypedSafeScheduleV2(
         out.child.valid &&
         out.child_seed_derived_from_outer_replay &&
         out.complete_challenge_kind_coverage &&
+        out.canonical_v13_proof_decoded &&
+        out.every_child_transcript_abi_source_resolved &&
         out.program.size() == out.witness.size() &&
         !out.normalized_child_cells_bound &&
         !out.same_parent_child_seed_feedback &&
@@ -4470,6 +5016,1354 @@ bool VerifyTypedSafeEventParentProofV13(
     return aq::AirQuotientVerifyRowsSplitRap(
         cs, proof.proof, base_indices,
         relation_seed, why);
+}
+
+namespace {
+
+constexpr gf::Fp kTypedDirectReceiptMagicV14 =
+    UINT64_C(0x4254585344523134); // "BTXSDR14"
+constexpr gf::Fp kTypedDirectReceiptHeaderEndV14 =
+    UINT64_C(0x454e443134); // "END14"
+constexpr char kTypedDirectReceiptDomainV14[] =
+    "BTX_RC_STAGE3_TYPED_SAFE_DIRECT_RECEIPT_V14";
+
+struct TypedDirectRowPlanV14 {
+    TypedSafeDirectRowKindV14 kind{
+        TypedSafeDirectRowKindV14::Padding};
+    bool event_reset{false};
+    bool event_final{false};
+    bool query_seed_final{false};
+    bool receipt_final{false};
+    uint32_t event{0};
+    uint32_t block{0};
+    uint32_t paired_event_row{0};
+    uint32_t receipt_source_start{0};
+    std::array<bool, 8> message_mask{};
+    std::array<bool, 8> constant_mask{};
+    std::array<gf::Fp, 8> constant_value{};
+    std::array<bool, 8> query_seed_mask{};
+    std::array<uint32_t, 8> query_seed_lane{};
+    std::array<bool, 8> receipt_source_mask{};
+    std::array<gf::Fp, 4> tag{};
+};
+
+struct TypedDirectPlanV14 {
+    std::vector<TypedDirectRowPlanV14> rows;
+    std::vector<std::vector<uint32_t>> event_block_row;
+    std::vector<std::vector<uint32_t>> receipt_message_row;
+    std::vector<uint32_t> event_final_row;
+    std::vector<uint32_t> receipt_output_row;
+    uint32_t query_seed_event{std::numeric_limits<uint32_t>::max()};
+    uint32_t semantic_count{0};
+    uint32_t proof_owned_count{0};
+    uint32_t event_rows{0};
+    uint32_t receipt_rows{0};
+    uint32_t active_rows{0};
+    uint32_t trace_rows{0};
+    uint32_t kinds_covered{0};
+    bool every_query_uses_seed{false};
+};
+
+Fp3 DirectKindSelectorV14(
+    const Fp3& kind, TypedSafeDirectRowKindV14 selected)
+{
+    Fp3 numerator = Fp3::One();
+    Fp3 denominator = Fp3::One();
+    const uint32_t selected_value =
+        static_cast<uint32_t>(selected);
+    for (uint32_t value = 0; value <= 4; ++value) {
+        if (value == selected_value) continue;
+        numerator = gf::Mul(
+            numerator, gf::Sub(kind, U32(value)));
+        denominator = gf::Mul(
+            denominator,
+            gf::Sub(U32(selected_value), U32(value)));
+    }
+    return gf::Mul(numerator, gf::Inv(denominator));
+}
+
+Fp3 DirectLaneSelectorV14(
+    const Fp3& lane,
+    const std::vector<Fp3>& row,
+    const TypedSafeDirectParentLayoutV14& layout)
+{
+    Fp3 selected = Fp3::Zero();
+    for (uint32_t source = 0; source < 8; ++source) {
+        Fp3 numerator = Fp3::One();
+        Fp3 denominator = Fp3::One();
+        for (uint32_t value = 0; value < 8; ++value) {
+            if (value == source) continue;
+            numerator = gf::Mul(
+                numerator, gf::Sub(lane, U32(value)));
+            denominator = gf::Mul(
+                denominator,
+                gf::Sub(U32(source), U32(value)));
+        }
+        selected = gf::Add(
+            selected,
+            gf::Mul(
+                row[layout.Message(source)],
+                gf::Mul(numerator, gf::Inv(denominator))));
+    }
+    return selected;
+}
+
+std::vector<gf::Fp> TypedDirectReceiptMessageV14(
+    const alg_hash::Digest& program_root,
+    const std::vector<gf::Fp>& semantic)
+{
+    std::vector<gf::Fp> out{
+        kTypedDirectReceiptMagicV14,
+        gf::FromU64(kTypedSafeDirectParentVersionV14),
+        program_root[0], program_root[1],
+        program_root[2], program_root[3],
+        gf::FromU64(semantic.size()),
+        kTypedDirectReceiptHeaderEndV14,
+    };
+    out.insert(out.end(), semantic.begin(), semantic.end());
+    return out;
+}
+
+bool BuildTypedDirectPlanV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const alg_hash::Digest& program_root,
+    const alg_hash::Digest& expected_commitment,
+    TypedDirectPlanV14& out,
+    std::string* why)
+{
+    out = {};
+    TypedEventPlanV13 coverage;
+    if (!Canonical(program_root) ||
+        program_root == alg_hash::Digest{} ||
+        !Canonical(expected_commitment) ||
+        expected_commitment == alg_hash::Digest{} ||
+        !ValidateTypedEventProgramV13(
+            program, &coverage, why)) {
+        return false;
+    }
+    out.query_seed_event = coverage.query_seed_event;
+    out.kinds_covered = coverage.kinds_covered;
+    out.every_query_uses_seed = coverage.every_query_uses_seed;
+    out.event_block_row.resize(program.size());
+    out.receipt_message_row.resize(program.size());
+    out.event_final_row.resize(program.size());
+    out.receipt_output_row.resize(program.size());
+
+    // The receipt header occupies exactly one full SAFE rate block.  This
+    // avoids inserting an unconstrained zero between the header and the
+    // first semantic cell.
+    TypedDirectRowPlanV14 header;
+    header.kind =
+        TypedSafeDirectRowKindV14::ReceiptHeader;
+    header.message_mask.fill(true);
+    header.constant_mask.fill(true);
+    header.constant_value = {
+        kTypedDirectReceiptMagicV14,
+        gf::FromU64(kTypedSafeDirectParentVersionV14),
+        program_root[0], program_root[1],
+        program_root[2], program_root[3],
+        gf::FromU64(0), // semantic count is patched below
+        kTypedDirectReceiptHeaderEndV14,
+    };
+    out.rows.push_back(header);
+    ++out.receipt_rows;
+
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        const auto& spec = program[event];
+        const uint32_t blocks = static_cast<uint32_t>(
+            (spec.message.size() + 7) / 8);
+        out.event_block_row[event].resize(blocks);
+        out.receipt_message_row[event].assign(
+            blocks, std::numeric_limits<uint32_t>::max());
+        std::array<gf::Fp, 4> event_tag{};
+        if (!TypedEventTagV13(
+                spec.role, spec.application_domain,
+                static_cast<uint32_t>(spec.message.size()),
+                event_tag, why)) {
+            return false;
+        }
+        for (uint32_t block = 0; block < blocks; ++block) {
+            TypedDirectRowPlanV14 event_row;
+            event_row.kind =
+                TypedSafeDirectRowKindV14::Event;
+            event_row.event_reset = block == 0;
+            event_row.event_final = block + 1 == blocks;
+            event_row.query_seed_final =
+                event_row.event_final &&
+                event == out.query_seed_event;
+            event_row.event = event;
+            event_row.block = block;
+            event_row.tag = event_tag;
+
+            uint32_t proof_start = 8;
+            uint32_t proof_count = 0;
+            bool proof_segment_ended = false;
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal = 8 * block + lane;
+                if (ordinal >= spec.message.size()) continue;
+                event_row.message_mask[lane] = true;
+                const auto& cell = spec.message[ordinal];
+                if (cell.binding ==
+                    TypedSafeMessageBindingV13::Constant) {
+                    event_row.constant_mask[lane] = true;
+                    event_row.constant_value[lane] =
+                        cell.constant;
+                    if (proof_count != 0) proof_segment_ended = true;
+                } else if (
+                    cell.binding ==
+                    TypedSafeMessageBindingV13::QuerySeedLane) {
+                    event_row.query_seed_mask[lane] = true;
+                    event_row.query_seed_lane[lane] =
+                        cell.query_seed_lane;
+                    if (proof_count != 0) proof_segment_ended = true;
+                } else {
+                    if (proof_segment_ended) {
+                        return Fail(
+                            why,
+                            "v14_noncontiguous_proof_segment");
+                    }
+                    if (proof_count == 0) proof_start = lane;
+                    ++proof_count;
+                }
+            }
+            out.event_block_row[event][block] =
+                static_cast<uint32_t>(out.rows.size());
+            out.rows.push_back(event_row);
+            ++out.event_rows;
+
+            if (proof_count != 0) {
+                TypedDirectRowPlanV14 receipt_row;
+                receipt_row.kind =
+                    TypedSafeDirectRowKindV14::
+                        ReceiptMessage;
+                receipt_row.event = event;
+                receipt_row.block = block;
+                receipt_row.paired_event_row =
+                    out.event_block_row[event][block];
+                receipt_row.receipt_source_start =
+                    proof_start;
+                for (uint32_t lane = 0;
+                     lane < proof_count; ++lane) {
+                    receipt_row.message_mask[lane] = true;
+                    receipt_row.receipt_source_mask[lane] =
+                        true;
+                }
+                out.receipt_message_row[event][block] =
+                    static_cast<uint32_t>(out.rows.size());
+                out.rows.push_back(receipt_row);
+                ++out.receipt_rows;
+                out.proof_owned_count += proof_count;
+                out.semantic_count += 8;
+            }
+            if (event_row.event_final) {
+                TypedDirectRowPlanV14 output_row;
+                output_row.kind =
+                    TypedSafeDirectRowKindV14::
+                        ReceiptOutput;
+                output_row.event = event;
+                output_row.block = block;
+                output_row.paired_event_row =
+                    out.event_block_row[event][block];
+                for (uint32_t lane = 0; lane < 4; ++lane) {
+                    output_row.message_mask[lane] = true;
+                }
+                out.event_final_row[event] =
+                    out.event_block_row[event][block];
+                out.receipt_output_row[event] =
+                    static_cast<uint32_t>(out.rows.size());
+                out.rows.push_back(output_row);
+                ++out.receipt_rows;
+                out.semantic_count += 8;
+            }
+        }
+    }
+    if (out.rows.empty() ||
+        out.semantic_count == 0 ||
+        out.proof_owned_count == 0) {
+        return Fail(why, "v14_empty_semantic_stream");
+    }
+    out.rows[0].constant_value[6] =
+        gf::FromU64(out.semantic_count);
+    {
+        const std::vector<uint8_t> receipt_domain(
+            reinterpret_cast<const uint8_t*>(
+                kTypedDirectReceiptDomainV14),
+            reinterpret_cast<const uint8_t*>(
+                kTypedDirectReceiptDomainV14) +
+                sizeof(kTypedDirectReceiptDomainV14) - 1);
+        if (!TypedEventTagV13(
+                aht::RoleV12::ReceiptCommitment,
+                receipt_domain,
+                8 + out.semantic_count,
+                out.rows[0].tag, why)) {
+            return false;
+        }
+    }
+    out.rows.back().receipt_final = true;
+    out.active_rows =
+        static_cast<uint32_t>(out.rows.size());
+    out.trace_rows =
+        NextPowerOfTwoV13(uint64_t{out.active_rows} + 1);
+    if (out.trace_rows == 0) {
+        return Fail(why, "v14_trace_rows_overflow");
+    }
+    out.rows.resize(out.trace_rows);
+    return true;
+}
+
+void AddTypedDirectPreprocessedV14(
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>* columns,
+    uint32_t column,
+    std::vector<Fp3> values)
+{
+    if (columns != nullptr) (*columns)[column] = values;
+    cs.preprocessed.emplace_back(column, std::move(values));
+}
+
+bool BuildTypedDirectCsV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const alg_hash::Digest& program_root,
+    const alg_hash::Digest& expected_commitment,
+    TypedDirectPlanV14& plan,
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::vector<std::vector<Fp3>>* columns,
+    std::string* why)
+{
+    if (!BuildTypedDirectPlanV14(
+            program, program_root, expected_commitment,
+            plan, why)) {
+        return false;
+    }
+    const TypedSafeDirectParentLayoutV14 layout;
+    cs = {};
+    cs.n_rows = plan.trace_rows;
+    cs.n_columns = layout.end;
+    cs.preprocessed_pin_ood = true;
+    if (columns != nullptr) {
+        columns->assign(
+            cs.n_columns,
+            std::vector<Fp3>(cs.n_rows, Fp3::Zero()));
+    }
+
+    std::vector<Fp3> active(cs.n_rows);
+    std::vector<Fp3> row_kind(cs.n_rows);
+    std::vector<Fp3> event_reset(cs.n_rows);
+    std::vector<Fp3> event_final(cs.n_rows);
+    std::vector<Fp3> query_seed_final(cs.n_rows);
+    std::vector<Fp3> receipt_final(cs.n_rows);
+    std::array<std::vector<Fp3>, 8> message_mask;
+    std::array<std::vector<Fp3>, 4> tag;
+    std::array<std::vector<Fp3>, 8> constant_mask;
+    std::array<std::vector<Fp3>, 8> constant_value;
+    std::array<std::vector<Fp3>, 8> query_seed_mask;
+    std::array<std::vector<Fp3>, 8> query_seed_lane;
+    std::array<std::vector<Fp3>, 8> receipt_source_mask;
+    std::vector<Fp3> receipt_source_start(cs.n_rows);
+    std::array<std::vector<Fp3>, 4> expected;
+    for (auto* group : {
+             &message_mask, &constant_mask, &constant_value,
+             &query_seed_mask, &query_seed_lane,
+             &receipt_source_mask}) {
+        for (auto& values : *group) values.resize(cs.n_rows);
+    }
+    for (auto& values : tag) values.resize(cs.n_rows);
+    for (auto& values : expected) values.resize(cs.n_rows);
+
+    for (uint32_t row = 0; row < cs.n_rows; ++row) {
+        const auto& p = plan.rows[row];
+        const bool is_active =
+            p.kind != TypedSafeDirectRowKindV14::Padding;
+        active[row] = U(is_active);
+        row_kind[row] =
+            U32(static_cast<uint32_t>(p.kind));
+        event_reset[row] = U(p.event_reset);
+        event_final[row] = U(p.event_final);
+        query_seed_final[row] = U(p.query_seed_final);
+        receipt_final[row] = U(p.receipt_final);
+        receipt_source_start[row] =
+            U32(p.receipt_source_start);
+        for (uint32_t lane = 0; lane < 8; ++lane) {
+            message_mask[lane][row] =
+                U(p.message_mask[lane]);
+            constant_mask[lane][row] =
+                U(p.constant_mask[lane]);
+            constant_value[lane][row] =
+                U(p.constant_value[lane]);
+            query_seed_mask[lane][row] =
+                U(p.query_seed_mask[lane]);
+            query_seed_lane[lane][row] =
+                U32(p.query_seed_lane[lane]);
+            receipt_source_mask[lane][row] =
+                U(p.receipt_source_mask[lane]);
+        }
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            tag[lane][row] = U(p.tag[lane]);
+            expected[lane][row] =
+                U(expected_commitment[lane]);
+        }
+    }
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.active, std::move(active));
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.row_kind, std::move(row_kind));
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.event_reset,
+        std::move(event_reset));
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.event_final,
+        std::move(event_final));
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.query_seed_final,
+        std::move(query_seed_final));
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.receipt_final,
+        std::move(receipt_final));
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        AddTypedDirectPreprocessedV14(
+            cs, columns, layout.message_mask_base + lane,
+            std::move(message_mask[lane]));
+        AddTypedDirectPreprocessedV14(
+            cs, columns, layout.constant_mask_base + lane,
+            std::move(constant_mask[lane]));
+        AddTypedDirectPreprocessedV14(
+            cs, columns, layout.constant_value_base + lane,
+            std::move(constant_value[lane]));
+        AddTypedDirectPreprocessedV14(
+            cs, columns, layout.query_seed_mask_base + lane,
+            std::move(query_seed_mask[lane]));
+        AddTypedDirectPreprocessedV14(
+            cs, columns, layout.query_seed_lane_base + lane,
+            std::move(query_seed_lane[lane]));
+        AddTypedDirectPreprocessedV14(
+            cs, columns,
+            layout.receipt_source_mask_base + lane,
+            std::move(receipt_source_mask[lane]));
+    }
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        AddTypedDirectPreprocessedV14(
+            cs, columns, layout.tag_base + lane,
+            std::move(tag[lane]));
+        AddTypedDirectPreprocessedV14(
+            cs, columns,
+            layout.expected_commitment_base + lane,
+            std::move(expected[lane]));
+    }
+    AddTypedDirectPreprocessedV14(
+        cs, columns, layout.receipt_source_start,
+        std::move(receipt_source_start));
+
+    auto constraints =
+        p2air::BuildSelectorGatedConstraints(
+            layout.poseidon, layout.active);
+    cs.constraints.insert(
+        cs.constraints.end(),
+        std::make_move_iterator(constraints.begin()),
+        std::make_move_iterator(constraints.end()));
+    const auto add =
+        [&cs](
+            const char* name, aq::AirKind kind,
+            uint32_t degree,
+            std::function<Fp3(
+                const std::vector<Fp3>&,
+                const std::vector<Fp3>&)> eval) {
+            aq::AirConstraint<Fp3> constraint;
+            constraint.name = name;
+            constraint.kind = kind;
+            constraint.alg_degree = degree;
+            constraint.eval = std::move(eval);
+            cs.constraints.push_back(std::move(constraint));
+        };
+
+    // Padded message cells are exactly zero. Event constants and QuerySeed
+    // feedback are verifier-programmed; receipt messages are linked below.
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        add(
+            "stage3.safe_direct.message_padding",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    gf::Sub(
+                        Fp3::One(),
+                        cur[layout.message_mask_base + lane]),
+                    cur[layout.Message(lane)]);
+            });
+        add(
+            "stage3.safe_direct.constant",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.constant_mask_base + lane],
+                    gf::Sub(
+                        cur[layout.Message(lane)],
+                        cur[layout.constant_value_base + lane]));
+            });
+        add(
+            "stage3.safe_direct.query_seed",
+            aq::AirKind::kEverywhere, 5,
+            [layout, lane](const auto& cur, const auto&) {
+                std::array<Fp3, 4> seed{};
+                for (uint32_t item = 0; item < 4; ++item) {
+                    seed[item] =
+                        cur[layout.QuerySeed(item)];
+                }
+                return gf::Mul(
+                    cur[layout.query_seed_mask_base + lane],
+                    gf::Sub(
+                        cur[layout.Message(lane)],
+                        TypedEventQuerySeedLaneV13(
+                            cur[layout.query_seed_lane_base + lane],
+                            seed)));
+            });
+    }
+
+    // Reset rows start a SAFE invocation. Continuation rows consume the
+    // alternating carry owned by the preceding opposite-purpose row.
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        add(
+            "stage3.safe_direct.event_reset_rate",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.event_reset],
+                    gf::Sub(
+                        cur[layout.poseidon.perm.InputCol(lane)],
+                        cur[layout.Message(lane)]));
+            });
+    }
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        const uint32_t capacity = 8 + lane;
+        add(
+            "stage3.safe_direct.event_reset_capacity",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane, capacity](
+                const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.event_reset],
+                    gf::Sub(
+                        cur[layout.poseidon.perm.InputCol(capacity)],
+                        cur[layout.tag_base + lane]));
+            });
+    }
+
+    // Receipt header is a local reset. It is the only header row.
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        add(
+            "stage3.safe_direct.receipt_header_rate",
+            aq::AirKind::kEverywhere, 5,
+            [layout, lane](const auto& cur, const auto&) {
+                const Fp3 header = DirectKindSelectorV14(
+                    cur[layout.row_kind],
+                    TypedSafeDirectRowKindV14::ReceiptHeader);
+                return gf::Mul(
+                    header,
+                    gf::Sub(
+                        cur[layout.poseidon.perm.InputCol(lane)],
+                        cur[layout.Message(lane)]));
+            });
+    }
+    // Receipt capacity tag is supplied on the header row by the same tag
+    // columns used for event resets.
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        const uint32_t capacity = 8 + lane;
+        add(
+            "stage3.safe_direct.receipt_header_capacity",
+            aq::AirKind::kEverywhere, 5,
+            [layout, lane, capacity](
+                const auto& cur, const auto&) {
+                const Fp3 header = DirectKindSelectorV14(
+                    cur[layout.row_kind],
+                    TypedSafeDirectRowKindV14::ReceiptHeader);
+                return gf::Mul(
+                    header,
+                    gf::Sub(
+                        cur[layout.poseidon.perm.InputCol(capacity)],
+                        cur[layout.tag_base + lane]));
+            });
+    }
+
+    // Every non-header active row is adjacent to the row that owns the other
+    // sponge state. The four transition cases below are exhaustive.
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT; ++lane) {
+        add(
+            "stage3.safe_direct.carry_transition",
+            aq::AirKind::kTransition, 6,
+            [layout, lane](const auto& cur, const auto& next) {
+                const Fp3 next_event =
+                    DirectKindSelectorV14(
+                        next[layout.row_kind],
+                        TypedSafeDirectRowKindV14::Event);
+                const Fp3 next_receipt_message =
+                    DirectKindSelectorV14(
+                        next[layout.row_kind],
+                        TypedSafeDirectRowKindV14::
+                            ReceiptMessage);
+                const Fp3 next_receipt_output =
+                    DirectKindSelectorV14(
+                        next[layout.row_kind],
+                        TypedSafeDirectRowKindV14::
+                            ReceiptOutput);
+                const Fp3 cur_event =
+                    DirectKindSelectorV14(
+                        cur[layout.row_kind],
+                        TypedSafeDirectRowKindV14::Event);
+                // For all next Event/ReceiptMessage rows the preceding
+                // permutation output is the state being parked. ReceiptOutput
+                // retains the event digest already parked by ReceiptMessage.
+                const Fp3 gate = gf::Add(
+                    gf::Add(next_event, next_receipt_message),
+                    next_receipt_output);
+                const Fp3 selected = gf::Add(
+                    gf::Mul(
+                        next_event,
+                        gf::Add(
+                            gf::Mul(
+                                cur_event,
+                                cur[layout.Carry(lane)]),
+                            gf::Mul(
+                                gf::Sub(
+                                    Fp3::One(), cur_event),
+                                ar::PermOutputLane(
+                                    layout.poseidon.perm,
+                                    cur, lane)))),
+                    gf::Add(
+                        gf::Mul(
+                            next_receipt_message,
+                            ar::PermOutputLane(
+                                layout.poseidon.perm, cur, lane)),
+                        gf::Mul(
+                            next_receipt_output,
+                            cur[layout.Carry(lane)])));
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.Carry(lane)],
+                        selected));
+            });
+    }
+
+    // Event continuation: if an Event follows an Event with no semantic
+    // message row, take the prior permutation output directly. Otherwise the
+    // prior ReceiptMessage carries the parked event state.
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT; ++lane) {
+        add(
+            "stage3.safe_direct.event_continuation",
+            aq::AirKind::kTransition, 10,
+            [layout, lane](const auto& cur, const auto& next) {
+                const Fp3 next_event =
+                    DirectKindSelectorV14(
+                        next[layout.row_kind],
+                        TypedSafeDirectRowKindV14::Event);
+                const Fp3 continuation = gf::Mul(
+                    next_event,
+                    gf::Sub(
+                        Fp3::One(),
+                        next[layout.event_reset]));
+                const Fp3 cur_event =
+                    DirectKindSelectorV14(
+                        cur[layout.row_kind],
+                        TypedSafeDirectRowKindV14::Event);
+                const Fp3 prior_state = gf::Add(
+                    gf::Mul(
+                        cur_event,
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, lane)),
+                    gf::Mul(
+                        gf::Sub(Fp3::One(), cur_event),
+                        cur[layout.Carry(lane)]));
+                const Fp3 absorbed = lane < 8
+                    ? next[layout.Message(lane)]
+                    : Fp3::Zero();
+                return gf::Mul(
+                    continuation,
+                    gf::Sub(
+                        next[layout.poseidon.perm.InputCol(lane)],
+                        gf::Add(prior_state, absorbed)));
+            });
+    }
+
+    // Event -> ReceiptMessage: park the event output, resume the receipt
+    // state from Event.carry, and copy the contiguous ProofOwned segment.
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT; ++lane) {
+        add(
+            "stage3.safe_direct.receipt_message_state",
+            aq::AirKind::kTransition, 6,
+            [layout, lane](const auto& cur, const auto& next) {
+                const Fp3 gate = DirectKindSelectorV14(
+                    next[layout.row_kind],
+                    TypedSafeDirectRowKindV14::ReceiptMessage);
+                const Fp3 absorbed = lane < 8
+                    ? next[layout.Message(lane)]
+                    : Fp3::Zero();
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.poseidon.perm.InputCol(lane)],
+                        gf::Add(
+                            cur[layout.Carry(lane)],
+                            absorbed)));
+            });
+    }
+    for (uint32_t lane = 0; lane < 8; ++lane) {
+        add(
+            "stage3.safe_direct.proof_cell_alias",
+            aq::AirKind::kTransition, 15,
+            [layout, lane](const auto& cur, const auto& next) {
+                const Fp3 gate = DirectKindSelectorV14(
+                    next[layout.row_kind],
+                    TypedSafeDirectRowKindV14::ReceiptMessage);
+                const Fp3 mask =
+                    next[
+                        layout.receipt_source_mask_base +
+                        lane];
+                const Fp3 source_lane = gf::Add(
+                    next[layout.receipt_source_start],
+                    U32(lane));
+                const Fp3 source = DirectLaneSelectorV14(
+                    source_lane, cur, layout);
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.Message(lane)],
+                        gf::Mul(mask, source)));
+            });
+    }
+
+    // ReceiptOutput follows either Event (zero ProofOwned cells in the final
+    // block) or ReceiptMessage. In both cases the exact four event digest
+    // lanes are adjacent-row aliases and the other receipt state is explicit.
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashT; ++lane) {
+        add(
+            "stage3.safe_direct.receipt_output_state",
+            aq::AirKind::kTransition, 10,
+            [layout, lane](const auto& cur, const auto& next) {
+                const Fp3 gate = DirectKindSelectorV14(
+                    next[layout.row_kind],
+                    TypedSafeDirectRowKindV14::ReceiptOutput);
+                const Fp3 cur_event =
+                    DirectKindSelectorV14(
+                        cur[layout.row_kind],
+                        TypedSafeDirectRowKindV14::Event);
+                const Fp3 receipt_state = gf::Add(
+                    gf::Mul(
+                        cur_event,
+                        cur[layout.Carry(lane)]),
+                    gf::Mul(
+                        gf::Sub(Fp3::One(), cur_event),
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, lane)));
+                const Fp3 event_digest =
+                    lane < 4
+                    ? gf::Add(
+                          gf::Mul(
+                              cur_event,
+                              ar::PermOutputLane(
+                                  layout.poseidon.perm,
+                                  cur, lane)),
+                          gf::Mul(
+                              gf::Sub(
+                                  Fp3::One(), cur_event),
+                              cur[layout.Carry(lane)]))
+                    : Fp3::Zero();
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.poseidon.perm.InputCol(lane)],
+                        gf::Add(
+                            receipt_state,
+                            event_digest)));
+            });
+    }
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        add(
+            "stage3.safe_direct.receipt_output_alias",
+            aq::AirKind::kTransition, 10,
+            [layout, lane](const auto& cur, const auto& next) {
+                const Fp3 gate = DirectKindSelectorV14(
+                    next[layout.row_kind],
+                    TypedSafeDirectRowKindV14::ReceiptOutput);
+                const Fp3 cur_event =
+                    DirectKindSelectorV14(
+                        cur[layout.row_kind],
+                        TypedSafeDirectRowKindV14::Event);
+                const Fp3 source = gf::Add(
+                    gf::Mul(
+                        cur_event,
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, lane)),
+                    gf::Mul(
+                        gf::Sub(Fp3::One(), cur_event),
+                        cur[layout.Carry(lane)]));
+                return gf::Mul(
+                    gate,
+                    gf::Sub(
+                        next[layout.Message(lane)],
+                        source));
+            });
+    }
+
+    for (uint32_t lane = 0; lane < 4; ++lane) {
+        add(
+            "stage3.safe_direct.event_output",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.event_final],
+                    gf::Sub(
+                        cur[layout.Output(lane)],
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, lane)));
+            });
+        add(
+            "stage3.safe_direct.query_seed_export",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.query_seed_final],
+                    gf::Sub(
+                        cur[layout.Output(lane)],
+                        cur[layout.QuerySeed(lane)]));
+            });
+        add(
+            "stage3.safe_direct.query_seed_stable",
+            aq::AirKind::kTransition, 1,
+            [layout, lane](const auto& cur, const auto& next) {
+                return gf::Sub(
+                    next[layout.QuerySeed(lane)],
+                    cur[layout.QuerySeed(lane)]);
+            });
+        add(
+            "stage3.safe_direct.receipt_boundary",
+            aq::AirKind::kEverywhere, 2,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    cur[layout.receipt_final],
+                    gf::Sub(
+                        ar::PermOutputLane(
+                            layout.poseidon.perm, cur, lane),
+                        cur[
+                            layout.expected_commitment_base +
+                            lane]));
+            });
+        add(
+            "stage3.safe_direct.output_zero_elsewhere",
+            aq::AirKind::kEverywhere, 3,
+            [layout, lane](const auto& cur, const auto&) {
+                return gf::Mul(
+                    gf::Sub(
+                        Fp3::One(),
+                        gf::Add(
+                            cur[layout.event_final],
+                            cur[layout.receipt_final])),
+                    cur[layout.Output(lane)]);
+            });
+    }
+    return true;
+}
+
+} // namespace
+
+bool BuildTypedSafeDirectParentV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const std::vector<TypedSafeEventWitnessV13>& witness,
+    TypedSafeDirectParentProductV14& out,
+    std::string* why)
+{
+    out = {};
+    if (program.size() != witness.size() ||
+        !ValidateTypedEventProgramV13(
+            program, nullptr, why)) {
+        return Fail(why, "v14_event_witness_count");
+    }
+    out.program = program;
+    out.program_root =
+        CommitTypedSafeEventProgramV13(program);
+    if (out.program_root == alg_hash::Digest{}) {
+        return Fail(why, "v14_program_root");
+    }
+
+    std::vector<std::vector<gf::Fp>> resolved(program.size());
+    out.event_output.resize(program.size());
+    std::vector<gf::Fp> semantic;
+    alg_hash::Digest query_seed{};
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        if (witness[event].message.size() !=
+            program[event].message.size()) {
+            return Fail(why, "v14_witness_shape");
+        }
+        resolved[event].resize(program[event].message.size());
+        for (uint32_t ordinal = 0;
+             ordinal < program[event].message.size(); ++ordinal) {
+            const auto& cell =
+                program[event].message[ordinal];
+            gf::Fp value = 0;
+            if (cell.binding ==
+                TypedSafeMessageBindingV13::ProofOwned) {
+                value = witness[event].message[ordinal];
+            } else if (cell.binding ==
+                       TypedSafeMessageBindingV13::Constant) {
+                if (witness[event].message[ordinal] != 0) {
+                    return Fail(
+                        why, "v14_constant_smuggling");
+                }
+                value = cell.constant;
+            } else {
+                if (witness[event].message[ordinal] != 0 ||
+                    query_seed == alg_hash::Digest{}) {
+                    return Fail(
+                        why, "v14_query_seed_smuggling");
+                }
+                value = query_seed[cell.query_seed_lane];
+            }
+            if (!Canonical(value)) {
+                return Fail(why, "v14_noncanonical_message");
+            }
+            resolved[event][ordinal] = value;
+        }
+        if (!safe::SafeCoreDigestV12(
+                program[event].role,
+                program[event].application_domain,
+                resolved[event],
+                out.event_output[event], nullptr, why)) {
+            return false;
+        }
+        if (program[event].kind ==
+            TypedSafeChallengeKindV13::QuerySeed) {
+            query_seed = out.event_output[event];
+        }
+    }
+
+    // The in-trace receipt absorbs one complete rate block per adjacent
+    // alias row. Preserve those deterministic zero-filled slots in the
+    // committed message so host and AIR evaluate the identical sponge while
+    // retaining direct Event -> ReceiptMessage/ReceiptOutput transitions.
+    for (uint32_t event = 0; event < program.size(); ++event) {
+        const auto& spec = program[event];
+        const uint32_t blocks = static_cast<uint32_t>(
+            (spec.message.size() + 7) / 8);
+        for (uint32_t block = 0; block < blocks; ++block) {
+            std::array<gf::Fp, 8> receipt_block{};
+            uint32_t target = 0;
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal = 8 * block + lane;
+                if (ordinal < spec.message.size() &&
+                    spec.message[ordinal].binding ==
+                        TypedSafeMessageBindingV13::
+                            ProofOwned) {
+                    receipt_block[target++] =
+                        resolved[event][ordinal];
+                }
+            }
+            if (target != 0) {
+                semantic.insert(
+                    semantic.end(),
+                    receipt_block.begin(),
+                    receipt_block.end());
+            }
+        }
+        semantic.insert(
+            semantic.end(),
+            out.event_output[event].begin(),
+            out.event_output[event].end());
+        semantic.insert(
+            semantic.end(), 4, gf::Fp{0});
+    }
+    const auto receipt_message =
+        TypedDirectReceiptMessageV14(
+            out.program_root, semantic);
+    const std::vector<uint8_t> receipt_domain(
+        reinterpret_cast<const uint8_t*>(
+            kTypedDirectReceiptDomainV14),
+        reinterpret_cast<const uint8_t*>(
+            kTypedDirectReceiptDomainV14) +
+            sizeof(kTypedDirectReceiptDomainV14) - 1);
+    if (!safe::SafeCoreDigestV12(
+            aht::RoleV12::ReceiptCommitment,
+            receipt_domain, receipt_message,
+            out.transcript_commitment, nullptr, why)) {
+        return false;
+    }
+
+    TypedDirectPlanV14 plan;
+    if (!BuildTypedDirectCsV14(
+            program, out.program_root,
+            out.transcript_commitment,
+            plan, out.cs, &out.columns, why)) {
+        return false;
+    }
+    const auto& layout = out.layout;
+    std::array<gf::Fp, 4> receipt_tag{};
+    if (!TypedEventTagV13(
+            aht::RoleV12::ReceiptCommitment,
+            receipt_domain,
+            static_cast<uint32_t>(receipt_message.size()),
+            receipt_tag, why)) {
+        return false;
+    }
+
+    alg_hash::State event_state{};
+    alg_hash::State receipt_state{};
+    alg_hash::Digest last_event_output{};
+    for (uint32_t row = 0; row < plan.active_rows; ++row) {
+        const auto& p = plan.rows[row];
+        alg_hash::State input{};
+        if (p.kind ==
+            TypedSafeDirectRowKindV14::ReceiptHeader) {
+            input.fill(0);
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const gf::Fp value =
+                    p.constant_value[lane];
+                out.columns[layout.Message(lane)][row] =
+                    U(value);
+                input[lane] = value;
+            }
+            for (uint32_t lane = 0; lane < 4; ++lane) {
+                input[8 + lane] = receipt_tag[lane];
+                out.columns[layout.tag_base + lane][row] =
+                    U(receipt_tag[lane]);
+            }
+        } else if (
+            p.kind ==
+            TypedSafeDirectRowKindV14::Event) {
+            const auto& message = resolved[p.event];
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal =
+                    8 * p.block + lane;
+                const gf::Fp value =
+                    ordinal < message.size()
+                    ? message[ordinal]
+                    : gf::Fp{0};
+                out.columns[layout.Message(lane)][row] =
+                    U(value);
+                input[lane] =
+                    gf::Add(
+                        p.event_reset
+                            ? gf::Fp{0}
+                            : event_state[lane],
+                        value);
+            }
+            for (uint32_t lane = 0; lane < 4; ++lane) {
+                input[8 + lane] =
+                    p.event_reset
+                    ? p.tag[lane]
+                    : event_state[8 + lane];
+            }
+            for (uint32_t lane = 0;
+                 lane < alg_hash::kAlgHashT; ++lane) {
+                out.columns[layout.Carry(lane)][row] =
+                    U(receipt_state[lane]);
+            }
+        } else if (
+            p.kind ==
+            TypedSafeDirectRowKindV14::ReceiptMessage) {
+            const auto& event_spec = program[p.event];
+            const auto& event_message = resolved[p.event];
+            uint32_t target = 0;
+            for (uint32_t lane = 0; lane < 8; ++lane) {
+                const uint32_t ordinal =
+                    8 * p.block + lane;
+                if (ordinal <
+                        event_spec.message.size() &&
+                    event_spec.message[ordinal].binding ==
+                        TypedSafeMessageBindingV13::
+                            ProofOwned) {
+                    out.columns[
+                        layout.Message(target)][row] =
+                        U(event_message[ordinal]);
+                    input[target] = gf::Add(
+                        receipt_state[target],
+                        event_message[ordinal]);
+                    out.proof_cell_aliases.push_back({
+                        p.event, ordinal,
+                        p.paired_event_row,
+                        layout.Message(lane),
+                        row,
+                        layout.Message(target),
+                    });
+                    ++target;
+                }
+            }
+            for (uint32_t lane = target; lane < 8; ++lane) {
+                input[lane] = receipt_state[lane];
+            }
+            for (uint32_t lane = 8; lane < 12; ++lane) {
+                input[lane] = receipt_state[lane];
+            }
+            for (uint32_t lane = 0;
+                 lane < alg_hash::kAlgHashT; ++lane) {
+                out.columns[layout.Carry(lane)][row] =
+                    U(event_state[lane]);
+            }
+        } else if (
+            p.kind ==
+            TypedSafeDirectRowKindV14::ReceiptOutput) {
+            const bool follows_event =
+                row != 0 &&
+                plan.rows[row - 1].kind ==
+                    TypedSafeDirectRowKindV14::Event;
+            const auto& parked =
+                follows_event
+                ? receipt_state
+                : event_state;
+            for (uint32_t lane = 0; lane < 4; ++lane) {
+                out.columns[layout.Message(lane)][row] =
+                    U(last_event_output[lane]);
+                input[lane] = gf::Add(
+                    receipt_state[lane],
+                    last_event_output[lane]);
+            }
+            for (uint32_t lane = 4; lane < 12; ++lane) {
+                input[lane] = receipt_state[lane];
+            }
+            for (uint32_t lane = 0;
+                 lane < alg_hash::kAlgHashT; ++lane) {
+                out.columns[layout.Carry(lane)][row] =
+                    U(parked[lane]);
+            }
+        }
+        const auto p2 =
+            p2air::BuildWitness(layout.poseidon, input);
+        if (p2.row.size() != layout.poseidon.End()) {
+            return Fail(why, "v14_poseidon_witness");
+        }
+        for (uint32_t column = 0;
+             column < p2.row.size(); ++column) {
+            out.columns[column][row] =
+                p2.row[column];
+        }
+        if (p.kind ==
+            TypedSafeDirectRowKindV14::Event) {
+            event_state = p2.output;
+            if (p.event_final) {
+                for (uint32_t lane = 0; lane < 4; ++lane) {
+                    last_event_output[lane] =
+                        p2.output[lane];
+                    out.columns[
+                        layout.Output(lane)][row] =
+                        U(p2.output[lane]);
+                }
+            }
+        } else {
+            receipt_state = p2.output;
+            if (p.receipt_final) {
+                for (uint32_t lane = 0; lane < 4; ++lane) {
+                    out.columns[
+                        layout.Output(lane)][row] =
+                        U(p2.output[lane]);
+                }
+            }
+        }
+    }
+    for (uint32_t row = 0; row < out.cs.n_rows; ++row) {
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            out.columns[layout.QuerySeed(lane)][row] =
+                U(query_seed[lane]);
+        }
+    }
+
+    out.trace_rows = plan.trace_rows;
+    out.active_rows = plan.active_rows;
+    out.event_rows = plan.event_rows;
+    out.receipt_rows = plan.receipt_rows;
+    out.proof_owned_message_cells =
+        plan.proof_owned_count;
+    out.aliased_proof_owned_message_cells =
+        static_cast<uint32_t>(
+            out.proof_cell_aliases.size());
+    out.aliased_event_output_cells =
+        4 * static_cast<uint32_t>(program.size());
+    out.challenge_kinds_covered =
+        plan.kinds_covered;
+    for (const auto& constraint : out.cs.constraints) {
+        out.max_algebraic_degree = std::max(
+            out.max_algebraic_degree,
+            constraint.alg_degree);
+    }
+    out.violations =
+        CountViolationsV12(out.cs, out.columns);
+    out.ordinary_air = true;
+    out.no_post_commit_challenges = true;
+    out.physical_alias_inventory_complete =
+        out.aliased_proof_owned_message_cells ==
+            out.proof_owned_message_cells &&
+        out.aliased_event_output_cells ==
+            4 * program.size();
+    out.ordered_receipt_hash_in_trace =
+        out.violations == 0 &&
+        receipt_state[0] ==
+            out.transcript_commitment[0] &&
+        receipt_state[1] ==
+            out.transcript_commitment[1] &&
+        receipt_state[2] ==
+            out.transcript_commitment[2] &&
+        receipt_state[3] ==
+            out.transcript_commitment[3];
+    out.query_seed_feedback_exact =
+        plan.every_query_uses_seed;
+    out.proof_cells_are_ordinary_columns = true;
+    out.canonical_child_proof_decoder_bound = false;
+    out.normalized_child_cells_bound = false;
+    out.recursive_authority_ready = false;
+    out.valid =
+        out.cs.n_columns ==
+            kTypedSafeDirectParentColumnsV14 &&
+        out.violations == 0 &&
+        out.ordinary_air &&
+        out.no_post_commit_challenges &&
+        out.physical_alias_inventory_complete &&
+        out.ordered_receipt_hash_in_trace &&
+        out.query_seed_feedback_exact &&
+        out.challenge_kinds_covered ==
+            kTypedSafeEventRequiredKindsV13 &&
+        !out.canonical_child_proof_decoder_bound &&
+        !out.normalized_child_cells_bound &&
+        !out.recursive_authority_ready;
+    out.note = out.valid
+        ? "ordinary W575 typed SAFE leaf; direct ordered receipt aliases "
+          "closed; canonical proof decoder copy-in remains open"
+        : "typed SAFE direct parent invalid";
+    if (!out.valid) {
+        if (out.violations != 0 &&
+            out.violations !=
+                std::numeric_limits<uint32_t>::max()) {
+            std::vector<Fp3> current(out.cs.n_columns);
+            std::vector<Fp3> next(out.cs.n_columns);
+            for (uint32_t row = 0;
+                 row < out.cs.n_rows; ++row) {
+                const uint32_t next_row =
+                    (row + 1) % out.cs.n_rows;
+                for (uint32_t column = 0;
+                     column < out.cs.n_columns; ++column) {
+                    current[column] =
+                        out.columns[column][row];
+                    next[column] =
+                        out.columns[column][next_row];
+                }
+                for (const auto& constraint :
+                     out.cs.constraints) {
+                    bool applies =
+                        constraint.kind ==
+                            aq::AirKind::kEverywhere ||
+                        (constraint.kind ==
+                             aq::AirKind::kTransition &&
+                         row + 1 < out.cs.n_rows) ||
+                        (constraint.kind ==
+                             aq::AirKind::kFirstRow &&
+                         row == 0) ||
+                        (constraint.kind ==
+                             aq::AirKind::kLastRow &&
+                         row + 1 == out.cs.n_rows);
+                    if (applies &&
+                        !gf::IsZero(
+                            constraint.eval(
+                                current, next))) {
+                        return Fail(
+                            why,
+                            std::string{
+                                "v14_constraints:"} +
+                            constraint.name +
+                            ":row=" +
+                            std::to_string(row) +
+                            ":count=" +
+                            std::to_string(
+                                out.violations));
+                    }
+                }
+            }
+        }
+        return Fail(why, "v14_constraints");
+    }
+    return true;
+}
+
+bool ProveTypedSafeDirectParentV14(
+    const TypedSafeDirectParentProductV14& product,
+    const uint256& relation_seed,
+    TypedSafeDirectParentProofV14& out,
+    std::string* why)
+{
+    out = {};
+    if (!product.valid ||
+        !product.ordinary_air ||
+        !product.no_post_commit_challenges ||
+        !product.physical_alias_inventory_complete ||
+        product.canonical_child_proof_decoder_bound ||
+        product.normalized_child_cells_bound ||
+        product.recursive_authority_ready ||
+        CountViolationsV12(
+            product.cs, product.columns) != 0) {
+        return Fail(why, "v14_product_for_prove");
+    }
+    const auto proved = aq::AirQuotientProveRows(
+        product.cs, product.columns, relation_seed);
+    if (!proved.ok || !proved.division_exact) {
+        return Fail(
+            why, "v14_air_prove:" + proved.note);
+    }
+    out.program_root = product.program_root;
+    out.transcript_commitment =
+        product.transcript_commitment;
+    out.proof = proved.proof;
+    out.trace_rows = product.trace_rows;
+    out.event_count =
+        static_cast<uint32_t>(product.program.size());
+    out.canonical_proof_encoding =
+        CanonicalRowsProof(out.proof);
+    out.decoder_copy_in_bound = false;
+    out.normalized_child_cells_bound = false;
+    out.recursive_authority_ready = false;
+    out.note =
+        "ordinary proof built; canonical decoder copy-in remains open";
+    if (!out.canonical_proof_encoding) {
+        out = {};
+        return Fail(why, "v14_noncanonical_proof");
+    }
+    return true;
+}
+
+bool VerifyTypedSafeDirectParentProofV14(
+    const std::vector<TypedSafeEventProgramV13>& program,
+    const TypedSafeDirectParentProofV14& proof,
+    const uint256& relation_seed,
+    const alg_hash::Digest& expected_transcript_commitment,
+    std::string* why)
+{
+    const auto program_root =
+        CommitTypedSafeEventProgramV13(program);
+    if (proof.version !=
+            kTypedSafeDirectParentVersionV14 ||
+        program_root == alg_hash::Digest{} ||
+        proof.program_root != program_root ||
+        proof.transcript_commitment !=
+            expected_transcript_commitment ||
+        proof.event_count != program.size() ||
+        !Canonical(proof.transcript_commitment) ||
+        proof.transcript_commitment ==
+            alg_hash::Digest{} ||
+        proof.decoder_copy_in_bound ||
+        proof.normalized_child_cells_bound ||
+        proof.recursive_authority_ready ||
+        !proof.canonical_proof_encoding ||
+        !CanonicalRowsProof(proof.proof)) {
+        return Fail(why, "v14_proof_envelope");
+    }
+    TypedDirectPlanV14 plan;
+    aq::AirConstraintSystem<Fp3> cs;
+    if (!BuildTypedDirectCsV14(
+            program, program_root,
+            expected_transcript_commitment,
+            plan, cs, nullptr, why) ||
+        proof.trace_rows != plan.trace_rows ||
+        cs.n_columns !=
+            kTypedSafeDirectParentColumnsV14) {
+        return Fail(why, "v14_verifier_rebuild");
+    }
+    return aq::AirQuotientVerifyRows(
+        cs, proof.proof, relation_seed, why);
 }
 
 } // namespace matmul::v4::rc::stage3_safe_v12_recursive_bridge

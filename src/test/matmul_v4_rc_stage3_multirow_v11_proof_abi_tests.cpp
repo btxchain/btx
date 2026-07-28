@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_proof_abi.h>
 
 #include <algorithm>
+#include <set>
 
 namespace matmul::v4::rc::stage3_multirow_v11_proof_abi {
 namespace {
@@ -190,6 +191,23 @@ BOOST_AUTO_TEST_CASE(
             return cell.ownership ==
                 OwnershipClassV1::DerivedTranscript;
         }));
+    std::set<uint16_t> semantic_families;
+    for (const auto& source : decoded->sources) {
+        semantic_families.insert(
+            static_cast<uint16_t>(
+                source.key.kind));
+    }
+    for (const auto& source : derived.sources) {
+        semantic_families.insert(
+            static_cast<uint16_t>(
+                source.key.kind));
+    }
+    BOOST_REQUIRE_EQUAL(semantic_families.size(), 60U);
+    for (uint16_t family = 1;
+         family <= 60; ++family) {
+        BOOST_CHECK(
+            semantic_families.contains(family));
+    }
 
     std::vector<ParentPublicCellV1> parent;
     uint32_t parent_column = 100;
@@ -222,6 +240,90 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!readiness.same_parent_consumer_joins_executable);
     BOOST_CHECK(!readiness.v11_backend_executable);
     BOOST_CHECK(!readiness.recursive_authority_ready);
+}
+
+BOOST_AUTO_TEST_CASE(
+    safe_v13_roundtrip_is_complete_and_domain_separated_from_v11)
+{
+    auto envelope = Envelope();
+    envelope.split.version =
+        aq::kAirQuotientSplitRapRowsSafeProofVersionV2;
+    envelope.split.batch.version =
+        kRCFri3AlgMultiRowSafeQ192K2ProofVersionV13;
+    std::vector<uint32_t> words;
+    std::vector<SourceCellV1> sources;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        EncodeCanonicalSafeV13(
+            envelope, words, &sources, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(words[5], sources.size());
+    BOOST_CHECK_EQUAL(
+        words[2], kMultiRowProtocolVersionV13);
+    BOOST_CHECK_EQUAL(
+        words[3],
+        static_cast<uint32_t>(
+            kMultiRowProtocolDomainV13));
+    BOOST_CHECK_EQUAL(
+        words[4],
+        static_cast<uint32_t>(
+            kMultiRowProtocolDomainV13 >> 32));
+
+    const auto decoded =
+        DecodeCanonicalSafeV13(words, &why);
+    BOOST_REQUIRE_MESSAGE(decoded.has_value(), why);
+    BOOST_CHECK(decoded->canonical);
+    BOOST_CHECK(decoded->complete);
+    BOOST_CHECK(decoded->addresses_unique);
+    BOOST_CHECK(decoded->semantic_keys_unique);
+    BOOST_CHECK_GT(decoded->public_statement_cells, 0U);
+    BOOST_CHECK_GT(decoded->child_proof_cells, 0U);
+    BOOST_CHECK_EQUAL(
+        decoded->sources.size(), sources.size());
+    BOOST_REQUIRE(!sources.empty());
+    BOOST_CHECK_EQUAL(
+        decoded->sources.front().address,
+        sources.front().address);
+    BOOST_CHECK(
+        decoded->sources.front().key ==
+        sources.front().key);
+    BOOST_CHECK_EQUAL(
+        decoded->sources.back().address,
+        sources.back().address);
+    BOOST_CHECK(
+        decoded->sources.back().key ==
+        sources.back().key);
+    BOOST_CHECK(decoded->sources == sources);
+    auto changed_sources = sources;
+    changed_sources.back().value ^= 1U;
+    BOOST_CHECK(decoded->sources != changed_sources);
+
+    // A canonical V13 envelope is never accepted under the frozen V11
+    // protocol header, even though both revisions share the complete
+    // 60-family field inventory.
+    BOOST_CHECK(!DecodeCanonicalV1(words).has_value());
+    auto v11 = Envelope();
+    std::vector<uint32_t> v11_words;
+    BOOST_REQUIRE(EncodeCanonicalV1(v11, v11_words));
+    BOOST_CHECK(
+        !DecodeCanonicalSafeV13(v11_words).has_value());
+
+    auto bad_domain = words;
+    bad_domain[3] ^= 1U;
+    BOOST_CHECK(
+        !DecodeCanonicalSafeV13(
+            bad_domain).has_value());
+    auto bad_batch = words;
+    const SourceKeyV1 batch_version{
+        FieldKindV1::BatchVersion, 0, 0, 0, 0, 0};
+    const auto batch_address =
+        FindSourceAddressV1(sources, batch_version);
+    BOOST_REQUIRE(batch_address.has_value());
+    bad_batch[ValueWord(*batch_address)] =
+        kRCFri3AlgMultiRowBatchProofVersion;
+    BOOST_CHECK(
+        !DecodeCanonicalSafeV13(
+            bad_batch).has_value());
 }
 
 BOOST_AUTO_TEST_CASE(
