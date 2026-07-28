@@ -2691,10 +2691,6 @@ struct NormalizedDeep64CtlChildParentAirAttachmentV1 {
     std::string note;
 };
 
-// Defined below with the complete recursive-child capability inventory.
-// The Deep64 promotion declarations return/reference it before that definition.
-struct NormalizedRecursiveChildCapabilityAuditV1;
-
 [[nodiscard]] NormalizedDeep64CtlChildParentAirAttachmentV1
 AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
     FoldBusComposition& composition,
