@@ -175,6 +175,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.layout.n_columns,
         CanonicalLayoutV1().n_columns);
+    BOOST_CHECK_EQUAL(product.layout.n_columns, 73U);
+    BOOST_CHECK_LE(product.max_constraint_degree, 2U);
     BOOST_CHECK_EQUAL(product.query_count, 4U);
     BOOST_CHECK_EQUAL(product.quotient_rows, 4U);
     BOOST_CHECK_EQUAL(product.deep_term_rows, 12U);
@@ -222,6 +224,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(
         RecountViolationsV1(product, inverse), 0U);
 
+    auto deep_aux = product.columns;
+    deep_aux[product.layout.deep_rhs_term1][final_row] =
+        gf::Add(
+            deep_aux[
+                product.layout.deep_rhs_term1][final_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, deep_aux), 0U);
+
     auto current = product.columns;
     const uint32_t term_row = FindRow(
         product, product.layout.deep_term);
@@ -229,11 +240,29 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_GT(
         RecountViolationsV1(product, current), 0U);
 
+    auto term_aux = product.columns;
+    term_aux[product.layout.u_contribution][term_row] =
+        gf::Add(
+            term_aux[
+                product.layout.u_contribution][term_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, term_aux), 0U);
+
     auto vm = product.columns;
     const uint32_t vm_row = FindRow(
         product, product.layout.vm_instruction);
     vm[product.layout.instruction_result][vm_row].c0 ^= 1;
     BOOST_CHECK_GT(RecountViolationsV1(product, vm), 0U);
+
+    auto vm_aux = product.columns;
+    vm_aux[product.layout.selected_result][vm_row] =
+        gf::Add(
+            vm_aux[
+                product.layout.selected_result][vm_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, vm_aux), 0U);
 
     auto quotient = product.columns;
     const uint32_t quotient_row = FindRow(
@@ -241,6 +270,16 @@ BOOST_AUTO_TEST_CASE(
     quotient[product.layout.quotient_value][quotient_row].c0 ^= 1;
     BOOST_CHECK_GT(
         RecountViolationsV1(product, quotient), 0U);
+
+    auto quotient_aux = product.columns;
+    quotient_aux[
+        product.layout.quotient_product][quotient_row] =
+        gf::Add(
+            quotient_aux[
+                product.layout.quotient_product][quotient_row],
+            gf::Fp3::One());
+    BOOST_CHECK_GT(
+        RecountViolationsV1(product, quotient_aux), 0U);
 
     // Changing a proof-owned input and its local arithmetic together still
     // cannot evade the fixed ordered preprocessed row commitment.

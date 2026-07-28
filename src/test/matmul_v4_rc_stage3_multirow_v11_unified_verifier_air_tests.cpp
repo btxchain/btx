@@ -235,7 +235,7 @@ BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_multirow_v11_unified_verifier_air_tests)
 
 BOOST_AUTO_TEST_CASE(
-    exact_q96_vertical_union_fails_closed_at_degree_five_lde)
+    exact_q96_vertical_union_closes_degree_and_lde_but_not_ownership)
 {
     const auto input = ActualInput();
     const rv::QueryRangeV1 range{
@@ -245,7 +245,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!product.valid_foundation);
     BOOST_CHECK(product.exact_q96_range);
     BOOST_CHECK(product.trace_cap_fits);
-    BOOST_CHECK(!product.lde_cap_fits);
+    BOOST_CHECK(product.lde_cap_fits);
     BOOST_CHECK(product.quotient_cap_audit_complete);
     BOOST_CHECK(!product.cs_independent_of_child_witness);
     BOOST_CHECK(
@@ -256,13 +256,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(product.trace_rows, 524288U);
     BOOST_CHECK_EQUAL(product.trace_columns, 1489U);
     BOOST_CHECK_EQUAL(
-        product.max_constraint_degree, 5U);
-    BOOST_CHECK_EQUAL(product.quotient_len, 2097148U);
+        product.max_constraint_degree, 3U);
+    BOOST_CHECK_EQUAL(product.quotient_len, 1048575U);
     BOOST_CHECK_EQUAL(
-        product.commitment_coefficients, 2097152U);
+        product.commitment_coefficients, 1048576U);
     BOOST_CHECK_EQUAL(
-        product.commitment_lde_rows, 33554432U);
-    BOOST_CHECK_GT(
+        product.commitment_lde_rows, 16777216U);
+    BOOST_CHECK_LE(
         product.commitment_lde_rows,
         kLdeRowsCapV1);
     for (uint32_t index = 0;

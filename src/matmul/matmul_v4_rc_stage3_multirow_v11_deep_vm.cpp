@@ -357,6 +357,12 @@ LayoutV1 CanonicalLayoutV1()
     BTX_V11_DEEP_VM_COL(v1_after);
     BTX_V11_DEEP_VM_COL(v2_before);
     BTX_V11_DEEP_VM_COL(v2_after);
+    BTX_V11_DEEP_VM_COL(u_weight);
+    BTX_V11_DEEP_VM_COL(u_contribution);
+    BTX_V11_DEEP_VM_COL(v1_weight);
+    BTX_V11_DEEP_VM_COL(v1_contribution);
+    BTX_V11_DEEP_VM_COL(v2_weight);
+    BTX_V11_DEEP_VM_COL(v2_contribution);
     BTX_V11_DEEP_VM_COL(deep_start);
     BTX_V11_DEEP_VM_COL(deep_chain);
     BTX_V11_DEEP_VM_COL(x);
@@ -368,6 +374,13 @@ LayoutV1 CanonicalLayoutV1()
     BTX_V11_DEEP_VM_COL(w2);
     BTX_V11_DEEP_VM_COL(expected_deep);
     BTX_V11_DEEP_VM_COL(first_fold_value);
+    BTX_V11_DEEP_VM_COL(inv_product1);
+    BTX_V11_DEEP_VM_COL(inv_product2);
+    BTX_V11_DEEP_VM_COL(deep_diff_inv1);
+    BTX_V11_DEEP_VM_COL(deep_rhs_term1);
+    BTX_V11_DEEP_VM_COL(deep_diff_inv2);
+    BTX_V11_DEEP_VM_COL(deep_rhs_term2);
+    BTX_V11_DEEP_VM_COL(deep_rhs);
     BTX_V11_DEEP_VM_COL(op_current);
     BTX_V11_DEEP_VM_COL(op_next);
     BTX_V11_DEEP_VM_COL(op_constant);
@@ -377,6 +390,7 @@ LayoutV1 CanonicalLayoutV1()
     BTX_V11_DEEP_VM_COL(operand_lhs);
     BTX_V11_DEEP_VM_COL(operand_rhs);
     BTX_V11_DEEP_VM_COL(instruction_result);
+    BTX_V11_DEEP_VM_COL(mul_product);
     BTX_V11_DEEP_VM_COL(program_end);
     BTX_V11_DEEP_VM_COL(vm_start);
     BTX_V11_DEEP_VM_COL(vm_chain);
@@ -384,11 +398,17 @@ LayoutV1 CanonicalLayoutV1()
     BTX_V11_DEEP_VM_COL(air_lambda);
     BTX_V11_DEEP_VM_COL(lambda_power);
     BTX_V11_DEEP_VM_COL(selector);
+    BTX_V11_DEEP_VM_COL(selected_result);
+    BTX_V11_DEEP_VM_COL(lambda_selected);
+    BTX_V11_DEEP_VM_COL(program_contribution);
+    BTX_V11_DEEP_VM_COL(lambda_delta);
+    BTX_V11_DEEP_VM_COL(lambda_after);
     BTX_V11_DEEP_VM_COL(composition_before);
     BTX_V11_DEEP_VM_COL(composition_after);
     BTX_V11_DEEP_VM_COL(y);
     BTX_V11_DEEP_VM_COL(zh);
     BTX_V11_DEEP_VM_COL(quotient_value);
+    BTX_V11_DEEP_VM_COL(quotient_product);
 #undef BTX_V11_DEEP_VM_COL
     out.n_columns = column;
     return out;
@@ -970,6 +990,30 @@ ProductV1 BuildProductV1(
         BTX_SET(v1_after, v1_after);
         BTX_SET(v2_before, v2_before);
         BTX_SET(v2_after, v2_after);
+        Set(
+            out.columns, l.u_weight, row,
+            gf::Mul(r.coefficient, r.x_power));
+        Set(
+            out.columns, l.u_contribution, row,
+            gf::Mul(
+                out.columns[l.u_weight][row],
+                r.current));
+        Set(
+            out.columns, l.v1_weight, row,
+            gf::Mul(r.coefficient, r.z1_power));
+        Set(
+            out.columns, l.v1_contribution, row,
+            gf::Mul(
+                out.columns[l.v1_weight][row],
+                r.eval1));
+        Set(
+            out.columns, l.v2_weight, row,
+            gf::Mul(r.coefficient, r.z2_power));
+        Set(
+            out.columns, l.v2_contribution, row,
+            gf::Mul(
+                out.columns[l.v2_weight][row],
+                r.eval2));
         BTX_SET(x, x);
         BTX_SET(z1, z1);
         BTX_SET(z2, z2);
@@ -979,17 +1023,95 @@ ProductV1 BuildProductV1(
         BTX_SET(w2, w2);
         BTX_SET(expected_deep, expected_deep);
         BTX_SET(first_fold_value, first_fold);
+        Set(
+            out.columns, l.inv_product1, row,
+            gf::Mul(
+                gf::Sub(r.x, r.z1), r.inv1));
+        Set(
+            out.columns, l.inv_product2, row,
+            gf::Mul(
+                gf::Sub(r.x, r.z2), r.inv2));
+        Set(
+            out.columns, l.deep_diff_inv1, row,
+            gf::Mul(
+                gf::Sub(r.u_before, r.v1_before),
+                r.inv1));
+        Set(
+            out.columns, l.deep_rhs_term1, row,
+            gf::Mul(
+                r.w1,
+                out.columns[
+                    l.deep_diff_inv1][row]));
+        Set(
+            out.columns, l.deep_diff_inv2, row,
+            gf::Mul(
+                gf::Sub(r.u_before, r.v2_before),
+                r.inv2));
+        Set(
+            out.columns, l.deep_rhs_term2, row,
+            gf::Mul(
+                r.w2,
+                out.columns[
+                    l.deep_diff_inv2][row]));
+        Set(
+            out.columns, l.deep_rhs, row,
+            gf::Add(
+                out.columns[
+                    l.deep_rhs_term1][row],
+                out.columns[
+                    l.deep_rhs_term2][row]));
         BTX_SET(operand_lhs, lhs);
         BTX_SET(operand_rhs, rhs);
         BTX_SET(instruction_result, result);
+        Set(
+            out.columns, l.mul_product, row,
+            gf::Mul(r.lhs, r.rhs));
         BTX_SET(air_lambda, air_lambda);
         BTX_SET(lambda_power, lambda_power);
         BTX_SET(selector, selector);
+        Set(
+            out.columns, l.selected_result, row,
+            gf::Mul(r.selector, r.result));
+        Set(
+            out.columns, l.lambda_selected, row,
+            gf::Mul(
+                r.lambda_power,
+                out.columns[
+                    l.selected_result][row]));
+        Set(
+            out.columns, l.program_contribution,
+            row,
+            gf::Mul(
+                r.program_end
+                    ? Fp3::One()
+                    : Fp3::Zero(),
+                out.columns[
+                    l.lambda_selected][row]));
+        Set(
+            out.columns, l.lambda_delta, row,
+            gf::Mul(
+                r.program_end
+                    ? Fp3::One()
+                    : Fp3::Zero(),
+                gf::Sub(
+                    r.air_lambda,
+                    Fp3::One())));
+        Set(
+            out.columns, l.lambda_after, row,
+            gf::Mul(
+                r.lambda_power,
+                gf::Add(
+                    Fp3::One(),
+                    out.columns[
+                        l.lambda_delta][row])));
         BTX_SET(composition_before, composition_before);
         BTX_SET(composition_after, composition_after);
         BTX_SET(y, y);
         BTX_SET(zh, zh);
         BTX_SET(quotient_value, quotient);
+        Set(
+            out.columns, l.quotient_product, row,
+            gf::Mul(r.zh, r.quotient));
 #undef BTX_SET
         Set(
             out.columns, l.deep_start, row,
@@ -1061,49 +1183,100 @@ ProductV1 BuildProductV1(
                         cur[l.quotient_identity])));
         });
     AddConstraint(
-        out.cs, "stage3.v11.deep_vm.u_term",
-        aq::AirKind::kEverywhere, 3,
+        out.cs, "stage3.v11.deep_vm.u_weight",
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
-            const Fp3 term = gf::Mul(
-                cur[l.coefficient],
+            return gf::Sub(
+                cur[l.u_weight],
                 gf::Mul(
-                    cur[l.x_power],
+                    cur[l.coefficient],
+                    cur[l.x_power]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.u_contribution",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.u_contribution],
+                gf::Mul(
+                    cur[l.u_weight],
                     cur[l.current_value]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.u_term",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.deep_term],
                 gf::Sub(
                     cur[l.u_after],
-                    gf::Add(cur[l.u_before], term)));
+                    gf::Add(
+                        cur[l.u_before],
+                        cur[l.u_contribution])));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.v1_weight",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.v1_weight],
+                gf::Mul(
+                    cur[l.coefficient],
+                    cur[l.z1_power]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.v1_contribution",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.v1_contribution],
+                gf::Mul(
+                    cur[l.v1_weight],
+                    cur[l.eval_z1]));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.v1_term",
-        aq::AirKind::kEverywhere, 3,
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
-            const Fp3 term = gf::Mul(
-                cur[l.coefficient],
-                gf::Mul(
-                    cur[l.z1_power],
-                    cur[l.eval_z1]));
             return gf::Mul(
                 cur[l.deep_term],
                 gf::Sub(
                     cur[l.v1_after],
-                    gf::Add(cur[l.v1_before], term)));
+                    gf::Add(
+                        cur[l.v1_before],
+                        cur[l.v1_contribution])));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.v2_weight",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.v2_weight],
+                gf::Mul(
+                    cur[l.coefficient],
+                    cur[l.z2_power]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.v2_contribution",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.v2_contribution],
+                gf::Mul(
+                    cur[l.v2_weight],
+                    cur[l.eval_z2]));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.v2_term",
-        aq::AirKind::kEverywhere, 3,
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
-            const Fp3 term = gf::Mul(
-                cur[l.coefficient],
-                gf::Mul(
-                    cur[l.z2_power],
-                    cur[l.eval_z2]));
             return gf::Mul(
                 cur[l.deep_term],
                 gf::Sub(
                     cur[l.v2_after],
-                    gf::Add(cur[l.v2_before], term)));
+                    gf::Add(
+                        cur[l.v2_before],
+                        cur[l.v2_contribution])));
         });
     for (uint32_t accumulator :
          {l.u_before, l.v1_before, l.v2_before}) {
@@ -1130,51 +1303,108 @@ ProductV1 BuildProductV1(
             });
     }
     AddConstraint(
+        out.cs, "stage3.v11.deep_vm.inverse_product_z1",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.inv_product1],
+                gf::Mul(
+                    gf::Sub(cur[l.x], cur[l.z1]),
+                    cur[l.inv_x_minus_z1]));
+        });
+    AddConstraint(
         out.cs, "stage3.v11.deep_vm.inverse_z1",
-        aq::AirKind::kEverywhere, 3,
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.deep_finalize],
                 gf::Sub(
-                    gf::Mul(
-                        gf::Sub(cur[l.x], cur[l.z1]),
-                        cur[l.inv_x_minus_z1]),
+                    cur[l.inv_product1],
                     Fp3::One()));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.inverse_product_z2",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.inv_product2],
+                gf::Mul(
+                    gf::Sub(cur[l.x], cur[l.z2]),
+                    cur[l.inv_x_minus_z2]));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.inverse_z2",
-        aq::AirKind::kEverywhere, 3,
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.deep_finalize],
                 gf::Sub(
-                    gf::Mul(
-                        gf::Sub(cur[l.x], cur[l.z2]),
-                        cur[l.inv_x_minus_z2]),
+                    cur[l.inv_product2],
                     Fp3::One()));
         });
     AddConstraint(
-        out.cs, "stage3.v11.deep_vm.deep_formula",
-        aq::AirKind::kEverywhere, 4,
+        out.cs, "stage3.v11.deep_vm.deep_diff_inv1",
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
-            const Fp3 rhs = gf::Add(
+            return gf::Sub(
+                cur[l.deep_diff_inv1],
+                gf::Mul(
+                    gf::Sub(
+                        cur[l.u_before],
+                        cur[l.v1_before]),
+                    cur[l.inv_x_minus_z1]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.deep_rhs_term1",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.deep_rhs_term1],
                 gf::Mul(
                     cur[l.w1],
-                    gf::Mul(
-                        gf::Sub(
-                            cur[l.u_before],
-                            cur[l.v1_before]),
-                        cur[l.inv_x_minus_z1])),
+                    cur[l.deep_diff_inv1]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.deep_diff_inv2",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.deep_diff_inv2],
+                gf::Mul(
+                    gf::Sub(
+                        cur[l.u_before],
+                        cur[l.v2_before]),
+                    cur[l.inv_x_minus_z2]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.deep_rhs_term2",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.deep_rhs_term2],
                 gf::Mul(
                     cur[l.w2],
-                    gf::Mul(
-                        gf::Sub(
-                            cur[l.u_before],
-                            cur[l.v2_before]),
-                        cur[l.inv_x_minus_z2])));
+                    cur[l.deep_diff_inv2]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.deep_rhs_sum",
+        aq::AirKind::kEverywhere, 1,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.deep_rhs],
+                gf::Add(
+                    cur[l.deep_rhs_term1],
+                    cur[l.deep_rhs_term2]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.deep_formula",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.deep_finalize],
-                gf::Sub(cur[l.expected_deep], rhs));
+                gf::Sub(
+                    cur[l.expected_deep],
+                    cur[l.deep_rhs]));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.first_fold",
@@ -1237,16 +1467,24 @@ ProductV1 BuildProductV1(
                         cur[l.operand_rhs])));
         });
     AddConstraint(
+        out.cs, "stage3.v11.deep_vm.mul_product",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.mul_product],
+                gf::Mul(
+                    cur[l.operand_lhs],
+                    cur[l.operand_rhs]));
+        });
+    AddConstraint(
         out.cs, "stage3.v11.deep_vm.mul",
-        aq::AirKind::kEverywhere, 3,
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.op_mul],
                 gf::Sub(
                     cur[l.instruction_result],
-                    gf::Mul(
-                        cur[l.operand_lhs],
-                        cur[l.operand_rhs])));
+                    cur[l.mul_product]));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.vm_start_composition",
@@ -1266,23 +1504,46 @@ ProductV1 BuildProductV1(
                     cur[l.lambda_power], Fp3::One()));
         });
     AddConstraint(
-        out.cs, "stage3.v11.deep_vm.composition_step",
-        aq::AirKind::kEverywhere, 4,
+        out.cs, "stage3.v11.deep_vm.selected_result",
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
-            const Fp3 contribution = gf::Mul(
-                cur[l.program_end],
+            return gf::Sub(
+                cur[l.selected_result],
+                gf::Mul(
+                    cur[l.selector],
+                    cur[l.instruction_result]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.lambda_selected",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.lambda_selected],
                 gf::Mul(
                     cur[l.lambda_power],
-                    gf::Mul(
-                        cur[l.selector],
-                        cur[l.instruction_result])));
+                    cur[l.selected_result]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.program_contribution",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.program_contribution],
+                gf::Mul(
+                    cur[l.program_end],
+                    cur[l.lambda_selected]));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.composition_step",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.vm_instruction],
                 gf::Sub(
                     cur[l.composition_after],
                     gf::Add(
                         cur[l.composition_before],
-                        contribution)));
+                        cur[l.program_contribution])));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.composition_chain",
@@ -1295,21 +1556,38 @@ ProductV1 BuildProductV1(
                     cur[l.composition_after]));
         });
     AddConstraint(
+        out.cs, "stage3.v11.deep_vm.lambda_delta",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.lambda_delta],
+                gf::Mul(
+                    cur[l.program_end],
+                    gf::Sub(
+                        cur[l.air_lambda],
+                        Fp3::One())));
+        });
+    AddConstraint(
+        out.cs, "stage3.v11.deep_vm.lambda_after",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.lambda_after],
+                gf::Mul(
+                    cur[l.lambda_power],
+                    gf::Add(
+                        Fp3::One(),
+                        cur[l.lambda_delta])));
+        });
+    AddConstraint(
         out.cs, "stage3.v11.deep_vm.lambda_chain",
-        aq::AirKind::kTransition, 3,
+        aq::AirKind::kTransition, 2,
         [l](const auto& cur, const auto& next) {
-            const Fp3 expected = gf::Mul(
-                cur[l.lambda_power],
-                gf::Add(
-                    Fp3::One(),
-                    gf::Mul(
-                        cur[l.program_end],
-                        gf::Sub(
-                            cur[l.air_lambda],
-                            Fp3::One()))));
             return gf::Mul(
                 cur[l.vm_chain],
-                gf::Sub(next[l.lambda_power], expected));
+                gf::Sub(
+                    next[l.lambda_power],
+                    cur[l.lambda_after]));
         });
     AddConstraint(
         out.cs, "stage3.v11.deep_vm.vm_to_quotient",
@@ -1322,16 +1600,24 @@ ProductV1 BuildProductV1(
                     cur[l.composition_after]));
         });
     AddConstraint(
+        out.cs, "stage3.v11.deep_vm.quotient_product",
+        aq::AirKind::kEverywhere, 2,
+        [l](const auto& cur, const auto&) {
+            return gf::Sub(
+                cur[l.quotient_product],
+                gf::Mul(
+                    cur[l.zh],
+                    cur[l.quotient_value]));
+        });
+    AddConstraint(
         out.cs, "stage3.v11.deep_vm.quotient_identity",
-        aq::AirKind::kEverywhere, 3,
+        aq::AirKind::kEverywhere, 2,
         [l](const auto& cur, const auto&) {
             return gf::Mul(
                 cur[l.quotient_identity],
                 gf::Sub(
                     cur[l.composition_before],
-                    gf::Mul(
-                        cur[l.zh],
-                        cur[l.quotient_value])));
+                    cur[l.quotient_product]));
         });
 
     out.preprocessed_columns = {

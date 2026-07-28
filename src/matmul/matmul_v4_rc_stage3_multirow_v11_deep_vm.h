@@ -73,6 +73,12 @@ struct LayoutV1 {
     uint32_t v1_after{0};
     uint32_t v2_before{0};
     uint32_t v2_after{0};
+    uint32_t u_weight{0};
+    uint32_t u_contribution{0};
+    uint32_t v1_weight{0};
+    uint32_t v1_contribution{0};
+    uint32_t v2_weight{0};
+    uint32_t v2_contribution{0};
     uint32_t deep_start{0};
     uint32_t deep_chain{0};
 
@@ -85,6 +91,13 @@ struct LayoutV1 {
     uint32_t w2{0};
     uint32_t expected_deep{0};
     uint32_t first_fold_value{0};
+    uint32_t inv_product1{0};
+    uint32_t inv_product2{0};
+    uint32_t deep_diff_inv1{0};
+    uint32_t deep_rhs_term1{0};
+    uint32_t deep_diff_inv2{0};
+    uint32_t deep_rhs_term2{0};
+    uint32_t deep_rhs{0};
 
     uint32_t op_current{0};
     uint32_t op_next{0};
@@ -95,6 +108,7 @@ struct LayoutV1 {
     uint32_t operand_lhs{0};
     uint32_t operand_rhs{0};
     uint32_t instruction_result{0};
+    uint32_t mul_product{0};
     uint32_t program_end{0};
     uint32_t vm_start{0};
     uint32_t vm_chain{0};
@@ -102,12 +116,18 @@ struct LayoutV1 {
     uint32_t air_lambda{0};
     uint32_t lambda_power{0};
     uint32_t selector{0};
+    uint32_t selected_result{0};
+    uint32_t lambda_selected{0};
+    uint32_t program_contribution{0};
+    uint32_t lambda_delta{0};
+    uint32_t lambda_after{0};
     uint32_t composition_before{0};
     uint32_t composition_after{0};
 
     uint32_t y{0};
     uint32_t zh{0};
     uint32_t quotient_value{0};
+    uint32_t quotient_product{0};
     uint32_t n_columns{0};
 };
 
