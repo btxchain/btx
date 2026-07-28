@@ -13,6 +13,7 @@
 #include <span.h>
 
 #include <algorithm>
+#include <array>
 #include <cassert>
 #include <chrono>
 #include <cstdio>
@@ -2065,13 +2066,30 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
         const F y = T::Mul(g, T::FromBase(AirPowBase(omega_lde, q.index)));
         const F zh = T::Sub(AirPow(y, N), T::One());
         if (T::IsZero(zh)) return "Z_H vanishes at query point (coset violated)";
+        // All constraints at this query share the same selector point.  The
+        // old loop called AirSelectorEval once per constraint, which repeated
+        // y^N and an Fp3 inversion for every first/last-row constraint.  Pin
+        // the four selector values once instead.  The coset check above makes
+        // both denominators non-zero, so this is algebraically identical to
+        // AirSelectorEval's non-domain branch.
+        const std::array<F, 4> selectors{
+            T::One(),
+            T::Sub(y, h_last),
+            T::Mul(
+                zh,
+                T::Inv(T::Sub(y, h_first))),
+            T::Mul(
+                zh,
+                T::Inv(T::Sub(y, h_last)))};
 
         F csum = T::Zero();
         F lp = T::One();
         for (const auto& con : cs.constraints) {
             const F v = con.eval(cur, nxt);
             if (!T::IsZero(v)) {
-                const F sel = AirSelectorEval<F>(con.kind, N, y, h_first, h_last);
+                const F& sel = selectors[
+                    static_cast<uint8_t>(
+                        con.kind)];
                 csum = T::Add(csum, T::Mul(lp, T::Mul(sel, v)));
             }
             lp = T::Mul(lp, lambda);
