@@ -44,6 +44,27 @@ ComputeRCStage3AggregationSeed(const RCStage3SuccinctProof& proof);
 ComputeRCStage3FinalDigest(const RCStage3SuccinctProof& proof);
 
 /**
+ * Canonical composed-work digest used by both the miner and the Stage-3
+ * statement verifier.
+ *
+ * This is the non-circular projection of ComputeRCStage3FinalDigest: callers
+ * that have executed both workload legs but have not built a proof envelope
+ * yet can compute the exact header digest that the eventual Composed statement
+ * must expose. Keeping the preimage here prevents the mining and proof paths
+ * from maintaining two copies of consensus-critical hash logic.
+ */
+[[nodiscard]] uint256 ComputeRCStage3ComposedWorkDigest(
+    uint16_t proof_version,
+    int32_t height,
+    const uint256& header_commitment,
+    const uint256& params_commitment,
+    uint32_t episode_profile,
+    uint32_t coupled_profile,
+    uint32_t transcript_version,
+    const uint256& episode_digest,
+    const uint256& coupled_digest);
+
+/**
  * Verify the deterministic composition/link relation. This is a real
  * relation check, but it does not verify the episode or coupled proof engines.
  * A complete verifier must AND this result with every required role verifier.

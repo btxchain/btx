@@ -95,17 +95,42 @@ uint256 ComputeRCStage3FinalDigest(const RCStage3SuccinctProof& proof)
     if (proof.statement == RCStage3StatementKind::Coupled) return p.coupled_digest;
     if (proof.statement != RCStage3StatementKind::Composed) return {};
 
+    return ComputeRCStage3ComposedWorkDigest(
+        proof.version, p.height, p.header_commitment, p.params_commitment,
+        p.episode_profile, p.coupled_profile, p.transcript_version,
+        p.episode_digest, p.coupled_digest);
+}
+
+uint256 ComputeRCStage3ComposedWorkDigest(
+    uint16_t proof_version,
+    int32_t height,
+    const uint256& header_commitment,
+    const uint256& params_commitment,
+    uint32_t episode_profile,
+    uint32_t coupled_profile,
+    uint32_t transcript_version,
+    const uint256& episode_digest,
+    const uint256& coupled_digest)
+{
+    if (proof_version == 0 || height < 0 ||
+        header_commitment.IsNull() || params_commitment.IsNull() ||
+        episode_profile == 0 || coupled_profile == 0 ||
+        transcript_version == 0 || episode_digest.IsNull() ||
+        coupled_digest.IsNull()) {
+        return {};
+    }
+
     HashWriter hash;
     hash << COMPOSED_DIGEST_DOMAIN;
-    hash << proof.version;
-    hash << p.height;
-    hash << p.header_commitment;
-    hash << p.params_commitment;
-    hash << p.episode_profile;
-    hash << p.coupled_profile;
-    hash << p.transcript_version;
-    hash << p.episode_digest;
-    hash << p.coupled_digest;
+    hash << proof_version;
+    hash << height;
+    hash << header_commitment;
+    hash << params_commitment;
+    hash << episode_profile;
+    hash << coupled_profile;
+    hash << transcript_version;
+    hash << episode_digest;
+    hash << coupled_digest;
     return hash.GetHash();
 }
 

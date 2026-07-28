@@ -7,6 +7,7 @@
 #include <matmul/matmul_v4_rc_coupled.h>
 #include <matmul/matmul_v4_rc_mx_ozaki.h>
 #include <matmul/matmul_v4_rc_selfqual.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/exact_gemm_resolve.h>
 
 #include <arith_uint256.h>
@@ -451,7 +452,9 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     Consensus::Params p;
     p.fMatMulPOW = true;
     p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
     p.nMatMulRCCoupledHeight = 1;
+    p.fMatMulRCUseToyDims = true;
     p.fMatMulRCCoupledUseToyDims = true;
     // Explicit V2 (profile 2) regression: pin the toy V2 miner↔checker gate under
     // explicit selection now that the default profile is V3 (3). Keeps V1-domain
@@ -464,8 +467,8 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     BOOST_REQUIRE(p.IsMatMulRCCoupledActive(kHeight));
     BOOST_REQUIRE(p.GetMatMulEncodingProfile(kHeight) ==
                   Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
-    // Coupled supersedes ENC_RC when both would be live.
-    p.nMatMulRCHeight = 1;
+    // Coupled is the selected encoding profile, but its work is additive: the
+    // lottery binds both the resident episode and coupled legs.
     BOOST_CHECK(p.GetMatMulEncodingProfile(kHeight) ==
                 Consensus::MatMulEncodingProfile::ENC_RC_COUPLED);
 
@@ -480,7 +483,13 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     BOOST_CHECK_EQUAL(options_coup.exchange_rounds, 0u);
     BOOST_CHECK(rc::RCCoupBarrierLoopComplete(params_coup));
 
-    header.matmul_digest = rc::MineCoupledPuzzle(header, kHeight, params_coup);
+    const uint256 coupled_digest =
+        rc::MineCoupledPuzzle(header, kHeight, params_coup);
+    const uint256 episode_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, rc::ResolveRCEpisodeParams(p, kHeight), kHeight);
+    header.matmul_digest = rc::ComputeRCStage3ComposedWorkDigest(
+        header, p, kHeight, episode_digest, coupled_digest);
     BOOST_CHECK(!header.matmul_digest.IsNull());
     BOOST_CHECK(CheckMatMulProofOfWork_RCCoupled(header, p, kHeight));
 
@@ -492,6 +501,52 @@ BOOST_AUTO_TEST_CASE(rc_coup_check_pow_regtest_gate)
     BOOST_CHECK_EQUAL(pub.nMatMulRCCoupledHeight, std::numeric_limits<int32_t>::max());
     BOOST_CHECK(!pub.IsMatMulRCCoupledActive(0));
     BOOST_CHECK(!pub.IsMatMulRCCoupledActive(std::numeric_limits<int32_t>::max() - 1));
+}
+
+BOOST_AUTO_TEST_CASE(rc_coup_solver_mines_the_additive_composed_digest)
+{
+    Consensus::Params p;
+    p.fMatMulPOW = true;
+    p.nMatMulV4Height = 1;
+    p.nMatMulRCHeight = 1;
+    p.nMatMulRCCoupledHeight = 1;
+    p.fMatMulRCUseToyDims = true;
+    p.fMatMulRCCoupledUseToyDims = true;
+    p.nMatMulRCProfile = 1;
+    p.nMatMulRCCoupledProfile = 2;
+    p.nMatMulV4Dimension = 256;
+    p.powLimit = uint256{
+        "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"};
+
+    constexpr int32_t HEIGHT{10};
+    CBlockHeader header = MakeCoupHeader(0);
+    header.nBits = UintToArith256(p.powLimit).GetCompact();
+    uint64_t tries{16};
+    BOOST_REQUIRE(SolveMatMul(
+        header, p, tries, HEIGHT, nullptr, nullptr, nullptr,
+        static_cast<int64_t>(header.nTime) - 1));
+
+    const uint256 episode_digest =
+        rc::RecomputeResidentCurriculumReference(
+            header, rc::ResolveRCEpisodeParams(p, HEIGHT), HEIGHT);
+    const uint256 coupled_digest =
+        rc::RecomputeCoupledPuzzleReference(
+            header, HEIGHT, rc::ResolveRCCoupParams(p),
+            rc::ResolveRCCoupOptions(p));
+    const uint256 composed_digest = rc::ComputeRCStage3ComposedWorkDigest(
+        header, p, HEIGHT, episode_digest, coupled_digest);
+
+    BOOST_CHECK_EQUAL(header.matmul_digest, composed_digest);
+    BOOST_CHECK(header.matmul_digest != episode_digest);
+    BOOST_CHECK(header.matmul_digest != coupled_digest);
+    BOOST_CHECK(CheckMatMulProofOfWork_RCCoupled(header, p, HEIGHT));
+
+    CBlockHeader coupled_only = header;
+    coupled_only.matmul_digest = coupled_digest;
+    BOOST_CHECK(!CheckMatMulProofOfWork_RCCoupled(coupled_only, p, HEIGHT));
+    CBlockHeader episode_only = header;
+    episode_only.matmul_digest = episode_digest;
+    BOOST_CHECK(!CheckMatMulProofOfWork_RCCoupled(episode_only, p, HEIGHT));
 }
 
 BOOST_AUTO_TEST_CASE(rc_coup_public_activation_resolves_v3_production_profile)

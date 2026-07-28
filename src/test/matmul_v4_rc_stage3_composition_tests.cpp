@@ -97,6 +97,29 @@ BOOST_AUTO_TEST_CASE(composition_binds_both_legs_and_context)
     BOOST_CHECK(why.find("final_digest_mismatch") != std::string::npos);
 }
 
+BOOST_AUTO_TEST_CASE(miner_projection_is_exactly_the_composed_statement_digest)
+{
+    const auto proof = MakeProof(rc::RCStage3StatementKind::Composed);
+    const auto& p = proof.public_inputs;
+    const uint256 projected = rc::ComputeRCStage3ComposedWorkDigest(
+        proof.version, p.height, p.header_commitment, p.params_commitment,
+        p.episode_profile, p.coupled_profile, p.transcript_version,
+        p.episode_digest, p.coupled_digest);
+    BOOST_CHECK_EQUAL(projected, p.final_digest);
+
+    // Neither leg may be deferred until after the lottery.
+    BOOST_CHECK(rc::ComputeRCStage3ComposedWorkDigest(
+                    proof.version, p.height, p.header_commitment,
+                    p.params_commitment, p.episode_profile, p.coupled_profile,
+                    p.transcript_version, uint256{}, p.coupled_digest)
+                    .IsNull());
+    BOOST_CHECK(rc::ComputeRCStage3ComposedWorkDigest(
+                    proof.version, p.height, p.header_commitment,
+                    p.params_commitment, p.episode_profile, p.coupled_profile,
+                    p.transcript_version, p.episode_digest, uint256{})
+                    .IsNull());
+}
+
 BOOST_AUTO_TEST_CASE(transcript_binds_every_commitment_and_section)
 {
     const auto proof = MakeProof(rc::RCStage3StatementKind::Composed);

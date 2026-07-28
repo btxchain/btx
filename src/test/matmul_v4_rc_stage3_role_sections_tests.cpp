@@ -267,6 +267,42 @@ bool LoadRealEpisode(const char* header_env, const char* height_env,
 
 } // namespace
 
+BOOST_AUTO_TEST_CASE(composed_statement_uses_coupled_transcript_family)
+{
+    constexpr int32_t HEIGHT{101};
+    Consensus::Params params = MakeChainParams(HEIGHT);
+    params.nMatMulRCCoupledHeight = HEIGHT;
+    params.nMatMulRCCoupledProfile = 3;
+    params.fMatMulRCCoupledUseToyDims = true;
+
+    CBlockHeader header;
+    header.nBits = 0x207fffff;
+    header.matmul_dim = 256;
+    header.nNonce64 = 9;
+    header.seed_a = uint256::ONE;
+    header.seed_b = uint256::ONE;
+
+    uint256 episode_digest = uint256::ONE;
+    uint256 coupled_digest = uint256::ONE;
+    coupled_digest.data()[1] = 1;
+
+    rc::RCStage3SuccinctProof statement;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3StatementForHeader(
+            header, params, HEIGHT, rc::RCStage3StatementKind::Composed,
+            PinFromParams(params), episode_digest, coupled_digest, statement,
+            &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        statement.public_inputs.transcript_version,
+        rc::ResolveRCCoupOptions(params).transcript_version);
+    BOOST_CHECK_EQUAL(
+        statement.public_inputs.final_digest,
+        rc::ComputeRCStage3ComposedWorkDigest(
+            header, params, HEIGHT, episode_digest, coupled_digest));
+}
+
 // ===========================================================================
 // THE END-TO-END CASE: real mined block -> statement -> 6 real role FRI proofs
 // assembled into RCStage3SuccinctProof::sections -> witness-free section

@@ -1179,7 +1179,14 @@ bool BuildRCStage3StatementForHeader(
     auto& p = out.public_inputs;
     p.height = height;
     p.n_bits = header.nBits;
-    p.transcript_version = kRCTranscriptVersion;
+    // A Composed statement is governed by the coupled transcript family.
+    // Consensus binding applies the same rule in ExpectedTranscriptVersion.
+    // Using the episode V1 constant here made every production-profile
+    // Composed proof unattachable (V1 statement versus V3/V4 verifier).
+    p.transcript_version =
+        kind == RCStage3StatementKind::Episode
+            ? kRCTranscriptVersion
+            : ResolveRCCoupOptions(params).transcript_version;
     p.program_consensus_pin = program_pin;
     p.header_commitment = RCStage3HeaderCommitment(header);
     p.params_commitment = RCStage3ParamsCommitment(params, height, kind);

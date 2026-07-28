@@ -73,6 +73,18 @@ RequiredRCStage3Statement(const Consensus::Params& params, int32_t height);
 [[nodiscard]] uint256 RCStage3ParamsCommitment(const Consensus::Params& params,
                                                int32_t height,
                                                RCStage3StatementKind statement);
+/**
+ * Compute the header's PoW digest for the additive episode+coupled workload.
+ * Returns null unless both legs are active and both leg digests are present.
+ * This is the miner/checker entry point for the same composition preimage used
+ * by ComputeRCStage3FinalDigest.
+ */
+[[nodiscard]] uint256 ComputeRCStage3ComposedWorkDigest(
+    const CBlockHeader& header,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& episode_digest,
+    const uint256& coupled_digest);
 [[nodiscard]] uint256 RCStage3ProofPayloadDigest(const std::vector<uint32_t>& words);
 [[nodiscard]] RCStage3ProofCacheKey
 RCStage3ProofKey(const CBlock& block);

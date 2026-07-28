@@ -33,6 +33,7 @@
 #include <matmul/matmul_v4_rc_freivalds_sampled.h>
 #include <matmul/matmul_v4_rc_gkr.h>
 #include <matmul/matmul_v4_rc_stage3.h>
+#include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_producer.h>
 #include <matmul/noise.h>
 #include <matmul/pow_v4.h>
@@ -4392,11 +4393,28 @@ bool CheckMatMulProofOfWork_RCCoupled(const CBlockHeader& header, const Consensu
     const matmul::v4::rc::RCCoupOptions options_coup =
         matmul::v4::rc::ResolveRCCoupOptions(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) return finish(false);
+    const matmul::v4::rc::RCEpisodeParams params_rc =
+        matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
+    if (!params.IsMatMulRCActive(block_height) ||
+        !matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) {
+        return finish(false);
+    }
 
-    // Consensus REJECT: empty ExactGemm (CPU-only; R1). Profile-selected domains (F7).
-    const uint256 digest = matmul::v4::rc::RecomputeCoupledPuzzleReference(
+    // Legacy fallback before succinct authority: exact CPU recomputation of
+    // both additive work legs. Once Stage-3 is active validation returns from
+    // the attachment verifier before reaching this path.
+    const uint256 coupled_digest = matmul::v4::rc::RecomputeCoupledPuzzleReference(
         header, block_height, params_coup, options_coup);
-    if (digest.IsNull() || digest != header.matmul_digest) return finish(false);
+    const uint256 episode_digest =
+        matmul::v4::rc::RecomputeResidentCurriculumReference(
+            header, params_rc, block_height);
+    const uint256 digest =
+        matmul::v4::rc::ComputeRCStage3ComposedWorkDigest(
+            header, params, block_height, episode_digest, coupled_digest);
+    if (coupled_digest.IsNull() || episode_digest.IsNull() || digest.IsNull() ||
+        digest != header.matmul_digest) {
+        return finish(false);
+    }
     if (UintToArith256(digest) > *bnTarget) return finish(false);
     return finish(true);
 }
@@ -6193,7 +6211,13 @@ static bool SolveMatMulV4BMX4C(CBlockHeader& block,
 // Public nets keep nMatMulRCCoupledHeight = INT32_MAX (unreachable).
 // ---------------------------------------------------------------------------
 
-/** Coupled-puzzle miner: Q-batch Mine via TryMineRCCoupledBatch + CPU reseal. */
+/** Additive episode+coupled miner.
+ *
+ * Coupled activation is not an exclusive replacement for the resident
+ * episode. Every nonce executes both legs and the lottery is the canonical
+ * Stage-3 composition digest. This keeps the work actually performed by the
+ * miner identical to the complete Composed statement validators will verify.
+ */
 static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
                                    const Consensus::Params& params,
                                    uint64_t& max_tries,
@@ -6217,6 +6241,15 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
     const matmul::v4::rc::RCCoupOptions options_coup =
         matmul::v4::rc::ResolveRCCoupOptions(params);
     if (!matmul::v4::rc::RCCoupBarrierLoopComplete(params_coup)) {
+        RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
+        return false;
+    }
+    const matmul::v4::rc::RCEpisodeParams params_rc =
+        matmul::v4::rc::ResolveRCEpisodeParams(params, block_height);
+    if (!params.IsMatMulRCActive(block_height) ||
+        !matmul::v4::rc::ValidateRCEpisodeParams(params_rc)) {
+        LogWarning("SolveMatMulV4RCCoupled: composed work requires an active "
+                   "valid episode leg at height=%d\n", block_height);
         RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
         return false;
     }
@@ -6266,32 +6299,84 @@ static bool SolveMatMulV4RCCoupled(CBlockHeader& block,
 
         for (uint32_t i = 0; i < Q; ++i) {
             if (max_tries == 0) break;
-            const uint256& mined = digests[i];
-            if (mined.IsNull()) {
+            const uint256& coupled_mined = digests[i];
+            if (coupled_mined.IsNull()) {
                 LogWarning("SolveMatMulV4RCCoupled: null batch digest at nonce=%llu; aborting\n",
                            static_cast<unsigned long long>(block.nNonce64 + i));
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
-            if (UintToArith256(mined) > effective_target) {
+
+            // This is a genuine per-nonce work leg, not a post-winner proof
+            // artifact. Computing it only after the coupled digest won would
+            // let miners omit most of the workload the Composed proof claims.
+            const uint256 episode_mined = matmul::v4::rc::MineRCEpisode(
+                window[i], params_rc, block_height, nullptr, gemm);
+            if (episode_mined.IsNull()) {
+                LogWarning("SolveMatMulV4RCCoupled: episode leg returned null at "
+                           "nonce=%llu; aborting\n",
+                           static_cast<unsigned long long>(window[i].nNonce64));
+                RegisterMatMulSolveRuntimeSample(
+                    false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            const uint256 composed_mined =
+                matmul::v4::rc::ComputeRCStage3ComposedWorkDigest(
+                    window[i], params, block_height, episode_mined,
+                    coupled_mined);
+            if (composed_mined.IsNull()) {
+                LogWarning("SolveMatMulV4RCCoupled: composed digest construction "
+                           "failed at nonce=%llu; aborting\n",
+                           static_cast<unsigned long long>(window[i].nNonce64));
+                RegisterMatMulSolveRuntimeSample(
+                    false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            if (UintToArith256(composed_mined) > effective_target) {
                 --max_tries;
                 continue;
             }
 
-            // Winner candidate: CPU reseal (empty ExactGemm).
+            // Winner candidate: CPU reseal BOTH work legs (empty ExactGemm),
+            // then rebuild the same composition digest.
             CBlockHeader cand = window[i];
-            const uint256 resealed = matmul::v4::rc::RecomputeCoupledPuzzleReference(
-                cand, block_height, params_coup, options_coup);
-            if (resealed != mined) {
+            const uint256 coupled_resealed =
+                matmul::v4::rc::RecomputeCoupledPuzzleReference(
+                    cand, block_height, params_coup, options_coup);
+            if (coupled_resealed != coupled_mined) {
                 LogWarning("SolveMatMulV4RCCoupled: TryMineRCCoupledBatch diverged from "
                            "RecomputeCoupledPuzzleReference at nonce=%llu; aborting solve\n",
                            static_cast<unsigned long long>(cand.nNonce64));
                 RegisterMatMulSolveRuntimeSample(false, std::chrono::steady_clock::now() - start);
                 return false;
             }
-            if (UintToArith256(resealed) <= effective_target) {
+            const uint256 episode_resealed =
+                matmul::v4::rc::RecomputeResidentCurriculumReference(
+                    cand, params_rc, block_height);
+            if (episode_resealed != episode_mined) {
+                LogWarning("SolveMatMulV4RCCoupled: MineRCEpisode diverged from "
+                           "RecomputeResidentCurriculumReference at nonce=%llu; "
+                           "aborting solve\n",
+                           static_cast<unsigned long long>(cand.nNonce64));
+                RegisterMatMulSolveRuntimeSample(
+                    false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            const uint256 composed_resealed =
+                matmul::v4::rc::ComputeRCStage3ComposedWorkDigest(
+                    cand, params, block_height, episode_resealed,
+                    coupled_resealed);
+            if (composed_resealed != composed_mined) {
+                LogWarning("SolveMatMulV4RCCoupled: composed miner/reseal "
+                           "divergence at nonce=%llu; aborting solve\n",
+                           static_cast<unsigned long long>(cand.nNonce64));
+                RegisterMatMulSolveRuntimeSample(
+                    false, std::chrono::steady_clock::now() - start);
+                return false;
+            }
+            if (UintToArith256(composed_resealed) <= effective_target) {
                 block = cand;
-                block.matmul_digest = resealed;
+                block.matmul_digest = composed_resealed;
                 RegisterMatMulSolveRuntimeSample(true, std::chrono::steady_clock::now() - start);
                 return true;
             }

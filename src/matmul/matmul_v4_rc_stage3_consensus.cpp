@@ -167,6 +167,27 @@ uint256 RCStage3ParamsCommitment(const Consensus::Params& params,
     return h.GetSHA256();
 }
 
+uint256 ComputeRCStage3ComposedWorkDigest(
+    const CBlockHeader& header,
+    const Consensus::Params& params,
+    int32_t height,
+    const uint256& episode_digest,
+    const uint256& coupled_digest)
+{
+    if (height < 0 || !params.IsMatMulRCActive(height) ||
+        !params.IsMatMulRCCoupledActive(height) ||
+        episode_digest.IsNull() || coupled_digest.IsNull()) {
+        return {};
+    }
+    return ComputeRCStage3ComposedWorkDigest(
+        kRCStage3ProofVersion, height, RCStage3HeaderCommitment(header),
+        RCStage3ParamsCommitment(
+            params, height, RCStage3StatementKind::Composed),
+        params.nMatMulRCProfile, params.nMatMulRCCoupledProfile,
+        ResolveRCCoupOptions(params).transcript_version, episode_digest,
+        coupled_digest);
+}
+
 uint256 RCStage3ProofPayloadDigest(const std::vector<uint32_t>& words)
 {
     HashWriter h;
