@@ -395,6 +395,76 @@ bool BuildStatementV1(
     return true;
 }
 
+bool BuildStatementFromOwningGemmProductV1(
+    const RCStage3SuccinctProof& episode_statement,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& gemm,
+    const RCStage3EpisodeExtractProduct& extract,
+    StatementV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!ValidateRCStage3GemmExtractManifestBinding(
+            episode_statement, manifest, why) ||
+        !ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            manifest, gemm, extract, why) ||
+        gemm.layers.size() != manifest.layers.size()) {
+        return Fail(why, "owning_product_shape_or_authority");
+    }
+    std::array<
+        std::vector<gf::Fp3>, kEndpointCountV1> values;
+    for (uint32_t ordinal = 0;
+         ordinal < manifest.layers.size(); ++ordinal) {
+        const auto& spec = manifest.layers[ordinal];
+        const auto& layer = gemm.layers[ordinal];
+        if (layer.layer_ordinal != ordinal ||
+            layer.operand_a.size() !=
+                uint64_t{spec.m} * spec.k ||
+            layer.operand_b.size() !=
+                uint64_t{spec.k} * spec.n ||
+            layer.gemm_y.size() !=
+                uint64_t{spec.m} * spec.n) {
+            return Fail(why, "owning_product_layer_shape");
+        }
+        for (const int8_t value : layer.operand_a) {
+            values[0].push_back(
+                gf::Fp3::FromFp(gf::FromSigned(value)));
+        }
+        for (const int8_t value : layer.operand_b) {
+            values[1].push_back(
+                gf::Fp3::FromFp(gf::FromSigned(value)));
+        }
+        for (const int64_t value : layer.gemm_y) {
+            values[2].push_back(
+                gf::Fp3::FromFp(gf::FromSigned(value)));
+        }
+    }
+    std::array<EndpointStatementV1, kEndpointCountV1>
+        endpoints;
+    const auto& order = CanonicalEndpointOrderV1();
+    for (uint32_t index = 0;
+         index < kEndpointCountV1; ++index) {
+        endpoints[index].endpoint = order[index];
+        endpoints[index].total_instance_count =
+            values[index].size();
+        endpoints[index].address_begin = 0;
+        endpoints[index].address_stride = 1;
+        if (!ComputeCanonicalShardRootsV1(
+                values[index],
+                endpoints[index].canonical_value_roots,
+                why)) {
+            return Fail(why, "owning_product_shard_roots");
+        }
+    }
+    if (!BuildStatementV1(
+            RCStage3EpisodeStatementCommitment(
+                episode_statement),
+            endpoints, out, why)) {
+        return false;
+    }
+    return true;
+}
+
 uint256 ComputeStatementCommitmentV1(
     const StatementV1& statement)
 {
@@ -532,6 +602,30 @@ bool VerifyV1(
     return true;
 }
 
+bool VerifyWithOwningGemmProductV1(
+    const RCStage3SuccinctProof& episode_statement,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& gemm,
+    const RCStage3EpisodeExtractProduct& extract,
+    const StatementV1& expected_statement,
+    const ProofV1& proof,
+    std::string* why)
+{
+    if (!VerifyRCStage3EpisodeGemmProduct(
+            episode_statement, manifest, gemm,
+            extract, why)) {
+        return Fail(why, "owning_product_verify");
+    }
+    StatementV1 regenerated;
+    if (!BuildStatementFromOwningGemmProductV1(
+            episode_statement, manifest, gemm,
+            extract, regenerated, why) ||
+        !(regenerated == expected_statement)) {
+        return Fail(why, "owning_product_statement_equality");
+    }
+    return VerifyV1(expected_statement, proof, why);
+}
+
 AuditV1 AssessV1(
     const StatementV1& expected_statement,
     const ProofV1& proof)
@@ -612,6 +706,95 @@ AuditV1 AssessV1(
           "owning_producer_root_and_recursive_bridge_pending"
         : "stage3:episode_gemm_openings_proof_owned:"
           "assessment_incomplete";
+    return out;
+}
+
+AuditV1 AssessWithOwningGemmProductV1(
+    const RCStage3SuccinctProof& episode_statement,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& gemm,
+    const RCStage3EpisodeExtractProduct& extract,
+    const StatementV1& expected_statement,
+    const ProofV1& proof)
+{
+    AuditV1 out = AssessV1(expected_statement, proof);
+    if (!out.valid ||
+        !VerifyWithOwningGemmProductV1(
+            episode_statement, manifest, gemm, extract,
+            expected_statement, proof, nullptr)) {
+        out.valid = false;
+        out.note =
+            "stage3:episode_gemm_openings_proof_owned:"
+            "owning_product_bridge_failed";
+        return out;
+    }
+    out.owning_manifest_authority_roots_bound = true;
+    out.owning_relation_product_verified = true;
+    out.owning_producer_roots_bound = true;
+    out.source_bridge_host_linear = true;
+    out.source_bridge_normalized_recursive = false;
+
+    if (!manifest.layers.empty()) {
+        auto mutated = manifest;
+        mutated.layers[0].bindings.operand_a_root_alg =
+            uint256{};
+        out.producer_root_mutation_rejected =
+            !VerifyWithOwningGemmProductV1(
+                episode_statement, mutated, gemm, extract,
+                expected_statement, proof, nullptr);
+
+        for (uint32_t ordinal = 1;
+             ordinal < manifest.layers.size(); ++ordinal) {
+            if (manifest.layers[ordinal]
+                    .bindings.operand_a_root_alg ==
+                manifest.layers[0]
+                    .bindings.operand_a_root_alg) {
+                continue;
+            }
+            out.distinct_producer_root_transplant_available =
+                true;
+            auto transplanted = manifest;
+            std::swap(
+                transplanted.layers[0]
+                    .bindings.operand_a_root_alg,
+                transplanted.layers[ordinal]
+                    .bindings.operand_a_root_alg);
+            out.producer_root_transplant_rejected =
+                !VerifyWithOwningGemmProductV1(
+                    episode_statement, transplanted, gemm,
+                    extract, expected_statement, proof,
+                    nullptr);
+            break;
+        }
+    }
+
+    // SOURCE remains fail-closed here. Although the flat owner and equality
+    // are genuinely executed, the bridge walks every A/B/Y value on the host;
+    // a normalized recursive child has not proved that equality.
+    out.residual_obligations =
+        topo::ProductionResidualSourceRootProvenance |
+        topo::ProductionResidualRecursiveConsumption |
+        (out.production_all_instance_aggregation
+             ? 0U
+             : topo::
+                 ProductionResidualExactAllInstanceAggregation);
+    out.valid =
+        out.valid &&
+        out.owning_manifest_authority_roots_bound &&
+        out.owning_relation_product_verified &&
+        out.owning_producer_roots_bound &&
+        out.source_bridge_host_linear &&
+        !out.source_bridge_normalized_recursive &&
+        out.producer_root_mutation_rejected &&
+        (!out.distinct_producer_root_transplant_available ||
+         out.producer_root_transplant_rejected);
+    out.note =
+        out.valid
+        ? "stage3:episode_gemm_openings_proof_owned:"
+          "flat_owner_and_alg_authority_equality_executed;"
+          "normalized_recursive_source_bridge_pending"
+        : "stage3:episode_gemm_openings_proof_owned:"
+          "owning_product_assessment_incomplete";
     return out;
 }
 

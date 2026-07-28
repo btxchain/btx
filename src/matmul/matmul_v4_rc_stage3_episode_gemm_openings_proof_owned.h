@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_EPISODE_GEMM_OPENINGS_PROOF_OWNED_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_EPISODE_GEMM_OPENINGS_PROOF_OWNED_H
 
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_episode_semantic.h>
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 
@@ -87,6 +88,19 @@ struct AuditV1 {
     /** False until those memory roots equal authenticated columns exported
      * by the owning GEMM/builder relation proofs. */
     bool owning_producer_roots_bound{false};
+    /** The serialized per-layer *_root_alg values were recomputed from the
+     * exact A/B/Y/Extract vectors and matched the manifest. */
+    bool owning_manifest_authority_roots_bound{false};
+    /** The complete flat GEMM product verifier executed before the equality
+     * bridge was accepted. */
+    bool owning_relation_product_verified{false};
+    /** Current bridge rebuilds the flattened vectors on the host. It is
+     * useful hardening/evidence, but not a sublinear production path. */
+    bool source_bridge_host_linear{false};
+    bool source_bridge_normalized_recursive{false};
+    bool producer_root_mutation_rejected{false};
+    bool distinct_producer_root_transplant_available{false};
+    bool producer_root_transplant_rejected{false};
     bool exact_all_instance_aggregation{false};
     bool production_all_instance_aggregation{false};
     bool proof_level_tamper_rejected{false};
@@ -115,6 +129,21 @@ CanonicalEndpointOrderV1();
     StatementV1& out,
     std::string* why = nullptr);
 
+/**
+ * Derive the only A/B/Y opening statement compatible with a validated
+ * RCStage3EpisodeGemmProduct.  The helper recomputes every per-layer
+ * VectorRootAlg and then flattens the exact layer vectors in Λ order before
+ * computing the SHA-FRI shard roots.  It never trusts caller-provided
+ * canonical_value_roots.
+ */
+[[nodiscard]] bool BuildStatementFromOwningGemmProductV1(
+    const RCStage3SuccinctProof& episode_statement,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& gemm,
+    const RCStage3EpisodeExtractProduct& extract,
+    StatementV1& out,
+    std::string* why = nullptr);
+
 [[nodiscard]] uint256 ComputeStatementCommitmentV1(
     const StatementV1& statement);
 
@@ -133,8 +162,33 @@ CanonicalEndpointOrderV1();
     const ProofV1& proof,
     std::string* why = nullptr);
 
+/**
+ * Execute the owning GEMM relation proof, validate all per-layer AlgHash
+ * authority roots, regenerate the exact flattened A/B/Y statement, and only
+ * then accept the proof-owned opening bundles.
+ *
+ * This is intentionally not a production-recursive claim: the equality is
+ * currently established by walking the flat vectors on the host.
+ */
+[[nodiscard]] bool VerifyWithOwningGemmProductV1(
+    const RCStage3SuccinctProof& episode_statement,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& gemm,
+    const RCStage3EpisodeExtractProduct& extract,
+    const StatementV1& expected_statement,
+    const ProofV1& proof,
+    std::string* why = nullptr);
+
 /** Re-verifies the proof and derives status; no caller-supplied booleans. */
 [[nodiscard]] AuditV1 AssessV1(
+    const StatementV1& expected_statement,
+    const ProofV1& proof);
+
+[[nodiscard]] AuditV1 AssessWithOwningGemmProductV1(
+    const RCStage3SuccinctProof& episode_statement,
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& gemm,
+    const RCStage3EpisodeExtractProduct& extract,
     const StatementV1& expected_statement,
     const ProofV1& proof);
 

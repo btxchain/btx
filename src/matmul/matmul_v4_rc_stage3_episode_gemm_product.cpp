@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
+#include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 
 #include <hash.h>
 
@@ -543,6 +544,102 @@ uint256 ComputeRCStage3EpisodeGemmCollectionCommitment(
     return hash.GetHash();
 }
 
+bool BindRCStage3EpisodeGemmAlgAuthorityRoots(
+    RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& product,
+    const RCStage3EpisodeExtractProduct& extract,
+    std::string* why)
+{
+    if (product.layers.size() != manifest.layers.size() ||
+        extract.tiles.size() != manifest.total_extract_tiles) {
+        return Fail(why, "alg_authority_public_shape");
+    }
+    for (uint32_t ordinal = 0;
+         ordinal < manifest.layers.size(); ++ordinal) {
+        auto& spec = manifest.layers[ordinal];
+        const auto& layer = product.layers[ordinal];
+        if (layer.layer_ordinal != ordinal ||
+            layer.operand_a.size() !=
+                uint64_t{spec.m} * spec.k ||
+            layer.operand_b.size() !=
+                uint64_t{spec.k} * spec.n ||
+            layer.gemm_y.size() !=
+                uint64_t{spec.m} * spec.n) {
+            return Fail(
+                why, "alg_authority_layer_" +
+                         std::to_string(ordinal) + "_shape");
+        }
+        std::vector<gf::Fp3> extract_input;
+        extract_input.reserve(layer.gemm_y.size());
+        for (uint64_t tile = 0;
+             tile < spec.extract_tile_count; ++tile) {
+            const uint64_t global =
+                spec.extract_tile_begin + tile;
+            if (global >= extract.tiles.size()) {
+                return Fail(why, "alg_authority_extract_inventory");
+            }
+            for (const int64_t value : extract.tiles[global].input) {
+                extract_input.push_back(S(value));
+            }
+        }
+        if (extract_input.size() != layer.gemm_y.size()) {
+            return Fail(why, "alg_authority_extract_shape");
+        }
+        spec.bindings.operand_a_root_alg =
+            RCStage3VectorRootAlgCommitment(
+                ToField(layer.operand_a));
+        spec.bindings.operand_b_root_alg =
+            RCStage3VectorRootAlgCommitment(
+                ToField(layer.operand_b));
+        spec.bindings.gemm_y_root_alg =
+            RCStage3VectorRootAlgCommitment(
+                ToField(layer.gemm_y));
+        spec.bindings.extract_input_root_alg =
+            RCStage3VectorRootAlgCommitment(extract_input);
+        if (spec.bindings.operand_a_root_alg.IsNull() ||
+            spec.bindings.operand_b_root_alg.IsNull() ||
+            spec.bindings.gemm_y_root_alg.IsNull() ||
+            spec.bindings.extract_input_root_alg.IsNull()) {
+            return Fail(why, "alg_authority_null_root");
+        }
+    }
+    return true;
+}
+
+bool ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& product,
+    const RCStage3EpisodeExtractProduct& extract,
+    std::string* why)
+{
+    RCStage3GemmExtractManifest expected = manifest;
+    if (!BindRCStage3EpisodeGemmAlgAuthorityRoots(
+            expected, product, extract, why)) {
+        return false;
+    }
+    for (uint32_t ordinal = 0;
+         ordinal < manifest.layers.size(); ++ordinal) {
+        const auto& actual =
+            manifest.layers[ordinal].bindings;
+        const auto& want =
+            expected.layers[ordinal].bindings;
+        if (actual.operand_a_root_alg !=
+                want.operand_a_root_alg ||
+            actual.operand_b_root_alg !=
+                want.operand_b_root_alg ||
+            actual.gemm_y_root_alg !=
+                want.gemm_y_root_alg ||
+            actual.extract_input_root_alg !=
+                want.extract_input_root_alg) {
+            return Fail(
+                why, "alg_authority_layer_" +
+                         std::to_string(ordinal) +
+                         "_root_mismatch");
+        }
+    }
+    return true;
+}
+
 bool ProveRCStage3EpisodeGemmProduct(
     const RCStage3SuccinctProof& statement,
     RCStage3GemmExtractManifest& manifest,
@@ -674,6 +771,12 @@ bool ProveRCStage3EpisodeGemmProduct(
             out = {};
             return Fail(why, "prove_opening_roots");
         }
+    }
+
+    if (!BindRCStage3EpisodeGemmAlgAuthorityRoots(
+            manifest, out, extract, why)) {
+        out = {};
+        return false;
     }
 
     out.manifest_commitment =
@@ -1039,6 +1142,10 @@ bool VerifyRCStage3EpisodeGemmProduct(
                              "_dot_proof");
             }
         }
+    }
+    if (!ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            manifest, product, extract, why)) {
+        return false;
     }
     if (!VerifyRCStage3EpisodeWiringCopyClosure(
             statement, manifest, product.wiring, why)) {

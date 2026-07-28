@@ -123,6 +123,36 @@ struct RCStage3EpisodeGemmLayerWitness {
     const RCStage3EpisodeGemmProduct& product);
 
 /**
+ * Populate the four per-layer Poseidon VectorRootAlg authority fields owned by
+ * the flat GEMM/Extract value products (A, B, Y and Extract input). The scale
+ * schedule is owned by the hash/Extract relation and remains separate. This
+ * is a prover-side helper only: callers
+ * must use ValidateRCStage3EpisodeGemmAlgAuthorityRoots (or the complete GEMM
+ * verifier, which calls it) before trusting the fields.
+ */
+[[nodiscard]] bool BindRCStage3EpisodeGemmAlgAuthorityRoots(
+    RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& product,
+    const RCStage3EpisodeExtractProduct& extract,
+    std::string* why = nullptr);
+
+/**
+ * Recompute every operand-A, operand-B, GEMM-Y and Extract-input
+ * VectorRootAlg from the owning product values and require exact equality to
+ * the corresponding RCStage3GemmExtractLayerBindings fields.  This prevents
+ * the serialized *_root_alg fields from being free caller-selected metadata.
+ *
+ * This check is deliberately linear in the flat product.  It hardens and
+ * validates the current R&D product but is not the normalized recursive
+ * source-provenance proof required for production authority.
+ */
+[[nodiscard]] bool ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+    const RCStage3GemmExtractManifest& manifest,
+    const RCStage3EpisodeGemmProduct& product,
+    const RCStage3EpisodeExtractProduct& extract,
+    std::string* why = nullptr);
+
+/**
  * Validate Λ coverage and every proof-owned opening/root alias. This performs
  * indexing and commitment computation only; it never multiplies matrices.
  */

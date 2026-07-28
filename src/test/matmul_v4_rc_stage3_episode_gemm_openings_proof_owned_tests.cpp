@@ -8,6 +8,7 @@
 
 namespace owned =
     matmul::v4::rc::episode_gemm_openings_proof_owned;
+namespace rc = matmul::v4::rc;
 namespace gf = matmul::v4::rc::gkr_field;
 namespace topo = matmul::v4::rc::universal_topology;
 
@@ -76,6 +77,116 @@ owned::StatementV1 Statement(
     BOOST_REQUIRE_MESSAGE(
         owned::BuildStatementV1(
             Root(0x51), endpoints, out, &why),
+        why);
+    return out;
+}
+
+rc::RCStage3SuccinctProof EpisodeStatement()
+{
+    rc::RCStage3SuccinctProof out;
+    out.statement = rc::RCStage3StatementKind::Episode;
+    out.public_inputs.height = 177;
+    out.public_inputs.episode_profile = 2;
+    out.public_inputs.header_commitment = Root(0x11);
+    out.public_inputs.params_commitment = Root(0x12);
+    out.public_inputs.target = Root(0x13);
+    out.public_inputs.sigma = Root(0x14);
+    out.public_inputs.episode_digest = Root(0x15);
+    out.public_inputs.final_digest = Root(0x15);
+    return out;
+}
+
+rc::RCEpisodeParams TinyParams()
+{
+    rc::RCEpisodeParams out;
+    out.rounds = 1;
+    out.d_head = 32;
+    out.n_q = 32;
+    out.n_ctx = 32;
+    out.L_lyr = 1;
+    out.d_model = 32;
+    out.d_ff = 32;
+    out.b_seq = 32;
+    out.T_leaf = 64;
+    return out;
+}
+
+std::vector<rc::RCStage3GemmExtractLayerBindings>
+Bindings(const rc::RCEpisodeParams& params)
+{
+    const auto layout = rc::RCGkrTraceLayout(params);
+    std::vector<rc::RCStage3GemmExtractLayerBindings> out(
+        layout.layers.size());
+    for (uint32_t ordinal = 0;
+         ordinal < out.size(); ++ordinal) {
+        auto& binding = out[ordinal];
+        binding.extract_prf = Root(0x20 + ordinal);
+        binding.operand_a_root = Root(0x30 + ordinal);
+        binding.operand_b_root = Root(0x40 + ordinal);
+        binding.gemm_y_root = Root(0x50 + ordinal);
+        binding.extract_input_root = Root(0x60 + ordinal);
+        binding.extract_output_root = Root(0x70 + ordinal);
+        binding.gemm_proof_root = Root(0x80 + ordinal);
+        binding.extract_recursive_root = Root(0x90 + ordinal);
+        binding.scale_schedule_root = Root(0xa0 + ordinal);
+        binding.ctl_terminal_root = Root(0xb0 + ordinal);
+    }
+    return out;
+}
+
+struct OwningFixture {
+    rc::RCStage3SuccinctProof outer{EpisodeStatement()};
+    rc::RCStage3GemmExtractManifest manifest;
+    rc::RCStage3EpisodeGemmProduct gemm;
+    rc::RCStage3EpisodeExtractProduct extract;
+};
+
+OwningFixture BuildOwningFixture()
+{
+    OwningFixture out;
+    const auto params = TinyParams();
+    std::string why;
+    auto manifest = rc::BuildRCStage3GemmExtractManifest(
+        params, rc::RCStage3EpisodeStatementCommitment(
+                    out.outer),
+        Bindings(params), &why);
+    BOOST_REQUIRE_MESSAGE(manifest.has_value(), why);
+    out.manifest = *manifest;
+    out.gemm.layers.resize(out.manifest.layers.size());
+    out.extract.tiles.resize(
+        out.manifest.total_extract_tiles);
+    for (uint32_t ordinal = 0;
+         ordinal < out.manifest.layers.size(); ++ordinal) {
+        const auto& spec = out.manifest.layers[ordinal];
+        auto& layer = out.gemm.layers[ordinal];
+        layer.layer_ordinal = ordinal;
+        layer.operand_a.assign(
+            uint64_t{spec.m} * spec.k,
+            static_cast<int8_t>(1 + ordinal % 11));
+        layer.operand_b.assign(
+            uint64_t{spec.k} * spec.n,
+            static_cast<int8_t>(-1 -
+                static_cast<int32_t>(ordinal % 11)));
+        layer.gemm_y.assign(
+            uint64_t{spec.m} * spec.n,
+            static_cast<int64_t>(101 + ordinal));
+        for (uint64_t tile = 0;
+             tile < spec.extract_tile_count; ++tile) {
+            auto& input =
+                out.extract.tiles[
+                    spec.extract_tile_begin + tile].input;
+            for (uint32_t lane = 0;
+                 lane < input.size(); ++lane) {
+                input[lane] =
+                    static_cast<int64_t>(
+                        ordinal * 10000U +
+                        tile * 32U + lane);
+            }
+        }
+    }
+    BOOST_REQUIRE_MESSAGE(
+        rc::BindRCStage3EpisodeGemmAlgAuthorityRoots(
+            out.manifest, out.gemm, out.extract, &why),
         why);
     return out;
 }
@@ -197,6 +308,63 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         nonproduction
             .production_site_manifest_commitment.IsNull());
+}
+
+BOOST_AUTO_TEST_CASE(
+    owning_gemm_values_regenerate_the_only_accepted_a_b_y_statement)
+{
+    const auto fixture = BuildOwningFixture();
+    std::string why;
+    owned::StatementV1 statement;
+    BOOST_REQUIRE_MESSAGE(
+        owned::BuildStatementFromOwningGemmProductV1(
+            fixture.outer, fixture.manifest, fixture.gemm,
+            fixture.extract, statement, &why),
+        why);
+    BOOST_CHECK(
+        statement.episode_statement_commitment ==
+        rc::RCStage3EpisodeStatementCommitment(
+            fixture.outer));
+    for (const auto& endpoint : statement.endpoints) {
+        BOOST_CHECK_GT(endpoint.total_instance_count, 0U);
+        BOOST_CHECK(!endpoint.canonical_value_roots.empty());
+    }
+
+    auto root_mutation = fixture.manifest;
+    root_mutation.layers[0]
+        .bindings.operand_b_root_alg = Root(0xd1);
+    owned::StatementV1 rejected;
+    BOOST_CHECK(
+        !owned::BuildStatementFromOwningGemmProductV1(
+            fixture.outer, root_mutation, fixture.gemm,
+            fixture.extract, rejected, &why));
+
+    BOOST_REQUIRE_GT(fixture.manifest.layers.size(), 1U);
+    auto root_transplant = fixture.manifest;
+    std::swap(
+        root_transplant.layers[0]
+            .bindings.operand_a_root_alg,
+        root_transplant.layers[1]
+            .bindings.operand_a_root_alg);
+    BOOST_CHECK(
+        !owned::BuildStatementFromOwningGemmProductV1(
+            fixture.outer, root_transplant, fixture.gemm,
+            fixture.extract, rejected, &why));
+
+    auto producer_mutation = fixture.gemm;
+    ++producer_mutation.layers[0].gemm_y[0];
+    BOOST_CHECK(
+        !owned::BuildStatementFromOwningGemmProductV1(
+            fixture.outer, fixture.manifest,
+            producer_mutation, fixture.extract,
+            rejected, &why));
+
+    auto extract_mutation = fixture.extract;
+    ++extract_mutation.tiles[0].input[0];
+    BOOST_CHECK(
+        !owned::BuildStatementFromOwningGemmProductV1(
+            fixture.outer, fixture.manifest, fixture.gemm,
+            extract_mutation, rejected, &why));
 }
 
 BOOST_AUTO_TEST_CASE(

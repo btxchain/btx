@@ -4,6 +4,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_stage3_episode_gemm_openings_proof_owned.h>
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_extract.h>
 #include <matmul/matmul_v4_rc_gkr_air.h>
@@ -18,6 +19,8 @@ namespace rc = matmul::v4::rc;
 namespace aq = rc::air_quotient;
 namespace gf = rc::gkr_field;
 namespace ga = rc::gkr_air;
+namespace owned =
+    rc::episode_gemm_openings_proof_owned;
 
 uint256 H(uint8_t value)
 {
@@ -399,6 +402,99 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    alg_authority_roots_are_value_derived_and_reject_mutation_transplant)
+{
+    const auto params = TinyParams();
+    std::string why;
+    auto manifest = rc::BuildRCStage3GemmExtractManifest(
+        params, H(0x91), Bindings(params), &why);
+    BOOST_REQUIRE_MESSAGE(manifest.has_value(), why);
+
+    rc::RCStage3EpisodeGemmProduct gemm;
+    gemm.layers.resize(manifest->layers.size());
+    rc::RCStage3EpisodeExtractProduct extract;
+    extract.tiles.resize(manifest->total_extract_tiles);
+    for (uint32_t ordinal = 0;
+         ordinal < manifest->layers.size(); ++ordinal) {
+        const auto& spec = manifest->layers[ordinal];
+        auto& layer = gemm.layers[ordinal];
+        layer.layer_ordinal = ordinal;
+        layer.operand_a.assign(
+            uint64_t{spec.m} * spec.k,
+            static_cast<int8_t>(1 + ordinal % 7));
+        layer.operand_b.assign(
+            uint64_t{spec.k} * spec.n,
+            static_cast<int8_t>(-1 -
+                static_cast<int32_t>(ordinal % 7)));
+        layer.gemm_y.assign(
+            uint64_t{spec.m} * spec.n,
+            static_cast<int64_t>(17 + ordinal));
+        for (uint64_t tile = 0;
+             tile < spec.extract_tile_count; ++tile) {
+            auto& input =
+                extract.tiles[
+                    spec.extract_tile_begin + tile].input;
+            for (uint32_t lane = 0;
+                 lane < input.size(); ++lane) {
+                input[lane] =
+                    static_cast<int64_t>(
+                        1000U * ordinal +
+                        32U * tile + lane);
+            }
+        }
+    }
+
+    BOOST_REQUIRE_MESSAGE(
+        rc::BindRCStage3EpisodeGemmAlgAuthorityRoots(
+            *manifest, gemm, extract, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        rc::ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            *manifest, gemm, extract, &why),
+        why);
+    for (const auto& layer : manifest->layers) {
+        BOOST_CHECK(
+            !layer.bindings.operand_a_root_alg.IsNull());
+        BOOST_CHECK(
+            !layer.bindings.operand_b_root_alg.IsNull());
+        BOOST_CHECK(
+            !layer.bindings.gemm_y_root_alg.IsNull());
+        BOOST_CHECK(
+            !layer.bindings.extract_input_root_alg.IsNull());
+    }
+
+    auto root_mutation = *manifest;
+    root_mutation.layers[0]
+        .bindings.gemm_y_root_alg = H(0xe1);
+    BOOST_CHECK(
+        !rc::ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            root_mutation, gemm, extract, &why));
+
+    BOOST_REQUIRE_GT(manifest->layers.size(), 1U);
+    auto root_transplant = *manifest;
+    std::swap(
+        root_transplant.layers[0]
+            .bindings.operand_a_root_alg,
+        root_transplant.layers[1]
+            .bindings.operand_a_root_alg);
+    BOOST_CHECK(
+        !rc::ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            root_transplant, gemm, extract, &why));
+
+    auto producer_mutation = gemm;
+    ++producer_mutation.layers[0].operand_b[0];
+    BOOST_CHECK(
+        !rc::ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            *manifest, producer_mutation, extract, &why));
+
+    auto extract_mutation = extract;
+    ++extract_mutation.tiles[0].input[0];
+    BOOST_CHECK(
+        !rc::ValidateRCStage3EpisodeGemmAlgAuthorityRoots(
+            *manifest, gemm, extract_mutation, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
     honest_whole_episode_gemm_extract_stream_product_executes)
 {
     if (std::getenv(
@@ -440,10 +536,115 @@ BOOST_AUTO_TEST_CASE(
         rc::VerifyRCStage3EpisodeGemmProduct(
             statement, *manifest, gemm, extract, &why),
         why);
+    for (const auto& layer : manifest->layers) {
+        BOOST_REQUIRE(
+            !layer.bindings.operand_a_root_alg.IsNull());
+        BOOST_REQUIRE(
+            !layer.bindings.operand_b_root_alg.IsNull());
+        BOOST_REQUIRE(
+            !layer.bindings.gemm_y_root_alg.IsNull());
+        BOOST_REQUIRE(
+            !layer.bindings.extract_input_root_alg.IsNull());
+    }
+
+    owned::StatementV1 openings_statement;
+    BOOST_REQUIRE_MESSAGE(
+        owned::BuildStatementFromOwningGemmProductV1(
+            statement, *manifest, gemm, extract,
+            openings_statement, &why),
+        why);
+    std::array<
+        std::vector<gf::Fp3>, owned::kEndpointCountV1>
+        opening_values;
+    for (const auto& layer : gemm.layers) {
+        for (const int8_t value : layer.operand_a) {
+            opening_values[0].push_back(
+                gf::Fp3::FromFp(gf::FromSigned(value)));
+        }
+        for (const int8_t value : layer.operand_b) {
+            opening_values[1].push_back(
+                gf::Fp3::FromFp(gf::FromSigned(value)));
+        }
+        for (const int64_t value : layer.gemm_y) {
+            opening_values[2].push_back(
+                gf::Fp3::FromFp(gf::FromSigned(value)));
+        }
+    }
+    owned::ProofV1 openings_proof;
+    BOOST_REQUIRE_MESSAGE(
+        owned::ProveV1(
+            openings_statement, opening_values,
+            openings_proof, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        owned::VerifyWithOwningGemmProductV1(
+            statement, *manifest, gemm, extract,
+            openings_statement, openings_proof, &why),
+        why);
+    const auto openings_audit =
+        owned::AssessWithOwningGemmProductV1(
+            statement, *manifest, gemm, extract,
+            openings_statement, openings_proof);
+    BOOST_REQUIRE_MESSAGE(
+        openings_audit.valid, openings_audit.note);
+    BOOST_CHECK(
+        openings_audit.owning_manifest_authority_roots_bound);
+    BOOST_CHECK(
+        openings_audit.owning_relation_product_verified);
+    BOOST_CHECK(
+        openings_audit.owning_producer_roots_bound);
+    BOOST_CHECK(openings_audit.source_bridge_host_linear);
+    BOOST_CHECK(
+        !openings_audit.source_bridge_normalized_recursive);
+    BOOST_CHECK(
+        (openings_audit.residual_obligations &
+         rc::universal_topology::
+             ProductionResidualSourceRootProvenance) != 0);
+
+    auto opening_query_attack = openings_proof;
+    auto& opening_child =
+        opening_query_attack.endpoint_bundles[0]
+            .shards[0].proof.quotient;
+    BOOST_REQUIRE(!opening_child.batch.queries.empty());
+    BOOST_REQUIRE(
+        !opening_child.batch.queries[0].columns.empty());
+    opening_child.batch.queries[0].columns[0].value =
+        gf::Add(
+            opening_child.batch.queries[0]
+                .columns[0].value,
+            gf::Fp3::One());
+    opening_query_attack.endpoint_bundles[0]
+        .bundle_commitment =
+        rc::ComputeRCStage3EpisodeSemanticMemoryBundleCommitment(
+            opening_query_attack.endpoint_bundles[0]);
+    opening_query_attack.ordered_proof_set_commitment =
+        owned::ComputeOrderedProofSetCommitmentV1(
+            opening_query_attack);
+    BOOST_CHECK(
+        !owned::VerifyWithOwningGemmProductV1(
+            statement, *manifest, gemm, extract,
+            openings_statement, opening_query_attack,
+            &why));
+
     auto changed = gemm;
     ++changed.layers[0].gemm_y[0];
     BOOST_CHECK(!rc::VerifyRCStage3EpisodeGemmProduct(
         statement, *manifest, changed, extract, &why));
+    auto changed_authority = *manifest;
+    changed_authority.layers[0]
+        .bindings.gemm_y_root_alg = H(0xe2);
+    BOOST_CHECK(!rc::VerifyRCStage3EpisodeGemmProduct(
+        statement, changed_authority, gemm, extract, &why));
+    BOOST_REQUIRE_GT(manifest->layers.size(), 1U);
+    auto transplanted_authority = *manifest;
+    std::swap(
+        transplanted_authority.layers[0]
+            .bindings.operand_a_root_alg,
+        transplanted_authority.layers[1]
+            .bindings.operand_a_root_alg);
+    BOOST_CHECK(!rc::VerifyRCStage3EpisodeGemmProduct(
+        statement, transplanted_authority, gemm, extract,
+        &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
