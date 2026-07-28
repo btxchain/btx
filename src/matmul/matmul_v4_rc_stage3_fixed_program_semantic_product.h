@@ -261,6 +261,66 @@ struct WitnessProductProofV2 {
     std::string note;
 };
 
+inline constexpr uint16_t kShardSetVersionV4 = 4;
+
+/**
+ * One verified split-RAP child reduced to the proof-owned cells needed by the
+ * all-instance scheduler.  `coverage` is the exact ordered family interval
+ * list carried by the child statement.  Both terminals are constrained by
+ * the child's R0-bound AIR; they are not copied from an unproved caller
+ * manifest.
+ */
+struct ProofOwnedBoundaryShardV4 {
+    uint32_t child_ordinal{0};
+    ha::ProgramKind program_kind{};
+    uint32_t source_instance_count{0};
+    uint256 child_statement_commitment{};
+    uint256 base_row_commitment{};
+    uint256 exact_input_schedule_root{};
+    DualFp3ProducerTerminalV2 input_terminal{};
+    DualFp3ProducerTerminalV2 output_terminal{};
+    std::vector<FamilyExportFragmentV2> coverage;
+    uint256 shard_commitment{};
+
+    bool operator==(const ProofOwnedBoundaryShardV4&) const = default;
+};
+
+/**
+ * Exact ordered set of all proof-owned shards in one V2 caller product.
+ *
+ * The bounded counts are derived from the validated caller manifests.  The
+ * production counts are independently regenerated from the canonical global
+ * proof-site manifest, so a bounded fixture can exercise the construction
+ * without being mislabeled production complete.
+ */
+struct ProofOwnedShardSetV4 {
+    uint16_t version{kShardSetVersionV4};
+    uint256 caller_statement_commitment{};
+    uint256 production_site_manifest_commitment{};
+    std::array<uint64_t, kFamilyCountV1>
+        caller_boundary_counts{};
+    std::array<uint64_t, kFamilyCountV1>
+        production_boundary_counts{};
+    std::vector<ProofOwnedBoundaryShardV4> shards;
+    DualFp3ProducerTerminalV2 aggregate_input_terminal{};
+    DualFp3ProducerTerminalV2 aggregate_output_terminal{};
+    uint256 exact_coverage_root{};
+    uint256 statement_commitment{};
+
+    bool exact_ordered_caller_coverage{false};
+    bool proof_owned_dual_fp3_terminals{false};
+    bool production_manifest_derived{false};
+    bool production_all_instance_aggregation{false};
+    /** Remains false until the owning role AIR exports and equality-links the
+     * exact same schedule root and dual-Fp3 terminals. */
+    bool role_export_equality_constrained{false};
+    bool recursive_child_consumed{false};
+    bool semantic_closure{false};
+    bool production_authority{false};
+
+    bool operator==(const ProofOwnedShardSetV4&) const = default;
+};
+
 /**
  * Canonically derive all typed roles, endpoints, program kinds, boundaries,
  * offsets and public-boundary output roots from the eleven typed manifests.
@@ -319,6 +379,25 @@ struct WitnessProductProofV2 {
     std::string* why = nullptr);
 
 /**
+ * Verify the complete V2 split-RAP proof first, then reduce its ordered child
+ * statements into a streaming-friendly exact shard set and aggregate their
+ * two independently challenged Fp3 input/output terminals.
+ */
+[[nodiscard]] bool BuildProofOwnedShardSetV4(
+    const FamilyInputsV1& inputs,
+    const uint256& fs_seed,
+    const WitnessProductProofV2& proof,
+    ProofOwnedShardSetV4& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyProofOwnedShardSetV4(
+    const FamilyInputsV1& inputs,
+    const uint256& fs_seed,
+    const WitnessProductProofV2& proof,
+    const ProofOwnedShardSetV4& shard_set,
+    std::string* why = nullptr);
+
+/**
  * Receipt cells must be unreduced canonical u32 base-field representatives.
  * In particular x+p is rejected before field arithmetic can alias it to x.
  */
@@ -333,12 +412,18 @@ inline constexpr bool kProductionAuthorityV1 = false;
 inline constexpr bool kWitnessRecursiveConsumptionReadyV2 = false;
 inline constexpr bool kWitnessSemanticClosureReadyV2 = false;
 inline constexpr bool kWitnessProductionAuthorityV2 = false;
+inline constexpr bool kShardSetRoleExportEqualityReadyV4 = false;
+inline constexpr bool kShardSetRecursiveConsumptionReadyV4 = false;
+inline constexpr bool kShardSetProductionAuthorityV4 = false;
 static_assert(!kRecursiveConsumptionReadyV1);
 static_assert(!kSemanticClosureReadyV1);
 static_assert(!kProductionAuthorityV1);
 static_assert(!kWitnessRecursiveConsumptionReadyV2);
 static_assert(!kWitnessSemanticClosureReadyV2);
 static_assert(!kWitnessProductionAuthorityV2);
+static_assert(!kShardSetRoleExportEqualityReadyV4);
+static_assert(!kShardSetRecursiveConsumptionReadyV4);
+static_assert(!kShardSetProductionAuthorityV4);
 
 } // namespace matmul::v4::rc::fixed_program_semantic_product
 

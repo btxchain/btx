@@ -407,6 +407,85 @@ BOOST_AUTO_TEST_CASE(
                 child.statement.source_instance_count);
     }
 
+    product::ProofOwnedShardSetV4 shard_set;
+    BOOST_REQUIRE_MESSAGE(
+        product::BuildProofOwnedShardSetV4(
+            inputs, seed, proof, shard_set, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof, shard_set, &why),
+        why);
+    BOOST_CHECK(shard_set.exact_ordered_caller_coverage);
+    BOOST_CHECK(shard_set.proof_owned_dual_fp3_terminals);
+    BOOST_CHECK(shard_set.production_manifest_derived);
+    BOOST_CHECK(
+        !shard_set.production_all_instance_aggregation);
+    BOOST_CHECK(
+        !shard_set.role_export_equality_constrained);
+    BOOST_CHECK(!shard_set.recursive_child_consumed);
+    BOOST_CHECK(!shard_set.semantic_closure);
+    BOOST_CHECK(!shard_set.production_authority);
+    BOOST_CHECK_EQUAL(
+        shard_set.shards.size(), proof.children.size());
+    for (uint32_t family = 0;
+         family < product::kFamilyCountV1; ++family) {
+        BOOST_CHECK_EQUAL(
+            shard_set.caller_boundary_counts[family], 1U);
+        BOOST_CHECK_GT(
+            shard_set.production_boundary_counts[family],
+            shard_set.caller_boundary_counts[family]);
+    }
+
+    auto shard_omitted = shard_set;
+    shard_omitted.shards.pop_back();
+    BOOST_CHECK(
+        !product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof, shard_omitted, &why));
+
+    auto shard_duplicated = shard_set;
+    shard_duplicated.shards.push_back(
+        shard_duplicated.shards.back());
+    BOOST_CHECK(
+        !product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof, shard_duplicated, &why));
+
+    auto shard_reordered = shard_set;
+    std::swap(
+        shard_reordered.shards[0],
+        shard_reordered.shards[1]);
+    BOOST_CHECK(
+        !product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof, shard_reordered, &why));
+
+    auto shard_transplanted = shard_set;
+    shard_transplanted.shards[0] =
+        shard_transplanted.shards[1];
+    shard_transplanted.shards[0].child_ordinal = 0;
+    BOOST_CHECK(
+        !product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof, shard_transplanted, &why));
+
+    auto shard_terminal = shard_set;
+    shard_terminal.shards[0].input_terminal.lane1 =
+        gf::Add(
+            shard_terminal.shards[0]
+                .input_terminal.lane1,
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof, shard_terminal, &why));
+
+    auto capacity_substitution = shard_set;
+    capacity_substitution.production_boundary_counts[1] =
+        capacity_substitution.caller_boundary_counts[1];
+    capacity_substitution
+        .production_all_instance_aggregation = true;
+    BOOST_CHECK(
+        !product::VerifyProofOwnedShardSetV4(
+            inputs, seed, proof,
+            capacity_substitution, &why));
+
     // A free-output attempt mutates a genuinely authenticated R0 query
     // opening.  Outer metadata is unchanged, so the Split-RAP/FRI child
     // verifier must reject it.

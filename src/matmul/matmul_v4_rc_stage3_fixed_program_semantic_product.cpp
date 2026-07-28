@@ -3123,6 +3123,422 @@ bool VerifyWitnessProductV2(
     return true;
 }
 
+namespace {
+
+uint256 CommitProofOwnedBoundaryShardV4(
+    const ProofOwnedBoundaryShardV4& shard)
+{
+    HashWriter hash;
+    hash << std::string{
+        "BTX_RC_STAGE3_FIXED_PRODUCT_PROOF_OWNED_SHARD_V4"};
+    hash << shard.child_ordinal;
+    hash << static_cast<uint8_t>(shard.program_kind);
+    hash << shard.source_instance_count;
+    hash << shard.child_statement_commitment;
+    hash << shard.base_row_commitment;
+    hash << shard.exact_input_schedule_root;
+    HashFp3(hash, shard.input_terminal.lane1);
+    HashFp3(hash, shard.input_terminal.lane2);
+    HashFp3(hash, shard.output_terminal.lane1);
+    HashFp3(hash, shard.output_terminal.lane2);
+    hash << static_cast<uint32_t>(shard.coverage.size());
+    for (const auto& fragment : shard.coverage) {
+        hash << CommitFragmentV2(fragment);
+    }
+    return hash.GetHash();
+}
+
+uint256 CommitProofOwnedShardSetV4(
+    const ProofOwnedShardSetV4& set)
+{
+    HashWriter hash;
+    hash << std::string{
+        "BTX_RC_STAGE3_FIXED_PRODUCT_PROOF_OWNED_SHARD_SET_V4"};
+    hash << set.version;
+    hash << set.caller_statement_commitment;
+    hash << set.production_site_manifest_commitment;
+    for (uint64_t count : set.caller_boundary_counts) {
+        hash << count;
+    }
+    for (uint64_t count : set.production_boundary_counts) {
+        hash << count;
+    }
+    hash << static_cast<uint32_t>(set.shards.size());
+    for (const auto& shard : set.shards) {
+        hash << shard.shard_commitment;
+    }
+    HashFp3(hash, set.aggregate_input_terminal.lane1);
+    HashFp3(hash, set.aggregate_input_terminal.lane2);
+    HashFp3(hash, set.aggregate_output_terminal.lane1);
+    HashFp3(hash, set.aggregate_output_terminal.lane2);
+    hash << set.exact_coverage_root;
+    hash << set.exact_ordered_caller_coverage;
+    hash << set.proof_owned_dual_fp3_terminals;
+    hash << set.production_manifest_derived;
+    hash << set.production_all_instance_aggregation;
+    hash << set.role_export_equality_constrained;
+    hash << set.recursive_child_consumed;
+    hash << set.semantic_closure;
+    hash << set.production_authority;
+    return hash.GetHash();
+}
+
+bool ProductionFamilyBoundaryCountsV4(
+    std::array<uint64_t, kFamilyCountV1>& counts,
+    uint256& manifest_commitment,
+    std::string* why)
+{
+    counts.fill(0);
+    const auto production =
+        sites::BuildProductionProofSiteManifest(
+            sites::SelectedProductionProofSitePolicy());
+    if (!sites::ValidateProductionProofSiteManifest(
+            production, why) ||
+        production.commitment.IsNull()) {
+        return Fail(why, "shard_set_production_manifest");
+    }
+    for (uint32_t family = 0;
+         family < kFamilyCountV1; ++family) {
+        const auto found = std::find_if(
+            production.entries.begin(),
+            production.entries.end(),
+            [family](const auto& entry) {
+                return entry.kind == RECIPES[family].kind;
+            });
+        if (found == production.entries.end() ||
+            found->logical_units == 0 ||
+            found->units_per_site !=
+                (RECIPES[family].program_kind ==
+                         ha::ProgramKind::ChaCha20Block
+                     ? sites::
+                           kProductionPrivateChaChaSourcesPerProofSiteV1
+                     : sites::
+                           kProductionPrivateShaSourcesPerProofSiteV1)) {
+            return Fail(
+                why, "shard_set_production_family:" +
+                    std::to_string(family));
+        }
+        counts[family] = found->logical_units;
+    }
+    manifest_commitment = production.commitment;
+    return true;
+}
+
+} // namespace
+
+bool BuildProofOwnedShardSetV4(
+    const FamilyInputsV1& inputs,
+    const uint256& fs_seed,
+    const WitnessProductProofV2& proof,
+    ProofOwnedShardSetV4& out,
+    std::string* why)
+{
+    out = {};
+    if (!VerifyWitnessProductV2(
+            inputs, fs_seed, proof, why)) {
+        return false;
+    }
+    ProductManifestV1 caller;
+    if (!BuildProductManifestV1(inputs, caller, why) ||
+        caller.statement_commitment !=
+            proof.manifest
+                .caller_input_statement_commitment ||
+        proof.children.empty()) {
+        return Fail(why, "shard_set_caller");
+    }
+    out.caller_statement_commitment =
+        caller.statement_commitment;
+    for (uint32_t family = 0;
+         family < kFamilyCountV1; ++family) {
+        out.caller_boundary_counts[family] =
+            caller.families[family].boundary_count;
+    }
+    if (!ProductionFamilyBoundaryCountsV4(
+            out.production_boundary_counts,
+            out.production_site_manifest_commitment,
+            why)) {
+        out = {};
+        return false;
+    }
+
+    std::array<uint64_t, kFamilyCountV1> next{};
+    out.shards.reserve(proof.children.size());
+    HashWriter coverage;
+    coverage << std::string{
+        "BTX_RC_STAGE3_FIXED_PRODUCT_EXACT_COVERAGE_V4"};
+    coverage << out.caller_statement_commitment;
+    coverage << out.production_site_manifest_commitment;
+    coverage << static_cast<uint32_t>(
+        proof.children.size());
+    for (uint32_t child_ordinal = 0;
+         child_ordinal < proof.children.size();
+         ++child_ordinal) {
+        const auto& child =
+            proof.children[child_ordinal].statement;
+        const auto& input =
+            child.caller_input_receipt;
+        if (child.child_ordinal != child_ordinal ||
+            child.source_instance_count == 0 ||
+            child.base_row_commitment.IsNull() ||
+            input.producer_r0_root !=
+                child.base_row_commitment ||
+            input.receipt_commitment !=
+                CommitCallerInputReceiptV3(input) ||
+            !(input.producer_terminal ==
+              input.consumer_terminal) ||
+            child.fragments.empty() ||
+            input.fragments.empty()) {
+            return Fail(
+                why, "shard_set_child:" +
+                    std::to_string(child_ordinal));
+        }
+        ProofOwnedBoundaryShardV4 shard;
+        shard.child_ordinal = child_ordinal;
+        shard.program_kind = child.program_kind;
+        shard.source_instance_count =
+            child.source_instance_count;
+        shard.child_statement_commitment =
+            CommitChildStatementV2(child);
+        shard.base_row_commitment =
+            child.base_row_commitment;
+        shard.exact_input_schedule_root =
+            input.exact_consumer_schedule_root;
+        shard.input_terminal =
+            input.producer_terminal;
+        shard.output_terminal =
+            child.output_producer_terminal;
+        shard.coverage = child.fragments;
+        uint64_t covered_sources = 0;
+        for (const auto& fragment : shard.coverage) {
+            if (fragment.family_ordinal >=
+                    kFamilyCountV1 ||
+                fragment.source_instance_count == 0 ||
+                fragment.family_boundary_begin !=
+                    next[fragment.family_ordinal] ||
+                fragment.source_instance_begin >
+                    child.source_instance_count ||
+                fragment.source_instance_count >
+                    child.source_instance_count -
+                        fragment.source_instance_begin) {
+                return Fail(
+                    why, "shard_set_coverage_order:" +
+                        std::to_string(child_ordinal));
+            }
+            const auto input_found =
+                std::find_if(
+                    input.fragments.begin(),
+                    input.fragments.end(),
+                    [&fragment](const auto& item) {
+                        return
+                            item.family_ordinal ==
+                                fragment.family_ordinal &&
+                            item.family_boundary_begin ==
+                                fragment.family_boundary_begin &&
+                            item.source_instance_begin ==
+                                fragment.source_instance_begin &&
+                            item.source_instance_count ==
+                                fragment.source_instance_count;
+                    });
+            if (input_found == input.fragments.end()) {
+                return Fail(
+                    why, "shard_set_input_fragment:" +
+                        std::to_string(child_ordinal));
+            }
+            next[fragment.family_ordinal] +=
+                fragment.source_instance_count;
+            covered_sources +=
+                fragment.source_instance_count;
+            coverage << fragment.family_ordinal;
+            coverage << fragment.family_boundary_begin;
+            coverage << fragment.source_instance_count;
+            coverage << CommitFragmentV2(fragment);
+            coverage << CommitCallerInputFragmentV3(
+                *input_found);
+        }
+        if (covered_sources !=
+            child.source_instance_count) {
+            return Fail(
+                why, "shard_set_child_coverage:" +
+                    std::to_string(child_ordinal));
+        }
+        shard.shard_commitment =
+            CommitProofOwnedBoundaryShardV4(shard);
+        if (shard.child_statement_commitment.IsNull() ||
+            shard.shard_commitment.IsNull()) {
+            return Fail(
+                why, "shard_set_commitment:" +
+                    std::to_string(child_ordinal));
+        }
+        out.aggregate_input_terminal.lane1 =
+            gf::Add(
+                out.aggregate_input_terminal.lane1,
+                shard.input_terminal.lane1);
+        out.aggregate_input_terminal.lane2 =
+            gf::Add(
+                out.aggregate_input_terminal.lane2,
+                shard.input_terminal.lane2);
+        out.aggregate_output_terminal.lane1 =
+            gf::Add(
+                out.aggregate_output_terminal.lane1,
+                shard.output_terminal.lane1);
+        out.aggregate_output_terminal.lane2 =
+            gf::Add(
+                out.aggregate_output_terminal.lane2,
+                shard.output_terminal.lane2);
+        coverage << shard.shard_commitment;
+        out.shards.push_back(std::move(shard));
+    }
+    for (uint32_t family = 0;
+         family < kFamilyCountV1; ++family) {
+        if (next[family] !=
+            out.caller_boundary_counts[family]) {
+            return Fail(
+                why, "shard_set_family_coverage:" +
+                    std::to_string(family));
+        }
+        coverage << family;
+        coverage << next[family];
+    }
+    out.exact_coverage_root = coverage.GetHash();
+    out.exact_ordered_caller_coverage = true;
+    out.proof_owned_dual_fp3_terminals = true;
+    out.production_manifest_derived = true;
+    out.production_all_instance_aggregation =
+        out.caller_boundary_counts ==
+        out.production_boundary_counts;
+    out.role_export_equality_constrained = false;
+    out.recursive_child_consumed = false;
+    out.semantic_closure = false;
+    out.production_authority = false;
+    out.statement_commitment =
+        CommitProofOwnedShardSetV4(out);
+    if (out.exact_coverage_root.IsNull() ||
+        out.statement_commitment.IsNull()) {
+        out = {};
+        return Fail(why, "shard_set_statement");
+    }
+    if (why != nullptr) {
+        *why =
+            out.production_all_instance_aggregation
+                ? "stage3:fixed_program_semantic_product:"
+                  "production_shard_set_exact;"
+                  "role_equality_and_recursion_open"
+                : "stage3:fixed_program_semantic_product:"
+                  "bounded_shard_set_exact;"
+                  "production_counts_role_equality_and_recursion_open";
+    }
+    return true;
+}
+
+bool VerifyProofOwnedShardSetV4(
+    const FamilyInputsV1& inputs,
+    const uint256& fs_seed,
+    const WitnessProductProofV2& proof,
+    const ProofOwnedShardSetV4& shard_set,
+    std::string* why)
+{
+    if (shard_set.version !=
+            kShardSetVersionV4 ||
+        !shard_set.exact_ordered_caller_coverage ||
+        !shard_set.proof_owned_dual_fp3_terminals ||
+        !shard_set.production_manifest_derived ||
+        shard_set.role_export_equality_constrained ||
+        shard_set.recursive_child_consumed ||
+        shard_set.semantic_closure ||
+        shard_set.production_authority) {
+        return Fail(why, "shard_set_shape");
+    }
+    if (shard_set.caller_statement_commitment !=
+            proof.manifest
+                .caller_input_statement_commitment ||
+        shard_set.shards.size() !=
+            proof.children.size()) {
+        return Fail(why, "shard_set_proof_shape");
+    }
+    std::array<uint64_t, kFamilyCountV1>
+        production_counts{};
+    uint256 production_commitment;
+    if (!ProductionFamilyBoundaryCountsV4(
+            production_counts,
+            production_commitment, why) ||
+        production_counts !=
+            shard_set.production_boundary_counts ||
+        production_commitment !=
+            shard_set.production_site_manifest_commitment) {
+        return Fail(why, "shard_set_production_counts");
+    }
+    DualFp3ProducerTerminalV2 aggregate_input;
+    DualFp3ProducerTerminalV2 aggregate_output;
+    for (uint32_t child = 0;
+         child < proof.children.size(); ++child) {
+        const auto& statement =
+            proof.children[child].statement;
+        const auto& shard =
+            shard_set.shards[child];
+        if (shard.child_ordinal != child ||
+            shard.program_kind !=
+                statement.program_kind ||
+            shard.source_instance_count !=
+                statement.source_instance_count ||
+            shard.child_statement_commitment !=
+                CommitChildStatementV2(statement) ||
+            shard.base_row_commitment !=
+                statement.base_row_commitment ||
+            shard.exact_input_schedule_root !=
+                statement.caller_input_receipt
+                    .exact_consumer_schedule_root ||
+            !(shard.input_terminal ==
+              statement.caller_input_receipt
+                  .producer_terminal) ||
+            !(shard.output_terminal ==
+              statement.output_producer_terminal) ||
+            shard.coverage != statement.fragments ||
+            shard.shard_commitment !=
+                CommitProofOwnedBoundaryShardV4(shard)) {
+            return Fail(
+                why, "shard_set_proof_child:" +
+                    std::to_string(child));
+        }
+        aggregate_input.lane1 =
+            gf::Add(
+                aggregate_input.lane1,
+                shard.input_terminal.lane1);
+        aggregate_input.lane2 =
+            gf::Add(
+                aggregate_input.lane2,
+                shard.input_terminal.lane2);
+        aggregate_output.lane1 =
+            gf::Add(
+                aggregate_output.lane1,
+                shard.output_terminal.lane1);
+        aggregate_output.lane2 =
+            gf::Add(
+                aggregate_output.lane2,
+                shard.output_terminal.lane2);
+    }
+    if (!(aggregate_input ==
+          shard_set.aggregate_input_terminal) ||
+        !(aggregate_output ==
+          shard_set.aggregate_output_terminal) ||
+        shard_set.statement_commitment !=
+            CommitProofOwnedShardSetV4(shard_set)) {
+        return Fail(why, "shard_set_terminal_or_statement");
+    }
+    ProofOwnedShardSetV4 expected;
+    if (!BuildProofOwnedShardSetV4(
+            inputs, fs_seed, proof, expected, why) ||
+        !(shard_set == expected)) {
+        return Fail(why, "shard_set_canonical");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:fixed_program_semantic_product:"
+            "proof_owned_shard_set_verified;"
+            "role_equality_and_recursion_open";
+    }
+    return true;
+}
+
 bool DecodeCanonicalU32V1(
     const Fp3& cell,
     uint32_t& out,
