@@ -44,8 +44,10 @@ struct RCStage3CoupledChainProduct {
  *   28 -> 31, 46 -> 30, 32 -> 34, 38 -> 39,
  *   41 -> 34, and shape-conditionally 41 -> 42 or 36 -> 42.
  *
- * This bounded V1 requires one bank page per barrier/lobe GEMM. It performs
- * no native GEMM, exchange, mix, Extract or bank replay.
+ * For the production full-bank schedule, endpoint 32 is accumulated over
+ * every immutable page slot for one (barrier,lobe) before it is compared with
+ * the fixed exchange segment. It performs no native GEMM, exchange, mix,
+ * Extract or bank replay.
  */
 [[nodiscard]] bool ValidateRCStage3CoupledChainProduct(
     const RCStage3SuccinctProof& statement,

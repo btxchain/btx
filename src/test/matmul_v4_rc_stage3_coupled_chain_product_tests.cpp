@@ -64,6 +64,14 @@ rc::RCStage3CoupledShape MaterialShape()
     return out;
 }
 
+rc::RCStage3CoupledShape MultiPageShape()
+{
+    auto out = Shape();
+    out.bank_pages = 2;
+    out.pages_per_barrier_lobe = 2;
+    return out;
+}
+
 rc::RCStage3SuccinctProof Statement(
     const CBlockHeader& header)
 {
@@ -142,11 +150,12 @@ struct Fixture {
     rc::RCStage3CoupledChainProduct chain;
 };
 
-Fixture BuildFixture()
+Fixture BuildFixture(
+    const rc::RCStage3CoupledShape& requested = Shape())
 {
     Fixture out;
     out.header = Header();
-    out.shape = Shape();
+    out.shape = requested;
     out.statement = Statement(out.header);
     std::string why;
     if (!rc::BuildRCStage3CoupledBankProduct(
@@ -229,9 +238,19 @@ Fixture BuildFixture()
             out.gemm, &why)) {
         throw std::runtime_error(why);
     }
-    for (const auto& instance : out.gemm.gemms) {
-        out.exchange_witness.fixed_exchange_inputs.
-            push_back(instance.output_y);
+    for (uint32_t barrier = 0;
+         barrier < out.shape.barriers; ++barrier) {
+        for (uint32_t lobe = 0;
+             lobe < out.shape.lobes; ++lobe) {
+            const uint64_t begin =
+                uint64_t{lobe} * lobe_cells;
+            out.exchange_witness.fixed_exchange_inputs.
+                emplace_back(
+                    permutation_inputs[barrier].begin() +
+                        begin,
+                    permutation_inputs[barrier].begin() +
+                        begin + lobe_cells);
+        }
     }
     out.exchange_witness.permutation_inputs =
         permutation_inputs;
@@ -270,6 +289,13 @@ Fixture BuildFixture()
 const Fixture& Honest()
 {
     static const Fixture fixture = BuildFixture();
+    return fixture;
+}
+
+const Fixture& MultiPageHonest()
+{
+    static const Fixture fixture =
+        BuildFixture(MultiPageShape());
     return fixture;
 }
 
@@ -629,6 +655,39 @@ BOOST_AUTO_TEST_CASE(
             chain, &why));
     BOOST_CHECK(
         why.find("36_to_42") != std::string::npos);
+}
+
+BOOST_AUTO_TEST_CASE(
+    full_page_schedule_sums_every_gemm_before_exchange)
+{
+    const auto& honest = MultiPageHonest();
+    BOOST_CHECK_EQUAL(
+        honest.chain.bank_to_gemm_instances, 8U);
+    BOOST_CHECK_EQUAL(
+        honest.chain.prior_extract_to_gemm_instances,
+        6U);
+    BOOST_CHECK_EQUAL(
+        honest.chain.gemm_to_exchange_instances, 4U);
+
+    auto bad_openings = honest.openings;
+    bad_openings[0].output_y[0] += 1;
+    rc::RCStage3CoupledGemmProduct bad_gemm;
+    rc::RCStage3CoupledChainProduct chain;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3CoupledGemmProduct(
+            honest.statement, honest.shape,
+            bad_openings, bad_gemm, &why),
+        why);
+    BOOST_CHECK(
+        !rc::ValidateRCStage3CoupledChainProduct(
+            honest.statement, honest.header,
+            honest.shape, honest.bank, bad_gemm,
+            honest.exchange, honest.mix,
+            honest.extract, chain, &why));
+    BOOST_CHECK(
+        why.find("32_sum_to_34") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

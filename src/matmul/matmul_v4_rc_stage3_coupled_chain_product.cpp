@@ -7,6 +7,7 @@
 #include <hash.h>
 
 #include <algorithm>
+#include <limits>
 
 namespace matmul::v4::rc {
 namespace {
@@ -67,8 +68,7 @@ bool ValidateRCStage3CoupledChainProduct(
     std::string* why)
 {
     out = {};
-    if (shape.pages_per_barrier_lobe != 1 ||
-        !ValidateRCStage3CoupledBankProductSchedule(
+    if (!ValidateRCStage3CoupledBankProductSchedule(
             statement, header, shape, bank, why) ||
         !ValidateRCStage3CoupledGemmSchedule(
             statement, shape, gemm, why) ||
@@ -122,11 +122,20 @@ bool ValidateRCStage3CoupledChainProduct(
                 why, "coupled_chain:extract_output_coverage");
         }
     }
+    const uint64_t aggregate_count =
+        uint64_t{shape.barriers} * shape.lobes;
+    std::vector<std::vector<int64_t>> gemm_sums(
+        aggregate_count,
+        std::vector<int64_t>(lobe_cells, 0));
+    std::vector<uint32_t> gemm_sum_terms(
+        aggregate_count, 0);
     for (const auto& instance : gemm.gemms) {
+        if (instance.schedule.barrier >= shape.barriers ||
+            instance.schedule.lobe >= shape.lobes ||
+            instance.output_y.size() != lobe_cells) {
+            return Fail(why, "coupled_chain:gemm_schedule");
+        }
         if (instance.schedule.barrier > 0) {
-            if (instance.schedule.lobe >= shape.lobes) {
-                return Fail(why, "coupled_chain:gemm_lobe");
-            }
             const auto& prior = extract_outputs[
                 instance.schedule.barrier - 1U];
             const uint64_t begin =
@@ -150,23 +159,61 @@ bool ValidateRCStage3CoupledChainProduct(
             return Fail(why, "coupled_chain:28_to_31");
         }
         bank_to_gemm.push_back(instance.operand_b);
-        const auto stage = std::find_if(
-            exchange.exchange_stages.begin(),
-            exchange.exchange_stages.end(),
-            [&](const auto& candidate) {
-                return candidate.schedule.kind ==
-                           RCStage3CoupledExchangeStageKind::
-                               FixedSegment &&
-                    candidate.schedule.barrier ==
-                        instance.schedule.barrier &&
-                    candidate.schedule.lobe_or_round ==
-                        instance.schedule.lobe;
-            });
-        if (stage == exchange.exchange_stages.end() ||
-            stage->input != instance.output_y) {
-            return Fail(why, "coupled_chain:32_to_34");
+        const uint64_t aggregate_index =
+            uint64_t{instance.schedule.barrier} *
+                shape.lobes +
+            instance.schedule.lobe;
+        auto& sum = gemm_sums[aggregate_index];
+        for (uint64_t cell = 0;
+             cell < lobe_cells; ++cell) {
+            const __int128 candidate =
+                static_cast<__int128>(sum[cell]) +
+                static_cast<__int128>(
+                    instance.output_y[cell]);
+            if (candidate <
+                    std::numeric_limits<int64_t>::min() ||
+                candidate >
+                    std::numeric_limits<int64_t>::max()) {
+                return Fail(
+                    why, "coupled_chain:gemm_sum_overflow");
+            }
+            sum[cell] =
+                static_cast<int64_t>(candidate);
         }
-        gemm_to_exchange.push_back(instance.output_y);
+        ++gemm_sum_terms[aggregate_index];
+    }
+    for (uint32_t barrier = 0;
+         barrier < shape.barriers; ++barrier) {
+        for (uint32_t lobe = 0;
+             lobe < shape.lobes; ++lobe) {
+            const uint64_t aggregate_index =
+                uint64_t{barrier} * shape.lobes + lobe;
+            if (gemm_sum_terms[aggregate_index] !=
+                shape.pages_per_barrier_lobe) {
+                return Fail(
+                    why, "coupled_chain:gemm_sum_coverage");
+            }
+            const auto stage = std::find_if(
+                exchange.exchange_stages.begin(),
+                exchange.exchange_stages.end(),
+                [&](const auto& candidate) {
+                    return candidate.schedule.kind ==
+                               RCStage3CoupledExchangeStageKind::
+                                   FixedSegment &&
+                        candidate.schedule.barrier ==
+                            barrier &&
+                        candidate.schedule.lobe_or_round ==
+                            lobe;
+                });
+            if (stage == exchange.exchange_stages.end() ||
+                stage->input !=
+                    gemm_sums[aggregate_index]) {
+                return Fail(
+                    why, "coupled_chain:32_sum_to_34");
+            }
+            gemm_to_exchange.push_back(
+                gemm_sums[aggregate_index]);
+        }
     }
 
     if (exchange.permutation_stages.size() !=
