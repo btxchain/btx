@@ -623,6 +623,123 @@ struct BytecodeInterpreterAttachment {
 };
 
 /**
+ * Exact post-R0 challenge epoch for a challenge-bearing canonical bytecode
+ * child.
+ *
+ * This is deliberately sourced from the child's SAFE Split-RAP statement:
+ * `r0_commitment` is group 0's authenticated row root and
+ * `base_column_indices` is the proof's exact ordered R0 schedule.  The
+ * challenge vector is derived after R0 from the public seed, canonical
+ * ProgramTable commitment and this schedule.  Fold-bus challenges are never
+ * accepted as a substitute.
+ */
+struct BytecodeChallengeTranscriptV1 {
+    uint16_t version{1};
+    uint16_t child_proof_version{0};
+    uint256 public_fs_seed{};
+    uint256 program_commitment{};
+    uint256 r0_commitment{};
+    uint32_t trace_rows{0};
+    uint32_t current_width{0};
+    uint32_t next_width{0};
+    uint32_t challenge_width{0};
+    std::vector<uint32_t> base_column_indices;
+    std::vector<std::vector<gkr_field::Fp>>
+        challenge_preimage_lanes;
+    std::vector<uint256> challenge_digest;
+    std::vector<Fp3> challenges;
+    uint256 transcript_commitment{};
+    bool safe_split_rap_statement_verified{false};
+    bool exact_p2_replay{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Derive the canonical challenge vector from an already committed R0.  This
+ * is the prover-ordering seam: it is called only after
+ * AirQuotientBuildTwoEpochBaseRowSession has produced `r0_commitment`.
+ */
+[[nodiscard]] bool DeriveBytecodeChallengeVectorV1(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t trace_rows,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& public_fs_seed,
+    const uint256& r0_commitment,
+    std::vector<Fp3>& challenges,
+    std::string* why = nullptr);
+
+/**
+ * Verify the complete SAFE Split-RAP child under the exact derived
+ * challenge vector, then export the canonical challenge transcript.
+ */
+[[nodiscard]] bool BuildBytecodeChallengeTranscriptV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    BytecodeChallengeTranscriptV1& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool ValidateBytecodeChallengeTranscriptV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    const BytecodeChallengeTranscriptV1& transcript,
+    std::string* why = nullptr);
+
+/**
+ * Same-parent P2 replay for every exported challenge plus an exact map for
+ * every Challenge opcode in the canonical table.  One shared Poseidon2 chip
+ * is scheduled vertically, so width is constant in challenge count.
+ *
+ * This slice proves the challenge epoch and interpreter Challenge-load
+ * equality.  It intentionally does not claim that the remaining
+ * Current/Next/arithmetic bytecode rows or the full child Split-RAP verifier
+ * are recursively consumed by this parent.
+ */
+struct BytecodeChallengeReplayParentV1 {
+    uint16_t version{1};
+    BytecodeChallengeTranscriptV1 transcript;
+    aq::AirConstraintSystem<Fp3> cs;
+    std::vector<std::vector<Fp3>> columns;
+    uint32_t poseidon_base{0};
+    uint32_t absorbed_lane_base{0};
+    uint32_t active_column{0};
+    uint32_t start_column{0};
+    uint32_t interpreter_result_column{0};
+    uint32_t challenge_column_base{0};
+    uint32_t challenge_loads{0};
+    uint32_t poseidon_permutations{0};
+    uint32_t violations{0};
+    bool transcript_authenticated{false};
+    bool p2_replay_constrained{false};
+    bool every_challenge_lane_mapped{false};
+    bool interpreter_challenge_rows_equal{false};
+    bool full_child_verifier_recursively_consumed{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] BytecodeChallengeReplayParentV1
+BuildBytecodeChallengeReplayParentV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    const BytecodeChallengeTranscriptV1& transcript);
+
+[[nodiscard]] bool VerifyBytecodeChallengeReplayParentV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    const BytecodeChallengeTranscriptV1& transcript,
+    const aq::AirQuotientRowsProof& parent_proof,
+    std::string* why = nullptr);
+
+/**
  * Additive V1 pin for a CoupledBank dequant proof on the normalized AlgHash
  * row-wise backend. It intentionally does not claim equality with the old
  * per-column SHA roots: the whole-trace row commitment is the proof binding,

@@ -7,6 +7,7 @@
 #include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
+#include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
@@ -20721,6 +20722,868 @@ bool PadFoldBusFreeRowsForBytecode(
             "stage3:recursive_fixedpoint:"
             "bytecode_pad_ok;rows=" +
             std::to_string(projected);
+    }
+    return true;
+}
+
+namespace {
+
+uint256 CommitBytecodeChallengeTranscriptV1(
+    const BytecodeChallengeTranscriptV1& transcript)
+{
+    if (transcript.version != 1 ||
+        transcript.public_fs_seed.IsNull() ||
+        transcript.program_commitment.IsNull() ||
+        transcript.r0_commitment.IsNull() ||
+        transcript.challenge_width == 0 ||
+        transcript.challenge_preimage_lanes.size() !=
+            transcript.challenge_width ||
+        transcript.challenge_digest.size() !=
+            transcript.challenge_width ||
+        transcript.challenges.size() !=
+            transcript.challenge_width) {
+        return {};
+    }
+    HashWriter hash;
+    hash <<
+        "BTX_RC_STAGE3_BYTECODE_CHALLENGE_TRANSCRIPT_V1";
+    hash << transcript.version;
+    hash << transcript.child_proof_version;
+    hash << transcript.public_fs_seed;
+    hash << transcript.program_commitment;
+    hash << transcript.r0_commitment;
+    hash << transcript.trace_rows;
+    hash << transcript.current_width;
+    hash << transcript.next_width;
+    hash << transcript.challenge_width;
+    hash << static_cast<uint32_t>(
+        transcript.base_column_indices.size());
+    for (const uint32_t column :
+         transcript.base_column_indices) {
+        hash << column;
+    }
+    for (uint32_t challenge = 0;
+         challenge < transcript.challenge_width;
+         ++challenge) {
+        const auto& lanes =
+            transcript.challenge_preimage_lanes[
+                challenge];
+        hash << challenge;
+        hash << static_cast<uint32_t>(lanes.size());
+        for (const gkr_field::Fp lane : lanes) {
+            hash << gkr_field::Canonical(lane);
+        }
+        hash << transcript.challenge_digest[challenge];
+        const Fp3 value =
+            transcript.challenges[challenge];
+        hash << gkr_field::Canonical(value.c0);
+        hash << gkr_field::Canonical(value.c1);
+        hash << gkr_field::Canonical(value.c2);
+    }
+    return hash.GetHash();
+}
+
+std::vector<uint32_t> BytecodeChallengeExtraV1(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t trace_rows,
+    const std::vector<uint32_t>& base_column_indices,
+    uint32_t challenge)
+{
+    std::vector<uint32_t> extra;
+    extra.reserve(9 + base_column_indices.size());
+    extra.push_back(1);
+    extra.push_back(
+        static_cast<uint32_t>(table.role));
+    extra.push_back(trace_rows);
+    extra.push_back(table.current_width);
+    extra.push_back(table.next_width);
+    extra.push_back(table.challenge_width);
+    extra.push_back(
+        static_cast<uint32_t>(
+            base_column_indices.size()));
+    extra.insert(
+        extra.end(),
+        base_column_indices.begin(),
+        base_column_indices.end());
+    extra.push_back(challenge);
+    return extra;
+}
+
+bool SameFp3Vector(
+    const std::vector<Fp3>& lhs,
+    const std::vector<Fp3>& rhs)
+{
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (!gkr_field::Eq(lhs[i], rhs[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool SameFpLaneVectors(
+    const std::vector<std::vector<gkr_field::Fp>>& lhs,
+    const std::vector<std::vector<gkr_field::Fp>>& rhs)
+{
+    if (lhs.size() != rhs.size()) return false;
+    for (size_t i = 0; i < lhs.size(); ++i) {
+        if (lhs[i].size() != rhs[i].size()) return false;
+        for (size_t j = 0; j < lhs[i].size(); ++j) {
+            if (gkr_field::Canonical(lhs[i][j]) !=
+                gkr_field::Canonical(rhs[i][j])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+bool DeriveBytecodeChallengeVectorV1(
+    const constraint_bytecode::ProgramTable& table,
+    uint32_t trace_rows,
+    const std::vector<uint32_t>& base_column_indices,
+    const uint256& public_fs_seed,
+    const uint256& r0_commitment,
+    std::vector<Fp3>& challenges,
+    std::string* why)
+{
+    challenges.clear();
+    std::string table_why;
+    if (!constraint_bytecode::ValidateProgramTable(
+            table, &table_why) ||
+        table.challenge_width == 0 ||
+        trace_rows < 2 ||
+        (trace_rows & (trace_rows - 1U)) != 0 ||
+        public_fs_seed.IsNull() ||
+        r0_commitment.IsNull() ||
+        base_column_indices.empty()) {
+        return Fail(
+            why,
+            "bytecode_challenge_epoch_shape:" +
+                table_why);
+    }
+    uint32_t previous = 0;
+    for (size_t i = 0;
+         i < base_column_indices.size(); ++i) {
+        const uint32_t column =
+            base_column_indices[i];
+        if (column >= table.current_width ||
+            (i != 0 && column <= previous)) {
+            return Fail(
+                why,
+                "bytecode_challenge_epoch_base_schedule");
+        }
+        previous = column;
+    }
+    const uint256 program_commitment =
+        constraint_bytecode::CommitProgramTable(
+            table);
+    if (program_commitment.IsNull()) {
+        return Fail(
+            why,
+            "bytecode_challenge_epoch_program");
+    }
+    challenges.reserve(table.challenge_width);
+    for (uint32_t challenge = 0;
+         challenge < table.challenge_width;
+         ++challenge) {
+        const auto extra =
+            BytecodeChallengeExtraV1(
+                table, trace_rows,
+                base_column_indices,
+                challenge);
+        const uint256 digest =
+            aq::AirChallengeDigestP2(
+                public_fs_seed,
+                "bytecode_program_challenge_v1",
+                {r0_commitment,
+                 program_commitment},
+                extra);
+        if (digest.IsNull()) {
+            challenges.clear();
+            return Fail(
+                why,
+                "bytecode_challenge_epoch_digest");
+        }
+        challenges.push_back(
+            gkr_field::FromChallengeBytes3(
+                digest.data()));
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_epoch_derived";
+    }
+    return true;
+}
+
+bool BuildBytecodeChallengeTranscriptV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    BytecodeChallengeTranscriptV1& out,
+    std::string* why)
+{
+    out = {};
+    std::string table_why;
+    if (!constraint_bytecode::ValidateProgramTable(
+            table, &table_why) ||
+        table.challenge_width == 0 ||
+        child_proof.version !=
+            aq::kAirQuotientSplitRapRowsSafeProofVersionV2 ||
+        child_proof.trace_rows < 2 ||
+        child_proof.base_column_indices !=
+            expected_base_column_indices ||
+        child_proof.batch.groups.size() != 3 ||
+        public_fs_seed.IsNull()) {
+        return Fail(
+            why,
+            "bytecode_challenge_transcript_shape:" +
+                table_why);
+    }
+    out.child_proof_version =
+        child_proof.version;
+    out.public_fs_seed = public_fs_seed;
+    out.program_commitment =
+        constraint_bytecode::CommitProgramTable(
+            table);
+    out.r0_commitment =
+        Fri3AlgDigestToUint256(
+            child_proof.batch.groups[0]
+                .row_commit.root);
+    out.trace_rows = child_proof.trace_rows;
+    out.current_width = table.current_width;
+    out.next_width = table.next_width;
+    out.challenge_width = table.challenge_width;
+    out.base_column_indices =
+        expected_base_column_indices;
+    if (out.program_commitment.IsNull() ||
+        out.r0_commitment.IsNull() ||
+        !DeriveBytecodeChallengeVectorV1(
+            table, out.trace_rows,
+            out.base_column_indices,
+            public_fs_seed,
+            out.r0_commitment,
+            out.challenges, why)) {
+        out = {};
+        return false;
+    }
+    out.challenge_preimage_lanes.reserve(
+        out.challenge_width);
+    out.challenge_digest.reserve(
+        out.challenge_width);
+    for (uint32_t challenge = 0;
+         challenge < out.challenge_width;
+         ++challenge) {
+        const auto extra =
+            BytecodeChallengeExtraV1(
+                table, out.trace_rows,
+                out.base_column_indices,
+                challenge);
+        auto lanes =
+            aq::AirChallengeP2Lanes(
+                public_fs_seed,
+                "bytecode_program_challenge_v1",
+                {out.r0_commitment,
+                 out.program_commitment},
+                extra);
+        const uint256 digest =
+            aq::AirChallengeDigestP2(
+                public_fs_seed,
+                "bytecode_program_challenge_v1",
+                {out.r0_commitment,
+                 out.program_commitment},
+                extra);
+        if (lanes.empty() ||
+            digest.IsNull() ||
+            !gkr_field::Eq(
+                out.challenges[challenge],
+                gkr_field::FromChallengeBytes3(
+                    digest.data()))) {
+            out = {};
+            return Fail(
+                why,
+                "bytecode_challenge_transcript_replay");
+        }
+        out.challenge_preimage_lanes.push_back(
+            std::move(lanes));
+        out.challenge_digest.push_back(
+            digest);
+    }
+    aq::AirConstraintSystem<Fp3> child_cs;
+    if (!constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                table, out.trace_rows,
+                out.challenges, child_cs,
+                why) ||
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            child_cs, child_proof,
+            expected_base_column_indices,
+            public_fs_seed, why)) {
+        out = {};
+        return false;
+    }
+    out.safe_split_rap_statement_verified = true;
+    out.exact_p2_replay = true;
+    out.transcript_commitment =
+        CommitBytecodeChallengeTranscriptV1(
+            out);
+    out.valid =
+        !out.transcript_commitment.IsNull();
+    out.note =
+        out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "bytecode_challenge_transcript_verified"
+        : "stage3:recursive_fixedpoint:"
+          "bytecode_challenge_transcript_commitment";
+    if (!out.valid) {
+        return Fail(
+            why,
+            "bytecode_challenge_transcript_commitment");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool ValidateBytecodeChallengeTranscriptV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    const BytecodeChallengeTranscriptV1& transcript,
+    std::string* why)
+{
+    BytecodeChallengeTranscriptV1 expected;
+    std::string local_why;
+    if (!BuildBytecodeChallengeTranscriptV1(
+            table, child_proof,
+            expected_base_column_indices,
+            public_fs_seed,
+            expected, &local_why) ||
+        !transcript.valid ||
+        transcript.version != expected.version ||
+        transcript.child_proof_version !=
+            expected.child_proof_version ||
+        transcript.public_fs_seed !=
+            expected.public_fs_seed ||
+        transcript.program_commitment !=
+            expected.program_commitment ||
+        transcript.r0_commitment !=
+            expected.r0_commitment ||
+        transcript.trace_rows !=
+            expected.trace_rows ||
+        transcript.current_width !=
+            expected.current_width ||
+        transcript.next_width !=
+            expected.next_width ||
+        transcript.challenge_width !=
+            expected.challenge_width ||
+        transcript.base_column_indices !=
+            expected.base_column_indices ||
+        transcript.challenge_digest !=
+            expected.challenge_digest ||
+        !SameFp3Vector(
+            transcript.challenges,
+            expected.challenges) ||
+        !SameFpLaneVectors(
+            transcript.challenge_preimage_lanes,
+            expected.challenge_preimage_lanes) ||
+        transcript.transcript_commitment !=
+            expected.transcript_commitment ||
+        CommitBytecodeChallengeTranscriptV1(
+            transcript) !=
+            expected.transcript_commitment) {
+        return Fail(
+            why,
+            "bytecode_challenge_transcript_mismatch:" +
+                local_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_transcript_valid";
+    }
+    return true;
+}
+
+BytecodeChallengeReplayParentV1
+BuildBytecodeChallengeReplayParentV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    const BytecodeChallengeTranscriptV1& transcript)
+{
+    namespace pa = stage3_poseidon_air;
+    BytecodeChallengeReplayParentV1 out;
+    out.transcript = transcript;
+    std::string why;
+    if (!ValidateBytecodeChallengeTranscriptV1(
+            table, child_proof,
+            expected_base_column_indices,
+            public_fs_seed, transcript, &why)) {
+        out.note = why;
+        return out;
+    }
+    out.transcript_authenticated = true;
+
+    struct Load {
+        uint32_t challenge{0};
+    };
+    std::vector<Load> loads;
+    for (const auto& program : table.programs) {
+        for (const auto& instruction :
+             program.instructions) {
+            if (instruction.opcode ==
+                constraint_bytecode::Opcode::
+                    Challenge) {
+                loads.push_back(
+                    {instruction.lhs});
+            }
+        }
+    }
+    out.challenge_loads =
+        static_cast<uint32_t>(loads.size());
+    if (loads.empty()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_parent_no_loads";
+        return out;
+    }
+
+    uint64_t permutation_rows = 0;
+    for (const auto& lanes :
+         transcript.challenge_preimage_lanes) {
+        const uint32_t permutations =
+            aq::AirChallengeP2Permutations(
+                lanes.size());
+        if (permutations == 0 ||
+            permutation_rows >
+                std::numeric_limits<uint32_t>::max() -
+                    permutations) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "bytecode_challenge_parent_permutations";
+            return out;
+        }
+        permutation_rows += permutations;
+    }
+    out.poseidon_permutations =
+        static_cast<uint32_t>(
+            permutation_rows);
+    const uint64_t active_rows =
+        permutation_rows + loads.size();
+    const uint32_t rows =
+        NextPow2(std::max<uint64_t>(
+            16, active_rows));
+    if (rows == 0 ||
+        uint64_t{rows} * kRCFriBlowup <
+            kRCFri3AlgNumQueries) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_parent_rows";
+        return out;
+    }
+
+    out.cs.n_rows = rows;
+    const pa::Layout poseidon =
+        pa::CanonicalLayout(0);
+    out.poseidon_base = 0;
+    out.absorbed_lane_base =
+        poseidon.End();
+    out.active_column =
+        out.absorbed_lane_base +
+        ah::kAlgHashRate;
+    out.start_column =
+        out.active_column + 1;
+    const uint32_t continuation_column =
+        out.start_column + 1;
+    const uint32_t last_selector_base =
+        continuation_column + 1;
+    const uint32_t load_selector_base =
+        last_selector_base +
+        table.challenge_width;
+    out.interpreter_result_column =
+        load_selector_base +
+        table.challenge_width;
+    out.challenge_column_base =
+        out.interpreter_result_column + 1;
+    out.cs.n_columns =
+        out.challenge_column_base +
+        table.challenge_width;
+    out.columns.assign(
+        out.cs.n_columns,
+        std::vector<Fp3>(
+            rows, Fp3::Zero()));
+    out.cs.constraints =
+        pa::BuildFixedConstraints(
+            poseidon);
+
+    uint32_t row = 0;
+    for (uint32_t challenge = 0;
+         challenge < table.challenge_width;
+         ++challenge) {
+        std::vector<gkr_field::Fp> padded =
+            transcript
+                .challenge_preimage_lanes[
+                    challenge];
+        padded.push_back(1);
+        while (padded.size() %
+                   ah::kAlgHashRate !=
+               0) {
+            padded.push_back(0);
+        }
+        const uint32_t blocks =
+            static_cast<uint32_t>(
+                padded.size() /
+                ah::kAlgHashRate);
+        ah::State state{};
+        for (uint32_t block = 0;
+             block < blocks; ++block, ++row) {
+            for (uint32_t lane = 0;
+                 lane < ah::kAlgHashRate;
+                 ++lane) {
+                const gkr_field::Fp value =
+                    padded[
+                        block *
+                            ah::kAlgHashRate +
+                        lane];
+                out.columns[
+                    out.absorbed_lane_base +
+                    lane][row] =
+                    Fp3::FromFp(value);
+                state[lane] =
+                    gkr_field::Add(
+                        state[lane], value);
+            }
+            const pa::Witness witness =
+                pa::BuildWitness(
+                    poseidon, state);
+            for (uint32_t column =
+                     poseidon.perm.base;
+                 column < poseidon.End();
+                 ++column) {
+                out.columns[column][row] =
+                    witness.row[column];
+            }
+            out.columns[
+                out.active_column][row] =
+                Fp3::One();
+            if (block == 0) {
+                out.columns[
+                    out.start_column][row] =
+                    Fp3::One();
+            } else {
+                out.columns[
+                    continuation_column][row] =
+                    Fp3::One();
+            }
+            if (block + 1 == blocks) {
+                out.columns[
+                    last_selector_base +
+                    challenge][row] =
+                    Fp3::One();
+            }
+            state = witness.output;
+        }
+    }
+    const pa::Witness zero =
+        pa::BuildWitness(
+            poseidon, ah::State{});
+    for (const auto& load : loads) {
+        // The fixed Poseidon chip is present on every trace row. Challenge
+        // load rows are not sponge rows, so materialize the canonical
+        // zero-input witness rather than leaving the fixed cells at zero.
+        for (uint32_t column =
+                 poseidon.perm.base;
+             column < poseidon.End();
+             ++column) {
+            out.columns[column][row] =
+                zero.row[column];
+        }
+        out.columns[
+            load_selector_base +
+            load.challenge][row] =
+            Fp3::One();
+        out.columns[
+            out.interpreter_result_column][row] =
+            transcript.challenges[
+                load.challenge];
+        ++row;
+    }
+    for (; row < rows; ++row) {
+        for (uint32_t column =
+                 poseidon.perm.base;
+             column < poseidon.End();
+             ++column) {
+            out.columns[column][row] =
+                zero.row[column];
+        }
+    }
+    for (uint32_t challenge = 0;
+         challenge < table.challenge_width;
+         ++challenge) {
+        out.columns[
+            out.challenge_column_base +
+            challenge]
+            .assign(
+                rows,
+                transcript.challenges[
+                    challenge]);
+    }
+
+    out.cs.preprocessed_pin_ood = true;
+    for (uint32_t lane = 0;
+         lane < ah::kAlgHashRate; ++lane) {
+        out.cs.preprocessed.emplace_back(
+            out.absorbed_lane_base + lane,
+            out.columns[
+                out.absorbed_lane_base +
+                lane]);
+    }
+    for (const uint32_t column : {
+             out.active_column,
+             out.start_column,
+             continuation_column}) {
+        out.cs.preprocessed.emplace_back(
+            column, out.columns[column]);
+    }
+    for (uint32_t challenge = 0;
+         challenge < table.challenge_width;
+         ++challenge) {
+        out.cs.preprocessed.emplace_back(
+            last_selector_base + challenge,
+            out.columns[
+                last_selector_base +
+                challenge]);
+        out.cs.preprocessed.emplace_back(
+            load_selector_base + challenge,
+            out.columns[
+                load_selector_base +
+                challenge]);
+    }
+
+    auto add =
+        [&out](
+            const char* name,
+            aq::AirKind kind,
+            uint32_t degree,
+            std::function<Fp3(
+                const std::vector<Fp3>&,
+                const std::vector<Fp3>&)>
+                eval) {
+            aq::AirConstraint<Fp3> constraint;
+            constraint.name = name;
+            constraint.kind = kind;
+            constraint.alg_degree = degree;
+            constraint.eval = std::move(eval);
+            out.cs.constraints.push_back(
+                std::move(constraint));
+        };
+    for (uint32_t lane = 0;
+         lane < ah::kAlgHashT; ++lane) {
+        const uint32_t input =
+            poseidon.perm.InputCol(lane);
+        add(
+            "stage3.bytecode_challenge.start_absorb",
+            aq::AirKind::kEverywhere, 2,
+            [start = out.start_column,
+             input,
+             source =
+                 lane < ah::kAlgHashRate
+                 ? out.absorbed_lane_base +
+                       lane
+                 : UINT32_MAX](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                const Fp3 expected =
+                    source == UINT32_MAX
+                    ? Fp3::Zero()
+                    : cur[source];
+                return gkr_field::Mul(
+                    cur[start],
+                    gkr_field::Sub(
+                        cur[input],
+                        expected));
+            });
+        add(
+            "stage3.bytecode_challenge.sponge_carry",
+            aq::AirKind::kTransition, 2,
+            [poseidon, continuation_column,
+             input, lane,
+             source =
+                 lane < ah::kAlgHashRate
+                 ? out.absorbed_lane_base +
+                       lane
+                 : UINT32_MAX](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>& next) {
+                Fp3 expected =
+                    ar::PermOutputLane(
+                        poseidon.perm,
+                        cur, lane);
+                if (source != UINT32_MAX) {
+                    expected =
+                        gkr_field::Add(
+                            expected,
+                            next[source]);
+                }
+                return gkr_field::Mul(
+                    next[
+                        continuation_column],
+                    gkr_field::Sub(
+                        next[input],
+                        expected));
+            });
+    }
+    const Fp3 u{0, 1, 0};
+    const Fp3 u2{0, 0, 1};
+    for (uint32_t challenge = 0;
+         challenge < table.challenge_width;
+         ++challenge) {
+        add(
+            "stage3.bytecode_challenge.output",
+            aq::AirKind::kEverywhere, 2,
+            [poseidon,
+             selector =
+                 last_selector_base +
+                 challenge,
+             value =
+                 out.challenge_column_base +
+                 challenge,
+             u, u2](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                const Fp3 reconstructed =
+                    gkr_field::Add(
+                        ar::PermOutputLane(
+                            poseidon.perm,
+                            cur, 0),
+                        gkr_field::Add(
+                            gkr_field::Mul(
+                                u,
+                                ar::PermOutputLane(
+                                    poseidon.perm,
+                                    cur, 1)),
+                            gkr_field::Mul(
+                                u2,
+                                ar::PermOutputLane(
+                                    poseidon.perm,
+                                    cur, 2))));
+                return gkr_field::Mul(
+                    cur[selector],
+                    gkr_field::Sub(
+                        cur[value],
+                        reconstructed));
+            });
+        add(
+            "stage3.bytecode_challenge.constant_column",
+            aq::AirKind::kTransition, 1,
+            [value =
+                 out.challenge_column_base +
+                 challenge](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>& next) {
+                return gkr_field::Sub(
+                    next[value],
+                    cur[value]);
+            });
+        add(
+            "stage3.bytecode_challenge.interpreter_load",
+            aq::AirKind::kEverywhere, 2,
+            [selector =
+                 load_selector_base +
+                 challenge,
+             result =
+                 out.interpreter_result_column,
+             value =
+                 out.challenge_column_base +
+                 challenge](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                return gkr_field::Mul(
+                    cur[selector],
+                    gkr_field::Sub(
+                        cur[result],
+                        cur[value]));
+            });
+    }
+    uint32_t first_bad_row = 0;
+    std::string first_bad_name;
+    out.violations =
+        ar::CountWitnessViolationsOnH(
+            out.cs, out.columns,
+            &first_bad_row, &first_bad_name);
+    out.p2_replay_constrained =
+        out.violations == 0 &&
+        out.poseidon_permutations > 0;
+    out.every_challenge_lane_mapped =
+        out.violations == 0 &&
+        transcript.challenges.size() ==
+            table.challenge_width;
+    out.interpreter_challenge_rows_equal =
+        out.violations == 0 &&
+        out.challenge_loads ==
+            loads.size();
+    out.full_child_verifier_recursively_consumed =
+        false;
+    out.valid =
+        out.transcript_authenticated &&
+        out.p2_replay_constrained &&
+        out.every_challenge_lane_mapped &&
+        out.interpreter_challenge_rows_equal;
+    out.note =
+        out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "bytecode_challenge_replay_parent_valid;"
+          "full_child_verifier_recursion_open"
+        : "stage3:recursive_fixedpoint:"
+          "bytecode_challenge_replay_parent_violation;"
+          "first_row=" +
+              std::to_string(first_bad_row) +
+          ";first_constraint=" +
+              first_bad_name;
+    return out;
+}
+
+bool VerifyBytecodeChallengeReplayParentV1(
+    const constraint_bytecode::ProgramTable& table,
+    const aq::AirQuotientSplitRapRowsProof& child_proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    const BytecodeChallengeTranscriptV1& transcript,
+    const aq::AirQuotientRowsProof& parent_proof,
+    std::string* why)
+{
+    const auto expected =
+        BuildBytecodeChallengeReplayParentV1(
+            table, child_proof,
+            expected_base_column_indices,
+            public_fs_seed, transcript);
+    if (!expected.valid) {
+        return Fail(
+            why,
+            "bytecode_challenge_parent_rebuild:" +
+                expected.note);
+    }
+    if (!aq::AirQuotientVerifyRows(
+            expected.cs, parent_proof,
+            transcript.transcript_commitment,
+            why)) {
+        return false;
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_parent_proof_verified";
     }
     return true;
 }

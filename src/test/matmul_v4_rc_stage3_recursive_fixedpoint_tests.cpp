@@ -19,6 +19,8 @@
 
 namespace aq = matmul::v4::rc::air_quotient;
 namespace ar = matmul::v4::rc::air_recurse;
+namespace cb =
+    matmul::v4::rc::constraint_bytecode;
 namespace fp =
     matmul::v4::rc::recursive_fixedpoint;
 namespace gf = matmul::v4::rc::gkr_field;
@@ -5529,6 +5531,178 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!fp::kNarrowBytecodeHierarchicalAttachReady);
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
+}
+
+BOOST_AUTO_TEST_CASE(
+    bytecode_challenge_epoch_is_r0_owned_and_replayed_in_parent)
+{
+    constexpr uint32_t N = 16;
+
+    cb::ProgramTable table;
+    table.role =
+        rc::RCStage3RelationRole::EpisodeDeterministicBuilder;
+    table.current_width = 3;
+    table.next_width = 3;
+    table.challenge_width = 2;
+    for (uint32_t ordinal = 0; ordinal < 2; ++ordinal) {
+        cb::Program program;
+        program.role = table.role;
+        program.constraint_ordinal = ordinal;
+        program.kind = aq::AirKind::kEverywhere;
+        program.declared_degree = 2;
+        program.current_width = table.current_width;
+        program.next_width = table.next_width;
+        program.challenge_width = table.challenge_width;
+        program.instructions = {
+            {cb::Opcode::Current, 0, 0, {}},
+            {cb::Opcode::Challenge, ordinal, 0, {}},
+            {cb::Opcode::Mul, 0, 1, {}},
+            {cb::Opcode::Current, ordinal + 1, 0, {}},
+            {cb::Opcode::Sub, 2, 3, {}},
+        };
+        table.programs.push_back(std::move(program));
+    }
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(table, &why), why);
+
+    std::vector<std::vector<gf::Fp3>> columns(
+        table.current_width,
+        std::vector<gf::Fp3>(N, gf::Fp3::Zero()));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[0][row] =
+            gf::Fp3::FromFp(uint64_t{row + 1});
+    }
+    const std::vector<uint32_t> base_indices{0};
+    aq::AirConstraintSystem<gf::Fp3> shape;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, N,
+            std::vector<gf::Fp3>(
+                table.challenge_width,
+                gf::Fp3::Zero()),
+            shape, &why),
+        why);
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            shape, columns, base_indices);
+    BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+    const uint256 public_seed = Seed(0xD7);
+    std::vector<gf::Fp3> challenges;
+    BOOST_REQUIRE_MESSAGE(
+        fp::DeriveBytecodeChallengeVectorV1(
+            table, N, base_indices, public_seed,
+            r0.base_row_commitment, challenges, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(challenges.size(), 2U);
+    BOOST_CHECK(!gf::Eq(challenges[0], challenges[1]));
+    for (uint32_t row = 0; row < N; ++row) {
+        columns[1][row] =
+            gf::Mul(columns[0][row], challenges[0]);
+        columns[2][row] =
+            gf::Mul(columns[0][row], challenges[1]);
+    }
+    aq::AirConstraintSystem<gf::Fp3> child_cs;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, N, challenges, child_cs, &why),
+        why);
+    const auto child =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            child_cs, columns, base_indices,
+            public_seed, {}, &r0);
+    BOOST_REQUIRE_MESSAGE(
+        child.ok && child.division_exact,
+        child.note);
+
+    fp::BytecodeChallengeTranscriptV1 transcript;
+    BOOST_REQUIRE_MESSAGE(
+        fp::BuildBytecodeChallengeTranscriptV1(
+            table, child.proof, base_indices,
+            public_seed, transcript, &why),
+        why);
+    BOOST_CHECK(transcript.safe_split_rap_statement_verified);
+    BOOST_CHECK(transcript.exact_p2_replay);
+    BOOST_CHECK(
+        transcript.r0_commitment ==
+        rc::Fri3AlgDigestToUint256(
+            child.proof.batch.groups[0].row_commit.root));
+
+    const auto parent =
+        fp::BuildBytecodeChallengeReplayParentV1(
+            table, child.proof, base_indices,
+            public_seed, transcript);
+    BOOST_TEST_MESSAGE(
+        parent.note << ";violations="
+                    << parent.violations
+                    << ";permutations="
+                    << parent.poseidon_permutations);
+    BOOST_REQUIRE_MESSAGE(parent.valid, parent.note);
+    BOOST_CHECK(parent.transcript_authenticated);
+    BOOST_CHECK(parent.p2_replay_constrained);
+    BOOST_CHECK(parent.every_challenge_lane_mapped);
+    BOOST_CHECK(parent.interpreter_challenge_rows_equal);
+    BOOST_CHECK_EQUAL(parent.challenge_loads, 2U);
+    BOOST_CHECK_EQUAL(parent.violations, 0U);
+    BOOST_CHECK(!parent.full_child_verifier_recursively_consumed);
+
+    const auto parent_proved =
+        aq::AirQuotientProveRows(
+            parent.cs, parent.columns,
+            transcript.transcript_commitment, {});
+    BOOST_REQUIRE_MESSAGE(
+        parent_proved.ok &&
+            parent_proved.division_exact,
+        parent_proved.note);
+    BOOST_REQUIRE_MESSAGE(
+        fp::VerifyBytecodeChallengeReplayParentV1(
+            table, child.proof, base_indices,
+            public_seed, transcript,
+            parent_proved.proof, &why),
+        why);
+
+    // Program substitution cannot reuse the authenticated challenge epoch:
+    // it changes the ProgramTable commitment and hence every P2 challenge.
+    cb::ProgramTable substituted = table;
+    substituted.programs[1].instructions[1].lhs = 0;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(substituted, &why), why);
+    BOOST_CHECK(
+        !fp::ValidateBytecodeChallengeTranscriptV1(
+            substituted, child.proof, base_indices,
+            public_seed, transcript, &why));
+
+    // Swapping encoded challenge messages is rejected even if the exported
+    // Fp3 values are left untouched.
+    auto lane_swapped = transcript;
+    std::swap(
+        lane_swapped.challenge_preimage_lanes[0],
+        lane_swapped.challenge_preimage_lanes[1]);
+    BOOST_CHECK(
+        !fp::ValidateBytecodeChallengeTranscriptV1(
+            table, child.proof, base_indices,
+            public_seed, lane_swapped, &why));
+
+    // Proof-level lane substitution: the parent prover can commit an
+    // inexact quotient, but the unmodified AIR/FRI verifier rejects it.
+    auto forged_columns = parent.columns;
+    std::swap(
+        forged_columns[parent.challenge_column_base],
+        forged_columns[parent.challenge_column_base + 1]);
+    aq::AirProveOptions adversarial;
+    adversarial.force_commit_on_inexact = true;
+    const auto forged =
+        aq::AirQuotientProveRows(
+            parent.cs, forged_columns,
+            transcript.transcript_commitment,
+            adversarial);
+    BOOST_REQUIRE(forged.ok);
+    BOOST_CHECK(!forged.division_exact);
+    BOOST_CHECK(
+        !fp::VerifyBytecodeChallengeReplayParentV1(
+            table, child.proof, base_indices,
+            public_seed, transcript,
+            forged.proof, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
