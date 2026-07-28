@@ -2019,9 +2019,9 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
 
     const Fp omega_lde = AirOmegaForSize(n_lde);
     const Fp omega_N = AirOmegaForSize(N);
-    const F h_first = T::One();
-    const F h_last = T::FromBase(AirPowBase(omega_N, N - 1));
-    const F g = T::FromBase(kAirCosetShift);
+    const Fp h_first_base = 1;
+    const Fp h_last_base =
+        AirPowBase(omega_N, N - 1);
 
     // One query's worth of the loop body below, factored out so the
     // sequential and (row-wise-only) threaded paths run IDENTICAL logic.
@@ -2077,9 +2077,18 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
             qv = q.columns[W].value;
         }
         // Actual evaluation point y = g·ω^index (coset — Z_H(y) ≠ 0).
-        const F y = T::Mul(g, T::FromBase(AirPowBase(omega_lde, q.index)));
-        const F zh = T::Sub(AirPow(y, N), T::One());
-        if (T::IsZero(zh)) return "Z_H vanishes at query point (coset violated)";
+        // Every query point and selector denominator is a base-field value
+        // embedded in Fp2/Fp3.  Keep this arithmetic in Goldilocks instead of
+        // invoking extension-field pow/inv, then embed the exact result.
+        const Fp y_base = gkr_field::Mul(
+            kAirCosetShift,
+            AirPowBase(omega_lde, q.index));
+        const Fp zh_base = gkr_field::Sub(
+            AirPowBase(y_base, N), 1);
+        if (zh_base == 0) {
+            return "Z_H vanishes at query point (coset violated)";
+        }
+        const F zh = T::FromBase(zh_base);
         // All constraints at this query share the same selector point.  The
         // old loop called AirSelectorEval once per constraint, which repeated
         // y^N and an Fp3 inversion for every first/last-row constraint.  Pin
@@ -2088,13 +2097,23 @@ bool AirQuotientVerify(const AirConstraintSystem<F>& cs,
         // AirSelectorEval's non-domain branch.
         const std::array<F, 4> selectors{
             T::One(),
-            T::Sub(y, h_last),
-            T::Mul(
-                zh,
-                T::Inv(T::Sub(y, h_first))),
-            T::Mul(
-                zh,
-                T::Inv(T::Sub(y, h_last)))};
+            T::FromBase(
+                gkr_field::Sub(
+                    y_base, h_last_base)),
+            T::FromBase(
+                gkr_field::Mul(
+                    zh_base,
+                    gkr_field::Inv(
+                        gkr_field::Sub(
+                            y_base,
+                            h_first_base)))),
+            T::FromBase(
+                gkr_field::Mul(
+                    zh_base,
+                    gkr_field::Inv(
+                        gkr_field::Sub(
+                            y_base,
+                            h_last_base))))};
 
         F csum = T::Zero();
         for (size_t constraint = 0;
