@@ -579,4 +579,64 @@ bool BuildCanonicalProgramTableV1(
     return true;
 }
 
+bool BuildCanonicalConstraintSystemV1(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    aq::AirConstraintSystem<Fp3>& out,
+    LayoutV1* layout_out,
+    ScheduleV1* schedule_out,
+    cb::ProgramTable* program_out,
+    std::string* why)
+{
+    aq::AirConstraintSystem<Fp3> native;
+    LayoutV1 layout;
+    ScheduleV1 schedule;
+    if (!BuildConstraintSystemV1(
+            shape, binding, native,
+            &layout, &schedule, why)) {
+        return false;
+    }
+    cb::ProgramTable program;
+    if (!BuildCanonicalProgramTableV1(
+            program, why)) {
+        return false;
+    }
+    aq::AirConstraintSystem<Fp3> canonical;
+    if (!cb::BuildAirConstraintSystemFromProgramTable(
+            program, native.n_rows,
+            canonical, why)) {
+        return false;
+    }
+    if (canonical.n_columns !=
+            native.n_columns ||
+        canonical.constraints.size() !=
+            native.constraints.size()) {
+        return Fail(
+            why, "canonical_adapter_shape");
+    }
+    canonical.preprocessed =
+        std::move(native.preprocessed);
+    canonical.preprocessed_pin_ood =
+        native.preprocessed_pin_ood;
+    canonical.preprocessed_row_group_roots =
+        std::move(
+            native.preprocessed_row_group_roots);
+    out = std::move(canonical);
+    if (layout_out != nullptr) {
+        *layout_out = layout;
+    }
+    if (schedule_out != nullptr) {
+        *schedule_out = std::move(schedule);
+    }
+    if (program_out != nullptr) {
+        *program_out = std::move(program);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:v13_proof_tape_bytecode:"
+            "canonical_constraint_system";
+    }
+    return true;
+}
+
 } // namespace matmul::v4::rc::stage3_multirow_v13_proof_tape_air

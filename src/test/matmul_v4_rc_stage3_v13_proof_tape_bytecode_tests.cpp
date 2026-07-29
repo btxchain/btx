@@ -255,6 +255,87 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
+    canonical_adapter_discards_every_opaque_relation_callback)
+{
+    std::string why;
+    aq::AirConstraintSystem<Fp3> native;
+    aq::AirConstraintSystem<Fp3> canonical;
+    cb::ProgramTable table;
+    LayoutV1 native_layout;
+    LayoutV1 canonical_layout;
+    ScheduleV1 native_schedule;
+    ScheduleV1 canonical_schedule;
+    BOOST_REQUIRE(
+        BuildConstraintSystemV1(
+            Shape(), Binding(), native,
+            &native_layout, &native_schedule,
+            &why));
+    BOOST_REQUIRE(
+        BuildCanonicalConstraintSystemV1(
+            Shape(), Binding(), canonical,
+            &canonical_layout,
+            &canonical_schedule,
+            &table, &why));
+    BOOST_CHECK_EQUAL(
+        canonical.constraints.size(), 669U);
+    BOOST_CHECK_EQUAL(
+        canonical.constraints.size(),
+        native.constraints.size());
+    BOOST_CHECK_EQUAL(
+        canonical.n_rows, native.n_rows);
+    BOOST_CHECK_EQUAL(
+        canonical.n_columns,
+        native.n_columns);
+    BOOST_CHECK(
+        canonical_layout.End() ==
+        native_layout.End());
+    BOOST_CHECK_EQUAL(
+        canonical_schedule.source_records,
+        native_schedule.source_records);
+    BOOST_REQUIRE_EQUAL(
+        canonical.preprocessed.size(),
+        native.preprocessed.size());
+    for (uint32_t index = 0;
+         index < canonical.preprocessed.size();
+         ++index) {
+        BOOST_CHECK_EQUAL(
+            canonical.preprocessed[index].first,
+            native.preprocessed[index].first);
+        BOOST_REQUIRE_EQUAL(
+            canonical.preprocessed[index].
+                second.size(),
+            native.preprocessed[index].
+                second.size());
+        for (uint32_t row = 0;
+             row <
+                canonical.preprocessed[index].
+                    second.size();
+             ++row) {
+            BOOST_CHECK(
+                gf::Eq(
+                    canonical.preprocessed[index].
+                        second[row],
+                    native.preprocessed[index].
+                        second[row]));
+        }
+    }
+    BOOST_CHECK(
+        canonical.preprocessed_pin_ood ==
+        native.preprocessed_pin_ood);
+    BOOST_CHECK(
+        std::all_of(
+            canonical.constraints.begin(),
+            canonical.constraints.end(),
+            [](const auto& constraint) {
+                return constraint.name ==
+                    "stage3.constraint_bytecode.v1";
+            }));
+    BOOST_CHECK_EQUAL(
+        table.programs.size(),
+        canonical.constraints.size());
+}
+
+BOOST_AUTO_TEST_CASE(
     acceptance_only_or_mutated_table_is_not_the_full_relation)
 {
     cb::ProgramTable table;
