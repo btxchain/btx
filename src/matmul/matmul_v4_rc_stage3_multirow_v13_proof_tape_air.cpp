@@ -2205,6 +2205,8 @@ uint256 DeriveShardFsSeed(
     for (gf::Fp lane : statement.end_state) {
         hash << static_cast<uint64_t>(lane);
     }
+    hash << statement.first_record_value;
+    hash << statement.next_record_value;
     hash << statement.source_inventory_root;
     hash << join_context_root;
     return hash.GetHash();
@@ -2233,6 +2235,7 @@ std::vector<ShardPlanV2> BuildShardPlansForMaxRowsV2(
     const uint32_t shard_count =
         global.trace_rows / shard_rows;
     if (shard_count == 0 ||
+        shard_count > 4 ||
         (shard_count & (shard_count - 1)) != 0) {
         return {};
     }
@@ -2420,6 +2423,8 @@ ShardLayoutV2 CanonicalShardLayoutV2()
     cursor += alg_hash::kAlgHashT;
     out.expected_end_state_base = cursor;
     cursor += alg_hash::kAlgHashT;
+    out.expected_first_value = cursor++;
+    out.expected_next_value = cursor++;
     out.dependent_base = cursor;
     out.source_inverse_base = cursor;
     cursor += 2 *
@@ -2453,6 +2458,22 @@ ShardBoundaryStatesV2 ComputeShardBoundaryStatesV2(
     out.states.assign(
         plans.size() + 1,
         alg_hash::State{});
+    out.first_record_values.resize(
+        plans.size(), 0);
+    out.next_record_values.resize(
+        plans.size(), 0);
+    for (uint32_t index = 0;
+         index < plans.size(); ++index) {
+        out.first_record_values[index] =
+            records.value[
+                plans[index].record_begin];
+        if (index + 1 < plans.size()) {
+            out.next_record_values[index] =
+                records.value[
+                    plans[index].record_begin +
+                    plans[index].record_count];
+        }
+    }
     alg_hash::State state{};
     uint32_t next_boundary = 1;
     for (uint32_t row = 0;
@@ -2560,8 +2581,8 @@ bool BuildShardConstraintSystemV2(
     if (records.size() !=
             size_t{statement.plan.trace_rows} *
                 kProofTapeShardRecordsPerRowV2 ||
-        (!records.empty() &&
-         records.back().fp_low_limb)) {
+        (statement.plan.contains_final_row &&
+         statement.next_record_value != 0)) {
         return fail("record_slice_or_fp_boundary");
     }
 
@@ -2851,6 +2872,63 @@ bool BuildShardConstraintSystemV2(
             });
     }
     add(
+        "stage3.v13_tape_shard.first_record_value",
+        aq::AirKind::kFirstRow, 1,
+        [layout](
+            const auto& cur,
+            const auto&) {
+            return gf::Sub(
+                cur[layout.tape.Value(0)],
+                cur[layout.expected_first_value]);
+        });
+    if (records.back().fp_low_limb) {
+        constexpr uint32_t slot =
+            kProofTapeShardRecordsPerRowV2 - 1;
+        add(
+            "stage3.v13_tape_shard.boundary_fp_eq_sound",
+            aq::AirKind::kLastRow, 2,
+            [layout](
+                const auto& cur,
+                const auto&) {
+                const Fp3 delta =
+                    gf::Sub(
+                        U(UINT32_MAX),
+                        cur[layout.expected_next_value]);
+                return gf::Mul(
+                    cur[layout.tape.HighIsMax(slot)],
+                    delta);
+            });
+        add(
+            "stage3.v13_tape_shard.boundary_fp_delta_inverse",
+            aq::AirKind::kLastRow, 2,
+            [layout](
+                const auto& cur,
+                const auto&) {
+                const Fp3 eq =
+                    cur[layout.tape.HighIsMax(slot)];
+                const Fp3 delta =
+                    gf::Sub(
+                        U(UINT32_MAX),
+                        cur[layout.expected_next_value]);
+                return gf::Sub(
+                    gf::Mul(
+                        delta,
+                        cur[layout.tape.
+                            HighDeltaInverse(slot)]),
+                    gf::Sub(Fp3::One(), eq));
+            });
+        add(
+            "stage3.v13_tape_shard.boundary_fp_low_if_high_max",
+            aq::AirKind::kLastRow, 2,
+            [layout](
+                const auto& cur,
+                const auto&) {
+                return gf::Mul(
+                    cur[layout.tape.HighIsMax(slot)],
+                    cur[layout.tape.Value(slot)]);
+            });
+    }
+    add(
         "stage3.v13_tape_shard.legacy_rdep_zero",
         aq::AirKind::kEverywhere, 1,
         [layout](const auto& cur,
@@ -3006,6 +3084,18 @@ bool BuildShardConstraintSystemV2(
             return fail("preprocessed_state");
         }
     }
+    if (!AddPreprocessed(
+            out, layout.expected_first_value,
+            std::vector<Fp3>(
+                out.n_rows,
+                U(statement.first_record_value))) ||
+        !AddPreprocessed(
+            out, layout.expected_next_value,
+            std::vector<Fp3>(
+                out.n_rows,
+                U(statement.next_record_value)))) {
+        return fail("preprocessed_boundary_value");
+    }
     uint32_t max_everywhere = 0;
     uint32_t max_transition = 0;
     uint32_t max_boundary = 0;
@@ -3105,7 +3195,15 @@ ShardProductV2 BuildShardProductV2(
         !StateEq(
             statement.end_state,
             boundaries.states[
-                statement.plan.shard_index + 1])) {
+                statement.plan.shard_index + 1]) ||
+        statement.plan.shard_index >=
+            boundaries.first_record_values.size() ||
+        statement.first_record_value !=
+            boundaries.first_record_values[
+                statement.plan.shard_index] ||
+        statement.next_record_value !=
+            boundaries.next_record_values[
+                statement.plan.shard_index]) {
         return fail("state_boundary");
     }
 
@@ -3187,16 +3285,14 @@ ShardProductV2 BuildShardProductV2(
                 fp_low_limb) {
             continue;
         }
-        if (local_record + 1 >=
-            records.size()) {
-            return fail("split_fp_pair");
-        }
         const uint32_t global_record =
             statement.plan.record_begin +
             local_record;
         const uint32_t high =
-            materialized.value[
-                global_record + 1];
+            local_record + 1 < records.size()
+            ? materialized.value[
+                global_record + 1]
+            : statement.next_record_value;
         const uint32_t row =
             local_record /
             kProofTapeShardRecordsPerRowV2;
@@ -3310,23 +3406,21 @@ ShardProductV2 BuildShardProductV2(
     return out;
 }
 
-namespace {
-
-struct ShardSourceChallenges {
-    std::array<Fp3, 2> gamma{};
-    std::array<Fp3, 2> alpha{};
-};
-
-bool DeriveShardSourceChallenges(
+bool DeriveShardSourceChallengesV2(
     const ShardStatementV2& statement,
     const uint256& r0_row_root,
     const ShardJoinContextV2& join_context,
-    ShardSourceChallenges& out)
+    ShardSourceChallengesV2& out)
 {
     out = {};
     if (r0_row_root.IsNull() ||
         !join_context.valid ||
-        join_context.root.IsNull()) {
+        join_context.root.IsNull() ||
+        statement.plan.shard_index >=
+            join_context.tape_r0_roots.size() ||
+        join_context.tape_r0_roots[
+            statement.plan.shard_index] !=
+            r0_row_root) {
         return false;
     }
     const uint256 seed =
@@ -3362,9 +3456,11 @@ bool DeriveShardSourceChallenges(
             out.alpha[0], out.alpha[1]);
 }
 
+namespace {
+
 bool MaterializeShardSourceTerminal(
     const ShardLayoutV2& layout,
-    const ShardSourceChallenges& challenges,
+    const ShardSourceChallengesV2& challenges,
     uint32_t shard_index,
     std::vector<std::vector<Fp3>>& columns,
     std::array<Fp3, 2>& terminal)
@@ -3438,7 +3534,7 @@ bool MaterializeShardSourceTerminal(
 
 bool AppendShardSourceTerminal(
     const ShardLayoutV2& layout,
-    const ShardSourceChallenges& challenges,
+    const ShardSourceChallengesV2& challenges,
     uint32_t shard_index,
     const std::array<Fp3, 2>& terminal,
     aq::AirConstraintSystem<Fp3>& cs)
@@ -3612,8 +3708,8 @@ bool ProveShardV2(
         DeriveShardFsSeed(
             product.statement,
             join_context.root);
-    ShardSourceChallenges challenges;
-    if (!DeriveShardSourceChallenges(
+    ShardSourceChallengesV2 challenges;
+    if (!DeriveShardSourceChallengesV2(
             product.statement,
             product.r0_session.
                 base_row_commitment,
@@ -3761,8 +3857,8 @@ bool VerifyShardV2(
             nullptr, why)) {
         return false;
     }
-    ShardSourceChallenges challenges;
-    if (!DeriveShardSourceChallenges(
+    ShardSourceChallengesV2 challenges;
+    if (!DeriveShardSourceChallengesV2(
             statement,
             proof.r0_row_root,
             join_context,
@@ -3859,6 +3955,16 @@ bool VerifyShardCoverageChainForMaxRowsV2(
             return fail(
                 "state_chain");
         }
+        if (index + 1 < receipts.size() &&
+            receipt.next_record_value !=
+                receipts[index + 1].
+                    first_record_value) {
+            return fail(
+                "record_value_chain");
+        }
+    }
+    if (receipts.back().next_record_value != 0) {
+        return fail("terminal_record_value");
     }
     alg_hash::Digest final_root{};
     std::copy_n(
@@ -3899,6 +4005,10 @@ bool VerifyShardReceiptChainForMaxRowsV2(
                 receipt.start_state,
             .end_state =
                 receipt.end_state,
+            .first_record_value =
+                receipt.first_record_value,
+            .next_record_value =
+                receipt.next_record_value,
             .source_inventory_root =
                 receipt.source_inventory_root,
         };

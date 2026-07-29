@@ -551,6 +551,8 @@ struct ShardLayoutV2 {
     LayoutV1 tape{};
     uint32_t expected_start_state_base{0};
     uint32_t expected_end_state_base{0};
+    uint32_t expected_first_value{0};
+    uint32_t expected_next_value{0};
     uint32_t dependent_base{0};
     uint32_t source_inverse_base{0};
     uint32_t running_base{0};
@@ -583,11 +585,15 @@ struct ShardStatementV2 {
     ShardPlanV2 plan{};
     alg_hash::State start_state{};
     alg_hash::State end_state{};
+    uint32_t first_record_value{0};
+    uint32_t next_record_value{0};
     uint256 source_inventory_root{};
 };
 
 struct ShardBoundaryStatesV2 {
     std::vector<alg_hash::State> states;
+    std::vector<uint32_t> first_record_values;
+    std::vector<uint32_t> next_record_values;
     alg_hash::Digest final_root{};
     bool exact_v1_tape_root{false};
     bool valid{false};
@@ -645,11 +651,23 @@ struct ShardJoinContextV2 {
     bool valid{false};
 };
 
+struct ShardSourceChallengesV2 {
+    std::array<gf::Fp3, 2> gamma{};
+    std::array<gf::Fp3, 2> alpha{};
+};
+
 [[nodiscard]] ShardJoinContextV2 BuildShardJoinContextV2(
     const PublicShapeV1& shape,
     const PublicBindingV1& binding,
     const std::vector<uint256>& tape_r0_roots,
     const std::vector<uint256>& consumer_r0_roots);
+
+/** Canonical transcript derivation shared by tape and recursive consumers. */
+[[nodiscard]] bool DeriveShardSourceChallengesV2(
+    const ShardStatementV2& statement,
+    const uint256& r0_row_root,
+    const ShardJoinContextV2& join_context,
+    ShardSourceChallengesV2& out);
 
 [[nodiscard]] bool ProveShardV2(
     const ShardProductV2& product,
@@ -667,6 +685,8 @@ struct ShardReceiptV2 {
     ShardPlanV2 plan{};
     alg_hash::State start_state{};
     alg_hash::State end_state{};
+    uint32_t first_record_value{0};
+    uint32_t next_record_value{0};
     uint256 source_inventory_root{};
     ShardProofV2 proof{};
 };

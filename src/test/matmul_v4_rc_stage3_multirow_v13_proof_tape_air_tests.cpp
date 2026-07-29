@@ -85,7 +85,9 @@ size_t SourceValueWord(uint32_t address)
 std::vector<alg_hash::State> BoundaryStatesForPlans(
     const ScheduleV1& schedule,
     const std::vector<uint32_t>& words,
-    const std::vector<ShardPlanV2>& plans)
+    const std::vector<ShardPlanV2>& plans,
+    std::vector<uint32_t>* first_record_values = nullptr,
+    std::vector<uint32_t>* next_record_values = nullptr)
 {
     std::vector<uint32_t> addresses(
         schedule.records.size(), 0);
@@ -125,6 +127,28 @@ std::vector<alg_hash::State> BoundaryStatesForPlans(
     }
     std::vector<alg_hash::State> out(
         plans.size() + 1);
+    if (first_record_values != nullptr) {
+        first_record_values->assign(
+            plans.size(), 0);
+    }
+    if (next_record_values != nullptr) {
+        next_record_values->assign(
+            plans.size(), 0);
+    }
+    for (uint32_t index = 0;
+         index < plans.size(); ++index) {
+        if (first_record_values != nullptr) {
+            (*first_record_values)[index] =
+                values[plans[index].record_begin];
+        }
+        if (next_record_values != nullptr &&
+            index + 1 < plans.size()) {
+            (*next_record_values)[index] =
+                values[
+                    plans[index].record_begin +
+                    plans[index].record_count];
+        }
+    }
     alg_hash::State state{};
     uint32_t boundary = 1;
     for (uint32_t row = 0;
@@ -817,11 +841,21 @@ BOOST_AUTO_TEST_CASE(
                     ShardAddressTagV2(right, 17)));
         }
     }
+    std::vector<uint32_t> first_record_values;
+    std::vector<uint32_t> next_record_values;
     const auto states =
         BoundaryStatesForPlans(
-            schedule, words, plans);
+            schedule, words, plans,
+            &first_record_values,
+            &next_record_values);
     BOOST_REQUIRE_EQUAL(
         states.size(), plans.size() + 1);
+    BOOST_REQUIRE_EQUAL(
+        first_record_values.size(),
+        plans.size());
+    BOOST_REQUIRE_EQUAL(
+        next_record_values.size(),
+        plans.size());
     const uint256 inventory =
         ComputeShardSourceInventoryRootV2(
             shape, binding);
@@ -833,6 +867,10 @@ BOOST_AUTO_TEST_CASE(
             .plan = plans[index],
             .start_state = states[index],
             .end_state = states[index + 1],
+            .first_record_value =
+                first_record_values[index],
+            .next_record_value =
+                next_record_values[index],
             .source_inventory_root =
                 inventory,
         });
@@ -905,6 +943,28 @@ BOOST_AUTO_TEST_CASE(
             shape, binding,
             wrong_interval,
             max_rows, &why));
+
+    for (uint32_t boundary = 1;
+         boundary < receipts.size();
+         ++boundary) {
+        auto wrong_record_boundary = receipts;
+        ++wrong_record_boundary[boundary].
+            first_record_value;
+        BOOST_CHECK(
+            !VerifyShardCoverageChainForMaxRowsV2(
+                shape, binding,
+                wrong_record_boundary,
+                max_rows, &why));
+    }
+
+    auto wrong_final_next = receipts;
+    wrong_final_next.back().
+        next_record_value = 1;
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding,
+            wrong_final_next,
+            max_rows, &why));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -944,6 +1004,10 @@ BOOST_AUTO_TEST_CASE(
             boundaries.states[0],
         .end_state =
             boundaries.states[1],
+        .first_record_value =
+            boundaries.first_record_values[0],
+        .next_record_value =
+            boundaries.next_record_values[0],
         .source_inventory_root =
             ComputeShardSourceInventoryRootV2(
                 shape, binding),
@@ -1019,6 +1083,35 @@ BOOST_AUTO_TEST_CASE(
                 base_row_commitment},
             {Root(0xd1), Root(0xd2)});
     BOOST_REQUIRE(join_context.valid);
+    ShardSourceChallengesV2 challenges;
+    BOOST_REQUIRE(
+        DeriveShardSourceChallengesV2(
+            statement,
+            product.r0_session.
+                base_row_commitment,
+            join_context, challenges));
+    ShardSourceChallengesV2 challenges_again;
+    BOOST_REQUIRE(
+        DeriveShardSourceChallengesV2(
+            statement,
+            product.r0_session.
+                base_row_commitment,
+            join_context,
+            challenges_again));
+    for (uint32_t lane = 0;
+         lane < 2; ++lane) {
+        BOOST_CHECK(gf::Eq(
+            challenges.gamma[lane],
+            challenges_again.gamma[lane]));
+        BOOST_CHECK(gf::Eq(
+            challenges.alpha[lane],
+            challenges_again.alpha[lane]));
+    }
+    BOOST_CHECK(
+        !DeriveShardSourceChallengesV2(
+            statement, Root(0xfe),
+            join_context,
+            challenges_again));
     BOOST_REQUIRE_MESSAGE(
         ProveShardV2(
             product, join_context,
@@ -1095,9 +1188,40 @@ BOOST_AUTO_TEST_CASE(
             wrong_context.tape_r0_roots,
             wrong_context.consumer_r0_roots);
     BOOST_REQUIRE(wrong_context.valid);
+    ShardSourceChallengesV2 wrong_challenges;
+    BOOST_REQUIRE(
+        DeriveShardSourceChallengesV2(
+            statement,
+            product.r0_session.
+                base_row_commitment,
+            wrong_context,
+            wrong_challenges));
+    BOOST_CHECK(
+        !gf::Eq(
+            challenges.gamma[0],
+            wrong_challenges.gamma[0]) ||
+        !gf::Eq(
+            challenges.alpha[0],
+            wrong_challenges.alpha[0]));
     BOOST_CHECK(
         !VerifyShardV2(
             statement, wrong_context,
+            proof, &why));
+
+    const ShardJoinContextV2 wrong_r0_context =
+        BuildShardJoinContextV2(
+            shape, binding,
+            {Root(0xe2)},
+            join_context.consumer_r0_roots);
+    BOOST_REQUIRE(wrong_r0_context.valid);
+    BOOST_CHECK(
+        !DeriveShardSourceChallengesV2(
+            statement, proof.r0_row_root,
+            wrong_r0_context,
+            wrong_challenges));
+    BOOST_CHECK(
+        !VerifyShardV2(
+            statement, wrong_r0_context,
             proof, &why));
 
     const ShardJoinContextV2 wrong_order =
@@ -1123,6 +1247,10 @@ BOOST_AUTO_TEST_CASE(
         .plan = statement.plan,
         .start_state = statement.start_state,
         .end_state = statement.end_state,
+        .first_record_value =
+            statement.first_record_value,
+        .next_record_value =
+            statement.next_record_value,
         .source_inventory_root =
             statement.source_inventory_root,
         .proof = proof,
@@ -1180,6 +1308,7 @@ BOOST_AUTO_TEST_CASE(
     const auto plans =
         BuildShardPlansV2(shape, binding);
     BOOST_REQUIRE_EQUAL(plans.size(), 4U);
+    uint32_t fp_pair_boundary_count = 0;
     for (uint32_t index = 0;
          index < plans.size(); ++index) {
         BOOST_CHECK(plans[index].valid);
@@ -1199,11 +1328,15 @@ BOOST_AUTO_TEST_CASE(
             BOOST_REQUIRE_LT(
                 last_record,
                 global.records.size());
-            BOOST_CHECK(
-                !global.records[last_record].
-                    fp_low_limb);
+            fp_pair_boundary_count +=
+                global.records[last_record].
+                    fp_low_limb ? 1U : 0U;
         }
     }
+    // Production inventory has two low/high field pairs split by the fixed
+    // shard cuts.  The shard statement's proof-owned next value closes them.
+    BOOST_CHECK_EQUAL(
+        fp_pair_boundary_count, 2U);
     BOOST_CHECK_EQUAL(
         plans[0].active_records,
         1U << 21);
@@ -1242,6 +1375,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_LE(
         CanonicalShardLayoutV2().End(),
         847U);
+    BOOST_CHECK_EQUAL(
+        CanonicalShardLayoutV2().End(),
+        723U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
