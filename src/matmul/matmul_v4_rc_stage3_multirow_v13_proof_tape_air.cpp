@@ -561,6 +561,8 @@ LayoutV1 CanonicalLayoutV1()
     cursor += kRecordsPerRowV1;
     out.semantic_packed_base = cursor;
     cursor += kRecordsPerRowV1;
+    out.expected_tape_root_base = cursor;
+    cursor += alg_hash::kAlgHashDigestLen;
     out.dependent_zero = cursor;
     return out;
 }
@@ -1124,15 +1126,15 @@ bool BuildConstraintSystemV1(
         terminal.kind = aq::AirKind::kLastRow;
         terminal.alg_degree = 1;
         terminal.eval =
-            [layout, lane,
-             expected = binding.tape_root[lane]](
+            [layout, lane](
                 const std::vector<Fp3>& cur,
                 const std::vector<Fp3>&) {
                 return gf::Sub(
                     air_recurse::PermOutputLane(
                         layout.poseidon.perm,
                         cur, lane),
-                    Fp3::FromFp(expected));
+                    cur[layout.ExpectedTapeRoot(
+                        lane)]);
             };
         out.constraints.push_back(
             std::move(terminal));
@@ -1260,6 +1262,17 @@ bool BuildConstraintSystemV1(
                         : 0);
                 }))) {
             return fail("preprocessed");
+        }
+    }
+    for (uint32_t lane = 0;
+         lane < alg_hash::kAlgHashDigestLen; ++lane) {
+        if (!AddPreprocessed(
+                out, layout.ExpectedTapeRoot(lane),
+                std::vector<Fp3>(
+                    out.n_rows,
+                    Fp3::FromFp(
+                        binding.tape_root[lane])))) {
+            return fail("preprocessed_tape_root");
         }
     }
 

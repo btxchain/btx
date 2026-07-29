@@ -129,6 +129,15 @@ struct LayoutV1 {
     uint32_t semantic_c_base{0};
     uint32_t semantic_packed_base{0};
 
+    /**
+     * Verifier-owned expected tape-root limbs.  These are ordinary R0 /
+     * preprocessed statement columns, rather than constants captured by an
+     * opaque callback.  Keeping the expected root in cells makes the
+     * terminal identity expressible by one proof-independent canonical
+     * ProgramTable while the public value remains bound by the R0 session.
+     */
+    uint32_t expected_tape_root_base{0};
+
     /** Sole Rdep placeholder. All preceding columns belong to global R0. */
     uint32_t dependent_zero{0};
 
@@ -208,6 +217,11 @@ struct LayoutV1 {
         uint32_t slot) const
     {
         return semantic_packed_base + slot;
+    }
+    [[nodiscard]] uint32_t ExpectedTapeRoot(
+        uint32_t lane) const
+    {
+        return expected_tape_root_base + lane;
     }
     [[nodiscard]] uint32_t End() const
     {
