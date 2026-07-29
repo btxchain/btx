@@ -122,6 +122,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_episode_builder_seed_chain_tests.cpp
   matmul_v4_rc_stage3_episode_builder_operand_xof_tests.cpp
   matmul_v4_rc_stage3_episode_builder_trace_tests.cpp
+  matmul_v4_rc_stage3_episode_digest_all_instance_tests.cpp
   matmul_v4_rc_stage3_episode_header_target_tests.cpp
   matmul_v4_rc_stage3_episode_round_roots_tests.cpp
   matmul_v4_rc_stage3_episode_extract_product_tests.cpp
