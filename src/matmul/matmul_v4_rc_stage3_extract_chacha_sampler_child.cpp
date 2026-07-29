@@ -1810,6 +1810,294 @@ bool AppendFinalRelationToParentV1(
     return true;
 }
 
+bool BuildVerifierComponentV1(
+    const TileStatementV1& statement,
+    VerifierComponentV1& out,
+    std::string* why)
+{
+    out = {};
+    const ProgramChallengeBindingV1 binding =
+        BuildProgramChallengeBindingV1(
+            statement);
+    Built rebuilt;
+    if (!binding.valid ||
+        !BuildComposition(
+            statement, statement.r0_root,
+            nullptr, false, rebuilt, why) ||
+        rebuilt.public_boundary_statement !=
+            statement.public_boundary_statement ||
+        rebuilt.outputs !=
+            statement.output_cells ||
+        rebuilt.positions !=
+            statement.position_cells ||
+        rebuilt.input_bits !=
+            statement.input_bit_cells) {
+        return Fail(
+            why, "verifier_component_statement");
+    }
+    const std::vector<uint32_t>
+        deterministic_columns =
+            DeterministicLocalColumns(rebuilt);
+    if (deterministic_columns.empty() ||
+        deterministic_columns.size() >=
+            rebuilt.cs.n_columns) {
+        return Fail(
+            why, "verifier_component_partition");
+    }
+    out.statement = statement;
+    out.cs.n_rows = rebuilt.cs.n_rows;
+    out.cs.n_columns =
+        static_cast<uint32_t>(
+            deterministic_columns.size());
+    out.cs.preprocessed_pin_ood =
+        rebuilt.cs.preprocessed_pin_ood;
+    out.deterministic_to_full_column =
+        deterministic_columns;
+    out.full_to_deterministic_column.assign(
+        rebuilt.cs.n_columns, UINT32_MAX);
+    for (uint32_t deterministic = 0;
+         deterministic <
+             deterministic_columns.size();
+         ++deterministic) {
+        out.full_to_deterministic_column[
+            deterministic_columns[
+                deterministic]] =
+            deterministic;
+    }
+    for (const auto& [full, values] :
+         rebuilt.cs.preprocessed) {
+        if (full >=
+                out.full_to_deterministic_column
+                    .size() ||
+            values.size() != out.cs.n_rows) {
+            out = {};
+            return Fail(
+                why,
+                "verifier_component_preprocessed_shape");
+        }
+        const uint32_t deterministic =
+            out.full_to_deterministic_column[
+                full];
+        if (deterministic == UINT32_MAX) {
+            out = {};
+            return Fail(
+                why,
+                "verifier_component_preprocessed_epoch");
+        }
+        out.cs.preprocessed.emplace_back(
+            deterministic, values);
+    }
+    out.full_relation_columns =
+        rebuilt.cs.n_columns;
+    out.full_relation_constraints =
+        static_cast<uint32_t>(
+            rebuilt.cs.constraints.size());
+    out.every_preprocessed_column_in_r0 =
+        out.cs.preprocessed.size() ==
+            rebuilt.cs.preprocessed.size();
+    out.challenge_columns_absent =
+        out.cs.n_columns <
+            out.full_relation_columns &&
+        out.cs.constraints.empty();
+    out.valid =
+        out.every_preprocessed_column_in_r0 &&
+        out.challenge_columns_absent;
+    out.note =
+        out.valid
+        ? "stage3:extract_chacha_sampler_child:"
+          "verifier_component_rebuilt"
+        : "stage3:extract_chacha_sampler_child:"
+          "verifier_component_invalid";
+    if (!out.valid) {
+        out = {};
+        return Fail(
+            why, "verifier_component_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendVerifierRelationToParentV1(
+    const VerifierComponentV1& component,
+    const composer::ChildAttachmentV1&
+        attachment,
+    const uint256& parent_r0_root,
+    AirCS& parent_cs,
+    VerifierParentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!component.valid ||
+        !component.challenge_columns_absent ||
+        parent_r0_root.IsNull() ||
+        component.statement.r0_root !=
+            parent_r0_root ||
+        !attachment.valid ||
+        attachment.row_lifted ||
+        !attachment.literal_column_mapping ||
+        attachment.semantic_child_columns !=
+            component.cs.n_columns ||
+        parent_cs.n_rows !=
+            component.cs.n_rows) {
+        return Fail(
+            why, "verifier_parent_finalize_input");
+    }
+    Built rebuilt;
+    if (!BuildComposition(
+            component.statement,
+            parent_r0_root, nullptr, false,
+            rebuilt, why) ||
+        rebuilt.cs.n_columns !=
+            component.full_relation_columns ||
+        rebuilt.cs.constraints.size() !=
+            component.full_relation_constraints ||
+        DeterministicLocalColumns(rebuilt) !=
+            component
+                .deterministic_to_full_column) {
+        return Fail(
+            why, "verifier_parent_finalize_rebuild");
+    }
+    out.full_local_to_parent_column.assign(
+        rebuilt.cs.n_columns, UINT32_MAX);
+    for (uint32_t deterministic = 0;
+         deterministic <
+             component
+                 .deterministic_to_full_column
+                 .size();
+         ++deterministic) {
+        out.full_local_to_parent_column[
+            component
+                .deterministic_to_full_column[
+                    deterministic]] =
+            attachment.ParentColumn(
+                deterministic);
+    }
+    out.dependent_column_base =
+        parent_cs.n_columns;
+    for (uint32_t full = 0;
+         full < rebuilt.cs.n_columns; ++full) {
+        if (out.full_local_to_parent_column[
+                full] != UINT32_MAX) {
+            continue;
+        }
+        out.full_local_to_parent_column[full] =
+            parent_cs.n_columns++;
+        ++out.dependent_columns;
+    }
+    if (out.dependent_columns == 0 ||
+        !AppendMappedFinalConstraints(
+            rebuilt.cs,
+            out.full_local_to_parent_column,
+            parent_cs,
+            out.canonical_constraints_relocated,
+            out.native_constraints_mapped,
+            why)) {
+        return Fail(
+            why,
+            "verifier_parent_finalize_append");
+    }
+    out.constraints_appended =
+        out.canonical_constraints_relocated +
+        out.native_constraints_mapped;
+    out.challenge_binding =
+        BuildProgramChallengeBindingV1(
+            component.statement);
+    const auto map_cell =
+        [&out](const CellV1& local) {
+            CellV1 parent = local;
+            if (local.column <
+                    out
+                        .full_local_to_parent_column
+                        .size()) {
+                parent.column =
+                    out
+                        .full_local_to_parent_column[
+                        local.column];
+            } else {
+                parent.column = UINT32_MAX;
+            }
+            return parent;
+        };
+    for (uint32_t i = 0;
+         i < out.output_cells.size(); ++i) {
+        out.output_cells[i] =
+            map_cell(rebuilt.outputs[i]);
+    }
+    out.position_cells.reserve(
+        rebuilt.positions.size());
+    for (const auto& cell :
+         rebuilt.positions) {
+        out.position_cells.push_back(
+            map_cell(cell));
+    }
+    out.input_bit_cells.reserve(
+        rebuilt.input_bits.size());
+    for (const auto& bits :
+         rebuilt.input_bits) {
+        std::array<CellV1, 64> mapped{};
+        for (uint32_t bit = 0;
+             bit < mapped.size(); ++bit) {
+            mapped[bit] =
+                map_cell(bits[bit]);
+        }
+        out.input_bit_cells.push_back(
+            std::move(mapped));
+    }
+    bool same_order = true;
+    for (uint32_t i = 0;
+         i < kProgramChallengeWidthV1; ++i) {
+        same_order =
+            same_order &&
+            gf::Eq(
+                out.challenge_binding
+                    .challenges[i],
+                rebuilt
+                    .program_challenges[i]);
+    }
+    out.parent_owned_r0_consumed =
+        component.statement.r0_root ==
+            parent_r0_root;
+    out.public_statement_rebuilt =
+        out.challenge_binding.valid &&
+        rebuilt.public_boundary_statement ==
+            component.statement
+                .public_boundary_statement &&
+        PreprocessedScheduleCommitment(
+            rebuilt.cs) ==
+            component.statement
+                .preprocessed_schedule_commitment &&
+        ProgramChallengeCommitment(
+            rebuilt.program_challenges) ==
+            component.statement
+                .program_challenge_commitment &&
+        rebuilt.outputs ==
+            component.statement.output_cells &&
+        rebuilt.positions ==
+            component.statement.position_cells &&
+        rebuilt.input_bits ==
+            component.statement.input_bit_cells;
+    out.exact_six_challenge_order =
+        same_order;
+    out.valid =
+        out.parent_owned_r0_consumed &&
+        out.public_statement_rebuilt &&
+        out.exact_six_challenge_order &&
+        out.constraints_appended ==
+            rebuilt.cs.constraints.size();
+    out.note =
+        out.valid
+        ? "stage3:extract_chacha_sampler_child:"
+          "verifier_same_parent_r0_final_relation"
+        : "stage3:extract_chacha_sampler_child:"
+          "verifier_same_parent_r0_invalid";
+    if (!out.valid) {
+        return Fail(
+            why, "verifier_parent_finalize_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
 uint256 ComputeRetainedNodeCommitmentV1(
     const TileStatementV1& statement)
 {

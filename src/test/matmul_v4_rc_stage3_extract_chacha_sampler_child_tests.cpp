@@ -237,6 +237,8 @@ BOOST_AUTO_TEST_CASE(
                 parent_cs, parent_columns,
                 parent_base);
     BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+    const auto verifier_parent_prefix_cs =
+        parent_cs;
 
     child::ParentFinalizationV1 finalized;
     BOOST_REQUIRE_MESSAGE(
@@ -264,6 +266,56 @@ BOOST_AUTO_TEST_CASE(
             CountWitnessViolationsOnH(
                 parent_cs, parent_columns),
         0U);
+
+    child::VerifierComponentV1
+        verifier_component;
+    BOOST_REQUIRE_MESSAGE(
+        child::BuildVerifierComponentV1(
+            finalized.statement,
+            verifier_component, &why),
+        why);
+    BOOST_REQUIRE(verifier_component.valid);
+    BOOST_CHECK(
+        verifier_component
+            .deterministic_to_full_column ==
+        component
+            .deterministic_to_full_column);
+    auto verifier_parent_cs =
+        verifier_parent_prefix_cs;
+    child::VerifierParentFinalizationV1
+        verifier_finalized;
+    BOOST_REQUIRE_MESSAGE(
+        child::AppendVerifierRelationToParentV1(
+            verifier_component, attachment,
+            r0.base_row_commitment,
+            verifier_parent_cs,
+            verifier_finalized, &why),
+        why);
+    BOOST_REQUIRE(verifier_finalized.valid);
+    BOOST_CHECK_EQUAL(
+        verifier_parent_cs.n_columns,
+        parent_cs.n_columns);
+    BOOST_CHECK_EQUAL(
+        verifier_parent_cs.constraints.size(),
+        parent_cs.constraints.size());
+    BOOST_CHECK(
+        verifier_finalized.output_cells ==
+        finalized.output_cells);
+    BOOST_CHECK_EQUAL(
+        matmul::v4::rc::air_recurse::
+            CountWitnessViolationsOnH(
+                verifier_parent_cs,
+                parent_columns),
+        0U);
+    auto wrong_parent_cs =
+        verifier_parent_prefix_cs;
+    child::VerifierParentFinalizationV1
+        wrong_parent;
+    BOOST_CHECK(
+        !child::AppendVerifierRelationToParentV1(
+             verifier_component, attachment,
+             H(0x45), wrong_parent_cs,
+             wrong_parent, &why));
 
     // One-coordinate transcript substitution cannot be made authoritative
     // by recomputing the compact retained-node handle.  The verifier rebuilds

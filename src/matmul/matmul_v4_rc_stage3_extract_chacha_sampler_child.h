@@ -170,6 +170,43 @@ struct ParentFinalizationV1 {
 };
 
 /**
+ * Witness-free reconstruction of the pre-R0 Extract component.  This is the
+ * consensus-verifier counterpart of DeterministicComponentV1: it carries the
+ * same public preprocessing and the same full/local column bijection, but no
+ * accumulator input or trace values.
+ */
+struct VerifierComponentV1 {
+    TileStatementV1 statement;
+    aq::AirConstraintSystem<gkr_field::Fp3> cs;
+    std::vector<uint32_t> deterministic_to_full_column;
+    std::vector<uint32_t> full_to_deterministic_column;
+    uint32_t full_relation_columns{0};
+    uint32_t full_relation_constraints{0};
+    bool every_preprocessed_column_in_r0{false};
+    bool challenge_columns_absent{false};
+    bool valid{false};
+    std::string note;
+};
+
+struct VerifierParentFinalizationV1 {
+    ProgramChallengeBindingV1 challenge_binding;
+    std::vector<uint32_t> full_local_to_parent_column;
+    std::array<CellV1, 32> output_cells{};
+    std::vector<CellV1> position_cells;
+    std::vector<std::array<CellV1, 64>> input_bit_cells;
+    uint32_t dependent_column_base{UINT32_MAX};
+    uint32_t dependent_columns{0};
+    uint32_t constraints_appended{0};
+    uint32_t canonical_constraints_relocated{0};
+    uint32_t native_constraints_mapped{0};
+    bool parent_owned_r0_consumed{false};
+    bool public_statement_rebuilt{false};
+    bool exact_six_challenge_order{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
  * Build the only form of the Extract relation which may enter a normalized
  * parent before that parent's single R0 commitment.
  */
@@ -196,6 +233,25 @@ struct ParentFinalizationV1 {
     aq::AirConstraintSystem<gkr_field::Fp3>& parent_cs,
     std::vector<std::vector<gkr_field::Fp3>>& parent_columns,
     ParentFinalizationV1& out,
+    std::string* why = nullptr);
+
+/** Rebuild the deterministic projection without private witness cells. */
+[[nodiscard]] bool BuildVerifierComponentV1(
+    const TileStatementV1& statement,
+    VerifierComponentV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Append the verifier's identical challenge-dependent CS to a frozen parent
+ * attachment.  No private input, deterministic columns, or host acceptance
+ * bit is accepted by this interface.
+ */
+[[nodiscard]] bool AppendVerifierRelationToParentV1(
+    const VerifierComponentV1& component,
+    const stage3_air_parent_composer::ChildAttachmentV1& attachment,
+    const uint256& parent_r0_root,
+    aq::AirConstraintSystem<gkr_field::Fp3>& parent_cs,
+    VerifierParentFinalizationV1& out,
     std::string* why = nullptr);
 
 [[nodiscard]] uint256 ComputeRetainedNodeCommitmentV1(
