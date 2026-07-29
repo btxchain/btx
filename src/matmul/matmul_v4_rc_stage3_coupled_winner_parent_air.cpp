@@ -590,13 +590,14 @@ bool CollectTerminalCellsV1(
     PushBinding(
         out, 7, TerminalKindV1::Count,
         EncodeCount(binding.barrier_links));
-    const std::array<uint256, 9> roots{
+    const std::array<uint256, 10> roots{
         binding.initial_state_binding,
         binding.scheduled_page_binding,
         binding.accumulation_binding,
         binding.stage_boundary_binding,
         binding.bank_hash_binding,
         binding.barrier_digest_binding,
+        binding.representative_cell_binding,
         binding.child_proof_family_binding,
         binding.product_commitment,
         children.extract.output_to_barrier

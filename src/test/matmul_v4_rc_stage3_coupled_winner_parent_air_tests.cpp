@@ -99,7 +99,8 @@ rc::RCStage3CoupledWinnerChildBindingV1 Binding()
     out.stage_boundary_binding = H(0x08);
     out.bank_hash_binding = H(0x09);
     out.barrier_digest_binding = H(0x0a);
-    out.child_proof_family_binding = H(0x0b);
+    out.representative_cell_binding = H(0x0b);
+    out.child_proof_family_binding = H(0x0c);
     out.product_commitment =
         rc::CommitRCStage3CoupledWinnerChildBindingV1(
             out);
@@ -311,7 +312,21 @@ BOOST_AUTO_TEST_CASE(
             honest_cells, &why),
         why);
     BOOST_CHECK_EQUAL(
-        honest_cells.size(), 41U);
+        honest_cells.size(), 42U);
+    BOOST_CHECK(
+        std::any_of(
+            honest_cells.begin(),
+            honest_cells.end(),
+            [](const auto& cell) {
+                return
+                    cell.family ==
+                        parent::TerminalFamilyV1::
+                            Binding &&
+                    cell.kind ==
+                        parent::TerminalKindV1::
+                            TerminalRoot &&
+                    cell.value == H(0x0b);
+            }));
     BOOST_CHECK(
         std::any_of(
             honest_cells.begin(),

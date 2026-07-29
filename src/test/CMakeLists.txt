@@ -160,6 +160,8 @@ add_executable(test_btx
   matmul_v4_rc_stage3_coupled_gemm_range_recursive_program_tests.cpp
   matmul_v4_rc_stage3_coupled_gemm_product_tests.cpp
   matmul_v4_rc_stage3_coupled_initial_state_product_tests.cpp
+  matmul_v4_rc_stage3_coupled_winner_child_binding_tests.cpp
+  matmul_v4_rc_stage3_coupled_winner_parent_air_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_composition_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_codec_tests.cpp
   matmul_v4_rc_stage3_bounded_semantic_binding_tests.cpp

@@ -669,6 +669,8 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_coupled_gemm_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_initial_state_product.cpp
   matmul/matmul_v4_rc_stage3_coupled_winner_capture.cpp
+  matmul/matmul_v4_rc_stage3_coupled_winner_child_binding.cpp
+  matmul/matmul_v4_rc_stage3_coupled_winner_parent_air.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_composition.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_codec.cpp
   matmul/matmul_v4_rc_stage3_bounded_semantic_binding.cpp
