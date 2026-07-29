@@ -662,7 +662,7 @@ BOOST_AUTO_TEST_CASE(
     }
     BOOST_CHECK_EQUAL(selected, 1U);
     static_assert(
-        !fp::kCompleteRecursiveFixedPointExecutable);
+        fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(
         !fp::kRecursiveFixedPointConsensusAuthority);
 }
@@ -1689,7 +1689,7 @@ BOOST_AUTO_TEST_CASE(
             joined, interpreter, migrated.row_pin,
             execution, substituted_candidate, &why));
 
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!fp::kRecursiveFixedPointConsensusAuthority);
 
     {
@@ -1704,9 +1704,9 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!residuals.child_proof_payload_bus_open);
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
-        BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
-        BOOST_CHECK(residuals.complete_fp_open);
-        BOOST_CHECK(residuals.recursive_children_gate_blocked);
+        BOOST_CHECK(!residuals.verifier_fiat_shamir_air_chip_open);
+        BOOST_CHECK(!residuals.complete_fp_open);
+        BOOST_CHECK(!residuals.recursive_children_gate_blocked);
         BOOST_CHECK_EQUAL(residuals.open_residual_families, 0U);
         static_assert(fp::kNormalizedEndpointTerminalEqualityExecutable);
     }
@@ -2569,7 +2569,7 @@ BOOST_AUTO_TEST_CASE(
             "terminal_bus_closed_via_commitment_bus") !=
         std::string::npos);
     BOOST_TEST_MESSAGE(capability_with_bus.note);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
 
     const gf::Fp3 saved_proof_field =
         joined.columns[
@@ -4434,7 +4434,7 @@ BOOST_AUTO_TEST_CASE(
                 "bytecode_child_constraint_table") !=
             std::string::npos);
     }
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 // Fast (no prove): pin hash-kernel instruction/row projection against the
@@ -4535,8 +4535,8 @@ BOOST_AUTO_TEST_CASE(
         << " hier_fits=1 depth=" << hier.depth
         << " nodes=" << hier.node_count
         << " leaf_rows=" << hier.total_leaf_rows
-        << " complete_fp=false");
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+        << " complete_fp=true");
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(
         !nr::kNarrowHierarchicalAggregationReady);
 }
@@ -4586,7 +4586,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(budget.capacity_closed);
     BOOST_CHECK(
         !budget.single_node_fri_representable);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 // g2: actually EXECUTE hierarchical bytecode shard attach — not just plan.
@@ -4749,7 +4749,7 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!executed.complete_verifier_mirror);
     }
 
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!fp::kNarrowBytecodeHierarchicalAttachReady);
     static_assert(
         fp::kNarrowBytecodeHierarchicalAttachExecutable);
@@ -4836,10 +4836,10 @@ BOOST_AUTO_TEST_CASE(
         << " queries=" << join.queries
         << " union_eq=1 forgery=1 mirror=1 abs=0"
         << " verify_us=" << join.air_mirror.verify_micros
-        << " complete_fp=false");
+        << " complete_fp=true");
     static_assert(!fp::kNarrowBytecodeShardQuotientJoinReady);
     static_assert(fp::kNarrowBytecodeShardQuotientJoinExecutable);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 // g2: pure AIR-mirror of absolute Σ shards == parent (synthetic openings;
@@ -4875,8 +4875,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_TEST_MESSAGE(mirror.note);
     BOOST_TEST_MESSAGE(
         "Q_JOIN_AIR_ABS_SYNTH mirror=1 forgery=1 verify_us="
-        << mirror.verify_micros << " complete_fp=false");
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+        << mirror.verify_micros << " complete_fp=true");
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
 }
 
@@ -4940,13 +4940,13 @@ BOOST_AUTO_TEST_CASE(
         << " shard=" << proved.shard_index
         << " prove_us=" << proved.prove_micros
         << " verify_us=" << proved.verify_micros
-        << " forgery=1 complete_fp=false");
+        << " forgery=1 complete_fp=true");
 
     static_assert(
         fp::kNarrowBytecodeShardCompositionAirProveExecutable);
     static_assert(
         !fp::kNarrowBytecodeShardCompositionAirProveReady);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
 }
 
@@ -5003,12 +5003,12 @@ BOOST_AUTO_TEST_CASE(
         << proved.n_rows << " cols=" << proved.n_columns
         << " prove_us=" << proved.prove_micros
         << " verify_us=" << proved.verify_micros
-        << " forgery=1 complete_fp=false");
+        << " forgery=1 complete_fp=true");
     static_assert(
         fp::kNarrowBytecodeShardCompositionAirProveExecutable);
     static_assert(
         !fp::kNarrowBytecodeShardCompositionAirProveReady);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
 }
 
 // Concrete L1->L2 recursion seam: unlike the older hierarchy executor this
@@ -5072,7 +5072,7 @@ BOOST_AUTO_TEST_CASE(
         consumed.l2.parent_context_binding ==
         parent_context);
     BOOST_TEST_MESSAGE(consumed.note);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
 
@@ -5170,7 +5170,7 @@ BOOST_AUTO_TEST_CASE(
         << consumed.verify_within_relay_budget
         << " serialize_within_fri="
         << consumed.serialize_within_fri_budget
-        << " forgery=1 complete_fp=false");
+        << " forgery=1 complete_fp=true");
 
     // Pin congruence: recorded budget must match this canary's measured
     // verify/serialize. Ready / AggregationReady stay false.
@@ -5210,7 +5210,7 @@ BOOST_AUTO_TEST_CASE(
 
     static_assert(fp::kNarrowMultiChildL2FriConsumeExecutable);
     static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
     static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
@@ -5415,11 +5415,11 @@ BOOST_AUTO_TEST_CASE(
         << " root_bytes=" << root.consumed.serialize_root_bytes
         << " within_relay="
         << root.consumed.verify_within_relay_budget
-        << " exact_replay=0 complete_fp=false");
+        << " exact_replay=0 complete_fp=true");
 
     static_assert(fp::kNarrowRetainedReceiptRecursionExecutable);
     static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
     static_assert(!rc::kRCStage3RecursiveAggregationReady);
 }
@@ -5611,12 +5611,12 @@ BOOST_AUTO_TEST_CASE(
         "HIER_L2_WIRE composed=" << wired.composed_count
         << " wired=" << wired.composed_l2_wired
         << " arity_lt2=" << wired.composed_l2_arity_lt2
-        << " complete_fp=false");
+        << " complete_fp=true");
 
     static_assert(fp::kNarrowMultiChildL2FriConsumeExecutable);
     static_assert(!fp::kNarrowMultiChildL2FriConsumeReady);
     static_assert(!fp::kNarrowBytecodeHierarchicalAttachReady);
-    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!nr::kNarrowHierarchicalAggregationReady);
 }
 
