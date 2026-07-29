@@ -52,13 +52,21 @@ inline constexpr uint32_t kDeepVmExtensionColumnsV1 =
     kDeepVmSsaScheduleColumnsV1 +
     kDeepVmRegisterAuxColumnsV1;
 inline constexpr uint32_t kDeepVmCanonicalConstraintsV1 =
-    kDeepVmNativeConstraintsV1 + 1 +
+    // One additional public-plan equation binds a Challenge instruction's
+    // ordinary operand cell to the verifier-owned challenge value carried in
+    // the immutable schedule.  The native DeepVM materializer already fills
+    // this value, but without the equation a recursive prover could
+    // substitute it after the child trace commitment.
+    kDeepVmNativeConstraintsV1 + 3 +
     kDeepVmRegisterBusLanesV1 *
         (kDeepVmRegisterBusSidesV1 *
              (kDeepVmRegisterHornerStagesV1 + 1) +
          3);
 inline constexpr uint32_t kDeepVmStatementScheduleColumnsV1 =
-    20 + kDeepVmSsaScheduleColumnsV1;
+    // V1 originally omitted op_challenge from the frozen opcode schedule.
+    // Challenge-bearing child programs therefore had no canonical public
+    // plan even though the native DeepVM already executed the opcode.
+    21 + kDeepVmSsaScheduleColumnsV1;
 inline constexpr uint32_t
     kParentJoinStatementScheduleColumnsV1 =
         3 +
@@ -610,6 +618,11 @@ struct DeepVmPublicPlanV1 {
     dvm::LayoutV1 layout{};
     cb::ProgramTable child_program{};
     alg_hash::Digest child_program_root{};
+    /** Verifier-owned child-relation challenges sampled after the child's
+     * R0 commitment.  They are never ordinary witness input: the canonical
+     * schedule places the selected value in a root-pinned column on each
+     * Challenge instruction row. */
+    std::vector<gf::Fp3> child_program_challenge;
     cb::ProgramTable program{};
     aq::AirConstraintSystem<gf::Fp3> cs{};
     std::vector<uint32_t> statement_manifest_columns;
@@ -629,6 +642,18 @@ struct DeepVmPublicPlanV1 {
 BuildDeepVmPublicPlanV1(
     const cb::ProgramTable& child_program,
     const alg_hash::Digest& expected_program_root,
+    const rv::QueryRangeV1& range);
+
+/** Challenge-bearing overload.  `child_program_challenge` must have exactly
+ * `child_program.challenge_width` entries.  The caller remains responsible
+ * for deriving those entries from the child's own R0 transcript; this API
+ * binds the resulting vector into the immutable DeepVM schedule and rejects
+ * every later substitution. */
+[[nodiscard]] DeepVmPublicPlanV1
+BuildDeepVmPublicPlanV1(
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const std::vector<gf::Fp3>& child_program_challenge,
     const rv::QueryRangeV1& range);
 
 /**

@@ -1106,6 +1106,8 @@ struct DeepVmPublicScheduleV1 {
 bool BuildDeepVmPublicScheduleV1(
     const dvm::LayoutV1& l,
     const cb::ProgramTable& child_program,
+    const std::vector<Fp3>&
+        child_program_challenge,
     const rv::QueryRangeV1& range,
     uint32_t phase_columns,
     DeepVmPublicScheduleV1& out,
@@ -1114,7 +1116,8 @@ bool BuildDeepVmPublicScheduleV1(
     out = {};
     if (!cb::ValidateProgramTable(
             child_program, why) ||
-        child_program.challenge_width != 0 ||
+        child_program.challenge_width !=
+            child_program_challenge.size() ||
         range.query_count == 0 ||
         range.first_query >
             abi::kQueryCountV11 ||
@@ -1165,15 +1168,6 @@ bool BuildDeepVmPublicScheduleV1(
                     cb::Opcode::Sub ||
                 instruction.opcode ==
                     cb::Opcode::Mul;
-            if (instruction.opcode ==
-                    cb::Opcode::Challenge) {
-                if (why != nullptr) {
-                    *why =
-                        "deep_vm_public_schedule_"
-                        "challenge_opcode";
-                }
-                return false;
-            }
             if (!binary) continue;
             if (instruction.lhs >= pc ||
                 instruction.rhs >= pc ||
@@ -1258,10 +1252,11 @@ bool BuildDeepVmPublicScheduleV1(
         add_manifest(l.deep_start);
     const size_t deep_chain =
         add_manifest(l.deep_chain);
-    const std::array<size_t, 6> opcode{{
+    const std::array<size_t, 7> opcode{{
         add_manifest(l.op_current),
         add_manifest(l.op_next),
         add_manifest(l.op_constant),
+        add_manifest(l.op_challenge),
         add_manifest(l.op_add),
         add_manifest(l.op_sub),
         add_manifest(l.op_mul),
@@ -1364,22 +1359,18 @@ bool BuildDeepVmPublicScheduleV1(
                 case cb::Opcode::Constant:
                     op_index = 2;
                     break;
-                case cb::Opcode::Add:
+                case cb::Opcode::Challenge:
                     op_index = 3;
                     break;
-                case cb::Opcode::Sub:
+                case cb::Opcode::Add:
                     op_index = 4;
                     break;
-                case cb::Opcode::Mul:
+                case cb::Opcode::Sub:
                     op_index = 5;
                     break;
-                case cb::Opcode::Challenge:
-                    if (why != nullptr) {
-                        *why =
-                            "deep_vm_public_schedule_"
-                            "challenge_opcode";
-                    }
-                    return false;
+                case cb::Opcode::Mul:
+                    op_index = 6;
+                    break;
                 }
                 out.columns[active].second[row] =
                     Fp3::One();
@@ -1417,7 +1408,11 @@ bool BuildDeepVmPublicScheduleV1(
                             instruction_index]);
                 out.columns[constant_value]
                     .second[row] =
-                    instruction.constant;
+                    instruction.opcode ==
+                            cb::Opcode::Challenge
+                        ? child_program_challenge[
+                              instruction.lhs]
+                        : instruction.constant;
                 out.columns[opcode[op_index]]
                     .second[row] =
                     Fp3::One();
@@ -3500,7 +3495,7 @@ cb::ProgramTable BuildDeepVmProgramTableV1(
                             e.Constant(one)));
                 });
         };
-    const std::array<uint32_t, 18>
+    const std::array<uint32_t, 19>
         boolean_columns{{
             l.active,
             l.deep_term,
@@ -3512,6 +3507,7 @@ cb::ProgramTable BuildDeepVmProgramTableV1(
             l.op_current,
             l.op_next,
             l.op_constant,
+            l.op_challenge,
             l.op_add,
             l.op_sub,
             l.op_mul,
@@ -3746,6 +3742,7 @@ cb::ProgramTable BuildDeepVmProgramTableV1(
                  {l.op_current,
                   l.op_next,
                   l.op_constant,
+                  l.op_challenge,
                   l.op_add,
                   l.op_sub,
                   l.op_mul}) {
@@ -3763,13 +3760,27 @@ cb::ProgramTable BuildDeepVmProgramTableV1(
                 e.Add(
                     e.Current(l.op_current),
                     e.Current(l.op_next)),
-                e.Current(l.op_constant));
+                e.Add(
+                    e.Current(l.op_constant),
+                    e.Current(l.op_challenge)));
             e.Mul(
                 load,
                 e.Sub(
                     e.Current(
                         l.instruction_result),
                     e.Current(l.operand_lhs)));
+        });
+    // A Challenge load has no child-proof tape source. Bind its ordinary
+    // operand cell to the verifier-owned value root-pinned in the immutable
+    // constant schedule at that exact instruction row.
+    AppendBytecodeProgramV1(
+        table, [=](BytecodeExprV1& e) {
+            e.Mul(
+                e.Current(l.op_challenge),
+                e.Sub(
+                    e.Current(l.operand_lhs),
+                    e.Current(
+                        ssa.constant_value)));
         });
     AppendBytecodeProgramV1(
         table, [=](BytecodeExprV1& e) {
@@ -4361,12 +4372,31 @@ BuildDeepVmPublicPlanV1(
     const alg_hash::Digest& expected_program_root,
     const rv::QueryRangeV1& range)
 {
+    static const std::vector<Fp3>
+        kNoChildProgramChallenge;
+    return BuildDeepVmPublicPlanV1(
+        child_program,
+        expected_program_root,
+        kNoChildProgramChallenge,
+        range);
+}
+
+DeepVmPublicPlanV1
+BuildDeepVmPublicPlanV1(
+    const cb::ProgramTable& child_program,
+    const alg_hash::Digest& expected_program_root,
+    const std::vector<Fp3>&
+        child_program_challenge,
+    const rv::QueryRangeV1& range)
+{
     DeepVmPublicPlanV1 out;
     out.range = range;
     out.layout = dvm::CanonicalLayoutV1();
     out.child_program = child_program;
     out.child_program_root =
         expected_program_root;
+    out.child_program_challenge =
+        child_program_challenge;
     out.program =
         BuildDeepVmProgramTableV1(
             out.layout);
@@ -4377,7 +4407,8 @@ BuildDeepVmPublicPlanV1(
     DeepVmPublicScheduleV1 schedule;
     if (!cb::ValidateProgramTable(
             child_program, &why) ||
-        child_program.challenge_width != 0 ||
+        child_program.challenge_width !=
+            child_program_challenge.size() ||
         !CanonicalDigest(
             expected_program_root) ||
         !DigestNonzero(
@@ -4397,6 +4428,7 @@ BuildDeepVmPublicPlanV1(
         !BuildDeepVmPublicScheduleV1(
             out.layout,
             child_program,
+            child_program_challenge,
             range,
             out.program.current_width,
             schedule,
@@ -4504,6 +4536,7 @@ MaterializeDeepVmCanonicalPhaseV1(
         BuildDeepVmPublicPlanV1(
             plan.child_program,
             plan.child_program_root,
+            plan.child_program_challenge,
             plan.range);
     const auto same_fp3 =
         [](const std::vector<Fp3>& left,
@@ -4566,6 +4599,9 @@ MaterializeDeepVmCanonicalPhaseV1(
         plan.range != rebuilt.range ||
         plan.child_program !=
             rebuilt.child_program ||
+        !same_fp3(
+            plan.child_program_challenge,
+            rebuilt.child_program_challenge) ||
         !SameDigest(
             plan.child_program_root,
             rebuilt.child_program_root) ||
@@ -4604,6 +4640,9 @@ MaterializeDeepVmCanonicalPhaseV1(
         !SameDigest(
             deep.program_root,
             plan.child_program_root) ||
+        !same_fp3(
+            deep.program_challenge,
+            plan.child_program_challenge) ||
         BuildDeepVmProgramTableV1(
             deep.layout) !=
             plan.program) {

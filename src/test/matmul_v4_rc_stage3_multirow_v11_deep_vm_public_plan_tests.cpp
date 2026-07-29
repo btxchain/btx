@@ -189,6 +189,75 @@ dvm::ProductV1 BuildDeep(
     return out;
 }
 
+cb::ProgramTable ChallengeChildProgram()
+{
+    cb::Program relation;
+    relation.version =
+        cb::kConstraintBytecodeScalarChallengeVersion;
+    relation.role =
+        rc::RCStage3RelationRole::EpisodeExtract;
+    relation.kind =
+        aq::AirKind::kEverywhere;
+    relation.declared_degree = 1;
+    relation.current_width = 2;
+    relation.next_width = 2;
+    relation.challenge_width = 1;
+    relation.instructions = {
+        Load(cb::Opcode::Current, 1),
+        Load(cb::Opcode::Challenge, 0),
+        Binary(cb::Opcode::Sub, 0, 1),
+    };
+
+    cb::ProgramTable out;
+    out.version =
+        cb::kConstraintBytecodeScalarChallengeVersion;
+    out.role = relation.role;
+    out.current_width = 2;
+    out.next_width = 2;
+    out.challenge_width = 1;
+    out.programs = {relation};
+    return out;
+}
+
+dvm::ProductV1 BuildChallengeDeep(
+    const cb::ProgramTable& child,
+    const alg_hash::Digest& root,
+    const std::vector<Fp3>& program_challenge)
+{
+    aq::AirConstraintSystem<Fp3> child_cs;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            child, 1024, program_challenge,
+            child_cs, &why),
+        why);
+    std::vector<std::vector<Fp3>> trace(
+        2, std::vector<Fp3>(
+               child_cs.n_rows, Fp3::Zero()));
+    std::fill(
+        trace[1].begin(), trace[1].end(),
+        program_challenge[0]);
+    const auto proved =
+        backend::ProveAirQuotientV1(
+            child_cs, trace, {0},
+            Seed(91));
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok, proved.note);
+    tp::ReceiptV1 receipt;
+    BOOST_REQUIRE_MESSAGE(
+        backend::VerifyV1(
+            proved.proximity.proof,
+            &receipt, &why),
+        why);
+    auto out = dvm::BuildProductV1(
+        proved.proximity.proof,
+        receipt, child, root,
+        program_challenge, 0, 1);
+    BOOST_REQUIRE_MESSAGE(
+        out.valid, out.note);
+    return out;
+}
+
 bool SameFp3(
     const std::vector<Fp3>& left,
     const std::vector<Fp3>& right)
@@ -369,6 +438,78 @@ BOOST_AUTO_TEST_CASE(
         !uv::MaterializeDeepVmCanonicalPhaseV1(
              plan_a,
              proof_root_substitution).valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    challenge_bearing_child_plan_binds_value_and_rejects_substitution)
+{
+    const cb::ProgramTable child =
+        ChallengeChildProgram();
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::ValidateProgramTable(child, &why),
+        why);
+    BOOST_CHECK(
+        cb::ProgramTableIsChallengeIndependent(
+            child));
+    const alg_hash::Digest root =
+        cb::CommitProgramTableAlgHash(child);
+    const rv::QueryRangeV1 range{0, 0, 1};
+    const std::vector<Fp3> honest_challenge{
+        gf::FromU64_3(17)};
+    const std::vector<Fp3> substituted_challenge{
+        gf::FromU64_3(19)};
+
+    const dvm::ProductV1 deep =
+        BuildChallengeDeep(
+            child, root, honest_challenge);
+    const uv::DeepVmPublicPlanV1 honest =
+        uv::BuildDeepVmPublicPlanV1(
+            child, root,
+            honest_challenge, range);
+    BOOST_REQUIRE_MESSAGE(
+        honest.valid, honest.note);
+    BOOST_CHECK(
+        SameFp3(
+            honest.child_program_challenge,
+            honest_challenge));
+    const auto materialized =
+        uv::MaterializeDeepVmCanonicalPhaseV1(
+            honest, deep);
+    BOOST_REQUIRE_MESSAGE(
+        materialized.valid,
+        materialized.note);
+
+    // The selected challenge is in the root-pinned immutable schedule.  A
+    // public challenge change leaves the canonical child ProgramTable root
+    // unchanged but necessarily changes the parent statement schedule.
+    const uv::DeepVmPublicPlanV1 substituted =
+        uv::BuildDeepVmPublicPlanV1(
+            child, root,
+            substituted_challenge, range);
+    BOOST_REQUIRE_MESSAGE(
+        substituted.valid,
+        substituted.note);
+    BOOST_CHECK(
+        honest.child_program_root ==
+        substituted.child_program_root);
+    BOOST_CHECK(
+        honest.statement_schedule_root !=
+        substituted.statement_schedule_root);
+    BOOST_CHECK(
+        !uv::MaterializeDeepVmCanonicalPhaseV1(
+             substituted, deep).valid);
+
+    // Reusing the honest schedule root while replacing only the advertised
+    // value is also rejected by public-plan reconstruction.
+    auto unbound_substitution = honest;
+    unbound_substitution
+        .child_program_challenge[0] =
+        substituted_challenge[0];
+    BOOST_CHECK(
+        !uv::MaterializeDeepVmCanonicalPhaseV1(
+             unbound_substitution,
+             deep).valid);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
