@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <functional>
 #include <set>
 #include <string_view>
@@ -715,6 +716,140 @@ BOOST_AUTO_TEST_CASE(
         Fp3::One(), forged_side[shard.fold_layout.side][0]);
     BOOST_CHECK_GT(
         RecountViolationsV1(shard.fold_cs, forged_side), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    native_safe_v13_shard_uses_native_replay_not_v11_receipt)
+{
+    if (std::getenv(
+            "BTX_RUN_NATIVE_SAFE_V13_SHARD") ==
+        nullptr) {
+        return;
+    }
+    constexpr uint32_t rows = 8;
+    const uint256 seed = FixedRoot(0x91);
+    std::vector<std::vector<Fp3>> columns(
+        4, std::vector<Fp3>(
+               rows, Fp3::Zero()));
+    for (uint32_t row = 0; row < rows; ++row) {
+        columns[0][row] =
+            Fp3::FromFp(
+                gf::FromU64(
+                    3 + 2 * row +
+                    row * row));
+        columns[1][row] =
+            Fp3::FromFp(
+                gf::FromU64(7 + 5 * row));
+    }
+    const auto make_cs =
+        [](const Fp3& challenge) {
+            aq::AirConstraintSystem<Fp3> cs;
+            cs.n_rows = rows;
+            cs.n_columns = 4;
+            cs.constraints.push_back({
+                "test.safe_v13_shard.relation",
+                aq::AirKind::kEverywhere, 1,
+                [challenge](
+                    const auto& cur,
+                    const auto&) {
+                    return gf::Sub(
+                        cur[2],
+                        gf::Add(
+                            cur[0],
+                            gf::Mul(
+                                challenge,
+                                cur[1])));
+                }});
+            cs.constraints.push_back({
+                "test.safe_v13_shard.next",
+                aq::AirKind::kTransition, 1,
+                [](const auto& cur,
+                   const auto& next) {
+                    return gf::Sub(
+                        next[3],
+                        gf::Add(
+                            cur[3], cur[2]));
+                }});
+            return cs;
+        };
+    const std::vector<uint32_t>
+        base_indices{0, 1};
+    const auto shape_cs =
+        make_cs(Fp3::Zero());
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            shape_cs, columns,
+            base_indices);
+    BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+    const uint256 relation_digest =
+        aq::AirChallengeDigest(
+            seed,
+            "test.safe_v13_shard.relation",
+            {r0.base_row_commitment},
+            {rows, 4});
+    const Fp3 challenge =
+        gf::FromChallengeBytes3(
+            relation_digest.data());
+    auto cs = make_cs(challenge);
+    for (uint32_t row = 0; row < rows; ++row) {
+        columns[2][row] =
+            gf::Add(
+                columns[0][row],
+                gf::Mul(
+                    challenge,
+                    columns[1][row]));
+        if (row + 1 < rows) {
+            columns[3][row + 1] =
+                gf::Add(
+                    columns[3][row],
+                    columns[2][row]);
+        }
+    }
+    cs.preprocessed.emplace_back(
+        1, columns[1]);
+    cs.preprocessed_pin_ood = true;
+    cs.preprocessed_row_group_roots.push_back({
+        .version = 1,
+        .role =
+            aq::AirPreprocessedRowGroupRole::kR0,
+        .ordered_columns = base_indices,
+        .root = r0.base_row_commitment,
+    });
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            cs, columns, base_indices,
+            seed, {}, &r0);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok, proved.note);
+
+    const auto shard =
+        BuildShardSafeV13(
+            cs, proved.proof,
+            base_indices, seed, 0, 1);
+    BOOST_REQUIRE_MESSAGE(
+        shard.valid, shard.note);
+    BOOST_CHECK(
+        shard.transcript_receipt_verified);
+    BOOST_CHECK(
+        shard.current_group_paths_verified);
+    BOOST_CHECK(
+        shard.next_group_paths_verified);
+    BOOST_CHECK(
+        shard.fold_paths_verified);
+
+    auto tampered = proved.proof;
+    BOOST_REQUIRE(
+        !tampered.batch.queries.empty());
+    tampered.batch.queries[0].index ^=
+        tampered.batch.blowup;
+    const auto rejected =
+        BuildShardSafeV13(
+            cs, tampered, base_indices,
+            seed, 0, 1);
+    BOOST_CHECK(!rejected.valid);
+    BOOST_CHECK(
+        rejected.note.find("native_verify") !=
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(

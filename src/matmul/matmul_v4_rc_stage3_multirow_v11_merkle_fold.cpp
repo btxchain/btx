@@ -363,9 +363,37 @@ struct RangeAudit {
     std::vector<FoldWitness> folds;
 };
 
+struct TranscriptAuthority {
+    std::vector<Fp3> fold_challenges;
+    std::vector<uint32_t> query_indices;
+    bool verified{false};
+    std::string note;
+};
+
+TranscriptAuthority LegacyTranscriptAuthority(
+    const abi::DecodedV1& decoded,
+    const tp::ReceiptV1& transcript)
+{
+    TranscriptAuthority out;
+    const tp::StatementV1 statement =
+        StatementFrom(decoded);
+    out.verified =
+        tp::VerifyReceiptV1(
+            statement, transcript, &out.note);
+    if (!out.verified) return out;
+    out.fold_challenges =
+        transcript.fold_challenges;
+    out.query_indices.reserve(
+        transcript.queries.size());
+    for (const auto& query : transcript.queries) {
+        out.query_indices.push_back(query.index);
+    }
+    return out;
+}
+
 RangeAudit AuditRange(
     const abi::DecodedV1& decoded,
-    const tp::ReceiptV1& transcript,
+    const TranscriptAuthority& transcript,
     uint32_t first_query,
     uint32_t query_count,
     bool retain)
@@ -394,12 +422,10 @@ RangeAudit AuditRange(
         return fail("range_or_shape");
     }
 
-    const tp::StatementV1 statement = StatementFrom(decoded);
-    std::string transcript_why;
     out.audit.transcript_receipt_verified =
-        tp::VerifyReceiptV1(statement, transcript, &transcript_why);
+        transcript.verified;
     if (!out.audit.transcript_receipt_verified) {
-        return fail("transcript:" + transcript_why);
+        return fail("transcript:" + transcript.note);
     }
     if (transcript.fold_challenges.size() != batch.fold_challenges.size()) {
         return fail("fold_challenge_count");
@@ -499,7 +525,8 @@ RangeAudit AuditRange(
 
     for (uint32_t q = first_query; q < first_query + query_count; ++q) {
         const auto& query = batch.queries[q];
-        if (query.index != transcript.queries[q].index) {
+        if (q >= transcript.query_indices.size() ||
+            query.index != transcript.query_indices[q]) {
             out.audit.query_indices_transcript_bound = false;
             return fail("query_index_not_transcript");
         }
@@ -875,8 +902,12 @@ NativeAuditV1 AuditAllV1(
     const abi::DecodedV1& decoded,
     const tp::ReceiptV1& transcript)
 {
+    const TranscriptAuthority authority =
+        LegacyTranscriptAuthority(
+            decoded, transcript);
     auto audit = AuditRange(
-        decoded, transcript, 0, kProductionQueriesV1, false).audit;
+        decoded, authority, 0,
+        kProductionQueriesV1, false).audit;
     std::set<uint32_t> indices;
     for (const auto& query : decoded.envelope.split.batch.queries) {
         if (!indices.insert(query.index).second) {
@@ -915,9 +946,9 @@ NativeAuditV1 AuditAllV1(
     return AuditAllV1(*decoded, transcript);
 }
 
-ShardProductV1 BuildShardV1(
+static ShardProductV1 BuildShardWithAuthority(
     const abi::DecodedV1& decoded,
-    const tp::ReceiptV1& transcript,
+    const TranscriptAuthority& authority,
     uint32_t first_query,
     uint32_t query_count)
 {
@@ -925,7 +956,9 @@ ShardProductV1 BuildShardV1(
     out.first_query = first_query;
     out.query_count = query_count;
     auto range =
-        AuditRange(decoded, transcript, first_query, query_count, true);
+        AuditRange(
+            decoded, authority,
+            first_query, query_count, true);
     const auto& audit = range.audit;
     out.canonical_abi = audit.canonical_abi;
     out.transcript_receipt_verified =
@@ -1241,6 +1274,19 @@ ShardProductV1 BuildShardV1(
 }
 
 ShardProductV1 BuildShardV1(
+    const abi::DecodedV1& decoded,
+    const tp::ReceiptV1& transcript,
+    uint32_t first_query,
+    uint32_t query_count)
+{
+    return BuildShardWithAuthority(
+        decoded,
+        LegacyTranscriptAuthority(
+            decoded, transcript),
+        first_query, query_count);
+}
+
+ShardProductV1 BuildShardV1(
     const backend::ProofV1& proof,
     const tp::ReceiptV1& transcript,
     uint32_t first_query,
@@ -1258,6 +1304,97 @@ ShardProductV1 BuildShardV1(
     }
     return BuildShardV1(
         *decoded, transcript, first_query, query_count);
+}
+
+ShardProductV1 BuildShardSafeV13(
+    const aq::AirConstraintSystem<Fp3>& expected_cs,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>&
+        expected_base_column_indices,
+    const uint256& public_fs_seed,
+    uint32_t first_query,
+    uint32_t query_count)
+{
+    ShardProductV1 failed;
+    failed.first_query = first_query;
+    failed.query_count = query_count;
+    const auto fail =
+        [&failed](const std::string& reason) {
+            failed.note =
+                "stage3:multirow_v11_merkle_fold:"
+                "safe_v13:" + reason;
+            return failed;
+        };
+    if (public_fs_seed.IsNull() ||
+        expected_cs.n_rows != proof.trace_rows ||
+        expected_cs.n_columns == 0) {
+        return fail("public_shape");
+    }
+
+    aq::AirQuotientSplitRapSafeReplayV2 replay;
+    std::string why;
+    if (!aq::AirQuotientVerifyRowsSplitRapSafeV2Replay(
+            expected_cs, proof,
+            expected_base_column_indices,
+            public_fs_seed, replay, &why) ||
+        !replay.native_verified) {
+        return fail("native_verify:" + why);
+    }
+
+    abi::EnvelopeV1 envelope;
+    for (uint32_t word = 0;
+         word < envelope.public_fs_seed.size();
+         ++word) {
+        uint32_t value = 0;
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            value |=
+                uint32_t{
+                    public_fs_seed.begin()[
+                        4 * word + byte]}
+                << (8 * byte);
+        }
+        envelope.public_fs_seed[word] = value;
+    }
+    envelope.trace_columns =
+        expected_cs.n_columns;
+    envelope.quotient_len =
+        expected_cs.QuotientLen();
+    envelope.split = proof;
+    std::vector<uint32_t> words;
+    if (!abi::EncodeCanonicalSafeV13(
+            envelope, words, nullptr, &why)) {
+        return fail("encode:" + why);
+    }
+    const auto decoded =
+        abi::DecodeCanonicalSafeV13(
+            words, &why);
+    if (!decoded.has_value()) {
+        return fail("decode:" + why);
+    }
+
+    TranscriptAuthority authority;
+    authority.verified = replay.native_verified;
+    authority.note =
+        "native_safe_v13_replay";
+    authority.fold_challenges =
+        proof.batch.fold_challenges;
+    authority.query_indices.reserve(
+        proof.batch.queries.size());
+    for (const auto& query : proof.batch.queries) {
+        authority.query_indices.push_back(
+            query.index);
+    }
+    ShardProductV1 out =
+        BuildShardWithAuthority(
+            *decoded, authority,
+            first_query, query_count);
+    if (out.valid) {
+        out.note =
+            "stage3:multirow_v11_merkle_fold:"
+            "native_safe_v13_bounded_shard;"
+            "decoder_deep_vm_joins_pending";
+    }
+    return out;
 }
 
 uint64_t RecountViolationsV1(
