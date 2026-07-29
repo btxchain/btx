@@ -171,6 +171,46 @@ bool StreamingLayerTerminalOk(
         !expected_root.IsNull();
 }
 
+/**
+ * Structural premises Assess/VerifyCertificate need to bind parent role-export
+ * joins to a streaming receipt.  Full FRI replay stays on Attach /
+ * VerifyStreamingEpisodeClosureReceiptV1 at ingress; Assess must remain fast
+ * and fixture-capable without a multi-hour mine.
+ */
+bool StreamingReceiptRoleExportPremisesV1(
+    const streaming::StreamingEpisodeClosureReceiptV1& receipt,
+    std::string* why)
+{
+    if (receipt.version != streaming::kReceiptVersionV1 ||
+        receipt.production_authority ||
+        !receipt.every_gemm_child_verified ||
+        receipt.extract_role_children_consumed ||
+        receipt.normalized_parent_consumed ||
+        receipt.layers.empty() ||
+        receipt.receipt_commitment.IsNull() ||
+        receipt.receipt_commitment !=
+            streaming::
+                ComputeStreamingEpisodeClosureReceiptCommitmentV1(
+                    receipt)) {
+        return Fail(why, "receipt_role_export_premises");
+    }
+    for (const auto& layer : receipt.layers) {
+        const std::array<uint256, 3> roots = {
+            layer.closure.operand_a_vector_root_alg,
+            layer.closure.operand_b_vector_root_alg,
+            layer.closure.output_y_vector_root_alg,
+        };
+        for (const auto& root : roots) {
+            if (!StreamingLayerTerminalOk(layer, root)) {
+                return Fail(
+                    why,
+                    "receipt_role_export_layer_terminal");
+            }
+        }
+    }
+    return true;
+}
+
 bool AppendTerminalJoin(
     AirCS& parent_cs,
     std::vector<std::vector<gf::Fp3>>& parent_columns,
@@ -495,10 +535,8 @@ bool VerifyParentRoleExportEqualityCertificateV1(
     std::string* why)
 {
     std::string verify_why;
-    if (!streaming::VerifyStreamingEpisodeClosureReceiptV1(
-            receipt, &verify_why) ||
-        receipt.production_authority ||
-        !receipt.every_gemm_child_verified) {
+    if (!StreamingReceiptRoleExportPremisesV1(
+            receipt, &verify_why)) {
         return Fail(
             why,
             "verify_certificate_receipt_invalid:" +
@@ -584,10 +622,10 @@ AssessmentV1 AssessStreamingRoleExportEqualityV1(
         static_cast<uint32_t>(receipt->layers.size());
 
     std::string verify_why;
-    if (!streaming::VerifyStreamingEpisodeClosureReceiptV1(
-            *receipt, &verify_why) ||
-        receipt->production_authority ||
-        !receipt->every_gemm_child_verified) {
+    // Assess binds certificate joins to receipt commitments + terminal flags.
+    // Full FRI replay remains on Attach/VerifyStreamingEpisodeClosureReceiptV1.
+    if (!StreamingReceiptRoleExportPremisesV1(
+            *receipt, &verify_why)) {
         out.residuals.push_back(
             "streaming_episode_closure_receipt_invalid:" +
             verify_why);

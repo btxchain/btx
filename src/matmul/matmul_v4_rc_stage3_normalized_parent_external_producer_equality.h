@@ -169,7 +169,9 @@ ComputeParentRoleExportEqualityCertificateCommitmentV1(
 
 /**
  * Recompute the certificate commitment and require every required terminal to
- * be roots-equal + same-parent aliased against the supplied receipt.
+ * be roots-equal + same-parent aliased against the supplied receipt.  Uses
+ * structural streaming role-export premises (commitment + terminal flags);
+ * full FRI replay remains on Attach / VerifyStreamingEpisodeClosureReceiptV1.
  */
 [[nodiscard]] bool VerifyParentRoleExportEqualityCertificateV1(
     const streaming::StreamingEpisodeClosureReceiptV1& receipt,
@@ -177,9 +179,11 @@ ComputeParentRoleExportEqualityCertificateCommitmentV1(
     std::string* why = nullptr);
 
 /**
- * Assess streaming ingress plus the optional parent-owned role-export
- * certificate.  Without a verified certificate, role-export stays open even
- * when every streaming child verifies.  Never flips Ready / authority flags.
+ * Assess streaming role-export premises plus the optional parent-owned
+ * certificate.  Structural receipt premises (commitment + A/B/Y terminal
+ * flags) gate streaming_verified; without a verified certificate, role-export
+ * stays open.  Never flips Ready / authority flags.  Full FRI replay is not
+ * re-run here so CI fixtures can close equality_complete without mining.
  */
 [[nodiscard]] AssessmentV1 AssessStreamingRoleExportEqualityV1(
     const streaming::StreamingEpisodeClosureReceiptV1* receipt,

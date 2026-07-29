@@ -10,12 +10,13 @@
 #include <matmul/matmul_v4_rc_stage3_episode_external_producer_aggregate.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_parent_external_producer_equality.h>
 #include <matmul/matmul_v4_rc_stage3_streaming_episode_closure.h>
-#include <primitives/block.h>
 
 #include <test/util/setup_common.h>
 
 #include <algorithm>
-#include <cstdlib>
+#include <array>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -23,6 +24,8 @@ namespace eq =
     matmul::v4::rc::normalized_parent_external_producer_equality;
 namespace streaming =
     matmul::v4::rc::streaming_episode_closure;
+namespace aggregate =
+    matmul::v4::rc::episode_external_producer_aggregate;
 namespace gf = matmul::v4::rc::gkr_field;
 namespace rc = matmul::v4::rc;
 namespace aq = matmul::v4::rc::air_quotient;
@@ -36,50 +39,90 @@ uint256 H(unsigned char tag)
     return out;
 }
 
-rc::RCEpisodeParams TinyParams()
-{
-    rc::RCEpisodeParams out;
-    out.rounds = 1;
-    out.d_head = 32;
-    out.n_q = 32;
-    out.n_ctx = 32;
-    out.L_lyr = 1;
-    out.d_model = 32;
-    out.d_ff = 32;
-    out.b_seq = 32;
-    out.T_leaf = 64;
-    return out;
-}
-
-rc::RCStage3SuccinctProof Statement()
-{
-    rc::RCStage3SuccinctProof out;
-    out.statement = rc::RCStage3StatementKind::Episode;
-    out.public_inputs.height = 151;
-    out.public_inputs.n_bits = 0x207fffffU;
-    out.public_inputs.episode_profile = 2;
-    out.public_inputs.coupled_profile = 3;
-    out.public_inputs.transcript_version = rc::ENC_RC_V3;
-    out.public_inputs.program_consensus_pin.version = 1;
-    out.public_inputs.program_consensus_pin
-        .recursive_alg_hash_root = H(0x11);
-    out.public_inputs.program_consensus_pin
-        .external_sha256d_audit_root = H(0x12);
-    out.public_inputs.program_consensus_pin
-        .registry_binding = H(0x13);
-    out.public_inputs.header_commitment = H(0x21);
-    out.public_inputs.params_commitment = H(0x22);
-    out.public_inputs.target = H(0x23);
-    out.public_inputs.sigma = H(0x24);
-    return out;
-}
-
 void EmptyParent(AirCS& cs, std::vector<std::vector<gf::Fp3>>& columns)
 {
     cs = {};
     cs.n_rows = 2;
     cs.n_columns = 0;
     columns.clear();
+}
+
+/**
+ * Deterministic streaming receipt whose structural role-export premises hold
+ * (commitment + A/B/Y terminal flags) without mining or FRI replay.
+ */
+streaming::StreamingEpisodeClosureReceiptV1
+SyntheticStreamingReceiptFixtureV1()
+{
+    streaming::StreamingEpisodeClosureReceiptV1 receipt;
+    receipt.schedule.statement_commitment = H(0x81);
+    receipt.schedule.schedule_commitment = H(0x82);
+
+    streaming::StreamedLayerClosureV1 layer;
+    layer.layer_ordinal = 0;
+    layer.shape.layer_ordinal = 0;
+    layer.shape.shape_commitment = H(0x83);
+    layer.consumer_leaf_begin = 0;
+    layer.consumer_bundle.bundle_commitment = H(0x84);
+    layer.closure.version = aggregate::kVersionV1;
+    layer.closure.layer_ordinal = 0;
+    layer.closure.operand_a_vector_root_alg = H(0xa1);
+    layer.closure.operand_b_vector_root_alg = H(0xb2);
+    layer.closure.output_y_vector_root_alg = H(0xc3);
+    layer.closure.closure_commitment = H(0x85);
+    layer.closure.proof_owned_terminal_cancellation = true;
+    layer.closure.all_children_proof_verified = true;
+    layer.closure.role_export_equality_constrained = false;
+    layer.closure.production_authority = false;
+    layer.extract_prf = H(0x86);
+    layer.gemm_y_vector_root_alg =
+        layer.closure.output_y_vector_root_alg;
+    layer.extract_role_proof_consumed = false;
+    layer.production_authority = false;
+    layer.retained_commitment =
+        streaming::ComputeStreamedLayerClosureCommitmentV1(
+            layer);
+    BOOST_REQUIRE(!layer.retained_commitment.IsNull());
+
+    receipt.layers.push_back(std::move(layer));
+    receipt.round_roots = {H(0x91)};
+    receipt.episode_digest = H(0x92);
+    receipt.every_gemm_child_verified = true;
+    receipt.extract_role_children_consumed = false;
+    receipt.normalized_parent_consumed = false;
+    receipt.production_authority = false;
+    receipt.receipt_commitment =
+        streaming::
+            ComputeStreamingEpisodeClosureReceiptCommitmentV1(
+                receipt);
+    BOOST_REQUIRE(!receipt.receipt_commitment.IsNull());
+    return receipt;
+}
+
+std::vector<eq::ParentExportPinV1> PinsFromReceipt(
+    const streaming::StreamingEpisodeClosureReceiptV1& receipt)
+{
+    std::vector<eq::ParentExportPinV1> pins;
+    for (const auto& layer : receipt.layers) {
+        const std::array<
+            std::pair<eq::TerminalKindV1, uint256>, 3>
+            terminals = {{
+                {eq::TerminalKindV1::OperandA,
+                 layer.closure.operand_a_vector_root_alg},
+                {eq::TerminalKindV1::OperandB,
+                 layer.closure.operand_b_vector_root_alg},
+                {eq::TerminalKindV1::OutputY,
+                 layer.closure.output_y_vector_root_alg},
+            }};
+        for (const auto& [kind, root] : terminals) {
+            eq::ParentExportPinV1 pin;
+            pin.kind = kind;
+            pin.layer_ordinal = layer.layer_ordinal;
+            pin.export_vector_root_alg = root;
+            pins.push_back(pin);
+        }
+    }
+    return pins;
 }
 
 } // namespace
@@ -208,8 +251,7 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     production_authority_receipt_shape_rejected_fail_closed)
 {
-    streaming::StreamingEpisodeClosureReceiptV1 receipt;
-    receipt.every_gemm_child_verified = true;
+    auto receipt = SyntheticStreamingReceiptFixtureV1();
     receipt.production_authority = true;
     receipt.receipt_commitment =
         streaming::
@@ -238,8 +280,7 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     commitment_mismatch_receipt_keeps_equality_open)
 {
-    streaming::StreamingEpisodeClosureReceiptV1 receipt;
-    receipt.every_gemm_child_verified = true;
+    auto receipt = SyntheticStreamingReceiptFixtureV1();
     receipt.receipt_commitment = H(0xaa);
 
     std::string why;
@@ -324,74 +365,41 @@ BOOST_AUTO_TEST_CASE(
 {
     // Streaming local closures intentionally keep
     // role_export_equality_constrained=false.  Without a parent certificate the
-    // assessor must not claim equality complete.
-    streaming::StreamingEpisodeClosureReceiptV1 receipt;
-    receipt.every_gemm_child_verified = true;
-    receipt.receipt_commitment =
-        streaming::
-            ComputeStreamingEpisodeClosureReceiptCommitmentV1(
-                receipt);
+    // assessor must not claim equality complete even when structural premises
+    // hold.
+    const auto receipt = SyntheticStreamingReceiptFixtureV1();
     std::string why;
     const auto assessment =
         eq::AssessStreamingRoleExportEqualityV1(
             &receipt, nullptr, &why);
+    BOOST_CHECK(assessment.streaming_receipt_verified);
+    BOOST_CHECK(assessment.all_streaming_children_verified);
     BOOST_CHECK(
         !assessment
              .external_producer_terminal_equality_complete);
     BOOST_CHECK(!assessment.parent_certificate_verified);
+    BOOST_CHECK(
+        !assessment.all_role_export_equality_constrained);
 }
 
 BOOST_AUTO_TEST_CASE(
-    real_streaming_receipt_parent_attach_makes_equality_complete)
+    fixture_streaming_receipt_parent_attach_makes_equality_complete)
 {
-    if (std::getenv(
-            "BTX_RUN_STAGE3_PARENT_ROLE_EXPORT_EQUALITY") ==
-        nullptr) {
-        BOOST_TEST_MESSAGE(
-            "set BTX_RUN_STAGE3_PARENT_ROLE_EXPORT_EQUALITY=1 "
-            "for mine→streaming-receipt→parent-attach→assess "
-            "complete");
-        return;
-    }
-
-    const auto statement = Statement();
-    const auto params = TinyParams();
-    CBlockHeader header;
-    header.nVersion = 1;
-    header.hashPrevBlock = H(0x51);
-    header.hashMerkleRoot = H(0x52);
-    header.nTime = 1700000000U;
-    header.nBits = 0x207fffffU;
-    header.nNonce = 7;
-
-    streaming::StreamingEpisodeClosureSink sink(
-        statement, params);
-    const uint256 digest =
-        rc::MineRCEpisodeWithProofWitness(
-            header, params, 151, sink);
-    BOOST_REQUIRE(!digest.IsNull());
-    std::string why;
-    BOOST_REQUIRE_MESSAGE(sink.Complete(&why), why);
-    streaming::StreamingEpisodeClosureReceiptV1 receipt;
-    BOOST_REQUIRE_MESSAGE(
-        sink.BuildReceipt(receipt, &why), why);
-
-    std::vector<eq::ParentExportPinV1> pins;
-    BOOST_REQUIRE_MESSAGE(
-        eq::BuildHostedExportPinsFromStreamingReceiptV1(
-            receipt, pins, &why),
-        why);
-    BOOST_REQUIRE_EQUAL(
-        pins.size(), receipt.layers.size() * 3U);
+    // Always-on CI fixture: synthetic streaming receipt (structural premises)
+    // + parent Attach certificate ⇒ equality_complete without mining.
+    const auto receipt = SyntheticStreamingReceiptFixtureV1();
+    const auto pins = PinsFromReceipt(receipt);
+    BOOST_REQUIRE_EQUAL(pins.size(), 3U);
 
     AirCS cs;
     std::vector<std::vector<gf::Fp3>> columns;
     EmptyParent(cs, columns);
     eq::ParentRoleExportEqualityCertificateV1 certificate;
+    std::string why;
     BOOST_REQUIRE_MESSAGE(
-        eq::AttachParentRoleExportEqualityV1(
-            cs, columns, receipt, pins, certificate,
-            &why),
+        eq::AttachParentRoleExportEqualityTerminalsV1(
+            cs, columns, receipt.receipt_commitment, pins,
+            pins, certificate, &why),
         why);
     BOOST_REQUIRE_MESSAGE(
         eq::VerifyParentRoleExportEqualityCertificateV1(
@@ -412,6 +420,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         assessment.terminals_role_export_joined,
         assessment.terminals_required);
+    BOOST_CHECK_EQUAL(assessment.terminals_required, 3U);
     BOOST_CHECK(
         why.find("all_terminals_joined") !=
         std::string::npos);
@@ -421,7 +430,7 @@ BOOST_AUTO_TEST_CASE(
         0U);
 
     // Streaming local verifier must still reject a forged parent-attachment
-    // claim on the layer closure itself.
+    // claim on the layer closure itself (fail-closed local ingress).
     BOOST_REQUIRE(!receipt.layers.empty());
     auto forged = receipt.layers.front().closure;
     forged.role_export_equality_constrained = true;
