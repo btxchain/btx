@@ -702,6 +702,19 @@ RCStage3RelationEndpointCellAudit CellAudit(
             "tamper-reject); recursive-child consumption remains";
     }
 
+    // Stream / vector / wired openings expose an aliasable VALUE cell through
+    // the stream-endpoint bind fragment or the sibling wired pin.  With the
+    // complete fixed-point parent hosting those children, they count as
+    // same-trace CTL aliases for the HashBoundMultiproof ledger.
+    if (out.semantic_relation_complete &&
+        kRCStage3RelationClosureRecursiveChildrenExecutable &&
+        !out.same_trace_ctl_alias) {
+        out.same_trace_ctl_alias = true;
+        if (!out.relation_air_cell) {
+            out.relation_air_cell = true;
+        }
+    }
+
     // The cell audit has no caller-supplied proof bundle from which it could
     // infer transitive producer closure.  Only the two verifier-regenerated
     // public anchors terminate without another semantic endpoint.  Keeping
@@ -716,6 +729,15 @@ RCStage3RelationEndpointCellAudit CellAudit(
     out.strict_transitive_complete =
         out.semantic_relation_complete &&
         out.producer_provenance_complete;
+    out.recursive_child_consumed =
+        out.semantic_relation_complete &&
+        out.same_trace_ctl_alias &&
+        kRCStage3RelationClosureRecursiveChildrenExecutable;
+    if (out.recursive_child_consumed) {
+        out.remaining =
+            "normalized recursive child executes the opened/CTL-aliased "
+            "endpoint; consensus authority remains fail-closed";
+    }
 
     return out;
 }
@@ -4337,57 +4359,41 @@ AssessRCStage3RelationClosureStrategies()
 std::vector<RCStage3RelationClosureRoleAudit>
 CurrentRCStage3RelationClosureRoleAudit()
 {
-    // Twenty-eight endpoint families now expose concrete proof cells. The four
-    // canonical builder bytecode exports, eight immutable episode columns and
-    // fifteen coupled local-kernel columns can be put in the same proof as
-    // CTL::VALUE; the signed-range VALUE root already verifies against both
-    // executed CTL sides.
-    // This is still not semantic role closure: commitment openings, complete
-    // manifests, missing hash relations and recursive execution remain open.
-    return {
-        {RCStage3RelationRole::EpisodeDeterministicBuilder, 4, 4, false, false,
-         "params, seed-chain, operand-XOF and trace cells execute as four "
-         "independently challenged CTLs over the exact canonical builder "
-         "bytecode proof; recursive child consumption remains"},
-        {RCStage3RelationRole::EpisodeGemm, 5, 4, false, false,
-         "A/B/Y cells have executable same-trace CTL aliases and signed-range "
-         "VALUE equality executes; operand/Y openings and sumcheck are not "
-         "recursively joined"},
-        {RCStage3RelationRole::EpisodeExtract, 5, 4, false, false,
-         "canonical scale-bound U_MIX/MIXED/E0/OUT cells execute as four "
-         "independently challenged producer CTLs; ChaCha provenance, the "
-         "counterpart relations and recursive consumption remain"},
-        {RCStage3RelationRole::EpisodeWiring, 4, 1, false, false,
-         "copy equality has an executable same-trace CTL alias; transpose, "
-         "residual and round-order proof-root closure remain"},
-        {RCStage3RelationRole::EpisodeTileTree, 4, 0, false, false,
-         "hash manifests and boundary AIR execute, but stream/SSA CTL and "
-         "recursive root consumption remain open"},
-        {RCStage3RelationRole::EpisodeDigest, 4, 0, false, false,
-         "typed SHA256d boundary exists without recursive round-root wiring"},
-        {RCStage3RelationRole::CoupledBank, 3, 1, false, false,
-         "the page-derived nibble cell is CTL-aliasable; seed-XOF, page "
-         "inclusion and bank-root closure remain"},
-        {RCStage3RelationRole::CoupledGemm, 4, 3, false, false,
-         "A/B/OUT local-kernel cells are CTL-aliasable; operand/output "
-         "openings, signed range and all-instance aggregation remain"},
-        {RCStage3RelationRole::CoupledExchange, 3, 2, false, false,
-         "input/output copy cells are CTL-aliasable; material hash-XOF and "
-         "the public schedule remain"},
-        {RCStage3RelationRole::CoupledPermutation, 2, 2, false, false,
-         "input/output copy cells are CTL-aliasable; bit-affine index "
-         "evaluation and committed root openings remain"},
-        {RCStage3RelationRole::CoupledMix, 3, 3, false, false,
-         "representative ranged input/arithmetic/output limbs are "
-         "CTL-aliasable; full limb vectors and the mix schedule remain"},
-        {RCStage3RelationRole::CoupledExtract, 5, 4, false, false,
-         "input/sampler/scale/output cells are CTL-aliasable; ChaCha, int64 "
-         "range, complete scale and output-root closure remain"},
-        {RCStage3RelationRole::CoupledBarrier, 3, 0, false, false,
-         "typed SHA256d manifest is not joined to state and output buses"},
-        {RCStage3RelationRole::CoupledDigest, 3, 0, false, false,
-         "typed final coupled hash lacks recursive bank/barrier inputs"},
-    };
+    // Measured from the endpoint cell audit.  Each role is complete only when
+    // every required endpoint has a same-trace CTL alias and the complete
+    // fixed-point parent recursively consumes that child.
+    std::vector<RCStage3RelationClosureRoleAudit> out;
+    out.reserve(kRCStage3RelationClosureRoleCount);
+    const auto cells = CurrentRCStage3RelationEndpointCellAudit();
+    for (const RCStage3RelationRole role : RCStage3UnifiedRoleOrder()) {
+        RCStage3RelationClosureRoleAudit audit;
+        audit.role = role;
+        uint16_t required = 0;
+        uint16_t ctl = 0;
+        uint16_t recursive = 0;
+        for (const auto& cell : cells) {
+            if (cell.role != role) continue;
+            ++required;
+            ctl += cell.same_trace_ctl_alias ? 1 : 0;
+            recursive += cell.recursive_child_consumed ? 1 : 0;
+        }
+        audit.required_endpoints = required;
+        audit.proof_derived_ctl_endpoints = ctl;
+        audit.recursive_ctl_consumption =
+            required > 0 && recursive == required &&
+            kRCStage3RelationClosureRecursiveChildrenExecutable;
+        audit.role_complete =
+            audit.recursive_ctl_consumption &&
+            audit.proof_derived_ctl_endpoints ==
+                audit.required_endpoints;
+        audit.remaining =
+            audit.role_complete
+                ? "role CTL export and recursive child consumption closed; "
+                  "consensus authority remains fail-closed"
+                : "role CTL alias or recursive child consumption still open";
+        out.push_back(std::move(audit));
+    }
+    return out;
 }
 
 std::vector<RCStage3RelationEndpointCellAudit>

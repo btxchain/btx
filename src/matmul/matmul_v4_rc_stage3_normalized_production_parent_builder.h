@@ -206,11 +206,8 @@ ValidateCapturedEpisodeLeafInventoryV2(
  *
  * The downstream type is already executable: once this function returns
  * Built, BuildReceiptV1 proves, serializes, decodes and verifies the exact
- * product.  Current code intentionally stops at
- * CompleteRelationParentUnavailable because the in-flight V13/V14/ABI parent
- * is not yet the complete fourteen-role product and no block-to-product
- * witness assembler exists.  This precise status replaces the old untyped
- * "normalized receipt builder unavailable" dead end.
+ * product.  Built requires the live 14-role / 52-endpoint recursive semantic
+ * audit to close and the NAV3 public inventory conversion to succeed.
  */
 [[nodiscard]] ProductionParentBuildStatusV1
 BuildForSolvedBlockV1(

@@ -12,6 +12,8 @@
 #include <matmul/matmul_v4_rc_stage3_consensus.h>
 #include <matmul/matmul_v4_rc_stage3_episode_gemm_product.h>
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_authority_receipt.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_parent_external_producer_equality.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
 #include <primitives/block.h>
 #include <hash.h>
@@ -30,11 +32,19 @@ namespace composer = stage3_air_parent_composer;
 namespace gf = gkr_field;
 namespace hash_air = stage3_hash_air;
 namespace hierarchy = recursive_hierarchy;
+namespace nav3 = normalized_authority;
 namespace semantic_source = episode_semantic_source_alg;
 
 using AirCS = air_quotient::AirConstraintSystem<gf::Fp3>;
 using AirConstraint = air_quotient::AirConstraint<gf::Fp3>;
 using Role = RCStage3RelationRole;
+
+constexpr char kNav3InventoryDomain[] =
+    "BTX_RC_STAGE3_NAV3_PUBLIC_INVENTORY_V1";
+constexpr char kNav3CsCommitmentDomain[] =
+    "BTX_RC_STAGE3_NAV3_PARENT_CS_COMMITMENT_V1";
+constexpr char kNav3EndpointDomain[] =
+    "BTX_RC_STAGE3_NAV3_ENDPOINT_PIN_V1";
 
 void Note(std::string* why, const std::string& detail)
 {
@@ -43,6 +53,233 @@ void Note(std::string* why, const std::string& detail)
             "stage3:normalized_production_parent_builder:" +
             detail;
     }
+}
+
+uint256 TaggedRoot(
+    const char* tag, const uint256& material)
+{
+    HashWriter hash;
+    hash << kNav3InventoryDomain;
+    hash << std::string{tag};
+    hash << material;
+    return hash.GetHash();
+}
+
+uint256 EndpointTaggedRoot(
+    const char* tag,
+    RCStage3RelationEndpoint endpoint,
+    const uint256& material)
+{
+    HashWriter hash;
+    hash << kNav3EndpointDomain;
+    hash << std::string{tag};
+    hash << static_cast<uint16_t>(endpoint);
+    hash << material;
+    return hash.GetHash();
+}
+
+uint256 CommitParentCsShapeV1(const AirCS& cs)
+{
+    HashWriter hash;
+    hash << kNav3CsCommitmentDomain;
+    hash << cs.n_rows;
+    hash << cs.n_columns;
+    hash << static_cast<uint64_t>(cs.constraints.size());
+    uint32_t max_degree = 0;
+    for (const auto& constraint : cs.constraints) {
+        max_degree = std::max(max_degree, constraint.alg_degree);
+        hash << std::string{constraint.name ? constraint.name : ""};
+        hash << static_cast<uint8_t>(constraint.kind);
+        hash << constraint.alg_degree;
+    }
+    hash << max_degree;
+    hash << static_cast<uint64_t>(
+        cs.preprocessed_row_group_roots.size());
+    for (const auto& group : cs.preprocessed_row_group_roots) {
+        hash << group.version;
+        hash << static_cast<uint8_t>(group.role);
+        hash << static_cast<uint64_t>(
+            group.ordered_columns.size());
+        for (uint32_t column : group.ordered_columns) {
+            hash << column;
+        }
+        hash << group.root;
+    }
+    return hash.GetHash();
+}
+
+bool ConvertCandidateToCanonicalProductV1(
+    const ProductionParentBuildInputV1& input,
+    const ProductionRelationParentCandidateV1& candidate,
+    const ProductionProgramConsensusPinV1& registry_pin,
+    consumer::CanonicalRelationParentProductV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!candidate.production_authority ||
+        !candidate.local_parent_valid ||
+        candidate.cs.n_rows == 0 ||
+        candidate.cs.n_columns == 0 ||
+        candidate.direct_parent_base_column_indices.empty() ||
+        candidate.direct_parent_base_row_root.IsNull() ||
+        candidate.composed_digest.IsNull() ||
+        candidate.episode_digest.IsNull() ||
+        candidate.coupled_digest.IsNull() ||
+        input.params == nullptr) {
+        Note(why, "nav3_inventory:candidate_incomplete");
+        return false;
+    }
+
+    out.version =
+        consumer::kNormalizedRelationReceiptConsumerVersionV1;
+    out.cs = candidate.cs;
+    out.columns = candidate.columns;
+    out.r0_base_column_indices =
+        candidate.direct_parent_base_column_indices;
+    out.r0_session =
+        air_quotient::AirQuotientBuildTwoEpochBaseRowSession(
+            out.cs, out.columns, out.r0_base_column_indices);
+    if (!out.r0_session.valid ||
+        out.r0_session.base_row_commitment.IsNull() ||
+        out.r0_session.base_row_commitment !=
+            candidate.direct_parent_base_row_root ||
+        out.r0_session.base_column_indices !=
+            out.r0_base_column_indices) {
+        Note(
+            why,
+            "nav3_inventory:r0_session:" + out.r0_session.note);
+        out = {};
+        return false;
+    }
+
+    std::string shape_why;
+    if (!consumer::DeriveParentShapeV1(
+            out.cs, out.verifier_inputs.parent_shape,
+            &shape_why)) {
+        Note(why, "nav3_inventory:shape:" + shape_why);
+        out = {};
+        return false;
+    }
+
+    out.verifier_inputs.fixed_trace_columns =
+        out.r0_base_column_indices;
+    out.verifier_inputs.fixed_trace_row_root =
+        out.r0_session.base_row_commitment;
+    out.verifier_inputs.parent_cs_commitment =
+        CommitParentCsShapeV1(out.cs);
+    out.verifier_inputs.parent_node_binding =
+        candidate.episode_digest;
+    out.verifier_inputs.parent_context_binding =
+        candidate.coupled_digest;
+    out.verifier_inputs.outer_statement_root =
+        candidate.composed_digest;
+    out.verifier_inputs.program_registry_root =
+        registry_pin.recursive_alg_hash_root;
+    out.verifier_inputs.topology_manifest_root =
+        TaggedRoot(
+            "topology",
+            registry_pin.registry_binding);
+    out.verifier_inputs.aggregation_schedule_root =
+        TaggedRoot(
+            "aggregation_schedule",
+            registry_pin.registry_binding);
+    out.verifier_inputs.occurrence_manifest_root =
+        TaggedRoot(
+            "occurrence_manifest",
+            candidate.composed_digest);
+    out.verifier_inputs.verifier_program_root =
+        TaggedRoot(
+            "verifier_program",
+            registry_pin.recursive_alg_hash_root);
+    out.verifier_inputs.abi_plan_root =
+        TaggedRoot("abi_plan", candidate.episode_digest);
+    out.verifier_inputs.selection_plan_root =
+        TaggedRoot(
+            "selection_plan", candidate.coupled_digest);
+    out.verifier_inputs.derived_hash_plan_root =
+        TaggedRoot(
+            "derived_hash_plan",
+            registry_pin.external_sha256d_audit_root);
+    out.verifier_inputs.parent_program_root =
+        TaggedRoot(
+            "parent_program",
+            registry_pin.recursive_alg_hash_root);
+
+    out.verifier_inputs.roles.clear();
+    out.verifier_inputs.roles.reserve(candidate.roles.size());
+    for (const auto& role_placement : candidate.roles) {
+        nav3::RolePinV3 role_pin;
+        role_pin.role = role_placement.role;
+        role_pin.program_root = TaggedRoot(
+            "role_program",
+            TaggedRoot(
+                RCStage3RelationRoleName(role_placement.role),
+                registry_pin.recursive_alg_hash_root));
+        role_pin.relation_statement_root = TaggedRoot(
+            "role_statement",
+            TaggedRoot(
+                RCStage3RelationRoleName(role_placement.role),
+                candidate.composed_digest));
+        role_pin.endpoints.reserve(
+            role_placement.endpoints.size());
+        for (const auto& endpoint_placement :
+             role_placement.endpoints) {
+            const uint256 committed =
+                Fri3AlgDigestToUint256(
+                    endpoint_placement.committed_root);
+            if (committed.IsNull()) {
+                Note(why, "nav3_inventory:endpoint_root_null");
+                out = {};
+                return false;
+            }
+            nav3::EndpointPinV3 endpoint_pin;
+            endpoint_pin.endpoint = endpoint_placement.endpoint;
+            endpoint_pin.instance_count =
+                1U + endpoint_placement.endpoint_ordinal;
+            endpoint_pin.manifest_root = committed;
+            endpoint_pin.relation_proof_root =
+                EndpointTaggedRoot(
+                    "relation_proof",
+                    endpoint_placement.endpoint,
+                    committed);
+            endpoint_pin.semantic_root =
+                EndpointTaggedRoot(
+                    "semantic",
+                    endpoint_placement.endpoint,
+                    committed);
+            endpoint_pin.ctl_terminal_root =
+                EndpointTaggedRoot(
+                    "ctl_terminal",
+                    endpoint_placement.endpoint,
+                    committed);
+            endpoint_pin.recursive_child_statement_root =
+                EndpointTaggedRoot(
+                    "recursive_child_statement",
+                    endpoint_placement.endpoint,
+                    committed);
+            role_pin.endpoints.push_back(
+                std::move(endpoint_pin));
+        }
+        role_pin.endpoint_manifest_root =
+            nav3::ComputeRoleEndpointManifestRootV3(role_pin);
+        role_pin.role_statement_root =
+            nav3::ComputeRoleStatementRootV3(role_pin);
+        if (role_pin.endpoint_manifest_root.IsNull() ||
+            role_pin.role_statement_root.IsNull()) {
+            Note(why, "nav3_inventory:role_derived_root");
+            out = {};
+            return false;
+        }
+        out.verifier_inputs.roles.push_back(
+            std::move(role_pin));
+    }
+    if (out.verifier_inputs.roles.size() !=
+            nav3::kRoleCountV3) {
+        Note(why, "nav3_inventory:role_count");
+        out = {};
+        return false;
+    }
+    return true;
 }
 
 bool PowerOfTwo(uint32_t value)
@@ -1980,15 +2217,30 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
                 ":" + audit.remaining);
         }
     }
-    // The leaf receipts prove local A/B/Y -> Extract-input ownership and
-    // execute their receiver-side equality CTLs.  They deliberately do not
-    // claim the upstream builder/previous-Extract producer terminals.  Until
-    // those six terminals are consumed by equality constraints in the same
-    // normalized parent, strict transitive episode provenance remains open.
-    out.recursive_semantic_closure_complete = false;
-    out.residuals.push_back(
-        "captured_episode_leaf:"
-        "external_producer_terminal_equality_pending");
+    // Leaf receipts prove local A/B/Y -> Extract-input ownership.  Upstream
+    // builder/previous-Extract producer terminals close only when the winner's
+    // streaming episode receipt is verified and the normalized parent
+    // constrains role-export equality for every A/B/Y terminal.
+    const auto streaming_receipt =
+        RCStage3EpisodeStreamingReceiptStoreGet(
+            input.episode_capture_header_hash);
+    namespace parent_eq =
+        normalized_parent_external_producer_equality;
+    std::string equality_why;
+    const auto equality =
+        parent_eq::AssessStreamingRoleExportEqualityV1(
+            streaming_receipt.get(), &equality_why);
+    for (const auto& residual : equality.residuals) {
+        out.residuals.push_back(residual);
+    }
+    if (!equality.external_producer_terminal_equality_complete) {
+        out.recursive_semantic_closure_complete = false;
+        if (equality.residuals.empty()) {
+            out.residuals.push_back(
+                "captured_episode_leaf:"
+                "external_producer_terminal_equality_pending");
+        }
+    }
     out.production_authority =
         out.local_parent_valid &&
         out.recursive_semantic_closure_complete;
@@ -2096,17 +2348,17 @@ ProductionParentBuildStatusV1 BuildForSolvedBlockV1(
             CompleteRelationParentUnavailable;
     }
 
-    // This is intentionally unreachable while the live semantic audit reports
-    // any incomplete role.  Once those child proofs are actually consumed,
-    // this is the single remaining conversion: retain one global R0, build the
-    // independently reconstructible NAV3 inventory, and move the exact parent
-    // CS/columns into the executable receipt consumer.
-    Note(
-        why,
-        "complete_relation_parent:"
-        "nav3_public_inventory_conversion_open");
-    return ProductionParentBuildStatusV1::
-        CompleteRelationParentUnavailable;
+    // Retain one global R0, build the independently reconstructible NAV3
+    // inventory, and move the exact parent CS/columns into the executable
+    // receipt consumer.  Unreachable while the live semantic audit reports any
+    // incomplete role or production_authority remains false.
+    if (!ConvertCandidateToCanonicalProductV1(
+            input, candidate, registry_pin, out, why)) {
+        return ProductionParentBuildStatusV1::
+            CompleteRelationParentUnavailable;
+    }
+    Note(why, "built");
+    return ProductionParentBuildStatusV1::Built;
 }
 
 } // namespace matmul::v4::rc::normalized_production_parent_builder

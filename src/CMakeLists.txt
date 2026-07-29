@@ -771,6 +771,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_normalized_authority_composition.cpp
   matmul/matmul_v4_rc_stage3_normalized_consensus_binding.cpp
   matmul/matmul_v4_rc_stage3_normalized_production_parent_builder.cpp
+  matmul/matmul_v4_rc_stage3_normalized_parent_external_producer_equality.cpp
   matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.cpp
   matmul/matmul_v4_rc_stage3_normalized_block_transport.cpp
   matmul/matmul_v4_rc_stage3_multirow_v11_receipt_join.cpp
