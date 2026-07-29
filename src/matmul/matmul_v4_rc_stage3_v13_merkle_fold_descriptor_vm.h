@@ -18,6 +18,7 @@ namespace abi = stage3_multirow_v11_proof_abi;
 namespace aq = air_quotient;
 namespace gf = gkr_field;
 namespace merkle = stage3_v13_merkle_fold_parent;
+namespace tape = stage3_multirow_v13_proof_tape_air;
 
 inline constexpr uint16_t kVersionV1 = 1;
 inline constexpr uint32_t kTapeShardsV1 = 4;
@@ -138,6 +139,10 @@ struct PlanV1 {
     std::array<SourceShardV1, kTapeShardsV1> source_shards{};
     /** Four canonical digest lanes of the proof tape's final sponge state. */
     alg_hash::Digest proof_tape_root{};
+    uint256 tape_program_root{};
+    uint256 tape_statement_root{};
+    uint256 tape_proof_wire_root{};
+    uint32_t tape_shard_count{0};
     uint256 source_inventory_root{};
     uint32_t parent_rows{0};
     uint32_t relation_rows{0};
@@ -162,6 +167,8 @@ struct PlanV1 {
 [[nodiscard]] bool BuildHashPlanV1(
     const std::array<SourceShardV1, kTapeShardsV1>&
         source_shards,
+    const tape::PublicBindingV1& tape_binding,
+    uint32_t tape_shard_count,
     const uint256& source_inventory_root,
     uint64_t family_tag,
     uint32_t parent_rows,
@@ -174,6 +181,8 @@ struct PlanV1 {
 [[nodiscard]] bool BuildFoldPlanV1(
     const std::array<SourceShardV1, kTapeShardsV1>&
         source_shards,
+    const tape::PublicBindingV1& tape_binding,
+    uint32_t tape_shard_count,
     const uint256& source_inventory_root,
     uint64_t family_tag,
     uint32_t parent_rows,
@@ -288,8 +297,15 @@ struct ChallengesV1 {
 };
 
 [[nodiscard]] uint256 ComputePublicTapeChallengeSeedV1(
-    const alg_hash::Digest& proof_tape_root,
-    const uint256& source_inventory_root);
+    const tape::PublicBindingV1& tape_binding,
+    const uint256& source_inventory_root,
+    uint32_t shard_count);
+
+[[nodiscard]] bool DerivePublicTapeChallengesV1(
+    const tape::PublicBindingV1& tape_binding,
+    const uint256& source_inventory_root,
+    uint32_t shard_count,
+    ChallengesV1& out);
 
 struct TerminalReceiptV1 {
     alg_hash::Digest schedule_root{};

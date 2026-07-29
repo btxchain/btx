@@ -354,6 +354,10 @@ alg_hash::Digest CommitPlan(const PlanV1& plan)
     AppendU64(lanes, plan.selector_stride);
     AppendU64(lanes, plan.manifest_reads);
     AppendDigest(lanes, plan.proof_tape_root);
+    AppendUint256(lanes, plan.tape_program_root);
+    AppendUint256(lanes, plan.tape_statement_root);
+    AppendUint256(lanes, plan.tape_proof_wire_root);
+    AppendU64(lanes, plan.tape_shard_count);
     AppendUint256(lanes, plan.source_inventory_root);
     for (const auto& shard : plan.source_shards) {
         AppendU64(lanes, shard.version);
@@ -416,6 +420,10 @@ bool ValidPlan(const PlanV1& plan)
         !Nonzero(plan.proof_tape_root) ||
         plan.proof_tape_root !=
             ProofTapeRoot(plan.source_shards) ||
+        plan.tape_program_root.IsNull() ||
+        plan.tape_statement_root.IsNull() ||
+        plan.tape_proof_wire_root.IsNull() ||
+        plan.tape_shard_count != kTapeShardsV1 ||
         plan.source_inventory_root.IsNull() ||
         !PowerOfTwo(plan.parent_rows) ||
         plan.relation_rows == 0 ||
@@ -574,6 +582,8 @@ bool HashLaneDescriptorV1::operator==(
 
 bool BuildHashPlanV1(
     const std::array<SourceShardV1, kTapeShardsV1>& shards,
+    const tape::PublicBindingV1& tape_binding,
+    uint32_t tape_shard_count,
     const uint256& source_inventory_root,
     uint64_t family_tag,
     uint32_t parent_rows,
@@ -585,6 +595,12 @@ bool BuildHashPlanV1(
 {
     out = {};
     if (!ValidSourceShards(shards) ||
+        tape_binding.program_root.IsNull() ||
+        tape_binding.statement_root.IsNull() ||
+        tape_binding.proof_wire_root.IsNull() ||
+        tape_binding.tape_root !=
+            ProofTapeRoot(shards) ||
+        tape_shard_count != kTapeShardsV1 ||
         family_tag == 0 ||
         source_inventory_root.IsNull() ||
         !PowerOfTwo(parent_rows) ||
@@ -612,6 +628,13 @@ bool BuildHashPlanV1(
     out.family_tag = family_tag ^ kHashFamilyDomainV1;
     out.source_shards = shards;
     out.proof_tape_root = ProofTapeRoot(shards);
+    out.tape_program_root =
+        tape_binding.program_root;
+    out.tape_statement_root =
+        tape_binding.statement_root;
+    out.tape_proof_wire_root =
+        tape_binding.proof_wire_root;
+    out.tape_shard_count = tape_shard_count;
     out.source_inventory_root = source_inventory_root;
     out.parent_rows = parent_rows;
     out.relation_rows = hash_plan.task_rows;
@@ -709,6 +732,8 @@ bool BuildHashPlanV1(
 
 bool BuildFoldPlanV1(
     const std::array<SourceShardV1, kTapeShardsV1>& shards,
+    const tape::PublicBindingV1& tape_binding,
+    uint32_t tape_shard_count,
     const uint256& source_inventory_root,
     uint64_t family_tag,
     uint32_t parent_rows,
@@ -718,6 +743,12 @@ bool BuildFoldPlanV1(
 {
     out = {};
     if (!ValidSourceShards(shards) ||
+        tape_binding.program_root.IsNull() ||
+        tape_binding.statement_root.IsNull() ||
+        tape_binding.proof_wire_root.IsNull() ||
+        tape_binding.tape_root !=
+            ProofTapeRoot(shards) ||
+        tape_shard_count != kTapeShardsV1 ||
         family_tag == 0 ||
         source_inventory_root.IsNull() ||
         !PowerOfTwo(parent_rows) ||
@@ -734,6 +765,13 @@ bool BuildFoldPlanV1(
     out.family_tag = family_tag ^ kFoldFamilyDomainV1;
     out.source_shards = shards;
     out.proof_tape_root = ProofTapeRoot(shards);
+    out.tape_program_root =
+        tape_binding.program_root;
+    out.tape_statement_root =
+        tape_binding.statement_root;
+    out.tape_proof_wire_root =
+        tape_binding.proof_wire_root;
+    out.tape_shard_count = tape_shard_count;
     out.source_inventory_root = source_inventory_root;
     out.parent_rows = parent_rows;
     out.relation_rows = fold_plan.real_rows;
@@ -1945,19 +1983,79 @@ bool AppendDeterministicWitnessV1(
 }
 
 uint256 ComputePublicTapeChallengeSeedV1(
-    const alg_hash::Digest& proof_tape_root,
-    const uint256& source_inventory_root)
+    const tape::PublicBindingV1& tape_binding,
+    const uint256& source_inventory_root,
+    uint32_t shard_count)
 {
-    HashWriter hash;
-    hash <<
-        "BTX_RC_STAGE3_V14_TAPE_ROOT_SOURCE_CHALLENGE_V1";
-    hash << kVersionV1;
-    for (gf::Fp lane : proof_tape_root) {
-        hash << static_cast<uint64_t>(
-            gf::Canonical(lane));
+    HashWriter transcript;
+    transcript <<
+        "BTX_RC_STAGE3_SAFE_V13_STREAMING_TAPE_SOURCE_PUBLIC_V3";
+    transcript <<
+        tape::kProofTapeShardVersionV3;
+    for (gf::Fp lane : tape_binding.tape_root) {
+        transcript << static_cast<uint64_t>(lane);
     }
-    hash << source_inventory_root;
-    return hash.GetHash();
+    transcript << tape_binding.program_root;
+    transcript << tape_binding.statement_root;
+    transcript << tape_binding.proof_wire_root;
+    transcript << source_inventory_root;
+    transcript << shard_count;
+    return transcript.GetHash();
+}
+
+bool DerivePublicTapeChallengesV1(
+    const tape::PublicBindingV1& tape_binding,
+    const uint256& source_inventory_root,
+    uint32_t shard_count,
+    ChallengesV1& out)
+{
+    out = {};
+    if (tape_binding.program_root.IsNull() ||
+        tape_binding.statement_root.IsNull() ||
+        tape_binding.proof_wire_root.IsNull() ||
+        tape_binding.tape_root ==
+            alg_hash::Digest{} ||
+        source_inventory_root.IsNull() ||
+        shard_count == 0 ||
+        shard_count > kTapeShardsV1) {
+        return false;
+    }
+    const uint256 seed =
+        ComputePublicTapeChallengeSeedV1(
+            tape_binding, source_inventory_root,
+            shard_count);
+    if (seed.IsNull()) return false;
+    for (uint32_t lane = 0;
+         lane < kLookupLanesV1; ++lane) {
+        const uint256 gamma_digest =
+            aq::AirChallengeDigest(
+                seed,
+                "stage3.v13_tape_shard.public_source_gamma.v3",
+                {tape_binding.program_root,
+                 tape_binding.statement_root,
+                 tape_binding.proof_wire_root,
+                 source_inventory_root},
+                {shard_count, lane});
+        const uint256 alpha_digest =
+            aq::AirChallengeDigest(
+                seed,
+                "stage3.v13_tape_shard.public_source_alpha.v3",
+                {tape_binding.program_root,
+                 tape_binding.statement_root,
+                 tape_binding.proof_wire_root,
+                 source_inventory_root},
+                {shard_count, lane});
+        out.gamma[lane] =
+            gf::FromChallengeBytes3(
+                gamma_digest.data());
+        out.alpha[lane] =
+            gf::FromChallengeBytes3(
+                alpha_digest.data());
+    }
+    return !gf::IsZero(out.gamma[0]) &&
+        !gf::IsZero(out.gamma[1]) &&
+        !gf::Eq(out.gamma[0], out.gamma[1]) &&
+        !gf::Eq(out.alpha[0], out.alpha[1]);
 }
 
 bool DeriveChallengesV1(
@@ -1966,38 +2064,20 @@ bool DeriveChallengesV1(
     std::string* why)
 {
     out = {};
-    const uint256 seed =
-        ComputePublicTapeChallengeSeedV1(
-            plan.proof_tape_root,
-            plan.source_inventory_root);
-    if (!ValidPlan(plan) || seed.IsNull()) {
+    if (!ValidPlan(plan)) {
         return Fail(why, "challenge_input");
     }
-    for (uint32_t lane = 0;
-         lane < kLookupLanesV1; ++lane) {
-        const uint256 gamma_digest =
-            aq::AirChallengeDigest(
-                seed,
-                "stage3.v14_tape_root.source_gamma",
-                {plan.source_inventory_root},
-                {lane});
-        const uint256 alpha_digest =
-            aq::AirChallengeDigest(
-                seed,
-                "stage3.v14_tape_root.source_alpha",
-                {plan.source_inventory_root},
-                {lane});
-        out.gamma[lane] =
-            gf::FromChallengeBytes3(
-                gamma_digest.data());
-        out.alpha[lane] =
-            gf::FromChallengeBytes3(
-                alpha_digest.data());
-    }
-    if (gf::IsZero(out.gamma[0]) ||
-        gf::IsZero(out.gamma[1]) ||
-        gf::Eq(out.gamma[0], out.gamma[1]) ||
-        gf::Eq(out.alpha[0], out.alpha[1])) {
+    tape::PublicBindingV1 binding;
+    binding.program_root =
+        plan.tape_program_root;
+    binding.statement_root =
+        plan.tape_statement_root;
+    binding.proof_wire_root =
+        plan.tape_proof_wire_root;
+    binding.tape_root = plan.proof_tape_root;
+    if (!DerivePublicTapeChallengesV1(
+            binding, plan.source_inventory_root,
+            plan.tape_shard_count, out)) {
         out = {};
         return Fail(why, "challenge_sampling");
     }

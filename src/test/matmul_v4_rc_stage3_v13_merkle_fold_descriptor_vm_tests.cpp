@@ -18,6 +18,9 @@ namespace aq = matmul::v4::rc::air_quotient;
 namespace gf = matmul::v4::rc::gkr_field;
 namespace merkle =
     matmul::v4::rc::stage3_v13_merkle_fold_parent;
+namespace tape =
+    matmul::v4::rc::
+        stage3_multirow_v13_proof_tape_air;
 using Fp3 = gf::Fp3;
 
 BOOST_AUTO_TEST_SUITE(
@@ -45,6 +48,7 @@ struct Fixture {
         shards{};
     proof_abi::DecodedV1 decoded{};
     merkle::TypedHashPlanV1 hash_plan{};
+    tape::PublicBindingV1 tape_binding{};
 };
 
 Fixture BuildFixture()
@@ -155,6 +159,15 @@ Fixture BuildFixture()
     out.hash_plan.lane_ownership_unique = true;
     out.hash_plan.output_inventory_complete = true;
     out.hash_plan.valid = true;
+    out.tape_binding.program_root = Seed(0x11);
+    out.tape_binding.statement_root = Seed(0x22);
+    out.tape_binding.public_fs_seed = Seed(0x33);
+    out.tape_binding.proof_wire_root = Seed(0x44);
+    std::copy_n(
+        out.shards.back().state_out.begin(),
+        matmul::v4::rc::alg_hash::
+            kAlgHashDigestLen,
+        out.tape_binding.tape_root.begin());
     return out;
 }
 
@@ -164,11 +177,72 @@ BOOST_AUTO_TEST_CASE(
     cross_shard_v3_descriptor_proves_and_rejects_forgery)
 {
     const Fixture fixture = BuildFixture();
+    tape::PublicShapeV1 challenge_shape;
+    challenge_shape.trace_rows = 2;
+    challenge_shape.trace_columns = 2;
+    challenge_shape.quotient_len = 2;
+    challenge_shape.n_coeffs = 2;
+    challenge_shape.base_column_indices = {0};
+    const uint256 challenge_inventory =
+        tape::ComputeShardSourceInventoryRootV2(
+            challenge_shape,
+            fixture.tape_binding);
+    const auto challenge_plans =
+        tape::BuildShardPlansV2(
+            challenge_shape,
+            fixture.tape_binding);
+    BOOST_REQUIRE(!challenge_inventory.IsNull());
+    BOOST_REQUIRE_EQUAL(
+        challenge_plans.size(), 1U);
+    tape::ShardSourceChallengesV2
+        canonical_tape_challenges;
+    BOOST_REQUIRE(
+        tape::DeriveShardPublicSourceChallengesV3(
+            challenge_shape,
+            fixture.tape_binding,
+            challenge_inventory,
+            challenge_plans.size(),
+            canonical_tape_challenges));
+    vm::ChallengesV1 descriptor_challenges;
+    BOOST_REQUIRE(
+        vm::DerivePublicTapeChallengesV1(
+            fixture.tape_binding,
+            challenge_inventory,
+            challenge_plans.size(),
+            descriptor_challenges));
+    for (uint32_t lane = 0;
+         lane < vm::kLookupLanesV1; ++lane) {
+        BOOST_CHECK(gf::Eq(
+            canonical_tape_challenges.gamma[lane],
+            descriptor_challenges.gamma[lane]));
+        BOOST_CHECK(gf::Eq(
+            canonical_tape_challenges.alpha[lane],
+            descriptor_challenges.alpha[lane]));
+    }
+    auto changed_binding = fixture.tape_binding;
+    changed_binding.program_root = Seed(0x12);
+    vm::ChallengesV1 changed_challenges;
+    BOOST_REQUIRE(
+        vm::DerivePublicTapeChallengesV1(
+            changed_binding,
+            challenge_inventory,
+            challenge_plans.size(),
+            changed_challenges));
+    BOOST_CHECK(
+        !gf::Eq(
+            changed_challenges.gamma[0],
+            descriptor_challenges.gamma[0]) ||
+        !gf::Eq(
+            changed_challenges.alpha[0],
+            descriptor_challenges.alpha[0]));
+
     vm::PlanV1 plan;
     std::string why;
     BOOST_REQUIRE_MESSAGE(
         vm::BuildHashPlanV1(
             fixture.shards,
+            fixture.tape_binding,
+            vm::kTapeShardsV1,
             Seed(0x55),
             UINT64_C(0x53484152445f5631),
             16, 64, 8, fixture.hash_plan,
@@ -282,23 +356,30 @@ BOOST_AUTO_TEST_CASE(
         production_lde, UINT32_C(16777216));
     const uint256 proof_seed =
         vm::ComputePublicTapeChallengeSeedV1(
-            plan.proof_tape_root,
-            plan.source_inventory_root);
+            fixture.tape_binding,
+            plan.source_inventory_root,
+            plan.tape_shard_count);
     BOOST_REQUIRE(!proof_seed.IsNull());
     for (uint32_t lane = 0;
          lane < vm::kLookupLanesV1; ++lane) {
         const uint256 gamma_digest =
             aq::AirChallengeDigest(
                 proof_seed,
-                "stage3.v14_tape_root.source_gamma",
-                {plan.source_inventory_root},
-                {lane});
+                "stage3.v13_tape_shard.public_source_gamma.v3",
+                {plan.tape_program_root,
+                 plan.tape_statement_root,
+                 plan.tape_proof_wire_root,
+                 plan.source_inventory_root},
+                {plan.tape_shard_count, lane});
         const uint256 alpha_digest =
             aq::AirChallengeDigest(
                 proof_seed,
-                "stage3.v14_tape_root.source_alpha",
-                {plan.source_inventory_root},
-                {lane});
+                "stage3.v13_tape_shard.public_source_alpha.v3",
+                {plan.tape_program_root,
+                 plan.tape_statement_root,
+                 plan.tape_proof_wire_root,
+                 plan.source_inventory_root},
+                {plan.tape_shard_count, lane});
         BOOST_CHECK(gf::Eq(
             final.challenges.gamma[lane],
             gf::FromChallengeBytes3(
@@ -480,7 +561,10 @@ BOOST_AUTO_TEST_CASE(
     vm::PlanV1 capacity_plan;
     BOOST_REQUIRE(
         vm::BuildHashPlanV1(
-            capacity_shards, Seed(0x55),
+            capacity_shards,
+            fixture.tape_binding,
+            vm::kTapeShardsV1,
+            Seed(0x55),
             UINT64_C(0x53484152445f5631),
             16, 64, 8, fixture.hash_plan,
             capacity_plan, &why));
@@ -509,10 +593,18 @@ BOOST_AUTO_TEST_CASE(
             alternate_root_shards.back()
                 .state_out[0],
             gf::FromU64(1));
+    auto alternate_root_binding =
+        fixture.tape_binding;
+    alternate_root_binding.tape_root[0] =
+        alternate_root_shards.back()
+            .state_out[0];
     vm::PlanV1 alternate_root_plan;
     BOOST_REQUIRE(
         vm::BuildHashPlanV1(
-            alternate_root_shards, Seed(0x55),
+            alternate_root_shards,
+            alternate_root_binding,
+            vm::kTapeShardsV1,
+            Seed(0x55),
             UINT64_C(0x53484152445f5631),
             16, 64, 8, fixture.hash_plan,
             alternate_root_plan, &why));
@@ -534,9 +626,11 @@ BOOST_AUTO_TEST_CASE(
             alternate_root_final, &why));
     const uint256 alternate_seed =
         vm::ComputePublicTapeChallengeSeedV1(
-            alternate_root_plan.proof_tape_root,
+            alternate_root_binding,
             alternate_root_plan
-                .source_inventory_root);
+                .source_inventory_root,
+            alternate_root_plan
+                .tape_shard_count);
     BOOST_CHECK(alternate_seed != proof_seed);
     BOOST_CHECK(
         !aq::AirQuotientVerifyRows(
