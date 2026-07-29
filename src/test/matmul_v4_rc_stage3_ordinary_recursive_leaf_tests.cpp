@@ -400,4 +400,102 @@ BOOST_AUTO_TEST_CASE(
              .cryptographically_valid);
 }
 
+BOOST_AUTO_TEST_CASE(
+    native_alg_proof_is_canonically_retained_and_mutations_reject)
+{
+    const Fixture fixture = BuildFixture();
+    const leaf::PublicBindingV1 binding{
+        .node_binding = Seed(0x81),
+        .program_binding = Seed(0x82),
+        .proof_context_binding = Seed(0x83),
+        .public_statement_binding = Seed(0x84),
+        .fs_seed = Seed(0x85),
+    };
+    const auto proved =
+        aq::AirQuotientProve<
+            gf::Fp3,
+            aq::AirFriBackendAlg<gf::Fp3>>(
+                fixture.cs, fixture.columns,
+                binding.fs_seed, {});
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact,
+        proved.note);
+
+    const leaf::ProofV1 retained =
+        leaf::RetainAlgProofV1(
+            fixture.cs, proved.proof, binding);
+    BOOST_REQUIRE_MESSAGE(
+        retained.valid, retained.note);
+    BOOST_CHECK(
+        retained.native_streaming_proof_verified);
+    BOOST_CHECK(
+        retained.ordinary_reentry_verified);
+    BOOST_CHECK(retained.proof_tamper_rejected);
+    BOOST_CHECK(retained.receipt.valid);
+    BOOST_CHECK(!retained.receipt.proof_bytes.empty());
+
+    std::string why;
+    const auto expected =
+        leaf::BuildExpectedRecursiveBindingV2(
+            fixture.cs, binding);
+    BOOST_CHECK_MESSAGE(
+        fixedpoint::
+            ValidateNarrowRecursiveProofReceiptV2(
+                retained.receipt, fixture.cs,
+                expected, &why),
+        why);
+    BOOST_CHECK_MESSAGE(
+        leaf::VerifyV1(
+            retained, fixture.cs, binding,
+            &why),
+        why);
+
+    auto query_value = proved.proof;
+    BOOST_REQUIRE(
+        !query_value.batch.queries.empty());
+    BOOST_REQUIRE(
+        !query_value.batch.queries[0]
+             .row.values.empty());
+    auto& value =
+        query_value.batch.queries[0]
+            .row.values[0];
+    value = gf::Add(value, gf::Fp3::One());
+    BOOST_CHECK(
+        !leaf::RetainAlgProofV1(
+             fixture.cs, query_value,
+             binding).valid);
+
+    auto query_index = proved.proof;
+    query_index.batch.queries[0].index ^= 1U;
+    BOOST_CHECK(
+        !leaf::RetainAlgProofV1(
+             fixture.cs, query_index,
+             binding).valid);
+
+    auto wrong = binding;
+    wrong.node_binding = Seed(0x91);
+    BOOST_CHECK(
+        !leaf::VerifyV1(
+             retained, fixture.cs, wrong,
+             &why));
+    wrong = binding;
+    wrong.proof_context_binding = Seed(0x92);
+    BOOST_CHECK(
+        !leaf::VerifyV1(
+             retained, fixture.cs, wrong,
+             &why));
+    wrong = binding;
+    wrong.public_statement_binding = Seed(0x93);
+    BOOST_CHECK(
+        !leaf::VerifyV1(
+             retained, fixture.cs, wrong,
+             &why));
+    wrong = binding;
+    wrong.fs_seed = Seed(0x94);
+    BOOST_CHECK(
+        !leaf::VerifyV1(
+             retained, fixture.cs, wrong,
+             &why));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
