@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V13_PROOF_TAPE_AIR_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V13_PROOF_TAPE_AIR_H
 
+#include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_proof_abi.h>
 #include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
 
@@ -728,6 +729,15 @@ static_assert(!kProofTapeShardRecursiveAuthorityReadyV2);
 
 inline constexpr uint16_t kProofTapeShardVersionV3 = 3;
 
+/**
+ * Verifier-recomputable Fiat--Shamir seed for the complete V3 shard AIR.
+ * Every input is either part of the public statement or the source terminal
+ * carried by (and equality-constrained inside) the shard proof.
+ */
+[[nodiscard]] uint256 DeriveShardPublicFsSeedV3(
+    const ShardStatementV2& statement,
+    const std::array<gf::Fp3, 2>& source_terminal);
+
 [[nodiscard]] bool DeriveShardPublicSourceChallengesV3(
     const PublicShapeV1& shape,
     const PublicBindingV1& binding,
@@ -748,6 +758,17 @@ struct ShardProofV3 {
     std::array<gf::Fp3, 2> source_terminal{};
     aq::AirQuotientRowsProof proof{};
 };
+
+/**
+ * Convert the streaming-row prover payload into the ordinary Alg verifier
+ * proof type and canonicalize it through the consensus proof codec.  This is
+ * the representation accepted by normalized recursive child receipts.
+ */
+[[nodiscard]] std::optional<AirQuotientProofAlg>
+CanonicalShardPublicAlgProofV3(
+    const ShardProofV3& proof,
+    std::vector<unsigned char>* canonical_bytes = nullptr,
+    std::string* why = nullptr);
 
 [[nodiscard]] bool ProveShardPublicV3(
     const ShardProductV2& product,

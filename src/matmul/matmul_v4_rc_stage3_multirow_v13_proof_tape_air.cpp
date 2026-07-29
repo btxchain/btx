@@ -2212,6 +2212,8 @@ uint256 DeriveShardFsSeed(
     return hash.GetHash();
 }
 
+} // namespace
+
 uint256 DeriveShardPublicFsSeedV3(
     const ShardStatementV2& statement,
     const std::array<Fp3, 2>& source_terminal)
@@ -2249,8 +2251,6 @@ uint256 DeriveShardPublicFsSeedV3(
     }
     return hash.GetHash();
 }
-
-} // namespace
 
 std::vector<ShardPlanV2> BuildShardPlansForMaxRowsV2(
     const PublicShapeV1& shape,
@@ -3917,6 +3917,57 @@ bool ProveShardPublicV3(
     out.proof = proved.proof;
     return VerifyShardPublicV3(
         product.statement, out, why);
+}
+
+std::optional<AirQuotientProofAlg>
+CanonicalShardPublicAlgProofV3(
+    const ShardProofV3& proof,
+    std::vector<unsigned char>* canonical_bytes,
+    std::string* why)
+{
+    if (proof.version !=
+        kProofTapeShardVersionV3) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_canonical_version";
+        }
+        return std::nullopt;
+    }
+    AirQuotientProofAlg ordinary;
+    ordinary.batch = proof.proof.batch;
+    ordinary.next_openings =
+        proof.proof.next_openings;
+    ordinary.trace_commit =
+        proof.proof.trace_commit;
+
+    std::vector<unsigned char> encoded;
+    if (!SerializeAirQuotientProofAlg(
+            ordinary, encoded, why)) {
+        return std::nullopt;
+    }
+    auto decoded =
+        DeserializeAirQuotientProofAlg(
+            encoded, why);
+    if (!decoded.has_value()) {
+        return std::nullopt;
+    }
+    std::vector<unsigned char> reencoded;
+    if (!SerializeAirQuotientProofAlg(
+            *decoded, reencoded, why) ||
+        reencoded != encoded) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_noncanonical_alg";
+        }
+        return std::nullopt;
+    }
+    if (canonical_bytes != nullptr) {
+        *canonical_bytes =
+            std::move(encoded);
+    }
+    return decoded;
 }
 
 bool VerifyShardPublicV3(

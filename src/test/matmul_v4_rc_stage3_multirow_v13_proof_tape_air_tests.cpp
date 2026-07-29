@@ -1251,6 +1251,47 @@ BOOST_AUTO_TEST_CASE(
         VerifyShardPublicV3(
             statement, public_proof, &why),
         why);
+    const uint256 public_fs_seed =
+        DeriveShardPublicFsSeedV3(
+            statement,
+            public_proof.source_terminal);
+    std::vector<unsigned char>
+        public_alg_bytes;
+    const auto public_alg_proof =
+        CanonicalShardPublicAlgProofV3(
+            public_proof,
+            &public_alg_bytes, &why);
+    BOOST_REQUIRE_MESSAGE(
+        public_alg_proof.has_value(),
+        why);
+    std::vector<unsigned char>
+        public_alg_bytes_again;
+    BOOST_REQUIRE_MESSAGE(
+        SerializeAirQuotientProofAlg(
+            *public_alg_proof,
+            public_alg_bytes_again, &why),
+        why);
+    BOOST_CHECK_EQUAL_COLLECTIONS(
+        public_alg_bytes.begin(),
+        public_alg_bytes.end(),
+        public_alg_bytes_again.begin(),
+        public_alg_bytes_again.end());
+    aq::AirConstraintSystem<gf::Fp3>
+        public_final_cs;
+    BOOST_REQUIRE_MESSAGE(
+        BuildShardFinalConstraintSystemV3(
+            statement,
+            public_proof.source_terminal,
+            public_final_cs, nullptr, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        (aq::AirQuotientVerify<
+            gf::Fp3,
+            aq::AirFriBackendAlg<gf::Fp3>>(
+                public_final_cs,
+                *public_alg_proof,
+                public_fs_seed, &why)),
+        why);
 
     auto public_proof_tamper =
         public_proof;
