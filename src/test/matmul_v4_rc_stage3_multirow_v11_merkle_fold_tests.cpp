@@ -5,6 +5,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
+#include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v11_merkle_fold.h>
 #include <matmul/matmul_v4_rc_stage3_v13_merkle_fold_parent.h>
 
@@ -12,12 +13,14 @@
 #include <chrono>
 #include <functional>
 #include <set>
+#include <string_view>
 #include <tuple>
 
 namespace matmul::v4::rc::stage3_multirow_v11_merkle_fold {
 namespace {
 
 using Digest = alg_hash::Digest;
+namespace cb = constraint_bytecode;
 
 struct Tree {
     std::vector<std::vector<Digest>> levels;
@@ -440,6 +443,85 @@ TypedSourceCanaryV1 BuildTypedSourceCanaryV1(
     return out;
 }
 
+TypedSourceCanaryV1
+BuildCanonicalAcceptanceCanaryV1(
+    const aq::AirConstraint<Fp3>& source,
+    bool substitute_constant)
+{
+    BOOST_REQUIRE(
+        std::string_view(source.name) ==
+            "stage3.v13_merkle_fold.hash_acceptance" ||
+        std::string_view(source.name) ==
+            "stage3.v13_merkle_fold.fold_acceptance");
+    BOOST_REQUIRE(
+        source.canonical_program_table_wire !=
+            nullptr);
+    cb::ProgramTable source_table;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::DeserializeProgramTable(
+            *source.canonical_program_table_wire,
+            source_table, &why),
+        why);
+    BOOST_REQUIRE_LT(
+        source.canonical_program_ordinal,
+        source_table.programs.size());
+    cb::Program program =
+        source_table.programs[
+            source.canonical_program_ordinal];
+    BOOST_REQUIRE(
+        program.kind ==
+            aq::AirKind::kFirstRow);
+    BOOST_REQUIRE_EQUAL(
+        program.declared_degree, 1U);
+    bool saw_column = false;
+    bool saw_one = false;
+    for (auto& instruction :
+         program.instructions) {
+        if (instruction.opcode ==
+                cb::Opcode::Current ||
+            instruction.opcode ==
+                cb::Opcode::Next) {
+            instruction.lhs = 0;
+            saw_column = true;
+        }
+        if (instruction.opcode ==
+                cb::Opcode::Constant &&
+            gf::Eq(
+                instruction.constant,
+                Fp3::One())) {
+            saw_one = true;
+            if (substitute_constant) {
+                instruction.constant =
+                    Fp3::Zero();
+            }
+        }
+    }
+    BOOST_REQUIRE(saw_column);
+    BOOST_REQUIRE(saw_one);
+    program.constraint_ordinal = 0;
+    program.current_width = 1;
+    program.next_width = 1;
+    program.challenge_width = 0;
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role = source_table.role;
+    table.current_width = 1;
+    table.next_width = 1;
+    table.challenge_width = 0;
+    table.programs.push_back(
+        std::move(program));
+    TypedSourceCanaryV1 out;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, 2, out.cs, &why),
+        why);
+    out.columns = {{
+        Fp3::One(), Fp3::One()}};
+    return out;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -668,6 +750,16 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(hash.all_abi_words_exported);
     BOOST_CHECK(hash.all_prior_edges_constrained);
     BOOST_CHECK(hash.all_output_roots_constrained);
+    BOOST_CHECK(hash.typed_inputs_canonical_bytecode);
+    BOOST_CHECK(
+        hash.all_relation_constraints_canonical_bytecode);
+    BOOST_CHECK_EQUAL(
+        hash.canonical_typed_input_constraints,
+        hash.plan.inputs.size());
+    BOOST_CHECK_EQUAL(
+        hash.canonical_relation_constraints,
+        hash.cs.constraints.size() -
+            shard.hash_cs.constraints.size());
     BOOST_CHECK_EQUAL(hash.violations, 0U);
     BOOST_CHECK(!hash.source_carriers.empty());
 
@@ -819,6 +911,12 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(fold.index_bits_constrained);
     BOOST_CHECK(fold.domain_point_exponentiation_constrained);
     BOOST_CHECK(fold.fold_chain_constrained);
+    BOOST_CHECK(
+        fold.all_relation_constraints_canonical_bytecode);
+    BOOST_CHECK_EQUAL(
+        fold.canonical_relation_constraints,
+        fold.cs.constraints.size() -
+            shard.fold_cs.constraints.size());
     BOOST_CHECK_EQUAL(fold.violations, 0U);
     BOOST_CHECK(!fold.source_carriers.empty());
 
@@ -1184,6 +1282,117 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(fold_proved.division_exact);
     BOOST_CHECK(aq::AirQuotientVerifyRows(
         shard.fold_cs, fold_proved.proof, seed, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_v13_merkle_fold_tables_prove_and_substitution_reject)
+{
+    namespace parent =
+        stage3_v13_merkle_fold_parent;
+    namespace tape =
+        stage3_multirow_v13_proof_tape_air;
+    tape::PublicShapeV1 shape;
+    shape.trace_rows = 256;
+    shape.trace_columns = 2;
+    shape.quotient_len = 256;
+    shape.n_coeffs = 256;
+    shape.base_column_indices = {0};
+    tape::PublicBindingV1 binding;
+    binding.program_root = FixedRoot(0x61);
+    binding.statement_root = FixedRoot(0x62);
+    binding.public_fs_seed = FixedRoot(0x63);
+    binding.proof_wire_root = FixedRoot(0x64);
+    binding.tape_root = {1, 2, 3, 4};
+    parent::PublicConstraintSystemsV1 systems;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        parent::BuildPublicConstraintSystemsV1(
+            shape, binding,
+            {.ordinal = 0,
+             .first_query = 0,
+             .query_count = 1},
+            systems, &why),
+        why);
+    BOOST_REQUIRE(
+        systems.hash_relations_canonical_bytecode);
+    BOOST_REQUIRE(
+        systems.fold_relations_canonical_bytecode);
+
+    const auto acceptance =
+        [](const auto& cs,
+           const char* name)
+            -> const aq::AirConstraint<Fp3>& {
+            const auto found =
+                std::find_if(
+                    cs.constraints.begin(),
+                    cs.constraints.end(),
+                    [name](const auto& constraint) {
+                        return constraint.name == name;
+                    });
+            BOOST_REQUIRE(
+                found != cs.constraints.end());
+            return *found;
+        };
+    const std::array<const aq::AirConstraint<Fp3>*, 2>
+        sources{{
+            &acceptance(
+                systems.hash_cs,
+                "stage3.v13_merkle_fold.hash_acceptance"),
+            &acceptance(
+                systems.fold_cs,
+                "stage3.v13_merkle_fold.fold_acceptance"),
+        }};
+    using Backend =
+        aq::AirFriBackendAlg<Fp3>;
+    const uint256 seed = uint256::ONE;
+    for (const auto* source : sources) {
+        const auto honest =
+            BuildCanonicalAcceptanceCanaryV1(
+                *source, false);
+        const auto proved =
+            aq::AirQuotientProve<
+                Fp3, Backend>(
+                honest.cs,
+                honest.columns, seed);
+        BOOST_REQUIRE_MESSAGE(
+            proved.ok, proved.note);
+        BOOST_REQUIRE(
+            proved.division_exact);
+        BOOST_REQUIRE_MESSAGE(
+            (aq::AirQuotientVerify<
+                Fp3, Backend>(
+                honest.cs, proved.proof,
+                seed, &why)),
+            why);
+
+        const auto substituted =
+            BuildCanonicalAcceptanceCanaryV1(
+                *source, true);
+        BOOST_CHECK(
+            (!aq::AirQuotientVerify<
+                Fp3, Backend>(
+                substituted.cs,
+                proved.proof,
+                seed, &why)));
+
+        auto tampered = proved.proof;
+        BOOST_REQUIRE(
+            !tampered.batch.queries.empty());
+        BOOST_REQUIRE(
+            !tampered.batch.queries[0]
+                 .row.values.empty());
+        tampered.batch.queries[0]
+            .row.values[0] =
+            gf::Add(
+                tampered.batch.queries[0]
+                    .row.values[0],
+                Fp3::One());
+        BOOST_CHECK(
+            (!aq::AirQuotientVerify<
+                Fp3, Backend>(
+                honest.cs, tampered,
+                seed, &why)));
+    }
 }
 
 BOOST_AUTO_TEST_CASE(readiness_is_explicitly_fail_closed)

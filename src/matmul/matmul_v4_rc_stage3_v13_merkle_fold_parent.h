@@ -117,6 +117,11 @@ struct OrdinaryHashProductV1 {
     bool all_abi_words_exported{false};
     bool all_prior_edges_constrained{false};
     bool all_output_roots_constrained{false};
+    uint32_t canonical_typed_input_constraints{0};
+    bool typed_inputs_canonical_bytecode{false};
+    uint32_t canonical_relation_constraints{0};
+    bool all_relation_constraints_canonical_bytecode{
+        false};
     bool valid{false};
     std::string note;
 };
@@ -178,6 +183,9 @@ struct OrdinaryFoldProductV1 {
     bool index_bits_constrained{false};
     bool domain_point_exponentiation_constrained{false};
     bool fold_chain_constrained{false};
+    uint32_t canonical_relation_constraints{0};
+    bool all_relation_constraints_canonical_bytecode{
+        false};
     bool valid{false};
     std::string note;
 };
@@ -227,6 +235,8 @@ struct PublicConstraintSystemsV1 {
     bool source_schedule_regenerated{false};
     bool task_schedule_regenerated{false};
     bool transformed_systems_rebuilt{false};
+    bool hash_relations_canonical_bytecode{false};
+    bool fold_relations_canonical_bytecode{false};
     bool proof_values_excluded{false};
     bool valid{false};
     std::string note;

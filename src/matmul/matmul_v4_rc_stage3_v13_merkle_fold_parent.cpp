@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_v13_merkle_fold_parent.h>
+#include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_v13_terminal_fold_parent.h>
 
 #include <algorithm>
@@ -20,6 +21,7 @@ namespace {
 using Fp3 = gf::Fp3;
 using Fp = gf::Fp;
 namespace ar = air_recurse;
+namespace cb = constraint_bytecode;
 
 constexpr Fp kOmega2_32 =
     UINT64_C(0x185629dcda58878c);
@@ -164,6 +166,490 @@ void AddConstraint(
     constraint.eval = std::move(eval);
     cs.constraints.push_back(
         std::move(constraint));
+}
+
+uint32_t BcConstant(
+    std::vector<cb::Instruction>& instructions,
+    const Fp3& value)
+{
+    cb::Instruction instruction;
+    instruction.opcode = cb::Opcode::Constant;
+    instruction.constant = value;
+    instructions.push_back(instruction);
+    return static_cast<uint32_t>(
+        instructions.size() - 1);
+}
+
+uint32_t BcCurrent(
+    std::vector<cb::Instruction>& instructions,
+    uint32_t column)
+{
+    cb::Instruction instruction;
+    instruction.opcode = cb::Opcode::Current;
+    instruction.lhs = column;
+    instructions.push_back(instruction);
+    return static_cast<uint32_t>(
+        instructions.size() - 1);
+}
+
+uint32_t BcNext(
+    std::vector<cb::Instruction>& instructions,
+    uint32_t column)
+{
+    cb::Instruction instruction;
+    instruction.opcode = cb::Opcode::Next;
+    instruction.lhs = column;
+    instructions.push_back(instruction);
+    return static_cast<uint32_t>(
+        instructions.size() - 1);
+}
+
+uint32_t BcBinary(
+    std::vector<cb::Instruction>& instructions,
+    cb::Opcode opcode,
+    uint32_t lhs,
+    uint32_t rhs)
+{
+    cb::Instruction instruction;
+    instruction.opcode = opcode;
+    instruction.lhs = lhs;
+    instruction.rhs = rhs;
+    instructions.push_back(instruction);
+    return static_cast<uint32_t>(
+        instructions.size() - 1);
+}
+
+uint32_t BcAdd(
+    std::vector<cb::Instruction>& instructions,
+    uint32_t lhs,
+    uint32_t rhs)
+{
+    return BcBinary(
+        instructions, cb::Opcode::Add,
+        lhs, rhs);
+}
+
+uint32_t BcSub(
+    std::vector<cb::Instruction>& instructions,
+    uint32_t lhs,
+    uint32_t rhs)
+{
+    return BcBinary(
+        instructions, cb::Opcode::Sub,
+        lhs, rhs);
+}
+
+uint32_t BcMul(
+    std::vector<cb::Instruction>& instructions,
+    uint32_t lhs,
+    uint32_t rhs)
+{
+    return BcBinary(
+        instructions, cb::Opcode::Mul,
+        lhs, rhs);
+}
+
+struct PendingCanonicalConstraintV1 {
+    uint32_t constraint_index{UINT32_MAX};
+    cb::Program program{};
+};
+
+cb::Program BcProgram(
+    aq::AirKind kind,
+    uint32_t degree,
+    std::vector<cb::Instruction> instructions)
+{
+    cb::Program out;
+    out.version =
+        cb::kConstraintBytecodeVersion;
+    out.role =
+        RCStage3RelationRole::CompositionLink;
+    out.kind = kind;
+    out.declared_degree = degree;
+    out.instructions =
+        std::move(instructions);
+    return out;
+}
+
+void QueueCanonicalConstraintV1(
+    const aq::AirConstraintSystem<Fp3>& cs,
+    cb::Program program,
+    std::vector<PendingCanonicalConstraintV1>&
+        pending)
+{
+    PendingCanonicalConstraintV1 item;
+    item.constraint_index =
+        static_cast<uint32_t>(
+            cs.constraints.size() - 1U);
+    item.program = std::move(program);
+    pending.push_back(std::move(item));
+}
+
+uint32_t BcRecomposeU32(
+    std::vector<cb::Instruction>& instructions,
+    uint32_t bit_base)
+{
+    uint32_t value =
+        BcConstant(instructions, Fp3::Zero());
+    uint64_t weight = 1;
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        value = BcAdd(
+            instructions, value,
+            BcMul(
+                instructions,
+                BcConstant(
+                    instructions, U(weight)),
+                BcCurrent(
+                    instructions,
+                    bit_base + bit)));
+        weight <<= 1;
+    }
+    return value;
+}
+
+struct AffineFormV1 {
+    Fp3 constant{};
+    std::vector<std::pair<uint32_t, Fp3>>
+        terms;
+};
+
+AffineFormV1 RecoverPermOutputV1(
+    const ar::PermLayout& layout,
+    uint32_t lane)
+{
+    std::vector<Fp3> row(
+        layout.End(), Fp3::Zero());
+    AffineFormV1 out;
+    out.constant =
+        ar::PermOutputLane(
+            layout, row, lane);
+    for (uint32_t column = 0;
+         column < layout.End(); ++column) {
+        row[column] = Fp3::One();
+        const Fp3 coefficient =
+            gf::Sub(
+                ar::PermOutputLane(
+                    layout, row, lane),
+                out.constant);
+        row[column] = Fp3::Zero();
+        if (!gf::IsZero(coefficient)) {
+            out.terms.emplace_back(
+                column, coefficient);
+        }
+    }
+    return out;
+}
+
+uint32_t BcAffine(
+    std::vector<cb::Instruction>& instructions,
+    const AffineFormV1& form)
+{
+    uint32_t value =
+        BcConstant(
+            instructions, form.constant);
+    for (const auto& [column, coefficient] :
+         form.terms) {
+        value = BcAdd(
+            instructions, value,
+            BcMul(
+                instructions,
+                BcConstant(
+                    instructions,
+                    coefficient),
+                BcCurrent(
+                    instructions, column)));
+    }
+    return value;
+}
+
+bool BuildTypedHashInputProgramV1(
+    const HashLaneExpressionV1& expression,
+    uint32_t selector,
+    uint32_t input,
+    uint32_t source_low,
+    uint32_t source_high,
+    uint32_t prior_column,
+    uint32_t derived_column,
+    uint32_t select_bit_column,
+    cb::Program& out)
+{
+    out = {};
+    out.version =
+        cb::kConstraintBytecodeVersion;
+    out.role =
+        RCStage3RelationRole::CompositionLink;
+    out.kind = aq::AirKind::kEverywhere;
+    out.declared_degree =
+        expression.kind ==
+                HashLaneExpressionKindV1::
+                    SelectPriorOrSiblingLeft ||
+            expression.kind ==
+                HashLaneExpressionKindV1::
+                    SelectPriorOrSiblingRight
+        ? 3U
+        : 2U;
+    auto& instructions = out.instructions;
+    const auto current =
+        [&instructions](uint32_t column) {
+            return BcCurrent(
+                instructions, column);
+        };
+    const auto abi_value =
+        [&]() -> std::optional<uint32_t> {
+            if (source_low == UINT32_MAX) {
+                return std::nullopt;
+            }
+            const uint32_t low =
+                current(source_low);
+            if (expression.kind ==
+                    HashLaneExpressionKindV1::
+                        AbiU32 ||
+                expression.kind ==
+                    HashLaneExpressionKindV1::
+                        PriorOutputPlusAbiU32) {
+                return low;
+            }
+            if (source_high == UINT32_MAX) {
+                return std::nullopt;
+            }
+            return BcAdd(
+                instructions, low,
+                BcMul(
+                    instructions,
+                    BcConstant(
+                        instructions,
+                        U(uint64_t{1} << 32)),
+                    current(source_high)));
+        };
+
+    uint32_t expected = UINT32_MAX;
+    switch (expression.kind) {
+    case HashLaneExpressionKindV1::Constant:
+        expected =
+            BcConstant(
+                instructions,
+                expression.constant);
+        break;
+    case HashLaneExpressionKindV1::AbiU32:
+    case HashLaneExpressionKindV1::
+        AbiFpCoordinate: {
+        const auto value = abi_value();
+        if (!value.has_value()) return false;
+        expected = *value;
+        break;
+    }
+    case HashLaneExpressionKindV1::PriorOutput:
+        if (prior_column == UINT32_MAX) {
+            return false;
+        }
+        expected = current(prior_column);
+        break;
+    case HashLaneExpressionKindV1::
+        PriorOutputPlusConstant:
+        if (prior_column == UINT32_MAX) {
+            return false;
+        }
+        expected = BcAdd(
+            instructions,
+            current(prior_column),
+            BcConstant(
+                instructions,
+                expression.constant));
+        break;
+    case HashLaneExpressionKindV1::
+        PriorOutputPlusAbiU32:
+    case HashLaneExpressionKindV1::
+        PriorOutputPlusAbiFpCoordinate: {
+        if (prior_column == UINT32_MAX) {
+            return false;
+        }
+        const auto value = abi_value();
+        if (!value.has_value()) return false;
+        expected = BcAdd(
+            instructions,
+            current(prior_column), *value);
+        break;
+    }
+    case HashLaneExpressionKindV1::
+        DerivedNextIndex:
+        if (derived_column == UINT32_MAX) {
+            return false;
+        }
+        expected = current(derived_column);
+        break;
+    case HashLaneExpressionKindV1::
+        PriorOutputPlusDerivedNextIndex:
+        if (prior_column == UINT32_MAX ||
+            derived_column == UINT32_MAX) {
+            return false;
+        }
+        expected = BcAdd(
+            instructions,
+            current(prior_column),
+            current(derived_column));
+        break;
+    case HashLaneExpressionKindV1::
+        SelectPriorOrSiblingLeft:
+    case HashLaneExpressionKindV1::
+        SelectPriorOrSiblingRight: {
+        if (prior_column == UINT32_MAX ||
+            select_bit_column == UINT32_MAX) {
+            return false;
+        }
+        const auto sibling = abi_value();
+        if (!sibling.has_value()) return false;
+        const uint32_t prior =
+            current(prior_column);
+        const uint32_t bit =
+            current(select_bit_column);
+        expected =
+            expression.kind ==
+                HashLaneExpressionKindV1::
+                    SelectPriorOrSiblingLeft
+            ? BcAdd(
+                  instructions, prior,
+                  BcMul(
+                      instructions, bit,
+                      BcSub(
+                          instructions,
+                          *sibling, prior)))
+            : BcAdd(
+                  instructions, *sibling,
+                  BcMul(
+                      instructions, bit,
+                      BcSub(
+                          instructions,
+                          prior, *sibling)));
+        break;
+    }
+    case HashLaneExpressionKindV1::Unresolved:
+        return false;
+    }
+    BcMul(
+        instructions,
+        current(selector),
+        BcSub(
+            instructions,
+            current(input), expected));
+    return true;
+}
+
+bool InstallCanonicalConstraintsV1(
+    uint32_t n_rows,
+    uint32_t n_columns,
+    std::vector<PendingCanonicalConstraintV1>& pending,
+    aq::AirConstraintSystem<Fp3>& cs,
+    std::string* why)
+{
+    if (pending.empty()) {
+        return false;
+    }
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = n_columns;
+    table.next_width = n_columns;
+    table.challenge_width = 0;
+    table.programs.reserve(pending.size());
+    for (uint32_t ordinal = 0;
+         ordinal < pending.size();
+         ++ordinal) {
+        auto& item = pending[ordinal];
+        if (item.constraint_index >=
+                cs.constraints.size()) {
+            return false;
+        }
+        item.program.constraint_ordinal =
+            ordinal;
+        item.program.current_width =
+            n_columns;
+        item.program.next_width =
+            n_columns;
+        item.program.challenge_width = 0;
+        std::string program_why;
+        if (!cb::ValidateProgram(
+                item.program,
+                &program_why)) {
+            if (why != nullptr) {
+                *why =
+                    "typed_hash_program_" +
+                    std::to_string(ordinal) +
+                    ":" + program_why;
+            }
+            return false;
+        }
+        table.programs.push_back(
+            std::move(item.program));
+    }
+    aq::AirConstraintSystem<Fp3> canonical;
+    if (!cb::BuildAirConstraintSystemFromProgramTable(
+            table, n_rows, canonical, why) ||
+        canonical.constraints.size() !=
+            pending.size()) {
+        return false;
+    }
+    std::vector<Fp3> differential_current(
+        n_columns);
+    std::vector<Fp3> differential_next(
+        n_columns);
+    for (uint32_t column = 0;
+         column < n_columns;
+         ++column) {
+        differential_current[column] =
+            Fp3{
+                gf::FromU64(
+                    1 + uint64_t{17} * column),
+                gf::FromU64(
+                    3 + uint64_t{29} * column),
+                gf::FromU64(
+                    5 + uint64_t{43} * column)};
+        differential_next[column] =
+            Fp3{
+                gf::FromU64(
+                    7 + uint64_t{47} * column),
+                gf::FromU64(
+                    11 + uint64_t{53} * column),
+                gf::FromU64(
+                    13 + uint64_t{61} * column)};
+    }
+    for (uint32_t ordinal = 0;
+         ordinal < pending.size();
+         ++ordinal) {
+        const uint32_t index =
+            pending[ordinal]
+                .constraint_index;
+        const auto& native =
+            cs.constraints[index];
+        const auto& rebuilt =
+            canonical.constraints[ordinal];
+        if (native.kind != rebuilt.kind ||
+            native.alg_degree !=
+                rebuilt.alg_degree ||
+            !gf::Eq(
+                native.eval(
+                    differential_current,
+                    differential_next),
+                rebuilt.eval(
+                    differential_current,
+                    differential_next))) {
+            if (why != nullptr) {
+                *why =
+                    "typed_hash_bytecode_differential_" +
+                    std::to_string(ordinal);
+            }
+            return false;
+        }
+        auto rebuilt_constraint =
+            std::move(
+                canonical.constraints[ordinal]);
+        rebuilt_constraint.name =
+            native.name;
+        cs.constraints[index] =
+            std::move(rebuilt_constraint);
+    }
+    return true;
 }
 
 bool IsPinColumn(
@@ -1173,6 +1659,9 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
     }
     out.cs = shard.hash_cs;
     out.columns = shard.hash_columns;
+    const uint32_t first_relation_constraint =
+        static_cast<uint32_t>(
+            out.cs.constraints.size());
     out.cs.preprocessed.erase(
         std::remove_if(
             out.cs.preprocessed.begin(),
@@ -1182,8 +1671,12 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                     shard.hash_layout,
                     item.first);
             }),
-        out.cs.preprocessed.end());
+    out.cs.preprocessed.end());
     out.cs.preprocessed_pin_ood = false;
+    std::vector<PendingCanonicalConstraintV1>
+        canonical_constraints;
+    canonical_constraints.reserve(
+        out.plan.inputs.size() + 1024U);
 
     const auto append_column =
         [&out](std::vector<Fp3> values) {
@@ -1285,6 +1778,17 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                     next[column],
                     current[column]);
             });
+        std::vector<cb::Instruction> program;
+        BcSub(
+            program,
+            BcNext(program, column),
+            BcCurrent(program, column));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kTransition,
+                1, std::move(program)),
+            canonical_constraints);
     }
 
     std::map<uint32_t, uint32_t>
@@ -1316,6 +1820,21 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                             current[column],
                             Fp3::One()));
                 });
+            std::vector<cb::Instruction> program;
+            const uint32_t value =
+                BcCurrent(program, column);
+            BcMul(
+                program, value,
+                BcSub(
+                    program, value,
+                    BcConstant(
+                        program, Fp3::One())));
+            QueueCanonicalConstraintV1(
+                out.cs,
+                BcProgram(
+                    aq::AirKind::kEverywhere,
+                    2, std::move(program)),
+                canonical_constraints);
         }
         AddConstraint(
             out.cs,
@@ -1340,6 +1859,17 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                 return gf::Sub(
                     current[source], value);
             });
+        std::vector<cb::Instruction> program;
+        BcSub(
+            program,
+            BcCurrent(program, source_columns.at(address)),
+            BcRecomposeU32(program, base));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                1, std::move(program)),
+            canonical_constraints);
     }
 
     struct DerivedIndexV1 {
@@ -1418,6 +1948,24 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                             current[column],
                             Fp3::One()));
                 });
+            std::vector<cb::Instruction> bit_program;
+            const uint32_t bit_value =
+                BcCurrent(
+                    bit_program, column);
+            BcMul(
+                bit_program, bit_value,
+                BcSub(
+                    bit_program, bit_value,
+                    BcConstant(
+                        bit_program,
+                        Fp3::One())));
+            QueueCanonicalConstraintV1(
+                out.cs,
+                BcProgram(
+                    aq::AirKind::kEverywhere,
+                    2,
+                    std::move(bit_program)),
+                canonical_constraints);
             if (bit >= domain_bits) {
                 AddConstraint(
                     out.cs,
@@ -1428,6 +1976,17 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                         const auto&) {
                         return current[column];
                     });
+                std::vector<cb::Instruction>
+                    range_program;
+                BcCurrent(
+                    range_program, column);
+                QueueCanonicalConstraintV1(
+                    out.cs,
+                    BcProgram(
+                        aq::AirKind::kEverywhere,
+                        1,
+                        std::move(range_program)),
+                    canonical_constraints);
                 const uint32_t query_bit =
                     index_bit_bases.at(
                         address) + bit;
@@ -1441,6 +2000,19 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                         return current[
                             query_bit];
                     });
+                std::vector<cb::Instruction>
+                    query_range_program;
+                BcCurrent(
+                    query_range_program,
+                    query_bit);
+                QueueCanonicalConstraintV1(
+                    out.cs,
+                    BcProgram(
+                        aq::AirKind::kEverywhere,
+                        1,
+                        std::move(
+                            query_range_program)),
+                    canonical_constraints);
             }
         }
         AddConstraint(
@@ -1467,6 +2039,22 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                     current[item.value],
                     value);
             });
+        std::vector<cb::Instruction>
+            recompose_program;
+        BcSub(
+            recompose_program,
+            BcCurrent(
+                recompose_program, item.value),
+            BcRecomposeU32(
+                recompose_program,
+                item.bit_base));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                1,
+                std::move(recompose_program)),
+            canonical_constraints);
         AddConstraint(
             out.cs,
             "stage3.v13_merkle_fold.next_index_wrap_boolean",
@@ -1480,6 +2068,23 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                         current[column],
                         Fp3::One()));
             });
+        std::vector<cb::Instruction> wrap_program;
+        const uint32_t wrap_value =
+            BcCurrent(
+                wrap_program, item.wrap);
+        BcMul(
+            wrap_program, wrap_value,
+            BcSub(
+                wrap_program, wrap_value,
+                BcConstant(
+                    wrap_program,
+                    Fp3::One())));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                2, std::move(wrap_program)),
+            canonical_constraints);
         AddConstraint(
             out.cs,
             "stage3.v13_merkle_fold.next_index_add",
@@ -1500,6 +2105,33 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                             current[
                                 item.wrap])));
             });
+        std::vector<cb::Instruction> add_program;
+        BcSub(
+            add_program,
+            BcAdd(
+                add_program,
+                BcCurrent(
+                    add_program,
+                    source_columns.at(address)),
+                BcConstant(
+                    add_program, U(stride))),
+            BcAdd(
+                add_program,
+                BcCurrent(
+                    add_program, item.value),
+                BcMul(
+                    add_program,
+                    BcConstant(
+                        add_program, U(n_lde)),
+                    BcCurrent(
+                        add_program,
+                        item.wrap))));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                1, std::move(add_program)),
+            canonical_constraints);
         derived[address] = item;
     }
 
@@ -1566,6 +2198,18 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                     next[column],
                     current[column]);
             });
+        std::vector<cb::Instruction> carry_program;
+        BcSub(
+            carry_program,
+            BcNext(carry_program, item.value),
+            BcCurrent(
+                carry_program, item.value));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kTransition,
+                1, std::move(carry_program)),
+            canonical_constraints);
         AddConstraint(
             out.cs,
             "stage3.v13_merkle_fold.prior_output_source",
@@ -1585,6 +2229,28 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                             perm, current,
                             lane)));
             });
+        std::vector<cb::Instruction> source_program;
+        BcMul(
+            source_program,
+            BcCurrent(
+                source_program,
+                item.source_selector),
+            BcSub(
+                source_program,
+                BcCurrent(
+                    source_program, item.value),
+                BcAffine(
+                    source_program,
+                    RecoverPermOutputV1(
+                        shard.hash_layout
+                            .poseidon.perm,
+                        lane))));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                2, std::move(source_program)),
+            canonical_constraints);
         priors[key] = item;
     }
 
@@ -1651,10 +2317,23 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                           .selector_address) +
                       expression.selector_bit;
         }
+        const uint32_t constraint_index =
+            static_cast<uint32_t>(
+                out.cs.constraints.size());
+        const uint32_t typed_degree =
+            expression.kind ==
+                    HashLaneExpressionKindV1::
+                        SelectPriorOrSiblingLeft ||
+                expression.kind ==
+                    HashLaneExpressionKindV1::
+                        SelectPriorOrSiblingRight
+            ? 3U
+            : 2U;
         AddConstraint(
             out.cs,
             "stage3.v13_merkle_fold.typed_hash_input",
-            aq::AirKind::kEverywhere, 3,
+            aq::AirKind::kEverywhere,
+            typed_degree,
             [expression, selector, input,
              source_low, source_high,
              prior_column, derived_column,
@@ -1770,6 +2449,20 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                         current[input],
                         expected));
             });
+        PendingCanonicalConstraintV1 pending;
+        pending.constraint_index =
+            constraint_index;
+        if (!BuildTypedHashInputProgramV1(
+                expression, selector, input,
+                source_low, source_high,
+                prior_column, derived_column,
+                select_bit_column,
+                pending.program)) {
+            return fail(
+                "typed_hash_bytecode");
+        }
+        canonical_constraints.push_back(
+            std::move(pending));
     }
     for (const auto& alias :
          out.plan.outputs) {
@@ -1804,6 +2497,34 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                         current[output],
                         expected));
             });
+        std::vector<cb::Instruction> output_program;
+        BcMul(
+            output_program,
+            BcCurrent(
+                output_program, selector),
+            BcSub(
+                output_program,
+                BcCurrent(
+                    output_program, output),
+                BcAdd(
+                    output_program,
+                    BcCurrent(
+                        output_program, low),
+                    BcMul(
+                        output_program,
+                        BcConstant(
+                            output_program,
+                            U(uint64_t{1}
+                              << 32)),
+                        BcCurrent(
+                            output_program,
+                            high)))));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                2, std::move(output_program)),
+            canonical_constraints);
     }
     for (uint32_t lane = 0;
          lane < alg_hash::kAlgHashT;
@@ -1821,6 +2542,20 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                     current[padding_column],
                     current[input]);
             });
+        std::vector<cb::Instruction> padding_program;
+        BcMul(
+            padding_program,
+            BcCurrent(
+                padding_program,
+                padding_column),
+            BcCurrent(
+                padding_program, input));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                2, std::move(padding_program)),
+            canonical_constraints);
     }
     const uint32_t acceptance =
         append_column(
@@ -1840,11 +2575,47 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
                 current[acceptance],
                 Fp3::One());
         });
+    std::vector<cb::Instruction> acceptance_program;
+    BcSub(
+        acceptance_program,
+        BcCurrent(
+            acceptance_program, acceptance),
+        BcConstant(
+            acceptance_program,
+            Fp3::One()));
+    QueueCanonicalConstraintV1(
+        out.cs,
+        BcProgram(
+            aq::AirKind::kFirstRow,
+            1, std::move(acceptance_program)),
+        canonical_constraints);
     out.acceptance = {acceptance, 0};
-
     out.violations =
         CountViolationsV1(
             out.cs, out.columns);
+    std::string canonical_why;
+    if (!InstallCanonicalConstraintsV1(
+            out.cs.n_rows, out.cs.n_columns,
+            canonical_constraints,
+            out.cs, &canonical_why)) {
+        return fail(
+            "typed_hash_bytecode_install:" +
+            canonical_why);
+    }
+    out.canonical_typed_input_constraints =
+        static_cast<uint32_t>(
+            out.plan.inputs.size());
+    out.typed_inputs_canonical_bytecode =
+        out.canonical_typed_input_constraints ==
+            out.plan.inputs.size() &&
+        canonical_constraints.size() ==
+            out.cs.constraints.size() -
+                first_relation_constraint;
+    out.canonical_relation_constraints =
+        static_cast<uint32_t>(
+            canonical_constraints.size());
+    out.all_relation_constraints_canonical_bytecode =
+        out.typed_inputs_canonical_bytecode;
     out.proof_pins_ordinary = true;
     out.selectors_and_constants_only_preprocessed =
         std::none_of(
@@ -1869,12 +2640,38 @@ OrdinaryHashProductV1 BuildOrdinaryHashProductV1(
         out.selectors_and_constants_only_preprocessed &&
         out.all_abi_words_exported &&
         out.all_prior_edges_constrained &&
-        out.all_output_roots_constrained;
+        out.all_output_roots_constrained &&
+        out.typed_inputs_canonical_bytecode &&
+        out.all_relation_constraints_canonical_bytecode;
     out.note = out.valid
         ? "stage3:v13_merkle_fold_parent:"
           "ordinary_typed_hash_product"
         : "stage3:v13_merkle_fold_parent:"
-          "ordinary_hash_invalid";
+          "ordinary_hash_invalid:canonical=" +
+              std::to_string(
+                  out.canonical_relation_constraints) +
+              ":required=" +
+              std::to_string(
+                  out.cs.constraints.size() -
+                  first_relation_constraint) +
+              ":violations=" +
+              std::to_string(out.violations) +
+              ":typed=" +
+              std::to_string(
+                  out.typed_inputs_canonical_bytecode) +
+              ":pins=" +
+              std::to_string(out.proof_pins_ordinary) +
+              ":pre=" +
+              std::to_string(
+                  out.selectors_and_constants_only_preprocessed) +
+              ":abi=" +
+              std::to_string(out.all_abi_words_exported) +
+              ":prior=" +
+              std::to_string(
+                  out.all_prior_edges_constrained) +
+              ":roots=" +
+              std::to_string(
+                  out.all_output_roots_constrained);
     return out;
 }
 
@@ -2119,6 +2916,12 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
     }
     out.cs = shard.fold_cs;
     out.columns = shard.fold_columns;
+    const uint32_t first_relation_constraint =
+        static_cast<uint32_t>(
+            out.cs.constraints.size());
+    std::vector<PendingCanonicalConstraintV1>
+        canonical_constraints;
+    canonical_constraints.reserve(1024U);
     const auto& layout =
         shard.fold_layout;
     const std::set<uint32_t>
@@ -2211,6 +3014,17 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                     next[column],
                     current[column]);
             });
+        std::vector<cb::Instruction> program;
+        BcSub(
+            program,
+            BcNext(program, column),
+            BcCurrent(program, column));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kTransition,
+                1, std::move(program)),
+            canonical_constraints);
     }
 
     std::vector<uint32_t> row_selectors(
@@ -2246,7 +3060,8 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
             row_selectors[row.row];
         const auto add_field_alias =
             [&out, selector,
-             &field_columns](
+             &field_columns,
+             &canonical_constraints](
                 uint32_t target,
                 const std::array<uint32_t, 6>&
                     source) {
@@ -2295,6 +3110,58 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                                 current[target],
                                 expected));
                     });
+                std::vector<cb::Instruction> program;
+                uint32_t expected =
+                    BcConstant(
+                        program, Fp3::Zero());
+                for (uint32_t coordinate = 0;
+                     coordinate < 3;
+                     ++coordinate) {
+                    const uint32_t word =
+                        BcAdd(
+                            program,
+                            BcCurrent(
+                                program,
+                                columns[
+                                    2 * coordinate]),
+                            BcMul(
+                                program,
+                                BcConstant(
+                                    program,
+                                    U(uint64_t{1}
+                                      << 32)),
+                                BcCurrent(
+                                    program,
+                                    columns[
+                                        2 *
+                                            coordinate +
+                                        1])));
+                    expected =
+                        BcAdd(
+                            program, expected,
+                            BcMul(
+                                program,
+                                BcConstant(
+                                    program,
+                                    Basis(
+                                        coordinate)),
+                                word));
+                }
+                BcMul(
+                    program,
+                    BcCurrent(
+                        program, selector),
+                    BcSub(
+                        program,
+                        BcCurrent(
+                            program, target),
+                        expected));
+                QueueCanonicalConstraintV1(
+                    out.cs,
+                    BcProgram(
+                        aq::AirKind::kEverywhere,
+                        2, std::move(program)),
+                    canonical_constraints);
             };
         add_field_alias(
             layout.even, row.even);
@@ -2332,6 +3199,20 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                             current[target],
                             current[source]));
                 });
+            std::vector<cb::Instruction> program;
+            BcMul(
+                program,
+                BcCurrent(program, selector),
+                BcSub(
+                    program,
+                    BcCurrent(program, target),
+                    BcCurrent(program, source)));
+            QueueCanonicalConstraintV1(
+                out.cs,
+                BcProgram(
+                    aq::AirKind::kEverywhere,
+                    2, std::move(program)),
+                canonical_constraints);
         }
     }
 
@@ -2367,6 +3248,21 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                         current[column],
                         Fp3::One()));
             });
+        std::vector<cb::Instruction> program;
+        const uint32_t value =
+            BcCurrent(program, column);
+        BcMul(
+            program, value,
+            BcSub(
+                program, value,
+                BcConstant(
+                    program, Fp3::One())));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                2, std::move(program)),
+            canonical_constraints);
     }
     AddConstraint(
         out.cs,
@@ -2390,6 +3286,20 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
             return gf::Sub(
                 current[index], expected);
         });
+    std::vector<cb::Instruction> recompose_program;
+    BcSub(
+        recompose_program,
+        BcCurrent(
+            recompose_program,
+            layout.even_index),
+        BcRecomposeU32(
+            recompose_program, bit_base));
+    QueueCanonicalConstraintV1(
+        out.cs,
+        BcProgram(
+            aq::AirKind::kEverywhere,
+            1, std::move(recompose_program)),
+        canonical_constraints);
 
     const uint32_t power_base =
         out.cs.n_columns;
@@ -2450,6 +3360,24 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                         current[
                             allowed_column]));
             });
+        std::vector<cb::Instruction> program;
+        BcMul(
+            program,
+            BcCurrent(
+                program, bit_base + bit),
+            BcSub(
+                program,
+                BcConstant(
+                    program, Fp3::One()),
+                BcCurrent(
+                    program,
+                    allowed_base + bit)));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                2, std::move(program)),
+            canonical_constraints);
     }
 
     const uint32_t accumulator_base =
@@ -2506,6 +3434,19 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                 current[column],
                 Fp3::One());
         });
+    std::vector<cb::Instruction> start_program;
+    BcSub(
+        start_program,
+        BcCurrent(
+            start_program, accumulator_base),
+        BcConstant(
+            start_program, Fp3::One()));
+    QueueCanonicalConstraintV1(
+        out.cs,
+        BcProgram(
+            aq::AirKind::kEverywhere,
+            1, std::move(start_program)),
+        canonical_constraints);
     for (uint32_t bit = 0;
          bit < 32; ++bit) {
         AddConstraint(
@@ -2539,6 +3480,43 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                             current_acc],
                         factor));
             });
+        std::vector<cb::Instruction> program;
+        const uint32_t factor =
+            BcAdd(
+                program,
+                BcConstant(
+                    program, Fp3::One()),
+                BcMul(
+                    program,
+                    BcCurrent(
+                        program,
+                        bit_base + bit),
+                    BcSub(
+                        program,
+                        BcCurrent(
+                            program,
+                            power_base + bit),
+                        BcConstant(
+                            program,
+                            Fp3::One()))));
+        BcSub(
+            program,
+            BcCurrent(
+                program,
+                accumulator_base +
+                    bit + 1),
+            BcMul(
+                program,
+                BcCurrent(
+                    program,
+                    accumulator_base + bit),
+                factor));
+        QueueCanonicalConstraintV1(
+            out.cs,
+            BcProgram(
+                aq::AirKind::kEverywhere,
+                3, std::move(program)),
+            canonical_constraints);
     }
     AddConstraint(
         out.cs,
@@ -2553,6 +3531,20 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                 current[x],
                 current[final_acc]);
         });
+    std::vector<cb::Instruction> bind_program;
+    BcSub(
+        bind_program,
+        BcCurrent(
+            bind_program, layout.x),
+        BcCurrent(
+            bind_program,
+            accumulator_base + 32));
+    QueueCanonicalConstraintV1(
+        out.cs,
+        BcProgram(
+            aq::AirKind::kEverywhere,
+            1, std::move(bind_program)),
+        canonical_constraints);
 
     const uint32_t acceptance =
         append_column(
@@ -2572,11 +3564,52 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
                 current[acceptance],
                 Fp3::One());
         });
+    std::vector<cb::Instruction> acceptance_program;
+    BcSub(
+        acceptance_program,
+        BcCurrent(
+            acceptance_program, acceptance),
+        BcConstant(
+            acceptance_program,
+            Fp3::One()));
+    QueueCanonicalConstraintV1(
+        out.cs,
+        BcProgram(
+            aq::AirKind::kFirstRow,
+            1, std::move(acceptance_program)),
+        canonical_constraints);
     out.acceptance = {acceptance, 0};
 
     out.violations =
         CountViolationsV1(
             out.cs, out.columns);
+    out.fold_chain_constrained =
+        std::any_of(
+            out.cs.constraints.begin(),
+            out.cs.constraints.end(),
+            [](const auto& constraint) {
+                return constraint.name ==
+                    "stage3.v11_merkle_fold.chain";
+            });
+    std::string canonical_why;
+    if (!InstallCanonicalConstraintsV1(
+            out.cs.n_rows, out.cs.n_columns,
+            canonical_constraints,
+            out.cs, &canonical_why) ||
+        canonical_constraints.size() !=
+            out.cs.constraints.size() -
+                first_relation_constraint) {
+        return fail(
+            "fold_bytecode_install:" +
+            canonical_why);
+    }
+    out.canonical_relation_constraints =
+        static_cast<uint32_t>(
+            canonical_constraints.size());
+    out.all_relation_constraints_canonical_bytecode =
+        out.canonical_relation_constraints ==
+            out.cs.constraints.size() -
+                first_relation_constraint;
     out.proof_pins_ordinary = true;
     out.schedule_only_preprocessed =
         std::all_of(
@@ -2597,14 +3630,6 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
     out.index_bits_constrained = true;
     out.domain_point_exponentiation_constrained =
         true;
-    out.fold_chain_constrained =
-        std::any_of(
-            out.cs.constraints.begin(),
-            out.cs.constraints.end(),
-            [](const auto& constraint) {
-                return constraint.name ==
-                    "stage3.v11_merkle_fold.chain";
-            });
     out.valid =
         out.violations == 0 &&
         out.proof_pins_ordinary &&
@@ -2612,7 +3637,8 @@ OrdinaryFoldProductV1 BuildOrdinaryFoldProductV1(
         out.all_abi_words_exported &&
         out.index_bits_constrained &&
         out.domain_point_exponentiation_constrained &&
-        out.fold_chain_constrained;
+        out.fold_chain_constrained &&
+        out.all_relation_constraints_canonical_bytecode;
     out.note = out.valid
         ? "stage3:v13_merkle_fold_parent:"
           "ordinary_typed_fold_product"
@@ -3234,6 +4260,15 @@ bool BuildPublicConstraintSystemsV1(
     auto fold =
         BuildOrdinaryFoldProductV1(
             decoded, structural);
+    if (!hash.plan.valid ||
+        !fold.plan.valid ||
+        !hash.all_relation_constraints_canonical_bytecode ||
+        !fold.all_relation_constraints_canonical_bytecode) {
+        return Fail(
+            why,
+            "public_relation_products:" +
+                hash.note + ":" + fold.note);
+    }
     out.hash_plan = hash.plan;
     out.fold_plan = fold.plan;
     out.hash_cs = std::move(hash.cs);
@@ -3292,6 +4327,10 @@ bool BuildPublicConstraintSystemsV1(
                 .fold_cs.n_columns &&
         !out.hash_cs.constraints.empty() &&
         !out.fold_cs.constraints.empty();
+    out.hash_relations_canonical_bytecode =
+        hash.all_relation_constraints_canonical_bytecode;
+    out.fold_relations_canonical_bytecode =
+        fold.all_relation_constraints_canonical_bytecode;
     out.proof_values_excluded =
         out.canonical_shape
             .proof_values_excluded &&
@@ -3301,6 +4340,8 @@ bool BuildPublicConstraintSystemsV1(
         out.source_schedule_regenerated &&
         out.task_schedule_regenerated &&
         out.transformed_systems_rebuilt &&
+        out.hash_relations_canonical_bytecode &&
+        out.fold_relations_canonical_bytecode &&
         out.proof_values_excluded;
     out.note = out.valid
         ? "stage3:v13_merkle_fold_parent:"
