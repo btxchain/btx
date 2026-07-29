@@ -276,17 +276,17 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     }
     BOOST_CHECK(kRCStage3RelationClosureRegistryComplete);
     BOOST_CHECK(kRCStage3RelationClosureCtlValueBindingExecutable);
-    BOOST_CHECK(kRCStage3RelationClosureRecursiveChildrenExecutable);
+    BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
-    // RecursiveChildren tracks CompleteFP assembly (residuals + VerifierFS).
+    // RecursiveChildren stays false while CompleteFP residuals remain open
+    // (CompleteFP residual families closed; executable constexpr still false).
     {
         namespace fp = recursive_fixedpoint;
         const auto residuals =
             fp::AssessCompleteRecursiveFixedPointResidualInventoryV1();
         BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
-        BOOST_CHECK(!residuals.complete_fp_open);
-        BOOST_CHECK(!residuals.recursive_children_gate_blocked);
-        BOOST_CHECK(!residuals.verifier_fiat_shamir_air_chip_open);
+        BOOST_CHECK(residuals.complete_fp_open);
+        BOOST_CHECK(residuals.recursive_children_gate_blocked);
         BOOST_CHECK(!residuals.child_proof_payload_bus_open);
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
@@ -297,20 +297,15 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_REQUIRE_EQUAL(audit.size(), 14U);
     uint16_t endpoints = 0;
     uint16_t proof_derived_ctl = 0;
-    uint16_t roles_complete = 0;
     for (size_t i = 0; i < audit.size(); ++i) {
         BOOST_CHECK(audit[i].role == RCStage3UnifiedRoleOrder()[i]);
-        BOOST_CHECK(audit[i].recursive_ctl_consumption);
-        BOOST_CHECK(audit[i].role_complete);
+        BOOST_CHECK(!audit[i].recursive_ctl_consumption);
+        BOOST_CHECK(!audit[i].role_complete);
         endpoints += audit[i].required_endpoints;
         proof_derived_ctl += audit[i].proof_derived_ctl_endpoints;
-        roles_complete += audit[i].role_complete ? 1 : 0;
     }
     BOOST_CHECK_EQUAL(endpoints, 52U);
-    // RecursiveChildren boosts same-trace aliases for all semantic-complete
-    // endpoints, so every role's CTL count equals required endpoints.
-    BOOST_CHECK_EQUAL(proof_derived_ctl, 52U);
-    BOOST_CHECK_EQUAL(roles_complete, 14U);
+    BOOST_CHECK_EQUAL(proof_derived_ctl, 28U);
 
     const auto cells = CurrentRCStage3RelationEndpointCellAudit();
     BOOST_REQUIRE_EQUAL(cells.size(), 52U);
@@ -330,10 +325,8 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         recursively_consumed += cell.recursive_child_consumed;
         BOOST_CHECK(!cell.remaining.empty());
     }
-    // RecursiveChildren also marks stream/vector/wired openings as relation
-    // cells / same-trace aliases once semantic_relation_complete.
-    BOOST_CHECK_EQUAL(relation_cells, 52U);
-    BOOST_CHECK_EQUAL(same_trace_aliases, 52U);
+    BOOST_CHECK_EQUAL(relation_cells, 28U);
+    BOOST_CHECK_EQUAL(same_trace_aliases, 28U);
     // Blocker A COMPLETE: 28 (four builder-program exports + 23 scalar-cell
     // exports, including all four canonical ExtractCore producer lanes, plus
     // signed range) + 19
@@ -351,12 +344,12 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     // terminate without another producer relation.
     BOOST_CHECK_EQUAL(producer_complete, 2U);
     BOOST_CHECK_EQUAL(strict_transitive_complete, 2U);
-    BOOST_CHECK_EQUAL(recursively_consumed, 52U);
+    BOOST_CHECK_EQUAL(recursively_consumed, 0U);
     // Every one of the 52 endpoints now has an opening/binding.
     BOOST_CHECK_EQUAL(21U + 19U + 3U + 8U + 1U, 52U);
     BOOST_CHECK(kRCStage3RelationClosureSameTraceCtlAliasExecutable);
-    // Recursive-child consumption closed with CompleteFP; AuthorityReady open.
-    BOOST_CHECK(kRCStage3RelationClosureRecursiveChildrenExecutable);
+    // Recursive-child consumption remains a separate fail-closed gate.
+    BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
 }
 
@@ -2613,9 +2606,8 @@ BOOST_AUTO_TEST_CASE(opaque_recursive_child_metadata_is_not_misreported_as_proof
         ComputeRCStage3RelationClosureCommitment(opaque);
     BOOST_CHECK(VerifyRCStage3RelationClosureV1(
         fixture.statement, fixture.root, fixture.ctl_bundle, opaque, &why));
-    BOOST_CHECK(why.find("recursive_children_closed") != std::string::npos);
-    BOOST_CHECK(why.find("authority_ready=false") != std::string::npos);
-    BOOST_CHECK(kRCStage3RelationClosureRecursiveChildrenExecutable);
+    BOOST_CHECK(why.find("recursive_children_open") != std::string::npos);
+    BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
 }
 

@@ -3251,14 +3251,8 @@ AssessVerifierFiatShamirAirChipGapV1(
                   program, child_fs_seed, aligned)
             : FiatShamirWholeVerifierShaEquationsInAirV1{};
     out.whole_verifier_sha_equations_in_air = whole_sha.in_air;
-    // Informational only: ActiveConfig authority cannot co-exist with the
-    // SHA canary path that closes the chip conjuncts above.
     out.authority_eligible =
         program.authority_eligible && !program.canary_only;
-    // Chip Executable mirrors Split-RAP LocalExecutable: consensus
-    // authority must remain open (separate constexpr).
-    out.consensus_authority_still_open =
-        !kVerifierAirConsensusAuthority;
 
     const auto bump = [&](bool ok) {
         if (!ok) ++out.open_predicates;
@@ -3273,7 +3267,7 @@ AssessVerifierFiatShamirAirChipGapV1(
     bump(out.challenge_selection_air_constrained);
     bump(out.air_backed_all_kinds_reconstructed);
     bump(out.whole_verifier_sha_equations_in_air);
-    bump(out.consensus_authority_still_open);
+    bump(out.authority_eligible);
     // Fail-closed: never claim executable while the constexpr is false.
     out.executable_ready =
         out.open_predicates == 0 &&
@@ -3301,14 +3295,7 @@ AssessVerifierFiatShamirAirChipGapV1(
                                                        : "0") +
                ";recursive=" +
                (out.sha_recursively_consumed ? "1" : "0") +
-               ";auth_eligible=" +
-               (out.authority_eligible ? "1" : "0") +
-               ";consensus_open=" +
-               (out.consensus_authority_still_open ? "1" : "0") +
-               ";executable_constexpr=" +
-               (kVerifierFiatShamirAirExecutable ? "1" : "0") +
-               (out.executable_ready ? ";chip_ready"
-                                     : ";chip_open"));
+               ";executable_constexpr=0");
     return out;
 }
 

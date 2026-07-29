@@ -7636,12 +7636,7 @@ bool VerifyRCStage3RelationClosureV1(
         return Fail(why, "closure_commitment");
     }
     if (why != nullptr) {
-        *why = kRCStage3RelationClosureRecursiveChildrenExecutable
-                   ? "stage3:relation_closure:v1_binding_ok_"
-                     "recursive_children_closed;"
-                     "authority_ready=false"
-                   : "stage3:relation_closure:v1_binding_ok_"
-                     "recursive_children_open";
+        *why = "stage3:relation_closure:v1_binding_ok_recursive_children_open";
     }
     return true;
 }

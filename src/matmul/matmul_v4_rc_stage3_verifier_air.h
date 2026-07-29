@@ -609,18 +609,11 @@ BuildFiatShamirShaExecutionPlanV1(
     const AlgAirProof& child_proof);
 
 /**
- * Inventory of predicates for flipping `kVerifierFiatShamirAirExecutable`.
- *
- * Chip Executable means the bounded SHA-FS AIR path (fixed OOD K-window,
- * SHA execution plan, selection AIR, 8/8 kinds, recursive SHA + non-SHA
- * consume, whole-verifier SHA equations) measures green on a concrete
- * (program, seed, proof). ActiveConfig / Q192 Poseidon2 authority stays a
- * separate gate (`kVerifierAirConsensusAuthority`): production P2 cannot
- * satisfy the SHA-plan conjuncts, and the SHA canary cannot be
- * `authority_eligible`, so chip Executable deliberately does not require
- * `authority_eligible`. Fail-closed: `executable_ready` is true only when
- * every chip conjunct is green, consensus authority is still open, AND the
- * constexpr is true.
+ * Inventory of predicates that still block flipping
+ * `kVerifierFiatShamirAirExecutable`.  Fail-closed: `executable_ready` is
+ * true only when every conjunct below is measured green.  Does NOT flip the
+ * constexpr — callers must keep Ready/CompleteFP false until this reports
+ * ready AND the SHA AIR / parent join are differentially tested.
  */
 struct VerifierFiatShamirAirChipGapV1 {
     bool bounded_ood_program_legislated{false};
@@ -633,11 +626,8 @@ struct VerifierFiatShamirAirChipGapV1 {
     bool challenge_selection_air_constrained{false};
     bool air_backed_all_kinds_reconstructed{false};
     bool whole_verifier_sha_equations_in_air{false};
-    /** Informational: ActiveConfig authority; not a chip-executable conjunct. */
     bool authority_eligible{false};
-    /** Must remain true while consensus authority stays fail-closed. */
-    bool consensus_authority_still_open{false};
-    /** Conjunction; true only after the Executable constexpr flips. */
+    /** Conjunction; must stay false until every field above is true. */
     bool executable_ready{false};
     uint32_t open_predicates{0};
     std::string note;
@@ -1713,18 +1703,11 @@ inline constexpr bool kWholeVerifierDualQ128V5HostDifferentialExecutable =
 inline constexpr bool kDualQ128V5HostTranscriptExecutable = true;
 inline constexpr bool kWholeVerifierHostDifferentialExecutable =
     kWholeVerifierLegacyV3HostDifferentialExecutable;
-/**
- * Bounded SHA-FS verifier AIR chip is executable.
- * Evidence: AssessVerifierFiatShamirAirChipGapV1 on the honest bounded
- * SHA-FS canary (fixed schedule, plan.valid, selection AIR, 8/8 kinds,
- * recursive SHA + non-SHA consume, whole-verifier SHA equations + tampers).
- * ConsensusAuthority / ActiveConfig P2 authority stay false.
- */
-inline constexpr bool kVerifierFiatShamirAirExecutable = true;
+inline constexpr bool kVerifierFiatShamirAirExecutable = false;
 /**
  * ChildProofPayloadBus closed: BuildVerifierProofRowsPayloadBusV1 enumerates
  * every batch codec word + supplemental next-opening field into AlgHash
- * sponge columns and rejects field forgery. WholeWitness / MultiRow
+ * sponge columns and rejects field forgery. WholeWitness / FS / MultiRow
  * recursive authority remain independent and false.
  */
 inline constexpr bool kVerifierProofRowsBoundInAir = true;
@@ -1741,7 +1724,7 @@ inline constexpr bool
 inline constexpr bool kVerifierAirConsensusAuthority = false;
 inline constexpr bool kChunkRlcPcsV1ProductionAuthority = false;
 
-static_assert(kVerifierFiatShamirAirExecutable);
+static_assert(!kVerifierFiatShamirAirExecutable);
 static_assert(kVerifierProofRowsBoundInAir);
 static_assert(!kWholeVerifierWitnessExecutable);
 static_assert(kMultiRowV2SplitRapVerifierAirLocalExecutable);

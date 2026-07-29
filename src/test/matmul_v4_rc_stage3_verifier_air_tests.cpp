@@ -666,9 +666,8 @@ BOOST_AUTO_TEST_CASE(bounded_fs_program_flips_rejection_loop_bounded_with_proof)
 }
 
 // g2 SHA-FS chip: bounded K-window SHA execution sets fixed_schedule when
-// rejection_loop_bounded; gap assessor closes chip Executable on the canary
-// technical conjuncts. ActiveConfig authority_eligible stays false /
-// consensus authority open.
+// rejection_loop_bounded; gap assessor inventories remaining Executable
+// blockers. Does NOT flip kVerifierFiatShamirAirExecutable / Ready.
 BOOST_AUTO_TEST_CASE(
     bounded_fs_sha_execution_fixed_schedule_and_chip_gap_inventory)
 {
@@ -740,7 +739,6 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
-    BOOST_CHECK(gap.consensus_authority_still_open);
     BOOST_CHECK(gap.whole_verifier_sha_equations_in_air);
     BOOST_TEST_MESSAGE(
         "FS_GAP open=" << gap.open_predicates
@@ -755,18 +753,15 @@ BOOST_AUTO_TEST_CASE(
         << " kinds8=" << gap.air_backed_all_kinds_reconstructed
         << " whole_sha=" << gap.whole_verifier_sha_equations_in_air
         << " auth=" << gap.authority_eligible
-        << " consensus_open=" << gap.consensus_authority_still_open
         << " ready=" << gap.executable_ready
         << " note=" << gap.note);
-    // Align path may leave sha_execution_plan_valid open on this seed; the
-    // honest canary case below is the chip-closing measurement.
-    BOOST_CHECK(gap.consensus_authority_still_open);
-    static_assert(va::kVerifierFiatShamirAirExecutable);
-    static_assert(!va::kVerifierAirConsensusAuthority);
+    BOOST_CHECK(!gap.executable_ready);
+    BOOST_CHECK_GE(gap.open_predicates, 1U);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
 // Honest SHA-squeeze + K=2 OOD canary: every_digest_matches_claim without Align.
-// Chip Executable closes; ActiveConfig authority / consensus stay open.
+// Production ActiveConfig keeps Poseidon2 squeezes; Executable stays false.
 BOOST_AUTO_TEST_CASE(
     bounded_sha_fs_canary_every_digest_matches_claim_on_honest_proof)
 {
@@ -841,13 +836,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
-    BOOST_CHECK(gap.consensus_authority_still_open);
-    BOOST_CHECK_EQUAL(gap.open_predicates, 0U);
-    BOOST_CHECK(gap.executable_ready);
-    static_assert(va::kVerifierFiatShamirAirExecutable);
-    static_assert(!va::kVerifierAirConsensusAuthority);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
 // Light opt-in: fs_selection_air ChallengeTable binds SHA digests to consumed
@@ -874,7 +867,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(join.table_violations, 0U);
     BOOST_CHECK_GE(join.draws, 6U);
     BOOST_CHECK_EQUAL(join.rows_bound_to_consumed, join.draws);
-    static_assert(va::kVerifierFiatShamirAirExecutable);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
 // Light opt-in: all eight FS challenge kinds reconstruct in-AIR from SHA
@@ -902,7 +895,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(kinds.kinds_reconstructed, 8U);
     BOOST_CHECK_EQUAL(
         kinds.values_bound_to_consumed, kinds.kinds_required);
-    static_assert(va::kVerifierFiatShamirAirExecutable);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
 // Light opt-in: MultiRow SHA schedule + vertical boundary AIRs + arity-4
@@ -943,12 +936,11 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.challenge_selection_air_constrained);
     BOOST_CHECK(gap.air_backed_all_kinds_reconstructed);
     BOOST_CHECK(gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
-    BOOST_CHECK(gap.consensus_authority_still_open);
-    BOOST_CHECK_EQUAL(gap.open_predicates, 0U);
-    BOOST_CHECK(gap.executable_ready);
-    static_assert(va::kVerifierFiatShamirAirExecutable);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
 BOOST_AUTO_TEST_CASE(fiat_shamir_witness_binds_every_claim_without_claiming_sha_air)
@@ -1374,7 +1366,7 @@ BOOST_AUTO_TEST_CASE(completeness_flags_name_the_remaining_hash_gap)
     static_assert(
         !va::kWholeVerifierDualQ128V5HostDifferentialExecutable);
     static_assert(va::kDualQ128V5HostTranscriptExecutable);
-    static_assert(va::kVerifierFiatShamirAirExecutable);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
     static_assert(va::kVerifierProofRowsBoundInAir);
     static_assert(!va::kWholeVerifierWitnessExecutable);
     static_assert(

@@ -1616,27 +1616,31 @@ inline constexpr bool
 /**
  * Recursive child consumption for CellAudit / RoleAudit.
  *
- * When true, CellAudit:
- *   - boosts same_trace_ctl_alias for stream/vector/wired openings that are
+ * FAIL-CLOSED (false). When true, CellAudit would:
+ *   - boost same_trace_ctl_alias for stream/vector/wired openings that are
  *     already semantic_relation_complete (requires a complete fixed-point
  *     parent hosting those children — see comment in CellAudit), and
- *   - sets recursive_child_consumed =
+ *   - set recursive_child_consumed =
  *       semantic_relation_complete && same_trace_ctl_alias.
  * RoleAudit.role_complete then requires every role endpoint consumed.
  *
- * Closed after recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
- * measured green via AssessCompleteRecursiveFixedPointResidualInventoryV1
- * (residual families + VerifierFS chip). Authority Ready stays separate/false.
+ * Blocked on recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
+ * (CompleteFP residual families measure closed via payload bus /
+ * SplitRap local / endpoint equality, but
+ * kCompleteRecursiveFixedPointExecutable stays false) measured by
+ * AssessCompleteRecursiveFixedPointResidualInventoryV1. Do not flip while
+ * CompleteFP is false — that would invent recursive consumption. Authority
+ * Ready stays separate/false.
  */
 inline constexpr bool kRCStage3RelationClosureRecursiveChildrenExecutable =
-    true;
+    false;
 inline constexpr bool kRCStage3RelationClosureAuthorityReady = false;
 
 static_assert(kRCStage3RelationClosureEndpointCount < 64);
 static_assert(kRCStage3RelationClosureRegistryComplete);
 static_assert(kRCStage3RelationClosureCtlValueBindingExecutable);
 static_assert(kRCStage3RelationClosureSameTraceCtlAliasExecutable);
-static_assert(kRCStage3RelationClosureRecursiveChildrenExecutable);
+static_assert(!kRCStage3RelationClosureRecursiveChildrenExecutable);
 static_assert(!kRCStage3RelationClosureAuthorityReady);
 
 } // namespace matmul::v4::rc

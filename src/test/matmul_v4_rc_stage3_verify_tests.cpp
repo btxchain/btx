@@ -64,12 +64,13 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
         semantic_complete += endpoint.semantic_relation_complete;
         recursively_consumed += endpoint.recursive_child_consumed;
     }
-    BOOST_CHECK_EQUAL(relation_cells, 52U);
-    BOOST_CHECK_EQUAL(same_trace_aliases, 52U);
-    // Every endpoint has a local semantic proof path; RecursiveChildren also
-    // marks stream/vector/wired openings as same-trace aliases and consumed.
+    BOOST_CHECK_EQUAL(relation_cells, 28U);
+    BOOST_CHECK_EQUAL(same_trace_aliases, 28U);
+    // Every endpoint has a local semantic proof path, but only 28 currently
+    // expose proof-owned relation cells/same-trace aliases. Recursive child
+    // consumption remains the authority-critical zero below.
     BOOST_CHECK_EQUAL(semantic_complete, 52U);
-    BOOST_CHECK_EQUAL(recursively_consumed, 52U);
+    BOOST_CHECK_EQUAL(recursively_consumed, 0U);
 
     const auto role_audit =
         rc::CurrentRCStage3RelationClosureRoleAudit();
@@ -78,7 +79,7 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
         std::count_if(
             role_audit.begin(), role_audit.end(),
             [](const auto& role) { return role.role_complete; }),
-        14U);
+        0U);
 
     const auto fixed_point = fp::SelectCompleteFixedPointV1();
     BOOST_REQUIRE(fixed_point.selected_v1_topology);
@@ -86,7 +87,7 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
     BOOST_CHECK(fixed_point.width_fixed_point);
     BOOST_CHECK(fixed_point.trace_fixed_point);
     BOOST_CHECK(!fixed_point.complete_recursive_parent);
-    BOOST_CHECK(fp::kCompleteRecursiveFixedPointExecutable);
+    BOOST_CHECK(!fp::kCompleteRecursiveFixedPointExecutable);
 
     BOOST_CHECK(v5v6::kNormalizedV5EightLaneExportBusExecutable);
     BOOST_CHECK(v5v6::kV5V6LiteralSameTraceAliasExecutable);
@@ -137,7 +138,7 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
     BOOST_CHECK(!rc::kRCStage3UnifiedRootExecutable);
     BOOST_CHECK(!rc::kRCStage3UnifiedRootAuthorityReady);
     BOOST_CHECK(
-        rc::stage3_verifier_air::kVerifierFiatShamirAirExecutable);
+        !rc::stage3_verifier_air::kVerifierFiatShamirAirExecutable);
     BOOST_CHECK(
         rc::stage3_verifier_air::kVerifierProofRowsBoundInAir);
     BOOST_CHECK(

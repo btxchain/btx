@@ -1634,7 +1634,7 @@ ConsumeUnifiedShardReceiptL2ParentV1(
                ";verify_us=" +
                std::to_string(
                    out.parent.verify_micros) +
-               ";complete_fp=true")
+               ";complete_fp=false")
             : (!prove
                    ? "stage3:recursive_receipt:"
                      "unified_l2_parent_proof_not_executed"
