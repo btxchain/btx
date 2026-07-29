@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -33,6 +34,120 @@ using AirCS = aq::AirConstraintSystem<Fp3>;
 constexpr uint32_t GOLDEN = 0x9E3779B9U;
 constexpr uint32_t MX_BLOCK_LANE = 0x4D58424CU;
 constexpr uint32_t LANE_ROWS = 1024;
+constexpr const char*
+    kP2TranscriptDomainV2 =
+        "BTX_RC_STAGE3_EXTRACT_CHACHA_SAMPLER_CHILD_P2_FS_V2";
+constexpr std::array<const char*, kProgramChallengeWidthV1>
+    kP2ChallengeLabelsV2{{
+        "extract_chacha_gamma1",
+        "extract_chacha_gamma2",
+        "extract_chacha_alpha1",
+        "extract_chacha_alpha2",
+        "extract_sampler_gamma",
+        "extract_sampler_alpha",
+    }};
+
+void AppendLE16(
+    std::vector<unsigned char>& out,
+    uint16_t value)
+{
+    out.push_back(
+        static_cast<unsigned char>(value));
+    out.push_back(
+        static_cast<unsigned char>(value >> 8));
+}
+
+void AppendLE32(
+    std::vector<unsigned char>& out,
+    uint32_t value)
+{
+    for (uint32_t byte = 0; byte < 4; ++byte) {
+        out.push_back(
+            static_cast<unsigned char>(
+                value >> (8 * byte)));
+    }
+}
+
+void AppendBytes(
+    std::vector<unsigned char>& out,
+    const unsigned char* begin,
+    size_t size)
+{
+    out.insert(out.end(), begin, begin + size);
+}
+
+std::vector<unsigned char>
+P2TranscriptPrefixV2(
+    const TileStatementV1& statement,
+    const uint256& r0_root)
+{
+    std::vector<unsigned char> out;
+    const size_t domain_size =
+        std::strlen(kP2TranscriptDomainV2);
+    out.reserve(
+        2 + domain_size + 4 * 6 + 32 * 4 + 1);
+    AppendLE16(
+        out, static_cast<uint16_t>(domain_size));
+    AppendBytes(
+        out,
+        reinterpret_cast<const unsigned char*>(
+            kP2TranscriptDomainV2),
+        domain_size);
+    AppendLE16(out, kVersionV2);
+    AppendBytes(
+        out, statement.statement_commitment.begin(), 32);
+    AppendBytes(
+        out, statement.public_fs_seed.begin(), 32);
+    AppendBytes(
+        out, statement.prf_key.begin(), 32);
+    AppendBytes(out, r0_root.begin(), 32);
+    AppendLE32(out, statement.row);
+    AppendLE32(out, statement.block);
+    AppendLE32(out, statement.chacha_blocks);
+    AppendLE32(out, statement.candidate_rows);
+    AppendLE32(out, statement.trace_rows);
+    out.push_back(statement.scale_e);
+    return out;
+}
+
+bool DeriveP2ProgramChallengesV2(
+    const TileStatementV1& statement,
+    const uint256& r0_root,
+    std::array<Fp3, kProgramChallengeWidthV1>& out,
+    std::array<std::vector<gf::Fp>,
+               kProgramChallengeWidthV1>* lanes = nullptr)
+{
+    if (statement.version != kVersionV2 ||
+        statement.statement_commitment.IsNull() ||
+        statement.public_fs_seed.IsNull() ||
+        statement.prf_key.IsNull() ||
+        r0_root.IsNull()) {
+        return false;
+    }
+    const auto prefix =
+        P2TranscriptPrefixV2(statement, r0_root);
+    for (uint32_t i = 0; i < out.size(); ++i) {
+        out[i] =
+            Fri3AlgP2SqueezeChallengeFp3(
+                prefix, kP2ChallengeLabelsV2[i], i);
+        if (lanes != nullptr) {
+            (*lanes)[i] =
+                Fri3AlgP2SqueezeAbsorbLanes(
+                    prefix,
+                    kP2ChallengeLabelsV2[i], i);
+        }
+        if (gf::IsZero(out[i])) {
+            return false;
+        }
+        for (uint32_t prior = 0;
+             prior < i; ++prior) {
+            if (gf::Eq(out[i], out[prior])) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -660,13 +775,14 @@ uint256 PreprocessedScheduleCommitment(
 
 uint256 ProgramChallengeCommitment(
     const std::array<
-        Fp3, kProgramChallengeWidthV1>& challenge)
+        Fp3, kProgramChallengeWidthV1>& challenge,
+    uint16_t version = kVersionV1)
 {
     std::vector<Fp3> values;
     values.reserve(challenge.size() + 1);
     values.push_back({
         gf::FromU64(UINT64_C(0x45584354)),
-        gf::FromU64(kVersionV1),
+        gf::FromU64(version),
         gf::FromU64(kProgramChallengeWidthV1)});
     values.insert(
         values.end(), challenge.begin(),
@@ -716,15 +832,42 @@ bool BuildComposition(
         hash_prover;
     ha::FixedProgramVerticalWitnessBoundaryVerifierInstance
         hash_verifier;
+    const bool p2_v2 =
+        statement.version == kVersionV2;
+    if (!p2_v2 &&
+        statement.version != kVersionV1) {
+        return Fail(why, "composition_version");
+    }
+    std::array<Fp3, kProgramChallengeWidthV1>
+        p2_challenges{};
+    if (p2_v2 &&
+        !DeriveP2ProgramChallengesV2(
+            statement, r0_root, p2_challenges)) {
+        return Fail(
+            why, "composition_p2_challenges");
+    }
     const uint256 boundary_seed =
-        ChildChallengeDigest(
-            statement.public_fs_seed,
-            r0_root, "chacha", statement);
+        p2_v2
+        ? statement.public_fs_seed
+        : ChildChallengeDigest(
+              statement.public_fs_seed,
+              r0_root, "chacha", statement);
+    RCStage3CtlChallenges hash_p2{};
+    if (p2_v2) {
+        hash_p2.gamma1 = p2_challenges[0];
+        hash_p2.gamma2 = p2_challenges[1];
+        hash_p2.alpha1 = p2_challenges[2];
+        hash_p2.alpha2 = p2_challenges[3];
+    }
     if (prover) {
         hash_prover =
-            ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
-                hash_program, honest, masks, {},
-                boundary_seed, r0_root);
+            p2_v2
+            ? ha::BuildFixedProgramVerticalWitnessBoundaryInstanceWithChallengesV2(
+                  hash_program, honest, masks, {},
+                  boundary_seed, r0_root, hash_p2)
+            : ha::BuildFixedProgramVerticalWitnessBoundaryInstance(
+                  hash_program, honest, masks, {},
+                  boundary_seed, r0_root);
         if (!hash_prover.valid) {
             return Fail(
                 why, "hash_prover:" +
@@ -752,9 +895,14 @@ bool BuildComposition(
             out.base_columns);
     } else {
         hash_verifier =
-            ha::BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
-                hash_program, public_templates,
-                masks, {}, boundary_seed, r0_root);
+            p2_v2
+            ? ha::BuildFixedProgramVerticalWitnessBoundaryVerifierInstanceWithChallengesV2(
+                  hash_program, public_templates,
+                  masks, {}, boundary_seed, r0_root,
+                  hash_p2)
+            : ha::BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
+                  hash_program, public_templates,
+                  masks, {}, boundary_seed, r0_root);
         if (!hash_verifier.valid) {
             return Fail(
                 why, "hash_verifier:" +
@@ -787,7 +935,11 @@ bool BuildComposition(
     const auto challenges = base_only
         ? std::array<Fp3, 2>{
               Fp3::Zero(), Fp3::Zero()}
-        : ChildChallenges(statement, r0_root);
+        : (p2_v2
+           ? std::array<Fp3, 2>{
+                 p2_challenges[4],
+                 p2_challenges[5]}
+           : ChildChallenges(statement, r0_root));
     out.program_challenges[4] = challenges[0];
     out.program_challenges[5] = challenges[1];
     const ga::TableTM table;
@@ -980,9 +1132,11 @@ TileStatementV1 BaseStatement(
     const uint256& prf_key,
     uint32_t row, uint32_t block,
     uint32_t chacha_blocks,
-    uint32_t candidate_rows)
+    uint32_t candidate_rows,
+    uint16_t version = kVersionV1)
 {
     TileStatementV1 out;
+    out.version = version;
     out.statement_commitment = statement_commitment;
     out.public_fs_seed = public_fs_seed;
     out.prf_key = prf_key;
@@ -1382,13 +1536,138 @@ BuildProgramChallengeBindingV1(
     return out;
 }
 
-bool BuildDeterministicComponentV1(
+ProgramChallengeP2BindingV2
+BuildProgramChallengeBindingV2(
+    const TileStatementV1& statement)
+{
+    ProgramChallengeP2BindingV2 out;
+    out.r0_root = statement.r0_root;
+    if (statement.version != kVersionV2 ||
+        statement.statement_commitment.IsNull() ||
+        statement.public_fs_seed.IsNull() ||
+        statement.prf_key.IsNull() ||
+        statement.r0_root.IsNull() ||
+        statement.chacha_blocks == 0 ||
+        statement.chacha_blocks > 4 ||
+        statement.candidate_rows == 0 ||
+        statement.trace_rows < 2048 ||
+        !DeriveP2ProgramChallengesV2(
+            statement, statement.r0_root,
+            out.challenges, &out.absorb_lanes)) {
+        out.note =
+            "stage3:extract_chacha_sampler_child:"
+            "p2_program_challenge_statement";
+        return out;
+    }
+    out.transcript_prefix =
+        P2TranscriptPrefixV2(
+            statement, statement.r0_root);
+    Built rebuilt;
+    std::string why;
+    if (!BuildComposition(
+            statement, statement.r0_root,
+            nullptr, false, rebuilt, &why)) {
+        out.note =
+            "stage3:extract_chacha_sampler_child:"
+            "p2_program_challenge_rebuild:" + why;
+        return out;
+    }
+    bool same_order = true;
+    bool exact_lanes = true;
+    for (uint32_t i = 0;
+         i < kProgramChallengeWidthV1; ++i) {
+        same_order =
+            same_order &&
+            gf::Eq(
+                out.challenges[i],
+                rebuilt.program_challenges[i]);
+        exact_lanes =
+            exact_lanes &&
+            out.absorb_lanes[i] ==
+                Fri3AlgP2SqueezeAbsorbLanes(
+                    out.transcript_prefix,
+                    kP2ChallengeLabelsV2[i], i);
+    }
+    out.public_boundary_statement =
+        rebuilt.public_boundary_statement;
+    out.preprocessed_schedule_commitment =
+        PreprocessedScheduleCommitment(rebuilt.cs);
+    out.challenge_commitment =
+        ProgramChallengeCommitment(
+            rebuilt.program_challenges,
+            kVersionV2);
+    out.preprocessed_columns =
+        static_cast<uint32_t>(
+            rebuilt.cs.preprocessed.size());
+    out.exact_domain_and_ordinal_order =
+        same_order && exact_lanes;
+    out.all_challenges_parent_r0_derived =
+        out.exact_domain_and_ordinal_order &&
+        out.public_boundary_statement ==
+            statement.public_boundary_statement &&
+        out.challenge_commitment ==
+            statement.program_challenge_commitment &&
+        !out.challenge_commitment.IsNull();
+    out.preprocessed_dual_ood_bound =
+        rebuilt.cs.preprocessed_pin_ood &&
+        out.preprocessed_columns != 0 &&
+        out.preprocessed_schedule_commitment ==
+            statement
+                .preprocessed_schedule_commitment &&
+        !out.preprocessed_schedule_commitment
+             .IsNull();
+    out.valid =
+        out.all_challenges_parent_r0_derived &&
+        out.preprocessed_dual_ood_bound;
+    out.note =
+        out.valid
+        ? "stage3:extract_chacha_sampler_child:"
+          "p2_program_challenges_parent_replayable"
+        : "stage3:extract_chacha_sampler_child:"
+          "p2_program_challenge_binding_open";
+    return out;
+}
+
+static ProgramChallengeBindingV1
+BuildVersionedProgramChallengeBinding(
+    const TileStatementV1& statement)
+{
+    if (statement.version == kVersionV1) {
+        return BuildProgramChallengeBindingV1(
+            statement);
+    }
+    ProgramChallengeBindingV1 out;
+    out.version = statement.version;
+    const ProgramChallengeP2BindingV2 p2 =
+        BuildProgramChallengeBindingV2(
+            statement);
+    out.r0_root = p2.r0_root;
+    out.public_boundary_statement =
+        p2.public_boundary_statement;
+    out.preprocessed_schedule_commitment =
+        p2.preprocessed_schedule_commitment;
+    out.challenge_commitment =
+        p2.challenge_commitment;
+    out.challenges = p2.challenges;
+    out.preprocessed_columns =
+        p2.preprocessed_columns;
+    out.all_challenges_r0_derived =
+        p2.all_challenges_parent_r0_derived;
+    out.preprocessed_dual_ood_bound =
+        p2.preprocessed_dual_ood_bound;
+    out.valid = p2.valid;
+    out.note = p2.note;
+    return out;
+}
+
+static bool BuildDeterministicComponentForVersion(
     const uint256& statement_commitment,
     const uint256& public_fs_seed,
     const uint256& prf_key,
     uint32_t row,
     uint32_t block,
     const std::array<int64_t, 32>& input,
+    uint16_t version,
     DeterministicComponentV1& out,
     std::string* why)
 {
@@ -1415,13 +1694,22 @@ bool BuildDeterministicComponentV1(
         prf_key, row, block,
         witness.chacha_blocks,
         static_cast<uint32_t>(
-            witness.cands.size()));
+            witness.cands.size()),
+        version);
     const uint256 provisional_root =
-        ChildChallengeDigest(
-            public_fs_seed,
-            statement_commitment,
-            "parent_r0_pending",
-            out.statement);
+        version == kVersionV2
+        ? Fri3AlgDigestToUint256(
+              alg_hash::SpongeHashFp(
+                  Fri3AlgP2SqueezeAbsorbLanes(
+                      P2TranscriptPrefixV2(
+                          out.statement,
+                          statement_commitment),
+                      "parent_r0_pending", 0)))
+        : ChildChallengeDigest(
+              public_fs_seed,
+              statement_commitment,
+              "parent_r0_pending",
+              out.statement);
     Built preliminary;
     if (!BuildComposition(
             out.statement, provisional_root,
@@ -1550,7 +1838,39 @@ bool BuildDeterministicComponentV1(
     return true;
 }
 
-bool AppendFinalRelationToParentV1(
+bool BuildDeterministicComponentV1(
+    const uint256& statement_commitment,
+    const uint256& public_fs_seed,
+    const uint256& prf_key,
+    uint32_t row,
+    uint32_t block,
+    const std::array<int64_t, 32>& input,
+    DeterministicComponentV1& out,
+    std::string* why)
+{
+    return BuildDeterministicComponentForVersion(
+        statement_commitment, public_fs_seed,
+        prf_key, row, block, input,
+        kVersionV1, out, why);
+}
+
+bool BuildDeterministicComponentV2(
+    const uint256& statement_commitment,
+    const uint256& public_fs_seed,
+    const uint256& prf_key,
+    uint32_t row,
+    uint32_t block,
+    const std::array<int64_t, 32>& input,
+    DeterministicComponentV1& out,
+    std::string* why)
+{
+    return BuildDeterministicComponentForVersion(
+        statement_commitment, public_fs_seed,
+        prf_key, row, block, input,
+        kVersionV2, out, why);
+}
+
+static bool AppendFinalRelationToParentForVersion(
     const DeterministicComponentV1& component,
     const composer::ChildAttachmentV1&
         attachment,
@@ -1559,11 +1879,13 @@ bool AppendFinalRelationToParentV1(
     AirCS& parent_cs,
     std::vector<std::vector<Fp3>>&
         parent_columns,
+    uint16_t version,
     ParentFinalizationV1& out,
     std::string* why)
 {
     out = {};
     if (!component.valid ||
+        component.statement.version != version ||
         !component.challenge_columns_absent ||
         !component.parent_r0_pending ||
         !attachment.valid ||
@@ -1715,17 +2037,20 @@ bool AppendFinalRelationToParentV1(
         PreprocessedScheduleCommitment(final.cs);
     statement.program_challenge_commitment =
         ProgramChallengeCommitment(
-            final.program_challenges);
+            final.program_challenges,
+            version);
     statement.output_cells = final.outputs;
     statement.position_cells =
         final.positions;
     statement.input_bit_cells =
         final.input_bits;
     statement.retained_node_commitment =
-        ComputeRetainedNodeCommitmentV1(statement);
+        version == kVersionV1
+        ? ComputeRetainedNodeCommitmentV1(statement)
+        : ComputeRetainedNodeCommitmentV2(statement);
     out.statement = statement;
     out.challenge_binding =
-        BuildProgramChallengeBindingV1(
+        BuildVersionedProgramChallengeBinding(
             statement);
     const auto map_cell =
         [&out](const CellV1& local) {
@@ -1810,17 +2135,51 @@ bool AppendFinalRelationToParentV1(
     return true;
 }
 
-bool BuildVerifierComponentV1(
+bool AppendFinalRelationToParentV1(
+    const DeterministicComponentV1& component,
+    const composer::ChildAttachmentV1& attachment,
+    const aq::AirQuotientTwoEpochBaseRowSession&
+        parent_r0_session,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>& parent_columns,
+    ParentFinalizationV1& out,
+    std::string* why)
+{
+    return AppendFinalRelationToParentForVersion(
+        component, attachment, parent_r0_session,
+        parent_cs, parent_columns, kVersionV1,
+        out, why);
+}
+
+bool AppendFinalRelationToParentV2(
+    const DeterministicComponentV1& component,
+    const composer::ChildAttachmentV1& attachment,
+    const aq::AirQuotientTwoEpochBaseRowSession&
+        parent_r0_session,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>& parent_columns,
+    ParentFinalizationV1& out,
+    std::string* why)
+{
+    return AppendFinalRelationToParentForVersion(
+        component, attachment, parent_r0_session,
+        parent_cs, parent_columns, kVersionV2,
+        out, why);
+}
+
+static bool BuildVerifierComponentForVersion(
     const TileStatementV1& statement,
+    uint16_t version,
     VerifierComponentV1& out,
     std::string* why)
 {
     out = {};
     const ProgramChallengeBindingV1 binding =
-        BuildProgramChallengeBindingV1(
+        BuildVersionedProgramChallengeBinding(
             statement);
     Built rebuilt;
-    if (!binding.valid ||
+    if (statement.version != version ||
+        !binding.valid ||
         !BuildComposition(
             statement, statement.r0_root,
             nullptr, false, rebuilt, why) ||
@@ -1917,17 +2276,37 @@ bool BuildVerifierComponentV1(
     return true;
 }
 
-bool AppendVerifierRelationToParentV1(
+bool BuildVerifierComponentV1(
+    const TileStatementV1& statement,
+    VerifierComponentV1& out,
+    std::string* why)
+{
+    return BuildVerifierComponentForVersion(
+        statement, kVersionV1, out, why);
+}
+
+bool BuildVerifierComponentV2(
+    const TileStatementV1& statement,
+    VerifierComponentV1& out,
+    std::string* why)
+{
+    return BuildVerifierComponentForVersion(
+        statement, kVersionV2, out, why);
+}
+
+static bool AppendVerifierRelationToParentForVersion(
     const VerifierComponentV1& component,
     const composer::ChildAttachmentV1&
         attachment,
     const uint256& parent_r0_root,
     AirCS& parent_cs,
+    uint16_t version,
     VerifierParentFinalizationV1& out,
     std::string* why)
 {
     out = {};
     if (!component.valid ||
+        component.statement.version != version ||
         !component.challenge_columns_absent ||
         parent_r0_root.IsNull() ||
         component.statement.r0_root !=
@@ -2000,7 +2379,7 @@ bool AppendVerifierRelationToParentV1(
         out.canonical_constraints_relocated +
         out.native_constraints_mapped;
     out.challenge_binding =
-        BuildProgramChallengeBindingV1(
+        BuildVersionedProgramChallengeBinding(
             component.statement);
     const auto map_cell =
         [&out](const CellV1& local) {
@@ -2067,7 +2446,8 @@ bool AppendVerifierRelationToParentV1(
             component.statement
                 .preprocessed_schedule_commitment &&
         ProgramChallengeCommitment(
-            rebuilt.program_challenges) ==
+            rebuilt.program_challenges,
+            version) ==
             component.statement
                 .program_challenge_commitment &&
         rebuilt.outputs ==
@@ -2098,10 +2478,39 @@ bool AppendVerifierRelationToParentV1(
     return true;
 }
 
-uint256 ComputeRetainedNodeCommitmentV1(
-    const TileStatementV1& statement)
+bool AppendVerifierRelationToParentV1(
+    const VerifierComponentV1& component,
+    const composer::ChildAttachmentV1& attachment,
+    const uint256& parent_r0_root,
+    AirCS& parent_cs,
+    VerifierParentFinalizationV1& out,
+    std::string* why)
 {
-    if (statement.version != kVersionV1 ||
+    return AppendVerifierRelationToParentForVersion(
+        component, attachment, parent_r0_root,
+        parent_cs, kVersionV1, out, why);
+}
+
+bool AppendVerifierRelationToParentV2(
+    const VerifierComponentV1& component,
+    const composer::ChildAttachmentV1& attachment,
+    const uint256& parent_r0_root,
+    AirCS& parent_cs,
+    VerifierParentFinalizationV1& out,
+    std::string* why)
+{
+    return AppendVerifierRelationToParentForVersion(
+        component, attachment, parent_r0_root,
+        parent_cs, kVersionV2, out, why);
+}
+
+static uint256 ComputeRetainedNodeCommitmentForVersion(
+    const TileStatementV1& statement,
+    uint16_t version)
+{
+    if (statement.version != version ||
+        (version != kVersionV1 &&
+         version != kVersionV2) ||
         statement.statement_commitment.IsNull() ||
         statement.public_fs_seed.IsNull() ||
         statement.prf_key.IsNull() ||
@@ -2127,7 +2536,9 @@ uint256 ComputeRetainedNodeCommitmentV1(
     }
     HashWriter hash;
     hash << std::string{
-        "BTX_RC_STAGE3_EXTRACT_CHACHA_SAMPLER_RETAINED_NODE_V1"}
+        version == kVersionV1
+        ? "BTX_RC_STAGE3_EXTRACT_CHACHA_SAMPLER_RETAINED_NODE_V1"
+        : "BTX_RC_STAGE3_EXTRACT_CHACHA_SAMPLER_RETAINED_NODE_V2"}
          << statement.version
          << statement.statement_commitment
          << statement.public_fs_seed
@@ -2156,6 +2567,20 @@ uint256 ComputeRetainedNodeCommitmentV1(
         }
     }
     return hash.GetHash();
+}
+
+uint256 ComputeRetainedNodeCommitmentV1(
+    const TileStatementV1& statement)
+{
+    return ComputeRetainedNodeCommitmentForVersion(
+        statement, kVersionV1);
+}
+
+uint256 ComputeRetainedNodeCommitmentV2(
+    const TileStatementV1& statement)
+{
+    return ComputeRetainedNodeCommitmentForVersion(
+        statement, kVersionV2);
 }
 
 bool ProveTileV1(

@@ -18,6 +18,7 @@ namespace matmul::v4::rc::extract_chacha_sampler_child {
 namespace aq = air_quotient;
 
 inline constexpr uint16_t kVersionV1 = 1;
+inline constexpr uint16_t kVersionV2 = 2;
 
 struct CellV1 {
     uint32_t column{0};
@@ -122,6 +123,35 @@ BuildProgramChallengeBindingV1(
     const TileStatementV1& statement);
 
 /**
+ * V2 challenge transcript exported for direct in-parent Poseidon2 replay.
+ * Every lane vector is the exact preimage accepted by
+ * BuildChildFsChallengeP2ReplayFromLanesV1.  Labels and draw ordinals are
+ * fixed in the same six-coordinate order as ProgramChallengeBindingV1.
+ */
+struct ProgramChallengeP2BindingV2 {
+    uint16_t version{kVersionV2};
+    uint256 r0_root{};
+    std::vector<unsigned char> transcript_prefix;
+    std::array<std::vector<gkr_field::Fp>,
+               kProgramChallengeWidthV1> absorb_lanes;
+    std::array<gkr_field::Fp3,
+               kProgramChallengeWidthV1> challenges{};
+    uint256 public_boundary_statement{};
+    uint256 preprocessed_schedule_commitment{};
+    uint256 challenge_commitment{};
+    uint32_t preprocessed_columns{0};
+    bool exact_domain_and_ordinal_order{false};
+    bool all_challenges_parent_r0_derived{false};
+    bool preprocessed_dual_ood_bound{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] ProgramChallengeP2BindingV2
+BuildProgramChallengeBindingV2(
+    const TileStatementV1& statement);
+
+/**
  * Challenge-independent projection of one complete Extract tile relation.
  *
  * `cs` contains exactly the columns which must be committed before any of the
@@ -220,6 +250,17 @@ struct VerifierParentFinalizationV1 {
     DeterministicComponentV1& out,
     std::string* why = nullptr);
 
+/** V2 uses the same relation, but leaves only parent-Poseidon2 challenges. */
+[[nodiscard]] bool BuildDeterministicComponentV2(
+    const uint256& statement_commitment,
+    const uint256& public_fs_seed,
+    const uint256& prf_key,
+    uint32_t row,
+    uint32_t block,
+    const std::array<int64_t, 32>& input,
+    DeterministicComponentV1& out,
+    std::string* why = nullptr);
+
 /**
  * Finalize an already attached deterministic component from the wider
  * parent's R0.  Only challenge-dependent columns are appended.  Every final
@@ -235,8 +276,22 @@ struct VerifierParentFinalizationV1 {
     ParentFinalizationV1& out,
     std::string* why = nullptr);
 
+[[nodiscard]] bool AppendFinalRelationToParentV2(
+    const DeterministicComponentV1& component,
+    const stage3_air_parent_composer::ChildAttachmentV1& attachment,
+    const aq::AirQuotientTwoEpochBaseRowSession& parent_r0_session,
+    aq::AirConstraintSystem<gkr_field::Fp3>& parent_cs,
+    std::vector<std::vector<gkr_field::Fp3>>& parent_columns,
+    ParentFinalizationV1& out,
+    std::string* why = nullptr);
+
 /** Rebuild the deterministic projection without private witness cells. */
 [[nodiscard]] bool BuildVerifierComponentV1(
+    const TileStatementV1& statement,
+    VerifierComponentV1& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool BuildVerifierComponentV2(
     const TileStatementV1& statement,
     VerifierComponentV1& out,
     std::string* why = nullptr);
@@ -254,7 +309,18 @@ struct VerifierParentFinalizationV1 {
     VerifierParentFinalizationV1& out,
     std::string* why = nullptr);
 
+[[nodiscard]] bool AppendVerifierRelationToParentV2(
+    const VerifierComponentV1& component,
+    const stage3_air_parent_composer::ChildAttachmentV1& attachment,
+    const uint256& parent_r0_root,
+    aq::AirConstraintSystem<gkr_field::Fp3>& parent_cs,
+    VerifierParentFinalizationV1& out,
+    std::string* why = nullptr);
+
 [[nodiscard]] uint256 ComputeRetainedNodeCommitmentV1(
+    const TileStatementV1& statement);
+
+[[nodiscard]] uint256 ComputeRetainedNodeCommitmentV2(
     const TileStatementV1& statement);
 
 /**

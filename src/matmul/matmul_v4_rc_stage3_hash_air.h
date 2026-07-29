@@ -487,6 +487,39 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
      */
     const uint256& precommitted_base_row = {});
 
+/**
+ * Versioned algebraic-transcript entry point.  Unlike the frozen V1 builder,
+ * this function never derives a SHA-backed challenge internally: the caller
+ * must supply the four challenges reconstructed from its authenticated
+ * parent transcript.  The same values are embedded in the returned CS and
+ * used to fill every challenge-dependent witness column.
+ */
+[[nodiscard]] FixedProgramVerticalWitnessBoundaryInstance
+BuildFixedProgramVerticalWitnessBoundaryInstanceWithChallengesV2(
+    const FixedProgram& program,
+    const std::vector<FixedProgramBoundaryInstance>& honest_boundaries,
+    const std::vector<std::vector<uint8_t>>& public_external_masks,
+    const std::vector<FixedProgramWitnessBoundaryLink>& links,
+    const uint256& fs_seed,
+    const uint256& precommitted_base_row,
+    const RCStage3CtlChallenges& transcript_challenges);
+
+/**
+ * Witness-free verifier reconstruction for the explicit-challenge V2 path.
+ * Private boundary words are discarded exactly as in the frozen V1 verifier.
+ */
+[[nodiscard]] FixedProgramVerticalWitnessBoundaryVerifierInstance
+BuildFixedProgramVerticalWitnessBoundaryVerifierInstanceWithChallengesV2(
+    const FixedProgram& program,
+    const std::vector<FixedProgramBoundaryInstance>&
+        public_boundary_templates,
+    const std::vector<std::vector<uint8_t>>&
+        public_external_masks,
+    const std::vector<FixedProgramWitnessBoundaryLink>& links,
+    const uint256& fs_seed,
+    const uint256& base_row_commitment,
+    const RCStage3CtlChallenges& transcript_challenges);
+
 [[nodiscard]] FixedProgramVerticalProvenanceInstance
 BuildFixedProgramVerticalProvenanceInstance(
     const FixedProgram& program,

@@ -2821,14 +2821,15 @@ uint256 CommitFixedProgramVerticalWitnessBoundaryStatement(
     return statement.GetHash();
 }
 
-FixedProgramVerticalWitnessBoundaryInstance
-BuildFixedProgramVerticalWitnessBoundaryInstance(
+static FixedProgramVerticalWitnessBoundaryInstance
+BuildFixedProgramVerticalWitnessBoundaryInstanceImpl(
     const FixedProgram& program,
     const std::vector<FixedProgramBoundaryInstance>& boundaries,
     const std::vector<std::vector<uint8_t>>& public_masks,
     const std::vector<FixedProgramWitnessBoundaryLink>& links,
     const uint256& fs_seed,
-    const uint256& precommitted_base_row)
+    const uint256& precommitted_base_row,
+    const RCStage3CtlChallenges* transcript_challenges)
 {
     FixedProgramVerticalWitnessBoundaryInstance out;
     if (fs_seed.IsNull()) {
@@ -3278,12 +3279,33 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
             base_why;
         return out;
     }
-    if (!DeriveVerticalChallenges(
-            program, out.public_statement, fs_seed,
-            dummy.n_rows, n_coeffs, scheduled,
-            {out.base_row_commitment},
-            out.challenges, &why) ||
-        !BuildVerticalConstraintSystem(
+    const bool challenge_ok =
+        transcript_challenges != nullptr
+        ? (!gf::IsZero(transcript_challenges->gamma1) &&
+           !gf::IsZero(transcript_challenges->gamma2) &&
+           !gf::IsZero(transcript_challenges->alpha1) &&
+           !gf::IsZero(transcript_challenges->alpha2) &&
+           !gf::Eq(
+               transcript_challenges->gamma1,
+               transcript_challenges->gamma2) &&
+           !gf::Eq(
+               transcript_challenges->alpha1,
+               transcript_challenges->alpha2))
+        : DeriveVerticalChallenges(
+              program, out.public_statement, fs_seed,
+              dummy.n_rows, n_coeffs, scheduled,
+              {out.base_row_commitment},
+              out.challenges, &why);
+    if (transcript_challenges != nullptr && challenge_ok) {
+        out.challenges = *transcript_challenges;
+    }
+    if (!challenge_ok) {
+        out.note =
+            "stage3:hash_air:"
+            "witness_vertical_explicit_challenges";
+        return out;
+    }
+    if (!BuildVerticalConstraintSystem(
             program, boundaries, out.challenges,
             out.cs, &why, scheduled, &public_masks,
             false)) {
@@ -3740,15 +3762,45 @@ BuildFixedProgramVerticalWitnessBoundaryInstance(
     return out;
 }
 
-FixedProgramVerticalWitnessBoundaryVerifierInstance
-BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
+FixedProgramVerticalWitnessBoundaryInstance
+BuildFixedProgramVerticalWitnessBoundaryInstance(
+    const FixedProgram& program,
+    const std::vector<FixedProgramBoundaryInstance>& boundaries,
+    const std::vector<std::vector<uint8_t>>& public_masks,
+    const std::vector<FixedProgramWitnessBoundaryLink>& links,
+    const uint256& fs_seed,
+    const uint256& precommitted_base_row)
+{
+    return BuildFixedProgramVerticalWitnessBoundaryInstanceImpl(
+        program, boundaries, public_masks, links, fs_seed,
+        precommitted_base_row, nullptr);
+}
+
+FixedProgramVerticalWitnessBoundaryInstance
+BuildFixedProgramVerticalWitnessBoundaryInstanceWithChallengesV2(
+    const FixedProgram& program,
+    const std::vector<FixedProgramBoundaryInstance>& boundaries,
+    const std::vector<std::vector<uint8_t>>& public_masks,
+    const std::vector<FixedProgramWitnessBoundaryLink>& links,
+    const uint256& fs_seed,
+    const uint256& precommitted_base_row,
+    const RCStage3CtlChallenges& transcript_challenges)
+{
+    return BuildFixedProgramVerticalWitnessBoundaryInstanceImpl(
+        program, boundaries, public_masks, links, fs_seed,
+        precommitted_base_row, &transcript_challenges);
+}
+
+static FixedProgramVerticalWitnessBoundaryVerifierInstance
+BuildFixedProgramVerticalWitnessBoundaryVerifierInstanceImpl(
     const FixedProgram& program,
     const std::vector<FixedProgramBoundaryInstance>&
         public_boundary_templates,
     const std::vector<std::vector<uint8_t>>& public_masks,
     const std::vector<FixedProgramWitnessBoundaryLink>& links,
     const uint256& fs_seed,
-    const uint256& base_row_commitment)
+    const uint256& base_row_commitment,
+    const RCStage3CtlChallenges* transcript_challenges)
 {
     FixedProgramVerticalWitnessBoundaryVerifierInstance
         out;
@@ -3833,9 +3885,14 @@ BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
             program, public_boundary_templates,
             public_masks, links);
     const auto reconstructed =
-        BuildFixedProgramVerticalWitnessBoundaryInstance(
-            program, dummy, public_masks, links,
-            fs_seed, base_row_commitment);
+        transcript_challenges == nullptr
+        ? BuildFixedProgramVerticalWitnessBoundaryInstance(
+              program, dummy, public_masks, links,
+              fs_seed, base_row_commitment)
+        : BuildFixedProgramVerticalWitnessBoundaryInstanceWithChallengesV2(
+              program, dummy, public_masks, links,
+              fs_seed, base_row_commitment,
+              *transcript_challenges);
     if (!reconstructed.valid ||
         expected_statement.IsNull() ||
         reconstructed.public_statement !=
@@ -3884,6 +3941,37 @@ BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
         "stage3:hash_air:"
         "witness_vertical_verifier_public_only_cs";
     return out;
+}
+
+FixedProgramVerticalWitnessBoundaryVerifierInstance
+BuildFixedProgramVerticalWitnessBoundaryVerifierInstance(
+    const FixedProgram& program,
+    const std::vector<FixedProgramBoundaryInstance>&
+        public_boundary_templates,
+    const std::vector<std::vector<uint8_t>>& public_masks,
+    const std::vector<FixedProgramWitnessBoundaryLink>& links,
+    const uint256& fs_seed,
+    const uint256& base_row_commitment)
+{
+    return BuildFixedProgramVerticalWitnessBoundaryVerifierInstanceImpl(
+        program, public_boundary_templates, public_masks, links,
+        fs_seed, base_row_commitment, nullptr);
+}
+
+FixedProgramVerticalWitnessBoundaryVerifierInstance
+BuildFixedProgramVerticalWitnessBoundaryVerifierInstanceWithChallengesV2(
+    const FixedProgram& program,
+    const std::vector<FixedProgramBoundaryInstance>&
+        public_boundary_templates,
+    const std::vector<std::vector<uint8_t>>& public_masks,
+    const std::vector<FixedProgramWitnessBoundaryLink>& links,
+    const uint256& fs_seed,
+    const uint256& base_row_commitment,
+    const RCStage3CtlChallenges& transcript_challenges)
+{
+    return BuildFixedProgramVerticalWitnessBoundaryVerifierInstanceImpl(
+        program, public_boundary_templates, public_masks, links,
+        fs_seed, base_row_commitment, &transcript_challenges);
 }
 
 bool ProveFixedProgramVerticalProvenanceAir(
