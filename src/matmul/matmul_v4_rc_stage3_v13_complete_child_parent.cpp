@@ -122,6 +122,59 @@ bool SameConstraintSystemStructure(
     return true;
 }
 
+bool SameVerifierOwnedColumns(
+    const AirCS& left,
+    const AirCS& right)
+{
+    if (left.n_rows != right.n_rows ||
+        left.n_columns != right.n_columns ||
+        left.preprocessed.size() !=
+            right.preprocessed.size() ||
+        left.preprocessed_roots !=
+            right.preprocessed_roots ||
+        left.preprocessed_pin_ood !=
+            right.preprocessed_pin_ood ||
+        left.preprocessed_row_group_roots !=
+            right.preprocessed_row_group_roots) {
+        return false;
+    }
+    for (uint32_t index = 0;
+         index < left.preprocessed.size();
+         ++index) {
+        if (left.preprocessed[index].first !=
+                right.preprocessed[index].first ||
+            !SameFp3Vector(
+                left.preprocessed[index].second,
+                right.preprocessed[index]
+                    .second)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CanonicalTapeProgramMatches(
+    const cb::ProgramTable& candidate,
+    const alg_hash::Digest& candidate_root,
+    cb::ProgramTable* canonical,
+    std::string* why)
+{
+    cb::ProgramTable expected;
+    if (!tape::BuildCanonicalProgramTableV1(
+            expected, why) ||
+        candidate != expected ||
+        candidate_root !=
+            cb::CommitProgramTableAlgHash(
+                expected)) {
+        return Fail(
+            why, "canonical_tape_program");
+    }
+    if (canonical != nullptr) {
+        *canonical = std::move(expected);
+    }
+    return true;
+}
+
 bool AppendChildConstraintSystem(
     AirCS& parent_cs,
     const AirCS& child_cs,
@@ -1268,11 +1321,18 @@ bool BuildDeterministicConstraintSystemV1(
     AirCS tape_cs;
     tape::LayoutV1 tape_layout;
     tape::ScheduleV1 tape_schedule;
-    if (!tape::BuildConstraintSystemV1(
+    cb::ProgramTable canonical_tape_program;
+    if (!CanonicalTapeProgramMatches(
+            statement.tape_program,
+            statement.tape_program_root,
+            &canonical_tape_program,
+            why) ||
+        !tape::BuildCanonicalConstraintSystemV1(
             statement.tape_shape,
             statement.tape_binding,
             tape_cs, &tape_layout,
-            &tape_schedule, why) ||
+            &tape_schedule,
+            nullptr, why) ||
         !merkle::BuildPublicConstraintSystemsV1(
             statement.tape_shape,
             statement.tape_binding,
@@ -1383,6 +1443,12 @@ bool BuildDeterministicConstraintSystemV1(
                 merkle_acceptance);
     out.deep_base_attachment =
         deep_base_attachment;
+    out.canonical_tape_program_bound =
+        canonical_tape_program ==
+            statement.tape_program &&
+        statement.tape_program_root ==
+            cb::CommitProgramTableAlgHash(
+                canonical_tape_program);
     out.deterministic_system_rebuilt =
         merkle_aliases.valid &&
         out.deep_base.valid &&
@@ -1397,6 +1463,7 @@ bool BuildDeterministicConstraintSystemV1(
             .proof_values_excluded;
     out.valid =
         out.deterministic_system_rebuilt &&
+        out.canonical_tape_program_bound &&
         out.proof_values_excluded &&
         out.cs.n_columns <
             kRCFri3AlgBatchMaxColumns &&
@@ -1574,6 +1641,9 @@ bool BuildConstraintSystemV1(
     }
     out.deep_finalization =
         finalization.deep;
+    out.canonical_tape_program_bound =
+        deterministic
+            .canonical_tape_program_bound;
     out.deterministic_system_rebuilt =
         deterministic.valid;
     out.challenge_system_rebuilt =
@@ -1583,6 +1653,7 @@ bool BuildConstraintSystemV1(
     out.proof_values_excluded =
         deterministic.proof_values_excluded;
     out.valid =
+        out.canonical_tape_program_bound &&
         out.deterministic_system_rebuilt &&
         out.challenge_system_rebuilt &&
         out.proof_values_excluded &&
@@ -1675,7 +1746,29 @@ bool BuildDeterministicComponentV1(
     out.range =
         deep_product.plan.range;
 
-    if (!merkle::BuildPublicConstraintSystemsV1(
+    AirCS canonical_tape_cs;
+    tape::LayoutV1 canonical_tape_layout;
+    tape::ScheduleV1 canonical_tape_schedule;
+    if (!tape::BuildCanonicalConstraintSystemV1(
+            out.tape_shape,
+            out.tape_binding,
+            canonical_tape_cs,
+            &canonical_tape_layout,
+            &canonical_tape_schedule,
+            &out.tape_program,
+            why) ||
+        !SameVerifierOwnedColumns(
+            canonical_tape_cs,
+            tape_product.cs) ||
+        canonical_tape_cs.n_columns !=
+            tape_product.columns.size() ||
+        canonical_tape_schedule.source_records !=
+            tape_product.schedule.source_records ||
+        canonical_tape_schedule.active_records !=
+            tape_product.schedule.active_records ||
+        canonical_tape_schedule.trace_rows !=
+            tape_product.schedule.trace_rows ||
+        !merkle::BuildPublicConstraintSystemsV1(
             out.tape_shape,
             out.tape_binding,
             out.range,
@@ -1697,12 +1790,12 @@ bool BuildDeterministicComponentV1(
         merkle_columns;
     const uint32_t merkle_rows =
         std::max({
-            tape_product.cs.n_rows,
+            canonical_tape_cs.n_rows,
             out.hash.cs.n_rows,
             out.fold.cs.n_rows});
     if (!AppendAtRows(
             merkle_cs, merkle_columns,
-            tape_product.cs,
+            canonical_tape_cs,
             tape_product.columns,
             merkle_rows, 0,
             out.merkle_tape_attachment,
@@ -1804,6 +1897,18 @@ bool BuildDeterministicComponentV1(
         out.deep_base.valid &&
         out.deep_base.challenge_columns_absent &&
         out.deep_base.row_group_root_pending;
+    out.tape_program_root =
+        cb::CommitProgramTableAlgHash(
+            out.tape_program);
+    out.canonical_tape_program_bound =
+        !std::all_of(
+            out.tape_program_root.begin(),
+            out.tape_program_root.end(),
+            [](gf::Fp value) {
+                return gf::Canonical(value) == 0;
+            }) &&
+        out.tape_program.programs.size() ==
+            canonical_tape_cs.constraints.size();
     out.challenge_columns_absent =
         out.cs
             .preprocessed_row_group_roots
@@ -1825,6 +1930,7 @@ bool BuildDeterministicComponentV1(
         out.verifier_merkle_systems_rebuilt &&
         out.merkle_fold_complete &&
         out.quotient_deep_base_complete &&
+        out.canonical_tape_program_bound &&
         out.challenge_columns_absent &&
         out.terminal_acceptance_connected &&
         out.canonical_embedding_ready;
@@ -1974,6 +2080,10 @@ bool BuildProductV1(
         component.tape_binding;
     public_statement.range =
         component.range;
+    public_statement.tape_program =
+        component.tape_program;
+    public_statement.tape_program_root =
+        component.tape_program_root;
     public_statement.child_program =
         component.deep_base.physical
             .deep_plan.child_program;
@@ -2042,6 +2152,11 @@ bool BuildProductV1(
     out.verifier_merkle_systems_rebuilt =
         component
             .verifier_merkle_systems_rebuilt;
+    out.canonical_tape_program_bound =
+        component
+            .canonical_tape_program_bound &&
+        verifier_system
+            .canonical_tape_program_bound;
     out.merkle_fold_complete =
         component.merkle_fold_complete;
     out.quotient_deep_complete =
@@ -2070,6 +2185,7 @@ bool BuildProductV1(
         out.exact_shared_tape_cells_aliased &&
         out.verifier_merkle_systems_rebuilt &&
         out.verifier_constraint_system_rebuilt &&
+        out.canonical_tape_program_bound &&
         out.merkle_fold_complete &&
         out.quotient_deep_complete &&
         out.every_deterministic_column_precedes_r0 &&

@@ -199,6 +199,9 @@ struct FullFixture {
         TransitionPrograms()};
     matmul::v4::rc::alg_hash::Digest
         child_program_root{};
+    cb::ProgramTable tape_program{};
+    matmul::v4::rc::alg_hash::Digest
+        tape_program_root{};
     dvm::ProductV1 deep_product;
     std::vector<uint32_t> canonical_v13_words;
     tape::PublicShapeV1 shape{};
@@ -226,6 +229,13 @@ struct FullFixture {
         child_program_root =
             cb::CommitProgramTableAlgHash(
                 child_program);
+        BOOST_REQUIRE_MESSAGE(
+            tape::BuildCanonicalProgramTableV1(
+                tape_program, &why),
+            why);
+        tape_program_root =
+            cb::CommitProgramTableAlgHash(
+                tape_program);
         deep_product =
             dvm::BuildProductV1(
                 proved.proximity.proof,
@@ -515,6 +525,7 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     public_complete_child_rebuilds_after_r0_without_proof_values)
 {
+    std::string why;
     complete::PublicStatementV1 statement;
     statement.tape_shape.trace_rows = 256;
     statement.tape_shape.trace_columns = 2;
@@ -537,6 +548,13 @@ BOOST_AUTO_TEST_CASE(
         .first_query = 0,
         .query_count = 1,
     };
+    BOOST_REQUIRE_MESSAGE(
+        tape::BuildCanonicalProgramTableV1(
+            statement.tape_program, &why),
+        why);
+    statement.tape_program_root =
+        cb::CommitProgramTableAlgHash(
+            statement.tape_program);
     statement.child_program =
         TransitionPrograms();
     statement.child_program_root =
@@ -549,7 +567,6 @@ BOOST_AUTO_TEST_CASE(
 
     complete::VerifierConstraintSystemV1
         rebuilt;
-    std::string why;
     BOOST_REQUIRE_MESSAGE(
         complete::BuildConstraintSystemV1(
             statement, r0_root,
@@ -559,6 +576,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         rebuilt
             .deterministic_system_rebuilt);
+    BOOST_CHECK(
+        rebuilt
+            .canonical_tape_program_bound);
     BOOST_CHECK(
         rebuilt.challenge_system_rebuilt);
     BOOST_CHECK(
@@ -593,6 +613,28 @@ BOOST_AUTO_TEST_CASE(
             substituted, r0_root,
             rejected, &why));
     BOOST_CHECK(!rejected.valid);
+
+    auto substituted_tape = statement;
+    substituted_tape.tape_program
+        .programs.back()
+        .instructions.back().lhs =
+            tape::CanonicalLayoutV1()
+                .ExpectedTapeRoot(0);
+    BOOST_CHECK(
+        !complete::BuildConstraintSystemV1(
+            substituted_tape, r0_root,
+            rejected, &why));
+
+    auto substituted_tape_root = statement;
+    substituted_tape_root.tape_program_root[0] =
+        gf::Add(
+            substituted_tape_root
+                .tape_program_root[0],
+            1);
+    BOOST_CHECK(
+        !complete::BuildConstraintSystemV1(
+            substituted_tape_root, r0_root,
+            rejected, &why));
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -1116,6 +1158,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         product
             .verifier_constraint_system_rebuilt);
+    BOOST_CHECK(
+        product
+            .canonical_tape_program_bound);
     BOOST_CHECK_EQUAL(
         product.shared_tape_aliases,
         fixture.tape_product.cs.n_columns);
@@ -1212,6 +1257,10 @@ BOOST_AUTO_TEST_CASE(
     public_statement.tape_binding =
         fixture.binding;
     public_statement.range = range;
+    public_statement.tape_program =
+        fixture.tape_program;
+    public_statement.tape_program_root =
+        fixture.tape_program_root;
     public_statement.child_program =
         fixture.child_program;
     public_statement.child_program_root =
@@ -1251,6 +1300,31 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !complete::VerifyProofV1(
             changed_program,
+            proved.proof, &why));
+
+    auto changed_tape_program =
+        public_statement;
+    changed_tape_program.tape_program
+        .programs.back()
+        .instructions.back().lhs =
+            tape::CanonicalLayoutV1()
+                .ExpectedTapeRoot(0);
+    BOOST_CHECK(
+        !complete::VerifyProofV1(
+            changed_tape_program,
+            proved.proof, &why));
+
+    auto changed_tape_program_root =
+        public_statement;
+    changed_tape_program_root
+        .tape_program_root[0] =
+            gf::Add(
+                changed_tape_program_root
+                    .tape_program_root[0],
+                1);
+    BOOST_CHECK(
+        !complete::VerifyProofV1(
+            changed_tape_program_root,
             proved.proof, &why));
 
     auto changed_program_root =

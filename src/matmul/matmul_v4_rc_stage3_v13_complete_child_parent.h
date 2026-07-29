@@ -5,6 +5,7 @@
 #ifndef BTX_MATMUL_MATMUL_V4_RC_STAGE3_V13_COMPLETE_CHILD_PARENT_H
 #define BTX_MATMUL_MATMUL_V4_RC_STAGE3_V13_COMPLETE_CHILD_PARENT_H
 
+#include <matmul/matmul_v4_rc_stage3_v13_proof_tape_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_v13_deep_source_logup_parent.h>
 #include <matmul/matmul_v4_rc_stage3_v13_merkle_fold_parent.h>
 
@@ -41,6 +42,8 @@ struct DeterministicComponentV1 {
     tape::PublicShapeV1 tape_shape{};
     tape::PublicBindingV1 tape_binding{};
     rv::QueryRangeV1 range{};
+    cb::ProgramTable tape_program{};
+    alg_hash::Digest tape_program_root{};
     aq::AirConstraintSystem<gf::Fp3> cs;
     std::vector<std::vector<gf::Fp3>> columns;
 
@@ -64,6 +67,7 @@ struct DeterministicComponentV1 {
     bool verifier_merkle_systems_rebuilt{false};
     bool merkle_fold_complete{false};
     bool quotient_deep_base_complete{false};
+    bool canonical_tape_program_bound{false};
     bool challenge_columns_absent{false};
     bool terminal_acceptance_connected{false};
     bool canonical_embedding_ready{false};
@@ -150,6 +154,7 @@ struct ProductV1 {
     bool exact_shared_tape_cells_aliased{false};
     bool verifier_merkle_systems_rebuilt{false};
     bool verifier_constraint_system_rebuilt{false};
+    bool canonical_tape_program_bound{false};
     bool merkle_fold_complete{false};
     bool quotient_deep_complete{false};
     bool every_deterministic_column_precedes_r0{false};
@@ -180,6 +185,8 @@ struct PublicStatementV1 {
     tape::PublicShapeV1 tape_shape{};
     tape::PublicBindingV1 tape_binding{};
     rv::QueryRangeV1 range{};
+    cb::ProgramTable tape_program{};
+    alg_hash::Digest tape_program_root{};
     cb::ProgramTable child_program{};
     alg_hash::Digest child_program_root{};
     uint256 public_seed{};
@@ -207,6 +214,7 @@ struct VerifierConstraintSystemV1 {
     uint32_t shared_tape_aliases{0};
     uint32_t terminal_acceptance_column{
         UINT32_MAX};
+    bool canonical_tape_program_bound{false};
     bool deterministic_system_rebuilt{false};
     bool challenge_system_rebuilt{false};
     bool proof_values_excluded{false};
@@ -234,6 +242,7 @@ struct PublicDeterministicComponentV1 {
     uint32_t shared_tape_aliases{0};
     uint32_t terminal_acceptance_column{
         UINT32_MAX};
+    bool canonical_tape_program_bound{false};
     bool deterministic_system_rebuilt{false};
     bool proof_values_excluded{false};
     bool valid{false};
