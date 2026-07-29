@@ -426,6 +426,28 @@ LayoutV1 CanonicalLayout(
     return out;
 }
 
+LayoutV1 RelocateDependentLayout(
+    const LayoutV1& base,
+    uint32_t dependent_column_base)
+{
+    LayoutV1 out = base;
+    out.dependent_base =
+        dependent_column_base;
+    out.source_inverse_base =
+        out.dependent_base;
+    out.consumer_inverse_base =
+        out.source_inverse_base +
+        kLookupLanesV1 *
+            kSourceByteSlotsPerRowV1;
+    out.running_base =
+        out.consumer_inverse_base +
+        kLookupLanesV1 *
+            kConsumerByteSlotsPerRowV1;
+    out.end =
+        out.running_base + kLookupLanesV1;
+    return out;
+}
+
 Fp3 SourceByte(
     const std::vector<Fp3>& row,
     const PlanV1& plan,
@@ -1454,6 +1476,335 @@ bool DeriveChallengesV1(
             "stage3:v13_v14_abi_logup_join:"
             "post_r0_challenges";
     }
+    return true;
+}
+
+bool AppendEmbeddedBaseConstraintSystemV1(
+    const PlanV1& plan,
+    const std::vector<uint32_t>&
+        parent_r0_base_column_indices,
+    AirCS& parent_cs,
+    EmbeddedBaseV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!ValidPlan(plan) ||
+        !PlanRefsValid(
+            plan, parent_cs,
+            parent_r0_base_column_indices)) {
+        return Fail(why, "embedded_base_parent");
+    }
+    out.plan = plan;
+    out.original_columns = parent_cs.n_columns;
+    if (!AppendBaseCs(
+            plan, parent_cs, nullptr,
+            out.layout, why)) {
+        out = {};
+        return false;
+    }
+    out.complete_r0_base_column_indices =
+        parent_r0_base_column_indices;
+    for (uint32_t column =
+             out.layout.original_columns;
+         column < out.layout.dependent_base;
+         ++column) {
+        out.complete_r0_base_column_indices
+            .push_back(column);
+    }
+    out.appended_r0_columns =
+        out.layout.dependent_base -
+        out.layout.original_columns;
+    out.physical_parent_cells_in_r0 = true;
+    out.verifier_schedule_preprocessed =
+        parent_cs.preprocessed_pin_ood;
+    out.challenge_columns_absent =
+        parent_cs.n_columns ==
+            out.layout.dependent_base &&
+        out.layout.dependent_base <
+            out.layout.end;
+    out.valid =
+        out.physical_parent_cells_in_r0 &&
+        out.verifier_schedule_preprocessed &&
+        out.challenge_columns_absent &&
+        StrictlyIncreasing(
+            out.complete_r0_base_column_indices,
+            parent_cs.n_columns) &&
+        out.complete_r0_base_column_indices.size() ==
+            parent_r0_base_column_indices.size() +
+                out.appended_r0_columns;
+    out.note = out.valid
+        ? "canonical ABI base embedded before global R0"
+        : "embedded ABI base incomplete";
+    if (!out.valid) {
+        return Fail(why, "embedded_base_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendEmbeddedBaseProductV1(
+    const PlanV1& plan,
+    const std::vector<uint32_t>&
+        parent_r0_base_column_indices,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>&
+        parent_columns,
+    EmbeddedBaseV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!ValidPlan(plan) ||
+        !PlanRefsValid(
+            plan, parent_cs,
+            parent_r0_base_column_indices) ||
+        parent_columns.size() !=
+            parent_cs.n_columns) {
+        return Fail(why, "embedded_base_product_parent");
+    }
+    for (const auto& column : parent_columns) {
+        if (column.size() != parent_cs.n_rows) {
+            return Fail(
+                why,
+                "embedded_base_product_rows");
+        }
+    }
+    out.plan = plan;
+    out.original_columns = parent_cs.n_columns;
+    if (!AppendBaseCs(
+            plan, parent_cs, &parent_columns,
+            out.layout, why) ||
+        !FillBaseWitness(
+            plan, out.layout,
+            parent_columns, why)) {
+        out = {};
+        return false;
+    }
+    out.complete_r0_base_column_indices =
+        parent_r0_base_column_indices;
+    for (uint32_t column =
+             out.layout.original_columns;
+         column < out.layout.dependent_base;
+         ++column) {
+        out.complete_r0_base_column_indices
+            .push_back(column);
+    }
+    out.appended_r0_columns =
+        out.layout.dependent_base -
+        out.layout.original_columns;
+    out.physical_parent_cells_in_r0 = true;
+    out.verifier_schedule_preprocessed =
+        parent_cs.preprocessed_pin_ood;
+    out.challenge_columns_absent =
+        parent_cs.n_columns ==
+            out.layout.dependent_base &&
+        parent_columns.size() ==
+            out.layout.dependent_base &&
+        out.layout.dependent_base <
+            out.layout.end;
+    out.valid =
+        out.physical_parent_cells_in_r0 &&
+        out.verifier_schedule_preprocessed &&
+        out.challenge_columns_absent &&
+        StrictlyIncreasing(
+            out.complete_r0_base_column_indices,
+            parent_cs.n_columns) &&
+        out.complete_r0_base_column_indices.size() ==
+            parent_r0_base_column_indices.size() +
+                out.appended_r0_columns;
+    out.note = out.valid
+        ? "canonical ABI base witness embedded before global R0"
+        : "embedded ABI base witness incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "embedded_base_product_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendEmbeddedFinalConstraintSystemV1(
+    const PlanV1& plan,
+    const EmbeddedBaseV1& base,
+    const uint256& domain_separated_public_seed,
+    const uint256& global_r0_row_root,
+    const std::vector<uint32_t>&
+        global_r0_base_column_indices,
+    AirCS& parent_cs,
+    EmbeddedFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    const bool required_columns_present =
+        std::all_of(
+            base.complete_r0_base_column_indices.begin(),
+            base.complete_r0_base_column_indices.end(),
+            [&global_r0_base_column_indices](
+                uint32_t column) {
+                return Contains(
+                    global_r0_base_column_indices,
+                    column);
+            });
+    if (!base.valid ||
+        !SamePlan(plan, base.plan) ||
+        domain_separated_public_seed.IsNull() ||
+        global_r0_row_root.IsNull() ||
+        !required_columns_present ||
+        parent_cs.n_rows != plan.parent_rows ||
+        parent_cs.n_columns <
+            base.layout.dependent_base ||
+        !StrictlyIncreasing(
+            global_r0_base_column_indices,
+            parent_cs.n_columns)) {
+        return Fail(
+            why, "embedded_final_verifier_parent");
+    }
+    out.global_r0_row_root =
+        global_r0_row_root;
+    out.dependent_column_base =
+        parent_cs.n_columns;
+    out.relocated_layout =
+        RelocateDependentLayout(
+            base.layout,
+            out.dependent_column_base);
+    if (!DeriveChallengesV1(
+            plan,
+            domain_separated_public_seed,
+            global_r0_row_root,
+            out.challenges, why) ||
+        !AppendFinalCs(
+            plan, out.challenges,
+            out.relocated_layout, parent_cs,
+            nullptr, why)) {
+        out = {};
+        return false;
+    }
+    out.dependent_columns =
+        parent_cs.n_columns -
+        out.dependent_column_base;
+    out.exact_global_r0_indices = true;
+    out.challenges_derived_after_global_r0 =
+        true;
+    out.dual_fp3_rational_identity_constrained =
+        out.dependent_columns ==
+            out.relocated_layout.end -
+                out.relocated_layout.dependent_base &&
+        parent_cs.n_columns ==
+            out.relocated_layout.end;
+    out.valid =
+        out.exact_global_r0_indices &&
+        out.challenges_derived_after_global_r0 &&
+        out.dual_fp3_rational_identity_constrained;
+    out.note = out.valid
+        ? "ABI dependent constraints derived from global parent R0"
+        : "embedded ABI verifier finalization incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "embedded_final_verifier_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendEmbeddedFinalProductV1(
+    const PlanV1& plan,
+    const EmbeddedBaseV1& base,
+    const uint256& domain_separated_public_seed,
+    const aq::AirQuotientTwoEpochBaseRowSession&
+        global_r0_session,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>&
+        parent_columns,
+    EmbeddedFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    const bool required_columns_present =
+        std::all_of(
+            base.complete_r0_base_column_indices.begin(),
+            base.complete_r0_base_column_indices.end(),
+            [&global_r0_session](
+                uint32_t column) {
+                return Contains(
+                    global_r0_session
+                        .base_column_indices,
+                    column);
+            });
+    if (!base.valid ||
+        !SamePlan(plan, base.plan) ||
+        domain_separated_public_seed.IsNull() ||
+        !global_r0_session.valid ||
+        global_r0_session.trace_rows !=
+            parent_cs.n_rows ||
+        global_r0_session.base_row_commitment.IsNull() ||
+        !required_columns_present ||
+        parent_cs.n_rows != plan.parent_rows ||
+        parent_cs.n_columns <
+            base.layout.dependent_base ||
+        parent_columns.size() !=
+            parent_cs.n_columns ||
+        !StrictlyIncreasing(
+            global_r0_session.base_column_indices,
+            parent_cs.n_columns)) {
+        return Fail(
+            why, "embedded_final_product_parent");
+    }
+    for (const auto& column : parent_columns) {
+        if (column.size() != parent_cs.n_rows) {
+            return Fail(
+                why, "embedded_final_product_rows");
+        }
+    }
+    out.global_r0_row_root =
+        global_r0_session.base_row_commitment;
+    out.dependent_column_base =
+        parent_cs.n_columns;
+    out.relocated_layout =
+        RelocateDependentLayout(
+            base.layout,
+            out.dependent_column_base);
+    if (!DeriveChallengesV1(
+            plan,
+            domain_separated_public_seed,
+            global_r0_session.base_row_commitment,
+            out.challenges, why) ||
+        !AppendFinalCs(
+            plan, out.challenges,
+            out.relocated_layout, parent_cs,
+            &parent_columns, why) ||
+        !FillFinalWitness(
+            plan, out.challenges,
+            out.relocated_layout,
+            parent_columns,
+            why)) {
+        out = {};
+        return false;
+    }
+    out.dependent_columns =
+        parent_cs.n_columns -
+        out.dependent_column_base;
+    out.exact_global_r0_indices = true;
+    out.challenges_derived_after_global_r0 =
+        true;
+    out.dual_fp3_rational_identity_constrained =
+        out.dependent_columns ==
+            out.relocated_layout.end -
+                out.relocated_layout.dependent_base &&
+        parent_cs.n_columns ==
+            out.relocated_layout.end &&
+        parent_columns.size() ==
+            out.relocated_layout.end;
+    out.valid =
+        out.exact_global_r0_indices &&
+        out.challenges_derived_after_global_r0 &&
+        out.dual_fp3_rational_identity_constrained;
+    out.note = out.valid
+        ? "ABI dependent witness derived from retained global parent R0"
+        : "embedded ABI product finalization incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "embedded_final_product_invariant");
+    }
+    if (why != nullptr) *why = out.note;
     return true;
 }
 

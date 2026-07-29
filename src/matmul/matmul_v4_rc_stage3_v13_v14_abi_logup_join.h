@@ -234,6 +234,85 @@ struct ProductV1 {
 };
 
 /**
+ * Challenge-independent ABI relation embedded into a wider verifier parent.
+ *
+ * The referenced tape Address/Value/Bit columns and V14 Message columns must
+ * already belong to `complete_r0_base_column_indices`. This constructor then
+ * appends only verifier-owned decomposition and canonical schedule columns.
+ * No row commitment or lookup challenge is created here: a caller may append
+ * several complete child components and commit all of them in one global R0.
+ */
+struct EmbeddedBaseV1 {
+    PlanV1 plan{};
+    LayoutV1 layout{};
+    std::vector<uint32_t> complete_r0_base_column_indices;
+    uint32_t original_columns{0};
+    uint32_t appended_r0_columns{0};
+    bool physical_parent_cells_in_r0{false};
+    bool verifier_schedule_preprocessed{false};
+    bool challenge_columns_absent{false};
+    bool valid{false};
+    std::string note;
+};
+
+/** Append the verifier-rebuilt pre-R0 constraint family only. */
+[[nodiscard]] bool AppendEmbeddedBaseConstraintSystemV1(
+    const PlanV1& plan,
+    const std::vector<uint32_t>& parent_r0_base_column_indices,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    EmbeddedBaseV1& out,
+    std::string* why = nullptr);
+
+/** Prover counterpart: also fills the u32 decomposition witness. */
+[[nodiscard]] bool AppendEmbeddedBaseProductV1(
+    const PlanV1& plan,
+    const std::vector<uint32_t>& parent_r0_base_column_indices,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    std::vector<std::vector<gf::Fp3>>& parent_columns,
+    EmbeddedBaseV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Challenge-dependent suffix derived from the wider parent's authenticated
+ * global R0. Child-local/private row commitments are deliberately not
+ * accepted by these APIs.
+ */
+struct EmbeddedFinalizationV1 {
+    ChallengesV1 challenges{};
+    LayoutV1 relocated_layout{};
+    uint256 global_r0_row_root{};
+    uint32_t dependent_column_base{0};
+    uint32_t dependent_columns{0};
+    bool exact_global_r0_indices{false};
+    bool challenges_derived_after_global_r0{false};
+    bool dual_fp3_rational_identity_constrained{false};
+    bool valid{false};
+    std::string note;
+};
+
+/** Append verifier constraints from an authenticated global R0 root. */
+[[nodiscard]] bool AppendEmbeddedFinalConstraintSystemV1(
+    const PlanV1& plan,
+    const EmbeddedBaseV1& base,
+    const uint256& domain_separated_public_seed,
+    const uint256& global_r0_row_root,
+    const std::vector<uint32_t>& global_r0_base_column_indices,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    EmbeddedFinalizationV1& out,
+    std::string* why = nullptr);
+
+/** Append and fill the dependent witness from the caller's retained R0. */
+[[nodiscard]] bool AppendEmbeddedFinalProductV1(
+    const PlanV1& plan,
+    const EmbeddedBaseV1& base,
+    const uint256& domain_separated_public_seed,
+    const aq::AirQuotientTwoEpochBaseRowSession& global_r0_session,
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    std::vector<std::vector<gf::Fp3>>& parent_columns,
+    EmbeddedFinalizationV1& out,
+    std::string* why = nullptr);
+
+/**
  * Append the join to an existing parent witness and prepare the retained R0.
  *
  * `parent_r0_base_column_indices` must already contain every referenced tape

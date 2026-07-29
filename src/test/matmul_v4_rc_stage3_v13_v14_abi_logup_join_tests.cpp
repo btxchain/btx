@@ -400,6 +400,175 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!honest.recursively_consumed);
     BOOST_CHECK(!honest.recursive_authority_ready);
 
+    // The reusable composition API produces the same relation while delaying
+    // every challenge-dependent column until the wider parent commits R0.
+    {
+        auto split_cs = fixture.resident_cs;
+        auto split_columns =
+            fixture.resident_columns;
+        join::EmbeddedBaseV1 base;
+        BOOST_REQUIRE_MESSAGE(
+            join::AppendEmbeddedBaseProductV1(
+                fixture.plan,
+                fixture.base_indices,
+                split_cs, split_columns,
+                base, &why),
+            why);
+        BOOST_CHECK(base.valid);
+        BOOST_CHECK(base.challenge_columns_absent);
+        BOOST_CHECK_EQUAL(
+            split_cs.n_columns,
+            base.layout.dependent_base);
+        const auto global_r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                split_cs, split_columns,
+                base.complete_r0_base_column_indices);
+        BOOST_REQUIRE_MESSAGE(
+            global_r0.valid, global_r0.note);
+
+        join::EmbeddedFinalizationV1 final;
+        BOOST_REQUIRE_MESSAGE(
+            join::AppendEmbeddedFinalProductV1(
+                fixture.plan, base,
+                fixture.proof_seed,
+                global_r0,
+                split_cs, split_columns,
+                final, &why),
+            why);
+        BOOST_CHECK(final.valid);
+        BOOST_CHECK(final.exact_global_r0_indices);
+        BOOST_CHECK(
+            final.challenges_derived_after_global_r0);
+        BOOST_CHECK(
+            final.dual_fp3_rational_identity_constrained);
+        BOOST_CHECK_EQUAL(
+            split_cs.n_columns,
+            honest.cs.n_columns);
+        BOOST_CHECK_EQUAL(
+            split_cs.constraints.size(),
+            honest.cs.constraints.size());
+        BOOST_CHECK(
+            final.challenges == honest.challenges);
+        BOOST_CHECK_EQUAL(
+            join::CountViolationsV1(
+                split_cs, split_columns),
+            0U);
+
+        // Verifier reconstruction follows the same two epochs and contains
+        // no witness or prover-selected physical cell map.
+        auto verifier_cs = fixture.resident_cs;
+        join::EmbeddedBaseV1 verifier_base;
+        BOOST_REQUIRE_MESSAGE(
+            join::AppendEmbeddedBaseConstraintSystemV1(
+                fixture.plan,
+                fixture.base_indices,
+                verifier_cs,
+                verifier_base, &why),
+            why);
+        join::EmbeddedFinalizationV1 verifier_final;
+        BOOST_REQUIRE_MESSAGE(
+            join::AppendEmbeddedFinalConstraintSystemV1(
+                fixture.plan, verifier_base,
+                fixture.proof_seed,
+                global_r0.base_row_commitment,
+                global_r0.base_column_indices,
+                verifier_cs,
+                verifier_final, &why),
+            why);
+        BOOST_CHECK(
+            verifier_final.challenges ==
+            final.challenges);
+        BOOST_CHECK_EQUAL(
+            verifier_cs.n_columns,
+            split_cs.n_columns);
+        BOOST_CHECK_EQUAL(
+            verifier_cs.constraints.size(),
+            split_cs.constraints.size());
+
+        // A child-local R0 that omits the ABI base schedule cannot finalize
+        // the embedded relation.
+        const auto private_r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                fixture.resident_cs,
+                fixture.resident_columns,
+                fixture.base_indices);
+        BOOST_REQUIRE(private_r0.valid);
+        auto rejected_cs = fixture.resident_cs;
+        auto rejected_columns =
+            fixture.resident_columns;
+        join::EmbeddedBaseV1 rejected_base;
+        BOOST_REQUIRE(
+            join::AppendEmbeddedBaseProductV1(
+                fixture.plan,
+                fixture.base_indices,
+                rejected_cs,
+                rejected_columns,
+                rejected_base, &why));
+        join::EmbeddedFinalizationV1 rejected;
+        BOOST_CHECK(
+            !join::AppendEmbeddedFinalProductV1(
+                fixture.plan, rejected_base,
+                fixture.proof_seed,
+                private_r0,
+                rejected_cs,
+                rejected_columns,
+                rejected, &why));
+        BOOST_CHECK_MESSAGE(
+            why.find(
+                "embedded_final_product_parent") !=
+                std::string::npos,
+            why);
+
+        // A sibling/base column may follow this ABI base inside the same R0.
+        // The dependent suffix relocates after it while retaining the exact
+        // physical references of this component.
+        auto sibling_cs = fixture.resident_cs;
+        auto sibling_columns =
+            fixture.resident_columns;
+        join::EmbeddedBaseV1 sibling_base;
+        BOOST_REQUIRE(
+            join::AppendEmbeddedBaseProductV1(
+                fixture.plan,
+                fixture.base_indices,
+                sibling_cs,
+                sibling_columns,
+                sibling_base, &why));
+        const uint32_t sibling_column =
+            sibling_cs.n_columns++;
+        sibling_columns.push_back(
+            std::vector<gf::Fp3>(
+                sibling_cs.n_rows,
+                gf::Fp3::Zero()));
+        auto sibling_r0_indices =
+            sibling_base
+                .complete_r0_base_column_indices;
+        sibling_r0_indices.push_back(
+            sibling_column);
+        const auto sibling_r0 =
+            aq::AirQuotientBuildTwoEpochBaseRowSession(
+                sibling_cs, sibling_columns,
+                sibling_r0_indices);
+        BOOST_REQUIRE(sibling_r0.valid);
+        join::EmbeddedFinalizationV1
+            sibling_final;
+        BOOST_REQUIRE_MESSAGE(
+            join::AppendEmbeddedFinalProductV1(
+                fixture.plan, sibling_base,
+                fixture.proof_seed,
+                sibling_r0,
+                sibling_cs,
+                sibling_columns,
+                sibling_final, &why),
+            why);
+        BOOST_CHECK_EQUAL(
+            sibling_final.dependent_column_base,
+            sibling_column + 1);
+        BOOST_CHECK_EQUAL(
+            join::CountViolationsV1(
+                sibling_cs, sibling_columns),
+            0U);
+    }
+
     {
         auto changed = fixture.resident_columns;
         const auto& source =
