@@ -322,6 +322,139 @@ ProofV1 RetainProofV1(
     return out;
 }
 
+ProofV1 RetainAlgProofV1(
+    const AirCS& expected_cs,
+    const fixedpoint::AlgAirProof& alg_proof,
+    const PublicBindingV1& binding)
+{
+    ProofV1 out;
+    out.binding = binding;
+    const uint256 cs_commitment =
+        hierarchy::
+            ComputeHierarchyConstraintSystemCommitmentV1(
+                expected_cs);
+    const uint256 statement_commitment =
+        CommitPublicBindingV1(
+            binding, cs_commitment);
+    const auto expected =
+        BuildExpectedRecursiveBindingV2(
+            expected_cs, binding);
+    if (cs_commitment.IsNull() ||
+        statement_commitment.IsNull() ||
+        expected.statement_commitment !=
+            statement_commitment ||
+        expected.n_lde == 0 ||
+        expected.active_rows == 0) {
+        out.note =
+            "stage3:ordinary_recursive_leaf:"
+            "alg_invalid_public_input";
+        return out;
+    }
+
+    std::string why;
+    out.native_streaming_proof_verified =
+        aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+                expected_cs, alg_proof,
+                binding.fs_seed, &why);
+    if (!out.native_streaming_proof_verified) {
+        out.note =
+            "stage3:ordinary_recursive_leaf:"
+            "alg_native_verify:" + why;
+        return out;
+    }
+
+    std::vector<unsigned char> proof_bytes;
+    if (!SerializeAirQuotientProofAlg(
+            alg_proof, proof_bytes, &why) ||
+        proof_bytes.empty()) {
+        out.note =
+            "stage3:ordinary_recursive_leaf:"
+            "alg_serialize:" + why;
+        return out;
+    }
+    const auto decoded =
+        DeserializeAirQuotientProofAlg(
+            proof_bytes, &why);
+    std::vector<unsigned char> canonical;
+    out.ordinary_reentry_verified =
+        decoded.has_value() &&
+        SerializeAirQuotientProofAlg(
+            *decoded, canonical, &why) &&
+        canonical == proof_bytes &&
+        aq::AirQuotientVerify<
+            Fp3, aq::AirFriBackendAlg<Fp3>>(
+                expected_cs, *decoded,
+                binding.fs_seed, &why);
+    if (!out.ordinary_reentry_verified) {
+        out.note =
+            "stage3:ordinary_recursive_leaf:"
+            "alg_reentry:" + why;
+        return out;
+    }
+
+    auto& receipt = out.receipt;
+    receipt.node_binding =
+        binding.node_binding;
+    receipt.program_binding =
+        binding.program_binding;
+    receipt.proof_context_binding =
+        binding.proof_context_binding;
+    receipt.n_rows = expected_cs.n_rows;
+    receipt.n_columns =
+        expected_cs.n_columns;
+    receipt.n_constraints =
+        static_cast<uint32_t>(
+            expected_cs.constraints.size());
+    receipt.active_rows =
+        expected.active_rows;
+    receipt.n_lde = expected.n_lde;
+    receipt.constraint_system_commitment =
+        cs_commitment;
+    receipt.fs_seed = binding.fs_seed;
+    receipt.proof_commitment =
+        CommitProofBytes(proof_bytes);
+    receipt.statement_commitment =
+        statement_commitment;
+    receipt.constraint_system =
+        expected_cs;
+    receipt.proof = *decoded;
+    receipt.proof_bytes =
+        std::move(proof_bytes);
+    receipt.serialize_within_fri_budget =
+        receipt.proof_bytes.size() <=
+            kRCFriMaxProofBytesHard;
+    receipt.receipt_commitment =
+        fixedpoint::
+            CommitNarrowRecursiveProofReceiptV1(
+                receipt);
+    receipt.valid =
+        !receipt.receipt_commitment.IsNull() &&
+        fixedpoint::
+            ValidateNarrowRecursiveProofReceiptV2(
+                receipt, expected_cs,
+                expected, &why);
+    receipt.note = receipt.valid
+        ? "stage3:ordinary_recursive_leaf:"
+          "alg_receipt_valid"
+        : "stage3:ordinary_recursive_leaf:"
+          "alg_receipt_invalid:" + why;
+    out.proof_tamper_rejected =
+        receipt.valid &&
+        RejectProofTamper(
+            expected_cs, receipt.proof,
+            binding.fs_seed);
+    out.valid =
+        receipt.valid &&
+        out.proof_tamper_rejected;
+    out.note = out.valid
+        ? "stage3:ordinary_recursive_leaf:"
+          "alg_valid"
+        : "stage3:ordinary_recursive_leaf:"
+          "alg_invalid";
+    return out;
+}
+
 ProofV1 ProveV1(
     const AirCS& expected_cs,
     const std::vector<std::vector<Fp3>>&

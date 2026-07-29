@@ -78,6 +78,17 @@ struct ProofV1 {
     const aq::AirQuotientRowsProof& streaming_proof,
     const PublicBindingV1& binding);
 
+/**
+ * Retain a native Alg-FRI proof without routing it through the unrelated
+ * streaming-row backend.  The proof is independently verified, canonically
+ * serialized/decoded, and rebound to the same verifier-owned recursive
+ * identity as RetainProofV1.
+ */
+[[nodiscard]] ProofV1 RetainAlgProofV1(
+    const aq::AirConstraintSystem<gf::Fp3>& expected_cs,
+    const fixedpoint::AlgAirProof& alg_proof,
+    const PublicBindingV1& binding);
+
 /** Convenience prover for ordinary one-epoch relations. */
 [[nodiscard]] ProofV1 ProveV1(
     const aq::AirConstraintSystem<gf::Fp3>& expected_cs,
