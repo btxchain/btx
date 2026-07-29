@@ -15,12 +15,14 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <map>
 #include <numeric>
 
 namespace matmul::v4::rc::extract_chacha_sampler_child {
 namespace {
 
 namespace cb = constraint_bytecode;
+namespace composer = stage3_air_parent_composer;
 namespace ga = gkr_air;
 namespace gf = gkr_field;
 namespace ha = stage3_hash_air;
@@ -80,32 +82,14 @@ bool AppendExact(
     parent.preprocessed_pin_ood =
         parent.preprocessed_pin_ood ||
         child.preprocessed_pin_ood;
-    for (const auto& constraint : child.constraints) {
-        if (!constraint.eval ||
-            constraint.alg_degree == 0) {
-            return Fail(why, "append_exact_constraint");
-        }
-        auto shifted = constraint;
-        const auto eval = constraint.eval;
-        const uint32_t base = out.base;
-        const uint32_t width = child.n_columns;
-        shifted.eval =
-            [eval, base, width](
-                const std::vector<Fp3>& current,
-                const std::vector<Fp3>& next) {
-                if (current.size() < base + width ||
-                    next.size() < base + width) {
-                    return Fp3::One();
-                }
-                std::vector<Fp3> c(
-                    current.begin() + base,
-                    current.begin() + base + width);
-                std::vector<Fp3> n(
-                    next.begin() + base,
-                    next.begin() + base + width);
-                return eval(c, n);
-            };
-        parent.constraints.push_back(std::move(shifted));
+    cb::CanonicalRelocationReportV1 relocation;
+    if (!cb::AppendRelocatedAirConstraintsV1(
+            child, out.base, parent,
+            relocation, why) ||
+        !relocation.every_claimed_provenance_valid ||
+        !relocation.exact_order_preserved) {
+        return Fail(
+            why, "append_exact_constraint_relocation");
     }
     for (const auto& [column, values] :
          child.preprocessed) {
@@ -128,144 +112,37 @@ bool AppendLifted(
     AirCS& parent, const AirCS& child,
     Attachment& out, std::string* why)
 {
-    if (parent.n_rows < child.n_rows ||
-        parent.n_rows % child.n_rows != 0 ||
-        !child.preprocessed_roots.empty() ||
-        !child.preprocessed_row_group_roots.empty()) {
-        return Fail(why, "append_lifted_shape");
-    }
-    constexpr uint32_t ACTIVE = 0;
-    constexpr uint32_t TRANSITION = 1;
-    constexpr uint32_t FIRST = 2;
-    constexpr uint32_t LAST = 3;
-    constexpr uint32_t PADDING = 4;
-    constexpr uint32_t SELECTORS = 5;
-    AirCS lifted;
-    lifted.n_rows = parent.n_rows;
-    const uint32_t wrap = child.n_columns;
-    const uint32_t selectors = child.n_columns * 2U;
-    lifted.n_columns = selectors + SELECTORS;
-    lifted.preprocessed_pin_ood =
-        child.preprocessed_pin_ood;
+    std::vector<std::vector<Fp3>> parent_columns(
+        parent.n_columns,
+        std::vector<Fp3>(
+            parent.n_rows, Fp3::Zero()));
+    std::vector<std::vector<Fp3>> child_columns(
+        child.n_columns,
+        std::vector<Fp3>(
+            child.n_rows, Fp3::Zero()));
     for (const auto& [column, values] :
          child.preprocessed) {
-        if (column >= child.n_columns ||
+        if (column >= child_columns.size() ||
             values.size() != child.n_rows) {
             return Fail(why, "append_lifted_preprocessed");
         }
-        std::vector<Fp3> padded(
-            parent.n_rows, Fp3::Zero());
-        std::copy(
-            values.begin(), values.end(),
-            padded.begin());
-        lifted.preprocessed.emplace_back(
-            column, std::move(padded));
+        child_columns[column] = values;
     }
-    std::array<std::vector<Fp3>, SELECTORS> selector;
-    for (auto& values : selector) {
-        values.assign(parent.n_rows, Fp3::Zero());
+    composer::ChildAttachmentV1 attachment;
+    if (!composer::AppendChildLiftedV1(
+            parent, parent_columns,
+            child, child_columns,
+            parent.n_rows, 0,
+            attachment, why) ||
+        !attachment.valid ||
+        !attachment
+             .canonical_program_relocation_exact ||
+        !attachment.padding_zero_constrained) {
+        return Fail(why, "append_lifted_canonical");
     }
-    for (uint32_t row = 0; row < parent.n_rows; ++row) {
-        selector[row < child.n_rows ? ACTIVE : PADDING][row] =
-            Fp3::One();
-        if (row + 1 < child.n_rows) {
-            selector[TRANSITION][row] = Fp3::One();
-        }
-    }
-    selector[FIRST][0] = Fp3::One();
-    selector[LAST][child.n_rows - 1] = Fp3::One();
-    for (uint32_t i = 0; i < SELECTORS; ++i) {
-        lifted.preprocessed.emplace_back(
-            selectors + i, std::move(selector[i]));
-    }
-    for (uint32_t column = 0;
-         column < child.n_columns; ++column) {
-        Add(
-            lifted, "extract_child.lift.wrap.first",
-            aq::AirKind::kFirstRow, 1,
-            [column, wrap](
-                const auto& cur, const auto&) {
-                return gf::Sub(
-                    cur[wrap + column], cur[column]);
-            });
-        Add(
-            lifted, "extract_child.lift.wrap.constant",
-            aq::AirKind::kTransition, 1,
-            [column, wrap](
-                const auto& cur, const auto& next) {
-                return gf::Sub(
-                    next[wrap + column],
-                    cur[wrap + column]);
-            });
-    }
-    const auto gated =
-        [&](const aq::AirConstraint<Fp3>& source,
-            uint32_t selector_index, bool wrap_next) {
-            aq::AirConstraint<Fp3> out_constraint;
-            out_constraint.name = source.name;
-            out_constraint.kind = aq::AirKind::kEverywhere;
-            out_constraint.alg_degree =
-                source.alg_degree + 1;
-            const auto eval = source.eval;
-            const uint32_t width = child.n_columns;
-            out_constraint.eval =
-                [eval, width, wrap, selectors,
-                 selector_index, wrap_next](
-                    const std::vector<Fp3>& cur,
-                    const std::vector<Fp3>& next) {
-                    std::vector<Fp3> c(
-                        cur.begin(), cur.begin() + width);
-                    std::vector<Fp3> n;
-                    if (wrap_next) {
-                        n.assign(
-                            cur.begin() + wrap,
-                            cur.begin() + wrap + width);
-                    } else {
-                        n.assign(
-                            next.begin(),
-                            next.begin() + width);
-                    }
-                    return gf::Mul(
-                        cur[selectors + selector_index],
-                        eval(c, n));
-                };
-            lifted.constraints.push_back(
-                std::move(out_constraint));
-        };
-    for (const auto& constraint : child.constraints) {
-        switch (constraint.kind) {
-        case aq::AirKind::kEverywhere:
-            gated(constraint, TRANSITION, false);
-            gated(constraint, LAST, true);
-            break;
-        case aq::AirKind::kTransition:
-            gated(constraint, TRANSITION, false);
-            break;
-        case aq::AirKind::kFirstRow:
-            gated(constraint, FIRST, false);
-            break;
-        case aq::AirKind::kLastRow:
-            gated(constraint, LAST, true);
-            break;
-        }
-    }
-    for (uint32_t column = 0;
-         column < child.n_columns; ++column) {
-        Add(
-            lifted, "extract_child.lift.padding.zero",
-            aq::AirKind::kEverywhere, 2,
-            [column, selectors](
-                const auto& cur, const auto&) {
-                return gf::Mul(
-                    cur[selectors + PADDING],
-                    cur[column]);
-            });
-    }
-    if (!AppendExact(parent, lifted, out, why)) {
-        return false;
-    }
+    out.base = attachment.column_base;
     out.semantic_columns = child.n_columns;
-    out.wrap_base = out.base + wrap;
+    out.wrap_base = out.base + child.n_columns;
     out.lifted = true;
     return true;
 }
@@ -1123,6 +1000,270 @@ TileStatementV1 BaseStatement(
     return out;
 }
 
+std::vector<uint32_t> DeterministicLocalColumns(
+    const Built& built)
+{
+    std::vector<uint32_t> out =
+        built.base_columns;
+    out.reserve(
+        out.size() +
+        built.cs.preprocessed.size());
+    for (const auto& [column, values] :
+         built.cs.preprocessed) {
+        if (column >= built.cs.n_columns ||
+            values.size() != built.cs.n_rows) {
+            return {};
+        }
+        out.push_back(column);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(
+        std::unique(out.begin(), out.end()),
+        out.end());
+    return out;
+}
+
+bool SameChallenges(
+    const std::vector<Fp3>& left,
+    const std::vector<Fp3>& right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (uint32_t i = 0; i < left.size(); ++i) {
+        if (!gf::Eq(left[i], right[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool AppendMappedFinalConstraints(
+    const AirCS& local,
+    const std::vector<uint32_t>& local_to_parent,
+    AirCS& parent,
+    uint32_t& canonical_count,
+    uint32_t& native_count,
+    std::string* why)
+{
+    canonical_count = 0;
+    native_count = 0;
+    if (local.n_rows != parent.n_rows ||
+        local_to_parent.size() !=
+            local.n_columns) {
+        return Fail(why, "mapped_constraint_shape");
+    }
+    for (uint32_t parent_column :
+         local_to_parent) {
+        if (parent_column >= parent.n_columns) {
+            return Fail(
+                why, "mapped_constraint_column");
+        }
+    }
+
+    struct CacheEntry {
+        std::vector<Fp3> challenges;
+        std::vector<unsigned char> wire;
+        AirCS mapped;
+    };
+    std::map<uint256, std::vector<CacheEntry>>
+        cache;
+    std::vector<aq::AirConstraint<Fp3>>
+        appended;
+    appended.reserve(local.constraints.size());
+    for (const auto& source :
+         local.constraints) {
+        if (!source.eval ||
+            source.alg_degree == 0) {
+            return Fail(
+                why, "mapped_constraint_source");
+        }
+        const bool has_root =
+            !source
+                 .canonical_program_table_root
+                 .IsNull();
+        const bool has_ordinal =
+            source.canonical_program_ordinal !=
+            UINT32_MAX;
+        const bool has_wire =
+            source.canonical_program_table_wire !=
+                nullptr &&
+            !source
+                 .canonical_program_table_wire
+                 ->empty();
+        const bool has_challenges =
+            source.canonical_program_challenges !=
+                nullptr;
+        const bool any =
+            has_root || has_ordinal ||
+            has_wire || has_challenges;
+        const bool complete =
+            has_root && has_ordinal &&
+            has_wire && has_challenges;
+        if (any && !complete) {
+            return Fail(
+                why,
+                "mapped_constraint_partial_provenance");
+        }
+        if (complete) {
+            auto& bucket = cache[
+                source
+                    .canonical_program_table_root];
+            CacheEntry* cached = nullptr;
+            for (auto& candidate : bucket) {
+                if (candidate.wire ==
+                        *source
+                             .canonical_program_table_wire &&
+                    SameChallenges(
+                        candidate.challenges,
+                        *source
+                             .canonical_program_challenges)) {
+                    cached = &candidate;
+                    break;
+                }
+            }
+            if (cached == nullptr) {
+                cb::ProgramTable table;
+                if (!cb::DeserializeProgramTable(
+                        *source
+                             .canonical_program_table_wire,
+                        table, why) ||
+                    cb::CommitProgramTable(table) !=
+                        source
+                            .canonical_program_table_root) {
+                    return Fail(
+                        why,
+                        "mapped_constraint_program");
+                }
+                table.current_width =
+                    parent.n_columns;
+                table.next_width =
+                    parent.n_columns;
+                for (auto& program :
+                     table.programs) {
+                    program.current_width =
+                        parent.n_columns;
+                    program.next_width =
+                        parent.n_columns;
+                    for (auto& instruction :
+                         program.instructions) {
+                        if (instruction.opcode !=
+                                cb::Opcode::Current &&
+                            instruction.opcode !=
+                                cb::Opcode::Next) {
+                            continue;
+                        }
+                        if (instruction.lhs >=
+                                local_to_parent.size()) {
+                            return Fail(
+                                why,
+                                "mapped_constraint_operand");
+                        }
+                        instruction.lhs =
+                            local_to_parent[
+                                instruction.lhs];
+                    }
+                }
+                CacheEntry entry;
+                entry.challenges =
+                    *source
+                         .canonical_program_challenges;
+                entry.wire =
+                    *source
+                         .canonical_program_table_wire;
+                const bool built =
+                    table.challenge_width == 0
+                    ? cb::
+                        BuildAirConstraintSystemFromProgramTable(
+                            table, local.n_rows,
+                            entry.mapped, why)
+                    : cb::
+                        BuildAirConstraintSystemFromProgramTable(
+                            table, local.n_rows,
+                            entry.challenges,
+                            entry.mapped, why);
+                if (!built) {
+                    return Fail(
+                        why,
+                        "mapped_constraint_adapter");
+                }
+                bucket.push_back(
+                    std::move(entry));
+                cached = &bucket.back();
+            }
+            if (source
+                    .canonical_program_ordinal >=
+                    cached->mapped
+                        .constraints.size()) {
+                return Fail(
+                    why,
+                    "mapped_constraint_ordinal");
+            }
+            auto mapped =
+                cached->mapped.constraints[
+                    source
+                        .canonical_program_ordinal];
+            if (mapped.kind != source.kind ||
+                mapped.alg_degree !=
+                    source.alg_degree) {
+                return Fail(
+                    why,
+                    "mapped_constraint_metadata");
+            }
+            mapped.name = source.name;
+            appended.push_back(
+                std::move(mapped));
+            ++canonical_count;
+            continue;
+        }
+
+        aq::AirConstraint<Fp3> mapped;
+        mapped.name = source.name;
+        mapped.kind = source.kind;
+        mapped.alg_degree =
+            source.alg_degree;
+        const auto eval = source.eval;
+        const uint32_t local_width =
+            local.n_columns;
+        mapped.eval =
+            [eval, local_to_parent,
+             local_width](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>& next) {
+                std::vector<Fp3> local_cur(
+                    local_width, Fp3::Zero());
+                std::vector<Fp3> local_next(
+                    local_width, Fp3::Zero());
+                for (uint32_t column = 0;
+                     column < local_width;
+                     ++column) {
+                    const uint32_t parent_column =
+                        local_to_parent[column];
+                    if (parent_column >= cur.size() ||
+                        parent_column >= next.size()) {
+                        return Fp3::One();
+                    }
+                    local_cur[column] =
+                        cur[parent_column];
+                    local_next[column] =
+                        next[parent_column];
+                }
+                return eval(
+                    local_cur, local_next);
+            };
+        appended.push_back(std::move(mapped));
+        ++native_count;
+    }
+    parent.constraints.insert(
+        parent.constraints.end(),
+        std::make_move_iterator(
+            appended.begin()),
+        std::make_move_iterator(
+            appended.end()));
+    return canonical_count + native_count ==
+        local.constraints.size();
+}
+
 } // namespace
 
 bool MaterializeVerifierOwnedPreprocessedV1(
@@ -1239,6 +1380,434 @@ BuildProgramChallengeBindingV1(
         : "stage3:extract_chacha_sampler_child:"
           "program_challenge_binding_open";
     return out;
+}
+
+bool BuildDeterministicComponentV1(
+    const uint256& statement_commitment,
+    const uint256& public_fs_seed,
+    const uint256& prf_key,
+    uint32_t row,
+    uint32_t block,
+    const std::array<int64_t, 32>& input,
+    DeterministicComponentV1& out,
+    std::string* why)
+{
+    out = {};
+    if (statement_commitment.IsNull() ||
+        public_fs_seed.IsNull() ||
+        prf_key.IsNull()) {
+        return Fail(
+            why, "deterministic_public_shape");
+    }
+    const ga::TileWitness witness =
+        ga::TraceTile(
+            {prf_key, row, block}, input);
+    if (witness.cands.empty() ||
+        witness.chacha_blocks == 0 ||
+        witness.chacha_blocks > 4 ||
+        witness.cands.size() >
+            std::numeric_limits<uint32_t>::max()) {
+        return Fail(
+            why, "deterministic_native_witness");
+    }
+    out.statement = BaseStatement(
+        statement_commitment, public_fs_seed,
+        prf_key, row, block,
+        witness.chacha_blocks,
+        static_cast<uint32_t>(
+            witness.cands.size()));
+    const uint256 provisional_root =
+        ChildChallengeDigest(
+            public_fs_seed,
+            statement_commitment,
+            "parent_r0_pending",
+            out.statement);
+    Built preliminary;
+    if (!BuildComposition(
+            out.statement, provisional_root,
+            &witness, true, preliminary, why)) {
+        out = {};
+        return false;
+    }
+    const std::vector<uint32_t>
+        deterministic_columns =
+            DeterministicLocalColumns(
+                preliminary);
+    if (deterministic_columns.empty() ||
+        deterministic_columns.size() >=
+            preliminary.cs.n_columns ||
+        preliminary.columns.size() !=
+            preliminary.cs.n_columns) {
+        out = {};
+        return Fail(
+            why, "deterministic_column_partition");
+    }
+
+    out.cs.n_rows = preliminary.cs.n_rows;
+    out.cs.n_columns =
+        static_cast<uint32_t>(
+            deterministic_columns.size());
+    out.cs.preprocessed_pin_ood =
+        preliminary.cs.preprocessed_pin_ood;
+    out.columns.reserve(
+        deterministic_columns.size());
+    out.deterministic_to_full_column =
+        deterministic_columns;
+    out.full_to_deterministic_column.assign(
+        preliminary.cs.n_columns, UINT32_MAX);
+    for (uint32_t deterministic = 0;
+         deterministic <
+             deterministic_columns.size();
+         ++deterministic) {
+        const uint32_t full =
+            deterministic_columns[
+                deterministic];
+        if (full >= preliminary.columns.size() ||
+            preliminary.columns[full].size() !=
+                preliminary.cs.n_rows) {
+            out = {};
+            return Fail(
+                why,
+                "deterministic_witness_column");
+        }
+        out.full_to_deterministic_column[full] =
+            deterministic;
+        out.columns.push_back(
+            preliminary.columns[full]);
+    }
+    for (const auto& [full, values] :
+         preliminary.cs.preprocessed) {
+        if (full >=
+                out.full_to_deterministic_column
+                    .size() ||
+            values.size() != out.cs.n_rows) {
+            out = {};
+            return Fail(
+                why,
+                "deterministic_preprocessed_shape");
+        }
+        const uint32_t deterministic =
+            out.full_to_deterministic_column[
+                full];
+        if (deterministic == UINT32_MAX ||
+            deterministic >=
+                out.columns.size()) {
+            out = {};
+            return Fail(
+                why,
+                "deterministic_preprocessed_epoch");
+        }
+        bool equal =
+            out.columns[deterministic].size() ==
+                values.size();
+        for (uint32_t r = 0;
+             equal && r < values.size(); ++r) {
+            equal = gf::Eq(
+                out.columns[deterministic][r],
+                values[r]);
+        }
+        if (!equal) {
+            out = {};
+            return Fail(
+                why,
+                "deterministic_preprocessed_witness");
+        }
+        out.cs.preprocessed.emplace_back(
+            deterministic, values);
+    }
+    out.private_input = input;
+    out.full_relation_columns =
+        preliminary.cs.n_columns;
+    out.full_relation_constraints =
+        static_cast<uint32_t>(
+            preliminary.cs.constraints.size());
+    out.every_preprocessed_column_in_r0 =
+        out.cs.preprocessed.size() ==
+            preliminary.cs.preprocessed.size();
+    out.challenge_columns_absent =
+        out.cs.n_columns <
+            out.full_relation_columns &&
+        out.cs.constraints.empty();
+    out.parent_r0_pending = true;
+    out.valid =
+        out.every_preprocessed_column_in_r0 &&
+        out.challenge_columns_absent &&
+        out.parent_r0_pending &&
+        out.cs.n_rows ==
+            out.statement.trace_rows;
+    out.note =
+        out.valid
+        ? "stage3:extract_chacha_sampler_child:"
+          "deterministic_component_parent_r0_pending"
+        : "stage3:extract_chacha_sampler_child:"
+          "deterministic_component_invalid";
+    if (!out.valid) {
+        out = {};
+        return Fail(
+            why, "deterministic_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendFinalRelationToParentV1(
+    const DeterministicComponentV1& component,
+    const composer::ChildAttachmentV1&
+        attachment,
+    const aq::AirQuotientTwoEpochBaseRowSession&
+        parent_r0_session,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>&
+        parent_columns,
+    ParentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!component.valid ||
+        !component.challenge_columns_absent ||
+        !component.parent_r0_pending ||
+        !attachment.valid ||
+        attachment.row_lifted ||
+        !attachment.literal_column_mapping ||
+        attachment.semantic_child_columns !=
+            component.cs.n_columns ||
+        parent_cs.n_rows != component.cs.n_rows ||
+        parent_columns.size() !=
+            parent_cs.n_columns ||
+        !parent_r0_session.valid ||
+        parent_r0_session.trace_rows !=
+            parent_cs.n_rows ||
+        parent_r0_session
+            .base_row_commitment.IsNull() ||
+        parent_r0_session.base_column_indices
+            .size() != parent_cs.n_columns) {
+        return Fail(
+            why, "parent_finalize_input");
+    }
+    for (uint32_t column = 0;
+         column < parent_cs.n_columns;
+         ++column) {
+        if (parent_columns[column].size() !=
+                parent_cs.n_rows ||
+            parent_r0_session
+                    .base_column_indices[column] !=
+                column) {
+            return Fail(
+                why, "parent_finalize_r0_prefix");
+        }
+    }
+
+    const ga::TileWitness witness =
+        ga::TraceTile(
+            {component.statement.prf_key,
+             component.statement.row,
+             component.statement.block},
+            component.private_input);
+    if (witness.chacha_blocks !=
+            component.statement.chacha_blocks ||
+        witness.cands.size() !=
+            component.statement.candidate_rows) {
+        return Fail(
+            why, "parent_finalize_witness");
+    }
+    TileStatementV1 statement =
+        component.statement;
+    statement.r0_root =
+        parent_r0_session.base_row_commitment;
+    Built final;
+    if (!BuildComposition(
+            statement, statement.r0_root,
+            &witness, false, final, why) ||
+        final.cs.n_columns !=
+            component.full_relation_columns ||
+        final.cs.constraints.size() !=
+            component.full_relation_constraints) {
+        return Fail(
+            why, "parent_finalize_rebuild");
+    }
+    const std::vector<uint32_t>
+        deterministic_columns =
+            DeterministicLocalColumns(final);
+    if (deterministic_columns !=
+            component
+                .deterministic_to_full_column) {
+        return Fail(
+            why,
+            "parent_finalize_deterministic_set");
+    }
+    for (uint32_t deterministic = 0;
+         deterministic <
+             deterministic_columns.size();
+         ++deterministic) {
+        const uint32_t full =
+            deterministic_columns[
+                deterministic];
+        if (full >= final.columns.size() ||
+            deterministic >=
+                component.columns.size() ||
+            final.columns[full].size() !=
+                component.columns[
+                    deterministic].size()) {
+            return Fail(
+                why,
+                "parent_finalize_deterministic_shape");
+        }
+        for (uint32_t row = 0;
+             row < final.cs.n_rows; ++row) {
+            if (!gf::Eq(
+                    final.columns[full][row],
+                    component.columns[
+                        deterministic][row])) {
+                return Fail(
+                    why,
+                    "parent_finalize_deterministic_changed");
+            }
+        }
+    }
+
+    out.full_local_to_parent_column.assign(
+        final.cs.n_columns, UINT32_MAX);
+    for (uint32_t deterministic = 0;
+         deterministic <
+             deterministic_columns.size();
+         ++deterministic) {
+        out.full_local_to_parent_column[
+            deterministic_columns[
+                deterministic]] =
+            attachment.ParentColumn(
+                deterministic);
+    }
+    out.dependent_column_base =
+        parent_cs.n_columns;
+    for (uint32_t full = 0;
+         full < final.cs.n_columns; ++full) {
+        if (out.full_local_to_parent_column[
+                full] != UINT32_MAX) {
+            continue;
+        }
+        out.full_local_to_parent_column[full] =
+            parent_cs.n_columns++;
+        parent_columns.push_back(
+            final.columns[full]);
+        ++out.dependent_columns;
+    }
+    if (out.dependent_columns == 0 ||
+        parent_columns.size() !=
+            parent_cs.n_columns ||
+        !AppendMappedFinalConstraints(
+            final.cs,
+            out.full_local_to_parent_column,
+            parent_cs,
+            out.canonical_constraints_relocated,
+            out.native_constraints_mapped,
+            why)) {
+        return Fail(
+            why,
+            "parent_finalize_relation_append");
+    }
+    out.constraints_appended =
+        out.canonical_constraints_relocated +
+        out.native_constraints_mapped;
+
+    statement.public_boundary_statement =
+        final.public_boundary_statement;
+    statement.preprocessed_schedule_commitment =
+        PreprocessedScheduleCommitment(final.cs);
+    statement.program_challenge_commitment =
+        ProgramChallengeCommitment(
+            final.program_challenges);
+    statement.output_cells = final.outputs;
+    statement.position_cells =
+        final.positions;
+    statement.input_bit_cells =
+        final.input_bits;
+    statement.retained_node_commitment =
+        ComputeRetainedNodeCommitmentV1(statement);
+    out.statement = statement;
+    out.challenge_binding =
+        BuildProgramChallengeBindingV1(
+            statement);
+    const auto map_cell =
+        [&out](const CellV1& local) {
+            CellV1 parent = local;
+            if (local.column <
+                    out
+                        .full_local_to_parent_column
+                        .size()) {
+                parent.column =
+                    out
+                        .full_local_to_parent_column[
+                        local.column];
+            } else {
+                parent.column = UINT32_MAX;
+            }
+            return parent;
+        };
+    for (uint32_t i = 0;
+         i < out.output_cells.size(); ++i) {
+        out.output_cells[i] =
+            map_cell(final.outputs[i]);
+    }
+    out.position_cells.reserve(
+        final.positions.size());
+    for (const auto& cell :
+         final.positions) {
+        out.position_cells.push_back(
+            map_cell(cell));
+    }
+    out.input_bit_cells.reserve(
+        final.input_bits.size());
+    for (const auto& bits : final.input_bits) {
+        std::array<CellV1, 64> mapped{};
+        for (uint32_t bit = 0;
+             bit < mapped.size(); ++bit) {
+            mapped[bit] =
+                map_cell(bits[bit]);
+        }
+        out.input_bit_cells.push_back(
+            std::move(mapped));
+    }
+    out.parent_owned_r0_consumed =
+        out.statement.r0_root ==
+            parent_r0_session
+                .base_row_commitment;
+    out.deterministic_witness_preserved =
+        true;
+    bool same_challenge_order = true;
+    for (uint32_t i = 0;
+         i < kProgramChallengeWidthV1; ++i) {
+        same_challenge_order =
+            same_challenge_order &&
+            gf::Eq(
+                out.challenge_binding
+                    .challenges[i],
+                final.program_challenges[i]);
+    }
+    out.exact_six_challenge_order =
+        out.challenge_binding.valid &&
+        same_challenge_order &&
+        out.challenge_binding.challenges.size() ==
+            kProgramChallengeWidthV1;
+    out.valid =
+        out.parent_owned_r0_consumed &&
+        out.deterministic_witness_preserved &&
+        out.exact_six_challenge_order &&
+        out.constraints_appended ==
+            final.cs.constraints.size() &&
+        !out.statement
+             .retained_node_commitment.IsNull();
+    out.note =
+        out.valid
+        ? "stage3:extract_chacha_sampler_child:"
+          "same_parent_r0_final_relation"
+        : "stage3:extract_chacha_sampler_child:"
+          "same_parent_r0_final_relation_invalid";
+    if (!out.valid) {
+        return Fail(
+            why, "parent_finalize_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
 }
 
 uint256 ComputeRetainedNodeCommitmentV1(

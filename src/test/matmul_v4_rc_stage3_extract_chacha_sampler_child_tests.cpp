@@ -4,9 +4,11 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_air_recurse.h>
 #include <matmul/matmul_v4_rc_stage3_extract_chacha_sampler_child.h>
 
 #include <cstdlib>
+#include <numeric>
 
 namespace child =
     matmul::v4::rc::extract_chacha_sampler_child;
@@ -169,6 +171,112 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !child::BuildProgramChallengeBindingV1(
              wrong_schedule).valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    deterministic_component_finalizes_only_after_one_parent_r0)
+{
+    std::array<int64_t, 32> input{};
+    for (uint32_t i = 0; i < input.size(); ++i) {
+        input[i] =
+            i & 1U
+            ? -static_cast<int64_t>(
+                  UINT64_C(0x100000000) + 7U * i)
+            : static_cast<int64_t>(
+                  UINT64_C(0x100000000) + 11U * i);
+    }
+    child::DeterministicComponentV1 component;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        child::BuildDeterministicComponentV1(
+            H(0x41), H(0x42), H(0x43),
+            7, 9, input, component, &why),
+        why);
+    BOOST_REQUIRE(component.valid);
+    BOOST_CHECK(component.challenge_columns_absent);
+    BOOST_CHECK(
+        component.every_preprocessed_column_in_r0);
+    BOOST_CHECK(
+        component.cs.n_columns <
+        component.full_relation_columns);
+    BOOST_CHECK(component.cs.constraints.empty());
+
+    child::aq::AirConstraintSystem<gf::Fp3>
+        parent_cs;
+    std::vector<std::vector<gf::Fp3>>
+        parent_columns;
+    matmul::v4::rc::stage3_air_parent_composer::
+        ChildAttachmentV1 attachment;
+    BOOST_REQUIRE_MESSAGE(
+        matmul::v4::rc::
+            stage3_air_parent_composer::AppendChildV1(
+                parent_cs, parent_columns,
+                component.cs, component.columns,
+                2, attachment, &why),
+        why);
+    BOOST_REQUIRE(attachment.valid);
+    BOOST_CHECK(!attachment.row_lifted);
+
+    // A sibling deterministic cell is committed by the same R0.  Extract
+    // finalization may not sample its challenges before this cell exists.
+    const uint32_t sibling_column =
+        parent_cs.n_columns++;
+    parent_columns.push_back(
+        std::vector<gf::Fp3>(
+            parent_cs.n_rows,
+            gf::Fp3::FromFp(
+                gf::FromU64(0x5aU))));
+    std::vector<uint32_t> parent_base(
+        parent_cs.n_columns);
+    std::iota(
+        parent_base.begin(),
+        parent_base.end(), 0U);
+    const auto r0 =
+        child::aq::
+            AirQuotientBuildTwoEpochBaseRowSession(
+                parent_cs, parent_columns,
+                parent_base);
+    BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+
+    child::ParentFinalizationV1 finalized;
+    BOOST_REQUIRE_MESSAGE(
+        child::AppendFinalRelationToParentV1(
+            component, attachment, r0,
+            parent_cs, parent_columns,
+            finalized, &why),
+        why);
+    BOOST_REQUIRE(finalized.valid);
+    BOOST_CHECK(finalized.parent_owned_r0_consumed);
+    BOOST_CHECK(
+        finalized.deterministic_witness_preserved);
+    BOOST_CHECK(
+        finalized.exact_six_challenge_order);
+    BOOST_CHECK_EQUAL(
+        finalized.dependent_column_base,
+        sibling_column + 1U);
+    BOOST_CHECK(
+        finalized.dependent_columns > 0);
+    BOOST_CHECK_EQUAL(
+        finalized.constraints_appended,
+        component.full_relation_constraints);
+    BOOST_CHECK_EQUAL(
+        matmul::v4::rc::air_recurse::
+            CountWitnessViolationsOnH(
+                parent_cs, parent_columns),
+        0U);
+
+    // One-coordinate transcript substitution cannot be made authoritative
+    // by recomputing the compact retained-node handle.  The verifier rebuilds
+    // the exact six coordinates from the parent R0.
+    auto substituted = finalized.statement;
+    substituted.program_challenge_commitment =
+        H(0x44);
+    substituted.retained_node_commitment =
+        child::ComputeRetainedNodeCommitmentV1(
+            substituted);
+    BOOST_CHECK(
+        !child::BuildProgramChallengeBindingV1(
+             substituted).valid);
 }
 
 BOOST_AUTO_TEST_CASE(
