@@ -2281,13 +2281,27 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
     out.production_authority =
         out.local_parent_valid &&
         out.recursive_semantic_closure_complete;
-    out.note =
-        out.production_authority
-            ? "stage3:normalized_production_parent_builder:"
-              "complete_relation_parent_candidate"
-            : "stage3:normalized_production_parent_builder:"
-              "local_14_role_52_endpoint_parent_valid;"
-              "recursive_semantic_child_consumption_open";
+    if (out.production_authority) {
+        out.note =
+            "stage3:normalized_production_parent_builder:"
+            "complete_relation_parent_candidate";
+    } else if (!out.local_parent_valid) {
+        out.note =
+            "stage3:normalized_production_parent_builder:"
+            "local_parent_invalid";
+    } else {
+        // RoleAudit recursive consumption closed under RecursiveChildren;
+        // remaining residual is parent role-export equality (streaming
+        // receipt + Attach certificate), not child consumption.
+        out.note =
+            "stage3:normalized_production_parent_builder:"
+            "local_14_role_52_endpoint_parent_valid;"
+            "external_producer_terminal_equality_pending";
+        if (!out.residuals.empty()) {
+            out.note.push_back(';');
+            out.note += out.residuals.front();
+        }
+    }
     if (!out.local_parent_valid) {
         Note(why, "local_parent_invalid");
         return false;
@@ -2376,19 +2390,29 @@ ProductionParentBuildStatusV1 BuildForSolvedBlockV1(
             CompleteRelationParentUnavailable;
     }
     if (!candidate.production_authority) {
-        Note(
-            why,
+        // Living RoleAudit already passed above. Fail-closed on parent
+        // role-export equality / remaining candidate residuals — do not
+        // misreport RecursiveChildren consumption as still open.
+        std::string detail =
             "complete_relation_parent:"
             "local_14_role_52_endpoint_parent_built;"
-            "recursive_semantic_child_consumption_open");
+            "external_producer_terminal_equality_pending";
+        if (!candidate.residuals.empty()) {
+            detail.push_back(';');
+            detail += candidate.residuals.front();
+        } else if (!candidate_why.empty()) {
+            detail.push_back(';');
+            detail += candidate_why;
+        }
+        Note(why, detail);
         return ProductionParentBuildStatusV1::
             CompleteRelationParentUnavailable;
     }
 
     // Retain one global R0, build the independently reconstructible NAV3
     // inventory, and move the exact parent CS/columns into the executable
-    // receipt consumer.  Unreachable while the live semantic audit reports any
-    // incomplete role or production_authority remains false.
+    // receipt consumer. Reachable only when RoleAudit + streaming role-export
+    // equality certificate premises hold and ConvertCandidate succeeds.
     if (!ConvertCandidateToCanonicalProductV1(
             input, candidate, registry_pin, out, why)) {
         return ProductionParentBuildStatusV1::

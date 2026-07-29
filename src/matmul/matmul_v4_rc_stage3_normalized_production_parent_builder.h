@@ -216,8 +216,12 @@ ValidateCapturedEpisodeLeafInventoryV2(
  *
  * The downstream type is already executable: once this function returns
  * Built, BuildReceiptV1 proves, serializes, decodes and verifies the exact
- * product.  Built requires the live 14-role / 52-endpoint recursive semantic
- * audit to close and the NAV3 public inventory conversion to succeed.
+ * product.  Built requires:
+ *   - live 14-role / 52-endpoint RoleAudit role_complete (RecursiveChildren),
+ *   - candidate production_authority (local parent + streaming role-export
+ *     equality certificate premises via Attach/Assess), and
+ *   - NAV3 public inventory conversion (ConvertCandidateToCanonicalProductV1).
+ * Fail-closed otherwise. Does not flip AuthorityReady / ExactReplay.
  */
 [[nodiscard]] ProductionParentBuildStatusV1
 BuildForSolvedBlockV1(

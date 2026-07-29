@@ -246,9 +246,11 @@ BOOST_AUTO_TEST_CASE(
         report.produce_status ==
             rc::RCStage3ProduceStatus::ProverFailed,
         why);
+    // RecursiveChildren RoleAudit is closed; the vertical still fails closed
+    // on missing streaming role-export equality (receipt + Attach certificate).
     BOOST_CHECK_MESSAGE(
         why.find(
-            "recursive_semantic_child_consumption_open") !=
+            "external_producer_terminal_equality_pending") !=
             std::string::npos,
         why);
     BOOST_CHECK(winner.block.matrix_c_data.empty());
