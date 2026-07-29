@@ -2207,6 +2207,10 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         if (!audit.role_complete ||
             !audit.recursive_ctl_consumption ||
             audit.proof_derived_ctl_endpoints !=
+                audit.required_endpoints ||
+            audit.strict_transitive_endpoints !=
+                audit.required_endpoints ||
+            audit.recursively_consumed_strict_endpoints !=
                 audit.required_endpoints) {
             out.recursive_semantic_closure_complete =
                 false;
@@ -2356,6 +2360,10 @@ ProductionParentBuildStatusV1 BuildForSolvedBlockV1(
         if (!audit.role_complete ||
             !audit.recursive_ctl_consumption ||
             audit.proof_derived_ctl_endpoints !=
+                audit.required_endpoints ||
+            audit.strict_transitive_endpoints !=
+                audit.required_endpoints ||
+            audit.recursively_consumed_strict_endpoints !=
                 audit.required_endpoints) {
             Note(
                 why,

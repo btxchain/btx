@@ -195,6 +195,19 @@ struct RCStage3RelationClosureRoleAudit {
     /** Endpoints which currently have an executable relation verifier and an
      * equality check from its committed witness column into executed CTL. */
     uint16_t proof_derived_ctl_endpoints{0};
+    /**
+     * Endpoints whose complete producer chain is proved transitively, not
+     * merely represented by a locally valid relation/opening.
+     *
+     * This is intentionally independent of recursive execution. Recursion
+     * can preserve an already-complete semantic statement; it cannot turn a
+     * representative/local endpoint into an all-instance computation proof.
+     */
+    uint16_t strict_transitive_endpoints{0};
+    /** Strict-transitive endpoints whose exact child proof is recursively
+     * consumed. This can reach `required_endpoints` only after both semantic
+     * provenance and recursive verification close. */
+    uint16_t recursively_consumed_strict_endpoints{0};
     bool recursive_ctl_consumption{false};
     bool role_complete{false};
     std::string remaining;

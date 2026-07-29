@@ -297,15 +297,22 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_REQUIRE_EQUAL(audit.size(), 14U);
     uint16_t endpoints = 0;
     uint16_t proof_derived_ctl = 0;
+    uint16_t strict_transitive = 0;
+    uint16_t recursively_consumed_strict = 0;
     for (size_t i = 0; i < audit.size(); ++i) {
         BOOST_CHECK(audit[i].role == RCStage3UnifiedRoleOrder()[i]);
         BOOST_CHECK(!audit[i].recursive_ctl_consumption);
         BOOST_CHECK(!audit[i].role_complete);
         endpoints += audit[i].required_endpoints;
         proof_derived_ctl += audit[i].proof_derived_ctl_endpoints;
+        strict_transitive += audit[i].strict_transitive_endpoints;
+        recursively_consumed_strict +=
+            audit[i].recursively_consumed_strict_endpoints;
     }
     BOOST_CHECK_EQUAL(endpoints, 52U);
     BOOST_CHECK_EQUAL(proof_derived_ctl, 28U);
+    BOOST_CHECK_EQUAL(strict_transitive, 2U);
+    BOOST_CHECK_EQUAL(recursively_consumed_strict, 0U);
 
     // Interlock vs the reverted constexpr theater: with RecursiveChildren
     // false, CellAudit must not invent 52/52 recursive consumption.

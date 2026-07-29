@@ -4359,9 +4359,11 @@ AssessRCStage3RelationClosureStrategies()
 std::vector<RCStage3RelationClosureRoleAudit>
 CurrentRCStage3RelationClosureRoleAudit()
 {
-    // Measured from the endpoint cell audit.  Each role is complete only when
-    // every required endpoint has a same-trace CTL alias and the complete
-    // fixed-point parent recursively consumes that child.
+    // Measured from the endpoint cell audit. Each role is complete only when
+    // every required endpoint is (a) strict-transitively complete, (b)
+    // same-trace CTL aliased, and (c) recursively consumed by the complete
+    // fixed-point parent. Recursive execution is preservation of a semantic
+    // claim, not a way to manufacture missing all-instance provenance.
     std::vector<RCStage3RelationClosureRoleAudit> out;
     out.reserve(kRCStage3RelationClosureRoleCount);
     const auto cells = CurrentRCStage3RelationEndpointCellAudit();
@@ -4370,27 +4372,43 @@ CurrentRCStage3RelationClosureRoleAudit()
         audit.role = role;
         uint16_t required = 0;
         uint16_t ctl = 0;
-        uint16_t recursive = 0;
+        uint16_t strict = 0;
+        uint16_t recursive_strict = 0;
         for (const auto& cell : cells) {
             if (cell.role != role) continue;
             ++required;
             ctl += cell.same_trace_ctl_alias ? 1 : 0;
-            recursive += cell.recursive_child_consumed ? 1 : 0;
+            strict += cell.strict_transitive_complete ? 1 : 0;
+            recursive_strict +=
+                cell.strict_transitive_complete &&
+                        cell.recursive_child_consumed
+                    ? 1
+                    : 0;
         }
         audit.required_endpoints = required;
         audit.proof_derived_ctl_endpoints = ctl;
+        audit.strict_transitive_endpoints = strict;
+        audit.recursively_consumed_strict_endpoints =
+            recursive_strict;
         audit.recursive_ctl_consumption =
-            required > 0 && recursive == required &&
+            required > 0 &&
+            recursive_strict == required &&
             kRCStage3RelationClosureRecursiveChildrenExecutable;
         audit.role_complete =
             audit.recursive_ctl_consumption &&
             audit.proof_derived_ctl_endpoints ==
+                audit.required_endpoints &&
+            audit.strict_transitive_endpoints ==
+                audit.required_endpoints &&
+            audit.recursively_consumed_strict_endpoints ==
                 audit.required_endpoints;
         audit.remaining =
             audit.role_complete
-                ? "role CTL export and recursive child consumption closed; "
-                  "consensus authority remains fail-closed"
-                : "role CTL alias or recursive child consumption still open";
+                ? "strict transitive semantic provenance, role CTL export, "
+                  "and recursive child consumption closed; consensus "
+                  "authority remains fail-closed"
+                : "strict transitive semantic provenance, role CTL alias, "
+                  "or recursive child consumption still open";
         out.push_back(std::move(audit));
     }
     return out;

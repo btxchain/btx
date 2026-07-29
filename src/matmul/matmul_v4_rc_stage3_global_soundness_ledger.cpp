@@ -945,6 +945,10 @@ AssessExecutableGlobalSoundnessLedgerV1(
             [](const RCStage3RelationClosureRoleAudit& role) {
                 return role.proof_derived_ctl_endpoints ==
                            role.required_endpoints &&
+                    role.strict_transitive_endpoints ==
+                           role.required_endpoints &&
+                    role.recursively_consumed_strict_endpoints ==
+                           role.required_endpoints &&
                     role.recursive_ctl_consumption &&
                     role.role_complete;
             });
