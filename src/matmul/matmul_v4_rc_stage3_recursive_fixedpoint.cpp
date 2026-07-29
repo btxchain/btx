@@ -15125,8 +15125,6 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
                   "semantic_root_required") &&
         fail_pred(out.split_rap_multirow_parent_adapter,
                   "split_rap_adapter_required") &&
-        fail_pred(!out.endpoint_terminal_equality,
-                  "endpoint_terminal_unexpected") &&
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
                   "complete_fp_unexpected") &&
         fail_pred(!kRecursiveFixedPointConsensusAuthority,
@@ -15135,6 +15133,21 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
                   "va_authority_unexpected") &&
         fail_pred(!va::kVerifierFiatShamirAirExecutable,
                   "va_fs_chip_unexpected");
+    for (auto& gap : out.gaps) {
+        if (gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                EndpointTerminalEquality) {
+            gap.present_in_parent_air =
+                out.endpoint_terminal_equality;
+            if (out.endpoint_terminal_equality) {
+                gap.mapped_lanes = 8;
+                gap.detail =
+                    "AttachNormalizedEndpointTerminalEqualityV1 "
+                    "SHA↔AlgHash packing join closes endpoint-28 "
+                    "role-root pin to AlgHash sponge digest";
+            }
+        }
+    }
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
           "capability_audit_ok;"
@@ -15145,11 +15158,14 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
           "ledger_g4_fiat_shamir_replay_closed;"
           "split_rap_multirow_adapter_closed;"
           "proof_payload_bus_closed;"
-          "complete_fp=false;"
         : ("stage3:recursive_fixedpoint:"
            "capability_with_proof_bus_and_deep_ctl_not_canonical" +
            failed);
     if (out.valid) {
+        out.note += out.endpoint_terminal_equality
+            ? "endpoint_terminal_equality_closed;"
+            : "endpoint_open;";
+        out.note += "complete_fp=false;";
         // Living counters — never hard-code 0/52 while CellAudit could lie.
         out.note +=
             "recursive_counters_" +
@@ -15303,8 +15319,6 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
                   "semantic_root_required") &&
         fail_pred(out.split_rap_multirow_parent_adapter,
                   "split_rap_adapter_required") &&
-        fail_pred(!out.endpoint_terminal_equality,
-                  "endpoint_terminal_unexpected") &&
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
                   "complete_fp_unexpected") &&
         fail_pred(!kRecursiveFixedPointConsensusAuthority,
@@ -15313,6 +15327,21 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
                   "va_authority_unexpected") &&
         fail_pred(!va::kVerifierFiatShamirAirExecutable,
                   "va_fs_chip_unexpected");
+    for (auto& gap : out.gaps) {
+        if (gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                EndpointTerminalEquality) {
+            gap.present_in_parent_air =
+                out.endpoint_terminal_equality;
+            if (out.endpoint_terminal_equality) {
+                gap.mapped_lanes = 8;
+                gap.detail =
+                    "AttachNormalizedEndpointTerminalEqualityV1 "
+                    "SHA↔AlgHash packing join closes endpoint-28 "
+                    "role-root pin to AlgHash sponge digest";
+            }
+        }
+    }
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
           "capability_audit_ok;"
@@ -15323,11 +15352,14 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
           "ledger_g4_fiat_shamir_replay_closed;"
           "split_rap_multirow_adapter_closed;"
           "proof_payload_bus_closed;"
-          "complete_fp=false;"
         : ("stage3:recursive_fixedpoint:"
            "capability_with_ctl_parent_air_not_canonical" +
            failed);
     if (out.valid) {
+        out.note += out.endpoint_terminal_equality
+            ? "endpoint_terminal_equality_closed;"
+            : "endpoint_open;";
+        out.note += "complete_fp=false;";
         out.note +=
             "recursive_counters_" +
             std::to_string(out.recursively_consumed_endpoints) +
@@ -15823,8 +15855,9 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
                   "semantic_root_state") &&
         fail_pred(out.split_rap_multirow_parent_adapter,
                   "split_rap_adapter_required") &&
-        fail_pred(!out.endpoint_terminal_equality,
-                  "endpoint_terminal_unexpected") &&
+        // EndpointTerminalEquality may be closed by
+        // AttachNormalizedEndpointTerminalEqualityV1 on this composition;
+        // report via gap.present_in_parent_air, do not reject either state.
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
                   "complete_fp_unexpected") &&
         fail_pred(!kRecursiveFixedPointConsensusAuthority,
@@ -15833,6 +15866,21 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
                   "va_authority_unexpected") &&
         fail_pred(!va::kVerifierFiatShamirAirExecutable,
                   "va_fs_chip_unexpected");
+    for (auto& gap : out.gaps) {
+        if (gap.code ==
+            NormalizedRecursiveVerifierGapCode::
+                EndpointTerminalEquality) {
+            gap.present_in_parent_air =
+                out.endpoint_terminal_equality;
+            if (out.endpoint_terminal_equality) {
+                gap.mapped_lanes = 8;
+                gap.detail =
+                    "AttachNormalizedEndpointTerminalEqualityV1 "
+                    "SHA↔AlgHash packing join closes endpoint-28 "
+                    "role-root pin to AlgHash sponge digest";
+            }
+        }
+    }
     if (out.valid) {
         out.note =
             "stage3:recursive_fixedpoint:"
@@ -15843,8 +15891,10 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
                 "terminal_bus_closed_via_commitment_bus;"
                 "semantic_root_derived_in_parent;"
                 "ctl_child_verifier_still_host_only;"
-                "proof_payload_bus_closed;"
-                "endpoint_open;";
+                "proof_payload_bus_closed;";
+            out.note += out.endpoint_terminal_equality
+                ? "endpoint_terminal_equality_closed;"
+                : "endpoint_open;";
         } else {
             out.note +=
                 "ledger_g4_fiat_shamir_replay_closed;"

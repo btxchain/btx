@@ -2688,6 +2688,109 @@ BOOST_AUTO_TEST_CASE(
     BOOST_TEST_MESSAGE(capability_with_bus.note);
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
 
+    // Fullest living capability path on a dedicated composition copy:
+    // ProofFieldBus + Deep64 CTL terminal + CTL-in-parent-AIR +
+    // EndpointTerminalEquality → open_gaps == 0. CompleteFP / Authority stay
+    // false (regression pins below).
+    {
+        fp::FoldBusComposition full_joined = joined;
+        auto full_interpreter = interpreter;
+        auto full_execution = execution;
+        const fp::NormalizedEndpointTerminalEqualityAttachmentV1
+            endpoint_eq =
+                fp::AttachNormalizedEndpointTerminalEqualityV1(
+                    full_joined, full_interpreter, migrated.row_pin,
+                    full_execution, terminal_layout, sponge);
+        BOOST_REQUIRE_MESSAGE(endpoint_eq.valid, endpoint_eq.note);
+        BOOST_CHECK(
+            full_interpreter.role_semantic_root_terminal_equality);
+        const auto ctl_parent_air =
+            fp::AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
+                full_joined, migrated.source_pin, ctl_terminal,
+                ctl.manifest, ctl.pins, ctl.bank_index,
+                ctl.schedules[ctl.bank_index],
+                ctl.bank_proof);
+        BOOST_REQUIRE_MESSAGE(
+            ctl_parent_air.valid, ctl_parent_air.note);
+        const fp::NormalizedRecursiveChildCapabilityAuditV1
+            capability_full =
+                fp::AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+                    full_joined, full_interpreter, migrated.row_pin,
+                    full_execution, proof_bus, ctl_terminal,
+                    ctl_parent_air);
+        BOOST_REQUIRE_MESSAGE(
+            capability_full.valid, capability_full.note);
+        BOOST_CHECK(capability_full.child_proof_commitment_mapped);
+        BOOST_CHECK(capability_full.ctl_child_verified_in_parent_air);
+        BOOST_CHECK(capability_full.terminal_bus_commitment_mapped);
+        BOOST_CHECK(
+            capability_full.normalized_semantic_root_derived_in_parent);
+        BOOST_CHECK(capability_full.endpoint_terminal_equality);
+        {
+            uint32_t open_gaps = 0;
+            for (const auto& gap : capability_full.gaps) {
+                if (!gap.present_in_parent_air) {
+                    ++open_gaps;
+                }
+            }
+            BOOST_CHECK_EQUAL(open_gaps, 0U);
+        }
+        BOOST_CHECK(
+            capability_full.note.find(
+                "ctl_child_verifier_in_parent_air_closed") !=
+            std::string::npos);
+        BOOST_CHECK(
+            capability_full.note.find(
+                "endpoint_terminal_equality_closed") !=
+            std::string::npos);
+        BOOST_CHECK_MESSAGE(
+            fp::ValidateNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+                full_joined, full_interpreter, migrated.row_pin,
+                full_execution, proof_bus, ctl_terminal, ctl_parent_air,
+                capability_full, &why),
+            why);
+        // Theater pins: assembly / authority gates stay fail-closed.
+        BOOST_CHECK(!fp::kCompleteRecursiveFixedPointExecutable);
+        BOOST_CHECK(!fp::kRecursiveFixedPointConsensusAuthority);
+        BOOST_CHECK(
+            !rc::kRCStage3RelationClosureRecursiveChildrenExecutable);
+        BOOST_TEST_MESSAGE(capability_full.note);
+
+        // Regression: CTL-in-parent without endpoint attach leaves exactly one
+        // living open gap (EndpointTerminalEquality).
+        {
+            fp::FoldBusComposition ctl_only = joined;
+            const auto ctl_only_air =
+                fp::AttachNormalizedDeep64CtlChildVerifierInParentAirV1(
+                    ctl_only, migrated.source_pin, ctl_terminal,
+                    ctl.manifest, ctl.pins, ctl.bank_index,
+                    ctl.schedules[ctl.bank_index],
+                    ctl.bank_proof);
+            BOOST_REQUIRE_MESSAGE(
+                ctl_only_air.valid, ctl_only_air.note);
+            const auto capability_ctl_only =
+                fp::AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
+                    ctl_only, interpreter, migrated.row_pin, execution,
+                    proof_bus, ctl_terminal, ctl_only_air);
+            BOOST_REQUIRE_MESSAGE(
+                capability_ctl_only.valid, capability_ctl_only.note);
+            BOOST_CHECK(
+                capability_ctl_only.ctl_child_verified_in_parent_air);
+            BOOST_CHECK(
+                !capability_ctl_only.endpoint_terminal_equality);
+            uint32_t open_gaps = 0;
+            for (const auto& gap : capability_ctl_only.gaps) {
+                if (!gap.present_in_parent_air) {
+                    ++open_gaps;
+                }
+            }
+            BOOST_CHECK_EQUAL(open_gaps, 1U);
+            BOOST_CHECK(
+                capability_ctl_only.note.find("endpoint_open") !=
+                std::string::npos);
+        }
+    }
+
     const gf::Fp3 saved_proof_field =
         joined.columns[
             proof_bus.layout.Field(0)][0];

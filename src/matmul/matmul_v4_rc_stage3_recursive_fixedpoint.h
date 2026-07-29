@@ -3249,8 +3249,12 @@ ValidateNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
  * Capability after ProofFieldBus + Deep64 CTL terminal + CTL child
  * verifier equations hosted in the parent FoldBus. Closes
  * CtlChildVerifierAndTerminalBus (ctl_child_verified_in_parent_air &&
- * terminal_bus_commitment_mapped). Payload / Split-RAP / endpoint
- * residuals and kCompleteRecursiveFixedPointExecutable stay open/false.
+ * terminal_bus_commitment_mapped). When the interpreter already carries
+ * `role_semantic_root_terminal_equality` from
+ * `AttachNormalizedEndpointTerminalEqualityV1`, also closes
+ * EndpointTerminalEquality (living open_gaps may reach 0). Split-RAP /
+ * payload / ledger-g4 FS stay closed when present; CompleteFP /
+ * VerifierFS Executable / Authority stay false.
  */
 [[nodiscard]] NormalizedRecursiveChildCapabilityAuditV1
 AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
