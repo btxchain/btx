@@ -30,16 +30,17 @@ inline constexpr uint32_t kNoColumnV1 = UINT32_MAX;
 /**
  * The proof artifact that owns an endpoint root.
  *
- * `DirectRelationCell` is already represented by the 21 literal scalar
- * exports in multirow_v11_semantic_ctl. The other three kinds are the only
- * admissible ways this bridge can add a literal export:
+ * `DirectRelationCell` classifies a canonical source column; it is not proof
+ * ownership by itself. Every kind below must be backed by a supplied,
+ * verifier-rebuilt role artifact before this bridge credits an endpoint:
  *
  *  - VectorOpening: an AlgHash Merkle opening executed inside C_rho;
  *  - WiredLedger: the full Poseidon ledger/sumcheck closer executed in C_rho;
  *  - StreamChild: a separate SHA/XOF/ChaCha child plus C_rho's root pin.
  *
- * A hash or metadata record which does not satisfy one of those executable
- * constructions is deliberately `Absent`.
+ * A route or metadata record without that executable evidence remains a
+ * residual. In particular, `preexisting_literal` is inventory metadata and
+ * never authorizes a semantic export.
  */
 enum class ProducerKindV1 : uint8_t {
     Absent = 0,
@@ -126,7 +127,9 @@ struct ProductV1 {
     std::vector<RoleExportProofV1> role_proofs;
     std::vector<InventoryEntryV1> endpoints;
     std::vector<semantic_ctl::EndpointCellsV1> semantic_ctl_cells;
+    /** Canonical routes with a direct source column; inventory, not credit. */
     uint32_t preexisting_literal_endpoints{0};
+    /** Endpoints backed by an executed, verifier-rebuilt role export. */
     uint32_t newly_executed_export_endpoints{0};
     uint32_t literal_proof_owned_endpoints{0};
     uint32_t residual_endpoints{0};

@@ -63,9 +63,9 @@ BOOST_AUTO_TEST_CASE(
             route.kind ==
             exports::ProducerKindV1::StreamChild;
     }
-    BOOST_CHECK_EQUAL(direct, 21U);
-    BOOST_CHECK_EQUAL(vectors, 3U);
-    BOOST_CHECK_EQUAL(wired, 7U);
+    BOOST_CHECK_EQUAL(direct, 26U);
+    BOOST_CHECK_EQUAL(vectors, 0U);
+    BOOST_CHECK_EQUAL(wired, 5U);
     BOOST_CHECK_EQUAL(streams, 21U);
 
     BOOST_CHECK((
@@ -73,7 +73,7 @@ BOOST_AUTO_TEST_CASE(
             routes,
             rc::RCStage3RelationEndpoint::
                 EpisodeGemmSignedRange).kind ==
-        exports::ProducerKindV1::WiredLedger));
+        exports::ProducerKindV1::DirectRelationCell));
     BOOST_CHECK((
         Route(
             routes,
@@ -105,19 +105,41 @@ BOOST_AUTO_TEST_CASE(
         product.all_supplied_artifacts_valid,
         product.note);
     BOOST_CHECK_EQUAL(
-        product.preexisting_literal_endpoints, 21U);
-    // Copy was already literal; transpose/residual/round-order are newly
-    // exported from their executed sponge ledger roots.
+        product.preexisting_literal_endpoints, 26U);
+    // Route literals are inventory only. All four Wiring endpoints become
+    // proof-owned only because this role artifact is executed and rebuilt.
     BOOST_CHECK_EQUAL(
-        product.newly_executed_export_endpoints, 3U);
+        product.newly_executed_export_endpoints, 4U);
     BOOST_CHECK_EQUAL(
-        product.literal_proof_owned_endpoints, 24U);
-    BOOST_CHECK_EQUAL(product.residual_endpoints, 28U);
+        product.literal_proof_owned_endpoints, 4U);
+    BOOST_CHECK_EQUAL(product.residual_endpoints, 48U);
     std::string validation;
     BOOST_CHECK_MESSAGE(
         exports::ValidateProductV1(
             product, &validation),
         validation);
+
+    auto duplicate =
+        exports::BuildProductV1({role, role}, {});
+    duplicate.no_duplicate_roles = true;
+    duplicate.all_supplied_artifacts_valid = true;
+    BOOST_CHECK(
+        !exports::ValidateProductV1(
+            duplicate, &validation));
+    BOOST_CHECK_NE(
+        validation.find("duplicate_role"),
+        std::string::npos);
+
+    auto route_attack = product;
+    route_attack.role_proofs.front()
+        .exports.front().route.kind =
+        exports::ProducerKindV1::WiredLedger;
+    BOOST_CHECK(
+        !exports::ValidateProductV1(
+            route_attack, &validation));
+    BOOST_CHECK_NE(
+        validation.find("role_export_route"),
+        std::string::npos);
 
     const auto& proof = product.role_proofs.front();
     BOOST_REQUIRE(proof.valid);
@@ -128,6 +150,41 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(item.canonical_u32_limbs);
         BOOST_CHECK(!item.recursively_consumed);
     }
+}
+
+BOOST_AUTO_TEST_CASE(
+    route_literal_without_validated_role_receipt_gets_zero_credit)
+{
+    const auto product =
+        exports::BuildProductV1({}, {});
+    BOOST_CHECK(product.exact_inventory);
+    BOOST_CHECK_EQUAL(
+        product.preexisting_literal_endpoints, 26U);
+    BOOST_CHECK_EQUAL(
+        product.literal_proof_owned_endpoints, 0U);
+    BOOST_CHECK_EQUAL(
+        product.newly_executed_export_endpoints, 0U);
+    BOOST_CHECK_EQUAL(product.residual_endpoints, 52U);
+    BOOST_CHECK(product.semantic_ctl_cells.empty());
+    std::string why;
+    BOOST_CHECK_MESSAGE(
+        exports::ValidateProductV1(product, &why), why);
+
+    auto forged = product;
+    BOOST_REQUIRE(
+        forged.endpoints.front()
+            .route.preexisting_literal);
+    forged.endpoints.front()
+        .literal_proof_owned_export = true;
+    forged.literal_proof_owned_endpoints = 1;
+    forged.newly_executed_export_endpoints = 1;
+    forged.residual_endpoints = 51;
+    BOOST_CHECK(
+        !exports::ValidateProductV1(
+            forged, &why));
+    BOOST_CHECK_NE(
+        why.find("endpoint_evidence"),
+        std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -348,8 +405,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(
         product.newly_executed_export_endpoints, 1U);
     BOOST_CHECK_EQUAL(
-        product.literal_proof_owned_endpoints, 22U);
-    BOOST_CHECK_EQUAL(product.residual_endpoints, 30U);
+        product.literal_proof_owned_endpoints, 1U);
+    BOOST_CHECK_EQUAL(product.residual_endpoints, 51U);
 
     auto wrong_root_role = role;
     wrong_root_role.endpoint_committed_roots[0][0] =

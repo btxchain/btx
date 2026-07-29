@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <limits>
 #include <set>
+#include <string_view>
 #include <utility>
 
 namespace matmul::v4::rc::multirow_v11_semantic_exports {
@@ -542,6 +543,44 @@ bool RawCanonical(
     return true;
 }
 
+const ProofOwnedExportV1* ExecutedExport(
+    const ProductV1& product,
+    const CanonicalExportRouteV1& route)
+{
+    const auto role = std::find_if(
+        product.role_proofs.begin(),
+        product.role_proofs.end(),
+        [&route](const RoleExportProofV1& proof) {
+            return proof.role == route.role;
+        });
+    if (role == product.role_proofs.end() ||
+        !ValidateRoleExportProofV1(*role, nullptr)) {
+        return nullptr;
+    }
+    const auto exported = std::find_if(
+        role->exports.begin(), role->exports.end(),
+        [&route](const ProofOwnedExportV1& item) {
+            return item.route.endpoint == route.endpoint;
+        });
+    if (exported == role->exports.end() ||
+        !exported->role_air_witness_executed ||
+        !exported->stream_child_witness_executed ||
+        !exported->same_trace_root_equality ||
+        !exported->canonical_u32_limbs ||
+        !RawCanonical(*role, *exported)) {
+        return nullptr;
+    }
+    return &*exported;
+}
+
+bool SameRouteText(const char* lhs, const char* rhs)
+{
+    if (lhs == nullptr || rhs == nullptr) {
+        return lhs == rhs;
+    }
+    return std::string_view(lhs) == std::string_view(rhs);
+}
+
 } // namespace
 
 std::array<CanonicalExportRouteV1, kEndpointCountV1>
@@ -616,8 +655,6 @@ ProductV1 BuildProductV1(
     for (const auto& route : routes) {
         InventoryEntryV1 row;
         row.route = route;
-        row.literal_proof_owned_export =
-            route.preexisting_literal;
         out.preexisting_literal_endpoints +=
             route.preexisting_literal;
         const auto role_found = std::find_if(
@@ -654,8 +691,7 @@ ProductV1 BuildProductV1(
                 row.literal_proof_owned_export |=
                     newly_literal;
                 out.newly_executed_export_endpoints +=
-                    newly_literal &&
-                    !route.preexisting_literal;
+                    newly_literal;
                 row.residual = export_found->residual;
             }
         }
@@ -728,6 +764,7 @@ bool ValidateRoleExportProofV1(
     }
     std::vector<alg_hash::Digest> roots;
     roots.reserve(proof.exports.size());
+    const auto routes = CanonicalExportRoutesV1();
     for (const auto& item : proof.exports) {
         if (item.root_words != RootWords(item.committed_root)) {
             return Fail(why, "root_limb_metadata");
@@ -761,6 +798,25 @@ bool ValidateRoleExportProofV1(
                 static_cast<uint32_t>(item.route.endpoint)) {
             return Fail(why, "role_export_order");
         }
+        const auto& expected =
+            routes[item.route.ordinal];
+        if (item.route.endpoint != expected.endpoint ||
+            item.route.role != expected.role ||
+            item.route.kind != expected.kind ||
+            item.route.relation_column !=
+                expected.relation_column ||
+            !SameRouteText(
+                item.route.producer_module,
+                expected.producer_module) ||
+            !SameRouteText(
+                item.route.producer_function,
+                expected.producer_function) ||
+            item.route.preexisting_literal !=
+                expected.preexisting_literal ||
+            item.route.requires_stream_child !=
+                expected.requires_stream_child) {
+            return Fail(why, "role_export_route");
+        }
         if (item.role_air_witness_executed &&
             item.stream_child_witness_executed &&
             (!item.same_trace_root_equality ||
@@ -776,15 +832,21 @@ bool ValidateProductV1(
     const ProductV1& product,
     std::string* why)
 {
+    const auto routes = CanonicalExportRoutesV1();
+    const uint32_t expected_preexisting =
+        static_cast<uint32_t>(std::count_if(
+            routes.begin(), routes.end(),
+            [](const CanonicalExportRouteV1& route) {
+                return route.preexisting_literal;
+            }));
     if (product.version != kVersionV1 ||
         !product.exact_inventory ||
         !product.no_duplicate_roles ||
         !product.no_duplicate_stream_children ||
         !product.all_supplied_artifacts_valid ||
         product.endpoints.size() != kEndpointCountV1 ||
-        product.preexisting_literal_endpoints != 21 ||
-        product.literal_proof_owned_endpoints <
-            product.preexisting_literal_endpoints ||
+        product.preexisting_literal_endpoints !=
+            expected_preexisting ||
         product.literal_proof_owned_endpoints +
                 product.residual_endpoints !=
             kEndpointCountV1 ||
@@ -796,6 +858,98 @@ bool ValidateProductV1(
         if (!ValidateRoleExportProofV1(role, why)) {
             return false;
         }
+    }
+    std::set<uint16_t> distinct_roles;
+    for (const auto& role : product.role_proofs) {
+        if (!distinct_roles.insert(
+                static_cast<uint16_t>(
+                    role.role)).second) {
+            return Fail(why, "duplicate_role");
+        }
+    }
+    uint32_t owned = 0;
+    uint32_t complete_roles = 0;
+    for (uint32_t ordinal = 0;
+         ordinal < routes.size(); ++ordinal) {
+        const auto& route = routes[ordinal];
+        const auto& endpoint = product.endpoints[ordinal];
+        if (endpoint.route.endpoint != route.endpoint ||
+            endpoint.route.role != route.role ||
+            endpoint.route.ordinal != route.ordinal ||
+            endpoint.route.kind != route.kind ||
+            endpoint.route.relation_column !=
+                route.relation_column ||
+            !SameRouteText(
+                endpoint.route.producer_module,
+                route.producer_module) ||
+            !SameRouteText(
+                endpoint.route.producer_function,
+                route.producer_function) ||
+            endpoint.route.preexisting_literal !=
+                route.preexisting_literal ||
+            endpoint.route.requires_stream_child !=
+                route.requires_stream_child ||
+            endpoint.recursively_consumed) {
+            return Fail(why, "endpoint_inventory");
+        }
+        const auto role = std::find_if(
+            product.role_proofs.begin(),
+            product.role_proofs.end(),
+            [&route](const RoleExportProofV1& proof) {
+                return proof.role == route.role;
+            });
+        const auto* proof =
+            role == product.role_proofs.end()
+                ? nullptr : &*role;
+        const ProofOwnedExportV1* exported = nullptr;
+        if (proof != nullptr) {
+            const auto found = std::find_if(
+                proof->exports.begin(), proof->exports.end(),
+                [&route](const ProofOwnedExportV1& item) {
+                    return item.route.endpoint ==
+                        route.endpoint;
+                });
+            if (found != proof->exports.end()) {
+                exported = &*found;
+            }
+        }
+        const bool expected_supplied = proof != nullptr;
+        const bool expected_role_executed =
+            proof != nullptr && proof->valid;
+        const bool expected_stream_executed =
+            exported != nullptr &&
+            exported->stream_child_witness_executed;
+        const bool expected_owned =
+            ExecutedExport(product, route) != nullptr;
+        if (endpoint.supplied_role_artifact !=
+                expected_supplied ||
+            endpoint.executed_role_artifact !=
+                expected_role_executed ||
+            endpoint.executed_stream_child !=
+                expected_stream_executed ||
+            endpoint.literal_proof_owned_export !=
+                expected_owned) {
+            return Fail(why, "endpoint_evidence");
+        }
+        owned += expected_owned;
+    }
+    for (const RCStage3RelationRole role :
+         RCStage3UnifiedRoleOrder()) {
+        complete_roles += std::all_of(
+            routes.begin(), routes.end(),
+            [&product, role](
+                const CanonicalExportRouteV1& route) {
+                return route.role != role ||
+                    product.endpoints[route.ordinal]
+                        .literal_proof_owned_export;
+            });
+    }
+    if (product.literal_proof_owned_endpoints != owned ||
+        product.newly_executed_export_endpoints != owned ||
+        product.residual_endpoints !=
+            kEndpointCountV1 - owned ||
+        product.complete_roles != complete_roles) {
+        return Fail(why, "endpoint_counts");
     }
     const auto cells = BuildSemanticCtlCellsV1(product);
     if (cells != product.semantic_ctl_cells ||
@@ -812,7 +966,9 @@ std::vector<semantic_ctl::EndpointCellsV1>
 BuildSemanticCtlCellsV1(const ProductV1& product)
 {
     if (product.literal_proof_owned_endpoints !=
-        kEndpointCountV1) {
+            kEndpointCountV1 ||
+        product.endpoints.size() !=
+            kEndpointCountV1) {
         return {};
     }
     std::vector<semantic_ctl::EndpointCellsV1> out(
@@ -822,26 +978,19 @@ BuildSemanticCtlCellsV1(const ProductV1& product)
         out[i].endpoint = routes[i].endpoint;
         out[i].role = routes[i].role;
         out[i].occurrence = routes[i].ordinal;
-    }
-    for (const auto& role : product.role_proofs) {
-        if (!role.valid) continue;
-        for (const auto& item : role.exports) {
-            if (!item.role_air_witness_executed ||
-                !item.stream_child_witness_executed ||
-                !item.same_trace_root_equality ||
-                !item.canonical_u32_limbs ||
-                !RawCanonical(role, item)) {
-                continue;
-            }
-            const uint32_t ordinal = item.route.ordinal;
-            if (ordinal >= out.size()) return {};
-            for (uint32_t word = 0;
-                 word < kRootWordsV1; ++word) {
-                out[ordinal].source_words[word] =
-                    item.root_words[word];
-                out[ordinal].consumer_words[word] =
-                    item.root_words[word];
-            }
+        const auto* item =
+            ExecutedExport(product, routes[i]);
+        if (item == nullptr ||
+            !product.endpoints[i]
+                 .literal_proof_owned_export) {
+            return {};
+        }
+        for (uint32_t word = 0;
+             word < kRootWordsV1; ++word) {
+            out[i].source_words[word] =
+                item->root_words[word];
+            out[i].consumer_words[word] =
+                item->root_words[word];
         }
     }
     return out;
