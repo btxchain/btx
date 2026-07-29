@@ -2270,7 +2270,9 @@ bool AttachNormalizedCoupledBankTerminalBinding(
         true;
     interpreter.normalized_v1_semantic_root =
         execution.slot.normalized_semantic_root;
-    // A separate SHA<->AlgHash bridge is deliberately not implied.
+    // Endpoint-28 / SHA↔AlgHash terminal equality is owned by
+    // AttachNormalizedEndpointTerminalEqualityV1; the V1 pin alone does not
+    // imply it.
     interpreter.role_semantic_root_terminal_equality =
         false;
     execution.parent_terminal_bound = true;
@@ -2281,7 +2283,329 @@ bool AttachNormalizedCoupledBankTerminalBinding(
         *why =
             "stage3:recursive_fixedpoint:"
             "normalized_bank_parent_terminal_v1_bound_"
-            "legacy_sha_bridge_open";
+            "endpoint_terminal_equality_open";
+    }
+    return true;
+}
+
+NormalizedEndpointTerminalEqualityAttachmentV1
+AttachNormalizedEndpointTerminalEqualityV1(
+    FoldBusComposition& composition,
+    BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedRoleTerminalLayout& terminal_layout,
+    const NormalizedSemanticRootSpongeAttachmentV1&
+        semantic_sponge)
+{
+    NormalizedEndpointTerminalEqualityAttachmentV1 out;
+    out.terminal_layout = terminal_layout;
+    out.constraint_base = static_cast<uint32_t>(
+        composition.combined.constraints.size());
+
+    const bool child_trace_root_proof_owned =
+        composition.valid &&
+        composition.hash.valid &&
+        composition.hash.proof_derived &&
+        composition.hash.native_child_accepted &&
+        composition.hash.program.trace_root_opening &&
+        row_pin.trace_row_commitment ==
+            execution.slot.child_trace_row_root &&
+        row_pin.trace_row_commitment ==
+            aq::AirFriBackendAlg<Fp3>::PackDigest(
+                composition.hash.program.
+                    public_inputs.rt_root);
+    out.child_trace_root_proof_owned =
+        child_trace_root_proof_owned;
+
+    const auto expected_root =
+        aq::AirFriBackendAlg<Fp3>::UnpackDigest(
+            execution.slot.normalized_semantic_root);
+    out.sponge_output_equals_role_root =
+        semantic_sponge.valid &&
+        semantic_sponge.output_equals_candidate_semantic_root &&
+        semantic_sponge.output_root ==
+            execution.slot.normalized_semantic_root &&
+        semantic_sponge.output_root ==
+            interpreter.normalized_v1_semantic_root &&
+        expected_root.has_value();
+
+    if (!composition.valid ||
+        !interpreter.valid ||
+        !execution.valid ||
+        !execution.parent_terminal_bound ||
+        execution.legacy_sha_alg_bridge ||
+        interpreter.role_semantic_root_terminal_equality ||
+        !interpreter.normalized_v1_role_terminal_binding ||
+        interpreter.normalized_v1_semantic_root !=
+            execution.slot.normalized_semantic_root ||
+        execution.slot.role !=
+            RCStage3RelationRole::CoupledBank ||
+        execution.slot.first_endpoint != 27 ||
+        execution.slot.endpoint_count != 3 ||
+        execution.slot.normalized_semantic_root !=
+            ComputeNormalizedSemanticRootV1(
+                execution.slot) ||
+        !child_trace_root_proof_owned ||
+        !out.sponge_output_equals_role_root ||
+        terminal_layout.End() >
+            composition.combined.n_columns ||
+        semantic_sponge.layout.End() >
+            composition.combined.n_columns ||
+        composition.columns.size() !=
+            composition.combined.n_columns) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "endpoint_terminal_equality_input";
+        return out;
+    }
+
+    // Verify pin columns already hold the SHA-byte u32 limbs of the root.
+    for (uint32_t limb = 0; limb < 8; ++limb) {
+        const uint32_t column =
+            terminal_layout.RootLimb(limb);
+        const Fp3 expected =
+            Fp3::FromFp(
+                gf::FromU64(
+                    Uint256Limb32(
+                        execution.slot.
+                            normalized_semantic_root,
+                        limb)));
+        if (column >= composition.columns.size() ||
+            composition.columns[column].size() !=
+                composition.combined.n_rows) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "endpoint_terminal_equality_pin_layout";
+            return out;
+        }
+        for (uint32_t row = 0;
+             row < composition.combined.n_rows;
+             ++row) {
+            if (!gf::Eq(
+                    composition.columns[column][row],
+                    expected)) {
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "endpoint_terminal_equality_pin_mismatch";
+                return out;
+            }
+        }
+    }
+
+    constexpr gf::Fp TWO32 = UINT64_C(1) << 32;
+    const ar::PermLayout final_permutation =
+        semantic_sponge.layout.Permutation(
+            kNormalizedSemanticRootSpongeBlocks - 1);
+    for (uint32_t limb = 0;
+         limb < ah::kAlgHashDigestLen;
+         ++limb) {
+        aq::AirConstraint<Fp3> packing;
+        packing.name =
+            "stage3.fixedpoint.endpoint_terminal_equality."
+            "sha_alg_hash_packing";
+        packing.kind = aq::AirKind::kEverywhere;
+        packing.alg_degree = 1;
+        const uint32_t low =
+            terminal_layout.RootLimb(2 * limb);
+        const uint32_t high =
+            terminal_layout.RootLimb(2 * limb + 1);
+        packing.eval =
+            [final_permutation, limb, low, high](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    ar::PermOutputLane(
+                        final_permutation, row, limb),
+                    gf::Add(
+                        row[low],
+                        gf::Mul(
+                            Fp3::FromFp(TWO32),
+                            row[high])));
+            };
+        composition.combined.constraints.push_back(
+            std::move(packing));
+        ++out.sha_alg_packing_constraints;
+    }
+
+    out.added_constraints =
+        static_cast<uint32_t>(
+            composition.combined.constraints.size()) -
+        out.constraint_base;
+    composition.violations =
+        CountHashOpeningViolations(
+            composition.combined,
+            composition.columns);
+    out.violations = composition.violations;
+    out.sha_alg_hash_packing_linked =
+        out.sha_alg_packing_constraints ==
+            ah::kAlgHashDigestLen &&
+        out.violations == 0;
+    out.role_semantic_root_terminal_equality =
+        out.child_trace_root_proof_owned &&
+        out.sponge_output_equals_role_root &&
+        out.sha_alg_hash_packing_linked;
+    out.legacy_sha_alg_bridge =
+        out.role_semantic_root_terminal_equality;
+    out.valid =
+        kNormalizedEndpointTerminalEqualityExecutable &&
+        out.role_semantic_root_terminal_equality &&
+        out.legacy_sha_alg_bridge &&
+        out.added_constraints == 4 &&
+        out.violations == 0;
+    if (out.valid) {
+        interpreter.role_semantic_root_terminal_equality =
+            true;
+        execution.legacy_sha_alg_bridge = true;
+    }
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "endpoint_terminal_equality_ok;"
+          "sha_alg_hash_packing_linked;"
+          "endpoint28_child_trace_root_proof_owned;"
+          "complete_fp=false"
+        : "stage3:recursive_fixedpoint:"
+          "endpoint_terminal_equality_invalid";
+    return out;
+}
+
+bool ValidateNormalizedEndpointTerminalEqualityV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedRoleTerminalLayout& terminal_layout,
+    const NormalizedSemanticRootSpongeAttachmentV1&
+        semantic_sponge,
+    const NormalizedEndpointTerminalEqualityAttachmentV1&
+        attachment,
+    std::string* why)
+{
+    if (!attachment.valid ||
+        attachment.version != 1 ||
+        !attachment.role_semantic_root_terminal_equality ||
+        !attachment.legacy_sha_alg_bridge ||
+        !attachment.sha_alg_hash_packing_linked ||
+        !attachment.child_trace_root_proof_owned ||
+        !attachment.sponge_output_equals_role_root ||
+        attachment.sha_alg_packing_constraints != 4 ||
+        attachment.added_constraints != 4 ||
+        attachment.violations != 0 ||
+        !interpreter.role_semantic_root_terminal_equality ||
+        !execution.legacy_sha_alg_bridge ||
+        !interpreter.normalized_v1_role_terminal_binding ||
+        interpreter.normalized_v1_semantic_root !=
+            execution.slot.normalized_semantic_root ||
+        attachment.terminal_layout.normalized_root_limb_base !=
+            terminal_layout.normalized_root_limb_base ||
+        !semantic_sponge.valid ||
+        !semantic_sponge.output_equals_candidate_semantic_root ||
+        semantic_sponge.output_root !=
+            execution.slot.normalized_semantic_root) {
+        return Fail(
+            why,
+            "endpoint_terminal_equality_attachment_shape");
+    }
+
+    const bool child_trace_root_proof_owned =
+        composition.valid &&
+        composition.hash.valid &&
+        composition.hash.proof_derived &&
+        composition.hash.native_child_accepted &&
+        composition.hash.program.trace_root_opening &&
+        row_pin.trace_row_commitment ==
+            execution.slot.child_trace_row_root &&
+        row_pin.trace_row_commitment ==
+            aq::AirFriBackendAlg<Fp3>::PackDigest(
+                composition.hash.program.
+                    public_inputs.rt_root);
+    if (!child_trace_root_proof_owned) {
+        return Fail(
+            why,
+            "endpoint_terminal_equality_trace_root");
+    }
+
+    constexpr gf::Fp TWO32 = UINT64_C(1) << 32;
+    const auto expected_root =
+        aq::AirFriBackendAlg<Fp3>::UnpackDigest(
+            execution.slot.normalized_semantic_root);
+    if (!expected_root.has_value()) {
+        return Fail(
+            why,
+            "endpoint_terminal_equality_root_unpack");
+    }
+    const ar::PermLayout final_permutation =
+        semantic_sponge.layout.Permutation(
+            kNormalizedSemanticRootSpongeBlocks - 1);
+    for (uint32_t limb = 0;
+         limb < ah::kAlgHashDigestLen;
+         ++limb) {
+        const uint32_t low =
+            terminal_layout.RootLimb(2 * limb);
+        const uint32_t high =
+            terminal_layout.RootLimb(2 * limb + 1);
+        if (low >= composition.columns.size() ||
+            high >= composition.columns.size()) {
+            return Fail(
+                why,
+                "endpoint_terminal_equality_columns");
+        }
+        const Fp3 digest =
+            Fp3::FromFp(
+                gf::Canonical((*expected_root)[limb]));
+        for (uint32_t r = 0;
+             r < composition.combined.n_rows;
+             ++r) {
+            const Fp3 packed = gf::Add(
+                composition.columns[low][r],
+                gf::Mul(
+                    Fp3::FromFp(TWO32),
+                    composition.columns[high][r]));
+            if (!gf::Eq(packed, digest)) {
+                return Fail(
+                    why,
+                    "endpoint_terminal_equality_packing");
+            }
+        }
+    }
+    // Spot-check sponge output on row 0; AIR violations cover every row.
+    {
+        std::vector<Fp3> row0(
+            composition.combined.n_columns,
+            Fp3::Zero());
+        for (uint32_t col = 0;
+             col < composition.combined.n_columns;
+             ++col) {
+            row0[col] = composition.columns[col][0];
+        }
+        for (uint32_t limb = 0;
+             limb < ah::kAlgHashDigestLen;
+             ++limb) {
+            const Fp3 digest =
+                Fp3::FromFp(
+                    gf::Canonical((*expected_root)[limb]));
+            if (!gf::Eq(
+                    ar::PermOutputLane(
+                        final_permutation, row0, limb),
+                    digest)) {
+                return Fail(
+                    why,
+                    "endpoint_terminal_equality_sponge_output");
+            }
+        }
+    }
+
+    if (CountHashOpeningViolations(
+            composition.combined,
+            composition.columns) != 0) {
+        return Fail(
+            why,
+            "endpoint_terminal_equality_air");
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:recursive_fixedpoint:"
+            "endpoint_terminal_equality_validated";
     }
     return true;
 }
@@ -22922,15 +23246,16 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         recursive_parent_air::AssessChildFsReplayClosureV1()
             .closed;
     // Residual families that keep CompleteFP false. SplitRapMultiRowVerifier
-    // closes when kMultiRowV2SplitRapVerifierAirLocalExecutable is true.
+    // and EndpointTerminalEquality close via their living constexprs.
     out.child_proof_payload_bus_open =
         !va::kVerifierProofRowsBoundInAir;
     out.split_rap_multirow_parent_adapter_open =
         !va::kMultiRowV2SplitRapVerifierAirLocalExecutable;
-    // No living constexpr for endpoint equality: AttachNormalizedCoupledBank
-    // TerminalBinding pins V1 limbs but leaves
-    // role_semantic_root_terminal_equality false by construction.
-    out.endpoint_terminal_equality_open = true;
+    // EndpointTerminalEquality closed by
+    // kNormalizedEndpointTerminalEqualityExecutable /
+    // AttachNormalizedEndpointTerminalEqualityV1.
+    out.endpoint_terminal_equality_open =
+        !kNormalizedEndpointTerminalEqualityExecutable;
     out.verifier_fiat_shamir_air_chip_open =
         !va::kVerifierFiatShamirAirExecutable;
     out.complete_fp_open = !kCompleteRecursiveFixedPointExecutable;
@@ -22951,18 +23276,20 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         out.ledger_g4_child_fs_replay_closed &&
         out.child_proof_payload_bus_open &&
         !out.split_rap_multirow_parent_adapter_open &&
-        out.endpoint_terminal_equality_open &&
+        !out.endpoint_terminal_equality_open &&
         out.verifier_fiat_shamir_air_chip_open &&
         out.complete_fp_open &&
         out.recursive_children_gate_blocked &&
-        out.open_residual_families == 2 &&
+        out.open_residual_families == 1 &&
+        kNormalizedEndpointTerminalEqualityExecutable &&
         !kCompleteRecursiveFixedPointExecutable &&
         !kRecursiveFixedPointConsensusAuthority;
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
           "complete_fp_residuals_open;"
-          "payload_bus+endpoint_terminal;"
+          "payload_bus;"
           "split_rap_multirow_closed;"
+          "endpoint_terminal_equality_closed;"
           "recursive_children_blocked;authority=false"
         : "stage3:recursive_fixedpoint:"
           "complete_fp_residual_inventory_incoherent";

@@ -1128,7 +1128,9 @@ struct NormalizedRoleTerminalLayout {
 /**
  * Pin the verifier-recomputed normalized semantic root into eight
  * verifier-owned u32 columns of the same parent AIR as the bytecode
- * interpreter. The legacy equality flag remains false by construction.
+ * interpreter. Does not set `role_semantic_root_terminal_equality`; call
+ * `AttachNormalizedEndpointTerminalEqualityV1` after the semantic sponge
+ * to close the SHA↔AlgHash / endpoint-28 proof-owned terminal join.
  */
 [[nodiscard]] bool AttachNormalizedCoupledBankTerminalBinding(
     FoldBusComposition& composition,
@@ -1137,6 +1139,38 @@ struct NormalizedRoleTerminalLayout {
     NormalizedCoupledBankTerminalExecution& execution,
     NormalizedRoleTerminalLayout* layout = nullptr,
     std::string* why = nullptr);
+
+/**
+ * Endpoint-28 / role semantic-root terminal equality (CompleteFP residual #3).
+ *
+ * Equality-constrains the eight externally pinned V1 u32 root limbs to the
+ * AlgHash sponge's four proof-derived digest outputs via the canonical
+ * SHA-byte packing (`limb = low_u32 + 2^32 * high_u32`). Requires the
+ * CoupledBank child_trace_row_root to be hash-opening authenticated
+ * (endpoint-28 proof-owned R0) and the sponge output to equal the candidate
+ * normalized semantic root. Sets
+ * `role_semantic_root_terminal_equality` and `legacy_sha_alg_bridge` only
+ * when the AIR equations hold. Does not flip CompleteFP / RecursiveChildren /
+ * authority. Attach/Validate live below
+ * `NormalizedSemanticRootSpongeAttachmentV1`.
+ */
+struct NormalizedEndpointTerminalEqualityAttachmentV1 {
+    uint16_t version{1};
+    NormalizedRoleTerminalLayout terminal_layout;
+    uint32_t constraint_base{0};
+    uint32_t added_constraints{0};
+    uint32_t sha_alg_packing_constraints{0};
+    uint32_t violations{0};
+    bool child_trace_root_proof_owned{false};
+    bool sponge_output_equals_role_root{false};
+    bool sha_alg_hash_packing_linked{false};
+    bool role_semantic_root_terminal_equality{false};
+    bool legacy_sha_alg_bridge{false};
+    bool valid{false};
+    std::string note;
+};
+
+inline constexpr bool kNormalizedEndpointTerminalEqualityExecutable = true;
 
 enum class NormalizedAlgHashInputSource : uint8_t {
     VerifierConstant = 1,
@@ -1316,6 +1350,30 @@ AttachNormalizedSemanticRootSpongeV1(
     const FoldBusComposition& composition,
     const NormalizedRoleChildSlot& slot,
     const NormalizedSemanticRootSpongeAttachmentV1& attachment,
+    std::string* why = nullptr);
+
+/**
+ * Join the CoupledBank V1 role-root pin to the AlgHash sponge digest via
+ * SHA-byte packing, proving endpoint-28 proof-owned terminal equality.
+ * See `NormalizedEndpointTerminalEqualityAttachmentV1`.
+ */
+[[nodiscard]] NormalizedEndpointTerminalEqualityAttachmentV1
+AttachNormalizedEndpointTerminalEqualityV1(
+    FoldBusComposition& composition,
+    BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedRoleTerminalLayout& terminal_layout,
+    const NormalizedSemanticRootSpongeAttachmentV1& semantic_sponge);
+
+[[nodiscard]] bool ValidateNormalizedEndpointTerminalEqualityV1(
+    const FoldBusComposition& composition,
+    const BytecodeInterpreterAttachment& interpreter,
+    const NormalizedCoupledBankRowPin& row_pin,
+    const NormalizedCoupledBankTerminalExecution& execution,
+    const NormalizedRoleTerminalLayout& terminal_layout,
+    const NormalizedSemanticRootSpongeAttachmentV1& semantic_sponge,
+    const NormalizedEndpointTerminalEqualityAttachmentV1& attachment,
     std::string* why = nullptr);
 
 // -------------------------------------------------------------------------
@@ -2878,10 +2936,12 @@ struct NormalizedRecursiveVerifierGap {
  *
  * This audit deliberately distinguishes those algebraic equations from
  * cryptographic recursive consumption. The current parent still lacks an
- * in-AIR all-proof-field bus, the child-proof commitment/CTL-terminal inputs
- * to its semantic-root sponge, and endpoint terminal equality. Child
- * Fiat-Shamir replay is consumed from the ledger's g4 assessor
- * (`AssessChildFsReplayClosureV1().closed` via
+ * in-AIR all-proof-field bus and the child-proof commitment/CTL-terminal
+ * inputs to its semantic-root sponge until those buses attach. Endpoint
+ * terminal equality is closed by
+ * `AttachNormalizedEndpointTerminalEqualityV1` when the SHA↔AlgHash packing
+ * join is present. Child Fiat-Shamir replay is consumed from the ledger's
+ * g4 assessor (`AssessChildFsReplayClosureV1().closed` via
  * `fiat_shamir_replay_complete`); `va::kVerifierFiatShamirAirExecutable`
  * may remain false. SplitRapMultiRowVerifier LocalExecutable is closed
  * (`va::kMultiRowV2SplitRapVerifierAirLocalExecutable`); RecursiveAuthority
@@ -3862,20 +3922,20 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *   1. ChildProofPayloadBus
  *      — `va::kVerifierProofRowsBoundInAir` still false
  *        (`matmul_v4_rc_stage3_verifier_air.h`).
- *   2. SplitRapMultiRowVerifier — CLOSED locally
+ *   Closed: SplitRapMultiRowVerifier (local)
  *      — `va::kMultiRowV2SplitRapVerifierAirLocalExecutable` true;
  *        `split_rap_multirow_parent_adapter` follows that constexpr.
  *        RecursiveAuthority stays false.
- *   3. EndpointTerminalEquality
- *      — `BytecodeInterpreterAttachment::role_semantic_root_terminal_equality`
- *        stays false after `AttachNormalizedCoupledBankTerminalBinding`
- *        (normalized V1 pin only; legacy SHA↔AlgHash /
- *        endpoint-28 proof-owned terminal equality open).
+ *   Closed: EndpointTerminalEquality
+ *      — `kNormalizedEndpointTerminalEqualityExecutable` via
+ *        `AttachNormalizedEndpointTerminalEqualityV1` (SHA↔AlgHash packing
+ *        join of the V1 role-root pin to the AlgHash sponge digest with
+ *        endpoint-28 proof-owned child_trace_row_root).
  *
  * `AssessCompleteRecursiveFixedPointResidualInventoryV1` remeasures these
- * living predicates. Do not flip CompleteFP without closing the remaining
- * open residuals with AIR evidence + forgery tests. Consensus authority
- * stays separate/false.
+ * living predicates. Do not flip CompleteFP without closing every open
+ * residual with AIR evidence + forgery tests. Consensus authority stays
+ * separate/false.
  */
 inline constexpr bool kCompleteRecursiveFixedPointExecutable = false;
 inline constexpr bool kRecursiveFixedPointConsensusAuthority = false;
@@ -3906,6 +3966,7 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1();
 
 static_assert(kHashOpeningAirExecutable);
 static_assert(kFoldHashScalarMemoryBusExecutable);
+static_assert(kNormalizedEndpointTerminalEqualityExecutable);
 static_assert(!kCompleteRecursiveFixedPointExecutable);
 static_assert(!kRecursiveFixedPointConsensusAuthority);
 static_assert(kNarrowBytecodeHierarchicalAttachExecutable);

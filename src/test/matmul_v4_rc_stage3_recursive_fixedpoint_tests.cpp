@@ -1703,11 +1703,12 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(residuals.ledger_g4_child_fs_replay_closed);
         BOOST_CHECK(residuals.child_proof_payload_bus_open);
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
-        BOOST_CHECK(residuals.endpoint_terminal_equality_open);
+        BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
         BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
         BOOST_CHECK(residuals.complete_fp_open);
         BOOST_CHECK(residuals.recursive_children_gate_blocked);
-        BOOST_CHECK_EQUAL(residuals.open_residual_families, 2U);
+        BOOST_CHECK_EQUAL(residuals.open_residual_families, 1U);
+        static_assert(fp::kNormalizedEndpointTerminalEqualityExecutable);
     }
 
     // Even if an attacker consistently changes the external semantic-root
@@ -1859,6 +1860,64 @@ BOOST_AUTO_TEST_CASE(
         fp::ValidateNormalizedSemanticRootSpongeV1(
             joined, execution.slot, sponge, &why),
         why);
+
+    // CompleteFP residual #3: SHA↔AlgHash packing join of the V1 role-root
+    // pin to the AlgHash sponge digest with endpoint-28 proof-owned R0.
+    // Attach on a composition copy so later ProofFieldBus / DeepCtl chips keep
+    // their exact tip-of-`joined` column/constraint budgets.
+    {
+        fp::FoldBusComposition eq_joined = joined;
+        auto eq_interpreter = interpreter;
+        auto eq_execution = execution;
+        const fp::NormalizedEndpointTerminalEqualityAttachmentV1
+            endpoint_eq =
+                fp::AttachNormalizedEndpointTerminalEqualityV1(
+                    eq_joined, eq_interpreter, migrated.row_pin,
+                    eq_execution, terminal_layout, sponge);
+        BOOST_REQUIRE_MESSAGE(endpoint_eq.valid, endpoint_eq.note);
+        BOOST_CHECK(endpoint_eq.child_trace_root_proof_owned);
+        BOOST_CHECK(endpoint_eq.sponge_output_equals_role_root);
+        BOOST_CHECK(endpoint_eq.sha_alg_hash_packing_linked);
+        BOOST_CHECK(
+            endpoint_eq.role_semantic_root_terminal_equality);
+        BOOST_CHECK(endpoint_eq.legacy_sha_alg_bridge);
+        BOOST_CHECK(
+            eq_interpreter.role_semantic_root_terminal_equality);
+        BOOST_CHECK(eq_execution.legacy_sha_alg_bridge);
+        BOOST_CHECK_EQUAL(
+            endpoint_eq.sha_alg_packing_constraints, 4U);
+        BOOST_CHECK_EQUAL(endpoint_eq.added_constraints, 4U);
+        BOOST_CHECK_EQUAL(
+            eq_joined.combined.constraints.size(), 1540U);
+        BOOST_CHECK_MESSAGE(
+            fp::ValidateNormalizedEndpointTerminalEqualityV1(
+                eq_joined, eq_interpreter, migrated.row_pin,
+                eq_execution, terminal_layout, sponge,
+                endpoint_eq, &why),
+            why);
+        // Forgery: mutate a pinned SHA-byte limb → packing / AIR reject.
+        const uint32_t pin_col = terminal_layout.RootLimb(0);
+        const gf::Fp3 saved = eq_joined.columns[pin_col][0];
+        eq_joined.columns[pin_col][0] =
+            gf::Add(saved, gf::Fp3::One());
+        BOOST_CHECK(
+            !fp::ValidateNormalizedEndpointTerminalEqualityV1(
+                eq_joined, eq_interpreter, migrated.row_pin,
+                eq_execution, terminal_layout, sponge,
+                endpoint_eq, &why));
+        eq_joined.columns[pin_col][0] = saved;
+        BOOST_CHECK_MESSAGE(
+            fp::ValidateNormalizedEndpointTerminalEqualityV1(
+                eq_joined, eq_interpreter, migrated.row_pin,
+                eq_execution, terminal_layout, sponge,
+                endpoint_eq, &why),
+            why);
+    }
+    // Original interpreter/execution remain pin-only (equality owned by the
+    // copy above) so later capability paths keep fail_pred(!equality).
+    BOOST_CHECK(
+        !interpreter.role_semantic_root_terminal_equality);
+    BOOST_CHECK(!execution.legacy_sha_alg_bridge);
 
     // Canonical order and all sixteen formerly missing lanes are now
     // constrained as local public pins. They still do not become recursive
@@ -2496,7 +2555,8 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(commit_gap_present);
         BOOST_CHECK(semantic_gap_present);
         BOOST_CHECK(!ctl_gap_present);
-        // SplitRapMultiRow local adapter closed; payload+FS-open gaps remain.
+        // SplitRap closed; endpoint equality attach is exercised later in this
+        // case. Three capability gaps remain open on this ProofBus path.
         BOOST_CHECK_EQUAL(open_gaps, 3U);
     }
     BOOST_CHECK_MESSAGE(
