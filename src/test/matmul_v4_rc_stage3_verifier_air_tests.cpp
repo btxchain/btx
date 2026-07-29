@@ -1089,13 +1089,15 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.bounded_ood_rejection_loop_bounded);
     BOOST_CHECK_EQUAL(
         gap.active_config_fs_blocker,
-        "p2_squeeze_sha_execution_plan_inapplicable");
+        "p2_native_poseidon2_fs_air_open");
     // SHA-AIR chip path does not apply to Poseidon2 V10.
     BOOST_CHECK(!gap.sha_execution_plan_valid);
     BOOST_CHECK(!gap.sha_fixed_schedule);
     BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
     BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK_GE(gap.open_predicates, 1U);
+    // Theater pin: Executable constexpr stays false on the P2 path.
+    BOOST_CHECK(!va::kVerifierFiatShamirAirExecutable);
 }
 
 BOOST_AUTO_TEST_CASE(fiat_shamir_witness_binds_every_claim_without_claiming_sha_air)

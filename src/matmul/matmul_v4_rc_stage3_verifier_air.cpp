@@ -3323,8 +3323,11 @@ AssessVerifierFiatShamirAirChipGapV1(
         out.active_config_fs_blocker =
             "unbounded_ood_rejection_loop";
     } else if (!program.child_sha256d_challenges) {
+        // Poseidon2 / V10 path: SHA execution-plan conjuncts do not apply.
+        // Name the living residual honestly (P2-native FS AIR still open),
+        // not as a SHA-plan failure.
         out.active_config_fs_blocker =
-            "p2_squeeze_sha_execution_plan_inapplicable";
+            "p2_native_poseidon2_fs_air_open";
     } else {
         out.active_config_fs_blocker.clear();
     }

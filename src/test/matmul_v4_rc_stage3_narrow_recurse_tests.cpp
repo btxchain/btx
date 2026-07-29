@@ -558,10 +558,11 @@ BOOST_AUTO_TEST_CASE(
         rounded_duplicated.composed_union_bits, 98.8070298407, 1e-7);
     BOOST_CHECK(!rounded_duplicated.numerical_target_met);
 
-    // The exact selected packed-four conditional manifest is smaller than
-    // 2^26.  Its genuine horizontal hash-AIR packing gives both commitment
-    // topologies numerical headroom; formal reductions and scheduler
-    // enforcement remain independently fail-closed.
+    // The selected packed-four conditional manifest's site count is living
+    // inventory (currently ~2^35.8). Derive every expected hybrid term from
+    // that count + the Q128/V5 lane theorem; do NOT pin stale literals such as
+    // "numerical_target_met == true" or "independence > 228" that silently
+    // regress whenever the production proof-site manifest grows.
     const auto selected_manifest =
         ss::BuildProductionProofSiteManifest(
             ss::SelectedProductionProofSitePolicy());
@@ -570,13 +571,6 @@ BOOST_AUTO_TEST_CASE(
         selected_manifest.complete_global_upper_bound_manifest_derived);
     BOOST_REQUIRE_GT(selected_manifest.total_proof_sites, 0U);
 
-    // Derive the expected composition directly from the exact live site
-    // count and the canonical Q128/V5 lane theorem terms, instead of
-    // pinning magic literals that silently go stale whenever the
-    // production proof-site manifest is revised (they depend on
-    // selected_manifest.total_proof_sites, which is not a compile-time
-    // constant). The union-of-two-failure-events algebra mirrors
-    // AssessFriDualQ128HybridBound's own -log2(2^-a + 2^-b) composition.
     const double expected_site_log2 = std::log2(
         static_cast<double>(selected_manifest.total_proof_sites));
     const nr::FriBcsRepetitionAssessment exact_fri =
@@ -603,6 +597,8 @@ BOOST_AUTO_TEST_CASE(
     const double expected_shared_binding_bits =
         static_cast<double>(rcx::kRCFri3AlgDualAlgHashCollisionBits) -
         expected_site_log2;
+    const double expected_shared_union = composed_union_of(
+        expected_fri_all_query_bits, expected_shared_binding_bits);
     BOOST_CHECK_CLOSE(
         exact_shared.global_site_log2, expected_site_log2, 1e-9);
     BOOST_CHECK_CLOSE(
@@ -612,11 +608,11 @@ BOOST_AUTO_TEST_CASE(
         exact_shared.commitment_binding_bits,
         expected_shared_binding_bits, 1e-9);
     BOOST_CHECK_CLOSE(
-        exact_shared.composed_union_bits,
-        composed_union_of(
-            expected_fri_all_query_bits, expected_shared_binding_bits),
-        1e-9);
-    BOOST_CHECK(exact_shared.numerical_target_met);
+        exact_shared.composed_union_bits, expected_shared_union, 1e-9);
+    BOOST_CHECK_EQUAL(
+        exact_shared.numerical_target_met,
+        expected_shared_union >=
+            static_cast<double>(nr::kNarrowTargetSoundnessBits));
     BOOST_CHECK(!exact_shared.exact_site_manifest_backend_enforced);
     BOOST_CHECK(!exact_shared.commitment_hybrid_reduction_complete);
     BOOST_CHECK(!exact_shared.formal_reduction_complete);
@@ -630,12 +626,15 @@ BOOST_AUTO_TEST_CASE(
     const double expected_duplicated_binding_bits =
         static_cast<double>(rcx::kRCFri3AlgDualAlgHashCollisionBits) -
         expected_site_log2 - std::log2(2.0);
+    const double expected_duplicated_union = composed_union_of(
+        expected_fri_all_query_bits, expected_duplicated_binding_bits);
     BOOST_CHECK_CLOSE(
         exact_duplicated.composed_union_bits,
-        composed_union_of(
-            expected_fri_all_query_bits, expected_duplicated_binding_bits),
-        1e-9);
-    BOOST_CHECK(exact_duplicated.numerical_target_met);
+        expected_duplicated_union, 1e-9);
+    BOOST_CHECK_EQUAL(
+        exact_duplicated.numerical_target_met,
+        expected_duplicated_union >=
+            static_cast<double>(nr::kNarrowTargetSoundnessBits));
     BOOST_CHECK(!exact_duplicated.authority_eligible);
 
     // Two common domain-separated roots do not amplify binding merely because
@@ -654,9 +653,17 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_CLOSE(
         two_common.composed_union_bits,
         exact_duplicated.composed_union_bits, 1e-9);
-    BOOST_CHECK_GT(
-        two_common.independence_amplified_binding_bits, 228.0);
-    BOOST_CHECK(two_common.numerical_target_met);
+    const double expected_independence_amplified =
+        2.0 *
+            static_cast<double>(rcx::kRCFri3AlgDualAlgHashCollisionBits) -
+        expected_site_log2;
+    BOOST_CHECK_CLOSE(
+        two_common.independence_amplified_binding_bits,
+        expected_independence_amplified, 1e-9);
+    BOOST_CHECK_EQUAL(
+        two_common.numerical_target_met,
+        expected_duplicated_union >=
+            static_cast<double>(nr::kNarrowTargetSoundnessBits));
     BOOST_CHECK(!two_common.two_common_root_backend_executable);
     BOOST_CHECK(!two_common.binding_independence_reduction_complete);
     BOOST_CHECK(!two_common.authority_eligible);

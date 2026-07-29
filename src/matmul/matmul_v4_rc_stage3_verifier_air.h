@@ -654,7 +654,7 @@ struct VerifierFiatShamirAirChipGapV1 {
      * ActiveConfig-specific FS schedule blocker remains; SHA/P2 path gaps
      * still appear in open_predicates. Examples: "canary_only",
      * "queries_ne_active_q192", "unbounded_ood_rejection_loop",
-     * "p2_squeeze_sha_execution_plan_inapplicable".
+     * "p2_native_poseidon2_fs_air_open" (Poseidon2/V10; SHA plan N/A).
      */
     std::string active_config_fs_blocker;
     /** Conjunction; must stay false until every bumped field above is true. */
