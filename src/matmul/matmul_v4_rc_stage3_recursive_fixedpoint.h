@@ -520,6 +520,12 @@ struct FoldBusComposition {
     bool fold_equations{false};
     bool fold_chain_and_final_equations{false};
     bool initial_deep_identity{false};
+    /** One verifier-owned canonical ProgramTable commitment per packed child.
+     * A null slot means that child's per-point AIR relation is not attached. */
+    std::vector<uint256>
+        child_per_point_program_commitments;
+    uint32_t per_point_children_joined{0};
+    uint32_t per_point_children_expected{0};
     bool deep_per_point_transition_join{false};
     bool valid{false};
     std::string note;
@@ -590,6 +596,7 @@ struct BytecodeBusLayout {
 };
 
 struct BytecodeInterpreterAttachment {
+    uint32_t child_index{0};
     constraint_bytecode::Program program;
     constraint_bytecode::ProgramTable program_table;
     uint256 program_commitment{};
@@ -618,6 +625,25 @@ struct BytecodeInterpreterAttachment {
      * equality with the legacy per-column SHA semantic root. */
     bool normalized_v1_role_terminal_binding{false};
     uint256 normalized_v1_semantic_root{};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Result of recovering and attaching the exact canonical constraint program
+ * carried by every verifier-owned child constraint system.
+ *
+ * Opaque callbacks remain supported by the legacy research builder, but they
+ * never set `every_child_joined`.  Mixed, partial, duplicate or inconsistent
+ * provenance fails closed instead of silently falling back to the open path.
+ */
+struct CanonicalChildAcceptanceJoinV1 {
+    uint32_t children_expected{0};
+    uint32_t children_with_canonical_provenance{0};
+    uint32_t children_joined{0};
+    std::vector<uint256> program_commitments;
+    bool provenance_present{false};
+    bool every_child_joined{false};
     bool valid{false};
     std::string note;
 };
@@ -3894,6 +3920,29 @@ AttachConstraintBytecodeInterpreter(
     const constraint_bytecode::ProgramTable& table);
 
 /**
+ * Child-indexed canonical attachment used by a vertically packed parent.
+ * `challenges` is the exact verifier-owned vector reconstructed with the
+ * ProgramTable from the expected child constraint system.  Challenge loads
+ * are pinned as preprocessed constants in the same parent trace.
+ */
+[[nodiscard]] BytecodeInterpreterAttachment
+AttachConstraintBytecodeInterpreterForChildV1(
+    FoldBusComposition& composition,
+    uint32_t child_index,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<Fp3>& challenges = {});
+
+/**
+ * Recover each exact canonical table/challenge vector from the expected child
+ * AIR provenance and attach all per-point C(y)=q(y)·Z_H(y) relations.
+ */
+[[nodiscard]] CanonicalChildAcceptanceJoinV1
+AttachCanonicalChildAcceptanceV1(
+    FoldBusComposition& composition,
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        expected_child_constraint_systems);
+
+/**
  * Hierarchical L1 shard attach. `shard_global_ordinals[i]` is the full-table
  * constraint ordinal of `table.programs[i]` (used for rho^ordinal weights).
  * The authenticated full-child AIR quotient opening is NOT required to equal
@@ -3924,6 +3973,17 @@ AttachConstraintBytecodeInterpreterShard(
     const uint256& child_fs_seed);
 
 /**
+ * Complete canonical child-acceptance variant.  It requires every constraint
+ * to carry one exact canonical ProgramTable provenance record and attaches
+ * the executable per-point transition/quotient join before returning.
+ */
+[[nodiscard]] FoldBusComposition
+BuildCanonicalFoldBusCompositionV1(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const AlgAirProof& child,
+    const uint256& child_fs_seed);
+
+/**
  * ARITY-N narrow node: ONE V_CS, ONE witness and therefore ONE root proof over
  * `children.size()` independent child proofs, each with its own constraint
  * system and its own Fiat-Shamir seed.
@@ -3942,6 +4002,12 @@ AttachConstraintBytecodeInterpreterShard(
  * does NOT by itself imply the children's native verifiers accept.
  */
 [[nodiscard]] FoldBusComposition BuildFoldBusCompositionMulti(
+    const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds);
+
+[[nodiscard]] FoldBusComposition
+BuildCanonicalFoldBusCompositionMultiV1(
     const std::vector<aq::AirConstraintSystem<Fp3>>& child_css,
     const std::vector<AlgAirProof>& children,
     const std::vector<uint256>& child_fs_seeds);

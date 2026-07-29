@@ -17034,7 +17034,9 @@ namespace {
 
 FoldBusComposition BuildAcceptedFoldBusCompositionMulti(
     HashOpeningWitness hash,
-    const std::vector<AlgAirProof>& proofs)
+    const std::vector<AlgAirProof>& proofs,
+    const std::vector<aq::AirConstraintSystem<Fp3>>*
+        expected_child_constraint_systems)
 {
     FoldBusComposition out;
     out.hash = std::move(hash);
@@ -17076,6 +17078,9 @@ FoldBusComposition BuildAcceptedFoldBusCompositionMulti(
         out.hash.program.children;
     const uint32_t arity =
         static_cast<uint32_t>(pis.size());
+    out.per_point_children_expected = arity;
+    out.child_per_point_program_commitments.assign(
+        arity, uint256{});
 
     // GLOBAL, DISJOINT bus address space. Child c's fold tuples occupy
     // [fold_base[c], fold_base[c+1]) and its chain tuples
@@ -18150,6 +18155,7 @@ FoldBusComposition BuildAcceptedFoldBusCompositionMulti(
         out.fold_final_rows == expected_final_rows;
     out.initial_deep_identity =
         initial_deep_rows == expected_deep_rows;
+    out.per_point_children_joined = 0;
     out.deep_per_point_transition_join = false;
     out.valid =
         out.fold_pairs > 0 &&
@@ -18160,13 +18166,31 @@ FoldBusComposition BuildAcceptedFoldBusCompositionMulti(
         out.fold_equations &&
         out.fold_chain_and_final_equations &&
         out.initial_deep_identity;
-    out.note =
-        out.valid
-            ? "stage3:recursive_fixedpoint:fold_hash_"
-              "scalar_dual_logup_chain_final_ok_"
-              "initial_deep_ok_perpoint_open"
-            : "stage3:recursive_fixedpoint:fold_bus_"
-              "violation";
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:fold_hash_"
+          "scalar_dual_logup_chain_final_ok_"
+          "initial_deep_ok_perpoint_open"
+        : "stage3:recursive_fixedpoint:fold_bus_"
+          "violation";
+    if (out.valid &&
+        expected_child_constraint_systems != nullptr) {
+        const CanonicalChildAcceptanceJoinV1 joined =
+            AttachCanonicalChildAcceptanceV1(
+                out,
+                *expected_child_constraint_systems);
+        if (joined.provenance_present &&
+            !joined.valid) {
+            out.valid = false;
+            out.note = joined.note;
+            return out;
+        }
+        if (joined.every_child_joined) {
+            out.note =
+                "stage3:recursive_fixedpoint:fold_hash_"
+                "scalar_dual_logup_chain_final_ok_"
+                "initial_deep_ok_perpoint_closed";
+        }
+    }
     return out;
 }
 
@@ -18180,7 +18204,23 @@ FoldBusComposition BuildFoldBusComposition(
     return BuildAcceptedFoldBusCompositionMulti(
         BuildHashOpeningWitness(
             child_cs, child, child_fs_seed),
-        std::vector<AlgAirProof>{child});
+        std::vector<AlgAirProof>{child},
+        nullptr);
+}
+
+FoldBusComposition
+BuildCanonicalFoldBusCompositionV1(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const AlgAirProof& child,
+    const uint256& child_fs_seed)
+{
+    const std::vector<aq::AirConstraintSystem<Fp3>>
+        child_css{child_cs};
+    return BuildAcceptedFoldBusCompositionMulti(
+        BuildHashOpeningWitness(
+            child_cs, child, child_fs_seed),
+        std::vector<AlgAirProof>{child},
+        &child_css);
 }
 
 FoldBusComposition BuildFoldBusCompositionMulti(
@@ -18191,7 +18231,20 @@ FoldBusComposition BuildFoldBusCompositionMulti(
     return BuildAcceptedFoldBusCompositionMulti(
         BuildHashOpeningWitnessMulti(
             child_css, children, child_fs_seeds),
-        children);
+        children, nullptr);
+}
+
+FoldBusComposition
+BuildCanonicalFoldBusCompositionMultiV1(
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        child_css,
+    const std::vector<AlgAirProof>& children,
+    const std::vector<uint256>& child_fs_seeds)
+{
+    return BuildAcceptedFoldBusCompositionMulti(
+        BuildHashOpeningWitnessMulti(
+            child_css, children, child_fs_seeds),
+        children, &child_css);
 }
 
 FoldBusComposition BuildDualV5FoldBusComposition(
@@ -18210,7 +18263,8 @@ FoldBusComposition BuildDualV5FoldBusComposition(
     return BuildAcceptedFoldBusCompositionMulti(
         BuildDualV5HashOpeningWitness(
             child_cs, child, child_fs_seed, lane),
-        std::vector<AlgAirProof>{view});
+        std::vector<AlgAirProof>{view},
+        nullptr);
 }
 
 FoldBusComposition BuildDualV5FoldBusCompositionAtBase(
@@ -18231,7 +18285,8 @@ FoldBusComposition BuildDualV5FoldBusCompositionAtBase(
         BuildDualV5HashOpeningWitnessAtBase(
             child_cs, child, child_fs_seed,
             lane, column_base),
-        std::vector<AlgAirProof>{view});
+        std::vector<AlgAirProof>{view},
+        nullptr);
 }
 
 uint64_t CountProgramTableInstructions(
@@ -19408,7 +19463,7 @@ ExecuteNarrowMultiChildL2FriConsumeV1(
     // into one narrow V_CS (zero column expansion). Distinct from host Σ
     // local_q / AIR-mirror of openings.
     const FoldBusComposition node =
-        BuildFoldBusCompositionMulti(
+        BuildCanonicalFoldBusCompositionMultiV1(
             child_css, children, child_fs_seeds);
     out.fold_bus_built = node.valid;
     if (!node.valid) {
@@ -22053,9 +22108,12 @@ BytecodeInterpreterAttachment
 AttachConstraintBytecodeInterpreterImpl(
     FoldBusComposition& composition,
     const constraint_bytecode::ProgramTable& table,
-    const std::vector<uint32_t>* shard_global_ordinals)
+    const std::vector<uint32_t>* shard_global_ordinals,
+    uint32_t child_index,
+    const std::vector<Fp3>* expected_challenges)
 {
     BytecodeInterpreterAttachment out;
+    out.child_index = child_index;
     out.program_table = table;
     if (!table.programs.empty()) {
         out.program = table.programs.front();
@@ -22072,13 +22130,27 @@ AttachConstraintBytecodeInterpreterImpl(
             : why;
         return out;
     }
-    // Challenge loads require verifier-owned post-commitment value columns.
-    // This attachment currently owns only current/next proof rows. Reject the
-    // newer opcode explicitly instead of silently treating it as Constant.
-    if (table.challenge_width != 0) {
+    if (child_index >=
+            composition.hash.program.children.size() ||
+        composition
+                .child_per_point_program_commitments
+                .size() !=
+            composition.hash.program.children.size()) {
         out.note =
             "stage3:recursive_fixedpoint:"
-            "bytecode_challenge_columns_not_attached";
+            "bytecode_child_index";
+        return out;
+    }
+    const std::vector<Fp3> no_challenges;
+    const std::vector<Fp3>& challenges =
+        expected_challenges != nullptr
+        ? *expected_challenges
+        : no_challenges;
+    if (challenges.size() !=
+            table.challenge_width) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_challenge_vector";
         return out;
     }
     const bool shard_mode =
@@ -22092,7 +22164,8 @@ AttachConstraintBytecodeInterpreterImpl(
         return out;
     }
     const auto& pi =
-        composition.hash.program.public_inputs;
+        composition.hash.program.children[
+            child_index];
     if (table.current_width != pi.child_w ||
         table.next_width != pi.child_w ||
         table.programs.size() !=
@@ -22120,6 +22193,15 @@ AttachConstraintBytecodeInterpreterImpl(
         out.note =
             "stage3:recursive_fixedpoint:"
             "bytecode_program_commitment";
+        return out;
+    }
+    if (!composition
+             .child_per_point_program_commitments[
+                 child_index]
+             .IsNull()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "bytecode_duplicate_child_attachment";
         return out;
     }
     out.canonical_program = true;
@@ -22318,6 +22400,9 @@ AttachConstraintBytecodeInterpreterImpl(
             continue;
         }
         reserved[row] = true;
+        if (meta.child != child_index) {
+            continue;
+        }
         const bool is_next = meta.next_row_sponge;
         const uint32_t width =
             is_next
@@ -22602,10 +22687,13 @@ AttachConstraintBytecodeInterpreterImpl(
                     break;
                 }
                 case constraint_bytecode::Opcode::Challenge:
-                    out.note =
-                        "stage3:recursive_fixedpoint:"
-                        "bytecode_challenge_columns_not_attached";
-                    return out;
+                    value =
+                        challenges[instruction.lhs];
+                    composition.columns[
+                        out.layout.constant][row] =
+                        value;
+                    output_port = 0;
+                    break;
                 case constraint_bytecode::Opcode::Constant:
                     value = instruction.constant;
                     composition.columns[
@@ -22806,6 +22894,15 @@ AttachConstraintBytecodeInterpreterImpl(
     precommit <<
         "BTX_RC_STAGE3_BYTECODE_MEMORY_PRECOMMIT_V1";
     precommit << out.program_commitment;
+    precommit << child_index;
+    precommit <<
+        static_cast<uint32_t>(
+            challenges.size());
+    for (const Fp3& value : challenges) {
+        precommit << gf::Canonical(value.c0);
+        precommit << gf::Canonical(value.c1);
+        precommit << gf::Canonical(value.c2);
+    }
     precommit << composition.prechallenge_commitment;
     precommit << composition.combined.n_rows;
     precommit << queries;
@@ -23312,9 +23409,30 @@ AttachConstraintBytecodeInterpreterImpl(
     composition.violations = out.violations;
     composition.valid =
         composition.valid && out.valid;
+    if (composition.valid &&
+        out.quotient_opening_equality) {
+        composition
+            .child_per_point_program_commitments[
+                child_index] =
+            out.program_commitment;
+        composition.per_point_children_joined =
+            static_cast<uint32_t>(
+                std::count_if(
+                    composition
+                        .child_per_point_program_commitments
+                        .begin(),
+                    composition
+                        .child_per_point_program_commitments
+                        .end(),
+                    [](const uint256& commitment) {
+                        return !commitment.IsNull();
+                    }));
+    }
     composition.deep_per_point_transition_join =
         composition.valid &&
-        out.quotient_opening_equality;
+        composition.per_point_children_expected != 0 &&
+        composition.per_point_children_joined ==
+            composition.per_point_children_expected;
     if (!composition.valid) {
         composition.note = out.note;
     }
@@ -23330,7 +23448,287 @@ AttachConstraintBytecodeInterpreter(
     const constraint_bytecode::ProgramTable& table)
 {
     return AttachConstraintBytecodeInterpreterImpl(
-        composition, table, nullptr);
+        composition, table, nullptr, 0, nullptr);
+}
+
+BytecodeInterpreterAttachment
+AttachConstraintBytecodeInterpreterForChildV1(
+    FoldBusComposition& composition,
+    uint32_t child_index,
+    const constraint_bytecode::ProgramTable& table,
+    const std::vector<Fp3>& challenges)
+{
+    return AttachConstraintBytecodeInterpreterImpl(
+        composition, table, nullptr,
+        child_index, &challenges);
+}
+
+CanonicalChildAcceptanceJoinV1
+AttachCanonicalChildAcceptanceV1(
+    FoldBusComposition& composition,
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        expected_child_constraint_systems)
+{
+    CanonicalChildAcceptanceJoinV1 out;
+    struct FailClosedGuard {
+        FoldBusComposition& composition;
+        CanonicalChildAcceptanceJoinV1& report;
+        ~FailClosedGuard()
+        {
+            if (report.provenance_present &&
+                !report.valid) {
+                composition.valid = false;
+                if (!report.note.empty()) {
+                    composition.note =
+                        report.note;
+                }
+            }
+        }
+    } fail_closed{composition, out};
+    out.children_expected =
+        static_cast<uint32_t>(
+            expected_child_constraint_systems.size());
+    if (!composition.valid ||
+        out.children_expected == 0 ||
+        composition.hash.program.children.size() !=
+            out.children_expected ||
+        composition.per_point_children_expected !=
+            out.children_expected ||
+        composition
+                .child_per_point_program_commitments
+                .size() !=
+            out.children_expected) {
+        out.provenance_present = true;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "canonical_child_acceptance_shape";
+        return out;
+    }
+
+    struct Recovered {
+        bool opaque{false};
+        constraint_bytecode::ProgramTable table;
+        std::vector<Fp3> challenges;
+        uint256 commitment{};
+    };
+    std::vector<Recovered> recovered(
+        out.children_expected);
+    bool any_canonical = false;
+    bool any_opaque = false;
+    for (uint32_t child = 0;
+         child < out.children_expected;
+         ++child) {
+        const auto& cs =
+            expected_child_constraint_systems[
+                child];
+        const auto& pi =
+            composition.hash.program.children[
+                child];
+        if (cs.constraints.empty() ||
+            cs.n_rows < 2 ||
+            cs.n_columns == 0 ||
+            cs.n_rows != pi.child_n_rows ||
+            cs.n_columns != pi.child_w ||
+            cs.QuotientLen() !=
+                pi.child_quotient_len) {
+            out.provenance_present = true;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "canonical_child_acceptance_domain";
+            return out;
+        }
+
+        uint32_t complete = 0;
+        uint32_t absent = 0;
+        for (const auto& constraint :
+             cs.constraints) {
+            const bool has_root =
+                !constraint
+                     .canonical_program_table_root
+                     .IsNull();
+            const bool has_ordinal =
+                constraint
+                    .canonical_program_ordinal !=
+                UINT32_MAX;
+            const bool has_wire =
+                constraint
+                        .canonical_program_table_wire !=
+                    nullptr &&
+                !constraint
+                     .canonical_program_table_wire
+                     ->empty();
+            const bool has_challenges =
+                constraint
+                        .canonical_program_challenges !=
+                    nullptr;
+            const uint32_t fields =
+                static_cast<uint32_t>(has_root) +
+                static_cast<uint32_t>(has_ordinal) +
+                static_cast<uint32_t>(has_wire) +
+                static_cast<uint32_t>(
+                    has_challenges);
+            if (fields == 0) {
+                ++absent;
+            } else if (fields == 4) {
+                ++complete;
+            } else {
+                out.provenance_present = true;
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "canonical_child_acceptance_partial";
+                return out;
+            }
+        }
+        if (absent == cs.constraints.size()) {
+            recovered[child].opaque = true;
+            any_opaque = true;
+            continue;
+        }
+        if (complete != cs.constraints.size()) {
+            out.provenance_present = true;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "canonical_child_acceptance_mixed";
+            return out;
+        }
+        any_canonical = true;
+        ++out.children_with_canonical_provenance;
+
+        const auto& first = cs.constraints.front();
+        const auto& first_wire =
+            *first.canonical_program_table_wire;
+        const auto& first_challenges =
+            *first.canonical_program_challenges;
+        auto& item = recovered[child];
+        std::string why;
+        if (!constraint_bytecode::
+                DeserializeProgramTable(
+                    first_wire, item.table,
+                    &why) ||
+            !constraint_bytecode::
+                ValidateProgramTable(
+                    item.table, &why)) {
+            out.provenance_present = true;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "canonical_child_acceptance_decode:" +
+                why;
+            return out;
+        }
+        item.commitment =
+            constraint_bytecode::
+                CommitProgramTable(item.table);
+        item.challenges = first_challenges;
+        if (item.commitment.IsNull() ||
+            item.commitment !=
+                first.canonical_program_table_root ||
+            item.table.current_width !=
+                cs.n_columns ||
+            item.table.next_width !=
+                cs.n_columns ||
+            item.table.programs.size() !=
+                cs.constraints.size() ||
+            item.table.challenge_width !=
+                item.challenges.size()) {
+            out.provenance_present = true;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "canonical_child_acceptance_table_shape";
+            return out;
+        }
+        std::vector<bool> ordinal_seen(
+            item.table.programs.size(), false);
+        for (uint32_t ordinal = 0;
+             ordinal < cs.constraints.size();
+             ++ordinal) {
+            const auto& constraint =
+                cs.constraints[ordinal];
+            if (constraint
+                    .canonical_program_table_root !=
+                    item.commitment ||
+                *constraint
+                     .canonical_program_table_wire !=
+                    first_wire ||
+                !SameFp3Vector(
+                    *constraint
+                         .canonical_program_challenges,
+                    item.challenges) ||
+                constraint
+                    .canonical_program_ordinal !=
+                    ordinal ||
+                ordinal_seen[ordinal] ||
+                item.table.programs[ordinal].kind !=
+                    constraint.kind ||
+                item.table.programs[ordinal]
+                        .declared_degree !=
+                    constraint.alg_degree) {
+                out.provenance_present = true;
+                out.note =
+                    "stage3:recursive_fixedpoint:"
+                    "canonical_child_acceptance_ordinal";
+                return out;
+            }
+            ordinal_seen[ordinal] = true;
+        }
+    }
+
+    out.provenance_present = any_canonical;
+    if (!any_canonical) {
+        out.valid = true;
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "canonical_child_acceptance_opaque_open";
+        return out;
+    }
+    if (any_opaque) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "canonical_child_acceptance_mixed_opaque";
+        composition.valid = false;
+        composition.note = out.note;
+        return out;
+    }
+
+    out.program_commitments.reserve(
+        out.children_expected);
+    for (uint32_t child = 0;
+         child < out.children_expected;
+         ++child) {
+        const auto attached =
+            AttachConstraintBytecodeInterpreterForChildV1(
+                composition, child,
+                recovered[child].table,
+                recovered[child].challenges);
+        if (!attached.valid) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "canonical_child_acceptance_attach[" +
+                std::to_string(child) + "]:" +
+                attached.note;
+            composition.valid = false;
+            composition.note = out.note;
+            return out;
+        }
+        out.program_commitments.push_back(
+            attached.program_commitment);
+        ++out.children_joined;
+    }
+    out.every_child_joined =
+        out.children_joined ==
+            out.children_expected &&
+        composition
+            .deep_per_point_transition_join;
+    out.valid = out.every_child_joined;
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "canonical_child_acceptance_joined"
+        : "stage3:recursive_fixedpoint:"
+          "canonical_child_acceptance_incomplete";
+    if (!out.valid) {
+        composition.valid = false;
+        composition.note = out.note;
+    }
+    return out;
 }
 
 BytecodeInterpreterAttachment
@@ -23340,7 +23738,8 @@ AttachConstraintBytecodeInterpreterShard(
     const std::vector<uint32_t>& shard_global_ordinals)
 {
     return AttachConstraintBytecodeInterpreterImpl(
-        composition, table, &shard_global_ordinals);
+        composition, table, &shard_global_ordinals,
+        0, nullptr);
 }
 
 BytecodeInterpreterAttachment
