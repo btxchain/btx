@@ -9,6 +9,7 @@
 #include <matmul/matmul_v4_rc_stage3_air_parent_composer.h>
 #include <matmul/matmul_v4_rc_stage3_coupled_winner_capture.h>
 #include <matmul/matmul_v4_rc_stage3_episode_semantic_source_alg.h>
+#include <matmul/matmul_v4_rc_stage3_normalized_parent_external_producer_equality.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
@@ -166,6 +167,15 @@ struct ProductionRelationParentCandidateV1 {
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};
     bool production_authority{false};
+    /**
+     * Parent-owned A/B/Y role-export equality certificate produced when the
+     * winner streaming receipt is present and Attach succeeds.  Empty/default
+     * when the receipt is missing or attachment cannot close.
+     */
+    normalized_parent_external_producer_equality::
+        ParentRoleExportEqualityCertificateV1
+            role_export_equality_certificate;
+    bool role_export_equality_certificate_valid{false};
     std::vector<std::string> residuals;
     std::string note;
 };

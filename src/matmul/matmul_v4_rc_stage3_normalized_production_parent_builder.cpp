@@ -2226,10 +2226,47 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
             input.episode_capture_header_hash);
     namespace parent_eq =
         normalized_parent_external_producer_equality;
+    const parent_eq::ParentRoleExportEqualityCertificateV1*
+        equality_certificate = nullptr;
+    if (streaming_receipt) {
+        std::vector<parent_eq::ParentExportPinV1>
+            export_pins;
+        std::string attach_why;
+        if (parent_eq::
+                BuildHostedExportPinsFromStreamingReceiptV1(
+                    *streaming_receipt, export_pins,
+                    &attach_why) &&
+            parent_eq::AttachParentRoleExportEqualityV1(
+                out.cs, out.columns, *streaming_receipt,
+                export_pins,
+                out.role_export_equality_certificate,
+                &attach_why)) {
+            out.role_export_equality_certificate_valid =
+                true;
+            equality_certificate =
+                &out.role_export_equality_certificate;
+            // Re-measure witness after appending role-export
+            // root pins / aliases.
+            out.witness_violations =
+                air_recurse::CountWitnessViolationsOnH(
+                    out.cs, out.columns);
+            out.local_parent_valid =
+                out.local_parent_valid &&
+                out.witness_violations == 0;
+        } else {
+            out.role_export_equality_certificate = {};
+            out.role_export_equality_certificate_valid =
+                false;
+            out.residuals.push_back(
+                "parent_role_export_equality_attach_open:" +
+                attach_why);
+        }
+    }
     std::string equality_why;
     const auto equality =
         parent_eq::AssessStreamingRoleExportEqualityV1(
-            streaming_receipt.get(), &equality_why);
+            streaming_receipt.get(), equality_certificate,
+            &equality_why);
     for (const auto& residual : equality.residuals) {
         out.residuals.push_back(residual);
     }
