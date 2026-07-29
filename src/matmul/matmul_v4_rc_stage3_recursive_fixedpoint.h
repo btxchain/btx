@@ -3850,8 +3850,57 @@ AttachConstraintBytecodeInterpreterShard(
 
 inline constexpr bool kHashOpeningAirExecutable = true;
 inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
+/**
+ * Complete recursive fixed-point parent: an accepted FoldBus (+ attached
+ * chips) implies the children's native verifiers accept.
+ *
+ * FAIL-CLOSED (false). DeepCtlParentAir capability closes ProofFieldBus,
+ * Deep64 CTL terminal, CTL-child-in-parent-air, semantic-root lanes, and
+ * ledger-g4 FS replay — but three residual families remain outside:
+ *
+ *   1. ChildProofPayloadBus
+ *      — `va::kVerifierProofRowsBoundInAir` still false
+ *        (`matmul_v4_rc_stage3_verifier_air.h`).
+ *   2. SplitRapMultiRowVerifier
+ *      — `split_rap_multirow_parent_adapter` hard-false in
+ *        `AssessNormalizedRecursiveChildCapabilityV1`;
+ *        `va::kMultiRowV2SplitRapVerifierAirLocalExecutable` still false.
+ *   3. EndpointTerminalEquality
+ *      — `BytecodeInterpreterAttachment::role_semantic_root_terminal_equality`
+ *        stays false after `AttachNormalizedCoupledBankTerminalBinding`
+ *        (normalized V1 pin only; legacy SHA↔AlgHash /
+ *        endpoint-28 proof-owned terminal equality open).
+ *
+ * `AssessCompleteRecursiveFixedPointResidualInventoryV1` remeasures these
+ * living predicates. Do not flip without closing all three with AIR
+ * evidence + forgery tests. Consensus authority stays separate/false.
+ */
 inline constexpr bool kCompleteRecursiveFixedPointExecutable = false;
 inline constexpr bool kRecursiveFixedPointConsensusAuthority = false;
+
+/**
+ * Measured residual inventory for CompleteFP. Never invents chip
+ * availability: each `*_open` bit is derived from a living constexpr or
+ * from the fixed DeepCtlParentAir fail_pred posture.
+ */
+struct CompleteRecursiveFixedPointResidualInventoryV1 {
+    bool proof_field_bus_attachable{false};
+    bool deep64_ctl_terminal_attachable{false};
+    bool ctl_child_verifier_in_parent_air_attachable{false};
+    bool ledger_g4_child_fs_replay_closed{false};
+    bool child_proof_payload_bus_open{true};
+    bool split_rap_multirow_parent_adapter_open{true};
+    bool endpoint_terminal_equality_open{true};
+    bool verifier_fiat_shamir_air_chip_open{true};
+    bool complete_fp_open{true};
+    bool recursive_children_gate_blocked{true};
+    uint16_t open_residual_families{0};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] CompleteRecursiveFixedPointResidualInventoryV1
+AssessCompleteRecursiveFixedPointResidualInventoryV1();
 
 static_assert(kHashOpeningAirExecutable);
 static_assert(kFoldHashScalarMemoryBusExecutable);

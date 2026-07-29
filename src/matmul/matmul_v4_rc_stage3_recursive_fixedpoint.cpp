@@ -22898,4 +22898,63 @@ AttachConstraintBytecodeInterpreter(
         composition, table);
 }
 
+CompleteRecursiveFixedPointResidualInventoryV1
+AssessCompleteRecursiveFixedPointResidualInventoryV1()
+{
+    namespace va = stage3_verifier_air;
+    CompleteRecursiveFixedPointResidualInventoryV1 out;
+    // Attach APIs measured closed on the DeepCtlParentAir capability path
+    // (ProofFieldBus + Deep64 CTL terminal + CTL child verifier in parent).
+    out.proof_field_bus_attachable = true;
+    out.deep64_ctl_terminal_attachable = true;
+    out.ctl_child_verifier_in_parent_air_attachable = true;
+    out.ledger_g4_child_fs_replay_closed =
+        recursive_parent_air::AssessChildFsReplayClosureV1()
+            .closed;
+    // Three residual families that keep CompleteFP false.
+    out.child_proof_payload_bus_open =
+        !va::kVerifierProofRowsBoundInAir;
+    out.split_rap_multirow_parent_adapter_open =
+        !va::kMultiRowV2SplitRapVerifierAirLocalExecutable;
+    // No living constexpr for endpoint equality: AttachNormalizedCoupledBank
+    // TerminalBinding pins V1 limbs but leaves
+    // role_semantic_root_terminal_equality false by construction.
+    out.endpoint_terminal_equality_open = true;
+    out.verifier_fiat_shamir_air_chip_open =
+        !va::kVerifierFiatShamirAirExecutable;
+    out.complete_fp_open = !kCompleteRecursiveFixedPointExecutable;
+    // Relation-closure RecursiveChildrenExecutable stays false while
+    // CompleteFP is open (CellAudit would invent recursive consumption).
+    out.recursive_children_gate_blocked = out.complete_fp_open;
+    out.open_residual_families = 0;
+    out.open_residual_families +=
+        out.child_proof_payload_bus_open ? 1 : 0;
+    out.open_residual_families +=
+        out.split_rap_multirow_parent_adapter_open ? 1 : 0;
+    out.open_residual_families +=
+        out.endpoint_terminal_equality_open ? 1 : 0;
+    out.valid =
+        out.proof_field_bus_attachable &&
+        out.deep64_ctl_terminal_attachable &&
+        out.ctl_child_verifier_in_parent_air_attachable &&
+        out.ledger_g4_child_fs_replay_closed &&
+        out.child_proof_payload_bus_open &&
+        out.split_rap_multirow_parent_adapter_open &&
+        out.endpoint_terminal_equality_open &&
+        out.verifier_fiat_shamir_air_chip_open &&
+        out.complete_fp_open &&
+        out.recursive_children_gate_blocked &&
+        out.open_residual_families == 3 &&
+        !kCompleteRecursiveFixedPointExecutable &&
+        !kRecursiveFixedPointConsensusAuthority;
+    out.note = out.valid
+        ? "stage3:recursive_fixedpoint:"
+          "complete_fp_residuals_open;"
+          "payload_bus+split_rap_multirow+endpoint_terminal;"
+          "recursive_children_blocked;authority=false"
+        : "stage3:recursive_fixedpoint:"
+          "complete_fp_residual_inventory_incoherent";
+    return out;
+}
+
 } // namespace matmul::v4::rc::recursive_fixedpoint

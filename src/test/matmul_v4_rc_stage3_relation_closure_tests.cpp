@@ -25,6 +25,7 @@
 #include <matmul/matmul_v4_rc_stage3_hash_air.h>
 #include <matmul/matmul_v4_rc_stage3_production_family_programs.h>
 #include <matmul/matmul_v4_rc_stage3_relation_closure.h>
+#include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
@@ -277,6 +278,17 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK(kRCStage3RelationClosureCtlValueBindingExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
+    // RecursiveChildren stays false while CompleteFP residuals remain open
+    // (payload bus / Split-RAP multirow adapter / endpoint terminal equality).
+    {
+        namespace fp = recursive_fixedpoint;
+        const auto residuals =
+            fp::AssessCompleteRecursiveFixedPointResidualInventoryV1();
+        BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
+        BOOST_CHECK(residuals.complete_fp_open);
+        BOOST_CHECK(residuals.recursive_children_gate_blocked);
+        BOOST_CHECK_EQUAL(residuals.open_residual_families, 3U);
+    }
 
     const auto audit = CurrentRCStage3RelationClosureRoleAudit();
     BOOST_REQUIRE_EQUAL(audit.size(), 14U);

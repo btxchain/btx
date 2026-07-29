@@ -1684,6 +1684,24 @@ BOOST_AUTO_TEST_CASE(
     static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
     static_assert(!fp::kRecursiveFixedPointConsensusAuthority);
 
+    {
+        const auto residuals =
+            fp::AssessCompleteRecursiveFixedPointResidualInventoryV1();
+        BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
+        BOOST_CHECK(residuals.proof_field_bus_attachable);
+        BOOST_CHECK(residuals.deep64_ctl_terminal_attachable);
+        BOOST_CHECK(
+            residuals.ctl_child_verifier_in_parent_air_attachable);
+        BOOST_CHECK(residuals.ledger_g4_child_fs_replay_closed);
+        BOOST_CHECK(residuals.child_proof_payload_bus_open);
+        BOOST_CHECK(residuals.split_rap_multirow_parent_adapter_open);
+        BOOST_CHECK(residuals.endpoint_terminal_equality_open);
+        BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
+        BOOST_CHECK(residuals.complete_fp_open);
+        BOOST_CHECK(residuals.recursive_children_gate_blocked);
+        BOOST_CHECK_EQUAL(residuals.open_residual_families, 3U);
+    }
+
     // Even if an attacker consistently changes the external semantic-root
     // pin, the audit refuses to call that an in-parent derivation because
     // the underlying proof/terminal commitment limbs have no parent source.

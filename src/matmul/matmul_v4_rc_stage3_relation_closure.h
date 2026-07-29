@@ -1613,6 +1613,24 @@ inline constexpr bool kRCStage3RelationClosureRegistryComplete = true;
 inline constexpr bool kRCStage3RelationClosureCtlValueBindingExecutable = true;
 inline constexpr bool
     kRCStage3RelationClosureSameTraceCtlAliasExecutable = true;
+/**
+ * Recursive child consumption for CellAudit / RoleAudit.
+ *
+ * FAIL-CLOSED (false). When true, CellAudit would:
+ *   - boost same_trace_ctl_alias for stream/vector/wired openings that are
+ *     already semantic_relation_complete (requires a complete fixed-point
+ *     parent hosting those children — see comment in CellAudit), and
+ *   - set recursive_child_consumed =
+ *       semantic_relation_complete && same_trace_ctl_alias.
+ * RoleAudit.role_complete then requires every role endpoint consumed.
+ *
+ * Blocked on recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
+ * and its three open residual families (ChildProofPayloadBus /
+ * SplitRapMultiRowVerifier / EndpointTerminalEquality) measured by
+ * AssessCompleteRecursiveFixedPointResidualInventoryV1. Do not flip while
+ * CompleteFP is false — that would invent recursive consumption. Authority
+ * Ready stays separate/false.
+ */
 inline constexpr bool kRCStage3RelationClosureRecursiveChildrenExecutable =
     false;
 inline constexpr bool kRCStage3RelationClosureAuthorityReady = false;
