@@ -375,6 +375,12 @@ RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     out.child_cs = inst.cs;
     out.child_witness = inst.columns;
     out.child_output_export_base = inst.output_export_base;
+    out.child_input_active_column =
+        inst.input_active_column;
+    out.child_input_address_column =
+        inst.input_address_column;
+    out.child_input_word_column =
+        inst.input_word_base;
     out.child_semantic_compressions =
         static_cast<uint32_t>(boundaries.size());
 
@@ -548,6 +554,316 @@ RCStage3StreamEndpointClosure RCStage3StreamEndpointClose(
     out.note = out.ok ? "stream_endpoint:closed"
                       : "stream_endpoint:violations";
     return out;
+}
+
+RCStage3StreamEndpointClosure
+RCStage3StreamEndpointCloseSemanticV2(
+    RCStage3StreamFamily family,
+    const RCStage3StreamEndpointManifest& manifest,
+    const uint256& fs_seed,
+    std::string* why,
+    bool run_cs_checks,
+    const uint256& precommitted_base_row)
+{
+    RCStage3StreamEndpointClosure out =
+        RCStage3StreamEndpointClose(
+            family, manifest, fs_seed, why,
+            /*run_cs_checks=*/false,
+            precommitted_base_row);
+    const uint32_t rows = out.child_cs.n_rows;
+    if (!out.ok || rows < 2 ||
+        out.child_witness.size() !=
+            out.child_cs.n_columns ||
+        out.child_input_active_column >=
+            out.child_cs.n_columns ||
+        out.child_input_address_column >=
+            out.child_cs.n_columns ||
+        out.child_input_word_column >=
+            out.child_cs.n_columns ||
+        out.child_output_export_base + 8U >
+            out.child_cs.n_columns) {
+        out.ok = false;
+        out.note =
+            "stream_endpoint:semantic_v2:base_shape";
+        if (why != nullptr) *why = out.note;
+        return out;
+    }
+
+    out.semantic_export_version =
+        kRCStage3StreamEndpointSemanticExportVersionV2;
+    out.child_stream_word_export_base =
+        out.child_cs.n_columns;
+    out.child_stream_word_bits_base =
+        out.child_stream_word_export_base + 8U;
+    const uint32_t selector_base =
+        out.child_stream_word_bits_base + 8U * 32U;
+    out.child_root_word_export_base =
+        out.child_output_export_base;
+    out.child_root_word_bits_base =
+        selector_base + 8U;
+    out.child_cs.n_columns =
+        out.child_root_word_bits_base + 8U * 32U;
+    out.child_witness.resize(
+        out.child_cs.n_columns,
+        std::vector<Fp3>(rows, Fp3::Zero()));
+
+    const auto append_u32_decomposition =
+        [&](uint32_t word_column,
+            uint32_t bit_base,
+            uint32_t word_value,
+            const char* boolean_name,
+            const char* recompose_name) {
+            for (uint32_t bit = 0; bit < 32U; ++bit) {
+                const Fp3 value =
+                    Fp3::FromFp(gf::FromU64(
+                        (word_value >> bit) & 1U));
+                std::fill(
+                    out.child_witness[
+                        bit_base + bit].begin(),
+                    out.child_witness[
+                        bit_base + bit].end(),
+                    value);
+                out.child_cs.constraints.push_back(
+                    {
+                        boolean_name,
+                        aq::AirKind::kEverywhere,
+                        2,
+                        [column = bit_base + bit](
+                            const std::vector<Fp3>& cur,
+                            const std::vector<Fp3>&) {
+                            return gf::Mul(
+                                cur[column],
+                                gf::Sub(
+                                    cur[column],
+                                    Fp3::One()));
+                        },
+                    });
+            }
+            out.child_cs.constraints.push_back(
+                {
+                    recompose_name,
+                    aq::AirKind::kEverywhere,
+                    1,
+                    [word_column, bit_base](
+                        const std::vector<Fp3>& cur,
+                        const std::vector<Fp3>&) {
+                        Fp3 value = Fp3::Zero();
+                        uint64_t power = 1;
+                        for (uint32_t bit = 0;
+                             bit < 32U; ++bit) {
+                            value = gf::Add(
+                                value,
+                                gf::Mul(
+                                    cur[bit_base + bit],
+                                    Fp3::FromFp(
+                                        gf::FromU64(
+                                            power))));
+                            power <<= 1U;
+                        }
+                        return gf::Sub(
+                            cur[word_column], value);
+                    },
+                });
+        };
+
+    for (uint32_t word = 0; word < 8U; ++word) {
+        const uint32_t export_column =
+            out.child_stream_word_export_base + word;
+        std::fill(
+            out.child_witness[export_column].begin(),
+            out.child_witness[export_column].end(),
+            Fp3::FromFp(gf::FromU64(
+                manifest.stream_value[word])));
+        std::vector<Fp3> selector(
+            rows, Fp3::Zero());
+        uint32_t selected_rows = 0;
+        for (uint32_t row = 0; row < rows; ++row) {
+            if (gf::Eq(
+                    out.child_witness[
+                        out.child_input_active_column][row],
+                    Fp3::One()) &&
+                out.child_witness[
+                    out.child_input_address_column][row].c1 ==
+                    0 &&
+                out.child_witness[
+                    out.child_input_address_column][row].c2 ==
+                    0 &&
+                gf::Canonical(
+                    out.child_witness[
+                        out.child_input_address_column][row].c0) ==
+                    2U + word) {
+                selector[row] = Fp3::One();
+                ++selected_rows;
+            }
+        }
+        if (selected_rows != 1U) {
+            out.ok = false;
+            out.note =
+                "stream_endpoint:semantic_v2:"
+                "stream_word_schedule";
+            if (why != nullptr) *why = out.note;
+            return out;
+        }
+        out.child_witness[selector_base + word] =
+            selector;
+        out.child_cs.preprocessed.emplace_back(
+            selector_base + word,
+            std::move(selector));
+        out.child_cs.constraints.push_back(
+            {
+                "stream_endpoint:semantic_v2:"
+                "stream_word_constant",
+                aq::AirKind::kTransition,
+                1,
+                [export_column](
+                    const std::vector<Fp3>& cur,
+                    const std::vector<Fp3>& next) {
+                    return gf::Sub(
+                        next[export_column],
+                        cur[export_column]);
+                },
+            });
+        out.child_cs.constraints.push_back(
+            {
+                "stream_endpoint:semantic_v2:"
+                "stream_word_from_sha_input",
+                aq::AirKind::kEverywhere,
+                2,
+                [export_column,
+                 selector_column =
+                     selector_base + word,
+                 input_word =
+                     out.child_input_word_column](
+                    const std::vector<Fp3>& cur,
+                    const std::vector<Fp3>&) {
+                    return gf::Mul(
+                        cur[selector_column],
+                        gf::Sub(
+                            cur[export_column],
+                            cur[input_word]));
+                },
+            });
+        append_u32_decomposition(
+            export_column,
+            out.child_stream_word_bits_base +
+                word * 32U,
+            manifest.stream_value[word],
+            "stream_endpoint:semantic_v2:"
+            "stream_word_bit",
+            "stream_endpoint:semantic_v2:"
+            "stream_word_recompose");
+
+        append_u32_decomposition(
+            out.child_root_word_export_base + word,
+            out.child_root_word_bits_base +
+                word * 32U,
+            out.committed_root[word],
+            "stream_endpoint:semantic_v2:"
+            "root_word_bit",
+            "stream_endpoint:semantic_v2:"
+            "root_word_recompose");
+    }
+
+    out.child_violations =
+        run_cs_checks
+            ? ar::CountWitnessViolationsOnH(
+                  out.child_cs,
+                  out.child_witness)
+            : 0U;
+    out.ok =
+        (!run_cs_checks ||
+         out.child_violations == 0U) &&
+        out.bind_violations == 0U;
+    out.note =
+        out.ok
+            ? "stream_endpoint:semantic_v2:closed"
+            : "stream_endpoint:semantic_v2:violations";
+    if (!out.ok && why != nullptr) *why = out.note;
+    return out;
+}
+
+bool ValidateRCStage3StreamEndpointSemanticV2(
+    const RCStage3StreamEndpointClosure& closure,
+    const std::array<uint32_t, 8>& expected_stream_words,
+    std::string* why)
+{
+    const auto fail =
+        [&](const std::string& detail) {
+            if (why != nullptr) {
+                *why =
+                    "stream_endpoint:semantic_v2:" +
+                    detail;
+            }
+            return false;
+        };
+    if (!closure.ok ||
+        closure.semantic_export_version !=
+            kRCStage3StreamEndpointSemanticExportVersionV2 ||
+        closure.child_stream_word_export_base + 8U >
+            closure.child_cs.n_columns ||
+        closure.child_stream_word_bits_base +
+                8U * 32U >
+            closure.child_cs.n_columns ||
+        closure.child_root_word_export_base + 8U >
+            closure.child_cs.n_columns ||
+        closure.child_root_word_bits_base +
+                8U * 32U >
+            closure.child_cs.n_columns ||
+        closure.child_witness.size() !=
+            closure.child_cs.n_columns) {
+        return fail("shape");
+    }
+    for (const auto& column :
+         closure.child_witness) {
+        if (column.size() !=
+            closure.child_cs.n_rows) {
+            return fail("witness_rows");
+        }
+        for (const Fp3& value : column) {
+            if (value.c0 >= gf::kP ||
+                value.c1 >= gf::kP ||
+                value.c2 >= gf::kP) {
+                return fail("noncanonical_field");
+            }
+        }
+    }
+    for (uint32_t word = 0; word < 8U; ++word) {
+        const uint32_t stream_column =
+            closure.child_stream_word_export_base +
+            word;
+        const uint32_t root_column =
+            closure.child_root_word_export_base +
+            word;
+        const Fp3 expected_stream =
+            U32(expected_stream_words[word]);
+        const Fp3 expected_root =
+            U32(closure.committed_root[word]);
+        for (uint32_t row = 0;
+             row < closure.child_cs.n_rows;
+             ++row) {
+            if (!gf::Eq(
+                    closure.child_witness[
+                        stream_column][row],
+                    expected_stream)) {
+                return fail("stream_word");
+            }
+            if (!gf::Eq(
+                    closure.child_witness[
+                        root_column][row],
+                    expected_root)) {
+                return fail("root_word");
+            }
+        }
+    }
+    if (ar::CountWitnessViolationsOnH(
+            closure.child_cs,
+            closure.child_witness) != 0 ||
+        ar::CountWitnessViolationsOnH(
+            closure.bind_cs,
+            closure.bind_witness) != 0) {
+        return fail("constraints");
+    }
+    return true;
 }
 
 aq::AirConstraintSystem<gf::Fp3> BuildRCStage3StreamEndpointConstraintSystem(

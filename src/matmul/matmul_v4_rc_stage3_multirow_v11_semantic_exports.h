@@ -80,6 +80,8 @@ struct ProofOwnedExportV1 {
     CanonicalExportRouteV1 route;
     alg_hash::Digest committed_root{};
     std::array<uint32_t, kRootWordsV1> root_words{};
+    /** 0 = frozen packed-u64 root; 2 = exact eight-u32 StreamChild root. */
+    uint16_t semantic_root_abi_version{0};
     uint32_t export_tag_base{kNoColumnV1};
     uint32_t export_word_base{kNoColumnV1};
     uint32_t export_bits_base{kNoColumnV1};
@@ -94,6 +96,7 @@ struct ProofOwnedExportV1 {
 /** One rebuilt role AIR plus its canonical root-export columns. */
 struct RoleExportProofV1 {
     RCStage3RelationRole role{};
+    uint16_t semantic_root_abi_version{0};
     uint32_t source_columns{0};
     aq::AirConstraintSystem<gf::Fp3> cs;
     std::vector<std::vector<gf::Fp3>> columns;

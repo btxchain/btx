@@ -48,6 +48,21 @@ bool SameFp3(const gf::Fp3& a, const gf::Fp3& b)
     return gf::Eq(a, b);
 }
 
+bool AllRawCanonical(
+    const std::vector<std::vector<gf::Fp3>>& columns)
+{
+    for (const auto& column : columns) {
+        for (const auto& value : column) {
+            if (value.c0 >= gf::kP ||
+                value.c1 >= gf::kP ||
+                value.c2 >= gf::kP) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool SamePreprocessed(
     const std::vector<
         std::pair<uint32_t, std::vector<gf::Fp3>>>& a,
@@ -254,8 +269,19 @@ const StreamChildArtifactV1* FindStreamChild(
 
 bool StreamChildExecutes(
     const StreamChildArtifactV1& child,
-    const std::array<uint32_t, kRootWordsV1>& root_words)
+    const std::array<uint32_t, kRootWordsV1>& root_words,
+    uint16_t semantic_root_abi_version)
 {
+    const bool exact_v2 =
+        semantic_root_abi_version ==
+            kRCStage3ExactU32StreamRootAbiVersionV2;
+    const bool closure_v2 =
+        child.closure.semantic_export_version ==
+        kRCStage3StreamEndpointSemanticExportVersionV2;
+    const bool versions_match =
+        exact_v2 == closure_v2 &&
+        (exact_v2 ||
+         semantic_root_abi_version == 0);
     if (!child.closure.ok ||
         child.closure.child_cs.n_columns == 0 ||
         child.closure.bind_cs.n_columns == 0 ||
@@ -267,6 +293,7 @@ bool StreamChildExecutes(
             RCStage3StreamFamilyForEndpoint(child.endpoint) ||
         child.closure.child_violations != 0 ||
         child.closure.bind_violations != 0 ||
+        !versions_match ||
         ClosureWords(child.closure) != root_words) {
         return false;
     }
@@ -408,13 +435,23 @@ RoleExportProofV1 BuildRoleProof(
 {
     RoleExportProofV1 out;
     out.role = artifact.role;
+    out.semantic_root_abi_version =
+        artifact.semantic_root_abi_version;
     const auto& required =
         RequiredRCStage3RelationEndpoints(artifact.role);
+    const bool exact_v2 =
+        artifact.semantic_root_abi_version ==
+        kRCStage3ExactU32StreamRootAbiVersionV2;
     out.exact_endpoint_order =
         artifact.endpoints == required;
     out.exact_root_count =
-        artifact.endpoint_committed_roots.size() ==
-            required.size();
+        exact_v2
+            ? artifact
+                      .endpoint_committed_root_words_v2
+                      .size() ==
+                  required.size()
+            : artifact.endpoint_committed_roots.size() ==
+                  required.size();
     if (!artifact.ok ||
         !out.exact_endpoint_order ||
         !out.exact_root_count ||
@@ -427,10 +464,19 @@ RoleExportProofV1 BuildRoleProof(
 
     aq::AirConstraintSystem<gf::Fp3> rebuilt;
     std::string why;
-    if (!RebuildRoleConstraintSystem(
-            artifact.role,
-            artifact.endpoint_committed_roots,
-            artifact.cs.n_rows, rebuilt, &why) ||
+    const bool rebuilt_ok =
+        exact_v2
+            ? BuildRCStage3PureStreamRoleAirCSV2(
+                  artifact.role,
+                  artifact
+                      .endpoint_committed_root_words_v2,
+                  rebuilt, &why)
+            : RebuildRoleConstraintSystem(
+                  artifact.role,
+                  artifact.endpoint_committed_roots,
+                  artifact.cs.n_rows,
+                  rebuilt, &why);
+    if (!rebuilt_ok ||
         !SameConstraintShape(artifact.cs, rebuilt)) {
         out.note =
             why.empty() ? "noncanonical_source_cs" : why;
@@ -451,9 +497,18 @@ RoleExportProofV1 BuildRoleProof(
             static_cast<uint32_t>(required[i]) - 1U;
         ProofOwnedExportV1 item;
         item.route = routes[ordinal];
-        item.committed_root =
-            artifact.endpoint_committed_roots[i];
-        item.root_words = RootWords(item.committed_root);
+        item.semantic_root_abi_version =
+            artifact.semantic_root_abi_version;
+        if (exact_v2) {
+            item.root_words =
+                artifact
+                    .endpoint_committed_root_words_v2[i];
+        } else {
+            item.committed_root =
+                artifact.endpoint_committed_roots[i];
+            item.root_words =
+                RootWords(item.committed_root);
+        }
         item.role_air_witness_executed = true;
         item.stream_child_witness_executed =
             item.route.kind != ProducerKindV1::StreamChild;
@@ -462,7 +517,9 @@ RoleExportProofV1 BuildRoleProof(
                 FindStreamChild(children, item.route.endpoint);
             item.stream_child_witness_executed =
                 child != nullptr &&
-                StreamChildExecutes(*child, item.root_words);
+                StreamChildExecutes(
+                    *child, item.root_words,
+                    item.semantic_root_abi_version);
         }
         if (!item.stream_child_witness_executed) {
             item.residual =
@@ -757,24 +814,49 @@ bool ValidateRoleExportProofV1(
         !proof.exact_root_count ||
         proof.source_columns == 0 ||
         proof.columns.size() != proof.cs.n_columns ||
+        !AllRawCanonical(proof.columns) ||
         proof.violations != 0 ||
         ar::CountWitnessViolationsOnH(
             proof.cs, proof.columns) != 0) {
         return Fail(why, "role_proof");
     }
     std::vector<alg_hash::Digest> roots;
+    std::vector<std::array<uint32_t, kRootWordsV1>>
+        roots_v2;
     roots.reserve(proof.exports.size());
+    roots_v2.reserve(proof.exports.size());
+    const bool exact_v2 =
+        proof.semantic_root_abi_version ==
+        kRCStage3ExactU32StreamRootAbiVersionV2;
     const auto routes = CanonicalExportRoutesV1();
     for (const auto& item : proof.exports) {
-        if (item.root_words != RootWords(item.committed_root)) {
+        if (item.semantic_root_abi_version !=
+                proof.semantic_root_abi_version ||
+            (!exact_v2 &&
+             item.root_words !=
+                 RootWords(item.committed_root)) ||
+            (exact_v2 &&
+             item.route.kind !=
+                 ProducerKindV1::StreamChild)) {
             return Fail(why, "root_limb_metadata");
         }
-        roots.push_back(item.committed_root);
+        if (exact_v2) {
+            roots_v2.push_back(item.root_words);
+        } else {
+            roots.push_back(item.committed_root);
+        }
     }
     aq::AirConstraintSystem<gf::Fp3> rebuilt;
-    if (!RebuildRoleConstraintSystem(
-            proof.role, roots, proof.cs.n_rows,
-            rebuilt, why) ||
+    const bool rebuilt_ok =
+        exact_v2
+            ? BuildRCStage3PureStreamRoleAirCSV2(
+                  proof.role, roots_v2,
+                  rebuilt, why)
+            : RebuildRoleConstraintSystem(
+                  proof.role, roots,
+                  proof.cs.n_rows,
+                  rebuilt, why);
+    if (!rebuilt_ok ||
         rebuilt.n_columns != proof.source_columns ||
         proof.source_columns > proof.columns.size()) {
         return Fail(why, "source_rebuild");

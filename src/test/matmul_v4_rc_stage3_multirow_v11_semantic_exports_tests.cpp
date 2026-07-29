@@ -408,6 +408,77 @@ BOOST_AUTO_TEST_CASE(
         product.literal_proof_owned_endpoints, 1U);
     BOOST_CHECK_EQUAL(product.residual_endpoints, 51U);
 
+    auto v2_child_on_v1_role = child;
+    v2_child_on_v1_role.closure
+        .semantic_export_version =
+        rc::kRCStage3StreamEndpointSemanticExportVersionV2;
+    const auto substituted_v2_child =
+        exports::BuildProductV1(
+            {role}, {v2_child_on_v1_role});
+    BOOST_CHECK_EQUAL(
+        substituted_v2_child
+            .newly_executed_export_endpoints,
+        0U);
+
+    rc::air_quotient::AirConstraintSystem<gf::Fp3>
+        exact_cs;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3PureStreamRoleAirCSV2(
+            rc::RCStage3RelationRole::
+                EpisodeTileTree,
+            roots, exact_cs, &why),
+        why);
+    std::vector<std::vector<gf::Fp3>>
+        exact_witness;
+    for (uint32_t endpoint_index = 0;
+         endpoint_index < roots.size();
+         ++endpoint_index) {
+        const auto fragment =
+            rc::BuildRCStage3StreamEndpointWitness(
+                roots[endpoint_index],
+                endpoint_index == 0
+                    ? rc::RCStage3StreamEndpointCtlValue(
+                          manifest)
+                    : gf::Fp3::Zero());
+        exact_witness.insert(
+            exact_witness.end(),
+            fragment.begin(), fragment.end());
+        for (uint32_t word = 0; word < 8U; ++word) {
+            for (uint32_t bit = 0; bit < 32U; ++bit) {
+                exact_witness.push_back(
+                    std::vector<gf::Fp3>(
+                        2,
+                        gf::Fp3::FromFp(
+                            gf::FromU64(
+                                (roots[endpoint_index][word] >>
+                                 bit) &
+                                1U))));
+            }
+        }
+    }
+    rc::RCStage3RoleAirProduct exact_role;
+    exact_role.role =
+        rc::RCStage3RelationRole::EpisodeTileTree;
+    exact_role.semantic_root_abi_version =
+        rc::kRCStage3ExactU32StreamRootAbiVersionV2;
+    exact_role.cs = exact_cs;
+    exact_role.witness = std::move(exact_witness);
+    exact_role.endpoints =
+        rc::RequiredRCStage3RelationEndpoints(
+            exact_role.role);
+    exact_role.endpoint_committed_root_words_v2 =
+        roots;
+    exact_role.opening_blocks =
+        static_cast<uint32_t>(roots.size());
+    exact_role.ok = true;
+    const auto substituted_v1_child =
+        exports::BuildProductV1(
+            {exact_role}, {child});
+    BOOST_CHECK_EQUAL(
+        substituted_v1_child
+            .newly_executed_export_endpoints,
+        0U);
+
     auto wrong_root_role = role;
     wrong_root_role.endpoint_committed_roots[0][0] =
         gf::Add(
@@ -419,6 +490,115 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !wrong_root.all_supplied_artifacts_valid ||
         wrong_root.newly_executed_export_endpoints == 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    exact_u32_stream_role_v2_does_not_alias_x_plus_p)
+{
+    using Role = rc::RCStage3RelationRole;
+    const Role role = Role::EpisodeTileTree;
+    const auto& endpoints =
+        rc::RequiredRCStage3RelationEndpoints(role);
+    std::vector<std::array<uint32_t, 8>> roots(
+        endpoints.size());
+    for (uint32_t endpoint = 0;
+         endpoint < roots.size(); ++endpoint) {
+        for (uint32_t word = 0;
+             word < roots[endpoint].size(); ++word) {
+            roots[endpoint][word] =
+                0x1000U + endpoint * 0x100U + word;
+        }
+    }
+    // p = 0xffffffff00000001. The first packed-u64 pair below is p+1,
+    // which the frozen four-Fp-lane ABI canonicalizes to 1. V2 retains the
+    // exact words {2, 0xffffffff} as two independent u32 lanes.
+    roots[0][0] = 2U;
+    roots[0][1] = 0xffffffffU;
+    auto alias_roots = roots;
+    alias_roots[0][0] = 1U;
+    alias_roots[0][1] = 0U;
+
+    rc::air_quotient::AirConstraintSystem<gf::Fp3> cs;
+    rc::air_quotient::AirConstraintSystem<gf::Fp3>
+        alias_cs;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3PureStreamRoleAirCSV2(
+            role, roots, cs, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        rc::BuildRCStage3PureStreamRoleAirCSV2(
+            role, alias_roots, alias_cs, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        cs.n_columns,
+        endpoints.size() *
+            rc::kRCStage3ExactU32StreamRoleEndpointStrideV2);
+
+    std::vector<std::vector<gf::Fp3>> witness;
+    for (uint32_t endpoint = 0;
+         endpoint < roots.size(); ++endpoint) {
+        const auto fragment =
+            rc::BuildRCStage3StreamEndpointWitness(
+                roots[endpoint], gf::Fp3::Zero());
+        witness.insert(
+            witness.end(),
+            fragment.begin(), fragment.end());
+        for (uint32_t word = 0; word < 8U; ++word) {
+            for (uint32_t bit = 0; bit < 32U; ++bit) {
+                witness.push_back(
+                    std::vector<gf::Fp3>(
+                        2,
+                        gf::Fp3::FromFp(
+                            gf::FromU64(
+                                (roots[endpoint][word] >>
+                                 bit) &
+                                1U))));
+            }
+        }
+    }
+    BOOST_REQUIRE_EQUAL(
+        witness.size(), cs.n_columns);
+    BOOST_CHECK_EQUAL(
+        rc::air_recurse::CountWitnessViolationsOnH(
+            cs, witness),
+        0U);
+    BOOST_CHECK_GT(
+        rc::air_recurse::CountWitnessViolationsOnH(
+            alias_cs, witness),
+        0U);
+
+    rc::RCStage3RoleAirProduct artifact;
+    artifact.role = role;
+    artifact.semantic_root_abi_version =
+        rc::kRCStage3ExactU32StreamRootAbiVersionV2;
+    artifact.cs = cs;
+    artifact.witness = witness;
+    artifact.endpoints = endpoints;
+    artifact.endpoint_committed_root_words_v2 =
+        roots;
+    artifact.fragment_columns = 0;
+    artifact.opening_blocks =
+        static_cast<uint32_t>(endpoints.size());
+    artifact.ok = true;
+    const auto honest =
+        exports::BuildProductV1({artifact}, {});
+    BOOST_REQUIRE_MESSAGE(
+        exports::ValidateProductV1(
+            honest, &why),
+        why);
+
+    // Field arithmetic alone reduces this raw p alias. The consensus-facing
+    // V2 validator must reject its noncanonical representation explicitly.
+    artifact.witness[
+        rc::kRCStage3ExactU32StreamRoleRootWordBaseV2]
+        [0]
+        .c0 += gf::kP;
+    const auto noncanonical =
+        exports::BuildProductV1({artifact}, {});
+    BOOST_CHECK(
+        !exports::ValidateProductV1(
+            noncanonical, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

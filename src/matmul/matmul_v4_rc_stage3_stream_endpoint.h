@@ -102,6 +102,10 @@ struct RCStage3StreamEndpointClosure {
     air_quotient::AirConstraintSystem<gkr_field::Fp3> child_cs;
     std::vector<std::vector<gkr_field::Fp3>> child_witness;
     uint32_t child_output_export_base{0};
+    /** Internal SHA input-bus columns exported for additive V2 receipts. */
+    uint32_t child_input_active_column{UINT32_MAX};
+    uint32_t child_input_address_column{UINT32_MAX};
+    uint32_t child_input_word_column{UINT32_MAX};
     /**
      * Broadcast Fp3 recomposition of the first three leaf stream words.
      *
@@ -111,6 +115,18 @@ struct RCStage3StreamEndpointClosure {
      * parent can therefore alias the role CTL cell directly to the SHA child.
      */
     uint32_t child_value_export_column{0};
+    /**
+     * Additive semantic-export ABI. Version zero is the frozen V1 closure
+     * shape above. Version two is produced only by
+     * RCStage3StreamEndpointCloseSemanticV2 and adds proof-owned broadcast
+     * columns for all eight leaf stream words, plus 32-bit decompositions of
+     * those words and all eight terminal committed-root words.
+     */
+    uint16_t semantic_export_version{0};
+    uint32_t child_stream_word_export_base{UINT32_MAX};
+    uint32_t child_stream_word_bits_base{UINT32_MAX};
+    uint32_t child_root_word_export_base{UINT32_MAX};
+    uint32_t child_root_word_bits_base{UINT32_MAX};
     uint32_t child_violations{0};
 
     air_quotient::AirConstraintSystem<gkr_field::Fp3> bind_cs;
@@ -165,6 +181,39 @@ BuildRCStage3StreamEndpointCanonicalManifest(
     const RCStage3StreamEndpointManifest& manifest, const uint256& fs_seed,
     std::string* why = nullptr, bool run_cs_checks = true,
     const uint256& precommitted_base_row = {});
+
+inline constexpr uint16_t
+    kRCStage3StreamEndpointSemanticExportVersionV2 = 2;
+
+/**
+ * Additive V2 closure for recursive semantic receipts.
+ *
+ * The frozen V1 builder and its proof shape are unchanged. V2 starts from a
+ * V1 closure, then exports all eight private leaf stream words and all eight
+ * proof-owned terminal SHA root words as canonical u32 base-field values.
+ * Every word has an in-AIR 32-bit decomposition. Stream exports are selected
+ * from the canonical first-pass SHA input bus; root exports are the SHA
+ * terminal output columns themselves.
+ */
+[[nodiscard]] RCStage3StreamEndpointClosure
+RCStage3StreamEndpointCloseSemanticV2(
+    RCStage3StreamFamily family,
+    const RCStage3StreamEndpointManifest& manifest,
+    const uint256& fs_seed,
+    std::string* why = nullptr,
+    bool run_cs_checks = true,
+    const uint256& precommitted_base_row = {});
+
+/**
+ * Revalidate a V2 closure, including raw canonical representation. The raw
+ * check is load-bearing because AIR equality alone cannot distinguish an
+ * in-memory x+p alias from x after field reduction.
+ */
+[[nodiscard]] bool
+ValidateRCStage3StreamEndpointSemanticV2(
+    const RCStage3StreamEndpointClosure& closure,
+    const std::array<uint32_t, 8>& expected_stream_words,
+    std::string* why = nullptr);
 
 /**
  * (Column-shiftable CS the registry direct-products into C_rho.)  The light

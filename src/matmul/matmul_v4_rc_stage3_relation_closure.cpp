@@ -6807,6 +6807,246 @@ BuildRCStage3PureStreamRoleAirFromManifests(
     return out;
 }
 
+bool BuildRCStage3PureStreamRoleAirCSV2(
+    RCStage3RelationRole role,
+    const std::vector<std::array<uint32_t, 8>>&
+        endpoint_root_words,
+    aq::AirConstraintSystem<gf::Fp3>& out,
+    std::string* why)
+{
+    out = {};
+    if (!RCStage3RoleIsPureStream(role) ||
+        endpoint_root_words.size() !=
+            RequiredRCStage3RelationEndpoints(
+                role).size()) {
+        if (why != nullptr) {
+            *why =
+                "stage3:stream_role_cs_v2:shape";
+        }
+        return false;
+    }
+    out.n_rows = 2;
+    for (uint32_t endpoint = 0;
+         endpoint < endpoint_root_words.size();
+         ++endpoint) {
+        const uint32_t base =
+            endpoint *
+            kRCStage3ExactU32StreamRoleEndpointStrideV2;
+        const auto fragment =
+            BuildRCStage3StreamEndpointConstraintSystem(
+                RCStage3StreamFamilyForEndpoint(
+                    RequiredRCStage3RelationEndpoints(
+                        role)[endpoint]),
+                0, endpoint_root_words[endpoint], 1);
+        if (fragment.n_rows != out.n_rows ||
+            fragment.n_columns !=
+                kRCStage3StreamEndpointBindWidth) {
+            if (why != nullptr) {
+                *why =
+                    "stage3:stream_role_cs_v2:"
+                    "fragment";
+            }
+            out = {};
+            return false;
+        }
+        CopyConstraintFamily(
+            fragment, base, out);
+        const uint32_t bit_base =
+            base +
+            kRCStage3ExactU32StreamRoleRootBitBaseV2;
+        const uint32_t root_base =
+            base +
+            kRCStage3ExactU32StreamRoleRootWordBaseV2;
+        for (uint32_t word = 0;
+             word < 8U; ++word) {
+            for (uint32_t bit = 0;
+                 bit < 32U; ++bit) {
+                const uint32_t column =
+                    bit_base + word * 32U + bit;
+                out.constraints.push_back(
+                    {
+                        "stream_role_v2:root_bit",
+                        aq::AirKind::kEverywhere,
+                        2,
+                        [column](
+                            const std::vector<gf::Fp3>& cur,
+                            const std::vector<gf::Fp3>&) {
+                            return gf::Mul(
+                                cur[column],
+                                gf::Sub(
+                                    cur[column],
+                                    gf::Fp3::One()));
+                        },
+                    });
+            }
+            out.constraints.push_back(
+                {
+                    "stream_role_v2:root_recompose",
+                    aq::AirKind::kEverywhere,
+                    1,
+                    [root_column = root_base + word,
+                     bit_column =
+                         bit_base + word * 32U](
+                        const std::vector<gf::Fp3>& cur,
+                        const std::vector<gf::Fp3>&) {
+                        gf::Fp3 value =
+                            gf::Fp3::Zero();
+                        uint64_t power = 1;
+                        for (uint32_t bit = 0;
+                             bit < 32U; ++bit) {
+                            value = gf::Add(
+                                value,
+                                gf::Mul(
+                                    cur[
+                                        bit_column +
+                                        bit],
+                                    gf::Fp3::FromFp(
+                                        gf::FromU64(
+                                            power))));
+                            power <<= 1U;
+                        }
+                        return gf::Sub(
+                            cur[root_column],
+                            value);
+                    },
+                });
+        }
+    }
+    out.n_columns =
+        static_cast<uint32_t>(
+            endpoint_root_words.size()) *
+        kRCStage3ExactU32StreamRoleEndpointStrideV2;
+    return true;
+}
+
+RCStage3RoleAirProduct
+BuildRCStage3PureStreamRoleAirFromManifestsV2(
+    RCStage3RelationRole role,
+    const std::vector<RCStage3StreamEndpointManifest>&
+        endpoint_manifests,
+    std::string* why)
+{
+    RCStage3RoleAirProduct out;
+    out.role = role;
+    out.semantic_root_abi_version =
+        kRCStage3ExactU32StreamRootAbiVersionV2;
+    if (!RCStage3RoleIsPureStream(role)) {
+        out.note = "not_pure_stream";
+        if (why != nullptr) {
+            *why =
+                "stage3:stream_manifest_v2:"
+                "not_pure_stream";
+        }
+        return out;
+    }
+    const auto& required =
+        RequiredRCStage3RelationEndpoints(role);
+    if (endpoint_manifests.size() !=
+        required.size()) {
+        out.note = "manifest_count";
+        if (why != nullptr) {
+            *why =
+                "stage3:stream_manifest_v2:"
+                "manifest_count";
+        }
+        return out;
+    }
+
+    std::vector<std::vector<gf::Fp3>> witness;
+    for (uint32_t i = 0;
+         i < required.size(); ++i) {
+        const RCStage3StreamFamily family =
+            StreamFamilyForEndpoint(required[i]);
+        std::array<uint32_t, 8> root8{};
+        std::string rwhy;
+        if (!RCStage3StreamEndpointCommittedRoot(
+                family, endpoint_manifests[i],
+                root8, &rwhy)) {
+            out.note =
+                "committed_root:" + rwhy;
+            if (why != nullptr) *why = out.note;
+            return out;
+        }
+        const auto fragment_witness =
+            BuildRCStage3StreamEndpointWitness(
+                root8,
+                RCStage3StreamEndpointCtlValue(
+                    endpoint_manifests[i]));
+        if (fragment_witness.size() !=
+                kRCStage3StreamEndpointBindWidth) {
+            out.note = "fragment_shape";
+            if (why != nullptr) {
+                *why =
+                    "stage3:stream_manifest_v2:"
+                    "fragment_shape";
+            }
+            return out;
+        }
+        for (const auto& column :
+             fragment_witness) {
+            witness.push_back(column);
+        }
+        for (uint32_t word = 0;
+             word < 8U; ++word) {
+            for (uint32_t bit = 0;
+                 bit < 32U; ++bit) {
+                const gf::Fp3 value =
+                    gf::Fp3::FromFp(
+                        gf::FromU64(
+                            (root8[word] >> bit) &
+                            1U));
+                witness.push_back(
+                    std::vector<gf::Fp3>(
+                        2, value));
+            }
+        }
+        const uint32_t base =
+            i *
+            kRCStage3ExactU32StreamRoleEndpointStrideV2;
+        out.endpoint_value_columns.push_back(
+            base +
+            kRCStage3StreamEndpointBindValueColumn);
+        out.endpoint_root_word_bases_v2
+            .push_back(
+                base +
+                kRCStage3ExactU32StreamRoleRootWordBaseV2);
+        out.endpoint_root_bit_bases_v2
+            .push_back(
+                base +
+                kRCStage3ExactU32StreamRoleRootBitBaseV2);
+        out.endpoint_committed_root_words_v2
+            .push_back(root8);
+        out.endpoints.push_back(required[i]);
+    }
+    aq::AirConstraintSystem<gf::Fp3> product;
+    if (!BuildRCStage3PureStreamRoleAirCSV2(
+            role,
+            out.endpoint_committed_root_words_v2,
+            product, why)) {
+        out.note = "constraint_system";
+        return out;
+    }
+    if (air_recurse::CountWitnessViolationsOnH(
+            product, witness) != 0) {
+        out.note = "witness";
+        if (why != nullptr) {
+            *why =
+                "stage3:stream_manifest_v2:witness";
+        }
+        return out;
+    }
+    out.fragment_columns = 0;
+    out.opening_blocks =
+        static_cast<uint32_t>(
+            out.endpoints.size());
+    out.cs = std::move(product);
+    out.witness = std::move(witness);
+    out.ok = true;
+    out.note =
+        "assembled_real_manifests_exact_u32_v2";
+    return out;
+}
+
 // ===========================================================================
 // CompositionLink (role 32) — the fifteenth relation's in-CS closer.
 //

@@ -14,6 +14,7 @@ namespace {
 
 using namespace matmul::v4::rc;
 namespace ar = air_recurse;
+namespace gf = gkr_field;
 
 std::array<uint32_t, 8> Value()
 {
@@ -222,6 +223,109 @@ BOOST_AUTO_TEST_CASE(slow_stream_endpoint_child_fold_verifies_in_air,
     }
     BOOST_REQUIRE(changed);
     BOOST_CHECK_GT(ar::CountWitnessViolationsOnH(c.child_cs, tampered), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    stream_endpoint_semantic_v2_exports_all_exact_u32_words)
+{
+    // Path length zero is the bounded common-ABI canary. The older V1 test
+    // covers a deeper Merkle path; this one must execute unconditionally so
+    // the all-eight-word V2 receipt cannot ship as an unexecuted shape.
+    const RCStage3StreamFamily family =
+        RCStage3StreamFamily::
+            DirectSha256dEpisodeDigest;
+    const auto manifest =
+        BuildRCStage3StreamEndpointCanonicalManifest(
+            family, Value(), 0U, 0U);
+    uint256 seed;
+    std::fill(
+        seed.begin(), seed.end(),
+        static_cast<unsigned char>(0x5a));
+    std::string why;
+    const auto closure =
+        RCStage3StreamEndpointCloseSemanticV2(
+            family, manifest, seed, &why, true);
+    BOOST_REQUIRE_MESSAGE(closure.ok, why);
+    BOOST_REQUIRE_MESSAGE(
+        ValidateRCStage3StreamEndpointSemanticV2(
+            closure, manifest.stream_value, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        closure.semantic_export_version,
+        kRCStage3StreamEndpointSemanticExportVersionV2);
+    for (uint32_t word = 0; word < 8U; ++word) {
+        BOOST_CHECK(gf::Eq(
+            closure.child_witness[
+                closure.child_stream_word_export_base +
+                word][0],
+            gf::Fp3::FromFp(gf::FromU64(
+                manifest.stream_value[word]))));
+        BOOST_CHECK(gf::Eq(
+            closure.child_witness[
+                closure.child_root_word_export_base +
+                word][0],
+            gf::Fp3::FromFp(gf::FromU64(
+                closure.committed_root[word]))));
+    }
+
+    auto wrong_stream = closure;
+    wrong_stream.child_witness[
+        wrong_stream.child_stream_word_export_base + 7U]
+        [0] =
+        gf::Add(
+            wrong_stream.child_witness[
+                wrong_stream
+                    .child_stream_word_export_base +
+                7U][0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !ValidateRCStage3StreamEndpointSemanticV2(
+            wrong_stream, manifest.stream_value,
+            &why));
+
+    auto wrong_root = closure;
+    wrong_root.child_witness[
+        wrong_root.child_root_word_export_base + 7U]
+        [0] =
+        gf::Add(
+            wrong_root.child_witness[
+                wrong_root
+                    .child_root_word_export_base +
+                7U][0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !ValidateRCStage3StreamEndpointSemanticV2(
+            wrong_root, manifest.stream_value,
+            &why));
+
+    auto wrong_bit = closure;
+    wrong_bit.child_witness[
+        wrong_bit.child_stream_word_bits_base +
+        7U * 32U][0] =
+        gf::Fp3::FromFp(gf::FromU64(2));
+    BOOST_CHECK(
+        !ValidateRCStage3StreamEndpointSemanticV2(
+            wrong_bit, manifest.stream_value,
+            &why));
+
+    auto extension_alias = closure;
+    extension_alias.child_witness[
+        extension_alias
+            .child_root_word_export_base][0]
+        .c1 = 1;
+    BOOST_CHECK(
+        !ValidateRCStage3StreamEndpointSemanticV2(
+            extension_alias,
+            manifest.stream_value, &why));
+
+    auto x_plus_p = closure;
+    x_plus_p.child_witness[
+        x_plus_p.child_root_word_export_base][0]
+        .c0 += gf::kP;
+    BOOST_CHECK(
+        !ValidateRCStage3StreamEndpointSemanticV2(
+            x_plus_p, manifest.stream_value,
+            &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

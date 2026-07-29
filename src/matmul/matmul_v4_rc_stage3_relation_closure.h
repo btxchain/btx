@@ -1151,6 +1151,11 @@ BuildRCStage3OpeningWitness(const gkr_field::Fp3& cell,
  */
 struct RCStage3RoleAirProduct {
     RCStage3RelationRole role{};
+    /**
+     * Zero is the frozen packed-u64 root ABI. Version two carries every
+     * StreamChild root as eight distinct canonical u32 lanes.
+     */
+    uint16_t semantic_root_abi_version{0};
     air_quotient::AirConstraintSystem<gkr_field::Fp3> cs;
     std::vector<std::vector<gkr_field::Fp3>> witness; // cs.n_columns x cs.n_rows
     std::vector<RCStage3RelationEndpoint> endpoints;
@@ -1158,6 +1163,12 @@ struct RCStage3RoleAirProduct {
     /** The committed VectorRootAlg root each opening block authenticates (the
      * authority root a matching child pin must carry, in endpoints order). */
     std::vector<alg_hash::Digest> endpoint_committed_roots;
+    std::vector<std::array<uint32_t, 8>>
+        endpoint_committed_root_words_v2;
+    std::vector<uint32_t>
+        endpoint_root_word_bases_v2;
+    std::vector<uint32_t>
+        endpoint_root_bit_bases_v2;
     uint32_t fragment_columns{0};
     uint32_t opening_blocks{0};
     bool ok{false};
@@ -1410,6 +1421,38 @@ BuildRCStage3PureStreamRoleAir(RCStage3RelationRole role,
  */
 [[nodiscard]] RCStage3RoleAirProduct
 BuildRCStage3PureStreamRoleAirFromManifests(
+    RCStage3RelationRole role,
+    const std::vector<RCStage3StreamEndpointManifest>& endpoint_manifests,
+    std::string* why = nullptr);
+
+inline constexpr uint16_t
+    kRCStage3ExactU32StreamRootAbiVersionV2 = 2;
+inline constexpr uint32_t
+    kRCStage3ExactU32StreamRoleRootWordBaseV2 =
+        kRCStage3StreamEndpointBindRootBase;
+inline constexpr uint32_t
+    kRCStage3ExactU32StreamRoleRootBitBaseV2 =
+        kRCStage3StreamEndpointBindWidth;
+inline constexpr uint32_t
+    kRCStage3ExactU32StreamRoleEndpointStrideV2 =
+        kRCStage3StreamEndpointBindWidth + 8U * 32U;
+
+[[nodiscard]] bool
+BuildRCStage3PureStreamRoleAirCSV2(
+    RCStage3RelationRole role,
+    const std::vector<std::array<uint32_t, 8>>&
+        endpoint_root_words,
+    air_quotient::AirConstraintSystem<gkr_field::Fp3>& out,
+    std::string* why = nullptr);
+
+/**
+ * Additive exact-root variant. V1 packs two u32 words into one Goldilocks
+ * lane and therefore cannot represent the rare x+p aliases exactly. V2 keeps
+ * all eight words as separate canonical base-field lanes in every endpoint
+ * binding fragment and records them losslessly in the role artifact.
+ */
+[[nodiscard]] RCStage3RoleAirProduct
+BuildRCStage3PureStreamRoleAirFromManifestsV2(
     RCStage3RelationRole role,
     const std::vector<RCStage3StreamEndpointManifest>& endpoint_manifests,
     std::string* why = nullptr);
