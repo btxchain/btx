@@ -450,6 +450,44 @@ struct CanonicalRelocationReportV1 {
     CanonicalRelocationReportV1& report,
     std::string* why = nullptr);
 
+struct CanonicalLiftReportV1 {
+    uint32_t source_constraints{0};
+    uint32_t output_constraints{0};
+    uint32_t canonical_constraints_lifted{0};
+    uint32_t native_constraints_gated{0};
+    uint32_t canonical_tables_recommitted{0};
+    bool every_claimed_provenance_valid{false};
+    bool exact_order_preserved{false};
+};
+
+/**
+ * Re-express a child constraint graph over a larger row domain.
+ *
+ * The caller supplies verifier-owned Transition/First/Last selector columns
+ * and a wrap bank containing each child column's row-zero value. Canonical
+ * programs are decoded and transformed instruction-by-instruction:
+ * Current loads retain their child-relative columns, ordinary Next loads stay
+ * Next, wrap variants replace Next(c) with Current(wrap_base+c), and the
+ * result is multiplied by the selected row mask. The transformed table is
+ * validated and recommitted before its callbacks are appended.
+ *
+ * Everywhere constraints emit transition and wrap variants; all other kinds
+ * emit the one selector appropriate to their original domain. Native
+ * callbacks retain a fail-closed gated compatibility wrapper and are counted
+ * separately. Any partial or inconsistent canonical provenance rejects
+ * without appending constraints.
+ */
+[[nodiscard]] bool AppendLiftedAirConstraintsV1(
+    const air_quotient::AirConstraintSystem<Fp3>& child,
+    uint32_t wrap_base,
+    uint32_t selector_base,
+    uint32_t transition_selector,
+    uint32_t first_selector,
+    uint32_t last_selector,
+    air_quotient::AirConstraintSystem<Fp3>& lifted,
+    CanonicalLiftReportV1& report,
+    std::string* why = nullptr);
+
 enum class MigrationState : uint8_t {
     NotStarted = 0,
     Partial = 1,

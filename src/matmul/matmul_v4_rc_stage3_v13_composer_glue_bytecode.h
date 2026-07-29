@@ -39,6 +39,8 @@ enum class FormulaV1 : uint8_t {
     CarryTransition = 3,
     /** current[a] * (current[b] - current[c]) */
     SelectedEqual = 4,
+    /** current[a] * current[b] */
+    SelectedZero = 5,
 };
 
 struct ConstraintV1 {
@@ -244,6 +246,22 @@ inline bool BuildCanonicalProgramTableV1(
             binary(
                 cb::Opcode::Mul,
                 selector, difference);
+            break;
+        }
+        case FormulaV1::SelectedZero: {
+            if (!column_ok(spec.a) ||
+                !column_ok(spec.b)) {
+                return FailV1(
+                    why, "selected_zero_column");
+            }
+            program.declared_degree = 2;
+            const uint32_t selector =
+                current(spec.a);
+            const uint32_t value =
+                current(spec.b);
+            binary(
+                cb::Opcode::Mul,
+                selector, value);
             break;
         }
         }

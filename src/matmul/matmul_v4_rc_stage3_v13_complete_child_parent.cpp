@@ -8,7 +8,6 @@
 
 #include <algorithm>
 #include <array>
-#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
@@ -32,19 +31,6 @@ bool Fail(std::string* why, const std::string& detail)
             detail;
     }
     return false;
-}
-
-void Add(
-    AirCS& cs,
-    const char* name,
-    aq::AirKind kind,
-    uint32_t degree,
-    std::function<Fp3(
-        const std::vector<Fp3>&,
-        const std::vector<Fp3>&)> eval)
-{
-    cs.constraints.push_back(
-        {name, kind, degree, std::move(eval)});
 }
 
 bool IsPreprocessed(
@@ -419,130 +405,86 @@ bool AppendChildConstraintSystemLifted(
                 selectors[selector]));
     }
 
+    std::vector<glue::ConstraintV1>
+        wrap_constraints;
+    std::vector<const char*> wrap_names;
+    wrap_constraints.reserve(
+        child_cs.n_columns * 2U);
+    wrap_names.reserve(
+        child_cs.n_columns * 2U);
     for (uint32_t column = 0;
          column < child_cs.n_columns;
          ++column) {
-        Add(
-            lifted, "lift.wrap.first",
-            aq::AirKind::kFirstRow, 1,
-            [column, wrap_base](
-                const auto& current,
-                const auto&) {
-                return gf::Sub(
-                    current[
-                        wrap_base + column],
-                    current[column]);
-            });
-        Add(
-            lifted, "lift.wrap.constant",
-            aq::AirKind::kTransition, 1,
-            [column, wrap_base](
-                const auto& current,
-                const auto& next) {
-                return gf::Sub(
-                    next[
-                        wrap_base + column],
-                    current[
-                        wrap_base + column]);
-            });
+        wrap_constraints.push_back(
+            {glue::FormulaV1::EqualCurrent,
+             aq::AirKind::kFirstRow,
+             wrap_base + column,
+             column, 0});
+        wrap_names.push_back(
+            "lift.wrap.first");
+        wrap_constraints.push_back(
+            {glue::FormulaV1::CarryTransition,
+             aq::AirKind::kTransition,
+             wrap_base + column, 0, 0});
+        wrap_names.push_back(
+            "lift.wrap.constant");
     }
-    const auto append_gated =
-        [&](const aq::AirConstraint<Fp3>&
-                source,
-            uint32_t selector,
-            bool wrap_next) {
-            aq::AirConstraint<Fp3> gated;
-            gated.name = source.name;
-            gated.kind =
-                aq::AirKind::kEverywhere;
-            gated.alg_degree =
-                source.alg_degree + 1;
-            const auto eval =
-                source.eval;
-            const uint32_t width =
-                child_cs.n_columns;
-            gated.eval =
-                [eval, width, wrap_base,
-                 selector_base, selector,
-                 wrap_next](
-                    const std::vector<Fp3>&
-                        current,
-                    const std::vector<Fp3>&
-                        next) {
-                    std::vector<Fp3>
-                        child_current(
-                            current.begin(),
-                            current.begin() +
-                                width);
-                    std::vector<Fp3>
-                        child_next;
-                    if (wrap_next) {
-                        child_next.assign(
-                            current.begin() +
-                                wrap_base,
-                            current.begin() +
-                                wrap_base +
-                                width);
-                    } else {
-                        child_next.assign(
-                            next.begin(),
-                            next.begin() +
-                                width);
-                    }
-                    return gf::Mul(
-                        current[
-                            selector_base +
-                            selector],
-                        eval(
-                            child_current,
-                            child_next));
-                };
-            lifted.constraints.push_back(
-                std::move(gated));
-        };
-    for (const auto& constraint :
-         child_cs.constraints) {
-        switch (constraint.kind) {
-        case aq::AirKind::kEverywhere:
-            append_gated(
-                constraint,
-                kTransition, false);
-            append_gated(
-                constraint,
-                kLast, true);
-            break;
-        case aq::AirKind::kTransition:
-            append_gated(
-                constraint,
-                kTransition, false);
-            break;
-        case aq::AirKind::kFirstRow:
-            append_gated(
-                constraint,
-                kFirst, false);
-            break;
-        case aq::AirKind::kLastRow:
-            append_gated(
-                constraint,
-                kLast, true);
-            break;
-        }
+    cb::ProgramTable wrap_program;
+    if (!glue::BuildCanonicalProgramTableV1(
+            lifted.n_columns,
+            wrap_constraints,
+            wrap_program, why) ||
+        !glue::AppendCanonicalConstraintsV1(
+            wrap_program, lifted.n_rows,
+            wrap_names, lifted,
+            nullptr, why)) {
+        return Fail(
+            why,
+            "public_lift_wrap_bytecode");
     }
+
+    cb::CanonicalLiftReportV1
+        lift_report;
+    if (!cb::AppendLiftedAirConstraintsV1(
+            child_cs, wrap_base,
+            selector_base, kTransition,
+            kFirst, kLast, lifted,
+            lift_report, why)) {
+        return Fail(
+            why,
+            "public_lift_child_bytecode");
+    }
+
+    std::vector<glue::ConstraintV1>
+        padding_constraints;
+    std::vector<const char*> padding_names;
+    padding_constraints.reserve(
+        child_cs.n_columns);
+    padding_names.reserve(
+        child_cs.n_columns);
     for (uint32_t column = 0;
          column < child_cs.n_columns;
          ++column) {
-        Add(
-            lifted, "lift.padding.zero",
-            aq::AirKind::kEverywhere, 2,
-            [column, selector_base](
-                const auto& current,
-                const auto&) {
-                return gf::Mul(
-                    current[
-                        selector_base +
-                        kPadding],
-                    current[column]);
-            });
+        padding_constraints.push_back(
+            {glue::FormulaV1::SelectedZero,
+             aq::AirKind::kEverywhere,
+             selector_base + kPadding,
+             column, 0});
+        padding_names.push_back(
+            "lift.padding.zero");
+    }
+    cb::ProgramTable padding_program;
+    if (!glue::BuildCanonicalProgramTableV1(
+            lifted.n_columns,
+            padding_constraints,
+            padding_program, why) ||
+        !glue::AppendCanonicalConstraintsV1(
+            padding_program, lifted.n_rows,
+            padding_names, lifted,
+            nullptr, why)) {
+        return Fail(
+            why,
+            "public_lift_padding_bytecode");
     }
 
     composer::ChildAttachmentV1 attached;

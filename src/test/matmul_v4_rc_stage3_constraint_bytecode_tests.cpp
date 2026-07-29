@@ -59,6 +59,39 @@ cb::ProgramTable MakeTable(uint64_t k)
     return table;
 }
 
+cb::ProgramTable MakeEverywhereNextTable()
+{
+    cb::Program program;
+    program.role =
+        rc::RCStage3RelationRole::EpisodeExtract;
+    program.constraint_ordinal = 0;
+    program.kind =
+        rc::air_quotient::AirKind::kEverywhere;
+    program.declared_degree = 1;
+    program.current_width = 1;
+    program.next_width = 1;
+
+    cb::Instruction after;
+    after.opcode = cb::Opcode::Next;
+    after.lhs = 0;
+    cb::Instruction before;
+    before.opcode = cb::Opcode::Current;
+    before.lhs = 0;
+    cb::Instruction difference;
+    difference.opcode = cb::Opcode::Sub;
+    difference.lhs = 0;
+    difference.rhs = 1;
+    program.instructions = {
+        after, before, difference};
+
+    cb::ProgramTable table;
+    table.role = program.role;
+    table.current_width = 1;
+    table.next_width = 1;
+    table.programs = {program};
+    return table;
+}
+
 cb::CrossHashFacts Facts(
     bool valid, bool ext_h, bool rec_h, bool ext_rec,
     bool ext_sha, bool rec_alg)
@@ -187,6 +220,116 @@ BOOST_AUTO_TEST_CASE(
             report, &why));
     BOOST_CHECK_EQUAL(
         untouched.constraints.size(), before);
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_row_lift_rewrites_next_and_gates_exactly)
+{
+    const auto table =
+        MakeEverywhereNextTable();
+    rc::air_quotient::AirConstraintSystem<Fp3>
+        child;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, 4, child, &why),
+        why);
+
+    rc::air_quotient::AirConstraintSystem<Fp3>
+        lifted;
+    lifted.n_rows = 8;
+    // [child=0, wrap=1, transition=2, first=3, last=4]
+    lifted.n_columns = 5;
+    cb::CanonicalLiftReportV1 report;
+    BOOST_REQUIRE_MESSAGE(
+        cb::AppendLiftedAirConstraintsV1(
+            child, 1, 2, 0, 1, 2,
+            lifted, report, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(
+        lifted.constraints.size(), 2U);
+    BOOST_CHECK_EQUAL(
+        report.source_constraints, 1U);
+    BOOST_CHECK_EQUAL(
+        report.output_constraints, 2U);
+    BOOST_CHECK_EQUAL(
+        report.canonical_constraints_lifted,
+        2U);
+    BOOST_CHECK_EQUAL(
+        report.native_constraints_gated, 0U);
+    BOOST_CHECK_EQUAL(
+        report.canonical_tables_recommitted,
+        1U);
+    BOOST_CHECK(
+        report.every_claimed_provenance_valid);
+    BOOST_CHECK(report.exact_order_preserved);
+    BOOST_CHECK(
+        !lifted.constraints[0]
+             .canonical_program_table_root
+             .IsNull());
+    BOOST_CHECK(
+        lifted.constraints[0]
+            .canonical_program_table_root ==
+        lifted.constraints[1]
+            .canonical_program_table_root);
+    BOOST_CHECK_EQUAL(
+        lifted.constraints[0]
+            .canonical_program_ordinal,
+        0U);
+    BOOST_CHECK_EQUAL(
+        lifted.constraints[1]
+            .canonical_program_ordinal,
+        1U);
+
+    const std::vector<Fp3> ordinary_current{
+        gf::FromU64_3(3),
+        gf::FromU64_3(9),
+        Fp3::One(),
+        Fp3::Zero(),
+        Fp3::Zero()};
+    const std::vector<Fp3> ordinary_next{
+        gf::FromU64_3(4),
+        gf::FromU64_3(9),
+        Fp3::One(),
+        Fp3::Zero(),
+        Fp3::Zero()};
+    BOOST_CHECK(gf::Eq(
+        lifted.constraints[0].eval(
+            ordinary_current,
+            ordinary_next),
+        gf::FromU64_3(1)));
+    BOOST_CHECK(gf::IsZero(
+        lifted.constraints[1].eval(
+            ordinary_current,
+            ordinary_next)));
+
+    const std::vector<Fp3> last_current{
+        gf::FromU64_3(3),
+        gf::FromU64_3(9),
+        Fp3::Zero(),
+        Fp3::Zero(),
+        Fp3::One()};
+    BOOST_CHECK(gf::IsZero(
+        lifted.constraints[0].eval(
+            last_current,
+            ordinary_next)));
+    BOOST_CHECK(gf::Eq(
+        lifted.constraints[1].eval(
+            last_current,
+            ordinary_next),
+        gf::FromU64_3(6)));
+
+    auto partial = child;
+    partial.constraints[0]
+        .canonical_program_challenges.reset();
+    const size_t before =
+        lifted.constraints.size();
+    BOOST_CHECK(
+        !cb::AppendLiftedAirConstraintsV1(
+            partial, 1, 2, 0, 1, 2,
+            lifted, report, &why));
+    BOOST_CHECK_EQUAL(
+        lifted.constraints.size(), before);
 }
 
 // The core of the reduction: over the ENTIRE boolean event space the hybrid

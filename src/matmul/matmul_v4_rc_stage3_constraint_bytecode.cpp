@@ -1123,6 +1123,471 @@ bool AppendRelocatedAirConstraintsV1(
     return report.exact_order_preserved;
 }
 
+bool AppendLiftedAirConstraintsV1(
+    const air_quotient::AirConstraintSystem<Fp3>& child,
+    uint32_t wrap_base,
+    uint32_t selector_base,
+    uint32_t transition_selector,
+    uint32_t first_selector,
+    uint32_t last_selector,
+    air_quotient::AirConstraintSystem<Fp3>& lifted,
+    CanonicalLiftReportV1& report,
+    std::string* why)
+{
+    report = {};
+    report.source_constraints =
+        static_cast<uint32_t>(
+            child.constraints.size());
+    if (child.n_rows < 2 ||
+        child.n_columns == 0 ||
+        lifted.n_rows < child.n_rows ||
+        lifted.n_columns == 0 ||
+        wrap_base > lifted.n_columns ||
+        child.n_columns >
+            lifted.n_columns - wrap_base ||
+        selector_base >= lifted.n_columns ||
+        transition_selector >
+            std::numeric_limits<uint32_t>::max() -
+                selector_base ||
+        first_selector >
+            std::numeric_limits<uint32_t>::max() -
+                selector_base ||
+        last_selector >
+            std::numeric_limits<uint32_t>::max() -
+                selector_base ||
+        selector_base + transition_selector >=
+            lifted.n_columns ||
+        selector_base + first_selector >=
+            lifted.n_columns ||
+        selector_base + last_selector >=
+            lifted.n_columns) {
+        return Fail(why, "lift_parent_shape");
+    }
+
+    struct Variant {
+        uint32_t selector{0};
+        bool wrap_next{false};
+    };
+    const auto variants =
+        [transition_selector,
+         first_selector,
+         last_selector](
+            air_quotient::AirKind kind) {
+            std::array<Variant, 2> out{};
+            uint32_t count = 1;
+            switch (kind) {
+            case air_quotient::AirKind::kEverywhere:
+                out[0] = {
+                    transition_selector, false};
+                out[1] = {
+                    last_selector, true};
+                count = 2;
+                break;
+            case air_quotient::AirKind::kTransition:
+                out[0] = {
+                    transition_selector, false};
+                break;
+            case air_quotient::AirKind::kFirstRow:
+                out[0] = {
+                    first_selector, false};
+                break;
+            case air_quotient::AirKind::kLastRow:
+                out[0] = {
+                    last_selector, true};
+                break;
+            }
+            return std::pair{out, count};
+        };
+
+    struct CacheEntry {
+        std::vector<Fp3> challenge;
+        ProgramTable source;
+        air_quotient::AirConstraintSystem<Fp3>
+            transformed;
+        std::vector<std::vector<uint32_t>>
+            output_ordinals;
+    };
+    std::map<uint256, std::vector<CacheEntry>>
+        cache;
+    std::vector<
+        air_quotient::AirConstraint<Fp3>>
+        appended;
+    appended.reserve(
+        child.constraints.size() * 2U);
+
+    const auto same_challenge =
+        [](const std::vector<Fp3>& left,
+           const std::vector<Fp3>& right) {
+            if (left.size() != right.size()) {
+                return false;
+            }
+            for (uint32_t index = 0;
+                 index < left.size(); ++index) {
+                if (!gf::Eq(
+                        left[index],
+                        right[index])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+    for (const auto& source_constraint :
+         child.constraints) {
+        if (!source_constraint.eval ||
+            source_constraint.alg_degree == 0 ||
+            source_constraint.alg_degree ==
+                std::numeric_limits<
+                    uint32_t>::max()) {
+            return Fail(
+                why, "lift_source_constraint");
+        }
+        const bool has_root =
+            !source_constraint
+                 .canonical_program_table_root
+                 .IsNull();
+        const bool has_ordinal =
+            source_constraint
+                .canonical_program_ordinal !=
+            UINT32_MAX;
+        const bool has_wire =
+            source_constraint
+                    .canonical_program_table_wire !=
+                nullptr &&
+            !source_constraint
+                 .canonical_program_table_wire
+                 ->empty();
+        const bool has_challenge =
+            source_constraint
+                    .canonical_program_challenges !=
+                nullptr;
+        const bool any_provenance =
+            has_root || has_ordinal ||
+            has_wire || has_challenge;
+        const bool complete_provenance =
+            has_root && has_ordinal &&
+            has_wire && has_challenge;
+        if (any_provenance &&
+            !complete_provenance) {
+            return Fail(
+                why, "lift_partial_provenance");
+        }
+
+        if (complete_provenance) {
+            auto& bucket = cache[
+                source_constraint
+                    .canonical_program_table_root];
+            CacheEntry* cached = nullptr;
+            for (auto& candidate : bucket) {
+                if (same_challenge(
+                        candidate.challenge,
+                        *source_constraint
+                             .canonical_program_challenges)) {
+                    cached = &candidate;
+                    break;
+                }
+            }
+            if (cached == nullptr) {
+                CacheEntry entry;
+                entry.challenge =
+                    *source_constraint
+                         .canonical_program_challenges;
+                if (!DeserializeProgramTable(
+                        *source_constraint
+                             .canonical_program_table_wire,
+                        entry.source, why) ||
+                    CommitProgramTable(entry.source) !=
+                        source_constraint
+                            .canonical_program_table_root ||
+                    entry.source.current_width >
+                        child.n_columns ||
+                    entry.source.next_width >
+                        child.n_columns) {
+                    return Fail(
+                        why, "lift_program_table");
+                }
+
+                ProgramTable transformed;
+                transformed.version =
+                    entry.source.version;
+                transformed.role =
+                    entry.source.role;
+                transformed.current_width =
+                    lifted.n_columns;
+                transformed.next_width =
+                    lifted.n_columns;
+                transformed.challenge_width =
+                    entry.source.challenge_width;
+                entry.output_ordinals.resize(
+                    entry.source.programs.size());
+                for (uint32_t source_ordinal = 0;
+                     source_ordinal <
+                         entry.source.programs.size();
+                     ++source_ordinal) {
+                    const Program& source_program =
+                        entry.source.programs[
+                            source_ordinal];
+                    const auto [
+                        source_variants,
+                        variant_count] =
+                        variants(source_program.kind);
+                    for (uint32_t variant_index = 0;
+                         variant_index <
+                             variant_count;
+                         ++variant_index) {
+                        const Variant& variant =
+                            source_variants[
+                                variant_index];
+                        Program program =
+                            source_program;
+                        program.kind =
+                            air_quotient::AirKind::
+                                kEverywhere;
+                        ++program.declared_degree;
+                        program.current_width =
+                            lifted.n_columns;
+                        program.next_width =
+                            lifted.n_columns;
+                        program.constraint_ordinal =
+                            static_cast<uint32_t>(
+                                transformed
+                                    .programs.size());
+                        for (Instruction& instruction :
+                             program.instructions) {
+                            if (instruction.opcode ==
+                                    Opcode::Next &&
+                                variant.wrap_next) {
+                                if (instruction.lhs >=
+                                    child.n_columns) {
+                                    return Fail(
+                                        why,
+                                        "lift_next_column");
+                                }
+                                instruction.opcode =
+                                    Opcode::Current;
+                                instruction.lhs +=
+                                    wrap_base;
+                            } else if (
+                                (instruction.opcode ==
+                                     Opcode::Current ||
+                                 instruction.opcode ==
+                                     Opcode::Next) &&
+                                instruction.lhs >=
+                                    child.n_columns) {
+                                return Fail(
+                                    why,
+                                    "lift_child_column");
+                            }
+                        }
+                        if (program.instructions.empty()) {
+                            return Fail(
+                                why,
+                                "lift_empty_program");
+                        }
+                        const uint32_t output =
+                            static_cast<uint32_t>(
+                                program
+                                    .instructions.size() -
+                                1U);
+                        Instruction selector;
+                        selector.opcode =
+                            Opcode::Current;
+                        selector.lhs =
+                            selector_base +
+                            variant.selector;
+                        program.instructions.push_back(
+                            selector);
+                        const uint32_t selector_result =
+                            static_cast<uint32_t>(
+                                program
+                                    .instructions.size() -
+                                1U);
+                        Instruction multiply;
+                        multiply.opcode = Opcode::Mul;
+                        multiply.lhs = output;
+                        multiply.rhs =
+                            selector_result;
+                        program.instructions.push_back(
+                            multiply);
+                        entry.output_ordinals[
+                            source_ordinal]
+                            .push_back(
+                                program
+                                    .constraint_ordinal);
+                        transformed.programs.push_back(
+                            std::move(program));
+                    }
+                }
+                if (!ValidateProgramTable(
+                        transformed, why)) {
+                    return Fail(
+                        why,
+                        "lift_transformed_table");
+                }
+                const bool adapter_ok =
+                    transformed.challenge_width == 0
+                    ? BuildAirConstraintSystemFromProgramTable(
+                          transformed,
+                          lifted.n_rows,
+                          entry.transformed, why)
+                    : BuildAirConstraintSystemFromProgramTable(
+                          transformed,
+                          lifted.n_rows,
+                          entry.challenge,
+                          entry.transformed, why);
+                if (!adapter_ok) {
+                    return Fail(
+                        why,
+                        "lift_transformed_adapter");
+                }
+                bucket.push_back(
+                    std::move(entry));
+                cached = &bucket.back();
+                ++report
+                      .canonical_tables_recommitted;
+            }
+
+            const uint32_t source_ordinal =
+                source_constraint
+                    .canonical_program_ordinal;
+            if (source_ordinal >=
+                    cached->source.programs.size() ||
+                source_ordinal >=
+                    cached->output_ordinals.size()) {
+                return Fail(
+                    why, "lift_program_ordinal");
+            }
+            const Program& original =
+                cached->source.programs[
+                    source_ordinal];
+            if (original.kind !=
+                    source_constraint.kind ||
+                original.declared_degree !=
+                    source_constraint.alg_degree) {
+                return Fail(
+                    why, "lift_program_metadata");
+            }
+            for (const uint32_t output_ordinal :
+                 cached->output_ordinals[
+                     source_ordinal]) {
+                if (output_ordinal >=
+                    cached->transformed
+                        .constraints.size()) {
+                    return Fail(
+                        why,
+                        "lift_output_ordinal");
+                }
+                auto constraint =
+                    cached->transformed
+                        .constraints[
+                            output_ordinal];
+                constraint.name =
+                    source_constraint.name;
+                appended.push_back(
+                    std::move(constraint));
+                ++report
+                      .canonical_constraints_lifted;
+            }
+            continue;
+        }
+
+        const auto [
+            source_variants,
+            variant_count] =
+            variants(source_constraint.kind);
+        for (uint32_t variant_index = 0;
+             variant_index < variant_count;
+             ++variant_index) {
+            const Variant variant =
+                source_variants[variant_index];
+            air_quotient::AirConstraint<Fp3>
+                gated;
+            gated.name = source_constraint.name;
+            gated.kind =
+                air_quotient::AirKind::kEverywhere;
+            gated.alg_degree =
+                source_constraint.alg_degree + 1;
+            const auto eval =
+                source_constraint.eval;
+            const uint32_t width =
+                child.n_columns;
+            gated.eval =
+                [eval, width, wrap_base,
+                 selector_base, variant](
+                    const std::vector<Fp3>& current,
+                    const std::vector<Fp3>& next) {
+                    if (current.size() <
+                            selector_base +
+                                variant.selector +
+                                1U ||
+                        next.size() < width ||
+                        current.size() <
+                            wrap_base + width) {
+                        return Fp3::One();
+                    }
+                    std::vector<Fp3>
+                        child_current(
+                            current.begin(),
+                            current.begin() +
+                                width);
+                    std::vector<Fp3> child_next;
+                    if (variant.wrap_next) {
+                        child_next.assign(
+                            current.begin() +
+                                wrap_base,
+                            current.begin() +
+                                wrap_base +
+                                width);
+                    } else {
+                        child_next.assign(
+                            next.begin(),
+                            next.begin() +
+                                width);
+                    }
+                    return gf::Mul(
+                        current[
+                            selector_base +
+                            variant.selector],
+                        eval(
+                            child_current,
+                            child_next));
+                };
+            appended.push_back(
+                std::move(gated));
+            ++report.native_constraints_gated;
+        }
+    }
+
+    report.output_constraints =
+        static_cast<uint32_t>(
+            appended.size());
+    lifted.constraints.insert(
+        lifted.constraints.end(),
+        std::make_move_iterator(
+            appended.begin()),
+        std::make_move_iterator(
+            appended.end()));
+    report.every_claimed_provenance_valid =
+        true;
+    uint32_t expected_outputs{0};
+    for (const auto& constraint :
+         child.constraints) {
+        expected_outputs +=
+            constraint.kind ==
+                    air_quotient::AirKind::
+                        kEverywhere
+                ? 2U
+                : 1U;
+    }
+    report.exact_order_preserved =
+        report.output_constraints ==
+            expected_outputs &&
+        report.output_constraints ==
+            report.canonical_constraints_lifted +
+                report.native_constraints_gated;
+    return report.exact_order_preserved;
+}
+
 PostChallengeColumnClassAudit AssessPostChallengeColumnClass()
 {
     return PostChallengeColumnClassAudit{};

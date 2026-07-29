@@ -5,11 +5,15 @@
 #include <boost/test/unit_test.hpp>
 
 #include <matmul/matmul_v4_rc_stage3_air_parent_composer.h>
+#include <matmul/matmul_v4_rc_stage3_constraint_bytecode.h>
 
 namespace composer =
     matmul::v4::rc::stage3_air_parent_composer;
 namespace aq = matmul::v4::rc::air_quotient;
 namespace gf = matmul::v4::rc::gkr_field;
+namespace cb =
+    matmul::v4::rc::constraint_bytecode;
+namespace rc = matmul::v4::rc;
 
 BOOST_AUTO_TEST_SUITE(matmul_v4_rc_stage3_air_parent_composer_tests)
 
@@ -187,6 +191,20 @@ BOOST_AUTO_TEST_CASE(exact_row_lift_preserves_boundaries_and_rejects_padding)
     BOOST_CHECK(attachment.padding_zero_constrained);
     BOOST_CHECK_EQUAL(attachment.semantic_child_columns, 2U);
     BOOST_CHECK_EQUAL(attachment.column_count, 9U);
+    BOOST_CHECK_EQUAL(
+        attachment
+            .canonical_constraints_relocated,
+        6U);
+    BOOST_CHECK_EQUAL(
+        attachment.native_constraints_shifted,
+        2U);
+    BOOST_CHECK_EQUAL(
+        attachment
+            .canonical_tables_recommitted,
+        2U);
+    BOOST_CHECK(
+        attachment
+            .canonical_program_relocation_exact);
     BOOST_CHECK_EQUAL(parent.n_rows, 16U);
 
     const auto honest =
@@ -247,6 +265,98 @@ BOOST_AUTO_TEST_CASE(row_lift_preserves_cyclic_next_on_child_last_row)
         aq::AirQuotientVerify<gf::Fp3>(
             parent, proof.proof, Seed(), &why),
         why);
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_row_lift_remains_executable_after_parent_relocation)
+{
+    cb::Program program;
+    program.role =
+        rc::RCStage3RelationRole::EpisodeExtract;
+    program.constraint_ordinal = 0;
+    program.kind = aq::AirKind::kEverywhere;
+    program.declared_degree = 1;
+    program.current_width = 1;
+    program.next_width = 1;
+    cb::Instruction after;
+    after.opcode = cb::Opcode::Next;
+    after.lhs = 0;
+    cb::Instruction before;
+    before.opcode = cb::Opcode::Current;
+    before.lhs = 0;
+    cb::Instruction difference;
+    difference.opcode = cb::Opcode::Sub;
+    difference.lhs = 0;
+    difference.rhs = 1;
+    program.instructions = {
+        after, before, difference};
+    cb::ProgramTable table;
+    table.role = program.role;
+    table.current_width = 1;
+    table.next_width = 1;
+    table.programs = {program};
+
+    Cs child;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, 4, child, &why),
+        why);
+    Columns child_columns(
+        1, std::vector<gf::Fp3>(4, U(5)));
+    Cs parent;
+    Columns columns;
+    composer::ChildAttachmentV1 attachment;
+    BOOST_REQUIRE_MESSAGE(
+        composer::AppendChildLiftedV1(
+            parent, columns, child,
+            child_columns, 16, 0,
+            attachment, &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        attachment
+            .canonical_constraints_relocated,
+        5U);
+    BOOST_CHECK_EQUAL(
+        attachment.native_constraints_shifted,
+        0U);
+    BOOST_CHECK_EQUAL(
+        attachment
+            .canonical_tables_recommitted,
+        3U);
+    BOOST_CHECK(
+        attachment
+            .canonical_program_relocation_exact);
+
+    const auto proof =
+        aq::AirQuotientProve<gf::Fp3>(
+            parent, columns, Seed());
+    BOOST_REQUIRE_MESSAGE(
+        proof.ok, proof.note);
+    BOOST_REQUIRE(proof.division_exact);
+    BOOST_CHECK_MESSAGE(
+        aq::AirQuotientVerify<gf::Fp3>(
+            parent, proof.proof,
+            Seed(), &why),
+        why);
+
+    auto forged = columns;
+    forged[attachment.ParentColumn(0)][1] =
+        U(6);
+    aq::AirProveOptions force;
+    force.force_commit_on_inexact = true;
+    const auto forged_proof =
+        aq::AirQuotientProve<gf::Fp3>(
+            parent, forged, Seed(), force);
+    BOOST_REQUIRE_MESSAGE(
+        forged_proof.ok,
+        forged_proof.note);
+    BOOST_REQUIRE(
+        !forged_proof.division_exact);
+    BOOST_CHECK(
+        !aq::AirQuotientVerify<gf::Fp3>(
+            parent, forged_proof.proof,
+            Seed(), &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
