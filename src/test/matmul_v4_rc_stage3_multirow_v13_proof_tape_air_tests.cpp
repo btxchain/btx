@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_multirow_v13_proof_tape_air.h>
+#include <matmul/matmul_v4_rc_stage3_ordinary_recursive_leaf.h>
 
 #include <boost/test/unit_test.hpp>
 
@@ -13,6 +14,9 @@
 
 namespace matmul::v4::rc::stage3_multirow_v13_proof_tape_air {
 namespace {
+
+namespace ordinary_leaf =
+    stage3_ordinary_recursive_leaf;
 
 uint256 Root(uint8_t byte)
 {
@@ -1251,6 +1255,28 @@ BOOST_AUTO_TEST_CASE(
         VerifyShardPublicV3(
             statement, public_proof, &why),
         why);
+    const auto recursive_tape =
+        ordinary_leaf::
+            RetainTapeShardProofV1(
+                statement, public_proof);
+    BOOST_REQUIRE_MESSAGE(
+        recursive_tape.valid,
+        recursive_tape.note);
+    BOOST_CHECK(
+        recursive_tape
+            .native_tape_verifier_accepted);
+    BOOST_CHECK(
+        recursive_tape
+            .canonical_payload_equal);
+    BOOST_CHECK(
+        recursive_tape.ordinary
+            .ordinary_reentry_verified);
+    BOOST_CHECK_MESSAGE(
+        ordinary_leaf::
+            VerifyTapeShardReceiptV1(
+                recursive_tape,
+                statement, &why),
+        why);
     const uint256 public_fs_seed =
         DeriveShardPublicFsSeedV3(
             statement,
@@ -1365,6 +1391,25 @@ BOOST_AUTO_TEST_CASE(
         !VerifyShardPublicV3(
             cross_context, public_proof,
             &why));
+    BOOST_CHECK(
+        !ordinary_leaf::
+             VerifyTapeShardReceiptV1(
+                 recursive_tape,
+                 cross_context, &why));
+
+    auto recursive_terminal_tamper =
+        recursive_tape;
+    recursive_terminal_tamper
+        .source_terminal[0] =
+        gf::Add(
+            recursive_terminal_tamper
+                .source_terminal[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !ordinary_leaf::
+             VerifyTapeShardReceiptV1(
+                 recursive_terminal_tamper,
+                 statement, &why));
 
     ShardProductV2 adaptive_witness =
         product;

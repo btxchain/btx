@@ -20156,6 +20156,44 @@ bool ValidateNarrowRecursiveProofReceiptV1(
     return true;
 }
 
+bool ValidateNarrowRecursiveProofReceiptV2(
+    const NarrowRecursiveProofReceiptV1& receipt,
+    const aq::AirConstraintSystem<Fp3>& expected_constraint_system,
+    const NarrowRecursiveProofExpectedBindingV2& expected_binding,
+    std::string* why)
+{
+    if (expected_binding.version !=
+            kNarrowRecursiveProofReceiptVersionV1 ||
+        expected_binding.node_binding.IsNull() ||
+        expected_binding.program_binding.IsNull() ||
+        expected_binding.proof_context_binding.IsNull() ||
+        expected_binding.statement_commitment.IsNull() ||
+        expected_binding.fs_seed.IsNull() ||
+        expected_binding.active_rows == 0 ||
+        expected_binding.n_lde == 0) {
+        return Fail(why, "narrow_receipt_v2_expected_binding");
+    }
+    if (receipt.proof_context_binding !=
+            expected_binding.proof_context_binding) {
+        return Fail(why, "narrow_receipt_v2_proof_context");
+    }
+    if (receipt.statement_commitment !=
+            expected_binding.statement_commitment) {
+        return Fail(why, "narrow_receipt_v2_statement");
+    }
+    if (receipt.fs_seed != expected_binding.fs_seed) {
+        return Fail(why, "narrow_receipt_v2_fs_seed");
+    }
+    if (receipt.active_rows != expected_binding.active_rows ||
+        receipt.n_lde != expected_binding.n_lde) {
+        return Fail(why, "narrow_receipt_v2_proof_domain");
+    }
+    return ValidateNarrowRecursiveProofReceiptV1(
+        receipt, expected_constraint_system,
+        expected_binding.node_binding,
+        expected_binding.program_binding, why);
+}
+
 NarrowRetainedReceiptParentV1
 ExecuteNarrowRetainedReceiptParentV1(
     const std::vector<NarrowRecursiveProofReceiptV1>& children,
@@ -20283,6 +20321,58 @@ ExecuteNarrowRetainedReceiptParentV1(
              : ";production_budget=0") +
         ";complete_fp=false";
     return out;
+}
+
+NarrowRetainedReceiptParentV1
+ExecuteNarrowRetainedReceiptParentV2(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        expected_child_constraint_systems,
+    const std::vector<NarrowRecursiveProofExpectedBindingV2>&
+        expected_child_bindings,
+    const uint256& parent_node_binding,
+    const uint256& parent_program_binding,
+    bool prove)
+{
+    NarrowRetainedReceiptParentV1 out;
+    out.arity = static_cast<uint32_t>(children.size());
+    out.parent_node_binding = parent_node_binding;
+    out.parent_program_binding = parent_program_binding;
+    if (children.size() < 2 ||
+        expected_child_constraint_systems.size() !=
+            children.size() ||
+        expected_child_bindings.size() != children.size()) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "narrow_retained_parent_v2_input";
+        return out;
+    }
+
+    std::vector<uint256> expected_node_bindings;
+    std::vector<uint256> expected_program_bindings;
+    expected_node_bindings.reserve(children.size());
+    expected_program_bindings.reserve(children.size());
+    for (uint32_t i = 0; i < children.size(); ++i) {
+        std::string why;
+        if (!ValidateNarrowRecursiveProofReceiptV2(
+                children[i],
+                expected_child_constraint_systems[i],
+                expected_child_bindings[i], &why)) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "narrow_retained_child_v2_invalid:" +
+                std::to_string(i) + ":" + why;
+            return out;
+        }
+        expected_node_bindings.push_back(
+            expected_child_bindings[i].node_binding);
+        expected_program_bindings.push_back(
+            expected_child_bindings[i].program_binding);
+    }
+    return ExecuteNarrowRetainedReceiptParentV1(
+        children, expected_child_constraint_systems,
+        expected_node_bindings, expected_program_bindings,
+        parent_node_binding, parent_program_binding, prove);
 }
 
 NarrowBytecodeShardQuotientJoinV1

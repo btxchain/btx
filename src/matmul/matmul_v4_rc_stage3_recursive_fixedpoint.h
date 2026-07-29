@@ -3747,6 +3747,36 @@ RetainNarrowRecursiveProofReceiptV1(
     std::string* why = nullptr);
 
 /**
+ * Complete verifier-owned identity for one retained recursive child.
+ *
+ * V1 predates ordinary semantic leaves and only accepts verifier-owned
+ * node/program identities.  That is sufficient for retained narrow parents,
+ * whose remaining fields are reconstructed by the parent protocol, but it is
+ * not sufficient for an ordinary leaf: proof_context_binding,
+ * statement_commitment and fs_seed must not be relabelable host fields.
+ *
+ * V2 is additive and fail-closed.  The caller reconstructs every field from
+ * the child protocol statement and supplies the exact AIR proof-domain
+ * charge.  No expected value is learned from the receipt under validation.
+ */
+struct NarrowRecursiveProofExpectedBindingV2 {
+    uint16_t version{kNarrowRecursiveProofReceiptVersionV1};
+    uint256 node_binding{};
+    uint256 program_binding{};
+    uint256 proof_context_binding{};
+    uint256 statement_commitment{};
+    uint256 fs_seed{};
+    uint64_t active_rows{0};
+    uint32_t n_lde{0};
+};
+
+[[nodiscard]] bool ValidateNarrowRecursiveProofReceiptV2(
+    const NarrowRecursiveProofReceiptV1& receipt,
+    const aq::AirConstraintSystem<Fp3>& expected_constraint_system,
+    const NarrowRecursiveProofExpectedBindingV2& expected_binding,
+    std::string* why = nullptr);
+
+/**
  * One real recursive hierarchy step.  Every child receipt is independently
  * validated and re-entered as an AlgAirProof.  The ordered child receipt
  * commitments and parent node binding derive the proof-context binding that
@@ -3783,6 +3813,27 @@ ExecuteNarrowRetainedReceiptParentV1(
         expected_child_constraint_systems,
     const std::vector<uint256>& expected_child_node_bindings,
     const std::vector<uint256>& expected_child_program_bindings,
+    const uint256& parent_node_binding,
+    const uint256& parent_program_binding,
+    bool prove = true);
+
+/**
+ * Complete public-identity intake for ordinary/semantic leaves.  Unlike V1,
+ * every child's context, statement, transcript seed and exact proof domain
+ * are supplied by the independent child verifier and equality-checked before
+ * construction of the parent transcript.
+ *
+ * This does not itself close CompleteFP: after validation it deliberately
+ * delegates to the existing fold-bus parent, whose remaining in-AIR
+ * child-verifier equations are tracked by the separate fixed-point audit.
+ */
+[[nodiscard]] NarrowRetainedReceiptParentV1
+ExecuteNarrowRetainedReceiptParentV2(
+    const std::vector<NarrowRecursiveProofReceiptV1>& children,
+    const std::vector<aq::AirConstraintSystem<Fp3>>&
+        expected_child_constraint_systems,
+    const std::vector<NarrowRecursiveProofExpectedBindingV2>&
+        expected_child_bindings,
     const uint256& parent_node_binding,
     const uint256& parent_program_binding,
     bool prove = true);

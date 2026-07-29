@@ -242,6 +242,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_v13_quotient_tape_parent_tests.cpp
   matmul_v4_rc_stage3_v13_deep_source_logup_parent_tests.cpp
   matmul_v4_rc_stage3_v13_two_child_parent_tests.cpp
+  matmul_v4_rc_stage3_ordinary_recursive_leaf_tests.cpp
   matmul_v4_rc_stage3_v13_fixedpoint_bytecode_coverage_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_merkle_fold_tests.cpp
   matmul_v4_rc_stage3_multirow_v11_decoder_join_tests.cpp
