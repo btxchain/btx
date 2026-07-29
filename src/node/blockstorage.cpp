@@ -355,8 +355,16 @@ CBlockIndex* BlockManager::AddToBlockIndex(const CBlockHeader& block, CBlockInde
     }
     pindexNew->nTimeMax = (pindexNew->pprev ? std::max(pindexNew->pprev->nTimeMax, pindexNew->nTime) : pindexNew->nTime);
     pindexNew->nChainWork = (pindexNew->pprev ? pindexNew->pprev->nChainWork : 0) + GetBlockProof(*pindexNew);
+    // Audit P0.1/C1: a freshly added header is only BLOCK_VALID_TREE, so at MatMul
+    // heights it contributes zero AUTHENTICATED work until its body validates
+    // (promoted later in ReceivedBlockTransactions). Pre-MatMul heights contribute
+    // full work here, keeping nAuthenticatedChainWork == nChainWork identical.
+    UpdateAuthenticatedChainWork(*pindexNew, GetConsensus());
     pindexNew->RaiseValidity(BLOCK_VALID_TREE);
-    if (best_header == nullptr || best_header->nChainWork < pindexNew->nChainWork) {
+    // Prefer trust-adjusted work for best-header selection so a forged
+    // header-only branch cannot displace a more authenticated tip beyond the
+    // bounded unauth lookahead (matches net_processing peer decisions).
+    if (best_header == nullptr || PreferTrustAdjustedHeader(*best_header, *pindexNew)) {
         best_header = pindexNew;
     }
 
@@ -656,6 +664,11 @@ bool BlockManager::LoadBlockIndex(const std::optional<uint256>& snapshot_blockha
         }
         previous_index = pindex;
         pindex->nChainWork = (pindex->pprev ? pindex->pprev->nChainWork : 0) + GetBlockProof(*pindex);
+        // Audit P0.1/C1: deterministically recompute authenticated chainwork from
+        // persisted nStatus. This is the restart path -- height-ordered so pprev is
+        // always finalized first. Reproduces exactly what the incremental
+        // AddToBlockIndex/ReceivedBlockTransactions maintenance built at runtime.
+        UpdateAuthenticatedChainWork(*pindex, GetConsensus());
         pindex->nTimeMax = (pindex->pprev ? std::max(pindex->pprev->nTimeMax, pindex->nTime) : pindex->nTime);
 
         // We can link the chain of blocks for which we've received transactions at some point, or

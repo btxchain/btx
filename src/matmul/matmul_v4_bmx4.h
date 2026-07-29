@@ -1,0 +1,540 @@
+// Copyright (c) 2026 The BTX developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#ifndef BTX_MATMUL_MATMUL_V4_BMX4_H
+#define BTX_MATMUL_MATMUL_V4_BMX4_H
+
+#include <matmul/int8_field.h>
+#include <matmul/matmul_v4.h>
+#include <uint256.h>
+
+#include <array>
+#include <cstddef>
+#include <cstdint>
+#include <string_view>
+#include <vector>
+
+class CBlockHeader;
+
+// ---------------------------------------------------------------------------
+// ENC-BMX4C committed-object encoding profile (MatMul v4.2 / BMX4-C).
+//
+// This is the CPU integer REFERENCE for the frontier-native ENC-BMX4C profile
+// pinned by doc/btx-matmul-v4.2-consolidated-design.md. It is the bit-exact
+// ground truth every backend / golden vector mirrors byte-for-byte.
+//
+// It changes ONLY the operand ENCODING (design §8.1 "versioned encoding
+// profile"); the invariant verification core is reused UNCHANGED from
+// matmul::v4: the field q = 2^61-1 (int8_field.h), the wide counter-mode
+// SHA-256 XOF, the projections P = U*A / Q = B*V, the direct mod-q combine,
+// SerializeSketch / ParseSketch / ComputeSketchDigest, and the O(n^2)
+// SketchFreivalds verifier. VerifySketch_BMX4C dequantizes the (mantissa,
+// scale) operand streams into exact integers and calls matmul::v4::
+// SketchFreivalds with no changes -- the verifier is compute-path-agnostic by
+// construction (design §3).
+//
+// Differences from the v4.1 ENC-S8 profile (namespace matmul::v4):
+//   * operands are E2M1-integer mantissas mu in M11 = {0,+-1,+-2,+-3,+-4,+-6}
+//     times a per-32-block power-of-two scale 2^e, e in {0,1,2,3} (E8M0, S=3);
+//     dequantized |Ahat| <= E_max = 48 (still <= 127, so INT8-native);
+//   * U, V are i.i.d. over M11, SCALE-FREE (|.| <= 6);
+//   * the combine uses 4 balanced base-2^6 digits (base 64, digits [-32,31]
+//     with the remainder-carrying top rule) instead of base-2^7;
+//   * V4.2 domain tags for the seed derivations.
+//
+// EVERYTHING here is exact integer arithmetic. NO float appears on the
+// committed path (design §4 C-1').
+// ---------------------------------------------------------------------------
+
+namespace matmul::v4::bmx4 {
+
+using int8_field::Fq;
+
+// --- Pinned encoding constants (design §2.1, §2.4, §5.2) --------------------
+
+/** The E2M1-integer mantissa alphabet M11 = {0, +-1, +-2, +-3, +-4, +-6}
+ *  (design §2.1). Exactly the integer-valued subset of OCP-MX FP4 E2M1;
+ *  +-5, +-0.5, +-1.5 are structurally absent. 11 symbols. */
+inline constexpr std::array<int8_t, 11> kAlphabetM11 =
+    {0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6};
+inline constexpr uint32_t kAlphabetSize = 11;
+
+/** Largest mantissa magnitude in M11 (the value 6). */
+inline constexpr int32_t kMantissaMaxAbs = 6;
+
+/** E8M0 block-scale discipline (design §2.1): one shared power-of-two scale
+ *  2^e per L = 32-element block along the contraction dimension K, with the
+ *  exponent e in {0..S}, S = 3. */
+inline constexpr uint32_t kBlockLen = 32;   // OCP block length L
+inline constexpr uint32_t kScaleS = 3;      // S = E_max exponent range
+inline constexpr uint32_t kNumScaleCodes = 4; // e in {0,1,2,3}
+
+/** Dequantized operand magnitude bound E_max = M_max * 2^S = 6*8 = 48
+ *  (design §2.4). 48 <= 127 keeps every INT8 part 1-GEMM native. */
+inline constexpr int32_t kEmax = kMantissaMaxAbs << kScaleS; // 48
+static_assert(kEmax == 48, "E_max must be 6*2^3 = 48");
+static_assert(kEmax <= 127, "E_max must fit s8 for the 1-GEMM INT8 embedding");
+
+/** Per-MAC magnitude of the base product C = Ahat*Bhat: E_max^2 = 2304
+ *  (design §2.4). |C| <= 2304*n < 2^24 at n = 4096. */
+inline constexpr int32_t kBaseProductPerMac = kEmax * kEmax; // 2304
+
+/** Per-MAC magnitude of the projections P = U*Ahat, Q = Bhat*V:
+ *  6 * 48 = 288 (design §2.2/§2.4, the scale-free M11 U/V). |P|,|Q| <= 288*n. */
+inline constexpr int32_t kProjPerMac = kMantissaMaxAbs * kEmax; // 288
+
+// --- Combine: 4 balanced base-2^6 digits, remainder-top rule (design §5.2) --
+
+/** Combine limb count and base: 4 balanced base-2^6 digits (base 64). The low
+ *  3 digits are in [-32, 31]; the top digit carries the exact remainder in
+ *  [-32, +32] (the remainder-top rule), making the decomposition TOTAL and
+ *  UNIQUE for every |x| < 64^4/2 = 2^23 (design §5.2). Each digit plane is a
+ *  valid s8 tensor operand (|digit| <= 32). */
+inline constexpr uint32_t kCombineLimbs = 4;
+inline constexpr int32_t kCombineLimbBase = 64;      // base 2^6
+inline constexpr int32_t kCombineDigitLow = -32;     // low-3-digit min
+inline constexpr int32_t kCombineDigitHigh = 31;     // low-3-digit max
+static_assert(kCombineLimbBase == 64, "base-2^6 combine pins base 64");
+
+/** CORRECTED asymmetric-extreme constant (design §5.2): a PURE balanced
+ *  base-2^6 scheme (all 4 digits in [-32,31]) covers positives only up to
+ *  31*(64^4-1)/63 = 8,255,455 (the redesign doc's 8,255,527 is off by 72),
+ *  i.e. 288*n total-decomposes only to n <= 28,664. This is MOOT under the
+ *  remainder-top rule the reference adopts, which reaches the full |x| < 2^23
+ *  window -- but the constant is pinned so the correction is machine-checked. */
+inline constexpr int64_t kCombinePureBalancedPositiveExtreme = 8'255'455;
+static_assert(kCombinePureBalancedPositiveExtreme ==
+                  31LL * (64LL * 64 * 64 * 64 - 1) / 63,
+              "pure balanced base-2^6 positive extreme = 31*(64^4-1)/63");
+
+/** The remainder-top total-decomposition bound: |x| <= 2^23 - 1 = 8,388,607.
+ *  CheckCombineLimbBound_BMX4C pins 288*n <= 2^23 - 1 (design §5.2 "the
+ *  CheckCombineLimbBound successor pins 288*n <= 2^23-1"), i.e. n <= 29,127 --
+ *  the whole 4096..8192 window with ~3.5x margin. */
+inline constexpr int64_t kCombineMaxAbs = (static_cast<int64_t>(1) << 23) - 1; // 8,388,607
+
+/** Per-MAC bound of a base-2^6 limb-pair GEMM: 32*32 = 1024, so |S_ij| <=
+ *  1024*n = 2^22 at n = 4096 (design §2.4) -- sub-2^24, runnable on any
+ *  proven-t=24 or true-int32 unit. */
+inline constexpr int32_t kCombineLimbPairPerMac = 32 * 32; // 1024
+
+// --- Sampler primitives (design §2.3) --------------------------------------
+
+/** Map one 4-bit nibble to an M11 mantissa by the pinned E2M1 bijection
+ *  (design §2.3): bit3 = sign, bits2..1 = exp, bit0 = mantissa; decode the FP4
+ *  E2M1 value and ACCEPT iff it is a non-negative-zero integer. The 5 rejected
+ *  codes are exactly {+-0.5, +-1.5, -0} (nibbles 1,3,8,9,11). Acceptance
+ *  11/16. Returns the mantissa on accept; sets `accepted=false` on a hole. */
+[[nodiscard]] int8_t SampleMantissaNibble(uint8_t nibble, bool& accepted);
+
+/** Deterministically expand `count` M11 mantissas from a seed via a wide
+ *  counter-mode SHA-256 XOF (mantissa-plane domain byte 'm'): one 4-bit nibble
+ *  per element in stream order (low nibble of each keystream byte first, then
+ *  high nibble), E2M1-rejection-sampled into M11. Exact-integer, byte-
+ *  reproducible, PQ-safe. This is the mantissa plane for A, B, U, and V. */
+void ExpandMantissaStream(const uint256& seed, size_t count, int8_t* out);
+
+/** Device-portable schedule for ExpandMantissaStream: two-pass count-then-fill
+ *  with deterministic block extension. BYTE-IDENTICAL output; GPU ports MUST
+ *  preserve counter / byte / nibble / rejection order. */
+void ExpandMantissaStreamPortable(const uint256& seed, size_t count, int8_t* out);
+
+/** Parallel block-prefix implementation of ExpandMantissaStream. Byte-identical
+ *  to the scalar stream; intended for verifier throughput where a single large
+ *  operand would otherwise strand worker cores. threads<=1 uses the scalar path. */
+void ExpandMantissaStreamParallel(const uint256& seed, size_t count, int8_t* out,
+                                  uint32_t threads);
+
+/** Deterministically expand `count` E8M0 exponents e in {0,1,2,3} from a seed
+ *  via a wide counter-mode SHA-256 XOF (scale-plane domain byte 'e'): 2 bits
+ *  per code, 4 codes per keystream byte from the LSB up, rejection-free. This
+ *  is the scale plane for A and B (U/V have none). */
+void ExpandScaleStream(const uint256& seed, size_t count, uint8_t* out);
+
+/** Device-portable schedule for ExpandScaleStream (same bytes). */
+void ExpandScaleStreamPortable(const uint256& seed, size_t count, uint8_t* out);
+
+/** Parallel implementation of ExpandScaleStream. Byte-identical to scalar. */
+void ExpandScaleStreamParallel(const uint256& seed, size_t count, uint8_t* out,
+                               uint32_t threads);
+
+// --- Seed derivation (design §2.3, V4.2 domain tags) -----------------------
+
+/** V4.2 seed derivations (design §2.3), mirroring the v4.1 I1'/§H.4 scoping:
+ *   seed_A = SHA256("BTX_MATMUL_SEED_V42"     || template_hash    || 0x41) TMPL
+ *   seed_B = SHA256("BTX_MATMUL_SEED_V42"     || full_header_hash || 0x42) NONCE
+ *   seed_U = SHA256("BTX_MATMUL_V42_SKETCH_U" || template_hash)           TMPL
+ *   seed_V = SHA256("BTX_MATMUL_V42_SKETCH_V" || template_hash)           TMPL
+ *  A/U/V are template-scoped; B is nonce-fresh (its mantissa AND scale planes,
+ *  design condition #6). sigma = SHA256d(header) is reused UNCHANGED. */
+[[nodiscard]] uint256 DeriveOperandSeedBMX4C(const CBlockHeader& header, Operand which);
+[[nodiscard]] std::pair<uint256, uint256> DeriveProjectorSeedsBMX4C(const CBlockHeader& header);
+
+// --- Operand / projector expansion + dequant (design §2.1) -----------------
+
+/** Expand + dequantize operand A: Ahat[i][k] = mu_A[i][k] * 2^{e_A(i/32,k)},
+ *  n*n row-major exact integers with |Ahat| <= 48 (fits int8). The scale
+ *  block runs along the contraction dim (rows i in P = U*Ahat): scale plane
+ *  is (n/32) x n row-major. Requires n % 32 == 0. */
+[[nodiscard]] std::vector<int8_t> ExpandOperandA(const uint256& seed, uint32_t n);
+
+/** Expand + dequantize operand B: Bhat[k][j] = mu_B[k][j] * 2^{e_B(k,j/32)},
+ *  n*n row-major exact integers with |Bhat| <= 48. The scale block runs along
+ *  the contraction dim (columns j in Q = Bhat*V): scale plane is
+ *  n x (n/32) row-major. */
+[[nodiscard]] std::vector<int8_t> ExpandOperandB(const uint256& seed, uint32_t n);
+
+/** Expand a scale-free M11 projector (U is m*n, V is n*m; design §2.2). */
+[[nodiscard]] std::vector<int8_t> ExpandProjectorBMX4C(const uint256& seed,
+                                                       uint32_t rows, uint32_t cols);
+
+// --- Combine: base-2^6 limb tensor (design §5) -----------------------------
+
+/** True iff the 4-digit base-2^6 remainder-top decomposition is total for
+ *  every P/Q entry at dimension n: 288*n <= 2^23-1 (design §5.2). Holds for
+ *  all n <= 29,127. */
+[[nodiscard]] bool CheckCombineLimbBoundBMX4C(uint32_t n);
+
+/** Base-2^6 limb-tensor combine (design §5): decompose P (m*n) and Q (n*m)
+ *  entrywise into 4 balanced base-64 digits (remainder-top), run the 16
+ *  limb-pair m*m*n exact s8xs8->s32 GEMMs, and recombine
+ *      Chat = sum_ij 2^{6(i+j)} * S_ij  (mod q).
+ *  BYTE-IDENTICAL to matmul::v4::ComputeCombineModQ(P, Q, n, m): the digit
+ *  identity x = sum_l 64^l d_l is exact, so the shifted mod-q fold reproduces
+ *  the canonical sum_k P[a][k]*Q[k][c] mod q. This is the CPU reference for the
+ *  GPU tensor-core combine. */
+[[nodiscard]] std::vector<Fq> ComputeCombineLimbTensorBMX4C(const std::vector<int32_t>& P,
+                                                            const std::vector<int32_t>& Q,
+                                                            uint32_t n, uint32_t m);
+
+/** Karatsuba-9 combine: same base-2^6 remainder-top digits as
+ *  ComputeCombineLimbTensorBMX4C, but evaluates the degree-3 digit polynomials
+ *  with nine GEMMs instead of sixteen (two-level Karatsuba). BYTE-IDENTICAL to
+ *  ComputeCombineLimbTensorBMX4C / ComputeCombineModQ. The largest Karatsuba
+ *  input is the sum of all four limbs, bounded by [-128,125] (fits s8); every
+ *  accumulator satisfies |sum| <= 128^2 * n < 2^29 at the dimension limit, so
+ *  results remain exact in INT32. This is the preferred miner-local INT8
+ *  combine lane (doc/btx-matmul-v4.4-exact-accel-lanes.md). */
+[[nodiscard]] std::vector<Fq> ComputeCombineKaratsuba9BMX4C(const std::vector<int32_t>& P,
+                                                            const std::vector<int32_t>& Q,
+                                                            uint32_t n, uint32_t m);
+
+/** Max |entry| over P and Q (magnitude scan for adaptive limb selection). */
+[[nodiscard]] int64_t ScanCombineMaxAbsBMX4C(const std::vector<int32_t>& P,
+                                            const std::vector<int32_t>& Q);
+
+/** Two-limb base-2^6 remainder-top bound: |x| <= 31 + 32*64 = 2079
+ *  (low digit in [-32,31], top remainder in [-32,32]).
+ *  When every P/Q entry fits, ComputeCombineTwoLimbBMX4C is exact with 4 GEMMs. */
+inline constexpr int64_t kCombineTwoLimbBase64MaxAbs = 31 + 32 * 64; // 2079
+
+/** Two-limb base-256 remainder-top bound with every digit in int8_t [-128,127]:
+ *  |x| <= 127 + 127*256 = 32639.
+ *  Note: the balanced low-digit step can yield remainder +128 at |x|=32640;
+ *  +128 is not representable in int8_t, so 32640 must use three limbs. */
+inline constexpr int64_t kCombineTwoLimbBase256MaxAbs = 127 + 127 * 256; // 32639
+
+/** Three-limb base-256 remainder-top bound with every digit in int8_t:
+ *  |x| <= 127 + 127*256 + 127*256^2 = 8,355,711.
+ *  Covers the full ENC-BMX4C projection envelope 288*n at n <= 8192. */
+inline constexpr int64_t kCombineThreeLimbBase256MaxAbs =
+    127 + 127 * 256 + 127 * 256 * 256; // 8,355,711
+
+/** Miner-local exact two-limb base-2^6 combine (4 limb-pair GEMMs). Requires
+ *  ScanCombineMaxAbsBMX4C(P,Q) <= kCombineTwoLimbBase64MaxAbs. BYTE-IDENTICAL
+ *  to ComputeCombineModQ when the magnitude precondition holds. */
+[[nodiscard]] std::vector<Fq> ComputeCombineTwoLimbBMX4C(const std::vector<int32_t>& P,
+                                                        const std::vector<int32_t>& Q,
+                                                        uint32_t n, uint32_t m);
+
+/** Miner-local adaptive base-256 combine with sparse high-limb plane skip:
+ *  magnitude scan selects 2 or 3 signed base-256 digits; all-zero high planes
+ *  are omitted from the GEMM set. When the scan exceeds the three-limb bound
+ *  (should not happen under CheckCombineLimbBoundBMX4C), falls back
+ *  unconditionally to ComputeCombineKaratsuba9BMX4C. BYTE-IDENTICAL to
+ *  ComputeCombineModQ / Karatsuba-9 on every path. */
+[[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveBase256BMX4C(const std::vector<int32_t>& P,
+                                                                 const std::vector<int32_t>& Q,
+                                                                 uint32_t n, uint32_t m);
+
+/** Dispatcher: two-limb base-64 when safe, else adaptive base-256, else
+ *  Karatsuba-9. Always returns Chat bytes identical to ComputeCombineModQ. */
+[[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveLimbBMX4C(const std::vector<int32_t>& P,
+                                                              const std::vector<int32_t>& Q,
+                                                              uint32_t n, uint32_t m);
+
+/** Miner-local adaptive exact combine statistics. These counters are not part
+ *  of the consensus transcript; they let accelerator planners and benchmarks
+ *  distinguish the common four-GEMM path from its deterministic exact
+ *  fallback. */
+struct AdaptiveCombineStatsBMX4C {
+    size_t input_elements{0};
+    size_t p_high_nonzero{0};
+    size_t q_high_nonzero{0};
+    uint64_t estimated_sparse_correction_macs{0};
+    uint32_t dense_gemm_count{0};
+    bool used_sparse_high_correction{false};
+    bool used_direct_fallback{false};
+};
+
+/** Maximum fraction of non-zero high limbs accepted by the sparse-correction
+ *  path. Once more than 1/16 of all P/Q entries need a high limb, the CPU
+ *  prototype deterministically falls back to ComputeCombineModQ instead of
+ *  allowing adversarially dense "sparse" work. */
+inline constexpr size_t kAdaptiveHighLimbFallbackDivisor = 16;
+
+/** Adaptive balanced-base-256 miner combine prototype. Each P/Q entry is
+ *  decomposed exactly as
+ *
+ *      x = d0 + 256*d1 + 65536*h,  d0,d1 in [-128,127].
+ *
+ *  The common h=0 portion uses four exact s8xs8->s32 GEMMs. Non-zero high
+ *  limbs are applied as exact sparse field corrections; if they exceed the
+ *  deterministic density gate above, the routine uses the direct exact
+ *  combine instead. Both routes are BYTE-IDENTICAL to ComputeCombineModQ and
+ *  change no consensus rule, digest, activation height, or verifier path.
+ *  `stats` is optional and intended for benchmarks/backend planning. */
+[[nodiscard]] std::vector<Fq> ComputeCombineAdaptiveSparseBase256BMX4C(
+    const std::vector<int32_t>& P, const std::vector<int32_t>& Q,
+    uint32_t n, uint32_t m, AdaptiveCombineStatsBMX4C* stats = nullptr);
+
+/** Five-limb exact FP8-alphabet combine (Rubin-class ENC-BMX4C lane only).
+ *
+ *  LT vs BMX4C — do NOT conflate consensus alphabets:
+ *    ENC-BMX4C / ENC-DR-LT operands: M11×E8M0 dequantized into [-48,48]
+ *      (kEmax / kMatExpandEmax). That [-48,48] bound is the consensus alphabet
+ *      and MUST NOT change.
+ *    This FP8-fold helper: miner-local combine of P/Q into five balanced
+ *      base-32 digits in [-16,15] (E4M3-representable). It is a combine-lane
+ *      optimization for ENC-BMX4C Adaptive/ExactFp8 planners — NOT an LT
+ *      MatExpand Extract alphabet, NOT a native MXFP4 claim, and NOT a
+ *      license to widen LT Extract beyond [-48,48].
+ *
+ *  Decompose P/Q into five balanced base-32 digits in [-16,15], evaluate the
+ *  25 digit-pair products as exact s8xs8->s32 GEMMs (CPU reference; device
+ *  lanes may group them), convert to INT32, then fold with weights 32^(i+j)
+ *  mod q. BYTE-IDENTICAL to ComputeCombineModQ. Per-pair accumulators are
+ *  bounded by 256*n < 2^22 at n <= 8192. Miner-local only — no separate
+ *  activation height. */
+[[nodiscard]] std::vector<Fq> ComputeCombineFp8FiveLimbBMX4C(const std::vector<int32_t>& P,
+                                                             const std::vector<int32_t>& Q,
+                                                             uint32_t n, uint32_t m);
+
+/** MX-block-scaled projections (ENC-BMX4C operand lane). The committed E8M0
+ *  scale is constant on each 32-element block of the contraction axis K,
+ *  matching the OCP MX operand convention. BYTE-IDENTICAL to the dense
+ *  dequantized GEMM. For ENC-DR-LT the normative sibling oracle is
+ *  lt::ComputeProjectedRightMxBlockScaleLT (same exact-integer identity;
+ *  LT Extract still emits [-48,48]). Neither routine alone qualifies native
+ *  MXFP4 silicon — see MxLaneProvenance / report native_*_qualified. */
+[[nodiscard]] std::vector<int32_t> ComputeProjectedLeftScalePartitionedBMX4C(
+    const std::vector<int8_t>& U, const std::vector<int8_t>& mu_a,
+    const std::vector<uint8_t>& scale_a, uint32_t n, uint32_t m);
+[[nodiscard]] std::vector<int32_t> ComputeProjectedRightScalePartitionedBMX4C(
+    const std::vector<int8_t>& mu_b, const std::vector<uint8_t>& scale_b,
+    const std::vector<int8_t>& V, uint32_t n, uint32_t m);
+
+// --- Digest-only mining surface (v4.4 ENC-DR) --------------------------------
+
+/** Backend status for a digest-only nonce attempt. Consensus never sees this;
+ *  it is a miner-local telemetry / dispatch signal. */
+enum class DigestOnlyBackendStatus : uint8_t {
+    Ok = 0,
+    Fallback = 1,
+    Error = 2,
+};
+
+/** Digest-only mining result: no loser sketch payload. Under ENC-DR the PoW
+ *  object is digest-only; materializing an 8 MiB sketch for every losing nonce
+ *  is wasted host traffic. Winners are recomputed through ComputeDigestBMX4C
+ *  before publication. */
+struct DigestOnlyResultBMX4C {
+    uint64_t nonce{0};
+    uint256 digest;
+    bool target_match{false};
+    DigestOnlyBackendStatus backend_status{DigestOnlyBackendStatus::Ok};
+};
+
+/** Capability-driven exact-accelerator planner (miner-local). Selects
+ *  projection and combine lanes without changing consensus bytes.
+ *  These are INTENT labels only — PlanExactAccelLanes / PlanLTAccel never
+ *  prove on-silicon native MXFP4 or FP8 execution. */
+enum class ProjectionLane : uint8_t {
+    CanonicalInt8 = 0,           // one INT8->INT32 GEMM on pre-shifted operands
+    ScalePartitionedMxfp4 = 1,   // exact-MX INT8 partitions; native MXFP4 needs self-qual
+    ExactFp8 = 2,                // future Rubin-class exact FP8 projection (BMX4C combine alphabet, not LT Extract)
+};
+
+enum class CombineLane : uint8_t {
+    CanonicalInteger = 0,        // direct mod-q / schoolbook reference
+    Karatsuba9Int8 = 1,          // nine INT8 GEMMs + fused M61 epilogue
+    ExactFp8FiveLimb = 2,        // five-limb E4M3-alphabet combine (BMX4C only; ≠ LT [-48,48])
+    AdaptiveLimb = 3,            // two-limb / base-256 adaptive + exact fallback
+};
+
+struct ExactAccelPlan {
+    ProjectionLane projection{ProjectionLane::CanonicalInt8};
+    CombineLane combine{CombineLane::Karatsuba9Int8};
+};
+
+/** Pick lanes from a coarse device class string ("h200","b200","sm120","mi350",
+ *  "rubin","cpu", ...). Unknown -> INT8 projection + Karatsuba-9 combine. */
+[[nodiscard]] ExactAccelPlan PlanExactAccelLanes(std::string_view device_class);
+
+// --- Digest + verify (mirrors the pow_v4 contract) -------------------------
+
+/** b-PARAMETRIC BMX4 dimension validator (design §4.2): the v4.1 ValidateDims
+ *  checks (n > 0, b | n, exact-int32 accumulation bound) PLUS the BMX4 gates
+ *  n % 32 == 0 (E8M0 block scales) and CheckCombineLimbBoundBMX4C(n) (288·n
+ *  <= 2^23-1, m-independent). Returns m = n/b on success. The structural gates
+ *  are IDENTICAL for every BMX4 encoding profile — only the tile b differs — so
+ *  ENC-BMX4C (b = kTileB = 4) and ENC-BMX4C-D (b = kTileBMX4D = 2) both flow
+ *  through this single routine; the profile-specific ValidateDimsBMX4C/D below
+ *  are thin b-fixing wrappers. */
+[[nodiscard]] bool ValidateDimsBMX4(uint32_t n, uint32_t b, uint32_t& m_out);
+
+/** ENC-BMX4C wrapper for ValidateDimsBMX4 (b passed by the caller; production
+ *  b = kTileB = 4). Returns m = n/b on success. */
+[[nodiscard]] bool ValidateDimsBMX4C(uint32_t n, uint32_t b, uint32_t& m_out);
+
+/** Miner: derive the ENC-BMX4C consensus digest and sketch payload for
+ *  `header` at dimension `n`. Derives sigma (UNCHANGED SHA256d(header)), the
+ *  template-scoped Ahat / U / V and nonce-fresh Bhat, evaluates the sketch
+ *  Chat = (U*Ahat)(Bhat*V) over q (byte-identical to projecting the exact
+ *  integer product C = Ahat*Bhat), serializes to `payload_out`, and sets
+ *  `digest_out = H(sigma || Chat)`. Returns false iff (n, kTileB) is invalid
+ *  for ENC-BMX4C. Pure integer arithmetic; no float. */
+[[nodiscard]] bool ComputeDigestBMX4C(const CBlockHeader& header, uint32_t n,
+                                      uint256& digest_out,
+                                      std::vector<unsigned char>& payload_out);
+
+/** Verifier: O(n^2) ENC-BMX4C consensus check. Regenerates the (mu, scale)
+ *  streams, dequantizes Ahat/Bhat (exact integers <= 48, fit int8) and the
+ *  M11 U/V, recomputes the digest from `payload`, and runs `rounds`
+ *  matmul::v4::SketchFreivalds rounds over q against the parsed sketch -- the
+ *  verifier is reused UNCHANGED. Returns true iff every round matches AND the
+ *  recomputed digest equals `header.matmul_digest`. `digest_out` receives the
+ *  recomputed digest. */
+[[nodiscard]] bool VerifySketchBMX4C(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                                     const std::vector<unsigned char>& payload,
+                                     uint256& digest_out);
+
+// ---------------------------------------------------------------------------
+// ENC-BMX4C-D / v4.2-D — RETIRED as a consensus profile by v4.4 ENC-DR
+// (doc/btx-matmul-v4.4-tension-resolution.md §4.4): the segregated-proof
+// carriage it depended on is deleted, its activation plumbing
+// (nMatMulBMX4CDHeight / IsBMX4CDActive / verify+solve dispatch) is removed,
+// and enum value 3 is RESERVED. Under digest-only carriage a deeper commit is
+// a storage-free parameter retarget, not a new profile. The D reference
+// routines below are retained as LIBRARY code only (NO consensus caller:
+// GetMatMulEncodingProfile only ever returns ENC_S8/ENC_BMX4C, there is no
+// IsBMX4CDActive predicate, and no verify/solve path dispatches to them).
+//
+// ==== SUPERSEDED HISTORY (do NOT read as current wiring) ====================
+// The paragraph below records a decision that was itself REVERSED by v4.4
+// ENC-DR and is kept only for provenance. It described briefly re-adding D as a
+// live consensus profile (ENC_BMX4CD=3, IsBMX4CDActive, verify/solve dispatch)
+// carried as a 32 MiB SEGREGATED PRUNABLE PROOF. ENC-DR then deleted the entire
+// segregated-proof subsystem (there is no getmatmulproof/matmulproof relay, no
+// proof store) and made a "deeper commit" a storage-free digest-only parameter
+// retarget rather than a distinct profile — so NONE of the wiring described
+// below exists in the tree today:
+//
+//   [HISTORICAL] ROUND-3 P0-2 removed ENC-BMX4C-D from the consensus state
+//   machine; an on-silicon per-card measurement (B200 leads a 5090 by 1.54x at
+//   D vs a 1.06x tie at C) briefly reversed that, re-adding D as a consensus
+//   profile (enum ENC_BMX4CD=3, IsBMX4CDActive, verify/solve dispatch,
+//   per-profile construction asserts), STAGED/disabled (nMatMulBMX4CDHeight =
+//   INT32_MAX), with the 32 MiB sketch relayed as a segregated prunable proof
+//   (design §3) rather than carried in-block. v4.4 ENC-DR superseded this.
+// ===========================================================================
+// Design: doc/btx-matmul-v4.2-solver-evolution-design.md (the b=2 operand math
+// below remains valid as library/reference code regardless of carriage).
+//
+// IDENTICAL to ENC-BMX4C in EVERY operand-encoding respect: the M11 mantissa
+// alphabet, E8M0 power-of-two block scales (block length 32, S = 3, E_max = 48),
+// scale-free M11 U/V, the wide counter-mode SHA-256 XOF, the base-2^6
+// remainder-top limb combine, q = 2^61-1, R = 3, and the digest H(sigma||Chat).
+// It changes EXACTLY ONE L1 parameter -- the sketch tile b, 4 -> 2 -- so the
+// sketch rank m = n/b DOUBLES (m = 2048 at n = 4096). This commits MORE of the
+// exact-integer product C: a rank-m^2 = n^2/4 linear sketch (4x compression of
+// C, up from the 16x compression at b = 4). Per design-spec §L.4 (verifier-
+// linearity collapse), growing m is the ONLY lever that simultaneously (i)
+// raises the enforced per-nonce tensor work and (ii) shrinks the (U*A)(B*V)
+// factoring shortcut, WHILE keeping the verifier O(n^2) and integer-exact.
+//
+// ENFORCED-WORK / PAYLOAD TRADEOFF at n = 4096 (the honest operating point):
+//   * per-nonce MARGINAL tensor MACs on the limb-tensor combine path
+//     (B nonce-fresh; A/U/V template-scoped under I1'):
+//         B*V = n^2*m   +   combine = 16*n*m^2
+//         b = 4 (m=1024): n^3/4 + n^3     = 1.25 n^3
+//         b = 2 (m=2048): n^3/2 + 4 n^3   = 4.5  n^3   (3.6x more enforced work)
+//     The combine term (16*n*m^2, QUADRATIC in m) rises to ~89% of the unit and
+//     is the tensor-core-resident work (16 native s8 limb-pair GEMMs).
+//   * (U*A)(B*V) shortcut speedup vs a per-nonce full-C recompute shrinks from
+//     ~4.2x (b=4) to ~2.3x (b=2); at b=1 (full C, out of transport bounds) it
+//     reaches 1.5x -- the linear commitment can never drive it to 1 while the
+//     verifier stays O(n^2) (the L1 theorem; we do not pretend to escape it).
+//   * sketch payload 8*m^2: 8 MiB (b=4) -> 32 MiB (b=2). Carried as a
+//     SEGREGATED PRUNABLE PROOF (design §3), NOT in-block, so it is excluded
+//     from the block/P2P serialized-size ceiling by construction (this removes
+//     the sole blocker that parked the profile). Stated plainly; it is the
+//     price of the work. Stage 2 wires the relay/prune/archive machinery.
+//   * verifier stays O(n^2): dominated by the two dense n^2 matvecs
+//     A*(B*(V*y)); the O(m^2) left side and O(nm) projections grow with m but
+//     stay sub-dominant (~+25% verify at n=4096, still well under a second).
+//   * DETERMINISM / M-t24 UNTOUCHED: every accumulator bound (|C| <= 2304*n,
+//     |P|,|Q| <= 288*n, |S_ij| <= 1024*n) is m-INDEPENDENT, so ENC-BMX4C-D is
+//     byte-for-byte identical to ENC-BMX4C on the accumulator-exactness axis.
+//     Growing m spends payload, NEVER precision.
+//
+// Cryptographically INDEPENDENT of ENC-BMX4C: distinct V4.2-D domain tags, so a
+// seed can never produce correlated C-profile / D-profile operand streams.
+// This is a versioned L1 profile (a clean hard fork of parameters+vectors into
+// the SAME L0 machine); it does NOT touch q, R, the verifier structure, the
+// digest form, C-1', or price-independence.
+// ---------------------------------------------------------------------------
+
+/** ENC-BMX4C-D sketch tile: b = 2 at the mainnet n = 4096, so m = n/2 = 2048
+ *  (payload 8*m^2 = 32 MiB). If n is ever retargeted, b retargets to HOLD
+ *  m = 2048 (b = 4 at n = 8192), mirroring the ENC-BMX4C m = 1024 discipline;
+ *  the compile-time constant here pins the mainnet-dimension tile. */
+inline constexpr uint32_t kTileBMX4D = 2;
+
+/** V4.2-D seed derivations (distinct domain tags from ENC-BMX4C's V42 tags):
+ *   seed_A = SHA256("BTX_MATMUL_SEED_V42D"     || template_hash    || 0x41) TMPL
+ *   seed_B = SHA256("BTX_MATMUL_SEED_V42D"     || full_header_hash || 0x42) NONCE
+ *   seed_U = SHA256("BTX_MATMUL_V42D_SKETCH_U" || template_hash)           TMPL
+ *   seed_V = SHA256("BTX_MATMUL_V42D_SKETCH_V" || template_hash)           TMPL
+ *  Same I1' scoping as ENC-BMX4C (A/U/V template-scoped -> batch-fusible;
+ *  B nonce-fresh). sigma = SHA256d(header) is reused UNCHANGED. */
+[[nodiscard]] uint256 DeriveOperandSeedBMX4D(const CBlockHeader& header, Operand which);
+[[nodiscard]] std::pair<uint256, uint256> DeriveProjectorSeedsBMX4D(const CBlockHeader& header);
+
+/** ENC-BMX4C-D wrapper for ValidateDimsBMX4 at the fixed D tile b = kTileBMX4D
+ *  = 2: identical structural gates to ENC-BMX4C (n % 32 == 0,
+ *  CheckCombineLimbBoundBMX4C, b | n, s32 accum bound) — only b differs.
+ *  Returns m = n/2 on success. */
+[[nodiscard]] bool ValidateDimsBMX4D(uint32_t n, uint32_t& m_out);
+
+/** Miner: derive the ENC-BMX4C-D consensus digest + sketch payload for `header`
+ *  at dimension `n`. Byte-for-byte the ENC-BMX4C ComputeDigestBMX4C algorithm
+ *  with the D domain tags and m = n/2, so the payload is 8*(n/2)^2 bytes and the
+ *  enforced tensor work is ~3.6x the C-profile. Returns false iff (n, kTileBMX4D)
+ *  is invalid for ENC-BMX4C-D. Pure integer arithmetic; no float. */
+[[nodiscard]] bool ComputeDigestBMX4D(const CBlockHeader& header, uint32_t n,
+                                      uint256& digest_out,
+                                      std::vector<unsigned char>& payload_out);
+
+/** Verifier: O(n^2) ENC-BMX4C-D consensus check. The ENC-BMX4C verifier at
+ *  m = n/2 with the D seeds -- SketchFreivalds is reused UNCHANGED (it is
+ *  compute-path- AND rank-agnostic). Returns true iff every round matches AND
+ *  the recomputed digest equals `header.matmul_digest`. */
+[[nodiscard]] bool VerifySketchBMX4D(const CBlockHeader& header, uint32_t n, uint32_t rounds,
+                                     const std::vector<unsigned char>& payload,
+                                     uint256& digest_out);
+
+} // namespace matmul::v4::bmx4
+
+#endif // BTX_MATMUL_MATMUL_V4_BMX4_H

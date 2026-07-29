@@ -1155,6 +1155,61 @@ public:
     kernel::MatMulValidationMode GetMatMulValidationMode() const { return m_options.matmul_validation_mode; }
     kernel::Notifications& GetNotifications() const { return m_options.notifications; };
 
+    /** WP-7: v4.4 ENC-DR assumevalid buried-recompute trust predicate, factored
+     *  verbatim out of ContextualCheckBlock (its (2) ASSUMEVALID BURIED-RECOMPUTE
+     *  TRUST clause) so the async-verify dispatcher and the sketch-prefetch
+     *  guard share the single implementation. True iff `pindex_self` (the index
+     *  of the block being considered, may be nullptr => false) is an
+     *  assumed-valid ancestor of the best header, the best header carries at
+     *  least MinimumChainWork of AUTHENTICATED work, and the block is buried by
+     *  more than the nMatMulProofAssumeValidMinAge equivalent-time guard. When
+     *  true the O(W) ENC-DR recompute for this block is skipped. */
+    bool IsMatMulRecomputeAssumeValidTrusted(const CBlockIndex* pindex_self, int nHeight) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** WP-7 / C5: ADVISORY classifier for the async ENC-DR verify worker.
+     *  Returns height + parent MTP iff accepting `block` now would reach the
+     *  O(W) ENC-DR reference recompute inside ContextualCheckBlock
+     *  (fMatMulPOW, v4-active DIGEST_RECOMPUTE height, digest-only body, known
+     *  prev header, no stored data for this hash, not assumevalid-trusted).
+     *  nullopt means the synchronous path is cheap (or would fail cheaply) and
+     *  the block must NOT be dispatched off-thread. Phase B seal-as-PoW heights
+     *  are eligible when parent MTP can be supplied from prev (always, once
+     *  prev is known); without MTP Classify stays fail-closed (nullopt).
+     *  Divergence from the seam's own logic is fail-safe: it degrades to a
+     *  recompute, never to a wrong verdict (the memoized verdict is a pure
+     *  function of the header + parent MTP). */
+    struct MatMulEncDrClassifyResult {
+        int32_t height{0};
+        std::optional<int64_t> parent_median_time_past;
+    };
+    /** If `verdict_pinned` is non-null, a cached verdict is looked up and
+     *  pinned atomically. On return true in `*verdict_pinned`, the caller owns
+     *  one pin and MUST call UnpinMatMulEncDrVerdict after validation consumes
+     *  it. This prevents the bounded FIFO from turning a classified cheap path
+     *  into an unbudgeted recomputation before ProcessNewBlock re-entry.
+     *  `assumevalid_trusted` identifies the other moving no-recompute result;
+     *  admission must scope that trust decision across its ProcessNewBlock
+     *  re-entry rather than letting a best-header race change the work. */
+    std::optional<MatMulEncDrClassifyResult> ClassifyMatMulEncDrRecompute(
+        const CBlock& block, bool* verdict_pinned = nullptr,
+        bool* assumevalid_trusted = nullptr) const
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
+    /** Cheap complete-block checks that must pass before P2P admission charges
+     *  an expensive MatMul recomputation. This covers context-free body rules,
+     *  contextual header rules, and contextual body rules, but deliberately
+     *  does not execute the MatMul phase-2/ENC-DR predicate itself. A valid
+     *  previously-unseen header is idempotently accepted/indexed here so its
+     *  nChainWork is available and the same unrequested gates as AcceptBlock
+     *  can be evaluated exactly before admission. */
+    bool CheckMatMulBlockAdmissionPreconditions(const CBlock& block,
+                                                BlockValidationState& state,
+                                                bool force_processing,
+                                                bool min_pow_checked,
+                                                bool& reaches_contextual_check)
+        EXCLUSIVE_LOCKS_REQUIRED(::cs_main);
+
     /**
      * Make various assertions about the state of the block index.
      *

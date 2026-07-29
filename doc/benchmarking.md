@@ -71,6 +71,45 @@ restricted to the same input set (introducing bias). [Fuzz
 tests](/doc/fuzzing.md) are better suited for this purpose, as they are
 specifically aimed at exploring the possible input space.
 
+MatMul Proof-of-Work Benchmarking
+----------------------------------
+
+The `bench_btx` framework above covers general node/wallet microbenchmarks. It
+does **not** cover the MatMul proof-of-work workload — that has its own
+dedicated benchmark tool.
+
+The current MatMul PoW is **ENC_RC v4.6**, a two-stage design: the profile-2
+ENC_RC datacenter episode (`nMatMulRCProfile = 2`) plus the profile-3
+ENC_RC_COUPLED V3 production puzzle (`nMatMulRCCoupledProfile = 3`). It is
+integrated and code-complete but **not activated on any public network**
+(`nMatMulRCHeight = nMatMulRCCoupledHeight = INT32_MAX`).
+
+The turnkey, recommended way to benchmark it is
+[`contrib/matmul-v4/run-full-benchmark.py`](../contrib/matmul-v4/run-full-benchmark.py):
+a single verbose command that describes the full workload, labels each
+component `[OPTIMIZED]` vs `[FALLBACK]` for your hardware, decides
+resident-vs-streamed from actual free VRAM, and reports every phase
+separately plus the combined total.
+
+```sh
+cmake --build build --target matmul-v4-rc-harness
+contrib/matmul-v4/run-full-benchmark.py --shape production --json report.json
+
+# fast sanity pass, no GPU or built binary needed
+contrib/matmul-v4/run-full-benchmark.py --quick
+```
+
+For targeted measurements (relay-path verify-carrier timing, CUDA episode
+probes, Stage-G CPU campaigns aggregated via `rc-gate.py`), see
+`contrib/matmul-v4/measure-enc-rc-v46.sh`, which drives the same
+`matmul-v4-rc-harness` binary.
+
+The legacy `matmul-v4-report` tool and the v4.1/v4.2/v4.4-era
+`btx-matmul-{cost,solve,metal}-bench`, `verify-backend.sh`, `lt-gate.py`, and
+`k2b-gate.py` scripts (and the `--profile bmx4c` / `bmx4c-lt` paths they took)
+have been removed — they measured superseded workloads and no longer reflect
+the shipping PoW. Do not reference them in new documentation.
+
 Going Further
 --------------------
 

@@ -214,6 +214,51 @@ public:
         std::optional<uint32_t> matmul_pre_hash_epsilon_bits_upgrade{};
         std::optional<int32_t> matmul_nonce_seed_height{};
         std::optional<int32_t> matmul_parent_mtp_seed_height{};
+        std::optional<int32_t> matmul_v4_height{};
+        std::optional<uint32_t> matmul_v4_dimension{};
+        std::optional<uint32_t> matmul_v4_max_dimension{};
+        std::optional<int32_t> matmul_bmx4c_height{};
+        //! v4.4-LT Rank-1 (ENC-DR-LT) activation height override. Regtest-only;
+        //! defaults to height 100. When set, must be >= the
+        //! (possibly also-overridden) BMX4C height -- LT is a deepening staged
+        //! at/after ENC-BMX4C, never before it (see
+        //! AssertBMX4CConstructionInvariants).
+        std::optional<int32_t> matmul_drlt_height{};
+        //! ENC_RC (Resident Curriculum) activation height override. Regtest-only;
+        //! defaults to INT32_MAX (disabled). When set finite, must be >= the
+        //! (possibly also-overridden) MatMul v4 height. Public nets stay
+        //! fail-closed at INT32_MAX (AssertBMX4CConstructionInvariants).
+        std::optional<int32_t> matmul_rc_height{};
+        //! ENC_RC_COUPLED activation height override. Regtest-only; defaults to
+        //! INT32_MAX. When set finite, must be >= MatMul v4 height; when ENC_RC
+        //! is also live, must be >= nMatMulRCHeight (coupled supersedes RC).
+        std::optional<int32_t> matmul_rc_coupled_height{};
+        //! v4.6 single-switch RC-family cutover. When set, assigns the SAME
+        //! height to BOTH nMatMulRCHeight and nMatMulRCCoupledHeight so episode +
+        //! coupled + V3 production transition together at one height (no staggered
+        //! regime). Applied before the granular per-component overrides so a test
+        //! may still refine one component afterwards. Public nets never set this;
+        //! defaults keep both heights INT32_MAX (OFF).
+        std::optional<int32_t> matmul_rc_unified_height{};
+        //! REGTEST-ONLY: CI-scale toy ENC_RC episode dims (MakeToyRCEpisodeParams).
+        //! Public nets must keep fMatMulRCUseToyDims=false.
+        std::optional<bool> matmul_rc_use_toy_dims{};
+        //! REGTEST-ONLY: CI-scale toy ENC_RC_COUPLED dims (MakeToyRCCoupParams).
+        std::optional<bool> matmul_rc_coupled_use_toy_dims{};
+        //! REGTEST-ONLY: coupled profile 2 (V2) or 3 (V3). Invalid → zero params.
+        std::optional<uint32_t> matmul_rc_coupled_profile{};
+        //! REGTEST-ONLY: ENC_RC episode profile 1 (epoch-0 base) or 2 (datacenter
+        //! dims — MakeDatacenterRCEpisodeParams). Public nets keep the default 1.
+        //! Values other than {1,2} fail AssertBMX4CConstructionInvariants.
+        std::optional<uint32_t> matmul_rc_profile{};
+        //! v4.4-LT Q* Phase B seal-as-PoW mode override. Regtest defaults to
+        //! enabled; an explicit false selects Phase A for differential tests.
+        std::optional<bool> matmul_lt_seal_as_pow{};
+        //! Test-only pending-job cap override used to exercise exact admission
+        //! boundaries (for example compact-block reservation transfer).
+        std::optional<uint32_t> matmul_lt_max_pending_verifications{};
+        bool matmul_flat_sketch_replay{false};
+        std::optional<uint32_t> matmul_proof_assumevalid_min_age{};
         bool fastprune{false};
         bool enforce_bip94{false};
         bool matmul_strict{false};

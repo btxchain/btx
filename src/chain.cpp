@@ -8,6 +8,12 @@
 #include <tinyformat.h>
 #include <util/time.h>
 
+#include <algorithm>
+#include <deque>
+#include <functional>
+#include <unordered_map>
+#include <vector>
+
 std::string CBlockFileInfo::ToString() const
 {
     return strprintf("CBlockFileInfo(blocks=%u, size=%u, heights=%u...%u, time=%s...%s)", nBlocks, nSize, nHeightFirst, nHeightLast, FormatISO8601Date(nTimeFirst), FormatISO8601Date(nTimeLast));
@@ -150,6 +156,122 @@ arith_uint256 GetBlockProof(const CBlockIndex& block)
     // as bnTarget+1, it is equal to ((2**256 - bnTarget - 1) / (bnTarget+1)) + 1,
     // or ~bnTarget / (bnTarget+1) + 1.
     return (~bnTarget / (bnTarget + 1)) + 1;
+}
+
+bool IsBlockAuthenticated(const CBlockIndex& block, const Consensus::Params& params)
+{
+    // Below the MatMul v4 fork, v3 header work is credited immediately (matches
+    // legacy nChainWork exactly). At and above the fork, a header's work is only
+    // authenticated once its body arrived and its MatMul product-committed proof
+    // verified -- which is precisely the point at which the index reaches
+    // BLOCK_VALID_TRANSACTIONS (ContextualCheckBlock runs the MatMul body proof
+    // before ReceivedBlockTransactions raises validity). A block that failed
+    // validation can never authenticate.
+    if (!params.IsMatMulV4Active(block.nHeight)) return true;
+    if (block.nStatus & BLOCK_FAILED_MASK) return false;
+    if ((block.nStatus & BLOCK_VALID_MASK) < BLOCK_VALID_TRANSACTIONS) return false;
+
+    // Authentication is a contiguous-prefix property, not a count of
+    // independently verified bodies. A child body can arrive and pass the
+    // context-free/body checks before an earlier body on the same branch is
+    // available (m_blocks_unlinked handles exactly that case). Crediting the
+    // child immediately would create a hole in authenticated chainwork and let
+    // a branch interleave cheap forged headers with isolated valid bodies.
+    //
+    // The parent-first load/recompute order and the descendant propagation in
+    // ReceivedBlockTransactions guarantee that a verified child is promoted
+    // as soon as the missing parent prefix becomes fully authenticated.
+    return block.pprev == nullptr ||
+           block.pprev->nAuthenticatedChainWork == block.pprev->nChainWork;
+}
+
+arith_uint256 GetBlockAuthenticatedProof(const CBlockIndex& block, const Consensus::Params& params)
+{
+    return IsBlockAuthenticated(block, params) ? GetBlockProof(block) : arith_uint256{};
+}
+
+void UpdateAuthenticatedChainWork(CBlockIndex& block, const Consensus::Params& params)
+{
+    block.nAuthenticatedChainWork =
+        (block.pprev ? block.pprev->nAuthenticatedChainWork : arith_uint256{}) +
+        GetBlockAuthenticatedProof(block, params);
+}
+
+arith_uint256 GetTrustAdjustedChainWork(const CBlockIndex& block, unsigned int unauth_allowance_blocks)
+{
+    // Invariant maintained by UpdateAuthenticatedChainWork: authenticated work
+    // never exceeds claimed work (each block contributes GetBlockProof or 0).
+    // Clamp the subtraction anyway (defense-in-depth): if that invariant were ever
+    // broken, an unsigned arith_uint256 underflow would wrap to ~2^256 and, via the
+    // std::min below, mis-rank an unauthenticated chain UPWARD. std::min pins it to 0.
+    const arith_uint256 unauth{block.nChainWork - std::min(block.nChainWork, block.nAuthenticatedChainWork)};
+    // The allowance uses the (possibly forged) tip's own nBits; the nBits
+    // transition validity is enforced upstream (CalculateClaimedHeadersWork),
+    // so the allowance is bounded by unauth_allowance_blocks blocks of
+    // difficulty-consistent work.
+    arith_uint256 allowance{GetBlockProof(block)};
+    allowance *= unauth_allowance_blocks;
+    return block.nAuthenticatedChainWork + std::min(unauth, allowance);
+}
+
+bool PreferTrustAdjustedHeader(const CBlockIndex& current, const CBlockIndex& candidate,
+                               unsigned int unauth_allowance_blocks)
+{
+    const arith_uint256 current_adjusted =
+        GetTrustAdjustedChainWork(current, unauth_allowance_blocks);
+    const arith_uint256 candidate_adjusted =
+        GetTrustAdjustedChainWork(candidate, unauth_allowance_blocks);
+    if (current_adjusted != candidate_adjusted) {
+        return current_adjusted < candidate_adjusted;
+    }
+
+    // A long unauthenticated suffix plateaus once it reaches the allowance.
+    // Never let unordered block-index iteration choose an arbitrary, possibly
+    // millions-of-headers-deep member of that plateau as m_best_header. Keep
+    // legacy/full-body ties unchanged; for a tie involving unauthenticated work,
+    // prefer the most authenticated and then the shallowest claimed suffix.
+    const bool current_has_unauth = current.nAuthenticatedChainWork < current.nChainWork;
+    const bool candidate_has_unauth = candidate.nAuthenticatedChainWork < candidate.nChainWork;
+    if (!current_has_unauth && !candidate_has_unauth) return false;
+    if (current.nAuthenticatedChainWork != candidate.nAuthenticatedChainWork) {
+        return current.nAuthenticatedChainWork < candidate.nAuthenticatedChainWork;
+    }
+    const arith_uint256 current_unauth =
+        current.nChainWork - std::min(current.nChainWork, current.nAuthenticatedChainWork);
+    const arith_uint256 candidate_unauth =
+        candidate.nChainWork - std::min(candidate.nChainWork, candidate.nAuthenticatedChainWork);
+    if (current_unauth != candidate_unauth) return candidate_unauth < current_unauth;
+    if (current.nHeight != candidate.nHeight) return candidate.nHeight < current.nHeight;
+    return candidate.GetBlockHash() < current.GetBlockHash();
+}
+
+void PropagateAuthenticatedChainWorkDescendants(
+    CBlockIndex& root,
+    const Consensus::Params& params,
+    std::function<void(std::function<void(CBlockIndex&)>)> for_each_index)
+{
+    // Build a parent→children adjacency from the live block index, then BFS
+    // from `root` so every descendant inherits the updated authenticated base.
+    // Called rarely (body promotion), so an O(N) index scan is acceptable.
+    std::unordered_map<CBlockIndex*, std::vector<CBlockIndex*>> children;
+    for_each_index([&](CBlockIndex& idx) {
+        if (idx.pprev != nullptr) {
+            children[idx.pprev].push_back(&idx);
+        }
+    });
+
+    std::deque<CBlockIndex*> queue;
+    queue.push_back(&root);
+    while (!queue.empty()) {
+        CBlockIndex* parent = queue.front();
+        queue.pop_front();
+        const auto it = children.find(parent);
+        if (it == children.end()) continue;
+        for (CBlockIndex* child : it->second) {
+            UpdateAuthenticatedChainWork(*child, params);
+            queue.push_back(child);
+        }
+    }
 }
 
 int64_t GetBlockProofEquivalentTime(const CBlockIndex& to, const CBlockIndex& from, const CBlockIndex& tip, const Consensus::Params& params)
