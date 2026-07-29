@@ -363,17 +363,16 @@ BOOST_AUTO_TEST_CASE(
 BOOST_AUTO_TEST_CASE(
     assessor_stays_open_without_parent_certificate_even_if_receipt_flags_look_ready)
 {
-    // Streaming local closures intentionally keep
-    // role_export_equality_constrained=false.  Without a parent certificate the
-    // assessor must not claim equality complete even when structural premises
-    // hold.
+    // Receipt commitments authenticate bytes, not truth. A synthetic receipt
+    // with self-asserted child-verification flags must not become production
+    // evidence, with or without a parent certificate.
     const auto receipt = SyntheticStreamingReceiptFixtureV1();
     std::string why;
     const auto assessment =
         eq::AssessStreamingRoleExportEqualityV1(
             &receipt, nullptr, &why);
-    BOOST_CHECK(assessment.streaming_receipt_verified);
-    BOOST_CHECK(assessment.all_streaming_children_verified);
+    BOOST_CHECK(!assessment.streaming_receipt_verified);
+    BOOST_CHECK(!assessment.all_streaming_children_verified);
     BOOST_CHECK(
         !assessment
              .external_producer_terminal_equality_complete);
@@ -383,10 +382,10 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    fixture_streaming_receipt_parent_attach_makes_equality_complete)
+    synthetic_streaming_receipt_cannot_close_production_equality)
 {
-    // Always-on CI fixture: synthetic streaming receipt (structural premises)
-    // + parent Attach certificate ⇒ equality_complete without mining.
+    // A structurally valid same-parent alias certificate is useful as a local
+    // wiring fixture, but it cannot authenticate the receipt's child proofs.
     const auto receipt = SyntheticStreamingReceiptFixtureV1();
     const auto pins = PinsFromReceipt(receipt);
     BOOST_REQUIRE_EQUAL(pins.size(), 3U);
@@ -401,28 +400,23 @@ BOOST_AUTO_TEST_CASE(
             cs, columns, receipt.receipt_commitment, pins,
             pins, certificate, &why),
         why);
-    BOOST_REQUIRE_MESSAGE(
-        eq::VerifyParentRoleExportEqualityCertificateV1(
-            receipt, certificate, &why),
-        why);
+    BOOST_CHECK(
+        !eq::VerifyParentRoleExportEqualityCertificateV1(
+            receipt, certificate, &why));
 
     const auto assessment =
         eq::AssessStreamingRoleExportEqualityV1(
             &receipt, &certificate, &why);
-    BOOST_CHECK(assessment.streaming_receipt_verified);
-    BOOST_CHECK(assessment.parent_certificate_verified);
-    BOOST_CHECK(assessment.all_streaming_children_verified);
+    BOOST_CHECK(!assessment.streaming_receipt_verified);
+    BOOST_CHECK(!assessment.parent_certificate_verified);
+    BOOST_CHECK(!assessment.all_streaming_children_verified);
     BOOST_CHECK(
-        assessment.all_role_export_equality_constrained);
+        !assessment.all_role_export_equality_constrained);
     BOOST_CHECK(
-        assessment
+        !assessment
             .external_producer_terminal_equality_complete);
-    BOOST_CHECK_EQUAL(
-        assessment.terminals_role_export_joined,
-        assessment.terminals_required);
-    BOOST_CHECK_EQUAL(assessment.terminals_required, 3U);
     BOOST_CHECK(
-        why.find("all_terminals_joined") !=
+        why.find("streaming_receipt_invalid") !=
         std::string::npos);
     BOOST_CHECK_EQUAL(
         rc::air_recurse::CountWitnessViolationsOnH(
