@@ -6090,8 +6090,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!residuals.verifier_fs_executable_ready_honest);
     BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
 
-    // Living production FS program may be authority_eligible at the program
-    // layer, but canary-only SHA evidence still blocks CompleteFP assembly.
+    // The production FS program is assessed independently. The bounded canary
+    // must be rejected as authority, but that successful rejection must not
+    // permanently veto a genuine production verifier chip.
     nr::NarrowChildShape production_shape{};
     production_shape.child_w = 1;
     production_shape.child_n_rows = 2;
@@ -6116,6 +6117,17 @@ BOOST_AUTO_TEST_CASE(
         va::BuildBoundedFiatShamirProgram(canary_shape);
     BOOST_CHECK(canary_fs.canary_only);
     BOOST_CHECK(!canary_fs.authority_eligible);
+    BOOST_CHECK_EQUAL(
+        residuals.verifier_fs_executable_ready_honest,
+        va::kVerifierFiatShamirAirExecutable &&
+            residuals.verifier_fs_authority_eligible &&
+            residuals.verifier_fs_canary_only_blocks_authority);
+    // g4 is an assembly prerequisite. An honestly open g4 is a valid
+    // fail-closed inventory, never an incoherent assessor and never an
+    // assembly authorization.
+    BOOST_CHECK(
+        !residuals.complete_fp_assembly_allowed ||
+        residuals.ledger_g4_child_fs_replay_closed);
 
     // Interlock predicates that MUST stay red while Executable is false, and
     // that would invalidate inventory if Executable were flipped alone.
@@ -6127,7 +6139,7 @@ BOOST_AUTO_TEST_CASE(
           !residuals.verifier_fs_executable_ready_honest));
     BOOST_CHECK(
         !(fp::kCompleteRecursiveFixedPointExecutable &&
-          residuals.verifier_fs_canary_only_blocks_authority));
+          !residuals.verifier_fs_canary_only_blocks_authority));
     // Assembly gate encodes the same conjunction tests above would break.
     BOOST_CHECK(
         !residuals.complete_fp_assembly_allowed ||

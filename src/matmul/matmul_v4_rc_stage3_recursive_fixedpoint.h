@@ -4266,12 +4266,13 @@ struct CompleteRecursiveFixedPointResidualInventoryV1 {
     bool verifier_fiat_shamir_air_chip_open{true};
     /** Production (non-canary) FS program authority_eligible. */
     bool verifier_fs_authority_eligible{false};
-    /** SHA-canary path cannot supply authority_eligible (blocks theater). */
+    /** SHA-canary path is positively identified and rejected as authority. */
     bool verifier_fs_canary_only_blocks_authority{true};
     /**
      * Honest VerifierFS executable_ready for CompleteFP: chip constexpr AND
-     * production authority_eligible AND canary-only evidence does not block.
-     * Never uses consensus_authority_still_open.
+     * production authority_eligible AND the bounded canary is independently
+     * recognized as non-authoritative. Never uses
+     * consensus_authority_still_open.
      */
     bool verifier_fs_executable_ready_honest{false};
     /** Living CellAudit recursive_child_consumed count (of 52). */
@@ -4287,8 +4288,9 @@ struct CompleteRecursiveFixedPointResidualInventoryV1 {
      */
     bool recursive_counters_honest{false};
     /**
-     * Assembly permission: residual families closed + honest VerifierFS +
-     * honest recursive counters. Executable may flip only when this is true.
+     * Assembly permission: g4 replay closed + residual families closed +
+     * honest VerifierFS + honest recursive counters. Executable may flip only
+     * when this is true.
      */
     bool complete_fp_assembly_allowed{false};
     bool complete_fp_open{true};

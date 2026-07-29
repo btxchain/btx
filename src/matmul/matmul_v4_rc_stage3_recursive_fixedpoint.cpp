@@ -24990,12 +24990,15 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     canary_shape.queries = 2;
     const va::FiatShamirProgram canary_fs =
         va::BuildBoundedFiatShamirProgram(canary_shape);
+    // A bounded canary must be recognizable as non-authoritative.  That is
+    // positive rejection evidence, not a veto on an independently
+    // authority-eligible production program.
     out.verifier_fs_canary_only_blocks_authority =
-        canary_fs.canary_only || !canary_fs.authority_eligible;
+        canary_fs.canary_only && !canary_fs.authority_eligible;
     out.verifier_fs_executable_ready_honest =
         va::kVerifierFiatShamirAirExecutable &&
         out.verifier_fs_authority_eligible &&
-        !out.verifier_fs_canary_only_blocks_authority;
+        out.verifier_fs_canary_only_blocks_authority;
     out.verifier_fiat_shamir_air_chip_open =
         !out.verifier_fs_executable_ready_honest;
 
@@ -25034,6 +25037,7 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     // CompleteFP chip families (payload / SplitRAP / endpoint).
 
     out.complete_fp_assembly_allowed =
+        out.ledger_g4_child_fs_replay_closed &&
         out.open_residual_families == 0 &&
         !out.child_proof_payload_bus_open &&
         !out.split_rap_multirow_parent_adapter_open &&
@@ -25069,6 +25073,13 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     const bool honesty_bits_coherent =
         (out.verifier_fiat_shamir_air_chip_open ==
          !out.verifier_fs_executable_ready_honest) &&
+        (out.verifier_fs_canary_only_blocks_authority ==
+         (canary_fs.canary_only &&
+          !canary_fs.authority_eligible)) &&
+        (out.verifier_fs_executable_ready_honest ==
+         (va::kVerifierFiatShamirAirExecutable &&
+          out.verifier_fs_authority_eligible &&
+          out.verifier_fs_canary_only_blocks_authority)) &&
         (out.recursive_counters_note_zero_of_52 ==
          (out.recursively_consumed_endpoints == 0)) &&
         (out.recursive_counters_honest ==
@@ -25081,7 +25092,6 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         out.proof_field_bus_attachable &&
         out.deep64_ctl_terminal_attachable &&
         out.ctl_child_verifier_in_parent_air_attachable &&
-        out.ledger_g4_child_fs_replay_closed &&
         !out.child_proof_payload_bus_open &&
         !out.split_rap_multirow_parent_adapter_open &&
         !out.endpoint_terminal_equality_open &&
@@ -25097,14 +25107,18 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     if (out.valid && !kCompleteRecursiveFixedPointExecutable &&
         !out.complete_fp_assembly_allowed) {
         out.note =
-            "stage3:recursive_fixedpoint:"
-            "complete_fp_residual_families_closed;"
-            "payload_bus_closed;"
-            "split_rap_multirow_closed;"
-            "endpoint_terminal_equality_closed;"
+            std::string(
+                "stage3:recursive_fixedpoint:"
+                "complete_fp_residual_families_closed;"
+                "payload_bus_closed;"
+                "split_rap_multirow_closed;"
+                "endpoint_terminal_equality_closed;") +
+            (out.ledger_g4_child_fs_replay_closed
+                 ? "ledger_g4_child_fs_replay_closed;"
+                 : "ledger_g4_child_fs_replay_open;") +
             "verifier_fs_open_awaiting_honest_authority_eligible;"
             "verifier_fs_requires_active_config_authority_eligible;"
-            "canary_only_blocks_fs_authority;"
+            "canary_only_rejected_as_authority;"
             "recursive_counters_0_of_52;"
             "complete_fp_assembly_blocked;"
             "complete_fp_executable_still_false;"
@@ -25126,9 +25140,10 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
             "honest_fs_and_recursive_counters;"
             "authority=false";
     } else if (kCompleteRecursiveFixedPointExecutable &&
-               (out.recursive_counters_note_zero_of_52 ||
+               (!out.ledger_g4_child_fs_replay_closed ||
+                out.recursive_counters_note_zero_of_52 ||
                 !out.verifier_fs_executable_ready_honest ||
-                out.verifier_fs_canary_only_blocks_authority)) {
+                !out.verifier_fs_canary_only_blocks_authority)) {
         out.note =
             "stage3:recursive_fixedpoint:"
             "complete_fp_theater_flip_rejected;"
