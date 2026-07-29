@@ -222,6 +222,25 @@ struct ShardProductV1 {
     uint32_t first_query,
     uint32_t query_count);
 
+/**
+ * Native SAFE-V13 entry point.
+ *
+ * The legacy V11 shard takes a caller-supplied Poseidon transcript receipt.
+ * SAFE V13 has a distinct Fiat-Shamir schedule, so translating it into that
+ * receipt would silently re-introduce the frozen V11 transcript.  This entry
+ * point instead verifies the complete Split-RAP SAFE-V2 proof with the
+ * unmodified verifier, canonically decodes the V13 proof tape, and treats the
+ * verifier-accepted fold challenges/query indices as the sole transcript
+ * authority.
+ */
+[[nodiscard]] ShardProductV1 BuildShardSafeV13(
+    const aq::AirConstraintSystem<gf::Fp3>& expected_cs,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const std::vector<uint32_t>& expected_base_column_indices,
+    const uint256& public_fs_seed,
+    uint32_t first_query,
+    uint32_t query_count);
+
 [[nodiscard]] uint64_t RecountViolationsV1(
     const aq::AirConstraintSystem<gf::Fp3>& cs,
     const std::vector<std::vector<gf::Fp3>>& columns);
