@@ -55,9 +55,20 @@ void SchemaRoot(
 }
 
 std::vector<unsigned char>
-CoupledExtractChaChaSchemaSuffix(
+ExtractChaChaSchemaSuffix(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    RCStage3RelationEndpoint endpoint,
     const fpb::ManifestV1& manifest)
 {
+    if ((kind != sites::ProductionProofSiteKind::
+                     EpisodeExtractChaCha &&
+         kind != sites::ProductionProofSiteKind::
+                     CoupledExtractChaCha) ||
+        (role != RCStage3RelationRole::EpisodeExtract &&
+         role != RCStage3RelationRole::CoupledExtract)) {
+        return {};
+    }
     std::vector<unsigned char> out;
     static constexpr char domain[] =
         "BTX_RC_STAGE3_PRODUCTION_FIXED_PROGRAM_ABI_V1";
@@ -65,14 +76,10 @@ CoupledExtractChaChaSchemaSuffix(
         out.end(), domain, domain + sizeof(domain) - 1);
     SchemaU16(out, fixed_program_abi_v1::Version);
     out.push_back(static_cast<unsigned char>(
-        sites::ProductionProofSiteKind::
-            CoupledExtractChaCha));
-    out.push_back(static_cast<unsigned char>(
-        RCStage3RelationRole::CoupledExtract));
+        kind));
+    out.push_back(static_cast<unsigned char>(role));
     SchemaU16(
-        out, static_cast<uint16_t>(
-                 RCStage3RelationEndpoint::
-                     CoupledExtractChaCha));
+        out, static_cast<uint16_t>(endpoint));
     out.push_back(static_cast<unsigned char>(
         stage3_hash_air::ProgramKind::
             ChaCha20Block));
@@ -1112,8 +1119,11 @@ bool PartialFamilyFor(
         return role == RCStage3RelationRole::CoupledExtract &&
             BuildProductionCoupledExtractChaChaProgramTableV1(
                 program, nullptr, nullptr, why);
-    case sites::ProductionProofSiteKind::EpisodeScaleSha:
     case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
+        return role == RCStage3RelationRole::EpisodeExtract &&
+            BuildProductionEpisodeExtractChaChaProgramTableV1(
+                program, nullptr, nullptr, why);
+    case sites::ProductionProofSiteKind::EpisodeScaleSha:
     case sites::ProductionProofSiteKind::CoupledBankCounterXof:
     case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
     case sites::ProductionProofSiteKind::CoupledLobeInitCounterXof:
@@ -1198,7 +1208,6 @@ uint32_t PartialResidualMask(
     case sites::ProductionProofSiteKind::EpisodeRangeExtractCtl:
         return PARAM | SOURCE | SCHEDULE | ALL | RECURSE;
     case sites::ProductionProofSiteKind::EpisodeScaleSha:
-    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
     case sites::ProductionProofSiteKind::CoupledBankCounterXof:
     case sites::ProductionProofSiteKind::CoupledBankCommitmentSha256d:
     case sites::ProductionProofSiteKind::CoupledLobeInitCounterXof:
@@ -1208,6 +1217,7 @@ uint32_t PartialResidualMask(
     case sites::ProductionProofSiteKind::CoupledMixXof:
     case sites::ProductionProofSiteKind::CoupledExtractScaleSha:
         return PARAM | SOURCE | SCHEDULE | COPY | ALL | RECURSE;
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
     case sites::ProductionProofSiteKind::CoupledExtractChaCha:
         // The table now contains the complete local opcode, boundary, output
         // mux and internal SSA relation.  The caller-owned source root, exact
@@ -1289,6 +1299,7 @@ bool BuildCanonicalR0BaseColumns(
         }
         append_range(0, 10);
         break;
+    case sites::ProductionProofSiteKind::EpisodeExtractChaCha:
     case sites::ProductionProofSiteKind::CoupledExtractChaCha:
         // The fixed-program provenance manifest explicitly places all
         // producer/consumer inverses and running sums after BaseColumns.
@@ -1429,16 +1440,40 @@ bool BuildProductionFixedProgramOutputLocalProgramTableV1(
     return BuildFixedProgramLocalFragment(role, out, why);
 }
 
-bool BuildProductionCoupledExtractChaChaProgramTableV1(
+bool BuildProductionExtractChaChaProgramTableV1(
+    sites::ProductionProofSiteKind kind,
+    RCStage3RelationRole role,
+    RCStage3RelationEndpoint endpoint,
     cb::ProgramTable& out,
     fpb::ManifestV1* manifest,
     std::vector<unsigned char>* schema_suffix,
     std::string* why)
 {
     out = {};
+    if (!((kind ==
+               sites::ProductionProofSiteKind::
+                   EpisodeExtractChaCha &&
+           role == RCStage3RelationRole::EpisodeExtract &&
+           endpoint ==
+               RCStage3RelationEndpoint::
+                   EpisodeExtractChaCha) ||
+          (kind ==
+               sites::ProductionProofSiteKind::
+                   CoupledExtractChaCha &&
+           role == RCStage3RelationRole::CoupledExtract &&
+           endpoint ==
+               RCStage3RelationEndpoint::
+                   CoupledExtractChaCha))) {
+        if (why != nullptr) {
+            *why =
+                "stage3:production_family_programs:"
+                "extract_chacha_role";
+        }
+        return false;
+    }
     fpb::ManifestV1 local;
     if (!fpb::BuildCanonicalProgramTableV1(
-            RCStage3RelationRole::CoupledExtract,
+            role,
             stage3_hash_air::ProgramKind::ChaCha20Block,
             out, &local, why) ||
         !local.exact_native_constraint_order ||
@@ -1456,18 +1491,19 @@ bool BuildProductionCoupledExtractChaChaProgramTableV1(
         if (why != nullptr && why->empty()) {
             *why =
                 "stage3:production_family_programs:"
-                "coupled_extract_chacha_program";
+                "extract_chacha_program";
         }
         return false;
     }
     const auto suffix =
-        CoupledExtractChaChaSchemaSuffix(local);
+        ExtractChaChaSchemaSuffix(
+            kind, role, endpoint, local);
     if (suffix.empty()) {
         out = {};
         if (why != nullptr) {
             *why =
                 "stage3:production_family_programs:"
-                "coupled_extract_chacha_schema";
+                "extract_chacha_schema";
         }
         return false;
     }
@@ -1476,6 +1512,36 @@ bool BuildProductionCoupledExtractChaChaProgramTableV1(
         *schema_suffix = suffix;
     }
     return true;
+}
+
+bool BuildProductionCoupledExtractChaChaProgramTableV1(
+    cb::ProgramTable& out,
+    fpb::ManifestV1* manifest,
+    std::vector<unsigned char>* schema_suffix,
+    std::string* why)
+{
+    return BuildProductionExtractChaChaProgramTableV1(
+        sites::ProductionProofSiteKind::
+            CoupledExtractChaCha,
+        RCStage3RelationRole::CoupledExtract,
+        RCStage3RelationEndpoint::
+            CoupledExtractChaCha,
+        out, manifest, schema_suffix, why);
+}
+
+bool BuildProductionEpisodeExtractChaChaProgramTableV1(
+    cb::ProgramTable& out,
+    fpb::ManifestV1* manifest,
+    std::vector<unsigned char>* schema_suffix,
+    std::string* why)
+{
+    return BuildProductionExtractChaChaProgramTableV1(
+        sites::ProductionProofSiteKind::
+            EpisodeExtractChaCha,
+        RCStage3RelationRole::EpisodeExtract,
+        RCStage3RelationEndpoint::
+            EpisodeExtractChaCha,
+        out, manifest, schema_suffix, why);
 }
 
 bool BuildCanonicalProductionFamilyProgramTableV1(
@@ -1527,11 +1593,23 @@ BuildProductionFamilyProgramSourcesV1(
             source.program = std::move(real);
             std::vector<unsigned char> suffix;
             if (site.kind ==
-                sites::ProductionProofSiteKind::
-                    CoupledExtractChaCha) {
+                    sites::ProductionProofSiteKind::
+                        CoupledExtractChaCha ||
+                site.kind ==
+                    sites::ProductionProofSiteKind::
+                        EpisodeExtractChaCha) {
                 cb::ProgramTable canonical;
-                if (!BuildProductionCoupledExtractChaChaProgramTableV1(
-                        canonical, nullptr, &suffix, &why) ||
+                const bool built =
+                    site.kind ==
+                        sites::ProductionProofSiteKind::
+                            CoupledExtractChaCha
+                    ? BuildProductionCoupledExtractChaChaProgramTableV1(
+                          canonical, nullptr,
+                          &suffix, &why)
+                    : BuildProductionEpisodeExtractChaChaProgramTableV1(
+                          canonical, nullptr,
+                          &suffix, &why);
+                if (!built ||
                     canonical != source.program) {
                     BindCanonicalPhaseDescriptor(
                         source, nullptr);

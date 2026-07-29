@@ -91,6 +91,15 @@ BuildProductionCoupledExtractChaChaProgramTableV1(
     std::vector<unsigned char>* schema_suffix = nullptr,
     std::string* why = nullptr);
 
+/** Episode-role analogue of the complete ChaCha provenance table above. */
+[[nodiscard]] bool
+BuildProductionEpisodeExtractChaChaProgramTableV1(
+    constraint_bytecode::ProgramTable& out,
+    fixed_program_provenance_bytecode::ManifestV1*
+        manifest = nullptr,
+    std::vector<unsigned char>* schema_suffix = nullptr,
+    std::string* why = nullptr);
+
 /**
  * Stable output-column ABI for the role-local direct products below.  Each
  * component occupies disjoint trace columns and disjoint challenge lanes.

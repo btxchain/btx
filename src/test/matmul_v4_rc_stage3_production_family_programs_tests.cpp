@@ -393,6 +393,51 @@ BOOST_AUTO_TEST_CASE(
         chacha_differential.valid,
         chacha_differential.note);
 
+    const size_t episode_chacha_idx = FindFamilyIndex(
+        manifest,
+        ss::ProductionProofSiteKind::EpisodeExtractChaCha);
+    const auto& episode_chacha =
+        sources[episode_chacha_idx];
+    cb::ProgramTable canonical_episode_chacha;
+    fpb::ManifestV1 episode_chacha_manifest;
+    std::vector<unsigned char> episode_chacha_suffix;
+    BOOST_REQUIRE(
+        ut::BuildProductionEpisodeExtractChaChaProgramTableV1(
+            canonical_episode_chacha,
+            &episode_chacha_manifest,
+            &episode_chacha_suffix));
+    BOOST_CHECK(
+        episode_chacha.program ==
+        canonical_episode_chacha);
+    BOOST_CHECK_EQUAL(
+        episode_chacha.program.current_width,
+        fpb::kColumnsV1);
+    BOOST_CHECK(
+        episode_chacha_manifest
+            .internal_ssa_provenance_complete);
+    BOOST_REQUIRE_GE(
+        episode_chacha.public_input_schema.size(),
+        episode_chacha_suffix.size());
+    BOOST_CHECK(std::equal(
+        episode_chacha_suffix.begin(),
+        episode_chacha_suffix.end(),
+        episode_chacha.public_input_schema.end() -
+            episode_chacha_suffix.size()));
+    BOOST_CHECK(
+        episode_chacha_suffix != chacha_suffix);
+    BOOST_CHECK(
+        cb::CommitProgramTable(
+            episode_chacha.program) !=
+        cb::CommitProgramTable(chacha.program));
+    const auto episode_chacha_differential =
+        fpb::AuditAgainstNativeV1(
+            rc::RCStage3RelationRole::EpisodeExtract,
+            rc::stage3_hash_air::ProgramKind::ChaCha20Block,
+            8);
+    BOOST_REQUIRE_MESSAGE(
+        episode_chacha_differential.valid,
+        episode_chacha_differential.note);
+
     // A site whose whole provenance relation is not closed now carries a real
     // canonical local kernel, but remains honestly INCOMPLETE: no endpoint
     // claim and no completeness bit.
@@ -436,6 +481,23 @@ BOOST_AUTO_TEST_CASE(
         status.partial_residuals.end());
     BOOST_CHECK_EQUAL(
         chacha_residual->missing_obligations,
+        ut::ProductionResidualSourceRootProvenance |
+            ut::ProductionResidualImmutableScheduleBinding |
+            ut::ProductionResidualExactAllInstanceAggregation |
+            ut::ProductionResidualRecursiveConsumption);
+    const auto episode_chacha_residual = std::find_if(
+        status.partial_residuals.begin(),
+        status.partial_residuals.end(),
+        [](const auto& residual) {
+            return residual.kind ==
+                ss::ProductionProofSiteKind::
+                    EpisodeExtractChaCha;
+        });
+    BOOST_REQUIRE(
+        episode_chacha_residual !=
+        status.partial_residuals.end());
+    BOOST_CHECK_EQUAL(
+        episode_chacha_residual->missing_obligations,
         ut::ProductionResidualSourceRootProvenance |
             ut::ProductionResidualImmutableScheduleBinding |
             ut::ProductionResidualExactAllInstanceAggregation |
@@ -797,7 +859,6 @@ BOOST_AUTO_TEST_CASE(
 
     const std::vector<ss::ProductionProofSiteKind> fixed_sites{
         ss::ProductionProofSiteKind::EpisodeScaleSha,
-        ss::ProductionProofSiteKind::EpisodeExtractChaCha,
         ss::ProductionProofSiteKind::CoupledBankCounterXof,
         ss::ProductionProofSiteKind::CoupledBankCommitmentSha256d,
         ss::ProductionProofSiteKind::CoupledLobeInitCounterXof,
@@ -886,10 +947,7 @@ BOOST_AUTO_TEST_CASE(
     for (const auto [program_kind, site_kind] : {
              std::pair{
                  ha::ProgramKind::Sha256Compression,
-                 ss::ProductionProofSiteKind::EpisodeScaleSha},
-             std::pair{
-                 ha::ProgramKind::ChaCha20Block,
-                 ss::ProductionProofSiteKind::EpisodeExtractChaCha}}) {
+                 ss::ProductionProofSiteKind::EpisodeScaleSha}}) {
         const auto program =
             ha::BuildCanonicalProgram(program_kind);
         std::vector<uint32_t> external(
