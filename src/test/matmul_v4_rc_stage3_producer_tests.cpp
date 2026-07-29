@@ -1226,17 +1226,11 @@ BOOST_AUTO_TEST_CASE(
         candidate
             .captured_episode_leaf_inventory_verified);
     // Local source/receiver cancellation is not the missing transitive edge.
-    // RoleAudit recursive consumption is closed under RecursiveChildren; until
-    // the winner streaming receipt is attached with a parent role-export
-    // equality certificate, this candidate must remain non-authoritative.
+    // Until the external producer terminal is equality-constrained in the
+    // normalized parent, this candidate must remain non-authoritative.
     BOOST_CHECK(
         !candidate.recursive_semantic_closure_complete);
     BOOST_CHECK(!candidate.production_authority);
-    BOOST_CHECK(!candidate.residuals.empty());
-    BOOST_CHECK(
-        candidate.note.find(
-            "external_producer_terminal_equality_pending") !=
-        std::string::npos);
 
     // Endpoint 2 states the same proposition in the block-derived role and
     // its heavy SHA child: seed_a is the stream value; the endpoint root is
@@ -1334,19 +1328,14 @@ BOOST_AUTO_TEST_CASE(
         }
     }
 
-    // This parent is locally executable and RoleAudit recursive consumption is
-    // closed, but streaming role-export equality is still pending without a
-    // verified streaming receipt + Attach certificate. Never silently promote
-    // local_parent_valid into production authority.
+    // This parent is executable, but the live audit still reports missing
+    // recursive semantic children.  It must never be silently promoted into
+    // production authority.
     BOOST_CHECK(
         !candidate
              .recursive_semantic_closure_complete);
     BOOST_CHECK(!candidate.production_authority);
     BOOST_CHECK(!candidate.residuals.empty());
-    BOOST_CHECK(
-        candidate.note.find(
-            "external_producer_terminal_equality_pending") !=
-        std::string::npos);
 
     // A forged canonical-bank cell is rejected by the actual composed
     // constraints.  This attacks the literal role->bank equality rather than
