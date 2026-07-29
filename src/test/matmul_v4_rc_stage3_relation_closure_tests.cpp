@@ -307,6 +307,20 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK_EQUAL(endpoints, 52U);
     BOOST_CHECK_EQUAL(proof_derived_ctl, 28U);
 
+    // Interlock vs the reverted constexpr theater: with RecursiveChildren
+    // false, CellAudit must not invent 52/52 recursive consumption.
+    {
+        const auto cells = CurrentRCStage3RelationEndpointCellAudit();
+        BOOST_REQUIRE_EQUAL(cells.size(), 52U);
+        uint16_t consumed = 0;
+        for (const auto& cell : cells) {
+            consumed += cell.recursive_child_consumed ? 1 : 0;
+        }
+        BOOST_CHECK_EQUAL(consumed, 0U);
+        BOOST_CHECK(
+            !kRCStage3RelationClosureRecursiveChildrenExecutable);
+    }
+
     const auto cells = CurrentRCStage3RelationEndpointCellAudit();
     BOOST_REQUIRE_EQUAL(cells.size(), 52U);
     uint16_t relation_cells = 0;

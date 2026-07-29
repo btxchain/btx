@@ -15124,10 +15124,18 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
           "split_rap_multirow_adapter_closed;"
           "proof_payload_bus_closed;"
           "complete_fp=false;"
-          "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
            "capability_with_proof_bus_and_deep_ctl_not_canonical" +
            failed);
+    if (out.valid) {
+        // Living counters — never hard-code 0/52 while CellAudit could lie.
+        out.note +=
+            "recursive_counters_" +
+            std::to_string(out.recursively_consumed_endpoints) +
+            "_of_52_and_" +
+            std::to_string(out.recursively_consumed_roles) +
+            "_of_14";
+    }
     return out;
 }
 bool ValidateNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
@@ -15294,10 +15302,17 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
           "split_rap_multirow_adapter_closed;"
           "proof_payload_bus_closed;"
           "complete_fp=false;"
-          "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
            "capability_with_ctl_parent_air_not_canonical" +
            failed);
+    if (out.valid) {
+        out.note +=
+            "recursive_counters_" +
+            std::to_string(out.recursively_consumed_endpoints) +
+            "_of_52_and_" +
+            std::to_string(out.recursively_consumed_roles) +
+            "_of_14";
+    }
     return out;
 }
 bool ValidateNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
@@ -15590,10 +15605,17 @@ AssessNormalizedRecursiveChildCapabilityV1(
           "proof_payload_bus_closed;"
           "ctl_terminal_and_semantic_root_chips_open;"
           "split_rap_multirow_adapter_closed;"
-          "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
            "capability_audit_input_not_canonical" +
            failed);
+    if (out.valid) {
+        out.note +=
+            "recursive_counters_" +
+            std::to_string(out.recursively_consumed_endpoints) +
+            "_of_52_and_" +
+            std::to_string(out.recursively_consumed_roles) +
+            "_of_14";
+    }
     return out;
 }
 
@@ -15809,7 +15831,11 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
         out.note +=
             "split_rap_multirow_adapter_closed;"
             "complete_fp=false;"
-            "recursive_counters_0_of_52_and_0_of_14";
+            "recursive_counters_" +
+            std::to_string(out.recursively_consumed_endpoints) +
+            "_of_52_and_" +
+            std::to_string(out.recursively_consumed_roles) +
+            "_of_14";
     } else {
         out.note =
             "stage3:recursive_fixedpoint:"
@@ -23301,7 +23327,9 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
           "split_rap_multirow_closed;"
           "endpoint_terminal_equality_closed;"
           "complete_fp_executable_still_false;"
-          "recursive_children_blocked;authority=false"
+          "verifier_fs_requires_active_config_authority_eligible;"
+          "recursive_children_blocked_until_living_parent_consume;"
+          "authority=false"
         : "stage3:recursive_fixedpoint:"
           "complete_fp_residual_inventory_incoherent";
     return out;

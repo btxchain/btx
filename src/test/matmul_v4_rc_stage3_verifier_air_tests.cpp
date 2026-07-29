@@ -757,6 +757,7 @@ BOOST_AUTO_TEST_CASE(
         << " note=" << gap.note);
     BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK_GE(gap.open_predicates, 1U);
+    BOOST_CHECK(gap.note.find("consensus_open") == std::string::npos);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
 }
 
@@ -840,7 +841,10 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
     BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
+    // Reverted cheat used consensus_open as a passing conjunct; must not return.
+    BOOST_CHECK(gap.note.find("consensus_open") == std::string::npos);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
+    static_assert(!va::kVerifierAirConsensusAuthority);
 }
 
 // Light opt-in: fs_selection_air ChallengeTable binds SHA digests to consumed
