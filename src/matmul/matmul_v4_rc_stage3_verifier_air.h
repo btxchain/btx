@@ -1574,6 +1574,44 @@ BuildChunkRlcInterleavedNodeV1(
     const alg_hash::Digest& sibling,
     bool sibling_on_left);
 
+/**
+ * Inventory of predicates for flipping
+ * `kMultiRowV2SplitRapVerifierAirLocalExecutable`.
+ *
+ * LocalExecutable means the exact MultiRow-V2 Split-RAP verifier AIR mirror
+ * of `AirQuotientVerifyRowsSplitRap` executes: canonical three-group program,
+ * host accept, local witness AIR green, openings/Merkle/DEEP/quotient checks,
+ * Poseidon layout aliases, and the exact SHA schedule. RecursiveAuthority is
+ * separate and stays false while semantic Poseidon I/O aliases, SHA transcript
+ * AIR, and parent hash chips remain open.
+ *
+ * Fail-closed: `local_executable_ready` is true only when every local
+ * conjunct is measured green AND the constexpr is true. Does not flip
+ * RecursiveAuthority / CompleteFP / consensus authority.
+ */
+struct MultiRowV2SplitRapLocalExecutableGapV1 {
+    bool canonical_program{false};
+    bool host_verifier_accepted{false};
+    bool local_witness_valid{false};
+    bool local_witness_verified{false};
+    bool openings_and_identities_checked{false};
+    bool poseidon_layout_constrained{false};
+    bool sha_schedule_exact{false};
+    bool claimed_tamper_rejects{false};
+    bool recursive_authority_still_open{false};
+    /** Conjunction; true only after the LocalExecutable constexpr flips. */
+    bool local_executable_ready{false};
+    uint32_t open_predicates{0};
+    std::string note;
+};
+
+[[nodiscard]] MultiRowV2SplitRapLocalExecutableGapV1
+AssessMultiRowV2SplitRapLocalExecutableGapV1(
+    const air_quotient::AirConstraintSystem<Fp3>& child_cs,
+    const MultiRowV2SplitRapProgramV1& program,
+    const air_quotient::AirQuotientSplitRapRowsProof& proof,
+    const uint256& public_fs_seed);
+
 inline constexpr bool kVerifierFixedSchedulerExecutable = true;
 inline constexpr bool kVerifierScalarAirExecutable = true;
 inline constexpr bool kWholeVerifierLegacyV3HostDifferentialExecutable = true;
@@ -1585,7 +1623,13 @@ inline constexpr bool kWholeVerifierHostDifferentialExecutable =
 inline constexpr bool kVerifierFiatShamirAirExecutable = false;
 inline constexpr bool kVerifierProofRowsBoundInAir = false;
 inline constexpr bool kWholeVerifierWitnessExecutable = false;
-inline constexpr bool kMultiRowV2SplitRapVerifierAirLocalExecutable = false;
+/**
+ * Exact local MultiRow-V2 Split-RAP verifier AIR mirror is executable.
+ * Evidence: AssessMultiRowV2SplitRapLocalExecutableGapV1 + CoupledBankEquality
+ * child-verifier / recursive-consumption audits. RecursiveAuthority stays
+ * false (semantic Poseidon I/O + SHA AIR + parent hash chips open).
+ */
+inline constexpr bool kMultiRowV2SplitRapVerifierAirLocalExecutable = true;
 inline constexpr bool
     kMultiRowV2SplitRapVerifierAirRecursiveAuthority = false;
 inline constexpr bool kVerifierAirConsensusAuthority = false;
@@ -1594,7 +1638,7 @@ inline constexpr bool kChunkRlcPcsV1ProductionAuthority = false;
 static_assert(!kVerifierFiatShamirAirExecutable);
 static_assert(!kVerifierProofRowsBoundInAir);
 static_assert(!kWholeVerifierWitnessExecutable);
-static_assert(!kMultiRowV2SplitRapVerifierAirLocalExecutable);
+static_assert(kMultiRowV2SplitRapVerifierAirLocalExecutable);
 static_assert(!kMultiRowV2SplitRapVerifierAirRecursiveAuthority);
 static_assert(!kVerifierAirConsensusAuthority);
 static_assert(!kChunkRlcPcsV1ProductionAuthority);

@@ -1357,7 +1357,7 @@ BOOST_AUTO_TEST_CASE(completeness_flags_name_the_remaining_hash_gap)
     static_assert(!va::kVerifierProofRowsBoundInAir);
     static_assert(!va::kWholeVerifierWitnessExecutable);
     static_assert(
-        !va::kMultiRowV2SplitRapVerifierAirLocalExecutable);
+        va::kMultiRowV2SplitRapVerifierAirLocalExecutable);
     static_assert(
         !va::kMultiRowV2SplitRapVerifierAirRecursiveAuthority);
     static_assert(!va::kVerifierAirConsensusAuthority);
@@ -1418,6 +1418,46 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !va::ValidateCanonicalMultiRowV2SplitRapProgramV1(
             cs, omission_attack, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    multi_row_v2_split_rap_local_executable_gap_closes)
+{
+    const auto cs = ToySplitRapSystem();
+    const std::vector<std::vector<gf::Fp3>> columns{
+        {gf::Fp3::Zero(), gf::Fp3::One()},
+        {gf::Fp3::One(), gf::Fp3::Zero()}};
+    const std::vector<uint32_t> base_indices{0};
+    const uint256 seed = Filled(0xdd);
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRap(
+            cs, columns, base_indices, seed);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact,
+        proved.note);
+    const auto program =
+        va::BuildCanonicalMultiRowV2SplitRapProgramV1(
+            cs, base_indices);
+    BOOST_REQUIRE_MESSAGE(program.valid, program.note);
+    const auto gap =
+        va::AssessMultiRowV2SplitRapLocalExecutableGapV1(
+            cs, program, proved.proof, seed);
+    BOOST_TEST_MESSAGE(gap.note);
+    BOOST_CHECK(gap.canonical_program);
+    BOOST_CHECK(gap.host_verifier_accepted);
+    BOOST_CHECK(gap.local_witness_valid);
+    BOOST_CHECK(gap.local_witness_verified);
+    BOOST_CHECK(gap.openings_and_identities_checked);
+    BOOST_CHECK(gap.poseidon_layout_constrained);
+    BOOST_CHECK(gap.sha_schedule_exact);
+    BOOST_CHECK(gap.claimed_tamper_rejects);
+    BOOST_CHECK(gap.recursive_authority_still_open);
+    BOOST_CHECK_EQUAL(gap.open_predicates, 0U);
+    BOOST_CHECK(gap.local_executable_ready);
+    static_assert(
+        va::kMultiRowV2SplitRapVerifierAirLocalExecutable);
+    static_assert(
+        !va::kMultiRowV2SplitRapVerifierAirRecursiveAuthority);
 }
 
 BOOST_AUTO_TEST_CASE(

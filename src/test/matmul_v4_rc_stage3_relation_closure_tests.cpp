@@ -279,7 +279,8 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
     // RecursiveChildren stays false while CompleteFP residuals remain open
-    // (payload bus / Split-RAP multirow adapter / endpoint terminal equality).
+    // (payload bus / endpoint terminal equality; Split-RAP multirow local
+    // adapter closed).
     {
         namespace fp = recursive_fixedpoint;
         const auto residuals =
@@ -287,7 +288,8 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
         BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
         BOOST_CHECK(residuals.complete_fp_open);
         BOOST_CHECK(residuals.recursive_children_gate_blocked);
-        BOOST_CHECK_EQUAL(residuals.open_residual_families, 3U);
+        BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
+        BOOST_CHECK_EQUAL(residuals.open_residual_families, 2U);
     }
 
     const auto audit = CurrentRCStage3RelationClosureRoleAudit();

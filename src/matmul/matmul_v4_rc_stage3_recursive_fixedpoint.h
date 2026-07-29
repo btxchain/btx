@@ -2883,8 +2883,9 @@ struct NormalizedRecursiveVerifierGap {
  * Fiat-Shamir replay is consumed from the ledger's g4 assessor
  * (`AssessChildFsReplayClosureV1().closed` via
  * `fiat_shamir_replay_complete`); `va::kVerifierFiatShamirAirExecutable`
- * may remain false. It also records that EpisodeGemmSignedRange's sound
- * three-group Split-RAP proof has no MultiRow-V2 recursive verifier adapter.
+ * may remain false. SplitRapMultiRowVerifier LocalExecutable is closed
+ * (`va::kMultiRowV2SplitRapVerifierAirLocalExecutable`); RecursiveAuthority
+ * for that mirror remains false.
  *
  * `valid` means the audit was reconstructed from the supplied checked
  * composition. It never means the endpoint was recursively consumed.
@@ -3856,15 +3857,15 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *
  * FAIL-CLOSED (false). DeepCtlParentAir capability closes ProofFieldBus,
  * Deep64 CTL terminal, CTL-child-in-parent-air, semantic-root lanes, and
- * ledger-g4 FS replay — but three residual families remain outside:
+ * ledger-g4 FS replay — but residual families remain outside:
  *
  *   1. ChildProofPayloadBus
  *      — `va::kVerifierProofRowsBoundInAir` still false
  *        (`matmul_v4_rc_stage3_verifier_air.h`).
- *   2. SplitRapMultiRowVerifier
- *      — `split_rap_multirow_parent_adapter` hard-false in
- *        `AssessNormalizedRecursiveChildCapabilityV1`;
- *        `va::kMultiRowV2SplitRapVerifierAirLocalExecutable` still false.
+ *   2. SplitRapMultiRowVerifier — CLOSED locally
+ *      — `va::kMultiRowV2SplitRapVerifierAirLocalExecutable` true;
+ *        `split_rap_multirow_parent_adapter` follows that constexpr.
+ *        RecursiveAuthority stays false.
  *   3. EndpointTerminalEquality
  *      — `BytecodeInterpreterAttachment::role_semantic_root_terminal_equality`
  *        stays false after `AttachNormalizedCoupledBankTerminalBinding`
@@ -3872,8 +3873,9 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *        endpoint-28 proof-owned terminal equality open).
  *
  * `AssessCompleteRecursiveFixedPointResidualInventoryV1` remeasures these
- * living predicates. Do not flip without closing all three with AIR
- * evidence + forgery tests. Consensus authority stays separate/false.
+ * living predicates. Do not flip CompleteFP without closing the remaining
+ * open residuals with AIR evidence + forgery tests. Consensus authority
+ * stays separate/false.
  */
 inline constexpr bool kCompleteRecursiveFixedPointExecutable = false;
 inline constexpr bool kRecursiveFixedPointConsensusAuthority = false;

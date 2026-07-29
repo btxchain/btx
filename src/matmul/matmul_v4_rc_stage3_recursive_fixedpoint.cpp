@@ -14777,8 +14777,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
                   "terminal_bus_required") &&
         fail_pred(out.normalized_semantic_root_derived_in_parent,
                   "semantic_root_required") &&
-        fail_pred(!out.split_rap_multirow_parent_adapter,
-                  "split_rap_adapter_unexpected") &&
+        fail_pred(out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_required") &&
         fail_pred(!out.endpoint_terminal_equality,
                   "endpoint_terminal_unexpected") &&
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
@@ -14797,7 +14797,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
           "semantic_root_input_lanes_complete;"
           "ctl_child_verifier_in_parent_air_open;"
           "ledger_g4_fiat_shamir_replay_closed;"
-          "proof_payload_and_split_rap_multirow_adapter_open;"
+          "split_rap_multirow_adapter_closed;"
+          "proof_payload_open;"
           "complete_fp=false;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
@@ -14946,8 +14947,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
                   "terminal_bus_required") &&
         fail_pred(out.normalized_semantic_root_derived_in_parent,
                   "semantic_root_required") &&
-        fail_pred(!out.split_rap_multirow_parent_adapter,
-                  "split_rap_adapter_unexpected") &&
+        fail_pred(out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_required") &&
         fail_pred(!out.endpoint_terminal_equality,
                   "endpoint_terminal_unexpected") &&
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
@@ -14966,7 +14967,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
           "semantic_root_input_lanes_complete;"
           "ctl_child_verifier_in_parent_air_closed;"
           "ledger_g4_fiat_shamir_replay_closed;"
-          "proof_payload_and_split_rap_multirow_adapter_open;"
+          "split_rap_multirow_adapter_closed;"
+          "proof_payload_open;"
           "complete_fp=false;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
@@ -15095,12 +15097,14 @@ AssessNormalizedRecursiveChildCapabilityV1(
     out.normalized_semantic_root_derived_in_parent =
         root.in_parent_derivation_complete;
 
-    // The signed-range Split-RAP verifier is executable natively, but the
-    // current recursive witness builders accept AlgAirProof/DualAlgAirProof,
-    // not the three-group MultiRow-V2 proof and its two next-row groups.
+    // Native signed-range Split-RAP canary plus the MultiRow-V2 local verifier
+    // AIR parent adapter (CoupledBankEqualityChildVerifier /
+    // NormalizedUniversalParentCandidate consume MultiRow-V2 proofs).
+    // RecursiveAuthority stays false (semantic Poseidon I/O + SHA AIR open).
     out.split_rap_native_verifier_executable =
         kRCStage3EpisodeSignedRangeSplitRapCanaryExecutable;
-    out.split_rap_multirow_parent_adapter = false;
+    out.split_rap_multirow_parent_adapter =
+        va::kMultiRowV2SplitRapVerifierAirLocalExecutable;
     out.endpoint_terminal_equality =
         interpreter.role_semantic_root_terminal_equality;
 
@@ -15159,9 +15163,15 @@ AssessNormalizedRecursiveChildCapabilityV1(
                 SplitRapMultiRowVerifier,
             "split_rap_multirow_v2_recursive_adapter",
             0, 0, 0, out.split_rap_multirow_parent_adapter,
-            "EpisodeGemmSignedRange uses three ordered current-row groups, "
-            "two supplemental next-row groups and Q192; current recursive "
-            "builders accept neither that proof type nor transcript",
+            out.split_rap_multirow_parent_adapter
+                ? "MultiRow-V2 Split-RAP local verifier AIR executes "
+                  "(kMultiRowV2SplitRapVerifierAirLocalExecutable); "
+                  "CoupledBankEqualityChildVerifier + "
+                  "NormalizedUniversalParentCandidate consume the three-"
+                  "group proof; RecursiveAuthority / hash chips remain open"
+                : "EpisodeGemmSignedRange uses three ordered current-row "
+                  "groups, two supplemental next-row groups and Q192; "
+                  "MultiRow-V2 local verifier AIR adapter still open",
         },
         {
             NormalizedRecursiveVerifierGapCode::
@@ -15229,8 +15239,8 @@ AssessNormalizedRecursiveChildCapabilityV1(
                   "terminal_bus_unexpected") &&
         fail_pred(!out.normalized_semantic_root_derived_in_parent,
                   "semantic_root_unexpected") &&
-        fail_pred(!out.split_rap_multirow_parent_adapter,
-                  "split_rap_adapter_unexpected") &&
+        fail_pred(out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_required") &&
         fail_pred(!out.endpoint_terminal_equality,
                   "endpoint_terminal_unexpected") &&
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
@@ -15247,8 +15257,8 @@ AssessNormalizedRecursiveChildCapabilityV1(
           "coupled_bank_pages_is_smallest_current_parent_candidate;"
           "algebraic_child_equations_execute;"
           "ledger_g4_fiat_shamir_replay_closed;"
+          "split_rap_multirow_adapter_closed;"
           "proof_payload_ctl_terminal_and_semantic_root_chips_open;"
-          "split_rap_multirow_adapter_open;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
            "capability_audit_input_not_canonical" +
@@ -15435,8 +15445,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
         fail_pred(out.normalized_semantic_root_derived_in_parent ==
                       close_terminal,
                   "semantic_root_state") &&
-        fail_pred(!out.split_rap_multirow_parent_adapter,
-                  "split_rap_adapter_unexpected") &&
+        fail_pred(out.split_rap_multirow_parent_adapter,
+                  "split_rap_adapter_required") &&
         fail_pred(!out.endpoint_terminal_equality,
                   "endpoint_terminal_unexpected") &&
         fail_pred(!kCompleteRecursiveFixedPointExecutable,
@@ -15457,14 +15467,14 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
                 "terminal_bus_closed_via_commitment_bus;"
                 "semantic_root_derived_in_parent;"
                 "ctl_child_verifier_still_host_only;"
-                "proof_payload_and_endpoint_split_rap_open;";
+                "proof_payload_and_endpoint_open;";
         } else {
             out.note +=
                 "ledger_g4_fiat_shamir_replay_closed;"
                 "proof_payload_ctl_terminal_and_semantic_root_chips_open;";
         }
         out.note +=
-            "split_rap_multirow_adapter_open;"
+            "split_rap_multirow_adapter_closed;"
             "complete_fp=false;"
             "recursive_counters_0_of_52_and_0_of_14";
     } else {
@@ -22911,7 +22921,8 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     out.ledger_g4_child_fs_replay_closed =
         recursive_parent_air::AssessChildFsReplayClosureV1()
             .closed;
-    // Three residual families that keep CompleteFP false.
+    // Residual families that keep CompleteFP false. SplitRapMultiRowVerifier
+    // closes when kMultiRowV2SplitRapVerifierAirLocalExecutable is true.
     out.child_proof_payload_bus_open =
         !va::kVerifierProofRowsBoundInAir;
     out.split_rap_multirow_parent_adapter_open =
@@ -22939,18 +22950,19 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         out.ctl_child_verifier_in_parent_air_attachable &&
         out.ledger_g4_child_fs_replay_closed &&
         out.child_proof_payload_bus_open &&
-        out.split_rap_multirow_parent_adapter_open &&
+        !out.split_rap_multirow_parent_adapter_open &&
         out.endpoint_terminal_equality_open &&
         out.verifier_fiat_shamir_air_chip_open &&
         out.complete_fp_open &&
         out.recursive_children_gate_blocked &&
-        out.open_residual_families == 3 &&
+        out.open_residual_families == 2 &&
         !kCompleteRecursiveFixedPointExecutable &&
         !kRecursiveFixedPointConsensusAuthority;
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
           "complete_fp_residuals_open;"
-          "payload_bus+split_rap_multirow+endpoint_terminal;"
+          "payload_bus+endpoint_terminal;"
+          "split_rap_multirow_closed;"
           "recursive_children_blocked;authority=false"
         : "stage3:recursive_fixedpoint:"
           "complete_fp_residual_inventory_incoherent";

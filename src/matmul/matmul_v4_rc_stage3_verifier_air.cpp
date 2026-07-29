@@ -7535,6 +7535,106 @@ bool VerifyMultiRowV2SplitRapVerifierWitnessV1(
     return true;
 }
 
+MultiRowV2SplitRapLocalExecutableGapV1
+AssessMultiRowV2SplitRapLocalExecutableGapV1(
+    const aq::AirConstraintSystem<Fp3>& child_cs,
+    const MultiRowV2SplitRapProgramV1& program,
+    const aq::AirQuotientSplitRapRowsProof& proof,
+    const uint256& public_fs_seed)
+{
+    MultiRowV2SplitRapLocalExecutableGapV1 out;
+    std::string why;
+    out.canonical_program =
+        ValidateCanonicalMultiRowV2SplitRapProgramV1(
+            child_cs, program, &why);
+    const MultiRowV2SplitRapVerifierWitnessV1 witness =
+        BuildMultiRowV2SplitRapVerifierWitnessV1(
+            child_cs, program, proof, public_fs_seed);
+    out.host_verifier_accepted =
+        witness.host_verifier_accepted;
+    out.local_witness_valid = witness.valid;
+    out.local_witness_verified =
+        VerifyMultiRowV2SplitRapVerifierWitnessV1(
+            child_cs, program, proof, public_fs_seed,
+            witness, &why);
+    out.openings_and_identities_checked =
+        witness.all_current_next_openings_bound &&
+        witness.all_merkle_paths_replayed &&
+        witness.all_deep_fold_identities_checked &&
+        witness.all_quotient_identities_checked &&
+        witness.preprocessed_relation_satisfied;
+    out.poseidon_layout_constrained =
+        witness.alg_hash_poseidon_permutations_constrained &&
+        witness.poseidon_alias_plan.valid &&
+        witness.poseidon_alias_plan.layout_aliases_complete;
+    out.sha_schedule_exact =
+        witness.transcript_replayed_exactly &&
+        witness.transcript_sha_plan.valid &&
+        witness.transcript_sha_plan.exact_call_order &&
+        witness.transcript_sha_plan
+            .every_compression_sharded_once &&
+        witness.transcript_sha_plan
+            .arity_four_manifest_complete &&
+        witness.transcript_sha_execution.valid;
+    // Claimed-column tamper must go red on the local AIR.
+    if (witness.valid &&
+        witness.witness_columns.size() >
+            kMultiRowV2Claimed0 &&
+        !witness.witness_columns[kMultiRowV2Claimed0]
+             .empty()) {
+        auto tampered = witness;
+        tampered.witness_columns[kMultiRowV2Claimed0][0] =
+            gf::Add(
+                tampered.witness_columns[
+                    kMultiRowV2Claimed0][0],
+                Fp3::One());
+        out.claimed_tamper_rejects =
+            CountVerifierScalarViolations(
+                tampered.constraint_system,
+                tampered.witness_columns) > 0 &&
+            !VerifyMultiRowV2SplitRapVerifierWitnessV1(
+                child_cs, program, proof, public_fs_seed,
+                tampered, &why);
+    }
+    // RecursiveAuthority stays open by construction on V1 local mirrors.
+    out.recursive_authority_still_open =
+        !witness.alg_hash_io_aliases_to_proof_rows_complete &&
+        !witness.sha_transcript_air_constrained &&
+        !witness.parent_hash_chips_execute &&
+        !witness.normalized_recursive_consumption_complete &&
+        !witness.production_authority_ready &&
+        !kMultiRowV2SplitRapVerifierAirRecursiveAuthority;
+
+    const auto bump = [&](bool ok) {
+        if (!ok) ++out.open_predicates;
+    };
+    bump(out.canonical_program);
+    bump(out.host_verifier_accepted);
+    bump(out.local_witness_valid);
+    bump(out.local_witness_verified);
+    bump(out.openings_and_identities_checked);
+    bump(out.poseidon_layout_constrained);
+    bump(out.sha_schedule_exact);
+    bump(out.claimed_tamper_rejects);
+    bump(out.recursive_authority_still_open);
+    out.local_executable_ready =
+        out.open_predicates == 0 &&
+        kMultiRowV2SplitRapVerifierAirLocalExecutable;
+    out.note =
+        std::string(
+            "stage3:verifier_air:multirow_v2_local_gap:") +
+        "open=" + std::to_string(out.open_predicates) +
+        ";local_constexpr=" +
+        (kMultiRowV2SplitRapVerifierAirLocalExecutable
+             ? "1"
+             : "0") +
+        ";authority_constexpr=0;" +
+        (out.local_executable_ready
+             ? "local_ready"
+             : "local_open");
+    return out;
+}
+
 std::vector<MultiRowV2VerifierOutputV1>
 ExportMultiRowV2SplitRapVerifierOutputsV1(
     const MultiRowV2SplitRapVerifierWitnessV1& witness)

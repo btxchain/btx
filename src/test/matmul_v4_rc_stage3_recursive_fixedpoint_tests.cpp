@@ -1596,7 +1596,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         capability.split_rap_native_verifier_executable);
     BOOST_CHECK(
-        !capability.split_rap_multirow_parent_adapter);
+        capability.split_rap_multirow_parent_adapter);
     BOOST_CHECK(!capability.endpoint_terminal_equality);
     BOOST_CHECK_EQUAL(
         capability.normalized_root_required_input_lanes,
@@ -1613,10 +1613,11 @@ BOOST_AUTO_TEST_CASE(
         910U);
     BOOST_REQUIRE_EQUAL(capability.gaps.size(), 7U);
     {
-        // Six residuals remain open; FiatShamirReplayAir is present via
-        // ledger g4 (AssessChildFsReplayClosureV1().closed).
+        // Five residuals remain open; FiatShamirReplayAir is present via
+        // ledger g4, and SplitRapMultiRowVerifier local adapter is closed.
         uint32_t open_gaps = 0;
         bool fs_gap_present = false;
+        bool split_rap_gap_present = false;
         for (const auto& gap : capability.gaps) {
             if (!gap.present_in_parent_air) {
                 ++open_gaps;
@@ -1626,9 +1627,16 @@ BOOST_AUTO_TEST_CASE(
                     FiatShamirReplayAir) {
                 fs_gap_present = gap.present_in_parent_air;
             }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    SplitRapMultiRowVerifier) {
+                split_rap_gap_present =
+                    gap.present_in_parent_air;
+            }
         }
         BOOST_CHECK(fs_gap_present);
-        BOOST_CHECK_EQUAL(open_gaps, 6U);
+        BOOST_CHECK(split_rap_gap_present);
+        BOOST_CHECK_EQUAL(open_gaps, 5U);
     }
     BOOST_CHECK_EQUAL(
         capability.recursively_consumed_endpoints, 0U);
@@ -1694,12 +1702,12 @@ BOOST_AUTO_TEST_CASE(
             residuals.ctl_child_verifier_in_parent_air_attachable);
         BOOST_CHECK(residuals.ledger_g4_child_fs_replay_closed);
         BOOST_CHECK(residuals.child_proof_payload_bus_open);
-        BOOST_CHECK(residuals.split_rap_multirow_parent_adapter_open);
+        BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(residuals.endpoint_terminal_equality_open);
         BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
         BOOST_CHECK(residuals.complete_fp_open);
         BOOST_CHECK(residuals.recursive_children_gate_blocked);
-        BOOST_CHECK_EQUAL(residuals.open_residual_families, 3U);
+        BOOST_CHECK_EQUAL(residuals.open_residual_families, 2U);
     }
 
     // Even if an attacker consistently changes the external semantic-root
