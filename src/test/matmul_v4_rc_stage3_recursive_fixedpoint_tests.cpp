@@ -2496,7 +2496,8 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(commit_gap_present);
         BOOST_CHECK(semantic_gap_present);
         BOOST_CHECK(!ctl_gap_present);
-        BOOST_CHECK_EQUAL(open_gaps, 4U);
+        // SplitRapMultiRow local adapter closed; payload+FS-open gaps remain.
+        BOOST_CHECK_EQUAL(open_gaps, 3U);
     }
     BOOST_CHECK_MESSAGE(
         fp::ValidateNormalizedRecursiveChildCapabilityWithProofBusV1(
