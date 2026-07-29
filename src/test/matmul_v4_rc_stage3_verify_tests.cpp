@@ -88,6 +88,24 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
     BOOST_CHECK(fixed_point.trace_fixed_point);
     BOOST_CHECK(!fixed_point.complete_recursive_parent);
     BOOST_CHECK(!fp::kCompleteRecursiveFixedPointExecutable);
+    {
+        const auto residuals =
+            fp::AssessCompleteRecursiveFixedPointResidualInventoryV1();
+        BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
+        BOOST_CHECK(residuals.complete_fp_open);
+        BOOST_CHECK(!residuals.complete_fp_assembly_allowed);
+        BOOST_CHECK(residuals.recursive_counters_note_zero_of_52);
+        BOOST_CHECK(residuals.verifier_fs_canary_only_blocks_authority);
+        BOOST_CHECK(!residuals.verifier_fs_executable_ready_honest);
+        // Theater interlock: CompleteFP must not be true while counters are
+        // 0_of_52 or FS lacks honest non-canary executable_ready.
+        BOOST_CHECK(
+            !(fp::kCompleteRecursiveFixedPointExecutable &&
+              residuals.recursive_counters_note_zero_of_52));
+        BOOST_CHECK(
+            !(fp::kCompleteRecursiveFixedPointExecutable &&
+              !residuals.verifier_fs_executable_ready_honest));
+    }
 
     BOOST_CHECK(v5v6::kNormalizedV5EightLaneExportBusExecutable);
     BOOST_CHECK(v5v6::kV5V6LiteralSameTraceAliasExecutable);

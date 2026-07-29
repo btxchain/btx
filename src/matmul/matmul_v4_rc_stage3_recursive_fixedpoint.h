@@ -3984,20 +3984,22 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *        endpoint-28 proof-owned child_trace_row_root).
  *
  * Inventoried residual families are closed; this constexpr stays false until
- * an explicit CompleteFP assembly flip (not this chip).
- *
- * `AssessCompleteRecursiveFixedPointResidualInventoryV1` remeasures these
- * living predicates. Do not flip CompleteFP without an explicit assembly
- * decision once residual families measure closed. Consensus authority
- * stays separate/false.
+ * CompleteFP assembly is allowed by
+ * `AssessCompleteRecursiveFixedPointResidualInventoryV1` (families closed +
+ * honest VerifierFS `authority_eligible` on a non-canary path + recursive
+ * counters not stuck at 0_of_52 while claiming consumption). Do not flip on
+ * canary-only SHA-FS or circular "consensus still open" theater. Consensus
+ * authority stays separate/false.
  */
 inline constexpr bool kCompleteRecursiveFixedPointExecutable = false;
 inline constexpr bool kRecursiveFixedPointConsensusAuthority = false;
 
 /**
  * Measured residual inventory for CompleteFP. Never invents chip
- * availability: each `*_open` bit is derived from a living constexpr or
- * from the fixed DeepCtlParentAir fail_pred posture.
+ * availability: each `*_open` bit is derived from living assessors
+ * (payload / SplitRAP / endpoint constexprs, VerifierFS program
+ * authority_eligible, CellAudit recursive counters) — never from
+ * "consensus still open".
  */
 struct CompleteRecursiveFixedPointResidualInventoryV1 {
     bool proof_field_bus_attachable{false};
@@ -4008,6 +4010,33 @@ struct CompleteRecursiveFixedPointResidualInventoryV1 {
     bool split_rap_multirow_parent_adapter_open{true};
     bool endpoint_terminal_equality_open{true};
     bool verifier_fiat_shamir_air_chip_open{true};
+    /** Production (non-canary) FS program authority_eligible. */
+    bool verifier_fs_authority_eligible{false};
+    /** SHA-canary path cannot supply authority_eligible (blocks theater). */
+    bool verifier_fs_canary_only_blocks_authority{true};
+    /**
+     * Honest VerifierFS executable_ready for CompleteFP: chip constexpr AND
+     * production authority_eligible AND canary-only evidence does not block.
+     * Never uses consensus_authority_still_open.
+     */
+    bool verifier_fs_executable_ready_honest{false};
+    /** Living CellAudit recursive_child_consumed count (of 52). */
+    uint16_t recursively_consumed_endpoints{0};
+    /** Living RoleAudit recursive_ctl_consumption count (of 14). */
+    uint16_t recursively_consumed_roles{0};
+    bool recursive_children_executable{false};
+    /** True while capability/CellAudit counters remain 0_of_52. */
+    bool recursive_counters_note_zero_of_52{true};
+    /**
+     * True when RecursiveChildren is false, or when it is true and counters
+     * actually reach 52/14 (not hardcoded zero while claiming consumption).
+     */
+    bool recursive_counters_honest{false};
+    /**
+     * Assembly permission: residual families closed + honest VerifierFS +
+     * honest recursive counters. Executable may flip only when this is true.
+     */
+    bool complete_fp_assembly_allowed{false};
     bool complete_fp_open{true};
     bool recursive_children_gate_blocked{true};
     uint16_t open_residual_families{0};

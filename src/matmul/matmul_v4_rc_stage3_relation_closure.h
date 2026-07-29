@@ -1640,7 +1640,8 @@ inline constexpr bool
  * Blocked on recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
  * (CompleteFP residual families measure closed via payload bus /
  * SplitRap local / endpoint equality, but
- * kCompleteRecursiveFixedPointExecutable stays false) measured by
+ * kCompleteRecursiveFixedPointExecutable stays false until honest VerifierFS
+ * authority_eligible + non-zero recursive counters allow assembly) measured by
  * AssessCompleteRecursiveFixedPointResidualInventoryV1. Do not flip while
  * CompleteFP is false — that would invent recursive consumption. Authority
  * Ready stays separate/false.

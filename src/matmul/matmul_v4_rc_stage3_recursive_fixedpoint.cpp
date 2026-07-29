@@ -23370,24 +23370,72 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     out.ledger_g4_child_fs_replay_closed =
         recursive_parent_air::AssessChildFsReplayClosureV1()
             .closed;
-    // Inventoried CompleteFP residual families are closed via living
-    // constexprs (payload bus / Split-RAP local / endpoint equality).
-    // kCompleteRecursiveFixedPointExecutable stays fail-closed separately.
+    // Inventoried CompleteFP residual families from living constexprs.
     out.child_proof_payload_bus_open =
         !va::kVerifierProofRowsBoundInAir;
     out.split_rap_multirow_parent_adapter_open =
         !va::kMultiRowV2SplitRapVerifierAirLocalExecutable;
-    // EndpointTerminalEquality closed by
-    // kNormalizedEndpointTerminalEqualityExecutable /
-    // AttachNormalizedEndpointTerminalEqualityV1.
     out.endpoint_terminal_equality_open =
         !kNormalizedEndpointTerminalEqualityExecutable;
+
+    // Living VerifierFS honesty — never "consensus still open".
+    // Production (non-canary) ActiveConfig path: authority_eligible requires
+    // queries == kRCFri3AlgNumQueries and !canary_only. Use a minimal shape so
+    // the inventory stays a cheap assessor (full episode schedule is heavy).
+    nr::NarrowChildShape production_shape{};
+    production_shape.child_w = 1;
+    production_shape.child_n_rows = 2;
+    production_shape.child_n_coeffs = 2;
+    production_shape.child_n_lde = 32;
+    production_shape.merkle_depth = 5;
+    production_shape.n_folds = 1;
+    production_shape.queries = kRCFri3AlgNumQueries;
+    production_shape.child_constraints = 1;
+    production_shape.arity = 1;
+    const va::FiatShamirProgram production_fs =
+        va::BuildCanonicalFiatShamirProgram(production_shape);
+    out.verifier_fs_authority_eligible =
+        production_fs.authority_eligible &&
+        !production_fs.canary_only;
+    // SHA-FS canary path (q=2 bounded): canary_only ⇒ !authority_eligible.
+    // Canary-only evidence must not close CompleteFP's FS residual.
+    nr::NarrowChildShape canary_shape = production_shape;
+    canary_shape.queries = 2;
+    const va::FiatShamirProgram canary_fs =
+        va::BuildBoundedFiatShamirProgram(canary_shape);
+    out.verifier_fs_canary_only_blocks_authority =
+        canary_fs.canary_only || !canary_fs.authority_eligible;
+    out.verifier_fs_executable_ready_honest =
+        va::kVerifierFiatShamirAirExecutable &&
+        out.verifier_fs_authority_eligible &&
+        !out.verifier_fs_canary_only_blocks_authority;
     out.verifier_fiat_shamir_air_chip_open =
-        !va::kVerifierFiatShamirAirExecutable;
-    out.complete_fp_open = !kCompleteRecursiveFixedPointExecutable;
-    // Relation-closure RecursiveChildrenExecutable stays false while
-    // CompleteFP is open (CellAudit would invent recursive consumption).
-    out.recursive_children_gate_blocked = out.complete_fp_open;
+        !out.verifier_fs_executable_ready_honest;
+
+    // Living recursive consumption counters from CellAudit / RoleAudit.
+    const auto cells = CurrentRCStage3RelationEndpointCellAudit();
+    out.recursively_consumed_endpoints = 0;
+    for (const auto& cell : cells) {
+        out.recursively_consumed_endpoints +=
+            cell.recursive_child_consumed ? 1 : 0;
+    }
+    const auto roles = CurrentRCStage3RelationClosureRoleAudit();
+    out.recursively_consumed_roles = 0;
+    for (const auto& role : roles) {
+        out.recursively_consumed_roles +=
+            role.recursive_ctl_consumption ? 1 : 0;
+    }
+    out.recursive_children_executable =
+        kRCStage3RelationClosureRecursiveChildrenExecutable;
+    out.recursive_counters_note_zero_of_52 =
+        out.recursively_consumed_endpoints == 0;
+    out.recursive_counters_honest =
+        !out.recursive_children_executable ||
+        (out.recursively_consumed_endpoints ==
+             kRCStage3RelationClosureEndpointCount &&
+         out.recursively_consumed_roles ==
+             kRCStage3RelationClosureRoleCount);
+
     out.open_residual_families = 0;
     out.open_residual_families +=
         out.child_proof_payload_bus_open ? 1 : 0;
@@ -23395,6 +23443,53 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         out.split_rap_multirow_parent_adapter_open ? 1 : 0;
     out.open_residual_families +=
         out.endpoint_terminal_equality_open ? 1 : 0;
+    // FS honesty residual counts toward assembly, not the three inventoried
+    // CompleteFP chip families (payload / SplitRAP / endpoint).
+
+    out.complete_fp_assembly_allowed =
+        out.open_residual_families == 0 &&
+        !out.child_proof_payload_bus_open &&
+        !out.split_rap_multirow_parent_adapter_open &&
+        !out.endpoint_terminal_equality_open &&
+        out.verifier_fs_executable_ready_honest &&
+        out.recursive_counters_honest &&
+        out.recursive_children_executable &&
+        !out.recursive_counters_note_zero_of_52 &&
+        out.recursively_consumed_endpoints ==
+            kRCStage3RelationClosureEndpointCount &&
+        out.recursively_consumed_roles ==
+            kRCStage3RelationClosureRoleCount &&
+        kNormalizedEndpointTerminalEqualityExecutable &&
+        !kRecursiveFixedPointConsensusAuthority;
+    // complete_fp_open stays true unless Executable AND assembly allowed.
+    // Flipping the constexpr alone (canary / 0_of_52 theater) leaves the
+    // gate open and makes `valid` false.
+    out.complete_fp_open =
+        !(kCompleteRecursiveFixedPointExecutable &&
+          out.complete_fp_assembly_allowed);
+    out.recursive_children_gate_blocked =
+        !out.recursive_children_executable ||
+        out.recursive_counters_note_zero_of_52 ||
+        !out.recursive_counters_honest;
+
+    const bool executable_matches_open =
+        kCompleteRecursiveFixedPointExecutable ==
+        !out.complete_fp_open;
+    // Theater rejection: Executable without honest assembly is invalid.
+    const bool no_theater_flip =
+        !kCompleteRecursiveFixedPointExecutable ||
+        out.complete_fp_assembly_allowed;
+    const bool honesty_bits_coherent =
+        (out.verifier_fiat_shamir_air_chip_open ==
+         !out.verifier_fs_executable_ready_honest) &&
+        (out.recursive_counters_note_zero_of_52 ==
+         (out.recursively_consumed_endpoints == 0)) &&
+        (out.recursive_counters_honest ==
+         (!out.recursive_children_executable ||
+          (out.recursively_consumed_endpoints ==
+               kRCStage3RelationClosureEndpointCount &&
+           out.recursively_consumed_roles ==
+               kRCStage3RelationClosureRoleCount)));
     out.valid =
         out.proof_field_bus_attachable &&
         out.deep64_ctl_terminal_attachable &&
@@ -23403,25 +23498,57 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         !out.child_proof_payload_bus_open &&
         !out.split_rap_multirow_parent_adapter_open &&
         !out.endpoint_terminal_equality_open &&
-        out.verifier_fiat_shamir_air_chip_open &&
-        out.complete_fp_open &&
-        out.recursive_children_gate_blocked &&
         out.open_residual_families == 0 &&
+        honesty_bits_coherent &&
+        executable_matches_open &&
+        no_theater_flip &&
+        (out.complete_fp_open
+             ? !kCompleteRecursiveFixedPointExecutable
+             : out.complete_fp_assembly_allowed) &&
         kNormalizedEndpointTerminalEqualityExecutable &&
-        !kCompleteRecursiveFixedPointExecutable &&
         !kRecursiveFixedPointConsensusAuthority;
-    out.note = out.valid
-        ? "stage3:recursive_fixedpoint:"
-          "complete_fp_residual_families_closed;"
-          "payload_bus_closed;"
-          "split_rap_multirow_closed;"
-          "endpoint_terminal_equality_closed;"
-          "complete_fp_executable_still_false;"
-          "verifier_fs_requires_active_config_authority_eligible;"
-          "recursive_children_blocked_until_living_parent_consume;"
-          "authority=false"
-        : "stage3:recursive_fixedpoint:"
-          "complete_fp_residual_inventory_incoherent";
+    if (out.valid && !kCompleteRecursiveFixedPointExecutable &&
+        !out.complete_fp_assembly_allowed) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "complete_fp_residual_families_closed;"
+            "payload_bus_closed;"
+            "split_rap_multirow_closed;"
+            "endpoint_terminal_equality_closed;"
+            "verifier_fs_open_awaiting_honest_authority_eligible;"
+            "verifier_fs_requires_active_config_authority_eligible;"
+            "canary_only_blocks_fs_authority;"
+            "recursive_counters_0_of_52;"
+            "complete_fp_assembly_blocked;"
+            "complete_fp_executable_still_false;"
+            "recursive_children_blocked_until_living_parent_consume;"
+            "recursive_children_blocked;authority=false";
+    } else if (out.valid && !kCompleteRecursiveFixedPointExecutable &&
+               out.complete_fp_assembly_allowed) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "complete_fp_assembly_allowed;"
+            "awaiting_explicit_executable_flip;"
+            "authority=false";
+    } else if (out.valid && kCompleteRecursiveFixedPointExecutable) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "complete_fp_executable;"
+            "honest_fs_and_recursive_counters;"
+            "authority=false";
+    } else if (kCompleteRecursiveFixedPointExecutable &&
+               (out.recursive_counters_note_zero_of_52 ||
+                !out.verifier_fs_executable_ready_honest ||
+                out.verifier_fs_canary_only_blocks_authority)) {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "complete_fp_theater_flip_rejected;"
+            "need_honest_fs_authority_eligible_and_nonzero_counters";
+    } else {
+        out.note =
+            "stage3:recursive_fixedpoint:"
+            "complete_fp_residual_inventory_incoherent";
+    }
     return out;
 }
 

@@ -11,11 +11,13 @@
 #include <matmul/matmul_v4_rc_stage3_recursive_fixedpoint.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
 #include <matmul/matmul_v4_rc_stage3_role_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <limits>
+#include <string>
 
 namespace aq = matmul::v4::rc::air_quotient;
 namespace ar = matmul::v4::rc::air_recurse;
@@ -1705,9 +1707,21 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
         BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
+        BOOST_CHECK(residuals.verifier_fs_canary_only_blocks_authority);
+        BOOST_CHECK(!residuals.verifier_fs_executable_ready_honest);
         BOOST_CHECK(residuals.complete_fp_open);
+        BOOST_CHECK(!residuals.complete_fp_assembly_allowed);
         BOOST_CHECK(residuals.recursive_children_gate_blocked);
+        BOOST_CHECK(residuals.recursive_counters_note_zero_of_52);
+        BOOST_CHECK(residuals.recursive_counters_honest);
+        BOOST_CHECK_EQUAL(residuals.recursively_consumed_endpoints, 0U);
         BOOST_CHECK_EQUAL(residuals.open_residual_families, 0U);
+        BOOST_CHECK(
+            residuals.note.find("recursive_counters_0_of_52") !=
+            std::string::npos);
+        BOOST_CHECK(
+            residuals.note.find("canary_only_blocks_fs_authority") !=
+            std::string::npos);
         static_assert(fp::kNormalizedEndpointTerminalEqualityExecutable);
     }
 
@@ -5790,6 +5804,77 @@ BOOST_AUTO_TEST_CASE(
             table, child.proof, base_indices,
             public_seed, transcript,
             forged.proof, &why));
+}
+
+// CompleteFP honesty interlocks: Executable must stay false while recursive
+// counters remain 0_of_52 or VerifierFS lacks honest non-canary
+// authority_eligible. Flipping the constexpr alone must make the residual
+// inventory invalid (theater rejection).
+BOOST_AUTO_TEST_CASE(
+    complete_fp_honesty_interlocks_reject_theater_flip)
+{
+    namespace va = rc::stage3_verifier_air;
+    static_assert(!fp::kCompleteRecursiveFixedPointExecutable);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+    static_assert(
+        !rc::kRCStage3RelationClosureRecursiveChildrenExecutable);
+
+    const auto residuals =
+        fp::AssessCompleteRecursiveFixedPointResidualInventoryV1();
+    BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
+    BOOST_CHECK(residuals.complete_fp_open);
+    BOOST_CHECK(!residuals.complete_fp_assembly_allowed);
+    BOOST_CHECK(residuals.recursive_counters_note_zero_of_52);
+    BOOST_CHECK_EQUAL(residuals.recursively_consumed_endpoints, 0U);
+    BOOST_CHECK(residuals.verifier_fs_canary_only_blocks_authority);
+    BOOST_CHECK(!residuals.verifier_fs_executable_ready_honest);
+    BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
+
+    // Living production FS program may be authority_eligible at the program
+    // layer, but canary-only SHA evidence still blocks CompleteFP assembly.
+    nr::NarrowChildShape production_shape{};
+    production_shape.child_w = 1;
+    production_shape.child_n_rows = 2;
+    production_shape.child_n_coeffs = 2;
+    production_shape.child_n_lde = 32;
+    production_shape.merkle_depth = 5;
+    production_shape.n_folds = 1;
+    production_shape.queries = rc::kRCFri3AlgNumQueries;
+    production_shape.child_constraints = 1;
+    production_shape.arity = 1;
+    const va::FiatShamirProgram production_fs =
+        va::BuildCanonicalFiatShamirProgram(production_shape);
+    BOOST_CHECK(production_fs.authority_eligible);
+    BOOST_CHECK(!production_fs.canary_only);
+    BOOST_CHECK_EQUAL(
+        residuals.verifier_fs_authority_eligible,
+        production_fs.authority_eligible);
+
+    nr::NarrowChildShape canary_shape = production_shape;
+    canary_shape.queries = 2;
+    const va::FiatShamirProgram canary_fs =
+        va::BuildBoundedFiatShamirProgram(canary_shape);
+    BOOST_CHECK(canary_fs.canary_only);
+    BOOST_CHECK(!canary_fs.authority_eligible);
+
+    // Interlock predicates that MUST stay red while Executable is false, and
+    // that would invalidate inventory if Executable were flipped alone.
+    BOOST_CHECK(
+        !(fp::kCompleteRecursiveFixedPointExecutable &&
+          residuals.recursive_counters_note_zero_of_52));
+    BOOST_CHECK(
+        !(fp::kCompleteRecursiveFixedPointExecutable &&
+          !residuals.verifier_fs_executable_ready_honest));
+    BOOST_CHECK(
+        !(fp::kCompleteRecursiveFixedPointExecutable &&
+          residuals.verifier_fs_canary_only_blocks_authority));
+    // Assembly gate encodes the same conjunction tests above would break.
+    BOOST_CHECK(
+        !residuals.complete_fp_assembly_allowed ||
+        (residuals.verifier_fs_executable_ready_honest &&
+         !residuals.recursive_counters_note_zero_of_52 &&
+         residuals.recursively_consumed_endpoints ==
+             rc::kRCStage3RelationClosureEndpointCount));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

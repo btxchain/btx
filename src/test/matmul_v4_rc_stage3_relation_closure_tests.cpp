@@ -279,18 +279,28 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
     // RecursiveChildren stays false while CompleteFP residuals remain open
-    // (CompleteFP residual families closed; executable constexpr still false).
+    // (CompleteFP residual families closed; executable constexpr still false;
+    // FS lacks honest non-canary authority_eligible; counters still 0_of_52).
     {
         namespace fp = recursive_fixedpoint;
         const auto residuals =
             fp::AssessCompleteRecursiveFixedPointResidualInventoryV1();
         BOOST_REQUIRE_MESSAGE(residuals.valid, residuals.note);
         BOOST_CHECK(residuals.complete_fp_open);
+        BOOST_CHECK(!residuals.complete_fp_assembly_allowed);
         BOOST_CHECK(residuals.recursive_children_gate_blocked);
+        BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
+        BOOST_CHECK(residuals.recursive_counters_note_zero_of_52);
         BOOST_CHECK(!residuals.child_proof_payload_bus_open);
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
         BOOST_CHECK_EQUAL(residuals.open_residual_families, 0U);
+        BOOST_CHECK(
+            !(fp::kCompleteRecursiveFixedPointExecutable &&
+              residuals.recursive_counters_note_zero_of_52));
+        BOOST_CHECK(
+            !(fp::kCompleteRecursiveFixedPointExecutable &&
+              !residuals.verifier_fs_executable_ready_honest));
     }
 
     const auto audit = CurrentRCStage3RelationClosureRoleAudit();
