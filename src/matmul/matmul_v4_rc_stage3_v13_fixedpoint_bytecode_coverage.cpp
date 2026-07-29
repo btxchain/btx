@@ -124,7 +124,29 @@ CallbackCoverageV1 AssessCallbackCoverageV1(
         (cs.n_rows & (cs.n_rows - 1)) == 0 &&
         cs.n_columns != 0;
     std::set<std::string> unknown;
+    std::set<uint256> canonical_roots;
     for (const auto& constraint : cs.constraints) {
+        const bool has_root =
+            !constraint
+                 .canonical_program_table_root
+                 .IsNull();
+        const bool has_ordinal =
+            constraint
+                .canonical_program_ordinal !=
+            UINT32_MAX;
+        if (has_root && has_ordinal) {
+            ++out
+                 .canonical_program_provenance_constraints;
+            canonical_roots.insert(
+                constraint
+                    .canonical_program_table_root);
+        } else {
+            ++out.native_or_unproven_constraints;
+            if (has_root != has_ordinal) {
+                ++out
+                     .invalid_program_provenance_constraints;
+            }
+        }
         switch (Classify(constraint.name)) {
         case FamilyV1::Bytecode:
             ++out.bytecode_adapter_named_constraints;
@@ -158,6 +180,9 @@ CallbackCoverageV1 AssessCallbackCoverageV1(
     }
     out.unknown_families.assign(
         unknown.begin(), unknown.end());
+    out.canonical_program_roots =
+        static_cast<uint32_t>(
+            canonical_roots.size());
     const uint32_t named_native_constraints =
         out.native_lift_constraints +
         out.native_poseidon_constraints +
@@ -166,9 +191,6 @@ CallbackCoverageV1 AssessCallbackCoverageV1(
         out.native_deep_constraints +
         out.native_alias_constraints +
         out.native_acceptance_constraints;
-    out.native_or_unproven_constraints =
-        named_native_constraints +
-        out.bytecode_adapter_named_constraints;
     out.classified_constraints =
         out.bytecode_adapter_named_constraints +
         named_native_constraints;
@@ -176,6 +198,8 @@ CallbackCoverageV1 AssessCallbackCoverageV1(
         out.shape_power_of_two &&
         out.constraints != 0 &&
         out.unknown_constraints == 0 &&
+        out.invalid_program_provenance_constraints ==
+            0 &&
         out.classified_constraints ==
             out.constraints &&
         // Reject an acceptance-only or otherwise truncated "parent".
@@ -187,6 +211,8 @@ CallbackCoverageV1 AssessCallbackCoverageV1(
         out.native_acceptance_constraints != 0;
     out.all_constraints_canonical_bytecode =
         out.inventory_complete &&
+        out.native_or_unproven_constraints == 0 &&
+        out.canonical_program_roots != 0 &&
         out.canonical_program_provenance_constraints ==
             out.constraints;
     out.whole_parent_program_reentry_ready =

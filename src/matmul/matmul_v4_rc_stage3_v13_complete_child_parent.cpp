@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_v13_complete_child_parent.h>
+#include <matmul/matmul_v4_rc_stage3_v13_composer_glue_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_v13_terminal_fold_parent.h>
 
 #include <algorithm>
@@ -20,6 +21,8 @@ using AirCS = aq::AirConstraintSystem<gf::Fp3>;
 using Fp3 = gf::Fp3;
 namespace terminal =
     stage3_v13_terminal_fold_parent;
+namespace glue =
+    stage3_v13_composer_glue_bytecode;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -586,6 +589,13 @@ bool AppendLiteralAliasesConstraintSystem(
     parent_cs.n_columns +=
         static_cast<uint32_t>(
             appended64);
+    std::vector<glue::ConstraintV1>
+        canonical_constraints;
+    std::vector<const char*> constraint_names;
+    canonical_constraints.reserve(
+        3 * aliases.size());
+    constraint_names.reserve(
+        3 * aliases.size());
     for (uint32_t ordinal = 0;
          ordinal < aliases.size();
          ++ordinal) {
@@ -632,50 +642,48 @@ bool AppendLiteralAliasesConstraintSystem(
         parent_cs.preprocessed.emplace_back(
             sink_selector,
             std::move(sink_values));
-        Add(
-            parent_cs,
+        canonical_constraints.push_back({
+            glue::FormulaV1::CarryTransition,
+            aq::AirKind::kTransition,
+            carrier, 0, 0});
+        constraint_names.push_back(
             "stage3.v13_terminal_parent."
-            "alias_carry",
-            aq::AirKind::kTransition, 1,
-            [carrier](
-                const auto& current,
-                const auto& next) {
-                return gf::Sub(
-                    next[carrier],
-                    current[carrier]);
-            });
-        Add(
-            parent_cs,
+            "alias_carry");
+        canonical_constraints.push_back({
+            glue::FormulaV1::SelectedEqual,
+            aq::AirKind::kEverywhere,
+            source_selector,
+            carrier,
+            source.column});
+        constraint_names.push_back(
             "stage3.v13_terminal_parent."
-            "alias_source",
-            aq::AirKind::kEverywhere, 2,
-            [carrier, source_selector,
-             source_column =
-                 source.column](
-                const auto& current,
-                const auto&) {
-                return gf::Mul(
-                    current[source_selector],
-                    gf::Sub(
-                        current[carrier],
-                        current[
-                            source_column]));
-            });
-        Add(
-            parent_cs,
+            "alias_source");
+        canonical_constraints.push_back({
+            glue::FormulaV1::SelectedEqual,
+            aq::AirKind::kEverywhere,
+            sink_selector,
+            carrier,
+            sink.column});
+        constraint_names.push_back(
             "stage3.v13_terminal_parent."
-            "alias_sink",
-            aq::AirKind::kEverywhere, 2,
-            [carrier, sink_selector,
-             sink_column = sink.column](
-                const auto& current,
-                const auto&) {
-                return gf::Mul(
-                    current[sink_selector],
-                    gf::Sub(
-                        current[carrier],
-                        current[sink_column]));
-            });
+            "alias_sink");
+    }
+    cb::ProgramTable canonical_program;
+    if (!glue::BuildCanonicalProgramTableV1(
+            parent_cs.n_columns,
+            canonical_constraints,
+            canonical_program,
+            why) ||
+        !glue::AppendCanonicalConstraintsV1(
+            canonical_program,
+            parent_cs.n_rows,
+            constraint_names,
+            parent_cs,
+            nullptr,
+            why)) {
+        return Fail(
+            why,
+            "public_literal_alias_bytecode");
     }
     out.literal_aliases =
         static_cast<uint32_t>(
@@ -882,40 +890,37 @@ bool AppendTerminalAcceptanceConstraintSystem(
     const uint32_t fold_column =
         fold_attachment.ParentColumn(
             fold_acceptance.column);
-    Add(
-        cs,
+    const std::vector<glue::ConstraintV1>
+        canonical_constraints{
+            {glue::FormulaV1::EqualOne,
+             aq::AirKind::kFirstRow,
+             acceptance, 0, 0},
+            {glue::FormulaV1::EqualCurrent,
+             aq::AirKind::kFirstRow,
+             acceptance, hash_column, 0},
+            {glue::FormulaV1::EqualCurrent,
+             aq::AirKind::kFirstRow,
+             acceptance, fold_column, 0},
+        };
+    const std::vector<const char*> names{
         "stage3.v13_complete.accept_one",
-        aq::AirKind::kFirstRow, 1,
-        [acceptance](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[acceptance],
-                Fp3::One());
-        });
-    Add(
-        cs,
         "stage3.v13_complete.accept_hash",
-        aq::AirKind::kFirstRow, 1,
-        [acceptance, hash_column](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[acceptance],
-                current[hash_column]);
-        });
-    Add(
-        cs,
         "stage3.v13_complete.accept_fold",
-        aq::AirKind::kFirstRow, 1,
-        [acceptance, fold_column](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[acceptance],
-                current[fold_column]);
-        });
-    return true;
+    };
+    cb::ProgramTable canonical_program;
+    return
+        glue::BuildCanonicalProgramTableV1(
+            cs.n_columns,
+            canonical_constraints,
+            canonical_program,
+            why) &&
+        glue::AppendCanonicalConstraintsV1(
+            canonical_program,
+            cs.n_rows,
+            names,
+            cs,
+            nullptr,
+            why);
 }
 
 bool AppendSharedTapeAliasConstraintSystem(
@@ -948,6 +953,9 @@ bool AppendSharedTapeAliasConstraintSystem(
             why,
             "public_shared_tape_input");
     }
+    std::vector<glue::ConstraintV1>
+        canonical_constraints;
+    canonical_constraints.reserve(tape_columns);
     for (uint32_t local = 0;
          local < tape_columns; ++local) {
         const uint32_t merkle_column =
@@ -970,20 +978,32 @@ bool AppendSharedTapeAliasConstraintSystem(
                 why,
                 "public_shared_tape_range");
         }
-        Add(
-            parent_cs,
-            "stage3.v13_complete.shared_tape",
-            aq::AirKind::kEverywhere, 1,
-            [merkle_column, deep_column](
-                const auto& current,
-                const auto&) {
-                return gf::Sub(
-                    current[merkle_column],
-                    current[deep_column]);
-            });
+        canonical_constraints.push_back({
+            glue::FormulaV1::EqualCurrent,
+            aq::AirKind::kEverywhere,
+            merkle_column, deep_column, 0});
         ++aliases;
     }
-    return aliases == tape_columns;
+    if (aliases != tape_columns) {
+        return false;
+    }
+    cb::ProgramTable canonical_program;
+    std::vector<const char*> names(
+        aliases,
+        "stage3.v13_complete.shared_tape");
+    return
+        glue::BuildCanonicalProgramTableV1(
+            parent_cs.n_columns,
+            canonical_constraints,
+            canonical_program,
+            why) &&
+        glue::AppendCanonicalConstraintsV1(
+            canonical_program,
+            parent_cs.n_rows,
+            names,
+            parent_cs,
+            nullptr,
+            why);
 }
 
 bool AppendAtRows(
@@ -1052,40 +1072,37 @@ bool AppendTerminalAcceptance(
     const uint32_t fold_column =
         fold_attachment.ParentColumn(
             fold.acceptance.column);
-    Add(
-        merkle_cs,
+    const std::vector<glue::ConstraintV1>
+        canonical_constraints{
+            {glue::FormulaV1::EqualOne,
+             aq::AirKind::kFirstRow,
+             acceptance, 0, 0},
+            {glue::FormulaV1::EqualCurrent,
+             aq::AirKind::kFirstRow,
+             acceptance, hash_column, 0},
+            {glue::FormulaV1::EqualCurrent,
+             aq::AirKind::kFirstRow,
+             acceptance, fold_column, 0},
+        };
+    const std::vector<const char*> names{
         "stage3.v13_complete.accept_one",
-        aq::AirKind::kFirstRow, 1,
-        [acceptance](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[acceptance],
-                Fp3::One());
-        });
-    Add(
-        merkle_cs,
         "stage3.v13_complete.accept_hash",
-        aq::AirKind::kFirstRow, 1,
-        [acceptance, hash_column](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[acceptance],
-                current[hash_column]);
-        });
-    Add(
-        merkle_cs,
         "stage3.v13_complete.accept_fold",
-        aq::AirKind::kFirstRow, 1,
-        [acceptance, fold_column](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[acceptance],
-                current[fold_column]);
-        });
-    return true;
+    };
+    cb::ProgramTable canonical_program;
+    return
+        glue::BuildCanonicalProgramTableV1(
+            merkle_cs.n_columns,
+            canonical_constraints,
+            canonical_program,
+            why) &&
+        glue::AppendCanonicalConstraintsV1(
+            canonical_program,
+            merkle_cs.n_rows,
+            names,
+            merkle_cs,
+            nullptr,
+            why);
 }
 
 bool AppendSharedTapeAliases(
@@ -1127,6 +1144,10 @@ bool AppendSharedTapeAliases(
         return Fail(
             why, "shared_tape_alias_input");
     }
+    std::vector<glue::ConstraintV1>
+        canonical_constraints;
+    canonical_constraints.reserve(
+        tape_product.cs.n_columns);
     for (uint32_t local = 0;
          local < tape_product.cs.n_columns;
          ++local) {
@@ -1145,21 +1166,33 @@ bool AppendSharedTapeAliases(
             return Fail(
                 why, "shared_tape_alias_range");
         }
-        Add(
-            parent_cs,
-            "stage3.v13_complete.shared_tape",
-            aq::AirKind::kEverywhere, 1,
-            [merkle_column, deep_column](
-                const auto& current,
-                const auto&) {
-                return gf::Sub(
-                    current[merkle_column],
-                    current[deep_column]);
-            });
+        canonical_constraints.push_back({
+            glue::FormulaV1::EqualCurrent,
+            aq::AirKind::kEverywhere,
+            merkle_column, deep_column, 0});
         ++aliases;
     }
-    return aliases ==
-        tape_product.cs.n_columns;
+    if (aliases !=
+        tape_product.cs.n_columns) {
+        return false;
+    }
+    cb::ProgramTable canonical_program;
+    std::vector<const char*> names(
+        aliases,
+        "stage3.v13_complete.shared_tape");
+    return
+        glue::BuildCanonicalProgramTableV1(
+            parent_cs.n_columns,
+            canonical_constraints,
+            canonical_program,
+            why) &&
+        glue::AppendCanonicalConstraintsV1(
+            canonical_program,
+            parent_cs.n_rows,
+            names,
+            parent_cs,
+            nullptr,
+            why);
 }
 
 bool AdoptComponentAsParent(

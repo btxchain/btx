@@ -4,6 +4,7 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <matmul/matmul_v4_rc_stage3_v13_fixedpoint_bytecode_coverage.h>
 #include <matmul/matmul_v4_rc_stage3_v13_two_child_parent.h>
 
 #include <cstdlib>
@@ -16,6 +17,8 @@ namespace cb = rc::constraint_bytecode;
 namespace gf = rc::gkr_field;
 namespace two =
     rc::stage3_v13_two_child_parent;
+namespace coverage =
+    rc::stage3_v13_fixedpoint_bytecode_coverage;
 
 namespace {
 
@@ -268,6 +271,33 @@ BOOST_AUTO_TEST_CASE(
             .child_finalization_seeds[0] !=
         rebuilt.deterministic
             .child_finalization_seeds[1]);
+
+    const auto bytecode =
+        coverage::AssessCallbackCoverageV1(
+            rebuilt.cs);
+    BOOST_TEST_MESSAGE(
+        "v13 parent constraints=" <<
+        bytecode.constraints <<
+        " canonical=" <<
+        bytecode
+            .canonical_program_provenance_constraints <<
+        " residual=" <<
+        bytecode.native_or_unproven_constraints <<
+        " roots=" <<
+        bytecode.canonical_program_roots);
+    BOOST_CHECK(bytecode.inventory_complete);
+    BOOST_CHECK(
+        bytecode
+            .canonical_program_provenance_constraints >=
+        2U);
+    BOOST_CHECK(
+        bytecode.canonical_program_roots >= 1);
+    BOOST_CHECK(
+        bytecode.native_or_unproven_constraints <
+        bytecode.constraints);
+    BOOST_CHECK(
+        !bytecode
+             .all_constraints_canonical_bytecode);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -3,11 +3,11 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <matmul/matmul_v4_rc_stage3_v13_two_child_parent.h>
+#include <matmul/matmul_v4_rc_stage3_v13_composer_glue_bytecode.h>
 
 #include <hash.h>
 
 #include <algorithm>
-#include <functional>
 #include <limits>
 #include <numeric>
 #include <utility>
@@ -17,6 +17,9 @@ namespace {
 
 using AirCS = aq::AirConstraintSystem<gf::Fp3>;
 using Fp3 = gf::Fp3;
+namespace cb = constraint_bytecode;
+namespace glue =
+    stage3_v13_composer_glue_bytecode;
 
 bool Fail(std::string* why, const std::string& detail)
 {
@@ -26,19 +29,6 @@ bool Fail(std::string* why, const std::string& detail)
             detail;
     }
     return false;
-}
-
-void Add(
-    AirCS& cs,
-    const char* name,
-    aq::AirKind kind,
-    uint32_t degree,
-    std::function<Fp3(
-        const std::vector<Fp3>&,
-        const std::vector<Fp3>&)> eval)
-{
-    cs.constraints.push_back(
-        {name, kind, degree, std::move(eval)});
 }
 
 void HashDigest(
@@ -289,29 +279,34 @@ bool AppendArityTwoAcceptance(
         attachments[1].ParentColumn(
             child_acceptance[1]);
     parent_acceptance = cs.n_columns++;
-    Add(
-        cs, "stage3.v13_two_child.accept_and",
-        aq::AirKind::kFirstRow, 2,
-        [left, right, parent_acceptance](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[parent_acceptance],
-                gf::Mul(
-                    current[left],
-                    current[right]));
-        });
-    Add(
-        cs, "stage3.v13_two_child.accept_one",
-        aq::AirKind::kFirstRow, 1,
-        [parent_acceptance](
-            const auto& current,
-            const auto&) {
-            return gf::Sub(
-                current[parent_acceptance],
-                Fp3::One());
-        });
-    return true;
+    const std::vector<glue::ConstraintV1>
+        canonical_constraints{
+            {glue::FormulaV1::Product,
+             aq::AirKind::kFirstRow,
+             parent_acceptance,
+             left, right},
+            {glue::FormulaV1::EqualOne,
+             aq::AirKind::kFirstRow,
+             parent_acceptance, 0, 0},
+        };
+    const std::vector<const char*> names{
+        "stage3.v13_two_child.accept_and",
+        "stage3.v13_two_child.accept_one",
+    };
+    cb::ProgramTable canonical_program;
+    return
+        glue::BuildCanonicalProgramTableV1(
+            cs.n_columns,
+            canonical_constraints,
+            canonical_program,
+            why) &&
+        glue::AppendCanonicalConstraintsV1(
+            canonical_program,
+            cs.n_rows,
+            names,
+            cs,
+            nullptr,
+            why);
 }
 
 bool AppendArityTwoAcceptanceWitness(

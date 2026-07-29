@@ -42,10 +42,17 @@ struct CallbackCoverageV1 {
      */
     uint32_t bytecode_adapter_named_constraints{0};
     /**
-     * Exact whole-parent ProgramTable provenance.  Zero until the parent
-     * builder exports the relocated program and proves ordinal parity.
+     * Constraints reconstructed by the canonical ProgramTable adapter and
+     * carrying both its committed table root and exact constraint ordinal.
+     * This is counted independently of the diagnostic constraint name.
      */
     uint32_t canonical_program_provenance_constraints{0};
+    /**
+     * Constraints with only one half of the root/ordinal provenance pair.
+     * Such a constraint is always unproved and makes the audit fail closed.
+     */
+    uint32_t invalid_program_provenance_constraints{0};
+    uint32_t canonical_program_roots{0};
     uint32_t native_lift_constraints{0};
     uint32_t native_poseidon_constraints{0};
     uint32_t native_tape_constraints{0};

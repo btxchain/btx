@@ -786,6 +786,12 @@ bool BuildAirConstraintSystemFromProgramTableImpl(
     out.n_rows = n_rows;
     out.n_columns = table.current_width;
     out.constraints.reserve(table.programs.size());
+    const uint256 canonical_table_root =
+        CommitProgramTable(table);
+    if (canonical_table_root.IsNull()) {
+        return Fail(
+            why, "air_adapter_program_root");
+    }
     for (const Program& program : table.programs) {
         air_quotient::AirConstraint<Fp3> constraint;
         // AirConstraint names are diagnostic string literals rather than
@@ -809,6 +815,10 @@ bool BuildAirConstraintSystemFromProgramTableImpl(
                 }
                 return result;
             };
+        constraint.canonical_program_table_root =
+            canonical_table_root;
+        constraint.canonical_program_ordinal =
+            program.constraint_ordinal;
         out.constraints.push_back(std::move(constraint));
     }
     return true;

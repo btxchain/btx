@@ -369,6 +369,15 @@ struct AirConstraint {
     AirKind kind{AirKind::kEverywhere};
     uint32_t alg_degree{1};
     std::function<F(const std::vector<F>& cur, const std::vector<F>& next)> eval;
+    /**
+     * Non-null only when this callback was reconstructed from one exact
+     * consensus-canonical ProgramTable.  These fields are diagnostic
+     * provenance (the proof still commits the ProgramTable root separately);
+     * they prevent fixed-point audits from inferring bytecode coverage from a
+     * mutable constraint name.
+     */
+    uint256 canonical_program_table_root{};
+    uint32_t canonical_program_ordinal{UINT32_MAX};
 };
 
 template <typename F>
