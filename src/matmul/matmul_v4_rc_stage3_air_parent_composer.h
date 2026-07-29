@@ -74,6 +74,19 @@ struct ChildAttachmentV1 {
     std::string* why = nullptr);
 
 /**
+ * Verifier-only counterpart of AppendChildV1. It relocates the complete
+ * constraint system and public/preprocessed pins without allocating a dummy
+ * witness matrix. The resulting descriptors are byte-for-byte identical to
+ * the witness-bearing path.
+ */
+[[nodiscard]] bool AppendChildConstraintSystemV1(
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    const aq::AirConstraintSystem<gf::Fp3>& child_cs,
+    uint32_t child_ordinal,
+    ChildAttachmentV1& out,
+    std::string* why = nullptr);
+
+/**
  * Exact power-of-two row lift used by the canonical 14-role parent.
  *
  * A child over H_n is embedded in the first n rows of H_N. Five canonical
@@ -95,6 +108,15 @@ struct ChildAttachmentV1 {
     std::vector<std::vector<gf::Fp3>>& parent_columns,
     const aq::AirConstraintSystem<gf::Fp3>& child_cs,
     const std::vector<std::vector<gf::Fp3>>& child_columns,
+    uint32_t parent_rows,
+    uint32_t child_ordinal,
+    ChildAttachmentV1& out,
+    std::string* why = nullptr);
+
+/** Constraint-only counterpart of AppendChildLiftedV1. */
+[[nodiscard]] bool AppendChildLiftedConstraintSystemV1(
+    aq::AirConstraintSystem<gf::Fp3>& parent_cs,
+    const aq::AirConstraintSystem<gf::Fp3>& child_cs,
     uint32_t parent_rows,
     uint32_t child_ordinal,
     ChildAttachmentV1& out,

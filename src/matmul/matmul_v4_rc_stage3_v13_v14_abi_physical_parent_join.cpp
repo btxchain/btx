@@ -385,41 +385,30 @@ bool BuildResidentParentV1(
     plan.tape_rows = tape_cs.n_rows;
     plan.prefix_columns = prefix_cs.n_columns;
     plan.prefix_rows = prefix_cs.n_rows;
-    std::vector<std::vector<Fp3>> parent_columns;
-    const std::vector<std::vector<Fp3>> zero_tape(
-        tape_cs.n_columns,
-        std::vector<Fp3>(
-            tape_cs.n_rows, Fp3::Zero()));
-    const std::vector<std::vector<Fp3>> zero_prefix(
-        prefix_cs.n_columns,
-        std::vector<Fp3>(
-            prefix_cs.n_rows, Fp3::Zero()));
     const auto append =
         [&](const AirCS& child_cs,
-            const std::vector<
-                std::vector<Fp3>>& child_columns,
             uint32_t ordinal,
             composer::ChildAttachmentV1& attachment) {
             if (child_cs.n_rows ==
                 plan.parent_rows) {
-                return composer::AppendChildV1(
+                return composer::
+                    AppendChildConstraintSystemV1(
                     resident_parent_cs,
-                    parent_columns,
-                    child_cs, child_columns,
+                    child_cs,
                     ordinal, attachment, why);
             }
-            return composer::AppendChildLiftedV1(
+            return composer::
+                AppendChildLiftedConstraintSystemV1(
                 resident_parent_cs,
-                parent_columns,
-                child_cs, child_columns,
+                child_cs,
                 plan.parent_rows, ordinal,
                 attachment, why);
         };
     if (!append(
-            tape_cs, zero_tape, 0,
+            tape_cs, 0,
             plan.tape_attachment) ||
         !append(
-            prefix_cs, zero_prefix, 1,
+            prefix_cs, 1,
             plan.prefix_attachment)) {
         resident_parent_cs = {};
         plan = {};
