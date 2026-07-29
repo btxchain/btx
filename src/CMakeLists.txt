@@ -743,6 +743,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_air_parent_composer.cpp
   matmul/matmul_v4_rc_stage3_v13_terminal_fold_parent.cpp
   matmul/matmul_v4_rc_stage3_v13_merkle_fold_parent.cpp
+  matmul/matmul_v4_rc_stage3_v13_merkle_fold_descriptor_vm.cpp
   matmul/matmul_v4_rc_stage3_v13_quotient_tape_parent.cpp
   matmul/matmul_v4_rc_stage3_v13_deep_source_logup_parent.cpp
   matmul/matmul_v4_rc_stage3_v13_complete_child_parent.cpp
