@@ -6305,12 +6305,35 @@ AssessChildFsFullEventP2TranscriptOwnershipV1()
         namespace p2bind = stage3_p2_transcript_binding;
         namespace p2tx = stage3_p2_transcript_air;
 
+        out.active_proof_version = kRCFri3AlgActiveBatchProofVersion;
+        out.evidence_proof_version =
+            kRCFri3AlgP2Q192K2ProofVersionV10;
+        out.active_domain_tag_exact =
+            std::strcmp(kRCFri3AlgActiveBatchDomainTag,
+                        kRCFri3AlgP2Q192K2DomainTagV10) == 0;
+        out.exact_active_protocol =
+            out.active_proof_version == out.evidence_proof_version &&
+            out.active_domain_tag_exact;
+
         // Fail-closed unless the active Poseidon2 squeeze lane is the live
-        // challenge route.  Representative SHA/P2 companions are not enough.
+        // challenge route AND the complete event proof is for that exact live
+        // protocol.  V8 and V10 both say P2/Q192, but their OOD schedules and
+        // domains differ; a valid V10 event AIR cannot own a V8 transcript.
         if (!aq::kAirChallengeP2Activated ||
             !kRCFri3AlgActiveP2Squeeze) {
             out.note =
                 "stage3:g4_full_event:p2_squeeze_inactive";
+            return out;
+        }
+        if (!out.exact_active_protocol) {
+            out.note =
+                "stage3:g4_full_event:active_protocol_mismatch:v" +
+                std::to_string(out.active_proof_version) +
+                "_vs_evidence_v" +
+                std::to_string(out.evidence_proof_version) +
+                (out.active_domain_tag_exact
+                     ? "_domain_exact"
+                     : "_domain_mismatch");
             return out;
         }
 
@@ -6521,10 +6544,13 @@ AssessChildFsReplayClosureV1()
     // but that is NOT sufficient alone for this production counter: upgrading
     // 8 representatives to complete instance coverage made the old gate
     // unsound.  COMPUTED from AssessChildFsFullEventP2TranscriptOwnershipV1,
-    // which requires the row-multiplexed V10 P2 transcript AIR to own every
+    // which first requires its V10 proof version and domain to equal the live
+    // protocol, then requires the row-multiplexed transcript AIR to own every
     // FRI draw (all folds + all Q192 queries) plus a Poseidon2 airq_lambda
     // companion for the single airq draw (intentionally absent from the FRI
-    // transcript AIR).  Fail-closed: never copy cov.kinds_transcript_bound.
+    // transcript AIR).  The active protocol is V8 today, so V10 evidence
+    // correctly contributes zero.  Fail-closed: never copy
+    // cov.kinds_transcript_bound.
     {
         const ChildFsFullEventP2TranscriptOwnershipV1& full =
             AssessChildFsFullEventP2TranscriptOwnershipV1();

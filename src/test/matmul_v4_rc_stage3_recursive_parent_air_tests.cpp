@@ -1872,11 +1872,28 @@ BOOST_AUTO_TEST_CASE(
     // second must never silently ride on the first.
     BOOST_CHECK_LE(
         a.challenge_kinds_transcript_bound, a.challenge_kinds_covered);
-    // Production transcript_bound is COMPUTED from the full-event V10 P2
-    // transcript AIR (all FRI draws) plus airq_lambda P2 companion — not from
-    // the representative-per-kind coverage counter.
+    // Production transcript_bound is COMPUTED from a full-event proof for the
+    // EXACT active protocol, not merely a protocol with the same P2/Q192
+    // headline.  V10 has a fixed K=2 OOD schedule; active V8 does not.  Until
+    // the active protocol and complete event AIR agree byte-for-byte, V10
+    // evidence contributes zero and g4 remains fail-closed.
+    const auto& full = AssessChildFsFullEventP2TranscriptOwnershipV1();
     BOOST_CHECK_EQUAL(
-        a.challenge_kinds_transcript_bound, a.challenge_kinds_required);
+        a.challenge_kinds_transcript_bound,
+        full.kinds_transcript_bound);
+    BOOST_CHECK_EQUAL(
+        full.active_proof_version,
+        kRCFri3AlgActiveBatchProofVersion);
+    BOOST_CHECK_EQUAL(
+        full.evidence_proof_version,
+        kRCFri3AlgP2Q192K2ProofVersionV10);
+    if (!full.exact_active_protocol) {
+        BOOST_CHECK_EQUAL(a.challenge_kinds_transcript_bound, 0U);
+        BOOST_CHECK(!a.closed);
+        BOOST_CHECK(
+            full.note.find("active_protocol_mismatch") !=
+            std::string::npos);
+    }
     if (aq::kAirChallengeP2Activated && a.recursion_parent_hosts_replay &&
         a.discharged_by_fri_proof && a.covers_all_slots_and_kinds) {
         BOOST_CHECK(a.closed);
@@ -2274,14 +2291,27 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK_EQUAL(parent.child_fs_p2_limb_bus_slots_hosted, 4U);
     BOOST_CHECK(parent.child_fiat_shamir_replayed_in_parent);
     BOOST_CHECK_EQUAL(parent.witness_violations, 0U);
-    // Closure assessor mirrors the hosted flag; transcript_bound is COMPUTED
-    // from the full-event V10 P2 transcript AIR ownership assessor.
+    // Closure assessor mirrors the hosted flag; transcript_bound additionally
+    // requires the complete event proof to be for the exact active protocol.
+    // Active V8 and additive V10 are intentionally separated today.
     const auto a = AssessChildFsReplayClosureV1();
     BOOST_CHECK(a.recursion_parent_hosts_replay);
+    const auto& full = AssessChildFsFullEventP2TranscriptOwnershipV1();
     BOOST_CHECK_EQUAL(
-        a.challenge_kinds_transcript_bound, a.challenge_kinds_required);
-    BOOST_CHECK(a.closed);
-    BOOST_CHECK_EQUAL(a.note, "stage3:child_fs_replay:closed");
+        a.challenge_kinds_transcript_bound,
+        full.kinds_transcript_bound);
+    BOOST_CHECK_EQUAL(
+        a.closed,
+        full.exact_active_protocol &&
+            a.covers_all_slots_and_kinds &&
+            a.discharged_by_fri_proof &&
+            a.recursion_parent_hosts_replay);
+    if (!full.exact_active_protocol) {
+        BOOST_CHECK_EQUAL(a.challenge_kinds_transcript_bound, 0U);
+        BOOST_CHECK(!a.closed);
+        BOOST_CHECK(
+            a.note.find("transcript_bound") != std::string::npos);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(

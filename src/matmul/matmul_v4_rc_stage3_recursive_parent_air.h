@@ -1426,7 +1426,9 @@ AssessChildFsChallengeDecoderCoverageV1();
  * kind.  g4 requires ownership of EVERY draw (all folds and all Q192 query
  * challenges).  This assessor therefore:
  *
- *   (1) commits a real V10/Q192/K=2 Fri3Alg toy proof;
+ *   (1) first proves that the evidence protocol is byte-for-byte the active
+ *       protocol (proof version and domain tag), then commits a real
+ *       V10/Q192/K=2 Fri3Alg toy proof;
  *   (2) rebuilds the proof-owned full event-prefix schedule via
  *       BuildProofOwnedTranscriptBindingV10;
  *   (3) builds the row-multiplexed stage3_p2_transcript_air over that
@@ -1438,11 +1440,20 @@ AssessChildFsChallengeDecoderCoverageV1();
  *       transcript AIR) when a Poseidon2 airq_lambda companion binds the
  *       real single draw — one draw IS full instance coverage for that kind.
  *
- * Fail-closed unless aq::kAirChallengeP2Activated && active P2 squeeze.
+ * V10 is deliberately additive while the active single-lane protocol is V8.
+ * Consequently this evidence MUST NOT close the production counter merely
+ * because both use Poseidon2/Q192: V8 has an unbounded rejection schedule,
+ * whereas V10 has fixed K=2.  Fail-closed unless the proof version and domain
+ * tag are exactly the active protocol in addition to
+ * aq::kAirChallengeP2Activated && active P2 squeeze.
  * Cached; do not copy cov.kinds_transcript_bound into the production
  * counter.
  */
 struct ChildFsFullEventP2TranscriptOwnershipV1 {
+    uint32_t active_proof_version{0};
+    uint32_t evidence_proof_version{0};
+    bool active_domain_tag_exact{false};
+    bool exact_active_protocol{false};
     bool fri_full_event_air_owned{false};
     bool airq_lambda_owned{false};
     bool binding_valid{false};
