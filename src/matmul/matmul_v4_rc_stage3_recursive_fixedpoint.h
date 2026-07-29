@@ -17,6 +17,15 @@
 #include <string>
 #include <vector>
 
+namespace matmul::v4::rc::multirow_v11_semantic_exports {
+struct StreamChildArtifactV1;
+}
+
+namespace matmul::v4::rc::
+    stage3_semantic_endpoint_receipt_intake {
+struct ProofV1;
+}
+
 namespace matmul::v4::rc::recursive_fixedpoint {
 
 namespace aq = air_quotient;
@@ -527,6 +536,13 @@ struct FoldBusComposition {
     uint32_t per_point_children_joined{0};
     uint32_t per_point_children_expected{0};
     bool deep_per_point_transition_join{false};
+    /** Exact concrete endpoint-receipt statement absorbed by the parent
+     * transcript after its same-parent terminal buses attach. */
+    uint256 semantic_endpoint_receipt_commitment{};
+    uint32_t semantic_endpoint_roles_joined{0};
+    uint32_t semantic_endpoint_roles_expected{0};
+    bool concrete_semantic_endpoint_terminal_join{false};
+    bool every_semantic_endpoint_role_joined{false};
     bool valid{false};
     std::string note;
 };
@@ -644,6 +660,146 @@ struct CanonicalChildAcceptanceJoinV1 {
     std::vector<uint256> program_commitments;
     bool provenance_present{false};
     bool every_child_joined{false};
+    bool valid{false};
+    std::string note;
+};
+
+/**
+ * Constant-width row-multiplexed semantic endpoint terminal bus.
+ *
+ * Root-word events occupy rows rather than columns. Per-role terminal and
+ * alias selectors are the only role-scaled columns.  Each Fp3 terminal
+ * requires three selectors because child openings are absorbed as flattened
+ * base-field coordinates. The terminal
+ * equations are reproduced in this parent because the intake V1 child's
+ * appended LogUp callbacks are not yet canonical bytecode.
+ */
+struct SemanticEndpointReceiptTerminalLayoutV1 {
+    static constexpr uint32_t kRoles =
+        kRCStage3RelationClosureRoleCount;
+    static constexpr uint32_t kTerminalLanes = 2;
+    static constexpr uint32_t kExtensionCoordinates = 3;
+
+    uint32_t base{0};
+    uint32_t active{0};
+    uint32_t role_end{0};
+    uint32_t role{0};
+    uint32_t receipt_slot{0};
+    uint32_t endpoint_ordinal{0};
+    uint32_t word_index{0};
+    uint32_t root_value{0};
+    uint32_t root_expected{0};
+    uint32_t address{0};
+    uint32_t inverse1{0};
+    uint32_t inverse2{0};
+    uint32_t running1{0};
+    uint32_t running2{0};
+    uint32_t role_terminal_base{0};
+    uint32_t role_end_selector_base{0};
+    uint32_t role_alias_selector_base{0};
+    uint32_t link_terminal_base{0};
+    uint32_t link_alias_selector_base{0};
+
+    explicit constexpr
+    SemanticEndpointReceiptTerminalLayoutV1(
+        uint32_t start = 0)
+        : base(start),
+          active(base),
+          role_end(active + 1),
+          role(role_end + 1),
+          receipt_slot(role + 1),
+          endpoint_ordinal(receipt_slot + 1),
+          word_index(endpoint_ordinal + 1),
+          root_value(word_index + 1),
+          root_expected(root_value + 1),
+          address(root_expected + 1),
+          inverse1(address + 1),
+          inverse2(inverse1 + 1),
+          running1(inverse2 + 1),
+          running2(running1 + 1),
+          role_terminal_base(running2 + 1),
+          role_end_selector_base(
+              role_terminal_base +
+              kRoles * kTerminalLanes),
+          role_alias_selector_base(
+              role_end_selector_base + kRoles),
+          link_terminal_base(
+              role_alias_selector_base +
+              kRoles * kTerminalLanes *
+                  kExtensionCoordinates),
+          link_alias_selector_base(
+              link_terminal_base +
+              2 * kTerminalLanes)
+    {
+    }
+    [[nodiscard]] constexpr uint32_t RoleTerminal(
+        uint32_t slot, uint32_t lane) const
+    {
+        return role_terminal_base +
+            slot * kTerminalLanes + lane;
+    }
+    [[nodiscard]] constexpr uint32_t RoleAliasSelector(
+        uint32_t slot, uint32_t lane,
+        uint32_t coordinate) const
+    {
+        return role_alias_selector_base +
+            (slot * kTerminalLanes + lane) *
+                kExtensionCoordinates +
+            coordinate;
+    }
+    [[nodiscard]] constexpr uint32_t RoleEndSelector(
+        uint32_t slot) const
+    {
+        return role_end_selector_base + slot;
+    }
+    [[nodiscard]] constexpr uint32_t LinkTerminal(
+        uint32_t side, uint32_t lane) const
+    {
+        return link_terminal_base +
+            side * kTerminalLanes + lane;
+    }
+    [[nodiscard]] constexpr uint32_t LinkAliasSelector(
+        uint32_t side, uint32_t lane,
+        uint32_t coordinate) const
+    {
+        return link_alias_selector_base +
+            (side * kTerminalLanes + lane) *
+                kExtensionCoordinates +
+            coordinate;
+    }
+    [[nodiscard]] constexpr uint32_t End() const
+    {
+        return link_alias_selector_base +
+            2 * kTerminalLanes *
+                kExtensionCoordinates;
+    }
+};
+
+struct SemanticEndpointReceiptParentAttachmentV1 {
+    SemanticEndpointReceiptTerminalLayoutV1 layout;
+    uint256 statement_commitment{};
+    uint32_t concrete_roles{0};
+    uint32_t concrete_endpoints{0};
+    uint32_t residual_endpoints{0};
+    uint32_t root_word_rows{0};
+    uint32_t role_terminal_alias_rows{0};
+    uint32_t link_terminal_alias_rows{0};
+    uint32_t added_constraints{0};
+    uint32_t violations{0};
+    bool intake_reverified{false};
+    bool exact_statement_and_context{false};
+    bool exact_child_order{false};
+    bool exact_endpoint_order{false};
+    bool root_words_equality_constrained{false};
+    bool dual_fp3_logup_recomputed{false};
+    bool role_terminals_proof_aliased{false};
+    bool link_terminal_proof_aliased{false};
+    bool every_concrete_role_joined{false};
+    /** Remains false while any endpoint/role is absent. */
+    bool all_52_endpoints_and_14_roles_joined{false};
+    /** Explicitly false until the intake terminal callbacks migrate to the
+     * canonical ProgramTable consumed by deep_per_point_transition_join. */
+    bool canonical_terminal_constraint_bytecode{false};
     bool valid{false};
     std::string note;
 };
@@ -3941,6 +4097,32 @@ AttachCanonicalChildAcceptanceV1(
     FoldBusComposition& composition,
     const std::vector<aq::AirConstraintSystem<Fp3>>&
         expected_child_constraint_systems);
+
+/**
+ * Attach the concrete semantic endpoint intake to the exact ordered ordinary
+ * receipt children already materialized in `composition`.
+ *
+ * The intake module remains the sole owner of the canonical 52-endpoint
+ * inventory and independently rebuilds all supplied role/stream artifacts.
+ * This fixedpoint seam consumes that result: it equality-aliases role and
+ * link terminal columns to authenticated child openings, recomputes the dual
+ * Fp3 endpoint-root LogUp terminal in the same parent AIR, and absorbs the
+ * exact statement/context/order commitment into the parent transcript.
+ *
+ * Missing roles/endpoints remain explicit residuals. V1 does not set
+ * `deep_per_point_transition_join`, CompleteFP, or authority because the
+ * intake's appended terminal callbacks are not canonical bytecode yet.
+ */
+[[nodiscard]] SemanticEndpointReceiptParentAttachmentV1
+AttachSemanticEndpointReceiptTerminalsV1(
+    FoldBusComposition& composition,
+    const std::vector<RCStage3RoleAirProduct>&
+        role_artifacts,
+    const std::vector<
+        multirow_v11_semantic_exports::
+            StreamChildArtifactV1>& stream_children,
+    const stage3_semantic_endpoint_receipt_intake::
+        ProofV1& intake_proof);
 
 /**
  * Hierarchical L1 shard attach. `shard_global_ordinals[i]` is the full-table

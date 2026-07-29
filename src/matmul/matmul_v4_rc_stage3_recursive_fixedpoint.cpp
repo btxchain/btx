@@ -9,8 +9,10 @@
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
 #include <matmul/matmul_v4_rc_stage3_multirow_v13_proof_tape_air.h>
 #include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
+#include <matmul/matmul_v4_rc_stage3_recursive.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
+#include <matmul/matmul_v4_rc_stage3_semantic_endpoint_receipt_intake.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
 #include <algorithm>
@@ -19979,6 +19981,14 @@ uint256 ComputeNarrowMultiChildParentFsSeedV1(
     seed_hash <<
         static_cast<uint32_t>(node.combined.constraints.size());
     seed_hash << node.prechallenge_commitment;
+    if (!node
+             .semantic_endpoint_receipt_commitment
+             .IsNull()) {
+        seed_hash <<
+            "BTX_RC_STAGE3_SEMANTIC_ENDPOINT_PARENT_V1";
+        seed_hash <<
+            node.semantic_endpoint_receipt_commitment;
+    }
     if (!parent_context_binding.IsNull()) {
         seed_hash <<
             "BTX_RC_STAGE3_MULTI_CHILD_L2_BOUND_CONTEXT_V1";
@@ -23767,6 +23777,951 @@ AttachCanonicalChildAcceptanceV1(
         composition.valid = false;
         composition.note = out.note;
     }
+    return out;
+}
+
+SemanticEndpointReceiptParentAttachmentV1
+AttachSemanticEndpointReceiptTerminalsV1(
+    FoldBusComposition& composition,
+    const std::vector<RCStage3RoleAirProduct>&
+        role_artifacts,
+    const std::vector<
+        multirow_v11_semantic_exports::
+            StreamChildArtifactV1>& stream_children,
+    const stage3_semantic_endpoint_receipt_intake::
+        ProofV1& intake_proof)
+{
+    namespace intake =
+        stage3_semantic_endpoint_receipt_intake;
+    SemanticEndpointReceiptParentAttachmentV1 out;
+    out.layout =
+        SemanticEndpointReceiptTerminalLayoutV1(
+            composition.combined.n_columns);
+    auto fail =
+        [&](const std::string& detail) {
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "semantic_endpoint_receipt_parent:" +
+                detail;
+            composition.valid = false;
+            composition.note = out.note;
+            return out;
+        };
+    if (!composition.valid ||
+        !composition.hash.valid ||
+        !composition.hash.proof_derived ||
+        !composition.hash.native_child_accepted ||
+        !composition
+             .semantic_endpoint_receipt_commitment
+             .IsNull()) {
+        return fail("composition");
+    }
+
+    std::string intake_why;
+    out.intake_reverified =
+        intake::VerifyIntakeV1(
+            role_artifacts, stream_children,
+            intake_proof, &intake_why);
+    if (!out.intake_reverified ||
+        !intake_proof.construction_valid ||
+        intake_proof.role_receipts.empty() ||
+        !intake_proof.manifest.valid ||
+        intake_proof.manifest.active_roles !=
+            intake_proof.role_receipts.size() ||
+        intake_proof.role_receipts.size() >
+            SemanticEndpointReceiptTerminalLayoutV1::
+                kRoles ||
+        intake_proof
+                .ordered_child_receipt_commitments
+                .size() !=
+            intake_proof.role_receipts.size() + 1U ||
+        composition.hash.program.children.size() !=
+            intake_proof.role_receipts.size() + 1U) {
+        return fail(
+            "intake:" + intake_why);
+    }
+    out.concrete_roles =
+        static_cast<uint32_t>(
+            intake_proof.role_receipts.size());
+    out.concrete_endpoints =
+        intake_proof.manifest.active_endpoints;
+    out.residual_endpoints =
+        intake_proof.manifest.residual_endpoints;
+
+    // The parent child order is consensus-visible: canonical role order first,
+    // followed by the one equality-link receipt. Compare the complete child
+    // public inputs, not just dimensions or a receipt label.
+    auto exact_child =
+        [&](uint32_t child,
+            const NarrowRecursiveProofReceiptV1& receipt) {
+            if (!receipt.valid ||
+                child >=
+                    composition.hash.program.children.size() ||
+                receipt.receipt_commitment !=
+                    intake_proof
+                        .ordered_child_receipt_commitments[
+                            child]) {
+                return false;
+            }
+            const ar::ChildPublicInputs recovered =
+                ar::ExtractChildPublicInputs(
+                    receipt.constraint_system,
+                    receipt.proof,
+                    receipt.fs_seed);
+            if (!recovered.ok) return false;
+            const RCStage3RecursiveChildPin expected{
+                recovered};
+            const RCStage3RecursiveChildPin materialized{
+                composition.hash.program.children[child]};
+            return expected == materialized;
+        };
+    for (uint32_t slot = 0;
+         slot < intake_proof.role_receipts.size();
+         ++slot) {
+        const auto& receipt =
+            intake_proof.role_receipts[slot];
+        if (!receipt.valid ||
+            !receipt.exact_endpoint_order ||
+            !receipt.proof_owned_terminal ||
+            receipt.canonical_terminal_constraint_bytecode ||
+            receipt.ordinary_proof.binding !=
+                receipt.binding ||
+            receipt.ordinary_proof
+                    .receipt.receipt_commitment !=
+                intake_proof
+                    .ordered_child_receipt_commitments[
+                        slot] ||
+            !exact_child(
+                slot,
+                receipt.ordinary_proof.receipt)) {
+            return fail(
+                "role_child[" +
+                std::to_string(slot) + "]");
+        }
+    }
+    const uint32_t link_child =
+        static_cast<uint32_t>(
+            intake_proof.role_receipts.size());
+    if (!intake_proof.equality_link.valid ||
+        !intake_proof.equality_link
+             .ordered_receipts_bound ||
+        !intake_proof.equality_link
+             .dual_fp3_terminal_cancellation ||
+        intake_proof.equality_link
+                .ordinary_proof.binding !=
+            intake_proof.equality_link.binding ||
+        intake_proof.equality_link
+                .ordinary_proof.receipt
+                .receipt_commitment !=
+            intake_proof
+                .ordered_child_receipt_commitments[
+                    link_child] ||
+        !exact_child(
+            link_child,
+            intake_proof.equality_link
+                .ordinary_proof.receipt)) {
+        return fail("link_child");
+    }
+    out.exact_child_order = true;
+
+    HashWriter statement;
+    statement <<
+        "BTX_RC_STAGE3_SEMANTIC_ENDPOINT_PARENT_V1";
+    statement << intake_proof.manifest.version;
+    statement <<
+        intake_proof.manifest.inventory_commitment;
+    statement << intake_proof.manifest.active_bitmap;
+    statement << intake_proof.manifest.residual_bitmap;
+    statement << intake_proof.manifest.active_endpoints;
+    statement << intake_proof.manifest.residual_endpoints;
+    auto hash_fp3 =
+        [&](const Fp3& value) {
+            statement << gf::Canonical(value.c0);
+            statement << gf::Canonical(value.c1);
+            statement << gf::Canonical(value.c2);
+        };
+    for (uint32_t lane = 0;
+         lane < intake::kTerminalLanesV1; ++lane) {
+        hash_fp3(
+            intake_proof.manifest.challenges
+                .gamma[lane]);
+        hash_fp3(
+            intake_proof.manifest.challenges
+                .alpha[lane]);
+    }
+    for (uint32_t ordinal = 0;
+         ordinal < intake_proof.manifest
+                       .endpoints.size();
+         ++ordinal) {
+        const auto& endpoint =
+            intake_proof.manifest.endpoints[ordinal];
+        statement << ordinal;
+        statement <<
+            static_cast<uint16_t>(
+                endpoint.route.endpoint);
+        statement <<
+            static_cast<uint16_t>(
+                endpoint.route.role);
+        statement << endpoint.receipt_slot;
+        statement <<
+            static_cast<uint8_t>(endpoint.present);
+        for (uint32_t word :
+             endpoint.root_words) {
+            statement << word;
+        }
+    }
+    auto hash_binding =
+        [&](const auto& binding) {
+            statement << binding.version;
+            statement << binding.node_binding;
+            statement << binding.program_binding;
+            statement << binding.proof_context_binding;
+            statement << binding.public_statement_binding;
+            statement << binding.fs_seed;
+        };
+    for (uint32_t slot = 0;
+         slot < intake_proof.role_receipts.size();
+         ++slot) {
+        const auto& receipt =
+            intake_proof.role_receipts[slot];
+        statement << slot;
+        statement <<
+            static_cast<uint16_t>(receipt.role);
+        statement <<
+            static_cast<uint32_t>(
+                receipt.endpoint_ordinals.size());
+        for (uint32_t ordinal :
+             receipt.endpoint_ordinals) {
+            statement << ordinal;
+            for (uint32_t word :
+                 intake_proof.manifest
+                     .endpoints[ordinal]
+                     .root_words) {
+                statement << word;
+            }
+        }
+        for (uint32_t lane = 0;
+             lane < intake::kTerminalLanesV1;
+             ++lane) {
+            statement << receipt.terminal_columns[lane];
+            hash_fp3(receipt.terminal[lane]);
+        }
+        hash_binding(receipt.binding);
+        statement <<
+            receipt.ordinary_proof
+                .receipt.receipt_commitment;
+    }
+    for (uint32_t lane = 0;
+         lane < intake::kTerminalLanesV1; ++lane) {
+        statement <<
+            intake_proof.equality_link
+                .source_terminal_columns[lane];
+        statement <<
+            intake_proof.equality_link
+                .consumer_terminal_columns[lane];
+        hash_fp3(
+            intake_proof.equality_link
+                .source_terminal[lane]);
+        hash_fp3(
+            intake_proof.equality_link
+                .consumer_terminal[lane]);
+    }
+    hash_binding(intake_proof.equality_link.binding);
+    statement <<
+        intake_proof.equality_link
+            .ordinary_proof.receipt
+            .receipt_commitment;
+    for (const uint256& commitment :
+         intake_proof
+             .ordered_child_receipt_commitments) {
+        statement << commitment;
+    }
+    out.statement_commitment =
+        statement.GetHash();
+    if (out.statement_commitment.IsNull()) {
+        return fail("statement_commitment");
+    }
+    out.exact_statement_and_context = true;
+
+    const uint32_t n_rows =
+        composition.combined.n_rows;
+    const uint32_t root_word_rows =
+        intake_proof.manifest.active_endpoints *
+        intake::kRootWordsV1;
+    if (root_word_rows == 0 ||
+        root_word_rows + 1U >= n_rows ||
+        out.layout.End() >
+            kRCFri3AlgBatchMaxColumns) {
+        return fail("parent_shape");
+    }
+    composition.combined.n_columns =
+        out.layout.End();
+    composition.columns.resize(
+        out.layout.End(),
+        std::vector<Fp3>(
+            n_rows, Fp3::Zero()));
+    composition.combined.preprocessed_pin_ood = true;
+
+    // Verifier-owned role/link terminal constants.
+    for (uint32_t slot = 0;
+         slot < intake_proof.role_receipts.size();
+         ++slot) {
+        for (uint32_t lane = 0;
+             lane < intake::kTerminalLanesV1;
+             ++lane) {
+            std::fill(
+                composition.columns[
+                    out.layout.RoleTerminal(
+                        slot, lane)]
+                    .begin(),
+                composition.columns[
+                    out.layout.RoleTerminal(
+                        slot, lane)]
+                    .end(),
+                intake_proof.role_receipts[slot]
+                    .terminal[lane]);
+        }
+    }
+    for (uint32_t lane = 0;
+         lane < intake::kTerminalLanesV1; ++lane) {
+        std::fill(
+            composition.columns[
+                out.layout.LinkTerminal(0, lane)]
+                .begin(),
+            composition.columns[
+                out.layout.LinkTerminal(0, lane)]
+                .end(),
+            intake_proof.equality_link
+                .source_terminal[lane]);
+        std::fill(
+            composition.columns[
+                out.layout.LinkTerminal(1, lane)]
+                .begin(),
+            composition.columns[
+                out.layout.LinkTerminal(1, lane)]
+                .end(),
+            intake_proof.equality_link
+                .consumer_terminal[lane]);
+    }
+
+    uint32_t row = 0;
+    Fp3 running1 = Fp3::Zero();
+    Fp3 running2 = Fp3::Zero();
+    for (uint32_t slot = 0;
+         slot < intake_proof.role_receipts.size();
+         ++slot) {
+        const auto& receipt =
+            intake_proof.role_receipts[slot];
+        if (receipt.endpoint_ordinals.empty()) {
+            return fail("empty_role_receipt");
+        }
+        for (uint32_t endpoint_index = 0;
+             endpoint_index <
+                 receipt.endpoint_ordinals.size();
+             ++endpoint_index) {
+            const uint32_t ordinal =
+                receipt.endpoint_ordinals[
+                    endpoint_index];
+            if (ordinal >=
+                    intake_proof.manifest
+                        .endpoints.size() ||
+                !intake_proof.manifest
+                     .endpoints[ordinal].present ||
+                intake_proof.manifest
+                        .endpoints[ordinal]
+                        .receipt_slot != slot ||
+                intake_proof.manifest
+                        .endpoints[ordinal]
+                        .route.role != receipt.role) {
+                return fail("endpoint_order");
+            }
+            for (uint32_t word = 0;
+                 word < intake::kRootWordsV1;
+                 ++word, ++row) {
+                const auto& endpoint =
+                    intake_proof.manifest
+                        .endpoints[ordinal];
+                const Fp3 value =
+                    Fp3::FromFp(
+                        gf::FromU64(
+                            endpoint
+                                .root_words[word]));
+                const uint64_t address =
+                    uint64_t{ordinal} *
+                        intake::kRootWordsV1 +
+                    word + 1U;
+                composition.columns[
+                    out.layout.active][row] =
+                    Fp3::One();
+                composition.columns[
+                    out.layout.role][row] =
+                    Fp3::FromFp(
+                        gf::FromU64(
+                            static_cast<uint16_t>(
+                                receipt.role)));
+                composition.columns[
+                    out.layout.receipt_slot][row] =
+                    Fp3::FromFp(
+                        gf::FromU64(slot));
+                composition.columns[
+                    out.layout.endpoint_ordinal][row] =
+                    Fp3::FromFp(
+                        gf::FromU64(ordinal));
+                composition.columns[
+                    out.layout.word_index][row] =
+                    Fp3::FromFp(
+                        gf::FromU64(word));
+                composition.columns[
+                    out.layout.root_value][row] =
+                    value;
+                composition.columns[
+                    out.layout.root_expected][row] =
+                    value;
+                composition.columns[
+                    out.layout.address][row] =
+                    Fp3::FromFp(
+                        gf::FromU64(address));
+                composition.columns[
+                    out.layout.running1][row] =
+                    running1;
+                composition.columns[
+                    out.layout.running2][row] =
+                    running2;
+                const Fp3 denominator1 =
+                    gf::Add(
+                        intake_proof.manifest
+                            .challenges.gamma[0],
+                        gf::Add(
+                            value,
+                            gf::Mul(
+                                intake_proof.manifest
+                                    .challenges.alpha[0],
+                                Fp3::FromFp(
+                                    gf::FromU64(
+                                        address)))));
+                const Fp3 denominator2 =
+                    gf::Add(
+                        intake_proof.manifest
+                            .challenges.gamma[1],
+                        gf::Add(
+                            value,
+                            gf::Mul(
+                                intake_proof.manifest
+                                    .challenges.alpha[1],
+                                Fp3::FromFp(
+                                    gf::FromU64(
+                                        address)))));
+                if (gf::IsZero(denominator1) ||
+                    gf::IsZero(denominator2)) {
+                    return fail("logup_pole");
+                }
+                const Fp3 inverse1 =
+                    gf::Inv(denominator1);
+                const Fp3 inverse2 =
+                    gf::Inv(denominator2);
+                composition.columns[
+                    out.layout.inverse1][row] =
+                    inverse1;
+                composition.columns[
+                    out.layout.inverse2][row] =
+                    inverse2;
+                running1 =
+                    gf::Add(running1, inverse1);
+                running2 =
+                    gf::Add(running2, inverse2);
+                const bool role_end =
+                    endpoint_index + 1U ==
+                        receipt.endpoint_ordinals
+                            .size() &&
+                    word + 1U ==
+                        intake::kRootWordsV1;
+                if (role_end) {
+                    composition.columns[
+                        out.layout.role_end][row] =
+                        Fp3::One();
+                    composition.columns[
+                        out.layout.RoleEndSelector(
+                            slot)][row] =
+                        Fp3::One();
+                    if (!gf::Eq(
+                            running1,
+                            receipt.terminal[0]) ||
+                        !gf::Eq(
+                            running2,
+                            receipt.terminal[1])) {
+                        return fail(
+                            "role_terminal_value");
+                    }
+                    running1 = Fp3::Zero();
+                    running2 = Fp3::Zero();
+                }
+            }
+        }
+    }
+    out.root_word_rows = row;
+    out.exact_endpoint_order =
+        row == root_word_rows;
+    if (!out.exact_endpoint_order ||
+        !gf::IsZero(running1) ||
+        !gf::IsZero(running2)) {
+        return fail("root_word_schedule");
+    }
+
+    const HashOpeningLayout hash_layout =
+        HashOpeningLayoutAt(
+            composition.hash.column_base);
+    const uint32_t constraint_base =
+        static_cast<uint32_t>(
+            composition.combined.constraints.size());
+    auto attach_alias =
+        [&](uint32_t child,
+            uint32_t terminal_column,
+            const auto& selector_column,
+            const Fp3& expected,
+            uint32_t& alias_rows) {
+            if (child >=
+                    composition.hash.program
+                        .children.size() ||
+                terminal_column >=
+                    composition.hash.program
+                        .children[child].child_w) {
+                return false;
+            }
+            const std::array<gf::Fp, 3> coordinates{
+                gf::Canonical(expected.c0),
+                gf::Canonical(expected.c1),
+                gf::Canonical(expected.c2)};
+            for (uint32_t coordinate = 0;
+                 coordinate <
+                     SemanticEndpointReceiptTerminalLayoutV1::
+                         kExtensionCoordinates;
+                 ++coordinate) {
+                const uint32_t position =
+                    3 * terminal_column + coordinate;
+                uint32_t port = UINT32_MAX;
+                uint32_t selected = 0;
+                for (uint32_t r = 0;
+                     r <
+                         composition.hash.program.rows.size();
+                     ++r) {
+                    const auto& meta =
+                        composition.hash.program.rows[r];
+                    if (meta.child != child ||
+                        !meta.current_row_sponge ||
+                        position <
+                            meta.current_word_offset ||
+                        position >=
+                            meta.current_word_offset +
+                                ah::kAlgHashRate) {
+                        continue;
+                    }
+                    const uint32_t current_port =
+                        position -
+                        meta.current_word_offset;
+                    if (port == UINT32_MAX) {
+                        port = current_port;
+                    } else if (port != current_port) {
+                        return false;
+                    }
+                    composition.columns[
+                        selector_column(coordinate)][r] =
+                        Fp3::One();
+                    ++selected;
+                }
+                if (port == UINT32_MAX ||
+                    selected !=
+                        composition.hash.program
+                            .children[child]
+                            .query_index.size()) {
+                    return false;
+                }
+                aq::AirConstraint<Fp3> alias;
+                alias.name =
+                    "stage3.fixedpoint.semantic_receipt."
+                    "authenticated_terminal_coordinate_alias";
+                alias.kind = aq::AirKind::kEverywhere;
+                alias.alg_degree = 2;
+                const Fp3 expected_coordinate =
+                    Fp3::FromFp(coordinates[coordinate]);
+                alias.eval =
+                    [selector =
+                         selector_column(coordinate),
+                     expected_coordinate,
+                     source =
+                         hash_layout.absorbed_pin_base +
+                         port](
+                        const std::vector<Fp3>& cur,
+                        const std::vector<Fp3>&) {
+                        return gf::Mul(
+                            cur[selector],
+                            gf::Sub(
+                                cur[source],
+                                expected_coordinate));
+                    };
+                composition.combined.constraints.push_back(
+                    std::move(alias));
+                alias_rows += selected;
+            }
+            return true;
+        };
+    for (uint32_t slot = 0;
+         slot < intake_proof.role_receipts.size();
+         ++slot) {
+        const auto& receipt =
+            intake_proof.role_receipts[slot];
+        for (uint32_t lane = 0;
+             lane < intake::kTerminalLanesV1;
+             ++lane) {
+            if (!attach_alias(
+                    slot,
+                    receipt.terminal_columns[lane],
+                    [&](uint32_t coordinate) {
+                        return out.layout.RoleAliasSelector(
+                            slot, lane, coordinate);
+                    },
+                    receipt.terminal[lane],
+                    out.role_terminal_alias_rows)) {
+                return fail("role_terminal_alias");
+            }
+        }
+    }
+    for (uint32_t lane = 0;
+         lane < intake::kTerminalLanesV1;
+         ++lane) {
+        if (!attach_alias(
+                link_child,
+                intake_proof.equality_link
+                    .source_terminal_columns[lane],
+                [&](uint32_t coordinate) {
+                    return out.layout.LinkAliasSelector(
+                        0, lane, coordinate);
+                },
+                intake_proof.equality_link
+                    .source_terminal[lane],
+                out.link_terminal_alias_rows) ||
+            !attach_alias(
+                link_child,
+                intake_proof.equality_link
+                    .consumer_terminal_columns[lane],
+                [&](uint32_t coordinate) {
+                    return out.layout.LinkAliasSelector(
+                        1, lane, coordinate);
+                },
+                intake_proof.equality_link
+                    .consumer_terminal[lane],
+                out.link_terminal_alias_rows)) {
+            return fail("link_terminal_alias");
+        }
+    }
+
+    for (const uint32_t column : {
+             out.layout.active,
+             out.layout.role_end,
+             out.layout.role,
+             out.layout.receipt_slot,
+             out.layout.endpoint_ordinal,
+             out.layout.word_index,
+             out.layout.root_expected,
+             out.layout.address}) {
+        composition.combined.preprocessed.emplace_back(
+            column, composition.columns[column]);
+    }
+    for (uint32_t slot = 0;
+         slot <
+             SemanticEndpointReceiptTerminalLayoutV1::
+                 kRoles;
+         ++slot) {
+        composition.combined.preprocessed.emplace_back(
+            out.layout.RoleEndSelector(slot),
+            composition.columns[
+                out.layout.RoleEndSelector(slot)]);
+        for (uint32_t lane = 0;
+             lane <
+                 SemanticEndpointReceiptTerminalLayoutV1::
+                     kTerminalLanes;
+             ++lane) {
+            for (const uint32_t column : {
+                     out.layout.RoleTerminal(
+                         slot, lane)}) {
+                composition.combined.preprocessed.emplace_back(
+                    column,
+                    composition.columns[column]);
+            }
+            for (uint32_t coordinate = 0;
+                 coordinate <
+                     SemanticEndpointReceiptTerminalLayoutV1::
+                         kExtensionCoordinates;
+                 ++coordinate) {
+                const uint32_t column =
+                    out.layout.RoleAliasSelector(
+                        slot, lane, coordinate);
+                composition.combined.preprocessed.emplace_back(
+                    column,
+                    composition.columns[column]);
+            }
+        }
+    }
+    for (uint32_t side = 0; side < 2; ++side) {
+        for (uint32_t lane = 0;
+             lane < intake::kTerminalLanesV1;
+             ++lane) {
+            const uint32_t terminal_column =
+                out.layout.LinkTerminal(side, lane);
+            composition.combined.preprocessed.emplace_back(
+                terminal_column,
+                composition.columns[terminal_column]);
+            for (uint32_t coordinate = 0;
+                 coordinate <
+                     SemanticEndpointReceiptTerminalLayoutV1::
+                         kExtensionCoordinates;
+                 ++coordinate) {
+                const uint32_t selector_column =
+                    out.layout.LinkAliasSelector(
+                        side, lane, coordinate);
+                composition.combined.preprocessed.emplace_back(
+                    selector_column,
+                    composition.columns[selector_column]);
+            }
+        }
+    }
+
+    auto add =
+        [&](const char* name, aq::AirKind kind,
+            uint32_t degree,
+            std::function<Fp3(
+                const std::vector<Fp3>&,
+                const std::vector<Fp3>&)> eval) {
+            aq::AirConstraint<Fp3> constraint;
+            constraint.name = name;
+            constraint.kind = kind;
+            constraint.alg_degree = degree;
+            constraint.eval = std::move(eval);
+            composition.combined.constraints.push_back(
+                std::move(constraint));
+        };
+    add(
+        "stage3.fixedpoint.semantic_receipt.root_word",
+        aq::AirKind::kEverywhere, 2,
+        [layout = out.layout](
+            const std::vector<Fp3>& cur,
+            const std::vector<Fp3>&) {
+            return gf::Mul(
+                cur[layout.active],
+                gf::Sub(
+                    cur[layout.root_value],
+                    cur[layout.root_expected]));
+        });
+    for (uint32_t lane = 0;
+         lane < intake::kTerminalLanesV1;
+         ++lane) {
+        const uint32_t inverse =
+            lane == 0
+            ? out.layout.inverse1
+            : out.layout.inverse2;
+        const uint32_t running =
+            lane == 0
+            ? out.layout.running1
+            : out.layout.running2;
+        const Fp3 gamma =
+            intake_proof.manifest
+                .challenges.gamma[lane];
+        const Fp3 alpha =
+            intake_proof.manifest
+                .challenges.alpha[lane];
+        add(
+            "stage3.fixedpoint.semantic_receipt.logup_inverse",
+            aq::AirKind::kEverywhere, 2,
+            [layout = out.layout, inverse,
+             gamma, alpha](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                const Fp3 denominator =
+                    gf::Add(
+                        gamma,
+                        gf::Add(
+                            cur[layout.root_value],
+                            gf::Mul(
+                                alpha,
+                                cur[layout.address])));
+                return gf::Sub(
+                    gf::Mul(
+                        cur[inverse],
+                        denominator),
+                    cur[layout.active]);
+            });
+        add(
+            "stage3.fixedpoint.semantic_receipt.logup_running",
+            aq::AirKind::kTransition, 2,
+            [layout = out.layout, inverse, running](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>& next) {
+                const Fp3 accumulated =
+                    gf::Add(
+                        cur[running],
+                        gf::Mul(
+                            cur[layout.active],
+                            cur[inverse]));
+                return gf::Sub(
+                    next[running],
+                    gf::Mul(
+                        gf::Sub(
+                            Fp3::One(),
+                            cur[layout.role_end]),
+                        accumulated));
+            });
+        add(
+            "stage3.fixedpoint.semantic_receipt.logup_first",
+            aq::AirKind::kFirstRow, 1,
+            [running](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                return cur[running];
+            });
+        for (uint32_t slot = 0;
+             slot < intake_proof.role_receipts.size();
+             ++slot) {
+            add(
+                "stage3.fixedpoint.semantic_receipt.role_terminal",
+                aq::AirKind::kEverywhere, 2,
+                [layout = out.layout, inverse,
+                 running, slot, lane](
+                    const std::vector<Fp3>& cur,
+                    const std::vector<Fp3>&) {
+                    return gf::Mul(
+                        cur[
+                            layout.RoleEndSelector(
+                                slot)],
+                        gf::Sub(
+                            gf::Add(
+                                cur[running],
+                                cur[inverse]),
+                            cur[
+                                layout.RoleTerminal(
+                                    slot, lane)]));
+                });
+        }
+    }
+    add(
+        "stage3.fixedpoint.semantic_receipt.role_end_schedule",
+        aq::AirKind::kEverywhere, 1,
+        [layout = out.layout](
+            const std::vector<Fp3>& cur,
+            const std::vector<Fp3>&) {
+            Fp3 sum = Fp3::Zero();
+            for (uint32_t slot = 0;
+                 slot <
+                     SemanticEndpointReceiptTerminalLayoutV1::
+                         kRoles;
+                 ++slot) {
+                sum = gf::Add(
+                    sum,
+                    cur[
+                        layout.RoleEndSelector(slot)]);
+            }
+            return gf::Sub(
+                cur[layout.role_end], sum);
+        });
+    for (uint32_t lane = 0;
+         lane < intake::kTerminalLanesV1;
+         ++lane) {
+        add(
+            "stage3.fixedpoint.semantic_receipt.link_equality",
+            aq::AirKind::kEverywhere, 1,
+            [layout = out.layout, lane](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    cur[layout.LinkTerminal(0, lane)],
+                    cur[layout.LinkTerminal(1, lane)]);
+            });
+        add(
+            "stage3.fixedpoint.semantic_receipt.link_role_sum",
+            aq::AirKind::kEverywhere, 1,
+            [layout = out.layout,
+             roles = out.concrete_roles,
+             lane](
+                const std::vector<Fp3>& cur,
+                const std::vector<Fp3>&) {
+                Fp3 sum = Fp3::Zero();
+                for (uint32_t slot = 0;
+                     slot < roles; ++slot) {
+                    sum = gf::Add(
+                        sum,
+                        cur[
+                            layout.RoleTerminal(
+                                slot, lane)]);
+                }
+                return gf::Sub(
+                    cur[
+                        layout.LinkTerminal(
+                            0, lane)],
+                    sum);
+            });
+    }
+    out.added_constraints =
+        static_cast<uint32_t>(
+            composition.combined.constraints.size()) -
+        constraint_base;
+    out.violations =
+        CountHashOpeningViolations(
+            composition.combined,
+            composition.columns);
+    composition.violations = out.violations;
+    out.root_words_equality_constrained =
+        out.exact_endpoint_order &&
+        out.root_word_rows == root_word_rows;
+    out.dual_fp3_logup_recomputed =
+        out.root_words_equality_constrained &&
+        out.violations == 0;
+    out.role_terminals_proof_aliased =
+        out.role_terminal_alias_rows > 0 &&
+        out.violations == 0;
+    out.link_terminal_proof_aliased =
+        out.link_terminal_alias_rows > 0 &&
+        out.violations == 0;
+    out.every_concrete_role_joined =
+        out.concrete_roles != 0 &&
+        out.intake_reverified &&
+        out.exact_statement_and_context &&
+        out.exact_child_order &&
+        out.dual_fp3_logup_recomputed &&
+        out.role_terminals_proof_aliased &&
+        out.link_terminal_proof_aliased;
+    out.all_52_endpoints_and_14_roles_joined =
+        out.every_concrete_role_joined &&
+        intake_proof.manifest.complete_52 &&
+        out.residual_endpoints == 0 &&
+        out.concrete_roles ==
+            kRCStage3RelationClosureRoleCount;
+    out.canonical_terminal_constraint_bytecode =
+        intake_proof
+            .canonical_terminal_constraint_bytecode_complete;
+    out.valid =
+        out.every_concrete_role_joined &&
+        out.added_constraints > 0 &&
+        out.violations == 0;
+    if (!out.valid) {
+        return fail("air_constraints");
+    }
+
+    composition
+        .semantic_endpoint_receipt_commitment =
+        out.statement_commitment;
+    composition.semantic_endpoint_roles_joined =
+        out.concrete_roles;
+    composition.semantic_endpoint_roles_expected =
+        kRCStage3RelationClosureRoleCount;
+    composition
+        .concrete_semantic_endpoint_terminal_join =
+        true;
+    composition.every_semantic_endpoint_role_joined =
+        out.all_52_endpoints_and_14_roles_joined;
+    out.note =
+        "stage3:recursive_fixedpoint:"
+        "semantic_endpoint_receipt_parent:"
+        "concrete_terminals_joined;"
+        "canonical_terminal_bytecode_open;"
+        "complete_fp=false";
     return out;
 }
 
