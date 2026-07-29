@@ -278,8 +278,8 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     BOOST_CHECK(kRCStage3RelationClosureCtlValueBindingExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
-    // RecursiveChildren stays false while CompleteFP residuals remain open
-    // (CompleteFP residual families closed; executable constexpr still false;
+    // RecursiveChildren stays false while CompleteFP executable is still
+    // fail-closed (payload / Split-RAP / endpoint residual families closed;
     // FS lacks honest non-canary authority_eligible; counters still 0_of_52).
     {
         namespace fp = recursive_fixedpoint;

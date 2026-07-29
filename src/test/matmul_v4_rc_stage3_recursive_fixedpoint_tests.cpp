@@ -1615,14 +1615,27 @@ BOOST_AUTO_TEST_CASE(
         910U);
     BOOST_REQUIRE_EQUAL(capability.gaps.size(), 7U);
     {
-        // Four residuals remain open; FiatShamirReplayAir, ChildProofPayloadBus,
-        // and SplitRapMultiRowVerifier local adapter are closed.
+        // Living AssessNormalizedRecursiveChildCapabilityV1 after
+        // ProofRows / ledger-g4 FS / Split-RAP local adapter close:
+        // open = ChildProofCommitmentBus, CtlChildVerifierAndTerminalBus,
+        // NormalizedSemanticRootAlgHash, EndpointTerminalEquality (4).
+        // Closed chips stay present_in_parent_air without inventing authority.
         uint32_t open_gaps = 0;
+        bool payload_gap_present = false;
         bool fs_gap_present = false;
         bool split_rap_gap_present = false;
+        bool commit_gap_open = false;
+        bool ctl_gap_open = false;
+        bool semantic_gap_open = false;
+        bool endpoint_gap_open = false;
         for (const auto& gap : capability.gaps) {
             if (!gap.present_in_parent_air) {
                 ++open_gaps;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    ChildProofPayloadBus) {
+                payload_gap_present = gap.present_in_parent_air;
             }
             if (gap.code ==
                 fp::NormalizedRecursiveVerifierGapCode::
@@ -1635,9 +1648,34 @@ BOOST_AUTO_TEST_CASE(
                 split_rap_gap_present =
                     gap.present_in_parent_air;
             }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    ChildProofCommitmentBus) {
+                commit_gap_open = !gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    CtlChildVerifierAndTerminalBus) {
+                ctl_gap_open = !gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    NormalizedSemanticRootAlgHash) {
+                semantic_gap_open = !gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    EndpointTerminalEquality) {
+                endpoint_gap_open = !gap.present_in_parent_air;
+            }
         }
+        BOOST_CHECK(payload_gap_present);
         BOOST_CHECK(fs_gap_present);
         BOOST_CHECK(split_rap_gap_present);
+        BOOST_CHECK(commit_gap_open);
+        BOOST_CHECK(ctl_gap_open);
+        BOOST_CHECK(semantic_gap_open);
+        BOOST_CHECK(endpoint_gap_open);
         BOOST_CHECK_EQUAL(open_gaps, 4U);
     }
     BOOST_CHECK_EQUAL(
@@ -2461,7 +2499,9 @@ BOOST_AUTO_TEST_CASE(
 
     // CompleteFP residual chip: ProofFieldBus closes ChildProofCommitmentBus
     // (8 lanes). TerminalBusCommitmentBus then closes terminal lanes + semantic
-    // root. Payload/CTL-child-verifier/endpoint/SplitRap/CompleteFP remain open.
+    // root. Payload + Split-RAP local adapter are already closed; CTL-child
+    // verifier in parent AIR and endpoint equality on this composition remain
+    // open (CompleteFP / VerifierFS assembly gates stay fail-closed).
     const auto alg_hash_with_bus =
         fp::PromoteNormalizedSemanticProofCommitmentFromFieldBusV1(
             fp::AssessNormalizedSemanticAlgHashParentClosure(
@@ -2541,10 +2581,19 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !capability_with_bus.endpoint_terminal_equality);
     {
+        // Living AssessNormalizedRecursiveChildCapabilityWithProofBusV1 after
+        // ProofFieldBus + TerminalBusCommitmentBus: commit + semantic close.
+        // SplitRap / payload / FS already present. Remaining open codes:
+        // CtlChildVerifierAndTerminalBus (host-only CTL) and
+        // EndpointTerminalEquality (attach exercised on a composition copy).
         uint32_t open_gaps = 0;
         bool commit_gap_present = false;
         bool semantic_gap_present = false;
         bool ctl_gap_present = false;
+        bool endpoint_gap_open = false;
+        bool payload_gap_present = false;
+        bool fs_gap_present = false;
+        bool split_rap_gap_present = false;
         for (const auto& gap : capability_with_bus.gaps) {
             if (!gap.present_in_parent_air) {
                 ++open_gaps;
@@ -2565,12 +2614,34 @@ BOOST_AUTO_TEST_CASE(
                     CtlChildVerifierAndTerminalBus) {
                 ctl_gap_present = gap.present_in_parent_air;
             }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    EndpointTerminalEquality) {
+                endpoint_gap_open = !gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    ChildProofPayloadBus) {
+                payload_gap_present = gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    FiatShamirReplayAir) {
+                fs_gap_present = gap.present_in_parent_air;
+            }
+            if (gap.code ==
+                fp::NormalizedRecursiveVerifierGapCode::
+                    SplitRapMultiRowVerifier) {
+                split_rap_gap_present = gap.present_in_parent_air;
+            }
         }
+        BOOST_CHECK(payload_gap_present);
+        BOOST_CHECK(fs_gap_present);
+        BOOST_CHECK(split_rap_gap_present);
         BOOST_CHECK(commit_gap_present);
         BOOST_CHECK(semantic_gap_present);
         BOOST_CHECK(!ctl_gap_present);
-        // SplitRap + payload + FS closed; ctl + endpoint capability bits
-        // remain open on this ProofBus path (endpoint attach is later).
+        BOOST_CHECK(endpoint_gap_open);
         BOOST_CHECK_EQUAL(open_gaps, 2U);
     }
     BOOST_CHECK_MESSAGE(
