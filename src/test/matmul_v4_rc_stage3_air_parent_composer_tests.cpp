@@ -207,6 +207,49 @@ BOOST_AUTO_TEST_CASE(exact_row_lift_preserves_boundaries_and_rejects_padding)
             .canonical_program_relocation_exact);
     BOOST_CHECK_EQUAL(parent.n_rows, 16U);
 
+    Cs public_parent;
+    composer::ChildAttachmentV1
+        public_attachment;
+    BOOST_REQUIRE_MESSAGE(
+        composer::
+            AppendChildLiftedConstraintSystemV1(
+                public_parent, child_cs,
+                16, 0, public_attachment,
+                &why),
+        why);
+    BOOST_CHECK_EQUAL(
+        public_parent.n_rows, parent.n_rows);
+    BOOST_CHECK_EQUAL(
+        public_parent.n_columns,
+        parent.n_columns);
+    BOOST_REQUIRE_EQUAL(
+        public_parent.constraints.size(),
+        parent.constraints.size());
+    BOOST_REQUIRE_EQUAL(
+        public_parent.preprocessed.size(),
+        parent.preprocessed.size());
+    for (uint32_t i = 0;
+         i < parent.constraints.size(); ++i) {
+        BOOST_CHECK_EQUAL(
+            public_parent.constraints[i].name,
+            parent.constraints[i].name);
+        BOOST_CHECK(
+            public_parent.constraints[i].kind ==
+            parent.constraints[i].kind);
+        BOOST_CHECK_EQUAL(
+            public_parent.constraints[i].alg_degree,
+            parent.constraints[i].alg_degree);
+    }
+    BOOST_CHECK_EQUAL(
+        public_attachment.column_base,
+        attachment.column_base);
+    BOOST_CHECK_EQUAL(
+        public_attachment.column_count,
+        attachment.column_count);
+    BOOST_CHECK(
+        public_attachment.row_lifted ==
+        attachment.row_lifted);
+
     const auto honest =
         aq::AirQuotientProve<gf::Fp3>(parent, columns, Seed());
     BOOST_REQUIRE_MESSAGE(honest.ok, honest.note);

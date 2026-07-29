@@ -239,6 +239,9 @@ struct PublicDeterministicComponentV1 {
         deep_base{};
     composer::ChildAttachmentV1
         deep_base_attachment{};
+    /** Canonical V13 tape interval relocated into this complete component. */
+    composer::ChildAttachmentV1
+        tape_attachment{};
     uint32_t shared_tape_aliases{0};
     uint32_t terminal_acceptance_column{
         UINT32_MAX};

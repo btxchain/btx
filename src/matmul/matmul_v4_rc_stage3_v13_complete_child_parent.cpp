@@ -1368,6 +1368,21 @@ bool BuildDeterministicConstraintSystemV1(
                 merkle_acceptance);
     out.deep_base_attachment =
         deep_base_attachment;
+    out.tape_attachment =
+        merkle_tape_attachment;
+    out.tape_attachment.column_base =
+        merkle_parent_attachment.ParentColumn(
+            merkle_tape_attachment.column_base);
+    out.tape_attachment.child_ordinal = 0;
+    out.tape_attachment.valid =
+        merkle_tape_attachment.valid &&
+        merkle_parent_attachment.valid &&
+        out.tape_attachment.column_base <
+            out.cs.n_columns &&
+        out.tape_attachment
+                .semantic_child_columns <=
+            out.cs.n_columns -
+                out.tape_attachment.column_base;
     out.canonical_tape_program_bound =
         canonical_tape_program ==
             statement.tape_program &&
@@ -1377,6 +1392,7 @@ bool BuildDeterministicConstraintSystemV1(
     out.deterministic_system_rebuilt =
         merkle_aliases.valid &&
         out.deep_base.valid &&
+        out.tape_attachment.valid &&
         out.shared_tape_aliases ==
             tape_cs.n_columns &&
         out.terminal_acceptance_column <
