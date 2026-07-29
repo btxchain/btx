@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_stage3_recursive.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
+#include <matmul/matmul_v4_rc_stage3_semantic_endpoint_parent_bytecode.h>
 #include <matmul/matmul_v4_rc_stage3_semantic_endpoint_receipt_intake.h>
 #include <matmul/matmul_v4_rc_stage3_verifier_air.h>
 
@@ -23843,10 +23844,16 @@ AttachSemanticEndpointReceiptTerminalsV1(
 {
     namespace intake =
         stage3_semantic_endpoint_receipt_intake;
+    namespace endpoint_bc =
+        stage3_semantic_endpoint_parent_bytecode;
     SemanticEndpointReceiptParentAttachmentV1 out;
+    const HashOpeningLayout semantic_hash_layout =
+        HashOpeningLayoutAt(
+            composition.hash.column_base);
     out.layout =
         SemanticEndpointReceiptTerminalLayoutV1(
-            composition.combined.n_columns);
+            composition.combined.n_columns,
+            semantic_hash_layout.absorbed_pin_base);
     auto fail =
         [&](const std::string& detail) {
             out.note =
@@ -23974,6 +23981,26 @@ AttachSemanticEndpointReceiptTerminalsV1(
     }
     out.exact_child_order = true;
 
+    constraint_bytecode::ProgramTable
+        terminal_program_table;
+    std::string bytecode_why;
+    out.canonical_program_table_valid =
+        endpoint_bc::BuildCanonicalProgramTableV1(
+            out.layout, terminal_program_table,
+            &bytecode_why);
+    if (!out.canonical_program_table_valid) {
+        return fail(
+            "canonical_program_table:" +
+            bytecode_why);
+    }
+    out.canonical_program_table_commitment =
+        constraint_bytecode::CommitProgramTable(
+            terminal_program_table);
+    if (out.canonical_program_table_commitment.IsNull()) {
+        return fail(
+            "canonical_program_table_commitment");
+    }
+
     HashWriter statement;
     statement <<
         "BTX_RC_STAGE3_SEMANTIC_ENDPOINT_PARENT_V1";
@@ -23984,6 +24011,8 @@ AttachSemanticEndpointReceiptTerminalsV1(
     statement << intake_proof.manifest.residual_bitmap;
     statement << intake_proof.manifest.active_endpoints;
     statement << intake_proof.manifest.residual_endpoints;
+    statement <<
+        out.canonical_program_table_commitment;
     auto hash_fp3 =
         [&](const Fp3& value) {
             statement << gf::Canonical(value.c0);
@@ -24317,16 +24346,12 @@ AttachSemanticEndpointReceiptTerminalsV1(
         return fail("root_word_schedule");
     }
 
-    const HashOpeningLayout hash_layout =
-        HashOpeningLayoutAt(
-            composition.hash.column_base);
     const uint32_t constraint_base =
         static_cast<uint32_t>(
             composition.combined.constraints.size());
     auto attach_alias =
         [&](uint32_t child,
             uint32_t terminal_column,
-            const auto& selector_column,
             const Fp3& expected,
             uint32_t& alias_rows) {
             if (child >=
@@ -24337,10 +24362,13 @@ AttachSemanticEndpointReceiptTerminalsV1(
                         .children[child].child_w) {
                 return false;
             }
-            const std::array<gf::Fp, 3> coordinates{
-                gf::Canonical(expected.c0),
-                gf::Canonical(expected.c1),
-                gf::Canonical(expected.c2)};
+            const std::array<Fp3, 3> coordinates{
+                Fp3::FromFp(
+                    gf::Canonical(expected.c0)),
+                Fp3::FromFp(
+                    gf::Canonical(expected.c1)),
+                Fp3::FromFp(
+                    gf::Canonical(expected.c2))};
             for (uint32_t coordinate = 0;
                  coordinate <
                      SemanticEndpointReceiptTerminalLayoutV1::
@@ -24373,9 +24401,23 @@ AttachSemanticEndpointReceiptTerminalsV1(
                     } else if (port != current_port) {
                         return false;
                     }
+                    const uint32_t selector =
+                        out.layout.AliasPortSelector(
+                            current_port);
+                    const uint32_t expected_column =
+                        out.layout.AliasPortExpected(
+                            current_port);
+                    if (!gf::IsZero(
+                            composition.columns[
+                                selector][r])) {
+                        return false;
+                    }
                     composition.columns[
-                        selector_column(coordinate)][r] =
+                        selector][r] =
                         Fp3::One();
+                    composition.columns[
+                        expected_column][r] =
+                        coordinates[coordinate];
                     ++selected;
                 }
                 if (port == UINT32_MAX ||
@@ -24385,31 +24427,6 @@ AttachSemanticEndpointReceiptTerminalsV1(
                             .query_index.size()) {
                     return false;
                 }
-                aq::AirConstraint<Fp3> alias;
-                alias.name =
-                    "stage3.fixedpoint.semantic_receipt."
-                    "authenticated_terminal_coordinate_alias";
-                alias.kind = aq::AirKind::kEverywhere;
-                alias.alg_degree = 2;
-                const Fp3 expected_coordinate =
-                    Fp3::FromFp(coordinates[coordinate]);
-                alias.eval =
-                    [selector =
-                         selector_column(coordinate),
-                     expected_coordinate,
-                     source =
-                         hash_layout.absorbed_pin_base +
-                         port](
-                        const std::vector<Fp3>& cur,
-                        const std::vector<Fp3>&) {
-                        return gf::Mul(
-                            cur[selector],
-                            gf::Sub(
-                                cur[source],
-                                expected_coordinate));
-                    };
-                composition.combined.constraints.push_back(
-                    std::move(alias));
                 alias_rows += selected;
             }
             return true;
@@ -24425,10 +24442,6 @@ AttachSemanticEndpointReceiptTerminalsV1(
             if (!attach_alias(
                     slot,
                     receipt.terminal_columns[lane],
-                    [&](uint32_t coordinate) {
-                        return out.layout.RoleAliasSelector(
-                            slot, lane, coordinate);
-                    },
                     receipt.terminal[lane],
                     out.role_terminal_alias_rows)) {
                 return fail("role_terminal_alias");
@@ -24442,10 +24455,6 @@ AttachSemanticEndpointReceiptTerminalsV1(
                 link_child,
                 intake_proof.equality_link
                     .source_terminal_columns[lane],
-                [&](uint32_t coordinate) {
-                    return out.layout.LinkAliasSelector(
-                        0, lane, coordinate);
-                },
                 intake_proof.equality_link
                     .source_terminal[lane],
                 out.link_terminal_alias_rows) ||
@@ -24453,10 +24462,6 @@ AttachSemanticEndpointReceiptTerminalsV1(
                 link_child,
                 intake_proof.equality_link
                     .consumer_terminal_columns[lane],
-                [&](uint32_t coordinate) {
-                    return out.layout.LinkAliasSelector(
-                        1, lane, coordinate);
-                },
                 intake_proof.equality_link
                     .consumer_terminal[lane],
                 out.link_terminal_alias_rows)) {
@@ -24497,18 +24502,6 @@ AttachSemanticEndpointReceiptTerminalsV1(
                     column,
                     composition.columns[column]);
             }
-            for (uint32_t coordinate = 0;
-                 coordinate <
-                     SemanticEndpointReceiptTerminalLayoutV1::
-                         kExtensionCoordinates;
-                 ++coordinate) {
-                const uint32_t column =
-                    out.layout.RoleAliasSelector(
-                        slot, lane, coordinate);
-                composition.combined.preprocessed.emplace_back(
-                    column,
-                    composition.columns[column]);
-            }
         }
     }
     for (uint32_t side = 0; side < 2; ++side) {
@@ -24520,198 +24513,68 @@ AttachSemanticEndpointReceiptTerminalsV1(
             composition.combined.preprocessed.emplace_back(
                 terminal_column,
                 composition.columns[terminal_column]);
-            for (uint32_t coordinate = 0;
-                 coordinate <
-                     SemanticEndpointReceiptTerminalLayoutV1::
-                         kExtensionCoordinates;
-                 ++coordinate) {
-                const uint32_t selector_column =
-                    out.layout.LinkAliasSelector(
-                        side, lane, coordinate);
-                composition.combined.preprocessed.emplace_back(
-                    selector_column,
-                    composition.columns[selector_column]);
-            }
+        }
+    }
+    for (uint32_t port = 0;
+         port < ah::kAlgHashRate;
+         ++port) {
+        for (const uint32_t column : {
+                 out.layout.AliasPortSelector(port),
+                 out.layout.AliasPortExpected(port)}) {
+            composition.combined.preprocessed.emplace_back(
+                column,
+                composition.columns[column]);
         }
     }
 
-    auto add =
-        [&](const char* name, aq::AirKind kind,
-            uint32_t degree,
-            std::function<Fp3(
-                const std::vector<Fp3>&,
-                const std::vector<Fp3>&)> eval) {
-            aq::AirConstraint<Fp3> constraint;
-            constraint.name = name;
-            constraint.kind = kind;
-            constraint.alg_degree = degree;
-            constraint.eval = std::move(eval);
-            composition.combined.constraints.push_back(
-                std::move(constraint));
-        };
-    add(
-        "stage3.fixedpoint.semantic_receipt.root_word",
-        aq::AirKind::kEverywhere, 2,
-        [layout = out.layout](
-            const std::vector<Fp3>& cur,
-            const std::vector<Fp3>&) {
-            return gf::Mul(
-                cur[layout.active],
-                gf::Sub(
-                    cur[layout.root_value],
-                    cur[layout.root_expected]));
-        });
-    for (uint32_t lane = 0;
-         lane < intake::kTerminalLanesV1;
-         ++lane) {
-        const uint32_t inverse =
-            lane == 0
-            ? out.layout.inverse1
-            : out.layout.inverse2;
-        const uint32_t running =
-            lane == 0
-            ? out.layout.running1
-            : out.layout.running2;
-        const Fp3 gamma =
-            intake_proof.manifest
-                .challenges.gamma[lane];
-        const Fp3 alpha =
-            intake_proof.manifest
-                .challenges.alpha[lane];
-        add(
-            "stage3.fixedpoint.semantic_receipt.logup_inverse",
-            aq::AirKind::kEverywhere, 2,
-            [layout = out.layout, inverse,
-             gamma, alpha](
-                const std::vector<Fp3>& cur,
-                const std::vector<Fp3>&) {
-                const Fp3 denominator =
-                    gf::Add(
-                        gamma,
-                        gf::Add(
-                            cur[layout.root_value],
-                            gf::Mul(
-                                alpha,
-                                cur[layout.address])));
-                return gf::Sub(
-                    gf::Mul(
-                        cur[inverse],
-                        denominator),
-                    cur[layout.active]);
-            });
-        add(
-            "stage3.fixedpoint.semantic_receipt.logup_running",
-            aq::AirKind::kTransition, 2,
-            [layout = out.layout, inverse, running](
-                const std::vector<Fp3>& cur,
-                const std::vector<Fp3>& next) {
-                const Fp3 accumulated =
-                    gf::Add(
-                        cur[running],
-                        gf::Mul(
-                            cur[layout.active],
-                            cur[inverse]));
-                return gf::Sub(
-                    next[running],
-                    gf::Mul(
-                        gf::Sub(
-                            Fp3::One(),
-                            cur[layout.role_end]),
-                        accumulated));
-            });
-        add(
-            "stage3.fixedpoint.semantic_receipt.logup_first",
-            aq::AirKind::kFirstRow, 1,
-            [running](
-                const std::vector<Fp3>& cur,
-                const std::vector<Fp3>&) {
-                return cur[running];
-            });
-        for (uint32_t slot = 0;
-             slot < intake_proof.role_receipts.size();
-             ++slot) {
-            add(
-                "stage3.fixedpoint.semantic_receipt.role_terminal",
-                aq::AirKind::kEverywhere, 2,
-                [layout = out.layout, inverse,
-                 running, slot, lane](
-                    const std::vector<Fp3>& cur,
-                    const std::vector<Fp3>&) {
-                    return gf::Mul(
-                        cur[
-                            layout.RoleEndSelector(
-                                slot)],
-                        gf::Sub(
-                            gf::Add(
-                                cur[running],
-                                cur[inverse]),
-                            cur[
-                                layout.RoleTerminal(
-                                    slot, lane)]));
-                });
-        }
+    std::vector<Fp3> terminal_challenges{
+        intake_proof.manifest.challenges.gamma[0],
+        intake_proof.manifest.challenges.alpha[0],
+        intake_proof.manifest.challenges.gamma[1],
+        intake_proof.manifest.challenges.alpha[1]};
+    aq::AirConstraintSystem<Fp3> canonical_terminal_cs;
+    out.canonical_program_interpreted =
+        constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                terminal_program_table, n_rows,
+                terminal_challenges,
+                canonical_terminal_cs,
+                &bytecode_why);
+    if (!out.canonical_program_interpreted ||
+        canonical_terminal_cs.n_columns !=
+            composition.combined.n_columns ||
+        canonical_terminal_cs.constraints.size() !=
+            endpoint_bc::kCanonicalConstraintCountV1) {
+        return fail(
+            "canonical_program_interpreter:" +
+            bytecode_why);
     }
-    add(
-        "stage3.fixedpoint.semantic_receipt.role_end_schedule",
-        aq::AirKind::kEverywhere, 1,
-        [layout = out.layout](
-            const std::vector<Fp3>& cur,
-            const std::vector<Fp3>&) {
-            Fp3 sum = Fp3::Zero();
-            for (uint32_t slot = 0;
-                 slot <
-                     SemanticEndpointReceiptTerminalLayoutV1::
-                         kRoles;
-                 ++slot) {
-                sum = gf::Add(
-                    sum,
-                    cur[
-                        layout.RoleEndSelector(slot)]);
-            }
-            return gf::Sub(
-                cur[layout.role_end], sum);
-        });
-    for (uint32_t lane = 0;
-         lane < intake::kTerminalLanesV1;
-         ++lane) {
-        add(
-            "stage3.fixedpoint.semantic_receipt.link_equality",
-            aq::AirKind::kEverywhere, 1,
-            [layout = out.layout, lane](
-                const std::vector<Fp3>& cur,
-                const std::vector<Fp3>&) {
-                return gf::Sub(
-                    cur[layout.LinkTerminal(0, lane)],
-                    cur[layout.LinkTerminal(1, lane)]);
-            });
-        add(
-            "stage3.fixedpoint.semantic_receipt.link_role_sum",
-            aq::AirKind::kEverywhere, 1,
-            [layout = out.layout,
-             roles = out.concrete_roles,
-             lane](
-                const std::vector<Fp3>& cur,
-                const std::vector<Fp3>&) {
-                Fp3 sum = Fp3::Zero();
-                for (uint32_t slot = 0;
-                     slot < roles; ++slot) {
-                    sum = gf::Add(
-                        sum,
-                        cur[
-                            layout.RoleTerminal(
-                                slot, lane)]);
-                }
-                return gf::Sub(
-                    cur[
-                        layout.LinkTerminal(
-                            0, lane)],
-                    sum);
-            });
-    }
+    out.canonical_constraints =
+        static_cast<uint32_t>(
+            canonical_terminal_cs.constraints.size());
+    composition.combined.constraints.insert(
+        composition.combined.constraints.end(),
+        canonical_terminal_cs.constraints.begin(),
+        canonical_terminal_cs.constraints.end());
+    // V0 emitted one opaque callback for every active role-terminal and
+    // every authenticated Fp3 coordinate.  The fixed table above replaces
+    // all of them, including inactive role slots, with 48 canonical programs.
+    out.opaque_callback_constraints_eliminated =
+        24U + 8U * out.concrete_roles;
     out.added_constraints =
         static_cast<uint32_t>(
             composition.combined.constraints.size()) -
         constraint_base;
+    out.remaining_noncanonical_constraints =
+        static_cast<uint32_t>(
+            std::count_if(
+                composition.combined.constraints.begin(),
+                composition.combined.constraints.end(),
+                [](const aq::AirConstraint<Fp3>& constraint) {
+                    return constraint
+                        .canonical_program_table_root
+                        .IsNull();
+                }));
     out.violations =
         CountHashOpeningViolations(
             composition.combined,
@@ -24744,10 +24607,13 @@ AttachSemanticEndpointReceiptTerminalsV1(
         out.concrete_roles ==
             kRCStage3RelationClosureRoleCount;
     out.canonical_terminal_constraint_bytecode =
-        intake_proof
-            .canonical_terminal_constraint_bytecode_complete;
+        out.canonical_program_table_valid &&
+        out.canonical_program_interpreted &&
+        out.canonical_constraints ==
+            endpoint_bc::kCanonicalConstraintCountV1;
     out.valid =
         out.every_concrete_role_joined &&
+        out.canonical_terminal_constraint_bytecode &&
         out.added_constraints > 0 &&
         out.violations == 0;
     if (!out.valid) {
@@ -24770,7 +24636,8 @@ AttachSemanticEndpointReceiptTerminalsV1(
         "stage3:recursive_fixedpoint:"
         "semantic_endpoint_receipt_parent:"
         "concrete_terminals_joined;"
-        "canonical_terminal_bytecode_open;"
+        "canonical_terminal_bytecode_interpreted;"
+        "child_role_program_tables_open;"
         "complete_fp=false";
     return out;
 }

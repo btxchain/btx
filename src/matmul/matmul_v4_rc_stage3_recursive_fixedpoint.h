@@ -668,11 +668,11 @@ struct CanonicalChildAcceptanceJoinV1 {
  * Constant-width row-multiplexed semantic endpoint terminal bus.
  *
  * Root-word events occupy rows rather than columns. Per-role terminal and
- * alias selectors are the only role-scaled columns.  Each Fp3 terminal
- * requires three selectors because child openings are absorbed as flattened
- * base-field coordinates. The terminal
- * equations are reproduced in this parent because the intake V1 child's
- * appended LogUp callbacks are not yet canonical bytecode.
+ * role terminals and role-end selectors are the only role-scaled columns.
+ * Authenticated Fp3 terminal openings are row-multiplexed through the eight
+ * AlgHash sponge ports.  One selector and one verifier-owned expected-value
+ * column per port cover every flattened base-field coordinate without making
+ * the canonical ProgramTable depend on a receipt's terminal-column indices.
  */
 struct SemanticEndpointReceiptTerminalLayoutV1 {
     static constexpr uint32_t kRoles =
@@ -681,6 +681,8 @@ struct SemanticEndpointReceiptTerminalLayoutV1 {
     static constexpr uint32_t kExtensionCoordinates = 3;
 
     uint32_t base{0};
+    /** Existing HashOpeningLayout::absorbed_pin_base in this parent. */
+    uint32_t authenticated_source_base{0};
     uint32_t active{0};
     uint32_t role_end{0};
     uint32_t role{0};
@@ -696,14 +698,16 @@ struct SemanticEndpointReceiptTerminalLayoutV1 {
     uint32_t running2{0};
     uint32_t role_terminal_base{0};
     uint32_t role_end_selector_base{0};
-    uint32_t role_alias_selector_base{0};
     uint32_t link_terminal_base{0};
-    uint32_t link_alias_selector_base{0};
+    uint32_t alias_port_selector_base{0};
+    uint32_t alias_port_expected_base{0};
 
     explicit constexpr
     SemanticEndpointReceiptTerminalLayoutV1(
-        uint32_t start = 0)
+        uint32_t start = 0,
+        uint32_t source_base = 0)
         : base(start),
+          authenticated_source_base(source_base),
           active(base),
           role_end(active + 1),
           role(role_end + 1),
@@ -721,15 +725,14 @@ struct SemanticEndpointReceiptTerminalLayoutV1 {
           role_end_selector_base(
               role_terminal_base +
               kRoles * kTerminalLanes),
-          role_alias_selector_base(
-              role_end_selector_base + kRoles),
           link_terminal_base(
-              role_alias_selector_base +
-              kRoles * kTerminalLanes *
-                  kExtensionCoordinates),
-          link_alias_selector_base(
+              role_end_selector_base + kRoles),
+          alias_port_selector_base(
               link_terminal_base +
-              2 * kTerminalLanes)
+              2 * kTerminalLanes),
+          alias_port_expected_base(
+              alias_port_selector_base +
+              ah::kAlgHashRate)
     {
     }
     [[nodiscard]] constexpr uint32_t RoleTerminal(
@@ -737,15 +740,6 @@ struct SemanticEndpointReceiptTerminalLayoutV1 {
     {
         return role_terminal_base +
             slot * kTerminalLanes + lane;
-    }
-    [[nodiscard]] constexpr uint32_t RoleAliasSelector(
-        uint32_t slot, uint32_t lane,
-        uint32_t coordinate) const
-    {
-        return role_alias_selector_base +
-            (slot * kTerminalLanes + lane) *
-                kExtensionCoordinates +
-            coordinate;
     }
     [[nodiscard]] constexpr uint32_t RoleEndSelector(
         uint32_t slot) const
@@ -758,26 +752,27 @@ struct SemanticEndpointReceiptTerminalLayoutV1 {
         return link_terminal_base +
             side * kTerminalLanes + lane;
     }
-    [[nodiscard]] constexpr uint32_t LinkAliasSelector(
-        uint32_t side, uint32_t lane,
-        uint32_t coordinate) const
+    [[nodiscard]] constexpr uint32_t AliasPortSelector(
+        uint32_t port) const
     {
-        return link_alias_selector_base +
-            (side * kTerminalLanes + lane) *
-                kExtensionCoordinates +
-            coordinate;
+        return alias_port_selector_base + port;
+    }
+    [[nodiscard]] constexpr uint32_t AliasPortExpected(
+        uint32_t port) const
+    {
+        return alias_port_expected_base + port;
     }
     [[nodiscard]] constexpr uint32_t End() const
     {
-        return link_alias_selector_base +
-            2 * kTerminalLanes *
-                kExtensionCoordinates;
+        return alias_port_expected_base +
+            ah::kAlgHashRate;
     }
 };
 
 struct SemanticEndpointReceiptParentAttachmentV1 {
     SemanticEndpointReceiptTerminalLayoutV1 layout;
     uint256 statement_commitment{};
+    uint256 canonical_program_table_commitment{};
     uint32_t concrete_roles{0};
     uint32_t concrete_endpoints{0};
     uint32_t residual_endpoints{0};
@@ -785,6 +780,9 @@ struct SemanticEndpointReceiptParentAttachmentV1 {
     uint32_t role_terminal_alias_rows{0};
     uint32_t link_terminal_alias_rows{0};
     uint32_t added_constraints{0};
+    uint32_t canonical_constraints{0};
+    uint32_t opaque_callback_constraints_eliminated{0};
+    uint32_t remaining_noncanonical_constraints{0};
     uint32_t violations{0};
     bool intake_reverified{false};
     bool exact_statement_and_context{false};
@@ -794,11 +792,15 @@ struct SemanticEndpointReceiptParentAttachmentV1 {
     bool dual_fp3_logup_recomputed{false};
     bool role_terminals_proof_aliased{false};
     bool link_terminal_proof_aliased{false};
+    bool canonical_program_table_valid{false};
+    bool canonical_program_interpreted{false};
     bool every_concrete_role_joined{false};
     /** Remains false while any endpoint/role is absent. */
     bool all_52_endpoints_and_14_roles_joined{false};
-    /** Explicitly false until the intake terminal callbacks migrate to the
-     * canonical ProgramTable consumed by deep_per_point_transition_join. */
+    /** True only for the parent terminal/LogUp/link/alias families described
+     * by canonical_program_table_commitment.  It does not claim that the
+     * underlying role child is fully canonical and never flips
+     * deep_per_point_transition_join by itself. */
     bool canonical_terminal_constraint_bytecode{false};
     bool valid{false};
     std::string note;

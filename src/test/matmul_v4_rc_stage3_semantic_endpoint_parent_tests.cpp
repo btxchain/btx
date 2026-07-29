@@ -99,20 +99,6 @@ IntakeNode BuildIntakeNode()
     return out;
 }
 
-uint32_t FirstSelectedRow(
-    const fp::FoldBusComposition& node,
-    uint32_t column)
-{
-    for (uint32_t row = 0;
-         row < node.combined.n_rows;
-         ++row) {
-        if (!gf::IsZero(node.columns[column][row])) {
-            return row;
-        }
-    }
-    return node.combined.n_rows;
-}
-
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -157,8 +143,22 @@ BOOST_AUTO_TEST_CASE(
         !attached
              .all_52_endpoints_and_14_roles_joined);
     BOOST_CHECK(
-        !attached
+        attached
              .canonical_terminal_constraint_bytecode);
+    BOOST_CHECK(attached.canonical_program_table_valid);
+    BOOST_CHECK(attached.canonical_program_interpreted);
+    BOOST_CHECK(
+        !attached
+             .canonical_program_table_commitment
+             .IsNull());
+    BOOST_CHECK_EQUAL(
+        attached.canonical_constraints, 48U);
+    BOOST_CHECK_EQUAL(
+        attached.opaque_callback_constraints_eliminated,
+        32U);
+    BOOST_CHECK_GT(
+        attached.remaining_noncanonical_constraints,
+        0U);
     BOOST_CHECK(
         fixture.node
             .concrete_semantic_endpoint_terminal_join);
@@ -201,27 +201,42 @@ BOOST_AUTO_TEST_CASE(
             fixture.node.combined, bad_root),
         0U);
 
-    const uint32_t selector =
-        attached.layout.RoleAliasSelector(0, 0, 0);
-    const uint32_t selected_row =
-        FirstSelectedRow(fixture.node, selector);
-    BOOST_REQUIRE_LT(
-        selected_row, fixture.node.combined.n_rows);
     const uint32_t terminal_column =
         fixture.intake_proof.role_receipts[0]
             .terminal_columns[0];
-    const auto& meta =
-        fixture.node.hash.program.rows[
-            selected_row];
     const uint32_t terminal_coordinate =
         3 * terminal_column;
-    BOOST_REQUIRE(
-        terminal_coordinate >=
-        meta.current_word_offset);
-    const uint32_t port =
-        terminal_coordinate -
-        meta.current_word_offset;
+    uint32_t selected_row =
+        fixture.node.combined.n_rows;
+    uint32_t port = UINT32_MAX;
+    for (uint32_t row = 0;
+         row < fixture.node.hash.program.rows.size();
+         ++row) {
+        const auto& meta =
+            fixture.node.hash.program.rows[row];
+        if (meta.child == 0 &&
+            meta.current_row_sponge &&
+            terminal_coordinate >=
+                meta.current_word_offset &&
+            terminal_coordinate <
+                meta.current_word_offset +
+                    rc::alg_hash::kAlgHashRate) {
+            selected_row = row;
+            port =
+                terminal_coordinate -
+                meta.current_word_offset;
+            break;
+        }
+    }
+    BOOST_REQUIRE_LT(
+        selected_row, fixture.node.combined.n_rows);
     BOOST_REQUIRE_LT(port, rc::alg_hash::kAlgHashRate);
+    BOOST_REQUIRE(
+        gf::Eq(
+            fixture.node.columns[
+                attached.layout.AliasPortSelector(port)]
+                [selected_row],
+            gf::Fp3::One()));
     auto bad_opening = fixture.node.columns;
     const fp::HashOpeningLayout hash_layout =
         fp::HashOpeningLayoutAt(
