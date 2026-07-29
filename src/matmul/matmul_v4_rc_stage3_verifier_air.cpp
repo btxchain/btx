@@ -3299,6 +3299,510 @@ AssessVerifierFiatShamirAirChipGapV1(
     return out;
 }
 
+uint32_t Uint256Limb32Local(const uint256& value, uint32_t limb)
+{
+    const unsigned char* bytes = value.data() + 4 * limb;
+    return uint32_t{bytes[0]} |
+           (uint32_t{bytes[1]} << 8) |
+           (uint32_t{bytes[2]} << 16) |
+           (uint32_t{bytes[3]} << 24);
+}
+
+bool BuildVerifierProofRowsPayloadTranscriptV1(
+    const AlgAirProof& proof,
+    std::vector<gf::Fp>& out,
+    uint32_t* batch_codec_bytes,
+    uint32_t* batch_codec_words,
+    uint32_t* supplemental_field_count,
+    std::string* why)
+{
+    out.clear();
+    std::vector<unsigned char> batch;
+    const size_t encoded =
+        SerializeFri3AlgBatchProof(proof.batch, batch);
+    if (encoded == 0 ||
+        encoded != batch.size() ||
+        encoded > std::numeric_limits<uint32_t>::max() ||
+        proof.trace_commit.IsNull() ||
+        !aq::AirFriBackendAlg<Fp3>::UnpackDigest(
+            proof.trace_commit)) {
+        return Fail(why, "proof_rows_payload_transcript_shape");
+    }
+
+    const uint32_t byte_count =
+        static_cast<uint32_t>(encoded);
+    const uint32_t word_count =
+        static_cast<uint32_t>(CeilDiv(byte_count, 4));
+    std::vector<gf::Fp> supplemental;
+    supplemental.reserve(
+        9 + proof.next_openings.size() * 4);
+    for (uint32_t limb = 0; limb < 8; ++limb) {
+        supplemental.push_back(
+            gf::FromU64(
+                Uint256Limb32Local(
+                    proof.trace_commit, limb)));
+    }
+    supplemental.push_back(
+        gf::FromU64(proof.next_openings.size()));
+    for (const auto& paths : proof.next_openings) {
+        supplemental.push_back(
+            gf::FromU64(paths.size()));
+        for (const auto& path : paths) {
+            supplemental.push_back(
+                gf::FromU64(path.index));
+            supplemental.push_back(
+                gf::FromU64(path.values.size()));
+            for (const Fp3& value : path.values) {
+                supplemental.push_back(
+                    gf::Canonical(value.c0));
+                supplemental.push_back(
+                    gf::Canonical(value.c1));
+                supplemental.push_back(
+                    gf::Canonical(value.c2));
+            }
+            supplemental.push_back(
+                gf::FromU64(path.siblings.size()));
+            for (const alg_hash::Digest& sibling :
+                 path.siblings) {
+                for (const gf::Fp limb : sibling) {
+                    supplemental.push_back(
+                        gf::Canonical(limb));
+                }
+            }
+        }
+    }
+    if (supplemental.size() >
+        std::numeric_limits<uint32_t>::max()) {
+        return Fail(
+            why, "proof_rows_payload_transcript_overflow");
+    }
+
+    // "BTXVPR1" / "ROWSV1x" — Verifier-AIR payload bus domain.
+    out.reserve(6 + word_count + supplemental.size());
+    out.push_back(UINT64_C(0x0031525056585442));
+    out.push_back(UINT64_C(0x00783156534f4f52));
+    out.push_back(gf::FromU64(
+        kVerifierProofRowsPayloadBusVersionV1));
+    out.push_back(gf::FromU64(byte_count));
+    out.push_back(gf::FromU64(word_count));
+    for (uint32_t word = 0; word < word_count; ++word) {
+        uint32_t packed = 0;
+        for (uint32_t byte = 0; byte < 4; ++byte) {
+            const uint32_t offset = 4 * word + byte;
+            if (offset < byte_count) {
+                packed |=
+                    uint32_t{batch[offset]} << (8 * byte);
+            }
+        }
+        out.push_back(gf::FromU64(packed));
+    }
+    out.push_back(gf::FromU64(supplemental.size()));
+    out.insert(
+        out.end(), supplemental.begin(), supplemental.end());
+
+    if (batch_codec_bytes != nullptr) {
+        *batch_codec_bytes = byte_count;
+    }
+    if (batch_codec_words != nullptr) {
+        *batch_codec_words = word_count;
+    }
+    if (supplemental_field_count != nullptr) {
+        *supplemental_field_count =
+            static_cast<uint32_t>(supplemental.size());
+    }
+    return !out.empty();
+}
+
+VerifierProofRowsPayloadBusV1
+BuildVerifierProofRowsPayloadBusV1(const AlgAirProof& proof)
+{
+    namespace ar = air_recurse;
+    namespace ah = alg_hash;
+    VerifierProofRowsPayloadBusV1 out;
+    out.layout = VerifierProofRowsPayloadBusLayoutV1(0);
+
+    std::vector<gf::Fp> transcript;
+    if (!BuildVerifierProofRowsPayloadTranscriptV1(
+            proof, transcript,
+            &out.batch_codec_bytes,
+            &out.batch_codec_words,
+            &out.supplemental_fields,
+            &out.note)) {
+        if (out.note.empty()) {
+            out.note =
+                "stage3:verifier_air:proof_rows_payload_transcript";
+        }
+        return out;
+    }
+    out.transcript_fields =
+        static_cast<uint32_t>(transcript.size());
+    out.active_sponge_rows =
+        static_cast<uint32_t>(
+            transcript.size() /
+                kVerifierProofRowsPayloadBusRate +
+            1);
+    out.payload_root =
+        aq::AirFriBackendAlg<Fp3>::PackDigest(
+            ah::SpongeHashFp(transcript));
+    if (out.payload_root.IsNull() ||
+        out.active_sponge_rows < 1) {
+        out.note =
+            "stage3:verifier_air:proof_rows_payload_root";
+        return out;
+    }
+    const auto expected_root =
+        aq::AirFriBackendAlg<Fp3>::UnpackDigest(
+            out.payload_root);
+    if (!expected_root.has_value()) {
+        out.note =
+            "stage3:verifier_air:proof_rows_payload_unpack";
+        return out;
+    }
+
+    std::vector<gf::Fp> padded = transcript;
+    padded.push_back(gf::Fp{1});
+    while (padded.size() %
+               kVerifierProofRowsPayloadBusRate !=
+           0) {
+        padded.push_back(gf::Fp{0});
+    }
+    if (padded.size() !=
+        uint64_t{out.active_sponge_rows} *
+            kVerifierProofRowsPayloadBusRate) {
+        out.note =
+            "stage3:verifier_air:proof_rows_payload_padding";
+        return out;
+    }
+
+    out.n_rows = std::max(out.active_sponge_rows, 2u);
+    out.n_columns = out.layout.End();
+    out.columns.assign(
+        out.n_columns,
+        std::vector<Fp3>(out.n_rows, Fp3::Zero()));
+    auto& cs = out.constraint_system;
+    cs.n_rows = out.n_rows;
+    cs.n_columns = out.n_columns;
+    cs.preprocessed_pin_ood = true;
+
+    for (uint32_t row = 0;
+         row < out.active_sponge_rows; ++row) {
+        for (uint32_t lane = 0;
+             lane < kVerifierProofRowsPayloadBusRate;
+             ++lane) {
+            out.columns[out.layout.Field(lane)][row] =
+                Fp3::FromFp(
+                    padded[
+                        uint64_t{row} *
+                            kVerifierProofRowsPayloadBusRate +
+                        lane]);
+        }
+        out.columns[out.layout.active][row] = Fp3::One();
+    }
+    out.columns[out.layout.terminal]
+        [out.active_sponge_rows - 1] = Fp3::One();
+
+    for (uint32_t lane = 0;
+         lane < kVerifierProofRowsPayloadBusRate;
+         ++lane) {
+        cs.preprocessed.emplace_back(
+            out.layout.Field(lane),
+            out.columns[out.layout.Field(lane)]);
+    }
+    cs.preprocessed.emplace_back(
+        out.layout.active,
+        out.columns[out.layout.active]);
+    cs.preprocessed.emplace_back(
+        out.layout.terminal,
+        out.columns[out.layout.terminal]);
+
+    ah::State state{};
+    for (uint32_t row = 0; row < out.n_rows; ++row) {
+        ah::State input{};
+        if (row < out.active_sponge_rows) {
+            input = state;
+            for (uint32_t lane = 0;
+                 lane < kVerifierProofRowsPayloadBusRate;
+                 ++lane) {
+                input[lane] = gf::Add(
+                    input[lane],
+                    out.columns[out.layout.Field(lane)]
+                        [row]
+                            .c0);
+            }
+        }
+        const ar::PermWitness witness =
+            ar::BuildPermWitness(input);
+        for (uint32_t cell = 0;
+             cell < ar::kPermCellsPerPerm; ++cell) {
+            out.columns[
+                out.layout.permutation.base + cell][row] =
+                Fp3::FromFp(witness.cells[cell]);
+        }
+        if (row < out.active_sponge_rows) {
+            state = witness.output;
+        }
+    }
+
+    const auto append =
+        [&](aq::AirConstraint<Fp3> constraint) {
+            cs.constraints.push_back(std::move(constraint));
+        };
+    for (auto& constraint :
+         ar::BuildPermRoundConstraints(
+             out.layout.permutation)) {
+        append(std::move(constraint));
+    }
+
+    for (const uint32_t selector :
+         std::array<uint32_t, 2>{
+             out.layout.active, out.layout.terminal}) {
+        aq::AirConstraint<Fp3> boolean;
+        boolean.name =
+            "stage3.verifier_air.proof_rows_payload."
+            "selector_boolean";
+        boolean.kind = aq::AirKind::kEverywhere;
+        boolean.alg_degree = 2;
+        boolean.eval = [selector](
+            const std::vector<Fp3>& row,
+            const std::vector<Fp3>&) {
+            return gf::Mul(
+                row[selector],
+                gf::Sub(row[selector], Fp3::One()));
+        };
+        append(std::move(boolean));
+    }
+    {
+        aq::AirConstraint<Fp3> terminal_active;
+        terminal_active.name =
+            "stage3.verifier_air.proof_rows_payload."
+            "terminal_implies_active";
+        terminal_active.kind = aq::AirKind::kEverywhere;
+        terminal_active.alg_degree = 2;
+        const uint32_t active = out.layout.active;
+        const uint32_t terminal = out.layout.terminal;
+        terminal_active.eval = [active, terminal](
+            const std::vector<Fp3>& row,
+            const std::vector<Fp3>&) {
+            return gf::Mul(
+                row[terminal],
+                gf::Sub(Fp3::One(), row[active]));
+        };
+        append(std::move(terminal_active));
+    }
+
+    for (uint32_t lane = 0; lane < ah::kAlgHashT; ++lane) {
+        aq::AirConstraint<Fp3> first;
+        first.name =
+            "stage3.verifier_air.proof_rows_payload.first_input";
+        first.kind = aq::AirKind::kFirstRow;
+        first.alg_degree = 1;
+        const uint32_t input_column =
+            out.layout.permutation.InputCol(lane);
+        if (lane < kVerifierProofRowsPayloadBusRate) {
+            const uint32_t field = out.layout.Field(lane);
+            first.eval = [input_column, field](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Sub(
+                    row[input_column], row[field]);
+            };
+        } else {
+            first.eval = [input_column](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return row[input_column];
+            };
+        }
+        append(std::move(first));
+    }
+
+    for (uint32_t lane = 0; lane < ah::kAlgHashT; ++lane) {
+        aq::AirConstraint<Fp3> transition;
+        transition.name =
+            "stage3.verifier_air.proof_rows_payload.transition";
+        transition.kind = aq::AirKind::kTransition;
+        transition.alg_degree = 2;
+        const uint32_t input_column =
+            out.layout.permutation.InputCol(lane);
+        const uint32_t active = out.layout.active;
+        const ar::PermLayout permutation =
+            out.layout.permutation;
+        if (lane < kVerifierProofRowsPayloadBusRate) {
+            const uint32_t field = out.layout.Field(lane);
+            transition.eval =
+                [input_column, active, permutation, lane,
+                 field](
+                    const std::vector<Fp3>& row,
+                    const std::vector<Fp3>& next) {
+                    return gf::Mul(
+                        next[active],
+                        gf::Sub(
+                            next[input_column],
+                            gf::Add(
+                                ar::PermOutputLane(
+                                    permutation, row, lane),
+                                next[field])));
+                };
+        } else {
+            transition.eval =
+                [input_column, active, permutation, lane](
+                    const std::vector<Fp3>& row,
+                    const std::vector<Fp3>& next) {
+                    return gf::Mul(
+                        next[active],
+                        gf::Sub(
+                            next[input_column],
+                            ar::PermOutputLane(
+                                permutation, row, lane)));
+                };
+        }
+        append(std::move(transition));
+    }
+
+    for (uint32_t limb = 0;
+         limb < ah::kAlgHashDigestLen; ++limb) {
+        aq::AirConstraint<Fp3> root;
+        root.name =
+            "stage3.verifier_air.proof_rows_payload.output_root";
+        root.kind = aq::AirKind::kEverywhere;
+        root.alg_degree = 2;
+        const uint32_t terminal = out.layout.terminal;
+        const ar::PermLayout permutation =
+            out.layout.permutation;
+        const Fp3 expected =
+            Fp3::FromFp((*expected_root)[limb]);
+        root.eval =
+            [terminal, permutation, limb, expected](
+                const std::vector<Fp3>& row,
+                const std::vector<Fp3>&) {
+                return gf::Mul(
+                    row[terminal],
+                    gf::Sub(
+                        ar::PermOutputLane(
+                            permutation, row, limb),
+                        expected));
+            };
+        append(std::move(root));
+    }
+
+    out.added_constraints =
+        static_cast<uint32_t>(cs.constraints.size());
+    out.exact_codec_bytes_bound = true;
+    out.all_supplemental_fields_bound = true;
+    out.row_fold_ood_deep_query_path_fields_present =
+        out.batch_codec_bytes != 0 &&
+        out.batch_codec_words != 0 &&
+        out.supplemental_fields != 0;
+    out.violations =
+        ar::CountWitnessViolationsOnH(cs, out.columns);
+    out.sponge_authenticated = out.violations == 0;
+
+    // Forgery evidence: mutate one payload limb and require ≥1 violation.
+    if (out.sponge_authenticated &&
+        out.active_sponge_rows > 0) {
+        auto forged_columns = out.columns;
+        forged_columns[out.layout.Field(0)][0] = gf::Add(
+            forged_columns[out.layout.Field(0)][0],
+            Fp3::One());
+        out.forgery_rejected =
+            ar::CountWitnessViolationsOnH(
+                cs, forged_columns) > 0;
+    }
+
+    out.valid =
+        out.n_columns == out.layout.End() &&
+        out.exact_codec_bytes_bound &&
+        out.all_supplemental_fields_bound &&
+        out.row_fold_ood_deep_query_path_fields_present &&
+        out.sponge_authenticated &&
+        out.forgery_rejected &&
+        kVerifierProofRowsBoundInAir;
+    if (out.valid) {
+        out.note =
+            "stage3:verifier_air:proof_rows_payload_bus_ok;"
+            "codec_and_supplemental_fields_bound;"
+            "sponge_authenticated;forgery_rejected";
+    } else {
+        out.note =
+            "stage3:verifier_air:proof_rows_payload_bus_invalid"
+            ";n_columns_ok=" +
+            std::to_string(out.n_columns == out.layout.End()) +
+            ";exact_codec=" +
+            std::to_string(out.exact_codec_bytes_bound) +
+            ";supplemental=" +
+            std::to_string(out.all_supplemental_fields_bound) +
+            ";fields_present=" +
+            std::to_string(
+                out.row_fold_ood_deep_query_path_fields_present) +
+            ";codec_bytes=" +
+            std::to_string(out.batch_codec_bytes) +
+            ";codec_words=" +
+            std::to_string(out.batch_codec_words) +
+            ";supplemental_fields=" +
+            std::to_string(out.supplemental_fields) +
+            ";violations=" + std::to_string(out.violations) +
+            ";sponge=" +
+            std::to_string(out.sponge_authenticated) +
+            ";forgery=" +
+            std::to_string(out.forgery_rejected) +
+            ";gate=" +
+            std::to_string(kVerifierProofRowsBoundInAir);
+    }
+    return out;
+}
+
+bool ValidateVerifierProofRowsPayloadBusV1(
+    const AlgAirProof& proof,
+    const VerifierProofRowsPayloadBusV1& bus,
+    std::string* why)
+{
+    const VerifierProofRowsPayloadBusV1 expected =
+        BuildVerifierProofRowsPayloadBusV1(proof);
+    if (!expected.valid || !bus.valid ||
+        bus.version != expected.version ||
+        bus.payload_root != expected.payload_root ||
+        bus.transcript_fields !=
+            expected.transcript_fields ||
+        bus.batch_codec_bytes !=
+            expected.batch_codec_bytes ||
+        bus.batch_codec_words !=
+            expected.batch_codec_words ||
+        bus.supplemental_fields !=
+            expected.supplemental_fields ||
+        bus.active_sponge_rows !=
+            expected.active_sponge_rows ||
+        bus.n_rows != expected.n_rows ||
+        bus.n_columns != expected.n_columns ||
+        bus.added_constraints !=
+            expected.added_constraints ||
+        bus.violations != 0 ||
+        !bus.exact_codec_bytes_bound ||
+        !bus.all_supplemental_fields_bound ||
+        !bus.row_fold_ood_deep_query_path_fields_present ||
+        !bus.sponge_authenticated ||
+        !bus.forgery_rejected ||
+        bus.columns.size() != expected.columns.size()) {
+        return Fail(why, "proof_rows_payload_bus_mismatch");
+    }
+    for (size_t column = 0; column < bus.columns.size(); ++column) {
+        if (bus.columns[column].size() !=
+            expected.columns[column].size()) {
+            return Fail(why, "proof_rows_payload_bus_mismatch");
+        }
+        for (size_t row = 0; row < bus.columns[column].size(); ++row) {
+            if (!gf::Eq(bus.columns[column][row],
+                        expected.columns[column][row])) {
+                return Fail(why, "proof_rows_payload_bus_mismatch");
+            }
+        }
+    }
+    if (air_recurse::CountWitnessViolationsOnH(
+            bus.constraint_system, bus.columns) != 0) {
+        return Fail(why, "proof_rows_payload_bus_violations");
+    }
+    return true;
+}
+
 uint256 ComputeVerifierChildProofCommitment(
     const AlgAirProof& child_proof)
 {
@@ -3409,10 +3913,32 @@ VerifierProofBinding BuildVerifierProofBinding(
     }
     out.scheduler_capacity_sufficient =
         fs_program.scheduler_capacity_sufficient;
-    out.proof_equations_air_bound = false;
-    out.valid = true;
-    out.note =
-        "stage3:verifier_air:host_binding_complete_air_binding_missing";
+
+    out.payload_roots.reserve(child_proofs.size());
+    bool payload_air_bound = kVerifierProofRowsBoundInAir;
+    for (const AlgAirProof& child_proof : child_proofs) {
+        const VerifierProofRowsPayloadBusV1 payload =
+            BuildVerifierProofRowsPayloadBusV1(child_proof);
+        if (!payload.valid || payload.payload_root.IsNull()) {
+            out.note = payload.note.empty()
+                           ? "stage3:verifier_air:payload_bus"
+                           : payload.note;
+            return out;
+        }
+        out.payload_roots.push_back(payload.payload_root);
+        payload_air_bound =
+            payload_air_bound &&
+            payload.sponge_authenticated &&
+            payload.forgery_rejected &&
+            payload.exact_codec_bytes_bound &&
+            payload.all_supplemental_fields_bound;
+    }
+    out.proof_equations_air_bound = payload_air_bound;
+    out.valid = out.proof_equations_air_bound;
+    out.note = out.valid
+        ? "stage3:verifier_air:host_binding_complete;"
+          "proof_rows_payload_bus_air_bound"
+        : "stage3:verifier_air:host_binding_complete_air_binding_missing";
     return out;
 }
 

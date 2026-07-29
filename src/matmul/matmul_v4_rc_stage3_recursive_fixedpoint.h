@@ -3917,11 +3917,11 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *
  * FAIL-CLOSED (false). DeepCtlParentAir capability closes ProofFieldBus,
  * Deep64 CTL terminal, CTL-child-in-parent-air, semantic-root lanes, and
- * ledger-g4 FS replay — but residual families remain outside:
+ * ledger-g4 FS replay — residual inventory:
  *
- *   1. ChildProofPayloadBus
- *      — `va::kVerifierProofRowsBoundInAir` still false
- *        (`matmul_v4_rc_stage3_verifier_air.h`).
+ *   Closed: ChildProofPayloadBus
+ *      — `va::kVerifierProofRowsBoundInAir` true with
+ *        `BuildVerifierProofRowsPayloadBusV1` evidence.
  *   Closed: SplitRapMultiRowVerifier (local)
  *      — `va::kMultiRowV2SplitRapVerifierAirLocalExecutable` true;
  *        `split_rap_multirow_parent_adapter` follows that constexpr.
@@ -3932,10 +3932,13 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *        join of the V1 role-root pin to the AlgHash sponge digest with
  *        endpoint-28 proof-owned child_trace_row_root).
  *
+ * Inventoried residual families are closed; this constexpr stays false until
+ * an explicit CompleteFP assembly flip (not this chip).
+ *
  * `AssessCompleteRecursiveFixedPointResidualInventoryV1` remeasures these
- * living predicates. Do not flip CompleteFP without closing every open
- * residual with AIR evidence + forgery tests. Consensus authority stays
- * separate/false.
+ * living predicates. Do not flip CompleteFP without an explicit assembly
+ * decision once residual families measure closed. Consensus authority
+ * stays separate/false.
  */
 inline constexpr bool kCompleteRecursiveFixedPointExecutable = false;
 inline constexpr bool kRecursiveFixedPointConsensusAuthority = false;

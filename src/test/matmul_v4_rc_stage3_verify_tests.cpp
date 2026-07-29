@@ -140,7 +140,7 @@ BOOST_AUTO_TEST_CASE(global_succinct_authority_hypotheses_are_auditable)
     BOOST_CHECK(
         !rc::stage3_verifier_air::kVerifierFiatShamirAirExecutable);
     BOOST_CHECK(
-        !rc::stage3_verifier_air::kVerifierProofRowsBoundInAir);
+        rc::stage3_verifier_air::kVerifierProofRowsBoundInAir);
     BOOST_CHECK(
         !rc::stage3_verifier_air::kWholeVerifierWitnessExecutable);
     BOOST_CHECK(!rc::kRCStage3SuccinctAuthorityReady);

@@ -15089,8 +15089,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
         fail_pred(out.split_rap_native_verifier_executable,
                   "split_rap_native") &&
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
-        fail_pred(!out.child_proof_payload_bound_in_air,
-                  "payload_bound_unexpected") &&
+        fail_pred(out.child_proof_payload_bound_in_air,
+                  "payload_bound_required") &&
         fail_pred(out.child_fiat_shamir_replayed_in_air,
                   "fs_replay_required") &&
         fail_pred(out.child_proof_commitment_mapped,
@@ -15122,7 +15122,7 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusAndDeepCtlV1(
           "ctl_child_verifier_in_parent_air_open;"
           "ledger_g4_fiat_shamir_replay_closed;"
           "split_rap_multirow_adapter_closed;"
-          "proof_payload_open;"
+          "proof_payload_bus_closed;"
           "complete_fp=false;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
@@ -15259,8 +15259,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
         fail_pred(out.split_rap_native_verifier_executable,
                   "split_rap_native") &&
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
-        fail_pred(!out.child_proof_payload_bound_in_air,
-                  "payload_bound_unexpected") &&
+        fail_pred(out.child_proof_payload_bound_in_air,
+                  "payload_bound_required") &&
         fail_pred(out.child_fiat_shamir_replayed_in_air,
                   "fs_replay_required") &&
         fail_pred(out.child_proof_commitment_mapped,
@@ -15292,7 +15292,7 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusDeepCtlParentAirV1(
           "ctl_child_verifier_in_parent_air_closed;"
           "ledger_g4_fiat_shamir_replay_closed;"
           "split_rap_multirow_adapter_closed;"
-          "proof_payload_open;"
+          "proof_payload_bus_closed;"
           "complete_fp=false;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
@@ -15401,8 +15401,9 @@ AssessNormalizedRecursiveChildCapabilityV1(
         root.child_trace_root_mapped;
 
     // Host replay and proof commitments are useful witness-construction
-    // checks, but neither places attacker-controlled proof fields or the
-    // child transcript in the parent AIR.
+    // checks; the ChildProofPayloadBus additionally places every batch codec
+    // word and supplemental opening field in authenticated AIR columns
+    // (va::BuildVerifierProofRowsPayloadBusV1 / kVerifierProofRowsBoundInAir).
     out.child_proof_payload_bound_in_air =
         va::kVerifierProofRowsBoundInAir;
     // g4 child Fiat-Shamir replay is owned by recursive_parent_air. The
@@ -15438,8 +15439,13 @@ AssessNormalizedRecursiveChildCapabilityV1(
                 ChildProofPayloadBus,
             "ordered_all_child_proof_field_bus",
             0, 0, 0, out.child_proof_payload_bound_in_air,
-            "no parent columns enumerate and authenticate every batch "
-            "field, opening, sibling, index and supplemental next row",
+            out.child_proof_payload_bound_in_air
+                ? "va::BuildVerifierProofRowsPayloadBusV1 enumerates "
+                  "batch codec words and every supplemental next-opening "
+                  "index/value/sibling into AlgHash sponge columns; "
+                  "forgery rejected; kVerifierProofRowsBoundInAir"
+                : "no parent columns enumerate and authenticate every batch "
+                  "field, opening, sibling, index and supplemental next row",
         },
         {
             NormalizedRecursiveVerifierGapCode::
@@ -15551,8 +15557,8 @@ AssessNormalizedRecursiveChildCapabilityV1(
         fail_pred(out.split_rap_native_verifier_executable,
                   "split_rap_native") &&
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
-        fail_pred(!out.child_proof_payload_bound_in_air,
-                  "payload_bound_unexpected") &&
+        fail_pred(out.child_proof_payload_bound_in_air,
+                  "payload_bound_required") &&
         fail_pred(out.child_fiat_shamir_replayed_in_air,
                   "fs_replay_required") &&
         fail_pred(!out.child_proof_commitment_mapped,
@@ -15581,8 +15587,9 @@ AssessNormalizedRecursiveChildCapabilityV1(
           "coupled_bank_pages_is_smallest_current_parent_candidate;"
           "algebraic_child_equations_execute;"
           "ledger_g4_fiat_shamir_replay_closed;"
+          "proof_payload_bus_closed;"
+          "ctl_terminal_and_semantic_root_chips_open;"
           "split_rap_multirow_adapter_closed;"
-          "proof_payload_ctl_terminal_and_semantic_root_chips_open;"
           "recursive_counters_0_of_52_and_0_of_14"
         : ("stage3:recursive_fixedpoint:"
            "capability_audit_input_not_canonical" +
@@ -15756,8 +15763,8 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
         fail_pred(out.split_rap_native_verifier_executable,
                   "split_rap_native") &&
         fail_pred(out.gaps.size() == 7, "gaps_size") &&
-        fail_pred(!out.child_proof_payload_bound_in_air,
-                  "payload_bound_unexpected") &&
+        fail_pred(out.child_proof_payload_bound_in_air,
+                  "payload_bound_required") &&
         fail_pred(out.child_fiat_shamir_replayed_in_air,
                   "fs_replay_required") &&
         fail_pred(out.child_proof_commitment_mapped,
@@ -15791,11 +15798,13 @@ AssessNormalizedRecursiveChildCapabilityWithProofBusV1(
                 "terminal_bus_closed_via_commitment_bus;"
                 "semantic_root_derived_in_parent;"
                 "ctl_child_verifier_still_host_only;"
-                "proof_payload_and_endpoint_open;";
+                "proof_payload_bus_closed;"
+                "endpoint_open;";
         } else {
             out.note +=
                 "ledger_g4_fiat_shamir_replay_closed;"
-                "proof_payload_ctl_terminal_and_semantic_root_chips_open;";
+                "proof_payload_bus_closed;"
+                "ctl_terminal_and_semantic_root_chips_open;";
         }
         out.note +=
             "split_rap_multirow_adapter_closed;"
@@ -23245,8 +23254,9 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
     out.ledger_g4_child_fs_replay_closed =
         recursive_parent_air::AssessChildFsReplayClosureV1()
             .closed;
-    // Residual families that keep CompleteFP false. SplitRapMultiRowVerifier
-    // and EndpointTerminalEquality close via their living constexprs.
+    // Inventoried CompleteFP residual families are closed via living
+    // constexprs (payload bus / Split-RAP local / endpoint equality).
+    // kCompleteRecursiveFixedPointExecutable stays fail-closed separately.
     out.child_proof_payload_bus_open =
         !va::kVerifierProofRowsBoundInAir;
     out.split_rap_multirow_parent_adapter_open =
@@ -23274,22 +23284,23 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
         out.deep64_ctl_terminal_attachable &&
         out.ctl_child_verifier_in_parent_air_attachable &&
         out.ledger_g4_child_fs_replay_closed &&
-        out.child_proof_payload_bus_open &&
+        !out.child_proof_payload_bus_open &&
         !out.split_rap_multirow_parent_adapter_open &&
         !out.endpoint_terminal_equality_open &&
         out.verifier_fiat_shamir_air_chip_open &&
         out.complete_fp_open &&
         out.recursive_children_gate_blocked &&
-        out.open_residual_families == 1 &&
+        out.open_residual_families == 0 &&
         kNormalizedEndpointTerminalEqualityExecutable &&
         !kCompleteRecursiveFixedPointExecutable &&
         !kRecursiveFixedPointConsensusAuthority;
     out.note = out.valid
         ? "stage3:recursive_fixedpoint:"
-          "complete_fp_residuals_open;"
-          "payload_bus;"
+          "complete_fp_residual_families_closed;"
+          "payload_bus_closed;"
           "split_rap_multirow_closed;"
           "endpoint_terminal_equality_closed;"
+          "complete_fp_executable_still_false;"
           "recursive_children_blocked;authority=false"
         : "stage3:recursive_fixedpoint:"
           "complete_fp_residual_inventory_incoherent";

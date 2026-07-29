@@ -822,6 +822,88 @@ MeasureFiatShamirWholeVerifierShaEquationsInAirV1(
 [[nodiscard]] uint256 ComputeVerifierChildProofCommitment(
     const AlgAirProof& child_proof);
 
+/**
+ * In-AIR ChildProofPayloadBus for one AlgAir child.
+ *
+ * Enumerates the lossless proof transcript (canonical Fri3Alg batch codec
+ * words + trace-commit limbs + every supplemental next-opening index,
+ * Fp3 value and AlgHash sibling) into rate-packed parent columns and
+ * authenticates them with an AlgHash sponge whose terminal root is a
+ * public pin. Field columns are preprocessed pins; forging any limb
+ * violates the sponge identities (measured by forgery_rejected).
+ *
+ * This is the living evidence behind kVerifierProofRowsBoundInAir. It does
+ * not claim proof_fields_sourced_from_verifier_chips (decoder / chip-output
+ * equality) or SHA Fiat-Shamir AIR.
+ */
+inline constexpr uint16_t kVerifierProofRowsPayloadBusVersionV1 = 1;
+inline constexpr uint32_t kVerifierProofRowsPayloadBusRate =
+    alg_hash::kAlgHashRate;
+
+struct VerifierProofRowsPayloadBusLayoutV1 {
+    uint32_t field_base{0};
+    uint32_t active{8};
+    uint32_t terminal{9};
+    air_recurse::PermLayout permutation{10};
+
+    explicit constexpr VerifierProofRowsPayloadBusLayoutV1(
+        uint32_t start = 0)
+        : field_base(start),
+          active(start + kVerifierProofRowsPayloadBusRate),
+          terminal(active + 1),
+          permutation{terminal + 1}
+    {
+    }
+    [[nodiscard]] constexpr uint32_t Field(uint32_t lane) const
+    {
+        return field_base + lane;
+    }
+    [[nodiscard]] uint32_t End() const
+    {
+        return permutation.End();
+    }
+};
+
+struct VerifierProofRowsPayloadBusV1 {
+    uint16_t version{kVerifierProofRowsPayloadBusVersionV1};
+    VerifierProofRowsPayloadBusLayoutV1 layout;
+    uint256 payload_root{};
+    uint32_t transcript_fields{0};
+    uint32_t batch_codec_bytes{0};
+    uint32_t batch_codec_words{0};
+    uint32_t supplemental_fields{0};
+    uint32_t active_sponge_rows{0};
+    uint32_t n_rows{0};
+    uint32_t n_columns{0};
+    uint32_t added_constraints{0};
+    uint32_t violations{0};
+    bool exact_codec_bytes_bound{false};
+    bool all_supplemental_fields_bound{false};
+    bool row_fold_ood_deep_query_path_fields_present{false};
+    bool sponge_authenticated{false};
+    bool forgery_rejected{false};
+    bool valid{false};
+    std::string note;
+    air_quotient::AirConstraintSystem<Fp3> constraint_system;
+    std::vector<std::vector<Fp3>> columns;
+};
+
+[[nodiscard]] bool BuildVerifierProofRowsPayloadTranscriptV1(
+    const AlgAirProof& proof,
+    std::vector<gkr_field::Fp>& out,
+    uint32_t* batch_codec_bytes = nullptr,
+    uint32_t* batch_codec_words = nullptr,
+    uint32_t* supplemental_field_count = nullptr,
+    std::string* why = nullptr);
+
+[[nodiscard]] VerifierProofRowsPayloadBusV1
+BuildVerifierProofRowsPayloadBusV1(const AlgAirProof& proof);
+
+[[nodiscard]] bool ValidateVerifierProofRowsPayloadBusV1(
+    const AlgAirProof& proof,
+    const VerifierProofRowsPayloadBusV1& bus,
+    std::string* why = nullptr);
+
 struct VerifierProofRowBinding {
     uint32_t program_row{0};
     uint256 source_commitment{};
@@ -835,6 +917,7 @@ struct VerifierProofBinding {
     std::vector<uint256> fiat_shamir_witness_commitments;
     std::vector<uint256> ctl_child_commitments;
     std::vector<VerifierProofRowBinding> rows;
+    std::vector<uint256> payload_roots;
     bool scheduler_capacity_sufficient{false};
     bool proof_equations_air_bound{false};
     bool valid{false};
@@ -1621,7 +1704,13 @@ inline constexpr bool kDualQ128V5HostTranscriptExecutable = true;
 inline constexpr bool kWholeVerifierHostDifferentialExecutable =
     kWholeVerifierLegacyV3HostDifferentialExecutable;
 inline constexpr bool kVerifierFiatShamirAirExecutable = false;
-inline constexpr bool kVerifierProofRowsBoundInAir = false;
+/**
+ * ChildProofPayloadBus closed: BuildVerifierProofRowsPayloadBusV1 enumerates
+ * every batch codec word + supplemental next-opening field into AlgHash
+ * sponge columns and rejects field forgery. WholeWitness / FS / MultiRow
+ * recursive authority remain independent and false.
+ */
+inline constexpr bool kVerifierProofRowsBoundInAir = true;
 inline constexpr bool kWholeVerifierWitnessExecutable = false;
 /**
  * Exact local MultiRow-V2 Split-RAP verifier AIR mirror is executable.
@@ -1636,7 +1725,7 @@ inline constexpr bool kVerifierAirConsensusAuthority = false;
 inline constexpr bool kChunkRlcPcsV1ProductionAuthority = false;
 
 static_assert(!kVerifierFiatShamirAirExecutable);
-static_assert(!kVerifierProofRowsBoundInAir);
+static_assert(kVerifierProofRowsBoundInAir);
 static_assert(!kWholeVerifierWitnessExecutable);
 static_assert(kMultiRowV2SplitRapVerifierAirLocalExecutable);
 static_assert(!kMultiRowV2SplitRapVerifierAirRecursiveAuthority);

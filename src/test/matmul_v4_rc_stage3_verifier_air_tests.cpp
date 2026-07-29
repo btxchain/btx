@@ -1316,8 +1316,21 @@ BOOST_AUTO_TEST_CASE(host_row_binding_covers_child_openings_ctl_and_program_meta
         binding.fiat_shamir_witness_commitments.size(), 1U);
     BOOST_CHECK_EQUAL(binding.ctl_child_commitments.size(), 1U);
     BOOST_CHECK(!binding.scheduler_capacity_sufficient);
-    BOOST_CHECK(!binding.proof_equations_air_bound);
+    BOOST_CHECK(binding.proof_equations_air_bound);
+    BOOST_REQUIRE_EQUAL(binding.payload_roots.size(), 1U);
+    BOOST_CHECK(!binding.payload_roots.front().IsNull());
+    const va::VerifierProofRowsPayloadBusV1 payload =
+        va::BuildVerifierProofRowsPayloadBusV1(proof);
+    BOOST_REQUIRE_MESSAGE(payload.valid, payload.note);
+    BOOST_CHECK(payload.sponge_authenticated);
+    BOOST_CHECK(payload.forgery_rejected);
+    BOOST_CHECK_MESSAGE(
+        binding.payload_roots.front() == payload.payload_root,
+        "payload_root mismatch");
     std::string why;
+    BOOST_CHECK_MESSAGE(
+        va::ValidateVerifierProofRowsPayloadBusV1(proof, payload, &why),
+        why);
     BOOST_CHECK_MESSAGE(
         va::ValidateVerifierProofBinding(
             program, seed, {proof}, {ctl}, binding, &why),
@@ -1354,7 +1367,7 @@ BOOST_AUTO_TEST_CASE(completeness_flags_name_the_remaining_hash_gap)
         !va::kWholeVerifierDualQ128V5HostDifferentialExecutable);
     static_assert(va::kDualQ128V5HostTranscriptExecutable);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
-    static_assert(!va::kVerifierProofRowsBoundInAir);
+    static_assert(va::kVerifierProofRowsBoundInAir);
     static_assert(!va::kWholeVerifierWitnessExecutable);
     static_assert(
         va::kMultiRowV2SplitRapVerifierAirLocalExecutable);

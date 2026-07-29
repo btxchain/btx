@@ -1581,7 +1581,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(capability.relation_bytecode_air);
     BOOST_CHECK(capability.child_trace_root_mapped);
     BOOST_CHECK(
-        !capability.child_proof_payload_bound_in_air);
+        capability.child_proof_payload_bound_in_air);
     BOOST_CHECK(
         capability.child_fiat_shamir_replayed_in_air);
     BOOST_CHECK(
@@ -1613,8 +1613,8 @@ BOOST_AUTO_TEST_CASE(
         910U);
     BOOST_REQUIRE_EQUAL(capability.gaps.size(), 7U);
     {
-        // Five residuals remain open; FiatShamirReplayAir is present via
-        // ledger g4, and SplitRapMultiRowVerifier local adapter is closed.
+        // Four residuals remain open; FiatShamirReplayAir, ChildProofPayloadBus,
+        // and SplitRapMultiRowVerifier local adapter are closed.
         uint32_t open_gaps = 0;
         bool fs_gap_present = false;
         bool split_rap_gap_present = false;
@@ -1636,7 +1636,7 @@ BOOST_AUTO_TEST_CASE(
         }
         BOOST_CHECK(fs_gap_present);
         BOOST_CHECK(split_rap_gap_present);
-        BOOST_CHECK_EQUAL(open_gaps, 5U);
+        BOOST_CHECK_EQUAL(open_gaps, 4U);
     }
     BOOST_CHECK_EQUAL(
         capability.recursively_consumed_endpoints, 0U);
@@ -1701,13 +1701,13 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(
             residuals.ctl_child_verifier_in_parent_air_attachable);
         BOOST_CHECK(residuals.ledger_g4_child_fs_replay_closed);
-        BOOST_CHECK(residuals.child_proof_payload_bus_open);
+        BOOST_CHECK(!residuals.child_proof_payload_bus_open);
         BOOST_CHECK(!residuals.split_rap_multirow_parent_adapter_open);
         BOOST_CHECK(!residuals.endpoint_terminal_equality_open);
         BOOST_CHECK(residuals.verifier_fiat_shamir_air_chip_open);
         BOOST_CHECK(residuals.complete_fp_open);
         BOOST_CHECK(residuals.recursive_children_gate_blocked);
-        BOOST_CHECK_EQUAL(residuals.open_residual_families, 1U);
+        BOOST_CHECK_EQUAL(residuals.open_residual_families, 0U);
         static_assert(fp::kNormalizedEndpointTerminalEqualityExecutable);
     }
 
@@ -2521,7 +2521,7 @@ BOOST_AUTO_TEST_CASE(
         capability_with_bus.normalized_root_missing_input_lanes,
         0U);
     BOOST_CHECK(
-        !capability_with_bus.child_proof_payload_bound_in_air);
+        capability_with_bus.child_proof_payload_bound_in_air);
     BOOST_CHECK(
         !capability_with_bus.ctl_child_verified_in_parent_air);
     BOOST_CHECK(
@@ -2555,9 +2555,9 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK(commit_gap_present);
         BOOST_CHECK(semantic_gap_present);
         BOOST_CHECK(!ctl_gap_present);
-        // SplitRap closed; endpoint equality attach is exercised later in this
-        // case. Three capability gaps remain open on this ProofBus path.
-        BOOST_CHECK_EQUAL(open_gaps, 3U);
+        // SplitRap + payload + FS closed; ctl + endpoint capability bits
+        // remain open on this ProofBus path (endpoint attach is later).
+        BOOST_CHECK_EQUAL(open_gaps, 2U);
     }
     BOOST_CHECK_MESSAGE(
         fp::ValidateNormalizedRecursiveChildCapabilityWithProofBusV1(

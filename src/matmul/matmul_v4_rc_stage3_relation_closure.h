@@ -1625,10 +1625,9 @@ inline constexpr bool
  * RoleAudit.role_complete then requires every role endpoint consumed.
  *
  * Blocked on recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
- * and its remaining open residual family (ChildProofPayloadBus;
- * SplitRapMultiRowVerifier closed via
- * kMultiRowV2SplitRapVerifierAirLocalExecutable; EndpointTerminalEquality
- * closed via kNormalizedEndpointTerminalEqualityExecutable) measured by
+ * (CompleteFP residual families measure closed via payload bus /
+ * SplitRap local / endpoint equality, but
+ * kCompleteRecursiveFixedPointExecutable stays false) measured by
  * AssessCompleteRecursiveFixedPointResidualInventoryV1. Do not flip while
  * CompleteFP is false — that would invent recursive consumption. Authority
  * Ready stays separate/false.
