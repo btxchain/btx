@@ -718,6 +718,51 @@ inline constexpr bool kProofTapeShardExecutableV2 = true;
 inline constexpr bool kProofTapeShardRecursiveAuthorityReadyV2 = false;
 static_assert(!kProofTapeShardRecursiveAuthorityReadyV2);
 
+// ---------------------------------------------------------------------------
+// Public-challenge ordinary-proof shard V3.
+//
+// V2 remains frozen above.  V3 removes the delayed R0 dependency from the
+// source-terminal challenges: the complete shard AIR is fixed from public
+// roots before its one ordinary AlgAir commitment is made.
+// ---------------------------------------------------------------------------
+
+inline constexpr uint16_t kProofTapeShardVersionV3 = 3;
+
+[[nodiscard]] bool DeriveShardPublicSourceChallengesV3(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const uint256& source_inventory_root,
+    uint32_t shard_count,
+    ShardSourceChallengesV2& out);
+
+[[nodiscard]] bool BuildShardFinalConstraintSystemV3(
+    const ShardStatementV2& statement,
+    const std::array<gf::Fp3, 2>& source_terminal,
+    aq::AirConstraintSystem<gf::Fp3>& out,
+    ShardLayoutV2* layout = nullptr,
+    std::string* why = nullptr);
+
+struct ShardProofV3 {
+    uint16_t version{kProofTapeShardVersionV3};
+    uint32_t shard_index{0};
+    std::array<gf::Fp3, 2> source_terminal{};
+    aq::AirQuotientRowsProof proof{};
+};
+
+[[nodiscard]] bool ProveShardPublicV3(
+    const ShardProductV2& product,
+    ShardProofV3& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyShardPublicV3(
+    const ShardStatementV2& statement,
+    const ShardProofV3& proof,
+    std::string* why = nullptr);
+
+inline constexpr bool kProofTapeShardPublicExecutableV3 = true;
+inline constexpr bool kProofTapeShardPublicRecursiveAuthorityReadyV3 = false;
+static_assert(!kProofTapeShardPublicRecursiveAuthorityReadyV3);
+
 } // namespace matmul::v4::rc::stage3_multirow_v13_proof_tape_air
 
 #endif // BTX_MATMUL_MATMUL_V4_RC_STAGE3_MULTIROW_V13_PROOF_TAPE_AIR_H

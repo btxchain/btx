@@ -1235,6 +1235,110 @@ BOOST_AUTO_TEST_CASE(
             statement, wrong_order,
             proof, &why));
 
+    ShardSourceChallengesV2 public_challenges;
+    BOOST_REQUIRE(
+        DeriveShardPublicSourceChallengesV3(
+            shape, binding,
+            statement.source_inventory_root,
+            statement.plan.shard_count,
+            public_challenges));
+    ShardProofV3 public_proof;
+    BOOST_REQUIRE_MESSAGE(
+        ProveShardPublicV3(
+            product, public_proof, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        VerifyShardPublicV3(
+            statement, public_proof, &why),
+        why);
+
+    auto public_proof_tamper =
+        public_proof;
+    BOOST_REQUIRE(
+        !public_proof_tamper.proof.batch.
+            queries.empty());
+    BOOST_REQUIRE(
+        !public_proof_tamper.proof.batch.
+            queries[0].row.values.empty());
+    public_proof_tamper.proof.batch.
+        queries[0].row.values[0] =
+        gf::Add(
+            public_proof_tamper.proof.batch.
+                queries[0].row.values[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !VerifyShardPublicV3(
+            statement, public_proof_tamper,
+            &why));
+
+    auto public_terminal_tamper =
+        public_proof;
+    public_terminal_tamper.
+        source_terminal[0] =
+        gf::Add(
+            public_terminal_tamper.
+                source_terminal[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !VerifyShardPublicV3(
+            statement,
+            public_terminal_tamper, &why));
+
+    ShardStatementV2 changed_tape =
+        statement;
+    changed_tape.binding.tape_root[0] =
+        gf::Add(
+            changed_tape.binding.tape_root[0],
+            gf::FromU64(1));
+    changed_tape.source_inventory_root =
+        ComputeShardSourceInventoryRootV2(
+            shape, changed_tape.binding);
+    ShardSourceChallengesV2
+        changed_tape_challenges;
+    BOOST_REQUIRE(
+        DeriveShardPublicSourceChallengesV3(
+            shape, changed_tape.binding,
+            changed_tape.source_inventory_root,
+            changed_tape.plan.shard_count,
+            changed_tape_challenges));
+    BOOST_CHECK(
+        !gf::Eq(
+            public_challenges.gamma[0],
+            changed_tape_challenges.gamma[0]) ||
+        !gf::Eq(
+            public_challenges.alpha[0],
+            changed_tape_challenges.alpha[0]));
+    BOOST_CHECK(
+        !VerifyShardPublicV3(
+            changed_tape, public_proof,
+            &why));
+
+    ShardStatementV2 cross_context =
+        statement;
+    cross_context.binding.proof_wire_root =
+        Root(0xf3);
+    cross_context.source_inventory_root =
+        ComputeShardSourceInventoryRootV2(
+            shape, cross_context.binding);
+    BOOST_CHECK(
+        !VerifyShardPublicV3(
+            cross_context, public_proof,
+            &why));
+
+    ShardProductV2 adaptive_witness =
+        product;
+    adaptive_witness.columns[
+        product.layout.tape.Value(0)][0] =
+        gf::Add(
+            adaptive_witness.columns[
+                product.layout.tape.Value(0)][0],
+            gf::Fp3::One());
+    ShardProofV3 adaptive_proof;
+    BOOST_CHECK(
+        !ProveShardPublicV3(
+            adaptive_witness,
+            adaptive_proof, &why));
+
     ShardStatementV2 relabel =
         statement;
     relabel.plan.shard_index = 1;

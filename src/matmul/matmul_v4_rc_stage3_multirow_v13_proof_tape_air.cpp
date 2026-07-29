@@ -2212,6 +2212,44 @@ uint256 DeriveShardFsSeed(
     return hash.GetHash();
 }
 
+uint256 DeriveShardPublicFsSeedV3(
+    const ShardStatementV2& statement,
+    const std::array<Fp3, 2>& source_terminal)
+{
+    HashWriter hash;
+    hash <<
+        "BTX_RC_STAGE3_SAFE_V13_STREAMING_TAPE_SHARD_PUBLIC_FS_V3";
+    hash << kProofTapeShardVersionV3;
+    hash << BindingHash(
+        statement.child_shape,
+        statement.binding);
+    hash << statement.plan.shard_index;
+    hash << statement.plan.shard_count;
+    hash << statement.plan.row_begin;
+    hash << statement.plan.trace_rows;
+    hash << statement.plan.record_begin;
+    hash << statement.plan.record_count;
+    hash << statement.plan.active_records;
+    hash << statement.plan.total_trace_rows;
+    hash << statement.plan.total_records;
+    hash << statement.plan.total_active_records;
+    for (gf::Fp lane : statement.start_state) {
+        hash << static_cast<uint64_t>(lane);
+    }
+    for (gf::Fp lane : statement.end_state) {
+        hash << static_cast<uint64_t>(lane);
+    }
+    hash << statement.first_record_value;
+    hash << statement.next_record_value;
+    hash << statement.source_inventory_root;
+    for (const Fp3& terminal : source_terminal) {
+        hash << static_cast<uint64_t>(terminal.c0);
+        hash << static_cast<uint64_t>(terminal.c1);
+        hash << static_cast<uint64_t>(terminal.c2);
+    }
+    return hash.GetHash();
+}
+
 } // namespace
 
 std::vector<ShardPlanV2> BuildShardPlansForMaxRowsV2(
@@ -3456,6 +3494,84 @@ bool DeriveShardSourceChallengesV2(
             out.alpha[0], out.alpha[1]);
 }
 
+bool DeriveShardPublicSourceChallengesV3(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const uint256& source_inventory_root,
+    uint32_t shard_count,
+    ShardSourceChallengesV2& out)
+{
+    out = {};
+    const auto plans =
+        BuildShardPlansV2(shape, binding);
+    const uint256 expected_inventory =
+        ComputeShardSourceInventoryRootV2(
+            shape, binding);
+    if (plans.empty() ||
+        plans.size() != shard_count ||
+        shard_count == 0 ||
+        shard_count > 4 ||
+        source_inventory_root.IsNull() ||
+        source_inventory_root !=
+            expected_inventory ||
+        binding.program_root.IsNull() ||
+        binding.statement_root.IsNull() ||
+        binding.proof_wire_root.IsNull() ||
+        binding.tape_root ==
+            alg_hash::Digest{}) {
+        return false;
+    }
+    HashWriter transcript;
+    transcript <<
+        "BTX_RC_STAGE3_SAFE_V13_STREAMING_TAPE_SOURCE_PUBLIC_V3";
+    transcript << kProofTapeShardVersionV3;
+    for (gf::Fp lane : binding.tape_root) {
+        transcript << static_cast<uint64_t>(lane);
+    }
+    transcript << binding.program_root;
+    transcript << binding.statement_root;
+    transcript << binding.proof_wire_root;
+    transcript << source_inventory_root;
+    transcript << shard_count;
+    const uint256 seed = transcript.GetHash();
+    if (seed.IsNull()) {
+        return false;
+    }
+    for (uint32_t lane = 0;
+         lane < 2; ++lane) {
+        const uint256 gamma_digest =
+            aq::AirChallengeDigest(
+                seed,
+                "stage3.v13_tape_shard.public_source_gamma.v3",
+                {binding.program_root,
+                 binding.statement_root,
+                 binding.proof_wire_root,
+                 source_inventory_root},
+                {shard_count, lane});
+        const uint256 alpha_digest =
+            aq::AirChallengeDigest(
+                seed,
+                "stage3.v13_tape_shard.public_source_alpha.v3",
+                {binding.program_root,
+                 binding.statement_root,
+                 binding.proof_wire_root,
+                 source_inventory_root},
+                {shard_count, lane});
+        out.gamma[lane] =
+            gf::FromChallengeBytes3(
+                gamma_digest.data());
+        out.alpha[lane] =
+            gf::FromChallengeBytes3(
+                alpha_digest.data());
+    }
+    return !gf::IsZero(out.gamma[0]) &&
+        !gf::IsZero(out.gamma[1]) &&
+        !gf::Eq(
+            out.gamma[0], out.gamma[1]) &&
+        !gf::Eq(
+            out.alpha[0], out.alpha[1]);
+}
+
 namespace {
 
 bool MaterializeShardSourceTerminal(
@@ -3670,6 +3786,169 @@ bool AppendShardSourceTerminal(
 }
 
 } // namespace
+
+bool BuildShardFinalConstraintSystemV3(
+    const ShardStatementV2& statement,
+    const std::array<Fp3, 2>& source_terminal,
+    aq::AirConstraintSystem<Fp3>& out,
+    ShardLayoutV2* out_layout,
+    std::string* why)
+{
+    ShardLayoutV2 layout;
+    ShardSourceChallengesV2 challenges;
+    if (!DeriveShardPublicSourceChallengesV3(
+            statement.child_shape,
+            statement.binding,
+            statement.source_inventory_root,
+            statement.plan.shard_count,
+            challenges) ||
+        !BuildShardConstraintSystemV2(
+            statement, out, &layout,
+            nullptr, why) ||
+        !AppendShardSourceTerminal(
+            layout, challenges,
+            statement.plan.shard_index,
+            source_terminal, out)) {
+        if (why != nullptr && why->empty()) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_final_cs";
+        }
+        return false;
+    }
+    if (out_layout != nullptr) {
+        *out_layout = layout;
+    }
+    return true;
+}
+
+bool ProveShardPublicV3(
+    const ShardProductV2& product,
+    ShardProofV3& out,
+    std::string* why)
+{
+    out = {};
+    ShardSourceChallengesV2 challenges;
+    if (!product.valid ||
+        product.recursive_authority_ready ||
+        !DeriveShardPublicSourceChallengesV3(
+            product.statement.child_shape,
+            product.statement.binding,
+            product.statement.
+                source_inventory_root,
+            product.statement.plan.shard_count,
+            challenges)) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_product";
+        }
+        return false;
+    }
+    auto columns = product.columns;
+    std::array<Fp3, 2> terminal{};
+    if (!MaterializeShardSourceTerminal(
+            product.layout, challenges,
+            product.statement.plan.shard_index,
+            columns, terminal)) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_terminal_witness";
+        }
+        return false;
+    }
+    aq::AirConstraintSystem<Fp3> cs;
+    if (!BuildShardFinalConstraintSystemV3(
+            product.statement, terminal,
+            cs, nullptr, why)) {
+        return false;
+    }
+    for (uint32_t lane = 0;
+         lane < 2; ++lane) {
+        std::fill(
+            columns[
+                product.layout.
+                    ExpectedTerminal(lane)].
+                begin(),
+            columns[
+                product.layout.
+                    ExpectedTerminal(lane)].
+                end(),
+            terminal[lane]);
+    }
+    uint32_t first_bad_row = UINT32_MAX;
+    std::string first_bad_constraint;
+    if (CountViolations(
+            cs, columns, &first_bad_row,
+            &first_bad_constraint) != 0) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_witness:" +
+                first_bad_constraint +
+                ":row=" +
+                std::to_string(
+                    first_bad_row);
+        }
+        return false;
+    }
+    const uint256 fs_seed =
+        DeriveShardPublicFsSeedV3(
+            product.statement, terminal);
+    const auto proved =
+        aq::AirQuotientProveRows(
+            cs, columns, fs_seed);
+    if (!proved.ok ||
+        !proved.division_exact) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_prove:" +
+                proved.note;
+        }
+        return false;
+    }
+    out.version =
+        kProofTapeShardVersionV3;
+    out.shard_index =
+        product.statement.plan.shard_index;
+    out.source_terminal = terminal;
+    out.proof = proved.proof;
+    return VerifyShardPublicV3(
+        product.statement, out, why);
+}
+
+bool VerifyShardPublicV3(
+    const ShardStatementV2& statement,
+    const ShardProofV3& proof,
+    std::string* why)
+{
+    if (proof.version !=
+            kProofTapeShardVersionV3 ||
+        proof.shard_index !=
+            statement.plan.shard_index) {
+        if (why) {
+            *why =
+                "stage3:proof_tape_shard:"
+                "public_v3_envelope";
+        }
+        return false;
+    }
+    aq::AirConstraintSystem<Fp3> cs;
+    if (!BuildShardFinalConstraintSystemV3(
+            statement,
+            proof.source_terminal,
+            cs, nullptr, why)) {
+        return false;
+    }
+    return aq::AirQuotientVerifyRows(
+        cs, proof.proof,
+        DeriveShardPublicFsSeedV3(
+            statement,
+            proof.source_terminal),
+        why);
+}
 
 bool ProveShardV2(
     const ShardProductV2& product,
