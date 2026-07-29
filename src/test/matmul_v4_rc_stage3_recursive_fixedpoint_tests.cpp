@@ -1761,6 +1761,38 @@ BOOST_AUTO_TEST_CASE(
             residuals.note.find("canary_only_blocks_fs_authority") !=
             std::string::npos);
         static_assert(fp::kNormalizedEndpointTerminalEqualityExecutable);
+        BOOST_CHECK(
+            residuals.note.find("living_counters_from_cell_audit") !=
+            std::string::npos);
+        BOOST_CHECK(
+            residuals.note.find(
+                "ordinary_v3_tape_endpoint_mapping_open") !=
+            std::string::npos);
+    }
+
+    // Living capability counters agree with CellAudit; forged RoleAudit-full
+    // while counters stay 0 fails the interlock.
+    {
+        BOOST_CHECK_EQUAL(
+            capability.recursively_consumed_endpoints, 0U);
+        BOOST_CHECK_EQUAL(
+            capability.recursively_consumed_roles, 0U);
+        BOOST_CHECK(
+            capability.note.find(
+                "recursive_counters_0_of_52_and_0_of_14") !=
+            std::string::npos);
+        const auto measured =
+            rc::MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+        std::string interlock_why;
+        BOOST_CHECK_MESSAGE(
+            rc::ValidateRCStage3RelationClosureRecursiveConsumptionInterlockV1(
+                measured,
+                capability.recursively_consumed_endpoints,
+                capability.recursively_consumed_roles,
+                &interlock_why),
+            interlock_why);
+        BOOST_CHECK(
+            !rc::kRCStage3RelationClosureRecursiveChildrenExecutable);
     }
 
     // Even if an attacker consistently changes the external semantic-root
@@ -3845,6 +3877,60 @@ BOOST_AUTO_TEST_CASE(
             reordered);
     BOOST_CHECK(
         !reordered_audit.canonical_order_and_intervals);
+}
+
+BOOST_AUTO_TEST_CASE(
+    ordinary_v3_tape_narrow_parent_consume_inventory_fail_closed)
+{
+    // Expensive ProveShardPublicV3 ×2 (~minutes). Default posture checks the
+    // fail-closed residual + living counters without re-proving; set
+    // BTX_RUN_ORDINARY_V3_TAPE_HOST=1 to host-verify, and
+    // BTX_RUN_ORDINARY_V3_NARROW_PARENT_L2=1 to also attempt light L2 consume.
+    if (std::getenv("BTX_RUN_ORDINARY_V3_TAPE_HOST") == nullptr) {
+        const auto measured =
+            rc::MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+        BOOST_CHECK_EQUAL(
+            measured.recursively_consumed_endpoints, 0U);
+        BOOST_CHECK_EQUAL(
+            measured.recursively_consumed_roles, 0U);
+        BOOST_CHECK(!measured.complete);
+        BOOST_CHECK(
+            !rc::kRCStage3RelationClosureRecursiveChildrenExecutable);
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_ORDINARY_V3_TAPE_HOST=1 to host-verify "
+            "ordinary V3 tape leaves; "
+            "BTX_RUN_ORDINARY_V3_NARROW_PARENT_L2=1 for light L2");
+        return;
+    }
+    const bool attempt_l2 =
+        std::getenv("BTX_RUN_ORDINARY_V3_NARROW_PARENT_L2") != nullptr;
+    const auto tape_inventory =
+        fp::AssessOrdinaryV3TapeNarrowParentConsumeInventoryV1(
+            /*attempt_narrow_parent_consume=*/attempt_l2);
+    BOOST_REQUIRE_MESSAGE(tape_inventory.valid, tape_inventory.note);
+    BOOST_CHECK_EQUAL(
+        tape_inventory.ordinary_v3_tape_leaves_built, 2U);
+    BOOST_CHECK_EQUAL(
+        tape_inventory.ordinary_v3_tape_leaves_host_verified, 2U);
+    BOOST_CHECK_EQUAL(
+        tape_inventory.endpoints_with_parent_verified_evidence, 0U);
+    BOOST_CHECK_EQUAL(
+        tape_inventory.consumer_leaves_parent_consumed, 0U);
+    BOOST_CHECK(!tape_inventory.endpoint_registry_mapping_complete);
+    BOOST_CHECK(!tape_inventory.recursive_children_gate_unblocked);
+    BOOST_CHECK(
+        !rc::kRCStage3RelationClosureRecursiveChildrenExecutable);
+    if (attempt_l2) {
+        BOOST_CHECK(tape_inventory.narrow_parent_fold_bus_built);
+        BOOST_CHECK(tape_inventory.narrow_parent_forgery_rejected);
+    } else {
+        BOOST_CHECK_EQUAL(
+            tape_inventory.ordinary_v3_tape_leaves_parent_consumed, 0U);
+    }
+    BOOST_CHECK(
+        tape_inventory.residual.find(
+            "endpoint_registry_mapping_open") != std::string::npos);
+    BOOST_TEST_MESSAGE(tape_inventory.note);
 }
 
 BOOST_AUTO_TEST_CASE(

@@ -48,6 +48,20 @@ constexpr char EPISODE_EXTRACT_OUTPUT_RECEIVER_SEED_DOMAIN[] =
 constexpr char COUPLED_ENDPOINT_SEED_DOMAIN[] =
     "BTX_RC_STAGE3_COUPLED_ENDPOINT_AIR_V1";
 
+// Parent-verified recursive-child evidence bits (one per relation endpoint).
+// Default false. Set only by RegisterRCStage3ParentVerifiedRecursiveChild-
+// EvidenceV1 after ordinary V3 tape / consumer leaves are verified inside
+// the narrow parent and mapped onto an endpoint. Never derived from
+// kRCStage3RelationClosureRecursiveChildrenExecutable alone.
+std::array<bool, kRCStage3RelationClosureEndpointCount>
+    g_parent_verified_recursive_child_evidence{};
+
+[[nodiscard]] uint16_t EndpointEvidenceIndex(
+    RCStage3RelationEndpoint endpoint)
+{
+    return static_cast<uint16_t>(endpoint);
+}
+
 constexpr std::array<RCStage3RelationEndpoint,
                      kRCStage3BuilderProgramAliasLaneCountV1>
     BUILDER_ALIAS_ENDPOINTS{
@@ -729,14 +743,22 @@ RCStage3RelationEndpointCellAudit CellAudit(
     out.strict_transitive_complete =
         out.semantic_relation_complete &&
         out.producer_provenance_complete;
+    // Honest consumption: parent-verified child evidence is required.
+    // RecursiveChildrenExecutable alone must not invent this bit.
+    const bool parent_verified_child =
+        RCStage3EndpointParentVerifiedRecursiveChildEvidenceV1(endpoint);
     out.recursive_child_consumed =
         out.semantic_relation_complete &&
         out.same_trace_ctl_alias &&
-        kRCStage3RelationClosureRecursiveChildrenExecutable;
+        parent_verified_child;
     if (out.recursive_child_consumed) {
         out.remaining =
             "normalized recursive child executes the opened/CTL-aliased "
             "endpoint; consensus authority remains fail-closed";
+    } else if (parent_verified_child) {
+        out.remaining =
+            "parent-verified recursive child evidence present, but "
+            "semantic/CTL alias still open";
     }
 
     return out;
@@ -4390,10 +4412,10 @@ CurrentRCStage3RelationClosureRoleAudit()
         audit.strict_transitive_endpoints = strict;
         audit.recursively_consumed_strict_endpoints =
             recursive_strict;
+        // Living from CellAudit evidence bits. Do not OR-in the constexpr
+        // gate here — that invented RoleAudit 14/14 while counters stayed 0.
         audit.recursive_ctl_consumption =
-            required > 0 &&
-            recursive_strict == required &&
-            kRCStage3RelationClosureRecursiveChildrenExecutable;
+            required > 0 && recursive_strict == required;
         audit.role_complete =
             audit.recursive_ctl_consumption &&
             audit.proof_derived_ctl_endpoints ==
@@ -4401,7 +4423,8 @@ CurrentRCStage3RelationClosureRoleAudit()
             audit.strict_transitive_endpoints ==
                 audit.required_endpoints &&
             audit.recursively_consumed_strict_endpoints ==
-                audit.required_endpoints;
+                audit.required_endpoints &&
+            kRCStage3RelationClosureRecursiveChildrenExecutable;
         audit.remaining =
             audit.role_complete
                 ? "strict transitive semantic provenance, role CTL export, "
@@ -4426,6 +4449,114 @@ CurrentRCStage3RelationEndpointCellAudit()
         }
     }
     return out;
+}
+
+RCStage3RelationClosureRecursiveConsumptionMeasureV1
+MeasureRCStage3RelationClosureRecursiveConsumptionV1()
+{
+    RCStage3RelationClosureRecursiveConsumptionMeasureV1 out;
+    const auto cells = CurrentRCStage3RelationEndpointCellAudit();
+    for (const auto& cell : cells) {
+        out.recursively_consumed_endpoints +=
+            cell.recursive_child_consumed ? 1 : 0;
+    }
+    const auto roles = CurrentRCStage3RelationClosureRoleAudit();
+    uint16_t roles_recursive = 0;
+    for (const auto& role : roles) {
+        roles_recursive += role.recursive_ctl_consumption ? 1 : 0;
+    }
+    out.recursively_consumed_roles = roles_recursive;
+    out.role_audit_reports_full_recursive_consumption =
+        out.roles_required > 0 &&
+        out.recursively_consumed_roles == out.roles_required;
+    out.counter_note =
+        "recursive_counters_" +
+        std::to_string(out.recursively_consumed_endpoints) +
+        "_of_" +
+        std::to_string(out.endpoints_required) +
+        "_and_" +
+        std::to_string(out.recursively_consumed_roles) +
+        "_of_" +
+        std::to_string(out.roles_required);
+    out.complete =
+        out.recursively_consumed_endpoints == out.endpoints_required &&
+        out.recursively_consumed_roles == out.roles_required &&
+        out.role_audit_reports_full_recursive_consumption &&
+        kRCStage3RelationClosureRecursiveChildrenExecutable;
+    out.note =
+        std::string("stage3:relation_closure:") + out.counter_note +
+        (out.complete
+             ? ";recursive_consumption_complete;authority_ready=false"
+             : ";recursive_consumption_open;"
+               "parent_verified_child_evidence_required");
+    return out;
+}
+
+bool ValidateRCStage3RelationClosureRecursiveConsumptionInterlockV1(
+    const RCStage3RelationClosureRecursiveConsumptionMeasureV1& measure,
+    uint16_t capability_recursively_consumed_endpoints,
+    uint16_t capability_recursively_consumed_roles,
+    std::string* why)
+{
+    // Dishonest posture: RoleAudit claims full recursive consumption while
+    // capability counters still report zero (constexpr-only CellAudit lie).
+    if (measure.role_audit_reports_full_recursive_consumption &&
+        capability_recursively_consumed_endpoints == 0 &&
+        capability_recursively_consumed_roles == 0) {
+        if (why != nullptr) {
+            *why =
+                "stage3:relation_closure:"
+                "recursive_consumption_interlock:"
+                "role_audit_full_while_capability_counters_zero";
+        }
+        return false;
+    }
+    // Living counters must agree with the capability audit's measured fields.
+    if (measure.recursively_consumed_endpoints !=
+            capability_recursively_consumed_endpoints ||
+        measure.recursively_consumed_roles !=
+            capability_recursively_consumed_roles) {
+        if (why != nullptr) {
+            *why =
+                "stage3:relation_closure:"
+                "recursive_consumption_interlock:"
+                "cell_audit_vs_capability_counter_mismatch";
+        }
+        return false;
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:relation_closure:"
+            "recursive_consumption_interlock_ok;" +
+            measure.counter_note;
+    }
+    return true;
+}
+
+bool RCStage3EndpointParentVerifiedRecursiveChildEvidenceV1(
+    RCStage3RelationEndpoint endpoint)
+{
+    const uint16_t index = EndpointEvidenceIndex(endpoint);
+    if (index >= kRCStage3RelationClosureEndpointCount) {
+        return false;
+    }
+    return g_parent_verified_recursive_child_evidence[index];
+}
+
+bool RegisterRCStage3ParentVerifiedRecursiveChildEvidenceV1(
+    RCStage3RelationEndpoint endpoint)
+{
+    const uint16_t index = EndpointEvidenceIndex(endpoint);
+    if (index >= kRCStage3RelationClosureEndpointCount) {
+        return false;
+    }
+    g_parent_verified_recursive_child_evidence[index] = true;
+    return true;
+}
+
+void ClearRCStage3ParentVerifiedRecursiveChildEvidenceV1()
+{
+    g_parent_verified_recursive_child_evidence.fill(false);
 }
 
 // ===========================================================================

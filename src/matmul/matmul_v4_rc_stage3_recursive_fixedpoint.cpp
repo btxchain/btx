@@ -7,6 +7,7 @@
 #include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_air_quotient_codec.h>
 #include <matmul/matmul_v4_rc_stage3_gemm_extract.h>
+#include <matmul/matmul_v4_rc_stage3_multirow_v13_proof_tape_air.h>
 #include <matmul/matmul_v4_rc_stage3_poseidon_air.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_parent_air.h>
@@ -36,6 +37,25 @@ bool Fail(std::string* why, const std::string& detail)
 uint64_t CeilDiv(uint64_t n, uint64_t d)
 {
     return n / d + (n % d != 0 ? 1 : 0);
+}
+
+/** Apply living CellAudit/RoleAudit recursive counters into a capability audit. */
+void ApplyLivingRecursiveConsumptionCounters(
+    NormalizedRecursiveChildCapabilityAuditV1& out)
+{
+    const auto measured =
+        MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+    out.recursively_consumed_endpoints =
+        measured.recursively_consumed_endpoints;
+    out.recursively_consumed_roles =
+        measured.recursively_consumed_roles;
+    out.recursive_consumption_complete = measured.complete;
+}
+
+[[nodiscard]] std::string LivingRecursiveCounterNote()
+{
+    return MeasureRCStage3RelationClosureRecursiveConsumptionV1()
+        .counter_note;
 }
 
 uint32_t NextPow2(uint64_t n)
@@ -15528,11 +15548,9 @@ AssessNormalizedRecursiveChildCapabilityV1(
         },
     };
 
-    // These are authority counters, not coverage estimates. They stay zero
-    // while any required recursive verifier component is absent.
-    out.recursively_consumed_endpoints = 0;
-    out.recursively_consumed_roles = 0;
-    out.recursive_consumption_complete = false;
+    // Living authority counters from CellAudit / RoleAudit measurement.
+    // Never hard-code zero while inventing RoleAudit 52/52 elsewhere.
+    ApplyLivingRecursiveConsumptionCounters(out);
     std::string failed;
     const auto fail_pred = [&](bool ok, const char* tag) {
         if (!ok) {
@@ -15643,12 +15661,15 @@ bool ValidateNormalizedRecursiveChildCapabilityV1(
             why,
             "normalized_recursive_capability_substitution");
     }
-    if (audit.recursively_consumed_endpoints != 0 ||
-        audit.recursively_consumed_roles != 0 ||
-        audit.recursive_consumption_complete) {
-        return Fail(
-            why,
-            "normalized_recursive_capability_counter_promotion");
+    // Living counters must agree with CellAudit / RoleAudit measurement and
+    // must not invent RoleAudit-full while counters stay zero.
+    std::string interlock_why;
+    if (!ValidateRCStage3RelationClosureRecursiveConsumptionInterlockV1(
+            MeasureRCStage3RelationClosureRecursiveConsumptionV1(),
+            audit.recursively_consumed_endpoints,
+            audit.recursively_consumed_roles,
+            &interlock_why)) {
+        return Fail(why, interlock_why);
     }
     return true;
 }
@@ -23756,6 +23777,283 @@ AttachConstraintBytecodeInterpreter(
         composition, table);
 }
 
+OrdinaryV3TapeNarrowParentConsumeInventoryV1
+AssessOrdinaryV3TapeNarrowParentConsumeInventoryV1(
+    bool attempt_narrow_parent_consume)
+{
+    namespace tape = stage3_multirow_v13_proof_tape_air;
+    OrdinaryV3TapeNarrowParentConsumeInventoryV1 out;
+
+    const auto make_binding = [](uint8_t tag) {
+        tape::PublicBindingV1 binding;
+        auto root = [&](uint8_t b) {
+            uint256 r;
+            std::fill(r.begin(), r.end(), b);
+            return r;
+        };
+        binding.program_root = root(static_cast<uint8_t>(0x11 ^ tag));
+        binding.statement_root = root(static_cast<uint8_t>(0x22 ^ tag));
+        binding.public_fs_seed = root(static_cast<uint8_t>(0x33 ^ tag));
+        binding.proof_wire_root = root(static_cast<uint8_t>(0x44 ^ tag));
+        binding.tape_root = {
+            static_cast<uint32_t>(1 + tag),
+            static_cast<uint32_t>(2 + tag),
+            static_cast<uint32_t>(3 + tag),
+            static_cast<uint32_t>(4 + tag)};
+        return binding;
+    };
+    tape::PublicShapeV1 shape;
+    shape.trace_rows = 2;
+    shape.trace_columns = 2;
+    shape.quotient_len = 2;
+    shape.n_coeffs = 2;
+    shape.base_column_indices = {0};
+
+    std::vector<aq::AirConstraintSystem<Fp3>> child_css;
+    std::vector<AlgAirProof> child_proofs;
+    std::vector<uint256> child_seeds;
+    child_css.reserve(2);
+    child_proofs.reserve(2);
+    child_seeds.reserve(2);
+
+    for (uint8_t leaf = 0; leaf < 2; ++leaf) {
+        tape::PublicBindingV1 binding = make_binding(leaf + 1);
+        const tape::ScheduleV1 schedule =
+            tape::BuildScheduleV1(shape, binding);
+        if (!schedule.valid) {
+            out.residual =
+                "ordinary_v3_tape_schedule_invalid;leaf=" +
+                std::to_string(leaf);
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        std::vector<uint32_t> words(
+            tape::kHeaderRecordsV1 +
+                size_t{schedule.source_records} * 2);
+        for (uint32_t header = 0;
+             header < tape::kHeaderRecordsV1; ++header) {
+            words[header] =
+                schedule.records[
+                    tape::kPublicPrefixRecordsV1 + header]
+                    .expected_value;
+        }
+        for (uint32_t address = 0;
+             address < schedule.source_records; ++address) {
+            const auto& record =
+                schedule.records[
+                    tape::kPublicPrefixRecordsV1 +
+                    tape::kHeaderRecordsV1 + address];
+            const size_t offset =
+                tape::kHeaderRecordsV1 + size_t{address} * 2;
+            words[offset] = record.expected_address;
+            words[offset + 1] = record.fixed_value
+                ? record.expected_value
+                : schedule.semantic_sources[address].value;
+        }
+        binding.tape_root =
+            tape::ComputeTapeRootV1(shape, binding, words);
+        const auto plans = tape::BuildShardPlansV2(shape, binding);
+        if (plans.size() != 1 || !plans[0].valid) {
+            out.residual =
+                "ordinary_v3_tape_plan_invalid;leaf=" +
+                std::to_string(leaf);
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        const auto boundaries =
+            tape::ComputeShardBoundaryStatesV2(
+                shape, binding, words);
+        if (!boundaries.valid) {
+            out.residual =
+                "ordinary_v3_tape_boundary_invalid;leaf=" +
+                std::to_string(leaf);
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        tape::ShardStatementV2 statement{
+            .child_shape = shape,
+            .binding = binding,
+            .plan = plans[0],
+            .start_state = boundaries.states[0],
+            .end_state = boundaries.states[1],
+            .first_record_value =
+                boundaries.first_record_values[0],
+            .next_record_value =
+                boundaries.next_record_values[0],
+            .source_inventory_root =
+                tape::ComputeShardSourceInventoryRootV2(
+                    shape, binding),
+        };
+        const tape::ShardProductV2 product =
+            tape::BuildShardProductV2(statement, words);
+        if (!product.valid) {
+            out.residual =
+                "ordinary_v3_tape_product_invalid;leaf=" +
+                std::to_string(leaf) + ":" + product.note;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        ++out.ordinary_v3_tape_leaves_built;
+
+        tape::ShardProofV3 proof;
+        std::string why;
+        if (!tape::ProveShardPublicV3(product, proof, &why) ||
+            !tape::VerifyShardPublicV3(
+                statement, proof, &why)) {
+            out.residual =
+                "ordinary_v3_tape_host_verify_failed;leaf=" +
+                std::to_string(leaf) + ":" + why;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        ++out.ordinary_v3_tape_leaves_host_verified;
+
+        aq::AirConstraintSystem<Fp3> final_cs;
+        if (!tape::BuildShardFinalConstraintSystemV3(
+                statement, proof.source_terminal, final_cs,
+                nullptr, &why)) {
+            out.residual =
+                "ordinary_v3_tape_final_cs_failed;leaf=" +
+                std::to_string(leaf) + ":" + why;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        const auto ordinary =
+            tape::CanonicalShardPublicAlgProofV3(proof, nullptr, &why);
+        if (!ordinary.has_value()) {
+            out.residual =
+                "ordinary_v3_tape_canonical_alg_failed;leaf=" +
+                std::to_string(leaf) + ":" + why;
+            out.note =
+                "stage3:recursive_fixedpoint:"
+                "ordinary_v3_tape_narrow_parent:" +
+                out.residual;
+            return out;
+        }
+        child_css.push_back(std::move(final_cs));
+        child_proofs.push_back(*ordinary);
+        child_seeds.push_back(
+            tape::DeriveShardPublicFsSeedV3(
+                statement, proof.source_terminal));
+    }
+
+    // Consumer-leaf proofs are still a separate ordinary-AIR seam; inventory
+    // them as open so RecursiveChildren cannot invent their consumption.
+    out.consumer_leaves_host_verified = 0;
+    out.consumer_leaves_parent_consumed = 0;
+
+    if (attempt_narrow_parent_consume &&
+        child_css.size() >= 2 &&
+        child_proofs.size() == child_css.size()) {
+        const NarrowMultiChildL2FriConsumeV1 consumed =
+            ExecuteNarrowMultiChildL2FriConsumeV1(
+                child_css, child_proofs, child_seeds,
+                /*prove=*/false);
+        out.narrow_parent_fold_bus_built = consumed.fold_bus_built;
+        out.narrow_parent_forgery_rejected =
+            consumed.forgery_rejected;
+        out.narrow_parent_cryptographically_valid =
+            consumed.cryptographically_valid;
+        // Light parent consume (prove=false): fold-bus + FRI shape + forgery.
+        // Full L2 prove/verify stays a separate residual.
+        if (consumed.fold_bus_built && consumed.forgery_rejected) {
+            out.ordinary_v3_tape_leaves_parent_consumed =
+                static_cast<uint32_t>(child_proofs.size());
+            if (!consumed.cryptographically_valid) {
+                out.residual =
+                    "ordinary_v3_tape_leaves_light_parent_consumed;"
+                    "l2_prove_verify_open;" +
+                    consumed.note;
+            }
+        } else {
+            out.residual =
+                "ordinary_v3_tape_rowsproof_to_narrow_algair_"
+                "parent_consume_open;" +
+                consumed.note;
+        }
+    } else if (!attempt_narrow_parent_consume) {
+        out.residual =
+            "ordinary_v3_tape_narrow_parent_consume_not_attempted;"
+            "host_verified_only";
+    }
+
+    const auto measured =
+        MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+    out.endpoints_with_parent_verified_evidence =
+        measured.recursively_consumed_endpoints;
+    out.endpoint_registry_mapping_complete =
+        measured.complete;
+    out.recursive_children_gate_unblocked =
+        kRCStage3RelationClosureRecursiveChildrenExecutable &&
+        measured.complete;
+
+    // Inventory is coherent when host-verified leaves exist and the gate
+    // stays false until endpoint mapping + living counters agree at 52/52.
+    out.valid =
+        out.ordinary_v3_tape_leaves_built == 2 &&
+        out.ordinary_v3_tape_leaves_host_verified == 2 &&
+        !out.endpoint_registry_mapping_complete &&
+        !out.recursive_children_gate_unblocked &&
+        !kRCStage3RelationClosureRecursiveChildrenExecutable;
+    if (out.residual.empty()) {
+        if (out.ordinary_v3_tape_leaves_parent_consumed < 2) {
+            out.residual =
+                "ordinary_v3_tape_parent_consume_incomplete;"
+                "consumer_leaf_parent_consume_open;"
+                "endpoint_registry_mapping_open;" +
+                measured.counter_note;
+        } else {
+            out.residual =
+                "ordinary_v3_tape_leaves_parent_consumed=" +
+                std::to_string(
+                    out.ordinary_v3_tape_leaves_parent_consumed) +
+                ";consumer_leaf_parent_consume_open;"
+                "endpoint_registry_mapping_open;" +
+                measured.counter_note +
+                ";RecursiveChildrenExecutable=false";
+        }
+    } else {
+        out.residual +=
+            ";consumer_leaf_parent_consume_open;"
+            "endpoint_registry_mapping_open;" +
+            measured.counter_note +
+            ";RecursiveChildrenExecutable=false";
+    }
+    out.note =
+        "stage3:recursive_fixedpoint:"
+        "ordinary_v3_tape_narrow_parent_inventory;"
+        "host_verified=" +
+        std::to_string(out.ordinary_v3_tape_leaves_host_verified) +
+        ";parent_consumed=" +
+        std::to_string(
+            out.ordinary_v3_tape_leaves_parent_consumed) +
+        ";consumer_parent_consumed=" +
+        std::to_string(out.consumer_leaves_parent_consumed) +
+        ";endpoint_evidence=" +
+        std::to_string(
+            out.endpoints_with_parent_verified_evidence) +
+        ";" + out.residual;
+    return out;
+}
+
 CompleteRecursiveFixedPointResidualInventoryV1
 AssessCompleteRecursiveFixedPointResidualInventoryV1()
 {
@@ -23921,6 +24219,8 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1()
             "complete_fp_assembly_blocked;"
             "complete_fp_executable_still_false;"
             "recursive_children_blocked_until_living_parent_consume;"
+            "living_counters_from_cell_audit;"
+            "ordinary_v3_tape_endpoint_mapping_open;"
             "recursive_children_blocked;authority=false";
     } else if (out.valid && !kCompleteRecursiveFixedPointExecutable &&
                out.complete_fp_assembly_allowed) {

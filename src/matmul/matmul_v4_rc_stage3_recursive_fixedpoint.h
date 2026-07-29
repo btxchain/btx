@@ -4113,6 +4113,40 @@ struct CompleteRecursiveFixedPointResidualInventoryV1 {
 [[nodiscard]] CompleteRecursiveFixedPointResidualInventoryV1
 AssessCompleteRecursiveFixedPointResidualInventoryV1();
 
+/**
+ * Ordinary SAFE V3 public-challenge tape shards / consumer leaves consumed
+ * as recursive children inside the narrow parent.
+ *
+ * This is the living evidence path RecursiveChildrenExecutable must wait on.
+ * Host VerifyShardPublicV3 alone is not enough: leaves must enter
+ * ExecuteNarrowMultiChildL2FriConsumeV1 (arity ≥2) and be parent-verified.
+ * Endpoint CellAudit bits are raised only when those parent-verified leaves
+ * are mapped onto relation endpoints — never from constexpr alone.
+ *
+ * Does NOT flip RecursiveChildrenExecutable / CompleteFP / Authority.
+ */
+struct OrdinaryV3TapeNarrowParentConsumeInventoryV1 {
+    uint16_t version{1};
+    uint32_t ordinary_v3_tape_leaves_built{0};
+    uint32_t ordinary_v3_tape_leaves_host_verified{0};
+    uint32_t ordinary_v3_tape_leaves_parent_consumed{0};
+    uint32_t consumer_leaves_host_verified{0};
+    uint32_t consumer_leaves_parent_consumed{0};
+    uint16_t endpoints_with_parent_verified_evidence{0};
+    bool narrow_parent_fold_bus_built{false};
+    bool narrow_parent_forgery_rejected{false};
+    bool narrow_parent_cryptographically_valid{false};
+    bool endpoint_registry_mapping_complete{false};
+    bool recursive_children_gate_unblocked{false};
+    bool valid{false};
+    std::string residual;
+    std::string note;
+};
+
+[[nodiscard]] OrdinaryV3TapeNarrowParentConsumeInventoryV1
+AssessOrdinaryV3TapeNarrowParentConsumeInventoryV1(
+    bool attempt_narrow_parent_consume = true);
+
 static_assert(kHashOpeningAirExecutable);
 static_assert(kFoldHashScalarMemoryBusExecutable);
 static_assert(kNormalizedEndpointTerminalEqualityExecutable);

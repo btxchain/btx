@@ -229,8 +229,9 @@ struct RCStage3RelationClosureRoleAudit {
  * only for a consensus/public anchor or after every immediate producer edge
  * is equality-constrained to an executed proof. `strict_transitive_complete`
  * is their conjunction. `recursive_child_consumed` is true only after a
- * recursive verifier executes the composed proof; it is false for all current
- * entries.
+ * recursive verifier executes the composed proof with parent-verified child
+ * evidence for that endpoint. The RecursiveChildrenExecutable constexpr alone
+ * must never invent this bit (that was the dishonest 52/52 path).
  */
 struct RCStage3RelationEndpointCellAudit {
     RCStage3RelationEndpoint endpoint{};
@@ -245,6 +246,64 @@ struct RCStage3RelationEndpointCellAudit {
     std::string source;
     std::string remaining;
 };
+
+/**
+ * Living recursive-consumption counters measured from CellAudit / RoleAudit.
+ * Notes are derived from the measured counts — never hard-coded `0_of_52`.
+ */
+struct RCStage3RelationClosureRecursiveConsumptionMeasureV1 {
+    uint16_t endpoints_required{kRCStage3RelationClosureEndpointCount};
+    uint16_t roles_required{kRCStage3RelationClosureRoleCount};
+    uint16_t recursively_consumed_endpoints{0};
+    uint16_t recursively_consumed_roles{0};
+    /** True iff every RoleAudit row reports recursive_ctl_consumption. */
+    bool role_audit_reports_full_recursive_consumption{false};
+    /**
+     * True only when living RoleAudit is 14/14, CellAudit is 52/52, and
+     * RecursiveChildrenExecutable is also true. Stay false while evidence
+     * is incomplete.
+     */
+    bool complete{false};
+    /** `recursive_counters_<E>_of_52_and_<R>_of_14` from measurement. */
+    std::string counter_note;
+    std::string note;
+};
+
+[[nodiscard]] RCStage3RelationClosureRecursiveConsumptionMeasureV1
+MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+
+/**
+ * Fail-closed interlock: RoleAudit must not claim full recursive consumption
+ * while living capability-style counters are still zero. Returns false with
+ * a why-tag when the dishonest constexpr-only 52/52 posture is detected.
+ */
+[[nodiscard]] bool
+ValidateRCStage3RelationClosureRecursiveConsumptionInterlockV1(
+    const RCStage3RelationClosureRecursiveConsumptionMeasureV1& measure,
+    uint16_t capability_recursively_consumed_endpoints,
+    uint16_t capability_recursively_consumed_roles,
+    std::string* why = nullptr);
+
+/**
+ * Parent-verified recursive-child evidence for one relation endpoint.
+ * Default false for every endpoint. Set only after ordinary SAFE V3 tape /
+ * consumer leaves are verified inside the narrow parent and mapped onto the
+ * endpoint — never from RecursiveChildrenExecutable alone.
+ */
+[[nodiscard]] bool
+RCStage3EndpointParentVerifiedRecursiveChildEvidenceV1(
+    RCStage3RelationEndpoint endpoint);
+
+/**
+ * Record parent-verified recursive-child evidence for an endpoint. Returns
+ * false if the endpoint is out of range. Does not flip Executable / Authority.
+ */
+[[nodiscard]] bool
+RegisterRCStage3ParentVerifiedRecursiveChildEvidenceV1(
+    RCStage3RelationEndpoint endpoint);
+
+/** Clear all parent-verified recursive-child evidence (tests / reassessment). */
+void ClearRCStage3ParentVerifiedRecursiveChildEvidenceV1();
 
 /**
  * Column layout of the selected direct-product construction:
@@ -1629,22 +1688,21 @@ inline constexpr bool
 /**
  * Recursive child consumption for CellAudit / RoleAudit.
  *
- * FAIL-CLOSED (false). When true, CellAudit would:
- *   - boost same_trace_ctl_alias for stream/vector/wired openings that are
- *     already semantic_relation_complete (requires a complete fixed-point
- *     parent hosting those children — see comment in CellAudit), and
- *   - set recursive_child_consumed =
- *       semantic_relation_complete && same_trace_ctl_alias.
- * RoleAudit.role_complete then requires every role endpoint consumed.
+ * FAIL-CLOSED (false). Flip only when living measurement agrees:
+ *   MeasureRCStage3RelationClosureRecursiveConsumptionV1 reports 52/52 and
+ *   14/14 from parent-verified child evidence, capability counters match
+ *   those living counts, and notes use the measured counter_note.
  *
- * Blocked on recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
- * (CompleteFP residual families measure closed via payload bus /
- * SplitRap local / endpoint equality, but
- * kCompleteRecursiveFixedPointExecutable stays false until honest VerifierFS
- * authority_eligible + non-zero recursive counters allow assembly) measured by
- * AssessCompleteRecursiveFixedPointResidualInventoryV1. Do not flip while
- * CompleteFP is false — that would invent recursive consumption. Authority
- * Ready stays separate/false.
+ * CellAudit.recursive_child_consumed requires
+ * RCStage3EndpointParentVerifiedRecursiveChildEvidenceV1(endpoint) — the
+ * constexpr alone must never invent consumption. When true, CellAudit may
+ * also boost same_trace_ctl_alias for stream/vector/wired openings that are
+ * already semantic_relation_complete (complete fixed-point parent hosting).
+ *
+ * Also blocked on recursive_fixedpoint::kCompleteRecursiveFixedPointExecutable
+ * until honest VerifierFS authority_eligible + non-zero recursive counters
+ * allow assembly (AssessCompleteRecursiveFixedPointResidualInventoryV1).
+ * Authority Ready stays separate/false.
  */
 inline constexpr bool kRCStage3RelationClosureRecursiveChildrenExecutable =
     false;

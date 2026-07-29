@@ -382,6 +382,77 @@ BOOST_AUTO_TEST_CASE(strategy_screen_selects_hash_bound_multiproof_v1)
     // Recursive-child consumption remains a separate fail-closed gate.
     BOOST_CHECK(!kRCStage3RelationClosureRecursiveChildrenExecutable);
     BOOST_CHECK(!kRCStage3RelationClosureAuthorityReady);
+
+    // Living counters must track CellAudit (still 0) — never hard-coded lies.
+    {
+        const auto measured =
+            MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+        BOOST_CHECK_EQUAL(
+            measured.recursively_consumed_endpoints, 0U);
+        BOOST_CHECK_EQUAL(
+            measured.recursively_consumed_roles, 0U);
+        BOOST_CHECK(
+            !measured.role_audit_reports_full_recursive_consumption);
+        BOOST_CHECK(!measured.complete);
+        BOOST_CHECK_EQUAL(
+            measured.counter_note,
+            "recursive_counters_0_of_52_and_0_of_14");
+        std::string interlock_why;
+        BOOST_CHECK_MESSAGE(
+            ValidateRCStage3RelationClosureRecursiveConsumptionInterlockV1(
+                measured, 0, 0, &interlock_why),
+            interlock_why);
+        // Fail-closed: RoleAudit-full while capability counters stay 0.
+        auto forged = measured;
+        forged.role_audit_reports_full_recursive_consumption = true;
+        forged.recursively_consumed_roles = 14;
+        forged.recursively_consumed_endpoints = 52;
+        BOOST_CHECK(
+            !ValidateRCStage3RelationClosureRecursiveConsumptionInterlockV1(
+                forged, 0, 0, &interlock_why));
+        BOOST_CHECK(
+            interlock_why.find(
+                "role_audit_full_while_capability_counters_zero") !=
+            std::string::npos);
+    }
+
+    // Constexpr alone must not invent recursive_child_consumed.
+    {
+        ClearRCStage3ParentVerifiedRecursiveChildEvidenceV1();
+        BOOST_CHECK(
+            !RCStage3EndpointParentVerifiedRecursiveChildEvidenceV1(
+                RCStage3RelationEndpoint::EpisodeGemmOperandA));
+        // Registering evidence on a same-trace alias endpoint raises the
+        // living CellAudit bit without flipping the Executable gate.
+        BOOST_REQUIRE(
+            RegisterRCStage3ParentVerifiedRecursiveChildEvidenceV1(
+                RCStage3RelationEndpoint::EpisodeGemmOperandA));
+        const auto cells_with_evidence =
+            CurrentRCStage3RelationEndpointCellAudit();
+        uint16_t consumed = 0;
+        for (const auto& cell : cells_with_evidence) {
+            consumed += cell.recursive_child_consumed ? 1 : 0;
+            if (cell.endpoint ==
+                RCStage3RelationEndpoint::EpisodeGemmOperandA) {
+                BOOST_CHECK(cell.recursive_child_consumed);
+            }
+        }
+        BOOST_CHECK_EQUAL(consumed, 1U);
+        BOOST_CHECK(
+            !kRCStage3RelationClosureRecursiveChildrenExecutable);
+        const auto measured =
+            MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+        BOOST_CHECK_EQUAL(
+            measured.recursively_consumed_endpoints, 1U);
+        BOOST_CHECK(
+            measured.counter_note.find(
+                "recursive_counters_1_of_52") != std::string::npos);
+        ClearRCStage3ParentVerifiedRecursiveChildEvidenceV1();
+        const auto cleared =
+            MeasureRCStage3RelationClosureRecursiveConsumptionV1();
+        BOOST_CHECK_EQUAL(
+            cleared.recursively_consumed_endpoints, 0U);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(
