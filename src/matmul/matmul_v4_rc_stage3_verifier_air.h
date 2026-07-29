@@ -374,10 +374,21 @@ BuildCanonicalFiatShamirProgram(const NarrowChildShape& child);
 // Hard-fork bounded transcript format: schedules `ood_candidates` fixed
 // candidate draws per OOD challenge (z1,z2) and flips rejection_loop_bounded
 // when ComputeFixedOodScheduleBound proves negligible failure.  ood_candidates
-// defaults to kRCFiatShamirOodCandidateSchedule.
+// defaults to kRCFiatShamirOodCandidateSchedule.  Canary-only (Q=2 SHA-FS);
+// never authority_eligible.
 [[nodiscard]] FiatShamirProgram BuildBoundedFiatShamirProgram(
     const NarrowChildShape& child,
     uint32_t ood_candidates = kRCFiatShamirOodCandidateSchedule);
+/**
+ * Additive P2/Q192/fixed-K=2 (V10) Fiat–Shamir program: same Poseidon2 +
+ * short-transcript identity as ActiveConfig V8, but with a legislated K=2
+ * OOD window.  authority_eligible when queries==kRCFri3AlgNumQueries;
+ * canary_only stays false.  Does NOT activate V10 or rewrite ActiveConfig
+ * (kRCFri3AlgP2Q192K2ActivatedV10 remains false).  SHA-AIR chip conjuncts
+ * stay inapplicable on this Poseidon2 path.
+ */
+[[nodiscard]] FiatShamirProgram BuildP2Q192K2V10FiatShamirProgram(
+    const NarrowChildShape& child);
 [[nodiscard]] bool ValidateCanonicalFiatShamirProgram(
     const FiatShamirProgram& program, std::string* why = nullptr);
 [[nodiscard]] FiatShamirWitness BuildFiatShamirWitness(
@@ -610,10 +621,15 @@ BuildFiatShamirShaExecutionPlanV1(
 
 /**
  * Inventory of predicates that still block flipping
- * `kVerifierFiatShamirAirExecutable`.  Fail-closed: `executable_ready` is
- * true only when every conjunct below is measured green.  Does NOT flip the
- * constexpr — callers must keep Ready/CompleteFP false until this reports
- * ready AND the SHA AIR / parent join are differentially tested.
+ * `kVerifierFiatShamirAirExecutable`.
+ *
+ * Chip Executable requires every technical conjunct AND `authority_eligible`
+ * on a non-canary (ActiveConfig / production-path) program. Never substitute
+ * `!kVerifierAirConsensusAuthority` / "consensus still open" for
+ * `authority_eligible` — that circularly certifies SHA canaries as production
+ * chips. Fail-closed: `executable_ready` is true only when
+ * `open_predicates==0` AND the Executable constexpr is true. Does NOT flip
+ * the constexpr — callers must keep Ready/CompleteFP/AuthorityReady false.
  */
 struct VerifierFiatShamirAirChipGapV1 {
     bool bounded_ood_program_legislated{false};
@@ -626,8 +642,22 @@ struct VerifierFiatShamirAirChipGapV1 {
     bool challenge_selection_air_constrained{false};
     bool air_backed_all_kinds_reconstructed{false};
     bool whole_verifier_sha_equations_in_air{false};
+    /**
+     * Production-path conjunct: program.authority_eligible && !canary_only.
+     * SHA canaries leave this false even when every SHA technical conjunct
+     * is green.
+     */
     bool authority_eligible{false};
-    /** Conjunction; must stay false until every field above is true. */
+    /**
+     * Living ActiveConfig / non-canary residual (assessor field, not a bump
+     * conjunct). Empty only when authority_eligible is green and no
+     * ActiveConfig-specific FS schedule blocker remains; SHA/P2 path gaps
+     * still appear in open_predicates. Examples: "canary_only",
+     * "queries_ne_active_q192", "unbounded_ood_rejection_loop",
+     * "p2_squeeze_sha_execution_plan_inapplicable".
+     */
+    std::string active_config_fs_blocker;
+    /** Conjunction; must stay false until every bumped field above is true. */
     bool executable_ready{false};
     uint32_t open_predicates{0};
     std::string note;
@@ -636,13 +666,15 @@ struct VerifierFiatShamirAirChipGapV1 {
 /**
  * Assess the SHA-FS chip gap against a concrete (program, seed, proof).
  * Prefer a bounded program (`BuildBoundedFiatShamirProgram`) when measuring
- * the fixed-schedule conjunct; legacy V3 programs correctly leave
- * `sha_fixed_schedule` false.
+ * the fixed-schedule conjunct; legacy V3 / ActiveConfig programs correctly
+ * leave `sha_fixed_schedule` false. Additive V10 P2/Q192/K2 programs can
+ * close authority_eligible + bounded-OOD while leaving SHA-AIR conjuncts
+ * open (Poseidon2 squeezes).
  *
- * When `program.ood_candidates>0`, the child's z1/z2 must equal the bounded
- * K-window selection under the same absorb prefix (consensus-bounded sampler).
+ * When `program.ood_candidates>0` on the SHA canary lane, the child's z1/z2
+ * must equal the bounded K-window selection under the same absorb prefix.
  * Use AlignAlgAirProofOodToBoundedShaScheduleV1 to patch a host proof for
- * light schedule canaries — never for production Ready.
+ * light schedule canaries — never for production Ready / Executable.
  */
 [[nodiscard]] VerifierFiatShamirAirChipGapV1
 AssessVerifierFiatShamirAirChipGapV1(

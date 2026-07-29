@@ -753,9 +753,11 @@ BOOST_AUTO_TEST_CASE(
         << " kinds8=" << gap.air_backed_all_kinds_reconstructed
         << " whole_sha=" << gap.whole_verifier_sha_equations_in_air
         << " auth=" << gap.authority_eligible
+        << " blocker=" << gap.active_config_fs_blocker
         << " ready=" << gap.executable_ready
         << " note=" << gap.note);
     BOOST_CHECK(!gap.executable_ready);
+    BOOST_CHECK_EQUAL(gap.active_config_fs_blocker, "canary_only");
     BOOST_CHECK_GE(gap.open_predicates, 1U);
     BOOST_CHECK(gap.note.find("consensus_open") == std::string::npos);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
@@ -840,6 +842,7 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
+    BOOST_CHECK_EQUAL(gap.active_config_fs_blocker, "canary_only");
     BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
     // Reverted cheat used consensus_open as a passing conjunct; must not return.
     BOOST_CHECK(gap.note.find("consensus_open") == std::string::npos);
@@ -943,8 +946,156 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(!gap.executable_ready);
     BOOST_CHECK(gap.non_sha_challenges_recursively_consumed);
     BOOST_CHECK(!gap.authority_eligible);
+    BOOST_CHECK_EQUAL(gap.active_config_fs_blocker, "canary_only");
     BOOST_CHECK_EQUAL(gap.open_predicates, 1U);
     static_assert(!va::kVerifierFiatShamirAirExecutable);
+}
+
+// Fail-closed: honest SHA canary never closes executable_ready via
+// consensus-authority-still-open theater. authority_eligible stays the
+// production-path conjunct; only ActiveConfig / non-canary (e.g. V10)
+// programs can turn it green.
+BOOST_AUTO_TEST_CASE(
+    sha_canary_never_closes_executable_via_consensus_open)
+{
+    const uint256 seed = Filled(0xce);
+    const va::AlgAirProof canary_proof =
+        HonestBoundedShaFsCanaryProof(seed);
+    const nr::NarrowChildShape canary_shape =
+        ShapeForProof(canary_proof);
+    const va::FiatShamirProgram canary =
+        va::BuildBoundedFiatShamirProgram(
+            canary_shape, va::kRCFiatShamirOodCandidateSchedule);
+    BOOST_REQUIRE(canary.valid);
+    BOOST_CHECK(canary.canary_only);
+    BOOST_CHECK(!canary.authority_eligible);
+
+    const va::VerifierFiatShamirAirChipGapV1 canary_gap =
+        va::AssessVerifierFiatShamirAirChipGapV1(
+            canary, seed, canary_proof);
+    BOOST_TEST_MESSAGE(canary_gap.note);
+    // Technical SHA conjuncts may be green on the canary...
+    BOOST_CHECK(canary_gap.sha_execution_plan_valid);
+    BOOST_CHECK(canary_gap.sha_fixed_schedule);
+    BOOST_CHECK(canary_gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(canary_gap.non_sha_challenges_recursively_consumed);
+    // ...but authority_eligible / executable_ready must stay closed.
+    BOOST_CHECK(!canary_gap.authority_eligible);
+    BOOST_CHECK_EQUAL(canary_gap.active_config_fs_blocker, "canary_only");
+    BOOST_CHECK_GE(canary_gap.open_predicates, 1U);
+    BOOST_CHECK(!canary_gap.executable_ready);
+    // Consensus authority remaining open is NOT a chip-closing conjunct.
+    static_assert(!va::kVerifierAirConsensusAuthority);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+
+    // ActiveConfig Canonical on Q=192 closes authority_eligible; living
+    // blocker documents the unbounded OOD residual (not canary theater).
+    nr::NarrowChildShape active_shape = canary_shape;
+    active_shape.queries = rc::kRCFri3AlgNumQueries;
+    const va::FiatShamirProgram active =
+        va::BuildCanonicalFiatShamirProgram(active_shape);
+    BOOST_REQUIRE(active.valid);
+    BOOST_CHECK(!active.canary_only);
+    BOOST_CHECK(active.authority_eligible);
+    BOOST_CHECK_EQUAL(active.ood_candidates, 0U);
+    BOOST_CHECK(!active.rejection_loop_bounded);
+    BOOST_CHECK_EQUAL(
+        active.child_proof_version,
+        rc::kRCFri3AlgActiveBatchProofVersion);
+
+    const va::AlgAirProof active_proof = ToyProof(active_shape);
+    const va::VerifierFiatShamirAirChipGapV1 active_gap =
+        va::AssessVerifierFiatShamirAirChipGapV1(
+            active, seed, active_proof);
+    BOOST_TEST_MESSAGE(active_gap.note);
+    BOOST_CHECK(active_gap.authority_eligible);
+    BOOST_CHECK_EQUAL(
+        active_gap.active_config_fs_blocker,
+        "unbounded_ood_rejection_loop");
+    BOOST_CHECK(!active_gap.bounded_ood_program_legislated);
+    BOOST_CHECK(!active_gap.executable_ready);
+    BOOST_CHECK_GE(active_gap.open_predicates, 1U);
+}
+
+// Additive V10 P2/Q192/K=2 FS program: authority_eligible + bounded OOD
+// measure green on the production-shaped Poseidon2 path; SHA-AIR conjuncts
+// remain the living blocker (not another SHA canary). Executable stays false.
+BOOST_AUTO_TEST_CASE(
+    p2_q192_k2_v10_fs_program_closes_authority_eligible_not_executable)
+{
+    BOOST_CHECK(!rc::kRCFri3AlgP2Q192K2ActivatedV10);
+    static_assert(!va::kVerifierFiatShamirAirExecutable);
+
+    nr::NarrowChildShape shape;
+    shape.child_w = 1;
+    shape.child_n_rows = 2;
+    shape.child_n_coeffs = 2;
+    shape.child_n_lde = 32;
+    shape.merkle_depth = 5;
+    shape.n_folds = 1;
+    shape.queries = rc::kRCFri3AlgNumQueries;
+    shape.child_constraints = 1;
+    shape.arity = 1;
+
+    const va::FiatShamirProgram v10 =
+        va::BuildP2Q192K2V10FiatShamirProgram(shape);
+    BOOST_REQUIRE_MESSAGE(v10.valid, v10.note);
+    BOOST_CHECK(va::ValidateCanonicalFiatShamirProgram(v10));
+    BOOST_CHECK(!v10.canary_only);
+    BOOST_CHECK(v10.authority_eligible);
+    BOOST_CHECK(!v10.child_sha256d_challenges);
+    BOOST_CHECK(v10.child_short_transcript_commitments);
+    BOOST_CHECK_EQUAL(
+        v10.ood_candidates, rc::kRCFri3AlgP2Q192K2OodCandidatesV10);
+    BOOST_CHECK(v10.rejection_loop_bounded);
+    BOOST_CHECK_EQUAL(
+        v10.child_proof_version,
+        rc::kRCFri3AlgP2Q192K2ProofVersionV10);
+    BOOST_CHECK_EQUAL(
+        v10.child_domain_tag, rc::kRCFri3AlgP2Q192K2DomainTagV10);
+    // Canary builder on the same Q192 shape must refuse (requires Q=2).
+    BOOST_CHECK(
+        !va::BuildBoundedFiatShamirProgram(
+             shape, va::kRCFiatShamirOodCandidateSchedule)
+             .valid);
+
+    // Concrete V10 proof path (existing additive producer). Shape must
+    // match the committed batch so BuildP2Q192K2V10FiatShamirProgram stays
+    // valid (column_len.size()-1 == child_w).
+    const uint256 seed = Filled(0xd2);
+    std::vector<std::vector<gf::Fp3>> columns{
+        {gf::Fp3::FromFp(3), gf::Fp3::FromFp(5)},
+        {gf::Fp3::FromFp(7), gf::Fp3::FromFp(11)}};
+    const auto committed =
+        rc::Fri3AlgP2Q192K2V10BatchCommit(columns, seed);
+    BOOST_REQUIRE_MESSAGE(committed.ok, committed.note);
+    va::AlgAirProof proof;
+    proof.batch = committed.proof;
+    proof.trace_commit = Filled(0xa2);
+    const nr::NarrowChildShape proof_shape = ShapeForProof(proof);
+    BOOST_CHECK_EQUAL(proof_shape.queries, rc::kRCFri3AlgNumQueries);
+    BOOST_CHECK_EQUAL(proof_shape.child_w, 1U);
+    const va::FiatShamirProgram v10_proof_program =
+        va::BuildP2Q192K2V10FiatShamirProgram(proof_shape);
+    BOOST_REQUIRE_MESSAGE(
+        v10_proof_program.valid, v10_proof_program.note);
+
+    const va::VerifierFiatShamirAirChipGapV1 gap =
+        va::AssessVerifierFiatShamirAirChipGapV1(
+            v10_proof_program, seed, proof);
+    BOOST_TEST_MESSAGE(gap.note);
+    BOOST_CHECK(gap.authority_eligible);
+    BOOST_CHECK(gap.bounded_ood_program_legislated);
+    BOOST_CHECK(gap.bounded_ood_rejection_loop_bounded);
+    BOOST_CHECK_EQUAL(
+        gap.active_config_fs_blocker,
+        "p2_squeeze_sha_execution_plan_inapplicable");
+    // SHA-AIR chip path does not apply to Poseidon2 V10.
+    BOOST_CHECK(!gap.sha_execution_plan_valid);
+    BOOST_CHECK(!gap.sha_fixed_schedule);
+    BOOST_CHECK(!gap.whole_verifier_sha_equations_in_air);
+    BOOST_CHECK(!gap.executable_ready);
+    BOOST_CHECK_GE(gap.open_predicates, 1U);
 }
 
 BOOST_AUTO_TEST_CASE(fiat_shamir_witness_binds_every_claim_without_claiming_sha_air)

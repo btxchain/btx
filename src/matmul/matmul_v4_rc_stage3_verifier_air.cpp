@@ -714,41 +714,68 @@ uint32_t SelectFirstAcceptableOodIndex(
 }
 
 static FiatShamirProgram BuildFiatShamirProgramImpl(
-    const NarrowChildShape& child, uint32_t ood_candidates)
+    const NarrowChildShape& child,
+    uint32_t ood_candidates,
+    bool p2_q192_k2_v10_lane)
 {
     FiatShamirProgram out;
     out.child_shape = child;
     out.ood_candidates = ood_candidates;
-    const bool bounded_sha_canary = ood_candidates != 0;
-    out.child_proof_version =
-        bounded_sha_canary
-            ? kRCFri3AlgShaFsCanaryProofVersion
-            : kRCFri3AlgActiveBatchProofVersion;
-    out.child_domain_tag =
-        bounded_sha_canary
-            ? kRCFri3AlgShaFsCanaryDomainTag
-            : kRCFri3AlgActiveBatchDomainTag;
-    out.child_domain_tag_bytes =
-        static_cast<uint32_t>(out.child_domain_tag.size());
-    out.child_short_transcript_commitments =
-        bounded_sha_canary
-            ? true
-            : kRCFri3AlgActiveShortTranscript;
-    out.child_sha256d_challenges =
-        bounded_sha_canary
-            ? true
-            : !kRCFri3AlgActiveP2Squeeze;
-    out.canary_only = bounded_sha_canary;
-    out.authority_eligible =
-        !bounded_sha_canary &&
-        child.queries == kRCFri3AlgNumQueries;
-    if (bounded_sha_canary &&
-        (ood_candidates != kRCFiatShamirOodCandidateSchedule ||
-         child.queries != 2)) {
-        out.note =
-            "stage3:verifier_air:"
-            "sha_canary_requires_q2_k2";
-        return out;
+    const bool bounded_sha_canary =
+        ood_candidates != 0 && !p2_q192_k2_v10_lane;
+    if (p2_q192_k2_v10_lane) {
+        // Additive V10: ActiveConfig-shaped P2/Q192 with fixed K=2 OOD.
+        // Distinct proof version/domain; never canary_only; never activates
+        // kRCFri3AlgP2Q192K2ActivatedV10 / ActiveConfig selectors.
+        if (ood_candidates !=
+                kRCFri3AlgP2Q192K2OodCandidatesV10 ||
+            child.queries != kRCFri3AlgNumQueries) {
+            out.note =
+                "stage3:verifier_air:"
+                "p2_q192_k2_requires_q192_k2";
+            return out;
+        }
+        out.child_proof_version =
+            kRCFri3AlgP2Q192K2ProofVersionV10;
+        out.child_domain_tag =
+            kRCFri3AlgP2Q192K2DomainTagV10;
+        out.child_domain_tag_bytes =
+            static_cast<uint32_t>(out.child_domain_tag.size());
+        out.child_short_transcript_commitments = true;
+        out.child_sha256d_challenges = false;
+        out.canary_only = false;
+        out.authority_eligible = true;
+    } else {
+        out.child_proof_version =
+            bounded_sha_canary
+                ? kRCFri3AlgShaFsCanaryProofVersion
+                : kRCFri3AlgActiveBatchProofVersion;
+        out.child_domain_tag =
+            bounded_sha_canary
+                ? kRCFri3AlgShaFsCanaryDomainTag
+                : kRCFri3AlgActiveBatchDomainTag;
+        out.child_domain_tag_bytes =
+            static_cast<uint32_t>(out.child_domain_tag.size());
+        out.child_short_transcript_commitments =
+            bounded_sha_canary
+                ? true
+                : kRCFri3AlgActiveShortTranscript;
+        out.child_sha256d_challenges =
+            bounded_sha_canary
+                ? true
+                : !kRCFri3AlgActiveP2Squeeze;
+        out.canary_only = bounded_sha_canary;
+        out.authority_eligible =
+            !bounded_sha_canary &&
+            child.queries == kRCFri3AlgNumQueries;
+        if (bounded_sha_canary &&
+            (ood_candidates != kRCFiatShamirOodCandidateSchedule ||
+             child.queries != 2)) {
+            out.note =
+                "stage3:verifier_air:"
+                "sha_canary_requires_q2_k2";
+            return out;
+        }
     }
     nr::NarrowVcsConfig config;
     config.poseidon_strategy =
@@ -840,6 +867,8 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
         // Fixed schedule: lay every candidate draw for z1 then z2.  The SHA-FS
         // chip materializes all K SHA256d draws in a fixed-width V_CS and a
         // selector picks the first candidate passing the OOD predicate.
+        // V10 P2/Q192 uses the same K-window event layout with Poseidon2
+        // squeezes (child_sha256d_challenges=false).
         for (uint32_t k = 0; k < ood_candidates; ++k) {
             add(FiatShamirEventKind::ChallengeZ1, k, 0);
         }
@@ -898,23 +927,44 @@ static FiatShamirProgram BuildFiatShamirProgramImpl(
 FiatShamirProgram BuildCanonicalFiatShamirProgram(
     const NarrowChildShape& child)
 {
-    return BuildFiatShamirProgramImpl(child, 0);
+    return BuildFiatShamirProgramImpl(child, 0, false);
 }
 
 FiatShamirProgram BuildBoundedFiatShamirProgram(
     const NarrowChildShape& child, uint32_t ood_candidates)
 {
     return BuildFiatShamirProgramImpl(
-        child, ood_candidates == 0 ? 1 : ood_candidates);
+        child, ood_candidates == 0 ? 1 : ood_candidates, false);
+}
+
+FiatShamirProgram BuildP2Q192K2V10FiatShamirProgram(
+    const NarrowChildShape& child)
+{
+    return BuildFiatShamirProgramImpl(
+        child, kRCFri3AlgP2Q192K2OodCandidatesV10, true);
 }
 
 bool ValidateCanonicalFiatShamirProgram(
     const FiatShamirProgram& program, std::string* why)
 {
     if (!program.valid) return Fail(why, "fs_program_not_valid");
+    const bool p2_q192_k2_v10 =
+        program.child_proof_version ==
+            kRCFri3AlgP2Q192K2ProofVersionV10 ||
+        program.child_domain_tag ==
+            kRCFri3AlgP2Q192K2DomainTagV10;
+    if (p2_q192_k2_v10 &&
+        (program.canary_only ||
+         program.child_sha256d_challenges ||
+         program.ood_candidates !=
+             kRCFri3AlgP2Q192K2OodCandidatesV10)) {
+        return Fail(why, "noncanonical_fs_program");
+    }
     const FiatShamirProgram expected =
         BuildFiatShamirProgramImpl(
-            program.child_shape, program.ood_candidates);
+            program.child_shape,
+            program.ood_candidates,
+            p2_q192_k2_v10);
     if (!expected.valid ||
         program.ood_candidates != expected.ood_candidates ||
         program.child_proof_version != expected.child_proof_version ||
@@ -3197,11 +3247,20 @@ AssessVerifierFiatShamirAirChipGapV1(
     AlgAirProof aligned = child_proof;
     std::string align_why;
     bool aligned_ok = true;
-    if (out.bounded_ood_program_legislated) {
+    // SHA Align is canary-lane only. ActiveConfig / V10 P2 bounded programs
+    // must not be rewritten by the SHA schedule aligner.
+    const bool sha_canary_lane =
+        program.canary_only && program.child_sha256d_challenges;
+    if (out.bounded_ood_program_legislated && sha_canary_lane) {
         aligned_ok =
             AlignAlgAirProofOodToBoundedShaScheduleV1(
                 program, child_fs_seed, aligned,
                 &align_why);
+    } else if (out.bounded_ood_program_legislated &&
+               !sha_canary_lane) {
+        aligned_ok = false;
+        align_why =
+            "p2_or_non_sha_bounded_ood_no_sha_align";
     }
     const FiatShamirShaExecutionPlanV1 plan =
         aligned_ok
@@ -3251,8 +3310,24 @@ AssessVerifierFiatShamirAirChipGapV1(
                   program, child_fs_seed, aligned)
             : FiatShamirWholeVerifierShaEquationsInAirV1{};
     out.whole_verifier_sha_equations_in_air = whole_sha.in_air;
+    // Production-path conjunct: never grant from canary or from
+    // !kVerifierAirConsensusAuthority (circular consensus_open evidence).
     out.authority_eligible =
         program.authority_eligible && !program.canary_only;
+    if (program.canary_only) {
+        out.active_config_fs_blocker = "canary_only";
+    } else if (!program.authority_eligible) {
+        out.active_config_fs_blocker = "queries_ne_active_q192";
+    } else if (program.ood_candidates == 0 ||
+               !program.rejection_loop_bounded) {
+        out.active_config_fs_blocker =
+            "unbounded_ood_rejection_loop";
+    } else if (!program.child_sha256d_challenges) {
+        out.active_config_fs_blocker =
+            "p2_squeeze_sha_execution_plan_inapplicable";
+    } else {
+        out.active_config_fs_blocker.clear();
+    }
 
     const auto bump = [&](bool ok) {
         if (!ok) ++out.open_predicates;
@@ -3268,12 +3343,16 @@ AssessVerifierFiatShamirAirChipGapV1(
     bump(out.air_backed_all_kinds_reconstructed);
     bump(out.whole_verifier_sha_equations_in_air);
     bump(out.authority_eligible);
-    // Fail-closed: never claim executable while the constexpr is false.
+    // Fail-closed: never claim executable while the constexpr is false,
+    // while authority_eligible is open, or while the program is canary-only.
     out.executable_ready =
         out.open_predicates == 0 &&
+        out.authority_eligible &&
+        !program.canary_only &&
         kVerifierFiatShamirAirExecutable;
     out.note =
-        !aligned_ok && out.bounded_ood_program_legislated
+        !aligned_ok && out.bounded_ood_program_legislated &&
+                sha_canary_lane
             ? ("stage3:verifier_air:fs_chip_gap:"
                "bounded_align:" +
                align_why)
@@ -3295,7 +3374,15 @@ AssessVerifierFiatShamirAirChipGapV1(
                                                        : "0") +
                ";recursive=" +
                (out.sha_recursively_consumed ? "1" : "0") +
-               ";executable_constexpr=0");
+               ";auth_eligible=" +
+               (out.authority_eligible ? "1" : "0") +
+               ";active_blocker=" +
+               out.active_config_fs_blocker +
+               ";executable_constexpr=" +
+               (kVerifierFiatShamirAirExecutable ? "1"
+                                                 : "0") +
+               (out.executable_ready ? ";chip_ready"
+                                     : ";chip_open"));
     return out;
 }
 
