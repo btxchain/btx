@@ -4,7 +4,6 @@
 
 #include <boost/test/unit_test.hpp>
 
-#include <hash.h>
 #include <matmul/matmul_v4_rc_stage3_episode_terminal_alg.h>
 
 #include <algorithm>
@@ -19,8 +18,6 @@ namespace digest =
 namespace ha = rc::stage3_hash_air;
 namespace tape =
     rc::stage3_multirow_v13_proof_tape_air;
-namespace ordinary =
-    rc::stage3_ordinary_recursive_leaf;
 namespace gf = rc::gkr_field;
 
 namespace {
@@ -82,35 +79,6 @@ digest::TapeChallengeContextV1 TapeContext()
         static_cast<uint32_t>(
             tape::BuildShardPlansV2(
                 out.shape, out.binding).size());
-    return out;
-}
-
-ordinary::PublicBindingV1 Binding(
-    uint32_t slot,
-    const terminal_alg::RecursiveChildInputV1&
-        input)
-{
-    ordinary::PublicBindingV1 out;
-    HashWriter node;
-    node << "BTX_TEST_TERMINAL_ALG_NODE_V1";
-    node << slot;
-    node << static_cast<uint8_t>(input.kind);
-    out.node_binding = node.GetHash();
-    HashWriter program;
-    program << "BTX_TEST_TERMINAL_ALG_PROGRAM_V1";
-    program << input.cs.n_rows;
-    program << input.cs.n_columns;
-    program << static_cast<uint32_t>(
-        input.cs.constraints.size());
-    out.program_binding = program.GetHash();
-    HashWriter context;
-    context << "BTX_TEST_TERMINAL_ALG_CONTEXT_V1";
-    context << input.source_statement;
-    out.proof_context_binding =
-        context.GetHash();
-    out.public_statement_binding =
-        input.source_statement;
-    out.fs_seed = input.public_fs_seed;
     return out;
 }
 
@@ -221,17 +189,37 @@ BOOST_AUTO_TEST_CASE(
         BOOST_CHECK_EQUAL(
             children[slot].cs.preprocessed.size(),
             children[slot].cs.n_columns);
-        const auto retained =
-            ordinary::RetainAlgProofV1(
-                children[slot].cs,
-                children[slot].proof,
-                Binding(slot, children[slot]));
+        std::vector<unsigned char> proof_bytes;
         BOOST_REQUIRE_MESSAGE(
-            retained.valid, retained.note);
+            rc::SerializeAirQuotientProofAlg(
+                children[slot].proof,
+                proof_bytes, &why),
+            why);
+        const auto retained =
+            rc::DeserializeAirQuotientProofAlg(
+                proof_bytes, &why);
+        BOOST_REQUIRE_MESSAGE(
+            retained.has_value(), why);
+        std::vector<unsigned char> canonical;
+        BOOST_REQUIRE_MESSAGE(
+            rc::SerializeAirQuotientProofAlg(
+                *retained, canonical, &why),
+            why);
+        BOOST_CHECK(canonical == proof_bytes);
+        BOOST_REQUIRE_MESSAGE(
+            (rc::air_quotient::AirQuotientVerify<
+                gf::Fp3,
+                rc::air_quotient::
+                    AirFriBackendAlg<gf::Fp3>>(
+                        children[slot].cs,
+                        *retained,
+                        children[slot].public_fs_seed,
+                        &why)),
+            why);
         BOOST_CHECK(
             rc::recursive_fixedpoint::
                 ComputeNormalizedAlgAirProofCommitment(
-                    retained.receipt.proof) ==
+                    *retained) ==
             product.children[slot]
                 .proof_commitment);
     }
