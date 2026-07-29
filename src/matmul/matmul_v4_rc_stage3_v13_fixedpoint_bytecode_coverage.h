@@ -53,6 +53,20 @@ struct CallbackCoverageV1 {
      */
     uint32_t invalid_program_provenance_constraints{0};
     uint32_t canonical_program_roots{0};
+    /**
+     * Canonical proof-tape constraints recognized from the committed
+     * ProgramTable bytes after undoing a parent-column relocation.  The
+     * diagnostic constraint name is deliberately not consulted.
+     */
+    uint32_t canonical_tape_constraints{0};
+    uint32_t canonical_tape_program_tables{0};
+    /**
+     * Number of recognized tape tables for which every canonical constraint
+     * ordinal occurs exactly once.  A truncated or duplicated tape therefore
+     * cannot satisfy the tape-family inventory.
+     */
+    uint32_t complete_canonical_tape_program_tables{0};
+    bool canonical_tape_inventory_complete{false};
     uint32_t native_lift_constraints{0};
     uint32_t native_poseidon_constraints{0};
     uint32_t native_tape_constraints{0};

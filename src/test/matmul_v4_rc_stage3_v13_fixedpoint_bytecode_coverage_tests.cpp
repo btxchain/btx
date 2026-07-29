@@ -6,6 +6,7 @@
 
 #include <matmul/matmul_v4_rc_stage3_v13_fixedpoint_bytecode_coverage.h>
 #include <matmul/matmul_v4_rc_stage3_v13_composer_glue_bytecode.h>
+#include <matmul/matmul_v4_rc_stage3_v13_proof_tape_bytecode.h>
 
 namespace rc = matmul::v4::rc;
 namespace aq = rc::air_quotient;
@@ -14,6 +15,8 @@ namespace coverage =
 namespace glue =
     rc::stage3_v13_composer_glue_bytecode;
 namespace gf = rc::gkr_field;
+namespace tape =
+    rc::stage3_multirow_v13_proof_tape_air;
 
 BOOST_AUTO_TEST_SUITE(
     matmul_v4_rc_stage3_v13_fixedpoint_bytecode_coverage_tests)
@@ -190,6 +193,103 @@ BOOST_AUTO_TEST_CASE(
         !gf::IsZero(
             cs.constraints[2].eval(
                 current, next)));
+}
+
+BOOST_AUTO_TEST_CASE(
+    canonical_tape_inventory_requires_exact_relocated_program_and_ordinals)
+{
+    rc::constraint_bytecode::ProgramTable source;
+    std::string why;
+    BOOST_REQUIRE(
+        tape::BuildCanonicalProgramTableV1(
+            source, &why));
+    constexpr uint32_t kBase = 17;
+    auto relocated = source;
+    relocated.current_width += kBase;
+    relocated.next_width += kBase;
+    for (auto& program : relocated.programs) {
+        program.current_width += kBase;
+        program.next_width += kBase;
+        for (auto& instruction :
+             program.instructions) {
+            if (instruction.opcode ==
+                    rc::constraint_bytecode::
+                        Opcode::Current ||
+                instruction.opcode ==
+                    rc::constraint_bytecode::
+                        Opcode::Next) {
+                instruction.lhs += kBase;
+            }
+        }
+    }
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    BOOST_REQUIRE(
+        rc::constraint_bytecode::
+            BuildAirConstraintSystemFromProgramTable(
+                relocated, 8, cs, &why));
+    const auto complete =
+        coverage::AssessCallbackCoverageV1(cs);
+    BOOST_CHECK_EQUAL(
+        complete.canonical_tape_constraints,
+        relocated.programs.size());
+    BOOST_CHECK_EQUAL(
+        complete.canonical_tape_program_tables,
+        1U);
+    BOOST_CHECK_EQUAL(
+        complete
+            .complete_canonical_tape_program_tables,
+        1U);
+    BOOST_CHECK(
+        complete.canonical_tape_inventory_complete);
+
+    auto truncated = cs;
+    truncated.constraints.pop_back();
+    const auto missing =
+        coverage::AssessCallbackCoverageV1(
+            truncated);
+    BOOST_CHECK_EQUAL(
+        missing.canonical_tape_program_tables,
+        1U);
+    BOOST_CHECK_EQUAL(
+        missing
+            .complete_canonical_tape_program_tables,
+        0U);
+    BOOST_CHECK(
+        !missing.canonical_tape_inventory_complete);
+
+    auto wrong_metadata = cs;
+    wrong_metadata.constraints.front().alg_degree += 1;
+    const auto metadata_forged =
+        coverage::AssessCallbackCoverageV1(
+            wrong_metadata);
+    BOOST_CHECK(
+        metadata_forged
+            .invalid_program_provenance_constraints >
+        0);
+    BOOST_CHECK(
+        !metadata_forged
+             .canonical_tape_inventory_complete);
+
+    auto copied_source_root = cs;
+    const uint256 source_root =
+        rc::constraint_bytecode::
+            CommitProgramTable(source);
+    for (auto& constraint :
+         copied_source_root.constraints) {
+        constraint.canonical_program_table_root =
+            source_root;
+    }
+    const auto forged =
+        coverage::AssessCallbackCoverageV1(
+            copied_source_root);
+    BOOST_CHECK_EQUAL(
+        forged.canonical_tape_constraints,
+        0U);
+    BOOST_CHECK(
+        forged.invalid_program_provenance_constraints >
+        0);
+    BOOST_CHECK(
+        !forged.canonical_tape_inventory_complete);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
