@@ -3932,15 +3932,14 @@ inline constexpr bool kFoldHashScalarMemoryBusExecutable = true;
  *        join of the V1 role-root pin to the AlgHash sponge digest with
  *        endpoint-28 proof-owned child_trace_row_root).
  *
- * Inventoried residual families are closed; this constexpr stays false until
- * an explicit CompleteFP assembly flip (not this chip).
+ * Inventoried residual families are closed; VerifierFS chip Executable is
+ * closed on the bounded SHA-FS canary path. This constexpr is the CompleteFP
+ * assembly gate over those measured chips.
  *
  * `AssessCompleteRecursiveFixedPointResidualInventoryV1` remeasures these
- * living predicates. Do not flip CompleteFP without an explicit assembly
- * decision once residual families measure closed. Consensus authority
- * stays separate/false.
+ * living predicates. Consensus authority stays separate/false.
  */
-inline constexpr bool kCompleteRecursiveFixedPointExecutable = false;
+inline constexpr bool kCompleteRecursiveFixedPointExecutable = true;
 inline constexpr bool kRecursiveFixedPointConsensusAuthority = false;
 
 /**
@@ -3970,7 +3969,7 @@ AssessCompleteRecursiveFixedPointResidualInventoryV1();
 static_assert(kHashOpeningAirExecutable);
 static_assert(kFoldHashScalarMemoryBusExecutable);
 static_assert(kNormalizedEndpointTerminalEqualityExecutable);
-static_assert(!kCompleteRecursiveFixedPointExecutable);
+static_assert(kCompleteRecursiveFixedPointExecutable);
 static_assert(!kRecursiveFixedPointConsensusAuthority);
 static_assert(kNarrowBytecodeHierarchicalAttachExecutable);
 static_assert(!kNarrowBytecodeHierarchicalAttachReady);

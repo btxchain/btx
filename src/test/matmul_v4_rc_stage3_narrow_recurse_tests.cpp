@@ -1044,7 +1044,7 @@ BOOST_AUTO_TEST_CASE(narrow_planner_is_not_the_executable_narrow_vcs)
     static_assert(!nr::kNarrowVcsProductionReady);
     static_assert(fpx::kHashOpeningAirExecutable);
     static_assert(fpx::kFoldHashScalarMemoryBusExecutable);
-    static_assert(!fpx::kCompleteRecursiveFixedPointExecutable);
+    static_assert(fpx::kCompleteRecursiveFixedPointExecutable);
     static_assert(!fpx::kRecursiveFixedPointConsensusAuthority);
 
     // The planner's fully-quadratic vertical lane and the executable chip
