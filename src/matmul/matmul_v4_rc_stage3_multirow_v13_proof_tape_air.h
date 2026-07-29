@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -343,6 +344,359 @@ inline constexpr bool kRecursiveAuthorityReadyV1 = false;
 
 static_assert(!kCompleteV13ConsumptionV1);
 static_assert(!kRecursiveAuthorityReadyV1);
+
+// ---------------------------------------------------------------------------
+// Packed proof-tape V2.
+//
+// V1 uses four [address,value] records per row because one Poseidon2 rate
+// block holds eight field lanes.  A production-width SAFE proof therefore
+// expands to 2^21 tape rows.  V2 packs 64 records per row without changing the
+// canonical record order or tape digest: sixteen fixed Poseidon2 instances
+// are chained inside each row, and instance 15 chains into instance 0 of the
+// next row.  This is a representation change only; V1 remains frozen.
+// ---------------------------------------------------------------------------
+
+inline constexpr uint16_t kProofTapeAirVersionV2 = 2;
+inline constexpr uint32_t kRecordsPerRowV2 = 64;
+inline constexpr uint32_t kRecordsPerPoseidonV2 = 4;
+inline constexpr uint32_t kPoseidonInstancesPerRowV2 =
+    kRecordsPerRowV2 / kRecordsPerPoseidonV2;
+static_assert(kPoseidonInstancesPerRowV2 == 16);
+
+struct ScheduleV2 {
+    PublicShapeV1 shape{};
+    /** Active records only; padding is uniquely all-zero by row/slot. */
+    std::vector<RecordScheduleV1> active_schedule;
+    /** Complete verifier-owned schedule, including the unique zero suffix. */
+    std::vector<RecordScheduleV1> records;
+    std::vector<abi::SourceCellV1> semantic_sources;
+    uint256 source_inventory_root{};
+    uint32_t source_records{0};
+    uint32_t active_records{0};
+    uint32_t padding_records{0};
+    uint32_t trace_rows{0};
+    bool exact_v1_record_order{false};
+    bool immutable_row_slot_mapping{false};
+    bool exact_source_multiplicity{false};
+    bool canonical_padding{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] ScheduleV2 BuildScheduleV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding);
+
+/** Exact V1 digest over the same ordered record stream, evaluated 16 blocks
+ * per V2 row. */
+[[nodiscard]] alg_hash::Digest ComputeTapeRootV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const std::vector<uint32_t>& canonical_words,
+    std::string* why = nullptr);
+
+struct LayoutV2 {
+    std::array<p2air::Layout,
+               kPoseidonInstancesPerRowV2> poseidon{};
+    uint32_t address_base{0};
+    uint32_t value_base{0};
+    uint32_t bit_base{0};
+    uint32_t high_is_max_base{0};
+    uint32_t high_delta_inverse_base{0};
+    uint32_t active_base{0};
+    uint32_t source_base{0};
+    uint32_t fixed_value_base{0};
+    uint32_t expected_address_base{0};
+    uint32_t expected_value_base{0};
+    uint32_t fp_low_base{0};
+    uint32_t successor_base{0};
+    uint32_t record_class_base{0};
+    uint32_t semantic_kind_base{0};
+    uint32_t semantic_a_base{0};
+    uint32_t semantic_b_base{0};
+    uint32_t semantic_c_base{0};
+    uint32_t semantic_packed_base{0};
+    uint32_t expected_tape_root_base{0};
+    uint32_t dependent_zero{0};
+
+    [[nodiscard]] uint32_t Address(uint32_t slot) const
+    { return address_base + slot; }
+    [[nodiscard]] uint32_t Value(uint32_t slot) const
+    { return value_base + slot; }
+    [[nodiscard]] uint32_t Bit(uint32_t slot, uint32_t bit) const
+    { return bit_base + 32 * slot + bit; }
+    [[nodiscard]] uint32_t HighIsMax(uint32_t slot) const
+    { return high_is_max_base + slot; }
+    [[nodiscard]] uint32_t HighDeltaInverse(uint32_t slot) const
+    { return high_delta_inverse_base + slot; }
+    [[nodiscard]] uint32_t Active(uint32_t slot) const
+    { return active_base + slot; }
+    [[nodiscard]] uint32_t Source(uint32_t slot) const
+    { return source_base + slot; }
+    [[nodiscard]] uint32_t FixedValue(uint32_t slot) const
+    { return fixed_value_base + slot; }
+    [[nodiscard]] uint32_t ExpectedAddress(uint32_t slot) const
+    { return expected_address_base + slot; }
+    [[nodiscard]] uint32_t ExpectedValue(uint32_t slot) const
+    { return expected_value_base + slot; }
+    [[nodiscard]] uint32_t FpLow(uint32_t slot) const
+    { return fp_low_base + slot; }
+    [[nodiscard]] uint32_t Successor(uint32_t slot) const
+    { return successor_base + slot; }
+    [[nodiscard]] uint32_t RecordClass(uint32_t slot) const
+    { return record_class_base + slot; }
+    [[nodiscard]] uint32_t SemanticKind(uint32_t slot) const
+    { return semantic_kind_base + slot; }
+    [[nodiscard]] uint32_t SemanticA(uint32_t slot) const
+    { return semantic_a_base + slot; }
+    [[nodiscard]] uint32_t SemanticB(uint32_t slot) const
+    { return semantic_b_base + slot; }
+    [[nodiscard]] uint32_t SemanticC(uint32_t slot) const
+    { return semantic_c_base + slot; }
+    [[nodiscard]] uint32_t SemanticPacked(uint32_t slot) const
+    { return semantic_packed_base + slot; }
+    [[nodiscard]] uint32_t ExpectedTapeRoot(uint32_t lane) const
+    { return expected_tape_root_base + lane; }
+    [[nodiscard]] uint32_t End() const
+    { return dependent_zero + 1; }
+};
+
+[[nodiscard]] LayoutV2 CanonicalLayoutV2();
+
+/**
+ * Version-neutral semantic source locator.  Downstream recursive joins must
+ * consume this resolver instead of reproducing V1/V2 row packing arithmetic.
+ */
+[[nodiscard]] std::optional<SourceAddressCellV1> ResolveSourceKeyV2(
+    const ScheduleV2& schedule,
+    const LayoutV2& layout,
+    const abi::SourceKeyV1& key);
+
+[[nodiscard]] std::optional<SourceAddressCellV1> ResolveSourceAddressV2(
+    const ScheduleV2& schedule,
+    const LayoutV2& layout,
+    uint32_t address);
+
+/**
+ * Verify canonical decoded words against the immutable packed schedule.
+ * This is the codec/ownership gate used before witness materialization; it
+ * rejects wrong slots/addresses, reorder, duplicate, omission, nonzero
+ * padding, source-key transplant and any value tamper against `tape_root`.
+ */
+[[nodiscard]] bool VerifyPackedWordsV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const std::vector<uint32_t>& canonical_words,
+    std::string* why = nullptr);
+
+[[nodiscard]] uint256 DeriveProofFsSeedV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const uint256& source_inventory_root);
+
+inline constexpr bool kProofTapePackedExecutableV2 = true;
+inline constexpr bool kPackedTapeRecursiveAuthorityReadyV2 = false;
+static_assert(!kPackedTapeRecursiveAuthorityReadyV2);
+
+// ---------------------------------------------------------------------------
+// Streaming sharded tape V2.
+//
+// The 64-record diagnostic layout above is intentionally not a proof path:
+// its ~10.9k columns make the Q192 row openings exceed the block envelope.
+// Production instead retains the narrow four-record layout and divides the
+// exact V1 next-power-of-two tape into contiguous, proof-executed shards.
+// ---------------------------------------------------------------------------
+
+inline constexpr uint16_t kProofTapeShardVersionV2 = 2;
+inline constexpr uint32_t kProofTapeShardMaxRowsV2 = 1U << 19;
+inline constexpr uint32_t kProofTapeShardRecordsPerRowV2 =
+    kRecordsPerRowV1;
+
+struct ShardPlanV2 {
+    uint32_t shard_index{0};
+    uint32_t shard_count{0};
+    uint32_t row_begin{0};
+    uint32_t trace_rows{0};
+    uint32_t record_begin{0};
+    uint32_t record_count{0};
+    uint32_t active_records{0};
+    uint32_t total_trace_rows{0};
+    uint32_t total_records{0};
+    uint32_t total_active_records{0};
+    bool contains_first_row{false};
+    bool contains_final_row{false};
+    bool contains_canonical_padding{false};
+    bool valid{false};
+};
+
+[[nodiscard]] std::vector<ShardPlanV2> BuildShardPlansV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding);
+
+/** Test/model helper.  Production callers must use BuildShardPlansV2. */
+[[nodiscard]] std::vector<ShardPlanV2> BuildShardPlansForMaxRowsV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    uint32_t max_rows);
+
+[[nodiscard]] uint256 ComputeShardSourceInventoryRootV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding);
+
+[[nodiscard]] gf::Fp3 ShardAddressTagV2(
+    uint32_t shard_index,
+    uint32_t address);
+
+struct ShardLayoutV2 {
+    LayoutV1 tape{};
+    uint32_t expected_start_state_base{0};
+    uint32_t expected_end_state_base{0};
+    uint32_t dependent_base{0};
+    uint32_t source_inverse_base{0};
+    uint32_t running_base{0};
+    uint32_t expected_terminal_base{0};
+
+    [[nodiscard]] uint32_t ExpectedStartState(uint32_t lane) const
+    { return expected_start_state_base + lane; }
+    [[nodiscard]] uint32_t ExpectedEndState(uint32_t lane) const
+    { return expected_end_state_base + lane; }
+    [[nodiscard]] uint32_t SourceInverse(
+        uint32_t lane, uint32_t slot) const
+    {
+        return source_inverse_base +
+            lane * kProofTapeShardRecordsPerRowV2 +
+            slot;
+    }
+    [[nodiscard]] uint32_t Running(uint32_t lane) const
+    { return running_base + lane; }
+    [[nodiscard]] uint32_t ExpectedTerminal(uint32_t lane) const
+    { return expected_terminal_base + lane; }
+    [[nodiscard]] uint32_t End() const
+    { return expected_terminal_base + 2; }
+};
+
+[[nodiscard]] ShardLayoutV2 CanonicalShardLayoutV2();
+
+struct ShardStatementV2 {
+    PublicShapeV1 child_shape{};
+    PublicBindingV1 binding{};
+    ShardPlanV2 plan{};
+    alg_hash::State start_state{};
+    alg_hash::State end_state{};
+    uint256 source_inventory_root{};
+};
+
+struct ShardBoundaryStatesV2 {
+    std::vector<alg_hash::State> states;
+    alg_hash::Digest final_root{};
+    bool exact_v1_tape_root{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] ShardBoundaryStatesV2 ComputeShardBoundaryStatesV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const std::vector<uint32_t>& canonical_words);
+
+[[nodiscard]] bool BuildShardConstraintSystemV2(
+    const ShardStatementV2& statement,
+    aq::AirConstraintSystem<gf::Fp3>& out,
+    ShardLayoutV2* layout = nullptr,
+    std::vector<RecordScheduleV1>* records = nullptr,
+    std::string* why = nullptr);
+
+struct ShardProductV2 {
+    ShardStatementV2 statement{};
+    ShardLayoutV2 layout{};
+    aq::AirConstraintSystem<gf::Fp3> cs;
+    std::vector<std::vector<gf::Fp3>> columns;
+    std::vector<uint32_t> r0_base_column_indices;
+    aq::AirQuotientTwoEpochBaseRowSession r0_session;
+    std::vector<SourceAddressCellV1> source_cells;
+    uint32_t violations{0};
+    uint32_t first_bad_row{UINT32_MAX};
+    std::string first_bad_constraint;
+    bool exact_schedule_slice{false};
+    bool exact_state_boundary{false};
+    bool stable_source_exports{false};
+    bool recursive_authority_ready{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] ShardProductV2 BuildShardProductV2(
+    const ShardStatementV2& statement,
+    const std::vector<uint32_t>& canonical_words);
+
+struct ShardProofV2 {
+    uint16_t version{kProofTapeShardVersionV2};
+    uint32_t shard_index{0};
+    uint256 r0_row_root{};
+    uint256 join_context_root{};
+    std::array<gf::Fp3, 2> source_terminal{};
+    aq::AirQuotientSplitRapRowsProof proof{};
+};
+
+struct ShardJoinContextV2 {
+    std::vector<uint256> tape_r0_roots;
+    std::vector<uint256> consumer_r0_roots;
+    uint256 root{};
+    bool valid{false};
+};
+
+[[nodiscard]] ShardJoinContextV2 BuildShardJoinContextV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const std::vector<uint256>& tape_r0_roots,
+    const std::vector<uint256>& consumer_r0_roots);
+
+[[nodiscard]] bool ProveShardV2(
+    const ShardProductV2& product,
+    const ShardJoinContextV2& join_context,
+    ShardProofV2& out,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyShardV2(
+    const ShardStatementV2& statement,
+    const ShardJoinContextV2& join_context,
+    const ShardProofV2& proof,
+    std::string* why = nullptr);
+
+struct ShardReceiptV2 {
+    ShardPlanV2 plan{};
+    alg_hash::State start_state{};
+    alg_hash::State end_state{};
+    uint256 source_inventory_root{};
+    ShardProofV2 proof{};
+};
+
+[[nodiscard]] bool VerifyShardCoverageChainForMaxRowsV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const std::vector<ShardReceiptV2>& receipts,
+    uint32_t max_rows,
+    std::string* why = nullptr);
+
+[[nodiscard]] bool VerifyShardReceiptChainV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const ShardJoinContextV2& join_context,
+    const std::vector<ShardReceiptV2>& receipts,
+    std::string* why = nullptr);
+
+/** Test/model helper for the same verifier with a smaller shard-row ceiling. */
+[[nodiscard]] bool VerifyShardReceiptChainForMaxRowsV2(
+    const PublicShapeV1& shape,
+    const PublicBindingV1& binding,
+    const ShardJoinContextV2& join_context,
+    const std::vector<ShardReceiptV2>& receipts,
+    uint32_t max_rows,
+    std::string* why = nullptr);
+
+inline constexpr bool kProofTapeShardExecutableV2 = true;
+inline constexpr bool kProofTapeShardRecursiveAuthorityReadyV2 = false;
+static_assert(!kProofTapeShardRecursiveAuthorityReadyV2);
 
 } // namespace matmul::v4::rc::stage3_multirow_v13_proof_tape_air
 

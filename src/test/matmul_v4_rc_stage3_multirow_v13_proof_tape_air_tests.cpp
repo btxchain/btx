@@ -82,6 +82,79 @@ size_t SourceValueWord(uint32_t address)
     return kHeaderRecordsV1 + size_t{address} * 2 + 1;
 }
 
+std::vector<alg_hash::State> BoundaryStatesForPlans(
+    const ScheduleV1& schedule,
+    const std::vector<uint32_t>& words,
+    const std::vector<ShardPlanV2>& plans)
+{
+    std::vector<uint32_t> addresses(
+        schedule.records.size(), 0);
+    std::vector<uint32_t> values(
+        schedule.records.size(), 0);
+    for (uint32_t record = 0;
+         record < schedule.active_records;
+         ++record) {
+        const auto& expected =
+            schedule.records[record];
+        addresses[record] =
+            expected.expected_address;
+        if (record <
+                kPublicPrefixRecordsV1) {
+            values[record] =
+                expected.expected_value;
+        } else if (
+            record <
+                kPublicPrefixRecordsV1 +
+                    kHeaderRecordsV1) {
+            values[record] =
+                words[record -
+                    kPublicPrefixRecordsV1];
+        } else {
+            const uint32_t source =
+                record -
+                kPublicPrefixRecordsV1 -
+                kHeaderRecordsV1;
+            const size_t offset =
+                kHeaderRecordsV1 +
+                size_t{source} * 2;
+            addresses[record] =
+                words[offset];
+            values[record] =
+                words[offset + 1];
+        }
+    }
+    std::vector<alg_hash::State> out(
+        plans.size() + 1);
+    alg_hash::State state{};
+    uint32_t boundary = 1;
+    for (uint32_t row = 0;
+         row < schedule.trace_rows; ++row) {
+        for (uint32_t slot = 0;
+             slot < kRecordsPerRowV1;
+             ++slot) {
+            const uint32_t record =
+                row * kRecordsPerRowV1 +
+                slot;
+            state[2 * slot] = gf::Add(
+                state[2 * slot],
+                gf::FromU64(
+                    addresses[record]));
+            state[2 * slot + 1] = gf::Add(
+                state[2 * slot + 1],
+                gf::FromU64(
+                    values[record]));
+        }
+        alg_hash::Permute(state);
+        if (boundary < out.size() &&
+            row + 1 ==
+                plans[boundary - 1].row_begin +
+                plans[boundary - 1].trace_rows) {
+            out[boundary++] = state;
+        }
+    }
+    return out;
+}
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -546,6 +619,629 @@ BOOST_AUTO_TEST_CASE(
     bad_binding.proof_wire_root.SetNull();
     BOOST_CHECK(
         !BuildScheduleV1(ToyShape(), bad_binding).valid);
+}
+
+BOOST_AUTO_TEST_CASE(
+    packed_v2_preserves_digest_and_rejects_record_stream_attacks)
+{
+    const PublicShapeV1 shape = ToyShape();
+    PublicBindingV1 binding = ToyBinding();
+    const ScheduleV1 legacy =
+        BuildScheduleV1(shape, binding);
+    BOOST_REQUIRE_MESSAGE(legacy.valid, legacy.note);
+    const std::vector<uint32_t> honest =
+        CanonicalZeroWords(legacy);
+    std::string why;
+    binding.tape_root =
+        ComputeTapeRootV1(
+            shape, binding, honest, &why);
+    BOOST_REQUIRE_MESSAGE(
+        binding.tape_root != alg_hash::Digest{},
+        why);
+
+    const ScheduleV2 packed =
+        BuildScheduleV2(shape, binding);
+    BOOST_REQUIRE_MESSAGE(packed.valid, packed.note);
+    BOOST_CHECK_EQUAL(
+        packed.source_records,
+        legacy.source_records);
+    BOOST_CHECK_EQUAL(
+        packed.active_records,
+        legacy.active_records);
+    BOOST_CHECK_EQUAL(
+        packed.active_schedule.size(),
+        packed.active_records);
+    BOOST_CHECK_EQUAL(
+        packed.trace_rows * kRecordsPerRowV2,
+        legacy.trace_rows * kRecordsPerRowV1);
+    BOOST_CHECK_EQUAL(
+        packed.padding_records,
+        packed.trace_rows * kRecordsPerRowV2 -
+            packed.active_records);
+    BOOST_CHECK(packed.exact_v1_record_order);
+    BOOST_CHECK(packed.immutable_row_slot_mapping);
+    BOOST_CHECK(packed.exact_source_multiplicity);
+    BOOST_CHECK(packed.canonical_padding);
+    BOOST_CHECK(!packed.source_inventory_root.IsNull());
+
+    const LayoutV2 layout = CanonicalLayoutV2();
+    BOOST_CHECK_EQUAL(
+        layout.poseidon.size(),
+        kPoseidonInstancesPerRowV2);
+    for (uint32_t block = 1;
+         block < layout.poseidon.size(); ++block) {
+        BOOST_CHECK_EQUAL(
+            layout.poseidon[block].perm.base,
+            layout.poseidon[block - 1].End());
+    }
+    BOOST_CHECK_LT(layout.End(), 1U << 20);
+
+    const auto v2_root =
+        ComputeTapeRootV2(
+            shape, binding, honest, &why);
+    BOOST_CHECK(v2_root == binding.tape_root);
+    BOOST_REQUIRE_MESSAGE(
+        VerifyPackedWordsV2(
+            shape, binding, honest, &why),
+        why);
+    BOOST_CHECK(
+        DeriveProofFsSeedV2(
+            shape, binding,
+            packed.source_inventory_root) !=
+        DeriveProofFsSeedV1(shape, binding));
+
+    // Any proof-value mutation remains canonically decodable but changes the
+    // authenticated tape root.
+    std::vector<uint32_t> value_tamper = honest;
+    bool changed_value = false;
+    for (uint32_t source = 0;
+         source < legacy.source_records; ++source) {
+        const auto& record =
+            legacy.records[
+                SemanticRecord(source)];
+        if (!record.fixed_value) {
+            value_tamper[
+                SourceValueWord(source)] ^= 1U;
+            changed_value = true;
+            break;
+        }
+    }
+    BOOST_REQUIRE(changed_value);
+    BOOST_CHECK(
+        !VerifyPackedWordsV2(
+            shape, binding,
+            value_tamper, &why));
+
+    // Wrong address, duplicate, omission and whole-record reorder are all
+    // rejected by the canonical SAFE decoder / immutable source schedule.
+    std::vector<uint32_t> wrong_address = honest;
+    wrong_address[kHeaderRecordsV1] ^= 1U;
+    BOOST_CHECK(
+        !VerifyPackedWordsV2(
+            shape, binding,
+            wrong_address, &why));
+
+    std::vector<uint32_t> duplicate = honest;
+    duplicate[
+        kHeaderRecordsV1 + 2] =
+        duplicate[kHeaderRecordsV1];
+    BOOST_CHECK(
+        !VerifyPackedWordsV2(
+            shape, binding, duplicate, &why));
+
+    std::vector<uint32_t> omission = honest;
+    omission.resize(omission.size() - 2);
+    BOOST_CHECK(
+        !VerifyPackedWordsV2(
+            shape, binding, omission, &why));
+
+    std::vector<uint32_t> reorder = honest;
+    BOOST_REQUIRE_GE(legacy.source_records, 2U);
+    for (uint32_t limb = 0; limb < 2; ++limb) {
+        std::swap(
+            reorder[
+                kHeaderRecordsV1 + limb],
+            reorder[
+                kHeaderRecordsV1 + 2 + limb]);
+    }
+    BOOST_CHECK(
+        !VerifyPackedWordsV2(
+            shape, binding, reorder, &why));
+
+    // Explicitly cross one 4-record Poseidon chunk boundary inside a packed
+    // row. This attack used to be invisible to a naive 64-record/one-perm
+    // generalization; the exact address schedule rejects it before hashing.
+    const uint32_t first_source_record =
+        kPublicPrefixRecordsV1 +
+        kHeaderRecordsV1;
+    const uint32_t next_boundary =
+        ((first_source_record + 3U) / 4U) * 4U;
+    BOOST_REQUIRE_GT(next_boundary, first_source_record);
+    BOOST_REQUIRE_LT(
+        next_boundary,
+        first_source_record +
+            legacy.source_records);
+    const uint32_t left_source =
+        next_boundary - 1U -
+        first_source_record;
+    const uint32_t right_source =
+        next_boundary -
+        first_source_record;
+    std::vector<uint32_t> boundary_swap = honest;
+    for (uint32_t limb = 0; limb < 2; ++limb) {
+        std::swap(
+            boundary_swap[
+                kHeaderRecordsV1 +
+                2 * left_source + limb],
+            boundary_swap[
+                kHeaderRecordsV1 +
+                2 * right_source + limb]);
+    }
+    BOOST_CHECK(
+        !VerifyPackedWordsV2(
+            shape, binding,
+            boundary_swap, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    streaming_shard_chain_covers_padding_and_rejects_boundary_attacks)
+{
+    const PublicShapeV1 shape = ToyShape();
+    PublicBindingV1 binding = ToyBinding();
+    const ScheduleV1 schedule =
+        BuildScheduleV1(shape, binding);
+    BOOST_REQUIRE(schedule.valid);
+    const std::vector<uint32_t> words =
+        CanonicalZeroWords(schedule);
+    binding.tape_root =
+        ComputeTapeRootV1(
+            shape, binding, words);
+    BOOST_REQUIRE(
+        binding.tape_root !=
+            alg_hash::Digest{});
+    BOOST_REQUIRE_GE(schedule.trace_rows, 8U);
+    const uint32_t max_rows =
+        schedule.trace_rows / 4;
+    const auto plans =
+        BuildShardPlansForMaxRowsV2(
+            shape, binding, max_rows);
+    BOOST_REQUIRE_EQUAL(plans.size(), 4U);
+    for (uint32_t left = 0;
+         left < 4; ++left) {
+        for (uint32_t right = 0;
+             right < 4; ++right) {
+            if (left == right) continue;
+            BOOST_CHECK(
+                !gf::Eq(
+                    ShardAddressTagV2(left, 17),
+                    ShardAddressTagV2(right, 17)));
+        }
+    }
+    const auto states =
+        BoundaryStatesForPlans(
+            schedule, words, plans);
+    BOOST_REQUIRE_EQUAL(
+        states.size(), plans.size() + 1);
+    const uint256 inventory =
+        ComputeShardSourceInventoryRootV2(
+            shape, binding);
+    BOOST_REQUIRE(!inventory.IsNull());
+    std::vector<ShardReceiptV2> receipts;
+    for (uint32_t index = 0;
+         index < plans.size(); ++index) {
+        receipts.push_back({
+            .plan = plans[index],
+            .start_state = states[index],
+            .end_state = states[index + 1],
+            .source_inventory_root =
+                inventory,
+        });
+    }
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding, receipts,
+            max_rows, &why),
+        why);
+    BOOST_CHECK(plans.back().
+        contains_canonical_padding);
+    BOOST_CHECK_EQUAL(
+        plans.front().record_begin, 0U);
+    BOOST_CHECK_EQUAL(
+        plans.back().record_begin +
+            plans.back().record_count,
+        plans.back().total_records);
+
+    auto omission = receipts;
+    omission.erase(omission.begin() + 1);
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding, omission,
+            max_rows, &why));
+
+    auto reorder = receipts;
+    std::swap(reorder[1], reorder[2]);
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding, reorder,
+            max_rows, &why));
+
+    auto duplicate = receipts;
+    duplicate[2] = duplicate[1];
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding, duplicate,
+            max_rows, &why));
+
+    auto wrong_boundary = receipts;
+    wrong_boundary[1].start_state[0] =
+        gf::Add(
+            wrong_boundary[1].start_state[0],
+            gf::FromU64(1));
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding, wrong_boundary,
+            max_rows, &why));
+
+    // The four digest lanes are unchanged.  Mutating a hidden capacity lane
+    // must still fail because all twelve state lanes are chained.
+    auto hidden_capacity = receipts;
+    hidden_capacity[1].start_state[
+        alg_hash::kAlgHashRate] =
+        gf::Add(
+            hidden_capacity[1].start_state[
+                alg_hash::kAlgHashRate],
+            gf::FromU64(1));
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding,
+            hidden_capacity,
+            max_rows, &why));
+
+    auto wrong_interval = receipts;
+    ++wrong_interval[1].plan.active_records;
+    BOOST_CHECK(
+        !VerifyShardCoverageChainForMaxRowsV2(
+            shape, binding,
+            wrong_interval,
+            max_rows, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    streaming_shard_air_proves_and_rejects_proof_and_state_tamper)
+{
+    if (std::getenv(
+            "BTX_RUN_V13_TAPE_SHARD_PROOF") ==
+        nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_V13_TAPE_SHARD_PROOF=1 "
+            "for the proof-level shard matrix");
+        return;
+    }
+    const PublicShapeV1 shape = ToyShape();
+    PublicBindingV1 binding = ToyBinding();
+    const ScheduleV1 schedule =
+        BuildScheduleV1(shape, binding);
+    BOOST_REQUIRE(schedule.valid);
+    const std::vector<uint32_t> words =
+        CanonicalZeroWords(schedule);
+    binding.tape_root =
+        ComputeTapeRootV1(
+            shape, binding, words);
+    const auto plans =
+        BuildShardPlansV2(shape, binding);
+    BOOST_REQUIRE_EQUAL(plans.size(), 1U);
+    const auto boundaries =
+        ComputeShardBoundaryStatesV2(
+            shape, binding, words);
+    BOOST_REQUIRE_MESSAGE(
+        boundaries.valid, boundaries.note);
+    ShardStatementV2 statement{
+        .child_shape = shape,
+        .binding = binding,
+        .plan = plans[0],
+        .start_state =
+            boundaries.states[0],
+        .end_state =
+            boundaries.states[1],
+        .source_inventory_root =
+            ComputeShardSourceInventoryRootV2(
+                shape, binding),
+    };
+    const ShardProductV2 product =
+        BuildShardProductV2(
+            statement, words);
+    BOOST_REQUIRE_MESSAGE(
+        product.valid, product.note);
+    BOOST_CHECK_EQUAL(product.violations, 0U);
+    BOOST_CHECK(product.exact_schedule_slice);
+    BOOST_CHECK(product.exact_state_boundary);
+    BOOST_CHECK(product.stable_source_exports);
+    BOOST_CHECK_LE(
+        product.cs.n_columns, 847U);
+    uint32_t max_everywhere = 0;
+    uint32_t max_transition = 0;
+    uint32_t max_boundary = 0;
+    for (const auto& c :
+         product.cs.constraints) {
+        if (c.kind == aq::AirKind::kEverywhere) {
+            max_everywhere =
+                std::max(
+                    max_everywhere,
+                    c.alg_degree);
+        } else if (
+            c.kind ==
+                aq::AirKind::kTransition) {
+            max_transition =
+                std::max(
+                    max_transition,
+                    c.alg_degree);
+        } else {
+            max_boundary =
+                std::max(
+                    max_boundary,
+                    c.alg_degree);
+        }
+    }
+    BOOST_CHECK_LE(max_everywhere, 3U);
+    BOOST_CHECK_LE(max_transition, 3U);
+    BOOST_CHECK_LE(max_boundary, 2U);
+    BOOST_CHECK_LE(
+        product.cs.QuotientLen(),
+        2 * product.cs.n_rows);
+
+    std::set<uint32_t> preprocessed;
+    for (const auto& [column, values] :
+         product.cs.preprocessed) {
+        BOOST_REQUIRE_EQUAL(
+            values.size(),
+            product.cs.n_rows);
+        preprocessed.insert(column);
+    }
+    for (uint32_t slot = 0;
+         slot < kRecordsPerRowV1; ++slot) {
+        BOOST_CHECK(
+            !preprocessed.contains(
+                product.layout.tape.
+                    Address(slot)));
+        BOOST_CHECK(
+            !preprocessed.contains(
+                product.layout.tape.
+                    Value(slot)));
+    }
+
+    ShardProofV2 proof;
+    std::string why;
+    const ShardJoinContextV2 join_context =
+        BuildShardJoinContextV2(
+            shape, binding,
+            {product.r0_session.
+                base_row_commitment},
+            {Root(0xd1), Root(0xd2)});
+    BOOST_REQUIRE(join_context.valid);
+    BOOST_REQUIRE_MESSAGE(
+        ProveShardV2(
+            product, join_context,
+            proof, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        VerifyShardV2(
+            statement, join_context,
+            proof, &why),
+        why);
+    std::vector<unsigned char> encoded;
+    const size_t proof_bytes =
+        aq::SerializeAirQuotientSplitRapRowsProof(
+            proof.proof, encoded);
+    BOOST_REQUIRE_EQUAL(
+        proof_bytes, encoded.size());
+    BOOST_CHECK_LT(
+        proof_bytes, 16U * 1024U * 1024U);
+
+    ShardProofV2 proof_tamper = proof;
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.
+            queries.empty());
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.
+            queries[0].group_rows.empty());
+    BOOST_REQUIRE(
+        !proof_tamper.proof.batch.
+            queries[0].group_rows[0].
+                values.empty());
+    proof_tamper.proof.batch.
+        queries[0].group_rows[0].
+        values[0].c0 =
+        gf::Add(
+            proof_tamper.proof.batch.
+                queries[0].group_rows[0].
+                values[0].c0,
+            gf::FromU64(1));
+    BOOST_CHECK(
+        !VerifyShardV2(
+            statement, join_context,
+            proof_tamper, &why));
+
+    ShardProofV2 terminal_tamper = proof;
+    terminal_tamper.source_terminal[0] =
+        gf::Add(
+            terminal_tamper.source_terminal[0],
+            gf::Fp3::One());
+    BOOST_CHECK(
+        !VerifyShardV2(
+            statement, join_context,
+            terminal_tamper, &why));
+
+    ShardStatementV2 wrong_state =
+        statement;
+    wrong_state.start_state[
+        alg_hash::kAlgHashRate] =
+        gf::Add(
+            wrong_state.start_state[
+                alg_hash::kAlgHashRate],
+            gf::FromU64(1));
+    BOOST_CHECK(
+        !VerifyShardV2(
+            wrong_state, join_context,
+            proof, &why));
+
+    ShardJoinContextV2 wrong_context =
+        join_context;
+    wrong_context.consumer_r0_roots[0] =
+        Root(0xe1);
+    wrong_context =
+        BuildShardJoinContextV2(
+            shape, binding,
+            wrong_context.tape_r0_roots,
+            wrong_context.consumer_r0_roots);
+    BOOST_REQUIRE(wrong_context.valid);
+    BOOST_CHECK(
+        !VerifyShardV2(
+            statement, wrong_context,
+            proof, &why));
+
+    const ShardJoinContextV2 wrong_order =
+        BuildShardJoinContextV2(
+            shape, binding,
+            join_context.tape_r0_roots,
+            {Root(0xd2), Root(0xd1)});
+    BOOST_REQUIRE(wrong_order.valid);
+    BOOST_CHECK(
+        !VerifyShardV2(
+            statement, wrong_order,
+            proof, &why));
+
+    ShardStatementV2 relabel =
+        statement;
+    relabel.plan.shard_index = 1;
+    BOOST_CHECK(
+        !VerifyShardV2(
+            relabel, join_context,
+            proof, &why));
+
+    const ShardReceiptV2 receipt{
+        .plan = statement.plan,
+        .start_state = statement.start_state,
+        .end_state = statement.end_state,
+        .source_inventory_root =
+            statement.source_inventory_root,
+        .proof = proof,
+    };
+    BOOST_REQUIRE_MESSAGE(
+        VerifyShardReceiptChainV2(
+            shape, binding, join_context,
+            {receipt}, &why),
+        why);
+
+    BOOST_TEST_MESSAGE(
+        "V13_TAPE_SHARD W=" <<
+        product.cs.n_columns <<
+        " N=" << product.cs.n_rows <<
+        " dmax=" <<
+        product.cs.MaxComposedDegreeBound() <<
+        " Lq=" << product.cs.QuotientLen() <<
+        " proof_bytes=" << proof_bytes);
+}
+
+BOOST_AUTO_TEST_CASE(
+    production_shard_fixedpoint_shape_is_four_by_two_to_19)
+{
+    if (std::getenv(
+            "BTX_RUN_V13_TAPE_SHARD_PRODUCTION_SHAPE") ==
+        nullptr) {
+        BOOST_TEST_MESSAGE(
+            "set BTX_RUN_V13_TAPE_SHARD_PRODUCTION_SHAPE=1 "
+            "for the production inventory recurrence");
+        return;
+    }
+    PublicShapeV1 shape;
+    shape.trace_rows = 16;
+    shape.trace_columns = 1804;
+    shape.quotient_len = 90;
+    shape.n_coeffs = 128;
+    shape.base_column_indices.resize(1803);
+    for (uint32_t column = 0;
+         column < 1803; ++column) {
+        shape.base_column_indices[column] =
+            column;
+    }
+    const PublicBindingV1 binding =
+        ToyBinding();
+    const ScheduleV1 global =
+        BuildScheduleV1(shape, binding);
+    BOOST_REQUIRE_MESSAGE(
+        global.valid, global.note);
+    BOOST_CHECK_EQUAL(
+        global.source_records, 4463758U);
+    BOOST_CHECK_EQUAL(
+        global.active_records, 4463796U);
+    BOOST_CHECK_EQUAL(
+        global.trace_rows, 1U << 21);
+    const auto plans =
+        BuildShardPlansV2(shape, binding);
+    BOOST_REQUIRE_EQUAL(plans.size(), 4U);
+    for (uint32_t index = 0;
+         index < plans.size(); ++index) {
+        BOOST_CHECK(plans[index].valid);
+        BOOST_CHECK_EQUAL(
+            plans[index].shard_index,
+            index);
+        BOOST_CHECK_EQUAL(
+            plans[index].trace_rows,
+            1U << 19);
+        BOOST_CHECK_EQUAL(
+            plans[index].record_count,
+            1U << 21);
+        if (index + 1 < plans.size()) {
+            const uint32_t last_record =
+                plans[index].record_begin +
+                plans[index].record_count - 1;
+            BOOST_REQUIRE_LT(
+                last_record,
+                global.records.size());
+            BOOST_CHECK(
+                !global.records[last_record].
+                    fp_low_limb);
+        }
+    }
+    BOOST_CHECK_EQUAL(
+        plans[0].active_records,
+        1U << 21);
+    BOOST_CHECK_EQUAL(
+        plans[1].active_records,
+        1U << 21);
+    BOOST_CHECK_EQUAL(
+        plans[2].active_records,
+        269492U);
+    BOOST_CHECK_EQUAL(
+        plans[3].active_records, 0U);
+    BOOST_CHECK_EQUAL(
+        plans[0].active_records -
+            kPublicPrefixRecordsV1 -
+            kHeaderRecordsV1,
+        (1U << 21) -
+            kPublicPrefixRecordsV1 -
+            kHeaderRecordsV1);
+    BOOST_CHECK_EQUAL(
+        plans[2].active_records, 269492U);
+    BOOST_CHECK(
+        plans[3].
+            contains_canonical_padding);
+    const uint32_t N = 1U << 19;
+    const uint64_t dmax =
+        uint64_t{3} * (N - 1) + 1;
+    const uint32_t quotient_len =
+        static_cast<uint32_t>(
+            dmax - N + 1);
+    BOOST_CHECK_EQUAL(
+        quotient_len, (1U << 20) - 1);
+    const uint32_t n_coeffs = 1U << 20;
+    const uint32_t n_lde =
+        n_coeffs * kRCFriBlowup;
+    BOOST_CHECK_EQUAL(n_lde, 1U << 24);
+    BOOST_CHECK_LE(
+        CanonicalShardLayoutV2().End(),
+        847U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
