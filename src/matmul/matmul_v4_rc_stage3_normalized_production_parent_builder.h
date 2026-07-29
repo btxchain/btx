@@ -12,6 +12,7 @@
 #include <matmul/matmul_v4_rc_stage3_normalized_parent_external_producer_equality.h>
 #include <matmul/matmul_v4_rc_stage3_normalized_relation_receipt_consumer.h>
 #include <matmul/matmul_v4_rc_stage3_recursive_hierarchy.h>
+#include <matmul/matmul_v4_rc_stage3_semantic_endpoint_receipt_intake.h>
 #include <matmul/matmul_v4_rc_stage3_stream_endpoint.h>
 
 #include <array>
@@ -135,6 +136,13 @@ struct ProductionRelationParentCandidateV1 {
     uint256 episode_digest{};
     uint256 coupled_digest{};
     uint256 composed_digest{};
+    stage3_semantic_endpoint_receipt_intake::
+        VerifiedRecursiveReceiptEvidenceV1
+            recursive_receipt_evidence;
+    std::array<uint32_t, 8>
+        recursive_receipt_evidence_root_columns{};
+    std::vector<RCStage3RelationClosureRoleAudit>
+        recursive_receipt_role_audit;
     /**
      * Canonical all-layer/all-tile proof-owned episode leaf inventory.
      * Complete LeafReceipts are retained so every SameParentCtlJoin terminal
@@ -164,6 +172,8 @@ struct ProductionRelationParentCandidateV1 {
     bool winner_coupled_capture_bound{false};
     bool coupled_witness_replay_avoided{false};
     bool captured_episode_leaf_inventory_verified{false};
+    bool recursive_receipt_evidence_rebuilt{false};
+    bool recursive_receipt_evidence_same_parent_bound{false};
     bool local_parent_valid{false};
     bool recursive_semantic_closure_complete{false};
     bool production_authority{false};
@@ -217,7 +227,8 @@ ValidateCapturedEpisodeLeafInventoryV2(
  * The downstream type is already executable: once this function returns
  * Built, BuildReceiptV1 proves, serializes, decodes and verifies the exact
  * product.  Built requires:
- *   - live 14-role / 52-endpoint RoleAudit role_complete (RecursiveChildren),
+ *   - an immutable 14-role / 52-endpoint receipt-evidence audit rebuilt from
+ *     canonical role/link receipts and their retained normalized parent,
  *   - candidate production_authority (local parent + streaming role-export
  *     equality certificate premises via Attach/Assess with FRI-verified
  *     receipt), and
@@ -252,8 +263,9 @@ ConvertProductionAuthorityCandidateToBuiltV1(
  *
  * This function is useful before authority closes: unlike BuildForSolvedBlockV1
  * it returns the executable local parent even when semantic child consumption
- * is incomplete.  Its status fields are derived from the actual products and
- * live role audit; callers must never treat `local_parent_valid` as authority.
+ * is incomplete. Its status fields are derived from actual products and
+ * immutable verified receipt evidence, never process-global audit state;
+ * callers must never treat `local_parent_valid` as authority.
  */
 [[nodiscard]] bool BuildRelationParentCandidateForSolvedBlockV1(
     const ProductionParentBuildInputV1& input,

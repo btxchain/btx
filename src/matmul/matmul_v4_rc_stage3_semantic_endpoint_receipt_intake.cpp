@@ -25,6 +25,8 @@ constexpr char BINDING_DOMAIN[] =
     "BTX_RC_STAGE3_SEMANTIC_ENDPOINT_RECEIPT_BINDING_V1";
 constexpr char PARENT_DOMAIN[] =
     "BTX_RC_STAGE3_SEMANTIC_ENDPOINT_RECEIPT_PARENT_V1";
+constexpr char VERIFIED_EVIDENCE_DOMAIN[] =
+    "BTX_RC_STAGE3_SEMANTIC_ENDPOINT_VERIFIED_EVIDENCE_V1";
 
 struct AirProduct {
     AirCs cs;
@@ -949,7 +951,8 @@ bool BuildManifestV1(
             }
             const bool concrete =
                 role_valid &&
-                ConcreteExport(*proof, item);
+                ConcreteExport(*proof, item) &&
+                !item.route.requires_stream_child;
             if (!concrete) continue;
             auto& endpoint =
                 out.endpoints[item.route.ordinal];
@@ -979,7 +982,9 @@ bool BuildManifestV1(
             endpoint.receipt_slot =
                 kNoReceiptSlotV1;
             endpoint.residual =
-                "no concrete proof-owned role receipt";
+                endpoint.route.requires_stream_child
+                ? "heavy stream child has no verified recursive receipt"
+                : "no concrete proof-owned role receipt";
         }
         out.exact_canonical_order &=
             endpoint.route.ordinal == ordinal &&
@@ -1296,6 +1301,267 @@ bool VerifyV1(
             parent_bindings.second,
             proof.parent.receipt, why)) {
         return Fail(why, "parent");
+    }
+    return true;
+}
+
+uint256 ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+    const VerifiedRecursiveReceiptEvidenceV1& evidence)
+{
+    HashWriter hash;
+    hash << VERIFIED_EVIDENCE_DOMAIN;
+    hash << evidence.version;
+    hash << evidence.inventory_commitment;
+    hash << evidence.active_bitmap;
+    hash << evidence.active_endpoints;
+    hash << evidence.residual_endpoints;
+    hash << evidence.active_roles;
+    for (uint32_t ordinal = 0;
+         ordinal < evidence
+                       .endpoint_receipt_commitments
+                       .size();
+         ++ordinal) {
+        hash << ordinal;
+        hash << evidence
+                    .endpoint_receipt_commitments[
+                        ordinal];
+    }
+    hash << static_cast<uint32_t>(
+        evidence
+            .ordered_child_receipt_commitments
+            .size());
+    for (const uint256& commitment :
+         evidence.ordered_child_receipt_commitments) {
+        hash << commitment;
+    }
+    hash <<
+        evidence.normalized_parent_receipt_commitment;
+    hash << static_cast<uint8_t>(
+        evidence.exact_canonical_inventory);
+    hash << static_cast<uint8_t>(
+        evidence
+            .all_canonical_role_receipts_and_link_verified);
+    hash << static_cast<uint8_t>(
+        evidence.normalized_parent_proof_verified);
+    hash << static_cast<uint8_t>(
+        evidence
+            .recursive_child_acceptance_constraints_complete);
+    hash << static_cast<uint8_t>(
+        evidence.complete_52_and_14);
+    hash << static_cast<uint8_t>(
+        evidence.recursive_credit_eligible);
+    return hash.GetHash();
+}
+
+bool BuildVerifiedRecursiveReceiptEvidenceV1(
+    const std::vector<RCStage3RoleAirProduct>&
+        role_artifacts,
+    const std::vector<exports::StreamChildArtifactV1>&
+        stream_children,
+    const ProofV1& proof,
+    VerifiedRecursiveReceiptEvidenceV1& out,
+    std::string* why)
+{
+    out = {};
+    std::string verify_why;
+    if (!VerifyV1(
+            role_artifacts, stream_children,
+            proof, &verify_why)) {
+        return Fail(
+            why, "verified_evidence:proof:" +
+                verify_why);
+    }
+    if (!proof.manifest.valid ||
+        proof.manifest.inventory_commitment.IsNull() ||
+        proof.manifest.active_roles !=
+            proof.role_receipts.size() ||
+        proof.ordered_child_receipt_commitments.size() !=
+            proof.role_receipts.size() + 1U ||
+        !proof.parent.receipt.valid ||
+        proof.parent.receipt
+            .receipt_commitment.IsNull()) {
+        return Fail(
+            why, "verified_evidence:shape");
+    }
+
+    out.inventory_commitment =
+        proof.manifest.inventory_commitment;
+    out.active_bitmap =
+        proof.manifest.active_bitmap;
+    out.active_endpoints =
+        proof.manifest.active_endpoints;
+    out.residual_endpoints =
+        proof.manifest.residual_endpoints;
+    out.active_roles =
+        proof.manifest.active_roles;
+    out.ordered_child_receipt_commitments =
+        proof.ordered_child_receipt_commitments;
+    out.normalized_parent_receipt_commitment =
+        proof.parent.receipt.receipt_commitment;
+
+    for (uint32_t ordinal = 0;
+         ordinal < proof.manifest.endpoints.size();
+         ++ordinal) {
+        const auto& endpoint =
+            proof.manifest.endpoints[ordinal];
+        if (!endpoint.present) {
+            if (endpoint.receipt_slot !=
+                    kNoReceiptSlotV1) {
+                return Fail(
+                    why,
+                    "verified_evidence:"
+                    "residual_receipt_slot");
+            }
+            continue;
+        }
+        // A host-executed StreamChildArtifactV1 owns only witness-level
+        // child/bind columns.  It is not an ordinary recursive receipt and
+        // therefore cannot be mapped to the enclosing role receipt.  Keep
+        // this defense in depth even though BuildManifestV1 leaves every
+        // such endpoint residual until a specialized child-receipt schema
+        // is implemented and verified by the retained parent.
+        if (endpoint.route.requires_stream_child) {
+            return Fail(
+                why,
+                "verified_evidence:"
+                "stream_child_recursive_receipt_absent");
+        }
+        if (endpoint.receipt_slot >=
+                proof.role_receipts.size()) {
+            return Fail(
+                why,
+                "verified_evidence:"
+                "endpoint_receipt_slot");
+        }
+        const auto& receipt =
+            proof.role_receipts[
+                endpoint.receipt_slot];
+        if (receipt.role != endpoint.route.role ||
+            std::find(
+                receipt.endpoint_ordinals.begin(),
+                receipt.endpoint_ordinals.end(),
+                ordinal) ==
+                receipt.endpoint_ordinals.end()) {
+            return Fail(
+                why,
+                "verified_evidence:"
+                "endpoint_receipt_owner");
+        }
+        const uint256 commitment =
+            receipt.ordinary_proof.receipt
+                .receipt_commitment;
+        if (commitment.IsNull()) {
+            return Fail(
+                why,
+                "verified_evidence:"
+                "endpoint_receipt_commitment");
+        }
+        out.endpoint_receipt_commitments[
+            ordinal] = commitment;
+    }
+
+    out.exact_canonical_inventory =
+        proof.manifest.exact_canonical_order &&
+        proof.manifest.no_duplicate_roles &&
+        proof.manifest.no_duplicate_stream_children;
+    out
+        .all_canonical_role_receipts_and_link_verified =
+        proof.exact_no_omission_no_duplicate_intake &&
+        proof.all_ordinary_receipts_verified &&
+        proof.equality_link.valid &&
+        proof.equality_link
+            .ordered_receipts_bound &&
+        proof.equality_link
+            .dual_fp3_terminal_cancellation;
+    out.normalized_parent_proof_verified =
+        proof.normalized_parent_proof_verified;
+    out
+        .recursive_child_acceptance_constraints_complete =
+        proof
+            .recursive_child_verifier_constraints_complete;
+    out.complete_52_and_14 =
+        proof.manifest.complete_52 &&
+        out.active_endpoints ==
+            kEndpointCountV1 &&
+        out.residual_endpoints == 0 &&
+        out.active_roles ==
+            kRCStage3RelationClosureRoleCount &&
+        proof.role_receipts.size() ==
+            kRCStage3RelationClosureRoleCount;
+    out.recursive_credit_eligible =
+        out.complete_52_and_14 &&
+        out.exact_canonical_inventory &&
+        out
+            .all_canonical_role_receipts_and_link_verified &&
+        out.normalized_parent_proof_verified &&
+        out
+            .recursive_child_acceptance_constraints_complete;
+    // VerifyV1 currently rejects any proof which claims executable child
+    // acceptance constraints. Until that verifier relation lands, evidence
+    // is retained and bound but earns exactly zero recursive credit.
+    if (out
+            .recursive_child_acceptance_constraints_complete ||
+        out.recursive_credit_eligible) {
+        return Fail(
+            why,
+            "verified_evidence:"
+            "recursive_acceptance_not_executable");
+    }
+    out.evidence_commitment =
+        ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+            out);
+    out.valid =
+        out.exact_canonical_inventory &&
+        out
+            .all_canonical_role_receipts_and_link_verified &&
+        out.normalized_parent_proof_verified &&
+        !out.evidence_commitment.IsNull();
+    out.note =
+        out.valid
+        ? "stage3:semantic_endpoint_receipt_intake:"
+          "verified_recursive_receipt_evidence;"
+          "recursive_child_acceptance_constraints=false;"
+          "recursive_credit=false"
+        : "stage3:semantic_endpoint_receipt_intake:"
+          "verified_recursive_receipt_evidence_invalid";
+    if (!out.valid) {
+        out.evidence_commitment.SetNull();
+        return Fail(
+            why,
+            "verified_evidence:invalid");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool VerifyRecursiveReceiptEvidenceV1(
+    const std::vector<RCStage3RoleAirProduct>&
+        role_artifacts,
+    const std::vector<exports::StreamChildArtifactV1>&
+        stream_children,
+    const ProofV1& proof,
+    const VerifiedRecursiveReceiptEvidenceV1& claimed,
+    std::string* why)
+{
+    VerifiedRecursiveReceiptEvidenceV1 expected;
+    std::string rebuild_why;
+    if (!BuildVerifiedRecursiveReceiptEvidenceV1(
+            role_artifacts, stream_children,
+            proof, expected, &rebuild_why) ||
+        claimed != expected ||
+        claimed.evidence_commitment.IsNull() ||
+        claimed.evidence_commitment !=
+            ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+                claimed)) {
+        return Fail(
+            why,
+            "verified_evidence:mismatch:" +
+                rebuild_why);
+    }
+    if (why != nullptr) {
+        *why =
+            "stage3:semantic_endpoint_receipt_intake:"
+            "verified_evidence_rebuilt_and_equal";
     }
     return true;
 }

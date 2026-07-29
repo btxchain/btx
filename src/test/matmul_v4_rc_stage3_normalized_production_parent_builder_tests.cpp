@@ -185,11 +185,11 @@ BOOST_AUTO_TEST_CASE(
 }
 
 BOOST_AUTO_TEST_CASE(
-    build_for_solved_block_fail_closes_on_role_audit_before_built)
+    build_for_solved_block_reaches_candidate_inputs_before_failing)
 {
-    // Composed-height request shape still stops at RoleAudit while
-    // RecursiveChildren is false.  Synthetic streaming receipts cannot bypass
-    // that residual, and tip Assess still requires FRI (equality suite).
+    // The legacy mutable-global RoleAudit precheck is gone. A composed request
+    // now reaches immutable candidate construction and fails on its actual
+    // missing winner capture, not process-global recursive evidence.
     auto params = FixtureParams();
     CBlock block;
     block.nVersion = 4;
@@ -220,7 +220,14 @@ BOOST_AUTO_TEST_CASE(
         builder::ProductionParentBuildStatusV1::
             CompleteRelationParentUnavailable);
     BOOST_CHECK(
-        why.find("recursive_semantic_child_consumption_open") !=
+        why.find("relation_parent:") !=
+        std::string::npos);
+    BOOST_CHECK(
+        why.find("winner_episode_capture_binding") !=
+        std::string::npos);
+    BOOST_CHECK(
+        why.find(
+            "recursive_semantic_child_consumption_open") ==
         std::string::npos);
     BOOST_CHECK(why.find("built") == std::string::npos);
 

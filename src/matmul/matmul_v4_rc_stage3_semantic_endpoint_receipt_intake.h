@@ -143,6 +143,68 @@ struct ProofV1 {
 };
 
 /**
+ * Immutable result of independently rebuilding and verifying ProofV1.
+ *
+ * This is evidence inventory, not semantic credit.  A present endpoint maps
+ * to the exact ordinary role-receipt commitment which owns it; residual
+ * endpoints remain null.  `recursive_credit_eligible` cannot become true
+ * until the canonical inventory is complete, every ordered role/link receipt
+ * and retained parent proof verifies, and executable in-parent child-verifier
+ * constraints are present.
+ */
+struct VerifiedRecursiveReceiptEvidenceV1 {
+    uint16_t version{kVersionV1};
+    uint256 inventory_commitment{};
+    uint64_t active_bitmap{0};
+    std::array<uint256, kEndpointCountV1>
+        endpoint_receipt_commitments{};
+    std::vector<uint256>
+        ordered_child_receipt_commitments;
+    uint256 normalized_parent_receipt_commitment{};
+    uint256 evidence_commitment{};
+    uint32_t active_endpoints{0};
+    uint32_t residual_endpoints{kEndpointCountV1};
+    uint32_t active_roles{0};
+    bool exact_canonical_inventory{false};
+    bool all_canonical_role_receipts_and_link_verified{false};
+    bool normalized_parent_proof_verified{false};
+    bool recursive_child_acceptance_constraints_complete{false};
+    bool complete_52_and_14{false};
+    bool recursive_credit_eligible{false};
+    bool valid{false};
+    std::string note;
+
+    bool operator==(
+        const VerifiedRecursiveReceiptEvidenceV1&) const = default;
+};
+
+[[nodiscard]] uint256
+ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+    const VerifiedRecursiveReceiptEvidenceV1& evidence);
+
+/**
+ * Rebuild the canonical manifest, role/link products, expected child order
+ * and retained normalized parent, execute VerifyV1, then derive immutable
+ * evidence. No field of ProofV1 is accepted as a host-side verification bit.
+ */
+[[nodiscard]] bool BuildVerifiedRecursiveReceiptEvidenceV1(
+    const std::vector<RCStage3RoleAirProduct>& role_artifacts,
+    const std::vector<exports::StreamChildArtifactV1>&
+        stream_children,
+    const ProofV1& proof,
+    VerifiedRecursiveReceiptEvidenceV1& out,
+    std::string* why = nullptr);
+
+/** Independent verifier: rebuild expected evidence and require exact match. */
+[[nodiscard]] bool VerifyRecursiveReceiptEvidenceV1(
+    const std::vector<RCStage3RoleAirProduct>& role_artifacts,
+    const std::vector<exports::StreamChildArtifactV1>&
+        stream_children,
+    const ProofV1& proof,
+    const VerifiedRecursiveReceiptEvidenceV1& claimed,
+    std::string* why = nullptr);
+
+/**
  * Build concrete role receipts, the equality-link receipt and their retained
  * same-parent join.  `prove_parent=false` is a bounded construction canary;
  * VerifyV1 intentionally requires the real parent proof.

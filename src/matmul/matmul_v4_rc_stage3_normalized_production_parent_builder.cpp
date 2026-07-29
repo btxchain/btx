@@ -34,6 +34,8 @@ namespace hash_air = stage3_hash_air;
 namespace hierarchy = recursive_hierarchy;
 namespace nav3 = normalized_authority;
 namespace semantic_source = episode_semantic_source_alg;
+namespace semantic_intake =
+    stage3_semantic_endpoint_receipt_intake;
 
 using AirCS = air_quotient::AirConstraintSystem<gf::Fp3>;
 using AirConstraint = air_quotient::AirConstraint<gf::Fp3>;
@@ -76,6 +78,102 @@ uint256 EndpointTaggedRoot(
     hash << static_cast<uint16_t>(endpoint);
     hash << material;
     return hash.GetHash();
+}
+
+uint256 RecursiveEvidenceStatementRoot(
+    const uint256& composed_digest,
+    const uint256& evidence_commitment)
+{
+    if (composed_digest.IsNull() ||
+        evidence_commitment.IsNull()) {
+        return {};
+    }
+    HashWriter hash;
+    hash << kNav3InventoryDomain;
+    hash << std::string{"recursive_receipt_evidence"};
+    hash << composed_digest;
+    hash << evidence_commitment;
+    return hash.GetHash();
+}
+
+std::vector<RCStage3RelationClosureRoleAudit>
+RoleAuditFromVerifiedEvidence(
+    const semantic_intake::
+        VerifiedRecursiveReceiptEvidenceV1& evidence)
+{
+    // Ignore the legacy process-global recursive-consumption bit entirely.
+    // The immutable evidence can authorize a cell only after the complete
+    // inventory and executable in-parent child verifier both close.
+    const auto cells =
+        CurrentRCStage3RelationEndpointCellAudit();
+    std::vector<RCStage3RelationClosureRoleAudit> out;
+    out.reserve(kRCStage3RelationClosureRoleCount);
+    for (const RCStage3RelationRole role :
+         RCStage3UnifiedRoleOrder()) {
+        RCStage3RelationClosureRoleAudit audit;
+        audit.role = role;
+        for (const auto& cell : cells) {
+            if (cell.role != role) continue;
+            ++audit.required_endpoints;
+            audit.proof_derived_ctl_endpoints +=
+                cell.same_trace_ctl_alias ? 1U : 0U;
+            // A partial receipt inventory is useful binding evidence only.
+            // It must not import even independently known strict cells into
+            // this recursive-evidence audit, because omission of any producer
+            // role still leaves the transitive episode statement open.
+            audit.strict_transitive_endpoints +=
+                evidence.complete_52_and_14 &&
+                        cell.strict_transitive_complete
+                    ? 1U
+                    : 0U;
+            const uint32_t ordinal =
+                static_cast<uint32_t>(
+                    cell.endpoint) - 1U;
+            const bool evidence_owned =
+                ordinal <
+                    evidence
+                        .endpoint_receipt_commitments
+                        .size() &&
+                !evidence
+                     .endpoint_receipt_commitments[
+                         ordinal]
+                     .IsNull();
+            const bool recursively_consumed =
+                evidence.valid &&
+                evidence.recursive_credit_eligible &&
+                evidence_owned &&
+                cell.strict_transitive_complete &&
+                cell.same_trace_ctl_alias;
+            audit
+                .recursively_consumed_strict_endpoints +=
+                recursively_consumed ? 1U : 0U;
+        }
+        audit.recursive_ctl_consumption =
+            audit.required_endpoints != 0 &&
+            audit
+                .recursively_consumed_strict_endpoints ==
+            audit.required_endpoints;
+        audit.role_complete =
+            audit.recursive_ctl_consumption &&
+            audit.proof_derived_ctl_endpoints ==
+                audit.required_endpoints &&
+            audit.strict_transitive_endpoints ==
+                audit.required_endpoints &&
+            evidence.complete_52_and_14 &&
+            evidence
+                .recursive_child_acceptance_constraints_complete &&
+            kRCStage3RelationClosureRecursiveChildrenExecutable;
+        audit.remaining =
+            audit.role_complete
+            ? "immutable verified receipt evidence, strict transitive "
+              "provenance and in-parent recursive acceptance closed"
+            : "verified_receipt_endpoints_" +
+              std::to_string(
+                  evidence.active_endpoints) +
+              "_of_52;strict_or_recursive_acceptance_open";
+        out.push_back(std::move(audit));
+    }
+    return out;
 }
 
 uint256 CommitParentCsShapeV1(const AirCS& cs)
@@ -125,6 +223,12 @@ bool ConvertCandidateToCanonicalProductV1(
         candidate.composed_digest.IsNull() ||
         candidate.episode_digest.IsNull() ||
         candidate.coupled_digest.IsNull() ||
+        !candidate.recursive_receipt_evidence.valid ||
+        candidate.recursive_receipt_evidence
+            .evidence_commitment.IsNull() ||
+        !candidate.recursive_receipt_evidence_rebuilt ||
+        !candidate
+             .recursive_receipt_evidence_same_parent_bound ||
         input.params == nullptr) {
         Note(why, "nav3_inventory:candidate_incomplete");
         return false;
@@ -186,7 +290,11 @@ bool ConvertCandidateToCanonicalProductV1(
     out.verifier_inputs.occurrence_manifest_root =
         TaggedRoot(
             "occurrence_manifest",
-            candidate.composed_digest);
+            RecursiveEvidenceStatementRoot(
+                candidate.composed_digest,
+                candidate
+                    .recursive_receipt_evidence
+                    .evidence_commitment));
     out.verifier_inputs.verifier_program_root =
         TaggedRoot(
             "verifier_program",
@@ -1264,6 +1372,49 @@ void AddSameParentFirstRowAlias(
         });
 }
 
+bool AppendRecursiveReceiptEvidenceRoot(
+    const semantic_intake::
+        VerifiedRecursiveReceiptEvidenceV1& evidence,
+    AirCS& parent_cs,
+    std::vector<std::vector<gf::Fp3>>&
+        parent_columns,
+    ProductionRelationParentCandidateV1& out,
+    std::string* why)
+{
+    if (!evidence.valid ||
+        evidence.evidence_commitment.IsNull() ||
+        evidence.evidence_commitment !=
+            semantic_intake::
+                ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+                    evidence) ||
+        parent_cs.n_rows < 2 ||
+        parent_columns.size() !=
+            parent_cs.n_columns) {
+        Note(why, "recursive_receipt_evidence");
+        return false;
+    }
+    const auto words = Root8(
+        evidence.evidence_commitment);
+    for (uint32_t word = 0;
+         word < words.size(); ++word) {
+        out.recursive_receipt_evidence_root_columns[
+            word] = parent_cs.n_columns++;
+        parent_columns.push_back(
+            std::vector<gf::Fp3>(
+                parent_cs.n_rows,
+                gf::Fp3::FromFp(
+                    gf::FromU64(words[word]))));
+        AddRootBankPin(
+            parent_cs,
+            out.recursive_receipt_evidence_root_columns[
+                word],
+            words[word]);
+    }
+    out.recursive_receipt_evidence_same_parent_bound =
+        true;
+    return true;
+}
+
 bool AppendCanonicalEndpointBank(
     const std::vector<RCStage3RoleAirProduct>& products,
     AirCS& parent_cs,
@@ -1485,6 +1636,9 @@ bool AppendDirectBuilderStreamChildren(
 bool AssembleDirectBuilderParent(
     const std::vector<RCStage3RoleAirProduct>&
         products,
+    const semantic_intake::
+        VerifiedRecursiveReceiptEvidenceV1*
+            recursive_evidence,
     const std::array<
         RCStage3StreamEndpointManifest, 2>&
         manifests,
@@ -1500,6 +1654,9 @@ bool AssembleDirectBuilderParent(
     out.columns.clear();
     out.roles.clear();
     out.direct_builder_stream_children.clear();
+    out.recursive_receipt_evidence_root_columns = {};
+    out.recursive_receipt_evidence_same_parent_bound =
+        false;
 
     out.roles.reserve(products.size());
     for (uint32_t ordinal = 0;
@@ -1525,6 +1682,10 @@ bool AssembleDirectBuilderParent(
             products, out.cs, out.columns,
             out.roles, expected_endpoint_count,
             why) ||
+        (recursive_evidence != nullptr &&
+         !AppendRecursiveReceiptEvidenceRoot(
+             *recursive_evidence,
+             out.cs, out.columns, out, why)) ||
         !AppendDirectBuilderStreamChildren(
             manifests, closures, common_rows,
             out.cs, out.columns, out.roles,
@@ -1828,7 +1989,7 @@ bool BuildDirectBuilderStreamParentCanaryV1(
     }
     if (!PowerOfTwo(common_rows) ||
         !AssembleDirectBuilderParent(
-            products, manifests, closures,
+            products, nullptr, manifests, closures,
             common_rows, 4U, out, why)) {
         return false;
     }
@@ -1864,7 +2025,7 @@ bool BuildDirectBuilderStreamParentCanaryV1(
         }
     }
     if (!AssembleDirectBuilderParent(
-            products, manifests, closures,
+            products, nullptr, manifests, closures,
             common_rows, 4U, out, why)) {
         return false;
     }
@@ -1989,6 +2150,39 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
                     node.cryptographic_child;
             });
 
+    // Build actual ordinary role/link receipts and their retained normalized
+    // parent, then independently rebuild and verify every expected manifest,
+    // child order, receipt commitment and parent proof.  Missing heavy stream
+    // children remain explicit residual endpoints: they are not synthesized
+    // from the local 52-cell representative parent.
+    const std::vector<
+        semantic_intake::exports::StreamChildArtifactV1>
+        semantic_stream_children;
+    const semantic_intake::ProofV1 semantic_proof =
+        semantic_intake::ProveV1(
+            products, semantic_stream_children,
+            /*prove_parent=*/true);
+    std::string evidence_why;
+    if (!semantic_proof.construction_valid ||
+        !semantic_intake::
+            BuildVerifiedRecursiveReceiptEvidenceV1(
+                products, semantic_stream_children,
+                semantic_proof,
+                out.recursive_receipt_evidence,
+                &evidence_why)) {
+        Note(
+            why,
+            "recursive_receipt_evidence:" +
+                (evidence_why.empty()
+                     ? semantic_proof.note
+                     : evidence_why));
+        return false;
+    }
+    out.recursive_receipt_evidence_rebuilt = true;
+    out.recursive_receipt_role_audit =
+        RoleAuditFromVerifiedEvidence(
+            out.recursive_receipt_evidence);
+
     out.direct_builder_public_fs_seed =
         input.solved_block->GetHash();
     if (out.direct_builder_public_fs_seed.IsNull()) {
@@ -2050,6 +2244,7 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
     // from choosing the heavy-child witness after seeing its LogUp challenge.
     if (!AssembleDirectBuilderParent(
             products,
+            &out.recursive_receipt_evidence,
             builder_stream_manifests,
             builder_stream_closures,
             common_rows,
@@ -2101,7 +2296,9 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         }
     }
     if (!AssembleDirectBuilderParent(
-            products, builder_stream_manifests,
+            products,
+            &out.recursive_receipt_evidence,
+            builder_stream_manifests,
             builder_stream_closures,
             common_rows,
             kRCStage3RelationClosureEndpointCount,
@@ -2198,12 +2395,18 @@ bool BuildRelationParentCandidateForSolvedBlockV1(
         out.winner_coupled_capture_bound &&
         out.coupled_witness_replay_avoided &&
         out.captured_episode_leaf_inventory_verified &&
+        out.recursive_receipt_evidence.valid &&
+        out.recursive_receipt_evidence_rebuilt &&
+        out
+            .recursive_receipt_evidence_same_parent_bound &&
+        out.recursive_receipt_role_audit.size() ==
+            kRCStage3RelationClosureRoleCount &&
         out.builder_stream_relations_same_parent &&
         out.witness_violations == 0;
 
     out.recursive_semantic_closure_complete = true;
     for (const auto& audit :
-         CurrentRCStage3RelationClosureRoleAudit()) {
+         out.recursive_receipt_role_audit) {
         if (!audit.role_complete ||
             !audit.recursive_ctl_consumption ||
             audit.proof_derived_ctl_endpoints !=
@@ -2349,30 +2552,6 @@ ProductionParentBuildStatusV1 BuildForSolvedBlockV1(
         Note(why, "program_registry:" + pin_why);
         return ProductionParentBuildStatusV1::
             ProgramRegistryUnavailable;
-    }
-
-    // Avoid recomputing a datacenter-scale winner only to discover a static
-    // semantic child is still absent.  This is not a readiness shortcut: the
-    // same audit is recomputed again inside the candidate, and the candidate
-    // remains directly executable in the gated real-data harness.
-    for (const auto& audit :
-         CurrentRCStage3RelationClosureRoleAudit()) {
-        if (!audit.role_complete ||
-            !audit.recursive_ctl_consumption ||
-            audit.proof_derived_ctl_endpoints !=
-                audit.required_endpoints ||
-            audit.strict_transitive_endpoints !=
-                audit.required_endpoints ||
-            audit.recursively_consumed_strict_endpoints !=
-                audit.required_endpoints) {
-            Note(
-                why,
-                "complete_relation_parent:"
-                "block_to_14_role_52_endpoint_assembler_available;"
-                "recursive_semantic_child_consumption_open");
-            return ProductionParentBuildStatusV1::
-                CompleteRelationParentUnavailable;
-        }
     }
 
     ProductionRelationParentCandidateV1 candidate;

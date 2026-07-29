@@ -1144,9 +1144,64 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(candidate.episode_witness_replay_avoided);
     BOOST_CHECK(candidate.winner_coupled_capture_bound);
     BOOST_CHECK(candidate.coupled_witness_replay_avoided);
+    BOOST_CHECK(
+        candidate.recursive_receipt_evidence.valid);
+    BOOST_CHECK(
+        candidate.recursive_receipt_evidence_rebuilt);
+    BOOST_CHECK(
+        candidate
+            .recursive_receipt_evidence_same_parent_bound);
+    BOOST_CHECK(
+        !candidate.recursive_receipt_evidence
+             .evidence_commitment.IsNull());
+    BOOST_CHECK(
+        candidate.recursive_receipt_evidence
+            .normalized_parent_proof_verified);
+    BOOST_CHECK(
+        !candidate.recursive_receipt_evidence
+             .recursive_child_acceptance_constraints_complete);
+    BOOST_CHECK(
+        !candidate.recursive_receipt_evidence
+             .recursive_credit_eligible);
+    BOOST_CHECK_EQUAL(
+        candidate.recursive_receipt_role_audit.size(),
+        14U);
+    for (const auto& audit :
+         candidate.recursive_receipt_role_audit) {
+        BOOST_CHECK_EQUAL(
+            audit.strict_transitive_endpoints, 0U);
+        BOOST_CHECK_EQUAL(
+            audit.recursively_consumed_strict_endpoints,
+            0U);
+        BOOST_CHECK(!audit.recursive_ctl_consumption);
+        BOOST_CHECK(!audit.role_complete);
+        BOOST_CHECK(
+            audit.remaining.find(
+                "verified_receipt_endpoints_") !=
+            std::string::npos);
+        BOOST_CHECK(
+            audit.remaining.find(
+                "_of_52;strict_or_recursive_acceptance_open") !=
+            std::string::npos);
+    }
     BOOST_CHECK_EQUAL(candidate.roles.size(), 14U);
     BOOST_CHECK_EQUAL(candidate.endpoint_count, 52U);
     BOOST_CHECK_EQUAL(candidate.witness_violations, 0U);
+    auto bad_evidence_root = candidate.columns;
+    const uint32_t evidence_word_column =
+        candidate
+            .recursive_receipt_evidence_root_columns[0];
+    BOOST_REQUIRE_LT(
+        evidence_word_column,
+        bad_evidence_root.size());
+    bad_evidence_root[evidence_word_column][0] =
+        rc::gkr_field::Add(
+            bad_evidence_root[evidence_word_column][0],
+            rc::gkr_field::Fp3::One());
+    BOOST_CHECK_GT(
+        rc::air_recurse::CountWitnessViolationsOnH(
+            candidate.cs, bad_evidence_root),
+        0U);
     BOOST_CHECK(
         candidate.episode_digest == episode_digest);
     BOOST_CHECK(

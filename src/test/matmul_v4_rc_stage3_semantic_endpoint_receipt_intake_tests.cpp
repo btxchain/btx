@@ -37,6 +37,13 @@ const intake::ProofV1& SharedIntake()
     return proof;
 }
 
+struct RecursiveEvidenceReset {
+    ~RecursiveEvidenceReset()
+    {
+        ClearRCStage3ParentVerifiedRecursiveChildEvidenceV1();
+    }
+};
+
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(
@@ -73,6 +80,82 @@ BOOST_AUTO_TEST_CASE(
     // Regardless of any local route-table/direct-alias accounting, none is
     // recursively admissible without a concrete role receipt.
     BOOST_CHECK_EQUAL(manifest.active_endpoints, 0U);
+}
+
+BOOST_AUTO_TEST_CASE(
+    host_valid_stream_child_without_recursive_receipt_earns_zero)
+{
+    using Endpoint = RCStage3RelationEndpoint;
+    const Endpoint endpoint =
+        Endpoint::EpisodeTileTreeStream;
+    const RCStage3StreamFamily family =
+        RCStage3StreamFamilyForEndpoint(endpoint);
+    std::array<uint32_t, 8> stream_value{};
+    for (uint32_t word = 0;
+         word < stream_value.size(); ++word) {
+        stream_value[word] =
+            0x760000U + 13U * word;
+    }
+    const auto stream_manifest =
+        BuildRCStage3StreamEndpointCanonicalManifest(
+            family, stream_value, 0, 1);
+    uint256 seed;
+    for (uint32_t byte = 0;
+         byte < seed.size(); ++byte) {
+        seed.begin()[byte] =
+            static_cast<unsigned char>(
+                9U * byte + 1U);
+    }
+    std::string why;
+    const auto closure =
+        RCStage3StreamEndpointClose(
+            family, stream_manifest,
+            seed, &why, true);
+    BOOST_REQUIRE_MESSAGE(closure.ok, why);
+
+    std::vector<std::array<uint32_t, 8>> roots(4);
+    roots[0] = closure.committed_root;
+    for (uint32_t index = 1;
+         index < roots.size(); ++index) {
+        for (uint32_t word = 0;
+             word < roots[index].size(); ++word) {
+            roots[index][word] =
+                0x880000U +
+                index * 0x1000U + word;
+        }
+    }
+    const auto role =
+        BuildRCStage3PureStreamRoleAirFromRoots(
+            RCStage3RelationRole::EpisodeTileTree,
+            roots, &why);
+    BOOST_REQUIRE_MESSAGE(role.ok, why);
+    intake::exports::StreamChildArtifactV1 child;
+    child.endpoint = endpoint;
+    child.closure = closure;
+
+    intake::ManifestV1 manifest;
+    BOOST_REQUIRE_MESSAGE(
+        intake::BuildManifestV1(
+            {role}, {child}, manifest, &why),
+        why);
+    const uint32_t ordinal =
+        static_cast<uint32_t>(endpoint) - 1U;
+    BOOST_REQUIRE(ordinal < manifest.endpoints.size());
+    const auto& row = manifest.endpoints[ordinal];
+    BOOST_CHECK(row.route.requires_stream_child);
+    BOOST_CHECK(!row.present);
+    BOOST_CHECK_EQUAL(
+        row.receipt_slot,
+        intake::kNoReceiptSlotV1);
+    BOOST_CHECK(
+        row.residual.find(
+            "no verified recursive receipt") !=
+        std::string::npos);
+    BOOST_CHECK_EQUAL(
+        manifest.active_bitmap &
+            (uint64_t{1} << ordinal),
+        0U);
+    BOOST_CHECK(!manifest.complete_52);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -179,6 +262,13 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !intake::VerifyV1(
             {WiringRole()}, {}, proof, &why));
+    intake::VerifiedRecursiveReceiptEvidenceV1
+        unverified_parent;
+    BOOST_CHECK(
+        !intake::BuildVerifiedRecursiveReceiptEvidenceV1(
+            {WiringRole()}, {}, proof,
+            unverified_parent, &why));
+    BOOST_CHECK(!unverified_parent.valid);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -319,6 +409,152 @@ BOOST_AUTO_TEST_CASE(
         intake::VerifyV1(
             {WiringRole()}, {}, proof, &why),
         why);
+
+    intake::VerifiedRecursiveReceiptEvidenceV1
+        evidence;
+    BOOST_REQUIRE_MESSAGE(
+        intake::BuildVerifiedRecursiveReceiptEvidenceV1(
+            {WiringRole()}, {}, proof,
+            evidence, &why),
+        why);
+    BOOST_CHECK(evidence.valid);
+    BOOST_CHECK_EQUAL(evidence.active_endpoints, 4U);
+    BOOST_CHECK_EQUAL(evidence.residual_endpoints, 48U);
+    BOOST_CHECK_EQUAL(evidence.active_roles, 1U);
+    BOOST_CHECK(!evidence.complete_52_and_14);
+    BOOST_CHECK(
+        !evidence
+             .recursive_child_acceptance_constraints_complete);
+    BOOST_CHECK(!evidence.recursive_credit_eligible);
+    BOOST_CHECK(
+        !evidence.evidence_commitment.IsNull());
+    BOOST_CHECK_MESSAGE(
+        intake::VerifyRecursiveReceiptEvidenceV1(
+            {WiringRole()}, {}, proof,
+            evidence, &why),
+        why);
+
+    {
+        auto omitted = proof;
+        omitted.role_receipts.clear();
+        intake::VerifiedRecursiveReceiptEvidenceV1
+            rejected;
+        BOOST_CHECK(
+            !intake::
+                BuildVerifiedRecursiveReceiptEvidenceV1(
+                    {WiringRole()}, {}, omitted,
+                    rejected, &why));
+    }
+    {
+        // The 52-entry inventory is positional and canonical.  Reordering
+        // entries must not be repairable by retaining the old commitment.
+        auto permuted = proof;
+        std::swap(
+            permuted.manifest.endpoints[14],
+            permuted.manifest.endpoints[15]);
+        intake::VerifiedRecursiveReceiptEvidenceV1
+            rejected;
+        BOOST_CHECK(
+            !intake::
+                BuildVerifiedRecursiveReceiptEvidenceV1(
+                    {WiringRole()}, {}, permuted,
+                    rejected, &why));
+    }
+    {
+        auto reordered = proof;
+        BOOST_REQUIRE_EQUAL(
+            reordered
+                .ordered_child_receipt_commitments
+                .size(),
+            2U);
+        std::swap(
+            reordered
+                .ordered_child_receipt_commitments[0],
+            reordered
+                .ordered_child_receipt_commitments[1]);
+        intake::VerifiedRecursiveReceiptEvidenceV1
+            rejected;
+        BOOST_CHECK(
+            !intake::
+                BuildVerifiedRecursiveReceiptEvidenceV1(
+                    {WiringRole()}, {}, reordered,
+                    rejected, &why));
+    }
+    {
+        auto forged = proof;
+        forged.parent.receipt
+            .proof_commitment.SetNull();
+        intake::VerifiedRecursiveReceiptEvidenceV1
+            rejected;
+        BOOST_CHECK(
+            !intake::
+                BuildVerifiedRecursiveReceiptEvidenceV1(
+                    {WiringRole()}, {}, forged,
+                    rejected, &why));
+    }
+    {
+        auto forged = evidence;
+        forged
+            .endpoint_receipt_commitments[14]
+            .begin()[0] ^= 1U;
+        forged.evidence_commitment =
+            intake::
+                ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+                    forged);
+        BOOST_CHECK(
+            !intake::VerifyRecursiveReceiptEvidenceV1(
+                {WiringRole()}, {}, proof,
+                forged, &why));
+    }
+    {
+        // A mutation of the evidence root itself is rejected even when every
+        // retained receipt and manifest byte is unchanged.
+        auto forged = evidence;
+        forged.evidence_commitment.begin()[0] ^= 1U;
+        BOOST_CHECK(
+            !intake::VerifyRecursiveReceiptEvidenceV1(
+                {WiringRole()}, {}, proof,
+                forged, &why));
+    }
+    {
+        // Recursive acceptance is not a claim bit.  It can become true only
+        // when the independently rebuilt child-verifier constraints say so.
+        auto forged = evidence;
+        forged
+            .recursive_child_acceptance_constraints_complete =
+            true;
+        forged.evidence_commitment =
+            intake::
+                ComputeVerifiedRecursiveReceiptEvidenceCommitmentV1(
+                    forged);
+        BOOST_CHECK(
+            !intake::VerifyRecursiveReceiptEvidenceV1(
+                {WiringRole()}, {}, proof,
+                forged, &why));
+    }
+
+    // Evidence is a pure function of canonical inputs and proofs. Legacy
+    // mutable process-global endpoint registrations cannot alter it.
+    RecursiveEvidenceReset reset;
+    ClearRCStage3ParentVerifiedRecursiveChildEvidenceV1();
+    bool legacy_global_mutated = false;
+    for (uint32_t ordinal = 1;
+         ordinal <= intake::kEndpointCountV1;
+         ++ordinal) {
+        legacy_global_mutated |=
+            RegisterRCStage3ParentVerifiedRecursiveChildEvidenceV1(
+                static_cast<RCStage3RelationEndpoint>(
+                    ordinal));
+    }
+    BOOST_REQUIRE(legacy_global_mutated);
+    intake::VerifiedRecursiveReceiptEvidenceV1
+        after_global_mutation;
+    BOOST_REQUIRE_MESSAGE(
+        intake::BuildVerifiedRecursiveReceiptEvidenceV1(
+            {WiringRole()}, {}, proof,
+            after_global_mutation, &why),
+        why);
+    BOOST_CHECK(after_global_mutation == evidence);
 
     auto attacked = proof;
     attacked.parent.receipt
