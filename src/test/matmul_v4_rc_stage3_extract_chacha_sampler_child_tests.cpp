@@ -42,6 +42,8 @@ BOOST_AUTO_TEST_CASE(retained_node_is_fail_closed)
     statement.trace_rows = 2048;
     statement.public_boundary_statement = H(4);
     statement.r0_root = H(5);
+    statement.preprocessed_schedule_commitment = H(6);
+    statement.program_challenge_commitment = H(7);
     statement.position_cells.resize(1);
     statement.input_bit_cells.resize(1);
     BOOST_CHECK(
@@ -100,6 +102,73 @@ BOOST_AUTO_TEST_CASE(
     BOOST_CHECK(
         !child::MaterializeVerifierOwnedPreprocessedV1(
             cs, columns, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    complete_program_challenge_binding_rejects_r0_and_schedule_substitution)
+{
+    child::TileStatementV1 statement;
+    statement.statement_commitment = H(0x31);
+    statement.public_fs_seed = H(0x32);
+    statement.prf_key = H(0x33);
+    statement.row = 7;
+    statement.block = 9;
+    statement.chacha_blocks = 1;
+    statement.candidate_rows = 64;
+    statement.trace_rows = 2048;
+    statement.scale_e = 3;
+    statement.r0_root = H(0x34);
+
+    // Rebuild once to obtain the verifier-owned boundary and preprocessing
+    // handles; neither is caller-selectable in an accepted statement.
+    auto provisional =
+        child::BuildProgramChallengeBindingV1(statement);
+    BOOST_CHECK(!provisional.valid);
+    BOOST_CHECK(
+        !provisional.public_boundary_statement
+             .IsNull());
+    BOOST_CHECK(
+        !provisional
+             .preprocessed_schedule_commitment
+             .IsNull());
+    BOOST_CHECK(
+        !provisional.challenge_commitment.IsNull());
+
+    statement.public_boundary_statement =
+        provisional.public_boundary_statement;
+    statement.preprocessed_schedule_commitment =
+        provisional
+            .preprocessed_schedule_commitment;
+    statement.program_challenge_commitment =
+        provisional.challenge_commitment;
+    const auto honest =
+        child::BuildProgramChallengeBindingV1(
+            statement);
+    BOOST_REQUIRE(honest.valid);
+    BOOST_CHECK_EQUAL(
+        honest.challenges.size(),
+        child::kProgramChallengeWidthV1);
+    BOOST_CHECK(
+        honest.preprocessed_schedule_commitment ==
+        statement
+            .preprocessed_schedule_commitment);
+
+    auto wrong_r0 = statement;
+    wrong_r0.r0_root = H(0x35);
+    const auto substituted =
+        child::BuildProgramChallengeBindingV1(
+            wrong_r0);
+    BOOST_CHECK(!substituted.valid);
+    BOOST_CHECK(
+        substituted.challenge_commitment !=
+        honest.challenge_commitment);
+
+    auto wrong_schedule = statement;
+    wrong_schedule.preprocessed_schedule_commitment =
+        H(0x36);
+    BOOST_CHECK(
+        !child::BuildProgramChallengeBindingV1(
+             wrong_schedule).valid);
 }
 
 BOOST_AUTO_TEST_CASE(

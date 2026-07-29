@@ -46,6 +46,16 @@ struct TileStatementV1 {
     uint8_t scale_e{0};
     uint256 public_boundary_statement{};
     uint256 r0_root{};
+    /**
+     * Canonical AlgHash commitment to every verifier-owned preprocessed
+     * column, including its absolute column index and complete H-domain
+     * values.  The native Split-RAP verifier still enforces those values
+     * through dual-OOD openings; this compact root is the exact statement
+     * handle consumed by a normalized parent.
+     */
+    uint256 preprocessed_schedule_commitment{};
+    /** AlgHash commitment to the six R0-derived ProgramTable challenges. */
+    uint256 program_challenge_commitment{};
     std::array<CellV1, 32> output_cells{};
     /** Per-candidate proof-owned position and signed input bit cells. */
     std::vector<CellV1> position_cells;
@@ -76,6 +86,38 @@ struct TileProofV1 {
 /** Deterministic two-lane challenge derivation exposed for transcript audits. */
 [[nodiscard]] std::array<gkr_field::Fp3, 2>
 DeriveChallengePairForAuditV1(
+    const TileStatementV1& statement);
+
+inline constexpr uint32_t kProgramChallengeWidthV1 = 6;
+
+/**
+ * Exact verifier reconstruction of the challenge-bearing child relation.
+ *
+ * Order is consensus-canonical for the composed child ProgramTable:
+ *   [0] ChaCha SSA gamma1, [1] gamma2, [2] alpha1, [3] alpha2,
+ *   [4] RcSampler gamma, [5] alpha.
+ *
+ * All six values are derived after the same authenticated R0 commitment.
+ * `preprocessed_schedule_commitment` names the complete verifier-owned
+ * schedule whose dual-OOD openings the native child proof enforces.
+ */
+struct ProgramChallengeBindingV1 {
+    uint16_t version{kVersionV1};
+    uint256 r0_root{};
+    uint256 public_boundary_statement{};
+    uint256 preprocessed_schedule_commitment{};
+    uint256 challenge_commitment{};
+    std::array<gkr_field::Fp3, kProgramChallengeWidthV1>
+        challenges{};
+    uint32_t preprocessed_columns{0};
+    bool all_challenges_r0_derived{false};
+    bool preprocessed_dual_ood_bound{false};
+    bool valid{false};
+    std::string note;
+};
+
+[[nodiscard]] ProgramChallengeBindingV1
+BuildProgramChallengeBindingV1(
     const TileStatementV1& statement);
 
 [[nodiscard]] uint256 ComputeRetainedNodeCommitmentV1(

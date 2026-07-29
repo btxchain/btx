@@ -733,7 +733,70 @@ struct Built {
     std::vector<CellV1> positions;
     std::vector<std::array<CellV1, 64>> input_bits;
     uint256 public_boundary_statement{};
+    std::array<Fp3, kProgramChallengeWidthV1>
+        program_challenges{};
 };
+
+uint256 PreprocessedScheduleCommitment(
+    const AirCS& cs)
+{
+    if (cs.n_rows < 2 || cs.n_columns == 0 ||
+        cs.preprocessed.empty() ||
+        !cs.preprocessed_pin_ood) {
+        return {};
+    }
+    std::vector<gf::Fp> lanes;
+    const uint64_t value_count =
+        uint64_t{cs.preprocessed.size()} *
+        (uint64_t{cs.n_rows} * 3U + 2U) + 4U;
+    if (value_count >
+        std::numeric_limits<size_t>::max()) {
+        return {};
+    }
+    lanes.reserve(static_cast<size_t>(value_count));
+    lanes.push_back(gf::FromU64(
+        UINT64_C(0x45584354))); // "EXCT"
+    lanes.push_back(gf::FromU64(cs.n_rows));
+    lanes.push_back(gf::FromU64(cs.n_columns));
+    lanes.push_back(gf::FromU64(
+        cs.preprocessed.size()));
+    for (const auto& [column, values] :
+         cs.preprocessed) {
+        if (column >= cs.n_columns ||
+            values.size() != cs.n_rows) {
+            return {};
+        }
+        lanes.push_back(gf::FromU64(column));
+        lanes.push_back(gf::FromU64(values.size()));
+        for (const Fp3& value : values) {
+            lanes.push_back(
+                gf::Canonical(value.c0));
+            lanes.push_back(
+                gf::Canonical(value.c1));
+            lanes.push_back(
+                gf::Canonical(value.c2));
+        }
+    }
+    return Fri3AlgDigestToUint256(
+        alg_hash::SpongeHashFp(lanes));
+}
+
+uint256 ProgramChallengeCommitment(
+    const std::array<
+        Fp3, kProgramChallengeWidthV1>& challenge)
+{
+    std::vector<Fp3> values;
+    values.reserve(challenge.size() + 1);
+    values.push_back({
+        gf::FromU64(UINT64_C(0x45584354)),
+        gf::FromU64(kVersionV1),
+        gf::FromU64(kProgramChallengeWidthV1)});
+    values.insert(
+        values.end(), challenge.begin(),
+        challenge.end());
+    return Fri3AlgDigestToUint256(
+        alg_hash::SpongeHashFp3(values));
+}
 
 void AddBaseMapping(
     const Attachment& attachment,
@@ -792,6 +855,14 @@ bool BuildComposition(
         }
         out.public_boundary_statement =
             hash_prover.public_statement;
+        out.program_challenges[0] =
+            hash_prover.challenges.gamma1;
+        out.program_challenges[1] =
+            hash_prover.challenges.gamma2;
+        out.program_challenges[2] =
+            hash_prover.challenges.alpha1;
+        out.program_challenges[3] =
+            hash_prover.challenges.alpha2;
         if (!AppendExact(
                 out.cs, hash_prover.cs,
                 out.hash, why)) {
@@ -814,6 +885,14 @@ bool BuildComposition(
         }
         out.public_boundary_statement =
             hash_verifier.public_statement;
+        out.program_challenges[0] =
+            hash_verifier.challenges.gamma1;
+        out.program_challenges[1] =
+            hash_verifier.challenges.gamma2;
+        out.program_challenges[2] =
+            hash_verifier.challenges.alpha1;
+        out.program_challenges[3] =
+            hash_verifier.challenges.alpha2;
         if (!AppendExact(
                 out.cs, hash_verifier.cs,
                 out.hash, why)) {
@@ -832,6 +911,8 @@ bool BuildComposition(
         ? std::array<Fp3, 2>{
               Fp3::Zero(), Fp3::Zero()}
         : ChildChallenges(statement, r0_root);
+    out.program_challenges[4] = challenges[0];
+    out.program_challenges[5] = challenges[1];
     const ga::TableTM table;
     AirCS sampler_cs;
     if (!BuildSamplerCs(
@@ -1093,6 +1174,73 @@ std::array<Fp3, 2> DeriveChallengePairForAuditV1(
     return ChildChallenges(statement, statement.r0_root);
 }
 
+ProgramChallengeBindingV1
+BuildProgramChallengeBindingV1(
+    const TileStatementV1& statement)
+{
+    ProgramChallengeBindingV1 out;
+    out.r0_root = statement.r0_root;
+    if (statement.version != kVersionV1 ||
+        statement.statement_commitment.IsNull() ||
+        statement.public_fs_seed.IsNull() ||
+        statement.prf_key.IsNull() ||
+        statement.r0_root.IsNull() ||
+        statement.chacha_blocks == 0 ||
+        statement.chacha_blocks > 4 ||
+        statement.candidate_rows == 0 ||
+        statement.trace_rows < 2048) {
+        out.note =
+            "stage3:extract_chacha_sampler_child:"
+            "program_challenge_statement";
+        return out;
+    }
+    Built rebuilt;
+    std::string why;
+    if (!BuildComposition(
+            statement, statement.r0_root,
+            nullptr, false, rebuilt, &why)) {
+        out.note =
+            "stage3:extract_chacha_sampler_child:"
+            "program_challenge_rebuild:" + why;
+        return out;
+    }
+    out.public_boundary_statement =
+        rebuilt.public_boundary_statement;
+    out.preprocessed_schedule_commitment =
+        PreprocessedScheduleCommitment(rebuilt.cs);
+    out.challenge_commitment =
+        ProgramChallengeCommitment(
+            rebuilt.program_challenges);
+    out.challenges = rebuilt.program_challenges;
+    out.preprocessed_columns =
+        static_cast<uint32_t>(
+            rebuilt.cs.preprocessed.size());
+    out.all_challenges_r0_derived =
+        out.public_boundary_statement ==
+            statement.public_boundary_statement &&
+        out.challenge_commitment ==
+            statement.program_challenge_commitment &&
+        !out.challenge_commitment.IsNull();
+    out.preprocessed_dual_ood_bound =
+        rebuilt.cs.preprocessed_pin_ood &&
+        out.preprocessed_columns != 0 &&
+        out.preprocessed_schedule_commitment ==
+            statement
+                .preprocessed_schedule_commitment &&
+        !out.preprocessed_schedule_commitment
+             .IsNull();
+    out.valid =
+        out.all_challenges_r0_derived &&
+        out.preprocessed_dual_ood_bound;
+    out.note =
+        out.valid
+        ? "stage3:extract_chacha_sampler_child:"
+          "program_challenges_and_preprocessing_bound"
+        : "stage3:extract_chacha_sampler_child:"
+          "program_challenge_binding_open";
+    return out;
+}
+
 uint256 ComputeRetainedNodeCommitmentV1(
     const TileStatementV1& statement)
 {
@@ -1110,6 +1258,10 @@ uint256 ComputeRetainedNodeCommitmentV1(
         statement.trace_rows < 2048 ||
         statement.public_boundary_statement.IsNull() ||
         statement.r0_root.IsNull() ||
+        statement.preprocessed_schedule_commitment
+            .IsNull() ||
+        statement.program_challenge_commitment
+            .IsNull() ||
         statement.position_cells.size() !=
             statement.candidate_rows ||
         statement.input_bit_cells.size() !=
@@ -1129,7 +1281,11 @@ uint256 ComputeRetainedNodeCommitmentV1(
          << statement.trace_rows
          << statement.scale_e
          << statement.public_boundary_statement
-         << statement.r0_root;
+         << statement.r0_root
+         << statement
+                .preprocessed_schedule_commitment
+         << statement
+                .program_challenge_commitment;
     for (const auto& cell : statement.output_cells) {
         hash << cell.column << cell.row;
     }
@@ -1220,6 +1376,21 @@ bool ProveTileV1(
     }
     statement.public_boundary_statement =
         final.public_boundary_statement;
+    statement.preprocessed_schedule_commitment =
+        PreprocessedScheduleCommitment(final.cs);
+    if (statement.preprocessed_schedule_commitment
+            .IsNull()) {
+        return Fail(
+            why, "prove_preprocessed_schedule");
+    }
+    statement.program_challenge_commitment =
+        ProgramChallengeCommitment(
+            final.program_challenges);
+    if (statement.program_challenge_commitment
+            .IsNull()) {
+        return Fail(
+            why, "prove_program_challenges");
+    }
     statement.output_cells = final.outputs;
     statement.position_cells =
         std::move(final.positions);
@@ -1293,9 +1464,15 @@ bool VerifyTileV1(
         return Fail(why, "verify_shape");
     }
     Built rebuilt;
+    const ProgramChallengeBindingV1 binding =
+        BuildProgramChallengeBindingV1(statement);
     if (!BuildComposition(
             statement, statement.r0_root,
             nullptr, false, rebuilt, why) ||
+        !binding.valid ||
+        binding.preprocessed_schedule_commitment !=
+            statement
+                .preprocessed_schedule_commitment ||
         rebuilt.public_boundary_statement !=
             statement.public_boundary_statement ||
         rebuilt.outputs != statement.output_cells ||
