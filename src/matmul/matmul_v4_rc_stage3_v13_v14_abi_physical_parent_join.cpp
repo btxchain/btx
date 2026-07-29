@@ -159,6 +159,173 @@ bool SamePublicPrefix(
         !product.recursive_authority_ready;
 }
 
+bool FillResidentColumns(
+    const tape::ProductV1& tape_product,
+    const prefix::ProductV1& prefix_product,
+    const PlanV1& plan,
+    const AirCS& resident_parent_cs,
+    std::vector<std::vector<Fp3>>& columns,
+    std::string* why)
+{
+    if (tape_product.cs.n_rows !=
+            plan.tape_rows ||
+        tape_product.cs.n_columns !=
+            plan.tape_columns ||
+        prefix_product.cs.n_rows !=
+            plan.prefix_rows ||
+        prefix_product.cs.n_columns !=
+            plan.prefix_columns ||
+        resident_parent_cs.n_columns !=
+            plan.resident_columns) {
+        return Fail(why, "product_shape");
+    }
+    columns.assign(
+        plan.resident_columns,
+        std::vector<Fp3>(
+            plan.parent_rows,
+            Fp3::Zero()));
+    if (!CopyShiftedColumns(
+            tape_product.columns,
+            plan.tape_offset,
+            plan.tape_rows,
+            plan.parent_rows,
+            columns,
+            why) ||
+        !CopyShiftedColumns(
+            prefix_product.columns,
+            plan.prefix_offset,
+            plan.prefix_rows,
+            plan.parent_rows,
+            columns,
+            why) ||
+        !FillWrapBroadcast(
+            tape_product.columns,
+            plan.tape_attachment,
+            plan.parent_rows,
+            columns,
+            why) ||
+        !FillWrapBroadcast(
+            prefix_product.columns,
+            plan.prefix_attachment,
+            plan.parent_rows,
+            columns,
+            why)) {
+        return false;
+    }
+    for (const auto& [column, values] :
+         resident_parent_cs.preprocessed) {
+        if (column >= columns.size() ||
+            values.size() != plan.parent_rows) {
+            return Fail(
+                why, "product_preprocessed");
+        }
+        columns[column] = values;
+    }
+    return true;
+}
+
+abi_join::LayoutV1 ShiftLayout(
+    const abi_join::LayoutV1& local,
+    uint32_t column_base)
+{
+    abi_join::LayoutV1 out = local;
+    out.original_columns += column_base;
+    out.consumer_bit_base += column_base;
+    out.consumer_decompose_mask_base += column_base;
+    out.source_active_base += column_base;
+    out.source_multiplicity_base += column_base;
+    out.consumer_active_base += column_base;
+    out.consumer_key_base += column_base;
+    out.dependent_base += column_base;
+    out.source_inverse_base += column_base;
+    out.consumer_inverse_base += column_base;
+    out.running_base += column_base;
+    out.end += column_base;
+    return out;
+}
+
+bool RelocateEmbeddedBase(
+    const PublicDeterministicComponentV1& component,
+    const composer::ChildAttachmentV1& attachment,
+    const AirCS& parent_cs,
+    abi_join::PlanV1& relocated_plan,
+    abi_join::EmbeddedBaseV1& relocated_base,
+    std::string* why)
+{
+    relocated_plan = {};
+    relocated_base = {};
+    if (!component.valid ||
+        !attachment.valid ||
+        attachment.row_lifted ||
+        !attachment.literal_column_mapping ||
+        attachment.semantic_child_columns !=
+            component.cs.n_columns ||
+        attachment.column_base >
+            parent_cs.n_columns ||
+        component.cs.n_columns >
+            parent_cs.n_columns -
+                attachment.column_base ||
+        parent_cs.n_rows !=
+            component.cs.n_rows) {
+        return Fail(
+            why, "component_relocation_input");
+    }
+    std::string local_why;
+    if (!abi_join::BuildCanonicalPlanV1(
+            component.shape,
+            component.tape_binding,
+            component.manifest.canonical_program,
+            component.manifest,
+            parent_cs.n_rows,
+            attachment.ParentColumn(
+                component.plan.tape_offset),
+            attachment.ParentColumn(
+                component.plan.v14_offset),
+            relocated_plan,
+            &local_why)) {
+        return Fail(
+            why, "component_relocation_plan:" +
+                     local_why);
+    }
+    relocated_base =
+        component.abi_base;
+    relocated_base.plan =
+        relocated_plan;
+    relocated_base.layout =
+        ShiftLayout(
+            component.abi_base.layout,
+            attachment.column_base);
+    relocated_base.original_columns +=
+        attachment.column_base;
+    for (uint32_t& column :
+         relocated_base
+             .complete_r0_base_column_indices) {
+        column =
+            attachment.ParentColumn(column);
+    }
+    relocated_base.valid =
+        component.abi_base.valid &&
+        relocated_base.layout.dependent_base ==
+            attachment.column_base +
+                component.abi_base
+                    .layout.dependent_base &&
+        relocated_base
+                .complete_r0_base_column_indices
+                .size() ==
+            component.abi_base
+                .complete_r0_base_column_indices
+                .size();
+    relocated_base.note =
+        relocated_base.valid
+        ? "canonical ABI base relocated into global parent"
+        : "relocated ABI base incomplete";
+    if (!relocated_base.valid) {
+        return Fail(
+            why, "component_relocation_invariant");
+    }
+    return true;
+}
+
 } // namespace
 
 bool BuildResidentParentV1(
@@ -339,6 +506,272 @@ bool BuildResidentParentV1(
         return Fail(why, "plan_invariant");
     }
     if (why != nullptr) *why = plan.note;
+    return true;
+}
+
+bool BuildDeterministicConstraintSystemV1(
+    const tape::PublicShapeV1& shape,
+    const tape::PublicBindingV1& tape_binding,
+    const occurrence::ManifestV1& manifest,
+    const alg_hash::Digest& expected_transcript_commitment,
+    const derived::BindingV1& expected_derived_binding,
+    PublicDeterministicComponentV1& out,
+    std::string* why)
+{
+    out = {};
+    out.shape = shape;
+    out.tape_binding = tape_binding;
+    out.manifest = manifest;
+    out.transcript_commitment =
+        expected_transcript_commitment;
+    out.derived_binding =
+        expected_derived_binding;
+    if (!BuildResidentParentV1(
+            shape, tape_binding, manifest,
+            expected_transcript_commitment,
+            expected_derived_binding,
+            out.cs, out.plan, why) ||
+        !abi_join::
+            AppendEmbeddedBaseConstraintSystemV1(
+                out.plan.abi_plan,
+                out.plan
+                    .complete_r0_base_column_indices,
+                out.cs, out.abi_base, why)) {
+        out = {};
+        return false;
+    }
+    out.r0_base_column_indices =
+        out.abi_base
+            .complete_r0_base_column_indices;
+    out.actual_verifiers_resident =
+        out.plan.tape_layout_rebuilt &&
+        out.plan.prefix_layout_rebuilt;
+    out.exact_physical_abi_pre_r0 =
+        out.plan.exact_abi_plan_rebuilt &&
+        out.abi_base.physical_parent_cells_in_r0 &&
+        out.abi_base
+            .verifier_schedule_preprocessed;
+    out.challenge_columns_absent =
+        out.abi_base.challenge_columns_absent &&
+        out.cs.n_columns ==
+            out.abi_base.layout.dependent_base;
+    out.valid =
+        out.actual_verifiers_resident &&
+        out.exact_physical_abi_pre_r0 &&
+        out.challenge_columns_absent &&
+        out.r0_base_column_indices.size() ==
+            out.cs.n_columns &&
+        !out.r0_base_column_indices.empty() &&
+        out.r0_base_column_indices.front() == 0 &&
+        out.r0_base_column_indices.back() + 1 ==
+            out.cs.n_columns &&
+        out.cs.preprocessed_row_group_roots.empty();
+    out.note = out.valid
+        ? "exact V13 tape and V14 replay resident before global R0"
+        : "physical transcript deterministic component incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "deterministic_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool BuildDeterministicComponentV1(
+    const tape::ProductV1& tape_product,
+    const prefix::ProductV1& prefix_product,
+    const occurrence::ManifestV1& manifest,
+    DeterministicComponentV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!tape_product.valid ||
+        !SamePublicPrefix(
+            prefix_product, manifest) ||
+        !BuildDeterministicConstraintSystemV1(
+            tape_product.schedule.shape,
+            tape_product.binding,
+            manifest,
+            prefix_product.transcript_commitment,
+            prefix_product.derived_binding,
+            out.public_component,
+            why)) {
+        return Fail(
+            why, "deterministic_product_input");
+    }
+
+    AirCS resident_cs;
+    PlanV1 resident_plan;
+    if (!BuildResidentParentV1(
+            tape_product.schedule.shape,
+            tape_product.binding,
+            manifest,
+            prefix_product.transcript_commitment,
+            prefix_product.derived_binding,
+            resident_cs, resident_plan, why) ||
+        !FillResidentColumns(
+            tape_product, prefix_product,
+            resident_plan, resident_cs,
+            out.columns, why) ||
+        !abi_join::AppendEmbeddedBaseProductV1(
+            resident_plan.abi_plan,
+            resident_plan
+                .complete_r0_base_column_indices,
+            resident_cs, out.columns,
+            out.public_component.abi_base,
+            why)) {
+        out = {};
+        return false;
+    }
+    out.public_component.cs =
+        std::move(resident_cs);
+    out.public_component.plan =
+        std::move(resident_plan);
+    out.public_component.r0_base_column_indices =
+        out.public_component.abi_base
+            .complete_r0_base_column_indices;
+    out.violations =
+        abi_join::CountViolationsV1(
+            out.public_component.cs,
+            out.columns);
+    out.actual_tape_witness_resident =
+        tape_product.violations == 0;
+    out.actual_v14_prefix_witness_resident =
+        prefix_product.violations == 0;
+    out.valid =
+        out.public_component.valid &&
+        out.violations == 0 &&
+        out.actual_tape_witness_resident &&
+        out.actual_v14_prefix_witness_resident &&
+        out.columns.size() ==
+            out.public_component.cs.n_columns;
+    out.note = out.valid
+        ? "exact physical transcript witness retained before global R0"
+        : "physical transcript deterministic witness incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "deterministic_product_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendFinalConstraintSystemToParentV1(
+    const PublicDeterministicComponentV1& component,
+    const composer::ChildAttachmentV1& component_attachment,
+    const uint256& domain_separated_public_seed,
+    const uint256& global_r0_row_root,
+    const std::vector<uint32_t>&
+        global_r0_base_column_indices,
+    AirCS& parent_cs,
+    ComponentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!RelocateEmbeddedBase(
+            component, component_attachment,
+            parent_cs, out.relocated_abi_plan,
+            out.relocated_abi_base, why) ||
+        !abi_join::
+            AppendEmbeddedFinalConstraintSystemV1(
+                out.relocated_abi_plan,
+                out.relocated_abi_base,
+                domain_separated_public_seed,
+                global_r0_row_root,
+                global_r0_base_column_indices,
+                parent_cs,
+                out.abi_finalization,
+                why)) {
+        out = {};
+        return false;
+    }
+    out.plan_rebuilt_at_parent_offsets =
+        out.relocated_abi_plan
+                .tape_column_offset ==
+            component_attachment.ParentColumn(
+                component.plan.tape_offset) &&
+        out.relocated_abi_plan
+                .v14_column_offset ==
+            component_attachment.ParentColumn(
+                component.plan.v14_offset);
+    out.exact_global_r0_consumed =
+        out.abi_finalization.valid &&
+        out.abi_finalization
+                .global_r0_row_root ==
+            global_r0_row_root;
+    out.valid =
+        out.plan_rebuilt_at_parent_offsets &&
+        out.exact_global_r0_consumed;
+    out.note = out.valid
+        ? "physical transcript relation finalized from global parent R0"
+        : "physical transcript verifier finalization incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "component_finalize_invariant");
+    }
+    if (why != nullptr) *why = out.note;
+    return true;
+}
+
+bool AppendFinalRelationToParentV1(
+    const DeterministicComponentV1& component,
+    const composer::ChildAttachmentV1& component_attachment,
+    const uint256& domain_separated_public_seed,
+    const aq::AirQuotientTwoEpochBaseRowSession&
+        global_r0_session,
+    AirCS& parent_cs,
+    std::vector<std::vector<Fp3>>&
+        parent_columns,
+    ComponentFinalizationV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!component.valid ||
+        !RelocateEmbeddedBase(
+            component.public_component,
+            component_attachment,
+            parent_cs, out.relocated_abi_plan,
+            out.relocated_abi_base, why) ||
+        !abi_join::
+            AppendEmbeddedFinalProductV1(
+                out.relocated_abi_plan,
+                out.relocated_abi_base,
+                domain_separated_public_seed,
+                global_r0_session,
+                parent_cs, parent_columns,
+                out.abi_finalization,
+                why)) {
+        out = {};
+        return false;
+    }
+    out.plan_rebuilt_at_parent_offsets =
+        out.relocated_abi_plan
+                .tape_column_offset ==
+            component_attachment.ParentColumn(
+                component.public_component
+                    .plan.tape_offset) &&
+        out.relocated_abi_plan
+                .v14_column_offset ==
+            component_attachment.ParentColumn(
+                component.public_component
+                    .plan.v14_offset);
+    out.exact_global_r0_consumed =
+        out.abi_finalization.valid &&
+        out.abi_finalization
+                .global_r0_row_root ==
+            global_r0_session
+                .base_row_commitment;
+    out.valid =
+        out.plan_rebuilt_at_parent_offsets &&
+        out.exact_global_r0_consumed;
+    out.note = out.valid
+        ? "physical transcript witness finalized from retained global R0"
+        : "physical transcript product finalization incomplete";
+    if (!out.valid) {
+        return Fail(
+            why, "component_product_finalize_invariant");
+    }
+    if (why != nullptr) *why = out.note;
     return true;
 }
 

@@ -238,6 +238,7 @@ add_executable(test_btx
   matmul_v4_rc_stage3_v13_proof_tape_source_join_tests.cpp
   matmul_v4_rc_stage3_v13_merkle_fold_descriptor_vm_tests.cpp
   matmul_v4_rc_stage3_v13_v14_abi_logup_join_tests.cpp
+  matmul_v4_rc_stage3_v13_v14_abi_physical_parent_join_tests.cpp
   matmul_v4_rc_stage3_v14_event_output_export_air_tests.cpp
   matmul_v4_rc_stage3_v14_selection_fused_join_tests.cpp
   matmul_v4_rc_stage3_v14_transcript_provenance_join_tests.cpp

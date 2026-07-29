@@ -742,6 +742,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_v13_selection_query_air.cpp
   matmul/matmul_v4_rc_stage3_v13_proof_tape_source_join.cpp
   matmul/matmul_v4_rc_stage3_v13_v14_abi_logup_join.cpp
+  matmul/matmul_v4_rc_stage3_v13_v14_abi_physical_parent_join.cpp
   matmul/matmul_v4_rc_stage3_v14_event_output_export_air.cpp
   matmul/matmul_v4_rc_stage3_v14_selection_fused_join.cpp
   matmul/matmul_v4_rc_stage3_v14_transcript_provenance_join.cpp

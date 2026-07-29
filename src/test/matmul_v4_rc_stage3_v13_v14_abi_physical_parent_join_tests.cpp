@@ -19,6 +19,8 @@ namespace aq = matmul::v4::rc::air_quotient;
 namespace alg_hash = matmul::v4::rc::alg_hash;
 namespace bridge =
     matmul::v4::rc::stage3_safe_v12_recursive_bridge;
+namespace composer =
+    matmul::v4::rc::stage3_air_parent_composer;
 namespace derived =
     matmul::v4::rc::stage3_v13_derived_hash_air;
 namespace event_export =
@@ -735,6 +737,280 @@ BOOST_AUTO_TEST_CASE(
             fixture.prefix_product
                 .derived_binding,
             fixture.seed, envelope, &why));
+}
+
+BOOST_AUTO_TEST_CASE(
+    split_r0_physical_component_is_publicly_rebuilt_and_attacks_reject)
+{
+    if (!FullActualProductEnabled()) return;
+    const Fixture& fixture = Honest();
+    std::string why;
+
+    parent_join::DeterministicComponentV1 component;
+    BOOST_REQUIRE_MESSAGE(
+        parent_join::BuildDeterministicComponentV1(
+            fixture.tape_product,
+            fixture.prefix_product,
+            fixture.manifest,
+            component, &why),
+        why);
+    BOOST_REQUIRE(component.valid);
+    BOOST_CHECK(
+        component.public_component
+            .challenge_columns_absent);
+
+    const auto make_dummy =
+        [&](aq::AirConstraintSystem<gf::Fp3>& cs,
+            std::vector<std::vector<gf::Fp3>>& columns) {
+            cs = {};
+            cs.n_rows =
+                component.public_component.cs.n_rows;
+            cs.n_columns = 1;
+            columns.assign(
+                1, std::vector<gf::Fp3>(
+                       cs.n_rows,
+                       gf::Fp3::FromFp(
+                           gf::FromU64(7))));
+            cs.constraints.push_back({
+                "test.physical_parent.shared_r0_dummy",
+                aq::AirKind::kEverywhere, 1,
+                [](const auto& cur,
+                   const auto&) {
+                    return gf::Sub(
+                        cur[0],
+                        gf::Fp3::FromFp(
+                            gf::FromU64(7)));
+                }});
+        };
+
+    aq::AirConstraintSystem<gf::Fp3> dummy_cs;
+    std::vector<std::vector<gf::Fp3>>
+        dummy_columns;
+    make_dummy(dummy_cs, dummy_columns);
+
+    aq::AirConstraintSystem<gf::Fp3> prover_cs;
+    std::vector<std::vector<gf::Fp3>>
+        prover_columns;
+    composer::ChildAttachmentV1 dummy_attachment;
+    composer::ChildAttachmentV1 component_attachment;
+    BOOST_REQUIRE_MESSAGE(
+        composer::AppendChildV1(
+            prover_cs, prover_columns,
+            dummy_cs, dummy_columns, 0,
+            dummy_attachment, &why),
+        why);
+    BOOST_REQUIRE_MESSAGE(
+        composer::AppendChildV1(
+            prover_cs, prover_columns,
+            component.public_component.cs,
+            component.columns, 1,
+            component_attachment, &why),
+        why);
+    std::vector<uint32_t> r0_indices(
+        prover_cs.n_columns);
+    std::iota(
+        r0_indices.begin(),
+        r0_indices.end(), 0U);
+    const auto r0 =
+        aq::AirQuotientBuildTwoEpochBaseRowSession(
+            prover_cs, prover_columns,
+            r0_indices);
+    BOOST_REQUIRE_MESSAGE(r0.valid, r0.note);
+    parent_join::ComponentFinalizationV1
+        prover_finalization;
+    BOOST_REQUIRE_MESSAGE(
+        parent_join::AppendFinalRelationToParentV1(
+            component, component_attachment,
+            fixture.seed, r0,
+            prover_cs, prover_columns,
+            prover_finalization, &why),
+        why);
+    prover_cs.preprocessed_row_group_roots
+        .push_back({
+            .version = 1,
+            .role =
+                aq::AirPreprocessedRowGroupRole::kR0,
+            .ordered_columns = r0_indices,
+            .root = r0.base_row_commitment,
+        });
+    BOOST_REQUIRE_EQUAL(
+        abi_join::CountViolationsV1(
+            prover_cs, prover_columns),
+        0U);
+    const auto proved =
+        aq::AirQuotientProveRowsSplitRapSafeV2(
+            prover_cs, prover_columns,
+            r0_indices, fixture.seed, {}, &r0);
+    BOOST_REQUIRE_MESSAGE(
+        proved.ok && proved.division_exact,
+        proved.note);
+    const uint256 proof_r0 =
+        rc::Fri3AlgDigestToUint256(
+            proved.proof.batch.groups[0]
+                .row_commit.root);
+    BOOST_REQUIRE(
+        proof_r0 == r0.base_row_commitment);
+
+    const auto verify_rebuilt =
+        [&](const tape::PublicBindingV1& binding,
+            const alg_hash::Digest& transcript_commitment,
+            bool component_first,
+            const uint256& claimed_r0) {
+            parent_join::
+                PublicDeterministicComponentV1
+                    rebuilt_component;
+            if (!parent_join::
+                    BuildDeterministicConstraintSystemV1(
+                        fixture.shape, binding,
+                        fixture.manifest,
+                        transcript_commitment,
+                        fixture.prefix_product
+                            .derived_binding,
+                        rebuilt_component, &why)) {
+                return false;
+            }
+            aq::AirConstraintSystem<gf::Fp3>
+                verifier_cs;
+            std::vector<std::vector<gf::Fp3>>
+                verifier_columns;
+            std::vector<std::vector<gf::Fp3>>
+                zero_component(
+                    rebuilt_component.cs.n_columns,
+                    std::vector<gf::Fp3>(
+                        rebuilt_component.cs.n_rows,
+                        gf::Fp3::Zero()));
+            composer::ChildAttachmentV1
+                rebuilt_dummy_attachment;
+            composer::ChildAttachmentV1
+                rebuilt_component_attachment;
+            const bool appended =
+                component_first
+                ? composer::AppendChildV1(
+                      verifier_cs,
+                      verifier_columns,
+                      rebuilt_component.cs,
+                      zero_component, 0,
+                      rebuilt_component_attachment,
+                      &why) &&
+                      composer::AppendChildV1(
+                          verifier_cs,
+                          verifier_columns,
+                          dummy_cs, dummy_columns, 1,
+                          rebuilt_dummy_attachment,
+                          &why)
+                : composer::AppendChildV1(
+                      verifier_cs,
+                      verifier_columns,
+                      dummy_cs, dummy_columns, 0,
+                      rebuilt_dummy_attachment,
+                      &why) &&
+                      composer::AppendChildV1(
+                          verifier_cs,
+                          verifier_columns,
+                          rebuilt_component.cs,
+                          zero_component, 1,
+                          rebuilt_component_attachment,
+                          &why);
+            if (!appended) return false;
+            std::vector<uint32_t>
+                verifier_r0_indices(
+                    verifier_cs.n_columns);
+            std::iota(
+                verifier_r0_indices.begin(),
+                verifier_r0_indices.end(), 0U);
+            parent_join::ComponentFinalizationV1
+                verifier_finalization;
+            if (!parent_join::
+                    AppendFinalConstraintSystemToParentV1(
+                        rebuilt_component,
+                        rebuilt_component_attachment,
+                        fixture.seed, claimed_r0,
+                        verifier_r0_indices,
+                        verifier_cs,
+                        verifier_finalization,
+                        &why)) {
+                return false;
+            }
+            verifier_cs.preprocessed_row_group_roots
+                .push_back({
+                    .version = 1,
+                    .role =
+                        aq::AirPreprocessedRowGroupRole::kR0,
+                    .ordered_columns =
+                        verifier_r0_indices,
+                    .root = claimed_r0,
+                });
+            return aq::
+                AirQuotientVerifyRowsSplitRapSafeV2(
+                    verifier_cs, proved.proof,
+                    verifier_r0_indices,
+                    fixture.seed, &why);
+        };
+
+    BOOST_CHECK_MESSAGE(
+        verify_rebuilt(
+            fixture.tape_binding,
+            fixture.prefix_product
+                .transcript_commitment,
+            false, proof_r0),
+        why);
+
+    auto substituted_commitment =
+        fixture.prefix_product
+            .transcript_commitment;
+    substituted_commitment[0] =
+        gf::Add(
+            substituted_commitment[0],
+            gf::FromU64(1));
+    BOOST_CHECK(
+        !verify_rebuilt(
+            fixture.tape_binding,
+            substituted_commitment,
+            false, proof_r0));
+
+    auto substituted_binding =
+        fixture.tape_binding;
+    substituted_binding.program_root =
+        Seed(0x13);
+    BOOST_CHECK(
+        !verify_rebuilt(
+            substituted_binding,
+            fixture.prefix_product
+                .transcript_commitment,
+            false, proof_r0));
+
+    BOOST_CHECK(
+        !verify_rebuilt(
+            fixture.tape_binding,
+            fixture.prefix_product
+                .transcript_commitment,
+            true, proof_r0));
+
+    const uint256 transplanted_r0 =
+        Seed(0xf0);
+    BOOST_REQUIRE(
+        transplanted_r0 != proof_r0);
+    BOOST_CHECK(
+        !verify_rebuilt(
+            fixture.tape_binding,
+            fixture.prefix_product
+                .transcript_commitment,
+            false, transplanted_r0));
+
+    aq::AirConstraintSystem<gf::Fp3>
+        omitted_cs = dummy_cs;
+    omitted_cs.preprocessed_row_group_roots
+        .push_back({
+            .version = 1,
+            .role =
+                aq::AirPreprocessedRowGroupRole::kR0,
+            .ordered_columns = {0},
+            .root = proof_r0,
+        });
+    BOOST_CHECK(
+        !aq::AirQuotientVerifyRowsSplitRapSafeV2(
+            omitted_cs, proved.proof, {0},
+            fixture.seed, &why));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
