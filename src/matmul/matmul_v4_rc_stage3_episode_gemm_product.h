@@ -324,6 +324,18 @@ void RCStage3EpisodeWitnessStoreClearForTest();
         StreamingEpisodeClosureReceiptV1>
 RCStage3EpisodeStreamingReceiptStoreGet(
     const uint256& final_header_hash);
+/**
+ * Test/fixture helper: install a streaming receipt under a header that already
+ * has a winner episode capture in the witness store.  Does not run full FRI
+ * verify — production publish remains WinnerBundleStorePut.  Used to prove
+ * fail-closed Built / equality residuals when a synthetic receipt is present.
+ */
+[[nodiscard]] bool RCStage3EpisodeStreamingReceiptStorePutForTest(
+    const uint256& final_header_hash,
+    std::shared_ptr<
+        const streaming_episode_closure::
+            StreamingEpisodeClosureReceiptV1> receipt,
+    std::string* why = nullptr);
 void RCStage3EpisodeWinnerBundleStoreErase(
     const uint256& final_header_hash);
 void RCStage3EpisodeWinnerBundleStoreClearForTest();

@@ -2384,19 +2384,72 @@ ProductionParentBuildStatusV1 BuildForSolvedBlockV1(
             CompleteRelationParentUnavailable;
     }
     if (!candidate.production_authority) {
-        Note(
-            why,
+        // Prefer the candidate's own residual note when RoleAudit is green but
+        // streaming role-export equality is still pending; otherwise keep the
+        // recursive-consumption residual that currently dominates tip.
+        std::string detail =
             "complete_relation_parent:"
             "local_14_role_52_endpoint_parent_built;"
-            "recursive_semantic_child_consumption_open");
+            "recursive_semantic_child_consumption_open";
+        if (!candidate.residuals.empty()) {
+            detail.push_back(';');
+            detail += candidate.residuals.front();
+        } else if (!candidate_why.empty()) {
+            detail.push_back(';');
+            detail += candidate_why;
+        }
+        Note(why, detail);
         return ProductionParentBuildStatusV1::
             CompleteRelationParentUnavailable;
     }
 
+    return ConvertProductionAuthorityCandidateToBuiltV1(
+        input, candidate, out, why);
+}
+
+ProductionParentBuildStatusV1
+ConvertProductionAuthorityCandidateToBuiltV1(
+    const ProductionParentBuildInputV1& input,
+    const ProductionRelationParentCandidateV1& candidate,
+    consumer::CanonicalRelationParentProductV1& out,
+    std::string* why)
+{
+    out = {};
+    if (!candidate.production_authority ||
+        !candidate.local_parent_valid) {
+        Note(
+            why,
+            "complete_relation_parent:"
+            "production_authority_or_local_parent_missing");
+        return ProductionParentBuildStatusV1::
+            CompleteRelationParentUnavailable;
+    }
+    if (input.params == nullptr) {
+        Note(why, "request");
+        return ProductionParentBuildStatusV1::InvalidRequest;
+    }
+
+    ProductionProgramConsensusPinV1 registry_pin;
+    registry_pin.recursive_alg_hash_root =
+        input.params
+            ->hashMatMulRCStage3ProgramRegistryAlgRoot;
+    registry_pin.external_sha256d_audit_root =
+        input.params
+            ->hashMatMulRCStage3ProgramRegistryShaAuditRoot;
+    registry_pin.registry_binding =
+        input.params
+            ->hashMatMulRCStage3ProgramRegistryBinding;
+    std::string pin_why;
+    if (!ValidateProductionProgramConsensusPinV1(
+            registry_pin, &pin_why)) {
+        Note(why, "program_registry:" + pin_why);
+        return ProductionParentBuildStatusV1::
+            ProgramRegistryUnavailable;
+    }
+
     // Retain one global R0, build the independently reconstructible NAV3
     // inventory, and move the exact parent CS/columns into the executable
-    // receipt consumer.  Unreachable while the live semantic audit reports any
-    // incomplete role or production_authority remains false.
+    // receipt consumer.
     if (!ConvertCandidateToCanonicalProductV1(
             input, candidate, registry_pin, out, why)) {
         return ProductionParentBuildStatusV1::

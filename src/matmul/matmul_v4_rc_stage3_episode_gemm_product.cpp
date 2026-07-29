@@ -1252,6 +1252,34 @@ RCStage3EpisodeStreamingReceiptStoreGet(
     return g_episode_streaming_receipt_store_receipt;
 }
 
+bool RCStage3EpisodeStreamingReceiptStorePutForTest(
+    const uint256& final_header_hash,
+    std::shared_ptr<
+        const streaming_episode_closure::
+            StreamingEpisodeClosureReceiptV1> receipt,
+    std::string* why)
+{
+    if (final_header_hash.IsNull() ||
+        receipt == nullptr ||
+        receipt->receipt_commitment.IsNull()) {
+        return Fail(why, "streaming_receipt_store_incomplete");
+    }
+    std::lock_guard<std::mutex> lock(
+        g_episode_witness_store_mutex);
+    if (g_episode_witness_store_capture == nullptr ||
+        g_episode_witness_store_header !=
+            final_header_hash) {
+        return Fail(
+            why,
+            "streaming_receipt_store_capture_missing");
+    }
+    g_episode_streaming_receipt_store_header =
+        final_header_hash;
+    g_episode_streaming_receipt_store_receipt =
+        std::move(receipt);
+    return true;
+}
+
 void RCStage3EpisodeWinnerBundleStoreErase(
     const uint256& final_header_hash)
 {

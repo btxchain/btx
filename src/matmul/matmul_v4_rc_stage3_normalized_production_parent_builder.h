@@ -216,12 +216,34 @@ ValidateCapturedEpisodeLeafInventoryV2(
  *
  * The downstream type is already executable: once this function returns
  * Built, BuildReceiptV1 proves, serializes, decodes and verifies the exact
- * product.  Built requires the live 14-role / 52-endpoint recursive semantic
- * audit to close and the NAV3 public inventory conversion to succeed.
+ * product.  Built requires:
+ *   - live 14-role / 52-endpoint RoleAudit role_complete (RecursiveChildren),
+ *   - candidate production_authority (local parent + streaming role-export
+ *     equality certificate premises via Attach/Assess with FRI-verified
+ *     receipt), and
+ *   - NAV3 public inventory conversion
+ *     (ConvertProductionAuthorityCandidateToBuiltV1).
+ * Fail-closed otherwise. Does not flip AuthorityReady / ExactReplay.
  */
 [[nodiscard]] ProductionParentBuildStatusV1
 BuildForSolvedBlockV1(
     const ProductionParentBuildInputV1& input,
+    consumer::CanonicalRelationParentProductV1& out,
+    std::string* why = nullptr);
+
+/**
+ * Finalize Built from a candidate that already carries production_authority.
+ *
+ * This is the NAV3 conversion step shared by BuildForSolvedBlockV1 after
+ * RoleAudit + candidate authority close.  Fixture tests may exercise it with
+ * a local canary parent whose authority bit is set only after documenting that
+ * living RoleAudit / FRI streaming equality are still open on the production
+ * BuildForSolvedBlockV1 path.  Never flips AuthorityReady / ExactReplay.
+ */
+[[nodiscard]] ProductionParentBuildStatusV1
+ConvertProductionAuthorityCandidateToBuiltV1(
+    const ProductionParentBuildInputV1& input,
+    const ProductionRelationParentCandidateV1& candidate,
     consumer::CanonicalRelationParentProductV1& out,
     std::string* why = nullptr);
 
