@@ -420,6 +420,36 @@ AssessPostChallengeColumnClass();
     air_quotient::AirConstraintSystem<Fp3>& out,
     std::string* why = nullptr);
 
+struct CanonicalRelocationReportV1 {
+    uint32_t constraints{0};
+    uint32_t canonical_constraints_relocated{0};
+    uint32_t native_constraints_shifted{0};
+    uint32_t canonical_tables_recommitted{0};
+    bool every_claimed_provenance_valid{false};
+    bool exact_order_preserved{false};
+};
+
+/**
+ * Append a child constraint graph at an absolute parent-column offset.
+ *
+ * Constraints carrying canonical adapter provenance are not wrapped in an
+ * opaque slicing callback. Their shared ProgramTable is decoded, every
+ * Current/Next column load is shifted by `column_base`, the table is
+ * recommitted, and the relocated adapter callback is selected in the child's
+ * exact order. Native constraints retain the legacy slice wrapper. Any
+ * partial/mismatched provenance fails closed.
+ *
+ * `parent.n_columns` must already cover the appended child interval. This
+ * helper appends constraints only; witnesses and preprocessing remain the
+ * parent composer's responsibility.
+ */
+[[nodiscard]] bool AppendRelocatedAirConstraintsV1(
+    const air_quotient::AirConstraintSystem<Fp3>& child,
+    uint32_t column_base,
+    air_quotient::AirConstraintSystem<Fp3>& parent,
+    CanonicalRelocationReportV1& report,
+    std::string* why = nullptr);
+
 enum class MigrationState : uint8_t {
     NotStarted = 0,
     Partial = 1,

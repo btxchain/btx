@@ -19,6 +19,8 @@ namespace two =
     rc::stage3_v13_two_child_parent;
 namespace coverage =
     rc::stage3_v13_fixedpoint_bytecode_coverage;
+namespace tape =
+    rc::stage3_multirow_v13_proof_tape_air;
 
 namespace {
 
@@ -136,6 +138,22 @@ two::PublicStatementV1 Statement()
             .first_query = child,
             .query_count = 1,
         };
+        aq::AirConstraintSystem<gf::Fp3>
+            canonical_tape_cs;
+        std::string tape_why;
+        BOOST_REQUIRE_MESSAGE(
+            tape::BuildCanonicalConstraintSystemV1(
+                statement.tape_shape,
+                statement.tape_binding,
+                canonical_tape_cs,
+                nullptr,
+                nullptr,
+                &statement.tape_program,
+                &tape_why),
+            tape_why);
+        statement.tape_program_root =
+            cb::CommitProgramTableAlgHash(
+                statement.tape_program);
         statement.child_program = Programs();
         statement.child_program_root =
             cb::CommitProgramTableAlgHash(
@@ -167,6 +185,8 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE(!seed0.IsNull());
     BOOST_REQUIRE(!seed1.IsNull());
     BOOST_CHECK(seed0 != seed1);
+    two::DeterministicParentV1 rejected;
+    std::string why;
 
     auto swapped = statement;
     std::swap(
@@ -189,10 +209,30 @@ BOOST_AUTO_TEST_CASE(
         two::DeriveChildFinalizationSeedV1(
             changed_seed, 0) != seed0);
 
+    auto changed_tape_program = statement;
+    changed_tape_program.children[0]
+        .tape_program.programs[0]
+        .declared_degree++;
+    changed_tape_program.children[0]
+        .tape_program_root =
+        cb::CommitProgramTableAlgHash(
+            changed_tape_program.children[0]
+                .tape_program);
+    BOOST_CHECK(
+        two::CommitStatementV1(
+            changed_tape_program) != root);
+    BOOST_CHECK(
+        two::CommitChildIdentityV1(
+            changed_tape_program.children[0]) !=
+        two::CommitChildIdentityV1(
+            statement.children[0]));
+    BOOST_CHECK(
+        !two::BuildDeterministicConstraintSystemV1(
+            changed_tape_program,
+            rejected, &why));
+
     auto omitted = statement;
     omitted.children[1] = {};
-    two::DeterministicParentV1 rejected;
-    std::string why;
     BOOST_CHECK(
         !two::BuildDeterministicConstraintSystemV1(
             omitted, rejected, &why));

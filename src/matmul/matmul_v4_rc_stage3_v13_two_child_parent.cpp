@@ -68,6 +68,10 @@ void HashChildPublicFields(
     hash << statement.range.ordinal;
     hash << statement.range.first_query;
     hash << statement.range.query_count;
+    hash << cb::CommitProgramTable(
+        statement.tape_program);
+    HashDigest(
+        hash, statement.tape_program_root);
     HashDigest(
         hash, statement.child_program_root);
     if (include_local_seed) {
@@ -185,42 +189,27 @@ bool AppendChildConstraintSystem(
         parent.preprocessed_pin_ood ||
         child.preprocessed_pin_ood;
 
-    for (const auto& source : child.constraints) {
-        if (!source.eval ||
-            source.alg_degree == 0) {
-            return Fail(why, "child_constraint");
-        }
-        aq::AirConstraint<Fp3> shifted;
-        shifted.name = source.name;
-        shifted.kind = source.kind;
-        shifted.alg_degree = source.alg_degree;
-        const auto eval = source.eval;
-        const uint32_t base = out.column_base;
-        const uint32_t width = child.n_columns;
-        shifted.eval =
-            [eval, base, width](
-                const std::vector<Fp3>& current,
-                const std::vector<Fp3>& next) {
-                if (current.size() <
-                        base + width ||
-                    next.size() <
-                        base + width) {
-                    return Fp3::One();
-                }
-                std::vector<Fp3> child_current(
-                    current.begin() + base,
-                    current.begin() +
-                        base + width);
-                std::vector<Fp3> child_next(
-                    next.begin() + base,
-                    next.begin() +
-                        base + width);
-                return eval(
-                    child_current, child_next);
-            };
-        parent.constraints.push_back(
-            std::move(shifted));
+    cb::CanonicalRelocationReportV1
+        relocation;
+    if (!cb::AppendRelocatedAirConstraintsV1(
+            child, out.column_base,
+            parent, relocation, why)) {
+        return Fail(
+            why,
+            "child_constraint_relocation");
     }
+    out.canonical_constraints_relocated =
+        relocation
+            .canonical_constraints_relocated;
+    out.native_constraints_shifted =
+        relocation.native_constraints_shifted;
+    out.canonical_tables_recommitted =
+        relocation
+            .canonical_tables_recommitted;
+    out.canonical_program_relocation_exact =
+        relocation
+            .every_claimed_provenance_valid &&
+        relocation.exact_order_preserved;
     for (const auto& [column, values] :
          child.preprocessed) {
         if (column >= child.n_columns ||

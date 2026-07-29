@@ -273,44 +273,27 @@ bool AppendChildConstraintSystem(
     parent_cs.preprocessed_pin_ood =
         parent_cs.preprocessed_pin_ood ||
         child_cs.preprocessed_pin_ood;
-    for (const auto& constraint :
-         child_cs.constraints) {
-        aq::AirConstraint<Fp3> shifted;
-        shifted.name = constraint.name;
-        shifted.kind = constraint.kind;
-        shifted.alg_degree =
-            constraint.alg_degree;
-        const auto eval =
-            constraint.eval;
-        const uint32_t base =
-            out.column_base;
-        const uint32_t width =
-            child_cs.n_columns;
-        shifted.eval =
-            [eval, base, width](
-                const std::vector<Fp3>& current,
-                const std::vector<Fp3>& next) {
-                if (current.size() <
-                        base + width ||
-                    next.size() <
-                        base + width) {
-                    return Fp3::One();
-                }
-                std::vector<Fp3> child_current(
-                    current.begin() + base,
-                    current.begin() +
-                        base + width);
-                std::vector<Fp3> child_next(
-                    next.begin() + base,
-                    next.begin() +
-                        base + width);
-                return eval(
-                    child_current,
-                    child_next);
-            };
-        parent_cs.constraints.push_back(
-            std::move(shifted));
+    cb::CanonicalRelocationReportV1
+        relocation;
+    if (!cb::AppendRelocatedAirConstraintsV1(
+            child_cs, out.column_base,
+            parent_cs, relocation, why)) {
+        return Fail(
+            why,
+            "public_child_constraint_relocation");
     }
+    out.canonical_constraints_relocated =
+        relocation
+            .canonical_constraints_relocated;
+    out.native_constraints_shifted =
+        relocation.native_constraints_shifted;
+    out.canonical_tables_recommitted =
+        relocation
+            .canonical_tables_recommitted;
+    out.canonical_program_relocation_exact =
+        relocation
+            .every_claimed_provenance_valid &&
+        relocation.exact_order_preserved;
     for (const auto& [column, values] :
          child_cs.preprocessed) {
         parent_cs.preprocessed.emplace_back(

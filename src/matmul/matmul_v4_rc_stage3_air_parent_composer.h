@@ -33,9 +33,13 @@ struct ChildAttachmentV1 {
     uint32_t column_count{0};
     uint32_t constraint_begin{0};
     uint32_t constraint_count{0};
+    uint32_t canonical_constraints_relocated{0};
+    uint32_t native_constraints_shifted{0};
+    uint32_t canonical_tables_recommitted{0};
     uint32_t preprocessed_count{0};
     bool literal_column_mapping{false};
     bool constraints_shifted{false};
+    bool canonical_program_relocation_exact{false};
     bool row_lifted{false};
     bool padding_zero_constrained{false};
     bool valid{false};

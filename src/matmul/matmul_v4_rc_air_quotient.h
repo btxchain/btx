@@ -15,6 +15,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -378,6 +379,17 @@ struct AirConstraint {
      */
     uint256 canonical_program_table_root{};
     uint32_t canonical_program_ordinal{UINT32_MAX};
+    /**
+     * Exact canonical ProgramTable bytes and transcript-derived challenge
+     * vector used to reconstruct this callback.  Shared ownership avoids
+     * duplicating a table per constraint.  Parent composers use these fields
+     * to relocate column loads and recommit the transformed table instead of
+     * copying a root that no longer describes the shifted evaluator.
+     */
+    std::shared_ptr<const std::vector<unsigned char>>
+        canonical_program_table_wire{};
+    std::shared_ptr<const std::vector<F>>
+        canonical_program_challenges{};
 };
 
 template <typename F>

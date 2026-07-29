@@ -8,7 +8,9 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <limits>
+#include <map>
 
 namespace matmul::v4::rc::constraint_bytecode {
 namespace {
@@ -792,6 +794,21 @@ bool BuildAirConstraintSystemFromProgramTableImpl(
         return Fail(
             why, "air_adapter_program_root");
     }
+    std::vector<unsigned char> canonical_wire;
+    if (!SerializeProgramTable(
+            table, canonical_wire, why) ||
+        canonical_wire.empty()) {
+        return Fail(
+            why, "air_adapter_program_wire");
+    }
+    const auto shared_wire =
+        std::make_shared<
+            const std::vector<unsigned char>>(
+                std::move(canonical_wire));
+    const auto shared_challenge =
+        std::make_shared<
+            const std::vector<Fp3>>(
+                challenge);
     for (const Program& program : table.programs) {
         air_quotient::AirConstraint<Fp3> constraint;
         // AirConstraint names are diagnostic string literals rather than
@@ -819,6 +836,10 @@ bool BuildAirConstraintSystemFromProgramTableImpl(
             canonical_table_root;
         constraint.canonical_program_ordinal =
             program.constraint_ordinal;
+        constraint.canonical_program_table_wire =
+            shared_wire;
+        constraint.canonical_program_challenges =
+            shared_challenge;
         out.constraints.push_back(std::move(constraint));
     }
     return true;
@@ -846,6 +867,260 @@ bool BuildAirConstraintSystemFromProgramTable(
 {
     return BuildAirConstraintSystemFromProgramTableImpl(
         table, n_rows, challenge, true, out, why);
+}
+
+bool AppendRelocatedAirConstraintsV1(
+    const air_quotient::AirConstraintSystem<Fp3>& child,
+    uint32_t column_base,
+    air_quotient::AirConstraintSystem<Fp3>& parent,
+    CanonicalRelocationReportV1& report,
+    std::string* why)
+{
+    report = {};
+    report.constraints =
+        static_cast<uint32_t>(
+            child.constraints.size());
+    if (child.n_rows < 2 ||
+        child.n_rows != parent.n_rows ||
+        child.n_columns == 0 ||
+        child.n_columns >
+            std::numeric_limits<uint32_t>::max() -
+                column_base ||
+        parent.n_columns <
+            column_base + child.n_columns) {
+        return Fail(
+            why, "relocate_parent_shape");
+    }
+
+    struct CacheEntry {
+        std::vector<Fp3> challenge;
+        air_quotient::AirConstraintSystem<Fp3>
+            relocated;
+    };
+    // One challenge-independent table may be instantiated under several
+    // transcript-derived challenge vectors in the same parent.  Cache by
+    // (table root, challenge vector), not table root alone.
+    std::map<uint256, std::vector<CacheEntry>>
+        cache;
+    std::vector<
+        air_quotient::AirConstraint<Fp3>>
+        appended;
+    appended.reserve(child.constraints.size());
+
+    const auto same_challenge =
+        [](const std::vector<Fp3>& left,
+           const std::vector<Fp3>& right) {
+            if (left.size() != right.size()) {
+                return false;
+            }
+            for (uint32_t index = 0;
+                 index < left.size(); ++index) {
+                if (!gf::Eq(left[index], right[index])) {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+    for (const auto& source : child.constraints) {
+        if (!source.eval ||
+            source.alg_degree == 0) {
+            return Fail(
+                why, "relocate_source_constraint");
+        }
+        const bool has_root =
+            !source
+                 .canonical_program_table_root
+                 .IsNull();
+        const bool has_ordinal =
+            source.canonical_program_ordinal !=
+            UINT32_MAX;
+        const bool has_wire =
+            source.canonical_program_table_wire !=
+                nullptr &&
+            !source
+                 .canonical_program_table_wire
+                 ->empty();
+        const bool has_challenge =
+            source.canonical_program_challenges !=
+            nullptr;
+        const bool any_provenance =
+            has_root || has_ordinal ||
+            has_wire || has_challenge;
+        const bool complete_provenance =
+            has_root && has_ordinal &&
+            has_wire && has_challenge;
+        if (any_provenance &&
+            !complete_provenance) {
+            return Fail(
+                why,
+                "relocate_partial_provenance");
+        }
+
+        if (complete_provenance) {
+            auto& bucket = cache[
+                source
+                    .canonical_program_table_root];
+            CacheEntry* cached = nullptr;
+            for (auto& candidate : bucket) {
+                if (same_challenge(
+                        candidate.challenge,
+                        *source
+                             .canonical_program_challenges)) {
+                    cached = &candidate;
+                    break;
+                }
+            }
+            if (cached == nullptr) {
+                ProgramTable table;
+                if (!DeserializeProgramTable(
+                        *source
+                             .canonical_program_table_wire,
+                        table, why) ||
+                    CommitProgramTable(table) !=
+                        source
+                            .canonical_program_table_root ||
+                    table.current_width >
+                        std::numeric_limits<
+                            uint32_t>::max() -
+                            column_base ||
+                    table.next_width >
+                        std::numeric_limits<
+                            uint32_t>::max() -
+                            column_base) {
+                    return Fail(
+                        why,
+                        "relocate_program_table");
+                }
+                table.current_width +=
+                    column_base;
+                table.next_width +=
+                    column_base;
+                for (Program& program :
+                     table.programs) {
+                    program.current_width =
+                        table.current_width;
+                    program.next_width =
+                        table.next_width;
+                    for (Instruction& instruction :
+                         program.instructions) {
+                        if (instruction.opcode ==
+                                Opcode::Current ||
+                            instruction.opcode ==
+                                Opcode::Next) {
+                            if (instruction.lhs >
+                                std::numeric_limits<
+                                    uint32_t>::max() -
+                                    column_base) {
+                                return Fail(
+                                    why,
+                                    "relocate_column_overflow");
+                            }
+                            instruction.lhs +=
+                                column_base;
+                        }
+                    }
+                }
+                CacheEntry entry;
+                entry.challenge =
+                    *source
+                         .canonical_program_challenges;
+                const bool adapter_ok =
+                    table.challenge_width == 0
+                    ? BuildAirConstraintSystemFromProgramTable(
+                          table, child.n_rows,
+                          entry.relocated, why)
+                    : BuildAirConstraintSystemFromProgramTable(
+                          table, child.n_rows,
+                          entry.challenge,
+                          entry.relocated, why);
+                if (!adapter_ok) {
+                    return Fail(
+                        why,
+                        "relocate_adapter");
+                }
+                bucket.push_back(
+                    std::move(entry));
+                cached = &bucket.back();
+                ++report
+                      .canonical_tables_recommitted;
+            }
+
+            if (source
+                    .canonical_program_ordinal >=
+                    cached->relocated
+                        .constraints.size()) {
+                return Fail(
+                    why,
+                    "relocate_program_ordinal");
+            }
+            auto relocated =
+                cached->relocated.constraints[
+                    source
+                        .canonical_program_ordinal];
+            if (relocated.kind != source.kind ||
+                relocated.alg_degree !=
+                    source.alg_degree) {
+                return Fail(
+                    why,
+                    "relocate_metadata");
+            }
+            relocated.name = source.name;
+            appended.push_back(
+                std::move(relocated));
+            ++report
+                  .canonical_constraints_relocated;
+            continue;
+        }
+
+        air_quotient::AirConstraint<Fp3>
+            shifted;
+        shifted.name = source.name;
+        shifted.kind = source.kind;
+        shifted.alg_degree =
+            source.alg_degree;
+        const auto eval = source.eval;
+        const uint32_t width =
+            child.n_columns;
+        shifted.eval =
+            [eval, column_base, width](
+                const std::vector<Fp3>& current,
+                const std::vector<Fp3>& next) {
+                if (current.size() <
+                        column_base + width ||
+                    next.size() <
+                        column_base + width) {
+                    return Fp3::One();
+                }
+                std::vector<Fp3> child_current(
+                    current.begin() + column_base,
+                    current.begin() +
+                        column_base + width);
+                std::vector<Fp3> child_next(
+                    next.begin() + column_base,
+                    next.begin() +
+                        column_base + width);
+                return eval(
+                    child_current, child_next);
+            };
+        appended.push_back(
+            std::move(shifted));
+        ++report.native_constraints_shifted;
+    }
+
+    parent.constraints.insert(
+        parent.constraints.end(),
+        std::make_move_iterator(
+            appended.begin()),
+        std::make_move_iterator(
+            appended.end()));
+    report.every_claimed_provenance_valid =
+        true;
+    report.exact_order_preserved =
+        report.constraints ==
+        report.canonical_constraints_relocated +
+            report.native_constraints_shifted;
+    return report.exact_order_preserved;
 }
 
 PostChallengeColumnClassAudit AssessPostChallengeColumnClass()

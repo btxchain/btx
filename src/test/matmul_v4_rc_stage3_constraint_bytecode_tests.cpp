@@ -89,6 +89,106 @@ BOOST_AUTO_TEST_CASE(builder_tables_are_valid_and_distinct)
     BOOST_CHECK(alg_a != alg_b);
 }
 
+BOOST_AUTO_TEST_CASE(
+    canonical_program_relocation_recommits_shifted_columns)
+{
+    const auto table = MakeTable(7);
+    rc::air_quotient::AirConstraintSystem<Fp3>
+        child;
+    std::string why;
+    BOOST_REQUIRE_MESSAGE(
+        cb::BuildAirConstraintSystemFromProgramTable(
+            table, 8, child, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(
+        child.constraints.size(), 1U);
+    const uint256 child_root =
+        child.constraints[0]
+            .canonical_program_table_root;
+
+    rc::air_quotient::AirConstraintSystem<Fp3>
+        parent;
+    parent.n_rows = 8;
+    parent.n_columns = 3;
+    cb::CanonicalRelocationReportV1 report;
+    BOOST_REQUIRE_MESSAGE(
+        cb::AppendRelocatedAirConstraintsV1(
+            child, 2, parent, report, &why),
+        why);
+    BOOST_REQUIRE_EQUAL(
+        parent.constraints.size(), 1U);
+    BOOST_CHECK_EQUAL(
+        report.canonical_constraints_relocated,
+        1U);
+    BOOST_CHECK_EQUAL(
+        report.native_constraints_shifted, 0U);
+    BOOST_CHECK_EQUAL(
+        report.canonical_tables_recommitted,
+        1U);
+    BOOST_CHECK(
+        report.every_claimed_provenance_valid);
+    BOOST_CHECK(report.exact_order_preserved);
+    BOOST_CHECK(
+        parent.constraints[0]
+            .canonical_program_table_root !=
+        child_root);
+    BOOST_CHECK_EQUAL(
+        parent.constraints[0]
+            .canonical_program_ordinal,
+        0U);
+    BOOST_CHECK(
+        parent.constraints[0]
+            .canonical_program_table_wire !=
+        nullptr);
+
+    const std::vector<Fp3> child_row{
+        gf::FromU64_3(3)};
+    const std::vector<Fp3> parent_row{
+        gf::FromU64_3(91),
+        gf::FromU64_3(92),
+        gf::FromU64_3(3)};
+    const Fp3 expected =
+        child.constraints[0].eval(
+            child_row, {});
+    BOOST_CHECK(
+        gf::Eq(
+            expected,
+            parent.constraints[0].eval(
+                parent_row, parent_row)));
+
+    auto changed_prefix = parent_row;
+    changed_prefix[0] =
+        gf::FromU64_3(1);
+    BOOST_CHECK(
+        gf::Eq(
+            expected,
+            parent.constraints[0].eval(
+                changed_prefix,
+                changed_prefix)));
+    auto changed_child = parent_row;
+    changed_child[2] =
+        gf::FromU64_3(4);
+    BOOST_CHECK(
+        !gf::Eq(
+            expected,
+            parent.constraints[0].eval(
+                changed_child,
+                changed_child)));
+
+    auto partial = child;
+    partial.constraints[0]
+        .canonical_program_table_wire.reset();
+    auto untouched = parent;
+    const size_t before =
+        untouched.constraints.size();
+    BOOST_CHECK(
+        !cb::AppendRelocatedAirConstraintsV1(
+            partial, 2, untouched,
+            report, &why));
+    BOOST_CHECK_EQUAL(
+        untouched.constraints.size(), before);
+}
+
 // The core of the reduction: over the ENTIRE boolean event space the hybrid
 // lemma must hold, i.e. a binding failure always extracts a SHA256d or AlgHash
 // collision. This exercises the accept/extraction branches that cannot be
