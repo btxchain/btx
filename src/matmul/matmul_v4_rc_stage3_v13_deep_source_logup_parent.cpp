@@ -235,6 +235,125 @@ void AddPreprocessed(
     cs.preprocessed.emplace_back(column, values);
 }
 
+struct BytecodeBuilder {
+    cb::Program program;
+
+    BytecodeBuilder(
+        uint32_t ordinal,
+        aq::AirKind kind,
+        uint32_t degree,
+        uint32_t width,
+        uint32_t challenge_width)
+    {
+        program.version =
+            cb::kConstraintBytecodeScalarChallengeVersion;
+        program.role =
+            RCStage3RelationRole::CompositionLink;
+        program.constraint_ordinal = ordinal;
+        program.kind = kind;
+        program.declared_degree = degree;
+        program.current_width = width;
+        program.next_width = width;
+        program.challenge_width =
+            challenge_width;
+    }
+
+    uint32_t Current(uint32_t column)
+    {
+        cb::Instruction out;
+        out.opcode = cb::Opcode::Current;
+        out.lhs = column;
+        program.instructions.push_back(out);
+        return static_cast<uint32_t>(
+            program.instructions.size() - 1);
+    }
+
+    uint32_t Next(uint32_t column)
+    {
+        cb::Instruction out;
+        out.opcode = cb::Opcode::Next;
+        out.lhs = column;
+        program.instructions.push_back(out);
+        return static_cast<uint32_t>(
+            program.instructions.size() - 1);
+    }
+
+    uint32_t Challenge(uint32_t index)
+    {
+        cb::Instruction out;
+        out.opcode = cb::Opcode::Challenge;
+        out.lhs = index;
+        program.instructions.push_back(out);
+        return static_cast<uint32_t>(
+            program.instructions.size() - 1);
+    }
+
+    uint32_t Constant(const Fp3& value)
+    {
+        cb::Instruction out;
+        out.opcode = cb::Opcode::Constant;
+        out.constant = value;
+        program.instructions.push_back(out);
+        return static_cast<uint32_t>(
+            program.instructions.size() - 1);
+    }
+
+    uint32_t Binary(
+        cb::Opcode opcode,
+        uint32_t lhs,
+        uint32_t rhs)
+    {
+        cb::Instruction out;
+        out.opcode = opcode;
+        out.lhs = lhs;
+        out.rhs = rhs;
+        program.instructions.push_back(out);
+        return static_cast<uint32_t>(
+            program.instructions.size() - 1);
+    }
+};
+
+bool AppendCanonicalPrograms(
+    const cb::ProgramTable& table,
+    const std::vector<Fp3>& challenges,
+    const std::vector<const char*>& names,
+    AirCS& cs,
+    std::string* why)
+{
+    if (table.current_width != cs.n_columns ||
+        table.next_width != cs.n_columns ||
+        names.size() != table.programs.size()) {
+        return Fail(
+            why, "bytecode_adapter_shape");
+    }
+    AirCS adapter;
+    const bool built =
+        table.challenge_width == 0
+        ? cb::BuildAirConstraintSystemFromProgramTable(
+              table, cs.n_rows,
+              adapter, why)
+        : cb::BuildAirConstraintSystemFromProgramTable(
+              table, cs.n_rows,
+              challenges, adapter, why);
+    if (!built ||
+        adapter.n_columns != cs.n_columns ||
+        adapter.constraints.size() !=
+            names.size()) {
+        return Fail(
+            why, "bytecode_adapter");
+    }
+    for (uint32_t ordinal = 0;
+         ordinal < adapter.constraints.size();
+         ++ordinal) {
+        adapter.constraints[ordinal].name =
+            names[ordinal];
+        cs.constraints.push_back(
+            std::move(
+                adapter.constraints[ordinal]));
+    }
+    return true;
+}
+
 uint32_t KindNumber(ConsumerKindV1 kind)
 {
     return static_cast<uint32_t>(kind);
@@ -822,32 +941,6 @@ uint64_t PhysicalMultisetMismatches(
     return mismatches;
 }
 
-Fp3 SourceRowContribution(
-    const std::vector<Fp3>& row,
-    uint32_t tape_base,
-    const LayoutV1& layout,
-    bool emit)
-{
-    const auto tape_layout =
-        tape::CanonicalLayoutV1();
-    Fp3 out = Fp3::Zero();
-    for (uint32_t slot = 0;
-         slot < kTapeSlotsV1; ++slot) {
-        out = gf::Add(
-            out,
-            gf::Mul(
-                row[
-                    emit
-                        ? layout.SourceEmitWeight(
-                            slot)
-                        : layout.SourceCarryWeight(
-                            slot)],
-                row[tape_base +
-                    tape_layout.Value(slot)]));
-    }
-    return out;
-}
-
 bool AppendBaseConstraints(
     const qp::ProductV1& physical,
     const LayoutV1& layout,
@@ -861,92 +954,209 @@ bool AppendBaseConstraints(
     cs.n_columns = layout.dependent_base;
     const uint32_t tape_base =
         physical.tape_attachment.column_base;
-    Add(
-        cs, "stage3.v13.deep_stream.emit_boolean",
-        aq::AirKind::kEverywhere, 2,
-        [layout](const auto& cur, const auto&) {
-            return gf::Mul(
-                cur[layout.source_emit_active],
-                gf::Sub(
-                    cur[layout.source_emit_active],
-                    Fp3::One()));
-        });
-    Add(
-        cs, "stage3.v13.deep_stream.carry_first",
-        aq::AirKind::kFirstRow, 1,
-        [layout](const auto& cur, const auto&) {
-            return cur[layout.source_carry];
-        });
-    const auto after =
-        [tape_base, layout](
-            const std::vector<Fp3>& row) {
-            return gf::Add(
-                gf::Mul(
-                    gf::Sub(
-                        Fp3::One(),
-                        row[
-                            layout
-                                .source_emit_active]),
-                    row[layout.source_carry]),
-                SourceRowContribution(
-                    row, tape_base,
-                    layout, false));
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeScalarChallengeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = cs.n_columns;
+    table.next_width = cs.n_columns;
+    table.challenge_width = 0;
+    std::vector<const char*> names;
+
+    const auto push =
+        [&](BytecodeBuilder&& builder,
+            const char* name) {
+            table.programs.push_back(
+                std::move(builder.program));
+            names.push_back(name);
         };
-    Add(
-        cs, "stage3.v13.deep_stream.carry_transition",
-        aq::AirKind::kTransition, 2,
-        [layout, after](
-            const auto& cur, const auto& next) {
-            return gf::Sub(
-                next[layout.source_carry],
-                after(cur));
-        });
-    Add(
-        cs, "stage3.v13.deep_stream.carry_last",
-        aq::AirKind::kLastRow, 2,
-        [after](const auto& cur, const auto&) {
-            return after(cur);
-        });
-    Add(
-        cs, "stage3.v13.deep_stream.emit_value",
-        aq::AirKind::kEverywhere, 2,
+    const auto one_minus =
+        [](BytecodeBuilder& builder,
+           uint32_t value) {
+            return builder.Binary(
+                cb::Opcode::Sub,
+                builder.Constant(Fp3::One()),
+                value);
+        };
+    const auto source_contribution =
         [tape_base, layout](
-            const auto& cur, const auto&) {
-            return gf::Mul(
-                cur[layout.source_emit_active],
-                gf::Sub(
-                    cur[layout.source_emit_value],
-                    gf::Add(
-                        cur[layout.source_carry],
-                        SourceRowContribution(
-                            cur, tape_base,
-                            layout, true))));
-        });
-    Add(
-        cs, "stage3.v13.deep_stream.emit_padding",
-        aq::AirKind::kEverywhere, 2,
-        [layout](const auto& cur, const auto&) {
-            return gf::Mul(
-                gf::Sub(
-                    Fp3::One(),
-                    cur[layout.source_emit_active]),
-                cur[layout.source_emit_value]);
-        });
+            BytecodeBuilder& builder,
+            bool emit) {
+            uint32_t sum =
+                builder.Constant(Fp3::Zero());
+            const auto tape_layout =
+                tape::CanonicalLayoutV1();
+            for (uint32_t slot = 0;
+                 slot < kTapeSlotsV1;
+                 ++slot) {
+                const uint32_t weight =
+                    builder.Current(
+                        emit
+                            ? layout.SourceEmitWeight(
+                                  slot)
+                            : layout.SourceCarryWeight(
+                                  slot));
+                const uint32_t value =
+                    builder.Current(
+                        tape_base +
+                        tape_layout.Value(slot));
+                const uint32_t product =
+                    builder.Binary(
+                        cb::Opcode::Mul,
+                        weight, value);
+                sum = builder.Binary(
+                    cb::Opcode::Add,
+                    sum, product);
+            }
+            return sum;
+        };
+    const auto after =
+        [layout, &one_minus,
+         &source_contribution](
+            BytecodeBuilder& builder) {
+            const uint32_t active =
+                builder.Current(
+                    layout.source_emit_active);
+            const uint32_t carry =
+                builder.Current(
+                    layout.source_carry);
+            const uint32_t gated_carry =
+                builder.Binary(
+                    cb::Opcode::Mul,
+                    one_minus(builder, active),
+                    carry);
+            return builder.Binary(
+                cb::Opcode::Add,
+                gated_carry,
+                source_contribution(
+                    builder, false));
+        };
+
+    {
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kEverywhere,
+            2, cs.n_columns, 0};
+        const uint32_t active =
+            builder.Current(
+                layout.source_emit_active);
+        builder.Binary(
+            cb::Opcode::Mul,
+            active,
+            builder.Binary(
+                cb::Opcode::Sub,
+                active,
+                builder.Constant(Fp3::One())));
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.emit_boolean");
+    }
+    {
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kFirstRow,
+            1, cs.n_columns, 0};
+        builder.Current(layout.source_carry);
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.carry_first");
+    }
+    {
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kTransition,
+            2, cs.n_columns, 0};
+        builder.Binary(
+            cb::Opcode::Sub,
+            builder.Next(layout.source_carry),
+            after(builder));
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.carry_transition");
+    }
+    {
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kLastRow,
+            2, cs.n_columns, 0};
+        after(builder);
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.carry_last");
+    }
+    {
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kEverywhere,
+            3, cs.n_columns, 0};
+        const uint32_t active =
+            builder.Current(
+                layout.source_emit_active);
+        const uint32_t value =
+            builder.Current(
+                layout.source_emit_value);
+        const uint32_t expected =
+            builder.Binary(
+                cb::Opcode::Add,
+                builder.Current(
+                    layout.source_carry),
+                source_contribution(
+                    builder, true));
+        builder.Binary(
+            cb::Opcode::Mul,
+            active,
+            builder.Binary(
+                cb::Opcode::Sub,
+                value, expected));
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.emit_value");
+    }
+    {
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kEverywhere,
+            2, cs.n_columns, 0};
+        const uint32_t active =
+            builder.Current(
+                layout.source_emit_active);
+        builder.Binary(
+            cb::Opcode::Mul,
+            one_minus(builder, active),
+            builder.Current(
+                layout.source_emit_value));
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.emit_padding");
+    }
     for (uint32_t slot = 0;
          slot < kConsumerSlotsV1; ++slot) {
         const uint32_t active =
             layout.ConsumerActive(slot);
-        Add(
-            cs,
-            "stage3.v13.deep_stream.consumer_boolean",
-            aq::AirKind::kEverywhere, 2,
-            [active](const auto& cur, const auto&) {
-                return gf::Mul(
-                    cur[active],
-                    gf::Sub(
-                        cur[active],
-                        Fp3::One()));
-            });
+        BytecodeBuilder builder{
+            static_cast<uint32_t>(
+                table.programs.size()),
+            aq::AirKind::kEverywhere,
+            2, cs.n_columns, 0};
+        const uint32_t active_value =
+            builder.Current(active);
+        builder.Binary(
+            cb::Opcode::Mul,
+            active_value,
+            builder.Binary(
+                cb::Opcode::Sub,
+                active_value,
+                builder.Constant(Fp3::One())));
+        push(
+            std::move(builder),
+            "stage3.v13.deep_stream.consumer_boolean");
         const auto kind =
             static_cast<ConsumerKindV1>(
                 slot + 1);
@@ -964,7 +1174,10 @@ bool AppendBaseConstraints(
                 why, "ordinary_deep_consumer");
         }
     }
-    return true;
+    return
+        cb::ValidateProgramTable(table, why) &&
+        AppendCanonicalPrograms(
+            table, {}, names, cs, why);
 }
 
 Fp3 SourceCompressed(
@@ -1012,41 +1225,149 @@ bool AppendFinalConstraints(
     const uint32_t deep_base =
         physical.deep_attachment.column_base;
     const auto deep = physical.deep_plan.layout;
+    cb::ProgramTable table;
+    table.version =
+        cb::kConstraintBytecodeScalarChallengeVersion;
+    table.role =
+        RCStage3RelationRole::CompositionLink;
+    table.current_width = cs.n_columns;
+    table.next_width = cs.n_columns;
+    table.challenge_width =
+        kLookupLanesV1 * 2U;
+    std::vector<const char*> names;
+    const auto push =
+        [&](BytecodeBuilder&& builder,
+            const char* name) {
+            table.programs.push_back(
+                std::move(builder.program));
+            names.push_back(name);
+        };
+    const auto one_minus =
+        [](BytecodeBuilder& builder,
+           uint32_t value) {
+            return builder.Binary(
+                cb::Opcode::Sub,
+                builder.Constant(Fp3::One()),
+                value);
+        };
+    const auto source_compressed =
+        [layout](
+            BytecodeBuilder& builder,
+            uint32_t lane) {
+            return builder.Binary(
+                cb::Opcode::Add,
+                builder.Current(
+                    layout.source_emit_address),
+                builder.Binary(
+                    cb::Opcode::Mul,
+                    builder.Challenge(lane),
+                    builder.Current(
+                        layout
+                            .source_emit_value)));
+        };
+    const auto consumer_compressed =
+        [deep_base, deep, layout](
+            BytecodeBuilder& builder,
+            uint32_t lane,
+            uint32_t slot) {
+            const auto kind =
+                static_cast<ConsumerKindV1>(
+                    slot + 1);
+            return builder.Binary(
+                cb::Opcode::Add,
+                builder.Current(
+                    layout.ConsumerAddress(
+                        slot)),
+                builder.Binary(
+                    cb::Opcode::Mul,
+                    builder.Challenge(lane),
+                    builder.Current(
+                        deep_base +
+                        DeepColumnForKind(
+                            deep, kind))));
+        };
+    const auto row_term =
+        [layout](
+            BytecodeBuilder& builder,
+            uint32_t lane) {
+            uint32_t term =
+                builder.Binary(
+                    cb::Opcode::Mul,
+                    builder.Current(
+                        layout
+                            .source_emit_multiplicity),
+                    builder.Current(
+                        layout.SourceInverse(
+                            lane)));
+            for (uint32_t slot = 0;
+                 slot < kConsumerSlotsV1;
+                 ++slot) {
+                const uint32_t consumed =
+                    builder.Binary(
+                        cb::Opcode::Mul,
+                        builder.Current(
+                            layout.ConsumerActive(
+                                slot)),
+                        builder.Current(
+                            layout.ConsumerInverse(
+                                lane, slot)));
+                term = builder.Binary(
+                    cb::Opcode::Sub,
+                    term, consumed);
+            }
+            return term;
+        };
     for (uint32_t lane = 0;
          lane < kLookupLanesV1; ++lane) {
         const uint32_t source_inverse =
             layout.SourceInverse(lane);
-        Add(
-            cs, "stage3.v13.deep_stream.source_inverse",
-            aq::AirKind::kEverywhere, 2,
-            [challenges, layout, lane,
-             source_inverse](
-                const auto& cur, const auto&) {
-                return gf::Sub(
-                    gf::Mul(
-                        cur[source_inverse],
-                        gf::Sub(
-                            challenges.alpha[lane],
-                            SourceCompressed(
-                                cur, layout,
-                                challenges.gamma[
-                                    lane]))),
-                    cur[
-                        layout.source_emit_active]);
-            });
-        Add(
-            cs, "stage3.v13.deep_stream.source_padding",
-            aq::AirKind::kEverywhere, 2,
-            [layout, source_inverse](
-                const auto& cur, const auto&) {
-                return gf::Mul(
-                    gf::Sub(
-                        Fp3::One(),
-                        cur[
-                            layout
-                                .source_emit_active]),
-                    cur[source_inverse]);
-            });
+        {
+            BytecodeBuilder builder{
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                aq::AirKind::kEverywhere,
+                2, cs.n_columns,
+                table.challenge_width};
+            const uint32_t denominator =
+                builder.Binary(
+                    cb::Opcode::Sub,
+                    builder.Challenge(
+                        kLookupLanesV1 +
+                        lane),
+                    source_compressed(
+                        builder, lane));
+            builder.Binary(
+                cb::Opcode::Sub,
+                builder.Binary(
+                    cb::Opcode::Mul,
+                    builder.Current(
+                        source_inverse),
+                    denominator),
+                builder.Current(
+                    layout.source_emit_active));
+            push(
+                std::move(builder),
+                "stage3.v13.deep_stream.source_inverse");
+        }
+        {
+            BytecodeBuilder builder{
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                aq::AirKind::kEverywhere,
+                2, cs.n_columns,
+                table.challenge_width};
+            const uint32_t active =
+                builder.Current(
+                    layout.source_emit_active);
+            builder.Binary(
+                cb::Opcode::Mul,
+                one_minus(builder, active),
+                builder.Current(
+                    source_inverse));
+            push(
+                std::move(builder),
+                "stage3.v13.deep_stream.source_padding");
+        }
         for (uint32_t slot = 0;
              slot < kConsumerSlotsV1; ++slot) {
             const uint32_t inverse =
@@ -1054,101 +1375,118 @@ bool AppendFinalConstraints(
                     lane, slot);
             const uint32_t active =
                 layout.ConsumerActive(slot);
-            Add(
-                cs,
-                "stage3.v13.deep_stream."
-                "consumer_inverse",
-                aq::AirKind::kEverywhere, 2,
-                [challenges, deep_base, deep,
-                 layout, lane, slot,
-                 inverse, active](
-                    const auto& cur,
-                    const auto&) {
-                    return gf::Sub(
-                        gf::Mul(
-                            cur[inverse],
-                            gf::Sub(
-                                challenges.alpha[lane],
-                                ConsumerCompressed(
-                                    cur, deep_base,
-                                    deep, layout,
-                                    slot,
-                                    challenges
-                                        .gamma[lane]))),
-                        cur[active]);
-                });
-            Add(
-                cs,
-                "stage3.v13.deep_stream."
-                "consumer_padding",
-                aq::AirKind::kEverywhere, 2,
-                [inverse, active](
-                    const auto& cur,
-                    const auto&) {
-                    return gf::Mul(
-                        gf::Sub(
-                            Fp3::One(),
-                            cur[active]),
-                        cur[inverse]);
-                });
+            {
+                BytecodeBuilder builder{
+                    static_cast<uint32_t>(
+                        table.programs.size()),
+                    aq::AirKind::kEverywhere,
+                    2, cs.n_columns,
+                    table.challenge_width};
+                const uint32_t denominator =
+                    builder.Binary(
+                        cb::Opcode::Sub,
+                        builder.Challenge(
+                            kLookupLanesV1 +
+                            lane),
+                        consumer_compressed(
+                            builder,
+                            lane, slot));
+                builder.Binary(
+                    cb::Opcode::Sub,
+                    builder.Binary(
+                        cb::Opcode::Mul,
+                        builder.Current(
+                            inverse),
+                        denominator),
+                    builder.Current(active));
+                push(
+                    std::move(builder),
+                    "stage3.v13.deep_stream."
+                    "consumer_inverse");
+            }
+            {
+                BytecodeBuilder builder{
+                    static_cast<uint32_t>(
+                        table.programs.size()),
+                    aq::AirKind::kEverywhere,
+                    2, cs.n_columns,
+                    table.challenge_width};
+                const uint32_t active_value =
+                    builder.Current(active);
+                builder.Binary(
+                    cb::Opcode::Mul,
+                    one_minus(
+                        builder,
+                        active_value),
+                    builder.Current(inverse));
+                push(
+                    std::move(builder),
+                    "stage3.v13.deep_stream."
+                    "consumer_padding");
+            }
         }
         const uint32_t running =
             layout.Running(lane);
-        const auto row_term =
-            [layout, lane](
-                const std::vector<Fp3>& row) {
-                Fp3 term = gf::Mul(
-                    row[
-                        layout
-                            .source_emit_multiplicity],
-                    row[layout.SourceInverse(lane)]);
-                for (uint32_t slot = 0;
-                     slot < kConsumerSlotsV1;
-                     ++slot) {
-                    term = gf::Sub(
-                        term,
-                        gf::Mul(
-                            row[
-                                layout
-                                    .ConsumerActive(
-                                        slot)],
-                            row[
-                                layout
-                                    .ConsumerInverse(
-                                        lane,
-                                        slot)]));
-                }
-                return term;
-            };
-        Add(
-            cs, "stage3.v13.deep_stream.running_first",
-            aq::AirKind::kFirstRow, 1,
-            [running](const auto& cur, const auto&) {
-                return cur[running];
-            });
-        Add(
-            cs,
-            "stage3.v13.deep_stream.running_transition",
-            aq::AirKind::kTransition, 2,
-            [running, row_term](
-                const auto& cur, const auto& next) {
-                return gf::Sub(
-                    next[running],
-                    gf::Add(
-                        cur[running],
-                        row_term(cur)));
-            });
-        Add(
-            cs, "stage3.v13.deep_stream.running_last",
-            aq::AirKind::kLastRow, 2,
-            [running, row_term](
-                const auto& cur, const auto&) {
-                return gf::Add(
-                    cur[running],
-                    row_term(cur));
-            });
+        {
+            BytecodeBuilder builder{
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                aq::AirKind::kFirstRow,
+                1, cs.n_columns,
+                table.challenge_width};
+            builder.Current(running);
+            push(
+                std::move(builder),
+                "stage3.v13.deep_stream.running_first");
+        }
+        {
+            BytecodeBuilder builder{
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                aq::AirKind::kTransition,
+                2, cs.n_columns,
+                table.challenge_width};
+            const uint32_t expected =
+                builder.Binary(
+                    cb::Opcode::Add,
+                    builder.Current(running),
+                    row_term(builder, lane));
+            builder.Binary(
+                cb::Opcode::Sub,
+                builder.Next(running),
+                expected);
+            push(
+                std::move(builder),
+                "stage3.v13.deep_stream."
+                "running_transition");
+        }
+        {
+            BytecodeBuilder builder{
+                static_cast<uint32_t>(
+                    table.programs.size()),
+                aq::AirKind::kLastRow,
+                2, cs.n_columns,
+                table.challenge_width};
+            builder.Binary(
+                cb::Opcode::Add,
+                builder.Current(running),
+                row_term(builder, lane));
+            push(
+                std::move(builder),
+                "stage3.v13.deep_stream.running_last");
+        }
     }
-    return true;
+    const std::vector<Fp3> challenge_vector{
+        challenges.gamma[0],
+        challenges.gamma[1],
+        challenges.alpha[0],
+        challenges.alpha[1],
+    };
+    return
+        cb::ValidateProgramTable(table, why) &&
+        AppendCanonicalPrograms(
+            table, challenge_vector,
+            names, cs, why);
 }
 
 bool FillFinalWitness(
@@ -1387,42 +1725,49 @@ bool SameFp3Vector(
 
 bool SameConstraintSystemStructure(
     const AirCS& left,
-    const AirCS& right)
+    const AirCS& right,
+    std::string* why = nullptr)
 {
-    if (left.n_rows != right.n_rows ||
-        left.n_columns != right.n_columns ||
-        left.constraints.size() !=
-            right.constraints.size() ||
-        left.preprocessed.size() !=
-            right.preprocessed.size() ||
-        left.preprocessed_roots !=
-            right.preprocessed_roots ||
-        left.preprocessed_pin_ood !=
-            right.preprocessed_pin_ood ||
-        left.preprocessed_row_group_roots !=
-            right.preprocessed_row_group_roots) {
-        return false;
-    }
+    if (left.n_rows != right.n_rows)
+        return Fail(why, "structure_rows");
+    if (left.n_columns != right.n_columns)
+        return Fail(why, "structure_columns");
+    if (left.constraints.size() !=
+        right.constraints.size())
+        return Fail(why, "structure_constraint_count");
+    if (left.preprocessed.size() !=
+        right.preprocessed.size())
+        return Fail(why, "structure_preprocessed_count");
+    if (left.preprocessed_roots !=
+        right.preprocessed_roots)
+        return Fail(why, "structure_preprocessed_roots");
+    if (left.preprocessed_pin_ood !=
+        right.preprocessed_pin_ood)
+        return Fail(why, "structure_preprocessed_pin");
+    if (left.preprocessed_row_group_roots !=
+        right.preprocessed_row_group_roots)
+        return Fail(why, "structure_row_group_roots");
     for (uint32_t i = 0;
          i < left.constraints.size(); ++i) {
         if (left.constraints[i].name !=
-                right.constraints[i].name ||
-            left.constraints[i].kind !=
-                right.constraints[i].kind ||
-            left.constraints[i].alg_degree !=
-                right.constraints[i].alg_degree) {
-            return false;
-        }
+            right.constraints[i].name)
+            return Fail(why, "structure_constraint_name");
+        if (left.constraints[i].kind !=
+            right.constraints[i].kind)
+            return Fail(why, "structure_constraint_kind");
+        if (left.constraints[i].alg_degree !=
+            right.constraints[i].alg_degree)
+            return Fail(why, "structure_constraint_degree");
     }
     for (uint32_t i = 0;
          i < left.preprocessed.size(); ++i) {
         if (left.preprocessed[i].first !=
-                right.preprocessed[i].first ||
-            !SameFp3Vector(
+            right.preprocessed[i].first)
+            return Fail(why, "structure_preprocessed_column");
+        if (!SameFp3Vector(
                 left.preprocessed[i].second,
-                right.preprocessed[i].second)) {
-            return false;
-        }
+                right.preprocessed[i].second))
+            return Fail(why, "structure_preprocessed_values");
     }
     return true;
 }
@@ -1943,7 +2288,8 @@ bool ExtractBaseProductV1(
             product.plan.range,
             verifier_cs, &rebuild_why) &&
         SameConstraintSystemStructure(
-            out.cs, verifier_cs.cs) &&
+            out.cs, verifier_cs.cs,
+            &rebuild_why) &&
         out.plan.plan_root ==
             verifier_cs.plan.plan_root;
     out.valid =
@@ -1957,7 +2303,10 @@ bool ExtractBaseProductV1(
         : "stage3:v13_deep_source_logup_parent:"
           "deterministic_base_invalid";
     if (!out.valid) {
-        return Fail(why, "extract_base_invariant");
+        return Fail(
+            why,
+            "extract_base_invariant:" +
+                rebuild_why);
     }
     if (why != nullptr) *why = out.note;
     return true;

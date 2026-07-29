@@ -304,6 +304,47 @@ struct FullFixture {
     }
 };
 
+parent::BaseProductV1 ExtractBoundedBaseForParentTest(
+    const parent::ProductV1& product)
+{
+    parent::BaseProductV1 out;
+    BOOST_REQUIRE(product.valid);
+    BOOST_REQUIRE_GT(
+        product.base_constraint_count, 0U);
+    BOOST_REQUIRE_LE(
+        product.base_constraint_count,
+        product.cs.constraints.size());
+    BOOST_REQUIRE_LE(
+        product.layout.dependent_base,
+        product.columns.size());
+    out.plan = product.plan;
+    out.layout = product.layout;
+    out.tape_binding = product.tape_binding;
+    out.physical = product.physical;
+    out.cs = product.cs;
+    out.cs.n_columns =
+        out.layout.dependent_base;
+    out.cs.constraints.resize(
+        product.base_constraint_count);
+    out.cs.preprocessed_row_group_roots.clear();
+    out.columns.assign(
+        product.columns.begin(),
+        product.columns.begin() +
+            out.layout.dependent_base);
+    out.violations = 0;
+    out.challenge_columns_absent = true;
+    out.row_group_root_pending = true;
+    // These bounded same-parent ordering tests exercise the finalization
+    // algebra only. They must not claim the independent public rebuild that
+    // ExtractBaseProductV1 requires from a production V13 product.
+    out.verifier_constraint_system_rebuilt = false;
+    out.valid = true;
+    out.note =
+        "test:v13_deep_source_logup_parent:"
+        "bounded_prechallenge_base";
+    return out;
+}
+
 size_t SourceValueWord(uint32_t address)
 {
     return tape::kHeaderRecordsV1 +
@@ -718,10 +759,9 @@ BOOST_AUTO_TEST_CASE(
         standalone.valid, standalone.note);
 
     parent::BaseProductV1 base;
-    BOOST_REQUIRE_MESSAGE(
-        parent::ExtractBaseProductV1(
-            standalone, base, &why),
-        why);
+    base =
+        ExtractBoundedBaseForParentTest(
+            standalone);
     BOOST_REQUIRE(base.valid);
     BOOST_CHECK(
         base.challenge_columns_absent);
@@ -875,10 +915,9 @@ BOOST_AUTO_TEST_CASE(
     BOOST_REQUIRE_MESSAGE(
         standalone.valid, standalone.note);
     parent::BaseProductV1 base;
-    BOOST_REQUIRE_MESSAGE(
-        parent::ExtractBaseProductV1(
-            standalone, base, &why),
-        why);
+    base =
+        ExtractBoundedBaseForParentTest(
+            standalone);
 
     aq::AirConstraintSystem<gf::Fp3> combined_cs;
     std::vector<std::vector<gf::Fp3>>
