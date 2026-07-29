@@ -643,6 +643,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   matmul/matmul_v4_rc_stage3_episode_wiring_product.cpp
   matmul/matmul_v4_rc_stage3_episode_wiring_proof_descriptor.cpp
   matmul/matmul_v4_rc_stage3_episode_wiring_proof_tape_join.cpp
+  matmul/matmul_v4_rc_stage3_semantic_endpoint_receipt_intake.cpp
   matmul/matmul_v4_rc_stage3_episode_tile_stream.cpp
   matmul/matmul_v4_rc_stage3_extract_stream_ctl.cpp
   matmul/matmul_v4_rc_stage3_tile_tree_hash_ctl.cpp

@@ -20196,7 +20196,25 @@ bool ValidateNarrowRecursiveProofReceiptV1(
     }
     const nr::NarrowNodeFriShape shape =
         nr::AssessNarrowNodeFriShape(receipt.active_rows);
-    if (!shape.representable || shape.n_lde != receipt.n_lde) {
+    // The normalized parent itself is degree two, but an ordinary retained
+    // child need not be.  Recompute that child's exact FRI domain from its
+    // verifier-owned AIR instead of comparing it with the parent estimate.
+    const uint32_t coefficient_floor =
+        std::max(
+            expected_constraint_system.n_rows,
+            expected_constraint_system.QuotientLen());
+    const uint32_t n_coeffs =
+        FriNextPow2(coefficient_floor);
+    const uint64_t expected_n_lde =
+        uint64_t{n_coeffs} * kRCFriBlowup;
+    if (!shape.representable ||
+        n_coeffs == 0 ||
+        expected_n_lde >
+            std::numeric_limits<uint32_t>::max() ||
+        expected_n_lde != receipt.n_lde ||
+        shape.lde_log2_cap >= 32 ||
+        expected_n_lde >
+            (uint64_t{1} << shape.lde_log2_cap)) {
         return Fail(why, "narrow_receipt_fri_shape");
     }
     std::string codec_why;

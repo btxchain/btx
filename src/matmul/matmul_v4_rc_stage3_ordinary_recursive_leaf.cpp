@@ -152,11 +152,23 @@ BuildExpectedRecursiveBindingV2(
     const auto shape =
         narrow::AssessNarrowNodeFriShape(
             out.active_rows);
+    // `shape.n_lde` is the degree-two normalized-parent estimate.  Ordinary
+    // children may have a larger algebraic degree, so their authenticated
+    // domain is ProofLdeSize(expected_cs), not that estimate.  Enforce the
+    // same hard cap without rewriting the child's proof statement.
+    const bool proof_domain_representable =
+        uint64_t{out.n_lde} >=
+            uint64_t{kRCFriBlowup} *
+                expected_cs.n_rows &&
+        (out.n_lde & (out.n_lde - 1U)) == 0 &&
+        shape.lde_log2_cap < 32 &&
+        uint64_t{out.n_lde} <=
+            (uint64_t{1} << shape.lde_log2_cap);
     if (cs_commitment.IsNull() ||
         out.statement_commitment.IsNull() ||
         !shape.representable ||
         shape.trace_rows != expected_cs.n_rows ||
-        shape.n_lde != out.n_lde) {
+        !proof_domain_representable) {
         return {};
     }
     return out;
@@ -295,9 +307,18 @@ ProofV1 RetainProofV1(
     out.valid =
         receipt.valid &&
         out.proof_tamper_rejected;
-    out.note = out.valid
-        ? "stage3:ordinary_recursive_leaf:valid"
-        : "stage3:ordinary_recursive_leaf:invalid";
+    if (out.valid) {
+        out.note =
+            "stage3:ordinary_recursive_leaf:valid";
+    } else if (!receipt.valid) {
+        out.note =
+            "stage3:ordinary_recursive_leaf:"
+            "invalid_receipt:" + receipt.note;
+    } else {
+        out.note =
+            "stage3:ordinary_recursive_leaf:"
+            "proof_tamper_canary_failed";
+    }
     return out;
 }
 

@@ -266,10 +266,9 @@ BOOST_AUTO_TEST_CASE(
                 proof.receipt, fixture.cs,
                 wrong_fs, &why));
 
-    // V1 also permits a smaller accounting class when that class is
-    // internally shape-consistent, because it never knew the semantic
-    // relation's exact row count.  V2 pins the exact independently rebuilt
-    // domain and rejects this undercharge.
+    // Both validators now derive the exact proof domain from the
+    // verifier-owned AIR.  A smaller accounting class is not a valid V1
+    // receipt even if its degree-two shape is internally consistent.
     auto undercharged = proof.receipt;
     undercharged.active_rows /= 2;
     undercharged.n_lde =
@@ -281,14 +280,13 @@ BOOST_AUTO_TEST_CASE(
         fixedpoint::
             CommitNarrowRecursiveProofReceiptV1(
                 undercharged);
-    BOOST_REQUIRE_MESSAGE(
-        fixedpoint::
+    BOOST_CHECK(
+        !fixedpoint::
             ValidateNarrowRecursiveProofReceiptV1(
                 undercharged, fixture.cs,
                 binding.node_binding,
                 binding.program_binding,
-                &why),
-        why);
+                &why));
     BOOST_CHECK(
         !fixedpoint::
             ValidateNarrowRecursiveProofReceiptV2(
