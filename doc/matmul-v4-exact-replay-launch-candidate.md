@@ -80,6 +80,27 @@ tip change.
 Raw evidence and reproduction commands are in
 `doc/evidence/m4-max-profile1-loaded-2026-07-30/`.
 
+## CUDA Blackwell-class loaded result
+
+An independent Linux CUDA campaign on a sanitized Blackwell-class 16 GiB
+consumer GPU (Xeon W-class host, 76 GiB RAM) measured 100 distinct
+`matmul_dim=4096` production headers:
+
+| Metric | Result |
+|---|---:|
+| Mean | 21.244 s |
+| p50 | 21.240 s |
+| p95 | 21.335 s |
+| p99 | **21.386 s** |
+| Maximum | 21.402 s |
+| MACs / episode | 141,149,805,215,744 |
+| CPU GEMM fallbacks | **0** |
+
+Device path detail:
+`cuda_resident_ffn_chain+triple_stream+persistent_ws`. Versus a 90-second
+block interval the p99 occupies ~23.8% (~68.6 s headroom). Sanitized evidence:
+`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/`.
+
 ## Full-Metal requirement
 
 A result is called `full_metal_pipeline` only when self-qualification and run
@@ -156,6 +177,15 @@ Measured on this M4 Max:
 - [x] Production headers bind `matmul_dim=4096`; the real consensus predicate,
   target check, verdict memo, and worker completion path accept the goldens.
 
+Independent CUDA class (sanitized; see
+[`doc/evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/`](evidence/cuda-blackwell-16gib-profile1-loaded-2026-07-30/)):
+
+- [x] Profile 1 loaded p99 **21.386 s** on a Blackwell-class 16 GiB NVIDIA
+  discrete GPU (Linux x86_64, Xeon W-class host, 76 GiB RAM).
+- [x] 100 distinct `matmul_dim=4096` headers / digests; zero CPU GEMM fallbacks.
+- [x] CUDA ExactReplay attached via the Metal-parity `ExactGemmBackend`
+  Launch* ABI (`rc_fused_ffn`, `rc_fused_ffn_chain`, `rc_phase1`).
+
 Still required before activation:
 
 - [ ] portable and independent Metal machines match the corrected golden
@@ -173,6 +203,8 @@ Still required before activation:
   invariants: equal v4/BMX4C/RC heights, withdrawn paths off, HeaderPoW off,
   v4/BMX4C ASERT inert, and RC as the sole calibrated branch.
 
-Profile 1 now passes the three requested performance gates on this host.
-Activation remains a no-go until the remaining consensus, cross-machine, DoS,
-and IBD gates are closed.
+Profile 1 now passes the three requested performance gates on the measured
+Metal host, with corroborating CUDA loaded p99 well inside the 90-second
+interval on a sanitized Blackwell-class validator class. Activation remains a
+no-go until the remaining consensus, cross-machine, DoS, and IBD gates are
+closed.
