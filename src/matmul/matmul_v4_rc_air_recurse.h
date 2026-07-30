@@ -132,7 +132,7 @@ struct PermLayout {
     [[nodiscard]] uint32_t InputCol(uint32_t lane) const { return base + lane; }
     [[nodiscard]] uint32_t SboxCol(uint32_t s) const { return base + kPermInputCells + s; }
     /** One past the last column of the block: base + 130. */
-    [[nodiscard]] uint32_t End() const { return base + kPermCellsPerPerm; }
+    [[nodiscard]] constexpr uint32_t End() const { return base + kPermCellsPerPerm; }
 };
 
 // ---------------------------------------------------------------------------
